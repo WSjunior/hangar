@@ -387,6 +387,25 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
 
 - **CSS animations.** Shared tokens/keyframes live in `app.css` (`--ease-out`, `--spring`, …); a global
   `prefers-reduced-motion` rule neutralizes loops, so new keyframes don't each need their own guard.
+  **Animação de `transform` NUNCA em `<svg>`, `<g>` ou `<path>` — só em elemento HTML** (medido
+  05/09/2026, `icons/HangarWorking.svelte`, Chrome 150 no Electron 43). O indicador de "trabalhando"
+  girava `<path>`s dentro do SVG: o Chromium não compõe isso na GPU, e cada quadro refazia style +
+  layout + paint da PÁGINA INTEIRA — 144 layouts e 576 paints em 3 s numa página com 3 sessões
+  trabalhando. Custo real: os dois renderers visíveis do app desktop a ~96% de CPU cada e o
+  gpu-process a 139%, por horas, com o JS ocioso (o profiler mostrava 85% em `(program)`). Pausar só
+  essas animações via CDP levou os renderers a 0–11%. Três armadilhas no conserto, todas medidas:
+  (1) mover a animação pra RAIZ do `<svg>` tirou layout e paint, mas o compositor ainda recusou
+  (`compositeFailed=1024`, `kTransformRelatedPropertyCannotBeAcceleratedOnTarget`) — num Chrome
+  headless avulso a mesma raiz compunha, dentro do app não; quem compõe de verdade é um `<span>` em
+  volta do svg; (2) a propriedade `rotate` (individual, usada pra compor com `transform` no mesmo
+  elemento) também não compõe — compor é aninhar spans, um por transformação; (3) nome de
+  `@keyframes` passado por `var()` a partir do markup não recebe o escopo do Svelte (só o nome
+  escrito na folha é reescrito) — a espiral final ficou meses sem rodar por isso, calada; escolher
+  por `:nth-child` no CSS. Diagnóstico reutilizável: CDP na 9223 com `Tracing`
+  (`disabled-by-default-devtools.timeline`) contando `Layout`/`Paint`/`UpdateLayoutTree` por 3 s —
+  composto é ~3 eventos, não-composto é um por quadro; e `blink.animations` traz o
+  `compositeFailed` de cada animação ao (re)iniciar. Depois do conserto: 3 eventos em 3 s e os
+  renderers a ~9%.
 - **Ponte de skills (`app/skill_bridge.py`): o omp descobre sozinho as skills dos outros CLIs
   (providers `claude`/`claude-plugins`/`agents`); pi, kimi e codex não — leem só as pastas da
   própria config.** Sem a ponte, cada um mantinha uma fazenda de symlinks à mão apontando pro
