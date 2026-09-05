@@ -9,6 +9,7 @@ import * as m from '../paraglide/messages';
 import { openSessionsStream } from './api';
 import { listServers, onServersChanged, type Server } from './auth';
 import { navPelaLista } from './navPelaLista';
+import { podarNavMortos } from './navegadorPanel.svelte';
 import { aggregateSessions, sweepHidden, type Slot, type Aggregate } from './sessions';
 
 function createSessionsStore() {
@@ -53,6 +54,11 @@ function createSessionsStore() {
   function recompute() {
     hidden = sweepHidden(hidden, slots);
     agg = aggregateSessions(servers, slots, hidden);
+    const vivos = new Map<string, Map<string, string | null>>();
+    for (const [id, slot] of slots) {
+      if (slot.sessions && !slot.error) vivos.set(id, new Map(slot.sessions.map((s) => [s.name, s.jsonl ?? null])));
+    }
+    podarNavMortos(vivos);
   }
 
   // Reconcilia streams com a lista: fecha o que sumiu, abre o que entrou, mantém o resto.
