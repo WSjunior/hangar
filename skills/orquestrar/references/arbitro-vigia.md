@@ -41,9 +41,23 @@ ships with the skill:
 
 ```bash
 systemd-run --user --unit=vigia-<gid> --property=Restart=always --property=RestartSec=20 \
-  "${CLAUDE_SKILL_DIR}/scripts/vigia.sh" <session> [session...] <arbiter> -m 5 \
+  "${CLAUDE_SKILL_DIR}/scripts/vigia.sh" <who has the ball> <arbiter> -m 5 \
   -d ~/.hangar/orq/<date>-<gid>/registro.md
 ```
+
+In serial, "who has the ball" is **one** session, and it changes three times per round. Rewrite the
+command at each:
+
+| Window | The list is |
+|---|---|
+| kick-off dispatched → 1st round delivered | `<executor> <arbiter>` |
+| round delivered → verdict | `<reviewer> <arbiter>` |
+| APROVA → commit reported | `<executor> <arbiter>` |
+
+The pair together is never the list: the script nudges **any** session on the list that sits idle
+for the interval, not only when nobody has the ball — so the one legitimately waiting (the reviewer
+before the first round, the executor waiting for a verdict) collects a paid nudge and wakes you with
+a false alarm.
 
 The command's manual — flags, why a service and not a background process, how to confirm it is
 alive — lives in the **header of `vigia.sh` itself**. Two things that are yours, not the

@@ -601,6 +601,15 @@ without killing it**, nothing was lost. And **in the same act, notify whoever ca
 them** — the REPROVA goes straight from reviewer to executor, by design, and the reviewer doesn't
 know the new address: a recipe dispatched to a retired session is a round lost in silence.
 
+**And the two cases end differently.** Mid-gate — repeated failure, blown context, a substitution —
+the session is **released, not killed**: a turn dead by provider comes back to life, and the stop
+order is what keeps two writers off the same stage. At a **closed** milestone — Task approved,
+commit made, nothing of that role's is in flight — retiring **ends** the session: close it as soon
+as the milestone closes, by name, through the same API you created it with. A finished session left
+alive is a live address for a stale role: it collects the watchdog's nudges, it shows up in listings
+as team, and the next session that reuses the name inherits the confusion. "I'll close them at the
+end" ends up being the user asking why they are still there.
+
 There is no "I'll wait for the gate to close before swapping": the gate may never close, and the
 saturated session keeps producing ever-worse rounds. The first factually wrong report is already
 late.
