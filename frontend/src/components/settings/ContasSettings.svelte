@@ -1044,8 +1044,8 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
        `flex-shrink: 0`, e no estreito não sobrava largura pro nome: como o `.ct-nome` tem
        `overflow-wrap: anywhere`, o min-content dele é UM caractere e o flex encolhia até isso —
        "Deepseek Claude" virava uma coluna vertical de letras. Mesma dupla que o modo compacto já
-       usa (linha 865 e 873) e pelo mesmo motivo: com piso de largura, quem desce pra segunda
-       linha é o que não coube, não o nome. */
+       usa em `.compacta .ct-top` (o wrap) e `.compacta .ct-txt` (o piso de largura), e pelo mesmo
+       motivo: com piso, quem desce pra segunda linha é o que não coube, não o nome. */
     .ct-top { flex-wrap: wrap; row-gap: var(--space-2); }
     .ct-txt { min-width: 14ch; }
   }

@@ -3856,12 +3856,14 @@ async def put_engine(nome: str, request: Request):
     api_key ausente, vazia, ou IGUAL à máscara que o cliente recebeu = preserva a atual. Sem isso,
     salvar o formulário só para trocar o modelo apagava a chave, sem volta — o bug pago em 22ae599.
 
-    Campo AUSENTE do corpo herda o valor do disco; campo presente vale, inclusive `""`/`0`, que é
-    como se LIMPA (_normalizar descarta vazio, então o campo sai do registro). engines.salvar()
-    substitui o registro inteiro, e sem a herança um cliente que só conhece parte do schema — um PUT
-    de script, uma versão antiga do front — apagava o resto calado. Medido: o probe de modelos
-    devolve `context_length: null` para provedor que não informa (opencode), o PUT seguinte vinha sem
-    `context_window` e o motor perdia a janela de 1M, voltando a compactar em 200k sem avisar.
+    Campo AUSENTE do corpo herda o valor do disco; campo presente vale, inclusive `""`, que é como
+    se LIMPA (_normalizar descarta vazio, então o campo sai do registro — texto ou numérico). `0`
+    NÃO limpa: num campo numérico é valor inválido, e volta 400 "deve ser maior que zero".
+    engines.salvar() substitui o registro inteiro, e sem a herança um cliente que só conhece parte
+    do schema — um PUT de script, uma versão antiga do front — apagava o resto calado. Medido: o
+    probe de modelos devolve `context_length: null` para provedor que não informa (opencode), o PUT
+    seguinte vinha sem `context_window` e o motor perdia a janela de 1M, voltando a compactar em
+    200k sem avisar.
 
     `null` conta como AUSENTE de propósito (é o que o probe manda quando não sabe). Quem quer limpar
     manda `""` — a tela de Motores faz isso nos campos opcionais."""
