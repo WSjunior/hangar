@@ -18,7 +18,7 @@
     apiTarget: Server | null;
     nome: string;
     motor: Motor;
-    onSalvo: (motores: Record<string, Motor>) => void;
+    onSalvo: (motores: Record<string, Motor>, alvo: Server | null) => void;
     onFechar: () => void;
   }
   let { apiTarget, nome, motor, onSalvo, onFechar }: Props = $props();
@@ -115,6 +115,10 @@
     // resultado nasce limpa a cada Salvar, senão a sincronização anterior fica na tela ao lado do
     // erro novo, como se fosse desta gravação.
     salvando = true; erro = ''; sync = null; syncErro = '';
+    // Retrato do alvo e do callback ANTES do await: prop é getter vivo, e depois do PUT ela já
+    // pode apontar pra outra máquina (o pai trocou de alvo e desmontou este bloco).
+    const alvo = apiTarget;
+    const aoSalvo = onSalvo;
     try {
       const corpo: Record<string, unknown> = {
         label: form.label.trim() || nome,
@@ -122,29 +126,37 @@
         model: form.model.trim(),
       };
       if (form.api_key.trim()) corpo.api_key = form.api_key.trim();
-      if (form.subagent_model.trim()) corpo.subagent_model = form.subagent_model.trim();
+      // Campo AUSENTE do corpo do PUT herda o valor do disco, e `null` conta como ausente
+      // (api.py:3881-3887 + engines._normalizar, engines.py:163). Quem LIMPA é o campo presente e
+      // vazio: `''` sai do registro em engines.py:183-189. Por isso o subagentes vai SEMPRE —
+      // omiti-lo quando vazio fazia "mesmo que o principal" voltar ao modelo antigo com HTTP 200.
+      corpo.subagent_model = form.subagent_model.trim();
+      // Os numéricos não têm valor de limpeza: `_normalizar` recusa `''` ("esperado número",
+      // engines.py:173-176) e `0` ("deve ser maior que zero", engines.py:177-178). Vazio continua
+      // FORA do corpo, o que herda o que estiver no disco; apagar um numérico já gravado exige o
+      // backend.
       if (form.context_window) corpo.context_window = Number(form.context_window);
-      // O PUT é substituição TOTAL do registro: omitir um campo é apagá-lo no disco. Precedência da
-      // visão: valor recém-testado > valor já salvo > omitir.
+      // Precedência da visão: valor recém-testado > valor já salvo > omitir.
       const vision = typeof modeloAtual?.vision === 'boolean' ? modeloAtual.vision : motor.vision;
       if (typeof vision === 'boolean') corpo.vision = vision;
       for (const k of CHAVES_LIGA) corpo[k] = form[k];
+      // Numéricos do avançado: mesma regra do context_window acima.
       if (form.auto_compact_window) corpo.auto_compact_window = Number(form.auto_compact_window);
       if (form.max_output_tokens) corpo.max_output_tokens = Number(form.max_output_tokens);
 
-      const r = apiTarget ? await putEngineForServer(apiTarget, nome, corpo) : await putEngine(nome, corpo);
+      const r = alvo ? await putEngineForServer(alvo, nome, corpo) : await putEngine(nome, corpo);
       form.api_key = '';
       // Quem sabe se há chave gravada é o registro que o PUT devolveu: um motor sem chave salvo sem
       // chave nova continua sem chave, e ligar a marca aqui prometeria "definida" com o disco vazio.
       form.api_key_definida = r.motores[nome]?.api_key_definida ?? (form.api_key_definida || !!corpo.api_key);
       form.base_url_original = form.base_url.trim();
-      onSalvo(r.motores);
+      aoSalvo(r.motores, alvo);
       // A chave também é dos OUTROS agentes (Pi/Kimi/Codex). Passo SEPARADO, fora do try do salvar:
       // falhar aqui não desfaz o motor, que vale para o Claude Code de qualquer jeito. O bloco
       // continua aberto para o resultado ser lido — quem fecha é a pessoa.
       sincronizando = true; syncErro = '';
       try {
-        sync = await sincronizarNosAgentes(apiTarget, `chave:${nome}`);
+        sync = await sincronizarNosAgentes(alvo, `chave:${nome}`);
       } catch (e) {
         syncErro = e instanceof Error && e.message ? e.message : m.config_motores_erro_sync();
       } finally {

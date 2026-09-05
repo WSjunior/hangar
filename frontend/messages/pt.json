@@ -1986,6 +1986,8 @@
   "contas_nao_conectada": "Não está conectada — nunca entrou nesta conta.",
   "contas_sem_leitura": "Sem leitura de limite: só aparece depois que uma sessão rodar nela.",
   "contas_entrar": "Entrar",
+  "contas_modelos_titulo": "Contas e modelos",
+  "contas_modelo_opcoes": "Modelo e opções",
   "contas_nova": "+ Nova conta",
   "contas_herda_titulo": "O que as contas dividem",
   "contas_herda_igual": "Igual em todas: skills, plugins, hooks e ajustes — são atalhos para a conta principal, então mexer num lugar muda em todos.",

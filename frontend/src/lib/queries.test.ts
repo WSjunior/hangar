@@ -2,10 +2,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 let ativo: string | null = 'srv-a';
 vi.mock('./auth', () => ({ getActiveId: () => ativo }));
-vi.mock('./api', () => ({ getOrqPolitica: vi.fn(), getOrqGrupo: vi.fn(), getOrqDetalheForServer: vi.fn() }));
+vi.mock('./api', () => ({
+	getOrqPolitica: vi.fn(), getOrqGrupo: vi.fn(), getOrqDetalheForServer: vi.fn(),
+	getEngines: vi.fn(), getEnginesForServer: vi.fn(),
+}));
 vi.mock('./credenciais', () => ({ listarCredenciais: vi.fn() }));
 
-const { credenciais, orqDetalhe, orqGrupo, orqPolitica } = await import('./queries');
+const { credenciais, motores, orqDetalhe, orqGrupo, orqPolitica } = await import('./queries');
 
 // O servidor ativo muda debaixo da tela (apiFetch resolve baseUrl na hora). Chave sem ele serviria
 // a política/o grupo da máquina anterior — dado errado, sem nenhum sinal de que está errado.
@@ -33,6 +36,14 @@ describe('chave das queries de orquestração', () => {
 		const a = credenciais(null).queryKey;
 		ativo = 'srv-b';
 		expect(credenciais(null).queryKey).not.toEqual(a);
+	});
+
+	// Mesmo defeito da `credenciais`: o alvo implícito é "o servidor ativo", e ele muda.
+	it('motores do alvo implícito seguem o servidor ativo', () => {
+		const a = motores(null).queryKey;
+		ativo = 'srv-b';
+		expect(motores(null).queryKey).not.toEqual(a);
+		expect(motores({ id: 'srv-x' } as never).queryKey).toEqual(['motores', 'srv-x']);
 	});
 
 	// Execução lida enquanto viva e reaberta já terminada: mesma chave + staleTime Infinity

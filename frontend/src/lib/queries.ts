@@ -8,8 +8,9 @@
 import { QueryClient, queryOptions } from '@tanstack/svelte-query';
 import { getActiveId, type Server } from './auth';
 import {
-  fetchCostsForServer, getArchive, getOrqDetalheForServer, getOrqGrupo, getOrqPolitica,
-  type ArchiveFolder,
+  fetchCostsForServer, getArchive, getEngines, getEnginesForServer, getOrqDetalheForServer,
+  getOrqGrupo, getOrqPolitica,
+  type ArchiveFolder, type EnginesResponse,
 } from './api';
 import { listarCredenciais } from './credenciais';
 import type { OrqGrupo, OrqPolitica } from './orquestracao';
@@ -77,6 +78,14 @@ export const credenciais = (alvo: Server | null) => queryOptions({
   staleTime: 60_000,
 });
 
+// O engines.json da máquina — o que dá "modelo e opções" à chave de API na tela Contas. Mesma
+// regra de chave da `credenciais`: id REAL do alvo, nunca um literal para "ativo".
+export const motores = (alvo: Server | null) => queryOptions({
+  queryKey: ['motores', alvo?.id ?? idAtivo()],
+  queryFn: (): Promise<EnginesResponse> => (alvo ? getEnginesForServer(alvo) : getEngines()),
+  staleTime: 60_000,
+});
+
 // Custo de UMA máquina num período. É a leitura mais cara do app — medida em 12,6s com o cache do
 // backend frio (0,28s quente). Cacheia por (máquina, período) e não o merge: o merge é código puro
 // e barato, e é a TROCA DE PERÍODO que o usuário faz o tempo todo — 7d → 30d → 7d pagava tudo de
@@ -113,4 +122,5 @@ export function prefetchOrq(name: string): void {
  */
 export function prefetchContas(alvo: Server | null): void {
   void clienteQuery.prefetchQuery(credenciais(alvo));
+  void clienteQuery.prefetchQuery(motores(alvo));
 }

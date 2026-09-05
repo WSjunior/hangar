@@ -1986,6 +1986,8 @@
   "contas_nao_conectada": "Not connected — never signed in to this account.",
   "contas_sem_leitura": "No limit reading yet: it only shows after a session runs in it.",
   "contas_entrar": "Sign in",
+  "contas_modelos_titulo": "Accounts and models",
+  "contas_modelo_opcoes": "Model and options",
   "contas_nova": "+ New account",
   "contas_herda_titulo": "What the accounts share",
   "contas_herda_igual": "Same in all: skills, plugins, hooks and settings — they're shortcuts to the main account, so changing one place changes all.",

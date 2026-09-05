@@ -75,7 +75,9 @@ describe('MotorForm', () => {
       vision: false, prompt_caching: false, adaptive_thinking: true, bundled_skills: false,
     });
     expect(corpo).not.toHaveProperty('api_key');   // chave vazia = mantém a atual
-    expect(t.onSalvo).toHaveBeenCalledWith({ kimi: expect.objectContaining({ model: 'kimi-k3' }) });
+    // 2º argumento: a máquina que RESPONDEU o PUT, capturada antes do await — é o que deixa o pai
+    // escrever sob a chave certa mesmo depois de a tela ter trocado de alvo.
+    expect(t.onSalvo).toHaveBeenCalledWith({ kimi: expect.objectContaining({ model: 'kimi-k3' }) }, null);
     expect(credMock.sincronizarNosAgentes).toHaveBeenCalledWith(null, 'chave:kimi');
     await tick();
     // O resultado da sincronização fica NA TELA: o bloco não fechou e o botão virou Fechar.
@@ -193,6 +195,45 @@ describe('MotorForm', () => {
     await espera();
     expect(t.el.textContent).toContain('502 upstream');
     expect(t.el.textContent).not.toContain(m.novacred_sync_titulo());
+    unmount(t.comp);
+  });
+
+  // Campo AUSENTE do corpo herda o valor do disco (api.put_engine, api.py:3881-3887): omitir o
+  // opcional vazio devolvia HTTP 200 com o valor antigo de volta, calado.
+  it('limpar o modelo dos subagentes manda subagent_model: "" — omitir faria o backend herdar o antigo', async () => {
+    const t = montar({ ...KIMI, subagent_model: 'k2' });
+    const sub = campo(t.el, 'subagent_model');
+    expect(sub.value).toBe('k2');
+    sub.value = '';
+    sub.dispatchEvent(new Event('input', { bubbles: true }));
+    const janela = campo(t.el, 'context_window');
+    janela.value = '';
+    janela.dispatchEvent(new Event('input', { bubbles: true }));
+    await espera();
+
+    botao(t.el, m.ctx_salvar()).click();
+    await espera();
+    const corpo = apiMock.putEngine.mock.calls[0][1];
+    expect(corpo).toHaveProperty('subagent_model', '');
+    // Numérico NÃO tem valor de limpeza: `_normalizar` recusa `''` ("esperado número") e `0`
+    // ("deve ser maior que zero") — engines.py:170-179. Vazio segue fora do corpo (= herda o
+    // 256000 do disco). Isto trava o corpo no que o backend aceita hoje; apagar a janela pede
+    // mudança no backend.
+    expect(corpo).not.toHaveProperty('context_window');
+    unmount(t.comp);
+  });
+
+  // Mesmo caminho do caso acima, no uso comum: abre o motor, não toca em nada, salva. É o que
+  // prova que mandar o campo vazio sempre não estraga quem nunca preencheu opcional nenhum.
+  it('motor sem opcionais salvo sem tocar em nada manda subagent_model: "" e nenhum numérico', async () => {
+    const t = montar({ ...KIMI, subagent_model: undefined, context_window: undefined });
+    botao(t.el, m.ctx_salvar()).click();
+    await espera();
+    const corpo = apiMock.putEngine.mock.calls[0][1];
+    expect(corpo).toHaveProperty('subagent_model', '');
+    expect(corpo).not.toHaveProperty('context_window');
+    expect(corpo).not.toHaveProperty('auto_compact_window');
+    expect(corpo).not.toHaveProperty('max_output_tokens');
     unmount(t.comp);
   });
 

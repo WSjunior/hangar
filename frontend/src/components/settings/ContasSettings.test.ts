@@ -21,7 +21,14 @@ import { clienteQuery } from '../../lib/queries';
 
 vi.mock('../../lib/credenciais', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../lib/credenciais')>();
-  return { ...real, listarCredenciais: vi.fn(), definirApelido: vi.fn(async () => ({ id: 'x', apelido: null })) };
+  // `sincronizarNosAgentes` entra no mock porque o MotorForm a chama DEPOIS do PUT: real, ela
+  // faria um POST de verdade no meio do teste do card.
+  return {
+    ...real,
+    listarCredenciais: vi.fn(),
+    definirApelido: vi.fn(async () => ({ id: 'x', apelido: null })),
+    sincronizarNosAgentes: vi.fn(async () => ({ resultado: { pi: { ok: true, motivo: '' } } })),
+  };
 });
 vi.mock('../../lib/api', () => ({
   getPermissionModes: vi.fn().mockResolvedValue({ current: 'plan', modes: ['plan', 'auto', 'manual', 'acceptEdits'] }),
@@ -32,6 +39,10 @@ vi.mock('../../lib/api', () => ({
   putEngineForServer: vi.fn(async () => ({ motores: {} })),
   deleteEngine: vi.fn(async () => ({ ok: true })),
   deleteEngineForServer: vi.fn(async () => ({ ok: true })),
+  getEngines: vi.fn(async () => ({ motores: {}, arquivo_corrompido: false, arquivo_caminho: '' })),
+  getEnginesForServer: vi.fn(async () => ({ motores: {}, arquivo_corrompido: false, arquivo_caminho: '' })),
+  engineModelos: vi.fn(async () => ({ modelos: [] })),
+  engineModelosForServer: vi.fn(async () => ({ modelos: [] })),
   isAbortError: () => false,
   isTimeoutError: () => false,
 }));
@@ -608,6 +619,263 @@ describe('ContasSettings — botão de atualizar do cabeçalho', () => {
     await tick(); await tick();
     expect(t.el.querySelector('.ct-card')).not.toBeNull();
     expect(t.el.querySelector<HTMLElement>('.ct-aviso.erro')!.textContent).toContain('sem rota');
+    unmount(t.comp);
+  });
+});
+
+describe('ContasSettings — modelo e opções da chave (Contas e modelos)', () => {
+  const MOTORES = {
+    motores: { kimi: { label: 'Kimi', base_url: 'https://api.kimi.com/coding', model: 'kimi-k3', context_window: 256000, api_key: 'sk-k••••4f2a', api_key_definida: true } },
+    arquivo_corrompido: false, arquivo_caminho: '',
+  };
+  const SEM_MOTORES = { motores: {}, arquivo_corrompido: false, arquivo_caminho: '' };
+  const botao = (raiz: Element, rotulo: string) =>
+    [...raiz.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === rotulo)!;
+  const abrirMotor = (raiz: Element) => botao(raiz, m.contas_modelo_opcoes()).click();
+  // `vi.clearAllMocks()` do arquivo limpa CONTAGENS, não `mockResolvedValue`/`mockRejectedValue`:
+  // sem repor aqui, o caso do arquivo corrompido (e o do erro) vazaria para o seguinte.
+  beforeEach(() => {
+    apiMock.getEnginesForServer.mockResolvedValue(SEM_MOTORES as never);
+    apiMock.getEngines.mockResolvedValue(SEM_MOTORES as never);
+    // O PUT devolve o mapa INTEIRO, e é dele que o card e o `{#if motor}` passam a viver: sem
+    // repor, o `{ motores: {} }` do mock do arquivo desmontaria o bloco a cada Salvar.
+    apiMock.putEngineForServer.mockResolvedValue({ motores: MOTORES.motores } as never);
+    credMock.sincronizarNosAgentes.mockResolvedValue({ resultado: { pi: { ok: true, motivo: '' } } } as never);
+  });
+
+  it('chave presente no engines.json mostra o modelo no card e o botão de abrir', async () => {
+    apiMock.getEnginesForServer.mockResolvedValue(MOTORES as never);
+    const t = montar([chave()]);
+    await tick(); await tick(); await tick();
+    expect(apiMock.getEnginesForServer).toHaveBeenCalledWith(ALVO);
+    expect(t.el.textContent).toContain('kimi-k3 · 256k');
+    const btn = [...t.el.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === m.contas_modelo_opcoes());
+    expect(btn).toBeDefined();
+    unmount(t.comp);
+  });
+
+  it('abrir mostra o formulário DENTRO do card e esconde o endereço repetido; salvar atualiza o card sem GET novo e o bloco segue aberto', async () => {
+    apiMock.getEnginesForServer.mockResolvedValue(MOTORES as never);
+    apiMock.putEngineForServer.mockResolvedValueOnce({ motores: { kimi: { ...MOTORES.motores.kimi, model: 'kimi-k2.7' } } } as never);
+    const t = montar([chave()]);
+    await tick(); await tick(); await tick();
+    expect(t.el.querySelector('.ct-card')!.textContent).toContain('https://api.kimi.com/coding/v1');
+    [...t.el.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === m.contas_modelo_opcoes())!.click();
+    await tick();
+    const card = t.el.querySelector('.ct-card')!;
+    expect(card.textContent).toContain(m.config_motores_avancado());
+    // "Um dado, um lugar": com o bloco aberto o card não repete endereço · chave nem o modelo.
+    expect(card.querySelector('.ct-sub')).toBeNull();
+    [...card.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === m.ctx_salvar())!.click();
+    await tick(); await tick(); await tick();
+    expect(apiMock.putEngineForServer).toHaveBeenCalledWith(ALVO, 'kimi', expect.objectContaining({ model: 'kimi-k3' }));
+    expect(apiMock.getEnginesForServer).toHaveBeenCalledTimes(1);
+    // Continua aberto (o resultado da sincronização mora aí); fechar devolve o card com o modelo novo.
+    expect(card.textContent).toContain(m.config_motores_avancado());
+    [...card.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === m.sessao_fechar())!.click();
+    await tick();
+    expect(t.el.querySelector('.ct-card')!.textContent).toContain('kimi-k2.7 · 256k');
+    unmount(t.comp);
+  });
+
+  it('salvar DUAS vezes na mesma instância não deixa o resultado da sincronização anterior na tela', async () => {
+    // O bloco não fecha depois de salvar, então a mesma instância salva de novo. Sem zerar a área
+    // de resultado a cada Salvar, a sincronização da gravação ANTERIOR fica na tela ao lado do
+    // erro desta — foi o defeito que a Task 1 pagou uma rodada.
+    apiMock.getEnginesForServer.mockResolvedValue(MOTORES as never);
+    // 1º Salvar sincroniza com sucesso, 2º falha: é o segundo que tem de deixar a tela sem a
+    // linha verde do primeiro.
+    credMock.sincronizarNosAgentes
+      .mockResolvedValueOnce({ resultado: { pi: { ok: true, motivo: '' } } } as never)
+      .mockRejectedValueOnce(new Error('sync caiu'));
+    const t = montar([chave()]);
+    await tick(); await tick(); await tick();
+    abrirMotor(t.el); await tick();
+    const card = t.el.querySelector('.ct-card')!;
+    botao(card, m.ctx_salvar()).click();
+    await tick(); await tick(); await tick(); await tick();
+    expect(card.textContent).toContain(m.novacred_sync_ok());
+    // Segundo Salvar: a linha verde do primeiro não pode sobreviver ao lado do erro deste.
+    botao(card, m.ctx_salvar()).click();
+    await tick(); await tick(); await tick(); await tick();
+    expect(card.textContent).toContain('sync caiu');
+    expect(card.textContent).not.toContain(m.novacred_sync_ok());
+    unmount(t.comp);
+  });
+
+  it('abrir, fechar e abrir de novo entrega um formulário com o dado ATUAL, não o da primeira vez', async () => {
+    apiMock.getEnginesForServer.mockResolvedValue(MOTORES as never);
+    apiMock.putEngineForServer.mockResolvedValueOnce({ motores: { kimi: { ...MOTORES.motores.kimi, model: 'kimi-k2.7' } } } as never);
+    const t = montar([chave()]);
+    await tick(); await tick(); await tick();
+    abrirMotor(t.el); await tick();
+    const card = t.el.querySelector('.ct-card')!;
+    botao(card, m.ctx_salvar()).click();
+    await tick(); await tick(); await tick(); await tick();
+    botao(card, m.sessao_fechar()).click();
+    await tick();
+    expect(t.el.querySelector('.mf')).toBeNull();
+    // Reabrir monta um MotorForm NOVO: o retrato tem de sair do motor de agora (kimi-k2.7), não
+    // do que estava no mapa quando o bloco abriu da primeira vez.
+    abrirMotor(t.el); await tick();
+    expect(t.el.querySelector<HTMLInputElement>('input[name="model"]')!.value).toBe('kimi-k2.7');
+    unmount(t.comp);
+  });
+
+  it('trocar de alvo com o Salvar do motor EM VOO não escreve a resposta da máquina antiga no cache da nova', async () => {
+    // Mesmo guard das outras mutações da tela: o MotorForm é desmontado na troca, mas o PUT em
+    // voo segue vivo e devolveria o mapa do alvo ANTIGO sob a chave do NOVO — o card da máquina
+    // nova mostraria um modelo que ela nunca teve.
+    const A: Server = { id: 'srv-a', label: 'A', baseUrl: 'http://a', token: 'ta' };
+    const B: Server = { id: 'srv-b', label: 'B', baseUrl: 'http://b', token: 'tb' };
+    apiMock.getEnginesForServer.mockResolvedValue(MOTORES as never);
+    credMock.listarCredenciais.mockResolvedValue([chave()]);
+    let soltaPut!: (v: unknown) => void;
+    apiMock.putEngineForServer.mockReturnValueOnce(new Promise((r) => { soltaPut = r as never; }) as never);
+    const props = criarProps({ apiTarget: A as Server | null });
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    const comp = mount(ContasSettings, { target: el, props });
+    await tick(); await tick(); await tick();
+    abrirMotor(el); await tick();
+    botao(el.querySelector('.ct-card')!, m.ctx_salvar()).click();
+    await tick();
+    props.apiTarget = B;   // ?srv= trocou com o PUT em voo
+    await tick(); await tick(); await tick();
+    soltaPut({ motores: { kimi: { ...MOTORES.motores.kimi, model: 'da-maquina-antiga' } } });
+    await tick(); await tick(); await tick();
+    expect(clienteQuery.getQueryData(['motores', 'srv-b'])).not.toEqual(
+      expect.objectContaining({ motores: expect.objectContaining({ kimi: expect.objectContaining({ model: 'da-maquina-antiga' }) }) }));
+    unmount(comp as never);
+  });
+
+  // `carregar()` é o ponto único: é ele que o `onCriada` do NovaCredencialSheet e o apagar
+  // chamam. Apagar o exercita de ponta a ponta — o caminho de criar passa pela mesma função.
+  it('apagar uma chave revalida os motores (o botão nasce junto com a credencial)', async () => {
+    const t = montar([chave()]);
+    await tick(); await tick(); await tick();
+    expect(apiMock.getEnginesForServer).toHaveBeenCalledTimes(1);
+    t.el.querySelector<HTMLButtonElement>('.ct-kebab')!.click();
+    await tick();
+    [...t.el.querySelectorAll<HTMLButtonElement>('.ct-menu-item')].find((b) => b.textContent?.trim() === m.comum_apagar())!.click();
+    await tick();
+    [...t.el.querySelectorAll<HTMLButtonElement>('.ct-confirma-btn')].find((b) => b.textContent?.trim() === m.comum_apagar())!.click();
+    await tick(); await tick(); await tick();
+    expect(apiMock.deleteEngineForServer).toHaveBeenCalledWith(ALVO, 'kimi');
+    expect(apiMock.getEnginesForServer).toHaveBeenCalledTimes(2);
+    unmount(t.comp);
+  });
+
+  it('erro ao ler os motores aparece na tela em vez de sumir com o botão calado', async () => {
+    apiMock.getEnginesForServer.mockRejectedValue(new Error('HTTP 500'));
+    const t = montar([chave()]);
+    await tick(); await tick(); await tick();
+    expect(t.el.textContent).toContain('HTTP 500');
+    expect(t.el.textContent).not.toContain(m.contas_modelo_opcoes());
+    unmount(t.comp);
+  });
+
+  it('conta do Claude e credencial só de cota (kimi_cli) NÃO ganham botão nem modelo', async () => {
+    apiMock.getEnginesForServer.mockResolvedValue(MOTORES as never);
+    const t = montar([LOGADA, chave({ id: 'kimi:/home/u/.kimi-code', nome: 'Kimi CLI', nome_natural: 'Kimi CLI', usos: ['kimi_cli'], base_url: null })]);
+    await tick(); await tick(); await tick();
+    expect(t.el.textContent).not.toContain(m.contas_modelo_opcoes());
+    expect(t.el.textContent).not.toContain('kimi-k3');
+    unmount(t.comp);
+  });
+
+  it('engines.json corrompido: aviso no topo, nenhum botão de motor e + Nova conta desabilitado', async () => {
+    apiMock.getEnginesForServer.mockResolvedValue({ motores: {}, arquivo_corrompido: true, arquivo_caminho: '/home/u/.claude/engines.json' } as never);
+    const t = montar([chave()]);
+    await tick(); await tick(); await tick();
+    expect(t.el.textContent).toContain(m.config_motores_nao_consegui_1());
+    expect(t.el.textContent).toContain('/home/u/.claude/engines.json');
+    expect(t.el.textContent).not.toContain(m.contas_modelo_opcoes());
+    const nova = [...t.el.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === m.contas_nova())!;
+    expect(nova.disabled).toBe(true);
+    unmount(t.comp);
+  });
+
+  // As três portas do mesmo defeito: a prop é getter VIVO, então o que o MotorForm lê depois do
+  // await do PUT é o alvo de agora, não o de quem gravou. Nenhum valor guardado no PAI fecha isso.
+  const A: Server = { id: 'srv-a', label: 'A', baseUrl: 'http://a', token: 'ta' };
+  const B: Server = { id: 'srv-b', label: 'B', baseUrl: 'http://b', token: 'tb' };
+
+  it('PUT em voo em A, troca pra B e REABRE o bloco em B: a resposta de A entra sob a chave de A, nunca sob a de B', async () => {
+    apiMock.getEnginesForServer.mockResolvedValue(MOTORES as never);
+    let soltaPut!: (v: unknown) => void;
+    apiMock.putEngineForServer.mockReturnValueOnce(new Promise((r) => { soltaPut = r as never; }) as never);
+    credMock.listarCredenciais.mockResolvedValue([chave()]);
+    const props = criarProps({ apiTarget: A as Server | null });
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    const comp = mount(ContasSettings, { target: el, props });
+    await tick(); await tick(); await tick();
+    abrirMotor(el); await tick();
+    botao(el.querySelector('.ct-card')!, m.ctx_salvar()).click();
+    await tick();
+    props.apiTarget = B;
+    await tick(); await tick(); await tick();
+    abrirMotor(el); await tick();           // a segunda porta: um bloco aberto em B enquanto o PUT de A voa
+    soltaPut({ motores: { kimi: { ...MOTORES.motores.kimi, model: 'da-maquina-antiga' } } });
+    await tick(); await tick(); await tick();
+    expect(clienteQuery.getQueryData(['motores', 'srv-b'])).not.toEqual(
+      expect.objectContaining({ motores: expect.objectContaining({ kimi: expect.objectContaining({ model: 'da-maquina-antiga' }) }) }));
+    // E a resposta não se perde: mora sob a chave da máquina que respondeu.
+    expect(clienteQuery.getQueryData(['motores', 'srv-a'])).toEqual(
+      expect.objectContaining({ motores: expect.objectContaining({ kimi: expect.objectContaining({ model: 'da-maquina-antiga' }) }) }));
+    unmount(comp as never);
+  });
+
+  it('PUT em voo em A, troca pra B: a sincronização nos agentes vai pra A (quem gravou), não pra B', async () => {
+    apiMock.getEnginesForServer.mockResolvedValue(MOTORES as never);
+    let soltaPut!: (v: unknown) => void;
+    apiMock.putEngineForServer.mockReturnValueOnce(new Promise((r) => { soltaPut = r as never; }) as never);
+    credMock.listarCredenciais.mockResolvedValue([chave()]);
+    const props = criarProps({ apiTarget: A as Server | null });
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    const comp = mount(ContasSettings, { target: el, props });
+    await tick(); await tick(); await tick();
+    abrirMotor(el); await tick();
+    botao(el.querySelector('.ct-card')!, m.ctx_salvar()).click();
+    await tick();
+    props.apiTarget = B;
+    await tick(); await tick(); await tick();
+    soltaPut({ motores: MOTORES.motores });
+    await tick(); await tick(); await tick();
+    expect(credMock.sincronizarNosAgentes).toHaveBeenCalledTimes(1);
+    expect(credMock.sincronizarNosAgentes.mock.calls[0][0]).toEqual(A);
+    unmount(comp as never);
+  });
+
+  it('refresh do cabeçalho com o bloco aberto, depois Salvar: o card mostra o modelo novo (nada é descartado calado)', async () => {
+    apiMock.getEnginesForServer.mockResolvedValue(MOTORES as never);
+    apiMock.putEngineForServer.mockResolvedValueOnce({ motores: { kimi: { ...MOTORES.motores.kimi, model: 'kimi-k2.7' } } } as never);
+    const t = montar([chave()]);
+    await tick(); await tick(); await tick();
+    abrirMotor(t.el); await tick();
+    // atualizar(): ++geracao SEM trocar de alvo — é o segundo evento que mexe no mesmo contador.
+    [...t.el.querySelectorAll<HTMLButtonElement>('.ct-refresh')].at(-1)!.click();
+    await tick(); await tick(); await tick();
+    const card = t.el.querySelector('.ct-card')!;
+    botao(card, m.ctx_salvar()).click();
+    await tick(); await tick(); await tick(); await tick();
+    expect(card.textContent).toContain(m.novacred_sync_ok());
+    botao(card, m.sessao_fechar()).click();
+    await tick();
+    expect(t.el.querySelector('.ct-card')!.textContent).toContain('kimi-k2.7 · 256k');
+    unmount(t.comp);
+  });
+
+  it('confirmação de apagar uma chave avisa que sessões abertas continuam', async () => {
+    const t = montar([chave()]);
+    await tick(); await tick();
+    t.el.querySelector<HTMLButtonElement>('.ct-kebab')!.click();
+    await tick();
+    [...t.el.querySelectorAll<HTMLButtonElement>('.ct-menu-item')].find((b) => b.textContent?.trim() === m.comum_apagar())!.click();
+    await tick();
+    expect(t.el.querySelector('.ct-confirma')!.textContent).toContain(m.config_motores_sessoes_abertas());
     unmount(t.comp);
   });
 });

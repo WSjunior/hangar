@@ -24,6 +24,12 @@ vi.mock('../../lib/api', () => ({
   setQuietHoursForServer: vi.fn(),
   criarConta: vi.fn(async () => ({ path: '/x', label: 'x', active: false })),
   apagarConta: vi.fn(async () => {}),
+  // Montar a aba Contas passa a CHAMAR getEngines pela queryFn (é o que dá modelo ao card da
+  // chave); sem estes o vitest acusa "No export is defined on the mock" só na chamada.
+  getEngines: vi.fn(async () => ({ motores: {}, arquivo_corrompido: false, arquivo_caminho: '' })),
+  getEnginesForServer: vi.fn(async () => ({ motores: {}, arquivo_corrompido: false, arquivo_caminho: '' })),
+  engineModelos: vi.fn(async () => ({ modelos: [] })),
+  engineModelosForServer: vi.fn(async () => ({ modelos: [] })),
 }));
 // A aba Contas busca a lista única /api/credenciais — sem este mock, montar a aba
 // faria fetch real no teste. formatarIntervalo segue real (puro; mantido via importOriginal).
