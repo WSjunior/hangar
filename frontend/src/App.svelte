@@ -201,7 +201,7 @@
   );
 
   // `targetServer` null significa "e o servidor ativo, use as funcoes globais" — o contrato que
-  // ServerSettings/EnginesSettings ja tem. Manter isso preserva o self-heal de 401 do caminho global
+  // ServerSettings ja tem. Manter isso preserva o self-heal de 401 do caminho global
   // (apiFetchForServer NAO faz self-heal de proposito, AccountMenu.svelte:94-96).
   const targetConfig = $derived.by(() => {
     versaoServidores;

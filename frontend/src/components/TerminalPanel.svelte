@@ -97,8 +97,8 @@
   // do painel de proposito -- o painel fecha ANTES do POST sair (ver abrirTerminalNativo), entao
   // qualquer erro so chega DEPOIS que a `<section>` (que so existe com `open`) ja sumiu do DOM. Por
   // isso este aviso mora FORA do bloco `{#if open}` no template. Sem toast global no app (nao existe
-  // um; `window.alert()` foi descartado -- ver o comentario de EnginesSettings.svelte sobre nao usar
-  // dialogo nativo, quebra o tema), entao e um aviso local mesmo, auto-some.
+  // um; `window.alert()` foi descartado -- dialogo nativo do navegador nao segue o tema escuro),
+  // entao e um aviso local mesmo, auto-some.
   let nativeErro = $state<string | null>(null);
   let nativeErroTimer: ReturnType<typeof setTimeout> | undefined;
 

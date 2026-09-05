@@ -158,13 +158,13 @@ describe('SettingsModal — GET config por tela', () => {
     const rotulos = itens.map((b) => b.textContent?.trim() ?? '');
     const acha = (rot: string) => rotulos.findIndex((r) => r.includes(rot));
     expect(acha(m.maquinas_titulo())).toBeGreaterThanOrEqual(0);
-    expect(acha(m.contas_titulo())).toBeGreaterThanOrEqual(0);
+    expect(acha(m.contas_modelos_titulo())).toBeGreaterThanOrEqual(0);
     // Grupo do servidor: Máquinas vem antes de Contas (já era a primeira do grupo).
-    expect(acha(m.maquinas_titulo())).toBeLessThan(acha(m.contas_titulo()));
+    expect(acha(m.maquinas_titulo())).toBeLessThan(acha(m.contas_modelos_titulo()));
     // Clicar em cada uma troca a tela (o dono da rota é o App, que recebe o id via onIrPara).
     itens[acha(m.maquinas_titulo())].click();
     expect(t.onIrPara).toHaveBeenCalledWith('maquinas');
-    itens[acha(m.contas_titulo())].click();
+    itens[acha(m.contas_modelos_titulo())].click();
     expect(t.onIrPara).toHaveBeenCalledWith('contas');
     unmount(t.comp);
   });

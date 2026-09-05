@@ -62,7 +62,7 @@ Lá o multiplexador é o [psmux](https://github.com/psmux/psmux) (tmux nativo de
 ConPTY) — não existe `tmux` no Windows, e o WSL não é necessário. O `hangar-send` (recado/pareamento
 entre sessões) e o `claude-conta` vão junto, via o bash do Git for Windows. Três coisas **não**
 vão: os wrappers do `codex`, `pi` e `kimi` (sessão deles, só criada pelo app), os motores de modelo
-(tela Motores — o `hangar-engine` depende de `execvpe`, que no Windows não substitui o processo) e os
+(Contas e modelos → Modelo e opções — o `hangar-engine` depende de `execvpe`, que no Windows não substitui o processo) e os
 plugins de persistência entre reboots.
 
 ## 2. Subir (3 partes)
@@ -308,18 +308,19 @@ Cada aba lembra em que nível estava: trocar de aba e voltar não perde o lugar.
   fechar e reabrir o modal não perde o estado, que é lido do próprio repositório.
 - Sessão cujo diretório não é repositório git diz isso em uma frase, sem despejar a saída do git.
 
-### Motores de modelo (Kimi, gateway próprio, …)
+### Rodar uma sessão em outro modelo (Kimi, gateway próprio, …)
 
 Dá para abrir uma sessão que roda em outro provedor de modelo sem criar perfil novo e sem
 desconectar sua conta Anthropic. A sessão continua no **mesmo** `~/.claude`: skills, hooks,
 `CLAUDE.md`, plugins, statusline e histórico, tudo igual — só muda um punhado de variáveis de
 ambiente no processo daquela sessão.
 
-**Configurar:** menu da conta → **Configurações** → **Motores de modelo** → Adicionar. Preencha o
+**Configurar:** menu da conta → **Configurações** → **Contas e modelos** → **+ Nova conta**. Preencha o
 endereço e a chave e toque em **Testar e listar modelos**: os ids e a janela de contexto vêm do seu
 provedor, com a sua chave — nada de tabela chumbada que envelhece. O mesmo botão serve de checagem
 de conectividade/chave: chave errada volta com a mensagem do próprio provedor, não um "não
-respondeu" genérico.
+respondeu" genérico. Subagentes, janela de contexto e as opções avançadas ficam em **Modelo e
+opções**, dentro do card da chave, depois de criada.
 
 - O endereço vai **sem o `/v1`** no fim (o Claude Code monta o caminho).
 - **Kimi Code** é `https://api.kimi.com/coding` — e **não** é a mesma coisa que a plataforma aberta
@@ -481,7 +482,7 @@ CP_AUTH_TOKEN=$(openssl rand -hex 24) CP_SYNC=1 CP_SYNC_BOOTSTRAP=$(openssl rand
 | Não vejo código novo após mudar | PWA com service worker servindo JS velho → **hard reload** / limpar dados do site / re-adicionar o PWA. |
 | Backend reiniciar | precisa do cwd=`backend` (`python -m app.main` acha `app`). Sem `--reload` (trava SSE no SIGTERM). |
 | Pane de sessão de motor morre na hora, sem chat nenhum | `hangar-engine` não está no PATH do **servidor tmux** (a sessão nasce via `hangar-engine --exec`). Garanta que o PATH usado pelo tmux enxerga `hangar-engine` (mesmo instalado pelo `install-claude-wrapper.sh`). |
-| Tela de Motores de modelo diz que não conseguiu ler o arquivo | `~/.claude/engines.json` foi editado à mão e ficou com JSON inválido — corrija-o (ou restaure um backup) antes de adicionar um motor novo; o app se recusa a gravar por cima de um arquivo que não conseguiu ler, pra não apagar os motores que já estavam lá. |
+| Contas e modelos avisa que não conseguiu ler o `engines.json` | `~/.claude/engines.json` foi editado à mão e ficou com JSON inválido — corrija-o (ou restaure um backup) antes de adicionar um motor novo; o app se recusa a gravar por cima de um arquivo que não conseguiu ler, pra não apagar os motores que já estavam lá. |
 
 ## 8. Segurança (resumo)
 

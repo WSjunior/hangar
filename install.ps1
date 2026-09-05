@@ -2242,8 +2242,8 @@ $linhaQr
   O que este Windows ainda NAO tem:
   - wrappers do `codex`, do `pi` e do `kimi`, e a extensao hangar-state.ts do Pi. Sessao Codex, Pi
     ou Kimi aberta por voce no terminal nao aparece; criada pelo app, funciona.
-  - resurrect/continuum abaixo, e mais nada desta lista: motor de modelo (tela Motores /
-    `CP_ENGINE`) PASSOU a funcionar aqui - o hangar-engine roda o comando por subprocess no Windows
+  - resurrect/continuum abaixo, e mais nada desta lista: motor de modelo (Contas e modelos ->
+    Modelo e opcoes / `CP_ENGINE`) PASSOU a funcionar aqui - o hangar-engine roda o comando por subprocess no Windows
     (o exec com env crasha la, medido) e o passo 7b instala o hangar-engine.cmd.
   - resurrect/continuum (sessoes sobreviverem a reboot): sao plugins de tmux em bash, e o
     psmux nao roda plugin de tmux. Fechou o Windows, as sessoes se foram.

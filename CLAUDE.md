@@ -343,8 +343,8 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   **Config e opção num modal único — implementado (2026-08-16).** A direção acordada de juntar as
   configs num só modal (antes marcada "ainda não implementada") existe: `SettingsModal.svelte` abre
   todas as telas num `BottomSheet` de navegação por seções (Aplicativo · Servidor) com as linhas de
-  `LINHAS` — hoje Geral, Aparência, Diário, Sobre (aplicativo) e Máquinas, Contas, Harnesses, Voz,
-  Notificações, Anexos, Avançado, Motores, Orquestração (servidor). Quem for adicionar aba: registra no `LINHAS` do `SettingsModal.svelte` e no
+  `LINHAS` — hoje Geral, Aparência, Diário, Sobre (aplicativo) e Máquinas, Contas e modelos,
+  Harnesses, Voz, Notificações, Anexos, Avançado, Orquestração (servidor). Quem for adicionar aba: registra no `LINHAS` do `SettingsModal.svelte` e no
   `lib/configRoute.ts` (`TelaConfig`/`TELAS_DE_SERVIDOR`), com chave de idioma nos dois
   `messages/*.json` no mesmo commit. O `lib/gitTabs.ts` + `GitTabs.svelte` continuam sendo o
   precedente de navegação por abas DENTRO de uma tela (incluindo nível por aba no celular).
@@ -418,7 +418,9 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   branch≠main, kill-switch `automations_enabled`, anti-estagnação (mesma cauda 2×). Loop ativo
   **suprime o chain** da sessão. Campos `loop_status/loop_iter/loop_max` fluem no `/api/sessions`
   e no `sig` do SSE (badge 🔁 nas 2 views). Spec/decisões: docs/superpowers/specs/2026-07-22-*.md.
-- **Model engines** (`app/engines.py` + `app/engine_probe.py` + `components/settings/EnginesSettings.svelte`):
+- **Model engines** (`app/engines.py` + `app/engine_probe.py` + `components/settings/MotorForm.svelte`,
+  aberto de dentro do card da chave em `ContasSettings.svelte`, tela "Contas e modelos" — a tela
+  Motores foi fundida nela em 05/09/2026, pela spec de config por assunto):
   a session can run on a non-Anthropic provider — only env vars change inside that session's process,
   `~/.claude` (skills, hooks, transcript) stays the SAME. Single source of truth at
   `~/.claude/engines.json` (0600). Four invariants: (1) `engines.py` is **stdlib-only** — an
@@ -485,7 +487,8 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
     pintadas e a leitura devolvia 4 modelos, sem o Haiku. E nunca mandar o 2º Enter sem antes
     reler: se o picker já abriu, esse Enter **confirma como default** a linha sob o cursor — num
     caminho que era pra ser só leitura.
-  - **Sessão de motor** → o `/v1/models` do provedor (o mesmo `engine_probe` da tela de Motores).
+  - **Sessão de motor** → o `/v1/models` do provedor (o mesmo `engine_probe` do "Testar e listar
+    modelos" de Contas e modelos).
     Ali o picker é inútil: lista os 4 aliases, **todos apontando pro mesmo `ANTHROPIC_MODEL`**
     (`Custom Opus model`, `Custom Fable model`, …) — e `gateway_model_discovery: true` não muda
     isso. A troca vai por `/model <id>`, que aceita id arbitrário.

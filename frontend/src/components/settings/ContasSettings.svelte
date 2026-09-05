@@ -12,7 +12,7 @@
   // que é o nome no disco. Trocar os dois faz o Entrar e o Apagar mirarem uma conta que não
   // existe assim que a pessoa renomear a primeira.
   import { onDestroy, untrack } from 'svelte';
-import { criarConta, apagarConta, putEngine, putEngineForServer, deleteEngine, deleteEngineForServer, isAbortError, isTimeoutError, type Motor, type EnginesResponse } from '../../lib/api';
+import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeoutError, type Motor, type EnginesResponse } from '../../lib/api';
   import { formatarIntervalo } from '../../lib/contaEstado';
   import { listarCredenciais, definirApelido, definirCookie, type Credencial } from '../../lib/credenciais';
   import { iniciarLogin, passoLogin, confirmarLogin, cancelarLogin, type PassoLogin } from '../../lib/loginConta';
@@ -74,13 +74,7 @@ import { criarConta, apagarConta, putEngine, putEngineForServer, deleteEngine, d
   // Criar: um botão só ("+ Nova conta") e a escolha do TIPO acontece depois do clique — pedido
   // do usuário: "eu seleciono qual vou criar na hora". Dois botões lado a lado obrigavam a
   // decidir antes de saber que existiam duas coisas.
-  let novo = $state<null | 'escolha' | 'claude' | 'chave'>(null);
-  let nomeConta = $state('');
-  let criando = $state(false);
-  // Campos da conta por chave de API.
-  let chaveNome = $state('');
-  let chaveUrl = $state('');
-  let chaveSegredo = $state('');
+  let novo = $state<null | 'escolha'>(null);
   // Renomear: o apelido é do app, não do disco — renomear pasta mexeria em caminho que um CLI
   // vivo tem aberto, e renomear motor quebraria o `hangar-engine --exec <nome>` de sessão rodando.
   let renomeando = $state<string | null>(null);   // id da credencial em edição
@@ -203,8 +197,8 @@ import { criarConta, apagarConta, putEngine, putEngineForServer, deleteEngine, d
     renomeando = null; apelidoTexto = ''; salvandoApelido = false;
     cookieDe = null; cookieWs = ''; cookieValor = ''; salvandoCookie = false;
     motorAberto = null;
-    novo = null; nomeConta = ''; chaveNome = ''; chaveUrl = ''; chaveSegredo = '';
-    criando = false; apagando = false;
+    novo = null;
+    apagando = false;
     // Refresh em voo pertence ao alvo que saiu: o finally de atualizar() só limpa o flag se a
     // geração for a mesma, então sem este reset o botão ficava desabilitado PRA SEMPRE no alvo
     // novo (achado da revisão). O carimbo "atualizado há" não precisa mais de reset: ele sai da
@@ -223,43 +217,6 @@ import { criarConta, apagarConta, putEngine, putEngineForServer, deleteEngine, d
   // coluna inteira nasceria esmaecida em toda montagem da tela.
   const leituraFresca = (c: Credencial) =>
     c.cota?.estado === 'lida' && (c.cota.idade_s == null || c.cota.idade_s <= VELHA_APOS_S);
-
-  async function salvarChave() {
-    const nome = chaveNome.trim();
-    const url = chaveUrl.trim();
-    const segredo = chaveSegredo.trim();
-    if (!nome || !url || !segredo || criando) return;
-    const g = geracao;
-    criando = true;
-    aviso = '';
-    avisoErro = false;
-    try {
-      // Mesma rota que a tela de Motores sempre usou: o cadastro da chave é o engines.json.
-      // `model: ''` é deliberado — a chave pode existir só pra acompanhar o limite; escolher
-      // modelo é assunto de quem for RODAR o Claude Code nela, não de quem só a cadastra.
-      const dados = { label: nome, base_url: url, api_key: segredo, model: '' };
-      if (apiTarget) await putEngineForServer(apiTarget, chaveIdDe(nome), dados);
-      else await putEngine(chaveIdDe(nome), dados);
-      if (g !== geracao) return;
-      novo = null; chaveNome = ''; chaveUrl = ''; chaveSegredo = '';
-      await carregar(geracao);
-    } catch (e) {
-      if (g !== geracao) return;
-      aviso = e instanceof Error && e.message ? e.message : m.criar_conta_erro();
-      avisoErro = true;
-    } finally {
-      criando = false;
-    }
-  }
-
-  // O engines.json tem alfabeto próprio pro nome (minúsculas, números, '-' e '_'): o nome bonito
-  // vai pro `label` e o id sai daqui. Sem isto, "PMédico 01" seria recusado com 400 e o usuário
-  // levaria a culpa por ter digitado um nome com espaço.
-  function chaveIdDe(nome: string): string {
-    const base = nome.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32);
-    return base || `chave-${Date.now().toString(36)}`;
-  }
 
   async function salvarApelido(c: Credencial) {
     if (salvandoApelido) return;
@@ -298,32 +255,6 @@ import { criarConta, apagarConta, putEngine, putEngineForServer, deleteEngine, d
       avisoErro = true;
     } finally {
       salvandoCookie = false;
-    }
-  }
-
-  async function novaConta() {
-    const nome = nomeConta.trim();
-    if (!nome || criando) return;
-    // Geração desta operação: o aviso de "criada" pertence à máquina que recebeu o POST — se o
-    // ?srv= trocou no meio do voo, a resposta da máquina antiga não escreve na tela da nova
-    // (parecer da rodada 2, mesmo molde do iniciarEntrar).
-    const g = geracao;
-    criando = true;
-    aviso = '';
-    avisoErro = false;
-    try {
-      await criarConta(apiTarget, nome);
-      if (g !== geracao) return;
-      nomeConta = '';
-      novo = null;
-      aviso = m.criar_conta_deslogada();
-      await carregar(geracao);
-    } catch (e) {
-      if (g !== geracao) return;
-      aviso = e instanceof Error && e.message ? e.message : m.criar_conta_erro();
-      avisoErro = true;
-    } finally {
-      criando = false;
     }
   }
 
