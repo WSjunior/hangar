@@ -126,23 +126,17 @@
         model: form.model.trim(),
       };
       if (form.api_key.trim()) corpo.api_key = form.api_key.trim();
-      // Campo AUSENTE do corpo do PUT herda o valor do disco, e `null` conta como ausente
-      // (api.py:3881-3887 + engines._normalizar, engines.py:163). Quem LIMPA é o campo presente e
-      // vazio: `''` sai do registro em engines.py:183-189. Por isso o subagentes vai SEMPRE —
-      // omiti-lo quando vazio fazia "mesmo que o principal" voltar ao modelo antigo com HTTP 200.
+      // Campo ausente do corpo do PUT herda o valor do disco, e `null` conta como ausente. Quem
+      // LIMPA é o campo presente e vazio: `''` sai do registro. Por isso os opcionais vão SEMPRE —
+      // omiti-los quando vazios fazia a limpeza voltar HTTP 200 com o valor antigo, calado.
       corpo.subagent_model = form.subagent_model.trim();
-      // Os numéricos não têm valor de limpeza: `_normalizar` recusa `''` ("esperado número",
-      // engines.py:173-176) e `0` ("deve ser maior que zero", engines.py:177-178). Vazio continua
-      // FORA do corpo, o que herda o que estiver no disco; apagar um numérico já gravado exige o
-      // backend.
-      if (form.context_window) corpo.context_window = Number(form.context_window);
+      corpo.context_window = form.context_window ? Number(form.context_window) : '';
       // Precedência da visão: valor recém-testado > valor já salvo > omitir.
       const vision = typeof modeloAtual?.vision === 'boolean' ? modeloAtual.vision : motor.vision;
       if (typeof vision === 'boolean') corpo.vision = vision;
       for (const k of CHAVES_LIGA) corpo[k] = form[k];
-      // Numéricos do avançado: mesma regra do context_window acima.
-      if (form.auto_compact_window) corpo.auto_compact_window = Number(form.auto_compact_window);
-      if (form.max_output_tokens) corpo.max_output_tokens = Number(form.max_output_tokens);
+      corpo.auto_compact_window = form.auto_compact_window ? Number(form.auto_compact_window) : '';
+      corpo.max_output_tokens = form.max_output_tokens ? Number(form.max_output_tokens) : '';
 
       const r = alvo ? await putEngineForServer(alvo, nome, corpo) : await putEngine(nome, corpo);
       form.api_key = '';
