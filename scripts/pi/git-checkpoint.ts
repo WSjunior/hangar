@@ -49,6 +49,8 @@ interface ActiveSession {
   file: string | undefined
   shadowDir?: string
   repository?: Repository
+  lastTree?: string
+  lastRef?: string
 }
 interface CaptureJob {
   token: ActiveSession
@@ -118,16 +120,21 @@ async function git(args: string[], options: GitOptions): Promise<Buffer> {
 }
 
 async function repositoryAt(cwd: string, signal?: AbortSignal): Promise<Repository | undefined> {
-  const inside = await gitResult(['rev-parse', '--is-inside-work-tree'], { cwd, signal })
-  if (inside.code !== 0 || inside.stdout.toString('utf8').trim() !== 'true') return undefined
-  const [top, directory] = await Promise.all([
-    git(['rev-parse', '--show-toplevel'], { cwd, signal }),
-    git(['rev-parse', '--absolute-git-dir'], { cwd, signal }),
-  ])
-  return {
-    workTree: fs.realpathSync(top.toString('utf8').replace(/\r?\n$/, '')),
-    repository: fs.realpathSync(directory.toString('utf8').replace(/\r?\n$/, '')),
+  const result = await gitResult(['rev-parse', '--is-inside-work-tree', '--show-toplevel', '--absolute-git-dir'], { cwd, signal })
+  if (result.code !== 0) return undefined
+  const [inside, top, directory] = result.stdout.toString('utf8').split(/\r?\n/)
+  if (inside !== 'true' || !top || !directory) return undefined
+  return { workTree: fs.realpathSync(top), repository: fs.realpathSync(directory) }
+}
+
+function readOrigin(directory: string): Repository | undefined {
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(directory, ORIGIN_FILE), 'utf8'))
+    if (data?.version === 2 && typeof data.workTree === 'string' && typeof data.repository === 'string') return data
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error
   }
+  return undefined
 }
 
 export function createCheckpointExtension(pi: ExtensionAPI, agentContext: AgentContext = getAgentContext()): void {
@@ -171,6 +178,8 @@ export function createCheckpointExtension(pi: ExtensionAPI, agentContext: AgentC
     if (active?.key === next.key) {
       next.shadowDir = active.shadowDir
       next.repository = active.repository
+      next.lastTree = active.lastTree
+      next.lastRef = active.lastRef
     }
     active = next
     if (next.file) mainStems.add(path.resolve(next.file).replace(/\.jsonl$/, ''))
@@ -197,10 +206,21 @@ export function createCheckpointExtension(pi: ExtensionAPI, agentContext: AgentC
       throw new Error('O repositório da sessão mudou durante a captura')
     }
     if (token.shadowDir) return token.shadowDir
-    const directory = path.join(rootDirectory(), `${sessionSlug(token.file).slice(0, 100)}-${randomUUID()}`)
-    fs.mkdirSync(directory, { mode: 0o700 })
-    await git(['init', '--bare', '--template=', '--initial-branch=main', directory], { cwd: repo.workTree, isolated: true, signal })
-    fs.writeFileSync(path.join(directory, ORIGIN_FILE), JSON.stringify({ version: 2, ...repo }), { flag: 'wx' })
+    // Uma pasta por sessão, reusada na retomada: cada ativação com pasta nova guardava a árvore
+    // inteira de novo, sem poda. Só ganha sufixo quando a pasta com esse nome é de outro projeto.
+    let directory = path.join(rootDirectory(), sessionSlug(token.file).slice(0, 100))
+    const origin = readOrigin(directory)
+    if (origin && (origin.workTree !== repo.workTree || origin.repository !== repo.repository)) {
+      directory = `${directory}-${randomUUID()}`
+    }
+    const bare = fs.existsSync(directory)
+      && (await gitResult(['--git-dir', directory, 'rev-parse', '--is-bare-repository'], { cwd: directory, isolated: true, signal })).stdout.toString('utf8').trim() === 'true'
+    if (!bare) {
+      if (fs.existsSync(directory)) directory = `${directory}-${randomUUID()}`
+      fs.mkdirSync(directory, { mode: 0o700 })
+      await git(['init', '--bare', '--template=', '--initial-branch=main', directory], { cwd: repo.workTree, isolated: true, signal })
+    }
+    if (!readOrigin(directory)) fs.writeFileSync(path.join(directory, ORIGIN_FILE), JSON.stringify({ version: 2, ...repo }), { flag: 'wx' })
     fs.mkdirSync(path.join(directory, 'info'), { recursive: true })
     // Os bytes do checkpoint não passam por filtros, normalização de EOL ou expansões de ident.
     fs.writeFileSync(path.join(directory, 'info/attributes'), '* -text -eol -filter -ident -working-tree-encoding\n')
@@ -219,10 +239,9 @@ export function createCheckpointExtension(pi: ExtensionAPI, agentContext: AgentC
     const cancelled = once(job.controller.signal, 'abort', { signal: listener.signal }).then(() => {
       throw new Error('Captura cancelada antes de concluir o checkpoint')
     })
-    const timer = agentContext.harness === 'omp' ? setTimeout(() => {
-      cancelCaptures('deadline', token.key)
-      if (active?.key === token.key) ctx.abort()
-    }, OMP_CAPTURE_TIMEOUT_MS) : undefined
+    // Estourou o prazo: a captura é cancelada (nada tardio entra no turno), o turno segue sem
+    // este checkpoint. Matar o pedido por uma foto lenta custava mais que um ponto a menos no /rewind.
+    const timer = agentContext.harness === 'omp' ? setTimeout(() => cancelCaptures('deadline', token.key), OMP_CAPTURE_TIMEOUT_MS) : undefined
     const signal = job.controller.signal
     const operation = exclusive(async () => {
       if (signal.aborted || !current(token, ctx)) return
@@ -230,43 +249,59 @@ export function createCheckpointExtension(pi: ExtensionAPI, agentContext: AgentC
       if (!repo || signal.aborted || !current(token, ctx)) return
       const shadowDir = await storage(token, repo, signal)
       if (signal.aborted || !current(token, ctx)) return
-      const options = { cwd: repo.workTree, shadowDir, indexFile: path.join(shadowDir, 'index'), signal }
-      // O Git do projeto enumera as exclusões locais/globais; nenhum comando escreve seu índice.
-      const candidates = pathsFromGit(await git(['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { cwd: repo.workTree, signal }))
-      const expected = new Set<string>()
-      const ownRoot = fs.realpathSync(checkpointRoot)
-      for (const name of candidates) {
-        const full = path.resolve(repo.workTree, name)
-        if (!contained(repo.workTree, full) || full === ownRoot || contained(ownRoot, full)) continue
-        try {
-          const info = fs.lstatSync(full)
-          if (info.isFile() || info.isSymbolicLink()) expected.add(name)
-        } catch (error) {
-          if (!['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error
+      // Índice por captura: duas instâncias da mesma sessão (ou um git abortado ainda saindo)
+      // nunca disputam o mesmo arquivo.
+      const indexFile = path.join(shadowDir, `index.${process.pid}.${randomUUID()}`)
+      const options = { cwd: repo.workTree, shadowDir, indexFile, signal }
+      try {
+        // O Git do projeto enumera tudo numa chamada: H/S/M = rastreado (com modo), ? = novo,
+        // R = rastreado que sumiu do disco. Nenhum comando escreve o índice dele.
+        const listing = pathsFromGit(await git(['ls-files', '-t', '-s', '-z', '--cached', '--others', '--deleted', '--exclude-standard'], { cwd: repo.workTree, signal }))
+        const ownRoot = fs.realpathSync(checkpointRoot)
+        const expected = new Set<string>()
+        const missing = new Set<string>()
+        for (const line of listing) {
+          const tag = line[0]
+          if (tag === '?') { expected.add(line.slice(2)); continue }
+          const tab = line.indexOf('\t')
+          if (tab === -1) continue
+          const name = line.slice(tab + 1)
+          if (tag === 'R') { missing.add(name); continue }
+          if (line.slice(2, 8) === '160000') continue
+          expected.add(name)
         }
+        for (const name of missing) expected.delete(name)
+        for (const name of [...expected]) {
+          const full = path.resolve(repo.workTree, name)
+          if (!contained(repo.workTree, full) || full === ownRoot || contained(ownRoot, full)) expected.delete(name)
+        }
+        if (expected.size) await git(['--literal-pathspecs', 'add', '--force', '--pathspec-from-file=-', '--pathspec-file-nul'], {
+          ...options, input: Buffer.from([...expected].join('\0') + '\0'),
+        })
+        const tree = (expected.size ? await git(['write-tree'], options) : await git(['mktree'], { ...options, input: Buffer.alloc(0) })).toString('utf8').trim()
+        let ref = token.lastTree === tree ? token.lastRef : undefined
+        if (!ref) {
+          ref = (await git(['-c', 'user.name=Hangar checkpoint', '-c', 'user.email=checkpoint@hangar.invalid',
+            'commit-tree', tree, '-m', 'checkpoint'], options)).toString('utf8').trim()
+          if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(ref)) throw new Error('Git não devolveu uma revisão válida')
+          await git(['update-ref', `refs/checkpoints/${randomUUID()}`, ref], options)
+        }
+        if (signal.aborted || !current(token, ctx)) return
+        token.lastTree = tree
+        token.lastRef = ref
+        const record: CheckpointRecord = { version: 2, ...repo, shadowDir, ref, prompt, createdAt: new Date().toISOString() }
+        // O próprio registro fica antes do pedido e vira a âncora; não procurar o último usuário depois.
+        pi.appendEntry(CUSTOM_TYPE, record)
+      } finally {
+        fs.rmSync(indexFile, { force: true })
+        fs.rmSync(`${indexFile}.lock`, { force: true })
       }
-      const previous = pathsFromGit(await git(['ls-files', '-z'], options))
-      const removed = previous.filter(name => !expected.has(name))
-      if (removed.length) await git(['update-index', '--force-remove', '-z', '--stdin'], { ...options, input: Buffer.from(removed.join('\0') + '\0') })
-      if (expected.size) await git(['--literal-pathspecs', 'add', '--force', '--pathspec-from-file=-', '--pathspec-file-nul'], {
-        ...options, input: Buffer.from([...expected].join('\0') + '\0'),
-      })
-      else await git(['read-tree', '--empty'], options)
-      const tree = (await git(['write-tree'], options)).toString('utf8').trim()
-      const ref = (await git(['-c', 'user.name=Hangar checkpoint', '-c', 'user.email=checkpoint@hangar.invalid',
-        'commit-tree', tree, '-m', 'checkpoint'], options)).toString('utf8').trim()
-      if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(ref)) throw new Error('Git não devolveu uma revisão válida')
-      await git(['update-ref', `refs/checkpoints/${randomUUID()}`, ref], options)
-      if (signal.aborted || !current(token, ctx)) return
-      const record: CheckpointRecord = { version: 2, ...repo, shadowDir, ref, prompt, createdAt: new Date().toISOString() }
-      // O próprio registro fica antes do pedido e vira a âncora; não procurar o último usuário depois.
-      pi.appendEntry(CUSTOM_TYPE, record)
     })
     try {
       await Promise.race([operation, cancelled])
     } catch (error) {
       if (job.reason === 'transition' || job.reason === 'loop') return
-      if (agentContext.harness === 'omp' && job.reason !== 'deadline' && active?.key === token.key) ctx.abort()
+      if (job.reason === 'deadline') throw new Error('a captura passou do prazo e foi cancelada')
       throw error
     } finally {
       clearTimeout(timer)
@@ -369,10 +404,10 @@ export function createCheckpointExtension(pi: ExtensionAPI, agentContext: AgentC
   pi.on('session_shutdown', (_event, ctx) => {
     if (!subagent(ctx)) { cancelCaptures('transition'); active = undefined }
   })
+  // Captura ainda em curso quando o turno começa: cancelar basta — nada tardio é publicado.
   const stopLateCapture = (_event: unknown, ctx: ExtensionContext) => {
     if (!subagent(ctx) && cancelCaptures('loop', identity(ctx).key)) {
-      ctx.abort()
-      ctx.ui.notify('Captura não concluída antes do turno; operação interrompida', 'error')
+      ctx.ui.notify('Este pedido segue sem checkpoint: a captura não terminou antes do turno', 'warning')
     }
   }
   pi.on('agent_start', stopLateCapture)
@@ -380,8 +415,7 @@ export function createCheckpointExtension(pi: ExtensionAPI, agentContext: AgentC
   pi.on('before_agent_start', async (event, ctx) => {
     try { await captureBeforePrompt(event.prompt, ctx) }
     catch (error) {
-      ctx.ui.notify(`Não foi possível capturar o checkpoint: ${String(error)}`, 'error')
-      throw error
+      ctx.ui.notify(`Este pedido segue sem checkpoint: ${error instanceof Error ? error.message : String(error)}`, 'warning')
     }
   })
 

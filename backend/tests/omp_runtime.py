@@ -8,6 +8,22 @@ import subprocess
 import uuid
 
 
+def _reusar_natives(home: Path) -> None:
+    """Aponta o addon nativo da HOME de teste pro da máquina, quando existe.
+
+    Sem isso o omp extrai ~344M por HOME (uma por caso), e as 3 rodadas que o pytest
+    guarda lotam um /tmp em tmpfs no meio da suíte. Sem o addon na máquina (CI limpo),
+    o omp extrai como sempre."""
+    real = Path.home() / ".omp" / "natives"
+    if not real.is_dir():
+        return
+    for alvo in (home / ".omp" / "natives", home / ".cache" / "omp" / "natives"):
+        if alvo.exists() or alvo.is_symlink():
+            continue
+        alvo.parent.mkdir(parents=True, exist_ok=True)
+        alvo.symlink_to(real, target_is_directory=True)
+
+
 def run_omp_driver(
     driver: Path, home: Path, env: dict[str, str] | None = None, *, cwd: Path | None = None, load_rules: bool = False
 ) -> subprocess.CompletedProcess[str]:
@@ -22,6 +38,7 @@ def run_omp_driver(
     config = agent_dir / "config.yml"
     if not config.exists():
         config.write_text("setupVersion: 2\n", encoding="utf-8")
+    _reusar_natives(home)
     run_id = uuid.uuid4().hex
     proof = home / "provas" / run_id
     proof.mkdir(parents=True)

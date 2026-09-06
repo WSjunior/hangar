@@ -610,19 +610,43 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   `before_agent_start`, não `turn_start`, e persiste revisão, worktree canônica, identidade do
   Git do projeto e diretório que contém os objetos. O próprio registro é a âncora anterior ao
   pedido. Retomada/fork conservam essa origem; `getBranch` impede oferecer um ramo descartado.
-  Cada instância/sessão tem armazenamento próprio em `<agentDir>/checkpoints/`; restaurações
-  usam índice temporário próprio, nunca o índice da sessão de origem. O Git do projeto só
+  **Uma pasta de checkpoints por SESSÃO** (`<agentDir>/checkpoints/<slug do jsonl>`, reusada
+  na retomada, 06/09/2026): a primeira versão do PR abria `<slug>-<uuid>` a cada ativação,
+  inclusive em cada resume, e cada pasta guarda os objetos da árvore inteira — 113 pastas e
+  1,2 GB nesta máquina, sem poda. O uuid existia pra duas instâncias da mesma sessão não
+  disputarem o índice; hoje o índice é **por captura** (`index.<pid>.<uuid>`, apagado no fim),
+  então objetos e refs (já nomeadas por uuid) convivem num bare repo só. Sufixo `-<uuid>` só
+  quando a pasta com esse nome é de OUTRO projeto (`hangar-origin.json` diverge) ou não é um
+  bare repo; a pasta v1 do Pi (mesmo slug, sem origem gravada) é adotada e ganha a origem.
+  Restaurações continuam com índice temporário próprio, nunca o da sessão de origem.
+  **A captura enumera numa chamada só**: `ls-files -t -s --cached --others --deleted
+  --exclude-standard` — `H`/`S`/`M` rastreado com modo (`160000` = submódulo, fora), `?` novo,
+  `R` rastreado que sumiu do disco. A primeira versão fazia um `lstatSync` síncrono por arquivo
+  rastreado mais 8–9 spawns por prompt; num repo de milhares de arquivos isso travava o loop de
+  eventos antes de cada mensagem. Árvore igual à da última foto **reaproveita a revisão**
+  (`lastTree`/`lastRef` na sessão ativa): todo pedido ganha registro, não commit.
+  **Captura lenta ou falha NÃO mata o turno.** A primeira versão chamava `ctx.abort()` no omp
+  ao estourar 25 s, em qualquer erro de captura e em `agent_start`/`turn_start` com captura
+  pendente — um repo grande cancelava TODO prompt. O que importa (nada tardio entra no turno)
+  é o cancelamento da captura, que fica; o abort saiu. Hoje é aviso "este pedido segue sem
+  checkpoint" e o turno anda; o `/rewind` só tem um ponto a menos. O Git do projeto só
   enumera arquivos/exclusões; variáveis `GIT_*` herdadas são removidas, hooks/assinatura/fsmonitor
   são desativados e atributos do shadow preservam bytes, inclusive CRLF, sem filtros de conteúdo.
   O modo de código repõe arquivos modificados/apagados, preservando os criados depois. Origem,
   projeto, revisão, ramo, diretório e ociosidade são conferidos antes da escrita; symlinks
   ancestrais ou diretórios posteriores em colisão recusam a operação.
   **O await do OMP tem prazo:** no 18.1.11 o dispatcher libera handlers após 30 s. A captura
-  tem limite total de 25 s, incluindo espera na fila, e cancela os processos Git/interrompe
-  o pedido antes desse limite nativo. `agent_start`/`turn_start` também invalidam qualquer
+  tem limite total de 25 s, incluindo espera na fila, e cancela os processos Git antes desse
+  limite nativo (o pedido segue, ver acima). `agent_start`/`turn_start` também invalidam qualquer
   captura restante; ela não pode publicar um checkpoint tardio no turno em execução.
   Prova usa `ExtensionRunner`/`loadExtensionFromFactory` reais, sem chamada a modelo; reproduziu
   a publicação tardia ao expirar o dispatcher e passou após o cancelamento.
+  **As provas do omp reusam o addon nativo da máquina** (`tests/omp_runtime._reusar_natives`,
+  06/09/2026): o omp extrai `pi_natives` (~344 MB) em `~/.omp/natives/<versão>` da HOME que
+  vê, e cada caso tem HOME própria — com as 3 rodadas que o pytest guarda, um `/tmp` em tmpfs
+  de 12 GB lotou NO MEIO da suíte e derrubou 756 testes com `No space left on device`, todos
+  longe do omp. A HOME de teste ganha um symlink `.omp/natives` (e `.cache/omp/natives`) pro
+  real quando ele existe; sem ele (CI limpo) o omp extrai como sempre.
   Registros Pi antigos só são restaurados quando a sessão original, seu `header.cwd` e o
   armazenamento legado previsto demonstram a origem; não se procura um SHA por pastas alheias.
   Código e conversa são etapas separadas: falha da segunda é informada como parcial, não sucesso.

@@ -172,6 +172,11 @@ export default async function (pi: ExtensionAPI) {
         const captured = await capture();
         assert.ok(pi.getCommands().some(command => command.name === "hangar-rewind"));
         assert.equal(fs.existsSync(path.join(root, ".pi/agent/checkpoints")), false);
+        // Árvore igual à da última foto reaproveita a revisão: cada pedido ganha registro, não commit.
+        const repeated = await capture("de novo, sem mudar nada");
+        assert.equal(repeated.data.ref, captured.data.ref);
+        assert.equal(repeated.data.shadowDir, captured.data.shadowDir);
+        assert.equal(fs.readdirSync(captured.data.shadowDir).filter(name => name.startsWith("index")).length, 0, "índice por captura precisa ser apagado");
         const listed = git(["--git-dir", captured.data.shadowDir, "ls-tree", "-r", "--name-only", captured.data.ref]);
         for (const ignored of ["ignored.txt", "local-ignored.txt", "global-ignored.txt"]) assert.ok(!listed.split("\n").includes(ignored));
         userMessage("alterar");
@@ -195,6 +200,9 @@ export default async function (pi: ExtensionAPI) {
         const originalFile = manager.getSessionFile()!;
         manager = await Manager.open(originalFile, sessionDir);
         install(); await emit("session_start");
+        // Retomar a sessão reusa a pasta de checkpoints dela em vez de abrir outra com a árvore inteira.
+        const resumed = await capture("após retomada");
+        assert.equal(resumed.data.shadowDir, captured.data.shadowDir);
         write(tracked, "após retomada\n"); await rewind();
         assert.equal(fs.readFileSync(tracked, "utf8"), "antes\n");
         manager.createBranchedSession(captured.entry.id);
