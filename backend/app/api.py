@@ -1328,7 +1328,24 @@ async def list_sessions():
     # MuxIndisponivel nao e tratada aqui: o handler de `_mux_indisponivel` cobre esta rota e as
     # outras quinze que chamam registry.list(). Um try/except so nesta seria a mesma resposta
     # escrita duas vezes, e a que envelhece primeiro.
-    return await registry.list_with_state()
+    #
+    # A RESOLUCAO (scan de /proc + fork de tmux) vem do snapshot de `_guardar_snap`, com TTL de 1s e
+    # single-flight; o ESTADO continua sendo classificado a cada chamada, entao a resposta nao fica
+    # velha. Medido em 06/09/2026: sem isto as chamadas nao se sobrepoem — 1 custa 13ms, 3 custam
+    # 35ms de parede, 6 custam 67ms e 12 custam 134ms, linear, porque cada uma refaz a varredura
+    # inteira. E o front chama isto a cada 2s POR cliente. Com o snapshot, N clientes que caem na
+    # mesma janela pagam uma varredura so. `to_thread` porque `_guardar_snap` bloqueia (mesma regra
+    # do git status na corrotina, o incidente de 2026-07-23).
+    #
+    # CADA requisicao decora as SUAS copias, e isto nao e zelo: `list_with_state` escreve NOS
+    # objetos (`info.state`, `info.last_activity`, `info.question`...), e o snapshot e a mesma lista
+    # servida a todo mundo dentro do TTL. Sem a copia, duas chamadas concorrentes — que e justamente
+    # o que este cache existe pra permitir — se intercalam nos MESMOS SessionInfo entre os awaits da
+    # decoracao, e o estado decorado ainda vazaria pro snapshot que `/history` e `/workflows` leem
+    # esperando a lista crua. `model_copy` rasa basta: a decoracao ATRIBUI campos, nunca muta em
+    # lugar o que ja esta neles.
+    snap = await asyncio.to_thread(_guardar_snap)
+    return await registry.list_with_state([i.model_copy() for i in snap])
 
 
 @app.post("/api/diag", dependencies=[Depends(require_auth)])
