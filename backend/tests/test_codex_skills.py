@@ -1,5 +1,6 @@
 """Provas de proveniência e atualização de skills em homes temporárias."""
 import json
+import os
 from pathlib import Path
 import shutil
 
@@ -167,7 +168,8 @@ def test_copia_windows_reflete_claude_remove_so_gerenciados_e_preserva_exclusivo
     assert {p.name: p.read_bytes() for p in backups.iterdir()} == backups_antes
 
 
-def test_duplicata_nativa_identica_e_retirada_com_backup(ambiente):
+def test_sem_plugin_a_copia_pessoal_em_agents_fica_e_a_ponte_nao_linka(ambiente):
+    # ~/.agents/skills é fonte do Pi/Kimi/omp e o Codex já a lê: nada a apagar, nada a duplicar.
     home, codex, backups = ambiente
     origem = _skill(home / ".claude/skills/skill")
     (origem / "helper.py").write_text("print('teste')")
@@ -175,31 +177,51 @@ def test_duplicata_nativa_identica_e_retirada_com_backup(ambiente):
     shutil.copytree(origem, duplicata)
     registro, avisos = _rodar(ambiente)
     assert avisos == []
-    assert not duplicata.exists()
-    assert (codex / "skills/skill").resolve() == origem
-    assert registro["skill"]["mode"] == "symlink"
-    assert len(list(backups.glob("*.json"))) == 2
+    assert duplicata.exists()
+    assert not os.path.lexists(codex / "skills/skill")
+    assert registro["skill"]["mode"] == "native"
+    assert list(backups.glob("*.json")) == []
 
 
 def test_duplicata_nativa_diferente_preservada_sem_proveniencia(ambiente):
-    home, _, _ = ambiente
+    home, codex, _ = ambiente
     _skill(home / ".claude/skills/skill", "atual")
     duplicata = _skill(home / ".agents/skills/skill", "outra")
     _, avisos = _rodar(ambiente)
-    assert avisos
+    assert avisos and "difere" in avisos[0]
     assert duplicata.exists()
+    assert not os.path.lexists(codex / "skills/skill")
 
 
-def test_historico_completo_da_copia_nativa_permite_retira_la(ambiente):
-    home, _, _ = ambiente
-    origem = _skill(home / ".claude/skills/skill", "atual")
+def _plugin_com_skill(home, codex):
+    _skill(home / ".claude/plugins/cache/market/plugin/1/skills/skill")
+    plugin = codex / "plugins/cache/market/plugin/1"
+    _skill(plugin / "skills/skill")
+    return {"plugin@market": {"path": str(plugin)}}
+
+
+def test_plugin_confirmado_nao_apaga_copia_pessoal_identica(ambiente):
+    home, codex, _ = ambiente
+    plugins = _plugin_com_skill(home, codex)
+    origem = home / ".claude/plugins/cache/market/plugin/1/skills/skill"
+    duplicata = home / ".agents/skills/skill"
+    shutil.copytree(origem, duplicata)
+    _, avisos = _rodar(ambiente, plugins)
+    assert duplicata.exists()
+    assert avisos and "preservada" in avisos[0]
+
+
+def test_plugin_confirmado_retira_so_a_copia_que_o_hangar_registrou(ambiente):
+    home, codex, _ = ambiente
+    plugins = _plugin_com_skill(home, codex)
+    origem = home / ".claude/plugins/cache/market/plugin/1/skills/skill"
     duplicata = _skill(home / ".agents/skills/skill", "versão antiga")
     registro = {"skill": {"path": str(duplicata), "mode": "copy", "source": str(origem),
                            "files": {"SKILL.md": hash_bytes((duplicata / "SKILL.md").read_bytes())}}}
-    novo, avisos = _rodar(ambiente, registro=registro)
+    novo, avisos = _rodar(ambiente, plugins, registro)
     assert avisos == []
     assert not duplicata.exists()
-    assert novo["skill"]["mode"] == "symlink"
+    assert novo["skill"]["mode"] == "native"
 
 
 def test_skill_ja_nativa_em_agents_nao_ganha_ponte_duplicada(ambiente):
@@ -257,8 +279,8 @@ def test_falha_na_ponte_nao_remove_duplicata_que_ainda_serve_ao_codex(ambiente, 
         raise OSError("Symlink indisponível")
     monkeypatch.setattr(Path, "symlink_to", falhar)
     registro, avisos = _rodar(ambiente)
-    assert avisos
-    assert registro == {}
+    assert avisos == [], "a ponte nem tenta linkar o que o Codex já lê em ~/.agents/skills"
+    assert registro["skill"]["mode"] == "native"
     assert duplicata.exists()
 
 

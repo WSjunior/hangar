@@ -257,8 +257,9 @@ def _duplicata_nativa(nome: str, origem: Path, home: Path, anterior: dict,
     historico = _estado_anterior(anterior, destino)
     comprovada = (historico.get("mode") == "copy" and historico.get("files") == hashes
                   and historico.get("source", historico.get("origem")) == str(origem))
-    if atuais != _arquivos(origem) and not comprovada:
-        avisos.append(f"Possível duplicata nativa com conteúdo próprio preservada: {destino}")
+    # ~/.agents/skills é fonte do Pi, do Kimi e do omp: só sai o que o Hangar mesmo pôs lá.
+    if not comprovada:
+        avisos.append(f"Skill {nome} existe no plugin nativo e em ~/.agents/skills; a cópia pessoal foi preservada")
         return
     # Confere novamente depois de gravar os backups e antes de retirar qualquer arquivo.
     for rel, data in atuais.items():
@@ -293,7 +294,9 @@ def reconciliar_skills(home: Path, codex_home: Path, plugins: dict, registro_ski
             nativa = next((id_ for id_, disponiveis in nativas
                            if nomes & disponiveis and _mesmo_plugin(origem, id_, home)), None)
             ja_nativa = origem.resolve().is_relative_to((home / ".agents/skills").resolve())
-            if nativa or ja_nativa:
+            # O Codex lê ~/.agents/skills sozinho: skill que já está lá não ganha link na ponte.
+            em_agents = not ja_nativa and os.path.lexists(home / ".agents/skills" / nome)
+            if nativa or ja_nativa or em_agents:
                 if _link_gerenciado(destino, raizes):
                     backup(destino, os.readlink(destino).encode(), backups)
                     destino.unlink()
@@ -303,7 +306,10 @@ def reconciliar_skills(home: Path, codex_home: Path, plugins: dict, registro_ski
                     resto = _retirar_copia(destino, anterior, backups, avisos)
                     if destino.exists():
                         manifesto[nome] = resto
-                _duplicata_nativa(nome, origem, home, registro_skills.get(nome, {}), backups, avisos)
+                if nativa:
+                    _duplicata_nativa(nome, origem, home, registro_skills.get(nome, {}), backups, avisos)
+                elif em_agents and (home / ".agents/skills" / nome).is_dir() and _arquivos(home / ".agents/skills" / nome) != _arquivos(origem):
+                    avisos.append(f"Skill {nome} em ~/.agents/skills difere da fonte do Claude; o Codex usa a de ~/.agents/skills")
                 continue
             if os.path.lexists(destino):
                 if destino.is_symlink():
@@ -312,14 +318,12 @@ def reconciliar_skills(home: Path, codex_home: Path, plugins: dict, registro_ski
                         continue
                     if destino.resolve() == origem.resolve():
                         manifesto[nome] = {"path": str(destino), "mode": "symlink", "source": str(origem), "files": {}}
-                        _duplicata_nativa(nome, origem, home, registro_skills.get(nome, {}), backups, avisos)
                         continue
                 elif anterior.get("mode") != "copy":
                     avisos.append(f"Skill pessoal preservada: {destino}")
                     continue
                 else:
                     manifesto[nome] = _copiar(destino, origem, anterior, backups, avisos)
-                    _duplicata_nativa(nome, origem, home, registro_skills.get(nome, {}), backups, avisos)
                     continue
             try:
                 esperado = os.readlink(destino) if destino.is_symlink() else None
@@ -329,7 +333,6 @@ def reconciliar_skills(home: Path, codex_home: Path, plugins: dict, registro_ski
                 if not windows or os.path.lexists(destino):
                     raise
                 manifesto[nome] = _copiar(destino, origem, anterior, backups, avisos)
-            _duplicata_nativa(nome, origem, home, registro_skills.get(nome, {}), backups, avisos)
         except (OSError, ValueError) as exc:
             avisos.append(f"Skill {nome} preservada após falha: {exc}")
             if nome not in manifesto and anterior:

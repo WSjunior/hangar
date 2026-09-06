@@ -501,6 +501,19 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
     lançador reconciliar sozinho, esperando o lock sem prazo — com uma instalação de plugins de
     65–103s o pane ficava minutos parado, e um teto que cancelasse a rodada nunca a deixaria
     terminar). Um executor só, e a instalação longa termina no backend.
+  - **`~/.agents/skills` não é do Codex** (`codex_skills._duplicata_nativa`): é fonte do Pi, do
+    Kimi e do omp, e o Codex a lê sozinho. A dedupe do PR apagava dali qualquer cópia idêntica à
+    fonte do Claude, com ou sem plugin nativo envolvido — nesta máquina são 11 skills pessoais que
+    existem nos dois lugares, e sumiriam dos outros três harnesses, caladas. Regra: skill que já
+    está em `~/.agents/skills` não ganha link na ponte (o Codex já a vê); a dedupe só roda com
+    plugin nativo confirmado e só retira o que o manifesto diz que o Hangar mesmo pôs lá; cópia
+    pessoal fica, com aviso. Medido na cópia fiel desta máquina: a ponte vai de 375 links pra
+    42 (só o que não vem de plugin nem de `~/.agents/skills`), 333 nativas, os 11 de
+    `~/.agents/skills` intactos e sem link, zero avisos.
+  - **Erro fora dos três tipos esperados deixava o estado preso em "executando"**: `hooks/list`
+    num formato inesperado dava `AttributeError`, escapava do `except`, e o botão ficava cinza e o
+    lançador esperava 20s a cada sessão até reiniciar o backend. Hoje qualquer exceção vira
+    "erro" (detalhe só no log) e o formato do `hooks/list` é conferido antes de percorrer.
   - `settings.env` vai inteiro pro `shell_environment_policy.set` — as 16 variáveis desta
     máquina, 6 delas tokens (Grafana, Jira, Jenkins, Outline, ElevenLabs), também no
     `estado.json` do manifesto (0600). É o comportamento do importador nativo; o que o Hangar

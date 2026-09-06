@@ -263,6 +263,10 @@ class IntegracaoCodex:
             self._erro(f"Falha na integração ({type(exc).__name__}); configuração anterior preservada nas etapas não concluídas")
             self._estado["estado"] = "erro"
             _log.debug("Falha da integração", exc_info=True)
+        except Exception as exc:  # noqa: BLE001 — erro escapando deixava o estado preso em "executando"
+            self._erro(f"Falha inesperada na integração ({type(exc).__name__}); configuração anterior preservada nas etapas não concluídas")
+            self._estado["estado"] = "erro"
+            _log.exception("Falha inesperada da integração")
         finally:
             if carregado:
                 self._estado["ultima_execucao"] = _iso(time.time())
@@ -295,8 +299,13 @@ class IntegracaoCodex:
     async def _conferir_confianca(self, codex) -> None:
         try:
             dados = await codex.request("hooks/list", {"cwds": [str(self.home)]})
+            entradas = dados.get("data") if isinstance(dados, dict) else None
+            if not isinstance(entradas, list) or any(not isinstance(e, dict) or not isinstance(e.get("hooks", []), list)
+                                                     or any(not isinstance(h, dict) for h in e.get("hooks", []))
+                                                     for e in entradas):
+                raise CodexNativoErro("hooks/list em formato desconhecido")
             pendente = any(h.get("enabled") and h.get("trustStatus") in ("untrusted", "modified")
-                          for entry in dados.get("data", []) for h in entry.get("hooks", []))
+                          for entry in entradas for h in entry.get("hooks", []))
             if pendente:
                 self._confianca()
             else:

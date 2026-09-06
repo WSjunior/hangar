@@ -97,7 +97,10 @@ As compatibilidades próprias do Hangar ficam em `backend/app/codex_compat.py`:
   de comandos de shell.
 
 Skills pessoais e conteúdos ainda não cobertos pela instalação nativa podem usar uma ponte de
-compatibilidade. Ela evita duplicar skills já fornecidas pelos plugins nativos gerenciados.
+compatibilidade. Ela evita duplicar skills já fornecidas pelos plugins nativos gerenciados, e
+não linka o que o Codex já lê sozinho em `~/.agents/skills`. Essa pasta é fonte compartilhada
+(Pi, Kimi e omp): a ponte só retira dali uma cópia que o próprio Hangar registrou, e só quando o
+plugin nativo correspondente está confirmado; cópia pessoal idêntica ou divergente fica, com aviso.
 O reconciliador reaproveita a descoberta de fontes da antiga `skill_bridge.py`, mas é o único
 caminho do Hangar responsável pelos destinos Codex dessa integração. No Windows, uma cópia
 registrada por arquivo serve de alternativa quando não é possível criar o symlink.

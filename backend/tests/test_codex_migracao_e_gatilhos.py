@@ -198,6 +198,37 @@ async def test_gatilho_de_sessao_respeita_interruptor_e_cache(rc, tmp_path, monk
     assert chamadas == [("sessao", False)]
 
 
+async def test_erro_inesperado_nao_deixa_o_estado_preso_em_executando(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    class Nativo:
+        def __init__(self, *a): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+
+    home = _home(tmp_path)
+    service = IntegracaoCodex(home, home / ".codex", nativo=Nativo)
+    monkeypatch.setattr(service, "_instrucoes", lambda: None)
+    monkeypatch.setattr(service, "_config", AsyncMock())
+    monkeypatch.setattr(service, "_plugins", AsyncMock(side_effect=TypeError("shape inesperado")))
+    estado = await service.reconciliar()
+    assert estado["estado"] == "erro"
+    assert any("TypeError" in e for e in estado["erros"])
+    assert service.status()["estado"] == "erro", "o botão não fica preso"
+    assert not any("shape" in e for e in estado["erros"]), "detalhe só no log"
+
+
+@pytest.mark.parametrize("resposta", [{"data": "x"}, {"data": [{"hooks": "nada"}]}, {"data": ["x"]}, "x"])
+async def test_hooks_list_em_formato_desconhecido_vira_aviso(tmp_path, resposta):
+    from unittest.mock import AsyncMock
+    home = _home(tmp_path)
+    service = IntegracaoCodex(home, home / ".codex")
+    service._estado = codex_integracao._snapshot()
+    codex = type("C", (), {"request": AsyncMock(return_value=resposta)})()
+    await service._conferir_confianca(codex)
+    assert any("não informou a confiança" in a for a in service._estado["avisos"])
+
+
 async def test_rodada_grava_assinatura_da_fonte(tmp_path, monkeypatch):
     home = _home(tmp_path)
     service = IntegracaoCodex(home, home / ".codex", nativo=object)
