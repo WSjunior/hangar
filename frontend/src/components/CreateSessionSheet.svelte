@@ -752,6 +752,8 @@
               type="button"
               class="server-chip"
               class:on={targetServer === s.id}
+              class:fora={offline.has(s.id)}
+              title={offline.has(s.id) ? m.lista_servidor_offline({ label: s.label }) : undefined}
               style="--chip: {serverColor(s.id)};"
               onclick={() => pickTarget(s.id)}
               disabled={contaOcupada || (bastao !== null && s.id !== bastao.serverId)}
@@ -1189,6 +1191,15 @@
   .server-chip:disabled {
     opacity: 0.45;
     cursor: default;
+  }
+  /* O único chip offline que sobrevive ao filtro é o ALVO atual (ver `serversVisiveis`). Sem marca
+     ele fica idêntico a uma máquina no ar, e a pessoa só descobre no erro depois do "Criar". */
+  .server-chip.fora {
+    opacity: 0.55;
+  }
+  .server-chip.fora .chip-dot {
+    background: transparent !important;
+    border: 1px solid var(--border-default);
   }
   .chip-dot {
     width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;

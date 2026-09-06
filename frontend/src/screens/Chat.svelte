@@ -21,6 +21,7 @@
   import PairSheet from '../components/PairSheet.svelte';
   import OrquestracaoSheet from '../components/OrquestracaoSheet.svelte';
   import { prefetchOrq } from '../lib/queries';
+  import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { aoAquecer, segurarAquecimento, soltarAquecimento } from '../lib/aquecimento';
   // Ciclo de import de propósito (PairChatModal importa este Chat): é o mesmo Chat montado por
   // dentro. Só o render é recursivo — o modal só existe com `peerChat` preenchido, e ele nunca
@@ -392,6 +393,16 @@
     };
   });
   let allSessions = $state<SessionInfo[]>([]);
+  // Servidores fora do ar, só pra folha de "Nova sessão" não oferecer máquina desligada. LÊ o store
+  // sem `retain`: leitura não abre stream nenhum, então a regra do comentário abaixo continua de pé.
+  // Consequência assumida: no celular nenhuma view de lista fica montada junto com o Chat, então o
+  // store está vazio aqui e o conjunto sai vazio — o seletor volta a mostrar todos, como antes. No
+  // desktop a Sidebar está sempre montada e o filtro vale.
+  const servidoresOffline = $derived(
+    new Set(
+      sessionsStore.byServer.filter((b) => b.error && !b.loaded).map((b) => b.server.id),
+    ),
+  );
   // Detalhe do plano (Task 5b): NÃO usa o sessionsStore (mesmo motivo do loopChip acima — reter o
   // store aqui abria 1 stream de lista por servidor no celular). `allSessions` já é populada por
   // getSessions() (loadSessionsForNav, a cada 5s nas DUAS views) — reusa ela pra achar plan_name.
@@ -2140,6 +2151,7 @@
   <CreateSessionSheet
     open={createOpen}
     servers={listServers()}
+    offline={servidoresOffline}
     onClose={() => (createOpen = false)}
     onCreate={handleCreate}
     onOpenSession={onNavigateToChat}
