@@ -48,6 +48,14 @@ def test_perfil_invalido_nao_derruba_quem_le(home, monkeypatch, caplog):
     assert "perfil do omp ignorado" in caplog.text
 
 
+def test_perfil_invalido_derruba_quem_escreve(home, monkeypatch):
+    # O login do ChatGPT grava credencial no agent.db: cair calado na raiz sem perfil gravaria
+    # no lugar errado com o relatório dizendo "ok".
+    monkeypatch.setenv("OMP_PROFILE", "Nome Inválido")
+    with pytest.raises(ValueError, match="perfil do omp inválido"):
+        oauth_codex._omp_db(None)
+
+
 def test_pane_omp_com_perfil_proprio_acha_o_transcript_na_raiz_do_perfil(home, monkeypatch):
     """O backend sem perfil; o pane nasceu com OMP_PROFILE=trabalho (wrapper ou app). O transcript
     dele mora na raiz do perfil, e é lá que o registry tem que procurar — não em ~/.omp/agent."""

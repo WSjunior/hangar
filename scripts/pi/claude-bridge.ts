@@ -283,7 +283,11 @@ export async function createBridge(pi: ExtensionAPI, context: AgentContext = get
 			const content = fs.readFileSync(full, "utf8");
 			if (owned[path.relative(agentDir, full)]?.content === content) continue;
 			let name: unknown;
-			try { name = parse(content).frontmatter.name; } catch { continue; }
+			try { name = parse(content).frontmatter.name; }
+			catch (error) {
+				console.error(`[claude-bridge] agent nativo ilegível, ignorado na checagem de nomes: ${full} (${error instanceof Error ? error.message : String(error)})`);
+				continue;
+			}
 			if (typeof name === "string") names.add(name);
 		}
 		return names;
@@ -436,11 +440,14 @@ export async function createBridge(pi: ExtensionAPI, context: AgentContext = get
 	try { sync(); }
 	catch (error) { console.error(`[claude-bridge] Falha na sincronização: ${String(error)}`); }
 
+	let avisouConfig = false;
 	pi.on("before_agent_start", async (event: { systemPrompt: string | string[] }, ctx: { cwd: string }) => {
 		let config: Config;
-		try { config = loadConfig(); }
+		try { config = loadConfig(); avisouConfig = false; }
 		catch (error) {
-			console.error(`[claude-bridge] Configuração ignorada: ${String(error)}`);
+			// Uma vez por quebra, não a cada prompt: o arquivo só muda quando alguém mexe nele.
+			if (!avisouConfig) console.error(`[claude-bridge] ${configPath} ilegível, memória do projeto desligada até consertar: ${String(error)}`);
+			avisouConfig = true;
 			return;
 		}
 		if (config.enabled === false) return;

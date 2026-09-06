@@ -54,7 +54,8 @@ def cofre() -> Path:
 def _omp_db(home: Path | None) -> Path:
     from app import omp_dirs
     # `home` explícito é semente de teste: raiz fixa, sem perfil nem variável de ambiente.
-    return omp_dirs.agent_dir(home=home, env={} if home else None) / "agent.db"
+    # Estrito: aqui se GRAVA credencial; perfil inválido tem que falhar, não cair na raiz errada.
+    return omp_dirs.agent_dir(home=home, env={} if home else None, estrito=True) / "agent.db"
 
 
 # ---------------------------------------------------------------- HTTP (seam de teste)

@@ -11,9 +11,10 @@ from pathlib import Path
 _log = logging.getLogger("hangar.omp_dirs")
 
 
-def agent_dir(home: Path | None = None, env: dict[str, str] | None = None) -> Path:
+def agent_dir(home: Path | None = None, env: dict[str, str] | None = None, *, estrito: bool = False) -> Path:
     """Diretório do agente omp em vigor. Perfil inválido não derruba quem só lê: cai na raiz
-    sem perfil, com aviso."""
+    sem perfil, com aviso. Quem ESCREVE ali (login, plugins) passa `estrito=True` e recebe
+    ValueError — gravar credencial no perfil errado calado é pior que falhar."""
     from app.omp_plugin_sync import InventoryError, resolve_omp_directories
 
     base = home or Path.home()
@@ -21,6 +22,8 @@ def agent_dir(home: Path | None = None, env: dict[str, str] | None = None) -> Pa
     try:
         return resolve_omp_directories(base, ambiente, base).agent_dir
     except InventoryError as erro:
+        if estrito:
+            raise ValueError(f"perfil do omp inválido: {erro}") from None
         _log.warning("perfil do omp ignorado: %s", erro)
         override = ambiente.get("PI_CODING_AGENT_DIR")
         return Path(override) if override else base / ".omp" / "agent"

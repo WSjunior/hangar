@@ -609,7 +609,13 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   pela regra do próprio omp; 400 fora dele), `hangar-send --new … --provider omp --profile x`,
   e o campo "Perfil do omp" da folha de Nova sessão, que só aparece com OMP escolhido.
   Variável e não flag de propósito: `--profile` no cmdline funcionaria pro omp mas o backend
-  teria duas fontes pra ler. No OMP, agents pessoais/extras viram arquivos diretos
+  teria duas fontes pra ler. **O que ainda NÃO olha as pastas de perfil:** o relatório de
+  custo (`costs_sources.raiz_omp`) e o Arquivo de conversas mortas (`archive_providers`) leem
+  só a raiz do backend — uma sessão omp criada com perfil funciona ao vivo, mas some das duas
+  telas depois de fechada. Cobrir isso é varrer `~/.omp/profiles/*/agent/sessions` além da
+  raiz, e ainda não foi feito. Quem GRAVA na raiz do omp (`oauth_codex._omp_db`) usa
+  `omp_dirs.agent_dir(estrito=True)`: perfil inválido levanta, em vez de cair calado na raiz
+  sem perfil com a credencial gravada no lugar errado. No OMP, agents pessoais/extras viram arquivos diretos
   em `<agentDir>/agents/claude-bridge-<nome>.md`, com ferramentas em array YAML: `Glob → glob`,
   `Task/Agent → task`, `WebFetch → read` e prefixo `mcp__` intacto. Agents nativos pessoais
   têm precedência; aliases Claude sem mapeamento explícito herdam o modelo da sessão.
