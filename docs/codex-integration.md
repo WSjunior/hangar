@@ -59,6 +59,19 @@ oficial `config/batchWrite` edita uma cópia de `config.toml`; o Hangar valida n
 conteúdo original antes de substituir o arquivo vivo. Isso mantém a escrita de TOML sob a
 responsabilidade do Codex e permite detectar alterações concorrentes.
 
+O bloco global `settings.env` participa da categoria nativa `CONFIG`. A área temporária recebe
+somente `env` e `hooks` do `settings.json`, e o reconciliador mescla exclusivamente as variáveis
+convertidas em `shell_environment_policy.set`. Não transfere `inherit`, filtros de ambiente,
+modelo ou permissões produzidos nessa conversão. Variáveis iguais às já importadas são adotadas;
+depois disso, alterações na fonte atualizam as variáveis gerenciadas. Remoções só retiram valores
+gerenciados que ainda correspondem ao manifesto. Colisões diferentes e sem proveniência são
+preservadas com aviso. Fonte inválida ou conversão incompleta não equivale a remoção.
+
+Essas variáveis podem conter credenciais de serviços usados pelos plugins. Seus valores ficam
+nos arquivos locais de configuração, manifesto e backups restritos, sem aparecer no painel ou
+nos diagnósticos públicos e sem serem versionados. As sessões seguintes recebem a configuração
+atualizada; o contexto de processos já abertos não é reescrito.
+
 As compatibilidades próprias do Hangar ficam em `backend/app/codex_compat.py`:
 
 - Um único bloco identificado em `AGENTS.md` orienta a leitura do `~/.claude/CLAUDE.md` e dos
@@ -156,10 +169,11 @@ abertura da TUI nem deve derrubar o restante do backend.
 
 ## Exclusões e limites
 
-A integração de ferramental não migra sessões, histórico, credenciais de login, tokens OAuth,
+A integração de ferramental não migra sessões, histórico, credenciais de login/OAuth do agente,
 modelo padrão, esforço de raciocínio, sandbox ou política de aprovação. O login compartilhado
 e a propagação de credenciais já existentes no Hangar continuam em seus próprios serviços.
-Isso não exclui os valores necessários à configuração de um MCP importado.
+Isso não exclui os valores necessários à configuração de um MCP importado ou de `settings.env`,
+incluindo tokens das ferramentas utilizadas pelos plugins.
 
 O que o importador aceita depende da versão do CLI. Um hook, agente ou comando do Claude não
 ganha compatibilidade semântica universal por ter sido convertido: dependências locais,

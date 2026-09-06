@@ -436,7 +436,7 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   `externalAgentConfig/detect` + `import` e espera a notificação `import/completed` com o mesmo
   `importId`. Plugins e marketplaces usam os comandos nativos do CLI; nenhum turno de agente é
   aberto para sincronizar. O backend acompanha alterações e atualiza marketplaces Git gerenciados
-  6h após a última tentativa, inclusive falhas persistidas com erros visíveis; a abertura da TUI
+  a cada 6h, com falhas persistidas e novas tentativas após 5 minutos; a abertura da TUI
   e o botão **Reconciliar agora** usam o mesmo reconciliador. CLI é
   executor, backend é agendador; a sincronização opcional do Codex Desktop é independente e não
   é necessária. A documentação de arquitetura, migração e limites está em
@@ -449,6 +449,11 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   para autoaprovar hooks**: normalizar RTK/`SessionEnd` pode invalidar aprovação, então o painel
   e a TUI avisam. Instruções globais usam bloco gerenciado no `AGENTS.md`; fallbacks `CLAUDE.md`
   e `CLAUDE.MD` são acrescentados à config sem substituir os já existentes.
+  `settings.env` entra pelo item nativo `CONFIG` em HOME temporário; somente
+  `shell_environment_policy.set` é mesclado por variável e registrado no manifesto. As políticas
+  de herança/filtros e as demais preferências do Codex permanecem intactas. Fonte inválida ou
+  conversão incompleta nunca significa remoção. Valores de tokens de ferramentas são locais e
+  não devem aparecer no painel, nos logs públicos ou no Git.
   A suíte desliga apenas os gatilhos automáticos com `CP_CODEX_SYNC_ENABLED=0`; testes do serviço
   usam diretórios temporários. Turnos reais do CLI 0.153.4 responderam exatamente `OK`, rc=0,
   zero eventos de ferramentas, em Linux (6,08s) e Windows (6,82s), em 06/09/2026. Usaram

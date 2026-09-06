@@ -28,7 +28,7 @@ from app.codex_importador import CodexNativo, CodexNativoErro
 _log = logging.getLogger("hangar.codex.integracao")
 _REPO = Path(__file__).resolve().parents[2]
 _INTERVALO = 6 * 60 * 60
-_IMPORTAVEIS = {"HOOKS", "MCP_SERVER_CONFIG", "COMMANDS", "SUBAGENTS"}
+_IMPORTAVEIS = {"CONFIG", "HOOKS", "MCP_SERVER_CONFIG", "COMMANDS", "SUBAGENTS"}
 _ID = re.compile(r"^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+$")
 
 
@@ -310,7 +310,8 @@ class IntegracaoCodex:
         raise AlteradoExternamente("config.toml continua mudando; nova leitura necessária")
 
     async def _config(self, codex, mcp: dict, agentes: dict, *, hooks: bool = False,
-                      registro: dict | None = None, historico: dict | None = None) -> None:
+                      registro: dict | None = None, historico: dict | None = None,
+                      env: dict | None = None) -> None:
         from app.codex_fragmentos import mesclar_config
         def preparar(atual):
             fallbacks = atual.get("project_doc_fallback_filenames", [])
@@ -335,6 +336,15 @@ class IntegracaoCodex:
                     for nome in sorted(set(antes) | set(novo)):
                         if antes.get(nome) != novo.get(nome):
                             edits.append({"keyPath": _chave(secao, nome), "value": novo.get(nome), "mergeStrategy": "replace"})
+                if env is not None:
+                    antes = atual.get("shell_environment_policy", {}).get("set", {})
+                    novo, manifesto, pendencias = mesclar_config(antes, env, registro.get("env", {}))
+                    manifestos["env"] = manifesto
+                    avisos.extend(pendencias)
+                    for nome in sorted(set(antes) | set(novo)):
+                        if antes.get(nome) != novo.get(nome):
+                            edits.append({"keyPath": _chave("shell_environment_policy", "set", nome),
+                                          "value": novo.get(nome), "mergeStrategy": "replace"})
             def confirmar():
                 if registro is not None:
                     registro.update(manifestos)
@@ -529,8 +539,13 @@ class IntegracaoCodex:
             cc, cx = stage / ".claude", stage / ".codex"
             cc.mkdir()
             cx.mkdir()
-            # Não copia credenciais, sessões nem as escolhas de modelo/permissões.
-            config = {"hooks": settings.get("hooks", {})}
+            # Somente fontes de ferramentas; autenticação do agente e preferências ficam fora.
+            env = settings.get("env", {})
+            if not isinstance(env, dict) or any(
+                    not isinstance(k, str) or not k or "=" in k or "\0" in k or
+                    not isinstance(v, str) or "\0" in v for k, v in env.items()):
+                raise ValueError("settings.env inválido; variáveis existentes preservadas")
+            config = {"hooks": settings.get("hooks", {}), "env": env}
             # O detector nativo ignora alguns shapes inválidos; isso nunca significa remoção.
             mesclar_hooks({}, config, {})
             gravar(cc / "settings.json", json_bytes(config), None)
@@ -565,6 +580,9 @@ class IntegracaoCodex:
                 # CODEX_HOME personalizado não precisa ser filho do HOME real.
                 return remapear(remapear(value, cx, self.codex_home), stage, self.home)
             native_cfg = remap(_toml(cx / "config.toml"))
+            native_env = native_cfg.get("shell_environment_policy", {}).get("set", {})
+            if native_env != env:
+                raise ValueError("Importação nativa de env incompleta; variáveis existentes preservadas")
             hooks = remap(json_obj(cx / "hooks.json"))
             if "hooks" not in hooks:
                 hooks = {"hooks": {}}
@@ -603,7 +621,7 @@ class IntegracaoCodex:
                        not v.get("config_file") or str(v["config_file"]) in manifesto}
             await self._config(codex, native_cfg.get("mcp_servers", {}), agentes,
                                hooks=native_cfg.get("features", {}).get("hooks") is True,
-                               registro=registro, historico=historico)
+                               registro=registro, historico=historico, env=native_env)
 
     def _skills(self, registro: dict) -> None:
         from app.codex_skills import reconciliar_skills
