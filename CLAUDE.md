@@ -638,6 +638,23 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   `dry_run=True` é somente leitura de registros/manifestos: nenhum CLI, lock, cache ou ledger
   é escrito, pois até `omp plugin list` pode migrar arquivos. Provas cobrem o CLI real, Git
   Smart HTTP em loopback privado, importação genérica e preservação da instalação nas falhas.
+  **Resolução de diretórios:** `resolve_omp_directories` separa configuração, agente e dados
+  conforme o OMP. `PI_CODING_AGENT_DIR` não move o armazenamento global. `PI_CONFIG_DIR`,
+  precedência de `OMP_PROFILE` sobre `PI_PROFILE` (inclusive vazio), override herdado e XDG
+  seguem as regras nativas. A categoria XDG exige caminho existente e agente padrão; perfis
+  nomeados exigem o caminho XDG daquele perfil. A resolução é lexical, usa o cwd do filho e
+  não expande `~`, não segue symlinks e não cria diretórios. Cada passagem tem sua própria visão;
+  mudar o destino não migra o ledger antigo: o vínculo incompatível gera diagnóstico.
+  **Passagens periódicas:** `PluginSyncLoop` é criado/encerrado no lifespan do backend, sem
+  serviço externo. `CP_OMP_PLUGIN_SYNC_ENABLED` é falso por padrão; intervalo positivo e finito
+  em `CP_OMP_PLUGIN_SYNC_INTERVAL` (300 s). Respeita também `automations_enabled()`. A primeira
+  passagem começa na subida e a seguinte espera o intervalo após a conclusão da anterior.
+  Importação/reconciliação rodam em `asyncio.to_thread`; desligar aguarda o worker em voo,
+  não cancela uma Future deixando o processo externo vivo. Uma parada observada fica registrada
+  até terminar a passagem, mesmo que o kill-switch seja reabilitado nesse intervalo.
+  `GET /api/omp/plugin-sync`, autenticado, expõe estado, horários e relatórios sanitizados.
+  Prova com backend real confirmou resposta HTTP enquanto o worker aguardava, e marcador de
+  teardown confirmou o encerramento cooperativo. Nenhuma página nova foi introduzida.
 - **Pi model + thinking level** (`app/pi_models.py` + `scripts/pi/hangar-state.ts` + `components/PiModelPopover.svelte` + `components/PiEffortPopover.svelte`):
   the third mechanism, next to Claude's TUI picker and Codex's app-server, and it does **not** scrape
   the pane. Measured on pi 0.82.1: `/model` is a fuzzy-**search** list of ~300 entries (footer

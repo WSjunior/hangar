@@ -314,6 +314,27 @@ disputarem o mesmo nome de pacote, nenhuma vence pela ordem do cadastro; a insta
 existente é preservada e o conflito é informado. Os diagnósticos não incluem linhas brutas
 de arquivos de configuração ou credenciais.
 
+**Execução periódica (opcional):** configure `CP_OMP_PLUGIN_SYNC_ENABLED=1` no ambiente do
+backend. `CP_OMP_PLUGIN_SYNC_INTERVAL` define o intervalo em segundos (padrão **300**; deve
+ser positivo e finito). Sem habilitação explícita, nenhuma passagem é iniciada. O controle
+global de automações também precisa estar habilitado; a integração não o liga por conta própria.
+
+A primeira passagem acontece na subida; as seguintes começam após o intervalo contado do
+fim da anterior, sem sobreposição. A API permanece disponível durante o trabalho. No
+encerramento, o backend sinaliza parada e aguarda a operação em andamento antes de sair.
+
+Consulte **`GET /api/omp/plugin-sync`**, com a autenticação normal da API, para ver
+`disabled` (desligado), `paused` (automações pausadas), `running` (executando), `updated`
+(houve ações), `unchanged` (sem mudanças), `suspended` (conflito/alteração manual), `error`
+(falha) ou `stopped` (encerrado). O relatório detalha cada catálogo/plugin; `updated` não
+significa que candidatos sem prova foram instalados. Erros não encerram o ciclo periódico.
+
+O diretório global de plugins não é derivado do diretório do agente. A integração respeita
+`PI_CONFIG_DIR`, o perfil OMP selecionado e o layout XDG já existente. Um agente em diretório
+personalizado não desloca sozinho os plugins. Caso a configuração passe a apontar para
+outra raiz, um registro de propriedade antigo é preservado e diagnosticado, não migrado
+automaticamente.
+
 ### Git
 
 O ícone de branch abre o **modal de git** da sessão — o mesmo nas duas views: no desktop ele é um

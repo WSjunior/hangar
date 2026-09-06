@@ -156,3 +156,100 @@ def test_cli_real_importa_catalogo_git_pela_origem_original(runtime_home, git_ht
     assert entry["name"] == "remote-catalog"
     assert entry["sourceUri"] == uri
     assert read_json(Path(entry["catalogPath"]))["name"] == "remote-catalog"
+
+
+@pytest.mark.skipif(os.environ.get("HANGAR_TEST_SANDBOX") != "1", reason="CLI real exige sandbox")
+@pytest.mark.parametrize("layout", [
+    "custom-agent", "xdg-absent", "xdg-default", "xdg-custom", "config-root",
+    "profile-legacy", "profile-xdg", "canonical-default", "xdg-double-slash",
+])
+def test_layout_global_coincide_com_cli_real(catalogs, monkeypatch, layout):
+    home, _ = catalogs
+    for variable in ("OMP_PROFILE", "PI_PROFILE", "PI_CONFIG_DIR", "PI_CODING_AGENT_DIR"):
+        monkeypatch.delenv(variable, raising=False)
+    data = home / ".local/share"
+    monkeypatch.setenv("XDG_DATA_HOME", str(data))
+    expected = home / ".omp"
+    if layout in {"custom-agent", "xdg-custom"}:
+        monkeypatch.setenv("PI_CODING_AGENT_DIR", str(home / "custom-agent"))
+    if layout in {"xdg-default", "xdg-custom", "profile-legacy", "canonical-default"}:
+        (data / "omp").mkdir(parents=True)
+    if layout == "xdg-default":
+        monkeypatch.setenv("PI_CODING_AGENT_DIR", str(home / ".omp/agent"))
+        expected = data / "omp"
+    elif layout == "config-root":
+        monkeypatch.setenv("PI_CONFIG_DIR", ".omp-alt")
+        expected = home / ".omp-alt"
+    elif layout in {"profile-legacy", "profile-xdg"}:
+        monkeypatch.setenv("OMP_PROFILE", "review")
+        monkeypatch.setenv("PI_CODING_AGENT_DIR", str(home / "ignored-agent"))
+        expected = home / ".omp/profiles/review"
+        if layout == "profile-xdg":
+            expected = data / "omp/profiles/review"
+            expected.mkdir(parents=True)
+    elif layout == "canonical-default":
+        monkeypatch.setenv("OMP_PROFILE", "")
+        monkeypatch.setenv("PI_PROFILE", "review")
+        monkeypatch.setenv("PI_CODING_AGENT_DIR", str(home / ".omp/profiles/review/agent"))
+        expected = data / "omp"
+    elif layout == "xdg-double-slash":
+        (data / "omp").mkdir(parents=True)
+        monkeypatch.setenv("XDG_DATA_HOME", "//" + str(data).lstrip("/"))
+        expected = data / "omp"
+    private_bin = home / "bin"
+    private_bin.mkdir()
+    (private_bin / "omp").symlink_to(os.environ["OMP_TEST_BIN"])
+    monkeypatch.setenv("PATH", str(private_bin) + os.pathsep + os.environ["PATH"])
+    sync = PluginSynchronizer(home=home, claude_dir=home / ".claude")
+    result = sync.import_marketplaces()
+    assert result["errors"] == [], result
+    assert sync.native_root == expected / "plugins"
+    registry = expected / "marketplaces.json"
+    assert {entry["name"] for entry in read_json(registry)["marketplaces"]} == {"catalog-alpha", "catalog-beta"}
+    before = registry.read_bytes()
+    assert sync.import_marketplaces()["errors"] == []
+    assert registry.read_bytes() == before
+
+
+def test_perfil_invalido_vira_diagnostico_sem_efeitos(catalogs, monkeypatch):
+    home, definitions = catalogs
+    monkeypatch.setenv("OMP_PROFILE", "../invalid")
+    native = CatalogCLI(home, definitions)
+    before = tree_snapshot(home)
+    sync = PluginSynchronizer(home=home, claude_dir=home / ".claude", runner=native)
+    result = sync.import_marketplaces()
+    assert result["errors"]
+    assert native.calls == []
+    assert tree_snapshot(home) == before
+
+
+@pytest.mark.skipif(os.environ.get("HANGAR_TEST_SANDBOX") != "1", reason="CLI real exige sandbox")
+def test_ciclo_real_de_plugin_usa_raiz_xdg(runtime_home, git_http):
+    from tests.test_omp_plugin_sync import make_repository, write_claude_inventory
+    home = runtime_home
+    bare, uri = git_http
+    data = Path(os.environ["XDG_DATA_HOME"]) / "omp"
+    data.mkdir(parents=True)
+    source = home / "source"
+    revision = make_repository(source, name="layout-fixture")
+    _git(source, "remote", "add", "origin", uri)
+    _git(source, "push", str(bare), "HEAD:refs/heads/main")
+    _git(bare, "update-server-info")
+    claude_dir = write_claude_inventory(home, source, repository=uri, revision=revision, package_name="layout-fixture")
+    sync = PluginSynchronizer(home=home, claude_dir=claude_dir)
+    assert sync.reconcile()["errors"] == []
+    installed = data / "plugins/node_modules/layout-fixture"
+    assert read_json(installed / "package.json")["name"] == "layout-fixture"
+    changed = "export default function () {}\\n// Nova revisão sintética.\\n".replace("\\n", "\n")
+    (source / "extension.ts").write_text(changed, encoding="utf-8")
+    _git(source, "add", "extension.ts")
+    _git(source, "commit", "-m", "Atualização sintética")
+    revision = _git(source, "rev-parse", "HEAD")
+    _git(source, "push", str(bare), "HEAD:refs/heads/main")
+    _git(bare, "update-server-info")
+    write_claude_inventory(home, source, repository=uri, revision=revision, package_name="layout-fixture")
+    assert sync.reconcile()["errors"] == []
+    assert (installed / "extension.ts").read_text(encoding="utf-8") == changed
+    write_json(claude_dir / "plugins/installed_plugins.json", {"version": 2, "plugins": {}})
+    assert sync.reconcile()["errors"] == []
+    assert not installed.exists()

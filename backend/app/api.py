@@ -97,6 +97,7 @@ from app.pair import PairLink, contract_path_for
 from app.hook_state import hook_state
 from app import push
 from app import stall_watch
+from app.omp_plugin_sync import PluginSynchronizer, PluginSyncLoop
 from app.sync import sync_router
 from app.deploy import deploy_router
 from app import desktop_palette
@@ -266,6 +267,14 @@ async def _lifespan(app: FastAPI):
     # threads (Timer da confirmacao, gatilho de hook). Ver `_drenar`.
     global _loop_servidor
     _loop_servidor = asyncio.get_running_loop()
+    omp_sync = PluginSyncLoop(
+        PluginSynchronizer(home=Path.home(), claude_dir=_backend_config_base()),
+        enabled=settings.omp_plugin_sync_enabled,
+        interval=settings.omp_plugin_sync_interval,
+        permitted=automations_enabled,
+    )
+    app.state.omp_plugin_sync = omp_sync
+    await omp_sync.start()
     try:
         yield
     finally:
@@ -273,6 +282,7 @@ async def _lifespan(app: FastAPI):
         stall_task.cancel()
         prune_task.cancel()
         renova_task.cancel()
+        await omp_sync.close()
         try:
             await task
         except asyncio.CancelledError:
@@ -295,6 +305,16 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(title="hangar", lifespan=_lifespan)
+
+
+@app.get("/api/omp/plugin-sync", dependencies=[Depends(require_auth)])
+async def omp_plugin_sync_status(request: Request):
+    service = getattr(request.app.state, "omp_plugin_sync", None)
+    if service is None:
+        return {"enabled": settings.omp_plugin_sync_enabled,
+                "state": "idle" if settings.omp_plugin_sync_enabled else "disabled",
+                "interval": settings.omp_plugin_sync_interval, "last_report": None}
+    return service.status()
 
 
 @app.exception_handler(tmux.MuxIndisponivel)

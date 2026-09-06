@@ -1,4 +1,10 @@
 """Reconciliação conservadora entre plugins Claude e instalações nativas do OMP."""
+from copy import copy
+from dataclasses import dataclass
+import sys
+import asyncio
+import logging
+from math import isfinite
 from contextlib import contextmanager, nullcontext
 import configparser
 import hashlib
@@ -9,6 +15,8 @@ import re
 import signal
 import subprocess
 import tempfile
+import threading
+import time
 from urllib.parse import urlsplit
 
 from app import atomico, peers
@@ -208,6 +216,70 @@ def _run(args, *, cwd, env, timeout):
     return subprocess.CompletedProcess(args, process.returncode, out, err)
 
 
+@dataclass(frozen=True)
+class OmpDirectories:
+    config_root: Path
+    agent_dir: Path
+    data_root: Path
+
+
+def resolve_omp_directories(home: Path, env: dict[str, str], cwd: Path) -> OmpDirectories:
+    """Espelha a resolução lexical nativa, sem criar diretórios nem seguir symlinks."""
+    def lexical(value):
+        value = os.path.normpath(value)
+        if "\0" in value:
+            raise InventoryError("Diretório OMP inválido")
+        if os.name != "nt" and value.startswith("//"):
+            value = "/" + value.lstrip("/")
+        return Path(value)
+
+    def join(*parts):
+        return lexical(os.sep.join(str(part) for part in parts))
+
+    def absolute(value):
+        if os.name == "nt" and os.path.splitdrive(value)[0] and not os.path.isabs(value):
+            raise InventoryError("Diretório relativo a outra unidade não pode ser resolvido")
+        return lexical(os.path.join(str(cwd), value))
+
+    def normalize_profile(value):
+        profile = (value or "").strip()
+        if not profile or profile == "default":
+            return None
+        if (profile in {".", ".."} or profile.endswith(".")
+                or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", profile)
+                or re.match(r"^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(?:\.|$)", profile, re.I)):
+            raise InventoryError("Nome de perfil OMP inválido")
+        return profile
+
+    directory_name = env.get("PI_CONFIG_DIR") or ".omp"
+    if os.name == "nt" and os.path.splitdrive(directory_name)[0]:
+        raise InventoryError("Nome do diretório de configuração OMP inválido")
+    base = join(home, directory_name)
+    profile = normalize_profile(env.get("OMP_PROFILE") if "OMP_PROFILE" in env else env.get("PI_PROFILE"))
+    config_root = join(base, "profiles", profile) if profile else base
+    default_agent = join(config_root, "agent")
+    override = env.get("PI_CODING_AGENT_DIR")
+    if profile:
+        override = None
+    else:
+        try:
+            legacy = normalize_profile(env.get("PI_PROFILE"))
+        except InventoryError:
+            legacy = None
+        if legacy and override == str(join(base, "profiles", legacy, "agent")):
+            override = None
+    agent = absolute(override) if override else default_agent
+    data_root = config_root
+    if sys.platform in {"linux", "darwin"} and agent == default_agent and env.get("XDG_DATA_HOME"):
+        candidate = join(env["XDG_DATA_HOME"], "omp")
+        if profile:
+            candidate = join(candidate, "profiles", profile)
+        effective = absolute(str(candidate))
+        if effective.exists():
+            data_root = effective
+    return OmpDirectories(config_root, agent, data_root)
+
+
 class PluginSynchronizer:
     def __init__(self, *, home: Path, claude_dir: Path, runner=None):
         self.home = Path(home).resolve()
@@ -220,16 +292,25 @@ class PluginSynchronizer:
         self.env.update(HOME=str(self.home), USERPROFILE=str(self.home),
                         CLAUDE_CONFIG_DIR=str(self.claude_dir), GIT_CONFIG_NOSYSTEM="1",
                         GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
-        override = self.env.get("PI_CODING_AGENT_DIR")
-        self.agent_dir = Path(override).expanduser().resolve() if override else self.home / ".omp/agent"
-        if override:
-            self.native_root = self.agent_dir.parent / "plugins"
-        elif self.env.get("XDG_DATA_HOME"):
-            self.native_root = Path(self.env["XDG_DATA_HOME"]) / "omp/plugins"
-        else:
-            self.native_root = self.home / ".omp/plugins"
+        self.directories = None
+        self.agent_dir = None
+        self.native_root = None
+        self._directory_error = None
+        self._refresh_directories()
         self.ledger_path = self.home / ".hangar/omp-plugin-sync.json"
         self.lock_path = self.ledger_path.with_suffix(".lock")
+
+    def _refresh_directories(self):
+        try:
+            self.directories = resolve_omp_directories(self.home, self.env, self.home)
+        except (InventoryError, OSError, ValueError) as error:
+            self._directory_error = str(error) if isinstance(error, InventoryError) else type(error).__name__
+            self.directories = self.agent_dir = self.native_root = None
+            return False
+        self.agent_dir = self.directories.agent_dir
+        self.native_root = self.directories.data_root / "plugins"
+        self._directory_error = None
+        return True
 
     @contextmanager
     def _locked(self):
@@ -241,6 +322,8 @@ class PluginSynchronizer:
         with self.lock_path.open("a+", encoding="utf-8") as lock:
             peers._travar(lock)
             try:
+                if not self._refresh_directories():
+                    raise InventoryError(self._directory_error)
                 yield
             finally:
                 peers._destravar(lock)
@@ -315,6 +398,11 @@ class PluginSynchronizer:
                   "mode": "read_only_local" if dry_run else "native"}
         stop = stop_requested or (lambda: False)
         try:
+            # Diretórios pertencem à passagem; uma inspeção não altera a visão de outro worker.
+            context = copy(self)
+            if not context._refresh_directories():
+                raise InventoryError(context._directory_error)
+            self = context
             with nullcontext() if dry_run else self._locked():
                 known = _read(self.claude_dir / "plugins/known_marketplaces.json", {})
                 native = self._marketplaces()
@@ -363,6 +451,10 @@ class PluginSynchronizer:
                         if dry_run:
                             item["planned"] = True
                             continue
+                        if stop():
+                            item["action"] = "interrupted"
+                            item["reason"] = "Parada solicitada antes da importação"
+                            break
                         result = self.runner(["omp", "plugin", "marketplace", "add", uri],
                                              cwd=self.home, env=self.env, timeout=120)
                         if result.returncode:
@@ -380,7 +472,7 @@ class PluginSynchronizer:
             report["errors"].append(str(error) if isinstance(error, InventoryError) else type(error).__name__)
         return report
 
-    def _native(self, *, dry_run):
+    def _native(self, *, dry_run, stop=None):
         package = _read(self.native_root / "package.json", {"dependencies": {}})
         lock = _read(self.native_root / "omp-plugins.lock.json", {"plugins": {}, "settings": {}})
         marketplace = _read(self.native_root / "installed_plugins.json", {"version": 2, "plugins": {}})
@@ -415,6 +507,8 @@ class PluginSynchronizer:
                             "settings": settings.get(name, {}), "version": installed.get("version"),
                             "path": str(root), "proof": proof, "digest": _digest(root)}
         if not dry_run:
+            if stop is not None and stop():
+                raise InventoryError("Passagem interrompida antes de consultar o CLI")
             listing = self._cli("list")
             if not isinstance(listing.get("npm"), list) or not isinstance(listing.get("marketplace"), list):
                 raise InventoryError("Formato do inventário CLI inválido")
@@ -424,8 +518,12 @@ class PluginSynchronizer:
                     raise InventoryError("CLI e registros nativos divergem")
                 seen.add(item["name"])
                 state = states[item["name"]]
+                listed_path = item.get("path")
+                if not isinstance(listed_path, str):
+                    raise InventoryError("Caminho nativo ausente no inventário CLI")
+                listed_path = os.path.normpath(os.path.join(str(self.home), listed_path))
                 if (item.get("enabled") != state["enabled"] or item.get("enabledFeatures") != state["features"]
-                        or item.get("version") != state["version"] or item.get("path") != state["path"]
+                        or item.get("version") != state["version"] or listed_path != state["path"]
                         or not isinstance(item.get("manifest"), dict)):
                     raise InventoryError("CLI e registros nativos divergem")
             if seen != set(states):
@@ -435,7 +533,7 @@ class PluginSynchronizer:
                 raise InventoryError("Inventário marketplace divergente")
         return states, marketplace["plugins"]
 
-    def _sources(self, *, dry_run, report):
+    def _sources(self, *, dry_run, report, stop=None):
         registry = _read(self.claude_dir / "plugins/installed_plugins.json")
         if registry.get("version") != 2 or not isinstance(registry.get("plugins"), dict):
             raise InventoryError("Inventário Claude inválido")
@@ -491,6 +589,8 @@ class PluginSynchronizer:
                 package = _manifest(root)
                 if _git_identity(root) != (identity, revision):
                     raise InventoryError("Checkout Claude não comprova origem e revisão")
+                if stop is not None and stop():
+                    break
                 if not dry_run:
                     result = _run(["git", "-c", "core.hooksPath=" + os.devnull, "-c", "core.fsmonitor=false",
                                    "show", revision + ":package.json"], cwd=root, env=self.env, timeout=15)
@@ -573,11 +673,16 @@ class PluginSynchronizer:
                   "mode": "read_only_local" if dry_run else "native"}
         stop = stop_requested or (lambda: False)
         try:
+            context = copy(self)
+            if not context._refresh_directories():
+                raise InventoryError(context._directory_error)
+            self = context
             if dry_run:
                 self._reconcile(report, dry_run=True, stop=stop)
             elif not stop():
                 with self._locked():
-                    self._reconcile(report, dry_run=False, stop=stop)
+                    if not stop():
+                        self._reconcile(report, dry_run=False, stop=stop)
         except (InventoryError, OSError, ValueError, configparser.Error, subprocess.SubprocessError) as error:
             report["errors"].append(str(error) if isinstance(error, InventoryError) else type(error).__name__)
         return report
@@ -585,8 +690,10 @@ class PluginSynchronizer:
     def _reconcile(self, report, *, dry_run, stop):
         ledger = _read(self.ledger_path, {"version": 1, "items": {}})
         self._validate_ledger(ledger)
-        sources, source_ids, ambiguous = self._sources(dry_run=dry_run, report=report)
-        native, marketplaces = self._native(dry_run=dry_run)
+        sources, source_ids, ambiguous = self._sources(dry_run=dry_run, report=report, stop=stop)
+        if stop():
+            return
+        native, marketplaces = self._native(dry_run=dry_run, stop=stop)
         report["complete_inventory"] = True
         records = ledger["items"]
         for name in sorted(set(sources) | set(records) | ambiguous):
@@ -650,14 +757,18 @@ class PluginSynchronizer:
                 records[name] = {"status": "managed", "source": source, "native": state}
                 self._save_ledger(ledger)
                 continue
+            # Revalidar antes de criar uma operação pendente; parar não perde a propriedade anterior.
+            before, _ = self._native(dry_run=False, stop=stop)
+            if before.get(name) != state:
+                raise InventoryError("Instalação mudou antes da ação")
+            if stop():
+                item["action"] = "interrupted"
+                item["reason"] = "Parada solicitada antes da operação"
+                break
             records[name] = {"status": "pending", "source": source or record["source"], "native": state}
             self._save_ledger(ledger)
             prepared_pin = None
             try:
-                # Revalidar antes de cada efeito; nunca restaurar um registro global antigo.
-                before, _ = self._native(dry_run=False)
-                if before.get(name) != state:
-                    raise InventoryError("Instalação mudou antes da ação")
                 argument = name
                 if action == "install":
                     features = state["features"] if state else None
@@ -675,7 +786,7 @@ class PluginSynchronizer:
                     records[name]["status"] = "suspended"
                     self._save_ledger(ledger)
                     break
-                after, _ = self._native(dry_run=False)
+                after, _ = self._native(dry_run=False, stop=stop)
                 confirmed = after.get(name)
                 if action == "uninstall":
                     if confirmed is not None:
@@ -705,3 +816,96 @@ class PluginSynchronizer:
                     self._save_ledger(ledger)
                 finally:
                     raise
+
+
+class PluginSyncLoop:
+    """Uma passagem por vez, fora do event loop, com parada cooperativa aguardada."""
+
+    def __init__(self, synchronizer, *, enabled=False, interval=300, permitted=lambda: True):
+        if isinstance(interval, bool) or not isinstance(interval, (int, float)) or not isfinite(interval) or interval <= 0:
+            raise ValueError("O intervalo deve ser positivo e finito")
+        self.synchronizer = synchronizer
+        self.enabled = enabled
+        self.interval = interval
+        self.permitted = permitted
+        self._stop = threading.Event()
+        self._wake = asyncio.Event()
+        self._task = None
+        self._interrupted = False
+        self._state = "idle" if enabled else "disabled"
+        self._report = None
+        self._started_at = None
+        self._completed_at = None
+
+    def status(self):
+        return {"enabled": self.enabled, "state": self._state, "interval": self.interval,
+                "started_at": self._started_at, "completed_at": self._completed_at,
+                "last_report": self._report}
+
+    async def start(self):
+        if self.enabled and self._task is None and not self._stop.is_set():
+            self._task = asyncio.create_task(self._loop(), name="omp-plugin-sync")
+
+    async def close(self):
+        self._stop.set()
+        self._wake.set()
+        if self._task is not None:
+            # Cancelar to_thread não interrompe o processo externo; aguardar a passagem é obrigatório.
+            await asyncio.shield(self._task)
+            self._state = "stopped"
+
+    def _should_stop(self):
+        self._interrupted = self._interrupted or self._stop.is_set() or not self.permitted()
+        return self._interrupted
+
+    def _cycle(self):
+        reports = {}
+        for name, operation in (("marketplaces", self.synchronizer.import_marketplaces),
+                                ("plugins", self.synchronizer.reconcile)):
+            if self._should_stop():
+                break
+            try:
+                reports[name] = operation(stop_requested=self._should_stop)
+            except Exception as error:
+                reports[name] = {"complete_inventory": False, "items": [], "errors": [type(error).__name__]}
+        return reports
+
+    async def _wait(self):
+        try:
+            await asyncio.wait_for(self._wake.wait(), timeout=self.interval)
+        except TimeoutError:
+            pass
+        self._wake.clear()
+
+    async def _loop(self):
+        while not self._stop.is_set():
+            try:
+                if not self.permitted():
+                    self._state = "paused"
+                else:
+                    self._state = "running"
+                    self._started_at = time.time()
+                    self._interrupted = False
+                    reports = await asyncio.to_thread(self._cycle)
+                    self._report = reports
+                    self._completed_at = time.time()
+                    if self._stop.is_set():
+                        self._state = "stopped"
+                    elif self._interrupted or not self.permitted():
+                        self._state = "paused"
+                    elif any(r.get("errors") or r.get("complete_inventory") is not True for r in reports.values()):
+                        self._state = "error"
+                    else:
+                        actions = {item.get("action") for r in reports.values() for item in r.get("items", [])}
+                        if actions & {"suspended", "conflict"}:
+                            self._state = "suspended"
+                        elif actions & {"install", "uninstall", "enable", "disable", "adopt", "import"}:
+                            self._state = "updated"
+                        else:
+                            self._state = "unchanged"
+            except Exception as error:
+                self._state = "error"
+                self._report = {"errors": [type(error).__name__]}
+                logging.getLogger("hangar").warning("Sincronização OMP interrompida: %s", type(error).__name__)
+            if not self._stop.is_set():
+                await self._wait()
