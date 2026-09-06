@@ -137,12 +137,11 @@ import ConfirmDialog from './ConfirmDialog.svelte';
     try { localStorage.setItem('cp_sidebar_w', String(width)); } catch { /* storage cheio/off */ }
   }
   const servers = $derived(sessionsStore.servers);
-  // Só quem NUNCA entregou lista nesta sessão conta como fora do ar; lista velha pode ser um
-  // piscar do watchdog, e sumir com o chip que a pessoa ia clicar é pior que deixá-lo lá.
+  // A pergunta aqui é "dá pra criar sessão nessa máquina agora?", então basta `error` — quem
+  // respondeu há 5 minutos e calou não dá. Sem vaivém do chip: o erro só é marcado após 25s de
+  // silêncio (watchdog) ou 10s sem o primeiro quadro.
   const servidoresOffline = $derived(
-    new Set(
-      sessionsStore.byServer.filter((b) => b.error && !b.loaded).map((b) => b.server.id),
-    ),
+    new Set(sessionsStore.byServer.filter((b) => b.error).map((b) => b.server.id)),
   );
   // Agrupando por projeto, o cwd já está no header do grupo; mostrar o caminho em cada row é
   // redundância. Ele volta a aparecer quando o agrupamento é por servidor.

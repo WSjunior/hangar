@@ -74,13 +74,12 @@ import * as m from '../paraglide/messages';
   // Lista de servidores (gerenciada no menu de conta: adicionar/remover). Sem "ativo" fixo — a lista é
   // agregada; o servidor-alvo de uma sessão é o dela, escolhido ao abrir/criar. Vem do store (derived).
   const servers = $derived(sessionsStore.servers);
-  // Mesmo portão do `serverErrors` acima (`!loaded`): só conta como fora do ar quem NUNCA entregou
-  // lista nesta sessão. Servidor com lista velha pode estar num piscar do watchdog, e esconder o
-  // chip que a pessoa ia clicar por causa de um piscar é pior que deixá-lo lá.
+  // Só `error`, SEM o portão `!loaded` do `serverErrors` acima: aquele existe pra o BANNER não
+  // gritar num piscar, mas aqui a pergunta é outra — "dá pra criar sessão nessa máquina agora?" —, e
+  // quem respondeu há 5 minutos e calou não dá. Piscar não gera vaivém do chip: o erro só é marcado
+  // depois de 25s de silêncio (watchdog) ou 10s sem o primeiro quadro.
   const servidoresOffline = $derived(
-    new Set(
-      sessionsStore.byServer.filter((b) => b.error && !b.loaded).map((b) => b.server.id),
-    ),
+    new Set(sessionsStore.byServer.filter((b) => b.error).map((b) => b.server.id)),
   );
 
   // 1 SSE por servidor via store, refcount pareado EXATAMENTE 1x (retain no mount, release no cleanup).

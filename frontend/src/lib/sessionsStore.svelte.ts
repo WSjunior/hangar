@@ -26,6 +26,12 @@ function createSessionsStore() {
   // views congelavam em silêncio até um reconnect manual. Sem sinal por 25s -> fecha e reabre.
   const watchdogs = new Map<string, ReturnType<typeof setTimeout>>();
   const WATCHDOG_MS = 25_000;
+  // Prazo só do PRIMEIRO quadro (ver o comentário no connect). 10s e não 3s porque a medição de
+  // 06/09/2026 achou 1,8s de p90 no caminho do celular quando o túnel está perdendo pacote —
+  // apertar demais esconderia da lista um servidor que está no ar, e isso é pior que mostrar um
+  // morto por mais alguns segundos.
+  const PRIMEIRO_QUADRO_MS = 10_000;
+  const primeiros = new Map<string, ReturnType<typeof setTimeout>>();
   // Backoff por servidor OFFLINE: o auto-retry do EventSource martela a cada ~3s pra sempre —
   // num tablet com 2+ servidores desligados isso é rádio/bateria à toa. Falhou -> fecha o stream
   // e re-tenta com espera crescente (5s -> 60s); qualquer frame bom zera a espera.
@@ -67,6 +73,7 @@ function createSessionsStore() {
       if (!list.some((s) => s.id === id)) {
         es.close(); streams.delete(id); slots.delete(id);
         clearTimeout(watchdogs.get(id)); watchdogs.delete(id);
+        clearTimeout(primeiros.get(id)); primeiros.delete(id);
         clearTimeout(retryTimers.get(id)); retryTimers.delete(id); retryDelays.delete(id);
       }
     }
@@ -81,6 +88,7 @@ function createSessionsStore() {
           es.close();
           streams.delete(s.id);
           watchdogs.delete(s.id);
+          chegou();   // este stream acabou: o prazo de primeiro quadro dele não tem mais o que medir
           // Mesmo tratamento do onerror: o slot que motivou o watchdog está potencialmente velho —
           // marca offline (mantendo a última lista boa) em vez de segui-lo servindo como bom.
           slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: 'offline' });
@@ -88,7 +96,33 @@ function createSessionsStore() {
           scheduleRetry(s.id);
         }, WATCHDOG_MS));
       };
+      // Prazo do PRIMEIRO quadro, separado do watchdog. O slot só nasce quando chega evento, então
+      // até lá o servidor tem `error` nulo e passa por vivo em quem filtra offline — com o watchdog
+      // de 25s isso era meio minuto oferecendo máquina desligada na folha de "Nova sessão". O
+      // stream da lista manda `sessions` na conexão (medido em 5ms daqui), então silêncio longo
+      // aqui é máquina fora do ar, não lentidão. Só MARCA: não fecha o stream nem mexe no retry,
+      // pra um servidor lento que responda depois voltar sozinho no próximo evento.
+      // Sem guarda de "o slot já existe": `reconnect()` (botão Atualizar) e `onVisibleKick` (celular
+      // acordando) reabrem o stream MANTENDO o slot antigo, e ali a guarda fazia o prazo virar
+      // no-op — o celular acordando é justamente quando isto precisa valer. O timer chegar a
+      // disparar já prova o que interessa: nenhum quadro nesta conexão. Preserva a última lista boa
+      // (mesmo tratamento do watchdog): "offline com dado velho" é diferente de "nunca respondeu",
+      // e o banner de erro depende dessa distinção.
+      const tPrimeiro = setTimeout(() => {
+        if (primeiros.get(s.id) === tPrimeiro) primeiros.delete(s.id);
+        slots.set(s.id, { sessions: slots.get(s.id)?.sessions ?? null, error: 'offline' });
+        recompute();
+      }, PRIMEIRO_QUADRO_MS);
+      primeiros.set(s.id, tPrimeiro);
+      // `delete` só se a entrada ainda for ESTE timer: um timer fantasma de tentativa anterior
+      // apagaria do Map o timer da tentativa atual, e aí ninguém mais conseguiria cancelá-lo.
+      const chegou = () => {
+        clearTimeout(tPrimeiro);
+        if (primeiros.get(s.id) === tPrimeiro) primeiros.delete(s.id);
+      };
       arm();
+      es.addEventListener('ping', chegou);
+      es.addEventListener('sessions', chegou);
       es.addEventListener('ping', arm);
       es.addEventListener('sessions', (e) => {
         arm();
@@ -122,6 +156,7 @@ function createSessionsStore() {
         es.close();
         streams.delete(s.id);
         clearTimeout(watchdogs.get(s.id)); watchdogs.delete(s.id);
+        chegou();   // este stream acabou: o prazo de primeiro quadro dele não tem mais o que medir
         scheduleRetry(s.id);
       };
       streams.set(s.id, es);
@@ -152,6 +187,8 @@ function createSessionsStore() {
     // Timers primeiro: um watchdog disparando pós-stop reabriria streams com refs = 0.
     for (const t of watchdogs.values()) clearTimeout(t);
     watchdogs.clear();
+    for (const t of primeiros.values()) clearTimeout(t);
+    primeiros.clear();
     for (const t of retryTimers.values()) clearTimeout(t);
     retryTimers.clear(); retryDelays.clear();
     for (const es of streams.values()) es.close();

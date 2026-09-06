@@ -399,9 +399,7 @@
   // store está vazio aqui e o conjunto sai vazio — o seletor volta a mostrar todos, como antes. No
   // desktop a Sidebar está sempre montada e o filtro vale.
   const servidoresOffline = $derived(
-    new Set(
-      sessionsStore.byServer.filter((b) => b.error && !b.loaded).map((b) => b.server.id),
-    ),
+    new Set(sessionsStore.byServer.filter((b) => b.error).map((b) => b.server.id)),
   );
   // Detalhe do plano (Task 5b): NÃO usa o sessionsStore (mesmo motivo do loopChip acima — reter o
   // store aqui abria 1 stream de lista por servidor no celular). `allSessions` já é populada por

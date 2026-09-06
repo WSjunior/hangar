@@ -64,6 +64,9 @@
   const serversVisiveis = $derived(
     servers.filter((s) => !offline.has(s.id) || s.id === targetServer),
   );
+  // Quantas sumiram. Esconder calado vira "cadê minha máquina?" — a pessoa não tem como saber se
+  // ela foi apagada, se o app perdeu, ou se está só desligada. Uma linha resolve.
+  const ocultas = $derived(servers.length - serversVisiveis.length);
 
   // Fluxo em dois passos: 1) escolher a pasta (scanner) -> 2) criar uma sessao nova com nome UNICO
   // derivado do basename. Varias sessoes na mesma pasta sao permitidas (cada uma tem nome+jsonl
@@ -743,8 +746,12 @@
   {/snippet}
 
   {#snippet chipsServidor()}
-    {#if serversVisiveis.length > 1}
+    <!-- Os chips só valem com mais de uma máquina pra escolher, mas o aviso de ocultas vale sempre:
+         com 3 cadastradas e 2 fora do ar sobra 1 visível, o seletor some, e sem esta linha a pessoa
+         não teria como saber que as outras duas existem e estão desligadas. -->
+    {#if serversVisiveis.length > 1 || ocultas > 0}
       <div class="server-select">
+        {#if serversVisiveis.length > 1}
         <span class="server-select-label">{m.lista_agrupar_servidor()}</span>
         <div class="server-chips">
           {#each serversVisiveis as s (s.id)}
@@ -763,6 +770,10 @@
             </button>
           {/each}
         </div>
+        {/if}
+        {#if ocultas > 0}
+          <p class="hint">{ocultas === 1 ? m.sessao_offline_1() : m.sessao_offline({ n: String(ocultas) })}</p>
+        {/if}
         {#if bastao && !bastaoSemServidor}
           <!-- Travado, e a tela DIZ por quê: o dossiê é arquivo local, então cross-server não é
                uma opção que a v1 recusa por preguiça — não há transporte pra ele. O rótulo vem do
