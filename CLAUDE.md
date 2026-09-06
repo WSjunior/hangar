@@ -568,9 +568,16 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   Hangar. Essas capacidades continuam complementares, não substituídas por nome.
   A seleção das extensões não demonstra compatibilidade completa: o bridge e os checkpoints
   têm as provas específicas abaixo; limitações do adaptador de hooks continuam separadas.
-  **Bridge adaptado ao OMP (05/09/2026):** `agent-context.ts` resolve a identidade pelo
+  **Bridge adaptado ao OMP (05/09/2026):** `lib/agent-context.ts` resolve a identidade pelo
   executável e normaliza `PI_CODING_AGENT_DIR`/`CLAUDE_CONFIG_DIR`, incluindo `~`; a fábrica
-  guarda esse contexto por instância. No OMP, agents pessoais/extras viram arquivos diretos
+  guarda esse contexto por instância. **Os helpers compartilhados moram em `scripts/pi/lib/` e
+  o instalador (e `harness_saude._ligar_extensoes`) linka a PASTA `extensions/lib`** (medido
+  06/09/2026, pi 0.85.0): o loader do Pi resolve import relativo pelo caminho do symlink, não do
+  arquivo real — `./agent-context` ao lado de `claude-bridge.ts` dava `Cannot find module` e o
+  Pi saía com rc=1 sem ponte nem `/rewind`; e um `.ts` solto em `extensions/` é carregado como
+  extensão (`does not export a valid factory function`). Pasta sem `index.ts` o Pi ignora. O omp
+  (Bun) resolve pelo realpath e carregava de qualquer jeito — foi por isso que a suíte, que só
+  roda o omp, não pegou. No OMP, agents pessoais/extras viram arquivos diretos
   em `<agentDir>/agents/claude-bridge-<nome>.md`, com ferramentas em array YAML: `Glob → glob`,
   `Task/Agent → task`, `WebFetch → read` e prefixo `mcp__` intacto. Agents nativos pessoais
   têm precedência; aliases Claude sem mapeamento explícito herdam o modelo da sessão.
@@ -579,18 +586,27 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   Nomes `main`/`sub`, reservados pelo núcleo OMP, também são recusados nesse harness.
   Skills/comandos/plugins não são espelhados no OMP, nem oferecidos no menu de fontes.
   No Pi permanecem a conversão de ferramentas e o layout recursivo de agents, prompts e skills.
-  `frontmatter.ts` usa `Bun.YAML.parse` no OMP e carrega o parser legado somente no Pi.
-  Memória respeita `enabled`, preserva blocos do prompt e não reinsere conteúdo já presente.
+  `lib/frontmatter.ts` usa `Bun.YAML.parse` no OMP e carrega o parser legado somente no Pi.
+  Memória respeita `enabled`, preserva blocos do prompt e não reinsere conteúdo já presente;
+  `claude-bridge.json` ilegível é logado e ignorado no `before_agent_start`, nunca lançado.
   O manifesto versão 2 registra conteúdo e caminho relativo de cada arquivo gerado: atualização
-  e remoção exigem os bytes originais, e conflitos são preservados e reportados. O manifesto
-  antigo só listava prompts; não prova propriedade suficiente para apagar ou sobrescrever.
-  Escritas usam arquivo temporário + rename. Leitura inválida interrompe a sincronização;
-  não autoriza poda. Isso adapta a ponte, não substitui o instalador nativo de plugins.
+  e remoção exigem os bytes originais, e conflitos são preservados e reportados. **O manifesto
+  v1 é ADOTADO uma vez** (`adoptLegacy`, 06/09/2026): ele só listava nomes de prompts, e a pasta
+  `agents/claude-bridge/` era inteira da ponte — os dois já eram sobrescritos e apagados por ela,
+  então adotá-los lendo o disco não tira segurança nenhuma. Tratar v1 como vazio (a primeira
+  versão do PR) deixava cada instalação existente com todos os arquivos em `skipped` para
+  sempre, e sem volta, porque o v2 vazio já tinha sobrescrito o v1 (nesta máquina: 16 prompts
+  e três pastas de agents). Escritas usam arquivo temporário + rename. **Fonte com frontmatter
+  inválida pula só ela** (entra em `skipped` com o motivo) e, enquanto houver uma, a ponte cria e
+  atualiza mas **não remove nada** — sem ler a fonte não se sabe qual cópia ela geraria, que era
+  o risco que o abort da primeira versão evitava ao custo de um `.md` quebrado em qualquer
+  marketplace derrubar o sync inteiro. Isso adapta a ponte, não substitui o instalador nativo
+  de plugins.
   Prova: `tests/test_claude_bridge_omp.py` roda o OMP real com HOME própria; o driver exige
   descoberta no catálogo de `task`, grava resultado estruturado em `session_start` e encerra
   sem prompt/modelo remoto. `rc=0` sozinho não prova carregamento de extensão.
   **Checkpoints por contexto no OMP (05/09/2026):** `git-checkpoint.ts` consome o mesmo
-  `agent-context.ts` e registra `/hangar-rewind`; o Pi mantém `/rewind`. A captura usa
+  `lib/agent-context.ts` e registra `/hangar-rewind`; o Pi mantém `/rewind`. A captura usa
   `before_agent_start`, não `turn_start`, e persiste revisão, worktree canônica, identidade do
   Git do projeto e diretório que contém os objetos. O próprio registro é a âncora anterior ao
   pedido. Retomada/fork conservam essa origem; `getBranch` impede oferecer um ramo descartado.

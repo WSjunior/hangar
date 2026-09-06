@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext, ExtensionCommandContext, SessionManager } from "@earendil-works/pi-coding-agent";
-import type { AgentContext } from "../pi/agent-context";
+import type { AgentContext } from "../pi/lib/agent-context";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";

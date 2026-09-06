@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type * as BridgeModule from "../pi/claude-bridge";
-import type * as ContextModule from "../pi/agent-context";
-import type { FrontmatterParser } from "../pi/frontmatter";
+import type * as ContextModule from "../pi/lib/agent-context";
+import type { FrontmatterParser } from "../pi/lib/frontmatter";
 import type { SyncResult } from "../pi/claude-bridge";
 
 type BeforeHandler = (event: { systemPrompt: string | string[] }, ctx: { cwd: string }) => Promise<{ systemPrompt: string | string[] } | undefined>;
@@ -38,6 +38,12 @@ export default async function (pi: ExtensionAPI) {
     write(path.join(source, "escape.md"), agent("../../escape"));
     write(path.join(claudeDir, "commands/fixture.md"), "Comando nativo, não espelhar.");
     write(path.join(agentDir, "claude-bridge.json"), JSON.stringify({ enabled: scenario !== "disabled", skillPlugins: [], cacheCommands: [] }));
+    if (scenario === "legacy") {
+      // Instalação da ponte antiga: manifesto v1 só com nomes de prompts e a pasta de agents inteira dela.
+      write(path.join(agentDir, "claude-bridge-manifest.json"), JSON.stringify({ prompts: ["fixture-cmd.md"] }));
+      write(path.join(agentDir, "prompts", "fixture-cmd.md"), "---\ndescription: legado\n---\nCorpo legado.\n");
+      write(path.join(agents, "claude-bridge", "user", "fixture-reviewer.md"), "---\nname: fixture-reviewer\ndescription: legado\n---\nCorpo legado.\n");
+    }
     const memoryDir = path.join(claudeDir, "projects", home.replace(/[^A-Za-z0-9]/g, "-"), "memory");
     write(path.join(memoryDir, "MEMORY.md"), "Índice sintético de memória.");
     // Import tardio: a prova precisa registrar falhas de carregamento no resultado estruturado.
@@ -61,8 +67,8 @@ export default async function (pi: ExtensionAPI) {
     const result: Record<string, unknown> = { run: process.env.OMP_DRIVER_RUN, ok: false, scenario };
     try {
       if (startupError) throw startupError;
-      contextModule = await import("../pi/agent-context.ts");
-      const parserModule = await import("../pi/frontmatter.ts");
+      contextModule = await import("../pi/lib/agent-context.ts");
+      const parserModule = await import("../pi/lib/frontmatter.ts");
       parse = await parserModule.loadFrontmatterParser(contextModule.getAgentContext());
       const generated = () => fs.readdirSync(agents).map(file => path.join(agents, file)).find(file => parse(fs.readFileSync(file, "utf8")).frontmatter.name === "fixture-reviewer");
       if (scenario === "discovery") {
@@ -115,10 +121,20 @@ export default async function (pi: ExtensionAPI) {
         assert.equal(parse(command.content).body.trim(), "Use $ARGUMENTS e $1.");
       } else if (scenario === "ownership") {
         const original = fs.readFileSync(generated()!, "utf8");
+        write(path.join(source, "gone.md"), agent("gone-agent"));
+        bridge.sync();
+        const gone = path.join(agents, fs.readdirSync(agents).find(file => parse(fs.readFileSync(path.join(agents, file), "utf8")).frontmatter.name === "gone-agent")!);
+        // Fonte ilegível pula só ela e suspende remoções: a cópia de uma fonte que sumiu fica até
+        // todas voltarem a ser lidas — a ponte não sabe qual cópia a fonte quebrada geraria.
         write(path.join(source, "reviewer.md"), "---\nname: [broken\n---\nbody");
-        assert.throws(() => bridge.sync());
+        fs.unlinkSync(path.join(source, "gone.md"));
+        const partial = bridge.sync();
+        assert.ok(partial.agents.skipped.some(entry => entry.includes("reviewer.md") && entry.includes("frontmatter inválida")));
         assert.equal(fs.readFileSync(generated()!, "utf8"), original);
+        assert.equal(fs.existsSync(gone), true);
         write(path.join(source, "reviewer.md"), agent("fixture-reviewer"));
+        bridge.sync();
+        assert.equal(fs.existsSync(gone), false);
         const target = generated()!;
         assert.ok(target);
         const changed = fs.readFileSync(target, "utf8") + "Edição manual.\n";
@@ -154,7 +170,20 @@ export default async function (pi: ExtensionAPI) {
           const text = await before({ systemPrompt: "prompt-original" }, { cwd: home });
           assert.ok(text);
           assert.equal(text.systemPrompt, "prompt-original" + memoryBlock);
+          // Configuração ilegível não derruba o turno: o hook desiste da memória e segue.
+          write(path.join(agentDir, "claude-bridge.json"), "{quebrado");
+          assert.equal(await before({ systemPrompt: "prompt-original" }, { cwd: home }), undefined);
         }
+      } else if (scenario === "legacy") {
+        const manifest = JSON.parse(fs.readFileSync(path.join(agentDir, "claude-bridge-manifest.json"), "utf8"));
+        assert.equal(manifest.version, 2);
+        const target = generated()!;
+        assert.ok(target, "agent legado precisa ter sido regravado no layout novo");
+        assert.ok(manifest.files[path.relative(agentDir, target)]);
+        assert.equal(fs.existsSync(path.join(agents, "claude-bridge", "user", "fixture-reviewer.md")), false);
+        assert.equal(fs.existsSync(path.join(agentDir, "prompts", "fixture-cmd.md")), false);
+        assert.equal(Object.keys(manifest.files).some(key => key.startsWith("agents/claude-bridge/") || key.startsWith("prompts/")), false);
+        assert.equal(fs.readFileSync(personal, "utf8"), native);
       } else if (scenario === "context") {
         assert.deepEqual(contextModule.getAgentContext(), { harness: "omp", agentDir, claudeDir });
         process.env.PI_CODING_AGENT_DIR = "~/custom/../agent";

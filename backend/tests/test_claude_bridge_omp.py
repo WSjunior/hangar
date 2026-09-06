@@ -8,7 +8,7 @@ from tests.omp_runtime import run_omp_driver
 DRIVER = Path(__file__).resolve().parents[2] / "scripts/tests/claude-bridge-driver.ts"
 
 
-@pytest.mark.parametrize("scenario", ["discovery", "conversion", "ownership", "memory", "disabled", "context"])
+@pytest.mark.parametrize("scenario", ["discovery", "conversion", "ownership", "memory", "disabled", "context", "legacy"])
 def test_bridge_no_omp_real(tmp_path, scenario):
     run_omp_driver(DRIVER, tmp_path / scenario, {"BRIDGE_SCENARIO": scenario})
 

@@ -7,7 +7,7 @@ from app import harness_saude as h
 
 def test_extensoes_faltando_e_o_conserto_liga(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
-    (repo / "scripts" / "pi").mkdir(parents=True)
+    (repo / "scripts" / "pi" / "lib").mkdir(parents=True)
     for nome in h._EXTENSOES_PI:
         (repo / "scripts" / "pi" / f"{nome}.ts").write_text("")
     monkeypatch.setattr(h, "_REPO", repo)
@@ -19,14 +19,20 @@ def test_extensoes_faltando_e_o_conserto_liga(tmp_path, monkeypatch):
     item = h._extensoes("pi")
     assert item["ok"] is False and item["codigo"] == "faltam" and item["conserto"] == "extensoes:pi"
     assert "claude-todo" not in item["params"]["lista"] and "hangar-state" in item["params"]["lista"]
+    assert "lib" in item["params"]["lista"]
     h.consertar(item["conserto"])
     assert h._extensoes("pi")["ok"] is True
     assert (raiz / "extensions" / "claude-todo.ts").read_text() == "meu"
+    # A pasta de helpers vai como link de diretório: sem ela, claude-bridge e git-checkpoint
+    # não resolvem o import relativo e o Pi recusa as duas na largada.
+    assert (raiz / "extensions" / "lib").resolve() == repo / "scripts" / "pi" / "lib"
+    (raiz / "extensions" / "lib").unlink()
+    assert h._extensoes("pi")["params"]["lista"] == "lib"
 
 
 def test_extensao_apontando_pra_outra_fonte_nao_e_falta(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
-    (repo / "scripts" / "pi").mkdir(parents=True)
+    (repo / "scripts" / "pi" / "lib").mkdir(parents=True)
     for nome in h._EXTENSOES_PI:
         (repo / "scripts" / "pi" / f"{nome}.ts").write_text("")
     monkeypatch.setattr(h, "_REPO", repo)
@@ -41,6 +47,7 @@ def test_extensao_apontando_pra_outra_fonte_nao_e_falta(tmp_path, monkeypatch):
     for nome in h._EXTENSOES_PI:
         if nome not in ("fullscreen-tui", "claude-todo"):
             (ext / f"{nome}.ts").symlink_to(repo / "scripts" / "pi" / f"{nome}.ts")
+    (ext / "lib").symlink_to(repo / "scripts" / "pi" / "lib", target_is_directory=True)
     (ext / "fullscreen-tui.ts").symlink_to(velho)
     item = h._extensoes("pi")
     assert item["ok"] is False and item["codigo"] == "extensoes_outra_fonte"
@@ -52,7 +59,7 @@ def test_extensao_apontando_pra_outra_fonte_nao_e_falta(tmp_path, monkeypatch):
 def test_omp_preserva_todo_e_rolagem_nativos_sem_perder_complementos(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     fontes = repo / "scripts" / "pi"
-    fontes.mkdir(parents=True)
+    (fontes / "lib").mkdir(parents=True)
     for nome in h._EXTENSOES_PI:
         (fontes / f"{nome}.ts").write_text("extensão")
     monkeypatch.setattr(h, "_REPO", repo)

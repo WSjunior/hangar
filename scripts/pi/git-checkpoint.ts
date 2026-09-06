@@ -1,7 +1,7 @@
 // Objetos ficam num Git próprio; o índice e as referências do projeto são somente leitura.
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from '@earendil-works/pi-coding-agent'
-import type { AgentContext } from './agent-context'
-import { getAgentContext } from './agent-context'
+import type { AgentContext } from './lib/agent-context'
+import { getAgentContext } from './lib/agent-context'
 import { execFile } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import * as fs from 'node:fs'

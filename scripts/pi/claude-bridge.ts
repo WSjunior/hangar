@@ -1,9 +1,9 @@
 // A ponte converte lacunas do Claude; plugins nativos continuam com o instalador do harness.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { AgentContext } from "./agent-context";
-import type { FrontmatterParser, ParsedFrontmatter } from "./frontmatter";
-import { getAgentContext } from "./agent-context";
-import { loadFrontmatterParser } from "./frontmatter";
+import type { AgentContext } from "./lib/agent-context";
+import type { FrontmatterParser, ParsedFrontmatter } from "./lib/frontmatter";
+import { getAgentContext } from "./lib/agent-context";
+import { loadFrontmatterParser } from "./lib/frontmatter";
 import * as fs from "node:fs";
 import { homedir } from "node:os";
 import * as path from "node:path";
@@ -151,6 +151,22 @@ function listMd(dir: string): string[] {
 	}
 }
 
+function listMdDeep(dir: string, base = dir): string[] {
+	let entries: fs.Dirent[];
+	try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+	catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+		throw error;
+	}
+	const files: string[] = [];
+	for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+		const full = path.join(dir, entry.name);
+		if (entry.isDirectory()) files.push(...listMdDeep(full, base));
+		else if (entry.isFile() && entry.name.endsWith(".md")) files.push(path.relative(base, full));
+	}
+	return files;
+}
+
 function latestVersionDir(pluginDir: string): string | null {
 	let versions: string[];
 	try { versions = fs.readdirSync(pluginDir).filter(v => /^\d+\.\d+\.\d+$/.test(v)); }
@@ -221,12 +237,34 @@ export async function createBridge(pi: ExtensionAPI, context: AgentContext = get
 		return target;
 	}
 
+	// O manifesto v1 só listava nomes de prompts, e agents/claude-bridge/ era inteira da ponte —
+	// os dois já eram sobrescritos e apagados por ela. Adotar uma vez, lendo o disco, é o que
+	// impede toda instalação existente de virar conflito permanente na primeira rodada v2.
+	function adoptLegacy(prompts: unknown[]): Manifest {
+		const owned: Manifest = {};
+		const adopt = (relative: string, kind: Kind) => {
+			const full = path.join(agentDir, relative);
+			let stat: fs.Stats;
+			try { stat = fs.lstatSync(full); }
+			catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+				throw error;
+			}
+			if (stat.isFile()) owned[relative] = { kind, content: fs.readFileSync(full, "utf8") };
+		};
+		for (const name of prompts) {
+			if (typeof name === "string" && /^[^\\/]+\.md$/.test(name)) adopt(path.join("prompts", name), "commands");
+		}
+		const legacyAgents = path.join("agents", "claude-bridge");
+		for (const file of listMdDeep(path.join(agentDir, legacyAgents))) adopt(path.join(legacyAgents, file), "agents");
+		return owned;
+	}
+
 	function readManifest(): Manifest {
 		const content = readOptional(manifestPath);
 		if (content === undefined) return {};
 		const parsed = JSON.parse(content);
-		// Manifestos antigos não provam os bytes escritos: ficam sem direito de remoção.
-		if (parsed && Array.isArray(parsed.prompts) && parsed.version === undefined) return {};
+		if (parsed && Array.isArray(parsed.prompts) && parsed.version === undefined) return adoptLegacy(parsed.prompts);
 		if (parsed?.version !== 2 || !parsed.files || typeof parsed.files !== "object" || Array.isArray(parsed.files)) throw new Error("Manifesto da ponte inválido");
 		for (const [relative, record] of Object.entries(parsed.files)) {
 			const entry = record as OwnedFile;
@@ -244,13 +282,16 @@ export async function createBridge(pi: ExtensionAPI, context: AgentContext = get
 			const full = path.join(agentsOut, file);
 			const content = fs.readFileSync(full, "utf8");
 			if (owned[path.relative(agentDir, full)]?.content === content) continue;
-			const name = parse(content).frontmatter.name;
+			let name: unknown;
+			try { name = parse(content).frontmatter.name; } catch { continue; }
 			if (typeof name === "string") names.add(name);
 		}
 		return names;
 	}
 
-	function reconcile(expected: Manifest, owned: Manifest, result: SyncResult): Manifest {
+	// Com uma fonte ilegível não se sabe qual cópia gerenciada ela geraria: a ponte segue
+	// criando e atualizando, mas não remove nada até a fonte voltar a ser lida.
+	function reconcile(expected: Manifest, owned: Manifest, result: SyncResult, remove = true): Manifest {
 		const next = { ...owned };
 		for (const relative of new Set([...Object.keys(owned), ...Object.keys(expected)])) {
 			const wanted = expected[relative];
@@ -271,6 +312,8 @@ export async function createBridge(pi: ExtensionAPI, context: AgentContext = get
 			if (wanted) {
 				if (current !== wanted.content) { atomicWrite(target, wanted.content); result[kind].written++; }
 				next[relative] = wanted;
+			} else if (!remove) {
+				continue;
 			} else {
 				if (current !== undefined) { fs.unlinkSync(target); result[kind].removed++; }
 				delete next[relative];
@@ -328,14 +371,24 @@ export async function createBridge(pi: ExtensionAPI, context: AgentContext = get
 		};
 		const owned = readManifest();
 		const expected: Manifest = {};
-		// Frontmatter inválido interrompe a passagem antes de reconciliar: pular a fonte poderia apagar sua cópia gerenciada.
+		let broken = 0;
+		const parseSource = (dir: string, file: string, kind: Kind): ParsedFrontmatter | null => {
+			try { return parse(fs.readFileSync(path.join(dir, file), "utf8")); }
+			catch (error) {
+				broken++;
+				result[kind].skipped.push(`${path.basename(path.dirname(dir))}/${file} (frontmatter inválida: ${error instanceof Error ? error.message : String(error)})`);
+				return null;
+			}
+		};
 		if (config.enabled !== false) {
 			const native = nativeNames(owned);
 			const seen = new Set<string>();
 			for (const source of discoverSources("agents", config.agents?.extraSources ?? [])) {
 				if (config.disabledSources?.agents?.includes(source.label)) continue;
 				for (const file of listMd(source.dir)) {
-					const converted = convertParsedAgent(parse(fs.readFileSync(path.join(source.dir, file), "utf8")), config, harness);
+					const parsed = parseSource(source.dir, file, "agents");
+					if (!parsed) continue;
+					const converted = convertParsedAgent(parsed, config, harness);
 					if (!converted) {
 						result.agents.skipped.push(`${source.label}/${file} (definição incompatível ou excluída)`);
 						continue;
@@ -356,7 +409,9 @@ export async function createBridge(pi: ExtensionAPI, context: AgentContext = get
 					if (config.disabledSources?.commands?.includes(source.label)) continue;
 					const dir = cacheCommands.includes(source.label) ? latestCacheSubdir(source.label, "commands") ?? source.dir : source.dir;
 					for (const file of listMd(dir)) {
-						const converted = convertParsedCommand(parse(fs.readFileSync(path.join(dir, file), "utf8")), file, config);
+						const parsed = parseSource(dir, file, "commands");
+						if (!parsed) continue;
+						const converted = convertParsedCommand(parsed, file, config);
 						if (!converted) continue;
 						const relative = path.relative(agentDir, path.join(promptsOut, `${converted.name}.md`));
 						if (expected[relative]) continue;
@@ -366,7 +421,7 @@ export async function createBridge(pi: ExtensionAPI, context: AgentContext = get
 				}
 			}
 		}
-		const files = reconcile(expected, owned, result);
+		const files = reconcile(expected, owned, result, broken === 0);
 		atomicWrite(manifestPath, `${JSON.stringify({ version: 2, files }, null, 2)}\n`);
 		if (harness === "pi" && config.enabled !== false) syncSkills(config, result);
 		return result;
@@ -382,7 +437,13 @@ export async function createBridge(pi: ExtensionAPI, context: AgentContext = get
 	catch (error) { console.error(`[claude-bridge] Falha na sincronização: ${String(error)}`); }
 
 	pi.on("before_agent_start", async (event: { systemPrompt: string | string[] }, ctx: { cwd: string }) => {
-		if (loadConfig().enabled === false) return;
+		let config: Config;
+		try { config = loadConfig(); }
+		catch (error) {
+			console.error(`[claude-bridge] Configuração ignorada: ${String(error)}`);
+			return;
+		}
+		if (config.enabled === false) return;
 		const addition = memoryIndex(ctx.cwd);
 		if (!addition) return;
 		const present = Array.isArray(event.systemPrompt)

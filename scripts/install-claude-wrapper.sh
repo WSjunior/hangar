@@ -287,6 +287,21 @@ link_agent_extensions() {  # $1 = binario, $2 = dir de extensoes
       echo "  linked $ext.ts into $extensions_dir"
     fi
   done
+  # Os helpers compartilhados (scripts/pi/lib) vao como PASTA: o loader do Pi resolve o import
+  # relativo pelo caminho do link, e um .ts solto em extensions/ e carregado como extensao.
+  target="$extensions_dir/lib"
+  if [ -L "$target" ]; then
+    if [ "$(readlink "$target")" = "$SCRIPT_DIR/pi/lib" ]; then
+      echo "  linked lib/ into $extensions_dir (ja apontada)"
+    else
+      echo "  ⚠ $target e um symlink customizado — mantido como esta."
+    fi
+  elif [ -e "$target" ]; then
+    echo "  ⚠ $target ja existe e nao e symlink — mantido como esta."
+  else
+    ln -s "$SCRIPT_DIR/pi/lib" "$target"
+    echo "  linked lib/ into $extensions_dir"
+  fi
 }
 
 enable_fullscreen() {  # $1 = binario, $2 = dir do agente

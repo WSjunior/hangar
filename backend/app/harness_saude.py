@@ -241,6 +241,11 @@ def _extensoes(cli: str) -> dict:
             outra_fonte.append(f"{nome} → {_abreviar_home(p.resolve())}")
             continue
         faltam.append(nome)
+    # Helpers de scripts/pi/lib vão como pasta: o Pi resolve import relativo pelo caminho do link.
+    lib = ext / "lib"
+    if not (lib.is_symlink() and lib.exists() and lib.resolve() == (_REPO / "scripts" / "pi" / "lib").resolve()):
+        if not (lib.exists() and not lib.is_symlink()):
+            faltam.append("lib")
     if outra_fonte:
         params = {"lista": ", ".join(outra_fonte)}
         if faltam:
@@ -515,6 +520,13 @@ def _ligar_extensoes(cli: str) -> str:
             p.unlink()
         p.symlink_to(fonte)
         feitos.append(nome)
+    lib = ext / "lib"
+    fonte_lib = _REPO / "scripts" / "pi" / "lib"
+    if fonte_lib.is_dir() and not (lib.exists() and not lib.is_symlink()):
+        if lib.is_symlink():
+            lib.unlink()
+        lib.symlink_to(fonte_lib, target_is_directory=True)
+        feitos.append("lib")
     return f"{len(feitos)} extensões ligadas"
 
 
