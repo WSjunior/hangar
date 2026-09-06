@@ -126,7 +126,7 @@ test('verbo shot grava PNG no caminho pedido', async () => {
   srv.fechar();
 });
 
-test('verbo shot em view escondido devolve erro claro em vez de PNG vazio', async () => {
+test('verbo shot com quadro ausente ate o fim devolve erro claro em vez de PNG vazio', async () => {
   const destino = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'preview-shot-')), 'print.png');
   const ctl = { enfileirar: (fn) => fn(), capturarPagina: async () => ({ isEmpty: () => true, toPNG: () => Buffer.alloc(0) }) };
   const srv = await subirServidor({ controladorDe: () => ctl, escrever: () => {} });
@@ -135,7 +135,7 @@ test('verbo shot em view escondido devolve erro claro em vez de PNG vazio', asyn
     body: JSON.stringify({ chave: 'srv::d2', verbo: 'shot', args: [destino] }),
     headers: { Authorization: `Bearer ${srv.token}` },
   });
-  assert.match(await r.text(), /^erro: .*escondido/);
+  assert.match(await r.text(), /^erro: .*nao produziu quadro/);
   assert.ok(!fs.existsSync(destino));
   srv.fechar();
 });

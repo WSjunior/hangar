@@ -87,9 +87,10 @@ tire `snapshot` de novo antes de agir.
 
 - `hangar-preview open <url>` — abre o navegador desta sessão com a url. Com o app desktop aberto
   ele nasce em segundos **mesmo com a sessão fora da tela** (escondido; `list` mostra `vivo`), e
-  você já pode dirigir: `text`, `snapshot`, `click`, `fill`, `eval` funcionam. Só `shot` não —
-  view escondido não é pintado e o verbo devolve `erro: ... escondido`; o print vem quando o
-  usuário abrir a sessão (aí o painel aparece com o navegador já na página em que você deixou).
+  todos os verbos funcionam ali, `shot` incluído: a página escondida é medida em 1280×800, então
+  o que você lê e fotografa é o layout de desktop. Quando o usuário abrir a sessão, o painel
+  aparece com o navegador na página em que você deixou, e aí a medida passa a ser o tamanho real
+  do painel — um `shot` de antes e um de depois podem ter tamanhos diferentes.
   **Avise o usuário** no texto da resposta que você abriu — a janela dele muda quando ele for lá.
 - `hangar-preview snapshot` — árvore de acessibilidade compacta, com as refs atuais.
 - `hangar-preview click @eN` — clica (evento de mouse real, não `.click()` em JS).

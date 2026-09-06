@@ -402,6 +402,22 @@ function soltarControlador(chave, view) {
   try { view.webContents.debugger.detach(); } catch { /* já solto */ }
 }
 
+// Conta ao controlador que o view saiu da tela (ou voltou pra ela): é ele quem liga a emulação
+// de tamanho que dá viewport e print a um view escondido. Espera a página carregar, porque
+// emular tamanho no `about:blank` de um view recém-criado derruba o processo com SIGSEGV.
+function avisarOculto(chave, view, oculto) {
+  const entrada = controladores.get(chave);
+  if (!entrada || entrada.view !== view || !entrada.ctl.definirOculto) return;
+  const aplicar = () => entrada.ctl.definirOculto(oculto).catch((err) => {
+    console.error('[nav] viewport do view escondido:', err && err.message);
+  });
+  // O critério é a página, não o estado de carregamento: `about:blank` (ou URL vazia) é
+  // exatamente o documento em que a emulação mata o processo.
+  const url = view.webContents.getURL();
+  if (!url || url === 'about:blank') view.webContents.once('did-finish-load', aplicar);
+  else aplicar();
+}
+
 function fecharNavegador(win, chave) {
   const m = navegadores.get(win);
   const view = m && m.get(chave);
@@ -588,18 +604,26 @@ ipcMain.handle('hangar:nav-open', async (ev, { chave, url, bounds, oculto } = {}
   }
   if (oculto) {
     if (novo) view.setVisible(false);
+    // Escondido, a página fica em 0x0 e sem quadro: quem devolve viewport de desktop e print é a
+    // emulação de tamanho, e ela SÓ pode entrar com a página carregada (antes disso, SIGSEGV).
+    avisarOculto(chave, view, true);
     // `oculto: true` na resposta é a prova de que este shell entendeu o pedido: um shell antigo
     // ignora o campo, cria o view visível com bounds zero e devolve só {ok} — o front não confirma.
     return { ok: true, oculto: true };
   }
   view.setVisible(true);
   view.setBounds(normalizaBounds(bounds));
+  avisarOculto(chave, view, false);
   return { ok: true };
 });
 
 ipcMain.on('hangar:nav-hide', (ev, { chave } = {}) => {
   const view = viewDe(ev, chave);
-  if (view) view.setVisible(false);
+  if (!view) return;
+  view.setVisible(false);
+  // Sair da tela é o mesmo estado do view que nasceu escondido: sem a emulação, o agente que
+  // continuar dirigindo esta sessão passa a ler uma página de 0x0.
+  avisarOculto(chave, view, true);
 });
 
 ipcMain.on('hangar:nav-bounds', (ev, { chave, bounds } = {}) => {

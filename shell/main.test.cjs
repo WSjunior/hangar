@@ -18,9 +18,10 @@ process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'hangar-main-test-'));
 test.after(() => { process.env.HOME = homeOriginal; });
 
 const criadas = [];
-function criarControladorFalso() {
-  const c = { enfileirar: (fn) => fn(), fechado: false };
+function criarControladorFalso(opcoes) {
+  const c = { enfileirar: (fn) => fn(), fechado: false, opcoes, ocultos: [] };
   c.fechar = () => { c.fechado = true; };
+  c.definirOculto = async (v) => { c.ocultos.push(v); };
   criadas.push(c);
   return c;
 }
@@ -31,6 +32,8 @@ require.cache[previewCtlPath] = {
 };
 
 function criarWebContentsFalso() {
+  // `url` começa vazia como no view recém-criado; dispararLoad() simula o did-finish-load.
+  const estado = { url: '', ouvintesLoad: [] };
   const dbg = {
     attached: false,
     isAttached: () => dbg.attached,
@@ -41,19 +44,21 @@ function criarWebContentsFalso() {
   };
   return {
     setUserAgent: () => {}, getUserAgent: () => 'UA',
-    setWindowOpenHandler: () => {}, loadURL: async () => {}, getURL: () => '',
-    capturePage: async () => ({ toPNG: () => Buffer.alloc(0) }),
+    setWindowOpenHandler: () => {}, loadURL: async () => {}, getURL: () => estado.url,
+    capturePage: async () => ({ isEmpty: () => false, toPNG: () => Buffer.alloc(0) }),
     close: () => {}, isDestroyed: () => false,
-    on: () => {}, once: () => {},
+    on: () => {},
+    once: (ev, cb) => { if (ev === 'did-finish-load') estado.ouvintesLoad.push(cb); },
+    dispararLoad: () => { estado.url = 'https://z.test/'; estado.ouvintesLoad.splice(0).forEach((cb) => cb()); },
     debugger: dbg,
   };
 }
 const viewsFalsos = [];
 class WebContentsViewFalso {
-  constructor() { this.webContents = criarWebContentsFalso(); this.visivel = null; viewsFalsos.push(this); }
+  constructor() { this.webContents = criarWebContentsFalso(); this.visivel = null; this.bounds = null; viewsFalsos.push(this); }
   setVisible(v) { this.visivel = v; }
   getVisible() { return this.visivel === true; }
-  setBounds() {}
+  setBounds(b) { this.bounds = b; }
 }
 
 const winMap = new Map();
@@ -139,4 +144,24 @@ test('open oculto cria o view escondido e ja dirigivel; view visivel nao e tocad
   assert.equal(r3.ok, true);
   assert.equal(view.visivel, true, 'view visível fica como está');
   assert.equal(criadas.length, antes + 1, 'sem controlador novo');
+});
+
+test('o controlador so e avisado do view escondido DEPOIS de a pagina carregar (senao, SIGSEGV)', async () => {
+  const a = novaJanela();
+  const abrir = handlers.get('hangar:nav-open');
+  await abrir(a.ev, { chave: 'srv::viewport', url: 'https://z.test', bounds: {}, oculto: true });
+  const view = viewsFalsos.at(-1);
+  const ctl = criadas.at(-1);
+  assert.deepEqual(ctl.ocultos, [], 'view recem-criado esta em about:blank — avisar aqui derruba o processo');
+
+  view.webContents.dispararLoad();
+  assert.deepEqual(ctl.ocultos, [true], 'carregou, agora sim');
+
+  // O usuário abre a sessão: o painel monta e a emulação sai na hora (a página já carregou).
+  await abrir(a.ev, { chave: 'srv::viewport', bounds: { x: 0, y: 0, width: 800, height: 600 } });
+  assert.deepEqual(ctl.ocultos, [true, false]);
+
+  // Trocar de sessão esconde o painel: o agente que continuar dirigindo precisa da emulação de volta.
+  handlers.get('hangar:nav-hide')(a.ev, { chave: 'srv::viewport' });
+  assert.deepEqual(ctl.ocultos, [true, false, true]);
 });

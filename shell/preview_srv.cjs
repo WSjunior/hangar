@@ -22,9 +22,9 @@ const VERBOS = {
   shot: async (c, a) => {
     if (!a[0]) return 'erro: shot precisa de um caminho de arquivo';
     const img = await c.capturarPagina();
-    // View escondido (sessão fora da tela) não é composto pelo Chromium: capturePage devolve
-    // imagem vazia e um PNG de 0 bytes com "ok" mentiria. O resto (text, snapshot, click) segue.
-    if (img.isEmpty()) return 'erro: o navegador desta sessao esta escondido (sessao fora da tela do desktop) — print so com a sessao aberta; text/snapshot/click funcionam';
+    // O controlador já acordou o renderer e insistiu até o teto; imagem ainda vazia é view que
+    // não compõe (janela minimizada, por exemplo). PNG de 0 bytes com "ok" mentiria.
+    if (img.isEmpty()) return 'erro: o navegador desta sessao nao produziu quadro (janela minimizada?) — text/snapshot/click funcionam; o print sai com a janela do Hangar visivel';
     // Assincrona: writeFileSync roda na thread principal do Electron e travaria a interface
     // inteira enquanto um disco lento escreve o PNG.
     await fs.promises.writeFile(a[0], img.toPNG());

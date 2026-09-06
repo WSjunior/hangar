@@ -470,9 +470,24 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   `NavegadorPane` só reexibe quando o usuário abrir a sessão. View já visível não é tocado pelo
   pedido oculto — ali quem manda é o painel montado. Trocar `main.cjs`/`preload.cjs` exige
   reabrir o app desktop; o front e o backend não. Três limites medidos no teste de ponta a ponta:
-  (1) view escondido **não é pintado** — `capturePage` volta vazio (e `Page.captureScreenshot`
-  por CDP pendura), então `shot` devolve `erro: ... escondido` em vez de um PNG de 0 bytes;
-  `text`/`snapshot`/`click` funcionam; (2) a sessão que ganhou navegador fora da tela entra
+  (1) **um view escondido é uma página de 0×0, e isso era pior do que "não dá pra tirar print"**
+  (medido 05/09/2026, Electron 43.3.0): `setVisible(false)` zera a viewport da página —
+  independente dos bounds, que não a movem —, então `matchMedia("(max-width:600px)")` responde
+  **true** e o agente que abria com a sessão fora da tela lia e clicava no layout de **celular**
+  do app achando que era o de desktop; e não havia quadro, com `capturePage` **rejeitando**
+  `UnknownVizError` (não devolvendo imagem vazia) e `Page.captureScreenshot` pendurando. O que
+  desamarra a página do compositor é `Emulation.setDeviceMetricsOverride` (1280×800): a viewport
+  volta, a media query volta pro desktop e o `captureScreenshot` responde em ~60ms — o print de
+  view escondido passou a existir. Três regras que caíram junto: a emulação **só pode entrar com
+  a página carregada** (aplicá-la no `about:blank` de um view recém-criado derruba o processo com
+  **SIGSEGV**, reproduzido 3×, e é por isso que `avisarOculto` espera o `did-finish-load`);
+  `capturePage` e `captureScreenshot` **não são intercambiáveis** — o primeiro serve o view
+  visível, o segundo o escondido, e usar o segundo sem a emulação é o que pendura; e
+  `setBackgroundThrottling(false)` **não tem efeito nenhum** aqui (medido: A, B e C da sonda
+  saíram todos vazios), o que descarta portar o `acquireAgentWake` do Superset — lá o webview
+  fica visível e parqueado, aqui o view é desligado no compositor. Quem sabe do estado é o
+  controlador (`definirOculto`), porque é ele que já reaplica emulação depois de navegar;
+  (2) a sessão que ganhou navegador fora da tela entra
   direto na aba **Navegador** ao ser aberta (`DesktopSessionContext`, só quando ela nunca
   escolheu aba); (3) **tudo isso é do layout desktop**: com a janela do Electron abaixo de 820px
   (estava com 757px numa tile do Hyprland) o app está no layout de celular — sem sidebar, sem
