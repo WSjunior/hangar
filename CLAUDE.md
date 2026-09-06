@@ -577,7 +577,17 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   Pi saía com rc=1 sem ponte nem `/rewind`; e um `.ts` solto em `extensions/` é carregado como
   extensão (`does not export a valid factory function`). Pasta sem `index.ts` o Pi ignora. O omp
   (Bun) resolve pelo realpath e carregava de qualquer jeito — foi por isso que a suíte, que só
-  roda o omp, não pegou. No OMP, agents pessoais/extras viram arquivos diretos
+  roda o omp, não pegou. **"Estou no omp?" tem UMA resposta**, `getAgentContext().harness`:
+  `claude-todo.ts` e `fullscreen-tui.ts` tinham o regex do `execPath` copiado, e uma mudança de
+  empacotamento do omp corrigida no `lib/` deixaria as duas religando no omp o que tem que ficar
+  desligado. Miudezas fechadas junto (06/09/2026): nome de agente repetido entre fontes no omp
+  entra em `skipped` (o caminho lá é plano, o segundo era descartado calado); o desfazer de uma
+  ação do plugin sync que falha loga e relança a **causa original** (antes o `finally: raise`
+  punha o erro do desfazer no relatório); `_digest` guarda assinatura (mtime, tamanho) por
+  arquivo e só relê quando ela muda (o laço de 300 s relia todo byte de todo plugin); e
+  `observe_controls` lê as 3 chaves do `omp config get` em paralelo e a releitura só pega
+  `disabledExtensions` — de 6 processos em série (~0,75 s cada, na subida do backend) pra 4 em
+  dois lotes. No OMP, agents pessoais/extras viram arquivos diretos
   em `<agentDir>/agents/claude-bridge-<nome>.md`, com ferramentas em array YAML: `Glob → glob`,
   `Task/Agent → task`, `WebFetch → read` e prefixo `mcp__` intacto. Agents nativos pessoais
   têm precedência; aliases Claude sem mapeamento explícito herdam o modelo da sessão.

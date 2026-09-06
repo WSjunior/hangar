@@ -1,4 +1,5 @@
 """Política CLAUDE.md opt-in, sem sobrescrever contexto personalizado."""
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -128,8 +129,13 @@ def configure_claude_context(*, home=None, claude_dir=None, enabled=False, runne
                 raise InventoryError("Controle nativo de regras inválido")
             return values
 
-        def observe_controls():
-            controls = {key: command("get", key) for key in ("disabledExtensions", "ttsr.disabledRules", "disabledProviders")}
+        def observe_controls(previous=None):
+            # Cada `omp config get` é um processo (~0,75 s); as três chaves não dependem uma da outra.
+            # Na releitura só `disabledExtensions` pode ter mudado — é a única que o `set` toca.
+            keys = ("disabledExtensions",) if previous else ("disabledExtensions", "ttsr.disabledRules", "disabledProviders")
+            with ThreadPoolExecutor(max_workers=len(keys)) as pool:
+                fetched = dict(zip(keys, pool.map(lambda key: command("get", key), keys)))
+            controls = {**(previous or {}), **fetched}
             selected = _preflight(agent, global_file, body)
             name = (selected or canonical).stem
             if ("native" in controls["disabledProviders"]
@@ -153,7 +159,7 @@ def configure_claude_context(*, home=None, claude_dir=None, enabled=False, runne
                     if command("set", "disabledExtensions", merged) != merged:
                         raise InventoryError("CLI não confirmou a configuração solicitada")
                     result["changed"] = True
-                controls, selected = observe_controls()
+                controls, selected = observe_controls(controls)
                 if not set(DISABLED_CONTEXT_IDS).issubset(controls["disabledExtensions"]):
                     raise InventoryError("Configuração de contexto mudou durante a operação")
                 result["global_context"] = "available" if global_file.is_file() else "missing"

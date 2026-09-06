@@ -67,6 +67,8 @@ def test_configura_apenas_ids_necessarios_e_repeticao_e_idempotente(context_home
     assert {k: v for k, v in configured.items() if k != "disabledExtensions"} == {k: v for k, v in before.items() if k != "disabledExtensions"}
     assert (agent / "APPEND_SYSTEM.md").samefile(claude / "CLAUDE.md")
     assert (agent / "rules" / RULE_TEMPLATE.name).samefile(RULE_TEMPLATE)
+    # Três leituras antes do set e uma releitura depois: cada `config get` é um processo na subida do backend.
+    assert sum(1 for args in cli.calls if args[2] == "get") == 4
     snapshot = tree_snapshot(home)
     cli.calls.clear()
     assert configure(context_home, enabled=True)["errors"] == []

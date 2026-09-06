@@ -574,6 +574,39 @@ def test_falha_cli_nao_confirma_instalacao_e_permite_nova_tentativa(scenario, ac
     assert [call[2] for call in scenario.native.mutations] == ["install"]
 
 
+def test_desfazer_que_falha_nao_esconde_a_causa_original(scenario, monkeypatch):
+    from app import omp_plugin_sync as m
+    armed = {"on": False}
+    scenario.native.failure = ("install", "no-effect")
+    scenario.native.after_install = lambda: armed.__setitem__("on", True)
+    original = m.PluginSynchronizer._native
+
+    def native(self, *, dry_run, stop=None):
+        if armed["on"] and dry_run:
+            raise m.InventoryError("falha sintética do desfazer")
+        return original(self, dry_run=dry_run, stop=stop)
+
+    monkeypatch.setattr(m.PluginSynchronizer, "_native", native)
+    result = scenario.reconcile()
+    assert result["errors"] == ["Efeito nativo não corresponde à ação solicitada"]
+
+
+def test_digest_so_rele_arquivo_quando_a_assinatura_muda(tmp_path, monkeypatch):
+    from app import omp_plugin_sync as m
+    root = tmp_path / "plugin"
+    (root / "sub").mkdir(parents=True)
+    (root / "a.txt").write_bytes(b"a")
+    (root / "sub" / "b.txt").write_bytes(b"b")
+    reads = []
+    real = Path.read_bytes
+    monkeypatch.setattr(Path, "read_bytes", lambda self: reads.append(self) or real(self))
+    first = m._digest(root)
+    assert len(reads) == 2
+    assert m._digest(root) == first and len(reads) == 2
+    (root / "a.txt").write_bytes(b"aa")
+    assert m._digest(root) != first and len(reads) == 4
+
+
 @pytest.mark.parametrize("failure", ["error", "timeout", "no-effect"])
 def test_falha_de_update_preserva_instalacao_e_pin_confirmados(scenario, failure):
     scenario.native.seed(scenario.repository, scenario.revision, features=["extra"], settings={"key": "preservar"})

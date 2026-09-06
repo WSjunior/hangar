@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 from app import atomico, peers
 
+_log = logging.getLogger("hangar.omp_plugin_sync")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _NAME = re.compile(r"(?:@[a-z0-9._-]+/)?[a-z0-9][a-z0-9._-]*")
 _FEATURE = re.compile(r"[A-Za-z0-9._-]+")
@@ -180,8 +181,13 @@ def _bun_revision(root: Path, name: str):
     return _spec(resolved[len(name) + 1:])
 
 
+# Assinatura (caminho, mtime, tamanho) por arquivo; o hash só é refeito quando ela muda.
+# Sem isso cada passagem do laço relia todo byte de todo plugin, mesmo sem nada ter mudado.
+_DIGEST_CACHE: dict[str, tuple[tuple, str]] = {}
+
+
 def _digest(root: Path) -> str:
-    digest = hashlib.sha256()
+    entries: list[tuple[str, int, int]] = []
     for directory, dirs, files in os.walk(root, followlinks=False):
         dirs[:] = sorted(d for d in dirs if d != ".git")
         for name in dirs + sorted(files):
@@ -190,11 +196,21 @@ def _digest(root: Path) -> str:
                 continue
             if path.is_symlink():
                 raise InventoryError("Conteúdo simbólico não pode ser gerenciado")
-            digest.update(str(path.relative_to(root)).encode())
-            digest.update(b"\0")
-            if path.is_file():
-                digest.update(path.read_bytes())
-    return digest.hexdigest()
+            info = path.lstat()
+            entries.append((str(path.relative_to(root)), info.st_mtime_ns, info.st_size if path.is_file() else -1))
+    signature = tuple(entries)
+    cached = _DIGEST_CACHE.get(str(root))
+    if cached and cached[0] == signature:
+        return cached[1]
+    digest = hashlib.sha256()
+    for relative, _, size in entries:
+        digest.update(relative.encode())
+        digest.update(b"\0")
+        if size >= 0:
+            digest.update((root / relative).read_bytes())
+    result = digest.hexdigest()
+    _DIGEST_CACHE[str(root)] = (signature, result)
+    return result
 
 
 def _run(args, *, cwd, env, timeout):
@@ -801,7 +817,8 @@ class PluginSynchronizer:
                     records[name] = {"status": "managed", "source": source, "native": confirmed}
                 self._save_ledger(ledger)
                 native = after
-            except (InventoryError, OSError, ValueError, subprocess.SubprocessError):
+            except (InventoryError, OSError, ValueError, subprocess.SubprocessError) as failure:
+                # Quem falhou foi a ação; o desfazer que falhar também não pode tomar o lugar dela no relatório.
                 try:
                     if prepared_pin is not None:
                         self._restore_pin(name, prepared_pin, state)
@@ -814,8 +831,9 @@ class PluginSynchronizer:
                     else:
                         records[name]["status"] = "suspended"
                     self._save_ledger(ledger)
-                finally:
-                    raise
+                except (InventoryError, OSError, ValueError, subprocess.SubprocessError) as cleanup:
+                    _log.warning("omp plugin %s: desfazer falhou (%s) após %s", name, cleanup, failure)
+                raise failure
 
 
 class PluginSyncLoop:

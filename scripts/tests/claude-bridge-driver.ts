@@ -37,7 +37,10 @@ export default async function (pi: ExtensionAPI) {
     write(path.join(source, "personal.md"), agent("personal-agent"));
     write(path.join(source, "escape.md"), agent("../../escape"));
     write(path.join(claudeDir, "commands/fixture.md"), "Comando nativo, não espelhar.");
-    write(path.join(agentDir, "claude-bridge.json"), JSON.stringify({ enabled: scenario !== "disabled", skillPlugins: [], cacheCommands: [] }));
+    const extraAgents = path.join(home, "extra", "agents");
+    write(path.join(extraAgents, "dup.md"), agent("fixture-reviewer"));
+    write(path.join(agentDir, "claude-bridge.json"), JSON.stringify({ enabled: scenario !== "disabled", skillPlugins: [], cacheCommands: [],
+      agents: scenario === "discovery" ? { extraSources: [extraAgents] } : undefined }));
     if (scenario === "legacy") {
       // Instalação da ponte antiga: manifesto v1 só com nomes de prompts e a pasta de agents inteira dela.
       write(path.join(agentDir, "claude-bridge-manifest.json"), JSON.stringify({ prompts: ["fixture-cmd.md"] }));
@@ -82,6 +85,9 @@ export default async function (pi: ExtensionAPI) {
         assert.equal(fs.existsSync(path.join(agentDir, "skills-bridge")), false);
         assert.equal(fs.existsSync(path.join(home, "escape.md")), false);
         assert.equal(fs.readdirSync(agents).filter(file => parse(fs.readFileSync(path.join(agents, file), "utf8")).frontmatter.name === "personal-agent").length, 1);
+        // Mesmo nome em duas fontes: no omp o caminho é plano, então o segundo é pulado — e reportado.
+        assert.ok(bridge.sync().agents.skipped.some(entry => entry.includes("extra/dup.md") && entry.includes("já usado")));
+        assert.equal(fs.readdirSync(agents).filter(file => parse(fs.readFileSync(path.join(agents, file), "utf8")).frontmatter.name === "fixture-reviewer").length, 1);
       } else if (scenario === "conversion") {
         const converted = module.convertAgent("\ufeff" + agent("fixture-reviewer", "effort: high\n").replaceAll("\n", "\r\n"), {}, "omp", parse);
         assert.ok(converted);

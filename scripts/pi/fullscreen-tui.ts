@@ -1,13 +1,10 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { getAgentContext } from "./lib/agent-context";
 
-// The same source is linked into Pi and Oh My Pi. Use the process identity to
-// keep each agent's opt-in state in its own config directory.
-const IS_OMP = /(^|[\\/])omp(\.exe)?$/.test(process.execPath);
-const AGENT_DIR =
-	process.env.PI_CODING_AGENT_DIR || join(homedir(), IS_OMP ? ".omp/agent" : ".pi/agent");
+const { harness, agentDir: AGENT_DIR } = getAgentContext();
+const IS_OMP = harness === "omp";
 const CONFIG_PATH = join(AGENT_DIR, "fullscreen-tui.json");
 const SETTINGS_PATH = join(AGENT_DIR, "settings.json");
 const EM_SUBAGENTE = Number(process.env.PI_SUBAGENT_DEPTH ?? "0") > 0;

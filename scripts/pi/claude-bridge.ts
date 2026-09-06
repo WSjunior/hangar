@@ -396,7 +396,7 @@ export async function createBridge(pi: ExtensionAPI, context: AgentContext = get
 					if (native.has(converted.name)) { result.agents.skipped.push(converted.name); continue; }
 					const relative = path.relative(agentDir, path.join(agentsOut, harness === "omp"
 						? `claude-bridge-${converted.name}.md` : path.join(encodeURIComponent(source.label), `${converted.name}.md`)));
-					if (seen.has(relative)) continue;
+					if (seen.has(relative)) { result.agents.skipped.push(`${source.label}/${file} (nome ${converted.name} já usado por outra fonte)`); continue; }
 					seen.add(relative);
 					expected[relative] = { kind: "agents", content: converted.content };
 					result.agents.total++;
