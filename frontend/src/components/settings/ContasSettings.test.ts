@@ -198,19 +198,21 @@ describe('ContasSettings — a lista', () => {
 });
 
 describe('ContasSettings — criar e apagar reusam as rotas de sempre', () => {
-  it('+ Nova conta abre o catálogo de provedores (a escolha saiu da linha do rodapé)', async () => {
-    // O rodapé tem UM botão. A escolha do provedor e o formulário vivem no modal
-    // (NovaCredencialSheet): inline, a pergunta e as opções viravam cinco controles competindo
-    // pela mesma linha — o que o usuário apontou em 18/08.
+  it('+ Adicionar (cabeçalho) abre a folha perguntando O QUÊ criar', async () => {
+    // O botão saiu do rodapé da lista e virou o primeiro controle do cabeçalho — criar era o
+    // 13º item da tela. A folha (NovaCredencialSheet, montada em document.body) passa a abrir
+    // no passo "o quê": conta do Claude, modelo pro Claude Code ou chave de outro agente; o
+    // catálogo de provedores só aparece depois dessa escolha.
     const t = montar([LOGADA]);
     await tick(); await tick();
-    const rodape = [...t.el.querySelectorAll<HTMLButtonElement>('.ct-rodape .ct-btn')];
-    expect(rodape.map((b) => b.textContent)).toEqual([m.contas_nova()]);
-    rodape[0].click();
+    const add = t.el.querySelector<HTMLButtonElement>(`.ct-cab button[aria-label="${m.contas_add_aria()}"]`)!;
+    expect(add).not.toBeNull();
+    expect(add.textContent).toContain(m.contas_add());
+    add.click();
     await tick(); await tick();
-    // O catálogo é do modal, que monta em document.body (BottomSheet), não dentro da aba.
-    expect(document.body.textContent).toContain(m.novacred_custom_nome());
-    expect(document.body.textContent).toContain(m.novacred_claude_nome());
+    expect(document.body.textContent).toContain(m.contas_add_conta());
+    expect(document.body.textContent).toContain(m.contas_add_modelo());
+    expect(document.body.textContent).toContain(m.contas_add_chave());
     unmount(t.comp);
   });
 
@@ -285,8 +287,8 @@ describe('ContasSettings — o botão Entrar (Task 7)', () => {
     input.value = 'CODE-123';
     input.dispatchEvent(new Event('input'));
     await tick();
-    // O botão Confirmar código fica no SEGUNDO .ct-rodape (o primeiro é o da lista).
-    const rodapeLogin = [...t.el.querySelectorAll<HTMLElement>('.ct-rodape')][1];
+    // O rodapé do login é o único que sobrou (o da lista virou o botão do cabeçalho).
+    const rodapeLogin = t.el.querySelector<HTMLElement>('.ct-rodape.login')!;
     rodapeLogin.querySelector<HTMLButtonElement>('.ct-btn.primario')!.click();
     await tick(); await tick();
     expect(loginMock.confirmarLogin).toHaveBeenCalledWith(ALVO, 'testes', 'CODE-123');
@@ -447,7 +449,7 @@ describe('ContasSettings — o botão Entrar (Task 7)', () => {
     input.value = 'CODE-123';
     input.dispatchEvent(new Event('input'));
     await tick();
-    const rodapeLogin = [...el.querySelectorAll<HTMLElement>('.ct-rodape')][1];
+    const rodapeLogin = el.querySelector<HTMLElement>('.ct-rodape.login')!;
     rodapeLogin.querySelector<HTMLButtonElement>('.ct-btn.primario')!.click();
     await tick(); await tick();
     expect(loginMock.confirmarLogin).toHaveBeenCalledWith(A, 'testes', 'CODE-123');
@@ -479,7 +481,7 @@ describe('ContasSettings — o botão Entrar (Task 7)', () => {
     input.value = 'CODE-123';
     input.dispatchEvent(new Event('input'));
     await tick();
-    const rodapeLogin = [...el.querySelectorAll<HTMLElement>('.ct-rodape')][1];
+    const rodapeLogin = el.querySelector<HTMLElement>('.ct-rodape.login')!;
     rodapeLogin.querySelector<HTMLButtonElement>('.ct-btn.primario')!.click();
     await tick(); await tick();
     props.apiTarget = B;   // ?srv= trocou com o confirmar em voo
@@ -504,7 +506,7 @@ describe('ContasSettings — o botão Entrar (Task 7)', () => {
     input.value = 'CODE-123';
     input.dispatchEvent(new Event('input'));
     await tick();
-    const rodapeLogin = [...t.el.querySelectorAll<HTMLElement>('.ct-rodape')][1];
+    const rodapeLogin = t.el.querySelector<HTMLElement>('.ct-rodape.login')!;
     rodapeLogin.querySelector<HTMLButtonElement>('.ct-btn.primario')!.click();
     await tick(); await tick(); await tick();
     // montagem + recarga do ramo de erro: a lista não fica presa no estado antigo.
@@ -529,8 +531,8 @@ describe('ContasSettings — o botão Entrar (Task 7)', () => {
     await tick(); await tick();
     t.el.querySelector<HTMLButtonElement>('.ct-acao.primaria')!.click();
     await tick(); await tick(); await tick(); await tick();
-    // O rodapé do login é o SEGUNDO .ct-rodape (o primeiro é o rodapé da lista, "+ Nova conta").
-    const rodapeLogin = [...t.el.querySelectorAll<HTMLElement>('.ct-rodape')][1];
+    // O rodapé do login é o único .ct-rodape da tela (o da lista virou botão do cabeçalho).
+    const rodapeLogin = t.el.querySelector<HTMLElement>('.ct-rodape.login')!;
     rodapeLogin.querySelector<HTMLButtonElement>('button:not(.primario)')!.click();
     await tick(); await tick();
     expect(loginMock.cancelarLogin).toHaveBeenCalledWith(ALVO, 'testes');
@@ -631,7 +633,7 @@ describe('ContasSettings — modelo e opções da chave (Contas e modelos)', () 
   const SEM_MOTORES = { motores: {}, arquivo_corrompido: false, arquivo_caminho: '' };
   const botao = (raiz: Element, rotulo: string) =>
     [...raiz.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === rotulo)!;
-  const abrirMotor = (raiz: Element) => botao(raiz, m.contas_modelo_opcoes()).click();
+  const abrirMotor = (raiz: Element) => botao(raiz, m.config_motores_editar()).click();
   // `vi.clearAllMocks()` do arquivo limpa CONTAGENS, não `mockResolvedValue`/`mockRejectedValue`:
   // sem repor aqui, o caso do arquivo corrompido (e o do erro) vazaria para o seguinte.
   beforeEach(() => {
@@ -648,8 +650,10 @@ describe('ContasSettings — modelo e opções da chave (Contas e modelos)', () 
     const t = montar([chave()]);
     await tick(); await tick(); await tick();
     expect(apiMock.getEnginesForServer).toHaveBeenCalledWith(ALVO);
-    expect(t.el.textContent).toContain('kimi-k3 · 256k');
-    const btn = [...t.el.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === m.contas_modelo_opcoes());
+    // A janela mudou de lugar (virou chip), não sumiu: a linha do modelo é só o id do modelo.
+    expect(t.el.querySelector('.ct-modelo')!.textContent).toBe('kimi-k3');
+    expect(t.el.textContent).toContain(m.contas_chip_janela({ n: '256k' }));
+    const btn = [...t.el.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === m.config_motores_editar());
     expect(btn).toBeDefined();
     unmount(t.comp);
   });
@@ -660,7 +664,7 @@ describe('ContasSettings — modelo e opções da chave (Contas e modelos)', () 
     const t = montar([chave()]);
     await tick(); await tick(); await tick();
     expect(t.el.querySelector('.ct-card')!.textContent).toContain('https://api.kimi.com/coding/v1');
-    [...t.el.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === m.contas_modelo_opcoes())!.click();
+    [...t.el.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === m.config_motores_editar())!.click();
     await tick();
     const card = t.el.querySelector('.ct-card')!;
     expect(card.textContent).toContain(m.config_motores_avancado());
@@ -674,7 +678,7 @@ describe('ContasSettings — modelo e opções da chave (Contas e modelos)', () 
     expect(card.textContent).toContain(m.config_motores_avancado());
     [...card.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === m.sessao_fechar())!.click();
     await tick();
-    expect(t.el.querySelector('.ct-card')!.textContent).toContain('kimi-k2.7 · 256k');
+    expect(t.el.querySelector('.ct-modelo')!.textContent).toBe('kimi-k2.7');
     unmount(t.comp);
   });
 
@@ -771,7 +775,7 @@ describe('ContasSettings — modelo e opções da chave (Contas e modelos)', () 
     const t = montar([chave()]);
     await tick(); await tick(); await tick();
     expect(t.el.textContent).toContain('HTTP 500');
-    expect(t.el.textContent).not.toContain(m.contas_modelo_opcoes());
+    expect(t.el.textContent).not.toContain(m.config_motores_editar());
     unmount(t.comp);
   });
 
@@ -779,19 +783,19 @@ describe('ContasSettings — modelo e opções da chave (Contas e modelos)', () 
     apiMock.getEnginesForServer.mockResolvedValue(MOTORES as never);
     const t = montar([LOGADA, chave({ id: 'kimi:/home/u/.kimi-code', nome: 'Kimi CLI', nome_natural: 'Kimi CLI', usos: ['kimi_cli'], base_url: null })]);
     await tick(); await tick(); await tick();
-    expect(t.el.textContent).not.toContain(m.contas_modelo_opcoes());
+    expect(t.el.textContent).not.toContain(m.config_motores_editar());
     expect(t.el.textContent).not.toContain('kimi-k3');
     unmount(t.comp);
   });
 
-  it('engines.json corrompido: aviso no topo, nenhum botão de motor e + Nova conta desabilitado', async () => {
+  it('engines.json corrompido: aviso no topo, nenhum botão de motor e + Adicionar desabilitado', async () => {
     apiMock.getEnginesForServer.mockResolvedValue({ motores: {}, arquivo_corrompido: true, arquivo_caminho: '/home/u/.claude/engines.json' } as never);
     const t = montar([chave()]);
     await tick(); await tick(); await tick();
     expect(t.el.textContent).toContain(m.config_motores_nao_consegui_1());
     expect(t.el.textContent).toContain('/home/u/.claude/engines.json');
-    expect(t.el.textContent).not.toContain(m.contas_modelo_opcoes());
-    const nova = [...t.el.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === m.contas_nova())!;
+    expect(t.el.textContent).not.toContain(m.config_motores_editar());
+    const nova = t.el.querySelector<HTMLButtonElement>(`button[aria-label="${m.contas_add_aria()}"]`)!;
     expect(nova.disabled).toBe(true);
     unmount(t.comp);
   });
@@ -864,7 +868,7 @@ describe('ContasSettings — modelo e opções da chave (Contas e modelos)', () 
     expect(card.textContent).toContain(m.novacred_sync_ok());
     botao(card, m.sessao_fechar()).click();
     await tick();
-    expect(t.el.querySelector('.ct-card')!.textContent).toContain('kimi-k2.7 · 256k');
+    expect(t.el.querySelector('.ct-modelo')!.textContent).toBe('kimi-k2.7');
     unmount(t.comp);
   });
 
@@ -876,6 +880,168 @@ describe('ContasSettings — modelo e opções da chave (Contas e modelos)', () 
     [...t.el.querySelectorAll<HTMLButtonElement>('.ct-menu-item')].find((b) => b.textContent?.trim() === m.comum_apagar())!.click();
     await tick();
     expect(t.el.querySelector('.ct-confirma')!.textContent).toContain(m.config_motores_sessoes_abertas());
+    unmount(t.comp);
+  });
+});
+
+describe('ContasSettings — as três seções da lista', () => {
+  // A tela nasceu da fusão de duas telas antigas e ficou com 12 credenciais numa lista só, sem
+  // seção nenhuma. Aqui cada credencial tem um lugar: conta do Claude, modelo pro Claude Code
+  // (chave que está no engines.json) e chave de outro agente. A CÓPIA que o agentes_sync grava
+  // no config.toml do Kimi tem o mesmo nome do motor — ela não é uma credencial a mais, é uma
+  // linha dentro do card do modelo.
+  const MOTORES = {
+    motores: {
+      kimi: {
+        label: 'Kimi', base_url: 'https://api.kimi.com/coding', model: 'kimi-k3',
+        context_window: 256000, subagent_model: 'kimi-k3-mini', adaptive_thinking: false,
+        api_key: 'sk-k••••4f2a', api_key_definida: true,
+      },
+      'command-code': {
+        // Sem context_window e sem subagent_model: é o caso dos chips "padrão"/"igual".
+        label: 'Command Code', base_url: 'https://gw.exemplo.com/provider', model: 'gpt-5.6-luna',
+        api_key: 'sk-cc••••1234', api_key_definida: true,
+      },
+    },
+    arquivo_corrompido: false, arquivo_caminho: '',
+  };
+  const CC = chave({
+    id: 'chave:command-code', nome: 'Command Code', nome_natural: 'command-code',
+    base_url: 'https://gw.exemplo.com/provider', chave_mascarada: 'sk-cc••••1234',
+  });
+  // A cópia do sync: id `kimi:<nome do motor>` (backend/app/cotas.py). O nome exibido é
+  // deliberadamente OUTRO — o que a linha do card diz é o nome do MOTOR, que é como o provider
+  // se chama dentro do Kimi, não o apelido que a cópia carrega.
+  const COPIA = chave({
+    id: 'kimi:command-code', nome: 'Apelido da cópia', nome_natural: 'command-code',
+    usos: ['kimi_cli'], base_url: null, cota: { estado: 'indisponivel', janelas: [] },
+  });
+  const KIMI_CLI = chave({
+    id: 'kimi:outro', nome: 'Kimi CLI', nome_natural: 'outro', usos: ['kimi_cli'],
+    base_url: null, cota: { estado: 'indisponivel', janelas: [] },
+  });
+  const CODEX = chave({
+    id: 'codex:chatgpt', nome: 'ChatGPT', nome_natural: 'chatgpt', usos: [],
+    base_url: null, cota: { estado: 'indisponivel', janelas: [] },
+  });
+  const LISTA = [LOGADA, chave(), CC, COPIA, KIMI_CLI, CODEX];
+
+  const secoes = (el: HTMLElement) => [...el.querySelectorAll<HTMLElement>('.ct-grupo')];
+  const nomes = (g: HTMLElement) => [...g.querySelectorAll('.ct-nome')].map((n) => n.textContent);
+  const cardDe = (el: HTMLElement, nome: string) =>
+    [...el.querySelectorAll<HTMLElement>('.ct-card')]
+      .find((c) => c.querySelector('.ct-nome')?.textContent === nome)!;
+
+  beforeEach(() => {
+    apiMock.getEnginesForServer.mockResolvedValue(MOTORES as never);
+    apiMock.getEngines.mockResolvedValue(MOTORES as never);
+  });
+
+  it('os três títulos aparecem nesta ordem: Claude, modelos, outros agentes', async () => {
+    const t = montar(LISTA);
+    await tick(); await tick(); await tick();
+    expect(secoes(t.el).map((s) => s.querySelector('.st-secao')!.textContent))
+      .toEqual([m.contas_secao_claude(), m.contas_secao_modelos(), m.contas_secao_outros()]);
+    unmount(t.comp);
+  });
+
+  it('cada credencial cai na sua seção (chave com motor = modelo; kimi/codex = outros)', async () => {
+    const t = montar(LISTA);
+    await tick(); await tick(); await tick();
+    const [claudes, modelos, outros] = secoes(t.el);
+    expect(nomes(claudes)).toEqual(['jefferson']);
+    expect(nomes(modelos)).toEqual(['Kimi', 'Command Code']);
+    expect(nomes(outros)).toEqual(['Kimi CLI', 'ChatGPT']);
+    unmount(t.comp);
+  });
+
+  it('a cópia do sync no Kimi não tem card próprio — é uma linha dentro do card do modelo', async () => {
+    const t = montar(LISTA);
+    await tick(); await tick(); await tick();
+    // 5 cards para 6 credenciais: a cópia foi absorvida.
+    expect(t.el.querySelectorAll('.ct-card').length).toBe(5);
+    expect(t.el.textContent).not.toContain('Apelido da cópia');
+    expect(cardDe(t.el, 'Command Code').textContent)
+      .toContain(m.contas_sync_kimi({ nome: 'command-code' }));
+    // E só no card dela: o outro modelo não ganhou a linha.
+    expect(cardDe(t.el, 'Kimi').textContent).not.toContain(m.contas_sync_kimi({ nome: 'command-code' }));
+    unmount(t.comp);
+  });
+
+  it('o botão de criar está no cabeçalho e o rodapé da lista não existe mais', async () => {
+    const t = montar(LISTA);
+    await tick(); await tick(); await tick();
+    const cab = t.el.querySelector<HTMLElement>('.ct-cab')!;
+    const add = cab.querySelector<HTMLButtonElement>(`button[aria-label="${m.contas_add_aria()}"]`)!;
+    expect(add).not.toBeNull();
+    expect(add.textContent!.trim()).toBe(`+ ${m.contas_add()}`);
+    // À esquerda dos dois botões redondos do cabeçalho (densidade e atualizar).
+    expect([...cab.querySelectorAll('button')].indexOf(add)).toBe(0);
+    // Sem login em voo não sobra rodapé nenhum na tela.
+    expect(t.el.querySelectorAll('.ct-rodape').length).toBe(0);
+    expect([...t.el.querySelectorAll('button')].some((b) => b.textContent?.trim() === m.contas_nova()))
+      .toBe(false);
+    unmount(t.comp);
+  });
+
+  it('o card do modelo mostra provedor, modelo e os três chips', async () => {
+    const t = montar(LISTA);
+    await tick(); await tick(); await tick();
+    const cc = cardDe(t.el, 'Command Code');
+    // Provedor é o HOST da base_url, não a URL inteira — o caminho (/provider) é ruído.
+    expect(cc.querySelector('.ct-provedor')!.textContent).toBe('gw.exemplo.com');
+    expect(cc.textContent).toContain('gpt-5.6-luna');
+    const chips = [...cc.querySelectorAll('.ct-chip')].map((c) => c.textContent);
+    expect(chips).toEqual([
+      m.contas_chip_janela_padrao(),          // sem context_window no motor
+      m.contas_chip_subagente_igual(),        // sem subagent_model
+      m.contas_chip_raciocinio_on(),          // default do backend é ligado
+    ]);
+    // O outro motor tem os três valores preenchidos.
+    const kimi = cardDe(t.el, 'Kimi');
+    expect([...kimi.querySelectorAll('.ct-chip')].map((c) => c.textContent)).toEqual([
+      m.contas_chip_janela({ n: '256k' }),
+      m.contas_chip_subagente({ id: 'kimi-k3-mini' }),
+      m.contas_chip_raciocinio_off(),
+    ]);
+    unmount(t.comp);
+  });
+
+  it('seção vazia não some: mostra o texto de vazio dela', async () => {
+    apiMock.getEnginesForServer.mockResolvedValue({ motores: {}, arquivo_corrompido: false, arquivo_caminho: '' } as never);
+    const t = montar([LOGADA]);
+    await tick(); await tick(); await tick();
+    const [claudes, modelos, outros] = secoes(t.el);
+    expect(claudes.querySelector('.ct-vazio')).toBeNull();
+    expect(modelos.querySelector('.ct-vazio')!.textContent).toBe(m.contas_secao_modelos_vazio());
+    expect(outros.querySelector('.ct-vazio')!.textContent).toBe(m.contas_secao_outros_vazio());
+    unmount(t.comp);
+  });
+
+  it('a etiqueta "chave de API" fica só nos outros agentes — na seção de modelos ela repetia o título', async () => {
+    const t = montar(LISTA);
+    await tick(); await tick(); await tick();
+    // Em "Chaves de outros agentes" a etiqueta informa: ali uma chave convive com o login do Codex.
+    expect(cardDe(t.el, 'Kimi CLI').querySelector('.ct-tag')!.textContent).toBe(m.contas_tipo_chave());
+    // No card do modelo, não: toda linha daquela seção é uma chave de API.
+    expect(cardDe(t.el, 'Command Code').querySelector('.ct-tag')).toBeNull();
+    expect(cardDe(t.el, 'Kimi').querySelector('.ct-tag')).toBeNull();
+    unmount(t.comp);
+  });
+
+  it('Editar e Remover aparecem NOMEADOS no card do modelo, não só dentro do kebab', async () => {
+    const t = montar(LISTA);
+    await tick(); await tick(); await tick();
+    const cc = cardDe(t.el, 'Command Code');
+    const acoes = [...cc.querySelectorAll<HTMLButtonElement>('.ct-acao')].map((b) => b.textContent?.trim());
+    expect(acoes).toContain(m.config_motores_editar());
+    expect(acoes).toContain(m.lista_remover());
+    // Remover cai na MESMA confirmação inline do kebab, com o aviso das sessões abertas.
+    [...cc.querySelectorAll<HTMLButtonElement>('.ct-acao')]
+      .find((b) => b.textContent?.trim() === m.lista_remover())!.click();
+    await tick();
+    const confirma = cardDe(t.el, 'Command Code').querySelector('.ct-confirma')!;
+    expect(confirma.textContent).toContain(m.config_motores_sessoes_abertas());
     unmount(t.comp);
   });
 });

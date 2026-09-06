@@ -35,6 +35,19 @@ function montar(motor: Motor = KIMI) {
   const comp = mount(MotorForm, { target: el, props: { apiTarget: null, nome: 'kimi', motor, onSalvo, onFechar } });
   return { el, comp: comp as never, onSalvo, onFechar };
 }
+
+// Modo criar: sem motor no disco e com o nome curto ainda por digitar.
+function montarCriando() {
+  const el = document.createElement('div');
+  document.body.appendChild(el);
+  const onSalvo = vi.fn();
+  const onFechar = vi.fn();
+  const comp = mount(MotorForm, {
+    target: el,
+    props: { apiTarget: null, nome: '', motor: null, criando: true, onSalvo, onFechar },
+  });
+  return { el, comp: comp as never, onSalvo, onFechar };
+}
 const campo = (el: HTMLElement, name: string) => el.querySelector<HTMLInputElement>(`input[name="${name}"]`)!;
 const botao = (el: HTMLElement, rotulo: string) =>
   [...el.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === rotulo)!;
@@ -54,12 +67,117 @@ describe('MotorForm', () => {
     unmount(t.comp);
   });
 
-  it('o avançado nasce fechado', () => {
+  // Os dez controles do Avançado são alcançáveis sem clique: escondê-los atrás do summary foi o
+  // que fez a tela fundida entregar menos do que a tela Motores tinha.
+  it('o avançado nasce ABERTO nos dois modos', () => {
     const t = montar();
     const det = t.el.querySelector<HTMLDetailsElement>('details');
     expect(det).not.toBeNull();
-    expect(det!.open).toBe(false);
+    expect(det!.open).toBe(true);
     unmount(t.comp);
+
+    const c = montarCriando();
+    expect(c.el.querySelector<HTMLDetailsElement>('details')!.open).toBe(true);
+    unmount(c.comp);
+  });
+
+  it('só o modo criar tem o campo de nome curto, com a linha do claude-engine', () => {
+    const c = montarCriando();
+    expect(campo(c.el, 'nome')).toBeDefined();
+    expect(c.el.textContent).toContain(m.config_motores_nome_curto());
+    expect(c.el.textContent).toContain(m.config_motores_terminal_1());
+    expect(c.el.textContent).toContain(m.config_motores_terminal_2());
+    const codigos = [...c.el.querySelectorAll('code')].map((x) => x.textContent ?? '');
+    expect(codigos.some((x) => x.startsWith('claude-engine'))).toBe(true);
+    unmount(c.comp);
+
+    // Em edição o nome é o id no disco e não muda — campo nenhum.
+    const t = montar();
+    expect(t.el.querySelector('input[name="nome"]')).toBeNull();
+    unmount(t.comp);
+  });
+
+  // A ajuda é lida como um comando de verdade: com o campo vazio ela tem que mostrar o EXEMPLO do
+  // placeholder, não o `chave` que o fallback do idDe('') produz — esse nome ninguém escolheu.
+  it('com o nome curto vazio a ajuda mostra o exemplo, não o fallback do idDe', async () => {
+    const c = montarCriando();
+    const codigo = () => [...c.el.querySelectorAll('code')]
+      .map((x) => x.textContent ?? '').find((x) => x.startsWith('claude-engine'))!;
+    expect(codigo()).toBe('claude-engine kimi');
+
+    const inp = campo(c.el, 'nome');
+    inp.value = 'Meu Provedor';
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+    await espera();
+    expect(codigo()).toBe('claude-engine meu-provedor');
+    unmount(c.comp);
+  });
+
+  it('os atalhos de endereço preenchem o campo base_url', async () => {
+    const t = montar();
+    const atalho = botao(t.el, m.config_motores_dica_omni());
+    expect(botao(t.el, m.config_motores_dica_kimi())).toBeDefined();
+    expect(atalho).toBeDefined();
+    atalho.click();
+    await tick();
+    expect(campo(t.el, 'base_url').value).toBe('https://ai.omniwise.com.br');
+    unmount(t.comp);
+  });
+
+  // Também na criação: o bloco continua aberto depois do primeiro Salvar, e daí em diante o motor
+  // existe e cada Salvar seguinte é edição.
+  it('o formulário avisa nos dois modos que salvar não mexe em sessão aberta', () => {
+    const t = montar();
+    expect(t.el.textContent).toContain(m.config_motores_sessoes_abertas());
+    unmount(t.comp);
+
+    const c = montarCriando();
+    expect(c.el.textContent).toContain(m.config_motores_sessoes_abertas());
+    unmount(c.comp);
+  });
+
+  // O aviso fala de uma chave e um endereço JÁ salvos: em criação não há nenhum dos dois, e a
+  // frase acendia no primeiro caractere digitado no endereço.
+  it('o aviso do endereço editado é só de edição com chave salva', async () => {
+    const c = montarCriando();
+    const novo = campo(c.el, 'base_url');
+    novo.value = 'https://x.exemplo';
+    novo.dispatchEvent(new Event('input', { bubbles: true }));
+    await espera();
+    expect(c.el.textContent).not.toContain(m.config_motores_endereco_mudou());
+    unmount(c.comp);
+
+    const t = montar();
+    const endereco = campo(t.el, 'base_url');
+    endereco.value = 'https://outro.exemplo.com';
+    endereco.dispatchEvent(new Event('input', { bubbles: true }));
+    await espera();
+    expect(t.el.textContent).toContain(m.config_motores_endereco_mudou());
+    unmount(t.comp);
+  });
+
+  it('em criação o PUT vai no id derivado do nome curto, e sem nome não dá pra salvar', async () => {
+    const c = montarCriando();
+    expect(botao(c.el, m.ctx_salvar()).disabled).toBe(true);
+
+    for (const [nome, valor] of [['nome', 'Meu Provedor'], ['base_url', 'https://x.exemplo'], ['model', 'mx-1']]) {
+      const inp = campo(c.el, nome);
+      inp.value = valor;
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    await espera();
+    expect(botao(c.el, m.ctx_salvar()).disabled).toBe(false);
+
+    botao(c.el, m.ctx_salvar()).click();
+    await espera();
+    const [id, corpo] = apiMock.putEngine.mock.calls[0];
+    expect(id).toBe('meu-provedor');
+    // Sem rótulo digitado, o nome curto é o rótulo.
+    expect(corpo).toMatchObject({ label: 'Meu Provedor', base_url: 'https://x.exemplo', model: 'mx-1' });
+    // Defaults do Avançado num motor que ainda não existe.
+    expect(corpo).toMatchObject({ prompt_caching: true, adaptive_thinking: true, bundled_skills: false });
+    expect(credMock.sincronizarNosAgentes).toHaveBeenCalledWith(null, 'chave:meu-provedor');
+    unmount(c.comp);
   });
 
   it('salvar manda o registro COMPLETO (avançado incluso, vision preservada), chama onSalvo, sincroniza e NÃO fecha', async () => {
