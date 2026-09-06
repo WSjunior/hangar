@@ -107,9 +107,12 @@ PY
 # api <METHOD> <path> [json-body] — imprime o corpo no stdout; falha (!2xx) imprime status + corpo
 # real da API no stderr e retorna 1. Sem -f: mascarar o detail ("sessão não encontrada" vs 401 vs
 # 502) deixava quem chama (inclusive um Claude) sem como se corrigir.
+# Máquina desligada no Tailscale não RECUSA a conexão, ela pendura: sem --connect-timeout o curl
+# espera o teto do SO e a varredura de peers nunca volta. API_TIMEOUT sobe pra operação local longa.
 api() {
     local method=$1 path=$2 body=${3:-} out code
-    out=$(curl -s -w $'\n%{http_code}' -X "$method" -H "$AUTH" \
+    out=$(curl -s --connect-timeout "${API_CONNECT_TIMEOUT:-3}" -m "${API_TIMEOUT:-30}" \
+        -w $'\n%{http_code}' -X "$method" -H "$AUTH" \
         ${body:+-H "Content-Type: application/json" -d "$body"} "$BASE$path") || {
         echo "erro: backend inacessível em $BASE (hangar rodando?)" >&2; return 1; }
     code=${out##*$'\n'}
@@ -137,18 +140,33 @@ for k, v in json.load(open(sys.argv[1])).items():
         continue
     print("%s\t%s\t%s" % (k, v["base_url"].rstrip("/"), v["token"]))' "$PEERS_FILE") \
             || { echo "⚠ $PEERS_FILE inválido — servidores remotos ignorados" >&2; peers_tsv=""; }
+        # Um peer POR PROCESSO, todos ao mesmo tempo: em série, uma máquina fora do ar atrasava
+        # todas as seguintes pelo tempo dela — e as que vinham depois nem chegavam a ser tentadas.
+        # A saída volta arquivada e é impressa na ordem do peers.json, senão as linhas intercalam.
+        tmpd=$(mktemp -d) || { echo "erro: mktemp falhou" >&2; exit 1; }
+        trap 'rm -rf "$tmpd"' EXIT
+        n=0
         while IFS=$'\t' read -r pid pbase ptok; do
             [[ -n "$pid" ]] || continue
-            BASE="$pbase" AUTH="Authorization: Bearer $ptok" api GET /api/sessions \
-                | python3 -c 'import json, sys
+            n=$((n + 1))
+            (
+                BASE="$pbase" AUTH="Authorization: Bearer $ptok" API_TIMEOUT=8 \
+                    api GET /api/sessions \
+                    | python3 -c 'import json, sys
 try:
     sessions = json.load(sys.stdin)
 except ValueError:  # api() falhou -> stdin vazio; o detalhe real já saiu no stderr dela
     sys.exit(1)
 for s in sessions:
     print("%-24s %-15s %s" % (sys.argv[1] + "::" + s["name"], s["state"], s["cwd"]))' "$pid" \
-                || echo "⚠ servidor '$pid' falhou ($pbase) — detalhe acima" >&2
+                    || echo "⚠ servidor '$pid' falhou ($pbase) — detalhe acima" >&2
+            ) >"$tmpd/$n.out" 2>"$tmpd/$n.err" &
         done <<< "$peers_tsv"
+        wait
+        for ((i = 1; i <= n; i++)); do
+            cat "$tmpd/$i.out"
+            cat "$tmpd/$i.err" >&2
+        done
     fi
     exit 0
 fi

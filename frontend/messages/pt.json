@@ -1589,6 +1589,7 @@
   "tabela_botao_tabela": "Tabela",
   "vault_sync_deslogado": "sync deslogado — a mudança ficou só neste aparelho",
   "vault_nao_subiu": "não subiu pro hub: {msg}",
+  "vault_descartou_locais": "{n} servidor(es) deste aparelho não estavam no hub e foram removidos — o hub manda. Se você os adicionou aqui sem sync, adicione de novo.",
   "comum_fechar_menu_conta": "Fechar menu da conta",
   "comum_falha_envio_opcao": "não deu pra enviar a opção",
   "shell_painel": "Painel",

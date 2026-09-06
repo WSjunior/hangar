@@ -31,8 +31,12 @@
      *  botão chama `POST /api/sessions/{origem}/bastao` (que grava o dossiê e enfileira o
      *  kick-off) em vez do create normal. */
     bastao?: { name: string; cwd: string; serverId: string } | null;
+    /** Ids que o stream da lista marcou como fora do ar. Só escondem o CHIP: `servers` segue
+     *  inteiro pra resolução de alvo/bastão, senão uma máquina que oscila trocaria o alvo sozinha. */
+    offline?: ReadonlySet<string>;
   }
-  let { open, servers, onClose, onCreate, onOpenSession, bastao = null }: Props = $props();
+  let { open, servers, onClose, onCreate, onOpenSession, bastao = null,
+        offline = new Set<string>() }: Props = $props();
 
   // Provider da sessao nova: Claude (padrao, tmux), Codex (app-server, sem tmux/config_dir), Pi,
   // Kimi ou OMP (pane tmux como o Claude, mas sem config_dir e sem motor — o backend recusa motor
@@ -54,6 +58,12 @@
     loadConfigs();
     carregarProviders();
   }
+
+  // Criar sessão em máquina desligada não funciona, então ela não é oferecida. O alvo atual fica
+  // visível mesmo offline: sumir com o chip selecionado deixaria a folha sem seleção nenhuma.
+  const serversVisiveis = $derived(
+    servers.filter((s) => !offline.has(s.id) || s.id === targetServer),
+  );
 
   // Fluxo em dois passos: 1) escolher a pasta (scanner) -> 2) criar uma sessao nova com nome UNICO
   // derivado do basename. Varias sessoes na mesma pasta sao permitidas (cada uma tem nome+jsonl
@@ -733,11 +743,11 @@
   {/snippet}
 
   {#snippet chipsServidor()}
-    {#if servers.length > 1}
+    {#if serversVisiveis.length > 1}
       <div class="server-select">
         <span class="server-select-label">{m.lista_agrupar_servidor()}</span>
         <div class="server-chips">
-          {#each servers as s (s.id)}
+          {#each serversVisiveis as s (s.id)}
             <button
               type="button"
               class="server-chip"

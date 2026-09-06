@@ -632,6 +632,46 @@ describe('CreateSessionSheet — retomar conversa da pasta', () => {
   });
 });
 
+describe('CreateSessionSheet — servidor fora do ar', () => {
+  const TRES = [
+    { id: 'srv-a', label: 'Servidor A', baseUrl: 'http://a', token: 'x' },
+    { id: 'srv-b', label: 'Servidor B', baseUrl: 'http://b', token: 'y' },
+    { id: 'srv-c', label: 'Servidor C', baseUrl: 'http://c', token: 'z' },
+  ];
+
+  function montar(props: Record<string, unknown>) {
+    const el = document.createElement('div');
+    document.body.appendChild(el);
+    const comp = mount(Harness, {
+      target: el,
+      props: { onCreate, onOpenSession: vi.fn(), ...props } as never,
+    });
+    return comp;
+  }
+
+  const rotulos = () =>
+    [...document.querySelectorAll<HTMLButtonElement>('.server-chip')].map((c) => c.textContent!.trim());
+
+  it('máquina desligada não é oferecida — criar sessão nela não funcionaria', async () => {
+    const comp = montar({ servidores: TRES, offline: new Set(['srv-c']) });
+    await flush();
+    expect(rotulos()).toEqual(['Servidor A', 'Servidor B']);
+    unmount(comp);
+  });
+
+  it('o alvo ATUAL continua visível mesmo offline: sem ele a folha ficaria sem seleção', async () => {
+    // Sem servidor ativo no localStorage o alvo cai em `servers[0]` = A. Se A cair, esconder o chip
+    // dele deixaria a lista inteira sem nenhum `.on` — a pessoa não veria onde a sessão vai nascer.
+    const comp = montar({ servidores: TRES, offline: new Set(['srv-a', 'srv-c']) });
+    await flush();
+    expect(rotulos()).toEqual(['Servidor A', 'Servidor B']);
+    const ligado = [...document.querySelectorAll<HTMLButtonElement>('.server-chip')]
+      .find((c) => c.classList.contains('on'));
+    expect(ligado?.textContent?.trim()).toBe('Servidor A');
+    unmount(comp);
+  });
+});
+
 describe('CreateSessionSheet — modo bastão', () => {
   const SERVIDORES = [
     { id: 'srv-a', label: 'Servidor A', baseUrl: 'http://a', token: 'x' },

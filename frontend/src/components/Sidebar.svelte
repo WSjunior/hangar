@@ -137,6 +137,13 @@ import ConfirmDialog from './ConfirmDialog.svelte';
     try { localStorage.setItem('cp_sidebar_w', String(width)); } catch { /* storage cheio/off */ }
   }
   const servers = $derived(sessionsStore.servers);
+  // Só quem NUNCA entregou lista nesta sessão conta como fora do ar; lista velha pode ser um
+  // piscar do watchdog, e sumir com o chip que a pessoa ia clicar é pior que deixá-lo lá.
+  const servidoresOffline = $derived(
+    new Set(
+      sessionsStore.byServer.filter((b) => b.error && !b.loaded).map((b) => b.server.id),
+    ),
+  );
   // Agrupando por projeto, o cwd já está no header do grupo; mostrar o caminho em cada row é
   // redundância. Ele volta a aparecer quando o agrupamento é por servidor.
   const showCwd = $derived(model.groupMode === 'server');
@@ -978,7 +985,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
      overflow:hidden (e backdrop-filter no modo liquid, que vira containing block) e clipa o popover. -->
 {#if hp}<HoverPreview text={hp.text} x={hp.x} y={hp.y} />{/if}
 
-<CreateSessionSheet open={showCreate} {servers} onClose={() => (showCreate = false)} onCreate={handleCreate} onOpenSession={abrirSessaoDoSheet} bastao={bastaoAlvo} />
+<CreateSessionSheet open={showCreate} {servers} offline={servidoresOffline} onClose={() => (showCreate = false)} onCreate={handleCreate} onOpenSession={abrirSessaoDoSheet} bastao={bastaoAlvo} />
 
 <!-- "Buscar conversas" (nav): switcher em modo só-busca (busca de conteúdo cross-servidor, feature #10). -->
 <SessionSwitcherSheet
