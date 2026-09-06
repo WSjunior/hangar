@@ -1296,6 +1296,31 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
     local, como sempre foi. `tar.gz` e não zip porque o Windows 10+ traz `tar.exe` — um comando só
     nos dois instaladores. O `npm ci` **continua** para quem mantém o preview, que precisa do
     `node_modules`.
+- **O diálogo de confiança do Claude Code, e as três coisas que ele derrubava** (medido 06/09/2026,
+  claude 2.1.263, com o pane real capturado em `tests/fixtures/pane_trust_dialog.txt`). Sintoma no
+  Windows: sessão criada pelo app numa pasta nova morria sozinha e o app dizia "sessão não
+  encontrada"; o chat de outra ficava em "reconectando" para sempre. São três defeitos em fila, e o
+  segundo e o terceiro valem em qualquer sistema:
+  - **A chave do pre-trust é o caminho com barra NORMAL no Windows.** No bundle do CLI,
+    `function uN(e){let t=B(e); if(L()==="windows") return t.replaceAll("\\","/"); return t}` é quem
+    monta a chave de `projects` no `.claude.json`. O `_pretrust_cwd` gravava o `cwd` cru — que vem do
+    `fs.py` como `str(Path(...))`, com contrabarra —, então escrevia uma chave que ninguém lê e o
+    diálogo aparecia mesmo com o pre-trust rodando. Hoje passa por `registry._chave_trust`. (A outra
+    metade dessa armadilha, "escreveu no ARQUIVO errado", já estava fechada em `tmux.claude_json_de`.)
+  - **`is_overlay` não via o diálogo porque olhava as 8 últimas linhas de um pane cheio de branco.**
+    A caixa ocupa 16 linhas de um pane de 30 e o resto fica vazio; `capture-pane` devolve a altura
+    inteira, então a janela de 8 linhas pegava só branco e o gate respondia "tela livre". Com isso o
+    `deliverable` liberava, o envio digitava às cegas e o Enter caía em **"No, exit"** — que é a
+    opção sob o cursor, porque o CLI desenha esse diálogo com `cancelFirst:!0, focus:"cancel"`. E as
+    opções vêm com `hideIndexes:!0`, sem `1.`/`2.`, então `classify` nunca as vê como menu: o
+    `is_overlay` é a única defesa. Quem responde "quais são as últimas 8 linhas" agora é o
+    `state._rodape`, que descarta as em branco do fim — a mesma correção que o `_pane_tail` do
+    `terminal_input` já tinha, e que o `_menu_block` (o gate do picker do Pi) também precisava.
+  - **`awatch` numa pasta que ainda não existe derruba o SSE em laço.** `projects/<slug>` só nasce
+    quando o agente escreve; até lá o `follow()` levantava `FileNotFoundError`, o `pump` mandava o
+    erro pro cliente, o EventSource reconectava e caía no mesmo erro. O `TranscriptTailer.follow`
+    espera a pasta em vez de estourar (o `mkdir` que o adapter do Codex já fazia era o mesmo
+    problema, resolvido só naquele caminho).
 - **Session creation's systemd-scope probe.** Creating a session wraps `tmux` in
   `systemd-run --user --scope` so the tmux server doesn't inherit the backend's cgroup, but the wrap
   is now gated on a probe: a systemd user manager that refuses transient scopes was making **every**

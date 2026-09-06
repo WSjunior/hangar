@@ -118,6 +118,15 @@ def sanitize_cwd(cwd: str) -> str:
 _pretrust_lock = threading.Lock()
 
 
+def _chave_trust(cwd: str, windows: bool = os.name == "nt") -> str:
+    """A chave que o Claude Code usa em `projects` do `.claude.json` para esta pasta.
+
+    No Windows ele normaliza o caminho pra barra NORMAL antes de indexar; gravar com contrabarra
+    escreve uma chave que ninguem le, e a sessao nova nascia presa no "trust this folder?" mesmo
+    com o pre-trust rodando."""
+    return cwd.replace("\\", "/") if windows else cwd
+
+
 def _pretrust_cwd(cwd: str, config_dir: str | None) -> None:
     """Marca `hasTrustDialogAccepted=True` pra `cwd` no .claude.json que a sessão nova vai LER —
     quem responde qual é o arquivo é `tmux.claude_json_de`, o mesmo lugar que decide se o pane
@@ -139,7 +148,7 @@ def _pretrust_cwd(cwd: str, config_dir: str | None) -> None:
             cfg = tmux.claude_json_de(config_dir)
             data = json.loads(cfg.read_text(encoding="utf-8")) if cfg.exists() else {}
             projects = data.setdefault("projects", {})
-            entry = projects.setdefault(cwd, {})
+            entry = projects.setdefault(_chave_trust(cwd), {})
             if entry.get("hasTrustDialogAccepted") is True:
                 return  # já confiada -> não reescreve o arquivo (evita corrida à toa)
             entry["hasTrustDialogAccepted"] = True
