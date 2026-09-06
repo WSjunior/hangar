@@ -1187,3 +1187,33 @@ async def test_estado_publica_sem_esperar_o_git_e_reaproveita_o_ultimo(tmp_path,
     await asyncio.sleep(0.05)
     out = await reg.list_with_state()
     assert out[0].git_dirty == 3 and out[0].git_added == 5
+
+
+def test_list_with_state_radar_de_limite_so_nas_travadas(tmp_path, monkeypatch):
+    # Sessao em limite fica `working` pelo marcador e nunca passava pela captura: limited ficava
+    # False na lista pra sempre. Agora a TRAVADA paga uma captura (cacheada) e ganha limit_reset; a
+    # working recente nao e raspada.
+    from pathlib import Path as _P
+    reg = SessionRegistry(projects_dir=tmp_path)
+    parada, fresca = tmp_path / "lim.jsonl", tmp_path / "viva.jsonl"
+    parada.write_text("{}\n"); fresca.write_text("{}\n")
+    old = time.time() - 999
+    os.utime(parada, (old, old))
+    mk = lambda n, j: type("I", (), {"name": n, "cwd": "/p", "jsonl": str(j), "state": "idle", "last_activity": None})()
+    monkeypatch.setattr(reg, "list", lambda: [mk("lim", parada), mk("viva", fresca)])
+    monkeypatch.setattr(hs_mod.hook_state, "get_state", lambda sid: ("working", old))
+    monkeypatch.setattr(registry.settings, "stall_seconds", 300)
+    banner = (_P(__file__).parent / "fixtures" / "pane_limite_uso.txt").read_text(encoding="utf-8")
+    capturas = []
+    monkeypatch.setattr(registry.tmux, "capture_pane", lambda name, lines=200: (capturas.append(name), banner)[1])
+    SessionRegistry._limit_cache.clear()
+    # Statusline ja quente: isola o radar (o sweep de statusline tambem captura, e alimenta o cache).
+    for n in ("lim", "viva"):
+        reg._status_cache[n] = (time.monotonic(), None)
+    out = {s.name: s for s in asyncio.run(reg.list_with_state())}
+    assert capturas == ["lim"]
+    assert out["lim"].limited is True and out["lim"].limit_reset == "9:10pm"
+    assert getattr(out["viva"], "limited", False) is False   # fake sem o default do SessionInfo
+    # 2o poll dentro do cache: nao captura de novo, mas o campo continua preenchido.
+    out = {s.name: s for s in asyncio.run(reg.list_with_state())}
+    assert capturas == ["lim"] and out["lim"].limit_reset == "9:10pm"

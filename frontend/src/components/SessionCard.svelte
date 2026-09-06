@@ -3,6 +3,7 @@
   import type { SessionInfo } from '../lib/types';
 import * as m from '../paraglide/messages';
   import { cwdParts, rotuloEstado, stateColors, untrackedReason, providerTag, relativeTime, fmtWhen } from '../lib/format';
+  import { chipDaConta } from '../lib/conta';
   import { loopBadge, LOOP_TONE_COLOR } from '../lib/loop';
   import { planBadge } from '../lib/plan';
   import PlanBar from './PlanBar.svelte';
@@ -67,9 +68,10 @@ import * as m from '../paraglide/messages';
     session.problema === 'codex_hooks_nao_aprovados' ? m.problema_codex_hooks() : null,
   );
 
-  // Rate-limit radar (feature #8): banner de limite de uso detectado no pane (best-effort). Chip
-  // proprio "⏳ HH:MM" ao lado do state-chip — calmo, so avisa quando volta.
+  // Radar de limite (feature #8): parada esperando o limite voltar. O state-chip vira "limite ·
+  // volta HH:MM" e o ícone para de animar — a sessão está `working` pro hook, não pra pessoa.
   const limited = $derived(session.limited === true);
+  const contaChip = $derived(chipDaConta(session.conta));
 
   const loopChip = $derived(loopBadge(session.loop_status, session.loop_iter, session.loop_max));
   const planChip = $derived(planBadge(session));
@@ -256,7 +258,7 @@ import * as m from '../paraglide/messages';
       {#if selectMode}
         <!-- Checkbox visual (a semantica de check fica no role="checkbox" da row -> so decorativo). -->
         <input type="checkbox" class="select-check" checked={selected} tabindex="-1" aria-hidden="true" />
-      {:else if session.state === 'working'}
+      {:else if session.state === 'working' && !limited}
         <!-- Working -> a marca desenhando, na COR DO ESTADO. O Lottie antigo trazia a cor dentro
              do arquivo; este herda via currentColor, então quem pinta é o container — sem isto ele
              sai na cor do texto do card, que é apagada. -->
@@ -264,7 +266,7 @@ import * as m from '../paraglide/messages';
       {:else}
         <!-- Parada -> ponto na COR do estado. O icone parado era igual em todos os estados: numa
              lista sem nada animando as linhas ficavam indistinguiveis. -->
-        <span class="state-dot" style="background: {stateColors[session.state]};"></span>
+        <span class="state-dot" style="background: {limited ? 'var(--pill-limite-fg)' : stateColors[session.state]};"></span>
       {/if}
     </span>
 
@@ -338,12 +340,6 @@ import * as m from '../paraglide/messages';
           {#if session.pair_peers?.length}
             <span class="paired-chip" title={m.sessao_grupo_com({ n: session.pair_peers.join(', ') })}><GroupGlyph size={12} />&nbsp;{session.pair_peers.length === 1 ? session.pair_peers[0] : session.pair_peers.length + 1}</span>
           {/if}
-          {#if limited}
-            <span
-              class="limited-chip"
-              title={session.limit_reset ? m.sessao_limite_volta({ n: session.limit_reset }) : m.sessao_limite()}
-            >⏳{#if session.limit_reset}&nbsp;{session.limit_reset}{/if}</span>
-          {/if}
           {#if loopChip}
             <span
               class="paired-chip"
@@ -358,6 +354,11 @@ import * as m from '../paraglide/messages';
             <!-- Sem isto nada na lista distingue uma sessão de motor de uma da conta Anthropic. NÃO
                  mostramos custo aqui: o preço que o Claude Code calcula é tabela Anthropic e mentiria. -->
             <span class="engine-chip" title={m.sessao_motor({ n: session.engine })}>⚙&nbsp;{session.engine}</span>
+          {/if}
+          {#if contaChip}
+            <!-- Qual conta Anthropic paga esta sessão. No celular não havia isto em lugar nenhum,
+                 e três sessões paradas no limite da mesma conta pareciam três problemas. -->
+            <span class="conta-chip" style="color: {contaChip.cor}; border-color: {contaChip.cor};" title={m.sessao_conta({ n: contaChip.nome })}>{contaChip.label}</span>
           {/if}
         </span>
       <PlanBar {session} />
@@ -387,8 +388,8 @@ import * as m from '../paraglide/messages';
       {:else if showStateChip}
         <!-- O envelope .state-chip existe pelo anel de travada e pela regra de papel de parede do
              app.css que ja mirava essa classe; a pilula em si e o StateChip. -->
-        <span class="state-chip" class:stalled>
-          <StateChip state={session.state} title={stalled ? m.sessao_travada() : undefined} />
+        <span class="state-chip" class:stalled={stalled && !limited}>
+          <StateChip state={session.state} {limited} limitReset={session.limit_reset} title={limited ? undefined : stalled ? m.sessao_travada() : undefined} />
         </span>
       {:else}
         <!-- Sem chip, o estado so existia como COR (o .lead e aria-hidden) — leitor de tela ficava
@@ -854,16 +855,12 @@ import * as m from '../paraglide/messages';
   /* Claude (sem texto, só a marca): chip só-ícone fica redondo e menor que os chips com texto. */
   .prov-chip--so-icone { padding: 1px 3px; }
 
-  .limited-chip {
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    padding: 3px 9px;
-    border-radius: var(--radius-full);
-    white-space: nowrap;
-    color: var(--warning);
-    background: rgba(255, 159, 10, 0.12);
-    font-variant-numeric: tabular-nums;
+  /* Conta Anthropic da sessão: contorno na cor da conta, fundo transparente (é rótulo de
+     identidade, como o prov-chip — não disputa com estado nem com o motor). */
+  .conta-chip {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.02em;
+    padding: 0 6px; border: 1px solid; border-radius: var(--radius-full);
+    background: transparent; flex-shrink: 0;
   }
 
   /* Escondido do layout (mouse/touch usam swipe) mas SEMPRE na arvore de a11y (SR anuncia "Excluir

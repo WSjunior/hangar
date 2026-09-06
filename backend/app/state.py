@@ -134,31 +134,25 @@ def is_login(pane_text: str) -> bool:
     return bool(_LOGIN_RE.search(pane_text))
 
 
-# Banner de rate-limit (feature #8). ponytail: texto EXATO do Claude Code nao documentado
-# publicamente -- CALIBRATION KNOB, igual ao _LOGIN_RE acima: melhor-esforco, ajustar aqui quando
-# confirmado contra o banner real. Cobre variantes plausiveis ("usage limit reached" / "5-hour limit
-# reached" / "rate limit") seguidas da frase de reset ("resets at 3pm" / "resets 15:30" / "try again
-# at ..."), capturando so o horario.
+# Banner de limite de uso (feature #8), calibrado contra o Claude Code real (fixture
+# pane_limite_uso.txt): o rodape mostra `⚠ Usage limit reached · continuing automatically at 9:10pm`
+# e a conversa ecoa `You've hit your session limit · resets 9:10pm`. Frase e horario na MESMA linha.
 _LIMIT_RE = re.compile(
-    r"(?:usage limit reached|rate limit reached|limit reached)"
-    r".{0,80}?"
-    r"(?:resets?|reset|try again)\s*(?:at\s*)?"
+    r"(?:usage limit reached|hit your \w+ limit|limit reached)"
+    r"[^\n]{0,80}?"
+    r"(?:resets?|continuing automatically|try again)\s*(?:at\s*)?"
     r"([0-9]{1,2}(?::[0-9]{2})?\s*(?:am|pm)?)",
-    re.I | re.S,
+    re.I,
 )
+# So o rodape, como o is_overlay: o banner mora la enquanto a sessao espera, e uma sessao que CITA
+# o texto na conversa (saida de ferramenta, grep) ganhava o chip de limite sem ter limite nenhum.
+_LIMIT_TAIL = 8
 
 
 def rate_limit_reset(pane_text: str) -> Optional[str]:
-    """Horario de reset do limite de uso (string crua, ex: "3pm"/"15:30"), se o pane mostra o
-    banner de rate-limit. None numa sessao normal. ponytail: calibration knob -- ver _LIMIT_RE.
-
-    LIMITACAO DE COBERTURA (feature #8): so roda sobre um pane REALMENTE capturado. O StateMonitor
-    (chat aberto) captura sempre, entao o campo `limited` funciona la; mas a LISTA (list_with_state)
-    fast-pathea sessoes working/idle pelo marcador do hook e PULA a captura -> nesse caminho (o normal
-    pra uma sessao rate-limited, que fica working/idle) rate_limit_reset nunca e chamado e limited fica
-    False. Ver a nota no fast-path de registry.list_with_state. Nao mover a deteccao pro watchdog antes
-    de _LIMIT_RE ser calibrado contra o banner real (hoje e chute nao-calibrado)."""
-    m = _LIMIT_RE.search(pane_text)
+    """Horario de volta do limite de uso (string crua, ex: "9:10pm"/"15:30") se o rodape do pane
+    mostra o banner; None numa sessao normal."""
+    m = _LIMIT_RE.search("\n".join(pane_text.splitlines()[-_LIMIT_TAIL:]))
     return m.group(1).strip() if m else None
 # Glifos que marcam a BORDA do box do picker: bullet de assistente, junta de tool-result e
 # spinners. Scrollback (incl. listas numeradas perdidas) vive alem dessas linhas.

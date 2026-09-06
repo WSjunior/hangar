@@ -576,3 +576,18 @@ def test_pi_cursor_citation_without_live_footer_is_not_a_menu():
     )
     state, *_ = classify(pane)
     assert state == "idle"
+
+
+def test_rate_limit_reset_le_o_banner_real_do_rodape():
+    # Fixture capturada de uma sessao parada no limite de 5h: o rodape traz
+    # `⚠ Usage limit reached · continuing automatically at 9:10pm`.
+    pane = (Path(__file__).parent / "fixtures" / "pane_limite_uso.txt").read_text(encoding="utf-8")
+    assert state_mod.rate_limit_reset(pane) == "9:10pm"
+    assert state_mod.rate_limit_reset("You've hit your session limit · resets 9:10pm (America/Sao_Paulo)\n") == "9:10pm"
+
+
+def test_rate_limit_reset_ignora_citacao_fora_do_rodape():
+    # A frase citada na CONVERSA (saida de um grep, msg do usuario) nao e limite desta sessao: a
+    # sessao que investigava o limite de outra ganhava o chip. So o rodape decide.
+    citada = "31: You've hit your session limit · resets 9:10pm\n" + "linha\n" * 10 + "❯ \n"
+    assert state_mod.rate_limit_reset(citada) is None

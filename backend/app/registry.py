@@ -715,6 +715,11 @@ class SessionRegistry:
     # Texto do spinner ("Hyperspacing… (1m51s · ↓2.1k tokens)") extraido da MESMA captura do sweep:
     # o fast-path de marcador deixa label=None e o card nunca mostrava a barrinha de "trabalhando".
     _label_cache: dict[str, Optional[str]] = {}
+    # Banner de limite de uso por sessao TRAVADA: name -> (monotonic, horario de volta ou None).
+    # Sessao em limite fica `working` pelo marcador e nunca passaria pela captura; olhar o pane so
+    # das travadas, com este cache, e o que liga o radar sem raspar toda sessao a cada poll.
+    _limit_cache: dict[str, tuple[float, Optional[str]]] = {}
+    _LIMIT_CACHE_S = 30.0
     # Nomes ja avisados por _agent_pane (Task 5.5): sessao com 2+ panes e nenhum reconhecido como
     # agente. De classe pela MESMA razao das demais acima (list() roda em ambas instancias).
     _SEM_AGENTE_AVISADAS: set[str] = set()
@@ -1169,6 +1174,24 @@ class SessionRegistry:
             _log.warning("varredura de pares falhou (lista segue): %r", e)
         return out
 
+    async def _radar_de_limite(self, infos: list[SessionInfo], raspadas: set[str]) -> None:
+        """Preenche limited/limit_reset das sessoes TRAVADAS que o fast-path de marcador nao raspou.
+        Uma sessao esperando o limite voltar e `working` pelo hook e sem transcript avancando —
+        exatamente `stalled` —, e so ela paga a captura, uma vez a cada _LIMIT_CACHE_S."""
+        alvos = [i for i in infos if getattr(i, "stalled", False) and i.name not in raspadas]
+        agora = time.monotonic()
+        frescos = [i for i in alvos
+                   if agora - self._limit_cache.get(i.name, (0.0, None))[0] > self._LIMIT_CACHE_S]
+        if frescos:
+            frames = await asyncio.gather(
+                *[asyncio.to_thread(tmux.capture_pane, i.name) for i in frescos], return_exceptions=True)
+            for i, f in zip(frescos, frames):
+                reset = rate_limit_reset(f) if isinstance(f, str) else None
+                self._limit_cache[i.name] = (agora, reset)
+        for i in alvos:
+            i.limit_reset = self._limit_cache.get(i.name, (0.0, None))[1]
+            i.limited = i.limit_reset is not None
+
     async def list_with_state(self, infos: Optional[list[SessionInfo]] = None) -> list[SessionInfo]:
         # Listagem COM estado vivo por sessao (pro /api/sessions). Faz a resolucao otimizada (sync, num
         # thread) e por cima classifica o pane de cada sessao concorrentemente. `infos` opcional: um
@@ -1323,6 +1346,7 @@ class SessionRegistry:
                 # (marker path fica com o default False/None, igual a label/question/options).
                 info.limit_reset = rate_limit_reset(frame)
                 info.limited = info.limit_reset is not None
+                self._limit_cache[info.name] = (time.monotonic(), info.limit_reset)
                 # Statusline + label de graca: o frame ja foi capturado pra classificar.
                 self._status_cache[info.name] = (time.monotonic(), _pane_status(frame))
                 self._label_cache[info.name] = c[1]
@@ -1367,6 +1391,8 @@ class SessionRegistry:
             try:
                 pane = await asyncio.to_thread(tmux.capture_pane, info.name)
                 self._status_cache[info.name] = (time.monotonic(), _pane_status(pane))
+                # Mesma captura serve o radar de limite: assim a travada raramente paga a sua.
+                self._limit_cache[info.name] = (time.monotonic(), rate_limit_reset(pane))
                 # Spinner da MESMA captura (classify e puro/regex): e o que devolve a barrinha de
                 # "trabalhando" pro card quando o estado veio do marcador (que nao traz label).
                 # SO grava se a captura PARECE working — captura unica nao distingue spinner vivo
@@ -1432,6 +1458,7 @@ class SessionRegistry:
                 and info.last_activity is not None
                 and (now - info.last_activity) > runtime_config.get("stall_seconds")
             )
+        await self._radar_de_limite(infos, raspadas={i.name for i in pending})
         # Estado de git por sessão — SÓ aqui (payload do /api/sessions), nunca em list(): git_summary
         # forka `git status` e list() é o caminho leve chamado por kill()/resume/SSE. E como
         # list_with_state é awaitado direto no event loop (/api/sessions, sse, stall_watch), o loop
