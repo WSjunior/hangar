@@ -143,6 +143,14 @@ sem alterar configurações ou extensões personalizadas. As demais integraçõe
 mantidas; descoberta de skills não substitui execução de hooks CLI nem snapshots de código.
 Para ampliar um painel do tmux, use `Ctrl-b z`.
 
+A ponte Claude respeita `PI_CODING_AGENT_DIR` e `CLAUDE_CONFIG_DIR` (aceitam `~`).
+No OMP, importa agents pessoais de `<claudeDir>/agents` para `<agentDir>/agents`,
+sem espelhar skills ou comandos que o núcleo já descobre. No Pi, mantém as conversões
+e os diretórios de recursos próprios. A configuração fica em `<agentDir>/claude-bridge.json`;
+`enabled: false` desativa também a memória. Agents nativos e arquivos editados manualmente
+são preservados; `/claude-bridge` informa conflitos. A ponte não instala plugins no lugar
+do gerenciador nativo do OMP.
+
 Start the backend on loopback:
 
 ```bash

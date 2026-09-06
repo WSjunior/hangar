@@ -570,6 +570,27 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   Pi fixos nas extensões complementares, `agent_settled` ausente no OMP, `/rewind` reservado
   pelo núcleo e ausência de uma barreira assíncrona em `turn_start`. Não anunciar equivalência
   ou compatibilidade completa dessas extensões no OMP sem provar os respectivos fluxos.
+  **Bridge adaptado ao OMP (05/09/2026):** `agent-context.ts` resolve a identidade pelo
+  executável e normaliza `PI_CODING_AGENT_DIR`/`CLAUDE_CONFIG_DIR`, incluindo `~`; a fábrica
+  guarda esse contexto por instância. No OMP, agents pessoais/extras viram arquivos diretos
+  em `<agentDir>/agents/claude-bridge-<nome>.md`, com ferramentas em array YAML: `Glob → glob`,
+  `Task/Agent → task`, `WebFetch → read` e prefixo `mcp__` intacto. Agents nativos pessoais
+  têm precedência; aliases Claude sem mapeamento explícito herdam o modelo da sessão.
+  Isso inclui `fable`. Negações explícitas (`disallowedTools`) são subtraídas da allowlist;
+  sem uma allowlist ou com negação não representável, o agent é recusado, não ampliado.
+  Nomes `main`/`sub`, reservados pelo núcleo OMP, também são recusados nesse harness.
+  Skills/comandos/plugins não são espelhados no OMP, nem oferecidos no menu de fontes.
+  No Pi permanecem a conversão de ferramentas e o layout recursivo de agents, prompts e skills.
+  `frontmatter.ts` usa `Bun.YAML.parse` no OMP e carrega o parser legado somente no Pi.
+  Memória respeita `enabled`, preserva blocos do prompt e não reinsere conteúdo já presente.
+  O manifesto versão 2 registra conteúdo e caminho relativo de cada arquivo gerado: atualização
+  e remoção exigem os bytes originais, e conflitos são preservados e reportados. O manifesto
+  antigo só listava prompts; não prova propriedade suficiente para apagar ou sobrescrever.
+  Escritas usam arquivo temporário + rename. Leitura inválida interrompe a sincronização;
+  não autoriza poda. Isso adapta a ponte, não substitui o instalador nativo de plugins.
+  Prova: `tests/test_claude_bridge_omp.py` roda o OMP real com HOME própria; o driver exige
+  descoberta no catálogo de `task`, grava resultado estruturado em `session_start` e encerra
+  sem prompt/modelo remoto. `rc=0` sozinho não prova carregamento de extensão.
   Regras herdadas do adapter: a allowlist embutida libera só `~/.claude/hooks/` — hook que mora
   noutro lugar entra por `~/.pi/agent/claude-hooks-adapter.json`, e `allowPatterns` ali
   **substitui** a lista, não soma; e os hooks só-Claude do próprio app (`state_hook`, `askq_capture`,
