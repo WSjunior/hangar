@@ -147,7 +147,12 @@ export function prefetchContas(alvo: Server | null): void {
 // `onDestroy` dele resolveria o servidor NOVO e gravaria a conversa de uma máquina sob a chave da
 // outra. Com sessões de mesmo nome nas duas (o `hangar` local e o da VPS), a próxima abertura
 // pintava a conversa errada antes de qualquer rede. Quem chama captura o id uma vez, na entrada.
-export interface CaudaChat { eventos: ChatEvent[]; lastEventId: string | null }
+// Só os eventos. O `lastEventId` do stream JÁ morou aqui e foi tirado: é offset em BYTES, avança
+// por linha lida do transcript (linha que o parser ignora move o offset sem virar bolha), e
+// restaurá-lo fazia o SSE retomar à frente do que o cache continha — o backend pulava o intervalo do
+// meio e a conversa ficava parada na última mensagem enviada até a SEGUNDA entrada. O stream faz o
+// backfill dele sozinho; o dedup por id do Chat descarta o que já está na tela.
+export interface CaudaChat { eventos: ChatEvent[] }
 
 const chaveCauda = (servidor: string, name: string) => ['chat-cauda', servidor, name] as const;
 

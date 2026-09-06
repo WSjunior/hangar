@@ -1099,7 +1099,12 @@
     const pintouDoCache = !!cache?.eventos.length;
     if (pintouDoCache) {
       events = cache!.eventos;
-      lastEventId = cache!.lastEventId;
+      // O `lastEventId` do cache NÃO é restaurado, e isso é o conserto de uma regressão: ele é um
+      // offset em BYTES, que avança por linha LIDA do transcript — linha que o parser ignora move o
+      // offset sem virar bolha. Restaurado, o SSE retomava de um ponto à frente do que o cache tinha
+      // e o backend nunca mandava o intervalo do meio: mandar uma mensagem, sair e voltar mostrava a
+      // conversa parada na própria mensagem, e só a SEGUNDA entrada corrigia. Sem ele o stream faz o
+      // backfill normal e o dedup por id descarta o repetido — que é como era antes do cache.
       rebuildIndex();
       reseedDerived();
       loading = false;
@@ -1449,7 +1454,7 @@
       // A cauda guardada é do transcript ANTIGO. O `appendTail` da próxima entrada a descartaria
       // (nenhum id em comum), mas só DEPOIS de ela já ter pintado — a conversa apagada apareceria
       // por um instante. Apagar aqui é o único ponto em que se sabe que ela morreu.
-      guardarCaudaChat(servidorDaCauda, sessionName, { eventos: [], lastEventId: null });
+      guardarCaudaChat(servidorDaCauda, sessionName, { eventos: [] });
       events = [];
       idIndex.clear();
       reseedDerived();          // zera activity/asstCount junto (loadHistory re-semeia com o novo)
@@ -1539,13 +1544,10 @@
 
   onDestroy(() => {
     // Guarda a CAUDA, não a conversa inteira: o que faz a tela pintar é a janela de 120 da
-    // MessageList, e cachear megabytes só moveria o custo de lugar. `lastEventId` vai junto porque
-    // é ele que o SSE usa pra retomar do ponto exato, em vez de refazer o backfill.
+    // MessageList, e cachear megabytes só moveria o custo de lugar. Só os eventos — o offset do
+    // stream JÁ foi guardado aqui e causou regressão (ver o comentário do `CaudaChat`).
     if (events.length) {
-      guardarCaudaChat(servidorDaCauda, sessionName, {
-        eventos: events.slice(-TAIL_FIRST),
-        lastEventId,
-      });
+      guardarCaudaChat(servidorDaCauda, sessionName, { eventos: events.slice(-TAIL_FIRST) });
     }
     alive = false;   // connectSSE/onVisible em voo viram no-op — sem EventSource fantasma
     histGen++;

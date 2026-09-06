@@ -62,13 +62,19 @@ describe('cauda do chat entre aberturas', () => {
 
 	const cauda = (n: number) => ({
 		eventos: Array.from({ length: n }, (_, i) => ({ id: `e${i}` })) as never,
-		lastEventId: `stem:${n}`,
 	});
 
 	it('guarda e devolve a mesma cauda', () => {
 		guardarCaudaChat('srv-a', 'sessao', cauda(3));
 		expect(lerCaudaChat('srv-a', 'sessao')?.eventos).toHaveLength(3);
-		expect(lerCaudaChat('srv-a', 'sessao')?.lastEventId).toBe('stem:3');
+	});
+
+	// O offset do stream JÁ foi guardado aqui e causou regressão: restaurado, o SSE retomava à
+	// frente do que o cache tinha e a conversa ficava parada na última mensagem enviada. O cache
+	// carrega eventos e nada mais — quem retoma o stream é o próprio stream.
+	it('não guarda offset de stream junto', () => {
+		guardarCaudaChat('srv-a', 'sessao', cauda(3));
+		expect(Object.keys(lerCaudaChat('srv-a', 'sessao')!)).toEqual(['eventos']);
 	});
 
 	it('sessão sem cauda guardada devolve undefined, não a de outra', () => {
@@ -99,7 +105,7 @@ describe('cauda do chat entre aberturas', () => {
 	// transcript morreu, e sem isso a conversa apagada piscaria na próxima entrada.
 	it('cauda vazia sobrescreve a anterior', () => {
 		guardarCaudaChat('srv-a', 'sessao', cauda(4));
-		guardarCaudaChat('srv-a', 'sessao', { eventos: [], lastEventId: null });
+		guardarCaudaChat('srv-a', 'sessao', { eventos: [] });
 		expect(lerCaudaChat('srv-a', 'sessao')?.eventos).toHaveLength(0);
 	});
 });
