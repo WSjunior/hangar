@@ -24,6 +24,8 @@ export type NavNativo = {
   back?: (chave: string) => void;
   forward?: (chave: string) => void;
   onEstado?: (cb: (p: NavEstado) => void) => () => void;
+  /** Navegador fechado por fora do painel (`hangar-preview close`). Opcional: shell antigo não tem. */
+  onFechado?: (cb: (p: { chave: string }) => void) => () => void;
   /** Cookies do Chrome real (CDP) pro view. Opcional: shell antigo não tem. Nunca rejeita. */
   importCookies?: (chave: string, host: string, porta?: number, recarregar?: boolean) =>
     Promise<{ ok: boolean; gravados: number; falhos: number; erro?: string; detalhe?: string }>;

@@ -41,7 +41,7 @@ const CDP = 'http://127.0.0.1:9223';
 const DIR = join(homedir(), '.hangar', 'nav');
 const VERBOS_SERVIDOR = new Set([
   'snapshot', 'click', 'fill', 'type', 'press', 'hover', 'wait', 'eval',
-  'tema', 'console', 'network', 'text', 'url', 'shot',
+  'tema', 'console', 'network', 'text', 'url', 'shot', 'close',
 ]);
 
 function erro(msg, codigo = 1) {
@@ -77,6 +77,7 @@ if (!cmd || cmd === 'help' || cmd === '--help') {
   text                    texto visível da página (innerText), sem árvore
   url                     URL atual
   shot [arquivo.png]      screenshot (default /tmp/hangar-preview-<sessao>.png)
+  close                   fecha o navegador desta sessão (o painel some; terminou de usar, feche)
   batch                   lê várias linhas do stdin, uma por comando
 
 Referência completa: skill hangar-preview.`);
@@ -228,4 +229,4 @@ if (cmd === 'batch') {
   process.exit(0);
 }
 
-erro(`comando desconhecido: ${cmd} (vale open|list|snapshot|click|fill|type|press|hover|wait|eval|tema|console|network|text|url|shot|batch)`);
+erro(`comando desconhecido: ${cmd} (vale open|list|snapshot|click|fill|type|press|hover|wait|eval|tema|console|network|text|url|shot|close|batch)`);

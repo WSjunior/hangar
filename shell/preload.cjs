@@ -40,6 +40,13 @@ contextBridge.exposeInMainWorld('hangar', {
       return () => ipcRenderer.removeListener('hangar:nav-estado', h);
     },
     close: (chave) => ipcRenderer.send('hangar:nav-close', { chave }),
+    // O navegador foi fechado por fora do painel (`hangar-preview close`): o painel tem que
+    // desmontar sozinho, senão fica mostrando um view que já morreu.
+    onFechado: (cb) => {
+      const h = (_e, p) => cb(p);
+      ipcRenderer.on('hangar:nav-fechado', h);
+      return () => ipcRenderer.removeListener('hangar:nav-fechado', h);
+    },
     // Cookies do Chrome real (CDP) -> partição do view. Resolve sempre; erro vem no objeto.
     importCookies: (chave, host, porta, recarregar) => ipcRenderer.invoke('hangar:nav-import-cookies', { chave, host, porta, recarregar }),
     // Abre chrome://inspect/#remote-debugging no Chrome do usuário: é lá que ele liga a

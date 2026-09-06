@@ -430,6 +430,18 @@ function fecharNavegador(win, chave) {
   try { fs.rmSync(path.join(NAV_SIDECARS, `${nomeSidecar(chave)}.json`), { force: true }); } catch { /* sem sidecar */ }
 }
 
+// `hangar-preview close`: o CLI só conhece a chave, não a janela. O painel não pediu o fechamento,
+// então precisa ser avisado — sem o evento ele seguia mostrando um view que não existe mais.
+function fecharNavegadorPorChave(chave) {
+  for (const [win, m] of navegadores) {
+    if (!m.has(chave)) continue;
+    fecharNavegador(win, chave);
+    if (!win.isDestroyed()) win.webContents.send('hangar:nav-fechado', { chave });
+    return true;
+  }
+  return false;
+}
+
 // Sidecar por sessão em ~/.hangar/nav/<chave>.json — é o que o `hangar-preview` lê pra achar o
 // target CDP DESTA sessão sem adivinhar por URL (duas sessões no mesmo localhost:3000 teriam a
 // mesma). O targetId é descoberto por diff do /json/list antes/depois do view nascer: opens são
@@ -733,6 +745,7 @@ if (!app.requestSingleInstanceLock()) {
     limparSidecaresNav();
     subirServidor({
       controladorDe: (chave) => controladores.get(chave)?.ctl || null,
+      fecharDe: fecharNavegadorPorChave,
       escrever: (dados) => {
         fs.mkdirSync(NAV_SIDECARS, { recursive: true });
         fs.writeFileSync(path.join(NAV_SIDECARS, '_srv.json'), JSON.stringify(dados), { mode: 0o600 });

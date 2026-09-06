@@ -26,6 +26,26 @@ test('recusa sem token e atende com token', async () => {
   srv.fechar();
 });
 
+test('close fecha pela chave sem passar pelo controlador, e chave sem navegador vira erro', async () => {
+  const fechadas = [];
+  const srv = await subirServidor({
+    controladorDe: () => { throw new Error('close nao pode consultar o controlador'); },
+    fecharDe: (chave) => { fechadas.push(chave); return chave === 'srv::a'; },
+    escrever: () => {},
+  });
+  const pedir = (chave) => fetch(`http://127.0.0.1:${srv.porta}/cmd`, {
+    method: 'POST', body: JSON.stringify({ chave, verbo: 'close', args: [] }),
+    headers: { Authorization: `Bearer ${srv.token}` },
+  });
+  const ok = await pedir('srv::a');
+  assert.equal(ok.status, 200);
+  assert.equal(await ok.text(), 'ok: close');
+  const nada = await pedir('srv::b');
+  assert.equal(await nada.text(), 'erro: a sessao srv::b nao tem navegador aberto');
+  assert.deepEqual(fechadas, ['srv::a', 'srv::b']);
+  srv.fechar();
+});
+
 test('token de tamanho diferente do certo recusa sem lancar (timingSafeEqual)', async () => {
   const srv = await subirServidor({ controladorDe: () => ctlFalso, escrever: () => {} });
   const r = await fetch(`http://127.0.0.1:${srv.porta}/cmd`, {
