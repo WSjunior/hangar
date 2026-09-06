@@ -1,6 +1,18 @@
+<script module lang="ts">
+  // O engines.json tem alfabeto próprio pro nome (minúsculas, números, '-', '_'): o nome bonito vai
+  // pro `label` e o id sai daqui. Sem isto, "Meu Provedor" seria recusado com 400 e o usuário
+  // levaria a culpa por ter digitado um espaço.
+  export function idDe(texto: string): string {
+    const base = texto.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+      .replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32);
+    return base || 'chave';
+  }
+</script>
+
 <script lang="ts">
   // Modelo e opções de UMA chave de API — o bloco que a tela Motores mostrava para o motor, agora
-  // aberto dentro do card da credencial. Edita um motor que já existe; criar é o NovaCredencialSheet.
+  // aberto dentro do card da credencial. Serve os dois usos: editar um motor do disco e criar um
+  // novo (`criando`), quando o nome curto ainda é digitado aqui.
   //
   // Nada de catálogo chumbado: modelos e janela de contexto vêm do PRÓPRIO provedor (GET /v1/models)
   // com a chave da pessoa, porque o valor muda por faixa de assinatura.
@@ -16,12 +28,21 @@
 
   interface Props {
     apiTarget: Server | null;
+    // Em edição é o id no disco; em criação, só o valor inicial do campo de nome curto.
     nome: string;
-    motor: Motor;
+    motor: Motor | null;
+    criando?: boolean;
     onSalvo: (motores: Record<string, Motor>, alvo: Server | null) => void;
     onFechar: () => void;
   }
-  let { apiTarget, nome, motor, onSalvo, onFechar }: Props = $props();
+  let { apiTarget, nome, motor, criando = false, onSalvo, onFechar }: Props = $props();
+
+  // Atalhos de endereço: dois provedores que a pessoa desta casa usa e cujo endereço não se
+  // adivinha (nem um nem outro é o domínio do produto).
+  const DICAS: { label: string; base_url: string }[] = [
+    { label: m.config_motores_dica_kimi(), base_url: 'https://api.kimi.com/coding' },
+    { label: m.config_motores_dica_omni(), base_url: 'https://ai.omniwise.com.br' },
+  ];
 
   // Defaults do Avançado, espelhando engines.env_de: ligado = capacidade ativa. Os que nascem
   // LIGADOS (cache e raciocínio) são os que causam dano se desligados sem motivo.
@@ -39,26 +60,31 @@
   // os desligados exigem `=== true`.
   // `untrack` não é adorno: sem ele o compilador acusa cada leitura de `motor` aqui
   // (`state_referenced_locally`), e o aviso repetido esconderia um dia a leitura que for engano.
+  // Sem motor (criação) os `?.` caem nos mesmos defaults do backend, sem ramo à parte: os ligados
+  // por padrão nascem ligados (`undefined !== false`) e o resto desligado.
   let form = $state(untrack(() => ({
-    label: motor.label ?? nome,
-    base_url: motor.base_url,
-    base_url_original: motor.base_url,
+    nome,
+    label: motor?.label ?? nome,
+    base_url: motor?.base_url ?? '',
+    base_url_original: motor?.base_url ?? '',
     api_key: '',
-    api_key_definida: motor.api_key_definida,
-    model: motor.model,
-    subagent_model: motor.subagent_model ?? '',
-    context_window: motor.context_window ? String(motor.context_window) : '',
-    bundled_skills: motor.bundled_skills === true,
-    experimental_betas: motor.experimental_betas === true,
-    prompt_caching: motor.prompt_caching !== false,
-    adaptive_thinking: motor.adaptive_thinking !== false,
-    tool_search: motor.tool_search === true,
-    gateway_model_discovery: motor.gateway_model_discovery === true,
-    fine_grained_tool_streaming: motor.fine_grained_tool_streaming === true,
-    auth_via_api_key: motor.auth_via_api_key === true,
-    auto_compact_window: motor.auto_compact_window ? String(motor.auto_compact_window) : '',
-    max_output_tokens: motor.max_output_tokens ? String(motor.max_output_tokens) : '',
+    api_key_definida: motor?.api_key_definida ?? false,
+    model: motor?.model ?? '',
+    subagent_model: motor?.subagent_model ?? '',
+    context_window: motor?.context_window ? String(motor.context_window) : '',
+    bundled_skills: motor?.bundled_skills === true,
+    experimental_betas: motor?.experimental_betas === true,
+    prompt_caching: motor?.prompt_caching !== false,
+    adaptive_thinking: motor?.adaptive_thinking !== false,
+    tool_search: motor?.tool_search === true,
+    gateway_model_discovery: motor?.gateway_model_discovery === true,
+    fine_grained_tool_streaming: motor?.fine_grained_tool_streaming === true,
+    auth_via_api_key: motor?.auth_via_api_key === true,
+    auto_compact_window: motor?.auto_compact_window ? String(motor.auto_compact_window) : '',
+    max_output_tokens: motor?.max_output_tokens ? String(motor.max_output_tokens) : '',
   })));
+  // Em edição o id no disco não muda; em criação ele sai do nome curto pelo alfabeto do engines.json.
+  const idAlvo = $derived(criando ? idDe(form.nome) : nome);
   const ligado = (k: ChaveLiga) => form[k];
   const setLigado = (k: ChaveLiga, v: boolean) => { form[k] = v; };
   const numero = (k: ChaveNum) => form[k];
@@ -80,16 +106,18 @@
   const ehMoonshot = $derived(/moonshot|kimi/i.test(`${form.base_url} ${form.model}`));
   const descobertaComprovada = $derived(modelos.length > 0);
   const modeloAtual = $derived(modelos.find((x) => x.id === form.model));
-  // Chave vazia + endereço editado: o Testar usaria a chave salva contra o endereço ANTIGO (o
-  // servidor só aceita nome sozinho) e ignoraria a edição calado.
-  const enderecoMudouSemChave = $derived(!form.api_key.trim() && form.base_url.trim() !== form.base_url_original);
+  // Motor com chave salva, campo de chave vazio e endereço editado: o Testar usaria a chave salva
+  // contra o endereço ANTIGO (o servidor só aceita nome sozinho) e ignoraria a edição calado. Em
+  // criação não há chave nem endereço salvos, então não há o que avisar.
+  const enderecoMudouSemChave = $derived(!criando && form.api_key_definida
+    && !form.api_key.trim() && form.base_url.trim() !== form.base_url_original);
 
   async function buscarModelos() {
     buscando = true; erroBusca = ''; okBusca = '';
     try {
       // `nome` e `base_url`/`api_key` são mutuamente exclusivos no servidor (400 juntos).
       const chave = form.api_key.trim();
-      const corpo = chave ? { base_url: form.base_url.trim(), api_key: chave } : { nome };
+      const corpo = chave ? { base_url: form.base_url.trim(), api_key: chave } : { nome: idAlvo };
       const r = apiTarget ? await engineModelosForServer(apiTarget, corpo) : await engineModelos(corpo);
       modelos = r.modelos;
       okBusca = m.config_motores_modelos_ok({ n: r.modelos.length });
@@ -119,9 +147,10 @@
     // pode apontar pra outra máquina (o pai trocou de alvo e desmontou este bloco).
     const alvo = apiTarget;
     const aoSalvo = onSalvo;
+    const id = idAlvo;
     try {
       const corpo: Record<string, unknown> = {
-        label: form.label.trim() || nome,
+        label: form.label.trim() || (criando ? form.nome.trim() : nome),
         base_url: form.base_url.trim(),
         model: form.model.trim(),
       };
@@ -132,17 +161,17 @@
       corpo.subagent_model = form.subagent_model.trim();
       corpo.context_window = form.context_window ? Number(form.context_window) : '';
       // Precedência da visão: valor recém-testado > valor já salvo > omitir.
-      const vision = typeof modeloAtual?.vision === 'boolean' ? modeloAtual.vision : motor.vision;
+      const vision = typeof modeloAtual?.vision === 'boolean' ? modeloAtual.vision : motor?.vision;
       if (typeof vision === 'boolean') corpo.vision = vision;
       for (const k of CHAVES_LIGA) corpo[k] = form[k];
       corpo.auto_compact_window = form.auto_compact_window ? Number(form.auto_compact_window) : '';
       corpo.max_output_tokens = form.max_output_tokens ? Number(form.max_output_tokens) : '';
 
-      const r = alvo ? await putEngineForServer(alvo, nome, corpo) : await putEngine(nome, corpo);
+      const r = alvo ? await putEngineForServer(alvo, id, corpo) : await putEngine(id, corpo);
       form.api_key = '';
       // Quem sabe se há chave gravada é o registro que o PUT devolveu: um motor sem chave salvo sem
       // chave nova continua sem chave, e ligar a marca aqui prometeria "definida" com o disco vazio.
-      form.api_key_definida = r.motores[nome]?.api_key_definida ?? (form.api_key_definida || !!corpo.api_key);
+      form.api_key_definida = r.motores[id]?.api_key_definida ?? (form.api_key_definida || !!corpo.api_key);
       form.base_url_original = form.base_url.trim();
       aoSalvo(r.motores, alvo);
       // A chave também é dos OUTROS agentes (Pi/Kimi/Codex). Passo SEPARADO, fora do try do salvar:
@@ -150,7 +179,7 @@
       // continua aberto para o resultado ser lido — quem fecha é a pessoa.
       sincronizando = true; syncErro = '';
       try {
-        sync = await sincronizarNosAgentes(alvo, `chave:${nome}`);
+        sync = await sincronizarNosAgentes(alvo, `chave:${id}`);
       } catch (e) {
         syncErro = e instanceof Error && e.message ? e.message : m.config_motores_erro_sync();
       } finally {
@@ -165,11 +194,30 @@
 </script>
 
 <div class="mf">
+  {#if criando}
+    <label class="campo">
+      <span class="rot">{m.config_motores_nome_curto()}</span>
+      <input type="text" name="nome" placeholder="kimi" autocapitalize="off" spellcheck={false}
+             value={form.nome} oninput={(e) => (form.nome = e.currentTarget.value)} />
+      <!-- Campo vazio mostra o EXEMPLO do placeholder: a frase é lida como comando de verdade, e
+           `idDe('')` cai no fallback `chave`, um nome que ninguém escolheu. -->
+      <span class="ajuda">
+        {m.config_motores_terminal_1()} <code>claude-engine {form.nome.trim() ? idAlvo : 'kimi'}</code>{m.config_motores_terminal_2()}
+      </span>
+    </label>
+  {/if}
+
   <label class="campo">
     <span class="rot">{m.config_motores_endereco()}</span>
     <input type="text" name="base_url" autocapitalize="off" spellcheck={false} placeholder="https://…"
            value={form.base_url} oninput={(e) => (form.base_url = e.currentTarget.value)} />
     <span class="ajuda"><strong>{m.config_motores_sem_v1()}</strong> {m.config_motores_messages()}</span>
+    <!-- Dois endereços que não se adivinham; digitá-los à mão é onde nasce o 404 do provedor. -->
+    <span class="dicas">
+      {#each DICAS as d (d.base_url)}
+        <button type="button" class="dica" onclick={() => (form.base_url = d.base_url)}>{d.label}</button>
+      {/each}
+    </span>
   </label>
 
   <label class="campo">
@@ -224,13 +272,13 @@
     <span class="ajuda">{m.config_motores_janela_ajuda_1()} <code>/context</code>{m.comum_ponto()}</span>
   </label>
 
-  <details class="avancado">
+  <details class="avancado" open>
     <summary>{m.config_motores_avancado()}</summary>
     <p class="ajuda topo">{m.config_motores_avancado_ajuda()}</p>
 
     <!-- Uma linha por recurso, no MESMO vocabulário do ServerSettings (rótulo à esquerda,
          controle à direita, separador entre linhas). O motivo é um acordeão: só um aberto por
-         vez, senão nove parágrafos abertos viram de novo a parede de texto que isto resolve. -->
+         vez, senão dez parágrafos abertos viram de novo a parede de texto que isto resolve. -->
     {#snippet linha(chave: ChaveLiga | ChaveNum, rot: string, vered: string, tom: string,
                     motivo: import('svelte').Snippet, morto = false)}
       <div class="linha" class:morta={morto}>
@@ -332,14 +380,21 @@
     </div>
   {/if}
 
-  <p class="ajuda">{m.config_motores_terminal_1()} <code>claude-engine {nome}</code>{m.comum_ponto()}</p>
+  <!-- Em criação este comando já está na ajuda do nome curto. -->
+  {#if !criando}
+    <p class="ajuda">{m.config_motores_terminal_1()} <code>claude-engine {nome}</code>{m.comum_ponto()}</p>
+  {/if}
+  <!-- Salvar reescreve o engines.json; quem já está numa sessão deste motor segue no valor antigo
+       até abrir outra. Vale na criação também: o bloco continua aberto depois do primeiro Salvar, e
+       o Salvar seguinte já é edição. Sem esta linha o efeito parecia não ter acontecido. -->
+  <p class="ajuda">{m.config_motores_sessoes_abertas()}</p>
 
   <div class="acoes">
     <!-- Depois de salvar o botão diz Fechar: a edição já foi, o que resta na tela é o resultado. -->
     <button type="button" class="btn" onclick={onFechar} disabled={salvando || sincronizando}
       >{sync || syncErro ? m.sessao_fechar() : m.comum_cancelar()}</button>
     <button type="button" class="btn primario" onclick={salvar}
-            disabled={salvando || !form.model.trim() || !form.base_url.trim()}>
+            disabled={salvando || !form.model.trim() || !form.base_url.trim() || (criando && !form.nome.trim())}>
       {salvando ? m.config_motores_salvando() : m.ctx_salvar()}
     </button>
   </div>
@@ -357,10 +412,17 @@
   .ajuda { font-size: var(--text-xs); color: var(--text-muted); line-height: 1.45; margin: 0; }
   .ajuda.erro { color: var(--error); }
   .def { font-size: 11px; color: var(--success); }
+  .dicas { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+  .dica {
+    background: var(--surface-raised); color: var(--text-secondary);
+    border: 1px solid var(--border-subtle); border-radius: var(--radius-full);
+    padding: 2px 10px; font-size: 11px; cursor: pointer;
+  }
   .ok { font-size: var(--text-xs); color: var(--success); }
 
-  /* Avançado: recolhido por padrão — são 9 controles que a maioria nunca toca. <details> nativo em
-     vez de estado próprio; o toggle já vem acessível e some com prefers-reduced-motion sem regra. */
+  /* Avançado: nasce ABERTO — os dez controles são o miolo do que a tela de motores oferecia, e atrás
+     de um clique eles não eram encontrados. <details> nativo em vez de estado próprio; o toggle já
+     vem acessível e some com prefers-reduced-motion sem regra, e quem quiser fechar fecha. */
   .avancado {
     border: 1px solid var(--border-subtle); border-radius: var(--radius-md);
     padding: var(--space-3) var(--space-4);
@@ -375,7 +437,7 @@
   .avancado .ajuda.topo { margin: 0; max-width: 68ch; }
 
   /* Linha de recurso: MESMO vocabulário do ServerSettings (rótulo à esquerda, controle à direita,
-     separador entre linhas). Nada de card por item — nove cards viram ruído, e o separador já
+     separador entre linhas). Nada de card por item — dez cards viram ruído, e o separador já
      agrupa. Grid de 3 faixas pra o motivo expandido nascer alinhado sob o texto, não sob o
      controle. */
   .grade { display: grid; grid-template-columns: 1fr; }

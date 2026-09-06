@@ -57,6 +57,39 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
   };
   // id da credencial com o bloco de motor aberto (um por vez, como o cookie e o renomear).
   let motorAberto = $state<string | null>(null);
+
+  // Três seções, não uma lista de doze linhas: conta do Claude, modelo pro Claude Code (chave que
+  // ESTÁ no engines.json) e chave de outro agente. A cópia que o `agentes_sync` grava no
+  // config.toml do Kimi tem o mesmo nome do motor — daí o id `kimi:<nome>` que `cotas.py` monta —
+  // e não é uma credencial a mais: ela aparece como linha dentro do card do modelo.
+  const ehCopiaSync = (c: Credencial) => c.id.startsWith('kimi:') && c.id.slice('kimi:'.length) in motoresMapa;
+  const secaoClaude = $derived(contas.filter((c) => c.tipo === 'claude'));
+  const secaoModelos = $derived(contas.filter((c) => {
+    const n = nomeMotorDe(c);
+    return !!n && n in motoresMapa;
+  }));
+  const secaoOutros = $derived(contas.filter(
+    (c) => c.tipo !== 'claude' && !secaoModelos.includes(c) && !ehCopiaSync(c),
+  ));
+  const copiaKimiDe = (c: Credencial) => {
+    const n = nomeMotorDe(c);
+    return n ? contas.some((x) => x.id === `kimi:${n}`) : false;
+  };
+  // Provedor = o HOST do endereço, não a URL inteira: o caminho (/coding/v1) é ruído na linha e
+  // URL inválida não pode derrubar a tela.
+  const hostDe = (url: string | null | undefined) => {
+    try { return url ? new URL(url).host : ''; } catch { return ''; }
+  };
+  // Os três chips saem do motor. Janela e subagente têm texto próprio pro caso "não definido" —
+  // um campo vazio ali significa "o padrão do provedor" / "o mesmo do principal", não "nada".
+  const chipsDe = (mo: Motor) => [
+    mo.context_window ? m.contas_chip_janela({ n: `${Math.round(mo.context_window / 1000)}k` })
+                      : m.contas_chip_janela_padrao(),
+    mo.subagent_model ? m.contas_chip_subagente({ id: mo.subagent_model })
+                      : m.contas_chip_subagente_igual(),
+    // O default do backend é ligado: só `false` explícito desliga.
+    mo.adaptive_thinking !== false ? m.contas_chip_raciocinio_on() : m.contas_chip_raciocinio_off(),
+  ];
   // `alvo` é a máquina que RESPONDEU o PUT (o MotorForm o captura antes do await): a resposta
   // entra sob a chave dela, esteja ela na tela ou não — nunca sob a do alvo atual.
   function motorSalvo(novos: Record<string, Motor>, alvo: Server | null) {
@@ -451,6 +484,12 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
     {#if atualizadoEm != null}
       <span class="ct-atualizado" aria-live="polite">{m.contas_atualizado_ha({ n: idadeAtualizacao })}</span>
     {/if}
+    <!-- Criar é a ação primária da tela e vive no cabeçalho: no rodapé ela era o 13º item, depois
+         de todas as credenciais. Com o engines.json quebrado fica inerte — a folha abre POR CIMA
+         da lista e esconderia o aviso que explica por que criar agora apagaria os outros motores. -->
+    <button type="button" class="ct-add" onclick={() => (novo = 'escolha')}
+      aria-label={m.contas_add_aria()}
+      disabled={!!novo || !!qMotores.data?.arquivo_corrompido}>+ {m.contas_add()}</button>
     <button type="button" class="ct-refresh" onclick={alternarDensidade}
       aria-pressed={compacta}
       aria-label={compacta ? m.contas_ver_completa() : m.contas_ver_compacta()}
@@ -492,14 +531,32 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
     <p class="ct-aviso">{m.comum_carregando()}</p>
   {:else if erro}
     <p class="ct-aviso erro" role="alert">{erro}</p>
-  {:else if !contas.length}
-    <p class="ct-aviso">{m.comum_nada_encontrado()}</p>
   {:else}
-    <!-- Cards separados (não uma caixa com divisórias): cada credencial é uma unidade que se
-         lê de uma vez — nome, e-mail, nome no disco e as barras de limite. `compacta` troca o
-         card por uma linha de escaneamento (sem sublinhas nem barras, só o %). -->
-    <div class="ct-lista" class:compacta>
-      {#each contas as conta (conta.id)}
+    <!-- As três seções aparecem SEMPRE depois da carga, mesmo vazias: uma seção que some deixa
+         a pessoa sem saber que aquele lugar existe (é onde a coisa nova vai aparecer). -->
+    {@render secao(m.contas_secao_claude(), m.contas_secao_claude_leg(), secaoClaude, m.comum_nada_encontrado())}
+    {@render secao(m.contas_secao_modelos(), m.contas_secao_modelos_leg(), secaoModelos, m.contas_secao_modelos_vazio())}
+    {@render secao(m.contas_secao_outros(), m.contas_secao_outros_leg(), secaoOutros, m.contas_secao_outros_vazio())}
+  {/if}
+
+  {#snippet secao(titulo: string, legenda: string, itens: Credencial[], vazio: string)}
+    <section class="ct-grupo">
+      <p class="st-secao">{titulo}</p>
+      <p class="ct-legenda">{legenda}</p>
+      {#if itens.length}
+        <!-- Cards separados (não uma caixa com divisórias): cada credencial é uma unidade que se
+             lê de uma vez — nome, e-mail, nome no disco e as barras de limite. `compacta` troca o
+             card por uma linha de escaneamento (sem sublinhas nem barras, só o %). -->
+        <div class="ct-lista" class:compacta>
+          {#each itens as conta (conta.id)}{@render cartao(conta)}{/each}
+        </div>
+      {:else}
+        <p class="ct-vazio">{vazio}</p>
+      {/if}
+    </section>
+  {/snippet}
+
+  {#snippet cartao(conta: Credencial)}
         <!-- Marcas de uso ("roda o Claude Code", "cota pelo painel") saem da linha do NOME e viram
              texto na linha do subtítulo. Pílula fica só para o TIPO da credencial e para "em uso":
              com quatro pílulas na mesma linha, o nome — que é o que distingue uma linha da outra —
@@ -566,7 +623,20 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
                    repeti-los seria o mesmo dado em dois lugares. -->
               <span class="ct-sub">{conta.base_url ?? ''}{conta.chave_mascarada ? ` · ${conta.chave_mascarada}` : ''}</span>
               {#if motor}
-                <span class="ct-sub ct-modelo">{motor.model}{motor.context_window ? ` · ${Math.round(motor.context_window / 1000)}k` : ''}</span>
+                <!-- Quem é o provedor: o host, não a URL de novo. É o que responde "de quem é
+                     esse modelo?" sem obrigar a ler o caminho da API. -->
+                {#if hostDe(motor.base_url)}<span class="ct-sub ct-provedor">{hostDe(motor.base_url)}</span>{/if}
+                <!-- Só o modelo: a janela do contexto mora no chip abaixo, e ter as duas era o
+                     mesmo número duas vezes na mesma caixa. -->
+                <span class="ct-sub ct-modelo">{motor.model}</span>
+                <span class="ct-chips">
+                  {#each chipsDe(motor) as chip (chip)}<span class="ct-chip">{chip}</span>{/each}
+                </span>
+                <!-- A cópia que o sync gravou no Kimi mora AQUI, não num card vazio ao lado: ela
+                     não é outra credencial, é este motor visto de dentro do outro agente. -->
+                {#if copiaKimiDe(conta)}
+                  <span class="ct-sub fraco">{m.contas_sync_kimi({ nome: nomeMotorDe(conta) ?? '' })}</span>
+                {/if}
               {/if}
             {:else if conta.login?.estado === 'ok' && conta.login.loggedIn && conta.login.email}
               <span class="ct-sub">{conta.login.email}</span>
@@ -583,7 +653,10 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
             {/if}
           </span>
 
-          {#if conta.tipo === 'chave'}<span class="ct-tag">{m.contas_tipo_chave()}</span>{/if}
+          <!-- A etiqueta só onde ela informa: na seção de outros agentes, onde uma chave de API
+               convive com o login do Codex. Dentro de "Modelos pro Claude Code" (o card COM motor)
+               toda linha é uma chave, e a etiqueta repetia o título da seção. -->
+          {#if conta.tipo === 'chave' && !motor}<span class="ct-tag">{m.contas_tipo_chave()}</span>{/if}
 
           <!-- Modo compacto: a cota vira rótulo+% na MESMA linha do nome, sem barra. -->
           {#if compacta && conta.cota && conta.cota.estado === 'lida' && conta.cota.janelas.length}
@@ -609,9 +682,14 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
             {/if}
 
             {#if motor}
+              <!-- Editar e Remover NOMEADOS: as duas ações do dia a dia de um modelo estavam
+                   escondidas atrás de um kebab e de um rótulo ("Modelo e opções") que não dizia
+                   qual delas ele abria. O kebab continua, com o cookie e o apagar. -->
               <button type="button" class="ct-acao ct-modelo-btn" aria-expanded={motorEmEdicao}
                 onclick={() => (motorAberto = motorEmEdicao ? null : conta.id)}
-                >{motorEmEdicao ? m.sessao_fechar() : m.contas_modelo_opcoes()}</button>
+                >{motorEmEdicao ? m.sessao_fechar() : m.config_motores_editar()}</button>
+              <button type="button" class="ct-acao"
+                onclick={() => { menuDe = null; confirmando = conta.id; }}>{m.lista_remover()}</button>
             {/if}
 
             <button type="button" class="ct-kebab" aria-haspopup="true" aria-expanded={menuDe === conta.id}
@@ -721,18 +799,7 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
             </div>
           {/if}
         </div>
-      {/each}
-    </div>
-
-    <div class="ct-rodape">
-      <!-- UM botão. A escolha do provedor e o formulário vivem no modal (NovaCredencialSheet):
-           inline, a pergunta e as opções viravam cinco controles competindo pela mesma linha. -->
-      <!-- Com o engines.json quebrado o botão fica inerte: a folha de criar abre POR CIMA da lista
-           e esconderia o aviso que explica por que criar agora apagaria os outros motores. -->
-      <button type="button" class="ct-btn" onclick={() => (novo = 'escolha')}
-        disabled={!!novo || !!qMotores.data?.arquivo_corrompido}>{m.contas_nova()}</button>
-    </div>
-  {/if}
+  {/snippet}
 
   {#if novo}
     <NovaCredencialSheet {apiTarget}
@@ -783,7 +850,7 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
       </div>
     </div>
 
-    <div class="ct-rodape">
+    <div class="ct-rodape login">
       <button type="button" class="ct-btn" onclick={cancelarEntrar}
         disabled={loginParado}>{loginParado ? '…' : m.comum_cancelar()}</button>
       <button type="button" class="ct-btn primario" onclick={confirmarEntrar}
@@ -835,6 +902,31 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
 
   .ct-legenda { margin: 0 var(--space-2) var(--space-3); color: var(--text-muted);
                 font-size: var(--text-xs); line-height: 1.45; }
+  /* Uma seção por natureza de credencial. O respiro entre elas é o que separa "conta do Claude"
+     de "modelo" sem precisar de linha divisória. */
+  .ct-grupo { margin-top: var(--space-4); }
+  .ct-grupo .st-secao { margin: 0 var(--space-2) var(--space-1); }
+  /* Seção vazia não some — mas o vazio dela não é aviso: é o lugar reservado. */
+  .ct-vazio { margin: 0 var(--space-2); color: var(--text-muted); font-size: var(--text-xs);
+              line-height: 1.45; }
+  /* Botão de criar no cabeçalho: mesma altura dos redondos ao lado, para a linha não crescer. */
+  .ct-add { flex-shrink: 0; height: 28px; min-height: 0; padding: 0 var(--space-3);
+            border-radius: var(--radius-full); border: 1px solid var(--border-default);
+            background: var(--surface-raised); color: var(--text-primary);
+            font-size: var(--text-xs); font-family: inherit; cursor: pointer;
+            transition: transform 160ms ease-out; }
+  .ct-add:not(:disabled):active { transform: scale(0.97); }
+  .ct-add:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .ct-add:disabled { opacity: .55; cursor: default; }
+  @media (hover: hover) and (pointer: fine) {
+    .ct-add:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  }
+  /* Os três parâmetros que definem como o motor roda: janela, subagente e raciocínio. Chip, e não
+     mais uma linha de texto, porque são três valores curtos que se leem juntos. */
+  .ct-chips { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-top: var(--space-1); }
+  .ct-chip { padding: 1px 7px; border-radius: var(--radius-full);
+             background: var(--surface-raised); color: var(--text-muted);
+             font-size: var(--text-3xs); white-space: nowrap; }
   .ct-sep { height: 1px; background: var(--border-subtle); margin: var(--space-4) 0 var(--space-3); }
   .ct-aviso { margin: var(--space-2); color: var(--text-muted); font-size: var(--text-sm); }
   .ct-aviso.erro { color: var(--error); }
