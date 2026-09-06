@@ -31,8 +31,8 @@ def sessions_root(provider: str) -> Path:
         env = os.environ.get("PI_CODING_AGENT_SESSION_DIR")
         return Path(env) if env else Path.home() / ".pi" / "agent" / "sessions"
     if provider == "omp":
-        env = os.environ.get("PI_CODING_AGENT_DIR")
-        return (Path(env) if env else Path.home() / ".omp" / "agent") / "sessions"
+        from app import omp_dirs
+        return omp_dirs.agent_dir() / "sessions"
     raise ValueError(f"provider sem raiz de sessoes: {provider!r}")
 
 

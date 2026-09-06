@@ -22,7 +22,7 @@ from pathlib import Path
 
 import sqlite3
 
-from app import agentes_sync, contas, engine_probe, engines, hook_installer, kimi_hook_installer, oauth_codex, skill_bridge
+from app import agentes_sync, contas, engine_probe, engines, hook_installer, kimi_hook_installer, oauth_codex, omp_dirs, skill_bridge
 from app.adapters.kimi.sessions import kimi_home
 from app.agentes_sync import _codex_dir, provedor_embutido_do_pi
 from app.config import list_config_dirs
@@ -218,8 +218,7 @@ def _ponte_skills(nome: str, home: Path) -> dict:
 
 def _raiz_agente(cli: str) -> Path:
     if cli == "omp":
-        raiz = os.environ.get("PI_CODING_AGENT_DIR")
-        return Path(raiz) if raiz else Path.home() / ".omp" / "agent"
+        return omp_dirs.agent_dir()
     return Path.home() / ".pi" / "agent"
 
 

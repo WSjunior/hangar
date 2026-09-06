@@ -587,7 +587,19 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   arquivo e só relê quando ela muda (o laço de 300 s relia todo byte de todo plugin); e
   `observe_controls` lê as 3 chaves do `omp config get` em paralelo e a releitura só pega
   `disabledExtensions` — de 6 processos em série (~0,75 s cada, na subida do backend) pra 4 em
-  dois lotes. No OMP, agents pessoais/extras viram arquivos diretos
+  dois lotes.
+  **A raiz do agente omp tem UMA resposta: `app/omp_dirs.agent_dir()`** (06/09/2026). O omp
+  com perfil (`--profile x` ou `OMP_PROFILE=x`) grava TUDO — login, sessões, config, plugins —
+  em `~/.omp/profiles/x/agent` (medido no 18.1.10 numa HOME descartável). O plugin sync e o
+  contexto vieram com `resolve_omp_directories`, que espelha essa regra; sessões
+  (`sessions_root("omp")`), painel de saúde (`_raiz_agente`) e login do ChatGPT (`_omp_db`)
+  continuavam em `~/.omp/agent` sem perfil — com `OMP_PROFILE` no ambiente do serviço, o sync
+  instalava no perfil e o painel dizia "não instalado". Hoje os três perguntam ao `omp_dirs`,
+  que só embrulha o resolvedor do sync (import tardio: `sessions.py` é folha e não pode puxar
+  `peers` na importação) e, pra quem só LÊ, perfil inválido vira aviso e raiz sem perfil —
+  levantar ali derrubaria a listagem de sessões inteira. O que NÃO existe: perfil por sessão.
+  O backend só enxerga o perfil do PRÓPRIO ambiente; um `omp --profile y` aberto à mão num
+  terminal continua invisível pro app, como sempre foi. No OMP, agents pessoais/extras viram arquivos diretos
   em `<agentDir>/agents/claude-bridge-<nome>.md`, com ferramentas em array YAML: `Glob → glob`,
   `Task/Agent → task`, `WebFetch → read` e prefixo `mcp__` intacto. Agents nativos pessoais
   têm precedência; aliases Claude sem mapeamento explícito herdam o modelo da sessão.

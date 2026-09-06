@@ -52,9 +52,9 @@ def cofre() -> Path:
 
 
 def _omp_db(home: Path | None) -> Path:
-    raiz = os.environ.get("PI_CODING_AGENT_DIR") if home is None else None
-    base = Path(raiz) if raiz else (home or Path.home()) / ".omp" / "agent"
-    return base / "agent.db"
+    from app import omp_dirs
+    # `home` explícito é semente de teste: raiz fixa, sem perfil nem variável de ambiente.
+    return omp_dirs.agent_dir(home=home, env={} if home else None) / "agent.db"
 
 
 # ---------------------------------------------------------------- HTTP (seam de teste)
