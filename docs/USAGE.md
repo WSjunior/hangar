@@ -272,6 +272,27 @@ não tem).
   um `systemctl --user restart` a derruba junto. Sem emulador conhecido no PATH ele diz isso; pra
   escolher qual usar, `CP_TERMINAL` (tabela da seção 2).
 
+### Checkpoints de código (Pi e OMP)
+
+Com a extensão do Hangar carregada, cada pedido em uma árvore Git recebe um checkpoint antes
+da atuação do agente. No **OMP**, use `/hangar-rewind`; no **Pi**, use `/rewind`.
+Escolha o checkpoint do ramo atual e um dos três modos:
+
+- **Código e conversa:** repõe os arquivos e reposiciona a conversa.
+- **Somente conversa:** mantém os arquivos como estão.
+- **Somente código:** mantém a conversa como está.
+
+Arquivos modificados ou apagados voltam ao estado capturado. **Arquivos criados depois são
+preservados**, e o índice, a branch e os commits do seu repositório não são alterados.
+As exclusões do Git são respeitadas; os objetos ficam em `<agentDir>/checkpoints`, onde
+`agentDir` vem de `PI_CODING_AGENT_DIR` ou da pasta padrão do harness.
+
+Retomar ou ramificar uma sessão preserva a referência aos objetos originais. Se eles não
+estiverem disponíveis ou pertencerem a outro projeto, a restauração do código é recusada.
+Mudança de sessão/estado durante a escolha exige uma nova seleção. Se os arquivos voltarem
+mas a conversa falhar, o aviso informa a conclusão parcial. No OMP, uma captura que exceda
+25 segundos interrompe o pedido, sem publicar um checkpoint tardio.
+
 ### Git
 
 O ícone de branch abre o **modal de git** da sessão — o mesmo nas duas views: no desktop ele é um

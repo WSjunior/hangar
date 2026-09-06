@@ -566,10 +566,8 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   memória. Hooks JS/TS nativos não executam automaticamente o protocolo CLI do `settings.json`.
   E checkpoint/rewind nativos reduzem contexto: não restauram arquivos como o shadow Git do
   Hangar. Essas capacidades continuam complementares, não substituídas por nome.
-  A comparação identificou limitações separadas, não corrigidas por esta seleção: caminhos
-  Pi fixos nas extensões complementares, `agent_settled` ausente no OMP, `/rewind` reservado
-  pelo núcleo e ausência de uma barreira assíncrona em `turn_start`. Não anunciar equivalência
-  ou compatibilidade completa dessas extensões no OMP sem provar os respectivos fluxos.
+  A seleção das extensões não demonstra compatibilidade completa: o bridge e os checkpoints
+  têm as provas específicas abaixo; limitações do adaptador de hooks continuam separadas.
   **Bridge adaptado ao OMP (05/09/2026):** `agent-context.ts` resolve a identidade pelo
   executável e normaliza `PI_CODING_AGENT_DIR`/`CLAUDE_CONFIG_DIR`, incluindo `~`; a fábrica
   guarda esse contexto por instância. No OMP, agents pessoais/extras viram arquivos diretos
@@ -591,6 +589,27 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   Prova: `tests/test_claude_bridge_omp.py` roda o OMP real com HOME própria; o driver exige
   descoberta no catálogo de `task`, grava resultado estruturado em `session_start` e encerra
   sem prompt/modelo remoto. `rc=0` sozinho não prova carregamento de extensão.
+  **Checkpoints por contexto no OMP (05/09/2026):** `git-checkpoint.ts` consome o mesmo
+  `agent-context.ts` e registra `/hangar-rewind`; o Pi mantém `/rewind`. A captura usa
+  `before_agent_start`, não `turn_start`, e persiste revisão, worktree canônica, identidade do
+  Git do projeto e diretório que contém os objetos. O próprio registro é a âncora anterior ao
+  pedido. Retomada/fork conservam essa origem; `getBranch` impede oferecer um ramo descartado.
+  Cada instância/sessão tem armazenamento próprio em `<agentDir>/checkpoints/`; restaurações
+  usam índice temporário próprio, nunca o índice da sessão de origem. O Git do projeto só
+  enumera arquivos/exclusões; variáveis `GIT_*` herdadas são removidas, hooks/assinatura/fsmonitor
+  são desativados e atributos do shadow preservam bytes, inclusive CRLF, sem filtros de conteúdo.
+  O modo de código repõe arquivos modificados/apagados, preservando os criados depois. Origem,
+  projeto, revisão, ramo, diretório e ociosidade são conferidos antes da escrita; symlinks
+  ancestrais ou diretórios posteriores em colisão recusam a operação.
+  **O await do OMP tem prazo:** no 18.1.11 o dispatcher libera handlers após 30 s. A captura
+  tem limite total de 25 s, incluindo espera na fila, e cancela os processos Git/interrompe
+  o pedido antes desse limite nativo. `agent_start`/`turn_start` também invalidam qualquer
+  captura restante; ela não pode publicar um checkpoint tardio no turno em execução.
+  Prova usa `ExtensionRunner`/`loadExtensionFromFactory` reais, sem chamada a modelo; reproduziu
+  a publicação tardia ao expirar o dispatcher e passou após o cancelamento.
+  Registros Pi antigos só são restaurados quando a sessão original, seu `header.cwd` e o
+  armazenamento legado previsto demonstram a origem; não se procura um SHA por pastas alheias.
+  Código e conversa são etapas separadas: falha da segunda é informada como parcial, não sucesso.
   Regras herdadas do adapter: a allowlist embutida libera só `~/.claude/hooks/` — hook que mora
   noutro lugar entra por `~/.pi/agent/claude-hooks-adapter.json`, e `allowPatterns` ali
   **substitui** a lista, não soma; e os hooks só-Claude do próprio app (`state_hook`, `askq_capture`,
