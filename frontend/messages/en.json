@@ -880,6 +880,7 @@
   "config_motores_terminal_1": "In the terminal you use",
   "config_motores_terminal_2": ". Lowercase, no spaces.",
   "config_motores_nome_curto": "Short name",
+  "config_motores_nome_em_uso": "A model with this name already exists. Pick another one, or edit the existing one.",
   "config_motores_editar": "Edit",
   "config_motores_dica_kimi": "Kimi Code",
   "config_motores_dica_omni": "OmniRoute",

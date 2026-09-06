@@ -37,14 +37,14 @@ function montar(motor: Motor = KIMI) {
 }
 
 // Modo criar: sem motor no disco e com o nome curto ainda por digitar.
-function montarCriando() {
+function montarCriando(nomesExistentes: string[] = []) {
   const el = document.createElement('div');
   document.body.appendChild(el);
   const onSalvo = vi.fn();
   const onFechar = vi.fn();
   const comp = mount(MotorForm, {
     target: el,
-    props: { apiTarget: null, nome: '', motor: null, criando: true, onSalvo, onFechar },
+    props: { apiTarget: null, nome: '', motor: null, criando: true, nomesExistentes, onSalvo, onFechar },
   });
   return { el, comp: comp as never, onSalvo, onFechar };
 }
@@ -352,6 +352,164 @@ describe('MotorForm', () => {
     expect(corpo).toHaveProperty('auto_compact_window', '');
     expect(corpo).toHaveProperty('max_output_tokens', '');
     unmount(t.comp);
+  });
+
+  // Criar não fecha o bloco (é onde o resultado da sincronização é lido), então a MESMA instância
+  // salva de novo. Do 1º Salvar em diante o modelo existe no disco: o formulário é edição dele.
+  describe('depois do primeiro Salvar em criação o formulário é edição', () => {
+    const preencher = async (el: HTMLElement, pares: [string, string][]) => {
+      for (const [nome, valor] of pares) {
+        const inp = campo(el, nome);
+        inp.value = valor;
+        inp.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      await espera();
+    };
+    // O registro criado tem que voltar do PUT: com `{ motores: {} }` a reconciliação do
+    // `api_key_definida` não acontece e o caso do aviso de endereço testaria o vazio.
+    const criado = { motores: { kimi: { ...KIMI, api_key_definida: true } } };
+
+    it('o 2º Salvar atualiza o mesmo id, mesmo com outro nome digitado — não cria um segundo modelo', async () => {
+      apiMock.putEngine.mockResolvedValue(criado);
+      const c = montarCriando();
+      await preencher(c.el, [['nome', 'kimi'], ['base_url', 'https://api.kimi.com/coding'], ['model', 'kimi-k3']]);
+      botao(c.el, m.ctx_salvar()).click();
+      await espera();
+
+      await preencher(c.el, [['nome', 'outro']]);
+      botao(c.el, m.ctx_salvar()).click();
+      await espera();
+
+      expect(apiMock.putEngine).toHaveBeenCalledTimes(2);
+      expect(apiMock.putEngine.mock.calls.map((x) => x[0])).toEqual(['kimi', 'kimi']);
+      unmount(c.comp);
+    });
+
+    it('o campo do nome curto fica só-leitura depois do 1º Salvar', async () => {
+      apiMock.putEngine.mockResolvedValue(criado);
+      const c = montarCriando();
+      await preencher(c.el, [['nome', 'kimi'], ['base_url', 'https://api.kimi.com/coding'], ['model', 'kimi-k3']]);
+      expect(campo(c.el, 'nome').readOnly).toBe(false);
+
+      botao(c.el, m.ctx_salvar()).click();
+      await espera();
+      expect(campo(c.el, 'nome').readOnly).toBe(true);
+      unmount(c.comp);
+    });
+
+    // O aviso é de edição com chave salva; depois do 1º Salvar a criação virou exatamente isso, e
+    // sem ele o Testar usaria a chave salva contra o endereço ANTIGO, calado.
+    it('o aviso do endereço editado volta a acender depois do 1º Salvar', async () => {
+      apiMock.putEngine.mockResolvedValue(criado);
+      const c = montarCriando();
+      await preencher(c.el, [
+        ['nome', 'kimi'], ['base_url', 'https://api.kimi.com/coding'],
+        ['model', 'kimi-k3'], ['api_key', 'sk-nova'],
+      ]);
+      // Antes de gravar não há endereço salvo: nada a avisar.
+      await preencher(c.el, [['base_url', 'https://antes.exemplo']]);
+      expect(c.el.textContent).not.toContain(m.config_motores_endereco_mudou());
+
+      await preencher(c.el, [['base_url', 'https://api.kimi.com/coding']]);
+      botao(c.el, m.ctx_salvar()).click();
+      await espera();
+      expect(c.el.textContent).not.toContain(m.config_motores_endereco_mudou());
+
+      await preencher(c.el, [['base_url', 'https://depois.exemplo']]);
+      expect(c.el.textContent).toContain(m.config_motores_endereco_mudou());
+      unmount(c.comp);
+    });
+
+    it('o onSalvo do 2º Salvar traz o mesmo id, e a ajuda segue mostrando o comando do id gravado', async () => {
+      apiMock.putEngine.mockResolvedValue(criado);
+      const c = montarCriando();
+      await preencher(c.el, [['nome', 'kimi'], ['base_url', 'https://api.kimi.com/coding'], ['model', 'kimi-k3']]);
+      botao(c.el, m.ctx_salvar()).click();
+      await espera();
+      botao(c.el, m.ctx_salvar()).click();
+      await espera();
+
+      expect(c.onSalvo).toHaveBeenCalledTimes(2);
+      expect(c.onSalvo.mock.calls[1][0]).toHaveProperty('kimi');
+      const codigo = [...c.el.querySelectorAll('code')]
+        .map((x) => x.textContent ?? '').find((x) => x.startsWith('claude-engine'));
+      expect(codigo).toBe('claude-engine kimi');
+      unmount(c.comp);
+    });
+  });
+
+  // O PUT é substituição: criar com o nome curto de um modelo existente apagaria o registro dele.
+  describe('nome curto já ocupado é recusado ANTES de gravar', () => {
+    const preencher = async (el: HTMLElement, pares: [string, string][]) => {
+      for (const [nome, valor] of pares) {
+        const inp = campo(el, nome);
+        inp.value = valor;
+        inp.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      await espera();
+    };
+
+    it('criar com nome homônimo não chama o PUT nem a sincronização, e avisa', async () => {
+      const c = montarCriando(['kimi']);
+      // `Kimi` normaliza para `kimi` pelo idDe: a recusa é sobre o id, não sobre o que se digitou.
+      await preencher(c.el, [['nome', 'Kimi'], ['base_url', 'https://x.exemplo'], ['model', 'mx-1']]);
+      botao(c.el, m.ctx_salvar()).click();
+      await espera();
+
+      expect(apiMock.putEngine).not.toHaveBeenCalled();
+      expect(credMock.sincronizarNosAgentes).not.toHaveBeenCalled();
+      expect(c.el.textContent).toContain(m.config_motores_nome_em_uso());
+      unmount(c.comp);
+    });
+
+    it('corrigir o nome no mesmo formulário grava normalmente e o aviso some', async () => {
+      const c = montarCriando(['kimi']);
+      await preencher(c.el, [['nome', 'kimi'], ['base_url', 'https://x.exemplo'], ['model', 'mx-1']]);
+      botao(c.el, m.ctx_salvar()).click();
+      await espera();
+      expect(c.el.textContent).toContain(m.config_motores_nome_em_uso());
+
+      await preencher(c.el, [['nome', 'kimi-2']]);
+      botao(c.el, m.ctx_salvar()).click();
+      await espera();
+      expect(apiMock.putEngine).toHaveBeenCalledTimes(1);
+      expect(apiMock.putEngine.mock.calls[0][0]).toBe('kimi-2');
+      expect(c.el.textContent).not.toContain(m.config_motores_nome_em_uso());
+      unmount(c.comp);
+    });
+
+    // A recusa vale só na criação: senão nenhum modelo do disco poderia ser salvo de novo.
+    it('em edição o nome no disco está na lista e o salvar grava normalmente', async () => {
+      const el = document.createElement('div');
+      document.body.appendChild(el);
+      const comp = mount(MotorForm, {
+        target: el,
+        props: { apiTarget: null, nome: 'kimi', motor: KIMI, nomesExistentes: ['kimi'], onSalvo: vi.fn(), onFechar: vi.fn() },
+      });
+      botao(el, m.ctx_salvar()).click();
+      await espera();
+      expect(apiMock.putEngine).toHaveBeenCalledTimes(1);
+      expect(el.textContent).not.toContain(m.config_motores_nome_em_uso());
+      unmount(comp);
+    });
+
+    it('o 2º Salvar do que acabou de ser criado não é recusado pelo próprio nome', async () => {
+      apiMock.putEngine.mockResolvedValue({ motores: { kimi: { ...KIMI, api_key_definida: true } } });
+      const lista: string[] = [];
+      const c = montarCriando(lista);
+      await preencher(c.el, [['nome', 'kimi'], ['base_url', 'https://api.kimi.com/coding'], ['model', 'kimi-k3']]);
+      botao(c.el, m.ctx_salvar()).click();
+      await espera();
+
+      // A lista recarregada do pai já traz o modelo recém-criado.
+      lista.push('kimi');
+      botao(c.el, m.ctx_salvar()).click();
+      await espera();
+
+      expect(apiMock.putEngine).toHaveBeenCalledTimes(2);
+      expect(c.el.textContent).not.toContain(m.config_motores_nome_em_uso());
+      unmount(c.comp);
+    });
   });
 
   it('cancelar chama onFechar sem gravar', () => {

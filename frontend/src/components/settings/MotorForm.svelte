@@ -32,10 +32,13 @@
     nome: string;
     motor: Motor | null;
     criando?: boolean;
+    // Ids já no disco: o PUT é substituição, então criar com um nome ocupado apagaria o registro
+    // do outro. Prop viva, lida na hora de salvar — copiá-la para um `$state` congelaria a lista.
+    nomesExistentes?: string[];
     onSalvo: (motores: Record<string, Motor>, alvo: Server | null) => void;
     onFechar: () => void;
   }
-  let { apiTarget, nome, motor, criando = false, onSalvo, onFechar }: Props = $props();
+  let { apiTarget, nome, motor, criando = false, nomesExistentes = [], onSalvo, onFechar }: Props = $props();
 
   // Atalhos de endereço: dois provedores que a pessoa desta casa usa e cujo endereço não se
   // adivinha (nem um nem outro é o domínio do produto).
@@ -83,8 +86,14 @@
     auto_compact_window: motor?.auto_compact_window ? String(motor.auto_compact_window) : '',
     max_output_tokens: motor?.max_output_tokens ? String(motor.max_output_tokens) : '',
   })));
+  // O bloco não fecha depois de salvar (é onde o resultado da sincronização é lido), então a mesma
+  // instância continua na tela com o modelo já no disco: `criando` é só o valor INICIAL. Sem isto o
+  // Salvar seguinte manda o id derivado do nome digitado e cria um SEGUNDO modelo. O `untrack` é o
+  // mesmo motivo do `form` acima (`state_referenced_locally`).
+  let criandoAgora = $state(untrack(() => criando));
+  let idNoDisco = $state(untrack(() => nome));
   // Em edição o id no disco não muda; em criação ele sai do nome curto pelo alfabeto do engines.json.
-  const idAlvo = $derived(criando ? idDe(form.nome) : nome);
+  const idAlvo = $derived(criandoAgora ? idDe(form.nome) : idNoDisco);
   const ligado = (k: ChaveLiga) => form[k];
   const setLigado = (k: ChaveLiga, v: boolean) => { form[k] = v; };
   const numero = (k: ChaveNum) => form[k];
@@ -109,7 +118,7 @@
   // Motor com chave salva, campo de chave vazio e endereço editado: o Testar usaria a chave salva
   // contra o endereço ANTIGO (o servidor só aceita nome sozinho) e ignoraria a edição calado. Em
   // criação não há chave nem endereço salvos, então não há o que avisar.
-  const enderecoMudouSemChave = $derived(!criando && form.api_key_definida
+  const enderecoMudouSemChave = $derived(!criandoAgora && form.api_key_definida
     && !form.api_key.trim() && form.base_url.trim() !== form.base_url_original);
 
   async function buscarModelos() {
@@ -139,6 +148,11 @@
   }
 
   async function salvar() {
+    // Homônimo é recusado ANTES de gravar: o PUT substitui, e o servidor aceitaria calado.
+    if (criandoAgora && nomesExistentes.includes(idAlvo)) {
+      erro = m.config_motores_nome_em_uso();
+      return;
+    }
     // O bloco não fecha depois de salvar, então a mesma instância salva de novo: a área de
     // resultado nasce limpa a cada Salvar, senão a sincronização anterior fica na tela ao lado do
     // erro novo, como se fosse desta gravação.
@@ -173,6 +187,11 @@
       // chave nova continua sem chave, e ligar a marca aqui prometeria "definida" com o disco vazio.
       form.api_key_definida = r.motores[id]?.api_key_definida ?? (form.api_key_definida || !!corpo.api_key);
       form.base_url_original = form.base_url.trim();
+      // O modelo existe no disco a partir daqui: a criação virou edição DELE. Depois do await de
+      // propósito — antes, uma falha de rede deixaria o formulário se dizendo edição do que não foi
+      // gravado.
+      idNoDisco = id;
+      criandoAgora = false;
       aoSalvo(r.motores, alvo);
       // A chave também é dos OUTROS agentes (Pi/Kimi/Codex). Passo SEPARADO, fora do try do salvar:
       // falhar aqui não desfaz o motor, que vale para o Claude Code de qualquer jeito. O bloco
@@ -197,7 +216,10 @@
   {#if criando}
     <label class="campo">
       <span class="rot">{m.config_motores_nome_curto()}</span>
+      <!-- Gravado, o nome curto é o id no disco: editá-lo aqui criaria outro modelo. Fica visível
+           (é o que a pessoa escolheu) e travado. -->
       <input type="text" name="nome" placeholder="kimi" autocapitalize="off" spellcheck={false}
+             readonly={!criandoAgora} class:travado={!criandoAgora}
              value={form.nome} oninput={(e) => (form.nome = e.currentTarget.value)} />
       <!-- Campo vazio mostra o EXEMPLO do placeholder: a frase é lida como comando de verdade, e
            `idDe('')` cai no fallback `chave`, um nome que ninguém escolheu. -->
@@ -394,7 +416,7 @@
     <button type="button" class="btn" onclick={onFechar} disabled={salvando || sincronizando}
       >{sync || syncErro ? m.sessao_fechar() : m.comum_cancelar()}</button>
     <button type="button" class="btn primario" onclick={salvar}
-            disabled={salvando || !form.model.trim() || !form.base_url.trim() || (criando && !form.nome.trim())}>
+            disabled={salvando || !form.model.trim() || !form.base_url.trim() || (criandoAgora && !form.nome.trim())}>
       {salvando ? m.config_motores_salvando() : m.ctx_salvar()}
     </button>
   </div>
@@ -495,6 +517,10 @@
     font-size: 16px; padding: 0 var(--space-3); outline: none; min-width: 0;
   }
   input:focus { border-color: var(--accent); }
+  /* Só-leitura tem que se distinguir do editável, senão a pessoa digita e nada acontece. O
+     seletor leva o `input[type=...]` junto: só `.travado` perde na cascata para a regra acima —
+     medido, a classe entrava e a cor não mudava. */
+  input[type='text'].travado { color: var(--text-muted); cursor: default; }
   .aviso { font-size: var(--text-sm); color: var(--text-muted); margin: 0; }
   .aviso.erro { color: var(--error); }
   .sync-bloco { margin: 0; }
