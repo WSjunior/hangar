@@ -663,6 +663,20 @@ describe('MotorForm', () => {
       unmount(largo.comp);
     });
 
+    // O rodapé grudado cobre o que o navegador encosta na borda de baixo ao dar foco; quem afasta
+    // a rolagem da faixa é uma regra presa a `.compacto`. happy-dom não mede rolagem, então o que
+    // dá para provar é a classe existir no estreito e não existir no largo.
+    it('só no estreito a raiz ganha "compacto", que é onde a regra de rolagem se prende', async () => {
+      const c = await comLargura(390, () => montarCriando());
+      expect(c.el.querySelector('.mf')!.classList.contains('compacto')).toBe(true);
+      unmount(c.comp);
+
+      const largo = montarCriando();
+      await espera();
+      expect(largo.el.querySelector('.mf')!.classList.contains('compacto')).toBe(false);
+      unmount(largo.comp);
+    });
+
     // Bloco ainda não medido tem largura 0: sem esta guarda ele nasceria compacto no desktop.
     it('largura 0 não decide nada — continua largo', async () => {
       const c = await comLargura(0, () => montarCriando());

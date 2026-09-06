@@ -237,7 +237,7 @@
   }
 </script>
 
-<div class="mf" bind:this={raiz}>
+<div class="mf" class:compacto={celular} bind:this={raiz}>
   <!-- Um lugar decide como a ajuda longa aparece; os quatro campos só chamam. No estreito ela vai
        para trás de um "?" — <details> nativo já traz teclado e estado, sem lib nem $state. -->
   {#snippet ajudaLonga(rotulo: string, conteudo: import('svelte').Snippet)}
@@ -616,6 +616,10 @@
     border-top: 1px solid var(--border-subtle);
     border-radius: 0 0 9px 9px;
   }
+  /* O sticky cobre o que o navegador encosta na borda de baixo ao dar foco; a margem faz a
+     rolagem parar acima da faixa (69px medidos + folga). Só no compacto: no largo não há faixa.
+     `:global` porque o gatilho do <Select> é elemento de outro componente. */
+  .mf.compacto :global(:is(input, button, summary)) { scroll-margin-bottom: 84px; }
   .btn { height: 36px; min-height: 0; padding: 0 var(--space-4); border-radius: var(--radius-sm);
          border: 1px solid var(--border-subtle); background: var(--surface-raised);
          color: var(--text-primary); font-size: var(--text-sm); font-weight: 600; cursor: pointer; }
