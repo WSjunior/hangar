@@ -80,6 +80,15 @@ NOTED 1: <one line> — not fixed now because <reason>; stays in the contract.
 WASTE this round: <what the executor did that became nothing> — would have prevented: <the instruction>.
 ```
 
+**A blocker names its source when there are two authorities.** A Task with a bar has two documents
+that can demand things, and they can disagree: the **excerpt** (what the user asked for) and the
+**bar** (what the reference does today). Where the excerpt deliberately goes beyond the reference,
+the reference **stops being able to arbitrate that element** — and a blocker that cites the bar for
+something the excerpt added inverts the criterion, sending the executor to prove a fidelity nobody
+asked for. One word per blocker line settles it: *from the excerpt* or *from the bar*. In doubt,
+open the reference before writing the line — the executor will, and a wrong source costs them a
+section of report and a capture to disprove.
+
 ### The last line is mandatory, including on APROVA
 
 It doesn't judge the executor: it measures the **round**. It is what lets the arbiter see a
