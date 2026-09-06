@@ -20,7 +20,7 @@
   import ForwardSheet from '../components/ForwardSheet.svelte';
   import PairSheet from '../components/PairSheet.svelte';
   import OrquestracaoSheet from '../components/OrquestracaoSheet.svelte';
-  import { prefetchOrq } from '../lib/queries';
+  import { prefetchOrq, lerCaudaChat, guardarCaudaChat } from '../lib/queries';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { aoAquecer, segurarAquecimento, soltarAquecimento } from '../lib/aquecimento';
   // Ciclo de import de propósito (PairChatModal importa este Chat): é o mesmo Chat montado por
@@ -147,6 +147,11 @@
   // abertas morreria. Mesmo padrao do FilesPanel. A chave e a MESMA identidade do shell
   // (serverId::nome) que o FilesPanel usa — nunca calculada diferente por caller.
   const filesChave = `${getActiveId() ?? ''}::${sessionName}`;
+  // Dono da conversa, capturado na ENTRADA. O `onDestroy` não pode perguntar "qual o servidor
+  // ativo?": navegando pra um chat de outra máquina, o `applyRouteServer` já trocou o ativo antes
+  // de este Chat desmontar, e a cauda desta sessão seria gravada sob a chave da OUTRA máquina.
+  // Mesmo padrão do `filesChave` acima, e pelo mesmo motivo.
+  const servidorDaCauda = getActiveId() ?? '';
   // svelte-ignore state_referenced_locally — a linha acima ja tem o ignore no comentario de
   // bloco; esta referência a sessionName (retain/release) e a mesma captura intencional.
   const filesStore = filesStores.retain(filesChave, sessionName);
@@ -1083,16 +1088,44 @@
     const g = histGen;
     histGap = '';
     histRetentando = false;   // carga nova comeca sem o aviso da anterior, igual ao histGap
+    // Carga nova = geração nova: a busca de antigos da anterior foi abortada junto, e deixar a
+    // trava levantada faria a primeira rolagem até o topo desta ser engolida em silêncio.
+    buscandoAntigos = false;
+    // A cauda da última visita pinta a tela ANTES de qualquer rede. Sem isto, voltar pra uma sessão
+    // dez segundos depois pagava a espera inteira de novo, porque a rota #/chat desmonta o Chat no
+    // celular e leva `events`/`lastEventId` junto. O fetch abaixo continua acontecendo — o que muda
+    // é a tela estar utilizável enquanto ele corre, em vez de esqueleto.
+    const cache = lerCaudaChat(servidorDaCauda, sessionName);
+    const pintouDoCache = !!cache?.eventos.length;
+    if (pintouDoCache) {
+      events = cache!.eventos;
+      lastEventId = cache!.lastEventId;
+      rebuildIndex();
+      reseedDerived();
+      loading = false;
+    }
     try {
       const tail = await tailComRetentativa(signal, g);
       if (g !== histGen) return;   // outra carga assumiu no meio do voo: esta resposta é velha
-      events = tail;
+      // Costura SÓ quando o cache pintou; sem ele, substitui como sempre foi. `appendTail` assume
+      // que a cauda é a parte MAIS RECENTE, e no caminho do /clear o SSE pode ter posto uma
+      // mensagem nova em `events` durante o fetch — ali a suposição se inverte e o histórico
+      // entraria DEPOIS dela, fora de ordem. Com a condição no cache, esse caminho segue no
+      // comportamento antigo, byte por byte.
+      // Quando NENHUM id bate (transcript trocado por /clear), `appendTail` devolve só a cauda nova
+      // e joga o cache fora — a proteção que dispensa pôr o jsonl na chave do cache.
+      events = pintouDoCache ? appendTail(tail, events) : tail;
       rebuildIndex();
       reseedDerived();
       error = '';
       kimiSemTranscript = false;   // transcript existe -> sai do modo "kimi pre-1o-prompt"
-      // Veio menos que o pedido = o transcript inteiro coube na cauda; não há o que buscar.
-      if (tail.length >= TAIL_FIRST) loadOlderInBackground(g);
+      // A fase 2 NÃO dispara mais aqui. Ela custava 1,2 MB por ENTRADA numa sessão grande (medido
+      // em 06/09/2026 na `pr-junior`, transcript de 31,9 MB) e servia a UMA coisa só: estar pronta
+      // caso a pessoa rolasse pra cima. Quem entra pra ler as últimas mensagens e sair — o uso
+      // normal no celular — pagava por um histórico que nunca olhou. Agora quem pede é a
+      // MessageList, quando a rolagem chega ao topo do que existe em memória (`onFimDoLocal`).
+      // Veio menos que o pedido = o transcript inteiro coube na cauda; nem há o que buscar depois.
+      temMaisNoServidor = tail.length >= TAIL_FIRST;
     } catch (err) {
       if (isAbortError(err) || g !== histGen) return;   // cancelado ≠ falhou: nada na tela
       // Teto estourado vira frase traduzida: o texto que o navegador poe no TimeoutError e
@@ -1119,10 +1152,26 @@
     }
   }
 
-  // Fase 2: o histórico ANTERIOR à cauda, em segundo plano. Não devolve promise de propósito —
+  // A cauda veio cheia, então existe histórico anterior a ela no servidor. Vira falso quando a
+  // fase 2 já trouxe tudo — sem isso, cada rolagem até o topo repetiria a busca do arquivo inteiro.
+  let temMaisNoServidor = false;
+  let buscandoAntigos = false;
+
+  // Chamado pela MessageList quando a rolagem chega ao topo do que há em memória.
+  function pedirMaisAntigos() {
+    if (!temMaisNoServidor) return;
+    loadOlderInBackground(histGen);
+  }
+
+  // Fase 2: o histórico ANTERIOR à cauda, sob demanda. Não devolve promise de propósito —
   // ninguém espera por ela, a tela já está utilizável. Anda junto com a carga da geração `g`: usa o
   // MESMO controller (não cria um novo), então quem invalida a geração aborta as duas fases.
   function loadOlderInBackground(g: number) {
+    // A trava mora AQUI, não em quem chama: os outros dois caminhos — a pílula de "tentar de novo"
+    // e a retomada do segundo plano — chamam esta função direto, e dois toques rápidos na pílula
+    // (que não desabilita durante a busca) disparavam dois downloads do arquivo inteiro.
+    if (buscandoAntigos) return;
+    buscandoAntigos = true;
     getHistory(sessionName, undefined, histAbort?.signal)
       .then((full) => {
         if (g !== histGen || !alive) return;   // resposta velha/pós-destroy: NÃO aplica
@@ -1143,6 +1192,15 @@
       .catch((err) => {
         if (isAbortError(err) || g !== histGen || !alive) return;   // cancelado ≠ falhou
         histGap = 'failed';
+      })
+      .finally(() => {
+        if (g !== histGen) return;
+        // Trouxe (ou tentou trazer) o arquivo INTEIRO: não há segunda página. Solta as duas travas
+        // — a de "está buscando" e a de "existe mais lá" —, senão a próxima rolagem até o topo
+        // repetiria o download completo. Falha some daqui de propósito: quem avisa é o `histGap`,
+        // e o toque nele é que tenta de novo.
+        buscandoAntigos = false;
+        temMaisNoServidor = false;
       });
   }
 
@@ -1388,6 +1446,10 @@
       // carregou" são indistinguíveis no arquivo que a pessoa manda.
       diag.registrar({ evento: 'chat.reset', tela: 'chat', sessao: sessionName });
       lastEventId = null;   // transcript trocado (/clear): id do arquivo antigo não vale mais
+      // A cauda guardada é do transcript ANTIGO. O `appendTail` da próxima entrada a descartaria
+      // (nenhum id em comum), mas só DEPOIS de ela já ter pintado — a conversa apagada apareceria
+      // por um instante. Apagar aqui é o único ponto em que se sabe que ela morreu.
+      guardarCaudaChat(servidorDaCauda, sessionName, { eventos: [], lastEventId: null });
       events = [];
       idIndex.clear();
       reseedDerived();          // zera activity/asstCount junto (loadHistory re-semeia com o novo)
@@ -1476,6 +1538,15 @@
   });
 
   onDestroy(() => {
+    // Guarda a CAUDA, não a conversa inteira: o que faz a tela pintar é a janela de 120 da
+    // MessageList, e cachear megabytes só moveria o custo de lugar. `lastEventId` vai junto porque
+    // é ele que o SSE usa pra retomar do ponto exato, em vez de refazer o backfill.
+    if (events.length) {
+      guardarCaudaChat(servidorDaCauda, sessionName, {
+        eventos: events.slice(-TAIL_FIRST),
+        lastEventId,
+      });
+    }
     alive = false;   // connectSSE/onVisible em voo viram no-op — sem EventSource fantasma
     histGen++;
     histAbort?.abort();   // e o /history em voo para de baixar (nao so de ser aplicado)
@@ -2028,6 +2099,7 @@
       {stateEvent}
       {pending}
       {sessionName}
+      onFimDoLocal={pedirMaisAntigos}
       {dockH}
       {swapIds}
       preview={previewText}

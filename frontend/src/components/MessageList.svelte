@@ -46,6 +46,9 @@
     askActive?: boolean;
     onAnswer?: (answers: AnswerItem[]) => Promise<void>;
     onAskClose?: () => void;
+    /** Rolou até o topo e não há mais nada em memória — quem tem o resto é o servidor. Ausente
+     *  (arquivo, board) = a lista simplesmente para onde acabou, como antes. */
+    onFimDoLocal?: () => void;
     // Override da URL de imagem do transcript (ex: arquivo de conversas mortas, que nao tem sessao).
     imageUrl?: (id: string, idx: number) => string;
     // Ids de assistant_msg que substituiram um preview em tela: montam SEM animacao (swap invisivel).
@@ -60,7 +63,8 @@
 
   let {
     events, stateEvent, pending, sessionName, dockH, preview = '', previewMd = false, previewFull = false, onSelectOption, onSubmitSelected, onCancel,
-    askOpen = false, askPayload = null, askActive = false, onAnswer, onAskClose, imageUrl, swapIds,
+    askOpen = false, askPayload = null, askActive = false, onAnswer, onAskClose, onFimDoLocal,
+    imageUrl, swapIds,
     onForward, onOpenSession, onOpenOrq
   }: Props = $props();
 
@@ -88,6 +92,12 @@
     scrolledUp = gap > listEl.clientHeight; // mais de uma tela do fim = "muito pra cima" -> botao
     // Perto do topo + ainda ha eventos antigos fora da janela -> revela a proxima pagina.
     if (listEl.scrollTop < 200 && hasOlder) revealOlder();
+    // Perto do topo e a memoria ACABOU: quem tem mais e o servidor. Este aviso e o que permite ao
+    // Chat buscar o historico antigo so quando ele e realmente pedido, em vez de puxa-lo sempre ao
+    // abrir — medido em 06/09/2026, era 1,2 MB por ENTRADA numa sessao grande, e quem entra pra ler
+    // as ultimas mensagens e sair nunca chega a rolar ate aqui. Quem evita repetir e o Chat: aqui
+    // nao da pra saber se ja veio tudo (a lista nao sabe o tamanho do transcript).
+    if (listEl.scrollTop < 200 && !hasOlder) onFimDoLocal?.();
   }
 
   // Janela curta demais pra rolar (rajada de tool calls colapsada em linhas de grupo) -> revela
