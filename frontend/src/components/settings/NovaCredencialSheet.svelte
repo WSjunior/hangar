@@ -28,8 +28,10 @@
     onFechar: () => void;
     // Chamado depois de criar — quem abriu recarrega a lista (fonte única, não insere item na mão).
     onCriada: () => void;
+    // Só repassada ao formulário do modelo, que recusa nome curto já ocupado antes de gravar.
+    nomesExistentes?: string[];
   }
-  let { apiTarget, onFechar, onCriada }: Props = $props();
+  let { apiTarget, onFechar, onCriada, nomesExistentes = [] }: Props = $props();
 
   // Catálogo. `url` vazia = o usuário digita (provedor personalizado); `login` = conta do Claude por
   // assinatura, que não tem URL nem chave. Só entra aqui provedor que a gente sabe usar de verdade —
@@ -314,7 +316,7 @@
            modelo, janela de contexto e o Avançado, o motor nasce pela metade e a sessão compacta
            a 200k. Salvar ali já faz PUT + sincronização; aqui só a lista de fora é recarregada. -->
       <p class="nc-leg">{escolhido.desc}</p>
-      <MotorForm {apiTarget} criando nome=""
+      <MotorForm {apiTarget} criando nome="" {nomesExistentes}
         motor={{ base_url: escolhido.url, model: '', api_key: '', api_key_definida: false }}
         onSalvo={() => onCriada()} {onFechar} />
     {:else if escolhido.login === 'codex'}

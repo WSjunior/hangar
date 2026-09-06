@@ -486,10 +486,12 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
     {/if}
     <!-- Criar é a ação primária da tela e vive no cabeçalho: no rodapé ela era o 13º item, depois
          de todas as credenciais. Com o engines.json quebrado fica inerte — a folha abre POR CIMA
-         da lista e esconderia o aviso que explica por que criar agora apagaria os outros motores. -->
+         da lista e esconderia o aviso que explica por que criar agora apagaria os outros motores.
+         Pendente ou com erro fica inerte pelo mesmo motivo: sem a lista de nomes na mão o
+         formulário não tem como recusar um nome curto já ocupado, e o PUT substitui calado. -->
     <button type="button" class="ct-add" onclick={() => (novo = 'escolha')}
       aria-label={m.contas_add_aria()}
-      disabled={!!novo || !!qMotores.data?.arquivo_corrompido}>+ {m.contas_add()}</button>
+      disabled={!!novo || qMotores.isPending || !!qMotores.error || !!qMotores.data?.arquivo_corrompido}>+ {m.contas_add()}</button>
     <button type="button" class="ct-refresh" onclick={alternarDensidade}
       aria-pressed={compacta}
       aria-label={compacta ? m.contas_ver_completa() : m.contas_ver_compacta()}
@@ -802,7 +804,7 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
   {/snippet}
 
   {#if novo}
-    <NovaCredencialSheet {apiTarget}
+    <NovaCredencialSheet {apiTarget} nomesExistentes={Object.keys(motoresMapa)}
       onFechar={() => (novo = null)}
       onCriada={() => { void carregar(geracao); }} />
   {/if}

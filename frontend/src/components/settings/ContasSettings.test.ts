@@ -779,6 +779,39 @@ describe('ContasSettings — modelo e opções da chave (Contas e modelos)', () 
     unmount(t.comp);
   });
 
+  // Sem a lista de nomes na mão, o formulário de criação não tem como recusar um nome curto já
+  // ocupado — e o PUT é substituição, então criar apagaria o motor do outro, calado. Enquanto a
+  // consulta não voltou, ou se ela falhou, criar fica inerte: mesmo tratamento do arquivo corrompido.
+  it('consulta de modelos ainda pendente: + Adicionar fica desabilitado', async () => {
+    apiMock.getEnginesForServer.mockReturnValue(new Promise(() => {}) as never);
+    const t = montar([chave()]);
+    await tick(); await tick(); await tick();
+    const nova = t.el.querySelector<HTMLButtonElement>(`button[aria-label="${m.contas_add_aria()}"]`)!;
+    expect(nova.disabled).toBe(true);
+    unmount(t.comp);
+  });
+
+  it('consulta de modelos que falhou: + Adicionar fica desabilitado e o erro aparece', async () => {
+    apiMock.getEnginesForServer.mockRejectedValue(new Error('HTTP 500'));
+    const t = montar([chave()]);
+    await tick(); await tick(); await tick();
+    const nova = t.el.querySelector<HTMLButtonElement>(`button[aria-label="${m.contas_add_aria()}"]`)!;
+    expect(nova.disabled).toBe(true);
+    expect(t.el.textContent).toContain('HTTP 500');
+    unmount(t.comp);
+  });
+
+  // Controle: com a consulta boa o botão volta a funcionar. Sem ele, um `disabled` chumbado em
+  // true passaria nos dois casos acima.
+  it('consulta de modelos que voltou: + Adicionar fica habilitado', async () => {
+    apiMock.getEnginesForServer.mockResolvedValue(SEM_MOTORES as never);
+    const t = montar([chave()]);
+    await tick(); await tick(); await tick();
+    const nova = t.el.querySelector<HTMLButtonElement>(`button[aria-label="${m.contas_add_aria()}"]`)!;
+    expect(nova.disabled).toBe(false);
+    unmount(t.comp);
+  });
+
   it('conta do Claude e credencial só de cota (kimi_cli) NÃO ganham botão nem modelo', async () => {
     apiMock.getEnginesForServer.mockResolvedValue(MOTORES as never);
     const t = montar([LOGADA, chave({ id: 'kimi:/home/u/.kimi-code', nome: 'Kimi CLI', nome_natural: 'Kimi CLI', usos: ['kimi_cli'], base_url: null })]);
