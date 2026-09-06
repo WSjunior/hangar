@@ -13,6 +13,7 @@ processo antes de ele chegar la.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import signal
@@ -172,21 +173,21 @@ def main() -> int:
     from app.adapters.codex import sessions as codex_sessions
     from app.adapters.codex.lancador import APPROVAL, SANDBOX
 
-    # Skill instalada no Claude vale JA nesta abertura: o codex le so a pasta dele, e a ponte que
-    # a materializa la era refeita apenas na subida do backend. Fail-soft — isto e conveniencia no
-    # caminho de abrir o agente, nunca motivo pra ele nao abrir.
+    # A sessão lê a configuração já reconciliada; falhas na integração não impedem a TUI.
     try:
-        from app import skill_bridge
-        # Calado quando nada mudou: este stderr e o pane que a pessoa esta olhando, e uma linha
-        # por harness a cada abertura de Codex seria ruido. Quando a ponte MEXEU, ela fala — sem
-        # isso nao ha como saber depois se ela rodou.
-        stats = skill_bridge.rebuild(log=lambda _m: None)
-        mexeu = {n: s for n, s in stats.items()
-                 if any(s.get(k) for k in ("criados", "trocados", "removidos", "erro"))}
-        if mexeu:
-            print(f"hangar-codex-tui: ponte de skills atualizada: {mexeu}", file=sys.stderr)
+        from app.codex_integracao import SERVICO, antes_da_sessao
+        anterior = SERVICO.status()
+        resultado = asyncio.run(antes_da_sessao())
+        if any(resultado.get(k) != anterior.get(k) for k in ("estado", "plugins", "confianca_pendente")):
+            print(f"hangar-codex-tui: integração Codex: {resultado['estado']} — {resultado.get('etapa', '')}",
+                  file=sys.stderr)
+        for aviso in [*resultado.get("avisos", []), *resultado.get("erros", [])]:
+            print(f"hangar-codex-tui: {aviso}", file=sys.stderr)
+        if resultado.get("confianca_pendente"):
+            print("hangar-codex-tui: há itens aguardando sua confirmação de confiança no Codex",
+                  file=sys.stderr)
     except Exception as exc:                          # noqa: BLE001
-        print(f"hangar-codex-tui: ponte de skills falhou ({exc}); a sessao abre assim mesmo",
+        print(f"hangar-codex-tui: integração Codex falhou ({exc}); a sessão abre assim mesmo",
               file=sys.stderr)
 
     endpoint = _porta_livre()

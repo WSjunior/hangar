@@ -407,17 +407,18 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   `compositeFailed` de cada animação ao (re)iniciar. Depois do conserto: 3 eventos em 3 s e os
   renderers a ~9%.
 - **Ponte de skills (`app/skill_bridge.py`): o omp descobre sozinho as skills dos outros CLIs
-  (providers `claude`/`claude-plugins`/`agents`); pi, kimi e codex não — leem só as pastas da
+  (providers `claude`/`claude-plugins`/`agents`); Pi e Kimi leem as pastas da
   própria config.** Sem a ponte, cada um mantinha uma fazenda de symlinks à mão apontando pro
   cache VERSIONADO dos plugins (`plugins/cache/ecc/ecc/2.2.0/skills/...`): bump de versão =
   dezenas de links pendurados, calados (03/09/2026: 3 fazendas manuais, 99/119/157 links, todas
   com podres). A ponte varre as fontes (`~/.claude/skills`, `skills/` do repo, cache — só a
   versão MAIS NOVA de cada plugin —, marketplaces, `~/.agents/skills`), dedup por nome na ordem
   de precedência, e materializa symlinks nas pontes: pi → `~/.pi/agent/skills-bridge`, kimi →
-  `~/.kimi-code/skills-bridge`, codex → `~/.codex/skills`. Harness novo = uma linha em `TARGETS`;
-  o omp fica fora de propósito (descobre nativo). Regras duras: stdlib-only (o installer chama
+  `~/.kimi-code/skills-bridge`. Harness novo = uma linha em `TARGETS`;
+  o omp fica fora de propósito (descobre nativo), e o Codex tem reconciliador próprio desde
+  06/09/2026 (abaixo). Regras duras: stdlib-only (o installer chama
   com o python3 do sistema, regra do `engines.py`); **só mexe em symlink cujo alvo está numa
-  fonte conhecida** — arquivo real (o `.system` do codex) ou link à mão pra fora das fontes
+  fonte conhecida** — arquivo real do usuário ou link à mão pra fora das fontes
   nunca é tocado; config alheia (settings.json do pi, config.toml do kimi) é só CONFERIDA, com
   aviso quando a ponte não está na lista — nunca editada. Roda na subida do backend e no
   `install-claude-wrapper.sh` (precedente `migracao_sidecars`: atualizar é `git pull` + restart,
@@ -427,7 +428,34 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   do Pi — tinha uma poda própria, só de plugins, e apagava a cada largada do Pi os 67 links de
   skills pessoais/marketplace que a ponte criava (o Pi abria listando cada uma como "skill path
   does not exist", e o backend as recriava no restart seguinte: 67 criados, todo dia). Hoje esse
-  script cuida de persona, `hooks.json` do Codex e pacotes do Pi, e chama a ponte no fim.
+  script cuida da persona do Pi/Kimi e dos pacotes do Pi, e chama a ponte no fim. Ele não escreve
+  mais no Codex: nem hooks, nem persona, nem symlinks de skills.
+
+- **Integração nativa do Codex** (`app/codex_integracao.py`, `codex_importador.py`,
+  `codex_compat.py`, `codex_arquivos.py`, 06/09/2026): o Hangar usa o importador oficial
+  `externalAgentConfig/detect` + `import` e espera a notificação `import/completed` com o mesmo
+  `importId`. Plugins e marketplaces usam os comandos nativos do CLI; nenhum turno de agente é
+  aberto para sincronizar. O backend acompanha alterações e atualiza marketplaces Git gerenciados
+  6h após a última tentativa, inclusive falhas persistidas com erros visíveis; a abertura da TUI
+  e o botão **Reconciliar agora** usam o mesmo reconciliador. CLI é
+  executor, backend é agendador; a sincronização opcional do Codex Desktop é independente e não
+  é necessária. A documentação de arquitetura, migração e limites está em
+  [`docs/codex-integration.md`](docs/codex-integration.md).
+  O registro e os backups ficam em `~/.hangar/codex-integracao/<identidade>/`, separados por
+  `CODEX_HOME`; o lock em `CODEX_HOME/.hangar-integracao.lock` serializa os escritores do Hangar
+  mesmo quando seus valores de `HOME` diferem. `GET` do painel é só
+  leitura, `POST` inicia ou acompanha a operação existente (202). O painel consulta enquanto a
+  operação executa e descarta respostas ao trocar servidor/desmontar. **Nunca gravar confiança
+  para autoaprovar hooks**: normalizar RTK/`SessionEnd` pode invalidar aprovação, então o painel
+  e a TUI avisam. Instruções globais usam bloco gerenciado no `AGENTS.md`; fallbacks `CLAUDE.md`
+  e `CLAUDE.MD` são acrescentados à config sem substituir os já existentes.
+  A suíte desliga apenas os gatilhos automáticos com `CP_CODEX_SYNC_ENABLED=0`; testes do serviço
+  usam diretórios temporários. Turnos reais do CLI 0.153.4 responderam exatamente `OK`, rc=0,
+  zero eventos de ferramentas, em Linux (6,08s) e Windows (6,82s), em 06/09/2026. Usaram
+  `HOME`/`CODEX_HOME` temporários com apenas `auth.json` copiado com autorização; cópias e
+  diretórios foram removidos e a limpeza confirmada. Windows usou CLI puro, e o Desktop do
+  usuário não foi alterado nem exercitado. Essa prova de resposta não valida execução dos
+  plugins/hooks importados: os turnos não usaram ferramentas.
 
 - **Loop runner** (`app/loop.py` + `components/LoopSheet.svelte`): loop autônomo por sessão —
   goal → sessão trabalha → idle dispara tick (`_on_hook_transition`, dentro do `_work`, só com
@@ -787,6 +815,7 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   cada CLI (auth.json+models.json do Pi, `auth_credentials` do omp, `providers` do Kimi,
   `model_providers`+login do Codex) com o que o app conhece (engines.json + cofre OAuth), no nome
   que AQUELE harness usa (`provedor_embutido_do_pi` pra Pi/omp, o nome do motor pros outros);
+  o card Codex tem uma seção própria de integração nativa e não oferece a ponte antiga de skills.
   "Sincronizar" reusa o `agentes_sync` e, no omp, grava a chave no mesmo SQLite do login. O Codex
   continua guardando só o nome da variável, e o resultado diz qual exportar. `instalado` é "binário no PATH OU pasta de
   config existe" porque o backend roda como serviço com PATH curto — só o binário dava "Kimi não

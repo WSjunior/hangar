@@ -455,7 +455,7 @@ def diagnosticar() -> list[dict]:
     v = _versao("codex")
     d = home / ".codex"
     saida.append({"id": "codex", "nome": "Codex", "instalado": v is not None or d.is_dir(), "versao": v,
-                  "itens": [_credenciais("codex"), _ponte_skills("codex", home), _hooks_codex(), _mcp("codex"),
+                  "itens": [_credenciais("codex"), _hooks_codex(), _mcp("codex"),
                             _modelo_padrao("codex")]
                   if d.is_dir() else []})
 

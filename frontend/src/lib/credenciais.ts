@@ -64,7 +64,9 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 async function reqEm<T>(s: Server, path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${s.baseUrl}${path}`, {
     ...init,
-    signal: AbortSignal.timeout(8000),
+    signal: init?.signal
+      ? AbortSignal.any([init.signal, AbortSignal.timeout(8000)])
+      : AbortSignal.timeout(8000),
     headers: {
       ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
       Authorization: `Bearer ${s.token}`,
@@ -186,4 +188,28 @@ export function listarHarnesses(alvo: Server | null): Promise<Harness[]> {
 
 export function consertarHarness(alvo: Server | null, conserto: string): Promise<{ feito: string; harnesses: Harness[] }> {
   return em(alvo, `/api/harness/conserto/${encodeURIComponent(conserto)}`, { method: 'POST' });
+}
+
+export interface IntegracaoCodex {
+  estado: 'ocioso' | 'executando' | 'ok' | 'parcial' | 'erro' | 'indisponivel';
+  etapa: string;
+  ultima_execucao: string | null;
+  proxima_atualizacao: string | null;
+  plugins: { id: string; versao: string; origem: string }[];
+  erros: string[];
+  avisos: string[];
+  confianca_pendente: boolean;
+}
+
+export function codexIntegracaoEstado(alvo: Server | null, signal?: AbortSignal): Promise<IntegracaoCodex> {
+  return em(alvo, '/api/harness/codex/integracao', {
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(8000)]) : AbortSignal.timeout(8000),
+  });
+}
+
+export function codexIntegracaoReconciliar(alvo: Server | null, signal?: AbortSignal): Promise<IntegracaoCodex> {
+  return em(alvo, '/api/harness/codex/integracao', {
+    method: 'POST',
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(8000)]) : AbortSignal.timeout(8000),
+  });
 }

@@ -5,11 +5,21 @@ import subprocess
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app import contas, harness_saude
+from app import codex_integracao, contas, harness_saude
 from app.auth import require_auth
 from app.mensagens import erro
 
 harness_router = APIRouter(prefix="/api/harness")
+
+
+@harness_router.get("/codex/integracao", dependencies=[Depends(require_auth)])
+async def integracao_codex_status() -> dict:
+    return codex_integracao.SERVICO.status()
+
+
+@harness_router.post("/codex/integracao", status_code=202, dependencies=[Depends(require_auth)])
+async def integracao_codex_reconciliar() -> dict:
+    return await codex_integracao.SERVICO.iniciar(motivo="manual", forcar=True)
 
 
 @harness_router.get("", dependencies=[Depends(require_auth)])

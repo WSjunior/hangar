@@ -266,9 +266,23 @@ async def _lifespan(app: FastAPI):
     # threads (Timer da confirmacao, gatilho de hook). Ver `_drenar`.
     global _loop_servidor
     _loop_servidor = asyncio.get_running_loop()
+    from app.codex_integracao import SERVICO as integracao_codex
+    codex_task = asyncio.create_task(integracao_codex.acompanhar())
+
+    def _codex_done(t: asyncio.Task) -> None:
+        if not t.cancelled() and (exc := t.exception()) is not None:
+            _log.exception("Acompanhamento da integração Codex falhou", exc_info=exc)
+
+    codex_task.add_done_callback(_codex_done)
     try:
         yield
     finally:
+        codex_task.cancel()
+        await asyncio.gather(codex_task, return_exceptions=True)
+        try:
+            await integracao_codex.fechar()
+        except Exception:
+            _log.exception("Falha ao encerrar a integração Codex")
         task.cancel()
         stall_task.cancel()
         prune_task.cancel()
