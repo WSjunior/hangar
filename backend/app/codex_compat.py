@@ -124,6 +124,28 @@ def _argv_rtk(command: str, *, windows: bool) -> list[str] | None:
         return None
 
 
+def wrapper_instalado(config: dict, *, windows: bool = False) -> tuple[str, str] | None:
+    """(python, wrapper) do rtk já embrulhado no hooks.json, se houver.
+
+    O comando gravado carrega o interpretador e o checkout de quem normalizou; reescrever com os do
+    processo atual muda o hook e, no Codex, hook alterado é hook não aprovado. Quem já está lá
+    manda: a próxima normalização reusa o par em vez de `sys.executable` + este checkout."""
+    split = _split_windows if windows else shlex.split
+    for grupo in (config.get("hooks") or {}).get("PreToolUse", []) if isinstance(config.get("hooks"), dict) else []:
+        for hook in grupo.get("hooks", []) if isinstance(grupo, dict) else []:
+            command = hook.get("command") if isinstance(hook, dict) else None
+            if not isinstance(command, str):
+                continue
+            try:
+                args = split(command)
+            except ValueError:
+                continue
+            if (len(args) >= 6 and args[2:6] == ["--", "rtk", "hook", "claude"]
+                    and _nome_binario(args[1]) == "codex-hook-allow.py"):
+                return args[0], args[1]
+    return None
+
+
 def _comando(args: list[str], *, windows: bool) -> str:
     if not windows:
         return shlex.join(args)

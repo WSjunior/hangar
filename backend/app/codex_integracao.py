@@ -22,7 +22,7 @@ from app.codex_arquivos import (
     AlteradoExternamente, backup, exclusivo, gravar, hash_bytes, json_bytes,
     json_obj, ler, mesclar_hooks, remapear, transformar,
 )
-from app.codex_compat import normalizar_hooks, texto_instrucoes
+from app.codex_compat import normalizar_hooks, texto_instrucoes, wrapper_instalado
 from app.codex_importador import CodexNativo, CodexNativoErro
 
 _log = logging.getLogger("hangar.codex.integracao")
@@ -30,6 +30,46 @@ _REPO = Path(__file__).resolve().parents[2]
 _INTERVALO = 6 * 60 * 60
 _IMPORTAVEIS = {"CONFIG", "HOOKS", "MCP_SERVER_CONFIG", "COMMANDS", "SUBAGENTS"}
 _ID = re.compile(r"^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+$")
+# Espelho que o instalador antigo (install-skills-bridge.sh) deixava do hooks.json que ELE escreveu.
+_ESPELHO_ANTIGO = ".hangar-hooks.json"
+# Prazo da reconciliação feita pelo lançador da TUI: estourou, a sessão abre sem ela.
+_PRAZO_SESSAO = 20.0
+
+
+def sincronizacao_ligada() -> bool:
+    """Gatilhos automáticos (laço do backend e abertura de TUI). O botão do painel não passa aqui."""
+    if os.environ.get("CP_CODEX_SYNC_ENABLED", "1").lower() in ("0", "false", "no"):
+        return False
+    from app import runtime_config
+    from app.config import automations_enabled
+    return bool(runtime_config.get("codex_sync")) and automations_enabled()
+
+
+def _e_hook_do_app(command: object) -> bool:
+    """Hook do próprio Hangar (backend/hooks/): cada harness recebe o seu pelo instalador dele
+    (codex_hook_installer aqui), então ele não atravessa pelo importador do Codex."""
+    return isinstance(command, str) and "backend/hooks/" in command.replace("\\", "/")
+
+
+def sem_hooks_do_app(hooks: dict) -> dict:
+    if not isinstance(hooks, dict):
+        return hooks
+    out = {}
+    for evento, grupos in hooks.items():
+        if not isinstance(grupos, list):
+            out[evento] = grupos
+            continue
+        restantes = []
+        for grupo in grupos:
+            if not isinstance(grupo, dict) or not isinstance(grupo.get("hooks"), list):
+                restantes.append(grupo)
+                continue
+            proprios = [h for h in grupo["hooks"] if not (isinstance(h, dict) and _e_hook_do_app(h.get("command")))]
+            if proprios or not grupo["hooks"]:
+                restantes.append({**grupo, "hooks": proprios})
+        if restantes:
+            out[evento] = restantes
+    return out
 
 
 def _iso(tempo: float | None) -> str | None:
@@ -158,9 +198,9 @@ class IntegracaoCodex:
         path = self.raiz / "estado.json"
         gravar(path, json_bytes(registro), ler(path))
 
-    def _normalizar(self, data: dict) -> dict:
-        return normalizar_hooks(data, sys.executable, _REPO / "scripts" / "codex-hook-allow.py",
-                                windows=os.name == "nt")
+    def _normalizar(self, data: dict, wrapper: tuple[str, str] | None = None) -> dict:
+        python, script = wrapper or (sys.executable, str(_REPO / "scripts" / "codex-hook-allow.py"))
+        return normalizar_hooks(data, python, Path(script), windows=os.name == "nt")
 
     def _etapa(self, texto: str) -> None:
         self._estado["etapa"] = texto
@@ -203,6 +243,7 @@ class IntegracaoCodex:
             desejados = _plugins_desejados(settings)
             self._etapa("Preparando instruções e hooks")
             await self._mutacao(self._instrucoes)
+            await self._mutacao(self._migrar_ponte_antiga)
             await self._mutacao(self._hooks, {}, registro)
             async with self.nativo(self.home, self.codex_home, self.binario) as codex:
                 await self._config(codex, {}, {})
@@ -269,20 +310,47 @@ class IntegracaoCodex:
 
     def _hooks(self, fonte: dict, registro: dict) -> None:
         path = self.codex_home / "hooks.json"
-        fonte = self._normalizar(fonte)
         anteriores = registro.get("hooks", {})
+        normalizada = fonte
 
         def atualizar(raw):
+            nonlocal normalizada
             atual = json.loads(raw) if raw else {}
-            atual = self._normalizar(atual)
-            merged = mesclar_hooks(atual, fonte, anteriores) if fonte else atual
+            wrapper = wrapper_instalado(atual, windows=os.name == "nt")
+            atual = self._normalizar(atual, wrapper)
+            normalizada = self._normalizar(fonte, wrapper)
+            merged = mesclar_hooks(atual, normalizada, anteriores) if normalizada else atual
             return raw if raw and json.loads(raw) == merged else json_bytes(merged)
 
         if ler(path) is not None or fonte.get("hooks"):
             if transformar(path, atualizar, self.backups):
                 self._confianca()
         if fonte:
-            registro["hooks"] = fonte
+            registro["hooks"] = normalizada
+
+    def _migrar_ponte_antiga(self) -> None:
+        """Primeira rodada numa máquina onde o instalador antigo escreveu o hooks.json: o que ele
+        pôs lá sai (o importador traz tudo de novo, senão cada hook roda em dobro) e o espelho some."""
+        espelho = self.codex_home / _ESPELHO_ANTIGO
+        raw_espelho = ler(espelho)
+        if raw_espelho is None:
+            return
+        antigo = json.loads(raw_espelho)
+        path = self.codex_home / "hooks.json"
+
+        def atualizar(raw):
+            atual = json.loads(raw) if raw else {}
+            merged = mesclar_hooks(atual, {"hooks": {}}, antigo)
+            return raw if raw and json.loads(raw) == merged else json_bytes(merged)
+
+        if ler(path) is not None and transformar(path, atualizar, self.backups):
+            self._confianca()
+        backup(espelho, raw_espelho, self.backups)
+        espelho.unlink()
+        # O instalador da subida já rodou e viu a entrada antiga; sem isto a sessão fica sem hook
+        # de estado até o próximo restart do backend.
+        from app.codex_hook_installer import ensure_codex_state_hook_installed
+        ensure_codex_state_hook_installed(self.codex_home)
 
     async def _editar_config(self, preparar) -> None:
         """Escritor TOML oficial numa cópia; cada tentativa recalcula sobre o arquivo atual."""
@@ -545,7 +613,7 @@ class IntegracaoCodex:
                     not isinstance(k, str) or not k or "=" in k or "\0" in k or
                     not isinstance(v, str) or "\0" in v for k, v in env.items()):
                 raise ValueError("settings.env inválido; variáveis existentes preservadas")
-            config = {"hooks": settings.get("hooks", {}), "env": env}
+            config = {"hooks": sem_hooks_do_app(settings.get("hooks", {})), "env": env}
             # O detector nativo ignora alguns shapes inválidos; isso nunca significa remoção.
             mesclar_hooks({}, config, {})
             gravar(cc / "settings.json", json_bytes(config), None)
@@ -667,6 +735,9 @@ class IntegracaoCodex:
             return
         while True:
             try:
+                if not sincronizacao_ligada():
+                    await asyncio.sleep(30)
+                    continue
                 fp = await asyncio.to_thread(self.fingerprint)
                 proxima = self.status().get("proxima_atualizacao")
                 venceu = bool(proxima and datetime.fromisoformat(proxima).timestamp() <= time.time())
@@ -686,10 +757,17 @@ class IntegracaoCodex:
 SERVICO = IntegracaoCodex()
 
 
-async def antes_da_sessao() -> dict:
-    if os.environ.get("CP_CODEX_SYNC_ENABLED", "1").lower() in ("0", "false", "no"):
+async def antes_da_sessao(prazo: float = _PRAZO_SESSAO) -> dict:
+    if not sincronizacao_ligada():
         return SERVICO.status()
     await SERVICO.iniciar("sessao", False)
     if SERVICO._task:
-        await asyncio.shield(SERVICO._task)
+        try:
+            await asyncio.wait_for(asyncio.shield(SERVICO._task), prazo)
+        except asyncio.TimeoutError:
+            # O lock pode estar com o backend no meio de instalar plugins; a TUI não espera por isso.
+            estado = SERVICO.status()
+            estado["avisos"] = [*estado.get("avisos", []),
+                                f"Reconciliação ainda em andamento após {prazo:.0f}s; a sessão abre sem ela."]
+            return estado
     return SERVICO.status()

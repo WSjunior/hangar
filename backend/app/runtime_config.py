@@ -27,6 +27,7 @@ EDITAVEIS: dict[str, type] = {
     "finish_min_seconds": int,
     "stall_seconds": int,
     "automations": bool,           # kill-switch das automações desatendidas
+    "codex_sync": bool,            # reconciliação automática do Codex (por cima do automations)
     "editor": str,
     "elevenlabs_api_key": str,     # sintese de voz (ouvir a selecao)
     "elevenlabs_voice_id": str,    # id da voz escolhida na conta

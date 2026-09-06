@@ -199,6 +199,7 @@ export interface IntegracaoCodex {
   erros: string[];
   avisos: string[];
   confianca_pendente: boolean;
+  automatica: boolean;
 }
 
 export function codexIntegracaoEstado(alvo: Server | null, signal?: AbortSignal): Promise<IntegracaoCodex> {

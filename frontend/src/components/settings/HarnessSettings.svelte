@@ -8,6 +8,7 @@
     listarHarnesses, consertarHarness, codexIntegracaoEstado, codexIntegracaoReconciliar,
     type Harness, type ItemHarness, type IntegracaoCodex,
   } from '../../lib/credenciais';
+  import { patchConfig, patchConfigForServer } from '../../lib/api';
   import * as m from '../../paraglide/messages';
   import { getLocale } from '../../paraglide/runtime';
   import ProvedorIcone from '../icons/ProvedorIcone.svelte';
@@ -57,6 +58,27 @@
   function reconciliarIntegracao() {
     if (consulta && !integracaoOcupada) {
       void consultarIntegracao(consulta, true);
+    }
+  }
+
+  let trocandoAutomatica = $state(false);
+  // O interruptor nunca muda sozinho: `checked` é o dado do servidor; o onchange repõe o dado,
+  // grava, e a releitura é quem muda a tela (regra das Máquinas, CLAUDE.md).
+  async function trocarAutomatica(ev: Event) {
+    const alvo = ev.currentTarget as HTMLInputElement;
+    const querido = alvo.checked;
+    alvo.checked = !querido;
+    if (!consulta || trocandoAutomatica) return;
+    trocandoAutomatica = true;
+    erroIntegracao = '';
+    try {
+      await (consulta.alvo ? patchConfigForServer(consulta.alvo, { codex_sync: querido })
+                           : patchConfig({ codex_sync: querido }));
+      await consultarIntegracao(consulta);
+    } catch (e) {
+      erroIntegracao = e instanceof Error ? e.message : String(e);
+    } finally {
+      trocandoAutomatica = false;
     }
   }
 
@@ -224,6 +246,14 @@
               >{integracaoOcupada ? m.harness_codex_executando() : m.harness_codex_reconciliar()}</button>
           </div>
           {#if integracao}
+            <label class="hs-item hs-automatica">
+              <span class="hs-item-txt">
+                <b>{m.harness_codex_automatica()}</b>
+                <span class="hs-ajuda">{m.harness_codex_automatica_ajuda()}</span>
+              </span>
+              <input type="checkbox" class="switch" checked={integracao.automatica}
+                disabled={trocandoAutomatica} onchange={trocarAutomatica} />
+            </label>
             <p class="hs-aviso" role="status">
               {ESTADOS_INTEGRACAO[integracao.estado]?.() ?? integracao.estado}
               {#if integracao.etapa} · {integracao.etapa}{/if}
@@ -280,6 +310,8 @@
   .hs-marca.ruim { color: var(--error); }
   .hs-item-txt { flex: 1; min-width: 0; color: var(--text-secondary); overflow-wrap: anywhere; }
   .hs-item-txt b { color: var(--text-primary); font-weight: 600; }
+  .hs-automatica { cursor: pointer; }
+  .hs-ajuda { display: block; font-size: var(--text-xs); color: var(--text-muted); }
   .hs-btn { flex-shrink: 0; min-height: 0; height: 26px; padding: 0 var(--space-2);
             font-size: var(--text-xs); border-radius: var(--radius-sm);
             background: var(--surface-raised); border: 1px solid var(--border-subtle); color: var(--text-primary); }

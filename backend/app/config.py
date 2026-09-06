@@ -238,6 +238,9 @@ class Settings(BaseSettings):
     # seu proprio opt-in/config — isto e um portao ADICIONAL, nao substitui CP_AUTO_RESUME). CP_AUTOMATIONS=0
     # desliga tudo de uma vez (ex: antes de um teste manual, ou se uma automacao ficar barulhenta).
     automations: bool = True
+    # Reconciliacao automatica do Codex (codex_integracao.acompanhar + abertura de TUI). Portao
+    # PROPRIO por cima do `automations`, editavel pela tela (card do Codex em Harnesses).
+    codex_sync: bool = True
     # Chave da Groq pra transcricao de audio (whisper-large-v3-turbo). Aceita CP_GROQ_API_KEY (padrao
     # do .env, com prefixo) OU GROQ_API_KEY (convencao do Groq/OpenAI SDK, ex: no Environment do systemd).
     # Vazio = transcricao desligada (o endpoint /transcribe responde 503). Ver docs/USAGE.md.

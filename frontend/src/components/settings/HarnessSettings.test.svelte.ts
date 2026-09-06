@@ -11,7 +11,7 @@ const B: Server = { id: 'b', label: 'B', baseUrl: 'http://b.local', token: 'toke
 const ROTA = '/api/harness/codex/integracao';
 const estado = (dados: Partial<IntegracaoCodex> = {}): IntegracaoCodex => ({
   estado: 'ocioso', etapa: '', ultima_execucao: null, proxima_atualizacao: null,
-  plugins: [], erros: [], avisos: [], confianca_pendente: false, ...dados,
+  plugins: [], erros: [], avisos: [], confianca_pendente: false, automatica: true, ...dados,
 });
 const resposta = (dados: unknown) => ({ ok: true, status: 200, json: async () => dados }) as Response;
 const harnesses = ['codex', 'claude'].map((id) => ({ id, nome: id, instalado: true, versao: '1', itens: [] }));
@@ -151,5 +151,26 @@ describe('integração do Codex em Harnesses', () => {
     botao(el).click(); await estabilizar();
     expect(el.textContent).toContain(m.harness_codex_ok());
     expect(chamadasIntegracao()[2][1]?.method).toBe('POST');
+  });
+
+  it('o interruptor grava codex_sync no servidor e só muda depois da releitura', async () => {
+    let automatica = true;
+    ler = async () => resposta(estado({ automatica }));
+    vi.mocked(fetch).mockImplementation(async (url, init) => {
+      if (String(url).endsWith('/api/config')) {
+        automatica = JSON.parse(String(init?.body)).codex_sync;
+        return resposta({ campos: {} });
+      }
+      return String(url).endsWith(ROTA) ? ler(String(url), init) : resposta(harnesses);
+    });
+    const { el } = await montar();
+    const caixa = el.querySelector<HTMLInputElement>('input.switch')!;
+    expect(caixa.checked).toBe(true);
+    caixa.click(); await estabilizar();
+    const gravacao = vi.mocked(fetch).mock.calls.find(([url]) => String(url).endsWith('/api/config'));
+    expect(String(gravacao?.[0])).toContain(B.baseUrl);
+    expect(JSON.parse(String(gravacao?.[1]?.body))).toEqual({ codex_sync: false });
+    expect(caixa.checked).toBe(false);
+    expect(chamadasIntegracao()).toHaveLength(2);
   });
 });

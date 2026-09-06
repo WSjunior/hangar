@@ -461,6 +461,45 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   diretórios foram removidos e a limpeza confirmada. Windows usou CLI puro, e o Desktop do
   usuário não foi alterado nem exercitado. Essa prova de resposta não valida execução dos
   plugins/hooks importados: os turnos não usaram ferramentas.
+  **O que a revisão do PR #2 mudou, medido em 06/09/2026 com a importação real (CLI 0.153.4) sobre
+  uma cópia do layout desta máquina** — 9 plugins habilitados, 18 entradas no `hooks.json`,
+  `AGENTS.md` como link pro `CLAUDE.md`, 379 links de skills:
+  - **A conversão dos hooks do usuário é do Codex, não do Hangar.** O importador descarta o que
+    não conhece (`MessageDisplay` e `Notification` sumiram sozinhos) e copia cada script pra
+    `~/.codex/hooks/`. O Hangar só faz o que ele não faz: `codex_compat` (rtk, `SessionEnd` ≤ 3s,
+    bloco do `AGENTS.md`), a ponte de skills pessoais e os plugins.
+  - **Os hooks do PRÓPRIO app não atravessam pelo importador** (`sem_hooks_do_app`): cada harness
+    recebe o `state_hook` pelo instalador dele — `codex_hook_installer.py` no Codex, irmão do do
+    Kimi —, e `adapters/codex/adapter.py` lê esse marcador como segunda fonte de "turno fechou",
+    então ele precisa existir mesmo com a integração desligada. Sem o filtro, `askq_capture`,
+    `preview_hook`, `pair_hook`, `nav_hook` e `subagent_hook` (que só entendem o stdin do Claude)
+    iam junto. O instalador só ACRESCENTA: reescrever o comando muda o hook, e hook alterado é
+    hook não aprovado no Codex.
+  - **A primeira rodada adota o que o instalador antigo escreveu** (`_migrar_ponte_antiga`): o
+    espelho `~/.codex/.hangar-hooks.json` é o registro exato do que `install-skills-bridge.sh`
+    gravava, então ele diz o que sai, sem chute. Sem isso a máquina ficava com cada hook em
+    dobro — 18 entradas viraram 37 na primeira rodada (a antiga em `~/.claude/hooks/` e a cópia
+    nova em `~/.codex/hooks/`), `sync-skills.sh &` e `state_hook` 2× por evento. Depois: 17 (11
+    do usuário + 5 de estado + rtk), segunda rodada em 1,0s sem reescrever nada. O instalador da
+    subida já rodou quando a migração tira a entrada antiga, por isso ela reinstala na hora.
+  - **O rtk embrulhado reusa o interpretador e o wrapper já gravados** (`wrapper_instalado`):
+    `sys.executable` + o checkout de quem reconciliou reescreviam o comando a cada backend
+    subindo de outra árvore (medido: worktree `.worktrees/pr2` no `hooks.json`), e cada
+    reescrita invalida a aprovação.
+  - **`AGENTS.md` como link pro `CLAUDE.md` vira arquivo com o bloco** — decisão do usuário: o
+    Codex lê o `CLAUDE.md` pela instrução, e o `CLAUDE.md` nunca fica cristalizado numa cópia.
+    Custo: as instruções globais deixam de estar no contexto desde o primeiro token.
+  - **Gatilhos nascem ligados, mas com interruptor na tela e sob o kill-switch**
+    (`sincronizacao_ligada`): `codex_sync` no `runtime-config` (card do Codex em Harnesses) +
+    `automations_enabled()` + `CP_CODEX_SYNC_ENABLED` (desligamento duro, o da suíte). O botão
+    "Reconciliar agora" não passa por nenhum dos três.
+  - **O lançador da TUI espera a reconciliação por 20s e abre sem ela** (`antes_da_sessao`): o
+    lock é do sistema operacional e a espera era sem prazo — com o backend instalando plugins
+    (120s por chamada; a primeira rodada aqui levou 65–103s) o pane ficava minutos parado.
+  - `settings.env` vai inteiro pro `shell_environment_policy.set` — as 16 variáveis desta
+    máquina, 6 delas tokens (Grafana, Jira, Jenkins, Outline, ElevenLabs), também no
+    `estado.json` do manifesto (0600). É o comportamento do importador nativo; o que o Hangar
+    acrescenta é fazê-lo sozinho, daí o interruptor.
 
 - **Loop runner** (`app/loop.py` + `components/LoopSheet.svelte`): loop autônomo por sessão —
   goal → sessão trabalha → idle dispara tick (`_on_hook_transition`, dentro do `_work`, só com

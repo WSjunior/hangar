@@ -46,7 +46,9 @@ def test_consulta_nao_inicia_operacao(painel):
     cliente, servico, snapshot = painel
     resposta = cliente.get(ROTA, headers=AUTH)
     assert resposta.status_code == 200
-    assert resposta.json() == snapshot
+    dados = resposta.json()
+    assert isinstance(dados.pop("automatica"), bool)
+    assert dados == snapshot
     servico.status.assert_called_once_with()
     servico.iniciar.assert_not_called()
 
@@ -55,6 +57,8 @@ def test_reconciliacao_retorna_202_com_snapshot(painel):
     cliente, servico, snapshot = painel
     resposta = cliente.post(ROTA, headers=AUTH)
     assert resposta.status_code == 202
-    assert resposta.json() == snapshot
+    dados = resposta.json()
+    assert isinstance(dados.pop("automatica"), bool)
+    assert dados == snapshot
     servico.iniciar.assert_awaited_once_with(motivo="manual", forcar=True)
     servico.status.assert_not_called()

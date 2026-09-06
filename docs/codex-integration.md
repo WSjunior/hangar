@@ -32,10 +32,21 @@ intervalo de 6 horas do Hangar não depende dessa opção, e o Hangar não a lig
 Executar o CLI sozinho também não mantém o agendador do Hangar funcionando: é necessário que
 o backend esteja ativo. O wrapper do terminal cobre apenas a reconciliação daquela abertura.
 
-`CP_CODEX_SYNC_ENABLED=0` desliga os gatilhos automáticos do backend e do lançador. Não é uma
-preferência escrita no Codex e não impede uma chamada manual explícita à integração. A suíte
-de testes usa essa variável para não acionar a integração no perfil de quem executa os testes;
-os testes específicos instanciam o serviço com diretórios temporários.
+Os gatilhos automáticos (laço do backend e abertura de TUI) obedecem a três portões, e o botão
+**Reconciliar agora** a nenhum deles: o interruptor **Sincronização automática** do card do Codex
+(`codex_sync` no `runtime-config.json`, ligado por padrão), o kill-switch geral de automações
+(`automations`) e `CP_CODEX_SYNC_ENABLED=0`, o desligamento duro por ambiente. Nenhum deles é uma
+preferência escrita no Codex. A suíte de testes usa a variável para não acionar a integração no
+perfil de quem executa os testes; os testes específicos instanciam o serviço com diretórios
+temporários. O lançador da TUI espera a reconciliação por até 20 segundos e abre a sessão sem ela
+quando o prazo estoura, avisando no pane.
+
+Os hooks do próprio Hangar (`backend/hooks/`) não passam pelo importador: o hook de estado do
+Codex é instalado por `backend/app/codex_hook_installer.py` na subida do backend, como no Claude
+e no Kimi, e os demais (prévia, AskUserQuestion, pareamento) são exclusivos do Claude. Numa
+máquina onde o instalador antigo escreveu o `hooks.json`, a primeira reconciliação remove
+exatamente as entradas registradas no espelho `~/.codex/.hangar-hooks.json` (com backup) e o
+apaga; sem isso cada hook passava a rodar duas vezes.
 
 ## Importação e compatibilidades
 

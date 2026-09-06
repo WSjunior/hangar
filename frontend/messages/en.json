@@ -2128,6 +2128,8 @@
   "harness_codex_proxima": "Next update: {data}",
   "harness_codex_plugins": "Managed plugins: {n}",
   "harness_codex_confianca": "Some items are awaiting your trust confirmation in Codex.",
+  "harness_codex_automatica": "Automatic sync",
+  "harness_codex_automatica_ajuda": "Reconciles on its own when Claude changes, before a session opens and every 6h. Off, only the button above touches Codex.",
   "harness_legenda": "The CLIs on this machine and what the app installed in each. A red item has a button that redoes it.",
   "harness_instalado": "installed",
   "harness_nao_instalado": "not installed",

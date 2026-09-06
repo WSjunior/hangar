@@ -12,14 +12,19 @@ from app.mensagens import erro
 harness_router = APIRouter(prefix="/api/harness")
 
 
+def _com_interruptor(estado: dict) -> dict:
+    from app import runtime_config
+    return {**estado, "automatica": bool(runtime_config.get("codex_sync"))}
+
+
 @harness_router.get("/codex/integracao", dependencies=[Depends(require_auth)])
 async def integracao_codex_status() -> dict:
-    return codex_integracao.SERVICO.status()
+    return _com_interruptor(codex_integracao.SERVICO.status())
 
 
 @harness_router.post("/codex/integracao", status_code=202, dependencies=[Depends(require_auth)])
 async def integracao_codex_reconciliar() -> dict:
-    return await codex_integracao.SERVICO.iniciar(motivo="manual", forcar=True)
+    return _com_interruptor(await codex_integracao.SERVICO.iniciar(motivo="manual", forcar=True))
 
 
 @harness_router.get("", dependencies=[Depends(require_auth)])

@@ -2128,6 +2128,8 @@
   "harness_codex_proxima": "Próxima atualização: {data}",
   "harness_codex_plugins": "Plugins gerenciados: {n}",
   "harness_codex_confianca": "Há itens aguardando sua confirmação de confiança no Codex.",
+  "harness_codex_automatica": "Sincronização automática",
+  "harness_codex_automatica_ajuda": "Reconcilia sozinho quando o Claude muda, antes de abrir uma sessão e a cada 6h. Desligado, só o botão acima mexe no Codex.",
   "harness_legenda": "Os CLIs desta máquina e o que o app instalou em cada um. Item vermelho tem botão que refaz.",
   "harness_instalado": "instalado",
   "harness_nao_instalado": "não instalado",
