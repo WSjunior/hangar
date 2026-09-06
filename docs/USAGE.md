@@ -293,6 +293,27 @@ Mudança de sessão/estado durante a escolha exige uma nova seleção. Se os arq
 mas a conversa falhar, o aviso informa a conclusão parcial. No OMP, uma captura que exceda
 25 segundos interrompe o pedido, sem publicar um checkpoint tardio.
 
+### Marketplaces e plugins no OMP
+
+A importação de marketplaces do Claude usa o gerenciador nativo do OMP. É genérica: não
+depende do nome do catálogo ou do plugin. Catálogos já registrados com a mesma origem não
+são importados novamente; um nome ocupado por outra origem é preservado e informado como
+conflito. Origens inválidas ou não representáveis são informadas, sem mudar configurações.
+
+**Importar um marketplace não instala todos os seus plugins nem converte instalações Git
+existentes.** Os plugins instalados por marketplace continuam sob responsabilidade do OMP.
+Na opção nativa **Marketplace Auto-Update**, `notify` (padrão) verifica e avisa na abertura
+da sessão; `auto` também instala as atualizações. A importação não altera essa preferência.
+
+Para plugins Git diretos elegíveis, a integração compara origem e revisão, não apenas o
+nome ou a versão textual. Arquivos/preferências alterados manualmente suspendem a gestão.
+Plugins sem prova suficiente são diagnosticados, não instalados por suposição. A inspeção
+`dry_run` não executa instaladores nem escreve no perfil pessoal.
+Registro de propriedade inválido interrompe a passagem sem remover plugins. Se duas origens
+disputarem o mesmo nome de pacote, nenhuma vence pela ordem do cadastro; a instalação
+existente é preservada e o conflito é informado. Os diagnósticos não incluem linhas brutas
+de arquivos de configuração ou credenciais.
+
 ### Git
 
 O ícone de branch abre o **modal de git** da sessão — o mesmo nas duas views: no desktop ele é um

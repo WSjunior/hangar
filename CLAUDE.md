@@ -614,6 +614,30 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   noutro lugar entra por `~/.pi/agent/claude-hooks-adapter.json`, e `allowPatterns` ali
   **substitui** a lista, não soma; e os hooks só-Claude do próprio app (`state_hook`, `askq_capture`,
   `preview_hook`, `subagent_hook`) ficam no `skipPatterns` porque o Pi tem extensão própria pra isso.
+  **Catálogos e plugins nativos (06/09/2026):** `app/omp_plugin_sync.py` oferece
+  `PluginSynchronizer.import_marketplaces` e `reconcile`. A importação percorre todos os
+  marketplaces registrados no Claude, sem nomes especiais, e chama o gerenciador nativo do
+  OMP. Confere nome/origem no registro após o comando; catálogo homônimo divergente permanece
+  intacto. Importar catálogo não instala seus plugins nem migra instalações Git existentes.
+  O OMP já oferece `marketplace.autoUpdate=off|notify|auto`, com padrão `notify`; a atualização
+  nativa por versão do catálogo ocorre na abertura da sessão e não é duplicada pelo Hangar.
+  A reconciliação de Git direto exige origem, revisão e manifesto instalável comprovados,
+  preserva escopo, seleção de recursos e preferências, e suspende a gestão após alteração
+  manual. Metadados Claude sem SHA tornam somente aquele candidato não verificável.
+  Em atualização, prepara apenas a dependência gerenciada antes de chamar o instalador:
+  isso evita arestas duplicadas no Bun quando o parser OMP não reconhece `#SHA` em host genérico.
+  Uma falha só reverte essa chave se a instalação anterior ainda estiver comprovadamente
+  intacta; não remove o plugin antes da atualização nem restaura cópia global antiga.
+  O registro próprio fica em `~/.hangar/omp-plugin-sync.json`, com trava portátil compartilhada
+  entre passagens e escrita atômica. Operação interrompida não concede autoridade de remoção.
+  Todos os vínculos e estados do ledger são validados antes de chamar o CLI ou agir; registro
+  malformado não é reparado por inferência e não autoriza remover um plugin. Duas identidades
+  Claude para o mesmo pacote tornam o nome ambíguo durante toda a passagem, inclusive diante
+  de uma terceira origem; os candidatos independentes continuam. Diagnósticos não publicam
+  texto bruto de exceções de parser/I/O, que pode transcrever credenciais da entrada.
+  `dry_run=True` é somente leitura de registros/manifestos: nenhum CLI, lock, cache ou ledger
+  é escrito, pois até `omp plugin list` pode migrar arquivos. Provas cobrem o CLI real, Git
+  Smart HTTP em loopback privado, importação genérica e preservação da instalação nas falhas.
 - **Pi model + thinking level** (`app/pi_models.py` + `scripts/pi/hangar-state.ts` + `components/PiModelPopover.svelte` + `components/PiEffortPopover.svelte`):
   the third mechanism, next to Claude's TUI picker and Codex's app-server, and it does **not** scrape
   the pane. Measured on pi 0.82.1: `/model` is a fuzzy-**search** list of ~300 entries (footer
