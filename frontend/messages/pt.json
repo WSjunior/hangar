@@ -1249,6 +1249,8 @@
   "custos_por_modelo": "Por modelo",
   "custos_de_servidores": "{n} de {m} ▾",
   "comum_motor": "Motor",
+  "criar_perfil_omp": "Perfil do omp",
+  "criar_perfil_omp_dica": "vazio = sem perfil (login e sessões em ~/.omp/agent)",
   "comum_nome": "Nome",
   "comum_provider": "Provider",
   "comum_conta_claude": "Conta Claude",

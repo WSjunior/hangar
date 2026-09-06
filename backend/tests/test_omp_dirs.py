@@ -48,6 +48,32 @@ def test_perfil_invalido_nao_derruba_quem_le(home, monkeypatch, caplog):
     assert "perfil do omp ignorado" in caplog.text
 
 
+def test_pane_omp_com_perfil_proprio_acha_o_transcript_na_raiz_do_perfil(home, monkeypatch):
+    """O backend sem perfil; o pane nasceu com OMP_PROFILE=trabalho (wrapper ou app). O transcript
+    dele mora na raiz do perfil, e é lá que o registry tem que procurar — não em ~/.omp/agent."""
+    from app import procinfo, registry
+    environ = home / "environ"
+    environ.write_bytes(b"CP_PI_SESSION=abc\0OMP_PROFILE=trabalho\0")
+    monkeypatch.setattr(procinfo, "_proc_environ_path", lambda pid: str(environ))
+    d = home / ".omp" / "profiles" / "trabalho" / "agent" / "sessions" / sessions.cwd_slug("/w")
+    d.mkdir(parents=True)
+    f = d / "2026-09-06T15-51-00-640Z_abc.jsonl"
+    f.write_text("")
+    assert registry.pi_session_file("%1", pid=4242, cwd="/w", provider="omp") == str(f)
+    # Mesmo pane sem perfil: a raiz de sempre, e esse transcript não é dele.
+    environ.write_bytes(b"CP_PI_SESSION=abc\0")
+    assert registry.pi_session_file("%1", pid=4242, cwd="/w", provider="omp") is None
+
+
+def test_create_recusa_perfil_fora_do_omp_e_nome_invalido_antes_de_tocar_o_tmux(home, tmp_path):
+    from app.registry import SessionRegistry
+    reg = SessionRegistry(tmp_path / "projects")
+    with pytest.raises(ValueError, match="perfil so vale para provider omp"):
+        reg.create("x", str(tmp_path), provider="claude", omp_profile="trabalho")
+    with pytest.raises(ValueError, match="perfil OMP inv"):
+        reg.create("x", str(tmp_path), provider="omp", omp_profile="Nome Inválido")
+
+
 def test_home_explicita_e_raiz_fixa(home, monkeypatch):
     monkeypatch.setenv("OMP_PROFILE", "trabalho")
     outra = home / "outra"

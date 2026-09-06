@@ -597,9 +597,19 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   instalava no perfil e o painel dizia "não instalado". Hoje os três perguntam ao `omp_dirs`,
   que só embrulha o resolvedor do sync (import tardio: `sessions.py` é folha e não pode puxar
   `peers` na importação) e, pra quem só LÊ, perfil inválido vira aviso e raiz sem perfil —
-  levantar ali derrubaria a listagem de sessões inteira. O que NÃO existe: perfil por sessão.
-  O backend só enxerga o perfil do PRÓPRIO ambiente; um `omp --profile y` aberto à mão num
-  terminal continua invisível pro app, como sempre foi. No OMP, agents pessoais/extras viram arquivos diretos
+  levantar ali derrubaria a listagem de sessões inteira.
+  **Perfil por SESSÃO** (06/09/2026): o perfil de um pane omp viaja como `OMP_PROFILE` no
+  ambiente dele — o wrapper (`omp.posix.sh`/`omp.fish`, `hangar_omp_perfil`) lê `--profile x`
+  da linha ou a variável já exportada, monta o `--session` na raiz do perfil e passa `-e` pro
+  tmux (o pane nasce do servidor, não do shell); o app faz o mesmo pelo `env` do
+  `OmpAdapter.spawn_command(perfil=...)`. Do outro lado, `registry._omp_profile_of(pid)` lê a
+  variável do processo vivo (mesmo `/proc/<pid>/environ` de `CP_ENGINE`) e passa pra
+  `transcript_path`/`localizar_na_raiz`, senão a varredura de `sessions/-/` caía na raiz do
+  BACKEND. Entrada: `omp_profile` no `POST /api/sessions` (só com `provider=omp`, nome validado
+  pela regra do próprio omp; 400 fora dele), `hangar-send --new … --provider omp --profile x`,
+  e o campo "Perfil do omp" da folha de Nova sessão, que só aparece com OMP escolhido.
+  Variável e não flag de propósito: `--profile` no cmdline funcionaria pro omp mas o backend
+  teria duas fontes pra ler. No OMP, agents pessoais/extras viram arquivos diretos
   em `<agentDir>/agents/claude-bridge-<nome>.md`, com ferramentas em array YAML: `Glob → glob`,
   `Task/Agent → task`, `WebFetch → read` e prefixo `mcp__` intacto. Agents nativos pessoais
   têm precedência; aliases Claude sem mapeamento explícito herdam o modelo da sessão.

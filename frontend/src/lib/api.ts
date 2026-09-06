@@ -465,12 +465,14 @@ export function createSession(
   model?: string | null,
   effort?: string | null,
   permissionMode?: string | null,
+  ompProfile?: string | null,
 ): Promise<SessionInfo> {
-  // `model`/`effort`/`permissionMode` no FIM de propósito: chamador antigo com 5 argumentos continua válido e abre
+  // `model`/`effort`/`permissionMode`/`ompProfile` no FIM de propósito: chamador antigo com 5 argumentos continua válido e abre
   // no padrão, byte por byte (o backend valida None = comportamento de hoje).
   const body: Record<string, unknown> = { name, cwd, config_dir: configDir ?? null, provider, engine: engine ?? null,
                            model: model ?? null, effort: effort ?? null };
   if (permissionMode) body.permission_mode = permissionMode;
+  if (ompProfile) body.omp_profile = ompProfile;
   return apiFetch<SessionInfo>('/api/sessions', {
     method: 'POST',
     body: JSON.stringify(body),
@@ -523,6 +525,7 @@ export function passarBastao(
     model?: string | null;
     effort?: string | null;
     permission_mode?: string | null;
+    omp_profile?: string | null;
   },
 ): Promise<BastaoResult> {
   return apiFetch<BastaoResult>(`/api/sessions/${encodeURIComponent(name)}/bastao`, {

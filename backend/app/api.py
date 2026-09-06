@@ -1223,6 +1223,9 @@ class CreateBody(_StrictBody):
     effort: str | None = None
     # Modo de permissão do Claude Code. None = padrão da conta (comportamento de hoje).
     permission_mode: str | None = None
+    # Perfil do omp (`omp --profile x`): login, sessões e config em ~/.omp/profiles/x/agent.
+    # None = sem perfil. Só vale com provider omp; o nome é validado no registry.
+    omp_profile: str | None = None
 
 
 class TtsBody(_StrictBody):
@@ -1545,6 +1548,8 @@ async def create_session(body: CreateBody):
     # permission_mode só vale para claude
     if body.permission_mode is not None and body.provider != "claude":
         raise HTTPException(409, detail=erro("erro_permissao_so_claude", "modo de permissao so vale para claude"))
+    if body.omp_profile and body.provider != "omp":
+        raise HTTPException(400, detail=erro("erro_perfil_so_omp", "perfil so vale para provider omp"))
     # Mesma regra das linhas acima, pro model/effort: recusa ANTES de qualquer efeito no disco,
     # inclusive pro provedor fora de escopo (codex/kimi) quando alguem pedir escolha — o valor
     # entraria num comando de shell montado por concatenacao.
@@ -1625,6 +1630,8 @@ async def create_session(body: CreateBody):
                                    effort=body.effort, context_window=janela)
                         if body.permission_mode is not None:
                             _kw["permission_mode"] = body.permission_mode
+                        if body.omp_profile:
+                            _kw["omp_profile"] = body.omp_profile
                         info = await asyncio.to_thread(registry.create, body.name, body.cwd, body.config_dir, **_kw)
                         return info.model_copy(update={"avisos": list(avisos)})
                     except ValueError as e:
@@ -1642,6 +1649,8 @@ async def create_session(body: CreateBody):
             _kw2["permission_mode"] = body.permission_mode
         if body.initial_prompt is not None:
             _kw2["initial_prompt"] = body.initial_prompt
+        if body.omp_profile:
+            _kw2["omp_profile"] = body.omp_profile
         return await asyncio.to_thread(registry.create, body.name, body.cwd, body.config_dir, **_kw2)
     except ValueError as e:
         raise HTTPException(409, str(e))
@@ -1990,6 +1999,7 @@ class BastaoBody(_StrictBody):
     model: str | None = None
     effort: str | None = None
     permission_mode: str | None = None
+    omp_profile: str | None = None
     # Endereçam a origem MORTA no archive (project + session_id); nunca a sucessora, e são
     # ignorados quando a origem está viva.
     project: str | None = None
@@ -2080,7 +2090,7 @@ async def bastao_passar(name: str, body: BastaoBody):
     novo = await create_session(CreateBody(
         name=destino, cwd=cwd, config_dir=body.config_dir, provider=body.provider,
         engine=body.engine, model=body.model, effort=body.effort,
-        permission_mode=body.permission_mode))
+        permission_mode=body.permission_mode, omp_profile=body.omp_profile))
     try:
         await asyncio.to_thread(lambda: PromptQueue(novo.name).append(
             kick, delivered=False, pre_transcript=True))
