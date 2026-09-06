@@ -514,8 +514,8 @@
 
   async function handleCreate(name: string, cwd?: string, configDir?: string | null, provider?: Provider,
                               engine?: string | null, model?: string | null, effort?: string | null,
-                              permissionMode?: string | null) {
-    await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode);
+                              permissionMode?: string | null, ompProfile?: string | null) {
+    await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile);
     onNavigateToChat(name);
   }
 

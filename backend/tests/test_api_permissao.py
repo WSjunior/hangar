@@ -47,6 +47,20 @@ def test_create_com_permissao_kimi_409():
     cr.assert_not_called()
 
 
+def test_create_com_perfil_omp_passa_e_fora_do_omp_400():
+    with patch("app.api.registry.create", return_value=SessionInfo(name="x", cwd="/tmp", provider="omp")) as cr:
+        r = _client().post("/api/sessions", headers=AUTH, json={
+            "name": "x", "cwd": "/tmp", "provider": "omp", "omp_profile": "trabalho"})
+    assert r.status_code == 200
+    assert cr.call_args.kwargs.get("omp_profile") == "trabalho"
+    with patch("app.api.registry.create") as cr:
+        r = _client().post("/api/sessions", headers=AUTH, json={
+            "name": "x", "cwd": "/tmp", "provider": "claude", "omp_profile": "trabalho"})
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "erro_perfil_so_omp"
+    cr.assert_not_called()
+
+
 def test_create_com_permissao_invalida_409():
     with patch("app.api.registry.create") as cr:
         r = _client().post("/api/sessions", headers=AUTH, json={

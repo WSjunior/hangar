@@ -22,7 +22,7 @@ from pathlib import Path
 
 import sqlite3
 
-from app import agentes_sync, contas, engine_probe, engines, hook_installer, kimi_hook_installer, oauth_codex, skill_bridge
+from app import agentes_sync, contas, engine_probe, engines, hook_installer, kimi_hook_installer, oauth_codex, omp_dirs, skill_bridge
 from app.adapters.kimi.sessions import kimi_home
 from app.agentes_sync import _codex_dir, provedor_embutido_do_pi
 from app.config import list_config_dirs
@@ -33,6 +33,10 @@ _log = logging.getLogger("hangar.harness_saude")
 _REPO = Path(__file__).resolve().parents[2]
 _EXTENSOES_PI = ("hangar-state", "rich-status-line", "claude-bridge", "claude-todo",
                  "claude-hooks-adapter", "git-checkpoint", "fullscreen-tui")
+_EXTENSOES_POR_CLI = {
+    "pi": _EXTENSOES_PI,
+    "omp": tuple(nome for nome in _EXTENSOES_PI if nome not in ("claude-todo", "fullscreen-tui")),
+}
 _HOOKS_CLAUDE = ("state_hook.py", "askq_capture.py", "preview_hook.py", "subagent_hook.py",
                  "pair_hook.py", "nav_hook.py")
 
@@ -214,8 +218,7 @@ def _ponte_skills(nome: str, home: Path) -> dict:
 
 def _raiz_agente(cli: str) -> Path:
     if cli == "omp":
-        raiz = os.environ.get("PI_CODING_AGENT_DIR")
-        return Path(raiz) if raiz else Path.home() / ".omp" / "agent"
+        return omp_dirs.agent_dir()
     return Path.home() / ".pi" / "agent"
 
 
@@ -226,7 +229,7 @@ def _extensoes(cli: str) -> dict:
     # Link vivo pra outra fonte (o repo antigo das extensões, tipicamente): a extensão RODA, só não
     # é a daqui. Dizer "falta" pra isso contradiz a linha de fullscreen logo abaixo dizendo "ligado".
     outra_fonte = []
-    for nome in _EXTENSOES_PI:
+    for nome in _EXTENSOES_POR_CLI[cli]:
         p = ext / f"{nome}.ts"
         fonte = _REPO / "scripts" / "pi" / f"{nome}.ts"
         if p.is_symlink() and p.exists() and p.resolve() == fonte.resolve():
@@ -237,6 +240,12 @@ def _extensoes(cli: str) -> dict:
             outra_fonte.append(f"{nome} → {_abreviar_home(p.resolve())}")
             continue
         faltam.append(nome)
+    # Helpers de scripts/pi/lib vão como pasta: o Pi resolve import relativo pelo caminho do link.
+    lib = ext / "lib"
+    if lib.is_symlink() and lib.exists() and lib.resolve() != (_REPO / "scripts" / "pi" / "lib").resolve():
+        outra_fonte.append(f"lib → {_abreviar_home(lib.resolve())}")
+    elif not lib.exists():
+        faltam.append("lib")
     if outra_fonte:
         params = {"lista": ", ".join(outra_fonte)}
         if faltam:
@@ -244,7 +253,7 @@ def _extensoes(cli: str) -> dict:
         return _item("extensoes", False, "extensoes_outra_fonte", f"extensoes:{cli}", **params)
     if faltam:
         return _item("extensoes", False, "faltam", f"extensoes:{cli}", lista=", ".join(faltam))
-    return _item("extensoes", True, "extensoes_ok", n=len(_EXTENSOES_PI))
+    return _item("extensoes", True, "extensoes_ok", n=len(_EXTENSOES_POR_CLI[cli]))
 
 
 def _abreviar_home(p: Path) -> str:
@@ -493,7 +502,16 @@ def _ligar_extensoes(cli: str) -> str:
     ext = _raiz_agente(cli) / "extensions"
     ext.mkdir(parents=True, exist_ok=True)
     feitos = []
+    esperadas = _EXTENSOES_POR_CLI[cli]
+    # Migra somente links nossos; configurações e extensões pessoais ficam intactas.
     for nome in _EXTENSOES_PI:
+        if nome in esperadas:
+            continue
+        p = ext / f"{nome}.ts"
+        fonte = _REPO / "scripts" / "pi" / f"{nome}.ts"
+        if p.is_symlink() and p.resolve() == fonte.resolve():
+            p.unlink()
+    for nome in esperadas:
         p = ext / f"{nome}.ts"
         fonte = _REPO / "scripts" / "pi" / f"{nome}.ts"
         if not fonte.is_file() or (p.exists() and not p.is_symlink()):
@@ -502,6 +520,13 @@ def _ligar_extensoes(cli: str) -> str:
             p.unlink()
         p.symlink_to(fonte)
         feitos.append(nome)
+    lib = ext / "lib"
+    fonte_lib = _REPO / "scripts" / "pi" / "lib"
+    if fonte_lib.is_dir() and not (lib.exists() and not lib.is_symlink()):
+        if lib.is_symlink():
+            lib.unlink()
+        lib.symlink_to(fonte_lib, target_is_directory=True)
+        feitos.append("lib")
     return f"{len(feitos)} extensões ligadas"
 
 

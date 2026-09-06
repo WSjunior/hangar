@@ -97,6 +97,7 @@ from app.pair import PairLink, contract_path_for
 from app.hook_state import hook_state
 from app import push
 from app import stall_watch
+from app.omp_plugin_sync import PluginSynchronizer, PluginSyncLoop
 from app.sync import sync_router
 from app.deploy import deploy_router
 from app import desktop_palette
@@ -266,6 +267,14 @@ async def _lifespan(app: FastAPI):
     # threads (Timer da confirmacao, gatilho de hook). Ver `_drenar`.
     global _loop_servidor
     _loop_servidor = asyncio.get_running_loop()
+    omp_sync = PluginSyncLoop(
+        PluginSynchronizer(home=Path.home(), claude_dir=_backend_config_base()),
+        enabled=settings.omp_plugin_sync_enabled,
+        interval=settings.omp_plugin_sync_interval,
+        permitted=automations_enabled,
+    )
+    app.state.omp_plugin_sync = omp_sync
+    await omp_sync.start()
     try:
         yield
     finally:
@@ -273,6 +282,7 @@ async def _lifespan(app: FastAPI):
         stall_task.cancel()
         prune_task.cancel()
         renova_task.cancel()
+        await omp_sync.close()
         try:
             await task
         except asyncio.CancelledError:
@@ -295,6 +305,16 @@ async def _lifespan(app: FastAPI):
 
 
 app = FastAPI(title="hangar", lifespan=_lifespan)
+
+
+@app.get("/api/omp/plugin-sync", dependencies=[Depends(require_auth)])
+async def omp_plugin_sync_status(request: Request):
+    service = getattr(request.app.state, "omp_plugin_sync", None)
+    if service is None:
+        return {"enabled": settings.omp_plugin_sync_enabled,
+                "state": "idle" if settings.omp_plugin_sync_enabled else "disabled",
+                "interval": settings.omp_plugin_sync_interval, "last_report": None}
+    return service.status()
 
 
 @app.exception_handler(tmux.MuxIndisponivel)
@@ -1203,6 +1223,9 @@ class CreateBody(_StrictBody):
     effort: str | None = None
     # Modo de permissão do Claude Code. None = padrão da conta (comportamento de hoje).
     permission_mode: str | None = None
+    # Perfil do omp (`omp --profile x`): login, sessões e config em ~/.omp/profiles/x/agent.
+    # None = sem perfil. Só vale com provider omp; o nome é validado no registry.
+    omp_profile: str | None = None
 
 
 class TtsBody(_StrictBody):
@@ -1542,6 +1565,8 @@ async def create_session(body: CreateBody):
     # permission_mode só vale para claude
     if body.permission_mode is not None and body.provider != "claude":
         raise HTTPException(409, detail=erro("erro_permissao_so_claude", "modo de permissao so vale para claude"))
+    if body.omp_profile and body.provider != "omp":
+        raise HTTPException(400, detail=erro("erro_perfil_so_omp", "perfil so vale para provider omp"))
     # Mesma regra das linhas acima, pro model/effort: recusa ANTES de qualquer efeito no disco,
     # inclusive pro provedor fora de escopo (codex/kimi) quando alguem pedir escolha — o valor
     # entraria num comando de shell montado por concatenacao.
@@ -1622,6 +1647,8 @@ async def create_session(body: CreateBody):
                                    effort=body.effort, context_window=janela)
                         if body.permission_mode is not None:
                             _kw["permission_mode"] = body.permission_mode
+                        if body.omp_profile:
+                            _kw["omp_profile"] = body.omp_profile
                         info = await asyncio.to_thread(registry.create, body.name, body.cwd, body.config_dir, **_kw)
                         return info.model_copy(update={"avisos": list(avisos)})
                     except ValueError as e:
@@ -1639,6 +1666,8 @@ async def create_session(body: CreateBody):
             _kw2["permission_mode"] = body.permission_mode
         if body.initial_prompt is not None:
             _kw2["initial_prompt"] = body.initial_prompt
+        if body.omp_profile:
+            _kw2["omp_profile"] = body.omp_profile
         return await asyncio.to_thread(registry.create, body.name, body.cwd, body.config_dir, **_kw2)
     except ValueError as e:
         raise HTTPException(409, str(e))
@@ -1987,6 +2016,7 @@ class BastaoBody(_StrictBody):
     model: str | None = None
     effort: str | None = None
     permission_mode: str | None = None
+    omp_profile: str | None = None
     # Endereçam a origem MORTA no archive (project + session_id); nunca a sucessora, e são
     # ignorados quando a origem está viva.
     project: str | None = None
@@ -2077,7 +2107,7 @@ async def bastao_passar(name: str, body: BastaoBody):
     novo = await create_session(CreateBody(
         name=destino, cwd=cwd, config_dir=body.config_dir, provider=body.provider,
         engine=body.engine, model=body.model, effort=body.effort,
-        permission_mode=body.permission_mode))
+        permission_mode=body.permission_mode, omp_profile=body.omp_profile))
     try:
         await asyncio.to_thread(lambda: PromptQueue(novo.name).append(
             kick, delivered=False, pre_transcript=True))
