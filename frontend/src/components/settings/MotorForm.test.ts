@@ -48,6 +48,40 @@ function montarCriando(nomesExistentes: string[] = []) {
   });
   return { el, comp: comp as never, onSalvo, onFechar };
 }
+// happy-dom não faz layout, então `getBoundingClientRect` devolve 0 e quem informa a largura é o
+// ResizeObserver: o que estes casos provam é a DECISÃO (estreito × largo), não o pixel. O stub
+// precisa estar no lugar ANTES do mount e ser restaurado no fim — vazá-lo deixaria toda a suíte
+// em modo estreito, calada. Precedente do stub: ActivitySheet.agente.test.ts.
+async function comLargura<T>(w: number, montarFn: () => T) {
+  const real = globalThis.ResizeObserver;
+  let cb: ResizeObserverCallback | null = null;
+  class RO {
+    constructor(c: ResizeObserverCallback) { cb = c; }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+  (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = RO;
+  try {
+    const t = montarFn();
+    await espera();
+    const disparar = async (largura: number) => {
+      cb?.([{ contentRect: { width: largura } } as ResizeObserverEntry], null as never);
+      await espera();
+    };
+    await disparar(w);
+    return Object.assign(t as object, { disparar }) as T & { disparar: (l: number) => Promise<void> };
+  } finally {
+    (globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = real;
+  }
+}
+
+const avancado = (el: HTMLElement) => el.querySelector<HTMLDetailsElement>('details.avancado')!;
+// Casa pela ESTRUTURA, não pelo texto do rótulo: o nome de cada "?" carrega o campo, e comparar
+// com um texto fixo esconderia justamente quatro botões chamados igual.
+const perguntas = (el: HTMLElement) =>
+  [...el.querySelectorAll<HTMLElement>('details.ajuda-q > summary')];
+const acoes = (el: HTMLElement) => el.querySelector<HTMLElement>('.acoes')!;
 const campo = (el: HTMLElement, name: string) => el.querySelector<HTMLInputElement>(`input[name="${name}"]`)!;
 const botao = (el: HTMLElement, rotulo: string) =>
   [...el.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === rotulo)!;
@@ -508,6 +542,132 @@ describe('MotorForm', () => {
 
       expect(apiMock.putEngine).toHaveBeenCalledTimes(2);
       expect(c.el.textContent).not.toContain(m.config_motores_nome_em_uso());
+      unmount(c.comp);
+    });
+  });
+
+  // Quem decide "é estreito" é a largura do PRÓPRIO bloco, não a da janela: o mesmo formulário
+  // mora na folha do celular e no card do desktop, e é o painel que aperta.
+  describe('painel estreito', () => {
+    it('no estreito o avançado nasce FECHADO e as ações grudam no pé', async () => {
+      const c = await comLargura(390, () => montarCriando());
+      expect(avancado(c.el).open).toBe(false);
+      expect(acoes(c.el).classList.contains('fixo')).toBe(true);
+      unmount(c.comp);
+
+      const t = await comLargura(390, () => montar());
+      expect(avancado(t.el).open).toBe(false);
+      expect(acoes(t.el).classList.contains('fixo')).toBe(true);
+      unmount(t.comp);
+    });
+
+    // Girar o telefone ou arrastar a largura do painel volta ao formulário inteiro.
+    it('voltar a largo reabre o avançado e solta o rodapé', async () => {
+      const c = await comLargura(390, () => montarCriando());
+      expect(avancado(c.el).open).toBe(false);
+      await c.disparar(900);
+      expect(avancado(c.el).open).toBe(true);
+      expect(acoes(c.el).classList.contains('fixo')).toBe(false);
+      unmount(c.comp);
+    });
+
+    // As quatro ajudas longas (nome curto, endereço, subagentes, janela) viram um "?" que abre o
+    // texto. Nada é removido: o <details> esconde por estilo.
+    it('no estreito as quatro ajudas longas viram "?" — e no largo não existem', async () => {
+      const l = montarCriando();
+      await espera();
+      expect(l.el.textContent).toContain(m.config_motores_messages());
+      expect(perguntas(l.el).length).toBe(0);
+      unmount(l.comp);
+
+      const c = await comLargura(390, () => montarCriando());
+      expect(perguntas(c.el).length).toBe(4);
+      expect(c.el.textContent).toContain(m.config_motores_messages());
+      expect(c.el.textContent).toContain(m.config_motores_subagentes_ajuda());
+      for (const s of perguntas(c.el)) expect((s.parentElement as HTMLDetailsElement).open).toBe(false);
+      unmount(c.comp);
+    });
+
+    // Quatro botões com o mesmo nome são quatro botões idênticos para o leitor de tela: quem
+    // navega por Tab não sabe qual "?" abre a ajuda do endereço.
+    it('cada "?" tem um nome próprio, com o campo dele', async () => {
+      const c = await comLargura(390, () => montarCriando());
+      const nomes = perguntas(c.el).map((s) => s.getAttribute('aria-label')!);
+      expect(nomes.length).toBe(4);
+      expect(new Set(nomes).size).toBe(4);
+      expect(nomes[0]).toContain(m.config_motores_nome_curto());
+      expect(nomes[1]).toContain(m.config_motores_endereco());
+      expect(nomes[2]).toContain(m.config_motores_subagentes());
+      expect(nomes[3]).toContain(m.config_motores_janela());
+      unmount(c.comp);
+    });
+
+    it('o "?" do endereço abre e fecha aquela ajuda', async () => {
+      const c = await comLargura(390, () => montarCriando());
+      // Ordem no formulário: nome curto, endereço, subagentes, janela.
+      const det = perguntas(c.el)[1].parentElement as HTMLDetailsElement;
+      expect(det.open).toBe(false);
+      perguntas(c.el)[1].click();
+      await espera();
+      expect(det.open).toBe(true);
+      perguntas(c.el)[1].click();
+      await espera();
+      expect(det.open).toBe(false);
+      unmount(c.comp);
+    });
+
+    // Ajuda de uma linha e aviso continuam à mostra: esconder um aviso atrás de um clique é
+    // esconder o motivo de ele existir.
+    it('ajuda curta e aviso não viram "?"', async () => {
+      const c = await comLargura(390, () => montarCriando());
+      const curta = [...c.el.querySelectorAll('.ajuda')]
+        .find((x) => x.textContent?.includes(m.config_motores_sessoes_abertas()))!;
+      expect(curta).toBeDefined();
+      expect(curta.closest('details')).toBeNull();
+      unmount(c.comp);
+
+      // Endereço editado sem chave nova: o aviso aparece solto, sem "?" em volta.
+      const t = await comLargura(390, () => montar());
+      const end = campo(t.el, 'base_url');
+      end.value = 'https://outro.exemplo';
+      end.dispatchEvent(new Event('input', { bubbles: true }));
+      await espera();
+      const aviso = [...t.el.querySelectorAll('.ajuda.erro')]
+        .find((x) => x.textContent?.includes(m.config_motores_endereco_mudou()))!;
+      expect(aviso).toBeDefined();
+      expect(aviso.closest('details')).toBeNull();
+      unmount(t.comp);
+    });
+
+    it('o resumo do avançado só existe no estreito e traz janela, subagentes e raciocínio', async () => {
+      const novo = await comLargura(390, () => montarCriando());
+      const resumo = () => novo.el.querySelector('.resumo')!.textContent ?? '';
+      expect(resumo()).toContain(m.config_motores_padrao());
+      expect(resumo()).toContain(m.config_motores_mesmo_principal());
+      expect(resumo()).toContain(m.comum_ligado());
+      unmount(novo.comp);
+
+      // Motor com janela, subagente próprio e raciocínio desligado.
+      const salvo = await comLargura(390, () => montar({
+        ...KIMI, context_window: 256000, subagent_model: 'kimi-k2', adaptive_thinking: false,
+      }));
+      const texto = salvo.el.querySelector('.resumo')!.textContent ?? '';
+      expect(texto).toContain('256k');
+      expect(texto).toContain('kimi-k2');
+      expect(texto).toContain(m.comum_desligado());
+      unmount(salvo.comp);
+
+      const largo = montarCriando();
+      await espera();
+      expect(largo.el.querySelector('.resumo')).toBeNull();
+      unmount(largo.comp);
+    });
+
+    // Bloco ainda não medido tem largura 0: sem esta guarda ele nasceria compacto no desktop.
+    it('largura 0 não decide nada — continua largo', async () => {
+      const c = await comLargura(0, () => montarCriando());
+      expect(avancado(c.el).open).toBe(true);
+      expect(acoes(c.el).classList.contains('fixo')).toBe(false);
       unmount(c.comp);
     });
   });
