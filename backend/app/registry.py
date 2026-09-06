@@ -934,6 +934,7 @@ class SessionRegistry:
         # por ate _STATUS_TTL (e o dict cresceria sem poda a cada create/kill).
         self._status_cache.pop(name, None)
         self._label_cache.pop(name, None)
+        self._limit_cache.pop(name, None)
 
     def _repl_sid(self, pid, children: Optional[dict[int, list[int]]] = None) -> Optional[str]:
         # --session-id do REPL principal da sessao (pula daemon/agent). Identidade do DONO de um
@@ -1178,7 +1179,9 @@ class SessionRegistry:
         """Preenche limited/limit_reset das sessoes TRAVADAS que o fast-path de marcador nao raspou.
         Uma sessao esperando o limite voltar e `working` pelo hook e sem transcript avancando —
         exatamente `stalled` —, e so ela paga a captura, uma vez a cada _LIMIT_CACHE_S."""
-        alvos = [i for i in infos if getattr(i, "stalled", False) and i.name not in raspadas]
+        # Codex nunca raspa o pane (a TUI dele nao tem o rodape do Claude Code) — fica de fora.
+        alvos = [i for i in infos if getattr(i, "stalled", False) and i.name not in raspadas
+                 and getattr(i, "provider", "claude") != "codex"]
         agora = time.monotonic()
         frescos = [i for i in alvos
                    if agora - self._limit_cache.get(i.name, (0.0, None))[0] > self._LIMIT_CACHE_S]
@@ -1186,7 +1189,12 @@ class SessionRegistry:
             frames = await asyncio.gather(
                 *[asyncio.to_thread(tmux.capture_pane, i.name) for i in frescos], return_exceptions=True)
             for i, f in zip(frescos, frames):
-                reset = rate_limit_reset(f) if isinstance(f, str) else None
+                if isinstance(f, str):
+                    reset = rate_limit_reset(f)
+                else:
+                    # tmux engasgado: preserva o ultimo valor bom (mesma regra do sweep de statusline).
+                    _log.debug("radar de limite: captura falhou pra %s: %r", i.name, f)
+                    reset = self._limit_cache.get(i.name, (0.0, None))[1]
                 self._limit_cache[i.name] = (agora, reset)
         for i in alvos:
             i.limit_reset = self._limit_cache.get(i.name, (0.0, None))[1]
@@ -1709,6 +1717,8 @@ class SessionRegistry:
             self._status_cache[new] = st
         if old in self._label_cache:
             self._label_cache[new] = self._label_cache.pop(old)
+        if old in self._limit_cache:
+            self._limit_cache[new] = self._limit_cache.pop(old)
         # A fila duravel tambem e keyed por NOME -> move junto, senao a sessao renomeada perde as
         # entradas nao-drenadas e elas ficam orfas no nome velho (fantasma se reusarem `old`).
         PromptQueue(old).rename(new)

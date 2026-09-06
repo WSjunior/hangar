@@ -50,6 +50,10 @@ function carregarLargura(): number {
 // ReferenceError e o store nascia vazio mesmo com localStorage cheio — o painel não remontava
 // depois de reload).
 const CHAVE_ABERTOS = 'cp_nav_abertos';
+// Dona de cada marca: o transcript (`jsonl`) da sessão que tinha o navegador quando a lista foi
+// lida. A marca é por NOME, e nome se repete: sessão morta e recriada com o app FECHADO chega na
+// lista com o mesmo nome e outro transcript — sem a dona, a poda por nome a tomava pela mesma.
+const CHAVE_DONOS = 'cp_nav_donos';
 
 function carregarJson(chave: string): Record<string, string> {
   try {
@@ -59,6 +63,8 @@ function carregarJson(chave: string): Record<string, string> {
     return {};
   }
 }
+
+const donos: Record<string, string> = carregarJson(CHAVE_DONOS);
 
 export const navegadorPanel = $state({
   largura: carregarLargura(),
@@ -95,17 +101,17 @@ export function fecharNav(chave: string): void {
   salvarAbertos();
 }
 
-// Dona de cada marca: o transcript (`jsonl`) da sessão que tinha o navegador quando a lista foi
-// lida. A marca é por NOME, e nome se repete: sessão morta e recriada com o app FECHADO chega na
-// lista com o mesmo nome e outro transcript — sem a dona, a poda por nome a tomava pela mesma.
-const CHAVE_DONOS = 'cp_nav_donos';
-const donos: Record<string, string> = carregarJson(CHAVE_DONOS);
-
 // Sessão que sumiu da lista — ou que está lá com outro transcript — leva o navegador junto:
 // a marca sobrevivia à morte da sessão e uma sessão nova com o mesmo nome no mesmo repo nascia
 // com o view e a URL de uma morta, e o agente dela era avisado de um navegador que nunca abriu.
 // `vivos` só traz os servidores cuja lista foi lida agora (nome → jsonl; null = sessão ainda sem
 // transcript, que nem adota nem condena); servidor offline não decide.
+//
+// Transcript diferente da dona só condena na PRIMEIRA vez que a sessão aparece desde que a página
+// abriu: aí ela morreu e foi recriada com o app fechado. Presente desde antes e o transcript
+// trocou, é `/clear` (mesma sessão, arquivo novo) — a dona só é atualizada.
+const presentes = new Set<string>();
+
 export function podarNavMortos(vivos: Map<string, Map<string, string | null>>): void {
   let mudou = false;
   for (const chave of Object.keys(navegadorPanel.abertos)) {
@@ -114,10 +120,15 @@ export function podarNavMortos(vivos: Map<string, Map<string, string | null>>): 
     if (!sessoes) continue;
     const nome = chave.slice(i + 2);
     const jsonl = sessoes.has(nome) ? sessoes.get(nome) ?? null : undefined;
-    if (jsonl === undefined || (jsonl && donos[chave] && donos[chave] !== jsonl)) {
+    const trocou = !!jsonl && !!donos[chave] && donos[chave] !== jsonl;
+    if (jsonl === undefined || (trocou && !presentes.has(chave))) {
       fecharNav(chave);
       navegadorNativo()?.close(chave);
-    } else if (jsonl && !donos[chave]) {
+      presentes.delete(chave);
+      continue;
+    }
+    presentes.add(chave);
+    if (jsonl && (!donos[chave] || trocou)) {
       donos[chave] = jsonl;
       mudou = true;
     }

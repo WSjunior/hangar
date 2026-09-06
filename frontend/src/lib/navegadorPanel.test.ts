@@ -95,6 +95,15 @@ describe('navegadorPanel — largura redimensionável', () => {
     expect(mod.navegadorPanel.abertos).toEqual({});
     expect(JSON.parse(localStorage.getItem('cp_nav_donos')!)).toEqual({});
     expect(close).toHaveBeenCalledWith('srv-x::hangar-4');
+    // `/clear` com o app ABERTO: a sessão nunca saiu da lista, só trocou de transcript — o
+    // navegador fica e a dona acompanha.
+    mod.marcarNavAberto('srv-x::viva');
+    mod.podarNavMortos(new Map([['srv-x', new Map([['viva', '/t/antes.jsonl']])]]));
+    mod.podarNavMortos(new Map([['srv-x', new Map([['viva', '/t/pos-clear.jsonl']])]]));
+    expect(mod.navegadorPanel.abertos).toHaveProperty('srv-x::viva');
+    expect(JSON.parse(localStorage.getItem('cp_nav_donos')!)).toEqual({ 'srv-x::viva': '/t/pos-clear.jsonl' });
+    expect(close).toHaveBeenCalledTimes(1);
+    mod.fecharNav('srv-x::viva');
     // sessão ainda sem transcript (Codex nascendo) não condena nem adota.
     mod.marcarNavAberto('srv-x::cx');
     mod.podarNavMortos(new Map([['srv-x', new Map([['cx', null]])]]));
