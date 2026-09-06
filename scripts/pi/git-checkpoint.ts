@@ -450,7 +450,7 @@ export function createCheckpointExtension(pi: ExtensionAPI, agentContext: AgentC
     }
   }
   if (agentContext.harness === 'omp') {
-    pi.on('session_before_branch', (_event, ctx) => activate(ctx))
+    pi.on('session_before_branch', beforeBranch)
     pi.on('session_branch', (_event, ctx) => activate(ctx))
   } else {
     // O Pi chama fork ao evento que o OMP chama branch.

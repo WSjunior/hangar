@@ -274,6 +274,8 @@ não tem).
 
 ### Checkpoints de código (Pi e OMP)
 
+Requer **Git 2.32 ou superior**, para isolar a configuração global durante as operações.
+
 Com a extensão do Hangar carregada, cada pedido em uma árvore Git recebe um checkpoint antes
 da atuação do agente. No **OMP**, use `/hangar-rewind`; no **Pi**, use `/rewind`.
 Escolha o checkpoint do ramo atual e um dos três modos:

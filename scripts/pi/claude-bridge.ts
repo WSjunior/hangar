@@ -328,6 +328,7 @@ export async function createBridge(pi: ExtensionAPI, context: AgentContext = get
 		};
 		const owned = readManifest();
 		const expected: Manifest = {};
+		// Frontmatter inválido interrompe a passagem antes de reconciliar: pular a fonte poderia apagar sua cópia gerenciada.
 		if (config.enabled !== false) {
 			const native = nativeNames(owned);
 			const seen = new Set<string>();

@@ -85,7 +85,10 @@ export default async function (pi: ExtensionAPI) {
       let restoreCommandName = "hangar-rewind";
       let commands = new Map<string, { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void> }>();
       const emit = async (name: string, event: Record<string, unknown> = {}, ctx = context()) => {
-        for (const handler of handlers.get(name) ?? []) await handler({ type: name, ...event }, ctx);
+        for (const handler of handlers.get(name) ?? []) {
+          const response = await handler({ type: name, ...event }, ctx);
+          if (response && typeof response === "object" && "cancel" in response && response.cancel) return response;
+        }
       };
       function context(): ExtensionCommandContext {
         const value = {
@@ -203,6 +206,20 @@ export default async function (pi: ExtensionAPI) {
         write(tracked, "após fork\n"); await rewind();
         assert.equal(fs.readFileSync(tracked, "utf8"), "antes\n");
         assert.equal(checksum(sourceIndex), sourceBefore);
+        assertRealGitIntact();
+      } else if (scenario === "before_branch") {
+        const captured = await capture();
+        write(tracked, "antes da ramificação\n");
+        choices = [0];
+        await emit("session_before_branch", { entryId: captured.entry.id });
+        assert.equal(fs.readFileSync(tracked, "utf8"), "antes\n");
+        assertRealGitIntact();
+        fs.rmSync(captured.data.shadowDir, { recursive: true });
+        write(tracked, "preservar após falha\n");
+        choices = [0];
+        const response = await emit("session_before_branch", { entryId: captured.entry.id });
+        assert.deepEqual(response, { cancel: true });
+        assert.equal(fs.readFileSync(tracked, "utf8"), "preservar após falha\n");
         assertRealGitIntact();
       } else if (scenario === "branch_scope") {
         const first = await capture("primeiro pedido"); userMessage("primeiro");

@@ -279,6 +279,12 @@ def test_config_recusa_intervalo_que_impede_ciclo_limitado(interval):
         Settings(_env_file=None, omp_plugin_sync_interval=interval)
 
 
+def test_intervalo_vazio_no_ambiente_nao_impede_subida(monkeypatch):
+    from app.config import Settings
+    monkeypatch.setenv("CP_OMP_PLUGIN_SYNC_INTERVAL", "")
+    assert Settings(_env_file=None).omp_plugin_sync_interval == 300
+
+
 @pytest.mark.asyncio
 async def test_suspensao_tem_prioridade_sobre_outro_item_atualizado():
     sync = FakeSync()

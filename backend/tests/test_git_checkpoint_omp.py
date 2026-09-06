@@ -9,7 +9,7 @@ DRIVER = Path(__file__).resolve().parents[2] / "scripts/tests/git-checkpoint-dri
 
 
 @pytest.mark.parametrize("scenario", [
-    "capture_restore", "resume_fork", "branch_scope", "late_capture",
+    "capture_restore", "resume_fork", "before_branch", "branch_scope", "late_capture",
     "subagent", "invalid_reference", "selection_and_partial", "legacy_pi", "directory_replaced", "native_timeout", "capture_deadline",
 ])
 def test_checkpoint_no_omp_com_git_real(tmp_path, scenario):
