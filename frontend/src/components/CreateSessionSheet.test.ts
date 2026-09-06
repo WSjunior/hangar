@@ -659,6 +659,30 @@ describe('CreateSessionSheet — servidor fora do ar', () => {
     unmount(comp);
   });
 
+  it('marca a rota mais rápida entre as visíveis, e não marca com uma medida só', async () => {
+    // A mesma máquina cadastrada por duas rotas (Tailscale e VPS) é o caso real: o número é o que
+    // diz qual escolher. B é o mais rápido; C está fora do ar e nem aparece.
+    const comp = montar({
+      servidores: TRES,
+      offline: new Set(['srv-c']),
+      latencias: new Map([['srv-a', 134], ['srv-b', 45]]),
+    });
+    await flush();
+    const chips = [...document.querySelectorAll<HTMLButtonElement>('.server-chip')];
+    const rapido = chips.find((c) => c.querySelector('.chip-ms.rapido'));
+    expect(rapido?.textContent).toContain('Servidor B');
+    expect(chips.map((c) => c.querySelector('.chip-ms')?.textContent)).toEqual(['134ms', '45ms']);
+    unmount(comp);
+  });
+
+  it('uma medida só não ganha coroa — "o mais rápido" seria o único', async () => {
+    const comp = montar({ servidores: TRES, latencias: new Map([['srv-a', 134]]) });
+    await flush();
+    expect(document.querySelector('.chip-ms.rapido')).toBeNull();
+    expect(document.querySelector('.chip-ms')?.textContent).toBe('134ms');
+    unmount(comp);
+  });
+
   it('o alvo ATUAL continua visível mesmo offline: sem ele a folha ficaria sem seleção', async () => {
     // Sem servidor ativo no localStorage o alvo cai em `servers[0]` = A. Se A cair, esconder o chip
     // dele deixaria a lista inteira sem nenhum `.on` — a pessoa não veria onde a sessão vai nascer.

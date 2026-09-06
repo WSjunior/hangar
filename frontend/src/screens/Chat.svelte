@@ -2150,6 +2150,7 @@
     open={createOpen}
     servers={listServers()}
     offline={servidoresOffline}
+    latencias={sessionsStore.latencias}
     onClose={() => (createOpen = false)}
     onCreate={handleCreate}
     onOpenSession={onNavigateToChat}

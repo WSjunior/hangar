@@ -609,6 +609,7 @@ import * as m from '../paraglide/messages';
     open={showCreateSheet}
     {servers}
     offline={servidoresOffline}
+    latencias={sessionsStore.latencias}
     onClose={() => (showCreateSheet = false)}
     onCreate={handleCreate}
     onOpenSession={onNavigateToChat}

@@ -34,9 +34,13 @@
     /** Ids que o stream da lista marcou como fora do ar. Só escondem o CHIP: `servers` segue
      *  inteiro pra resolução de alvo/bastão, senão uma máquina que oscila trocaria o alvo sozinha. */
     offline?: ReadonlySet<string>;
+    /** ms até o primeiro quadro de cada servidor. A MESMA máquina costuma estar cadastrada duas
+     *  vezes, por duas rotas (Tailscale direto e o desvio pela VPS) — com as duas no ar, isto é o
+     *  que diz qual escolher. */
+    latencias?: ReadonlyMap<string, number>;
   }
   let { open, servers, onClose, onCreate, onOpenSession, bastao = null,
-        offline = new Set<string>() }: Props = $props();
+        offline = new Set<string>(), latencias = new Map<string, number>() }: Props = $props();
 
   // Provider da sessao nova: Claude (padrao, tmux), Codex (app-server, sem tmux/config_dir), Pi,
   // Kimi ou OMP (pane tmux como o Claude, mas sem config_dir e sem motor — o backend recusa motor
@@ -67,6 +71,13 @@
   // Quantas sumiram. Esconder calado vira "cadê minha máquina?" — a pessoa não tem como saber se
   // ela foi apagada, se o app perdeu, ou se está só desligada. Uma linha resolve.
   const ocultas = $derived(servers.length - serversVisiveis.length);
+  // A rota mais rápida ENTRE AS VISÍVEIS. Só marca com 2+ medidas: com uma só, "a mais rápida" é
+  // a única, e a coroa não informa nada. Empate fica com a primeira, que é a ordem do cadastro.
+  const maisRapido = $derived.by(() => {
+    const medidos = serversVisiveis.filter((s) => latencias.has(s.id));
+    if (medidos.length < 2) return null;
+    return medidos.reduce((a, b) => (latencias.get(b.id)! < latencias.get(a.id)! ? b : a)).id;
+  });
 
   // Fluxo em dois passos: 1) escolher a pasta (scanner) -> 2) criar uma sessao nova com nome UNICO
   // derivado do basename. Varias sessoes na mesma pasta sao permitidas (cada uma tem nome+jsonl
@@ -767,6 +778,9 @@
             >
               <span class="chip-dot" style="background: {serverColor(s.id)};" aria-hidden="true"></span>
               {s.label}
+              {#if latencias.has(s.id)}
+                <span class="chip-ms" class:rapido={maisRapido === s.id}>{latencias.get(s.id)}ms</span>
+              {/if}
             </button>
           {/each}
         </div>
@@ -1207,6 +1221,19 @@
      ele fica idêntico a uma máquina no ar, e a pessoa só descobre no erro depois do "Criar". */
   .server-chip.fora {
     opacity: 0.55;
+  }
+  /* O número mede a ROTA, não a máquina: a mesma máquina cadastrada por Tailscale e pela VPS dá
+     dois valores bem diferentes, e é essa diferença que se quer ver. */
+  .chip-ms {
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-tertiary, var(--text-secondary));
+    opacity: 0.7;
+  }
+  .chip-ms.rapido {
+    color: var(--success, var(--accent));
+    opacity: 1;
+    font-weight: 600;
   }
   .server-chip.fora .chip-dot {
     background: transparent !important;
