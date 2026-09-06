@@ -110,6 +110,23 @@
   let syncErro = $state('');
   let porQue = $state<string | null>(null);
 
+  // Mesmo número do `@container (max-width: 620px)` lá embaixo: um limiar só para toda a
+  // apresentação estreita. A medida é em JS porque `open` de <details> é atributo do DOM e
+  // nenhuma container query o alcança; quem aperta é o painel, não a janela.
+  const LARGURA_COMPACTA = 620;
+  let raiz = $state<HTMLElement | null>(null);
+  let celular = $state(false);
+  $effect(() => {
+    if (!raiz) return;
+    const medir = (w: number) => { if (w > 0) celular = w <= LARGURA_COMPACTA; };
+    // Leitura síncrona antes de observar: sem ela o bloco estreito nasceria com o Avançado
+    // aberto e o fecharia no quadro seguinte.
+    medir(raiz.getBoundingClientRect().width);
+    const ro = new ResizeObserver((es) => medir(es[0]?.contentRect.width ?? 0));
+    ro.observe(raiz);
+    return () => ro.disconnect();
+  });
+
   // Só o caso documentado da Moonshot, onde desligar o thinking rebaixa K3/K2.7 para K2.6 sem
   // avisar. Não inventar regra para provedor sem doc.
   const ehMoonshot = $derived(/moonshot|kimi/i.test(`${form.base_url} ${form.model}`));
@@ -120,6 +137,14 @@
   // criação não há chave nem endereço salvos, então não há o que avisar.
   const enderecoMudouSemChave = $derived(!criandoAgora && form.api_key_definida
     && !form.api_key.trim() && form.base_url.trim() !== form.base_url_original);
+
+  // Fechado, o Avançado tem de dizer o que guarda — senão é um clique que ninguém dá. Sai do
+  // próprio `form`, então acompanha a edição sem estado à parte.
+  const resumoAvancado = $derived(m.config_motores_avancado_resumo({
+    janela: form.context_window ? `${Math.round(Number(form.context_window) / 1000)}k` : m.config_motores_padrao(),
+    sub: form.subagent_model.trim() || m.config_motores_mesmo_principal(),
+    rac: form.adaptive_thinking ? m.comum_ligado() : m.comum_desligado(),
+  }));
 
   async function buscarModelos() {
     buscando = true; erroBusca = ''; okBusca = '';
@@ -212,7 +237,36 @@
   }
 </script>
 
-<div class="mf">
+<div class="mf" bind:this={raiz}>
+  <!-- Um lugar decide como a ajuda longa aparece; os quatro campos só chamam. No estreito ela vai
+       para trás de um "?" — <details> nativo já traz teclado e estado, sem lib nem $state. -->
+  {#snippet ajudaLonga(rotulo: string, conteudo: import('svelte').Snippet)}
+    {#if celular}
+      <details class="ajuda-q">
+        <!-- O nome leva o campo: quatro botões chamados "Ajuda" são quatro botões idênticos para
+             quem navega por teclado ou leitor de tela. -->
+        <summary aria-label={m.config_motores_ajuda_campo({ campo: rotulo })}>?</summary>
+        <span class="ajuda">{@render conteudo()}</span>
+      </details>
+    {:else}
+      <span class="ajuda">{@render conteudo()}</span>
+    {/if}
+  {/snippet}
+  {#snippet aNome()}
+    <!-- Campo vazio mostra o EXEMPLO do placeholder: a frase é lida como comando de verdade, e
+         `idDe('')` cai no fallback `chave`, um nome que ninguém escolheu. -->
+    {m.config_motores_terminal_1()} <code>claude-engine {form.nome.trim() ? idAlvo : 'kimi'}</code>{m.config_motores_terminal_2()}
+  {/snippet}
+  {#snippet aEndereco()}
+    <strong>{m.config_motores_sem_v1()}</strong> {m.config_motores_messages()}
+  {/snippet}
+  {#snippet aSubagentes()}
+    {m.config_motores_subagentes_ajuda()}
+  {/snippet}
+  {#snippet aJanela()}
+    {m.config_motores_janela_ajuda_1()} <code>/context</code>{m.comum_ponto()}
+  {/snippet}
+
   {#if criando}
     <label class="campo">
       <span class="rot">{m.config_motores_nome_curto()}</span>
@@ -221,11 +275,7 @@
       <input type="text" name="nome" placeholder="kimi" autocapitalize="off" spellcheck={false}
              readonly={!criandoAgora} class:travado={!criandoAgora}
              value={form.nome} oninput={(e) => (form.nome = e.currentTarget.value)} />
-      <!-- Campo vazio mostra o EXEMPLO do placeholder: a frase é lida como comando de verdade, e
-           `idDe('')` cai no fallback `chave`, um nome que ninguém escolheu. -->
-      <span class="ajuda">
-        {m.config_motores_terminal_1()} <code>claude-engine {form.nome.trim() ? idAlvo : 'kimi'}</code>{m.config_motores_terminal_2()}
-      </span>
+      {@render ajudaLonga(m.config_motores_nome_curto(), aNome)}
     </label>
   {/if}
 
@@ -233,7 +283,7 @@
     <span class="rot">{m.config_motores_endereco()}</span>
     <input type="text" name="base_url" autocapitalize="off" spellcheck={false} placeholder="https://…"
            value={form.base_url} oninput={(e) => (form.base_url = e.currentTarget.value)} />
-    <span class="ajuda"><strong>{m.config_motores_sem_v1()}</strong> {m.config_motores_messages()}</span>
+    {@render ajudaLonga(m.config_motores_endereco(), aEndereco)}
     <!-- Dois endereços que não se adivinham; digitá-los à mão é onde nasce o 404 do provedor. -->
     <span class="dicas">
       {#each DICAS as d (d.base_url)}
@@ -284,18 +334,18 @@
       <input type="text" name="subagent_model" placeholder={m.config_motores_vazio_principal()} autocapitalize="off" spellcheck={false}
              value={form.subagent_model} oninput={(e) => (form.subagent_model = e.currentTarget.value)} />
     {/if}
-    <span class="ajuda">{m.config_motores_subagentes_ajuda()}</span>
+    {@render ajudaLonga(m.config_motores_subagentes(), aSubagentes)}
   </label>
 
   <label class="campo">
     <span class="rot">{m.config_motores_janela()}</span>
     <input type="number" name="context_window" inputmode="numeric" min="1" placeholder={m.ctx_tokens()}
            value={form.context_window} oninput={(e) => (form.context_window = e.currentTarget.value)} />
-    <span class="ajuda">{m.config_motores_janela_ajuda_1()} <code>/context</code>{m.comum_ponto()}</span>
+    {@render ajudaLonga(m.config_motores_janela(), aJanela)}
   </label>
 
-  <details class="avancado" open>
-    <summary>{m.config_motores_avancado()}</summary>
+  <details class="avancado" open={!celular}>
+    <summary>{m.config_motores_avancado()}{#if celular}<span class="resumo">{resumoAvancado}</span>{/if}</summary>
     <p class="ajuda topo">{m.config_motores_avancado_ajuda()}</p>
 
     <!-- Uma linha por recurso, no MESMO vocabulário do ServerSettings (rótulo à esquerda,
@@ -411,7 +461,7 @@
        o Salvar seguinte já é edição. Sem esta linha o efeito parecia não ter acontecido. -->
   <p class="ajuda">{m.config_motores_sessoes_abertas()}</p>
 
-  <div class="acoes">
+  <div class="acoes" class:fixo={celular}>
     <!-- Depois de salvar o botão diz Fechar: a edição já foi, o que resta na tela é o resultado. -->
     <button type="button" class="btn" onclick={onFechar} disabled={salvando || sincronizando}
       >{sync || syncErro ? m.sessao_fechar() : m.comum_cancelar()}</button>
@@ -433,6 +483,25 @@
   .rot { font-size: var(--text-sm); font-weight: 600; color: var(--text-primary); }
   .ajuda { font-size: var(--text-xs); color: var(--text-muted); line-height: 1.45; margin: 0; }
   .ajuda.erro { color: var(--error); }
+  /* O "?" é o alvo de toque da ajuda no painel estreito: bolinha com superfície própria (que
+     acompanha o slider de transparência), sem o triângulo padrão do <details>. */
+  .ajuda-q > summary {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; min-height: 24px; box-sizing: border-box;
+    border: 1px solid var(--border-subtle); border-radius: var(--radius-full);
+    background: var(--surface-raised); color: var(--text-muted);
+    font-size: 12px; line-height: 1; cursor: pointer; list-style: none;
+  }
+  .ajuda-q > summary::-webkit-details-marker { display: none; }
+  /* O dedo pega 44px, mesmo alvo que o `.btn` recebe em painel estreito; o desenho continua a
+     bolinha de 24. O pseudo-elemento cresce a área SEM empurrar o layout em volta. */
+  .ajuda-q > summary { position: relative; }
+  .ajuda-q > summary::after {
+    content: ''; position: absolute; left: 50%; top: 50%;
+    width: 44px; height: 44px; transform: translate(-50%, -50%);
+  }
+  .ajuda-q[open] > summary { color: var(--text-primary); }
+  .ajuda-q > .ajuda { display: block; margin-top: var(--space-2); }
   .def { font-size: 11px; color: var(--success); }
   .dicas { display: flex; flex-wrap: wrap; gap: var(--space-2); }
   .dica {
@@ -456,6 +525,8 @@
     margin: calc(var(--space-3) * -1) 0;
   }
   .avancado[open] > summary { margin-bottom: 0; }
+  /* Fechado, o bloco diz o que guarda: sem isto o resumo seria só mais um clique no escuro. */
+  .resumo { display: block; margin-top: 2px; font-size: var(--text-xs); font-weight: 400; color: var(--text-muted); }
   .avancado .ajuda.topo { margin: 0; max-width: 68ch; }
 
   /* Linha de recurso: MESMO vocabulário do ServerSettings (rótulo à esquerda, controle à direita,
@@ -529,8 +600,22 @@
   .sync-linha b { color: var(--text-primary); font-weight: 600; margin-right: 6px; }
   .sync-linha.pulado { color: var(--text-muted); }
   .sync-linha.falhou { color: var(--error); }
-  /* Sem rodapé sticky: dentro do card os botões ficam no fim do bloco. */
+  /* No painel largo os botões ficam no fim do bloco; no estreito eles grudam no pé enquanto o
+     formulário rola (`.fixo` abaixo). */
   .acoes { display: flex; justify-content: flex-end; gap: var(--space-2); }
+  /* CHROME FUNCIONAL, sólido de propósito (mesmo caso do `.rodape` do ServerSettings/VozSettings):
+     com token de véu o texto que rola por baixo atravessaria os botões. As margens negativas
+     cancelam o respiro do `.mf` para a faixa ir de ponta a ponta, e o raio de baixo acompanha o
+     bloco — `overflow` no `.mf` viraria o scrollport e mataria o sticky. */
+  .acoes.fixo {
+    position: sticky; bottom: calc(-1 * var(--space-3));
+    margin: 0 calc(-1 * var(--space-3)) calc(-1 * var(--space-3));
+    padding: var(--space-3);
+    padding-bottom: calc(var(--space-3) + env(safe-area-inset-bottom));
+    background: rgb(var(--glass-panel-rgb));
+    border-top: 1px solid var(--border-subtle);
+    border-radius: 0 0 9px 9px;
+  }
   .btn { height: 36px; min-height: 0; padding: 0 var(--space-4); border-radius: var(--radius-sm);
          border: 1px solid var(--border-subtle); background: var(--surface-raised);
          color: var(--text-primary); font-size: var(--text-sm); font-weight: 600; cursor: pointer; }
