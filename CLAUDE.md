@@ -655,6 +655,22 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   `GET /api/omp/plugin-sync`, autenticado, expõe estado, horários e relatórios sanitizados.
   Prova com backend real confirmou resposta HTTP enquanto o worker aguardava, e marcador de
   teardown confirmou o encerramento cooperativo. Nenhuma página nova foi introduzida.
+  **Contexto CLAUDE.md:** `CP_OMP_CLAUDE_CONTEXT_ENABLED=1` habilita a configuração na subida
+  pelo módulo `omp_context`. Reusa o resolvedor nativo de diretórios, vincula APPEND_SYSTEM.md
+  ao CLAUDE.md global existente e instala/reusa a regra genérica de leitura do projeto.
+  Arquivo/link personalizado em conflito é preservado e informado; arquivo global ausente
+  não vira link quebrado. A lista disabledExtensions é mesclada pelo CLI nativo somente com
+  `context-file:project:AGENTS.md` e `context-file:user:AGENTS.md`, sem retirar outras escolhas.
+  Equivalência exige corpo compatível e frontmatter comprovadamente habilitado/incondicional,
+  lido pela biblioteca YAML já usada no backend. Só arquivos diretos .md/.mdc participam, como
+  no provider nativo; o nome/ID vem do arquivo. disabledExtensions, ttsr.disabledRules e
+  disabledProviders são conferidos sem remover bloqueios pessoais. Precondições de arquivo,
+  regra e diretório são repetidas após a trava e chamadas externas; rules/ convertido em
+  symlink é recusado antes de publicar a regra, preservando o alvo externo.
+  O CLI pode normalizar formatos legados de configuração, como o tema escalar para theme.dark,
+  mantendo a preferência efetiva. OMP real confirmou as sentinelas CLAUDE global/de projeto
+  e ausência das sentinelas AGENTS no prompt antes de ferramentas; projeto sem CLAUDE não
+  recebe conteúdo inventado. Outros harnesses e arquivos AGENTS.md dos projetos não são alterados.
 - **Pi model + thinking level** (`app/pi_models.py` + `scripts/pi/hangar-state.ts` + `components/PiModelPopover.svelte` + `components/PiEffortPopover.svelte`):
   the third mechanism, next to Claude's TUI picker and Codex's app-server, and it does **not** scrape
   the pane. Measured on pi 0.82.1: `/model` is a fuzzy-**search** list of ~300 entries (footer

@@ -9,7 +9,7 @@ import uuid
 
 
 def run_omp_driver(
-    driver: Path, home: Path, env: dict[str, str] | None = None
+    driver: Path, home: Path, env: dict[str, str] | None = None, *, cwd: Path | None = None, load_rules: bool = False
 ) -> subprocess.CompletedProcess[str]:
     """Executa um driver isolado; exige conclusão estruturada além do código de saída."""
     binary = os.environ.get("OMP_TEST_BIN") or shutil.which("omp")
@@ -39,11 +39,13 @@ def run_omp_driver(
         "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
         "OMP_DRIVER_RESULT": str(result_path), "OMP_DRIVER_RUN": run_id,
     })
-    command = [str(binary), "--no-extensions", "--no-skills", "--no-rules", "--no-session", "--print",
+    command = [str(binary), "--no-extensions", "--no-skills", "--no-session", "--print",
                "--model", "openai-codex/gpt-6-astra", "--api-key", "fixture-sem-credencial",
                "--extension", str(driver.resolve())]
+    if not load_rules:
+        command.append("--no-rules")
     try:
-        result = subprocess.run(command, cwd=home, env=process_env, input="", capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        result = subprocess.run(command, cwd=cwd or home, env=process_env, input="", capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
     except subprocess.TimeoutExpired as exc:
         (proof / "stdout.log").write_bytes(exc.stdout or b"")
         (proof / "stderr.log").write_bytes(exc.stderr or b"")

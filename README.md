@@ -151,6 +151,12 @@ e os diretórios de recursos próprios. A configuração fica em `<agentDir>/cla
 são preservados; `/claude-bridge` informa conflitos. A ponte não instala plugins no lugar
 do gerenciador nativo do OMP.
 
+Opcionalmente, `CP_OMP_CLAUDE_CONTEXT_ENABLED=1` configura o OMP para priorizar `CLAUDE.md`,
+com regra explícita e preservação de arquivos/links pessoais. `CP_OMP_PLUGIN_SYNC_ENABLED=1`
+ativa a importação genérica de marketplaces e reconciliação nativa em background (300 s
+por padrão), respeitando o controle global de automações. Ambos ficam desligados por padrão.
+Detalhes, limitações e diagnóstico estão em [`docs/USAGE.md`](docs/USAGE.md).
+
 Start the backend on loopback:
 
 ```bash

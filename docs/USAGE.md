@@ -335,6 +335,26 @@ personalizado não desloca sozinho os plugins. Caso a configuração passe a apo
 outra raiz, um registro de propriedade antigo é preservado e diagnosticado, não migrado
 automaticamente.
 
+### Contexto CLAUDE.md no OMP
+
+Com `CP_OMP_CLAUDE_CONTEXT_ENABLED=1`, a subida do backend configura somente o OMP:
+
+- Usa o `CLAUDE.md` global existente por um link `APPEND_SYSTEM.md`, sem copiar seu conteúdo
+  para o repositório e sem substituir um arquivo/link personalizado.
+- Instala ou reutiliza a regra que exige ler o `CLAUDE.md` do projeto antes do trabalho.
+- Acrescenta os dois identificadores de contexto AGENTS à lista de recursos desativados,
+  preservando as outras entradas. Nenhum arquivo `AGENTS.md` é apagado.
+
+Se o projeto não tiver `CLAUDE.md`, a regra exige informar a ausência, não fingir que o
+arquivo foi carregado. Conflitos com contexto personalizado são informados, sem sobrescrita.
+Uma regra desativada, restrita a agentes/condições ou bloqueada nas configurações pessoais
+não é reativada por conta própria. Regras equivalentes `.md` e `.mdc` no nível direto são
+reutilizadas; arquivos em subdiretórios não substituem uma regra que o OMP precisa descobrir.
+Mudanças concorrentes nos arquivos ou no diretório de regras geram diagnóstico, sem gravar
+em um destino externo.
+A alteração usa o CLI nativo de configuração, que pode normalizar formatos legados sem
+mudar a preferência efetiva. Reabra a sessão OMP para carregar a política recém-configurada.
+
 ### Git
 
 O ícone de branch abre o **modal de git** da sessão — o mesmo nas duas views: no desktop ele é um

@@ -214,6 +214,7 @@ class Settings(BaseSettings):
     # Importação/sincronização OMP é opt-in e também respeita o kill-switch mestre.
     omp_plugin_sync_enabled: bool = False
     omp_plugin_sync_interval: float = Field(300, gt=0, allow_inf_nan=False)
+    omp_claude_context_enabled: bool = False
     # Cloud sync hub (opt-in). CP_SYNC=1 turns THIS backend into the sync hub: it mounts /api/sync/*.
     # Stores only salt + auth verifier + ciphertext (zero-knowledge; tokens are encrypted client-side).
     sync: bool = False
