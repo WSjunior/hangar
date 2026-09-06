@@ -210,7 +210,10 @@ export function createCheckpointExtension(pi: ExtensionAPI, agentContext: AgentC
     // inteira de novo, sem poda. Só ganha sufixo quando a pasta com esse nome é de outro projeto.
     let directory = path.join(rootDirectory(), sessionSlug(token.file).slice(0, 100))
     const origin = readOrigin(directory)
-    if (origin && (origin.workTree !== repo.workTree || origin.repository !== repo.repository)) {
+    // Origem de outro projeto, ou arquivo de origem presente mas ilegível (o `wx` abaixo bateria
+    // nele pra sempre): a pasta não é confiável, abre outra ao lado.
+    const origemIlegivel = !origin && fs.existsSync(path.join(directory, ORIGIN_FILE))
+    if (origemIlegivel || (origin && (origin.workTree !== repo.workTree || origin.repository !== repo.repository))) {
       directory = `${directory}-${randomUUID()}`
     }
     const bare = fs.existsSync(directory)

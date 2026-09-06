@@ -376,11 +376,11 @@ export async function createBridge(pi: ExtensionAPI, context: AgentContext = get
 		const owned = readManifest();
 		const expected: Manifest = {};
 		let broken = 0;
-		const parseSource = (dir: string, file: string, kind: Kind): ParsedFrontmatter | null => {
+		const parseSource = (dir: string, file: string, kind: Kind, label: string): ParsedFrontmatter | null => {
 			try { return parse(fs.readFileSync(path.join(dir, file), "utf8")); }
 			catch (error) {
 				broken++;
-				result[kind].skipped.push(`${path.basename(path.dirname(dir))}/${file} (frontmatter inválida: ${error instanceof Error ? error.message : String(error)})`);
+				result[kind].skipped.push(`${label}/${file} (frontmatter inválida: ${error instanceof Error ? error.message : String(error)})`);
 				return null;
 			}
 		};
@@ -390,7 +390,7 @@ export async function createBridge(pi: ExtensionAPI, context: AgentContext = get
 			for (const source of discoverSources("agents", config.agents?.extraSources ?? [])) {
 				if (config.disabledSources?.agents?.includes(source.label)) continue;
 				for (const file of listMd(source.dir)) {
-					const parsed = parseSource(source.dir, file, "agents");
+					const parsed = parseSource(source.dir, file, "agents", source.label);
 					if (!parsed) continue;
 					const converted = convertParsedAgent(parsed, config, harness);
 					if (!converted) {
@@ -413,7 +413,7 @@ export async function createBridge(pi: ExtensionAPI, context: AgentContext = get
 					if (config.disabledSources?.commands?.includes(source.label)) continue;
 					const dir = cacheCommands.includes(source.label) ? latestCacheSubdir(source.label, "commands") ?? source.dir : source.dir;
 					for (const file of listMd(dir)) {
-						const parsed = parseSource(dir, file, "commands");
+						const parsed = parseSource(dir, file, "commands", source.label);
 						if (!parsed) continue;
 						const converted = convertParsedCommand(parsed, file, config);
 						if (!converted) continue;
