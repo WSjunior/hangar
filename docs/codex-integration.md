@@ -14,25 +14,26 @@ pontuais e registra o que passou a gerenciar. A integração funciona sem o Code
 | `hangar-codex-tui` | Aguarda a reconciliação antes de abrir o app-server da sessão e a TUI; informa falhas sem impedir a abertura. |
 | Codex Desktop | Pode executar sua própria sincronização opcional, independente do Hangar. |
 
-O reconciliador é `backend/app/codex_integracao.py`. Ele é chamado pela inicialização do Hangar,
-pelo acompanhamento mantido no lifespan do backend, antes da abertura de uma sessão pelo
-lançador e pelo botão **Reconciliar agora**, em **Configurações → Harnesses → Codex**.
+O reconciliador é `backend/app/codex_integracao.py`, e quem o chama é sempre o backend, em dois
+momentos: quando o lançador abre uma sessão Codex (`POST /api/harness/codex/integracao/sessao`)
+e no botão **Reconciliar agora**, em **Configurações → Harnesses → Codex**. Não há laço nem
+rodada na subida do backend: o Codex converte, o backend decide quando, o lançador só avisa.
 
-O acompanhamento verifica alterações aproximadamente a cada 30 segundos e aguarda 2 segundos
-antes de disparar a reconciliação. O intervalo de atualização dos marketplaces Git gerenciados
-é de **6 horas**. Tentativas e falhas são persistidas; uma falha agenda nova tentativa
-após 5 minutos e permanece visível até ser resolvida, sem disparar rede a cada consulta.
-O botão manual força uma nova tentativa de atualização. Marketplaces locais
-permanecem locais e não recebem uma URL Git inventada pelo Hangar.
+A abertura de sessão é um cache por conteúdo: o `estado.json` guarda a assinatura das pastas do
+Claude da última rodada; assinatura igual, marketplaces dentro do prazo e última rodada sem falha
+significam que o Codex nem é chamado. O intervalo de atualização dos marketplaces Git gerenciados
+é de **6 horas**. Uma rodada parcial ou com erro só é refeita 5 minutos depois, na abertura
+seguinte, e permanece visível até ser resolvida. O botão manual força uma nova tentativa de
+atualização. Marketplaces locais permanecem locais e não recebem uma URL Git inventada pelo Hangar.
 
 Na instalação inspecionada em 06/09/2026, com CLI 0.153.4, o bundle do Codex Desktop continha a
 opção `external-agent-import-sync-enabled` e uma rotina própria de sincronização de 12 horas.
 Esse é um comportamento observado daquela instalação, sujeito a mudanças no Desktop. O
 intervalo de 6 horas do Hangar não depende dessa opção, e o Hangar não a liga nem a desliga.
-Executar o CLI sozinho também não mantém o agendador do Hangar funcionando: é necessário que
-o backend esteja ativo. O wrapper do terminal cobre apenas a reconciliação daquela abertura.
+Executar o CLI sozinho não reconcilia nada: quem reconcilia é o backend, e o lançador da TUI
+só o avisa ao abrir a sessão — com o backend fora do ar, a sessão abre com o que já está lá.
 
-Os gatilhos automáticos (laço do backend e abertura de TUI) obedecem a três portões, e o botão
+O gatilho automático (abertura de sessão) obedece a três portões, e o botão
 **Reconciliar agora** a nenhum deles: o interruptor **Sincronização automática** do card do Codex
 (`codex_sync` no `runtime-config.json`, ligado por padrão), o kill-switch geral de automações
 (`automations`) e `CP_CODEX_SYNC_ENABLED=0`, o desligamento duro por ambiente. Nenhum deles é uma

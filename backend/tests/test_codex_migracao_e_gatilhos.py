@@ -1,5 +1,4 @@
-"""Primeira rodada numa máquina com a ponte antiga, hook de estado próprio, interruptor e prazo da TUI."""
-import asyncio
+"""Primeira rodada numa máquina com a ponte antiga, hook de estado próprio, interruptor e gatilho de sessão."""
 import json
 import sys
 
@@ -147,40 +146,63 @@ def test_interruptor_da_tela_e_o_kill_switch_desligam_os_gatilhos(rc, monkeypatc
     assert sincronizacao_ligada() is False
 
 
-async def test_laco_desligado_nao_reconcilia_e_religado_volta(rc, monkeypatch, tmp_path):
-    rc.aplicar({"codex_sync": False})
-    service = IntegracaoCodex(tmp_path, tmp_path / ".codex")
+def _registro(service, *, fingerprint, estado="ok", ha_segundos=10, proxima_em=3600):
+    import time
+    from app.codex_integracao import _iso
+    service.raiz.mkdir(parents=True, exist_ok=True)
+    (service.raiz / "estado.json").write_text(json.dumps({
+        "fingerprint": fingerprint,
+        "status": {"estado": estado, "ultima_execucao": _iso(time.time() - ha_segundos),
+                   "proxima_atualizacao": _iso(time.time() + proxima_em)}}))
+
+
+def test_abrir_sessao_so_reconcilia_quando_algo_mudou(tmp_path, monkeypatch):
+    home = _home(tmp_path)
+    service = IntegracaoCodex(home, home / ".codex")
+    monkeypatch.setattr(service, "fingerprint", lambda *a, **k: "fp-1")
+    assert service.precisa_reconciliar() is True, "nunca rodou"
+    _registro(service, fingerprint="fp-1")
+    assert service.precisa_reconciliar() is False, "fonte igual, marketplace no prazo, última ok"
+    _registro(service, fingerprint="fp-0")
+    assert service.precisa_reconciliar() is True, "fonte mudou"
+    _registro(service, fingerprint="fp-1", proxima_em=-1)
+    assert service.precisa_reconciliar() is True, "marketplace venceu"
+    _registro(service, fingerprint="fp-1", estado="parcial", ha_segundos=10)
+    assert service.precisa_reconciliar() is False, "falha recente espera a retentativa"
+    _registro(service, fingerprint="fp-1", estado="parcial", ha_segundos=301)
+    assert service.precisa_reconciliar() is True
+    _registro(service, fingerprint="fp-1", estado="ocioso")
+    assert service.precisa_reconciliar() is True, "rodada interrompida retoma"
+
+
+async def test_gatilho_de_sessao_respeita_interruptor_e_cache(rc, tmp_path, monkeypatch):
+    home = _home(tmp_path)
+    service = IntegracaoCodex(home, home / ".codex")
     chamadas = []
 
     async def iniciar(motivo, forcar):
-        chamadas.append(motivo)
-
-    dormidas = []
-
-    async def dormir(s):
-        dormidas.append(s)
-        if len(dormidas) == 2:
-            rc.aplicar({"codex_sync": True})
-        if len(dormidas) >= 4:
-            raise asyncio.CancelledError
+        chamadas.append((motivo, forcar))
+        return {"estado": "executando"}
 
     monkeypatch.setattr(service, "iniciar", iniciar)
-    monkeypatch.setattr(service, "fingerprint", lambda *a, **k: "fp")
-    monkeypatch.setattr(codex_integracao.asyncio, "sleep", dormir)
-    with pytest.raises(asyncio.CancelledError):
-        await service.acompanhar()
-    assert chamadas == ["automatico"]
+    monkeypatch.setattr(service, "fingerprint", lambda *a, **k: "fp-1")
+    rc.aplicar({"codex_sync": False})
+    await service.sessao()
+    assert chamadas == [], "interruptor desligado"
+    rc.aplicar({"codex_sync": True})
+    _registro(service, fingerprint="fp-1")
+    await service.sessao()
+    assert chamadas == [], "nada mudou: não chama o Codex"
+    _registro(service, fingerprint="fp-0")
+    assert (await service.sessao())["estado"] == "executando"
+    assert chamadas == [("sessao", False)]
 
 
-async def test_lancador_desiste_no_prazo_e_avisa(monkeypatch, tmp_path, rc):
-    service = IntegracaoCodex(tmp_path, tmp_path / ".codex")
-    monkeypatch.setattr(codex_integracao, "SERVICO", service)
-
-    async def demorada(motivo, forcar):
-        await asyncio.Event().wait()
-
-    monkeypatch.setattr(service, "reconciliar", demorada)
-    estado = await codex_integracao.antes_da_sessao(prazo=0.05)
-    assert any("abre sem ela" in a for a in estado["avisos"])
-    assert not service._task.done(), "a reconciliação continua; só a TUI parou de esperar"
-    await service.fechar()
+async def test_rodada_grava_assinatura_da_fonte(tmp_path, monkeypatch):
+    home = _home(tmp_path)
+    service = IntegracaoCodex(home, home / ".codex", nativo=object)
+    (home / ".claude/settings.json").write_text('{"enabledPlugins": []}')  # inválido: rodada em erro
+    await service.reconciliar()
+    registro = json.loads((service.raiz / "estado.json").read_text())
+    assert registro["fingerprint"] == service.fingerprint()
+    assert registro["status"]["estado"] == "erro"

@@ -23,9 +23,46 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 _REPO = Path(__file__).resolve().parent.parent
+# Quanto a abertura espera o backend reconciliar; estourou, a sessão abre e ele termina sozinho.
+_PRAZO_INTEGRACAO = 20.0
+
+
+def _api_backend(method: str, path: str) -> dict:
+    env: dict[str, str] = {}
+    try:
+        for line in (_REPO / "backend" / ".env").read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                env[key.strip()] = value.strip()
+    except OSError:
+        pass
+    token = os.environ.get("CP_AUTH_TOKEN") or env.get("CP_AUTH_TOKEN")
+    port = os.environ.get("CP_PORT") or env.get("CP_PORT") or "8765"
+    if not token:
+        raise RuntimeError("CP_AUTH_TOKEN ausente")
+    req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", method=method,
+                                 headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=5) as response:
+        return json.load(response)
+
+
+def _integracao_codex(prazo: float = _PRAZO_INTEGRACAO) -> dict:
+    """Pede a reconciliação ao backend e espera até `prazo` por ela terminar."""
+    resultado = _api_backend("POST", "/api/harness/codex/integracao/sessao")
+    limite = time.monotonic() + prazo
+    while resultado.get("estado") == "executando" and time.monotonic() < limite:
+        time.sleep(0.5)
+        resultado = _api_backend("GET", "/api/harness/codex/integracao")
+    if resultado.get("estado") == "executando":
+        resultado = {**resultado, "avisos": [*resultado.get("avisos", []),
+                     f"reconciliação ainda em andamento após {prazo:.0f}s; a sessão abre sem ela"]}
+    return resultado
 # Quanto esperamos a TUI abrir a thread. Estourar NAO e fatal: o pane segue sendo um Codex
 # utilizavel; o que se perde e o vinculo com o app ate a proxima abertura.
 _ESPERA_THREAD = 60.0
@@ -173,12 +210,11 @@ def main() -> int:
     from app.adapters.codex import sessions as codex_sessions
     from app.adapters.codex.lancador import APPROVAL, SANDBOX
 
-    # A sessão lê a configuração já reconciliada; falhas na integração não impedem a TUI.
+    # A sessão lê a configuração já reconciliada; quem reconcilia é o BACKEND (um executor só, e
+    # uma instalação longa termina lá) — aqui só se avisa e se espera um pouco. Falha não impede a TUI.
     try:
-        from app.codex_integracao import SERVICO, antes_da_sessao
-        anterior = SERVICO.status()
-        resultado = asyncio.run(antes_da_sessao())
-        if any(resultado.get(k) != anterior.get(k) for k in ("estado", "plugins", "confianca_pendente")):
+        resultado = _integracao_codex()
+        if resultado.get("estado") not in (None, "ocioso", "ok") or resultado.get("erros"):
             print(f"hangar-codex-tui: integração Codex: {resultado['estado']} — {resultado.get('etapa', '')}",
                   file=sys.stderr)
         for aviso in [*resultado.get("avisos", []), *resultado.get("erros", [])]:

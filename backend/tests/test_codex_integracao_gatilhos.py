@@ -1,4 +1,4 @@
-"""Gatilhos usam o reconciliador e encerram seu trabalho sem tocar no perfil real."""
+"""Gatilhos: o lançador só avisa o backend e espera um pouco; o lifespan não reconcilia sozinho."""
 import asyncio
 import importlib.util
 import sys
@@ -12,17 +12,22 @@ import pytest
 from app import api, codex_integracao
 
 
-@pytest.mark.parametrize("falha", [False, True])
-def test_lancador_reconcilia_antes_de_abrir_servidor_e_tolera_falha(tmp_path, monkeypatch, capsys, falha):
+def _lancador():
     caminho = Path(__file__).resolve().parents[2] / "scripts" / "hangar-codex-tui"
     loader = SourceFileLoader("lancador_codex_teste", str(caminho))
     spec = importlib.util.spec_from_loader(loader.name, loader)
-    lancador = importlib.util.module_from_spec(spec)
-    loader.exec_module(lancador)
+    modulo = importlib.util.module_from_spec(spec)
+    loader.exec_module(modulo)
+    return caminho, modulo
+
+
+@pytest.mark.parametrize("falha", [False, True])
+def test_lancador_avisa_o_backend_antes_de_abrir_servidor_e_tolera_falha(tmp_path, monkeypatch, capsys, falha):
+    caminho, lancador = _lancador()
     ordem = []
 
-    async def reconciliar():
-        ordem.append("integracao")
+    def api_backend(method, path):
+        ordem.append((method, path))
         if falha:
             raise RuntimeError("Falha simulada")
         return {"estado": "parcial", "etapa": "Concluída", "avisos": ["Aviso simulado"],
@@ -35,15 +40,14 @@ def test_lancador_reconcilia_antes_de_abrir_servidor_e_tolera_falha(tmp_path, mo
         ordem.append("servidor")
         raise AntesDoServidor
 
-    monkeypatch.setattr(codex_integracao, "SERVICO", SimpleNamespace(status=lambda: {"estado": "ocioso"}))
-    monkeypatch.setattr(codex_integracao, "antes_da_sessao", reconciliar)
+    monkeypatch.setattr(lancador, "_api_backend", api_backend)
     monkeypatch.setattr(lancador, "_com_websockets", lambda: None)
     monkeypatch.setattr(lancador, "_porta_livre", porta)
     monkeypatch.setattr(sys, "argv", [str(caminho), "--name", "teste", "--cwd", str(tmp_path)])
     monkeypatch.setattr(sys, "path", sys.path.copy())
     with pytest.raises(AntesDoServidor):
         lancador.main()
-    assert ordem == ["integracao", "servidor"]
+    assert ordem == [("POST", "/api/harness/codex/integracao/sessao"), "servidor"]
     texto = capsys.readouterr().err
     if falha:
         assert "a sessão abre assim mesmo" in texto
@@ -52,15 +56,23 @@ def test_lancador_reconcilia_antes_de_abrir_servidor_e_tolera_falha(tmp_path, mo
         assert "confirmação de confiança" in texto
 
 
-async def test_lifespan_inicia_acompanhamento_e_aguarda_encerramento(tmp_path, monkeypatch):
-    ordem = []
+def test_lancador_desiste_no_prazo_e_a_reconciliacao_segue_no_backend(monkeypatch):
+    _, lancador = _lancador()
+    chamadas = []
 
-    async def acompanhar():
-        ordem.append("inicio")
-        try:
-            await asyncio.Event().wait()
-        finally:
-            ordem.append("cancelado")
+    def api_backend(method, path):
+        chamadas.append(method)
+        return {"estado": "executando", "etapa": "Instalando", "avisos": [], "erros": []}
+
+    monkeypatch.setattr(lancador, "_api_backend", api_backend)
+    monkeypatch.setattr(lancador.time, "sleep", lambda s: None)
+    resultado = lancador._integracao_codex(prazo=0.01)
+    assert chamadas[0] == "POST" and "GET" in chamadas
+    assert any("abre sem ela" in a for a in resultado["avisos"])
+
+
+async def test_lifespan_nao_reconcilia_sozinho_e_fecha_a_integracao(tmp_path, monkeypatch):
+    ordem = []
 
     async def fechar():
         ordem.append("fechado")
@@ -68,7 +80,8 @@ async def test_lifespan_inicia_acompanhamento_e_aguarda_encerramento(tmp_path, m
     async def nada(*args):
         pass
 
-    monkeypatch.setattr(codex_integracao, "SERVICO", SimpleNamespace(acompanhar=acompanhar, fechar=fechar))
+    servico = SimpleNamespace(fechar=fechar, iniciar=Mock(side_effect=AssertionError("não devia iniciar")))
+    monkeypatch.setattr(codex_integracao, "SERVICO", servico)
     monkeypatch.setattr(api, "list_config_dirs", lambda: [])
     monkeypatch.setattr(api, "_backend_config_base", lambda: tmp_path)
     monkeypatch.setattr(api.registry, "list", lambda: [])
@@ -82,6 +95,6 @@ async def test_lifespan_inicia_acompanhamento_e_aguarda_encerramento(tmp_path, m
     monkeypatch.setattr(api.INBOX, "ligar_loop", lambda loop: None)
     monkeypatch.setattr(api, "_loop_servidor", None)
     async with api._lifespan(api.app):
-        await asyncio.sleep(0)
-        assert ordem == ["inicio"]
-    assert ordem == ["inicio", "cancelado", "fechado"]
+        await asyncio.sleep(0.05)
+        assert ordem == []
+    assert ordem == ["fechado"]

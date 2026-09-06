@@ -32,8 +32,8 @@ _IMPORTAVEIS = {"CONFIG", "HOOKS", "MCP_SERVER_CONFIG", "COMMANDS", "SUBAGENTS"}
 _ID = re.compile(r"^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+$")
 # Espelho que o instalador antigo (install-skills-bridge.sh) deixava do hooks.json que ELE escreveu.
 _ESPELHO_ANTIGO = ".hangar-hooks.json"
-# Prazo da reconciliação feita pelo lançador da TUI: estourou, a sessão abre sem ela.
-_PRAZO_SESSAO = 20.0
+# Rodada parcial/erro só é refeita depois disto (a abertura seguinte de sessão a dispara).
+_RETENTATIVA = 300
 
 
 def sincronizacao_ligada() -> bool:
@@ -134,9 +134,7 @@ class IntegracaoCodex:
         self.nativo, self.binario = nativo, binario
         self._task: asyncio.Task | None = None
         self._estado: dict | None = None
-        self._ultimo_fingerprint: str | None = None
         self._plugins_confirmados: set[str] = set()
-        self._retentar_em = 0.0
 
     @property
     def home(self) -> Path:
@@ -271,6 +269,11 @@ class IntegracaoCodex:
                 if self._estado["estado"] != "ocioso":
                     self._estado["etapa"] = "Concluído" if self._estado["estado"] == "ok" else "Confira os itens pendentes"
                 registro["status"] = self.status()
+                # Fonte que mudou no meio da rodada não vira assinatura: a próxima abertura relê.
+                try:
+                    registro["fingerprint"] = (self.fingerprint() if fonte_inicial == self.fingerprint(fontes=True) else None)
+                except OSError:
+                    registro["fingerprint"] = None
                 try:
                     path = self.raiz / "estado.json"
                     gravar(path, json_bytes(registro), ler(path))
@@ -278,12 +281,6 @@ class IntegracaoCodex:
                     _log.exception("Não foi possível persistir o estado da integração")
             if adquirido:
                 await lock.__aexit__(None, None, None)
-            # Mudanças na fonte durante uma rodada precisam de outra leitura no próximo poll.
-            try:
-                self._ultimo_fingerprint = (self.fingerprint() if fonte_inicial == self.fingerprint(fontes=True) else None)
-            except OSError:
-                self._ultimo_fingerprint = None
-            self._retentar_em = time.time() + 300 if self._estado["estado"] in ("parcial", "erro", "ocioso") else 0
         return self.status()
 
     def _instrucoes(self) -> None:
@@ -730,44 +727,33 @@ class IntegracaoCodex:
                 h.update(f"{path}:ausente".encode())
         return h.hexdigest()
 
-    async def acompanhar(self) -> None:
-        if os.environ.get("CP_CODEX_SYNC_ENABLED", "1").lower() in ("0", "false", "no"):
-            return
-        while True:
-            try:
-                if not sincronizacao_ligada():
-                    await asyncio.sleep(30)
-                    continue
-                fp = await asyncio.to_thread(self.fingerprint)
-                proxima = self.status().get("proxima_atualizacao")
-                venceu = bool(proxima and datetime.fromisoformat(proxima).timestamp() <= time.time())
-                retentar = self._retentar_em and time.time() >= self._retentar_em
-                if fp != self._ultimo_fingerprint or venceu or retentar:
-                    await asyncio.sleep(2)
-                    await self.iniciar("automatico", False)
-                    if self._task:
-                        await asyncio.shield(self._task)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                _log.exception("Falha ao acompanhar a integração Codex")
-            await asyncio.sleep(30)
+    def precisa_reconciliar(self) -> bool:
+        """Cache por conteúdo: fonte igual à da última rodada, marketplace dentro do prazo e sem
+        falha a retentar = não há o que fazer, e abrir sessão não chama o Codex."""
+        if self._task and not self._task.done():
+            return False
+        try:
+            registro = json_obj(self.raiz / "estado.json")
+        except (OSError, ValueError):
+            return True
+        if registro.get("fingerprint") != self.fingerprint():
+            return True
+        status = registro.get("status", {})
+        proxima = status.get("proxima_atualizacao")
+        if proxima and datetime.fromisoformat(proxima).timestamp() <= time.time():
+            return True
+        ultima = status.get("ultima_execucao")
+        if not ultima or status.get("estado") == "ocioso":
+            return True  # nunca rodou, ou foi interrompida no meio
+        if status.get("estado") in ("parcial", "erro"):
+            return datetime.fromisoformat(ultima).timestamp() + _RETENTATIVA <= time.time()
+        return False
+
+    async def sessao(self) -> dict:
+        """Gatilho da abertura de uma sessão Codex: dispara e devolve na hora; quem espera é o lançador."""
+        if not sincronizacao_ligada() or not await asyncio.to_thread(self.precisa_reconciliar):
+            return self.status()
+        return await self.iniciar("sessao", False)
 
 
 SERVICO = IntegracaoCodex()
-
-
-async def antes_da_sessao(prazo: float = _PRAZO_SESSAO) -> dict:
-    if not sincronizacao_ligada():
-        return SERVICO.status()
-    await SERVICO.iniciar("sessao", False)
-    if SERVICO._task:
-        try:
-            await asyncio.wait_for(asyncio.shield(SERVICO._task), prazo)
-        except asyncio.TimeoutError:
-            # O lock pode estar com o backend no meio de instalar plugins; a TUI não espera por isso.
-            estado = SERVICO.status()
-            estado["avisos"] = [*estado.get("avisos", []),
-                                f"Reconciliação ainda em andamento após {prazo:.0f}s; a sessão abre sem ela."]
-            return estado
-    return SERVICO.status()

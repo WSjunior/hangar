@@ -27,6 +27,12 @@ async def integracao_codex_reconciliar() -> dict:
     return _com_interruptor(await codex_integracao.SERVICO.iniciar(motivo="manual", forcar=True))
 
 
+@harness_router.post("/codex/integracao/sessao", status_code=202, dependencies=[Depends(require_auth)])
+async def integracao_codex_sessao() -> dict:
+    """Gatilho do lançador da TUI: só reconcilia se a fonte mudou; devolve na hora e o lançador consulta."""
+    return _com_interruptor(await codex_integracao.SERVICO.sessao())
+
+
 @harness_router.get("", dependencies=[Depends(require_auth)])
 async def listar() -> list[dict]:
     # `--version` de cinco CLIs em série: fora do loop do servidor, que segue servindo o SSE.

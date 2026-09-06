@@ -23,7 +23,8 @@ def painel(monkeypatch):
         "proxima_atualizacao": None, "plugins": [], "erros": [], "avisos": [],
         "confianca_pendente": False,
     }
-    servico = SimpleNamespace(status=Mock(return_value=snapshot), iniciar=AsyncMock(return_value=snapshot))
+    servico = SimpleNamespace(status=Mock(return_value=snapshot), iniciar=AsyncMock(return_value=snapshot),
+                              sessao=AsyncMock(return_value=snapshot))
     monkeypatch.setattr(codex_integracao, "SERVICO", servico)
     monkeypatch.setattr(settings, "auth_token", TOKEN)
     reset_backoff()
@@ -50,6 +51,17 @@ def test_consulta_nao_inicia_operacao(painel):
     assert isinstance(dados.pop("automatica"), bool)
     assert dados == snapshot
     servico.status.assert_called_once_with()
+    servico.iniciar.assert_not_called()
+
+
+def test_gatilho_de_sessao_e_operacao_propria(painel):
+    cliente, servico, snapshot = painel
+    resposta = cliente.post(ROTA + "/sessao", headers=AUTH)
+    assert resposta.status_code == 202
+    dados = resposta.json()
+    assert isinstance(dados.pop("automatica"), bool)
+    assert dados == snapshot
+    servico.sessao.assert_awaited_once_with()
     servico.iniciar.assert_not_called()
 
 

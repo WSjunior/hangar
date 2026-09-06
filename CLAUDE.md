@@ -435,11 +435,15 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   `codex_compat.py`, `codex_arquivos.py`, 06/09/2026): o Hangar usa o importador oficial
   `externalAgentConfig/detect` + `import` e espera a notificação `import/completed` com o mesmo
   `importId`. Plugins e marketplaces usam os comandos nativos do CLI; nenhum turno de agente é
-  aberto para sincronizar. O backend acompanha alterações e atualiza marketplaces Git gerenciados
-  a cada 6h, com falhas persistidas e novas tentativas após 5 minutos; a abertura da TUI
-  e o botão **Reconciliar agora** usam o mesmo reconciliador. CLI é
-  executor, backend é agendador; a sincronização opcional do Codex Desktop é independente e não
-  é necessária. A documentação de arquitetura, migração e limites está em
+  aberto para sincronizar. Dois gatilhos, e só: a abertura de uma sessão Codex (o lançador chama
+  `POST /api/harness/codex/integracao/sessao` e espera até 20s) e o botão **Reconciliar agora**.
+  Sem laço e sem rodada na subida — decisão do usuário em 06/09/2026, no lugar da varredura das
+  pastas do Claude a cada 30s que veio no PR: **Codex converte, backend decide quando, lançador só
+  avisa.** A abertura é um cache por conteúdo (`precisa_reconciliar`): a assinatura das pastas do
+  Claude fica no `estado.json`; igual à última, marketplace dentro das 6h e última rodada sem
+  falha = o Codex nem é chamado (medido: 0,08s contra 1,0–1,3s da rodada vazia do PR). Falha só é
+  refeita 5 min depois, na abertura seguinte. A sincronização opcional do Codex Desktop é
+  independente e não é necessária. A documentação de arquitetura, migração e limites está em
   [`docs/codex-integration.md`](docs/codex-integration.md).
   O registro e os backups ficam em `~/.hangar/codex-integracao/<identidade>/`, separados por
   `CODEX_HOME`; o lock em `CODEX_HOME/.hangar-integracao.lock` serializa os escritores do Hangar
@@ -489,13 +493,14 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   - **`AGENTS.md` como link pro `CLAUDE.md` vira arquivo com o bloco** — decisão do usuário: o
     Codex lê o `CLAUDE.md` pela instrução, e o `CLAUDE.md` nunca fica cristalizado numa cópia.
     Custo: as instruções globais deixam de estar no contexto desde o primeiro token.
-  - **Gatilhos nascem ligados, mas com interruptor na tela e sob o kill-switch**
+  - **O gatilho de sessão nasce ligado, com interruptor na tela e sob o kill-switch**
     (`sincronizacao_ligada`): `codex_sync` no `runtime-config` (card do Codex em Harnesses) +
     `automations_enabled()` + `CP_CODEX_SYNC_ENABLED` (desligamento duro, o da suíte). O botão
     "Reconciliar agora" não passa por nenhum dos três.
-  - **O lançador da TUI espera a reconciliação por 20s e abre sem ela** (`antes_da_sessao`): o
-    lock é do sistema operacional e a espera era sem prazo — com o backend instalando plugins
-    (120s por chamada; a primeira rodada aqui levou 65–103s) o pane ficava minutos parado.
+  - **Quem reconcilia é o backend; o lançador da TUI pede, espera até 20s e abre** (o PR fazia o
+    lançador reconciliar sozinho, esperando o lock sem prazo — com uma instalação de plugins de
+    65–103s o pane ficava minutos parado, e um teto que cancelasse a rodada nunca a deixaria
+    terminar). Um executor só, e a instalação longa termina no backend.
   - `settings.env` vai inteiro pro `shell_environment_policy.set` — as 16 variáveis desta
     máquina, 6 delas tokens (Grafana, Jira, Jenkins, Outline, ElevenLabs), também no
     `estado.json` do manifesto (0600). É o comportamento do importador nativo; o que o Hangar
