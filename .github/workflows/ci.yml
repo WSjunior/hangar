@@ -30,9 +30,13 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/omp"
           cd "$RUNNER_TEMP/omp"
-          curl --fail --location --output omp-linux-x64 \
+          # Com retry: em 07/09/2026 o CDN do GitHub devolveu 504 no SHA256SUMS.txt (92 bytes),
+          # `curl --fail` saiu 22 e a suíte inteira do backend nem chegou a rodar — enquanto o
+          # binário de 190 MB, logo acima, tinha baixado em 2s. `--retry-all-errors` porque o
+          # `--retry` sozinho ignora conexão cortada, que é o outro jeito de o mesmo CDN falhar.
+          curl --fail --location --retry 3 --retry-all-errors --retry-delay 2 --output omp-linux-x64 \
             https://github.com/can1357/oh-my-pi/releases/download/v18.1.11/omp-linux-x64
-          curl --fail --location --output SHA256SUMS.txt \
+          curl --fail --location --retry 3 --retry-all-errors --retry-delay 2 --output SHA256SUMS.txt \
             https://github.com/can1357/oh-my-pi/releases/download/v18.1.11/SHA256SUMS.txt
           sha256sum --check --ignore-missing SHA256SUMS.txt
           sudo install -m 755 omp-linux-x64 /usr/local/bin/omp
