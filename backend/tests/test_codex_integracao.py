@@ -158,7 +158,7 @@ async def test_adota_importacao_nativa_anterior_remove_gerenciados_preserva_coli
     data = tomllib.loads(cfg.read_text())['mcp_servers']
     assert data['adotado']['args'] == ['depois']
     assert data['colisao']['args'] == ['particular']
-    assert any('colisao' in a for a in result['avisos'])
+    assert any(a['params'].get('nome') == 'colisao' for a in result['avisos'])
     source.write_text('{"mcpServers": {}}')
     result = await service.reconciliar()
     assert result['estado'] == 'ok', result
@@ -217,7 +217,7 @@ async def test_fonte_alterada_durante_importacao_e_relida(tmp_path):
     assert result['estado'] == 'ok', result
     assert mudou
     assert tomllib.loads((home / '.codex/config.toml').read_text())['mcp_servers']['teste']['args'] == ['novo']
-    assert service._ultimo_fingerprint is None
+    assert json.loads((service.raiz / 'estado.json').read_text())['fingerprint'] is None
 
 
 async def test_falha_marketplace_permanece_visivel_ate_nova_tentativa(tmp_path, monkeypatch):

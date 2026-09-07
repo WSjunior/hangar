@@ -47,7 +47,7 @@ async def test_env_importa_atualiza_remove_e_preserva_politica_e_exclusivos(tmp_
     assert policy["inherit"] == "all"
     assert policy["exclude"] == ["OUTRO_*"]
     assert policy["set"] == {"EXCLUSIVA": "pessoal", "COLISAO": "codex", "PM_PLUGIN_KEY": "ficticia-v1"}
-    assert any("COLISAO" in aviso for aviso in result["avisos"])
+    assert any(aviso["params"].get("nome") == "COLISAO" for aviso in result["avisos"])
     assert "ficticia-v1" not in json.dumps(result)
     before = cfg.read_bytes(), cfg.stat().st_mtime_ns
     assert (await service.reconciliar())["estado"] == "ok"

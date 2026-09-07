@@ -252,6 +252,8 @@ class Settings(BaseSettings):
     # Reconciliacao automatica do Codex (codex_integracao.acompanhar + abertura de TUI). Portao
     # PROPRIO por cima do `automations`, editavel pela tela (card do Codex em Harnesses).
     codex_sync: bool = True
+    # A preferência salva também é lida pelos instaladores, sem depender do backend em execução.
+    claude_statusline_update: bool = True
     # Chave da Groq pra transcricao de audio (whisper-large-v3-turbo). Aceita CP_GROQ_API_KEY (padrao
     # do .env, com prefixo) OU GROQ_API_KEY (convencao do Groq/OpenAI SDK, ex: no Environment do systemd).
     # Vazio = transcricao desligada (o endpoint /transcribe responde 503). Ver docs/USAGE.md.

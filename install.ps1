@@ -1104,55 +1104,13 @@ if (-not (Test-Path $setupTmux)) {
 # O instalador do Linux ja fazia; o do Windows tinha ficado sem.
 Titulo '5c/8 Statusline do Claude Code'
 $slJs = "$raiz\scripts\omniroute-statusline.js"
-$settingsClaude = Join-Path $HOME '.claude\settings.json'
 if (-not (Test-Path $slJs)) {
     Falta 'omniroute-statusline.js nao encontrado - pulando'
 } elseif (-not (Tem 'node')) {
     Falta 'node nao encontrado - a statusline precisa dele'
 } else {
-    $nodeExe = (Get-Command node).Source
-    $cmdSl = "`"$nodeExe`" `"$slJs`""
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $settingsClaude) | Out-Null
-    # NADA de `ConvertFrom-Json -AsHashtable`: esse parametro so existe no PowerShell 6+, e no
-    # 5.1 que vem no Windows a chamada levanta - o catch abaixo transformava isso em "settings
-    # ilegivel" e o passo se pulava sozinho, num arquivo que estava perfeitamente legivel.
-    # PSCustomObject entao, com Add-Member -Force pra sobrescrever a chave.
-    $cfg = $null
-    if (Test-Path $settingsClaude) {
-        try {
-            # Ler-Texto e nao `Get-Content -Raw`: sem BOM o Get-Content assume ANSI no 5.1 e
-            # UTF-8 no 7, e como este bloco REESCREVE o arquivo inteiro, o chute errado corrompia
-            # todo acento que ja estava la (mesma historia do token no Set-EnvKey).
-            $bruto = Ler-Texto $settingsClaude
-            if ($bruto.Trim()) { $cfg = $bruto | ConvertFrom-Json }
-        } catch {
-            Falta 'settings.json do Claude ilegivel - nao vou reescrever por cima'
-            $cfg = 'ERRO'
-        }
-    }
-    if ($null -eq $cfg) { $cfg = New-Object psobject }
-    if ($cfg -ne 'ERRO') {
-        $atual = $null
-        if ($cfg.PSObject.Properties.Name -contains 'statusLine') { $atual = $cfg.statusLine.command }
-        if ($atual -eq $cmdSl) {
-            Ok 'statusline ja configurada'
-        } else {
-            if ($atual) { Copy-Item $settingsClaude "$settingsClaude.bak" -Force }
-            $valor = New-Object psobject -Property @{ type = 'command'; command = $cmdSl }
-            $cfg | Add-Member -NotePropertyName 'statusLine' -NotePropertyValue $valor -Force
-            # SEM BOM, e isto nao e preferencia: `Set-Content -Encoding UTF8` poe BOM no 5.1 e
-            # nao poe no 7 (medido), e quem le este arquivo e o Claude Code, em Node — medido
-            # aqui que `JSON.parse` de um arquivo com BOM levanta
-            # "Unexpected token, is not valid JSON". Ou seja, instalar pelo 5.1 podia deixar o
-            # settings.json do Claude ilegivel pra ele.
-            Escrever-Texto $settingsClaude ($cfg | ConvertTo-Json -Depth 20)
-            Ok 'statusline configurada no ~/.claude/settings.json'
-            Nota 'Vale nas sessoes NOVAS do Claude Code.'
-            # Mesmo aviso do Linux: o caminho do node fica CRAVADO no settings. Trocar de versao
-            # de node quebra a statusline em silencio - o app volta a dizer "medicao indisponivel".
-            Nota 'Se voce trocar a versao do node, rode este instalador de novo.'
-        }
-    }
+    & node (Join-Path $raiz 'scripts\configure-statusline.cjs')
+    if ($LASTEXITCODE -ne 0) { Falta 'Não foi possível configurar a barra de status do Claude Code' }
 }
 
 # -- 5d/8 Publicar o backend no Tailscale -------------------------------------

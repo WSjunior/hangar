@@ -233,6 +233,17 @@ Cada PC roda backend+vite+`tailscale serve` com o **mesmo** `CP_AUTH_TOKEN`. O a
 servidores** e troca entre eles (switcher) — útil pra dirigir o Claude de máquinas diferentes do
 mesmo celular.
 
+### Opções do Claude Code
+
+Em **Configurações → Harnesses → Claude Code → Opções**, a preferência **Atualizar barra de
+status** permite ao instalador do Hangar configurar a barra do Claude Code. Ela vem ligada por
+padrão. Para manter uma barra personalizada, desligue a opção e clique em **Salvar**.
+
+A escolha fica no servidor selecionado e vale nas instalações e atualizações seguintes, em
+Linux e Windows, mesmo com o backend parado. Salvar a preferência não troca nem restaura a barra
+atual; desligá-la preserva o comando que já está configurado. No desktop, as opções abrem em
+modal; no celular, em uma folha.
+
 ### Desktop (≥820px)
 Abrindo a mesma URL num monitor largo, vira **shell de duas colunas**: sidebar de sessões +
 chat largo. O fluxo mobile fica intacto abaixo de 820px.

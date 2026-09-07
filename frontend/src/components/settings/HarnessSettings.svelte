@@ -13,6 +13,7 @@
   import { getLocale } from '../../paraglide/runtime';
   import ProvedorIcone from '../icons/ProvedorIcone.svelte';
   import type { Server } from '../../lib/auth';
+  import HarnessOpcoes from './HarnessOpcoes.svelte';
 
   interface Props { apiTarget: Server | null }
   let { apiTarget }: Props = $props();
@@ -22,6 +23,7 @@
   let erro = $state('');
   let consertando = $state<string | null>(null);
   let feito = $state('');
+  let opcoesClaude = $state<string | null>(null);
   let integracao = $state<IntegracaoCodex | null>(null);
   let erroIntegracao = $state('');
   let reconciliando = $state(false);
@@ -143,7 +145,7 @@
   $effect(() => {
     const ctx: ConsultaIntegracao = { alvo: apiTarget, controle: new AbortController(), requisicao: 0 };
     consulta = ctx;
-    lista = []; feito = ''; consertando = null;
+    lista = []; feito = ''; consertando = null; opcoesClaude = null;
     integracao = null; erroIntegracao = ''; reconciliando = false;
     void carregar();
     void consultarIntegracao(ctx);
@@ -234,6 +236,10 @@
           iniciais={h.id === 'omp' ? 'ω' : h.id === 'pi' ? 'π' : h.id === 'tmux' ? '⌗' : h.nome.slice(0, 2).toUpperCase()} size={22} />
         <span class="hs-nome">{h.nome}</span>
         <span class="hs-versao">{h.instalado ? (h.versao || m.harness_instalado()) : m.harness_nao_instalado()}</span>
+        {#if h.id === 'claude'}
+          <button type="button" class="hs-btn hs-opcoes" aria-label={m.sessao_aria_opcoes({ n: h.nome })}
+            onclick={() => { opcoesClaude = h.nome; }}>{m.sessao_opcoes()}</button>
+        {/if}
       </div>
       {#each h.itens as i (i.id)}
         <div class="hs-item">
@@ -301,6 +307,10 @@
   {#if erro}<p class="hs-aviso erro" role="alert">{erro}</p>{/if}
 </div>
 
+{#if opcoesClaude}
+  <HarnessOpcoes {apiTarget} nome={opcoesClaude} onClose={() => { opcoesClaude = null; }} />
+{/if}
+
 <style>
   .hs { container-type: inline-size; padding: var(--space-2) var(--space-3) var(--space-5); }
   .hs-cab { display: flex; align-items: center; gap: var(--space-2); margin: 0 0 var(--space-1); }
@@ -330,6 +340,11 @@
   .hs-btn { flex-shrink: 0; min-height: 0; height: 26px; padding: 0 var(--space-2);
             font-size: var(--text-xs); border-radius: var(--radius-sm);
             background: var(--surface-raised); border: 1px solid var(--border-subtle); color: var(--text-primary); }
+  .hs-opcoes { min-height: 36px; }
+  @container (max-width: 400px) {
+    .hs-topo { flex-wrap: wrap; }
+    .hs-opcoes { min-height: 44px; }
+  }
   .hs-aviso { margin: var(--space-2) 0 0; font-size: var(--text-xs); color: var(--text-secondary); }
   .hs-aviso.erro { color: var(--error); }
   .hs-integracao { border-top: 1px solid var(--border-subtle); margin-top: var(--space-2); padding-top: var(--space-1); }

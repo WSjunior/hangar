@@ -6,7 +6,7 @@
 # it inside a tmux session named after the folder (the app only lists tmux sessions). See
 # scripts/shell/claude.fish + claude.posix.sh, and their pi.fish / pi.posix.sh twins.
 #
-# It also (opt-in) sets the claude-pocket statusline as your Claude Code statusLine, so the app can
+# Unless disabled in Harnesses → Claude Code → Options, it sets the Hangar statusline so the app can
 # parse model / context / cost / rate-limit reliably (the parser expects that format). See
 # scripts/omniroute-statusline.js.
 #
@@ -19,13 +19,12 @@
 #   (no shell arg)   auto-detect from $SHELL
 #   all              install for fish + bash + zsh
 #   --no-tmux        skip the ~/.tmux.conf truecolor + window-rename block
-#   --statusline     set the claude-pocket statusline as your Claude statusLine (no prompt)
+#   --statusline     configure the Hangar statusline, respecting the saved preference (no prompt)
 #   --no-statusline  skip the statusline step
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SHELL_DIR="$SCRIPT_DIR/shell"
-STATUSLINE_JS="$SCRIPT_DIR/omniroute-statusline.js"
 BEGIN_MARK="# >>> hangar >>>"
 END_MARK="# <<< hangar <<<"
 # Marcador que este projeto usava antes do rename. O bloco velho é ARRANCADO antes de o novo
@@ -182,7 +181,7 @@ done
 
 # Point Claude Code's statusLine at scripts/omniroute-statusline.js so the app parses it reliably.
 install_statusline() {
-  local node settings
+  local node
   node="$(command -v node || true)"
   # Resolve symlinks (fnm/nvm shims live in volatile per-shell dirs) -> stable real binary path.
   [ -n "$node" ] && node="$(readlink -f "$node" 2>/dev/null || echo "$node")"
@@ -190,22 +189,7 @@ install_statusline() {
     echo "  node not found in PATH — skipping statusline (install Node 20+ and re-run with --statusline)"
     return
   fi
-  settings="$HOME/.claude/settings.json"
-  mkdir -p "$(dirname "$settings")"
-  [ -f "$settings" ] || echo '{}' >"$settings"
-  cp "$settings" "$settings.bak"
-  SP_NODE="$node" SP_SCRIPT="$STATUSLINE_JS" SP_FILE="$settings" "$node" -e '
-    const fs = require("fs");
-    const p = process.env.SP_FILE;
-    let d = {}; try { d = JSON.parse(fs.readFileSync(p, "utf8")); } catch {}
-    d.statusLine = { type: "command", command: process.env.SP_NODE + " " + process.env.SP_SCRIPT };
-    fs.writeFileSync(p, JSON.stringify(d, null, 2));
-  '
-  echo "  set Claude statusLine -> $node $STATUSLINE_JS (backup: $settings.bak)"
-  case "$node" in
-    *fnm*|*nvm*|*node-versions*)
-      echo "  note: statusLine is pinned to this exact node version path — re-run this installer after upgrading node" ;;
-  esac
+  "$node" "$SCRIPT_DIR/configure-statusline.cjs"
 }
 
 instalados=""

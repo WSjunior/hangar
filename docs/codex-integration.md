@@ -65,6 +65,14 @@ Os plugins habilitados no Claude são a fonte do conjunto gerenciado. Um plugin 
 conjunto só é desabilitado pelo Hangar se já havia sido adotado no registro da integração.
 Plugins exclusivos do Codex ficam fora dessa administração.
 
+Um marketplace pode declarar nomes diferentes para Claude Code e Codex, como
+`thedotmack` e `claude-mem-local`. O reconciliador associa uma instalação nativa pelo nome do
+plugin e pela origem confirmada do marketplace. O registro mantém o identificador da fonte e
+o `id_codex` de destino; instalação, atualização, habilitação e desabilitação usam esse destino.
+O painel mostra a identidade nativa. Homônimos de outra origem e associações ambíguas são
+preservados com erro, sem escolher um plugin arbitrariamente. A ponte continua reconhecendo as
+skills pela origem Claude e só retira duplicatas quando o destino nativo está habilitado.
+
 Hooks, comandos, subagentes e MCPs passam por uma área temporária com apenas as fontes da
 importação. Os caminhos de saída são remapeados para os destinos definitivos. O escritor
 oficial `config/batchWrite` edita uma cópia de `config.toml`; o Hangar valida novamente o

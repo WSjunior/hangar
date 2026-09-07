@@ -128,6 +128,21 @@ def _origem_marketplace(data: dict, *, claude: bool = False) -> tuple[str, str] 
     return None
 
 
+def _identidade_plugin(id_: str, origem: tuple[str, str], mercados: dict, inventario: dict) -> str:
+    """O mesmo repositório pode declarar nomes distintos nos manifestos de cada harness."""
+    nome, mercado = id_.rsplit("@", 1)
+    if mercado in mercados:
+        if _origem_marketplace(mercados[mercado]) != origem:
+            raise ValueError("Marketplace homônimo de outra origem")
+        if id_ in inventario:
+            return id_
+    aliases = [p for p in inventario if p.rsplit("@", 1)[0] == nome and
+               _origem_marketplace(mercados.get(p.rsplit("@", 1)[1], {})) == origem]
+    if len(aliases) > 1:
+        raise ValueError("Mais de uma identidade nativa para o plugin")
+    return aliases[0] if aliases else id_
+
+
 class IntegracaoCodex:
     def __init__(self, home: Path | None = None, codex_home: Path | None = None,
                  *, nativo=CodexNativo, binario: str = "codex"):
@@ -495,13 +510,24 @@ class IntegracaoCodex:
             for tipo in result.get("itemTypeResults", []):
                 if tipo.get("failures"):
                     self._erro(msg("erro_plugins_incompletos"))
+        mercados = _toml(cfg_path).get("marketplaces", {})
+        inventario = {p["pluginId"]: p for p in await codex.plugins_instalados()}
+        identidades = {}
+        for id_ in sorted(candidatos):
+            try:
+                origem = _origem_marketplace(conhecidos[id_.rsplit("@", 1)[1]], claude=True)
+                identidades[id_] = _identidade_plugin(id_, origem, mercados, inventario)
+            except ValueError:
+                bloqueados.add(id_)
+                self._erro(msg("erro_plugin", id=id_))
+        candidatos -= bloqueados
         agora = time.time()
         ultima = max(registro.get("marketplaces_em", 0), registro.get("marketplaces_tentativa_em", 0))
         falhas_anteriores = set(registro.get("marketplaces_pendentes", []))
         atualizar = forcar or agora - ultima >= _INTERVALO or bool(falhas_anteriores and agora - ultima >= 300)
         falhas = set()
         if atualizar:
-            for marketplace in sorted({p.rsplit("@", 1)[1] for p in candidatos}):
+            for marketplace in sorted({identidades[p].rsplit("@", 1)[1] for p in candidatos}):
                 source = _toml(cfg_path).get("marketplaces", {}).get(marketplace, {})
                 if source.get("source_type") != "git":
                     continue
@@ -525,15 +551,17 @@ class IntegracaoCodex:
         plugins = {p: anteriores[p] for p in bloqueados if p in anteriores}
         for id_ in sorted(candidatos):
             try:
+                id_codex = identidades[id_]
                 conhecido = anteriores.get(id_)
-                instalado = inventario.get(id_)
+                instalado = inventario.get(id_codex)
                 if (atualizar or id_ in plugins_pendentes or not conhecido or not instalado or
+                        conhecido.get("id_codex", id_) != id_codex or
                         instalado.get("version") != conhecido.get("versao") or
                         not Path(conhecido.get("path", "")).is_dir()):
                     self._etapa(msg("etapa_plugin", id=id_))
-                    data = await codex.instalar_plugin(id_)
+                    data = await codex.instalar_plugin(id_codex)
                     conhecido = {"path": data["installedPath"], "versao": data.get("version", ""),
-                                 "origem": id_.rsplit("@", 1)[1]}
+                                 "origem": id_codex.rsplit("@", 1)[1], "id_codex": id_codex}
                 plugins[id_] = conhecido
                 # Retém a identidade mesmo se uma etapa posterior falhar ou a fonte mudar.
                 registro.setdefault("plugins", {})[id_] = conhecido
@@ -549,13 +577,15 @@ class IntegracaoCodex:
             raise AlteradoExternamente("Plugins do Claude mudaram durante a integração")
         # Só desabilita identidades anteriormente adotadas, nunca plugins exclusivos do Codex.
         removidos = set(anteriores) - desejados
+        ativos = {d.get("id_codex", p) for p, d in plugins.items()}
         if removidos:
-            await self._habilitar_plugins(codex, {p: False for p in removidos})
-        await self._habilitar_plugins(codex, {p: True for p in plugins if p in candidatos})
+            await self._habilitar_plugins(codex, {anteriores[p].get("id_codex", p): False for p in removidos
+                                                if anteriores[p].get("id_codex", p) not in ativos})
+        await self._habilitar_plugins(codex, {d.get("id_codex", p): True for p, d in plugins.items() if p in candidatos})
         registro["plugins"] = plugins
         registro["plugins_pendentes"] = sorted(plugins_pendentes)
         self._plugins_confirmados = set(plugins) & candidatos
-        self._estado["plugins"] = [{"id": p, "versao": d["versao"], "origem": d["origem"]} for p, d in plugins.items()]
+        self._estado["plugins"] = [{"id": d.get("id_codex", p), "versao": d["versao"], "origem": d["origem"]} for p, d in plugins.items()]
         self._estado["proxima_atualizacao"] = _iso(max(registro.get("marketplaces_em", 0), registro.get("marketplaces_tentativa_em", agora)) + (300 if registro.get("marketplaces_pendentes") else _INTERVALO))
 
     async def _habilitar_plugins(self, codex, escolhas: dict[str, bool]) -> None:
@@ -735,7 +765,7 @@ class IntegracaoCodex:
         manifesto, avisos = reconciliar_skills(
             self.home, self.codex_home,
             {p: d for p, d in registro.get("plugins", {}).items() if p in self._plugins_confirmados and
-             habilitados.get(p, {}).get("enabled") is True},
+             habilitados.get(d.get("id_codex", p), {}).get("enabled") is True},
             registro.get("skills", {}), self.backups, windows=os.name == "nt",
         )
         registro["skills"] = manifesto

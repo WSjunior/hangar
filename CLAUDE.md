@@ -1722,6 +1722,19 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
     autentica pelo cookie `cp_token`, então origem arbitrária seria qualquer site abrindo um
     terminal na máquina.
 
+**Preferência da barra do Claude Code (07/09/2026):** o card de Harnesses abre **Opções**
+(`HarnessOpcoes.svelte`), com rascunho e Salvar no servidor selecionado. `claude_statusline_update`
+vem ligado; desligado, o instalador preserva `statusLine`. Linux e Windows chamam a mesma rotina
+stdlib Node (`scripts/configure-statusline.cjs`), que lê `runtime-config.json` sem backend,
+respeita `CLAUDE_CONFIG_DIR`, faz backup e grava sem BOM. Preferência inválida não vira autorização
+para sobrescrever a barra. Salvar só muda a preferência, não o comando atual.
+
+**Marketplace nativo com outro nome (07/09/2026):** o Claude Mem declara `thedotmack` no manifesto
+Claude e `claude-mem-local` no do Codex. Nome do plugin + origem confirmada identificam o alias;
+`registro.plugins` continua indexado pela fonte Claude, e `id_codex` acompanha o destino real nas
+operações e na checagem de skills habilitadas. Não associar só pelo nome e não esquecer o destino
+ao desabilitar: isso deixaria o plugin antigo executando. Mais de um alias possível é erro.
+
 ## tmux + Claude Code truecolor
 
 Inside tmux, Claude Code caps color depth to 256 and renders theme colors wrong (teal / pink / washed-out)

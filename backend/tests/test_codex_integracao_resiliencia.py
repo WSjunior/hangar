@@ -211,5 +211,8 @@ async def test_fonte_invalida_nao_vira_remocao_no_importador_real(home, monkeypa
     else:
         agent.write_text("---\nname: [invalido\n---\nTexto\n", encoding="utf-8")
     segunda = await service.reconciliar()
-    assert segunda["estado"] in {"erro", "parcial"}, segunda
+    if tipo == "agent":
+        assert any(a["codigo"] == "aviso_ignorados" for a in segunda["avisos"]), segunda
+    else:
+        assert segunda["estado"] in {"erro", "parcial"}, segunda
     assert {path: path.read_bytes() for path in protegidos} == antes
