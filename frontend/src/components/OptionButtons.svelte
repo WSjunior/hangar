@@ -127,7 +127,9 @@
   .q-code {
     font-family: var(--font-mono);
     font-size: 0.85em;
-    background: var(--surface-raised);
+    /* `--surface-inset`, não `--surface-raised`: este é o mesmo token do cartão que agora envolve a
+       pergunta, e o trecho em code sumia dentro dele. */
+    background: var(--surface-inset);
     padding: 2px 6px;
     border-radius: 4px;
     word-break: break-all;

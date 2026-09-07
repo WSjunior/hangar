@@ -717,14 +717,30 @@
   const codexPergunta = $derived(codexEntrada?.question ?? null);
   // O seletor do pane no formato do cartão nativo: uma pergunta, escolha única, opções sem
   // descrição (o pane não tem onde guardar uma).
-  const codexPayload = $derived(codexOpcoes.length ? {
-    questions: [{
-      header: m.chat_sem_thread_codex_header(),
-      question: codexPergunta ?? m.chat_sem_thread_codex(),
-      multiSelect: false,
-      options: codexOpcoes.map((label) => ({ label, description: '' })),
-    }],
-  } : null);
+  // CONGELADO enquanto a sessão não tem thread: a lista repolla a cada 5s, e um poll que volte sem
+  // opções (pane ilegível no instante da captura) desmontaria o cartão — junto com a escolha que a
+  // pessoa marcou e ainda não enviou. O cartão só sai quando a sessão sai deste estado.
+  let codexPayload = $state<AskQuestionPayload | null>(null);
+  $effect(() => {
+    if (!codexPreThread) { codexPayload = null; return; }
+    if (!codexOpcoes.length) return;                     // poll vazio não apaga o que está na tela
+    const opts = codexOpcoes.map((label) => ({ label, description: '' }));
+    const pergunta = codexPergunta ?? m.chat_sem_thread_codex();
+    // Mesma pergunta e mesmas opções: NÃO troca a referência, senão o cartão remonta a cada poll e
+    // perde o passo em que a pessoa está.
+    const atual = codexPayload?.questions[0];
+    if (atual && atual.question === pergunta
+        && atual.options.length === opts.length
+        && atual.options.every((o, i) => o.label === opts[i].label)) return;
+    codexPayload = {
+      questions: [{
+        header: m.chat_sem_thread_codex_header(),
+        question: pergunta,
+        multiSelect: false,
+        options: opts,
+      }],
+    };
+  });
   // O cartão devolve índices; o /select conta a partir de 1, como o picker do terminal.
   async function responderCodex(answers: AnswerItem[]) {
     const a = answers[0];
@@ -2489,9 +2505,8 @@
     padding-top: var(--nav-h, 56px);
   }
 
-  /* Vence o teto de 380px do `.chat-error` (inclusive o da media query lá embaixo, por vir depois
-     e ter a mesma especificidade + a classe extra): aqui o conteúdo é um cartão de escolha, e ele
-     acompanha a largura disponível até o mesmo teto do cartão nativo. */
+  /* Vence o teto de 380px do `.chat-error` por especificidade (duas classes contra uma): aqui o
+     conteúdo é um cartão de escolha, e ele acompanha a largura disponível até o teto do cartão. */
   .chat-error.codex-pre {
     max-width: 640px;
     width: 100%;
@@ -2543,9 +2558,6 @@
     margin: 0 auto;
     padding-left: var(--space-5);
     padding-right: var(--space-5);
-  }
-  .chat-error.codex-pre {
-    max-width: 640px;
   }
   .chat-error-title {
     font-size: var(--text-base);
