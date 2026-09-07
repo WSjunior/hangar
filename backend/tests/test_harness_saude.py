@@ -114,7 +114,7 @@ def test_codex_nao_oferece_a_ponte_antiga_no_painel(tmp_path, monkeypatch):
     monkeypatch.setattr(h, "_versao", lambda cli: "0.153.4" if cli == "codex" else None)
     codex = next(item for item in h.diagnosticar() if item["id"] == "codex")
     assert codex["instalado"] is True
-    assert {item["id"] for item in codex["itens"]} == {"credenciais", "hooks", "mcp", "modelo"}
+    assert {item["id"] for item in codex["itens"]} == {"credenciais", "wrapper", "hooks", "mcp", "modelo"}
     assert all(item["codigo"] != "sem_ponte" and item["conserto"] != "skills" for item in codex["itens"])
 
 
@@ -158,3 +158,36 @@ def test_chave_no_omp_nao_duplica(tmp_path, monkeypatch):
     assert h._omp_gravar_chave("opencode", "k2") == (True, "ja-existe")
     con = sqlite3.connect(db)
     assert con.execute("select count(*) from auth_credentials").fetchone()[0] == 1
+
+
+def test_wrapper_por_shell_que_a_pessoa_tem(tmp_path, monkeypatch):
+    """Um CLI instalado à mão ficava todo verde sem esta linha, e nada que ele abrisse aparecia no app."""
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    (tmp_path / ".config" / "fish" / "functions").mkdir(parents=True)
+    # O caminho é de OUTRO clone de propósito: wrapper apontando pra outro checkout funciona igual,
+    # e chamá-lo de ausente seria mentira.
+    (tmp_path / ".bashrc").write_text('source "/qualquer/clone/scripts/shell/pi.posix.sh"\n')
+
+    item = h._wrapper("pi")
+    assert item["ok"] is False and item["codigo"] == "wrapper_falta"
+    assert item["params"]["lista"] == "fish" and item["conserto"] == "wrapper"
+
+    (tmp_path / ".config" / "fish" / "functions" / "pi.fish").write_text("function pi\nend\n")
+    item = h._wrapper("pi")
+    assert item["ok"] is True and item["params"]["onde"] == "fish, bash"
+
+    # O Codex depende também dos lançadores: é por eles que o BACKEND abre a sessão.
+    (tmp_path / ".config" / "fish" / "functions" / "codex.fish").write_text("function codex\nend\n")
+    (tmp_path / ".bashrc").write_text('source "/qualquer/clone/scripts/shell/codex.posix.sh"\n')
+    # Rotulado: sem isso a frase "falta em: fish, hangar-codex" faz o lançador parecer um shell.
+    assert h._wrapper("codex")["params"]["lista"] == "lançador hangar-codex, lançador hangar-codex-tui"
+    (tmp_path / ".local" / "bin").mkdir(parents=True)
+    for nome in ("hangar-codex", "hangar-codex-tui"):
+        (tmp_path / ".local" / "bin" / nome).write_text("")
+    assert h._wrapper("codex")["ok"] is True
+
+
+def test_wrapper_sem_rc_nenhum_nao_acusa_falta(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    item = h._wrapper("pi")
+    assert item["ok"] is None and item["codigo"] == "wrapper_sem_shell"

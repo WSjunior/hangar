@@ -6,12 +6,14 @@
   // no meio do trabalho.
   import {
     listarHarnesses, consertarHarness, codexIntegracaoEstado, codexIntegracaoReconciliar,
-    type Harness, type ItemHarness, type IntegracaoCodex, type MensagemCodex,
+    instalacaoEstado, instalarHarness,
+    type Harness, type ItemHarness, type IntegracaoCodex, type MensagemCodex, type Instalacao,
   } from '../../lib/credenciais';
   import { patchConfig, patchConfigForServer } from '../../lib/api';
   import * as m from '../../paraglide/messages';
   import { getLocale } from '../../paraglide/runtime';
   import ProvedorIcone from '../icons/ProvedorIcone.svelte';
+  import ConfirmDialog from '../ConfirmDialog.svelte';
   import type { Server } from '../../lib/auth';
 
   interface Props { apiTarget: Server | null }
@@ -31,8 +33,65 @@
     controle: AbortController;
     timer?: ReturnType<typeof setTimeout>;
     requisicao: number;
+    timerInst?: ReturnType<typeof setTimeout>;
+    reqInst: number;
   }
   let consulta: ConsultaIntegracao | null = null;
+
+  // Instalar um CLI que falta. O estado vem do servidor por polling — a instalação vive lá, então
+  // fechar a tela ou recarregar o app no meio dela não perde o progresso nem a saída do comando.
+  let inst = $state<Instalacao | null>(null);
+  let erroInst = $state('');
+  let confirmar = $state<Harness | null>(null);
+  let instalando = $derived(inst?.fase === 'rodando');
+
+  function comandoDe(h: Harness): string | null { return inst?.comandos?.[h.id] ?? null; }
+  // Só http(s): a URL vem do servidor e vira `href`, e um `javascript:` ali executaria no clique.
+  // Mesma regra que `lib/markdown.ts` já aplica na outra superfície que renderiza link de fora.
+  function manualDe(h: Harness): string | null {
+    const u = inst?.manual?.[h.id] ?? null;
+    return u && /^https?:\/\//i.test(u) ? u : null;
+  }
+
+  async function consultarInstalacao(ctx: ConsultaIntegracao, cli?: string) {
+    if (ctx.timerInst) clearTimeout(ctx.timerInst);
+    const requisicao = ++ctx.reqInst;
+    erroInst = '';
+    try {
+      const estado = cli
+        ? await instalarHarness(ctx.alvo, cli, ctx.controle.signal)
+        : await instalacaoEstado(ctx.alvo, ctx.controle.signal);
+      if (ctx.controle.signal.aborted || requisicao !== ctx.reqInst) return;
+      const terminou = inst?.fase === 'rodando' && estado.fase === 'pronto';
+      // Normaliza o `log` na entrada: um backend mais velho (ou uma resposta de outra forma) não
+      // pode derrubar a tela inteira por causa de um campo ausente — mesmo precedente do
+      // `statusline.read` exigir dict antes de usar o valor (CLAUDE.md).
+      inst = { ...estado, log: Array.isArray(estado?.log) ? estado.log : [] };
+      if (estado.fase === 'rodando') {
+        ctx.timerInst = setTimeout(() => { void consultarInstalacao(ctx); }, 1200);
+      } else if (terminou) {
+        // Quem diz se instalou é o disco relido, não o `rc` do comando: recarrega o card.
+        void carregar();
+      }
+    } catch (e) {
+      if (ctx.controle.signal.aborted || requisicao !== ctx.reqInst) return;
+      erroInst = e instanceof Error ? e.message : String(e);
+      // O trabalho vive no SERVIDOR: uma resposta perdida (blip de rede, ou o teto de 8s da
+      // chamada) não pode congelar a tela em "rodando" — e congelava de vez, porque `instalando`
+      // ficava `true` para sempre, o que desabilita o botão de todos os cards e faz o ↻ pular a
+      // releitura. Reagenda: o estado real está lá e a próxima resposta desempata.
+      // `cli` cobre o outro lado: se o POST estourar, `inst` nunca vira "rodando" e o card
+      // voltaria a oferecer "Instalar" com uma instalação já correndo no servidor.
+      if (inst?.fase === 'rodando' || cli) {
+        ctx.timerInst = setTimeout(() => { void consultarInstalacao(ctx); }, 1200);
+      }
+    }
+  }
+
+  function instalar(h: Harness) {
+    confirmar = null;
+    if (consulta && !instalando) void consultarInstalacao(consulta, h.id);
+  }
 
   async function consultarIntegracao(ctx: ConsultaIntegracao, reconciliar = false) {
     if (ctx.timer) clearTimeout(ctx.timer);
@@ -88,6 +147,10 @@
   function atualizar() {
     void carregar();
     if (consulta && !reconciliando) void consultarIntegracao(consulta);
+    // Sem guard de "instalando": `consultarInstalacao` já limpa o timer e incrementa a geração no
+    // topo, então reentrar é seguro — e o guard trancava justamente a saída manual de uma tela
+    // presa em "rodando".
+    if (consulta) void consultarInstalacao(consulta);
   }
 
   // Mensagem da integração: código do backend → frase daqui (harness_codex_m_<codigo>); código que
@@ -141,17 +204,25 @@
   }
 
   $effect(() => {
-    const ctx: ConsultaIntegracao = { alvo: apiTarget, controle: new AbortController(), requisicao: 0 };
+    const ctx: ConsultaIntegracao = {
+      alvo: apiTarget, controle: new AbortController(), requisicao: 0, reqInst: 0,
+    };
     consulta = ctx;
     lista = []; feito = ''; consertando = null;
     integracao = null; erroIntegracao = ''; reconciliando = false;
+    inst = null; erroInst = ''; confirmar = null;
     void carregar();
     void consultarIntegracao(ctx);
+    // Também na montagem: é desta resposta que sai a lista de quem dá pra instalar por botão nesta
+    // máquina, e sem ela nenhum card ausente saberia o que oferecer.
+    void consultarInstalacao(ctx);
     return () => {
       // Nem uma resposta atrasada nem o próximo poll podem atravessar a troca de servidor.
       ++ger;
+      ++ctx.reqInst;
       ctx.controle.abort();
       if (ctx.timer) clearTimeout(ctx.timer);
+      if (ctx.timerInst) clearTimeout(ctx.timerInst);
       consulta = null;
     };
   });
@@ -197,6 +268,9 @@
     plugins_com_problema: (p) => m.harness_plugins_com_problema({ n: p.n ?? '', lista: p.lista ?? '' }),
     credenciais_ok: (p) => m.harness_credenciais_ok({ tem: p.tem ?? '' }),
     credenciais_faltam: (p) => m.harness_credenciais_faltam({ tem: p.tem ?? '', faltam: p.faltam ?? '' }),
+    wrapper_ok: (p) => m.harness_wrapper_ok({ onde: p.onde ?? '' }),
+    wrapper_falta: (p) => m.harness_wrapper_falta({ lista: p.lista ?? '' }),
+    wrapper_sem_shell: () => m.harness_wrapper_sem_shell(),
     statusline_ok: () => m.harness_statusline_ok(),
     fullscreen_ok: () => m.harness_fullscreen_ok(),
     fullscreen_desligado: () => m.harness_fullscreen_desligado(),
@@ -211,9 +285,29 @@
     bloco: m.harness_item_tmux_bloco, default_terminal: m.harness_item_tmux_term, truecolor: m.harness_item_tmux_truecolor,
     titulo: m.harness_item_tmux_titulo, mouse: m.harness_item_tmux_mouse, persistencia: m.harness_item_tmux_persist,
     skills: m.harness_item_skills, extensoes: m.harness_item_extensoes, statusline: m.harness_item_statusline,
+    wrapper: m.harness_item_wrapper,
   };
   function texto(i: ItemHarness): string { return (TEXTOS[i.codigo] ?? (() => i.codigo))(i.params); }
   function rotulo(i: ItemHarness): string { return (ROTULOS[i.id] ?? (() => i.id))(); }
+
+  const ETAPAS_INST: Record<string, () => string> = {
+    comando: m.harness_inst_etapa_comando,
+    conferir: m.harness_inst_etapa_conferir,
+    wrapper: m.harness_inst_etapa_wrapper,
+    ajustes: m.harness_inst_etapa_ajustes,
+  };
+  function etapaInst(chave: string | null): string { return (ETAPAS_INST[chave ?? ''] ?? (() => chave ?? ''))(); }
+
+  // A caixa de saída acompanha a última linha: um `npm install` de rede fria escreve por minutos, e
+  // uma caixa parada na primeira linha é indistinguível de uma travada. Mas só acompanha quem JÁ
+  // está no fim — quem rolou pra cima está lendo o erro, e puxá-lo de volta a cada poll é o oposto
+  // do que essa caixa existe pra fazer.
+  let logEl = $state<HTMLElement | null>(null);
+  $effect(() => {
+    const linhas = inst?.log.length ?? 0;
+    if (!logEl || !linhas) return;
+    if (logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40) logEl.scrollTop = logEl.scrollHeight;
+  });
 </script>
 
 <div class="hs">
@@ -249,6 +343,52 @@
           {/if}
         </div>
       {/each}
+      {#if !h.instalado}
+        <div class="hs-item">
+          <span class="hs-marca" aria-hidden="true">·</span>
+          {#if comandoDe(h)}
+            <span class="hs-item-txt">{m.harness_inst_disponivel()}</span>
+            <button type="button" class="hs-btn" onclick={() => (confirmar = h)}
+              disabled={instalando}>{m.harness_inst_botao()}</button>
+          {:else}
+            <span class="hs-item-txt">
+              {m.harness_inst_manual()}
+              {#if manualDe(h)}
+                <a class="hs-link" href={manualDe(h)} target="_blank" rel="noreferrer noopener">{manualDe(h)}</a>
+              {/if}
+            </span>
+          {/if}
+        </div>
+      {/if}
+      <!-- Fase que este app não conhece não mostra nada. Com `!== 'ocioso'` ela caía no `{:else}`
+           e pintava uma falha que não aconteceu — sucesso virando erro é tão mentira quanto o
+           contrário. -->
+      {#if inst && inst.harness === h.id && (inst.fase === 'rodando' || inst.fase === 'pronto')}
+        <div class="hs-inst">
+          <p class="hs-aviso" role="status">
+            {#if instalando}
+              {m.harness_inst_andamento({ passo: inst.passo, total: inst.total, etapa: etapaInst(inst.etapa) })}
+            {:else if inst.ok}
+              {m.harness_inst_pronto()}
+            {:else}
+              {m.harness_inst_falhou({ etapa: etapaInst(inst.etapa) })}
+            {/if}
+          </p>
+          {#if inst.erro}<p class="hs-aviso erro" role="alert">{inst.erro}</p>{/if}
+          {#if erroInst}<p class="hs-aviso erro" role="alert">{erroInst}</p>{/if}
+          <!-- `tabindex` porque a caixa rola: conteúdo rolável sem foco é inalcançável sem mouse.
+               Sem `role="log"` de propósito — faria o leitor narrar cada linha do `npm install`. -->
+          {#if inst.log.length}
+            <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+            <!-- O `tabindex` é o certo aqui e a regra não distingue o caso: a caixa ROLA, e
+                 conteúdo rolável sem foco não se alcança pelo teclado (WCAG 2.1.1). `group` com
+                 rótulo, e não `log`, porque `log` implica região viva e faria o leitor de tela
+                 narrar cada linha do `npm install`. -->
+            <pre class="hs-inst-log" role="group" tabindex="0" aria-label={m.harness_inst_log()}
+              bind:this={logEl}>{inst.log.join('\n')}</pre>
+          {/if}
+        </div>
+      {/if}
       {#if h.id === 'codex'}
         <div class="hs-integracao">
           <div class="hs-item hs-integracao-cab">
@@ -299,7 +439,32 @@
 
   {#if feito}<p class="hs-aviso" role="status">{feito}</p>{/if}
   {#if erro}<p class="hs-aviso erro" role="alert">{erro}</p>{/if}
+  <!-- Só quando não há card mostrando esse erro (falha do poll na montagem, sem instalação
+       nenhuma em curso): com seis cards, o erro de instalar o Kimi embaixo do tmux não se liga a
+       nada. -->
+  {#if erroInst && (!inst || inst.fase === 'ocioso')}
+    <p class="hs-aviso erro" role="alert">{erroInst}</p>
+  {/if}
 </div>
+
+{#if confirmar}
+  {@const alvo = confirmar}
+  <ConfirmDialog
+    title={m.harness_inst_conf_titulo({ nome: alvo.nome })}
+    aria={m.harness_inst_conf_titulo({ nome: alvo.nome })}
+    role="dialog"
+    wide
+    actions={[
+      { label: m.harness_inst_conf_cancelar(), onClick: () => (confirmar = null) },
+      { label: m.harness_inst_botao(), kind: 'primary', onClick: () => instalar(alvo) },
+    ]}
+    onClose={() => (confirmar = null)}
+  >
+    <p class="hs-conf-txt">{m.harness_inst_conf_corpo()}</p>
+    <pre class="hs-conf-cmd">{comandoDe(alvo)}</pre>
+    <p class="hs-conf-txt">{m.harness_inst_conf_depois()}</p>
+  </ConfirmDialog>
+{/if}
 
 <style>
   .hs { container-type: inline-size; padding: var(--space-2) var(--space-3) var(--space-5); }
@@ -332,6 +497,24 @@
             background: var(--surface-raised); border: 1px solid var(--border-subtle); color: var(--text-primary); }
   .hs-aviso { margin: var(--space-2) 0 0; font-size: var(--text-xs); color: var(--text-secondary); }
   .hs-aviso.erro { color: var(--error); }
+  .hs-link { color: var(--accent); overflow-wrap: anywhere; }
+  /* `--surface-raised`, e não `--bg-elevated` cru: o card já é `--surface-inset` e as duas
+     superfícies precisam acompanhar o véu do papel de parede juntas (regra do CLAUDE.md). */
+  .hs-inst-log { margin: var(--space-1) 0 0; padding: var(--space-2); max-height: 190px; overflow: auto;
+                 background: var(--surface-raised); border: 1px solid var(--border-subtle);
+                 border-radius: var(--radius-sm); font-family: var(--font-mono);
+                 font-size: var(--text-xs); color: var(--text-secondary);
+                 white-space: pre-wrap; overflow-wrap: anywhere; }
+  .hs-inst { margin-top: var(--space-1); }
+  /* Escopado: o corpo do ConfirmDialog entra por snippet, compilado no escopo DESTE arquivo. */
+  .hs-conf-txt { margin: 0; font-size: var(--text-sm); color: var(--text-secondary); }
+  /* Selecionável de propósito: ninguém aprova instalar software sem poder copiar e conferir o
+     comando exato que vai rodar. */
+  .hs-conf-cmd { margin: 0; padding: var(--space-2); user-select: text;
+                 background: var(--surface-raised); border: 1px solid var(--border-subtle);
+                 border-radius: var(--radius-sm); font-family: var(--font-mono);
+                 font-size: var(--text-xs); color: var(--text-primary);
+                 white-space: pre-wrap; overflow-wrap: anywhere; }
   .hs-integracao { border-top: 1px solid var(--border-subtle); margin-top: var(--space-2); padding-top: var(--space-1); }
   .hs-integracao-cab { flex-wrap: wrap; }
   .hs-integracao .hs-aviso, .hs-plugins { overflow-wrap: anywhere; }
