@@ -263,6 +263,11 @@ pelo catálogo local; em 07/09/2026, o Codex 0.153.4 desta instalação anunciav
 Astra e Sol, embora a documentação dos modelos informe contexto de até 1.050.000 tokens. A opção
 não altera o catálogo nem promete uma janela maior que a aceita pelo CLI.
 
+Nessa versão, janela utilizável e compactação são valores distintos: a janela utilizável é 95%
+da janela configurada e o gatilho padrão de compactação é 90%. Assim, o padrão de 272.000 vira
+258.400 utilizáveis e compacta a partir de 244.800; com 872.000, são 828.400 utilizáveis e gatilho
+de 784.800. Um limite personalizado de compactação menor continua antecipando esse gatilho.
+
 ### Desktop (≥820px)
 Abrindo a mesma URL num monitor largo, vira **shell de duas colunas**: sidebar de sessões +
 chat largo. O fluxo mobile fica intacto abaixo de 820px.

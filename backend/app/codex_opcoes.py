@@ -14,6 +14,8 @@ def ler_opcoes(servico) -> dict:
     try:
         catalogo = json.loads((servico.codex_home / "models_cache.json").read_text())
         for model in catalogo.get("models", []):
+            if model.get("visibility", "list") != "list":
+                continue
             base, limite = model.get("context_window"), model.get("max_context_window")
             if isinstance(base, int) and isinstance(limite, int) and limite > base:
                 modelos.append({"model": model["slug"], "default": base, "max": limite})

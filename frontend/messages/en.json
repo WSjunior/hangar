@@ -3,7 +3,7 @@
   "codex_contexto_titulo": "Extended context (up to 1M)",
   "codex_contexto_ajuda": "Request up to 1 million tokens. Codex applies each model's supported limit, including Astra and Sol.",
   "codex_contexto_novas": "Applies to new sessions. Turning this off restores the previous value. Automatic compaction continues to follow your Codex configuration.",
-  "codex_contexto_limites": "Limits reported by the local Codex catalog (tokens):",
+  "codex_contexto_limites": "Window caps in the local catalog, before reserved headroom (tokens):",
   "codex_contexto_sem_catalogo": "Open a Codex session to refresh the catalog and see model limits.",
   "codex_contexto_compactacao": "A custom compaction limit of {n} tokens remains in effect.",
   "codex_modo_plan": "Plan",

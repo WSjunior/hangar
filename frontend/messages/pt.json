@@ -3,7 +3,7 @@
   "codex_contexto_titulo": "Contexto estendido (até 1M)",
   "codex_contexto_ajuda": "Solicitar até 1 milhão de tokens. O Codex aplica o limite suportado por cada modelo, incluindo Astra e Sol.",
   "codex_contexto_novas": "Vale para novas sessões. Ao desativar, o valor anterior é restaurado. A compactação automática continua seguindo a configuração do Codex.",
-  "codex_contexto_limites": "Limites anunciados pelo catálogo local do Codex (tokens):",
+  "codex_contexto_limites": "Teto da janela no catálogo local, antes da margem de uso (tokens):",
   "codex_contexto_sem_catalogo": "Abra uma sessão Codex para atualizar o catálogo e consultar os limites dos modelos.",
   "codex_contexto_compactacao": "Há um limite personalizado de compactação: {n} tokens. Ele continua valendo.",
   "codex_modo_plan": "Planejar",

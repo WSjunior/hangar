@@ -36,5 +36,6 @@ def test_catalogo_anuncia_teto_real_sem_inventar_um_milhao(tmp_path):
     (tmp_path / "models_cache.json").write_text(json.dumps({"models": [
         {"slug": "gpt-6-astra", "context_window": 272000, "max_context_window": 872000},
         {"slug": "pequeno", "context_window": 128000, "max_context_window": 128000},
+        {"slug": "interno", "context_window": 272000, "max_context_window": 872000, "visibility": "hide"},
     ]}))
     assert ler_opcoes(service)["modelos"] == [{"model": "gpt-6-astra", "default": 272000, "max": 872000}]
