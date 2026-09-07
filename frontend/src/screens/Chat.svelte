@@ -719,14 +719,23 @@
   // tracked=true — carrega history e conecta o SSE (que o guard de kimiPreNascimento no connectSSE
   // segurou ate aqui). Chave em PRIMITIVOS: allSessions troca de referencia a cada poll de 5s,
   // entao efeito lendo o objeto re-rodaria em todo poll (ver pairPeersKey).
-  let kimiEstavaSemId = false;
+  // Vale pro Codex pelo MESMO motivo: a thread nasce quando a pessoa responde o seletor, o poll
+  // traz tracked=true, e sem isto a conversa so aparecia saindo da sessao e voltando — a tela diz
+  // "responda e a conversa aparece aqui", e essa promessa e este efeito que cumpre.
+  let estavaSemId = false;
   $effect(() => {
-    const nasceu = sessionProvider === 'kimi' && sessionTracked === true;
-    if (kimiEstavaSemId && nasceu) {
+    const semId = kimiPreNascimento || codexPreThread;
+    const nasceu = !semId && (sessionProvider === 'kimi' || sessionProvider === 'codex')
+      && sessionTracked === true;
+    if (estavaSemId && nasceu) {
       kimiSemTranscript = false;
+      // O SSE pode ter sido recusado enquanto nao havia transcript (/events 404 -> CLOSED); sem
+      // limpar, a faixa de "servidor recusou" sobrevive a chegada do transcript.
+      sseRecusado = false;
+      error = '';
       loadHistory().then(() => { if (alive) connectSSE(); });
     }
-    kimiEstavaSemId = kimiPreNascimento;
+    estavaSemId = semId;
   });
   // Badge do provider na NavBar (mobile): so aparece quando NAO e Claude — antes so o Codex tinha
   // rotulo e uma sessao Pi ficava sem badge nenhum, indistinguivel de uma Claude no celular.
@@ -1171,6 +1180,10 @@
         kimiSemTranscript = true;
         return;
       }
+      // Codex antes da thread: o 404 e o estado NORMAL (nao ha rollout ate a TUI abrir a thread) —
+      // guardar o erro deixava a frase de falha esperando pra aparecer no instante em que a
+      // conversa nascesse, por cima dela.
+      if (sessionProvider === 'codex' && (err as { status?: number } | null)?.status === 404) return;
       error = msg;
     } finally {
       if (g === histGen) loading = false;
@@ -1270,7 +1283,9 @@
     // Kimi pre-1o-prompt: /events 404 (sem jsonl) -> nao conecta ate o flip tracked (efeito mais
     // abaixo dispara). Sem este guard o onerror virava retry com backoff martelando pra sempre um
     // endpoint que so passa a existir depois do primeiro envio.
-    if (kimiPreNascimento) return;
+    // Codex junto: sem thread o /events 404a igual, e o EventSource fecha em CLOSED — a faixa
+    // "o servidor recusou" aparecia sobre uma sessao que so ainda nao comecou.
+    if (kimiPreNascimento || codexPreThread) return;
     clearTimeout(reconnectTimer);
     if (es) { es.close(); es = null; }
     sseRecusado = false;
