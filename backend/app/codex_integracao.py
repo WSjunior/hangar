@@ -268,6 +268,9 @@ class IntegracaoCodex:
                 await self._plugins(codex, desejados, registro, forcar)
                 self._etapa(msg("etapa_fragmentos"))
                 await self._fragmentos(codex, settings, registro)
+                # DEPOIS da importação: é ela que reescreve os comandos pra `<codex>/hooks/` e
+                # decide o que copiar. Antes dela não há o que materializar.
+                await self._mutacao(self._hooks_arquivos)
                 self._checkpoint(registro)
                 self._etapa(msg("etapa_skills"))
                 await self._mutacao(self._skills, registro)
@@ -353,6 +356,21 @@ class IntegracaoCodex:
                 self._confianca()
         if fonte:
             registro["hooks"] = normalizada
+
+    def _hooks_arquivos(self) -> None:
+        """O importador nativo reescreve o comando pra `<codex>/hooks/x` e copia o arquivo — mas
+        pula symlink (medido em 07/09/2026 no codex-cli 0.153.4). Quem versiona hooks num repo e
+        linka em `~/.claude/hooks` ficava com o comando apontando pro vazio, e hook de PreToolUse
+        que falha BLOQUEIA a ferramenta. Aqui o que faltou vira symlink pro mesmo alvo."""
+        from app import codex_hooks_arquivos
+        criados, orfaos = codex_hooks_arquivos.materializar(self.codex_home, self.home)
+        if criados:
+            _log.info("codex: hooks materializados em ~/.codex/hooks: %s", ", ".join(criados))
+        if orfaos:
+            # Sem equivalente no Claude: o app não tem de onde tirar o arquivo, e o hook vai falhar
+            # na próxima sessão. Dizer isso é melhor que a pessoa descobrir por um "no such file"
+            # no meio de um turno.
+            self._estado["avisos"].append(msg("aviso_hooks_sem_arquivo", arquivos=", ".join(orfaos)))
 
     def _migrar_ponte_antiga(self) -> None:
         """Primeira rodada numa máquina onde o instalador antigo escreveu o hooks.json: o que ele
