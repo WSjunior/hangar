@@ -15,10 +15,21 @@ const msgs = (n: number): ChatEvent[] =>
 // happy-dom não faz layout: scrollHeight/clientHeight/scrollTop são 0, então um evento de scroll
 // nasce com folga 0 = "está no fim". Forjar as três medidas é o que permite reproduzir o estado
 // que congela a janela — alguém rolou pra cima.
+//
+// `scrollTop` entra como propriedade GRAVÁVEL, e não como valor fixo: no DOM real ela é de
+// leitura e escrita, e o componente escreve nela (`revealOlder` empurra o scroll pra preservar o
+// ponto de leitura ao revelar página antiga). Forjada read-only, a atribuição estoura e a exceção
+// sai como rejeição não tratada — teste passando com erro pendurado ao lado.
 function rolarPraCima(lista: HTMLElement) {
-  for (const [prop, valor] of [['scrollHeight', 5000], ['clientHeight', 500], ['scrollTop', 100]] as const) {
+  for (const [prop, valor] of [['scrollHeight', 5000], ['clientHeight', 500]] as const) {
     Object.defineProperty(lista, prop, { value: valor, configurable: true });
   }
+  let topo = 100;
+  Object.defineProperty(lista, 'scrollTop', {
+    configurable: true,
+    get: () => topo,
+    set: (v: number) => { topo = v; },
+  });
   lista.dispatchEvent(new Event('scroll'));
 }
 
