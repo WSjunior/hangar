@@ -1933,6 +1933,19 @@ if (-not $bash) {
         else { Ok 'lancador hangar-engine.cmd ja atualizado' }
     }
 
+    # (2d) lancador pro hangar-preview (navegador embutido da sessao). Sem ele o script fica
+    # invisivel pro PowerShell e pro cmd: ele nao tem extensao, entao o PowerShell ACHA o arquivo
+    # (Get-Command devolve Application) e executar nao produz nada, com $LASTEXITCODE VAZIO - falha
+    # muda, pior que o "nao e reconhecido" do cmd.
+    # Por NODE, nao pelo bash nem pelo python: o hangar-preview e `#!/usr/bin/env node`. Copiar o
+    # corpo do hangar-send.cmd (que e bash de verdade) repetiria o erro ja cometido no hangar-conta.
+    $lancadorPreview = Join-Path $binUsuario 'hangar-preview.cmd'
+    $conteudoPreview = "@echo off`r`n" +
+                       "set `"PATH=%USERPROFILE%\.local\bin;%PATH%`"`r`n" +
+                       "node `"$raiz\scripts\hangar-preview`" %*`r`n"
+    if (Escrever-Lancador $lancadorPreview $conteudoPreview 'cmd') { Ok "lancador hangar-preview.cmd criado em $binUsuario" }
+    else { Ok 'lancador hangar-preview.cmd ja atualizado' }
+
     # (3) PATH do usuario, pra `hangar-send` funcionar de qualquer terminal (e pro bash achar o shim).
     $pathUsuario = [Environment]::GetEnvironmentVariable('Path', 'User')
     if ($pathUsuario -notlike "*$binUsuario*") {
@@ -1967,11 +1980,24 @@ if (-not $bash) {
         # python3 volta a ser o atalho da Microsoft Store. Os dois pontos de entrada precisam
         # da mesma garantia - consertar so um deles foi o que deixou o bug de pe.
         $corpoCp = "#!/bin/sh`n" +
-                   "# Gerado por hangar/install.ps1 - ver comentario no instalador.`n" +
+                   "# Gerado pelo instalador do hangar (install.ps1 / install-hangar-send.sh).`n" +
                    "PATH='$binMsys':`$PATH; export PATH`n" +
                    "exec '$rota/scripts/hangar-send' `"`$@`"`n"
         if (Escrever-Lancador $cpSendSh $corpoCp 'sh') {
             Ok 'hangar-send do ~/.local/bin aponta pro script do repo'
+        }
+        # Mesmo conserto pro hangar-preview, e pela mesma razao com um agravante: o `import` ESM
+        # estatico dele (`../shell/preview_fmt.cjs`) e resolvido pelo lugar do ARQUIVO, entao a
+        # copia em ~/.local/bin procura ~/.local/shell/ e morre com ERR_MODULE_NOT_FOUND - quebrado
+        # ate no Git Bash, nao so no PowerShell. `exec node`, nao `exec <script>`: sh tambem nao
+        # honra shebang de arquivo que ele mesmo executa por caminho.
+        $cpPreviewSh = Join-Path $binUsuario 'hangar-preview'
+        $corpoPreview = "#!/bin/sh`n" +
+                        "# Gerado pelo instalador do hangar (install.ps1 / install-hangar-send.sh).`n" +
+                        "PATH='$binMsys':`$PATH; export PATH`n" +
+                        "exec node '$rota/scripts/hangar-preview' `"`$@`"`n"
+        if (Escrever-Lancador $cpPreviewSh $corpoPreview 'sh') {
+            Ok 'hangar-preview do ~/.local/bin aponta pro script do repo'
         }
         Ok 'hangar-send + skills instalados'
         Nota 'teste (em terminal NOVO):  hangar-send --list'

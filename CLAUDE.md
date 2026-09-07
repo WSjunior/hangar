@@ -1192,6 +1192,71 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
     it either. Neither triggered copy mode even with the option `on`, which is the behaviour a real
     wheel produces every day — so the result is about the injection, not about psmux. Wheel
     behaviour here is verified by a human scrolling, not by a probe.
+- **No psmux, `display-message -p '#S'` responde a sessão de QUEM PERGUNTA, não a do cliente
+  anexado** (medido 06/09/2026, psmux 3.3.7, VM WinBoat). É o oposto do tmux, e é por isso que o
+  `hangar-send` abandonou esse caminho: lá a resposta é estado global do servidor. Aqui ela acertou
+  em todas as configurações testadas — 1, 2 e 3 sessões vivas; com um cliente REAL anexado a outra
+  sessão (`session_attached=1` nela, 0 na minha); com `$TMUX` forjado apontando para outro id; e de
+  um filho destacado por `Start-Process`. De dentro de um pane de uma terceira sessão, veio o nome
+  DELA. Consequência: `--sessao` não é obrigatório no Windows, e o `nomeSessao()` do
+  `hangar-preview` (que só tinha esse caminho) estava certo. Copiar o primeiro critério do
+  `hangar-send` seria **pior**: `TMUX_PANE` + `list-panes -a` contando ocorrências dá AMBÍGUO aqui,
+  porque o psmux numera pane por sessão e duas sessões têm `%1` — contei 2. O que faltava era ler
+  `CP_SESSION_NAME` antes (carimbo do nascimento, imune a cliente anexado), validado por
+  `has-session -t "=<nome>"` porque um rename deixa o carimbo obsoleto e nome obsoleto endereça
+  OUTRA sessão. Fallback continua o `display-message`.
+- **O `ln -sf` do Git Bash COPIA, devolve 0, e é isso que quebrava os dois CLIs no Windows**
+  (06/09/2026). Três defeitos em fila, um só culpado. O `hangar-send` se localiza por
+  `dirname $(realpath $0)/../backend/.env` e a cópia em `~/.local/bin` procurava
+  `~/.local/backend/.env`; o `hangar-preview` é pior, porque o `import` ESM **estático** de
+  `../shell/preview_fmt.cjs` é resolvido pelo lugar do ARQUIVO — a cópia morria com
+  `ERR_MODULE_NOT_FOUND` apontando `~/.local/shell/`, quebrada **até no Git Bash**. E o
+  `install-hangar-send.sh` imprimia `ok: … -> …`, com a seta, nos dois casos: o fallback que diria
+  "CÓPIA" só cobre o `ln` FALHAR, e ele não falha. Pior, o script **desfazia** o shim que o
+  `install.ps1` já escrevia pro `hangar-send` — ou seja, o comando que a doc manda rodar depois de
+  um `git pull` quebrava o `hangar-send`. Hoje a checagem é `test -L` DEPOIS do `ln`, na fonte, e o
+  shim (idêntico nos dois instaladores) chama o script do repo por caminho absoluto. No Linux o
+  `ln` linka, `test -L` é verdadeiro e o ramo não roda.
+- **Script sem extensão é invisível pro PowerShell, e a falha é MUDA** (06/09/2026). Sem
+  `hangar-preview.cmd`, o `Get-Command` **achava** o arquivo (`CommandType=Application`) e executar
+  não produzia nada, com `$LASTEXITCODE` **vazio**; só dentro de um pipeline aparecia
+  `RuntimeException :: Não é possível executar um documento no meio de um pipeline`. O cmd.exe ao
+  menos diz "não é reconhecido". O corpo do lançador é **node**, não bash — o `hangar-preview` é
+  `#!/usr/bin/env node`, e copiar o `hangar-send.cmd` repetiria o erro que o `hangar-conta` já
+  pagou (`bash arquivo` não honra shebang).
+- **O navegador embutido funciona no Windows — com a sessão gráfica ATIVA** (06/09/2026, Electron
+  43.3.0 / Chrome 150, psmux 3.3.7). `open`, `list`, `snapshot`, `click`, `fill`, `type`, `press`,
+  `wait` e `shot` passam; o `shot` grava PNG real (1280×800, assinatura conferida). Com a janela
+  ocluída — sessão RDP/console **desconectada**, `query session` = `Disco` — o teclado
+  (`type`/`press`) continua entregando e o **mouse não**: o `click` devolve `rc=0` e ZERO evento
+  chega ao DOM (verificado com listener em captura). Não é do `hangar-preview`: um
+  `Input.dispatchMouseEvent` por **CDP cru** na página do próprio app respondeu `ok` e também não
+  entregou nada. O `fill` cai junto, mas alto, porque confere o foco depois do clique — e a
+  mensagem dele culpa a ref, que estava certa. Defeito à parte, do mesmo dia e ainda ABERTO: com a
+  janela ocluída o `shot` recusa com "não produziu quadro" enquanto um `Page.captureScreenshot`
+  **cru** no mesmo alvo devolve um PNG **íntegro** (1600×1000, 47382 bytes, app inteiro legível) —
+  ou seja, o quadro existe e é o `capturarPagina` de `preview_ctl.cjs` que desiste dele. O
+  `await quadro()` está **descartado** (é um `Promise.race` com teto de 500ms, não bloqueia); os
+  candidatos que sobram são o `TETO_SHOT_CDP` de 3000ms (o print de view escondido é lento sem
+  compositor) e o estado do flag `oculto`. Não medi qual dos dois, e não dá pra reproduzir sem
+  desconectar o display de novo.
+- **No Windows, um recado do `hangar-send` pode chegar TRÊS vezes de UM envio só — e a culpa é do
+  oráculo de entrega, não de quem mandou** (06/09/2026). A prova de que o texto chegou é
+  comparação de string entre o que foi enviado e o que aparece no transcript; a mensagem
+  perdeu **uma contrabarra** no caminho, a comparação não casou, e o reconcile redigitou. O
+  log do backend registra `REQUEUE name=win-preview id=6fc37a2f… tentativa=1` e `tentativa=2`
+  — um envio, três chegadas idênticas. Medido: a fila durável guardou `\\host.lan\Data\.hangar`
+  (duas contrabarras antes de `host.lan`) e o transcript recebeu `\host.lan\Data\.hangar` (uma).
+  **O que NÃO é**, medido na mesma hora e ao contrário do que o comentário do `api.py` supõe:
+  o `send-keys -l` do psmux **preserva** contrabarra (mandei 4, a tela mostrou 4) e o
+  round-trip do clipboard **preserva** (escrevi 6, li 6 de volta, string idêntica). Ou seja a
+  perda é DEPOIS dos dois primitivos de entrega — camada não identificada. Consequência
+  prática enquanto isso não fecha: recado repetido no Windows não é o par insistindo; antes
+  de responder, olhe `REQUEUE` em `%LOCALAPPDATA%\hangar\hangar-backend.log` e a fila em
+  `<config>\.hangar-queue\<sessao>.jsonl`, que guarda o texto ORIGINAL.
+- **`send-keys` do psmux: `;` corta a linha e o Enter junto não executa** (06/09/2026). O `;` é
+  separador de comando do tmux, então `send-keys "a ; b" Enter` digitou só o `a` — e mesmo esse não
+  rodou: foi preciso um `send-keys … Enter` **separado** para o shell do pane executar.
 - **The pane's environment comes from the SERVER on tmux and from the CALLER on psmux — which is
   why `CLAUDE_CONFIG_DIR` cannot be exported unconditionally** (measured on psmux 3.3.7,
   22/08/2026). tmux gives a new session the env of whoever started the *server*, so `new_session`
