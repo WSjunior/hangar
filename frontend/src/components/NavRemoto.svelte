@@ -37,7 +37,13 @@
     const s = new WebSocket(navUrl(sessionName));
     ws = s;
     s.onopen = () => (estado = 'ligado');
-    s.onclose = () => { if (ws === s) estado = 'caiu'; };
+    // O motivo do backend é o que separa "esta sessão não tem navegador aberto" de queda de rede —
+    // sem ele, problema de configuração e cabo solto viravam a mesma frase genérica.
+    s.onclose = (e) => {
+      if (ws !== s) return;
+      estado = 'caiu';
+      if (e?.reason) erro = e.reason;
+    };
     s.onmessage = (e) => {
       let msg: Record<string, unknown>;
       try { msg = JSON.parse(String(e.data)); } catch { return; }

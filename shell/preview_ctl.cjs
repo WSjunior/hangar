@@ -148,7 +148,14 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, tetoEspera = 15000 }
     if (temaAtual !== 'sistema') await aplicarTema();
     // A emulação de tamanho sobrevive à navegação, mas a do tema também deveria e não sobrevive;
     // reaplicar custa um comando e o preço de errar é a página inteira em 0x0, calada.
-    if (oculto || layoutMovel) await aplicarViewport().catch(() => {});
+    // O `oculto` aceita falhar calado (o comentário acima diz por quê). O layout de celular, não:
+    // ele foi PEDIDO por alguém que está olhando, e se a emulação não voltar depois de navegar a
+    // página vira desktop com a pill ainda marcando celular.
+    if (oculto || layoutMovel) {
+      await aplicarViewport().catch((err) => {
+        if (layoutMovel) console.error(`[nav] layout de celular nao voltou apos navegar: ${err && err.message ? err.message : err}`);
+      });
+    }
   });
 
   // Dois frames, não um: o primeiro rAF roda ANTES da pintura do quadro seguinte; só o segundo

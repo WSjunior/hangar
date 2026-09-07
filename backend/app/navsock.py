@@ -289,7 +289,10 @@ async def _autorizado(ws: WebSocket) -> bool:
     origem = ws.headers.get("origin")
     if origem and not termsock._origem_aceita(origem, ws.headers.get("host")):
         _log.warning("navsock: origem %r recusada", origem)
-        await ws.close(code=1008)
+        # Com motivo, ao contrário do token: origem recusada é CONFIGURAÇÃO (o app servido de outro
+        # endereço, que se declara em CP_TERM_ORIGINS), não credencial errada — e sem essa frase ela
+        # chega na tela como "conexão caiu", igual a cabo solto.
+        await ws.close(code=1008, reason="origem nao autorizada (CP_TERM_ORIGINS)")
         return False
     return True
 

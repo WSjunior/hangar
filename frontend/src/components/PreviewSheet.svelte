@@ -33,7 +33,11 @@ import * as m from '../paraglide/messages';
       navUrl = u;
       navPorta = p.port ? Number(p.port) : (p.protocol === 'https:' ? 443 : 80);
       navPath = p.pathname + p.search + p.hash;
-    } catch { /* sem navegador ou fora do app desktop */ }
+    } catch (e) {
+      // Sem navegador e fora do app desktop são o caso normal — a seção some e está certo. O log
+      // existe pro outro caso, que some igualzinho: o backend fora do ar ou respondendo erro.
+      console.debug('PreviewSheet: navegador da sessão não respondeu', e);
+    }
   }
   async function abrirNavegador() {
     if (navPorta == null) return;
