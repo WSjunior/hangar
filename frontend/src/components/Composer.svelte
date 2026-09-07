@@ -1537,15 +1537,19 @@
         // Sobe todos os anexos e junta os paths numa UNICA linha (o backend rejeita '\n' no
         // send-keys). Cada path nao tem espaco (nome gerado). Marca imagem x arquivo pelo tipo.
         const parts: string[] = [];
-        for (const [i, a] of attachments.entries()) {
+        // Percorre uma CÓPIA e escreve no objeto, nunca em `attachments[i]`: quem já subiu e quem
+        // ainda espera continuam com o ✕ à mostra, então dá pra remover um anexo no meio do envio —
+        // e aí o índice de todo mundo depois dele anda, e o anel ia parar no tile errado (pior: um
+        // anexo que nunca subiu ganhava 100%). A referência do objeto sobrevive ao filter.
+        for (const a of [...attachments]) {
           // Encolhe foto/converte HEIC antes de subir. Falhou? prepareImage devolve o original.
           const arquivo = a.isImage ? await prepareImage(a.file) : a.file;
           // O anel começa em 0 ANTES do primeiro byte: sem isso, arquivo pequeno ia de "esperando"
           // direto pra "pronto" e a fila não aparecia.
-          attachments[i].pct = 0;
+          a.pct = 0;
           const { path, frames, transcript } = await uploadFile(
-            sessionName, arquivo, (pct) => { attachments[i].pct = pct; });
-          attachments[i].pct = 100;
+            sessionName, arquivo, (pct) => { a.pct = pct; });
+          a.pct = 100;
           parts.push((a.isImage ? `📎 ${m.board_imagem()}: ` : `📎 ${m.board_arquivo()}: `) + path);
           // Video: o backend extraiu quadros ao longo da duracao e transcreveu a fala. Os quadros
           // entram como imagens (o Read abre; a lista tambem vira miniatura no chat) e a fala vai

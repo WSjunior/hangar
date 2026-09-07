@@ -183,6 +183,7 @@
   <div
     class="nr-tela"
     bind:this={telaEl}
+    data-gesto-proprio
     style="aspect-ratio: {largura} / {altura};"
     role="application"
     aria-label={m.nav_remoto_tela()}
@@ -232,8 +233,14 @@
     position: relative; width: 100%; overflow: hidden; touch-action: none;
     background: var(--surface-inset); border: 1px solid var(--border-subtle);
     border-radius: var(--radius-md); display: grid; place-items: center;
+    /* Teto de altura: com o navegador em layout de celular o quadro é mais alto que largo, e o
+       `aspect-ratio` sozinho empurrava os controles pra fora da folha. */
+    max-height: 62vh;
   }
-  .nr-tela img { width: 100%; height: 100%; object-fit: contain; display: block; user-select: none; }
+  .nr-tela img {
+    width: 100%; height: 100%; object-fit: contain; display: block; user-select: none;
+    -webkit-user-drag: none;   /* iOS: arrastar a imagem virava "salvar foto" no meio da rolagem */
+  }
   .nr-vazio { font-size: var(--text-sm); color: var(--text-muted); }
   .nr-erro { font-size: var(--text-xs); color: var(--error); }
   .nr-pe { display: flex; align-items: center; gap: var(--space-2); min-height: 20px; }

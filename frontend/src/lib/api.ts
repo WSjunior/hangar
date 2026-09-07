@@ -1263,10 +1263,20 @@ export function uploadFile(
   onProgresso?: (pct: number) => void,
 ): Promise<{ path: string; frames?: string[]; transcript?: string }> {
   const base = getBaseUrl();
+  // Diário à mão: sair do `apiFetchRes` significa sair do registro, e o comentário dele avisa
+  // exatamente isso. Upload é AÇÃO, então entra dando certo ou não — o mesmo id de pedido dos dois
+  // lados, que é o que deixa seguir a cadeia depois.
+  const req = novoReq();
+  const rota = 'POST /api/sessions/:name/upload';
+  const t0 = Date.now();
+  const anotar = (nivel: 'ok' | 'aviso' | 'erro', codigo: string, motivo = '') =>
+    registrarDiag({ evento: 'acao', nivel, codigo, ms: Date.now() - t0, req,
+                    detalhe: [rota, motivo].filter(Boolean).join(' — ') });
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${base}/api/sessions/${encodeURIComponent(name)}/upload`);
     for (const [k, v] of Object.entries(authHeaders())) xhr.setRequestHeader(k, String(v));
+    xhr.setRequestHeader('X-Hangar-Req', req);
     xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
     xhr.setRequestHeader('X-Filename', encodeURIComponent(file.name || 'arquivo'));
     // Mesmo teto do uploadFileForServer: sem ele, uma foto grande num link ruim deixava o composer
@@ -1279,6 +1289,7 @@ export function uploadFile(
     };
     xhr.onload = () => {
       if (xhr.status === 401 && getToken()) {
+        anotar('erro', '401');
         dropActiveServer();
         if (typeof window !== 'undefined') window.location.reload();
         reject(Object.assign(new Error(m.sessao_expirada()), { status: 401 }));
@@ -1294,17 +1305,28 @@ export function uploadFile(
             msg = mensagemDeErro(j.detail.code, j.detail.params ?? {}) ?? j.detail.msg ?? j.detail.code;
           }
         } catch { /* corpo não-JSON: fica o texto cru */ }
+        anotar(xhr.status >= 500 ? 'erro' : 'aviso', String(xhr.status), msg);
         reject(Object.assign(new Error(msg), { status: xhr.status }));
         return;
       }
       try {
-        resolve(JSON.parse(xhr.responseText));
+        const corpo = JSON.parse(xhr.responseText);
+        anotar('ok', String(xhr.status));
+        resolve(corpo);
       } catch (e) {
+        anotar('erro', String(xhr.status), 'resposta ilegivel');
         reject(e instanceof Error ? e : new Error(String(e)));
       }
     };
-    xhr.onerror = () => reject(new Error(m.composer_falha_envio()));
-    xhr.ontimeout = () => reject(new Error(m.composer_falha_envio()));
+    xhr.onerror = () => {
+      // Sem status: nunca houve resposta. É o mesmo caso do `api.sem_rede` do apiFetchRes.
+      registrarDiag({ evento: 'api.sem_rede', nivel: 'erro', ms: Date.now() - t0, req, detalhe: rota });
+      reject(new Error(m.composer_falha_envio()));
+    };
+    xhr.ontimeout = () => {
+      anotar('erro', 'timeout');
+      reject(new Error(m.composer_falha_envio()));
+    };
     xhr.send(file);
   });
 }

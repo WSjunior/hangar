@@ -121,26 +121,23 @@ import * as m from '../paraglide/messages';
 
 <BottomSheet {open} {onClose} ariaLabel={m.preview_titulo()} wide={desktop.atual} centered={desktop.atual}>
   <div class="pv">
-    <div class="pv-head">
-      <h2 class="pv-title">{m.preview_titulo()}</h2>
-      <p class="pv-sub">{m.preview_descricao()}</p>
-    </div>
-
     {#if temNav}
-      <!-- Acesso remoto ao navegador daquela sessão. Vem ANTES do túnel de porta porque é o que a
-           pessoa quer quase sempre: ver o que o agente está fazendo agora. O túnel continua abaixo
-           pra abrir uma porta que ninguém abriu no navegador ainda. -->
-      <section class="pv-nav">
-        <h3 class="pv-nav-t">{m.nav_remoto_titulo()}</h3>
-        <p class="pv-sub">{m.nav_remoto_descricao()}</p>
-        <NavRemoto {sessionName} ativo={open} />
-        {#if navPorta != null}
-          <div class="pv-bar">
-            <span class="pv-url" title={navUrl}>{m.preview_navegador_sessao()} · {navUrl}</span>
-            <button class="pv-ext" disabled={busy} onclick={abrirNavegador}>{m.preview_navegador_abrir()}</button>
-          </div>
-        {/if}
-      </section>
+      <!-- Com navegador aberto, ele É a tela: título, descrição e o formulário de porta viram
+           acessório, porque quem abriu isto quer ver o que o agente está fazendo agora. Cabeçalho
+           e explicação comiam metade da altura do celular antes de a imagem começar. -->
+      <h2 class="pv-title">{m.nav_remoto_titulo()}</h2>
+      <NavRemoto {sessionName} ativo={open} />
+      {#if navPorta != null}
+        <div class="pv-bar">
+          <span class="pv-url" title={navUrl}>{m.preview_navegador_sessao()} · {navUrl}</span>
+          <button class="pv-ext" disabled={busy} onclick={abrirNavegador}>{m.preview_navegador_abrir()}</button>
+        </div>
+      {/if}
+    {:else}
+      <div class="pv-head">
+        <h2 class="pv-title">{m.preview_titulo()}</h2>
+        <p class="pv-sub">{m.preview_descricao()}</p>
+      </div>
     {/if}
 
     <div class="pv-form">
@@ -211,8 +208,6 @@ import * as m from '../paraglide/messages';
   .pv-btn.accent { background: var(--accent); color: var(--bg-base); border-color: transparent; }
   .pv-btn.danger { color: var(--error); border-color: color-mix(in srgb, var(--error) 50%, transparent); }
 
-  .pv-nav { display: flex; flex-direction: column; gap: var(--space-2); }
-  .pv-nav-t { font-size: var(--text-sm); font-weight: 600; color: var(--text-primary); }
   .pv-bar { display: flex; align-items: center; gap: var(--space-3); flex-shrink: 0; }
   .pv-url {
     flex: 1; min-width: 0; font-family: var(--font-mono); font-size: var(--text-xs);
