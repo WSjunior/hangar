@@ -14,7 +14,7 @@ import {
 } from './api';
 import { listarCredenciais } from './credenciais';
 import type { OrqGrupo, OrqPolitica } from './orquestracao';
-import type { ChatEvent, CostReport, OrqExecucao } from './types';
+import type { CostReport, OrqExecucao } from './types';
 
 export const clienteQuery = new QueryClient({
   defaultOptions: {
@@ -125,41 +125,9 @@ export function prefetchContas(alvo: Server | null): void {
   void clienteQuery.prefetchQuery(motores(alvo));
 }
 
-// ── Cauda do chat entre ABERTURAS ────────────────────────────────────────────────────────────
-// Entrar numa sessão baixava tudo de novo, toda vez: no celular a rota #/chat desmonta o Chat, e
-// com ele morriam `events` e `lastEventId`. Medido em 06/09/2026 na sessão `pr-junior` (transcript
-// de 31,9 MB), pelo caminho que o iPhone percorre: 313 KB de cauda (401ms, e 2,5s quando o túnel
-// está em rajada) mais 1,2 MB de histórico de fundo — 1,5 MB por ENTRADA, mesmo voltando dez
-// segundos depois sem nada ter mudado.
-//
-// Guarda aqui, e não num mapa de módulo próprio, porque o `gcTime` de 30min do cliente já é
-// exatamente o que se quer ("faz o stale-while-revalidate valer entre ABERTURAS", ver o comentário
-// dele) e a decisão de chave/TTL mora neste arquivo. NÃO é uma query: o `events` do chat é um
-// buffer VIVO — o SSE acrescenta, o dedup tira eco, `appendTail`/`prependOlder` costuram pontas —
-// e isso continua no Chat. Aqui é só o depósito da última cauda conhecida.
-//
-// Sem `/clear` na chave de propósito: quem protege é o `appendTail`, que ao não achar NENHUM id em
-// comum devolve só a cauda nova e joga fora o cache. Pôr o jsonl na chave exigiria conhecê-lo antes
-// de pintar, e ele vem de um poll que pode não ter chegado.
-//
-// O servidor vem por ARGUMENTO, não de `idAtivo()`: ao navegar entre chats de máquinas diferentes,
-// `applyRouteServer` (App.svelte) chama `selectServer` ANTES de o Chat antigo desmontar — o
-// `onDestroy` dele resolveria o servidor NOVO e gravaria a conversa de uma máquina sob a chave da
-// outra. Com sessões de mesmo nome nas duas (o `hangar` local e o da VPS), a próxima abertura
-// pintava a conversa errada antes de qualquer rede. Quem chama captura o id uma vez, na entrada.
-// Só os eventos. O `lastEventId` do stream JÁ morou aqui e foi tirado: é offset em BYTES, avança
-// por linha lida do transcript (linha que o parser ignora move o offset sem virar bolha), e
-// restaurá-lo fazia o SSE retomar à frente do que o cache continha — o backend pulava o intervalo do
-// meio e a conversa ficava parada na última mensagem enviada até a SEGUNDA entrada. O stream faz o
-// backfill dele sozinho; o dedup por id do Chat descarta o que já está na tela.
-export interface CaudaChat { eventos: ChatEvent[] }
-
-const chaveCauda = (servidor: string, name: string) => ['chat-cauda', servidor, name] as const;
-
-export function lerCaudaChat(servidor: string, name: string): CaudaChat | undefined {
-  return clienteQuery.getQueryData<CaudaChat>(chaveCauda(servidor, name));
-}
-
-export function guardarCaudaChat(servidor: string, name: string, cauda: CaudaChat): void {
-  clienteQuery.setQueryData(chaveCauda(servidor, name), cauda);
-}
+// NÃO cacheie a cauda do chat aqui. Já existiu (b9db4367): guardava os últimos eventos por sessão
+// pra abrir a conversa sem esperar a rede, e trouxe uma regressão CONFIRMADA pelo usuário — mandar
+// mensagem, sair e voltar deixava a resposta de fora, e só a segunda entrada mostrava. Pintar a
+// tela antes do fetch faz a MessageList montar cedo demais e a janela dela nascer do tamanho
+// errado (ver o comentário em Chat.svelte, no `loadHistory`). Antes de tentar de novo, conserte a
+// janela; o ganho de tráfego que sobreviveu está na fase 2 sob demanda, que é independente disto.

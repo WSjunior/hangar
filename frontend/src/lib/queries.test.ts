@@ -8,8 +8,7 @@ vi.mock('./api', () => ({
 }));
 vi.mock('./credenciais', () => ({ listarCredenciais: vi.fn() }));
 
-const { credenciais, motores, orqDetalhe, orqGrupo, orqPolitica,
-        lerCaudaChat, guardarCaudaChat } = await import('./queries');
+const { credenciais, motores, orqDetalhe, orqGrupo, orqPolitica } = await import('./queries');
 
 // O servidor ativo muda debaixo da tela (apiFetch resolve baseUrl na hora). Chave sem ele serviria
 // a política/o grupo da máquina anterior — dado errado, sem nenhum sinal de que está errado.
@@ -55,57 +54,3 @@ describe('chave das queries de orquestração', () => {
 	});
 });
 
-// A cauda do chat é o que faz voltar pra uma sessão pintar sem rede. Errar a chave aqui não dá
-// erro: mostra a conversa de OUTRA sessão (ou de outra máquina) como se fosse a certa.
-describe('cauda do chat entre aberturas', () => {
-	beforeEach(() => { ativo = 'srv-a'; });
-
-	const cauda = (n: number) => ({
-		eventos: Array.from({ length: n }, (_, i) => ({ id: `e${i}` })) as never,
-	});
-
-	it('guarda e devolve a mesma cauda', () => {
-		guardarCaudaChat('srv-a', 'sessao', cauda(3));
-		expect(lerCaudaChat('srv-a', 'sessao')?.eventos).toHaveLength(3);
-	});
-
-	// O offset do stream JÁ foi guardado aqui e causou regressão: restaurado, o SSE retomava à
-	// frente do que o cache tinha e a conversa ficava parada na última mensagem enviada. O cache
-	// carrega eventos e nada mais — quem retoma o stream é o próprio stream.
-	it('não guarda offset de stream junto', () => {
-		guardarCaudaChat('srv-a', 'sessao', cauda(3));
-		expect(Object.keys(lerCaudaChat('srv-a', 'sessao')!)).toEqual(['eventos']);
-	});
-
-	it('sessão sem cauda guardada devolve undefined, não a de outra', () => {
-		guardarCaudaChat('srv-a', 'uma', cauda(2));
-		expect(lerCaudaChat('srv-a', 'outra')).toBeUndefined();
-	});
-
-	// Mesmo nome de sessão em duas máquinas é comum (`hangar` local e `hangar` na VPS): sem o id do
-	// servidor na chave, trocar de máquina serviria a conversa da anterior.
-	it('separa por servidor', () => {
-		guardarCaudaChat('srv-a', 'hangar', cauda(5));
-		expect(lerCaudaChat('srv-b', 'hangar')).toBeUndefined();
-		expect(lerCaudaChat('srv-a', 'hangar')?.eventos).toHaveLength(5);
-	});
-
-	// O servidor vem por ARGUMENTO justamente porque `idAtivo()` já mudou quando o Chat desmonta:
-	// navegando pro chat de outra máquina, `applyRouteServer` troca o ativo ANTES do onDestroy.
-	// Se a chave resolvesse o ativo na hora da escrita, a conversa de srv-a era gravada em srv-b —
-	// e a próxima abertura da sessão homônima de srv-b pintava a conversa da outra máquina.
-	it('gravar não depende de quem está ativo no momento da escrita', () => {
-		guardarCaudaChat('srv-a', 'hangar', cauda(7));
-		ativo = 'srv-b';                                     // o ativo mudou; a cauda é de srv-a
-		expect(lerCaudaChat('srv-b', 'hangar')).toBeUndefined();
-		expect(lerCaudaChat('srv-a', 'hangar')?.eventos).toHaveLength(7);
-	});
-
-	// O /clear grava cauda VAZIA em vez de deixar a antiga: é o único ponto que sabe que o
-	// transcript morreu, e sem isso a conversa apagada piscaria na próxima entrada.
-	it('cauda vazia sobrescreve a anterior', () => {
-		guardarCaudaChat('srv-a', 'sessao', cauda(4));
-		guardarCaudaChat('srv-a', 'sessao', { eventos: [] });
-		expect(lerCaudaChat('srv-a', 'sessao')?.eventos).toHaveLength(0);
-	});
-});

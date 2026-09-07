@@ -20,7 +20,7 @@
   import ForwardSheet from '../components/ForwardSheet.svelte';
   import PairSheet from '../components/PairSheet.svelte';
   import OrquestracaoSheet from '../components/OrquestracaoSheet.svelte';
-  import { prefetchOrq, lerCaudaChat, guardarCaudaChat } from '../lib/queries';
+  import { prefetchOrq } from '../lib/queries';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { aoAquecer, segurarAquecimento, soltarAquecimento } from '../lib/aquecimento';
   // Ciclo de import de propósito (PairChatModal importa este Chat): é o mesmo Chat montado por
@@ -147,11 +147,6 @@
   // abertas morreria. Mesmo padrao do FilesPanel. A chave e a MESMA identidade do shell
   // (serverId::nome) que o FilesPanel usa — nunca calculada diferente por caller.
   const filesChave = `${getActiveId() ?? ''}::${sessionName}`;
-  // Dono da conversa, capturado na ENTRADA. O `onDestroy` não pode perguntar "qual o servidor
-  // ativo?": navegando pra um chat de outra máquina, o `applyRouteServer` já trocou o ativo antes
-  // de este Chat desmontar, e a cauda desta sessão seria gravada sob a chave da OUTRA máquina.
-  // Mesmo padrão do `filesChave` acima, e pelo mesmo motivo.
-  const servidorDaCauda = getActiveId() ?? '';
   // svelte-ignore state_referenced_locally — a linha acima ja tem o ignore no comentario de
   // bloco; esta referência a sessionName (retain/release) e a mesma captura intencional.
   const filesStore = filesStores.retain(filesChave, sessionName);
@@ -1091,35 +1086,18 @@
     // Carga nova = geração nova: a busca de antigos da anterior foi abortada junto, e deixar a
     // trava levantada faria a primeira rolagem até o topo desta ser engolida em silêncio.
     buscandoAntigos = false;
-    // A cauda da última visita pinta a tela ANTES de qualquer rede. Sem isto, voltar pra uma sessão
-    // dez segundos depois pagava a espera inteira de novo, porque a rota #/chat desmonta o Chat no
-    // celular e leva `events`/`lastEventId` junto. O fetch abaixo continua acontecendo — o que muda
-    // é a tela estar utilizável enquanto ele corre, em vez de esqueleto.
-    const cache = lerCaudaChat(servidorDaCauda, sessionName);
-    const pintouDoCache = !!cache?.eventos.length;
-    if (pintouDoCache) {
-      events = cache!.eventos;
-      // O `lastEventId` do cache NÃO é restaurado, e isso é o conserto de uma regressão: ele é um
-      // offset em BYTES, que avança por linha LIDA do transcript — linha que o parser ignora move o
-      // offset sem virar bolha. Restaurado, o SSE retomava de um ponto à frente do que o cache tinha
-      // e o backend nunca mandava o intervalo do meio: mandar uma mensagem, sair e voltar mostrava a
-      // conversa parada na própria mensagem, e só a SEGUNDA entrada corrigia. Sem ele o stream faz o
-      // backfill normal e o dedup por id descarta o repetido — que é como era antes do cache.
-      rebuildIndex();
-      reseedDerived();
-      loading = false;
-    }
+    // NÃO pinte a tela antes do fetch. Já houve um cache da cauda aqui (b9db4367), que soltava o
+    // `loading` cedo pra abrir a conversa sem espera — e trouxe uma regressão CONFIRMADA pelo
+    // usuário: mandar mensagem, sair e voltar deixava a resposta de fora, e só a segunda entrada
+    // mostrava. A causa provável é a premissa escrita em MessageList.svelte:75 — `windowEnd` nasce
+    // síncrono em `events.length` PORQUE o Chat só monta a lista depois desta função. Montando
+    // antes, a janela nasce do tamanho do cache e pode congelar (o mesmo defeito de 25/08/2026,
+    // cujo sintoma é literalmente "a única saída era sair da conversa e voltar"). Abrir rápido vale
+    // menos que mostrar a conversa inteira; quem quiser tentar de novo, conserte a janela primeiro.
     try {
       const tail = await tailComRetentativa(signal, g);
       if (g !== histGen) return;   // outra carga assumiu no meio do voo: esta resposta é velha
-      // Costura SÓ quando o cache pintou; sem ele, substitui como sempre foi. `appendTail` assume
-      // que a cauda é a parte MAIS RECENTE, e no caminho do /clear o SSE pode ter posto uma
-      // mensagem nova em `events` durante o fetch — ali a suposição se inverte e o histórico
-      // entraria DEPOIS dela, fora de ordem. Com a condição no cache, esse caminho segue no
-      // comportamento antigo, byte por byte.
-      // Quando NENHUM id bate (transcript trocado por /clear), `appendTail` devolve só a cauda nova
-      // e joga o cache fora — a proteção que dispensa pôr o jsonl na chave do cache.
-      events = pintouDoCache ? appendTail(tail, events) : tail;
+      events = tail;
       rebuildIndex();
       reseedDerived();
       error = '';
@@ -1451,10 +1429,6 @@
       // carregou" são indistinguíveis no arquivo que a pessoa manda.
       diag.registrar({ evento: 'chat.reset', tela: 'chat', sessao: sessionName });
       lastEventId = null;   // transcript trocado (/clear): id do arquivo antigo não vale mais
-      // A cauda guardada é do transcript ANTIGO. O `appendTail` da próxima entrada a descartaria
-      // (nenhum id em comum), mas só DEPOIS de ela já ter pintado — a conversa apagada apareceria
-      // por um instante. Apagar aqui é o único ponto em que se sabe que ela morreu.
-      guardarCaudaChat(servidorDaCauda, sessionName, { eventos: [] });
       events = [];
       idIndex.clear();
       reseedDerived();          // zera activity/asstCount junto (loadHistory re-semeia com o novo)
@@ -1543,12 +1517,6 @@
   });
 
   onDestroy(() => {
-    // Guarda a CAUDA, não a conversa inteira: o que faz a tela pintar é a janela de 120 da
-    // MessageList, e cachear megabytes só moveria o custo de lugar. Só os eventos — o offset do
-    // stream JÁ foi guardado aqui e causou regressão (ver o comentário do `CaudaChat`).
-    if (events.length) {
-      guardarCaudaChat(servidorDaCauda, sessionName, { eventos: events.slice(-TAIL_FIRST) });
-    }
     alive = false;   // connectSSE/onVisible em voo viram no-op — sem EventSource fantasma
     histGen++;
     histAbort?.abort();   // e o /history em voo para de baixar (nao so de ser aplicado)
