@@ -12,6 +12,7 @@
   import ActivitySheet from '../components/ActivitySheet.svelte';
   import TerminalMirror from '../components/TerminalMirror.svelte';
   import TerminalMobile from '../components/TerminalMobile.svelte';
+  import OptionButtons from '../components/OptionButtons.svelte';
   import AskQuestionSheet from '../components/AskQuestionSheet.svelte';
   import RunSheet from '../components/RunSheet.svelte';
   import MoreSheet from '../components/MoreSheet.svelte';
@@ -704,6 +705,16 @@
   let kimiSemTranscript = $state(false);
   const kimiPreNascimento = $derived(sessionProvider === 'kimi'
     && (sessionTracked === false || (kimiSemTranscript && sessionTracked !== true)));
+  // Codex antes da thread: mesma familia do kimiPreNascimento, com uma diferenca que muda o texto
+  // da tela — aqui o composer NAO resolve. O id vem da thread, e a TUI so a abre depois de o
+  // usuario responder o que ela estiver perguntando (a aprovacao dos hooks da integracao nativa e
+  // o caso comum). Quem tira a sessao do lugar e o TERMINAL, entao e pra ele que a tela aponta.
+  const codexPreThread = $derived(sessionProvider === 'codex' && sessionTracked === false);
+  // Pergunta/opcoes vem da LISTA (poll de 5s), nao do SSE: sem thread nao ha /events pra esta
+  // sessao. A lista raspa o pane so nesse estado e so quando ha seletor na tela (registry).
+  const codexEntrada = $derived(codexPreThread ? allSessions.find((s) => s.name === sessionName) : null);
+  const codexOpcoes = $derived(codexEntrada?.options ?? []);
+  const codexPergunta = $derived(codexEntrada?.question ?? null);
   // Nascimento da sessao kimi: o hook grava o ticket ~1s apos o 1o prompt e o poll da lista traz
   // tracked=true — carrega history e conecta o SSE (que o guard de kimiPreNascimento no connectSSE
   // segurou ate aqui). Chave em PRIMITIVOS: allSessions troca de referencia a cada poll de 5s,
@@ -2099,6 +2110,21 @@
         <p class="chat-error-hint">{m.chat_mensagem_enviada_kimi()}</p>
       {/if}
     </div>
+  {:else if codexPreThread}
+    <!-- Codex antes da thread: o composer NAO resolve (a entrada do Codex vai pelo app-server, que
+         so existe com a thread aberta). Se a TUI esta num seletor, os botoes vem da LISTA — nao ha
+         SSE aqui (o /events exige transcript, que so nasce com a thread), e a lista ja classifica
+         esse pane. O terminal fica como plano B, pra pergunta que nao e um seletor (login). -->
+    <div class="chat-error">
+      <p class="chat-error-title">{m.chat_sem_thread_codex()}</p>
+      {#if codexOpcoes.length}
+        <OptionButtons question={codexPergunta ?? ''} options={codexOpcoes}
+                       onSelect={handleSelect} onCancel={handleInterrupt} />
+      {:else}
+        <p class="chat-error-hint">{m.chat_sem_thread_codex_hint()}</p>
+      {/if}
+      <button class="chat-error-acao" onclick={abrirTerminalReal}>{m.chat_abrir_terminal_codex()}</button>
+    </div>
   {:else if error}
     <div class="chat-error">
       {#if errorInfo.notFound}
@@ -2478,6 +2504,17 @@
     color: var(--text-secondary);
     text-align: center;
     line-height: 1.5;
+  }
+  .chat-error-acao {
+    margin-top: 4px;
+    padding: 8px 16px;
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--accent);
+    font: inherit;
+    font-size: var(--text-sm);
+    cursor: pointer;
   }
   .chat-error-hint code {
     font-family: var(--font-mono);

@@ -11,6 +11,8 @@
   import AcessoSettings from './AcessoSettings.svelte';
   import ListaMaquinas from './ListaMaquinas.svelte';
   import ServerEditSheet from '../ServerEditSheet.svelte';
+  import LinhaConfig from './LinhaConfig.svelte';
+  import type { ConfigServidorStore } from '../../lib/serverConfig.svelte';
   import type { RemovalSnapshot, Server } from '../../lib/auth';
   import * as m from '../../paraglide/messages';
 
@@ -30,8 +32,21 @@
     // acessível, mesmo quando o gatilho (linha de servidor, Sair) sai da a11y tree.
     fallbackFocus?: HTMLElement | null;
     onLogout: () => void | Promise<void>;
+    // Config do servidor, só pra linha das origens do terminal. Opcional porque a tela existe (e
+    // é útil) mesmo com o servidor fora do ar, quando não há config nenhuma pra ler.
+    store?: ConfigServidorStore;
   }
-  let { resolvedServer, apiTarget, fallbackFocus = null, onLogout }: Props = $props();
+  let { resolvedServer, apiTarget, fallbackFocus = null, onLogout, store }: Props = $props();
+
+  const CAMPO_TERM_ORIGINS = {
+    chave: 'term_origins', tipo: 'texto' as const,
+    rotulo: m.config_term_origins(), ajuda: m.config_term_origins_ajuda(),
+  };
+  // A origem DESTE app, quando o servidor a recusaria. Vem do próprio backend (ele responde a
+  // mesma pergunta que o handshake do terminal faz), e não de um palpite do navegador.
+  const origemRecusada = $derived(
+    store?.leitura?.terminal_origem_ok === false ? window.location.origin : '',
+  );
 
   // lista reativa local: listServers() lê localStorage e não é reativo; o contador sobe pelo mesmo
   // onServersChanged que o App usa (o sync cross-aparelho também passa por ele).
@@ -437,6 +452,17 @@
   {#if idErro}<p class="id-erro" role="alert">{idErro}</p>{/if}
 
   <AcessoSettings alvo={resolvedServer} />
+
+  <!-- Origens do terminal: mora AQUI, e não em Avançado, porque a pergunta é "de qual máquina o
+       app pode abrir um terminal nesta" — o mesmo assunto do resto do bloco. Quem tem um servidor
+       só nunca precisa disso (mesma-origem já passa); quem tem dois descobria a recusa como uma
+       tela preta escrita "desconectado". -->
+  {#if store}
+    <LinhaConfig campo={CAMPO_TERM_ORIGINS} store={store} />
+    {#if origemRecusada}
+      <p class="id-aviso" role="status">{m.config_term_origins_recusada({ origem: origemRecusada })}</p>
+    {/if}
+  {/if}
 
   <div class="ss-sep"></div>
 {/if}

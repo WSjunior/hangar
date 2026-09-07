@@ -1,5 +1,6 @@
 <script lang="ts">
   import { TermSocket, termUrlForServer, sessionExistsOnServer } from '../lib/term';
+  import { motivoDeOrigemRecusada } from '../lib/termOrigem';
   import { openShell, openNativeTerminal } from '../lib/api';
   import { listServers, onServersChanged } from '../lib/auth';
   import type { Server } from '../lib/auth';
@@ -305,7 +306,14 @@
         // sessao, o cleanup fecha o socket velho -> o efeito novo zera `caiu` -> DEPOIS chega o
         // onclose do socket velho -> sem a guarda, `caiu = true` aterrissava na sessao ERRADA (ou
         // num componente ja destruido, se foi o painel que fechou).
-        close: (motivoFechamento) => { if (vivo) { caiu = true; motivo = motivoFechamento ?? null; } },
+        close: (motivoFechamento) => {
+          if (!vivo) return;
+          caiu = true;
+          motivo = motivoFechamento ?? null;
+          // Fechou MUDO: pode ser a origem recusada no handshake (403 antes do accept, ilegível pro
+          // navegador). Mesma pergunta por HTTP, que responde com texto.
+          if (!motivo) void motivoDeOrigemRecusada(srv).then((r) => { if (vivo && r) motivo = r; });
+        },
       });
       t.onData((d: string) => sock?.send(enc.encode(d)));
 

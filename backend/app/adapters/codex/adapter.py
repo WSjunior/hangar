@@ -667,6 +667,13 @@ class CodexAdapter:
         if client is None:
             # Sessao Codex desconhecida (sem client vivo e sem sidecar) -> "dead" pro front, igual
             # ao StateMonitor do Claude quando a sessao tmux some.
+            #
+            # A sessao que ainda NAO abriu a thread (a TUI parada num seletor dela) tambem cai aqui,
+            # e quem a cobre e a LISTA: `list_with_state` le o pane dessa sessao so pra achar menu, e
+            # o chat monta os botoes com isso. Foi tentado resolver aqui, caindo no monitor de pane
+            # enquanto nao ha thread, e nao presta: este monitor nunca acabaria sozinho quando a
+            # thread abrisse (o chat ficaria no fallback ate reconectar), e no teste ele roda pra
+            # sempre, porque `has_session` ali e um mock que responde sempre "sim".
             yield StateEvent(session=name, state="dead")
             return
         sess = self._sessions[name]

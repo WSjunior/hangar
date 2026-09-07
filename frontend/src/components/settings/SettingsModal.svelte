@@ -351,7 +351,7 @@
     <SobreSettings />
   {:else if telaAtual === 'maquinas'}
     <MaquinasSettings resolvedServer={resolvedServer} apiTarget={alvo}
-      fallbackFocus={fecharEl}
+      fallbackFocus={fecharEl} {store}
       onLogout={onLogout ?? (() => {})} />
   {:else if telaAtual === 'contas'}
     <ContasSettings apiTarget={alvo} />

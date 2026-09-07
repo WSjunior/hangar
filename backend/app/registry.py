@@ -23,7 +23,8 @@ from app.pair import PairLink, rename_pair, leave as pair_leave
 from app.adapters.codex import sessions as codex_sessions
 from app.askquestion import clear_pending_askq, pergunta_aberta
 from app.state import (classify, _live_spinner, rate_limit_reset, corrige_ocioso_kimi,
-                       aprovacao_kimi, codex_turno_aberto, status_line as _pane_status)
+                       aprovacao_kimi, codex_turno_aberto, menu_codex,
+                       status_line as _pane_status)
 from app.statusline import read as _sidecar_status
 from app.adapters.codex.adapter import status_line_do_rollout as _codex_status_line
 from app.hook_state import hook_state
@@ -361,18 +362,23 @@ def _provider_do_argv(argv: list[str]) -> Optional[str]:
     return None
 
 
-def provider_of_pane(pid, children: Optional[dict[int, list[int]]] = None) -> str:
-    """Qual agente roda neste pane, lido do /proc dos descendentes.
+def agente_do_pane(pid, children: Optional[dict[int, list[int]]] = None) -> tuple[str, Optional[int]]:
+    """Qual agente roda neste pane e QUAL pid e o dele, lidos do /proc dos descendentes.
 
     NAO ha campo de comando no pane: tmux.list_panes_active() devolve so name/pid/cwd/pane_id, entao
     o caminho e o mesmo do _repl_sid — descer os descendentes e ler o cmdline.
 
+    O pid importa porque `CLAUDE_CONFIG_DIR`/`CP_ENGINE` moram no ambiente do processo do AGENTE. Numa
+    sessao aberta a mao o pane e o shell, que nao declara nenhum dos dois: lendo o pid do pane, a conta
+    caia no default (`~/.claude`) e a sessao aparecia com o badge da conta errada.
+
     Default "claude" preserva o comportamento anterior a esta funcao existir: pane nao reconhecido
-    segue tratado como Claude, em vez de sumir da lista.
+    segue tratado como Claude, em vez de sumir da lista. Pid None = nao achou agente; o call site
+    decide o fallback.
     """
     if not pid:
         # pid 0 (System Idle no Windows) e pai dele mesmo no mapa do psutil e tem a arvore da maquina inteira embaixo — visitar ele custa um _cmdline por processo da maquina, a cada poll
-        return "claude"
+        return "claude", None
     for p in _descendant_pids(pid, children):
         cmd = _cmdline(p)
         if "daemon" in cmd or "--bg-" in cmd or "--agent" in cmd:
@@ -382,8 +388,12 @@ def provider_of_pane(pid, children: Optional[dict[int, list[int]]] = None) -> st
         # acima segue servindo pra exclusao por substring, que e o uso dele.
         prov = _provider_do_argv(_argv(p))
         if prov:
-            return prov
-    return "claude"
+            return prov, p
+    return "claude", None
+
+
+def provider_of_pane(pid, children: Optional[dict[int, list[int]]] = None) -> str:
+    return agente_do_pane(pid, children)[0]
 
 
 # Cache pid -> (instante de inicio do processo, nome da sessao tmux). Um processo nunca muda de
@@ -1096,7 +1106,10 @@ class SessionRegistry:
             # jsonl muda: o --session-id nao sobrevive no cmdline (Task 0, fato 7) e resolve_tracked
             # cairia no fallback newest-by-mtime, que pegaria o transcript do CLAUDE do mesmo cwd (a
             # regressao mais cara desta task). Resolve pelo bilhete da extensao / env do wrapper.
-            prov = provider_of_pane(p["pid"], children)
+            prov, pid_agente = agente_do_pane(p["pid"], children)
+            # Quem declara conta e motor e o processo do agente, nao o pane: numa sessao aberta a mao
+            # o pane e o shell, e o shell nao tem CLAUDE_CONFIG_DIR nem CP_ENGINE.
+            pid_env = pid_agente or p["pid"]
             if prov in ("pi", "omp"):
                 jsonl = pi_session_file(p.get("pane_id", ""), p["pid"], p["cwd"], prov)
                 # tracked segue o TRANSCRITO, nao o provider. O bilhete/env sao deterministicos
@@ -1138,7 +1151,7 @@ class SessionRegistry:
             # Motor da sessão, do mesmo pid que já resolve o config_dir. É uma leitura de
             # /proc/<pid>/environ por sessão (a mesma ordem de custo do _config_dir_of ao lado) —
             # não é de graça, mas é local e sem rede. Feature em tick do SSE tem que ser barata.
-            info.engine = _engine_of(p["pid"]) if p.get("pid") else None
+            info.engine = _engine_of(pid_env) if pid_env else None
             # Conta pra pílula de cota (id do /api/cotas): com motor, a chave do engines.json; sem
             # motor e Claude, o config dir do pane — ou o default (~/.claude) quando o processo não
             # declara CLAUDE_CONFIG_DIR (o fallback é idiom dos call sites, não do _config_dir_of).
@@ -1160,7 +1173,7 @@ class SessionRegistry:
                 # desta lista. Provider sem chave conhecida (OAuth do Codex, provedor só do Pi)
                 # segue None, e a pílula cai no pior-geral como antes.
                 from app import cotas, pi_models
-                cfg_pi = _config_dir_of(p["pid"]) if p.get("pid") else None
+                cfg_pi = _config_dir_of(pid_env) if pid_env else None
                 atual = pi_models.provider_atual(jsonl, cfg_pi) if jsonl else None
                 info.conta = cotas.conta_de_provider_pi(atual)
             elif prov == "codex":
@@ -1168,7 +1181,7 @@ class SessionRegistry:
                 # /api/cotas — cair no `else` abaixo carimbaria uma conta Claude que ela nao gasta.
                 info.conta = conta_codex
             else:
-                cdir = (_config_dir_of(p["pid"]) if p.get("pid") else None) or (Path.home() / ".claude")
+                cdir = (_config_dir_of(pid_env) if pid_env else None) or (Path.home() / ".claude")
                 info.conta = f"claude:{Path(cdir).resolve()}"
             out.append(info)
             sids[p["name"]] = self._repl_sid(p["pid"], children)
@@ -1276,6 +1289,7 @@ class SessionRegistry:
 
             corrigidos, aprovacoes = await asyncio.to_thread(_kimi_sweep)
         pending = []  # infos sem marcador (ou awaiting) -> precisa raspar o pane
+        pendente_sem_thread = []  # Codex antes da thread -> raspa o pane SO pra achar menu
         for info in infos:
             # Codex: le o marcador como os outros, mas NUNCA raspa o pane. A TUI dele nao tem regua
             # nem caixa de composer, entao `classify` devolveria as duas ultimas linhas verbatim —
@@ -1288,6 +1302,14 @@ class SessionRegistry:
                     # tanto a chave do marcador quanto a leitura do turno EXIGEM um caminho
                     # (session_key(None) levanta TypeError). Sem esta saida, uma sessao Codex
                     # recem-criada derrubaria a lista INTEIRA — todas as sessoes de todo mundo.
+                    #
+                    # Mas e justamente aqui que a TUI costuma estar PERGUNTANDO alguma coisa
+                    # (aprovar os hooks que a integracao escreveu, escolher o login), e sem isto a
+                    # unica saida era um `tmux attach` na maquina. O pane so e raspado por MENU: a
+                    # ressalva acima (as duas ultimas linhas virariam uma segunda statusline) vale
+                    # pro Codex JA rodando, nao pra um seletor numerado, que e o que `classify`
+                    # reconhece. Sem menu na tela, nada muda — segue o default idle.
+                    pendente_sem_thread.append(info)
                     continue
                 marker = hook_state.get_state(_sid(info.jsonl))
                 if marker and marker[0] != "awaiting_input":
@@ -1376,6 +1398,13 @@ class SessionRegistry:
                 # Statusline + label de graca: o frame ja foi capturado pra classificar.
                 self._status_cache[info.name] = (time.monotonic(), _pane_status(frame))
                 self._label_cache[info.name] = c[1]
+        if pendente_sem_thread:
+            quadros = await asyncio.gather(*[asyncio.to_thread(tmux.capture_pane, i.name)
+                                            for i in pendente_sem_thread])
+            for info, frame in zip(pendente_sem_thread, quadros):
+                menu = menu_codex(frame)
+                if menu:
+                    info.state, (info.question, info.options) = "awaiting_input", menu
         # Pergunta que o pane nao mostra (o menu rolou pra fora — ver askquestion.pergunta_aberta).
         # FORA dos dois ramos acima de proposito: com marcador de hook a sessao nem raspa o pane, e
         # era justamente ali que a pergunta sumia. So pras que ficaram SEM menu — com menu visivel

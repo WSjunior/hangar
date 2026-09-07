@@ -598,6 +598,26 @@ def test_rate_limit_reset_le_o_banner_real_do_rodape():
     assert state_mod.rate_limit_reset("You've hit your session limit · resets 9:10pm (America/Sao_Paulo)\n") == "9:10pm"
 
 
+def test_menu_codex_le_o_seletor_de_hooks_do_pane_real():
+    # Fixture capturada de uma sessao Codex recem-criada: a TUI para no seletor de aprovacao dos
+    # hooks ANTES de abrir a thread, e ate aqui o app so oferecia `tmux attach` como saida.
+    pane = (Path(__file__).parent / "fixtures" / "pane_codex_hooks.txt").read_text(encoding="utf-8")
+    pergunta, opcoes = state_mod.menu_codex(pane)
+    assert opcoes == ["Review hooks", "Trust all and continue",
+                      "Continue without trusting (hooks won't run)"]
+    assert "trust" in (pergunta or "").lower()
+    # `classify` continua sem enxergar: o cursor do Codex e outro, e e por isso que este leitor
+    # existe separado.
+    assert classify(pane)[0] != "awaiting_input"
+
+
+def test_menu_codex_exige_o_rodape_do_widget():
+    # Lista numerada solta na conversa nao e seletor — sem o rodape, nao ha nada na tela pra clicar.
+    assert state_mod.menu_codex("passos:\n  1. um\n  2. dois\n") is None
+    # Numeracao fora de ordem tambem nao: prosa citando "1." e "3." em blocos diferentes.
+    assert state_mod.menu_codex("  1. um\n  3. tres\nPress enter to confirm or esc to go back\n") is None
+
+
 def test_rate_limit_reset_ignora_citacao_fora_do_rodape():
     # A frase citada na CONVERSA (saida de um grep, msg do usuario) nao e limite desta sessao: a
     # sessao que investigava o limite de outra ganhava o chip. So o rodape decide.

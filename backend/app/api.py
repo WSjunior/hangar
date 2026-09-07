@@ -3636,6 +3636,19 @@ def _painel_disponivel() -> bool:
     return termsock.painel_disponivel()
 
 
+def _origem_do_terminal_ok(request: Request) -> bool:
+    """A mesma pergunta que o handshake do terminal faz, respondida por HTTP (que tem corpo).
+
+    Sem `Origin` (cliente que nao e navegador) e True: o handshake tambem so cobra origem quando o
+    cabecalho existe, e responder False aqui poria um aviso de recusa numa tela que abre normal.
+    """
+    from app import termsock
+    origem = request.headers.get("origin")
+    if not origem:
+        return True
+    return termsock._origem_aceita(origem, request.headers.get("host"))
+
+
 # ─── Atualizar ─────────────────────────────────────────────────────────────────────────────────
 
 def _mudancas_pendentes() -> list[dict]:
@@ -3836,7 +3849,7 @@ async def _auto_update_loop():
 
 
 @app.get("/api/config", dependencies=[Depends(require_auth)])
-def get_config():
+def get_config(request: Request):
     """Config editavel pelo app + o que e so-leitura (exige reiniciar o servico).
 
     Segredo NUNCA volta inteiro: `estado()` devolve mascarado (gsk_••••1234) — da pra conferir QUAL
@@ -3855,6 +3868,11 @@ def get_config():
             # Ela tambem responde False num POSIX sem `pty`. Import tardio pelo mesmo motivo de
             # sempre: o termsock nao pode ser importado no topo deste modulo.
             "terminal_panel": _painel_disponivel(),
+            # A ORIGEM DESTE cliente abriria o terminal aqui? O handshake do WebSocket recusa com
+            # 403 e o navegador nao entrega corpo nem motivo — a tela dizia so "desconectado", e o
+            # unico lugar com a explicacao era o log do servidor. Com este campo a propria tela
+            # nomeia a origem recusada e manda pro campo que a libera.
+            "terminal_origem_ok": _origem_do_terminal_ok(request),
             # A versao do PROCESSO VIVO, nao a do checkout. Durante a janela entre o `git pull` e o
             # restart as duas divergem, e e exatamente ai que o botao Atualizar vive: dizer a do
             # disco aqui seria afirmar estar rodando codigo que ninguem carregou (o defeito que

@@ -1123,6 +1123,31 @@ def test_list_preenche_conta_da_sessao(tmp_path):
     assert out[0].conta == f"claude:{Path.home() / '.claude'}"
 
 
+def test_list_conta_vem_do_processo_do_agente_nao_do_pane(tmp_path):
+    """Sessão aberta à mão: o pane é o shell, e quem declara CLAUDE_CONFIG_DIR/CP_ENGINE é o
+    `claude` filho dele. Lendo o pid do pane, a conta caía no default e a sessão aparecia com o
+    badge da conta errada."""
+    reg = SessionRegistry(projects_dir=tmp_path)
+    pane = {"name": "cc", "pid": 111, "cwd": "/home/u/p", "pane_id": "%1", "active": True}
+    ambiente = {222: Path("/home/u/.claude-jefferson")}   # só o agente declara; o shell (111) não
+    with patch.object(registry.tmux, "list_panes_all", return_value={"cc": [pane]}), \
+         patch.object(reg, "resolve_tracked", return_value=("/x/s.jsonl", True)), \
+         patch.object(registry, "agente_do_pane", return_value=("claude", 222)), \
+         patch.object(registry, "_config_dir_of", side_effect=ambiente.get), \
+         patch.object(registry, "_engine_of", side_effect=lambda pid: "deepseek" if pid == 222 else None):
+        out = reg.list()
+    assert out[0].engine == "deepseek"
+    assert out[0].conta == "chave:deepseek"
+
+    with patch.object(registry.tmux, "list_panes_all", return_value={"cc": [pane]}), \
+         patch.object(reg, "resolve_tracked", return_value=("/x/s.jsonl", True)), \
+         patch.object(registry, "agente_do_pane", return_value=("claude", 222)), \
+         patch.object(registry, "_config_dir_of", side_effect=ambiente.get), \
+         patch.object(registry, "_engine_of", return_value=None):
+        out = reg.list()
+    assert out[0].conta == "claude:" + str(Path("/home/u/.claude-jefferson").resolve())
+
+
 def test_list_conta_em_pi_kimi(tmp_path):
     """Pi sem motor: conta=None (fallback smart da pílula). Kimi sem motor: a conta é o provider
     do default_model do config dele ("apikey/k3" -> "kimi:apikey"); sem provider, None."""
@@ -1130,7 +1155,7 @@ def test_list_conta_em_pi_kimi(tmp_path):
 
     reg = SessionRegistry(projects_dir=tmp_path)
     with patch.object(registry.tmux, "list_panes_all", return_value={"kk": [pane]}), \
-         patch.object(registry, "provider_of_pane", return_value="pi"), \
+         patch.object(registry, "agente_do_pane", return_value=("pi", 111)), \
          patch.object(registry, "pi_session_file", return_value="/x/s.jsonl"), \
          patch.object(registry, "_engine_of", return_value=None):
         out = reg.list()
@@ -1140,7 +1165,7 @@ def test_list_conta_em_pi_kimi(tmp_path):
     for padrao, esperado in (("apikey", "kimi:apikey"), (None, None)):
         reg = SessionRegistry(projects_dir=tmp_path)
         with patch.object(registry.tmux, "list_panes_all", return_value={"kk": [pane]}), \
-             patch.object(registry, "provider_of_pane", return_value="kimi"), \
+             patch.object(registry, "agente_do_pane", return_value=("kimi", 111)), \
              patch.object(registry, "kimi_session_file", return_value="/x/s.jsonl"), \
              patch.object(registry, "_engine_of", return_value=None), \
              patch.object(cotas, "provider_padrao_kimi", return_value=padrao):

@@ -278,6 +278,47 @@ def _live_spinner(pane_text: str) -> Optional[str]:
     return None
 
 
+# Seletor da TUI do Codex ANTES da thread (aprovar hooks, escolher login). Cursor proprio: `›`
+# (U+203A), que o `classify` nao conhece — e nao entra la de proposito, porque o `classify` roda em
+# TODO pane e um chevron solto no scrollback viraria menu fantasma. Aqui o portao e o rodape do
+# proprio widget, que so existe com ele na tela.
+_CODEX_OPT_RE = re.compile(r"^\s*[›>]?\s*(\d+)\.\s+(.*\S)\s*$")
+_CODEX_RODAPE = "press enter to confirm"
+
+
+def menu_codex(pane_text: str) -> Optional[tuple[Optional[str], list[str]]]:
+    """(pergunta, opcoes) do seletor do Codex, ou None quando nao ha seletor na tela.
+
+    Existe separado do `classify` porque a TUI do Codex nao tem regua nem composer pra ancorar a
+    leitura — sem menu, ler o pane dela devolve as duas ultimas linhas como se fossem estado. Aqui
+    so o widget e reconhecido: rodape presente, opcoes numeradas em sequencia (1, 2, 3...) e
+    contiguas. Qualquer desvio disso devolve None, que e "nao sei", nao "nao ha".
+    """
+    linhas = pane_text.splitlines()
+    # `_rodape` e nao `linhas[-6:]`: o widget desenha no ALTO do pane e o `capture-pane` devolve a
+    # altura inteira, entao as ultimas linhas sao brancas — o mesmo tropeco do dialogo de confianca.
+    if _CODEX_RODAPE not in _rodape(linhas).lower():
+        return None
+    opcoes: list[str] = []
+    primeira = None
+    for i, ln in enumerate(linhas):
+        mm = _CODEX_OPT_RE.match(ln)
+        if not mm:
+            if opcoes:
+                break          # bloco contiguo: a primeira linha fora do padrao fecha o menu
+            continue
+        if int(mm.group(1)) != len(opcoes) + 1:
+            return None        # numeracao fora de ordem: nao e o widget
+        if primeira is None:
+            primeira = i
+        opcoes.append(mm.group(2))
+    if len(opcoes) < 2:
+        return None
+    # Pergunta = a ultima linha nao vazia acima do bloco (o titulo do widget).
+    pergunta = next((ln.strip() for ln in reversed(linhas[:primeira]) if ln.strip()), None)
+    return pergunta, opcoes
+
+
 def classify(pane_text: str) -> tuple[str, Optional[str], Optional[str], Optional[list[str]]]:
     """Return (state, label, question, options).
 
