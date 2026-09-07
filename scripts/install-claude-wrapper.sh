@@ -121,12 +121,42 @@ install_fish() {
 # Helper chamado pelos wrappers de shell. Symlink absoluto preserva a descoberta do backend/.env
 # mesmo quando executado de qualquer cwd e atualiza automaticamente depois de git pull.
 mkdir -p "$HOME/.local/bin"
-chmod +x "$SCRIPT_DIR/hangar-codex"
-ln -sfn "$SCRIPT_DIR/hangar-codex" "$HOME/.local/bin/hangar-codex"
-echo "  installed Codex helper -> $HOME/.local/bin/hangar-codex"
-chmod +x "$SCRIPT_DIR/hangar-codex-tui"
-ln -sfn "$SCRIPT_DIR/hangar-codex-tui" "$HOME/.local/bin/hangar-codex-tui"
-echo "  installed Codex launcher -> $HOME/.local/bin/hangar-codex-tui"
+# No Git Bash o `ln -s` COPIA e devolve 0, e a copia se localiza pelo PROPRIO caminho: os dois
+# scripts do Codex fazem `_REPO = Path(__file__).parent.parent`, entao a copia em ~/.local/bin
+# procura `backend/` em ~/.local e morre. Por isso a checagem e `test -L` DEPOIS do ln, e nao o
+# codigo de saida dele. Mesmo conserto que o install-hangar-send.sh ja faz, e o mesmo shim que o
+# install.ps1 escreve — as duas fontes precisam produzir a mesma coisa.
+# Interpretador PINADO: deixar o shebang decidir cai no `python3` do PATH, que no Windows e o
+# atalho da Microsoft Store. O venv do backend e o unico que tem `websockets`, que o -tui importa.
+# No Linux o `ln` linka de verdade, `test -L` e verdadeiro e nada abaixo do `if` roda.
+py_do_venv() {
+    for c in "$REPO_DIR/backend/.venv/bin/python" "$REPO_DIR/backend/.venv/Scripts/python.exe"; do
+        [ -x "$c" ] && { echo "$c"; return; }
+    done
+    echo python3
+}
+
+linkar_codex() {
+    origem="$SCRIPT_DIR/$1"; destino="$HOME/.local/bin/$1"
+    chmod +x "$origem"
+    ln -sfn "$origem" "$destino"
+    if [ -L "$destino" ]; then
+        echo "  installed $2 -> $destino"
+        return
+    fi
+    {
+        echo "#!/bin/sh"
+        echo "# Gerado pelo instalador do hangar (install.ps1 / install-claude-wrapper.sh)."
+        echo "PATH='$HOME/.local/bin':\$PATH; export PATH"
+        echo "exec '$(py_do_venv)' '$origem' \"\$@\""
+    } > "$destino"
+    chmod +x "$destino"
+    echo "  installed $2 -> $destino (copia -> shim; o ln do Git Bash nao linka)"
+}
+
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+linkar_codex hangar-codex "Codex helper"
+linkar_codex hangar-codex-tui "Codex launcher"
 chmod +x "$SCRIPT_DIR/hangar-engine"
 ln -sfn "$SCRIPT_DIR/hangar-engine" "$HOME/.local/bin/hangar-engine"
 echo "  installed engine helper -> $HOME/.local/bin/hangar-engine"

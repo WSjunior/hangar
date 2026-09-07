@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -103,6 +104,26 @@ def _rollout_de(thread_id: str) -> str:
     achados = sorted(raiz.glob(f"*/*/*/rollout-*-{thread_id}.jsonl"),
                      key=lambda p: p.stat().st_mtime, reverse=True)
     return str(achados[0]) if achados else ""
+
+
+def _codex() -> str:
+    """O caminho do binario `codex`, resolvido UMA vez.
+
+    Nome cru nao serve no Windows: o `CreateProcess` nao aplica PATHEXT, e o codex do npm e um
+    `codex.CMD` — `Popen(["codex", ...])` estoura com WinError 2 enquanto o mesmo comando com o
+    caminho resolvido funciona (medido 07/09/2026). O `shutil.which` aplica PATHEXT e devolve o
+    arquivo real, entao serve aos dois sistemas sem ramo por OS.
+
+    Falha ALTA e legivel: sem isto o pane morria com um traceback de FileNotFoundError apontando
+    pro `subprocess.py`, que nao diz a quem le que o que falta e o proprio Codex.
+    """
+    caminho = shutil.which("codex")
+    if not caminho:
+        raise SystemExit(
+            "hangar-codex-tui: nao achei o executavel `codex` no PATH deste processo. "
+            "Instale o Codex CLI (npm install -g @openai/codex) e reabra a sessao."
+        )
+    return caminho
 
 
 def _porta_livre() -> str:
@@ -233,7 +254,7 @@ def main() -> int:
     # justamente a mensagem que explica uma largada que falhou.
     erros = tempfile.TemporaryFile()
     servidor = subprocess.Popen(
-        ["codex", "app-server", "--listen", endpoint],
+        [_codex(), "app-server", "--listen", endpoint],
         stdout=subprocess.DEVNULL, stderr=erros,
     )
 
@@ -264,8 +285,13 @@ def main() -> int:
 
     # SIGTERM/SIGHUP viram SystemExit pra que o `finally` rode: `tmux kill-session` derruba o pane
     # por sinal, e sem isto o app-server ficaria escutando sem dono.
-    for sinal in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sinal, lambda *_: sys.exit(143))
+    # `getattr`: SIGHUP nao existe no Windows e o acesso direto levantava AttributeError aqui,
+    # matando o pane DEPOIS de o app-server ja ter subido (medido 07/09/2026). No Linux os dois
+    # existem e o laco e o mesmo de antes.
+    for nome in ("SIGTERM", "SIGHUP"):
+        sinal = getattr(signal, nome, None)
+        if sinal is not None:
+            signal.signal(sinal, lambda *_: sys.exit(143))
 
     # A escolha de modelo do usuario, traduzida pro que o binario entende. Sao DUAS gramaticas
     # diferentes e e por isso que a traducao mora aqui, e nao no model_args como a dos outros
@@ -289,11 +315,11 @@ def main() -> int:
         # que ninguem vai responder — a TUI trava e o app fica olhando uma sessao muda.
         # `-C` fica de fora porque o pane ja nasce no cwd certo (`tmux new-session -c`) e a conversa
         # carrega o dela; o id vai no fim, onde o subcomando o espera.
-        argv = ["codex", "resume", "--remote", endpoint, "--no-alt-screen",
+        argv = [_codex(), "resume", "--remote", endpoint, "--no-alt-screen",
                 "--sandbox", SANDBOX, "--ask-for-approval", APPROVAL,
                 *flags_da_escolha, args.resume]
     else:
-        argv = ["codex", "--remote", endpoint, "--no-alt-screen", "-C", cwd,
+        argv = [_codex(), "--remote", endpoint, "--no-alt-screen", "-C", cwd,
                 "--sandbox", SANDBOX, "--ask-for-approval", APPROVAL, *flags_da_escolha]
     if args.prompt:
         argv.append(args.prompt)

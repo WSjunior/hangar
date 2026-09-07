@@ -1946,6 +1946,49 @@ if (-not $bash) {
     if (Escrever-Lancador $lancadorPreview $conteudoPreview 'cmd') { Ok "lancador hangar-preview.cmd criado em $binUsuario" }
     else { Ok 'lancador hangar-preview.cmd ja atualizado' }
 
+    # (2e) lancadores do Codex. O `hangar-codex-tui` e o COMANDO do pane de toda sessao Codex, e o
+    # backend o procura com `shutil.which` (registry._exigir_lancador_codex). No Windows o `which`
+    # so acha o que casa PATHEXT (.COM;.EXE;.BAT;.CMD;...), entao arquivo SEM extensao nunca e
+    # achado por mais que ~/.local/bin esteja no PATH - medido: which('hangar-codex-tui')=None ao
+    # lado de which('hangar-engine')=...CMD. Sem estes artefatos, criar sessao Codex devolve 400.
+    # Por PYTHON (os dois sao `#!/usr/bin/env python3`), nunca por bash nem por node.
+    # O `-tui` leva o python do VENV, nao o do sistema: ele importa `websockets`, que so existe la
+    # (medido: sistema nao tem, venv tem 16.0). Ele TENTA se reexecutar no venv sozinho, mas
+    # procura `backend/.venv/bin/python` - layout POSIX, inexistente no Windows -, entao quem
+    # escolhe o interpretador tem de ser este instalador. O `hangar-codex` fica no python do
+    # sistema: ele so importa stdlib.
+    # `$rota` (forma /c/... do repo) so e calculada mais abaixo, no trecho do hangar-send —
+    # usar ela aqui gerava shim apontando pra `/scripts/...`. Calculo a minha.
+    $rotaRepo = ($raiz -replace '\\', '/') -replace '^([A-Za-z]):', '/$1'
+    $pyTui = Join-Path $raiz 'backend\.venv\Scripts\python.exe'
+    $argTui = ''
+    if (-not (Test-Path $pyTui)) { $pyTui = $pyExe; $argTui = $arg }
+    if (-not $pyExe) {
+        Falta 'lancadores do Codex nao criados - precisa de um Python real (ver acima)'
+    } else {
+        foreach ($par in @(@('hangar-codex-tui', $pyTui, $argTui), @('hangar-codex', $pyExe, $arg))) {
+            $nome, $py, $a = $par
+            $cmdPath = Join-Path $binUsuario "$nome.cmd"
+            $corpo = "@echo off`r`n" +
+                     "set `"PATH=%USERPROFILE%\.local\bin;%PATH%`"`r`n" +
+                     "`"$py`"$a `"$raiz\scripts\$nome`" %*`r`n"
+            if (Escrever-Lancador $cmdPath $corpo 'cmd') { Ok "lancador $nome.cmd criado em $binUsuario" }
+            else { Ok "lancador $nome.cmd ja atualizado" }
+            # Shim sh pro Git Bash, mesma razao do hangar-send/hangar-preview: o `ln -s` de la
+            # COPIA, e a copia resolve `_REPO = Path(__file__).parent.parent` como ~/.local, onde
+            # nao ha `backend/`. Interpretador PINADO em vez de deixar o shebang decidir: um
+            # `python3` no Git Bash cai no atalho da Microsoft Store.
+            $pyMsysTui = ($py -replace '\\', '/') -replace '^([A-Za-z]):', '/$1'
+            $shPath = Join-Path $binUsuario $nome
+            $corpoSh = "#!/bin/sh`n" +
+                       "# Gerado pelo instalador do hangar (install.ps1 / install-hangar-send.sh).`n" +
+                       "PATH='$binMsys':`$PATH; export PATH`n" +
+                       "exec '$pyMsysTui'$a '$rotaRepo/scripts/$nome' `"`$@`"`n"
+            if (Escrever-Lancador $shPath $corpoSh 'sh') { Ok "$nome do ~/.local/bin aponta pro script do repo" }
+            else { Ok "$nome do ~/.local/bin ja atualizado" }
+        }
+    }
+
     # (3) PATH do usuario, pra `hangar-send` funcionar de qualquer terminal (e pro bash achar o shim).
     $pathUsuario = [Environment]::GetEnvironmentVariable('Path', 'User')
     if ($pathUsuario -notlike "*$binUsuario*") {

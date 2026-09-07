@@ -49,9 +49,15 @@ def _versao(cli: str) -> str | None:
     if hit and time.monotonic() - hit[0] < 600:
         return hit[1]
     v: str | None = None
-    if shutil.which(cli):
+    # O CAMINHO resolvido, nao o nome: no Windows o `CreateProcess` nao aplica PATHEXT, entao
+    # `run(["codex", ...])` levanta FileNotFoundError — que e OSError, cai no except abaixo e
+    # zerava a versao. Efeito medido em 07/09/2026: TODO harness instalado por npm (codex, pi —
+    # sao .CMD) aparecia com versao vazia no painel, enquanto os .EXE (claude, tmux) apareciam
+    # certos. No Linux o which devolve o mesmo caminho que o exec resolveria, entao nada muda la.
+    exe = shutil.which(cli)
+    if exe:
         try:
-            r = subprocess.run([cli, "-V" if cli == "tmux" else "--version"], capture_output=True, text=True, timeout=8,
+            r = subprocess.run([exe, "-V" if cli == "tmux" else "--version"], capture_output=True, text=True, timeout=8,
                                encoding="utf-8", errors="replace")
             linha = (r.stdout or r.stderr or "").strip().splitlines()
             v = linha[0].strip() if linha else ""

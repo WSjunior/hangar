@@ -42,6 +42,30 @@ def _sanitize(name: str) -> str:
 _PREFIXO_MIN = 8   # piso de prefixo: "ok"/"sim"/"1" nao confirmam frase alheia que comeca igual
 
 
+_RUN_CONTRABARRA = re.compile(r"\\\\+")
+
+
+def _encolhe_contrabarra(s: str) -> str:
+    """O texto como o transcript o guarda quando o psmux comeu contrabarra no caminho.
+
+    No Windows o `send-keys -l` leva o texto no argv, e o psmux desescapa: corrida de N
+    contrabarras chega com ceil(N/2) (medido byte a byte em 07/09/2026 — 2 viram 1, 3 viram 2).
+    A prova de entrega compara STRING, entao o eco corrompido nunca casava com a entrada e a msg
+    virava bolha de 'nao chegou' sobre uma msg que CHEGOU — e o RESGATE, que existe justamente
+    pra desfazer isso, tambem nao disparava.
+
+    Aplicar a mesma regra do lado da ENTRADA da fila devolve a forma que o transcript tem. Isto
+    nao e conserto da origem (esse mora no terminal_input, que passou a colar pelo clipboard):
+    e tolerancia pro que JA aconteceu e esta gravado na fila.
+
+    Sem contrabarra no texto, devolve o proprio objeto — nenhuma mensagem normal paga nada, e no
+    Linux (onde o argv nao come nada) a forma extra so nunca casa com linha nenhuma.
+    """
+    if "\\" not in s:
+        return s
+    return _RUN_CONTRABARRA.sub(lambda m: "\\" * -(-len(m.group(0)) // 2), s)
+
+
 def _linhas_da_entrada(r: dict) -> set[str]:
     """Formas do texto de UMA entrada da fila: cru, sem o marcador de anexo, e cada uma por linha.
 
@@ -53,6 +77,9 @@ def _linhas_da_entrada(r: dict) -> set[str]:
     ls = {cru, podado,
           *(ln.strip() for ln in cru.split("\n")),
           *(ln.strip() for ln in podado.split("\n"))}
+    # Formas ENCOLHIDAS junto: no Windows o eco pode ter chegado com contrabarra a menos (ver
+    # _encolhe_contrabarra), e sem elas nem o casamento normal nem o resgate casavam.
+    ls |= {_encolhe_contrabarra(x) for x in ls}
     ls.discard("")
     return ls
 
