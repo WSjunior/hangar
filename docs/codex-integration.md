@@ -73,6 +73,18 @@ O painel mostra a identidade nativa. Homônimos de outra origem e associações 
 preservados com erro, sem escolher um plugin arbitrariamente. A ponte continua reconhecendo as
 skills pela origem Claude e só retira duplicatas quando o destino nativo está habilitado.
 
+Os scripts de `~/.claude/hooks/` também passam pela importação: links são materializados antes
+do importador nativo, e o resultado de `~/.codex/hooks/` é publicado com suas dependências e
+permissão de execução. Os arquivos entram no manifesto e na verificação de mudanças; editar a
+fonte ou perder uma cópia gerenciada dispara reparo na próxima reconciliação. Colisão com um
+script exclusivo preserva esse arquivo e impede publicar a nova configuração de hooks.
+
+O `security-guidance` emite telemetria (`metrics`, `rewakeSummary`) e, no bootstrap, duas linhas
+JSON com anúncio `async`. O adaptador `codex-hook-json.py`, instalado em
+`CODEX_HOME/.hangar-hooks/`, converte somente esse plugin para o contrato estrito do Codex.
+Mensagens, contexto, decisões de bloqueio, stderr e código de saída são preservados. A mudança
+dos comandos exige nova aprovação na interface de hooks do Codex; o Hangar não concede confiança.
+
 Hooks, comandos, subagentes e MCPs passam por uma área temporária com apenas as fontes da
 importação. Os caminhos de saída são remapeados para os destinos definitivos. O escritor
 oficial `config/batchWrite` edita uma cópia de `config.toml`; o Hangar valida novamente o

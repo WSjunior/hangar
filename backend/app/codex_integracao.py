@@ -22,7 +22,7 @@ from app.codex_arquivos import (
     AlteradoExternamente, backup, exclusivo, gravar, hash_bytes, json_bytes,
     json_obj, ler, mesclar_hooks, remapear, transformar,
 )
-from app.codex_compat import normalizar_hooks, texto_instrucoes, wrapper_instalado
+from app.codex_compat import normalizar_hooks, normalizar_security_guidance, texto_instrucoes, wrapper_instalado
 from app.codex_importador import CodexNativo, CodexNativoErro
 from app.codex_msgs import msg, serializar
 
@@ -600,11 +600,14 @@ class IntegracaoCodex:
         if not raiz.resolve().is_relative_to(cache.resolve()):
             raise ValueError("Plugin fora do cache do Codex")
         paths = {raiz / "hooks" / "hooks.json", raiz / "hooks.json"}
+        security_guidance = False
         for rel in (".codex-plugin/plugin.json", ".claude-plugin/plugin.json"):
             manifest = raiz / rel
             if not manifest.is_file():
                 continue
-            declaradas = json_obj(manifest).get("hooks")
+            dados = json_obj(manifest)
+            security_guidance |= dados.get("name") == "security-guidance"
+            declaradas = dados.get("hooks")
             if isinstance(declaradas, dict):
                 paths.add(manifest)
             else:
@@ -612,6 +615,9 @@ class IntegracaoCodex:
                 if not isinstance(refs, list) or any(not isinstance(r, str) for r in refs):
                     raise ValueError("Referências de hooks inválidas no plugin")
                 paths.update(raiz / r for r in refs)
+        wrapper_json = self.codex_home / ".hangar-hooks" / "codex-hook-json.py"
+        if security_guidance:
+            gravar(wrapper_json, (_REPO / "scripts/codex-hook-json.py").read_bytes(), ler(wrapper_json), self.backups)
         for path in sorted(paths):
             if not path.is_file():
                 continue
@@ -620,6 +626,8 @@ class IntegracaoCodex:
             def converter(raw):
                 data = json.loads(raw)
                 result = self._normalizar(data)
+                if security_guidance:
+                    result = normalizar_security_guidance(result, sys.executable, wrapper_json, windows=os.name == "nt")
                 return raw if data == result else json_bytes(result)
             if transformar(path, converter, self.backups):
                 self._confianca()
@@ -673,10 +681,11 @@ class IntegracaoCodex:
             # O detector nativo ignora alguns shapes inválidos; isso nunca significa remoção.
             mesclar_hooks({}, config, {})
             gravar(cc / "settings.json", json_bytes(config), None)
-            for nome in ("commands", "agents"):
+            for nome in ("commands", "agents", "hooks"):
                 origem = self.home / ".claude" / nome
                 if origem.is_dir():
-                    shutil.copytree(origem, cc / nome)
+                    # O importador não segue symlinks; materializa também guardas ligados ao repo.
+                    shutil.copytree(origem, cc / nome, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git"))
             source_mcp = self.home / ".claude.json"
             mcp_raw = ler(source_mcp)
             if mcp_raw is not None:
@@ -720,9 +729,9 @@ class IntegracaoCodex:
                 hooks = {"hooks": {}}
             if self.fingerprint(fontes=True) != inicio:
                 raise AlteradoExternamente("Fontes do Claude mudaram durante a importação")
-            self._hooks(hooks, registro)
-            desejados, confiaveis = {}, set()
+            desejados, confiaveis, modos = {}, set(), {}
             for src_root, dst_root in ((cx / "agents", self.codex_home / "agents"),
+                                       (cx / "hooks", self.codex_home / "hooks"),
                                        (stage / ".agents" / "skills", self.home / ".agents" / "skills")):
                 if not src_root.is_dir():
                     continue
@@ -736,21 +745,27 @@ class IntegracaoCodex:
                     except UnicodeDecodeError:
                         pass
                     desejados[dst] = data
+                    if src_root == cx / "hooks":
+                        modos[dst] = 0o700 if src.stat().st_mode & 0o111 else 0o600
                     if src_root == cx / "agents":
                         if src.stem in historico["agents"]:
                             confiaveis.add(dst)
-                    elif src.relative_to(src_root).parts[0] in historico["commands"]:
+                    elif src_root == stage / ".agents" / "skills" and src.relative_to(src_root).parts[0] in historico["commands"]:
                         confiaveis.add(dst)
             anteriores = registro.get("artefatos", {})
             guardados = {k: v for k, v in anteriores.items() if Path(k).stem in congelados}
             manifesto, avisos = reconciliar_arquivos(
                 desejados, {k: v for k, v in anteriores.items() if k not in guardados},
                 self.backups, confiaveis=confiaveis,
+                modos=modos,
             )
             manifesto.update(guardados)
             registro["artefatos"] = manifesto
             self._estado["avisos"].extend(avisos)
             self._checkpoint(registro)
+            if any(manifesto.get(str(p), {}).get("hash") != hash_bytes(desejados[p]) for p in modos):
+                raise ValueError("Scripts de hooks não publicados; configuração anterior preservada")
+            self._hooks(hooks, registro)
             # Não vincula um agente cujo arquivo colidiu com conteúdo exclusivo do Codex.
             agentes = native_cfg.get("agents", {})
             agentes = {n: v for n, v in agentes.items() if not isinstance(v, dict) or
@@ -773,14 +788,19 @@ class IntegracaoCodex:
 
     def fingerprint(self, *, fontes: bool = False) -> str:
         h = hashlib.sha256()
+        h.update(b"hooks-com-artefatos-v1")
         caminhos = [self.home / ".claude" / "settings.json", self.home / ".claude.json"]
         if not fontes:
             caminhos.extend([self.codex_home / "hooks.json", self.codex_home / "AGENTS.md",
                              self.codex_home / "config.toml", self.codex_home / "plugins" / "installed_plugins.json"])
+            caminhos.extend(Path(p) for p in json_obj(self.raiz / "estado.json").get("artefatos", {})
+                            if Path(p).is_relative_to(self.codex_home / "hooks"))
+            caminhos.append(_REPO / "scripts/codex-hook-json.py")
+            caminhos.append(self.codex_home / ".hangar-hooks/codex-hook-json.py")
         caminhos.extend([self.home / ".claude/plugins/installed_plugins.json",
                          self.home / ".claude/plugins/known_marketplaces.json"])
         from app import skill_bridge
-        roots = {self.home / ".claude/commands", self.home / ".claude/agents"}
+        roots = {self.home / ".claude/commands", self.home / ".claude/agents", self.home / ".claude/hooks"}
         roots.update(p.resolve() for p in skill_bridge._varrer_fontes(self.home).values())
         roots.update({self.home / ".claude/skills", self.home / ".agents/skills", _REPO / "skills"})
         for raiz in sorted(roots):
@@ -789,6 +809,8 @@ class IntegracaoCodex:
                 if not isinstance(exc, FileNotFoundError):
                     raise exc
             for atual, dirs, nomes in os.walk(raiz, onerror=falhou):
+                dirs[:] = [d for d in dirs if d not in ("__pycache__", ".git")]
+                nomes = [n for n in nomes if not n.endswith(".pyc")]
                 caminhos.extend(Path(atual) / nome for nome in [*dirs, *nomes])
         for path in sorted(caminhos):
             try:

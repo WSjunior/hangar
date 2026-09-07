@@ -1735,6 +1735,18 @@ Claude e `claude-mem-local` no do Codex. Nome do plugin + origem confirmada iden
 operações e na checagem de skills habilitadas. Não associar só pelo nome e não esquecer o destino
 ao desabilitar: isso deixaria o plugin antigo executando. Mais de um alias possível é erro.
 
+**Hooks importados precisam de prova de execução (07/09/2026):** o importador reescrevia
+`~/.claude/hooks/guard_tmux.py` para `~/.codex/hooks/guard_tmux.py`, mas a área temporária não
+recebia `hooks/` e a publicação só recolhia agentes/skills. O resultado era arquivo ausente e
+toda ferramenta bloqueada, inclusive a leitura do `CLAUDE.md`. Agora os scripts (links
+materializados), dependências e permissão de execução atravessam as duas etapas; o manifesto
+detecta cópia perdida e fonte alterada. A configuração só é publicada depois dos arquivos.
+O `security-guidance` 2.0.7 provocava os outros dois erros medidos no Codex 0.153.4:
+`SessionStart` emite anúncio `async` + resposta com `metrics`, e `Stop` também emite `metrics`.
+São extensões do Claude, recusadas pelo JSON estrito do Codex. Só esse plugin recebe
+`codex-hook-json.py`; bloqueios e contexto são preservados, sem autoaprovar os comandos novos.
+O global continua sendo lido por instrução do `AGENTS.md`, não inserido no contexto inicial.
+
 ## tmux + Claude Code truecolor
 
 Inside tmux, Claude Code caps color depth to 256 and renders theme colors wrong (teal / pink / washed-out)

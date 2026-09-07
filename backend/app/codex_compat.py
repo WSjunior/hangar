@@ -187,6 +187,26 @@ def normalizar_hooks(config: dict, python_bin: str, wrapper: Path, *, windows: b
     return novo
 
 
+def normalizar_security_guidance(config: dict, python_bin: str, wrapper: Path, *, windows: bool = False) -> dict:
+    """Somente o plugin confirmado pelo chamador emite este protocolo de telemetria."""
+    novo = deepcopy(config)
+    split = _split_windows if windows else shlex.split
+    for grupos in novo.get("hooks", {}).values():
+        for grupo in grupos:
+            for hook in grupo.get("hooks", []):
+                command = hook.get("command")
+                if hook.get("type") != "command" or not isinstance(command, str):
+                    continue
+                try:
+                    args = split(command)
+                except ValueError:
+                    args = []
+                if len(args) == 4 and _nome_binario(args[1]) == wrapper.name and args[2] == "--":
+                    continue
+                hook["command"] = _comando([python_bin, str(wrapper), "--", command], windows=windows)
+    return novo
+
+
 def texto_instrucoes(atual: str, claude_home: Path) -> str:
     """Mantém um único bloco no início e preserva o restante das instruções."""
     restante = atual
