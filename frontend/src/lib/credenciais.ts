@@ -190,27 +190,35 @@ export function consertarHarness(alvo: Server | null, conserto: string): Promise
   return em(alvo, `/api/harness/conserto/${encodeURIComponent(conserto)}`, { method: 'POST' });
 }
 
+// Código + parâmetros vêm do backend (`codex_msgs.CATALOGO`); o front traduz por `harness_codex_m_<codigo>`.
+// `texto` é o fallback em pt para código que este app ainda não conhece. String crua = backend antigo.
+export type MensagemCodex = { codigo: string | null; params: Record<string, string>; texto: string } | string;
+
 export interface IntegracaoCodex {
   estado: 'ocioso' | 'executando' | 'ok' | 'parcial' | 'erro' | 'indisponivel';
-  etapa: string;
+  etapa: MensagemCodex;
   ultima_execucao: string | null;
   proxima_atualizacao: string | null;
   plugins: { id: string; versao: string; origem: string }[];
-  erros: string[];
-  avisos: string[];
+  erros: MensagemCodex[];
+  avisos: MensagemCodex[];
   confianca_pendente: boolean;
   automatica: boolean;
+  skills?: { ponte: number; nativas: number };
+}
+
+// `AbortSignal.any` só existe do Safari 17.4 em diante; num iPhone mais velho lançava dentro do
+// `req()` e derrubava toda chamada de credenciais/harness, não só a do Codex.
+function comTeto(signal: AbortSignal | undefined, ms: number): AbortSignal {
+  const teto = AbortSignal.timeout(ms);
+  if (!signal) return teto;
+  return typeof AbortSignal.any === 'function' ? AbortSignal.any([signal, teto]) : signal;
 }
 
 export function codexIntegracaoEstado(alvo: Server | null, signal?: AbortSignal): Promise<IntegracaoCodex> {
-  return em(alvo, '/api/harness/codex/integracao', {
-    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(8000)]) : AbortSignal.timeout(8000),
-  });
+  return em(alvo, '/api/harness/codex/integracao', { signal: comTeto(signal, 8000) });
 }
 
 export function codexIntegracaoReconciliar(alvo: Server | null, signal?: AbortSignal): Promise<IntegracaoCodex> {
-  return em(alvo, '/api/harness/codex/integracao', {
-    method: 'POST',
-    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(8000)]) : AbortSignal.timeout(8000),
-  });
+  return em(alvo, '/api/harness/codex/integracao', { method: 'POST', signal: comTeto(signal, 8000) });
 }

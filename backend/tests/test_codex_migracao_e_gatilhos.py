@@ -213,9 +213,10 @@ async def test_erro_inesperado_nao_deixa_o_estado_preso_em_executando(tmp_path, 
     monkeypatch.setattr(service, "_plugins", AsyncMock(side_effect=TypeError("shape inesperado")))
     estado = await service.reconciliar()
     assert estado["estado"] == "erro"
-    assert any("TypeError" in e for e in estado["erros"])
+    assert estado["erros"][0]["codigo"] == "erro_falha_inesperada"
+    assert estado["erros"][0]["params"] == {"tipo": "TypeError"}
     assert service.status()["estado"] == "erro", "o botão não fica preso"
-    assert not any("shape" in e for e in estado["erros"]), "detalhe só no log"
+    assert "shape" not in estado["erros"][0]["texto"], "detalhe só no log"
 
 
 @pytest.mark.parametrize("resposta", [{"data": "x"}, {"data": [{"hooks": "nada"}]}, {"data": ["x"]}, "x"])
@@ -227,6 +228,51 @@ async def test_hooks_list_em_formato_desconhecido_vira_aviso(tmp_path, resposta)
     codex = type("C", (), {"request": AsyncMock(return_value=resposta)})()
     await service._conferir_confianca(codex)
     assert any("não informou a confiança" in a for a in service._estado["avisos"])
+
+
+async def test_md_solto_em_agents_e_ignorado_com_aviso_sem_derrubar_a_etapa(tmp_path, monkeypatch):
+    from app.codex_importador import CodexNativoErro
+    home = _home(tmp_path)
+    (home / ".claude/agents").mkdir()
+    (home / ".claude/agents/vision.md").write_text("---\nname: vision\n---\nvê imagens")
+    (home / ".claude/agents/README.md").write_text("# só documentação")
+    (home / ".claude/settings.json").write_text('{"enabledPlugins": {}, "hooks": {}, "env": {}}')
+
+    class Importer:
+        def __init__(self, stage, cx, binario):
+            self.stage, self.cx = stage, cx
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def detectar(self):
+            return [{"itemType": "SUBAGENTS", "details": {"subagents": [{"name": "vision"}]}}]
+        async def importar(self, itens):
+            (self.cx / "agents").mkdir(parents=True, exist_ok=True)
+            (self.cx / "agents/vision.md").write_text("vision convertido")
+            (self.cx / "hooks.json").write_text('{"hooks": {}}')
+            return {"itemTypeResults": []}
+        async def historicos_importacao(self):
+            raise CodexNativoErro("sem histórico")
+
+    service = IntegracaoCodex(home, home / ".codex", nativo=Importer)
+    service._estado = codex_integracao._snapshot()
+    service.raiz.mkdir(parents=True)
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(service, "_config", AsyncMock())
+    registro = {"artefatos": {str(home / ".codex/agents/README.md"): {"hash": "antigo"}}}
+    await service._fragmentos(Importer(None, None, None), {}, registro)
+    assert (home / ".codex/agents/vision.md").read_text() == "vision convertido"
+    assert any("README.md" in a and "ignorados" in a for a in service._estado["avisos"])
+    assert str(home / ".codex/agents/README.md") in registro["artefatos"], "artefato do nome ignorado não é podado"
+
+
+def test_status_traz_resumo_de_skills_do_manifesto(tmp_path):
+    home = _home(tmp_path)
+    service = IntegracaoCodex(home, home / ".codex")
+    assert service.status()["skills"] == {"ponte": 0, "nativas": 0}
+    service.raiz.mkdir(parents=True)
+    (service.raiz / "estado.json").write_text(json.dumps({"skills": {
+        "a": {"mode": "symlink"}, "b": {"mode": "copy"}, "c": {"mode": "native"}, "d": {"mode": "native"}}}))
+    assert service.status()["skills"] == {"ponte": 2, "nativas": 2}
 
 
 async def test_rodada_grava_assinatura_da_fonte(tmp_path, monkeypatch):

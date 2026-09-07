@@ -214,11 +214,12 @@ def main() -> int:
     # uma instalação longa termina lá) — aqui só se avisa e se espera um pouco. Falha não impede a TUI.
     try:
         resultado = _integracao_codex()
+        texto = lambda m: m.get("texto", "") if isinstance(m, dict) else str(m or "")  # noqa: E731
         if resultado.get("estado") not in (None, "ocioso", "ok") or resultado.get("erros"):
-            print(f"hangar-codex-tui: integração Codex: {resultado['estado']} — {resultado.get('etapa', '')}",
+            print(f"hangar-codex-tui: integração Codex: {resultado['estado']} — {texto(resultado.get('etapa'))}",
                   file=sys.stderr)
         for aviso in [*resultado.get("avisos", []), *resultado.get("erros", [])]:
-            print(f"hangar-codex-tui: {aviso}", file=sys.stderr)
+            print(f"hangar-codex-tui: {texto(aviso)}", file=sys.stderr)
         if resultado.get("confianca_pendente"):
             print("hangar-codex-tui: há itens aguardando sua confirmação de confiança no Codex",
                   file=sys.stderr)

@@ -153,6 +153,22 @@ describe('integração do Codex em Harnesses', () => {
     expect(chamadasIntegracao()[2][1]?.method).toBe('POST');
   });
 
+  it('mensagem com código é traduzida; código desconhecido e string crua mostram o texto', async () => {
+    ler = async () => resposta(estado({
+      estado: 'parcial',
+      etapa: { codigo: 'etapa_pendencias', params: {}, texto: 'Confira os itens pendentes' },
+      erros: [{ codigo: 'erro_plugin', params: { id: 'ecc@ecc' }, texto: 'Não foi possível reconciliar o plugin ecc@ecc' }],
+      avisos: [{ codigo: 'inventado_no_futuro', params: {}, texto: 'Texto em pt do backend novo' }, 'String crua de backend antigo'],
+      skills: { ponte: 42, nativas: 333 },
+    }));
+    const { el } = await montar();
+    expect(el.textContent).toContain(m.harness_codex_m_etapa_pendencias());
+    expect(el.textContent).toContain(m.harness_codex_m_erro_plugin({ id: 'ecc@ecc' }));
+    expect(el.textContent).toContain('Texto em pt do backend novo');
+    expect(el.textContent).toContain('String crua de backend antigo');
+    expect(el.textContent).toContain(m.harness_codex_skills({ ponte: 42, nativas: 333 }));
+  });
+
   it('o interruptor grava codex_sync no servidor e só muda depois da releitura', async () => {
     let automatica = true;
     ler = async () => resposta(estado({ automatica }));

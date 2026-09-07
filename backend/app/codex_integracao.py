@@ -24,6 +24,7 @@ from app.codex_arquivos import (
 )
 from app.codex_compat import normalizar_hooks, texto_instrucoes, wrapper_instalado
 from app.codex_importador import CodexNativo, CodexNativoErro
+from app.codex_msgs import msg, serializar
 
 _log = logging.getLogger("hangar.codex.integracao")
 _REPO = Path(__file__).resolve().parents[2]
@@ -154,22 +155,40 @@ class IntegracaoCodex:
         return self.raiz / "backups"
 
     def status(self) -> dict:
+        estado = self._status()
+        estado["skills"] = self._resumo_skills()
+        # Código + parâmetros pra tela traduzir; o texto vai junto pro log e pro lançador.
+        estado["etapa"] = serializar(estado.get("etapa"))
+        estado["avisos"] = [serializar(a) for a in estado.get("avisos", [])]
+        estado["erros"] = [serializar(e) for e in estado.get("erros", [])]
+        return estado
+
+    def _status(self) -> dict:
         if self._estado is not None and self._estado.get("estado") == "executando":
             return copy.deepcopy(self._estado)
         try:
             salvo = json_obj(self.raiz / "estado.json")
             estado = {**_snapshot(), **salvo.get("status", {})}
             if estado["estado"] == "executando":
-                estado.update(estado="ocioso", etapa="Aguardando reconciliação após reinício")
+                estado.update(estado="ocioso", etapa=msg("etapa_reinicio"))
             if self._estado is not None and (self._estado.get("ultima_execucao") or "") >= (estado.get("ultima_execucao") or ""):
                 return copy.deepcopy(self._estado)
             return estado
         except (OSError, ValueError):
-            return {**_snapshot(), "estado": "erro", "erros": ["Registro da integração ilegível"]}
+            return {**_snapshot(), "estado": "erro", "erros": [msg("erro_registro_ilegivel")]}
+
+    def _resumo_skills(self) -> dict:
+        """O card mostra isto no lugar do item "ponte de skills" que a ponte antiga tinha."""
+        try:
+            skills = json_obj(self.raiz / "estado.json").get("skills", {})
+        except (OSError, ValueError):
+            return {"ponte": 0, "nativas": 0}
+        modos = [d.get("mode") for d in skills.values() if isinstance(d, dict)]
+        return {"ponte": sum(m in ("symlink", "copy") for m in modos), "nativas": modos.count("native")}
 
     async def iniciar(self, motivo: str = "manual", forcar: bool = True) -> dict:
         if self._task is None or self._task.done():
-            self._estado = {**self.status(), "estado": "executando", "etapa": "Aguardando integração"}
+            self._estado = {**self.status(), "estado": "executando", "etapa": msg("etapa_aguardando")}
             self._task = asyncio.create_task(self.reconciliar(motivo, forcar))
         return self.status()
 
@@ -209,20 +228,20 @@ class IntegracaoCodex:
 
     def _confianca(self) -> None:
         self._estado["confianca_pendente"] = True
-        aviso = "Hooks alterados: confira a aprovação dos hooks no Codex antes de usá-los."
+        aviso = msg("aviso_hooks_alterados")
         if aviso not in self._estado["avisos"]:
             self._estado["avisos"].append(aviso)
 
     async def reconciliar(self, motivo: str = "manual", forcar: bool = False) -> dict:
         anterior = self.status()
-        self._estado = {**_snapshot(), "estado": "executando", "etapa": "Inventariando configuração",
+        self._estado = {**_snapshot(), "estado": "executando", "etapa": msg("etapa_inventariando"),
                         "plugins": anterior["plugins"], "ultima_execucao": anterior["ultima_execucao"],
                         "confianca_pendente": anterior["confianca_pendente"]}
         if not (self.home / ".claude" / "settings.json").is_file():
-            self._estado.update(estado="indisponivel", etapa="Claude Code sem configuração nesta máquina")
+            self._estado.update(estado="indisponivel", etapa=msg("etapa_sem_claude"))
             return self.status()
         if self.nativo is CodexNativo and not shutil.which(self.binario):
-            self._estado.update(estado="indisponivel", etapa="Codex CLI não encontrado")
+            self._estado.update(estado="indisponivel", etapa=msg("etapa_sem_codex"))
             return self.status()
         registro = {}
         self._plugins_confirmados = set()
@@ -239,39 +258,39 @@ class IntegracaoCodex:
             self.codex_home.mkdir(parents=True, exist_ok=True)
             settings = json_obj(self.home / ".claude" / "settings.json")
             desejados = _plugins_desejados(settings)
-            self._etapa("Preparando instruções e hooks")
+            self._etapa(msg("etapa_instrucoes"))
             await self._mutacao(self._instrucoes)
             await self._mutacao(self._migrar_ponte_antiga)
             await self._mutacao(self._hooks, {}, registro)
             async with self.nativo(self.home, self.codex_home, self.binario) as codex:
                 await self._config(codex, {}, {})
-                self._etapa("Importando pelo Codex")
+                self._etapa(msg("etapa_importando"))
                 await self._plugins(codex, desejados, registro, forcar)
-                self._etapa("Reconciliando hooks, comandos, agentes e MCPs")
+                self._etapa(msg("etapa_fragmentos"))
                 await self._fragmentos(codex, settings, registro)
                 self._checkpoint(registro)
-                self._etapa("Atualizando ponte de skills")
+                self._etapa(msg("etapa_skills"))
                 await self._mutacao(self._skills, registro)
                 self._checkpoint(registro)
                 await self._conferir_confianca(codex)
             self._estado["estado"] = "parcial" if self._estado["erros"] else "ok"
         except asyncio.CancelledError:
-            self._estado.update(estado="ocioso", etapa="Reconciliação interrompida; será retomada")
+            self._estado.update(estado="ocioso", etapa=msg("etapa_interrompida"))
             raise
         except (OSError, ValueError, RuntimeError) as exc:
             # Não devolve conteúdo de config ou saídas de subprocessos que podem conter chaves.
-            self._erro(f"Falha na integração ({type(exc).__name__}); configuração anterior preservada nas etapas não concluídas")
+            self._erro(msg("erro_falha", tipo=type(exc).__name__))
             self._estado["estado"] = "erro"
             _log.debug("Falha da integração", exc_info=True)
         except Exception as exc:  # noqa: BLE001 — erro escapando deixava o estado preso em "executando"
-            self._erro(f"Falha inesperada na integração ({type(exc).__name__}); configuração anterior preservada nas etapas não concluídas")
+            self._erro(msg("erro_falha_inesperada", tipo=type(exc).__name__))
             self._estado["estado"] = "erro"
             _log.exception("Falha inesperada da integração")
         finally:
             if carregado:
                 self._estado["ultima_execucao"] = _iso(time.time())
                 if self._estado["estado"] != "ocioso":
-                    self._estado["etapa"] = "Concluído" if self._estado["estado"] == "ok" else "Confira os itens pendentes"
+                    self._estado["etapa"] = msg("etapa_concluido") if self._estado["estado"] == "ok" else msg("etapa_pendencias")
                 registro["status"] = self.status()
                 # Fonte que mudou no meio da rodada não vira assinatura: a próxima abertura relê.
                 try:
@@ -312,7 +331,7 @@ class IntegracaoCodex:
                 self._estado["confianca_pendente"] = False
                 self._estado["avisos"] = [a for a in self._estado["avisos"] if not a.startswith("Hooks alterados:")]
         except CodexNativoErro:
-            self._estado["avisos"].append("Esta versão do Codex não informou a confiança dos hooks.")
+            self._estado["avisos"].append(msg("aviso_confianca_indisponivel"))
 
     def _hooks(self, fonte: dict, registro: dict) -> None:
         path = self.codex_home / "hooks.json"
@@ -454,7 +473,7 @@ class IntegracaoCodex:
             destino = _origem_marketplace(mercados.get(mercado, {}))
             if origem is None or (mercado in mercados and origem != destino):
                 bloqueados.add(id_)
-                self._erro(f"Origem do marketplace {mercado} não confirmada; instalação existente preservada")
+                self._erro(msg("erro_marketplace_origem", marketplace=mercado))
         candidatos = desejados - bloqueados
         # Recorta a seleção nativa pela identidade completa, inclusive em marketplaces homônimos.
         itens = []
@@ -474,7 +493,7 @@ class IntegracaoCodex:
             result = await codex.importar(itens)
             for tipo in result.get("itemTypeResults", []):
                 if tipo.get("failures"):
-                    self._erro("Importação nativa de plugins incompleta; confira os plugins pendentes")
+                    self._erro(msg("erro_plugins_incompletos"))
         agora = time.time()
         ultima = max(registro.get("marketplaces_em", 0), registro.get("marketplaces_tentativa_em", 0))
         falhas_anteriores = set(registro.get("marketplaces_pendentes", []))
@@ -486,12 +505,12 @@ class IntegracaoCodex:
                 if source.get("source_type") != "git":
                     continue
                 try:
-                    self._etapa(f"Atualizando marketplace {marketplace}")
+                    self._etapa(msg("etapa_marketplace", marketplace=marketplace))
                     result = await codex.atualizar_marketplace(marketplace)
                     if result.get("errors"):
                         raise CodexNativoErro("Falha ao atualizar marketplace")
                 except (OSError, ValueError, RuntimeError):
-                    self._erro(f"Não foi possível atualizar o marketplace {marketplace}")
+                    self._erro(msg("erro_marketplace_atualizar", marketplace=marketplace))
                     falhas.add(marketplace)
             registro["marketplaces_tentativa_em"] = agora
             registro["marketplaces_pendentes"] = sorted(falhas)
@@ -499,7 +518,7 @@ class IntegracaoCodex:
                 registro["marketplaces_em"] = agora
         else:
             for marketplace in sorted(falhas_anteriores):
-                self._erro(f"Atualização do marketplace {marketplace} permanece pendente; nova tentativa agendada")
+                self._erro(msg("erro_marketplace_pendente", marketplace=marketplace))
         inventario = {p["pluginId"]: p for p in await codex.plugins_instalados()}
         plugins_pendentes = set(registro.get("plugins_pendentes", [])) & desejados
         plugins = {p: anteriores[p] for p in bloqueados if p in anteriores}
@@ -510,7 +529,7 @@ class IntegracaoCodex:
                 if (atualizar or id_ in plugins_pendentes or not conhecido or not instalado or
                         instalado.get("version") != conhecido.get("versao") or
                         not Path(conhecido.get("path", "")).is_dir()):
-                    self._etapa(f"Instalando ou atualizando {id_}")
+                    self._etapa(msg("etapa_plugin", id=id_))
                     data = await codex.instalar_plugin(id_)
                     conhecido = {"path": data["installedPath"], "versao": data.get("version", ""),
                                  "origem": id_.rsplit("@", 1)[1]}
@@ -521,7 +540,7 @@ class IntegracaoCodex:
                 plugins_pendentes.discard(id_)
                 self._checkpoint(registro)
             except (OSError, KeyError, ValueError, RuntimeError):
-                self._erro(f"Não foi possível reconciliar o plugin {id_}")
+                self._erro(msg("erro_plugin", id=id_))
                 plugins_pendentes.add(id_)
                 if id_ in anteriores:
                     plugins[id_] = anteriores[id_]
@@ -579,7 +598,7 @@ class IntegracaoCodex:
         try:
             histories = await codex.historicos_importacao()
         except CodexNativoErro:
-            self._estado["avisos"].append("Histórico nativo indisponível; colisões existentes serão preservadas.")
+            self._estado["avisos"].append(msg("aviso_historico_indisponivel"))
             return result
         tipos = {"MCP_SERVER_CONFIG": "mcp_servers", "SUBAGENTS": "agents", "COMMANDS": "commands"}
         for entry in histories:
@@ -639,13 +658,21 @@ class IntegracaoCodex:
                             ("env" in value and (not isinstance(value["env"], dict) or any(not isinstance(v, str) for v in value["env"].values())))):
                         raise ValueError("Entrada MCP inválida; servidores existentes preservados")
                 gravar(stage / ".claude.json", json_bytes({"mcpServers": mcp}), None)
+            congelados: set[str] = set()
             async with self.nativo(stage, cx, self.binario) as importer:
                 itens = [i for i in await importer.detectar() if i.get("itemType") in _IMPORTAVEIS]
                 for pasta, tipo, detalhe in (("agents", "SUBAGENTS", "subagents"), ("commands", "COMMANDS", "commands")):
-                    fontes_md = list((cc / pasta).rglob("*.md"))
-                    reconhecidos = sum(len(i.get("details", {}).get(detalhe, [])) for i in itens if i.get("itemType") == tipo)
-                    if len(fontes_md) != reconhecidos:
-                        raise ValueError(f"Fontes de {pasta} não reconhecidas pelo Codex; artefatos existentes preservados")
+                    nomes = {e.get("name", "") for i in itens if i.get("itemType") == tipo
+                             for e in i.get("details", {}).get(detalhe, []) if isinstance(e, dict)}
+                    # Um README.md em ~/.claude/agents não é agente: fica de fora com aviso, e o que já
+                    # tinha sido importado com esse nome é preservado — sem derrubar a etapa inteira.
+                    ignorados = [md for md in sorted((cc / pasta).rglob("*.md"))
+                                 if not any(md.stem == n or md.stem in n for n in nomes)]
+                    if ignorados:
+                        congelados.update(md.stem for md in ignorados)
+                        self._estado["avisos"].append(msg(
+                            "aviso_ignorados", pasta=pasta,
+                            arquivos=", ".join(str(md.relative_to(cc / pasta)) for md in ignorados)))
                 if itens:
                     result = await importer.importar(itens)
                     if any(r.get("failures") for r in result.get("itemTypeResults", [])):
@@ -683,9 +710,14 @@ class IntegracaoCodex:
                             confiaveis.add(dst)
                     elif src.relative_to(src_root).parts[0] in historico["commands"]:
                         confiaveis.add(dst)
+            anteriores = registro.get("artefatos", {})
+            guardados = {k: v for k, v in anteriores.items()
+                         if any(stem in Path(k).stem for stem in congelados)}
             manifesto, avisos = reconciliar_arquivos(
-                desejados, registro.get("artefatos", {}), self.backups, confiaveis=confiaveis,
+                desejados, {k: v for k, v in anteriores.items() if k not in guardados},
+                self.backups, confiaveis=confiaveis,
             )
+            manifesto.update(guardados)
             registro["artefatos"] = manifesto
             self._estado["avisos"].extend(avisos)
             self._checkpoint(registro)

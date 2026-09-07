@@ -6,7 +6,7 @@
   // no meio do trabalho.
   import {
     listarHarnesses, consertarHarness, codexIntegracaoEstado, codexIntegracaoReconciliar,
-    type Harness, type ItemHarness, type IntegracaoCodex,
+    type Harness, type ItemHarness, type IntegracaoCodex, type MensagemCodex,
   } from '../../lib/credenciais';
   import { patchConfig, patchConfigForServer } from '../../lib/api';
   import * as m from '../../paraglide/messages';
@@ -85,6 +85,15 @@
   function atualizar() {
     void carregar();
     if (consulta && !reconciliando) void consultarIntegracao(consulta);
+  }
+
+  // Mensagem da integração: código do backend → frase daqui (harness_codex_m_<codigo>); código que
+  // este app não conhece mostra o `texto` em pt em vez de sumir.
+  function textoDe(msg: MensagemCodex | null | undefined): string {
+    if (!msg) return '';
+    if (typeof msg === 'string') return msg;
+    const fn = msg.codigo ? (m as Record<string, unknown>)[`harness_codex_m_${msg.codigo}`] : undefined;
+    return typeof fn === 'function' ? (fn as (p: Record<string, string>) => string)(msg.params ?? {}) : msg.texto;
   }
 
   const ESTADOS_INTEGRACAO: Record<IntegracaoCodex['estado'], () => string> = {
@@ -256,13 +265,16 @@
             </label>
             <p class="hs-aviso" role="status">
               {ESTADOS_INTEGRACAO[integracao.estado]?.() ?? integracao.estado}
-              {#if integracao.etapa} · {integracao.etapa}{/if}
+              {#if textoDe(integracao.etapa)} · {textoDe(integracao.etapa)}{/if}
             </p>
             <p class="hs-aviso">{m.harness_codex_ultima({ data: dataIntegracao(integracao.ultima_execucao) })}</p>
             {#if integracao.proxima_atualizacao}
               <p class="hs-aviso">{m.harness_codex_proxima({ data: dataIntegracao(integracao.proxima_atualizacao) })}</p>
             {/if}
             <p class="hs-aviso">{m.harness_codex_plugins({ n: integracao.plugins.length })}</p>
+            {#if integracao.skills}
+              <p class="hs-aviso">{m.harness_codex_skills({ ponte: integracao.skills.ponte, nativas: integracao.skills.nativas })}</p>
+            {/if}
             {#if integracao.plugins.length}
               <ul class="hs-plugins">
                 {#each integracao.plugins as plugin}
@@ -273,8 +285,8 @@
             {#if integracao.confianca_pendente}
               <p class="hs-aviso" role="status">{m.harness_codex_confianca()}</p>
             {/if}
-            {#each integracao.avisos as aviso}<p class="hs-aviso">{aviso}</p>{/each}
-            {#each integracao.erros as falha}<p class="hs-aviso erro" role="alert">{falha}</p>{/each}
+            {#each integracao.avisos as aviso}<p class="hs-aviso">{textoDe(aviso)}</p>{/each}
+            {#each integracao.erros as falha}<p class="hs-aviso erro" role="alert">{textoDe(falha)}</p>{/each}
           {/if}
           {#if erroIntegracao}<p class="hs-aviso erro" role="alert">{erroIntegracao}</p>{/if}
         </div>

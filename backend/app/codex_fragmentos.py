@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 
+from app.codex_msgs import msg
 from app.codex_arquivos import AlteradoExternamente, backup, gravar, hash_bytes, ler
 
 
@@ -25,7 +26,7 @@ def reconciliar_arquivos(desejados: dict[Path, bytes], anteriores: dict, backups
             for tentativa in range(3):
                 atual = ler(path)
                 if atual is not None and atual != data and esperado is None and nome not in historico:
-                    avisos.append(f"Artefato sem proveniência preservado: {path}")
+                    avisos.append(msg("aviso_artefato_sem_proveniencia", path=path))
                     break
                 try:
                     # Em artefatos gerenciados, a fonte Claude prevalece também sobre
@@ -37,7 +38,7 @@ def reconciliar_arquivos(desejados: dict[Path, bytes], anteriores: dict, backups
                     if tentativa == 2:
                         raise
         except (OSError, ValueError, AlteradoExternamente) as exc:
-            avisos.append(f"Artefato {path} preservado após falha: {exc}")
+            avisos.append(msg("aviso_artefato_falha", path=path, erro=exc))
             if esperado is not None:
                 manifesto[nome] = deepcopy(anterior)
     for nome, anterior in sorted(anteriores.items()):
@@ -49,7 +50,7 @@ def reconciliar_arquivos(desejados: dict[Path, bytes], anteriores: dict, backups
             if atual is None:
                 continue
             if hash_bytes(atual) != anterior["hash"]:
-                avisos.append(f"Artefato obsoleto com alteração local preservado: {path}")
+                avisos.append(msg("aviso_artefato_obsoleto_alterado", path=path))
                 manifesto[nome] = deepcopy(anterior)
                 continue
             backup(path, atual, backups)
@@ -57,7 +58,7 @@ def reconciliar_arquivos(desejados: dict[Path, bytes], anteriores: dict, backups
                 raise AlteradoExternamente(f"Artefato alterado durante a retirada: {path}")
             path.unlink()
         except (OSError, ValueError, AlteradoExternamente) as exc:
-            avisos.append(f"Artefato obsoleto {path} preservado após falha: {exc}")
+            avisos.append(msg("aviso_artefato_obsoleto_falha", path=path, erro=exc))
             manifesto[nome] = deepcopy(anterior)
     return manifesto, avisos
 
@@ -115,7 +116,7 @@ def mesclar_config(atual: dict, fonte: dict, anteriores: dict,
     historico = confiaveis or set()
     for nome, valor in fonte.items():
         if nome in atual and nome not in anteriores and nome not in historico and atual[nome] != valor:
-            avisos.append(f"Entrada de configuração sem proveniência preservada: {nome}")
+            avisos.append(msg("aviso_config_sem_proveniencia", nome=nome))
             continue
         novo[nome] = _mesclar_campos(atual.get(nome), valor, anteriores.get(nome))
         manifesto[nome] = deepcopy(valor)
@@ -127,5 +128,5 @@ def mesclar_config(atual: dict, fonte: dict, anteriores: dict,
             novo.pop(nome, None)
         else:
             novo[nome] = restante
-            avisos.append(f"Campos particulares preservados na entrada removida da fonte: {nome}")
+            avisos.append(msg("aviso_config_campos_particulares", nome=nome))
     return novo, manifesto, avisos

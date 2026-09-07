@@ -514,6 +514,20 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
     num formato inesperado dava `AttributeError`, escapava do `except`, e o botão ficava cinza e o
     lançador esperava 20s a cada sessão até reiniciar o backend. Hoje qualquer exceção vira
     "erro" (detalhe só no log) e o formato do `hooks/list` é conferido antes de percorrer.
+  - **Um `.md` que o Codex não reconhece não derruba a etapa** (medido no CLI 0.153.4: o
+    detector aceita qualquer `.md` em `commands/`, inclusive sem frontmatter e em subpasta, mas um
+    `README.md` em `agents/` fica de fora). O PR abortava hooks, env, MCPs e agentes inteiros quando
+    a contagem não batia, toda rodada. Hoje o arquivo não reconhecido entra num aviso, é ignorado,
+    e o artefato que já existia com aquele nome não é podado.
+  - **Mensagem pra tela é código + parâmetros** (`app/codex_msgs.py`, `CATALOGO`; o front traduz
+    por `harness_codex_m_<codigo>`). Uma `Mensagem` É uma `str` — log, lançador e testes seguem
+    lendo o texto —, e `status()` a serializa em `{codigo, params, texto}`; código que o app não
+    conhece cai no `texto`. Armadilha medida: `copy.deepcopy` numa `str` com `__new__` próprio
+    reconstrói pelo VALOR (`KeyError: 'Concluído'`), daí o `__reduce__`/`__deepcopy__`.
+  - `AbortSignal.any` só existe do Safari 17.4 em diante (`credenciais.ts:comTeto`); sem o
+    fallback, um iPhone mais velho derrubava toda chamada de credenciais/harness.
+  - O card mostra `skills: N na ponte, M nativas` do manifesto, no lugar do item "ponte de skills"
+    que o PR tirou — sem isso, com a sincronização desligada ninguém via as skills paradas.
   - `settings.env` vai inteiro pro `shell_environment_policy.set` — as 16 variáveis desta
     máquina, 6 delas tokens (Grafana, Jira, Jenkins, Outline, ElevenLabs), também no
     `estado.json` do manifesto (0600). É o comportamento do importador nativo; o que o Hangar

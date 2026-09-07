@@ -167,7 +167,10 @@ As rotas autenticadas são:
 | `POST /api/harness/codex/integracao` | Inicia ou compartilha uma reconciliação manual, retorna HTTP 202 com o snapshot. |
 
 O snapshot informa `estado`, `etapa`, `ultima_execucao`, `proxima_atualizacao`, `plugins`,
-`erros`, `avisos` e `confianca_pendente`. Os estados são `ocioso`, `executando`, `ok`, `parcial`,
+`skills` (`{ponte, nativas}`), `erros`, `avisos`, `confianca_pendente` e `automatica`. `etapa`,
+`erros` e `avisos` são mensagens `{codigo, params, texto}`: o catálogo é
+`backend/app/codex_msgs.py` e a interface traduz por `harness_codex_m_<codigo>`; `texto` é o
+fallback em português para um código que o app ainda não conhece. Os estados são `ocioso`, `executando`, `ok`, `parcial`,
 `erro` e `indisponivel`. Datas usam ISO 8601 em UTC; a interface apresenta o horário local.
 
 O card acompanha uma operação em execução aproximadamente a cada 1,5 segundo e encerra as

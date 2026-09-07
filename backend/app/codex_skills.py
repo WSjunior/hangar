@@ -9,6 +9,7 @@ import re
 import tempfile
 
 from app import skill_bridge
+from app.codex_msgs import msg
 from app.codex_arquivos import AlteradoExternamente, backup, gravar, hash_bytes, ler
 
 
@@ -101,7 +102,7 @@ def _nativas(plugins: dict, avisos: list[str]) -> list[tuple[str, set[str]]]:
                     if nomes:
                         resultado.append((id_, nomes))
         except (OSError, ValueError, KeyError, TypeError) as exc:
-            avisos.append(f"Skills do plugin {id_} não puderam ser confirmadas: {exc}")
+            avisos.append(msg("aviso_plugin_skills", id=id_, erro=exc))
     return resultado
 
 
@@ -163,7 +164,7 @@ def _copiar(destino: Path, origem: Path, anterior: dict, backups: Path, avisos: 
             for tentativa in range(3):
                 atual = ler(path)
                 if atual is not None and rel not in velhos:
-                    avisos.append(f"Arquivo exclusivo preservado: {path}")
+                    avisos.append(msg("aviso_arquivo_exclusivo", path=path))
                     break
                 try:
                     # O Claude define o conteúdo gerenciado. A releitura a cada tentativa
@@ -175,7 +176,7 @@ def _copiar(destino: Path, origem: Path, anterior: dict, backups: Path, avisos: 
                     if tentativa == 2:
                         raise
         except (OSError, ValueError, AlteradoExternamente) as exc:
-            avisos.append(f"Arquivo {destino / rel} preservado após falha: {exc}")
+            avisos.append(msg("aviso_arquivo_falha", path=destino / rel, erro=exc))
             if rel in velhos:
                 gerenciados[rel] = velhos[rel]
     for rel, hash_anterior in velhos.items():
@@ -187,7 +188,7 @@ def _copiar(destino: Path, origem: Path, anterior: dict, backups: Path, avisos: 
             if atual is None:
                 continue
             if hash_bytes(atual) != hash_anterior:
-                avisos.append(f"Arquivo removido na fonte, mas alterado localmente, preservado: {path}")
+                avisos.append(msg("aviso_arquivo_removido_alterado", path=path))
                 gerenciados[rel] = hash_anterior
                 continue
             backup(path, atual, backups)
@@ -195,7 +196,7 @@ def _copiar(destino: Path, origem: Path, anterior: dict, backups: Path, avisos: 
                 raise ValueError(f"Arquivo alterado durante a retirada: {path}")
             path.unlink()
         except (OSError, ValueError) as exc:
-            avisos.append(f"Arquivo {destino / rel} preservado após falha: {exc}")
+            avisos.append(msg("aviso_arquivo_falha", path=destino / rel, erro=exc))
             gerenciados[rel] = hash_anterior
     return {"path": str(destino), "mode": "copy", "source": str(origem), "files": gerenciados}
 
@@ -210,7 +211,7 @@ def _retirar_copia(destino: Path, anterior: dict, backups: Path, avisos: list[st
             continue
         if hash_bytes(atual) != hash_anterior:
             restantes[rel] = hash_anterior
-            avisos.append(f"Alteração local preservada ao retirar ponte: {path}")
+            avisos.append(msg("aviso_ponte_alteracao_local", path=path))
             continue
         backup(path, atual, backups)
         if ler(path) != atual:
@@ -221,7 +222,7 @@ def _retirar_copia(destino: Path, anterior: dict, backups: Path, avisos: list[st
         if not path.is_symlink() and not any(path.iterdir()):
             path.rmdir()
     if destino.exists():
-        avisos.append(f"Conteúdo pessoal preservado na ponte desnecessária: {destino}")
+        avisos.append(msg("aviso_ponte_conteudo_pessoal", destino=destino))
     return {**anterior, "files": restantes}
 
 
@@ -250,7 +251,7 @@ def _duplicata_nativa(nome: str, origem: Path, home: Path, anterior: dict,
     if not os.path.lexists(destino) or destino.resolve() == origem.resolve():
         return
     if destino.is_symlink() or not destino.is_dir():
-        avisos.append(f"Skill nativa sem proveniência preservada: {destino}")
+        avisos.append(msg("aviso_skill_nativa_sem_proveniencia", destino=destino))
         return
     atuais = _arquivos(destino)
     hashes = {rel: hash_bytes(data) for rel, data in atuais.items()}
@@ -259,7 +260,7 @@ def _duplicata_nativa(nome: str, origem: Path, home: Path, anterior: dict,
                   and historico.get("source", historico.get("origem")) == str(origem))
     # ~/.agents/skills é fonte do Pi, do Kimi e do omp: só sai o que o Hangar mesmo pôs lá.
     if not comprovada:
-        avisos.append(f"Skill {nome} existe no plugin nativo e em ~/.agents/skills; a cópia pessoal foi preservada")
+        avisos.append(msg("aviso_skill_duplicata_plugin", nome=nome))
         return
     # Confere novamente depois de gravar os backups e antes de retirar qualquer arquivo.
     for rel, data in atuais.items():
@@ -309,18 +310,18 @@ def reconciliar_skills(home: Path, codex_home: Path, plugins: dict, registro_ski
                 if nativa:
                     _duplicata_nativa(nome, origem, home, registro_skills.get(nome, {}), backups, avisos)
                 elif em_agents and (home / ".agents/skills" / nome).is_dir() and _arquivos(home / ".agents/skills" / nome) != _arquivos(origem):
-                    avisos.append(f"Skill {nome} em ~/.agents/skills difere da fonte do Claude; o Codex usa a de ~/.agents/skills")
+                    avisos.append(msg("aviso_skill_agents_difere", nome=nome))
                 continue
             if os.path.lexists(destino):
                 if destino.is_symlink():
                     if not _link_gerenciado(destino, raizes):
-                        avisos.append(f"Link pessoal preservado: {destino}")
+                        avisos.append(msg("aviso_link_pessoal", destino=destino))
                         continue
                     if destino.resolve() == origem.resolve():
                         manifesto[nome] = {"path": str(destino), "mode": "symlink", "source": str(origem), "files": {}}
                         continue
                 elif anterior.get("mode") != "copy":
-                    avisos.append(f"Skill pessoal preservada: {destino}")
+                    avisos.append(msg("aviso_skill_pessoal", destino=destino))
                     continue
                 else:
                     manifesto[nome] = _copiar(destino, origem, anterior, backups, avisos)
@@ -334,7 +335,7 @@ def reconciliar_skills(home: Path, codex_home: Path, plugins: dict, registro_ski
                     raise
                 manifesto[nome] = _copiar(destino, origem, anterior, backups, avisos)
         except (OSError, ValueError) as exc:
-            avisos.append(f"Skill {nome} preservada após falha: {exc}")
+            avisos.append(msg("aviso_skill_falha", nome=nome, erro=exc))
             if nome not in manifesto and anterior:
                 manifesto[nome] = anterior
     # Fontes vazias podem significar instalação temporariamente indisponível.
@@ -345,7 +346,7 @@ def reconciliar_skills(home: Path, codex_home: Path, plugins: dict, registro_ski
                 destino.unlink()
         for nome, anterior in registro_skills.items():
             if Path(nome).name != nome or nome in {".", ".."}:
-                avisos.append(f"Nome inválido no manifesto de skills preservado: {nome}")
+                avisos.append(msg("aviso_skill_nome_invalido", nome=nome))
                 continue
             destino = ponte / nome
             estado = _estado_anterior(anterior, destino)
@@ -357,8 +358,8 @@ def reconciliar_skills(home: Path, codex_home: Path, plugins: dict, registro_ski
                         manifesto[nome] = resto
                 except (OSError, ValueError) as exc:
                     manifesto[nome] = estado
-                    avisos.append(f"Cópia obsoleta {nome} preservada após falha: {exc}")
+                    avisos.append(msg("aviso_copia_obsoleta_falha", nome=nome, erro=exc))
     else:
         manifesto = dict(registro_skills)
-        avisos.append("Nenhuma fonte de skills disponível; pontes anteriores preservadas.")
+        avisos.append(msg("aviso_skills_sem_fonte"))
     return manifesto, avisos
