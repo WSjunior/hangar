@@ -514,8 +514,8 @@
 
   async function handleCreate(name: string, cwd?: string, configDir?: string | null, provider?: Provider,
                               engine?: string | null, model?: string | null, effort?: string | null,
-                              permissionMode?: string | null) {
-    await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode);
+                              permissionMode?: string | null, ompProfile?: string | null) {
+    await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile);
     onNavigateToChat(name);
   }
 
@@ -1083,6 +1083,17 @@
     const g = histGen;
     histGap = '';
     histRetentando = false;   // carga nova comeca sem o aviso da anterior, igual ao histGap
+    // Carga nova = geração nova: a busca de antigos da anterior foi abortada junto, e deixar a
+    // trava levantada faria a primeira rolagem até o topo desta ser engolida em silêncio.
+    buscandoAntigos = false;
+    // NÃO pinte a tela antes do fetch. Já houve um cache da cauda aqui (b9db4367), que soltava o
+    // `loading` cedo pra abrir a conversa sem espera — e trouxe uma regressão CONFIRMADA pelo
+    // usuário: mandar mensagem, sair e voltar deixava a resposta de fora, e só a segunda entrada
+    // mostrava. A causa provável é a premissa escrita em MessageList.svelte:75 — `windowEnd` nasce
+    // síncrono em `events.length` PORQUE o Chat só monta a lista depois desta função. Montando
+    // antes, a janela nasce do tamanho do cache e pode congelar (o mesmo defeito de 25/08/2026,
+    // cujo sintoma é literalmente "a única saída era sair da conversa e voltar"). Abrir rápido vale
+    // menos que mostrar a conversa inteira; quem quiser tentar de novo, conserte a janela primeiro.
     try {
       const tail = await tailComRetentativa(signal, g);
       if (g !== histGen) return;   // outra carga assumiu no meio do voo: esta resposta é velha
@@ -1091,8 +1102,13 @@
       reseedDerived();
       error = '';
       kimiSemTranscript = false;   // transcript existe -> sai do modo "kimi pre-1o-prompt"
-      // Veio menos que o pedido = o transcript inteiro coube na cauda; não há o que buscar.
-      if (tail.length >= TAIL_FIRST) loadOlderInBackground(g);
+      // A fase 2 NÃO dispara mais aqui. Ela custava 1,2 MB por ENTRADA numa sessão grande (medido
+      // em 06/09/2026 na `pr-junior`, transcript de 31,9 MB) e servia a UMA coisa só: estar pronta
+      // caso a pessoa rolasse pra cima. Quem entra pra ler as últimas mensagens e sair — o uso
+      // normal no celular — pagava por um histórico que nunca olhou. Agora quem pede é a
+      // MessageList, quando a rolagem chega ao topo do que existe em memória (`onFimDoLocal`).
+      // Veio menos que o pedido = o transcript inteiro coube na cauda; nem há o que buscar depois.
+      temMaisNoServidor = tail.length >= TAIL_FIRST;
     } catch (err) {
       if (isAbortError(err) || g !== histGen) return;   // cancelado ≠ falhou: nada na tela
       // Teto estourado vira frase traduzida: o texto que o navegador poe no TimeoutError e
@@ -1119,10 +1135,26 @@
     }
   }
 
-  // Fase 2: o histórico ANTERIOR à cauda, em segundo plano. Não devolve promise de propósito —
+  // A cauda veio cheia, então existe histórico anterior a ela no servidor. Vira falso quando a
+  // fase 2 já trouxe tudo — sem isso, cada rolagem até o topo repetiria a busca do arquivo inteiro.
+  let temMaisNoServidor = false;
+  let buscandoAntigos = false;
+
+  // Chamado pela MessageList quando a rolagem chega ao topo do que há em memória.
+  function pedirMaisAntigos() {
+    if (!temMaisNoServidor) return;
+    loadOlderInBackground(histGen);
+  }
+
+  // Fase 2: o histórico ANTERIOR à cauda, sob demanda. Não devolve promise de propósito —
   // ninguém espera por ela, a tela já está utilizável. Anda junto com a carga da geração `g`: usa o
   // MESMO controller (não cria um novo), então quem invalida a geração aborta as duas fases.
   function loadOlderInBackground(g: number) {
+    // A trava mora AQUI, não em quem chama: os outros dois caminhos — a pílula de "tentar de novo"
+    // e a retomada do segundo plano — chamam esta função direto, e dois toques rápidos na pílula
+    // (que não desabilita durante a busca) disparavam dois downloads do arquivo inteiro.
+    if (buscandoAntigos) return;
+    buscandoAntigos = true;
     getHistory(sessionName, undefined, histAbort?.signal)
       .then((full) => {
         if (g !== histGen || !alive) return;   // resposta velha/pós-destroy: NÃO aplica
@@ -1143,6 +1175,15 @@
       .catch((err) => {
         if (isAbortError(err) || g !== histGen || !alive) return;   // cancelado ≠ falhou
         histGap = 'failed';
+      })
+      .finally(() => {
+        if (g !== histGen) return;
+        // Trouxe (ou tentou trazer) o arquivo INTEIRO: não há segunda página. Solta as duas travas
+        // — a de "está buscando" e a de "existe mais lá" —, senão a próxima rolagem até o topo
+        // repetiria o download completo. Falha some daqui de propósito: quem avisa é o `histGap`,
+        // e o toque nele é que tenta de novo.
+        buscandoAntigos = false;
+        temMaisNoServidor = false;
       });
   }
 
@@ -2028,6 +2069,7 @@
       {stateEvent}
       {pending}
       {sessionName}
+      onFimDoLocal={pedirMaisAntigos}
       {dockH}
       {swapIds}
       preview={previewText}

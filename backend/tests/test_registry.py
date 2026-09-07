@@ -1217,3 +1217,20 @@ def test_list_with_state_radar_de_limite_so_nas_travadas(tmp_path, monkeypatch):
     # 2o poll dentro do cache: nao captura de novo, mas o campo continua preenchido.
     out = {s.name: s for s in asyncio.run(reg.list_with_state())}
     assert capturas == ["lim"] and out["lim"].limit_reset == "9:10pm"
+
+
+def test_pretrust_grava_a_chave_que_o_claude_le(tmp_path, monkeypatch):
+    # No Windows o Claude Code indexa `projects` pelo caminho com barra NORMAL. Gravando com
+    # contrabarra, o pre-trust criava uma chave que ninguem le: a sessao nova nascia presa no
+    # "trust this folder?" e o Enter do envio seguinte caia em "No, exit", matando a sessao.
+    import json as _json
+    assert registry._chave_trust(r"C:\Users\p\proj", windows=True) == "C:/Users/p/proj"
+    assert registry._chave_trust("/home/j/proj", windows=False) == "/home/j/proj"
+
+    cfg = tmp_path / ".claude.json"
+    monkeypatch.setattr(registry.tmux, "claude_json_de", lambda _c: cfg)
+    monkeypatch.setattr(registry, "_chave_trust", lambda cwd: cwd.replace("\\", "/"))
+    registry._pretrust_cwd(r"C:\Users\p\proj", None)
+    projetos = _json.loads(cfg.read_text(encoding="utf-8"))["projects"]
+    assert projetos["C:/Users/p/proj"]["hasTrustDialogAccepted"] is True
+    assert r"C:\Users\p\proj" not in projetos

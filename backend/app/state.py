@@ -111,12 +111,25 @@ def _question(lines: list[str]) -> Optional[str]:
 _FOOTER_RE = re.compile(r"to navigate|Esc to cancel|Enter to select|Enter select")
 
 
+def _rodape(lines: list[str], n: int = 8) -> str:
+    """As `n` ultimas linhas do pane, DESCARTANDO as em branco do fim.
+
+    O `capture-pane` devolve a altura inteira, entao um desenho no ALTO do pane (dialogo, picker
+    curto) deixa o fundo vazio e empurra o rodape pra fora da janela — foi assim que o "Accessing
+    workspace" do Claude Code passou por "tela livre" e o Enter do envio caiu no "No, exit" dele,
+    matando a sessao. Mesma correcao que o `_pane_tail` do terminal_input ja fazia."""
+    fim = len(lines)
+    while fim and not lines[fim - 1].strip():
+        fim -= 1
+    return "\n".join(lines[max(0, fim - n):fim])
+
+
 def is_overlay(pane_text: str) -> bool:
     # Overlay so-TUI aberto: rodape de navegacao por teclas no FUNDO do pane (ultimas 8 linhas — nao o
     # pane todo, senao a MESMA frase citada na conversa/scrollback dava falso-positivo). Cobre pickers
     # (/model) e paineis (/status, /config, /help) alem do AskUserQuestion. Fonte unica de "overlay"
     # (StateMonitor e terminal_input.deliverable usam esta).
-    return bool(_FOOTER_RE.search("\n".join(pane_text.splitlines()[-8:])))
+    return bool(_FOOTER_RE.search(_rodape(pane_text.splitlines())))
 
 
 # Marcadores da tela de welcome/login do Claude Code (tema -> metodo -> URL OAuth -> colar code).
@@ -196,7 +209,7 @@ def _menu_block(lines: list[str]) -> Optional[tuple[int, int]]:
     # Cursor do Pi ("> N.") so e picker VIVO se o rodape de navegacao estiver nas ultimas linhas do
     # pane (mesma janela do is_overlay). Uma citacao do picker no scrollback tem o "> 1." mas o
     # rodape dela subiu junto — sem a trava ela travava o app num menu fantasma.
-    if pi_cursor and not _FOOTER_RE.search("\n".join(lines[-8:])):
+    if pi_cursor and not _FOOTER_RE.search(_rodape(lines)):
         return None
     # No omp o bloco e o proprio box, delimitado — nao ha o que adivinhar subindo linha a linha (ver
     # omp_box: o cartao-resumo que fica na tela tem as mesmas marcas de opcao).

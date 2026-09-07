@@ -34,7 +34,10 @@ const VERBOS = {
 
 const TETO_CORPO = 128 * 1024; // folgado: o maior corpo real é um eval com trecho de JS
 
-async function subirServidor({ controladorDe, escrever }) {
+// `fecharDe(chave)` fecha o navegador de verdade (view, controlador, sidecar) e avisa o painel;
+// devolve false quando a chave não tem navegador. Fica fora de VERBOS porque não passa pela
+// fila do controlador — o controlador é justamente o que morre.
+async function subirServidor({ controladorDe, escrever, fecharDe }) {
   const token = crypto.randomBytes(24).toString('hex');
   const tokenBuf = Buffer.from(`Bearer ${token}`);
   const servidor = http.createServer(async (req, res) => {
@@ -65,6 +68,10 @@ async function subirServidor({ controladorDe, escrever }) {
       const bruto = Buffer.concat(pedacos).toString('utf8');
       let pedido;
       try { pedido = JSON.parse(bruto); } catch { return responder(400, 'erro: corpo invalido'); }
+      if (pedido.verbo === 'close') {
+        if (!fecharDe) return responder(500, 'erro: este shell nao sabe fechar navegador pelo CLI');
+        return responder(200, fecharDe(pedido.chave) ? 'ok: close' : `erro: a sessao ${pedido.chave} nao tem navegador aberto`);
+      }
       const ctl = controladorDe(pedido.chave);
       if (!ctl) return responder(404, `erro: a sessao ${pedido.chave} nao tem navegador aberto`);
       // Object.hasOwn, nao `VERBOS[pedido.verbo]` direto: um verbo tipo "constructor" alcancaria o

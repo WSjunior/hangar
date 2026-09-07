@@ -425,9 +425,29 @@ function fecharNavegador(win, chave) {
   m.delete(chave);
   if (m.size === 0) navegadores.delete(win);
   soltarControlador(chave, view);
-  try { win.contentView.removeChildView(view); } catch { /* janela já destruída */ }
-  try { view.webContents.close(); } catch { /* idem */ }
-  try { fs.rmSync(path.join(NAV_SIDECARS, `${nomeSidecar(chave)}.json`), { force: true }); } catch { /* sem sidecar */ }
+  // "Já morto" é silencioso; qualquer outra falha aqui deixaria um view vivo com o painel
+  // desmontado e o CLI dizendo "ok" — precisa aparecer no log.
+  const avisar = (etapa, err) => console.error(`[nav] fechar ${chave}: ${etapa}:`, err && err.message);
+  try { if (!win.isDestroyed()) win.contentView.removeChildView(view); } catch (err) { avisar('removeChildView', err); }
+  try { if (!view.webContents.isDestroyed()) view.webContents.close(); } catch (err) { avisar('close', err); }
+  try { fs.rmSync(path.join(NAV_SIDECARS, `${nomeSidecar(chave)}.json`), { force: true }); } catch (err) { avisar('sidecar', err); }
+}
+
+// `hangar-preview close`: o CLI só conhece a chave, não a janela. O painel não pediu o fechamento,
+// então precisa ser avisado — sem o evento ele seguia mostrando um view que não existe mais.
+function fecharNavegadorPorChave(chave) {
+  // Duas janelas com a mesma chave: o navegador "de verdade" é o do controlador registrado
+  // (último open ganha em `controladores`); fechar o outro deixaria o vivo na tela.
+  const vivo = controladores.get(chave)?.view;
+  let alvo = null;
+  for (const [win, m] of navegadores) {
+    if (!m.has(chave)) continue;
+    if (!alvo || m.get(chave) === vivo) alvo = win;
+  }
+  if (!alvo) return false;
+  fecharNavegador(alvo, chave);
+  if (!alvo.isDestroyed()) alvo.webContents.send('hangar:nav-fechado', { chave });
+  return true;
 }
 
 // Sidecar por sessão em ~/.hangar/nav/<chave>.json — é o que o `hangar-preview` lê pra achar o
@@ -733,6 +753,7 @@ if (!app.requestSingleInstanceLock()) {
     limparSidecaresNav();
     subirServidor({
       controladorDe: (chave) => controladores.get(chave)?.ctl || null,
+      fecharDe: fecharNavegadorPorChave,
       escrever: (dados) => {
         fs.mkdirSync(NAV_SIDECARS, { recursive: true });
         fs.writeFileSync(path.join(NAV_SIDECARS, '_srv.json'), JSON.stringify(dados), { mode: 0o600 });

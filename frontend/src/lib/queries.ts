@@ -124,3 +124,10 @@ export function prefetchContas(alvo: Server | null): void {
   void clienteQuery.prefetchQuery(credenciais(alvo));
   void clienteQuery.prefetchQuery(motores(alvo));
 }
+
+// NÃO cacheie a cauda do chat aqui. Já existiu (b9db4367): guardava os últimos eventos por sessão
+// pra abrir a conversa sem esperar a rede, e trouxe uma regressão CONFIRMADA pelo usuário — mandar
+// mensagem, sair e voltar deixava a resposta de fora, e só a segunda entrada mostrava. Pintar a
+// tela antes do fetch faz a MessageList montar cedo demais e a janela dela nascer do tamanho
+// errado (ver o comentário em Chat.svelte, no `loadHistory`). Antes de tentar de novo, conserte a
+// janela; o ganho de tráfego que sobreviveu está na fase 2 sob demanda, que é independente disto.

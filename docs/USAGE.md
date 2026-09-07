@@ -272,6 +272,91 @@ não tem).
   um `systemctl --user restart` a derruba junto. Sem emulador conhecido no PATH ele diz isso; pra
   escolher qual usar, `CP_TERMINAL` (tabela da seção 2).
 
+### Checkpoints de código (Pi e OMP)
+
+Requer **Git 2.32 ou superior**, para isolar a configuração global durante as operações.
+
+Com a extensão do Hangar carregada, cada pedido em uma árvore Git recebe um checkpoint antes
+da atuação do agente. No **OMP**, use `/hangar-rewind`; no **Pi**, use `/rewind`.
+Escolha o checkpoint do ramo atual e um dos três modos:
+
+- **Código e conversa:** repõe os arquivos e reposiciona a conversa.
+- **Somente conversa:** mantém os arquivos como estão.
+- **Somente código:** mantém a conversa como está.
+
+Arquivos modificados ou apagados voltam ao estado capturado. **Arquivos criados depois são
+preservados**, e o índice, a branch e os commits do seu repositório não são alterados.
+As exclusões do Git são respeitadas; os objetos ficam em `<agentDir>/checkpoints`, onde
+`agentDir` vem de `PI_CODING_AGENT_DIR` ou da pasta padrão do harness.
+
+Retomar ou ramificar uma sessão preserva a referência aos objetos originais. Se eles não
+estiverem disponíveis ou pertencerem a outro projeto, a restauração do código é recusada.
+Mudança de sessão/estado durante a escolha exige uma nova seleção. Se os arquivos voltarem
+mas a conversa falhar, o aviso informa a conclusão parcial. No OMP, uma captura que exceda
+25 segundos interrompe o pedido, sem publicar um checkpoint tardio.
+
+### Marketplaces e plugins no OMP
+
+A importação de marketplaces do Claude usa o gerenciador nativo do OMP. É genérica: não
+depende do nome do catálogo ou do plugin. Catálogos já registrados com a mesma origem não
+são importados novamente; um nome ocupado por outra origem é preservado e informado como
+conflito. Origens inválidas ou não representáveis são informadas, sem mudar configurações.
+
+**Importar um marketplace não instala todos os seus plugins nem converte instalações Git
+existentes.** Os plugins instalados por marketplace continuam sob responsabilidade do OMP.
+Na opção nativa **Marketplace Auto-Update**, `notify` (padrão) verifica e avisa na abertura
+da sessão; `auto` também instala as atualizações. A importação não altera essa preferência.
+
+Para plugins Git diretos elegíveis, a integração compara origem e revisão, não apenas o
+nome ou a versão textual. Arquivos/preferências alterados manualmente suspendem a gestão.
+Plugins sem prova suficiente são diagnosticados, não instalados por suposição. A inspeção
+`dry_run` não executa instaladores nem escreve no perfil pessoal.
+Registro de propriedade inválido interrompe a passagem sem remover plugins. Se duas origens
+disputarem o mesmo nome de pacote, nenhuma vence pela ordem do cadastro; a instalação
+existente é preservada e o conflito é informado. Os diagnósticos não incluem linhas brutas
+de arquivos de configuração ou credenciais.
+
+**Execução periódica (opcional):** configure `CP_OMP_PLUGIN_SYNC_ENABLED=1` no ambiente do
+backend. `CP_OMP_PLUGIN_SYNC_INTERVAL` define o intervalo em segundos (padrão **300**; deve
+ser positivo e finito). Sem habilitação explícita, nenhuma passagem é iniciada. O controle
+global de automações também precisa estar habilitado; a integração não o liga por conta própria.
+
+A primeira passagem acontece na subida; as seguintes começam após o intervalo contado do
+fim da anterior, sem sobreposição. A API permanece disponível durante o trabalho. No
+encerramento, o backend sinaliza parada e aguarda a operação em andamento antes de sair.
+
+Consulte **`GET /api/omp/plugin-sync`**, com a autenticação normal da API, para ver
+`disabled` (desligado), `paused` (automações pausadas), `running` (executando), `updated`
+(houve ações), `unchanged` (sem mudanças), `suspended` (conflito/alteração manual), `error`
+(falha) ou `stopped` (encerrado). O relatório detalha cada catálogo/plugin; `updated` não
+significa que candidatos sem prova foram instalados. Erros não encerram o ciclo periódico.
+
+O diretório global de plugins não é derivado do diretório do agente. A integração respeita
+`PI_CONFIG_DIR`, o perfil OMP selecionado e o layout XDG já existente. Um agente em diretório
+personalizado não desloca sozinho os plugins. Caso a configuração passe a apontar para
+outra raiz, um registro de propriedade antigo é preservado e diagnosticado, não migrado
+automaticamente.
+
+### Contexto CLAUDE.md no OMP
+
+Com `CP_OMP_CLAUDE_CONTEXT_ENABLED=1`, a subida do backend configura somente o OMP:
+
+- Usa o `CLAUDE.md` global existente por um link `APPEND_SYSTEM.md`, sem copiar seu conteúdo
+  para o repositório e sem substituir um arquivo/link personalizado.
+- Instala ou reutiliza a regra que exige ler o `CLAUDE.md` do projeto antes do trabalho.
+- Acrescenta os dois identificadores de contexto AGENTS à lista de recursos desativados,
+  preservando as outras entradas. Nenhum arquivo `AGENTS.md` é apagado.
+
+Se o projeto não tiver `CLAUDE.md`, a regra exige informar a ausência, não fingir que o
+arquivo foi carregado. Conflitos com contexto personalizado são informados, sem sobrescrita.
+Uma regra desativada, restrita a agentes/condições ou bloqueada nas configurações pessoais
+não é reativada por conta própria. Regras equivalentes `.md` e `.mdc` no nível direto são
+reutilizadas; arquivos em subdiretórios não substituem uma regra que o OMP precisa descobrir.
+Mudanças concorrentes nos arquivos ou no diretório de regras geram diagnóstico, sem gravar
+em um destino externo.
+A alteração usa o CLI nativo de configuração, que pode normalizar formatos legados sem
+mudar a preferência efetiva. Reabra a sessão OMP para carregar a política recém-configurada.
+
 ### Git
 
 O ícone de branch abre o **modal de git** da sessão — o mesmo nas duas views: no desktop ele é um

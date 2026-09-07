@@ -18,7 +18,7 @@
 //   hangar-preview network                 últimas respostas de rede
 //   hangar-preview text                    texto visível da página (innerText)
 //   hangar-preview url                     URL atual do navegador desta sessão
-//   hangar-preview shot [arquivo.png]      screenshot (default /tmp/hangar-preview-<sessao>.png)
+//   hangar-preview shot [arquivo.png]      screenshot (default <tmp do sistema>/hangar-preview-<sessao>.png)
 //   hangar-preview batch                   lê várias linhas do stdin, uma por comando (ver skill)
 //
 // A sessão é resolvida pelo nome da sessão tmux atual (dentro do tmux); fora dele, ou pra operar
@@ -31,9 +31,9 @@
 // webContents está aberto. `open` e `list` continuam fora do servidor: `open` passa pelo backend
 // (quem monta o painel na tela) e `list` só lê os sidecares de sessão — os dois têm que funcionar
 // mesmo com o shell fora do ar.
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import fmt from '../shell/preview_fmt.cjs';
 
@@ -41,7 +41,7 @@ const CDP = 'http://127.0.0.1:9223';
 const DIR = join(homedir(), '.hangar', 'nav');
 const VERBOS_SERVIDOR = new Set([
   'snapshot', 'click', 'fill', 'type', 'press', 'hover', 'wait', 'eval',
-  'tema', 'console', 'network', 'text', 'url', 'shot',
+  'tema', 'console', 'network', 'text', 'url', 'shot', 'close',
 ]);
 
 function erro(msg, codigo = 1) {
@@ -76,7 +76,8 @@ if (!cmd || cmd === 'help' || cmd === '--help') {
   network                 últimas respostas de rede
   text                    texto visível da página (innerText), sem árvore
   url                     URL atual
-  shot [arquivo.png]      screenshot (default /tmp/hangar-preview-<sessao>.png)
+  shot [arquivo.png]      screenshot (default <tmp do sistema>/hangar-preview-<sessao>.png)
+  close                   fecha o navegador desta sessão (o painel some; terminou de usar, feche)
   batch                   lê várias linhas do stdin, uma por comando
 
 Referência completa: skill hangar-preview.`);
@@ -86,9 +87,21 @@ Referência completa: skill hangar-preview.`);
 // --- resolve a sessão (chave serverId::nome) ---
 function nomeSessao() {
   if (flags.sessao) return flags.sessao;
+  // O carimbo do nascimento (posto pelo new_session do tmux.py) vem do env do PANE, então é imune
+  // a qual cliente está anexado. Só vale se a sessão ainda se chamar assim: `rename-session` não
+  // reescreve env de processo já rodando, e nome obsoleto endereçaria OUTRA sessão — pior que
+  // nome ausente. O `=` força match exato (sem ele o tmux cai em prefix match).
+  const carimbo = process.env.CP_SESSION_NAME;
+  if (carimbo) {
+    try {
+      execFileSync('tmux', ['has-session', '-t', `=${carimbo}`], { stdio: 'ignore' });
+      return carimbo;
+    } catch { /* sessão renomeada, morta, ou sem tmux — cai no fallback */ }
+  }
   if (process.env.TMUX) {
     try {
-      return execSync('tmux display-message -p "#S"').toString().trim();
+      const nome = execSync('tmux display-message -p "#S"').toString().trim();
+      if (nome) return nome;
     } catch { /* tmux indisponível */ }
   }
   return null;
@@ -206,7 +219,8 @@ if (VERBOS_SERVIDOR.has(cmd)) {
   // relativo mandado cru pro shell grava no cwd de onde o ELECTRON subiu, não no do agente, e a
   // resposta citava um caminho que não existia onde o agente (e o app do celular) foram procurar.
   if (cmd === 'shot') {
-    cmdArgs[0] = resolve(cmdArgs[0] || `/tmp/hangar-preview-${(nomeSessao() || 'nav').replace(/\W+/g, '-')}.png`);
+    cmdArgs[0] = resolve(cmdArgs[0]
+      || join(tmpdir(), `hangar-preview-${(nomeSessao() || 'nav').replace(/\W+/g, '-')}.png`));
   }
   process.exit(await comando(chave, cmd, cmdArgs));
 }
@@ -228,4 +242,4 @@ if (cmd === 'batch') {
   process.exit(0);
 }
 
-erro(`comando desconhecido: ${cmd} (vale open|list|snapshot|click|fill|type|press|hover|wait|eval|tema|console|network|text|url|shot|batch)`);
+erro(`comando desconhecido: ${cmd} (vale open|list|snapshot|click|fill|type|press|hover|wait|eval|tema|console|network|text|url|shot|close|batch)`);

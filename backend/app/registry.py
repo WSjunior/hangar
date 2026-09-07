@@ -118,6 +118,15 @@ def sanitize_cwd(cwd: str) -> str:
 _pretrust_lock = threading.Lock()
 
 
+def _chave_trust(cwd: str, windows: bool = os.name == "nt") -> str:
+    """A chave que o Claude Code usa em `projects` do `.claude.json` para esta pasta.
+
+    No Windows ele normaliza o caminho pra barra NORMAL antes de indexar; gravar com contrabarra
+    escreve uma chave que ninguem le, e a sessao nova nascia presa no "trust this folder?" mesmo
+    com o pre-trust rodando."""
+    return cwd.replace("\\", "/") if windows else cwd
+
+
 def _pretrust_cwd(cwd: str, config_dir: str | None) -> None:
     """Marca `hasTrustDialogAccepted=True` pra `cwd` no .claude.json que a sessão nova vai LER —
     quem responde qual é o arquivo é `tmux.claude_json_de`, o mesmo lugar que decide se o pane
@@ -139,7 +148,7 @@ def _pretrust_cwd(cwd: str, config_dir: str | None) -> None:
             cfg = tmux.claude_json_de(config_dir)
             data = json.loads(cfg.read_text(encoding="utf-8")) if cfg.exists() else {}
             projects = data.setdefault("projects", {})
-            entry = projects.setdefault(cwd, {})
+            entry = projects.setdefault(_chave_trust(cwd), {})
             if entry.get("hasTrustDialogAccepted") is True:
                 return  # já confiada -> não reescreve o arquivo (evita corrida à toa)
             entry["hasTrustDialogAccepted"] = True
@@ -491,12 +500,18 @@ def _pi_sid_of(pid: int) -> Optional[str]:
     return None
 
 
-def _pi_transcript_of_id(cwd: str, sid: str, provider: str = "pi") -> Optional[str]:
+def _pi_transcript_of_id(cwd: str, sid: str, provider: str = "pi", perfil: str | None = None) -> Optional[str]:
     # Indireção pro adapter (Task 1), que sabe o slug e o glob <timestamp>_<uuid>.jsonl. Import local
     # pelo mesmo motivo do get_adapter em create(): evita qualquer ciclo se um adapter futuro vier a
     # importar daqui.
     from app.adapters import get_adapter
-    return get_adapter(provider).transcript_path(cwd, sid) or None
+    return get_adapter(provider).transcript_path(cwd, sid, perfil) or None
+
+
+def _omp_profile_of(pid: Optional[int]) -> Optional[str]:
+    # Perfil do omp DAQUELE pane: move a raiz das sessoes pra ~/.omp/profiles/<p>/agent. Lido do
+    # processo vivo, como CP_ENGINE e CLAUDE_CONFIG_DIR — o backend pode estar noutro perfil.
+    return procinfo._env_var_of(pid, "OMP_PROFILE") if pid else None
 
 
 def _pi_is_subagent(path: str) -> bool:
@@ -610,11 +625,14 @@ def pi_session_file(pane_id: str, pid: Optional[int] = None,
             # em `sessions/-/<nome>` (ver pi_sessions.localizar_na_raiz). Mesmo nome, outra pasta.
             if provider == "omp" and not os.path.exists(f):
                 from app.adapters.pi.sessions import localizar_na_raiz   # import local, como os irmaos acima
-                f = localizar_na_raiz(os.path.basename(f), provider) or f
+                f = localizar_na_raiz(os.path.basename(f), provider, _omp_profile_of(pid)) or f
             return f
     except (OSError, ValueError):
         pass
-    return _pi_transcript_of_id(cwd, sid, provider) if sid else None
+    if not sid:
+        return None
+    perfil = _omp_profile_of(pid) if provider == "omp" else None
+    return _pi_transcript_of_id(cwd, sid, provider, perfil) if perfil else _pi_transcript_of_id(cwd, sid, provider)
 
 
 _KIMI_TICKET_WARNED: set[tuple[str, str]] = set()
@@ -1506,12 +1524,22 @@ class SessionRegistry:
                engine: str | None = None, model: str | None = None,
                effort: str | None = None, context_window: int | None = None,
                permission_mode: str | None = None,
-               initial_prompt: str | None = None) -> SessionInfo:
+               initial_prompt: str | None = None,
+               omp_profile: str | None = None) -> SessionInfo:
         # Nome tmux nao aceita "."/":"/espaco -> sanitiza igual ao rename. Varias sessoes na MESMA
         # pasta sao permitidas: cada uma tem nome unico + --session-id proprio -> jsonl proprio.
         name = sanitize_session_name(name)
         if not name:
             raise ValueError("nome invalido")
+        if omp_profile:
+            if provider != "omp":
+                raise ValueError("perfil so vale para provider omp")
+            # A MESMA regra de nome do omp (resolve_omp_directories): o valor vai pro ambiente do pane.
+            from app.omp_plugin_sync import InventoryError, resolve_omp_directories
+            try:
+                resolve_omp_directories(Path.home(), {"OMP_PROFILE": omp_profile}, Path.home())
+            except InventoryError as e:
+                raise ValueError(str(e)) from None
         # Motor de modelo: valida ANTES de criar o pane. Motor inexistente com env vazio faria a
         # sessão subir na conta Anthropic ACHANDO que é o motor pedido — falha silenciosa.
         if engine:
@@ -1596,7 +1624,7 @@ class SessionRegistry:
                     raise ValueError("session_id invalido")
                 sid = resume_session_id
                 from app.adapters import get_adapter
-                cmd = tmux.join_cmd(get_adapter("omp").resume_command(cwd, sid, model, effort))
+                cmd = tmux.join_cmd(get_adapter("omp").resume_command(cwd, sid, model, effort, omp_profile))
             elif provider == "pi":
                 # `pi --session-id <id>` RETOMA quando o id ja existe ("creating it if missing", no
                 # --help do 0.82.1) -> o comando do resume e o mesmo do spawn, so com o id antigo.
@@ -1628,6 +1656,8 @@ class SessionRegistry:
             # que estar no comando do pane. Os outros providers recebem prompt inicial por /input,
             # e aceitar o argumento neles seria escolha que some calada.
             extra = {"initial_prompt": initial_prompt} if provider == "codex" else {}
+            if provider == "omp" and omp_profile:
+                extra["perfil"] = omp_profile
             cmd = tmux.join_cmd(get_adapter(provider).spawn_command(
                 cwd, sid, model, effort, permission_mode, **extra))
         if engine:

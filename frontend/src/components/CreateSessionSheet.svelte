@@ -24,7 +24,7 @@
     onClose: () => void;
     onCreate: (name: string, cwd?: string, configDir?: string | null, provider?: Provider,
                engine?: string | null, model?: string | null, effort?: string | null,
-               permissionMode?: string | null) => Promise<void>;
+               permissionMode?: string | null, ompProfile?: string | null) => Promise<void>;
     onOpenSession: (name: string) => void;
     /** Passagem de bastão: a MESMA folha, aberta pra criar a sessão que CONTINUA `bastao.name`.
      *  Não-nulo = modo bastão — servidor travado no da origem, cwd/nome pré-preenchidos, e o
@@ -127,6 +127,8 @@
   // Motor de modelo (Task 5): '' = conta Anthropic (o padrão de sempre). Só faz sentido com provider claude.
   let engine = $state('');
   let motores = $state<Record<string, Motor>>({});
+  // Perfil do omp (`omp --profile x`): '' = sem perfil. Só vale com provider omp; o backend valida o nome.
+  let perfilOmp = $state('');
 
   // Escolha de modelo e esforço (modelo: claude, pi e kimi; esforço: só claude e pi — o Kimi não
   // tem flag de esforço no CLI, ver NIVEIS abaixo). `''` = Padrão, ou seja
@@ -725,6 +727,7 @@
           model: modelo || null,
           effort: esforco || null,
           permission_mode: provider === 'claude' ? (permissao || null) : null,
+          omp_profile: provider === 'omp' ? (perfilOmp.trim() || null) : null,
         });
         onClose();
         onOpenSession(r.name);
@@ -732,7 +735,9 @@
       }
       await onCreate(name.trim(), picked, provider === 'claude' ? selectedConfig : null, provider,
                      provider === 'claude' ? (engine || null) : null, modelo || null, esforco || null,
-                     provider === 'claude' ? (permissao || null) : null);
+                     provider === 'claude' ? (permissao || null) : null,
+                     // O 9º argumento só existe pro omp: os outros providers chamam como sempre chamaram.
+                     ...(provider === 'omp' ? [perfilOmp.trim() || null] : []));
       onClose();
     } catch (err) {
       error = err instanceof Error ? err.message : m.criar_sessao_erro();
@@ -1013,6 +1018,14 @@
                      ...Object.entries(motores).map(([nome, motor]) => ({
                        value: nome, label: motor.label ?? nome, hint: motor.model }))]}
             onchange={(v) => { engine = v; carregarModelos(); }} />
+        </div>
+      {/if}
+
+      {#if provider === 'omp' && !conversaAlvo}
+        <div class="field">
+          <label class="field-label" for="omp-profile">{m.criar_perfil_omp()}</label>
+          <input id="omp-profile" class="field-input" type="text" bind:value={perfilOmp}
+                 placeholder={m.criar_perfil_omp_dica()} autocomplete="off" spellcheck="false" />
         </div>
       {/if}
 

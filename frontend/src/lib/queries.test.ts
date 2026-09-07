@@ -53,3 +53,4 @@ describe('chave das queries de orquestração', () => {
 		expect(orqDetalhe(s, 'exec-1', false).queryKey).not.toEqual(orqDetalhe(s, 'exec-1', true).queryKey);
 	});
 });
+

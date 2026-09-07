@@ -643,27 +643,216 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
 - **As extensões de FUNCIONAMENTO da experiência Claude no Pi moram aqui** (`scripts/pi/`,
   04/09/2026): `claude-bridge.ts` (agents/commands/skills do `~/.claude` como recursos do Pi),
   `claude-todo.ts` (painel de tarefas), `claude-hooks-adapter.ts` (hooks do `settings.json` nos
-  eventos do Pi), `git-checkpoint.ts` (`/rewind`) e `fullscreen-tui.ts` (alternate screen no OMP)
+  eventos do Pi), `git-checkpoint.ts` (`/rewind`) e `fullscreen-tui.ts` (alternate screen no Pi)
   vieram do repo `pi-claude-bridge`, que ficou só com aparência (caixa da mensagem, título do
   terminal e temas). Motivo: sem elas uma sessão Pi criada pelo app não enxerga skills/agents nem
   roda hooks, e quem instala o Hangar não deveria precisar de um segundo repo pra isso. O
-  `install-claude-wrapper.sh` symlinka as sete (`link_agent_extensions`) em
-  `~/.pi/agent/extensions/` e `~/.omp/agent/extensions/`. No Pi com fullscreen nativo, a extensão
-  não assume o alternate screen para evitar dupla posse. **No omp ela fica DESLIGADA, e a tela
-  Harnesses não oferece o botão** (05/09/2026): a conversa do omp mora no scrollback do terminal
-  por desenho — o renderizador nunca consulta a posição de rolagem (issue can1357/oh-my-pi#10232,
-  #7893 fechada como duplicata da RFC #2040). Medido no tmux e no kitty: em alternate screen sem
-  pedir mouse (`alternate_on=1`, `mouse_any_flag=0`), a roda vira seta e o composer mostra o
-  histórico de prompts (`❯ ola`); sem alternate screen, a roda rola o scrollback (copy-mode no
-  tmux, `history=51`) e o composer some enquanto se lê — que é como o omp funciona em qualquer
-  terminal. O Pi nativo escapa porque **pede o mouse** (`mouse_any_flag=1`) e rola a própria tela;
-  no omp o renderizador é privado (`#doRender`), então nem as extensões do Pi (`pi-sticky-input`,
-  `pi-claude-style-scroll`) conseguem — só suporte no núcleo. O instalador desfaz o
-  `enabled: true` que ele mesmo escrevia; `/fullscreen-on` continua existindo pra quem insistir.
-  regras herdadas do adapter: a allowlist embutida libera só `~/.claude/hooks/` — hook que mora
+  `install-claude-wrapper.sh` symlinka as sete no Pi e cinco no OMP: neste, `claude-todo` e
+  `fullscreen-tui` ficam com o núcleo. O painel de saúde usa a mesma seleção por CLI e não
+  oferece fullscreen no OMP. No Pi com fullscreen nativo, a extensão não assume o buffer
+  alternativo para evitar dupla posse.
+  **Comparação com OMP 18.1.11 (05/09/2026):** em uma HOME descartável, sem chamadas a modelos,
+  `getAllTools()` mostrou que `claude-todo` substituía a ferramenta `<builtin:todo>` pela extensão:
+  o contrato `action/id/activeForm` tomava o lugar de `op/task/phase`, fases e bloqueios usados
+  pelo próprio núcleo. Com a proteção no entrypoint, a origem continua `builtin`. A proteção
+  também cobre quem atualiza só com `git pull`, sem rodar o instalador.
+  Na mesma prova com o binário real e sockets tmux separados, o nativo usou
+  `alternate_on=0, mouse_any_flag=0`; fullscreen externo ativado usou `1,0`. Após a correção,
+  mesmo carregado explicitamente com `enabled: true`, permaneceu `0,0`. O OMP depende do
+  scrollback normal; colocar a conversa no buffer alternativo não cria um renderizador com
+  rolagem (issues can1357/oh-my-pi#10232 e #2040).
+  **Migração não edita preferências:** instalador e reparo removem somente symlinks próprios
+  dessas duas extensões. Arquivos reais, symlinks para outra fonte e `fullscreen-tui.json`
+  ficam intactos. A configuração do OMP não é reescrita.
+  **Não estender essa conclusão às demais extensões.** A descoberta nativa do OMP respeita
+  registros/escopo de plugins e reduz a necessidade de espelhar skills e comandos, mas não
+  importa todos os agents pessoais do Claude, sua normalização de modelos nem o índice de
+  memória. Hooks JS/TS nativos não executam automaticamente o protocolo CLI do `settings.json`.
+  E checkpoint/rewind nativos reduzem contexto: não restauram arquivos como o shadow Git do
+  Hangar. Essas capacidades continuam complementares, não substituídas por nome.
+  A seleção das extensões não demonstra compatibilidade completa: o bridge e os checkpoints
+  têm as provas específicas abaixo; limitações do adaptador de hooks continuam separadas.
+  **Bridge adaptado ao OMP (05/09/2026):** `lib/agent-context.ts` resolve a identidade pelo
+  executável e normaliza `PI_CODING_AGENT_DIR`/`CLAUDE_CONFIG_DIR`, incluindo `~`; a fábrica
+  guarda esse contexto por instância. **Os helpers compartilhados moram em `scripts/pi/lib/` e
+  o instalador (e `harness_saude._ligar_extensoes`) linka a PASTA `extensions/lib`** (medido
+  06/09/2026, pi 0.85.0): o loader do Pi resolve import relativo pelo caminho do symlink, não do
+  arquivo real — `./agent-context` ao lado de `claude-bridge.ts` dava `Cannot find module` e o
+  Pi saía com rc=1 sem ponte nem `/rewind`; e um `.ts` solto em `extensions/` é carregado como
+  extensão (`does not export a valid factory function`). Pasta sem `index.ts` o Pi ignora. O omp
+  (Bun) resolve pelo realpath e carregava de qualquer jeito — foi por isso que a suíte, que só
+  roda o omp, não pegou. **"Estou no omp?" tem UMA resposta**, `getAgentContext().harness`:
+  `claude-todo.ts` e `fullscreen-tui.ts` tinham o regex do `execPath` copiado, e uma mudança de
+  empacotamento do omp corrigida no `lib/` deixaria as duas religando no omp o que tem que ficar
+  desligado. Miudezas fechadas junto (06/09/2026): nome de agente repetido entre fontes no omp
+  entra em `skipped` (o caminho lá é plano, o segundo era descartado calado); o desfazer de uma
+  ação do plugin sync que falha loga e relança a **causa original** (antes o `finally: raise`
+  punha o erro do desfazer no relatório); `_digest` guarda assinatura (mtime, tamanho) por
+  arquivo e só relê quando ela muda (o laço de 300 s relia todo byte de todo plugin); e
+  `observe_controls` lê as 3 chaves do `omp config get` em paralelo e a releitura só pega
+  `disabledExtensions` — de 6 processos em série (~0,75 s cada, na subida do backend) pra 4 em
+  dois lotes.
+  **A raiz do agente omp tem UMA resposta: `app/omp_dirs.agent_dir()`** (06/09/2026). O omp
+  com perfil (`--profile x` ou `OMP_PROFILE=x`) grava TUDO — login, sessões, config, plugins —
+  em `~/.omp/profiles/x/agent` (medido no 18.1.10 numa HOME descartável). O plugin sync e o
+  contexto vieram com `resolve_omp_directories`, que espelha essa regra; sessões
+  (`sessions_root("omp")`), painel de saúde (`_raiz_agente`) e login do ChatGPT (`_omp_db`)
+  continuavam em `~/.omp/agent` sem perfil — com `OMP_PROFILE` no ambiente do serviço, o sync
+  instalava no perfil e o painel dizia "não instalado". Hoje os três perguntam ao `omp_dirs`,
+  que só embrulha o resolvedor do sync (import tardio: `sessions.py` é folha e não pode puxar
+  `peers` na importação) e, pra quem só LÊ, perfil inválido vira aviso e raiz sem perfil —
+  levantar ali derrubaria a listagem de sessões inteira.
+  **Perfil por SESSÃO** (06/09/2026): o perfil de um pane omp viaja como `OMP_PROFILE` no
+  ambiente dele — o wrapper (`omp.posix.sh`/`omp.fish`, `hangar_omp_perfil`) lê `--profile x`
+  da linha ou a variável já exportada, monta o `--session` na raiz do perfil e passa `-e` pro
+  tmux (o pane nasce do servidor, não do shell); o app faz o mesmo pelo `env` do
+  `OmpAdapter.spawn_command(perfil=...)`. Do outro lado, `registry._omp_profile_of(pid)` lê a
+  variável do processo vivo (mesmo `/proc/<pid>/environ` de `CP_ENGINE`) e passa pra
+  `transcript_path`/`localizar_na_raiz`, senão a varredura de `sessions/-/` caía na raiz do
+  BACKEND. Entrada: `omp_profile` no `POST /api/sessions` (só com `provider=omp`, nome validado
+  pela regra do próprio omp; 400 fora dele), `hangar-send --new … --provider omp --profile x`,
+  e o campo "Perfil do omp" da folha de Nova sessão, que só aparece com OMP escolhido.
+  Variável e não flag de propósito: `--profile` no cmdline funcionaria pro omp mas o backend
+  teria duas fontes pra ler. **O que ainda NÃO olha as pastas de perfil:** o relatório de
+  custo (`costs_sources.raiz_omp`) e o Arquivo de conversas mortas (`archive_providers`) leem
+  só a raiz do backend — uma sessão omp criada com perfil funciona ao vivo, mas some das duas
+  telas depois de fechada. Cobrir isso é varrer `~/.omp/profiles/*/agent/sessions` além da
+  raiz, e ainda não foi feito. Quem GRAVA na raiz do omp (`oauth_codex._omp_db`) usa
+  `omp_dirs.agent_dir(estrito=True)`: perfil inválido levanta, em vez de cair calado na raiz
+  sem perfil com a credencial gravada no lugar errado. No OMP, agents pessoais/extras viram arquivos diretos
+  em `<agentDir>/agents/claude-bridge-<nome>.md`, com ferramentas em array YAML: `Glob → glob`,
+  `Task/Agent → task`, `WebFetch → read` e prefixo `mcp__` intacto. Agents nativos pessoais
+  têm precedência; aliases Claude sem mapeamento explícito herdam o modelo da sessão.
+  Isso inclui `fable`. Negações explícitas (`disallowedTools`) são subtraídas da allowlist;
+  sem uma allowlist ou com negação não representável, o agent é recusado, não ampliado.
+  Nomes `main`/`sub`, reservados pelo núcleo OMP, também são recusados nesse harness.
+  Skills/comandos/plugins não são espelhados no OMP, nem oferecidos no menu de fontes.
+  No Pi permanecem a conversão de ferramentas e o layout recursivo de agents, prompts e skills.
+  `lib/frontmatter.ts` usa `Bun.YAML.parse` no OMP e carrega o parser legado somente no Pi.
+  Memória respeita `enabled`, preserva blocos do prompt e não reinsere conteúdo já presente;
+  `claude-bridge.json` ilegível é logado e ignorado no `before_agent_start`, nunca lançado.
+  O manifesto versão 2 registra conteúdo e caminho relativo de cada arquivo gerado: atualização
+  e remoção exigem os bytes originais, e conflitos são preservados e reportados. **O manifesto
+  v1 é ADOTADO uma vez** (`adoptLegacy`, 06/09/2026): ele só listava nomes de prompts, e a pasta
+  `agents/claude-bridge/` era inteira da ponte — os dois já eram sobrescritos e apagados por ela,
+  então adotá-los lendo o disco não tira segurança nenhuma. Tratar v1 como vazio (a primeira
+  versão do PR) deixava cada instalação existente com todos os arquivos em `skipped` para
+  sempre, e sem volta, porque o v2 vazio já tinha sobrescrito o v1 (nesta máquina: 16 prompts
+  e três pastas de agents). Escritas usam arquivo temporário + rename. **Fonte com frontmatter
+  inválida pula só ela** (entra em `skipped` com o motivo) e, enquanto houver uma, a ponte cria e
+  atualiza mas **não remove nada** — sem ler a fonte não se sabe qual cópia ela geraria, que era
+  o risco que o abort da primeira versão evitava ao custo de um `.md` quebrado em qualquer
+  marketplace derrubar o sync inteiro. Isso adapta a ponte, não substitui o instalador nativo
+  de plugins.
+  Prova: `tests/test_claude_bridge_omp.py` roda o OMP real com HOME própria; o driver exige
+  descoberta no catálogo de `task`, grava resultado estruturado em `session_start` e encerra
+  sem prompt/modelo remoto. `rc=0` sozinho não prova carregamento de extensão.
+  **Checkpoints por contexto no OMP (05/09/2026):** `git-checkpoint.ts` consome o mesmo
+  `lib/agent-context.ts` e registra `/hangar-rewind`; o Pi mantém `/rewind`. A captura usa
+  `before_agent_start`, não `turn_start`, e persiste revisão, worktree canônica, identidade do
+  Git do projeto e diretório que contém os objetos. O próprio registro é a âncora anterior ao
+  pedido. Retomada/fork conservam essa origem; `getBranch` impede oferecer um ramo descartado.
+  **Uma pasta de checkpoints por SESSÃO** (`<agentDir>/checkpoints/<slug do jsonl>`, reusada
+  na retomada, 06/09/2026): a primeira versão do PR abria `<slug>-<uuid>` a cada ativação,
+  inclusive em cada resume, e cada pasta guarda os objetos da árvore inteira — 113 pastas e
+  1,2 GB nesta máquina, sem poda. O uuid existia pra duas instâncias da mesma sessão não
+  disputarem o índice; hoje o índice é **por captura** (`index.<pid>.<uuid>`, apagado no fim),
+  então objetos e refs (já nomeadas por uuid) convivem num bare repo só. Sufixo `-<uuid>` só
+  quando a pasta com esse nome é de OUTRO projeto (`hangar-origin.json` diverge) ou não é um
+  bare repo; a pasta v1 do Pi (mesmo slug, sem origem gravada) é adotada e ganha a origem.
+  Restaurações continuam com índice temporário próprio, nunca o da sessão de origem.
+  **A captura enumera numa chamada só**: `ls-files -t -s --cached --others --deleted
+  --exclude-standard` — `H`/`S`/`M` rastreado com modo (`160000` = submódulo, fora), `?` novo,
+  `R` rastreado que sumiu do disco. A primeira versão fazia um `lstatSync` síncrono por arquivo
+  rastreado mais 8–9 spawns por prompt; num repo de milhares de arquivos isso travava o loop de
+  eventos antes de cada mensagem. Árvore igual à da última foto **reaproveita a revisão**
+  (`lastTree`/`lastRef` na sessão ativa): todo pedido ganha registro, não commit.
+  **Captura lenta ou falha NÃO mata o turno.** A primeira versão chamava `ctx.abort()` no omp
+  ao estourar 25 s, em qualquer erro de captura e em `agent_start`/`turn_start` com captura
+  pendente — um repo grande cancelava TODO prompt. O que importa (nada tardio entra no turno)
+  é o cancelamento da captura, que fica; o abort saiu. Hoje é aviso "este pedido segue sem
+  checkpoint" e o turno anda; o `/rewind` só tem um ponto a menos. O Git do projeto só
+  enumera arquivos/exclusões; variáveis `GIT_*` herdadas são removidas, hooks/assinatura/fsmonitor
+  são desativados e atributos do shadow preservam bytes, inclusive CRLF, sem filtros de conteúdo.
+  O modo de código repõe arquivos modificados/apagados, preservando os criados depois. Origem,
+  projeto, revisão, ramo, diretório e ociosidade são conferidos antes da escrita; symlinks
+  ancestrais ou diretórios posteriores em colisão recusam a operação.
+  **O await do OMP tem prazo:** no 18.1.11 o dispatcher libera handlers após 30 s. A captura
+  tem limite total de 25 s, incluindo espera na fila, e cancela os processos Git antes desse
+  limite nativo (o pedido segue, ver acima). `agent_start`/`turn_start` também invalidam qualquer
+  captura restante; ela não pode publicar um checkpoint tardio no turno em execução.
+  Prova usa `ExtensionRunner`/`loadExtensionFromFactory` reais, sem chamada a modelo; reproduziu
+  a publicação tardia ao expirar o dispatcher e passou após o cancelamento.
+  **As provas do omp reusam o addon nativo da máquina** (`tests/omp_runtime._reusar_natives`,
+  06/09/2026): o omp extrai `pi_natives` (~344 MB) em `~/.omp/natives/<versão>` da HOME que
+  vê, e cada caso tem HOME própria — com as 3 rodadas que o pytest guarda, um `/tmp` em tmpfs
+  de 12 GB lotou NO MEIO da suíte e derrubou 756 testes com `No space left on device`, todos
+  longe do omp. A HOME de teste ganha um symlink `.omp/natives` (e `.cache/omp/natives`) pro
+  real quando ele existe; sem ele (CI limpo) o omp extrai como sempre.
+  Registros Pi antigos só são restaurados quando a sessão original, seu `header.cwd` e o
+  armazenamento legado previsto demonstram a origem; não se procura um SHA por pastas alheias.
+  Código e conversa são etapas separadas: falha da segunda é informada como parcial, não sucesso.
+  Regras herdadas do adapter: a allowlist embutida libera só `~/.claude/hooks/` — hook que mora
   noutro lugar entra por `~/.pi/agent/claude-hooks-adapter.json`, e `allowPatterns` ali
   **substitui** a lista, não soma; e os hooks só-Claude do próprio app (`state_hook`, `askq_capture`,
   `preview_hook`, `subagent_hook`) ficam no `skipPatterns` porque o Pi tem extensão própria pra isso.
+  **Catálogos e plugins nativos (06/09/2026):** `app/omp_plugin_sync.py` oferece
+  `PluginSynchronizer.import_marketplaces` e `reconcile`. A importação percorre todos os
+  marketplaces registrados no Claude, sem nomes especiais, e chama o gerenciador nativo do
+  OMP. Confere nome/origem no registro após o comando; catálogo homônimo divergente permanece
+  intacto. Importar catálogo não instala seus plugins nem migra instalações Git existentes.
+  O OMP já oferece `marketplace.autoUpdate=off|notify|auto`, com padrão `notify`; a atualização
+  nativa por versão do catálogo ocorre na abertura da sessão e não é duplicada pelo Hangar.
+  A reconciliação de Git direto exige origem, revisão e manifesto instalável comprovados,
+  preserva escopo, seleção de recursos e preferências, e suspende a gestão após alteração
+  manual. Metadados Claude sem SHA tornam somente aquele candidato não verificável.
+  Em atualização, prepara apenas a dependência gerenciada antes de chamar o instalador:
+  isso evita arestas duplicadas no Bun quando o parser OMP não reconhece `#SHA` em host genérico.
+  Uma falha só reverte essa chave se a instalação anterior ainda estiver comprovadamente
+  intacta; não remove o plugin antes da atualização nem restaura cópia global antiga.
+  O registro próprio fica em `~/.hangar/omp-plugin-sync.json`, com trava portátil compartilhada
+  entre passagens e escrita atômica. Operação interrompida não concede autoridade de remoção.
+  Todos os vínculos e estados do ledger são validados antes de chamar o CLI ou agir; registro
+  malformado não é reparado por inferência e não autoriza remover um plugin. Duas identidades
+  Claude para o mesmo pacote tornam o nome ambíguo durante toda a passagem, inclusive diante
+  de uma terceira origem; os candidatos independentes continuam. Diagnósticos não publicam
+  texto bruto de exceções de parser/I/O, que pode transcrever credenciais da entrada.
+  `dry_run=True` é somente leitura de registros/manifestos: nenhum CLI, lock, cache ou ledger
+  é escrito, pois até `omp plugin list` pode migrar arquivos. Provas cobrem o CLI real, Git
+  Smart HTTP em loopback privado, importação genérica e preservação da instalação nas falhas.
+  **Resolução de diretórios:** `resolve_omp_directories` separa configuração, agente e dados
+  conforme o OMP. `PI_CODING_AGENT_DIR` não move o armazenamento global. `PI_CONFIG_DIR`,
+  precedência de `OMP_PROFILE` sobre `PI_PROFILE` (inclusive vazio), override herdado e XDG
+  seguem as regras nativas. A categoria XDG exige caminho existente e agente padrão; perfis
+  nomeados exigem o caminho XDG daquele perfil. A resolução é lexical, usa o cwd do filho e
+  não expande `~`, não segue symlinks e não cria diretórios. Cada passagem tem sua própria visão;
+  mudar o destino não migra o ledger antigo: o vínculo incompatível gera diagnóstico.
+  **Passagens periódicas:** `PluginSyncLoop` é criado/encerrado no lifespan do backend, sem
+  serviço externo. `CP_OMP_PLUGIN_SYNC_ENABLED` é falso por padrão; intervalo positivo e finito
+  em `CP_OMP_PLUGIN_SYNC_INTERVAL` (300 s). Respeita também `automations_enabled()`. A primeira
+  passagem começa na subida e a seguinte espera o intervalo após a conclusão da anterior.
+  Importação/reconciliação rodam em `asyncio.to_thread`; desligar aguarda o worker em voo,
+  não cancela uma Future deixando o processo externo vivo. Uma parada observada fica registrada
+  até terminar a passagem, mesmo que o kill-switch seja reabilitado nesse intervalo.
+  `GET /api/omp/plugin-sync`, autenticado, expõe estado, horários e relatórios sanitizados.
+  Prova com backend real confirmou resposta HTTP enquanto o worker aguardava, e marcador de
+  teardown confirmou o encerramento cooperativo. Nenhuma página nova foi introduzida.
+  **Contexto CLAUDE.md:** `CP_OMP_CLAUDE_CONTEXT_ENABLED=1` habilita a configuração na subida
+  pelo módulo `omp_context`. Reusa o resolvedor nativo de diretórios, vincula APPEND_SYSTEM.md
+  ao CLAUDE.md global existente e instala/reusa a regra genérica de leitura do projeto.
+  Arquivo/link personalizado em conflito é preservado e informado; arquivo global ausente
+  não vira link quebrado. A lista disabledExtensions é mesclada pelo CLI nativo somente com
+  `context-file:project:AGENTS.md` e `context-file:user:AGENTS.md`, sem retirar outras escolhas.
+  Equivalência exige corpo compatível e frontmatter comprovadamente habilitado/incondicional,
+  lido pela biblioteca YAML já usada no backend. Só arquivos diretos .md/.mdc participam, como
+  no provider nativo; o nome/ID vem do arquivo. disabledExtensions, ttsr.disabledRules e
+  disabledProviders são conferidos sem remover bloqueios pessoais. Precondições de arquivo,
+  regra e diretório são repetidas após a trava e chamadas externas; rules/ convertido em
+  symlink é recusado antes de publicar a regra, preservando o alvo externo.
+  O CLI pode normalizar formatos legados de configuração, como o tema escalar para theme.dark,
+  mantendo a preferência efetiva. OMP real confirmou as sentinelas CLAUDE global/de projeto
+  e ausência das sentinelas AGENTS no prompt antes de ferramentas; projeto sem CLAUDE não
+  recebe conteúdo inventado. Outros harnesses e arquivos AGENTS.md dos projetos não são alterados.
 - **Pi model + thinking level** (`app/pi_models.py` + `scripts/pi/hangar-state.ts` + `components/PiModelPopover.svelte` + `components/PiEffortPopover.svelte`):
   the third mechanism, next to Claude's TUI picker and Codex's app-server, and it does **not** scrape
   the pane. Measured on pi 0.82.1: `/model` is a fuzzy-**search** list of ~300 entries (footer
@@ -1108,6 +1297,71 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
     it either. Neither triggered copy mode even with the option `on`, which is the behaviour a real
     wheel produces every day — so the result is about the injection, not about psmux. Wheel
     behaviour here is verified by a human scrolling, not by a probe.
+- **No psmux, `display-message -p '#S'` responde a sessão de QUEM PERGUNTA, não a do cliente
+  anexado** (medido 06/09/2026, psmux 3.3.7, VM WinBoat). É o oposto do tmux, e é por isso que o
+  `hangar-send` abandonou esse caminho: lá a resposta é estado global do servidor. Aqui ela acertou
+  em todas as configurações testadas — 1, 2 e 3 sessões vivas; com um cliente REAL anexado a outra
+  sessão (`session_attached=1` nela, 0 na minha); com `$TMUX` forjado apontando para outro id; e de
+  um filho destacado por `Start-Process`. De dentro de um pane de uma terceira sessão, veio o nome
+  DELA. Consequência: `--sessao` não é obrigatório no Windows, e o `nomeSessao()` do
+  `hangar-preview` (que só tinha esse caminho) estava certo. Copiar o primeiro critério do
+  `hangar-send` seria **pior**: `TMUX_PANE` + `list-panes -a` contando ocorrências dá AMBÍGUO aqui,
+  porque o psmux numera pane por sessão e duas sessões têm `%1` — contei 2. O que faltava era ler
+  `CP_SESSION_NAME` antes (carimbo do nascimento, imune a cliente anexado), validado por
+  `has-session -t "=<nome>"` porque um rename deixa o carimbo obsoleto e nome obsoleto endereça
+  OUTRA sessão. Fallback continua o `display-message`.
+- **O `ln -sf` do Git Bash COPIA, devolve 0, e é isso que quebrava os dois CLIs no Windows**
+  (06/09/2026). Três defeitos em fila, um só culpado. O `hangar-send` se localiza por
+  `dirname $(realpath $0)/../backend/.env` e a cópia em `~/.local/bin` procurava
+  `~/.local/backend/.env`; o `hangar-preview` é pior, porque o `import` ESM **estático** de
+  `../shell/preview_fmt.cjs` é resolvido pelo lugar do ARQUIVO — a cópia morria com
+  `ERR_MODULE_NOT_FOUND` apontando `~/.local/shell/`, quebrada **até no Git Bash**. E o
+  `install-hangar-send.sh` imprimia `ok: … -> …`, com a seta, nos dois casos: o fallback que diria
+  "CÓPIA" só cobre o `ln` FALHAR, e ele não falha. Pior, o script **desfazia** o shim que o
+  `install.ps1` já escrevia pro `hangar-send` — ou seja, o comando que a doc manda rodar depois de
+  um `git pull` quebrava o `hangar-send`. Hoje a checagem é `test -L` DEPOIS do `ln`, na fonte, e o
+  shim (idêntico nos dois instaladores) chama o script do repo por caminho absoluto. No Linux o
+  `ln` linka, `test -L` é verdadeiro e o ramo não roda.
+- **Script sem extensão é invisível pro PowerShell, e a falha é MUDA** (06/09/2026). Sem
+  `hangar-preview.cmd`, o `Get-Command` **achava** o arquivo (`CommandType=Application`) e executar
+  não produzia nada, com `$LASTEXITCODE` **vazio**; só dentro de um pipeline aparecia
+  `RuntimeException :: Não é possível executar um documento no meio de um pipeline`. O cmd.exe ao
+  menos diz "não é reconhecido". O corpo do lançador é **node**, não bash — o `hangar-preview` é
+  `#!/usr/bin/env node`, e copiar o `hangar-send.cmd` repetiria o erro que o `hangar-conta` já
+  pagou (`bash arquivo` não honra shebang).
+- **O navegador embutido funciona no Windows — com a sessão gráfica ATIVA** (06/09/2026, Electron
+  43.3.0 / Chrome 150, psmux 3.3.7). `open`, `list`, `snapshot`, `click`, `fill`, `type`, `press`,
+  `wait` e `shot` passam; o `shot` grava PNG real (1280×800, assinatura conferida). Com a janela
+  ocluída — sessão RDP/console **desconectada**, `query session` = `Disco` — o teclado
+  (`type`/`press`) continua entregando e o **mouse não**: o `click` devolve `rc=0` e ZERO evento
+  chega ao DOM (verificado com listener em captura). Não é do `hangar-preview`: um
+  `Input.dispatchMouseEvent` por **CDP cru** na página do próprio app respondeu `ok` e também não
+  entregou nada. O `fill` cai junto, mas alto, porque confere o foco depois do clique — e a
+  mensagem dele culpa a ref, que estava certa. Defeito à parte, do mesmo dia e ainda ABERTO: com a
+  janela ocluída o `shot` recusa com "não produziu quadro" enquanto um `Page.captureScreenshot`
+  **cru** no mesmo alvo devolve um PNG **íntegro** (1600×1000, 47382 bytes, app inteiro legível) —
+  ou seja, o quadro existe e é o `capturarPagina` de `preview_ctl.cjs` que desiste dele. O
+  `await quadro()` está **descartado** (é um `Promise.race` com teto de 500ms, não bloqueia); os
+  candidatos que sobram são o `TETO_SHOT_CDP` de 3000ms (o print de view escondido é lento sem
+  compositor) e o estado do flag `oculto`. Não medi qual dos dois, e não dá pra reproduzir sem
+  desconectar o display de novo.
+- **No Windows, um recado do `hangar-send` pode chegar TRÊS vezes de UM envio só — e a culpa é do
+  oráculo de entrega, não de quem mandou** (06/09/2026). A prova de que o texto chegou é
+  comparação de string entre o que foi enviado e o que aparece no transcript; a mensagem
+  perdeu **uma contrabarra** no caminho, a comparação não casou, e o reconcile redigitou. O
+  log do backend registra `REQUEUE name=win-preview id=6fc37a2f… tentativa=1` e `tentativa=2`
+  — um envio, três chegadas idênticas. Medido: a fila durável guardou `\\host.lan\Data\.hangar`
+  (duas contrabarras antes de `host.lan`) e o transcript recebeu `\host.lan\Data\.hangar` (uma).
+  **O que NÃO é**, medido na mesma hora e ao contrário do que o comentário do `api.py` supõe:
+  o `send-keys -l` do psmux **preserva** contrabarra (mandei 4, a tela mostrou 4) e o
+  round-trip do clipboard **preserva** (escrevi 6, li 6 de volta, string idêntica). Ou seja a
+  perda é DEPOIS dos dois primitivos de entrega — camada não identificada. Consequência
+  prática enquanto isso não fecha: recado repetido no Windows não é o par insistindo; antes
+  de responder, olhe `REQUEUE` em `%LOCALAPPDATA%\hangar\hangar-backend.log` e a fila em
+  `<config>\.hangar-queue\<sessao>.jsonl`, que guarda o texto ORIGINAL.
+- **`send-keys` do psmux: `;` corta a linha e o Enter junto não executa** (06/09/2026). O `;` é
+  separador de comando do tmux, então `send-keys "a ; b" Enter` digitou só o `a` — e mesmo esse não
+  rodou: foi preciso um `send-keys … Enter` **separado** para o shell do pane executar.
 - **The pane's environment comes from the SERVER on tmux and from the CALLER on psmux — which is
   why `CLAUDE_CONFIG_DIR` cannot be exported unconditionally** (measured on psmux 3.3.7,
   22/08/2026). tmux gives a new session the env of whoever started the *server*, so `new_session`
@@ -1212,6 +1466,31 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
     local, como sempre foi. `tar.gz` e não zip porque o Windows 10+ traz `tar.exe` — um comando só
     nos dois instaladores. O `npm ci` **continua** para quem mantém o preview, que precisa do
     `node_modules`.
+- **O diálogo de confiança do Claude Code, e as três coisas que ele derrubava** (medido 06/09/2026,
+  claude 2.1.263, com o pane real capturado em `tests/fixtures/pane_trust_dialog.txt`). Sintoma no
+  Windows: sessão criada pelo app numa pasta nova morria sozinha e o app dizia "sessão não
+  encontrada"; o chat de outra ficava em "reconectando" para sempre. São três defeitos em fila, e o
+  segundo e o terceiro valem em qualquer sistema:
+  - **A chave do pre-trust é o caminho com barra NORMAL no Windows.** No bundle do CLI,
+    `function uN(e){let t=B(e); if(L()==="windows") return t.replaceAll("\\","/"); return t}` é quem
+    monta a chave de `projects` no `.claude.json`. O `_pretrust_cwd` gravava o `cwd` cru — que vem do
+    `fs.py` como `str(Path(...))`, com contrabarra —, então escrevia uma chave que ninguém lê e o
+    diálogo aparecia mesmo com o pre-trust rodando. Hoje passa por `registry._chave_trust`. (A outra
+    metade dessa armadilha, "escreveu no ARQUIVO errado", já estava fechada em `tmux.claude_json_de`.)
+  - **`is_overlay` não via o diálogo porque olhava as 8 últimas linhas de um pane cheio de branco.**
+    A caixa ocupa 16 linhas de um pane de 30 e o resto fica vazio; `capture-pane` devolve a altura
+    inteira, então a janela de 8 linhas pegava só branco e o gate respondia "tela livre". Com isso o
+    `deliverable` liberava, o envio digitava às cegas e o Enter caía em **"No, exit"** — que é a
+    opção sob o cursor, porque o CLI desenha esse diálogo com `cancelFirst:!0, focus:"cancel"`. E as
+    opções vêm com `hideIndexes:!0`, sem `1.`/`2.`, então `classify` nunca as vê como menu: o
+    `is_overlay` é a única defesa. Quem responde "quais são as últimas 8 linhas" agora é o
+    `state._rodape`, que descarta as em branco do fim — a mesma correção que o `_pane_tail` do
+    `terminal_input` já tinha, e que o `_menu_block` (o gate do picker do Pi) também precisava.
+  - **`awatch` numa pasta que ainda não existe derruba o SSE em laço.** `projects/<slug>` só nasce
+    quando o agente escreve; até lá o `follow()` levantava `FileNotFoundError`, o `pump` mandava o
+    erro pro cliente, o EventSource reconectava e caía no mesmo erro. O `TranscriptTailer.follow`
+    espera a pasta em vez de estourar (o `mkdir` que o adapter do Codex já fazia era o mesmo
+    problema, resolvido só naquele caminho).
 - **Session creation's systemd-scope probe.** Creating a session wraps `tmux` in
   `systemd-run --user --scope` so the tmux server doesn't inherit the backend's cgroup, but the wrap
   is now gated on a probe: a systemd user manager that refuses transient scopes was making **every**
