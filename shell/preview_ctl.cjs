@@ -10,7 +10,13 @@ const TEMAS = { claro: 'light', escuro: 'dark', sistema: '' };
 // layout de celular e não há quadro pra fotografar. A emulação de tamanho a desamarra do
 // compositor. Tamanho fixo porque não há painel de onde tirar um: é o que o agente vê.
 const VIEWPORT_OCULTO = { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false };
-const TETO_SHOT_CDP = 3000;
+// Teto do print por CDP. 3000 era APERTADO DEMAIS e recusava quadro que existia: o caminho do
+// `Page.captureScreenshot` é o ÚNICO de uma sessão fora do painel (`oculto`), e sem compositor
+// ele é lento — medido 2071-2902ms nesta VM, com a primeira captura consumindo 97% do teto.
+// Estourar aqui devolvia imagem vazia, que o preview_srv reporta como "não produziu quadro
+// (janela minimizada?)" — culpa trocada, porque o quadro estava lá. Alinhado ao `tetoEspera`
+// dos outros verbos: melhor um print que demora do que um print que mente.
+const TETO_SHOT_CDP = 15000;
 
 // Tecla nomeada precisa de `code` + virtual key code pra o Chromium reconhecer, e Enter precisa
 // do caractere: keyDown sem `text: "\r"` não gera char e o form não submete.
@@ -201,7 +207,12 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, tetoEspera = 15000 }
         pedido.catch(() => null),
         new Promise((res) => setTimeout(() => res(null), TETO_SHOT_CDP)),
       ]);
-      if (!r || !r.data) return { isEmpty: () => true, toPNG: () => Buffer.alloc(0) };
+      if (!r || !r.data) {
+        // Distinguir no LOG o que o retorno não distingue: o preview_srv só vê "imagem vazia" e
+        // atribui à janela minimizada. Quem for investigar precisa saber se foi o teto.
+        console.error(`[nav] captureScreenshot sem dado apos ${TETO_SHOT_CDP}ms (oculto=${oculto})`);
+        return { isEmpty: () => true, toPNG: () => Buffer.alloc(0) };
+      }
       const png = Buffer.from(r.data, 'base64');
       return { isEmpty: () => png.length === 0, toPNG: () => png };
     },

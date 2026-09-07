@@ -1337,14 +1337,15 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   chega ao DOM (verificado com listener em captura). Não é do `hangar-preview`: um
   `Input.dispatchMouseEvent` por **CDP cru** na página do próprio app respondeu `ok` e também não
   entregou nada. O `fill` cai junto, mas alto, porque confere o foco depois do clique — e a
-  mensagem dele culpa a ref, que estava certa. Defeito à parte, do mesmo dia e ainda ABERTO: com a
-  janela ocluída o `shot` recusa com "não produziu quadro" enquanto um `Page.captureScreenshot`
+  mensagem dele culpa a ref, que estava certa. Defeito à parte, do mesmo dia, CONSERTADO: com a
+  janela ocluída o `shot` recusava com "não produziu quadro" enquanto um `Page.captureScreenshot`
   **cru** no mesmo alvo devolve um PNG **íntegro** (1600×1000, 47382 bytes, app inteiro legível) —
   ou seja, o quadro existe e é o `capturarPagina` de `preview_ctl.cjs` que desiste dele. O
-  `await quadro()` está **descartado** (é um `Promise.race` com teto de 500ms, não bloqueia); os
-  candidatos que sobram são o `TETO_SHOT_CDP` de 3000ms (o print de view escondido é lento sem
-  compositor) e o estado do flag `oculto`. Não medi qual dos dois, e não dá pra reproduzir sem
-  desconectar o display de novo.
+  culpado era o `TETO_SHOT_CDP` de 3000ms, provado por causalidade: baixado a 100ms ele produz
+  exatamente aquela frase, com a janela VISÍVEL. O print sem compositor mede 2071-2902ms aqui —
+  a primeira captura consumia 97% do teto. Descartados o `await quadro()` (`Promise.race` de
+  500ms, não bloqueia) e o flag `oculto` (a sessão fora do painel tem `oculto=true`, e é
+  justamente esse ramo que só tem o `captureScreenshot`). Teto agora 15000ms.
 - **No Windows, um recado do `hangar-send` pode chegar TRÊS vezes de UM envio só — e a culpa é do
   oráculo de entrega, não de quem mandou** (06/09/2026). A prova de que o texto chegou é
   comparação de string entre o que foi enviado e o que aparece no transcript; a mensagem
@@ -1352,11 +1353,17 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   log do backend registra `REQUEUE name=win-preview id=6fc37a2f… tentativa=1` e `tentativa=2`
   — um envio, três chegadas idênticas. Medido: a fila durável guardou `\\host.lan\Data\.hangar`
   (duas contrabarras antes de `host.lan`) e o transcript recebeu `\host.lan\Data\.hangar` (uma).
-  **O que NÃO é**, medido na mesma hora e ao contrário do que o comentário do `api.py` supõe:
-  o `send-keys -l` do psmux **preserva** contrabarra (mandei 4, a tela mostrou 4) e o
-  round-trip do clipboard **preserva** (escrevi 6, li 6 de volta, string idêntica). Ou seja a
-  perda é DEPOIS dos dois primitivos de entrega — camada não identificada. Consequência
-  prática enquanto isso não fecha: recado repetido no Windows não é o par insistindo; antes
+  **Onde some** (medido byte a byte em 06/09/2026, com o pane gravando num arquivo o que recebe,
+  em vez de eu contar barra em tela renderizada — foi contando na tela que eu errei antes, e
+  cheguei a registrar aqui que o multiplexador estava inocente): é o **argv entre o Python e o
+  psmux**, e só quando o argumento vai **entre aspas**. `send-keys -l 'A\\x'` (tem espaço, então
+  o `subprocess.list2cmdline` cita) chega no pane como `A\x`, uma a menos; `send-keys -l
+  'B\\x'` (sem espaço, sem aspas) chega inteiro. Run maior encolhe igual: 3 viram 2. A causa é
+  regra de escape divergente — o `list2cmdline` segue o MSVC, onde contrabarra só é especial
+  **imediatamente antes de uma aspa**, e o psmux desescapa `\\` em qualquer lugar dentro das
+  aspas. O clipboard está fora disso (round-trip preserva 6 de 6), e o composer do Claude Code e
+  o transcript também: quando o pane já recebeu a menos, os dois só repassam o que chegou.
+  Consequência prática enquanto isso não fecha: recado repetido no Windows não é o par insistindo; antes
   de responder, olhe `REQUEUE` em `%LOCALAPPDATA%\hangar\hangar-backend.log` e a fila em
   `<config>\.hangar-queue\<sessao>.jsonl`, que guarda o texto ORIGINAL.
 - **`send-keys` do psmux: `;` corta a linha e o Enter junto não executa** (06/09/2026). O `;` é
