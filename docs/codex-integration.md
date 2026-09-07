@@ -75,7 +75,10 @@ skills pela origem Claude e só retira duplicatas quando o destino nativo está 
 
 Script de `~/.claude/hooks/` que é symlink não é copiado pelo importador nativo; depois da
 importação o Hangar cria em `~/.codex/hooks/` um link para o arquivo real (`codex_hooks_arquivos`),
-sem cópia. Sem equivalente no Claude, vira aviso nomeando o arquivo.
+sem cópia. Subpastas são preservadas, inclusive `hooks/gitnexus/gitnexus-hook.cjs`; sem
+equivalente no Claude, vira aviso com o caminho relativo completo. No Windows, a cópia segue
+essa mesma estrutura e acompanha alterações na fonte. Caminhos que escapam da pasta de hooks
+por `..` ou por um link de subpasta não autorizam escrita fora dela.
 
 O `security-guidance` emite telemetria (`metrics`, `rewakeSummary`) e, no bootstrap, duas linhas
 JSON com anúncio `async`. O adaptador `codex-hook-json.py`, instalado em

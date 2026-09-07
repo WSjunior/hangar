@@ -73,7 +73,7 @@ def faltantes(doc: dict, codex_home: Path) -> list[Path]:
             # PENDURADO continua sendo ele mesmo — resolvendo o arquivo, um link morto vira o
             # caminho do alvo inexistente, sai de dentro de `hooks/` e nunca seria refeito.
             alvo = p.parent.resolve(strict=False) / p.name
-            dentro = alvo.parent == pasta
+            dentro = alvo != pasta and alvo.is_relative_to(pasta)
         except OSError:
             continue
         # `exists()` segue symlink: link pendurado conta como faltante, que é o que ele é na prática.
@@ -99,9 +99,9 @@ def _copias_velhas(doc: dict, codex_home: Path, origem: Path) -> list[Path]:
             continue
         try:
             alvo = p.parent.resolve(strict=False) / p.name
-            if alvo.parent != pasta or not alvo.is_file():
+            if not alvo.is_relative_to(pasta) or not alvo.is_file():
                 continue
-            fonte = origem / alvo.name
+            fonte = origem / alvo.relative_to(pasta)
             if fonte.is_file() and fonte.read_bytes() != alvo.read_bytes():
                 velhas.append(alvo)
         except OSError:
@@ -127,15 +127,19 @@ def materializar(codex_home: Path, home: Path, doc: dict | None = None) -> tuple
     if not isinstance(doc, dict):
         return [], []
     origem = home / ".claude" / "hooks"
+    pasta = (codex_home / "hooks").resolve()
     criados: list[str] = []
     orfaos: list[str] = []
     # No Windows o que existe é CÓPIA, e cópia envelhece: o hook editado em `~/.claude/hooks` não
     # chegaria ao Codex nunca mais, calado. Aqui uma cópia que divergiu da fonte é refeita — o
     # arquivo é nosso (foi esta função que o escreveu), e o conteúdo é o do hook, não do usuário.
     for destino in _copias_velhas(doc, codex_home, origem) + faltantes(doc, codex_home):
-        fonte = origem / destino.name
+        # Preserva a subpasta: hooks diferentes podem ter o mesmo nome de arquivo.
+        relativo = destino.relative_to(pasta)
+        nome = relativo.as_posix()
+        fonte = origem / relativo
         if not fonte.exists():           # segue o symlink: fonte quebrada também não serve
-            orfaos.append(destino.name)
+            orfaos.append(nome)
             continue
         alvo = fonte.resolve()           # o arquivo REAL, não o link do meio do caminho
         try:
@@ -148,7 +152,7 @@ def materializar(codex_home: Path, home: Path, doc: dict | None = None) -> tuple
             else:
                 destino.symlink_to(alvo)
         except OSError:
-            orfaos.append(destino.name)
+            orfaos.append(nome)
             continue
-        criados.append(destino.name)
+        criados.append(nome)
     return criados, orfaos

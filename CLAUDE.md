@@ -1779,6 +1779,15 @@ comandos novos. O PR também COPIAVA `~/.claude/hooks` inteiro pela área de imp
 cópias com manifesto em `~/.codex/hooks` — mesmo bug que o `13ed4251` do mesmo dia já fechava com
 symlink (`codex_hooks_arquivos`). Ficou o symlink, decisão do usuário: uma fonte só, sem cópia
 pra envelhecer entre reconciliações. A parte de cópia foi retirada na integração do PR.
+
+**Hooks em subpastas (07/09/2026):** `codex_hooks_arquivos` preserva o caminho relativo inteiro,
+também ao atualizar cópias no Windows. A verificação anterior exigia o pai imediato `hooks/` e
+ignorava `gitnexus/gitnexus-hook.cjs`: os comandos importados existiam, mas o arquivo não.
+Captura de `hook/completed` no app-server confirmou falha nos dois hooks do GitNexus; execução
+direta mostrou `MODULE_NOT_FOUND`, código 1. Homônimos na raiz não substituem arquivos de
+subpastas; caminhos resolvidos fora de `hooks/` continuam excluídos. A restauração do arquivo
+mantém o comando aprovado no Codex.
+
 **Instruções nativas (07/09/2026, PR #3):** `codex_instrucoes.py` prepara `AGENTS.override.md`
 — nome que o Codex 0.153.4 lê no lugar do `AGENTS.md` da mesma pasta — como link para o
 `CLAUDE.md` global (`<codex>/AGENTS.override.md`) e dos projetos registrados no `config.toml`; o
