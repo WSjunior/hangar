@@ -10,13 +10,14 @@
   interface Props {
     open: boolean;
     commands: CommandInfo[];
+    fillOnly?: boolean;
     onCommand: (cmd: string) => void; // envia "/nome"
     onFill: (name: string) => void; // preenche "/nome " no textarea
     /** Qual das duas caixas abrir: `/model` e `/effort` viraram pills separadas. */
     onOpenModelEffort: (qual: 'model' | 'effort') => void;
     onClose: () => void;
   }
-  let { open, commands, onCommand, onFill, onOpenModelEffort, onClose }: Props = $props();
+  let { open, commands, fillOnly = false, onCommand, onFill, onOpenModelEffort, onClose }: Props = $props();
 
   let query = $state('');
   let confirming = $state<string | null>(null);
@@ -52,6 +53,11 @@
   );
 
   function handleTap(c: CommandInfo) {
+    if (fillOnly) {
+      onFill(c.name);
+      onClose();
+      return;
+    }
     if (c.name === 'model' || c.name === 'effort') {
       onOpenModelEffort(c.name === 'effort' ? 'effort' : 'model');
       onClose();

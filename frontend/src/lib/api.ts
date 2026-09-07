@@ -970,15 +970,16 @@ export async function sendInput(name: string, text: string): Promise<void> {
   });
 }
 
-// ctrl-s avulso (só Kimi): a msg que JÁ está na fila da TUI entra no turno em curso. É o caso que o
-// botão de enviar-com-steer não cobre — quando o usuário só decide isso depois de ter mandado.
+// Kimi promove a fila por ctrl-s; Codex aceita texto imediato ou promove a fila por turn/steer.
 // promoted=true: o backend já baixou a fila durável — o front tira as bolhas "queued-" na hora,
 // porque o user_msg real só é gravado no wire no FIM do turno (medido: ~34s depois do ctrl-s).
 export async function steerSession(
   name: string,
+  text?: string,
 ): Promise<{ ok: boolean; promoted?: boolean; confirmed?: number }> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/steer`, {
     method: 'POST',
+    body: text === undefined ? undefined : JSON.stringify({ text }),
   });
 }
 
@@ -1896,10 +1897,17 @@ export function getLimits(name: string): Promise<SessionLimits> {
 
 // Modelo + reasoning effort do Codex (Task C) — so sessoes Codex; o back devolve 400 pra Claude.
 export function getCodexModels(name: string): Promise<CodexModelsResponse> {
-  return _catalogo(`codex|${name}`, () => apiFetch(`/api/sessions/${encodeURIComponent(name)}/models`));
+  // O catálogo pode ser estável; a escolha atual também muda pelo terminal.
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/models`);
 }
 
-// Grava a escolha (dict + sidecar no backend); vale a partir do PROXIMO turno enviado.
+export function setCodexMode(name: string, mode: 'default' | 'plan'): Promise<CodexModelsResponse['current']> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/codex/mode`, {
+    method: 'POST', body: JSON.stringify({ mode }),
+  });
+}
+
+// Atualiza as configurações nativas compartilhadas pelo chat e pelo terminal.
 export function setCodexModel(name: string, model: string, effort?: string | null): Promise<void> {
   _invalidarCatalogo(name);
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/model`, {

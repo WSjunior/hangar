@@ -152,6 +152,7 @@ export interface ChatEvent {
 }
 
 export interface StateEvent {
+  codex_mode?: 'default' | 'plan' | null;
   session: string;
   state: State;
   label?: string | null;
@@ -482,6 +483,7 @@ export interface CodexModel {
 export interface CodexModelChoice {
   model: string | null;
   effort: string | null;
+  mode?: 'default' | 'plan';
 }
 
 export interface CodexModelsResponse {

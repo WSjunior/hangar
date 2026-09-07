@@ -213,10 +213,17 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
 - **Furar a fila (só Kimi):** mensagem mandada com a sessão trabalhando fica na fila **do Kimi** —
   ele processa quando o turno atual acabar. Enquanto houver fila, a fileira de cima do composer
   mostra **⏳ N na fila · mandar agora**; tocar manda o `ctrl-s` do Kimi e a fila **inteira** entra no
-  turno em curso, sem esperar. Não tocar = espera, como sempre. Claude e Codex não têm essa tecla,
-  então lá o chip não aparece.
+  turno em curso, sem esperar. Não tocar = espera, como sempre.
+- **Orientar no Codex:** durante um turno, o botão de envio habitual coloca a mensagem na fila.
+  **Orientar** envia o texto ao turno em andamento. O indicador da fila também tem **Orientar**
+  para promover mensagens já enviadas. Se o turno terminar antes da entrega, o texto é preservado
+  e o app informa a falha; a orientação não inicia outro turno por conta própria.
 - **Slash commands:** `/` abre a lista (`/clear`, `/compact`, …). `/clear` limpa de verdade (zera a fila).
 - **Modelo/esforço:** toque na pill (ex `Opus4.8·1M·high`) → escolhe modelo + esforço (só na sessão).
+- **Codex — modo e skills:** o botão **Normal/Planejar**, ou **Shift+Tab** no campo de mensagem,
+  muda o modo nativo da sessão. A troca preserva modelo, esforço e permissões e vale para o próximo
+  turno. Modelo e esforço acompanham alterações feitas no terminal. Digitar `/` lista as skills
+  habilitadas no próprio Codex; selecionar preenche `/nome ` para você acrescentar os argumentos.
 - **Pergunta interativa do Claude** (AskUserQuestion/permissão): as opções viram **botões** —
   toque. (Se não renderizar como botão, responda com o **número** em texto.)
 
@@ -243,6 +250,18 @@ A escolha fica no servidor selecionado e vale nas instalações e atualizações
 Linux e Windows, mesmo com o backend parado. Salvar a preferência não troca nem restaura a barra
 atual; desligá-la preserva o comando que já está configurado. No desktop, as opções abrem em
 modal; no celular, em uma folha.
+
+### Contexto estendido do Codex
+
+Em **Configurações → Harnesses → Codex → Opções**, habilite **Contexto estendido (até 1M)** e
+clique em **Salvar**. A opção usa `model_context_window` na configuração oficial do Codex e vale
+para novas sessões. Desativar restaura o valor anterior; o limite personalizado de compactação,
+quando existir, continua valendo e aparece na tela.
+
+O Codex limita a janela ao máximo permitido pelo modelo. O painel mostra os limites anunciados
+pelo catálogo local; em 07/09/2026, o Codex 0.153.4 desta instalação anunciava 872.000 tokens para
+Astra e Sol, embora a documentação dos modelos informe contexto de até 1.050.000 tokens. A opção
+não altera o catálogo nem promete uma janela maior que a aceita pelo CLI.
 
 ### Desktop (≥820px)
 Abrindo a mesma URL num monitor largo, vira **shell de duas colunas**: sidebar de sessões +

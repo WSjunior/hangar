@@ -49,6 +49,7 @@
   import { ditadoEstilo, estilosDitado, type EstiloDitado } from '../lib/ditadoEstilo.svelte';
   import { getCommands, setModelEffort, uploadFile, uploadUrl, transcribeFile, relimparDitado, getCodexModels, getPiModels, getKimiModels, getModelOptions, getPermissionModes, setPermissionMode, type ModelEffortBody } from '../lib/api';
   import { aoAquecer } from '../lib/aquecimento';
+  import { setCodexMode } from '../lib/api';
   import type { Provider, State, StatsEvent } from '../lib/types';
   import type { StatusFields } from '../lib/statusline';
   import { ttsPlayer } from '../lib/ttsPlayer.svelte';
@@ -57,7 +58,8 @@
     sessionName: string;
     sessionState: State;
     status: StatusFields | null;
-    onSend: (text: string) => Promise<void> | void;
+    onSend: (text: string, steer?: boolean) => Promise<void> | void;
+    codexMode?: 'default' | 'plan' | null;
     // ctrl-s avulso: promove o que JÁ está na fila da TUI do Kimi pro turno em curso.
     onSteer?: () => Promise<void> | void;
     // Quantas msgs estão esperando o turno atual (as bolhas translúcidas). 0 = sem chip de fila.
@@ -80,9 +82,7 @@
     inputText?: string;  // bindable: o pai injeta um draft (ex: interrupt devolve a msg pendente)
     // Faixa de estatísticas da sessão (evento SSE `stats`). null = sem faixa.
     stats?: StatsEvent | null;
-    // Provider da sessao (Chat.svelte, via allSessions). undefined/"claude" = comportamento de
-    // sempre; "codex" esconde o picker de /model e o autocomplete de slash-commands (Claude-only —
-    // o Codex nao tem nem um nem outro); "kimi" nao tem sheet de modelo neste MVP (pill so leitura).
+    // Cada provider consulta o catálogo e os controles da sua própria sessão.
     provider?: Provider;
     // Motor da sessao (SessionInfo.engine). Numa sessao de motor quem responde nao e o Claude,
     // entao o placeholder usa o modelo real (pill/statusline) em vez de "Claude".
@@ -102,6 +102,7 @@
     provider = 'claude',
     engine = null,
     filaCount = 0,
+    codexMode = null,
     stats = null,
   }: Props = $props();
 
@@ -168,9 +169,9 @@
   $effect(() => { void ditadoEstilo.carregar(); });
 
   $effect(() => {
-    if (isCodex) return;   // Codex nao tem slash-commands do Claude Code -> nem busca a lista
     const sn = sessionName;
-    const cached = commandCache.get(sn);
+    const key = `${provider}|${sn}`;
+    const cached = isCodex ? undefined : commandCache.get(key);
     if (cached) {
       commands = cached;
       return;
@@ -182,7 +183,7 @@
       if (sn !== sessionName) return;   // trocou de sessao na espera: esta busca nao serve mais
       getCommands(sn)
         .then((c) => {
-          commandCache.set(sn, c);
+          commandCache.set(key, c);
           if (sn === sessionName) commands = c;
         })
         .catch(() => {
@@ -552,18 +553,45 @@
   let codexEffortPillEl = $state<HTMLElement | null>(null);
   let codexModel = $state<string | null>(null);
   let codexEffort = $state<string | null>(null);
+  let modoCodex = $state<'default' | 'plan'>('default');
+  let trocandoModo = $state(false);
+
+  $effect(() => {
+    if (!isCodex) return;
+    if (status?.model) codexModel = status.model;
+    if (status?.effort) codexEffort = status.effort;
+    if (codexMode) modoCodex = codexMode;
+  });
+
+  async function alternarModoCodex() {
+    if (trocandoModo) return;
+    trocandoModo = true;
+    sendError = '';
+    const sn = sessionName;
+    try {
+      const res = await setCodexMode(sn, modoCodex === 'plan' ? 'default' : 'plan');
+      if (sn === sessionName) modoCodex = res.mode ?? modoCodex;
+    } catch (e) {
+      if (sn === sessionName) sendError = e instanceof Error ? e.message : m.comum_falha_aplicar();
+    } finally { trocandoModo = false; }
+  }
 
   $effect(() => {
     if (!isCodex) return;
     const sn = sessionName;
+    let active = true;
+    codexModel = null; codexEffort = null; modoCodex = 'default';
     getCodexModels(sn)
       .then((res) => {
+        if (!active) return;
         codexModel = res.current.model;
         codexEffort = res.current.effort;
+        modoCodex = res.current.mode ?? 'default';
       })
       .catch(() => {
         // endpoint indisponivel -> pill fica com o rotulo generico, sem quebrar a UI
       });
+    return () => { active = false; };
   });
 
   function handleCodexModelApplied(model: string, effort: string | null) {
@@ -827,6 +855,11 @@
   // comando caia na lista de modelos e tinha que fechar e achar a outra pill.
   // Haiku nao tem esforco -> a pill nao existe -> cai no seletor de modelo, que existe sempre.
   function abrirSeletor(qual: 'model' | 'effort') {
+    if (isCodex) {
+      if (qual === 'effort') codexEffortOpen = true;
+      else codexPopOpen = true;
+      return;
+    }
     if (qual === 'effort' && !semEsforcoClaude) claudeEffortOpen = true;
     else claudePopOpen = true;
   }
@@ -834,12 +867,12 @@
   // Toque numa sugestao do strip inline. model/effort abrem a caixa correspondente; comando com
   // argumento (ou destrutivo) preenche pra revisao antes de enviar; o resto envia direto.
   function handleSuggestPick(cmd: CommandInfo) {
-    if (cmd.name === 'model' || cmd.name === 'effort') {
+    if ((!isCodex || cmd.source === 'builtin') && (cmd.name === 'model' || cmd.name === 'effort')) {
       inputText = '';
       abrirSeletor(cmd.name === 'effort' ? 'effort' : 'model');
       return;
     }
-    if (cmd.argumentHint || cmd.destructive) {
+    if (isCodex || cmd.argumentHint || cmd.destructive) {
       fillCommand(cmd.name);
       return;
     }
@@ -899,9 +932,10 @@
     }
     // Shift+Tab no campo = a tecla do terminal do Claude. Só com o foco aqui, pra não roubar a
     // navegação por teclado do resto da tela.
-    if (e.key === 'Tab' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && isClaude) {
+    if (e.key === 'Tab' && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && (isClaude || isCodex)) {
       e.preventDefault();
-      void ciclarPermissao();
+      if (isCodex) void alternarModoCodex();
+      else void ciclarPermissao();
     }
   }
 
@@ -1492,7 +1526,7 @@
     }
   }
 
-  async function submit(): Promise<boolean> {
+  async function submit(steer = false): Promise<boolean> {
     if (!canSend) return false;
     cancelarContagem();   // envio manual torna a contagem sem sentido
     const caption = inputText.trim();
@@ -1519,7 +1553,7 @@
         }
         const attachPart = parts.join(' ');
         const msg = (caption ? caption + ' — ' : '') + attachPart;
-        await onSend(msg);                 // espera o /input; so limpa se foi
+        await onSend(msg, steer);
         inputText = '';
         if (textareaEl) textareaEl.style.height = 'auto';
         clearAttachments();
@@ -1540,7 +1574,7 @@
     if (textareaEl) textareaEl.style.height = 'auto';
     let ok = true;
     try {
-      await onSend(caption);
+      await onSend(caption, steer);
     } catch (err) {
       // falhou -> devolve o texto, MAS so se a caixa segue vazia (nao pisa no que o usuario digitou
       // na janela do envio em voo).
@@ -1584,14 +1618,18 @@
     {/if}
     <div class="composer-top">
       <div class="top-left">
-        {#if !isCodex}
           <button class="slash-btn" onclick={() => (commandSheetOpen = true)} aria-label={m.comandos_titulo()}>
             <span class="slash-glyph" aria-hidden="true">/</span>
           </button>
-        {/if}
         <button class="slash-btn" onclick={onOpenPreview} aria-label={m.composer_preview_rodando()}>
           <IconMonitor size={17} />
         </button>
+        {#if isCodex}
+          <button class="repo-chip" onclick={alternarModoCodex} disabled={trocandoModo}
+            aria-pressed={modoCodex === 'plan'} title={m.codex_modo_atalho()}>
+            <span class="repo-name">{modoCodex === 'plan' ? m.codex_modo_plan() : m.codex_modo_normal()}</span>
+          </button>
+        {/if}
         {#if onOpenPair}
           {@const pairLabel = pairPeers?.length === 1 ? pairPeers[0]
             : pairPeers?.length ? `grupo (${pairPeers.length + 1})` : null}
@@ -1623,7 +1661,7 @@
             </button>
           {/if}
         {/if}
-        {#if isKimi && isWorking && filaCount > 0 && onSteer}
+        {#if (isKimi || isCodex) && isWorking && filaCount > 0 && onSteer}
           <!-- FILA da TUI do Kimi: msg já mandada, esperando o turno atual acabar. O chip existe pra
                DIZER que há fila (antes disso a bolha translúcida era a única pista) e dar a saída:
                tocar manda o `ctrl-s`, que promove a msg pro turno em curso. Não tocar = espera, que
@@ -1634,7 +1672,7 @@
             <span class="repo-glyph" aria-hidden="true">⏳</span>
             <span class="repo-name">{m.composer_fila_contagem({ n: filaCount })}</span>
             <span class="repo-sep" aria-hidden="true">·</span>
-            <span class="fila-acao">{m.composer_fila_acao()}</span>
+            <span class="fila-acao">{isCodex ? m.codex_orientar() : m.composer_fila_acao()}</span>
           </button>
         {/if}
         {#if shellsRodando > 0 && onOpenActivity}
@@ -1696,9 +1734,7 @@
       </div>
     {/if}
 
-    {#if !isCodex}
-      <SlashSuggest {commands} query={inputText} onPick={handleSuggestPick} />
-    {/if}
+    <SlashSuggest {commands} query={inputText} onPick={handleSuggestPick} />
 
     <textarea
       bind:this={textareaEl}
@@ -1991,6 +2027,10 @@
       </div>
 
       <div class="control-right">
+        {#if isCodex && isWorking && hasInput && !sendToPair}
+          <button class="model-pill" onclick={() => submit(true)} disabled={!canSend}
+            title={m.codex_orientar_ajuda()}>{m.codex_orientar()}</button>
+        {/if}
         {#if isWorking && !hasInput}
           <!-- Pensando + input vazio -> o slot vira STOP. Ao digitar/colar algo, volta a ser SEND
                (enfileira a msg). Um slot so -> ganha espaco. -->
@@ -2003,7 +2043,7 @@
             class:send-btn--disabled={!canSend}
             onclick={() => submit()}
             disabled={!canSend}
-            aria-label={isKimi && isWorking ? m.composer_enviar_fila_kimi() : m.composer_enviar_mensagem()}
+            aria-label={(isKimi || isCodex) && isWorking ? m.composer_enviar_fila_kimi() : m.composer_enviar_mensagem()}
           >
             <IconSend size={18} />
           </button>
@@ -2141,6 +2181,7 @@
   <CommandSheet
     open={commandSheetOpen}
     {commands}
+    fillOnly={isCodex}
     onCommand={runCommand}
     onFill={fillCommand}
     onOpenModelEffort={abrirSeletor}

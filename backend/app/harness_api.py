@@ -4,12 +4,33 @@ import sqlite3
 import subprocess
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, ConfigDict, StrictBool
 
 from app import codex_integracao, contas, harness_saude
 from app.auth import require_auth
 from app.mensagens import erro
 
 harness_router = APIRouter(prefix="/api/harness")
+
+
+class CodexOpcoesBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    contexto_estendido: StrictBool
+
+
+@harness_router.get("/codex/opcoes", dependencies=[Depends(require_auth)])
+async def codex_opcoes_ler() -> dict:
+    from app.codex_opcoes import ler_opcoes
+    return await asyncio.to_thread(ler_opcoes, codex_integracao.SERVICO)
+
+
+@harness_router.post("/codex/opcoes", dependencies=[Depends(require_auth)])
+async def codex_opcoes_salvar(body: CodexOpcoesBody) -> dict:
+    from app.codex_opcoes import salvar_opcoes
+    try:
+        return await salvar_opcoes(codex_integracao.SERVICO, body.contexto_estendido)
+    except (OSError, ValueError, RuntimeError):
+        raise HTTPException(409, detail=erro("erro_codex_opcoes", "Não foi possível salvar as opções do Codex.")) from None
 
 
 def _com_interruptor(estado: dict) -> dict:

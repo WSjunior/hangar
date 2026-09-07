@@ -2592,17 +2592,21 @@ async def input_prompt(name: str, body: InputBody):
 
 
 @app.post("/api/sessions/{name}/steer", dependencies=[Depends(require_auth)])
-async def steer_session(name: str):
-    """`ctrl-s` avulso numa sessao Kimi: a msg que ja esta na fila da TUI entra no turno em curso.
-
-    Rota propria e nao um /input sem texto: aqui NAO se digita nada — e uma tecla so, pra uma msg
-    que o usuario ja mandou. Passa pelo mesmo pool dedicado do envio (é tmux, bloqueante).
-
-    409 (e nao 400) fora do Kimi: a sessao existe e o pedido e valido, so nao ha "steer" naquela TUI
-    — mesmo contrato das rotas que recusam com o painel do terminal aberto. O front nem mostra o
-    botao fora do Kimi; isto e a defesa de quem chama a API na mao."""
+async def steer_session(name: str, body: InputBody | None = None):
+    """Orienta o turno do Codex por RPC ou promove a fila da TUI do Kimi por ctrl-s."""
     if not await _send_thread(_session_exists, name):
         raise HTTPException(404, "sessão não encontrada")
+    if _provider_of(name) == "codex":
+        adapter = get_adapter("codex")
+        try:
+            if body is not None:
+                await adapter.steer(name, body.text)
+                return {"ok": True, "promoted": False}
+            sent = await adapter.steer_queue(name)
+            # O rollout confirma cada mensagem; não apaga ecos de envios concorrentes.
+            return {"ok": True, "promoted": False, "confirmed": sent}
+        except (RuntimeError, ValueError):
+            raise HTTPException(409, detail=erro("erro_codex_controle", "O Codex não aceitou a alteração; atualize a sessão e tente novamente.")) from None
     provider, _ = await _send_thread(_pane_info, name)
     if provider != "kimi":
         raise HTTPException(409, "só sessão Kimi tem steer (ctrl-s)")
@@ -3578,16 +3582,37 @@ async def modelos_da_sessao_codex(name: str):
     if _provider_of(name) != "codex":
         raise HTTPException(400, detail=erro("erro_models_so_codex", "models so existe pra sessoes Codex"))
     adapter = get_adapter("codex")
-    return {"models": await adapter.list_models(name), "current": adapter.current_model(name)}
+    try:
+        current = await adapter.read_settings(name)
+    except RuntimeError:
+        raise HTTPException(409, detail=erro("erro_codex_controle", "O Codex não aceitou a alteração; atualize a sessão e tente novamente.")) from None
+    return {"models": await adapter.list_models(name), "current": current}
 
 
 @app.post("/api/sessions/{name}/model", dependencies=[Depends(require_auth)])
 async def set_codex_model(name: str, body: CodexModelBody):
-    # Grava a escolha e reabre/configura a TUI; se ha turno em voo, aplica ao terminar.
+    # A thread compartilha a escolha com a TUI, sem reiniciar o processo.
     if _provider_of(name) != "codex":
         raise HTTPException(400, detail=erro("erro_model_so_codex", "model so existe pra sessoes Codex"))
-    await get_adapter("codex").set_model(name, body.model, body.effort)
+    try:
+        await get_adapter("codex").set_model(name, body.model, body.effort)
+    except RuntimeError:
+        raise HTTPException(409, detail=erro("erro_codex_controle", "O Codex não aceitou a alteração; atualize a sessão e tente novamente.")) from None
     return {"ok": True}
+
+
+class CodexModeBody(_StrictBody):
+    mode: Literal["default", "plan"]
+
+
+@app.post("/api/sessions/{name}/codex/mode", dependencies=[Depends(require_auth)])
+async def set_codex_mode(name: str, body: CodexModeBody):
+    if _provider_of(name) != "codex":
+        raise HTTPException(400, detail=erro("erro_model_so_codex", "model só existe para sessões Codex"))
+    try:
+        return await get_adapter("codex").set_mode(name, body.mode)
+    except RuntimeError:
+        raise HTTPException(409, detail=erro("erro_codex_controle", "O Codex não aceitou a alteração; atualize a sessão e tente novamente.")) from None
 
 
 @app.get("/api/sessions/{name}/pane", dependencies=[Depends(require_auth)])
@@ -5934,7 +5959,17 @@ def navegador_da_sessao(name: str):
 
 
 @app.get("/api/sessions/{name}/commands", dependencies=[Depends(require_auth)])
-def commands(name: str):
+async def commands(name: str):
+    if _provider_of(name) == "codex":
+        try:
+            return [{k: v for k, v in s.items() if k not in {"path", "native_name"}}
+                    for s in await get_adapter("codex").list_skills(name)]
+        except RuntimeError:
+            raise HTTPException(409, detail=erro("erro_codex_controle", "O Codex não aceitou a alteração; atualize a sessão e tente novamente.")) from None
+    return await asyncio.to_thread(_commands_claude, name)
+
+
+def _commands_claude(name: str):
     # cwd vem do registry/tmux; se a sessao nao for achada, ainda devolvemos os built-ins
     # + skills globais (lista util mesmo sem cwd casado).
     #

@@ -20,6 +20,15 @@ only peeks at the tmux pane for live **state**. Backend pieces (`backend/app/`):
 - `terminal_input.py` + `tmux.py` — input via `tmux send-keys` (prompt / option select via `(n-1)×Down`+`Enter` / `Esc`).
 - `adapters/codex/` — one loopback WebSocket app-server per Codex session; the backend consumes
   structured JSON-RPC events while a `codex --remote` TUI for the same thread runs inside tmux.
+  **Controles nativos do chat (07/09/2026, CLI 0.153.4):** `thread/read` e `thread/resume`
+  informam `reasoningEffort`, enquanto `thread/settings/updated.threadSettings` usa `effort`.
+  `thread/settings/update` compartilha modelo, esforço e `collaborationMode` com a TUI; o
+  `turn/start` herda esses valores, pois reenviar o sidecar sobrescreveria uma escolha do terminal.
+  `skills/list` fornece nomes e caminhos de entradas `UserInput` do tipo `skill`; o texto `/nome`
+  permanece no histórico para reconciliar os ecos da fila. `turn/steer` exige `expectedTurnId`:
+  uma orientação para um turno encerrado falha, preservando a mensagem. Contexto estendido usa
+  `model_context_window=1000000`, com restauração do valor anterior e sem editar o catálogo;
+  o Codex aplica `max_context_window` de cada modelo (Astra/Sol: 872000 nessa instalação).
   **O app-server é do PANE, não do backend** (`scripts/hangar-codex-tui`, o lançador único que o
   backend e o terminal chamam igual): ele escolhe a porta, sobe o servidor em segundo plano, roda a
   TUI em primeiro plano — nunca `exec`, que é o que o deixaria sem quem matar o servidor na saída —

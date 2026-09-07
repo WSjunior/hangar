@@ -654,19 +654,17 @@ async def test_current_model_null_when_never_chosen():
 
 # --- modelo/effort viajam no proprio turn/start ---------------------------------------------
 
-async def test_send_prompt_includes_model_and_effort_when_set():
-    # TurnStartParams aceita model/effort ("for this turn and subsequent turns") -> a escolha
-    # aplica SEM matar/recriar a TUI (era isso que piscava a pane e abria a janela em que o
-    # watcher de tmux destruia a sessao inteira).
+async def test_send_prompt_herda_configuracao_viva_sem_sobrescrever_terminal():
     adapter = CodexAdapter()
     client = _FakeClient([])
     adapter.attach("sess", client, "thread-1")
     await adapter.set_model("sess", "gpt-5-codex", "high")
     await adapter.send_prompt("sess", "oi")
     assert adapter.current_model("sess") == {"model": "gpt-5-codex", "effort": "high"}
-    assert client.requests == [("turn/start", {
+    assert client.requests == [("thread/settings/update", {
+        "threadId": "thread-1", "model": "gpt-5-codex", "effort": "high",
+    }), ("turn/start", {
         "threadId": "thread-1", "input": [{"type": "text", "text": "oi"}],
-        "model": "gpt-5-codex", "effort": "high",
     })]
 
 
@@ -711,7 +709,6 @@ async def test_ensure_running_resume_restores_model_effort_from_sidecar():
     await adapter.send_prompt("sess", "oi")
     assert client.requests[-1] == ("turn/start", {
         "threadId": "thread-1", "input": [{"type": "text", "text": "oi"}],
-        "model": "gpt-5-codex", "effort": "high",
     })
 
 

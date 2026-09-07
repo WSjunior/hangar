@@ -1794,7 +1794,7 @@
     sendToPair = false;
   });
 
-  async function handleSend(text: string) {
+  async function handleSend(text: string, steer = false) {
     // Eco imediato SEMPRE (não só em 'working'): o transcript só grava a msg quando o TURNO dela
     // começa — sessão ocupada num turno longo deixava a msg invisível por minutos, e a corrida de
     // estado (flip idle->working no instante do envio) derrubava até o eco condicional antigo
@@ -1802,7 +1802,9 @@
     const pendingId: string | null = `pending-${pendingSeq++}`;
     pending = [...pending, { id: pendingId, text }];
     try {
-      if (sendToPair && pairPeers?.length && !text.trimStart().startsWith('/')) {
+      if (steer && sessionProvider === 'codex') {
+        await steerSession(sessionName, text);
+      } else if (sendToPair && pairPeers?.length && !text.trimStart().startsWith('/')) {
         // Slash-command nunca em broadcast (o backend rejeita; mesmo racional do /api/broadcast).
         // /broadcast responde 200 com resultado POR sessão — falha individual (pane de membro
         // morto) não rejeita a promise; sem conferir, o envio pro grupo falhava calado.
@@ -2288,7 +2290,8 @@
         {lastCache}
         stats={statsEvent}
         onSend={handleSend}
-        onSteer={sessionProvider === 'kimi' ? steerAgora : undefined}
+        onSteer={sessionProvider === 'kimi' || sessionProvider === 'codex' ? steerAgora : undefined}
+        codexMode={stateEvent?.codex_mode}
         {filaCount}
         onCommand={handleCommand}
         onInterrupt={handleInterrupt}

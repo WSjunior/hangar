@@ -207,6 +207,7 @@ class ChatEvent(BaseModel):
 class StateEvent(BaseModel):
     session: str
     state: State
+    codex_mode: Optional[Literal["default", "plan"]] = None
     label: Optional[str] = None         # working: live status text, e.g. "Elucidating…"
     question: Optional[str] = None       # awaiting_input: the question line
     options: Optional[list[str]] = None  # awaiting_input: selectable option labels
