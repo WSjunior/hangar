@@ -1804,19 +1804,12 @@
              para o ESTADO da sessão — juntos, os dois grupos espremiam oito itens numa faixa de
              390px no celular. -->
         {#if !isCodex}
-          <button class="slash-btn" onclick={() => (commandSheetOpen = true)} aria-label={m.comandos_titulo()}>
+          <button class="slash-btn atalho" onclick={() => (commandSheetOpen = true)} aria-label={m.comandos_titulo()}>
             <span class="slash-glyph" aria-hidden="true">/</span>
           </button>
         {/if}
-        {#if !desktop.atual}
-          <!-- Túnel de porta: só no celular. No desktop quem faz isso é a aba Navegador do painel
-               de contexto, que abre a porta local direto — dois botões pra mesma coisa. -->
-          <button class="slash-btn" onclick={onOpenPreview} aria-label={m.composer_preview_rodando()}>
-            <IconMonitor size={17} />
-          </button>
-        {/if}
         {#if onOpenOrq}
-          <button class="slash-btn" title={m.orqcfg_titulo()} onclick={onOpenOrq} aria-label={m.orqcfg_titulo()}>
+          <button class="slash-btn atalho" title={m.orqcfg_titulo()} onclick={onOpenOrq} aria-label={m.orqcfg_titulo()}>
             <span class="slash-glyph" aria-hidden="true">🎛</span>
           </button>
         {/if}
@@ -2179,6 +2172,24 @@
 
   <!-- Menu do "+" (mobile): as duas ações que saíram da fileira. -->
   <Popover open={plusOpen} anchor={plusBtnEl} onClose={() => (plusOpen = false)} width={260} ariaLabel={m.tabs_mais_opcoes()}>
+    <!-- Atalhos: no celular moram aqui, como anexo e estilo do ditado — soltos na fileira eles
+         espremiam o nome do modelo até truncar. No desktop ficam à vista, onde há espaço. -->
+    {#if !isCodex}
+      <button class="plus-item" onclick={() => { plusOpen = false; commandSheetOpen = true; }}>
+        <span class="plus-item-label">{m.comandos_titulo()}</span>
+        <span class="plus-item-value">/</span>
+      </button>
+    {/if}
+    <button class="plus-item" onclick={() => { plusOpen = false; onOpenPreview?.(); }}>
+      <IconMonitor size={16} />
+      <span>{m.composer_preview_rodando()}</span>
+    </button>
+    {#if onOpenOrq}
+      <button class="plus-item" onclick={() => { plusOpen = false; onOpenOrq?.(); }}>
+        <span class="plus-item-label">{m.orqcfg_titulo()}</span>
+        <span class="plus-item-value">🎛</span>
+      </button>
+    {/if}
     <button class="plus-item" onclick={() => { plusOpen = false; fileInput?.click(); }}>
       <IconAttach size={16} />
       <span>{m.composer_anexar_arquivo()}</span>
@@ -2446,9 +2457,10 @@
        "bypassPermissions") e estourava, derrubando mic e estilo órfãos pra uma segunda linha. */
     .control-left { gap: 6px; flex-wrap: nowrap; }
     .plus-btn { display: inline-flex; }
-    /* Anexo e pill de estilo saem da fileira (estão no "+"); o mic fica. */
+    /* Anexo, pill de estilo e os atalhos saem da fileira (estão no "+"); o mic fica. */
     .control-left > .attach-btn:not(.mic-btn):not(.plus-btn) { display: none; }
     .control-left > .model-pill { display: none; }
+    .control-left > .slash-btn.atalho { display: none; }
     .pill-perm { display: none; }
     .pill-duo {
       display: inline-flex;
