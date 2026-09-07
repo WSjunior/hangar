@@ -59,13 +59,17 @@
     onOpenSession?: (name: string) => void;
     // Botao do cartao de orquestracao -> abre o modal de papeis. Ausente (Archive) = cartao sem acao.
     onOpenOrq?: () => void;
+    /** Contador que o dono da conversa incrementa a cada CARGA de historico (pintar do cache,
+     *  chegar a cauda do servidor, trocar de transcript). Cada mudanca re-ancora a janela na cauda
+     *  — ver `ancoraVista`. Quem nao carrega historico (Archive, ActivitySheet) nao passa. */
+    ancora?: number;
   }
 
   let {
     events, stateEvent, pending, sessionName, dockH, preview = '', previewMd = false, previewFull = false, onSelectOption, onSubmitSelected, onCancel,
     askOpen = false, askPayload = null, askActive = false, onAnswer, onAskClose, onFimDoLocal,
     imageUrl, swapIds,
-    onForward, onOpenSession, onOpenOrq
+    onForward, onOpenSession, onOpenOrq, ancora = 0
   }: Props = $props();
 
   let listEl: HTMLElement | undefined = $state();
@@ -75,9 +79,9 @@
   let scrolledUp = $state(false);
 
   // Janela de render: monta SO os ultimos WINDOW eventos (a cauda). Sessao longa/compactada (milhares de
-  // linhas no .jsonl) montando tudo = tempestade de mount/layout = congela no celular. windowEnd inicia
-  // SINCRONO em events.length (o prop ja vem populado: o Chat so monta o MessageList apos loadHistory) ->
-  // ja no PRIMEIRO paint a fatia e a cauda, sem montar os 5000 e so depois encolher.
+  // linhas no .jsonl) montando tudo = tempestade de mount/layout = congela no celular. windowEnd e
+  // ancorado em events.length pelo `$effect.pre` da ancora, que roda ANTES do primeiro paint -> a
+  // fatia ja nasce sendo a cauda, sem montar os 5000 e so depois encolher.
   // WINDOW = botao de calibragem (ajuste no device real); tool_result e filtrado depois, entao bolhas < WINDOW.
   const WINDOW = 120;
   const PAGE = 100;            // quantos eventos antigos revelar por vez ao rolar pro topo (paginacao)
@@ -177,7 +181,25 @@
   // nova quando a paginacao pra cima os revelasse.
   // svelte-ignore state_referenced_locally
   let headId: string | undefined = events[0]?.id;
+  // Carga de historico: a janela volta pra cauda, sem perguntar por onde o scroll anda. Comeca em
+  // -1 pra a PRIMEIRA passagem tambem ancorar — e ela roda antes do primeiro paint, entao a fatia
+  // ja nasce certa. Isto e o que faltava quando a tela era pintada de um cache antes do fetch: o
+  // unico caminho que avancava `windowEnd` era o effect de auto-scroll, que congela de proposito
+  // com `atBottom` falso — a cauda recem-chegada ficava fora da fatia e a resposta nao aparecia,
+  // com o sintoma de sempre ("so sair da conversa e voltar resolvia"). Numa carga ninguem rolou
+  // ainda: nao ha ponto de leitura a preservar, e `atBottom` volta a true pra o auto-scroll
+  // reencostar no fim.
+  let ancoraVista = -1;
   $effect.pre(() => {
+    if (ancora !== ancoraVista) {
+      ancoraVista = ancora;
+      headId = events[0]?.id;
+      windowEnd = events.length;
+      extra = 0;
+      piso = 0;
+      atBottom = true;
+      return;
+    }
     const first = events[0]?.id;
     if (first === headId) return;
     const grew = headId === undefined ? -1 : events.findIndex((e) => e.id === headId);

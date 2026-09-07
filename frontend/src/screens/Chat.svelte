@@ -20,7 +20,7 @@
   import ForwardSheet from '../components/ForwardSheet.svelte';
   import PairSheet from '../components/PairSheet.svelte';
   import OrquestracaoSheet from '../components/OrquestracaoSheet.svelte';
-  import { prefetchOrq } from '../lib/queries';
+  import { prefetchOrq, lerCaudaChat, guardarCaudaChat } from '../lib/queries';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { aoAquecer, segurarAquecimento, soltarAquecimento } from '../lib/aquecimento';
   // Ciclo de import de propósito (PairChatModal importa este Chat): é o mesmo Chat montado por
@@ -35,6 +35,7 @@
   import { loopBadge, LOOP_TONE_COLOR } from '../lib/loop';
   import {
     getHistory,
+    getHistoryDesde,
     sendInput,
     steerSession,
     broadcast,
@@ -134,6 +135,18 @@
   segurarAquecimento(sessaoDoPortao);
 
   let events = $state<ChatEvent[]>([]);
+  // Sobe a cada CARGA de histórico (pintar do cache, chegar a cauda, trocar de transcript). A
+  // MessageList re-ancora a janela na cauda a cada mudança — sem isso, uma carga que chega com a
+  // lista já montada pode ficar fora da fatia visível e a conversa para na mensagem anterior.
+  let ancora = $state(0);
+  // Validador da cauda que está na tela (o `ETag` da última resposta do /history). Vai pro cache no
+  // onDestroy e volta como pergunta na entrada seguinte.
+  let etagCauda: string | null = null;
+  // Dono da conversa, capturado na ENTRADA. O `onDestroy` não pode perguntar "qual o servidor
+  // ativo?": navegando pra um chat de outra máquina, o `applyRouteServer` já trocou o ativo antes
+  // de este Chat desmontar, e a cauda desta sessão seria gravada sob a chave da OUTRA máquina.
+  // Mesmo padrão do `filesChave` abaixo, e pelo mesmo motivo.
+  const servidorDaCauda = getActiveId() ?? '';
 
   // Store da aba Arquivos — MESMA instância do FilesPanel (registry por identidade
   // serverId::sessionName). Quem desenha o arquivo aberto no DESKTOP é este Chat (mock 2: o
@@ -1062,16 +1075,16 @@
   // `g` (a geracao da carga) entra aqui pelo mesmo motivo de todo o resto do loadHistory: uma carga
   // velha nao pode escrever na tela da carga nova. Sem isso, o aviso ficava aceso pela ordem em que
   // os `finally` calham de rodar — que hoje funciona e nao e garantia de nada.
-  async function tailComRetentativa(signal: AbortSignal, g: number) {
+  async function tailComRetentativa(signal: AbortSignal, g: number, etag: string | null) {
     try {
-      return await getHistory(sessionName, TAIL_FIRST, signal, TAIL_TIMEOUT_1);
+      return await getHistoryDesde(sessionName, TAIL_FIRST, etag, signal, TAIL_TIMEOUT_1);
     } catch (err) {
       // So o TETO justifica repetir. Cancelamento (troca de sessao, /clear) e erro do servidor
       // (404/500) sobem: repetir os dois seria pedir de novo o que ja falhou de verdade.
       if (!isTimeoutError(err)) throw err;
       if (g === histGen) histRetentando = true;
       try {
-        return await getHistory(sessionName, TAIL_FIRST, signal, TAIL_TIMEOUT_2);
+        return await getHistoryDesde(sessionName, TAIL_FIRST, etag, signal, TAIL_TIMEOUT_2);
       } finally {
         if (g === histGen) histRetentando = false;
       }
@@ -1086,29 +1099,51 @@
     // Carga nova = geração nova: a busca de antigos da anterior foi abortada junto, e deixar a
     // trava levantada faria a primeira rolagem até o topo desta ser engolida em silêncio.
     buscandoAntigos = false;
-    // NÃO pinte a tela antes do fetch. Já houve um cache da cauda aqui (b9db4367), que soltava o
-    // `loading` cedo pra abrir a conversa sem espera — e trouxe uma regressão CONFIRMADA pelo
-    // usuário: mandar mensagem, sair e voltar deixava a resposta de fora, e só a segunda entrada
-    // mostrava. A causa provável é a premissa escrita em MessageList.svelte:75 — `windowEnd` nasce
-    // síncrono em `events.length` PORQUE o Chat só monta a lista depois desta função. Montando
-    // antes, a janela nasce do tamanho do cache e pode congelar (o mesmo defeito de 25/08/2026,
-    // cujo sintoma é literalmente "a única saída era sair da conversa e voltar"). Abrir rápido vale
-    // menos que mostrar a conversa inteira; quem quiser tentar de novo, conserte a janela primeiro.
-    try {
-      const tail = await tailComRetentativa(signal, g);
-      if (g !== histGen) return;   // outra carga assumiu no meio do voo: esta resposta é velha
-      events = tail;
+    // A cauda da última visita pinta a tela ANTES de qualquer rede. Sem isto, voltar pra uma sessão
+    // dez segundos depois pagava a espera inteira de novo, porque a rota #/chat desmonta o Chat no
+    // celular e leva `events` junto. Pintar cedo já existiu e foi revertido (b9db4367) porque a
+    // janela da MessageList não re-ancorava numa carga que chegasse com a lista montada — quem
+    // conserta isso é a `ancora`, e ela sobe aqui e a cada resposta do servidor.
+    const cache = lerCaudaChat(servidorDaCauda, sessionName);
+    const pintouDoCache = !!cache?.eventos.length;
+    if (pintouDoCache) {
+      events = cache!.eventos;
+      etagCauda = cache!.etag;
       rebuildIndex();
       reseedDerived();
+      ancora++;
+      loading = false;
+    }
+    try {
+      const r = await tailComRetentativa(signal, g, pintouDoCache ? etagCauda : null);
+      if (g !== histGen) return;   // outra carga assumiu no meio do voo: esta resposta é velha
+      if (r === 'igual') {
+        // Nada mudou no servidor desde a cauda que está na tela: ela CONTINUA sendo a verdade, e
+        // não há corpo pra aplicar. É este o caminho que faz entrar numa sessão sem novidade custar
+        // ~200 bytes em vez de 313 KB.
+        temMaisNoServidor = events.length >= TAIL_FIRST;
+      } else {
+        // Costura SÓ quando o cache pintou; sem ele, substitui como sempre foi. `appendTail` assume
+        // que a cauda é a parte MAIS RECENTE, e no caminho do /clear o SSE pode ter posto uma
+        // mensagem nova em `events` durante o fetch — ali a suposição se inverte e o histórico
+        // entraria DEPOIS dela, fora de ordem. Com a condição no cache, esse caminho segue no
+        // comportamento antigo, byte por byte. Quando NENHUM id bate (transcript trocado por
+        // /clear), `appendTail` devolve só a cauda nova e joga o cache fora.
+        events = pintouDoCache ? appendTail(r.eventos, events) : r.eventos;
+        etagCauda = r.etag;
+        rebuildIndex();
+        reseedDerived();
+        ancora++;
+        // A fase 2 NÃO dispara mais aqui. Ela custava 1,2 MB por ENTRADA numa sessão grande (medido
+        // em 06/09/2026 na `pr-junior`, transcript de 31,9 MB) e servia a UMA coisa só: estar
+        // pronta caso a pessoa rolasse pra cima. Quem entra pra ler as últimas mensagens e sair — o
+        // uso normal no celular — pagava por um histórico que nunca olhou. Agora quem pede é a
+        // MessageList, quando a rolagem chega ao topo do que existe em memória (`onFimDoLocal`).
+        // Veio menos que o pedido = o transcript inteiro coube na cauda; nem há o que buscar.
+        temMaisNoServidor = r.eventos.length >= TAIL_FIRST;
+      }
       error = '';
       kimiSemTranscript = false;   // transcript existe -> sai do modo "kimi pre-1o-prompt"
-      // A fase 2 NÃO dispara mais aqui. Ela custava 1,2 MB por ENTRADA numa sessão grande (medido
-      // em 06/09/2026 na `pr-junior`, transcript de 31,9 MB) e servia a UMA coisa só: estar pronta
-      // caso a pessoa rolasse pra cima. Quem entra pra ler as últimas mensagens e sair — o uso
-      // normal no celular — pagava por um histórico que nunca olhou. Agora quem pede é a
-      // MessageList, quando a rolagem chega ao topo do que existe em memória (`onFimDoLocal`).
-      // Veio menos que o pedido = o transcript inteiro coube na cauda; nem há o que buscar depois.
-      temMaisNoServidor = tail.length >= TAIL_FIRST;
     } catch (err) {
       if (isAbortError(err) || g !== histGen) return;   // cancelado ≠ falhou: nada na tela
       // Teto estourado vira frase traduzida: o texto que o navegador poe no TimeoutError e
@@ -1429,6 +1464,12 @@
       // carregou" são indistinguíveis no arquivo que a pessoa manda.
       diag.registrar({ evento: 'chat.reset', tela: 'chat', sessao: sessionName });
       lastEventId = null;   // transcript trocado (/clear): id do arquivo antigo não vale mais
+      // A cauda guardada é do transcript ANTIGO, e o validador junto com ela. O `appendTail` da
+      // próxima entrada a descartaria (nenhum id em comum), mas só DEPOIS de ela já ter pintado —
+      // a conversa apagada apareceria por um instante. Apagar aqui é o único ponto em que se sabe
+      // que ela morreu.
+      guardarCaudaChat(servidorDaCauda, sessionName, { eventos: [], etag: null });
+      etagCauda = null;
       events = [];
       idIndex.clear();
       reseedDerived();          // zera activity/asstCount junto (loadHistory re-semeia com o novo)
@@ -1517,6 +1558,15 @@
   });
 
   onDestroy(() => {
+    // Guarda a CAUDA, não a conversa inteira: o que faz a tela pintar é a janela de 120 da
+    // MessageList, e cachear megabytes só moveria o custo de lugar. O validador vai junto — é ele
+    // que a próxima entrada manda no `If-None-Match`. Ele pode estar atrasado em relação aos
+    // eventos (o SSE acrescentou depois da resposta do /history), e isso é seguro na direção certa:
+    // o servidor devolve a cauda inteira de novo em vez de um 304 sobre dado que mudou.
+    if (events.length) {
+      guardarCaudaChat(servidorDaCauda, sessionName,
+                       { eventos: events.slice(-TAIL_FIRST), etag: etagCauda });
+    }
     alive = false;   // connectSSE/onVisible em voo viram no-op — sem EventSource fantasma
     histGen++;
     histAbort?.abort();   // e o /history em voo para de baixar (nao so de ser aplicado)
@@ -2070,6 +2120,7 @@
       {pending}
       {sessionName}
       onFimDoLocal={pedirMaisAntigos}
+      {ancora}
       {dockH}
       {swapIds}
       preview={previewText}

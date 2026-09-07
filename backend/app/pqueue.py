@@ -872,3 +872,27 @@ def merged_history(name: str, jsonl: str, provider: str = "claude",
 
     items.sort(key=lambda x: (x[0], x[1]))
     return [ev for _, _, ev in items]
+
+
+def historico_etag(name: str, jsonl: str, provider: str, limit: int | None) -> str | None:
+    """Validador do que `merged_history` devolveria, por METADADO -- sem ler os arquivos.
+
+    Cobre as DUAS fontes que ela funde (transcript e sidecar da fila) porque mensagem enfileirada
+    aparece no historico antes de estar no jsonl. `provider` e `limit` entram porque mudam a
+    resposta com os mesmos bytes em disco (parser diferente, cauda de tamanho diferente).
+
+    Granularidade: tamanho + mtime_ns. Os dois arquivos so crescem por append, entao escrita que
+    nao mexe no tamanho nem no relogio nao existe aqui. Sem o transcript nao ha validador (None):
+    melhor sempre baixar do que servir 304 sobre um arquivo que nem da pra medir.
+    """
+    def marca(p: str | Path) -> str:
+        try:
+            st = os.stat(p)
+        except OSError:
+            return "-"
+        return f"{st.st_size}.{st.st_mtime_ns}"
+
+    t = marca(jsonl)
+    if t == "-":
+        return None
+    return f'"{t}-{marca(_queue_dir() / f"{_sanitize(name)}.jsonl")}-{provider}-{limit}"'

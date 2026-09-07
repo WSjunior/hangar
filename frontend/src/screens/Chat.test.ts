@@ -68,6 +68,7 @@ vi.mock('../lib/api', () => ({
   isTimeoutError: vi.fn(() => false),
   errorDetail: vi.fn(async () => ''),
   getHistory: vi.fn(async () => []),
+  getHistoryDesde: vi.fn(async () => ({ eventos: [], etag: null })),
   openEventStream: vi.fn(() => ({
     onmessage: () => {}, onerror: () => {}, close: () => {},
     readyState: 0,

@@ -370,6 +370,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
     allow_credentials=False,
+    # `allow_headers` cobre o pedido; o navegador so deixa o JS LER um header de resposta que esteja
+    # aqui. Sem o ETag exposto, o PWA servido pela VPS falando com o backend de casa (cross-origin)
+    # recebe o validador e nao consegue le-lo: o cache do chat nunca teria o que mandar no
+    # If-None-Match e cairia calado no download inteiro, em toda entrada.
+    expose_headers=["ETag"],
 )
 if settings.sync:
     app.include_router(sync_router)
@@ -1927,11 +1932,22 @@ def resume_session(name: str, body: ResumeBody):
 
 
 @app.get("/api/sessions/{name}/history", dependencies=[Depends(require_auth)], response_model=list[ChatEvent])
-async def history(name: str, limit: int | None = None):
+async def history(request: Request, response: Response, name: str, limit: int | None = None):
     info = await _cached_info(name)
     if not info or not info.jsonl:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "session or transcript not found"))
-    from app.pqueue import merged_history
+    from app.pqueue import historico_etag, merged_history
+    # Entrar numa sessao e a leitura mais repetida do app, e quase sempre nada mudou desde a
+    # ultima: medido em 06/09/2026 na `pr-junior` (transcript de 31,9 MB), a cauda custava 313 KB
+    # POR ENTRADA pelo caminho do celular. O validador sai de dois `stat` -- barato aqui e, do lado
+    # do cliente, dispensa qualquer regra de "quando invalidar o cache": quem responde e o disco,
+    # entao msg deste aparelho, de outro, do terminal, /clear e sessao que continuou trabalhando
+    # caem todos no mesmo caminho.
+    etag = await asyncio.to_thread(historico_etag, name, info.jsonl, info.provider, limit)
+    if etag:
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers={"ETag": etag})
+        response.headers["ETag"] = etag
     # provider: o rollout do Codex tem um shape DIFERENTE do jsonl do Claude (ver
     # app.adapters.codex.rollout) -- sem isto merged_history tentava o parser do Claude em toda
     # linha do rollout, nunca casava e devolvia [] (chat do Codex abria vazio ate o SSE encher via

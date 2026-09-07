@@ -146,6 +146,16 @@ export function rotaGenerica(path: string): string {
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await apiFetchRes(path, init);
+  await ensureOk(res);
+  return res.json() as Promise<T>;
+}
+
+// A metade de baixo do apiFetch: entrega a `Response` crua, sem `ensureOk` nem `json()`. Existe pra
+// quem precisa do STATUS ou de um header — hoje o histórico condicional (304 + ETag), que não tem
+// corpo pra desserializar e cujo status não é erro. O diário e o rastreio de "sem rede/voltou"
+// ficam aqui: um fetch escrito à mão sairia do registro sem ninguém notar.
+async function apiFetchRes(path: string, init?: RequestInit): Promise<Response> {
   const base = getBaseUrl();
   const url = `${base}${path}`;
   const t0 = Date.now();
@@ -199,7 +209,9 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   //    histórico dariam milhares de linhas por hora e afogariam o resto.
   const metodo = (init?.method ?? 'GET').toUpperCase();
   const acao = metodo !== 'GET';
-  if (acao || !res.ok) {
+  // 304 não é falha: é a resposta certa pra "o que eu tenho ainda vale". Sem esta exceção, toda
+  // entrada em sessão sem novidade viraria uma linha de aviso no diário.
+  if (acao || (!res.ok && res.status !== 304)) {
     // Falhou: junta o MOTIVO que o backend mandou no corpo. Só o status ("#409") diz que recusou e
     // não por quê, e o `detail` do backend é exatamente a explicação ("o terminal está aberto",
     // "sessão não encontrada — opção NÃO enviada"). Lido de um `clone()` porque o corpo só pode ser
@@ -228,8 +240,7 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
       detalhe: [`${metodo} ${rotaGenerica(path)}`, motivo].filter(Boolean).join(' — '),
     });
   }
-  await ensureOk(res);
-  return res.json() as Promise<T>;
+  return res;
 }
 
 // Configurações abertas a partir da visão agregada precisam continuar no servidor capturado, sem
@@ -749,6 +760,28 @@ export function getHistory(name: string, limit?: number, signal?: AbortSignal,
   return apiFetch<ChatEvent[]>(`/api/sessions/${encodeURIComponent(name)}/history${q}`, {
     signal: signal ? AbortSignal.any([signal, cap]) : cap,
   });
+}
+
+/** A cauda do histórico, mas SÓ se mudou desde a última vez.
+ *
+ *  `etag` é o validador que veio no `ETag` da resposta anterior (guardado junto com os eventos).
+ *  Igual ao do servidor -> `'igual'`, ~200 bytes e nenhum corpo: o que está na tela continua sendo
+ *  a verdade. Diferente (ou sem etag) -> a cauda inteira, com o validador novo pra guardar.
+ *  Medido em 06/09/2026 na `pr-junior`: a cauda são 313 KB, pagos a cada entrada na sessão.
+ *
+ *  `etag: null` no retorno = servidor sem validador (transcript que não dá pra medir) — o chamador
+ *  guarda os eventos mesmo assim, só não terá o que perguntar na próxima. */
+export async function getHistoryDesde(
+  name: string, limit: number, etag: string | null, signal?: AbortSignal, timeoutMs = 45_000,
+): Promise<{ eventos: ChatEvent[]; etag: string | null } | 'igual'> {
+  const cap = AbortSignal.timeout(timeoutMs);
+  const res = await apiFetchRes(`/api/sessions/${encodeURIComponent(name)}/history?limit=${limit}`, {
+    signal: signal ? AbortSignal.any([signal, cap]) : cap,
+    headers: etag ? { 'If-None-Match': etag } : {},
+  });
+  if (res.status === 304) return 'igual';
+  await ensureOk(res);
+  return { eventos: (await res.json()) as ChatEvent[], etag: res.headers.get('ETag') };
 }
 
 export function getCommands(name: string): Promise<CommandInfo[]> {
