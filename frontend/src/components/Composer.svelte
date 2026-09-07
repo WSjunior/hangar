@@ -29,6 +29,8 @@
   import IconAttach from './icons/IconAttach.svelte';
   import IconMic from './icons/IconMic.svelte';
   import IconMonitor from './icons/IconMonitor.svelte';
+  import IconComandos from './icons/IconComandos.svelte';
+  import IconOrquestrar from './icons/IconOrquestrar.svelte';
   import IconFolder from './icons/IconFolder.svelte';
   import { prepareImage } from '../lib/imagePrep';
   import ContextRing from './ContextRing.svelte';
@@ -1805,12 +1807,12 @@
              390px no celular. -->
         {#if !isCodex}
           <button class="slash-btn atalho" onclick={() => (commandSheetOpen = true)} aria-label={m.comandos_titulo()}>
-            <span class="slash-glyph" aria-hidden="true">/</span>
+            <IconComandos size={17} />
           </button>
         {/if}
         {#if onOpenOrq}
           <button class="slash-btn atalho" title={m.orqcfg_titulo()} onclick={onOpenOrq} aria-label={m.orqcfg_titulo()}>
-            <span class="slash-glyph" aria-hidden="true">🎛</span>
+            <IconOrquestrar size={17} />
           </button>
         {/if}
         <!-- "+" do celular (referência: app do Claude): anexo e estilo do ditado moram AQUI no
@@ -1923,10 +1925,10 @@
                 </span>
               </button>
             {/if}
-            <!-- Permissão: linha dentro do seletor de modelo (ClaudeModelPopover) em qualquer tela,
-                 e pill própria SÓ no desktop (.pill-perm some no celular via media query): ali a
-                 palavra do modo ("bypassPermissions") estourava a linha e derrubava os controles.
-                 Glifo + rótulo curto são os do rodapé do próprio Claude (⏸/⏵⏵). Shift+Tab no
+            <!-- Permissão: pill própria nas duas telas, e também uma linha dentro do seletor de
+                 modelo (ClaudeModelPopover). No celular ela ficou fora enquanto a fileira levava
+                 sete peças; com os atalhos no "+" sobrou espaço, e o rótulo curto trunca em vez de
+                 empurrar. Glifo + rótulo são os do rodapé do próprio Claude (⏸/⏵⏵). Shift+Tab no
                  campo ou Alt+Shift+P passam pro próximo modo do ciclo. -->
             {#if permCurrent}
               <button
@@ -2176,8 +2178,8 @@
          espremiam o nome do modelo até truncar. No desktop ficam à vista, onde há espaço. -->
     {#if !isCodex}
       <button class="plus-item" onclick={() => { plusOpen = false; commandSheetOpen = true; }}>
-        <span class="plus-item-label">{m.comandos_titulo()}</span>
-        <span class="plus-item-value">/</span>
+        <IconComandos size={16} />
+        <span>{m.comandos_titulo()}</span>
       </button>
     {/if}
     <button class="plus-item" onclick={() => { plusOpen = false; onOpenPreview?.(); }}>
@@ -2186,8 +2188,8 @@
     </button>
     {#if onOpenOrq}
       <button class="plus-item" onclick={() => { plusOpen = false; onOpenOrq?.(); }}>
-        <span class="plus-item-label">{m.orqcfg_titulo()}</span>
-        <span class="plus-item-value">🎛</span>
+        <IconOrquestrar size={16} />
+        <span>{m.orqcfg_titulo()}</span>
       </button>
     {/if}
     <button class="plus-item" onclick={() => { plusOpen = false; fileInput?.click(); }}>
@@ -2269,18 +2271,33 @@
     height: 34px;
     margin: 0 var(--space-4) -1px;
     padding: 0 var(--space-2);
-    border: 1px solid rgba(255, 255, 255, 0.14);
+    /* Mesmo material do card, não uma cor parecida: o vidro dele muda de receita no Chromium
+       (refração do liquid glass) e uma tinta chapada aqui destoava justamente ali. Quem separa a
+       aba do card é a borda e o recorte, não a cor. */
+    position: relative;
+    isolation: isolate;
+    background: transparent;
+    border: 1px solid var(--glass-border);
     border-bottom: 0;
     border-radius: var(--radius-md) var(--radius-md) 0 0;
-    /* Duas demãos de tinta: com uma só a faixa some dentro do card e deixa de ler como degrau. */
-    background:
-      linear-gradient(var(--fill-subtle), var(--fill-subtle)),
-      linear-gradient(var(--fill-subtle), var(--fill-subtle)),
-      var(--chrome-bg);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    box-shadow: inset 0 1px 1px var(--glass-specular);
     font-size: var(--text-xs);
     color: var(--text-muted);
     overflow: hidden;
+  }
+  /* Camada de vidro: leaf isolado, mesma regra do .composer-card::before (WebKit sem filtro). */
+  .status-tab::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    pointer-events: none;
+    background: var(--chrome-bg);
+  }
+  :global(html[data-liquid]) .status-tab::before {
+    background: var(--glass-bg);
+    backdrop-filter: url(#liquid-glass) blur(16px) saturate(180%);
   }
   @media (min-width: 820px) {
     .status-tab { margin-inline: var(--space-6); }
@@ -2442,7 +2459,10 @@
 
   /* Linhas do menu do "+". */
   .plus-item {
-    display: flex; align-items: center; gap: var(--space-2);
+    /* `justify-content` explícito: o reset global centraliza todo `button` (app.css, alvo de
+       toque), e as linhas sem rótulo esticado ficavam no meio enquanto as com `.plus-item-label`
+       encostavam à esquerda — o menu saía com duas colunas de ícone. */
+    display: flex; align-items: center; justify-content: flex-start; gap: var(--space-2);
     width: 100%; padding: 10px var(--space-3);
     background: transparent; border: none; color: var(--text-primary);
     font-size: var(--text-sm); text-align: left; cursor: pointer;
@@ -2461,7 +2481,15 @@
     .control-left > .attach-btn:not(.mic-btn):not(.plus-btn) { display: none; }
     .control-left > .model-pill { display: none; }
     .control-left > .slash-btn.atalho { display: none; }
-    .pill-perm { display: none; }
+    /* A permissão voltou pro celular: ela sumia porque a fileira levava sete peças e estourava;
+       hoje são quatro. O teto de largura é pro rótulo mais comprido ("Aceitar edições"), que
+       trunca em vez de empurrar o resto. */
+    .pill-perm { display: inline-flex; flex-shrink: 1; min-width: 0; max-width: 108px; }
+    .pill-perm .pill-model {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .pill-duo {
       display: inline-flex;
       align-items: center;
@@ -2541,12 +2569,6 @@
     background: var(--bg-elevated);
   }
 
-  .slash-glyph {
-    font-family: var(--font-mono);
-    font-size: var(--text-sm);
-    font-weight: 600;
-    line-height: 1;
-  }
 
   .control-right {
     display: flex;
