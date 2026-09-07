@@ -10,6 +10,11 @@ const TEMAS = { claro: 'light', escuro: 'dark', sistema: '' };
 // layout de celular e não há quadro pra fotografar. A emulação de tamanho a desamarra do
 // compositor. Tamanho fixo porque não há painel de onde tirar um: é o que o agente vê.
 const VIEWPORT_OCULTO = { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false };
+// Layout de celular: iPhone 14/15 em pontos CSS. `deviceScaleFactor: 2` porque site que serve
+// imagem por densidade decide por ele, e é o que se quer ver ao testar em celular.
+const VIEWPORT_MOVEL = { width: 390, height: 844, deviceScaleFactor: 2, mobile: true };
+const UA_MOVEL = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 '
+  + '(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
 // Teto do print por CDP. 3000 era APERTADO DEMAIS e recusava quadro que existia: o caminho do
 // `Page.captureScreenshot` é o ÚNICO de uma sessão fora do painel (`oculto`), e sem compositor
 // ele é lento — medido 2071-2902ms nesta VM, com a primeira captura consumindo 97% do teto.
@@ -62,6 +67,7 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, tetoEspera = 15000 }
   let refs = new Map();
   let temaAtual = 'sistema';
   let oculto = false;
+  let layoutMovel = false;
   let ultimaRede = Date.now();
   let requisicoesEmVoo = 0;
   const console_ = [];
@@ -110,6 +116,18 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, tetoEspera = 15000 }
   // Emular tamanho numa página que ainda não carregou (o `about:blank` de um view recém-criado)
   // derruba o processo com SIGSEGV. Quem chama espera o load.
   async function aplicarViewport() {
+    if (layoutMovel) {
+      // Layout de celular pedido por quem está olhando de fora (acesso remoto). Vale MAIS que o
+      // `oculto`: quem escolheu ver em celular quer o site servindo mobile, com ou sem painel.
+      // Sem a emulação de toque a página não recebe touchstart e um carrossel que só escuta toque
+      // fica morto — que é justamente o que se quer testar num layout de celular.
+      await dbg.sendCommand('Emulation.setDeviceMetricsOverride', VIEWPORT_MOVEL);
+      await dbg.sendCommand('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+      await dbg.sendCommand('Emulation.setUserAgentOverride', { userAgent: UA_MOVEL });
+      return;
+    }
+    await dbg.sendCommand('Emulation.setTouchEmulationEnabled', { enabled: false });
+    await dbg.sendCommand('Emulation.setUserAgentOverride', { userAgent: '' });
     if (oculto) await dbg.sendCommand('Emulation.setDeviceMetricsOverride', VIEWPORT_OCULTO);
     else await dbg.sendCommand('Emulation.clearDeviceMetricsOverride');
   }
@@ -130,7 +148,7 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, tetoEspera = 15000 }
     if (temaAtual !== 'sistema') await aplicarTema();
     // A emulação de tamanho sobrevive à navegação, mas a do tema também deveria e não sobrevive;
     // reaplicar custa um comando e o preço de errar é a página inteira em 0x0, calada.
-    if (oculto) await aplicarViewport().catch(() => {});
+    if (oculto || layoutMovel) await aplicarViewport().catch(() => {});
   });
 
   // Dois frames, não um: o primeiro rAF roda ANTES da pintura do quadro seguinte; só o segundo
@@ -173,6 +191,16 @@ function criarControlador({ dbg, capturarPagina, aoNavegar, tetoEspera = 15000 }
       await aplicarTema();
       return `tema: ${modo}`;
     },
+    // Layout do navegador de verdade — não de uma cópia: quem está vendo de fora escolhe, e o
+    // agente que dirige esta mesma sessão passa a ver a mesma coisa. Mora junto do tema porque os
+    // dois são emulação que `aplicarViewport`/`aoNavegar` precisam repor depois de navegar.
+    async layout(modo) {
+      if (modo !== 'mobile' && modo !== 'desktop') return `erro: layout desconhecido: ${modo}`;
+      layoutMovel = modo === 'mobile';
+      await aplicarViewport();
+      return `layout: ${modo}`;
+    },
+    layoutAtual: () => (layoutMovel ? 'mobile' : 'desktop'),
     console(limpar) {
       const saida = console_.join('\n');
       if (limpar) console_.length = 0;

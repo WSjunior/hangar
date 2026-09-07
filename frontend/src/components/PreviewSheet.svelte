@@ -1,5 +1,7 @@
 <script lang="ts">
 import BottomSheet from './BottomSheet.svelte';
+import NavRemoto from './NavRemoto.svelte';
+import { desktop } from '../lib/desktop.svelte';
 import * as m from '../paraglide/messages';
   import ModalDialog from './ModalDialog.svelte';
   import { getNavegadorDaSessao, getPreview, startPreview, stopPreview } from '../lib/api';
@@ -16,12 +18,16 @@ import * as m from '../paraglide/messages';
   let navUrl = $state('');
   let navPorta = $state<number | null>(null);
   let navPath = $state('/');
+  // Ter navegador e ter porta local são coisas diferentes: o acesso remoto vale pra qualquer página
+  // (é o navegador de lá que renderiza), e só o túnel exige que a URL seja desta máquina.
+  let temNav = $state(false);
   async function lerNavegador() {
-    navUrl = ''; navPorta = null; navPath = '/';
+    navUrl = ''; navPorta = null; navPath = '/'; temNav = false;
     if (!sessionName) return;
     try {
       const u = (await getNavegadorDaSessao(sessionName)).url;
       if (!u) return;
+      temNav = true;
       const p = new URL(u);
       if (!['localhost', '127.0.0.1', '[::1]'].includes(p.hostname)) return;
       navUrl = u;
@@ -109,18 +115,28 @@ import * as m from '../paraglide/messages';
   </ModalDialog>
 {/if}
 
-<BottomSheet {open} {onClose} ariaLabel={m.preview_titulo()}>
+<BottomSheet {open} {onClose} ariaLabel={m.preview_titulo()} wide={desktop.atual} centered={desktop.atual}>
   <div class="pv">
     <div class="pv-head">
       <h2 class="pv-title">{m.preview_titulo()}</h2>
       <p class="pv-sub">{m.preview_descricao()}</p>
     </div>
 
-    {#if navUrl}
-      <div class="pv-bar">
-        <span class="pv-url" title={navUrl}>{m.preview_navegador_sessao()} · {navUrl}</span>
-        <button class="pv-ext" disabled={busy} onclick={abrirNavegador}>{m.preview_navegador_abrir()}</button>
-      </div>
+    {#if temNav}
+      <!-- Acesso remoto ao navegador daquela sessão. Vem ANTES do túnel de porta porque é o que a
+           pessoa quer quase sempre: ver o que o agente está fazendo agora. O túnel continua abaixo
+           pra abrir uma porta que ninguém abriu no navegador ainda. -->
+      <section class="pv-nav">
+        <h3 class="pv-nav-t">{m.nav_remoto_titulo()}</h3>
+        <p class="pv-sub">{m.nav_remoto_descricao()}</p>
+        <NavRemoto {sessionName} ativo={open} />
+        {#if navPorta != null}
+          <div class="pv-bar">
+            <span class="pv-url" title={navUrl}>{m.preview_navegador_sessao()} · {navUrl}</span>
+            <button class="pv-ext" disabled={busy} onclick={abrirNavegador}>{m.preview_navegador_abrir()}</button>
+          </div>
+        {/if}
+      </section>
     {/if}
 
     <div class="pv-form">
@@ -191,6 +207,8 @@ import * as m from '../paraglide/messages';
   .pv-btn.accent { background: var(--accent); color: var(--bg-base); border-color: transparent; }
   .pv-btn.danger { color: var(--error); border-color: color-mix(in srgb, var(--error) 50%, transparent); }
 
+  .pv-nav { display: flex; flex-direction: column; gap: var(--space-2); }
+  .pv-nav-t { font-size: var(--text-sm); font-weight: 600; color: var(--text-primary); }
   .pv-bar { display: flex; align-items: center; gap: var(--space-3); flex-shrink: 0; }
   .pv-url {
     flex: 1; min-width: 0; font-family: var(--font-mono); font-size: var(--text-xs);

@@ -537,6 +537,15 @@ async def term_ws_route(ws: WebSocket, name: str):
     await termsock.term_ws(ws, name)
 
 
+@app.websocket("/api/sessions/{name}/nav-remoto")
+async def nav_ws_route(ws: WebSocket, name: str):
+    # Acesso remoto ao navegador embutido DAQUELA sessao: quadros pra fora, toque/tecla pra dentro.
+    # Mesma porta de entrada do painel de terminal (token + Origin) -- o de la abre um shell, este
+    # abre o navegador que o agente esta dirigindo.
+    from app import navsock
+    await navsock.nav_ws(ws, name)
+
+
 @app.post("/api/sessions/{name}/shell", dependencies=[Depends(require_auth)])
 def abrir_shell(name: str):
     # Sessao de shell SEPARADA e ESCONDIDA do app (Task 6) -- ver tmux.new_hidden_shell. Sync (nao

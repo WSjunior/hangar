@@ -15,6 +15,7 @@ const VERBOS = {
   wait: (c, a) => c.esperar(a),
   eval: (c, a) => c.avaliar(a[0]),
   tema: (c, a) => c.tema(a[0]),
+  layout: (c, a) => (a[0] ? c.layout(a[0]) : `layout: ${c.layoutAtual()}`),
   console: (c, a) => c.console(a[0] === '--limpar'),
   network: (c) => c.rede(),
   text: (c) => c.texto(),

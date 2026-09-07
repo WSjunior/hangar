@@ -41,7 +41,7 @@ const CDP = 'http://127.0.0.1:9223';
 const DIR = join(homedir(), '.hangar', 'nav');
 const VERBOS_SERVIDOR = new Set([
   'snapshot', 'click', 'fill', 'type', 'press', 'hover', 'wait', 'eval',
-  'tema', 'console', 'network', 'text', 'url', 'shot', 'close',
+  'tema', 'layout', 'console', 'network', 'text', 'url', 'shot', 'close',
 ]);
 
 function erro(msg, codigo = 1) {
@@ -72,6 +72,7 @@ if (!cmd || cmd === 'help' || cmd === '--help') {
   wait <alvo>             @eN | --url <trecho> | --text <trecho> | --idle | <ms>
   eval '<js>'             roda JS na página (expressão ou declarações) e imprime o resultado
   tema <claro|escuro|sistema>
+  layout [mobile|desktop] tamanho e user-agent do navegador de verdade (sem valor, diz o atual)
   console [--limpar]      log do console da página
   network                 últimas respostas de rede
   text                    texto visível da página (innerText), sem árvore
@@ -242,4 +243,4 @@ if (cmd === 'batch') {
   process.exit(0);
 }
 
-erro(`comando desconhecido: ${cmd} (vale open|list|snapshot|click|fill|type|press|hover|wait|eval|tema|console|network|text|url|shot|close|batch)`);
+erro(`comando desconhecido: ${cmd} (vale open|list|snapshot|click|fill|type|press|hover|wait|eval|tema|layout|console|network|text|url|shot|close|batch)`);
