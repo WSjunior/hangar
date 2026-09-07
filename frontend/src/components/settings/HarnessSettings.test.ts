@@ -140,6 +140,43 @@ describe('HarnessSettings — instalar um CLI que falta', () => {
     await vi.waitFor(() => expect(t.el.textContent).toContain(m.harness_inst_pronto()), { timeout: 5000 });
   });
 
+  it('erro que impede COMEÇAR fica na tela — não some no poll seguinte', async () => {
+    // Limpando o erro no topo de cada chamada, o próprio poll de reparo apagava a mensagem 1,2s
+    // depois: a pessoa clicava em Instalar e nada acontecia, sem uma palavra.
+    const t = await montar([CARD_AUSENTE], estado());
+    c.instalarHarness.mockRejectedValue(new Error('ja ha uma instalacao em curso (codex)'));
+    t.el.querySelector<HTMLButtonElement>('.hs-btn')!.click();
+    await tick();
+    document.querySelector<HTMLElement>('.confirm-card')!.querySelector<HTMLButtonElement>('.c-primary')!.click();
+    await vi.waitFor(() => expect(t.el.textContent).toContain('ja ha uma instalacao em curso'), { timeout: 3000 });
+    // O poll de reparo roda em 1200ms e volta 'ocioso'; a mensagem tem de sobreviver a ele.
+    await new Promise((r) => setTimeout(r, 2000));
+    expect(t.el.textContent).toContain('ja ha uma instalacao em curso');
+  });
+
+  it('o erro aparece no card de QUEM falhou, não no da instalação anterior', async () => {
+    const t = await montar(
+      [{ ...CARD_AUSENTE, id: 'omp', nome: 'oh-my-pi' }, CARD_AUSENTE],
+      estado({ fase: 'pronto', ok: true, harness: 'kimi', etapa: 'ajustes', comandos: { kimi: 'x', omp: 'y' } }),
+    );
+    c.instalarHarness.mockRejectedValue(new Error('BOOM-omp'));
+    t.el.querySelector<HTMLButtonElement>('.hs-btn')!.click();   // o primeiro card é o omp
+    await tick();
+    document.querySelector<HTMLElement>('.confirm-card')!.querySelector<HTMLButtonElement>('.c-primary')!.click();
+    await vi.waitFor(() => expect(t.el.textContent).toContain('BOOM-omp'), { timeout: 3000 });
+    const cards = [...t.el.querySelectorAll('.hs-card')];
+    expect(cards[0].textContent).toContain('BOOM-omp');
+    expect(cards[1].textContent).not.toContain('BOOM-omp');
+  });
+
+  it('aviso de etapa pulada aparece junto do "pronto"', async () => {
+    const t = await montar([CARD_PRESENTE], estado({
+      fase: 'pronto', ok: true, harness: 'kimi', etapa: 'ajustes',
+      avisos: ['a etapa do wrapper foi pulada: sem bash nesta máquina'],
+    }));
+    expect(t.el.textContent).toContain('a etapa do wrapper foi pulada');
+  });
+
   it('com uma instalação em curso, o botão dos outros cards fica desabilitado', async () => {
     const t = await montar(
       [CARD_AUSENTE, { ...CARD_AUSENTE, id: 'omp', nome: 'oh-my-pi' }],

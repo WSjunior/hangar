@@ -2267,6 +2267,7 @@
   "harness_inst_pronto": "Installed and wired to the app. Open a new terminal to use the command — the wrapper that starts the session inside tmux comes from your shell rc, and an already-open terminal never loaded it.",
   "harness_inst_falhou": "Stopped at: {etapa}. Nothing was undone — whatever the vendor installed is still there.",
   "harness_inst_log": "Installer output",
+  "harness_inst_ocupado": "An installation is already running on this machine — wait for it to finish.",
   "harness_inst_etapa_comando": "running the vendor installer",
   "harness_inst_etapa_conferir": "checking that the CLI shows up",
   "harness_inst_etapa_wrapper": "wiring the wrapper that starts the session inside tmux",

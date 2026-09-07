@@ -228,6 +228,18 @@ def _ponte_skills(nome: str, home: Path) -> dict:
     return _item("skills", True, "skills_ok", n=len(links), origem=_origem_das_skills(ponte, home))
 
 
+# Constante de módulo, não `os.name` lido na hora: trocar `os.name` num teste leva o `pathlib`
+# junto e estoura no primeiro `Path(...)` do andaime (armadilha registrada no CLAUDE.md).
+_E_WINDOWS = os.name == "nt"
+
+
+def _perfil_powershell(home: Path) -> Path:
+    """O `$PROFILE` do PowerShell 7 — é nele que o `install.ps1` dot-sourceia os wrappers."""
+    docs = os.environ.get("USERPROFILE")
+    raiz = Path(docs) if docs else home
+    return raiz / "Documents" / "PowerShell" / "Microsoft.PowerShell_profile.ps1"
+
+
 def _wrapper(cli: str) -> dict:
     """O wrapper do Hangar para este CLI: a função de shell que faz ele subir DENTRO do tmux, com id
     próprio, em vez de rodar solto.
@@ -244,15 +256,24 @@ def _wrapper(cli: str) -> dict:
     """
     home = Path.home()
     faltam, onde = [], []
-    candidatos = [("fish", home / ".config" / "fish"), ("bash", home / ".bashrc"), ("zsh", home / ".zshrc")]
-    for nome, marca in candidatos:
+    candidatos: list[tuple[str, Path, str]] = [
+        ("fish", home / ".config" / "fish", ""),
+        ("bash", home / ".bashrc", f"shell/{cli}.posix.sh"),
+        ("zsh", home / ".zshrc", f"shell/{cli}.posix.sh"),
+    ]
+    # No Windows o wrapper é o dot-source do `claude.ps1` no perfil do PowerShell (install.ps1,
+    # passo 5/8). Sem esta linha a checagem caía em "nenhum rc conhecido" nos cinco cards — ou
+    # seja, ficava cega justamente onde a cegueira que ela existe pra pegar é mais provável.
+    if _E_WINDOWS:
+        candidatos.append(("PowerShell", _perfil_powershell(home), f"shell/{cli}.ps1"))
+    for nome, marca, agulha in candidatos:
         if not marca.exists():
             continue
-        if nome == "fish":
+        if not agulha:
             ok = (marca / "functions" / f"{cli}.fish").is_file()
         else:
             try:
-                ok = f"shell/{cli}.posix.sh" in marca.read_text(encoding="utf-8", errors="replace")
+                ok = agulha in marca.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 return _item("wrapper", None, "config_ilegivel")
         (onde if ok else faltam).append(nome)
@@ -266,7 +287,11 @@ def _wrapper(cli: str) -> dict:
     if not onde and not faltam:
         return _item("wrapper", None, "wrapper_sem_shell")
     if faltam:
-        return _item("wrapper", False, "wrapper_falta", "wrapper", lista=", ".join(faltam))
+        # Sem bash não há conserto a oferecer: o instalador é POSIX. Um botão que só sabe errar
+        # nessa máquina é pior que nenhum — e, na etapa de instalação, ele transformava "não deu
+        # pra ligar o wrapper aqui" em falha dura DEPOIS de o CLI já ter sido instalado.
+        conserto = "wrapper" if shutil.which("bash") else None
+        return _item("wrapper", False, "wrapper_falta", conserto, lista=", ".join(faltam))
     return _item("wrapper", True, "wrapper_ok", onde=", ".join(onde))
 
 

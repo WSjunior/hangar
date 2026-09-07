@@ -128,7 +128,7 @@ class Instalador:
     @staticmethod
     def _zerado(**campos: object) -> dict[str, object]:
         return {"fase": "ocioso", "harness": None, "etapa": None, "passo": 0,
-                "total": len(ETAPAS), "log": [], "ok": None, "erro": None, **campos}
+                "total": len(ETAPAS), "log": [], "avisos": [], "ok": None, "erro": None, **campos}
 
     def status(self) -> dict[str, object]:
         return {**self._estado, "comandos": comandos(), "manual": MANUAL}
@@ -156,7 +156,11 @@ class Instalador:
         return self.status()
 
     def _encerrou(self, task: asyncio.Task) -> None:
-        if self._estado["fase"] != "rodando":
+        # `task is not self._task` é a mesma janela que o `iniciar` fecha: entre a thread escrever
+        # `fase="pronto"` e o `Task` dela fechar, uma instalação NOVA pode ter começado. Sem esta
+        # linha o callback da rodada velha pintava a rodada nova como interrompida — e, como a vez
+        # é guardada pela fase, ainda soltava a tranca com a thread nova trabalhando.
+        if task is not self._task or self._estado["fase"] != "rodando":
             return
         try:
             falha = task.exception()
@@ -189,7 +193,7 @@ class Instalador:
                 return
 
             self._passo("wrapper")
-            if not self._wrapper():
+            if not self._wrapper(cli):
                 return
 
             self._passo("ajustes")
@@ -197,13 +201,16 @@ class Instalador:
             # aqui é o que só o diagnóstico sabe (credenciais, hooks do Kimi). Idempotente dos dois
             # lados, então o que já ficou pronto vira uma linha de "nada a fazer".
             card = self._card(cli) or card
-            for item in card["itens"]:
-                if not item.get("conserto"):
-                    continue
+            pendentes = [i for i in card["itens"] if i.get("conserto")]
+            for item in pendentes:
                 try:
                     feito = harness_saude.consertar(item["conserto"])
                 except Exception as e:  # noqa: BLE001 — um conserto sabe falhar de muitos jeitos
-                    self._falhou("ajustes", f"{item['conserto']}: {e}")
+                    # Para aqui, e DIZ o que ficou pra trás: só o nome do que falhou deixava a
+                    # pessoa sem saber que os seguintes nem foram tentados.
+                    restantes = [i["conserto"] for i in pendentes[pendentes.index(item) + 1:]]
+                    faltou = f"; não cheguei a rodar: {', '.join(restantes)}" if restantes else ""
+                    self._falhou("ajustes", f"{item['conserto']}: {e}{faltou}")
                     return
                 self._anotar(f"$ {item['conserto']}\n{feito}")
             self._pub(fase="pronto", ok=True, erro=None)
@@ -214,24 +221,38 @@ class Instalador:
             _log.exception("instalação de %s falhou", cli)
             self._falhou(self._estado.get("etapa") or ETAPAS[0], f"{type(e).__name__}: {e}")
 
-    def _wrapper(self) -> bool:
+    def _wrapper(self, cli: str) -> bool:
         """Os wrappers do Hangar e os lançadores de `~/.local/bin`. `False` = parou aqui.
 
         No Windows não há o que rodar: os wrappers de lá são do `install.ps1` (que dot-sourceia
-        `claude.ps1` do perfil do PowerShell) e não há wrapper de `codex`. Anotar e seguir, em vez
-        de falhar — a instalação em si deu certo, e o que falta é dito na tela, não engolido.
+        `claude.ps1` do perfil do PowerShell) e não há wrapper de `codex`. Aí a etapa é PULADA, e o
+        pulo vira aviso no estado — não só uma linha perdida no meio do log, porque a manchete da
+        tela promete "ligado ao app" e nessa máquina isso não aconteceu.
         """
         try:
             comando = harness_saude.cmd_instalador()
         except ValueError as e:
             self._anotar(f"[wrapper pulado] {e}")
+            self._pub(avisos=[*self._avisos(), f"a etapa do wrapper foi pulada: {e}"])
             return True
         p = atualizar._rodar(comando, cwd=harness_saude._REPO,
                              timeout=harness_saude.TIMEOUT_INSTALADOR, log=self._anotar)
         if p.returncode != 0:
             self._falhou("wrapper", f"o instalador dos wrappers saiu com {p.returncode}")
             return False
+        # O `rc` não prova, aqui como em `conferir`: o instalador só escreve nos shells que ELE
+        # detecta (com o PATH do serviço) e sai 0 tendo coberto menos do que a pessoa usa. A
+        # releitura já existe e é de graça.
+        item = harness_saude._wrapper(cli)
+        if item["ok"] is False:
+            self._falhou("wrapper", "o instalador rodou, mas o wrapper continua faltando em: "
+                                    f"{item['params'].get('lista', '?')}")
+            return False
         return True
+
+    def _avisos(self) -> list:
+        atual = self._estado.get("avisos")
+        return list(atual) if isinstance(atual, list) else []
 
     def _card(self, cli: str) -> dict | None:
         return next((h for h in harness_saude.diagnosticar() if h["id"] == cli), None)

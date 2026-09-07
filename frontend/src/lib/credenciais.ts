@@ -238,6 +238,8 @@ export interface Instalacao {
   passo: number;
   total: number;
   log: string[];
+  /** Etapa pulada com motivo legítimo (sem bash no Windows): não é falha, mas não pode ficar no log. */
+  avisos?: string[];
   ok: boolean | null;
   erro: string | null;
   comandos: Record<string, string>;

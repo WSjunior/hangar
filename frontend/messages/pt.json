@@ -2267,6 +2267,7 @@
   "harness_inst_pronto": "Instalado e ligado ao app. Abra um terminal novo pra usar o comando — o wrapper que faz a sessão subir no tmux entra pelo rc, e um terminal já aberto não o carregou.",
   "harness_inst_falhou": "Parou em: {etapa}. Nada foi desfeito — o que o fornecedor instalou continua onde está.",
   "harness_inst_log": "Saída do instalador",
+  "harness_inst_ocupado": "Já há uma instalação em curso nesta máquina — espere ela terminar.",
   "harness_inst_etapa_comando": "rodando o instalador do fornecedor",
   "harness_inst_etapa_conferir": "conferindo se o CLI aparece",
   "harness_inst_etapa_wrapper": "ligando o wrapper que faz a sessão subir no tmux",

@@ -19,6 +19,10 @@ def _rodar(inst, cli):
 def inst(monkeypatch):
     i = hi.Instalador()
     monkeypatch.setattr(hi, "_resolver", lambda argv: argv)
+    # A releitura do wrapper depois do instalador olha o HOME REAL: sem fixar, o resultado do teste
+    # dependeria de a máquina de quem roda ter os wrappers instalados. Quem exercita esse ramo
+    # sobrescreve com o valor que quer.
+    monkeypatch.setattr(hi.harness_saude, "_wrapper", lambda cli: {"ok": True, "params": {}})
     return i
 
 
@@ -143,6 +147,60 @@ def test_rodada_anterior_ja_terminada_nao_e_devolvida_como_desta(inst, monkeypat
     monkeypatch.setattr(hi.asyncio, "create_task", lambda coro: (coro.close(), _Pendente())[1])
     e = asyncio.run(inst.iniciar("pi"))
     assert e["harness"] == "pi" and e["fase"] == "rodando" and e["ok"] is None
+
+
+def test_callback_da_rodada_velha_nao_derruba_a_nova(inst):
+    """Ele pintava a instalação nova como interrompida — e, como a vez é da fase, soltava a tranca
+    com a thread nova ainda trabalhando."""
+    velha = asyncio.Future(loop=asyncio.new_event_loop())
+    velha.set_result(None)
+    inst._task = object()  # a instalação ATUAL é outra
+    inst._estado = inst._zerado(fase="rodando", harness="pi", etapa="comando", passo=1)
+    inst._encerrou(velha)
+    assert inst._estado["fase"] == "rodando" and inst._estado["ok"] is None
+
+
+def test_sem_bash_o_pulo_do_wrapper_vira_aviso_no_estado(inst, monkeypatch):
+    """No log ele some entre 400 linhas, enquanto a manchete promete 'ligado ao app'."""
+    def _sem_bash():
+        raise ValueError("sem bash nesta máquina")
+
+    monkeypatch.setattr(hi.harness_saude, "cmd_instalador", _sem_bash)
+    monkeypatch.setattr(hi.atualizar, "_rodar", lambda argv, cwd=None, timeout=0, log=None:
+                        subprocess.CompletedProcess(argv, 0, "", ""))
+    monkeypatch.setattr(hi.harness_saude, "diagnosticar",
+                        lambda: [{"id": "codex", "instalado": True, "itens": []}])
+    e = _rodar(inst, "codex")
+    assert e["ok"] is True
+    assert any("wrapper foi pulada" in a for a in e["avisos"])
+
+
+def test_instalador_que_sai_zero_sem_ligar_o_wrapper_e_falha(inst, monkeypatch):
+    """`rc==0` não prova: o instalador só escreve nos shells que ELE detecta."""
+    monkeypatch.setattr(hi.harness_saude, "cmd_instalador", lambda: ["bash", "instalador"])
+    monkeypatch.setattr(hi.atualizar, "_rodar", lambda argv, cwd=None, timeout=0, log=None:
+                        subprocess.CompletedProcess(argv, 0, "", ""))
+    monkeypatch.setattr(hi.harness_saude, "diagnosticar",
+                        lambda: [{"id": "pi", "instalado": True, "itens": []}])
+    monkeypatch.setattr(hi.harness_saude, "_wrapper",
+                        lambda cli: {"ok": False, "params": {"lista": "fish"}})
+    e = _rodar(inst, "pi")
+    assert e["ok"] is False and e["etapa"] == "wrapper" and "continua faltando em: fish" in e["erro"]
+
+
+def test_conserto_que_falha_diz_o_que_nao_chegou_a_rodar(inst, monkeypatch):
+    monkeypatch.setattr(hi.harness_saude, "cmd_instalador", lambda: ["bash", "instalador"])
+    monkeypatch.setattr(hi.atualizar, "_rodar", lambda argv, cwd=None, timeout=0, log=None:
+                        subprocess.CompletedProcess(argv, 0, "", ""))
+    monkeypatch.setattr(hi.harness_saude, "_wrapper", lambda cli: {"ok": True, "params": {}})
+    monkeypatch.setattr(hi.harness_saude, "diagnosticar", lambda: [{
+        "id": "pi", "instalado": True, "itens": [
+            {"id": "a", "conserto": "sync:pi"}, {"id": "b", "conserto": "extensoes:pi"},
+            {"id": "c", "conserto": "skills"}]}])
+    monkeypatch.setattr(hi.harness_saude, "consertar",
+                        lambda i: (_ for _ in ()).throw(ValueError("quebrou")))
+    e = _rodar(inst, "pi")
+    assert "não cheguei a rodar: extensoes:pi, skills" in e["erro"]
 
 
 def test_harness_sem_comando_conferido_nao_instala(inst):

@@ -42,6 +42,7 @@
   // fechar a tela ou recarregar o app no meio dela não perde o progresso nem a saída do comando.
   let inst = $state<Instalacao | null>(null);
   let erroInst = $state('');
+  let erroInstCli = $state<string | null>(null);
   let confirmar = $state<Harness | null>(null);
   let instalando = $derived(inst?.fase === 'rodando');
 
@@ -56,12 +57,19 @@
   async function consultarInstalacao(ctx: ConsultaIntegracao, cli?: string) {
     if (ctx.timerInst) clearTimeout(ctx.timerInst);
     const requisicao = ++ctx.reqInst;
-    erroInst = '';
+    // Tentativa nova zera o erro da anterior; poll de rotina, não — ver abaixo.
+    if (cli) { erroInst = ''; erroInstCli = null; }
     try {
       const estado = cli
         ? await instalarHarness(ctx.alvo, cli, ctx.controle.signal)
         : await instalacaoEstado(ctx.alvo, ctx.controle.signal);
       if (ctx.controle.signal.aborted || requisicao !== ctx.reqInst) return;
+      // Só uma instalação ANDANDO apaga o erro. Zerando a cada chamada — ou a cada resposta boa —,
+      // o erro que impede a instalação de COMEÇAR (409 de outra em curso, 500, teto de tempo)
+      // aparecia e o próprio poll de reparo o apagava 1,2s depois: a pessoa clicava, lia um
+      // instante e ficava sem nada. Erro transitório de poll continua sumindo, porque ali a
+      // instalação está rodando e a resposta seguinte diz isso.
+      if (estado.fase === 'rodando') { erroInst = ''; erroInstCli = null; }
       const terminou = inst?.fase === 'rodando' && estado.fase === 'pronto';
       // Normaliza o `log` na entrada: um backend mais velho (ou uma resposta de outra forma) não
       // pode derrubar a tela inteira por causa de um campo ausente — mesmo precedente do
@@ -76,6 +84,8 @@
     } catch (e) {
       if (ctx.controle.signal.aborted || requisicao !== ctx.reqInst) return;
       erroInst = e instanceof Error ? e.message : String(e);
+      // De quem é o erro: sem isto ele era desenhado dentro do card da instalação ANTERIOR.
+      erroInstCli = cli ?? inst?.harness ?? null;
       // O trabalho vive no SERVIDOR: uma resposta perdida (blip de rede, ou o teto de 8s da
       // chamada) não pode congelar a tela em "rodando" — e congelava de vez, porque `instalando`
       // ficava `true` para sempre, o que desabilita o botão de todos os cards e faz o ↻ pular a
@@ -90,7 +100,11 @@
 
   function instalar(h: Harness) {
     confirmar = null;
-    if (consulta && !instalando) void consultarInstalacao(consulta, h.id);
+    if (!consulta) return;
+    // Uma instalação pode ter começado noutro aparelho enquanto a confirmação estava aberta.
+    // Fechar a caixa e não fazer nada é o clique que some — diz o porquê.
+    if (instalando) { erroInst = m.harness_inst_ocupado(); erroInstCli = h.id; return; }
+    void consultarInstalacao(consulta, h.id);
   }
 
   async function consultarIntegracao(ctx: ConsultaIntegracao, reconciliar = false) {
@@ -360,6 +374,11 @@
           {/if}
         </div>
       {/if}
+      <!-- Erro do card DESTE harness. Sem a marca de dono, o erro de instalar o omp era desenhado
+           dentro do card do Kimi, e o rodapé que existe pro erro solto ficava suprimido. -->
+      {#if erroInst && erroInstCli === h.id}
+        <p class="hs-aviso erro" role="alert">{erroInst}</p>
+      {/if}
       <!-- Fase que este app não conhece não mostra nada. Com `!== 'ocioso'` ela caía no `{:else}`
            e pintava uma falha que não aconteceu — sucesso virando erro é tão mentira quanto o
            contrário. -->
@@ -375,7 +394,8 @@
             {/if}
           </p>
           {#if inst.erro}<p class="hs-aviso erro" role="alert">{inst.erro}</p>{/if}
-          {#if erroInst}<p class="hs-aviso erro" role="alert">{erroInst}</p>{/if}
+          <!-- Etapa pulada não pode viver só no log: a manchete acima promete "ligado ao app". -->
+          {#each inst.avisos ?? [] as aviso}<p class="hs-aviso" role="status">{aviso}</p>{/each}
           <!-- `tabindex` porque a caixa rola: conteúdo rolável sem foco é inalcançável sem mouse.
                Sem `role="log"` de propósito — faria o leitor narrar cada linha do `npm install`. -->
           {#if inst.log.length}
@@ -439,10 +459,9 @@
 
   {#if feito}<p class="hs-aviso" role="status">{feito}</p>{/if}
   {#if erro}<p class="hs-aviso erro" role="alert">{erro}</p>{/if}
-  <!-- Só quando não há card mostrando esse erro (falha do poll na montagem, sem instalação
-       nenhuma em curso): com seis cards, o erro de instalar o Kimi embaixo do tmux não se liga a
-       nada. -->
-  {#if erroInst && (!inst || inst.fase === 'ocioso')}
+  <!-- Só o erro que não achou dono na lista (falha do poll na montagem): com seis cards, o erro
+       de instalar o Kimi desenhado embaixo do tmux não se liga a nada. -->
+  {#if erroInst && !lista.some((h) => h.id === erroInstCli)}
     <p class="hs-aviso erro" role="alert">{erroInst}</p>
   {/if}
 </div>
