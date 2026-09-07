@@ -9,6 +9,14 @@ import * as m from '../../paraglide/messages';
 const A: Server = { id: 'a', label: 'A', baseUrl: 'http://a.local', token: 'token-a' };
 const B: Server = { id: 'b', label: 'B', baseUrl: 'http://b.local', token: 'token-b' };
 const ROTA = '/api/harness/codex/integracao';
+const ROTA_INST = '/api/harness/instalar';
+// A tela também consulta a instalação na montagem (é de lá que sai a lista de quem dá pra instalar
+// por botão). Sem uma resposta com a forma certa, o `fetch` genérico abaixo devolveria a lista de
+// harnesses no lugar dela.
+const ociosa = {
+  fase: 'ocioso', harness: null, etapa: null, passo: 0, total: 4, log: [], ok: null, erro: null,
+  comandos: {}, manual: {},
+};
 const estado = (dados: Partial<IntegracaoCodex> = {}): IntegracaoCodex => ({
   estado: 'ocioso', etapa: '', ultima_execucao: null, proxima_atualizacao: null,
   plugins: [], erros: [], avisos: [], confianca_pendente: false, automatica: true, ...dados,
@@ -41,8 +49,11 @@ beforeEach(() => {
   localStorage.setItem('cp_servers', JSON.stringify([A, B]));
   localStorage.setItem('cp_active', A.id);
   ler = async () => resposta(estado());
-  vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) =>
-    String(url).endsWith(ROTA) ? ler(String(url), init) : resposta(harnesses));
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+    if (String(url).endsWith(ROTA)) return ler(String(url), init);
+    if (String(url).endsWith(ROTA_INST)) return resposta(ociosa);
+    return resposta(harnesses);
+  });
 });
 afterEach(async () => {
   for (const comp of componentes) await unmount(comp);

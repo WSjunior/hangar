@@ -30,6 +30,7 @@ CATALOGO: dict[str, str] = {
     "erro_plugin": "Não foi possível reconciliar o plugin {id}",
     "aviso_hooks_alterados": "Hooks alterados: confira a aprovação dos hooks no Codex antes de usá-los.",
     "aviso_confianca_indisponivel": "Esta versão do Codex não informou a confiança dos hooks.",
+    "aviso_hooks_sem_arquivo": "Hooks sem arquivo no Codex e sem equivalente em ~/.claude/hooks: {arquivos}",
     "aviso_historico_indisponivel": "Histórico nativo indisponível; colisões existentes serão preservadas.",
     "aviso_ignorados": "Não reconhecidos pelo Codex e ignorados em {pasta}/: {arquivos}",
     "aviso_artefato_sem_proveniencia": "Artefato sem proveniência preservado: {path}",

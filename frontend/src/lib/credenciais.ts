@@ -241,3 +241,29 @@ export function codexIntegracaoEstado(alvo: Server | null, signal?: AbortSignal)
 export function codexIntegracaoReconciliar(alvo: Server | null, signal?: AbortSignal): Promise<IntegracaoCodex> {
   return em(alvo, '/api/harness/codex/integracao', { method: 'POST', signal: comTeto(signal, 8000) });
 }
+
+// Instalar um CLI que falta (backend/app/harness_install.py). `comandos` diz o que dá pra instalar
+// por botão NESTA máquina — quem não está lá só tem o link de `manual`.
+export interface Instalacao {
+  fase: 'ocioso' | 'rodando' | 'pronto';
+  harness: string | null;
+  /** Chave da etapa; a frase é daqui (`harness_inst_etapa_<etapa>`). */
+  etapa: string | null;
+  passo: number;
+  total: number;
+  log: string[];
+  /** Etapa pulada com motivo legítimo (sem bash no Windows): não é falha, mas não pode ficar no log. */
+  avisos?: string[];
+  ok: boolean | null;
+  erro: string | null;
+  comandos: Record<string, string>;
+  manual: Record<string, string>;
+}
+
+export function instalacaoEstado(alvo: Server | null, signal?: AbortSignal): Promise<Instalacao> {
+  return em(alvo, '/api/harness/instalar', { signal: comTeto(signal, 8000) });
+}
+
+export function instalarHarness(alvo: Server | null, cli: string, signal?: AbortSignal): Promise<Instalacao> {
+  return em(alvo, `/api/harness/instalar/${encodeURIComponent(cli)}`, { method: 'POST', signal: comTeto(signal, 8000) });
+}

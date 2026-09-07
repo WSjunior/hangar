@@ -2,6 +2,7 @@
 import hashlib
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import tomllib
 from contextlib import contextmanager
@@ -135,4 +136,31 @@ def _preparar(home: Path, codex_home: Path, cwd: Path | None) -> None:
     escopos = {p for projeto in projetos if projeto.is_absolute() and projeto.is_dir()
                for p in _escopos(projeto)}
     for pasta in sorted(escopos):
-        _alias(pasta / 'AGENTS.override.md', _fonte(pasta), registros)
+        fonte = _fonte(pasta)
+        _alias(pasta / 'AGENTS.override.md', fonte, registros)
+        if fonte is not None:
+            _excluir_do_git(pasta)
+
+
+def _excluir_do_git(pasta: Path) -> None:
+    """O alias mora dentro do repositório e é local à instalação: some do `git status` pelo
+    `info/exclude`, que não versiona. Fora de repositório (ou sem git) não há o que fazer."""
+    try:
+        r = subprocess.run(['git', '-C', str(pasta), 'rev-parse', '--git-path', 'info/exclude'],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return
+    if r.returncode != 0 or not r.stdout.strip():
+        return
+    exclude = Path(r.stdout.strip())
+    if not exclude.is_absolute():
+        exclude = pasta / exclude
+    try:
+        linhas = exclude.read_text(encoding='utf-8').splitlines() if exclude.exists() else []
+        if 'AGENTS.override.md' in linhas:
+            return
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        with exclude.open('a', encoding='utf-8') as f:
+            f.write(('' if not linhas or linhas[-1] == '' else '\n') + 'AGENTS.override.md\n')
+    except OSError:
+        return

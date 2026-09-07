@@ -48,7 +48,7 @@ function configurar() {
 }
 
 try { configurar(); }
-catch {
-  console.error('Não foi possível configurar a barra de status; confira settings.json e runtime-config.json.');
+catch (e) {
+  console.error(`Não foi possível configurar a barra de status (${e.message}); confira settings.json e runtime-config.json.`);
   process.exitCode = 1;
 }

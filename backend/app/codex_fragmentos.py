@@ -9,8 +9,7 @@ from app.codex_arquivos import AlteradoExternamente, backup, gravar, hash_bytes,
 
 
 def reconciliar_arquivos(desejados: dict[Path, bytes], anteriores: dict, backups: Path,
-                         *, confiaveis: set[Path] | None = None,
-                         modos: dict[Path, int] | None = None) -> tuple[dict, list[str]]:
+                         *, confiaveis: set[Path] | None = None) -> tuple[dict, list[str]]:
     """Retorna manifesto ``path -> {hash}`` e avisos após escritas com backup e comparação.
 
     ``confiaveis`` contém somente paths cuja origem no importador nativo foi comprovada
@@ -33,8 +32,6 @@ def reconciliar_arquivos(desejados: dict[Path, bytes], anteriores: dict, backups
                     # Em artefatos gerenciados, a fonte Claude prevalece também sobre
                     # edições locais; cada tentativa relê os bytes antes da escrita.
                     gravar(path, data, atual, backups)
-                    if modos and path in modos and not path.is_symlink():
-                        path.chmod(modos[path])
                     manifesto[nome] = {"hash": hash_bytes(data)}
                     break
                 except AlteradoExternamente:

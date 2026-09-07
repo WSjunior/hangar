@@ -1,4 +1,6 @@
 from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
@@ -13,6 +15,24 @@ def ambiente(tmp_path):
     projeto = home / 'projeto'
     (projeto / '.git').mkdir(parents=True)
     return home, cx, projeto
+
+
+@pytest.mark.skipif(shutil.which('git') is None, reason='sem git')
+def test_alias_de_projeto_sai_do_git_status_pelo_info_exclude(tmp_path):
+    home, cx, projeto = ambiente(tmp_path)
+    shutil.rmtree(projeto / '.git')
+    subprocess.run(['git', 'init', '-q', str(projeto)], check=True)
+    (projeto / 'CLAUDE.md').write_text('PROJETO')
+    sub = projeto / 'sub'
+    sub.mkdir()
+    (sub / 'CLAUDE.md').write_text('SUB')
+    preparar_instrucoes(home, cx, sub)
+    preparar_instrucoes(home, cx, sub)
+    exclude = (projeto / '.git/info/exclude').read_text()
+    assert exclude.count('AGENTS.override.md') == 1
+    status = subprocess.run(['git', '-C', str(projeto), 'status', '--porcelain'], capture_output=True, text=True).stdout
+    assert 'AGENTS.override.md' not in status
+    assert 'CLAUDE.md' in status
 
 
 def test_conteudo_nativo_prioriza_claude_global_e_projeto(tmp_path):

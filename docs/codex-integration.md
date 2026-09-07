@@ -73,11 +73,9 @@ O painel mostra a identidade nativa. Homônimos de outra origem e associações 
 preservados com erro, sem escolher um plugin arbitrariamente. A ponte continua reconhecendo as
 skills pela origem Claude e só retira duplicatas quando o destino nativo está habilitado.
 
-Os scripts de `~/.claude/hooks/` também passam pela importação: links são materializados antes
-do importador nativo, e o resultado de `~/.codex/hooks/` é publicado com suas dependências e
-permissão de execução. Os arquivos entram no manifesto e na verificação de mudanças; editar a
-fonte ou perder uma cópia gerenciada dispara reparo na próxima reconciliação. Colisão com um
-script exclusivo preserva esse arquivo e impede publicar a nova configuração de hooks.
+Script de `~/.claude/hooks/` que é symlink não é copiado pelo importador nativo; depois da
+importação o Hangar cria em `~/.codex/hooks/` um link para o arquivo real (`codex_hooks_arquivos`),
+sem cópia. Sem equivalente no Claude, vira aviso nomeando o arquivo.
 
 O `security-guidance` emite telemetria (`metrics`, `rewakeSummary`) e, no bootstrap, duas linhas
 JSON com anúncio `async`. O adaptador `codex-hook-json.py`, instalado em
@@ -112,7 +110,8 @@ As compatibilidades próprias do Hangar ficam em `backend/app/codex_compat.py` e
   app-server. O conteúdo é carregado pelo Codex, sem ordem de leitura nem hook de contexto.
   `AGENTS.md` permanece intacto; um override pessoal preexistente é preservado com erro explícito.
   A ordem de leitura gerenciada antiga é removida do `AGENTS.md` global, com backup.
-- Os aliases são locais à instalação e não devem ser commitados. Para abrir pelo IDE/CLI cru
+- Os aliases são locais à instalação e não devem ser commitados: o Hangar os grava no
+  `.git/info/exclude` do repositório, então não aparecem no `git status`. Para abrir pelo IDE/CLI cru
   um projeto ainda não registrado, rode **Reconciliar agora** após registrá-lo no Codex, ou
   abra-o primeiro pelo Hangar. Sem preparação, vale a precedência padrão do Codex.
   Sistemas sem permissão para links usam cópias verificadas, atualizadas na reconciliação e

@@ -189,7 +189,8 @@ install_statusline() {
     echo "  node not found in PATH — skipping statusline (install Node 20+ and re-run with --statusline)"
     return
   fi
-  "$node" "$SCRIPT_DIR/configure-statusline.cjs"
+  # Passo opcional: sob `set -e`, o exit 1 daqui abortaria o instalador antes do hangar-send.
+  "$node" "$SCRIPT_DIR/configure-statusline.cjs" || echo "  aviso: statusline não configurada (o resto da instalação segue)"
 }
 
 instalados=""

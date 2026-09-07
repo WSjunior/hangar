@@ -526,6 +526,8 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   - **`AGENTS.md` como link pro `CLAUDE.md` vira arquivo com o bloco** — decisão do usuário: o
     Codex lê o `CLAUDE.md` pela instrução, e o `CLAUDE.md` nunca fica cristalizado numa cópia.
     Custo: as instruções globais deixam de estar no contexto desde o primeiro token.
+    **Superada em 07/09/2026** pelo `AGENTS.override.md` (ver "Instruções nativas" mais abaixo):
+    o bloco sai e o `CLAUDE.md` entra inteiro, por link, no primeiro request.
   - **O gatilho de sessão nasce ligado, com interruptor na tela e sob o kill-switch**
     (`sincronizacao_ligada`): `codex_sync` no `runtime-config` (card do Codex em Harnesses) +
     `automations_enabled()` + `CP_CODEX_SYNC_ENABLED` (desligamento duro, o da suíte). O botão
@@ -1768,27 +1770,33 @@ Claude e `claude-mem-local` no do Codex. Nome do plugin + origem confirmada iden
 operações e na checagem de skills habilitadas. Não associar só pelo nome e não esquecer o destino
 ao desabilitar: isso deixaria o plugin antigo executando. Mais de um alias possível é erro.
 
-**Hooks importados precisam de prova de execução (07/09/2026):** o importador reescrevia
-`~/.claude/hooks/guard_tmux.py` para `~/.codex/hooks/guard_tmux.py`, mas a área temporária não
-recebia `hooks/` e a publicação só recolhia agentes/skills. O resultado era arquivo ausente e
-toda ferramenta bloqueada, inclusive a leitura do `CLAUDE.md`. Agora os scripts (links
-materializados), dependências e permissão de execução atravessam as duas etapas; o manifesto
-detecta cópia perdida e fonte alterada. A configuração só é publicada depois dos arquivos.
-O `security-guidance` 2.0.7 provocava os outros dois erros medidos no Codex 0.153.4:
-`SessionStart` emite anúncio `async` + resposta com `metrics`, e `Stop` também emite `metrics`.
-São extensões do Claude, recusadas pelo JSON estrito do Codex. Só esse plugin recebe
-`codex-hook-json.py`; bloqueios e contexto são preservados, sem autoaprovar os comandos novos.
-**Instruções nativas (07/09/2026):** `codex_instrucoes.py` prepara `AGENTS.override.md`
-como link para o `CLAUDE.md` global e dos projetos registrados; o lançador prepara também
-os escopos raiz→cwd antes de subir o app-server. `CLAUDE.MD` é a segunda opção e
-`AGENTS.md` fica preservado, com menor prioridade. Override pessoal não é sobrescrito.
-Sem permissão de symlink, usa cópia gerenciada que é atualizada na próxima preparação.
-O limite de instruções parte de 1 MiB, cresce com as fontes conhecidas e preserva limites
-maiores. O teste com CLI real captura a primeira requisição em servidor local, sem modelo:
-global + projeto acima de 180 KB presentes, AGENTS preteridos ausentes. Não depende de
-ordem de leitura nem de aprovação de hook. Aliases são artefatos locais, não versionar;
-projeto novo aberto pelo IDE/CLI cru precisa ser registrado e reconciliado antes de ganhar
-prioridade sobre um AGENTS existente. Sessões já abertas conservam o contexto inicial.
+**Hook do `security-guidance` no JSON estrito do Codex (07/09/2026, PR #3):** o plugin 2.0.7
+provocava dois erros medidos no Codex 0.153.4: `SessionStart` emite anúncio `async` + resposta
+com `metrics`, e `Stop` também emite `metrics`. São extensões do Claude, recusadas pelo JSON
+estrito do Codex. Só esse plugin recebe `codex-hook-json.py` (instalado em
+`<codex>/.hangar-hooks/`); bloqueios, contexto e exit code são preservados, sem autoaprovar os
+comandos novos. O PR também COPIAVA `~/.claude/hooks` inteiro pela área de importação e publicava
+cópias com manifesto em `~/.codex/hooks` — mesmo bug que o `13ed4251` do mesmo dia já fechava com
+symlink (`codex_hooks_arquivos`). Ficou o symlink, decisão do usuário: uma fonte só, sem cópia
+pra envelhecer entre reconciliações. A parte de cópia foi retirada na integração do PR.
+**Instruções nativas (07/09/2026, PR #3):** `codex_instrucoes.py` prepara `AGENTS.override.md`
+— nome que o Codex 0.153.4 lê no lugar do `AGENTS.md` da mesma pasta — como link para o
+`CLAUDE.md` global (`<codex>/AGENTS.override.md`) e dos projetos registrados no `config.toml`; o
+lançador prepara também os escopos raiz→cwd antes de subir o app-server. `CLAUDE.MD` é a segunda
+opção. Override pessoal não é sobrescrito. Sem permissão de symlink, usa cópia gerenciada que é
+atualizada na próxima preparação. Isso INVERTE a decisão de 06/09 (bloco "leia o CLAUDE.md" no
+`AGENTS.md`, custo de as regras não estarem no primeiro token): o bloco antigo sai com backup e o
+`CLAUDE.md` inteiro entra no primeiro request — por isso `project_doc_max_bytes` sobe pra pelo menos
+1 MiB, crescendo com as fontes conhecidas e preservando limite maior já configurado. Dois custos
+aceitos pelo usuário: ~110 KB de contexto por sessão Codex, e um arquivo untracked na raiz de cada
+repo com `CLAUDE.md` — o mesmo problema dos anexos de 31/08, mitigado aqui gravando
+`AGENTS.override.md` no `.git/info/exclude` do repo (`_excluir_do_git`), que é local e não
+versiona. Onde já existe `AGENTS.md` de verdade, ele deixa de ser lido pelo Codex (o override
+substitui, não soma). Teste com CLI real captura a primeira requisição em servidor local, sem
+modelo: global + projeto acima de 180 KB presentes, AGENTS preteridos ausentes. Projeto novo
+aberto pelo IDE/CLI cru precisa ser registrado e reconciliado antes de ganhar prioridade sobre um
+AGENTS existente. Sessões já abertas conservam o contexto inicial. Falha na preparação (override
+pessoal, `config.toml` ilegível) não impede a TUI de abrir: sai aviso no stderr do pane.
 
 ## tmux + Claude Code truecolor
 

@@ -284,6 +284,9 @@ class IntegracaoCodex:
                 await self._plugins(codex, desejados, registro, forcar)
                 self._etapa(msg("etapa_fragmentos"))
                 await self._fragmentos(codex, settings, registro)
+                # DEPOIS da importação: é ela que reescreve os comandos pra `<codex>/hooks/` e
+                # decide o que copiar. Antes dela não há o que materializar.
+                await self._mutacao(self._hooks_arquivos)
                 self._checkpoint(registro)
                 self._etapa(msg("etapa_skills"))
                 await self._mutacao(self._skills, registro)
@@ -366,6 +369,21 @@ class IntegracaoCodex:
                 self._confianca()
         if fonte:
             registro["hooks"] = normalizada
+
+    def _hooks_arquivos(self) -> None:
+        """O importador nativo reescreve o comando pra `<codex>/hooks/x` e copia o arquivo — mas
+        pula symlink (medido em 07/09/2026 no codex-cli 0.153.4). Quem versiona hooks num repo e
+        linka em `~/.claude/hooks` ficava com o comando apontando pro vazio, e hook de PreToolUse
+        que falha BLOQUEIA a ferramenta. Aqui o que faltou vira symlink pro mesmo alvo."""
+        from app import codex_hooks_arquivos
+        criados, orfaos = codex_hooks_arquivos.materializar(self.codex_home, self.home)
+        if criados:
+            _log.info("codex: hooks materializados em ~/.codex/hooks: %s", ", ".join(criados))
+        if orfaos:
+            # Sem equivalente no Claude: o app não tem de onde tirar o arquivo, e o hook vai falhar
+            # na próxima sessão. Dizer isso é melhor que a pessoa descobrir por um "no such file"
+            # no meio de um turno.
+            self._estado["avisos"].append(msg("aviso_hooks_sem_arquivo", arquivos=", ".join(orfaos)))
 
     def _migrar_ponte_antiga(self) -> None:
         """Primeira rodada numa máquina onde o instalador antigo escreveu o hooks.json: o que ele
@@ -685,10 +703,9 @@ class IntegracaoCodex:
             # O detector nativo ignora alguns shapes inválidos; isso nunca significa remoção.
             mesclar_hooks({}, config, {})
             gravar(cc / "settings.json", json_bytes(config), None)
-            for nome in ("commands", "agents", "hooks"):
+            for nome in ("commands", "agents"):
                 origem = self.home / ".claude" / nome
                 if origem.is_dir():
-                    # O importador não segue symlinks; materializa também guardas ligados ao repo.
                     shutil.copytree(origem, cc / nome, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git"))
             source_mcp = self.home / ".claude.json"
             mcp_raw = ler(source_mcp)
@@ -733,9 +750,8 @@ class IntegracaoCodex:
                 hooks = {"hooks": {}}
             if self.fingerprint(fontes=True) != inicio:
                 raise AlteradoExternamente("Fontes do Claude mudaram durante a importação")
-            desejados, confiaveis, modos = {}, set(), {}
+            desejados, confiaveis = {}, set()
             for src_root, dst_root in ((cx / "agents", self.codex_home / "agents"),
-                                       (cx / "hooks", self.codex_home / "hooks"),
                                        (stage / ".agents" / "skills", self.home / ".agents" / "skills")):
                 if not src_root.is_dir():
                     continue
@@ -749,26 +765,21 @@ class IntegracaoCodex:
                     except UnicodeDecodeError:
                         pass
                     desejados[dst] = data
-                    if src_root == cx / "hooks":
-                        modos[dst] = 0o700 if src.stat().st_mode & 0o111 else 0o600
                     if src_root == cx / "agents":
                         if src.stem in historico["agents"]:
                             confiaveis.add(dst)
-                    elif src_root == stage / ".agents" / "skills" and src.relative_to(src_root).parts[0] in historico["commands"]:
+                    elif src.relative_to(src_root).parts[0] in historico["commands"]:
                         confiaveis.add(dst)
             anteriores = registro.get("artefatos", {})
             guardados = {k: v for k, v in anteriores.items() if Path(k).stem in congelados}
             manifesto, avisos = reconciliar_arquivos(
                 desejados, {k: v for k, v in anteriores.items() if k not in guardados},
                 self.backups, confiaveis=confiaveis,
-                modos=modos,
             )
             manifesto.update(guardados)
             registro["artefatos"] = manifesto
             self._estado["avisos"].extend(avisos)
             self._checkpoint(registro)
-            if any(manifesto.get(str(p), {}).get("hash") != hash_bytes(desejados[p]) for p in modos):
-                raise ValueError("Scripts de hooks não publicados; configuração anterior preservada")
             self._hooks(hooks, registro)
             # Não vincula um agente cujo arquivo colidiu com conteúdo exclusivo do Codex.
             agentes = native_cfg.get("agents", {})
@@ -801,14 +812,12 @@ class IntegracaoCodex:
         if not fontes:
             caminhos.extend([self.codex_home / "hooks.json", self.codex_home / "AGENTS.md",
                              self.codex_home / "config.toml", self.codex_home / "plugins" / "installed_plugins.json"])
-            caminhos.extend(Path(p) for p in json_obj(self.raiz / "estado.json").get("artefatos", {})
-                            if Path(p).is_relative_to(self.codex_home / "hooks"))
             caminhos.append(_REPO / "scripts/codex-hook-json.py")
             caminhos.append(self.codex_home / ".hangar-hooks/codex-hook-json.py")
         caminhos.extend([self.home / ".claude/plugins/installed_plugins.json",
                          self.home / ".claude/plugins/known_marketplaces.json"])
         from app import skill_bridge
-        roots = {self.home / ".claude/commands", self.home / ".claude/agents", self.home / ".claude/hooks"}
+        roots = {self.home / ".claude/commands", self.home / ".claude/agents"}
         roots.update(p.resolve() for p in skill_bridge._varrer_fontes(self.home).values())
         roots.update({self.home / ".claude/skills", self.home / ".agents/skills", _REPO / "skills"})
         for raiz in sorted(roots):
