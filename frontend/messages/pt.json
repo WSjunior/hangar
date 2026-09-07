@@ -454,6 +454,7 @@
   "comum_voltar": "Voltar",
   "chat_sem_transcript_kimi": "A sessão Kimi ainda não tem transcript.",
   "chat_sem_thread_codex": "A conversa do Codex ainda não começou.",
+  "chat_sem_thread_codex_header": "Codex",
   "chat_sem_thread_codex_hint": "A tela do Codex costuma estar esperando uma resposta — aprovar os hooks, escolher o login. Responda no terminal e a conversa aparece aqui.",
   "chat_abrir_terminal_codex": "Abrir o terminal",
   "chat_envie_primeira_kimi": "Envie a primeira mensagem abaixo — o Kimi cria a sessão nesse envio e a conversa aparece aqui sozinha.",

@@ -12,7 +12,7 @@
   import ActivitySheet from '../components/ActivitySheet.svelte';
   import TerminalMirror from '../components/TerminalMirror.svelte';
   import TerminalMobile from '../components/TerminalMobile.svelte';
-  import OptionButtons from '../components/OptionButtons.svelte';
+  import AskQuestionCard from '../components/AskQuestionCard.svelte';
   import AskQuestionSheet from '../components/AskQuestionSheet.svelte';
   import RunSheet from '../components/RunSheet.svelte';
   import MoreSheet from '../components/MoreSheet.svelte';
@@ -715,6 +715,21 @@
   const codexEntrada = $derived(codexPreThread ? allSessions.find((s) => s.name === sessionName) : null);
   const codexOpcoes = $derived(codexEntrada?.options ?? []);
   const codexPergunta = $derived(codexEntrada?.question ?? null);
+  // O seletor do pane no formato do cartão nativo: uma pergunta, escolha única, opções sem
+  // descrição (o pane não tem onde guardar uma).
+  const codexPayload = $derived(codexOpcoes.length ? {
+    questions: [{
+      header: m.chat_sem_thread_codex_header(),
+      question: codexPergunta ?? m.chat_sem_thread_codex(),
+      multiSelect: false,
+      options: codexOpcoes.map((label) => ({ label, description: '' })),
+    }],
+  } : null);
+  // O cartão devolve índices; o /select conta a partir de 1, como o picker do terminal.
+  async function responderCodex(answers: AnswerItem[]) {
+    const a = answers[0];
+    if (a?.kind === 'option' && a.indices.length) await handleSelect(a.indices[0] + 1);
+  }
   // Nascimento da sessao kimi: o hook grava o ticket ~1s apos o 1o prompt e o poll da lista traz
   // tracked=true — carrega history e conecta o SSE (que o guard de kimiPreNascimento no connectSSE
   // segurou ate aqui). Chave em PRIMITIVOS: allSessions troca de referencia a cada poll de 5s,
@@ -2130,11 +2145,16 @@
          so existe com a thread aberta). Se a TUI esta num seletor, os botoes vem da LISTA — nao ha
          SSE aqui (o /events exige transcript, que so nasce com a thread), e a lista ja classifica
          esse pane. O terminal fica como plano B, pra pergunta que nao e um seletor (login). -->
-    <div class="chat-error">
+    <!-- Contêiner PRÓPRIO: o `.chat-error` tem max-width de 380px, que é medida de frase de erro —
+         o cartão com opções ficava espremido e fora de centro numa área larga. -->
+    <div class="chat-error codex-pre">
       <p class="chat-error-title">{m.chat_sem_thread_codex()}</p>
-      {#if codexOpcoes.length}
-        <OptionButtons question={codexPergunta ?? ''} options={codexOpcoes}
-                       onSelect={handleSelect} onCancel={handleInterrupt} />
+      {#if codexPayload}
+        <!-- Cartão NATIVO, o mesmo do AskUserQuestion: aqui há uma pergunta e opções de verdade, e
+             o OptionButtons cru é o fallback de picker raspado do pane — sem Cancelar, que ali só
+             mandaria Esc e fecharia o seletor do Codex sem resolver nada. -->
+        <AskQuestionCard open payload={codexPayload} escapes={false}
+                         onSubmit={responderCodex} onClose={abrirTerminalReal} />
       {:else}
         <p class="chat-error-hint">{m.chat_sem_thread_codex_hint()}</p>
       {/if}
@@ -2232,7 +2252,9 @@
         <button class="back-btn" onclick={onBack}>{'← '}{m.comum_voltar()}</button>
       </div>
     {:else}
-      {#if sseRecusado}
+      <!-- `!codexPreThread`: sem thread o /events 404a por definição, e a faixa acusava o servidor
+           de recusar uma sessão que só ainda não começou — em cima do cartão que resolve isso. -->
+      {#if sseRecusado && !codexPreThread}
         <div class="sse-recusado" role="status">
           <span>{m.chat_sse_recusado()}</span>
           <button type="button" class="sse-retry" onclick={connectSSE}>{m.chat_sse_tentar()}</button>
@@ -2467,6 +2489,20 @@
     padding-top: var(--nav-h, 56px);
   }
 
+  /* Vence o teto de 380px do `.chat-error` (inclusive o da media query lá embaixo, por vir depois
+     e ter a mesma especificidade + a classe extra): aqui o conteúdo é um cartão de escolha, e ele
+     acompanha a largura disponível até o mesmo teto do cartão nativo. */
+  .chat-error.codex-pre {
+    max-width: 640px;
+    width: 100%;
+    padding-inline: var(--space-4);
+    box-sizing: border-box;
+  }
+  .chat-error.codex-pre :global(.ask-card) {
+    width: 100%;
+    max-width: none;
+  }
+
   /* Skeleton de boot (no lugar do splash): linhas shimmer ocupando a area do chat. */
   .chat-skeleton {
     flex: 1;
@@ -2507,6 +2543,9 @@
     margin: 0 auto;
     padding-left: var(--space-5);
     padding-right: var(--space-5);
+  }
+  .chat-error.codex-pre {
+    max-width: 640px;
   }
   .chat-error-title {
     font-size: var(--text-base);
