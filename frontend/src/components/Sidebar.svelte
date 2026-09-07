@@ -713,7 +713,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
             <button
               class="sess-main"
               class:untracked={s.tracked === false}
-              class:untracked-open={s.tracked === false && s.provider === 'kimi'}
+              class:untracked-open={s.tracked === false && (s.provider === 'kimi' || s.provider === 'codex')}
               aria-pressed={model.selectMode ? model.selected.has(selKey) : undefined}
               aria-label={!expanded ? `${s.name} · ${srvLabel} · ${estadoTxt}` : undefined}
               title={!expanded
@@ -870,7 +870,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
                    Fora do Pi/Kimi/OMP: o resume varre ~/.claude/projects e relanca `claude --resume` DEPOIS
                    de matar o pane -> num pane Pi/Kimi/OMP ofereceria a conversa do agente errado e mataria
                    a sessao viva. Ali o title da linha ja diz o que fazer (untrackedReason). -->
-              {#if s.tracked === false && s.provider !== 'pi' && s.provider !== 'kimi' && s.provider !== 'omp'}
+              {#if s.tracked === false && s.provider !== 'pi' && s.provider !== 'kimi' && s.provider !== 'omp' && s.provider !== 'codex'}
                 <button
                   class="sess-resume"
                   onclick={(e) => handleResume(s.name, s.serverId, undefined, e)}

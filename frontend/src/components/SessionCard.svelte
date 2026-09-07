@@ -54,7 +54,10 @@ import * as m from '../paraglide/messages';
   // primeiro envio. Bloquear o clique fechava um ciclo sem saida: sem chat -> sem 1o prompt -> sem
   // id, pra sempre. O badge/hint continuam; so renomear e broadcast seguem bloqueados (precisam do
   // vinculo). O /input do backend nao depende de jsonl (vai por tmux), entao o chat abre e envia.
-  const abreChat = $derived(!untracked || session.provider === 'kimi');
+  // Codex entra pela MESMA razão, com uma diferença: lá o ciclo sem saída não é o 1º prompt, e sim
+  // a TUI parada num seletor dela (aprovar hooks, escolher login). Sem abrir, a única saída era um
+  // `tmux attach` na máquina — que no celular não existe.
+  const abreChat = $derived(!untracked || session.provider === 'kimi' || session.provider === 'codex');
 
   // "Precisa de voce": aguardando input -> barra de acao + fundo tingido.
   const action = $derived(session.state === 'awaiting_input');
@@ -365,7 +368,7 @@ import * as m from '../paraglide/messages';
       <!-- Retomar e Claude-only de ponta a ponta (candidatos de ~/.claude/projects + relance com
            `claude --resume`): numa sessao Pi/Kimi/OMP o botao so poderia errar, entao mostramos a
            razao no lugar dele. O backend recusa igual, pra um cliente velho nao matar o pane. -->
-      {#if untracked && (session.provider === 'pi' || session.provider === 'kimi' || session.provider === 'omp')}
+      {#if untracked && (session.provider === 'pi' || session.provider === 'kimi' || session.provider === 'omp' || session.provider === 'codex')}
         <span class="untracked-hint">{untrackedReason(session.provider)}</span>
       {:else if untracked}
         <button

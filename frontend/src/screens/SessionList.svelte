@@ -194,9 +194,11 @@ import * as m from '../paraglide/messages';
   // Abrir/apagar precisam mirar o servidor DA sessão: selectServer(serverId) antes, pois api.ts lê
   // o ativo a cada chamada (sem reload). Assim chat/SSE/delete vão pro backend certo.
   function openSession(s: AggSession) {
-    // Sem id confiável não abre (exceção kimi) — o modelo bloqueia igual; repetir aqui é pra não
-    // salvar o scroll nem congelar o save de uma saída que não vai acontecer.
-    if (s.tracked === false && s.provider !== 'kimi') return;
+    // Sem id confiável não abre (exceções kimi e codex) — o modelo bloqueia igual; repetir aqui é
+    // pra não salvar o scroll nem congelar o save de uma saída que não vai acontecer. A cópia da
+    // regra é a divergência entre as duas views em pessoa: liberar o Codex no modelo e esquecer
+    // esta linha deixou o card sem abrir NO CELULAR, que é onde ela é a única saída.
+    if (s.tracked === false && s.provider !== 'kimi' && s.provider !== 'codex') return;
     // Captura a posição AGORA (DOM intacto) e congela o save — ver comentário do restore.
     if (restoreTarget <= 0) savedScroll = listEl?.scrollTop ?? savedScroll;
     leaving = true;
