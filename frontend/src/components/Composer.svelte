@@ -29,6 +29,10 @@
   import IconAttach from './icons/IconAttach.svelte';
   import IconMic from './icons/IconMic.svelte';
   import IconMonitor from './icons/IconMonitor.svelte';
+  import { tipoDoArquivo, quadroDeVideo, type TipoAnexo } from '../lib/tipoAnexo';
+  import FileIcon from './files/FileIcon.svelte';
+  import { scale } from 'svelte/transition';
+  import { cubicOut } from 'svelte/easing';
   import IconComandos from './icons/IconComandos.svelte';
   import IconOrquestrar from './icons/IconOrquestrar.svelte';
   import IconFolder from './icons/IconFolder.svelte';
@@ -211,7 +215,12 @@
   // isImage -> preview; resto -> chip de arquivo. Audio NAO vira anexo: e transcrito e cai no textarea.
   // Restaura do cache em memoria da sessao atual (mesma ideia do draft de texto em Chat.svelte).
   // svelte-ignore state_referenced_locally
-  let attachments = $state<{ file: File; url: string; isImage: boolean }[]>(attachmentCache.get(sessionName) ?? []);
+  // `pct`: null = parado (ainda não é a vez dele ou nem começou), 0..100 = subindo agora, 100 =
+  // pronto. Fica FORA do cache entre sessões — progresso de um envio que já acabou não significa
+  // nada quando a pessoa volta pro chat.
+  let attachments = $state<{ file: File; url: string; isImage: boolean; tipo?: TipoAnexo; pct?: number | null }[]>(
+    attachmentCache.get(sessionName) ?? [],
+  );
   // Mantem o cache em sincronia a cada mudanca (add/remove/clear); some da sessao ao esvaziar.
   $effect(() => {
     if (attachments.length) attachmentCache.set(sessionName, attachments);
@@ -928,9 +937,20 @@
         transcribeIntoComposer(f, { ditado: !!opts?.ditado, avisoTeto: !!opts?.avisoTeto });
         continue;
       }
-      const isImage = f.type.startsWith('image/');
-      // url so pra preview de imagem; outros tipos viram chip com o nome (sem objectURL pra revogar).
-      attachments = [...attachments, { file: f, url: isImage ? URL.createObjectURL(f) : '', isImage }];
+      const tipo = tipoDoArquivo(f);
+      const isImage = tipo === 'imagem';
+      // url = miniatura do tile. Imagem tem a sua na hora; vídeo ganha o primeiro quadro logo
+      // depois (assíncrono, e o tile mostra o ícone enquanto isso); o resto fica no ícone do tipo.
+      attachments = [...attachments, { file: f, url: isImage ? URL.createObjectURL(f) : '', isImage, tipo }];
+      if (tipo === 'video') {
+        void quadroDeVideo(f).then((thumb) => {
+          if (!thumb) return;
+          // Reencontra pelo arquivo: entre pedir o quadro e ele chegar, a pessoa pode ter removido
+          // este anexo ou anexado outros, e o índice de agora não vale mais.
+          const i = attachments.findIndex((a) => a.file === f);
+          if (i >= 0) attachments[i].url = thumb;
+        });
+      }
     }
     attachError = '';
   }
@@ -1517,10 +1537,15 @@
         // Sobe todos os anexos e junta os paths numa UNICA linha (o backend rejeita '\n' no
         // send-keys). Cada path nao tem espaco (nome gerado). Marca imagem x arquivo pelo tipo.
         const parts: string[] = [];
-        for (const a of attachments) {
+        for (const [i, a] of attachments.entries()) {
           // Encolhe foto/converte HEIC antes de subir. Falhou? prepareImage devolve o original.
           const arquivo = a.isImage ? await prepareImage(a.file) : a.file;
-          const { path, frames, transcript } = await uploadFile(sessionName, arquivo);
+          // O anel começa em 0 ANTES do primeiro byte: sem isso, arquivo pequeno ia de "esperando"
+          // direto pra "pronto" e a fila não aparecia.
+          attachments[i].pct = 0;
+          const { path, frames, transcript } = await uploadFile(
+            sessionName, arquivo, (pct) => { attachments[i].pct = pct; });
+          attachments[i].pct = 100;
           parts.push((a.isImage ? `📎 ${m.board_imagem()}: ` : `📎 ${m.board_arquivo()}: `) + path);
           // Video: o backend extraiu quadros ao longo da duracao e transcreveu a fala. Os quadros
           // entram como imagens (o Read abre; a lista tambem vira miniatura no chat) e a fala vai
@@ -1686,23 +1711,57 @@
       <div class="solte-anexo" aria-hidden="true">{m.composer_soltar_anexo()}</div>
     {/if}
     {#if attachments.length}
+      <!-- Tiles quadrados com o anel do envio em volta (referência: BoardUI Composer Attachments).
+           O upload acontece no ENVIO, não ao anexar — então o anel só cresce a partir do toque em
+           enviar, e os que ainda não começaram ficam apagados esperando a vez. -->
       <div class="attach-row">
         {#each attachments as a, idx (a.file)}
-          <div class="attach-chip">
-            {#if a.isImage}
-              <img class="attach-thumb" src={a.url} alt="anexo" />
-            {:else}
-              <span class="attach-file" title={a.file.name}>
-                <span class="attach-file-glyph" aria-hidden="true">📎</span>
-                <span class="attach-file-name">{a.file.name}</span>
-              </span>
+          <div class="attach-tile" class:esperando={uploading && a.pct == null} in:scale={{ duration: 180, start: 0.85, easing: cubicOut }}>
+            <div class="tile-box">
+              {#if a.url}
+                <!-- Imagem e vídeo mostram o conteúdo; o vídeo ganha o play por cima pra não virar
+                     uma foto qualquer. -->
+                <img class="tile-thumb" src={a.url} alt="" />
+                {#if a.tipo === 'video'}
+                  <span class="tile-play" aria-hidden="true">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M9 7.5l8 4.5-8 4.5z" />
+                    </svg>
+                  </span>
+                {/if}
+              {:else}
+                <!-- O MESMO ícone da aba Arquivos: é o material-icon-theme (o do VS Code), que o
+                     projeto já gera em fileIcons.generated.ts. Ele conhece a extensão de verdade —
+                     `.ts` é o losango azul do TypeScript, não uma folha genérica. -->
+                <span class="tile-glyph" aria-hidden="true"><FileIcon nome={a.file.name} /></span>
+                <span class="tile-name" title={a.file.name}>{a.file.name}</span>
+              {/if}
+            </div>
+            {#if a.pct != null}
+              <!-- O traço segue a BORDA do tile, que é um quadrado de cantos redondos — anel
+                   circular em volta de tile quadrado deixa o progresso descolado da imagem.
+                   Começa no topo e anda no sentido horário porque é onde o path do `rect`
+                   começa (x+rx, y); daí não haver rotação nenhuma aqui. -->
+              <svg class="tile-ring" viewBox="0 0 66 66" aria-hidden="true">
+                <rect class="ring-trilho" x="1.25" y="1.25" width="63.5" height="63.5" rx="15.75" />
+                <!-- `pathLength="100"`: o navegador normaliza o comprimento do contorno pra 100, e
+                     aí o traço é a própria porcentagem. A conta à mão (2(l+a) − 8r + 2πr) erra
+                     0,28% porque os cantos são Bézier, não arco de círculo. -->
+                <rect
+                  class="ring-arco" x="1.25" y="1.25" width="63.5" height="63.5" rx="15.75"
+                  pathLength="100" stroke-dasharray="100" stroke-dashoffset={100 - a.pct}
+                />
+              </svg>
             {/if}
-            <button class="attach-remove" onclick={() => removeAttachment(idx)} aria-label={m.board_remover_anexo()}>×</button>
+            {#if a.pct != null && a.pct < 100}
+              <span class="tile-pct" role="status">{a.pct}%</span>
+            {:else}
+              <button class="tile-x" onclick={() => removeAttachment(idx)} aria-label={m.board_remover_anexo()}>×</button>
+            {/if}
           </div>
         {/each}
-        {#if uploading}<span class="attach-status">{m.composer_enviando()}</span>{/if}
-        {#if attachError}<span class="attach-error">{attachError}</span>{/if}
       </div>
+      {#if attachError}<span class="attach-error">{attachError}</span>{/if}
     {/if}
 
     {#if !isCodex}
@@ -2706,62 +2765,109 @@
   /* ── Anexo de imagem ────────────────────────────────────────────────────── */
   .file-input { display: none; }
 
+  /* Rola de lado em vez de quebrar linha: com quatro anexos o dock crescia e empurrava a conversa.
+     O padding é a folga do anel, que passa 5px de cada lado do tile. */
   .attach-row {
     display: flex;
-    flex-wrap: wrap;
     align-items: center;
-    gap: var(--space-2);
+    gap: 14px;
+    padding: 7px 2px 9px;
+    overflow-x: auto;
+    scrollbar-width: none;
   }
-  .attach-chip {
+  .attach-row::-webkit-scrollbar { display: none; }
+
+  .attach-tile {
     position: relative;
-    flex-shrink: 0;
+    width: 56px;
+    height: 56px;
+    flex: 0 0 56px;
   }
-  .attach-thumb {
-    width: 48px;
-    height: 48px;
-    border-radius: var(--radius-sm);
-    object-fit: cover;
-    display: block;
-  }
-  .attach-file {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    max-width: 140px;
-    height: 48px;
-    padding: 0 var(--space-2);
-    border-radius: var(--radius-sm);
-    background: var(--bg-elevated);
+  .tile-box {
+    width: 56px;
+    height: 56px;
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    background: var(--surface-inset);
     border: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    transition: opacity 180ms var(--ease-out);
   }
-  .attach-file-glyph { flex-shrink: 0; font-size: 13px; }
-  .attach-file-name {
+  /* Esperando a vez na fila: apagado, mas presente — some a dúvida de "esse foi ou não foi?". */
+  .attach-tile.esperando .tile-box { opacity: 0.45; }
+  .tile-box { position: relative; }
+  .tile-thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
+  /* Play sobre o quadro do vídeo: fundo escuro por baixo porque o quadro pode ser claro. */
+  .tile-play {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.28);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  }
+  .tile-glyph { display: flex; color: var(--text-secondary); line-height: 1; }
+  .tile-name {
+    max-width: 50px;
     font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    color: var(--text-secondary);
+    font-size: 9px;
+    color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .attach-status { font-size: var(--text-xs); color: var(--text-muted); }
-  .attach-error { font-size: var(--text-xs); color: var(--error); }
-  .attach-remove {
+
+  .tile-ring {
     position: absolute;
-    top: -6px;
-    right: -6px;
-    width: 20px;
-    height: 20px;
+    inset: -5px;
+    width: 66px;
+    height: 66px;
+    pointer-events: none;
+  }
+  .tile-ring rect { fill: none; stroke-width: 2.5; }
+  .ring-trilho { stroke: var(--border-default); }
+  .ring-arco {
+    stroke: var(--accent);
+    stroke-linecap: round;
+    /* Mesma duração do ContextRing: o salto entre dois eventos de progresso vira movimento. */
+    transition: stroke-dashoffset 200ms linear;
+  }
+
+  /* % e ✕ ocupam o MESMO canto: um sai quando o outro entra, e é o que faz o tile "terminar". */
+  .tile-pct,
+  .tile-x {
+    position: absolute;
+    right: -7px;
+    bottom: -6px;
+    min-width: 22px;
+    height: 16px;
     min-height: 0;
+    padding: 0 3px;
     display: flex;
     align-items: center;
     justify-content: center;
     border-radius: var(--radius-full);
     background: var(--bg-base);
     border: 1px solid var(--border-default);
+    font-size: 9px;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .tile-pct { color: var(--accent); }
+  .tile-x {
+    top: -7px;
+    bottom: auto;
+    width: 20px;
+    height: 20px;
     color: var(--text-secondary);
     font-size: 14px;
-    line-height: 1;
   }
+  .attach-error { font-size: var(--text-xs); color: var(--error); }
 
   .attach-btn {
     width: 44px; height: 44px; flex-shrink: 0;

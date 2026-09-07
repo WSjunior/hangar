@@ -1249,25 +1249,64 @@ export function engineModelosForServer(s: Server, corpo: EngineModelosBody): Pro
   return apiFetchForServer(s, '/api/engines/modelos', { method: 'POST', body: JSON.stringify(corpo) });
 }
 
-export async function uploadFile(
+/**
+ * Sobe um anexo da sessão. `onProgresso` recebe 0..100 conforme os bytes saem.
+ *
+ * XMLHttpRequest, e não `fetch`: só ele reporta progresso de UPLOAD (`fetch` só entrega o corpo da
+ * resposta, o que já chegou). Sem isso, o anel em volta do tile teria que ser inventado — animação
+ * que não mede nada é pior que nenhuma, porque some da tela junto com um arquivo que ainda está
+ * subindo. Cabeçalhos, teto e tratamento de erro são os mesmos do resto do arquivo.
+ */
+export function uploadFile(
   name: string,
   file: File,
+  onProgresso?: (pct: number) => void,
 ): Promise<{ path: string; frames?: string[]; transcript?: string }> {
   const base = getBaseUrl();
-  const res = await fetch(`${base}/api/sessions/${encodeURIComponent(name)}/upload`, {
-    method: 'POST',
-    headers: {
-      ...authHeaders(),
-      'Content-Type': file.type || 'application/octet-stream',
-      'X-Filename': encodeURIComponent(file.name || 'arquivo'),
-    },
-    body: file,
-    // Mesmo teto do uploadFileForServer (o fix de ontem cobriu só a variante do board; esta é a
-    // do chat principal — auditoria achou o composer preso em "enviando…" por aqui também).
-    signal: AbortSignal.timeout(180_000),
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${base}/api/sessions/${encodeURIComponent(name)}/upload`);
+    for (const [k, v] of Object.entries(authHeaders())) xhr.setRequestHeader(k, String(v));
+    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+    xhr.setRequestHeader('X-Filename', encodeURIComponent(file.name || 'arquivo'));
+    // Mesmo teto do uploadFileForServer: sem ele, uma foto grande num link ruim deixava o composer
+    // presto em "enviando…" pra sempre.
+    xhr.timeout = 180_000;
+    xhr.upload.onprogress = (e) => {
+      // `lengthComputable` é falso em algumas pontes (proxy que recodifica): aí não há fração pra
+      // mostrar, e quem chama decide o que fazer com a ausência.
+      if (e.lengthComputable && e.total > 0) onProgresso?.(Math.round((e.loaded / e.total) * 100));
+    };
+    xhr.onload = () => {
+      if (xhr.status === 401 && getToken()) {
+        dropActiveServer();
+        if (typeof window !== 'undefined') window.location.reload();
+        reject(Object.assign(new Error(m.sessao_expirada()), { status: 401 }));
+        return;
+      }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        // Mesma leitura de detalhe do `lerErro`, sobre o texto cru que o XHR entrega.
+        let msg = xhr.responseText || xhr.statusText || `falha ${xhr.status} sem detalhe do servidor`;
+        try {
+          const j = JSON.parse(xhr.responseText);
+          if (typeof j?.detail === 'string') msg = j.detail;
+          else if (typeof j?.detail?.code === 'string') {
+            msg = mensagemDeErro(j.detail.code, j.detail.params ?? {}) ?? j.detail.msg ?? j.detail.code;
+          }
+        } catch { /* corpo não-JSON: fica o texto cru */ }
+        reject(Object.assign(new Error(msg), { status: xhr.status }));
+        return;
+      }
+      try {
+        resolve(JSON.parse(xhr.responseText));
+      } catch (e) {
+        reject(e instanceof Error ? e : new Error(String(e)));
+      }
+    };
+    xhr.onerror = () => reject(new Error(m.composer_falha_envio()));
+    xhr.ontimeout = () => reject(new Error(m.composer_falha_envio()));
+    xhr.send(file);
   });
-  await ensureOk(res);
-  return res.json() as Promise<{ path: string }>;
 }
 
 /**
