@@ -64,6 +64,40 @@ def test_ignora_caminho_fora_da_pasta_de_hooks_do_codex(tmp_path):
     assert mod.materializar(codex, home, doc) == ([], [])
 
 
+def test_citacao_com_dotdot_nao_escapa_da_pasta_de_hooks(tmp_path):
+    """`<codex>/hooks/../../fora.py` não é um hook do Codex — e o caminho que entra na lista é o
+    RESOLVIDO, não o cru, pra a escrita não depender de o SO normalizar o `..` de novo."""
+    home, codex = tmp_path / "home", tmp_path / "home" / ".codex"
+    (home / ".claude" / "hooks").mkdir(parents=True)
+    (codex / "hooks").mkdir(parents=True)
+    doc = _doc(f"python3 '{codex}/hooks/../../fora.py'")
+    assert mod.faltantes(doc, codex) == []
+    dentro = _doc(f"python3 '{codex}/hooks/./x.py'")
+    assert mod.faltantes(dentro, codex) == [(codex / "hooks" / "x.py").resolve()]
+
+
+def test_windows_refaz_a_copia_que_ficou_velha(tmp_path, monkeypatch):
+    """No Windows o hook é CÓPIA, e cópia envelhece: sem isto, editar o hook em ~/.claude/hooks
+    nunca chegava ao Codex — calado. Compara bytes, não mtime (cópia e original nascem com datas
+    diferentes)."""
+    # `mod._WINDOWS`, não `os.name`: trocar `os.name` num teste leva o `pathlib` junto e o caso
+    # estoura no andaime, não no código (está registrado no CLAUDE.md).
+    monkeypatch.setattr(mod, "_WINDOWS", True)
+    home, codex = tmp_path / "home", tmp_path / "home" / ".codex"
+    (home / ".claude" / "hooks").mkdir(parents=True)
+    (codex / "hooks").mkdir(parents=True)
+    (home / ".claude" / "hooks" / "x.py").write_text("novo\n")
+    (codex / "hooks" / "x.py").write_text("velho\n")
+    doc = _doc(f"python3 '{codex}/hooks/x.py'")
+
+    criados, orfaos = mod.materializar(codex, home, doc)
+
+    assert criados == ["x.py"] and orfaos == []
+    assert (codex / "hooks" / "x.py").read_text() == "novo\n"
+    # Conteúdo igual não reescreve (senão toda reconciliação mexeria no arquivo à toa).
+    assert mod.materializar(codex, home, doc) == ([], [])
+
+
 @pytest.mark.skipif(os.name == "nt", reason="symlink pendurado exige privilégio no Windows")
 def test_link_pendurado_e_refeito(tmp_path):
     home, codex = tmp_path / "home", tmp_path / "home" / ".codex"
