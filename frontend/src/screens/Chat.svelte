@@ -1788,7 +1788,7 @@
   // Medido em 14/08/2026: um envio pelo app vira "queued-" em ~1s e o dedup ali embaixo REMOVE o
   // pending correspondente — contar só o `pending` dava 0 com a bolha na tela e o chip nunca
   // aparecia. `desistiu` fora: aquela não está na fila, está perdida (a TUI engoliu as teclas).
-  // Duas travas de propósito: (1) só Kimi — é o único provider com o chip, e sem isto TODA sessão
+  // Duas travas de propósito: (1) só Kimi e Codex oferecem o chip; sem isto TODA sessão
   // pagava um scan O(n) sobre `events` a cada evento novo do SSE (o arquivo já trocou o
   // `deriveActivity` por fold incremental pelo mesmo motivo); (2) `kind === 'user_msg'` — o prefixo
   // "queued-" tem DOIS produtores no backend: a fila durável (`pqueue.py`, user_msg) e o aviso de
