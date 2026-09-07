@@ -47,6 +47,7 @@
   import ConfirmSheet from './ConfirmSheet.svelte';
   import DitadoEstiloPopover from './DitadoEstiloPopover.svelte';
   import { ditadoEstilo, estilosDitado, type EstiloDitado } from '../lib/ditadoEstilo.svelte';
+  import { desktop } from '../lib/desktop.svelte';
   import { getCommands, setModelEffort, uploadFile, uploadUrl, transcribeFile, relimparDitado, getCodexModels, getPiModels, getKimiModels, getModelOptions, getPermissionModes, setPermissionMode, type ModelEffortBody } from '../lib/api';
   import { aoAquecer } from '../lib/aquecimento';
   import type { Provider, State, StatsEvent } from '../lib/types';
@@ -1575,6 +1576,113 @@
     aria-hidden="true"
     tabindex="-1"
   />
+  <div class="composer-dock">
+  <!-- Faixa pendurada na borda de cima do card (referência: BoardUI Composer Panel). Tudo que era a
+       fileira de dentro mudou pra cá: atalhos e estado da sessão à esquerda, o que só se lê (repo,
+       branch, prazo do cache, contexto) à direita. Dentro do card ficam texto e controles do envio,
+       que é o que a pessoa usa a cada mensagem. -->
+  <div class="status-tab">
+    <div class="tab-left">
+      {#if !isCodex}
+        <button class="slash-btn" onclick={() => (commandSheetOpen = true)} aria-label={m.comandos_titulo()}>
+          <span class="slash-glyph" aria-hidden="true">/</span>
+        </button>
+      {/if}
+      {#if !desktop.atual}
+        <!-- Túnel de porta: só no celular. No desktop quem faz isso é a aba Navegador do painel de
+             contexto, que abre a porta local direto — dois botões pra mesma coisa, um deles pior. -->
+        <button class="slash-btn" onclick={onOpenPreview} aria-label={m.composer_preview_rodando()}>
+          <IconMonitor size={17} />
+        </button>
+      {/if}
+      {#if onOpenPair}
+        {@const pairLabel = pairPeers?.length === 1 ? pairPeers[0]
+          : pairPeers?.length ? `grupo (${pairPeers.length + 1})` : null}
+        <button class="repo-chip pair-chip" class:pair-chip--on={!!pairPeers?.length}
+                title={pairPeers?.length ? m.composer_grupo_voce({ n: pairPeers.join(', ') }) : m.composer_parear_outra()}
+                onclick={onOpenPair} aria-label={m.composer_pareamento_sessoes()}>
+          <span class="repo-glyph" aria-hidden="true"><GroupGlyph size={13} /></span>
+          {#if pairLabel}
+            <span class="repo-name">{pairLabel}</span>
+            {#if pairedState}
+              <!-- Estado vivo do par ÚNICO (mesmas cores da lista); grupo de N não tem bolinha. -->
+              <span class="pair-dot" style="background: {stateColors[pairedState as keyof typeof stateColors] ?? 'var(--text-muted)'};"
+                    title={m.composer_par_estado({ n: pairedState })} aria-hidden="true"></span>
+            {/if}
+          {/if}
+        </button>
+        {#if onOpenOrq}
+          <button class="repo-chip" title={m.orqcfg_titulo()} onclick={onOpenOrq} aria-label={m.orqcfg_titulo()}>
+            <span class="repo-glyph" aria-hidden="true">🎛</span>
+          </button>
+        {/if}
+        {#if pairPeers?.length && onToggleSendToPair}
+          <!-- "Mandar pro grupo": prompt vai pra esta sessão E pros membros (broadcast). Aceso = ativo. -->
+          <button class="repo-chip both-chip" class:both-chip--on={sendToPair}
+                  title={sendToPair ? m.composer_mandando_grupo() : m.composer_mandar_tambem({ n: pairPeers.join(', ') })}
+                  onclick={onToggleSendToPair} aria-pressed={sendToPair} aria-label={m.composer_mandar_grupo()}>
+            <span class="repo-glyph" aria-hidden="true">⇄</span>
+            {#if sendToPair}<span class="repo-name">{pairPeers.length === 1 ? m.composer_pros_dois() : m.composer_pro_grupo()}</span>{/if}
+          </button>
+        {/if}
+      {/if}
+      {#if isKimi && isWorking && filaCount > 0 && onSteer}
+        <!-- FILA da TUI do Kimi: msg já mandada, esperando o turno atual acabar. O chip existe pra
+             DIZER que há fila (antes disso a bolha translúcida era a única pista) e dar a saída:
+             tocar manda o `ctrl-s`, que promove a msg pro turno em curso. Não tocar = espera, que
+             é o comportamento de sempre. -->
+        <button class="repo-chip fila-chip" onclick={steerFila}
+                title={m.composer_fila_titulo()}
+                aria-label={m.composer_fila_aria()}>
+          <span class="repo-glyph" aria-hidden="true">⏳</span>
+          <span class="repo-name">{m.composer_fila_contagem({ n: filaCount })}</span>
+          <span class="repo-sep" aria-hidden="true">·</span>
+          <span class="fila-acao">{m.composer_fila_acao()}</span>
+        </button>
+      {/if}
+      {#if shellsRodando > 0 && onOpenActivity}
+        <!-- Shells de FUNDO: comando que continua rodando depois que a ferramenta respondeu. O
+             terminal mostra "N shells still running" no rodapé e o app não mostrava nada — dava
+             pra sair da sessão sem saber que um build ainda estava de pé. O toque abre a
+             Atividade, onde está qual comando é e há quanto tempo. -->
+        <button class="repo-chip shell-chip" onclick={onOpenActivity}
+                title={m.composer_shells_titulo({ n: shellsRodando })}
+                aria-label={m.composer_shells_titulo({ n: shellsRodando })}>
+          <span class="repo-glyph" aria-hidden="true">&gt;_</span>
+          <span class="repo-name">{m.composer_shells_contagem({ n: shellsRodando })}</span>
+          <span class="shell-dot" aria-hidden="true"></span>
+        </button>
+      {/if}
+    </div>
+    <div class="tab-right">
+      {#if status?.repo}
+        <button class="repo-chip" title={m.composer_git_chip()} onclick={onOpenGit}>
+          <IconFolder size={13} />
+          <span class="repo-name">{status.repo}</span>
+          {#if status.branch}
+            <span class="repo-sep" aria-hidden="true">·</span>
+            <span class="repo-branch">{status.branch}{#if status.dirty}<span class="repo-dirty" aria-label={m.composer_alteracoes_nao_commitadas()}>*</span>{/if}</span>
+          {/if}
+        </button>
+      {/if}
+        {#if lastCache}
+          <!-- Prazo do cache. Nao e botao: nao ha o que fazer com ele alem de saber. -->
+          <span
+            class="cache-chip"
+            class:acabando={cacheAcabando}
+            class:frio={!cacheAtivo}
+            title={cacheAtivo
+              ? m.composer_cache_vale({ label: cacheLabel, janela: lastCache.ttl >= 3600 ? m.composer_cache_1_hora() : m.composer_cache_5_min() })
+              : m.composer_cache_expirou()}
+          >
+            <span class="cache-glyph" aria-hidden="true"></span>{cacheLabel}
+          </span>
+        {/if}
+      {#if status?.ctxPct != null}
+        <ContextRing pct={status.ctxPct} size={22} />
+      {/if}
+    </div>
+  </div>
   <!-- O card precisa delegar foco para a textarea em areas vazias, mas contem varios botoes:
        nao pode virar button/role=button sem aninhar controles interativos. -->
   <div class="composer-card" class:arrastando role="button" tabindex="-1" onclick={focusInput} onkeydown={focusInput}
@@ -1582,100 +1690,6 @@
     {#if arrastando}
       <div class="solte-anexo" aria-hidden="true">{m.composer_soltar_anexo()}</div>
     {/if}
-    <div class="composer-top">
-      <div class="top-left">
-        {#if !isCodex}
-          <button class="slash-btn" onclick={() => (commandSheetOpen = true)} aria-label={m.comandos_titulo()}>
-            <span class="slash-glyph" aria-hidden="true">/</span>
-          </button>
-        {/if}
-        <button class="slash-btn" onclick={onOpenPreview} aria-label={m.composer_preview_rodando()}>
-          <IconMonitor size={17} />
-        </button>
-        {#if onOpenPair}
-          {@const pairLabel = pairPeers?.length === 1 ? pairPeers[0]
-            : pairPeers?.length ? `grupo (${pairPeers.length + 1})` : null}
-          <button class="repo-chip pair-chip" class:pair-chip--on={!!pairPeers?.length}
-                  title={pairPeers?.length ? m.composer_grupo_voce({ n: pairPeers.join(', ') }) : m.composer_parear_outra()}
-                  onclick={onOpenPair} aria-label={m.composer_pareamento_sessoes()}>
-            <span class="repo-glyph" aria-hidden="true"><GroupGlyph size={13} /></span>
-            {#if pairLabel}
-              <span class="repo-name">{pairLabel}</span>
-              {#if pairedState}
-                <!-- Estado vivo do par ÚNICO (mesmas cores da lista); grupo de N não tem bolinha. -->
-                <span class="pair-dot" style="background: {stateColors[pairedState as keyof typeof stateColors] ?? 'var(--text-muted)'};"
-                      title={m.composer_par_estado({ n: pairedState })} aria-hidden="true"></span>
-              {/if}
-            {/if}
-          </button>
-          {#if onOpenOrq}
-            <button class="repo-chip" title={m.orqcfg_titulo()} onclick={onOpenOrq} aria-label={m.orqcfg_titulo()}>
-              <span class="repo-glyph" aria-hidden="true">🎛</span>
-            </button>
-          {/if}
-          {#if pairPeers?.length && onToggleSendToPair}
-            <!-- "Mandar pro grupo": prompt vai pra esta sessão E pros membros (broadcast). Aceso = ativo. -->
-            <button class="repo-chip both-chip" class:both-chip--on={sendToPair}
-                    title={sendToPair ? m.composer_mandando_grupo() : m.composer_mandar_tambem({ n: pairPeers.join(', ') })}
-                    onclick={onToggleSendToPair} aria-pressed={sendToPair} aria-label={m.composer_mandar_grupo()}>
-              <span class="repo-glyph" aria-hidden="true">⇄</span>
-              {#if sendToPair}<span class="repo-name">{pairPeers.length === 1 ? m.composer_pros_dois() : m.composer_pro_grupo()}</span>{/if}
-            </button>
-          {/if}
-        {/if}
-        {#if isKimi && isWorking && filaCount > 0 && onSteer}
-          <!-- FILA da TUI do Kimi: msg já mandada, esperando o turno atual acabar. O chip existe pra
-               DIZER que há fila (antes disso a bolha translúcida era a única pista) e dar a saída:
-               tocar manda o `ctrl-s`, que promove a msg pro turno em curso. Não tocar = espera, que
-               é o comportamento de sempre. -->
-          <button class="repo-chip fila-chip" onclick={steerFila}
-                  title={m.composer_fila_titulo()}
-                  aria-label={m.composer_fila_aria()}>
-            <span class="repo-glyph" aria-hidden="true">⏳</span>
-            <span class="repo-name">{m.composer_fila_contagem({ n: filaCount })}</span>
-            <span class="repo-sep" aria-hidden="true">·</span>
-            <span class="fila-acao">{m.composer_fila_acao()}</span>
-          </button>
-        {/if}
-        {#if shellsRodando > 0 && onOpenActivity}
-          <!-- Shells de FUNDO: comando que continua rodando depois que a ferramenta respondeu. O
-               terminal mostra "N shells still running" no rodapé e o app não mostrava nada — dava
-               pra sair da sessão sem saber que um build ainda estava de pé. O toque abre a
-               Atividade, onde está qual comando é e há quanto tempo. -->
-          <button class="repo-chip shell-chip" onclick={onOpenActivity}
-                  title={m.composer_shells_titulo({ n: shellsRodando })}
-                  aria-label={m.composer_shells_titulo({ n: shellsRodando })}>
-            <span class="repo-glyph" aria-hidden="true">&gt;_</span>
-            <span class="repo-name">{m.composer_shells_contagem({ n: shellsRodando })}</span>
-            <span class="shell-dot" aria-hidden="true"></span>
-          </button>
-        {/if}
-        {#if status?.repo}
-          <button class="repo-chip" title={m.composer_git_chip()} onclick={onOpenGit}>
-            <IconFolder size={13} />
-            <span class="repo-name">{status.repo}</span>
-            {#if status.branch}
-              <span class="repo-sep" aria-hidden="true">·</span>
-              <span class="repo-branch">{status.branch}{#if status.dirty}<span class="repo-dirty" aria-label={m.composer_alteracoes_nao_commitadas()}>*</span>{/if}</span>
-            {/if}
-          </button>
-        {/if}
-      </div>
-      {#if lastCache}
-        <!-- Prazo do cache. Nao e botao: nao ha o que fazer com ele alem de saber. -->
-        <span
-          class="cache-chip"
-          class:acabando={cacheAcabando}
-          class:frio={!cacheAtivo}
-          title={cacheAtivo
-            ? m.composer_cache_vale({ label: cacheLabel, janela: lastCache.ttl >= 3600 ? m.composer_cache_1_hora() : m.composer_cache_5_min() })
-            : m.composer_cache_expirou()}
-        >
-          <span class="cache-glyph" aria-hidden="true"></span>{cacheLabel}
-        </span>
-      {/if}
-    </div>
-
     {#if attachments.length}
       <div class="attach-row">
         {#each attachments as a, idx (a.file)}
@@ -1825,7 +1839,6 @@
               <span class="pill-label">
                 <span class="pill-model">{piModel ?? status?.model ?? m.composer_modelo()}</span>
               </span>
-              <ContextRing pct={status?.ctxPct ?? null} />
             </button>
             <!-- Nivel de raciocinio em pill propria (referencia: opencode). Antes vivia dentro da
                  folha de modelo, atras da lista de 390 itens. -->
@@ -1859,7 +1872,6 @@
               <span class="pill-label">
                 <span class="pill-model">{kimiModel ?? status?.model ?? m.composer_modelo()}</span>
               </span>
-              <ContextRing pct={status?.ctxPct ?? null} />
             </button>
             <button
               class="model-pill"
@@ -1887,7 +1899,6 @@
               <span class="pill-label">
                 <span class="pill-model">{pillModel ?? m.composer_modelo()}</span>
               </span>
-              <ContextRing pct={status?.ctxPct ?? null} />
             </button>
             <!-- Esforco em pill propria. Some no Haiku, que nao usa esforco (o picker responde
                  "Effort not supported") — pill que nao aplica nada e pior que pill ausente. -->
@@ -1943,7 +1954,6 @@
               <span class="pill-label">
                 <span class="pill-model">{codexModel ?? m.composer_modelo()}</span>
               </span>
-              <ContextRing pct={status?.ctxPct ?? null} />
             </button>
             <button
               class="model-pill"
@@ -2010,6 +2020,7 @@
         {/if}
       </div>
     </div>
+  </div>
   </div>
 
   {#if stats}
@@ -2215,13 +2226,68 @@
   .stats-strip .dot { opacity: 0.5; }
   .stats-strip .sep { color: var(--border-strong); }
 
+  /* Aba + card andam juntos: a largura mora aqui pra os dois ficarem alinhados. */
+  .composer-dock {
+    max-width: 600px;
+    margin: 0 auto;
+  }
+  @media (min-width: 820px) {
+    .composer-dock { max-width: min(1400px, 94vw); }
+  }
+
+  /* Aba de status: faixa fina recuada nas duas pontas, arredondada só em cima, encostada no card
+     (-1px come a borda dupla). Fundo = o vidro do card com uma demão de tinta por cima, pra ela
+     ler como um degrau atrás e continuar entrando no véu do papel de parede. */
+  .status-tab {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    height: 34px;
+    margin: 0 var(--space-4) -1px;
+    padding: 0 var(--space-2);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-bottom: 0;
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+    /* Duas demãos de tinta: com uma só a faixa some dentro do card e deixa de ler como degrau. */
+    background:
+      linear-gradient(var(--fill-subtle), var(--fill-subtle)),
+      linear-gradient(var(--fill-subtle), var(--fill-subtle)),
+      var(--chrome-bg);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    overflow: hidden;
+  }
+  @media (min-width: 820px) {
+    .status-tab { margin-inline: var(--space-6); }
+  }
+  /* Esquerda rola de lado quando não cabe (par + grupo + fila + shell no celular); quebrar linha
+     engordaria a faixa e ela deixaria de ser uma aba. */
+  .tab-left {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .tab-left::-webkit-scrollbar { display: none; }
+  .tab-right {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-left: auto;
+    padding-left: var(--space-2);
+    flex-shrink: 0;
+  }
+  /* Os botões vieram de dentro do card, onde havia 44px de altura; aqui a faixa tem 34. */
+  .status-tab .slash-btn { height: 26px; padding: 0 6px; }
+
   /* Card unico que reune status, textarea e controles. */
   .composer-card {
     display: flex;
     flex-direction: column;
     gap: var(--space-2);
-    max-width: 600px;
-    margin: 0 auto;
     /* Card de vidro fosco. O blur NÃO fica mais aqui: ficava no MESMO elemento que tem conteúdo +
        borda + filhos, forçando o WebKit a promover a subárvore e quebrar o fast-path do scroll ->
        bloco PRETO no topo durante o streaming (WebKit #89475). Agora o filtro vive só no ::before
@@ -2281,12 +2347,6 @@
   :global(html[data-liquid]) .composer-card::before {
     background: var(--glass-bg);
     backdrop-filter: url(#liquid-glass) blur(16px) saturate(180%);
-  }
-
-  /* Desktop: composer mais largo (aditivo; mobile fica nos 600px). min() acompanha a lista
-     (messages-inner): sem degrau 600->1400 em tablet. */
-  @media (min-width: 820px) {
-    .composer-card { max-width: min(1400px, 94vw); }
   }
 
   /* ── Textarea (transparente dentro do card) ─────────────────────────────── */
@@ -2511,18 +2571,6 @@
   .cache-chip.acabando .cache-glyph { background: var(--warning); }
   .cache-chip.frio .cache-glyph { background: var(--text-muted); opacity: 0.5; }
 
-  .composer-top {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-
-  .top-left {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    min-width: 0;
-  }
   /* Pareada: chip acende no accent (o 🤝 sem par fica na cor muted padrão do repo-chip). */
   .pair-chip--on { color: var(--accent); }
   .pair-chip--on .repo-name { color: var(--accent); }
