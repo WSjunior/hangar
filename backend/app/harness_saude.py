@@ -476,10 +476,11 @@ def diagnosticar() -> list[dict]:
 
     v = _versao("pi")
     d = home / ".pi" / "agent"
-    saida.append({"id": "pi", "nome": "Pi", "instalado": v is not None or d.is_dir(), "versao": v,
+    # A pasta de dados sobrevive à desinstalação do CLI.
+    saida.append({"id": "pi", "nome": "Pi", "instalado": v is not None, "versao": v,
                   "itens": [_credenciais("pi"), _extensoes("pi"), _fullscreen("pi"), _ponte_skills("pi", home),
                             _mcp("pi"), _modelo_padrao("pi")]
-                  if d.is_dir() else []})
+                  if v is not None and d.is_dir() else []})
 
     v = _versao("omp")
     d = _raiz_agente("omp")

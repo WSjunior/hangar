@@ -1,8 +1,21 @@
 """Painel de saúde dos harnesses (app/harness_saude.py): checagem lê, conserto reusa o instalador."""
 import json
 from pathlib import Path
+import pytest
 
 from app import harness_saude as h
+
+
+@pytest.mark.parametrize("versao, instalado", [(None, False), ("", True), ("1.0", True)])
+def test_pi_exige_executavel_mesmo_com_configuracao_residual(tmp_path, monkeypatch, versao, instalado):
+    (tmp_path / ".pi/agent").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(h, "list_config_dirs", lambda: [])
+    monkeypatch.setattr(h, "_versao", lambda cli: versao if cli == "pi" else None)
+    pi = next(item for item in h.diagnosticar() if item["id"] == "pi")
+    assert pi["instalado"] is instalado
+    if not instalado:
+        assert pi["itens"] == []
 
 
 def test_extensoes_faltando_e_o_conserto_liga(tmp_path, monkeypatch):
