@@ -101,6 +101,7 @@ from app.omp_plugin_sync import PluginSynchronizer, PluginSyncLoop
 from app.sync import sync_router
 from app.deploy import deploy_router
 from app import desktop_palette
+from app import plano_claude
 
 _log = logging.getLogger("hangar")
 
@@ -1963,6 +1964,28 @@ async def history(request: Request, response: Response, name: str, limit: int | 
     if limit is not None and limit > 0:
         return evs[-limit:]
     return evs
+
+
+@app.get("/api/sessions/{name}/plan-preview", dependencies=[Depends(require_auth)])
+async def plan_preview(name: str, content: bool = True):
+    info = await _cached_info(name)
+    if not info or not info.jsonl:
+        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "session or transcript not found"))
+    if info.provider != "claude":
+        return None
+    plano = await asyncio.to_thread(plano_claude.descobrir, info.jsonl, info.cwd)
+    if plano is None:
+        return None
+    resposta = {"name": plano.nome, "path": str(plano.caminho)}
+    if not content:
+        return resposta
+    try:
+        resposta["markdown"] = await asyncio.to_thread(plano.caminho.read_text, encoding="utf-8")
+    except FileNotFoundError:
+        raise HTTPException(404, detail=erro("erro_plano_removido", "arquivo do plano não encontrado")) from None
+    except OSError:
+        raise HTTPException(500, detail=erro("erro_plano_ilegivel", "não foi possível ler o plano")) from None
+    return resposta
 
 
 async def _bastao_alvo(name: str, project: str | None, session_id: str | None,
@@ -5081,6 +5104,7 @@ def serve_file(name: str, path: str, request: Request):
 
 class AnswerItem(_StrictBody):
     kind: str
+    question_id: str | None = None
     indices: list[int] | None = None
     multi: bool = False
     value: str | None = None
@@ -5091,6 +5115,7 @@ class AnswerItem(_StrictBody):
 
 class AnswerBody(_StrictBody):
     answers: list[AnswerItem]
+    request_id: int | str | None = None
 
 
 def _askq_fallback_text(answers: list[dict], jsonl: str | None) -> str:
@@ -5150,10 +5175,24 @@ def answer(name: str, body: AnswerBody):
     # FALLBACK automatico: Escape (fecha o picker; o "declined" e intencional aqui) + resposta como
     # texto via _send_one (fila duravel: se o pane ainda estiver em overlay vira deferred e o drain
     # entrega). A resposta do usuario NUNCA se perde — pior caso chega como texto, nao como interrupt mudo.
-    _recusa_se_painel_aberto(name)
     from app import terminal_input
     answers = [a.model_dump() for a in body.answers]
     info = _cached_info_sync(name)
+    if getattr(info, "provider", "claude") == "codex":
+        if _loop_servidor is None or not _loop_servidor.is_running():
+            raise HTTPException(503, detail=erro("erro_codex_resposta_envio", "Não foi possível confirmar o envio da resposta ao Codex."))
+        future = asyncio.run_coroutine_threadsafe(
+            get_adapter("codex").answer_questions(name, body.request_id, answers), _loop_servidor
+        )
+        try:
+            future.result(timeout=35)
+        except ValueError as exc:
+            raise HTTPException(409, detail=erro("erro_codex_resposta_invalida", "A pergunta mudou ou não aceita essas respostas. Confira as opções e tente novamente.")) from exc
+        except Exception as exc:
+            _log.warning("Falha ao enviar resposta nativa ao Codex: %s", type(exc).__name__)
+            raise HTTPException(503, detail=erro("erro_codex_resposta_envio", "Não foi possível confirmar o envio da resposta ao Codex.")) from exc
+        return {"ok": True, "fallback": False}
+    _recusa_se_painel_aberto(name)
     jsonl = info.jsonl if info else None
     fallback = False
 
@@ -5305,6 +5344,10 @@ def _cache_key_perm(name: str, info) -> str:
     j = getattr(info, "jsonl", None) if info else None
     return f"{name}::{j or 'sem-jsonl'}"
 
+def _tracking_key_perm(name: str, info) -> str:
+    j = getattr(info, "jsonl", None) if info else None
+    return Path(j).stem if j else name
+
 def _guard_perm(name: str, info) -> None:
     """409 quando sessão não é claude, painel aberto, ou há menu aberto no pane."""
     if info is None:
@@ -5350,6 +5393,9 @@ async def permission_modes(name: str, sondar: bool = False):
         cur_now = None
     if cur_now is None:
         raise HTTPException(409, detail=erro("erro_permissao_leitura", "não consegui ler o modo atual no rodapé"))
+    tracking_key = _tracking_key_perm(name, info)
+    cur_now, anterior_nao_plan = perm_mode.observar_ou_confirmado(
+        tracking_key, cur_now, sessao=name)
     sondavel = cur_now != "dontAsk"
     if not sondar:
         # sem sondar: devolver cache se houver, ou []
@@ -5357,18 +5403,23 @@ async def permission_modes(name: str, sondar: bool = False):
         if hit is not None:
             _, modos_cached = hit
             # revalida current mas mantém modos do cache
-            return {"current": cur_now, "modes": modos_cached, "sondavel": sondavel}
-        return {"current": cur_now, "modes": [], "sondavel": sondavel}
+            return {"current": cur_now, "modes": modos_cached, "sondavel": sondavel,
+                    "previous_non_plan": anterior_nao_plan}
+        return {"current": cur_now, "modes": [], "sondavel": sondavel,
+                "previous_non_plan": anterior_nao_plan}
     # com sondar=1: comportamento de antes (listar_modos + cache)
     # se não sondável (dontAsk), não chamar listar_modos (bloqueador 2)
     if not sondavel:
-        return {"current": cur_now, "modes": [], "sondavel": False}
+        return {"current": cur_now, "modes": [], "sondavel": False,
+                "previous_non_plan": anterior_nao_plan}
     hit = _perm_modes_cache.get(key)
     if hit is not None:
         _, modos_cached = hit
-        return {"current": cur_now, "modes": modos_cached, "sondavel": sondavel}
+        return {"current": cur_now, "modes": modos_cached, "sondavel": sondavel,
+                "previous_non_plan": anterior_nao_plan}
     try:
-        cur, modos = await asyncio.to_thread(perm_mode.listar_modos, name)
+        cur, modos = await asyncio.to_thread(
+            perm_mode.executar_controlado, name, perm_mode.listar_modos, name)
     except RuntimeError as e:
         raise HTTPException(409, detail=erro("erro_permissao_leitura", str(e)))
     # Chave é nome::jsonl, então sessão nova nunca reusa entrada: sem poda o dict cresce pela
@@ -5376,13 +5427,15 @@ async def permission_modes(name: str, sondar: bool = False):
     if len(_perm_modes_cache) > 200:
         _perm_modes_cache.clear()
     _perm_modes_cache[key] = (cur, modos)
+    cur, anterior_nao_plan = perm_mode.observar_ou_confirmado(
+        tracking_key, cur, sessao=name)
     # A sonda dá voltas de BTab de verdade. Se não conseguiu voltar, a sessão FICOU noutro modo de
     # permissão por causa de uma chamada que o usuário leu como leitura — isso não pode sair calado.
     restaurado = cur == cur_now
     if not restaurado:
         _log.warning("permission-modes: sonda deixou %s em %s (era %s)", name, cur, cur_now)
     return {"current": cur, "modes": modos, "sondavel": cur != "dontAsk",
-            "restaurado": restaurado}
+            "restaurado": restaurado, "previous_non_plan": anterior_nao_plan}
 
 @app.post("/api/sessions/{name}/permission-mode", dependencies=[Depends(require_auth)])
 async def permission_mode_set(name: str, body: PermissionModeBody):
@@ -5402,8 +5455,16 @@ async def permission_mode_set(name: str, body: PermissionModeBody):
     if not info:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
     _guard_perm(name, info)
+    tracking_key = _tracking_key_perm(name, info)
     try:
-        ficou = await asyncio.to_thread(perm_mode.trocar_modo, name, alvo)
+        inicial = await asyncio.to_thread(perm_mode.ler_modo, name)
+    except Exception:
+        inicial = None
+    if inicial is not None:
+        perm_mode.observar_ou_confirmado(tracking_key, inicial, sessao=name)
+    try:
+        ficou = await asyncio.to_thread(
+            perm_mode.executar_controlado, name, perm_mode.trocar_modo, name, alvo)
     except RuntimeError as e:
         raise HTTPException(409, detail=erro("erro_permissao_leitura", str(e)))
     except ValueError as e:
@@ -5416,7 +5477,8 @@ async def permission_mode_set(name: str, body: PermissionModeBody):
         _perm_modes_cache[key] = (ficou, modos_cached)
     if ficou != alvo:
         raise HTTPException(status_code=409, detail=erro("erro_permissao_teto", f"não alcançou {alvo!r} em {perm_mode.TETO_TECLAS} teclas — ficou em {ficou!r}", alvo=alvo, ficou=ficou, mode=ficou))
-    return {"mode": ficou, "current": ficou}
+    return {"mode": ficou, "current": ficou,
+            "previous_non_plan": perm_mode.observar_modo(tracking_key, ficou)}
 
 
 # ── Catalogo de modelos de uma sessao Claude Code ───────────────────────────────────────────────

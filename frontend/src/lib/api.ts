@@ -1529,9 +1529,15 @@ export function gitPush(name: string): Promise<{ ok: boolean; output: string }> 
 // resposta como TEXTO. É sucesso (a resposta chegou), mas o Escape aparece no transcript como
 // "user declined"/"Request interrupted" — em vermelho. Sem propagar este campo, quem respondeu vê
 // só o vermelho e conclui que perdeu a resposta; era o que acontecia até 27/08/2026.
-export function answerQuestions(name: string, answers: AnswerItem[]): Promise<{ ok: boolean; fallback?: boolean }> {
+export interface SessionPlanPreview { name: string; path: string; markdown?: string }
+
+export function getSessionPlanPreview(name: string, content = true): Promise<SessionPlanPreview | null> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/plan-preview?content=${content}`);
+}
+
+export function answerQuestions(name: string, answers: AnswerItem[], requestId?: string | number): Promise<{ ok: boolean; fallback?: boolean }> {
   return apiFetch<{ ok: boolean; fallback?: boolean }>(`/api/sessions/${encodeURIComponent(name)}/answer`, {
-    method: 'POST', body: JSON.stringify({ answers }),
+    method: 'POST', body: JSON.stringify({ answers, ...(requestId !== undefined ? { request_id: requestId } : {}) }),
   });
 }
 
@@ -1980,7 +1986,7 @@ export function writeFile(name: string, path: string, text: string, digest: stri
   });
 }
 
-export function getPermissionModes(name: string, sondar = false): Promise<{ current: string; modes: string[]; sondavel: boolean; restaurado?: boolean }> {
+export function getPermissionModes(name: string, sondar = false): Promise<{ current: string; modes: string[]; sondavel: boolean; restaurado?: boolean; previous_non_plan: string }> {
   // Fora do cache de catálogo (revisão): o `current` muda FORA do app — shift+tab no terminal da
   // sessão — e a pill lê pelo poll do Composer; cacheado, o modo aparecia errado por até 60s.
   // A sonda (sondar=1) segue ação viva, como sempre foi.
@@ -1988,7 +1994,7 @@ export function getPermissionModes(name: string, sondar = false): Promise<{ curr
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/permission-modes${qs}`);
 }
 
-export function setPermissionMode(name: string, mode: string): Promise<{ mode: string; current: string }> {
+export function setPermissionMode(name: string, mode: string): Promise<{ mode: string; current: string; previous_non_plan: string }> {
   _invalidarCatalogo(name);
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/permission-mode`, {
     method: 'POST',

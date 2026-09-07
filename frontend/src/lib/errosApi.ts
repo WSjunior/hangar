@@ -52,6 +52,10 @@ export function formataErro(e: unknown): string | undefined {
 }
 
 const ERROS: Record<string, (params: Parametros) => string> = {
+  erro_codex_resposta_invalida: () => m.erro_codex_resposta_invalida(),
+  erro_codex_resposta_envio: () => m.erro_codex_resposta_envio(),
+  erro_plano_removido: () => m.chat_plan_ausente(),
+  erro_plano_ilegivel: () => m.chat_plan_erro(),
   // /api/claude-configs — apagar conta recusado por alguma condicao da maquina
   erro_config_dirs_fixo: () => m.erro_config_dirs_fixo(),
   erro_conta_ativa_backend: () => m.erro_conta_ativa_backend(),

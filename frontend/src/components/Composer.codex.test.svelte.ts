@@ -41,6 +41,7 @@ it('Shift+Tab alterna Planejar e Normal sem mudar permissões', async () => {
   expect(api.setCodexMode).toHaveBeenLastCalledWith('codex-test', 'plan');
   expect(button(m.codex_modo_plan()).getAttribute('aria-pressed')).toBe('true');
   button(m.codex_modo_plan()).click(); await flush();
+  button(m.codex_modo_normal()).click(); await flush();
   expect(api.setCodexMode).toHaveBeenLastCalledWith('codex-test', 'default');
 });
 

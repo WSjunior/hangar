@@ -24,7 +24,7 @@ class ClaudeAdapter:
         return TranscriptTailer(path).follow(start_offset)
 
     def state_monitor(self, name: str, sid_get: Callable[[], str]) -> AsyncIterator[StateEvent]:
-        return StateMonitor(name, sid_get=sid_get).stream()
+        return StateMonitor(name, sid_get=sid_get, observe_permission=True).stream()
 
     async def drain(self, name: str, path: str) -> int:
         # ti.drain e sincrono (digita no tty via subprocess tmux) -> thread, como sse.py ja fazia

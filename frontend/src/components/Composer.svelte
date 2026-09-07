@@ -21,7 +21,6 @@
   import { novoEstadoVad, passoVad } from '../lib/vad';
   import type { EstadoVad } from '../lib/vad';
   import { lerMaosLivres } from '../lib/maosLivres';
-  import { glifoPermissao, rotuloPermissao } from '../lib/permissaoRotulo';
   import { podeEnviarSozinho } from '../lib/autoEnvio';
   import type { MotivoFim } from '../lib/autoEnvio';
   import IconSend from './icons/IconSend.svelte';
@@ -34,7 +33,7 @@
   import ContextRing from './ContextRing.svelte';
   import ClaudeModelPopover from './ClaudeModelPopover.svelte';
   import ClaudeEffortPopover from './ClaudeEffortPopover.svelte';
-  import ClaudePermissionPopover from './ClaudePermissionPopover.svelte';
+  import SessionModeControl from './SessionModeControl.svelte';
   import Popover from './Popover.svelte';
   import CodexModelPopover from './CodexModelPopover.svelte';
   import CodexEffortPopover from './CodexEffortPopover.svelte';
@@ -60,6 +59,8 @@
     status: StatusFields | null;
     onSend: (text: string, steer?: boolean) => Promise<void> | void;
     codexMode?: 'default' | 'plan' | null;
+    claudePermissionMode?: string | null;
+    claudePreviousNonPlan?: string | null;
     // ctrl-s avulso: promove o que JÁ está na fila da TUI do Kimi pro turno em curso.
     onSteer?: () => Promise<void> | void;
     // Quantas msgs estão esperando o turno atual (as bolhas translúcidas). 0 = sem chip de fila.
@@ -103,6 +104,8 @@
     engine = null,
     filaCount = 0,
     codexMode = null,
+    claudePermissionMode = null,
+    claudePreviousNonPlan = null,
     stats = null,
   }: Props = $props();
 
@@ -453,10 +456,7 @@
     return () => document.removeEventListener('keydown', aoAtalhoMic);
   });
 
-  // Atalho de permissão (só Claude): Alt+Shift+P em qualquer lugar da tela, e Shift+Tab com o
-  // foco no campo de texto (a mesma tecla do terminal), passam pro PRÓXIMO modo do ciclo vivo —
-  // a mesma lista que a pílula mostra (4 ou 5 modos lidos da sessão), nunca a lista canônica:
-  // modo só-de-criação não entra no ciclo. Mesmos guards do atalho do mic.
+  // Os atalhos do Claude percorrem o ciclo lido da sessão, sem incluir modos só de criação.
   function aoAtalhoPermissao(e: KeyboardEvent) {
     if (e.repeat || !e.altKey || !e.shiftKey || e.ctrlKey || e.metaKey || e.code !== 'KeyP') return;
     if (!isClaude) return;
@@ -555,6 +555,45 @@
   let codexEffort = $state<string | null>(null);
   let modoCodex = $state<'default' | 'plan'>('default');
   let trocandoModo = $state(false);
+  let modoNaPrimeiraLinha = $state(false);
+
+  function posicionarModo(card: HTMLElement) {
+    let frame = 0;
+    function medir() {
+      frame = 0;
+      const row = card.querySelector<HTMLElement>('.control-row');
+      const left = card.querySelector<HTMLElement>('.control-left');
+      const right = card.querySelector<HTMLElement>('.control-right');
+      const mode = card.querySelector<HTMLElement>('.mode-slot');
+      if (!row || !left || !right || !mode || !row.clientWidth) return;
+      const gap = parseFloat(getComputedStyle(row).columnGap) || 0;
+      // Os grupos inferiores não contêm o seletor: a medida continua válida quando ele sobe.
+      // O flex do celular pode cortar o nome do modelo antes de acusar overflow no grupo.
+      const textoCortado = [...left.querySelectorAll<HTMLElement>('.pill-model')].reduce((total, el) => {
+        const limite = parseFloat(getComputedStyle(el).maxWidth) || Infinity;
+        return total + Math.max(0, Math.min(el.scrollWidth, limite) - el.clientWidth);
+      }, 0);
+      const necessario = left.scrollWidth + textoCortado + right.scrollWidth + mode.offsetWidth + gap * 2;
+      modoNaPrimeiraLinha = necessario > row.clientWidth + 1;
+    }
+    function agendar() {
+      if (!frame) frame = requestAnimationFrame(medir);
+    }
+    const resize = new ResizeObserver(agendar);
+    resize.observe(card);
+    for (const el of card.querySelectorAll('.control-left, .control-right')) resize.observe(el);
+    // Modelo, modo e botões de envio podem mudar sem redimensionar o compositor.
+    const mutations = new MutationObserver(agendar);
+    mutations.observe(card, { childList: true, characterData: true, subtree: true });
+    agendar();
+    return {
+      destroy() {
+        cancelAnimationFrame(frame);
+        resize.disconnect();
+        mutations.disconnect();
+      },
+    };
+  }
 
   $effect(() => {
     if (!isCodex) return;
@@ -563,17 +602,21 @@
     if (codexMode) modoCodex = codexMode;
   });
 
-  async function alternarModoCodex() {
+  async function aplicarModoCodex(alvo: 'default' | 'plan') {
     if (trocandoModo) return;
     trocandoModo = true;
     sendError = '';
     const sn = sessionName;
     try {
-      const res = await setCodexMode(sn, modoCodex === 'plan' ? 'default' : 'plan');
+      const res = await setCodexMode(sn, alvo);
       if (sn === sessionName) modoCodex = res.mode ?? modoCodex;
     } catch (e) {
       if (sn === sessionName) sendError = e instanceof Error ? e.message : m.comum_falha_aplicar();
     } finally { trocandoModo = false; }
+  }
+
+  function alternarModoCodex() {
+    return aplicarModoCodex(modoCodex === 'plan' ? 'default' : 'plan');
   }
 
   $effect(() => {
@@ -657,8 +700,18 @@
   // Lista viva via GET /permission-modes (ciclo 4 ou 5 lido ao vivo), troca via POST
   // com BTab. Modos fora do ciclo (dontAsk isolado, bypass sem ter nascido nele)
   // aparecem desabilitados com motivo "só na criação".
-  let permPopOpen = $state(false);
   let permCurrent = $state<string | null>(null);
+  let permPreviousNonPlan = $state('manual');
+  // Toda leitura recebe um token. Um modo confirmado pelo SSE também avança a sequência para que
+  // um GET iniciado antes da captura não consiga restaurar o valor antigo ao terminar depois.
+  let permSeq = 0;
+  $effect(() => {
+    if (!isClaude) return;
+    if (!claudePermissionMode && !claudePreviousNonPlan) return;
+    permSeq++;
+    if (claudePermissionMode) permCurrent = claudePermissionMode;
+    if (claudePreviousNonPlan) permPreviousNonPlan = claudePreviousNonPlan;
+  });
   // "+" do mobile: menu com Anexar + estilo do ditado (que saem da fileira em tela estreita).
   let plusOpen = $state(false);
   let plusBtnEl = $state<HTMLElement | null>(null);
@@ -699,11 +752,9 @@
       else void getModelOptions(sn).catch(() => {});
     });
   });
-  $effect(() => { if (permPopOpen) permError = null; });
   // Token de sequência: o poll de fundo e a sonda da pílula correm juntos, e sem isto a resposta
   // atrasada de um pisava no resultado do outro — inclusive zerando `permModes` (o poll pede sem
   // sondar, e volta `[]` enquanto o servidor não tem cache) com o popover já aberto na lista.
-  let permSeq = 0;
   // Sessão (nome|provider) pra qual o backend já disse "modo de permissão só vale para Claude".
   // `isClaude` é "não é codex/pi/kimi", e uma sessão Pi/Kimi recém-criada chega como `claude` nos
   // primeiros ~15s — o poll refazia o 409 a cada mudança de estado (medido: 558 numa semana). A
@@ -725,6 +776,7 @@
         .then((res) => {
           if (seq !== permSeq || sn !== sessionName) return;
           permCurrent = res.current;
+          permPreviousNonPlan = res.previous_non_plan ?? permPreviousNonPlan;
           // lista vazia do poll não apaga o ciclo que a sonda já trouxe
           if (res.modes.length > 0 || permModes.length === 0) permModes = res.modes;
           permSondavel = res.sondavel;
@@ -738,7 +790,6 @@
     });
   });
   async function abrirPermissao() {
-    permPopOpen = true;
     if (!permSondavel || permModes.length > 0 || permCarregando) return;
     permCarregando = true;
     const sn = sessionName;
@@ -747,6 +798,7 @@
       const res = await getPermissionModes(sn, true);
       if (seq !== permSeq || sn !== sessionName) return;
       permCurrent = res.current;
+      permPreviousNonPlan = res.previous_non_plan ?? permPreviousNonPlan;
       permModes = res.modes;
       permSondavel = res.sondavel;
       // A sonda dá voltas de BTab de verdade; se não voltou, a sessão FICOU noutro modo por
@@ -769,6 +821,7 @@
       // backend devolve o que FICOU (pode ser diferente do pedido se houve clamp/teto)
       const ficou = res.mode ?? res.current ?? modo;
       permCurrent = ficou;
+      permPreviousNonPlan = res.previous_non_plan ?? permPreviousNonPlan;
     } catch (e) {
       // 409 com modo que ficou: backend devolveu {mode: ficou} mas jogou 409.
       // Tenta extrair o modo que ficou da mensagem, senão mantém o atual.
@@ -778,6 +831,7 @@
       try {
         const cur = await getPermissionModes(sessionName);
         permCurrent = cur.current;
+        permPreviousNonPlan = cur.previous_non_plan ?? permPreviousNonPlan;
         permModes = cur.modes;
       } catch (e2) {
         // mantém permError do POST; releitura falhou mas 409 já está na tela
@@ -1598,6 +1652,22 @@
   });
 </script>
 
+{#snippet seletorModo()}
+  <div class="mode-slot">
+    <SessionModeControl
+      provider={isCodex ? 'codex' : 'claude'}
+      current={isCodex ? modoCodex : permCurrent}
+      modes={isCodex ? undefined : permModes}
+      loading={isCodex ? trocandoModo : permCarregando}
+      error={isCodex ? null : permError}
+      onOpen={isCodex ? undefined : () => void abrirPermissao()}
+      onApply={isCodex
+        ? async (mode) => { await aplicarModoCodex(mode as 'default' | 'plan'); }
+        : handlePermApply}
+    />
+  </div>
+{/snippet}
+
 <footer class="composer">
   <input
     type="file"
@@ -1611,7 +1681,7 @@
   />
   <!-- O card precisa delegar foco para a textarea em areas vazias, mas contem varios botoes:
        nao pode virar button/role=button sem aninhar controles interativos. -->
-  <div class="composer-card" class:arrastando role="button" tabindex="-1" onclick={focusInput} onkeydown={focusInput}
+  <div class="composer-card" use:posicionarModo class:arrastando role="button" tabindex="-1" onclick={focusInput} onkeydown={focusInput}
        ondragover={onDragOver} ondragleave={onDragLeave} ondrop={onDrop}>
     {#if arrastando}
       <div class="solte-anexo" aria-hidden="true">{m.composer_soltar_anexo()}</div>
@@ -1624,12 +1694,6 @@
         <button class="slash-btn" onclick={onOpenPreview} aria-label={m.composer_preview_rodando()}>
           <IconMonitor size={17} />
         </button>
-        {#if isCodex}
-          <button class="repo-chip" onclick={alternarModoCodex} disabled={trocandoModo}
-            aria-pressed={modoCodex === 'plan'} title={m.codex_modo_atalho()}>
-            <span class="repo-name">{modoCodex === 'plan' ? m.codex_modo_plan() : m.codex_modo_normal()}</span>
-          </button>
-        {/if}
         {#if onOpenPair}
           {@const pairLabel = pairPeers?.length === 1 ? pairPeers[0]
             : pairPeers?.length ? `grupo (${pairPeers.length + 1})` : null}
@@ -1699,6 +1763,9 @@
           </button>
         {/if}
       </div>
+      {#if (isClaude || isCodex) && modoNaPrimeiraLinha}
+        {@render seletorModo()}
+      {/if}
       {#if lastCache}
         <!-- Prazo do cache. Nao e botao: nao ha o que fazer com ele alem de saber. -->
         <span
@@ -1823,9 +1890,6 @@
     {#if modelError}
       <div class="send-error" role="alert">{modelError}</div>
     {/if}
-    {#if permError}
-      <div class="send-error" role="alert">{permError}</div>
-    {/if}
 
     <div class="control-row">
       <div class="control-left">
@@ -1942,26 +2006,6 @@
                 </span>
               </button>
             {/if}
-            <!-- Permissão: linha dentro do seletor de modelo (ClaudeModelPopover) em qualquer tela,
-                 e pill própria SÓ no desktop (.pill-perm some no celular via media query): ali a
-                 palavra do modo ("bypassPermissions") estourava a linha e derrubava os controles.
-                 Glifo + rótulo curto são os do rodapé do próprio Claude (⏸/⏵⏵). Shift+Tab no
-                 campo ou Alt+Shift+P passam pro próximo modo do ciclo. -->
-            {#if permCurrent}
-              <button
-                class="model-pill pill-perm"
-                onclick={() => void abrirPermissao()}
-                aria-haspopup="dialog"
-                aria-expanded={permPopOpen}
-                aria-label={m.composer_permissao()}
-                title={m.permissao_atalho()}
-              >
-                <span class="pill-label">
-                  <span class="pill-glifo" aria-hidden="true">{glifoPermissao(permCurrent)}</span>
-                  <span class="pill-model">{rotuloPermissao(permCurrent)}</span>
-                </span>
-              </button>
-            {/if}
           </span>
         {:else}
           <!-- Codex: pill-duo como os outros três. O esforço tem metade própria em vez de virar
@@ -2026,6 +2070,9 @@
         {/if}
       </div>
 
+      {#if (isClaude || isCodex) && !modoNaPrimeiraLinha}
+        {@render seletorModo()}
+      {/if}
       <div class="control-right">
         {#if isCodex && isWorking && hasInput && !sendToPair}
           <button class="model-pill" onclick={() => submit(true)} disabled={!canSend}
@@ -2102,8 +2149,6 @@
     onApply={handleApply}
     onApplied={handleEngineModelApplied}
     onFail={(msg) => (modelError = msg)}
-    {permCurrent}
-    onOpenPermission={() => { claudePopOpen = false; void abrirPermissao(); }}
     onClose={() => (claudePopOpen = false)}
   />
 
@@ -2115,16 +2160,6 @@
     onClose={() => (claudeEffortOpen = false)}
   />
 
-  <ClaudePermissionPopover
-    open={permPopOpen}
-    anchor={claudePillEl}
-    current={permCurrent}
-    modes={permModes}
-    sondavel={permSondavel}
-    carregando={permCarregando}
-    onApply={handlePermApply}
-    onClose={() => (permPopOpen = false)}
-  />
 
   <CodexModelPopover
     open={codexPopOpen}
@@ -2354,6 +2389,14 @@
     color: var(--text-muted);
   }
 
+  .mode-slot { flex: none; min-width: 0; max-width: 180px; }
+  .control-row > .mode-slot { margin-right: auto; }
+  .composer-top:has(.mode-slot) { gap: var(--space-2); }
+  .composer-top:has(.mode-slot) .top-left {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
   /* ── Control row ────────────────────────────────────────────────────────── */
   .control-row {
     display: flex;
@@ -2419,7 +2462,6 @@
     /* Anexo e pill de estilo saem da fileira (estão no "+"); o mic fica. */
     .control-left > .attach-btn:not(.mic-btn):not(.plus-btn) { display: none; }
     .control-left > .model-pill { display: none; }
-    .pill-perm { display: none; }
     .pill-duo {
       display: inline-flex;
       align-items: center;

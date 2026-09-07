@@ -224,6 +224,10 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   muda o modo nativo da sessão. A troca preserva modelo, esforço e permissões e vale para o próximo
   turno. Modelo e esforço acompanham alterações feitas no terminal. Digitar `/` lista as skills
   habilitadas no próprio Codex; selecionar preenche `/nome ` para você acrescentar os argumentos.
+- **Claude — modo:** o seletor mostra o modo atual. **Shift+Tab** no campo de mensagem ou
+  **Alt+Shift+P** percorre todos os modos disponíveis naquela sessão, na ordem do terminal.
+  Modos indisponíveis não entram no ciclo. O seletor fica na linha inferior; quando falta espaço,
+  ocupa a primeira linha existente, tanto no Claude quanto no Codex.
 - **Pergunta interativa do Claude** (AskUserQuestion/permissão): as opções viram **botões** —
   toque. (Se não renderizar como botão, responda com o **número** em texto.)
 

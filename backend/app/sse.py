@@ -754,6 +754,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
             await queue.put(("__error__", exc))
 
     ask_q_emitted = False          # impede reemissao enquanto o mesmo prompt permanece na tela
+    codex_question_emitted = ""
     ultimo_estado = None           # ultimo `state` emitido; None ate o primeiro tick
     _fantasma_logado = {"v": False}
     prev_deliverable = False     # init False -> 1o estado entregavel pos-(re)connect tambem dispara 1
@@ -892,7 +893,12 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 if _sl and context_pairs(_sl) < 2 and _sl != _last_ctx_warn["sl"]:
                     _last_ctx_warn["sl"] = _sl
                     _log.info("sse: sem métrica de contexto name=%s statusline=%r", name, _sl)
-                if parsed_state.get("state") != "awaiting_input":
+                if current_provider == "codex":
+                    question_data = json.dumps(parsed_state.get("codex_question"), ensure_ascii=False)
+                    if question_data != codex_question_emitted:
+                        codex_question_emitted = question_data
+                        yield {"event": "ask_question", "data": question_data}
+                elif parsed_state.get("state") != "awaiting_input":
                     ask_q_emitted = False
                 elif not ask_q_emitted:
                     ask_ev = _ask_question_event(data, current_jsonl)

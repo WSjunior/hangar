@@ -14,6 +14,9 @@
   import TerminalMobile from '../components/TerminalMobile.svelte';
   import AskQuestionCard from '../components/AskQuestionCard.svelte';
   import AskQuestionSheet from '../components/AskQuestionSheet.svelte';
+  import SessionPlanPreview from '../components/SessionPlanPreview.svelte';
+  import { proposedPlan } from '../lib/proposedPlan';
+  import { setCodexMode } from '../lib/api';
   import RunSheet from '../components/RunSheet.svelte';
   import MoreSheet from '../components/MoreSheet.svelte';
   import AttachmentsSheet from '../components/AttachmentsSheet.svelte';
@@ -371,6 +374,26 @@
   let limitsOpen = $state(false);  // Task B: sheet de limites de uso Codex (badge da NavBar)
   let askPayload = $state<AskQuestionPayload | null>(null);
   let askOpen = $state(false);
+  const codexPlan = $derived.by(() => {
+    if (sessionProvider !== 'codex') return null;
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i];
+      if (event.kind === 'user_msg' && !event.id.startsWith('queued-')) return null;
+      if (event.kind === 'assistant_msg' && event.text) {
+        const plan = proposedPlan(event.text);
+        if (plan) return plan;
+      }
+    }
+    return null;
+  });
+
+  async function implementCodexPlan(plan: string) {
+    if (currentState !== 'idle' || plan !== codexPlan) throw new Error(m.chat_plan_indisponivel());
+    const confirmed = await setCodexMode(sessionName, 'default');
+    if (confirmed.mode !== 'default') throw new Error(m.chat_plan_indisponivel());
+    if (stateEvent) stateEvent = { ...stateEvent, codex_mode: 'default' };
+    await handleSend(m.chat_plan_pedido(), false, true);
+  }
   // Pergunta nativa sintetizada do transcript (Pi: tool `question`; Kimi: `AskUserQuestion`): qual
   // tool_use_id abriu o sheet e qual o usuario ja DISPENSOU sem responder (fechou o sheet -> nao
   // reabre; o OptionButtons cru, lido do pane, fica como fallback). null = nenhuma.
@@ -1430,7 +1453,7 @@
         // resposta de algo ja respondido. Pergunta de Pi/Kimi tem dono proprio (o $effect do
         // `pendingPiQuestion`, que fecha pelo tool_result) e o estado do pane dela nao segue essa
         // regra -> so o caso do Claude, que abre pelo evento SSE.
-        if (askOpen && !askPiId && stateEvent?.state !== 'awaiting_input') askOpen = false;
+        if (askOpen && !askPiId && askPayload?.provider !== 'codex' && stateEvent?.state !== 'awaiting_input') askOpen = false;
       } catch (err) {
         // Mesmo motivo do handler de `preview` logo abaixo: engolir aqui congela a prévia na tela
         // (este handler virou o OUTRO dono dela) e ainda deixa o `stateEvent` preso no valor
@@ -1449,7 +1472,15 @@
 
     // Stepper nativo AskUserQuestion: abre o sheet com as perguntas recebidas via SSE
     es.addEventListener('ask_question', (e: MessageEvent) => {
-      try { askPayload = JSON.parse(e.data); askOpen = true; } catch {}
+      try {
+        const next = JSON.parse(e.data) as AskQuestionPayload | null;
+        if (!next) { askPayload = null; askOpen = false; return; }
+        // O retrato de reconexão não pode apagar escolhas nem reabrir uma pergunta dispensada.
+        if (next.provider === 'codex' && askPayload?.provider === 'codex'
+            && next.request_id === askPayload.request_id) return;
+        askPayload = next;
+        askOpen = true;
+      } catch {}
     });
 
     // O agente abriu/empurrou o navegador embutido desta sessão (POST /api/sessions/<nome>/nav,
@@ -1764,7 +1795,7 @@
   // subagente que terminou (`transcript.py`, `queued-task:<id>`, tool_result). Sem o kind, um
   // agente de fundo terminando contaria como mensagem na fila.
   const filaCount = $derived(
-    sessionProvider !== 'kimi'
+    sessionProvider !== 'kimi' && sessionProvider !== 'codex'
       ? 0
       : pending.length
         + events.filter((e) => e.kind === 'user_msg'
@@ -1794,7 +1825,7 @@
     sendToPair = false;
   });
 
-  async function handleSend(text: string, steer = false) {
+  async function handleSend(text: string, steer = false, onlyThisSession = false) {
     // Eco imediato SEMPRE (não só em 'working'): o transcript só grava a msg quando o TURNO dela
     // começa — sessão ocupada num turno longo deixava a msg invisível por minutos, e a corrida de
     // estado (flip idle->working no instante do envio) derrubava até o eco condicional antigo
@@ -1804,7 +1835,7 @@
     try {
       if (steer && sessionProvider === 'codex') {
         await steerSession(sessionName, text);
-      } else if (sendToPair && pairPeers?.length && !text.trimStart().startsWith('/')) {
+      } else if (!onlyThisSession && sendToPair && pairPeers?.length && !text.trimStart().startsWith('/')) {
         // Slash-command nunca em broadcast (o backend rejeita; mesmo racional do /api/broadcast).
         // /broadcast responde 200 com resultado POR sessão — falha individual (pane de membro
         // morto) não rejeita a promise; sem conferir, o envio pro grupo falhava calado.
@@ -2000,8 +2031,11 @@
 
   // 409 (mismatch de verificação, ou painel de terminal aberto) ou erro inesperado.
   async function handleAnswer(answers: AnswerItem[]) {
+    const requestId = askPayload?.request_id;
+    const native = askPayload?.provider === 'codex';
     try {
-      const r = await answerQuestions(sessionName, answers);
+      const r = await answerQuestions(sessionName, answers, requestId);
+      if (native && askPayload?.request_id !== requestId) return;
       // Pergunta do Pi respondida com sucesso: o tool_result ainda demora ~1s pra aterrissar no
       // transcript — sem marcar a dispensa aqui, o sheet REABRIA nessa janela (pergunta ainda
       // pendente + askOpen false).
@@ -2012,6 +2046,8 @@
       // vermelho ficava sem legenda e parecia que a resposta tinha se perdido.
       if (r?.fallback) mostrarAviso(m.askq_enviada_como_texto());
     } catch (err) {
+      // O protocolo nativo permite tentar de novo sem perder o rascunho da resposta.
+      if (native) throw err;
       if (askPiId) { askPiDismissed = askPiId; askPiId = null; }
       askOpen = false;
       // O `/answer` TAMBÉM é guardado pelo 409 do painel de terminal (api.py, _recusa_se_painel_
@@ -2193,8 +2229,19 @@
       </div>
     </div>
   {:else}
+    {#snippet chatPlans()}
+      <SessionPlanPreview {sessionName} provider={sessionProvider ?? 'claude'} {desktop}
+        revision={`${events.length}:${currentState}`} {codexPlan}
+        disabled={currentState !== 'idle' || pending.length > 0}
+        onImplement={implementCodexPlan} />
+      {#if !askOpen && askPayload?.provider === 'codex'}
+        <button class="ghost-btn" onclick={() => { askOpen = true; }}>{m.ask_perguntas()}</button>
+      {/if}
+    {/snippet}
     <MessageList
       {events}
+      codex={sessionProvider === 'codex'}
+      footer={chatPlans}
       {stateEvent}
       {pending}
       {sessionName}
@@ -2292,6 +2339,8 @@
         onSend={handleSend}
         onSteer={sessionProvider === 'kimi' || sessionProvider === 'codex' ? steerAgora : undefined}
         codexMode={stateEvent?.codex_mode}
+        claudePermissionMode={stateEvent?.claude_permission_mode}
+        claudePreviousNonPlan={stateEvent?.claude_previous_non_plan}
         {filaCount}
         onCommand={handleCommand}
         onInterrupt={handleInterrupt}

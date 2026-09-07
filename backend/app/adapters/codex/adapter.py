@@ -657,6 +657,23 @@ class CodexAdapter:
     def state_monitor(self, name: str, sid_get: Callable[[], str]) -> AsyncIterator[StateEvent]:
         return self._state_stream(name)
 
+    def _question_state(self, name: str, sess: dict) -> StateEvent:
+        from .questions import pending
+        question = pending(sess["client"], sess["thread_id"])
+        return StateEvent(session=name, state="awaiting_input" if question else sess["state"],
+                          status_line=self._status_line(sess), codex_mode=sess.get("mode"),
+                          codex_question=question)
+
+    async def answer_questions(self, name: str, request_id: int | str | None, answers: list[dict]) -> None:
+        from .questions import pending, response
+        client = await self.ensure_running(name)
+        if client is None:
+            raise ValueError("A sessão não está disponível.")
+        question = pending(client, self._sessions[name]["thread_id"])
+        if question is None or request_id != question["request_id"] or type(request_id) is not type(question["request_id"]):
+            raise ValueError("A pergunta já foi respondida ou cancelada.")
+        await client.respond(request_id, response(question, answers))
+
     async def _state_stream(self, name: str) -> AsyncIterator[StateEvent]:
         try:
             client = await self.ensure_running(name)
@@ -693,8 +710,7 @@ class CodexAdapter:
                 await self.read_settings(name)
             except Exception:
                 _log.warning("codex: não foi possível atualizar os controles de %s", name)
-            yield StateEvent(session=name, state=sess["state"], status_line=self._status_line(sess),
-                             codex_mode=sess.get("mode"))
+            yield self._question_state(name, sess)
             while True:
                 ev = await fila.get()
                 if ev is None:
@@ -820,7 +836,8 @@ class CodexAdapter:
                 sess["token_usage"] = mapped.token_usage
             if mapped.rate_limits is not None:
                 sess["rate_limits"] = mapped.rate_limits
-            if mapped.state is None and mapped.token_usage is None and mapped.rate_limits is None and not settings_updated:
+            question_updated = method in ("item/tool/requestUserInput", "serverRequest/resolved")
+            if mapped.state is None and mapped.token_usage is None and mapped.rate_limits is None and not settings_updated and not question_updated:
                 # Neutro (method desconhecido) ou so preview_delta: StateEvent nao tem campo de
                 # preview -> nada a emitir aqui (o preview ja foi empurrado acima, fora do
                 # StateEvent -- efeito colateral adicional, nao substitui).
@@ -829,8 +846,7 @@ class CodexAdapter:
             # dict quente + token_usage/rate_limits guardados acima) -- nao so quando ESTE notif
             # trouxe token/limite novo, senao o front perderia contexto/limites em StateEvents de
             # working/idle puros (a maioria).
-            espalhar(StateEvent(session=name, state=sess["state"],
-                                status_line=self._status_line(sess), codex_mode=sess.get("mode")))
+            espalhar(self._question_state(name, sess))
         # notifications() terminou = EOF do app-server (o read loop empurra o sentinela ao morrer).
         # Dead-detection (backlog T4-m2): emite dead pra o front + limpa a sessao da memoria (o
         # sidecar duravel fica; ensure_running reabre num acesso futuro). getattr: um client FAKE de
@@ -913,6 +929,9 @@ class CodexAdapter:
         sess = self._sessions.get(name)
         if sess is None:
             return True
+        from .questions import pending
+        if pending(sess.get("client"), sess.get("thread_id", "")) is not None:
+            return False
         if not sess["in_progress"]:
             return True
         # O marcador do hook e uma fonte INDEPENDENTE do nosso estado em memoria, e quem o escreve e

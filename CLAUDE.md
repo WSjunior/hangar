@@ -228,6 +228,30 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
 
 ## Conventions & gotchas (read before touching UI / backend lifecycle)
 
+- **Revisão de código:** o CodeRabbit desta máquina é para repositórios da Promedico em
+  `gitlab.pmedico.dev`. Não o executar neste repositório GitHub; usar revisão local e as
+  verificações do projeto.
+
+- **Planejamento no chat (07/09/2026):** `SessionModeControl` é o controle compartilhado de
+  Claude e Codex. Ele ocupa a linha inferior do compositor; quando os controles e seus rótulos
+  não cabem, passa para a primeira linha existente, sem acrescentar uma faixa vertical. A medida
+  considera o texto cortado pelo flex do celular, para não esconder o modelo só para acomodar o modo.
+  Shift+Tab percorre todos os modos disponíveis no Claude, como Alt+Shift+P; no Codex,
+  alterna Normal e Planejar. O monitor reaproveita a captura do pane para publicar o modo e lembrar
+  o último modo fora do planejamento por identidade de sessão. Sondas e trocas controladas
+  não deixam seus modos intermediários contaminarem essa memória.
+  Pedidos `item/tool/requestUserInput` do Codex têm identidade própria: JSON-RPC distingue
+  pedido de resposta pela presença de `method`, mesmo quando os IDs coincidem. O cliente
+  guarda pendências independentemente do SSE; `serverRequest/resolved` e o fim do turno
+  retiram a pergunta de todos os clientes. Fechar o formulário não responde ao servidor.
+  A confirmação de um `proposed_plan` é uma ação local da TUI, não um pedido JSON-RPC:
+  implementar muda para Normal e envia o pedido de implementação. Tags em linhas próprias
+  são retiradas da apresentação, preservando exemplos dentro de cercas de código.
+  O plano nativo do Claude usa `/plan-preview`, separado de `planprog`: escritas confirmadas
+  pela sessão identificam o arquivo. Um `slug` isolado não prova que existe plano, pois o
+  Claude também o grava em conversas comuns. A prévia busca o conteúdo atualizado ao abrir;
+  visualizar não aprova execução.
+
 - **Comentário explica o PORQUÊ, e é curto. A história medida mora AQUI, não no código.** Este
   arquivo é longo de propósito: é o lugar onde decisão medida, com data e número, sobrevive e é
   relida. O código não é. Lá vale a regra, não a arqueologia dela: se o comentário repete o que o
