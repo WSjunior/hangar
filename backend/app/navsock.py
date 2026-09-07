@@ -218,8 +218,12 @@ async def _aplicar_entrada(cdp: _Cdp, msg: dict, largura: int, altura: int) -> N
 async def _fluxo_de_quadros(cdp: _Cdp, ws: WebSocket, estado: dict) -> None:
     """Screencast enquanto o view compõe; print em laço quando ele não compõe."""
     await cdp.cmd("Page.enable")
-    await cdp.cmd("Page.startScreencast", {"format": "jpeg", "quality": 55,
-                                           "maxWidth": 1400, "maxHeight": 1400,
+    # O quadro sai no tamanho que a tela de quem olha aguenta, não no tamanho da página: mandar
+    # 1400px de largura pra um iPhone é pagar banda por pixel que a tela dele não mostra, e a conta
+    # é paga no túnel da VPS. `quality` 45 já é o suficiente pra ler texto nesse tamanho.
+    largura = int(estado.get("pedida") or 0) or 1400
+    await cdp.cmd("Page.startScreencast", {"format": "jpeg", "quality": 45,
+                                           "maxWidth": largura, "maxHeight": largura,
                                            "everyNthFrame": 1})
     ultimo_envio = 0.0
     while True:
@@ -297,6 +301,14 @@ async def _autorizado(ws: WebSocket) -> bool:
     return True
 
 
+def _largura_pedida(ws: WebSocket) -> int:
+    """Largura útil da tela de quem está olhando, em pixels de verdade. 0 = não disse."""
+    try:
+        return max(0, min(1400, int(ws.query_params.get("w", "0"))))
+    except ValueError:
+        return 0
+
+
 async def _url_atual(cdp: _Cdp, sc: dict) -> Optional[str]:
     try:
         r = await cdp.cmd("Runtime.evaluate", {"expression": "location.href",
@@ -322,7 +334,7 @@ async def nav_ws(ws: WebSocket, name: str) -> None:
         await ws.close(code=1008, reason="sessao sem navegador")
         return
     await ws.accept()
-    estado = {"w": 1280, "h": 800}
+    estado = {"w": 1280, "h": 800, "pedida": _largura_pedida(ws)}
     try:
         async with _Cdp(str(sc["targetId"])) as cdp:
             # A url do sidecar é a da última vez que o shell gravou; quem sabe a de agora é a

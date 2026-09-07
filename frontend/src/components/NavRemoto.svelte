@@ -10,6 +10,7 @@
   import { onDestroy } from 'svelte';
   import * as m from '../paraglide/messages';
   import { navUrl } from '../lib/navRemoto';
+  import SegmentedPicker from './SegmentedPicker.svelte';
 
   interface Props {
     sessionName: string;
@@ -164,10 +165,15 @@
 <div class="nr">
   <div class="nr-bar">
     <span class="nr-url" title={url}>{url || m.nav_remoto_sem_url()}</span>
-    <div class="nr-modos" role="group" aria-label={m.nav_remoto_layout()}>
-      <button class:sel={modo === 'desktop'} onclick={() => trocarModo('desktop')}>{m.nav_remoto_desktop()}</button>
-      <button class:sel={modo === 'mobile'} onclick={() => trocarModo('mobile')}>{m.nav_remoto_celular()}</button>
-    </div>
+    <SegmentedPicker
+      value={modo}
+      ariaLabel={m.nav_remoto_layout()}
+      options={[
+        { v: 'desktop', label: m.nav_remoto_desktop(), aria: m.nav_remoto_desktop() },
+        { v: 'mobile', label: m.nav_remoto_celular(), aria: m.nav_remoto_celular() },
+      ]}
+      onPick={trocarModo}
+    />
   </div>
 
   {#if erro}
@@ -222,13 +228,6 @@
     flex: 1; min-width: 0; font-size: var(--text-xs); color: var(--text-muted);
     font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
-  .nr-modos { display: inline-flex; background: var(--surface-raised); border-radius: var(--radius-md); }
-  .nr-modos button {
-    min-height: 0; height: 28px; padding: 0 var(--space-3); border: 0; background: transparent;
-    color: var(--text-secondary); font-size: var(--text-xs); border-radius: var(--radius-md);
-    cursor: pointer;
-  }
-  .nr-modos button.sel { background: var(--accent-dim); color: var(--accent); }
   .nr-tela {
     position: relative; width: 100%; overflow: hidden; touch-action: none;
     background: var(--surface-inset); border: 1px solid var(--border-subtle);

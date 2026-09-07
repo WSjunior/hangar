@@ -347,6 +347,14 @@
   const canSend = $derived(hasInput && !uploading && !sending && !recording && !transcribing);
   const isWorking = $derived(sessionState === 'working');
 
+  // Com os atalhos de volta na fileira de baixo, a aba pode não ter nada: sessão fora de repo, sem
+  // par, sem cache. Faixa vazia pendurada é pior que faixa ausente.
+  const temAba = $derived(
+    !!status?.repo || !!lastCache || status?.ctxPct != null
+    || !!onOpenPair || (isKimi && isWorking && filaCount > 0 && !!onSteer)
+    || (shellsRodando > 0 && !!onOpenActivity),
+  );
+
   // ── Contagem regressiva do maos-livres: 3s antes do envio automatico ────────
   // Segundos restantes, ou null = sem contagem. $state porque aparece no template (mesmo padrao
   // de recError/recSeconds).
@@ -1581,20 +1589,9 @@
        fileira de dentro mudou pra cá: atalhos e estado da sessão à esquerda, o que só se lê (repo,
        branch, prazo do cache, contexto) à direita. Dentro do card ficam texto e controles do envio,
        que é o que a pessoa usa a cada mensagem. -->
+  {#if temAba}
   <div class="status-tab">
     <div class="tab-left">
-      {#if !isCodex}
-        <button class="slash-btn" onclick={() => (commandSheetOpen = true)} aria-label={m.comandos_titulo()}>
-          <span class="slash-glyph" aria-hidden="true">/</span>
-        </button>
-      {/if}
-      {#if !desktop.atual}
-        <!-- Túnel de porta: só no celular. No desktop quem faz isso é a aba Navegador do painel de
-             contexto, que abre a porta local direto — dois botões pra mesma coisa, um deles pior. -->
-        <button class="slash-btn" onclick={onOpenPreview} aria-label={m.composer_preview_rodando()}>
-          <IconMonitor size={17} />
-        </button>
-      {/if}
       {#if onOpenPair}
         {@const pairLabel = pairPeers?.length === 1 ? pairPeers[0]
           : pairPeers?.length ? `grupo (${pairPeers.length + 1})` : null}
@@ -1611,11 +1608,6 @@
             {/if}
           {/if}
         </button>
-        {#if onOpenOrq}
-          <button class="repo-chip" title={m.orqcfg_titulo()} onclick={onOpenOrq} aria-label={m.orqcfg_titulo()}>
-            <span class="repo-glyph" aria-hidden="true">🎛</span>
-          </button>
-        {/if}
         {#if pairPeers?.length && onToggleSendToPair}
           <!-- "Mandar pro grupo": prompt vai pra esta sessão E pros membros (broadcast). Aceso = ativo. -->
           <button class="repo-chip both-chip" class:both-chip--on={sendToPair}
@@ -1683,6 +1675,7 @@
       {/if}
     </div>
   </div>
+  {/if}
   <!-- O card precisa delegar foco para a textarea em areas vazias, mas contem varios botoes:
        nao pode virar button/role=button sem aninhar controles interativos. -->
   <div class="composer-card" class:arrastando role="button" tabindex="-1" onclick={focusInput} onkeydown={focusInput}
@@ -1807,6 +1800,26 @@
 
     <div class="control-row">
       <div class="control-left">
+        <!-- Atalhos: abrem outra tela e existem sempre. Ficam aqui, e não na aba de cima, que é
+             para o ESTADO da sessão — juntos, os dois grupos espremiam oito itens numa faixa de
+             390px no celular. -->
+        {#if !isCodex}
+          <button class="slash-btn" onclick={() => (commandSheetOpen = true)} aria-label={m.comandos_titulo()}>
+            <span class="slash-glyph" aria-hidden="true">/</span>
+          </button>
+        {/if}
+        {#if !desktop.atual}
+          <!-- Túnel de porta: só no celular. No desktop quem faz isso é a aba Navegador do painel
+               de contexto, que abre a porta local direto — dois botões pra mesma coisa. -->
+          <button class="slash-btn" onclick={onOpenPreview} aria-label={m.composer_preview_rodando()}>
+            <IconMonitor size={17} />
+          </button>
+        {/if}
+        {#if onOpenOrq}
+          <button class="slash-btn" title={m.orqcfg_titulo()} onclick={onOpenOrq} aria-label={m.orqcfg_titulo()}>
+            <span class="slash-glyph" aria-hidden="true">🎛</span>
+          </button>
+        {/if}
         <!-- "+" do celular (referência: app do Claude): anexo e estilo do ditado moram AQUI no
              mobile, não na fileira — com modelo+esforço+permissão+ações a fileira estourava e
              quebrava os controles. No desktop ele some e anexo/estilo ficam na fileira (CSS). -->
@@ -2280,8 +2293,6 @@
     padding-left: var(--space-2);
     flex-shrink: 0;
   }
-  /* Os botões vieram de dentro do card, onde havia 44px de altura; aqui a faixa tem 34. */
-  .status-tab .slash-btn { height: 26px; padding: 0 6px; }
 
   /* Card unico que reune status, textarea e controles. */
   .composer-card {
