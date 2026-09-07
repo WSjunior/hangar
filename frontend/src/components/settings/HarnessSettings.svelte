@@ -4,8 +4,13 @@
   // item fora do lugar que roda o conserto que já existe no servidor. Existe porque cada peça
   // dessas falha calada: sessão sem estado, skill que sumiu, CLI deslogado, e a pessoa só descobre
   // no meio do trabalho.
-  import { listarHarnesses, consertarHarness, type Harness, type ItemHarness } from '../../lib/credenciais';
+  import {
+    listarHarnesses, consertarHarness, codexIntegracaoEstado, codexIntegracaoReconciliar,
+    type Harness, type ItemHarness, type IntegracaoCodex, type MensagemCodex,
+  } from '../../lib/credenciais';
+  import { patchConfig, patchConfigForServer } from '../../lib/api';
   import * as m from '../../paraglide/messages';
+  import { getLocale } from '../../paraglide/runtime';
   import ProvedorIcone from '../icons/ProvedorIcone.svelte';
   import type { Server } from '../../lib/auth';
 
@@ -17,6 +22,94 @@
   let erro = $state('');
   let consertando = $state<string | null>(null);
   let feito = $state('');
+  let integracao = $state<IntegracaoCodex | null>(null);
+  let erroIntegracao = $state('');
+  let reconciliando = $state(false);
+  let integracaoOcupada = $derived(reconciliando || (integracao?.estado === 'executando' && !erroIntegracao));
+  interface ConsultaIntegracao {
+    alvo: Server | null;
+    controle: AbortController;
+    timer?: ReturnType<typeof setTimeout>;
+    requisicao: number;
+  }
+  let consulta: ConsultaIntegracao | null = null;
+
+  async function consultarIntegracao(ctx: ConsultaIntegracao, reconciliar = false) {
+    if (ctx.timer) clearTimeout(ctx.timer);
+    const requisicao = ++ctx.requisicao;
+    if (reconciliar) reconciliando = true;
+    erroIntegracao = '';
+    try {
+      const estado = await (reconciliar ? codexIntegracaoReconciliar : codexIntegracaoEstado)(ctx.alvo, ctx.controle.signal);
+      if (ctx.controle.signal.aborted || requisicao !== ctx.requisicao) return;
+      integracao = estado;
+      if (estado.estado === 'executando') {
+        ctx.timer = setTimeout(() => { void consultarIntegracao(ctx); }, 1500);
+      }
+    } catch (e) {
+      if (!ctx.controle.signal.aborted && requisicao === ctx.requisicao) {
+        erroIntegracao = e instanceof Error ? e.message : String(e);
+      }
+    } finally {
+      if (!ctx.controle.signal.aborted && requisicao === ctx.requisicao) reconciliando = false;
+    }
+  }
+
+  function reconciliarIntegracao() {
+    if (consulta && !integracaoOcupada) {
+      void consultarIntegracao(consulta, true);
+    }
+  }
+
+  let trocandoAutomatica = $state(false);
+  // O interruptor nunca muda sozinho: `checked` é o dado do servidor; o onchange repõe o dado,
+  // grava, e a releitura é quem muda a tela (regra das Máquinas, CLAUDE.md).
+  async function trocarAutomatica(ev: Event) {
+    const alvo = ev.currentTarget as HTMLInputElement;
+    const querido = alvo.checked;
+    alvo.checked = !querido;
+    // `consulta` é trocada pelo $effect quando o servidor muda; a gravação e a releitura são do
+    // contexto que existia no clique — trocar de servidor no meio não pode reconsultar o outro.
+    const ctx = consulta;
+    if (!ctx || trocandoAutomatica) return;
+    trocandoAutomatica = true;
+    erroIntegracao = '';
+    try {
+      await (ctx.alvo ? patchConfigForServer(ctx.alvo, { codex_sync: querido })
+                      : patchConfig({ codex_sync: querido }));
+      if (consulta === ctx) await consultarIntegracao(ctx);
+    } catch (e) {
+      if (consulta === ctx) erroIntegracao = e instanceof Error ? e.message : String(e);
+    } finally {
+      trocandoAutomatica = false;
+    }
+  }
+
+  function atualizar() {
+    void carregar();
+    if (consulta && !reconciliando) void consultarIntegracao(consulta);
+  }
+
+  // Mensagem da integração: código do backend → frase daqui (harness_codex_m_<codigo>); código que
+  // este app não conhece mostra o `texto` em pt em vez de sumir.
+  function textoDe(msg: MensagemCodex | null | undefined): string {
+    if (!msg) return '';
+    if (typeof msg === 'string') return msg;
+    const fn = msg.codigo ? (m as Record<string, unknown>)[`harness_codex_m_${msg.codigo}`] : undefined;
+    return typeof fn === 'function' ? (fn as (p: Record<string, string>) => string)(msg.params ?? {}) : msg.texto;
+  }
+
+  const ESTADOS_INTEGRACAO: Record<IntegracaoCodex['estado'], () => string> = {
+    ocioso: m.harness_codex_ocioso, executando: m.harness_codex_executando,
+    ok: m.harness_codex_ok, parcial: m.harness_codex_parcial,
+    erro: m.harness_codex_erro, indisponivel: m.harness_codex_indisponivel,
+  };
+
+  function dataIntegracao(valor: string | null): string {
+    if (!valor) return m.harness_codex_nunca();
+    const data = new Date(valor);
+    return Number.isNaN(data.getTime()) ? valor : data.toLocaleString(getLocale());
+  }
 
   // Alvo capturado na chamada e resposta descartada se ele mudou: trocar de servidor com a
   // requisição em voo não pode pintar a lista da máquina errada.
@@ -44,10 +137,24 @@
       lista = r.harnesses;
       feito = r.feito;
     } catch (e) { if (g === ger) erro = e instanceof Error ? e.message : String(e); }
-    finally { consertando = null; }
+    finally { if (g === ger) consertando = null; }
   }
 
-  $effect(() => { void apiTarget; void carregar(); });
+  $effect(() => {
+    const ctx: ConsultaIntegracao = { alvo: apiTarget, controle: new AbortController(), requisicao: 0 };
+    consulta = ctx;
+    lista = []; feito = ''; consertando = null;
+    integracao = null; erroIntegracao = ''; reconciliando = false;
+    void carregar();
+    void consultarIntegracao(ctx);
+    return () => {
+      // Nem uma resposta atrasada nem o próximo poll podem atravessar a troca de servidor.
+      ++ger;
+      ctx.controle.abort();
+      if (ctx.timer) clearTimeout(ctx.timer);
+      consulta = null;
+    };
+  });
 
   // O código vem do servidor; a frase é daqui. Código desconhecido (backend mais novo que o app)
   // aparece cru em vez de sumir — sumir esconderia justamente o item que mudou.
@@ -112,7 +219,7 @@
 <div class="hs">
   <div class="hs-cab">
     <p class="st-secao hs-titulo">{m.harness_titulo()}</p>
-    <button type="button" class="hs-refresh" onclick={carregar} disabled={carregando}
+    <button type="button" class="hs-refresh" onclick={atualizar} disabled={carregando || consertando !== null}
       aria-label={m.arq_recarregar()}>{carregando ? '…' : '↻'}</button>
   </div>
   <p class="hs-leg">{m.harness_legenda()}</p>
@@ -142,6 +249,51 @@
           {/if}
         </div>
       {/each}
+      {#if h.id === 'codex'}
+        <div class="hs-integracao">
+          <div class="hs-item hs-integracao-cab">
+            <span class="hs-item-txt"><b>{m.harness_codex_integracao()}</b></span>
+            <button type="button" class="hs-btn" onclick={reconciliarIntegracao}
+              disabled={integracaoOcupada}
+              >{integracaoOcupada ? m.harness_codex_executando() : m.harness_codex_reconciliar()}</button>
+          </div>
+          {#if integracao}
+            <label class="hs-item hs-automatica">
+              <span class="hs-item-txt">
+                <b>{m.harness_codex_automatica()}</b>
+                <span class="hs-ajuda">{m.harness_codex_automatica_ajuda()}</span>
+              </span>
+              <input type="checkbox" class="switch" checked={integracao.automatica}
+                disabled={trocandoAutomatica} onchange={trocarAutomatica} />
+            </label>
+            <p class="hs-aviso" role="status">
+              {ESTADOS_INTEGRACAO[integracao.estado]?.() ?? integracao.estado}
+              {#if textoDe(integracao.etapa)} · {textoDe(integracao.etapa)}{/if}
+            </p>
+            <p class="hs-aviso">{m.harness_codex_ultima({ data: dataIntegracao(integracao.ultima_execucao) })}</p>
+            {#if integracao.proxima_atualizacao}
+              <p class="hs-aviso">{m.harness_codex_proxima({ data: dataIntegracao(integracao.proxima_atualizacao) })}</p>
+            {/if}
+            <p class="hs-aviso">{m.harness_codex_plugins({ n: integracao.plugins.length })}</p>
+            {#if integracao.skills}
+              <p class="hs-aviso">{m.harness_codex_skills({ ponte: integracao.skills.ponte, nativas: integracao.skills.nativas })}</p>
+            {/if}
+            {#if integracao.plugins.length}
+              <ul class="hs-plugins">
+                {#each integracao.plugins as plugin}
+                  <li><b>{plugin.id}</b> · {plugin.versao} · {plugin.origem}</li>
+                {/each}
+              </ul>
+            {/if}
+            {#if integracao.confianca_pendente}
+              <p class="hs-aviso" role="status">{m.harness_codex_confianca()}</p>
+            {/if}
+            {#each integracao.avisos as aviso}<p class="hs-aviso">{textoDe(aviso)}</p>{/each}
+            {#each integracao.erros as falha}<p class="hs-aviso erro" role="alert">{textoDe(falha)}</p>{/each}
+          {/if}
+          {#if erroIntegracao}<p class="hs-aviso erro" role="alert">{erroIntegracao}</p>{/if}
+        </div>
+      {/if}
     </div>
   {/each}
 
@@ -173,9 +325,15 @@
   .hs-marca.ruim { color: var(--error); }
   .hs-item-txt { flex: 1; min-width: 0; color: var(--text-secondary); overflow-wrap: anywhere; }
   .hs-item-txt b { color: var(--text-primary); font-weight: 600; }
+  .hs-automatica { cursor: pointer; }
+  .hs-ajuda { display: block; font-size: var(--text-xs); color: var(--text-muted); }
   .hs-btn { flex-shrink: 0; min-height: 0; height: 26px; padding: 0 var(--space-2);
             font-size: var(--text-xs); border-radius: var(--radius-sm);
             background: var(--surface-raised); border: 1px solid var(--border-subtle); color: var(--text-primary); }
   .hs-aviso { margin: var(--space-2) 0 0; font-size: var(--text-xs); color: var(--text-secondary); }
   .hs-aviso.erro { color: var(--error); }
+  .hs-integracao { border-top: 1px solid var(--border-subtle); margin-top: var(--space-2); padding-top: var(--space-1); }
+  .hs-integracao-cab { flex-wrap: wrap; }
+  .hs-integracao .hs-aviso, .hs-plugins { overflow-wrap: anywhere; }
+  .hs-plugins { margin: var(--space-1) 0 0; padding-left: var(--space-4); font-size: var(--text-xs); color: var(--text-secondary); }
 </style>

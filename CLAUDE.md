@@ -407,17 +407,18 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   `compositeFailed` de cada animação ao (re)iniciar. Depois do conserto: 3 eventos em 3 s e os
   renderers a ~9%.
 - **Ponte de skills (`app/skill_bridge.py`): o omp descobre sozinho as skills dos outros CLIs
-  (providers `claude`/`claude-plugins`/`agents`); pi, kimi e codex não — leem só as pastas da
+  (providers `claude`/`claude-plugins`/`agents`); Pi e Kimi leem as pastas da
   própria config.** Sem a ponte, cada um mantinha uma fazenda de symlinks à mão apontando pro
   cache VERSIONADO dos plugins (`plugins/cache/ecc/ecc/2.2.0/skills/...`): bump de versão =
   dezenas de links pendurados, calados (03/09/2026: 3 fazendas manuais, 99/119/157 links, todas
   com podres). A ponte varre as fontes (`~/.claude/skills`, `skills/` do repo, cache — só a
   versão MAIS NOVA de cada plugin —, marketplaces, `~/.agents/skills`), dedup por nome na ordem
   de precedência, e materializa symlinks nas pontes: pi → `~/.pi/agent/skills-bridge`, kimi →
-  `~/.kimi-code/skills-bridge`, codex → `~/.codex/skills`. Harness novo = uma linha em `TARGETS`;
-  o omp fica fora de propósito (descobre nativo). Regras duras: stdlib-only (o installer chama
+  `~/.kimi-code/skills-bridge`. Harness novo = uma linha em `TARGETS`;
+  o omp fica fora de propósito (descobre nativo), e o Codex tem reconciliador próprio desde
+  06/09/2026 (abaixo). Regras duras: stdlib-only (o installer chama
   com o python3 do sistema, regra do `engines.py`); **só mexe em symlink cujo alvo está numa
-  fonte conhecida** — arquivo real (o `.system` do codex) ou link à mão pra fora das fontes
+  fonte conhecida** — arquivo real do usuário ou link à mão pra fora das fontes
   nunca é tocado; config alheia (settings.json do pi, config.toml do kimi) é só CONFERIDA, com
   aviso quando a ponte não está na lista — nunca editada. Roda na subida do backend e no
   `install-claude-wrapper.sh` (precedente `migracao_sidecars`: atualizar é `git pull` + restart,
@@ -427,7 +428,110 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   do Pi — tinha uma poda própria, só de plugins, e apagava a cada largada do Pi os 67 links de
   skills pessoais/marketplace que a ponte criava (o Pi abria listando cada uma como "skill path
   does not exist", e o backend as recriava no restart seguinte: 67 criados, todo dia). Hoje esse
-  script cuida de persona, `hooks.json` do Codex e pacotes do Pi, e chama a ponte no fim.
+  script cuida da persona do Pi/Kimi e dos pacotes do Pi, e chama a ponte no fim. Ele não escreve
+  mais no Codex: nem hooks, nem persona, nem symlinks de skills.
+
+- **Integração nativa do Codex** (`app/codex_integracao.py`, `codex_importador.py`,
+  `codex_compat.py`, `codex_arquivos.py`, 06/09/2026): o Hangar usa o importador oficial
+  `externalAgentConfig/detect` + `import` e espera a notificação `import/completed` com o mesmo
+  `importId`. Plugins e marketplaces usam os comandos nativos do CLI; nenhum turno de agente é
+  aberto para sincronizar. Dois gatilhos, e só: a abertura de uma sessão Codex (o lançador chama
+  `POST /api/harness/codex/integracao/sessao` e espera até 20s) e o botão **Reconciliar agora**.
+  Sem laço e sem rodada na subida — decisão do usuário em 06/09/2026, no lugar da varredura das
+  pastas do Claude a cada 30s que veio no PR: **Codex converte, backend decide quando, lançador só
+  avisa.** A abertura é um cache por conteúdo (`precisa_reconciliar`): a assinatura das pastas do
+  Claude fica no `estado.json`; igual à última, marketplace dentro das 6h e última rodada sem
+  falha = o Codex nem é chamado (medido: 0,08s contra 1,0–1,3s da rodada vazia do PR). Falha só é
+  refeita 5 min depois, na abertura seguinte. A sincronização opcional do Codex Desktop é
+  independente e não é necessária. A documentação de arquitetura, migração e limites está em
+  [`docs/codex-integration.md`](docs/codex-integration.md).
+  O registro e os backups ficam em `~/.hangar/codex-integracao/<identidade>/`, separados por
+  `CODEX_HOME`; o lock em `CODEX_HOME/.hangar-integracao.lock` serializa os escritores do Hangar
+  mesmo quando seus valores de `HOME` diferem. `GET` do painel é só
+  leitura, `POST` inicia ou acompanha a operação existente (202). O painel consulta enquanto a
+  operação executa e descarta respostas ao trocar servidor/desmontar. **Nunca gravar confiança
+  para autoaprovar hooks**: normalizar RTK/`SessionEnd` pode invalidar aprovação, então o painel
+  e a TUI avisam. Instruções globais usam bloco gerenciado no `AGENTS.md`; fallbacks `CLAUDE.md`
+  e `CLAUDE.MD` são acrescentados à config sem substituir os já existentes.
+  `settings.env` entra pelo item nativo `CONFIG` em HOME temporário; somente
+  `shell_environment_policy.set` é mesclado por variável e registrado no manifesto. As políticas
+  de herança/filtros e as demais preferências do Codex permanecem intactas. Fonte inválida ou
+  conversão incompleta nunca significa remoção. Valores de tokens de ferramentas são locais e
+  não devem aparecer no painel, nos logs públicos ou no Git.
+  A suíte desliga apenas os gatilhos automáticos com `CP_CODEX_SYNC_ENABLED=0`; testes do serviço
+  usam diretórios temporários. Turnos reais do CLI 0.153.4 responderam exatamente `OK`, rc=0,
+  zero eventos de ferramentas, em Linux (6,08s) e Windows (6,82s), em 06/09/2026. Usaram
+  `HOME`/`CODEX_HOME` temporários com apenas `auth.json` copiado com autorização; cópias e
+  diretórios foram removidos e a limpeza confirmada. Windows usou CLI puro, e o Desktop do
+  usuário não foi alterado nem exercitado. Essa prova de resposta não valida execução dos
+  plugins/hooks importados: os turnos não usaram ferramentas.
+  **O que a revisão do PR #2 mudou, medido em 06/09/2026 com a importação real (CLI 0.153.4) sobre
+  uma cópia do layout desta máquina** — 9 plugins habilitados, 18 entradas no `hooks.json`,
+  `AGENTS.md` como link pro `CLAUDE.md`, 379 links de skills:
+  - **A conversão dos hooks do usuário é do Codex, não do Hangar.** O importador descarta o que
+    não conhece (`MessageDisplay` e `Notification` sumiram sozinhos) e copia cada script pra
+    `~/.codex/hooks/`. O Hangar só faz o que ele não faz: `codex_compat` (rtk, `SessionEnd` ≤ 3s,
+    bloco do `AGENTS.md`), a ponte de skills pessoais e os plugins.
+  - **Os hooks do PRÓPRIO app não atravessam pelo importador** (`sem_hooks_do_app`): cada harness
+    recebe o `state_hook` pelo instalador dele — `codex_hook_installer.py` no Codex, irmão do do
+    Kimi —, e `adapters/codex/adapter.py` lê esse marcador como segunda fonte de "turno fechou",
+    então ele precisa existir mesmo com a integração desligada. Sem o filtro, `askq_capture`,
+    `preview_hook`, `pair_hook`, `nav_hook` e `subagent_hook` (que só entendem o stdin do Claude)
+    iam junto. O instalador só ACRESCENTA: reescrever o comando muda o hook, e hook alterado é
+    hook não aprovado no Codex.
+  - **A primeira rodada adota o que o instalador antigo escreveu** (`_migrar_ponte_antiga`): o
+    espelho `~/.codex/.hangar-hooks.json` é o registro exato do que `install-skills-bridge.sh`
+    gravava, então ele diz o que sai, sem chute. Sem isso a máquina ficava com cada hook em
+    dobro — 18 entradas viraram 37 na primeira rodada (a antiga em `~/.claude/hooks/` e a cópia
+    nova em `~/.codex/hooks/`), `sync-skills.sh &` e `state_hook` 2× por evento. Depois: 17 (11
+    do usuário + 5 de estado + rtk), segunda rodada em 1,0s sem reescrever nada. O instalador da
+    subida já rodou quando a migração tira a entrada antiga, por isso ela reinstala na hora.
+  - **O rtk embrulhado reusa o interpretador e o wrapper já gravados** (`wrapper_instalado`):
+    `sys.executable` + o checkout de quem reconciliou reescreviam o comando a cada backend
+    subindo de outra árvore (medido: worktree `.worktrees/pr2` no `hooks.json`), e cada
+    reescrita invalida a aprovação.
+  - **`AGENTS.md` como link pro `CLAUDE.md` vira arquivo com o bloco** — decisão do usuário: o
+    Codex lê o `CLAUDE.md` pela instrução, e o `CLAUDE.md` nunca fica cristalizado numa cópia.
+    Custo: as instruções globais deixam de estar no contexto desde o primeiro token.
+  - **O gatilho de sessão nasce ligado, com interruptor na tela e sob o kill-switch**
+    (`sincronizacao_ligada`): `codex_sync` no `runtime-config` (card do Codex em Harnesses) +
+    `automations_enabled()` + `CP_CODEX_SYNC_ENABLED` (desligamento duro, o da suíte). O botão
+    "Reconciliar agora" não passa por nenhum dos três.
+  - **Quem reconcilia é o backend; o lançador da TUI pede, espera até 20s e abre** (o PR fazia o
+    lançador reconciliar sozinho, esperando o lock sem prazo — com uma instalação de plugins de
+    65–103s o pane ficava minutos parado, e um teto que cancelasse a rodada nunca a deixaria
+    terminar). Um executor só, e a instalação longa termina no backend.
+  - **`~/.agents/skills` não é do Codex** (`codex_skills._duplicata_nativa`): é fonte do Pi, do
+    Kimi e do omp, e o Codex a lê sozinho. A dedupe do PR apagava dali qualquer cópia idêntica à
+    fonte do Claude, com ou sem plugin nativo envolvido — nesta máquina são 11 skills pessoais que
+    existem nos dois lugares, e sumiriam dos outros três harnesses, caladas. Regra: skill que já
+    está em `~/.agents/skills` não ganha link na ponte (o Codex já a vê); a dedupe só roda com
+    plugin nativo confirmado e só retira o que o manifesto diz que o Hangar mesmo pôs lá; cópia
+    pessoal fica, com aviso. Medido na cópia fiel desta máquina: a ponte vai de 375 links pra
+    42 (só o que não vem de plugin nem de `~/.agents/skills`), 333 nativas, os 11 de
+    `~/.agents/skills` intactos e sem link, zero avisos.
+  - **Erro fora dos três tipos esperados deixava o estado preso em "executando"**: `hooks/list`
+    num formato inesperado dava `AttributeError`, escapava do `except`, e o botão ficava cinza e o
+    lançador esperava 20s a cada sessão até reiniciar o backend. Hoje qualquer exceção vira
+    "erro" (detalhe só no log) e o formato do `hooks/list` é conferido antes de percorrer.
+  - **Um `.md` que o Codex não reconhece não derruba a etapa** (medido no CLI 0.153.4: o
+    detector aceita qualquer `.md` em `commands/`, inclusive sem frontmatter e em subpasta, mas um
+    `README.md` em `agents/` fica de fora). O PR abortava hooks, env, MCPs e agentes inteiros quando
+    a contagem não batia, toda rodada. Hoje o arquivo não reconhecido entra num aviso, é ignorado,
+    e o artefato que já existia com aquele nome não é podado.
+  - **Mensagem pra tela é código + parâmetros** (`app/codex_msgs.py`, `CATALOGO`; o front traduz
+    por `harness_codex_m_<codigo>`). Uma `Mensagem` É uma `str` — log, lançador e testes seguem
+    lendo o texto —, e `status()` a serializa em `{codigo, params, texto}`; código que o app não
+    conhece cai no `texto`. Armadilha medida: `copy.deepcopy` numa `str` com `__new__` próprio
+    reconstrói pelo VALOR (`KeyError: 'Concluído'`), daí o `__reduce__`/`__deepcopy__`.
+  - `AbortSignal.any` só existe do Safari 17.4 em diante (`credenciais.ts:comTeto`); sem o
+    fallback, um iPhone mais velho derrubava toda chamada de credenciais/harness.
+  - O card mostra `skills: N na ponte, M nativas` do manifesto, no lugar do item "ponte de skills"
+    que o PR tirou — sem isso, com a sincronização desligada ninguém via as skills paradas.
+  - `settings.env` vai inteiro pro `shell_environment_policy.set` — as 16 variáveis desta
+    máquina, 6 delas tokens (Grafana, Jira, Jenkins, Outline, ElevenLabs), também no
+    `estado.json` do manifesto (0600). É o comportamento do importador nativo; o que o Hangar
+    acrescenta é fazê-lo sozinho, daí o interruptor.
 
 - **Loop runner** (`app/loop.py` + `components/LoopSheet.svelte`): loop autônomo por sessão —
   goal → sessão trabalha → idle dispara tick (`_on_hook_transition`, dentro do `_work`, só com
@@ -976,6 +1080,7 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   cada CLI (auth.json+models.json do Pi, `auth_credentials` do omp, `providers` do Kimi,
   `model_providers`+login do Codex) com o que o app conhece (engines.json + cofre OAuth), no nome
   que AQUELE harness usa (`provedor_embutido_do_pi` pra Pi/omp, o nome do motor pros outros);
+  o card Codex tem uma seção própria de integração nativa e não oferece a ponte antiga de skills.
   "Sincronizar" reusa o `agentes_sync` e, no omp, grava a chave no mesmo SQLite do login. O Codex
   continua guardando só o nome da variável, e o resultado diz qual exportar. `instalado` é "binário no PATH OU pasta de
   config existe" porque o backend roda como serviço com PATH curto — só o binário dava "Kimi não

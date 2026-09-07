@@ -147,6 +147,9 @@ def main():
     # Idem pro hook do Kimi (config.toml do ~/.kimi-code) — ver app/kimi_hook_installer.py.
     from app.kimi_hook_installer import ensure_kimi_hooks_installed
     ensure_kimi_hooks_installed()
+    # E pro Codex (hooks.json do ~/.codex) — ver app/codex_hook_installer.py.
+    from app.codex_hook_installer import ensure_codex_state_hook_installed
+    ensure_codex_state_hook_installed()
     # Endereço pra extensão do Pi ligar de volta (ver pi_inbox.escrever_endpoint).
     escrever_endpoint()
     hook_state.load_existing(_state_dirs)

@@ -267,6 +267,7 @@ async def _lifespan(app: FastAPI):
     # threads (Timer da confirmacao, gatilho de hook). Ver `_drenar`.
     global _loop_servidor
     _loop_servidor = asyncio.get_running_loop()
+    from app.codex_integracao import SERVICO as integracao_codex
     omp_sync = PluginSyncLoop(
         PluginSynchronizer(home=Path.home(), claude_dir=_backend_config_base()),
         enabled=settings.omp_plugin_sync_enabled,
@@ -278,6 +279,10 @@ async def _lifespan(app: FastAPI):
     try:
         yield
     finally:
+        try:
+            await integracao_codex.fechar()
+        except Exception:
+            _log.exception("Falha ao encerrar a integração Codex")
         task.cancel()
         stall_task.cancel()
         prune_task.cancel()

@@ -5,11 +5,32 @@ import subprocess
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app import contas, harness_saude
+from app import codex_integracao, contas, harness_saude
 from app.auth import require_auth
 from app.mensagens import erro
 
 harness_router = APIRouter(prefix="/api/harness")
+
+
+def _com_interruptor(estado: dict) -> dict:
+    from app import runtime_config
+    return {**estado, "automatica": bool(runtime_config.get("codex_sync"))}
+
+
+@harness_router.get("/codex/integracao", dependencies=[Depends(require_auth)])
+async def integracao_codex_status() -> dict:
+    return _com_interruptor(codex_integracao.SERVICO.status())
+
+
+@harness_router.post("/codex/integracao", status_code=202, dependencies=[Depends(require_auth)])
+async def integracao_codex_reconciliar() -> dict:
+    return _com_interruptor(await codex_integracao.SERVICO.iniciar(motivo="manual", forcar=True))
+
+
+@harness_router.post("/codex/integracao/sessao", status_code=202, dependencies=[Depends(require_auth)])
+async def integracao_codex_sessao() -> dict:
+    """Gatilho do lançador da TUI: só reconcilia se a fonte mudou; devolve na hora e o lançador consulta."""
+    return _com_interruptor(await codex_integracao.SERVICO.sessao())
 
 
 @harness_router.get("", dependencies=[Depends(require_auth)])

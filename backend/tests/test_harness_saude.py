@@ -107,6 +107,17 @@ def test_hooks_do_claude_faltando_apontam_o_conserto(tmp_path):
     assert h._hooks_claude(tmp_path)["ok"] is None
 
 
+def test_codex_nao_oferece_a_ponte_antiga_no_painel(tmp_path, monkeypatch):
+    (tmp_path / ".codex").mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(h, "list_config_dirs", lambda: [])
+    monkeypatch.setattr(h, "_versao", lambda cli: "0.153.4" if cli == "codex" else None)
+    codex = next(item for item in h.diagnosticar() if item["id"] == "codex")
+    assert codex["instalado"] is True
+    assert {item["id"] for item in codex["itens"]} == {"credenciais", "hooks", "mcp", "modelo"}
+    assert all(item["codigo"] != "sem_ponte" and item["conserto"] != "skills" for item in codex["itens"])
+
+
 def test_omp_nao_oferece_fullscreen(tmp_path, monkeypatch):
     # A conversa do omp mora no scrollback do terminal por desenho (renderizador nunca consulta a
     # posicao de rolagem; issue #10232). Em alternate screen ela some, e a roda vira seta =

@@ -1,8 +1,8 @@
 """O espelho de ferramental (`scripts/install-skills-bridge.sh`) sobre um HOME falso.
 
 O script inteiro lê `~` via `expanduser`, então dar-lhe um HOME de mentira é o seam. O que ele
-faz hoje: persona (CLAUDE.md como AGENTS.md/CLAUDE.md), `hooks.json` do Codex e os pacotes do Pi
-— e no fim chama a `backend/app/skill_bridge.py`, que é a ÚNICA dona das pastas de skills. Ele
+faz hoje: persona (CLAUDE.md como AGENTS.md/CLAUDE.md) e os pacotes do Pi
+— e no fim chama a `backend/app/skill_bridge.py`, dona das pontes de skills do Pi e Kimi. Ele
 próprio não cria nem apaga link de skill: com dois donos, a poda de um desfazia o outro a cada
 largada do Pi (67 skills sumindo, listadas como "skill path does not exist").
 """
@@ -31,11 +31,14 @@ def _skill(raiz: Path, nome: str) -> None:
 
 
 def _home(tmp_path: Path) -> Path:
-    """HOME falso com um plugin habilitado no cache e o Codex 'instalado'."""
+    """HOME falso com um plugin habilitado e os três agentes instalados."""
     home = tmp_path / "home"
     claude = home / ".claude"
     (claude / "plugins").mkdir(parents=True)
     (home / ".codex").mkdir()  # a raiz é o que decide que o agente está instalado
+    (home / ".pi" / "agent").mkdir(parents=True)
+    (home / ".kimi-code").mkdir()
+    (claude / "CLAUDE.md").write_text("Instruções compartilhadas\n", encoding="utf-8")
     (claude / "settings.json").write_text(
         json.dumps({"enabledPlugins": {"p@m": True}}), encoding="utf-8")
     alvo = claude / "plugins" / "cache" / "m" / "p" / "v1"
@@ -52,28 +55,22 @@ def _rodar(home: Path) -> str:
     return r.stdout
 
 
-def test_hook_de_estado_do_app_entra_no_hooks_json_do_codex(tmp_path):
-    """O estado ao vivo da sessão Codex vem do marcador que este hook grava, e o dono do arquivo é
-    o INSTALADOR: o comando carrega o caminho do venv deste checkout, então recriar venv, mover o
-    repo ou subir de outra worktree mudaria o arquivo — e hook alterado é hook não aprovado, que
-    não roda e não avisa. Escrevendo aqui, o arquivo só muda num momento explícito."""
+def test_instalador_preserva_codex_para_o_reconciliador(tmp_path):
     home = _home(tmp_path)
+    codex = home / ".codex"
+    existentes = {"hooks.json": '{"hooks": {}}\n', "AGENTS.md": "Instruções próprias\n",
+                  ".hangar-hooks.json": '{"anterior": true}\n'}
+    for nome, texto in existentes.items():
+        (codex / nome).write_text(texto, encoding="utf-8")
     _rodar(home)
-    cfg = json.loads((home / ".codex" / "hooks.json").read_text(encoding="utf-8"))
-    eventos = cfg["hooks"]
-    for ev in ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"):
-        comandos = [e["command"] for g in eventos.get(ev, []) for e in g["hooks"]]
-        assert any("state_hook.py" in c for c in comandos), f"sem hook de estado em {ev}"
-    # `Notification` não existe no Codex — escrevê-lo seria hook que nunca roda, que é pior que
-    # hook ausente (parece ligado).
-    assert "Notification" not in eventos
+    assert {p.name: p.read_text(encoding="utf-8") for p in codex.iterdir()} == existentes
 
 
 def test_skills_vem_da_skill_bridge_e_o_script_nao_poda(tmp_path):
     """A pasta de skills é da skill_bridge.py: o script cria a skill do plugin por ela e deixa em
     paz um link que não é de nenhuma fonte dela (o caso dos 67 apagados)."""
     home = _home(tmp_path)
-    ponte = home / ".codex" / "skills"
+    ponte = home / ".pi" / "agent" / "skills-bridge"
     ponte.mkdir(parents=True)
     (ponte / "de-terceiro").symlink_to(home / "outro-lugar" / "skill")
     _rodar(home)
@@ -112,17 +109,27 @@ def test_filtro_nao_mexe_em_decisao_ja_dada_nem_em_saida_vazia():
     assert _filtrar("texto que nao e json\n") == "texto que nao e json\n"
 
 
-def test_hooks_json_do_codex_passa_o_rtk_pelo_filtro(tmp_path):
+def test_persona_e_pacotes_do_pi_seguem_idempotentes(tmp_path):
     home = _home(tmp_path)
-    settings = home / ".claude" / "settings.json"
-    cfg = json.loads(settings.read_text(encoding="utf-8"))
-    cfg["hooks"] = {"PreToolUse": [
-        {"matcher": "Bash", "hooks": [{"type": "command", "command": "rtk hook claude"}]},
-        {"matcher": "Bash", "hooks": [{"type": "command", "command": "/x/guard.sh"}]},
-    ]}
-    settings.write_text(json.dumps(cfg), encoding="utf-8")
+    installed = home / ".claude" / "plugins" / "installed_plugins.json"
+    cfg = json.loads(installed.read_text(encoding="utf-8"))
+    cfg["plugins"]["superpowers@claude-plugins-official"] = cfg["plugins"]["p@m"]
+    installed.write_text(json.dumps(cfg), encoding="utf-8")
     _rodar(home)
-    hooks = json.loads((home / ".codex" / "hooks.json").read_text(encoding="utf-8"))["hooks"]
-    comandos = [e["command"] for g in hooks["PreToolUse"] for e in g["hooks"]]
-    assert f"rtk hook claude | python3 {FILTRO}" in comandos
-    assert "/x/guard.sh" in comandos   # so o rtk e embrulhado: rc=2 (deny) de outro hook sobrevive
+    _rodar(home)
+    persona = home / ".claude" / "CLAUDE.md"
+    assert (home / ".pi/agent/CLAUDE.md").resolve() == persona
+    assert (home / ".kimi-code/AGENTS.md").resolve() == persona
+    assert (home / ".kimi-code/skills-bridge/uma-skill").is_symlink()
+    assert (home / ".pi/agent/packages/superpowers").resolve() == Path(cfg["plugins"]["p@m"][0]["installPath"])
+    assert list((home / ".codex").iterdir()) == []
+
+
+def test_persona_real_do_usuario_e_preservada(tmp_path):
+    home = _home(tmp_path)
+    propria = home / ".kimi-code/AGENTS.md"
+    propria.write_text("Minha persona", encoding="utf-8")
+    saida = _rodar(home)
+    assert propria.read_text(encoding="utf-8") == "Minha persona"
+    assert not propria.is_symlink()
+    assert "já existe como arquivo de verdade" in saida

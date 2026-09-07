@@ -1568,7 +1568,7 @@ class SessionRegistry:
         # quem materializa as skills do Claude la e a ponte, e ela era refeita apenas na subida do
         # backend — instalar uma skill exigia reiniciar o servico. Claude e omp ficam de fora
         # porque os dois descobrem as fontes sozinhos. Fail-soft: criar sessao nunca depende disto.
-        if provider in ("pi", "kimi", "codex"):
+        if provider in ("pi", "kimi"):
             try:
                 from app import skill_bridge
                 # Silencioso no caso comum (nada mudou) e falante quando MEXEU: sem a segunda
