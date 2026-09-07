@@ -187,8 +187,28 @@ def normalizar_hooks(config: dict, python_bin: str, wrapper: Path, *, windows: b
     return novo
 
 
-def texto_instrucoes(atual: str, claude_home: Path) -> str:
-    """Mantém um único bloco no início e preserva o restante das instruções."""
+def normalizar_security_guidance(config: dict, python_bin: str, wrapper: Path, *, windows: bool = False) -> dict:
+    """Somente o plugin confirmado pelo chamador emite este protocolo de telemetria."""
+    novo = deepcopy(config)
+    split = _split_windows if windows else shlex.split
+    for grupos in novo.get("hooks", {}).values():
+        for grupo in grupos:
+            for hook in grupo.get("hooks", []):
+                command = hook.get("command")
+                if hook.get("type") != "command" or not isinstance(command, str):
+                    continue
+                try:
+                    args = split(command)
+                except ValueError:
+                    args = []
+                if len(args) == 4 and _nome_binario(args[1]) == wrapper.name and args[2] == "--":
+                    continue
+                hook["command"] = _comando([python_bin, str(wrapper), "--", command], windows=windows)
+    return novo
+
+
+def remover_instrucao_de_leitura(atual: str) -> str:
+    """Remove a antiga ordem de leitura, preservando as instruções pessoais."""
     restante = atual
     while INICIO_INSTRUCOES in restante or FIM_INSTRUCOES in restante:
         inicio = restante.find(INICIO_INSTRUCOES)
@@ -201,14 +221,4 @@ def texto_instrucoes(atual: str, claude_home: Path) -> str:
         if restante[fim:fim + 2] == "\n\n":
             fim += 2
         restante = restante[:inicio] + restante[fim:]
-    bloco = (
-        f"{INICIO_INSTRUCOES}\n"
-        "Antes de trabalhar, leia e siga as instruções globais em "
-        f"`{claude_home / 'CLAUDE.md'}`.\n"
-        "Em cada projeto, leia também os arquivos `CLAUDE.md` e `CLAUDE.MD` aplicáveis "
-        "na raiz e nos subdiretórios em que for trabalhar, respeitando o escopo de cada arquivo. "
-        "Essa leitura é obrigatória mesmo quando houver um `AGENTS.md`; suas instruções "
-        "devem ser consideradas em conjunto.\n"
-        f"{FIM_INSTRUCOES}\n\n"
-    )
-    return bloco + restante
+    return restante

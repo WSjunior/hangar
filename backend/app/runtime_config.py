@@ -28,6 +28,7 @@ EDITAVEIS: dict[str, type] = {
     "stall_seconds": int,
     "automations": bool,           # kill-switch das automações desatendidas
     "codex_sync": bool,            # reconciliação automática do Codex (por cima do automations)
+    "claude_statusline_update": bool,  # permite ao instalador atualizar a barra do Claude Code
     "editor": str,
     "elevenlabs_api_key": str,     # sintese de voz (ouvir a selecao)
     "elevenlabs_voice_id": str,    # id da voz escolhida na conta

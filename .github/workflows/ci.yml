@@ -7,6 +7,20 @@ on:
   pull_request:
 
 jobs:
+  statusline:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test scripts/test-configure-statusline.cjs
+
   backend:
     runs-on: ubuntu-latest
     # So roda teste/build — nao escreve nada no repo. Declarado explicito pra nao herdar

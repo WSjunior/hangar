@@ -230,6 +230,18 @@ def main() -> int:
     sys.path.insert(0, str(_REPO / "backend"))
     from app.adapters.codex import sessions as codex_sessions
     from app.adapters.codex.lancador import APPROVAL, SANDBOX
+    from app.codex_instrucoes import LIMITE_INSTRUCOES, limite_instrucoes, preparar_instrucoes
+
+    # O cwd novo ainda pode não estar no config do Codex. O alias precisa existir antes do app-server.
+    # Falha (override pessoal, config.toml ilegível) não impede a TUI: fica sem alias e sem limite maior.
+    codex_home = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex')
+    limite = LIMITE_INSTRUCOES
+    try:
+        preparar_instrucoes(Path.home(), codex_home, Path(cwd))
+        limite = limite_instrucoes(codex_home)
+    except Exception as exc:                          # noqa: BLE001
+        print(f"hangar-codex-tui: instruções nativas não preparadas ({exc}); a sessão abre assim mesmo",
+              file=sys.stderr)
 
     # A sessão lê a configuração já reconciliada; quem reconcilia é o BACKEND (um executor só, e
     # uma instalação longa termina lá) — aqui só se avisa e se espera um pouco. Falha não impede a TUI.
@@ -254,7 +266,7 @@ def main() -> int:
     # justamente a mensagem que explica uma largada que falhou.
     erros = tempfile.TemporaryFile()
     servidor = subprocess.Popen(
-        [_codex(), "app-server", "--listen", endpoint],
+        [_codex(), "app-server", "--listen", endpoint, "-c", f"project_doc_max_bytes={limite}"],
         stdout=subprocess.DEVNULL, stderr=erros,
     )
 

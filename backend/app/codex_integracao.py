@@ -22,7 +22,8 @@ from app.codex_arquivos import (
     AlteradoExternamente, backup, exclusivo, gravar, hash_bytes, json_bytes,
     json_obj, ler, mesclar_hooks, remapear, transformar,
 )
-from app.codex_compat import normalizar_hooks, texto_instrucoes, wrapper_instalado
+from app.codex_compat import normalizar_hooks, normalizar_security_guidance, remover_instrucao_de_leitura, wrapper_instalado
+from app.codex_instrucoes import limite_instrucoes, preparar_instrucoes
 from app.codex_importador import CodexNativo, CodexNativoErro
 from app.codex_msgs import msg, serializar
 
@@ -126,6 +127,21 @@ def _origem_marketplace(data: dict, *, claude: bool = False) -> tuple[str, str] 
         if host:
             return "git", f"{host.lower()}/{repo.rstrip('/').removesuffix('.git')}"
     return None
+
+
+def _identidade_plugin(id_: str, origem: tuple[str, str], mercados: dict, inventario: dict) -> str:
+    """O mesmo repositório pode declarar nomes distintos nos manifestos de cada harness."""
+    nome, mercado = id_.rsplit("@", 1)
+    if mercado in mercados:
+        if _origem_marketplace(mercados[mercado]) != origem:
+            raise ValueError("Marketplace homônimo de outra origem")
+        if id_ in inventario:
+            return id_
+    aliases = [p for p in inventario if p.rsplit("@", 1)[0] == nome and
+               _origem_marketplace(mercados.get(p.rsplit("@", 1)[1], {})) == origem]
+    if len(aliases) > 1:
+        raise ValueError("Mais de uma identidade nativa para o plugin")
+    return aliases[0] if aliases else id_
 
 
 class IntegracaoCodex:
@@ -310,13 +326,10 @@ class IntegracaoCodex:
         return self.status()
 
     def _instrucoes(self) -> None:
-        alvo = self.codex_home / "AGENTS.md"
-        globais = {(self.home / ".claude" / nome).resolve() for nome in ("CLAUDE.md", "CLAUDE.MD")}
-        def atualizar(raw):
-            # A ponte antiga era um link para a fonte; não cristaliza uma cópia desatualizada dela.
-            anterior = "" if alvo.is_symlink() and alvo.resolve() in globais else (raw or b"").decode()
-            return texto_instrucoes(anterior, self.home / ".claude").encode()
-        transformar(alvo, atualizar, self.backups)
+        preparar_instrucoes(self.home, self.codex_home)
+        alvo = self.codex_home / 'AGENTS.md'
+        if alvo.is_file() and not alvo.is_symlink():
+            transformar(alvo, lambda raw: remover_instrucao_de_leitura(raw.decode()).encode(), self.backups)
 
     async def _conferir_confianca(self, codex) -> None:
         try:
@@ -431,6 +444,12 @@ class IntegracaoCodex:
                 raise ValueError("project_doc_fallback_filenames inválido")
             nomes = list(dict.fromkeys([*fallbacks, "CLAUDE.md", "CLAUDE.MD"]))
             edits = []
+            limite = atual.get("project_doc_max_bytes", 32768)
+            if not isinstance(limite, int) or isinstance(limite, bool) or limite < 0:
+                raise ValueError("project_doc_max_bytes inválido")
+            necessario = limite_instrucoes(self.codex_home)
+            if limite < necessario:
+                edits.append({"keyPath": "project_doc_max_bytes", "value": necessario, "mergeStrategy": "replace"})
             if nomes != fallbacks:
                 edits.append({"keyPath": "project_doc_fallback_filenames", "value": nomes, "mergeStrategy": "replace"})
             if hooks and atual.get("features", {}).get("hooks") is not True:
@@ -513,13 +532,24 @@ class IntegracaoCodex:
             for tipo in result.get("itemTypeResults", []):
                 if tipo.get("failures"):
                     self._erro(msg("erro_plugins_incompletos"))
+        mercados = _toml(cfg_path).get("marketplaces", {})
+        inventario = {p["pluginId"]: p for p in await codex.plugins_instalados()}
+        identidades = {}
+        for id_ in sorted(candidatos):
+            try:
+                origem = _origem_marketplace(conhecidos[id_.rsplit("@", 1)[1]], claude=True)
+                identidades[id_] = _identidade_plugin(id_, origem, mercados, inventario)
+            except ValueError:
+                bloqueados.add(id_)
+                self._erro(msg("erro_plugin", id=id_))
+        candidatos -= bloqueados
         agora = time.time()
         ultima = max(registro.get("marketplaces_em", 0), registro.get("marketplaces_tentativa_em", 0))
         falhas_anteriores = set(registro.get("marketplaces_pendentes", []))
         atualizar = forcar or agora - ultima >= _INTERVALO or bool(falhas_anteriores and agora - ultima >= 300)
         falhas = set()
         if atualizar:
-            for marketplace in sorted({p.rsplit("@", 1)[1] for p in candidatos}):
+            for marketplace in sorted({identidades[p].rsplit("@", 1)[1] for p in candidatos}):
                 source = _toml(cfg_path).get("marketplaces", {}).get(marketplace, {})
                 if source.get("source_type") != "git":
                     continue
@@ -543,15 +573,17 @@ class IntegracaoCodex:
         plugins = {p: anteriores[p] for p in bloqueados if p in anteriores}
         for id_ in sorted(candidatos):
             try:
+                id_codex = identidades[id_]
                 conhecido = anteriores.get(id_)
-                instalado = inventario.get(id_)
+                instalado = inventario.get(id_codex)
                 if (atualizar or id_ in plugins_pendentes or not conhecido or not instalado or
+                        conhecido.get("id_codex", id_) != id_codex or
                         instalado.get("version") != conhecido.get("versao") or
                         not Path(conhecido.get("path", "")).is_dir()):
                     self._etapa(msg("etapa_plugin", id=id_))
-                    data = await codex.instalar_plugin(id_)
+                    data = await codex.instalar_plugin(id_codex)
                     conhecido = {"path": data["installedPath"], "versao": data.get("version", ""),
-                                 "origem": id_.rsplit("@", 1)[1]}
+                                 "origem": id_codex.rsplit("@", 1)[1], "id_codex": id_codex}
                 plugins[id_] = conhecido
                 # Retém a identidade mesmo se uma etapa posterior falhar ou a fonte mudar.
                 registro.setdefault("plugins", {})[id_] = conhecido
@@ -567,13 +599,15 @@ class IntegracaoCodex:
             raise AlteradoExternamente("Plugins do Claude mudaram durante a integração")
         # Só desabilita identidades anteriormente adotadas, nunca plugins exclusivos do Codex.
         removidos = set(anteriores) - desejados
+        ativos = {d.get("id_codex", p) for p, d in plugins.items()}
         if removidos:
-            await self._habilitar_plugins(codex, {p: False for p in removidos})
-        await self._habilitar_plugins(codex, {p: True for p in plugins if p in candidatos})
+            await self._habilitar_plugins(codex, {anteriores[p].get("id_codex", p): False for p in removidos
+                                                if anteriores[p].get("id_codex", p) not in ativos})
+        await self._habilitar_plugins(codex, {d.get("id_codex", p): True for p, d in plugins.items() if p in candidatos})
         registro["plugins"] = plugins
         registro["plugins_pendentes"] = sorted(plugins_pendentes)
         self._plugins_confirmados = set(plugins) & candidatos
-        self._estado["plugins"] = [{"id": p, "versao": d["versao"], "origem": d["origem"]} for p, d in plugins.items()]
+        self._estado["plugins"] = [{"id": d.get("id_codex", p), "versao": d["versao"], "origem": d["origem"]} for p, d in plugins.items()]
         self._estado["proxima_atualizacao"] = _iso(max(registro.get("marketplaces_em", 0), registro.get("marketplaces_tentativa_em", agora)) + (300 if registro.get("marketplaces_pendentes") else _INTERVALO))
 
     async def _habilitar_plugins(self, codex, escolhas: dict[str, bool]) -> None:
@@ -588,11 +622,14 @@ class IntegracaoCodex:
         if not raiz.resolve().is_relative_to(cache.resolve()):
             raise ValueError("Plugin fora do cache do Codex")
         paths = {raiz / "hooks" / "hooks.json", raiz / "hooks.json"}
+        security_guidance = False
         for rel in (".codex-plugin/plugin.json", ".claude-plugin/plugin.json"):
             manifest = raiz / rel
             if not manifest.is_file():
                 continue
-            declaradas = json_obj(manifest).get("hooks")
+            dados = json_obj(manifest)
+            security_guidance |= dados.get("name") == "security-guidance"
+            declaradas = dados.get("hooks")
             if isinstance(declaradas, dict):
                 paths.add(manifest)
             else:
@@ -600,6 +637,9 @@ class IntegracaoCodex:
                 if not isinstance(refs, list) or any(not isinstance(r, str) for r in refs):
                     raise ValueError("Referências de hooks inválidas no plugin")
                 paths.update(raiz / r for r in refs)
+        wrapper_json = self.codex_home / ".hangar-hooks" / "codex-hook-json.py"
+        if security_guidance:
+            gravar(wrapper_json, (_REPO / "scripts/codex-hook-json.py").read_bytes(), ler(wrapper_json), self.backups)
         for path in sorted(paths):
             if not path.is_file():
                 continue
@@ -608,6 +648,8 @@ class IntegracaoCodex:
             def converter(raw):
                 data = json.loads(raw)
                 result = self._normalizar(data)
+                if security_guidance:
+                    result = normalizar_security_guidance(result, sys.executable, wrapper_json, windows=os.name == "nt")
                 return raw if data == result else json_bytes(result)
             if transformar(path, converter, self.backups):
                 self._confianca()
@@ -664,7 +706,7 @@ class IntegracaoCodex:
             for nome in ("commands", "agents"):
                 origem = self.home / ".claude" / nome
                 if origem.is_dir():
-                    shutil.copytree(origem, cc / nome)
+                    shutil.copytree(origem, cc / nome, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git"))
             source_mcp = self.home / ".claude.json"
             mcp_raw = ler(source_mcp)
             if mcp_raw is not None:
@@ -708,7 +750,6 @@ class IntegracaoCodex:
                 hooks = {"hooks": {}}
             if self.fingerprint(fontes=True) != inicio:
                 raise AlteradoExternamente("Fontes do Claude mudaram durante a importação")
-            self._hooks(hooks, registro)
             desejados, confiaveis = {}, set()
             for src_root, dst_root in ((cx / "agents", self.codex_home / "agents"),
                                        (stage / ".agents" / "skills", self.home / ".agents" / "skills")):
@@ -739,6 +780,7 @@ class IntegracaoCodex:
             registro["artefatos"] = manifesto
             self._estado["avisos"].extend(avisos)
             self._checkpoint(registro)
+            self._hooks(hooks, registro)
             # Não vincula um agente cujo arquivo colidiu com conteúdo exclusivo do Codex.
             agentes = native_cfg.get("agents", {})
             agentes = {n: v for n, v in agentes.items() if not isinstance(v, dict) or
@@ -753,7 +795,7 @@ class IntegracaoCodex:
         manifesto, avisos = reconciliar_skills(
             self.home, self.codex_home,
             {p: d for p, d in registro.get("plugins", {}).items() if p in self._plugins_confirmados and
-             habilitados.get(p, {}).get("enabled") is True},
+             habilitados.get(d.get("id_codex", p), {}).get("enabled") is True},
             registro.get("skills", {}), self.backups, windows=os.name == "nt",
         )
         registro["skills"] = manifesto
@@ -761,10 +803,17 @@ class IntegracaoCodex:
 
     def fingerprint(self, *, fontes: bool = False) -> str:
         h = hashlib.sha256()
+        h.update(b"instrucoes-nativas-v1")
         caminhos = [self.home / ".claude" / "settings.json", self.home / ".claude.json"]
+        caminhos.extend(self.home / ".claude" / nome for nome in ("CLAUDE.md", "CLAUDE.MD"))
+        for path in (self.codex_home / ".hangar-instrucoes").glob('*.json'):
+            dados = json_obj(path)
+            caminhos.extend([path, Path(dados['fonte']), Path(dados['alvo'])])
         if not fontes:
             caminhos.extend([self.codex_home / "hooks.json", self.codex_home / "AGENTS.md",
                              self.codex_home / "config.toml", self.codex_home / "plugins" / "installed_plugins.json"])
+            caminhos.append(_REPO / "scripts/codex-hook-json.py")
+            caminhos.append(self.codex_home / ".hangar-hooks/codex-hook-json.py")
         caminhos.extend([self.home / ".claude/plugins/installed_plugins.json",
                          self.home / ".claude/plugins/known_marketplaces.json"])
         from app import skill_bridge
@@ -777,6 +826,8 @@ class IntegracaoCodex:
                 if not isinstance(exc, FileNotFoundError):
                     raise exc
             for atual, dirs, nomes in os.walk(raiz, onerror=falhou):
+                dirs[:] = [d for d in dirs if d not in ("__pycache__", ".git")]
+                nomes = [n for n in nomes if not n.endswith(".pyc")]
                 caminhos.extend(Path(atual) / nome for nome in [*dirs, *nomes])
         for path in sorted(caminhos):
             try:

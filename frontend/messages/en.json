@@ -1,5 +1,8 @@
 {
   "$schema": "https://inlang.com/schema/inlang-message-format",
+  "harness_claude_statusline_atualizar": "Update status bar",
+  "harness_claude_statusline_ajuda": "Allow Hangar installations and updates to configure the Claude Code status bar. Turn this off to preserve your custom bar. Saving this option does not change the current bar.",
+  "harness_opcoes_indisponiveis": "Update Hangar on this server to configure these options.",
   "arq_meta_arquivo_um": "{tam} · 1 line",
   "config_geral_titulo": "General",
   "config_geral_linha": "Geral · General",

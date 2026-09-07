@@ -158,7 +158,7 @@ async def test_adota_importacao_nativa_anterior_remove_gerenciados_preserva_coli
     data = tomllib.loads(cfg.read_text())['mcp_servers']
     assert data['adotado']['args'] == ['depois']
     assert data['colisao']['args'] == ['particular']
-    assert any('colisao' in a for a in result['avisos'])
+    assert any(a['params'].get('nome') == 'colisao' for a in result['avisos'])
     source.write_text('{"mcpServers": {}}')
     result = await service.reconciliar()
     assert result['estado'] == 'ok', result
@@ -217,7 +217,7 @@ async def test_fonte_alterada_durante_importacao_e_relida(tmp_path):
     assert result['estado'] == 'ok', result
     assert mudou
     assert tomllib.loads((home / '.codex/config.toml').read_text())['mcp_servers']['teste']['args'] == ['novo']
-    assert service._ultimo_fingerprint is None
+    assert json.loads((service.raiz / 'estado.json').read_text())['fingerprint'] is None
 
 
 async def test_falha_marketplace_permanece_visivel_ate_nova_tentativa(tmp_path, monkeypatch):
@@ -254,7 +254,7 @@ async def test_falha_marketplace_permanece_visivel_ate_nova_tentativa(tmp_path, 
     assert chamadas == ['mercado']
 
 
-def test_migra_persona_antiga_sem_cristalizar_copia_das_instrucoes(tmp_path):
+def test_persona_antiga_continua_ligada_a_fonte_nativa(tmp_path):
     home = _home(tmp_path)
     source = home / '.claude/CLAUDE.md'
     source.write_text('Texto global que deve permanecer somente na fonte')
@@ -265,9 +265,6 @@ def test_migra_persona_antiga_sem_cristalizar_copia_das_instrucoes(tmp_path):
         pytest.skip('Symlink indisponível nesta máquina')
     service = IntegracaoCodex(home, home / '.codex')
     service._instrucoes()
-    assert not target.is_symlink()
-    assert str(source) in target.read_text()
-    assert source.read_text() not in target.read_text()
+    assert target.is_symlink()
+    assert (home / '.codex/AGENTS.override.md').read_text() == source.read_text()
     assert source.read_text() == 'Texto global que deve permanecer somente na fonte'
-    saved = json.loads(next(service.backups.glob('*.json')).read_text())
-    assert saved['symlink']

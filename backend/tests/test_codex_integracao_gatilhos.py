@@ -24,6 +24,8 @@ def _lancador():
 @pytest.mark.parametrize("falha", [False, True])
 def test_lancador_avisa_o_backend_antes_de_abrir_servidor_e_tolera_falha(tmp_path, monkeypatch, capsys, falha):
     caminho, lancador = _lancador()
+    monkeypatch.setenv('HOME', str(tmp_path / 'home'))
+    monkeypatch.setenv('CODEX_HOME', str(tmp_path / 'home/.codex'))
     ordem = []
 
     def api_backend(method, path):

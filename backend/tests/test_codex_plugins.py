@@ -161,7 +161,36 @@ async def test_marketplace_homonimo_de_outra_origem_nao_e_adotado(instalacao, tm
 
     result = await service.reconciliar(forcar=True)
     assert result["estado"] == "parcial", result
-    assert any("Origem do marketplace" in error for error in result["erros"])
+    assert any(error["codigo"] == "erro_marketplace_origem" for error in result["erros"])
     assert GERENCIADO not in _registro(service).get("plugins", {})
     assert _config(service)["plugins"][GERENCIADO]["enabled"] is False
     assert (cache / "hooks/hooks.json").read_bytes() == antes
+
+
+@pytest.mark.parametrize("preinstalado", [False, True])
+async def test_marketplace_com_nome_nativo_diferente_atualiza_e_desabilita_identidade_real(instalacao, preinstalado):
+    service, mercado = instalacao
+    nativo = "gerenciado@codex-local"
+    _json(mercado / ".agents/plugins/marketplace.json", {
+        "name": "codex-local", "owner": {"name": "Hangar"},
+        "plugins": [{"name": "gerenciado", "source": "./plugins/gerenciado"}],
+    })
+    if preinstalado:
+        async with CodexNativo(service.home, service.codex_home) as codex:
+            await codex.cli(["plugin", "marketplace", "add", str(mercado), "--json"])
+            await codex.instalar_plugin(nativo)
+
+    primeira = await service.reconciliar()
+    assert primeira["estado"] == "ok", primeira
+    assert _registro(service)["plugins"][GERENCIADO]["id_codex"] == nativo
+    assert GERENCIADO not in _config(service)["plugins"]
+    assert _config(service)["plugins"][nativo]["enabled"] is True
+
+    _plugin(mercado, "gerenciado", "2.0.0")
+    segunda = await service.reconciliar(forcar=True)
+    assert segunda["estado"] == "ok", segunda
+    assert _registro(service)["plugins"][GERENCIADO]["versao"] == "2.0.0"
+    assert not _registro(service)["plugins_pendentes"]
+    _json(service.home / ".claude/settings.json", {"enabledPlugins": {GERENCIADO: False}})
+    assert (await service.reconciliar())["estado"] == "ok"
+    assert _config(service)["plugins"][nativo]["enabled"] is False
