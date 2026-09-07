@@ -22,7 +22,8 @@ from app.codex_arquivos import (
     AlteradoExternamente, backup, exclusivo, gravar, hash_bytes, json_bytes,
     json_obj, ler, mesclar_hooks, remapear, transformar,
 )
-from app.codex_compat import normalizar_hooks, normalizar_security_guidance, texto_instrucoes, wrapper_instalado
+from app.codex_compat import normalizar_hooks, normalizar_security_guidance, remover_instrucao_de_leitura, wrapper_instalado
+from app.codex_instrucoes import limite_instrucoes, preparar_instrucoes
 from app.codex_importador import CodexNativo, CodexNativoErro
 from app.codex_msgs import msg, serializar
 
@@ -322,13 +323,10 @@ class IntegracaoCodex:
         return self.status()
 
     def _instrucoes(self) -> None:
-        alvo = self.codex_home / "AGENTS.md"
-        globais = {(self.home / ".claude" / nome).resolve() for nome in ("CLAUDE.md", "CLAUDE.MD")}
-        def atualizar(raw):
-            # A ponte antiga era um link para a fonte; não cristaliza uma cópia desatualizada dela.
-            anterior = "" if alvo.is_symlink() and alvo.resolve() in globais else (raw or b"").decode()
-            return texto_instrucoes(anterior, self.home / ".claude").encode()
-        transformar(alvo, atualizar, self.backups)
+        preparar_instrucoes(self.home, self.codex_home)
+        alvo = self.codex_home / 'AGENTS.md'
+        if alvo.is_file() and not alvo.is_symlink():
+            transformar(alvo, lambda raw: remover_instrucao_de_leitura(raw.decode()).encode(), self.backups)
 
     async def _conferir_confianca(self, codex) -> None:
         try:
@@ -428,6 +426,12 @@ class IntegracaoCodex:
                 raise ValueError("project_doc_fallback_filenames inválido")
             nomes = list(dict.fromkeys([*fallbacks, "CLAUDE.md", "CLAUDE.MD"]))
             edits = []
+            limite = atual.get("project_doc_max_bytes", 32768)
+            if not isinstance(limite, int) or isinstance(limite, bool) or limite < 0:
+                raise ValueError("project_doc_max_bytes inválido")
+            necessario = limite_instrucoes(self.codex_home)
+            if limite < necessario:
+                edits.append({"keyPath": "project_doc_max_bytes", "value": necessario, "mergeStrategy": "replace"})
             if nomes != fallbacks:
                 edits.append({"keyPath": "project_doc_fallback_filenames", "value": nomes, "mergeStrategy": "replace"})
             if hooks and atual.get("features", {}).get("hooks") is not True:
@@ -788,8 +792,12 @@ class IntegracaoCodex:
 
     def fingerprint(self, *, fontes: bool = False) -> str:
         h = hashlib.sha256()
-        h.update(b"hooks-com-artefatos-v1")
+        h.update(b"instrucoes-nativas-v1")
         caminhos = [self.home / ".claude" / "settings.json", self.home / ".claude.json"]
+        caminhos.extend(self.home / ".claude" / nome for nome in ("CLAUDE.md", "CLAUDE.MD"))
+        for path in (self.codex_home / ".hangar-instrucoes").glob('*.json'):
+            dados = json_obj(path)
+            caminhos.extend([path, Path(dados['fonte']), Path(dados['alvo'])])
         if not fontes:
             caminhos.extend([self.codex_home / "hooks.json", self.codex_home / "AGENTS.md",
                              self.codex_home / "config.toml", self.codex_home / "plugins" / "installed_plugins.json"])

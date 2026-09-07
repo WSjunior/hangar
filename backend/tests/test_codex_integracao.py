@@ -254,7 +254,7 @@ async def test_falha_marketplace_permanece_visivel_ate_nova_tentativa(tmp_path, 
     assert chamadas == ['mercado']
 
 
-def test_migra_persona_antiga_sem_cristalizar_copia_das_instrucoes(tmp_path):
+def test_persona_antiga_continua_ligada_a_fonte_nativa(tmp_path):
     home = _home(tmp_path)
     source = home / '.claude/CLAUDE.md'
     source.write_text('Texto global que deve permanecer somente na fonte')
@@ -265,9 +265,6 @@ def test_migra_persona_antiga_sem_cristalizar_copia_das_instrucoes(tmp_path):
         pytest.skip('Symlink indisponível nesta máquina')
     service = IntegracaoCodex(home, home / '.codex')
     service._instrucoes()
-    assert not target.is_symlink()
-    assert str(source) in target.read_text()
-    assert source.read_text() not in target.read_text()
+    assert target.is_symlink()
+    assert (home / '.codex/AGENTS.override.md').read_text() == source.read_text()
     assert source.read_text() == 'Texto global que deve permanecer somente na fonte'
-    saved = json.loads(next(service.backups.glob('*.json')).read_text())
-    assert saved['symlink']

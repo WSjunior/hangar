@@ -15,7 +15,7 @@ from app.codex_compat import (
     INICIO_INSTRUCOES,
     _split_windows,
     normalizar_hooks,
-    texto_instrucoes,
+    remover_instrucao_de_leitura,
 )
 
 
@@ -204,25 +204,14 @@ def test_windows_migra_pipeline_legado():
 
 
 @pytest.mark.parametrize("atual", ["", "# Preferências\n\nMantenha isto.\n", "\n\nTexto com espaços  \n"])
-def test_instrucoes_no_inicio_preservam_conteudo_e_nao_duplicam(atual, tmp_path):
-    home = tmp_path / "Claude local"
-    resultado = texto_instrucoes(atual, home)
-    assert resultado.startswith(INICIO_INSTRUCOES)
-    assert resultado.endswith(FIM_INSTRUCOES + "\n\n" + atual)
-    assert str(home / "CLAUDE.md") in resultado
-    assert "`CLAUDE.MD`" in resultado
-    assert "subdiretórios" in resultado
-    assert "mesmo quando houver um `AGENTS.md`" in resultado
-    assert texto_instrucoes(resultado, home) == resultado
+def test_sem_bloco_preserva_instrucoes_pessoais(atual):
+    assert remover_instrucao_de_leitura(atual) == atual
 
 
-def test_move_bloco_antigo_para_inicio_e_remove_duplicatas(tmp_path):
+def test_remove_blocos_antigos_sem_perder_texto_pessoal():
     bloco = f"{INICIO_INSTRUCOES}\nantigo\n{FIM_INSTRUCOES}\n\n"
     atual = "Antes\n\n" + bloco + "Depois\n" + bloco
-    resultado = texto_instrucoes(atual, tmp_path)
-    assert resultado.count(INICIO_INSTRUCOES) == 1
-    assert resultado.endswith("Antes\n\nDepois\n")
-    assert "\nantigo\n" not in resultado
+    assert remover_instrucao_de_leitura(atual) == "Antes\n\nDepois\n"
 
 
 @pytest.mark.parametrize("atual", [
@@ -232,7 +221,7 @@ def test_move_bloco_antigo_para_inicio_e_remove_duplicatas(tmp_path):
 ])
 def test_bloco_incompleto_ou_malformado_e_recusado(atual, tmp_path):
     with pytest.raises(ValueError, match="incompleto ou malformado"):
-        texto_instrucoes(atual, tmp_path)
+        remover_instrucao_de_leitura(atual)
 
 
 @pytest.mark.skipif(shutil.which("rtk") is None, reason="RTK não instalado")

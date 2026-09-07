@@ -104,12 +104,23 @@ nos arquivos locais de configuração, manifesto e backups restritos, sem aparec
 nos diagnósticos públicos e sem serem versionados. As sessões seguintes recebem a configuração
 atualizada; o contexto de processos já abertos não é reescrito.
 
-As compatibilidades próprias do Hangar ficam em `backend/app/codex_compat.py`:
+As compatibilidades próprias do Hangar ficam em `backend/app/codex_compat.py` e `codex_instrucoes.py`:
 
-- Um único bloco identificado em `AGENTS.md` orienta a leitura do `~/.claude/CLAUDE.md` e dos
-  arquivos `CLAUDE.md`/`CLAUDE.MD` aplicáveis ao projeto. Instruções do usuário fora do bloco
-  são mantidas. Os dois nomes também são acrescentados a `project_doc_fallback_filenames`,
-  preservando os fallbacks anteriores. O bloco reforça a leitura mesmo quando há `AGENTS.md`.
+- `CLAUDE.md` tem prioridade sobre `AGENTS.md`, com `CLAUDE.MD` como segunda opção. O Hangar
+  cria `AGENTS.override.md` como link para a fonte, no Codex home (global) e nos escopos dos
+  projetos registrados no `config.toml`. O lançador prepara também o cwd novo, antes do
+  app-server. O conteúdo é carregado pelo Codex, sem ordem de leitura nem hook de contexto.
+  `AGENTS.md` permanece intacto; um override pessoal preexistente é preservado com erro explícito.
+  A ordem de leitura gerenciada antiga é removida do `AGENTS.md` global, com backup.
+- Os aliases são locais à instalação e não devem ser commitados. Para abrir pelo IDE/CLI cru
+  um projeto ainda não registrado, rode **Reconciliar agora** após registrá-lo no Codex, ou
+  abra-o primeiro pelo Hangar. Sem preparação, vale a precedência padrão do Codex.
+  Sistemas sem permissão para links usam cópias verificadas, atualizadas na reconciliação e
+  na abertura pelo Hangar; com links, edições da fonte são vistas na próxima sessão diretamente.
+- O limite nativo de instruções passa a pelo menos 1 MiB e cresce com as fontes conhecidas,
+  preservando um limite maior já configurado. O lançador também calcula o limite antes de abrir
+  o app-server. Sessões já abertas não recebem um novo contexto inicial. Os fallbacks
+  `CLAUDE.md`/`CLAUDE.MD` continuam configurados para projetos ainda sem alias.
 - Hooks `SessionEnd` com timeout numérico acima de 3 segundos são limitados a 3 segundos.
 - O hook RTK reconhecido passa pelo executor `scripts/codex-hook-allow.py`, que preserva a
   execução e seu código de saída e completa `permissionDecision: allow` quando a reescrita

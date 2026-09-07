@@ -1745,7 +1745,17 @@ O `security-guidance` 2.0.7 provocava os outros dois erros medidos no Codex 0.15
 `SessionStart` emite anúncio `async` + resposta com `metrics`, e `Stop` também emite `metrics`.
 São extensões do Claude, recusadas pelo JSON estrito do Codex. Só esse plugin recebe
 `codex-hook-json.py`; bloqueios e contexto são preservados, sem autoaprovar os comandos novos.
-O global continua sendo lido por instrução do `AGENTS.md`, não inserido no contexto inicial.
+**Instruções nativas (07/09/2026):** `codex_instrucoes.py` prepara `AGENTS.override.md`
+como link para o `CLAUDE.md` global e dos projetos registrados; o lançador prepara também
+os escopos raiz→cwd antes de subir o app-server. `CLAUDE.MD` é a segunda opção e
+`AGENTS.md` fica preservado, com menor prioridade. Override pessoal não é sobrescrito.
+Sem permissão de symlink, usa cópia gerenciada que é atualizada na próxima preparação.
+O limite de instruções parte de 1 MiB, cresce com as fontes conhecidas e preserva limites
+maiores. O teste com CLI real captura a primeira requisição em servidor local, sem modelo:
+global + projeto acima de 180 KB presentes, AGENTS preteridos ausentes. Não depende de
+ordem de leitura nem de aprovação de hook. Aliases são artefatos locais, não versionar;
+projeto novo aberto pelo IDE/CLI cru precisa ser registrado e reconciliado antes de ganhar
+prioridade sobre um AGENTS existente. Sessões já abertas conservam o contexto inicial.
 
 ## tmux + Claude Code truecolor
 
