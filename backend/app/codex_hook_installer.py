@@ -44,12 +44,12 @@ def ensure_codex_state_hook_installed(home: Path | None = None) -> list[str]:
         if data is None:
             return []
         hooks = data.setdefault("hooks", {})
-        faltando = [ev for ev in _EVENTOS if not _tem_hook(hooks.get(ev))]
+        # Evento com valor que não é lista é arquivo editado à mão: não se mexe (mesma regra do
+        # _sync_hook do Claude), em vez de zerar o que estava lá.
+        faltando = [ev for ev in _EVENTOS
+                    if isinstance(hooks.get(ev, []), list) and not _tem_hook(hooks.get(ev))]
         for ev in faltando:
-            grupos = hooks.get(ev)
-            if not isinstance(grupos, list):
-                grupos = hooks[ev] = []
-            grupos.append({"hooks": [{"type": "command", "command": _STATE_COMMAND}]})
+            hooks.setdefault(ev, []).append({"hooks": [{"type": "command", "command": _STATE_COMMAND}]})
         if faltando:
             _write(path, data)
         return faltando

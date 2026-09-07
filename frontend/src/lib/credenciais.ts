@@ -64,9 +64,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 async function reqEm<T>(s: Server, path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${s.baseUrl}${path}`, {
     ...init,
-    signal: init?.signal
-      ? AbortSignal.any([init.signal, AbortSignal.timeout(8000)])
-      : AbortSignal.timeout(8000),
+    signal: comTeto(init?.signal ?? undefined, 8000),
     headers: {
       ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
       Authorization: `Bearer ${s.token}`,
@@ -208,11 +206,18 @@ export interface IntegracaoCodex {
 }
 
 // `AbortSignal.any` só existe do Safari 17.4 em diante; num iPhone mais velho lançava dentro do
-// `req()` e derrubava toda chamada de credenciais/harness, não só a do Codex.
-function comTeto(signal: AbortSignal | undefined, ms: number): AbortSignal {
+// `reqEm()` e derrubava toda chamada de credenciais/harness, não só a do Codex. Sem ele, os dois
+// sinais são amarrados à mão — o teto de tempo não pode sumir junto.
+export function comTeto(signal: AbortSignal | undefined, ms: number): AbortSignal {
   const teto = AbortSignal.timeout(ms);
   if (!signal) return teto;
-  return typeof AbortSignal.any === 'function' ? AbortSignal.any([signal, teto]) : signal;
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any([signal, teto]);
+  const juncao = new AbortController();
+  for (const s of [signal, teto]) {
+    if (s.aborted) juncao.abort(s.reason);
+    else s.addEventListener('abort', () => juncao.abort(s.reason), { once: true });
+  }
+  return juncao.signal;
 }
 
 export function codexIntegracaoEstado(alvo: Server | null, signal?: AbortSignal): Promise<IntegracaoCodex> {

@@ -68,15 +68,18 @@
     const alvo = ev.currentTarget as HTMLInputElement;
     const querido = alvo.checked;
     alvo.checked = !querido;
-    if (!consulta || trocandoAutomatica) return;
+    // `consulta` é trocada pelo $effect quando o servidor muda; a gravação e a releitura são do
+    // contexto que existia no clique — trocar de servidor no meio não pode reconsultar o outro.
+    const ctx = consulta;
+    if (!ctx || trocandoAutomatica) return;
     trocandoAutomatica = true;
     erroIntegracao = '';
     try {
-      await (consulta.alvo ? patchConfigForServer(consulta.alvo, { codex_sync: querido })
-                           : patchConfig({ codex_sync: querido }));
-      await consultarIntegracao(consulta);
+      await (ctx.alvo ? patchConfigForServer(ctx.alvo, { codex_sync: querido })
+                      : patchConfig({ codex_sync: querido }));
+      if (consulta === ctx) await consultarIntegracao(ctx);
     } catch (e) {
-      erroIntegracao = e instanceof Error ? e.message : String(e);
+      if (consulta === ctx) erroIntegracao = e instanceof Error ? e.message : String(e);
     } finally {
       trocandoAutomatica = false;
     }

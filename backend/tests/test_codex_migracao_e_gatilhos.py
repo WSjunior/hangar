@@ -86,6 +86,15 @@ def test_instalador_acrescenta_uma_vez_e_nao_reescreve_entrada_existente(tmp_pat
     assert json.loads((codex / "hooks.json").read_text()) == data
 
 
+def test_instalador_nao_zera_evento_que_nao_e_lista(tmp_path):
+    codex = tmp_path / ".codex"
+    codex.mkdir()
+    (codex / "hooks.json").write_text(json.dumps({"hooks": {"Stop": {"editado": "à mão"}}}))
+    gravados = codex_hook_installer.ensure_codex_state_hook_installed(codex)
+    assert "Stop" not in gravados
+    assert json.loads((codex / "hooks.json").read_text())["hooks"]["Stop"] == {"editado": "à mão"}
+
+
 @pytest.mark.parametrize("conteudo", ["{ quebrado", '{"hooks": []}'])
 def test_instalador_nao_clobra_hooks_json_estranho(tmp_path, conteudo):
     codex = tmp_path / ".codex"
@@ -258,11 +267,13 @@ async def test_md_solto_em_agents_e_ignorado_com_aviso_sem_derrubar_a_etapa(tmp_
     service.raiz.mkdir(parents=True)
     from unittest.mock import AsyncMock
     monkeypatch.setattr(service, "_config", AsyncMock())
-    registro = {"artefatos": {str(home / ".codex/agents/README.md"): {"hash": "antigo"}}}
+    registro = {"artefatos": {str(home / ".codex/agents/README.md"): {"hash": "antigo"},
+                              str(home / ".codex/agents/README-notas.md"): {"hash": "parecido"}}}
     await service._fragmentos(Importer(None, None, None), {}, registro)
     assert (home / ".codex/agents/vision.md").read_text() == "vision convertido"
     assert any("README.md" in a and "ignorados" in a for a in service._estado["avisos"])
     assert str(home / ".codex/agents/README.md") in registro["artefatos"], "artefato do nome ignorado não é podado"
+    assert str(home / ".codex/agents/README-notas.md") not in registro["artefatos"], "nome parecido não é congelado junto"
 
 
 def test_status_traz_resumo_de_skills_do_manifesto(tmp_path):

@@ -211,7 +211,7 @@ class IntegracaoCodex:
             raise
 
     def _checkpoint(self, registro: dict) -> None:
-        registro["status"] = copy.deepcopy(self._estado)
+        registro["status"] = self.status()  # serializado: o código da mensagem sobrevive a uma queda no meio
         path = self.raiz / "estado.json"
         gravar(path, json_bytes(registro), ler(path))
 
@@ -329,7 +329,8 @@ class IntegracaoCodex:
                 self._confianca()
             else:
                 self._estado["confianca_pendente"] = False
-                self._estado["avisos"] = [a for a in self._estado["avisos"] if not a.startswith("Hooks alterados:")]
+                self._estado["avisos"] = [a for a in self._estado["avisos"]
+                                          if getattr(a, "codigo", None) != "aviso_hooks_alterados"]
         except CodexNativoErro:
             self._estado["avisos"].append(msg("aviso_confianca_indisponivel"))
 
@@ -711,8 +712,7 @@ class IntegracaoCodex:
                     elif src.relative_to(src_root).parts[0] in historico["commands"]:
                         confiaveis.add(dst)
             anteriores = registro.get("artefatos", {})
-            guardados = {k: v for k, v in anteriores.items()
-                         if any(stem in Path(k).stem for stem in congelados)}
+            guardados = {k: v for k, v in anteriores.items() if Path(k).stem in congelados}
             manifesto, avisos = reconciliar_arquivos(
                 desejados, {k: v for k, v in anteriores.items() if k not in guardados},
                 self.backups, confiaveis=confiaveis,
