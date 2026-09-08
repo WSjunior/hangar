@@ -256,15 +256,28 @@
   // Reanexa um arquivo que já está no servidor: baixa de volta e entra na lista como qualquer
   // outro. Baixar em vez de referenciar o caminho mantém UM caminho de envio — o mesmo do arquivo
   // escolhido agora, com prévia, anel de progresso e remoção.
+  // Quem está sendo baixado agora. Sem isto o toque na miniatura não deixava rastro: o menu fecha
+  // na hora, e numa rede lenta a pessoa reabre e toca de novo — `addFiles` não deduplica por nome,
+  // então o mesmo arquivo entrava duas vezes.
+  let reanexando = $state<string | null>(null);
   async function reanexar(filename: string) {
+    if (reanexando) return;
     attachError = '';
+    reanexando = filename;
     try {
-      const res = await fetch(uploadUrl(sessionName, filename));
+      // Teto: o mesmo do upload. Sem ele, rede caída deixa a promessa pendurada e a miniatura
+      // presa em "baixando" pra sempre.
+      const res = await fetch(uploadUrl(sessionName, filename), {
+        signal: AbortSignal.timeout(180_000),
+      });
       if (!res.ok) throw new Error(String(res.status));
       const blob = await res.blob();
       addFiles([new File([blob], filename, { type: blob.type })]);
     } catch (e) {
       attachError = e instanceof Error ? e.message : m.composer_falha_envio();
+    } finally {
+      reanexando = null;
+      plusOpen = false;      // fecha no FIM, dando certo ou não; o erro aparece no composer
     }
   }
   let uploading = $state(false);
@@ -2321,8 +2334,12 @@
         <span>{m.composer_fotos()}</span>
       </button>
       {#each recentes as r (r.filename)}
+        <!-- A folha fica aberta enquanto baixa e fecha ao terminar: fechando no toque, o único
+             sinal de que algo acontece ia embora junto, e numa rede lenta a pessoa tocava de novo. -->
         <button class="faixa-thumb" title={r.filename}
-                onclick={() => { plusOpen = false; void reanexar(r.filename); }}>
+                class:baixando={reanexando === r.filename}
+                disabled={!!reanexando}
+                onclick={() => void reanexar(r.filename)}>
           <img src={uploadUrl(sessionName, r.filename)} alt="" loading="lazy" />
         </button>
       {/each}
@@ -2639,6 +2656,12 @@
     gap: 6px; color: var(--text-primary); font-size: var(--text-xs);
   }
   .faixa-thumb { padding: 0; overflow: hidden; }
+  /* Baixando: a miniatura apaga e pulsa. É o único aviso de que o toque foi recebido — sem ele,
+     rede lenta parecia toque perdido. As outras ficam desabilitadas junto, uma de cada vez. */
+  .faixa-thumb.baixando { animation: faixa-pulso 1.1s var(--ease-out, ease-out) infinite; }
+  .faixa-thumb:disabled { cursor: default; }
+  .faixa-thumb:disabled:not(.baixando) { opacity: 0.45; }
+  @keyframes faixa-pulso { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
   .faixa-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
   @media (hover: hover) {
     .faixa-btn:hover, .faixa-thumb:hover { background: var(--bg-hover); }
