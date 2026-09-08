@@ -755,7 +755,9 @@ function Baixar-Dist {
         Move-Item $tmp "$raiz\frontend\dist"
         return $true
     } catch {
-        Nota 'compilando aqui: falhou o download do dist do CI (rede, TLS ou release fora do ar)'
+        # A excecao junto, e nao so a lista de suspeitos: 404 (o CI esta trocando o asset agora),
+        # DNS e TLS chegam aqui pela mesma porta e pedem conserto diferente.
+        Nota ("compilando aqui: falhou o download do dist do CI - " + $_.Exception.Message)
         return $false
     } finally {
         if ($null -ne $progAnt) { $ProgressPreference = $progAnt }
@@ -1234,7 +1236,13 @@ function Publica-Tailscale {
                         # atualizacao do app por causa de um extra; a marca ##HANGAR-AVISO## leva o
                         # aviso pra tela do Atualizar.
                         if ($Update) {
-                            Write-Host '##HANGAR-AVISO## o backend nao foi publicado no Tailscale (serve falhou)'
+                            # O motivo vai JUNTO: quem atualiza pelo botao nao ve o terminal, e a
+                            # frase sozinha manda a pessoa procurar entre permissao, HTTPS do tailnet
+                            # e handler alheio. Uma linha so, porque o atualizar.py casa a marca por
+                            # LINHA (_MARCA_AVISO), e cortado pra nao empurrar a tela pro lado.
+                            $motivo = ($falha -replace '\s+', ' ').Trim()
+                            if ($motivo.Length -gt 200) { $motivo = $motivo.Substring(0, 200) + '...' }
+                            Write-Host "##HANGAR-AVISO## o backend nao foi publicado no Tailscale: $motivo"
                         } else {
                             $script:pendencias += 'tailscale serve'
                         }
