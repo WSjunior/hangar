@@ -56,10 +56,14 @@
       } else if (msg.t === 'url') {
         url = String(msg.url ?? '');
       } else if (msg.t === 'layout') {
-        // A resposta vem do shell e pode ser recusa ("verbo desconhecido") — quem manda no rótulo
-        // é o que ele respondeu, não o que a gente pediu.
+        // A resposta vem do shell e pode ser recusa — quem manda no rótulo é o que ele respondeu,
+        // não o que a gente pediu.
         const r = String(msg.resposta ?? '');
         if (r.startsWith('layout:')) modo = msg.modo === 'mobile' ? 'mobile' : 'desktop';
+        // "verbo desconhecido" aqui só quer dizer uma coisa: o app desktop está rodando a versão
+        // anterior a este verbo, e o verbo mora no processo principal do Electron. Repassar o texto
+        // cru mandava a pessoa procurar defeito onde não há.
+        else if (r.includes('verbo desconhecido')) erro = m.nav_remoto_reabrir_app();
         else erro = r;
       } else if (msg.t === 'erro') {
         erro = String(msg.m ?? '');
