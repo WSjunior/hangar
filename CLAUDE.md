@@ -1788,6 +1788,17 @@ direta mostrou `MODULE_NOT_FOUND`, código 1. Homônimos na raiz não substituem
 subpastas; caminhos resolvidos fora de `hooks/` continuam excluídos. A restauração do arquivo
 mantém o comando aprovado no Codex.
 
+**Clone reduzido de marketplace no Codex (07/09/2026):** o clone completo do Claude Mem levou
+44,09 s e trouxe 461 MiB nesta máquina; o atualizador nativo encerra o clone após 30 s. Clone
+raso manual levou 12,44 s, mas o CLI não oferece `--depth`. A opção nativa `sparse_paths =
+[".agents", "plugin"]`, no marketplace `claude-mem-local`, usa `--filter=blob:none` e checkout
+das pastas necessárias: cadastro em 2,42 s, atualização em 3,21 s, mesma origem GitHub.
+Essas pastas são específicas desse catálogo; não são padrão para marketplaces alheios.
+O importador nativo considera opções de clone diferentes como outra origem, mesmo com a URL
+igual, e recusava reimportar o plugin já instalado. O reconciliador agora dispensa a importação
+quando nome e origem comprovam a instalação nativa, inclusive com alias; atualização, reparo,
+habilitação e desabilitação continuam pela mesma esteira. Plugin ausente continua sendo importado.
+
 **Instruções nativas (07/09/2026, PR #3):** `codex_instrucoes.py` prepara `AGENTS.override.md`
 — nome que o Codex 0.153.4 lê no lugar do `AGENTS.md` da mesma pasta — como link para o
 `CLAUDE.md` global (`<codex>/AGENTS.override.md`) e dos projetos registrados no `config.toml`; o

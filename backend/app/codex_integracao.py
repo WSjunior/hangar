@@ -513,6 +513,17 @@ class IntegracaoCodex:
                 bloqueados.add(id_)
                 self._erro(msg("erro_marketplace_origem", marketplace=mercado))
         candidatos = desejados - bloqueados
+        inventario = {p["pluginId"]: p for p in await codex.plugins_instalados()}
+        ja_instalados = set()
+        for id_ in candidatos:
+            origem = _origem_marketplace(conhecidos[id_.rsplit("@", 1)[1]], claude=True)
+            try:
+                if _identidade_plugin(id_, origem, mercados, inventario) in inventario:
+                    ja_instalados.add(id_)
+            except ValueError:
+                pass
+        # Reimportar instalações confirmadas conflita com opções nativas como sparse_paths.
+        # Elas seguem pela atualização abaixo, sem recadastrar a origem do marketplace.
         # Recorta a seleção nativa pela identidade completa, inclusive em marketplaces homônimos.
         itens = []
         for item in await codex.detectar():
@@ -521,7 +532,8 @@ class IntegracaoCodex:
             item = copy.deepcopy(item)
             grupos = []
             for grupo in item.get("details", {}).get("plugins", []):
-                nomes = [n for n in grupo.get("pluginNames", []) if f"{n}@{grupo.get('marketplaceName')}" in candidatos]
+                nomes = [n for n in grupo.get("pluginNames", [])
+                         if f"{n}@{grupo.get('marketplaceName')}" in candidatos - ja_instalados]
                 if nomes:
                     grupos.append({**grupo, "pluginNames": nomes})
             if grupos:
