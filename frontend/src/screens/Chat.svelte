@@ -1164,6 +1164,29 @@
     }
   }
 
+  // Pinta a cauda guardada, se houver uma sob a chave desta sessão. Devolve se pintou.
+  function pintarDoCache(): boolean {
+    const cache = lerCaudaChat(servidorDaCauda, sessionJsonl);
+    if (!cache?.eventos.length) return false;
+    events = cache.eventos;
+    etagCauda = cache.etag;
+    rebuildIndex();
+    reseedDerived();
+    ancora++;
+    loading = false;
+    return true;
+  }
+
+  // A chave da cauda é o `jsonl`, e ele vem da LISTA de sessões, que é um REST à parte disparado no
+  // onMount — ou seja, chega DEPOIS da primeira carga. Sem esta segunda chance a chave era sempre
+  // nula na abertura: a cauda era gravada no onDestroy e nunca lida, e toda entrada pagava a espera
+  // da rede que o cache existe pra evitar. Só pinta enquanto a rede não respondeu (tela ainda
+  // vazia); chegando depois disso, quem manda é a resposta do servidor.
+  $effect(() => {
+    if (!sessionJsonl || !loading || events.length) return;
+    pintarDoCache();
+  });
+
   async function loadHistory() {
     const signal = newHistLoad();
     const g = histGen;
@@ -1177,16 +1200,7 @@
     // celular e leva `events` junto. Pintar cedo já existiu e foi revertido (b9db4367) porque a
     // janela da MessageList não re-ancorava numa carga que chegasse com a lista montada — quem
     // conserta isso é a `ancora`, e ela sobe aqui e a cada resposta do servidor.
-    const cache = lerCaudaChat(servidorDaCauda, sessionJsonl);
-    const pintouDoCache = !!cache?.eventos.length;
-    if (pintouDoCache) {
-      events = cache!.eventos;
-      etagCauda = cache!.etag;
-      rebuildIndex();
-      reseedDerived();
-      ancora++;
-      loading = false;
-    }
+    const pintouDoCache = pintarDoCache();
     try {
       const r = await tailComRetentativa(signal, g, pintouDoCache ? etagCauda : null);
       if (g !== histGen) return;   // outra carga assumiu no meio do voo: esta resposta é velha

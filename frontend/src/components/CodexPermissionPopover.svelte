@@ -36,6 +36,10 @@
         if (sn !== sessionName) return;
         modos = res.modes;
         atual = res.current;
+        // A pílula também vive do que a LEITURA achou: alimentada só pelo `onApplied` da troca,
+        // ela ficava no rótulo genérico até o usuário mudar de modo — inclusive na sessão que já
+        // estava em Full Access.
+        if (res.current) onApplied(res.current);
       })
       .catch((e) => {
         if (sn !== sessionName) return;

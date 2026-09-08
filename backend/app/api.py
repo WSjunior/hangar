@@ -3608,8 +3608,13 @@ async def _guard_permissao_codex(name: str) -> None:
 
     Turno em voo: o texto nao vira comando, cai no composer do Codex e o Enter o ENFILEIRA como
     mensagem — a troca de permissao viraria um "/permissions" mandado pro modelo ler. Quem sabe se
-    ha turno e o app-server (`deliverable`), que e resposta exata; o guard do Claude ao lado
-    (`_require_drivable`) compara dois quadros do spinner porque la nao ha essa fonte.
+    ha turno e o app-server (`deliverable`); o guard do Claude ao lado (`_require_drivable`) compara
+    dois quadros do spinner porque la nao ha essa fonte.
+
+    Atalho BARATO, nao a palavra final: `deliverable` responde True quando o app-server nao tem a
+    sessao (backend reiniciado, TUI ainda nao reconectada) — sem olhar a tela. Quem le o pane e o
+    `_require_drivable` que `_abrir_picker_permissoes` chama, e e ele que cobre esse caso e o do
+    menu aberto por cima.
     """
     if _provider_of(name) != "codex":
         raise HTTPException(400, detail=erro("erro_permissao_so_codex",
