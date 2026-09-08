@@ -15,7 +15,8 @@ from app import pi_inbox
 from app import tmux
 from app.models import scrub_surrogates
 from app.pqueue import PromptQueue, _transcript_start_ts
-from app.state import _live_spinner, classify, is_overlay, omp_box, aprovacao_kimi_no_pane
+from app.state import (_live_spinner, classify, is_overlay, menu_codex, omp_box,
+                       aprovacao_kimi_no_pane)
 from app.tmux import send_keys
 
 _log = logging.getLogger("hangar.terminal_input")
@@ -2249,11 +2250,26 @@ class TerminalInput:
     # numero de um picker costuma selecionar E confirmar). Por que e o picker, e nao o app-server,
     # esta medido no cabecalho de `app/codex_permissions.py`.
 
+    def _recusa_com_menu_do_codex(self, name: str) -> None:
+        """Ha um menu do CODEX na tela? Entao nada de teclar — a tecla seria resposta dele.
+
+        Existe separado do `_require_drivable` porque aquele so conhece a TUI do Claude: o
+        `_live_spinner` casa os glifos do Claude e o `is_overlay` procura o rodape de navegacao
+        DELE. Medido nas fixtures de tests/test_codex_permissions.py: a confirmacao do Full Access
+        do Codex da `is_overlay` False. O `menu_codex` e o detector do widget do Codex (o mesmo que
+        a lista usa) e devolve None pro nosso proprio picker de permissoes, entao ele barra menu
+        alheio sem barrar a operacao.
+        """
+        pane = tmux.capture_pane(name)
+        if menu_codex(pane) is not None or cxperm.confirmacao_de_full_access(pane):
+            raise mp.PickerError(409, "ha um menu aberto no terminal da sessao")
+
     def _abrir_picker_permissoes(self, name: str) -> str:
-        # Mesmo guard do `/model`: pane com menu aberto ou turno em voo nao pode receber texto. Ele
-        # le o PANE, entao vale tambem quando o app-server nao tem a sessao assinada — o
-        # `deliverable` da rota responde True nesse caso, sem olhar a tela.
+        # Guard do Claude (sessao viva, sem overlay, sem turno em voo) MAIS o menu do Codex, que
+        # aquele nao enxerga. Ele le o PANE, entao vale tambem quando o app-server nao tem a sessao
+        # assinada — o `deliverable` da rota responde True nesse caso sem olhar a tela.
         self._require_drivable(name)
+        self._recusa_com_menu_do_codex(name)
         send_keys(name, "/permissions", literal=True)
         time.sleep(_SETTLE)
         send_keys(name, "Enter")
@@ -2265,14 +2281,12 @@ class TerminalInput:
             # melhor caso e um no-op e no pior dispara a confirmacao do Full Access.
             # "Nao abriu" nao quer dizer "tela livre": um dialogo tambem devolve None aqui, e ai o
             # Enter confirmaria a opcao sob o cursor DELE. Sem Esc tambem: o dialogo e de quem esta
-            # no terminal, nao nosso.
-            # Os DOIS predicados porque nenhum sozinho cobre: `is_overlay` procura o rodape de
-            # navegacao do Claude e nao ve dialogo do Codex (medido nas fixtures deste pacote — ate
-            # o picker de permissoes da False), e a confirmacao do Full Access e o dialogo perigoso
-            # que sobra pendurado justamente no caminho desta funcao.
-            pendente = tmux.capture_pane(name)
-            if is_overlay(pendente) or cxperm.confirmacao_de_full_access(pendente):
-                raise mp.PickerError(409, "ha um menu aberto no terminal da sessao")
+            # no terminal, nao nosso. E "aberto pela metade" tambem nao e "nao abriu": ai o Enter
+            # confirmaria a linha sob o cursor de um picker que ESTA na tela.
+            if cxperm.picker_aberto(tmux.capture_pane(name)):
+                self._abort(name)
+                raise mp.PickerError(409, "o picker de permissoes do Codex abriu pela metade")
+            self._recusa_com_menu_do_codex(name)
             send_keys(name, "Enter")
             pane = self._espera_picker_permissoes(name)
         if pane is None:
@@ -2281,6 +2295,14 @@ class TerminalInput:
         return pane
 
     def _espera_picker_permissoes(self, name: str) -> str | None:
+        """O pane com o picker DESENHADO, ou None se ele nao chegou a esse ponto.
+
+        Pane meio desenhado nao serve de resposta: `parse_modos` nele devolve a lista pela metade e
+        `modo_atual` devolve None — a folha do app mostraria menos modos do que existem, sem tique
+        e sem erro. Quem estourar o prazo com o titulo na tela mas a lista incompleta vira falha, e
+        nao meia-verdade (o `picker_aberto` decide isso no caller, que precisa saber a diferenca
+        entre "nao abriu" e "abriu e nao terminou").
+        """
         fim = time.monotonic() + self._OPEN_PRAZO
         while True:
             time.sleep(_SETTLE)
@@ -2288,7 +2310,7 @@ class TerminalInput:
             if cxperm.picker_desenhado(pane):
                 return pane
             if time.monotonic() >= fim:
-                return pane if cxperm.picker_aberto(pane) else None
+                return None
 
     def list_codex_permissions(self, name: str) -> dict:
         """Modos do `/permissions` e qual esta ativo. Fecha com Esc, sem aplicar nada.
@@ -2365,7 +2387,13 @@ class TerminalInput:
             time.sleep(_SETTLE)
             if cxperm.confirmacao_de_full_access(tmux.capture_pane(name)):
                 return True
-        return False
+        # Estouro NAO e "nao vem dialogo": pedimos justamente o modo que abre um, e nao sabemos se
+        # ele esta a caminho. Seguir daqui e digitar `/permissions` por cima de um dialogo que pode
+        # chegar meio segundo depois — o Enter cairia no "Yes, continue anyway" e o Full Access
+        # seria aplicado com a rota dizendo que falhou. Falha alta, com o terminal do jeito que
+        # esta: quem abriu o dialogo responde nele.
+        raise mp.PickerError(
+            409, "o Codex nao mostrou a confirmacao do Full Access — confira o terminal da sessao")
 
     def _confirmar_permissao(self, name: str, modo: str) -> str:
         """Le de volta o que o Codex aplicou, reabrindo o picker.

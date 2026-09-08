@@ -51,6 +51,7 @@
   async function escolher(modo: string) {
     if (aplicando) return;
     if (modo === atual) { onClose(); return; }
+    const sn = sessionName;   // a folha pode trocar de sessão embaixo da releitura do catch
     aplicando = modo;
     err = null;
     try {
@@ -61,6 +62,17 @@
     } catch (e) {
       err = e instanceof Error ? e.message : m.comum_falha_aplicar();
       aplicando = null;
+      // Relê o que ficou DE FATO. A troca pode ter chegado no terminal e falhado na volta (o
+      // backend recusa quando o modo lido não é o pedido), e aí a tela mostrando o modo antigo é
+      // pior que o erro: ela afirma uma permissão que não é a que está valendo. Se a releitura
+      // também falhar, fica só o erro — ele já está na tela.
+      getCodexPermissions(sessionName)
+        .then((res) => {
+          if (sn !== sessionName) return;
+          atual = res.current;
+          if (res.current) onApplied(res.current);
+        })
+        .catch(() => {});
       return;
     }
     aplicando = null;

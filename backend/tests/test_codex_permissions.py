@@ -114,6 +114,39 @@ def test_espera_a_confirmacao_de_full_access_que_demora():
         assert TerminalInput()._espera_confirmacao_full("cx", "Full Access") is True
 
 
+# Menu do Codex JA na tela (aprovacao de hook, login): nem o `/permissions` chega a ser digitado —
+# ele cairia dentro do menu do usuario. O `_require_drivable` sozinho nao pega isto: ele so conhece
+# a TUI do Claude.
+def test_menu_do_codex_barra_antes_de_digitar():
+    cap, sk, hs, sl, pz = _driver([PANE_IDLE, CONFIRMA])
+    with cap, sk as teclas, hs, sl, pz, pytest.raises(mp.PickerError) as exc:
+        TerminalInput().list_codex_permissions("cx")
+    assert exc.value.status == 409
+    assert teclas.call_args_list == []
+
+
+# Picker que abriu e parou no meio do desenho: a lista sai pela metade e o modo atual some. Falha
+# alta — 200 com menos modos do que existem e sem tique e pior que erro. E sem 2o Enter: ele
+# confirmaria a linha sob o cursor de um picker que ESTA na tela.
+def test_picker_pela_metade_falha_em_vez_de_devolver_lista_parcial():
+    meio = PICKER.split("Press enter to confirm")[0]
+    cap, sk, hs, sl, pz = _driver([PANE_IDLE, PANE_IDLE, meio])
+    with cap, sk as teclas, hs, sl, pz, pytest.raises(mp.PickerError) as exc:
+        TerminalInput().list_codex_permissions("cx")
+    assert exc.value.status == 409
+    assert [c.args[1] for c in teclas.call_args_list] == ["/permissions", "Enter", "Escape"]
+
+
+# Pedimos Full Access e o dialogo nao apareceu no prazo: NAO da pra concluir que ele nao vem. Seguir
+# daqui digitaria `/permissions` por cima de um dialogo que pode chegar em seguida, e o Enter cairia
+# no "Yes, continue anyway" — Full Access aplicado com a rota dizendo que falhou.
+def test_dialogo_que_nunca_chega_vira_erro_e_nao_silencio():
+    cap, sk, hs, sl, pz = _driver([PANE_IDLE], prazo=0.05)
+    with cap, sk, hs, sl, pz, pytest.raises(mp.PickerError) as exc:
+        TerminalInput()._espera_confirmacao_full("cx", "Full Access")
+    assert exc.value.status == 409
+
+
 # Modo comum: o Codex nao abre dialogo nenhum. A sonda tem que sair na primeira leitura, senao toda
 # troca pagaria o prazo inteiro de espera por um dialogo que nunca vem.
 def test_modo_comum_nao_espera_dialogo():
