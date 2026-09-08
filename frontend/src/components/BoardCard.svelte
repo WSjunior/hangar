@@ -10,7 +10,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   import { ditadoEstilo } from '../lib/ditadoEstilo.svelte';
   import { relativeTime, bubblesFromTail, pairColor, parsePeerMessage, providerTag } from '../lib/format';
   import { parseStatusLine } from '../lib/statusline';
-  import { lerSubagenteCodex } from '../lib/subagenteCodex';
+  import { lerSubagenteCodex, rotuloSubagente } from '../lib/subagenteCodex';
   import { loopBadge, LOOP_TONE_COLOR } from '../lib/loop';
   import { planBadge } from '../lib/plan';
   import PlanBar from './PlanBar.svelte';
@@ -487,7 +487,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
           {#if sub}
             <!-- Notificação de subagente do Codex (mensagem de user no rollout): uma linha, senão
                  o card do quadro enche de JSON. O relatório inteiro está no chat. -->
-            <p class="bc-user bc-sub">{sub.status === 'completed' ? m.subagente_card_concluido() : sub.status === 'errored' || sub.status === 'failed' ? m.subagente_card_falhou() : m.subagente_card_status({ s: sub.status })}</p>
+            <p class="bc-user bc-sub">{rotuloSubagente(sub.status)}</p>
           {:else if peer}
             <!-- Recado de par ([de: X]/[grupo: X]): mesma linguagem da bolha do chat cheio
                  (chip 📟/📣 + tinta accent), versão compacta — sem isto o card mostrava o

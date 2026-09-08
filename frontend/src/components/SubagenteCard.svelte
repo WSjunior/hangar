@@ -2,7 +2,7 @@
   import * as m from '../paraglide/messages';
   import { intlLocale } from '../lib/locale';
   import { renderMarkdown } from '../lib/markdown';
-  import type { SubagenteCodex } from '../lib/subagenteCodex';
+  import { rotuloSubagente, subagenteFalhou, type SubagenteCodex } from '../lib/subagenteCodex';
 
   // Cartão da notificação de subagente do Codex. Mesmo molde do OrqPainelCard: desfecho no
   // cabeçalho, corpo renderizado, e a notificação crua num bloco fechado — o cartão pode ler
@@ -15,17 +15,11 @@
   }
   let { sub, cru, ts = null }: Props = $props();
 
-  const erro = $derived(sub.status === 'errored' || sub.status === 'failed');
+  const erro = $derived(subagenteFalhou(sub.status));
   const hora = $derived(
     ts ? new Date(ts * 1000).toLocaleTimeString(intlLocale(), { hour: '2-digit', minute: '2-digit' }) : '',
   );
-  const titulo = $derived(
-    sub.status === 'completed'
-      ? m.subagente_card_concluido()
-      : erro
-        ? m.subagente_card_falhou()
-        : m.subagente_card_status({ s: sub.status }),
-  );
+  const titulo = $derived(rotuloSubagente(sub.status));
   // Só os 8 primeiros: o agent_path é um uuid inteiro e come a linha do cabeçalho no celular.
   const curto = $derived(sub.agentPath.slice(0, 8));
 

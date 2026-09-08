@@ -9,6 +9,7 @@
 // Mesmas duas regras dos outros cartões (orqRecado, bastaoRecado): o que não casar volta `null` e
 // cai na bolha de sempre, e o texto cru nunca some — quem o mostra é o componente, num bloco
 // fechado.
+import * as m from '../paraglide/messages';
 
 export type SubagenteCodex = {
   /** Chave de `status` como o Codex a escreveu: `completed`, `errored`, ou outra que ele criar. */
@@ -20,6 +21,21 @@ export type SubagenteCodex = {
 };
 
 const ENVELOPE = /^<subagent_notification>\s*([\s\S]*?)\s*<\/subagent_notification>$/;
+
+/** Falhou? `errored` e `failed` são o mesmo desfecho pra quem lê; o Codex usa os dois. */
+export function subagenteFalhou(status: string): boolean {
+  return status === 'errored' || status === 'failed';
+}
+
+/**
+ * Rótulo do status, um só pros dois lugares que o mostram (cartão do chat e linha do quadro).
+ * Estava duplicado como ternário no card do quadro — a terceira cópia é que começaria a divergir.
+ */
+export function rotuloSubagente(status: string): string {
+  if (status === 'completed') return m.subagente_card_concluido();
+  if (subagenteFalhou(status)) return m.subagente_card_falhou();
+  return m.subagente_card_status({ s: status });
+}
 
 export function lerSubagenteCodex(texto: string): SubagenteCodex | null {
   const casou = texto.trim().match(ENVELOPE);
