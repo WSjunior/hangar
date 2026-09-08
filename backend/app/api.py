@@ -2746,7 +2746,7 @@ async def pair_session(name: str, body: PairBody):
         members, snap = await asyncio.to_thread(pair.join_group, name, others, body.task, substituir_task=body.replace_task)
     except pair.PairMixError as e:
         # Uma das sessões locais já está pareada cross-server (1:1) — não dá pra fundir em grupo local.
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, detail=erro("erro_pareamento_mistura_cross", str(e)))
     except pair.TaskConflito as e:
         raise HTTPException(409, detail=erro("erro_pareamento_tarefa_existente",
                                              f"o grupo já tem tarefa: {e.existente!r} — repita com "
@@ -2800,7 +2800,7 @@ async def _pair_cross_server(name: str, peer: str, task: str, replace_task: bool
         members, snap = await asyncio.to_thread(pair.join_group, name, [peer], task, substituir_task=replace_task)
     except pair.PairMixError as e:
         # `name` já está num grupo local (ou já pareada cross-server): não dá pra cross-parear.
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, detail=erro("erro_pareamento_mistura_cross", str(e)))
     except pair.TaskConflito as e:
         raise HTTPException(409, detail=erro("erro_pareamento_tarefa_existente",
                                              f"o grupo já tem tarefa: {e.existente!r} — repita com "
@@ -2860,7 +2860,7 @@ async def pair_remote(name: str, body: PairRemoteBody):
         members, snap = await asyncio.to_thread(pair.join_group, name, [body.initiator], body.task, substituir_task=True)
     except pair.PairMixError as e:
         # `name` já está num grupo local aqui — não pode virar par cross-server de outra máquina.
-        raise HTTPException(409, str(e))
+        raise HTTPException(409, detail=erro("erro_pareamento_mistura_cross", str(e)))
     e = await _deliver(name, _group_text(name, [body.initiator], body.task))
     if e:
         await asyncio.to_thread(pair.restore, snap)
@@ -3293,7 +3293,7 @@ async def _avisar_saida(name: str, expeers: list[str], motivo: str) -> list[dict
         except peers.PeerError as ex:
             # Sidecar remoto fica órfão até alguém desparear lá. ponytail: sem fila de retry — single-user.
             _log.warning("saida do grupo: peer remoto '%s' não avisado (sidecar de lá fica órfão): %s", p, ex)
-            errs.append({"sessao": p, "erro": str(ex)})
+            errs.append({"sessao": p, "erro": erro("erro_peer_nao_avisado", str(ex), peer=p)})
     resto = [p for p in expeers if not peers.is_remote(p)]
     for p in resto:
         e = await _deliver(p, pair_texto.texto_saida(name, motivo, [x for x in resto if x != p]))

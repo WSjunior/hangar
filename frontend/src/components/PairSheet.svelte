@@ -43,8 +43,11 @@
   let feed = $state<PeerMsg[]>([]);
   let feedLoading = $state(false);
   let feedError = $state<string | null>(null); // membros cujo histórico falhou (≠ conversa vazia)
-  // Contrato compartilhado (markdown que os membros editam via fs): exibido cru, read-only.
+  // Contrato compartilhado (markdown que os membros editam via fs): renderizado, read-only.
   let contract = $state<{ path: string; content: string } | null>(null);
+  // Separado de `contract = null`: "não consegui buscar" não pode se passar por "ainda não há
+  // contrato" — são a mesma tela com causas opostas, e a segunda é estado normal do grupo novo.
+  let contractError = $state<string | null>(null);
 
   // epoch: o BottomSheet mantem o componente MONTADO entre aberturas — abrir/fechar/reabrir rapido
   // (ou o grupo mudar entre aberturas) deixava resposta ANTIGA resolver depois e sobrescrever
@@ -95,11 +98,16 @@
     feed = [];
     feedError = null;
     contract = null;
+    contractError = null;
     if (members.length) {
       loadFeed(members, my);
       getPairContract(sessionName)
-        .then((c) => { if (my === epoch) contract = { path: c.path, content: c.content }; })
-        .catch(() => { if (my === epoch) contract = null; });
+        .then((c) => { if (my === epoch) { contract = { path: c.path, content: c.content }; } })
+        .catch((e) => {
+          if (my !== epoch) return;
+          contract = null;
+          contractError = e instanceof Error && e.message ? e.message : m.par_contrato_falhou();
+        });
     }
     getSessions()
       .then((all) => { if (my === epoch) sessions = all.filter((s) => s.name !== sessionName && s.state !== 'dead'); })
@@ -270,6 +278,9 @@
           <div class="contract-body md">{@html renderMarkdown(contract.content, { joinWrapped: true })}</div>
           <span class="contract-path" title={contract.path}>{contract.path}</span>
         </div>
+      {:else if contractError}
+        <!-- Sem isto a busca que falhou some na tela do grupo que ainda não escreveu contrato. -->
+        <p class="empty">⚠ {contractError}</p>
       {/if}
 
       <!-- Conversa do grupo: o que os membros já combinaram, num lugar só. -->

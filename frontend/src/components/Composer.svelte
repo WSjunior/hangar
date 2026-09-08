@@ -1716,7 +1716,7 @@
     <div class="tab-left">
       {#if onOpenPair}
         {@const pairLabel = pairPeers?.length === 1 ? pairPeers[0]
-          : pairPeers?.length ? `grupo (${pairPeers.length + 1})` : null}
+          : pairPeers?.length ? m.composer_grupo_n({ n: pairPeers.length + 1 }) : null}
         <button class="repo-chip pair-chip" class:pair-chip--on={!!pairPeers?.length}
                 title={pairPeers?.length ? m.composer_grupo_voce({ n: pairPeers.join(', ') }) : m.composer_parear_outra()}
                 onclick={onOpenPair} aria-label={m.composer_pareamento_sessoes()}>

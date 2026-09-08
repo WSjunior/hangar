@@ -170,6 +170,8 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_pareamento_cross_1_1: () => m.erro_pareamento_cross_1_1(),
   erro_pareamento_server_id_ausente: () => m.erro_pareamento_server_id_ausente(),
   erro_pareamento_desfeito: (p) => m.erro_pareamento_desfeito({ avisos: fmtParam(p.avisos) }),
+  erro_pareamento_mistura_cross: () => m.erro_pareamento_mistura_cross(),
+  erro_peer_nao_avisado: (p) => m.erro_peer_nao_avisado({ peer: fmtParam(p.peer) }),
   erro_pareamento_nao_confirmado: (p) => m.erro_pareamento_nao_confirmado({ srv: String(p.srv), erro: String(p.erro) }),
   erro_pareamento_rejeitado: (p) => m.erro_pareamento_rejeitado({ erro: fmtParam(p.erro) }),
   erro_pareamento_aviso_falhou: (p) => m.erro_pareamento_aviso_falhou({ nome: String(p.nome), erro: fmtParam(p.erro) }),

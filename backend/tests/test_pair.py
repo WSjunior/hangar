@@ -81,6 +81,27 @@ def test_legacy_single_peer_format_is_read():
     assert link["peers"] == ["outro"] and link["task"] == "t"
 
 
+def test_sidecar_legado_sem_gid_ganha_um_derivado_e_igual_dos_dois_lados():
+    # Sidecar de antes do gid existir voltava com gid vazio; `clusterByPair` (front) só agrupa por
+    # gid, então a sessão aparecia solta — o desktop disfarçava com um chip próprio lendo `peers` e
+    # o celular não mostrava vínculo nenhum. O derivado sai do CONJUNTO de membros, então os dois
+    # sidecars caem no mesmo valor sem combinarem nada.
+    for nome, peer in (("velho", "antigo"), ("antigo", "velho")):
+        (pair._pair_dir() / f"{nome}.json").write_text(
+            json.dumps({"peers": [peer], "task": "t"}), encoding="utf-8")
+    gid_a, gid_b = PairLink("velho").get()["gid"], PairLink("antigo").get()["gid"]
+    assert gid_a and gid_a == gid_b
+    # E não é gravado: escrever durante uma leitura que roda a cada poll da lista é caro e arriscado.
+    assert "gid" not in json.loads((pair._pair_dir() / "velho.json").read_text(encoding="utf-8"))
+
+
+def test_gid_derivado_nao_atropela_o_gravado():
+    # Grupo normal tem gid de verdade; o derivado só cobre a ausência.
+    pair.join("a", "b")
+    gravado = json.loads((pair._pair_dir() / "a.json").read_text(encoding="utf-8"))["gid"]
+    assert PairLink("a").get()["gid"] == gravado
+
+
 def test_snapshot_restore_roundtrip():
     pair.join("a", "b")
     snap = pair.snapshot(["a", "c"])

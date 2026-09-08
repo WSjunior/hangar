@@ -8,7 +8,9 @@ peers = os OUTROS membros do grupo (cada sidecar lista todos menos o dono). gid 
 grupo (não muda quando membro entra/sai) — nomeia o arquivo de CONTRATO compartilhado. Formato
 legado {"peer": "x"} (1:1) é lido como {"peers": ["x"]}. O efeito de comportamento (as sessões se
 falarem via hangar-send) vem do PROMPT que a API injeta; o sidecar persiste o vínculo pro badge/unpair."""
+import hashlib
 import json
+import logging
 import shutil
 import threading
 import time
@@ -18,6 +20,8 @@ from pathlib import Path
 from app import atomico
 from app.config import settings
 from app.models import dumps_safe
+
+_log = logging.getLogger(__name__)
 from app.pqueue import _sanitize
 
 # Lock global das operações de GRUPO (N sidecars): join/leave/rename concorrentes sem isto podiam
@@ -47,10 +51,24 @@ def _pair_dir() -> Path:
     return d
 
 
+def _gid_legado(name: str, peers: list[str]) -> str:
+    """gid derivado do CONJUNTO de membros, pra sidecar escrito antes de o gid existir (par 1:1).
+
+    Todo membro deriva do mesmo conjunto ordenado, então os sidecars de um mesmo grupo caem no mesmo
+    valor sem combinarem nada — que é o que a lista do app precisa pra agrupá-los. Sem isto o link
+    volta com `gid` vazio, `clusterByPair` não agrupa e a sessão aparece solta: o desktop disfarçava
+    com um chip próprio lendo `peers`, e o celular não mostrava vínculo nenhum.
+
+    Não é gravado: escrever durante uma leitura que roda a cada poll da lista é caro e arriscado, e
+    o primeiro `join_group`/`leave` já grava um gid de verdade por cima."""
+    return hashlib.sha1("\n".join(sorted([name, *peers])).encode("utf-8")).hexdigest()[:8]
+
+
 class PairLink:
     """Sidecar de UM membro (<nome>.json). get() normaliza o formato legado 1:1."""
 
     def __init__(self, name: str):
+        self.name = name
         self.path = _pair_dir() / f"{_sanitize(name)}.json"
 
     def get(self) -> dict | None:
@@ -66,7 +84,8 @@ class PairLink:
         peers = [p for p in (data.get("peers") or []) if p]
         if not peers:
             return None
-        return {"peers": peers, "task": data.get("task", ""), "gid": data.get("gid", "")}
+        return {"peers": peers, "task": data.get("task", ""),
+                "gid": data.get("gid") or _gid_legado(self.name, peers)}
 
     def set(self, peers: list[str], task: str = "", gid: str = "") -> None:
         # Escrita atômica (tmp + replace), mesmo padrão do PromptQueue._write_atomic.
@@ -191,8 +210,11 @@ def _merge_contract(loser_gid: str, survivor_gid: str) -> None:
                 old + f"\n\n## Contrato herdado do grupo {loser_gid} (merge)\n\n" + content + "\n",
                 encoding="utf-8")
             loser.unlink(missing_ok=True)
-        except OSError:
-            pass
+        except OSError as e:
+            # Best-effort de propósito (falhar aqui não desfaz um merge que já valeu), mas não pode
+            # ser MUDO: sem rastro, um contrato herdado que sumiu vira mistério.
+            _log.warning("merge de contrato falhou prefixo=%s perdedor=%s sobrevivente=%s: %s",
+                         prefixo, loser_gid, survivor_gid, e)
 
 
 def join(a: str, b: str, task: str = "") -> list[str]:
@@ -217,8 +239,8 @@ def _arquivar_contratos(gid: str) -> None:
             dst = _arquivo_dir()
             dst.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(dst / f"{prefixo}-{gid}-{ts}.md"))
-        except OSError:
-            pass
+        except OSError as e:
+            _log.warning("arquivamento de contrato falhou prefixo=%s gid=%s: %s", prefixo, gid, e)
 
 
 def leave(name: str) -> list[str]:

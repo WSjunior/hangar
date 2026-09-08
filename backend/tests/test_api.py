@@ -2728,6 +2728,90 @@ def test_pair_warning_parcial_carrega_avisos_estruturados(api_client):
     }]
 
 
+def test_pair_desfaz_o_grupo_quando_ninguem_e_avisado(api_client):
+    # O caminho que produziu um 502 real em 08/09/2026: o composer de duas sessões recém-abertas
+    # não pôde ser lido, `_deliver` falhou nas DUAS, e o grupo tinha de ser revertido — grupo
+    # fantasma (badge sem ninguém saber que está pareado) é pior que pareamento nenhum. A cobertura
+    # existente só olhava a falha PARCIAL, que devolve 200 com warning; esta é a total.
+    snap = {"me": None, "voce": None}
+    restaurados = []
+    async def falha_em_todos(name, text):
+        return {"code": "erro_fila_nao_digitada", "params": {}, "msg": "composer ilegivel"}
+    with patch("app.api.registry.list",
+              return_value=[SessionInfo(name="me", cwd="/p"), SessionInfo(name="voce", cwd="/p")]), \
+         patch("app.api.pair.join_group", return_value=(["me", "voce"], snap)), \
+         patch("app.api.PairLink.get", return_value={"peers": ["voce"], "task": "", "gid": "g1"}), \
+         patch("app.api.pair.restore", side_effect=lambda s: restaurados.append(s)), \
+         patch("app.api._deliver", side_effect=falha_em_todos):
+        r = api_client.post("/api/sessions/me/pair", headers=_h(),
+                            json={"peers": ["voce"], "task": "t"})
+    assert r.status_code == 502
+    assert r.json()["detail"]["code"] == "erro_pareamento_desfeito"
+    # O snapshot restaurado é o MESMO que o join devolveu: sem isso o rollback "funciona" gravando
+    # um estado inventado, e o teste passaria com o grupo meio desfeito.
+    assert restaurados == [snap]
+
+
+def test_pair_mistura_cross_server_vem_com_envelope_traduzivel(api_client):
+    # PairMixError saía como `HTTPException(400, str(e))` cru, ao lado de um irmão (TaskConflito) já
+    # migrado: o celular mostrava texto do backend em vez da frase no idioma do app.
+    with patch("app.api.registry.list",
+              return_value=[SessionInfo(name="me", cwd="/p"), SessionInfo(name="voce", cwd="/p")]), \
+         patch("app.api.pair.join_group", side_effect=pair.PairMixError("ja pareada cross-server")):
+        r = api_client.post("/api/sessions/me/pair", headers=_h(),
+                            json={"peers": ["voce"], "task": "t"})
+    assert r.status_code == 400
+    assert r.json()["detail"]["code"] == "erro_pareamento_mistura_cross"
+
+
+def test_pair_cross_server_feliz_registra_os_dois_lados(api_client, monkeypatch):
+    # O handshake /pair→/pair-remote não tinha teste de rota nenhum: só a unidade `join_group` com
+    # peer remoto. Aqui o endpoint inteiro, com o peer mockado no lugar da outra máquina.
+    from app import api as api_mod
+    monkeypatch.setattr(api_mod.settings, "server_id", "srv-a")
+    chamadas = []
+    with patch("app.api.registry.list", return_value=[SessionInfo(name="me", cwd="/p")]), \
+         patch("app.api.peers.is_remote", side_effect=lambda p: p.startswith("srv-b::")), \
+         patch("app.api.peers.split_addr", return_value=("srv-b", "x")), \
+         patch("app.api.pair.join_group", return_value=(["me", "srv-b::x"], {"me": None})), \
+         patch("app.api.PairLink.get", return_value={"peers": ["srv-b::x"], "task": "t", "gid": "g1"}), \
+         patch("app.api.peers.call", side_effect=lambda *a, **k: chamadas.append(a) or {}), \
+         patch("app.api._deliver", return_value=None):
+        r = api_client.post("/api/sessions/me/pair", headers=_h(),
+                            json={"peers": ["srv-b::x"], "task": "t"})
+    assert r.status_code == 200 and r.json()["warning"] is None
+    # O endereço de resposta que vai pro outro lado é `<server_id>::<sessao>` — sem ele o peer não
+    # sabe pra quem responder, e o recado de volta cai num nome que não existe lá.
+    assert chamadas and chamadas[0][2] == "/api/sessions/x/pair-remote"
+
+
+def test_pair_cross_server_desfaz_deste_lado_quando_o_peer_recusa(api_client, monkeypatch):
+    # Peer rejeitou (não é falha de rede): desfaz aqui e NÃO tenta limpar lá — o outro lado não
+    # chegou a comitar. O 502 tem de vir com envelope, não com texto cru.
+    from app import api as api_mod
+    from app import peers as peers_mod
+    monkeypatch.setattr(api_mod.settings, "server_id", "srv-a")
+    snap = {"me": None}
+    restaurados, chamadas = [], []
+    def call(srv, metodo, rota, corpo=None):
+        chamadas.append(rota)
+        raise peers_mod.PeerError("sessão não encontrada lá", transport=False)
+    with patch("app.api.registry.list", return_value=[SessionInfo(name="me", cwd="/p")]), \
+         patch("app.api.peers.is_remote", side_effect=lambda p: p.startswith("srv-b::")), \
+         patch("app.api.peers.split_addr", return_value=("srv-b", "x")), \
+         patch("app.api.pair.join_group", return_value=(["me", "srv-b::x"], snap)), \
+         patch("app.api.PairLink.get", return_value={"peers": ["srv-b::x"], "task": "t", "gid": "g1"}), \
+         patch("app.api.pair.restore", side_effect=lambda s: restaurados.append(s)), \
+         patch("app.api.peers.call", side_effect=call):
+        r = api_client.post("/api/sessions/me/pair", headers=_h(),
+                            json={"peers": ["srv-b::x"], "task": "t"})
+    assert r.status_code == 502
+    assert r.json()["detail"]["code"] == "erro_pareamento_rejeitado"
+    assert restaurados == [snap]
+    # Rejeição não é rede: o unpair-remote de garantia é só do ramo `transport=True`.
+    assert [c for c in chamadas if "unpair-remote" in c] == []
+
+
 def test_pair_warning_none_quando_todos_avisados(api_client):
     # B1: sem falha -> warning None (array vazio nunca chega ao formatador do front).
     with patch("app.api.registry.list",
@@ -2999,8 +3083,13 @@ def test_unpair_peer_error_serializa_causa_textual(api_client, monkeypatch):
         assert r.status_code == 200, transport
         w = r.json()["warning"]
         assert w["params"]["avisos"][0]["sessao"] == "srv-b::x"
-        assert "rede caiu" in w["params"]["avisos"][0]["erro"], transport
-        assert isinstance(w["params"]["avisos"][0]["erro"], str), transport
+        # Envelope, como no aviso LOCAL (que sempre mandou dict): o remoto era o único que saía
+        # como string crua. A intenção original do caso continua sendo cobrada — o que não pode é
+        # o PeerError virar {"transport": ...} e a causa sumir; aqui ela está no `msg`.
+        env = w["params"]["avisos"][0]["erro"]
+        assert env["code"] == "erro_peer_nao_avisado", transport
+        assert "rede caiu" in env["msg"], transport
+        assert env["params"]["peer"] == "srv-b::x", transport
 
 
 def test_input_value_error_do_send_vira_envelope(api_client):
