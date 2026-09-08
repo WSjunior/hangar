@@ -179,10 +179,13 @@
   // desses componentes medem a JANELA e não veem isto, por isso a régua vem daqui, por classe e
   // por prop, em vez de container query: `container-type` no .chat-screen viraria containing
   // block pros sheets position:fixed que moram dentro dele.
+  // O `isDesktopLargo` na conta é o que impede descontar uma faixa que não existe: abaixo de
+  // 1280px o painel é display:none e a reserva --recuo-dir nem é declarada, então sem ele TODA
+  // janela entre 820 e 1279px descontava 240-560px de nada e caía no arranjo de celular.
   let larguraTela = $state(0);
   const larguraColuna = $derived(
     larguraTela === 0 ? 0
-      : larguraTela - (desktop && showContextPanel
+      : larguraTela - (desktop && isDesktopLargo && showContextPanel
           ? (ctxPanel.recolhido ? LARGURA_TRILHO
              : ctxPanel.aba === 'navegador' ? navegadorPanel.largura : ctxPanel.largura)
           : 0),
