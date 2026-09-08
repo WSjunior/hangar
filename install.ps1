@@ -714,9 +714,16 @@ function Baixar-Dist {
     # TUDO em variavel, e Out-Null no que nao interessa: em PowerShell qualquer saida solta dentro
     # da funcao ENTRA no valor de retorno, e um `$true` no fim viraria um array que o `if` le como
     # verdadeiro sempre — inclusive no caminho de falha.
-    if (-not (Tem 'tar')) { return $false }        # tar.exe existe no Windows 10+; sem ele, build local
-    if (-not $commit) { return $false }            # sem git nao da pra saber de que commit e o dist
-    if ($sujo) { return $false }                   # front editado a mao: a pessoa quer o codigo DELA na tela
+    # Cada desistencia diz o MOTIVO (Nota e Write-Host, entao nao entra no valor de retorno): so o
+    # sucesso falava, e quem via o `npm ci` de um minuto e meio rodando nao tinha como saber se o
+    # download nem foi tentado, se o CI ainda nao publicou aquele commit, ou se foi a propria arvore
+    # que o desqualificou.
+    if (-not (Tem 'tar')) {                        # tar.exe existe no Windows 10+; sem ele, build local
+        Nota 'compilando aqui: falta o tar.exe pra baixar o dist do CI'; return $false }
+    if (-not $commit) {                            # sem git nao da pra saber de que commit e o dist
+        Nota 'compilando aqui: sem git, nao da pra saber de que commit e o dist do CI'; return $false }
+    if ($sujo) {                                   # front editado a mao: a pessoa quer o codigo DELA na tela
+        Nota 'compilando aqui: frontend/ tem mudanca local - o dist do CI apagaria ela da tela'; return $false }
     $tmp = Join-Path "$raiz\frontend" (".dist-baixado." + [IO.Path]::GetRandomFileName())
     try {
         # TLS 1.2 explicito: o 5.1 ainda negocia TLS 1.0 por padrao em algumas maquinas e o GitHub
@@ -728,19 +735,27 @@ function Baixar-Dist {
         # O .sha primeiro, que sao 200 bytes: dist de OUTRO commit serve tela velha contra API nova,
         # e esse defeito e mudo. Nao bateu (CI ainda compilando) -> build local, como sempre foi.
         $shaRemoto = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 15 -Uri "$distUrl/frontend-dist.sha").Content
-        if ($shaRemoto.Trim() -ne $commit.Trim()) { return $false }
+        if ($shaRemoto.Trim() -ne $commit.Trim()) {
+            $a = $shaRemoto.Trim(); $b = $commit.Trim()
+            Nota ("compilando aqui: o dist do CI e do commit " + $a.Substring(0, [Math]::Min(8, $a.Length)) +
+                  " e este checkout esta em " + $b.Substring(0, [Math]::Min(8, $b.Length)))
+            return $false
+        }
         $tar = "$tmp.tar.gz"
         Invoke-WebRequest -UseBasicParsing -TimeoutSec 180 -Uri "$distUrl/frontend-dist.tar.gz" -OutFile $tar | Out-Null
         New-Item -ItemType Directory -Force -Path $tmp | Out-Null
         & tar -xzf $tar -C $tmp
-        if ($LASTEXITCODE -ne 0) { return $false }
-        if (-not (Test-Path (Join-Path $tmp 'index.html'))) { return $false }
+        if ($LASTEXITCODE -ne 0) {
+            Nota 'compilando aqui: o frontend-dist.tar.gz do CI nao descompactou'; return $false }
+        if (-not (Test-Path (Join-Path $tmp 'index.html'))) {
+            Nota 'compilando aqui: o dist do CI veio sem index.html'; return $false }
         # Extrai ao LADO e so entao troca: download interrompido no meio nao pode deixar a maquina
         # sem front nenhum, ja que este caminho, ao voltar $true, faz o build local nem rodar.
         if (Test-Path $dist) { Remove-Item -Recurse -Force (Split-Path -Parent $dist) -ErrorAction SilentlyContinue }
         Move-Item $tmp "$raiz\frontend\dist"
         return $true
     } catch {
+        Nota 'compilando aqui: falhou o download do dist do CI (rede, TLS ou release fora do ar)'
         return $false
     } finally {
         if ($null -ne $progAnt) { $ProgressPreference = $progAnt }

@@ -233,6 +233,15 @@ def test_composer_pi_vazio_envia():
         assert terminal_input._composer_ocupado_pi("pi-x") is False
 
 
+def test_composer_pi_no_alto_da_tela_ainda_ve_o_rascunho():
+    # Sessao recem-aberta (composer no alto, fundo em branco) e exatamente quando este caminho de
+    # raspagem roda: antes de a extensao publicar a linha do Pi. Sem a poda das brancas do fim ele
+    # respondia "nao ha rascunho" sem ler, e a checagem ficava inerte na janela em que mais importa.
+    pane = _pane_pi(["texto parado no composer"]) + "\n" * 16
+    with patch.object(terminal_input, "_capture", return_value=pane):
+        assert terminal_input._composer_ocupado_pi("pi-x") is True
+
+
 def test_composer_pi_ilegivel_nao_bloqueia():
     # pane sem réguas (redraw/boot): na dúvida envia — mesma política do resto do arquivo
     with patch.object(terminal_input, "_capture", return_value="pi v0.83.0\nsem reguas aqui"):

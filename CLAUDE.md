@@ -1495,6 +1495,26 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
     `is_overlay` é a única defesa. Quem responde "quais são as últimas 8 linhas" agora é o
     `state._rodape`, que descarta as em branco do fim — a mesma correção que o `_pane_tail` do
     `terminal_input` já tinha, e que o `_menu_block` (o gate do picker do Pi) também precisava.
+  - **Quarta porta do mesmo defeito: `_composer_regiao`** (medido 08/09/2026, numa máquina Windows,
+    parear `pss` com `pmw`). Numa sessão **recém-aberta** o Claude Code desenha o composer no ALTO
+    da tela e o resto do pane vem em branco; a distância da régua de baixo até o fim estourava
+    `_COMPOSER_FUNDO = 8` e a região era dada como ilegível. Consequência: `_deliver` não conseguia
+    provar a entrega do prompt do grupo em NENHUM membro, `pair_session` reverteu o grupo e devolveu
+    502, e a tela dizia só "Falhou o pareamento com pss." O log traz a geometria exata —
+    `reguas=5,7 fundo=16` e `reguas=11,13 fundo=10`, panes de 23 linhas —, reproduzida com um pane
+    fabricado nesses números. Aqui, com a janela cheia, o fundo é 4–7: por isso nunca apareceu no
+    Linux. Hoje `_linhas_uteis` apara as brancas do fim antes de medir, e o **diagnóstico usa a mesma
+    poda** — medindo o pane cru ele reportaria um fundo que a decisão real não usa.
+  - **O `catch` do `PairSheet` jogava fora o motivo.** Todos os erros do `/pair` vêm em envelope
+    traduzível (`erro_sessao_nao_encontrada_detalhe`, `erro_pareamento_desfeito`,
+    `erro_pareamento_tarefa_existente`) e `lerErro` já os resolve antes de virar `Error` — o
+    `catch` sem variável descartava isso e deixava a tela sem nada para consertar. Mesmo defeito no
+    `doLeave`, corrigido junto.
+  - **`Baixar-Dist` só falava no sucesso.** Cada `return $false` (sem tar/curl, sem git, `frontend/`
+    sujo, sha do CI de outro commit, tar quebrado) era mudo, e o `npm ci` de um minuto e meio
+    começava sem explicação — quem trocou para baixar o dist do CI não tinha como saber se o
+    download nem foi tentado. Agora cada desistência imprime o motivo, nos dois instaladores; no
+    `install.ps1` isso só é seguro porque `Nota` é `Write-Host` e não entra no valor de retorno.
   - **`awatch` numa pasta que ainda não existe derruba o SSE em laço.** `projects/<slug>` só nasce
     quando o agente escreve; até lá o `follow()` levantava `FileNotFoundError`, o `pump` mandava o
     erro pro cliente, o EventSource reconectava e caía no mesmo erro. O `TranscriptTailer.follow`

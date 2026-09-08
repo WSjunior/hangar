@@ -124,8 +124,12 @@
       } else {
         onClose();
       }
-    } catch {
-      error = m.par_falhou_pareamento({ nomes: picked.join(', ') });
+    } catch (e) {
+      // O motivo vem do backend já traduzido (sessão sumida, aviso não entregue em ninguém, tarefa
+      // em conflito) e o `catch` sem variável o jogava fora: a tela dizia só "falhou" e não havia
+      // como saber o que consertar.
+      const base = m.par_falhou_pareamento({ nomes: picked.join(', ') });
+      error = e instanceof Error && e.message ? `${base} ${e.message}` : base;
     } finally {
       busy = false;
     }
@@ -143,8 +147,8 @@
       } else {
         onClose();
       }
-    } catch {
-      error = m.par_falhou_saida();
+    } catch (e) {
+      error = e instanceof Error && e.message ? `${m.par_falhou_saida()} ${e.message}` : m.par_falhou_saida();
     } finally {
       busy = false;
     }

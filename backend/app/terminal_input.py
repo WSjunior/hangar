@@ -382,9 +382,20 @@ def _paste_ids(regiao: str) -> set[str]:
     return set(_PASTE_ID_RE.findall(regiao))
 
 
+def _linhas_uteis(pane: str) -> list[str]:
+    """Linhas do pane SEM as em branco do fim — terceira porta do mesmo defeito que `state._rodape` e
+    `_pane_tail` ja tratam. O `capture-pane` devolve a altura inteira, entao numa sessao recem-aberta
+    o composer fica no ALTO e o resto vem vazio: a distancia dele ate o fim estoura _COMPOSER_FUNDO e
+    a regiao e dada como ilegivel."""
+    linhas = pane.split("\n")
+    while linhas and not linhas[-1].strip():
+        linhas.pop()
+    return linhas
+
+
 def _composer_regiao(pane: str, nome_sessao: str = "") -> str | None:
     """Regiao do composer (entre as duas ultimas reguas) ou None se ilegivel (avisa uma vez)."""
-    linhas = pane.split("\n")
+    linhas = _linhas_uteis(pane)
     reguas = [i for i, l in enumerate(linhas) if l.count("─") >= 20]
     if len(reguas) >= 2 and (
             len(linhas) - reguas[-1] > _COMPOSER_FUNDO or reguas[-1] - reguas[-2] > _COMPOSER_ALTURA):
@@ -489,7 +500,9 @@ def _diag_composer(pane: str, texto: str, name: str, pastes_antes: set[str] | No
     antes/depois, pro caso do texto ter colapsado em placeholder.
     """
     try:
-        linhas = pane.split("\n")
+        # Mesma poda do _composer_regiao: medindo o pane cru, a geometria do diagnostico contaria as
+        # linhas em branco do fim e apontaria um fundo que a decisao real nao usa.
+        linhas = _linhas_uteis(pane)
         reguas = [i for i, l in enumerate(linhas) if l.count("─") >= 20]
         if len(reguas) >= 2:
             geometria = (f"reguas={reguas[-2]},{reguas[-1]} "
@@ -588,7 +601,10 @@ def _composer_ocupado_pi(name: str, pane_id: str | None = None) -> bool:
             # sobra de um paste cancelado. Vazio e resposta ("nao ha rascunho"), None e ausencia.
             return bool(resposta.strip())
     try:
-        linhas = _capture(name).split("\n")
+        # Mesma poda do _composer_regiao, e pelo mesmo motivo: numa sessao Pi recem-aberta — que e
+        # justamente quando este caminho de raspagem roda, antes de haver linha do Pi — o composer
+        # fica no alto e o fundo em branco faz a checagem de rascunho responder "nao ha" sem ler.
+        linhas = _linhas_uteis(_capture(name))
     except Exception:
         return False
     reguas = [i for i, l in enumerate(linhas) if l.count("─") >= 20]

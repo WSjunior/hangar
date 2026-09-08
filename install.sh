@@ -249,16 +249,24 @@ nota "É esse token que você digita no celular na primeira conexão."
 # O CI compila o front a cada push na main e publica o resultado na release `dist-latest`. Baixar
 # de lá evita o passo mais lento e mais frágil da instalação (o `npm ci` + build local).
 DIST_URL=https://github.com/jeffer1312/hangar/releases/download/dist-latest
+# Cada desistência diz o MOTIVO: só o sucesso falava, então quem via o `npm ci` de um minuto e meio
+# rodando não tinha como saber se o download nem foi tentado, se o CI ainda não publicou aquele
+# commit, ou se foi a própria árvore que o desqualificou.
 baixar_dist() { # 0 = frontend/dist agora tem o build DESTE commit
-  command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1 || return 1
+  command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1 \
+    || { nota "compilando aqui: falta curl ou tar pra baixar o dist do CI"; return 1; }
   local sha_local sha_remoto tmp
-  sha_local=$(git rev-parse HEAD 2>/dev/null) || return 1
+  sha_local=$(git rev-parse HEAD 2>/dev/null) \
+    || { nota "compilando aqui: sem git, não dá pra saber de que commit é o dist do CI"; return 1; }
   # Árvore suja no front = quem está editando quer o SEU código na tela, não o do CI.
-  [ -z "$(git status --porcelain -- frontend 2>/dev/null)" ] || return 1
+  [ -z "$(git status --porcelain -- frontend 2>/dev/null)" ] \
+    || { nota "compilando aqui: frontend/ tem mudança local — o dist do CI apagaria ela da tela"; return 1; }
   # O .sha primeiro, que são 200 bytes: dist de OUTRO commit serve tela velha contra API nova, e
   # esse defeito é mudo. Não bateu (CI ainda compilando, push agorinha) → cai no build local.
-  sha_remoto=$(curl -fsSL --max-time 15 "$DIST_URL/frontend-dist.sha" 2>/dev/null) || return 1
-  [ "$sha_remoto" = "$sha_local" ] || return 1
+  sha_remoto=$(curl -fsSL --max-time 15 "$DIST_URL/frontend-dist.sha" 2>/dev/null) \
+    || { nota "compilando aqui: não consegui ler o frontend-dist.sha do CI (rede ou release fora)"; return 1; }
+  [ "$sha_remoto" = "$sha_local" ] \
+    || { nota "compilando aqui: o dist do CI é do commit ${sha_remoto:0:8} e este checkout está em ${sha_local:0:8}"; return 1; }
   tmp=$(mktemp -d "frontend/.dist-baixado.XXXXXX") || return 1
   # Extrai ao LADO do dist e só então troca: um download interrompido no meio não pode deixar a
   # máquina sem front nenhum — o build local depois nem roda, porque este caminho já disse "ok".
@@ -267,6 +275,7 @@ baixar_dist() { # 0 = frontend/dist agora tem o build DESTE commit
     rm -rf frontend/dist && mv "$tmp" frontend/dist && return 0
   fi
   rm -rf "$tmp"
+  nota "compilando aqui: o frontend-dist.tar.gz do CI não baixou ou veio incompleto"
   return 1
 }
 say "4/8 Frontend"

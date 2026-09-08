@@ -549,6 +549,16 @@ def test_composer_residuo_pane_ilegivel_devolve_none_nao_false():
     assert ti._composer_residuo("", "qualquer texto longo aqui") is None
 
 
+def test_composer_no_alto_da_tela_com_fundo_vazio_ainda_e_legivel():
+    # Sessao recem-aberta: o composer fica no ALTO e o `capture-pane` devolve a altura inteira, com o
+    # resto em branco. Medido 08/09/2026 numa maquina Windows, no pareamento de 'pss' e 'pmw':
+    # `reguas=5,7 fundo=16` e `reguas=11,13 fundo=10` — os dois acima de _COMPOSER_FUNDO=8, os dois
+    # dados como ilegiveis, o aviso do grupo nao entregue em ninguem e o pareamento revertido (502).
+    pane = _pane_com_composer("linha final do recado") + "\n" * 16
+    assert ti._composer_regiao(pane) is not None
+    assert ti._composer_residuo(pane, "texto longo o suficiente\nlinha final do recado") is True
+
+
 def test_send_prompt_multilinha_que_nao_submete_devolve_partial():
     # O caso dos 3 recados longos que sairam com delivered=True e nunca viraram entrada no transcript
     # do destino (attempts=2 na fila, achados so lendo o sidecar).
