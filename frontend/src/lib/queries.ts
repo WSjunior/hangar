@@ -151,14 +151,23 @@ export function prefetchContas(alvo: Server | null): void {
 // `onDestroy` dele resolveria o servidor NOVO e gravaria a conversa de uma máquina sob a chave da
 // outra. Com sessões de mesmo nome nas duas (o `hangar` local e o da VPS), a próxima abertura
 // pintava a conversa errada antes de qualquer rede. Quem chama captura o id uma vez, na entrada.
+//
+// A chave é o TRANSCRIPT, não o nome: nome é reusado. Uma sessão Codex nova chamada `hangar-2`
+// pintava a conversa da sessão Claude `hangar-2` que existiu antes, e ali o `/history` responde
+// 404 (o rollout só nasce com a thread), então a pintura errada não era nem corrigida — ficava.
+// O `jsonl` é único por sessão, sobrevive a rename e troca sozinho no `/clear`. Sem ele (Codex
+// antes da thread, Kimi antes do 1o prompt) não há chave: melhor não pintar que pintar de outra.
 export interface CaudaChat { eventos: ChatEvent[]; etag: string | null }
 
-const chaveCauda = (servidor: string, name: string) => ['chat-cauda', servidor, name] as const;
+const chaveCauda = (servidor: string, jsonl: string) => ['chat-cauda', servidor, jsonl] as const;
 
-export function lerCaudaChat(servidor: string, name: string): CaudaChat | undefined {
-  return clienteQuery.getQueryData<CaudaChat>(chaveCauda(servidor, name));
+export function lerCaudaChat(servidor: string, jsonl: string | null | undefined): CaudaChat | undefined {
+  if (!jsonl) return undefined;
+  return clienteQuery.getQueryData<CaudaChat>(chaveCauda(servidor, jsonl));
 }
 
-export function guardarCaudaChat(servidor: string, name: string, cauda: CaudaChat): void {
-  clienteQuery.setQueryData(chaveCauda(servidor, name), cauda);
+export function guardarCaudaChat(servidor: string, jsonl: string | null | undefined,
+                                 cauda: CaudaChat): void {
+  if (!jsonl) return;
+  clienteQuery.setQueryData(chaveCauda(servidor, jsonl), cauda);
 }

@@ -1969,6 +1969,30 @@ export function setCodexModel(name: string, model: string, effort?: string | nul
   });
 }
 
+// ── Modo de permissao de uma sessao Codex (`/permissions` da TUI) ─────────────────────────────
+// Sem cache de catalogo, ao contrario do modelo: a lista carrega QUAL modo esta ativo, e ele muda
+// pelo terminal tambem. Cada abertura da pilula pergunta de novo.
+export interface CodexPermissionMode {
+  numero: number;
+  nome: string;
+  desc: string;
+  cursor: boolean;
+  atual: boolean;
+}
+
+export function getCodexPermissions(
+  name: string,
+): Promise<{ modes: CodexPermissionMode[]; current: string | null }> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/codex-permissions`);
+}
+
+export function setCodexPermission(name: string, mode: string): Promise<{ current: string }> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/codex-permissions`, {
+    method: 'POST',
+    body: JSON.stringify({ mode }),
+  });
+}
+
 // ── Modelo + nivel de raciocinio de uma sessao Pi ─────────────────────────────────────────────
 // 409 = extensao hangar-state.ts ausente/desatualizada no Pi (o backend manda a instrucao no detail).
 

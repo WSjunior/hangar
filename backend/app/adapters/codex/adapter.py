@@ -60,6 +60,16 @@ def matar_app_server(name: str) -> None:
         _log.warning("codex: nao deu pra matar o app-server pid=%s name=%s: %s", pid, name, exc)
 
 
+def _effort_da_thread(result: dict) -> str | None:
+    """O esforço padrão da thread na resposta de `thread/start`/`thread/resume`.
+
+    O campo chama `reasoningEffort`, e não `effort` como o do `turn/start` — medido no codex-cli
+    0.153.4. Lendo `effort` a pílula do app nascia vazia com o terminal mostrando `max` ao lado do
+    modelo, que vem da MESMA resposta e por isso aparecia.
+    """
+    return result.get("reasoningEffort") or result.get("effort")
+
+
 def ensure_tmux_tui(name: str, cwd: str, thread_id: str | None, endpoint: str,
                     *, replace: bool = False, initial_prompt: str | None = None,
                     model: str | None = None, effort: str | None = None) -> None:
@@ -454,7 +464,7 @@ class CodexAdapter:
             # `or` e nao setdefault: o attach() ja criou as chaves com None, entao setdefault nunca
             # sobrescreveria e o 🤖 sumia da statusline (visto na verificacao ao vivo).
             sess["default_model"] = sess.get("default_model") or result.get("model")
-            sess["default_effort"] = sess.get("default_effort") or result.get("effort")
+            sess["default_effort"] = sess.get("default_effort") or _effort_da_thread(result)
             _log.info("codex assinado: thread=%s name=%s", sess["thread_id"], name)
             return
 
@@ -594,7 +604,7 @@ class CodexAdapter:
             # subscribed=True: o thread/resume acima JA assinou esta thread (pos-restart o rollout
             # existe, entao ele cola de primeira) -> nao precisa da task de retry.
             self.attach(name, client, thread_id, model=meta.get("model"), effort=meta.get("effort"),
-                        default_model=result.get("model"), default_effort=result.get("effort"),
+                        default_model=result.get("model"), default_effort=_effort_da_thread(result),
                         watch_tmux=True, subscribed=True)
             _log.info("codex ensure_running: resumed thread=%s name=%s", thread_id, name)
             return client

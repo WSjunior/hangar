@@ -3599,6 +3599,45 @@ async def set_codex_model(name: str, body: CodexModelBody):
     return {"ok": True}
 
 
+class CodexPermissionBody(_StrictBody):
+    mode: str
+
+
+async def _guard_permissao_codex(name: str) -> None:
+    """Recusa dirigir o `/permissions` quando o pane nao pode receber comando AGORA.
+
+    Turno em voo: o texto nao vira comando, cai no composer do Codex e o Enter o ENFILEIRA como
+    mensagem — a troca de permissao viraria um "/permissions" mandado pro modelo ler. Quem sabe se
+    ha turno e o app-server (`deliverable`), que e resposta exata; o guard do Claude ao lado
+    (`_require_drivable`) compara dois quadros do spinner porque la nao ha essa fonte.
+    """
+    if _provider_of(name) != "codex":
+        raise HTTPException(400, detail=erro("erro_permissao_so_codex",
+                                             "este modo de permissao so vale para sessoes Codex"))
+    _recusa_se_painel_aberto(name)
+    if not await get_adapter("codex").deliverable(name):
+        raise HTTPException(409, detail=erro("erro_permissao_ocupada",
+                                             "a sessao esta trabalhando — espere ela terminar"))
+
+
+@app.get("/api/sessions/{name}/codex-permissions", dependencies=[Depends(require_auth)])
+async def permissoes_do_codex(name: str):
+    await _guard_permissao_codex(name)
+    try:
+        return await asyncio.to_thread(terminal.list_codex_permissions, name)
+    except (PickerError, terminal.NaoDigitou) as exc:
+        raise HTTPException(exc.status, detail=erro("erro_permissao_picker", exc.detail))
+
+
+@app.post("/api/sessions/{name}/codex-permissions", dependencies=[Depends(require_auth)])
+async def trocar_permissao_do_codex(name: str, body: CodexPermissionBody):
+    await _guard_permissao_codex(name)
+    try:
+        return await asyncio.to_thread(terminal.set_codex_permission, name, body.mode)
+    except (PickerError, terminal.NaoDigitou) as exc:
+        raise HTTPException(exc.status, detail=erro("erro_permissao_picker", exc.detail))
+
+
 @app.get("/api/sessions/{name}/pane", dependencies=[Depends(require_auth)])
 def pane(name: str, lines: int = 200):
     # Pane CRU (texto ja composto pelo tmux: sem ANSI/cursor-move). O espelho do pane (TerminalMirror)

@@ -46,6 +46,7 @@
   import BottomSheet from './BottomSheet.svelte';
   import CodexModelPopover from './CodexModelPopover.svelte';
   import CodexEffortPopover from './CodexEffortPopover.svelte';
+  import CodexPermissionPopover from './CodexPermissionPopover.svelte';
   import PiModelPopover from './PiModelPopover.svelte';
   import KimiModelPopover from './KimiModelPopover.svelte';
   import KimiEffortPopover from './KimiEffortPopover.svelte';
@@ -647,6 +648,12 @@
   function handleCodexEffortApplied(effort: string) {
     codexEffort = effort;
   }
+
+  // Permissão do Codex: o rótulo é o do picker vivo (`Full Access`, `Ask for approval`…), então a
+  // pill só ganha texto depois da primeira leitura — o genérico "Permissão" é o estado até lá.
+  let codexPermOpen = $state(false);
+  let codexPermPillEl = $state<HTMLElement | null>(null);
+  let codexPerm = $state<string | null>(null);
 
   // ── Pill de modelo do Pi: mesmo desenho do de Codex, terceira fonte ──────────────────────────
   // O `/model` do Pi e uma lista com busca de ~300 modelos e o nivel de raciocinio mora dentro do
@@ -2117,6 +2124,20 @@
               </span>
             </button>
           </span>
+          <!-- Permissão do Codex em pill própria, fora do duo: ela não é escolha de modelo, e o
+               que ela move (sandbox + aprovação) é o mesmo eixo da pill de permissão do Claude. -->
+          <button
+            class="model-pill"
+            bind:this={codexPermPillEl}
+            onclick={() => (codexPermOpen = true)}
+            aria-haspopup="dialog"
+            aria-expanded={codexPermOpen}
+            aria-label={m.composer_permissao()}
+          >
+            <span class="pill-label">
+              <span class="pill-model">{codexPerm ?? m.composer_permissao()}</span>
+            </span>
+          </button>
         {/if}
         <button class="attach-btn" onclick={() => fileInput?.click()} aria-label={m.composer_anexar_arquivo()}>
           <IconAttach size={20} />
@@ -2260,6 +2281,14 @@
     {sessionName}
     onApplied={handleCodexEffortApplied}
     onClose={() => (codexEffortOpen = false)}
+  />
+
+  <CodexPermissionPopover
+    open={codexPermOpen}
+    anchor={codexPermPillEl}
+    {sessionName}
+    onApplied={(modo) => (codexPerm = modo)}
+    onClose={() => (codexPermOpen = false)}
   />
 
   <PiModelPopover

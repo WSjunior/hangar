@@ -104,14 +104,28 @@ describe('cauda do chat entre aberturas', () => {
 		expect(lerCaudaChat('srv-a', 'hangar')?.eventos).toHaveLength(7);
 	});
 
-	// O /clear grava cauda VAZIA (e sem validador) em vez de deixar a antiga: é o único ponto que
-	// sabe que o transcript morreu, e sem isso a conversa apagada piscaria na próxima entrada — e o
-	// etag do arquivo velho ainda seria oferecido ao servidor.
 	it('cauda vazia sobrescreve a anterior, validador junto', () => {
 		guardarCaudaChat('srv-a', 'sessao', cauda(4, 'velho'));
 		guardarCaudaChat('srv-a', 'sessao', { eventos: [], etag: null });
 		expect(lerCaudaChat('srv-a', 'sessao')?.eventos).toHaveLength(0);
 		expect(lerCaudaChat('srv-a', 'sessao')?.etag).toBeNull();
+	});
+
+	// Nome é reusado: uma sessão Codex nova chamada `hangar-2` herdava a conversa da sessão Claude
+	// `hangar-2` que existiu antes. A chave é o transcript, que é único por sessão — e o /clear,
+	// que abre outro arquivo, cai neste mesmo caminho sem precisar de regra própria.
+	it('mesmo nome com transcript diferente não compartilha cauda', () => {
+		guardarCaudaChat('srv-a', '/p/claude/abc.jsonl', cauda(5));
+		expect(lerCaudaChat('srv-a', '/p/codex/xyz.jsonl')).toBeUndefined();
+		expect(lerCaudaChat('srv-a', '/p/claude/abc.jsonl')?.eventos).toHaveLength(5);
+	});
+
+	// Codex antes da thread e Kimi antes do 1o prompt não têm transcript. Sem chave não há o que
+	// ler nem onde gravar: pintar a cauda de outra sessão é pior que não pintar nada.
+	it('sem transcript não lê nem grava', () => {
+		guardarCaudaChat('srv-a', null, cauda(3));
+		expect(lerCaudaChat('srv-a', null)).toBeUndefined();
+		expect(lerCaudaChat('srv-a', undefined)).toBeUndefined();
 	});
 });
 

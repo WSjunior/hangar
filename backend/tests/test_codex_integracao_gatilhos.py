@@ -73,6 +73,27 @@ def test_lancador_desiste_no_prazo_e_a_reconciliacao_segue_no_backend(monkeypatc
     assert any("abre sem ela" in a for a in resultado["avisos"])
 
 
+# Instalar plugin leva mais que o prazo inteiro, e o pane ficava mudo o tempo todo: de fora nao da
+# pra distinguir "instalando" de "abriu e travou". A etapa sai enquanto a espera acontece, e uma vez
+# por mudanca — repetir a mesma duas vezes por segundo enterraria as linhas que importam.
+def test_etapa_da_reconciliacao_sai_na_tela_enquanto_espera(monkeypatch, capsys):
+    _, lancador = _lancador()
+    etapas = iter(["Instalando plugin A", "Instalando plugin A", "Instalando plugin B"])
+
+    def api_backend(method, path):
+        return {"estado": "executando", "etapa": {"texto": next(etapas, "Instalando plugin B")},
+                "avisos": [], "erros": []}
+
+    monkeypatch.setattr(lancador, "_api_backend", api_backend)
+    monkeypatch.setattr(lancador.time, "sleep", lambda s: None)
+    relogio = iter([0.0, 1.0, 2.0, 3.0, 99.0])
+    monkeypatch.setattr(lancador.time, "monotonic", lambda: next(relogio, 99.0))
+    lancador._integracao_codex(prazo=10.0)
+    texto = capsys.readouterr().err
+    assert texto.count("Instalando plugin A") == 1
+    assert "Instalando plugin B" in texto
+
+
 async def test_lifespan_nao_reconcilia_sozinho_e_fecha_a_integracao(tmp_path, monkeypatch):
     ordem = []
 

@@ -1,0 +1,40 @@
+╭──────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.153.4)                       │
+│                                                  │
+│ model:       gpt-5.6-luna max   /model to change │
+│ directory:   /tmp/claude-1000/…/scratchpad/probe │
+│ permissions: YOLO mode                           │
+╰──────────────────────────────────────────────────╯
+
+  Tip: New Use /fast to enable our fastest inference with increased plan usage.
+
+• You have 3 usage limit resets available. Run /usage to use one.
+
+
+  Update Model Permissions
+
+  1. Ask for approval       Codex can read and edit files in the current workspace, and run
+                            commands. Approval is required to access the internet or edit other
+                            files.
+  2. Approve for me         Only ask for actions detected as potentially unsafe.
+› 3. Full Access (current)  Codex can edit files outside this workspace and access the internet
+                            without asking for approval. Exercise caution when using.
+
+  Press enter to confirm or esc to go back
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -695,6 +695,9 @@
   const sessionProvider = $derived(allSessions.find((s) => s.name === sessionName)?.provider);
   // Motor da sessão (null = conta Anthropic) — o Composer usa no placeholder ("Mensagem para …").
   const sessionEngine = $derived(allSessions.find((s) => s.name === sessionName)?.engine ?? null);
+  // Transcript desta sessão: a chave da cauda em cache (ver queries.ts). Nulo enquanto a lista não
+  // chegou ou a sessão ainda não tem transcript — aí não há cauda a ler nem a guardar.
+  const sessionJsonl = $derived(allSessions.find((s) => s.name === sessionName)?.jsonl ?? null);
   const isCodex = $derived(sessionProvider === 'codex');
   const sessionTracked = $derived(allSessions.find((s) => s.name === sessionName)?.tracked);
   // Kimi "sem id" e o estado NORMAL pre-1o-prompt: o Kimi so cria a sessao (id + wire.jsonl) no
@@ -1155,7 +1158,7 @@
     // celular e leva `events` junto. Pintar cedo já existiu e foi revertido (b9db4367) porque a
     // janela da MessageList não re-ancorava numa carga que chegasse com a lista montada — quem
     // conserta isso é a `ancora`, e ela sobe aqui e a cada resposta do servidor.
-    const cache = lerCaudaChat(servidorDaCauda, sessionName);
+    const cache = lerCaudaChat(servidorDaCauda, sessionJsonl);
     const pintouDoCache = !!cache?.eventos.length;
     if (pintouDoCache) {
       events = cache!.eventos;
@@ -1202,19 +1205,23 @@
       // apiFetchForServer ja faz em lib/api.ts).
       const msg = isTimeoutError(err) ? m.chat_historico_sem_resposta()
         : err instanceof Error ? err.message : m.chat_erro_carregar_historico();
-      // Kimi pre-1o-prompt: o 404 do /history e ESPERADO (sem jsonl ainda) -> vira hint, nao a
-      // tela de erro "Não encontrei o transcript" (que apavorava num estado que e por design).
-      // Pelo `.status` que o apiFetch anexa, NAO por regex na frase do backend: o texto do detail
-      // e prosa (traduzir/reescrever ele apagaria esta tela sem quebrar teste nenhum). Mesmo
-      // padrao do 409 do terminal, linha ~1324, e do Composer.
-      if (sessionProvider === 'kimi' && (err as { status?: number } | null)?.status === 404) {
-        kimiSemTranscript = true;
+      // Kimi pre-1o-prompt e Codex pre-thread: o 404 do /history e ESPERADO (o transcript so nasce
+      // no 1o turno) -> nao vira a tela de erro "Não encontrei o transcript", que apavorava num
+      // estado que e por design. Pelo `.status` que o apiFetch anexa, NAO por regex na frase do
+      // backend: o texto do detail e prosa (traduzir/reescrever ele apagaria esta tela sem quebrar
+      // teste nenhum). Mesmo padrao do 409 do terminal, linha ~1324, e do Composer.
+      // Limpar `events` faz parte da resposta: "não há transcript" significa que o que está na tela
+      // veio do cache e não é desta sessão. O caminho normal só substitui a pintura quando o
+      // servidor responde com uma cauda — aqui ele nunca responde, e ela ficaria.
+      if ((err as { status?: number } | null)?.status === 404
+          && (sessionProvider === 'kimi' || sessionProvider === 'codex')) {
+        events = [];
+        etagCauda = null;
+        rebuildIndex();
+        reseedDerived();
+        kimiSemTranscript = sessionProvider === 'kimi';
         return;
       }
-      // Codex antes da thread: o 404 e o estado NORMAL (nao ha rollout ate a TUI abrir a thread) —
-      // guardar o erro deixava a frase de falha esperando pra aparecer no instante em que a
-      // conversa nascesse, por cima dela.
-      if (sessionProvider === 'codex' && (err as { status?: number } | null)?.status === 404) return;
       error = msg;
     } finally {
       if (g === histGen) loading = false;
@@ -1521,11 +1528,8 @@
       // carregou" são indistinguíveis no arquivo que a pessoa manda.
       diag.registrar({ evento: 'chat.reset', tela: 'chat', sessao: sessionName });
       lastEventId = null;   // transcript trocado (/clear): id do arquivo antigo não vale mais
-      // A cauda guardada é do transcript ANTIGO, e o validador junto com ela. O `appendTail` da
-      // próxima entrada a descartaria (nenhum id em comum), mas só DEPOIS de ela já ter pintado —
-      // a conversa apagada apareceria por um instante. Apagar aqui é o único ponto em que se sabe
-      // que ela morreu.
-      guardarCaudaChat(servidorDaCauda, sessionName, { eventos: [], etag: null });
+      // A cauda do transcript antigo fica sob a chave dele e nunca mais é lida — a chave é o
+      // `jsonl`, e o /clear abre outro. Não há o que apagar aqui.
       etagCauda = null;
       events = [];
       idIndex.clear();
@@ -1621,7 +1625,7 @@
     // eventos (o SSE acrescentou depois da resposta do /history), e isso é seguro na direção certa:
     // o servidor devolve a cauda inteira de novo em vez de um 304 sobre dado que mudou.
     if (events.length) {
-      guardarCaudaChat(servidorDaCauda, sessionName,
+      guardarCaudaChat(servidorDaCauda, sessionJsonl,
                        { eventos: events.slice(-TAIL_FIRST), etag: etagCauda });
     }
     alive = false;   // connectSSE/onVisible em voo viram no-op — sem EventSource fantasma

@@ -53,11 +53,26 @@ def _api_backend(method: str, path: str) -> dict:
         return json.load(response)
 
 
+def _texto(msg) -> str:
+    """A mensagem do backend é `{codigo, params, texto}`; no terminal só o texto serve."""
+    return msg.get("texto", "") if isinstance(msg, dict) else str(msg or "")
+
+
 def _integracao_codex(prazo: float = _PRAZO_INTEGRACAO) -> dict:
-    """Pede a reconciliação ao backend e espera até `prazo` por ela terminar."""
+    """Pede a reconciliação ao backend e espera até `prazo` por ela terminar.
+
+    A etapa sai na tela A CADA MUDANÇA, e não só no fim: instalar plugin leva mais que o prazo
+    inteiro, e o pane ficava mudo o tempo todo — de fora não dá pra distinguir "instalando" de
+    "abriu e travou". Só quando muda, senão a mesma linha sairia duas vezes por segundo.
+    """
     resultado = _api_backend("POST", "/api/harness/codex/integracao/sessao")
     limite = time.monotonic() + prazo
+    ultima = ""
     while resultado.get("estado") == "executando" and time.monotonic() < limite:
+        etapa = _texto(resultado.get("etapa"))
+        if etapa and etapa != ultima:
+            print(f"hangar-codex-tui: integração Codex: {etapa}", file=sys.stderr)
+            ultima = etapa
         time.sleep(0.5)
         resultado = _api_backend("GET", "/api/harness/codex/integracao")
     if resultado.get("estado") == "executando":
@@ -247,12 +262,11 @@ def main() -> int:
     # uma instalação longa termina lá) — aqui só se avisa e se espera um pouco. Falha não impede a TUI.
     try:
         resultado = _integracao_codex()
-        texto = lambda m: m.get("texto", "") if isinstance(m, dict) else str(m or "")  # noqa: E731
         if resultado.get("estado") not in (None, "ocioso", "ok") or resultado.get("erros"):
-            print(f"hangar-codex-tui: integração Codex: {resultado['estado']} — {texto(resultado.get('etapa'))}",
+            print(f"hangar-codex-tui: integração Codex: {resultado['estado']} — {_texto(resultado.get('etapa'))}",
                   file=sys.stderr)
         for aviso in [*resultado.get("avisos", []), *resultado.get("erros", [])]:
-            print(f"hangar-codex-tui: {texto(aviso)}", file=sys.stderr)
+            print(f"hangar-codex-tui: {_texto(aviso)}", file=sys.stderr)
         if resultado.get("confianca_pendente"):
             print("hangar-codex-tui: há itens aguardando sua confirmação de confiança no Codex",
                   file=sys.stderr)
@@ -336,6 +350,9 @@ def main() -> int:
     if args.prompt:
         argv.append(args.prompt)
     try:
+        # A espera abaixo pode levar segundos com a maquina carregada, e ate a TUI desenhar o pane
+        # fica em branco — de fora, indistinguivel de um terminal que nao abriu nada.
+        print("hangar-codex-tui: subindo o app-server do Codex…", file=sys.stderr)
         if not _esperar_porta(endpoint, servidor, erros, _ESPERA_THREAD):
             return 1
         return subprocess.run(argv).returncode

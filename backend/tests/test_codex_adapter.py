@@ -778,6 +778,28 @@ async def test_ensure_running_resume_captures_default_without_overwriting_choice
     assert adapter.current_model("sess") == {"model": "gpt-5-codex", "effort": "high"}
 
 
+# O campo do esforco na resposta de thread/start|resume chama `reasoningEffort`, e nao `effort`
+# como o parametro do turn/start (medido no codex-cli 0.153.4). Lendo `effort` a pilula do app
+# nascia VAZIA com o terminal mostrando `max`, e o modelo aparecia -- ele vem da mesma resposta.
+async def test_resume_le_o_esforco_da_thread_em_reasoning_effort():
+    codex_sessions.save("sess", "thread-1", "/rollout.jsonl", "/tmp/proj")
+    adapter = CodexAdapter()
+
+    class _ResumeClient(_FakeClient):
+        async def request(self, method, params, timeout=30.0):
+            self.requests.append((method, params))
+            if method == "thread/resume":
+                return {"thread": {"id": "thread-1"}, "model": "gpt-5.6-luna",
+                        "reasoningEffort": "max"}
+            return {}
+
+    client = _ResumeClient([])
+    with patch("app.adapters.codex.adapter.AppServerClient", lambda *a, **k: client), \
+         patch.object(codex_adapter.tmux, "has_session", return_value=False):
+        await adapter.ensure_running("sess")
+    assert adapter.current_model("sess") == {"model": "gpt-5.6-luna", "effort": "max"}
+
+
 def test_transcript_stream_creates_rollout_dir(tmp_path):
     # 1a sessao Codex do dia: o dir do rollout (~/.codex/sessions/YYYY/MM/DD) ainda nao existe quando o
     # SSE abre o tail -> sem o mkdir, awatch(parent) em follow() derruba o SSE com FileNotFoundError.

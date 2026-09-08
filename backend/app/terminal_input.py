@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from app import agentpane
+from app import codex_permissions as cxperm
 from app import kimi_models
 from app.askquestion import pergunta_aberta
 from app import model_picker as mp
@@ -2242,6 +2243,99 @@ class TerminalInput:
                 if time.monotonic() >= fim:
                     self._abort(name)
                     raise mp.PickerError(409, "sem confirmacao da troca no terminal")
+
+    # ── modo de permissao do Codex (`/permissions`) ─────────────────────────────────────────
+    # Mesmo desenho do picker do `/model`: abre, le/navega, e nunca fecha por numero (a tecla de
+    # numero de um picker costuma selecionar E confirmar). Por que e o picker, e nao o app-server,
+    # esta medido no cabecalho de `app/codex_permissions.py`.
+
+    def _abrir_picker_permissoes(self, name: str) -> str:
+        if not tmux.has_session(name):
+            raise self.NaoDigitou(409, "sessao nao esta viva")
+        send_keys(name, "/permissions", literal=True)
+        time.sleep(_SETTLE)
+        send_keys(name, "Enter")
+        pane = self._espera_picker_permissoes(name)
+        if pane is None:
+            # O autocomplete do Codex pode comer o 1o Enter (ele lista `/permissions` embaixo do
+            # campo). O 2o so sai depois de a leitura provar que o picker NAO abriu: com ele
+            # aberto, este Enter confirmaria a linha sob o cursor — que e o modo atual, entao no
+            # melhor caso e um no-op e no pior dispara a confirmacao do Full Access.
+            send_keys(name, "Enter")
+            pane = self._espera_picker_permissoes(name)
+        if pane is None:
+            self._abort(name)
+            raise mp.PickerError(409, "o picker de permissoes do Codex nao abriu")
+        return pane
+
+    def _espera_picker_permissoes(self, name: str) -> str | None:
+        fim = time.monotonic() + self._OPEN_PRAZO
+        while True:
+            time.sleep(_SETTLE)
+            pane = tmux.capture_pane(name)
+            if cxperm.picker_desenhado(pane):
+                return pane
+            if time.monotonic() >= fim:
+                return pane if cxperm.picker_aberto(pane) else None
+
+    def list_codex_permissions(self, name: str) -> dict:
+        """Modos do `/permissions` e qual esta ativo. Fecha com Esc, sem aplicar nada.
+
+        A lista sai do picker VIVO, e nao de uma tabela aqui: o Codex ja descontinuou o
+        `permissionProfile` uma vez, e um quarto modo apareceria na tela do app sozinho.
+        """
+        with _send_lock(name):
+            pane = self._abrir_picker_permissoes(name)
+            modos = cxperm.parse_modos(pane)
+            atual = cxperm.modo_atual(pane)
+            self._abort(name)
+        return {"modes": modos, "current": atual}
+
+    def set_codex_permission(self, name: str, modo: str) -> dict:
+        """Troca o modo de permissao da sessao Codex viva. Devolve o que FICOU, nao o que foi pedido."""
+        with _send_lock(name):
+            pane = self._abrir_picker_permissoes(name)
+            passos = cxperm.passos_ate(pane, modo)
+            if passos is None:
+                self._abort(name)
+                nomes = ", ".join(m["nome"] for m in cxperm.parse_modos(pane)) or "nenhum"
+                raise mp.PickerError(400, f"modo desconhecido: {modo} (o picker tem: {nomes})")
+            tecla, vezes = passos
+            for _ in range(vezes):
+                send_keys(name, tecla)
+                time.sleep(_NAV_GAP)
+            time.sleep(_SETTLE)
+            # Reler antes de confirmar: se a navegacao escorregou, o Enter aplica OUTRO modo — e
+            # permissao errada aplicada em silencio e o pior desfecho que esta funcao tem.
+            sob_cursor = next((m["nome"] for m in cxperm.parse_modos(tmux.capture_pane(name))
+                               if m["cursor"]), None)
+            if sob_cursor is None or sob_cursor.lower() != modo.strip().lower():
+                self._abort(name)
+                raise mp.PickerError(409, f"o cursor parou em {sob_cursor!r}, nao em {modo!r}")
+            send_keys(name, "Enter")
+            time.sleep(_OPEN_SETTLE)
+            # So o Full Access pede a 2a confirmacao ("Enable full access?"). Sem responde-la, a
+            # troca fica pendurada num dialogo que ninguem mais vai fechar.
+            if cxperm.confirmacao_de_full_access(tmux.capture_pane(name)):
+                send_keys(name, "Enter")
+                time.sleep(_OPEN_SETTLE)
+            return {"current": self._confirmar_permissao(name, modo)}
+
+    def _confirmar_permissao(self, name: str, modo: str) -> str:
+        """Le de volta o que o Codex aplicou, reabrindo o picker.
+
+        Nao serve a linha `• Permissions updated to X` do historico: ela e do que ficou na TELA, e
+        a troca ANTERIOR deixa a dela ali — foi assim que o `/model` do Claude ja leu a resposta
+        passada como se fosse desta. O `(current)` do picker e o estado, nao o rastro.
+        """
+        pane = self._abrir_picker_permissoes(name)
+        atual = cxperm.modo_atual(pane)
+        self._abort(name)
+        if atual is None:
+            raise mp.PickerError(409, "nao deu pra ler o modo de permissao depois da troca")
+        if atual.lower() != modo.strip().lower():
+            raise mp.PickerError(409, f"o Codex ficou em {atual!r}, nao em {modo!r}")
+        return atual
 
     def _abort(self, name: str) -> None:
         send_keys(name, "Escape")
