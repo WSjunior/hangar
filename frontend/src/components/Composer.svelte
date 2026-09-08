@@ -1930,15 +1930,17 @@
       <div class="control-left">
         <!-- Atalhos: abrem outra tela e existem sempre. Ficam aqui, e não na aba de cima, que é
              para o ESTADO da sessão — juntos, os dois grupos espremiam oito itens numa faixa de
-             390px no celular. -->
+             390px no celular. Levam a mesma classe do clipe e do mic porque na fileira quem tem
+             fundo carrega um valor escolhido (modelo, esforço, permissão); quem só executa uma
+             ação não tem. -->
         {#if !isCodex}
-          <button class="slash-btn atalho" onclick={() => (commandSheetOpen = true)} aria-label={m.comandos_titulo()}>
-            <IconComandos size={17} />
+          <button class="attach-btn" onclick={() => (commandSheetOpen = true)} aria-label={m.comandos_titulo()}>
+            <IconComandos size={20} />
           </button>
         {/if}
         {#if onOpenOrq}
-          <button class="slash-btn atalho" title={m.orqcfg_titulo()} onclick={onOpenOrq} aria-label={m.orqcfg_titulo()}>
-            <IconOrquestrar size={17} />
+          <button class="attach-btn" title={m.orqcfg_titulo()} onclick={onOpenOrq} aria-label={m.orqcfg_titulo()}>
+            <IconOrquestrar size={20} />
           </button>
         {/if}
         <!-- "+" do celular (referência: app do Claude): anexo e estilo do ditado moram AQUI no
@@ -2679,7 +2681,6 @@
     /* Anexo, pill de estilo e os atalhos saem da fileira (estão no "+"); o mic fica. */
     .control-left > .attach-btn:not(.mic-btn):not(.plus-btn) { display: none; }
     .control-left > .model-pill { display: none; }
-    .control-left > .slash-btn.atalho { display: none; }
     /* A permissão voltou pro celular: ela sumia porque a fileira levava sete peças e estourava;
        hoje são quatro. O teto de largura é pro rótulo mais comprido ("Aceitar edições"), que
        trunca em vez de empurrar o resto. */
@@ -2742,32 +2743,6 @@
     color: var(--text-primary);
     font-weight: 600;
   }
-
-  /* Botao [ / ]: abre o CommandSheet. Chip compacto na faixa do topo, igual ao cost-chip.
-     min-height/min-width:0 sobrescrevem o alvo global de 44px pra manter o chip enxuto
-     (tap confortavel dentro da faixa). */
-  .slash-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    height: 28px;
-    min-height: 0;
-    min-width: 0;
-    padding: 0 var(--space-2);
-    flex-shrink: 0;
-    border-radius: var(--radius-md);
-    /* `--surface-raised`, nao `--bg-hover` cru: o chip fica DENTRO do composer, que e vidro sobre a
-       foto — com cor opaca ele virava um retangulo chapado por cima do vidro e ignorava o slider
-       Solidez (CLAUDE.md, "Transparencia"). O realce de :active abaixo segue em `--bg-*` cru, que e
-       tinta de estado por cima, nao superficie. */
-    background: var(--surface-raised);
-    color: var(--text-secondary);
-  }
-
-  .slash-btn:active {
-    background: var(--bg-elevated);
-  }
-
 
   .control-right {
     display: flex;
