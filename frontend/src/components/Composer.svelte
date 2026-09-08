@@ -103,6 +103,10 @@
     // comando, há quanto tempo) fica no painel de Atividade, que o toque abre.
     shellsRodando?: number;
     onOpenActivity?: () => void;
+    // A COLUNA (não a janela) é estreita: com o navegador embutido ou o painel de contexto largo
+    // abertos, o chat vive em ~500px dentro de uma janela de 1900. A fileira de controles precisa
+    // do arranjo de celular ali. Sem prop = decide pela janela, como sempre.
+    estreito?: boolean;
   }
   let {
     sessionName, sessionState, status, lastCache = null, onSend, onSteer, onCommand, onInterrupt, onOpenGit,
@@ -114,7 +118,11 @@
     engine = null,
     filaCount = 0,
     stats = null,
+    estreito = false,
   }: Props = $props();
+
+  // OU, não `??`: a janela estreita (celular) manda sozinha, e a coluna estreita no desktop soma.
+  const compacto = $derived(estreito || !desktop.atual);
 
   // ── Faixa de estatísticas ──────────────────────────────────────────────────
   // "52s" / "18m01s" / "1h02m". Sub-10s ganha 1 decimal (TTFT vive nessa faixa).
@@ -1664,7 +1672,7 @@
   });
 </script>
 
-<footer class="composer">
+<footer class="composer" class:compacto>
   <input
     type="file"
     accept="*/*"
@@ -2425,10 +2433,10 @@
     padding: var(--space-2) var(--space-3) var(--composer-pb, max(var(--space-2), env(safe-area-inset-bottom)));
   }
   /* Desktop: nao ha home indicator pra desviar, entao o piso de 8px deixava o card colado na borda
-     da janela. Mais respiro embaixo — o dock flutua, e o que separa ele do fim da tela e esta folga. */
-  @media (min-width: 820px) {
-    .composer { padding-bottom: var(--composer-pb, var(--space-5)); }
-  }
+     da janela. Mais respiro embaixo — o dock flutua, e o que separa ele do fim da tela e esta folga.
+     O portao e a classe `.compacto` (largura da COLUNA), nao uma media query da janela: com o
+     navegador embutido aberto o composer vive em ~500px numa janela de 1900. */
+  .composer:not(.compacto) { padding-bottom: var(--composer-pb, var(--space-5)); }
 
   /* Faixa de estatísticas: métrica passiva sob o card (precedente do cache-chip), na cor
      apagada e SEM fundo próprio — o vidro é do .composer. Numa tela estreita rola de lado
@@ -2461,9 +2469,7 @@
     max-width: 600px;
     margin: 0 auto;
   }
-  @media (min-width: 820px) {
-    .composer-dock { max-width: min(1400px, 94vw); }
-  }
+  .composer:not(.compacto) .composer-dock { max-width: min(1400px, 94vw); }
 
   /* Aba de status: faixa fina recuada nas duas pontas, arredondada só em cima, encostada no card
      (-1px come a borda dupla). Fundo = o vidro do card com uma demão de tinta por cima, pra ela
@@ -2503,9 +2509,7 @@
     background: var(--glass-bg);
     backdrop-filter: url(#liquid-glass) blur(16px) saturate(180%);
   }
-  @media (min-width: 820px) {
-    .status-tab { margin-inline: var(--space-6); }
-  }
+  .composer:not(.compacto) .status-tab { margin-inline: var(--space-6); }
   /* Esquerda rola de lado quando não cabe (par + grupo + fila + shell no celular); quebrar linha
      engordaria a faixa e ela deixaria de ser uma aba. */
   .tab-left {
@@ -2724,59 +2728,59 @@
   .plus-item-label { flex: 1; min-width: 0; }
   .plus-item-value { color: var(--text-muted); font-size: var(--text-xs); }
 
-  @media (max-width: 819px) {
-    /* Fileira do celular: [+] [modelo·esforço] [🎤] [↑]. Anexo e estilo do ditado moram no "+"
-       (referência: app do Claude) — antes a fileira levava seis peças (com a palavra comprida
-       "bypassPermissions") e estourava, derrubando mic e estilo órfãos pra uma segunda linha. */
-    .control-left { gap: 6px; flex-wrap: nowrap; }
-    .plus-btn { display: inline-flex; }
-    /* Anexo, pill de estilo e os atalhos saem da fileira (estão no "+"); o mic fica. */
-    .control-left > .attach-btn:not(.mic-btn):not(.plus-btn) { display: none; }
-    .control-left > .model-pill { display: none; }
-    /* A permissão voltou pro celular: ela sumia porque a fileira levava sete peças e estourava;
-       hoje são quatro. O teto de largura é pro rótulo mais comprido ("Aceitar edições"), que
-       trunca em vez de empurrar o resto. */
-    .pill-perm { display: inline-flex; flex-shrink: 1; min-width: 0; max-width: 108px; }
-    .pill-perm .pill-model {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .pill-duo {
-      display: inline-flex;
-      align-items: center;
-      background: var(--accent-dim);
-      border-radius: var(--radius-md);
-      flex-shrink: 1;
-      min-width: 0;
-    }
-    .pill-duo > .model-pill {
-      background: transparent;
-      flex-shrink: 1;
-      min-width: 0;
-      gap: var(--space-1);                       /* anel de contexto mais colado no nome */
-    }
-    .pill-duo > .model-pill:first-child {
-      padding-left: var(--space-2);
-      padding-right: var(--space-1);
-    }
-    .pill-duo > .model-pill + .model-pill { padding-left: var(--space-1); }
-    /* Haiku não tem esforço -> o duo fica com UMA pill; o padding-right de emenda não vale. */
-    .pill-duo > .model-pill:only-child { padding-right: var(--space-2); }
-    .pill-duo > .model-pill + .model-pill .pill-model {
-      color: var(--text-muted);                  /* "Alto" em cinza, como no app do Claude */
-      font-weight: 500;
-    }
-    /* O esforço é palavra curta ("high") — encolher ele vira "hi…", pior que nada. */
-    .pill-duo > .model-pill + .model-pill { flex-shrink: 0; }
-    /* Ícone de 20px não precisa de 44px de largura (a ALTURA da fileira segue 44 = alvo do
-       dedo). É daqui que sai o espaço que faltava, em vez de cortar palavra com reticências.
-       `.control-left >` não é enfeite: a regra base de .attach-btn vem DEPOIS neste arquivo e,
-       em especificidade igual, venceria — o seletor composto desempata. */
-    .control-left > .attach-btn { width: 32px; min-width: 0; }  /* min-width fura o alvo global de 44px */
-    /* Anel de contexto de 26px vira 20 dentro do chip (o viewBox escala o desenho inteiro). */
-    .pill-duo .model-pill :global(svg) { width: 20px; height: 20px; }
+  /* Fileira do celular: [+] [modelo·esforço] [🎤] [↑]. Anexo e estilo do ditado moram no "+"
+     (referência: app do Claude) — antes a fileira levava seis peças (com a palavra comprida
+     "bypassPermissions") e estourava, derrubando mic e estilo órfãos pra uma segunda linha.
+     Vale por LARGURA DA COLUNA (`.compacto`), não da janela: no desktop com o navegador embutido
+     aberto sobram ~500px pro chat e a fileira larga cortava os rótulos. */
+  .composer.compacto .control-left { gap: 6px; flex-wrap: nowrap; }
+  .composer.compacto .plus-btn { display: inline-flex; }
+  /* Anexo, pill de estilo e os atalhos saem da fileira (estão no "+"); o mic fica. */
+  .composer.compacto .control-left > .attach-btn:not(.mic-btn):not(.plus-btn) { display: none; }
+  .composer.compacto .control-left > .model-pill { display: none; }
+  /* A permissão voltou pro celular: ela sumia porque a fileira levava sete peças e estourava;
+     hoje são quatro. O teto de largura é pro rótulo mais comprido ("Aceitar edições"), que
+     trunca em vez de empurrar o resto. */
+  .composer.compacto .pill-perm { display: inline-flex; flex-shrink: 1; min-width: 0; max-width: 108px; }
+  .composer.compacto .pill-perm .pill-model {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
+  .composer.compacto .pill-duo {
+    display: inline-flex;
+    align-items: center;
+    background: var(--accent-dim);
+    border-radius: var(--radius-md);
+    flex-shrink: 1;
+    min-width: 0;
+  }
+  .composer.compacto .pill-duo > .model-pill {
+    background: transparent;
+    flex-shrink: 1;
+    min-width: 0;
+    gap: var(--space-1);                       /* anel de contexto mais colado no nome */
+  }
+  .composer.compacto .pill-duo > .model-pill:first-child {
+    padding-left: var(--space-2);
+    padding-right: var(--space-1);
+  }
+  .composer.compacto .pill-duo > .model-pill + .model-pill { padding-left: var(--space-1); }
+  /* Haiku não tem esforço -> o duo fica com UMA pill; o padding-right de emenda não vale. */
+  .composer.compacto .pill-duo > .model-pill:only-child { padding-right: var(--space-2); }
+  .composer.compacto .pill-duo > .model-pill + .model-pill .pill-model {
+    color: var(--text-muted);                  /* "Alto" em cinza, como no app do Claude */
+    font-weight: 500;
+  }
+  /* O esforço é palavra curta ("high") — encolher ele vira "hi…", pior que nada. */
+  .composer.compacto .pill-duo > .model-pill + .model-pill { flex-shrink: 0; }
+  /* Ícone de 20px não precisa de 44px de largura (a ALTURA da fileira segue 44 = alvo do
+     dedo). É daqui que sai o espaço que faltava, em vez de cortar palavra com reticências.
+     `.control-left >` não é enfeite: a regra base de .attach-btn vem DEPOIS neste arquivo e,
+     em especificidade igual, venceria — o seletor composto desempata. */
+  .composer.compacto .control-left > .attach-btn { width: 32px; min-width: 0; }  /* min-width fura o alvo global de 44px */
+  /* Anel de contexto de 26px vira 20 dentro do chip (o viewBox escala o desenho inteiro). */
+  .composer.compacto .pill-duo .model-pill :global(svg) { width: 20px; height: 20px; }
 
   .pill-label {
     display: inline-flex;

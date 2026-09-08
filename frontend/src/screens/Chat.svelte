@@ -173,6 +173,22 @@
     typeof window !== 'undefined' && window.matchMedia('(min-width: 1280px)').matches,
   );
 
+  // Largura REAL da coluna de conversa: a tela do chat menos a faixa do painel de contexto (o
+  // navegador embutido é o caso extremo — sobram ~500px numa janela de 1900). Abaixo de 820 a
+  // coluna É uma tela de celular, e lista/composer usam o arranjo de celular. As media queries
+  // desses componentes medem a JANELA e não veem isto, por isso a régua vem daqui, por classe e
+  // por prop, em vez de container query: `container-type` no .chat-screen viraria containing
+  // block pros sheets position:fixed que moram dentro dele.
+  let larguraTela = $state(0);
+  const larguraColuna = $derived(
+    larguraTela === 0 ? 0
+      : larguraTela - (desktop && showContextPanel
+          ? (ctxPanel.recolhido ? LARGURA_TRILHO
+             : ctxPanel.aba === 'navegador' ? navegadorPanel.largura : ctxPanel.largura)
+          : 0),
+  );
+  const colunaEstreita = $derived(desktop && larguraColuna > 0 && larguraColuna < 820);
+
   // O painel de contexto esta VISIVEL? (B1, Task 12): o Git desktop so esconde a aba Arquivos
   // quando este host existe — a MESMA condicao do visorAberto (incluindo a faixa de 1280px em
   // que o painel e display:none). Derivada aqui e passada ao Git, nunca recalculada no modal.
@@ -2036,6 +2052,8 @@
   class:desktop
   class:split-pane={splitTab}
   class:with-context={desktop && showContextPanel}
+  class:coluna-estreita={colunaEstreita}
+  bind:clientWidth={larguraTela}
   style:--cp-ctx-w={`${ctxPanel.recolhido ? LARGURA_TRILHO : ctxPanel.aba === 'navegador' ? navegadorPanel.largura : ctxPanel.largura}px`}
   bind:this={screenEl}
   style:--nav-h={navH + topInset + 'px'}
@@ -2287,6 +2305,7 @@
         bind:this={composerRef}
         {sessionName}
         bind:inputText={composerText}
+        estreito={colunaEstreita}
         sessionState={currentState}
         status={status}
         {lastCache}
@@ -2706,6 +2725,19 @@
     .chat-screen.with-context .bottom-dock :global(.composer-card) { max-width: min(calc(min(1440px, 100%) * var(--cp-width-scale, 1)), 100%); }
   }
 
+  /* Coluna estreita (navegador embutido, painel de contexto largo, pane de split): a conversa é
+     uma tela de celular dentro de uma janela larga. Os degraus de largura e o corpo de 17px vêm de
+     media queries dos FILHOS, que medem a janela — desfeitos aqui, onde se sabe a largura da
+     coluna. Fica no fim do arquivo e com um seletor a mais de propósito: precisa vencer os degraus
+     de 1600/1900 acima. O composer tem caminho próprio (prop `estreito`). */
+  .chat-screen.desktop.coluna-estreita :global(.messages-inner) {
+    max-width: 600px;
+    padding-inline: var(--space-4);
+  }
+  .chat-screen.desktop.coluna-estreita :global(.prose) {
+    font-size: calc(var(--text-base) * var(--cp-text-scale, 1));
+    line-height: calc(1.6 * var(--cp-lh-scale, 1));
+  }
 
   /* Aviso flutuante "interação só pela TUI": acima do dock (bottom = altura do dock + gap, via JS).
      Pulsa pra chamar atenção; centralizado. z acima do dock. */
