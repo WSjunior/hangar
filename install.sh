@@ -267,7 +267,8 @@ baixar_dist() { # 0 = frontend/dist agora tem o build DESTE commit
     || { nota "compilando aqui: não consegui ler o frontend-dist.sha do CI (rede ou release fora)"; return 1; }
   [ "$sha_remoto" = "$sha_local" ] \
     || { nota "compilando aqui: o dist do CI é do commit ${sha_remoto:0:8} e este checkout está em ${sha_local:0:8}"; return 1; }
-  tmp=$(mktemp -d "frontend/.dist-baixado.XXXXXX") || return 1
+  tmp=$(mktemp -d "frontend/.dist-baixado.XXXXXX") \
+    || { nota "compilando aqui: não consegui criar a pasta temporária em frontend/ (permissão ou disco cheio)"; return 1; }
   # Extrai ao LADO do dist e só então troca: um download interrompido no meio não pode deixar a
   # máquina sem front nenhum — o build local depois nem roda, porque este caminho já disse "ok".
   if curl -fsSL --max-time 180 "$DIST_URL/frontend-dist.tar.gz" 2>/dev/null | tar -xzf - -C "$tmp" \
