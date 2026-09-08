@@ -29,6 +29,8 @@
   import IconAttach from './icons/IconAttach.svelte';
   import IconMic from './icons/IconMic.svelte';
   import IconMonitor from './icons/IconMonitor.svelte';
+  import IconCamera from './icons/IconCamera.svelte';
+  import IconImagem from './icons/IconImagem.svelte';
   import { tipoDoArquivo, quadroDeVideo, type TipoAnexo } from '../lib/tipoAnexo';
   import FileIcon from './files/FileIcon.svelte';
   import { scale } from 'svelte/transition';
@@ -41,7 +43,7 @@
   import ClaudeModelPopover from './ClaudeModelPopover.svelte';
   import ClaudeEffortPopover from './ClaudeEffortPopover.svelte';
   import ClaudePermissionPopover from './ClaudePermissionPopover.svelte';
-  import Popover from './Popover.svelte';
+  import BottomSheet from './BottomSheet.svelte';
   import CodexModelPopover from './CodexModelPopover.svelte';
   import CodexEffortPopover from './CodexEffortPopover.svelte';
   import PiModelPopover from './PiModelPopover.svelte';
@@ -54,7 +56,8 @@
   import DitadoEstiloPopover from './DitadoEstiloPopover.svelte';
   import { ditadoEstilo, estilosDitado, type EstiloDitado } from '../lib/ditadoEstilo.svelte';
   import { desktop } from '../lib/desktop.svelte';
-  import { getCommands, setModelEffort, uploadFile, uploadUrl, transcribeFile, relimparDitado, getCodexModels, getPiModels, getKimiModels, getModelOptions, getPermissionModes, setPermissionMode, type ModelEffortBody } from '../lib/api';
+  import { getCommands, setModelEffort, uploadFile, uploadUrl, listUploads, transcribeFile, relimparDitado, getCodexModels, getPiModels, getKimiModels, getModelOptions, getPermissionModes, setPermissionMode, type ModelEffortBody } from '../lib/api';
+  import type { UploadFile } from '../lib/types';
   import { aoAquecer } from '../lib/aquecimento';
   import type { Provider, State, StatsEvent } from '../lib/types';
   import type { StatusFields } from '../lib/statusline';
@@ -227,6 +230,43 @@
     else attachmentCache.delete(sessionName);
   });
   let fileInput: HTMLInputElement | undefined = $state();
+  let cameraInput: HTMLInputElement | undefined = $state();
+  let imagemInput: HTMLInputElement | undefined = $state();
+
+  // Anexos já enviados NESTA sessão, no lugar onde o app do Claude põe o rolo da câmera (que uma
+  // página web não pode ler). Só imagem, e só as 8 mais novas: é uma faixa, não uma galeria — a
+  // galeria inteira já tem tela própria (AttachmentsSheet).
+  let recentes = $state<UploadFile[]>([]);
+  $effect(() => {
+    if (!plusOpen || !sessionName) return;
+    let vivo = true;
+    void listUploads(sessionName)
+      .then(({ files }) => {
+        if (!vivo) return;
+        recentes = files
+          .filter((f) => /\.(png|jpe?g|gif|webp|avif|bmp)$/i.test(f.filename))
+          .sort((a, b) => b.mtime - a.mtime)
+          .slice(0, 8);
+      })
+      // Sem anexo nenhum, ou backend fora: a faixa fica só com câmera e fotos, que é o essencial.
+      .catch((e) => console.debug('composer: recentes não vieram', e));
+    return () => { vivo = false; };
+  });
+
+  // Reanexa um arquivo que já está no servidor: baixa de volta e entra na lista como qualquer
+  // outro. Baixar em vez de referenciar o caminho mantém UM caminho de envio — o mesmo do arquivo
+  // escolhido agora, com prévia, anel de progresso e remoção.
+  async function reanexar(filename: string) {
+    attachError = '';
+    try {
+      const res = await fetch(uploadUrl(sessionName, filename));
+      if (!res.ok) throw new Error(String(res.status));
+      const blob = await res.blob();
+      addFiles([new File([blob], filename, { type: blob.type })]);
+    } catch (e) {
+      attachError = e instanceof Error ? e.message : m.composer_falha_envio();
+    }
+  }
   let uploading = $state(false);
   let attachError = $state('');
   let sending = $state(false);
@@ -1615,6 +1655,29 @@
     aria-hidden="true"
     tabindex="-1"
   />
+  <!-- Três entradas, três telas do sistema: arquivo (acima), câmera e fototeca. `capture` abre a
+       câmera direto; sem ele, `image/*` cai no seletor de imagens. Um input só levava sempre à
+       mesma tela genérica, e a pessoa pagava um toque pra escolher de onde vinha. -->
+  <input
+    type="file"
+    accept="image/*"
+    capture="environment"
+    bind:this={cameraInput}
+    onchange={onPickFile}
+    class="file-input"
+    aria-hidden="true"
+    tabindex="-1"
+  />
+  <input
+    type="file"
+    accept="image/*"
+    multiple
+    bind:this={imagemInput}
+    onchange={onPickFile}
+    class="file-input"
+    aria-hidden="true"
+    tabindex="-1"
+  />
   <div class="composer-dock">
   <!-- Faixa pendurada na borda de cima do card (referência: BoardUI Composer Panel). Tudo que era a
        fileira de dentro mudou pra cá: atalhos e estado da sessão à esquerda, o que só se lê (repo,
@@ -2235,35 +2298,65 @@
     onClose={() => (estiloAberto = false)}
   />
 
-  <!-- Menu do "+" (mobile): as duas ações que saíram da fileira. -->
-  <Popover open={plusOpen} anchor={plusBtnEl} onClose={() => (plusOpen = false)} width={260} ariaLabel={m.tabs_mais_opcoes()}>
-    <!-- Atalhos: no celular moram aqui, como anexo e estilo do ditado — soltos na fileira eles
-         espremiam o nome do modelo até truncar. No desktop ficam à vista, onde há espaço. -->
-    {#if !isCodex}
-      <button class="plus-item" onclick={() => { plusOpen = false; commandSheetOpen = true; }}>
-        <IconComandos size={16} />
-        <span>{m.comandos_titulo()}</span>
+  <!-- Menu do "+" (mobile): as ações que saíram da fileira. Sheet subindo de baixo, não popover
+       ancorado — é o desenho do app do Claude, e no celular a largura inteira é o que deixa a
+       faixa de fotos caber. -->
+  <BottomSheet open={plusOpen} onClose={() => (plusOpen = false)} ariaLabel={m.composer_adicionar_ao_chat()}>
+    <!-- Desenho do app do Claude no celular: câmera e imagens numa faixa em cima, o resto em
+         grupos com separador fino. Câmera e Fotos são ENTRADAS SEPARADAS porque no iOS levam a
+         telas diferentes (câmera direto x Fototeca) — juntas custavam um toque a mais. Miniatura
+         da galeria do aparelho é impossível numa página web: o sistema só entrega a foto depois
+         que a pessoa escolhe. No lugar dela vão os anexos já enviados NESTA sessão, que o backend
+         tem — reanexar vira um toque. -->
+    <h2 class="plus-titulo">{m.composer_adicionar_ao_chat()}</h2>
+    <div class="plus-faixa">
+      <button class="faixa-btn" onclick={() => { plusOpen = false; cameraInput?.click(); }}>
+        <IconCamera size={20} />
+        <span>{m.composer_camera()}</span>
       </button>
-    {/if}
-    <button class="plus-item" onclick={() => { plusOpen = false; onOpenPreview?.(); }}>
-      <IconMonitor size={16} />
-      <span>{m.composer_preview_rodando()}</span>
-    </button>
-    {#if onOpenOrq}
-      <button class="plus-item" onclick={() => { plusOpen = false; onOpenOrq?.(); }}>
-        <IconOrquestrar size={16} />
-        <span>{m.orqcfg_titulo()}</span>
+      <button class="faixa-btn" onclick={() => { plusOpen = false; imagemInput?.click(); }}>
+        <IconImagem size={20} />
+        <span>{m.composer_fotos()}</span>
       </button>
-    {/if}
-    <button class="plus-item" onclick={() => { plusOpen = false; fileInput?.click(); }}>
-      <IconAttach size={16} />
-      <span>{m.composer_anexar_arquivo()}</span>
-    </button>
-    <button class="plus-item" onclick={() => { plusOpen = false; estiloAberto = true; }}>
-      <span class="plus-item-label">{m.ditado_estilo_titulo()}</span>
-      <span class="plus-item-value">{rotuloEstilo}</span>
-    </button>
-  </Popover>
+      {#each recentes as r (r.filename)}
+        <button class="faixa-thumb" title={r.filename}
+                onclick={() => { plusOpen = false; void reanexar(r.filename); }}>
+          <img src={uploadUrl(sessionName, r.filename)} alt="" loading="lazy" />
+        </button>
+      {/each}
+    </div>
+
+    <div class="plus-grupo">
+      <button class="plus-item" onclick={() => { plusOpen = false; fileInput?.click(); }}>
+        <IconAttach size={16} />
+        <span>{m.composer_anexar_arquivo()}</span>
+      </button>
+      <button class="plus-item" onclick={() => { plusOpen = false; estiloAberto = true; }}>
+        <IconMic size={16} />
+        <span class="plus-item-label">{m.ditado_estilo_titulo()}</span>
+        <span class="plus-item-value">{rotuloEstilo}</span>
+      </button>
+    </div>
+
+    <div class="plus-grupo">
+      {#if !isCodex}
+        <button class="plus-item" onclick={() => { plusOpen = false; commandSheetOpen = true; }}>
+          <IconComandos size={16} />
+          <span>{m.comandos_titulo()}</span>
+        </button>
+      {/if}
+      <button class="plus-item" onclick={() => { plusOpen = false; onOpenPreview?.(); }}>
+        <IconMonitor size={16} />
+        <span>{m.composer_preview_rodando()}</span>
+      </button>
+      {#if onOpenOrq}
+        <button class="plus-item" onclick={() => { plusOpen = false; onOpenOrq?.(); }}>
+          <IconOrquestrar size={16} />
+          <span>{m.orqcfg_titulo()}</span>
+        </button>
+      {/if}
+    </div>
+  </BottomSheet>
 
   <ConfirmSheet
     open={confirmStopOpen}
@@ -2519,6 +2612,49 @@
   /* O "+" só aparece no celular (regra no bloco mobile); no desktop anexo e estilo ficam na
      fileira e ele some. */
   .plus-btn { display: none; }
+
+  /* Menu do "+": faixa rolando de lado em cima, cartões embaixo (referência: app do Claude). */
+  .plus-titulo {
+    margin: 0 0 var(--space-3);
+    font-size: var(--text-lg); font-weight: 600; color: var(--text-primary);
+  }
+  /* Sangra até a borda da folha (que tem --space-5 de padding): a faixa rola de lado, e a foto
+     cortada na borda é o que conta que há mais pro lado. */
+  .plus-faixa {
+    display: flex; gap: var(--space-2);
+    margin: 0 calc(-1 * var(--space-5)) var(--space-4);
+    padding: 0 var(--space-5);
+    overflow-x: auto; scrollbar-width: none;
+  }
+  .plus-faixa::-webkit-scrollbar { display: none; }
+  .faixa-btn, .faixa-thumb {
+    flex: 0 0 auto; width: 96px; height: 96px;
+    border: none; border-radius: var(--radius-md);
+    background: var(--fill-subtle); cursor: pointer;
+  }
+  .faixa-btn {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 6px; color: var(--text-primary); font-size: var(--text-xs);
+  }
+  .faixa-thumb { padding: 0; overflow: hidden; }
+  .faixa-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  @media (hover: hover) {
+    .faixa-btn:hover, .faixa-thumb:hover { background: var(--bg-hover); }
+  }
+
+  /* Cartão com as linhas: separador fino ENTRE elas, recuado até o texto (sai debaixo do ícone),
+     senão a linha cruza o cartão inteiro e some a leitura de grupo. */
+  .plus-grupo {
+    margin: 0 0 var(--space-3);
+    background: var(--fill-subtle);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+  }
+  .plus-grupo .plus-item + .plus-item { position: relative; }
+  .plus-grupo .plus-item + .plus-item::before {
+    content: ''; position: absolute; left: 40px; right: 0; top: 0; height: 1px;
+    background: var(--border-subtle);
+  }
 
   /* Linhas do menu do "+". */
   .plus-item {
