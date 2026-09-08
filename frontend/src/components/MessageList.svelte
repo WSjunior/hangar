@@ -22,6 +22,8 @@
   import OrqPainelCard from './OrqPainelCard.svelte';
   import BastaoCard from './BastaoCard.svelte';
   import { lerRecadoBastao } from '../lib/bastaoRecado';
+  import SubagenteCard from './SubagenteCard.svelte';
+  import { lerSubagenteCodex } from '../lib/subagenteCodex';
   import { transcriptImageUrl, uploadUrl } from '../lib/api';
   import { windowStartFor, nextWindowEnd, precisaPreencher, mostrarIrPraoFim } from '../lib/window';
 
@@ -389,6 +391,9 @@
              `[hangar: passagem de bastão]`, e ler "passagem de bastão" como nome de remetente
              desenharia um chip "de: passagem de bastão" que não é sessão nenhuma. -->
         {@const bastao = ev.text ? lerRecadoBastao(ev.text) : null}
+        <!-- Notificação de subagente do Codex: ele a grava como mensagem de USER, então sem
+             cartão ela sai como bolha tua com o envelope e o JSON cru. -->
+        {@const sub = ev.text ? lerSubagenteCodex(ev.text) : null}
         {#if ev.image_count}
           <!-- Imagem(ns) colada(s) no TERMINAL: thumbnail buscado lazy do .jsonl (base64). Quando a
                msg veio do APP (tem "📎 imagem: <path>"), a legenda entra LIMPA e as fotos enviadas
@@ -421,6 +426,8 @@
               <p class="queued-perdida" role="status">{m.msg_nao_chegou_reenvie()}</p>
             {/if}
           </div>
+        {:else if sub}
+          <SubagenteCard {sub} cru={ev.text ?? ''} ts={ev.ts} />
         {:else if imgFotos}
           <ImageBubble caption={imgFotos.caption} srcs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f))} />
         {:else if bastao}

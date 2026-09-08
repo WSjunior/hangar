@@ -10,6 +10,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   import { ditadoEstilo } from '../lib/ditadoEstilo.svelte';
   import { relativeTime, bubblesFromTail, pairColor, parsePeerMessage, providerTag } from '../lib/format';
   import { parseStatusLine } from '../lib/statusline';
+  import { lerSubagenteCodex } from '../lib/subagenteCodex';
   import { loopBadge, LOOP_TONE_COLOR } from '../lib/loop';
   import { planBadge } from '../lib/plan';
   import PlanBar from './PlanBar.svelte';
@@ -482,7 +483,12 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
           <AssistantBubble text={e.text ?? ''} animate={false} />
         {:else}
           {@const peer = e.text ? parsePeerMessage(e.text) : null}
-          {#if peer}
+          {@const sub = e.text ? lerSubagenteCodex(e.text) : null}
+          {#if sub}
+            <!-- Notificação de subagente do Codex (mensagem de user no rollout): uma linha, senão
+                 o card do quadro enche de JSON. O relatório inteiro está no chat. -->
+            <p class="bc-user bc-sub">{sub.status === 'completed' ? m.subagente_card_concluido() : sub.status === 'errored' || sub.status === 'failed' ? m.subagente_card_falhou() : m.subagente_card_status({ s: sub.status })}</p>
+          {:else if peer}
             <!-- Recado de par ([de: X]/[grupo: X]): mesma linguagem da bolha do chat cheio
                  (chip 📟/📣 + tinta accent), versão compacta — sem isto o card mostrava o
                  prefixo cru como se fosse msg tua. -->
@@ -730,6 +736,8 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     white-space: pre-wrap; word-break: break-word; margin: 0;
   }
   .bc-pending { opacity: 0.55; }
+  /* Não é fala de ninguém: é aviso do sistema. Sem bolha, tinta apagada. */
+  .bc-sub { background: none; padding: 2px 0; font-size: 12px; color: var(--text-muted); }
   /* Recado de par: entra como "recebido" (esquerda, canto reto embaixo-esquerda), tinta accent —
      espelho compacto do .bubble.peer do chat. Aviso de grupo troca o acento pra warning. */
   .bc-peer {
