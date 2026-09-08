@@ -145,6 +145,17 @@ def test_merge_appends_loser_contract(tmp_path):
     assert not pc.exists()
 
 
+def test_merge_sem_contrato_escrito_nao_loga_falha(caplog):
+    # O arquivo de contrato só nasce quando alguém escreve um, então fundir dois grupos que ainda
+    # não têm contrato é o caso COMUM. Como FileNotFoundError é OSError, o log de falha do merge
+    # transformava esse caminho normal em warning — duas vezes por fusão (grupo- e regras-).
+    pair.join("a", "b")
+    pair.join("c", "d")
+    with caplog.at_level("WARNING", logger="app.pair"):
+        pair.join("a", "c")
+    assert [r.message for r in caplog.records if "merge de contrato" in r.message] == []
+
+
 def test_contrato_e_arquivado_quando_o_grupo_dissolve_e_sobrevive_a_membro_solto(tmp_path, monkeypatch):
     pair.join("a", "b")
     pair.join("a", "c")

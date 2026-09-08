@@ -199,8 +199,14 @@ def _merge_contract(loser_gid: str, survivor_gid: str) -> None:
     # `regras-` (o que o time lê) segue o `grupo-` (o registro do árbitro): sem isto o merge
     # deixava o regras-<loser> órfão, o mesmo furo que o leave() já fechava só pro grupo-.
     for prefixo in ("grupo", "regras"):
+        loser = _pair_dir() / f"{prefixo}-{loser_gid}.md"
+        # Guarda ANTES do try, igual ao _arquivar_contratos: o arquivo de contrato só existe se
+        # alguém escreveu um, então "não há o que herdar" é o caso comum de um merge — e sem isto o
+        # FileNotFoundError (que é OSError) cairia no warning abaixo, 2x por fusão, chamando de
+        # falha o caminho normal.
+        if not loser.is_file():
+            continue
         try:
-            loser = _pair_dir() / f"{prefixo}-{loser_gid}.md"
             content = loser.read_text(encoding="utf-8").strip()
             if not content:
                 continue
