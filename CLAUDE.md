@@ -290,11 +290,12 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
     Feature nova de tela é escrita duas vezes, de propósito.
   - **A verificação é `npm run check` (ou `npm run test`) NA RAIZ, e ela cobre as três** — core,
     front web e app nativo. Não era assim: cada uma tinha o seu comando, nenhum cobria o outro, e
-    quem mexesse no core e rodasse só o `check` do frontend levava verde com o app quebrado. Como
-    `mobile/` não é workspace (`npm ... -w mobile` não existe), o app entra por
-    `scripts/verificar-app.mjs`, e a regra dele é a que dá sentido a tudo: **dependência do app
-    ausente FALHA com código 1 e diz o que fazer**, nunca é pulada em silêncio — um check que passa
-    por não ter olhado é pior que um que não roda. Complementos: um hook em `.claude/settings.json`
+    quem mexesse no core e rodasse só o `check` do frontend levava verde com o app quebrado. O app
+    entra por `scripts/verificar-app.mjs` — não por não ser workspace (ele é), e sim porque o
+    `npm ci` do CI, do deploy e dos instaladores é **seletivo** e não instala as dependências dele.
+    A regra desse script é a que dá sentido a tudo: **dependência do app ausente FALHA com código 1
+    e diz o que fazer**, nunca é pulada em silêncio — um check que passa por não ter olhado é pior
+    que um que não roda. Complementos: um hook em `.claude/settings.json`
     (versionado, vale para quem clonar) avisa ao editar `packages/core`, e o CI segue compilando só
     front e backend, por decisão — o build do app é no Expo.
   - **Texto de interface é um `project.inlang` só, compilado três vezes** (`frontend/src/paraglide`,
