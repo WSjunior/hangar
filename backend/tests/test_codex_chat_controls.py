@@ -218,6 +218,106 @@ async def test_eventos_de_outra_thread_nao_alteram_sessao_principal(chat, monkey
     assert sess["rate_limits"] == {"primary": {"usedPercent": 12}}
 
 
+async def test_nova_principal_religa_adapter_e_ignora_subagente(chat, monkeypatch):
+    from app.adapters.codex import adapter as module
+    adapter, old = chat
+    sessions.save("sess", "thread-1", "/old.jsonl", "/p", model="modelo", effort="high",
+                  endpoint="ws://fake", app_pid=123)
+    previous = adapter._sessions["sess"]
+    previous.update(endpoint="ws://fake", app_pid=123, mode="plan", turn_id="old-turn")
+    main = {"id": "new", "path": "/new.jsonl", "cwd": "/p", "source": "vscode", "threadSource": "user"}
+    async def notifications():
+        for thread in [{**main, "id": "sub", "source": {"subAgent": {}}}, main]:
+            yield {"method": "thread/started", "params": {"thread": thread}}
+    async def close():
+        old.closed = True
+    old.notifications, old.close = notifications, close
+    await adapter._consumir("sess", old, previous, lambda event: None)
+    assert sessions.load("sess")["thread_id"] == "new"
+    new = Client()
+    async def connect(endpoint):
+        return endpoint
+    async def request(method, params):
+        return {"thread": {**main, "status": {"type": "active"}, "turns": [{"id": "new-turn", "status": "inProgress"}]}}
+    new.connect, new.request = connect, request
+    monkeypatch.setattr(module, "AppServerClient", lambda: new)
+    monkeypatch.setattr(module, "pid_vivo", lambda pid: True)
+    monkeypatch.setattr(adapter, "_start_tmux_watcher", lambda name: None)
+    subscriptions = []
+    monkeypatch.setattr(adapter, "start_subscription", lambda *args: subscriptions.append(args))
+    assert await adapter.ensure_running("sess") is new
+    assert old.closed and subscriptions == [("sess", "/p")]
+    assert adapter._sessions["sess"]["thread_id"] == "new"
+    assert adapter._sessions["sess"]["turn_id"] == "new-turn"
+    assert adapter._sessions["sess"].get("mode") is None
+    await adapter._consumir("sess", old, previous, lambda event: pytest.fail("evento antigo publicado"))
+    assert adapter._sessions["sess"]["client"] is new
+
+
+def test_troca_thread_preserva_modelo_e_recusa_escritor_atrasado(chat):
+    from concurrent.futures import ThreadPoolExecutor
+    sessions.save("sess", "old", "/old.jsonl", "/p", model="m", effort="high",
+                  endpoint="ws://fake", app_pid=123)
+    main = {"id": "new", "path": "/new.jsonl", "cwd": "/p", "source": "vscode"}
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        switched = workers.submit(sessions.switch_thread, "sess", main, "old", endpoint="ws://fake", app_pid=123)
+        updated = workers.submit(sessions.update_model, "sess", "novo-modelo", "low")
+        assert switched.result()
+        updated.result()
+    assert not sessions.switch_thread("sess", {**main, "id": "atrasada"}, "old", endpoint="ws://fake", app_pid=123)
+    assert not sessions.switch_thread("sess", {**main, "id": "outro-dono"}, "new", endpoint="ws://fake", app_pid=456)
+    meta = sessions.load("sess")
+    assert (meta["thread_id"], meta["rollout_path"], meta["model"], meta["effort"]) == ("new", "/new.jsonl", "novo-modelo", "low")
+
+
+@pytest.mark.parametrize("operation", ["rename", "delete"])
+def test_troca_thread_serializa_com_rename_e_delete(chat, monkeypatch, operation):
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+    from threading import Event, local
+    sessions.save("sess", "old", "/old.jsonl", "/p", model="m", effort="high",
+                  endpoint="ws://fake", app_pid=123)
+    before = {**sessions.load("sess"), "extra": "preservado"}
+    sessions._write("sess", before)
+    writing, competing = Event(), Event()
+    role = local()
+    write, locked = sessions._write, sessions._locked
+
+    def paused_write(name, meta):
+        if name == "sess" and meta["thread_id"] == "new":
+            writing.set()
+            assert competing.wait(5)
+        write(name, meta)
+
+    @contextmanager
+    def observed_lock(*names):
+        if getattr(role, "operation", False):
+            competing.set()
+        with locked(*names):
+            yield
+
+    def mutate():
+        role.operation = True
+        if operation == "rename":
+            sessions.rename("sess", "renamed")
+        else:
+            sessions.delete("sess")
+
+    monkeypatch.setattr(sessions, "_write", paused_write)
+    monkeypatch.setattr(sessions, "_locked", observed_lock)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        switched = workers.submit(sessions.switch_thread, "sess",
+            {"id": "new", "path": "/new.jsonl", "cwd": "/p", "source": "vscode"},
+            "old", endpoint="ws://fake", app_pid=123)
+        assert writing.wait(5)
+        changed = workers.submit(mutate)
+        assert switched.result(timeout=5)
+        changed.result(timeout=5)
+    assert sessions.load("sess") is None
+    assert sessions.load("renamed") == ({**before, "name": "renamed", "thread_id": "new",
+                                        "rollout_path": "/new.jsonl"} if operation == "rename" else None)
+
+
 async def test_falha_orientacao_restaura_fila(chat, monkeypatch, tmp_path):
     from app import pqueue
     monkeypatch.setattr(pqueue, "_queue_dir", lambda: tmp_path)

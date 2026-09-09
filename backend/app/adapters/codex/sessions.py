@@ -13,6 +13,8 @@ import json
 import logging
 import os
 import threading
+import tempfile
+from contextlib import contextmanager, ExitStack
 from pathlib import Path
 
 from app import atomico
@@ -20,6 +22,7 @@ from app.names import sanitize_session_name
 
 _log = logging.getLogger("hangar.codex.sessions")
 _pretrust_lock = threading.Lock()
+_write_lock = threading.Lock()
 
 
 def _dir() -> Path:
@@ -38,6 +41,53 @@ def _path(name: str) -> Path:
     return _dir() / f"{_sanitize(name)}.json"
 
 
+def primary_thread(thread: dict, cwd: str) -> bool:
+    return (thread.get("cwd") == cwd and thread.get("source") in ("cli", "vscode")
+            and not thread.get("parentThreadId") and thread.get("threadSource") != "subagent"
+            and thread.get("canAcceptDirectInput") is not False
+            and bool(thread.get("id") and thread.get("path")))
+
+
+def switch_thread(name: str, thread: dict, previous: str, *, endpoint: str, app_pid: int) -> bool:
+    with _locked(name):
+        meta = load(name)
+        if not meta or meta.get("endpoint") != endpoint or meta.get("app_pid") != app_pid \
+                or not primary_thread(thread, meta.get("cwd")):
+            return False
+        if meta["thread_id"] == thread["id"]:
+            return True
+        if meta["thread_id"] != previous:
+            return False
+        _write(name, {**meta, "thread_id": thread["id"], "rollout_path": thread["path"]})
+        return True
+
+
+@contextmanager
+def _locked(*names: str):
+    _dir().mkdir(parents=True, exist_ok=True)
+    with _write_lock, ExitStack() as stack:
+        # Origem e destino seguem a mesma ordem em todos os processos; fechar libera as travas.
+        for path in sorted({_path(name).with_suffix(".lock") for name in names}):
+            lock = stack.enter_context(path.open("a+b"))
+            if os.name == "nt":
+                import msvcrt
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def _write(name: str, meta: dict) -> None:
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=_dir(), suffix=".tmp", delete=False) as tmp:
+        json.dump(meta, tmp)
+    try:
+        atomico.substituir(tmp.name, _path(name))
+    finally:
+        Path(tmp.name).unlink(missing_ok=True)
+
+
 def save(name: str, thread_id: str, rollout_path: str, cwd: str,
          model: str | None = None, effort: str | None = None,
          endpoint: str | None = None, app_pid: int | None = None) -> None:
@@ -54,10 +104,7 @@ def save(name: str, thread_id: str, rollout_path: str, cwd: str,
     endpoint porque porta de loopback e reciclada: reconectar so pelo endereco pode cair num
     processo alheio que ja tomou a porta. Ausentes = sidecar do desenho antigo, em que o servidor
     era filho do backend."""
-    _dir().mkdir(parents=True, exist_ok=True)
-    p = _path(name)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps({
+    meta = {
         "name": name,
         "provider": "codex",
         "thread_id": thread_id,
@@ -67,21 +114,19 @@ def save(name: str, thread_id: str, rollout_path: str, cwd: str,
         "effort": effort,
         "endpoint": endpoint,
         "app_pid": app_pid,
-    }), encoding="utf-8")
-    atomico.substituir(tmp, p)
+    }
+    with _locked(name):
+        _write(name, meta)
 
 
 def update_model(name: str, model: str | None, effort: str | None) -> None:
     """Atualiza SO a escolha de modelo/effort no sidecar existente, preservando thread_id/
     rollout_path/cwd (re-le e regrava via save()). No-op silencioso se o sidecar nao existe
     (nome desconhecido) -- quem chama (CodexAdapter.set_model) ja mantem a copia em memoria."""
-    meta = load(name)
-    if meta is None:
-        return
-    # endpoint/app_pid seguem juntos: sem eles aqui, trocar o modelo apagaria o endereco do
-    # app-server e o backend passaria a tratar a sessao viva como sessao do desenho antigo.
-    save(name, meta["thread_id"], meta["rollout_path"], meta["cwd"], model=model, effort=effort,
-         endpoint=meta.get("endpoint"), app_pid=meta.get("app_pid"))
+    with _locked(name):
+        meta = load(name)
+        if meta is not None:
+            _write(name, {**meta, "model": model, "effort": effort})
 
 
 def load(name: str) -> dict | None:
@@ -95,7 +140,9 @@ def load(name: str) -> dict | None:
 def delete(name: str) -> None:
     """Remove o sidecar (idempotente)."""
     try:
-        _path(name).unlink(missing_ok=True)
+        if _path(name).exists():
+            with _locked(name):
+                _path(name).unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -103,15 +150,13 @@ def delete(name: str) -> None:
 def rename(old: str, new: str) -> None:
     """Move o sidecar junto com a sessao tmux, preservando a identidade da thread."""
     src, dst = _path(old), _path(new)
-    if not src.exists():
-        return
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    atomico.substituir(src, dst)
-    meta = load(new)
-    if meta is not None:
-        save(new, meta["thread_id"], meta["rollout_path"], meta["cwd"],
-             model=meta.get("model"), effort=meta.get("effort"),
-             endpoint=meta.get("endpoint"), app_pid=meta.get("app_pid"))
+    with _locked(old, new):
+        if not src.exists():
+            return
+        atomico.substituir(src, dst)
+        meta = load(new)
+        if meta is not None:
+            _write(new, {**meta, "name": new})
 
 
 def list_all() -> list[dict]:

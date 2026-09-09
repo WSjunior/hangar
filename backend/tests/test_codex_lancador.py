@@ -48,7 +48,12 @@ if args[:1] == ["app-server"]:
                     continue
                 ws.send(json.dumps({"jsonrpc": "2.0", "method": "thread/started", "params": {
                     "thread": {"id": "thread-falso", "path": os.environ["FAKE_ROLLOUT"],
-                               "cwd": os.environ["FAKE_CWD"]}}}))
+                               "cwd": os.environ["FAKE_CWD"], "source": "vscode", "threadSource": "user"}}}))
+                for thread in json.loads(os.environ.get("FAKE_THREAD_SEQUENCE", "[]")):
+                    time.sleep(0.1)
+                    ws.send(json.dumps({"jsonrpc": "2.0", "method": "thread/started", "params": {"thread": thread}}))
+                if os.environ.get("FAKE_EVENTS_DONE"):
+                    open(os.environ["FAKE_EVENTS_DONE"], "w").close()
 
     with serve(handler, "127.0.0.1", porta) as servidor:
         servidor.serve_forever()
@@ -248,6 +253,40 @@ def test_lancador_retoma_a_conversa_pedida(tmp_path):
     # num pedido de aprovacao que ninguem responde, e o app fica olhando uma sessao muda.
     assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
     assert argv[argv.index("--ask-for-approval") + 1] == "never"
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_lancador_acompanha_nova_principal_sem_tomar_subagente(tmp_path, resume):
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    env = _ambiente(tmp_path, cwd)
+    env["FAKE_TUI_SLEEP"] = "4"
+    env["FAKE_EVENTS_DONE"] = str(tmp_path / "events-done")
+    main = {"id": "nova", "path": str(tmp_path / "nova.jsonl"), "cwd": str(cwd),
+            "source": "vscode", "threadSource": "user", "parentThreadId": None}
+    sub = {**main, "id": "sub", "source": {"subAgent": {}}, "threadSource": "subagent", "parentThreadId": "nova"}
+    env["FAKE_THREAD_SEQUENCE"] = json.dumps([sub, main, sub, {**main, "id": "aux", "canAcceptDirectInput": False}])
+    args = [sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd), "--model", "gpt-test", "--effort", "high"]
+    if resume:
+        args += ["--resume", "anterior"]
+        rollout = Path(env["HOME"]) / ".codex/sessions/2026/09/09/rollout-anterior.jsonl"
+        rollout.parent.mkdir(parents=True)
+        rollout.touch()
+        previous = _sidecar(env, "sess")
+        previous.parent.mkdir(parents=True)
+        previous.write_text(json.dumps({"name": "sess", "thread_id": "anterior", "rollout_path": str(rollout),
+                                       "cwd": str(cwd), "app_pid": 999999, "endpoint": "ws://127.0.0.1:1"}))
+    proc = subprocess.Popen(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert _espera(lambda: Path(env["FAKE_EVENTS_DONE"]).exists())
+        assert _espera(lambda: json.loads(_sidecar(env, "sess").read_text())["thread_id"] == "nova")
+        meta = json.loads(_sidecar(env, "sess").read_text())
+        assert meta["rollout_path"] == main["path"]
+        assert (meta["model"], meta["effort"]) == ("gpt-test", "high")
+        assert pid_vivo(meta["app_pid"]) and meta["endpoint"].startswith("ws://")
+    finally:
+        proc.wait(timeout=15)
+    assert not _sidecar(env, "sess").exists()
 
 
 def test_o_sandbox_nao_pode_voltar_a_prender_a_rede():

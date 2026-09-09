@@ -179,13 +179,14 @@ def _esperar_porta(endpoint: str, servidor, erros, teto: float) -> bool:
 
 
 def _espera_thread(endpoint: str, cwd: str, servidor, erros, salvar) -> None:
-    """Escuta o app-server ate a TUI abrir a thread e grava o sidecar. Roda numa thread propria.
+    """Acompanha as threads principais abertas pela TUI durante a vida do pane.
 
     A TUI e quem chama thread/start: uma thread aberta por outro cliente e ainda sem turno nao tem
     rollout no disco, e `codex resume` a rejeita. Aqui so olhamos.
     """
     from websockets.sync.client import connect
     from app.adapters.codex.lancador import CLIENT_INFO
+    from app.adapters.codex.sessions import primary_thread
 
     limite = time.monotonic() + _ESPERA_THREAD
     ws = None
@@ -212,11 +213,10 @@ def _espera_thread(endpoint: str, cwd: str, servidor, erros, salvar) -> None:
                 if not isinstance(msg, dict) or msg.get("method") != "thread/started":
                     continue
                 thread = (msg.get("params") or {}).get("thread") or {}
-                if thread.get("cwd") != cwd:
+                if not primary_thread(thread, cwd):
                     continue
                 if thread.get("id") and thread.get("path"):
-                    salvar(thread["id"], thread["path"])
-                return
+                    salvar(thread["id"], thread["path"], thread)
         except ConnectionClosed:
             # Servidor foi embora (a TUI saiu e o `finally` o matou): nao ha o que salvar, e um
             # traceback aqui so suja o pane por cima do erro de verdade.
@@ -286,14 +286,22 @@ def main() -> int:
         stdout=subprocess.DEVNULL, stderr=erros,
     )
 
-    def salvar(thread_id: str, rollout: str) -> None:
+    previous_thread = None
+
+    def salvar(thread_id: str, rollout: str, thread: dict | None = None) -> None:
+        nonlocal previous_thread
         # A escolha do usuario vai pro sidecar, nao so pro comando da TUI: quem responde a pill do
         # app e `CodexAdapter.current_model`, que le daqui. Sem isto a sessao NASCIA no modelo certo
         # (o `-m` da TUI) e a pill mostrava vazio — o ramo `_conectar` do sidecar com endpoint so
         # conecta, entao o `default_model` da thread nunca chega a ser lido.
-        codex_sessions.save(args.name, thread_id, rollout, cwd,
-                            model=args.model, effort=args.effort,
-                            endpoint=endpoint, app_pid=servidor.pid)
+        if previous_thread is None:
+            codex_sessions.save(args.name, thread_id, rollout, cwd,
+                                model=args.model, effort=args.effort,
+                                endpoint=endpoint, app_pid=servidor.pid)
+        elif thread_id != previous_thread and thread is not None:
+            codex_sessions.switch_thread(args.name, thread, previous_thread,
+                                         endpoint=endpoint, app_pid=servidor.pid)
+        previous_thread = thread_id
 
     escuta = None
     if args.resume:
@@ -306,10 +314,9 @@ def main() -> int:
                   file=sys.stderr)
         else:
             salvar(args.resume, rollout)
-    else:
-        escuta = threading.Thread(target=_espera_thread,
-                                  args=(endpoint, cwd, servidor, erros, salvar), daemon=True)
-        escuta.start()
+    escuta = threading.Thread(target=_espera_thread,
+                              args=(endpoint, cwd, servidor, erros, salvar), daemon=True)
+    escuta.start()
 
     # SIGTERM/SIGHUP viram SystemExit pra que o `finally` rode: `tmux kill-session` derruba o pane
     # por sinal, e sem isto o app-server ficaria escutando sem dono.

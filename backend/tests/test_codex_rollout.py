@@ -87,6 +87,15 @@ def test_user_message_mentioning_agents_md_kept():
     assert len(evs) == 1 and evs[0].kind == "user_msg"
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_global_agents_wrapper_without_path_is_hidden(newline):
+    text = newline.join(["# AGENTS.md instructions", "", "<INSTRUCTIONS>", "Regras", "</INSTRUCTIONS>"])
+    obj = {"type": "response_item", "payload": {"type": "message", "role": "user", "content": text}}
+    assert parse_rollout_obj(obj) == []
+    obj["payload"]["content"] = "# AGENTS.md instructions\n\nPode revisar estas regras?"
+    assert parse_rollout_obj(obj)[0].text == obj["payload"]["content"]
+
+
 def test_assistant_message_output_text():
     obj = {"timestamp": "t", "type": "response_item",
            "payload": {"type": "message", "role": "assistant",

@@ -538,6 +538,7 @@ class CodexAdapter:
         # Publicar a sessão antes da leitura liberaria envios concorrentes como se estivesse ociosa.
         self.attach(name, client, meta["thread_id"], model=meta.get("model"),
                     effort=meta.get("effort"), watch_tmux=True)
+        self._sessions[name].update(endpoint=meta["endpoint"], app_pid=meta["app_pid"])
         self._restore_turn(self._sessions[name], thread)
         self.start_subscription(name, meta.get("cwd") or ".")
         _log.info("codex: conectado ao app-server do pane endpoint=%s name=%s",
@@ -561,17 +562,29 @@ class CodexAdapter:
         subprocess orfao do 1o. setdefault no dict de locks e seguro sem lock proprio: nao ha
         `await` entre o get e o set, entao nenhuma outra corrotina roda no meio (cooperativo)."""
         sess = self._sessions.get(name)
-        if sess is not None:
+        meta = codex_sessions.load(name)
+        if sess is not None and (not meta or not meta.get("endpoint") or meta.get("thread_id") == sess["thread_id"]):
             return sess["client"]
         lock = self._locks.setdefault(name, asyncio.Lock())
         async with lock:
             # Double-check: outro chamador pode ter terminado de spawnar enquanto esperavamos o lock.
             sess = self._sessions.get(name)
-            if sess is not None:
-                return sess["client"]
             meta = codex_sessions.load(name)
+            if sess is not None and (not meta or not meta.get("endpoint") or meta.get("thread_id") == sess["thread_id"]):
+                return sess["client"]
             if meta is None:
                 return None
+            if sess is not None:
+                # A TUI trocou de conversa; só a conexão antiga termina, nunca o app-server do pane.
+                self._sessions.pop(name, None)
+                tasks = [self._tmux_watchers.pop(name, None), self._subscribers.pop(name, None), sess.get("bomba")]
+                tasks = [task for task in tasks if task is not None and task is not asyncio.current_task()]
+                for task in tasks:
+                    if task is not None:
+                        task.cancel()
+                await asyncio.gather(*(task for task in tasks if task is not None), return_exceptions=True)
+                await sess["client"].close()
+                await CodexPreviewSource.get(name).push("")
             if meta.get("endpoint") and meta.get("app_pid"):
                 return await self._conectar(name, meta)
             # Daqui pra baixo o app-server e SPAWNADO e a TUI e RECRIADA — o pane atual morre. Isso
@@ -792,7 +805,14 @@ class CodexAdapter:
         # contract.md).
         buf = ""
         async for notif in client.notifications():
+            if self._sessions.get(name) is not sess:
+                return
             params = notif.get("params") or {}
+            if notif.get("method") == "thread/started" and sess.get("app_pid"):
+                thread = params.get("thread") or {}
+                if thread.get("id") != sess["thread_id"]:
+                    await asyncio.to_thread(codex_sessions.switch_thread, name, thread, sess["thread_id"],
+                                            endpoint=sess["endpoint"], app_pid=sess["app_pid"])
             # O app-server também publica estados de outras threads, inclusive subagentes.
             if params.get("threadId") is not None and params["threadId"] != sess["thread_id"]:
                 continue
@@ -848,6 +868,8 @@ class CodexAdapter:
                     await self.drain(name, "")
                 except Exception:
                     _log.exception("codex drain-on-complete falhou name=%s", name)
+                if self._sessions.get(name) is not sess:
+                    return
             if mapped.state is not None:
                 sess["state"] = mapped.state
                 was = sess["in_progress"]
@@ -881,7 +903,7 @@ class CodexAdapter:
         # Dead-detection (backlog T4-m2): emite dead pra o front + limpa a sessao da memoria (o
         # sidecar duravel fica; ensure_running reabre num acesso futuro). getattr: um client FAKE de
         # teste sem `closed` termina o stream sem simular morte -> nao emite dead.
-        if getattr(client, "closed", False):
+        if getattr(client, "closed", False) and self._sessions.get(name) is sess:
             sess["state"] = "dead"
             self._sessions.pop(name, None)
             espalhar(StateEvent(session=name, state="dead"))
