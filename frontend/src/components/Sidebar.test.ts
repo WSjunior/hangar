@@ -401,7 +401,7 @@ describe('Sidebar — trilho original no modo rail', () => {
   const sess = (name: string, serverId: string, state: string, extra: Record<string, unknown> = {}) =>
     ({ name, serverId, state, ...extra });
 
-  it('RAIL: WorkspaceNav em ícones, sem filtro nem cabeçalho de grupo', async () => {
+  it('RAIL no chat: sem WorkspaceNav, filtro nem cabeçalho de grupo', async () => {
     navMode.mode = 'rail';
     sidebarPin.setUser(true);   // pin recolhido -> trilho
     comStore([
@@ -714,7 +714,8 @@ describe('Sidebar — filesInContext (Task 14/15): o Git do menu e a sessão hos
     unmount(t.comp);
   });
 
-  it('QUADRO no trilho: a troca de view aparece em ícones (é a volta pro chat)', async () => {
+  // WorkspaceNav é stub aqui: o que se prova é que o trilho MONTA a troca de view no modo rail.
+  it('QUADRO no trilho: a troca de view monta em modo rail (é a volta pro chat)', async () => {
     navMode.mode = 'rail';
     comSessao();
     const t = montarCom({ boardActive: true, canvasActive: false, view: 'board' });
