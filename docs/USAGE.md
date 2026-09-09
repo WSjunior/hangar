@@ -61,9 +61,9 @@ com uma checagem que prova que o backend sobe de verdade.
 Lá o multiplexador é o [psmux](https://github.com/psmux/psmux) (tmux nativo de Windows, sobre
 ConPTY) — não existe `tmux` no Windows, e o WSL não é necessário. O `hangar-send` (recado/pareamento
 entre sessões) e o `claude-conta` vão junto, via o bash do Git for Windows. Três coisas **não**
-vão: os wrappers do `codex`, `pi` e `kimi` (sessão deles, só criada pelo app), os motores de modelo
-(Contas e modelos → Modelo e opções — o `hangar-engine` depende de `execvpe`, que no Windows não substitui o processo) e os
-plugins de persistência entre reboots.
+vão: os wrappers do `codex`, `pi` e `kimi` (sessão deles, só criada pelo app), e os
+plugins de persistência entre reboots — os motores de modelo (Contas e modelos → Modelo e
+opções) funcionam, via `subprocess.run` no lugar do `execvpe` que o Linux usa.
 
 O instalador faz duas perguntas no começo (a senha do celular e se você vai usar fora de
 casa) e depois segue sozinho; só pede a senha de administrador avisando antes. No fim ele
@@ -83,7 +83,8 @@ falha:
 - Hangar respondendo na porta configurada
 - multiplexador de terminal (tmux) no PATH
 - Claude Code instalado e logado
-- Tailscale instalado, logado e publicado
+- Tailscale: instalado / logado / publicado (três estados — cada um falha sozinho: pode
+  estar instalado e sem login, ou logado e sem o `serve` publicado)
 - endereço da rede local responde (celular no mesmo Wi-Fi)
 
 ### O que o Windows ainda não tem
