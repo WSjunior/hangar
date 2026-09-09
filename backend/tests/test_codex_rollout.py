@@ -200,8 +200,8 @@ def test_sem_cmd_no_codigo_sobra_o_codigo_e_nunca_um_campo_vazio():
 def test_saida_em_lista_de_blocos_vira_texto():
     """A saida do `exec` e uma LISTA de blocos, nao um escalar como no function_call_output."""
     res = [e for e in _eventos_exec() if e.kind == "tool_result"]
-    assert "Script completed" in res[0].result
-    assert "wall_time_seconds" in res[0].result   # o 2o bloco tambem entra, nao so o 1o
+    assert res[0].result == "session_id: 58546\n"
+    assert "wall_time_seconds" not in res[0].result
 
 
 def test_saida_em_string_continua_valendo():
@@ -340,3 +340,65 @@ def test_function_call_output_com_lista_nao_vira_repr_de_python():
         "type": "function_call_output", "call_id": "c1",
         "output": [{"type": "input_text", "text": "Script completed\n"}]}}
     assert parse_rollout_obj(obj)[0].result == "Script completed\n"
+
+
+def _exec_result(*blocks, status="completed"):
+    return parse_rollout_obj({"type": "response_item", "payload": {
+        "type": "custom_tool_call_output", "call_id": "c1", "output": [
+            {"type": "input_text", "text": f"Script {status}\nWall time 0.4 seconds\nOutput:\n"},
+            *({"type": "input_text", "text": block} for block in blocks),
+        ],
+    }})[0]
+
+
+def test_exec_desembrulha_blocos_reais_sem_colar_jsons():
+    # Shape do rollout de 09/09: cada text(await tools.exec_command(...)) é um bloco.
+    command = {"chunk_id": "fb7ed7", "wall_time_seconds": 0.000006049,
+               "exit_code": 0, "original_token_count": 2, "output": "linha 1\nlinha 2\n"}
+    result = _exec_result(json.dumps(command), json.dumps(command))
+    assert result.result == "linha 1\nlinha 2\n\n\nlinha 1\nlinha 2\n"
+    assert result.is_error is False
+
+
+@pytest.mark.parametrize("array", [False, True])
+def test_exec_desembrulha_all_settled_preservando_falha(array):
+    command = {"chunk_id": "a728ff", "wall_time_seconds": 0.000003579,
+               "exit_code": 2, "original_token_count": 2, "output": "teste falhou\n"}
+    value = {"status": "fulfilled", "value": command}
+    result = _exec_result(json.dumps([value] if array else value))
+    assert result.result == "exit_code: 2\nteste falhou\n"
+    assert result.is_error is True
+
+
+def test_exec_falha_de_patch_nao_parece_edicao_bem_sucedida():
+    error = "Script error:\napply_patch verification failed: invalid hunk at line 17"
+    result = _exec_result(error, status="failed")
+    assert result.result == error
+    assert result.is_error is True
+
+
+def test_exec_rejected_preserva_motivo_e_json_desconhecido():
+    result = _exec_result(json.dumps({"status": "rejected", "reason": "timeout"}),
+                          '{"output":"dado de domínio"}', "saída normal")
+    assert result.result == 'timeout\n\n{"output":"dado de domínio"}\n\nsaída normal'
+    assert result.is_error is True
+
+
+def test_exec_misto_nao_se_apresenta_como_a_primeira_ferramenta():
+    code = ('image((await tools.view_image({path:"/tmp/tela.png"})).image_url); '
+            'text(await tools.exec_command({cmd:"cat exemplo.py"}));')
+    result = parse_rollout_obj({"type": "response_item", "payload": {
+        "type": "custom_tool_call", "name": "exec", "call_id": "c1", "input": code,
+    }})[0]
+    assert result.tool_name == "exec"
+    assert result.tool_input == {"code": code, "command": "cat exemplo.py"}
+
+
+def test_patch_misto_nao_inventa_diff_das_demais_chamadas():
+    code = ('text(await tools.apply_patch("*** Begin Patch\\n*** End Patch")); '
+            'text(await tools.exec_command({cmd:"npm test"}));')
+    result = parse_rollout_obj({"type": "response_item", "payload": {
+        "type": "custom_tool_call", "name": "exec", "call_id": "c1", "input": code,
+    }})[0]
+    assert result.tool_name == "exec"
+    assert "patch" not in result.tool_input

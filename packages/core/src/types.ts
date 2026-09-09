@@ -133,6 +133,7 @@ export interface ResumeCandidate {
 export type ResumeResult = SessionInfo | { ambiguous: true; candidates: ResumeCandidate[] };
 
 export interface ChatEvent {
+  queued_delivered?: boolean | null;
   // `thinking` = resumo do raciocínio. Só chega quando a sessão foi aberta com o resumo ligado
   // (settings.json["showThinkingSummaries"]); no Pi e no Kimi o texto é o raciocínio cru.
   kind: 'user_msg' | 'assistant_msg' | 'tool_use' | 'tool_result' | 'thinking';

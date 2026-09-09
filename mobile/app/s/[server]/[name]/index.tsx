@@ -295,7 +295,7 @@ export default function ChatScreen() {
           </Text>
         ) : null}
         {!servidorSumiu ? <TuiPill serverId={serverId} name={name} overlay={!!stateEvent?.overlay} login={!!stateEvent?.login} /> : null}
-        {!servidorSumiu && !codexPreThread && fetchedSession !== null ? <Composer serverId={serverId} name={name} draft={draft} /> : null}
+        {!servidorSumiu && !codexPreThread && fetchedSession !== null ? <Composer serverId={serverId} name={name} draft={draft} sessionProvider={provider} /> : null}
       </KeyboardAvoidingView>
     </Screen>
   );

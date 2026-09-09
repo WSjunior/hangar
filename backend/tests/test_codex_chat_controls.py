@@ -80,6 +80,90 @@ async def test_orientar_exige_turno_atual_e_nao_inicia_outro(chat):
     assert all(method != "turn/start" for method, _ in client.calls)
 
 
+async def test_reabrir_stream_recupera_turno_e_permite_orientar(chat):
+    adapter, client = chat
+    snapshot = {"thread": {"id": "thread-1", "status": {"type": "active", "activeFlags": []},
+                           "turns": [{"id": "anterior", "status": "completed"},
+                                     {"id": "atual", "status": "inProgress"}]}}
+    original = client.request
+
+    async def request(method, params):
+        result = await original(method, params)
+        return snapshot if method == "thread/read" else result
+
+    async def notifications():
+        await asyncio.Event().wait()
+        yield {}
+
+    client.request, client.notifications = request, notifications
+    stream = adapter.state_monitor("sess", lambda: "thread-1")
+    try:
+        first = await anext(stream)
+        assert first.state == "working"
+        assert client.calls[0] == ("thread/read", {"threadId": "thread-1", "includeTurns": True})
+        await adapter.steer("sess", "ajuste durante o turno")
+        assert client.calls[-1][1]["expectedTurnId"] == "atual"
+        assert await adapter.deliverable("sess") is False
+        second = adapter.state_monitor("sess", lambda: "thread-1")
+        try:
+            assert (await anext(second)).state == "working"
+            assert client.calls[-1] == ("thread/read", {"threadId": "thread-1", "includeTurns": False})
+            assert adapter._sessions["sess"]["turn_id"] == "atual"
+        finally:
+            await second.aclose()
+    finally:
+        await stream.aclose()
+
+
+async def test_resposta_de_leitura_antiga_nao_reabre_turno_concluido(chat):
+    adapter, client = chat
+    async def notifications():
+        yield {"method": "turn/completed", "params": {"threadId": "thread-1", "turn": {"id": "atual"}}}
+    client.notifications = notifications
+
+    async def request(method, params):
+        await adapter._consumir("sess", client, adapter._sessions["sess"], lambda event: None)
+        return {"thread": {"status": {"type": "active"},
+                           "turns": [{"id": "atual", "status": "inProgress"}]}}
+
+    client.request = request
+    await adapter.read_settings("sess", include_turns=True)
+    sess = adapter._sessions["sess"]
+    assert sess["state"] == "idle" and not sess["in_progress"] and sess["turn_id"] is None
+    with pytest.raises(RuntimeError, match="Não há turno"):
+        await adapter.steer("sess", "orientação tardia")
+
+
+async def test_assinatura_recupera_turno_sem_notificacao_de_inicio(chat):
+    adapter, client = chat
+    adapter._sessions["sess"]["subscribed"] = False
+    async def request(method, params):
+        return {"thread": {"status": {"type": "active"},
+                           "turns": [{"id": "atual", "status": "inProgress"}]}}
+    client.request = request
+    await adapter._subscribe_when_ready("sess", "/tmp")
+    assert adapter._sessions["sess"]["turn_id"] == "atual"
+    assert await adapter.deliverable("sess") is False
+
+
+async def test_conexao_recupera_turno_antes_de_aceitar_envio(chat, monkeypatch):
+    from app.adapters.codex import adapter as module
+    adapter, client = chat
+    async def connect(endpoint):
+        return endpoint
+    async def request(method, params):
+        return {"thread": {"status": {"type": "active"},
+                           "turns": [{"id": "atual", "status": "inProgress"}]}}
+    client.connect, client.request = connect, request
+    monkeypatch.setattr(module, "AppServerClient", lambda: client)
+    monkeypatch.setattr(module, "pid_vivo", lambda pid: True)
+    monkeypatch.setattr(adapter, "_start_tmux_watcher", lambda name: None)
+    monkeypatch.setattr(adapter, "start_subscription", lambda name, cwd: None)
+    await adapter._conectar("sess", {"thread_id": "thread-1", "app_pid": 123, "endpoint": "ws://fake"})
+    assert adapter._sessions["sess"]["turn_id"] == "atual"
+    assert await adapter.deliverable("sess") is False
+
+
 async def test_modelo_rejeitado_nao_altera_estado(chat):
     adapter, client = chat
     client.fail = "thread/settings/update"
@@ -102,6 +186,38 @@ async def test_notificacao_terminal_atualiza_modo_e_esforco(chat):
     assert adapter.current_model("sess") == {"model": "gpt-5.6-sol", "effort": "xhigh"}
 
 
+async def test_eventos_de_outra_thread_nao_alteram_sessao_principal(chat, monkeypatch):
+    from app.adapters.codex.adapter import CodexPreviewSource
+    adapter, client = chat
+    sess = adapter._sessions["sess"]
+    sess.update(state="working", in_progress=True, turn_id="turno-main")
+    preview = CodexPreviewSource.get("sess")
+    await preview.push("prévia principal")
+    drained = []
+    async def drain(*args):
+        drained.append(args)
+        return 0
+    monkeypatch.setattr(adapter, "drain", drain)
+    async def notifications():
+        for method, params in [
+            ("thread/status/changed", {"status": {"type": "idle"}}),
+            ("turn/started", {"turn": {"id": "turno-sub"}}),
+            ("item/agentMessage/delta", {"delta": "texto subagente"}),
+            ("turn/completed", {"turn": {"id": "turno-sub"}}),
+            ("thread/tokenUsage/updated", {"tokenUsage": {"last": {"totalTokens": 999}}}),
+        ]:
+            yield {"method": method, "params": {"threadId": "outra-thread", **params}}
+        yield {"method": "account/rateLimits/updated", "params": {"rateLimits": {"primary": {"usedPercent": 12}}}}
+    client.notifications = notifications
+    events = []
+    await adapter._consumir("sess", client, sess, events.append)
+    assert (sess["state"], sess["in_progress"], sess["turn_id"]) == ("working", True, "turno-main")
+    assert preview.text == "prévia principal"
+    assert drained == [] and "token_usage" not in sess
+    assert len(events) == 1 and events[0].state == "working"
+    assert sess["rate_limits"] == {"primary": {"usedPercent": 12}}
+
+
 async def test_falha_orientacao_restaura_fila(chat, monkeypatch, tmp_path):
     from app import pqueue
     monkeypatch.setattr(pqueue, "_queue_dir", lambda: tmp_path)
@@ -113,6 +229,21 @@ async def test_falha_orientacao_restaura_fila(chat, monkeypatch, tmp_path):
     with pytest.raises(RuntimeError):
         await adapter.steer_queue("sess")
     assert queue.load()[0]["delivered"] is False
+
+
+async def test_orientar_fila_devolve_apenas_ids_confirmados(chat, monkeypatch, tmp_path):
+    from app import pqueue
+    monkeypatch.setattr(pqueue, "_queue_dir", lambda: tmp_path)
+    adapter, client = chat
+    adapter._sessions["sess"].update(turn_id="turno-1", in_progress=True)
+    queue = pqueue.PromptQueue("sess")
+    queue.append("já entregue", delivered=True)
+    first = queue.append("primeira orientação")
+    second = queue.append("segunda orientação")
+    assert await adapter.steer_queue("sess") == [first["id"], second["id"]]
+    assert [params["input"][0]["text"] for method, params in client.calls
+            if method == "turn/steer"] == ["primeira orientação", "segunda orientação"]
+    assert await adapter.steer_queue("sess") == []
 
 
 @pytest.mark.skipif(not shutil.which("codex"), reason="Codex CLI necessário para validar o protocolo")

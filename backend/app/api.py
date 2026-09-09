@@ -2636,7 +2636,8 @@ async def steer_session(name: str, body: InputBody | None = None):
                 return {"ok": True, "promoted": False}
             sent = await adapter.steer_queue(name)
             # O rollout confirma cada mensagem; não apaga ecos de envios concorrentes.
-            return {"ok": True, "promoted": False, "confirmed": sent}
+            return {"ok": True, "promoted": False, "confirmed": len(sent),
+                    "queued_ids": ["queued-" + entry_id for entry_id in sent]}
         except (RuntimeError, ValueError):
             raise HTTPException(409, detail=erro("erro_codex_controle", "O Codex não aceitou a alteração; atualize a sessão e tente novamente.")) from None
     provider, _ = await _send_thread(_pane_info, name)

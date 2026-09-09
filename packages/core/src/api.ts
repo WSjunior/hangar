@@ -998,7 +998,7 @@ export async function sendInput(name: string, text: string): Promise<void> {
 export async function steerSession(
   name: string,
   text?: string,
-): Promise<{ ok: boolean; promoted?: boolean; confirmed?: number }> {
+): Promise<{ ok: boolean; promoted?: boolean; confirmed?: number; queued_ids?: string[] }> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/steer`, {
     method: 'POST',
     body: text === undefined ? undefined : JSON.stringify({ text }),

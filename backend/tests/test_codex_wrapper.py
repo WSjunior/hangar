@@ -1,8 +1,7 @@
 """O wrapper do `codex` do shell (scripts/hangar-codex) com o BACKEND DESLIGADO.
 
 O que estes testes protegem: antes, toda decisao do wrapper era uma pergunta a API local — com o
-serviço parado ele nao abria nada, enquanto `claude`, `pi` e `kimi` abriam. Agora a fonte de
-verdade e o sidecar em disco, e a API so entra onde agrega algo.
+serviço parado ele nao abria nada, enquanto `claude`, `pi` e `kimi` abriam. Cada chamada deve criar uma nova sessao, mesmo quando ha outra no mesmo diretorio.
 
 O modulo e carregado por caminho porque `scripts/hangar-codex` nao tem extensao `.py` (e um
 executavel do PATH, nao um pacote).
@@ -46,46 +45,6 @@ def _sidecars_em_tmp(tmp_path):
 def _salva(nome, cwd, rollout, app_pid=None):
     codex_sessions.save(nome, f"tid-{nome}", str(rollout), cwd,
                         endpoint="ws://127.0.0.1:1", app_pid=app_pid)
-
-
-def _sem_api(w):
-    """A API fora do ar: e o estado que este ticket existe pra cobrir."""
-    return patch.object(w, "_api", side_effect=RuntimeError("backend inacessivel"))
-
-
-def test_escolhe_a_mais_recente_por_atividade_sem_tocar_na_api(w, tmp_path, capsys):
-    velho, novo = tmp_path / "a.jsonl", tmp_path / "b.jsonl"
-    velho.write_text("x")
-    novo.write_text("x")
-    os.utime(velho, (1000, 1000))
-    os.utime(novo, (2000, 2000))
-    _salva("proj", "/tmp/proj", velho)
-    _salva("proj-2", "/tmp/proj", novo)
-
-    with _sem_api(w), patch.object(w, "_tmux_vivas", return_value={"proj", "proj-2"}):
-        assert w._resume_target("/tmp/proj", codex_sessions) == "proj-2"
-    # As que ficaram de fora sao DITAS, nunca descartadas em silencio.
-    assert "proj" in capsys.readouterr().err
-
-
-def test_sidecar_sem_pane_vivo_nao_e_candidata(w, tmp_path):
-    """Sidecar orfao (pane derrubado sem limpeza) sequestraria o `codex` daquela pasta pra sempre:
-    o wrapper diria "retomando" e o attach falharia."""
-    rollout = tmp_path / "a.jsonl"
-    rollout.write_text("x")
-    _salva("proj", "/tmp/proj", rollout)
-
-    with _sem_api(w), patch.object(w, "_tmux_vivas", return_value=set()):
-        assert w._resume_target("/tmp/proj", codex_sessions) is None
-
-
-def test_sessao_de_outro_diretorio_nao_e_candidata(w, tmp_path):
-    rollout = tmp_path / "a.jsonl"
-    rollout.write_text("x")
-    _salva("outro", "/tmp/outro", rollout)
-
-    with _sem_api(w), patch.object(w, "_tmux_vivas", return_value={"outro"}):
-        assert w._resume_target("/tmp/proj", codex_sessions) is None
 
 
 def test_cria_direto_no_tmux_com_o_comando_do_lancador(w):
@@ -167,16 +126,68 @@ def test_carregar_os_modulos_nao_puxa_o_pacote_dos_adapters(w):
     assert callable(lancador.comando_do_lancador)
 
 
-def test_api_fora_do_ar_nao_impede_de_abrir(w):
-    """Sem disco E sem API, "nao sei se ja existe sessao" tem que virar "nao ha" e seguir pra
-    criacao. Deixar o erro subir encerrava o `codex` sem abrir nada."""
-    with _sem_api(w):
-        assert w._resume_target("/tmp/proj", None) is None
+@pytest.mark.parametrize("prompt", [None, "revise"])
+@pytest.mark.parametrize("backend", ["ativo", "fora", "sem_token"])
+@pytest.mark.parametrize("pane", ["fora", "vivo", "morto"])
+def test_main_cria_sessao_nova_e_escolhe_cliente(w, monkeypatch, tmp_path, prompt, backend, pane):
+    from app.adapters.codex import lancador
+    from types import SimpleNamespace
 
+    cwd = str(tmp_path)
+    _salva(tmp_path.name, cwd, tmp_path / "antigo.jsonl")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(w.sys, "argv", ["hangar-codex"] + ([prompt] if prompt else []))
+    monkeypatch.setattr(w, "_do_backend", lambda: (codex_sessions, lancador))
+    monkeypatch.setattr(w, "_tmux_vivas", lambda: {tmp_path.name})
+    monkeypatch.setattr(w, "_env", lambda: {})
+    monkeypatch.delenv("CP_AUTH_TOKEN", raising=False)
+    if pane == "fora":
+        monkeypatch.delenv("TMUX", raising=False)
+        monkeypatch.delenv("TMUX_PANE", raising=False)
+    else:
+        monkeypatch.setenv("TMUX", "socket-herdado")
+        monkeypatch.setenv("TMUX_PANE", "%42")
+    chamadas, pedidos = [], []
 
-def test_sem_os_modulos_do_backend_a_api_decide(w, tmp_path):
-    """Plano B honesto: sem conseguir ler o disco, o wrapper volta a perguntar a API — o
-    comportamento de antes deste ticket, e nao um silencio."""
-    with patch.object(w, "_api", return_value=[
-            {"provider": "codex", "cwd": "/tmp/proj", "name": "proj", "last_activity": 5.0}]):
-        assert w._resume_target("/tmp/proj", None) == "proj"
+    def api(method, path, body=None):
+        pedidos.append((method, path, body))
+        if backend == "fora":
+            raise RuntimeError("backend inacessivel")
+        if method == "GET":
+            return [{"name": tmp_path.name, "cwd": cwd, "provider": "codex"}]
+        if method == "POST":
+            return {"name": body["name"]}
+        return {}
+
+    if backend != "sem_token":
+        monkeypatch.setattr(w, "_api", api)
+
+    def run(argv, **kwargs):
+        chamadas.append(argv)
+        command = argv[1]
+        if command == "list-panes":
+            return SimpleNamespace(returncode=0 if pane == "vivo" else 1)
+        if command == "has-session":
+            return SimpleNamespace(returncode=1)
+        if command == "attach-session":
+            assert "TMUX" not in os.environ
+            assert "TMUX_PANE" not in os.environ
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(w.subprocess, "run", run)
+    assert w.main() == 0
+    name = f"{tmp_path.name}-2"
+    if backend == "ativo":
+        assert pedidos[1] == ("POST", "/api/sessions", {
+            "name": name, "cwd": cwd, "provider": "codex", "initial_prompt": prompt,
+        })
+    else:
+        creation = next(c for c in chamadas if c[1] == "new-session")
+        assert creation[4] == name
+        assert "--resume" not in creation[-1]
+        if prompt:
+            assert f"--prompt {prompt}" in creation[-1]
+    action = "switch-client" if pane == "vivo" else "attach-session"
+    assert ["tmux", action, "-t", f"={name}"] in chamadas
+    assert all("/input" not in path for _, path, _ in pedidos)
+    assert codex_sessions.load(tmp_path.name) is not None

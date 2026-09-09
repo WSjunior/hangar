@@ -183,6 +183,7 @@ def _entry_event(entry: dict) -> ChatEvent:
     # `desistiu` vai junto: e a UNICA forma de o front distinguir "esperando a vez" de "perdida".
     # Sem ele a bolha desistida acendia solida igual a uma aceita (ver models.ChatEvent.desistiu).
     return ChatEvent(kind="user_msg", id="queued-" + str(entry.get("id")), text=entry.get("text"),
+                     queued_delivered=entry.get("delivered") if isinstance(entry.get("delivered"), bool) else None,
                      desistiu=True if entry.get("desistiu") else None)
 
 
@@ -667,15 +668,11 @@ class PromptQueue:
 
     async def follow(self, min_ts: float = 0.0) -> AsyncIterator[ChatEvent]:
         # Emite as entradas existentes e depois vigia novos appends, como user_msg sintetico.
-        # Usa um set de ids ja vistos (o append reescreve o arquivo inteiro -> rastrear posicao
+        # Guarda os estados já vistos (o append reescreve o arquivo inteiro -> rastrear posicao
         # quebraria; reload + dedup por id e simples e correto). min_ts: descarta entradas anteriores
         # ao inicio da sessao atual (ex: pre-/clear) — espelha a poda do merged_history no live SSE.
-        # id -> `desistiu` JA EMITIDO, nao um set de ids. `desistiu` e decidido DEPOIS que a entrada
-        # nasce (o reconcile roda num Timer, segundos mais tarde), entao com um set a entrada era
-        # emitida uma unica vez, ainda sem o campo, e a virada pra "perdida" nunca chegava a quem
-        # esta com o chat ABERTO — justo o caso mais comum. Reemitir e seguro: o front indexa por id
-        # e SUBSTITUI no lugar (Chat.svelte, idIndex), nao duplica a bolha.
-        seen: dict[str, bool] = {}
+        # Entrega e desistência mudam depois do primeiro evento. O front substitui pelo mesmo id.
+        seen: dict[str, tuple[bool | None, bool | None]] = {}
 
         def emit_new() -> list[ChatEvent]:
             evs = []
@@ -687,13 +684,14 @@ class PromptQueue:
                 # -> re-emitir o eco so duplicava (bolha antiga "solta" no fim a cada reconexao).
                 if entry.get("confirmed"):
                     continue
-                desistiu = bool(entry.get("desistiu"))
-                if eid in seen and seen[eid] == desistiu:
+                event = _entry_event(entry)
+                signature = (event.desistiu, event.queued_delivered)
+                if eid in seen and seen[eid] == signature:
                     continue
-                seen[eid] = desistiu
+                seen[eid] = signature
                 if min_ts and not _da_sessao_atual(entry, min_ts):
                     continue
-                evs.append(_entry_event(entry))
+                evs.append(event)
             return evs
 
         # emit_new() faz read_text do sidecar -> roda no threadpool pra nao bloquear o loop. As chamadas

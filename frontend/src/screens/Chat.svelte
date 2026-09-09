@@ -62,7 +62,7 @@
   import { formataErro } from '@hangar/core';
   import { appendTail, hasSeam, prependOlder } from '@hangar/core';
   import { especificidade, donoDaLinha } from '@hangar/core';
-  import { parseStatusLine } from '@hangar/core';
+  import { parseStatusLine, queuedMessages } from '@hangar/core';
   import { listServers, getActiveId } from '../lib/auth';
   import { createActivityFolder } from '@hangar/core';
   import type { ChatEvent, StateEvent, StatsEvent, State, SessionInfo, AskQuestionPayload, AnswerItem, Provider, PlanDetail, UploadFile } from '@hangar/core';
@@ -1837,19 +1837,23 @@
     sessionProvider !== 'kimi' && sessionProvider !== 'codex'
       ? 0
       : pending.length
-        + events.filter((e) => e.kind === 'user_msg'
-                          && e.id?.startsWith('queued-') && !e.desistiu).length,
+        + queuedMessages(events, sessionProvider).length,
   );
 
   // "mandar agora" (chip da fila): o ctrl-s promove a fila da TUI pro turno em curso. Com
   // promoted=true o backend JÁ baixou a fila durável — tira as bolhas "queued-" na hora, porque o
   // user_msg real só é gravado no wire no FIM do turno (medido: ~34s depois do ctrl-s) e até lá
   // nada mais derrubaria o chip: ele ficava aceso e clicável o turno inteiro sobre um no-op.
-  async function steerAgora(): Promise<void> {
+  async function steerAgora(): Promise<boolean> {
     const r = await steerSession(sessionName);
-    if (!r.promoted) return;
+    if (r.queued_ids?.length) {
+      const sent = new Set(r.queued_ids);
+      events = events.map(e => sent.has(e.id) ? { ...e, queued_delivered: true } : e);
+    }
+    if (!r.promoted) return (r.confirmed ?? 0) > 0;
     events = events.filter((e) => !(e.kind === 'user_msg' && e.id?.startsWith('queued-')));
     rebuildIndex();
+    return true;
   }
 
   let pendingSeq = 0;

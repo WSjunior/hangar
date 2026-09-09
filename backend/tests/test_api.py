@@ -643,11 +643,12 @@ def test_codex_modo_e_skills_usam_adapter_nativo(api_client):
 def test_codex_orientar_texto_ou_fila_com_falha_visivel(api_client):
     fake = _fake_codex_adapter()
     fake.steer = AsyncMock()
-    fake.steer_queue = AsyncMock(return_value=2)
+    fake.steer_queue = AsyncMock(return_value=["m1", "m2"])
     with patch("app.api._session_exists", return_value=True), patch("app.api._provider_of", return_value="codex"), \
          patch("app.api.get_adapter", return_value=fake):
         assert api_client.post("/api/sessions/cx/steer", headers=_h(), json={"text": "orientação"}).status_code == 200
-        assert api_client.post("/api/sessions/cx/steer", headers=_h()).json()["confirmed"] == 2
+        assert api_client.post("/api/sessions/cx/steer", headers=_h()).json() == {
+            "ok": True, "promoted": False, "confirmed": 2, "queued_ids": ["queued-m1", "queued-m2"]}
         fake.steer.side_effect = RuntimeError("turno terminou")
         assert api_client.post("/api/sessions/cx/steer", headers=_h(), json={"text": "preservar"}).status_code == 409
     fake.steer_queue.assert_awaited_once_with("cx")

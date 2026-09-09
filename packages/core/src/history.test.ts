@@ -1,9 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatEvent } from './types';
-import { appendTail, hasSeam, prependOlder } from './history';
+import { appendTail, hasSeam, prependOlder, queuedMessages } from './history';
 
 const ev = (id: string): ChatEvent => ({ kind: 'user_msg', id, text: id });
 const ids = (evs: ChatEvent[] | null) => (evs ?? []).map((e) => e.id);
+
+it('Codex conta só mensagens ainda não encaminhadas, preservando Kimi e o legado', () => {
+  const events: ChatEvent[] = [ev('queued-legado'), { ...ev('queued-enviada'), queued_delivered: true },
+    { ...ev('queued-pendente'), queued_delivered: false }, { ...ev('queued-perdida'), desistiu: true },
+    ev('real'), { ...ev('queued-task'), kind: 'tool_result' }];
+  expect(ids(queuedMessages(events, 'codex'))).toEqual(['queued-legado', 'queued-pendente']);
+  expect(ids(queuedMessages(events, 'kimi'))).toEqual(['queued-legado', 'queued-enviada', 'queued-pendente']);
+  expect(events).toHaveLength(6);
+});
 
 describe('prependOlder', () => {
   it('traz so o que e mais antigo que a cauda em tela', () => {

@@ -10,6 +10,7 @@ import {
   especificidade,
   donoDaLinha,
   sendInput,
+  queuedMessages,
 } from '@hangar/core';
 import type { ChatEvent, StateEvent, PreviewEvent, AskQuestionPayload, StatsEvent } from '@hangar/core';
 import * as m from '../paraglide/messages';
@@ -60,8 +61,8 @@ export interface ChatState {
 
 // Quantas bolhas estão "na fila" (translúcidas): ecos locais + sintéticos queued-* da fila durável.
 // Extraído pra não duplicar a regra entre Composer (chip) e teste (file: chat.ts é a fonte).
-export function filaCount(state: Pick<ChatState, 'events' | 'pending'>): number {
-  return state.pending.length + state.events.filter((e) => e.kind === 'user_msg' && e.id.startsWith('queued-')).length;
+export function filaCount(state: Pick<ChatState, 'events' | 'pending'>, provider?: string | null): number {
+  return state.pending.length + queuedMessages(state.events, provider).length;
 }
 
 export interface ChatApi {

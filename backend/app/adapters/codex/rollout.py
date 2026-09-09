@@ -135,6 +135,67 @@ def _files_from_patch(code: str) -> list[str]:
     return _PATCH_FILE_RE.findall(code or "")
 
 
+_SCRIPT_HEADER_RE = re.compile(
+    r"^Script (completed|failed)\nWall time [\d.]+ seconds\nOutput:\n")
+
+
+def _command_output(value) -> tuple[str, bool] | None:
+    if isinstance(value, list):
+        parts = [_command_output(item) for item in value]
+        if parts and all(part is not None for part in parts):
+            return "\n\n".join(part[0] for part in parts), any(part[1] for part in parts)
+        return None
+    if not isinstance(value, dict):
+        return None
+    if value.get("status") == "fulfilled" and set(value) == {"status", "value"}:
+        return _command_output(value["value"])
+    if value.get("status") == "rejected" and set(value) == {"status", "reason"}:
+        reason = value["reason"]
+        return (reason if isinstance(reason, str) else json.dumps(reason, ensure_ascii=False)), True
+    # Um JSON de domínio também pode ter `output`: os metadados provam o envelope do executor.
+    if not (isinstance(value.get("output"), str) and "chunk_id" in value
+            and "wall_time_seconds" in value):
+        return None
+    text = value["output"]
+    failed = isinstance(value.get("exit_code"), int) and value["exit_code"] != 0
+    if failed:
+        text = f"exit_code: {value['exit_code']}\n{text}"
+    elif value.get("session_id") is not None:
+        text = f"session_id: {value['session_id']}\n{text}"
+    return text, failed
+
+
+def _output_result(output) -> tuple[str | None, bool]:
+    raw = _output_text(output)
+    if raw is None:
+        return None, False
+    header = _SCRIPT_HEADER_RE.match(raw)
+    if not header:
+        return raw, False
+    failed = header.group(1) == "failed"
+    # Os blocos precisam permanecer separados: dois text(obj) viram JSONs adjacentes no rollout.
+    blocks = ([b["text"] for b in output if isinstance(b, dict)
+               and b.get("type") == "input_text" and isinstance(b.get("text"), str)]
+              if isinstance(output, list) else [raw])
+    blocks[0] = blocks[0][header.end():]
+    parts = []
+    for block in blocks:
+        if not block:
+            continue
+        try:
+            value = json.loads(block)
+        except (json.JSONDecodeError, ValueError):
+            parts.append(block)
+            continue
+        parsed = _command_output(value)
+        if parsed is None:
+            parts.append(block)
+        else:
+            parts.append(parsed[0])
+            failed = failed or parsed[1]
+    return "\n\n".join(parts), failed
+
+
 def _output_text(output) -> str | None:
     """Text of a tool output: a LIST of blocks or a raw string — both shapes appear in real
     rollouts, so handling only the list would leave half the results empty."""
@@ -199,7 +260,8 @@ def parse_rollout_obj(obj: dict) -> list[ChatEvent]:
         # THIS file would — used to match here and send the reader hunting for a JS string in the
         # middle of a diff, dropping the real patch without a word.
         embrulhado = name == "exec"
-        inner = _TOOL_IN_CODE_RE.search(code) if embrulhado else None
+        calls = list(_TOOL_IN_CODE_RE.finditer(code)) if embrulhado else []
+        inner = calls[0] if len(calls) == 1 else None
         if inner:
             name = inner.group(1)
         # Each tool has a different salient field, and an empty value would make the front draw an
@@ -220,6 +282,10 @@ def parse_rollout_obj(obj: dict) -> list[ChatEvent]:
             files = _files_from_patch(patch)
             if files:
                 tool_input["file_path"] = files
+        elif len(calls) > 1:
+            tool_input["command"] = "\n".join(
+                _unescape_js(m.group(1)) for m in _CMD_RE.finditer(code)
+            ) or ", ".join(dict.fromkeys(m.group(1) for m in calls))
         else:
             command = _command_from_code(code)
             if command:
@@ -230,22 +296,12 @@ def parse_rollout_obj(obj: dict) -> list[ChatEvent]:
             tool_input=tool_input,
         )]
 
-    if ptype == "custom_tool_call_output":
-        # Output here is a LIST of blocks, not a scalar like in function_call_output.
+    if ptype in {"custom_tool_call_output", "function_call_output"}:
+        result, failed = _output_result(payload.get("output"))
         return [ChatEvent(
             kind="tool_result", id=_event_id(obj),
             tool_use_id=payload.get("call_id"),
-            result=_output_text(payload.get("output")),
-        )]
-
-    if ptype == "function_call_output":
-        # Same conversion as custom_tool_call_output: this type ALSO arrives as a list of blocks
-        # (seen on the `wait` tool), and the previous `str()` put Python's repr in the conversation
-        # — `[{'type': 'input_text', 'text': '...'}]` instead of the output.
-        return [ChatEvent(
-            kind="tool_result", id=_event_id(obj),
-            tool_use_id=payload.get("call_id"),
-            result=_output_text(payload.get("output")),
+            result=result, is_error=failed,
         )]
 
     # reasoning: encrypted_content opaco no rollout -> ignora no v1 (texto legivel so ao vivo).

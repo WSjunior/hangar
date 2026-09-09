@@ -185,6 +185,8 @@ class ChatEvent(BaseModel):
     # renderiza IGUAL a uma aceita, e "some sem aviso" vira "parece que foi" — que é pior, porque o
     # usuário acha que mandou. `confirmed` é o oposto e não vem: ali a bolha real já cobre.
     desistiu: Optional[bool] = None
+    # Transporte da fila, não confirmação no transcript; ausente em entradas legadas.
+    queued_delivered: Optional[bool] = None
     # Nº de imagens base64 anexadas a uma msg do user via TERMINAL (paste na TUI do Claude). O front
     # busca cada uma sob demanda em /transcript-image/{id}/{idx} (lazy; base64 não vai no payload).
     image_count: Optional[int] = None

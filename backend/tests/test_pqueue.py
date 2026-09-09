@@ -842,6 +842,44 @@ def test_entry_event_carrega_desistiu():
     assert _entry_event({"id": "e1", "text": "oi", "desistiu": True}).desistiu is True
 
 
+@pytest.mark.parametrize("delivered", [False, True, None])
+def test_entry_event_informa_transporte_sem_inferir_confirmacao(delivered):
+    entry = {"id": "e1", "text": "oi", "desistiu": True}
+    if delivered is not None:
+        entry["delivered"] = delivered
+    event = pqueue._entry_event(entry)
+    assert event.queued_delivered is delivered
+    assert event.desistiu is True
+    assert event.id == "queued-e1"
+
+
+def test_follow_reemite_entrega_e_reversao_sem_reemitir_confirmada(monkeypatch):
+    import asyncio
+    import json
+
+    q = PromptQueue("transporte")
+    entry = q.append("oi")
+
+    async def changes(*args, **kwargs):
+        for delivered in (True, True, False):
+            q.set_delivered(entry["id"], delivered)
+            yield set()
+        q.path.write_text(json.dumps({**entry, "confirmed": True, "delivered": True}) + "\n",
+                          encoding="utf-8")
+        yield set()
+
+    monkeypatch.setattr(pqueue, "awatch", changes)
+
+    async def collect():
+        return [event async for event in q.follow()]
+
+    events = asyncio.run(collect())
+    assert [event.queued_delivered for event in events] == [False, True, False]
+    assert {event.id for event in events} == {"queued-" + entry["id"]}
+    assert all(event.text == "oi" and event.desistiu is None for event in events)
+    assert q.load()[0]["confirmed"] is True
+
+
 def test_reconcile_resgata_desistida_que_apareceu_depois():
     # `desistiu` era irreversivel: a bolha ficava avisando "nao chegou" pra sempre sobre uma msg que
     # CHEGOU — so que depois do prazo. Medido em 13/08/2026 numa sessao Kimi: 6 de 7 desistidas

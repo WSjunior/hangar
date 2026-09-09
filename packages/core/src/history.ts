@@ -7,6 +7,11 @@
 // veio do backend.
 import type { ChatEvent } from './types';
 
+export function queuedMessages(events: ChatEvent[], provider?: string | null): ChatEvent[] {
+  return events.filter(e => e.kind === 'user_msg' && e.id.startsWith('queued-') && !e.desistiu
+    && (provider !== 'codex' || !e.queued_delivered));
+}
+
 /** Historico COMPLETO recem-buscado + a cauda que ja esta na tela -> lista com os eventos
  *  ANTERIORES a cauda prependados. `null` = nada a fazer (o chamador mantem o que tem):
  *  ou ja temos desde o comeco, ou nao ha um evento em comum pra costurar (transcript trocado por

@@ -17,9 +17,9 @@ async function flush() { await tick(); await new Promise(r => setTimeout(r, 0));
 const button = (label: string) => [...document.querySelectorAll('button')].find(b => b.textContent?.trim() === label)!;
 async function montar() {
   const props = $state({
-    sessionName: 'codex-test', sessionState: 'working' as const, provider: 'codex' as const,
+    sessionName: 'codex-test', sessionState: 'working' as 'working' | 'idle', provider: 'codex' as const,
     status: { raw: '', model: 'gpt-6-astra', effort: 'high' }, codexMode: 'default' as 'default' | 'plan' | null,
-    inputText: '', onSend: vi.fn().mockResolvedValue(undefined), onSteer: vi.fn(), filaCount: 1,
+    inputText: '', onSend: vi.fn().mockResolvedValue(undefined), onSteer: vi.fn().mockResolvedValue(true), filaCount: 1,
     onCommand: vi.fn(), onInterrupt: vi.fn(), onOpenGit: vi.fn(), onOpenPreview: vi.fn(),
   });
   const el = document.createElement('div'); document.body.appendChild(el);
@@ -88,4 +88,56 @@ it('permite orientar agora ou enviar à fila e conserva o texto em caso de falha
   props.inputText = 'preservar'; await flush();
   [...document.querySelectorAll('button')].find(b => b.title === m.codex_orientar_ajuda())!.click(); await flush();
   expect(document.querySelector('textarea')!.value).toBe('preservar');
+});
+
+it('mostra o andamento de Orientar, bloqueia repetição e permite tentar após falha', async () => {
+  const props = await montar();
+  let finish!: () => void;
+  props.onSteer.mockImplementationOnce(() => new Promise<boolean>(resolve => { finish = () => resolve(true); }));
+  const steer = document.querySelector<HTMLButtonElement>('.fila-chip')!;
+  steer.click(); steer.click(); await flush();
+  expect(props.onSteer).toHaveBeenCalledTimes(1);
+  expect(steer.disabled).toBe(true);
+  expect(steer.textContent).toContain(m.askq_enviando());
+  finish(); await flush();
+  expect(steer.disabled).toBe(false);
+  expect(document.querySelector('.steer-feedback')?.textContent).toBe(m.codex_orientar_recebido());
+  props.onSteer.mockRejectedValueOnce(new Error('Turno encerrado'));
+  steer.click(); await flush();
+  expect(document.querySelector('.steer-feedback')).toBeNull();
+  expect(document.querySelector('.send-error')?.textContent).toBe('Turno encerrado');
+  expect(steer.disabled).toBe(false);
+  steer.click(); await flush();
+  expect(props.onSteer).toHaveBeenCalledTimes(3);
+});
+
+it('tira Orientar após aceite e só oferece de novo para uma fila nova', async () => {
+  const props = await montar();
+  let finish!: () => void;
+  props.onSteer.mockImplementationOnce(() => new Promise<boolean>(resolve => { finish = () => resolve(true); }));
+  document.querySelector<HTMLButtonElement>('.fila-chip')!.click(); await flush();
+  props.filaCount = 0; await flush();
+  expect(document.querySelector<HTMLButtonElement>('.fila-chip')?.disabled).toBe(true);
+  finish(); await flush();
+  expect(document.querySelector('.fila-chip')).toBeNull();
+  expect(document.querySelector('.steer-feedback')?.textContent).toBe(m.codex_orientar_recebido());
+  props.filaCount = 1; await flush();
+  expect(document.querySelector<HTMLButtonElement>('.fila-chip')?.disabled).toBe(false);
+});
+
+it('resposta atrasada não mostra recibo em turno encerrado', async () => {
+  const props = await montar();
+  let finish!: () => void;
+  props.onSteer.mockImplementationOnce(() => new Promise<boolean>(resolve => { finish = () => resolve(true); }));
+  document.querySelector<HTMLButtonElement>('.fila-chip')!.click(); await flush();
+  props.sessionState = 'idle'; await flush();
+  finish(); await flush();
+  expect(document.querySelector('.steer-feedback')).toBeNull();
+});
+
+it('não confirma recebimento quando nenhuma orientação foi encaminhada', async () => {
+  const props = await montar();
+  props.onSteer.mockResolvedValueOnce(false);
+  document.querySelector<HTMLButtonElement>('.fila-chip')!.click(); await flush();
+  expect(document.querySelector('.steer-feedback')?.textContent).toBe(m.codex_orientar_sem_envio());
 });

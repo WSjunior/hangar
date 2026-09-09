@@ -74,7 +74,7 @@
     claudePermissionMode?: string | null;
     claudePreviousNonPlan?: string | null;
     // ctrl-s avulso: promove o que JÁ está na fila da TUI do Kimi pro turno em curso.
-    onSteer?: () => Promise<void> | void;
+    onSteer?: () => Promise<boolean | void> | boolean | void;
     // Quantas msgs estão esperando o turno atual (as bolhas translúcidas). 0 = sem chip de fila.
     filaCount?: number;
     onCommand: (cmd: string) => void;
@@ -298,6 +298,8 @@
   let attachError = $state('');
   let sending = $state(false);
   let sendError = $state('');
+  let steeringQueue = $state(false);
+  let steerFeedback = $state('');
   let transcribing = $state(false);   // audio gravado/anexado sendo transcrito pro composer
 
   // ── Gravacao de audio pelo microfone (MediaRecorder) ────────────────────────
@@ -429,7 +431,7 @@
   // par, sem cache. Faixa vazia pendurada é pior que faixa ausente.
   const temAba = $derived(
     !!status?.repo || !!lastCache || status?.ctxPct != null
-    || !!onOpenPair || ((isKimi || isCodex) && isWorking && filaCount > 0 && !!onSteer)
+    || !!onOpenPair || ((isKimi || isCodex) && isWorking && (filaCount > 0 || steeringQueue) && !!onSteer)
     || (shellsRodando > 0 && !!onOpenActivity),
   );
 
@@ -1673,19 +1675,31 @@
   // ctrl-s sem texto: não passa pelo submit (não há o que digitar nem o que limpar). Erro vai pro
   // mesmo lugar do erro de envio — falha calada aqui seria um toque que não faz nada.
   async function steerFila(): Promise<void> {
+    if (steeringQueue || !onSteer) return;
+    steeringQueue = true;
+    steerFeedback = '';
     sendError = '';
     try {
-      await onSteer?.();
+      const sent = await onSteer();
+      if (isCodex && isWorking) steerFeedback = sent
+        ? m.codex_orientar_recebido() : m.codex_orientar_sem_envio();
     } catch (err) {
       sendError = err instanceof Error ? err.message : m.composer_fila_erro();
+    } finally {
+      steeringQueue = false;
     }
   }
+
+  $effect(() => {
+    if (!isWorking) steerFeedback = '';
+  });
 
   async function submit(steer = false): Promise<boolean> {
     if (!canSend) return false;
     cancelarContagem();   // envio manual torna a contagem sem sentido
     const caption = inputText.trim();
     sendError = '';
+    steerFeedback = '';
     fecharDitado();   // enviou -> o texto saiu do campo, nao ha mais versao pra trocar
     if (attachments.length) {
       uploading = true;
@@ -1846,18 +1860,21 @@
           </button>
         {/if}
       {/if}
-      {#if (isKimi || isCodex) && isWorking && filaCount > 0 && onSteer}
+      {#if (isKimi || isCodex) && isWorking && (filaCount > 0 || steeringQueue) && onSteer}
         <!-- FILA da TUI do Kimi: msg já mandada, esperando o turno atual acabar. O chip existe pra
              DIZER que há fila (antes disso a bolha translúcida era a única pista) e dar a saída:
              tocar manda o `ctrl-s`, que promove a msg pro turno em curso. Não tocar = espera, que
              é o comportamento de sempre. -->
         <button class="repo-chip fila-chip" onclick={steerFila}
+                disabled={steeringQueue} aria-busy={steeringQueue}
                 title={m.composer_fila_titulo()}
                 aria-label={m.composer_fila_aria()}>
           <span class="repo-glyph" aria-hidden="true">⏳</span>
-          <span class="repo-name">{m.composer_fila_contagem({ n: filaCount })}</span>
-          <span class="repo-sep" aria-hidden="true">·</span>
-          <span class="fila-acao">{isCodex ? m.codex_orientar() : m.composer_fila_acao()}</span>
+          {#if !steeringQueue}
+            <span class="repo-name">{m.composer_fila_contagem({ n: filaCount })}</span>
+            <span class="repo-sep" aria-hidden="true">·</span>
+          {/if}
+          <span class="fila-acao">{steeringQueue ? m.askq_enviando() : isCodex ? m.codex_orientar() : m.composer_fila_acao()}</span>
         </button>
       {/if}
       {#if shellsRodando > 0 && onOpenActivity}
@@ -2053,6 +2070,9 @@
     {/if}
     {#if sendError}
       <div class="send-error" role="alert">{sendError}</div>
+    {/if}
+    {#if steerFeedback && isWorking}
+      <div class="steer-feedback" role="status">{steerFeedback}</div>
     {/if}
     {#if modelError}
       <div class="send-error" role="alert">{modelError}</div>
@@ -3241,6 +3261,11 @@
     font-weight: 600;
   }
 
+  .steer-feedback {
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
+    padding-block: var(--space-1);
+  }
   .send-error {
     display: flex;
     align-items: baseline;

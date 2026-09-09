@@ -27,6 +27,8 @@
   "chat_mode_unavailable": "unavailable",
   "chat_mode_only_creation": "Available only when creating the session",
   "codex_orientar": "Steer",
+  "codex_orientar_recebido": "Received by Codex.",
+  "codex_orientar_sem_envio": "No messages were forwarded this time.",
   "codex_orientar_ajuda": "Send this message to the active turn",
   "erro_codex_controle": "Codex did not accept the change; refresh the session and try again.",
   "erro_codex_opcoes": "Could not save the Codex options.",

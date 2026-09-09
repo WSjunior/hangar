@@ -432,6 +432,7 @@ class CodexAdapter:
                 return
             if sess.get("subscribed"):
                 return
+            revision = sess.get("state_revision", 0)
             try:
                 result = await sess["client"].request("thread/resume", {
                     "threadId": sess["thread_id"],
@@ -465,6 +466,10 @@ class CodexAdapter:
             # sobrescreveria e o 🤖 sumia da statusline (visto na verificacao ao vivo).
             sess["default_model"] = sess.get("default_model") or result.get("model")
             sess["default_effort"] = _effort_da_thread(result)
+            if revision == sess.get("state_revision", 0):
+                self._restore_turn(sess, result.get("thread") or {})
+                for fila in sess.get("ouvintes", []):
+                    fila.put_nowait(self._question_state(name, sess))
             _log.info("codex assinado: thread=%s name=%s", sess["thread_id"], name)
             return
 
@@ -524,8 +529,16 @@ class CodexAdapter:
         except Exception:
             await client.close()
             raise
+        thread = {}
+        try:
+            result = await client.request("thread/read", {"threadId": meta["thread_id"], "includeTurns": True})
+            thread = result.get("thread") or {}
+        except Exception:
+            _log.warning("codex: não foi possível recuperar o turno de %s", name, exc_info=True)
+        # Publicar a sessão antes da leitura liberaria envios concorrentes como se estivesse ociosa.
         self.attach(name, client, meta["thread_id"], model=meta.get("model"),
                     effort=meta.get("effort"), watch_tmux=True)
+        self._restore_turn(self._sessions[name], thread)
         self.start_subscription(name, meta.get("cwd") or ".")
         _log.info("codex: conectado ao app-server do pane endpoint=%s name=%s",
                   meta["endpoint"], name)
@@ -606,6 +619,7 @@ class CodexAdapter:
             self.attach(name, client, thread_id, model=meta.get("model"), effort=meta.get("effort"),
                         default_model=result.get("model"), default_effort=_effort_da_thread(result),
                         watch_tmux=True, subscribed=True)
+            self._restore_turn(self._sessions[name], result.get("thread") or {})
             _log.info("codex ensure_running: resumed thread=%s name=%s", thread_id, name)
             return client
 
@@ -717,7 +731,7 @@ class CodexAdapter:
             # Retrato do que ja se sabe: quem reabre o chat no meio de um turno nao espera a
             # proxima notification pra ver estado, contexto e limites.
             try:
-                await self.read_settings(name)
+                await self.read_settings(name, include_turns=not sess.get("turn_state_known", False))
             except Exception:
                 _log.warning("codex: não foi possível atualizar os controles de %s", name)
             yield self._question_state(name, sess)
@@ -778,11 +792,16 @@ class CodexAdapter:
         # contract.md).
         buf = ""
         async for notif in client.notifications():
+            params = notif.get("params") or {}
+            # O app-server também publica estados de outras threads, inclusive subagentes.
+            if params.get("threadId") is not None and params["threadId"] != sess["thread_id"]:
+                continue
             mapped = map_state(notif)
             method = notif.get("method")
+            if mapped.state is not None:
+                sess["state_revision"] = sess.get("state_revision", 0) + 1
             settings_updated = method == "thread/settings/updated"
             if settings_updated:
-                params = notif.get("params") or {}
                 if params.get("threadId") != sess["thread_id"]:
                     continue
                 settings = params.get("threadSettings") or {}
@@ -833,6 +852,7 @@ class CodexAdapter:
                 sess["state"] = mapped.state
                 was = sess["in_progress"]
                 sess["in_progress"] = mapped.state == "working"
+                sess["turn_state_known"] = not sess["in_progress"] or bool(sess.get("turn_id"))
                 # Carimba QUANDO o turno comecou. O TTL de deliverable() mede a partir daqui; sem
                 # isto um in_progress vindo do stream (nao do send_prompt) ficava com marco 0 e
                 # expirava de imediato, liberando envio no meio de um turno vivo.
@@ -899,6 +919,8 @@ class CodexAdapter:
         # entradas pendentes back-to-back (ver test_drain_stops_after_first_delivery).
         #
         sess["in_progress"] = True
+        sess["turn_state_known"] = bool(sess.get("turn_id"))
+        sess["state_revision"] = sess.get("state_revision", 0) + 1
         sess["in_progress_since"] = time.monotonic()
         return "sent"
 
@@ -1073,14 +1095,31 @@ class CodexAdapter:
         sess["default_effort"] = effort
         codex_sessions.update_model(name, model, effort)
 
-    async def read_settings(self, name: str) -> dict:
+    @staticmethod
+    def _restore_turn(sess: dict, thread: dict) -> None:
+        status = (thread.get("status") or {}).get("type")
+        if status not in {"active", "idle"}:
+            return
+        sess["state"] = "working" if status == "active" else "idle"
+        sess["in_progress"] = status == "active"
+        sess["turn_id"] = next((t.get("id") for t in reversed(thread.get("turns") or [])
+                                if t.get("status") == "inProgress"), None) if status == "active" else None
+        sess["turn_state_known"] = not sess["in_progress"] or bool(sess["turn_id"])
+        if sess["in_progress"]:
+            sess["in_progress_since"] = time.monotonic()
+
+    async def read_settings(self, name: str, *, include_turns: bool = False) -> dict:
         client = await self.ensure_running(name)
         if client is None:
             raise RuntimeError("Sessão Codex indisponível")
         sess = self._sessions[name]
         revision = sess.get("settings_revision", 0)
-        result = await client.request("thread/read", {"threadId": sess["thread_id"], "includeTurns": False})
+        state_revision = sess.get("state_revision", 0)
+        result = await client.request("thread/read", {"threadId": sess["thread_id"], "includeTurns": include_turns})
         thread = result.get("thread") or {}
+        # Uma notification recebida durante a leitura é mais recente que esse retrato.
+        if include_turns and state_revision == sess.get("state_revision", 0):
+            self._restore_turn(sess, thread)
         if revision == sess.get("settings_revision", 0):
             if thread.get("model"):
                 sess["model"] = thread["model"]
@@ -1136,14 +1175,14 @@ class CodexAdapter:
             "input": await self._user_input(name, text),
         })
 
-    async def steer_queue(self, name: str) -> int:
+    async def steer_queue(self, name: str) -> list[str]:
         await self.ensure_running(name)
         sess = self._sessions.get(name) or {}
         turn_id = sess.get("turn_id")
         if not turn_id or not sess.get("in_progress"):
             raise RuntimeError("Não há turno em andamento para orientar")
         q = PromptQueue(name)
-        sent = 0
+        sent: list[str] = []
         while claimed := await asyncio.to_thread(q.claim_undelivered, limit=1):
             entry = claimed[0]
             try:
@@ -1151,7 +1190,7 @@ class CodexAdapter:
             except BaseException:
                 await asyncio.to_thread(q.set_delivered, entry["id"], False)
                 raise
-            sent += 1
+            sent.append(entry["id"])
         return sent
 
     def current_model(self, name: str) -> dict:

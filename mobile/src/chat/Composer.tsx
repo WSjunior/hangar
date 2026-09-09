@@ -27,6 +27,7 @@ interface Props {
   serverId: string;
   name: string;
   draft?: string;
+  sessionProvider?: string | null;
 }
 
 type PendingAttach = {
@@ -37,28 +38,29 @@ type PendingAttach = {
   size?: number;
 };
 
-export function Composer({ serverId, name, draft }: Props) {
+export function Composer({ serverId, name, draft, sessionProvider }: Props) {
   const { theme } = useUnistyles();
   const router = useRouter();
   const chat = chatStore(serverId, name);
   const pending = chat.use((s) => s.pending);
   const events = chat.use((s) => s.events);
   const state = chat.use((s) => s.stateEvent?.state ?? 'idle');
-  const provider = useSessions((s) => {
+  const detectedProvider = useSessions((s) => {
     const byServer = s.byServerRecord?.[serverId];
     if (byServer) {
       const hit = byServer.find((x) => x.name === name);
       if (hit?.provider) return hit.provider;
     }
-    return (s.rows.find((x) => x.name === name)?.provider ?? null) as string | null;
+    return (s.rows.find((x) => x.serverId === serverId && x.name === name)?.provider ?? null) as string | null;
   });
+  const provider = sessionProvider ?? detectedProvider;
   const pairPeers = useSessions((s) => {
     const byServer = s.byServerRecord?.[serverId];
     return byServer?.find((x) => x.name === name)?.pair_peers ?? s.rows.find((x) => x.name === name)?.pair_peers ?? null;
   });
   const pairPeersKey = pairPeers?.join('\u0000') ?? '';
   const isCodex = provider === 'codex';
-  const filaCount = filaCountOf({ events, pending });
+  const filaCount = filaCountOf({ events, pending }, provider);
 
   const [sendToPair, setSendToPair] = useState(false);
   useEffect(() => {
@@ -73,6 +75,9 @@ export function Composer({ serverId, name, draft }: Props) {
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
+  const steeringRef = useRef(false);
+  const [steering, setSteering] = useState(false);
+  const [steerFeedback, setSteerFeedback] = useState('');
   const [transcribing, setTranscribing] = useState(false);
   const [undo, setUndo] = useState<{ before: string; raw: string } | null>(null);
   const [failed, setFailed] = useState<{ file: File; motivo: MotivoFim } | null>(null);
@@ -329,16 +334,34 @@ export function Composer({ serverId, name, draft }: Props) {
   }, [failed, handleTranscribe]);
 
   const handleSteer = useCallback(async () => {
+    if (steeringRef.current) return;
+    steeringRef.current = true;
+    setSteering(true);
+    setSteerFeedback('');
+    setError('');
     try {
-      await steerSession(name);
+      const result = await steerSession(name);
+      if (result.queued_ids?.length) {
+        const sent = new Set(result.queued_ids);
+        chat.use.setState(s => ({ events: s.events.map(e => sent.has(e.id) ? { ...e, queued_delivered: true } : e) }));
+      }
+      if (isCodex && chat.use.getState().stateEvent?.state === 'working') {
+        setSteerFeedback((result.confirmed ?? 0) > 0 ? m.codex_orientar_recebido() : m.codex_orientar_sem_envio());
+      }
     } catch (e) {
       const status = (e as { status?: number } | null)?.status;
       setError(status === 409 ? m.composer_fila_erro() : e instanceof Error ? e.message : m.composer_fila_erro());
+    } finally {
+      steeringRef.current = false;
+      setSteering(false);
     }
-  }, [name]);
+  }, [name, isCodex, chat]);
 
   const isKimi = provider === 'kimi';
-  const showSteer = isKimi && state === 'working' && filaCount > 0;
+  const showSteer = (isKimi || isCodex) && state === 'working' && (filaCount > 0 || steering);
+  useEffect(() => {
+    if (state !== 'working') setSteerFeedback('');
+  }, [state]);
 
   const handleKeyPress = useCallback(
     (ev: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
@@ -424,25 +447,29 @@ export function Composer({ serverId, name, draft }: Props) {
   return (
     <Glass variant="chrome" style={styles.glass}>
         {/* chip de fila: pending local + queued-* do SSE (contado no store como pending até chegar o real) */}
-        {filaCount > 0 ? (
+        {filaCount > 0 || steering ? (
           <View style={styles.filaChip}>
-            <Text style={[styles.filaText, { color: theme.tokens.text.secondary }]}>
+            {!steering ? <Text style={[styles.filaText, { color: theme.tokens.text.secondary }]}>
               ⏳ {m.composer_fila_contagem({ n: filaCount })}
-            </Text>
+            </Text> : null}
             {showSteer ? (
               <Pressable
                 onPress={handleSteer}
+                disabled={steering}
+                accessibilityState={{ disabled: steering, busy: steering }}
                 style={[styles.steerBtn, { borderColor: theme.tokens.accent.base }]}
                 accessibilityLabel={m.composer_fila_aria()}
                 accessibilityRole="button"
               >
                 <Text style={[styles.steerText, { color: theme.tokens.accent.base }]}>
-                  {m.composer_fila_acao()}
+                  {steering ? m.askq_enviando() : isCodex ? m.codex_orientar() : m.composer_fila_acao()}
                 </Text>
               </Pressable>
             ) : null}
           </View>
         ) : null}
+
+        {steerFeedback && state === 'working' ? <Text style={[styles.steerText, { color: theme.tokens.text.secondary }]} accessibilityLiveRegion="polite">{steerFeedback}</Text> : null}
 
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.pillsRow}>
           <View style={styles.pillDuo}>
