@@ -2,15 +2,15 @@
 // Lógica da lista de sessões compartilhada pelas duas views (Sidebar desktop, SessionList
 // celular). Só lógica: template e CSS continuam em cada view. Formato do sessionsStore — fábrica
 // com getters, sem destructuring (perderia a reatividade).
-import { broadcast, deleteSession, renameSession, resumeSession } from './api';
+import { broadcast, deleteSession, renameSession, resumeSession } from '@hangar/core';
 import { getActiveId, selectServer, serverColor } from './auth';
-import { formataErro } from './errosApi';
+import { formataErro } from '@hangar/core';
 import { sessionsStore } from './sessionsStore.svelte';
 import {
   countAwaiting, effectiveGroupBy, groupSelectedByServer, projectKey, projectLabel, providerName,
   sortSessions, type GroupBy,
-} from './format';
-import type { AggSession, ResumeCandidate, State } from './types';
+} from '@hangar/core';
+import type { AggSession, ResumeCandidate, State } from '@hangar/core';
 import * as m from '../paraglide/messages';
 
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));

@@ -7,12 +7,12 @@ import { intlLocale } from '../lib/locale';
   import {
     getArchiveFolder, getArchiveHistory, archiveImageUrl, resumeArchivedConversation,
     getEngines, type ArchiveFolder, type ArchiveEntry, type Motor,
-  } from '../lib/api';
+  } from '@hangar/core';
   import { arquivo, clienteQuery } from '../lib/queries';
-  import type { ChatEvent } from '../lib/types';
+  import type { ChatEvent } from '@hangar/core';
   import { selectServer, listServers, getActiveId, serverColor } from '../lib/auth';
   import ProviderGlyph from '../components/icons/ProviderGlyph.svelte';
-  import { basename, providerName } from '../lib/format';
+  import { basename, providerName } from '@hangar/core';
 
   interface Props {
     onBack: () => void;

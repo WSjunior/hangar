@@ -1,8 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
 import { webcrypto } from 'node:crypto';
-import { overwriteGetLocale } from '../paraglide/runtime';
+import { overwriteGetLocale as overwriteFront } from '../paraglide/runtime';
+import { configureLocale } from '@hangar/core';
+function overwriteGetLocale(fn: () => 'en' | 'pt') {
+  overwriteFront(fn);
+  configureLocale({ getLocale: fn });
+}
 
-// O import de './sync' puxa './api' -> './auth', que roda migrate() no import-time e precisa de
+// O import de './sync' puxa '@hangar/core' -> './auth', que roda migrate() no import-time e precisa de
 // localStorage/document/window (mesmo stub do api.test.ts, antes do import DINAMICO — import
 // estatico e hoisted e executaria antes destes stubs).
 const store = new Map<string, string>();

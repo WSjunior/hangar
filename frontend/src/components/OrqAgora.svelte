@@ -2,8 +2,8 @@
   import { onMount } from 'svelte';
   import * as m from '../paraglide/messages';
   import type { Server } from '../lib/auth';
-  import type { OrqExecucao, OrqTask, PlanDetail } from '../lib/types';
-  import { getPlanForServer } from '../lib/api';
+  import type { OrqExecucao, OrqTask, PlanDetail } from '@hangar/core';
+  import { getPlanForServer } from '@hangar/core';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { etapaAtual, type Etapa } from '../lib/orqAgora';
 

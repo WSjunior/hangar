@@ -2,9 +2,9 @@
   import { untrack } from 'svelte';
   import * as m from '../paraglide/messages';
   import { listServers, onServersChanged, type Server } from '../lib/auth';
-  import { getOrqForServer } from '../lib/api';
+  import { getOrqForServer } from '@hangar/core';
   import { clienteQuery, orqDetalhe } from '../lib/queries';
-  import type { OrqExecucao, OrqFicha } from '../lib/types';
+  import type { OrqExecucao, OrqFicha } from '@hangar/core';
   import { duracaoLegivel } from '../lib/orq';
   import Spinner from '../components/Spinner.svelte';
   import OrqAgora from '../components/OrqAgora.svelte';
@@ -368,7 +368,7 @@
 </div>
 
 <script lang="ts" module>
-  import type { OrqExecucao as ExecTipo, OrqFicha as FichaTipo } from '../lib/types';
+  import type { OrqExecucao as ExecTipo, OrqFicha as FichaTipo } from '@hangar/core';
 
   // Ficha DESTA execução, calculada dos próprios dados: o endpoint da lista agrega a malha inteira,
   // e filtrar aquilo por execução não dá — o par não carrega de qual execução veio. No `module`

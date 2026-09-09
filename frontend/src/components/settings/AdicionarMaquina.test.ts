@@ -11,7 +11,8 @@ const getConfigForServer = vi.fn();
 const addServer = vi.fn((..._args: unknown[]) => ({ id: 'srv-n', existed: false }));
 const getIdentificador = vi.fn();
 const registrarPeerDoisLados = vi.fn();
-vi.mock('../../lib/api', () => ({ getConfigForServer: (...a: unknown[]) => getConfigForServer(...a) }));
+vi.mock('@hangar/core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@hangar/core')>()), getConfigForServer: (...a: unknown[]) => getConfigForServer(...a) }));
 vi.mock('../../lib/auth', () => ({ addServer: (...a: unknown[]) => addServer(...a) }));
 vi.mock('../QrScanner.svelte', () => ({ default: () => {} }));
 vi.mock('../../lib/peers', () => ({ getIdentificador: (...a: unknown[]) => getIdentificador(...a) }));

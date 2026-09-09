@@ -17,7 +17,10 @@ vi.mock('../../lib/credenciais', () => ({
   instalacaoEstado: vi.fn(),
   instalarHarness: vi.fn(),
 }));
-vi.mock('../../lib/api', () => ({ patchConfig: vi.fn(), patchConfigForServer: vi.fn() }));
+vi.mock('@hangar/core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@hangar/core')>()),
+  patchConfig: vi.fn(), patchConfigForServer: vi.fn(),
+}));
 
 const c = vi.mocked(cred);
 

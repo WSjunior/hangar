@@ -11,10 +11,10 @@ import {
   fetchCostsForServer, getArchive, getEngines, getEnginesForServer, getOrqDetalheForServer,
   getOrqGrupo, getOrqPolitica,
   type ArchiveFolder, type EnginesResponse,
-} from './api';
+} from '@hangar/core';
 import { listarCredenciais } from './credenciais';
-import type { OrqGrupo, OrqPolitica } from './orquestracao';
-import type { ChatEvent, CostReport, OrqExecucao } from './types';
+import type { OrqGrupo, OrqPolitica } from '@hangar/core';
+import type { ChatEvent, CostReport, OrqExecucao } from '@hangar/core';
 
 export const clienteQuery = new QueryClient({
   defaultOptions: {

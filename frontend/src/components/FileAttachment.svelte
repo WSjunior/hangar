@@ -1,9 +1,9 @@
 <script lang="ts">
   import * as m from '../paraglide/messages';
   import ModalDialog from './ModalDialog.svelte';
-  import { fileUrl } from '../lib/api';
+  import { fileUrl } from '@hangar/core';
   import { abrirVisor } from '../lib/visor';
-  import type { FileRef } from '../lib/format';
+  import type { FileRef } from '@hangar/core';
 
   interface Props {
     sessionName: string;

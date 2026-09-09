@@ -4,8 +4,9 @@
   import Select from '../Select.svelte';
   import SegmentedPicker from '../SegmentedPicker.svelte';
   import { lerMaosLivres, setMaosLivres } from '../../lib/maosLivres';
-  import { ditadoEstilo, estilosDitado, type EstiloDitado } from '../../lib/ditadoEstilo.svelte';
-  import { listarVozesTts, saldoTts, type TtsVoz } from '../../lib/api';
+  import { ditadoEstilo } from '../../lib/ditadoEstilo.svelte';
+  import { estilosDitado, type EstiloDitado } from '@hangar/core';
+  import { listarVozesTts, saldoTts, type TtsVoz } from '@hangar/core';
   import { ttsPlayer } from '../../lib/ttsPlayer.svelte';
   import { ouvirAmostra } from '../../lib/ouvir';
   import { podeLerCriterio } from '../../lib/segredos.svelte';

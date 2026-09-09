@@ -1,7 +1,7 @@
 <script lang="ts">
   import HangarMark from '../icons/HangarMark.svelte';
   import * as m from '../../paraglide/messages';
-  import { getAtualizacao } from '../../lib/api';
+  import { getAtualizacao } from '@hangar/core';
   import { atualizarUI } from '../../lib/atualizarUI.svelte';
   const REPO = 'https://github.com/jeffer1312/hangar';
 

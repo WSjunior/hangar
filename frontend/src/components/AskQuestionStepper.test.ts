@@ -7,7 +7,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { mount, unmount } from 'svelte';
 import AskQuestionStepper from './AskQuestionStepper.svelte';
-import type { AskQuestionPayload } from '../lib/types';
+import type { AskQuestionPayload } from '@hangar/core';
 
 const payload: AskQuestionPayload = {
   questions: [{

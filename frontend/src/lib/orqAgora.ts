@@ -1,4 +1,4 @@
-import type { OrqEvento } from './types';
+import type { OrqEvento } from '@hangar/core';
 
 export type Etapa = 'execucao' | 'revisao' | 'portao' | 'aprovada';
 

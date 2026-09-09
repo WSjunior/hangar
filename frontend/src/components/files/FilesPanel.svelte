@@ -13,9 +13,9 @@
   import FileIcon from './FileIcon.svelte';
   import CitadosView from './CitadosView.svelte';
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
-  import { fileUrl, resolverCitados, searchFiles } from '../../lib/api';
-  import { acumularCitados, estadoVazio, type Citado } from '../../lib/arquivosCitados';
-  import type { ChatEvent } from '../../lib/types';
+  import { fileUrl, resolverCitados, searchFiles } from '@hangar/core';
+  import { acumularCitados, estadoVazio, type Citado } from '@hangar/core';
+  import type { ChatEvent } from '@hangar/core';
 
   interface Props {
     sessionName: string;

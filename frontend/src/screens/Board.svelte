@@ -1,6 +1,6 @@
 <script lang="ts" module>
-  import type { SessionInfo } from '../lib/types';
-import * as m from '../paraglide/messages';
+  import type { SessionInfo } from '@hangar/core';
+  import * as m from '../paraglide/messages';
   // Linha do quadro: sessão + servidor dono (pro card falar com o backend certo).
   export interface BoardRow extends SessionInfo { serverId: string }
   // Eco otimista de uma msg mandada do card. `ackAt` = instante em que o /input respondeu 200 (0 =
@@ -15,8 +15,8 @@ import * as m from '../paraglide/messages';
   import BoardCard from '../components/BoardCard.svelte';
   import RateStrip from '../components/RateStrip.svelte';
   import { serverColor } from '../lib/auth';
-  import type { State } from '../lib/types';
-  import { stateColors } from '../lib/format';
+  import { type State } from '@hangar/core';
+  import { stateColors } from '@hangar/core';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
 
   interface Props { onOpenSession: (name: string, serverId: string) => void }

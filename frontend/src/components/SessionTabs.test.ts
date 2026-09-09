@@ -18,11 +18,12 @@ vi.mock('../lib/sessionsStore.svelte', async () => ({
   sessionsStore: (await import('./sessionTabs.test-store.svelte')).fixtureStore,
 }));
 import { fixtureByServer } from './sessionTabs.test-store.svelte';
-vi.mock('../lib/format', () => ({
+vi.mock('@hangar/core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@hangar/core')>()),
   stateColors: {}, rotuloEstado: () => '', sortSessions: (s: unknown[]) => s,
+ planBadge: vi.fn(),
 }));
-vi.mock('../lib/plan', () => ({ planBadge: vi.fn() }));
-import { planBadge } from '../lib/plan';
+import { planBadge } from '@hangar/core';
 // A QuotaPill lê as cotas ao montar; sem isto cada teste deixava um fetch REAL escapar pro
 // `localhost:3000` do happy-dom (19 ECONNREFUSED/AbortError por suíte, um por teste).
 vi.mock('../lib/contaEstado', async (importOriginal) => {

@@ -11,9 +11,9 @@ import ContasSettings from './ContasSettings.svelte';
 import { criarProps } from './props-reativas.svelte';
 import * as m from '../../paraglide/messages';
 import * as contaEstadoLib from '../../lib/contaEstado';
-import * as apiLib from '../../lib/api';
+import * as apiLib from '@hangar/core';
 import * as loginLib from '../../lib/loginConta';
-import { mensagemDeErro } from '../../lib/errosApi';
+import { mensagemDeErro } from '@hangar/core';
 import * as credLib from '../../lib/credenciais';
 import type { Credencial } from '../../lib/credenciais';
 import type { Server } from '../../lib/auth';
@@ -30,7 +30,8 @@ vi.mock('../../lib/credenciais', async (importOriginal) => {
     sincronizarNosAgentes: vi.fn(async () => ({ resultado: { pi: { ok: true, motivo: '' } } })),
   };
 });
-vi.mock('../../lib/api', () => ({
+vi.mock('@hangar/core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@hangar/core')>()),
   getPermissionModes: vi.fn().mockResolvedValue({ current: 'plan', modes: ['plan', 'auto', 'manual', 'acceptEdits'] }),
   setPermissionMode: vi.fn().mockResolvedValue({ mode: 'plan', current: 'plan' }),
   criarConta: vi.fn(async () => ({ path: '/x', label: 'x', active: false })),

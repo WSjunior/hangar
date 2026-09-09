@@ -1,6 +1,6 @@
 <script module lang="ts">
-  import type { CommandInfo } from '../lib/types';
-  import { stateColors, abbrevNum } from '../lib/format';
+  import type { CommandInfo } from '@hangar/core';
+  import { stateColors, abbrevNum } from '@hangar/core';
   // Cache de comandos por sessao: sobrevive a remontagens do Composer (ex: voltar de
   // awaiting_input) pra buscar a lista so uma vez por sessao.
   const commandCache = new Map<string, CommandInfo[]>();
@@ -18,12 +18,12 @@
   import { tick, onDestroy } from 'svelte';
   import * as m from '../paraglide/messages';
   import GroupGlyph from './icons/GroupGlyph.svelte';
-  import { novoEstadoVad, passoVad } from '../lib/vad';
-  import type { EstadoVad } from '../lib/vad';
+  import { novoEstadoVad, passoVad } from '@hangar/core';
+  import type { EstadoVad } from '@hangar/core';
   import { lerMaosLivres } from '../lib/maosLivres';
   import { glifoPermissao, rotuloPermissao } from '../lib/permissaoRotulo';
-  import { podeEnviarSozinho } from '../lib/autoEnvio';
-  import type { MotivoFim } from '../lib/autoEnvio';
+  import { podeEnviarSozinho } from '@hangar/core';
+  import type { MotivoFim } from '@hangar/core';
   import IconSend from './icons/IconSend.svelte';
   import IconInterrupt from './icons/IconInterrupt.svelte';
   import IconAttach from './icons/IconAttach.svelte';
@@ -55,13 +55,14 @@
   import CommandSheet from './CommandSheet.svelte';
   import ConfirmSheet from './ConfirmSheet.svelte';
   import DitadoEstiloPopover from './DitadoEstiloPopover.svelte';
-  import { ditadoEstilo, estilosDitado, type EstiloDitado } from '../lib/ditadoEstilo.svelte';
+  import { ditadoEstilo } from '../lib/ditadoEstilo.svelte';
+  import { estilosDitado, type EstiloDitado } from '@hangar/core';
   import { desktop } from '../lib/desktop.svelte';
-  import { getCommands, setModelEffort, uploadFile, uploadUrl, listUploads, transcribeFile, relimparDitado, getCodexModels, getPiModels, getKimiModels, getModelOptions, getPermissionModes, setPermissionMode, type ModelEffortBody } from '../lib/api';
-  import type { UploadFile } from '../lib/types';
+  import { getCommands, setModelEffort, uploadFile, uploadUrl, listUploads, transcribeFile, relimparDitado, getCodexModels, getPiModels, getKimiModels, getModelOptions, getPermissionModes, setPermissionMode, type ModelEffortBody } from '@hangar/core';
+  import type { UploadFile } from '@hangar/core';
   import { aoAquecer } from '../lib/aquecimento';
-  import type { Provider, State, StatsEvent } from '../lib/types';
-  import type { StatusFields } from '../lib/statusline';
+  import type { Provider, State, StatsEvent } from '@hangar/core';
+  import type { StatusFields } from '@hangar/core';
   import { ttsPlayer } from '../lib/ttsPlayer.svelte';
 
   interface Props {

@@ -1,4 +1,5 @@
 from pathlib import Path
+from app.config import _default_projects_dir, detect_lan_ip, pairing_url_api, resolve_bind_ip, pairing_url, Settings
 from app.config import (
     _default_projects_dir,
     detect_lan_ip,
@@ -43,6 +44,15 @@ def test_pairing_url_builds_from_bind_ip_and_front_port():
     assert pairing_url(s) == "http://192.168.1.50:5173/?token=tok"
 
 
+def test_pairing_url_api_usa_porta_do_backend():
+    # public_url="" de propósito: backend/.env desta máquina tem CP_PUBLIC_URL e o Settings herda
+    s = Settings(lan_bind_ip="10.0.0.5", port=8765, auth_token="t", public_url="")
+    assert pairing_url_api(s) == "http://10.0.0.5:8765/?token=t"
+
+
+def test_pairing_url_api_com_public_url_leva_api_na_query():
+    s = Settings(lan_bind_ip="10.0.0.5", port=8765, auth_token="t", public_url="https://casa.ts.net/")
+    assert pairing_url_api(s) == "https://casa.ts.net/?token=t&api=http://10.0.0.5:8765"
 def test_porta_do_front_cai_no_backend_quando_nao_ha_servico_de_front():
     # Sem serviço de front instalado (o padrão desde que o backend passou a servir o dist), o QR
     # e o painel de alcance têm de apontar pra porta do BACKEND. Com 5173 cravado como default,

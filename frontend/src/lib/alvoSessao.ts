@@ -13,7 +13,7 @@
 // Aqui o alvo só vira rota quando existe MESMO uma sessão com aquele nome naquele servidor. Sem
 // isso, `null`: quem chama não desenha o botão. Botão que não faz nada é pior que botão ausente —
 // ele promete uma tela que não existe.
-import type { ServerBucket } from './sessions';
+import type { ServerBucket } from '@hangar/core';
 
 export interface RotaSessao {
   serverId: string;

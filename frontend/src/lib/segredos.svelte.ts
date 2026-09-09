@@ -1,7 +1,7 @@
 // Quais SEGREDOS o servidor tem configurados — só o booleano, nunca o valor. Existe para o app
 // esconder, FORA da tela de configuração, o que não tem como funcionar: sem chave da ElevenLabs o
 // chip "Ouvir" não é um botão que falha, é um botão que não devia estar ali.
-import { getConfig } from './api';
+import { getConfig } from '@hangar/core';
 
 // Ler em voz alta funciona por DOIS motores (backend/app/tts.py): ElevenLabs, ou o comando local
 // quando configurado. `tts_local_cmd` não é segredo — o backend calcula `definido` como

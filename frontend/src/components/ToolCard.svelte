@@ -1,11 +1,9 @@
 <script lang="ts">
-  import type { ChatEvent } from '../lib/types';
+  import { extractEdits, extractFilePath, pseudoCaminhoPorConteudo, type ChatEvent } from '@hangar/core';
   import * as m from '../paraglide/messages';
-  import { parseFilePaths, summarizeToolInput, summarizeToolResult, toolPhase } from '../lib/format';
-  import { extractEdits, extractFilePath } from '../lib/editdiff';
+  import { parseFilePaths, summarizeToolInput, summarizeToolResult, toolPhase } from '@hangar/core';
   import { toolLook } from '../lib/toolLook.svelte';
   import { caminhoDeCodigoNoComando } from '../lib/codeFromBash';
-  import { pseudoCaminhoPorConteudo } from '../lib/detectarLinguagem';
   import { rolagemSoAoClicar } from '../lib/rolagemSoAoClicar';
   import { lerComandoHangar, lerFerramentaClaude } from '../lib/hangarCmd';
   import HangarCommandCard from './HangarCommandCard.svelte';

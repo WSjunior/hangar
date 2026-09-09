@@ -1,10 +1,10 @@
 <script lang="ts">
   import * as m from '../paraglide/messages';
   import OptionButtons from './OptionButtons.svelte';
-  import { selectOption, submitSelected } from '../lib/api';
+  import { selectOption, submitSelected } from '@hangar/core';
   import { getActiveId, selectServer } from '../lib/auth';
-  import { attentionFeed } from '../lib/format';
-  import type { AggSession } from '../lib/types';
+  import { attentionFeed } from '@hangar/core';
+  import type { AggSession } from '@hangar/core';
 
   // "Precisa de você" (feature #6): seção FIXA no topo da lista (mobile + desktop), com TODA sessão
   // AGUARDANDO de TODOS os servidores, mesclada e ordenada por quem espera há mais tempo. Responder

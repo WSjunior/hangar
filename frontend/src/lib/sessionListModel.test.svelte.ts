@@ -9,7 +9,8 @@ const store = vi.hoisted(() => ({
   retain: vi.fn(), release: vi.fn(), markDeleting: vi.fn(), unmarkDeleting: vi.fn(),
 }));
 vi.mock('./sessionsStore.svelte', () => ({ sessionsStore: store }));
-vi.mock('./api', () => ({
+vi.mock('@hangar/core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@hangar/core')>()),
   deleteSession: vi.fn(), renameSession: vi.fn(), resumeSession: vi.fn(), broadcast: vi.fn(),
 }));
 vi.mock('./auth', () => ({
@@ -160,7 +161,7 @@ describe('colapso de grupo', () => {
   });
 });
 
-import { broadcast, deleteSession, renameSession, resumeSession } from './api';
+import { broadcast, deleteSession, renameSession, resumeSession } from '@hangar/core';
 import { getActiveId, selectServer } from './auth';
 import * as m from '../paraglide/messages';
 

@@ -2,7 +2,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const getConfig = vi.fn();
-vi.mock('./api', () => ({ getConfig: (...a: unknown[]) => getConfig(...a) }));
+// Sem importOriginal de propósito: o pacote inteiro arrasta as 2400 mensagens do paraglide e a
+// carga a frio dentro do teste (resetModules + import dinâmico) estoura os 5s.
+vi.mock('@hangar/core', () => ({ getConfig: (...a: unknown[]) => getConfig(...a) }));
 
 describe('segredos', () => {
   beforeEach(() => { vi.resetModules(); getConfig.mockReset(); });

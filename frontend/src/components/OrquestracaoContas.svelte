@@ -5,9 +5,9 @@
   // Configurações → Orquestração mostra a mesma tela sem precisar de grupo.
   import * as m from '../paraglide/messages';
   import ProviderGlyph from './icons/ProviderGlyph.svelte';
-  import { providerName } from '../lib/format';
-  import { getOrqPolitica, putOrqConta } from '../lib/api';
-  import { iniciais, politicaDe, type ContaInventario, type ModeloInventario, type OrqPolitica, type Papel, type Provider } from '../lib/orquestracao';
+  import { providerName } from '@hangar/core';
+  import { getOrqPolitica, putOrqConta } from '@hangar/core';
+  import { iniciais, politicaDe, type ContaInventario, type ModeloInventario, type OrqPolitica, type Papel, type Provider } from '@hangar/core';
 
   interface Props {
     desktop: boolean;

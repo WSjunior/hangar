@@ -1,0 +1,766 @@
+// Tempo relativo curto a partir de um timestamp epoch em segundos, no idioma escolhido
+// (as frases sao mensagens; a data acima de 24h usa o intlLocale).
+// Mesma semântica do antigo formatActivity do SessionCard, agora compartilhada.
+export function relativeTime(ts: number | null | undefined): string {
+  if (!ts) return '';
+  const diff = Date.now() / 1000 - ts;
+  if (diff < 60) return m.tempo_agora();
+  if (diff < 3600) return m.tempo_min_atras({ n: Math.floor(diff / 60) });
+  if (diff < 86400) return m.tempo_h_atras({ n: Math.floor(diff / 3600) });
+  return new Date(ts * 1000).toLocaleDateString(intlLocale());
+}
+
+// Tempo relativo FUTURO ("em X") a partir de um epoch em SEGUNDOS — pro reset de rate limit do Codex
+// (resetsAt é sempre um instante futuro; relativeTime() acima só serve pra passado e cairia em "agora"
+// pra qualquer futuro). Falsy ou já-passado -> string vazia. Pura/testável.
+export function resetsIn(ts: number | null | undefined): string {
+  if (!ts) return '';
+  const diff = ts - Date.now() / 1000;
+  if (diff <= 0) return '';
+  if (diff < 3600) return m.tempo_em_min({ n: Math.max(1, Math.floor(diff / 60)) });
+  if (diff < 86400) return m.tempo_em_h({ n: Math.floor(diff / 3600) });
+  return m.tempo_em_d({ n: Math.floor(diff / 86400) });
+}
+
+// Vocabulário único de estado (label pt-BR + cor) — compartilhado por SessionCard, Sidebar e
+// SessionSwitcherSheet pra mesma sessão nunca aparecer com nomes/cores divergentes.
+import type { State, ChatEvent, SessionInfo } from './types';
+import { intlLocale } from './i18n';
+import * as m from './paraglide/messages';
+
+// Nome humano do provider da sessão. Existe porque cada tela escrevia o próprio ternário
+// (`provider === 'codex' ? 'Codex' : 'Claude'`) e, quando o Pi entrou como terceiro provider, toda
+// sessão Pi aparecia rotulada como "Claude". Um lugar só -> um provider novo não volta a mentir.
+// Ausente/desconhecido -> "Claude", que é o default do backend (SessionInfo.provider).
+const PROVIDER_NAMES: Record<string, string> = { claude: 'Claude', codex: 'Codex', pi: 'Pi', kimi: 'Kimi', omp: 'OMP' };
+
+export function providerName(p: SessionInfo['provider'] | null | undefined): string {
+  return PROVIDER_NAMES[p ?? 'claude'] ?? 'Claude';
+}
+
+// Marcador de provider PRA LISTA (mobile, sidebar, board/canvas): devolve o rótulo só quando a
+// sessão NÃO é Claude, senão null. Claude é a esmagadora maioria das linhas — marcar todas seria
+// ruído sem informação, e o que o olho procura é a exceção. Passa pelo providerName de propósito:
+// provider desconhecido cai em "Claude" lá e vira null aqui, ou seja, linha sem chip em vez de uma
+// linha rotulada "Claude" mentindo sobre o que ela roda.
+export function providerTag(p: SessionInfo['provider'] | null | undefined): string | null {
+  const name = providerName(p);
+  return name === PROVIDER_NAMES.claude ? null : name;
+}
+
+// Por que a linha está "sem id" — a causa (e a saída) mudam por provider, e as duas views mostram
+// a mesma frase. Claude: aberto sem --session-id, o vínculo com o transcript seria um chute. Pi e
+// Kimi: o pane não resolve transcript nenhum — normal antes do 1º turno (a sessão só escreve o
+// arquivo então), definitivo se a extensão de estado não carregou naquele pane.
+export function untrackedReason(p: SessionInfo['provider'] | null | undefined): string {
+  if (p === 'pi') return m.formato_sem_transcript_pi();
+  if (p === 'omp') return m.formato_sem_transcript_omp();
+  if (p === 'kimi') return m.formato_sem_transcript_kimi();
+  if (p === 'codex') return m.formato_sem_transcript_codex();
+  return m.formato_sem_transcript_claude();
+}
+
+// Vocabulario unico de estado. Era um Record de literais em pt; virou funcao porque um Record de
+// literais e o formato que mais vaza: nao tem markup, nao parece texto de tela, e passa batido em
+// qualquer varredura. O guard em i18nGuard.test.ts trava a volta disso.
+export function rotuloEstado(s: State): string {
+  switch (s) {
+    case 'working': return m.estado_em_execucao();
+    case 'idle': return m.estado_pronto();
+    case 'awaiting_input': return m.estado_aguardando();
+    case 'dead': return m.estado_encerrado();
+  }
+}
+export const stateColors: Record<State, string> = {
+  working: 'var(--accent)',
+  idle: 'var(--success)',
+  awaiting_input: 'var(--warning)',
+  dead: 'var(--error)',
+};
+
+// Conta sessões aguardando resposta numa lista agregada — usado pro contador do header (mobile/
+// desktop) E pro badge do ícone do app (feature #13: navigator.setAppBadge). Pure, sem side-effect.
+export function countAwaiting(sessions: { state: State }[]): number {
+  return sessions.filter((s) => s.state === 'awaiting_input').length;
+}
+
+// Proxima sessao "aguardando resposta" a partir da atual, com wrap-around — usado pela pilula de
+// triage do mobile (feature #4). Ordena por NOME (mesmo criterio alfabetico do resto da lista de
+// sessoes) pra posicao estavel entre chamadas, mesmo com last_activity mudando a todo instante.
+// Sem awaiting nenhum -> null. Atual ja aguardando -> pula pra PROXIMA (nao fica nela mesma), exceto
+// se for a unica aguardando (nao ha outra opcao). Mesmo padrao de indice do switchRelative (Chat.svelte).
+export function nextAwaiting(sessions: { name: string; state: State }[], currentName: string): string | null {
+  const names = sessions.filter((s) => s.state === 'awaiting_input').map((s) => s.name).sort();
+  if (names.length === 0) return null;
+  const i = names.indexOf(currentName);
+  return names[(i < 0 ? 0 : i + 1) % names.length];
+}
+
+// "Precisa de você" (feature #6): fila de sessões AGUARDANDO resposta, mesclada de TODOS os
+// servidores, ordenada por quem espera HÁ MAIS TEMPO primeiro (last_activity mais antigo = topo,
+// mais urgente). Pura, sem side-effect (testável). Sem last_activity vai pro fim; empate desempata
+// por nome (posição estável entre polls, mesmo com last_activity mudando).
+export function attentionFeed<T extends { name: string; state: State; last_activity?: number | null }>(
+  sessions: T[],
+): T[] {
+  return sessions
+    .filter((s) => s.state === 'awaiting_input')
+    .sort(
+      (a, b) =>
+        (a.last_activity ?? Infinity) - (b.last_activity ?? Infinity) || a.name.localeCompare(b.name),
+    );
+}
+
+// Caixa de marcação que o picker MULTI-select desenha na frente de cada opção — o texto chega
+// cru de state.classify ("[ ] backend", "[✓] app de desktop"). Aceita a caixa vazia, marcada
+// (✓/✔/x/X/*) e a que vem sem espaço nenhum.
+const CAIXA_DE_MARCACAO = /^\s*\[[\s✓✔xX*]*\]/;
+
+/**
+ * A pergunta pede MARCAÇÃO (várias opções) em vez de uma escolha só?
+ *
+ * Importa porque um toque numa opção dessas TOGGLA a caixa e não responde nada — a pergunta segue
+ * aberta esperando o passo de confirmar. Quem oferece "resposta rápida" de um toque (a tira de
+ * atenção) precisa saber a diferença: em 25/08/2026 ela mostrou um botão escrito "[ ] backend",
+ * e quem clicou achou que tinha respondido — a sessão continuou aguardando e a resposta teve de
+ * ser refeita dentro dela.
+ *
+ * `some`, não `every`: as linhas de escape do AskUserQuestion ("Chat about this") entram no mesmo
+ * menu sem caixa nenhuma.
+ */
+export function pedeMarcacao(options?: string[] | null): boolean {
+  return !!options?.length && options.some((o) => CAIXA_DE_MARCACAO.test(o));
+}
+
+// Ordenação compartilhada das LISTAS de sessões (Sidebar + SessionList): quem aguarda resposta
+// primeiro (realce de atenção), depois alfabético. Estável: rows só trocam de posição quando o
+// ESTADO muda, não a cada last_activity. O Board NÃO usa isto (colunas já separam por estado;
+// lá é por atividade recente).
+export function sortSessions<T extends { name: string; state: State }>(list: T[]): T[] {
+  return [...list].sort(
+    (a, b) =>
+      Number(b.state === 'awaiting_input') - Number(a.state === 'awaiting_input') ||
+      a.name.localeCompare(b.name),
+  );
+}
+
+// Data/hora local curta a partir de um epoch em SEGUNDOS — usado pra rotular os candidatos de resume
+// (última atividade de cada transcript) nos dois views. Falsy -> string vazia. Pura/testável.
+export function fmtWhen(mtime?: number | null): string {
+  if (!mtime) return '';
+  return new Date(mtime * 1000).toLocaleString(intlLocale(), { dateStyle: 'short', timeStyle: 'short' });
+}
+
+// Iniciais pra avatar/rail (identifica sem o nome inteiro). "api-front" -> AF, "jeffer1312" -> JE.
+// Duas palavras -> 1a letra de cada; uma só -> 2 primeiros chars. Puro/testável. Reusado pelo
+// avatar da conta (AccountMenu) e pelo rail recolhido da sidebar.
+export function initials(name: string): string {
+  const parts = name.split(/[^a-zA-Z0-9]+/).filter(Boolean);
+  // Nome sem nenhum alfanumérico ("---", "___"): cai no próprio nome, como era antes. Devolver ''
+  // apagaria a sigla — e no trilho recolhido ela é o único texto que identifica a sessão, então o
+  // chip ficaria em branco sem erro nenhum. Nome de sessão tmux aceita esses caracteres.
+  if (!parts.length) return name.slice(0, 2).toUpperCase();
+  // Sufixo numérico manda: sessões irmãs quase sempre diferem só nele (claude-cockpit e
+  // claude-cockpit-2 davam "CC" as duas, e no trilho recolhido a sigla é o ÚNICO texto que
+  // identifica a sessão — duas iguais não identificam nada). Vira "CC" e "C2".
+  const ultimo = parts[parts.length - 1];
+  if (parts.length >= 2 && /^\d{1,2}$/.test(ultimo)) {
+    // A letra vem da palavra ANTES do número, não da primeira do nome: com a primeira, todo nome de
+    // uma mesma família continuava colidindo — `svc-mailer-2` e `svc-report-ai-2` davam "S2" as
+    // duas, que é exatamente o problema que este ramo existe pra resolver.
+    const anterior = parts[parts.length - 2];
+    return (anterior[0] + ultimo).toUpperCase().slice(0, 3);
+  }
+  // Família com NÚMERO NO MEIO e sufixo textual (task-4021-api / -front / -sync): o fallback dava
+  // "T4" pra todas — na rail viravam siglas idênticas, e lá a sigla é o único texto que
+  // identifica a sessão. A letra que distingue é a do sufixo, não a do dígito do meio: vira
+  // "TA" / "TF" / "TS". Só neste formato — nome sem número no meio segue no fallback de sempre.
+  if (parts.length >= 3 && parts.slice(1, -1).some((p) => /^\d+$/.test(p))) {
+    const distintivo = parts.slice(1).find((p) => !/^\d+$/.test(p));
+    if (distintivo) return (parts[0][0] + distintivo[0]).toUpperCase();
+  }
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return parts[0].slice(0, 2).toUpperCase();
+}
+
+// Último segmento não vazio de um caminho absoluto (basename do projeto).
+// A contrabarra só separa quando o caminho é do Windows (`C:\...` ou `\\servidor\...`): no Linux
+// ela é caractere VÁLIDO num nome de arquivo, e quebrar por ela ali cortaria o nome no meio. Sem
+// essa distinção, um cwd do Windows não tinha separador nenhum e voltava inteiro — a sessão nascia
+// chamada `C--Sistemas-DotNet-PssBackend`, que é o caminho todo depois do sanitizador do nome.
+const EH_WINDOWS = /^([A-Za-z]:[\\/]|\\\\)/;
+
+export function basename(path: string): string {
+  const parts = path.split(EH_WINDOWS.test(path) ? /[\\/]/ : '/').filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : path;
+}
+
+// cwd -> prefixo truncável + basename que nunca encolhe: o que identifica a sessão na lista é a
+// ÚLTIMA pasta, e a ellipsis padrão corta justamente o fim. Mora aqui, e não copiado no card e na
+// sidebar, porque a regra da contrabarra é a mesma do basename() — num cwd do Windows as duas
+// cópias liam `lastIndexOf('/')` como -1 e mostravam o caminho INTEIRO como nome da pasta.
+export function cwdParts(cwd: string | undefined): { prefix: string; base: string } {
+  const win = EH_WINDOWS.test(cwd ?? '');
+  const p = (cwd ?? '').replace(win ? /[\\/]+$/ : /\/+$/, '');
+  const i = win ? Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\')) : p.lastIndexOf('/');
+  return i < 0 ? { prefix: '', base: p } : { prefix: p.slice(0, i + 1), base: p.slice(i + 1) };
+}
+
+// Chave de agrupamento por PROJETO (toggle Servidor|Projeto da lista de sessões, feature #3): o cwd
+// normalizado (sem barra final) — duas sessões no MESMO caminho caem no mesmo grupo mesmo vindo de
+// servidores diferentes. Sessão sem cwd cai numa chave fixa isolada (não mistura com um projeto real).
+const NO_CWD_KEY = 'no-cwd'; // sentinela: cwd real sempre comeca com "/" ou "~", nunca colide
+export function projectKey(cwd: string | null | undefined): string {
+  if (!cwd) return NO_CWD_KEY;
+  return cwd.replace(/\/+$/, '') || '/';
+}
+
+// Rótulo exibido pro grupo de projeto: basename do cwd (reusa basename); sem cwd -> rótulo fixo.
+export function projectLabel(cwd: string | null | undefined): string {
+  return cwd ? basename(cwd) : m.formato_sem_projeto();
+}
+
+// Modo de agrupamento da lista de sessões (toggle Nenhum|Servidor|Projeto, feature #3).
+export type GroupBy = 'none' | 'server' | 'project';
+
+// Modo EFETIVO dada a preferência do usuário e o nº de servidores. Só uma regra: agrupar "por
+// servidor" com <2 servidores produz 1 grupo gigante sem nada pra separar -> cai pra lista lisa,
+// que é o mesmo conteúdo sem um cabeçalho inútil. "Nenhum" e "projeto" valem sempre, com qualquer
+// número de servidores: a lista lisa é escolha legítima, não um caso degenerado. Pura/testável.
+export function effectiveGroupBy(pref: GroupBy, serverCount: number): GroupBy {
+  if (pref === 'server' && serverCount < 2) return 'none';
+  return pref;
+}
+
+// Cluster de pareamento DENTRO de um grupo (servidor/projeto): sessões do mesmo grupo (pair_gid)
+// viram um sub-cluster colapsável; as demais ficam soltas. Devolve LINHAS INTERCALADAS (header do
+// grupo seguido dos seus membros; solo = só a sessão) pra o template consumir num {#each} plano —
+// sem aninhar/extrair o bloco grande da linha. Preserva a ordem: o cluster nasce na posição do 1º
+// membro; os demais são puxados pra junto. N grupos = N clusters. Genérico em T (só exige os campos
+// de pareamento) — serve Sidebar e SessionList.
+export interface PairFields { name: string; pair_gid?: string | null; pair_peers?: string[] | null; pair_task?: string | null; }
+export type PairRow<T> =
+  | { kind: 'header'; gid: string; label: string; count: number }
+  | { kind: 'session'; session: T; gid: string | null; label?: string; ultimo?: boolean };
+
+// Rótulo do trilho recolhido: o NOME em duas linhas de até 8 caracteres (corte seco), em vez de
+// sigla — sigla é código e ninguém memoriza código. Linha 1 = primeiro pedaço; linha 2 = o que
+// distingue (o resto). Dentro de um grupo, o pedaço que o rótulo do grupo já carrega sai
+// (`api-1234` no grupo `ABC-1234` vira só `api`). Toda linha ocupa o mesmo bloco, então a 2ª
+// pode ficar vazia sem mudar a altura — é o que iguala `hangar` e `storefront-web`.
+export const RAIL_MAX = 8;
+export function railLabel(name: string, grupo?: string | null): [string, string] {
+  // Classe unicode, não ASCII: com `[^a-zA-Z0-9]` o acento virava separador e `análise-app`
+  // saía como `an` / `lise-app` — nome errado na tela, sem aviso.
+  let parts = name.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  if (!parts.length) return [name.slice(0, RAIL_MAX) || '?', ''];
+  if (grupo) {
+    // Só a CHAVE do grupo (a primeira palavra: `ABC-1234`), não a tarefa inteira — ela cita os
+    // nomes dos membros, e casar contra ela apagava o nome todo (`api-1234` ficava sem sobra).
+    const chave = grupo.trim().split(/\s/)[0];
+    const doGrupo = new Set(chave.split(/[^\p{L}\p{N}]+/u).filter(Boolean).map((t) => t.toLowerCase()));
+    const sobra = parts.filter((p) => !doGrupo.has(p.toLowerCase()));
+    if (sobra.length) parts = sobra;   // nome INTEIRO igual ao grupo: fica como está
+  }
+  return [parts[0].slice(0, RAIL_MAX), parts.slice(1).join('-').slice(0, RAIL_MAX)];
+}
+
+export function clusterByPair<T extends PairFields>(sessions: T[]): PairRow<T>[] {
+  // Pré-agrupa por gid numa passada (O(n)) — evita o filter-dentro-do-loop O(n²), já que roda
+  // inline no {#each} a cada render.
+  const byGid = new Map<string, T[]>();
+  for (const s of sessions) {
+    if (!s.pair_gid) continue;
+    const arr = byGid.get(s.pair_gid);
+    if (arr) arr.push(s); else byGid.set(s.pair_gid, [s]);
+  }
+  const out: PairRow<T>[] = [];
+  const emitted = new Set<string>();
+  for (const s of sessions) {
+    const gid = s.pair_gid ?? null;
+    if (!gid) { out.push({ kind: 'session', session: s, gid: null }); continue; }
+    if (emitted.has(gid)) continue;               // membro já entrou no cluster do 1º
+    emitted.add(gid);
+    const members = byGid.get(gid)!;
+    // Rótulo: tarefa (ex: ABC-1234) do 1º que tiver, senão os nomes.
+    const task = members.map((m) => m.pair_task).find((t) => t && t.trim());
+    const label = task ? task.trim() : members.map((m) => m.name).join(', ');
+    out.push({ kind: 'header', gid, label, count: members.length });
+    members.forEach((m, i) => out.push({ kind: 'session', session: m, gid, label, ultimo: i === members.length - 1 }));
+  }
+  return out;
+}
+
+// Recado de OUTRA sessão Claude (hangar-send): "[de: <sessao>] texto" (1:1) ou "[grupo: <sessao>] texto"
+// (aviso pro grupo) ou "[painel: <tela>] texto" (recado AUTOMÁTICO do app — ex.: o modal de
+// orquestração avisando o árbitro). Devolve remetente + texto sem o prefixo + scope; null = msg
+// normal do usuário. Só APRESENTAÇÃO: o texto guardado em events/pending fica intacto (dedup do
+// Chat compara o cru).
+const _PEER_RE = /^\[(de|grupo|painel):\s*([^\]]+)\]\s*/;
+export type PeerScope = 'peer' | 'group' | 'panel';
+const _SCOPES: Record<string, PeerScope> = { de: 'peer', grupo: 'group', painel: 'panel' };
+export function parsePeerMessage(text: string): { from: string; text: string; scope: PeerScope } | null {
+  const m = _PEER_RE.exec(text);
+  if (!m) return null;
+  return { from: m[2].trim(), text: text.slice(m[0].length), scope: _SCOPES[m[1]] };
+}
+
+// Canal do recado: uma sessão que manda aviso de máquina abre o texto com "[vigia] ...", "[ALERTA]
+// ..." e afins — convenção de quem escreve a skill, não formato do servidor. Vira etiqueta ao lado
+// do remetente e sai do corpo, pra a primeira linha do recado ser a frase e não o rótulo. Só uma
+// palavra (letras/dígitos/-/_, até 16): "[de: x]" já saiu antes, e "[isso é um aparte]" no meio de
+// uma frase não vira etiqueta porque não abre o texto. E `]` seguido de `(` é LINK markdown
+// (`[log](https://…)`): virava etiqueta "log" com a URL crua sobrando no corpo, o rótulo do link
+// perdido.
+const _CANAL_RE = /^\[([\p{L}\d_-]{1,16})\](?!\()\s*/u;
+export function parseCanal(text: string): { canal: string; text: string } | null {
+  const m = _CANAL_RE.exec(text);
+  if (!m) return null;
+  return { canal: m[1], text: text.slice(m[0].length) };
+}
+
+// Anexos de arquivo por CAMINHO citado na conversa (sua ou minha msg). v1 = só "preview-worthy"
+// (mídia + html + pdf); texto/código fora de proposito pra nao virar ruido (caminho de codigo
+// aparece toda hora na prosa). O backend so serve o que esta no transcript (consentido).
+export type FileKind = 'image' | 'video' | 'audio' | 'html' | 'pdf';
+const EXT_KIND: Record<string, FileKind> = {
+  png: 'image', jpg: 'image', jpeg: 'image', gif: 'image', webp: 'image', svg: 'image', avif: 'image', bmp: 'image',
+  mp4: 'video', mov: 'video', webm: 'video', mkv: 'video', m4v: 'video', avi: 'video',
+  mp3: 'audio', wav: 'audio', m4a: 'audio', ogg: 'audio', flac: 'audio', aac: 'audio',
+  html: 'html', htm: 'html',
+  pdf: 'pdf',
+};
+const _EXTS = Object.keys(EXT_KIND).join('|');
+// Caminho ABSOLUTO (/ ou ~/) — lazy ate a 1a extensao conhecida, seguida de fim/espaco/delimitador
+// (pega path COM espaco tipo "/a/WhatsApp Video….mp4"). Lookbehind (?<![\w.~:/]) evita comecar dentro
+// de URL ("https://…") ou logo apos "." (o "/" do "./rel.png" e do REL, nao deste). Global + ci.
+// O lookahead inclui `*`: path citado em **negrito** ("**/tmp/x.jpg**") parava de casar e a imagem
+// nunca era servida (bug real de 2026-08-03 — o path existia, o endpoint 200, e nada renderizava).
+const _PATH_RE = new RegExp(`(?<![\\w.~:/*])(~?/[^\\n]*?\\.(${_EXTS}))(?=$|[\\s)\\]"'\`,*])`, 'gi');
+// Caminho RELATIVO com DIRETORIO (./x.png, ../a/x.png, sub/dir/x.png) — jeito comum do Claude citar
+// arquivo que criou no cwd. Exige >=1 segmento "dir/" -> NAO casa nome puro "x.png" (ruido de prosa).
+// O backend resolve contra o cwd da sessao. Lookbehind tira word/`/`/~/./:/- (nao pega pedaco de path
+// absoluto nem de dentro de URL).
+const _REL_RE = new RegExp(`(?<![\\w/~.:*-])((?:[\\w.-]+/)+[\\w.-]+\\.(${_EXTS}))(?=$|[\\s)\\]"'\`,:*])`, 'gi');
+
+export interface FileRef { path: string; name: string; kind: FileKind; url?: string; }
+
+// Tipo de um arquivo pelo NOME (sem passar pelo parser de prosa acima) — a galeria de anexos já
+// recebe a lista pronta do backend e só precisa saber o que dá pra desenhar. null = extensão sem
+// preview (zip, txt, ...): quem chama mostra um chip genérico. Mesma tabela EXT_KIND do chat, pra
+// um .webp não ser imagem numa tela e "arquivo" na outra.
+export function fileKind(filename: string): FileKind | null {
+  const ext = filename.split('.').pop()?.toLowerCase() ?? '';
+  return EXT_KIND[ext] ?? null;
+}
+
+// Tamanho legível em unidades binárias (o que o backend mede: st_size). 1 casa só a partir de MB —
+// "1.2 KB" é ruído; abaixo de 1 KB mostra os bytes crus.
+export function fmtBytes(n: number): string {
+  if (n < 1024) return `${Math.round(n)} B`;
+  const kb = n / 1024;
+  if (kb < 1024) return `${Math.round(kb)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1).replace(/\.0$/, '')} MB`;
+  return `${(mb / 1024).toFixed(1).replace(/\.0$/, '')} GB`;
+}
+
+export function parseFilePaths(text: string): FileRef[] {
+  const out: FileRef[] = [];
+  const seen = new Set<string>();
+  // Absoluto + relativo-com-dir. Os dois regexes nao se sobrepoem (lookbehind) -> dedup por string.
+  for (const re of [_PATH_RE, _REL_RE]) {
+    for (const m of text.matchAll(re)) {
+      const path = m[1];
+      if (seen.has(path)) continue;
+      seen.add(path);
+      const kind = EXT_KIND[m[2].toLowerCase()];
+      out.push({ path, name: path.split('/').filter(Boolean).pop() || path, kind });
+    }
+  }
+  return out;
+}
+
+// URLs http(s) de MIDIA (imagem/video/audio) na conversa -> preview inline no chat, pra ver sem sair
+// pro navegador. So midia "tocavel": doc/html remoto fica fora (evita iframe de link aleatorio; o link
+// clicavel do markdown ja cobre). url = absoluta (FileAttachment usa direto, sem passar pelo backend).
+export function parseMediaUrls(text: string): FileRef[] {
+  const out: FileRef[] = [];
+  const seen = new Set<string>();
+  for (const m of text.matchAll(/https?:\/\/[^\s<>"'`\])]+/gi)) {
+    const u = m[0].replace(/[.,;:!?]+$/, '');   // tira pontuacao final colada
+    if (seen.has(u)) continue;
+    const base = u.split(/[?#]/)[0];            // path sem query/fragment
+    const ext = base.split('.').pop()?.toLowerCase() ?? '';
+    const kind = EXT_KIND[ext];
+    if (kind !== 'image' && kind !== 'video' && kind !== 'audio') continue;
+    seen.add(u);
+    out.push({ path: u, url: u, name: base.split('/').filter(Boolean).pop() || u, kind });
+  }
+  return out;
+}
+
+// Detecta o(s) marcador(es) de imagem nas mensagens do usuario:
+// "<legenda> — 📎 imagem: <path1> 📎 imagem: <path2> ..." (1+ imagens, ou sem legenda).
+// Devolve { caption, filenames } ou null. Cada filename e o basename do path (sem espaco,
+// nome gerado), entao da pra separar varias numa linha so pelo proprio marcador.
+export function parseImageMessage(text: string): { caption: string; filenames: string[] } | null {
+  // O separador e uma REGEX, nao a string "📎 imagem: ": o que a fila digita numa linha so volta do
+  // transcript reescrito pelo Claude Code — quebra de linha depois do marcador, prefixo "[Image #N]"
+  // na frente e o path da ULTIMA imagem consumido (ela virou anexo de verdade, entao o marcador fica
+  // sozinho no fim). Com o indexOf da string exata nada disso casava e a bolha real caia no texto
+  // cru: o usuario via os paths escritos no chat em vez das miniaturas (medido em 03/08/2026).
+  const marker = /📎\s*imagem:\s*/g;
+  const first = text.search(marker);
+  if (first < 0) return null;
+  const filenames = text
+    .slice(first)
+    .split(marker)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    // Os DOIS separadores: no Windows o marcador traz o caminho nativo
+    // (`C:\cockpit\.hangar-uploads\<arquivo>.png`), que não tem `/` nenhum — o split por `/`
+    // devolvia o caminho INTEIRO como se fosse o basename. Aí `uploadUrl` montava
+    // `/uploads/C%3A%5C…` e o backend recusava com 400 "filename invalido" (resolve_upload rejeita
+    // `\` de propósito, contra path traversal): no celular a foto virava o quadrinho de imagem
+    // quebrada, com a legenda do lado. Medido em 21/08/2026, mandando um print do celular pra uma
+    // sessão no Windows. Dividir por `\` também é seguro no Linux: o nome é GERADO pelo servidor
+    // (`<epoch>-<hex>.<ext>`, uploads.py:30) e nunca contém separador.
+    .map((p) => p.split(/[\\/]/).filter(Boolean).pop() ?? '')
+    .filter(Boolean);
+  // `filenames` VAZIO nao e "nao e mensagem de imagem": e o caso mais comum do celular — UMA foto,
+  // que o Claude Code absorve como anexo de verdade e cujo path ele apaga, deixando so o marcador
+  // pendurado. Devolver null aqui jogava a bolha pro texto cru ("legenda — 📎 imagem:"), que e
+  // exatamente o que esta funcao existe pra evitar. Quem precisa das miniaturas checa o tamanho.
+  let caption = text.slice(0, first).replace(/^(?:\[Image #\d+\])+\s*/, '').trim();
+  if (caption.endsWith('—')) caption = caption.slice(0, -1).trim();
+  return { caption, filenames };
+}
+
+// Painel de tarefas do TUI dentro da PREVIA AO VIVO. Ele nao e prosa: e o mesmo TodoWrite/TodoList
+// que vira ToolCard quando o turno fecha no transcript — mas o preview le o PANE, onde ele aparece
+// como um bloco comum, e um turno longo deixava 13 linhas de painel ocupando a tela inteira por
+// 40min. Aqui so SEPARO; quem colapsa e a bolha (<details>).
+// O painel e desenhado pelo TUI, entao o formato e calibration knob — e sao DOIS:
+//   Claude: cabecalho "Todos (N/M)" + arvore ├─/└─/│ (box-drawing);
+//   Kimi:   cabecalho "Todo" seco + itens com o glifo de status ✓/●/○ (medido no 0.37.2,
+//           screenshots de 19/08/2026 — sem contador e sem arvore).
+// Cabecalho sozinho (sem item) nao conta — pode ser prosa do assistente.
+const TODO_HEAD_RE = /^Todos \((\d+)\/(\d+)\)$/;
+const TODO_HEAD_KIMI_RE = /^Todo$/;
+const TODO_ITEM_KIMI_RE = /^\s*[✓●○]\s/;
+const _CORPOS: [RegExp, RegExp][] = [[TODO_HEAD_RE, /^\s*[├└│]/], [TODO_HEAD_KIMI_RE, TODO_ITEM_KIMI_RE]];
+export function splitTodoBlock(text: string): { head: string; body: string; rest: string } | null {
+  const lines = text.split('\n');
+  for (const [cab, item] of _CORPOS) {
+    const i = lines.findIndex((l) => cab.test(l.trim()));
+    if (i < 0) continue;
+    let j = i + 1;
+    while (j < lines.length && item.test(lines[j])) j++;
+    if (j === i + 1) continue;
+    return {
+      head: lines[i].trim(),
+      body: lines.slice(i + 1, j).join('\n'),
+      rest: [...lines.slice(0, i), ...lines.slice(j)].join('\n').trim(),
+    };
+  }
+  return null;
+}
+
+// Selecao do broadcast (feature #9): agrupa os nomes SELECIONADOS por servidor-dono, na ordem em
+// que aparecem em `sessions` — cada grupo vira 1 chamada a broadcast() nesse servidor (selectServer/
+// restore, igual ao resto do app). Chave de selecao = "<serverId>:<name>" (mesma composta usada nas
+// keys #each da lista). Pura/testavel; servidor sem nenhum selecionado nao entra no Map.
+export function groupSelectedByServer(
+  sessions: { name: string; serverId: string }[],
+  selected: Set<string>,
+): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const s of sessions) {
+    if (!selected.has(`${s.serverId}:${s.name}`)) continue;
+    const arr = out.get(s.serverId);
+    if (arr) arr.push(s.name);
+    else out.set(s.serverId, [s.name]);
+  }
+  return out;
+}
+
+// ── Compare (feature #11): grade lado a lado com a última resposta de N sessões ─────────────────
+export interface CompareId { serverId: string; name: string }
+
+// Codifica a seleção pro hash da rota (#/compare/<param>): cada par "serverId:nome" com AMBOS os
+// lados URI-encoded separadamente, juntos por vírgula. encodeURIComponent escapa ':' e ',' -> o
+// texto codificado nunca contém os separadores literais, então o parse abaixo nunca ambigua.
+export function encodeCompareIds(ids: CompareId[]): string {
+  return ids.map((s) => `${encodeURIComponent(s.serverId)}:${encodeURIComponent(s.name)}`).join(',');
+}
+
+export function parseCompareIds(param: string): CompareId[] {
+  if (!param) return [];
+  return param
+    .split(',')
+    .map((pair): CompareId | null => {
+      const i = pair.indexOf(':');
+      if (i < 0) return null;
+      const serverId = decodeURIComponent(pair.slice(0, i));
+      const name = decodeURIComponent(pair.slice(i + 1));
+      return serverId && name ? { serverId, name } : null;
+    })
+    .filter((x): x is CompareId => x !== null);
+}
+
+// Último assistant_msg com texto de uma lista de eventos (transcript ou stream ao vivo) — usado
+// pelo card da grade de comparação pra mostrar só a resposta MAIS RECENTE, sem montar o chat inteiro.
+export function latestAssistantEvent(events: ChatEvent[]): ChatEvent | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].kind === 'assistant_msg' && events[i].text) return events[i];
+  }
+  return null;
+}
+
+// Cauda CRUA do /history -> só as bolhas que o card do quadro desenha: user/assistant com texto,
+// começando no 1º user_msg. A cauda corta no meio de um turno, então o 1º assistant_msg pode ser
+// resposta a um prompt que ficou de fora — órfã, sem o "porquê" acima dela.
+// Mora AQUI e não na rota: /history?limit é compartilhado com a espiada do hover da Sidebar, que só
+// quer o último assistant_msg — cortar no backend jogava fora justamente a resposta que ela procura
+// (medido: cauda [assistant_msg, user_msg, tool_use…] -> o corte matava o popover). É preferência de
+// RENDERIZAÇÃO do card, não do endpoint. Sem user_msg na janela -> devolve tudo (card vazio é pior).
+export function bubblesFromTail(events: ChatEvent[]): ChatEvent[] {
+  const msgs = events.filter((e) => (e.kind === 'user_msg' || e.kind === 'assistant_msg') && e.text);
+  const start = msgs.findIndex((e) => e.kind === 'user_msg');
+  return start > 0 ? msgs.slice(start) : msgs;
+}
+
+// Cor determinística por grupo de pareamento (gid): mesmo grupo = mesma cor em QUALQUER view
+// (chip 🤝 do card, barra/aro do canvas). Hash simples -> matiz. A LUMINÂNCIA vem do token
+// --pair-l (app.css: 0.72 no escuro, mais fundo no claro) — L fixa 0.72 era pastel invisível
+// sobre fundo quase-branco (aro de 1.5px sumia no tema claro).
+export function pairColor(gid: string): string {
+  let h = 0;
+  for (let i = 0; i < gid.length; i++) h = (h * 31 + gid.charCodeAt(i)) >>> 0;
+  return `oklch(var(--pair-l, 0.72) 0.14 ${h % 360})`;
+}
+
+// Janela de contexto legível: 1e6 -> "1M", 1.5e6 -> "1.5M", 200000 -> "200k".
+// Separado do abbrevNum porque este quer INTEIRO quando exato ("1M", não "1.0M") e usa 'k'
+// minúsculo, casando o que a própria statusline do terminal mostra.
+// O corte olha o valor JÁ ARREDONDADO, não o bruto: com o teste em `n >= 1e6`, um total de
+// 999_700 caía no ramo k e virava "1000k" — o exato defeito que esta função existe pra evitar.
+export function ctxWindow(n: number): string {
+  const k = Math.round(n / 1000);
+  if (k < 1000) return `${k}k`;
+  // `.replace(/\.0$/, '')` como o abbrevNum abaixo: 1e6 e 999_700 viram "1M", não "1.0M".
+  return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+}
+
+// ── Linha colapsada de uma tool call (ToolCard/ToolGroup) ───────────────────
+// Regras copiadas do pi-claude-code-ui (extensions/index.ts: summarizeText/getToolArgSummary/
+// summarizeOpenAiToolCall): argumento saliente por ferramenta, cortado em 72 chars; quando o input
+// carrega VÁRIOS valores, o primeiro cai pra 48 e sobra espaço pro contador "(+N …)".
+
+// Corta pra UMA linha com no máximo `max` chars — o "…" conta como um deles (a linha do chat é
+// nowrap + ellipsis, então o orçamento tem que ser exato pra não haver dois cortes seguidos).
+export function summarizeText(text: string, max = 60): string {
+  const oneLine = text.replace(/\s+/g, ' ').trim();
+  if (oneLine.length <= max) return oneLine;
+  // Corta por CARACTERE, nao por unidade UTF-16: slice() parte emoji no meio (sao 2 unidades) e
+  // deixa meia metade orfa antes do "…". Array.from itera por code point.
+  return Array.from(oneLine).slice(0, Math.max(0, max - 1)).join('') + '…';
+}
+
+const TOOL_MAX = 72;        // valor único
+const TOOL_MAX_FIRST = 48;  // primeiro de vários (o resto vira "(+N …)")
+
+// Chaves cujo valor é uma LISTA + o plural pt-BR do contador.
+const MULTI_KEYS: Record<string, string> = {
+  queries: 'consultas',
+  urls: 'urls',
+  paths: 'arquivos',
+  file_paths: 'arquivos',
+  // No singular também: um patch do Codex toca N arquivos e o backend os entrega em `file_path`,
+  // que é a chave que o resto do app já lê. Sem esta linha o cartão dizia "(+2 itens)" onde
+  // Read/Edit dizem "(+2 arquivos)".
+  file_path: 'arquivos',
+};
+// Ordem de preferência do fallback genérico: a chave saliente vem primeiro, não a 1ª do objeto
+// (a ordem do JSON do transcript não é contrato).
+const PREFERRED_KEYS = ['file_path', 'path', 'command', 'query', 'url', 'pattern', 'name', 'description', 'prompt'];
+
+function strList(v: unknown): string[] {
+  return Array.isArray(v) ? v.map((x) => String(x)).filter(Boolean) : [];
+}
+
+// Um valor -> 72 chars. Vários -> 1º em 48 + "(+N <noun>)".
+function summarizeValues(values: string[], noun: string): string {
+  if (!values.length) return '';
+  if (values.length === 1) return summarizeText(values[0], TOOL_MAX);
+  return `${summarizeText(values[0], TOOL_MAX_FIRST)} (+${values.length - 1} ${noun})`;
+}
+
+// Argumento saliente da tool pra LINHA 1 do bloco ("● Read .claude/settings.json (limit=1000)"):
+// o VALOR cru, sem prefixo "chave:" — o nome da ferramenta ao lado já diz o que ele é, e o prefixo
+// só roubava largura do que importa no celular.
+export function summarizeToolInput(
+  toolName: string | null | undefined,
+  input: Record<string, unknown> | null | undefined,
+): string {
+  if (!input) return '';
+  const name = toolName ?? '';
+  const one = (k: string) => {
+    const v = input[k];
+    return v === null || v === undefined ? '' : String(v);
+  };
+
+  if (name === 'Read') {
+    // offset/limit entre parênteses depois do caminho (mesma forma do pacote): são o recorte lido,
+    // e sem eles duas leituras do MESMO arquivo ficavam indistinguíveis na árvore do grupo.
+    const p = summarizeText(one('file_path') || one('path'), TOOL_MAX);
+    if (!p) return '';
+    // Testa o valor CRU, não a string: `offset: 0` é "sem recorte" e String(0) === '0' é truthy —
+    // com o teste na string, todo Read do topo do arquivo ganhava um "(offset=0)" mudo.
+    const parts = (['offset', 'limit'] as const)
+      .filter((k) => input[k])
+      .map((k) => `${k}=${one(k)}`);
+    return parts.length ? `${p} (${parts.join(', ')})` : p;
+  }
+  if (name === 'Write' || name === 'Edit') return summarizeText(one('file_path') || one('path'), TOOL_MAX);
+  if (name === 'Bash') return summarizeText(one('command'), TOOL_MAX);
+  // O Bash do Codex. O comando não vem pronto: o backend o extrai do código JavaScript da chamada
+  // e só o entrega quando conseguiu — sem extração sobra o código, que é o que foi executado de
+  // verdade. Nunca uma linha vazia. Os três nomes porque o Codex embrulha tudo num `exec` e o
+  // backend desembrulha para a ferramenta de dentro (`exec_command`, `write_stdin`, …); `exec`
+  // continua chegando quando a chamada interna não é reconhecida.
+  if (name === 'exec' || name === 'exec_command' || name === 'write_stdin') {
+    // `cmd` é o nome do campo quando a chamada NÃO vem embrulhada em código (aí ela chega com os
+    // argumentos em JSON). Não achando nenhum dos três, o caso se cala e deixa o genérico lá
+    // embaixo escolher — retornar aqui é que produzia linha em branco numa chamada que tinha o
+    // campo com outro nome. (Entrada sem nenhum campo legível não tem resumo mesmo, e aí o vazio
+    // é a resposta honesta: o cartão ainda mostra a saída da ferramenta.)
+    const alvo = one('command') || one('cmd') || one('code');
+    if (alvo) return summarizeText(alvo, TOOL_MAX);
+  }
+  // Plano do Codex: a linha diz em que passo ele está, que é o que se quer saber de relance — a
+  // lista inteira aparece no painel de tarefas (lib/activity.ts). Sem isto o cartão mostrava o
+  // código JavaScript da chamada, igual para todas as revisões do plano.
+  if (name === 'update_plan') {
+    const plano = Array.isArray(input['plan']) ? (input['plan'] as Record<string, unknown>[]) : [];
+    const passo = plano.find((p) => p?.status === 'in_progress') ?? plano[0];
+    const texto = typeof passo?.step === 'string' ? passo.step : one('code');
+    if (texto) return summarizeText(texto, TOOL_MAX);
+  }
+  if (name === 'Grep' || name === 'Glob') {
+    // O argumento saliente e o PADRAO, nunca o diretorio (o pacote faz `"pattern" in path`); sem
+    // este ramo o fallback preferiria `path` e a linha esconderia o que foi procurado.
+    const pat = summarizeText(one('pattern'), TOOL_MAX);
+    const p = one('path');
+    return pat ? `"${pat}"${p ? ` em ${p}` : ''}` : '';
+  }
+  if (name === 'WebSearch') {
+    // A tool do Claude Code manda `query` (uma só); `queries` é a forma do pacote/outros provedores.
+    return one('query')
+      ? summarizeText(one('query'), TOOL_MAX)
+      : summarizeValues(strList(input['queries']), MULTI_KEYS.queries);
+  }
+  if (name === 'AskUserQuestion') {
+    // `questions` e uma lista de OBJETOS, e o fallback generico la embaixo faria String() nela:
+    // o card saia literalmente "AskUserQuestion [object Object]". A linha util e a pergunta (a
+    // primeira, quando ha varias abas) — as opcoes o usuario ve no stepper, que abre por cima.
+    const qs: unknown[] = Array.isArray(input['questions']) ? input['questions'] : [];
+    const primeira = qs[0];
+    // `typeof === 'string'`, nao `String(...)`: se `question` vier como objeto (outro agente, outra
+    // versao), o String() reproduz o MESMO "[object Object]" um nivel mais fundo. Aqui forma
+    // inesperada vira linha vazia, que e o cartao sem resumo — nunca lixo na tela.
+    const texto = primeira && typeof primeira === 'object'
+      ? (primeira as Record<string, unknown>)['question'] : undefined;
+    return typeof texto === 'string' && texto ? summarizeText(texto, TOOL_MAX) : '';
+  }
+  if (name === 'WebFetch') {
+    return one('url') ? summarizeText(one('url'), TOOL_MAX) : summarizeValues(strList(input['urls']), MULTI_KEYS.urls);
+  }
+  if (name === 'ToolSearch') {
+    // O argumento cru é `select:WebSearch,WebFetch` ou uma busca por palavra — nos dois casos o
+    // fallback genérico mostrava o prefixo `select:` colado nos nomes, que não diz nada a quem lê.
+    // A linha útil é QUAIS ferramentas foram carregadas.
+    // `typeof === 'string'`, não `one()`: aquele faz `String(v)`, então um `query` que venha como
+    // objeto (outro provedor, outra versão) sairia "[object Object]" no chip — a mesma armadilha
+    // que o ramo do AskUserQuestion guarda logo acima. Forma inesperada vira linha vazia.
+    const cru = input['query'];
+    if (typeof cru !== 'string') return '';
+    // `trim` antes do prefixo: `"select: WebSearch,WebFetch"` (com espaço) falharia o startsWith e
+    // cairia no ramo de texto livre, mostrando o `select:` cru — justamente o que este ramo existe
+    // pra tirar da tela.
+    const q = cru.trim();
+    if (q.startsWith('select:')) {
+      // Junta os nomes enquanto CABEM: com dois ou três, "WebSearch, WebFetch" diz tudo, e o
+      // "(+1 itens)" do summarizeValues esconderia justamente o segundo nome. Passando da linha,
+      // porém, o corte cru perde o último nome no meio e não conta quantos ficaram de fora —
+      // então aí vale a forma dos vizinhos (WebSearch/WebFetch), que ao menos diz o número.
+      const nomes = q.slice('select:'.length).split(',').map((s) => s.trim()).filter(Boolean);
+      if (!nomes.length) return '';
+      const junto = nomes.join(', ');
+      return junto.length <= TOOL_MAX ? junto : summarizeValues(nomes, 'ferramentas');
+    }
+    return summarizeText(q, TOOL_MAX);
+  }
+
+  const keys = Object.keys(input);
+  const key = PREFERRED_KEYS.find((k) => keys.includes(k) && (one(k) || strList(input[k]).length)) ?? keys[0];
+  if (!key) return '';
+  const list = strList(input[key]);
+  return list.length ? summarizeValues(list, MULTI_KEYS[key] ?? 'itens') : summarizeText(one(key), TOOL_MAX);
+}
+
+// Fase de UMA tool call, do jeito que as duas views desenham (bolinha + cor): sem tool_result ainda
+// = rodando. Mora aqui porque ToolCard e ToolGroup precisam da MESMA regra (o grupo agrega as fases
+// dos filhos) e a versão duplicada já tinha divergido.
+export type ToolPhase = 'pending' | 'done' | 'error';
+
+export function toolPhase(result: { is_error?: boolean | null } | null | undefined): ToolPhase {
+  if (result === null || result === undefined) return 'pending';
+  return result.is_error ? 'error' : 'done';
+}
+
+// Desfecho da tool na LINHA 2 do bloco ("└ Pronto (38 linhas)"). A frase muda POR FERRAMENTA, como
+// no pacote: bash diz "Done (N lines)", read diz "N lines loaded", o resto "N lines returned".
+// Erro mostra a PRIMEIRA LINHA do erro — é a informação que importa quando falhou. Resultado vazio
+// (comando mudo) -> só "Pronto". Sem resultado (ainda rodando) -> string vazia.
+export function summarizeToolResult(
+  result: { result?: string | null; is_error?: boolean | null } | null | undefined,
+  toolName?: string | null,
+): string {
+  if (result === null || result === undefined) return '';
+  const raw = (result.result ?? '').trim();
+  if (result.is_error) return raw ? summarizeText(raw.split('\n')[0], TOOL_MAX) : m.formato_tool_falhou();
+  if (!raw) return m.formato_tool_pronto();
+  const n = raw.split('\n').length;
+  const linhas = n === 1 ? m.formato_linha_1() : m.formato_linhas({ n });
+  if (toolName === 'Bash' || toolName === 'BashOutput') return `${m.formato_tool_pronto()} (${linhas})`;
+  if (toolName === 'Read') return n === 1 ? m.formato_linhas_carregadas_1() : m.formato_linhas_carregadas({ n });
+  return n === 1 ? m.formato_linhas_retornadas_1() : m.formato_linhas_retornadas({ n });
+}
+
+// Rótulo do cabeçalho de um burst: todas do MESMO tipo -> o nome dela ("Read"), misturadas ->
+// rótulo genérico. É o que dá sentido a esconder o nome em cada filho da árvore.
+export function toolGroupLabel(names: (string | null | undefined)[]): string {
+  const first = names[0] ?? m.formato_tool_generico();
+  return names.every((n) => (n ?? m.formato_tool_generico()) === first) ? first : m.lista_ferramentas();
+}
+
+// Contagem por fase no cabeçalho do grupo ("2 rodando • 3 concluídos"), na ordem rodando → ok → erro.
+export function toolGroupCounts(phases: ToolPhase[]): string {
+  const n = { pending: 0, done: 0, error: 0 };
+  for (const p of phases) n[p]++;
+  const parts: string[] = [];
+  if (n.pending) parts.push(m.formato_rodando({ n: n.pending }));
+  if (n.done) parts.push(n.done === 1 ? m.formato_concluido_1({ n: 1 }) : m.formato_concluidos({ n: n.done }));
+  if (n.error) parts.push(m.formato_com_erro({ n: n.error }));
+  return parts.join(' • ');
+}
+
+// Abrevia contagem grande: 3668662 -> "3.7M", 1.5e9 -> "1.5B", 999 -> "999".
+export function abbrevNum(n: number): string {
+  for (const [div, suf] of [[1e9, 'B'], [1e6, 'M'], [1e3, 'K']] as const) {
+    if (n >= div) return (n / div).toFixed(1).replace(/\.0$/, '') + suf;
+  }
+  return String(Math.round(n));
+}

@@ -514,7 +514,11 @@ $marca = $null
 # em vez de cair no "sem git nao da pra saber o que mudou" logo abaixo, que existe pra este caso.
 if ((Tem 'git') -and (Test-Path "$raiz\.git")) {
     $commit = (& git -C $raiz rev-parse HEAD 2>$null)
-    $sujo = (& git -C $raiz status --porcelain -- frontend 2>$null) -join "`n"
+    # `packages` junto de `frontend`: metade das fontes da tela mora no `@hangar/core`, e este
+    # valor responde por DOIS gates - a marca de rebuild logo abaixo e o $sujo do Baixar-Dist.
+    # Olhando so `frontend`, uma edicao em api.ts/format.ts nao rebuilda e ainda e sobrescrita
+    # pelo dist do CI, que nao a contem.
+    $sujo = (& git -C $raiz status --porcelain -- frontend packages 2>$null) -join "`n"
     if ($commit) { $marca = "$commit`n$sujo" }
 }
 
@@ -723,7 +727,7 @@ function Baixar-Dist {
     if (-not $commit) {                            # sem git nao da pra saber de que commit e o dist
         Nota 'compilando aqui: sem git, nao da pra saber de que commit e o dist do CI'; return $false }
     if ($sujo) {                                   # front editado a mao: a pessoa quer o codigo DELA na tela
-        Nota 'compilando aqui: frontend/ tem mudanca local - o dist do CI apagaria ela da tela'; return $false }
+        Nota 'compilando aqui: frontend/ ou packages/ tem mudanca local - o dist do CI apagaria ela da tela'; return $false }
     $tmp = Join-Path "$raiz\frontend" (".dist-baixado." + [IO.Path]::GetRandomFileName())
     try {
         # TLS 1.2 explicito: o 5.1 ainda negocia TLS 1.0 por padrao em algumas maquinas e o GitHub
@@ -773,11 +777,14 @@ if ($precisa -and (Baixar-Dist)) {
     if (-not (Test-Path $modulos)) {
         $eapAnt2 = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
-        Push-Location "$raiz\frontend"
+        # RAIZ, nao frontend: `frontend` e workspace e nao tem lockfile proprio, e o `@hangar/core`
+        # so existe como link criado por instalacao na raiz. O app nativo nao e workspace, entao
+        # isto nao baixa React Native — o build dele e no Expo.
+        Push-Location $raiz
         try { npm ci @quieto; $rcDeps = $LASTEXITCODE } finally { Pop-Location; $ErrorActionPreference = $eapAnt2 }
         if ($rcDeps -ne 0) {
             Erro "npm ci falhou (exit $rcDeps) - o servico do frontend nao vai subir"
-            Nota 'rodar na mao:  cd frontend ; npm ci'
+            Nota 'rodar na mao:  npm ci   (na raiz do repositorio)'
             $script:pendencias += 'frontend'
         } else {
             Ok 'dependencias do frontend instaladas'
@@ -828,7 +835,8 @@ if ($precisa) {
     $tBuild = Get-Date
     $eapAnterior = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    Push-Location "$raiz\frontend"
+    # RAIZ, nao frontend: workspace sem lockfile proprio e o core so linkado por instalacao na raiz.
+    Push-Location $raiz
     try {
         # Sem --silent no -Update: e o modo que o BOTAO Atualizar do app usa, e a caixinha da tela
         # mostra esta saida ao vivo. Com --silent o npm nao imprime NADA, entao durante o minuto de
@@ -848,7 +856,7 @@ if ($precisa) {
             # A flag vai ANTES do nome do script: no npm 11 `npm run build --silent` nao e mais
             # consumida pelo npm, ela e repassada ao script e chega no `vite build`, que morre com
             # CACError (medido na VM Windows, node 24.15 / npm 11).
-            npm run @quieto build
+            npm run @quieto build -w frontend
             $rcBuild = $LASTEXITCODE
         } else {
             $rcBuild = -1
@@ -862,7 +870,7 @@ if ($precisa) {
     $distNovo = (Test-Path $dist) -and ((Get-Item $dist).LastWriteTime -ge $tBuild)
     if ($rcCi -ne 0) {
         Erro "npm ci falhou (exit $rcCi) - frontend NAO buildado"
-        Nota 'rodar na mao:  cd frontend ; npm ci ; npm run build'
+        Nota 'rodar na mao (na raiz):  npm ci ; npm run build -w frontend'
         $script:pendencias += 'frontend'
     } elseif ($rcBuild -ne 0) {
         Erro "npm run build falhou (exit $rcBuild) - dist NAO atualizado"

@@ -7,7 +7,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, unmount, tick } from 'svelte';
 import TerminalMobile from './TerminalMobile.svelte';
 import * as auth from '../lib/auth';
-import * as api from '../lib/api';
+import * as api from '@hangar/core';
 import * as m from '../paraglide/messages';
 
 class FakeWS {

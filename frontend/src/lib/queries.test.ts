@@ -2,9 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 let ativo: string | null = 'srv-a';
 vi.mock('./auth', () => ({ getActiveId: () => ativo }));
-vi.mock('./api', () => ({
-	getOrqPolitica: vi.fn(), getOrqGrupo: vi.fn(), getOrqDetalheForServer: vi.fn(),
-	getEngines: vi.fn(), getEnginesForServer: vi.fn(),
+// O core traz muito mais que estas cinco funções; sem espalhar o original o mock derruba
+// todo o resto que `queries.ts` importa de lá.
+vi.mock('@hangar/core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@hangar/core')>()),
+  getOrqPolitica: vi.fn(), getOrqGrupo: vi.fn(), getOrqDetalheForServer: vi.fn(),
+  getEngines: vi.fn(), getEnginesForServer: vi.fn(),
 }));
 vi.mock('./credenciais', () => ({ listarCredenciais: vi.fn() }));
 

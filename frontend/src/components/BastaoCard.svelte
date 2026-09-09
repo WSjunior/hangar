@@ -2,7 +2,7 @@
   import * as m from '../paraglide/messages';
   import { intlLocale } from '../lib/locale';
   import { renderMarkdown } from '../lib/markdown';
-  import { getBastaoDossie } from '../lib/api';
+  import { getBastaoDossie } from '@hangar/core';
   import type { RecadoBastao } from '../lib/bastaoRecado';
   import HangarMark from './icons/HangarMark.svelte';
   import BottomSheet from './BottomSheet.svelte';

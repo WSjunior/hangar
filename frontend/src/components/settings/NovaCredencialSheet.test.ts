@@ -7,7 +7,8 @@ import { mount, unmount, tick } from 'svelte';
 import NovaCredencialSheet from './NovaCredencialSheet.svelte';
 import * as m from '../../paraglide/messages';
 
-vi.mock('../../lib/api', () => ({
+vi.mock('@hangar/core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@hangar/core')>()),
   criarConta: vi.fn(async () => ({ path: '/x', label: 'x', active: false })),
   putEngine: vi.fn(async () => ({ motores: {} })),
   putEngineForServer: vi.fn(async () => ({ motores: {} })),

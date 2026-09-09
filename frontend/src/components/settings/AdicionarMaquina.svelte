@@ -7,7 +7,7 @@
   import ConfirmDialog from '../ConfirmDialog.svelte';
   import QrScanner from '../QrScanner.svelte';
   import { normalizarEndereco } from '../../lib/url';
-  import { getConfigForServer } from '../../lib/api';
+  import { getConfigForServer } from '@hangar/core';
   import { addServer } from '../../lib/auth';
   import { getIdentificador } from '../../lib/peers';
   import { registrarPeerDoisLados } from '../../lib/registrarPeerDoisLados';

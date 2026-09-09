@@ -22,10 +22,10 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   import PlanRing from './PlanRing.svelte';
   import FilesPanel from './files/FilesPanel.svelte';
   import StateChip from './StateChip.svelte';
-  import type { Provider, State, SessionInfo, PlanDetail, ChatEvent } from '../lib/types';
-  import type { StatusFields } from '../lib/statusline';
-  import { ctxWindow, providerName } from '../lib/format';
-  import { planBadge } from '../lib/plan';
+  import type { Provider, State, SessionInfo, PlanDetail, ChatEvent } from '@hangar/core';
+  import type { StatusFields } from '@hangar/core';
+  import { ctxWindow, providerName } from '@hangar/core';
+  import { planBadge } from '@hangar/core';
 
   interface Props {
     state: State;

@@ -21,7 +21,7 @@
   import {
     putEngine, putEngineForServer, engineModelos, engineModelosForServer,
     type Motor, type ModeloProvedor,
-  } from '../../lib/api';
+  } from '@hangar/core';
   import type { Server } from '../../lib/auth';
   import { sincronizarNosAgentes, type ResultadoSync } from '../../lib/credenciais';
   import * as m from '../../paraglide/messages';

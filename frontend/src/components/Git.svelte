@@ -5,7 +5,7 @@
   import BottomSheet from './BottomSheet.svelte';
   import GitTabs from './git/GitTabs.svelte';
   import { createGitStore } from '../lib/gitStore.svelte';
-  import type { ChatEvent } from '../lib/types';
+  import type { ChatEvent } from '@hangar/core';
 
   // `desktop` por PROP, nao matchMedia proprio: o GitSheet era a terceira copia da mesma media
   // query (App.svelte, BottomSheet.svelte) e a primeira pintura saia mobile.

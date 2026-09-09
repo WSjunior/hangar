@@ -1,9 +1,9 @@
 <script lang="ts">
   import * as m from '../paraglide/messages';
-  import { summarizeToolInput } from '../lib/format';
-  import { pensamentoEmPt } from '../lib/api';
+  import { summarizeToolInput, resumoPensamento } from '@hangar/core';
+  import { pensamentoEmPt } from '@hangar/core';
   import { ehBusca } from '../lib/pensamentoTools.svelte';
-  import type { ChatEvent } from '../lib/types';
+  import type { ChatEvent } from '@hangar/core';
 
   // Um turno de raciocínio RECOLHIDO numa linha só, do tamanho do cabeçalho de grupo de ferramenta
   // (ToolGroup), que abre no lugar.
@@ -31,9 +31,7 @@
   // reticências); pegar a frase inteira evita cortar no meio de uma palavra na maioria dos casos.
   const resumo = $derived.by(() => {
     const p0 = pensamentos[0];
-    const limpo = ((p0 && pt[p0.id]) || p0?.text || '').replace(/\s+/g, ' ').trim();
-    const fim = limpo.search(/[.!?](\s|$)/);
-    return fim > 0 && fim < 140 ? limpo.slice(0, fim + 1) : limpo;
+    return resumoPensamento((p0 && pt[p0.id]) || p0?.text || '');
   });
 
   // Rótulo do estado aberto. Sem contagem de passos: eles estão à vista logo abaixo. O que a lista

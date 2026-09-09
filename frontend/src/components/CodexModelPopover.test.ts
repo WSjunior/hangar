@@ -7,12 +7,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount, unmount, tick } from 'svelte';
 import CodexModelPopover from './CodexModelPopover.svelte';
 import CodexEffortPopover from './CodexEffortPopover.svelte';
-import * as api from '../lib/api';
+import * as api from '@hangar/core';
 
 const onApplied = vi.hoisted(() => vi.fn());
 const onClose = vi.hoisted(() => vi.fn());
 
-vi.mock('../lib/api', () => ({
+vi.mock('@hangar/core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@hangar/core')>()),
   getCodexModels: vi.fn(),
   setCodexModel: vi.fn(),
 }));

@@ -5,7 +5,7 @@
 // ensureOk com 401 → dropActiveServer + reload), sem tocar no arquivo. `errorDetail` vem de
 // api.ts, que é exportado — importar não é editar.
 import { getBaseUrl, getToken, dropActiveServer, type Server } from './auth';
-import { errorDetail } from './api';
+import { errorDetail } from '@hangar/core';
 import * as m from '../paraglide/messages';
 
 export type EstadoLogin = {
@@ -18,7 +18,7 @@ export type EstadoLogin = {
 
 export type EstadoLimite = {
   estado: 'lido' | 'sem_leitura';
-  linha?: string | null; // linha inteira da statusline — a Task 9 parseia com lib/statusline
+  linha?: string | null; // linha inteira da statusline — a Task 9 parseia com parseStatusLine do core
   ts?: number | null;
   idade_s?: number | null;
 };

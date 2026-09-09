@@ -2,9 +2,9 @@
   import BottomSheet from './BottomSheet.svelte';
   import { desktop } from '../lib/desktop.svelte';
 import * as m from '../paraglide/messages';
-  import { getSessions, sendInput } from '../lib/api';
-  import { rotuloEstado, stateColors } from '../lib/format';
-  import type { SessionInfo } from '../lib/types';
+  import { getSessions, sendInput } from '@hangar/core';
+  import { rotuloEstado, stateColors } from '@hangar/core';
+  import type { SessionInfo } from '@hangar/core';
 
   interface Props {
     open: boolean;

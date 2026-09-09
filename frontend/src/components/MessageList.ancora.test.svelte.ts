@@ -7,7 +7,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { mount, unmount, tick } from 'svelte';
 import MessageList from './MessageList.svelte';
-import type { ChatEvent } from '../lib/types';
+import type { ChatEvent } from '@hangar/core';
 
 const msgs = (n: number): ChatEvent[] =>
   Array.from({ length: n }, (_, i) => ({ kind: 'user_msg', id: `e${i}`, text: `msg-${i}` }) as ChatEvent);

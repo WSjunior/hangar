@@ -1,11 +1,11 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import type { SessionInfo } from '../lib/types';
+  import type { SessionInfo } from '@hangar/core';
 import * as m from '../paraglide/messages';
-  import { cwdParts, rotuloEstado, stateColors, untrackedReason, providerTag, relativeTime, fmtWhen } from '../lib/format';
+  import { cwdParts, rotuloEstado, stateColors, untrackedReason, providerTag, relativeTime, fmtWhen } from '@hangar/core';
   import { chipDaConta } from '../lib/conta';
-  import { loopBadge, LOOP_TONE_COLOR } from '../lib/loop';
-  import { planBadge } from '../lib/plan';
+  import { loopBadge, LOOP_TONE_COLOR } from '@hangar/core';
+  import { planBadge } from '@hangar/core';
   import PlanBar from './PlanBar.svelte';
   import StateChip from './StateChip.svelte';
   import BottomSheet from './BottomSheet.svelte';

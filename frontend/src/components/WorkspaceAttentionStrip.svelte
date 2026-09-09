@@ -1,8 +1,8 @@
 <script lang="ts">
-  import { selectOption } from '../lib/api';
+  import { selectOption } from '@hangar/core';
   import { getActiveId, selectServer } from '../lib/auth';
-  import { attentionFeed, pedeMarcacao } from '../lib/format';
-  import type { AggSession } from '../lib/types';
+  import { attentionFeed, pedeMarcacao } from '@hangar/core';
+  import type { AggSession } from '@hangar/core';
   import * as m from '../paraglide/messages';
 
   interface Props {

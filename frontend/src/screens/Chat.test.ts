@@ -62,7 +62,8 @@ const sseCtl = vi.hoisted(() => {
 
 // API: só o que o mount do Chat toca precisa responder; o resto nunca chega a ser chamado
 // com os filhos stubados.
-vi.mock('../lib/api', () => ({
+vi.mock('@hangar/core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@hangar/core')>()),
   getPermissionModes: vi.fn().mockResolvedValue({ current: 'plan', modes: ['plan', 'auto', 'manual', 'acceptEdits'] }),
   setPermissionMode: vi.fn().mockResolvedValue({ mode: 'plan', current: 'plan' }),
   isTimeoutError: vi.fn(() => false),
@@ -97,6 +98,14 @@ vi.mock('../lib/api', () => ({
   createSession: vi.fn(),
   answerQuestions: vi.fn(),
   isAbortError: vi.fn(() => false),
+ loopBadge: vi.fn(() => null), LOOP_TONE_COLOR: {},
+ parseStatusLine: vi.fn(() => null),
+ appendTail: vi.fn(), hasSeam: vi.fn(), prependOlder: vi.fn(),
+  createActivityFolder: vi.fn(() => ({
+    snapshot: () => ({ tasks: [], inProgress: 0, running: 0, agents: [], shells: [], runningAgents: 0, runningShells: 0, writeEvents: [] }),
+    push: () => {}, save: () => {}, attach: () => {}, reset: () => {},
+  })),
+ formataErro: vi.fn(() => ''),
 }));
 vi.mock('../lib/auth', () => ({
   listServers: vi.fn(() => [{ id: 'srv-test', label: 'T', baseUrl: 'http://x', token: 't' }]),
@@ -105,21 +114,11 @@ vi.mock('../lib/auth', () => ({
 vi.mock('../lib/ttsPlayer.svelte', () => ({ ttsPlayer: { active: false, loading: false } }));
 vi.mock('../lib/ouvir', () => ({ ouvirTexto: vi.fn() }));
 vi.mock('../lib/speakable', () => ({ textoFalavelComCodigo: vi.fn(() => '') }));
-vi.mock('../lib/loop', () => ({ loopBadge: vi.fn(() => null), LOOP_TONE_COLOR: {} }));
-vi.mock('../lib/statusline', () => ({ parseStatusLine: vi.fn(() => null) }));
-vi.mock('../lib/history', () => ({ appendTail: vi.fn(), hasSeam: vi.fn(), prependOlder: vi.fn() }));
-vi.mock('../lib/activity', () => ({
-  createActivityFolder: vi.fn(() => ({
-    snapshot: () => ({ tasks: [], inProgress: 0, running: 0, agents: [], shells: [], runningAgents: 0, runningShells: 0, writeEvents: [] }),
-    push: () => {}, save: () => {}, attach: () => {}, reset: () => {},
-  })),
-}));
 // O módulo inteiro é mockado vazio; a exceção é a função PURA que o Chat usa pra chavear o
 // navegador embutido por sessão — duplicada aqui pra não puxar o módulo real (e as deps dele).
 vi.mock('../lib/workspaceCommands', () => ({
   workspaceSessionKey: (s: { serverId: string; name: string }) => `${s.serverId}::${s.name}`,
 }) );
-vi.mock('../lib/errosApi', () => ({ formataErro: vi.fn(() => '') }));
 
 function montar() {
   const el = document.createElement('div');
@@ -258,7 +257,7 @@ describe('Chat — visor de arquivo (Task 11, B5: foco e inert)', () => {
     const t = montar();
     await tick();
     await tick();
-    await import('../lib/api');   // estabiliza o mock do SSE: sem o import explicito, o registro
+    await import('@hangar/core');   // estabiliza o mock do SSE: sem o import explicito, o registro
     // dos handlers pode nao estar visivel ao sseCtl na suite completa (medido: falha intermitente).
     sseCtl.state({ state: 'dead' });   // a sessao encerrou
     await tick();

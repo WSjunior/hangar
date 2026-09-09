@@ -4,7 +4,7 @@ import NavRemoto from './NavRemoto.svelte';
 import { desktop } from '../lib/desktop.svelte';
 import * as m from '../paraglide/messages';
   import ModalDialog from './ModalDialog.svelte';
-  import { getNavegadorDaSessao, getPreview, startPreview, stopPreview } from '../lib/api';
+  import { getNavegadorDaSessao, getPreview, startPreview, stopPreview } from '@hangar/core';
 
   interface Props {
     open: boolean;

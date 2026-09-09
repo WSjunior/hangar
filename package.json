@@ -1,0 +1,19 @@
+{
+  "name": "hangar",
+  "private": true,
+  "_comentario_workspaces": "O app nativo NÃO entra aqui de propósito: quem instala o Hangar (e o CI) roda `npm ci` na raiz e não pode baixar o toolchain do React Native/Expo por isso. O build do app é no Expo, não no GitHub. Pra mexer no app: `npm install` dentro de mobile/, que resolve o core por `file:../packages/core`.",
+  "workspaces": [
+    "packages/*",
+    "frontend"
+  ],
+  "_comentario_scripts": "check e test cobrem as TRÊS interfaces (core, front web, app nativo). O app entra por scripts/verificar-app.mjs porque não é workspace; sem isso ele ficava de fora e uma mudança no @hangar/core podia quebrá-lo com a verificação verde.",
+  "scripts": {
+    "test": "npm run test -w @hangar/core && npm run test -w frontend && npm run test:app",
+    "check": "npm run check -w @hangar/core && npm run check -w frontend && npm run check:app",
+    "test:app": "node scripts/verificar-app.mjs test",
+    "check:app": "node scripts/verificar-app.mjs typecheck"
+  },
+  "devDependencies": {
+    "happy-dom": "^20.11.1"
+  }
+}

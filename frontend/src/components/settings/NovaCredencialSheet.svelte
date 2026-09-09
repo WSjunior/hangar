@@ -17,7 +17,7 @@
   import ConfigIcone from './ConfigIcone.svelte';
   import * as m from '../../paraglide/messages';
   import { engineModelos, engineModelosForServer, putEngine, putEngineForServer,
-           criarConta, type ModeloProvedor } from '../../lib/api';
+           criarConta, type ModeloProvedor } from '@hangar/core';
   import { sincronizarNosAgentes, codexLoginIniciar, codexLoginPasso, codexLoginCancelar,
            type ResultadoSync, type PassoCodex } from '../../lib/credenciais';
   import type { Server } from '../../lib/auth';

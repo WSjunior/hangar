@@ -16,10 +16,10 @@
    */
   import * as m from '../paraglide/messages';
   import BottomSheet from './BottomSheet.svelte';
-  import { getAtualizacao, iniciarAtualizacao, reiniciarServidor } from '../lib/api';
+  import { getAtualizacao, iniciarAtualizacao, reiniciarServidor } from '@hangar/core';
   import * as diag from '../lib/diag';
   import { renderMarkdown } from '../lib/markdown';
-  import type { Atualizacao } from '../lib/types';
+  import type { Atualizacao } from '@hangar/core';
 
   interface Props {
     open: boolean;

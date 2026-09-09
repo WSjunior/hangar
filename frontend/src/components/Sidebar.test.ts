@@ -22,7 +22,8 @@ const storeState = vi.hoisted(() => ({
   servers: [] as unknown[],
 }));
 
-vi.mock('../lib/api', () => ({
+vi.mock('@hangar/core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@hangar/core')>()),
   getPermissionModes: vi.fn().mockResolvedValue({ current: 'plan', modes: ['plan', 'auto', 'manual', 'acceptEdits'] }),
   setPermissionMode: vi.fn().mockResolvedValue({ mode: 'plan', current: 'plan' }),
   isTimeoutError: vi.fn(() => false),
@@ -48,6 +49,21 @@ vi.mock('../lib/api', () => ({
     path: 'a.txt', diff: '', truncated: false,
     escopo_pedido: 'branch', escopo_usado: 'branch', base: null, motivo: null,
   })),
+  // Rótulo REAL de estado (agora funcao): o trilho original anuncia estado no aria-label/title.
+  rotuloEstado: (s: string) => ({ working: 'em execução', idle: 'pronto', awaiting_input: 'aguardando', dead: 'encerrado' })[s] ?? '',
+  stateColors: {}, countAwaiting: () => 0,
+  groupSelectedByServer: () => [], initials: (n: string) => n.slice(0, 2),
+  railLabel: (n: string) => [n.slice(0, 8), ''],
+  projectKey: () => '', projectLabel: () => '', effectiveGroupBy: () => 'server',
+  fmtWhen: () => '', sortSessions: (s: unknown[]) => s, latestAssistantEvent: () => null,
+  // Mesmo shape do real: itens do cluster são {session} (ou {kind:'header',...}); o template lê
+  // item.session — sessão crua no lugar certo quebraria na chave do each.
+  clusterByPair: (s: unknown[]) => s.map((x) => ({ session: x })),
+  untrackedReason: () => '', providerName: () => 'claude',
+  providerTag: () => null,
+  cwdParts: (c: string | undefined) => ({ prefix: '', base: c ?? '' }),
+ loopBadge: () => null, LOOP_TONE_COLOR: {},
+ planBadge: () => null,
 }));
 vi.mock('../lib/auth', () => ({
   getActiveId: vi.fn(() => null),
@@ -63,24 +79,7 @@ vi.mock('../lib/sessionsStore.svelte', () => ({
     loading: false,
   },
 }));
-vi.mock('../lib/format', () => ({
-  // Rótulo REAL de estado (agora funcao): o trilho original anuncia estado no aria-label/title.
-  rotuloEstado: (s: string) => ({ working: 'em execução', idle: 'pronto', awaiting_input: 'aguardando', dead: 'encerrado' })[s] ?? '',
-  stateColors: {}, countAwaiting: () => 0,
-  groupSelectedByServer: () => [], initials: (n: string) => n.slice(0, 2),
-  railLabel: (n: string) => [n.slice(0, 8), ''],
-  projectKey: () => '', projectLabel: () => '', effectiveGroupBy: () => 'server',
-  fmtWhen: () => '', sortSessions: (s: unknown[]) => s, latestAssistantEvent: () => null,
-  // Mesmo shape do real: itens do cluster são {session} (ou {kind:'header',...}); o template lê
-  // item.session — sessão crua no lugar certo quebraria na chave do each.
-  clusterByPair: (s: unknown[]) => s.map((x) => ({ session: x })),
-  untrackedReason: () => '', providerName: () => 'claude',
-  providerTag: () => null,
-  cwdParts: (c: string | undefined) => ({ prefix: '', base: c ?? '' }),
-}));
 vi.mock('../lib/badge', () => ({ updateBadge: vi.fn() }));
-vi.mock('../lib/loop', () => ({ loopBadge: () => null, LOOP_TONE_COLOR: {} }));
-vi.mock('../lib/plan', () => ({ planBadge: () => null }));
 vi.mock('../lib/sidebarPrefs.svelte', () => ({ sidebarPrefs: { height: 'content' } }));
 vi.mock('../lib/configNav', () => ({ abrirConfig: vi.fn() }));
 
@@ -115,9 +114,9 @@ import { sidebarPin } from '../lib/sidebarPin.svelte';
 import { sidebarBridge } from '../lib/sidebarBridge';
 import { navMode } from '../lib/navMode.svelte';
 import { ctxPanel } from '../lib/ctxPanel.svelte';
-import * as api from '../lib/api';
+import * as api from '@hangar/core';
 import * as m from '../paraglide/messages';
-import type { AggSession } from '../lib/types';
+import type { AggSession } from '@hangar/core';
 
 // O body-scroll-lock do bits-ui agenda um cleanup de 24ms ao desmontar um dialog/sheet; sem
 // esperar, o timer dispara DEPOIS do teardown do happy-dom ("document is not defined" — erro

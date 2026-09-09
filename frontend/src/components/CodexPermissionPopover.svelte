@@ -6,7 +6,7 @@
   // ou saída de comando, não viram chave de idioma. Um quarto modo aparece na tela sozinho.
   import * as m from '../paraglide/messages';
   import Popover from './Popover.svelte';
-  import { getCodexPermissions, setCodexPermission, type CodexPermissionMode } from '../lib/api';
+  import { getCodexPermissions, setCodexPermission, type CodexPermissionMode } from '@hangar/core';
 
   interface Props {
     open: boolean;

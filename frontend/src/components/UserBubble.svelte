@@ -1,7 +1,7 @@
 <script lang="ts">
 import { intlLocale } from '../lib/locale';
 import { renderMarkdown } from '../lib/markdown';
-import { parseCanal } from '../lib/format';
+import { parseCanal } from '@hangar/core';
 import * as m from '../paraglide/messages';
   interface Props {
     text: string;

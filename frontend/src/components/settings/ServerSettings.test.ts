@@ -11,7 +11,8 @@ import { criarProps } from './props-reativas.svelte';
 import * as m from '../../paraglide/messages';
 import type { ConfigServidorStore } from '../../lib/serverConfig.svelte';
 
-vi.mock('../../lib/api', () => ({
+vi.mock('@hangar/core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@hangar/core')>()),
   listarVozesTts: vi.fn(async () => []),
   saldoTts: vi.fn(async () => ({ usados: 0, limite: 0 })),
   getPushSettings: vi.fn(() => new Promise(() => {})),

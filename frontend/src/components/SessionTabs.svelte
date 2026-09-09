@@ -6,9 +6,9 @@
 import * as m from '../paraglide/messages';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { buildSessionTabs, focusedTabKey, tabKeyOf } from '../lib/sessionTabs';
-  import { stateColors, rotuloEstado } from '../lib/format';
-  import { parseStatusLine } from '../lib/statusline';
-  import { planBadge } from '../lib/plan';
+  import { stateColors, rotuloEstado } from '@hangar/core';
+  import { parseStatusLine } from '@hangar/core';
+  import { planBadge } from '@hangar/core';
   import { sidebarPin } from '../lib/sidebarPin.svelte';
   import { sidebarBridge } from '../lib/sidebarBridge';
   import { prefetchContas } from '../lib/queries';
@@ -19,7 +19,7 @@ import * as m from '../paraglide/messages';
   import ProviderGlyph from './icons/ProviderGlyph.svelte';
   import HangarWorking from './icons/HangarWorking.svelte';
   import QuotaPill from './QuotaPill.svelte';
-  import type { AggSession } from '../lib/types';
+  import type { AggSession } from '@hangar/core';
 
   interface Props {
     currentKey: string | null;

@@ -33,7 +33,7 @@
   import FileViewer from '../components/files/FileViewer.svelte';
   import { filesStores } from '../lib/filesStore.svelte';
   import { navegadorPanel, marcarNavAberto, atualizarNavUrl } from '../lib/navegadorPanel.svelte';
-  import { loopBadge, LOOP_TONE_COLOR } from '../lib/loop';
+  import { loopBadge, LOOP_TONE_COLOR } from '@hangar/core';
   import {
     getHistory,
     getHistoryDesde,
@@ -43,7 +43,7 @@
     selectOption,
     submitSelected,
     interrupt,
-    openEventStream,
+    openEventStream, type EventSourceLike,
     getSessions,
     createSession,
     getWorkflows,
@@ -55,17 +55,17 @@
     getPlan,
     getConfig,
     uploadUrl,
-  } from '../lib/api';
-  import { formataErro } from '../lib/errosApi';
-  import { appendTail, hasSeam, prependOlder } from '../lib/history';
-  import { especificidade, donoDaLinha } from '../lib/covers';
-  import { parseStatusLine } from '../lib/statusline';
+  } from '@hangar/core';
+  import { formataErro } from '@hangar/core';
+  import { appendTail, hasSeam, prependOlder } from '@hangar/core';
+  import { especificidade, donoDaLinha } from '@hangar/core';
+  import { parseStatusLine } from '@hangar/core';
   import { listServers, getActiveId } from '../lib/auth';
-  import { createActivityFolder } from '../lib/activity';
-  import type { ChatEvent, StateEvent, StatsEvent, State, SessionInfo, AskQuestionPayload, AnswerItem, Provider, PlanDetail, UploadFile } from '../lib/types';
+  import { createActivityFolder } from '@hangar/core';
+  import type { ChatEvent, StateEvent, StatsEvent, State, SessionInfo, AskQuestionPayload, AnswerItem, Provider, PlanDetail, UploadFile } from '@hangar/core';
   import type { WorkspaceAction } from '../lib/workspaceCommands';
   import { workspaceSessionKey } from '../lib/workspaceCommands';
-  import { countAwaiting, nextAwaiting, providerName, untrackedReason, stateColors } from '../lib/format';
+  import { countAwaiting, nextAwaiting, providerName, untrackedReason, stateColors } from '@hangar/core';
   import { chipDaConta } from '../lib/conta';
   import * as diag from '../lib/diag';
   import { ttsPlayer } from '../lib/ttsPlayer.svelte';
@@ -317,7 +317,7 @@
   let statsEvent = $state<StatsEvent | null>(null);
   let loading = $state(true);
   let error = $state('');
-  let es: EventSource | null = null;
+  let es: EventSourceLike | null = null;
   let watchdog: ReturnType<typeof setTimeout> | undefined;     // liveness: reconecta se a conexao morrer calada
   // Última posição recebida do transcript; reenviada no reconnect pra retomar exatamente dali.
   let lastEventId: string | null = null;
@@ -1369,7 +1369,7 @@
                      provider: sessionProvider });
     armWatchdog();
 
-    es.addEventListener('message', (e: MessageEvent) => {
+    es.addEventListener('message', (e) => {
       noteAlive();
       // Chegou conversa: o aviso de "não carregou o histórico" não pode continuar na frente dela.
       // A tela de erro SUBSTITUI a lista inteira ({:else if error}), então um erro aceso por uma
@@ -1454,7 +1454,7 @@
       } catch {}
     });
 
-    es.addEventListener('state', (e: MessageEvent) => {
+    es.addEventListener('state', (e) => {
       noteAlive();
       try {
         stateEvent = JSON.parse(e.data) as StateEvent;
@@ -1480,7 +1480,7 @@
     });
 
     // Faixa de estatísticas da sessão (app/stats.py). Full-replace; ausência de evento = sem faixa.
-    es.addEventListener('stats', (e: MessageEvent) => {
+    es.addEventListener('stats', (e) => {
       try { statsEvent = JSON.parse(e.data) as StatsEvent; } catch {}
     });
 
@@ -1488,7 +1488,7 @@
     es.addEventListener('ping', () => noteAlive());
 
     // Stepper nativo AskUserQuestion: abre o sheet com as perguntas recebidas via SSE
-    es.addEventListener('ask_question', (e: MessageEvent) => {
+    es.addEventListener('ask_question', (e) => {
       try { askPayload = JSON.parse(e.data); askOpen = true; } catch {}
     });
 
@@ -1496,7 +1496,7 @@
     // via `hangar-preview open`). Marca no store SEMPRE (sem guard de desktop: se ele chegar com o
     // usuário no celular e for descartado, o navegador nunca abre — marcado, abre quando a sessão
     // estiver num desktop). O NavegadorPane monta pelo navOpen derivado e abre com a url salva.
-    es.addEventListener('nav', (e: MessageEvent) => {
+    es.addEventListener('nav', (e) => {
       try {
         const { url } = JSON.parse(e.data) as { url?: string };
         marcarNavAberto(navKey);
@@ -1512,7 +1512,7 @@
 
     // Preview ao vivo (best-effort) do bloco de assistente em voo. Full-replace; tambem e prova de
     // vida (mas NAO a unica — entre turnos nao ha preview, por isso o ping ancora o watchdog).
-    es.addEventListener('preview', (e: MessageEvent) => {
+    es.addEventListener('preview', (e) => {
       noteAlive();
       try {
         const ev = JSON.parse(e.data) as { text?: string; md?: boolean; full?: boolean };

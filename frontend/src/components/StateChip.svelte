@@ -11,8 +11,8 @@
   // `stateColors` (lib/format.ts) continua existindo pra quem precisa da cor CRUA num style
   // inline (o anel do PlanRing, a bolinha de um grafico) — aqui nao se usa.
   import * as m from '../paraglide/messages';
-  import { rotuloEstado } from '../lib/format';
-  import type { State } from '../lib/types';
+  import { rotuloEstado } from '@hangar/core';
+  import type { State } from '@hangar/core';
 
   interface Props {
     state: State;

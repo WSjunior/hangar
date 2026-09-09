@@ -1,7 +1,7 @@
 // Catálogo de modelos de uma conta/provider ANTES de existir sessão (GET /api/model-options), com
 // a memória do último modelo escolhido. Vive fora do CreateSessionSheet porque a tela de
 // orquestração oferece a mesma escolha (provider → conta → modelo) e uma segunda cópia divergiria.
-import { modelOptions, type ModelOption } from './api';
+import { modelOptions, type ModelOption } from '@hangar/core';
 
 // Os cinco escolhem modelo, cada um de uma fonte diferente (picker do Claude, `pi --list-models`,
 // config.toml do Kimi, `model/list` do Codex; omp reusa a fonte do Pi). Lista explícita:

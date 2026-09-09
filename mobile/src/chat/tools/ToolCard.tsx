@@ -1,0 +1,57 @@
+import { memo } from 'react';
+import { Pressable, Text } from 'react-native';
+import { StyleSheet, useUnistyles } from 'react-native-unistyles';
+import { summarizeToolInput, summarizeToolResult, toolPhase, type ChatEvent } from '@hangar/core';
+import { Icon } from '../../ui/Icon';
+import { toolIcon } from './toolIcon';
+import { superficie } from '../../theme/superficie';
+import * as m from '../../paraglide/messages';
+
+// ChatEvent.ts é epoch em SEGUNDOS (backend/app/transcript.py:_ts).
+function duracao(use: ChatEvent, result?: ChatEvent | null): string | null {
+  if (!use.ts || !result?.ts) return null;
+  const s = Math.max(0, result.ts - use.ts);
+  return s < 60 ? `${s.toFixed(s < 10 ? 1 : 0)}s` : `${Math.floor(s / 60)}m${Math.round(s % 60)}s`;
+}
+
+// Card curto: ícone do verbo + 1 linha + duração/estado. Toque abre o detalhe.
+// `semNome`: dentro de um grupo do mesmo tipo o nome já está no cabeçalho.
+// `onPress` recebe o próprio evento em vez de ser fechado sobre ele por quem monta o card: assim a
+// prop é a MESMA referência em toda a lista, e o `memo` daqui não é anulado por uma arrow nova a
+// cada render do pai — que, durante o streaming, é a cada token.
+export const ToolCard = memo(function ToolCard({ use, result, onPress, semNome }: { use: ChatEvent; result?: ChatEvent | null; onPress: (use: ChatEvent) => void; semNome?: boolean }) {
+  const { theme } = useUnistyles();
+  const fase = toolPhase(result ?? null);
+  const resumo = summarizeToolInput(use.tool_name, use.tool_input);
+  const cor = fase === 'error' ? theme.tokens.status.error : fase === 'pending' ? theme.tokens.accent.base : theme.tokens.text.muted;
+  // Coluna direita: nunca vazia. Sem os dois `ts` não dá pra medir duração, e aí vale o desfecho em
+  // palavra ("Pronto (38 linhas)"), que é o que a PWA mostra — cor sozinha não conta o estado.
+  const direita = fase === 'pending' ? '…' : fase === 'error' ? '!' : duracao(use, result) ?? summarizeToolResult(result, use.tool_name);
+  const estado = fase === 'pending' ? m.formato_rodando({ n: 1 }) : summarizeToolResult(result, use.tool_name);
+  return (
+    <Pressable
+      onPress={() => onPress(use)}
+      style={({ pressed }) => [styles.card, pressed && { opacity: 0.7 }]}
+      accessibilityRole="button"
+      accessibilityLabel={`${use.tool_name ?? m.formato_tool_generico()}: ${resumo} — ${estado}`}
+    >
+      <Icon name={toolIcon(use.tool_name)} size={15} color={cor} />
+      {!semNome ? <Text style={[styles.nome, { color: theme.tokens.text.secondary }]}>{use.tool_name}</Text> : null}
+      <Text style={[styles.resumo, { color: theme.tokens.text.primary }]} numberOfLines={1}>{resumo}</Text>
+      <Text style={[styles.dir, { color: cor }]} numberOfLines={1}>{direita}</Text>
+    </Pressable>
+  );
+});
+
+const styles = StyleSheet.create((theme) => ({
+  // Conteúdo: rgba com o alpha das caixas, nunca vidro com blur.
+  card: {
+    flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 10, paddingVertical: 7,
+    borderRadius: theme.base.radius.sm,
+    backgroundColor: superficie(theme),
+  },
+  nome: { fontSize: theme.base.text.xs, fontWeight: '600' },
+  resumo: { flex: 1, fontSize: theme.base.text.xs, fontFamily: theme.base.fontMono },
+  // maxWidth: o desfecho em palavra é bem mais largo que "1.2s" e sem teto ele espremia o resumo.
+  dir: { fontSize: theme.base.text.xxs, fontFamily: theme.base.fontMono, minWidth: 28, maxWidth: '38%', textAlign: 'right' },
+}));

@@ -3,10 +3,10 @@
   import BottomSheet from './BottomSheet.svelte';
   import { desktop } from '../lib/desktop.svelte';
   import * as m from '../paraglide/messages';
-  import { listUploads, uploadUrl } from '../lib/api';
-  import { fileKind, fmtBytes, relativeTime } from '../lib/format';
+  import { listUploads, uploadUrl } from '@hangar/core';
+  import { fileKind, fmtBytes, relativeTime } from '@hangar/core';
   import { abrirVisor, type MidiaVisor } from '../lib/visor';
-  import type { UploadFile } from '../lib/types';
+  import type { UploadFile } from '@hangar/core';
 
   // Galeria dos anexos JÁ enviados pra esta sessão. Até aqui, rever uma foto mandada do celular
   // significava rolar o chat inteiro atrás dela — e agora os anexos EXPIRAM (retenção configurável),

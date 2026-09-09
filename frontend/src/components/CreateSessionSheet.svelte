@@ -7,14 +7,14 @@
   import IconFolder from './icons/IconFolder.svelte';
   import { getSessions, listClaudeConfigs, getEngines, getProviders, criarConta, apagarConta,
            getArchivePorCwd, resumeArchivedConversation, getArchiveHistory, getBastao, passarBastao,
-           type ModelOption, type Motor, type ArchiveEntry } from '../lib/api';
+           type ModelOption, type Motor, type ArchiveEntry } from '@hangar/core';
   import { carregarModelos as carregarModelosDaConta, temEscolhaDeModelo, valorModelo } from '../lib/modelosPorConta';
-  import { basename, providerName, relativeTime } from '../lib/format';
+  import { basename, providerName, relativeTime } from '@hangar/core';
   import { renderMarkdown } from '../lib/markdown';
-  import type { ChatEvent } from '../lib/types';
+  import type { ChatEvent } from '@hangar/core';
   import { selectServer, getActiveId, serverColor } from '../lib/auth';
   import type { Server } from '../lib/auth';
-  import type { SessionInfo, ConfigDirInfo, Provider } from '../lib/types';
+  import type { SessionInfo, ConfigDirInfo, Provider } from '@hangar/core';
   import { criarSeletorNativo } from '../lib/pastaNativa.svelte';
   import * as m from '../paraglide/messages';
 

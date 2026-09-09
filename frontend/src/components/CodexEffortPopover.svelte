@@ -10,7 +10,7 @@
   import { untrack } from 'svelte';
   import * as m from '../paraglide/messages';
   import Popover from './Popover.svelte';
-  import { getCodexModels, setCodexModel } from '../lib/api';
+  import { getCodexModels, setCodexModel } from '@hangar/core';
 
   interface Props {
     open: boolean;

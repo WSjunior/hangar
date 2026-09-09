@@ -1,0 +1,21 @@
+{
+  "name": "@hangar/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "test": "vitest run",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "i18n:compile": "paraglide-js compile --project ../../project.inlang --outdir ./src/paraglide --strategy baseLocale",
+    "pretest": "npm run i18n:compile",
+    "precheck": "npm run i18n:compile"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.2",
+    "vitest": "^4.1.9",
+    "@types/node": "^24.13.2",
+    "@inlang/paraglide-js": "^2.23.2"
+  }
+}

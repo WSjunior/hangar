@@ -258,9 +258,11 @@ baixar_dist() { # 0 = frontend/dist agora tem o build DESTE commit
   local sha_local sha_remoto tmp
   sha_local=$(git rev-parse HEAD 2>/dev/null) \
     || { nota "compilando aqui: sem git, não dá pra saber de que commit é o dist do CI"; return 1; }
-  # Árvore suja no front = quem está editando quer o SEU código na tela, não o do CI.
-  [ -z "$(git status --porcelain -- frontend 2>/dev/null)" ] \
-    || { nota "compilando aqui: frontend/ tem mudança local — o dist do CI apagaria ela da tela"; return 1; }
+  # Árvore suja no front = quem está editando quer o SEU código na tela, não o do CI. `packages`
+  # junto porque metade das fontes da tela mora no `@hangar/core`: olhando só `frontend`, uma
+  # edição em api.ts/format.ts seria apagada por um dist do CI que não a contém.
+  [ -z "$(git status --porcelain -- frontend packages 2>/dev/null)" ] \
+    || { nota "compilando aqui: frontend/ ou packages/ tem mudança local — o dist do CI apagaria ela da tela"; return 1; }
   # O .sha primeiro, que são 200 bytes: dist de OUTRO commit serve tela velha contra API nova, e
   # esse defeito é mudo. Não bateu (CI ainda compilando, push agorinha) → cai no build local.
   sha_remoto=$(curl -fsSL --max-time 15 "$DIST_URL/frontend-dist.sha" 2>/dev/null) \
@@ -291,8 +293,11 @@ if [ "$FRONTEND" = 0 ]; then
 else
 # Só rebuilda se houver motivo: dist ausente, ou alguma fonte/lockfile mais novo que ele. Num
 # re-run logo após um `git pull` sem mudança de front, isso economiza o `npm ci` inteiro.
+# `packages/core/src` na lista porque a tela é buildada a partir das DUAS árvores: sem ele, um pull
+# que mexe só no `@hangar/core` responde "nada mudou" e serve o dist velho, calado.
 DIST=frontend/dist/index.html
-if [ -f "$DIST" ] && [ -z "$(find frontend/src frontend/package-lock.json frontend/index.html \
+if [ -f "$DIST" ] && [ -z "$(find frontend/src packages/core/src package-lock.json \
+                              frontend/index.html \
                               frontend/vite.config.* -newer "$DIST" -print -quit 2>/dev/null)" ]; then
   ok "frontend já buildado e atualizado (nada mudou desde o último build)"
 elif baixar_dist; then
@@ -304,7 +309,10 @@ else
   QUIETO=--silent; [ "$UPDATE" = 1 ] && QUIETO=
   # A flag vai ANTES do nome do script: no npm 11 `npm run build --silent` não é mais consumida
   # pelo npm, ela é repassada ao script e chega no `vite build`, que morre com CACError.
-  build_front() { (cd frontend && npm ci $QUIETO && npm run $QUIETO build); }
+  # `npm ci` na RAIZ: `frontend` é workspace e não tem lockfile próprio, e o `@hangar/core` só
+  # existe como link criado por instalação na raiz. O app nativo não é workspace, então isto não
+  # baixa React Native — o build dele é no Expo.
+  build_front() { npm ci $QUIETO && npm run $QUIETO build -w frontend; }
   gira "npm ci + build do frontend" build_front \
     && [ -f "$DIST" ] && ok "buildado em frontend/dist/" \
     || fail "o build do frontend falhou — corrige o erro acima e re-roda (ele continua de onde parou)"

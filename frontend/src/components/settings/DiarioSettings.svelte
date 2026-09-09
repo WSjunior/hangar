@@ -5,8 +5,8 @@
   //
   // O que o arquivo contém e o que NÃO contém está em backend/app/diag.py e em lib/diag.ts. O texto
   // aqui repete a parte que importa pra quem vai enviar: fica na máquina, e não guarda conversa.
-  import { getDiagResumo, baixarDiag, type ResumoDiag, type LinhaDiag } from '../../lib/api';
-  import { fmtBytes } from '../../lib/format';
+  import { getDiagResumo, baixarDiag, type ResumoDiag, type LinhaDiag } from '@hangar/core';
+  import { fmtBytes } from '@hangar/core';
   import * as m from '../../paraglide/messages';
 
   let resumo = $state<ResumoDiag | null>(null);

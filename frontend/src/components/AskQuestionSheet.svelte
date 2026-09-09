@@ -3,7 +3,7 @@
   import { desktop } from '../lib/desktop.svelte';
   import * as m from '../paraglide/messages';
   import AskQuestionStepper from './AskQuestionStepper.svelte';
-  import type { AskQuestionPayload, AnswerItem } from '../lib/types';
+  import type { AskQuestionPayload, AnswerItem } from '@hangar/core';
 
   // Container mobile: bottom-sheet embrulhando o stepper compartilhado. No desktop usa-se
   // AskQuestionCard (inline no chat) — ambos rodam o mesmo AskQuestionStepper.

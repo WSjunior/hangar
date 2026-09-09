@@ -2,12 +2,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount, unmount, tick } from 'svelte';
 import MotorForm from './MotorForm.svelte';
-import * as apiLib from '../../lib/api';
+import * as apiLib from '@hangar/core';
 import * as credLib from '../../lib/credenciais';
 import * as m from '../../paraglide/messages';
-import type { Motor } from '../../lib/api';
+import type { Motor } from '@hangar/core';
 
-vi.mock('../../lib/api', () => ({
+// O core traz muito mais que estas quatro funções; sem espalhar o original o mock derruba o resto
+// que o componente importa de lá.
+vi.mock('@hangar/core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@hangar/core')>()),
   putEngine: vi.fn(async () => ({ motores: {} })),
   putEngineForServer: vi.fn(async () => ({ motores: {} })),
   engineModelos: vi.fn(async () => ({ modelos: [] })),

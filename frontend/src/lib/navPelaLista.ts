@@ -3,7 +3,7 @@
 // ouviria. Marca o store (é o que faz o NavegadorPane reexibir quando o usuário abrir a sessão) e,
 // no shell desktop, já cria o view escondido: o agente dirige por CDP desde agora. Fora do shell
 // (celular, PWA) fica só a marca — não há view pra criar.
-import { confirmarNavForServer } from './api';
+import { confirmarNavForServer } from '@hangar/core';
 import type { Server } from './auth';
 import { navegadorNativo } from './navegadorNativo';
 import { atualizarNavUrl, marcarNavAberto } from './navegadorPanel.svelte';

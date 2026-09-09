@@ -1,4 +1,4 @@
-import { getConfig, getConfigForServer } from './api';
+import { getConfig, getConfigForServer } from '@hangar/core';
 import type { Server } from './auth';
 import * as m from '../paraglide/messages';
 

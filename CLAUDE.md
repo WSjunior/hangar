@@ -263,6 +263,30 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
     `cp_token` **não mudam** — quebrariam o `.env` de instalação alheia. A documentação ensina só o
     nome novo.
 
+- **Duas interfaces, não uma: o front web (`frontend/`, Svelte) e o app nativo (`mobile/`, Expo).**
+  Mudança de comportamento tem que passar pelas DUAS, e a pergunta certa não é "qual arquivo eu
+  edito", é "de onde essa lógica vem". Quem responde é `packages/core`: 90 arquivos do app nativo
+  importam dele, sempre pelo barrel `@hangar/core`, e o front web também — foi pra lá que os 46
+  arquivos de `frontend/src/lib` migraram. Daí a regra prática:
+  - **Lógica (chamada de API, formatação, parser de transcript, tipos) entra no `core`** e serve as
+    duas de uma vez. É onde o esforço rende, e é onde um teste cobre as duas.
+  - **Tela é por interface, sem exceção**: `.svelte` no front web, `.tsx` no app nativo. Não há
+    componente compartilhado e não vai haver — Svelte e React Native não renderizam a mesma coisa.
+    Feature nova de tela é escrita duas vezes, de propósito.
+  - **A verificação é `npm run check` (ou `npm run test`) NA RAIZ, e ela cobre as três** — core,
+    front web e app nativo. Não era assim: cada uma tinha o seu comando, nenhum cobria o outro, e
+    quem mexesse no core e rodasse só o `check` do frontend levava verde com o app quebrado. Como
+    `mobile/` não é workspace (`npm ... -w mobile` não existe), o app entra por
+    `scripts/verificar-app.mjs`, e a regra dele é a que dá sentido a tudo: **dependência do app
+    ausente FALHA com código 1 e diz o que fazer**, nunca é pulada em silêncio — um check que passa
+    por não ter olhado é pior que um que não roda. Complementos: um hook em `.claude/settings.json`
+    (versionado, vale para quem clonar) avisa ao editar `packages/core`, e o CI segue compilando só
+    front e backend, por decisão — o build do app é no Expo.
+  - **Texto de interface é um `project.inlang` só, compilado três vezes** (`frontend/src/paraglide`,
+    `packages/core/src/paraglide`, `mobile/src/paraglide`, todos gerados e gitignored). Chave nova
+    nasce nos dois `messages/*.json` da raiz e já vale para as duas interfaces; o que muda é só quem
+    a compila.
+  Dentro do front web, a divisão continua sendo esta:
 - **Two views: mobile & desktop (820px breakpoint).** `App.svelte` switches on
   `matchMedia('(min-width: 820px)')`: desktop → `DesktopShell` (which uses `Sidebar.svelte`), mobile →
   `SessionList.svelte`. Lots of UI has a per-view path (the session list is the clearest — `Sidebar` vs
@@ -1493,6 +1517,27 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
     local, como sempre foi. `tar.gz` e não zip porque o Windows 10+ traz `tar.exe` — um comando só
     nos dois instaladores. O `npm ci` **continua** para quem mantém o preview, que precisa do
     `node_modules`.
+  - **Os dois gates dos instaladores perguntam pelo `packages/` junto do `frontend/`, e essa
+    palavra é a única coisa que os separa de servir tela velha** (09/09/2026, quando os 46
+    arquivos saíram de `frontend/src/lib` para `packages/core`). A tela passou a ser buildada a
+    partir de DUAS árvores, e os dois gates ainda perguntavam por uma:
+    - *Precisa rebuildar?* (`install.sh`, por mtime) — `find frontend/src …` não olhava o core, e
+      um `git pull` que mexesse só em `api.ts`/`format.ts` respondia "já buildado e atualizado",
+      servindo o dist velho, calado. Reproduzido em sandbox: com o core alterado, a lista antiga
+      diz "já buildado" e a nova diz "precisa rebuildar". Hoje o `find` leva `packages/core/src`.
+    - *A pessoa está editando o front?* (`install.sh` e `install.ps1`, por `git status
+      --porcelain`) — cego para o core, ele baixava o dist do CI **por cima** de uma edição local
+      em `packages/` e apagava da tela o que ela estava escrevendo. Efeito oposto ao de cima, mesma
+      causa. Hoje o pathspec é `-- frontend packages`; em repositório descartável, com só o core
+      editado, `-- frontend` devolve vazio e `-- frontend packages` devolve a linha do arquivo.
+      No `install.ps1` esse mesmo valor (`$sujo`) alimenta os dois gates, porque a `$marca` de
+      rebuild é `commit HEAD` + `$sujo`.
+    Duas coisas medidas que o conserto NÃO precisou tratar: `find` com um dos caminhos ausente
+    (checkout pré-migração) erra em stderr só naquele argumento e segue avaliando os outros, então
+    não vira falso "não precisa"; e `packages/core/src/paraglide/` é gerado e gitignored, e
+    `git status --porcelain` sem `--ignored` não o lista — ele não dispara rebuild à toa.
+    A regra que sobrevive à próxima mudança de layout: **gate que pergunta "o front mudou?" tem
+    que conhecer todas as árvores de onde o front é compilado.**
 - **O diálogo de confiança do Claude Code, e as três coisas que ele derrubava** (medido 06/09/2026,
   claude 2.1.263, com o pane real capturado em `tests/fixtures/pane_trust_dialog.txt`). Sintoma no
   Windows: sessão criada pelo app numa pasta nova morria sozinha e o app dizia "sessão não

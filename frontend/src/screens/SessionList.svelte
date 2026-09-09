@@ -18,13 +18,13 @@ import * as m from '../paraglide/messages';
   import AttentionFeed from '../components/AttentionFeed.svelte';
   import AccountMenu from '../components/AccountMenu.svelte';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
-  import { createSession } from '../lib/api';
+  import { createSession } from '@hangar/core';
   import { listServers, getActiveId, selectServer, removeServer, renameServer, updateServer, onServersChanged, snapshotRemocao, removalStillMatches } from '../lib/auth';
-  import type { AggSession, Provider } from '../lib/types';
+  import type { AggSession, Provider } from '@hangar/core';
   import type { RemovalSnapshot } from '../lib/auth';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { createSessionListModel } from '../lib/sessionListModel.svelte';
-  import { countAwaiting, fmtWhen, initials, clusterByPair } from '../lib/format';
+  import { countAwaiting, fmtWhen, initials, clusterByPair } from '@hangar/core';
   import { updateBadge } from '../lib/badge';
 
   interface Props {

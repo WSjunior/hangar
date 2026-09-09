@@ -15,13 +15,13 @@ import * as m from '../paraglide/messages';
   import Canvas from '../screens/Canvas.svelte';
   import Orq from '../screens/Orq.svelte';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
-  import { getConfig, getAtualizacao } from '../lib/api';
+  import { getConfig, getAtualizacao } from '@hangar/core';
   import { atualizarUI } from '../lib/atualizarUI.svelte';
   import AtualizarSheet from './AtualizarSheet.svelte';
   import { getActiveId, selectServer } from '../lib/auth';
   import { navMode } from '../lib/navMode.svelte';
   import { sidebarPin } from '../lib/sidebarPin.svelte';
-  import type { AggSession } from '../lib/types';
+  import type { AggSession } from '@hangar/core';
   import {
     aggregateWorkspaceActions,
     resolveWorkspaceChatTarget,

@@ -5,7 +5,8 @@ import VozSettings from './VozSettings.svelte';
 import * as m from '../../paraglide/messages';
 import type { ConfigServidorStore } from '../../lib/serverConfig.svelte';
 
-vi.mock('../../lib/api', () => ({ listarVozesTts: vi.fn(async () => []), saldoTts: vi.fn(async () => ({ usados: 0, limite: 0 })), getConfig: vi.fn(async () => ({ campos: {}, somente_leitura: {} })) }));
+vi.mock('@hangar/core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@hangar/core')>()), listarVozesTts: vi.fn(async () => []), saldoTts: vi.fn(async () => ({ usados: 0, limite: 0 })), getConfig: vi.fn(async () => ({ campos: {}, somente_leitura: {} })) }));
 vi.mock('../../lib/ttsPlayer.svelte', () => ({ ttsPlayer: { tocando: false, parar: vi.fn() } }));
 vi.mock('../../lib/ouvir', () => ({ ouvirAmostra: vi.fn() }));
 

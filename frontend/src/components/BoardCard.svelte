@@ -6,17 +6,16 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   import {
     getHistoryTailCached, getHistoryTailForServer, sendInputForServer, selectOptionForServer,
     uploadFileForServer, transcribeFileForServer,
-  } from '../lib/api';
+  } from '@hangar/core';
   import { ditadoEstilo } from '../lib/ditadoEstilo.svelte';
-  import { relativeTime, bubblesFromTail, pairColor, parsePeerMessage, providerTag } from '../lib/format';
-  import { parseStatusLine } from '../lib/statusline';
+  import { relativeTime, bubblesFromTail, pairColor, parsePeerMessage, providerTag } from '@hangar/core';
+  import { parseStatusLine } from '@hangar/core';
   import { lerSubagenteCodex, rotuloSubagente } from '../lib/subagenteCodex';
-  import { loopBadge, LOOP_TONE_COLOR } from '../lib/loop';
-  import { planBadge } from '../lib/plan';
+  import { loopBadge, LOOP_TONE_COLOR, type ChatEvent } from '@hangar/core';
+  import { planBadge } from '@hangar/core';
   import PlanBar from './PlanBar.svelte';
   import StateChip from './StateChip.svelte';
   import type { Server } from '../lib/auth';
-  import type { ChatEvent } from '../lib/types';
   import type { BoardRow, PendingMsg } from '../screens/Board.svelte';
 
   interface Props {

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { rotaDoAlvo } from './alvoSessao';
-import type { ServerBucket } from './sessions';
+import type { ServerBucket } from '@hangar/core';
 
 function bucket(id: string, label: string, baseUrl: string, nomes: string[]): ServerBucket {
   return {

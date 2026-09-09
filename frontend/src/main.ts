@@ -4,8 +4,23 @@ import App from './App.svelte';
 import { applyTheme, getThemePref, getTextoDoDesktop } from './lib/theme';
 import { buscarPaleta, aplicarPaleta, ligarAtualizacaoAoFocar } from './lib/desktopTheme';
 import { applyBg, applyAppearance } from './lib/background';
-import { ensureCookie } from './lib/auth';
+import { ensureCookie, getBaseUrl, getToken, dropActiveServer } from './lib/auth';
 import { localeAtual } from './lib/locale';
+import { configureApi, configureLocale, configureDiag } from '@hangar/core';
+import { registrar as registrarDiag, novoReq } from './lib/diag';
+
+configureLocale({ getLocale: localeAtual });
+// O diário de uso é da web (usa window/navigator e o auth daqui). O core só tem a tomada: sem este
+// registro, o `apiFetch` segue funcionando e não grava nada.
+configureDiag({ registrar: registrarDiag, novoReq });
+configureApi({
+  getBaseUrl,
+  getToken,
+  onUnauthorized: () => { dropActiveServer(); window.location.reload(); },
+  origin: window.location.origin,
+  createEventSource: (url, { withCredentials }) =>
+    new EventSource(url, { withCredentials }) as unknown as import('@hangar/core').EventSourceLike,
+});
 
 // Pedaco que nao existe mais no servidor -> recarrega. A aba aberta ANTES de um deploy guarda um
 // index.html que aponta pra hashes trocados; quando ela enfim pede um pedaco sob demanda (o realce

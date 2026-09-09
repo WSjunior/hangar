@@ -2,7 +2,7 @@
   import BottomSheet from './BottomSheet.svelte';
   import { desktop } from '../lib/desktop.svelte';
   import * as m from '../paraglide/messages';
-  import type { CommandInfo } from '../lib/types';
+  import type { CommandInfo } from '@hangar/core';
 
   // Folha de comandos: busca no topo + lista agrupada (Built-ins, Suas skills, Plugins).
   // Comportamento ao tocar: destrutivos pedem confirmacao inline; model/effort abrem o

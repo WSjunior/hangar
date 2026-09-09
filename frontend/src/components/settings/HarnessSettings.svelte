@@ -9,7 +9,7 @@
     instalacaoEstado, instalarHarness,
     type Harness, type ItemHarness, type IntegracaoCodex, type MensagemCodex, type Instalacao,
   } from '../../lib/credenciais';
-  import { patchConfig, patchConfigForServer } from '../../lib/api';
+  import { patchConfig, patchConfigForServer } from '@hangar/core';
   import * as m from '../../paraglide/messages';
   import { getLocale } from '../../paraglide/runtime';
   import ProvedorIcone from '../icons/ProvedorIcone.svelte';

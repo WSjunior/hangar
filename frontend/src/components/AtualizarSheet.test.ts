@@ -6,8 +6,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, unmount, tick } from 'svelte';
 import AtualizarSheet from './AtualizarSheet.svelte';
 import * as m from '../paraglide/messages';
-import * as api from '../lib/api';
-import type { Atualizacao } from '../lib/types';
+import * as api from '@hangar/core';
+import type { Atualizacao } from '@hangar/core';
 
 function base(over: Partial<Atualizacao> = {}): Atualizacao {
   return {

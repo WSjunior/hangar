@@ -15,6 +15,9 @@ const store = new Map<string, string>();
 (globalThis as any).window = { location: (globalThis as any).location };
 
 const { TermSocket, termUrlForServer, sessionExistsOnServer, RESIZE_DEBOUNCE_MS } = await import('./term');
+// term.ts só importa TIPO de auth.ts, então auth (e as 2400 mensagens do paraglide do front) carregaria
+// a frio dentro do primeiro teste e estouraria os 5s. Carrega aqui, na coleta.
+await import('./auth');
 
 class FakeWS {
   static ultimo: FakeWS;
@@ -84,20 +87,20 @@ describe('sessionExistsOnServer', () => {
   const srvB = { id: 'b', label: 'servidor B', baseUrl: 'http://b', token: 'tb' };
 
   it('verdadeiro quando a sessao esta na lista do servidor', async () => {
-    const api = await import('./api');
+    const api = await import('@hangar/core');
     vi.spyOn(api, 'fetchSessionsForServer').mockResolvedValue([sess('x'), sess('y')]);
     expect(await sessionExistsOnServer(srvB, 'x')).toBe(true);
   });
 
   it('falso quando a sessao nao existe naquele servidor — o caso do erro visivel', async () => {
-    const api = await import('./api');
+    const api = await import('@hangar/core');
     vi.spyOn(api, 'fetchSessionsForServer').mockResolvedValue([sess('outra')]);
     // A homonima pode existir em OUTRO servidor; o probe pergunta so ao B, e so ele decide.
     expect(await sessionExistsOnServer(srvB, 'x')).toBe(false);
   });
 
   it('propaga a falha de rede — quem chama decide o que mostrar', async () => {
-    const api = await import('./api');
+    const api = await import('@hangar/core');
     vi.spyOn(api, 'fetchSessionsForServer').mockRejectedValue(new Error('servidor fora do ar'));
     await expect(sessionExistsOnServer(srvB, 'x')).rejects.toThrow('servidor fora do ar');
   });

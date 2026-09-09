@@ -8,17 +8,17 @@
   import Select from './Select.svelte';
   import ProviderGlyph from './icons/ProviderGlyph.svelte';
   import OrquestracaoContas from './OrquestracaoContas.svelte';
-  import { providerName } from '../lib/format';
+  import { providerName } from '@hangar/core';
   import { untrack } from 'svelte';
   import { createQuery } from '@tanstack/svelte-query';
-  import { comecarOrq, postOrqPapeis, removerPapel } from '../lib/api';
+  import { comecarOrq, postOrqPapeis, removerPapel } from '@hangar/core';
   import { clienteQuery, orqGrupo, orqPolitica } from '../lib/queries';
   import { quotaFeed } from '../lib/quotaFeed.svelte';
   import {
     agruparPorPapel, casarViva, contasLiberadas, estadoDoPapel, modelosLiberados, politicaDe,
     type ModoPapel, type OrqGrupo, type OrqPolitica, type Papel, type Provider,
-  } from '../lib/orquestracao';
-  import type { SessionInfo } from '../lib/types';
+  } from '@hangar/core';
+  import type { SessionInfo } from '@hangar/core';
 
   type Aba = 'papeis' | 'contas';
   interface Props {

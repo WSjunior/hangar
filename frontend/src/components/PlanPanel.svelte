@@ -5,9 +5,9 @@
   import Select from './Select.svelte';
   import * as m from '../paraglide/messages';
   import { renderMarkdown } from '../lib/markdown';
-  import { getPlans, setPlanPin, setPlanStep, archivePlan, type PlanListItem } from '../lib/api';
-  import { planBadge } from '../lib/plan';
-  import type { PlanDetail, SessionInfo } from '../lib/types';
+  import { getPlans, setPlanPin, setPlanStep, archivePlan, type PlanListItem } from '@hangar/core';
+  import { planBadge } from '@hangar/core';
+  import type { PlanDetail, SessionInfo } from '@hangar/core';
 
   interface Props {
     session: SessionInfo;
