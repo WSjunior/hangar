@@ -6,21 +6,27 @@
     view: WorkspaceView;
     onSelect: (view: WorkspaceView) => void;
     onOpenCommand: () => void;
+    // Trilho recolhido: so icones, empilhados. Quadro/Canvas forcam o recolhido, entao sem isto a
+    // barra sumia junto com a sidebar e nao havia caminho de volta pro chat.
+    rail?: boolean;
   }
 
-  let { view, onSelect, onOpenCommand }: Props = $props();
+  let { view, onSelect, onOpenCommand, rail = false }: Props = $props();
 
   // Rotulos CURTOS de proposito: a coluna tem 248px por padrao, e "Conversa" + "Quadro" + "Canvas"
-  // + "Orq" + o botao de busca nao cabem sem cortar palavra no meio. O nome longo vive no title.
-  const items: { id: WorkspaceView; label: string; title: string }[] = [
-    { id: 'chat', label: m.shell_chat_curto(), title: m.shell_conversa() },
-    { id: 'board', label: m.shell_quadro(), title: m.shell_quadro() },
-    { id: 'canvas', label: m.shell_canvas(), title: m.shell_canvas() },
-    { id: 'orq', label: m.shell_orq_curto(), title: m.shell_orq() },
+  // + o botao de busca nao cabem sem cortar palavra no meio. O nome longo vive no title.
+  // Orquestracao fica fora da barra: segue na paleta de comandos e na rota #/orq.
+  const items: { id: WorkspaceView; label: string; title: string; icon: string }[] = [
+    { id: 'chat', label: m.shell_chat_curto(), title: m.shell_conversa(),
+      icon: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z' },
+    { id: 'board', label: m.shell_quadro(), title: m.shell_quadro(),
+      icon: 'M3 4h5v16H3zM10 4h5v10h-5zM17 4h4v7h-4z' },
+    { id: 'canvas', label: m.shell_canvas(), title: m.shell_canvas(),
+      icon: 'M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z' },
   ];
 </script>
 
-<div class="workspace-nav-wrap">
+<div class="workspace-nav-wrap" class:rail>
   <nav class="workspace-nav" aria-label={m.shell_visualizacao()}>
     {#each items as item (item.id)}
       <button
@@ -30,10 +36,12 @@
         title={item.title}
         aria-label={item.title}
         onclick={() => onSelect(item.id)}
-      >{item.label}</button>
+      >{#if rail}<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+          stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d={item.icon}/></svg>{:else}{item.label}{/if}</button>
     {/each}
   </nav>
 
+  {#if !rail}
   <button
     type="button"
     class="command-button"
@@ -47,6 +55,7 @@
       <path d="m20 20-3.2-3.2"></path>
     </svg>
   </button>
+  {/if}
 </div>
 
 <style>
@@ -118,6 +127,16 @@
   .command-button:hover {
     color: var(--text-primary);
     background: var(--bg-hover);
+  }
+
+  /* Trilho: coluna de 3 botoes quadrados, mesma largura do botao de recolher do rail (40px). */
+  .workspace-nav-wrap.rail { width: auto; justify-content: center; }
+  .workspace-nav-wrap.rail .workspace-nav {
+    flex: none; flex-direction: column; gap: 2px; padding: 3px; width: 40px;
+  }
+  .workspace-nav-wrap.rail .workspace-nav button {
+    flex: none; width: 32px; height: 32px; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
   }
 
 </style>

@@ -593,9 +593,11 @@ import ConfirmDialog from './ConfirmDialog.svelte';
          desktop do hamburger do mobile. Abre um popover ancorado (renderizado fora do <aside>). -->
   </div>
 
-  {#if expanded}
-  <div class="side-views">
-    <WorkspaceNav {view} onSelect={onSelectView} {onOpenCommand} />
+  <!-- No trilho só aparece fora do chat: é o caminho de volta do Quadro/Canvas, que forçam o
+       recolhido. Trilho no chat é escolha do usuário, e ali a barra é ruído. -->
+  {#if expanded || view !== 'chat'}
+  <div class="side-views" class:rail={!expanded}>
+    <WorkspaceNav {view} onSelect={onSelectView} {onOpenCommand} rail={!expanded} />
   </div>
   {/if}
 
@@ -1390,6 +1392,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   .side-top { display: flex; align-items: center; gap: var(--space-2); min-height: 36px; }
   /* Linha propria sob o header: o seletor de view separa "onde estou" da lista de sessoes. */
   .side-views { display: flex; margin-top: var(--space-2); }
+  .side-views.rail { justify-content: center; }
   /* Rail recolhido: o header empilha (recolher em cima, kebab embaixo) — a nav secundária segue
      acessível num toque sem precisar expandir. */
   .sidebar.collapsed .side-top { flex-direction: column; gap: var(--space-2); }

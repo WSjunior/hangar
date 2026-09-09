@@ -401,7 +401,7 @@ describe('Sidebar — trilho original no modo rail', () => {
   const sess = (name: string, serverId: string, state: string, extra: Record<string, unknown> = {}) =>
     ({ name, serverId, state, ...extra });
 
-  it('RAIL: não renderiza WorkspaceNav, filtro nem cabeçalho de grupo', async () => {
+  it('RAIL: WorkspaceNav em ícones, sem filtro nem cabeçalho de grupo', async () => {
     navMode.mode = 'rail';
     sidebarPin.setUser(true);   // pin recolhido -> trilho
     comStore([
@@ -410,6 +410,7 @@ describe('Sidebar — trilho original no modo rail', () => {
     ]);
     const t = montar();
     await tick();
+    // No chat o trilho não mostra a troca de view (ruído); ela só entra no Quadro/Canvas.
     expect(document.querySelector('.side-views')).toBeNull();
     expect(document.querySelector('.filter-input')).toBeNull();
     expect(document.querySelector('.grp-head-row')).toBeNull();
@@ -539,7 +540,7 @@ describe('Sidebar — trilho original no modo rail', () => {
     await tick();
     document.querySelector('.sidebar')!.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
     await tick();
-    expect(document.querySelector('.side-views')).toBeNull();
+    expect(document.querySelector('.side-brand')).toBeNull();
     unmount(t.comp);
   });
 
@@ -711,6 +712,16 @@ describe('Sidebar — filesInContext (Task 14/15): o Git do menu e a sessão hos
     await abrirGitDaSessao();
     expect(temArquivos()).toBe(true);
     unmount(t.comp);
+  });
+
+  it('QUADRO no trilho: a troca de view aparece em ícones (é a volta pro chat)', async () => {
+    navMode.mode = 'rail';
+    comSessao();
+    const t = montarCom({ boardActive: true, canvasActive: false, view: 'board' });
+    await tick();
+    expect(document.querySelector('.side-views.rail')).not.toBeNull();
+    unmount(t.comp);
+    navMode.mode = 'tabs';
   });
 
   it('QUADRO com overlay da MESMA sessão: sem a aba (o Chat do overlay hospeda o visor)', async () => {
