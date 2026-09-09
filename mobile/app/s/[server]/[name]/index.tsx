@@ -94,13 +94,13 @@ export default function ChatScreen() {
 
   // Sem SSE adicional: acompanha a abertura e o Git do Codex pela lista.
   const rowsProvider = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name)?.provider ?? null) as Provider | null;
-  const [fetchedSession, setFetchedSession] = useState<SessionInfo | null>(null);
+  const [fetchedSession, setFetchedSession] = useState<SessionInfo | null | undefined>(undefined);
   const planSession = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name) ?? null);
-  const currentSession = fetchedSession ?? planSession;
+  const currentSession = fetchedSession === undefined ? planSession : fetchedSession;
   const codexPreThread = currentSession?.provider === 'codex' && currentSession.tracked === false;
   useEffect(() => {
     if (!ready || servidorSumiu) return;
-    setFetchedSession(null);
+    setFetchedSession(undefined);
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const refresh = async () => {
@@ -110,7 +110,7 @@ export default function ChatScreen() {
         const all = await fetchSessionsForServer(server);
         if (!alive) return;
         const hit = all.find((s) => s.name === name);
-        if (hit) setFetchedSession(hit);
+        setFetchedSession(hit ?? null);
         if (hit?.provider === 'codex') timer = setTimeout(refresh, hit.tracked === false ? 2000 : 5000);
       } catch {
         if (alive) {
@@ -225,6 +225,13 @@ export default function ChatScreen() {
                 {m.comum_voltar()}
               </Text>
             </View>
+          ) : fetchedSession === null ? (
+            <View style={styles.erro}>
+              <Text style={styles.hint}>{m.chat_sessao_encerrada()}</Text>
+              <Text style={styles.retry} onPress={() => router.replace('/')} accessibilityRole="button">
+                {m.chat_voltar_sessoes()}
+              </Text>
+            </View>
           ) : codexPreThread ? (
             <View style={styles.erro}>
               <Text style={styles.hint}>{m.chat_sem_thread_codex()}</Text>
@@ -288,7 +295,7 @@ export default function ChatScreen() {
           </Text>
         ) : null}
         {!servidorSumiu ? <TuiPill serverId={serverId} name={name} overlay={!!stateEvent?.overlay} login={!!stateEvent?.login} /> : null}
-        {!servidorSumiu && !codexPreThread ? <Composer serverId={serverId} name={name} draft={draft} /> : null}
+        {!servidorSumiu && !codexPreThread && fetchedSession !== null ? <Composer serverId={serverId} name={name} draft={draft} /> : null}
       </KeyboardAvoidingView>
     </Screen>
   );
