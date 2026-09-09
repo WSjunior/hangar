@@ -65,6 +65,36 @@ vão: os wrappers do `codex`, `pi` e `kimi` (sessão deles, só criada pelo app)
 (Contas e modelos → Modelo e opções — o `hangar-engine` depende de `execvpe`, que no Windows não substitui o processo) e os
 plugins de persistência entre reboots.
 
+O instalador faz duas perguntas no começo (a senha do celular e se você vai usar fora de
+casa) e depois segue sozinho; só pede a senha de administrador avisando antes. No fim ele
+mostra um QR: leia com a câmera do celular.
+Quer escolher cada extra? No checkout: `./install.sh --avancado` / `.\install.ps1 -Avancado`
+(o `bootstrap.ps1` não repassa argumentos; o `bootstrap.sh` aceita `bash -s -- --avancado`).
+Algo não abriu? `hangar-doctor` diz o que falta e como consertar.
+
+### hangar-doctor
+
+Diagnóstico read-only, chamado por `--check`/`-SoChecar` e disponível a qualquer hora
+(`hangar-doctor` no PATH depois do instalador, ou `uv run --no-sync python -m app.doctor`
+dentro de `backend/`). Cada linha é um `ok`/`aviso`/`erro` com o conserto ao lado quando
+falha:
+
+- token de acesso definido
+- Hangar respondendo na porta configurada
+- multiplexador de terminal (tmux) no PATH
+- Claude Code instalado e logado
+- Tailscale instalado, logado e publicado
+- endereço da rede local responde (celular no mesmo Wi-Fi)
+
+### O que o Windows ainda não tem
+
+- Wrappers do `codex`, do `pi` e do `kimi`, e a extensão `hangar-state.ts` do Pi. Sessão
+  Codex, Pi ou Kimi aberta por você no terminal não aparece; criada pelo app, funciona.
+- Motor de modelo (Contas e modelos → Modelo e opções / `CP_ENGINE`) funciona: o
+  `hangar-engine` roda o comando por subprocess no Windows (o `exec` com env crasha lá).
+- Resurrect/continuum (sessões sobreviverem a reboot): são plugins de tmux em bash, e o
+  psmux não roda plugin de tmux. Fechou o Windows, as sessões se foram.
+
 ## 2. Subir (3 partes)
 
 **a) Claude ou Codex gerenciado dentro do tmux** (a sessão que o app vai espelhar):

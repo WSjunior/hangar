@@ -123,6 +123,13 @@ $env:CP_DESTINO = 'D:\hangar'
 irm https://raw.githubusercontent.com/jeffer1312/hangar/main/bootstrap.ps1 | iex
 ```
 
+O instalador faz duas perguntas no começo (a senha do celular e se você vai usar fora de
+casa) e depois segue sozinho; só pede a senha de administrador avisando antes. No fim ele
+mostra um QR: leia com a câmera do celular.
+Quer escolher cada extra? No checkout: `./install.sh --avancado` / `.\install.ps1 -Avancado`
+(o `bootstrap.ps1` não repassa argumentos; o `bootstrap.sh` aceita `bash -s -- --avancado`).
+Algo não abriu? `hangar-doctor` diz o que falta e como consertar.
+
 For pairing and PWA installation, see [docs/USAGE.md](docs/USAGE.md).
 
 ## Run locally
