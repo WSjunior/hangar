@@ -89,9 +89,10 @@ gira() { # gira <rótulo> <comando...>: spinner enquanto roda; sem TTY (ou --upd
 if { exec 3</dev/tty; } 2>/dev/null; then TEM_TTY=1; else TEM_TTY=0; fi
 
 # Log em arquivo, nunca no --update: o app lê a saída CRUA pra pegar ##HANGAR-AVISO##,
-# e o `tee` quebraria esse parse.
+# e o `tee` quebraria esse parse. E nunca no --check: ele promete não escrever nada no disco,
+# e criar o próprio log já era escrita.
 LOG="$HOME/.hangar/install.log"
-if [ "$UPDATE" = 0 ]; then
+if [ "$UPDATE" = 0 ] && [ "$CHECK" = 0 ]; then
   mkdir -p "$(dirname "$LOG")"
   printf '\n===== %s  %s =====\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$0 $*" >> "$LOG"
   exec > >(tee -a "$LOG") 2>&1
@@ -321,7 +322,16 @@ nota "psutil NÃO entra aqui: no Linux existe /proc e ele é mais rápido (ver a
 # O trabalho foi feito no passo 0: token e Tailscale são as DUAS decisões da pessoa, e elas
 # vêm antes de qualquer instalação — depois o instalador segue sozinho.
 say "3/8 Token de acesso"
-ok "definido no passo 0"
+# Confere o que o passo 0 gravou, em vez de anunciar sucesso de memória: sem TTY o passo 0 não
+# pergunta nada, e um `.env` sem token deixa o celular de fora sem ninguém ver.
+if grep -q '^CP_AUTH_TOKEN=.\+' backend/.env 2>/dev/null \
+   && ! grep -q '^CP_AUTH_TOKEN=change-me[[:space:]]*$' backend/.env; then
+  ok "definido no passo 0"
+elif [ "$UPDATE" = 1 ]; then
+  anota_problema "backend/.env sem CP_AUTH_TOKEN — rode ./install.sh sem --update para definir"
+else
+  fail "o token não foi gravado em backend/.env — sem ele o celular não entra"
+fi
 
 # ── 4/8 Frontend ─────────────────────────────────────────────────────────────
 # O CI compila o front a cada push na main e publica o resultado na release `dist-latest`. Baixar
@@ -739,18 +749,26 @@ if [ -n "$URL_FIM" ]; then echo "   celular : $URL_FIM"
 else echo "   celular : não publicado no Tailscale"; fi
 echo "  +---------------------------------------------------------------"
 [ -n "$URL_FIM" ] || URL_FIM="http://$(hostname -I 2>/dev/null | awk '{print $1}'):$PORTA_FIM"
+QR_MOSTRADO=0
 if [ "$TEM_TTY" = 1 ] && [ "$UPDATE" = 0 ]; then
   echo
-  echo "  Aponte a câmera do celular para o QR: ele abre o Hangar já conectado."
   # Só no terminal: a URL do QR carrega o token, e o log não pode tê-lo.
-  (cd backend && uv run --quiet python -m app.doctor --qr) > /dev/tty 2>/dev/null || true
+  # rc 0 é a prova de que o desenho saiu (2 = sem tty); sem ela a tela mandaria ler um QR que
+  # não existe.
+  if (cd backend && uv run --quiet --no-sync python -m app.doctor --qr) > /dev/tty 2>/dev/null; then
+    QR_MOSTRADO=1
+  fi
 fi
 cat <<EOF
 
   O QUE FAZER AGORA
    1. No PC: abra um terminal, digite  claude  e faça o login (só na primeira vez).
-   2. No celular: leia o QR acima (ou abra $URL_FIM e digite o token).
 EOF
+if [ "$QR_MOSTRADO" = 1 ]; then
+  echo "   2. No celular: leia o QR acima (ou abra $URL_FIM e digite o token)."
+else
+  echo "   2. No celular: abra $URL_FIM e digite o token."
+fi
 [ "$QUER_TAILSCALE" = 1 ] && echo "   3. No celular: instale o app Tailscale e entre com a MESMA conta do PC."
 command -v loginctl >/dev/null && echo "   4. Para o Hangar subir mesmo sem você logar no PC:  sudo loginctl enable-linger \$USER"
 cat <<EOF

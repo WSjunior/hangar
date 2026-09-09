@@ -2,13 +2,15 @@
 Roda com cwd = backend/ (o Settings lê o .env pelo diretório atual)."""
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import socket
 import sys
+import unicodedata
 from collections import namedtuple
 
-from app.config import settings
+from app.config import pairing_url, settings
 
 Linha = namedtuple("Linha", "nivel titulo conserto")
 _WIN = os.name == "nt"
@@ -111,19 +113,51 @@ def diagnosticar(s) -> list[Linha]:
 _MARCA = {"ok": "ok  ", "aviso": "--  ", "erro": "X   "}
 
 
+def _ascii(s: str) -> str:
+    """Sem acento e sem travessão: o console do Windows é cp850, onde o U+2014 vira `?`."""
+    return unicodedata.normalize("NFKD", s.replace("—", "-").replace("–", "-")) \
+        .encode("ascii", "ignore").decode()
+
+
+def _qr(s) -> int:
+    """Desenha SÓ o QR do PWA, que é o que a tela final do instalador manda ler.
+
+    `main.print_pairing` desenha dois QRs com legenda em inglês — ele serve ao log do backend.
+    rc 2 = sem terminal, QR não desenhado (o instalador troca a linha 2 da tela final por isso).
+    """
+    url = pairing_url(s)
+    if not sys.stdout.isatty():
+        print(f"  Abra no celular: {url}\n", flush=True)
+        return 2
+    import qrcode
+    qr = qrcode.QRCode(border=1)
+    qr.add_data(url)
+    qr.make(fit=True)
+    buf = io.StringIO()
+    qr.print_ascii(out=buf, invert=True)
+    print(buf.getvalue(), flush=True)
+    print(f"  Aponte a câmera do celular para o QR acima; ou abra: {url}\n", flush=True)
+    return 0
+
+
 def main(argv: list[str]) -> int:
     if "--qr" in argv:
-        from app.main import print_pairing
-        print_pairing(settings)
-        return 0
+        return _qr(settings)
     linhas = diagnosticar(settings)
+    saida = print if not _WIN else (lambda t="": print(_ascii(t)))
     for l in linhas:
-        print(f"  {_MARCA[l.nivel]}{l.titulo}")
+        saida(f"  {_MARCA[l.nivel]}{l.titulo}")
         if l.conserto:
-            print(f"        conserto: {l.conserto}")
+            saida(f"        conserto: {l.conserto}")
     erros = sum(1 for l in linhas if l.nivel == "erro")
-    print()
-    print("  tudo certo" if erros == 0 else f"  {erros} item(ns) para consertar (marcados com X)")
+    avisos = sum(1 for l in linhas if l.nivel == "aviso")
+    saida()
+    if erros:
+        saida(f"  {erros} item(ns) para consertar (marcados com X)")
+    elif avisos:
+        saida(f"  {avisos} aviso(s) — nada quebrado, mas veja acima")
+    else:
+        saida("  tudo certo")
     return 1 if erros else 0
 
 

@@ -60,10 +60,8 @@ com uma checagem que prova que o backend sobe de verdade.
 
 Lá o multiplexador é o [psmux](https://github.com/psmux/psmux) (tmux nativo de Windows, sobre
 ConPTY) — não existe `tmux` no Windows, e o WSL não é necessário. O `hangar-send` (recado/pareamento
-entre sessões) e o `claude-conta` vão junto, via o bash do Git for Windows. Três coisas **não**
-vão: os wrappers do `codex`, `pi` e `kimi` (sessão deles, só criada pelo app), e os
-plugins de persistência entre reboots — os motores de modelo (Contas e modelos → Modelo e
-opções) funcionam, via `subprocess.run` no lugar do `execvpe` que o Linux usa.
+entre sessões) e o `claude-conta` vão junto, via o bash do Git for Windows. O que **não** vai
+está listado em "O que o Windows ainda não tem", mais abaixo.
 
 O instalador faz duas perguntas no começo (a senha do celular e se você vai usar fora de
 casa) e depois segue sozinho; só pede a senha de administrador avisando antes. No fim ele

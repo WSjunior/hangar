@@ -462,7 +462,7 @@ function Token-Do-Env {
 # Depois daqui o instalador vai ate o fim sozinho.
 if (-not $SoChecar -and -not $Update) {
 Titulo '0/8 Antes de comecar'
-Write-Host '  Duas perguntas agora, e depois o instalador segue sozinho ate o fim.'
+Write-Host '  No maximo duas perguntas agora, e depois o instalador segue sozinho ate o fim.'
 Write-Host '  (Se voce disser que usa fora de casa, logo em seguida o Tailscale abre o navegador'
 Write-Host '   uma vez, para voce entrar na conta dele. Fora isso, nada mais e perguntado.)'
 Write-Host '  Se pedir permissao de administrador e para liberar a porta do Wi-Fi no firewall.'
@@ -559,7 +559,9 @@ if (-not (Tem 'git')) {
 # desproporcional pra uma ferramenta que so a lupa usa.
 if (-not (Tem 'rg')) {
     Falta 'ripgrep ausente - a busca por conteudo entre sessoes (a lupa) volta sempre vazia'
-    if (-not $SoChecar -and (Pergunte '      Instalar o ripgrep agora?')) {
+    # -Update nao pergunta e nao instala nada de terceiro: com $Sim ligado o Pergunte devolve
+    # verdadeiro sozinho e o winget rodaria numa atualizacao desassistida.
+    if (-not $SoChecar -and -not $Update -and (Pergunte '      Instalar o ripgrep agora?')) {
         Write-Host '  .. instalando ripgrep (BurntSushi.ripgrep.MSVC)'
         Nativo winget install --id BurntSushi.ripgrep.MSVC --exact --silent `
             --accept-package-agreements --accept-source-agreements | Out-Null
@@ -940,8 +942,11 @@ if ($precisa -and $Update) {
     # VM ele nem roda, porque o `npm ci` de um lock feito no Linux nao traz o
     # @rollup/rollup-win32-x64-msvc e o vite morre. Sem o dist do CI a tela fica na versao anterior,
     # e o resto da atualizacao (backend, servicos) segue.
-    Falta 'frontend nao atualizado: o dist do CI nao pode ser baixado - a tela continua na versao anterior'
-    $script:pendencias += 'frontend'
+    # Aviso, NAO pendencia: sob -Update quem chama e o hook de post-merge ou o botao Atualizar do
+    # app, e uma pendencia ali faz a atualizacao inteira falhar por causa da tela. O app le a marca
+    # e mostra um recado - mesma convencao do passo do wrapper mais abaixo, e do `anota_problema`
+    # do Linux.
+    Write-Host '##HANGAR-AVISO## frontend nao atualizado: o dist do CI nao pode ser baixado - a tela continua na versao anterior'
 } elseif ($precisa) {
     # Exit code de CADA etapa, e nao roda-e-assume: o comentario abaixo prometia que a marca so era
     # gravada depois do build dar certo, mas nada CONFERIA o resultado - `npm ci` e `npm run build`
@@ -2349,8 +2354,7 @@ Titulo 'Pronto'
 $pyVenv = Join-Path $raiz 'backend\.venv\Scripts\python.exe'
 $qrMostrado = $false
 if ($script:Interativo -and -not $Update -and (Test-Path $pyVenv)) {
-    Write-Host '  Aponte a camera do celular para o QR: ele abre o Hangar ja conectado.'
-    Pausa-Log   # a URL do QR carrega o token
+    Pausa-Log   # a URL do QR carrega o token (a legenda quem escreve e o proprio app.doctor)
     # Sem UTF-8 no console os blocos do QR viram '?' na codepage OEM; e o preference baixa pra
     # Continue porque qualquer linha no stderr viraria NativeCommandError com 'Stop'.
     $eapAnt = $ErrorActionPreference
@@ -2364,8 +2368,10 @@ if ($script:Interativo -and -not $Update -and (Test-Path $pyVenv)) {
         & $pyVenv -m app.doctor --qr
         # Exit 0 e a prova: com o preference em 'Continue' um app.doctor que falha nao levanta nada,
         # e a tela final mandaria ler um QR que nunca foi desenhado.
+        # 2 = o app.doctor achou que nao ha terminal e so imprimiu a URL: nao ha QR a ler, e nao
+        # ha nada a consertar - a tela final ja cai na linha "abra <url> e digite o token".
         if ($LASTEXITCODE -eq 0) { $qrMostrado = $true }
-        else { Falta "nao consegui desenhar o QR (app.doctor saiu $LASTEXITCODE)" }
+        elseif ($LASTEXITCODE -ne 2) { Falta "nao consegui desenhar o QR (app.doctor saiu $LASTEXITCODE)" }
     } catch {
         Nota "nao consegui desenhar o QR: $_"
     } finally {

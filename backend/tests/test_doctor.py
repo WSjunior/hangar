@@ -74,3 +74,33 @@ def test_claude_logado_usa_loggedIn(monkeypatch):
         SimpleNamespace(login=SimpleNamespace(estado="ok", loggedIn=True)),
     ])
     assert doctor._claude_logado() is True
+
+
+def test_erro_sai_um_e_aviso_nao(monkeypatch, capsys):
+    _tudo_ok(monkeypatch)
+    monkeypatch.setattr(doctor, "_porta_responde", lambda porta: False)
+    monkeypatch.setattr(doctor, "settings", _settings(public_url="https://pc.tail.ts.net"))
+    assert doctor.main([]) == 1
+    assert "para consertar" in capsys.readouterr().out
+
+    # Só avisos: rc 0, mas a última linha não pode dizer "tudo certo".
+    _tudo_ok(monkeypatch)
+    monkeypatch.setattr(doctor, "_tailscale", lambda: ("ausente", ""))
+    assert doctor.main([]) == 0
+    saida = capsys.readouterr().out
+    assert "tudo certo" not in saida
+    assert "aviso(s)" in saida and "nada quebrado" in saida
+
+
+def test_ascii_para_o_console_do_windows():
+    assert doctor._ascii("endereço — não") == "endereco - nao"
+
+
+def test_qr_sem_terminal_devolve_2_e_so_a_url(monkeypatch, capsys):
+    # `--qr` não diagnostica nada: é só o QR/URL de pareamento.
+    monkeypatch.setattr(doctor, "diagnosticar", lambda s: 1 / 0)
+    monkeypatch.setattr(doctor, "settings", _settings(public_url="https://pc.tail.ts.net"))
+    assert doctor.main(["--qr"]) == 2   # pytest captura o stdout -> não é tty
+    saida = capsys.readouterr().out
+    assert "https://pc.tail.ts.net/?token=segredo-forte" in saida
+    assert "█" not in saida
