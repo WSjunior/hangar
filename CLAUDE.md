@@ -1718,8 +1718,9 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   aviso); nunca `npm ci`/build no update; sem download vira pendência `frontend` e o backend
   reinicia mesmo assim. Motivo medido na VM Windows: `.Content` do `.sha` vem como `byte[]` no
   PS 5.1 (`.Trim()` estourava) e o build local morre em `@rollup/rollup-win32-x64-msvc` ausente
-  (npm ci com lock gerado no Linux). `--check`/`-SoChecar` e `hangar-doctor` chamam `uv run
-  --no-sync`: diagnóstico nunca sincroniza o venv.
+  (npm ci com lock gerado no Linux). No Linux, `--check`/`-SoChecar` e `hangar-doctor` chamam
+  `uv run --no-sync`; no Windows, `-SoChecar` (`install.ps1`) e o `hangar-doctor.cmd` chamam o
+  `python.exe` do venv direto, sem `uv` — o mesmo efeito, nada é sincronizado.
 
 - **Grupo: o protocolo é do HOOK, a saída é de UMA esteira, e o anti-loop é do backend**
   (`app/pair_texto.py` + `hooks/pair_hook.py` + `api._avisar_saida` + `registry._varrer_pares_mortos`,
