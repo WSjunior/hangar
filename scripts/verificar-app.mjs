@@ -9,7 +9,7 @@
 // A regra que dá sentido a ele: dependência do app ausente FALHA, nunca é pulada em silêncio. Um
 // "check" que passa por não ter olhado é pior que um que não roda.
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -22,11 +22,27 @@ if (script !== 'typecheck' && script !== 'test') {
 const raiz = dirname(dirname(fileURLToPath(import.meta.url)));
 const app = join(raiz, 'mobile');
 
-if (!existsSync(join(app, 'node_modules'))) {
-  console.error(`\n  As dependências do app nativo não estão instaladas, então "${script}" NÃO rodou nele.`);
-  console.error('  Instale com:  cd mobile && npm install');
+// Duas perguntas, não uma. "A pasta existe?" deixava passar o caso mais comum no dia a dia:
+// alguém adiciona uma dependência no package.json e não reinstala. Aí o `tsc` sai 0 enquanto
+// nada ainda importa o pacote novo, e o check fica verde escondendo a instalação atrasada —
+// que é o mesmo defeito que este arquivo existe para evitar, um degrau abaixo.
+// A marca é `node_modules/.package-lock.json`, que o npm reescreve a CADA instalação; a data da
+// pasta `node_modules` não acompanha o que acontece dentro dela. Mesmo truque do install.sh.
+const marca = join(app, 'node_modules', '.package-lock.json');
+const manifesto = join(app, 'package.json');
+
+function avisar(motivo) {
+  console.error(`\n  ${motivo}, então "${script}" NÃO rodou no app nativo.`);
+  console.error('  Resolva com:  cd mobile && npm install');
   console.error('  (o app não é workspace da raiz de propósito — o build dele é no Expo)\n');
   process.exit(1);
+}
+
+if (!existsSync(join(app, 'node_modules')) || !existsSync(marca)) {
+  avisar('As dependências do app nativo não estão instaladas');
+}
+if (statSync(manifesto).mtimeMs > statSync(marca).mtimeMs) {
+  avisar('O package.json do app mudou depois da última instalação');
 }
 
 const r = spawnSync('npm', ['run', script], { cwd: app, stdio: 'inherit', shell: process.platform === 'win32' });

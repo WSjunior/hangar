@@ -32,7 +32,11 @@
       "softwareKeyboardLayoutMode": "resize",
       "permissions": [
         "CAMERA",
-        "RECORD_AUDIO"
+        "RECORD_AUDIO",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
       ],
       "predictiveBackGestureEnabled": false
     },
@@ -57,6 +61,13 @@
           "microphonePermission": "Grava o ditado pro composer."
         }
       ]
-    ]
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "9fd06001-323e-4b82-835f-6dfc3674236d"
+      }
+    },
+    "owner": "jeffer1312"
   }
 }
