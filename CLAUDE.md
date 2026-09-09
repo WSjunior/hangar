@@ -1696,6 +1696,31 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   mexer nas chamadas), spinner nos comandos longos do sh (`gira` — sem TTY ou `--update`, passa
   direto com saída ao vivo), caixa RESUMO no fim (token só com TTY, mesma regra do passo 3/8).
 
+- **Instalador guiado: duas perguntas no passo 0, o resto é padrão** (`install.sh --avancado` /
+  `install.ps1 -Avancado` devolvem o wizard; 09/09/2026, spec em
+  `docs/superpowers/specs/2026-09-09-instalador-guiado-design.md`). Decisão do usuário para o
+  time não técnico: token (continua pergunta — é o que se digita no celular quando o QR não
+  dá) e "usar fora de casa?" (Tailscale instalado e logado no 1/8, publicado no 6/8 — o Linux
+  passou a rodar `sudo tailscale serve` como o Windows já fazia). Quatro sabores de pergunta:
+  `ask` sim por padrão, `ask_senha` sempre pergunta (sudo nunca aparece "do nada"), `ask_extra`
+  não por padrão (persistência tmux, painel), e sem terminal tudo é NÃO — o `Pergunte` do
+  Windows foi alinhado a isso (antes, sem console, respondia sim). Log em
+  `~/.hangar/install.log` / `%LOCALAPPDATA%\hangar\install.log`, nunca no `--update` (o app
+  lê `##HANGAR-AVISO##` da saída crua) e SEM o token: a URL de pareamento do `print_pairing`
+  carrega o token, então QR e URL vão só pro `/dev/tty` e, no Windows, com o `Start-Transcript`
+  pausado (ele captura `Read-Host` e `Write-Host`). O "pull automático" que parecia redundante
+  com o Atualizar do app é o hook `post-merge`: complementares (o botão chama o mesmo
+  `--update`); ele passou a instalar sem perguntar. `hangar-doctor` é UMA implementação
+  (`app/doctor.py`), com cwd em `backend/` porque o `Settings` lê o `.env` pelo diretório
+  atual; login do Claude é `EstadoLogin.loggedIn`, não `estado` (que só diz se o CLI
+  respondeu); LAN é `estado == "ok"` do `alcance`. `--check`/`-SoChecar` delegam a ele.
+  `-Update`/`--update` só baixa o dist do CI (sha diferente → o mais recente publicado, com
+  aviso); nunca `npm ci`/build no update; sem download vira pendência `frontend` e o backend
+  reinicia mesmo assim. Motivo medido na VM Windows: `.Content` do `.sha` vem como `byte[]` no
+  PS 5.1 (`.Trim()` estourava) e o build local morre em `@rollup/rollup-win32-x64-msvc` ausente
+  (npm ci com lock gerado no Linux). `--check`/`-SoChecar` e `hangar-doctor` chamam `uv run
+  --no-sync`: diagnóstico nunca sincroniza o venv.
+
 - **Grupo: o protocolo é do HOOK, a saída é de UMA esteira, e o anti-loop é do backend**
   (`app/pair_texto.py` + `hooks/pair_hook.py` + `api._avisar_saida` + `registry._varrer_pares_mortos`,
   02/09/2026). Decisões que fecham furos medidos na análise daquele dia:
