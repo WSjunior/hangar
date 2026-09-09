@@ -26,16 +26,18 @@ $ErrorActionPreference = 'Stop'
 $raiz = Split-Path -Parent $MyInvocation.MyCommand.Path
 $pendencias = @()
 
-# Log da instalacao. NUNCA no -Update: aquele roda pelo hook post-merge, e um `git pull` nao pode
-# abrir transcript. O transcript captura Read-Host E Write-Host, entao todo trecho que mostra o
-# token roda entre Pausa-Log e Retoma-Log - senao a credencial fica em texto puro no arquivo.
+# Log da instalacao. NUNCA no -Update (roda pelo hook post-merge, e um `git pull` nao pode abrir
+# transcript) nem no -SoChecar, que por contrato nao escreve NADA no disco - nem a pasta do log.
+# O transcript captura Read-Host E Write-Host, entao todo trecho que mostra o token roda entre
+# Pausa-Log e Retoma-Log - senao a credencial fica em texto puro no arquivo.
 $logInstall = Join-Path $env:LOCALAPPDATA 'hangar\install.log'
-if (-not $Update) {
+$script:temLog = (-not $Update) -and (-not $SoChecar)
+if ($script:temLog) {
     New-Item -ItemType Directory -Force -Path (Split-Path $logInstall) | Out-Null
     try { Start-Transcript -Path $logInstall -Append | Out-Null } catch { }
 }
-function Pausa-Log  { if (-not $Update) { try { Stop-Transcript | Out-Null } catch { } } }
-function Retoma-Log { if (-not $Update) { try { Start-Transcript -Path $logInstall -Append | Out-Null } catch { } } }
+function Pausa-Log  { if ($script:temLog) { try { Stop-Transcript | Out-Null } catch { } } }
+function Retoma-Log { if ($script:temLog) { try { Start-Transcript -Path $logInstall -Append | Out-Null } catch { } } }
 
 function Titulo($m) {
     # Título numerado ("3/8 ...", "5d/8 ...") ganha a barra de progresso; os demais seguem sem.
@@ -88,11 +90,6 @@ function Pergunte($texto) {         # padrao SIM sem perguntar; -Avancado pergun
     if (-not $Avancado) { Nota "$texto -> sim (padrao; -Avancado pergunta)"; return $true }
     return (Pergunte-Mesmo $texto)
 }
-function Pergunte-Extra($texto) {   # extra de terceiro: padrao NAO; so -Avancado pergunta
-    if (-not $Avancado) { return $false }
-    return (Pergunte-Mesmo $texto)
-}
-
 function Ip-Lan {
     # IP de rede local desta maquina, ou '' se nao houver. A interface certa e a da ROTA PADRAO
     # (0.0.0.0/0): pegar -First 1 da lista crua do Get-NetIPAddress traz o vEthernet do Docker/WSL/
@@ -106,6 +103,43 @@ function Ip-Lan {
                Select-Object -First 1 -ExpandProperty IPAddress)
     }
     if ($ip) { return $ip } else { return '' }
+}
+
+# Login no Tailscale. Aqui em cima porque quem chama primeiro e o 1/8: instalar e logar sao a MESMA
+# decisao ("uso fora de casa"), e separa-las deixava a pessoa parada de novo no passo 6.
+# `tailscale up` e INTERATIVO (imprime um link, abre o navegador e bloqueia ate autenticar) - nao ha
+# como automatizar, so esperar. Por isso e pergunta, e no -Sim nao roda (desatendido nao pode ficar
+# parado esperando login). Teto de 5 min pra um login abandonado nao segurar o instalador pra sempre.
+# NAO publica nada: quem grava CP_PUBLIC_URL e o passo 5d, que roda depois deste de qualquer jeito.
+function Loga-Tailscale {
+    if ($Sim) {
+        Nota 'Falta logar: rode `tailscale up` e depois este instalador de novo (o passo 5d grava o endereco sozinho).'
+        return
+    }
+    # `Pergunte-Mesmo` e nao `Pergunte`: o login abre navegador e espera a pessoa - assumir "sim"
+    # sem perguntar deixaria o instalador parado num passo que ninguem pediu.
+    if (-not (Pergunte-Mesmo '  Entrar no Tailscale agora? (abre o navegador; espero ate 5 min)')) {
+        Nota 'Depois: `tailscale up` e este instalador de novo - o passo 5d grava CP_PUBLIC_URL sozinho.'
+        return
+    }
+    $eapAnt = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'   # nativo: o link de login sai no stderr
+    try {
+        # Em job, pelo timeout - e a saida e mostrada na hora em que chega, porque o link de login
+        # e o que a pessoa precisa ver ANTES de o comando terminar.
+        $job = Start-Job -ScriptBlock { & tailscale up 2>&1 }
+        $fim = (Get-Date).AddMinutes(5)
+        while ($job.State -eq 'Running' -and (Get-Date) -lt $fim) {
+            Receive-Job $job | ForEach-Object { Nota "  $_" }
+            Start-Sleep -Milliseconds 500
+        }
+        Receive-Job $job | ForEach-Object { Nota "  $_" }
+        if ($job.State -eq 'Running') {
+            Stop-Job $job -ErrorAction SilentlyContinue
+            Falta 'tailscale up nao concluiu em 5 min - termine o login e rode este instalador de novo'
+        }
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+    } finally { $ErrorActionPreference = $eapAnt }
 }
 
 function Escrever-Texto($caminho, $texto, [switch]$ComBom) {
@@ -429,6 +463,8 @@ function Token-Do-Env {
 if (-not $SoChecar -and -not $Update) {
 Titulo '0/8 Antes de comecar'
 Write-Host '  Duas perguntas agora, e depois o instalador segue sozinho ate o fim.'
+Write-Host '  (Se voce disser que usa fora de casa, logo em seguida o Tailscale abre o navegador'
+Write-Host '   uma vez, para voce entrar na conta dele. Fora isso, nada mais e perguntado.)'
 Write-Host '  Se pedir permissao de administrador e para liberar a porta do Wi-Fi no firewall.'
 
 # O BLOCO INTEIRO do token fora do transcript: o Start-Transcript captura Read-Host e Write-Host,
@@ -471,7 +507,7 @@ if ($temToken) {
 }
 # Prova, não ausência de erro: o passo inteiro vale zero se o token não estiver de fato no arquivo.
 if (-not (Token-Do-Env)) { Pare 'o token nao foi gravado em backend\.env - sem ele o celular nao entra' @() }
-Add-Content -Path $logInstall -Value '  ok  CP_AUTH_TOKEN definido (valor omitido do log de proposito)'
+if ($script:temLog) { Add-Content -Path $logInstall -Value '  ok  CP_AUTH_TOKEN definido (valor omitido do log de proposito)' }
 Retoma-Log
 Nota 'E esse token que voce digita no celular na primeira conexao.'
 
@@ -534,9 +570,15 @@ if (-not (Tem 'rg')) {
 } else { Ok 'ripgrep' }
 
 # O Tailscale entra AQUI, junto das outras dependencias, e nao no passo 6: quem respondeu "uso fora
-# de casa" no passo 0 nao pode ser parado de novo no fim pra instalar terceiro.
+# de casa" no passo 0 nao pode ser parado de novo no fim pra instalar terceiro. O login vem colado
+# na instalacao pelo mesmo motivo - e a mesma decisao, e o passo 5d publica sozinho depois.
 if ($script:querTailscale -and -not (Tem 'tailscale')) {
-    if (-not (Instale 'Tailscale' 'tailscale' 'Tailscale.Tailscale' 'acesso remoto')) { $script:querTailscale = $false }
+    if (Instale 'Tailscale' 'tailscale' 'Tailscale.Tailscale' 'acesso remoto') {
+        Nota 'Instale o Tailscale tambem no celular (mesma conta).'
+        Loga-Tailscale
+    } else {
+        $script:querTailscale = $false
+    }
 }
 
 if ($SoChecar) {
@@ -558,7 +600,16 @@ Pop-Location
 
 # -- 3/8 Token de acesso -----------------------------------------------------
 Titulo '3/8 Token de acesso'
-Ok 'definido no passo 0'
+# Prova, nao "o passo 0 rodou": em -Update o passo 0 nao roda, e um .env sem token terminaria a
+# instalacao com ok verde e o celular levando 401 sem nada explicando.
+if (Token-Do-Env) {
+    Ok 'definido no passo 0'
+} elseif ($Update) {
+    Falta 'backend\.env sem CP_AUTH_TOKEN - rode .\install.ps1 sem -Update para definir'
+    $pendencias += 'token'
+} else {
+    Pare 'o token nao foi gravado em backend\.env - sem ele o celular nao entra' @()
+}
 
 # -- 4/8 Frontend ------------------------------------------------------------
 Titulo '4/8 Frontend'
@@ -1447,62 +1498,27 @@ if (-not $script:cpPublicUrl) {
     }
 }
 
-# Login + publicacao na MESMA rodada. `tailscale up` e INTERATIVO (imprime um link, abre o
-# navegador e bloqueia ate a pessoa autenticar) - nao ha como automatizar, so esperar. Por isso
-# e pergunta, e no -Sim nao roda (desatendido nao pode ficar parado esperando login). Teto de 5 min
-# pra um login abandonado nao segurar o instalador pra sempre. Depois chama o passo 5d de novo
-# (Publica-Tailscale), que grava CP_PUBLIC_URL e deixa o QR do final ja com o endereco do tailnet.
-# Antes disto, quem instalava o Tailscale por aqui terminava com o QR em 127.0.0.1 e precisava
-# lembrar de rodar o instalador inteiro de novo.
-function Loga-E-Publica-Tailscale {
-    if ($Sim) {
-        Nota 'Falta logar: rode `tailscale up` e depois este instalador de novo (o passo 5d grava o endereco sozinho).'
-        return
-    }
-    # `Pergunte-Mesmo` e nao `Pergunte`: o login abre navegador e espera a pessoa - assumir "sim"
-    # sem perguntar deixaria o instalador parado num passo que ninguem pediu.
-    if (-not (Pergunte-Mesmo '  Entrar no Tailscale agora? (abre o navegador; espero ate 5 min)')) {
-        Nota 'Depois: `tailscale up` e este instalador de novo - o passo 5d grava CP_PUBLIC_URL sozinho.'
-        return
-    }
-    $eapAnt = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'   # nativo: o link de login sai no stderr
-    try {
-        # Em job, pelo timeout - e a saida e mostrada na hora em que chega, porque o link de login
-        # e o que a pessoa precisa ver ANTES de o comando terminar.
-        $job = Start-Job -ScriptBlock { & tailscale up 2>&1 }
-        $fim = (Get-Date).AddMinutes(5)
-        while ($job.State -eq 'Running' -and (Get-Date) -lt $fim) {
-            Receive-Job $job | ForEach-Object { Nota "  $_" }
-            Start-Sleep -Milliseconds 500
-        }
-        Receive-Job $job | ForEach-Object { Nota "  $_" }
-        if ($job.State -eq 'Running') {
-            Stop-Job $job -ErrorAction SilentlyContinue
-            Falta 'tailscale up nao concluiu em 5 min - termine o login e rode este instalador de novo'
-        }
-        Remove-Job $job -Force -ErrorAction SilentlyContinue
-    } finally { $ErrorActionPreference = $eapAnt }
-    # O proprio 5d diz "sem nome de no" se o login nao aconteceu; nao ha o que checar antes.
-    Publica-Tailscale
-    if (-not $script:cpPublicUrl) {
-        Nota 'Ainda sem endereco do tailnet - depois de logar, rode este instalador de novo.'
-    }
-}
-
+# Instalar e logar acontecem no 1/8; aqui sobra so publicar, e nenhuma pergunta nova - o passo 6 e
+# o fim da instalacao, e parar a pessoa aqui era exatamente o que esta mudanca tirou.
 if (Tem 'tailscale') {
     Ok 'Tailscale ja instalado'
     if (-not $script:cpPublicUrl) {
-        Nota 'CP_PUBLIC_URL nao gravado ainda (veja o passo 5d acima) - provavelmente falta `tailscale up`.'
-        Loga-E-Publica-Tailscale
+        # Unico caso em que ainda se pergunta aqui: o Tailscale JA estava instalado (entao o 1/8 nao
+        # ofereceu login) e nunca foi logado. Sem isto essa maquina terminaria sem endereco nenhum,
+        # com apenas um aviso - que e a falha silenciosa que este passo existe pra evitar.
+        Nota 'CP_PUBLIC_URL nao gravado ainda - falta entrar na conta do Tailscale.'
+        Loga-Tailscale
+        Publica-Tailscale
     }
 } elseif ($script:querTailscale) {
-    # So chega aqui se a instalacao do 1/8 falhou; o `Instale` abaixo e a segunda chance.
+    # So chega aqui se a instalacao do 1/8 falhou; o `Instale` abaixo e a segunda chance, e por isso
+    # o login reaparece: sem ele o Tailscale recem-instalado nao tem nome de no pra publicar.
     # Id com MAIUSCULAS: o `--exact` do winget diferencia caixa, e 'tailscale.tailscale' nao casa
     # nada. Medido: os outros seis ids do instalador estavam certos, so este errado.
     if (Instale 'Tailscale' 'tailscale' 'Tailscale.Tailscale' 'acesso remoto') {
         Nota 'Instale o Tailscale tambem no celular (mesma conta).'
-        Loga-E-Publica-Tailscale
+        Loga-Tailscale
+        Publica-Tailscale
     }
 }
 
@@ -2309,6 +2325,7 @@ Titulo 'Pronto'
 # O passo 7b tambem define $pyVenv, mas ele pode nao ter rodado (-Update parcial, venv ausente):
 # a tela final nao pode depender de um ramo anterior ter executado.
 $pyVenv = Join-Path $raiz 'backend\.venv\Scripts\python.exe'
+$qrMostrado = $false
 if ($script:Interativo -and -not $Update -and (Test-Path $pyVenv)) {
     Write-Host '  Aponte a camera do celular para o QR: ele abre o Hangar ja conectado.'
     Pausa-Log   # a URL do QR carrega o token
@@ -2323,6 +2340,10 @@ if ($script:Interativo -and -not $Update -and (Test-Path $pyVenv)) {
         [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
         $env:PYTHONIOENCODING = 'utf-8'
         & $pyVenv -m app.doctor --qr
+        # Exit 0 e a prova: com o preference em 'Continue' um app.doctor que falha nao levanta nada,
+        # e a tela final mandaria ler um QR que nunca foi desenhado.
+        if ($LASTEXITCODE -eq 0) { $qrMostrado = $true }
+        else { Falta "nao consegui desenhar o QR (app.doctor saiu $LASTEXITCODE)" }
     } catch {
         Nota "nao consegui desenhar o QR: $_"
     } finally {
@@ -2333,14 +2354,19 @@ if ($script:Interativo -and -not $Update -and (Test-Path $pyVenv)) {
     }
     Retoma-Log
 }
-$urlCel = if ($script:cpPublicUrl) { $script:cpPublicUrl } else { "http://$(Ip-Lan):$portaBack" }
+# $cpPublicUrl vazio = "so nesta maquina" ou LAN sem IP: nos dois o unico endereco que existe e o
+# loopback, e mandar o celular num IP que nao ha e o QR morto que este passo evita.
+$urlCel = if ($script:cpPublicUrl) { $script:cpPublicUrl } else { "http://127.0.0.1:$portaBack" }
+if ($qrMostrado) { $linha2 = "No celular: leia o QR acima (ou abra $urlCel e digite o token)." }
+elseif ($script:cpPublicUrl) { $linha2 = "No celular: abra $urlCel e digite o token." }
+else { $linha2 = "Neste PC: abra $urlCel. Pro celular entrar, veja 'acesso pelo celular' no guia." }
 Write-Host @"
 
   O QUE FAZER AGORA
    1. No PC: abra um terminal, digite  claude  e faca o login (so na primeira vez).
-   2. No celular: leia o QR acima (ou abra $urlCel e digite o token).
+   2. $linha2
 "@
-if ($script:querTailscale) { Write-Host '   3. No celular: instale o app Tailscale e entre com a MESMA conta do PC.' }
+if ($script:querTailscale -and -not $Update) { Write-Host '   3. No celular: instale o app Tailscale e entre com a MESMA conta do PC.' }
 Write-Host @"
    Algo nao abriu?  hangar-doctor   (diz o que falta e como consertar)
    Log desta instalacao: $logInstall
@@ -2361,7 +2387,7 @@ if ($tokenFim) {
     Write-Host "   token   : " -NoNewline; Write-Host $tokenFim -ForegroundColor Yellow
     Write-Host "             (e o que voce digita no celular; fica em backend\.env)"
     # Enquanto o transcript esta PAUSADO: com ele rodando o arquivo esta aberto pelo PowerShell.
-    if (-not $Update) { Add-Content -Path $logInstall -Value '   token   : (em backend\.env)' }
+    if ($script:temLog) { Add-Content -Path $logInstall -Value '   token   : (em backend\.env)' }
     Retoma-Log
 } else {
     Write-Host "   token   : nao consegui ler de backend\.env - veja o passo 3/8 acima" -ForegroundColor Red
