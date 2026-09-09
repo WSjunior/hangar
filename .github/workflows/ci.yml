@@ -72,10 +72,17 @@ jobs:
           cache-dependency-path: package-lock.json
       # Roda na RAIZ: o lockfile é um só, e os workspaces são `packages/*` + `frontend`. O app
       # nativo não é workspace de propósito — o build dele é no Expo, e nada de React Native pode
-      # entrar aqui nem na máquina de quem instala. `check` e `test` da raiz cobrem core e frontend.
+      # entrar aqui nem na máquina de quem instala.
+      #
+      # Por workspace, e NÃO `npm run check`/`npm test` da raiz: os da raiz cobrem as três
+      # interfaces, app nativo incluído, e falham de propósito quando as dependências dele não
+      # estão instaladas — que é sempre o caso aqui, porque o `npm ci` da raiz não as instala.
+      # Aqui a lista é explícita: o CI compila front e backend, e o app é assunto do Expo.
       - run: npm ci
-      - run: npm run check
-      - run: npm test
+      - run: npm run check -w @hangar/core
+      - run: npm run check -w frontend
+      - run: npm run test -w @hangar/core
+      - run: npm run test -w frontend
       - run: npm run build -w frontend
       # O build ja acontecia aqui e ia pro lixo. Guardado, ele vira o dist que o instalador baixa
       # em vez de compilar na maquina de quem instala — que e o passo mais lento e o mais fragil
