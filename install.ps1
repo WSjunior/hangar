@@ -731,10 +731,12 @@ function Pare-Servico {
     # processo atual, nunca a linhagem dele.
     $paisMapa = @{}
     $nascMapa = @{}
+    $cmdMapa = @{}
     foreach ($p in @($tabela)) {
         if ($null -eq $p) { continue }
         $paisMapa[[int]$p.ProcessId] = [int]$p.ParentProcessId
         $nascMapa[[int]$p.ProcessId] = $p.CreationDate
+        $cmdMapa[[int]$p.ProcessId] = $p.CommandLine
     }
     # Enumeracao de processo FALHANDO nao pode virar linhagem de um elemento so: o `-ErrorAction
     # SilentlyContinue` engole hiccup do WMI, e com o mapa vazio a protecao degradaria exatamente
@@ -753,6 +755,13 @@ function Pare-Servico {
     $cur = $PID
     $meuNasc = $nascMapa[$PID]
     while ($cur -and $linhagem.Add($cur)) {
+        # A linhagem PARA no motor da atualizacao. Pelo app a cadeia e `backend (python -m app.main)
+        # -> python -m app.atualizar -> powershell install.ps1`, ou seja tudo ACIMA do motor e o
+        # backend VELHO, que e exatamente quem segura a porta e quem este passo tem que derrubar.
+        # Protegendo a linhagem inteira ele virava ancestral intocavel: "porta 8765 continua ocupada
+        # apos parar hangar-backend", instancia nova nunca subia, codigo novo no disco e servidor
+        # velho no ar. O motor ENTRA na linhagem (foi ele quem chamou); os pais dele, nao.
+        if ($cmdMapa[$cur] -and $cmdMapa[$cur] -match 'app\.atualizar') { break }
         $pai = $paisMapa[$cur]
         # PID e RECICLADO: o ppid e so um numero gravado no nascimento, e se aquele pai morreu o
         # numero pode pertencer hoje a um processo qualquer — inclusive ao Vite que a gente QUER

@@ -1680,6 +1680,12 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
     25/08/2026: lock e processo morreram no minuto do "instância anterior derrubada"). A proteção
     por linhagem já existia e não bastou; hoje há exclusão explícita de quem tem `app.atualizar` na
     linha de comando. No Linux quem cobre isso é o escopo transiente do systemd, que lá não existe.
+    **E a linhagem tinha o furo oposto (09/09/2026):** como a cadeia do app é `backend
+    (python -m app.main) → app.atualizar → powershell install.ps1 -Update`, o backend VELHO era
+    ancestral do instalador e, protegido por isso, ficava de fora dos alvos — `porta 8765 continua
+    ocupada (pid N) apos parar hangar-backend` em toda atualização pelo app, com código novo no
+    disco e servidor velho no ar. Hoje a subida da linhagem PARA no motor (cmdline casando
+    `app.atualizar`): ele entra na linhagem, os pais dele não.
 
 - **Instalador com portão de prova por etapa** (`install.sh` / `install.ps1`, 02/09/2026). Duas
   gravidades: **essencial falhou → para na hora** com causa e conserto (`fail` / `Pare`): deps,
