@@ -9,6 +9,7 @@ import { MenuView } from '@react-native-menu/menu';
 import { useServers } from '../../stores/servers';
 import { CwdPicker } from './CwdPicker';
 import { ProviderPicker } from './ProviderPicker';
+import { CodexContextControl } from './CodexContextControl';
 import * as m from '../../paraglide/messages';
 
 const PROVIDERS: Provider[] = ['claude', 'codex', 'pi', 'kimi'];
@@ -72,6 +73,7 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
   const [takenNames, setTakenNames] = useState<Set<string>>(new Set());
   const [hasSameFolder, setHasSameFolder] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [contextBusy, setContextBusy] = useState(false);
   const [error, setError] = useState('');
 
   const [provider, setProvider] = useState<Provider>('claude');
@@ -174,9 +176,10 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
     if (p) void handlePick(p);
   };
 
-  const canCreate = !!picked && !!name.trim() && !loading;
+  const canCreate = !!picked && !!name.trim() && !loading && !contextBusy;
 
   const handleCreate = async () => {
+    if (contextBusy) return;
     if (!picked || !name.trim()) return;
     setLoading(true);
     setError('');
@@ -276,6 +279,8 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
               <Text style={styles.label}>{m.comum_provider()}</Text>
               <ProviderPicker value={provider} onChange={(p) => setProvider(p)} />
             </View>
+
+            {provider === 'codex' ? <CodexContextControl server={active ?? null} onBusy={setContextBusy} /> : null}
 
             {provider === 'claude' && configs.length > 1 ? (
               <View style={styles.field}>

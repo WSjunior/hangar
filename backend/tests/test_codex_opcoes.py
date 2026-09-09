@@ -23,12 +23,28 @@ async def test_contexto_nativo_preserva_e_restaura_config(tmp_path, anterior):
     assert (await salvar_opcoes(service, True))["contexto_estendido"]
     config = tomllib.loads(path.read_text())
     assert config["model_context_window"] == 1000000
-    assert config["model_auto_compact_token_limit"] == 250000
+    assert config["model_auto_compact_token_limit"] == 900000
     await salvar_opcoes(service, False)
     config = tomllib.loads(path.read_text())
     assert config.get("model_context_window") == anterior
+    assert config["model_auto_compact_token_limit"] == 250000
     assert config["model"] == "gpt-6-astra"
     assert "# comentário pessoal" in path.read_text()
+
+
+@pytest.mark.skipif(not shutil.which("codex"), reason="Codex CLI necessário para validar o escritor TOML")
+@pytest.mark.parametrize("compactacao", [900000, 250000])
+async def test_contexto_preexistente_desliga_sem_restaurar_um_milhao(tmp_path, compactacao):
+    path = tmp_path / "config.toml"
+    path.write_text(f"model_context_window = 1000000\nmodel_auto_compact_token_limit = {compactacao}\n")
+    service = IntegracaoCodex(home=tmp_path, codex_home=tmp_path)
+    if compactacao != 900000:
+        await salvar_opcoes(service, True)
+        assert tomllib.loads(path.read_text())["model_auto_compact_token_limit"] == 900000
+    await salvar_opcoes(service, False)
+    config = tomllib.loads(path.read_text())
+    assert "model_context_window" not in config
+    assert config.get("model_auto_compact_token_limit") == (None if compactacao == 900000 else compactacao)
 
 
 def test_catalogo_anuncia_teto_real_sem_inventar_um_milhao(tmp_path):

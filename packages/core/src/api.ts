@@ -39,6 +39,35 @@ import type {
   PathDiff,
 } from './types';
 
+export interface CodexOpcoes {
+  contexto_estendido: boolean;
+  contexto_configurado: number | null;
+  compactacao: number | null;
+  modelos: { model: string; default: number; max: number }[];
+}
+
+export function codexOpcoes(alvo: Server | null, signal: AbortSignal, habilitar?: boolean): Promise<CodexOpcoes> {
+  const init = {
+    signal: comTeto(signal, 8000), method: habilitar === undefined ? 'GET' : 'POST',
+    body: habilitar === undefined ? undefined : JSON.stringify({ contexto_estendido: habilitar }),
+  };
+  return alvo ? apiFetchForServer(alvo, '/api/harness/codex/opcoes', init)
+              : apiFetch('/api/harness/codex/opcoes', init);
+}
+
+// Safari antigo precisa combinar o cancelamento e o prazo sem AbortSignal.any.
+export function comTeto(signal: AbortSignal | undefined, ms: number): AbortSignal {
+  const teto = AbortSignal.timeout(ms);
+  if (!signal) return teto;
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any([signal, teto]);
+  const juncao = new AbortController();
+  for (const s of [signal, teto]) {
+    if (s.aborted) juncao.abort(s.reason);
+    else s.addEventListener('abort', () => juncao.abort(s.reason), { once: true });
+  }
+  return juncao.signal;
+}
+
 // URL da idx-ésima imagem (colada no terminal) de uma msg do transcript. `?token` porque a tag img
 // não manda header Authorization e cross-origin (multi-PC) não leva cookie — o backend aceita ?token.
 export function transcriptImageUrl(name: string, id: string, idx: number): string {

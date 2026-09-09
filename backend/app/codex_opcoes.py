@@ -5,6 +5,7 @@ import tomllib
 from app.codex_arquivos import exclusivo, gravar, json_bytes, json_obj, ler
 
 CONTEXTO = 1_000_000
+COMPACTACAO = 900_000
 
 
 def ler_opcoes(servico) -> dict:
@@ -34,19 +35,31 @@ async def salvar_opcoes(servico, habilitado: bool) -> dict:
 
         def preparar(config):
             atual = config.get("model_context_window")
+            compactacao = config.get("model_auto_compact_token_limit")
+            estendido = isinstance(atual, int) and atual >= CONTEXTO
             registro = json_obj(path)
             if habilitado:
-                if isinstance(atual, int) and atual >= CONTEXTO:
+                if estendido and compactacao == COMPACTACAO:
                     return [], lambda: None
                 # Guarda antes de gravar a config: uma queda não perde o valor a restaurar.
-                registro = {"anterior": atual}
+                if not estendido:
+                    registro = {"anterior": atual, "compactacao_anterior": compactacao}
+                elif "compactacao_anterior" not in registro:
+                    registro = {**registro, "compactacao_anterior": compactacao}
                 gravar(path, json_bytes(registro), ler(path))
                 querido = CONTEXTO
+                compactacao_querida = COMPACTACAO
             else:
-                if not isinstance(atual, int) or atual < CONTEXTO:
+                if not estendido:
                     return [], lambda: None
                 querido = registro.get("anterior")
-            edits = [{"keyPath": "model_context_window", "value": querido, "mergeStrategy": "replace"}]
+                if isinstance(querido, int) and querido >= CONTEXTO:
+                    querido = None
+                compactacao_querida = (registro.get("compactacao_anterior")
+                                      if compactacao == COMPACTACAO else compactacao)
+            edits = [{"keyPath": chave, "value": valor, "mergeStrategy": "replace"}
+                     for chave, valor in (("model_context_window", querido),
+                                          ("model_auto_compact_token_limit", compactacao_querida))]
             return edits, lambda: None
 
         await servico._editar_config(preparar)

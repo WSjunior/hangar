@@ -8,7 +8,7 @@
 // O fetch segue o mesmo par do contaEstado.ts: `null` = servidor ATIVO (401 desloga), Server
 // explícito = máquina do ?srv= (401 de outra máquina não pode apagar a credencial ativa).
 import { getBaseUrl, getToken, dropActiveServer, type Server } from './auth';
-import { errorDetail } from '@hangar/core';
+import { errorDetail, comTeto } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import type { EstadoLogin } from './contaEstado';
 import type { JanelaCota, EstadoCota } from './contaEstado';
@@ -78,19 +78,7 @@ function em<T>(alvo: Server | null, path: string, init?: RequestInit): Promise<T
   return alvo ? reqEm<T>(alvo, path, init) : req<T>(path, init);
 }
 
-export interface CodexOpcoes {
-  contexto_estendido: boolean;
-  contexto_configurado: number | null;
-  compactacao: number | null;
-  modelos: { model: string; default: number; max: number }[];
-}
-
-export function codexOpcoes(alvo: Server | null, signal: AbortSignal, habilitar?: boolean): Promise<CodexOpcoes> {
-  return em(alvo, '/api/harness/codex/opcoes', {
-    signal, method: habilitar === undefined ? 'GET' : 'POST',
-    body: habilitar === undefined ? undefined : JSON.stringify({ contexto_estendido: habilitar }),
-  });
-}
+export { codexOpcoes, type CodexOpcoes } from '@hangar/core';
 
 // `forcar` é o botão "atualizar" da aba: pede ao servidor a leitura de cota de AGORA,
 // pulando o cache de 5 min (ver backend/app/cotas.py — `?forcar=true`).
@@ -219,20 +207,7 @@ export interface IntegracaoCodex {
   skills?: { ponte: number; nativas: number };
 }
 
-// `AbortSignal.any` só existe do Safari 17.4 em diante; num iPhone mais velho lançava dentro do
-// `reqEm()` e derrubava toda chamada de credenciais/harness, não só a do Codex. Sem ele, os dois
-// sinais são amarrados à mão — o teto de tempo não pode sumir junto.
-export function comTeto(signal: AbortSignal | undefined, ms: number): AbortSignal {
-  const teto = AbortSignal.timeout(ms);
-  if (!signal) return teto;
-  if (typeof AbortSignal.any === 'function') return AbortSignal.any([signal, teto]);
-  const juncao = new AbortController();
-  for (const s of [signal, teto]) {
-    if (s.aborted) juncao.abort(s.reason);
-    else s.addEventListener('abort', () => juncao.abort(s.reason), { once: true });
-  }
-  return juncao.signal;
-}
+export { comTeto } from '@hangar/core';
 
 export function codexIntegracaoEstado(alvo: Server | null, signal?: AbortSignal): Promise<IntegracaoCodex> {
   return em(alvo, '/api/harness/codex/integracao', { signal: comTeto(signal, 8000) });

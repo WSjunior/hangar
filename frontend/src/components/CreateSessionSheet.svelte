@@ -4,6 +4,7 @@
   import Select from './Select.svelte';
   import FolderScanner from './FolderScanner.svelte';
   import ProviderGlyph from './icons/ProviderGlyph.svelte';
+  import CodexContextControl from './CodexContextControl.svelte';
   import IconFolder from './icons/IconFolder.svelte';
   import { getSessions, listClaudeConfigs, getEngines, getProviders, criarConta, apagarConta,
            getArchivePorCwd, resumeArchivedConversation, getArchiveHistory, getBastao, passarBastao,
@@ -90,6 +91,7 @@
   let takenNames = $state<Set<string>>(new Set());
   let hasSameFolder = $state(false);
   let loading = $state(false);
+  let contextBusy = $state(false);
   let error = $state('');
 
   // A MESMA regra do backend (`app/names.py:sanitize_session_name`): NFKD, descarta o acento,
@@ -714,6 +716,7 @@
   }
 
   async function create() {
+    if (contextBusy) return;
     if (!picked || !name.trim()) return;
     // Guarda de verdade, não só o `disabled` do botão: o precedente aqui é a sonda de provider
     // (C5), cujo teste dispara um clique sintético justamente pra provar que o atributo não basta.
@@ -1119,6 +1122,10 @@
         </div>
       {/if}
 
+      {#if !conversaAlvo && provider === 'codex'}
+        <CodexContextControl server={servers.find((s) => s.id === targetServer) ?? null} bind:busy={contextBusy} />
+      {/if}
+
       {#if !conversaAlvo && provider === 'claude'}
         <div class="field">
           <label class="field-label" for="perm-pick">{m.criar_permissao()}</label>
@@ -1170,7 +1177,7 @@
             {retomando ? m.criar_criando() : m.criar_retomar_acao()}
           </button>
         {:else}
-          <button class="primary-btn" onclick={create} disabled={loading || !name.trim() || providersCarregando || bastaoSemServidor || (providers[provider] && !providers[provider].disponivel)}>
+          <button class="primary-btn" onclick={create} disabled={loading || contextBusy || !name.trim() || providersCarregando || bastaoSemServidor || (providers[provider] && !providers[provider].disponivel)}>
             {loading ? m.criar_criando() : (bastao ? m.bastao_acao() : m.sessao_nova())}
           </button>
         {/if}
