@@ -303,6 +303,9 @@ if [ "$UPDATE" = 0 ] && [ "$QUER_TAILSCALE" = 1 ] && ! tailscale status >/dev/nu
 fi
 
 if [ "$CHECK" = 1 ]; then
+  if [ -x backend/.venv/bin/python ]; then
+    say "Diagnóstico"; (cd backend && uv run --quiet python -m app.doctor) || PENDENTE+=("doctor")
+  fi
   [ ${#PENDENTE[@]} -eq 0 ] && { say "Nada faltando."; exit 0; }
   say "Faltam: ${PENDENTE[*]}"; exit 1
 fi

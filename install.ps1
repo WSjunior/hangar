@@ -582,6 +582,12 @@ if ($script:querTailscale -and -not (Tem 'tailscale')) {
 }
 
 if ($SoChecar) {
+    $pyVenvCheck = Join-Path $raiz 'backend\.venv\Scripts\python.exe'
+    if (Test-Path $pyVenvCheck) {
+        Titulo 'Diagnostico'
+        Push-Location (Join-Path $raiz 'backend'); & $pyVenvCheck -m app.doctor; $rcDoctor = $LASTEXITCODE; Pop-Location
+        if ($rcDoctor -ne 0) { $pendencias += 'doctor' }
+    }
     if ($pendencias.Count -eq 0) { Titulo 'Nada faltando.'; Pausa-Log; exit 0 }
     Titulo "Faltam: $($pendencias -join ', ')"
     Pausa-Log
