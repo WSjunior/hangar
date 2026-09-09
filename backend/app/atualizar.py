@@ -455,11 +455,16 @@ def resguardar(pre: dict) -> str | None:
 
 def _puxar(pre: dict) -> None:
     """`fetch` + fast-forward. Só reseta quando o ff é impossível — e o resgate já rodou."""
-    # `--tags --force`: sem isso a `dist-latest`, que o CI move a cada push, fica presa no commit
-    # em que nasceu e o `git describe` da versao diz um numero que nao muda.
-    f = _git("fetch", "origin", "--tags", "--force", timeout=300)
+    f = _git("fetch", "origin", timeout=300)
     if f.returncode != 0:
         raise RuntimeError(f"nao consegui buscar o codigo novo: {_cauda(f)}")
+
+    # A `dist-latest` o CI move a cada push, e sem `--force` a copia local fica presa no commit
+    # em que nasceu. Fetch separado e nao fatal: ela so da nome a versao na tela; falhar aqui
+    # nao pode segurar o codigo novo, que ja chegou.
+    t = _git("fetch", "origin", "--force", "refs/tags/dist-latest:refs/tags/dist-latest", timeout=60)
+    if t.returncode != 0:
+        _log.warning("tag dist-latest nao atualizada: %s", _cauda(t))
 
     m = _git("merge", "--ff-only", "origin/main", timeout=120)
     if m.returncode == 0:
