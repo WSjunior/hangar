@@ -88,6 +88,15 @@ gira() { # gira <rótulo> <comando...>: spinner enquanto roda; sem TTY (ou --upd
 # hangar-send sem ninguém ter respondido nada. Sem terminal (CI, cron), a resposta é NÃO.
 if { exec 3</dev/tty; } 2>/dev/null; then TEM_TTY=1; else TEM_TTY=0; fi
 
+# Log em arquivo, nunca no --update: o app lê a saída CRUA pra pegar ##HANGAR-AVISO##,
+# e o `tee` quebraria esse parse.
+LOG="$HOME/.hangar/install.log"
+if [ "$UPDATE" = 0 ]; then
+  mkdir -p "$(dirname "$LOG")"
+  printf '\n===== %s  %s =====\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$0 $*" >> "$LOG"
+  exec > >(tee -a "$LOG") 2>&1
+fi
+
 # Quatro sabores, e a diferença é quem decide:
 #  ask       -> padrão SIM sem perguntar (--avancado pergunta). Sem terminal: NÃO.
 #  ask_senha -> vai pedir sudo: SEMPRE pergunta (com terminal), mesmo no padrão. --yes: sim.
@@ -711,27 +720,34 @@ URL_FIM=$(grep '^CP_PUBLIC_URL=' backend/.env 2>/dev/null | tail -1 | cut -d= -f
 # O valor do token só aparece com terminal: sem TTY isto roda em provisionamento e o stdout
 # vira log — mesma regra do passo 3/8.
 TOKEN_FIM="(está em backend/.env)"
-[ "$TEM_TTY" = 1 ] && TOKEN_FIM=$(grep '^CP_AUTH_TOKEN=' backend/.env 2>/dev/null | tail -1 | cut -d= -f2- || true)
+[ "$TEM_TTY" = 1 ] && TOKEN_REAL=$(grep '^CP_AUTH_TOKEN=' backend/.env 2>/dev/null | tail -1 | cut -d= -f2- || true)
 echo
 echo "  +---------------------------------------------------------------"
 echo "   RESUMO"
+# O token de verdade só vai pra TELA — o `tee` grava esta saída no log, e o token não pode ir lá.
+if [ "$TEM_TTY" = 1 ]; then printf '   token   : %s\n' "$TOKEN_REAL" > /dev/tty; fi
 echo "   token   : $TOKEN_FIM"
 echo "   local   : http://127.0.0.1:$PORTA_FIM"
 if [ -n "$URL_FIM" ]; then echo "   celular : $URL_FIM"
 else echo "   celular : não publicado no Tailscale"; fi
 echo "  +---------------------------------------------------------------"
+[ -n "$URL_FIM" ] || URL_FIM="http://$(hostname -I 2>/dev/null | awk '{print $1}'):$PORTA_FIM"
+if [ "$TEM_TTY" = 1 ] && [ "$UPDATE" = 0 ]; then
+  echo
+  echo "  Aponte a câmera do celular para o QR: ele abre o Hangar já conectado."
+  # Só no terminal: a URL do QR carrega o token, e o log não pode tê-lo.
+  (cd backend && uv run --quiet python -m app.doctor --qr) > /dev/tty 2>/dev/null || true
+fi
 cat <<EOF
-  Rodar na mão (se você pulou os serviços):
-      cd backend  && CP_LAN_BIND_IP=auto uv run python -m app.main
-      cd frontend && npm run dev
 
-  No celular: abra a URL do QR que o backend imprime e digite o token de backend/.env.
-  Guia completo (Tailscale, instalar como PWA, cada tela): docs/USAGE.md
-
-  Mais de uma máquina? UM frontend atende VÁRIOS backends: ele guarda a lista de
-  servidores no próprio navegador e você adiciona cada máquina pelo menu de conta.
-  Dá pra deixar o PWA num lugar só (uma VPS, por exemplo) e nas outras rodar apenas
-  o backend, com ./install.sh --no-frontend. O front é leve (~94 MB contra ~149 MB do
-  backend, medido), então instalá-lo por padrão não custa caro — a flag existe pra
-  quem já tem o PWA noutro lugar, não porque ele pese.
+  O QUE FAZER AGORA
+   1. No PC: abra um terminal, digite  claude  e faça o login (só na primeira vez).
+   2. No celular: leia o QR acima (ou abra $URL_FIM e digite o token).
+EOF
+[ "$QUER_TAILSCALE" = 1 ] && echo "   3. No celular: instale o app Tailscale e entre com a MESMA conta do PC."
+command -v loginctl >/dev/null && echo "   4. Para o Hangar subir mesmo sem você logar no PC:  sudo loginctl enable-linger \$USER"
+cat <<EOF
+   Algo não abriu?  hangar-doctor   (diz o que falta e como consertar)
+   Log desta instalação: $LOG
+   Guia completo: docs/USAGE.md
 EOF
