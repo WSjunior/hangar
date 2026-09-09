@@ -2,6 +2,8 @@ import http.client
 import json
 import logging
 import re
+import subprocess
+import tempfile
 import unicodedata
 import urllib.error
 import urllib.request
@@ -116,6 +118,42 @@ def _esforco_raciocinio() -> str:
     return (runtime_config.get("llm_reasoning_effort") or "").strip()
 
 
+# Plano B do chat: a assinatura Claude da propria maquina, pelo `claude -p`. Nao e o SDK de
+# proposito — o `claude-agent-sdk` roda ESTE binario por baixo, entao seria uma dependencia nova pra
+# chegar no mesmo subprocess. Medido em 08/09/2026, com o system prompt real do estilo `limpar`:
+#   sonnet 3,6s / 3,7s / 4,5s   |   haiku 27,8s / 37,5s / 39,2s (consistente, nao e primeira chamada)
+# Dai o sonnet fixo. As tres flags nao sao enfeite:
+#   --tools ""          18.900 tokens de entrada -> 466. O caro sao as definicoes das ferramentas.
+#   --setting-sources ""  nao carrega settings/hooks/skills do usuario nessa chamada.
+#   --strict-mcp-config   nao sobe servidor MCP nenhum pra limpar uma frase.
+_CLAUDE_ARGS = [
+    "claude", "-p", "--model", "sonnet", "--tools", "",
+    "--setting-sources", "", "--strict-mcp-config", "--no-session-persistence",
+]
+
+
+def _via_claude(system: str, prompt: str, timeout: int, motivo: str) -> str:
+    """Refaz o pedido na assinatura Claude quando o provedor de chat falhou. Devolve o texto, ou
+    levanta NarrarError(502, motivo) — o erro ORIGINAL do provedor, porque e ele que o usuario
+    precisa ver pra consertar a config; o plano B ter falhado tambem e ruido em cima disso.
+
+    O prompt vai por stdin, nao por argv: ditado de dois minutos passa do limite da linha de comando
+    e apareceria inteiro no `ps` de quem estiver na maquina."""
+    try:
+        r = subprocess.run(
+            [*_CLAUDE_ARGS, "--system-prompt", system], input=prompt, capture_output=True,
+            text=True, timeout=timeout, cwd=tempfile.gettempdir())
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.warning("plano B (claude -p) indisponivel: %s", e)
+        raise NarrarError(502, motivo)
+    saida = r.stdout.strip()
+    if r.returncode != 0 or not saida:
+        logger.warning("plano B (claude -p) falhou: rc=%s %s", r.returncode, r.stderr.strip()[:300])
+        raise NarrarError(502, motivo)
+    logger.info("limpeza feita pela assinatura Claude; o provedor falhou com: %s", motivo)
+    return saida
+
+
 def chamar_chat(system: str, prompt: str, *, temperature: float, timeout: int,
                 perfil: str = "padrao") -> str:
     """Chat completions no formato da OpenAI. Compartilhada pela narracao guiada e pela limpeza do
@@ -123,8 +161,10 @@ def chamar_chat(system: str, prompt: str, *, temperature: float, timeout: int,
 
     Provedor NAO fixo: qualquer endpoint compativel serve. Ver _provedor().
 
-    Levanta NarrarError(status, detail): 503 sem chave, 502 falha/erro do provedor ou resposta sem o
-    texto esperado."""
+    Provedor que falha cai no plano B (_via_claude). Sem chave NAO cai: config ausente e coisa pra
+    corrigir na tela, nao pra mascarar gastando a cota da assinatura.
+
+    Levanta NarrarError(status, detail): 503 sem chave, 502 quando o provedor E o plano B falham."""
     base_url, api_key, modelo = _provedor(perfil)
     if not api_key:
         # A mensagem tem que apontar pro campo que _provedor() realmente le nesse ramo, senao o
@@ -175,20 +215,20 @@ def chamar_chat(system: str, prompt: str, *, temperature: float, timeout: int,
             detalhe = e.read().decode("utf-8", "replace")[:300]
         except (OSError, http.client.HTTPException):
             detalhe = "(sem corpo)"
-        raise NarrarError(502, f"provedor {e.code}: {detalhe}")
+        return _via_claude(system, prompt, timeout, f"provedor {e.code}: {detalhe}")
     except (OSError, http.client.HTTPException) as e:
-        raise NarrarError(502, f"falha ao contatar o provedor: {e}")
+        return _via_claude(system, prompt, timeout, f"falha ao contatar o provedor: {e}")
     except json.JSONDecodeError:
-        raise NarrarError(502, "resposta do provedor nao e JSON valido")
+        return _via_claude(system, prompt, timeout, "resposta do provedor nao e JSON valido")
     try:
         # AttributeError entra na lista porque `content` pode vir None (modelo so devolveu
         # tool_calls, ou foi filtrado) ou uma lista de partes (formato de varios proxies
         # compativeis) — dois payloads reais que nao tem `.strip()`.
         texto_tratado = dados["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError, TypeError, AttributeError):
-        raise NarrarError(502, "resposta do provedor sem o texto esperado")
+        return _via_claude(system, prompt, timeout, "resposta do provedor sem o texto esperado")
     if not texto_tratado:
-        raise NarrarError(502, "provedor devolveu texto vazio")
+        return _via_claude(system, prompt, timeout, "provedor devolveu texto vazio")
     return texto_tratado
 
 

@@ -1052,6 +1052,24 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
     medido no muse-spark, um ditado com autocorreção longa cai pra 62% de cobertura e o estilo
     `limpar` (piso 0,80) devolve o cru com aviso — o modelo apagou a versão corrigida, que é a
     regra funcionando, mas o piso de `limpar` não foi calibrado nele.
+  - **Provedor que falha cai na assinatura Claude da própria máquina** (`narrar._via_claude`), e o
+    caminho é o `claude -p`, não o SDK — o `claude-agent-sdk` roda esse mesmo binário por baixo,
+    seria dependência nova pra chegar no mesmo `subprocess`. O gatilho é falha do PROVEDOR (HTTP,
+    rede, JSON inválido, payload sem texto); **sem chave configurada continua 503**, porque config
+    ausente é pra corrigir na tela, não pra mascarar gastando cota. Falhando os dois, quem sobe é o
+    erro ORIGINAL do provedor — "o plano B também falhou" é ruído em cima do que a pessoa conserta.
+    O que motivou: em 08/09/2026 o OpenCode Zen respondeu **500 nos dois** modelos que uma chave
+    `contributor` alcança (`muse-spark-1.3-contributor` e `1.2-contributor`; o `1.2-…-free` virou
+    401 "not supported", e glm/deepseek dão 400 nessa chave), e cada ditado voltava cru.
+    Três números medidos no mesmo dia, com o system prompt real do estilo `limpar`:
+    **sonnet 3,6–4,5s contra haiku 27,8–39,2s** (consistente em 3 rodadas, não é primeira chamada —
+    daí o sonnet fixo); **`--tools ""` leva a entrada de ~18.900 tokens pra 466**, porque o caro são
+    as definições das ferramentas, não o prompt; e o par `--setting-sources ""` + `--strict-mcp-config`
+    evita carregar settings/hooks/skills e subir servidor MCP pra limpar uma frase. O prompt vai por
+    **stdin**: ditado de dois minutos passa do limite de argv e apareceria inteiro no `ps`.
+    Duas coisas que o fallback NÃO muda, medidas: o texto dele passa pelas mesmas travas (um resumo
+    volta como cru, igual ao do provedor), e a `_cobertura` continua rejeitando o ditado curto cheio
+    de `barra`/`traço traço` — 0,727 contra o piso 0,80 de `limpar`, idêntico pela Groq.
 - **Login do ChatGPT (Codex) é UM login pra três CLIs, e quem faz é o app** (`app/oauth_codex.py` +
   a linha "Conta do ChatGPT (Codex)" do `NovaCredencialSheet` + `app/harness_saude.py`, 04/09/2026).
   Codex CLI, Pi e omp usam o MESMO OAuth — `client_id app_EMoamEEZ73f0CkXaXp7hrann`, mesmo

@@ -19,6 +19,17 @@ def _config_isolada(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime_config, "_backend_config_base", lambda: str(tmp_path))
 
 
+@pytest.fixture(autouse=True)
+def _plano_b_fora(monkeypatch):
+    """O plano B (`claude -p`) nao roda na suite. Ele gasta a cota da assinatura de quem roda os
+    testes e leva ~4s por chamada; e todo teste de "provedor falhou" passa por ele agora. O padrao e
+    o binario ausente — que e o caminho que devolve o erro ORIGINAL do provedor, o que esses testes
+    ja afirmavam. Quem testa o plano B em si sobrescreve `app.narrar.subprocess.run`."""
+    def _sem_claude(*a, **k):
+        raise FileNotFoundError("claude")
+    monkeypatch.setattr("app.narrar.subprocess.run", _sem_claude)
+
+
 def _com_chave(monkeypatch):
     monkeypatch.setattr(runtime_config, "get", lambda campo: "k" if campo == "groq_api_key" else None)
 
@@ -268,6 +279,81 @@ def test_resposta_sem_texto_esperado_levanta_502(monkeypatch):
     with pytest.raises(NarrarError) as ei:
         narrar.narrar("texto", [], "explica")
     assert ei.value.status == 502
+
+
+def _provedor_500(monkeypatch):
+    import urllib.error
+
+    def _erro(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 500, "Internal Server Error", {}, None)
+
+    monkeypatch.setattr("app.narrar.urllib.request.urlopen", _erro)
+
+
+def _claude_responde(monkeypatch, texto: str, visto: dict):
+    class R:
+        returncode, stdout, stderr = 0, texto, ""
+
+    def _run(cmd, **k):
+        visto["cmd"], visto["input"], visto["cwd"] = cmd, k.get("input"), k.get("cwd")
+        return R()
+
+    monkeypatch.setattr("app.narrar.subprocess.run", _run)
+
+
+def test_provedor_500_cai_na_assinatura_claude(monkeypatch):
+    _com_chave(monkeypatch)
+    _provedor_500(monkeypatch)
+    visto: dict = {}
+    _claude_responde(monkeypatch, "Texto limpo.", visto)
+    assert narrar.chamar_chat("sys", "texto cru", temperature=0, timeout=60) == "Texto limpo."
+    # O prompt vai por stdin, nunca em argv: ditado longo estoura a linha de comando e apareceria
+    # no `ps` da maquina.
+    assert visto["input"] == "texto cru"
+    assert "texto cru" not in visto["cmd"]
+    # As flags que seguram o custo: sem elas sao ~18.900 tokens de entrada por chamada, com elas 466.
+    assert visto["cmd"][:2] == ["claude", "-p"]
+    for flag in ("--tools", "--setting-sources", "--strict-mcp-config"):
+        assert flag in visto["cmd"]
+    assert visto["cmd"][-2:] == ["--system-prompt", "sys"]
+
+
+def test_plano_b_que_falha_devolve_o_erro_do_provedor(monkeypatch):
+    # O que o usuario precisa ler e o 500 do provedor, que e o que ele consegue consertar na tela —
+    # nao "o claude -p tambem falhou", que so empilha ruido em cima.
+    _com_chave(monkeypatch)
+    _provedor_500(monkeypatch)
+
+    class R:
+        returncode, stdout, stderr = 1, "", "boom"
+
+    monkeypatch.setattr("app.narrar.subprocess.run", lambda cmd, **k: R())
+    with pytest.raises(NarrarError) as ei:
+        narrar.chamar_chat("sys", "texto", temperature=0, timeout=60)
+    assert ei.value.status == 502
+    assert "provedor 500" in ei.value.detail
+
+
+def test_sem_chave_nao_gasta_a_assinatura(monkeypatch):
+    # 503 e config ausente: e pra corrigir na tela, nao pra mascarar gastando cota da assinatura.
+    _sem_chave(monkeypatch)
+    monkeypatch.setattr("app.narrar.subprocess.run",
+                        lambda *a, **k: pytest.fail("nao devia chamar o claude"))
+    with pytest.raises(NarrarError) as ei:
+        narrar.chamar_chat("sys", "texto", temperature=0, timeout=60)
+    assert ei.value.status == 503
+
+
+def test_limpeza_pelo_plano_b_ainda_passa_pelas_travas(monkeypatch):
+    # O plano B entrega texto pela mesma porta, entao cobertura/invencao continuam valendo: um
+    # resumo vindo dele tem que devolver o cru, igual ao do provedor.
+    _com_chave(monkeypatch)
+    _provedor_500(monkeypatch)
+    cru = ("entao a ideia e pegar o arquivo narrar ponto py e colocar um retry pra conta do claude "
+           "quando o provedor devolver erro quinhentos porque hoje o ditado volta cru")
+    _claude_responde(monkeypatch, "Resumo.", {})
+    texto, erro = narrar.limpar_ditado(cru, "limpar")
+    assert texto == cru and erro is not None
 
 
 def test_ditado_curto_nao_chama_o_provedor(monkeypatch):
