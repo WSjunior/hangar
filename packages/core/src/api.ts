@@ -5,6 +5,7 @@ import { localeAtual } from './i18n';
 import { mensagemDeErro, formataErro, type EnvelopeErro } from './errosApi';
 // diag NÃO importa api (ele usa `fetch` direto) — é o que mantém esta dependência de mão única.
 import { registrar as registrarDiag, novoReq } from './diag';
+import type { CotaContaResumo } from './cotaResumo';
 import type {
   Atualizacao,
   SessionInfo,
@@ -511,6 +512,11 @@ export function createSession(
 // Só leitura: o GET não cria nem grava nada, então serve de AMOSTRA (a origem segue trabalhando).
 export async function getBastao(name: string): Promise<string> {
   const res = await fetch(`${apiEnv().getBaseUrl()}/api/sessions/${encodeURIComponent(name)}/bastao`, {
+/** Cota de cada credencial do servidor ativo (backend/app/cotas.py). Ver `cotaResumo`. */
+export function listarCotasResumo(): Promise<CotaContaResumo[]> {
+  return apiFetch<CotaContaResumo[]>('/api/cotas');
+}
+
     headers: authHeaders(),
   });
   await ensureOk(res);

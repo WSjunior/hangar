@@ -38,5 +38,6 @@ export * from './vad';
 export * from './autoEnvio';
 export * from './ditadoEstilo';
 export * from './tableChart';
+export * from './cotaResumo';
 export * from './orquestracao';
 export * from './proposedPlan';

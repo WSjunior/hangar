@@ -2,9 +2,9 @@ import { useEffect, useState, useCallback } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
-import { createSession, getEngines, getSessions, listClaudeConfigs, modelOptions } from '@hangar/core';
-import { basename, providerName } from '@hangar/core';
-import type { ConfigDirInfo, Provider, ModelOption } from '@hangar/core';
+import { createSession, getEngines, getSessions, listClaudeConfigs, listarCotasResumo, modelOptions } from '@hangar/core';
+import { basename, providerName, cotaDaConta, resumoCota } from '@hangar/core';
+import type { ConfigDirInfo, Provider, ModelOption, CotaContaResumo } from '@hangar/core';
 import { MenuView } from '@react-native-menu/menu';
 import { useServers } from '../../stores/servers';
 import { CwdPicker } from './CwdPicker';
@@ -79,6 +79,8 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
   const [configs, setConfigs] = useState<ConfigDirInfo[]>([]);
   const [selectedConfig, setSelectedConfig] = useState<string | null>(null);
   const [motores, setMotores] = useState<Record<string, { label?: string; model?: string }>>({});
+  // Cota por conta no seletor (/api/cotas, chave `claude:<path>`); falha = lista sem número.
+  const [cotas, setCotas] = useState<CotaContaResumo[]>([]);
   const [engine, setEngine] = useState('');
   const [modelos, setModelos] = useState<ModelOption[]>([]);
   const [modelo, setModelo] = useState('');
@@ -104,6 +106,11 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
       });
     void getEngines()
       .then((r) => {
+    void listarCotasResumo()
+      .then((cs) => {
+        if (alive) setCotas(cs);
+      })
+      .catch(() => {});
         if (alive) setMotores(r.motores as any);
       })
       .catch(() => {
@@ -278,7 +285,8 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
                   options={configs.map((c) => ({
                     value: c.path,
                     label: c.label,
-                    hint: c.active ? (m.switcher_atual() as string) ?? undefined : undefined,
+                    hint: [c.active ? (m.switcher_atual() as string) : '', resumoCota(cotaDaConta(cotas, c.path))]
+                      .filter(Boolean).join(' · ') || undefined,
                   }))}
                   onChange={(v) => setSelectedConfig(v)}
                 />
@@ -287,6 +295,12 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
 
             {provider === 'claude' && Object.keys(motores).length ? (
               <View style={styles.field}>
+                {selectedConfig && cotaDaConta(cotas, selectedConfig) ? (
+                  <Text style={styles.hint}>
+                    {resumoCota(cotaDaConta(cotas, selectedConfig)) ||
+                      `${m.cota_sem_cota()} ${cotaDaConta(cotas, selectedConfig)?.estado === 'indisponivel' ? '' : m.cota_precisa_entrar()}`.trim()}
+                  </Text>
+                ) : null}
                 <Text style={styles.label}>{m.comum_motor()}</Text>
                 <MenuSelect
                   value={engine}

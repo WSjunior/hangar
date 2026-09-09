@@ -9,9 +9,11 @@
            getArchivePorCwd, resumeArchivedConversation, getArchiveHistory, getBastao, passarBastao,
            type ModelOption, type Motor, type ArchiveEntry } from '@hangar/core';
   import { carregarModelos as carregarModelosDaConta, temEscolhaDeModelo, valorModelo } from '../lib/modelosPorConta';
-  import { basename, providerName, relativeTime } from '@hangar/core';
+  import { basename, providerName, relativeTime, cotaDaConta, resumoCota } from '@hangar/core';
   import { renderMarkdown } from '../lib/markdown';
   import type { ChatEvent } from '@hangar/core';
+  import { quotaFeed } from '../lib/quotaFeed.svelte';
+  import { faixaDeCota, faltaPara, motivoParado } from '../lib/cota';
   import { selectServer, getActiveId, serverColor } from '../lib/auth';
   import type { Server } from '../lib/auth';
   import type { SessionInfo, ConfigDirInfo, Provider } from '@hangar/core';
@@ -302,6 +304,22 @@
 
   // Confirmação DENTRO da tela: `confirm()` nativo tem o mesmo defeito do `prompt()` — o navegador
   // pode suprimi-lo e aí apagar vira um clique que não faz nada, ou pior, faz sem perguntar.
+  // Cota por conta no seletor (mesmo feed da pílula/faixa: /api/cotas, chave `claude:<path>`).
+  // O feed mira o servidor ATIVO, que o pickTarget já igualou ao alvo — setServidor só força a
+  // releitura quando o alvo muda. Sem leitura o hint fica vazio: a opção continua escolhível.
+  $effect(() => {
+    quotaFeed.retain();
+    return () => quotaFeed.release();
+  });
+  $effect(() => { quotaFeed.setServidor(targetServer); });
+  const cotaLinha = $derived(faixaDeCota(quotaFeed.contas) ?? []);
+  function cotaHint(c: ConfigDirInfo): string | undefined {
+    const partes = [c.active ? m.switcher_atual() : '', resumoCota(cotaDaConta(quotaFeed.contas, c.path))]
+      .filter(Boolean);
+    return partes.length ? partes.join(' · ') : undefined;
+  }
+  const cotaSelecionada = $derived(selectedConfig ? cotaDaConta(cotaLinha, selectedConfig) ?? null : null);
+
   let confirmandoApagar = $state(false);
 
   async function apagar() {
@@ -918,7 +936,7 @@
             <Select id="cfg-pick" class="field-input" ariaLabel={m.criar_conta_aria()} disabled={contaOcupada}
               value={selectedConfig ?? ''}
               opcoes={configs.map((c) => ({
-                value: c.path, label: c.label, hint: c.active ? m.switcher_atual() : undefined, title: c.path }))}
+                value: c.path, label: c.label, hint: cotaHint(c), title: c.path }))}
               onchange={(v) => { selectedConfig = v; carregarModelos(); }} />
             <button type="button" class="ghost-btn conta-add" onclick={abrirCampoConta}
               disabled={contaOcupada} aria-busy={contaOcupada}
@@ -934,6 +952,23 @@
           {#if confirmandoApagar && nomeDaSelecionada}
             <div class="conta-row conta-nova">
               <p class="conta-hint conta-confirma">
+          {#if cotaSelecionada}
+            <p class="conta-hint conta-cota" data-testid="conta-cota">
+              {#if cotaSelecionada.estado === 'lida'}
+                {#each cotaSelecionada.janelas as j, i (j.rotulo)}
+                  {#if i > 0}<span class="cota-sep">·</span>{/if}
+                  <span class="cota-jan" data-nivel={j.nivel}>{j.rotulo} {Math.round(j.pct)}%</span>
+                  {#if faltaPara(j.resetTs, quotaFeed.agora)}
+                    <span class="cota-reset">{m.rate_reseta({ quando: faltaPara(j.resetTs, quotaFeed.agora) })}</span>
+                  {/if}
+                {/each}
+              {:else if cotaSelecionada.estado === 'expirada' || cotaSelecionada.estado === 'sem_credencial'}
+                {m.cota_sem_cota()} {m.cota_precisa_entrar()}
+              {:else}
+                {m.cota_sem_cota()} {motivoParado(cotaSelecionada.motivo) ? m.cota_conta_parada() : ''}
+              {/if}
+            </p>
+          {/if}
                 {m.comum_apagar()} <strong>{nomeDaSelecionada}</strong> {m.criar_apagar_fim()}
               </p>
               <button type="button" class="ghost-btn conta-add conta-perigo" onclick={apagar}
@@ -1524,6 +1559,12 @@
     margin-bottom: var(--space-3);
   }
 
+  /* Cores por faixa = as da QuotaStrip (neutro / âmbar acima de 80% / vermelho acima de 90%). */
+  .conta-cota { display: flex; flex-wrap: wrap; gap: 0 6px; font-variant-numeric: tabular-nums; }
+  .cota-jan[data-nivel='alerta'] { color: var(--warning); }
+  .cota-jan[data-nivel='cheio'] { color: var(--error); }
+  .cota-reset { opacity: 0.7; }
+  .cota-sep { opacity: 0.5; }
   .primary-btn {
     width: 100%;
     height: 50px;
