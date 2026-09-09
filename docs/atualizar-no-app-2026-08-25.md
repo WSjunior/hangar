@@ -15,7 +15,7 @@ Metade do motor está pronta. Antes de desenhar qualquer coisa nova, vale saber 
 | Peça | Onde | O que faz |
 |---|---|---|
 | Atualização completa não interativa | `scripts/deploy.sh` | fetch, `merge --ff-only` (aborta se divergiu), `npm ci` só se o lock mudou, backup do `dist` + build + **restaura o dist antigo se o build falhar**, `uv sync` só se o lock mudou, restart só depois do build ok |
-| Reaplicar o que o pull não atualiza | `install.sh --update` / `install.ps1 -Update` | units systemd com caminho cravado, bloco de protocolo no `~/.claude/CLAUDE.md`, deps, build do front |
+| Reaplicar o que o pull não atualiza | `install.sh --update` / `install.ps1 -Update` | units systemd com caminho cravado, bloco de protocolo no `~/.claude/CLAUDE.md`, deps. O front **nunca** é compilado aqui: baixa o `dist` do CI ou fica pendência |
 | Disparo automático hoje | `scripts/post-merge.hook` | roda o installer no modo `--update` depois de todo `git pull`/merge — e recusa rodar dentro de worktree |
 | Migração de dados versão-a-versão | `backend/app/migracao_sidecars.py`, chamado em `backend/app/main.py:99` | renomeia `.claude-pocket-*` → `.hangar-*` na **subida do backend**, deixando link no caminho antigo |
 | Estado do repo por API | `backend/app/git_ops.py` | `git_summary` (branch, sujo, ahead/behind), `git_action` (pull/fetch), `push`, `reset_to`, `switch_branch`, `git_log` — já expostos em rotas e já com tela Git no app |

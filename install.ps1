@@ -846,11 +846,11 @@ function Baixar-Dist {
     # download nem foi tentado, se o CI ainda nao publicou aquele commit, ou se foi a propria arvore
     # que o desqualificou.
     if (-not (Tem 'tar')) {                        # tar.exe existe no Windows 10+; sem ele, build local
-        Nota 'compilando aqui: falta o tar.exe pra baixar o dist do CI'; return $false }
+        Nota 'dist do CI nao usado: falta o tar.exe'; return $false }
     if (-not $commit) {                            # sem git nao da pra saber de que commit e o dist
-        Nota 'compilando aqui: sem git, nao da pra saber de que commit e o dist do CI'; return $false }
+        Nota 'dist do CI nao usado: sem git, nao da pra saber de que commit ele e'; return $false }
     if ($sujo) {                                   # front editado a mao: a pessoa quer o codigo DELA na tela
-        Nota 'compilando aqui: frontend/ ou packages/ tem mudanca local - o dist do CI apagaria ela da tela'; return $false }
+        Nota 'dist do CI nao usado: frontend/ ou packages/ tem mudanca local - ele apagaria ela da tela'; return $false }
     $tmp = Join-Path "$raiz\frontend" (".dist-baixado." + [IO.Path]::GetRandomFileName())
     try {
         # TLS 1.2 explicito: o 5.1 ainda negocia TLS 1.0 por padrao em algumas maquinas e o GitHub
@@ -859,23 +859,25 @@ function Baixar-Dist {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $progAnt = $ProgressPreference
         $ProgressPreference = 'SilentlyContinue'
-        # O .sha primeiro, que sao 200 bytes: dist de OUTRO commit serve tela velha contra API nova,
-        # e esse defeito e mudo. Nao bateu (CI ainda compilando) -> build local, como sempre foi.
-        $shaRemoto = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 15 -Uri "$distUrl/frontend-dist.sha").Content
-        if ($shaRemoto.Trim() -ne $commit.Trim()) {
-            $a = $shaRemoto.Trim(); $b = $commit.Trim()
-            Nota ("compilando aqui: o dist do CI e do commit " + $a.Substring(0, [Math]::Min(8, $a.Length)) +
+        # O GitHub serve o .sha como application/octet-stream, e no 5.1 o `.Content` disso e byte[]:
+        # `.Trim()` nao existe la e a excecao caia no catch como "falhou o download".
+        $bruto = (Invoke-WebRequest -UseBasicParsing -TimeoutSec 15 -Uri "$distUrl/frontend-dist.sha").Content
+        if ($bruto -is [byte[]]) { $bruto = [Text.Encoding]::UTF8.GetString($bruto) }
+        $a = "$bruto".Trim(); $b = "$commit".Trim()
+        # Commit diferente NAO cancela mais o download: o dist mais recente do CI e melhor que um
+        # build local, que e o passo mais fragil da instalacao. So dizemos de que commit ele e.
+        if ($a -ne $b) {
+            Nota ("o dist do CI e do commit " + $a.Substring(0, [Math]::Min(8, $a.Length)) +
                   " e este checkout esta em " + $b.Substring(0, [Math]::Min(8, $b.Length)))
-            return $false
         }
         $tar = "$tmp.tar.gz"
         Invoke-WebRequest -UseBasicParsing -TimeoutSec 180 -Uri "$distUrl/frontend-dist.tar.gz" -OutFile $tar | Out-Null
         New-Item -ItemType Directory -Force -Path $tmp | Out-Null
         & tar -xzf $tar -C $tmp
         if ($LASTEXITCODE -ne 0) {
-            Nota 'compilando aqui: o frontend-dist.tar.gz do CI nao descompactou'; return $false }
+            Nota 'dist do CI nao usado: o frontend-dist.tar.gz nao descompactou'; return $false }
         if (-not (Test-Path (Join-Path $tmp 'index.html'))) {
-            Nota 'compilando aqui: o dist do CI veio sem index.html'; return $false }
+            Nota 'dist do CI nao usado: ele veio sem index.html'; return $false }
         # Extrai ao LADO e so entao troca: download interrompido no meio nao pode deixar a maquina
         # sem front nenhum, ja que este caminho, ao voltar $true, faz o build local nem rodar.
         if (Test-Path $dist) { Remove-Item -Recurse -Force (Split-Path -Parent $dist) -ErrorAction SilentlyContinue }
@@ -884,7 +886,7 @@ function Baixar-Dist {
     } catch {
         # A excecao junto, e nao so a lista de suspeitos: 404 (o CI esta trocando o asset agora),
         # DNS e TLS chegam aqui pela mesma porta e pedem conserto diferente.
-        Nota ("compilando aqui: falhou o download do dist do CI - " + $_.Exception.Message)
+        Nota ("dist do CI nao usado: falhou o download - " + $_.Exception.Message)
         return $false
     } finally {
         if ($null -ne $progAnt) { $ProgressPreference = $progAnt }
@@ -897,7 +899,14 @@ if ($precisa -and (Baixar-Dist)) {
     # As DEPENDENCIAS continuam necessarias mesmo com o dist pronto: a tarefa hangar-frontend roda
     # `npm run preview`, que e o vite servindo o dist — sem node_modules ela nao sobe. Pular o
     # `npm ci` aqui deixaria a instalacao com front compilado e servico morto.
-    if (-not (Test-Path $modulos)) {
+    if ((-not (Test-Path $modulos)) -and $Update) {
+        # Atualizacao nao instala nada de npm. E so a tarefa hangar-frontend (legado) que precisa
+        # do node_modules; sem ela, o backend serve o dist e nao falta nada.
+        if ($temTarefaFront) {
+            Falta 'frontend\node_modules ausente - a tarefa hangar-frontend nao sobe; rode .\install.ps1 sem -Update'
+            $script:pendencias += 'frontend'
+        }
+    } elseif (-not (Test-Path $modulos)) {
         $eapAnt2 = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         # RAIZ, nao frontend (`frontend` nao tem lockfile proprio, e o `@hangar/core` so existe como
@@ -920,7 +929,14 @@ if ($precisa -and (Baixar-Dist)) {
     $precisa = $false
 }
 
-if ($precisa) {
+if ($precisa -and $Update) {
+    # Atualizacao NUNCA compila o front. O build local e o passo mais fragil que existe aqui: nesta
+    # VM ele nem roda, porque o `npm ci` de um lock feito no Linux nao traz o
+    # @rollup/rollup-win32-x64-msvc e o vite morre. Sem o dist do CI a tela fica na versao anterior,
+    # e o resto da atualizacao (backend, servicos) segue.
+    Falta 'frontend nao atualizado: o dist do CI nao pode ser baixado - a tela continua na versao anterior'
+    $script:pendencias += 'frontend'
+} elseif ($precisa) {
     # Exit code de CADA etapa, e nao roda-e-assume: o comentario abaixo prometia que a marca so era
     # gravada depois do build dar certo, mas nada CONFERIA o resultado - `npm ci` e `npm run build`
     # iam sem checagem. Medido em producao (post-merge de 30/07 07:37): o npm ci nao populou o

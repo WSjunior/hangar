@@ -327,25 +327,25 @@ DIST_URL=https://github.com/jeffer1312/hangar/releases/download/dist-latest
 # Cada desistência diz o MOTIVO: só o sucesso falava, então quem via o `npm ci` de um minuto e meio
 # rodando não tinha como saber se o download nem foi tentado, se o CI ainda não publicou aquele
 # commit, ou se foi a própria árvore que o desqualificou.
-baixar_dist() { # 0 = frontend/dist agora tem o build DESTE commit
+baixar_dist() { # 0 = frontend/dist agora tem o build publicado pelo CI
   command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1 \
-    || { nota "compilando aqui: falta curl ou tar pra baixar o dist do CI"; return 1; }
+    || { nota "dist do CI não usado: falta curl ou tar"; return 1; }
   local sha_local sha_remoto tmp
   sha_local=$(git rev-parse HEAD 2>/dev/null) \
-    || { nota "compilando aqui: sem git, não dá pra saber de que commit é o dist do CI"; return 1; }
+    || { nota "dist do CI não usado: sem git, não dá pra saber de que commit ele é"; return 1; }
   # Árvore suja no front = quem está editando quer o SEU código na tela, não o do CI. `packages`
   # junto porque metade das fontes da tela mora no `@hangar/core`: olhando só `frontend`, uma
   # edição em api.ts/format.ts seria apagada por um dist do CI que não a contém.
   [ -z "$(git status --porcelain -- frontend packages 2>/dev/null)" ] \
-    || { nota "compilando aqui: frontend/ ou packages/ tem mudança local — o dist do CI apagaria ela da tela"; return 1; }
-  # O .sha primeiro, que são 200 bytes: dist de OUTRO commit serve tela velha contra API nova, e
-  # esse defeito é mudo. Não bateu (CI ainda compilando, push agorinha) → cai no build local.
+    || { nota "dist do CI não usado: frontend/ ou packages/ tem mudança local — ele apagaria ela da tela"; return 1; }
   sha_remoto=$(curl -fsSL --max-time 15 "$DIST_URL/frontend-dist.sha" 2>/dev/null) \
-    || { nota "compilando aqui: não consegui ler o frontend-dist.sha do CI (rede ou release fora)"; return 1; }
+    || { nota "dist do CI não usado: não consegui ler o frontend-dist.sha (rede ou release fora)"; return 1; }
+  # Commit diferente NÃO cancela mais o download: o dist mais recente do CI é melhor que um build
+  # local, que é o passo mais frágil da instalação. Só dizemos de que commit ele é.
   [ "$sha_remoto" = "$sha_local" ] \
-    || { nota "compilando aqui: o dist do CI é do commit ${sha_remoto:0:8} e este checkout está em ${sha_local:0:8}"; return 1; }
+    || nota "o dist do CI é do commit ${sha_remoto:0:8} e este checkout está em ${sha_local:0:8}"
   tmp=$(mktemp -d "frontend/.dist-baixado.XXXXXX") \
-    || { nota "compilando aqui: não consegui criar a pasta temporária em frontend/ (permissão ou disco cheio)"; return 1; }
+    || { nota "dist do CI não usado: não consegui criar a pasta temporária em frontend/ (permissão ou disco cheio)"; return 1; }
   # Extrai ao LADO do dist e só então troca: um download interrompido no meio não pode deixar a
   # máquina sem front nenhum — o build local depois nem roda, porque este caminho já disse "ok".
   if curl -fsSL --max-time 180 "$DIST_URL/frontend-dist.tar.gz" 2>/dev/null | tar -xzf - -C "$tmp" \
@@ -353,7 +353,7 @@ baixar_dist() { # 0 = frontend/dist agora tem o build DESTE commit
     rm -rf frontend/dist && mv "$tmp" frontend/dist && return 0
   fi
   rm -rf "$tmp"
-  nota "compilando aqui: o frontend-dist.tar.gz do CI não baixou ou veio incompleto"
+  nota "dist do CI não usado: o frontend-dist.tar.gz não baixou ou veio incompleto"
   return 1
 }
 say "4/8 Frontend"
@@ -377,11 +377,15 @@ if [ -f "$DIST" ] && [ -z "$(find frontend/src packages/core/src package-lock.js
   ok "frontend já buildado e atualizado (nada mudou desde o último build)"
 elif baixar_dist; then
   ok "dist baixado do CI (não precisou compilar aqui)"
+elif [ "$UPDATE" = 1 ]; then
+  # Atualização NUNCA compila o front. O build local é o passo mais frágil que existe aqui — na VM
+  # Windows ele nem roda, porque o `npm ci` de um lock feito no Linux não traz a dependência nativa
+  # do rollup e o build morre. Sem o dist do CI, a tela fica na versão anterior e o resto segue.
+  anota_problema "frontend não atualizado: o dist do CI não pôde ser baixado — a tela continua na versão anterior"
 else
-  # Sem --silent no --update (o modo que o BOTÃO Atualizar usa): a caixinha da tela mostra esta
-  # saída ao vivo, e com --silent o npm não imprime nada — a tela fica idêntica a uma travada
-  # durante o minuto do `npm ci`. No modo interativo o --silent fica, pra não poluir o terminal.
-  QUIETO=--silent; [ "$UPDATE" = 1 ] && QUIETO=
+  # Só o modo interativo chega aqui (o --update parou no ramo acima), então o --silent é sempre bom:
+  # ele existe pra não poluir o terminal de quem instala.
+  QUIETO=--silent
   # A flag vai ANTES do nome do script: no npm 11 `npm run build --silent` não é mais consumida
   # pelo npm, ela é repassada ao script e chega no `vite build`, que morre com CACError.
   # `npm ci` na RAIZ (`frontend` não tem lockfile próprio, e o `@hangar/core` só existe como link
