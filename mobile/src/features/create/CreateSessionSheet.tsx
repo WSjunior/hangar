@@ -77,10 +77,10 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
   const [provider, setProvider] = useState<Provider>('claude');
 
   const [configs, setConfigs] = useState<ConfigDirInfo[]>([]);
-  const [selectedConfig, setSelectedConfig] = useState<string | null>(null);
-  const [motores, setMotores] = useState<Record<string, { label?: string; model?: string }>>({});
   // Cota por conta no seletor (/api/cotas, chave `claude:<path>`); falha = lista sem número.
   const [cotas, setCotas] = useState<CotaContaResumo[]>([]);
+  const [selectedConfig, setSelectedConfig] = useState<string | null>(null);
+  const [motores, setMotores] = useState<Record<string, { label?: string; model?: string }>>({});
   const [engine, setEngine] = useState('');
   const [modelos, setModelos] = useState<ModelOption[]>([]);
   const [modelo, setModelo] = useState('');
@@ -104,13 +104,13 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
       .catch(() => {
         if (alive) setConfigs([]);
       });
-    void getEngines()
-      .then((r) => {
     void listarCotasResumo()
       .then((cs) => {
         if (alive) setCotas(cs);
       })
       .catch(() => {});
+    void getEngines()
+      .then((r) => {
         if (alive) setMotores(r.motores as any);
       })
       .catch(() => {
@@ -290,17 +290,17 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
                   }))}
                   onChange={(v) => setSelectedConfig(v)}
                 />
-              </View>
-            ) : null}
-
-            {provider === 'claude' && Object.keys(motores).length ? (
-              <View style={styles.field}>
                 {selectedConfig && cotaDaConta(cotas, selectedConfig) ? (
                   <Text style={styles.hint}>
                     {resumoCota(cotaDaConta(cotas, selectedConfig)) ||
                       `${m.cota_sem_cota()} ${cotaDaConta(cotas, selectedConfig)?.estado === 'indisponivel' ? '' : m.cota_precisa_entrar()}`.trim()}
                   </Text>
                 ) : null}
+              </View>
+            ) : null}
+
+            {provider === 'claude' && Object.keys(motores).length ? (
+              <View style={styles.field}>
                 <Text style={styles.label}>{m.comum_motor()}</Text>
                 <MenuSelect
                   value={engine}

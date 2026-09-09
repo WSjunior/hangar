@@ -483,6 +483,11 @@ export function listClaudeConfigs(): Promise<ConfigDirInfo[]> {
   return apiFetch<ConfigDirInfo[]>('/api/claude-configs');
 }
 
+/** Cota de cada credencial do servidor ativo (backend/app/cotas.py). Ver `cotaResumo`. */
+export function listarCotasResumo(): Promise<CotaContaResumo[]> {
+  return apiFetch<CotaContaResumo[]>('/api/cotas');
+}
+
 export function createSession(
   name: string,
   cwd?: string,
@@ -512,11 +517,6 @@ export function createSession(
 // Só leitura: o GET não cria nem grava nada, então serve de AMOSTRA (a origem segue trabalhando).
 export async function getBastao(name: string): Promise<string> {
   const res = await fetch(`${apiEnv().getBaseUrl()}/api/sessions/${encodeURIComponent(name)}/bastao`, {
-/** Cota de cada credencial do servidor ativo (backend/app/cotas.py). Ver `cotaResumo`. */
-export function listarCotasResumo(): Promise<CotaContaResumo[]> {
-  return apiFetch<CotaContaResumo[]>('/api/cotas');
-}
-
     headers: authHeaders(),
   });
   await ensureOk(res);

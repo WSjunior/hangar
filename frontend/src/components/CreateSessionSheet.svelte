@@ -11,9 +11,9 @@
   import { carregarModelos as carregarModelosDaConta, temEscolhaDeModelo, valorModelo } from '../lib/modelosPorConta';
   import { basename, providerName, relativeTime, cotaDaConta, resumoCota } from '@hangar/core';
   import { renderMarkdown } from '../lib/markdown';
-  import type { ChatEvent } from '@hangar/core';
   import { quotaFeed } from '../lib/quotaFeed.svelte';
   import { faixaDeCota, faltaPara, motivoParado } from '../lib/cota';
+  import type { ChatEvent } from '@hangar/core';
   import { selectServer, getActiveId, serverColor } from '../lib/auth';
   import type { Server } from '../lib/auth';
   import type { SessionInfo, ConfigDirInfo, Provider } from '@hangar/core';
@@ -302,8 +302,6 @@
       : null,
   );
 
-  // Confirmação DENTRO da tela: `confirm()` nativo tem o mesmo defeito do `prompt()` — o navegador
-  // pode suprimi-lo e aí apagar vira um clique que não faz nada, ou pior, faz sem perguntar.
   // Cota por conta no seletor (mesmo feed da pílula/faixa: /api/cotas, chave `claude:<path>`).
   // O feed mira o servidor ATIVO, que o pickTarget já igualou ao alvo — setServidor só força a
   // releitura quando o alvo muda. Sem leitura o hint fica vazio: a opção continua escolhível.
@@ -320,6 +318,8 @@
   }
   const cotaSelecionada = $derived(selectedConfig ? cotaDaConta(cotaLinha, selectedConfig) ?? null : null);
 
+  // Confirmação DENTRO da tela: `confirm()` nativo tem o mesmo defeito do `prompt()` — o navegador
+  // pode suprimi-lo e aí apagar vira um clique que não faz nada, ou pior, faz sem perguntar.
   let confirmandoApagar = $state(false);
 
   async function apagar() {
@@ -949,9 +949,6 @@
                 aria-label={m.criar_apagar_conta_aria({ nome: nomeDaSelecionada })}>{m.criar_apagar()}</button>
             {/if}
           </div>
-          {#if confirmandoApagar && nomeDaSelecionada}
-            <div class="conta-row conta-nova">
-              <p class="conta-hint conta-confirma">
           {#if cotaSelecionada}
             <p class="conta-hint conta-cota" data-testid="conta-cota">
               {#if cotaSelecionada.estado === 'lida'}
@@ -969,6 +966,9 @@
               {/if}
             </p>
           {/if}
+          {#if confirmandoApagar && nomeDaSelecionada}
+            <div class="conta-row conta-nova">
+              <p class="conta-hint conta-confirma">
                 {m.comum_apagar()} <strong>{nomeDaSelecionada}</strong> {m.criar_apagar_fim()}
               </p>
               <button type="button" class="ghost-btn conta-add conta-perigo" onclick={apagar}
@@ -1552,6 +1552,12 @@
   .conta-row .conta-perigo:hover:not(:disabled) { color: var(--error); border-color: var(--error); }
   .conta-nova :global(.field-input) { height: 40px; }
   .conta-hint { margin: var(--space-2) 0 0; font-size: 12px; color: var(--text-secondary); }
+  /* Cores por faixa = as da QuotaStrip (neutro / âmbar acima de 80% / vermelho acima de 90%). */
+  .conta-cota { display: flex; flex-wrap: wrap; gap: 0 6px; font-variant-numeric: tabular-nums; }
+  .cota-jan[data-nivel='alerta'] { color: var(--warning); }
+  .cota-jan[data-nivel='cheio'] { color: var(--error); }
+  .cota-reset { opacity: 0.7; }
+  .cota-sep { opacity: 0.5; }
 
   .error-msg {
     font-size: var(--text-sm);
@@ -1559,12 +1565,6 @@
     margin-bottom: var(--space-3);
   }
 
-  /* Cores por faixa = as da QuotaStrip (neutro / âmbar acima de 80% / vermelho acima de 90%). */
-  .conta-cota { display: flex; flex-wrap: wrap; gap: 0 6px; font-variant-numeric: tabular-nums; }
-  .cota-jan[data-nivel='alerta'] { color: var(--warning); }
-  .cota-jan[data-nivel='cheio'] { color: var(--error); }
-  .cota-reset { opacity: 0.7; }
-  .cota-sep { opacity: 0.5; }
   .primary-btn {
     width: 100%;
     height: 50px;
