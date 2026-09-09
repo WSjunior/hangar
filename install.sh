@@ -91,7 +91,7 @@ if { exec 3</dev/tty; } 2>/dev/null; then TEM_TTY=1; else TEM_TTY=0; fi
 # Quatro sabores, e a diferença é quem decide:
 #  ask       -> padrão SIM sem perguntar (--avancado pergunta). Sem terminal: NÃO.
 #  ask_senha -> vai pedir sudo: SEMPRE pergunta (com terminal), mesmo no padrão. --yes: sim.
-#  ask_extra -> extra de terceiro/ambiente: padrão NÃO; só --avancado pergunta.
+#  ask_extra -> extra de terceiro/ambiente: padrão NÃO; só --avancado pergunta. --yes: sim.
 _pergunta() {
   if [ "$TEM_TTY" = 0 ]; then
     printf '  \033[2m%s [S/n] -> sem terminal para responder, assumindo NÃO\033[0m\n' "$1"
@@ -109,7 +109,7 @@ ask() {
   _pergunta "$1"
 }
 ask_senha() { [ "$YES" = 1 ] && return 0; _pergunta "$1"; }
-ask_extra() { [ "$AVANCADO" = 0 ] && return 1; _pergunta "$1"; }
+ask_extra() { [ "$YES" = 1 ] && return 0; [ "$AVANCADO" = 0 ] && return 1; _pergunta "$1"; }
 
 PENDENTE=()
 
@@ -150,9 +150,10 @@ fi
 gera_token() { openssl rand -hex 24 2>/dev/null || python3 -c 'import secrets; print(secrets.token_hex(24))'; }
 if [ "$UPDATE" = 0 ] && [ "$CHECK" = 0 ]; then
 say "0/8 Antes de começar"
-echo "  Duas perguntas agora, e depois o instalador segue sozinho até o fim."
+echo "  No máximo duas perguntas agora, e depois o instalador segue sozinho até o fim."
 echo "  Ele pode pedir sua senha de administrador (pergunta antes, cada vez) para:"
-echo "  instalar o tmux, liberar a porta do Wi-Fi e, se você quiser, o Tailscale."
+echo "  instalar o programa que mantém as sessões abertas (tmux), liberar a porta do"
+echo "  Wi-Fi e, se você quiser, o Tailscale."
 if [ -f backend/.env ] && grep -q '^CP_AUTH_TOKEN=' backend/.env; then
   ok "backend/.env já tem CP_AUTH_TOKEN (mantido)"
 elif [ "$YES" = 1 ]; then
@@ -206,9 +207,9 @@ else
   _pergunta "Usar fora de casa (instalar Tailscale)?" && QUER_TAILSCALE=1 || true
 fi
 fi
+# Sem passo 0 (--update, --check) ninguém respondeu nada, e o padrão é NÃO mexer no Tailscale:
+# o --update é o hook do `git pull`, onde um `sudo tailscale up` esperaria senha por 5 minutos.
 QUER_TAILSCALE=${QUER_TAILSCALE:-0}
-# No --update ninguém responde nada; o 6/8 nem roda, mas a variável precisa refletir a máquina.
-if [ "$UPDATE" = 1 ] && command -v tailscale >/dev/null; then QUER_TAILSCALE=1; fi
 
 # Instala o que cai no $HOME sem root. Separado de propósito do tier que precisa de sudo:
 # um instalador que pede senha sem avisar é como se perde a confiança de quem está rodando.
@@ -274,7 +275,8 @@ command -v git >/dev/null && ok "git" || falta "git ausente — o painel de git 
 
 # Tailscale entra aqui, junto das outras dependências: a decisão já foi tomada no passo 0, e o
 # 6/8 só publica. Falhar aqui não derruba a instalação — o app ainda funciona no Wi-Fi de casa.
-if [ "$QUER_TAILSCALE" = 1 ] && ! command -v tailscale >/dev/null; then
+# `UPDATE = 0` nos dois: o --update é o hook do `git pull` e nada ali pode parar pedindo senha.
+if [ "$UPDATE" = 0 ] && [ "$QUER_TAILSCALE" = 1 ] && ! command -v tailscale >/dev/null; then
   nota "Tailscale: instalação do sistema."
   if ask_senha "Instalar o Tailscale agora (vai pedir a senha)?"; then
     curl -fsSL https://tailscale.com/install.sh | sh && command -v tailscale >/dev/null \
@@ -284,7 +286,7 @@ if [ "$QUER_TAILSCALE" = 1 ] && ! command -v tailscale >/dev/null; then
     QUER_TAILSCALE=0; nota "pulado — o celular entra só pelo Wi-Fi do PC"
   fi
 fi
-if [ "$QUER_TAILSCALE" = 1 ] && ! tailscale status >/dev/null 2>&1; then
+if [ "$UPDATE" = 0 ] && [ "$QUER_TAILSCALE" = 1 ] && ! tailscale status >/dev/null 2>&1; then
   echo "  Falta entrar no Tailscale: vai abrir um link, faça login no navegador (até 5 min)."
   if ask_senha "Entrar agora (vai pedir a senha)?"; then
     timeout 300 sudo tailscale up || anota_problema "login no Tailscale não concluiu — depois: sudo tailscale up e ./install.sh"
