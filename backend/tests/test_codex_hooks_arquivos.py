@@ -113,3 +113,60 @@ def test_link_pendurado_e_refeito(tmp_path):
 
     assert criados == ["x.py"] and orfaos == []
     assert (codex / "hooks" / "x.py").read_text() == "ok\n"
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_materializa_subpastas_sem_confundir_arquivos_homonimos(tmp_path, monkeypatch, windows):
+    if not windows and os.name == "nt":
+        pytest.skip("symlink exige privilégio no Windows")
+    monkeypatch.setattr(mod, "_WINDOWS", windows)
+    home, codex = tmp_path / "home", tmp_path / "home" / ".codex"
+    origem = home / ".claude" / "hooks"
+    for pasta in ("gitnexus", "outro"):
+        fonte = origem / pasta / "hook.cjs"
+        fonte.parent.mkdir(parents=True)
+        fonte.write_text(pasta)
+    (origem / "hook.cjs").write_text("não é este arquivo")
+    destinos = [codex / "hooks" / pasta / "hook.cjs" for pasta in ("gitnexus", "outro")]
+    doc = _doc(*(f"node '{p}'" for p in destinos))
+
+    assert mod.faltantes(doc, codex) == destinos
+    assert mod.materializar(codex, home, doc) == (["gitnexus/hook.cjs", "outro/hook.cjs"], [])
+    for pasta, destino in zip(("gitnexus", "outro"), destinos):
+        assert destino.read_text() == pasta
+        assert destino.is_symlink() is (not windows)
+    assert mod.materializar(codex, home, doc) == ([], [])
+
+    (origem / "gitnexus" / "hook.cjs").write_text("atualizado")
+    esperado = (["gitnexus/hook.cjs"], []) if windows else ([], [])
+    assert mod.materializar(codex, home, doc) == esperado
+    assert destinos[0].read_text() == "atualizado"
+    assert destinos[1].read_text() == "outro"
+
+
+def test_subpasta_sem_fonte_informa_caminho_relativo(tmp_path):
+    home, codex = tmp_path / "home", tmp_path / "home" / ".codex"
+    origem = home / ".claude" / "hooks"
+    origem.mkdir(parents=True)
+    (origem / "hook.cjs").write_text("homônimo da raiz")
+    destino = codex / "hooks" / "gitnexus" / "hook.cjs"
+
+    assert mod.materializar(codex, home, _doc(f"node '{destino}'")) == ([], ["gitnexus/hook.cjs"])
+    assert not destino.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink exige privilégio no Windows")
+def test_subpasta_linkada_para_fora_nao_autoriza_escrita(tmp_path):
+    home, codex = tmp_path / "home", tmp_path / "home" / ".codex"
+    origem = home / ".claude" / "hooks" / "gitnexus"
+    origem.mkdir(parents=True)
+    (origem / "hook.cjs").write_text("fonte")
+    (codex / "hooks").mkdir(parents=True)
+    fora = tmp_path / "fora"
+    fora.mkdir()
+    (codex / "hooks" / "gitnexus").symlink_to(fora, target_is_directory=True)
+    doc = _doc(f"node '{codex}/hooks/gitnexus/hook.cjs'")
+
+    assert mod.faltantes(doc, codex) == []
+    assert mod.materializar(codex, home, doc) == ([], [])
+    assert not (fora / "hook.cjs").exists()

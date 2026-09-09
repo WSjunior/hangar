@@ -324,11 +324,18 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       }
     });
 
-    // Stepper nativo (Claude): o hook askq_capture.py publica a pergunta e o SSE a entrega.
+    // O Codex publica a mesma solicitação ao reconectar; só uma nova identidade reabre a folha.
     es.addEventListener('ask_question', (e) => {
       try {
-        const payload = JSON.parse(e.data as string) as AskQuestionPayload;
+        const payload = JSON.parse(e.data as string) as AskQuestionPayload | null;
+        if (!payload) {
+          useChatStore.setState({ askPayload: null, askOpen: false, askPiId: null });
+          return;
+        }
         if (!Array.isArray(payload.questions) || !payload.questions.length) return;
+        const current = useChatStore.getState().askPayload;
+        if (payload.provider === 'codex' && current?.provider === 'codex'
+            && payload.request_id === current.request_id) return;
         useChatStore.setState({ askPayload: payload, askOpen: true, askPiId: null });
       } catch {
         // payload ilegível: o OptionButtons cru segue como saída

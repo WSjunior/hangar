@@ -77,6 +77,7 @@ export default function ChatScreen() {
   const sseRecusado = chat.use((s) => s.sseRecusado);
   const pending = chat.use((s) => s.pending);
   const askOpen = chat.use((s) => s.askOpen);
+  const askPayload = chat.use((s) => s.askPayload);
   const askPiId = chat.use((s) => s.askPiId);
   const askPiDismissed = chat.use((s) => s.askPiDismissed);
 
@@ -241,6 +242,11 @@ export default function ChatScreen() {
           </View>
         ) : null}
         {!servidorSumiu ? <StatsStrip stats={stats} /> : null}
+        {!servidorSumiu && !askOpen && askPayload?.provider === 'codex' ? (
+          <Text style={styles.retry} onPress={() => chat.openAsk(askPayload)} accessibilityRole="button">
+            {m.ask_perguntas()}
+          </Text>
+        ) : null}
         {!servidorSumiu ? <TuiPill serverId={serverId} name={name} overlay={!!stateEvent?.overlay} login={!!stateEvent?.login} /> : null}
         {!servidorSumiu ? <Composer serverId={serverId} name={name} draft={draft} /> : null}
       </KeyboardAvoidingView>

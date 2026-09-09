@@ -464,7 +464,7 @@ class CodexAdapter:
             # `or` e nao setdefault: o attach() ja criou as chaves com None, entao setdefault nunca
             # sobrescreveria e o 🤖 sumia da statusline (visto na verificacao ao vivo).
             sess["default_model"] = sess.get("default_model") or result.get("model")
-            sess["default_effort"] = sess.get("default_effort") or _effort_da_thread(result)
+            sess["default_effort"] = _effort_da_thread(result)
             _log.info("codex assinado: thread=%s name=%s", sess["thread_id"], name)
             return
 
@@ -512,7 +512,7 @@ class CodexAdapter:
         client = AppServerClient()
         try:
             await client.connect(meta["endpoint"])
-            await client.request("initialize", {"clientInfo": CLIENT_INFO, "capabilities": None})
+            await client.request("initialize", {"clientInfo": CLIENT_INFO, "capabilities": {"experimentalApi": True}})
         # Estreito de proposito: sao as falhas de CONVERSA com o servidor, as unicas que significam
         # "sessao morta". Um `except Exception` aqui transformaria erro de programacao (um nome
         # errado, um shape mudado) em "sessao morta" no log — a falha viraria um card sumindo, sem
@@ -574,7 +574,7 @@ class CodexAdapter:
             client = AppServerClient()
             try:
                 endpoint = await client.start_shared()
-                await client.request("initialize", {"clientInfo": CLIENT_INFO, "capabilities": None})
+                await client.request("initialize", {"clientInfo": CLIENT_INFO, "capabilities": {"experimentalApi": True}})
                 result = await client.request("thread/resume", {
                     "threadId": meta["thread_id"],
                     "cwd": meta.get("cwd"),
@@ -667,6 +667,23 @@ class CodexAdapter:
     def state_monitor(self, name: str, sid_get: Callable[[], str]) -> AsyncIterator[StateEvent]:
         return self._state_stream(name)
 
+    def _question_state(self, name: str, sess: dict) -> StateEvent:
+        from .questions import pending
+        question = pending(sess["client"], sess["thread_id"])
+        return StateEvent(session=name, state="awaiting_input" if question else sess["state"],
+                          status_line=self._status_line(sess), codex_mode=sess.get("mode"),
+                          codex_question=question)
+
+    async def answer_questions(self, name: str, request_id: int | str | None, answers: list[dict]) -> None:
+        from .questions import pending, response
+        client = await self.ensure_running(name)
+        if client is None:
+            raise ValueError("A sessão não está disponível.")
+        question = pending(client, self._sessions[name]["thread_id"])
+        if question is None or request_id != question["request_id"] or type(request_id) is not type(question["request_id"]):
+            raise ValueError("A pergunta já foi respondida ou cancelada.")
+        await client.respond(request_id, response(question, answers))
+
     async def _state_stream(self, name: str) -> AsyncIterator[StateEvent]:
         try:
             client = await self.ensure_running(name)
@@ -699,7 +716,11 @@ class CodexAdapter:
         try:
             # Retrato do que ja se sabe: quem reabre o chat no meio de um turno nao espera a
             # proxima notification pra ver estado, contexto e limites.
-            yield StateEvent(session=name, state=sess["state"], status_line=self._status_line(sess))
+            try:
+                await self.read_settings(name)
+            except Exception:
+                _log.warning("codex: não foi possível atualizar os controles de %s", name)
+            yield self._question_state(name, sess)
             while True:
                 ev = await fila.get()
                 if ev is None:
@@ -759,6 +780,16 @@ class CodexAdapter:
         async for notif in client.notifications():
             mapped = map_state(notif)
             method = notif.get("method")
+            settings_updated = method == "thread/settings/updated"
+            if settings_updated:
+                params = notif.get("params") or {}
+                if params.get("threadId") != sess["thread_id"]:
+                    continue
+                settings = params.get("threadSettings") or {}
+                sess["model"] = settings.get("model")
+                sess["effort"] = sess["default_effort"] = settings.get("effort")
+                sess["mode"] = (settings.get("collaborationMode") or {}).get("mode", "default")
+                sess["settings_revision"] = sess.get("settings_revision", 0) + 1
             if method == "turn/started":
                 buf = ""  # novo turno -- zera pra nao vazar o texto do turno anterior
                 # guarda o turnId do turno em voo (turn/interrupt exige threadId+turnId).
@@ -815,7 +846,8 @@ class CodexAdapter:
                 sess["token_usage"] = mapped.token_usage
             if mapped.rate_limits is not None:
                 sess["rate_limits"] = mapped.rate_limits
-            if mapped.state is None and mapped.token_usage is None and mapped.rate_limits is None:
+            question_updated = method in ("item/tool/requestUserInput", "serverRequest/resolved")
+            if mapped.state is None and mapped.token_usage is None and mapped.rate_limits is None and not settings_updated and not question_updated:
                 # Neutro (method desconhecido) ou so preview_delta: StateEvent nao tem campo de
                 # preview -> nada a emitir aqui (o preview ja foi empurrado acima, fora do
                 # StateEvent -- efeito colateral adicional, nao substitui).
@@ -824,8 +856,7 @@ class CodexAdapter:
             # dict quente + token_usage/rate_limits guardados acima) -- nao so quando ESTE notif
             # trouxe token/limite novo, senao o front perderia contexto/limites em StateEvents de
             # working/idle puros (a maioria).
-            espalhar(StateEvent(session=name, state=sess["state"],
-                                status_line=self._status_line(sess)))
+            espalhar(self._question_state(name, sess))
         # notifications() terminou = EOF do app-server (o read loop empurra o sentinela ao morrer).
         # Dead-detection (backlog T4-m2): emite dead pra o front + limpa a sessao da memoria (o
         # sidecar duravel fica; ensure_running reabre num acesso futuro). getattr: um client FAKE de
@@ -845,21 +876,18 @@ class CodexAdapter:
         assinatura no lugar (_subscribe), `turn/start` deixa terminal + celular + rollout como uma
         conversa so, e o caminho Claude (terminal_input) volta a nao ser tocado por Codex nenhum.
 
-        model/effort vao no PROPRIO turno (TurnStartParams aceita os dois, "for this turn and
-        subsequent turns") -> a escolha do usuario aplica sem matar/recriar a TUI.
+        Modelo, esforço e modo são herdados da thread: reenviar valores locais sobrescreveria
+        uma mudança mais recente feita pelo terminal.
         """
         client = await self.ensure_running(name)
         if client is None or not await self.deliverable(name):
             return "deferred"
         sess = self._sessions[name]
         params: dict = {"threadId": sess["thread_id"],
-                        "input": [{"type": "text", "text": text}]}
-        if sess.get("model"):
-            params["model"] = sess["model"]
-        if sess.get("effort"):
-            params["effort"] = sess["effort"]
+                        "input": await self._user_input(name, text)}
         try:
-            await client.request("turn/start", params)
+            result = await client.request("turn/start", params)
+            sess["turn_id"] = (result.get("turn") or {}).get("id")
         except Exception:
             # app-server morto/timeout: NAO engolir -- o caller (api/_send_one_codex, drain) trata
             # "deferred" reenfileirando, entao a msg nao se perde silenciosamente.
@@ -911,6 +939,9 @@ class CodexAdapter:
         sess = self._sessions.get(name)
         if sess is None:
             return True
+        from .questions import pending
+        if pending(sess.get("client"), sess.get("thread_id", "")) is not None:
+            return False
         if not sess["in_progress"]:
             return True
         # O marcador do hook e uma fonte INDEPENDENTE do nosso estado em memoria, e quem o escreve e
@@ -1030,20 +1061,98 @@ class CodexAdapter:
         ]
 
     async def set_model(self, name: str, model: Optional[str], effort: Optional[str]) -> None:
-        """Grava a escolha de modelo/effort da sessao: dict quente (se anexada) + sidecar duravel
-        (sobrevive ao restart). Vale a partir do PROXIMO turno.
-
-        NAO reabre a TUI. TurnStartParams aceita `model` e `effort` ("for this turn and subsequent
-        turns"), entao send_prompt ja carrega a escolha e ela vale pra thread inteira -- terminal
-        incluso, que compartilha a thread. A versao anterior matava e recriava a pane pra aplicar
-        a flag, o que (a) piscava a TUI no meio da conversa e (b) abria uma janela em que o watcher
-        de tmux via a sessao sumida e destruia a sessao inteira (sidecar + fila + app-server).
-        """
-        sess = self._sessions.get(name)
-        if sess is not None:
-            sess["model"] = model
-            sess["effort"] = effort
+        """Atualiza a thread viva; futuros turnos herdam inclusive mudanças feitas no terminal."""
+        client = await self.ensure_running(name)
+        if client is None:
+            raise RuntimeError("Sessão Codex indisponível")
+        sess = self._sessions[name]
+        await client.request("thread/settings/update", {
+            "threadId": sess["thread_id"], "model": model, "effort": effort,
+        })
+        sess["model"], sess["effort"] = model, effort
+        sess["default_effort"] = effort
         codex_sessions.update_model(name, model, effort)
+
+    async def read_settings(self, name: str) -> dict:
+        client = await self.ensure_running(name)
+        if client is None:
+            raise RuntimeError("Sessão Codex indisponível")
+        sess = self._sessions[name]
+        revision = sess.get("settings_revision", 0)
+        result = await client.request("thread/read", {"threadId": sess["thread_id"], "includeTurns": False})
+        thread = result.get("thread") or {}
+        if revision == sess.get("settings_revision", 0):
+            if thread.get("model"):
+                sess["model"] = thread["model"]
+            if "reasoningEffort" in thread:
+                sess["effort"] = sess["default_effort"] = thread["reasoningEffort"]
+        # thread/read não informa o modo; o último turno pode anteceder uma troca pelo terminal.
+        return {**self.current_model(name), "mode": sess.get("mode")}
+
+    async def set_mode(self, name: str, mode: str) -> dict:
+        if mode not in {"default", "plan"}:
+            raise ValueError("Modo Codex inválido")
+        current = await self.read_settings(name)
+        if not current["model"]:
+            raise RuntimeError("Modelo atual indisponível")
+        sess = self._sessions[name]
+        await sess["client"].request("thread/settings/update", {
+            "threadId": sess["thread_id"], "collaborationMode": {"mode": mode, "settings": {
+                "model": current["model"], "reasoning_effort": current["effort"],
+                "developer_instructions": None,
+            }},
+        })
+        sess["mode"] = mode
+        return {**current, "mode": mode}
+
+    async def list_skills(self, name: str) -> list[dict]:
+        from .chat_controls import skills_do_catalogo
+        client = await self.ensure_running(name)
+        if client is None:
+            raise RuntimeError("Sessão Codex indisponível")
+        meta = codex_sessions.load(name) or {}
+        params = {"cwds": [meta["cwd"]]} if meta.get("cwd") else {}
+        return skills_do_catalogo(await client.request("skills/list", params))
+
+    async def _user_input(self, name: str, text: str) -> list[dict]:
+        inputs = [{"type": "text", "text": text}]
+        if text.lstrip().startswith("/"):
+            command = text.lstrip().split()[0][1:]
+            skill = next((s for s in await self.list_skills(name) if s["name"] == command), None)
+            if skill:
+                inputs.append({"type": "skill", "name": skill["native_name"], "path": skill["path"]})
+        return inputs
+
+    async def steer(self, name: str, text: str, *, turn_id: str | None = None) -> None:
+        if not text.strip():
+            raise ValueError("A orientação não pode estar vazia")
+        client = await self.ensure_running(name)
+        sess = self._sessions.get(name) or {}
+        expected = turn_id or sess.get("turn_id")
+        if client is None or not expected or not sess.get("in_progress"):
+            raise RuntimeError("Não há turno em andamento para orientar")
+        await client.request("turn/steer", {
+            "threadId": sess["thread_id"], "expectedTurnId": expected,
+            "input": await self._user_input(name, text),
+        })
+
+    async def steer_queue(self, name: str) -> int:
+        await self.ensure_running(name)
+        sess = self._sessions.get(name) or {}
+        turn_id = sess.get("turn_id")
+        if not turn_id or not sess.get("in_progress"):
+            raise RuntimeError("Não há turno em andamento para orientar")
+        q = PromptQueue(name)
+        sent = 0
+        while claimed := await asyncio.to_thread(q.claim_undelivered, limit=1):
+            entry = claimed[0]
+            try:
+                await self.steer(name, entry["text"], turn_id=turn_id)
+            except BaseException:
+                await asyncio.to_thread(q.set_delivered, entry["id"], False)
+                raise
+            sent += 1
+        return sent
 
     def current_model(self, name: str) -> dict:
         """Modelo/effort pra DISPLAY (pill do front): a escolha explicita do usuario tem

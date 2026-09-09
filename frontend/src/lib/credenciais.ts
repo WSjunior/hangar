@@ -78,6 +78,20 @@ function em<T>(alvo: Server | null, path: string, init?: RequestInit): Promise<T
   return alvo ? reqEm<T>(alvo, path, init) : req<T>(path, init);
 }
 
+export interface CodexOpcoes {
+  contexto_estendido: boolean;
+  contexto_configurado: number | null;
+  compactacao: number | null;
+  modelos: { model: string; default: number; max: number }[];
+}
+
+export function codexOpcoes(alvo: Server | null, signal: AbortSignal, habilitar?: boolean): Promise<CodexOpcoes> {
+  return em(alvo, '/api/harness/codex/opcoes', {
+    signal, method: habilitar === undefined ? 'GET' : 'POST',
+    body: habilitar === undefined ? undefined : JSON.stringify({ contexto_estendido: habilitar }),
+  });
+}
+
 // `forcar` é o botão "atualizar" da aba: pede ao servidor a leitura de cota de AGORA,
 // pulando o cache de 5 min (ver backend/app/cotas.py — `?forcar=true`).
 export function listarCredenciais(alvo: Server | null, forcar = false): Promise<Credencial[]> {

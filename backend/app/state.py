@@ -651,7 +651,8 @@ class StateMonitor:
     def __init__(self, name: str, poll: float = 0.75,
                  sid_get: Optional[Callable[[], Optional[str]]] = None,
                  hook_grace: Optional[int] = HOOK_WORKING_GRACE,
-                 transcript_get: Optional[Callable[[], Optional[str]]] = None):
+                 transcript_get: Optional[Callable[[], Optional[str]]] = None,
+                 observe_permission: bool = False):
         self.name = name
         self.poll = poll
         # hook_grace: apos quantos polls SEM SPINNER o marcador "working" deixa de valer. None =
@@ -669,6 +670,7 @@ class StateMonitor:
         # `corrige_ocioso_kimi`, pro chat aberto nao mostrar "pronta" uma sessao que esta no meio de
         # um turno vindo da fila da TUI (ver a docstring da funcao). None = comportamento de sempre.
         self.transcript_get = transcript_get
+        self.observe_permission = observe_permission
 
     def _marcador(self):
         """Marcador do hook, ja corrigido quando ha transcript pra contradizer um idle velho."""
@@ -684,11 +686,20 @@ class StateMonitor:
         no_spinner = 0      # polls consecutivos sem spinner (filtra redraw transiente)
         held_state = "idle"
         held_label = None
+        permission_mode = None
+        previous_non_plan = None
         while True:
             if not await asyncio.to_thread(tmux.has_session, self.name):
                 yield StateEvent(session=self.name, state="dead")
                 return
             pane = await asyncio.to_thread(tmux.capture_pane, self.name)
+            if self.observe_permission:
+                from app.permission_mode import observar_ou_confirmado, parse_permission_mode
+                permission_key = self.sid_get() or self.name
+                observed_permission = parse_permission_mode(pane)
+                if observed_permission is not None:
+                    permission_mode, previous_non_plan = observar_ou_confirmado(
+                        permission_key, observed_permission, sessao=self.name)
             state, label, question, options = classify(pane)
             spinner = _live_spinner(pane)
 
@@ -774,7 +785,8 @@ class StateMonitor:
             loop_iter = loop_d.get("iter") if loop_d else None
             loop_max = loop_d.get("max_iters") if loop_d else None
             key = (state, label, question, tuple(options or ()), status, overlay, login,
-                   limited, limit_reset, loop_status, loop_iter, loop_max)
+                   limited, limit_reset, loop_status, loop_iter, loop_max,
+                   permission_mode, previous_non_plan)
             if key != last_key:
                 last_key = key
                 held_state, held_label = state, label
@@ -782,5 +794,7 @@ class StateMonitor:
                                  question=question, options=options, status_line=status,
                                  overlay=overlay, login=login,
                                  limited=limited, limit_reset=limit_reset,
-                                 loop_status=loop_status, loop_iter=loop_iter, loop_max=loop_max)
+                                 loop_status=loop_status, loop_iter=loop_iter, loop_max=loop_max,
+                                 claude_permission_mode=permission_mode,
+                                 claude_previous_non_plan=previous_non_plan)
             await asyncio.sleep(self.poll)

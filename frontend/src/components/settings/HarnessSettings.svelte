@@ -16,6 +16,7 @@
   import ConfirmDialog from '../ConfirmDialog.svelte';
   import type { Server } from '../../lib/auth';
   import HarnessOpcoes from './HarnessOpcoes.svelte';
+  import CodexOpcoes from './CodexOpcoes.svelte';
 
   interface Props { apiTarget: Server | null }
   let { apiTarget }: Props = $props();
@@ -26,6 +27,7 @@
   let consertando = $state<string | null>(null);
   let feito = $state('');
   let opcoesClaude = $state<string | null>(null);
+  let opcoesCodex = $state<string | null>(null);
   let integracao = $state<IntegracaoCodex | null>(null);
   let erroIntegracao = $state('');
   let reconciliando = $state(false);
@@ -225,6 +227,7 @@
     };
     consulta = ctx;
     lista = []; feito = ''; consertando = null; opcoesClaude = null;
+    opcoesCodex = null;
     integracao = null; erroIntegracao = ''; reconciliando = false;
     inst = null; erroInst = ''; confirmar = null;
     void carregar();
@@ -347,6 +350,9 @@
         {#if h.id === 'claude'}
           <button type="button" class="hs-btn hs-opcoes" aria-label={m.sessao_aria_opcoes({ n: h.nome })}
             onclick={() => { opcoesClaude = h.nome; }}>{m.sessao_opcoes()}</button>
+        {:else if h.id === 'codex' && h.instalado}
+          <button type="button" class="hs-btn hs-opcoes" aria-label={m.sessao_aria_opcoes({ n: h.nome })}
+            onclick={() => { opcoesCodex = h.nome; }}>{m.sessao_opcoes()}</button>
         {/if}
       </div>
       {#each h.itens as i (i.id)}
@@ -493,6 +499,9 @@
 
 {#if opcoesClaude}
   <HarnessOpcoes {apiTarget} nome={opcoesClaude} onClose={() => { opcoesClaude = null; }} />
+{/if}
+{#if opcoesCodex}
+  <CodexOpcoes {apiTarget} nome={opcoesCodex} onClose={() => { opcoesCodex = null; }} />
 {/if}
 
 <style>

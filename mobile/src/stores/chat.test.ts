@@ -375,6 +375,28 @@ test('ask_question via SSE abre o stepper', async () => {
   expect(s.askPayload?.questions).toHaveLength(1);
 });
 
+test('pergunta Codex mantém identidade na reconexão e fecha na resolução', async () => {
+  historyResponses = [[]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  const payload = { provider: 'codex', request_id: 1, questions: [
+    { id: 'choice', header: 'H', question: 'Q?', multiSelect: false, options: [{ label: 'A' }] },
+  ] };
+  created[0].trigger('ask_question', JSON.stringify(payload));
+  const original = chat.use.getState().askPayload;
+  chat.closeAsk();
+  created[0].trigger('ask_question', JSON.stringify(payload));
+  expect(chat.use.getState().askOpen).toBe(false);
+  expect(chat.use.getState().askPayload).toBe(original);
+  created[0].trigger('ask_question', JSON.stringify({ ...payload, request_id: 2 }));
+  expect(chat.use.getState().askOpen).toBe(true);
+  expect(chat.use.getState().askPayload?.request_id).toBe(2);
+  created[0].trigger('ask_question', 'null');
+  expect(chat.use.getState().askOpen).toBe(false);
+  expect(chat.use.getState().askPayload).toBeNull();
+});
+
 test('preview md flag espelha no store', async () => {
   historyResponses = [[]];
   const chat = chatStore('srv1', 'sess');

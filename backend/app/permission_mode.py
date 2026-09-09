@@ -10,7 +10,11 @@ Este módulo é stdlib + tmux, no padrão de model_picker.py.
 """
 
 import re
+import threading
 import time
+from collections import OrderedDict
+from contextlib import contextmanager
+from typing import Callable, TypeVar
 
 from app import tmux
 
@@ -38,6 +42,71 @@ _CANON = {
 
 # Ordem canônica dos modos como aparecem no help (não é ordem do ciclo; ciclo é descoberto ao vivo).
 ORDEM_CANONICA = ("plan", "auto", "manual", "acceptEdits", "bypassPermissions", "dontAsk")
+
+# Leituras durante uma sequência de BTab preservam o último retrato confirmado da sessão.
+_ultimos_nao_plan: OrderedDict[str, str] = OrderedDict()
+_modos_confirmados: dict[str, str] = {}
+_operacoes_controladas: dict[str, int] = {}
+_mem_lock = threading.Lock()
+_T = TypeVar("_T")
+
+
+def observar_modo(name: str, modo: str) -> str:
+    """Registra um modo confirmado e devolve o último modo da sessão fora do plano."""
+    _, anterior = observar_ou_confirmado(name, modo)
+    return anterior
+
+
+def observar_ou_confirmado(name: str, modo: str,
+                           sessao: str | None = None) -> tuple[str, str]:
+    """Confirma uma leitura livre ou preserva o retrato durante uma sequência controlada."""
+    with _mem_lock:
+        if sessao is not None and sessao in _operacoes_controladas:
+            return (_modos_confirmados.get(name, modo),
+                    _ultimos_nao_plan.get(name, "manual"))
+        _modos_confirmados[name] = modo
+        if modo != "plan":
+            _ultimos_nao_plan[name] = modo
+            _ultimos_nao_plan.move_to_end(name)
+            if len(_ultimos_nao_plan) > 200:
+                removido, _ = _ultimos_nao_plan.popitem(last=False)
+                _modos_confirmados.pop(removido, None)
+        return modo, _ultimos_nao_plan.get(name, "manual")
+
+
+def ultimo_nao_plan(name: str) -> str:
+    """Consulta o modo anterior sem registrar a captura como confirmação."""
+    with _mem_lock:
+        return _ultimos_nao_plan.get(name, "manual")
+
+
+def observar_pane(name: str, pane: str, sessao: str | None = None) -> str | None:
+    """Atualiza a memória a partir de uma captura já feita e devolve o modo confirmado."""
+    modo = parse_permission_mode(pane)
+    if modo is not None:
+        return observar_ou_confirmado(name, modo, sessao)[0]
+    return None
+
+
+@contextmanager
+def operacao_controlada(sessao: str):
+    """Impede que o monitor registre os modos intermediários de uma sequência de BTab."""
+    with _mem_lock:
+        _operacoes_controladas[sessao] = _operacoes_controladas.get(sessao, 0) + 1
+    try:
+        yield
+    finally:
+        with _mem_lock:
+            restantes = _operacoes_controladas.get(sessao, 1) - 1
+            if restantes:
+                _operacoes_controladas[sessao] = restantes
+            else:
+                _operacoes_controladas.pop(sessao, None)
+
+
+def executar_controlado(sessao: str, func: Callable[..., _T], *args) -> _T:
+    with operacao_controlada(sessao):
+        return func(*args)
 
 
 def parse_permission_mode(pane: str) -> str | None:

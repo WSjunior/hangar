@@ -35,6 +35,8 @@
   // Reseta tudo ao abrir; lê payload dentro de untrack p/ não reativar no mid-flow
   $effect(() => {
     if (!open) return;
+    // Uma nova solicitação pode chegar sem desmontar o formulário anterior.
+    void payload?.request_id;
     untrack(() => {
       step = 0;
       picks = (payload?.questions ?? []).map(() => ({ kind: 'option' as const, indices: [] }));
@@ -93,11 +95,12 @@
   function buildAnswers(): AnswerItem[] {
     return questions.map((q, qi) => {
       const p = picks[qi];
+      const identity = q.id !== undefined ? { question_id: q.id } : {};
       if (p.kind === 'text')
-        return { kind: 'text', value: p.value, type_index: q.options.length, labels: [p.value] };
+        return { ...identity, kind: 'text', value: p.value, type_index: q.options.length, labels: [p.value] };
       if (p.kind === 'chat')
-        return { kind: 'chat', chat_index: q.options.length + 1 };
-      return { kind: 'option', indices: p.indices, multi: q.multiSelect, labels: p.indices.map((i) => q.options[i].label) };
+        return { ...identity, kind: 'chat', chat_index: q.options.length + 1 };
+      return { ...identity, kind: 'option', indices: p.indices, multi: q.multiSelect, labels: p.indices.map((i) => q.options[i].label) };
     });
   }
 
@@ -117,7 +120,7 @@
   function pickLabel(qi: number): string {
     const p = picks[qi];
     if (!p) return '—';
-    if (p.kind === 'text') return p.value;
+    if (p.kind === 'text') return questions[qi]?.isSecret ? '••••••' : p.value;
     if (p.kind === 'chat') return m.askq_conversar();
     const q = questions[qi];
     if (!q) return '—';
@@ -179,25 +182,31 @@
        contrário de mostrar as saídas. Escrito como `{#if !textOpen && escapes}{:else}`, desligar
        as saídas caía no else e desenhava o campo de texto — exatamente o que a pergunta só-de-
        escolha não deve ter. -->
-  {#if textOpen}
+  {#if textOpen || (payload?.provider === 'codex' && q.options.length === 0)}
     <div class="text-escape">
       <!-- svelte-ignore a11y_autofocus -->
       <input
-        type="text"
+        type={q.isSecret ? 'password' : 'text'}
         class="field-input"
         bind:value={textValue}
         placeholder={m.askq_sua_resposta()}
+        aria-label={q.question}
         autofocus
       />
       <div class="text-actions">
         <button class="primary-btn" onclick={confirmText} disabled={!textValue.trim()}>{m.comum_confirmar()}</button>
-        <button class="ghost-btn" onclick={() => { textOpen = false; textValue = ''; }}>{m.comum_cancelar()}</button>
+        <button class="ghost-btn" onclick={() => {
+          if (q.options.length === 0) onClose();
+          else { textOpen = false; textValue = ''; }
+        }}>{m.comum_cancelar()}</button>
       </div>
     </div>
-  {:else if escapes}
+  {:else if escapes && (payload?.provider !== 'codex' || q.isOther)}
     <div class="escapes">
       <button class="ghost-btn" onclick={() => (textOpen = true)}>{m.askq_digitar_resposta()}</button>
-      <button class="ghost-btn" onclick={setChat}>{m.askq_conversar_sobre()}</button>
+      {#if payload?.provider !== 'codex'}
+        <button class="ghost-btn" onclick={setChat}>{m.askq_conversar_sobre()}</button>
+      {/if}
     </div>
   {/if}
 

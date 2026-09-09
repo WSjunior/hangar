@@ -82,7 +82,7 @@ export function AskStepper({ payload, onSubmit, onClose }: Props) {
   function pickLabel(qi: number): string {
     const p = picks[qi];
     if (!p) return '—';
-    if (p.kind === 'text') return p.value;
+    if (p.kind === 'text') return questions[qi]?.isSecret ? '••••••' : p.value;
     if (p.kind === 'chat') return m.askq_conversar();
     const q = questions[qi];
     if (!q) return '—';
@@ -194,7 +194,8 @@ export function AskStepper({ payload, onSubmit, onClose }: Props) {
         </Pressable>
       ) : null}
 
-      {!textOpen ? (
+      {!textOpen && !(payload.provider === 'codex' && q.options.length === 0) ? (
+        payload.provider !== 'codex' || q.isOther ? (
         <View style={[styles.escapes, { borderTopColor: theme.tokens.border.subtle }]}>
           <Pressable
             onPress={() => setTextOpen(true)}
@@ -203,14 +204,17 @@ export function AskStepper({ payload, onSubmit, onClose }: Props) {
           >
             <Text style={[styles.ghostOptTxt, { color: theme.tokens.text.primary }]}>{m.askq_digitar_resposta()}</Text>
           </Pressable>
-          <Pressable
-            onPress={setChat}
-            style={[styles.ghostOpt, { borderColor: theme.tokens.border.default }]}
-            accessibilityRole="button"
-          >
-            <Text style={[styles.ghostOptTxt, { color: theme.tokens.text.primary }]}>{m.askq_conversar_sobre()}</Text>
-          </Pressable>
+          {payload.provider !== 'codex' ? (
+            <Pressable
+              onPress={setChat}
+              style={[styles.ghostOpt, { borderColor: theme.tokens.border.default }]}
+              accessibilityRole="button"
+            >
+              <Text style={[styles.ghostOptTxt, { color: theme.tokens.text.primary }]}>{m.askq_conversar_sobre()}</Text>
+            </Pressable>
+          ) : null}
         </View>
+        ) : null
       ) : (
         <View style={[styles.textEscape, { borderTopColor: theme.tokens.border.subtle }]}>
           <TextInput
@@ -220,6 +224,10 @@ export function AskStepper({ payload, onSubmit, onClose }: Props) {
             ]}
             value={textValue}
             onChangeText={setTextValue}
+            secureTextEntry={q.isSecret}
+            autoCorrect={!q.isSecret}
+            autoCapitalize={q.isSecret ? 'none' : 'sentences'}
+            accessibilityLabel={q.question}
             placeholder={m.askq_sua_resposta()}
             placeholderTextColor={theme.tokens.text.muted}
             autoFocus
@@ -235,8 +243,8 @@ export function AskStepper({ payload, onSubmit, onClose }: Props) {
             </Pressable>
             <Pressable
               onPress={() => {
-                setTextOpen(false);
-                setTextValue('');
+                if (q.options.length === 0) onClose?.();
+                else { setTextOpen(false); setTextValue(''); }
               }}
               style={styles.ghostBtn}
               accessibilityRole="button"

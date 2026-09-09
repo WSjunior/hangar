@@ -992,15 +992,16 @@ export async function sendInput(name: string, text: string): Promise<void> {
   });
 }
 
-// ctrl-s avulso (só Kimi): a msg que JÁ está na fila da TUI entra no turno em curso. É o caso que o
-// botão de enviar-com-steer não cobre — quando o usuário só decide isso depois de ter mandado.
+// Kimi promove a fila por ctrl-s; Codex aceita texto imediato ou promove a fila por turn/steer.
 // promoted=true: o backend já baixou a fila durável — o front tira as bolhas "queued-" na hora,
 // porque o user_msg real só é gravado no wire no FIM do turno (medido: ~34s depois do ctrl-s).
 export async function steerSession(
   name: string,
+  text?: string,
 ): Promise<{ ok: boolean; promoted?: boolean; confirmed?: number }> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/steer`, {
     method: 'POST',
+    body: text === undefined ? undefined : JSON.stringify({ text }),
   });
 }
 
@@ -1611,9 +1612,15 @@ export function gitPush(name: string): Promise<{ ok: boolean; output: string }> 
 // resposta como TEXTO. É sucesso (a resposta chegou), mas o Escape aparece no transcript como
 // "user declined"/"Request interrupted" — em vermelho. Sem propagar este campo, quem respondeu vê
 // só o vermelho e conclui que perdeu a resposta; era o que acontecia até 27/08/2026.
-export function answerQuestions(name: string, answers: AnswerItem[]): Promise<{ ok: boolean; fallback?: boolean }> {
+export interface SessionPlanPreview { name: string; path: string; markdown?: string }
+
+export function getSessionPlanPreview(name: string, content = true): Promise<SessionPlanPreview | null> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/plan-preview?content=${content}`);
+}
+
+export function answerQuestions(name: string, answers: AnswerItem[], requestId?: string | number): Promise<{ ok: boolean; fallback?: boolean }> {
   return apiFetch<{ ok: boolean; fallback?: boolean }>(`/api/sessions/${encodeURIComponent(name)}/answer`, {
-    method: 'POST', body: JSON.stringify({ answers }),
+    method: 'POST', body: JSON.stringify({ answers, ...(requestId !== undefined ? { request_id: requestId } : {}) }),
   });
 }
 
@@ -1982,10 +1989,17 @@ export function getLimits(name: string): Promise<SessionLimits> {
 
 // Modelo + reasoning effort do Codex (Task C) — so sessoes Codex; o back devolve 400 pra Claude.
 export function getCodexModels(name: string): Promise<CodexModelsResponse> {
-  return _catalogo(`codex|${name}`, () => apiFetch(`/api/sessions/${encodeURIComponent(name)}/models`));
+  // O catálogo pode ser estável; a escolha atual também muda pelo terminal.
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/models`);
 }
 
-// Grava a escolha (dict + sidecar no backend); vale a partir do PROXIMO turno enviado.
+export function setCodexMode(name: string, mode: 'default' | 'plan'): Promise<CodexModelsResponse['current']> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/codex/mode`, {
+    method: 'POST', body: JSON.stringify({ mode }),
+  });
+}
+
+// Atualiza as configurações nativas compartilhadas pelo chat e pelo terminal.
 export function setCodexModel(name: string, model: string, effort?: string | null): Promise<void> {
   _invalidarCatalogo(name);
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/model`, {
@@ -2082,7 +2096,7 @@ export function writeFile(name: string, path: string, text: string, digest: stri
   });
 }
 
-export function getPermissionModes(name: string, sondar = false): Promise<{ current: string; modes: string[]; sondavel: boolean; restaurado?: boolean }> {
+export function getPermissionModes(name: string, sondar = false): Promise<{ current: string; modes: string[]; sondavel: boolean; restaurado?: boolean; previous_non_plan: string }> {
   // Fora do cache de catálogo (revisão): o `current` muda FORA do app — shift+tab no terminal da
   // sessão — e a pill lê pelo poll do Composer; cacheado, o modo aparecia errado por até 60s.
   // A sonda (sondar=1) segue ação viva, como sempre foi.
@@ -2090,7 +2104,7 @@ export function getPermissionModes(name: string, sondar = false): Promise<{ curr
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/permission-modes${qs}`);
 }
 
-export function setPermissionMode(name: string, mode: string): Promise<{ mode: string; current: string }> {
+export function setPermissionMode(name: string, mode: string): Promise<{ mode: string; current: string; previous_non_plan: string }> {
   _invalidarCatalogo(name);
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/permission-mode`, {
     method: 'POST',

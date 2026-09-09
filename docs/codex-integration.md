@@ -73,9 +73,19 @@ O painel mostra a identidade nativa. Homônimos de outra origem e associações 
 preservados com erro, sem escolher um plugin arbitrariamente. A ponte continua reconhecendo as
 skills pela origem Claude e só retira duplicatas quando o destino nativo está habilitado.
 
+Plugins já instalados com nome e origem confirmados seguem diretamente pela atualização nativa,
+sem reimportação. Isso preserva opções pessoais de clone, como `sparse_paths`, que o importador
+consideraria outra origem ao tentar cadastrar o mesmo marketplace novamente. Para o Claude Mem,
+`sparse_paths = [".agents", "plugin"]` baixa apenas o catálogo e seu plugin, mantendo a origem
+GitHub. Essa seleção depende da estrutura de cada repositório e não deve ser copiada para outros
+marketplaces sem conferir os caminhos dos plugins.
+
 Script de `~/.claude/hooks/` que é symlink não é copiado pelo importador nativo; depois da
 importação o Hangar cria em `~/.codex/hooks/` um link para o arquivo real (`codex_hooks_arquivos`),
-sem cópia. Sem equivalente no Claude, vira aviso nomeando o arquivo.
+sem cópia. Subpastas são preservadas, inclusive `hooks/gitnexus/gitnexus-hook.cjs`; sem
+equivalente no Claude, vira aviso com o caminho relativo completo. No Windows, a cópia segue
+essa mesma estrutura e acompanha alterações na fonte. Caminhos que escapam da pasta de hooks
+por `..` ou por um link de subpasta não autorizam escrita fora dela.
 
 O `security-guidance` emite telemetria (`metrics`, `rewakeSummary`) e, no bootstrap, duas linhas
 JSON com anúncio `async`. O adaptador `codex-hook-json.py`, instalado em

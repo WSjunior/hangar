@@ -20,6 +20,22 @@ only peeks at the tmux pane for live **state**. Backend pieces (`backend/app/`):
 - `terminal_input.py` + `tmux.py` — input via `tmux send-keys` (prompt / option select via `(n-1)×Down`+`Enter` / `Esc`).
 - `adapters/codex/` — one loopback WebSocket app-server per Codex session; the backend consumes
   structured JSON-RPC events while a `codex --remote` TUI for the same thread runs inside tmux.
+  **Controles nativos do chat (07/09/2026, CLI 0.153.4):** `thread/read` e `thread/resume`
+  informam `reasoningEffort`, enquanto `thread/settings/updated.threadSettings` usa `effort`.
+  `thread/settings/update` compartilha modelo, esforço e `collaborationMode` com a TUI; o
+  `turn/start` herda esses valores, pois reenviar o sidecar sobrescreveria uma escolha do terminal.
+  `skills/list` fornece nomes e caminhos de entradas `UserInput` do tipo `skill`; o texto `/nome`
+  permanece no histórico para reconciliar os ecos da fila. `turn/steer` exige `expectedTurnId`:
+  uma orientação para um turno encerrado falha, preservando a mensagem. Contexto estendido usa
+  `model_context_window=1000000`, com restauração do valor anterior e sem editar o catálogo;
+  o Codex aplica `max_context_window` de cada modelo (Astra/Sol: 872000 nessa instalação).
+  **Reconexão do modo (09/09/2026, revisão do PR #4):** `thread/read` não devolve
+  `collaborationMode`, e uma conexão nova não recebe o retrato de `thread/settings/updated`.
+  Prova com dois clientes do CLI real, sem inferência: o primeiro escolheu Planejar e o segundo
+  não recebeu essa escolha. O último `turn_context` do rollout é histórico, não estado atual.
+  Até uma notificação ou troca confirmada, o backend devolve `null` e o seletor mostra modo
+  desconhecido. A descoberta do plano Claude acontece nas transições de estado, não a cada
+  mensagem/ferramenta: cada chamada percorre o transcript inteiro.
   **O app-server é do PANE, não do backend** (`scripts/hangar-codex-tui`, o lançador único que o
   backend e o terminal chamam igual): ele escolhe a porta, sobe o servidor em segundo plano, roda a
   TUI em primeiro plano — nunca `exec`, que é o que o deixaria sem quem matar o servidor na saída —
@@ -233,6 +249,29 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   errada digita teclas que aquela TUI não espera.
 
 ## Conventions & gotchas (read before touching UI / backend lifecycle)
+
+- **Revisão de código:** neste repositório GitHub, usar revisão local e as verificações
+  do projeto. A instalação local do CodeRabbit pertence a outros repositórios.
+
+- **Planejamento no chat (07/09/2026):** `SessionModeControl` é o controle compartilhado de
+  Claude e Codex. Ele ocupa a linha inferior do compositor; quando os controles e seus rótulos
+  não cabem, passa para a primeira linha existente, sem acrescentar uma faixa vertical. A medida
+  considera o texto cortado pelo flex do celular, para não esconder o modelo só para acomodar o modo.
+  Shift+Tab percorre todos os modos disponíveis no Claude, como Alt+Shift+P; no Codex,
+  alterna Normal e Planejar. O monitor reaproveita a captura do pane para publicar o modo e lembrar
+  o último modo fora do planejamento por identidade de sessão. Sondas e trocas controladas
+  não deixam seus modos intermediários contaminarem essa memória.
+  Pedidos `item/tool/requestUserInput` do Codex têm identidade própria: JSON-RPC distingue
+  pedido de resposta pela presença de `method`, mesmo quando os IDs coincidem. O cliente
+  guarda pendências independentemente do SSE; `serverRequest/resolved` e o fim do turno
+  retiram a pergunta de todos os clientes. Fechar o formulário não responde ao servidor.
+  A confirmação de um `proposed_plan` é uma ação local da TUI, não um pedido JSON-RPC:
+  implementar muda para Normal e envia o pedido de implementação. Tags em linhas próprias
+  são retiradas da apresentação, preservando exemplos dentro de cercas de código.
+  O plano nativo do Claude usa `/plan-preview`, separado de `planprog`: escritas confirmadas
+  pela sessão identificam o arquivo. Um `slug` isolado não prova que existe plano, pois o
+  Claude também o grava em conversas comuns. A prévia busca o conteúdo atualizado ao abrir;
+  visualizar não aprova execução.
 
 - **Comentário explica o PORQUÊ, e é curto. A história medida mora AQUI, não no código.** Este
   arquivo é longo de propósito: é o lugar onde decisão medida, com data e número, sobrevive e é
@@ -1845,6 +1884,26 @@ comandos novos. O PR também COPIAVA `~/.claude/hooks` inteiro pela área de imp
 cópias com manifesto em `~/.codex/hooks` — mesmo bug que o `13ed4251` do mesmo dia já fechava com
 symlink (`codex_hooks_arquivos`). Ficou o symlink, decisão do usuário: uma fonte só, sem cópia
 pra envelhecer entre reconciliações. A parte de cópia foi retirada na integração do PR.
+
+**Hooks em subpastas (07/09/2026):** `codex_hooks_arquivos` preserva o caminho relativo inteiro,
+também ao atualizar cópias no Windows. A verificação anterior exigia o pai imediato `hooks/` e
+ignorava `gitnexus/gitnexus-hook.cjs`: os comandos importados existiam, mas o arquivo não.
+Captura de `hook/completed` no app-server confirmou falha nos dois hooks do GitNexus; execução
+direta mostrou `MODULE_NOT_FOUND`, código 1. Homônimos na raiz não substituem arquivos de
+subpastas; caminhos resolvidos fora de `hooks/` continuam excluídos. A restauração do arquivo
+mantém o comando aprovado no Codex.
+
+**Clone reduzido de marketplace no Codex (07/09/2026):** o clone completo do Claude Mem levou
+44,09 s e trouxe 461 MiB nesta máquina; o atualizador nativo encerra o clone após 30 s. Clone
+raso manual levou 12,44 s, mas o CLI não oferece `--depth`. A opção nativa `sparse_paths =
+[".agents", "plugin"]`, no marketplace `claude-mem-local`, usa `--filter=blob:none` e checkout
+das pastas necessárias: cadastro em 2,42 s, atualização em 3,21 s, mesma origem GitHub.
+Essas pastas são específicas desse catálogo; não são padrão para marketplaces alheios.
+O importador nativo considera opções de clone diferentes como outra origem, mesmo com a URL
+igual, e recusava reimportar o plugin já instalado. O reconciliador agora dispensa a importação
+quando nome e origem comprovam a instalação nativa, inclusive com alias; atualização, reparo,
+habilitação e desabilitação continuam pela mesma esteira. Plugin ausente continua sendo importado.
+
 **Instruções nativas (07/09/2026, PR #3):** `codex_instrucoes.py` prepara `AGENTS.override.md`
 — nome que o Codex 0.153.4 lê no lugar do `AGENTS.md` da mesma pasta — como link para o
 `CLAUDE.md` global (`<codex>/AGENTS.override.md`) e dos projetos registrados no `config.toml`; o

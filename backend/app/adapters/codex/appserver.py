@@ -33,6 +33,8 @@ class AppServerClient:
         self._next_id = 0
         self._pending: dict[int, asyncio.Future] = {}
         self._notifications: asyncio.Queue = asyncio.Queue()
+        self.server_requests: dict[int | str, dict] = {}
+        self._respondendo: set[int | str] = set()
         # True quando o read loop encerrou (EOF do processo / close()). Deixa o adapter distinguir
         # "app-server morreu" de "sem mais notifications no momento" -> emite estado dead (Task 5).
         self._closed = False
@@ -160,7 +162,23 @@ class AppServerClient:
                     if not isinstance(msg, dict):
                         continue  # JSON valido mas nao-objeto (ex: "42", "[]") - ignora
                     msg_id = msg.get("id")
-                    if msg_id is not None:
+                    if "method" in msg:
+                        # Os dois lados numeram pedidos independentemente: o método distingue
+                        # pedido do servidor de resposta ao cliente, mesmo com IDs iguais.
+                        if msg_id is not None:
+                            self.server_requests[msg_id] = msg
+                        elif msg["method"] == "serverRequest/resolved":
+                            resolved = (msg.get("params") or {}).get("requestId")
+                            self.server_requests.pop(resolved, None)
+                            self._respondendo.discard(resolved)
+                        elif msg["method"] == "turn/completed":
+                            params = msg.get("params") or {}
+                            for rid, pedido in list(self.server_requests.items()):
+                                if (pedido.get("params") or {}).get("threadId") == params.get("threadId"):
+                                    self.server_requests.pop(rid, None)
+                                    self._respondendo.discard(rid)
+                        await self._notifications.put(msg)
+                    elif msg_id is not None:
                         # Resposta de request: casa o Future pendente. Se o id nao tem Future
                         # (resposta tardia de request que ja deu timeout), dropa com warning -
                         # NAO enfileira em notifications (resposta nao tem `method`, poluiria a
@@ -171,8 +189,6 @@ class AppServerClient:
                                 fut.set_result(msg)
                         else:
                             logger.warning("codex app-server: resposta orfa id=%r (request ja expirou?)", msg_id)
-                    elif "method" in msg:
-                        await self._notifications.put(msg)  # notification legitima
                     else:
                         logger.warning("codex app-server: mensagem sem id e sem method, ignorada: %.200r", raw)
                 except asyncio.CancelledError:
@@ -192,7 +208,27 @@ class AppServerClient:
             # Sinaliza morte: marca fechado e empurra um sentinela None pra fila -> notifications()
             # termina o async-for e o adapter emite dead (em vez de bloquear pra sempre num get()).
             self._closed = True
+            self.server_requests.clear()
+            self._respondendo.clear()
             self._notifications.put_nowait(None)
+
+    async def respond(self, request_id: int | str, result: dict) -> None:
+        """Responde uma vez ao pedido nativo; o servidor publica a resolução para todos."""
+        if self.closed or request_id not in self.server_requests:
+            raise ValueError("A pergunta já foi respondida ou cancelada.")
+        if request_id in self._respondendo:
+            raise ValueError("A resposta desta pergunta já está sendo enviada.")
+        self._respondendo.add(request_id)
+        line = json.dumps({"jsonrpc": "2.0", "id": request_id, "result": result})
+        try:
+            if self._ws is not None:
+                await self._ws.send(line)
+            else:
+                self._writer.write((line + "\n").encode())
+                await self._writer.drain()
+        except Exception:
+            self._respondendo.discard(request_id)
+            raise
 
     async def request(self, method: str, params: dict, timeout: float = 30.0) -> dict:
         if self._writer is None and self._ws is None:

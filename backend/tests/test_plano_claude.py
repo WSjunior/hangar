@@ -1,0 +1,179 @@
+import json
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.config import settings
+from app.models import SessionInfo
+from app.plano_claude import descobrir
+
+
+def _evento_tool(identificador: str, caminho: Path, *, sidechain: bool = False) -> str:
+    return json.dumps({
+        "isSidechain": sidechain,
+        "message": {"content": [{"type": "tool_use", "id": identificador, "name": "Write",
+                                    "input": {"file_path": str(caminho)}}]},
+    })
+
+
+def _resultado(identificador: str, *, erro: bool = False) -> str:
+    return json.dumps({
+        "isSidechain": False,
+        "message": {"content": [{"type": "tool_result", "tool_use_id": identificador,
+                                    "content": "resultado", "is_error": erro}]},
+    })
+
+
+def _transcript(tmp_path: Path, config: Path, sessao: str, linhas: list[str]) -> Path:
+    caminho = config / "projects" / "-projeto" / f"{sessao}.jsonl"
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    caminho.write_text("\n".join(linhas), encoding="utf-8")
+    return caminho
+
+
+def test_associa_cada_sessao_ao_plano_que_ela_escreveu(tmp_path):
+    config = tmp_path / "conta"
+    planos = config / "plans"
+    planos.mkdir(parents=True)
+    um, dois = planos / "um.md", planos / "dois.md"
+    um.write_text("# Um", encoding="utf-8")
+    dois.write_text("# Dois", encoding="utf-8")
+    t1 = _transcript(tmp_path, config, "s1", [_evento_tool("a", um), _resultado("a")])
+    t2 = _transcript(tmp_path, config, "s2", [_evento_tool("b", dois), _resultado("b")])
+
+    assert descobrir(t1, tmp_path).caminho == um
+    assert descobrir(t2, tmp_path).caminho == dois
+
+
+def test_respeita_plans_directory_do_projeto(tmp_path):
+    config = tmp_path / "conta"
+    projeto = tmp_path / "repo"
+    (projeto / ".claude").mkdir(parents=True)
+    (projeto / ".claude" / "settings.local.json").write_text(
+        json.dumps({"plansDirectory": "documentos/planos"}), encoding="utf-8")
+    plano = projeto / "documentos" / "planos" / "custom.md"
+    plano.parent.mkdir(parents=True)
+    plano.write_text("# Custom", encoding="utf-8")
+    transcript = _transcript(tmp_path, config, "s1", [_evento_tool("a", plano), _resultado("a")])
+
+    assert descobrir(transcript, projeto).caminho == plano
+
+
+def test_ignora_escrita_fora_da_raiz_subagente_e_falha(tmp_path):
+    config = tmp_path / "conta"
+    planos = config / "plans"
+    planos.mkdir(parents=True)
+    valido = planos / "valido.md"
+    fora = tmp_path / "segredo.md"
+    transcript = _transcript(tmp_path, config, "s1", [
+        _evento_tool("fora", fora), _resultado("fora"),
+        _evento_tool("sub", valido, sidechain=True), _resultado("sub"),
+        _evento_tool("falha", valido), _resultado("falha", erro=True),
+    ])
+
+    assert descobrir(transcript, tmp_path) is None
+
+
+def test_mantem_metadado_quando_arquivo_foi_removido(tmp_path):
+    config = tmp_path / "conta"
+    plano = config / "plans" / "removido.md"
+    transcript = _transcript(tmp_path, config, "s1", [_evento_tool("a", plano), _resultado("a")])
+
+    encontrado = descobrir(transcript, tmp_path)
+    assert encontrado is not None
+    assert encontrado.caminho == plano
+
+
+def test_slug_nativo_do_transcript_define_o_plano(tmp_path):
+    config = tmp_path / "conta"
+    transcript = _transcript(tmp_path, config, "s1", [
+        json.dumps({"type": "system", "subtype": "compact_boundary",
+                    "slug": "plano-nativo", "isSidechain": False}),
+        json.dumps({"slug": "plano-nativo", "isSidechain": False, "message": {"content": [
+            {"type": "tool_use", "id": "sair", "name": "ExitPlanMode", "input": {"plan": "# Plano"}},
+        ]}}),
+        _resultado("sair"),
+    ])
+
+    encontrado = descobrir(transcript, tmp_path)
+
+    assert encontrado is not None
+    assert encontrado.nome == "plano-nativo"
+    assert encontrado.caminho == config / "plans" / "plano-nativo.md"
+
+
+def test_slug_malformado_nao_permite_sair_do_diretorio(tmp_path):
+    config = tmp_path / "conta"
+    transcript = _transcript(tmp_path, config, "s1", [
+        json.dumps({"type": "system", "slug": "../../segredo", "isSidechain": False}),
+    ])
+
+    assert descobrir(transcript, tmp_path) is None
+
+
+def test_slug_de_sessao_normal_sem_plano_nao_anuncia_arquivo(tmp_path):
+    config = tmp_path / "conta"
+    transcript = _transcript(tmp_path, config, "s1", [
+        json.dumps({"type": "user", "slug": "sessao-normal", "isSidechain": False}),
+    ])
+
+    assert descobrir(transcript, tmp_path) is None
+
+
+def test_write_confirmado_prevalece_sobre_slug_sem_arquivo(tmp_path):
+    config = tmp_path / "conta"
+    plano = config / "plans" / "nome-escolhido.md"
+    transcript = _transcript(tmp_path, config, "s1", [
+        json.dumps({"type": "user", "slug": "slug-generico", "isSidechain": False}),
+        _evento_tool("escrita", plano),
+        _resultado("escrita"),
+    ])
+
+    encontrado = descobrir(transcript, tmp_path)
+    assert encontrado is not None
+    assert encontrado.caminho == plano
+
+
+@pytest.fixture
+def cliente(monkeypatch):
+    settings.auth_token = "segredo"
+    import app.api as api_mod
+
+    async def info(_nome: str):
+        return api_mod._info_teste
+
+    monkeypatch.setattr(api_mod, "_cached_info", info)
+    return TestClient(api_mod.app), api_mod
+
+
+def test_endpoint_leve_nao_exige_arquivo_existente(tmp_path, cliente):
+    client, api_mod = cliente
+    config = tmp_path / "conta"
+    plano = config / "plans" / "removido.md"
+    transcript = _transcript(tmp_path, config, "s1", [_evento_tool("a", plano), _resultado("a")])
+    api_mod._info_teste = SessionInfo(name="sessao", cwd=str(tmp_path), jsonl=str(transcript))
+
+    resposta = client.get(
+        "/api/sessions/sessao/plan-preview?content=false",
+        headers={"Authorization": "Bearer segredo"},
+    )
+
+    assert resposta.status_code == 200
+    assert resposta.json() == {"name": "removido", "path": str(plano)}
+
+
+def test_endpoint_conteudo_retorna_404_se_plano_foi_removido(tmp_path, cliente):
+    client, api_mod = cliente
+    config = tmp_path / "conta"
+    plano = config / "plans" / "removido.md"
+    transcript = _transcript(tmp_path, config, "s1", [_evento_tool("a", plano), _resultado("a")])
+    api_mod._info_teste = SessionInfo(name="sessao", cwd=str(tmp_path), jsonl=str(transcript))
+
+    resposta = client.get(
+        "/api/sessions/sessao/plan-preview",
+        headers={"Authorization": "Bearer segredo"},
+    )
+
+    assert resposta.status_code == 404
+    assert resposta.json()["detail"]["code"] == "erro_plano_removido"
