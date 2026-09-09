@@ -304,7 +304,7 @@ fi
 
 if [ "$CHECK" = 1 ]; then
   if [ -x backend/.venv/bin/python ]; then
-    say "Diagnóstico"; (cd backend && uv run --quiet python -m app.doctor) || PENDENTE+=("doctor")
+    say "Diagnóstico"; (cd backend && uv run --quiet --no-sync python -m app.doctor) || PENDENTE+=("doctor")
   fi
   [ ${#PENDENTE[@]} -eq 0 ] && { say "Nada faltando."; exit 0; }
   say "Faltam: ${PENDENTE[*]}"; exit 1
