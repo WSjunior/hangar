@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Text, View } from 'react-native';
+import { ScrollView, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
@@ -18,8 +18,8 @@ import { MoreSheet } from '../../../../src/chat/MoreSheet';
 import { OptionButtons } from '../../../../src/chat/OptionButtons';
 import { StatsStrip } from '../../../../src/chat/StatsStrip';
 import { SessionPickerSheet } from '../../../../src/chat/SessionPickerSheet';
-import { pendingAskFromEvents, askPayloadFromToolUse, getSessions, parseStatusLine, selectOption, interrupt } from '@hangar/core';
-import type { Provider } from '@hangar/core';
+import { pendingAskFromEvents, askPayloadFromToolUse, fetchSessionsForServer, parseStatusLine, selectOption, interrupt } from '@hangar/core';
+import type { Provider, SessionInfo } from '@hangar/core';
 import * as m from '../../../../src/paraglide/messages';
 
 // Tela de chat de uma sessão: histórico janelado + SSE ao vivo (store chat.ts).
@@ -92,28 +92,45 @@ export default function ChatScreen() {
     avisoTimer.current = setTimeout(() => setAviso(''), 8000);
   }
 
-  // provider sem retain (regra do cabeçalho) — com fallback por request única pra Pi/Kimi
+  // Sem SSE adicional: acompanha a abertura e o Git do Codex pela lista.
   const rowsProvider = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name)?.provider ?? null) as Provider | null;
-  const [fetchedProvider, setFetchedProvider] = useState<Provider | null>(null);
+  const [fetchedSession, setFetchedSession] = useState<SessionInfo | null>(null);
+  const planSession = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name) ?? null);
+  const currentSession = fetchedSession ?? planSession;
+  const codexPreThread = currentSession?.provider === 'codex' && currentSession.tracked === false;
   useEffect(() => {
-    if (rowsProvider) return;
+    if (!ready || servidorSumiu) return;
+    setFetchedSession(null);
     let alive = true;
-    void getSessions()
-      .then((all) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = async () => {
+      const server = useServers.getState().servers.find((s) => s.id === serverId);
+      if (!server) return;
+      try {
+        const all = await fetchSessionsForServer(server);
         if (!alive) return;
         const hit = all.find((s) => s.name === name);
-        if (hit?.provider) setFetchedProvider(hit.provider as Provider);
-      })
-      .catch(() => {
-        if (alive) console.warn('getSessions fallback falhou');
-      });
+        if (hit) setFetchedSession(hit);
+        if (hit?.provider === 'codex') timer = setTimeout(refresh, hit.tracked === false ? 2000 : 5000);
+      } catch {
+        if (alive) {
+          console.warn('fetchSessionsForServer falhou');
+          timer = setTimeout(refresh, 5000);
+        }
+      }
+    };
+    void refresh();
     return () => {
       alive = false;
+      clearTimeout(timer);
     };
-  }, [rowsProvider, name]);
-  const provider: Provider | null = rowsProvider ?? fetchedProvider;
-  // sessão para o chip do plano (sem retain, regra do cabeçalho)
-  const planSession = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name) ?? null);
+  }, [ready, servidorSumiu, serverId, name]);
+  const provider: Provider | null = codexPreThread ? 'codex' : rowsProvider ?? fetchedSession?.provider ?? null;
+  const wasPreThread = useRef(false);
+  useEffect(() => {
+    if (wasPreThread.current && currentSession?.tracked) chat.retry();
+    wasPreThread.current = codexPreThread;
+  }, [codexPreThread, currentSession?.tracked, chat]);
 
   // O "Ouvir" das bolhas toca num player de módulo; sair da conversa cala a voz.
   useEffect(() => () => pararTts(), []);
@@ -168,7 +185,7 @@ export default function ChatScreen() {
     <Screen>
       <ChatHeader
         name={name}
-        state={stateEvent?.state ?? null}
+        state={codexPreThread ? currentSession.state : stateEvent?.state ?? null}
         onBack={() => {
           if (router.canGoBack()) router.back();
           else router.replace('/');
@@ -208,6 +225,28 @@ export default function ChatScreen() {
                 {m.comum_voltar()}
               </Text>
             </View>
+          ) : codexPreThread ? (
+            <View style={styles.erro}>
+              <Text style={styles.hint}>{m.chat_sem_thread_codex()}</Text>
+              {currentSession.startup_steps?.length ? (
+                <ScrollView style={styles.steps} accessibilityLiveRegion="polite">
+                  {currentSession.startup_steps.map((step, index, steps) => (
+                    <Text key={index} style={[styles.step,
+                      index === steps.length - 1 && currentSession.state === 'working' && styles.currentStep]}>
+                      {index + 1}. {step}
+                    </Text>
+                  ))}
+                </ScrollView>
+              ) : (
+              <Text style={styles.hint} accessibilityLiveRegion="polite">
+                {currentSession.label || currentSession.question || m.chat_sem_thread_codex_hint()}
+              </Text>
+              )}
+              <Text style={styles.retry} accessibilityRole="button"
+                onPress={() => router.push(`/s/${serverId}/${name}/terminal` as never)}>
+                {m.chat_abrir_terminal_codex()}
+              </Text>
+            </View>
           ) : loading && !error ? (
             <Text style={styles.hint}>{m.chat_carregando_historico()}</Text>
           ) : error ? (
@@ -224,6 +263,7 @@ export default function ChatScreen() {
               previewMd={previewMd}
               previewFull={previewFull}
               statusLine={statusLine}
+              session={currentSession}
               olderFailed={olderFailed}
               onLoadOlder={chat.loadOlder}
               pending={pending}
@@ -233,7 +273,7 @@ export default function ChatScreen() {
             />
           )}
         </View>
-        {sseRecusado && !servidorSumiu ? (
+        {sseRecusado && !servidorSumiu && !codexPreThread ? (
           <View style={styles.sseRecusado} accessibilityRole="alert">
             <Text style={styles.sseRecusadoTexto}>{m.chat_sse_recusado()}</Text>
             <Text style={styles.retry} onPress={chat.retry} accessibilityRole="button">
@@ -241,14 +281,14 @@ export default function ChatScreen() {
             </Text>
           </View>
         ) : null}
-        {!servidorSumiu ? <StatsStrip stats={stats} /> : null}
+        {!servidorSumiu && !codexPreThread ? <StatsStrip stats={stats} /> : null}
         {!servidorSumiu && !askOpen && askPayload?.provider === 'codex' ? (
           <Text style={styles.retry} onPress={() => chat.openAsk(askPayload)} accessibilityRole="button">
             {m.ask_perguntas()}
           </Text>
         ) : null}
         {!servidorSumiu ? <TuiPill serverId={serverId} name={name} overlay={!!stateEvent?.overlay} login={!!stateEvent?.login} /> : null}
-        {!servidorSumiu ? <Composer serverId={serverId} name={name} draft={draft} /> : null}
+        {!servidorSumiu && !codexPreThread ? <Composer serverId={serverId} name={name} draft={draft} /> : null}
       </KeyboardAvoidingView>
     </Screen>
   );
@@ -271,6 +311,19 @@ const styles = StyleSheet.create((theme) => ({
     flex: 1,
     justifyContent: 'center',
     gap: theme.base.space[2],
+  },
+  steps: {
+    maxHeight: 320,
+    marginHorizontal: theme.base.space[6],
+  },
+  step: {
+    fontSize: theme.base.text.sm,
+    color: theme.tokens.text.muted,
+    marginBottom: theme.base.space[2],
+  },
+  currentStep: {
+    color: theme.tokens.text.primary,
+    fontWeight: '600',
   },
   // Faixa, não tela cheia: a conversa já carregada continua legível — o que parou foi só a
   // atualização ao vivo.

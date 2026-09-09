@@ -364,9 +364,12 @@ def _list_sig(infos) -> str:
     # identicos e ainda assim mudar a distribuicao por Task — sem isto a barra segmentada e a
     # Task atual ficam com o snapshot velho ate outra coisa qualquer mudar a sig.
     return json.dumps(
-        [(i.name, i.cwd, i.state, i.tracked, i.jsonl, i.question, i.stalled, i.limited,
+        [(i.name, i.cwd, getattr(i, "branch", None), getattr(i, "git_dirty", None),
+          i.state, i.tracked, i.jsonl, i.question, i.stalled, i.limited,
           i.limit_reset, i.then_target, _status_sig(getattr(i, "status_line", None)),
-          bool(getattr(i, "label", None)),
+          (getattr(i, "label", None) if getattr(i, "provider", None) == "codex" and not i.tracked
+           else bool(getattr(i, "label", None))),
+          getattr(i, "startup_steps", []),
           getattr(i, "loop_status", None), getattr(i, "loop_iter", None),
           getattr(i, "engine", None), getattr(i, "conta", None),
           getattr(i, "plan_name", None), getattr(i, "plan_done", None),

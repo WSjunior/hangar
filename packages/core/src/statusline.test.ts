@@ -1,6 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import { parseStatusLine } from './statusline';
 
+it('mostra o Git do Codex sem depender da statusline e acompanha a branch', () => {
+  const session = { name: 'cx', state: 'idle' as const, provider: 'codex' as const,
+    cwd: 'C:\\Projetos\\hangar', branch: 'main', git_dirty: 2 };
+  expect(parseStatusLine(null, session)).toMatchObject({ repo: 'hangar', branch: 'main', dirty: true });
+  expect(parseStatusLine('🤖 gpt-6-astra │ 💬 ctx 20k/100k', { ...session, branch: 'fix', git_dirty: 0 }))
+    .toMatchObject({ model: 'gpt-6-astra', ctxPct: 20, branch: 'fix', dirty: false });
+  expect(parseStatusLine(null, { ...session, branch: null })).toBeNull();
+  expect(parseStatusLine(null, { ...session, provider: 'claude' })).toBeNull();
+});
+
 describe('parseStatusLine — uso de contexto', () => {
   it('deriva ctxPct do 2º par (usado/janela) quando há métrica de contexto', () => {
     const s = parseStatusLine('💬 20k/1k 40k/200k');

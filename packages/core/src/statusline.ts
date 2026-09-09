@@ -7,6 +7,9 @@
 // reconciled on top of this (Slice 1B). Everything here is best-effort and defensive — a field
 // that is not present just stays undefined; the ring/metrics then render an indeterminate state.
 
+import { basename } from './format';
+import type { SessionInfo } from './types';
+
 export interface StatusFields {
   model?: string;        // "Opus4.8·1M"
   effort?: string;       // "high" | "med" | "low"
@@ -44,8 +47,14 @@ function clampPct(n: number): number {
   return Math.min(100, Math.max(0, n));
 }
 
-export function parseStatusLine(raw: string | null | undefined): StatusFields | null {
-  if (!raw) return null;
+export function parseStatusLine(raw: string | null | undefined, session?: SessionInfo | null): StatusFields | null {
+  // O Codex não publica Git na statusline; a lista já consulta o repositório da sessão.
+  const git = session?.provider === 'codex' && session.cwd && session.branch
+    ? { repo: basename(session.cwd), branch: session.branch,
+        dirty: session.git_dirty == null ? undefined : session.git_dirty > 0 }
+    : null;
+  if (!raw && !git) return null;
+  raw ??= '';
   const out: StatusFields = { raw };
 
   // 🤖 Opus4.8·1M (high✦)   — model + effort (effort lives in the parenthetical)
@@ -141,5 +150,5 @@ export function parseStatusLine(raw: string | null | undefined): StatusFields | 
     out.branch = br.replace(/\*+$/, '').trim();
   }
 
-  return out;
+  return Object.assign(out, git);
 }

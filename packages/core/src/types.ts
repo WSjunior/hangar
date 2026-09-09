@@ -47,8 +47,10 @@ export interface SessionInfo {
   // untracked não conta). null = cwd sem repo ou repo sem commit nenhum -> sem badge.
   git_added?: number | null;
   git_removed?: number | null;
+  git_dirty?: number | null;
   // Estado vivo detalhado, pra a linha ser acionável sem abrir a sessão (feature #1):
   label?: string | null;       // working: texto do spinner
+  startup_steps?: string[];    // saída do lançador, em ordem, antes de abrir a conversa
   question?: string | null;    // awaiting_input: a pergunta
   options?: string[] | null;   // awaiting_input: rótulos das opções
   // True quando "working" ha mais de CP_STALL_SECONDS sem avancar (feature #7: watchdog de travada) —

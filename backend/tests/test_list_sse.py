@@ -29,10 +29,11 @@ class _Info:
 
 async def _take(gen, n):
     out = []
-    async for ev in gen:
-        out.append(ev)
-        if len(out) >= n:
-            break
+    async with asyncio.timeout(2):
+        async for ev in gen:
+            out.append(ev)
+            if len(out) >= n:
+                break
     return out
 
 

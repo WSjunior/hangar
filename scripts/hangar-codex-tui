@@ -251,6 +251,7 @@ def main() -> int:
     # Falha (override pessoal, config.toml ilegível) não impede a TUI: fica sem alias e sem limite maior.
     codex_home = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex')
     limite = LIMITE_INSTRUCOES
+    print("hangar-codex-tui: preparando as instruções do Codex…", file=sys.stderr)
     try:
         preparar_instrucoes(Path.home(), codex_home, Path(cwd))
         limite = limite_instrucoes(codex_home)
@@ -261,6 +262,7 @@ def main() -> int:
     # A sessão lê a configuração já reconciliada; quem reconcilia é o BACKEND (um executor só, e
     # uma instalação longa termina lá) — aqui só se avisa e se espera um pouco. Falha não impede a TUI.
     try:
+        print("hangar-codex-tui: verificando a integração do Codex…", file=sys.stderr)
         resultado = _integracao_codex()
         if resultado.get("estado") not in (None, "ocioso", "ok") or resultado.get("erros"):
             print(f"hangar-codex-tui: integração Codex: {resultado['estado']} — {_texto(resultado.get('etapa'))}",

@@ -730,7 +730,6 @@
     ouvirTexto(texto, (msg) => Promise.resolve(window.confirm(msg)), '');
   }
 
-  const currentState = $derived<State>(stateEvent?.state ?? 'idle');
   // Provider desta sessao (allSessions ja carregada pro switcher/nav — sem round-trip extra).
   // "claude" e o caso comum e some do header; os demais ganham badge (providerBadge abaixo) e o
   // "codex" alem disso esconde controles Claude-only.
@@ -758,6 +757,8 @@
   // Pergunta/opcoes vem da LISTA (poll de 5s), nao do SSE: sem thread nao ha /events pra esta
   // sessao. A lista raspa o pane so nesse estado e so quando ha seletor na tela (registry).
   const codexEntrada = $derived(codexPreThread ? allSessions.find((s) => s.name === sessionName) : null);
+  const currentState = $derived<State>(codexPreThread
+    ? codexEntrada?.state ?? 'idle' : stateEvent?.state ?? 'idle');
   const codexOpcoes = $derived(codexEntrada?.options ?? []);
   const codexPergunta = $derived(codexEntrada?.question ?? null);
   // O seletor do pane no formato do cartão nativo: uma pergunta, escolha única, opções sem
@@ -942,7 +943,8 @@
     else mirrorOpen = true;
   }
   // Statusline crua -> campos tipados (modelo, contexto, custo, tempo de sessao).
-  const status = $derived(parseStatusLine(stateEvent?.status_line ?? null));
+  const status = $derived(parseStatusLine(stateEvent?.status_line ?? null,
+    allSessions.find((s) => s.name === sessionName)));
 
   // Header: breadcrumb desktop (servidor › sessao › branch) e subtítulo mobile (nome do servidor
   // sob o título — com N servidores, sessões homônimas ficavam indistinguíveis no celular).
@@ -2242,14 +2244,23 @@
          o cartão com opções ficava espremido e fora de centro numa área larga. -->
     <div class="chat-error codex-pre">
       <p class="chat-error-title">{m.chat_sem_thread_codex()}</p>
+      {#if codexEntrada?.startup_steps?.length}
+        <div class="codex-steps" role="log" aria-live="polite">
+          <ol>
+            {#each codexEntrada.startup_steps as step, index (index)}
+              <li aria-current={index === codexEntrada.startup_steps.length - 1 && currentState === 'working' ? 'step' : undefined}>{step}</li>
+            {/each}
+          </ol>
+        </div>
+      {/if}
       {#if codexPayload}
         <!-- Cartão NATIVO, o mesmo do AskUserQuestion: aqui há uma pergunta e opções de verdade, e
              o OptionButtons cru é o fallback de picker raspado do pane — sem Cancelar, que ali só
              mandaria Esc e fecharia o seletor do Codex sem resolver nada. -->
         <AskQuestionCard open payload={codexPayload} escapes={false}
                          onSubmit={responderCodex} onClose={abrirTerminalReal} />
-      {:else}
-        <p class="chat-error-hint">{m.chat_sem_thread_codex_hint()}</p>
+      {:else if !codexEntrada?.startup_steps?.length}
+        <p class="chat-error-hint" role="status">{codexEntrada?.label || m.chat_sem_thread_codex_hint()}</p>
       {/if}
       <button class="chat-error-acao" onclick={abrirTerminalReal}>{m.chat_abrir_terminal_codex()}</button>
     </div>
@@ -2608,6 +2619,22 @@
   .chat-error.codex-pre :global(.ask-card) {
     width: 100%;
     max-width: none;
+  }
+  .codex-steps {
+    max-height: 40vh;
+    overflow-y: auto;
+    text-align: start;
+    color: var(--text-muted);
+  }
+  .codex-steps ol {
+    display: grid;
+    gap: var(--space-2);
+    padding-inline-start: var(--space-6);
+    margin: 0;
+  }
+  .codex-steps [aria-current="step"] {
+    color: var(--text-primary);
+    font-weight: 600;
   }
 
   /* Skeleton de boot (no lugar do splash): linhas shimmer ocupando a area do chat. */

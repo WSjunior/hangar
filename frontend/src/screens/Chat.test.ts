@@ -120,7 +120,7 @@ vi.mock('../lib/workspaceCommands', () => ({
   workspaceSessionKey: (s: { serverId: string; name: string }) => `${s.serverId}::${s.name}`,
 }) );
 
-function montar() {
+function montar(desktop = true) {
   const el = document.createElement('div');
   document.body.appendChild(el);
   const comp = mount(Chat, {
@@ -129,7 +129,7 @@ function montar() {
       sessionName: 'sess',
       onBack: vi.fn(),
       onNavigateToChat: vi.fn(),
-      desktop: true,
+      desktop,
       showContextPanel: true,
     },
   });
@@ -146,6 +146,29 @@ beforeEach(() => {
   const s = filesStores.retain('srv-test::sess', 'sess');
   s.selecionado = null;
   filesStores.release('srv-test::sess');
+});
+
+it.each([true, false])('mostra a preparação do Codex sem conversa antiga (desktop=%s)', async (desktop) => {
+  const api = await import('@hangar/core');
+  vi.mocked(api.getSessions).mockResolvedValue([{
+    name: 'sess', provider: 'codex', tracked: false, jsonl: null, state: 'working',
+    label: 'integração Codex: conferindo plugins',
+    startup_steps: ['preparando as instruções do Codex', 'integração Codex: conferindo plugins'],
+  }]);
+  vi.mocked(api.getHistoryDesde).mockRejectedValue(Object.assign(new Error('404'), { status: 404 }));
+  const t = montar(desktop);
+  try {
+    await vi.waitFor(() => expect(t.el.querySelector('.codex-pre [aria-current="step"]')?.textContent)
+      .toBe('integração Codex: conferindo plugins'));
+    expect(Array.from(t.el.querySelectorAll('.codex-steps li'), (li) => li.textContent))
+      .toEqual(['preparando as instruções do Codex', 'integração Codex: conferindo plugins']);
+    expect(t.el.querySelector('.codex-pre')).not.toBeNull();
+    expect(t.el.textContent).not.toContain('Não achei o transcript');
+  } finally {
+    await unmount(t.comp);
+    vi.mocked(api.getSessions).mockResolvedValue([]);
+    vi.mocked(api.getHistoryDesde).mockResolvedValue({ eventos: [], etag: null });
+  }
 });
 
 // Stub do matchMedia com ouvintes controlados na mao (ver nota no describe do visor).

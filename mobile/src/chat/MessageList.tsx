@@ -10,7 +10,7 @@ import { ToolGroup } from './tools/ToolGroup';
 import { ToolDetailSheet, type ToolDetailHandle } from './tools/ToolDetailSheet';
 import { StatusLine } from './StatusLine';
 import { ThinkingBlock } from './ThinkingBlock';
-import { agruparConversa, entraNoPensamento, type ChatEvent, type ItemConversa } from '@hangar/core';
+import { agruparConversa, entraNoPensamento, type ChatEvent, type ItemConversa, type SessionInfo } from '@hangar/core';
 import { useAparencia } from '../stores/aparencia';
 import type { PendingMsg } from './pending';
 import * as m from '../paraglide/messages';
@@ -28,6 +28,7 @@ interface Props {
   previewMd?: boolean; // prévia do agente = markdown (default true = comportamento antigo)
   previewFull?: boolean;
   statusLine: string | null;
+  session?: SessionInfo | null;
   olderFailed: '' | 'failed' | 'unjoinable';
   onLoadOlder: () => void;
   pending?: PendingMsg[];
@@ -49,6 +50,7 @@ export function MessageList({
   previewMd = true,
   previewFull = false,
   statusLine,
+  session,
   olderFailed,
   onLoadOlder,
   pending = [],
@@ -125,7 +127,7 @@ export function MessageList({
       contentContainerStyle={styles.content}
       ListFooterComponent={
         <View style={styles.footer}>
-          <StatusLine line={statusLine} />
+          <StatusLine line={statusLine} session={session} />
           {olderFailed === 'failed' ? (
             <Text
               style={styles.gap}

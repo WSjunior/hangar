@@ -109,6 +109,7 @@ class SessionInfo(BaseModel):
     avisos: list[str] = []
     # Estado vivo detalhado, pra a linha da lista ser acionável sem abrir a sessão (feature #1):
     label: Optional[str] = None          # working: texto do spinner ("Elucidating…")
+    startup_steps: list[str] = Field(default_factory=list)
     question: Optional[str] = None       # awaiting_input: a pergunta
     options: Optional[list[str]] = None  # awaiting_input: rótulos das opções
     # True quando "working" ha mais de CP_STALL_SECONDS sem avancar (last_activity parado) — feature #7:

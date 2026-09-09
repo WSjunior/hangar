@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import { ScrollView, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { parseStatusLine } from '@hangar/core';
+import type { SessionInfo } from '@hangar/core';
 import { ContextRing } from './ContextRing';
 import { statusChips } from './statusChips';
 import { superficie } from '../theme/superficie';
@@ -10,11 +11,11 @@ import { superficie } from '../theme/superficie';
 // (custo, janelas de cota, repo/branch, tempo). Sessão sem marcador nenhum segue mostrando a
 // linha crua — nunca fica sem linha. O numberOfLines={1} do P1 sumiu: a fileira rola na
 // horizontal, nada é truncado ("status line truncada" registrado no Plano 1).
-export function StatusLine({ line }: { line: string | null }) {
+export function StatusLine({ line, session }: { line: string | null; session?: SessionInfo | null }) {
   const { theme } = useUnistyles();
-  const f = useMemo(() => parseStatusLine(line), [line]);
+  const f = useMemo(() => parseStatusLine(line, session), [line, session]);
   const chips = useMemo(() => statusChips(f), [f]);
-  if (!line) return null;
+  if (!f) return null;
   // parseStatusLine só devolve null com line vazia; "não parseou" aqui é nenhum marcador
   // reconhecido (objeto com só o raw) — nesse caso, cru como antes.
   const parseou = !!f && (!!f.model || !!f.branch || f.ctxPct != null || chips.length > 0);
@@ -33,7 +34,7 @@ export function StatusLine({ line }: { line: string | null }) {
         horizontal
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.row}
-        accessibilityLabel={line}
+        accessibilityLabel={line ?? undefined}
       >
         <ContextRing pct={f!.ctxPct ?? null} />
         {f!.model ? (

@@ -370,6 +370,84 @@ def test_pane_codex_sem_sidecar_nao_vira_sessao_claude(tmp_path):
     assert [(s.name, s.provider, s.jsonl, s.tracked) for s in out] == [("cx", "codex", None, False)]
 
 
+@pytest.mark.parametrize("argv", [
+    ["/usr/bin/python3", "/home/u/.local/bin/hangar-codex-tui", "--cwd", "/tmp/a"],
+    ["/repo/backend/.venv/bin/python", "/repo/scripts/hangar-codex-tui", "--cwd", "/tmp/a"],
+    ["/repo/scripts/hangar-codex-tui", "--cwd", "/tmp/a"],
+])
+def test_lancador_em_integracao_nao_herda_transcript_por_nome(tmp_path, monkeypatch, argv):
+    reg = SessionRegistry(projects_dir=tmp_path)
+    reg._jsonl_cache["cx"] = str(tmp_path / "claude-antigo.jsonl")
+    reg._fd_locked.add("cx")
+    panes = {"cx": [{"name": "cx", "cwd": "/tmp/a", "pid": 321, "pane_id": "%3", "active": True}]}
+    monkeypatch.setattr(registry.tmux, "list_panes_all", lambda: panes)
+    monkeypatch.setattr(registry, "_proc_children_map", lambda: {})
+    monkeypatch.setattr(registry, "_descendant_pids", lambda *args: [321])
+    monkeypatch.setattr(registry, "_argv", lambda pid: argv)
+    monkeypatch.setattr(registry, "_cmdline", lambda pid: " ".join(argv))
+    with patch.object(SessionRegistry, "resolve_tracked") as resolve:
+        out = reg.list()
+    resolve.assert_not_called()
+    assert [(s.provider, s.jsonl, s.tracked) for s in out] == [("codex", None, False)]
+
+
+@pytest.mark.parametrize("argv", [
+    ["python3", "outro.py", "hangar-codex-tui"],
+    ["python3", "-c", "hangar-codex-tui"],
+    ["cat", "/repo/scripts/hangar-codex-tui"],
+])
+def test_argumento_citando_lancador_nao_e_agente(argv):
+    assert registry._provider_do_argv(argv) is None
+
+
+async def test_preparacao_codex_publica_etapa_atual_sem_cache_anterior(tmp_path, monkeypatch):
+    from pathlib import Path
+    from app.sse import _list_sig
+
+    reg = SessionRegistry(projects_dir=tmp_path)
+    monkeypatch.setattr(reg, "_status_cache", {"cx": (registry.time.monotonic(), "modelo antigo")})
+    reg._jsonl_cache["cx"] = "/claude-antigo.jsonl"
+    quadros = iter([
+        "hangar-codex-tui: integração Codex: Verificando plugins\n",
+        "hangar-codex-tui: integração Codex: Verificando plugins\n"
+        "hangar-codex-tui: integração Codex: Instalando plugin\n",
+        (Path(__file__).parent / "fixtures" / "pane_codex_hooks.txt").read_text(),
+    ])
+    monkeypatch.setattr(registry.tmux, "capture_pane", lambda *args: next(quadros))
+    assinaturas = []
+    for estado, etapa in [("working", "Verificando plugins"), ("working", "Instalando plugin"),
+                          ("awaiting_input", None)]:
+        info = registry.SessionInfo(name="cx", cwd=None, jsonl=None, tracked=False, provider="codex")
+        out = await reg.list_with_state([info])
+        assert out[0].state == estado
+        assert out[0].label == (f"integração Codex: {etapa}" if etapa else None)
+        expected = (["integração Codex: Verificando plugins"] if etapa else [
+            "Hooks alterados: confira a aprovação dos hooks no Codex antes de usá-los.",
+            "há itens aguardando sua confirmação de confiança no Codex",
+        ])
+        if etapa == "Instalando plugin":
+            expected.append("integração Codex: Instalando plugin")
+        assert out[0].startup_steps == expected
+        assert out[0].status_line is None
+        assert "cx" not in reg._jsonl_cache
+        assinaturas.append(_list_sig(out))
+    assert assinaturas[0] != assinaturas[1]
+    same_label = registry.SessionInfo(name="cx", provider="codex", tracked=False,
+                                      startup_steps=["etapa anterior"])
+    assert _list_sig([same_label]) != _list_sig([same_label.model_copy(update={"startup_steps": []})])
+    assert out[0].options == ["Review hooks", "Trust all and continue",
+                              "Continue without trusting (hooks won't run)"]
+
+
+def test_git_codex_atualiza_lista_mesmo_sem_novo_turno():
+    from app.sse import _list_sig
+
+    info = registry.SessionInfo(name="cx", provider="codex", branch="main", git_dirty=0)
+    original = _list_sig([info])
+    assert _list_sig([info.model_copy(update={"branch": "fix"})]) != original
+    assert _list_sig([info.model_copy(update={"git_dirty": 1})]) != original
+
+
 def _config_codex(tmp_path, conteudo):
     casa = tmp_path / "casa"
     (casa / ".codex").mkdir(parents=True)

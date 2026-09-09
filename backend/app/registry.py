@@ -280,7 +280,7 @@ def _kimi_corrige_ocioso(info, marker):
 # processo `pi` -- sem esta entrada o pane cai no default "claude" e e casado com o transcript do
 # Claude do mesmo cwd, a mesma regressao do Pi acima.
 _EXEC_PROVIDER = {"pi": "pi", "omp": "omp", "claude": "claude", "kimi": "kimi", "kimi-code": "kimi",
-                  "codex": "codex"}
+                  "codex": "codex", "hangar-codex-tui": "codex"}
 
 # Windows: o argv0 vem com extensao (`claude.exe`), que nao casa em _EXEC_PROVIDER; e um CLI
 # instalado por `npm -g` nao aparece com o nome dele nenhuma vez — o processo e o
@@ -351,6 +351,10 @@ def _provider_do_argv(argv: list[str]) -> Optional[str]:
     prov = _EXEC_PROVIDER.get(base)
     if prov:
         return prov
+    # A integração roda no lançador antes de existir qualquer processo `codex`.
+    if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?", base) and len(argv) > 1:
+        if argv[1].replace("\\", "/").rsplit("/", 1)[-1] == "hangar-codex-tui":
+            return "codex"
     # Lancado por node: quem diz qual agente e o CAMINHO do script, nao o interpretador. Normaliza
     # a barra porque o npm do Windows monta o shim com `/` no meio de um caminho com `\`.
     if base in ("node", "node.exe"):
@@ -1298,6 +1302,8 @@ class SessionRegistry:
             if getattr(info, "provider", "claude") == "codex":
                 info.last_activity = _jsonl_mtime(info.jsonl)
                 if not info.jsonl:
+                    # Sem thread, nenhum cache de uma sessão anterior pertence a esta abertura.
+                    self._forget(info.name)
                     # Janela entre o pane nascer e o lancador gravar o sidecar: nao ha rollout, e
                     # tanto a chave do marcador quanto a leitura do turno EXIGEM um caminho
                     # (session_key(None) levanta TypeError). Sem esta saida, uma sessao Codex
@@ -1308,7 +1314,7 @@ class SessionRegistry:
                     # unica saida era um `tmux attach` na maquina. O pane so e raspado por MENU: a
                     # ressalva acima (as duas ultimas linhas virariam uma segunda statusline) vale
                     # pro Codex JA rodando, nao pra um seletor numerado, que e o que `classify`
-                    # reconhece. Sem menu na tela, nada muda — segue o default idle.
+                    # reconhece. Sem menu, o lançador pode informar a etapa da preparação.
                     pendente_sem_thread.append(info)
                     continue
                 marker = hook_state.get_state(_sid(info.jsonl))
@@ -1402,9 +1408,15 @@ class SessionRegistry:
             quadros = await asyncio.gather(*[asyncio.to_thread(tmux.capture_pane, i.name)
                                             for i in pendente_sem_thread])
             for info, frame in zip(pendente_sem_thread, quadros):
+                info.startup_steps = [linha.removeprefix("hangar-codex-tui: ")
+                                      for linha in frame.splitlines()
+                                      if linha.startswith("hangar-codex-tui: ")]
                 menu = menu_codex(frame)
                 if menu:
                     info.state, (info.question, info.options) = "awaiting_input", menu
+                elif info.startup_steps:
+                    info.state = "working"
+                    info.label = info.startup_steps[-1]
         # Pergunta que o pane nao mostra (o menu rolou pra fora — ver askquestion.pergunta_aberta).
         # FORA dos dois ramos acima de proposito: com marcador de hook a sessao nem raspa o pane, e
         # era justamente ali que a pergunta sumia. So pras que ficaram SEM menu — com menu visivel
