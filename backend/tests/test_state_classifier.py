@@ -207,6 +207,64 @@ async def test_monitor_emits_only_on_change():
 
 
 @pytest.mark.asyncio
+async def test_monitor_emite_troca_de_permissao_mesmo_quando_estado_continua_idle():
+    panes = iter(["❯\n⏵⏵ auto mode on", "❯\n⏸ plan mode on"])
+    with patch.object(state_mod.tmux, "has_session", return_value=True), \
+         patch.object(state_mod.tmux, "capture_pane", side_effect=lambda *a, **k: next(panes)):
+        mon = StateMonitor("cc", poll=0.001, sid_get=lambda: "sid-modo", observe_permission=True)
+        seen = []
+        async for ev in mon.stream():
+            seen.append((ev.state, ev.claude_permission_mode, ev.claude_previous_non_plan))
+            if len(seen) == 2:
+                break
+
+    assert seen == [("idle", "auto", "auto"), ("idle", "plan", "auto")]
+
+
+@pytest.mark.asyncio
+async def test_monitor_nao_confirma_modo_intermediario_de_operacao_controlada():
+    from app import permission_mode
+
+    permission_mode._ultimos_nao_plan.clear()
+    permission_mode._modos_confirmados.clear()
+    permission_mode.observar_modo("sid-controlado-monitor", "auto")
+    pane = "❯\n⏸ manual mode on"
+    with patch.object(state_mod.tmux, "has_session", return_value=True), \
+         patch.object(state_mod.tmux, "capture_pane", return_value=pane), \
+         permission_mode.operacao_controlada("cc-controlado"):
+        mon = StateMonitor("cc-controlado", poll=0.001,
+                           sid_get=lambda: "sid-controlado-monitor", observe_permission=True)
+        evento = await anext(mon.stream())
+
+    assert evento.claude_permission_mode == "auto"
+    assert evento.claude_previous_non_plan == "auto"
+    assert permission_mode.ultimo_nao_plan("sid-controlado-monitor") == "auto"
+
+
+@pytest.mark.asyncio
+async def test_monitor_nao_emite_captura_intermediaria_suprimida():
+    from app import permission_mode
+
+    permission_mode._ultimos_nao_plan.clear()
+    permission_mode.observar_modo("sid-supressao", "auto")
+    with patch.object(state_mod.tmux, "has_session", return_value=True), \
+         patch.object(state_mod.tmux, "capture_pane", return_value="❯"), \
+         patch("app.permission_mode.observar_ou_confirmado",
+               side_effect=[("auto", "auto"), ("auto", "auto"), ("plan", "auto")]), \
+         patch("app.permission_mode.parse_permission_mode",
+               side_effect=["auto", "manual", "plan"]):
+        mon = StateMonitor("cc-supressao", poll=0.001,
+                           sid_get=lambda: "sid-supressao", observe_permission=True)
+        stream = mon.stream()
+        primeiro = await anext(stream)
+        segundo = await anext(stream)
+
+    assert primeiro.claude_permission_mode == "auto"
+    assert segundo.claude_permission_mode == "plan"
+    assert segundo.claude_previous_non_plan == "auto"
+
+
+@pytest.mark.asyncio
 async def test_monitor_frozen_completed_marker_reads_idle():
     """Regression (bug #4): a completed-turn marker ("✻ Worked for 13s") lingers in the pane
     while Claude is idle. It is shaped exactly like a live spinner; a single frame can't tell

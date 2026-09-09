@@ -608,7 +608,7 @@ def test_codex_models_returns_list_and_current(api_client):
         "model": "gpt-5-codex", "displayName": "GPT-5 Codex", "description": "padrao",
         "efforts": [{"value": "high", "description": "mais capaz"}], "defaultEffort": "medium",
     }])
-    fake.current_model = MagicMock(return_value={"model": "gpt-5-codex", "effort": "high"})
+    fake.read_settings = AsyncMock(return_value={"model": "gpt-5-codex", "effort": "high"})
     with patch("app.api._provider_of", return_value="codex"), \
          patch("app.api.get_adapter", return_value=fake):
         r = api_client.get("/api/sessions/cx/models", headers=_h())
@@ -617,7 +617,7 @@ def test_codex_models_returns_list_and_current(api_client):
     assert body["models"][0]["model"] == "gpt-5-codex"
     assert body["current"] == {"model": "gpt-5-codex", "effort": "high"}
     fake.list_models.assert_awaited_once_with("cx")
-    fake.current_model.assert_called_once_with("cx")
+    fake.read_settings.assert_awaited_once_with("cx")
 
 
 def test_codex_models_claude_rejected_with_400(api_client):
@@ -625,6 +625,32 @@ def test_codex_models_claude_rejected_with_400(api_client):
     with patch("app.api.get_adapter", return_value=fake):
         r = api_client.get("/api/sessions/cc/models", headers=_h())
     assert r.status_code == 400
+
+
+def test_codex_modo_e_skills_usam_adapter_nativo(api_client):
+    fake = _fake_codex_adapter()
+    fake.set_mode = AsyncMock(return_value={"mode": "plan", "model": "gpt-6-astra", "effort": "high"})
+    fake.list_skills = AsyncMock(return_value=[{"name": "revisar", "display": "/revisar", "source": "skill",
+                                              "native_name": "revisar", "path": "/privado/SKILL.md"}])
+    with patch("app.api._provider_of", return_value="codex"), patch("app.api.get_adapter", return_value=fake):
+        assert api_client.post("/api/sessions/cx/codex/mode", headers=_h(), json={"mode": "plan"}).json()["mode"] == "plan"
+        assert api_client.post("/api/sessions/cx/codex/mode", headers=_h(), json={"mode": "bypassPermissions"}).status_code == 422
+        skills = api_client.get("/api/sessions/cx/commands", headers=_h()).json()
+    fake.set_mode.assert_awaited_once_with("cx", "plan")
+    assert skills == [{"name": "revisar", "display": "/revisar", "source": "skill"}]
+
+
+def test_codex_orientar_texto_ou_fila_com_falha_visivel(api_client):
+    fake = _fake_codex_adapter()
+    fake.steer = AsyncMock()
+    fake.steer_queue = AsyncMock(return_value=2)
+    with patch("app.api._session_exists", return_value=True), patch("app.api._provider_of", return_value="codex"), \
+         patch("app.api.get_adapter", return_value=fake):
+        assert api_client.post("/api/sessions/cx/steer", headers=_h(), json={"text": "orientação"}).status_code == 200
+        assert api_client.post("/api/sessions/cx/steer", headers=_h()).json()["confirmed"] == 2
+        fake.steer.side_effect = RuntimeError("turno terminou")
+        assert api_client.post("/api/sessions/cx/steer", headers=_h(), json={"text": "preservar"}).status_code == 409
+    fake.steer_queue.assert_awaited_once_with("cx")
 
 
 def test_set_codex_model_calls_adapter(api_client):

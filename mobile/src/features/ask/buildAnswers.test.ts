@@ -17,6 +17,19 @@ function q(
 }
 
 describe('buildAnswers', () => {
+  it('preserva o ID nativo em respostas de opção e texto', () => {
+    const questions = [
+      { ...q('H1', 'Q1?', false, ['A']), id: 'choice' },
+      { ...q('H2', 'Q2?', false, []), id: 'free' },
+    ];
+    expect(buildAnswers(questions, [
+      { kind: 'option', indices: [0] }, { kind: 'text', value: 'resposta' },
+    ])).toMatchObject([
+      { question_id: 'choice', labels: ['A'] },
+      { question_id: 'free', value: 'resposta' },
+    ]);
+  });
+
   it('monta payload com 3 tipos: option, text e chat', () => {
     const questions: AskQuestionItem[] = [
       q('H1', 'Q1?', false, ['A', 'B', 'C']),

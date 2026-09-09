@@ -83,6 +83,8 @@ def _ambiente(tmp_path, cwd):
         "FAKE_ROLLOUT": str(tmp_path / "rollout.jsonl"),
         "FAKE_CWD": str(cwd),
         "FAKE_TUI_OUT": str(tmp_path / "tui-argv.txt"),
+        # O lançador lê o .env do checkout; a prova não pode reconciliar o backend real.
+        "CP_PORT": "0",
     })
     env.pop("CP_SESSION_NAME", None)
     (tmp_path / "home").mkdir()

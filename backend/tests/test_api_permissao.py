@@ -100,6 +100,7 @@ def test_perm_get_ok():
     assert r.json()["current"] == "plan"
     assert r.json()["modes"] == []
     assert r.json()["sondavel"] is True
+    assert r.json()["previous_non_plan"] == "manual"
     assert mock_ler.call_count == 1
     assert mock_listar.call_count == 0
     # com sondar=1: chama listar_modos uma vez
@@ -113,6 +114,65 @@ def test_perm_get_ok():
     assert r2.json()["current"] == "plan"
     assert r2.json()["modes"] == ["plan", "auto", "manual", "acceptEdits"]
     assert mk2.call_count == 1
+
+
+def test_perm_get_lembra_ultimo_modo_fora_do_plano_observado_no_terminal():
+    """Uma troca feita no terminal também define para onde Shift+Tab deve voltar."""
+    from app import permission_mode
+
+    permission_mode._ultimos_nao_plan.clear()
+    info = _info_claude(name="sess-observada", jsonl="/tmp/observada.jsonl")
+    with patch("app.api._cached_info", return_value=info), \
+         patch("app.api._recusa_se_painel_aberto"), \
+         patch("app.permission_mode.ler_modo", side_effect=["acceptEdits", "plan"]):
+        primeira = _client().get("/api/sessions/sess-observada/permission-modes", headers=AUTH)
+        segunda = _client().get("/api/sessions/sess-observada/permission-modes", headers=AUTH)
+
+    assert primeira.json()["previous_non_plan"] == "acceptEdits"
+    assert segunda.json()["previous_non_plan"] == "acceptEdits"
+
+
+def test_monitor_do_pane_preserva_ultima_escolha_antes_de_entrar_no_plano():
+    from app import permission_mode
+
+    permission_mode._ultimos_nao_plan.clear()
+    assert permission_mode.observar_pane("sid", "⏵⏵ auto mode on") == "auto"
+    assert permission_mode.observar_pane("sid", "⏸ plan mode on") == "plan"
+    assert permission_mode.observar_modo("sid", "plan") == "auto"
+
+
+def test_modos_intermediarios_de_operacao_controlada_nao_substituem_anterior():
+    from app import permission_mode
+
+    permission_mode._ultimos_nao_plan.clear()
+    permission_mode.observar_pane("sid-controlado", "⏵⏵ auto mode on", sessao="sess")
+    with permission_mode.operacao_controlada("sess"):
+        permission_mode.observar_pane("sid-controlado", "⏸ manual mode on", sessao="sess")
+        permission_mode.observar_pane("sid-controlado", "⏵⏵ bypass permissions on", sessao="sess")
+        permission_mode.observar_pane("sid-controlado", "⏸ plan mode on", sessao="sess")
+
+    assert permission_mode.observar_modo("sid-controlado", "plan") == "auto"
+
+
+def test_get_durante_sonda_devolve_retrato_confirmado_sem_gravar_intermediario():
+    from app import permission_mode
+
+    permission_mode._ultimos_nao_plan.clear()
+    permission_mode._modos_confirmados.clear()
+    permission_mode.observar_modo("concorrente", "auto")
+    permission_mode.observar_modo("concorrente", "plan")
+    info = _info_claude(name="sess-concorrente", jsonl="/tmp/concorrente.jsonl")
+    with permission_mode.operacao_controlada("sess-concorrente"), \
+         patch("app.api._cached_info", return_value=info), \
+         patch("app.api._recusa_se_painel_aberto"), \
+         patch("app.permission_mode.ler_modo", return_value="manual"):
+        resposta = _client().get(
+            "/api/sessions/sess-concorrente/permission-modes", headers=AUTH)
+
+    assert resposta.status_code == 200
+    assert resposta.json()["current"] == "plan"
+    assert resposta.json()["previous_non_plan"] == "auto"
+    assert permission_mode.observar_modo("concorrente", "plan") == "auto"
 
 def test_perm_get_sonda_que_nao_voltou_marca_restaurado_false():
     """A sonda dá voltas de BTab de verdade. Quando não consegue voltar, a sessão FICA noutro
@@ -221,6 +281,7 @@ def test_perm_post_ok():
         r = _client().post("/api/sessions/sess/permission-mode", headers=AUTH, json={"mode": "auto"})
     assert r.status_code == 200
     assert r.json()["mode"] == "auto"
+    assert r.json()["previous_non_plan"] == "auto"
 
 def test_perm_post_aceita_permission_mode_alias():
     info = _info_claude()
@@ -276,4 +337,3 @@ def test_perm_post_sessao_trabalhando_409():
          patch("app.api.terminal._require_drivable", side_effect=TerminalInput.NaoDigitou(409, "trabalhando")):
         r = _client().post("/api/sessions/sess/permission-mode", headers=AUTH, json={"mode": "plan"})
     assert r.status_code == 409
-

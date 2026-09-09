@@ -16,11 +16,12 @@ export default function AskSheet() {
   const sessionName = Array.isArray(name) ? name[0] : (name ?? '');
   const chat = chatStore(serverId, sessionName);
 
-  // payload copiado no mount — mesmo precedente do untrack em AskQuestionStepper.svelte:32-42
-  const [payload] = useState(() => chat.use.getState().askPayload);
+  const payload = chat.use((s) => s.askPayload);
   const askOpen = chat.use((s) => s.askOpen);
   const [routeError, setRouteError] = useState('');
   const navegando = useRef(false);
+
+  useEffect(() => { setRouteError(''); }, [payload?.request_id]);
 
   // desmontou por gesto/back = fechou; senão askOpen ficaria true e re-empurraria a rota
   useEffect(() => {
@@ -47,14 +48,18 @@ export default function AskSheet() {
 
   const handleSubmit = async (answers: AnswerItem[]) => {
     setRouteError('');
+    const requestId = payload.request_id;
+    const native = payload.provider === 'codex';
     try {
-      await answerQuestions(sessionName, answers);
+      await answerQuestions(sessionName, answers, requestId);
+      if (native && chat.use.getState().askPayload?.request_id !== requestId) return;
       chat.markAskDismissed();
     } catch (e) {
+      if (native && chat.use.getState().askPayload?.request_id !== requestId) return;
       const msg = e instanceof Error ? e.message : m.askq_erro_envio();
       setRouteError(msg);
       const status = (e as { status?: number })?.status;
-      if (status !== 409) {
+      if (!native && status !== 409) {
         navegando.current = true;
         chat.markAskDismissed();
         router.replace(`/s/${serverId}/${sessionName}/terminal?aviso=${encodeURIComponent(msg)}` as never);
@@ -66,7 +71,7 @@ export default function AskSheet() {
   return (
     <KeyboardAvoidingView behavior="padding" style={styles.root}>
       <View style={styles.inner}>
-        <AskStepper payload={payload} onSubmit={handleSubmit} onClose={() => chat.closeAsk()} />
+        <AskStepper key={`${typeof payload.request_id}:${payload.request_id}`} payload={payload} onSubmit={handleSubmit} onClose={() => chat.closeAsk()} />
         {routeError ? (
           <Text style={styles.error} accessibilityRole="alert">
             {routeError}

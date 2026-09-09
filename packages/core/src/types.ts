@@ -152,6 +152,9 @@ export interface ChatEvent {
 }
 
 export interface StateEvent {
+  codex_mode?: 'default' | 'plan' | null;
+  claude_permission_mode?: string | null;
+  claude_previous_non_plan?: string | null;
   session: string;
   state: State;
   label?: string | null;
@@ -313,12 +316,24 @@ export interface FsScanResult {
 
 // ── AskUserQuestion (stepper nativo multi-pergunta) ─────────────────────────
 export interface AskOption { label: string; description: string; preview?: string }
-export interface AskQuestionItem { header: string; question: string; multiSelect: boolean; options: AskOption[] }
-export interface AskQuestionPayload { questions: AskQuestionItem[] }
-export type AnswerItem =
+export interface AskQuestionItem {
+  id?: string;
+  header: string;
+  question: string;
+  multiSelect: boolean;
+  options: AskOption[];
+  isOther?: boolean;
+  isSecret?: boolean;
+}
+export interface AskQuestionPayload {
+  questions: AskQuestionItem[];
+  provider?: 'codex';
+  request_id?: string | number;
+}
+export type AnswerItem = { question_id?: string } & (
   | { kind: 'option'; indices: number[]; multi: boolean; labels: string[] }
   | { kind: 'text'; value: string; type_index: number; labels: string[] }
-  | { kind: 'chat'; chat_index: number };
+  | { kind: 'chat'; chat_index: number });
 
 // ── Custos (visão agregada de uso/gasto por conta) ──────────────────────────
 export interface CostBucket {
@@ -486,6 +501,7 @@ export interface CodexModel {
 export interface CodexModelChoice {
   model: string | null;
   effort: string | null;
+  mode?: 'default' | 'plan' | null;
 }
 
 export interface CodexModelsResponse {

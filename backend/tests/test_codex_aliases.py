@@ -1,4 +1,6 @@
 """Identidades nativas só são associadas com prova da origem, nunca apenas pelo nome."""
+import json
+
 import pytest
 
 from app.codex_integracao import IntegracaoCodex, _identidade_plugin, _origem_marketplace
@@ -51,3 +53,63 @@ def test_skill_so_dispensa_ponte_quando_alias_nativo_esta_habilitado(tmp_path, m
     service._skills(registro)
     assert registro["skills"]["mem-search"]["mode"] == "symlink"
     assert (service.codex_home / "skills/mem-search").resolve() == fonte
+
+
+@pytest.mark.parametrize("preinstalado", [False, True])
+async def test_reconciliacao_preserva_clone_esparso_de_plugin_nativo(tmp_path, monkeypatch, preinstalado):
+    home = tmp_path
+    codex_home = home / ".codex"
+    codex_home.mkdir()
+    fonte = home / ".claude/plugins"
+    fonte.mkdir(parents=True)
+    (fonte.parent / "settings.json").write_text('{"enabledPlugins":{"plugin@fonte":true}}')
+    (fonte / "known_marketplaces.json").write_text(json.dumps({
+        "fonte": {"source": {"source": "github", "repo": "exemplo/mercado"}},
+    }))
+    config = codex_home / "config.toml"
+    config.write_text('[marketplaces.nativo]\nsource_type="git"\n'
+                      'source="https://github.com/exemplo/mercado.git"\n'
+                      'sparse_paths=[".agents", "plugin"]\n')
+    antes = config.read_bytes()
+    cache = codex_home / "plugins/cache/nativo/plugin/1"
+    cache.mkdir(parents=True)
+    service = IntegracaoCodex(home, codex_home)
+    service.raiz.mkdir(parents=True)
+    service._estado = service.status()
+    registro = {}
+
+    class Nativo:
+        instalado = preinstalado
+
+        async def detectar(self):
+            return [{"itemType": "PLUGINS", "details": {"plugins": [
+                {"marketplaceName": "fonte", "pluginNames": ["plugin"]},
+            ]}}]
+
+        async def plugins_instalados(self):
+            return [{"pluginId": "plugin@nativo", "version": "1"}] if self.instalado else []
+
+        async def importar(self, itens):
+            if self.instalado:
+                return {"itemTypeResults": [{"failures": [{
+                    "message": "marketplace is already added from a different source",
+                }]}]}
+            self.instalado = True
+            return {}
+
+        async def atualizar_marketplace(self, nome):
+            return {"errors": []}
+
+        async def instalar_plugin(self, nome):
+            return {"installedPath": str(cache), "version": "1"}
+
+    async def habilitar(*args):
+        pass
+
+    monkeypatch.setattr(service, "_habilitar_plugins", habilitar)
+    await service._plugins(Nativo(), {"plugin@fonte"}, registro, True)
+
+    assert service.status()["erros"] == []
+    assert registro["plugins"]["plugin@fonte"]["id_codex"] == "plugin@nativo"
+    assert registro["plugins_pendentes"] == []
+    assert config.read_bytes() == antes

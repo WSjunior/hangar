@@ -1,6 +1,8 @@
 <script lang="ts">
   import { agruparConversa, type ItemConversa } from '@hangar/core';
   import { tick } from 'svelte';
+  import type { Snippet } from 'svelte';
+  import { planDisplayText } from '@hangar/core';
   import * as m from '../paraglide/messages';
   import type { ChatEvent, StateEvent, AskQuestionPayload, AnswerItem } from '@hangar/core';
   import UserBubble from './UserBubble.svelte';
@@ -33,6 +35,8 @@
     pending: { id: string; text: string; solid?: boolean }[];
     sessionName: string;
     dockH: number;
+    codex?: boolean;
+    footer?: Snippet;
     preview?: string;
     previewMd?: boolean;   // o texto da previa e markdown cru -> a bolha renderiza
     previewFull?: boolean; // a previa e incremental (so cresce no fim) -> bolha sem o teto de 10 linhas
@@ -70,7 +74,7 @@
   let {
     events, stateEvent, pending, sessionName, dockH, preview = '', previewMd = false, previewFull = false, onSelectOption, onSubmitSelected, onCancel,
     askOpen = false, askPayload = null, askActive = false, onAnswer, onAskClose, onFimDoLocal,
-    imageUrl, swapIds,
+    imageUrl, swapIds, codex = false, footer,
     onForward, onOpenSession, onOpenOrq, ancora = 0
   }: Props = $props();
 
@@ -414,7 +418,7 @@
           {#if ev.text}{@const fr = parseFilePaths(ev.text)}{#if fr.length}<FileAttachment {sessionName} refs={fr} />{/if}{/if}
         {/if}
       {:else if ev.kind === 'assistant_msg' && ev.text}
-        <AssistantBubble text={ev.text} ts={ev.ts} {sessionName}
+        <AssistantBubble text={codex ? planDisplayText(ev.text) : ev.text} ts={ev.ts} {sessionName}
                          animate={!histIds.has(ev.id) && !swapIds?.has(ev.id)}
                          onForward={onForward ? () => onForward(ev.text ?? '') : null} />
         {:else if ev.kind === 'tool_use'}
@@ -424,7 +428,7 @@
     {/each}
 
     {#if preview}
-      <AssistantBubble text={preview} ts={undefined} preview md={previewMd} full={previewFull} />
+      <AssistantBubble text={codex ? planDisplayText(preview) : preview} ts={undefined} preview md={previewMd} full={previewFull} />
     {/if}
 
     {#if stateEvent?.state === 'working'}
@@ -452,6 +456,8 @@
         onCancel={onCancel}
       />
     {/if}
+
+    {@render footer?.()}
 
     {#if askOpen && askPayload && onAnswer}
       <AskQuestionCard
