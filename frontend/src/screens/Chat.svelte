@@ -1394,7 +1394,7 @@
                      provider: sessionProvider });
     armWatchdog();
 
-    es.addEventListener('message', (e) => {
+    const onMessage = (e: { data: string; lastEventId?: string }) => {
       noteAlive();
       // Chegou conversa: o aviso de "não carregou o histórico" não pode continuar na frente dela.
       // A tela de erro SUBSTITUI a lista inteira ({:else if error}), então um erro aceso por uma
@@ -1482,7 +1482,9 @@
           }
         }
       } catch {}
-    });
+    };
+    es.addEventListener('message', onMessage);
+    es.addEventListener('queue_confirmed', onMessage);
 
     es.addEventListener('state', (e) => {
       noteAlive();

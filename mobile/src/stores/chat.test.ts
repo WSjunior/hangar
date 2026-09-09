@@ -126,12 +126,12 @@ test('confirmação retira apenas o eco da fila e preserva índices no próximo 
   const chat = chatStore('srv1', 'sess');
   chat.retain();
   await tick();
-  created[0].trigger('message', JSON.stringify(ev({ id: 'queued-a', queued_confirmed: true })));
+  created[0].trigger('queue_confirmed', JSON.stringify(ev({ id: 'queued-a', queued_confirmed: true })));
   expect(chat.use.getState().events.map(e => e.id)).toEqual(['real', 'queued-b']);
   created[0].trigger('message', JSON.stringify(ev({ id: 'real', text: 'atualizado' })));
   expect(chat.use.getState().events.map(e => e.id)).toEqual(['real', 'queued-b']);
   expect(chat.use.getState().events[0].text).toBe('atualizado');
-  created[0].trigger('message', JSON.stringify(ev({ id: 'queued-a', queued_confirmed: true })));
+  created[0].trigger('queue_confirmed', JSON.stringify(ev({ id: 'queued-a', queued_confirmed: true })));
   expect(chat.use.getState().events).toHaveLength(2);
 });
 

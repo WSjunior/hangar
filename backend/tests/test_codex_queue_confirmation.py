@@ -40,16 +40,22 @@ async def test_codex_confirms_rollout_before_replaying_queue(tmp_path, monkeypat
     async def follow(self, min_ts=0, emit_confirmed=False):
         if reconnect:
             assert self.load()[0]["confirmed"] is True
+            yield ChatEvent(kind="user_msg", id="queued-old", queued_confirmed=True)
         await asyncio.Event().wait()
-        yield
 
     monkeypatch.setattr(pqueue.PromptQueue, "follow", follow)
     stream = sse.merged_events("codex-queue", str(path), provider="codex", start_offset=0)
+    received = set()
     try:
         async with asyncio.timeout(3):
             async for event in stream:
+                if event["event"] == "queue_confirmed":
+                    assert json.loads(event["data"])["id"] == "queued-old"
+                    received.add("queue_confirmed")
                 if event["event"] == "message":
                     assert json.loads(event["data"])["id"] == "real"
+                    received.add("message")
+                if received == ({"message", "queue_confirmed"} if reconnect else {"message"}):
                     break
     finally:
         await stream.aclose()

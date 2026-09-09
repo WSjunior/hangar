@@ -132,11 +132,11 @@ it('confirmação retira o eco antigo sem depender do replay do transcript', asy
   await emit('message', { id: 'queued-antiga', kind: 'user_msg', text: 'Recado já entregue', queued_delivered: true });
   await emit('message', { id: 'queued-nova', kind: 'user_msg', text: 'Recado aguardando', queued_delivered: false });
   expect(bolhas('Recado já entregue')).toHaveLength(1);
-  await emit('message', { id: 'queued-antiga', kind: 'user_msg', text: 'Recado já entregue', queued_confirmed: true });
+  await emit('queue_confirmed', { id: 'queued-antiga', kind: 'user_msg', text: 'Recado já entregue', queued_confirmed: true });
   expect(bolhas('Recado já entregue')).toHaveLength(0);
   expect(bolhas('Recado aguardando')).toHaveLength(1);
   expect(orientar()).not.toBeNull();
-  await emit('message', { id: 'queued-antiga', kind: 'user_msg', queued_confirmed: true });
+  await emit('queue_confirmed', { id: 'queued-antiga', kind: 'user_msg', queued_confirmed: true });
   expect(bolhas('Recado aguardando')).toHaveLength(1);
 });
 

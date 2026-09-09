@@ -193,7 +193,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     // não roda rearmar() e o stream saudável morre aos 25s (mesmo padrão do sessions.ts).
     es.addEventListener('ping', () => {});
 
-    es.addEventListener('message', (e) => {
+    const onMessage = (e: { data: string; lastEventId?: string }) => {
       // Só o transcript carrega lastEventId ("<stem>:<offset>"); state/preview/ping vêm sem.
       if (e.lastEventId) lastEventId = e.lastEventId;
       try {
@@ -265,7 +265,9 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       } catch {
         // evento ilegível não derruba o stream
       }
-    });
+    };
+    es.addEventListener('message', onMessage);
+    es.addEventListener('queue_confirmed', onMessage);
 
     es.addEventListener('state', (e) => {
       try {
