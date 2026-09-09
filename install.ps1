@@ -777,14 +777,15 @@ if ($precisa -and (Baixar-Dist)) {
     if (-not (Test-Path $modulos)) {
         $eapAnt2 = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
-        # RAIZ, nao frontend: `frontend` e workspace e nao tem lockfile proprio, e o `@hangar/core`
-        # so existe como link criado por instalacao na raiz. O app nativo nao e workspace, entao
-        # isto nao baixa React Native — o build dele e no Expo.
+        # RAIZ, nao frontend (`frontend` nao tem lockfile proprio, e o `@hangar/core` so existe como
+        # link criado por instalacao na raiz), e SELETIVO: o app nativo tambem e workspace — precisa
+        # ser, senao o EAS Build nao detecta o monorepo —, e sem os dois --workspace isto baixaria o
+        # toolchain do React Native na maquina de quem so quer usar o Hangar.
         Push-Location $raiz
-        try { npm ci @quieto; $rcDeps = $LASTEXITCODE } finally { Pop-Location; $ErrorActionPreference = $eapAnt2 }
+        try { npm ci --workspace=@hangar/core --workspace=frontend @quieto; $rcDeps = $LASTEXITCODE } finally { Pop-Location; $ErrorActionPreference = $eapAnt2 }
         if ($rcDeps -ne 0) {
             Erro "npm ci falhou (exit $rcDeps) - o servico do frontend nao vai subir"
-            Nota 'rodar na mao:  npm ci   (na raiz do repositorio)'
+            Nota 'rodar na mao:  npm ci --workspace=@hangar/core --workspace=frontend   (na raiz do repositorio)'
             $script:pendencias += 'frontend'
         } else {
             Ok 'dependencias do frontend instaladas'
@@ -850,7 +851,9 @@ if ($precisa) {
         # ruidoso, e antes disso as sobras caiam no `vite build` (`Unused args: 'l','e','n','t'`).
         $quieto = @()
         if (-not $Update) { $quieto = @('--silent') }
-        npm ci @quieto
+        # Seletivo pelo mesmo motivo do passo de dependencias acima: o app nativo e workspace (o EAS
+        # exige), mas o React Native nao tem o que fazer na maquina de quem instala o Hangar.
+        npm ci --workspace=@hangar/core --workspace=frontend @quieto
         $rcCi = $LASTEXITCODE
         if ($rcCi -eq 0) {
             # A flag vai ANTES do nome do script: no npm 11 `npm run build --silent` nao e mais
@@ -870,7 +873,7 @@ if ($precisa) {
     $distNovo = (Test-Path $dist) -and ((Get-Item $dist).LastWriteTime -ge $tBuild)
     if ($rcCi -ne 0) {
         Erro "npm ci falhou (exit $rcCi) - frontend NAO buildado"
-        Nota 'rodar na mao (na raiz):  npm ci ; npm run build -w frontend'
+        Nota 'rodar na mao (na raiz):  npm ci --workspace=@hangar/core --workspace=frontend ; npm run build -w frontend'
         $script:pendencias += 'frontend'
     } elseif ($rcBuild -ne 0) {
         Erro "npm run build falhou (exit $rcBuild) - dist NAO atualizado"

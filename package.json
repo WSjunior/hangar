@@ -1,12 +1,13 @@
 {
   "name": "hangar",
   "private": true,
-  "_comentario_workspaces": "O app nativo NÃO entra aqui de propósito: quem instala o Hangar (e o CI) roda `npm ci` na raiz e não pode baixar o toolchain do React Native/Expo por isso. O build do app é no Expo, não no GitHub. Pra mexer no app: `npm install` dentro de mobile/, que resolve o core por `file:../packages/core`.",
+  "_comentario_workspaces": "O app nativo ESTÁ aqui, e quem paga por isso é o package-lock (dobra de tamanho), não a instalação: quem instala o Hangar, o CI e o deploy rodam `npm ci --workspace=@hangar/core --workspace=frontend`, que NÃO baixa o toolchain do React Native (medido: 170 pacotes contra 167 quando o app estava fora). Ele precisa estar listado porque o EAS Build detecta monorepo pelos workspaces da raiz — sem isso ele envia só a pasta mobile/, e o `@hangar/core`, que é `file:../packages/core`, chega como link quebrado: o `npm install` de lá sai 0 e o erro só aparece depois, no bundle. Um `npm ci` na raiz SEM os dois --workspace funciona, só baixa o React Native à toa.",
   "workspaces": [
     "packages/*",
-    "frontend"
+    "frontend",
+    "mobile"
   ],
-  "_comentario_scripts": "check e test cobrem as TRÊS interfaces (core, front web, app nativo). O app entra por scripts/verificar-app.mjs porque não é workspace; sem isso ele ficava de fora e uma mudança no @hangar/core podia quebrá-lo com a verificação verde.",
+  "_comentario_scripts": "check e test cobrem as TRÊS interfaces (core, front web, app nativo). O app entra por scripts/verificar-app.mjs, que confere se as dependências dele estão instaladas e FALHA se não estiverem, em vez de pular calado — o `npm ci` do CI e dos instaladores é seletivo e não as instala.",
   "scripts": {
     "test": "npm run test -w @hangar/core && npm run test -w frontend && npm run test:app",
     "check": "npm run check -w @hangar/core && npm run check -w frontend && npm run check:app",

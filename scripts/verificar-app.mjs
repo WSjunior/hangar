@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 // Roda `typecheck` ou `test` do app nativo a partir da RAIZ.
 //
-// Existe porque `mobile/` não é workspace (para um `npm ci` na raiz não baixar o toolchain do
-// React Native), então `npm run <script> -w mobile` não funciona e o app ficava fora do
-// `npm run check`/`npm run test` da raiz — que é como uma mudança no `@hangar/core` podia quebrar
-// o app com o verde na mão.
+// Existe porque o `npm ci` do CI, do deploy e dos instaladores é SELETIVO
+// (`--workspace=@hangar/core --workspace=frontend`): o app é workspace — precisa ser, senão o EAS
+// Build não detecta o monorepo —, mas as dependências dele não são instaladas nesses lugares, para
+// não baixar o toolchain do React Native onde ninguém vai compilar o app. Sem este script, o app
+// ficaria fora do `npm run check`/`npm run test` da raiz, e uma mudança no `@hangar/core` poderia
+// quebrá-lo com o verde na mão.
 //
 // A regra que dá sentido a ele: dependência do app ausente FALHA, nunca é pulada em silêncio. Um
 // "check" que passa por não ter olhado é pior que um que não roda.
@@ -38,7 +40,7 @@ const manifesto = join(app, 'package.json');
 function avisar(motivo) {
   console.error(`\n  ${motivo}, então "${script}" NÃO rodou no app nativo.`);
   console.error('  Resolva com:  cd mobile && npm install');
-  console.error('  (o app não é workspace da raiz de propósito — o build dele é no Expo)\n');
+  console.error('  (o `npm ci` da raiz é seletivo e não instala o app de propósito — o build dele é no Expo)\n');
   process.exit(1);
 }
 

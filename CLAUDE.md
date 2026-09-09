@@ -118,6 +118,21 @@ Python 3.14 + [`uv`](https://docs.astral.sh/uv/), Node 20+. Optional, one per pr
 `pi`, `omp` (oh-my-pi), `kimi`.
 Frontend uses **npm** (has `package-lock.json`).
 
+**O `npm ci` da raiz é SELETIVO, e esquecer os dois `--workspace` baixa o React Native à toa.** O
+comando certo, em todo lugar (CI, `scripts/deploy.sh`, `install.sh`, `install.ps1`) é
+`npm ci --workspace=@hangar/core --workspace=frontend`. O app nativo (`mobile/`) **é** workspace da
+raiz, e precisa ser: o **EAS Build detecta monorepo pelos `workspaces` da raiz**, e sem encontrar
+`mobile` ali ele envia só a pasta do app — aí o `@hangar/core`, que é `file:../packages/core`,
+chega como **link quebrado**, e o pior é que o `npm install` do outro lado **sai 0**: o erro só
+aparece depois, no bundle, como `Cannot find module '@hangar/core'` (reproduzido com
+`git archive HEAD mobile` + `npm install` numa pasta isolada). Ele já ficou de fora dos workspaces
+por causa do peso do React Native, e a lição é que a economia nunca veio dali: com os dois flags são
+**170 pacotes** instalados, contra os 167 de quando o app estava fora. O que dobrou de verdade foi o
+`package-lock.json` (7617 → 14348 linhas), porque o lock cobre todos os workspaces — peso no
+arquivo, não na instalação. Para trabalhar no app é `npm install` dentro de `mobile/` (ele tem
+lockfile próprio); o `metro.config.js` declara `watchFolders`/`nodeModulesPaths` à mão; e o
+`react-dom` dos testes fica pinado na mesma versão do `react`.
+
 ```bash
 # Backend — binds http://127.0.0.1:8765 (set CP_LAN_BIND_IP to a LAN IP for phone access)
 cd backend && CP_AUTH_TOKEN=$(openssl rand -hex 24) CP_LAN_BIND_IP=127.0.0.1 uv run python -m app.main

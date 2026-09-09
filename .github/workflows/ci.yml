@@ -70,15 +70,15 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: package-lock.json
-      # Roda na RAIZ: o lockfile é um só, e os workspaces são `packages/*` + `frontend`. O app
-      # nativo não é workspace de propósito — o build dele é no Expo, e nada de React Native pode
-      # entrar aqui nem na máquina de quem instala.
+      # Roda na RAIZ (o lockfile é um só), mas SELETIVO: o app nativo é workspace — precisa ser,
+      # senão o EAS Build não detecta o monorepo —, e sem os dois `--workspace` este passo baixaria
+      # o toolchain do React Native à toa. Medido: 170 pacotes com os flags, contra ~700 sem eles.
       #
-      # Por workspace, e NÃO `npm run check`/`npm test` da raiz: os da raiz cobrem as três
-      # interfaces, app nativo incluído, e falham de propósito quando as dependências dele não
-      # estão instaladas — que é sempre o caso aqui, porque o `npm ci` da raiz não as instala.
+      # Por workspace também nos passos abaixo, e NÃO `npm run check`/`npm test` da raiz: os da raiz
+      # cobrem as três interfaces, app nativo incluído, e falham de propósito quando as dependências
+      # dele não estão instaladas — que é sempre o caso aqui, por causa do `npm ci` seletivo acima.
       # Aqui a lista é explícita: o CI compila front e backend, e o app é assunto do Expo.
-      - run: npm ci
+      - run: npm ci --workspace=@hangar/core --workspace=frontend
       - run: npm run check -w @hangar/core
       - run: npm run check -w frontend
       - run: npm run test -w @hangar/core

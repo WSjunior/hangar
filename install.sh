@@ -309,10 +309,11 @@ else
   QUIETO=--silent; [ "$UPDATE" = 1 ] && QUIETO=
   # A flag vai ANTES do nome do script: no npm 11 `npm run build --silent` não é mais consumida
   # pelo npm, ela é repassada ao script e chega no `vite build`, que morre com CACError.
-  # `npm ci` na RAIZ: `frontend` é workspace e não tem lockfile próprio, e o `@hangar/core` só
-  # existe como link criado por instalação na raiz. O app nativo não é workspace, então isto não
-  # baixa React Native — o build dele é no Expo.
-  build_front() { npm ci $QUIETO && npm run $QUIETO build -w frontend; }
+  # `npm ci` na RAIZ (`frontend` não tem lockfile próprio, e o `@hangar/core` só existe como link
+  # criado por instalação na raiz) e SELETIVO: o app nativo também é workspace — precisa ser, senão
+  # o EAS Build não detecta o monorepo —, e sem os dois `--workspace` isto baixaria o toolchain do
+  # React Native na máquina de quem só quer usar o Hangar. O build dele é no Expo.
+  build_front() { npm ci --workspace=@hangar/core --workspace=frontend $QUIETO && npm run $QUIETO build -w frontend; }
   gira "npm ci + build do frontend" build_front \
     && [ -f "$DIST" ] && ok "buildado em frontend/dist/" \
     || fail "o build do frontend falhou — corrige o erro acima e re-roda (ele continua de onde parou)"

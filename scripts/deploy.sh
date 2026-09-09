@@ -44,15 +44,16 @@ if ! git merge --ff-only origin/main; then
 fi
 
 # --- Frontend: build isolado + swap ---
-# O `npm ci` roda na RAIZ: `frontend` é workspace e não tem lockfile proprio, e o `@hangar/core`
-# so existe como link criado por instalacao na raiz. O app nativo nao e workspace, entao isto nao
-# baixa React Native. O build continua sendo do frontend, por workspace.
+# O `npm ci` roda na RAIZ (`frontend` não tem lockfile proprio, e o `@hangar/core` so existe como
+# link criado por instalacao na raiz) e é SELETIVO: o app nativo tambem e workspace — precisa ser,
+# senao o EAS Build nao detecta o monorepo —, e sem os dois `--workspace` este passo baixaria o
+# toolchain do React Native numa VPS que nunca vai compilar o app. O build continua so do frontend.
 cd "$REPO"
 
 # node_modules em dia so quando o lock mudou (ci e lento; roda so quando precisa).
 if ! git -C "$REPO" diff --quiet "$LOCAL" HEAD -- package-lock.json 2>/dev/null; then
   log "package-lock.json mudou -> npm ci"
-  npm ci
+  npm ci --workspace=@hangar/core --workspace=frontend
 fi
 
 # Backup do dist atual ANTES do build. O vite esvazia o dist no inicio (emptyOutDir), entao um
