@@ -4,6 +4,7 @@
 #   ./install.sh              # interativo
 #   ./install.sh --yes        # aceita tudo (não pergunta nada)
 #   ./install.sh --check      # só diz o que falta e sai, sem instalar nada
+#   ./install.sh --avancado   # pergunta cada extra (o padrão instala o recomendado sem perguntar)
 #   ./install.sh --update        # re-aplica só o que um `git pull` não atualiza sozinho
 #   ./install.sh --no-frontend   # só o backend (o PWA já roda noutro lugar)
 #   ./install.sh --no-wrapper --no-services --no-hangar-send --no-panel   # pula partes
@@ -14,11 +15,12 @@ set -euo pipefail
 cd "$(dirname "$0")"
 REPO=$(pwd)
 
-YES=0; CHECK=0; UPDATE=0; WRAPPER=1; SERVICES=1; CPSEND=1; PANEL=1; FRONTEND=1
+YES=0; CHECK=0; UPDATE=0; WRAPPER=1; SERVICES=1; CPSEND=1; PANEL=1; FRONTEND=1; AVANCADO=0
 for arg in "$@"; do
   case "$arg" in
     --yes|-y)      YES=1 ;;
     --check)       CHECK=1 ;;
+    --avancado)    AVANCADO=1 ;;
     # --update: modo do hook post-merge. Re-aplica o que o `git pull` NÃO atualiza (units com
     # caminho cravado, o bloco de protocolo no ~/.claude/CLAUDE.md, deps do backend, build do
     # front) e NÃO toca em nada que peça senha ou decisão: sem instalar dependência, sem token,
@@ -86,8 +88,11 @@ gira() { # gira <rótulo> <comando...>: spinner enquanto roda; sem TTY (ou --upd
 # hangar-send sem ninguém ter respondido nada. Sem terminal (CI, cron), a resposta é NÃO.
 if { exec 3</dev/tty; } 2>/dev/null; then TEM_TTY=1; else TEM_TTY=0; fi
 
-ask() { # ask "pergunta" -> 0/1 (em --yes, sempre sim; sem terminal, sempre não)
-  [ "$YES" = 1 ] && return 0
+# Quatro sabores, e a diferença é quem decide:
+#  ask       -> padrão SIM sem perguntar (--avancado pergunta). Sem terminal: NÃO.
+#  ask_senha -> vai pedir sudo: SEMPRE pergunta (com terminal), mesmo no padrão. --yes: sim.
+#  ask_extra -> extra de terceiro/ambiente: padrão NÃO; só --avancado pergunta.
+_pergunta() {
   if [ "$TEM_TTY" = 0 ]; then
     printf '  \033[2m%s [S/n] -> sem terminal para responder, assumindo NÃO\033[0m\n' "$1"
     return 1
@@ -97,6 +102,14 @@ ask() { # ask "pergunta" -> 0/1 (em --yes, sempre sim; sem terminal, sempre não
   read -r r <&3 || r=''
   [ -z "$r" ] || [[ "$r" =~ ^[SsYy] ]]
 }
+ask() {
+  [ "$YES" = 1 ] && return 0
+  [ "$TEM_TTY" = 0 ] && { _pergunta "$1"; return; }
+  [ "$AVANCADO" = 0 ] && { nota "$1 -> sim (padrão; --avancado pergunta)"; return 0; }
+  _pergunta "$1"
+}
+ask_senha() { [ "$YES" = 1 ] && return 0; _pergunta "$1"; }
+ask_extra() { [ "$AVANCADO" = 0 ] && return 1; _pergunta "$1"; }
 
 PENDENTE=()
 
@@ -117,6 +130,10 @@ detecta_pkg() {
 }
 PKG=$(detecta_pkg)
 
+# Cedo porque o 6/8 também precisa dela (o `tailscale serve` publica ESTA porta), não só o resumo.
+PORTA_FIM=$(grep '^CP_PORT=' backend/.env 2>/dev/null | tail -1 | cut -d= -f2- || true)
+PORTA_FIM=${PORTA_FIM:-8765}
+
 if [ "$UPDATE" = 0 ] && [ "$CHECK" = 0 ]; then
   echo
   echo "  +--------------------------------------------------+"
@@ -126,83 +143,16 @@ if [ "$UPDATE" = 0 ] && [ "$CHECK" = 0 ]; then
   echo "  +--------------------------------------------------+"
 fi
 
-# Instala o que cai no $HOME sem root. Separado de propósito do tier que precisa de sudo:
-# um instalador que pede senha sem avisar é como se perde a confiança de quem está rodando.
-precisa_home() { # precisa_home <rótulo> <cmd> <comando de instalação> <pra quê>
-  local rotulo=$1 cmd=$2 instalacao=$3 porque=$4
-  if command -v "$cmd" >/dev/null; then ok "$rotulo"; return 0; fi
-  if [ "$CHECK" = 1 ]; then falta "$rotulo — $porque"; nota "$instalacao"; PENDENTE+=("$rotulo"); return 1; fi
-  echo "  .. $rotulo não encontrado ($porque)"
-  nota "$instalacao"
-  if [ "$UPDATE" = 1 ]; then erro "$rotulo faltando (--update não instala dependência)"; PENDENTE+=("$rotulo"); return 1; fi
-  if ask "Instalar agora? (vai pro teu \$HOME, sem sudo)"; then
-    eval "$instalacao" >/dev/null 2>&1 || true
-    # O instalador põe em ~/.local/bin, que pode não estar no PATH DESTE shell.
-    export PATH="$HOME/.local/bin:$HOME/.local/share/fnm:$PATH"
-    hash -r 2>/dev/null || true
-    if command -v "$cmd" >/dev/null; then ok "$rotulo instalado"; return 0; fi
-  fi
-  erro "$rotulo continua faltando"; PENDENTE+=("$rotulo"); return 1
-}
-
-precisa_root() { # precisa_root <rótulo> <cmd> <pacote> <pra quê>
-  local rotulo=$1 cmd=$2 pacote=$3 porque=$4
-  if command -v "$cmd" >/dev/null; then ok "$rotulo"; return 0; fi
-  if [ -z "$PKG" ]; then
-    erro "$rotulo faltando e não reconheci o gerenciador de pacotes — instale $pacote na mão"
-    PENDENTE+=("$rotulo"); return 1
-  fi
-  if [ "$CHECK" = 1 ]; then falta "$rotulo — $porque"; nota "$PKG $pacote"; PENDENTE+=("$rotulo"); return 1; fi
-  echo "  .. $rotulo não encontrado ($porque)"
-  nota "$PKG $pacote     <- precisa de senha de administrador"
-  if [ "$UPDATE" = 1 ]; then erro "$rotulo faltando (--update não instala dependência)"; PENDENTE+=("$rotulo"); return 1; fi
-  if ask "Rodar esse comando?"; then
-    eval "$PKG $pacote" && { ok "$rotulo instalado"; return 0; }
-  fi
-  erro "$rotulo continua faltando"; PENDENTE+=("$rotulo"); return 1
-}
-
-# ── 1/8 Dependências ─────────────────────────────────────────────────────────
-[ "$UPDATE" = 1 ] && say "Modo --update: só o que um git pull não atualiza sozinho" || true
-say "1/8 Dependências"
-precisa_root "tmux"        tmux   tmux 'sem ele não existe sessão' || true
-precisa_home "Claude Code" claude 'curl -fsSL https://claude.ai/install.sh | bash' 'é o que o app pilota' || true
-precisa_home "uv"          uv     'curl -LsSf https://astral.sh/uv/install.sh | sh' 'gerencia o venv do backend' || true
-if [ "$FRONTEND" = 0 ]; then
-  ok "Node: dispensado (--no-frontend)"
-elif ! command -v npm >/dev/null; then
-  precisa_home "Node 20+" node \
-    'curl -fsSL https://fnm.vercel.app/install | bash && "$HOME/.local/share/fnm/fnm" install 22 && "$HOME/.local/share/fnm/fnm" default 22' \
-    'o frontend é Svelte' || true
-elif ! node -e 'process.exit(parseInt(process.versions.node) >= 20 ? 0 : 1)' 2>/dev/null; then
-  erro "Node 20+ é necessário (atual: $(node --version))"; PENDENTE+=("Node 20+")
-else
-  ok "node $(node --version)"
-fi
-
-# Codex é OPCIONAL: o app é primariamente um cockpit de Claude Code. Exigir o binário aqui
-# travava a instalação inteira de quem só usa Claude.
-if command -v codex >/dev/null; then ok "codex"; else
-  falta "codex ausente — sessões Codex indisponíveis, o resto funciona"
-  nota "habilitar depois: https://developers.openai.com/codex/cli"
-fi
-command -v git >/dev/null && ok "git" || falta "git ausente — o painel de git e o chip de branch ficam vazios"
-
-if [ "$CHECK" = 1 ]; then
-  [ ${#PENDENTE[@]} -eq 0 ] && { say "Nada faltando."; exit 0; }
-  say "Faltam: ${PENDENTE[*]}"; exit 1
-fi
-[ ${#PENDENTE[@]} -eq 0 ] || fail "faltam: ${PENDENTE[*]}"
-
-# ── 2/8 Backend ──────────────────────────────────────────────────────────────
-say "2/8 Backend"
-(cd backend && uv sync --quiet) || fail "uv sync falhou — o backend ficou sem as dependências"
-ok "dependências instaladas"
-nota "psutil NÃO entra aqui: no Linux existe /proc e ele é mais rápido (ver app/procinfo.py)"
-
-# ── 3/8 Token de acesso ──────────────────────────────────────────────────────
-say "3/8 Token de acesso"
+# ── 0/8 Antes de começar ─────────────────────────────────────────────────────
+# As DUAS decisões que são da pessoa (token e "vou usar fora de casa?") vêm juntas, na frente:
+# depois disto o instalador segue sozinho, e o que restar de senha já foi anunciado aqui.
+# O --check não entra: ele não pode gravar nada no disco, token incluído.
 gera_token() { openssl rand -hex 24 2>/dev/null || python3 -c 'import secrets; print(secrets.token_hex(24))'; }
+if [ "$UPDATE" = 0 ] && [ "$CHECK" = 0 ]; then
+say "0/8 Antes de começar"
+echo "  Duas perguntas agora, e depois o instalador segue sozinho até o fim."
+echo "  Ele pode pedir sua senha de administrador (pergunta antes, cada vez) para:"
+echo "  instalar o tmux, liberar a porta do Wi-Fi e, se você quiser, o Tailscale."
 if [ -f backend/.env ] && grep -q '^CP_AUTH_TOKEN=' backend/.env; then
   ok "backend/.env já tem CP_AUTH_TOKEN (mantido)"
 elif [ "$YES" = 1 ]; then
@@ -244,6 +194,120 @@ grep -q '^CP_AUTH_TOKEN=.\+' backend/.env 2>/dev/null \
   && ! grep -q '^CP_AUTH_TOKEN=change-me[[:space:]]*$' backend/.env \
   || fail "o token não foi gravado em backend/.env — sem ele o celular não entra"
 nota "É esse token que você digita no celular na primeira conexão."
+
+QUER_TAILSCALE=0
+if command -v tailscale >/dev/null; then
+  QUER_TAILSCALE=1; ok "Tailscale já instalado — vai ser usado"
+else
+  echo "  Você vai usar o Hangar fora de casa (celular fora do Wi-Fi do PC)?"
+  nota "Sim = instala o Tailscale, uma rede privada entre o PC e o celular, sem abrir"
+  nota "nada para a internet. Não = só no mesmo Wi-Fi. Dá pra mudar depois: ./install.sh"
+  # `|| true`: um "não" aqui é resposta, não falha — sem ele o set -e derrubaria o instalador.
+  _pergunta "Usar fora de casa (instalar Tailscale)?" && QUER_TAILSCALE=1 || true
+fi
+fi
+QUER_TAILSCALE=${QUER_TAILSCALE:-0}
+# No --update ninguém responde nada; o 6/8 nem roda, mas a variável precisa refletir a máquina.
+if [ "$UPDATE" = 1 ] && command -v tailscale >/dev/null; then QUER_TAILSCALE=1; fi
+
+# Instala o que cai no $HOME sem root. Separado de propósito do tier que precisa de sudo:
+# um instalador que pede senha sem avisar é como se perde a confiança de quem está rodando.
+precisa_home() { # precisa_home <rótulo> <cmd> <comando de instalação> <pra quê>
+  local rotulo=$1 cmd=$2 instalacao=$3 porque=$4
+  if command -v "$cmd" >/dev/null; then ok "$rotulo"; return 0; fi
+  if [ "$CHECK" = 1 ]; then falta "$rotulo — $porque"; nota "$instalacao"; PENDENTE+=("$rotulo"); return 1; fi
+  echo "  .. $rotulo não encontrado ($porque)"
+  nota "$instalacao"
+  if [ "$UPDATE" = 1 ]; then erro "$rotulo faltando (--update não instala dependência)"; PENDENTE+=("$rotulo"); return 1; fi
+  if ask "Instalar agora? (vai pro teu \$HOME, sem sudo)"; then
+    eval "$instalacao" >/dev/null 2>&1 || true
+    # O instalador põe em ~/.local/bin, que pode não estar no PATH DESTE shell.
+    export PATH="$HOME/.local/bin:$HOME/.local/share/fnm:$PATH"
+    hash -r 2>/dev/null || true
+    if command -v "$cmd" >/dev/null; then ok "$rotulo instalado"; return 0; fi
+  fi
+  erro "$rotulo continua faltando"; PENDENTE+=("$rotulo"); return 1
+}
+
+precisa_root() { # precisa_root <rótulo> <cmd> <pacote> <pra quê>
+  local rotulo=$1 cmd=$2 pacote=$3 porque=$4
+  if command -v "$cmd" >/dev/null; then ok "$rotulo"; return 0; fi
+  if [ -z "$PKG" ]; then
+    erro "$rotulo faltando e não reconheci o gerenciador de pacotes — instale $pacote na mão"
+    PENDENTE+=("$rotulo"); return 1
+  fi
+  if [ "$CHECK" = 1 ]; then falta "$rotulo — $porque"; nota "$PKG $pacote"; PENDENTE+=("$rotulo"); return 1; fi
+  echo "  .. $rotulo não encontrado ($porque)"
+  nota "$PKG $pacote     <- precisa de senha de administrador"
+  if [ "$UPDATE" = 1 ]; then erro "$rotulo faltando (--update não instala dependência)"; PENDENTE+=("$rotulo"); return 1; fi
+  if ask_senha "Rodar esse comando?"; then
+    eval "$PKG $pacote" && { ok "$rotulo instalado"; return 0; }
+  fi
+  erro "$rotulo continua faltando"; PENDENTE+=("$rotulo"); return 1
+}
+
+# ── 1/8 Dependências ─────────────────────────────────────────────────────────
+[ "$UPDATE" = 1 ] && say "Modo --update: só o que um git pull não atualiza sozinho" || true
+say "1/8 Dependências"
+precisa_root "tmux"        tmux   tmux 'sem ele não existe sessão' || true
+precisa_home "Claude Code" claude 'curl -fsSL https://claude.ai/install.sh | bash' 'é o que o app pilota' || true
+precisa_home "uv"          uv     'curl -LsSf https://astral.sh/uv/install.sh | sh' 'gerencia o venv do backend' || true
+if [ "$FRONTEND" = 0 ]; then
+  ok "Node: dispensado (--no-frontend)"
+elif ! command -v npm >/dev/null; then
+  precisa_home "Node 20+" node \
+    'curl -fsSL https://fnm.vercel.app/install | bash && "$HOME/.local/share/fnm/fnm" install 22 && "$HOME/.local/share/fnm/fnm" default 22' \
+    'o frontend é Svelte' || true
+elif ! node -e 'process.exit(parseInt(process.versions.node) >= 20 ? 0 : 1)' 2>/dev/null; then
+  erro "Node 20+ é necessário (atual: $(node --version))"; PENDENTE+=("Node 20+")
+else
+  ok "node $(node --version)"
+fi
+
+# Codex é OPCIONAL: o app é primariamente um cockpit de Claude Code. Exigir o binário aqui
+# travava a instalação inteira de quem só usa Claude.
+if command -v codex >/dev/null; then ok "codex"; else
+  falta "codex ausente — sessões Codex indisponíveis, o resto funciona"
+  nota "habilitar depois: https://developers.openai.com/codex/cli"
+fi
+command -v git >/dev/null && ok "git" || falta "git ausente — o painel de git e o chip de branch ficam vazios"
+
+# Tailscale entra aqui, junto das outras dependências: a decisão já foi tomada no passo 0, e o
+# 6/8 só publica. Falhar aqui não derruba a instalação — o app ainda funciona no Wi-Fi de casa.
+if [ "$QUER_TAILSCALE" = 1 ] && ! command -v tailscale >/dev/null; then
+  nota "Tailscale: instalação do sistema."
+  if ask_senha "Instalar o Tailscale agora (vai pedir a senha)?"; then
+    curl -fsSL https://tailscale.com/install.sh | sh && command -v tailscale >/dev/null \
+      && ok "Tailscale instalado" \
+      || { anota_problema "instalação do Tailscale falhou"; QUER_TAILSCALE=0; }
+  else
+    QUER_TAILSCALE=0; nota "pulado — o celular entra só pelo Wi-Fi do PC"
+  fi
+fi
+if [ "$QUER_TAILSCALE" = 1 ] && ! tailscale status >/dev/null 2>&1; then
+  echo "  Falta entrar no Tailscale: vai abrir um link, faça login no navegador (até 5 min)."
+  if ask_senha "Entrar agora (vai pedir a senha)?"; then
+    timeout 300 sudo tailscale up || anota_problema "login no Tailscale não concluiu — depois: sudo tailscale up e ./install.sh"
+  fi
+fi
+
+if [ "$CHECK" = 1 ]; then
+  [ ${#PENDENTE[@]} -eq 0 ] && { say "Nada faltando."; exit 0; }
+  say "Faltam: ${PENDENTE[*]}"; exit 1
+fi
+[ ${#PENDENTE[@]} -eq 0 ] || fail "faltam: ${PENDENTE[*]}"
+
+# ── 2/8 Backend ──────────────────────────────────────────────────────────────
+say "2/8 Backend"
+(cd backend && uv sync --quiet) || fail "uv sync falhou — o backend ficou sem as dependências"
+ok "dependências instaladas"
+nota "psutil NÃO entra aqui: no Linux existe /proc e ele é mais rápido (ver app/procinfo.py)"
+
+# ── 3/8 Token de acesso ──────────────────────────────────────────────────────
+# O trabalho foi feito no passo 0: token e Tailscale são as DUAS decisões da pessoa, e elas
+# vêm antes de qualquer instalação — depois o instalador segue sozinho.
+say "3/8 Token de acesso"
+ok "definido no passo 0"
 
 # ── 4/8 Frontend ─────────────────────────────────────────────────────────────
 # O CI compila o front a cada push na main e publica o resultado na release `dist-latest`. Baixar
@@ -426,7 +490,7 @@ if command -v ufw >/dev/null || command -v firewall-cmd >/dev/null; then
   else
     nota "Liberar precisa de senha de administrador. Por fora seria:"
     for p in "${PORTAS[@]}"; do nota "    sudo ./scripts/lan-setup.sh $p"; done
-    if ask "Liberar a(s) porta(s) $LISTA agora (vai pedir a senha)?"; then
+    if ask_senha "Liberar a(s) porta(s) $LISTA agora (vai pedir a senha)?"; then
       OK_FW=1
       for p in "${PORTAS[@]}"; do sudo ./scripts/lan-setup.sh "$p" || OK_FW=0; done
       [ "$OK_FW" = 1 ] && ok "portas liberadas" || anota_problema "liberar portas no firewall falhou"
@@ -436,31 +500,23 @@ else
   nota "sem ufw/firewalld — provavelmente não há firewall bloqueando (padrão de Arch/CachyOS)"
 fi
 
-if command -v tailscale >/dev/null; then
-  ok "Tailscale já instalado"
-  if tailscale status >/dev/null 2>&1; then
-    ok "e já está conectado ao teu tailnet"
-    nota "Ponha o nome .ts.net em CP_PUBLIC_URL no backend/.env pra o QR sair com ele"
-    nota "em vez do IP da LAN."
+publica_tailscale() { # grava CP_PUBLIC_URL com o https do tailnet; o serve precisa de root (ou operator)
+  local nome
+  nome=$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true)
+  [ -n "$nome" ] || { falta "Tailscale sem login — sudo tailscale up e ./install.sh de novo"; return 1; }
+  nota "Publicar o Hangar no Tailscale precisa da senha (tailscale serve)."
+  ask_senha "Publicar agora (vai pedir a senha)?" || { nota "pulado — depois: ./install.sh"; return 1; }
+  if sudo tailscale serve --bg "$PORTA_FIM" >/dev/null 2>&1 && tailscale serve status 2>/dev/null | grep -q ':443'; then
+    grep -q '^CP_PUBLIC_URL=' backend/.env 2>/dev/null && sed -i.bak '/^CP_PUBLIC_URL=/d' backend/.env && rm -f backend/.env.bak
+    printf 'CP_PUBLIC_URL=https://%s\n' "$nome" >> backend/.env
+    ok "publicado no Tailscale: https://$nome"
   else
-    falta "instalado mas NÃO logado — rode: sudo tailscale up"
+    anota_problema "tailscale serve falhou — HTTPS do tailnet desligado? Habilite em https://login.tailscale.com/admin/dns (HTTPS Certificates) e rode ./install.sh de novo"
+    return 1
   fi
-else
-  echo "  O Tailscale põe teu PC e teu celular na mesma rede privada, de qualquer lugar do"
-  echo "  mundo, sem abrir nenhuma porta pra internet. É como usar o app fora de casa."
-  nota "A instalação é do sistema, então ela PEDE SUA SENHA de administrador."
-  nota "Prefere fazer por fora? Rode isto e depois chame o install.sh de novo:"
-  nota "    curl -fsSL https://tailscale.com/install.sh | sh"
-  if ask "Instalar agora (vai pedir a senha)?"; then
-    if curl -fsSL https://tailscale.com/install.sh | sh && command -v tailscale >/dev/null; then
-      ok "Tailscale instalado"
-    else
-      anota_problema "instalação do Tailscale falhou"
-    fi
-    nota "Falta logar: rode 'sudo tailscale up' e instale o Tailscale também no celular."
-  else
-    nota "pulado — o app segue funcionando na LAN (mesmo Wi-Fi)"
-  fi
+}
+if [ "$QUER_TAILSCALE" = 1 ]; then publica_tailscale || true
+else nota "sem Tailscale: o celular entra pelo Wi-Fi do PC. Fora de casa? ./install.sh e responda Sim."
 fi
 
 fi
@@ -526,7 +582,7 @@ elif [ "$UPDATE" = 1 ]; then
 else
   nota "Opcional: fazer as sessões voltarem depois de um reboot/OOM, com a conversa junto."
   nota "Clona 3 plugins de tmux de terceiros (tpm, resurrect, continuum) no teu ~/.tmux."
-  ask "Instalar a persistência de sessões?" && { ./scripts/tmux-persist-setup.sh || anota_problema "persistência de sessões não instalou"; }
+  ask_extra "Instalar a persistência de sessões?" && { ./scripts/tmux-persist-setup.sh || anota_problema "persistência de sessões não instalou"; }
 fi
 
 # Painel flutuante + tray. Só Hyprland com Quickshell (testado no rice end-4/dots-hyprland).
@@ -544,7 +600,7 @@ elif [ -e "$HOME/.local/bin/hangar-panel-open" ]; then
   nota "atualizar de propósito (muda como o painel sobe): ./scripts/install-hangar-panel.sh"
 elif [ "$UPDATE" = 1 ]; then
   :   # não instala coisa nova num --update; isso é decisão, não atualização
-elif [ "$PANEL" = 1 ] && ask "Instalar painel flutuante + tray (SUPER+SHIFT+U)?"; then
+elif [ "$PANEL" = 1 ] && ask_extra "Instalar painel flutuante + tray (SUPER+SHIFT+U)?"; then
   ./scripts/install-hangar-panel.sh || anota_problema "painel do desktop não instalou"
 fi
 
@@ -580,9 +636,8 @@ elif [ -f "$HOOK" ]; then
   falta "já existe um $HOOK que não é nosso — não vou mexer nele"
   nota "pra somar, acrescente a linha:  ./install.sh --update"
 else
-  echo "  Daqui pra frente, um 'git pull' traz código novo — mas as units do systemd e o texto"
-  echo "  do protocolo guardam cópia própria e ficariam velhos. Este hook re-aplica isso sozinho."
-  nota "Ele só roda no pull, que é você quem dá. Nada nele pede senha. Desligar: rm $HOOK"
+  echo "  Quando alguém atualizar o Hangar por 'git pull', isto reaplica sozinho o que o pull"
+  echo "  não cobre. Não pede senha. Pelo botão Atualizar do app não precisa de nada disto."
   if ask "Deixar o próximo 'git pull' já se atualizar sozinho?"; then
   # Corpo vem de scripts/post-merge.hook, FONTE ÚNICA compartilhada com o install.ps1 (que passou a
   # instalar o mesmo hook no Windows, onde ninguém o instalava). Era um heredoc aqui; com dois
@@ -637,8 +692,6 @@ if [ ${#PROBLEMAS[@]} -gt 0 ]; then
 else
   say "Pronto"
 fi
-PORTA_FIM=$(grep '^CP_PORT=' backend/.env 2>/dev/null | tail -1 | cut -d= -f2- || true)
-PORTA_FIM=${PORTA_FIM:-8765}
 if [ "${ABRIR_SHELL:-0}" = 1 ]; then
   # O passo 7/8 acabou de reiniciar o backend; abrir antes da porta voltar mostra a tela de
   # "não consegui carregar a interface" (medido: serviço active às :53, janela aberta no mesmo
