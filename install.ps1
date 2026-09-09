@@ -10,6 +10,7 @@
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -Sim       # aceita tudo
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -SoChecar  # so diz o que falta
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -Update    # re-aplica o que o git pull nao atualiza
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -Avancado  # volta a perguntar tudo
 #
 # Espelha o install.sh do Linux. Escrito pra Windows PowerShell 5.1 (o que vem no Windows):
 # nada de operador ternario nem API de .NET Core, senao quebra em quem nao instalou o PS 7.
@@ -18,12 +19,23 @@
 # agendada - e nao toca em nada que peca decisao ou elevacao: sem instalar dependencia, sem
 # token, sem firewall, sem Tailscale. Um hook que trava pedindo confirmacao no meio de um pull
 # e pior que hook nenhum.
-param([switch]$Sim, [switch]$SoChecar, [switch]$Update)
+param([switch]$Sim, [switch]$SoChecar, [switch]$Update, [switch]$Avancado)
 if ($Update) { $Sim = $true }
 
 $ErrorActionPreference = 'Stop'
 $raiz = Split-Path -Parent $MyInvocation.MyCommand.Path
 $pendencias = @()
+
+# Log da instalacao. NUNCA no -Update: aquele roda pelo hook post-merge, e um `git pull` nao pode
+# abrir transcript. O transcript captura Read-Host E Write-Host, entao todo trecho que mostra o
+# token roda entre Pausa-Log e Retoma-Log - senao a credencial fica em texto puro no arquivo.
+$logInstall = Join-Path $env:LOCALAPPDATA 'hangar\install.log'
+if (-not $Update) {
+    New-Item -ItemType Directory -Force -Path (Split-Path $logInstall) | Out-Null
+    try { Start-Transcript -Path $logInstall -Append | Out-Null } catch { }
+}
+function Pausa-Log  { if (-not $Update) { try { Stop-Transcript | Out-Null } catch { } } }
+function Retoma-Log { if (-not $Update) { try { Start-Transcript -Path $logInstall -Append | Out-Null } catch { } } }
 
 function Titulo($m) {
     # Título numerado ("3/8 ...", "5d/8 ...") ganha a barra de progresso; os demais seguem sem.
@@ -49,6 +61,7 @@ function Pare($mensagem, $dicas) {
     # Sem a pausa, a janela aberta por duplo clique FECHA e ninguém lê o motivo — o mesmo
     # cuidado do Read-Host do fim.
     if ($script:Interativo -and -not $Update) { Read-Host '  Enter pra fechar' | Out-Null }
+    Pausa-Log
     exit 1
 }
 
@@ -62,14 +75,37 @@ function Pare($mensagem, $dicas) {
 # alternativa seria P/Invoke de CreateFile dentro de um instalador.
 $script:Interativo = -not [Console]::IsInputRedirected
 
-function Pergunte($texto) {
-    if ($Sim) { return $true }
-    # Sem entrada interativa nao ha o que perguntar. Antes disto o Read-Host devolvia '' e o valor
-    # DEFAULT (sim) valia do mesmo jeito — o comportamento nao muda, o que muda e ele ser escolha
-    # escrita em vez de efeito colateral de uma pergunta que ninguem viu.
-    if (-not $script:Interativo) { Nota "$texto -> sim (sem entrada interativa, assumindo o padrao)"; return $true }
+# Sem entrada interativa a resposta e NAO, alinhado ao install.sh: `irm | iex` chamado por outro
+# processo nao pode instalar terceiro nem mexer no firewall por conta propria.
+function Pergunte-Mesmo($texto) {
+    if (-not $script:Interativo) { Nota "$texto -> nao (sem entrada interativa)"; return $false }
     $r = Read-Host "$texto [S/n]"
     return ($r -eq '' -or $r -match '^[SsYy]')
+}
+function Pergunte($texto) {         # padrao SIM sem perguntar; -Avancado pergunta
+    if ($Sim) { return $true }
+    if (-not $script:Interativo) { return (Pergunte-Mesmo $texto) }
+    if (-not $Avancado) { Nota "$texto -> sim (padrao; -Avancado pergunta)"; return $true }
+    return (Pergunte-Mesmo $texto)
+}
+function Pergunte-Extra($texto) {   # extra de terceiro: padrao NAO; so -Avancado pergunta
+    if (-not $Avancado) { return $false }
+    return (Pergunte-Mesmo $texto)
+}
+
+function Ip-Lan {
+    # IP de rede local desta maquina, ou '' se nao houver. A interface certa e a da ROTA PADRAO
+    # (0.0.0.0/0): pegar -First 1 da lista crua do Get-NetIPAddress traz o vEthernet do Docker/WSL/
+    # Hyper-V, que passa nos mesmos filtros e costuma vir antes da Wi-Fi real.
+    $idxRota = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+               Sort-Object RouteMetric | Select-Object -First 1 -ExpandProperty InterfaceIndex
+    $ip = $null
+    if ($idxRota) {
+        $ip = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $idxRota -ErrorAction SilentlyContinue |
+               Where-Object { $_.IPAddress -notmatch '^(127\.|169\.254\.)' } |
+               Select-Object -First 1 -ExpandProperty IPAddress)
+    }
+    if ($ip) { return $ip } else { return '' }
 }
 
 function Escrever-Texto($caminho, $texto, [switch]$ComBom) {
@@ -294,6 +330,7 @@ function Instale-ClaudeCode {
 Atualiza-Path
 if (-not (Tem 'winget')) {
     Erro 'winget nao encontrado. Instale o "App Installer" pela Microsoft Store e rode de novo.'
+    Pausa-Log
     exit 1
 }
 
@@ -306,72 +343,8 @@ if (-not $Update) {
     Write-Host '  +--------------------------------------------------+'
 }
 
-# -- 1/8 Dependencias obrigatorias -------------------------------------------
-Titulo '1/8 Dependencias'
-Instale 'psmux (multiplexador)' 'psmux'  'marlocarlo.psmux'     'sem ele nao existe sessao' | Out-Null
-Instale-ClaudeCode | Out-Null
-Instale 'Python'                'py'     'Python.Python.3.14'   'o backend e Python'        | Out-Null
-# 3.14, nao 3.13: backend/pyproject.toml exige >=3.14 (e .python-version = 3.14). Com o 3.13 o
-# `uv sync` ate funcionava - baixava um 3.14 gerenciado por conta propria - mas o Python do winget
-# virava peso morto, servindo so ao shim python3 do hangar-send. Um Python so pros dois papeis.
-Instale 'Node 20+'              'node'   'OpenJS.NodeJS.LTS'    'o frontend e Svelte'       | Out-Null
-Instale 'uv'                    'uv'     'astral-sh.uv'         'gerencia o venv do backend' | Out-Null
-
-# O backend chama o multiplexador por `tmux`. O psmux publica esse alias; se um dia parar,
-# isso vira erro claro AQUI em vez de "falha ao criar sessao" dentro do app.
-if ((Tem 'psmux') -and -not (Tem 'tmux')) {
-    Erro 'psmux instalado mas sem o alias `tmux` - o backend chama por esse nome'
-    $pendencias += 'alias tmux'
-}
-
-# Git e OPCIONAL: sem ele o app roda, so perde o chip de branch e a aba de git.
-if (-not (Tem 'git')) {
-    Falta 'git ausente - o painel de git e o chip de branch ficam vazios (o resto funciona)'
-    if (-not $SoChecar -and (Pergunte '      Instalar o Git agora?')) {
-        Instale 'Git' 'git' 'Git.Git' 'painel de git' | Out-Null
-    }
-} else { Ok 'git' }
-
-# ripgrep tambem e OPCIONAL, e o preco de nao ter e ESPECIFICO: quem chama o `rg` e a busca por
-# conteudo entre sessoes (a lupa; backend/app/search.py), e sem o binario ela devolve lista VAZIA -
-# a tela diz "nenhum resultado" pra uma busca que nunca rodou. No Linux o ripgrep costuma ja estar
-# ai; no Windows nao vem com o sistema, e foi assim que a busca ficou muda nesta VM. O backend
-# agora tambem registra o aviso no log, mas quem resolve de verdade e instalar.
-# NAO usa `Instale`: aquele empurra pra $pendencias e a linha seguinte aborta a instalacao inteira -
-# desproporcional pra uma ferramenta que so a lupa usa.
-if (-not (Tem 'rg')) {
-    Falta 'ripgrep ausente - a busca por conteudo entre sessoes (a lupa) volta sempre vazia'
-    if (-not $SoChecar -and (Pergunte '      Instalar o ripgrep agora?')) {
-        Write-Host '  .. instalando ripgrep (BurntSushi.ripgrep.MSVC)'
-        Nativo winget install --id BurntSushi.ripgrep.MSVC --exact --silent `
-            --accept-package-agreements --accept-source-agreements | Out-Null
-        Atualiza-Path
-        if (Tem 'rg') { Ok 'ripgrep instalado' }
-        else { Erro 'ripgrep nao instalou - so a lupa fica vazia; o resto do app funciona' }
-    }
-} else { Ok 'ripgrep' }
-
-if ($SoChecar) {
-    if ($pendencias.Count -eq 0) { Titulo 'Nada faltando.'; exit 0 }
-    Titulo "Faltam: $($pendencias -join ', ')"
-    exit 1
-}
-if ($pendencias.Count -gt 0) { Erro "faltam: $($pendencias -join ', ')"; exit 1 }
-
-# -- 2/8 Backend -------------------------------------------------------------
-Titulo '2/8 Backend'
-Push-Location "$raiz\backend"
-$rcSync = Nativo uv sync --quiet
-if ($rcSync -ne 0) { Pop-Location; Pare 'uv sync falhou - o backend ficou sem as dependencias' @('rodar na mao:  cd backend ; uv sync') }
-Ok 'dependencias instaladas'
-Nota 'psutil entra aqui: no Windows nao ha /proc pra ler informacao de processo'
-Pop-Location
-
-# -- 3/8 Token de acesso -----------------------------------------------------
-# Perguntado, nao gerado: voce DIGITA isto no celular, e 48 caracteres hex e castigo. Enter em
-# branco ainda gera um aleatorio. O piso de 8 e daqui - o backend so recusa o literal
-# 'change-me', entao uma senha de 4 digitos passaria batido sem esta checagem.
-Titulo '3/8 Token de acesso'
+# As funcoes do .env vem ANTES do passo 0 porque o token e gravado la: no PowerShell uma funcao so
+# existe depois que a linha que a define executou.
 $envFile = "$raiz\backend\.env"
 function Porta-Do-Env {
     param([string]$Chave, [int]$Default)
@@ -450,6 +423,18 @@ function Token-Do-Env {
     return $null
 }
 
+# -- 0/8 Antes de comecar ----------------------------------------------------
+# As duas unicas perguntas da instalacao ficam AQUI, juntas: token e "vai usar fora de casa?".
+# Depois daqui o instalador vai ate o fim sozinho.
+if (-not $SoChecar -and -not $Update) {
+Titulo '0/8 Antes de comecar'
+Write-Host '  Duas perguntas agora, e depois o instalador segue sozinho ate o fim.'
+Write-Host '  Se pedir permissao de administrador e para liberar a porta do Wi-Fi no firewall.'
+
+# O BLOCO INTEIRO do token fora do transcript: o Start-Transcript captura Read-Host e Write-Host,
+# entao tanto o que a pessoa digita quanto o aleatorio impresso no ramo nao-interativo cairiam
+# em texto puro no install.log.
+Pausa-Log
 if ($temToken) {
     Ok 'backend\.env ja tem CP_AUTH_TOKEN (mantido)'
 } elseif ($Sim) {
@@ -486,7 +471,94 @@ if ($temToken) {
 }
 # Prova, não ausência de erro: o passo inteiro vale zero se o token não estiver de fato no arquivo.
 if (-not (Token-Do-Env)) { Pare 'o token nao foi gravado em backend\.env - sem ele o celular nao entra' @() }
+Add-Content -Path $logInstall -Value '  ok  CP_AUTH_TOKEN definido (valor omitido do log de proposito)'
+Retoma-Log
 Nota 'E esse token que voce digita no celular na primeira conexao.'
+
+# Segunda e ultima pergunta. A resposta decide se o Tailscale entra na lista do 1/8 - instalar
+# terceiro no meio do passo 6 era o que fazia a instalacao parar de novo quase no fim.
+$script:querTailscale = $false
+if (Tem 'tailscale') { $script:querTailscale = $true; Ok 'Tailscale ja instalado - vai ser usado' }
+else {
+    Write-Host '  Voce vai usar o Hangar fora de casa (celular fora do Wi-Fi do PC)?'
+    Nota 'Sim = instala o Tailscale, uma rede privada entre PC e celular, sem abrir nada pra internet.'
+    $script:querTailscale = Pergunte-Mesmo '  Usar fora de casa (instalar Tailscale)?'
+}
+}
+# Fora da guarda: no -Update nao ha pergunta, mas quem ja tem Tailscale continua publicando nele.
+if ($Update -and (Tem 'tailscale')) { $script:querTailscale = $true }
+
+# -- 1/8 Dependencias obrigatorias -------------------------------------------
+Titulo '1/8 Dependencias'
+Instale 'psmux (multiplexador)' 'psmux'  'marlocarlo.psmux'     'sem ele nao existe sessao' | Out-Null
+Instale-ClaudeCode | Out-Null
+Instale 'Python'                'py'     'Python.Python.3.14'   'o backend e Python'        | Out-Null
+# 3.14, nao 3.13: backend/pyproject.toml exige >=3.14 (e .python-version = 3.14). Com o 3.13 o
+# `uv sync` ate funcionava - baixava um 3.14 gerenciado por conta propria - mas o Python do winget
+# virava peso morto, servindo so ao shim python3 do hangar-send. Um Python so pros dois papeis.
+Instale 'Node 20+'              'node'   'OpenJS.NodeJS.LTS'    'o frontend e Svelte'       | Out-Null
+Instale 'uv'                    'uv'     'astral-sh.uv'         'gerencia o venv do backend' | Out-Null
+
+# O backend chama o multiplexador por `tmux`. O psmux publica esse alias; se um dia parar,
+# isso vira erro claro AQUI em vez de "falha ao criar sessao" dentro do app.
+if ((Tem 'psmux') -and -not (Tem 'tmux')) {
+    Erro 'psmux instalado mas sem o alias `tmux` - o backend chama por esse nome'
+    $pendencias += 'alias tmux'
+}
+
+# Git e OPCIONAL: sem ele o app roda, so perde o chip de branch e a aba de git.
+if (-not (Tem 'git')) {
+    Falta 'git ausente - o painel de git e o chip de branch ficam vazios (o resto funciona)'
+    if (-not $SoChecar -and (Pergunte '      Instalar o Git agora?')) {
+        Instale 'Git' 'git' 'Git.Git' 'painel de git' | Out-Null
+    }
+} else { Ok 'git' }
+
+# ripgrep tambem e OPCIONAL, e o preco de nao ter e ESPECIFICO: quem chama o `rg` e a busca por
+# conteudo entre sessoes (a lupa; backend/app/search.py), e sem o binario ela devolve lista VAZIA -
+# a tela diz "nenhum resultado" pra uma busca que nunca rodou. No Linux o ripgrep costuma ja estar
+# ai; no Windows nao vem com o sistema, e foi assim que a busca ficou muda nesta VM. O backend
+# agora tambem registra o aviso no log, mas quem resolve de verdade e instalar.
+# NAO usa `Instale`: aquele empurra pra $pendencias e a linha seguinte aborta a instalacao inteira -
+# desproporcional pra uma ferramenta que so a lupa usa.
+if (-not (Tem 'rg')) {
+    Falta 'ripgrep ausente - a busca por conteudo entre sessoes (a lupa) volta sempre vazia'
+    if (-not $SoChecar -and (Pergunte '      Instalar o ripgrep agora?')) {
+        Write-Host '  .. instalando ripgrep (BurntSushi.ripgrep.MSVC)'
+        Nativo winget install --id BurntSushi.ripgrep.MSVC --exact --silent `
+            --accept-package-agreements --accept-source-agreements | Out-Null
+        Atualiza-Path
+        if (Tem 'rg') { Ok 'ripgrep instalado' }
+        else { Erro 'ripgrep nao instalou - so a lupa fica vazia; o resto do app funciona' }
+    }
+} else { Ok 'ripgrep' }
+
+# O Tailscale entra AQUI, junto das outras dependencias, e nao no passo 6: quem respondeu "uso fora
+# de casa" no passo 0 nao pode ser parado de novo no fim pra instalar terceiro.
+if ($script:querTailscale -and -not (Tem 'tailscale')) {
+    if (-not (Instale 'Tailscale' 'tailscale' 'Tailscale.Tailscale' 'acesso remoto')) { $script:querTailscale = $false }
+}
+
+if ($SoChecar) {
+    if ($pendencias.Count -eq 0) { Titulo 'Nada faltando.'; Pausa-Log; exit 0 }
+    Titulo "Faltam: $($pendencias -join ', ')"
+    Pausa-Log
+    exit 1
+}
+if ($pendencias.Count -gt 0) { Erro "faltam: $($pendencias -join ', ')"; Pausa-Log; exit 1 }
+
+# -- 2/8 Backend -------------------------------------------------------------
+Titulo '2/8 Backend'
+Push-Location "$raiz\backend"
+$rcSync = Nativo uv sync --quiet
+if ($rcSync -ne 0) { Pop-Location; Pare 'uv sync falhou - o backend ficou sem as dependencias' @('rodar na mao:  cd backend ; uv sync') }
+Ok 'dependencias instaladas'
+Nota 'psutil entra aqui: no Windows nao ha /proc pra ler informacao de processo'
+Pop-Location
+
+# -- 3/8 Token de acesso -----------------------------------------------------
+Titulo '3/8 Token de acesso'
+Ok 'definido no passo 0'
 
 # -- 4/8 Frontend ------------------------------------------------------------
 Titulo '4/8 Frontend'
@@ -1328,13 +1400,12 @@ if ($regras.Count -eq $portasFw.Count) {
 # So aqui, nunca no bloco 5b: esta pergunta e do dono, e o -Update roda sozinho pelo post-merge.
 if (-not $script:cpPublicUrl) {
     Write-Host '  Sem Tailscale configurado. De onde voce vai usar?'
-    Write-Host '    [1] So nesta maquina  - o app de desktop. Sem QR (nao ha o que ler do celular).'
     Write-Host '    [2] Rede de casa      - celular no mesmo Wi-Fi.'
-    # -Sim honra o padrao (opcao 1, so nesta maquina) sem perguntar - achado da revisao final:
-    # `install.ps1 -Sim` (modo documentado no cabecalho) ficava parado esperando tecla aqui, porque
-    # este Read-Host era cru e nao olhava pra $Sim como o resto do arquivo (via `Pergunte`).
-    $escolha = if ($Sim) { '1' } else { Read-Host '  1 ou 2 (Enter = 1)' }
-    if ($escolha -eq '2') {
+    Write-Host '    [1] So nesta maquina  - o app de desktop. Sem QR (nao ha o que ler do celular).'
+    # Rede de casa e o padrao: quem instala isto quer o celular. So o -Avancado ainda pergunta;
+    # o -Sim tambem cai no padrao, pra nao ficar parado esperando tecla num modo desatendido.
+    $escolha = if ($Sim -or -not $Avancado) { '2' } else { Read-Host '  1 ou 2 (Enter = 2)' }
+    if ($escolha -ne '1') {   # Enter em branco vale o padrao, que agora e a rede de casa
         # 0.0.0.0, NUNCA 'auto': resolve_bind_ip (backend/app/config.py:199-201) troca 'auto' pelo
         # IP de LAN detectado e SO, entao o uvicorn passa a escutar SO naquela interface - o
         # `tailscale serve` que o passo 5d publica em cima de "localhost:$portaBack" levaria recusa
@@ -1347,21 +1418,9 @@ if (-not $script:cpPublicUrl) {
         # (config.py:215) = 5173, e o Vite escuta so em loopback: o QR sairia apontando pra uma porta
         # onde nada responde na LAN. Com a chave gravada, o curto-circuito de config.py:211 usa este
         # endereco e o QR passa a valer.
-        # NAO pegar -First 1 da lista crua de Get-NetIPAddress: a ordem ali e enumeracao interna do
-        # Windows, nao prioridade de rota, e uma maquina com Docker Desktop/WSL/Hyper-V/VPN (perfil
-        # comum de quem instala isto) tem um vEthernet que passa nos mesmos filtros (DHCP interno,
-        # nao e 127./169.254., nao e WellKnown) e costuma vir ANTES da Wi-Fi real. Gravaria um IP
-        # interno tipo 172.x com "gravado" na tela - o QR morto que esta task existe pra evitar, so
-        # que pelo IP em vez da porta. A interface certa e a da rota padrao (0.0.0.0/0): essa e a
-        # que de fato sai pra rede.
-        $idxRota = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
-                   Sort-Object RouteMetric | Select-Object -First 1 -ExpandProperty InterfaceIndex
-        $ipLan = $null
-        if ($idxRota) {
-            $ipLan = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceIndex $idxRota -ErrorAction SilentlyContinue |
-                      Where-Object { $_.IPAddress -notmatch '^(127\.|169\.254\.)' } |
-                      Select-Object -First 1 -ExpandProperty IPAddress)
-        }
+        # A escolha da interface (rota padrao, nunca -First 1 da lista crua) mora no `Ip-Lan`, que a
+        # tela final tambem usa - duas respostas diferentes pro mesmo endereco era bug esperando.
+        $ipLan = Ip-Lan
         if ($ipLan) {
             $novaUrl = "http://${ipLan}:$portaBack"
             # So GRAVA se o valor mudou - mesmo padrao Select-String -Quiet do bloco Tailscale
@@ -1400,7 +1459,9 @@ function Loga-E-Publica-Tailscale {
         Nota 'Falta logar: rode `tailscale up` e depois este instalador de novo (o passo 5d grava o endereco sozinho).'
         return
     }
-    if (-not (Pergunte '  Logar no Tailscale agora? (abre o navegador; o instalador espera voce autenticar)')) {
+    # `Pergunte-Mesmo` e nao `Pergunte`: o login abre navegador e espera a pessoa - assumir "sim"
+    # sem perguntar deixaria o instalador parado num passo que ninguem pediu.
+    if (-not (Pergunte-Mesmo '  Entrar no Tailscale agora? (abre o navegador; espero ate 5 min)')) {
         Nota 'Depois: `tailscale up` e este instalador de novo - o passo 5d grava CP_PUBLIC_URL sozinho.'
         return
     }
@@ -1435,7 +1496,8 @@ if (Tem 'tailscale') {
         Nota 'CP_PUBLIC_URL nao gravado ainda (veja o passo 5d acima) - provavelmente falta `tailscale up`.'
         Loga-E-Publica-Tailscale
     }
-} elseif (Pergunte '  Instalar o Tailscale? (VPN pessoal - acesso de fora de casa)') {
+} elseif ($script:querTailscale) {
+    # So chega aqui se a instalacao do 1/8 falhou; o `Instale` abaixo e a segunda chance.
     # Id com MAIUSCULAS: o `--exact` do winget diferencia caixa, e 'tailscale.tailscale' nao casa
     # nada. Medido: os outros seis ids do instalador estavam certos, so este errado.
     if (Instale 'Tailscale' 'tailscale' 'Tailscale.Tailscale' 'acesso remoto') {
@@ -2199,48 +2261,7 @@ if ($jaAgendado -or $registrou) {
     if (-not $vivo) { $script:pendencias += 'backend no ar' }
 }
 
-# O QR do backend NAO aparece nesta maquina: print_pairing so desenha se sys.stdout.isatty()
-# (backend/app/main.py:56) e a tarefa roda por wscript, sem console. Entao quem desenha e o
-# instalador, que ESTA num terminal. Quatro detalhes, todos ja pagos neste arquivo:
-#  - `Nativo` engole a saida (install.ps1:65), entao a chamada aqui e direta;
-#  - `uv run` escreve rotina no stderr ("Resolved N packages"), e com $ErrorActionPreference='Stop'
-#    isso vira NativeCommandError -> o preference baixa pra Continue em volta (install.ps1:387-402);
-#  - sem UTF-8 no console os blocos do QR viram '?' na codepage OEM;
-#  - o .env e lido em caminho relativo (backend/app/config.py:83), logo roda de dentro de backend\.
-# Restrito ao modo INTERATIVO (-not $Update): achado MINOR da revisao final. O -Update roda pelo
-# hook post-merge, e este bloco imprimiria a URL COM TOKEN no scrollback de TODO `git pull`, alem
-# de pagar um `uv run` que ninguem pediu (o QR nao serve pra nada num pull desatendido - nao ha
-# celular olhando o terminal naquele momento).
-$qrMostrado = $false
-if ($vivo -and -not $Update) {
-    $eapAnt = $ErrorActionPreference
-    $encAnt = $null
-    $pyioAnt = $env:PYTHONIOENCODING
-    Push-Location "$raiz\backend"
-    try {
-        $ErrorActionPreference = 'Continue'
-        $encAnt = [Console]::OutputEncoding
-        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
-        $env:PYTHONIOENCODING = 'utf-8'
-        & uv run python -c "from app.config import settings; from app.main import print_pairing; print_pairing(settings)"
-        # Confere $LASTEXITCODE - achado MINOR da revisao final: sem isto, um print_pairing que
-        # falha (exit != 0, sem excecao nenhuma porque o preference aqui e 'Continue') fazia o QR
-        # sumir em silencio, sem nenhum Falta/Nota explicando o motivo.
-        if ($LASTEXITCODE -eq 0) {
-            $qrMostrado = $true
-        } else {
-            Falta "nao consegui desenhar o QR (uv run saiu $LASTEXITCODE)"
-        }
-    } catch {
-        Nota "nao consegui desenhar o QR: $_"
-    } finally {
-        if ($encAnt) { [Console]::OutputEncoding = $encAnt }
-        $env:PYTHONIOENCODING = $pyioAnt
-        $ErrorActionPreference = $eapAnt
-        Pop-Location
-    }
-}
-
+# O QR saiu daqui: hoje ele e desenhado UMA vez, na tela final, junto do "o que fazer agora".
 # Nunca no -Update: ele roda do hook post-merge, e um `git pull` que abre janela de navegador e
 # hostil. try/catch porque $ErrorActionPreference='Stop' (install.ps1:24) transformaria "sem
 # navegador padrao" em aborto do ultimo passo.
@@ -2258,8 +2279,9 @@ if ($vivo -and -not $Update) {
     $tokenAgora = Token-Do-Env
     $base = if ($script:cpPublicUrl) { $script:cpPublicUrl } else { "http://127.0.0.1:$portaBack" }
     $abrir = if ($tokenAgora) { "$base/?token=$([uri]::EscapeDataString($tokenAgora))" } else { $base }
-    try { Start-Process $abrir | Out-Null; Ok "abri $base no navegador (ja autenticado)" }
-    catch { Nota "abra na mao: $abrir" }
+    Pausa-Log   # a URL de fallback carrega o token
+    try { Start-Process $abrir | Out-Null; Retoma-Log; Ok "abri $base no navegador (ja autenticado)" }
+    catch { Nota "abra na mao: $abrir"; Retoma-Log }
 }
 
 # -- Fim ---------------------------------------------------------------------
@@ -2280,45 +2302,49 @@ if ($pendencias.Count -gt 0) {
     # A mesma pausa do fim feliz: sem ela, a janela aberta por duplo clique fecha no exit e
     # ninguem le o que faltou.
     if ($script:Interativo -and -not $Update) { Read-Host '  Enter pra fechar' | Out-Null }
+    Pausa-Log
     exit 1
 }
 Titulo 'Pronto'
-# So menciona o QR se ele de fato foi desenhado (achado MINOR da revisao final): quem escolheu
-# "so nesta maquina" no passo 6/8 ou rodou em -Update nunca viu QR nenhum, e a frase ficava
-# afirmando algo que nao aconteceu.
-$linhaQr = ''
-if ($qrMostrado) { $linhaQr = "`n  O QR acima ja leva o token: ler com a camera do celular abre o app JA conectado." }
-# A frase do 5173 so vale pra quem MANTEVE a tarefa do front; numa instalacao nova ela nao existe
-# mais, e prometer um endereco que ninguem escuta e o mesmo defeito do QR apontando pra porta morta.
-$linha5173 = ''
-if ($temTarefaFront) {
-    $linha5173 = @"
-
-  O http://localhost:5173 tambem sobe: e o 'vite preview' servindo o MESMO build (a tarefa
-  agendada roda preview, nao dev - sem recarga ao vivo). Ele escuta SO em 127.0.0.1
-  (vite.config.ts) - do celular se chega pelo Tailscale, nao pelo IP da LAN direto.
-"@
+# O passo 7b tambem define $pyVenv, mas ele pode nao ter rodado (-Update parcial, venv ausente):
+# a tela final nao pode depender de um ramo anterior ter executado.
+$pyVenv = Join-Path $raiz 'backend\.venv\Scripts\python.exe'
+if ($script:Interativo -and -not $Update -and (Test-Path $pyVenv)) {
+    Write-Host '  Aponte a camera do celular para o QR: ele abre o Hangar ja conectado.'
+    Pausa-Log   # a URL do QR carrega o token
+    # Sem UTF-8 no console os blocos do QR viram '?' na codepage OEM; e o preference baixa pra
+    # Continue porque qualquer linha no stderr viraria NativeCommandError com 'Stop'.
+    $eapAnt = $ErrorActionPreference
+    $encAnt = [Console]::OutputEncoding
+    $pyioAnt = $env:PYTHONIOENCODING
+    Push-Location (Join-Path $raiz 'backend')   # o .env e lido em caminho relativo
+    try {
+        $ErrorActionPreference = 'Continue'
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+        $env:PYTHONIOENCODING = 'utf-8'
+        & $pyVenv -m app.doctor --qr
+    } catch {
+        Nota "nao consegui desenhar o QR: $_"
+    } finally {
+        if ($encAnt) { [Console]::OutputEncoding = $encAnt }
+        $env:PYTHONIOENCODING = $pyioAnt
+        $ErrorActionPreference = $eapAnt
+        Pop-Location
+    }
+    Retoma-Log
 }
+$urlCel = if ($script:cpPublicUrl) { $script:cpPublicUrl } else { "http://$(Ip-Lan):$portaBack" }
 Write-Host @"
-  Abra a interface em http://127.0.0.1:$portaBack - o proprio backend serve o build, entao ali
-  tem tela e API no mesmo endereco.$linha5173
-  Pra mexer no layout com recarga ao vivo: 'npm run dev' na pasta frontend (porta 5173).
 
-  Rodar na mao (se voce pulou o passo 7):
-      cd backend  ; `$env:CP_LAN_BIND_IP='0.0.0.0' ; uv run python -m app.main
-$linhaQr
-  Guarde: quem tiver essa URL entra sem senha. Ela fica no historico do navegador desta
-  maquina, e num navegador logado em conta o historico sincroniza pra nuvem do fornecedor.
-  Guia completo (Tailscale, instalar como PWA, cada tela): docs\USAGE.md
-
-  O que este Windows ainda NAO tem:
-  - wrappers do `codex`, do `pi` e do `kimi`, e a extensao hangar-state.ts do Pi. Sessao Codex, Pi
-    ou Kimi aberta por voce no terminal nao aparece; criada pelo app, funciona.
-  - resurrect/continuum abaixo, e mais nada desta lista: motor de modelo (Contas e modelos ->
-    Modelo e opcoes / `CP_ENGINE`) PASSOU a funcionar aqui - o hangar-engine roda o comando por subprocess no Windows
-    (o exec com env crasha la, medido) e o passo 7b instala o hangar-engine.cmd.
-  - resurrect/continuum (sessoes sobreviverem a reboot): sao plugins de tmux em bash, e o
-    psmux nao roda plugin de tmux. Fechou o Windows, as sessoes se foram.
+  O QUE FAZER AGORA
+   1. No PC: abra um terminal, digite  claude  e faca o login (so na primeira vez).
+   2. No celular: leia o QR acima (ou abra $urlCel e digite o token).
+"@
+if ($script:querTailscale) { Write-Host '   3. No celular: instale o app Tailscale e entre com a MESMA conta do PC.' }
+Write-Host @"
+   Algo nao abriu?  hangar-doctor   (diz o que falta e como consertar)
+   Log desta instalacao: $logInstall
+   Guia completo: docs\USAGE.md
 "@
 
 # -- Resumo (o que a pessoa precisa ter na mao quando a janela fechar) --------
@@ -2331,8 +2357,12 @@ Write-Host ""
 Write-Host "  ---------------------------------------------------------------" -ForegroundColor Cyan
 Write-Host "   RESUMO" -ForegroundColor Cyan
 if ($tokenFim) {
+    Pausa-Log   # o token nao entra no install.log; la fica so a linha mascarada abaixo
     Write-Host "   token   : " -NoNewline; Write-Host $tokenFim -ForegroundColor Yellow
     Write-Host "             (e o que voce digita no celular; fica em backend\.env)"
+    # Enquanto o transcript esta PAUSADO: com ele rodando o arquivo esta aberto pelo PowerShell.
+    if (-not $Update) { Add-Content -Path $logInstall -Value '   token   : (em backend\.env)' }
+    Retoma-Log
 } else {
     Write-Host "   token   : nao consegui ler de backend\.env - veja o passo 3/8 acima" -ForegroundColor Red
 }
@@ -2348,3 +2378,4 @@ Write-Host ""
 if ($script:Interativo -and -not $Update) {
     Read-Host '  Enter pra fechar' | Out-Null
 }
+Pausa-Log
