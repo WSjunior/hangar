@@ -127,6 +127,19 @@ it('uma falha ao orientar preserva a bolha da fila e permite tentar novamente', 
   expect(document.body.textContent).toContain('O turno terminou');
 });
 
+it('confirmação retira o eco antigo sem depender do replay do transcript', async () => {
+  await montar();
+  await emit('message', { id: 'queued-antiga', kind: 'user_msg', text: 'Recado já entregue', queued_delivered: true });
+  await emit('message', { id: 'queued-nova', kind: 'user_msg', text: 'Recado aguardando', queued_delivered: false });
+  expect(bolhas('Recado já entregue')).toHaveLength(1);
+  await emit('message', { id: 'queued-antiga', kind: 'user_msg', text: 'Recado já entregue', queued_confirmed: true });
+  expect(bolhas('Recado já entregue')).toHaveLength(0);
+  expect(bolhas('Recado aguardando')).toHaveLength(1);
+  expect(orientar()).not.toBeNull();
+  await emit('message', { id: 'queued-antiga', kind: 'user_msg', queued_confirmed: true });
+  expect(bolhas('Recado aguardando')).toHaveLength(1);
+});
+
 it('uma pergunta SSE abre o stepper real e a resolução no terminal fecha o cartão', async () => {
   await montar();
   await emit('ask_question', { provider: 'codex', request_id: 7, questions: [{

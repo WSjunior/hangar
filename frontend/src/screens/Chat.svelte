@@ -1408,6 +1408,11 @@
       if (e.lastEventId) lastEventId = e.lastEventId;
       try {
         const ev = JSON.parse(e.data) as ChatEvent;
+        if (ev.queued_confirmed && ev.id.startsWith('queued-')) {
+          events = events.filter((x) => x.id !== ev.id);
+          rebuildIndex();
+          return;
+        }
         // Dedup cruzado fila<->transcript: a fila duravel emite user_msg sintetico (id "queued-").
         // Quando o Claude Code grava o prompt real, chega o user_msg real -> tira o sintetico de
         // mesmo texto (por linha, pq ele pode fundir varias). E nao adiciona sintetico se o real

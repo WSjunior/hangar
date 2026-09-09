@@ -666,13 +666,13 @@ class PromptQueue:
                 continue
         return out
 
-    async def follow(self, min_ts: float = 0.0) -> AsyncIterator[ChatEvent]:
+    async def follow(self, min_ts: float = 0.0, emit_confirmed: bool = False) -> AsyncIterator[ChatEvent]:
         # Emite as entradas existentes e depois vigia novos appends, como user_msg sintetico.
         # Guarda os estados já vistos (o append reescreve o arquivo inteiro -> rastrear posicao
         # quebraria; reload + dedup por id e simples e correto). min_ts: descarta entradas anteriores
         # ao inicio da sessao atual (ex: pre-/clear) — espelha a poda do merged_history no live SSE.
         # Entrega e desistência mudam depois do primeiro evento. O front substitui pelo mesmo id.
-        seen: dict[str, tuple[bool | None, bool | None]] = {}
+        seen: dict[str, tuple[bool | None, bool | None, bool]] = {}
 
         def emit_new() -> list[ChatEvent]:
             evs = []
@@ -680,12 +680,14 @@ class PromptQueue:
                 eid = str(entry.get("id"))
                 if not eid:
                     continue
-                # CONFIRMADA = texto comprovadamente no transcript (reconcile): a bolha real existe
-                # -> re-emitir o eco so duplicava (bolha antiga "solta" no fim a cada reconexao).
-                if entry.get("confirmed"):
+                # Codex recebe a baixa explícita; os demais mantêm a supressão do eco.
+                confirmed = bool(entry.get("confirmed"))
+                if confirmed and not emit_confirmed:
                     continue
                 event = _entry_event(entry)
-                signature = (event.desistiu, event.queued_delivered)
+                if confirmed:
+                    event.queued_confirmed = True
+                signature = (event.desistiu, event.queued_delivered, confirmed)
                 if eid in seen and seen[eid] == signature:
                     continue
                 seen[eid] = signature

@@ -853,7 +853,8 @@ def test_entry_event_informa_transporte_sem_inferir_confirmacao(delivered):
     assert event.id == "queued-e1"
 
 
-def test_follow_reemite_entrega_e_reversao_sem_reemitir_confirmada(monkeypatch):
+@pytest.mark.parametrize("emit_confirmed", [False, True])
+def test_follow_reemite_entrega_e_reversao_sem_reemitir_confirmada(monkeypatch, emit_confirmed):
     import asyncio
     import json
 
@@ -871,10 +872,11 @@ def test_follow_reemite_entrega_e_reversao_sem_reemitir_confirmada(monkeypatch):
     monkeypatch.setattr(pqueue, "awatch", changes)
 
     async def collect():
-        return [event async for event in q.follow()]
+        return [event async for event in q.follow(emit_confirmed=emit_confirmed)]
 
     events = asyncio.run(collect())
-    assert [event.queued_delivered for event in events] == [False, True, False]
+    assert [event.queued_delivered for event in events] == [False, True, False] + ([True] if emit_confirmed else [])
+    assert [bool(event.queued_confirmed) for event in events] == [False, False, False] + ([True] if emit_confirmed else [])
     assert {event.id for event in events} == {"queued-" + entry["id"]}
     assert all(event.text == "oi" and event.desistiu is None for event in events)
     assert q.load()[0]["confirmed"] is True

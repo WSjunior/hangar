@@ -199,6 +199,12 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       try {
         const ev = JSON.parse(e.data as string) as ChatEvent;
         let { events } = useChatStore.getState();
+        if (ev.queued_confirmed && ev.id.startsWith('queued-')) {
+          events = events.filter((x) => x.id !== ev.id);
+          rebuildIndex(events);
+          useChatStore.setState({ events });
+          return;
+        }
         // Dedup cruzado fila<->transcript: a fila durável emite user_msg sintético (id
         // "queued-") e o transcript grava depois o user_msg REAL com texto igual — sem
         // isto, toda msg enfileirada (cp-send, composer working) aparece DOBRADA. O backend

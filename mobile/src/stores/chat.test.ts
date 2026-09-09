@@ -121,6 +121,20 @@ test('(a) history inicial + message novo via SSE = N+1 com ids únicos', async (
   }
 });
 
+test('confirmação retira apenas o eco da fila e preserva índices no próximo evento', async () => {
+  historyResponses = [[ev({ id: 'queued-a' }), ev({ id: 'real' }), ev({ id: 'queued-b' })]];
+  const chat = chatStore('srv1', 'sess');
+  chat.retain();
+  await tick();
+  created[0].trigger('message', JSON.stringify(ev({ id: 'queued-a', queued_confirmed: true })));
+  expect(chat.use.getState().events.map(e => e.id)).toEqual(['real', 'queued-b']);
+  created[0].trigger('message', JSON.stringify(ev({ id: 'real', text: 'atualizado' })));
+  expect(chat.use.getState().events.map(e => e.id)).toEqual(['real', 'queued-b']);
+  expect(chat.use.getState().events[0].text).toBe('atualizado');
+  created[0].trigger('message', JSON.stringify(ev({ id: 'queued-a', queued_confirmed: true })));
+  expect(chat.use.getState().events).toHaveLength(2);
+});
+
 test('(b) reset zera tudo e recarrega o history novo', async () => {
   historyResponses = [
     [ev({ id: 'old:1' })],

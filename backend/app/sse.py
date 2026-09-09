@@ -11,7 +11,7 @@ from app import atomico, diag
 from app.adapters import get_adapter
 from app.adapters.codex.preview import CodexPreviewSource
 from app.difusor import Difusor
-from app.pqueue import PromptQueue, _transcript_start_ts
+from app.pqueue import PromptQueue, _transcript_start_ts, committed_user_lines
 from app.preview import PreviewBroker, _norm
 from app.models import PreviewEvent, session_key
 from app.stats import Accumulator as StatsAccumulator
@@ -538,6 +538,17 @@ async def list_events(ping_secs: float = 8.0):
         _list_refresher.release()
 
 
+def _confirm_codex_queue(name: str, jsonl: str) -> None:
+    queue = PromptQueue(name)
+    if not any(r.get("delivered") and not r.get("confirmed") for r in queue.load()):
+        return
+    committed = committed_user_lines(jsonl, "codex")
+    start = _transcript_start_ts(jsonl)
+    if committed is not None and start is not None:
+        # RPC aceito não prova escrita no rollout; ausência nunca autoriza reenvio.
+        queue.reconcile_delivered(committed, start, time.time(), grace=0, confirm_only=True)
+
+
 async def merged_events(name: str, jsonl: str, provider: str = "claude",
                         start_offset: int | None = None):
     # provider: default "claude" preserva o comportamento de hoje pros callers que ainda nao passam
@@ -648,6 +659,8 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         # Recebe o path (em vez de fechar sobre um tailer fixo) pra poder ser recriado no rebind do /clear.
         try:
             async for ev in get_adapter(current_provider).transcript_stream(path, start_offset):
+                if current_provider == "codex" and ev.kind == "user_msg":
+                    await asyncio.to_thread(_confirm_codex_queue, name, path)
                 if ev.kind == "assistant_msg" and ev.text:
                     committed["text"] = _norm(ev.text)
                     if _already_committed(preview_slot["text"]):
@@ -766,6 +779,9 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
 
     # start_offset so vale pro tail INICIAL (veio do Last-Event-ID desta conexao). O rebind do
     # /clear abaixo recria sem ele: o transcript e outro arquivo, o offset antigo nao significa nada.
+    if provider == "codex":
+        # Confirma antigas antes de o follow republicar a fila na reconexão.
+        await asyncio.to_thread(_confirm_codex_queue, name, jsonl)
     tail_task = asyncio.create_task(tail_pump(jsonl, start_offset))
     stats_task = asyncio.create_task(stats_pump(jsonl))
     # Nomeadas porque as quatro sao refeitas quando o provider muda no meio do stream
@@ -779,7 +795,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         stats_task,
         # Fila duravel: user_msg sinteticos (id "queued-") pras msgs enfileiradas. O front faz o
         # dedup cruzado (queued- vs real) por texto.
-        asyncio.create_task(pump("message", pqueue.follow(min_ts=start_ts))),
+        asyncio.create_task(pump("message", pqueue.follow(min_ts=start_ts, emit_confirmed=provider == "codex"))),
         state_task,
         asyncio.create_task(ping_loop()),
         asyncio.create_task(nav_pump()),
