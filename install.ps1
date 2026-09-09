@@ -1907,6 +1907,17 @@ if (-not $bash) {
         else { Ok 'lancador hangar-conta.cmd ja atualizado' }
     }
 
+    # hangar-doctor.cmd: Python do VENV do backend (importa app.*), com cd para backend\ (o .env e lido pelo cwd).
+    $pyVenv = Join-Path $raiz 'backend\.venv\Scripts\python.exe'
+    if (Test-Path $pyVenv) {
+        $lancadorDoctor = Join-Path $binUsuario 'hangar-doctor.cmd'
+        $conteudoDoctor = "@echo off`r`ncd /d `"$raiz\backend`"`r`n`"$pyVenv`" -m app.doctor %*`r`n"
+        if (Escrever-Lancador $lancadorDoctor $conteudoDoctor 'cmd') { Ok "lancador hangar-doctor.cmd criado em $binUsuario" }
+        else { Ok 'lancador hangar-doctor.cmd ja atualizado' }
+    } else {
+        Falta 'hangar-doctor.cmd nao criado - o venv do backend nao existe (passo 2/8 falhou?)'
+    }
+
     # (2c) lancador pro hangar-engine (motores de modelo). Sem ele o backend monta o comando do pane
     # como `hangar-engine --exec <motor> -- claude ...`, o pane morre no ato e o `tmux new-session`
     # devolve 0 assim mesmo: medido nesta VM, rc=0 na criacao e 3s depois a sessao ja nao existe.
