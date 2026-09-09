@@ -3,7 +3,7 @@ import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from 
 import { StyleSheet } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { createSession, getEngines, getSessions, listClaudeConfigs, listarCotasResumo, modelOptions } from '@hangar/core';
-import { basename, providerName, cotaDaConta, resumoCota } from '@hangar/core';
+import { basename, providerName, cotaDaConta, cotaParada, resumoCota } from '@hangar/core';
 import type { ConfigDirInfo, Provider, ModelOption, CotaContaResumo } from '@hangar/core';
 import { MenuView } from '@react-native-menu/menu';
 import { useServers } from '../../stores/servers';
@@ -82,6 +82,7 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
   // Cota por conta no seletor (/api/cotas, chave `claude:<path>`); falha = lista sem número.
   const [cotas, setCotas] = useState<CotaContaResumo[]>([]);
   const [selectedConfig, setSelectedConfig] = useState<string | null>(null);
+  const cotaSelecionada = selectedConfig ? cotaDaConta(cotas, selectedConfig) : undefined;
   const [motores, setMotores] = useState<Record<string, { label?: string; model?: string }>>({});
   const [engine, setEngine] = useState('');
   const [modelos, setModelos] = useState<ModelOption[]>([]);
@@ -295,10 +296,14 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
                   }))}
                   onChange={(v) => setSelectedConfig(v)}
                 />
-                {selectedConfig && cotaDaConta(cotas, selectedConfig) ? (
+                {cotaSelecionada ? (
                   <Text style={styles.hint}>
-                    {resumoCota(cotaDaConta(cotas, selectedConfig)) ||
-                      `${m.cota_sem_cota()} ${cotaDaConta(cotas, selectedConfig)?.estado === 'indisponivel' ? '' : m.cota_precisa_entrar()}`.trim()}
+                    {resumoCota(cotaSelecionada) ||
+                      `${m.cota_sem_cota()} ${
+                        cotaSelecionada.estado === 'indisponivel'
+                          ? (cotaParada(cotaSelecionada) ? m.cota_conta_parada() : '')
+                          : m.cota_precisa_entrar()
+                      }`.trim()}
                   </Text>
                 ) : null}
               </View>

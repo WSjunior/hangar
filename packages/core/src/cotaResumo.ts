@@ -12,6 +12,13 @@ export interface CotaContaResumo {
   id: string;
   estado: 'lida' | 'sem_credencial' | 'expirada' | 'indisponivel';
   janelas: JanelaCotaResumo[];
+  /** Código do backend (`sessao-viva`, `renovacao-falhou`, …), nunca texto de tela. */
+  motivo?: string | null;
+}
+
+/** Leitura parou porque a credencial não renovou: resolve abrindo uma sessão na conta. */
+export function cotaParada(c: CotaContaResumo | undefined): boolean {
+  return c?.motivo === 'renovacao-falhou';
 }
 
 /** A cota da conta Claude cujo config dir é `path` — a chave do /api/cotas é `claude:<path>`. */

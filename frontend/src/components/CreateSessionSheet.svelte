@@ -307,7 +307,10 @@
   // Cota por conta no seletor (mesmo feed da pílula/faixa: /api/cotas, chave `claude:<path>`).
   // O feed mira o servidor ATIVO, que o pickTarget já igualou ao alvo — setServidor só força a
   // releitura quando o alvo muda. Sem leitura o hint fica vazio: a opção continua escolhível.
+  // Gateado por `open`: o componente fica montado o tempo todo (o BottomSheet só esconde), e sem
+  // o gate o retain seria pra sempre — o feed pollaria mesmo sem ninguém olhando.
   $effect(() => {
+    if (!open) return;
     quotaFeed.retain();
     return () => quotaFeed.release();
   });
