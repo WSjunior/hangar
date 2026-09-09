@@ -455,7 +455,9 @@ def resguardar(pre: dict) -> str | None:
 
 def _puxar(pre: dict) -> None:
     """`fetch` + fast-forward. Só reseta quando o ff é impossível — e o resgate já rodou."""
-    f = _git("fetch", "origin", timeout=300)
+    # `--tags --force`: sem isso a `dist-latest`, que o CI move a cada push, fica presa no commit
+    # em que nasceu e o `git describe` da versao diz um numero que nao muda.
+    f = _git("fetch", "origin", "--tags", "--force", timeout=300)
     if f.returncode != 0:
         raise RuntimeError(f"nao consegui buscar o codigo novo: {_cauda(f)}")
 

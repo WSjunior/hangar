@@ -125,3 +125,6 @@ jobs:
                  --notes 'Reescrita a cada push na main. O instalador baixa daqui em vez de compilar na maquina.'
           gh release upload dist-latest frontend-dist.tar.gz frontend-dist.sha \
             --repo "$GITHUB_REPOSITORY" --clobber
+          # A tag anda junto: `git describe --match dist-latest` na maquina e o que da nome a versao.
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/dist-latest" \
+            -f sha="${{ github.sha }}" -F force=true >/dev/null

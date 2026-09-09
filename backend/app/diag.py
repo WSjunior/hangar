@@ -79,7 +79,10 @@ _CAMPOS: dict[str, type] = {
 def _git_describe() -> str:
     try:
         return subprocess.run(
-            ["git", "describe", "--tags", "--always", "--dirty"],
+            # So a `dist-latest` (movida pelo CI a cada push) da nome: sem `--match`, qualquer tag
+            # de backup vira "a versao". `--long` mantem o hash mesmo em cima da tag, senao dois
+            # commits diferentes (o rodando e o baixado) sairiam com o mesmo nome.
+            ["git", "describe", "--tags", "--match", "dist-latest", "--long", "--always", "--dirty"],
             cwd=Path(__file__).resolve().parents[2], capture_output=True,
             text=True, timeout=5, encoding="utf-8", errors="replace").stdout.strip()
     except Exception:                                # noqa: BLE001 — versão nunca derruba nada
