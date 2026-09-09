@@ -808,5 +808,8 @@ def test_lancamento_escolhe_o_modo_do_sistema(repo, monkeypatch):
     atualizar._escrever(fase="pronto", pid=0)
     monkeypatch.setattr(atualizar, "_E_WINDOWS", True)
     atualizar.iniciar()
-    assert capturado.get("creationflags")
+    # Valor exato: o DETACHED_PROCESS (0x8) aqui é o que fazia o trampolim do venv abrir uma
+    # janela visível na cara de quem apertou Atualizar.
+    assert capturado.get("creationflags") == 0x00000200 | 0x08000000
+    assert not capturado.get("creationflags") & 0x00000008
     assert "start_new_session" not in capturado

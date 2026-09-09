@@ -58,7 +58,11 @@ _E_WINDOWS = os.name == "nt"
 # Windows**, então referenciá-lo no corpo da função quebra o teste que exercita o ramo Windows a
 # partir do Linux — que é o único lugar onde ele é testado por alguém deste projeto. Os números são
 # os da API do Win32 e não mudam.
-_FLAGS_DESTACADO_WINDOWS = 0x00000200 | 0x00000008   # CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS
+# Sem DETACHED_PROCESS de propósito: o `python.exe` do venv é um trampolim que roda o interpretador
+# de base como FILHO, e um pai sem console nenhum faz esse filho alocar um — visível. Medido com
+# sonda EnumWindows: uma janela do Windows Terminal subia 3s depois de cada Atualizar. O
+# CREATE_NO_WINDOW sozinho já dá ao motor um console próprio (invisível) e independente do backend.
+_FLAGS_MOTOR_WINDOWS = 0x00000200 | 0x08000000   # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
 
 # CREATE_NO_WINDOW. Sem isto, cada comando de console que a atualização roda no Windows ABRE UMA
 # JANELA na frente de quem está usando — visto em 25/08/2026: um console preto escrito "npm ci"
@@ -813,7 +817,7 @@ def iniciar(porta: int = 8765) -> dict:
     """Lança a atualização fora deste processo e devolve na hora.
 
     Fora do processo porque ela reinicia o backend — dentro, ela se mataria no meio. `setsid` no
-    POSIX e `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` no Windows, sem herdar os pipes daqui:
+    POSIX e `CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` no Windows, sem herdar os pipes daqui:
     o filho não pode morrer junto com o pai nem escrever no log do serviço que vai reiniciar.
     """
     if not _tomar_a_vez():
@@ -830,9 +834,9 @@ def iniciar(porta: int = 8765) -> dict:
     args = tmux._scope_prefix() + [sys.executable, "-m", "app.atualizar", str(porta)]
     extra: dict = {}
     if _E_WINDOWS:
-        # Destacado E sem janela: o processo da atualização é de console, e sem o CREATE_NO_WINDOW
-        # ele abre um terminal preto na tela de quem apertou o botão.
-        extra["creationflags"] = _FLAGS_DESTACADO_WINDOWS | 0x08000000
+        # Grupo próprio + sem janela. O DETACHED_PROCESS que havia aqui era o que ABRIA a janela:
+        # sem console nenhum, o interpretador de base que o trampolim do venv roda alocava um.
+        extra["creationflags"] = _FLAGS_MOTOR_WINDOWS
     else:
         extra["start_new_session"] = True   # setsid: sai do grupo de processos do backend
 
