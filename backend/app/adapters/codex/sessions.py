@@ -135,6 +135,14 @@ def load(name: str) -> dict | None:
         return json.loads(_path(name).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+def update_app_pid(name: str, app_pid: int) -> None:
+    """O lancador ressubiu o app-server na mesma porta: so o dono muda. No-op sem sidecar."""
+    with _locked(name):
+        meta = load(name)
+        if meta is not None:
+            _write(name, {**meta, "app_pid": app_pid})
+
+
 
 
 def delete(name: str) -> None:

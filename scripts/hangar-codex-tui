@@ -82,6 +82,8 @@ def _integracao_codex(prazo: float = _PRAZO_INTEGRACAO) -> dict:
 # Quanto esperamos a TUI abrir a thread. Estourar NAO e fatal: o pane segue sendo um Codex
 # utilizavel; o que se perde e o vinculo com o app ate a proxima abertura.
 _ESPERA_THREAD = 60.0
+# Quantas vezes o app-server pode ser ressubido em 5 min antes de assumir crash em laço.
+_QUEDAS_MAX = 3
 # Quanto do stderr do app-server sai na tela quando ele morre na largada. E a cauda, porque a
 # ultima linha e que costuma dizer o motivo.
 _ERRO_MAX = 2000
@@ -281,10 +283,14 @@ def main() -> int:
     # arquivo temporario: PIPE sem consumidor encheria numa sessao longa, e DEVNULL jogaria fora
     # justamente a mensagem que explica uma largada que falhou.
     erros = tempfile.TemporaryFile()
-    servidor = subprocess.Popen(
-        [_codex(), "app-server", "--listen", endpoint, "-c", f"project_doc_max_bytes={limite}"],
-        stdout=subprocess.DEVNULL, stderr=erros,
-    )
+
+    def subir_servidor() -> subprocess.Popen:
+        return subprocess.Popen(
+            [_codex(), "app-server", "--listen", endpoint, "-c", f"project_doc_max_bytes={limite}"],
+            stdout=subprocess.DEVNULL, stderr=erros,
+        )
+
+    servidor = subir_servidor()
 
     previous_thread = None
 
@@ -364,7 +370,27 @@ def main() -> int:
         print("hangar-codex-tui: subindo o app-server do Codex…", file=sys.stderr)
         if not _esperar_porta(endpoint, servidor, erros, _ESPERA_THREAD):
             return 1
-        return subprocess.run(argv).returncode
+        tui = subprocess.Popen(argv)
+        # O servidor pode morrer com a TUI viva (SIGTERM alheio, crash). A TUI `--remote` tenta
+        # reconectar por ~1 min e depois desiste PRA SEMPRE — nem mensagem nova a acorda. Subir
+        # outro na MESMA porta dentro dessa janela faz ela retomar a thread sozinha, sem relançar
+        # o pane; o backend se religa pelo pid novo do sidecar.
+        quedas: list[float] = []
+        while tui.poll() is None:
+            if servidor.poll() is not None:
+                quedas = [t for t in quedas if time.monotonic() - t < 300] + [time.monotonic()]
+                if len(quedas) > _QUEDAS_MAX:
+                    print("hangar-codex-tui: app-server caindo em laço; desisto de ressubir",
+                          file=sys.stderr)
+                    break
+                _avisar_servidor_morto(endpoint, servidor, erros)
+                servidor = subir_servidor()
+                if not _esperar_porta(endpoint, servidor, erros, _ESPERA_THREAD):
+                    break
+                codex_sessions.update_app_pid(args.name, servidor.pid)
+                print(f"hangar-codex-tui: app-server ressubido em {endpoint}", file=sys.stderr)
+            time.sleep(0.5)
+        return tui.wait()
     finally:
         servidor.terminate()
         try:

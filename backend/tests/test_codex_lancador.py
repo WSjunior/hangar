@@ -154,6 +154,39 @@ def test_lancador_preserva_sidecar_de_outro_dono(tmp_path):
 
     Apagar o de outro dono deixaria uma sessao VIVA invisivel pro app -- pior que o orfao que a
     limpeza existe pra evitar.
+@pytest.mark.skipif(os.name != "posix", reason="o lancador so e usado em pane POSIX por ora")
+def test_lancador_ressobe_o_servidor_na_mesma_porta_com_a_tui_viva(tmp_path):
+    # A TUI `--remote` desiste de reconectar em ~1 min e nao volta nem com mensagem nova; o unico
+    # caminho sem relançar o pane e o servidor voltar na MESMA porta, e o sidecar apontar pro
+    # dono novo (o backend confere o pid antes de conectar).
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    env = _ambiente(tmp_path, cwd)
+    env["FAKE_TUI_SLEEP"] = "12"
+    proc = subprocess.Popen(
+        [sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd)],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        assert _espera(_sidecar(env, "sess").exists), "o sidecar nunca apareceu"
+        meta = json.loads(_sidecar(env, "sess").read_text())
+        os.kill(meta["app_pid"], 9)
+        assert _espera(lambda: not pid_vivo(meta["app_pid"]))
+
+        def ressubiu():
+            novo = json.loads(_sidecar(env, "sess").read_text())
+            return novo["app_pid"] != meta["app_pid"] and pid_vivo(novo["app_pid"])
+        assert _espera(ressubiu, 10), "o app-server nao foi ressubido"
+        novo = json.loads(_sidecar(env, "sess").read_text())
+        assert novo["endpoint"] == meta["endpoint"]
+        assert proc.poll() is None, "a TUI nao pode ser relançada"
+    finally:
+        if proc.poll() is None:
+            proc.wait(timeout=30)
+    assert _espera(lambda: not pid_vivo(novo["app_pid"])), "o servidor novo sobreviveu ao lancador"
+    assert not _sidecar(env, "sess").exists()
+
+
     """
     cwd = tmp_path / "proj"
     cwd.mkdir()

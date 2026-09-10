@@ -369,7 +369,10 @@ class CodexAdapter:
             # Grace de startup: attach() ocorre logo apos tmux.new_session, mas evita qualquer
             # falso negativo transitorio no primeiro poll.
             await asyncio.sleep(1.0)
-            while name in self._sessions and await asyncio.to_thread(tmux.has_session, name):
+            # None (tmux nao respondeu) NAO e sessao morta: um has-session que estourou o teto
+            # com a maquina carregada ja matou o app-server de toda sessao Codex viva.
+            while name in self._sessions and \
+                    await asyncio.to_thread(tmux.sessao_existe, name) is not False:
                 await asyncio.sleep(1.0)
             sess = self._sessions.pop(name, None)
             if sess is None:

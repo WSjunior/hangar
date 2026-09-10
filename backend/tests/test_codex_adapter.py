@@ -22,6 +22,7 @@ def _isolate_sidecar(tmp_path):
     with patch.object(codex_sessions, "_dir", lambda: tmp_path / "codex-sessions"), \
          patch.object(codex_adapter, "ensure_tmux_tui"), \
          patch.object(codex_adapter.tmux, "has_session", return_value=True), \
+         patch.object(codex_adapter.tmux, "sessao_existe", return_value=True), \
          patch.object(codex_adapter.tmux, "paste_text"), \
          patch.object(codex_adapter.tmux, "send_keys"):
         yield

@@ -447,6 +447,18 @@ def has_session(name: str) -> bool:
     return _run(["tmux", "has-session", "-t", f"={name}"]).returncode == 0
 
 
+def sessao_existe(name: str) -> bool | None:
+    """Como has_session, mas timeout/tmux ausente vira None ("nao sei"), nunca False.
+
+    Quem derruba recurso ao ver a sessao sumir (o watcher do Codex) precisa da diferenca: um
+    has-session que estourou o teto com a maquina carregada nao e sessao morta.
+    """
+    rc = _run(["tmux", "has-session", "-t", f"={name}"]).returncode
+    if rc == RC_INDISPONIVEL:
+        return None
+    return rc == 0
+
+
 def session_created(name: str) -> float:
     # Epoch (s) do NASCIMENTO da sessao tmux atual com esse nome. Entrada de fila mais velha que
     # isto pertence a uma VIDA ANTERIOR da sessao (mesmo nome de pasta, tmux recriado) e nao deve

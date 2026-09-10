@@ -153,6 +153,20 @@ def test_capture_pane_returns_stdout():
     assert run.call_args[0][0][:2] == ["tmux", "capture-pane"]
 
 
+def test_sessao_existe_distingue_timeout_de_morta():
+    # Timeout do tmux e "nao sei", nao "morreu": o watcher do Codex derrubou o app-server de
+    # todas as sessoes vivas num has-session que estourou o teto com a maquina carregada.
+    def travado(args, **_kw):
+        raise subprocess.TimeoutExpired(args, 5)
+    with patch.object(tmux, "RUN", travado):
+        assert tmux.sessao_existe("x") is None
+        assert tmux.has_session("x") is False
+    with patch.object(tmux, "RUN", return_value=MagicMock(returncode=1)):
+        assert tmux.sessao_existe("x") is False
+    with patch.object(tmux, "RUN", return_value=MagicMock(returncode=0)):
+        assert tmux.sessao_existe("x") is True
+
+
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux nao instalado no ambiente")
 def test_has_session_is_exact_against_real_tmux():
     # SEMANTICA REAL do tmux (nao mock): sem o `=`, o `-t` resolve exact -> fnmatch -> PREFIX match,
