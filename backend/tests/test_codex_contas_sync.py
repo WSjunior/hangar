@@ -149,6 +149,17 @@ def test_command_mapping_preserves_windows_quoting_when_path_is_external(tmp_pat
     assert sync._map_command(command, tmp_path, tmp_path / "dest", set(), []) == command
 
 
+async def test_prepare_without_default_config_toml_is_ready(isolated, fake_writer):
+    # Maquina que nunca rodou o Codex: `~/.codex` sem config.toml. A primeira conta criada pelo
+    # app caia em "origem invalida" por um FileNotFoundError na leitura da conta padrao.
+    _, source, account = isolated
+    assert not (source / "config.toml").exists()
+
+    result = await sync.prepare_account(account)
+
+    assert result["status"] == "ready", result
+
+
 async def test_prepare_inherits_preferences_and_keeps_account_state(isolated, fake_writer):
     _, source, account = isolated
     _config(source / "config.toml", model="high", cli_auth_credentials_store="file")

@@ -610,6 +610,9 @@ def _snapshot(root: Path, relative_paths: set[str], previous: dict | None = None
 
 def _config_source(source: Path, relative: str) -> tuple[dict, bytes]:
     path = source / relative
+    # Codex nunca rodado: sem config.toml a conta padrao e vazia, nao invalida.
+    if relative == "config.toml" and not path.exists() and not path.is_symlink():
+        return {}, b""
     raw = path.read_bytes()
     data = tomllib.loads(raw.decode("utf-8"))
     if not isinstance(data, dict):
