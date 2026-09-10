@@ -29,6 +29,9 @@ if args != ["app-server", "--stdio"]:
     if scenario == "cli_invalid":
         print("secret-token")
         sys.exit(0)
+    if scenario == "cli_errors_json":
+        send({"errors": ["fatal: unable to access https://secret-token@example.invalid/repo"]})
+        sys.exit(0)
     if scenario == "cli_timeout":
         time.sleep(30)
     if args == ["plugin", "list", "--json"]:
@@ -204,6 +207,22 @@ async def test_cli_falha_sem_publicar_conteudo_sensivel(cliente, scenario, messa
     with pytest.raises(CodexNativoErro, match=message) as error:
         await obj.cli(["plugin", "add", "plugin@market", "--json"])
     assert "secret-token" not in str(error.value)
+
+
+@pytest.mark.parametrize("scenario", ["cli_error", "cli_invalid", "cli_errors_json"])
+async def test_cli_guarda_diagnostico_privado_sem_tokens_no_log(cliente, scenario, caplog):
+    obj = cliente(scenario)
+    try:
+        await obj.cli(["plugin", "marketplace", "upgrade", "market", "--json"])
+    except CodexNativoErro:
+        pass
+    arquivos = list((obj.codex_home / ".hangar-diagnosticos").glob("*.log"))
+    assert len(arquivos) == 1
+    assert "secret-token" in arquivos[0].read_text()
+    assert "secret-token" not in caplog.text
+    assert str(arquivos[0]) in caplog.text
+    if os.name != "nt":
+        assert arquivos[0].stat().st_mode & 0o777 == 0o600
 
 
 async def test_cancelamento_limpa_espera_e_processo(cliente):

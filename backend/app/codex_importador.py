@@ -2,12 +2,16 @@
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
 from pathlib import Path
 import shutil
+import tempfile
 from typing import TYPE_CHECKING
+
+from app.atomico import substituir
 
 if TYPE_CHECKING:
     from app.codex_contas import Account
@@ -284,6 +288,30 @@ class CodexNativo:
                 self._reader_task = None
             self._proc = None
 
+    def _diagnostico_cli(self, args: list[str], codigo: int | None,
+                        stdout: bytes, stderr: bytes) -> None:
+        """Guarda a última falha por comando; saída bruta pode conter credenciais."""
+        temporario = None
+        try:
+            pasta = self.codex_home / ".hangar-diagnosticos"
+            pasta.mkdir(mode=0o700, parents=True, exist_ok=True)
+            chave = hashlib.sha256(json.dumps(args).encode()).hexdigest()[:16]
+            destino = pasta / f"cli-{chave}.log"
+            with tempfile.NamedTemporaryFile(dir=pasta, prefix=".cli-", delete=False) as arquivo:
+                temporario = Path(arquivo.name)
+                arquivo.write(json.dumps({"comando": args, "codigo": codigo,
+                                          "stdout": stdout[-8192:].decode(errors="replace"),
+                                          "stderr": stderr[-8192:].decode(errors="replace")},
+                                         ensure_ascii=False).encode("utf-8"))
+            substituir(temporario, destino)
+            _log.warning("Falha do CLI Codex (código %s); diagnóstico local: %s", codigo, destino)
+        except OSError:
+            _log.warning("Falha do CLI Codex (código %s); não foi possível gravar o diagnóstico local", codigo)
+        finally:
+            if temporario is not None:
+                with contextlib.suppress(OSError):
+                    temporario.unlink(missing_ok=True)
+
     async def cli(self, args: list[str]) -> dict:
         proc = await asyncio.create_subprocess_exec(
             *self._comando(), *args, cwd=self.home, env=self._env(),
@@ -296,17 +324,18 @@ class CodexNativo:
             except TimeoutError:
                 raise CodexNativoErro("O comando do Codex excedeu o tempo limite.") from None
             if proc.returncode:
-                # Só no log, nunca na tela: a cauda pode carregar URL com token. Sem ela um
-                # "não foi possível atualizar o marketplace" não dizia que era o GitLab sem rede.
-                _log.warning("codex %s falhou (código %s): %s", args[:3], proc.returncode,
-                             stderr.decode(errors="replace")[-500:].strip())
+                self._diagnostico_cli(args, proc.returncode, stdout, stderr)
                 raise CodexNativoErro(f"O comando do Codex falhou (código {proc.returncode}).")
             try:
                 result = json.loads(stdout)
             except (ValueError, UnicodeError):
+                self._diagnostico_cli(args, proc.returncode, stdout, stderr)
                 raise CodexNativoErro("O comando do Codex não retornou JSON válido.") from None
             if not isinstance(result, dict):
+                self._diagnostico_cli(args, proc.returncode, stdout, stderr)
                 raise CodexNativoErro("O comando do Codex retornou um resultado inválido.")
+            if result.get("errors"):
+                self._diagnostico_cli(args, proc.returncode, stdout, stderr)
             return result
         finally:
             await self._stop(proc)

@@ -1955,6 +1955,19 @@ igual, e recusava reimportar o plugin já instalado. O reconciliador agora dispe
 quando nome e origem comprovam a instalação nativa, inclusive com alias; atualização, reparo,
 habilitação e desabilitação continuam pela mesma esteira. Plugin ausente continua sendo importado.
 
+**Avisos da reconciliação Codex (10/09/2026):** uma entrada MCP que já contém todos os campos
+convertidos da fonte pode ser adotada mesmo com complementos locais (`tools`, timeout, variáveis
+extras). O manifesto guarda só os campos da fonte; divergência em qualquer um deles continua
+preservada com aviso. Um link pessoal que resolve exatamente para a skill descoberta, como o alias
+antigo `~/hangar`, fica intacto e sem aviso, mas não é adotado como gerenciado: equivalência não
+transfere propriedade. Falhas do CLI com código não zero, JSON inválido ou `errors` no JSON deixam
+um diagnóstico privado em `<codex>/.hangar-diagnosticos/cli-<hash do comando>.log` (0600 no POSIX,
+última falha por comando, caudas limitadas a 8 KiB por saída). O log do serviço mostra somente o
+código e o caminho; stdout/stderr brutos podem conter tokens e não vão para ele. Em 10/09, o erro
+de atualização do Claude Mem não reproduziu na nova tentativa: catálogo local e HEAD remoto
+coincidiram e a reconciliação terminou `ok`, sem erros nem marketplaces pendentes. Isso comprova a
+recuperação, não a causa da falha anterior, cujo detalhe não foi preservado pelo backend antigo.
+
 **Instruções nativas (07/09/2026, PR #3):** `codex_instrucoes.py` prepara `AGENTS.override.md`
 — nome que o Codex 0.153.4 lê no lugar do `AGENTS.md` da mesma pasta — como link para o
 `CLAUDE.md` global (`<codex>/AGENTS.override.md`) e dos projetos registrados no `config.toml`; o

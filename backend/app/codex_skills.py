@@ -341,7 +341,9 @@ def reconciliar_skills(home: Path, codex_home: Path, plugins: dict, registro_ski
             if os.path.lexists(destino):
                 if destino.is_symlink():
                     if not _link_gerenciado(destino, raizes):
-                        avisos.append(msg("aviso_link_pessoal", destino=destino))
+                        # Um alias equivalente fica intacto e continua fora da nossa gestão.
+                        if destino.resolve() != origem.resolve():
+                            avisos.append(msg("aviso_link_pessoal", destino=destino))
                         continue
                     if destino.resolve() == origem.resolve():
                         manifesto[nome] = {"path": str(destino), "mode": "symlink", "source": str(origem), "files": {}}

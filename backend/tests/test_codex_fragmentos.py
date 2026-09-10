@@ -157,6 +157,33 @@ def test_config_historico_adota_preservando_campos_complementares_recursivos():
     assert mesclar_config(novo, fonte, manifesto) == (novo, manifesto, [])
 
 
+def test_config_equivalente_com_complementos_nao_exige_historico():
+    fonte = {"gitnexus": {"command": "gitnexus", "args": ["mcp"], "env": {"FONTE": "x"}}}
+    atual = deepcopy(fonte)
+    atual["gitnexus"].update({"tools": {"search": {"enabled": False}}, "startup_timeout_sec": 60})
+    atual["gitnexus"]["env"]["PESSOAL"] = "meu"
+    novo, manifesto, avisos = mesclar_config(atual, fonte, {})
+    assert novo == atual
+    assert manifesto == fonte
+    assert avisos == []
+    assert mesclar_config(novo, fonte, manifesto) == (novo, manifesto, [])
+    retirado, _, _ = mesclar_config(novo, {}, manifesto)
+    assert retirado == {"gitnexus": {"tools": {"search": {"enabled": False}},
+                                   "startup_timeout_sec": 60, "env": {"PESSOAL": "meu"}}}
+
+
+@pytest.mark.parametrize("campo, valor", [("command", "outro"), ("args", ["outro"]),
+                                         ("env", {"FONTE": "pessoal"})])
+def test_config_divergente_com_complementos_continua_preservada(campo, valor):
+    fonte = {"mcp": {"command": "gitnexus", "args": ["mcp"], "env": {"FONTE": "x"}}}
+    atual = deepcopy(fonte)
+    atual["mcp"].update({campo: valor, "tools": {"search": {"enabled": False}}})
+    novo, manifesto, avisos = mesclar_config(atual, fonte, {})
+    assert novo == atual
+    assert manifesto == {}
+    assert len(avisos) == 1
+
+
 def test_config_remove_campos_antigos_apenas_se_ainda_iguais():
     antigo = {"mcp": {"command": "velho", "env": {"RETIRADO": "x", "EDITADO": "x"}, "args": ["old"]}}
     atual = {"mcp": {"command": "velho", "env": {"RETIRADO": "x", "EDITADO": "local", "LOCAL": "meu"},

@@ -115,7 +115,9 @@ def mesclar_config(atual: dict, fonte: dict, anteriores: dict,
     novo, manifesto, avisos = deepcopy(atual), {}, []
     historico = confiaveis or set()
     for nome, valor in fonte.items():
-        if nome in atual and nome not in anteriores and nome not in historico and atual[nome] != valor:
+        # Complementos locais não são divergência se todos os campos da fonte já coincidem.
+        if (nome in atual and nome not in anteriores and nome not in historico
+                and _mesclar_campos(atual[nome], valor, None) != atual[nome]):
             avisos.append(msg("aviso_config_sem_proveniencia", nome=nome))
             continue
         novo[nome] = _mesclar_campos(atual.get(nome), valor, anteriores.get(nome))

@@ -89,6 +89,30 @@ def test_usuario_tem_precedencia_sobre_plugin_com_mesmo_nome(ambiente):
     assert registro["skill"]["mode"] == "symlink"
 
 
+def test_alias_do_repo_equivalente_nao_avisa_nem_toma_posse(ambiente):
+    home, codex, _ = ambiente
+    origem = _skill(skill_bridge._REPO / "skills/hangar-preview")
+    alias = home / "hangar"
+    alias.symlink_to(skill_bridge._REPO, target_is_directory=True)
+    destino = codex / "skills/hangar-preview"
+    destino.parent.mkdir(parents=True)
+    destino.symlink_to(alias / "skills/hangar-preview", target_is_directory=True)
+    alvo = os.readlink(destino)
+    for _ in range(2):
+        registro, avisos = _rodar(ambiente)
+        assert avisos == []
+        assert os.readlink(destino) == alvo
+        assert destino.resolve() == origem
+        assert "hangar-preview" not in registro
+    alias.unlink()
+    pessoal = _skill(home / "pessoal/skills/hangar-preview")
+    alias.symlink_to(home / "pessoal", target_is_directory=True)
+    _, avisos = _rodar(ambiente)
+    assert len(avisos) == 1
+    assert destino.resolve() == pessoal
+    assert os.readlink(destino) == alvo
+
+
 def test_plugin_equivalente_retira_ponte_gerenciada_e_cria_backup(ambiente):
     home, codex, backups = ambiente
     origem = _skill(home / ".claude/plugins/cache/market/plugin/1/skills/skill")
