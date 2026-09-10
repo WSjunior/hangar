@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -12,6 +13,7 @@ if TYPE_CHECKING:
     from app.codex_contas import Account
 
 
+_log = logging.getLogger("hangar.codex.importador")
 _READ_LIMIT = 8 * 1024 * 1024
 _COMPLETED = "externalAgentConfig/import/completed"
 
@@ -286,14 +288,18 @@ class CodexNativo:
         proc = await asyncio.create_subprocess_exec(
             *self._comando(), *args, cwd=self.home, env=self._env(),
             stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
         )
         try:
             try:
-                stdout, _ = await asyncio.wait_for(proc.communicate(), self.timeout)
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), self.timeout)
             except TimeoutError:
                 raise CodexNativoErro("O comando do Codex excedeu o tempo limite.") from None
             if proc.returncode:
+                # Só no log, nunca na tela: a cauda pode carregar URL com token. Sem ela um
+                # "não foi possível atualizar o marketplace" não dizia que era o GitLab sem rede.
+                _log.warning("codex %s falhou (código %s): %s", args[:3], proc.returncode,
+                             stderr.decode(errors="replace")[-500:].strip())
                 raise CodexNativoErro(f"O comando do Codex falhou (código {proc.returncode}).")
             try:
                 result = json.loads(stdout)
