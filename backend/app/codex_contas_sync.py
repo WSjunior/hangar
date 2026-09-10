@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -25,6 +26,8 @@ from app.codex_arquivos import (
 from app.codex_contas import Account, default_home
 from app.codex_importador import CodexNativo
 
+
+_log = logging.getLogger("hangar.codex.contas_sync")
 
 PREFERENCE_KEYS = frozenset({
     "model",
@@ -935,6 +938,8 @@ async def _prepare_locked(account: Account, force: bool, state: dict) -> dict:
         source_files, toml_overrides = _transform_resources(
             source_files, source, destination, set(source_files), source_issues)
     except (OSError, UnicodeError, tomllib.TOMLDecodeError, ValueError) as exc:
+        # A tela só vê o tipo; qual arquivo (config.toml, perfil, TOML de agent) fica aqui.
+        _log.warning("conta Codex: origem %s inválida", source, exc_info=True)
         result = _status("error", issues=[_issue("codex_account_source_invalid", path=type(exc).__name__)])
         try:
             _write_state(account, {**state, "public": result})

@@ -52,7 +52,7 @@
   "codex_account_source_broad_link": "A source link reaches files outside the allowed scope.",
   "codex_account_source_cycle": "There is a link cycle in the source.",
   "codex_account_source_forbidden": "A source file cannot be inherited.",
-  "codex_account_source_invalid": "The source configuration is invalid.",
+  "codex_account_source_invalid": "The source configuration is invalid ({path}).",
   "codex_account_source_root_link": "The source root cannot be a link.",
   "codex_account_source_unreadable": "Could not read the source configuration.",
   "codex_account_state_invalid": "The account preparation record is invalid.",

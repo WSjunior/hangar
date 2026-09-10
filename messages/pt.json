@@ -52,7 +52,7 @@
   "codex_account_source_broad_link": "Um link da origem alcança arquivos fora do escopo permitido.",
   "codex_account_source_cycle": "Há um ciclo de links na origem.",
   "codex_account_source_forbidden": "Um arquivo da origem não pode ser herdado.",
-  "codex_account_source_invalid": "A configuração de origem é inválida.",
+  "codex_account_source_invalid": "A configuração de origem é inválida ({path}).",
   "codex_account_source_root_link": "A raiz da origem não pode ser um link.",
   "codex_account_source_unreadable": "Não foi possível ler a configuração de origem.",
   "codex_account_state_invalid": "O registro de preparação da conta é inválido.",

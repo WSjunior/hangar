@@ -107,7 +107,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   codex_account_source_broad_link: () => m.codex_account_source_broad_link(),
   codex_account_source_cycle: () => m.codex_account_source_cycle(),
   codex_account_source_forbidden: () => m.codex_account_source_forbidden(),
-  codex_account_source_invalid: () => m.codex_account_source_invalid(),
+  codex_account_source_invalid: (p) => m.codex_account_source_invalid({ path: String(p.path ?? '') }),
   codex_account_source_root_link: () => m.codex_account_source_root_link(),
   codex_account_source_unreadable: () => m.codex_account_source_unreadable(),
   codex_account_state_invalid: () => m.codex_account_state_invalid(),
