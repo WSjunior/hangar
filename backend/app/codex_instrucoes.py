@@ -57,6 +57,30 @@ def _fonte(pasta: Path) -> Path | None:
     return None
 
 
+def _importado(linha: str, base: Path) -> Path | None:
+    alvo = linha.strip()
+    if not alvo.startswith('@') or len(alvo) < 2 or alvo[1].isspace():
+        return None
+    path = Path(os.path.expanduser(alvo[1:]))
+    path = path if path.is_absolute() else base / path
+    return path if path.is_file() else None
+
+
+def _render(fonte: Path, vistos: frozenset[Path] = frozenset()) -> bytes:
+    """Inlina as linhas `@arquivo`: só o Claude Code as expande, então no Codex a linha
+    chegaria literal e o conteúdo importado sumiria. Import que não resolve fica literal."""
+    vistos = vistos | {fonte.resolve()}
+    saida = []
+    for linha in fonte.read_text(encoding='utf-8').splitlines(keepends=True):
+        path = _importado(linha, fonte.parent)
+        if path is None or path.resolve() in vistos:
+            saida.append(linha)
+            continue
+        texto = _render(path, vistos).decode('utf-8')
+        saida.append(texto if texto.endswith('\n') else texto + '\n')
+    return ''.join(saida).encode('utf-8')
+
+
 def _escopos(cwd: Path) -> list[Path]:
     cwd = cwd.resolve()
     caminho = [cwd, *cwd.parents]
@@ -85,8 +109,10 @@ def _alias(alvo: Path, fonte: Path | None, registros: Path) -> None:
             alvo.unlink()
         registro.unlink(missing_ok=True)
         return
-    dados = fonte.read_bytes()
-    if proprio and alvo.is_symlink() and alvo.resolve() == fonte.resolve():
+    dados = _render(fonte)
+    # Sem import a expandir o alias continua sendo link, que acompanha a edição da fonte sozinho.
+    espelho = dados == fonte.read_bytes()
+    if proprio and espelho and alvo.is_symlink() and alvo.resolve() == fonte.resolve():
         return
     if proprio and not alvo.is_symlink() and raw == dados:
         return
@@ -97,9 +123,12 @@ def _alias(alvo: Path, fonte: Path | None, registros: Path) -> None:
     tmp = Path(nome)
     tmp.unlink()
     try:
-        try:
-            tmp.symlink_to(os.path.relpath(fonte, alvo.parent))
-        except OSError:
+        if espelho:
+            try:
+                tmp.symlink_to(os.path.relpath(fonte, alvo.parent))
+            except OSError:
+                tmp.write_bytes(dados)
+        else:
             tmp.write_bytes(dados)
         # O registro vem antes: uma queda após a troca ainda deixa a autoria verificável.
         transicao = json_bytes({**novo, 'anterior': {k: anterior.get(k) for k in ('fonte', 'hash')}})
@@ -116,12 +145,23 @@ def _alias(alvo: Path, fonte: Path | None, registros: Path) -> None:
 def preparar_instrucoes(home: Path, codex_home: Path, cwd: Path | None = None) -> None:
     """Prepara o global e os escopos conhecidos; não sobrescreve overrides pessoais."""
     with _trava(codex_home):
-        _preparar(home, codex_home, cwd)
+        _preparar_global(home, codex_home)
+        _preparar_projetos(codex_home, cwd)
 
 
-def _preparar(home: Path, codex_home: Path, cwd: Path | None) -> None:
+def preparar_projeto(codex_home: Path, cwd: Path) -> None:
+    """Prepara somente os aliases dos escopos do projeto, preservando o global da conta."""
+    with _trava(codex_home):
+        _preparar_projetos(codex_home, cwd)
+
+
+def _preparar_global(home: Path, codex_home: Path) -> None:
     registros = codex_home / '.hangar-instrucoes'
     _alias(codex_home / 'AGENTS.override.md', _fonte(home / '.claude'), registros)
+
+
+def _preparar_projetos(codex_home: Path, cwd: Path | None) -> None:
+    registros = codex_home / '.hangar-instrucoes'
     projetos = set()
     config = codex_home / 'config.toml'
     if cwd is None and config.exists():

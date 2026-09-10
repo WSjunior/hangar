@@ -4,7 +4,7 @@ import subprocess
 
 import pytest
 
-from app.codex_instrucoes import preparar_instrucoes
+from app.codex_instrucoes import preparar_instrucoes, preparar_projeto
 
 
 def ambiente(tmp_path):
@@ -125,6 +125,15 @@ def test_sem_claude_preserva_override_pessoal(tmp_path):
     assert target.read_text() == 'Só Codex'
 
 
+def test_preparar_projeto_preserva_global_herdado(tmp_path):
+    home, cx, projeto = ambiente(tmp_path)
+    (cx / 'AGENTS.override.md').write_text('GLOBAL DO CODEX PADRÃO')
+    (projeto / 'CLAUDE.md').write_text('REGRA DO PROJETO NOVO')
+    preparar_projeto(cx, projeto)
+    assert (cx / 'AGENTS.override.md').read_text() == 'GLOBAL DO CODEX PADRÃO'
+    assert (projeto / 'AGENTS.override.md').read_text() == 'REGRA DO PROJETO NOVO'
+
+
 def test_projeto_registrado_e_reconciliado_sem_cwd(tmp_path):
     import json
     home, cx, projeto = ambiente(tmp_path)
@@ -234,3 +243,38 @@ def test_codex_real_recebe_conteudo_antes_de_qualquer_ferramenta(tmp_path):
     assert 'MARCADOR_FIM_NATIVO' in entrada
     assert 'MARCADOR_GLOBAL_PRETERIDO' not in entrada
     assert 'MARCADOR_PROJETO_PRETERIDO' not in entrada
+
+
+def test_import_do_claude_e_inlinado_no_alias(tmp_path, monkeypatch):
+    home, cx, projeto = ambiente(tmp_path)
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setenv('USERPROFILE', str(home))
+    (home / '.claude/CLAUDE.local.md').write_text('AMBIENTE DA MAQUINA')
+    (home / '.claude/CLAUDE.md').write_text('regra global\n@~/.claude/CLAUDE.local.md\n@RTK.md\nfim\n')
+    (home / '.claude/RTK.md').write_text('ATALHO RTK')
+    (projeto / 'CLAUDE.md').write_text('so o projeto')
+    preparar_instrucoes(home, cx, projeto)
+    alias = cx / 'AGENTS.override.md'
+    assert alias.read_text() == 'regra global\nAMBIENTE DA MAQUINA\nATALHO RTK\nfim\n'
+    assert not alias.is_symlink()
+    # Sem import a expandir nada muda: o alias segue link e acompanha a fonte sozinho.
+    assert (projeto / 'AGENTS.override.md').read_text() == 'so o projeto'
+
+
+def test_import_que_nao_resolve_fica_literal(tmp_path, monkeypatch):
+    home, cx, projeto = ambiente(tmp_path)
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setenv('USERPROFILE', str(home))
+    (home / '.claude/CLAUDE.md').write_text('antes\n@~/.claude/nao-existe.md\n@grok responde\ndepois\n')
+    preparar_instrucoes(home, cx, projeto)
+    assert (cx / 'AGENTS.override.md').read_text() == 'antes\n@~/.claude/nao-existe.md\n@grok responde\ndepois\n'
+
+
+def test_import_ciclico_nao_entra_em_recursao(tmp_path, monkeypatch):
+    home, cx, projeto = ambiente(tmp_path)
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setenv('USERPROFILE', str(home))
+    (home / '.claude/CLAUDE.md').write_text('raiz\n@~/.claude/a.md\n')
+    (home / '.claude/a.md').write_text('A\n@~/.claude/CLAUDE.md\n')
+    preparar_instrucoes(home, cx, projeto)
+    assert (cx / 'AGENTS.override.md').read_text() == 'raiz\nA\n@~/.claude/CLAUDE.md\n'
