@@ -1247,6 +1247,8 @@ class CreateBody(_StrictBody):
     # None = sem perfil. Só vale com provider omp; o nome é validado no registry.
     omp_profile: str | None = None
 
+    read_only: bool = Field(default=False, strict=True)
+
 
 class TtsBody(_StrictBody):
     # max_length: sem teto, um corpo de 100 MB era parseado INTEIRO antes do 413 do preparo/teto
@@ -1573,6 +1575,12 @@ async def create_session(body: CreateBody):
     # ser rejeitado aqui não pode ter reconciliado a conta (deriva movida, memória criada) à toa.
     if body.provider not in ("claude", "codex", "pi", "kimi", "omp"):
         raise HTTPException(400, detail=erro("erro_provider_sessao_invalido", "provider invalido"))
+    if body.read_only:
+        from app.orq_readonly import prepare
+        try:
+            await asyncio.to_thread(prepare, body.cwd, runtime_dirs=(body.config_dir or "",))
+        except ValueError as exc:
+            raise HTTPException(400, detail=erro("erro_criacao_sessao", str(exc))) from None
     if body.config_dir is not None and body.config_dir not in {c.path for c in list_config_dirs()}:
         raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
     # Mesma guarda do config_dir. Codex nao usa spawn_command/tmux desse jeito, entao motor + codex e
@@ -1669,6 +1677,8 @@ async def create_session(body: CreateBody):
                             _kw["permission_mode"] = body.permission_mode
                         if body.omp_profile:
                             _kw["omp_profile"] = body.omp_profile
+                        if body.read_only:
+                            _kw["read_only"] = True
                         info = await asyncio.to_thread(registry.create, body.name, body.cwd, body.config_dir, **_kw)
                         return info.model_copy(update={"avisos": list(avisos)})
                     except ValueError as e:
@@ -1688,6 +1698,8 @@ async def create_session(body: CreateBody):
             _kw2["initial_prompt"] = body.initial_prompt
         if body.omp_profile:
             _kw2["omp_profile"] = body.omp_profile
+        if body.read_only:
+            _kw2["read_only"] = True
         return await asyncio.to_thread(registry.create, body.name, body.cwd, body.config_dir, **_kw2)
     except ValueError as e:
         raise HTTPException(409, str(e))

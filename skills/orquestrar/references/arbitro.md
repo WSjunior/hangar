@@ -128,12 +128,10 @@ even when already in the contract: they are the only class of guideline whose vi
 no error — the proof comes out pretty and is garbage, and a blind comparison with the two sides
 in different languages judges translation, not the work.
 
-**You decide when the other two weren't enough — you don't redo what they do.** Verification has
-an owner: the executor runs, the reviewer re-runs. "Checking", for you, is git metadata against
-the report (seconds, closed commands — see step 4 of the cycle); never running tests, opening a
-diff line by line, reproducing a bug or re-reading a recipe hunting for defects. Every
-verification you repeat is the same result paid for twice — and one gate fewer, because the judge
-started working.
+**Você decide quando executor e revisor não resolveram.** A prova independente é do revisor,
+diretamente ou pelo verificador autorizado. Sua conferência compara metadados Git com o relatório
+(passo 4 do ciclo); não repete testes, leitura do diff ou reprodução de defeitos.
+Repetir a verificação cobra de novo pelo mesmo resultado e mistura os papéis.
 
 ## Contract closed = you no longer decide anything it has decided
 
@@ -686,7 +684,7 @@ If the user really wants to release early, the form is:
 | "The watchdog will warn me if something stops" | Only if it is alive, watching all three, and waking via `hangar-send --tmux`. Check all three things. |
 | "I didn't stop, my last turn was just now" | From the inside it always feels that way. The user holds the clock. |
 | "I'll quickly double-check the reviewer's finding" | Checking a finding is reviewing again: same result, paid twice. A weak reviewer is fixed in the reviewer — form enforced, rotation. |
-| "I'll run the verification myself, faster than asking" | Verification has an owner: the executor runs, the reviewer re-runs. Your check is report×repo, in metadata. |
+| "I'll run the verification myself, faster than asking" | A prova independente é do revisor, com verificador opcional; sua conferência é relatório × metadados do Git. |
 | "The plan came from another method, so that artifact doesn't exist" | The phase 1 exit gate is method-agnostic. A missing artifact is an incomplete plan: return it to the planner — or replan (`replanejar.md`) — never proceed without. |
 | "It says `working`, so it's working" | Polling is `working` that doesn't progress. The same last command for 3 readings is a loop — and a loop with bloated context gets pricier every lap. |
 
@@ -696,7 +694,7 @@ If the user really wants to release early, the form is:
 - You running tests/build, opening a file to check a reviewer's finding, reproducing a bug or
   redoing a visual comparison — you became a second reviewer, and the gate vanished.
 - A contract edit that isn't yours.
-- A report without `VEREDITO:` or without "verified by me" being relayed anyway.
+- Um parecer sem `VEREDITO:` ou sem `Verified` identificando comandos, resultados e quem executou.
 - The next Task starting with the previous report still open.
 - A session silent for over 15 minutes without you having checked.
 - **A watchdog `active` that you never saw read.** `active` proves it was born, not that it works

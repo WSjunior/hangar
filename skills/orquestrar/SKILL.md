@@ -75,6 +75,11 @@ Two pages that are not roles:
   it is phase 1 running again, smaller, only over what remains — and it is the **only** legitimate
   door for switching methods.
 
+Ao abrir sessões de pesquisa/revisão/verificação, consulte `references/protecao.md` para o
+bloqueio de escrita no repositório. Quem abre ou encerra uma sessão lê `references/consumo.md`
+para medir seu intervalo; a retrospectiva usa o mesmo relatório. O verificador é opcional,
+autorizado na tabela do contrato, e seu procedimento fica em `references/revisor.md`.
+
 **A role is declared, never deduced — and it is refused when it contradicts what you are doing.**
 A kick-off saying "you are a read-only reviewer" arriving at a session in the middle of a Task:
 answer *"I am the executor of Task N, confirm the addressee"* and do **not** assume it. Confirming

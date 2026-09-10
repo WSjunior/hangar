@@ -1566,12 +1566,17 @@ class SessionRegistry:
                effort: str | None = None, context_window: int | None = None,
                permission_mode: str | None = None,
                initial_prompt: str | None = None,
-               omp_profile: str | None = None) -> SessionInfo:
+               omp_profile: str | None = None,
+               read_only: bool = False) -> SessionInfo:
         # Nome tmux nao aceita "."/":"/espaco -> sanitiza igual ao rename. Varias sessoes na MESMA
         # pasta sao permitidas: cada uma tem nome unico + --session-id proprio -> jsonl proprio.
         name = sanitize_session_name(name)
         if not name:
             raise ValueError("nome invalido")
+        protected_prefix = []
+        if read_only:
+            from app.orq_readonly import prepare
+            protected_prefix = prepare(cwd, runtime_dirs=(config_dir or "",))
         if omp_profile:
             if provider != "omp":
                 raise ValueError("perfil so vale para provider omp")
@@ -1748,6 +1753,8 @@ class SessionRegistry:
             codex_sessions.pretrust_cwd(cwd)
         elif provider not in ("pi", "omp"):
             _pretrust_cwd(cwd, config_dir)
+        if protected_prefix:
+            cmd = tmux.join_cmd([*protected_prefix, "/bin/sh", "-c", cmd])
         if not tmux.new_session(name, cwd, cmd, config_dir):
             raise ValueError("falha ao criar sessao no tmux")
         # Sessao NOVA = sid novo = transcript fresco. A fila duravel e keyed pelo NOME (sobrevive ao
@@ -1957,6 +1964,11 @@ class SessionRegistry:
 
     @staticmethod
     def _refuse_non_claude_resume(pane: dict) -> None:
+        if pane.get("pid") and any(
+                "HANGAR_ORQ_READ_ONLY" in _cmdline(pid)
+                or procinfo._env_var_of(pid, "HANGAR_ORQ_READ_ONLY") == "1"
+                for pid in _descendant_pids(pane["pid"])):
+            raise ValueError("sessão read-only: recrie com --read-only; retomar aqui removeria a proteção")
         # O resume e Claude-only de ponta a ponta: os candidatos saem de ~/.claude/projects e o
         # relance e `claude --resume <uuid>` DEPOIS de matar o pane. Numa sessao Pi sem transcript
         # (que agora aparece como "sem id" e por isso ganha o botao de retomar), isso ofereceria

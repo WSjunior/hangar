@@ -68,11 +68,10 @@ list of what to use, because it saves the next session a turn of trying.
 
 ## Opening a session — a recipe, not a decision
 
-**Exception:** the reviewer's **verification session** is not yours. The reviewer opens, drives
-and closes it alone, without asking you — it is their arm for running the app, clicking screens
-and capturing shots, and what reaches you is still only the review report. Don't create, manage or
-demand reports from it. **Its model is not the reviewer's choice**: it comes from the contract,
-like everyone's — but the reviewer creates and checks it, not you.
+**Exceção: a sessão verificadora é conduzida pelo revisor.** Ele abre, envia o roteiro, registra
+os snapshots de consumo (`consumo.md`) e encerra; você recebe só o parecer de revisão.
+A configuração vem da linha opcional `verificador` do contrato. Sem essa linha, o revisor
+verifica na própria sessão. Não crie nem gerencie o verificador por ele.
 
 ### A rotating role: which table row holds for this Task
 
@@ -148,6 +147,11 @@ in their middle.
    directory keeps one file per id and doesn't delete them when a session dies. Two of those
    three read the sidecar of the dead session that previously occupied the pane, and the value
    came out right by coincidence.
+
+   Para pesquisa, revisão, revisão final e verificação, crie com `--read-only` e comprove a
+   proteção de `protecao.md`. Antes do primeiro pedido, registre o snapshot inicial de
+   `consumo.md`; ao encerrar ou substituir a sessão, registre o final. A mesma regra vale para
+   o executor e para seu próprio período como árbitro, sem lhes acrescentar `--read-only`.
 3. **Write the request into a file** and deliver with `hangar-send <name> "$(cat <file>)"`. A
    long request typed straight on the line breaks: `|`, `$`, backticks and the `|` of "YES | NO"
    become commands, and the message goes out mutilated or not at all.

@@ -63,9 +63,8 @@ break the very feature it fixed, with the screen saying it worked.
 The question is not answered by reading the test. It is answered by **breaking the code on
 purpose and watching the test fall**:
 
-1. `git worktree add --detach <tmp>/mut-<x> <object>` (the repo stays untouched — a mutation in
-   the working tree leaves residue that rides into the commit, see `executor.md`); `git worktree
-   remove --force` at the end.
+1. Prepare uma cópia descartável do objeto conforme `protecao.md`, fora do checkout protegido;
+   uma mutação na árvore do executor deixaria resíduos no commit. Remova a cópia ao terminar.
 2. Remove **the fix's line**, one at a time, and run the suite.
 3. Only the new test fell → it proves the scenario. Nothing fell → **that point has no test**,
    and that is a finding (a `NOTED` gap, not a blocker).

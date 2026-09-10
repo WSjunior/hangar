@@ -4,6 +4,9 @@ You are **read-only**: you don't edit, commit or fix. One review report per roun
 context (a new session or a fresh subagent — big diffs don't sit in your main context). Your
 report opens or closes the Task's gate.
 
+A proteção do repositório vem da abertura, não desta frase: confira o `--read-only`
+conforme `protecao.md`. Ela também vale para o verificador e os subagentes locais.
+
 **You judge code that has NOT been committed yet.** The executor stops with a dirty tree and
 freezes the round (`git add` + `git stash create` + `git stash store`); what reaches you is that
 object's hash, the `HEAD` that serves as base, and a file with the diff. Judge the **frozen
@@ -70,7 +73,7 @@ line is its raw material.
 ```
 VEREDITO: APROVA | REPROVA | DEVOLVIDO
 Reviewed: round <R>, object <stash hash>, over base <HEAD hash>
-Verified by me: <the commands I ran and their output>
+Verified: <comandos, resultados e quem executou: eu | sessão verificadora>
 
 BLOCKER 1: <one line>
   [closed recipe — see below]
@@ -117,10 +120,10 @@ judge also rewrites the assignment is a loop that fixes the criteria instead of 
   becoming a ghost round over code that already changed.
 - There is no finding "small enough to ride with the next Task". Either it is a blocker (gets a
   recipe and blocks this Task), or it is NOTED and **nobody** fixes it now.
-- **Run the verifications yourself.** The executor's test count is report, not proof. And
-  **nobody re-runs after you**: the arbiter checks metadata (hash, files, untouchables), never
-  code. A verification you didn't run doesn't exist at the gate — your APROVA is the last line
-  before the next Task.
+- **A verificação é independente do executor.** Rode os comandos ou use a sessão verificadora
+  abaixo; confira a saída, o objeto testado e as lacunas antes de aprovar. Declare quem executou,
+  sem apresentar prova delegada como execução própria. O árbitro confere metadados, não repete
+  os testes: seu parecer continua sendo a última verificação antes da próxima Task.
 
 ## The recipe — six fields, plus the inventory
 
@@ -223,30 +226,35 @@ yourself, because the subagents already read the work. Rules worth more than the
 
 ## Grunt work you DELEGATE — the judgment stays yours
 
-You are usually the team's most expensive model. Bringing the app up, driving a browser,
-clicking through states, capturing screenshots, running a long suite: none of it needs your
-reasoning, and done by you it costs several times more for the same result.
+Subir um ambiente descartável, executar um roteiro de cliques, capturar telas e rodar uma suíte
+podem ficar com um modelo mais barato. A economia é uma hipótese até a medição de `consumo.md`.
 
-**The verification session is yours, start to finish.** You open, drive and close it — asking the
-arbiter for nothing. **Its model is NOT your choice:** it is born on the **reviewer's row** of the
-contract's `## Quem é quem` table (the table has no row of its own for it). A new session is born
-on the harness default, which is not that model — switch, **read it back** and check before
-sending work. The arbiter doesn't enter this loop: what reaches him is your report.
+**Use a linha opcional `verificador` do contrato**, com conta, modelo e esforço próprios,
+aprovados no planejamento. Sem essa linha, execute a verificação na sua sessão; não abra uma
+sessão extra herdando seu modelo nem escolha outro por preço. A regra de rodízio, quando houver,
+usa a Task atual. Na revisão final, uma linha com rodízio precisa ter a vez definida no contrato.
+
+Você abre, dirige e fecha o verificador; o árbitro não transporta seus pedidos. Crie com os
+valores da linha e confira modelo e esforço reais antes do roteiro. A autorização dessa sessão
+separada não muda a regra dos subagentes, que continuam na conta da sessão que os abriu.
 
 ```bash
-# 1. create, in the Task's worktree, already on the row's model (add --conta <name> for another Claude account)
-hangar-send --new verif-<task> <worktree> --provider <provider> --model <id> --effort <level>
+# 1. Use nome e configuração da linha verificador; acrescente o flag da conta correspondente.
+hangar-send --new <work>-verif-<task> <worktree> --provider <provider> --model <id> --effort <level> --read-only
 # 2. PROVE the real model before sending work — `arbitro-lancamento.md`, "Prove what was born"
-# 3. send the script
-hangar-send verif-<task> "<closed script>"
-# 4. at the Task's end, close it
-tmux kill-session -t "=verif-<task>"
+# 3. Capture o início da medição (consumo.md), depois envie o roteiro.
+hangar-send <work>-verif-<task> "<closed script>"
+# 4. Capture o fim da medição e encerre pela API de sessões, como na abertura.
 ```
 
 The request to it is a **closed script**, never "see if it looks good": the exact steps, the
 states to capture, where to save the screenshots (absolute path), and what to report back —
 command run, raw output, each file's path. A cheap model well driven does this very well; badly
 driven, it invents.
+
+O roteiro inclui o objeto/base sob teste, a proteção de `protecao.md` e o destino dos artefatos.
+O verificador executa o roteiro e informa falhas; não corrige código ou testes, não decide
+arquitetura e não emite aprovação. Resultado inesperado volta para você decidir o próximo teste.
 
 You remain read-only in code. Delegating the arm is not delegating the judgment: a finding you
 didn't reproduce and don't understand becomes no blocker, wherever it came from. **You read the
@@ -255,13 +263,10 @@ the executor or the arbiter. Round done, **close it**: a verifier is disposable,
 
 ## What you and your arms don't do
 
-- **Nobody writes in the repo** — not you, not the verifier, not a subagent: no file edits, no
-  `git checkout`, `restore`, `stash`, `reset` or commit. That prohibition goes **in the request**,
-  written, every time: a subagent that believes it is in a clone has already reverted a whole
-  checkout. Need another tree → `git worktree add --detach <tmp>/mut-<x> <object>` and
-  `git worktree remove --force` after (a disposable tree is not phase 5's raw material). Must the
-  verifier bring the app up? Isolated sandbox (the contract usually carries the recipe), torn down
-  at the end.
+- **O checkout do executor permanece protegido**, inclusive seu índice e metadados Git.
+  Inclua essa restrição no roteiro. Teste que escreve cache/build e teste de mutação rodam em
+  cópia descartável do objeto congelado, preparada conforme `protecao.md`; os artefatos finais
+  ficam na pasta durável. A proteção não é desligada para fazer um teste passar.
 - **A secret in the round is a full blocker** — token, key, password, even in a fallback, even
   under a dev flag. You see it in the frozen object, **before** the commit exists: report it to the
   arbiter now, because once committed, published history can't be erased, only the credential

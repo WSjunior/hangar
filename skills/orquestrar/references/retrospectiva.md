@@ -42,11 +42,17 @@ git -C <skill-repo> diff <commit-before-the-work>..HEAD -- skills/orquestrar
 
 # 5. the eventos.jsonl — rounds, verdicts and times per Task ALREADY counted by the arbiter
 cat ~/.hangar/orq/<date>-<gid>/eventos.jsonl
+
+# 6. consumo das fontes registradas, medido por snapshots (consumo.md)
+cat ~/.hangar/orq/<date>-<gid>/medicao/relatorio.json
 ```
 
 The fifth gives numbers without recounting by hand: rounds, verdicts and time per Task come
 counted from there, and the retro **checks the prose against it** instead of rebuilding from git
 and mtime. An old run lacks the file — the others hold, and the report says so.
+
+O sexto separa consumo por papel. Confira as fontes e os intervalos antes de comparar; medição
+ausente ou incompleta é declarada, nunca reconstruída pelo nome da sessão ou tratada como zero.
 
 The second and the fourth are the ones nobody thinks to look at, and the ones that pay most:
 **every guideline the arbiter had to write mid-work is something the skill didn't have.** If he
@@ -60,6 +66,9 @@ waiting, and separating that from the work costs more than it yields; what **rea
 is repeated rounds — section 1. A Task blowing its clock is handled when it happens, by the
 arbiter. Any time number that does enter here comes from `date -Iseconds` or from git's stamp —
 never from memory, which drifts by hours.
+
+A duração dos snapshots serve apenas para delimitar a medição, incluindo espera. Tokens entram
+nas seções de desperdício e de modelos existentes; não crie um ranking de produtividade por hora.
 
 ### 1. Waste, grouped
 
@@ -109,6 +118,10 @@ model that worked:
 
 - **New numbers:** context per Task type, time, cost. It is what makes the next plan predict
   rotation instead of discovering it midway.
+- **Consumo por papel:** entrada sem cache, cache lido/criado e saída, com fontes e período do
+  relatório. Para comparar configurações, use o protocolo de `consumo.md`; menos tokens com mais
+  reprovações não demonstra melhoria. O modelo informado na coleta não atribui sozinho cada token
+  a ele quando a sessão trocou de modelo.
 - **How it failed**, as a pattern — and it only becomes an assertion with two runs agreeing. Once
   enters marked `(seen once, on <date>)`.
 - **What the kick-off had to say because of it**, which next time can be born in the plan.

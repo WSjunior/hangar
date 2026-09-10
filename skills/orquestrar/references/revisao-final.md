@@ -3,6 +3,9 @@
 You are a **fresh session that took no part** in this work, and you review the branch's
 **whole** before any push. Read-only.
 
+A abertura deve aplicar a proteção de `protecao.md`. Para executar testes, vale a linha opcional
+`verificador` e o procedimento de `revisor.md`; o julgamento do conjunto continua sendo seu.
+
 The per-Task reviewer doesn't replace you: they never saw the commits interacting. You don't
 replace them: don't re-review commit by commit.
 
@@ -25,13 +28,14 @@ Hunt what only shows in the sum:
 - **The repo's final state**: a dependency removed in one Task and still imported in another, a
   test that passes alone and fails in the full suite, a surviving temporary file.
 
-Run every verification command the plan defines **yourself**, at the branch's tip.
+Execute as verificações do plano na ponta da branch, diretamente ou pelo verificador, e confira
+as provas antes do parecer. Identifique quem executou cada comando.
 
 ## Format
 
-The same as the per-Task reviewer's: `VEREDITO` first, `Verified by me` with the commands you
-ran, and every blocker with a closed recipe — cause reproduced, where, **all the callers**,
-**proof of the recipe**, steps, final behavior, proof. Detail in `revisor.md`.
+Use o formato de `revisor.md`: `VEREDITO` primeiro; `Verified` com comandos, resultados e quem
+executou; cada problema impeditivo com causa reproduzida, localização, todos os chamadores,
+prova do mecanismo proposto, passos, comportamento final e verificação.
 
 **You may be called for a DELTA, not the whole branch.** When commits enter after a first
 approval, the arbiter opens a set review of just those. The scope comes declared in the kick-off

@@ -119,6 +119,9 @@ A **read-only** session or subagent, with a closed question ("how does flow X wo
 breaks if Y changes"). The output is a file on disk that the plan references — research that only
 exists in a session's context dies on `/clear`. Can the plan be written without it? Skip it.
 
+Proteja a sessão de pesquisa conforme `protecao.md`; um subagente precisa herdar a proteção
+ou ter uma restrição nativa comprovada. O rótulo de explorador sozinho não bloqueia escrita.
+
 **"It doesn't exist" is the answer to ONE question — write down which question the search asked.**
 Absence is not a fact of the repository; it is the result of one query, and two queries over the
 same base return opposite answers. Before recording "the field doesn't exist" / "there's nothing
@@ -465,6 +468,12 @@ table from there and only adjust the session names — it is their choice, not y
 | retrospectiva | <work>-retro | claude | claude-200-3 | opus[1m] | high |
 ```
 
+**Verificação mecânica pode ter uma linha própria, opcional: `verificador`.** Proponha conta,
+modelo e esforço adequados ao roteiro, separados dos do revisor; o usuário aprova junto do time.
+Use sessão `<work>-verif-*`, com a mesma estrutura de colunas. Sem a linha, o revisor executa
+os testes na própria sessão. O verificador entrega provas, e o revisor continua decidindo o
+parecer. Não acrescente a linha a um contrato em andamento sem autorização.
+
 **The table is born with ALL the pipeline's roles, including phases 4 and 5.** Branch review and
 retrospective arrive days later, when whoever launched is no longer in the session — and without
 the row, that moment's arbiter picks account, model and effort alone for a role the user never
@@ -505,6 +514,10 @@ because *"the final review runs in an X-agent session"* is a sentence that ages 
 later, at opening time, it becomes an improvised decision between default account, engine, gateway
 and subagent — and the four give different results. Write the command the day the user defines the
 role: `hangar-send --new <work>-final <cwd> --conta claude-200-3 --model 'opus[1m]' --effort high`.
+
+Nos comandos de pesquisa, revisão, revisão final e verificação, inclua `--read-only` e confira
+o suporte conforme `protecao.md`. Declare onde rodam testes que precisam escrever e onde ficam
+os relatórios. Registre também o comando de medição e seu responsável (`consumo.md`).
 
 **The final review enters the table as its own item, with its trigger alongside:** *"fires when
 every code Task is approved"*. Never "after Task N" — a manual Task (uploading an asset,
@@ -707,7 +720,7 @@ ignores. Never launch silently on a broken base.
 
 ```bash
 hangar-send --new <work>-writer /path/to/repo --engine <plan's engine>
-hangar-send --new <work>-review /path/to/repo --engine <other engine>
+hangar-send --new <work>-review /path/to/repo --engine <other engine> --read-only
 hangar-send --pair <session> "<work>: <where the contract is>"   # one call per session
 ```
 

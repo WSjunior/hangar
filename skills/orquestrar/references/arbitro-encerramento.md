@@ -103,6 +103,8 @@ off-plan Task.
       skill, at `~/.hangar/orq/<date>-<gid>.md`. Kick-off carries its four inputs:
       `Durable dir: <path>` · `Branch range: <base>..<tip>` · `Skill repo: <path> (commit before
       the work: <hash>)` · `Cards: ~/.hangar/orq/modelos/`.
+      Antes do pedido, gere `medicao/relatorio.json` conforme `consumo.md` e inclua seu caminho,
+      com as fontes/períodos que ficaram sem medição. Não adie isso até mover os transcripts.
 ```
 
 **Phase 5's trigger is not the final review's first approval.** An approved branch opens the door

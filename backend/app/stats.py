@@ -43,6 +43,8 @@ class _Fold:
         self.in_tok = 0
         self.out_tok = 0
         self.cache_read_tok = 0
+        self.cache_write_tok = 0
+        self._invalid_usage = False
         self.ttft_ms = 0.0
         self.ttft_n = 0
         self._prev_ts: float | None = None      # ts (s) da linha anterior — atribuição de gap
@@ -130,6 +132,7 @@ class _FoldClaude(_Fold):
                 cc = _int(usage.get("cache_creation_input_tokens"))
                 self.in_tok += inp + cr + cc
                 self.cache_read_tok += cr
+                self.cache_write_tok += cc
                 self.out_tok += _int(usage.get("output_tokens"))
             if not sidechain:
                 gap = self._gap(ts)
@@ -193,6 +196,7 @@ class _FoldKimi(_Fold):
                 cr = _int(u.get("inputCacheRead"))
                 self.in_tok += _int(u.get("inputOther")) + cr + _int(u.get("inputCacheCreation"))
                 self.cache_read_tok += cr
+                self.cache_write_tok += _int(u.get("inputCacheCreation"))
                 self.out_tok += _int(u.get("output"))
             if self._req_ts is not None and ts is not None and 0 <= ts - self._req_ts <= _GAP_TETO_S:
                 self.llm_ms += (ts - self._req_ts) * 1000.0
@@ -235,6 +239,7 @@ class _FoldPi(_Fold):
                 cr = _int(u.get("cacheRead"))
                 self.in_tok += _int(u.get("input")) + cr + _int(u.get("cacheWrite"))
                 self.cache_read_tok += cr
+                self.cache_write_tok += _int(u.get("cacheWrite"))
                 self.out_tok += _int(u.get("output"))
             # O Pi grava a linha do assistente quando a geração COMEÇA (medido em
             # sessão real: gap ~1ms da linha anterior mesmo com 4k tok de saída),
@@ -286,6 +291,8 @@ class _FoldCodex(_Fold):
         atual = (_int(tot.get("input_tokens")), _int(tot.get("cached_input_tokens")),
                  _int(tot.get("output_tokens")))
         ant = self._total or (0, 0, 0)
+        if any(a < b for a, b in zip(atual, ant)):
+            self._invalid_usage = True
         self._total = atual
         # Acumula o DELTA do total, e não o total, pra sobreviver a um reset dele (compactação
         # agressiva): delta negativo vira zero em vez de subtrair da faixa.
@@ -357,6 +364,7 @@ class Accumulator:
         self._provider = provider
         self._offset = 0
         self._resto = b""            # linha parcial no fim do arquivo (escrita em andamento)
+        self._invalid_lines = 0
         self._trava = threading.Lock()   # collect() roda em thread, e ha uma por conexao
         self._donos = 0
 
@@ -389,6 +397,24 @@ class Accumulator:
         with self._trava:
             return self._collect()
 
+    def usage_totals(self) -> dict[str, int]:
+        """Totais exatos e limite das linhas completas, sem arredondar o cache do SSE."""
+        with self._trava:
+            self._collect()
+            if self._invalid_lines:
+                raise ValueError(f"Fonte contém {self._invalid_lines} linhas inválidas; consumo incompleto.")
+            if self._fold._invalid_usage:
+                raise ValueError("Contadores de uso regrediram; consumo exato não pode ser reconstruído.")
+            fold = self._fold
+            return {
+                "input": fold.in_tok - fold.cache_read_tok - fold.cache_write_tok,
+                "output": fold.out_tok,
+                "cache_read": fold.cache_read_tok,
+                "cache_write": fold.cache_write_tok,
+                "steps": fold.steps,
+                "bytes": self._offset - len(self._resto),
+            }
+
     def _collect(self) -> dict | None:
         try:
             size = self._path.stat().st_size
@@ -401,6 +427,7 @@ class Accumulator:
             self._fold = _FOLDS[self._provider]()
             self._offset = 0
             self._resto = b""
+            self._invalid_lines = 0
         if size > self._offset:
             with self._path.open("rb") as f:
                 f.seek(self._offset)
@@ -416,9 +443,12 @@ class Accumulator:
                     try:
                         obj = json.loads(raw)
                     except ValueError:
+                        self._invalid_lines += 1
                         continue
                     if isinstance(obj, dict):
                         self._fold.feed(obj)
+                    else:
+                        self._invalid_lines += 1
         return self._fold.snapshot()
 
 
