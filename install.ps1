@@ -761,8 +761,15 @@ function Pare-Servico {
         # Protegendo a linhagem inteira ele virava ancestral intocavel: "porta 8765 continua ocupada
         # apos parar hangar-backend", instancia nova nunca subia, codigo novo no disco e servidor
         # velho no ar. O motor ENTRA na linhagem (foi ele quem chamou); os pais dele, nao.
-        if ($cmdMapa[$cur] -and $cmdMapa[$cur] -match 'app\.atualizar') { break }
+        # O motor sao DOIS processos com `app.atualizar` na cmdline: o python.exe do venv e um
+        # trampolim que sobe o interpretador real como filho, e o trampolim leva o filho junto ao
+        # morrer. Parar no primeiro deixava o trampolim de fora da linhagem, e o BFS abaixo (que
+        # desce do backend) o matava - a atualizacao terminava "interrompida". Sobe enquanto o PAI
+        # ainda e motor; para no ultimo.
         $pai = $paisMapa[$cur]
+        $souMotor = $cmdMapa[$cur] -and $cmdMapa[$cur] -match 'app\.atualizar'
+        $paiMotor = $pai -and $cmdMapa[$pai] -and $cmdMapa[$pai] -match 'app\.atualizar'
+        if ($souMotor -and -not $paiMotor) { break }
         # PID e RECICLADO: o ppid e so um numero gravado no nascimento, e se aquele pai morreu o
         # numero pode pertencer hoje a um processo qualquer — inclusive ao Vite que a gente QUER
         # matar, que assim escaparia por coincidencia numerica. Ancestral de verdade nasceu ANTES;
