@@ -300,7 +300,9 @@ class IntegracaoCodex:
             # Não devolve conteúdo de config ou saídas de subprocessos que podem conter chaves.
             self._erro(msg("erro_falha", tipo=type(exc).__name__))
             self._estado["estado"] = "erro"
-            _log.debug("Falha da integração", exc_info=True)
+            # Traceback no log (caminhos, não conteúdo): a tela só diz o tipo, e sem isto um
+            # PermissionError no Windows não tinha onde ser lido.
+            _log.warning("Falha da integração", exc_info=True)
         except Exception as exc:  # noqa: BLE001 — erro escapando deixava o estado preso em "executando"
             self._erro(msg("erro_falha_inesperada", tipo=type(exc).__name__))
             self._estado["estado"] = "erro"
