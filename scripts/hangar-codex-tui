@@ -313,7 +313,10 @@ def main() -> int:
 
     def subir_servidor() -> subprocess.Popen:
         return subprocess.Popen(
-            [_codex(), "app-server", "--listen", endpoint, "-c", f"project_doc_max_bytes={limite}"],
+            # Sandbox e aprovacao tambem no SERVIDOR: o thread/resume que a TUI faz ao reconectar
+            # nao repassa as flags dela, e a conversa caia em `Workspace` com aprovacao.
+            [_codex(), "app-server", "--listen", endpoint, "-c", f"project_doc_max_bytes={limite}",
+             "-c", f'sandbox_mode="{SANDBOX}"', "-c", f'approval_policy="{APPROVAL}"'],
             stdout=subprocess.DEVNULL, stderr=erros,
         )
 
