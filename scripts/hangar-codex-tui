@@ -157,6 +157,8 @@ def _avisar_servidor_morto(endpoint: str, servidor, erros) -> None:
     """O stderr DELE e a unica pista de por que nao abriu a porta."""
     erros.seek(0)
     cauda = erros.read()[-_ERRO_MAX:].decode(errors="replace").strip()
+    # O mesmo arquivo e o stderr do proximo servidor: sem voltar ao fim, ele sobrescreve daqui.
+    erros.seek(0, os.SEEK_END)
     print(f"hangar-codex-tui: o app-server saiu com codigo {servidor.returncode} antes de "
           f"abrir {endpoint}" + (f":\n{cauda}" if cauda else ""), file=sys.stderr)
 
@@ -377,16 +379,19 @@ def main() -> int:
         # o pane; o backend se religa pelo pid novo do sidecar.
         quedas: list[float] = []
         while tui.poll() is None:
-            if servidor.poll() is not None:
+            if servidor.poll() is not None and not desisti:
                 quedas = [t for t in quedas if time.monotonic() - t < 300] + [time.monotonic()]
                 if len(quedas) > _QUEDAS_MAX:
                     print("hangar-codex-tui: app-server caindo em laço; desisto de ressubir",
                           file=sys.stderr)
-                    break
+                    desisti = True
+                    continue
                 _avisar_servidor_morto(endpoint, servidor, erros)
                 servidor = subir_servidor()
                 if not _esperar_porta(endpoint, servidor, erros, _ESPERA_THREAD):
-                    break
+                    # Vivo sem porta enganaria o `poll()` acima; morto, conta como queda.
+                    servidor.kill()
+                    continue
                 codex_sessions.update_app_pid(args.name, servidor.pid)
                 print(f"hangar-codex-tui: app-server ressubido em {endpoint}", file=sys.stderr)
             time.sleep(0.5)
@@ -402,9 +407,12 @@ def main() -> int:
         # lia um arquivo ja fechado, ou gravava um sidecar apontando pro servidor que acabou de
         # morrer: sessao fantasma que nada limpa depois.
         if escuta is not None:
+        desisti = False
             escuta.join(timeout=5)
         erros.close()
         # So apaga o sidecar que e NOSSO: uma sessao recriada com o mesmo nome ja teria reescrito o
+                    # A TUI fica: o pane ainda mostra o scrollback e este aviso. Matar a TUI
+                    # apagaria a sessao inteira da tela por causa do servidor.
         # arquivo, e apagar o dela deixaria a sessao viva invisivel pro app.
         meta = codex_sessions.load(args.name)
         if meta and meta.get("app_pid") == servidor.pid:
@@ -413,3 +421,9 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+                # A escuta antiga morreu com o socket. Sem uma nova, sessao que caiu antes do
+                # primeiro thread/started nunca ganharia sidecar (update_app_pid e no-op sem ele).
+                escuta = threading.Thread(target=_espera_thread,
+                                          args=(endpoint, cwd, servidor, erros, salvar),
+                                          daemon=True)
+                escuta.start()
