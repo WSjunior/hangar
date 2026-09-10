@@ -937,8 +937,12 @@ if ($precisa -and (Baixar-Dist)) {
         # link criado por instalacao na raiz), e SELETIVO: o app nativo tambem e workspace — precisa
         # ser, senao o EAS Build nao detecta o monorepo —, e sem os dois --workspace isto baixaria o
         # toolchain do React Native na maquina de quem so quer usar o Hangar.
+        # Mesmo array do passo de build abaixo, que so existe naquele ramo: usar `@quieto` aqui sem
+        # definir estourava "variavel nao definida" (StrictMode) no npm.ps1, com o dist ja baixado.
+        $quietoDeps = @()
+        if (-not $Update) { $quietoDeps = @('--silent') }
         Push-Location $raiz
-        try { npm ci --workspace=@hangar/core --workspace=frontend @quieto; $rcDeps = $LASTEXITCODE } finally { Pop-Location; $ErrorActionPreference = $eapAnt2 }
+        try { npm ci --workspace=@hangar/core --workspace=frontend @quietoDeps; $rcDeps = $LASTEXITCODE } finally { Pop-Location; $ErrorActionPreference = $eapAnt2 }
         if ($rcDeps -ne 0) {
             Erro "npm ci falhou (exit $rcDeps) - o servico do frontend nao vai subir"
             Nota 'rodar na mao:  npm ci --workspace=@hangar/core --workspace=frontend   (na raiz do repositorio)'
