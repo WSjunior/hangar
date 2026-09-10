@@ -5,7 +5,8 @@ import * as Linking from 'expo-linking';
 import * as Clipboard from 'expo-clipboard';
 import { createCodexAccountForServer, prepareCodexAccountForServer, getCodexPreparationForServer,
   startCodexAccountLoginForServer, getCodexAccountLoginForServer, cancelCodexAccountLoginForServer,
-  codexAccountMessage, type Server, type CodexAccount, type CodexLoginAttempt } from '@hangar/core';
+  getCodexAccountsForServer, codexAccountMessage, contaCodexParaEntrar,
+  type Server, type CodexAccount, type CodexLoginAttempt } from '@hangar/core';
 import * as m from '../../paraglide/messages';
 
 export function CodexContaLogin({ server, accountId, onComplete }: {
@@ -38,10 +39,20 @@ export function CodexContaLogin({ server, accountId, onComplete }: {
       if (next?.status === 'waiting') timer.current = setTimeout(() => void read(s, id, g, signal), 1000);
     } catch (e) { if (g === generation.current) setError(fail(e)); }
   }
+  // "Adicionar conta" com a padrao ainda sem login = entrar NELA, sem nome nem conta extra.
+  async function entrarNaPadrao(s: Server, g: number, signal: AbortSignal) {
+    try {
+      const id = contaCodexParaEntrar(await getCodexAccountsForServer(s, signal));
+      if (g !== generation.current || !id) return;
+      setAccount(id);
+      void read(s, id, g, signal);
+    } catch { /* lista indisponivel: segue criando conta nomeada, como antes */ }
+  }
   useEffect(() => {
     const g = stop(), signal = controller.current.signal;
     setAccount(accountId); setAttempt(null); setSync(null); setBusy(false); setError(''); setName('');
     if (accountId) void read(server, accountId, g, signal);
+    else void entrarNaPadrao(server, g, signal);
     return () => { stop(); };
   }, [server.id, server.baseUrl, server.token, accountId]);
   useEffect(() => {

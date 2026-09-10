@@ -3,8 +3,8 @@
   import { serverIdentidade } from '../../lib/auth';
   import { createCodexAccountForServer, prepareCodexAccountForServer,
     getCodexPreparationForServer, startCodexAccountLoginForServer,
-    getCodexAccountLoginForServer, cancelCodexAccountLoginForServer,
-    codexAccountMessage, type Server, type CodexLoginAttempt, type CodexAccount } from '@hangar/core';
+    getCodexAccountLoginForServer, cancelCodexAccountLoginForServer, getCodexAccountsForServer,
+    codexAccountMessage, contaCodexParaEntrar, type Server, type CodexLoginAttempt, type CodexAccount } from '@hangar/core';
   import { copyText } from '../../lib/clipboard';
   import * as m from '../../paraglide/messages';
 
@@ -35,6 +35,16 @@
     if (next?.status === 'completed') oncomplete();
   }
 
+  // "Adicionar conta" com a padrao ainda sem login = entrar NELA, sem nome nem conta extra.
+  async function entrarNaPadrao(s: Server, g: number, signal: AbortSignal) {
+    try {
+      const id = contaCodexParaEntrar(await getCodexAccountsForServer(s, signal));
+      if (g !== generation || !id) return;
+      account = id;
+      void read(s, id, g, signal);
+    } catch { /* lista indisponivel: segue criando conta nomeada, como antes */ }
+  }
+
   async function read(s: Server, id: string, g: number, signal: AbortSignal) {
     try {
       const next = await getCodexAccountLoginForServer(s, id, signal);
@@ -56,6 +66,7 @@
     clearTimeout(timer);
     account = id; attempt = null; sync = null; busy = false; error = ''; name = '';
     if (id) void read(s, id, g, controller.signal);
+    else void entrarNaPadrao(s, g, controller.signal);
     return () => { ++generation; controller.abort(); clearTimeout(timer); };
   });
 

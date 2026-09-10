@@ -1,5 +1,6 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
-import { credentialAuth, credentialGroup, codexAccountMessage, type Credencial } from './credenciais';
+import { credentialAuth, credentialGroup, codexAccountMessage, contaCodexParaEntrar,
+  type Credencial, type CodexAccount } from './credenciais';
 import { configureApi } from './apiEnv';
 import { configureLocale } from './i18n';
 import { overwriteGetLocale } from './paraglide/runtime';
@@ -134,5 +135,19 @@ describe('contas e servidor explícito', () => {
       expect(formataErro(unknown)).toBe(codexAccountMessage(unknown));
       expect(codexAccountMessage(unknown)).not.toContain(unknown.code);
     }
+  });
+});
+
+describe('contaCodexParaEntrar', () => {
+  const conta = (id: string, is_default: boolean, status: CodexAccount['auth']['status']): CodexAccount => ({
+    id, credential_id: `codex:${id}`, name: id, home: `/h/${id}`, is_default,
+    auth: { method: status === 'connected' ? 'oauth' : 'none', status, email: null, plan: null },
+    sync: { status: 'idle', trust_pending: false, issues: [] },
+  });
+  it('padrao sem login e a conta a entrar; padrao logada ou desconhecida cria adicional', () => {
+    expect(contaCodexParaEntrar([conta('default', true, 'disconnected')])).toBe('default');
+    expect(contaCodexParaEntrar([conta('default', true, 'connected'), conta('work', false, 'disconnected')])).toBeUndefined();
+    expect(contaCodexParaEntrar([conta('default', true, 'unavailable')])).toBeUndefined();
+    expect(contaCodexParaEntrar(undefined)).toBeUndefined();
   });
 });

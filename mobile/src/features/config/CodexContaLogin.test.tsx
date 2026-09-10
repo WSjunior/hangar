@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CodexContaLogin } from './CodexContaLogin';
 
 const calls = vi.hoisted(() => ({
-  create: vi.fn(), prepare: vi.fn(), start: vi.fn(), read: vi.fn(), cancel: vi.fn(),
+  create: vi.fn(), prepare: vi.fn(), start: vi.fn(), read: vi.fn(), cancel: vi.fn(), accounts: vi.fn(),
   open: vi.fn(), copy: vi.fn(), foreground: undefined as undefined | ((state: string) => void),
 }));
 const server = { id: 'b', label: 'B', baseUrl: 'https://b.local', token: 'test' };
@@ -32,11 +32,13 @@ vi.mock('@hangar/core', async original => ({
   startCodexAccountLoginForServer: calls.start,
   getCodexAccountLoginForServer: calls.read,
   cancelCodexAccountLoginForServer: calls.cancel,
+  getCodexAccountsForServer: calls.accounts,
 }));
 
 beforeEach(() => {
-  for (const call of [calls.create, calls.prepare, calls.start, calls.read, calls.cancel, calls.open, calls.copy]) call.mockReset();
+  for (const call of [calls.create, calls.prepare, calls.start, calls.read, calls.cancel, calls.accounts, calls.open, calls.copy]) call.mockReset();
   calls.foreground = undefined;
+  calls.accounts.mockResolvedValue([]);
   calls.prepare.mockResolvedValue(ready);
   calls.read.mockResolvedValue(null);
   calls.open.mockResolvedValue(true);
@@ -120,6 +122,19 @@ describe('CodexContaLogin', () => {
       await click(container, 'Entrar');
       expect(calls.start).not.toHaveBeenCalled();
       expect(container.textContent).toContain('prepare failed');
+    } finally { await act(async () => root.unmount()); }
+  });
+
+  it('sem conta informada e a padrao sem login, entra na padrao em vez de criar outra', async () => {
+    const { container, root } = render();
+    calls.accounts.mockResolvedValue([{ id: 'default', is_default: true, auth: { method: 'none', status: 'disconnected' } }]);
+    calls.start.mockResolvedValue({ ...attempt, account_id: 'default' });
+    try {
+      await act(async () => root.render(createElement(CodexContaLogin, { server, onComplete: vi.fn() })));
+      expect(container.querySelector('textarea')).toBeNull();
+      await click(container, 'Entrar');
+      expect(calls.create).not.toHaveBeenCalled();
+      expect(calls.start).toHaveBeenCalledWith(server, 'default');
     } finally { await act(async () => root.unmount()); }
   });
 

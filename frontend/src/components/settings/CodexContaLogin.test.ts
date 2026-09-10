@@ -11,6 +11,7 @@ vi.mock('@hangar/core', async (original) => ({
   createCodexAccountForServer: vi.fn(), prepareCodexAccountForServer: vi.fn(),
   getCodexPreparationForServer: vi.fn(), startCodexAccountLoginForServer: vi.fn(),
   getCodexAccountLoginForServer: vi.fn(), cancelCodexAccountLoginForServer: vi.fn(),
+  getCodexAccountsForServer: vi.fn(),
 }));
 const A = { id: 'A', label: 'A', baseUrl: 'https://a.test', token: 'a' };
 const B = { id: 'B', label: 'B', baseUrl: 'https://b.test', token: 'b' };
@@ -31,6 +32,7 @@ beforeEach(() => {
   vi.mocked(api.getCodexAccountLoginForServer).mockResolvedValue(null);
   vi.mocked(api.prepareCodexAccountForServer).mockResolvedValue(ready);
   vi.mocked(api.startCodexAccountLoginForServer).mockResolvedValue(waiting);
+  vi.mocked(api.getCodexAccountsForServer).mockResolvedValue([]);
 });
 afterEach(async () => { for (const c of components) await unmount(c); components = []; document.body.innerHTML = ''; });
 
@@ -87,6 +89,17 @@ it('cria conta nomeada e só então prepara e solicita login', async () => {
   expect(api.createCodexAccountForServer).toHaveBeenCalledWith(B, 'work');
   expect(api.prepareCodexAccountForServer).toHaveBeenCalledWith(B, 'work');
   expect(api.startCodexAccountLoginForServer).toHaveBeenCalledWith(B, 'work');
+});
+
+it('sem conta informada e a padrão sem login, entra na padrão em vez de criar outra', async () => {
+  vi.mocked(api.getCodexAccountsForServer).mockResolvedValue([
+    { id: 'default', is_default: true, auth: { method: 'none', status: 'disconnected' } } as api.CodexAccount]);
+  const target = document.body.appendChild(document.createElement('div'));
+  components.push(mount(Login, { target, props: { server: B, oncomplete: vi.fn() } })); await flush();
+  expect(document.querySelector('input')).toBeNull();
+  button(m.contas_entrar()).click(); await flush();
+  expect(api.createCodexAccountForServer).not.toHaveBeenCalled();
+  expect(api.startCodexAccountLoginForServer).toHaveBeenCalledWith(B, 'default');
 });
 
 it('recusa link não HTTPS e expõe erro de consulta', async () => {

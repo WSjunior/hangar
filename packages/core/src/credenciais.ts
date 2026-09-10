@@ -54,6 +54,15 @@ export function credentialGroup(c: Credencial): 'subscription' | 'claude_engine'
   return 'unknown';
 }
 
+/**
+ * Conta que o "adicionar conta Codex" deve logar. A padrao (~/.codex) sem login e a primeira
+ * conta da maquina: criar uma adicional ali deixaria a padrao vazia e copiaria dela o nada.
+ */
+export function contaCodexParaEntrar(accounts: CodexAccount[] | undefined): 'default' | undefined {
+  const padrao = accounts?.find((a) => a.is_default);
+  return padrao?.auth.status === 'disconnected' ? 'default' : undefined;
+}
+
 export function codexAccountMessage(issue: { code: string; params?: Record<string, string> }): string {
   return mensagemDeErro(issue.code, issue.params) ?? m.codex_account_error_unknown();
 }
