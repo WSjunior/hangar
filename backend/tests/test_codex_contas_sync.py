@@ -6,6 +6,7 @@ import copy
 import asyncio
 import json
 import re
+import shutil
 import tomllib
 from pathlib import Path
 
@@ -608,6 +609,7 @@ async def test_invalid_manifest_blocks_preparation_and_preserves_destination(iso
     assert tomllib.loads((account.home / "config.toml").read_text())["model"] == "local"
 
 
+@pytest.mark.skipif(not shutil.which("codex"), reason="usa o `codex config` real; o CI nao o instala")
 async def test_preparation_uses_native_writer_in_temporary_codex_home(isolated, monkeypatch):
     _, source, account = isolated
     _config(source / "config.toml", model="high")
