@@ -153,6 +153,8 @@ async def test_servidor_removido_da_fonte_com_enabled_particular_sai_inteiro(tmp
     depois = await service.reconciliar()
     assert depois["estado"] in ("ok", "parcial"), depois
     assert "local-probe" not in tomllib.loads(cfg.read_text()).get("mcp_servers", {})
+    # A entrada foi removida: um aviso de "campos particulares preservados" mentiria.
+    assert not any(a.get("codigo") == "aviso_config_campos_particulares" for a in depois.get("avisos", [])), depois["avisos"]
 
 
 @pytest.mark.integration

@@ -463,15 +463,23 @@ class IntegracaoCodex:
                         confiaveis=(historico or {}).get(secao, set()),
                     )
                     manifestos[secao] = manifesto
-                    avisos.extend(pendencias)
                     if secao == "mcp_servers":
-                        # Servidor que saiu da fonte deixa so os campos particulares (um `enabled`
+                        # Servidor que SAIU da fonte deixa so os campos particulares (um `enabled`
                         # solto) depois de tirar o transporte gerenciado; o Codex recusa a tabela
                         # inteira ("invalid transport") e a integracao parava. Sem `command`/`url`
-                        # nao ha servidor: a entrada sai.
-                        for nome in [n for n, v in novo.items()
-                                     if isinstance(v, dict) and not (v.get("command") or v.get("url"))]:
+                        # nao ha servidor: a entrada sai, e o aviso de "campos preservados" com ela.
+                        # So as entradas que esta reconciliacao gerenciava; tabela alheia sem
+                        # transporte e problema do dono dela, nao deste passo.
+                        sem_servidor = [
+                            n for n in registro.get(secao, {})
+                            if n not in valores and isinstance(novo.get(n), dict)
+                            and not (novo[n].get("command") or novo[n].get("url"))
+                        ]
+                        for nome in sem_servidor:
                             novo.pop(nome)
+                        pendencias = [p for p in pendencias
+                                      if getattr(p, "params", {}).get("nome") not in sem_servidor]
+                    avisos.extend(pendencias)
                     for nome in sorted(set(antes) | set(novo)):
                         if antes.get(nome) != novo.get(nome):
                             edits.append({"keyPath": _chave(secao, nome), "value": novo.get(nome), "mergeStrategy": "replace"})
