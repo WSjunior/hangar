@@ -808,7 +808,7 @@
     const request = ++claudePlanGeneration;
     claudePlanDiscoveryLoading = true;
     claudePlanDiscoveryError = '';
-    getSessionPlanPreview(sessionName)
+    getSessionPlanPreview(sessionName, false)
       .then((value) => {
         if (request !== claudePlanGeneration) return;
         claudePlanDiscovery = value as ClaudePlanDiscovery | null;

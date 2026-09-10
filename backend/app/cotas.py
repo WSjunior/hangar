@@ -454,8 +454,8 @@ def _tem_credencial_codex(home: Path | str | None = None) -> bool:
         return True
     # A identidade do keyring tem TTL próprio, independente da assinatura do arquivo.
     identidade = _identidade_codex(auth_path.parent)
-    return not (identidade and identidade.get("method") in {"none", "api_key"}
-                and identidade.get("status") in {"disconnected", "connected"})
+    return bool(identidade and identidade.get("method") == "oauth"
+                and identidade.get("status") == "connected")
 
 
 def id_conta_codex(home: Path | str | None = None) -> str | None:

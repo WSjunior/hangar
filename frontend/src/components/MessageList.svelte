@@ -340,6 +340,16 @@
     return base;
   });
 
+  const planAnchored = $derived.by(() => {
+    const id = plan?.eventId;
+    if (!id) return false;
+    return renderItems.some((item) => item.type === 'group'
+      ? item.tools.some((tool) => tool.id === id)
+      : (item.type === 'event' || item.type === 'tool')
+        && item.id === id
+        && (item.ev.kind === 'tool_use' || (item.ev.kind === 'assistant_msg' && !!item.ev.text)));
+  });
+
   // Claude trabalhando? -> msgs da fila durável (id "queued-") ficam atenuadas (= na fila).
   const working = $derived(stateEvent?.state === 'working');
 
@@ -484,7 +494,7 @@
       {/if}
     {/each}
 
-    {#if plan?.provider === 'claude' && !plan.eventId && (plan.discoveryLoading || plan.discoveryError)}
+    {#if plan?.provider === 'claude' && !planAnchored}
       <SessionPlanPreview {...planoProps()} />
     {/if}
 

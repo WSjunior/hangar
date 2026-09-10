@@ -1690,6 +1690,7 @@
   "arquivo_carregar_erro": "Erro ao carregar o arquivo",
   "arquivo_pasta_erro": "Erro ao abrir a pasta",
   "arquivo_conversa_erro": "Erro ao abrir a conversa",
+  "arquivo_conversa_conta_ambigua": "Esta conversa existe em mais de uma conta Codex. Volte e escolha a conta na lista.",
   "arquivo_retomar_erro": "Erro ao retomar a conversa",
   "arquivo_motor_escolha": "A escolha é sua — o app não sabe qual motor rodava esta conversa.",
   "arquivo_retomando": "Retomando…",

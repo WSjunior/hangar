@@ -230,8 +230,8 @@ it('Claude redescobre no fim de cada turno e ancora o cartão no plano novo', as
   vi.mocked(api.getHistory).mockResolvedValueOnce([]);
   vi.mocked(api.getSessionPlanPreview)
     .mockResolvedValueOnce(null)
-    .mockResolvedValueOnce({ name: 'primeiro', path: '/p/primeiro.md', markdown: '# Primeiro', anchor_id: 'a-plan-1' } as unknown as Awaited<ReturnType<typeof api.getSessionPlanPreview>>)
-    .mockResolvedValueOnce({ name: 'segundo', path: '/p/segundo.md', markdown: '# Segundo', anchor_id: 'a-plan-2' } as unknown as Awaited<ReturnType<typeof api.getSessionPlanPreview>>);
+    .mockResolvedValueOnce({ name: 'primeiro', path: '/p/primeiro.md', anchor_id: 'a-plan-1' } as unknown as Awaited<ReturnType<typeof api.getSessionPlanPreview>>)
+    .mockResolvedValueOnce({ name: 'segundo', path: '/p/segundo.md', anchor_id: 'a-plan-2' } as unknown as Awaited<ReturnType<typeof api.getSessionPlanPreview>>);
   await montarClaude();
   expect(api.getSessionPlanPreview).toHaveBeenCalledTimes(1);
 
@@ -243,7 +243,7 @@ it('Claude redescobre no fim de cada turno e ancora o cartão no plano novo', as
   expect(api.getSessionPlanPreview).toHaveBeenCalledTimes(2);
   await emit('message', { id: 'a-old', kind: 'assistant_msg', text: 'Resposta anterior.', ts: 1 });
   await emit('message', { id: 'a-plan-1', kind: 'assistant_msg', text: 'Plano primeiro.', ts: 2 });
-  expect(document.querySelector('.plan-name')?.textContent).toBe('Primeiro');
+  expect(document.querySelector('.plan-name')?.textContent).toBe(m.chat_plan_proposto());
   const anterior = [...document.querySelectorAll<HTMLElement>('.assistant-msg')]
     .find((el) => el.textContent?.includes('Resposta anterior.'));
   expect(anterior?.nextElementSibling?.classList.contains('plan-preview')).toBe(false);
@@ -256,4 +256,31 @@ it('Claude redescobre no fim de cada turno e ancora o cartão no plano novo', as
   const segunda = respostas.find((el) => el.textContent?.includes('Plano segundo.'));
   expect(segunda?.nextElementSibling?.classList.contains('plan-preview')).toBe(true);
   expect(document.body.textContent).not.toContain('Resposta anterior.Plano');
+});
+
+it('Claude mantém o cartão visível sem âncora e quando a âncora sai da janela', async () => {
+  harness.provider = 'claude';
+  const history = Array.from({ length: 121 }, (_, i) => ({
+    id: i === 0 ? 'a-plan-old' : `a-${i}`,
+    kind: 'assistant_msg' as const,
+    text: i === 0 ? 'Plano antigo.' : `Resposta ${i}.`,
+    ts: i,
+  }));
+  vi.mocked(api.getHistory).mockResolvedValueOnce(history);
+  vi.mocked(api.getSessionPlanPreview).mockResolvedValueOnce({
+    name: 'plano', path: '/p/plano.md', anchor_id: 'a-plan-old',
+  } as unknown as Awaited<ReturnType<typeof api.getSessionPlanPreview>>);
+
+  await montarClaude();
+
+  expect(document.querySelectorAll('.plan-preview')).toHaveLength(1);
+  expect(api.getSessionPlanPreview).toHaveBeenCalledWith('codex-flow', false);
+
+  vi.mocked(api.getSessionPlanPreview).mockResolvedValueOnce({
+    name: 'plano', path: '/p/plano.md', anchor_id: null,
+  } as unknown as Awaited<ReturnType<typeof api.getSessionPlanPreview>>);
+  await emit('state', { session: 'codex-flow', state: 'working' });
+  await emit('state', { session: 'codex-flow', state: 'idle' });
+
+  expect(document.querySelectorAll('.plan-preview')).toHaveLength(1);
 });

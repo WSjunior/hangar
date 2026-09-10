@@ -38,7 +38,7 @@ export default function Contas() {
     setLoading(true);
     void Promise.all([
       getCodexAccountsForServer(target, nextController.signal),
-      getCredentialsForServer(target),
+      getCredentialsForServer(target, false, nextController.signal),
     ])
       .then(([next, nextCredentials]) => {
         if (generationNow !== generation.current || nextController.signal.aborted) return;

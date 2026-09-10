@@ -51,10 +51,13 @@ import { intlLocale } from '../lib/locale';
   let activeServerId = $state(getActiveId());
   function pickServer(id: string) {
     if (id === activeServerId) return;
+    motorSeq++;
     selectServer(id);
     activeServerId = id;
     folder = null;      // volta pro nivel de pastas do servidor novo
     selected = null;
+    loadingChat = false;
+    resuming = false;
     load();
   }
 
@@ -71,6 +74,10 @@ import { intlLocale } from '../lib/locale';
   }
   $effect(() => {
     if (deepLink) {
+      motorSeq++;
+      selected = null;
+      loadingChat = false;
+      resuming = false;
       // Aponta pro servidor dono ANTES de qualquer fetch (apiFetch le o ativo na hora da chamada),
       // carrega as pastas por baixo (pro "voltar" da conversa cair na lista) e abre a conversa direto.
       selectServer(deepLink.serverId);
@@ -81,7 +88,7 @@ import { intlLocale } from '../lib/locale';
         if (deepLink !== link || activeServerId !== link.serverId) return;
         const matches = items.filter((item) => item.session_id === link.sessionId);
         if (matches.length === 1) void openConversation(matches[0]);
-        else error = matches.length > 1 ? m.codex_account_ambiguous_rollout() : m.arquivo_conversa_erro();
+        else error = matches.length > 1 ? m.arquivo_conversa_conta_ambigua() : m.arquivo_conversa_erro();
       }).catch(() => {
         if (deepLink === link && activeServerId === link.serverId) error = m.arquivo_conversa_erro();
       });
@@ -126,7 +133,7 @@ import { intlLocale } from '../lib/locale';
       error = m.arquivo_conversa_erro();
       selected = null;
     } finally {
-      if (seq === motorSeq && activeServerId === server?.id) loadingChat = false;
+      if (seq === motorSeq) loadingChat = false;
     }
   }
 
@@ -152,7 +159,7 @@ import { intlLocale } from '../lib/locale';
       if (selected !== entry || activeServerId !== server?.id) return;
       resumeError = e instanceof Error ? e.message : m.arquivo_retomar_erro();
     } finally {
-      if (selected === entry && activeServerId === server?.id) resuming = false;
+      resuming = false;
     }
   }
 

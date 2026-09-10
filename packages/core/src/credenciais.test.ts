@@ -32,6 +32,18 @@ describe('autenticação explícita', () => {
 });
 
 describe('contas e servidor explícito', () => {
+  it('propaga o cancelamento ao carregar credenciais de outro servidor', async () => {
+    const controller = new AbortController();
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json([]));
+
+    await getCredentialsForServer(server, false, controller.signal);
+
+    const signal = fetcher.mock.calls[0][1]?.signal;
+    expect(signal?.aborted).toBe(false);
+    controller.abort();
+    expect(signal?.aborted).toBe(true);
+  });
+
   it('serializa todos os endpoints com token B e prazo', async () => {
     const fetcher = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json({}));
     await getCredentialsForServer(server, true);

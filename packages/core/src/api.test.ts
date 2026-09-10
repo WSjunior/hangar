@@ -368,6 +368,12 @@ describe('formataErro (Task 11 round 2: envelopes nos helpers de envio e avisos 
     expect(formataErro(e)).toBe('texto legado cru');
   });
 
+  it('code futuro de conta Codex também preserva o texto do backend', () => {
+    overwriteGetLocale(() => 'en');
+    const e = { code: 'codex_account_future', params: {}, msg: 'readable server message' };
+    expect(formataErro(e)).toBe('readable server message');
+  });
+
   it('erro aninhado em params.erro traduz pelo contrato (fallback do /answer)', () => {
     overwriteGetLocale(() => 'en');
     const interno = { code: 'erro_fila_nao_entregue', params: {}, msg: 'fila indisponivel' };

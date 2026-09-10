@@ -96,3 +96,14 @@ it('recusa link não HTTPS e expõe erro de consulta', async () => {
   vi.mocked(api.getCodexAccountLoginForServer).mockRejectedValue(new Error(m.codex_ui_login_error()));
   setup(); await flush(); expect(document.body.textContent).toContain(m.codex_ui_login_error());
 });
+
+it('consulta de novo ao voltar para a aba durante um login', async () => {
+  vi.mocked(api.getCodexAccountLoginForServer).mockResolvedValue(waiting);
+  setup(); await flush();
+  vi.mocked(api.getCodexAccountLoginForServer).mockClear();
+
+  document.dispatchEvent(new Event('visibilitychange'));
+  await flush();
+
+  expect(api.getCodexAccountLoginForServer).toHaveBeenCalledExactlyOnceWith(B, 'default', expect.any(AbortSignal));
+});

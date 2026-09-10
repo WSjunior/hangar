@@ -85,7 +85,7 @@ describe('contas Codex', () => {
     await act(async () => Promise.resolve());
 
     expect(calls.list).toHaveBeenCalledWith(server, expect.any(AbortSignal));
-    expect(calls.credentials).toHaveBeenCalledWith(server);
+    expect(calls.credentials).toHaveBeenCalledWith(server, false, expect.any(AbortSignal));
     expect(container.textContent).toContain('Servidor B');
     expect((container.textContent?.match(/Trabalho/g) ?? []).length).toBe(1);
     expect(container.textContent).not.toContain('Codex OAuth');

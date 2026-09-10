@@ -706,8 +706,8 @@ export function modelOptionsForServer(server: Server, provider: string, engine?:
   return apiFetchForServer(server, modelOptionsPath(provider, engine, configDir, codexAccount), { signal: comTeto(signal, 8000) });
 }
 
-export function getCredentialsForServer(server: Server, force = false): Promise<Credencial[]> {
-  return apiFetchForServer(server, `/api/credenciais${force ? '?forcar=true' : ''}`);
+export function getCredentialsForServer(server: Server, force = false, signal?: AbortSignal): Promise<Credencial[]> {
+  return apiFetchForServer(server, `/api/credenciais${force ? '?forcar=true' : ''}`, { signal: comTeto(signal, 8000) });
 }
 export function listarCredenciais(server: Server | null, force = false): Promise<Credencial[]> {
   return server ? getCredentialsForServer(server, force) : apiFetch(`/api/credenciais${force ? '?forcar=true' : ''}`);

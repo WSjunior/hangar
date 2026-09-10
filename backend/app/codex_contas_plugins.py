@@ -477,8 +477,8 @@ async def sync_plugins(source: Account, target: Account, previous: dict) -> dict
         return {"manifest": manifest, "issues": [_issue("codex_account_source_destination_conflict")],
                 "trust_pending": False}
     try:
-        source_native = _NATIVO(Path.home(), source.home)
-        target_native = _NATIVO(Path.home(), target.home)
+        source_native = _NATIVO(Path.home(), source.home, account=source)
+        target_native = _NATIVO(Path.home(), target.home, account=target)
         source_items = _plugins(await source_native.plugins_instalados())
         target_items = _plugins(await target_native.plugins_instalados())
         source_markets = _marketplace_map(await _marketplaces(source_native))

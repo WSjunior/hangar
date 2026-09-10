@@ -47,8 +47,9 @@ export function formataErro(e: unknown): string | undefined {
   if (e && typeof e === 'object' && typeof (e as EnvelopeErro).code === 'string') {
     const env = e as EnvelopeErro;
     return mensagemDeErro(env.code, env.params ?? {})
+      ?? env.msg
       ?? (env.code.startsWith('codex_account_') || env.code.startsWith('codex_login_')
-        ? m.codex_account_error_unknown() : env.msg ?? env.code);
+        ? m.codex_account_error_unknown() : env.code);
   }
   return undefined;
 }

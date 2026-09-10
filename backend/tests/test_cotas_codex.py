@@ -151,6 +151,16 @@ def test_sem_credencial_no_disco_nem_pergunta(monkeypatch, tmp_path):
     assert cotas._ler_codex() == ("sem_credencial", [], None)
 
 
+def test_sem_auth_json_e_sem_identidade_cacheada_nao_abre_app_server(monkeypatch, tmp_path):
+    _home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cotas, "_codex_auth_cache", None)
+    monkeypatch.setattr(cotas.codex_appserver, "perguntar",
+                        lambda method, **kwargs: pytest.fail("nao podia consultar cota sem credencial"))
+
+    assert cotas._tem_credencial_codex() is False
+    assert cotas._ler_codex() == ("sem_credencial", [], None)
+
+
 def test_o_id_da_conta_e_o_mesmo_da_fonte(monkeypatch, tmp_path):
     """A pílula do topo procura no `/api/cotas` a linha do `conta` da sessão. Ids diferentes nos
     dois lugares fariam ela cair no pior-geral numa sessão cuja cota o app sabe ler."""

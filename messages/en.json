@@ -1690,6 +1690,7 @@
   "arquivo_carregar_erro": "Error loading the file",
   "arquivo_pasta_erro": "Error opening the folder",
   "arquivo_conversa_erro": "Error opening the conversation",
+  "arquivo_conversa_conta_ambigua": "This conversation exists in more than one Codex account. Go back and select the account from the list.",
   "arquivo_retomar_erro": "Error resuming the conversation",
   "arquivo_motor_escolha": "It's your call — the app doesn't know which engine ran this conversation.",
   "arquivo_retomando": "Resuming…",

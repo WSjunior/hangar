@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { serverIdentidade } from '../../lib/auth';
   import { createCodexAccountForServer, prepareCodexAccountForServer,
     getCodexPreparationForServer, startCodexAccountLoginForServer,
@@ -57,6 +57,19 @@
     account = id; attempt = null; sync = null; busy = false; error = ''; name = '';
     if (id) void read(s, id, g, controller.signal);
     return () => { ++generation; controller.abort(); clearTimeout(timer); };
+  });
+
+  onMount(() => {
+    const resume = () => {
+      if (document.visibilityState !== 'visible' || !account || busy || attempt?.status !== 'waiting') return;
+      const g = ++generation;
+      controller.abort();
+      controller = new AbortController();
+      clearTimeout(timer);
+      void read(server, account, g, controller.signal);
+    };
+    document.addEventListener('visibilitychange', resume);
+    return () => document.removeEventListener('visibilitychange', resume);
   });
 
   async function start() {

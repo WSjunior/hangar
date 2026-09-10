@@ -80,10 +80,12 @@ def _entry(marketplace: Path, *, enabled: bool = True, version: str = "1.0.0") -
 class FakeNative:
     states: dict[str, dict] = {}
     calls: list[tuple[str, str, object]] = []
+    accounts: list[object | None] = []
 
     def __init__(self, home: Path, codex_home: Path, binario: str = "codex", **kwargs):
         self.home = Path(home)
         self.codex_home = Path(codex_home)
+        self.accounts.append(kwargs.get("account"))
         self.state = self.states.setdefault(str(self.codex_home), {"plugins": [], "marketplaces": []})
 
     async def plugins_instalados(self) -> list[dict]:
@@ -183,6 +185,7 @@ def fake_native(monkeypatch, contas):
     from app import codex_contas_plugins as module
     FakeNative.states = {}
     FakeNative.calls = []
+    FakeNative.accounts = []
     _, source, target, _ = contas
     FakeNative.states[str(source.home)] = {"plugins": [], "marketplaces": []}
     FakeNative.states[str(target.home)] = {"plugins": [], "marketplaces": []}
@@ -213,6 +216,14 @@ def fake_native(monkeypatch, contas):
 
     monkeypatch.setattr(module, "editar_config", edit_config)
     return FakeNative
+
+
+async def test_cli_nativo_recebe_a_conta_para_isolar_o_ambiente(contas, fake_native):
+    _, source, target, _ = contas
+
+    await sync_plugins(source, target, {})
+
+    assert FakeNative.accounts[:2] == [source, target]
 
 
 async def test_instala_somente_plugins_da_fonte_e_preserva_exclusivos(contas, fake_native):
