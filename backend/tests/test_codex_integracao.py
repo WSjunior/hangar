@@ -138,6 +138,25 @@ async def test_nativo_reaplica_mcp_e_agente_sem_alterar_exclusivos(tmp_path):
 
 @pytest.mark.integration
 @real_codex
+async def test_servidor_removido_da_fonte_com_enabled_particular_sai_inteiro(tmp_path):
+    # Medido: o servidor sai do Claude, o Codex fica com `enabled = false` (campo particular) e
+    # sem transporte -> `config/batchWrite` recusa a tabela ("invalid transport") e a integracao
+    # inteira parava em erro. Sem command/url nao ha servidor: a entrada tem que sumir.
+    home = _home(tmp_path)
+    (home / ".claude.json").write_text(json.dumps({"mcpServers": {"local-probe": {"command": "echo", "args": ["primeiro"]}}}))
+    cfg = home / ".codex/config.toml"
+    service = IntegracaoCodex(home, home / ".codex")
+    assert (await service.reconciliar())["estado"] == "ok"
+    cfg.write_text(cfg.read_text().replace('[mcp_servers.local-probe]\n', '[mcp_servers.local-probe]\nenabled = false\n'))
+    assert tomllib.loads(cfg.read_text())["mcp_servers"]["local-probe"]["enabled"] is False
+    (home / ".claude.json").write_text(json.dumps({"mcpServers": {}}))
+    depois = await service.reconciliar()
+    assert depois["estado"] in ("ok", "parcial"), depois
+    assert "local-probe" not in tomllib.loads(cfg.read_text()).get("mcp_servers", {})
+
+
+@pytest.mark.integration
+@real_codex
 async def test_adota_importacao_nativa_anterior_remove_gerenciados_preserva_colisao(tmp_path):
     from app.codex_importador import CodexNativo
     home = _home(tmp_path)

@@ -464,6 +464,14 @@ class IntegracaoCodex:
                     )
                     manifestos[secao] = manifesto
                     avisos.extend(pendencias)
+                    if secao == "mcp_servers":
+                        # Servidor que saiu da fonte deixa so os campos particulares (um `enabled`
+                        # solto) depois de tirar o transporte gerenciado; o Codex recusa a tabela
+                        # inteira ("invalid transport") e a integracao parava. Sem `command`/`url`
+                        # nao ha servidor: a entrada sai.
+                        for nome in [n for n, v in novo.items()
+                                     if isinstance(v, dict) and not (v.get("command") or v.get("url"))]:
+                            novo.pop(nome)
                     for nome in sorted(set(antes) | set(novo)):
                         if antes.get(nome) != novo.get(nome):
                             edits.append({"keyPath": _chave(secao, nome), "value": novo.get(nome), "mergeStrategy": "replace"})
