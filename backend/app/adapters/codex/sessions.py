@@ -90,7 +90,9 @@ def _write(name: str, meta: dict) -> None:
 
 def save(name: str, thread_id: str, rollout_path: str, cwd: str,
          model: str | None = None, effort: str | None = None,
-         endpoint: str | None = None, app_pid: int | None = None) -> None:
+         endpoint: str | None = None, app_pid: int | None = None,
+         codex_home: str | Path | None = None,
+         codex_account: str | None = None) -> None:
     """Grava (ou sobrescreve) o sidecar duravel da sessao Codex. Escrita ATOMICA (tmp + replace,
     mesmo padrao de PromptQueue._write_atomic em pqueue.py) -- write_text direto podia corromper
     o sidecar em crash/concorrencia no meio da escrita.
@@ -115,6 +117,10 @@ def save(name: str, thread_id: str, rollout_path: str, cwd: str,
         "endpoint": endpoint,
         "app_pid": app_pid,
     }
+    if codex_home is not None:
+        meta["codex_home"] = str(Path(codex_home).expanduser().absolute())
+    if codex_account is not None:
+        meta["codex_account"] = codex_account
     with _locked(name):
         _write(name, meta)
 
@@ -129,12 +135,6 @@ def update_model(name: str, model: str | None, effort: str | None) -> None:
             _write(name, {**meta, "model": model, "effort": effort})
 
 
-def load(name: str) -> dict | None:
-    """Le o sidecar de uma sessao (ou None se nao existe / corrompido)."""
-    try:
-        return json.loads(_path(name).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
 def update_app_pid(name: str, app_pid: int) -> None:
     """O lancador ressubiu o app-server na mesma porta: so o dono muda. No-op sem sidecar."""
     with _locked(name):
@@ -143,6 +143,12 @@ def update_app_pid(name: str, app_pid: int) -> None:
             _write(name, {**meta, "app_pid": app_pid})
 
 
+def load(name: str) -> dict | None:
+    """Le o sidecar de uma sessao (ou None se nao existe / corrompido)."""
+    try:
+        return json.loads(_path(name).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
 
 
 def delete(name: str) -> None:
@@ -193,7 +199,7 @@ def exists(name: str) -> bool:
 _MARCA_BLOCO = "# >>> hangar:"
 
 
-def pretrust_cwd(cwd: str) -> None:
+def pretrust_cwd(cwd: str, codex_home: str | Path | None = None) -> None:
     """Pre-confia a pasta no `~/.codex/config.toml`: sem isso, uma sessao criada pelo app numa
     pasta NOVA nasce presa no "Do you trust the contents of this directory?" da TUI do Codex.
 
@@ -217,7 +223,10 @@ def pretrust_cwd(cwd: str) -> None:
     # `python3` do sistema e nunca chama pretrust — ele nao pode pagar por esta dependencia.
     from app.agentes_sync import _gravar_preservando
 
-    cfg = Path.home() / ".codex" / "config.toml"
+    if codex_home is None:
+        cfg = Path.home() / ".codex" / "config.toml"
+    else:
+        cfg = Path(codex_home).expanduser().absolute() / "config.toml"
     alvo = os.path.abspath(os.path.expanduser(cwd))
     # Um create() por thread (registry.create roda em to_thread): dois nascendo juntos fariam
     # read-modify-write no MESMO arquivo e o ultimo apagaria a entrada do outro, calado. Mesmo

@@ -1,6 +1,13 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { comTeto } from './credenciais';
+import { listarCredenciais, credentialAuth } from './credenciais';
+import { listarCredenciais as coreListar, credentialAuth as coreAuth } from '@hangar/core';
+
+it('reexporta o cliente e a classificação do core', () => {
+  expect(listarCredenciais).toBe(coreListar);
+  expect(credentialAuth).toBe(coreAuth);
+});
 
 const originalAny = AbortSignal.any;
 

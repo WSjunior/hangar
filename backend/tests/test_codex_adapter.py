@@ -520,7 +520,33 @@ async def test_read_rate_limits_returns_snapshot():
     adapter.attach("sess", client, "thread-1")
     got = await adapter.read_rate_limits("sess")
     assert got == snapshot
+    assert "📅7d:42%" in adapter._status_line(adapter._sessions["sess"])
     assert ("account/rateLimits/read", {}) in client.requests
+
+
+def test_spark_quota_does_not_replace_account_quota():
+    mapped = map_state({"method": "account/rateLimits/updated", "params": {
+        "rateLimits": {"limitId": "codex_bengalfox", "primary": {
+            "usedPercent": 0, "windowDurationMins": 10080}}}})
+    assert mapped.rate_limits is None
+
+
+def test_rollout_uses_account_quota_before_latest_spark_snapshot(tmp_path):
+    path = tmp_path / "rollout.jsonl"
+    rows = [
+        {"type": "turn_context", "payload": {"model": "gpt-6-astra"}},
+        {"type": "event_msg", "payload": {"type": "token_count", "rate_limits": {
+            "limit_id": "codex", "primary": {"used_percent": 25, "window_minutes": 10080}}}},
+        {"type": "event_msg", "payload": {"type": "token_count", "rate_limits": {
+            "limit_id": "codex_bengalfox", "primary": {"used_percent": 0, "window_minutes": 300},
+            "secondary": {"used_percent": 0, "window_minutes": 10080}},
+            "info": {"last_token_usage": {"input_tokens": 42000, "output_tokens": 100},
+                     "model_context_window": 872000}}},
+    ]
+    path.write_text("\n".join(json.dumps(row) for row in rows))
+    line = codex_adapter.status_line_do_rollout(str(path))
+    assert "📅7d:25%" in line and "⚡5h" not in line
+    assert "42k" in line
 
 
 async def test_read_rate_limits_none_when_not_attached():

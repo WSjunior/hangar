@@ -8,9 +8,11 @@ import os
 
 import pytest
 from unittest.mock import patch
+from pathlib import Path
 
 from app import pair, registry
 from app import procinfo
+from app import codex_contas as codex_accounts
 from app.registry import SessionRegistry
 from app.adapters.codex import sessions as codex_sessions
 from app.adapters.codex import adapter as codex_adapter
@@ -50,7 +52,7 @@ class _FakeClient:
     async def start(self):
         self.started = True
 
-    async def start_shared(self):
+    async def start_shared(self, **kwargs):
         self.started = True
         return "ws://127.0.0.1:45123"
 
@@ -97,6 +99,21 @@ def test_create_codex_usa_o_lancador_e_nao_pre_semeia_transcript(tmp_path):
     assert "hangar-codex-tui" in comando
     assert "/tmp/proj" in comando
     assert "revise este projeto" in comando
+
+
+def test_create_codex_transporta_a_conta_secundaria_ao_lancador(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(codex_accounts, "_DEFAULT_HOME", tmp_path / ".codex")
+    account = codex_accounts.create_account("work")
+    reg = SessionRegistry(projects_dir=tmp_path)
+    with patch.object(registry.tmux, "has_session", return_value=False), \
+         patch.object(registry.shutil, "which", return_value="/usr/bin/hangar-codex-tui"), \
+         patch.object(registry.tmux, "new_session", return_value=True) as new_sess:
+        reg.create("mysess", "/tmp/proj", provider="codex", codex_account="work")
+    comando = new_sess.call_args[0][2]
+    assert "--codex-home" in comando
+    assert str(account.home) in comando
+    assert (account.home / "config.toml").exists()
 
 
 def test_create_codex_com_resume_abre_a_conversa_existente(tmp_path):
@@ -253,6 +270,38 @@ def test_rename_codex_moves_sidecar_and_live_adapter(tmp_path):
     assert adapter._sessions["new"]["client"] is fake
 
 
+def test_sidecar_preserva_codex_home_em_update_e_rename(tmp_path):
+    codex_sessions.save("one", "thread-a", "/tmp/rollout-a.jsonl", "/tmp/project",
+                        codex_home="/tmp/codex-work")
+    codex_sessions.update_model("one", "model-a", "high")
+    assert codex_sessions.load("one")["codex_home"] == "/tmp/codex-work"
+    codex_sessions.rename("one", "two")
+    assert codex_sessions.load("two")["codex_home"] == "/tmp/codex-work"
+
+
+def test_list_codex_preserva_conta_do_sidecar_sem_ler_cota(tmp_path, monkeypatch):
+    from app import cotas
+    home = tmp_path / "codex-work"
+    codex_sessions.save("cx", "thread-a", str(home / "sessions" / "rollout.jsonl"), "/tmp/a",
+                        codex_home=home)
+    monkeypatch.setattr(cotas, "id_conta_codex",
+                        lambda *args, **kwargs: pytest.fail("list nao pode ler cota"), raising=False)
+    reg = SessionRegistry(projects_dir=tmp_path)
+    with patch.object(registry.tmux, "list_panes_all", return_value={}):
+        info = next(item for item in reg.list() if item.name == "cx")
+    assert info.conta == f"codex:{home.resolve()}"
+
+
+def test_rename_avisa_lease_codex_antes_do_sidecar(tmp_path):
+    avisos = []
+    reg = SessionRegistry(projects_dir=tmp_path)
+    with patch.object(registry, "apos_renomear_codex", lambda old, new: avisos.append((old, new))), \
+         patch.object(registry.tmux, "is_hidden", return_value=False), \
+         patch.object(registry.tmux, "rename_session", return_value=True):
+        reg.rename("old", "new")
+    assert avisos == [("old", "new")]
+
+
 # --- Colisao de nome cross-provider (review Important #1) ------------------------------------
 
 def test_create_claude_rejects_existing_codex_name(tmp_path):
@@ -324,6 +373,18 @@ async def test_sem_pane_o_resume_do_desenho_antigo_ainda_recria(tmp_path):
         assert await adapter.ensure_running("cx") is fake
     assert tui.call_args.kwargs["replace"] is True
     assert [m for m, _ in fake.requests] == ["initialize", "thread/resume"]
+
+
+async def test_resume_legacy_usa_codex_home_do_sidecar(tmp_path):
+    codex_sessions.save("cx", "tid-1", "/x/rollout.jsonl", "/tmp/a",
+                        codex_home="/tmp/codex-work")
+    adapter = CodexAdapter()
+    fake = _FakeClient()
+    with patch.object(codex_adapter.tmux, "has_session", return_value=False), \
+         patch.object(codex_adapter, "AppServerClient", lambda *a, **k: fake), \
+         patch.object(codex_adapter, "ensure_tmux_tui") as tui:
+        assert await adapter.ensure_running("cx") is fake
+    assert tui.call_args.kwargs["codex_home"] == "/tmp/codex-work"
 
 
 async def test_app_server_morto_com_pane_vivo_nao_tira_a_sessao_da_lista(tmp_path):

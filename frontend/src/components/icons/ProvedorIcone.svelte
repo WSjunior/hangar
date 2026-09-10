@@ -14,7 +14,7 @@
   // Provedor é deduzido da base_url, não de um campo novo no backend: a URL é o que o usuário
   // digitou, e um campo "tipo" precisaria ser mantido em sincronia à mão.
   interface Props {
-    tipo: 'claude' | 'chave';
+    tipo: 'claude' | 'chave' | 'codex';
     baseUrl?: string | null;
     /** Fallback quando não se reconhece o provedor: as iniciais do nome exibido. */
     iniciais: string;
@@ -37,6 +37,7 @@
 
   const marca = $derived<Marca>((() => {
     if (tipo === 'claude') return 'claude';
+    if (tipo === 'codex') return 'openai';
     const u = (baseUrl ?? '').toLowerCase();
     if (u.includes('anthropic.com')) return 'claude';
     if (u.includes('opencode.ai')) return 'opencode';

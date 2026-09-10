@@ -1,10 +1,19 @@
-"""Transformações puras para importar hooks e instruções do Claude no Codex."""
+"""Transformações e compatibilidades de hooks do Claude no Codex."""
 
 from copy import deepcopy
+import json
+import os
 from pathlib import Path, PureWindowsPath
 import re
 import shlex
 import subprocess
+import sys
+from typing import Callable
+
+from app.codex_arquivos import gravar, json_bytes, json_obj, ler, transformar
+
+
+_REPO = Path(__file__).resolve().parents[2]
 
 
 INICIO_INSTRUCOES = "<!-- hangar:codex-instrucoes:start -->"
@@ -205,6 +214,61 @@ def normalizar_security_guidance(config: dict, python_bin: str, wrapper: Path, *
                     continue
                 hook["command"] = _comando([python_bin, str(wrapper), "--", command], windows=windows)
     return novo
+
+
+def adaptar_hooks_plugin(
+    raiz: Path,
+    codex_home: Path,
+    backups: Path,
+    *,
+    normalizar: Callable[[dict], dict],
+    ao_alterar: Callable[[], None],
+) -> None:
+    """Aplica compatibilidades nos hooks de um plugin já instalado no cache.
+
+    A decisão de confiança pertence ao chamador: `ao_alterar` apenas informa que o conteúdo
+    mudou, sem copiar aprovações nem marcar o hook como confiável.
+    """
+    cache = (codex_home / "plugins" / "cache").resolve()
+    raiz = raiz.resolve()
+    if not raiz.is_relative_to(cache):
+        raise ValueError("Plugin fora do cache do Codex")
+    paths = {raiz / "hooks" / "hooks.json", raiz / "hooks.json"}
+    security_guidance = False
+    for rel in (".codex-plugin/plugin.json", ".claude-plugin/plugin.json"):
+        manifest = raiz / rel
+        if not manifest.is_file():
+            continue
+        dados = json_obj(manifest)
+        security_guidance |= dados.get("name") == "security-guidance"
+        declaradas = dados.get("hooks")
+        if isinstance(declaradas, dict):
+            paths.add(manifest)
+            continue
+        refs = [declaradas] if isinstance(declaradas, str) else declaradas or []
+        if not isinstance(refs, list) or any(not isinstance(ref, str) for ref in refs):
+            raise ValueError("Referências de hooks inválidas no plugin")
+        paths.update(raiz / ref for ref in refs)
+    wrapper_json = codex_home / ".hangar-hooks" / "codex-hook-json.py"
+    if security_guidance:
+        wrapper_source = _REPO / "scripts" / "codex-hook-json.py"
+        gravar(wrapper_json, wrapper_source.read_bytes(), ler(wrapper_json), backups)
+    for path in sorted(paths):
+        if not path.is_file():
+            continue
+        if not path.resolve().is_relative_to(raiz):
+            raise ValueError("Hooks fora do plugin gerenciado")
+
+        def converter(raw):
+            data = json.loads(raw)
+            result = normalizar(data)
+            if security_guidance:
+                result = normalizar_security_guidance(
+                    result, sys.executable, wrapper_json, windows=os.name == "nt")
+            return raw if data == result else json_bytes(result)
+
+        if transformar(path, converter, backups):
+            ao_alterar()
 
 
 def remover_instrucao_de_leitura(atual: str) -> str:

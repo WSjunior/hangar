@@ -429,6 +429,20 @@ def test_origem_sem_statusline_devolve_modelo_vazio(monkeypatch):
     assert bastao.origem_resumida("/cfg/projects/p/abc.jsonl")[1] == ""
 
 
+def test_origem_resumida_preserva_conta_codex(tmp_path, monkeypatch):
+    from app import codex_contas
+    monkeypatch.setattr(__import__("pathlib").Path, "home",
+                        classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", tmp_path / ".codex")
+    work = codex_contas.create_account("work")
+    sid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    path = work.home / "sessions" / "2026" / "09" / "09"
+    path.mkdir(parents=True)
+    rollout = path / f"rollout-2026-09-09T10-00-00-{sid}.jsonl"
+    rollout.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": "/repo"}}) + "\n")
+    assert bastao.origem_resumida(str(rollout), "codex")[0] == "work"
+
+
 def test_dossie_gravado_com_o_nome_do_destino(tmp_path):
     # Só o DESTINO no nome (`<destino>.md`, sanitizado igual à fila): é o que faz o `prune` casar o
     # sidecar com uma sessão viva — nome composto ficaria órfão pra sempre.
@@ -721,6 +735,68 @@ def test_post_bastao_origem_morta_usa_origem_provider_pra_achar_o_transcript(api
     assert r.status_code == 200, r.text
     assert vistos == ["pi"]                      # archive_jsonl recebeu o provider da ORIGEM
     assert criadas[0].provider == "claude"       # a sucessora fica no provider PEDIDO, não no da origem
+
+
+def test_post_bastao_codex_herda_conta_da_origem(api_client_bastao, monkeypatch, tmp_path):
+    from app import codex_contas
+    from app.models import SessionInfo
+    import app.api as api_mod
+    monkeypatch.setattr(__import__("pathlib").Path, "home",
+                        classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", tmp_path / ".codex")
+    work = codex_contas.create_account("work")
+    sid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    path = work.home / "sessions" / "2026" / "09" / "09"
+    path.mkdir(parents=True)
+    rollout = path / f"rollout-2026-09-09T10-00-00-{sid}.jsonl"
+    rollout.write_text(json.dumps({
+        "type": "session_meta", "payload": {"cwd": str(tmp_path)},
+    }) + "\n", encoding="utf-8")
+    origem = SessionInfo(name="cx", cwd=str(tmp_path), jsonl=str(rollout), provider="codex",
+                         codex_home=str(work.home))
+    criadas = []
+
+    async def fake_create(body):
+        criadas.append(body)
+        return SessionInfo(name=body.name, cwd=body.cwd, provider=body.provider)
+
+    monkeypatch.setattr(api_mod, "create_session", fake_create)
+    monkeypatch.setattr(api_mod, "_drain_session", lambda name: None)
+    monkeypatch.setattr(api_mod, "_nome_ocupado", lambda nome: False)
+    with __import__("unittest.mock").mock.patch("app.api.registry.list", return_value=[origem]):
+        response = api_client_bastao.post(
+            "/api/sessions/cx/bastao", headers={"Authorization": "Bearer secret"},
+            json={"name": "cx2", "provider": "codex"},
+        )
+    assert response.status_code == 200, response.text
+    assert criadas[0].codex_account == "work"
+
+
+def test_post_bastao_codex_recusa_conta_sucessora_diferente(api_client_bastao, monkeypatch, tmp_path):
+    from app import codex_contas
+    from app.models import SessionInfo
+    import app.api as api_mod
+    monkeypatch.setattr(__import__("pathlib").Path, "home",
+                        classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", tmp_path / ".codex")
+    work = codex_contas.create_account("work")
+    other = codex_contas.create_account("other")
+    sid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+    path = work.home / "sessions" / "2026" / "09" / "09"
+    path.mkdir(parents=True)
+    rollout = path / f"rollout-2026-09-09T10-00-00-{sid}.jsonl"
+    rollout.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": str(tmp_path)}}) + "\n")
+    origem = SessionInfo(name="cx", cwd=str(tmp_path), jsonl=str(rollout), provider="codex",
+                         codex_home=str(work.home))
+    monkeypatch.setattr(api_mod, "create_session", lambda body: pytest.fail("nao cria"))
+    monkeypatch.setattr(api_mod, "_nome_ocupado", lambda nome: False)
+    with __import__("unittest.mock").mock.patch("app.api.registry.list", return_value=[origem]):
+        response = api_client_bastao.post(
+            "/api/sessions/cx/bastao", headers={"Authorization": "Bearer secret"},
+            json={"name": "cx2", "provider": "codex", "codex_account": other.id},
+        )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "codex_account_archive_mismatch"
 
 
 def test_get_bastao_recusa_provider_desconhecido(api_client_bastao, tmp_path, monkeypatch):

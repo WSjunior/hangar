@@ -30,6 +30,7 @@ from app.models import session_key
 from app.procinfo import pid_vivo
 from app.adapters.codex.preview import CodexPreviewSource
 from app.adapters.codex.rollout import parse_rollout_line
+from app import codex_contas
 from app import tmux
 from app.pqueue import PromptQueue
 from app.state import StateEvent
@@ -72,7 +73,9 @@ def _effort_da_thread(result: dict) -> str | None:
 
 def ensure_tmux_tui(name: str, cwd: str, thread_id: str | None, endpoint: str,
                     *, replace: bool = False, initial_prompt: str | None = None,
-                    model: str | None = None, effort: str | None = None) -> None:
+                    model: str | None = None, effort: str | None = None,
+                    codex_home: str | None = None,
+                    codex_account: str | None = None) -> None:
     """Garante uma TUI Codex anexavel no tmux, ligada ao app-server do backend.
 
     ``replace`` e usado no resume lazy apos restart do backend: uma pane antiga aponta para o
@@ -100,6 +103,35 @@ def ensure_tmux_tui(name: str, cwd: str, thread_id: str | None, endpoint: str,
         if initial_prompt:
             argv.append(initial_prompt)
     command = shlex.join(argv)
+    if codex_home:
+        path = str(Path(codex_home).expanduser().absolute())
+        if os.name == "posix":
+            prefix = ["env"]
+            secondary = codex_account not in (None, "default")
+            if codex_account is None and codex_home:
+                secondary = True
+            if secondary:
+                for key in os.environ:
+                    upper = key.upper()
+                    if (codex_contas._AUTH_ENV.fullmatch(upper)
+                            or upper in codex_contas._PROVIDER_ENV
+                            or (upper in codex_contas._RUNTIME_ENV
+                                and upper not in {"HOME", "USERPROFILE"})):
+                        prefix += ["-u", key]
+            command = shlex.join(prefix + [f"CODEX_HOME={path}", *argv])
+        else:
+            parts = [f'set "CODEX_HOME={path}"']
+            secondary = codex_account not in (None, "default")
+            if codex_account is None and codex_home:
+                secondary = True
+            if secondary:
+                parts += [f'set "{key}="' for key in os.environ
+                          if (codex_contas._AUTH_ENV.fullmatch(key.upper())
+                              or key.upper() in codex_contas._PROVIDER_ENV
+                              or (key.upper() in codex_contas._RUNTIME_ENV
+                                  and key.upper() not in {"HOME", "USERPROFILE"}))]
+            command = shlex.join(["cmd.exe", "/d", "/s", "/c",
+                                  " && ".join(parts + [command])])
     if not tmux.new_session(name, cwd, command):
         raise RuntimeError(f"nao foi possivel criar a TUI Codex no tmux: {name}")
 
@@ -151,7 +183,7 @@ def map_state(notif: dict) -> MappedState:
         # Task D: antes ignorado. Guarda o snapshot cru (primary/secondary) pro _state_stream
         # acumular por sessao -- mesmo shape de account/rateLimits/read (ver read_rate_limits).
         rate_limits = params.get("rateLimits") or {}
-        if not rate_limits:
+        if not rate_limits or rate_limits.get("limitId") not in (None, "codex"):
             return MappedState()
         return MappedState(rate_limits=rate_limits)
 
@@ -280,7 +312,7 @@ def status_line_do_rollout(path: str, now: Optional[float] = None) -> Optional[s
     de composer, a captura devolveria as duas ultimas linhas verbatim, uma segunda statusline).
     Entao a linha sai do mesmo arquivo que o chat ja le. Os campos do rollout sao snake_case; o
     `format_status_line` fala o camelCase do app-server, e a traducao mora aqui."""
-    tc = ctx = None
+    tc = ctx = limites = None
     try:
         with open(path, "rb") as fh:
             fh.seek(0, os.SEEK_END)
@@ -300,11 +332,15 @@ def status_line_do_rollout(path: str, now: Optional[float] = None) -> Optional[s
         payload = obj.get("payload")
         if not isinstance(payload, dict):
             continue
+        rates = payload.get("rate_limits")
+        if limites is None and payload.get("type") == "token_count" and isinstance(rates, dict) \
+                and rates.get("limit_id") in (None, "codex"):
+            limites = rates
         if tc is None and payload.get("type") == "token_count":
             tc = payload
         elif ctx is None and obj.get("type") == "turn_context":
             ctx = payload
-        if tc is not None and ctx is not None:
+        if tc is not None and ctx is not None and limites is not None:
             break
 
     info = (tc or {}).get("info") or {}
@@ -312,7 +348,7 @@ def status_line_do_rollout(path: str, now: Optional[float] = None) -> Optional[s
     usage = {"last": {"inputTokens": total.get("input_tokens"),
                       "outputTokens": total.get("output_tokens")},
              "modelContextWindow": info.get("model_context_window")} if total else None
-    limites = (tc or {}).get("rate_limits") or {}
+    limites = limites or {}
     janelas = {k: {"windowDurationMins": (limites.get(k) or {}).get("window_minutes"),
                    "usedPercent": (limites.get(k) or {}).get("used_percent"),
                    "resetsAt": (limites.get(k) or {}).get("resets_at")}
@@ -387,6 +423,9 @@ class CodexAdapter:
             if callable(term):
                 term()
             codex_sessions.delete(name)
+            from app import registry as registry_mod
+            if registry_mod.apos_saida_codex:
+                registry_mod.apos_saida_codex(name)
             await asyncio.to_thread(PromptQueue(name).clear)
             CodexPreviewSource._sources.pop(name, None)
             _log.info("codex tmux encerrou: cleanup automatico name=%s", name)
@@ -601,8 +640,12 @@ class CodexAdapter:
                           name)
                 return None
             client = AppServerClient()
+            home_kw = ({"codex_home": meta["codex_home"]}
+                        if meta.get("codex_home") else {})
+            if meta.get("codex_account"):
+                home_kw["codex_account"] = meta["codex_account"]
             try:
-                endpoint = await client.start_shared()
+                endpoint = await client.start_shared(**home_kw)
                 await client.request("initialize", {"clientInfo": CLIENT_INFO, "capabilities": {"experimentalApi": True}})
                 result = await client.request("thread/resume", {
                     "threadId": meta["thread_id"],
@@ -621,6 +664,7 @@ class CodexAdapter:
                 ensure_tmux_tui(
                     name, meta.get("cwd") or ".", thread_id, endpoint, replace=True,
                     model=meta.get("model"), effort=meta.get("effort"),
+                    **home_kw,
                 )
             except Exception:
                 await client.close()
@@ -748,6 +792,7 @@ class CodexAdapter:
             # proxima notification pra ver estado, contexto e limites.
             try:
                 await self.read_settings(name, include_turns=not sess.get("turn_state_known", False))
+                await self.read_rate_limits(name)
             except Exception:
                 _log.warning("codex: não foi possível atualizar os controles de %s", name)
             yield self._question_state(name, sess)
@@ -1072,7 +1117,11 @@ class CodexAdapter:
         except Exception:
             _log.exception("codex read_rate_limits: request falhou name=%s", name)
             return None
-        return result.get("rateLimits")
+        snapshot = result.get("rateLimits")
+        if snapshot and snapshot.get("limitId") in (None, "codex"):
+            # O cabeçalho usa a cota da conta, não a última cota específica de outro modelo.
+            self._sessions[name]["rate_limits"] = snapshot
+        return snapshot
 
     async def list_models(self, name: str) -> list[dict]:
         """Lista os modelos disponiveis pra sessao via `model/list` (Task C), normalizados:
@@ -1235,7 +1284,9 @@ class CodexAdapter:
     def spawn_command(self, cwd: str, session_id: str,
                       model: str | None = None, effort: str | None = None,
                       permission_mode: str | None = None,
-                      initial_prompt: str | None = None) -> list[str]:
+                      initial_prompt: str | None = None,
+                      codex_home: str | None = None,
+                      codex_account: str | None = None) -> list[str]:
         # Sessao Codex nasce como as outras: um comando no pane. O comando e o lancador, que sobe o
         # app-server e a TUI juntos (ver comando_do_lancador).
         # session_id nao entra: a identidade da conversa e o threadId, que so existe depois que a
@@ -1246,7 +1297,8 @@ class CodexAdapter:
         # (tmux.py), e sem esta chamada o Codex seria o unico provider cujo id nao passa por ela.
         from app import model_args
         model, effort = model_args.validar("codex", model, effort)
-        return comando_do_lancador(cwd, initial_prompt, model=model, effort=effort)
+        return comando_do_lancador(cwd, initial_prompt, model=model, effort=effort,
+                                   codex_home=codex_home, codex_account=codex_account)
 
     def transcript_path(self, cwd: str, session_id: str) -> str:
         # O rollout path vem do thread/start (result.thread.path), gravado no sidecar -- nao ha como

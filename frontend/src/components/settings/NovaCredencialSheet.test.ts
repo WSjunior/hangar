@@ -73,12 +73,14 @@ describe('NovaCredencialSheet — o passo "o quê"', () => {
     t.fim();
   });
 
-  it('"Conta do Claude" vai DIRETO ao nome da conta, sem passar pelo catálogo', async () => {
+  it('assinatura oferece Claude e Codex antes do nome', async () => {
     const t = montar();
     await tick();
     conectarDe(m.contas_add_conta()).click();
     await tick();
-    expect(document.body.querySelector('.nc-lista')).toBeNull();
+    expect(document.body.textContent).toContain(m.novacred_codex_nome());
+    conectarDe(m.novacred_claude_nome()).click();
+    await tick();
     expect(document.body.textContent).toContain(m.novacred_nome_conta());
     t.fim();
   });
@@ -113,15 +115,28 @@ describe('NovaCredencialSheet — o passo "o quê"', () => {
     t.fim();
   });
 
-  it('"Chave pra outro agente" mostra o catálogo COM a linha do Codex/ChatGPT', async () => {
+  it('chave preserva catálogo API sem login Codex', async () => {
     const t = montar();
     await tick();
     conectarDe(m.contas_add_chave()).click();
     await tick();
-    expect(document.body.textContent).toContain(m.novacred_codex_nome());
+    expect(document.body.textContent).not.toContain(m.novacred_codex_nome());
     // E a conta do Claude não é chave de agente nenhum.
     expect(document.body.textContent).not.toContain(m.novacred_claude_desc());
     t.fim();
+  });
+
+  it('assinatura ChatGPT abre cadastro sem URL ou segredo de API', async () => {
+    localStorage.setItem('cp_servers', JSON.stringify([{ id: 'b', label: 'B', baseUrl: 'https://b.test', token: 'b' }]));
+    localStorage.setItem('cp_active', 'b');
+    const t = montar(); await tick();
+    conectarDe(m.contas_add_conta()).click(); await tick();
+    conectarDe(m.novacred_codex_nome()).click(); await tick();
+    expect(document.body.textContent).toContain(m.codex_ui_oauth());
+    expect(document.querySelector('input[type="password"]')).toBeNull();
+    expect(document.querySelector('input[type="url"]')).toBeNull();
+    expect(document.body.textContent).toContain(m.novacred_nome_conta());
+    t.fim(); localStorage.clear();
   });
 
   it('voltar do catálogo devolve ao passo "o quê" — não fecha a folha', async () => {
@@ -149,7 +164,7 @@ describe('NovaCredencialSheet — o passo "o quê"', () => {
     document.body.querySelector<HTMLButtonElement>('.nc-voltar')!.click();
     await tick();
     expect(document.body.querySelector('.nc-lista')).not.toBeNull();
-    expect(document.body.textContent).toContain(m.novacred_codex_nome());
+    expect(document.body.textContent).toContain('Groq');
     expect(onFechar).not.toHaveBeenCalled();
     t.fim();
   });

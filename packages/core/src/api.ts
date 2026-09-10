@@ -1,5 +1,6 @@
 import { apiEnv, type EventSourceLike } from './apiEnv';
 import type { Server } from './servers';
+import type { CodexAccount, CodexLoginAttempt, Credencial } from './credenciais';
 import * as m from './paraglide/messages';
 import { localeAtual } from './i18n';
 import { mensagemDeErro, formataErro, type EnvelopeErro } from './errosApi';
@@ -139,9 +140,9 @@ async function lerErro(res: Response): Promise<{ msg: string; code?: string }> {
   try {
     const j = JSON.parse(text);
     if (j && typeof j.detail === 'string') return { msg: j.detail };
-    if (j?.detail && typeof j.detail.code === 'string') {
-      const traduzida = mensagemDeErro(j.detail.code, j.detail.params ?? {});
-      return { msg: traduzida ?? j.detail.msg ?? j.detail.code, code: j.detail.code };
+    const envelope = j?.detail ?? j;
+    if (envelope && typeof envelope.code === 'string') {
+      return { msg: formataErro(envelope)!, code: envelope.code };
     }
   } catch { /* corpo nao-JSON: cai no texto cru abaixo */ }
   // text e statusText podem os DOIS vir vazios (502 de infra sem corpo JSON, servidor HTTP/2 que
@@ -316,7 +317,7 @@ async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit)
     }
     throw e;
   }
-  if (!res.ok) throw new Error(`${res.status}: ${await errorDetail(res)}`);
+  if (!res.ok) throw Object.assign(new Error(`${res.status}: ${await errorDetail(res)}`), { status: res.status });
   return res.json() as Promise<T>;
 }
 
@@ -517,6 +518,28 @@ export function listarCotasResumo(): Promise<CotaContaResumo[]> {
   return apiFetch<CotaContaResumo[]>('/api/cotas');
 }
 
+export interface CreateSessionBody {
+  name: string;
+  cwd?: string | null;
+  config_dir?: string | null;
+  provider?: Provider;
+  engine?: string | null;
+  model?: string | null;
+  effort?: string | null;
+  permission_mode?: string | null;
+  omp_profile?: string | null;
+  codex_account?: string | null;
+}
+
+export function buildCreateSessionBody(body: CreateSessionBody): CreateSessionBody {
+  const { codex_account, ...rest } = body;
+  return rest.provider === 'codex' && codex_account ? { ...rest, codex_account } : rest;
+}
+
+export function createSessionForServer(server: Server, body: CreateSessionBody): Promise<SessionInfo> {
+  return apiFetchForServer(server, '/api/sessions', { method: 'POST', body: JSON.stringify(buildCreateSessionBody(body)) });
+}
+
 export function createSession(
   name: string,
   cwd?: string,
@@ -527,16 +550,17 @@ export function createSession(
   effort?: string | null,
   permissionMode?: string | null,
   ompProfile?: string | null,
+  codexAccount?: string | null,
 ): Promise<SessionInfo> {
   // `model`/`effort`/`permissionMode`/`ompProfile` no FIM de propósito: chamador antigo com 5 argumentos continua válido e abre
   // no padrão, byte por byte (o backend valida None = comportamento de hoje).
-  const body: Record<string, unknown> = { name, cwd, config_dir: configDir ?? null, provider, engine: engine ?? null,
-                           model: model ?? null, effort: effort ?? null };
+  const body: CreateSessionBody = { name, cwd, config_dir: configDir ?? null, provider, engine: engine ?? null,
+                           model: model ?? null, effort: effort ?? null, codex_account: codexAccount };
   if (permissionMode) body.permission_mode = permissionMode;
   if (ompProfile) body.omp_profile = ompProfile;
   return apiFetch<SessionInfo>('/api/sessions', {
     method: 'POST',
-    body: JSON.stringify(body),
+    body: JSON.stringify(buildCreateSessionBody(body)),
   });
 }
 
@@ -587,8 +611,13 @@ export function passarBastao(
     effort?: string | null;
     permission_mode?: string | null;
     omp_profile?: string | null;
+    codex_account?: string | null;
   },
+  server?: Server | null,
 ): Promise<BastaoResult> {
+  if (server) return apiFetchForServer(server, `/api/sessions/${encodeURIComponent(name)}/bastao`, {
+    method: 'POST', body: JSON.stringify(body),
+  });
   return apiFetch<BastaoResult>(`/api/sessions/${encodeURIComponent(name)}/bastao`, {
     method: 'POST',
     body: JSON.stringify(body),
@@ -659,11 +688,53 @@ export async function removerPapel(
 // a da sessão viva — sem isto a lista quente de uma conta nunca seria aproveitada na abertura.
 export async function modelOptions(
   provider: string, engine?: string | null, configDir?: string | null,
+  codexAccount?: string | null,
 ): Promise<{ kind: string; reduced: boolean; models: ModelOption[] }> {
+  return apiFetch(modelOptionsPath(provider, engine, configDir, codexAccount));
+}
+
+function modelOptionsPath(provider: string, engine?: string | null, configDir?: string | null, codexAccount?: string | null): string {
   const q = new URLSearchParams({ provider });
   if (engine) q.set('engine', engine);
   if (configDir) q.set('config_dir', configDir);
-  return apiFetch(`/api/model-options?${q}`);
+  if (provider === 'codex' && codexAccount) q.set('codex_account', codexAccount);
+  return `/api/model-options?${q}`;
+}
+
+export function modelOptionsForServer(server: Server, provider: string, engine?: string | null,
+  configDir?: string | null, codexAccount?: string | null, signal?: AbortSignal): ReturnType<typeof modelOptions> {
+  return apiFetchForServer(server, modelOptionsPath(provider, engine, configDir, codexAccount), { signal: comTeto(signal, 8000) });
+}
+
+export function getCredentialsForServer(server: Server, force = false): Promise<Credencial[]> {
+  return apiFetchForServer(server, `/api/credenciais${force ? '?forcar=true' : ''}`);
+}
+export function listarCredenciais(server: Server | null, force = false): Promise<Credencial[]> {
+  return server ? getCredentialsForServer(server, force) : apiFetch(`/api/credenciais${force ? '?forcar=true' : ''}`);
+}
+export function getCodexAccountsForServer(server: Server, signal?: AbortSignal): Promise<CodexAccount[]> {
+  return apiFetchForServer(server, '/api/codex-contas', { signal: comTeto(signal, 8000) });
+}
+export function createCodexAccountForServer(server: Server, name: string): Promise<CodexAccount> {
+  return apiFetchForServer(server, '/api/codex-contas', { method: 'POST', body: JSON.stringify({ name }) });
+}
+function codexAccountPath(id: string, action: string): string {
+  return `/api/codex-contas/${encodeURIComponent(id)}/${action}`;
+}
+export function prepareCodexAccountForServer(server: Server, id: string): Promise<CodexAccount['sync']> {
+  return apiFetchForServer(server, codexAccountPath(id, 'prepare'), { method: 'POST' });
+}
+export function getCodexPreparationForServer(server: Server, id: string, signal?: AbortSignal): Promise<CodexAccount['sync']> {
+  return apiFetchForServer(server, codexAccountPath(id, 'prepare'), { signal: comTeto(signal, 8000) });
+}
+export function startCodexAccountLoginForServer(server: Server, id: string): Promise<CodexLoginAttempt> {
+  return apiFetchForServer(server, codexAccountPath(id, 'login'), { method: 'POST' });
+}
+export function getCodexAccountLoginForServer(server: Server, id: string, signal?: AbortSignal): Promise<CodexLoginAttempt | null> {
+  return apiFetchForServer(server, codexAccountPath(id, 'login'), { signal: comTeto(signal, 8000) });
+}
+export function cancelCodexAccountLoginForServer(server: Server, id: string, attemptId: string): Promise<CodexLoginAttempt> {
+  return apiFetchForServer(server, `${codexAccountPath(id, 'login')}?attempt_id=${encodeURIComponent(attemptId)}`, { method: 'DELETE' });
 }
 
 // Cria a pasta da conta Claude no servidor. NÃO loga — o OAuth é interativo e roda dentro da
@@ -911,6 +982,8 @@ export interface ArchiveFolder {
 }
 
 export interface ArchiveEntry {
+  codex_account?: string | null;
+  codex_home?: string | null;
   project: string;
   cwd: string | null;
   session_id: string;
@@ -943,37 +1016,45 @@ export function resumeArchivedConversation(
   engine?: string | null,
   configDir?: string | null,
   provider?: string,
+  codexAccount?: string | null,
+  server?: Server | null,
 ): Promise<SessionInfo> {
-  return apiFetch<SessionInfo>(
+  const request = server ? <T>(path: string, init?: RequestInit) => apiFetchForServer<T>(server, path, init) : apiFetch;
+  return request<SessionInfo>(
     `/api/archive/${encodeURIComponent(project)}/${encodeURIComponent(sessionId)}/resume`,
     { method: 'POST', body: JSON.stringify({
-      engine: engine ?? null, config_dir: configDir ?? null, provider: provider ?? 'claude' }) },
+      engine: engine ?? null, config_dir: configDir ?? null, provider: provider ?? 'claude',
+      ...(provider === 'codex' && codexAccount ? { codex_account: codexAccount } : {}) }) },
   );
 }
 
 // Conversas retomaveis de UM cwd, na conta pedida — a lista do modal de sessao nova. Pasta sem
 // conversa devolve [], nao erro.
 export function getArchivePorCwd(cwd: string, configDir?: string | null,
-                                 provider?: string): Promise<ArchiveEntry[]> {
+                                 provider?: string, codexAccount?: string | null,
+                                 server?: Server | null, signal?: AbortSignal): Promise<ArchiveEntry[]> {
   const q = new URLSearchParams({ cwd });
   if (configDir) q.set('config_dir', configDir);
   if (provider && provider !== 'claude') q.set('provider', provider);
-  return apiFetch<ArchiveEntry[]>(`/api/archive-por-cwd?${q}`);
+  if (provider === 'codex' && codexAccount) q.set('codex_account', codexAccount);
+  const init = { signal: comTeto(signal, 8000) };
+  return server ? apiFetchForServer(server, `/api/archive-por-cwd?${q}`, init) : apiFetch(`/api/archive-por-cwd?${q}`, init);
 }
 
 // `tail` = so as N ultimas mensagens, lidas pelo fim do arquivo (previa). Sem ele, a conversa
 // inteira, como sempre.
 export function getArchiveHistory(project: string, sid: string, tail?: number,
                                   configDir?: string | null,
-                                  provider?: string): Promise<ChatEvent[]> {
+                                  provider?: string, codexAccount?: string | null,
+                                  server?: Server | null, signal?: AbortSignal): Promise<ChatEvent[]> {
   const q = new URLSearchParams();
   if (tail) q.set('tail', String(tail));
   if (configDir) q.set('config_dir', configDir);
   if (provider && provider !== 'claude') q.set('provider', provider);
-  const qs = q.toString();
-  return apiFetch<ChatEvent[]>(
-    `/api/archive/${encodeURIComponent(project)}/${encodeURIComponent(sid)}/history${qs ? `?${qs}` : ''}`,
-  );
+  if (provider === 'codex' && codexAccount) q.set('codex_account', codexAccount);
+  const path = `/api/archive/${encodeURIComponent(project)}/${encodeURIComponent(sid)}/history${q.size ? `?${q}` : ''}`;
+  const init = { signal: comTeto(signal, 8000) };
+  return server ? apiFetchForServer(server, path, init) : apiFetch(path, init);
 }
 
 // URL de imagem colada no terminal, versão arquivo (mesmo ?token das outras URLs de <img>).

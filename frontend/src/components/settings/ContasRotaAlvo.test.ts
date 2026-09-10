@@ -14,6 +14,10 @@ import { mount, unmount, tick } from 'svelte';
 import ContasSettings from './ContasSettings.svelte';
 import AcessoSettings from './AcessoSettings.svelte';
 import type { Server } from '../../lib/auth';
+import { getBaseUrl, getToken } from '../../lib/auth';
+import { configureApi } from '@hangar/core';
+import { clienteQuery } from '../../lib/queries';
+import * as m from '../../paraglide/messages';
 
 const SRV_A: Server = { id: 'srv-a', label: 'A', baseUrl: 'http://a.local:8765', token: 't-a' };
 const SRV_B: Server = { id: 'srv-b', label: 'B', baseUrl: 'http://b.local:8765', token: 't-b' };
@@ -25,9 +29,12 @@ function resposta(json: unknown) {
 const urls: string[] = [];
 
 beforeEach(() => {
+  clienteQuery.clear();
   urls.length = 0;
   localStorage.setItem('cp_servers', JSON.stringify([SRV_A, SRV_B]));
   localStorage.setItem('cp_active', 'srv-a');
+  configureApi({ getBaseUrl, getToken, origin: location.origin, onUnauthorized: vi.fn(),
+    createEventSource: () => { throw new Error('unexpected SSE'); } });
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
     urls.push(String(input));
     const u = input.toString();
@@ -53,6 +60,33 @@ function montar(componente: unknown, props?: Record<string, unknown>) {
 }
 
 describe('aba Contas fala com o servidor do ?srv=, não com o ativo', () => {
+  it('login Codex prepara e inicia com token de B enquanto A permanece ativo', async () => {
+    const calls: [string, RequestInit | undefined][] = [];
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const url = String(input); calls.push([url, init]);
+      return resposta(url.endsWith('/credenciais') ? [{
+        id: 'codex:/b/default', tipo: 'codex', codex_account: 'default', auth_method: 'none',
+        nome: 'Codex B', nome_natural: 'default', ativa: true, usos: [], login: { estado: 'ok', loggedIn: false },
+      }] : url.endsWith('/engines') ? { motores: {} }
+        : url.endsWith('/prepare') ? { status: 'ready', trust_pending: false, issues: [] }
+        : init?.method === 'POST' ? { account_id: 'default', attempt_id: 'b-attempt', status: 'waiting', user_code: 'BBB' }
+        : null);
+    });
+    const t = montar(ContasSettings, { apiTarget: SRV_B });
+    for (let i = 0; i < 12; i++) await tick();
+    [...t.el.querySelectorAll('button')].find((b) => b.textContent === m.contas_entrar())!.click();
+    for (let i = 0; i < 12; i++) await tick();
+    t.el.querySelector<HTMLButtonElement>('.codex-login button')!.click();
+    for (let i = 0; i < 15; i++) await tick();
+    const posts = calls.filter(([, init]) => init?.method === 'POST');
+    expect(posts.map(([url]) => url)).toEqual([
+      'http://b.local:8765/api/codex-contas/default/prepare',
+      'http://b.local:8765/api/codex-contas/default/login',
+    ]);
+    expect(posts.every(([, init]) => (init?.headers as Record<string, string>).Authorization === 'Bearer t-b')).toBe(true);
+    expect(localStorage.getItem('cp_active')).toBe('srv-a');
+    await unmount(t.comp);
+  });
   it('?srv=srv-b com o ativo em srv-a: a lista de Contas sai para o baseUrl de B', async () => {
     location.hash = '#/?config=contas&srv=srv-b';
     const t = montar(ContasSettings, { apiTarget: SRV_B });

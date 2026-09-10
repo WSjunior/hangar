@@ -3,6 +3,7 @@
   import { tick } from 'svelte';
   import type { Snippet } from 'svelte';
   import { planDisplayText } from '@hangar/core';
+  import SessionPlanPreview from './SessionPlanPreview.svelte';
   import * as m from '../paraglide/messages';
   import type { ChatEvent, StateEvent, AskQuestionPayload, AnswerItem } from '@hangar/core';
   import UserBubble from './UserBubble.svelte';
@@ -36,6 +37,20 @@
     sessionName: string;
     dockH: number;
     codex?: boolean;
+    plan?: {
+      eventId: string | null;
+      serverId?: string;
+      provider: string;
+      revision: string;
+      desktop: boolean;
+      codexPlan: string | null;
+      disabled: boolean;
+      onImplement: (plan: string) => Promise<void>;
+      discovery?: { name: string; path: string; markdown?: string; anchor_id?: string | null } | null;
+      discoveryLoading?: boolean;
+      discoveryError?: string;
+      onRetryDiscovery?: () => void;
+    } | null;
     footer?: Snippet;
     preview?: string;
     previewMd?: boolean;   // o texto da previa e markdown cru -> a bolha renderiza
@@ -74,9 +89,42 @@
   let {
     events, stateEvent, pending, sessionName, dockH, preview = '', previewMd = false, previewFull = false, onSelectOption, onSubmitSelected, onCancel,
     askOpen = false, askPayload = null, askActive = false, onAnswer, onAskClose, onFimDoLocal,
-    imageUrl, swapIds, codex = false, footer,
+    imageUrl, swapIds, codex = false, plan = null, footer,
     onForward, onOpenSession, onOpenOrq, ancora = 0
   }: Props = $props();
+
+  type PlanComponentProps = {
+    sessionName: string;
+    serverId?: string;
+    provider: string;
+    revision: string;
+    desktop: boolean;
+    codexPlan: string | null;
+    disabled: boolean;
+    onImplement: (plan: string) => Promise<void>;
+    discovery?: { name: string; path: string; markdown?: string; anchor_id?: string | null } | null;
+    discoveryLoading?: boolean;
+    discoveryError?: string;
+    onRetryDiscovery?: () => void;
+  };
+
+  function planoProps(): PlanComponentProps {
+    if (!plan) throw new Error('plano ausente');
+    return {
+      sessionName,
+      serverId: plan.serverId,
+      provider: plan.provider,
+      revision: plan.revision,
+      desktop: plan.desktop,
+      codexPlan: plan.codexPlan,
+      disabled: plan.disabled,
+      onImplement: plan.onImplement,
+      discovery: plan.discovery,
+      discoveryLoading: plan.discoveryLoading,
+      discoveryError: plan.discoveryError,
+      onRetryDiscovery: plan.onRetryDiscovery,
+    };
+  }
 
   let listEl: HTMLElement | undefined = $state();
   // O usuario "gruda" no fim por padrao; ao rolar pra cima, paramos de arrastar.
@@ -345,6 +393,9 @@
         <TaskRows tasks={tarefas} />
       {:else if item.type === 'group'}
         <ToolGroup tools={item.tools} {toolResults} {sessionName} animate={!histIds.has(item.tools[0].id)} />
+        {#if plan?.eventId && item.tools.some((tool) => tool.id === plan?.eventId)}
+          <SessionPlanPreview {...planoProps()} />
+        {/if}
       {:else if item.type === 'pensamento'}
         <ThinkingBlock eventos={item.eventos} />
       {:else}
@@ -421,11 +472,21 @@
         <AssistantBubble text={codex ? planDisplayText(ev.text) : ev.text} ts={ev.ts} {sessionName}
                          animate={!histIds.has(ev.id) && !swapIds?.has(ev.id)}
                          onForward={onForward ? () => onForward(ev.text ?? '') : null} />
+        {#if plan?.eventId === ev.id}
+          <SessionPlanPreview {...planoProps()} />
+        {/if}
         {:else if ev.kind === 'tool_use'}
           <ToolCard event={ev} result={toolResults.get(ev.tool_use_id ?? '') ?? null} {sessionName} animate={!histIds.has(ev.id)} />
+          {#if plan?.eventId === ev.id}
+            <SessionPlanPreview {...planoProps()} />
+          {/if}
         {/if}
       {/if}
     {/each}
+
+    {#if plan?.provider === 'claude' && !plan.eventId && (plan.discoveryLoading || plan.discoveryError)}
+      <SessionPlanPreview {...planoProps()} />
+    {/if}
 
     {#if preview}
       <AssistantBubble text={codex ? planDisplayText(preview) : preview} ts={undefined} preview md={previewMd} full={previewFull} />

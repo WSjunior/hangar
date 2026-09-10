@@ -301,6 +301,35 @@ da janela configurada e o gatilho padrão de compactação é 90%. Assim, o padr
 258.400 utilizáveis e compacta a partir de 244.800; com 872.000, são 828.400 utilizáveis e gatilho
 de 784.800. Um limite personalizado de compactação menor continua antecipando esse gatilho.
 
+### Contas Codex (ChatGPT)
+
+Para cadastrar uma conta de assinatura, abra **Configurações → Servidor → Contas e modelos →
++ Nova conta → Conta por assinatura → Conta do ChatGPT (Codex)**. Dê um nome à conta e conclua o
+login OAuth nativo por código de dispositivo: o Hangar mostra um endereço HTTPS e um código, e só
+marca o login como concluído depois da confirmação do Codex. **Chave de API** segue o caminho
+separado de cadastro de chave para provedores; ela não é login OAuth da assinatura ChatGPT.
+
+A conta padrão usa o `CODEX_HOME` atual. Cada conta adicional recebe seu próprio `CODEX_HOME` e,
+ao ser preparada, herda seletivamente preferências, referências de agentes/skills/hooks e plugins
+da conta padrão. A autenticação, o histórico, as sessões, os rollouts, os bancos locais, caches e
+o estado de confiança ficam no diretório da conta escolhida. Uma preparação parcial ou com erro
+mostra as pendências; o Hangar não aprova hooks automaticamente. Se aparecer o aviso de confiança,
+confirme os itens no próprio Codex antes de usar a conta.
+
+Os plugins continuam instalados por conta. O Hangar não liga o cache da secundária ao da padrão por
+symlink: o Codex exige que o catálogo embutido pertença ao `CODEX_HOME` atual, e compartilhar o cache
+permitiria que uma atualização numa conta alterasse o código executado pela outra.
+
+Ao criar uma sessão pelo Hangar, escolha **Codex** e a conta no campo **Conta do Codex**. A conta
+padrão vem marcada quando está disponível, mas a seleção é explícita e acompanha a criação até o
+processo do Codex. O formulário bloqueia uma conta sem login confirmado ou sem preparação pronta.
+OAuth e chave de API aparecem apenas como método de autenticação; a origem da conversa é a conta
+Codex selecionada.
+
+No **Arquivo**, a retomada usa a conta registrada nos metadados da conversa e não troca de conta
+por cota ou por conveniência. Se a origem ficar ambígua, a retomada é recusada até haver uma única
+conta identificada. Esse fluxo não apaga, rotaciona nem migra credenciais ou conversas entre contas.
+
 ### Desktop (≥820px)
 Abrindo a mesma URL num monitor largo, vira **shell de duas colunas**: sidebar de sessões +
 chat largo. O fluxo mobile fica intacto abaixo de 820px.

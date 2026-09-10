@@ -48,7 +48,7 @@ from typing import Callable, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app import apelidos, codex_appserver, contas, engines, opencode_cota, renova_token
+from app import apelidos, codex_appserver, codex_contas, contas, engines, opencode_cota, renova_token
 from app.adapters.kimi import sessions as kimi_sessions
 from app.auth import require_auth
 from app.config import list_config_dirs
@@ -388,17 +388,40 @@ def _ler_commandcode(api_key: str) -> _Leitura:
     return "lida", janelas, None
 
 
-# Presença da credencial do Codex, cacheada pelo mtime do `auth.json` (ver _tem_credencial_codex).
-_cred_codex_cache: tuple[tuple[float, ...], bool] | None = None
+# Presença da credencial do Codex, cacheada por raiz e assinatura do `auth.json`.
+_cred_codex_cache: dict[str, tuple[tuple[int, int], bool]] = {}
+_codex_auth_cache: Callable[[object], dict | None] | None = None
 
 
-def _auth_codex() -> Path:
-    """O `auth.json` do Codex. A pasta sai do `codex_appserver.home()` — `CODEX_HOME` é respeitado
-    pelo mesmo motivo do lançador: quem move a pasta move a credencial junto."""
-    return codex_appserver.home() / "auth.json"
+def registrar_codex_auth_cache(leitor: Callable[[object], dict | None] | None) -> None:
+    """Conecta a identidade pública já cacheada pelo serviço de contas, sem abrir o CLI aqui."""
+    global _codex_auth_cache
+    _codex_auth_cache = leitor
 
 
-def _tem_credencial_codex() -> bool:
+def _codex_home(home: Path | str | None = None) -> Path:
+    return (codex_contas.default_home() if home is None else Path(home)).expanduser().absolute()
+
+
+def _auth_codex(home: Path | str | None = None) -> Path:
+    """O `auth.json` da raiz Codex selecionada."""
+    return _codex_home(home) / "auth.json"
+
+
+def _identidade_codex(home: Path) -> dict | None:
+    if _codex_auth_cache is None:
+        return None
+    try:
+        raiz = home.expanduser().resolve(strict=False)
+        account = next((item for item in codex_contas.list_accounts()
+                        if item.home.expanduser().resolve(strict=False) == raiz), None)
+        result = _codex_auth_cache(account) if account is not None else None
+    except Exception:  # noqa: BLE001 - identidade cacheada não pode derrubar o leitor de cotas
+        return None
+    return result if isinstance(result, dict) else None
+
+
+def _tem_credencial_codex(home: Path | str | None = None) -> bool:
     """Par OAuth presente no disco. Sem isto não há o que perguntar — e perguntar custa um processo
     de ~1,2s, então a checagem vem antes.
 
@@ -407,20 +430,35 @@ def _tem_credencial_codex() -> bool:
     do SSE não pode pagar (o `_mtimes` sobra um `stat`).
     """
     global _cred_codex_cache
-    chave = _mtimes(_auth_codex())
-    if _cred_codex_cache and _cred_codex_cache[0] == chave:
-        return _cred_codex_cache[1]
+    if not isinstance(_cred_codex_cache, dict):
+        _cred_codex_cache = {}
+    auth_path = _auth_codex(home)
+    chave = str(auth_path.parent.resolve(strict=False))
     try:
-        auth = json.loads(_auth_codex().read_text(encoding="utf-8"))
-        tokens = auth.get("tokens")
-        tem = isinstance(tokens, dict) and bool(tokens.get("access_token"))
-    except (OSError, ValueError):
-        tem = False
-    _cred_codex_cache = (chave, tem)
-    return tem
+        stat = auth_path.stat()
+        assinatura = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        assinatura = (0, 0)
+    hit = _cred_codex_cache.get(chave)
+    if hit is not None and hit[0] == assinatura:
+        tem = hit[1]
+    else:
+        try:
+            auth = json.loads(auth_path.read_text(encoding="utf-8"))
+            tokens = auth.get("tokens")
+            tem = isinstance(tokens, dict) and bool(tokens.get("access_token"))
+        except (OSError, ValueError):
+            tem = False
+        _cred_codex_cache[chave] = (assinatura, tem)
+    if tem:
+        return True
+    # A identidade do keyring tem TTL próprio, independente da assinatura do arquivo.
+    identidade = _identidade_codex(auth_path.parent)
+    return not (identidade and identidade.get("method") in {"none", "api_key"}
+                and identidade.get("status") in {"disconnected", "connected"})
 
 
-def id_conta_codex() -> str | None:
+def id_conta_codex(home: Path | str | None = None) -> str | None:
     """O id desta credencial no `/api/cotas`, ou None quando não há credencial.
 
     Uma função só porque o id vive em DOIS lugares: a fonte, aqui, e o campo `conta` da sessão
@@ -428,7 +466,8 @@ def id_conta_codex() -> str | None:
     desenha com outro nome, e cair no pior-geral sem ninguém entender — o mesmo cuidado que o
     comentário do `chave:<motor>` já registra.
     """
-    return f"codex:{_auth_codex().parent}" if _tem_credencial_codex() else None
+    raiz = _codex_home(home).resolve(strict=False)
+    return f"codex:{raiz}" if _tem_credencial_codex(raiz) else None
 
 
 def _janela_codex(o: object) -> JanelaCota | None:
@@ -445,7 +484,7 @@ def _janela_codex(o: object) -> JanelaCota | None:
                       pct=max(0.0, min(100.0, pct)), reset_ts=reset or None)
 
 
-def _ler_codex() -> _Leitura:
+def _ler_codex(home: Path | str | None = None) -> _Leitura:
     """Cota da conta do Codex, pelo `account/rateLimits/read` de um app-server efêmero.
 
     Não é HTTP como as outras porque a credencial é um par OAuth do ChatGPT e o endpoint que a
@@ -459,12 +498,15 @@ def _ler_codex() -> _Leitura:
     # A fonte só nasce com credencial (ver `_fontes`), então isto cobre a corrida: um logout entre
     # a montagem da fonte e a leitura pagaria o processo à toa e voltaria "falhou" no lugar de
     # "não há credencial".
-    if not _tem_credencial_codex():
+    raiz = _codex_home(home)
+    if not _tem_credencial_codex(raiz):
         return "sem_credencial", [], None
     try:
         # Mesmo teto das fontes HTTP: `_atualizar` espera TODAS as leituras juntas, então uma fonte
         # com teto maior que as outras vira o tempo de resposta do `/api/cotas` inteiro.
-        r = codex_appserver.perguntar("account/rateLimits/read", timeout=_HTTP_TIMEOUT)
+        kwargs = {"codex_home": raiz} if home is not None else {}
+        r = codex_appserver.perguntar("account/rateLimits/read", timeout=_HTTP_TIMEOUT,
+                                      **kwargs)
     except codex_appserver.CodexAusente:
         return "indisponivel", [], "codex-ausente"
     except (RuntimeError, OSError) as e:
@@ -621,11 +663,19 @@ def _fontes() -> list[_Fonte]:
         if contas.e_conta(p) or c.active:
             out.append(_Fonte(f"claude:{c.path}", c.label, "claude",
                               lambda p=p, at=bool(c.active): _ler_claude(p, at), bool(c.active)))
-    # Codex: UMA credencial por máquina (o `auth.json` do CODEX_HOME), e ela só vira linha quando
-    # existe — quem não usa Codex não ganha uma linha vazia nem paga o processo que a leitura custa.
-    cid_codex = id_conta_codex()
-    if cid_codex:
-        out.append(_Fonte(cid_codex, "Codex", "codex", _ler_codex))
+    # Codex: uma linha por raiz registrada. A conta continua visível sem `auth.json`: ausência de
+    # credencial é estado da conta, não prova de que ela deixou de existir.
+    try:
+        contas_codex = codex_contas.list_accounts()
+    except OSError:
+        _log.warning("cota: nao consegui listar contas Codex", exc_info=True)
+        contas_codex = []
+    for account in contas_codex:
+        raiz = account.home.expanduser().absolute().resolve(strict=False)
+        out.append(_Fonte(
+            f"codex:{raiz}", "Codex" if account.is_default else account.id, "codex",
+            lambda raiz=raiz: _ler_codex(raiz),
+        ))
     for nome, key, base in _providers_kimi():
         # CommandCode plugado como provider do Kimi Code: o `<base>/usages` dele é 403 — a rota
         # de cota é a do CommandCode, escolhida pela base_url, igual ao ramo das chaves abaixo.

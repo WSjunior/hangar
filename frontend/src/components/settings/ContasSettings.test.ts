@@ -955,6 +955,7 @@ describe('ContasSettings — as três seções da lista', () => {
     base_url: null, cota: { estado: 'indisponivel', janelas: [] },
   });
   const CODEX = chave({
+    tipo: 'codex', auth_method: 'oauth', codex_account: 'default',
     id: 'codex:chatgpt', nome: 'ChatGPT', nome_natural: 'chatgpt', usos: [],
     base_url: null, cota: { estado: 'indisponivel', janelas: [] },
   });
@@ -983,9 +984,39 @@ describe('ContasSettings — as três seções da lista', () => {
     const t = montar(LISTA);
     await tick(); await tick(); await tick();
     const [claudes, modelos, outros] = secoes(t.el);
-    expect(nomes(claudes)).toEqual(['jefferson']);
+    expect(nomes(claudes)).toEqual(['jefferson', 'ChatGPT']);
+    expect(cardDe(t.el, 'ChatGPT').textContent).toContain('OAuth');
+    expect(cardDe(t.el, 'ChatGPT').textContent).not.toContain(m.contas_tipo_chave());
     expect(nomes(modelos)).toEqual(['Kimi', 'Command Code']);
-    expect(nomes(outros)).toEqual(['Kimi CLI', 'ChatGPT']);
+    expect(nomes(outros)).toEqual(['Kimi CLI']);
+    unmount(t.comp);
+  });
+
+  it('conta Codex secundária informa herança sem abrir formulário', async () => {
+    const t = montar([CODEX, { ...CODEX, id: 'codex:/work', codex_account: 'work', nome: 'Work', ativa: false }]);
+    await tick(); await tick(); await tick();
+    expect(cardDe(t.el, 'Work').textContent).toContain(m.codex_ui_inherited());
+    expect(t.el.querySelector('.codex-login')).toBeNull();
+    unmount(t.comp);
+  });
+
+  it('conta Codex agrupa autenticação, identidade e origem em três linhas legíveis', async () => {
+    const google = {
+      ...CODEX,
+      id: 'codex:/home/u/.codex-google', codex_account: 'google', nome: 'google', ativa: false,
+      path: '/home/u/.codex-google',
+      login: { estado: 'ok', loggedIn: true, email: 'secondary@example.test', plano: 'plus' },
+    } satisfies Credencial;
+    const t = montar([google]);
+    await tick(); await tick(); await tick();
+    const rows = [...cardDe(t.el, 'google').querySelectorAll<HTMLElement>('.ct-codex-meta')]
+      .map((row) => row.textContent?.replace(/\s+/g, ' ').trim());
+
+    expect(rows).toEqual([
+      `${m.codex_ui_oauth()} · plus`,
+      'secondary@example.test',
+      `${m.codex_ui_inherited()} · .codex-google`,
+    ]);
     unmount(t.comp);
   });
 

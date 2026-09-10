@@ -26,6 +26,12 @@ export default function ConfigIndex() {
         onPress={() => router.push('/config/maquinas' as never)}
       />
       <Linha
+        icon="KeyRound"
+        titulo={m.contas_titulo()}
+        descricao={m.contas_descricao()}
+        onPress={() => router.push('/config/contas' as never)}
+      />
+      <Linha
         icon="Info"
         titulo={m.config_modal_sobre()}
         descricao={m.config_modal_desc_sobre()}

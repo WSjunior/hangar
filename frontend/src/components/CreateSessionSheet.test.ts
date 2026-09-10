@@ -14,6 +14,8 @@ import * as m from '../paraglide/messages';
 // Svelte 5 — component_api_changed), reproduzindo o ciclo fechar/reabrir do app real.
 import Harness from './CreateSessionSheet.harness.svelte';
 import * as api from '@hangar/core';
+import * as contaEstado from '../lib/contaEstado';
+import { quotaFeed } from '../lib/quotaFeed.svelte';
 
 const onCreate = vi.hoisted(() => vi.fn(async () => {}));
 
@@ -32,6 +34,14 @@ vi.mock('@hangar/core', async (importOriginal) => ({
           models: [{ provider: 'openai-codex', id: 'gpt-5.6-luna', context: '272K', images: true }] }
       : { kind: 'claude', reduced: true, models: [{ id: 'opus' }, { id: 'sonnet' }, { id: 'haiku' }] }),
   getSessions: vi.fn(async () => []),
+  getCodexAccountsForServer: vi.fn(async () => [{ id: 'default', name: 'Default', is_default: true,
+    auth: { method: 'oauth', status: 'connected', email: 'b@example.test', plan: 'plus' },
+    sync: { status: 'ready', trust_pending: false, issues: [] } }]),
+  prepareCodexAccountForServer: vi.fn(async () => ({ status: 'ready', trust_pending: false, issues: [] })),
+  getCodexPreparationForServer: vi.fn(),
+  createSessionForServer: vi.fn(async () => ({ name: 'x' })),
+  modelOptionsForServer: vi.fn(),
+  codexOpcoes: vi.fn(async () => ({ contexto_estendido: false })),
   getEngines: vi.fn(async () => ({ motores: {}, arquivo_corrompido: false, arquivo_caminho: '' })),
   getProviders: vi.fn(async () => ({ claude: { disponivel: true, motivo: null }, codex: { disponivel: true, motivo: null }, pi: { disponivel: true, motivo: null }, kimi: { disponivel: true, motivo: null } })),
   criarConta: vi.fn(), apagarConta: vi.fn(),
@@ -48,6 +58,9 @@ vi.mock('@hangar/core', async (importOriginal) => ({
 }));
 vi.mock('./FolderScanner.svelte', () => ({
   default: createRawSnippet(() => ({ render: () => '<div />' })),
+}));
+vi.mock('../lib/contaEstado', async (original) => ({
+  ...await original<typeof import('../lib/contaEstado')>(), listarCotas: vi.fn(async () => []),
 }));
 
 function flush(): Promise<void> {
@@ -144,6 +157,7 @@ async function confirmarApagar() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  quotaFeed.resetParaTeste();
   localStorage.clear();
   document.body.innerHTML = '';
   // Default: fetch de contas PENDENTE (nunca resolve) — o cenário A.
@@ -794,22 +808,102 @@ describe('CreateSessionSheet — modelo e esforço do Codex', () => {
     ],
   };
 
-  async function abrirNoCodex() {
+  async function abrirNoCodex(bastao?: { name: string; cwd: string; serverId: string }) {
+    const server = { id: 'B', label: 'B', baseUrl: 'https://b.test', token: 'b' };
+    vi.mocked(api.modelOptionsForServer).mockResolvedValue(CODEX as never);
     vi.mocked(api.modelOptions).mockImplementation(async (p) =>
       p === 'codex' ? (CODEX as never)
                     : ({ kind: 'claude', reduced: true, models: [{ id: 'opus' }] } as never));
-    const montado = montar();
+    const el = document.body.appendChild(document.createElement('div'));
+    const onOpenSession = vi.fn();
+    const comp = mount(Harness, { target: el, props: { onCreate, onOpenSession, servidores: [server], bastao } });
+    const montado = { el, comp, onOpenSession };
     await flush();
-    await escolherPasta();
+    if (!bastao) await escolherPasta();
     [...(document.querySelectorAll('.provider-tile') as unknown as HTMLElement[])]
       .find((b) => b.textContent!.trim().endsWith('Codex'))!.click();
     await flush();
     return montado;
   }
 
+  it('mostra os limites da conta Codex selecionada como no seletor Claude', async () => {
+    vi.mocked(api.getCodexAccountsForServer).mockResolvedValueOnce([
+      { id: 'default', credential_id: 'codex:/test/default', home: '/test/default', name: 'Default',
+        is_default: true, auth: { status: 'connected', method: 'oauth', email: 'default@example.test', plan: 'pro' },
+        sync: { status: 'ready', trust_pending: false, issues: [] } },
+      { id: 'google', credential_id: 'codex:/test/google', home: '/test/google', name: 'google',
+        is_default: false, auth: { status: 'connected', method: 'oauth', email: 'google@example.test', plan: 'plus' },
+        sync: { status: 'ready', trust_pending: false, issues: [
+          { code: 'codex_account_mcp_runtime_excluded', params: { server: 'node_repl', variable: 'CODEX_HOME' } },
+        ] } },
+    ] as api.CodexAccount[]);
+    vi.mocked(contaEstado.listarCotas).mockResolvedValue([
+      { id: 'codex:/test/default', label: 'Codex', provedor: 'codex', ativa: false, estado: 'lida',
+        janelas: [{ rotulo: '7d', pct: 26, reset_ts: 2_000_000_000 }] },
+      { id: 'codex:/test/google', label: 'google', provedor: 'codex', ativa: false, estado: 'lida',
+        janelas: [{ rotulo: '5h', pct: 12, reset_ts: 2_000_000_000 },
+                  { rotulo: '7d', pct: 41, reset_ts: 2_000_000_000 }] },
+    ]);
+
+    const { comp } = await abrirNoCodex();
+    await flush();
+    expect(document.querySelector('[data-testid="codex-conta-cota"]')?.textContent).toContain('7d 26%');
+    await escolherNoCombo('#codex-account', 'google');
+    await flush();
+    const text = document.querySelector('[data-testid="codex-conta-cota"]')?.textContent ?? '';
+    expect(text).toContain('5h 12%');
+    expect(text).toContain('7d 41%');
+    const info = [...document.querySelectorAll<HTMLElement>('p')]
+      .find((p) => p.textContent?.includes(m.codex_account_mcp_runtime_excluded()));
+    expect(info?.getAttribute('role')).toBe('status');
+    expect(info?.classList.contains('error-msg')).toBe(false);
+    unmount(comp);
+  });
+
+  it('trocar provider durante preparo libera criação e descarta preparo antigo', async () => {
+    const { comp } = await abrirNoCodex();
+    let resolve!: (value: api.CodexAccount['sync']) => void;
+    vi.mocked(api.prepareCodexAccountForServer).mockReturnValueOnce(new Promise((r) => resolve = r));
+    try {
+      (document.querySelector('.primary-btn') as HTMLElement).click(); await flush();
+      [...document.querySelectorAll<HTMLButtonElement>('.provider-tile')].find((b) => b.textContent?.trim().endsWith('Claude'))!.click();
+      await flush();
+      expect((document.querySelector('.primary-btn') as HTMLButtonElement).disabled).toBe(false);
+      let resolveNew!: () => void;
+      onCreate.mockReturnValueOnce(new Promise<void>((r) => resolveNew = r));
+      (document.querySelector('.primary-btn') as HTMLElement).click(); await flush();
+      resolve({ status: 'ready', trust_pending: false, issues: [] }); await flush();
+      expect(api.createSessionForServer).not.toHaveBeenCalled();
+      expect((document.querySelector('.primary-btn') as HTMLButtonElement).disabled).toBe(true);
+      expect(onCreate).toHaveBeenCalledOnce();
+      expect(onCreate.mock.calls[0]).toEqual(expect.arrayContaining(['claude']));
+      resolveNew(); await flush();
+    } finally { await unmount(comp); }
+  });
+
+  it.each([false, true])('bastão Codex captura B e descarta resposta após reabertura=%s', async (reopen) => {
+    const { comp, onOpenSession } = await abrirNoCodex({ name: 'origin', cwd: '/tmp/x', serverId: 'B' });
+    let resolve!: (value: api.BastaoResult) => void;
+    vi.mocked(api.passarBastao).mockReturnValueOnce(new Promise((r) => resolve = r));
+    location.hash = '#/original';
+    try {
+      (document.querySelector('.primary-btn') as HTMLElement).click(); await flush();
+      expect(api.passarBastao).toHaveBeenCalledWith('origin', expect.objectContaining({ provider: 'codex', codex_account: 'default' }), expect.objectContaining({ id: 'B' }));
+      if (reopen) {
+        (document.querySelector('[data-testid="sheet-toggle"]') as HTMLElement).click(); await flush();
+        (document.querySelector('[data-testid="sheet-toggle"]') as HTMLElement).click(); await flush();
+      }
+      resolve({ name: 'successor', texto: '', kickoff: '' } as api.BastaoResult); await flush();
+      expect(onOpenSession).not.toHaveBeenCalled();
+      expect(location.hash).toBe(reopen ? '#/original' : '#/chat/B/successor');
+      if (reopen) expect(document.querySelector('.primary-btn')).not.toBeNull();
+    } finally { await unmount(comp); location.hash = ''; }
+  });
+
   it('oferece a lista do catálogo do Codex', async () => {
     const { comp } = await abrirNoCodex();
-    expect(vi.mocked(api.modelOptions).mock.calls.at(-1)![0]).toBe('codex');
+    expect(vi.mocked(api.modelOptionsForServer).mock.calls.at(-1)?.slice(0, 5)).toEqual([
+      { id: 'B', label: 'B', baseUrl: 'https://b.test', token: 'b' }, 'codex', '', null, 'default']);
     (document.querySelector('#model-pick') as HTMLElement).click();
     await tick();
     const itens = [...document.querySelectorAll('.sel-item')].map((b) => b.textContent);
@@ -860,7 +954,51 @@ describe('CreateSessionSheet — modelo e esforço do Codex', () => {
     (document.querySelector('.primary-btn') as HTMLElement).click();
     await flush();
     // (nome, cwd, configDir, provider, engine, model, effort, permissao)
-    expect(onCreate).toHaveBeenCalledWith('x', '/tmp/x', null, 'codex', null, 'gpt-5.6-sol', 'xhigh', null);
+    expect(api.prepareCodexAccountForServer).toHaveBeenCalledWith(expect.objectContaining({ id: 'B' }), 'default');
+    expect(api.createSessionForServer).toHaveBeenCalledWith(expect.objectContaining({ id: 'B' }), {
+      name: 'x', cwd: '/tmp/x', provider: 'codex', codex_account: 'default', model: 'gpt-5.6-sol', effort: 'xhigh',
+    });
+    expect(window.location.hash).toBe('#/chat/B/x');
+    expect(onCreate).not.toHaveBeenCalled();
+    unmount(comp);
+  });
+
+  it('falha no preparo é visível e não cria; nova tentativa reaproveita a conta', async () => {
+    const { comp } = await abrirNoCodex();
+    vi.mocked(api.prepareCodexAccountForServer).mockResolvedValueOnce({ status: 'error', trust_pending: false, issues: [] });
+    (document.querySelector('.primary-btn') as HTMLElement).click(); await flush();
+    expect(document.body.textContent).toContain(m.codex_ui_prepare_error());
+    expect(api.createSessionForServer).not.toHaveBeenCalled();
+    expect(document.querySelector('#codex-account')?.textContent).toContain('Default');
+    (document.querySelector('.primary-btn') as HTMLElement).click(); await flush();
+    expect(api.createSessionForServer).toHaveBeenCalledOnce();
+    unmount(comp);
+  });
+
+  it('fechar durante preparação não cria quando a resposta chega', async () => {
+    const { comp } = await abrirNoCodex();
+    let resolve!: (value: api.CodexAccount['sync']) => void;
+    vi.mocked(api.prepareCodexAccountForServer).mockReturnValueOnce(new Promise((r) => resolve = r));
+    (document.querySelector('.primary-btn') as HTMLElement).click(); await flush();
+    (document.querySelector('[data-testid="sheet-toggle"]') as HTMLElement).click(); await flush();
+    resolve({ status: 'ready', trust_pending: false, issues: [] }); await flush();
+    expect(api.createSessionForServer).not.toHaveBeenCalled();
+    unmount(comp);
+  });
+
+  it('trocar conta limpa modelo/esforço e consulta catálogo com a identidade nova', async () => {
+    vi.mocked(api.getCodexAccountsForServer).mockResolvedValueOnce([
+      { id: 'default', credential_id: 'codex:/test/default', home: '/test/default', name: 'Default', is_default: true, auth: { status: 'connected', method: 'oauth', email: null, plan: null }, sync: { status: 'ready', trust_pending: false, issues: [] } },
+      { id: 'work', credential_id: 'codex:/test/work', home: '/test/work', name: 'Work', is_default: false, auth: { status: 'connected', method: 'oauth', email: null, plan: null }, sync: { status: 'ready', trust_pending: false, issues: [] } },
+    ] as api.CodexAccount[]);
+    const { comp } = await abrirNoCodex();
+    await escolherNoCombo('#model-pick', 'GPT-5.6-Sol');
+    await escolherNoCombo('#effort-pick', 'ultra');
+    await escolherNoCombo('#codex-account', 'Work'); await flush();
+    expect(document.querySelector('#model-pick')?.textContent).toContain(m.criar_padrao());
+    expect(document.querySelector('#effort-pick')).toBeNull();
+    expect(vi.mocked(api.modelOptionsForServer).mock.calls.at(-1)?.[4]).toBe('work');
+    expect(document.body.textContent).toContain(m.codex_contexto_titulo());
     unmount(comp);
   });
 });

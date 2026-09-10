@@ -14,7 +14,6 @@
   import TerminalMobile from '../components/TerminalMobile.svelte';
   import AskQuestionCard from '../components/AskQuestionCard.svelte';
   import AskQuestionSheet from '../components/AskQuestionSheet.svelte';
-  import SessionPlanPreview from '../components/SessionPlanPreview.svelte';
   import { proposedPlan } from '@hangar/core';
   import { setCodexMode } from '@hangar/core';
   import RunSheet from '../components/RunSheet.svelte';
@@ -56,6 +55,7 @@
     isAbortError,
     isTimeoutError,
     getPlan,
+    getSessionPlanPreview,
     getConfig,
     uploadUrl,
   } from '@hangar/core';
@@ -76,6 +76,13 @@
   import { ouvirTexto } from '../lib/ouvir';
   import { textoFalavelComCodigo } from '../lib/speakable';
   import { segredos } from '../lib/segredos.svelte';
+
+  type ClaudePlanDiscovery = {
+    name: string;
+    path: string;
+    markdown?: string;
+    anchor_id?: string | null;
+  };
 
   interface Props {
     sessionName: string;
@@ -393,18 +400,19 @@
   let limitsOpen = $state(false);  // Task B: sheet de limites de uso Codex (badge da NavBar)
   let askPayload = $state<AskQuestionPayload | null>(null);
   let askOpen = $state(false);
-  const codexPlan = $derived.by(() => {
+  const codexPlanEvent = $derived.by(() => {
     if (sessionProvider !== 'codex') return null;
     for (let i = events.length - 1; i >= 0; i--) {
       const event = events[i];
       if (event.kind === 'user_msg' && !event.id.startsWith('queued-')) return null;
       if (event.kind === 'assistant_msg' && event.text) {
         const plan = proposedPlan(event.text);
-        if (plan) return plan;
+        if (plan) return { id: event.id, plan };
       }
     }
     return null;
   });
+  const codexPlan = $derived(codexPlanEvent?.plan ?? null);
 
   async function implementCodexPlan(plan: string) {
     if (currentState !== 'idle' || plan !== codexPlan) throw new Error(m.chat_plan_indisponivel());
@@ -759,6 +767,79 @@
   const codexEntrada = $derived(codexPreThread ? allSessions.find((s) => s.name === sessionName) : null);
   const currentState = $derived<State>(codexPreThread
     ? codexEntrada?.state ?? 'idle' : stateEvent?.state ?? 'idle');
+  let claudePlanDiscovery = $state<ClaudePlanDiscovery | null>(null);
+  let claudePlanDiscoveryLoading = $state(false);
+  let claudePlanDiscoveryError = $state('');
+  let claudePlanDiscoveryRetry = $state(0);
+  let claudePlanDiscoveryKey = '';
+  let claudePlanLastState: State | null = null;
+  let claudePlanLastRetry = -1;
+  let claudePlanGeneration = 0;
+  $effect(() => {
+    const provider = sessionProvider;
+    const identity = `${getActiveId() ?? ''}\0${sessionName}`;
+    const state = currentState;
+    const retry = claudePlanDiscoveryRetry;
+    if (provider !== 'claude') {
+      claudePlanGeneration++;
+      claudePlanDiscovery = null;
+      claudePlanDiscoveryLoading = false;
+      claudePlanDiscoveryError = '';
+      claudePlanDiscoveryKey = '';
+      claudePlanLastState = null;
+      claudePlanLastRetry = -1;
+      return;
+    }
+    if (identity !== claudePlanDiscoveryKey) {
+      claudePlanGeneration++;
+      claudePlanDiscoveryKey = identity;
+      claudePlanDiscovery = null;
+      claudePlanDiscoveryError = '';
+      claudePlanLastState = null;
+      claudePlanLastRetry = -1;
+    }
+    const previous = claudePlanLastState;
+    const retryChanged = retry !== claudePlanLastRetry;
+    claudePlanLastState = state;
+    claudePlanLastRetry = retry;
+    const first = previous === null;
+    const concluded = previous === 'working' && (state === 'idle' || state === 'awaiting_input');
+    if (!first && !concluded && !retryChanged) return;
+    const request = ++claudePlanGeneration;
+    claudePlanDiscoveryLoading = true;
+    claudePlanDiscoveryError = '';
+    getSessionPlanPreview(sessionName)
+      .then((value) => {
+        if (request !== claudePlanGeneration) return;
+        claudePlanDiscovery = value as ClaudePlanDiscovery | null;
+        claudePlanDiscoveryLoading = false;
+      })
+      .catch(() => {
+        if (request !== claudePlanGeneration) return;
+        claudePlanDiscovery = null;
+        claudePlanDiscoveryLoading = false;
+        claudePlanDiscoveryError = m.chat_plan_erro();
+      });
+  });
+  const planAnchorId = $derived.by(() => {
+    if (sessionProvider === 'codex') return codexPlanEvent?.id ?? null;
+    if (sessionProvider !== 'claude') return null;
+    return claudePlanDiscovery?.anchor_id ?? null;
+  });
+  const planControls = $derived((sessionProvider === 'claude' || planAnchorId) ? {
+    eventId: planAnchorId,
+    serverId: getActiveId() ?? '',
+    provider: sessionProvider ?? 'claude',
+    revision: currentState,
+    desktop,
+    codexPlan,
+    disabled: currentState !== 'idle' || pending.length > 0,
+    onImplement: implementCodexPlan,
+    discovery: sessionProvider === 'claude' ? claudePlanDiscovery : undefined,
+    discoveryLoading: sessionProvider === 'claude' ? claudePlanDiscoveryLoading : false,
+    discoveryError: sessionProvider === 'claude' ? claudePlanDiscoveryError : '',
+    onRetryDiscovery: sessionProvider === 'claude' ? () => { claudePlanDiscoveryRetry++; } : undefined,
+  } : null);
   const codexOpcoes = $derived(codexEntrada?.options ?? []);
   const codexPergunta = $derived(codexEntrada?.question ?? null);
   // O seletor do pane no formato do cartão nativo: uma pergunta, escolha única, opções sem
@@ -2291,10 +2372,6 @@
     </div>
   {:else}
     {#snippet chatPlans()}
-      <SessionPlanPreview {sessionName} provider={sessionProvider ?? 'claude'} {desktop}
-        revision={currentState} {codexPlan}
-        disabled={currentState !== 'idle' || pending.length > 0}
-        onImplement={implementCodexPlan} />
       {#if !askOpen && askPayload?.provider === 'codex'}
         <button class="ghost-btn" onclick={() => { askOpen = true; }}>{m.ask_perguntas()}</button>
       {/if}
@@ -2302,6 +2379,7 @@
     <MessageList
       {events}
       codex={sessionProvider === 'codex'}
+      plan={planControls}
       footer={chatPlans}
       {stateEvent}
       {pending}

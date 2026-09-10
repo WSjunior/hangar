@@ -16,6 +16,7 @@ _SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,119}$")
 class PlanoClaude:
     nome: str
     caminho: Path
+    anchor_id: str | None = None
 
 
 def _ler_json(caminho: Path) -> dict[str, Any]:
@@ -66,15 +67,50 @@ def _caminho_de_bloco(bloco: dict[str, Any]) -> str | None:
     return None
 
 
+def _id_bloco_assistente(evento: dict[str, Any], *, tipo: str, valor: str | None = None) -> str | None:
+    """Converte um bloco do transcript no mesmo id que `transcript.parse_obj` publica."""
+    uuid = evento.get("uuid")
+    mensagem = evento.get("message")
+    conteudo = mensagem.get("content") if isinstance(mensagem, dict) else None
+    if not isinstance(uuid, str) or not isinstance(conteudo, list):
+        return None
+    indice = 0
+    for bloco in conteudo:
+        if not isinstance(bloco, dict):
+            continue
+        bloco_tipo = bloco.get("type")
+        if bloco_tipo == "tool_use":
+            if tipo == "tool_use" and bloco.get("id") == valor:
+                return uuid if indice == 0 else f"{uuid}:{indice}"
+            indice += 1
+        elif bloco_tipo == "text":
+            texto = bloco.get("text")
+            if tipo == "text" and isinstance(texto, str) and texto.strip():
+                return uuid if indice == 0 else f"{uuid}:{indice}"
+            indice += 1
+        elif bloco_tipo == "thinking" and isinstance(bloco.get("thinking"), str) and bloco["thinking"].strip():
+            indice += 1
+    return None
+
+
+def _eh_prompt_humano(conteudo: Any) -> bool:
+    if isinstance(conteudo, str):
+        return bool(conteudo.strip())
+    if not isinstance(conteudo, list) or not conteudo:
+        return False
+    return not all(isinstance(bloco, dict) and bloco.get("type") == "tool_result" for bloco in conteudo)
+
+
 def descobrir(transcript: str | Path, cwd: str | Path) -> PlanoClaude | None:
     """Encontra o último plano confirmado pelo transcript principal da sessão."""
     arquivo = Path(transcript)
     raiz = _diretorio_de_planos(arquivo, Path(cwd))
-    candidatos: dict[str, Path] = {}
-    saidas_do_modo_plano: dict[str, str] = {}
-    ultimo: Path | None = None
+    candidatos: dict[str, tuple[Path, str | None]] = {}
+    saidas_do_modo_plano: dict[str, tuple[str, str | None]] = {}
+    ultimo: tuple[Path, str | None] | None = None
     ultimo_slug: str | None = None
-    slug_confirmado: str | None = None
+    slug_confirmado: tuple[str, str | None] | None = None
+    aguardando_resposta: tuple[Path, str | None] | None = None
 
     try:
         linhas = arquivo.open(encoding="utf-8")
@@ -93,8 +129,15 @@ def descobrir(transcript: str | Path, cwd: str | Path) -> PlanoClaude | None:
                 ultimo_slug = slug
             mensagem = evento.get("message")
             conteudo = mensagem.get("content") if isinstance(mensagem, dict) else None
+            if evento.get("type") == "user" and _eh_prompt_humano(conteudo):
+                aguardando_resposta = None
             if not isinstance(conteudo, list):
                 continue
+            if evento.get("type") == "assistant" and aguardando_resposta is not None:
+                resposta = _id_bloco_assistente(evento, tipo="text")
+                if resposta is not None:
+                    ultimo = (aguardando_resposta[0], resposta)
+                    aguardando_resposta = None
             for bloco in conteudo:
                 if not isinstance(bloco, dict):
                     continue
@@ -102,30 +145,46 @@ def descobrir(transcript: str | Path, cwd: str | Path) -> PlanoClaude | None:
                     identificador = bloco.get("id")
                     if (bloco.get("name") == "ExitPlanMode" and isinstance(identificador, str)
                             and ultimo_slug is not None):
-                        saidas_do_modo_plano[identificador] = ultimo_slug
+                        saidas_do_modo_plano[identificador] = (
+                            ultimo_slug,
+                            _id_bloco_assistente(evento, tipo="tool_use", valor=identificador),
+                        )
                     bruto = _caminho_de_bloco(bloco)
                     if not bruto or not isinstance(identificador, str):
                         continue
                     caminho = Path(bruto).expanduser()
                     caminho = (caminho if caminho.is_absolute() else Path(cwd) / caminho).resolve()
                     if caminho.suffix.lower() == ".md" and caminho.is_relative_to(raiz):
-                        candidatos[identificador] = caminho
+                        candidatos[identificador] = (
+                            caminho,
+                            _id_bloco_assistente(evento, tipo="tool_use", valor=identificador),
+                        )
                 elif bloco.get("type") == "tool_result":
                     identificador = bloco.get("tool_use_id")
-                    caminho = candidatos.pop(identificador, None)
-                    if caminho is not None and bloco.get("is_error") is not True:
-                        ultimo = caminho
-                    slug_da_saida = saidas_do_modo_plano.pop(identificador, None)
-                    if slug_da_saida is not None and bloco.get("is_error") is not True:
-                        slug_confirmado = slug_da_saida
+                    candidato = candidatos.pop(identificador, None)
+                    if candidato is not None and bloco.get("is_error") is not True:
+                        ultimo = candidato
+                        aguardando_resposta = candidato
+                    saida = saidas_do_modo_plano.pop(identificador, None)
+                    if saida is not None and bloco.get("is_error") is not True:
+                        slug_confirmado = saida
+                        if candidato is not None:
+                            caminho = candidato[0]
+                        elif ultimo is not None:
+                            caminho = ultimo[0]
+                        else:
+                            caminho = (raiz / f"{saida[0]}.md").resolve()
+                        ancora = saida[1] or (ultimo[1] if ultimo is not None else None)
+                        ultimo = (caminho, ancora)
+                        aguardando_resposta = (caminho, ancora)
 
     # Uma escrita confirmada traz o caminho exato e prevalece sobre o slug genérico da sessão.
     if ultimo is not None:
-        return PlanoClaude(nome=ultimo.stem, caminho=ultimo)
+        return PlanoClaude(nome=ultimo[0].stem, caminho=ultimo[0], anchor_id=ultimo[1])
     if slug_confirmado is not None:
-        caminho = (raiz / f"{slug_confirmado}.md").resolve()
+        caminho = (raiz / f"{slug_confirmado[0]}.md").resolve()
         # A validação do slug torna a checagem redundante no caso normal, mas mantém a fronteira
         # explícita caso a construção do caminho mude no futuro.
         if caminho.is_relative_to(raiz):
-            return PlanoClaude(nome=slug_confirmado, caminho=caminho)
+            return PlanoClaude(nome=slug_confirmado[0], caminho=caminho, anchor_id=slug_confirmado[1])
     return None

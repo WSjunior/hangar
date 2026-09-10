@@ -19,10 +19,10 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from app.codex_arquivos import (
-    AlteradoExternamente, backup, exclusivo, gravar, hash_bytes, json_bytes,
-    json_obj, ler, mesclar_hooks, remapear, transformar,
+    AlteradoExternamente, backup, editar_config, exclusivo, gravar, hash_bytes,
+    json_bytes, json_obj, ler, mesclar_hooks, remapear, transformar,
 )
-from app.codex_compat import normalizar_hooks, normalizar_security_guidance, remover_instrucao_de_leitura, wrapper_instalado
+from app.codex_compat import adaptar_hooks_plugin, normalizar_hooks, remover_instrucao_de_leitura, wrapper_instalado
 from app.codex_instrucoes import limite_instrucoes, preparar_instrucoes
 from app.codex_importador import CodexNativo, CodexNativoErro
 from app.codex_msgs import msg, serializar
@@ -410,29 +410,8 @@ class IntegracaoCodex:
         ensure_codex_state_hook_installed(self.codex_home)
 
     async def _editar_config(self, preparar) -> None:
-        """Escritor TOML oficial numa cópia; cada tentativa recalcula sobre o arquivo atual."""
-        path = self.codex_home / "config.toml"
-        for _ in range(3):
-            raw = ler(path)
-            atual = tomllib.loads(raw.decode()) if raw else {}
-            edits, confirmar = preparar(atual)
-            if not edits:
-                confirmar()
-                return
-            with tempfile.TemporaryDirectory(prefix="hangar-config-", dir=self.raiz) as temp:
-                temp_home = Path(temp)
-                (temp_home / ".codex").mkdir()
-                copia = temp_home / ".codex" / "config.toml"
-                gravar(copia, raw or b"", None)
-                async with self.nativo(temp_home, temp_home / ".codex", self.binario) as writer:
-                    await writer.request("config/batchWrite", {"edits": edits, "reloadUserConfig": False})
-                try:
-                    gravar(path, copia.read_bytes(), raw, self.backups)
-                    confirmar()
-                    return
-                except AlteradoExternamente:
-                    continue
-        raise AlteradoExternamente("config.toml continua mudando; nova leitura necessária")
+        await editar_config(self.codex_home / "config.toml", self.backups, self.raiz,
+                            self.nativo, preparar, binario=self.binario)
 
     async def _config(self, codex, mcp: dict, agentes: dict, *, hooks: bool = False,
                       registro: dict | None = None, historico: dict | None = None,
@@ -646,41 +625,13 @@ class IntegracaoCodex:
         await self._editar_config(preparar)
 
     def _hooks_plugin(self, raiz: Path) -> None:
-        cache = self.codex_home / "plugins" / "cache"
-        if not raiz.resolve().is_relative_to(cache.resolve()):
-            raise ValueError("Plugin fora do cache do Codex")
-        paths = {raiz / "hooks" / "hooks.json", raiz / "hooks.json"}
-        security_guidance = False
-        for rel in (".codex-plugin/plugin.json", ".claude-plugin/plugin.json"):
-            manifest = raiz / rel
-            if not manifest.is_file():
-                continue
-            dados = json_obj(manifest)
-            security_guidance |= dados.get("name") == "security-guidance"
-            declaradas = dados.get("hooks")
-            if isinstance(declaradas, dict):
-                paths.add(manifest)
-            else:
-                refs = [declaradas] if isinstance(declaradas, str) else declaradas or []
-                if not isinstance(refs, list) or any(not isinstance(r, str) for r in refs):
-                    raise ValueError("Referências de hooks inválidas no plugin")
-                paths.update(raiz / r for r in refs)
-        wrapper_json = self.codex_home / ".hangar-hooks" / "codex-hook-json.py"
-        if security_guidance:
-            gravar(wrapper_json, (_REPO / "scripts/codex-hook-json.py").read_bytes(), ler(wrapper_json), self.backups)
-        for path in sorted(paths):
-            if not path.is_file():
-                continue
-            if not path.resolve().is_relative_to(raiz.resolve()):
-                raise ValueError("Hooks fora do plugin gerenciado")
-            def converter(raw):
-                data = json.loads(raw)
-                result = self._normalizar(data)
-                if security_guidance:
-                    result = normalizar_security_guidance(result, sys.executable, wrapper_json, windows=os.name == "nt")
-                return raw if data == result else json_bytes(result)
-            if transformar(path, converter, self.backups):
-                self._confianca()
+        adaptar_hooks_plugin(
+            raiz,
+            self.codex_home,
+            self.backups,
+            normalizar=self._normalizar,
+            ao_alterar=self._confianca,
+        )
 
     async def _historico(self, codex) -> dict:
         result = {"mcp_servers": set(), "agents": set(), "commands": set()}
@@ -831,8 +782,9 @@ class IntegracaoCodex:
 
     def fingerprint(self, *, fontes: bool = False) -> str:
         h = hashlib.sha256()
-        h.update(b"instrucoes-nativas-v1")
+        h.update(b"instrucoes-nativas-v1-ecc-keep-v1-marketplace-skills-v1")
         caminhos = [self.home / ".claude" / "settings.json", self.home / ".claude.json"]
+        caminhos.append(self.home / ".claude/ecc-slim-keep.txt")
         caminhos.extend(self.home / ".claude" / nome for nome in ("CLAUDE.md", "CLAUDE.MD"))
         for path in (self.codex_home / ".hangar-instrucoes").glob('*.json'):
             dados = json_obj(path)

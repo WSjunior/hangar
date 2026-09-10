@@ -1,4 +1,6 @@
+import json
 import time
+from pathlib import Path
 import pytest
 from types import SimpleNamespace
 from fastapi import FastAPI, Depends
@@ -6,6 +8,7 @@ from fastapi.testclient import TestClient
 from app.auth import require_auth
 from app.config import settings
 from app import pair, tmux
+from app import codex_contas
 from app import registry as registry_mod
 from app.registry import SessionRegistry
 import app.api as api_mod
@@ -1569,7 +1572,10 @@ def test_resume_archived_route_404_when_transcript_missing(api_client):
 # `codex resume` recebe — o mesmo id que o Arquivo ja usa pra listar e abrir a conversa.
 
 def test_resume_archived_codex_cria_sessao_ligada_a_conversa(api_client):
+    origem = codex_contas.Account("default", Path("/tmp/codex"), True)
     with patch("app.api.archive_cwd", return_value="/home/u/my-proj"), \
+         patch("app.api.archive_jsonl", return_value=Path("/tmp/codex/sessions/rollout.jsonl")), \
+         patch("app.api.codex_accounts.account_for_rollout", return_value=origem), \
          patch.object(tmux, "has_session", return_value=False), \
          patch("app.api.codex_sessions.exists", return_value=False), \
          patch("app.api.registry.create",
@@ -1580,13 +1586,16 @@ def test_resume_archived_codex_cria_sessao_ligada_a_conversa(api_client):
     assert r.status_code == 200
     assert r.json()["provider"] == "codex"
     create.assert_called_once_with("my-proj", "/home/u/my-proj", config_dir=None, provider="codex",
-                                   resume_session_id=_SID, engine=None)
+                                   resume_session_id=_SID, engine=None, codex_account="default")
 
 
 def test_resume_archived_codex_desvia_de_nome_de_sessao_codex_viva(api_client):
     """A sessao Codex viva nao esta no tmux com aquele nome — esta no sidecar. Olhando so o tmux, o
     conflito estourava la dentro do create, com a mensagem de outro assunto."""
+    origem = codex_contas.Account("default", Path("/tmp/codex"), True)
     with patch("app.api.archive_cwd", return_value="/home/u/my-proj"), \
+         patch("app.api.archive_jsonl", return_value=Path("/tmp/codex/sessions/rollout.jsonl")), \
+         patch("app.api.codex_accounts.account_for_rollout", return_value=origem), \
          patch.object(tmux, "has_session", return_value=False), \
          patch("app.api.codex_sessions.exists", side_effect=[True, False]), \
          patch("app.api.registry.create",
@@ -1595,6 +1604,48 @@ def test_resume_archived_codex_desvia_de_nome_de_sessao_codex_viva(api_client):
                             json={"provider": "codex"})
     assert r.status_code == 200
     assert create.call_args[0][0] == "my-proj-2"
+
+
+def test_resume_archived_codex_encaminha_a_conta_da_origem(api_client, monkeypatch, tmp_path):
+    monkeypatch.setattr(__import__("pathlib").Path, "home",
+                        classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", tmp_path / ".codex")
+    work = codex_contas.create_account("work")
+    sid = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    path = work.home / "sessions" / "2026" / "09" / "09"
+    path.mkdir(parents=True)
+    (path / f"rollout-2026-09-09T10-00-00-{sid}.jsonl").write_text(json.dumps({
+        "type": "session_meta", "payload": {"session_id": sid, "cwd": "/home/u/my-proj"},
+    }) + "\n", encoding="utf-8")
+    with patch.object(tmux, "has_session", return_value=False), \
+         patch("app.api.codex_sessions.exists", return_value=False), \
+         patch("app.api.registry.create",
+               return_value=SessionInfo(name="my-proj", cwd="/home/u/my-proj",
+                                        provider="codex")) as create:
+        response = api_client.post(f"/api/archive/codex/{sid}/resume", headers=_h(),
+                                   json={"provider": "codex"})
+    assert response.status_code == 200, response.text
+    assert create.call_args.kwargs["codex_account"] == "work"
+
+
+def test_resume_archived_codex_recusa_conta_diferente_da_origem(api_client, monkeypatch, tmp_path):
+    monkeypatch.setattr(__import__("pathlib").Path, "home",
+                        classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", tmp_path / ".codex")
+    work = codex_contas.create_account("work")
+    other = codex_contas.create_account("other")
+    sid = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+    path = work.home / "sessions" / "2026" / "09" / "09"
+    path.mkdir(parents=True)
+    (path / f"rollout-2026-09-09T10-00-00-{sid}.jsonl").write_text(json.dumps({
+        "type": "session_meta", "payload": {"session_id": sid, "cwd": "/home/u/my-proj"},
+    }) + "\n", encoding="utf-8")
+    with patch("app.api.registry.create") as create:
+        response = api_client.post(f"/api/archive/codex/{sid}/resume", headers=_h(),
+                                   json={"provider": "codex", "codex_account": other.id})
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "codex_account_archive_mismatch"
+    create.assert_not_called()
 
 
 def test_resume_archived_codex_recusa_nome_de_rollout_sem_id(api_client):

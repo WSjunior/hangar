@@ -21,6 +21,7 @@ from app.chain import ThenLink
 from app import pair, pair_texto
 from app.pair import PairLink, rename_pair, leave as pair_leave
 from app.adapters.codex import sessions as codex_sessions
+from app import codex_contas
 from app.askquestion import clear_pending_askq, pergunta_aberta
 from app.state import (classify, _live_spinner, rate_limit_reset, corrige_ocioso_kimi,
                        aprovacao_kimi, codex_turno_aberto, menu_codex,
@@ -713,6 +714,8 @@ _STATUS_BUDGET = 2
 # Gancho que o api.py registra: drena a fila do peer avisado (PromptQueue só drena em transição
 # de hook; peer já ocioso nunca receberia o aviso). Módulo, não instância — há 4 registries.
 apos_saida_por_morte: Optional[Callable[[str], None]] = None
+apos_saida_codex: Optional[Callable[[str], None]] = None
+apos_renomear_codex: Optional[Callable[[str, str], None]] = None
 
 
 class KillFailed(Exception):
@@ -1069,13 +1072,6 @@ class SessionRegistry:
         # state (sai 'idle' default): este caminho so resolve transcript; quem quer state usa
         # list_with_state(). Usado por varios endpoints que so precisam do jsonl por nome.
         children = _proc_children_map()
-        # A conta do Codex é UMA por máquina (o `auth.json` do CODEX_HOME) e agora tem fonte no
-        # painel de cotas — sem carimbá-la nas sessões Codex, a pílula do topo continuaria caindo no
-        # pior-geral numa sessão cuja cota o app já sabe ler. `None` quando não há credencial no
-        # disco. Resolvida UMA vez aqui porque serve aos dois lugares que montam sessão Codex (o
-        # pane sem sidecar, logo abaixo, e o laço dos sidecars no fim) e isto roda a cada varredura.
-        from app import cotas
-        conta_codex = cotas.id_conta_codex()
         out = []
         sids: dict[str, Optional[str]] = {}
         for panes in tmux.list_panes_all().values():
@@ -1181,9 +1177,11 @@ class SessionRegistry:
                 atual = pi_models.provider_atual(jsonl, cfg_pi) if jsonl else None
                 info.conta = cotas.conta_de_provider_pi(atual)
             elif prov == "codex":
-                # Codex tem conta propria (o OAuth do proprio CLI), que nao e nenhuma das chaves do
-                # /api/cotas — cair no `else` abaixo carimbaria uma conta Claude que ela nao gasta.
-                info.conta = conta_codex
+                # A origem é a raiz do Codex, mesmo sem `auth.json`: a identidade da sessão não pode
+                # desaparecer só porque a conta está desconectada.
+                codex_home = str(codex_contas.default_home().resolve(strict=False))
+                info.codex_home = codex_home
+                info.conta = f"codex:{codex_home}"
             else:
                 cdir = (_config_dir_of(pid_env) if pid_env else None) or (Path.home() / ".claude")
                 info.conta = f"claude:{Path(cdir).resolve()}"
@@ -1194,10 +1192,13 @@ class SessionRegistry:
         # Sessoes Codex: a TUI vive no tmux, mas a identidade vem dos sidecars duraveis (sobrevivem
         # a restart; o historico esta no rollout). O client vivo e reaberto sob demanda.
         for meta in codex_sessions.list_all():
+            codex_home = str(Path(meta.get("codex_home") or codex_contas.default_home())
+                             .expanduser().resolve(strict=False))
             br, wt = head_info(meta.get("cwd"))
             out.append(SessionInfo(
                 name=meta["name"], cwd=meta.get("cwd"), jsonl=meta.get("rollout_path"),
-                provider="codex", tracked=True, conta=conta_codex,
+                provider="codex", tracked=True, conta=f"codex:{codex_home}",
+                codex_home=codex_home,
                 branch=br, worktree=wt,
                 then_target=(ThenLink(meta["name"]).get() or {}).get("target"),
                 pair_peers=(PairLink(meta["name"]).get() or {}).get("peers"),
@@ -1567,16 +1568,26 @@ class SessionRegistry:
                permission_mode: str | None = None,
                initial_prompt: str | None = None,
                omp_profile: str | None = None,
+               codex_account: str | None = None,
                read_only: bool = False) -> SessionInfo:
         # Nome tmux nao aceita "."/":"/espaco -> sanitiza igual ao rename. Varias sessoes na MESMA
         # pasta sao permitidas: cada uma tem nome unico + --session-id proprio -> jsonl proprio.
         name = sanitize_session_name(name)
         if not name:
             raise ValueError("nome invalido")
+        codex_home = None
+        if provider == "codex":
+            try:
+                account = codex_contas.resolve_account(codex_account or "default")
+            except codex_contas.AccountError as exc:
+                raise ValueError(f"{exc.code}: {exc.params}") from None
+            codex_home = str(account.home.expanduser().absolute())
+        elif codex_account is not None:
+            raise ValueError("codex_account so vale para provider codex")
         protected_prefix = []
         if read_only:
             from app.orq_readonly import prepare
-            protected_prefix = prepare(cwd, runtime_dirs=(config_dir or "",))
+            protected_prefix = prepare(cwd, runtime_dirs=(config_dir or "", codex_home or ""))
         if omp_profile:
             if provider != "omp":
                 raise ValueError("perfil so vale para provider omp")
@@ -1660,7 +1671,9 @@ class SessionRegistry:
                     raise ValueError("session_id invalido")
                 sid = resume_session_id
                 from app.adapters.codex.lancador import comando_do_lancador
-                cmd = tmux.join_cmd(comando_do_lancador(cwd, thread_id=sid))
+                cmd = tmux.join_cmd(comando_do_lancador(cwd, thread_id=sid,
+                                                       codex_home=codex_home,
+                                                       codex_account=account.id))
             elif provider == "omp":
                 # Retoma por CAMINHO: o id interno do omp nao e o do nome do arquivo, e spawn e
                 # resume sao verbos diferentes — reusar o spawn abriria conversa nova.
@@ -1702,6 +1715,9 @@ class SessionRegistry:
             # que estar no comando do pane. Os outros providers recebem prompt inicial por /input,
             # e aceitar o argumento neles seria escolha que some calada.
             extra = {"initial_prompt": initial_prompt} if provider == "codex" else {}
+            if provider == "codex":
+                extra["codex_home"] = codex_home
+                extra["codex_account"] = account.id
             if provider == "omp" and omp_profile:
                 extra["perfil"] = omp_profile
             cmd = tmux.join_cmd(get_adapter(provider).spawn_command(
@@ -1750,7 +1766,7 @@ class SessionRegistry:
             from app.adapters.kimi import sessions as kimi_sessions
             kimi_sessions.pretrust_cwd(cwd)
         elif provider == "codex":
-            codex_sessions.pretrust_cwd(cwd)
+            codex_sessions.pretrust_cwd(cwd, codex_home=codex_home)
         elif provider not in ("pi", "omp"):
             _pretrust_cwd(cwd, config_dir)
         if protected_prefix:
@@ -1774,7 +1790,8 @@ class SessionRegistry:
         # Pi (jsonl=None) nao entra no cache — nao ha path a fixar, e a resolucao dele nem passa por aqui.
         if jsonl is not None:
             self._jsonl_cache[name] = jsonl
-        return SessionInfo(name=name, cwd=cwd, jsonl=jsonl, provider=provider, engine=engine)
+        return SessionInfo(name=name, cwd=cwd, jsonl=jsonl, provider=provider, engine=engine,
+                           codex_home=codex_home)
 
     def rename(self, old: str, new: str) -> None:
         if codex_sessions.exists(old):
@@ -1807,6 +1824,8 @@ class SessionRegistry:
         # senão o par ficaria pareado com um fantasma e o unpair simétrico quebrava. Sob o lock do
         # módulo pair (rename_pair): sem ele, um unpair concorrente podia ser ressuscitado.
         rename_pair(old, new)
+        if apos_renomear_codex:
+            apos_renomear_codex(old, new)
         # L71 da revisao final: o shell escondido e keyed por NOME (`term-<nome>`) e NAO acompanha o
         # rename sozinho -- ele ficava orfa pra sempre, invisivel no app (marcado @cp_hidden) e fora
         # do alcance do `kill()`, que so procura `term-<nome NOVO>`. Pior: a aba Shell do nome novo
@@ -1866,6 +1885,8 @@ class SessionRegistry:
             PromptQueue(name).clear()
             ThenLink(name).clear()
             self._clear_pair(name)
+            if apos_saida_codex:
+                apos_saida_codex(name)
             return
         # Limpa o sidecar do AskUserQuestion ANTES de matar (precisa do processo vivo pra resolver o
         # jsonl), best-effort: cleanup nunca bloqueia/quebra o kill. Senao um stale reabriria o stepper

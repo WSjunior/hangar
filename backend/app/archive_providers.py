@@ -19,13 +19,13 @@ indice, e o nome do arquivo do Pi e do Codex carrega um timestamp que nao da pra
 """
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
 from app.models import ChatEvent
+from app import codex_contas
 
 _log = logging.getLogger("hangar.archive_providers")
 
@@ -46,6 +46,8 @@ class Conversa:
     session_id: str
     path: Path
     mtime: float
+    # Origem confiável do rollout Codex. `None` mantém fixtures e sidecars antigos compatíveis.
+    codex_home: Optional[str] = None
 
 
 def _mtime(p: Path) -> float:
@@ -148,8 +150,40 @@ def _kimi_jsonl(session_id: str) -> Optional[Path]:
 
 
 # ── Codex ─────────────────────────────────────────────────────────────────────
-def _codex_raiz() -> Path:
-    return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")) / "sessions"
+def _codex_raiz(home: Path | str | None = None) -> Path:
+    base = codex_contas.default_home() if home is None else Path(home)
+    return base.expanduser().absolute() / "sessions"
+
+
+def _codex_raizes(home: Path | str) -> tuple[Path, Path]:
+    base = Path(home).expanduser().absolute()
+    return base / "sessions", base / "archived_sessions"
+
+
+def _codex_contas(account_id: str | None = None) -> list[codex_contas.Account]:
+    if account_id is not None:
+        return [codex_contas.resolve_account(account_id)]
+    return codex_contas.list_accounts()
+
+
+def _codex_rollouts(home: Path | str) -> list[Path]:
+    out: list[Path] = []
+    vistos: set[Path] = set()
+    for raiz in _codex_raizes(home):
+        try:
+            arquivos = raiz.rglob("rollout-*.jsonl") if raiz.is_dir() else ()
+            for path in arquivos:
+                try:
+                    canonical = path.resolve(strict=True)
+                except OSError:
+                    continue
+                if canonical in vistos:
+                    continue
+                vistos.add(canonical)
+                out.append(path)
+        except OSError:
+            _log.warning("arquivo: nao consegui varrer raiz Codex %s", raiz, exc_info=True)
+    return out
 
 
 def _codex_cwd(obj: dict) -> Optional[str]:
@@ -159,29 +193,65 @@ def _codex_cwd(obj: dict) -> Optional[str]:
     return payload.get("cwd") if isinstance(payload, dict) else None
 
 
-def _codex_conversas() -> list[Conversa]:
+def _codex_conversas(codex_account: str | None = None) -> list[Conversa]:
     out: list[Conversa] = []
-    try:
-        arquivos = list(_codex_raiz().glob("*/*/*/rollout-*.jsonl"))
-    except OSError:
-        return []
-    for f in arquivos:
-        sid = f.stem[-36:]
-        if not UUID_RE.match(sid):
+    for account in _codex_contas(codex_account):
+        try:
+            arquivos = _codex_rollouts(account.home)
+        except OSError:
+            _log.warning("arquivo: conta Codex ilegivel %s", account.id, exc_info=True)
             continue
-        out.append(Conversa("codex", _cwd_do_cabecalho(f, _codex_cwd), sid, f, _mtime(f)))
+        for f in arquivos:
+            sid = f.stem[-36:]
+            if not UUID_RE.match(sid):
+                continue
+            try:
+                owner = codex_contas.account_for_rollout(f)
+            except codex_contas.AccountError:
+                raise
+            if owner is None or owner.id != account.id:
+                continue
+            out.append(Conversa("codex", _cwd_do_cabecalho(f, _codex_cwd), sid, f, _mtime(f),
+                                str(owner.home.resolve(strict=False))))
     return out
 
 
-def _codex_jsonl(session_id: str) -> Optional[Path]:
+def _codex_jsonl(session_id: str, codex_account: str | None = None) -> Optional[Path]:
     if not UUID_RE.match(session_id):
         raise ValueError("session_id invalido")
-    try:
-        achados = sorted(_codex_raiz().glob(f"*/*/*/rollout-*-{session_id}.jsonl"),
-                         key=_mtime, reverse=True)
-    except OSError:
-        return None
-    return achados[0] if achados else None
+    achados: list[tuple[Path, codex_contas.Account]] = []
+    for account in _codex_contas(codex_account):
+        for path in _codex_rollouts(account.home):
+            if not path.name.endswith(f"-{session_id}.jsonl"):
+                continue
+            owner = codex_contas.account_for_rollout(path)
+            if owner is not None and owner.id == account.id:
+                achados.append((path, owner))
+    if codex_account is not None and not achados:
+        # O filtro escolhe a raiz, mas não pode transformar uma conversa existente noutra conta em
+        # 404: a origem comprovada é um conflito explícito antes da retomada.
+        for account in _codex_contas():
+            if account.id == codex_account:
+                continue
+            for path in _codex_rollouts(account.home):
+                if not path.name.endswith(f"-{session_id}.jsonl"):
+                    continue
+                owner = codex_contas.account_for_rollout(path)
+                if owner is not None and owner.id != codex_account:
+                    raise codex_contas.AccountError(
+                        409,
+                        "codex_account_archive_mismatch",
+                        {"account_id": codex_account, "origin_account": owner.id},
+                    )
+    ids = {owner.id for _, owner in achados}
+    if codex_account is None and len(ids) > 1:
+        raise codex_contas.AccountError(
+            409,
+            "codex_account_ambiguous_rollout",
+            {"session_id": session_id, "accounts": sorted(ids)},
+        )
+    achados.sort(key=lambda item: _mtime(item[0]), reverse=True)
+    return achados[0][0] if achados else None
 
 
 # ── Fachada ───────────────────────────────────────────────────────────────────
@@ -191,25 +261,25 @@ _RESOLVER = {"pi": _pi_jsonl, "omp": lambda sid: _pi_jsonl(sid, "omp"),
              "kimi": _kimi_jsonl, "codex": _codex_jsonl}
 
 
-def conversas() -> list[Conversa]:
+def conversas(codex_account: str | None = None) -> list[Conversa]:
     """Todas as conversas mortas de Pi, Kimi e Codex. Provider que falhar (layout mudou, home
     ausente) sai da lista com um log -- nunca derruba os outros nem o Arquivo do Claude."""
     out: list[Conversa] = []
     for nome, fn in _LISTAR.items():
         try:
-            out += fn()
+            out += _codex_conversas(codex_account) if nome == "codex" else fn()
         except Exception:
             _log.warning("arquivo: falha ao varrer conversas de %s", nome, exc_info=True)
     return out
 
 
-def jsonl_de(provider: str, session_id: str) -> Path:
+def jsonl_de(provider: str, session_id: str, codex_account: str | None = None) -> Path:
     """Path do transcript. ValueError = session_id fora do formato daquele provider;
     FileNotFoundError = nao existe. Mesmos erros de archive.archive_jsonl."""
     fn = _RESOLVER.get(provider)
     if fn is None:
         raise ValueError("provider invalido")
-    p = fn(session_id)
+    p = fn(session_id, codex_account=codex_account) if provider == "codex" else fn(session_id)
     if p is None:
         raise FileNotFoundError(session_id)
     return p

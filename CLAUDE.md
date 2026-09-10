@@ -1169,6 +1169,25 @@ The frontend `EventSource` (`screens/Chat.svelte`) listens for:
   - **`earliest_refresh_at` na resposta do token**: o servidor diz quando o próximo refresh é aceito
     (~9 dias, com o access valendo 10). Não é erro, é o ritmo dele.
   O `codex login` (0.153.1) não tem `--device-auth` visível no `--help`; o app não depende dele.
+- **Contas Codex adicionais têm origem própria** (`app/codex_contas*.py`, 10/09/2026): a padrão usa
+  o `CODEX_HOME` atual; cada secundária tem outro `CODEX_HOME` e herda seletivamente a configuração,
+  recursos e plugins da padrão. O parágrafo histórico acima descreve o fluxo legado de login único
+  e está superado para cadastro Codex: o novo login por conta usa o protocolo nativo do Codex e não
+  propaga novas credenciais para Pi/OMP. OAuth/API key são apenas métodos (`auth_method`), nunca a
+  chave da conta: a identidade é `credential_id=codex:<home canônica>` e a origem do rollout.
+  Autenticação, histórico, sessões, caches e confiança ficam separados; hooks herdados podem ficar
+  pendentes e nunca são aprovados automaticamente. Catálogo embutido é materializado dentro da
+  secundária: no CLI 0.153.4, symlink do cache ou do catálogo da padrão resulta em zero plugins, e o
+  catálogo reservado só instala quando está sob o `CODEX_HOME` atual. Plugins remotos instalados por
+  padrão são reconhecidos pela identidade remota, mesmo quando o inventário chama o catálogo de
+  `openai-curated` e o plugin usa `openai-curated-remote`. Sessão, Arquivo e retomada preservam a
+  conta; não há exclusão, rotação, migração ou troca automática por cota.
+  Prova real em Linux (10/09/2026): conta padrão Pro preservada e secundária Plus conectada pelo
+  login nativo, com os e-mails omitidos desta documentação pública; 20/20 plugins mantiveram
+  a mesma versão/estado,
+  hooks aprovados somente após pedido explícito do usuário e turno mínimo em `gpt-5.6-luna`
+  respondendo `OK`. O rollout nasceu em `~/.codex-google`, apareceu no Arquivo após fechar e foi
+  retomado pela mesma conta. AVD e Windows continuam sem verificação.
 - **Painel de saúde dos harnesses** (`app/harness_saude.py` + `harness_api.py` +
   `components/settings/HarnessSettings.svelte`, aba "Harnesses" em Configurações → Servidor): uma
   linha por CLI com o que o app instalou nele (hooks do Claude, contas, login do ChatGPT, extensões

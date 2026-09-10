@@ -6,6 +6,10 @@ import json
 import os
 from pathlib import Path
 import shutil
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.codex_contas import Account
 
 
 _READ_LIMIT = 8 * 1024 * 1024
@@ -25,9 +29,11 @@ class CodexNativo:
     def __init__(
         self, home: Path, codex_home: Path, binario: str = "codex", *,
         timeout: float = 120.0, close_timeout: float = 3.0,
+        account: "Account | None" = None,
     ) -> None:
         self.home = home.absolute()
         self.codex_home = codex_home.absolute()
+        self.account = account
         self.binario = binario
         self.timeout = timeout
         self.close_timeout = close_timeout
@@ -38,8 +44,12 @@ class CodexNativo:
         self._closed = True
         self._import_lock = asyncio.Lock()
         self._completions: asyncio.Queue | None = None
+        self._listeners: dict[str, set[asyncio.Queue]] = {}
 
     def _env(self) -> dict[str, str]:
+        if self.account is not None:
+            from app.codex_contas import environment
+            return environment(self.account, home=self.home)
         env = {**os.environ, "HOME": str(self.home), "USERPROFILE": str(self.home),
                "CODEX_HOME": str(self.codex_home)}
         if self.home != Path.home().absolute():
@@ -106,6 +116,43 @@ class CodexNativo:
                 future.set_exception(CodexNativoErro("O importador nativo do Codex encerrou a conexão."))
         if self._completions is not None:
             self._completions.put_nowait(None)
+        for queues in self._listeners.values():
+            for queue in queues:
+                queue.put_nowait(None)
+        self._listeners.clear()
+
+    def subscribe(self, method: str) -> asyncio.Queue:
+        queue: asyncio.Queue = asyncio.Queue()
+        self._listeners.setdefault(method, set()).add(queue)
+        return queue
+
+    def unsubscribe(self, method: str, queue: asyncio.Queue) -> None:
+        listeners = self._listeners.get(method)
+        if listeners is None:
+            return
+        listeners.discard(queue)
+        if not listeners:
+            self._listeners.pop(method, None)
+
+    def _dispatch(self, message: dict) -> None:
+        # JSON-RPC server messages are identified by `method`; a server request may also carry
+        # `id`, so checking id first would resolve a client Future with an unrelated notification.
+        method = message.get("method")
+        if "method" in message:
+            if not isinstance(method, str):
+                return
+            if method == _COMPLETED and self._completions is not None:
+                params = message.get("params")
+                if isinstance(params, dict):
+                    self._completions.put_nowait(params)
+            for queue in tuple(self._listeners.get(method, ())):
+                queue.put_nowait(message)
+            return
+        if "id" in message:
+            req_id = message["id"]
+            future = self._pending.get(req_id) if isinstance(req_id, int) else None
+            if future is not None and not future.done():
+                future.set_result(message)
 
     async def _read_loop(self) -> None:
         assert self._proc is not None and self._proc.stdout is not None
@@ -116,15 +163,7 @@ class CodexNativo:
                 message = json.loads(raw)
                 if not isinstance(message, dict):
                     continue
-                if "id" in message:
-                    req_id = message["id"]
-                    future = self._pending.get(req_id) if isinstance(req_id, int) else None
-                    if future is not None and not future.done():
-                        future.set_result(message)
-                elif message.get("method") == _COMPLETED and self._completions is not None:
-                    params = message.get("params")
-                    if isinstance(params, dict):
-                        self._completions.put_nowait(params)
+                self._dispatch(message)
         except (OSError, ValueError):
             # Conteúdo de stdout pode incluir segredos; a falha publicada é somente de conexão.
             pass
@@ -275,6 +314,13 @@ class CodexNativo:
         if not isinstance(plugins, list) or any(not isinstance(item, dict) for item in plugins):
             raise CodexNativoErro("O Codex retornou um inventário de plugins inválido.")
         return plugins
+
+    async def marketplaces_instalados(self) -> list[dict]:
+        result = await self.cli(["plugin", "marketplace", "list", "--json"])
+        marketplaces = result.get("marketplaces")
+        if not isinstance(marketplaces, list) or any(not isinstance(item, dict) for item in marketplaces):
+            raise CodexNativoErro("O Codex retornou um inventário de marketplaces inválido.")
+        return marketplaces
 
     async def atualizar_marketplace(self, nome: str) -> dict:
         return await self.cli(["plugin", "marketplace", "upgrade", nome, "--json"])

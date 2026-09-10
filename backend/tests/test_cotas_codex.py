@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from app import codex_appserver, cotas
+from app import codex_appserver, codex_contas, cotas
 
 # Cópia da resposta real desta máquina em 30/08/2026 (campos que não usamos foram cortados).
 # Detalhes que quebram parser ingênuo: o percentual já vem PRONTO (`usedPercent`, não used/cap), a
@@ -33,8 +33,10 @@ def _cache_limpo():
     """A presença da credencial é cacheada pelo mtime (custo do tick do SSE). Sem zerar, um caso
     que muda o HOME herdaria a resposta do anterior e passaria por acidente."""
     cotas._cred_codex_cache = None
+    cotas._codex_auth_cache = None
     yield
     cotas._cred_codex_cache = None
+    cotas._codex_auth_cache = None
 
 
 def _home(monkeypatch, alvo):
@@ -43,6 +45,7 @@ def _home(monkeypatch, alvo):
     O delenv anda junto: `CODEX_HOME` exportado na máquina de quem roda furaria o home falso."""
     monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setattr(codex_appserver.Path, "home", staticmethod(lambda: alvo))
+    monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", alvo / ".codex")
 
 
 def _auth(home, tokens=True):
@@ -117,6 +120,8 @@ def test_credencial_nova_no_disco_e_notada(monkeypatch, tmp_path):
     """O cache é pelo mtime, e a leitura roda por sessão a cada varredura: fazer login no Codex
     não pode exigir reiniciar o backend pra a linha aparecer."""
     _home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cotas, "_codex_auth_cache",
+                        lambda home: {"method": "none", "status": "disconnected"})
     cotas._cred_codex_cache = None
     assert cotas.id_conta_codex() is None
     _auth(tmp_path)
@@ -139,6 +144,8 @@ def test_sem_credencial_no_disco_nem_pergunta(monkeypatch, tmp_path):
     sem `auth.json` com tokens a linha diz "não há credencial" em vez de "falhou"."""
     _auth(tmp_path, tokens=False)
     _home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cotas, "_codex_auth_cache",
+                        lambda home: {"method": "none", "status": "disconnected"})
     monkeypatch.setattr(cotas.codex_appserver, "perguntar",
                         lambda m, **kw:pytest.fail("nao podia perguntar sem credencial"))
     assert cotas._ler_codex() == ("sem_credencial", [], None)
@@ -148,6 +155,8 @@ def test_o_id_da_conta_e_o_mesmo_da_fonte(monkeypatch, tmp_path):
     """A pílula do topo procura no `/api/cotas` a linha do `conta` da sessão. Ids diferentes nos
     dois lugares fariam ela cair no pior-geral numa sessão cuja cota o app sabe ler."""
     _home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cotas, "_codex_auth_cache",
+                        lambda home: {"method": "none", "status": "disconnected"})
     assert cotas.id_conta_codex() is None
     _auth(tmp_path)
     fonte = next(f for f in cotas._fontes() if f.provedor == "codex")
@@ -160,7 +169,7 @@ def test_codex_home_manda_no_caminho(monkeypatch, tmp_path):
     outro = tmp_path / "alhures"
     _auth(outro)
     _home(monkeypatch, tmp_path / "vazio")
-    monkeypatch.setenv("CODEX_HOME", str(outro / ".codex"))
+    monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", outro / ".codex")
     assert cotas.id_conta_codex() == f"codex:{outro / '.codex'}"
 
 
@@ -213,8 +222,78 @@ def test_resposta_boa_continua_passando(monkeypatch):
 def test_a_fonte_so_existe_com_credencial(monkeypatch, tmp_path):
     """Quem não usa Codex não ganha uma linha vazia no painel — nem paga o processo."""
     _home(monkeypatch, tmp_path)
-    assert not [f for f in cotas._fontes() if f.provedor == "codex"]
+    assert len([f for f in cotas._fontes() if f.provedor == "codex"]) == 1
     _auth(tmp_path)
     fontes = [f for f in cotas._fontes() if f.provedor == "codex"]
     assert len(fontes) == 1
     assert fontes[0].chave.startswith("codex:")
+
+
+def test_keyring_oauth_sem_auth_json_consulta_cota(monkeypatch, tmp_path):
+    _home(monkeypatch, tmp_path)
+    monkeypatch.setattr(cotas, "_codex_auth_cache",
+                        lambda home: {"method": "oauth", "status": "connected"})
+    vistos = []
+    monkeypatch.setattr(cotas.codex_appserver, "perguntar",
+                        lambda method, **kw: (vistos.append(kw["codex_home"]), _RATE_LIMITS)[1])
+    estado, janelas, motivo = cotas._ler_codex(tmp_path / ".codex")
+    assert (estado, motivo) == ("lida", None)
+    assert vistos == [tmp_path / ".codex"]
+
+
+@pytest.mark.parametrize("arquivo", [False, True])
+def test_identidade_keyring_muda_sem_alterar_disco(monkeypatch, tmp_path, arquivo):
+    _home(monkeypatch, tmp_path)
+    if arquivo:
+        _auth(tmp_path, tokens=False)
+    identidade = {"method": "none", "status": "disconnected"}
+    monkeypatch.setattr(cotas, "_codex_auth_cache", lambda account: identidade)
+    assert not cotas._tem_credencial_codex()
+    identidade.update(method="oauth", status="connected")
+    assert cotas._tem_credencial_codex()
+    identidade.update(method="none", status="disconnected")
+    assert not cotas._tem_credencial_codex()
+
+
+def test_fontes_codex_sao_separadas_mesmo_sem_auth(monkeypatch, tmp_path):
+    monkeypatch.setattr(__import__("pathlib").Path, "home",
+                        classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", tmp_path / ".codex")
+    monkeypatch.setattr(cotas, "_codex_auth_cache",
+                        lambda home: {"method": "none", "status": "disconnected"})
+    work = codex_contas.create_account("work")
+    fontes = [f for f in cotas._fontes() if f.provedor == "codex"]
+    assert {f.chave for f in fontes} == {
+        f"codex:{(tmp_path / '.codex').resolve()}", f"codex:{work.home.resolve()}"
+    }
+    assert all(f.ler()[0] == "sem_credencial" for f in fontes)
+
+
+def test_cota_codex_le_roots_com_mesma_assinatura(monkeypatch, tmp_path):
+    monkeypatch.setattr(__import__("pathlib").Path, "home",
+                        classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", tmp_path / ".codex")
+    work = codex_contas.create_account("work")
+    _auth(tmp_path)
+    work_auth = work.home / "auth.json"
+    work_auth.write_text(json.dumps({"tokens": {"access_token": "at-work"}}), encoding="utf-8")
+    same = 1_700_000_000
+    for account in (codex_contas.default_home(), work.home):
+        auth = account / "auth.json"
+        auth.touch()
+        import os
+        os.utime(auth, (same, same))
+    vistos = []
+
+    def perguntar(method, **kwargs):
+        vistos.append(str(kwargs["codex_home"]))
+        pct = 11 if kwargs["codex_home"] == codex_contas.default_home() else 22
+        return {"rateLimits": {"primary": {"usedPercent": pct, "windowDurationMins": 300}}}
+
+    monkeypatch.setattr(cotas.codex_appserver, "perguntar", perguntar)
+    cotas._cred_codex_cache = None
+    fontes = [f for f in cotas._fontes() if f.provedor == "codex"]
+    cotas._atualizar(fontes, forcar=True)
+    assert {f"{home}" for home in vistos} == {
+        str(codex_contas.default_home()), str(work.home),
+    }

@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { proposedPlan, planDisplayText } from './proposedPlan';
+import { proposedPlan, planDisplayText, planTitle } from './proposedPlan';
+
+it('usa o primeiro título real, ignorando cercas e código indentado', () => {
+  expect(planTitle('```md\n# Exemplo\n```\n    # Código\n## Título real ###\n# Outro')).toBe('Título real');
+  expect(planTitle('~~~~md\n# Exemplo\n~~~\n# Ainda exemplo\n~~~~\nTítulo setext\n=====')).toBe('Título setext');
+  expect(planTitle('Sem título\n\n- Etapa')).toBeNull();
+  expect(planTitle('# ' + 'Longo '.repeat(80))).toBe('Longo '.repeat(80).trim());
+});
 
 describe('plano proposto pelo Codex', () => {
   it('extrai o plano completo preservando o Markdown', () => {

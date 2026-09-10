@@ -1,56 +1,97 @@
 <script lang="ts">
   import * as m from '../paraglide/messages';
-  import { getSessionPlanPreview, type SessionPlanPreview } from '@hangar/core';
+  import { getSessionPlanPreview, planTitle, type SessionPlanPreview } from '@hangar/core';
   import { renderMarkdown } from '../lib/markdown';
   import BottomSheet from './BottomSheet.svelte';
 
+  type ClaudePlanPreview = SessionPlanPreview & { anchor_id?: string | null };
+
   interface Props {
     sessionName: string;
+    serverId?: string;
     provider: string;
     revision: string;
     desktop: boolean;
     codexPlan: string | null;
     disabled: boolean;
     onImplement: (plan: string) => Promise<void>;
+    discovery?: ClaudePlanPreview | null;
+    discoveryLoading?: boolean;
+    discoveryError?: string;
+    onRetryDiscovery?: () => void;
   }
-  let { sessionName, provider, revision, desktop, codexPlan, disabled, onImplement }: Props = $props();
-  let metadata = $state<SessionPlanPreview | null>(null);
+  let {
+    sessionName, serverId = '', provider, revision, desktop, codexPlan, disabled, onImplement,
+    discovery = undefined, discoveryLoading = false, discoveryError = '', onRetryDiscovery,
+  }: Props = $props();
+  let metadata = $state<ClaudePlanPreview | null>(null);
+  let modalMetadata = $state<ClaudePlanPreview | null>(null);
   let open = $state(false);
   let markdown = $state('');
   let loading = $state(false);
   let error = $state('');
   let sending = $state(false);
   let actionError = $state('');
-  let discoveryError = $state('');
-  let retries = $state(0);
+  let discoveryErrorInterno = $state('');
+  let discoveryLoadingInterno = $state(false);
+  let retriesInterno = $state(0);
   let dismissed = $state<string | null>(null);
   let generation = 0;
-  let discoveredSession = '';
-  let discoveryRetry = 0;
-  const title = $derived(metadata?.name ?? m.chat_plan_proposto());
+  let identidadeInterna = '';
+  let ultimoEstado: string | null = null;
+  let ultimaBusca = '';
+  const discoveryControlada = $derived(discovery !== undefined);
+  const metadataAtual = $derived(discoveryControlada ? discovery : metadata);
+  const discoveryLoadingAtual = $derived(discoveryControlada ? discoveryLoading : discoveryLoadingInterno);
+  const discoveryErrorAtual = $derived(discoveryControlada ? discoveryError : discoveryErrorInterno);
+  const metadataModal = $derived(modalMetadata ?? metadataAtual);
+  const titleText = $derived(codexPlan ?? (markdown || metadataModal?.markdown || ''));
+  const title = $derived(planTitle(titleText) ?? m.chat_plan_proposto());
   const html = $derived(renderMarkdown(markdown, { joinWrapped: true }));
 
   $effect(() => {
     const name = sessionName;
     const source = provider;
-    const state = revision;
-    void retries;
-    if (source !== 'claude') { metadata = null; discoveryError = ''; return; }
-    if (state === 'working' && discoveredSession === name && discoveryRetry === retries) return;
-    discoveredSession = name;
-    discoveryRetry = retries;
-    let active = true;
-    getSessionPlanPreview(name, false).then((value) => {
-      if (active) { metadata = value; discoveryError = ''; }
+    const key = `${serverId}\0${name}`;
+    if (discoveryControlada || source !== 'claude') {
+      if (source !== 'claude') {
+        metadata = null;
+        discoveryErrorInterno = '';
+        discoveryLoadingInterno = false;
+        identidadeInterna = '';
+        ultimoEstado = null;
+        ultimaBusca = '';
+      }
+      return;
+    }
+    if (key !== identidadeInterna) {
+      identidadeInterna = key;
+      metadata = null;
+      discoveryErrorInterno = '';
+      ultimoEstado = null;
+      ultimaBusca = '';
+    }
+    const previous = ultimoEstado;
+    ultimoEstado = revision;
+    const retry = retriesInterno > 0;
+    const concluded = previous === 'working' && (revision === 'idle' || revision === 'awaiting_input');
+    const requestKey = `${key}\0${revision}\0${retriesInterno}`;
+    if (!retry && !concluded && previous !== null) return;
+    if (requestKey === ultimaBusca) return;
+    ultimaBusca = requestKey;
+    discoveryErrorInterno = '';
+    discoveryLoadingInterno = true;
+    const request = ++generation;
+    getSessionPlanPreview(name).then((value) => {
+      if (request !== generation) return;
+      metadata = value as ClaudePlanPreview | null;
+      discoveryLoadingInterno = false;
+      discoveryErrorInterno = '';
     }).catch(() => {
-      if (active) discoveryError = m.chat_plan_erro();
+      if (request !== generation) return;
+      discoveryLoadingInterno = false;
+      discoveryErrorInterno = m.chat_plan_erro();
     });
-    return () => { active = false; };
-  });
-
-  $effect(() => {
-    void sessionName;
-    return () => { generation++; };
   });
 
   async function show() {
@@ -58,14 +99,16 @@
     open = true;
     error = '';
     markdown = '';
+    modalMetadata = null;
     loading = true;
     try {
       if (provider === 'codex') markdown = codexPlan ?? '';
       else {
-        const result = await getSessionPlanPreview(sessionName);
+        const result = await getSessionPlanPreview(sessionName) as ClaudePlanPreview | null;
         if (request !== generation) return;
+        modalMetadata = result;
         if (!result) error = m.chat_plan_ausente();
-        else { metadata = result; markdown = result.markdown ?? ''; }
+        else markdown = result.markdown ?? '';
       }
     } catch (cause) {
       if (request !== generation) return;
@@ -88,14 +131,16 @@
   function close() { open = false; generation++; }
 </script>
 
-{#if metadata || codexPlan || actionError || discoveryError}
+{#if metadataAtual || codexPlan || actionError || discoveryErrorAtual || discoveryLoadingAtual}
   <div class="plan-preview" role="group" aria-label={m.chat_plan_proposto()}>
-    {#if metadata || codexPlan}
+    {#if metadataAtual || codexPlan || discoveryLoadingAtual}
       <button class="plan-open" onclick={show}>
-        <span>{m.chat_plan_ver()}</span>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h6"/></svg>
         <span class="plan-name">{title}</span>
+        <span class="plan-label">{m.chat_plan_ver()}</span>
       </button>
     {/if}
+    {#if discoveryLoadingAtual}<p class="plan-status" role="status">{m.chat_plan_carregando()}</p>{/if}
     {#if codexPlan && dismissed !== codexPlan}
       <div class="plan-actions">
         <button class="primary-btn" onclick={implement} disabled={disabled || sending}>
@@ -107,9 +152,9 @@
       </div>
     {/if}
     {#if actionError}<p class="error-msg" role="alert">{actionError}</p>{/if}
-    {#if discoveryError}
-      <p class="error-msg" role="alert">{discoveryError}</p>
-      <button class="ghost-btn" onclick={() => { retries++; }}>{m.lista_tentar_novamente()}</button>
+    {#if discoveryErrorAtual}
+      <p class="error-msg" role="alert">{discoveryErrorAtual}</p>
+      <button class="ghost-btn" onclick={() => onRetryDiscovery ? onRetryDiscovery() : retriesInterno++}>{m.lista_tentar_novamente()}</button>
     {/if}
   </div>
 {/if}
@@ -120,23 +165,30 @@
     <h2>{title}</h2>
     <button class="ghost-btn" onclick={close}>{m.sessao_fechar()}</button>
   </header>
-  {#if metadata}<p class="plan-path">{metadata.path}</p>{/if}
+  {#if metadataModal}<p class="plan-path">{metadataModal.path}</p>{/if}
   {#if loading}<p role="status">{m.chat_plan_carregando()}</p>
   {:else if error}
     <p class="error-msg" role="alert">{error}</p>
     <button class="ghost-btn" onclick={show}>{m.lista_tentar_novamente()}</button>
-  {:else}<div class="prose">{@html html}</div>{/if}
+  {:else}<div class="prose">
+    <!-- eslint-disable-next-line svelte/no-at-html-tags -->
+    {@html html}
+  </div>{/if}
 </BottomSheet>
 
 <style>
-  .plan-preview { padding: var(--space-3) 0; display: grid; gap: var(--space-3); }
+  .plan-preview { padding: var(--space-3); display: grid; gap: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface-raised); min-width: 0; }
   .preview-header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
   .preview-header h2 { min-width: 0; overflow-wrap: anywhere; }
   .preview-header button { flex-shrink: 0; min-height: 44px; }
-  .plan-open { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; min-height: 44px; width: fit-content; max-width: 100%; color: var(--accent); text-align: left; }
-  .plan-name { color: var(--text-muted); font-size: var(--text-sm); overflow-wrap: anywhere; }
+  .plan-open { display: flex; gap: var(--space-2); align-items: center; min-height: 44px; width: 100%; min-width: 0; color: var(--accent); text-align: left; border-radius: var(--radius-sm); }
+  .plan-open svg { flex-shrink: 0; }
+  .plan-name { flex: 1; min-width: 0; color: var(--text-primary); font-size: var(--text-sm); font-weight: 600; overflow-wrap: anywhere; }
+  .plan-label { flex-shrink: 0; font-size: var(--text-sm); }
   .plan-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
   .plan-actions button { min-height: 44px; }
+  .plan-status { color: var(--text-muted); font-size: var(--text-sm); margin: 0; }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
   .primary-btn { padding: var(--space-2) var(--space-4); background: var(--accent); color: var(--bg-base); border-radius: var(--radius-md); font-weight: 650; }
   .primary-btn:disabled { opacity: .5; cursor: default; }
   .ghost-btn { padding: var(--space-2) var(--space-3); color: var(--text-secondary); border-radius: var(--radius-md); }

@@ -19,6 +19,9 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
   import { initials } from '@hangar/core';
   import { nivelDePct, VELHA_APOS_S, motivoParado, motivoSessaoViva } from '../../lib/cota';
   import NovaCredencialSheet from './NovaCredencialSheet.svelte';
+  import CodexContaLogin from './CodexContaLogin.svelte';
+  import { credentialAuth, credentialGroup } from '@hangar/core';
+  import { listServers, getActiveId } from '../../lib/auth';
   import ProvedorIcone from '../icons/ProvedorIcone.svelte';
   import { serverIdentidade, type Server } from '../../lib/auth';
   import { createQuery } from '@tanstack/svelte-query';
@@ -34,6 +37,8 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
     apiTarget: Server | null;
   }
   let { apiTarget }: Props = $props();
+  const codexServer = $derived(apiTarget ?? listServers().find((s) => s.id === getActiveId()) ?? null);
+  let codexLogin = $state<string | null>(null);
 
   // A lista vem do cache compartilhado: reabrir Contas entrega o que já estava lá e revalida por
   // baixo, em vez de esvaziar a tela e esperar a leitura das cotas (medida em ~2,5s com o cache do
@@ -63,13 +68,14 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
   // config.toml do Kimi tem o mesmo nome do motor — daí o id `kimi:<nome>` que `cotas.py` monta —
   // e não é uma credencial a mais: ela aparece como linha dentro do card do modelo.
   const ehCopiaSync = (c: Credencial) => c.id.startsWith('kimi:') && c.id.slice('kimi:'.length) in motoresMapa;
-  const secaoClaude = $derived(contas.filter((c) => c.tipo === 'claude'));
+  const secaoClaude = $derived(contas.filter((c) => credentialGroup(c) === 'subscription'
+    || (c.tipo === 'codex' && credentialAuth(c) === 'none')));
   const secaoModelos = $derived(contas.filter((c) => {
     const n = nomeMotorDe(c);
     return !!n && n in motoresMapa;
   }));
   const secaoOutros = $derived(contas.filter(
-    (c) => c.tipo !== 'claude' && !secaoModelos.includes(c) && !ehCopiaSync(c),
+    (c) => !secaoClaude.includes(c) && !secaoModelos.includes(c) && !ehCopiaSync(c),
   ));
   const copiaKimiDe = (c: Credencial) => {
     const n = nomeMotorDe(c);
@@ -618,6 +624,32 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
                 {#if conta.ativa}<span class="ct-emuso">{m.contas_em_uso()}</span>{/if}
               {/if}
             </span>
+            {#if conta.tipo === 'codex'}
+              {#if credentialAuth(conta) !== 'none' || (conta.login?.loggedIn && conta.login.plano)}
+                <span class="ct-sub-l ct-codex-meta">
+                  {#if credentialAuth(conta) !== 'none'}
+                    <span class="ct-sub">{credentialAuth(conta) === 'oauth' ? m.codex_ui_oauth()
+                      : credentialAuth(conta) === 'api_key' ? m.contas_tipo_chave()
+                      : m.codex_ui_unknown()}</span>
+                  {/if}
+                  {#if conta.login?.loggedIn && conta.login.plano}
+                    <span class="ct-sub">· {conta.login.plano}</span>
+                  {/if}
+                </span>
+              {/if}
+              {#if conta.login?.loggedIn && conta.login.email}
+                <span class="ct-sub ct-codex-meta">{conta.login.email}</span>
+              {:else if conta.login?.estado === 'ok' && !conta.login.loggedIn}
+                <span class="ct-sub fraco ct-codex-meta">{m.contas_nao_conectada()}</span>
+              {/if}
+              {#if conta.ativa || conta.codex_account || dir}
+                <span class="ct-sub-l ct-codex-meta">
+                  {#if conta.ativa}<span class="ct-sub fraco">{m.criar_padrao()}</span>
+                  {:else if conta.codex_account}<span class="ct-sub fraco">{m.codex_ui_inherited()}</span>{/if}
+                  {#if dir}<span class="ct-dir">{conta.ativa || conta.codex_account ? '· ' : ''}{dir}</span>{/if}
+                </span>
+              {/if}
+            {/if}
             {#if conta.tipo === 'chave' && !motorEmEdicao}
               <!-- A chave NUNCA volta inteira do servidor (credenciais._mascarar): o que a tela
                    mostra é o rabicho, o bastante pra saber QUAL chave é sem expor a chave. Com o
@@ -640,14 +672,14 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
                   <span class="ct-sub fraco">{m.contas_sync_kimi({ nome: nomeMotorDe(conta) ?? '' })}</span>
                 {/if}
               {/if}
-            {:else if conta.login?.estado === 'ok' && conta.login.loggedIn && conta.login.email}
+            {:else if conta.tipo !== 'codex' && conta.login?.estado === 'ok' && conta.login.loggedIn && conta.login.email}
               <span class="ct-sub">{conta.login.email}</span>
-            {:else if conta.login?.estado === 'ok' && !conta.login.loggedIn}
+            {:else if conta.tipo !== 'codex' && conta.login?.estado === 'ok' && !conta.login.loggedIn}
               <span class="ct-sub fraco">{m.contas_nao_conectada()}</span>
             {/if}
             <!-- Marcas e caminho dividem UMA linha (densidade, 18/08): eram duas, e nenhuma das
                  duas é a identidade da conta — quem identifica é o nome e o e-mail acima. -->
-            {#if marcas.length || dir}
+            {#if conta.tipo !== 'codex' && (marcas.length || dir)}
               <span class="ct-sub-l">
                 {#if marcas.length}<span class="ct-marcas">{marcas.join(' · ')}</span>{/if}
                 {#if dir}<span class="ct-dir">{dir}</span>{/if}
@@ -676,6 +708,9 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
 
           <!-- Um envelope só para as ações: o Entrar é condicional e mora junto do kebab. -->
           <span class="ct-acoes">
+            {#if conta.tipo === 'codex' && conta.codex_account && credentialAuth(conta) === 'none'}
+              <button type="button" class="ct-acao primaria" onclick={() => codexLogin = conta.codex_account ?? null}>{m.contas_entrar()}</button>
+            {/if}
             {#if conta.tipo === 'claude' && conta.login?.estado === 'ok' && !conta.login.loggedIn}
               <button type="button" class="ct-acao primaria"
                 aria-label={m.contas_entrar_titulo({ nome: conta.nome })}
@@ -694,6 +729,7 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
                 onclick={() => { menuDe = null; confirmando = conta.id; }}>{m.lista_remover()}</button>
             {/if}
 
+            {#if conta.tipo !== 'codex'}
             <button type="button" class="ct-kebab" aria-haspopup="true" aria-expanded={menuDe === conta.id}
               aria-label={m.comum_fechar_menu_conta()} onclick={() => (menuDe = menuDe === conta.id ? null : conta.id)}>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -703,8 +739,16 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
                 <circle cx="12" cy="19" r="1" />
               </svg>
             </button>
+            {/if}
           </span>
           </div>
+          {#if conta.tipo === 'codex' && codexLogin === conta.codex_account && codexServer}
+            <div class="ct-form">
+              <CodexContaLogin server={codexServer} accountId={conta.codex_account ?? undefined}
+                oncomplete={() => { codexLogin = null; carregar(); }} />
+              <button type="button" class="ct-acao" onclick={() => codexLogin = null}>{m.sessao_fechar()}</button>
+            </div>
+          {/if}
 
           <!-- As barras do limite em largura cheia, abaixo do nome: a MESMA leitura da faixa do
                rodapé (uma fonte só). O medidor é o MESMO dado do número, em forma de comprimento:
@@ -805,7 +849,7 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
 
   {#if novo}
     <NovaCredencialSheet {apiTarget} nomesExistentes={Object.keys(motoresMapa)}
-      onFechar={() => (novo = null)}
+      onFechar={() => { novo = null; carregar(); }}
       onCriada={() => { void carregar(geracao); }} />
   {/if}
 
@@ -929,6 +973,7 @@ import { apagarConta, deleteEngine, deleteEngineForServer, isAbortError, isTimeo
   .ct-chip { padding: 1px 7px; border-radius: var(--radius-full);
              background: var(--surface-raised); color: var(--text-muted);
              font-size: var(--text-3xs); white-space: nowrap; }
+  .ct-default { align-self: flex-start; }
   .ct-sep { height: 1px; background: var(--border-subtle); margin: var(--space-4) 0 var(--space-3); }
   .ct-aviso { margin: var(--space-2); color: var(--text-muted); font-size: var(--text-sm); }
   .ct-aviso.erro { color: var(--error); }

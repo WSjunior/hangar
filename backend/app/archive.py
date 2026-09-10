@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from app.config import list_config_dirs, settings
 from app.models import ChatEvent
 from app.transcript import parse_obj
+from app import codex_contas
 
 _log = logging.getLogger("hangar.archive")
 
@@ -49,6 +50,8 @@ class ArchiveEntry(BaseModel):
     # Pi, Kimi e Codex guardam transcript FORA do projects/ da conta (ver app.archive_providers).
     # `project` continua sendo o cwd sanitizado, entao a pasta e a mesma pros quatro.
     provider: str = "claude"
+    codex_home: Optional[str] = None
+    codex_account: Optional[str] = None
 
 
 def _head_info(jsonl: Path, max_lines: int = 60) -> tuple[str, Optional[str]]:
@@ -260,13 +263,17 @@ def list_folders(config_dir: Optional[str] = None) -> list[ArchiveFolder]:
 
 
 def list_conversations(project: str, live_realpaths: set[str], cap: int = 100,
-                       config_dir: Optional[str] = None) -> list[ArchiveEntry]:
+                       config_dir: Optional[str] = None,
+                       codex_account: str | None = None,
+                       provider: str | None = None) -> list[ArchiveEntry]:
     """Nivel 2: conversas de UMA pasta, em TODAS as contas (ou so na pedida), mais recentes
     primeiro. O preview abre cada arquivo -> o teto limita o custo por request; ele vale pro
     resultado JUNTO, senao 4 contas custariam 4x o teto. FileNotFoundError so quando a pasta nao
     existe em conta nenhuma."""
     if not _PROJ_RE.match(project):
         raise ValueError("caminho invalido")
+    if codex_account is not None:
+        codex_contas.resolve_account(codex_account)
     achou = False
     linhas: list[tuple[float, Path, Optional[str], str]] = []
     for cfg, rotulo, base in _contas(config_dir):
@@ -279,11 +286,14 @@ def list_conversations(project: str, live_realpaths: set[str], cap: int = 100,
     # cortar direto descartaria conversa NOVA e manteria velha -- calado, e justo na lista que diz
     # "mais recentes primeiro".
     outras = sorted((c for c in (() if config_dir else _conversas_de_outros_providers())
-                     if _projeto_de(c.cwd) == project),
+                     if _projeto_de(c.cwd) == project
+                     and (provider is None or c.provider == provider)),
                     key=lambda c: c.mtime, reverse=True)
     if not achou and not outras:
         raise FileNotFoundError(project)
     linhas.sort(key=lambda t: t[0], reverse=True)
+    if provider is not None and provider != "claude":
+        linhas = []
     out: list[ArchiveEntry] = []
     for mt, f, cfg, rotulo in linhas[:cap]:
         preview, cwd = _head_info(f)
@@ -292,7 +302,15 @@ def list_conversations(project: str, live_realpaths: set[str], cap: int = 100,
             preview=preview, ultima=_tail_info(f), config_dir=cfg, conta=rotulo,
             live=os.path.realpath(str(f)) in live_realpaths,
         ))
-    for c in outras[:cap]:
+    outras_com_origem: list[tuple[object, object | None]] = []
+    for c in outras:
+        owner = None
+        if c.provider == "codex":
+            owner = codex_contas.account_for_rollout(c.path)
+            if codex_account is not None and (owner is None or owner.id != codex_account):
+                continue
+        outras_com_origem.append((c, owner))
+    for c, owner in outras_com_origem[:cap]:
         # `preview` fica vazio de proposito: nos outros providers o cwd ja veio do indice/cabecalho,
         # entao abrir o comeco do arquivo so pra pegar a 1a msg seria uma leitura a mais por uma
         # informacao que a lista nem mostra (quem identifica a conversa e a ULTIMA msg).
@@ -300,13 +318,15 @@ def list_conversations(project: str, live_realpaths: set[str], cap: int = 100,
             project=project, cwd=c.cwd, session_id=c.session_id, mtime=c.mtime,
             preview="", ultima=_tail_info(c.path, c.provider), provider=c.provider,
             live=os.path.realpath(str(c.path)) in live_realpaths,
+            codex_home=c.codex_home if c.provider == "codex" else None,
+            codex_account=owner.id if owner is not None else None,
         ))
     out.sort(key=lambda e: e.mtime, reverse=True)
     return out[:cap]
 
 
 def archive_jsonl(project: str, session_id: str, config_dir: Optional[str] = None,
-                  provider: str = "claude") -> Path:
+                  provider: str = "claude", codex_account: str | None = None) -> Path:
     """Path validado do transcript arquivado. ValueError = componente invalido (traversal barrado);
     FileNotFoundError = nao existe.
 
@@ -318,7 +338,7 @@ def archive_jsonl(project: str, session_id: str, config_dir: Optional[str] = Non
     porque o nome do arquivo do Pi e do Codex carrega um timestamp que nao da pra recriar."""
     if provider != "claude":
         from app import archive_providers
-        return archive_providers.jsonl_de(provider, session_id)
+        return archive_providers.jsonl_de(provider, session_id, codex_account=codex_account)
     if not _PROJ_RE.match(project) or not _SID_RE.match(session_id):
         raise ValueError("caminho invalido")
     ultimo: Optional[Path] = None
@@ -331,7 +351,7 @@ def archive_jsonl(project: str, session_id: str, config_dir: Optional[str] = Non
 
 
 def tail_events(project: str, session_id: str, n: int = 30, config_dir: Optional[str] = None,
-                provider: str = "claude") -> list[ChatEvent]:
+                provider: str = "claude", codex_account: str | None = None) -> list[ChatEvent]:
     """As ULTIMAS n mensagens da conversa, pra confirmar "e essa mesmo?" antes de retomar. Le pelo
     fim (`seek`), NAO pelo /history: aquele carrega o transcript inteiro, e aqui um arquivo de 19MB
     seria aberto so pra mostrar cinco balões. So user/assistente -- chamada de ferramenta encheria a
@@ -341,7 +361,7 @@ def tail_events(project: str, session_id: str, n: int = 30, config_dir: Optional
     Crescer e obrigatorio, nao otimizacao: medido nesta sessao, as ultimas 2MB de um transcript de
     15MB tinham 300 linhas e apenas SEIS mensagens de texto -- o resto era `attachment`, tool_use e
     metadado. Com um span fixo a previa vinha quase vazia justo nas conversas longas."""
-    p = archive_jsonl(project, session_id, config_dir, provider)
+    p = archive_jsonl(project, session_id, config_dir, provider, codex_account)
     out: list[ChatEvent] = []
     span = _TAIL_BYTES * 4
     while True:
@@ -374,18 +394,19 @@ def conta_de(project: str, session_id: str) -> Optional[str]:
 
 
 def archive_cwd(project: str, session_id: str, config_dir: Optional[str] = None,
-                provider: str = "claude") -> Optional[str]:
+                provider: str = "claude", codex_account: str | None = None) -> Optional[str]:
     """cwd real da conversa arquivada (lido do cabecalho do transcript) -- usado pra retomar (feature
     'Retomar conversa'): a sessao tmux nova precisa nascer no MESMO cwd da conversa original. Mesma
     validacao de archive_jsonl (propaga ValueError/FileNotFoundError); None = cwd nao ficou gravado
     nas primeiras linhas do transcript (conversa nao pode ser retomada)."""
-    p = archive_jsonl(project, session_id, config_dir, provider)
+    p = archive_jsonl(project, session_id, config_dir, provider, codex_account)
     if provider == "claude":
         _, cwd = _head_info(p)
         return cwd
     # Pi e Codex gravam o cwd num cabecalho de formato proprio; o Kimi nem grava (vem do indice).
     from app import archive_providers
+    alvo = os.path.realpath(str(p))
     for c in archive_providers.conversas():
-        if c.provider == provider and c.session_id == session_id:
+        if c.provider == provider and os.path.realpath(str(c.path)) == alvo:
             return c.cwd
     return None

@@ -60,6 +60,12 @@ if args[:1] == ["app-server"]:
 else:
     with open(os.environ["FAKE_TUI_OUT"], "w") as fh:
         fh.write("\\n".join(args))
+    if os.environ.get("FAKE_TUI_ENV"):
+        with open(os.environ["FAKE_TUI_ENV"], "w") as fh:
+            fh.write(os.environ.get("CODEX_HOME", ""))
+    if os.environ.get("FAKE_TUI_TOKEN"):
+        with open(os.environ["FAKE_TUI_TOKEN"], "w") as fh:
+            fh.write(os.environ.get("OPENAI_API_KEY", ""))
     if os.environ.get("FAKE_TUI_CONN"):
         # A TUI de verdade conecta UMA vez e morre no refused; aqui so registramos o que ela veria.
         import socket
@@ -149,12 +155,6 @@ def test_lancador_grava_sidecar_completo_e_mata_o_servidor_na_saida(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="o lancador so e usado em pane POSIX por ora")
-def test_lancador_preserva_sidecar_de_outro_dono(tmp_path):
-    """Nome reusado: o sidecar que ficou no disco NAO e nosso, entao nao pode ser apagado.
-
-    Apagar o de outro dono deixaria uma sessao VIVA invisivel pro app -- pior que o orfao que a
-    limpeza existe pra evitar.
-@pytest.mark.skipif(os.name != "posix", reason="o lancador so e usado em pane POSIX por ora")
 def test_lancador_ressobe_o_servidor_na_mesma_porta_com_a_tui_viva(tmp_path):
     # A TUI `--remote` desiste de reconectar em ~1 min e nao volta nem com mensagem nova; o unico
     # caminho sem relançar o pane e o servidor voltar na MESMA porta, e o sidecar apontar pro
@@ -187,6 +187,12 @@ def test_lancador_ressobe_o_servidor_na_mesma_porta_com_a_tui_viva(tmp_path):
     assert not _sidecar(env, "sess").exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="o lancador so e usado em pane POSIX por ora")
+def test_lancador_preserva_sidecar_de_outro_dono(tmp_path):
+    """Nome reusado: o sidecar que ficou no disco NAO e nosso, entao nao pode ser apagado.
+
+    Apagar o de outro dono deixaria uma sessao VIVA invisivel pro app -- pior que o orfao que a
+    limpeza existe pra evitar.
     """
     cwd = tmp_path / "proj"
     cwd.mkdir()
@@ -389,3 +395,56 @@ def test_lancador_recusa_sem_nome(tmp_path):
                        env=env, capture_output=True, text=True, timeout=30)
     assert r.returncode == 2
     assert "CP_SESSION_NAME" in r.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="o lancador so e usado em pane POSIX por ora")
+def test_lancador_aplica_codex_home_antes_da_tui(tmp_path):
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    codex_home = tmp_path / "codex-work"
+    env = _ambiente(tmp_path, cwd)
+    env["FAKE_TUI_SLEEP"] = "0.3"
+    env["FAKE_TUI_ENV"] = str(tmp_path / "tui-env.txt")
+    proc = subprocess.run(
+        [sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd),
+         "--codex-home", str(codex_home)],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert Path(env["FAKE_TUI_ENV"]).read_text() == str(codex_home.absolute())
+    meta = json.loads(_sidecar(env, "sess").read_text()) if _sidecar(env, "sess").exists() else None
+    assert meta is None  # o lancador limpa o sidecar ao sair; o arquivo foi conferido durante a TUI
+
+
+@pytest.mark.skipif(os.name != "posix", reason="o lancador so e usado em pane POSIX por ora")
+def test_lancador_secundario_remove_token_openai_herdado(tmp_path):
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    env = _ambiente(tmp_path, cwd)
+    env["FAKE_TUI_SLEEP"] = "0.3"
+    env["FAKE_TUI_TOKEN"] = str(tmp_path / "tui-token.txt")
+    env["OPENAI_API_KEY"] = "sentinel"
+    r = subprocess.run(
+        [sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd),
+         "--codex-home", str(tmp_path / "codex-work"), "--codex-account", "work"],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30,
+    )
+    assert r.returncode == 0, r.stderr
+    assert Path(env["FAKE_TUI_TOKEN"]).read_text() == ""
+
+
+@pytest.mark.skipif(os.name != "posix", reason="o lancador so e usado em pane POSIX por ora")
+def test_lancador_nao_reclassifica_conta_pelo_codex_home_herdado(tmp_path):
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    env = _ambiente(tmp_path, cwd)
+    env["CODEX_HOME"] = str(tmp_path / "stale-tmux-default")
+    env["OPENAI_API_KEY"] = "sentinel"
+    env["FAKE_TUI_TOKEN"] = str(tmp_path / "tui-token.txt")
+    r = subprocess.run(
+        [sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd),
+         "--codex-home", str(tmp_path / "codex-work"), "--codex-account", "work"],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30,
+    )
+    assert r.returncode == 0, r.stderr
+    assert Path(env["FAKE_TUI_TOKEN"]).read_text() == ""

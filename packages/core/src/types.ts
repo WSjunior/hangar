@@ -31,6 +31,8 @@ export interface LoopState {
 export type Provider = 'claude' | 'codex' | 'pi' | 'kimi' | 'omp';
 
 export interface SessionInfo {
+  codex_account?: string | null;
+  codex_home?: string | null;
   name: string;
   cwd?: string;
   jsonl?: string | null;

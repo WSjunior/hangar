@@ -4,8 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from app import codex_arquivos
 from app.codex_arquivos import (
-    AlteradoExternamente, exclusivo, gravar, json_obj, mesclar_hooks, transformar,
+    AlteradoExternamente, editar_config, exclusivo, gravar, json_obj, mesclar_hooks, transformar,
 )
 
 
@@ -93,3 +94,60 @@ async def test_lock_serializa_e_cancelamento_nao_prende(tmp_path):
         ordem.append("primeiro")
     await asyncio.wait_for(segundo(), 1)
     assert ordem == ["primeiro", "segundo"]
+
+
+class _NativoConfig:
+    def __init__(self, home, codex_home, binario="codex"):
+        self.codex_home = codex_home
+        self.binario = binario
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def request(self, method, params):
+        assert method == "config/batchWrite"
+        self.codex_home.joinpath("config.toml").write_bytes(b'model = "novo"\n')
+        return {}
+
+
+async def test_editar_config_usa_copia_nativa_e_confirma_depois_da_troca(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_bytes(b'model = "antigo"\n')
+    confirmado = []
+
+    await editar_config(
+        path, tmp_path / "backups", tmp_path / "work", _NativoConfig,
+        lambda atual: ([{"keyPath": '"model"', "value": "novo", "mergeStrategy": "replace"}],
+                       lambda: confirmado.append(True)),
+        binario="codex-teste",
+    )
+
+    assert path.read_bytes() == b'model = "novo"\n'
+    assert confirmado == [True]
+
+
+async def test_editar_config_preserva_a_causa_da_colisao_final(tmp_path, monkeypatch):
+    path = tmp_path / "config.toml"
+    path.write_bytes(b'model = "antigo"\n')
+    original = codex_arquivos.gravar
+
+    def colidir(destino, data, esperado, backups=None):
+        if destino == path:
+            path.write_bytes(b'model = "externo"\n')
+            raise AlteradoExternamente("causa original")
+        return original(destino, data, esperado, backups)
+
+    monkeypatch.setattr(codex_arquivos, "gravar", colidir)
+    with pytest.raises(AlteradoExternamente) as erro:
+        await editar_config(
+            path, tmp_path / "backups", tmp_path / "work", _NativoConfig,
+            lambda atual: ([{"keyPath": '"model"', "value": "novo", "mergeStrategy": "replace"}],
+                           lambda: None),
+        )
+
+    assert isinstance(erro.value.__cause__, AlteradoExternamente)
+    assert "continua mudando" in str(erro.value)
+    assert path.read_bytes() == b'model = "externo"\n'

@@ -239,46 +239,71 @@ def main() -> int:
     ap.add_argument("--model", default=None, help="modelo do Codex (vira `-m` na TUI)")
     ap.add_argument("--effort", default=None,
                     help="nivel de raciocinio; vira sobrescrita de config, nao flag")
+    ap.add_argument("--codex-home", default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--codex-account", default="default", help=argparse.SUPPRESS)
     args = ap.parse_args()
     if not args.name:
         print("hangar-codex-tui: --name (ou CP_SESSION_NAME) e obrigatorio", file=sys.stderr)
         return 2
     cwd = os.path.abspath(args.cwd or os.getcwd())
+    selected_home = (Path(args.codex_home).expanduser().absolute()
+                     if args.codex_home else Path(os.environ.get("CODEX_HOME") or
+                                                  Path.home() / ".codex").absolute())
+    os.environ["CODEX_HOME"] = str(selected_home)
 
     _com_websockets()
     sys.path.insert(0, str(_REPO / "backend"))
     from app.adapters.codex import sessions as codex_sessions
     from app.adapters.codex.lancador import APPROVAL, SANDBOX
-    from app.codex_instrucoes import LIMITE_INSTRUCOES, limite_instrucoes, preparar_instrucoes
+    from app import codex_contas
+    from app.codex_instrucoes import (LIMITE_INSTRUCOES, limite_instrucoes,
+                                      preparar_instrucoes, preparar_projeto)
+
+    account = codex_contas.Account(
+        args.codex_account,
+        selected_home, args.codex_account == "default",
+    )
+    ambiente = codex_contas.environment(account, base=os.environ)
+    os.environ.clear()
+    os.environ.update(ambiente)
 
     # O cwd novo ainda pode não estar no config do Codex. O alias precisa existir antes do app-server.
     # Falha (override pessoal, config.toml ilegível) não impede a TUI: fica sem alias e sem limite maior.
-    codex_home = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex')
+    codex_home = selected_home
     limite = LIMITE_INSTRUCOES
     print("hangar-codex-tui: preparando as instruções do Codex…", file=sys.stderr)
-    try:
-        preparar_instrucoes(Path.home(), codex_home, Path(cwd))
-        limite = limite_instrucoes(codex_home)
-    except Exception as exc:                          # noqa: BLE001
-        print(f"hangar-codex-tui: instruções nativas não preparadas ({exc}); a sessão abre assim mesmo",
-              file=sys.stderr)
+    if account.is_default:
+        try:
+            preparar_instrucoes(Path.home(), codex_home, Path(cwd))
+            limite = limite_instrucoes(codex_home)
+        except Exception as exc:                          # noqa: BLE001
+            print(f"hangar-codex-tui: instruções nativas não preparadas ({exc}); a sessão abre assim mesmo",
+                  file=sys.stderr)
+    else:
+        try:
+            preparar_projeto(codex_home, Path(cwd))
+            limite = limite_instrucoes(codex_home)
+        except Exception as exc:                          # noqa: BLE001
+            print(f"hangar-codex-tui: limite de instruções da conta não pôde ser lido ({exc})",
+                  file=sys.stderr)
 
     # A sessão lê a configuração já reconciliada; quem reconcilia é o BACKEND (um executor só, e
     # uma instalação longa termina lá) — aqui só se avisa e se espera um pouco. Falha não impede a TUI.
-    try:
-        print("hangar-codex-tui: verificando a integração do Codex…", file=sys.stderr)
-        resultado = _integracao_codex()
-        if resultado.get("estado") not in (None, "ocioso", "ok") or resultado.get("erros"):
-            print(f"hangar-codex-tui: integração Codex: {resultado['estado']} — {_texto(resultado.get('etapa'))}",
+    if account.is_default:
+        try:
+            print("hangar-codex-tui: verificando a integração do Codex…", file=sys.stderr)
+            resultado = _integracao_codex()
+            if resultado.get("estado") not in (None, "ocioso", "ok") or resultado.get("erros"):
+                print(f"hangar-codex-tui: integração Codex: {resultado['estado']} — {_texto(resultado.get('etapa'))}",
+                      file=sys.stderr)
+            for aviso in [*resultado.get("avisos", []), *resultado.get("erros", [])]:
+                print(f"hangar-codex-tui: {_texto(aviso)}", file=sys.stderr)
+            if resultado.get("confianca_pendente"):
+                print("hangar-codex-tui: há itens aguardando sua confirmação de confiança no Codex",
+                      file=sys.stderr)
+        except Exception as exc:                          # noqa: BLE001
+            print(f"hangar-codex-tui: integração Codex falhou ({exc}); a sessão abre assim mesmo",
                   file=sys.stderr)
-        for aviso in [*resultado.get("avisos", []), *resultado.get("erros", [])]:
-            print(f"hangar-codex-tui: {_texto(aviso)}", file=sys.stderr)
-        if resultado.get("confianca_pendente"):
-            print("hangar-codex-tui: há itens aguardando sua confirmação de confiança no Codex",
-                  file=sys.stderr)
-    except Exception as exc:                          # noqa: BLE001
-        print(f"hangar-codex-tui: integração Codex falhou ({exc}); a sessão abre assim mesmo",
-              file=sys.stderr)
 
     endpoint = _porta_livre()
     # stdout no lixo (no modo WebSocket o protocolo nao passa por ele), mas o stderr vai pra um
@@ -305,7 +330,9 @@ def main() -> int:
         if previous_thread is None:
             codex_sessions.save(args.name, thread_id, rollout, cwd,
                                 model=args.model, effort=args.effort,
-                                endpoint=endpoint, app_pid=servidor.pid)
+                                endpoint=endpoint, app_pid=servidor.pid,
+                                codex_home=str(codex_home),
+                                codex_account=args.codex_account)
         elif thread_id != previous_thread and thread is not None:
             codex_sessions.switch_thread(args.name, thread, previous_thread,
                                          endpoint=endpoint, app_pid=servidor.pid)
@@ -378,10 +405,13 @@ def main() -> int:
         # outro na MESMA porta dentro dessa janela faz ela retomar a thread sozinha, sem relançar
         # o pane; o backend se religa pelo pid novo do sidecar.
         quedas: list[float] = []
+        desisti = False
         while tui.poll() is None:
             if servidor.poll() is not None and not desisti:
                 quedas = [t for t in quedas if time.monotonic() - t < 300] + [time.monotonic()]
                 if len(quedas) > _QUEDAS_MAX:
+                    # A TUI fica: o pane ainda mostra o scrollback e este aviso. Matar a TUI
+                    # apagaria a sessao inteira da tela por causa do servidor.
                     print("hangar-codex-tui: app-server caindo em laço; desisto de ressubir",
                           file=sys.stderr)
                     desisti = True
@@ -393,6 +423,12 @@ def main() -> int:
                     servidor.kill()
                     continue
                 codex_sessions.update_app_pid(args.name, servidor.pid)
+                # A escuta antiga morreu com o socket. Sem uma nova, sessao que caiu antes do
+                # primeiro thread/started nunca ganharia sidecar (update_app_pid e no-op sem ele).
+                escuta = threading.Thread(target=_espera_thread,
+                                          args=(endpoint, cwd, servidor, erros, salvar),
+                                          daemon=True)
+                escuta.start()
                 print(f"hangar-codex-tui: app-server ressubido em {endpoint}", file=sys.stderr)
             time.sleep(0.5)
         return tui.wait()
@@ -407,12 +443,9 @@ def main() -> int:
         # lia um arquivo ja fechado, ou gravava um sidecar apontando pro servidor que acabou de
         # morrer: sessao fantasma que nada limpa depois.
         if escuta is not None:
-        desisti = False
             escuta.join(timeout=5)
         erros.close()
         # So apaga o sidecar que e NOSSO: uma sessao recriada com o mesmo nome ja teria reescrito o
-                    # A TUI fica: o pane ainda mostra o scrollback e este aviso. Matar a TUI
-                    # apagaria a sessao inteira da tela por causa do servidor.
         # arquivo, e apagar o dela deixaria a sessao viva invisivel pro app.
         meta = codex_sessions.load(args.name)
         if meta and meta.get("app_pid") == servidor.pid:
@@ -421,9 +454,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-                # A escuta antiga morreu com o socket. Sem uma nova, sessao que caiu antes do
-                # primeiro thread/started nunca ganharia sidecar (update_app_pid e no-op sem ele).
-                escuta = threading.Thread(target=_espera_thread,
-                                          args=(endpoint, cwd, servidor, erros, salvar),
-                                          daemon=True)
-                escuta.start()

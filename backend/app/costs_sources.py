@@ -12,14 +12,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from app import costs_claude_transcript, pricing
+from app import codex_contas, costs_claude_transcript, pricing
 from app.adapters.kimi import sessions as kimi_sessions
 from app.adapters.pi import sessions as pi_sessions
 from app.config import list_config_dirs
@@ -44,6 +43,7 @@ class UsageRow:
     cache_write: int
     cache_read: int
     subagente: bool = False   # transcript de subagente (Task tool), não de conversa
+    account_id: str | None = None
 
 
 def _ler_jsonl(path: Path) -> Iterator[dict]:
@@ -119,11 +119,13 @@ def linhas_claude(config_dir: Path, account_id: str) -> list[UsageRow]:
     return out
 
 
-def raiz_codex() -> Path:
-    return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")) / "sessions"
+def raiz_codex(home: Path | str | None = None) -> Path:
+    base = codex_contas.default_home() if home is None else Path(home)
+    return base.expanduser().absolute() / "sessions"
 
 
-def linhas_codex() -> list[UsageRow]:
+def linhas_codex(home: Path | str | None = None, account_id: str | None = None,
+                 *, only_paths: set[Path] | None = None) -> list[UsageRow]:
     """~/.codex/sessions/**/rollout-*.jsonl — cumulativo, último token_count vence.
 
     Dois detalhes medidos em 30/07/2026 que só se descobre olhando o arquivo:
@@ -137,13 +139,24 @@ def linhas_codex() -> list[UsageRow]:
     move e não copy, os `session_id` dos dois diretórios não se sobrepõem: ler os dois não
     duplica nada.
     """
-    viva = raiz_codex()
+    base = (codex_contas.default_home() if home is None else Path(home)).expanduser().absolute()
+    viva = raiz_codex() if home is None else raiz_codex(base)
     arquivada = viva.parent / "archived_sessions"
     out: list[UsageRow] = []
+    vistos: set[Path] = set()
     for raiz in (viva, arquivada):
         if not raiz.is_dir():
             continue
         for arq in raiz.rglob("rollout-*.jsonl"):
+            try:
+                canonical = arq.resolve(strict=True)
+            except OSError:
+                continue
+            if canonical in vistos:
+                continue
+            if only_paths is not None and canonical not in only_paths:
+                continue
+            vistos.add(canonical)
             cwd = prov = modelo = sid = ""
             ts = None
             ultimo: dict | None = None
@@ -174,6 +187,7 @@ def linhas_codex() -> list[UsageRow]:
                 input=max(0, _int(ultimo.get("input_tokens")) - cr),
                 output=_int(ultimo.get("output_tokens")),
                 cache_write=0, cache_read=cr,
+                account_id=account_id or f"codex:{base.resolve(strict=False)}",
             ))
     return out
 
@@ -394,6 +408,36 @@ def _config_dirs() -> list[tuple[str, str]]:
     return out
 
 
+def _contas_codex() -> list[codex_contas.Account]:
+    try:
+        return codex_contas.list_accounts()
+    except OSError:
+        _log.warning("custos: nao consegui listar contas Codex", exc_info=True)
+        return [codex_contas.Account("default", codex_contas.default_home(), True)]
+
+
+def _rollouts_codex_por_conta(accounts: list[codex_contas.Account]) \
+        -> dict[str, tuple[codex_contas.Account, set[Path]]]:
+    """Enumera primeiro e atribui pelo caminho canônico; links não trocam o dono do rollout."""
+    result: dict[str, tuple[codex_contas.Account, set[Path]]] = {}
+    for account in accounts:
+        viva = raiz_codex(account.home)
+        for raiz in (viva, viva.parent / "archived_sessions"):
+            if not raiz.is_dir():
+                continue
+            for path in raiz.rglob("rollout-*.jsonl"):
+                try:
+                    canonical = path.resolve(strict=True)
+                    owner = codex_contas.account_for_rollout(canonical)
+                except (OSError, codex_contas.AccountError):
+                    continue
+                if owner is None:
+                    continue
+                item = result.setdefault(owner.id, (owner, set()))
+                item[1].add(canonical)
+    return result
+
+
 def coletar() -> list[UsageRow]:
     """Todas as linhas das três fontes. NUNCA vai à rede."""
     out: list[UsageRow] = []
@@ -404,8 +448,19 @@ def coletar() -> list[UsageRow]:
         for caminho, account_id in _config_dirs():
             out.extend(linhas_claude(Path(caminho), account_id))
 
-        for nome, raiz, leitor in (("codex", raiz_codex(), linhas_codex),
-                                   ("pi", raiz_pi(), linhas_pi),
+        por_conta = _rollouts_codex_por_conta(_contas_codex())
+        for chave, (owner, caminhos) in por_conta.items():
+            home = owner.home.expanduser().absolute().resolve(strict=False)
+            sig_dir = tuple(sorted(
+                (str(path), *(_assinatura(path) or (0, 0))) for path in caminhos))
+            hit = _cache.get(chave)
+            if hit is None or hit[0] != sig_dir:
+                linhas = linhas_codex(home, account_id=f"codex:{home}", only_paths=caminhos)
+                hit = (sig_dir, linhas)
+                _cache[chave] = hit
+            out.extend(hit[1])
+
+        for nome, raiz, leitor in (("pi", raiz_pi(), linhas_pi),
                                    ("omp", raiz_omp(), linhas_omp),
                                    ("kimi", raiz_kimi(), linhas_kimi)):
             if nome == "omp" and raiz == raiz_pi():

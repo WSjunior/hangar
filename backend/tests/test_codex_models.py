@@ -6,6 +6,7 @@ sem modelo nenhum é falha do provedor, não catálogo vazio.
 """
 import io
 import json
+from pathlib import Path
 
 import pytest
 
@@ -100,10 +101,10 @@ def test_listar_sem_o_binario_tem_erro_proprio(monkeypatch):
 class _FakeProc:
     """O app-server em stdio: escreve o que mandaram nele e devolve as linhas combinadas."""
 
-    def __init__(self, argv, linhas, erro=""):
+    def __init__(self, argv, linhas, erro="", stdin=None):
         self.argv = argv
         self.escrito = io.StringIO()
-        self.stdin = self.escrito
+        self.stdin = stdin or self.escrito
         self.stdout = iter(linhas)
         self.stderr = io.StringIO(erro)
         self.morto = False
@@ -115,18 +116,21 @@ class _FakeProc:
         return 0
 
 
-def _fake_popen(monkeypatch, linhas, erro=""):
+def _fake_popen(monkeypatch, linhas, erro="", stdin=None):
     criados = []
 
     def popen(argv, **kw):
-        p = _FakeProc(argv, linhas, erro)
+        p = _FakeProc(argv, linhas, erro, stdin)
         criados.append(p)
         return p
 
     # O processo mora no `codex_appserver` (a mesma máquina serve o catálogo e a cota).
     monkeypatch.setattr(cx.shutil, "which", lambda _: "/usr/bin/codex")
     monkeypatch.setattr(cx.subprocess, "Popen", popen)
-    cm._cache = None
+    if hasattr(cm._cache, "clear"):
+        cm._cache.clear()
+    else:
+        cm._cache = None
     return criados
 
 
@@ -165,6 +169,37 @@ def test_saida_sem_a_resposta_do_pedido_estoura(monkeypatch):
         cm.listar(fresco=True)
 
 
+def test_broken_pipe_vira_indisponibilidade_e_limpa_processo(monkeypatch):
+    class BrokenStdin(io.StringIO):
+        def write(self, _value):
+            raise BrokenPipeError("pipe fechado")
+
+    criados = _fake_popen(monkeypatch, [], stdin=BrokenStdin())
+    with pytest.raises(cm.CodexIndisponivel) as exc:
+        cm.listar(fresco=True)
+    assert isinstance(exc.value.__cause__, BrokenPipeError)
+    assert criados[0].morto
+
+
+def test_recusa_do_app_server_nao_e_indisponibilidade(monkeypatch):
+    _fake_popen(monkeypatch, [json.dumps({"jsonrpc": "2.0", "id": 2,
+                                          "error": {"code": -32602}}) + "\n"])
+    with pytest.raises(cm.CodexRecusado):
+        cm.listar(fresco=True)
+
+
+def test_catalogo_sem_modelos_tem_resposta_invalida(monkeypatch):
+    _fake_popen(monkeypatch, [json.dumps({"jsonrpc": "2.0", "id": 2,
+                                          "result": {"data": []}}) + "\n"])
+    with pytest.raises(cm.CodexRespostaInvalida):
+        cm.listar(fresco=True)
+
+
+def test_catalogo_com_formato_sem_data_tem_resposta_invalida():
+    with pytest.raises(cm.CodexRespostaInvalida):
+        cm.parse({"data": {"model": "gpt"}})
+
+
 def test_checar_escolha_recusa_nivel_que_o_modelo_nao_lista(monkeypatch):
     """Medido em 30/08/2026: pedir `ultra` a um `gpt-5.5` NÃO mata o arranque — o binário segue com
     o dele. Sem esta recusa a sessão nasceria com a escolha descartada em silêncio."""
@@ -195,3 +230,53 @@ def test_processo_sempre_morre(monkeypatch):
     with pytest.raises(RuntimeError):
         cm.listar(fresco=True)
     assert criados[0].morto
+
+
+def test_cache_de_catalogo_e_separado_por_codex_home(monkeypatch, tmp_path):
+    respostas = {
+        str((tmp_path / "a").resolve()): {"data": [{"model": "model-a", "hidden": False}]},
+        str((tmp_path / "b").resolve()): {"data": [{"model": "model-b", "hidden": False}]},
+    }
+    chamadas = []
+
+    def perguntar(metodo, *, codex_home=None, **kwargs):
+        chamadas.append((metodo, str(codex_home)))
+        return respostas[str(codex_home.resolve())]
+
+    monkeypatch.setattr(cm.codex_appserver, "perguntar", perguntar)
+    cm._cache.clear()
+    assert cm.listar(fresco=True, codex_home=tmp_path / "a")[0]["id"] == "model-a"
+    assert cm.listar(codex_home=tmp_path / "a")[0]["id"] == "model-a"
+    assert cm.listar(codex_home=tmp_path / "b")[0]["id"] == "model-b"
+    assert [home for _, home in chamadas] == [str((tmp_path / "a").resolve()),
+                                               str((tmp_path / "b").resolve())]
+
+
+def test_checar_escolha_usa_o_catalogo_da_conta_pedida(monkeypatch, tmp_path):
+    def perguntar(metodo, *, codex_home=None, **kwargs):
+        model = "model-a" if codex_home.resolve().name == "a" else "model-b"
+        return {"data": [{"model": model, "hidden": False,
+                           "supportedReasoningEfforts": [{"reasoningEffort": "high"}]}]}
+
+    monkeypatch.setattr(cm.codex_appserver, "perguntar", perguntar)
+    cm._cache.clear()
+    cm.checar_escolha("model-a", "high", codex_home=tmp_path / "a")
+    with pytest.raises(ValueError, match="fora do catalogo"):
+        cm.checar_escolha("model-a", "high", codex_home=tmp_path / "b")
+
+
+def test_invalidar_catalogo_de_uma_conta_nao_apaga_as_outras(tmp_path, monkeypatch):
+    calls = []
+
+    def perguntar(metodo, *, codex_home=None, **kwargs):
+        calls.append(str(codex_home))
+        return {"data": [{"model": Path(codex_home).name, "hidden": False}]}
+
+    monkeypatch.setattr(cm.codex_appserver, "perguntar", perguntar)
+    cm._cache.clear()
+    cm.listar(fresco=True, codex_home=tmp_path / "a")
+    cm.listar(fresco=True, codex_home=tmp_path / "b")
+    cm.invalidar(tmp_path / "a")
+    cm.listar(codex_home=tmp_path / "b")
+    cm.listar(codex_home=tmp_path / "a")
+    assert calls == [str(tmp_path / "a"), str(tmp_path / "b"), str(tmp_path / "a")]

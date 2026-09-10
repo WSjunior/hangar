@@ -57,19 +57,31 @@ afterEach(async () => {
   document.body.innerHTML = '';
 });
 
-it('busca somente metadados na montagem e conteúdo apenas ao abrir', async () => {
-  getPreview.mockResolvedValueOnce({ name: 'meu-plano', path: '/planos/meu-plano.md' })
+it('busca conteúdo para o título na montagem e revalida ao abrir', async () => {
+  getPreview.mockResolvedValueOnce({ name: 'meu-plano', path: '/planos/meu-plano.md', markdown: '# Título inicial' })
     .mockResolvedValueOnce({ name: 'meu-plano', path: '/planos/meu-plano.md', markdown: '# Título\n\n**Forte**' });
   await montar();
 
-  expect(getPreview).toHaveBeenNthCalledWith(1, 'sessao', false);
+  expect(getPreview).toHaveBeenNthCalledWith(1, 'sessao');
   expect(getPreview).toHaveBeenCalledTimes(1);
+  expect(document.querySelector('.plan-name')?.textContent).toBe('Título inicial');
   botao(m.chat_plan_ver())!.click();
   await estabilizar();
 
   expect(getPreview).toHaveBeenNthCalledWith(2, 'sessao');
   expect(document.querySelector('.prose h1')?.textContent).toBe('Título');
   expect(document.querySelector('.prose strong')?.textContent).toBe('Forte');
+});
+
+it('mostra carregamento enquanto o título do plano Claude é desconhecido', async () => {
+  let resolve!: (value: { name: string; path: string; markdown: string }) => void;
+  getPreview.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+  await montar();
+
+  expect(document.querySelector('[role="status"]')?.textContent).toBe(m.chat_plan_carregando());
+  resolve({ name: 'plano', path: '/planos/plano.md', markdown: '# Descoberto' });
+  await estabilizar();
+  expect(document.querySelector('.plan-name')?.textContent).toBe('Descoberto');
 });
 
 it('descobre na abertura e ao concluir o turno, sem reler quando começa a trabalhar', async () => {
@@ -137,6 +149,32 @@ it('Codex executa somente ao aprovar e continuar planejando apenas dispensa as a
   await montar({ provider: 'codex', codexPlan: '# Segundo', onImplement: continuar });
   botao(m.chat_plan_continuar())!.click(); await estabilizar();
   expect(continuar).not.toHaveBeenCalled();
+  expect(botao(m.chat_plan_implementar())).toBeUndefined();
+});
+
+it('apresenta título real e ações no mesmo cartão compacto', async () => {
+  await montar({ provider: 'codex', codexPlan: '```md\n# Exemplo\n```\n# Plano real' });
+  expect(document.querySelector('.plan-name')?.textContent).toBe('Plano real');
+  expect(document.querySelector('.plan-preview .plan-actions')).toBeTruthy();
+  expect(document.querySelector('.plan-open svg')).toBeTruthy();
+});
+
+it('sem título usa Plano proposto e ocupado permite visualizar, sem implementar', async () => {
+  const props = await montar({ provider: 'codex', codexPlan: 'Etapas sem título', disabled: true });
+  expect(document.querySelector('.plan-name')?.textContent).toBe(m.chat_plan_proposto());
+  expect(botao(m.chat_plan_implementar())?.disabled).toBe(true);
+  botao(m.chat_plan_ver())!.click(); await estabilizar();
+  expect(document.querySelector('.prose')?.textContent).toContain('Etapas sem título');
+  expect(props.onImplement).not.toHaveBeenCalled();
+});
+
+it('impede aprovações repetidas durante envio', async () => {
+  let resolver!: () => void;
+  await montar({ provider: 'codex', codexPlan: '# Plano', onImplement: () => new Promise<void>((resolve) => { resolver = resolve; }) });
+  botao(m.chat_plan_implementar())!.click(); await estabilizar();
+  expect(botao(m.chat_plan_iniciando())?.disabled).toBe(true);
+  expect(botao(m.chat_plan_continuar())?.disabled).toBe(true);
+  resolver(); await estabilizar();
   expect(botao(m.chat_plan_implementar())).toBeUndefined();
 });
 

@@ -127,6 +127,25 @@ def _mesmo_plugin(origem: Path, id_: str, home: Path) -> bool:
                 return json.loads(manifest.read_text(encoding="utf-8")).get("name") == nome
             except (OSError, ValueError, AttributeError):
                 return False
+    manifest = marketplace / ".claude-plugin/marketplace.json"
+    try:
+        plugins = json.loads(manifest.read_text(encoding="utf-8")).get("plugins", [])
+        for plugin in plugins:
+            if plugin.get("name") != nome or plugin.get("strict") is not False:
+                continue
+            source = plugin.get("source")
+            if not isinstance(source, str) or not source.startswith("./"):
+                continue
+            raiz = (marketplace / source).resolve()
+            if not raiz.is_relative_to(marketplace) or not real.is_relative_to(raiz):
+                continue
+            skills = plugin.get("skills", ["./skills"])
+            if isinstance(skills, str):
+                skills = [skills]
+            return any(isinstance(rel, str) and (raiz / rel).resolve().is_relative_to(raiz)
+                       and real.is_relative_to((raiz / rel).resolve()) for rel in skills)
+    except (OSError, ValueError, AttributeError, TypeError):
+        return False
     return False
 
 
@@ -280,6 +299,13 @@ def reconciliar_skills(home: Path, codex_home: Path, plugins: dict, registro_ski
     """Retorna manifesto por nome e avisos; plugins recebidos devem estar habilitados."""
     avisos: list[str] = []
     fontes = skill_bridge._varrer_fontes(home)
+    fontes_disponiveis = bool(fontes)
+    keep = home / ".claude/ecc-slim-keep.txt"
+    if keep.is_file():
+        permitidas = set(keep.read_text(encoding="utf-8").splitlines())
+        # O marketplace completo não deve reativar skills podadas do cache.
+        fontes = {nome: origem for nome, origem in fontes.items()
+                  if nome in permitidas or not _mesmo_plugin(origem, "ecc@ecc", home)}
     nativas = _nativas(plugins, avisos)
     ponte = codex_home / "skills"
     ponte.mkdir(parents=True, exist_ok=True)
@@ -339,7 +365,7 @@ def reconciliar_skills(home: Path, codex_home: Path, plugins: dict, registro_ski
             if nome not in manifesto and anterior:
                 manifesto[nome] = anterior
     # Fontes vazias podem significar instalação temporariamente indisponível.
-    if fontes:
+    if fontes_disponiveis:
         for destino in ponte.iterdir():
             if destino.name != ".system" and destino.name not in fontes and _link_gerenciado(destino, raizes):
                 backup(destino, os.readlink(destino).encode(), backups)

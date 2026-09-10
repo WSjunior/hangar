@@ -198,9 +198,10 @@ async def test_shared_websocket_transport_returns_endpoint_and_handles_request()
          patch("app.adapters.codex.appserver.websockets.connect",
                AsyncMock(return_value=ws)):
         client = AppServerClient()
-        endpoint = await client.start_shared("ws://127.0.0.1:45123")
+        endpoint = await client.start_shared("ws://127.0.0.1:45123", codex_home="/tmp/codex-work")
         assert endpoint == "ws://127.0.0.1:45123"
         spawn.assert_awaited_once()
+        assert spawn.call_args.kwargs["env"]["CODEX_HOME"] == "/tmp/codex-work"
 
         task = asyncio.create_task(client.request("thread/list", {"limit": 1}))
         await asyncio.sleep(0)

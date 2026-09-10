@@ -5,6 +5,8 @@ import os
 import pytest
 
 from app import archive
+from app import archive_providers
+from app import codex_contas
 
 
 SID = "11111111-1111-1111-1111-111111111111"
@@ -194,3 +196,52 @@ def test_archive_cwd_reads_from_header(tmp_path):
     assert archive.archive_cwd("-home-u-proj", SID) == "/home/u/proj"
     with pytest.raises(FileNotFoundError):
         archive.archive_cwd("-home-u-proj", "22222222-2222-2222-2222-222222222222")
+
+
+def test_archive_codex_filtra_a_conta_antes_do_limite(tmp_path, monkeypatch):
+    monkeypatch.setattr(__import__("pathlib").Path, "home",
+                        classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", tmp_path / ".codex")
+    default = codex_contas.Account("default", tmp_path / ".codex", True)
+    work = codex_contas.create_account("work")
+    sid_default = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    sid_work = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+    def rollout(account, sid, text):
+        path = account.home / "sessions" / "2026" / "09" / "09"
+        path.mkdir(parents=True)
+        out = path / f"rollout-2026-09-09T10-00-00-{sid}.jsonl"
+        out.write_text(json.dumps({
+            "type": "session_meta", "payload": {"session_id": sid, "cwd": "/repo"},
+        }) + "\n" + text + "\n", encoding="utf-8")
+        return out
+
+    rollout(default, sid_default, "default")
+    rollout(work, sid_work, "work")
+    monkeypatch.setattr(archive, "_conversas_de_outros_providers", archive_providers.conversas)
+
+    entries = archive.list_conversations("-repo", set(), cap=1, codex_account="work")
+    assert [(entry.session_id, entry.codex_account) for entry in entries] == [(sid_work, "work")]
+
+
+def test_archive_por_cwd_filtra_provider_antes_do_limite(tmp_path, monkeypatch):
+    from app import archive_providers
+    monkeypatch.setattr(__import__("pathlib").Path, "home",
+                        classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", tmp_path / ".codex")
+    work = codex_contas.create_account("work")
+    sid = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+    path = work.home / "sessions" / "2026" / "09" / "09"
+    path.mkdir(parents=True)
+    rollout = path / f"rollout-2026-09-09T10-00-00-{sid}.jsonl"
+    rollout.write_text(json.dumps({
+        "type": "session_meta", "payload": {"session_id": sid, "cwd": "/repo"},
+    }) + "\n", encoding="utf-8")
+    monkeypatch.setattr(archive, "_conversas_de_outros_providers", lambda: [
+        archive_providers.Conversa("pi", "/repo", f"pi-{i}", tmp_path / f"p{i}.jsonl", 1000 - i)
+        for i in range(60)
+    ] + archive_providers.conversas())
+
+    entries = archive.list_conversations("-repo", set(), cap=12, codex_account="work",
+                                         provider="codex")
+    assert [entry.session_id for entry in entries] == [sid]

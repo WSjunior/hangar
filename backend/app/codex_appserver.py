@@ -19,6 +19,8 @@ import subprocess
 import threading
 from pathlib import Path
 
+from app import codex_contas
+
 # Sobe um processo e faz duas chamadas: mediana de 0,8s a 1,2s. O teto é folgado porque o
 # app-server lê o config.toml e carrega plugins na largada.
 _TIMEOUT = 30.0
@@ -38,7 +40,19 @@ def home() -> Path:
     return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
 
 
-class CodexAusente(RuntimeError):
+class CodexIndisponivel(RuntimeError):
+    """O transporte ou o processo não pôde responder ao pedido."""
+
+
+class CodexRecusado(RuntimeError):
+    """O app-server respondeu com uma recusa semântica."""
+
+
+class CodexRespostaInvalida(RuntimeError):
+    """O app-server respondeu, mas o formato não serve ao pedido."""
+
+
+class CodexAusente(CodexIndisponivel):
     """`codex` não está no PATH deste backend — não é falha do comando, é ausência do binário."""
 
 
@@ -52,7 +66,18 @@ def _binario() -> str:
     return exe
 
 
-def perguntar(metodo: str, timeout: float = _TIMEOUT) -> dict:
+def _environment(codex_home: str | Path | None) -> dict[str, str]:
+    if codex_home is None:
+        return dict(os.environ)
+    path = Path(codex_home).expanduser().absolute()
+    default = codex_contas.default_home().expanduser().absolute()
+    account = codex_contas.Account("default", path, True) if path == default else \
+        codex_contas.Account("selected", path, False)
+    return codex_contas.environment(account, base=os.environ)
+
+
+def perguntar(metodo: str, timeout: float = _TIMEOUT, *,
+              codex_home: str | Path | None = None, params: dict | None = None) -> dict:
     """Sobe um app-server em stdio, chama `metodo` e devolve o `result`.
 
     Sem parâmetros de chamada: os dois métodos que este caminho usa (`model/list` e
@@ -70,10 +95,14 @@ def perguntar(metodo: str, timeout: float = _TIMEOUT) -> dict:
     `encoding` explícito pelo mesmo motivo dos outros: `text=True` sozinho decodifica pelo locale
     (cp1252 no Windows), e os rótulos de modelo não são só ASCII.
     """
-    proc = subprocess.Popen(
-        [_binario(), "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", bufsize=1,
-    )
+    try:
+        proc = subprocess.Popen(
+            [_binario(), "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", bufsize=1,
+            env=_environment(codex_home),
+        )
+    except OSError as exc:
+        raise CodexIndisponivel(f"codex app-server não iniciou: {exc}") from exc
     # O teto de tempo mata o processo em vez de embrulhar o `readline`: um app-server que trava sem
     # fechar o stdout deixaria a leitura pendurada pra sempre, e é o pane de quem usa que paga.
     carrasco = threading.Timer(timeout, proc.kill)
@@ -83,7 +112,7 @@ def perguntar(metodo: str, timeout: float = _TIMEOUT) -> dict:
         proc.stdin.write("\n".join([
             json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
                         "params": {"clientInfo": CLIENT_INFO, "capabilities": None}}),
-            json.dumps({"jsonrpc": "2.0", "id": 2, "method": metodo, "params": {}}),
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": metodo, "params": params or {}}),
         ]) + "\n")
         proc.stdin.flush()
         for linha in proc.stdout:
@@ -99,12 +128,16 @@ def perguntar(metodo: str, timeout: float = _TIMEOUT) -> dict:
                 # motivo. Como isto alimenta a cota e o catalogo do Codex, o motivo real sumia do log.
                 if "error" in msg:
                     proc.kill()
-                    raise RuntimeError(f"codex app-server recusou {metodo}: {msg['error']}")
+                    raise CodexRecusado(f"codex app-server recusou {metodo}: {msg['error']}")
+                raise CodexRespostaInvalida(
+                    f"codex app-server devolveu resposta inválida para {metodo}")
         # Mata ANTES de ler o stderr: o `read()` vai até o EOF, e um processo ainda vivo com o
         # stderr aberto penduraria quem chamou justamente no caminho de falha.
         proc.kill()
-        raise RuntimeError((proc.stderr.read() or "").strip()[-500:]
-                           or f"codex app-server nao respondeu {metodo}")
+        detalhe = (proc.stderr.read() or "").strip()[-500:]
+        raise CodexIndisponivel(detalhe or f"codex app-server nao respondeu {metodo}")
+    except OSError as exc:
+        raise CodexIndisponivel(f"codex app-server perdeu o transporte: {exc}") from exc
     finally:
         carrasco.cancel()
         proc.kill()

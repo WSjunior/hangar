@@ -1,8 +1,11 @@
 import json
+from pathlib import Path
 
 import pytest
 
 from app import costs_claude_transcript as ct
+from app import codex_contas
+from app import codex_contas
 from app import costs_sources as cs
 from app import pricing
 
@@ -18,6 +21,8 @@ def _pricing_isolado(tmp_path, monkeypatch):
     ~/.claude/.hangar-custos/ — lixo que se acumula a cada rodada da suíte."""
     monkeypatch.setattr(pricing, "_CACHE_DIR", tmp_path / "pricing")
     monkeypatch.setattr(ct, "_CACHE_DIR", tmp_path / "custos")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", tmp_path / ".codex")
     # getattr: `cs.invalidar_cache` só nasce na Task 6; até lá o no-op mantém a fixture válida
     # desde a Task 3, sem precisar reescrevê-la depois.
     limpar = lambda: getattr(cs, "invalidar_cache", lambda: None)()  # noqa: E731
@@ -90,7 +95,7 @@ def test_codex_usa_o_ultimo_token_count_e_desconta_o_cache(tmp_path, monkeypatch
             "input_tokens": 300, "cached_input_tokens": 200, "output_tokens": 9,
             "reasoning_output_tokens": 4}}}},
     ])
-    monkeypatch.setattr(cs, "raiz_codex", lambda: tmp_path / "sessions")
+    monkeypatch.setattr(cs, "raiz_codex", lambda home=None: tmp_path / "sessions")
     r = cs.linhas_codex()[0]
     assert r.input == 100      # 300 - 200
     assert r.cache_read == 200
@@ -104,7 +109,7 @@ def test_codex_usa_o_ultimo_token_count_e_desconta_o_cache(tmp_path, monkeypatch
 
 def test_codex_sem_diretorio_devolve_lista_vazia(tmp_path, monkeypatch):
     # Quem não usa Codex não pode ver "Codex: US$ 0,00" — isso lê como "usei e não gastou".
-    monkeypatch.setattr(cs, "raiz_codex", lambda: tmp_path / "nao-existe")
+    monkeypatch.setattr(cs, "raiz_codex", lambda home=None: tmp_path / "nao-existe")
     assert cs.linhas_codex() == []
 
 
@@ -114,7 +119,7 @@ def test_codex_rollout_sem_token_count_e_pulado(tmp_path, monkeypatch):
         {"timestamp": "2026-08-01T10:00:00Z", "type": "session_meta",
          "payload": {"cwd": "/r", "model_provider": "openai"}},
     ])
-    monkeypatch.setattr(cs, "raiz_codex", lambda: tmp_path / "sessions")
+    monkeypatch.setattr(cs, "raiz_codex", lambda home=None: tmp_path / "sessions")
     assert cs.linhas_codex() == []
 
 
@@ -134,7 +139,7 @@ def test_codex_le_sessions_e_archived_sessions_sem_duplicar(tmp_path, monkeypatc
               _rollout_codex("/repo/viva", "viva", {"input_tokens": 10, "output_tokens": 1}))
     _escrever(tmp_path / "archived_sessions" / "rollout-arquivada.jsonl",
               _rollout_codex("/repo/arquivada", "arquivada", {"input_tokens": 20, "output_tokens": 2}))
-    monkeypatch.setattr(cs, "raiz_codex", lambda: tmp_path / "sessions")
+    monkeypatch.setattr(cs, "raiz_codex", lambda home=None: tmp_path / "sessions")
     sids = {r.session_id for r in cs.linhas_codex()}
     assert sids == {"viva", "arquivada"}
 
@@ -142,7 +147,7 @@ def test_codex_le_sessions_e_archived_sessions_sem_duplicar(tmp_path, monkeypatc
 def test_codex_sem_archived_sessions_nao_quebra(tmp_path, monkeypatch):
     _escrever(tmp_path / "sessions" / "rollout-viva.jsonl",
               _rollout_codex("/repo/viva", "viva", {"input_tokens": 10, "output_tokens": 1}))
-    monkeypatch.setattr(cs, "raiz_codex", lambda: tmp_path / "sessions")
+    monkeypatch.setattr(cs, "raiz_codex", lambda home=None: tmp_path / "sessions")
     assert [r.session_id for r in cs.linhas_codex()] == ["viva"]
 
 
@@ -209,7 +214,7 @@ def test_as_tres_fontes_convergem_no_mesmo_provedor(tmp_path, monkeypatch):
         {"type": "model_change", "provider": "openai-codex", "modelId": "gpt-5.6-sol"},
         {"type": "message", "message": {"usage": {"input": 1, "output": 1}}},
     ])
-    monkeypatch.setattr(cs, "raiz_codex", lambda: codex)
+    monkeypatch.setattr(cs, "raiz_codex", lambda home=None: codex)
     monkeypatch.setattr(cs, "raiz_pi", lambda: pi)
     provs = {cs.linhas_claude(cfg, "conta-x")[0].provider,
              cs.linhas_codex()[0].provider, cs.linhas_pi()[0].provider}
@@ -244,7 +249,7 @@ def test_codex_le_modelo_so_do_turn_context(tmp_path, monkeypatch):
         {"type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {
             "input_tokens": 10, "output_tokens": 1}}}},
     ])
-    monkeypatch.setattr(cs, "raiz_codex", lambda: raiz)
+    monkeypatch.setattr(cs, "raiz_codex", lambda home=None: raiz)
     assert cs.linhas_codex()[0].model == "?"
 
 
@@ -260,7 +265,7 @@ def test_coletar_junta_as_tres_fontes_e_dedup_e_por_fonte(tmp_path, monkeypatch)
     ])
     monkeypatch.setattr(cs, "raiz_pi", lambda: tmp_path / "sessions")
     monkeypatch.setattr(cs, "raiz_omp", lambda: tmp_path / "sem-omp")
-    monkeypatch.setattr(cs, "raiz_codex", lambda: tmp_path / "sem-codex")
+    monkeypatch.setattr(cs, "raiz_codex", lambda home=None: tmp_path / "sem-codex")
     monkeypatch.setattr(cs, "raiz_kimi", lambda: tmp_path / "sem-kimi")
     monkeypatch.setattr(cs, "_config_dirs", lambda: [(str(cfg), "conta-x")])
     cs.invalidar_cache()
@@ -274,7 +279,7 @@ def test_cache_relê_quando_o_arquivo_muda(tmp_path, monkeypatch):
     _transcript_claude(cfg, "s", "claude-opus-5", "/r", i=1, o=0)
     monkeypatch.setattr(cs, "raiz_pi", lambda: tmp_path / "x")
     monkeypatch.setattr(cs, "raiz_omp", lambda: tmp_path / "sem-omp")
-    monkeypatch.setattr(cs, "raiz_codex", lambda: tmp_path / "y")
+    monkeypatch.setattr(cs, "raiz_codex", lambda home=None: tmp_path / "y")
     monkeypatch.setattr(cs, "raiz_kimi", lambda: tmp_path / "z")
     monkeypatch.setattr(cs, "_config_dirs", lambda: [(str(cfg), "c")])
     cs.invalidar_cache()
@@ -298,7 +303,7 @@ def test_cache_evita_reparse_quando_nada_muda(tmp_path, monkeypatch):
     ])
     monkeypatch.setattr(cs, "raiz_pi", lambda: tmp_path / "sessions")
     monkeypatch.setattr(cs, "raiz_omp", lambda: tmp_path / "sem-omp")
-    monkeypatch.setattr(cs, "raiz_codex", lambda: tmp_path / "sem-codex")
+    monkeypatch.setattr(cs, "raiz_codex", lambda home=None: tmp_path / "sem-codex")
     monkeypatch.setattr(cs, "raiz_kimi", lambda: tmp_path / "sem-kimi")
     monkeypatch.setattr(cs, "_config_dirs", lambda: [(str(cfg), "c")])
     cs.invalidar_cache()   # senão o estado de um teste anterior contamina a contagem
@@ -346,7 +351,7 @@ def test_coletar_nao_conta_duas_vezes_quando_as_raizes_coincidem(tmp_path, monke
     raiz.mkdir()
     monkeypatch.setattr(cs, "raiz_pi", lambda: raiz)
     monkeypatch.setattr(cs, "raiz_omp", lambda: raiz)
-    monkeypatch.setattr(cs, "raiz_codex", lambda: tmp_path / "x")
+    monkeypatch.setattr(cs, "raiz_codex", lambda home=None: tmp_path / "x")
     monkeypatch.setattr(cs, "raiz_kimi", lambda: tmp_path / "y")
     monkeypatch.setattr(cs, "_config_dirs", lambda: [])
     vistos = []
@@ -501,3 +506,65 @@ def test_linhas_kimi_marca_subagente(tmp_path, monkeypatch):
     ])
     (r,) = cs.linhas_kimi()
     assert r.subagente is True
+
+
+def test_coletar_codex_separa_contas_e_deduplica_rollout_canonico(tmp_path, monkeypatch):
+    monkeypatch.setattr(__import__("pathlib").Path, "home",
+                        classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", tmp_path / ".codex")
+    default = codex_contas.Account("default", tmp_path / ".codex", True)
+    work = codex_contas.create_account("work")
+    sid_a = "a"
+    sid_b = "b"
+    original = default.home / "sessions" / "2026" / "09" / "09" / "rollout-a.jsonl"
+    _escrever(original, _rollout_codex("/a", sid_a,
+                                       {"input_tokens": 10, "output_tokens": 1}))
+    other = work.home / "sessions" / "2026" / "09" / "09" / "rollout-b.jsonl"
+    _escrever(other, _rollout_codex("/b", sid_b,
+                                    {"input_tokens": 20, "output_tokens": 2}))
+    link = work.home / "archived_sessions" / "rollout-a.jsonl"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(original)
+    monkeypatch.setattr(cs, "_config_dirs", lambda: [])
+    monkeypatch.setattr(cs, "raiz_pi", lambda: tmp_path / "pi")
+    monkeypatch.setattr(cs, "raiz_omp", lambda: tmp_path / "omp")
+    monkeypatch.setattr(cs, "raiz_kimi", lambda: tmp_path / "kimi")
+    cs.invalidar_cache()
+
+    rows = cs.coletar()
+    assert {row.session_id for row in rows if row.source == "codex"} == {sid_a, sid_b}
+    assert sum(row.input for row in rows if row.source == "codex") == 30
+    assert {row.account_id for row in rows if row.source == "codex"} == {
+        f"codex:{default.home.resolve()}", f"codex:{work.home.resolve()}"
+    }
+
+
+def test_coletar_link_da_padrao_para_secundaria_preserva_dono_e_cache(tmp_path, monkeypatch):
+    default = codex_contas.Account("default", tmp_path / ".codex", True)
+    work = codex_contas.create_account("work")
+    rollout = work.home / "sessions" / "2026" / "09" / "09" / "rollout-only.jsonl"
+    _escrever(rollout, _rollout_codex("/work", "only",
+                                      {"input_tokens": 10, "output_tokens": 1}))
+    monkeypatch.setattr(cs, "_config_dirs", lambda: [])
+    monkeypatch.setattr(cs, "raiz_pi", lambda: tmp_path / "pi")
+    monkeypatch.setattr(cs, "raiz_omp", lambda: tmp_path / "omp")
+    monkeypatch.setattr(cs, "raiz_kimi", lambda: tmp_path / "kimi")
+    cs.invalidar_cache()
+
+    def codex_rows():
+        return [row for row in cs.coletar() if row.source == "codex"]
+
+    first = codex_rows()
+    link = default.home / "sessions" / "2026" / "09" / "09" / "rollout-link.jsonl"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(rollout)
+    second = codex_rows()
+    link.unlink()
+    third = codex_rows()
+
+    assert [(row.session_id, row.account_id, row.input) for row in first] == \
+        [("only", f"codex:{work.home.resolve()}", 10)]
+    assert [(row.session_id, row.account_id, row.input) for row in second] == \
+        [("only", f"codex:{work.home.resolve()}", 10)]
+    assert [(row.session_id, row.account_id, row.input) for row in third] == \
+        [("only", f"codex:{work.home.resolve()}", 10)]

@@ -13,31 +13,71 @@ mesma lição que o Pi já tinha ensinado.
 
 Cache pelo motivo do pi_catalog: é subprocess, e a lista muda de mês em mês.
 """
+import hashlib
 import time
+from pathlib import Path
 
 from app import codex_appserver
+from app import codex_contas
 
 # Reexportado porque a rota captura este erro por aqui, e ele não muda de significado no caminho
 # do catálogo: "não achei o codex" continua sendo outra conversa que "o codex falhou".
 CodexAusente = codex_appserver.CodexAusente
+CodexIndisponivel = codex_appserver.CodexIndisponivel
+CodexRecusado = codex_appserver.CodexRecusado
+CodexRespostaInvalida = codex_appserver.CodexRespostaInvalida
 
 _TTL = 600.0
-_cache: tuple[float, list[dict]] | None = None
+_cache: dict[tuple[str, tuple], tuple[float, list[dict]]] = {}
+
+
+def _cache_key(codex_home: str | Path | None) -> tuple[str, tuple]:
+    path = Path(codex_home) if codex_home is not None else codex_contas.default_home()
+    path = path.expanduser().resolve(strict=False)
+    assinatura = []
+    for nome in ("auth.json", "config.toml"):
+        arquivo = path / nome
+        try:
+            assinatura.append((nome, hashlib.sha256(arquivo.read_bytes()).hexdigest()))
+        except OSError:
+            assinatura.append((nome, None))
+    return str(path), tuple(assinatura)
+
+
+def invalidar(codex_home: str | Path | None = None) -> None:
+    global _cache
+    if not isinstance(_cache, dict):
+        _cache = {}
+    if codex_home is None:
+        _cache.clear()
+        return
+    raiz = _cache_key(codex_home)[0]
+    for key in list(_cache):
+        if key[0] == raiz:
+            _cache.pop(key, None)
 
 
 def parse(result: dict) -> list[dict]:
     """A resposta do `model/list` no formato da tela. Estoura se não sobrar modelo nenhum."""
+    if not isinstance(result, dict):
+        raise CodexRespostaInvalida("codex app-server retornou catálogo inválido")
+    data = result.get("data")
+    if not isinstance(data, list):
+        raise CodexRespostaInvalida("codex app-server retornou catálogo inválido")
     out: list[dict] = []
-    for m in result.get("data") or []:
+    for m in data:
         # `hidden` é o provedor dizendo "não ofereça este": oferecer faria a sessão nascer num id
         # que o plano do usuário não atende, e a falha só apareceria no primeiro turno.
         if not isinstance(m, dict) or m.get("hidden") or not m.get("model"):
             continue
+        efforts = m.get("supportedReasoningEfforts") or []
+        if not isinstance(efforts, list):
+            raise CodexRespostaInvalida("codex app-server retornou esforços inválidos")
         out.append({
             "id": m["model"],
             "name": m.get("displayName") or m["model"],
             "desc": m.get("description") or "",
-            "efforts": [e.get("reasoningEffort") for e in (m.get("supportedReasoningEfforts") or [])
+            "efforts": [e.get("reasoningEffort") for e in efforts
                         if isinstance(e, dict) and e.get("reasoningEffort")],
             # `default_effort` é o mesmo campo que o catálogo do Kimi já manda — a tela lê os dois
             # pelo mesmo `ModelOption`. O `isDefault` do provedor NÃO entra: quem decide o padrão
@@ -49,20 +89,24 @@ def parse(result: dict) -> list[dict]:
         # Zero modelo com rc=0 é falha do provedor (login vencido, versão que mudou o schema), não
         # "seu plano não tem modelo". Levanta pra virar o 502 que a rota já sabe dar, e o caller
         # NÃO cacheia: senão o erro duraria 10 min depois de o Codex voltar.
-        raise RuntimeError("codex app-server nao devolveu modelo nenhum em model/list")
+        raise CodexRespostaInvalida("codex app-server nao devolveu modelo nenhum em model/list")
     return out
 
 
-def listar(fresco: bool = False) -> list[dict]:
-    global _cache
-    if _cache and not fresco and time.monotonic() - _cache[0] < _TTL:
-        return _cache[1]
-    modelos = parse(codex_appserver.perguntar("model/list"))
-    _cache = (time.monotonic(), modelos)
+def listar(fresco: bool = False, *, codex_home: str | Path | None = None) -> list[dict]:
+    key = _cache_key(codex_home)
+    cached = _cache.get(key)
+    if cached and not fresco and time.monotonic() - cached[0] < _TTL:
+        return cached[1]
+    result = (codex_appserver.perguntar("model/list") if codex_home is None else
+              codex_appserver.perguntar("model/list", codex_home=Path(key[0])))
+    modelos = parse(result)
+    _cache[key] = (time.monotonic(), modelos)
     return modelos
 
 
-def checar_escolha(model: str | None, effort: str | None) -> None:
+def checar_escolha(model: str | None, effort: str | None, *,
+                   codex_home: str | Path | None = None) -> None:
     """Recusa (ValueError) modelo fora do catálogo, ou nível que AQUELE modelo não lista.
 
     `model_args` só valida a FORMA do nível — não pode ter lista fechada, porque os níveis variam
@@ -76,7 +120,8 @@ def checar_escolha(model: str | None, effort: str | None) -> None:
     """
     if model is None:
         return
-    for m in listar():
+    modelos = listar() if codex_home is None else listar(codex_home=codex_home)
+    for m in modelos:
         if m["id"] == model:
             if effort is not None and effort not in m["efforts"]:
                 raise ValueError(f"nivel fora do suporte de {model}: {effort!r} "

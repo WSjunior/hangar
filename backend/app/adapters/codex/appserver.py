@@ -8,10 +8,14 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import socket
+from pathlib import Path
 from typing import AsyncIterator
 
 import websockets
+
+from app import codex_contas
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +72,8 @@ class AppServerClient:
             port = sock.getsockname()[1]
         return f"ws://127.0.0.1:{port}"
 
-    async def start_shared(self, endpoint: str | None = None) -> str:
+    async def start_shared(self, endpoint: str | None = None, *,
+                           codex_home: str | Path | None = None) -> str:
         """Spawna app-server WebSocket local e conecta este cliente.
 
         O endpoint retornado pode ser passado a ``codex --remote`` dentro do tmux. stdout/stderr
@@ -76,10 +81,18 @@ class AppServerClient:
         poderiam encher durante uma sessao longa.
         """
         self._endpoint = endpoint or self._free_loopback_endpoint()
+        env = dict(os.environ)
+        if codex_home is not None:
+            path = Path(codex_home).expanduser().absolute()
+            default = codex_contas.default_home().expanduser().absolute()
+            account = codex_contas.Account("default", path, True) if path == default else \
+                codex_contas.Account("selected", path, False)
+            env = codex_contas.environment(account, base=env)
         self._proc = await asyncio.create_subprocess_exec(
             self._codex_bin, "app-server", "--listen", self._endpoint,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
+            env=env,
         )
         last_error: Exception | None = None
         for _ in range(50):

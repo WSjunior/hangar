@@ -31,7 +31,9 @@ EXECUTAVEL = "hangar-codex-tui"
 
 def comando_do_lancador(cwd: str, initial_prompt: str | None = None,
                         thread_id: str | None = None, model: str | None = None,
-                        effort: str | None = None) -> list[str]:
+                        effort: str | None = None,
+                        codex_home: str | None = None,
+                        codex_account: str | None = None) -> list[str]:
     """O comando do pane de uma sessao Codex: o lancador unico, o MESMO nos tres chamadores.
 
     O nome da sessao nao entra aqui — `tmux new-session` carimba CP_SESSION_NAME no pane e o
@@ -45,6 +47,10 @@ def comando_do_lancador(cwd: str, initial_prompt: str | None = None,
     que e quem monta o argv do `codex`.
     """
     argv = [EXECUTAVEL, "--cwd", cwd]
+    if codex_home:
+        argv += ["--codex-home", codex_home]
+    if codex_account:
+        argv += ["--codex-account", codex_account]
     if thread_id:
         argv += ["--resume", thread_id]
     if model:

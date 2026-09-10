@@ -217,7 +217,7 @@ def test_catalogo_fora_do_ar_nao_impede_criar_sessao(cli, monkeypatch, caplog):
     """Mesma decisão da janela do motor: provedor parado não pode IMPEDIR de abrir sessão. A
     escolha segue pro comando e o CLI decide — mas a falha NÃO some: fica no log."""
     def quebra():
-        raise RuntimeError("model/list nao respondeu")
+        raise api.codex_models.CodexIndisponivel("model/list nao respondeu")
     monkeypatch.setattr(api.codex_models, "listar", quebra)
     alvo = SessionInfo(name="c2", cwd="/tmp", provider="codex")
     with caplog.at_level("WARNING", logger="hangar"), \
@@ -228,6 +228,18 @@ def test_catalogo_fora_do_ar_nao_impede_criar_sessao(cli, monkeypatch, caplog):
     # A escolha segue INTEIRA pro comando do pane, não é descartada junto com a checagem.
     assert (cr.call_args.kwargs.get("model"), cr.call_args.kwargs.get("effort")) == ("gpt-5.5", "high")
     assert "catalogo indisponivel" in caplog.text
+
+
+def test_recusa_semantica_do_catalogo_impede_criar_sessao(cli, monkeypatch):
+    monkeypatch.setattr(api.codex_models, "checar_escolha",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            api.codex_models.CodexRecusado("modelo recusado")))
+    with patch("app.api.registry.create") as cr:
+        r = cli.post("/api/sessions", headers=AUTH, json={
+            "name": "c3", "cwd": "/tmp", "provider": "codex",
+            "model": "gpt-5.5", "effort": "high"})
+    assert r.status_code == 502
+    cr.assert_not_called()
 
 
 def test_sem_token_vira_401(cli):

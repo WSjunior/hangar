@@ -10,38 +10,8 @@
 import { getBaseUrl, getToken, dropActiveServer, type Server } from './auth';
 import { errorDetail, comTeto } from '@hangar/core';
 import * as m from '../paraglide/messages';
-import type { EstadoLogin } from './contaEstado';
-import type { JanelaCota, EstadoCota } from './contaEstado';
-
-export type TipoCredencial = 'claude' | 'chave';
-
-export interface CotaResumo {
-  estado: EstadoCota;
-  janelas: JanelaCota[];
-  ts?: number | null;
-  idade_s?: number | null;
-  motivo?: string | null;
-}
-
-export interface Credencial {
-  id: string;
-  tipo: TipoCredencial;
-  /** O que a tela mostra: o apelido, quando existe. */
-  nome: string;
-  /** O que o disco diz (nome da pasta / do motor). É ele que vai nas rotas de escrita. */
-  nome_natural: string;
-  apelido?: string | null;
-  ativa: boolean;
-  path?: string | null;
-  login?: EstadoLogin | null;
-  base_url?: string | null;
-  chave_mascarada?: string | null;
-  usos: string[];
-  cota?: CotaResumo | null;
-  /** Só o OpenCode: a cota dele não sai de API, sai do painel com o cookie de sessão. */
-  aceita_cookie?: boolean;
-  cookie_definido?: boolean;
-}
+export { listarCredenciais, credentialAuth, credentialGroup, codexAccountMessage } from '@hangar/core';
+export type { Credencial, CotaResumo, TipoCredencial, AuthMethod, CodexAccount, CodexLoginAttempt } from '@hangar/core';
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getToken();
@@ -82,9 +52,6 @@ export { codexOpcoes, type CodexOpcoes } from '@hangar/core';
 
 // `forcar` é o botão "atualizar" da aba: pede ao servidor a leitura de cota de AGORA,
 // pulando o cache de 5 min (ver backend/app/cotas.py — `?forcar=true`).
-export function listarCredenciais(alvo: Server | null, forcar = false): Promise<Credencial[]> {
-  return em<Credencial[]>(alvo, `/api/credenciais${forcar ? '?forcar=true' : ''}`);
-}
 
 /** Apelido vazio APAGA o apelido (volta ao nome do disco). */
 export function definirApelido(

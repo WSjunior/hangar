@@ -46,6 +46,37 @@ def test_skill_pessoal_symlink_idempotente_e_sistema_preservado(ambiente):
     assert _rodar(ambiente, registro=registro) == (registro, [])
 
 
+def test_ecc_keep_retira_links_e_permite_reativar(ambiente):
+    home, codex, backups = ambiente
+    marketplace = home / ".claude/plugins/marketplaces/ecc"
+    (marketplace / ".claude-plugin").mkdir(parents=True)
+    (marketplace / ".claude-plugin/plugin.json").write_text('{"name": "ecc"}')
+    origem = _skill(marketplace / "skills/agent-eval")
+    registro, avisos = _rodar(ambiente)
+    assert not avisos
+    assert (codex / "skills/agent-eval").is_symlink()
+    keep = home / ".claude/ecc-slim-keep.txt"
+    keep.write_text("python-testing\n")
+    registro, avisos = _rodar(ambiente, registro=registro)
+    assert not avisos
+    assert not (codex / "skills/agent-eval").exists()
+    assert list(backups.glob("*.json"))
+    assert _rodar(ambiente, registro=registro) == (registro, [])
+    keep.write_text("agent-eval\n")
+    registro, avisos = _rodar(ambiente, registro=registro)
+    assert not avisos
+    assert (codex / "skills/agent-eval").resolve() == origem
+
+
+def test_ecc_keep_preserva_skill_pessoal_com_mesmo_nome(ambiente):
+    home, codex, _ = ambiente
+    origem = _skill(home / ".claude/skills/agent-eval")
+    (home / ".claude/ecc-slim-keep.txt").write_text("python-testing\n")
+    registro, avisos = _rodar(ambiente)
+    assert not avisos
+    assert (codex / "skills/agent-eval").resolve() == origem
+
+
 def test_usuario_tem_precedencia_sobre_plugin_com_mesmo_nome(ambiente):
     home, codex, _ = ambiente
     origem = _skill(home / ".claude/skills/skill", "pessoal diferente")
@@ -70,6 +101,29 @@ def test_plugin_equivalente_retira_ponte_gerenciada_e_cria_backup(ambiente):
     assert registro["skill"]["mode"] == "native"
     assert registro["skill"]["source"] == str(origem)
     assert list(backups.glob("*.json"))
+
+
+def test_marketplace_strict_false_retira_so_links_do_plugin(ambiente):
+    home, codex, backups = ambiente
+    marketplace = home / ".claude/plugins/marketplaces/private-marketplace"
+    origem = _skill(marketplace / "skills/delphi")
+    outra = _skill(marketplace / "skills/outra")
+    (marketplace / ".claude-plugin").mkdir()
+    (marketplace / ".claude-plugin/marketplace.json").write_text(json.dumps({
+        "plugins": [{"name": "private", "source": "./", "strict": False,
+                     "skills": ["./skills/delphi"]}]}))
+    registro, _ = _rodar(ambiente)
+    plugin = codex / "plugins/cache/private-marketplace/private/local"
+    _skill(plugin / "skills/delphi")
+    _skill(plugin / "skills/outra")
+    plugins = {"private@private-marketplace": {"path": str(plugin)}}
+    registro, avisos = _rodar(ambiente, plugins, registro)
+    assert not avisos
+    assert not (codex / "skills/delphi").is_symlink()
+    assert (origem / "SKILL.md").is_file()
+    assert (codex / "skills/outra").resolve() == outra
+    assert list(backups.glob("*.json"))
+    assert _rodar(ambiente, plugins, registro) == (registro, [])
 
 
 def test_plugin_de_outro_marketplace_nao_remove_ponte(ambiente):

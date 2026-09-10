@@ -1,10 +1,13 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
-import { createSession, getEngines, getSessions, listClaudeConfigs, listarCotasResumo, modelOptions } from '@hangar/core';
+import { createSession, createSessionForServer, getArchivePorCwd, getCodexAccountsForServer,
+  getCodexPreparationForServer, getEngines, getSessions, listClaudeConfigs, listarCotasResumo,
+  modelOptions, modelOptionsForServer, prepareCodexAccountForServer, resumeArchivedConversation,
+  codexAccountMessage } from '@hangar/core';
 import { basename, providerName, cotaDaConta, cotaParada, resumoCota } from '@hangar/core';
-import type { ConfigDirInfo, Provider, ModelOption, CotaContaResumo } from '@hangar/core';
+import type { ArchiveEntry, CodexAccount, ConfigDirInfo, Provider, ModelOption, CotaContaResumo } from '@hangar/core';
 import { MenuView } from '@react-native-menu/menu';
 import { useServers } from '../../stores/servers';
 import { CwdPicker } from './CwdPicker';
@@ -78,6 +81,20 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
 
   const [provider, setProvider] = useState<Provider>('claude');
 
+  const [codexAccounts, setCodexAccounts] = useState<CodexAccount[]>([]);
+  const [codexAccount, setCodexAccount] = useState('');
+  const [codexLoading, setCodexLoading] = useState(false);
+  const [codexError, setCodexError] = useState('');
+  const codexGeneration = useRef(0);
+  const codexController = useRef<AbortController | null>(null);
+  const operationController = useRef<AbortController | null>(null);
+  const mounted = useRef(true);
+  const [retomaveis, setRetomaveis] = useState<ArchiveEntry[]>([]);
+  const [retomavel, setRetomavel] = useState('');
+  const [retomando, setRetomando] = useState(false);
+  const archiveGeneration = useRef(0);
+  const archiveController = useRef<AbortController | null>(null);
+
   const [configs, setConfigs] = useState<ConfigDirInfo[]>([]);
   // Cota por conta no seletor (/api/cotas, chave `claude:<path>`); falha = lista sem número.
   const [cotas, setCotas] = useState<CotaContaResumo[]>([]);
@@ -93,6 +110,57 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
   const [erroModelos, setErroModelos] = useState('');
   const [manualOpen, setManualOpen] = useState(false);
   const [manualPath, setManualPath] = useState('');
+
+  const contaCodex = codexAccounts.find((account) => account.id === codexAccount);
+  const codexReady = provider !== 'codex' || (!!active && !!contaCodex && contaCodex.auth.status === 'connected' && !codexLoading);
+  const esforcosDoModelo = (value: string) => {
+    const selected = modelos.find((model) => valorModelo(model) === value || model.id === value);
+    return selected?.efforts ?? [];
+  };
+  const niveisEsforco = provider === 'codex' ? esforcosDoModelo(modelo) : (NIVEIS[provider] ?? []);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+    mounted.current = false;
+    codexGeneration.current++;
+    archiveGeneration.current++;
+    codexController.current?.abort();
+    archiveController.current?.abort();
+    operationController.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    const generation = ++codexGeneration.current;
+    codexController.current?.abort();
+    const controller = new AbortController();
+    codexController.current = controller;
+    setCodexAccounts([]);
+    setCodexAccount('');
+    setCodexError('');
+    setLoading(false);
+    setRetomando(false);
+    if (provider !== 'codex' || !active) {
+      setCodexLoading(false);
+      return () => { controller.abort(); codexGeneration.current++; };
+    }
+    setCodexLoading(true);
+    void getCodexAccountsForServer(active, controller.signal)
+      .then((accounts) => {
+        if (generation !== codexGeneration.current || controller.signal.aborted) return;
+        setCodexAccounts(accounts);
+        setCodexAccount((accounts.find((account) => account.is_default) ?? accounts[0])?.id ?? '');
+      })
+      .catch((cause: unknown) => {
+        if (generation !== codexGeneration.current || controller.signal.aborted) return;
+        setCodexError(cause instanceof Error ? cause.message : m.codex_ui_login_error());
+      })
+      .finally(() => {
+        if (generation === codexGeneration.current && !controller.signal.aborted) setCodexLoading(false);
+      });
+    return () => { controller.abort(); codexGeneration.current++; };
+  }, [provider, active, active?.id, active?.baseUrl, active?.token]);
 
   // carrega configs + motores uma vez (e quando provider volta a claude)
   useEffect(() => {
@@ -129,15 +197,25 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
     // reset incondicional — igual à PWA (CreateSessionSheet.svelte:141), evita vazar modelo/esforço pro Codex
     setModelo('');
     setEsforco('');
-    if (provider !== 'claude' && provider !== 'pi' && provider !== 'kimi') {
+    if (provider !== 'claude' && provider !== 'codex' && provider !== 'pi' && provider !== 'kimi') {
+      setModelos([]);
+      setListaReduzida(false);
+      setErroModelos('');
+      return;
+    }
+    if (provider === 'codex' && (!active || !codexAccount)) {
       setModelos([]);
       setListaReduzida(false);
       setErroModelos('');
       return;
     }
     let alive = true;
+    const controller = new AbortController();
     setErroModelos('');
-    void modelOptions(provider, engine || null, selectedConfig)
+    const request = provider === 'codex'
+      ? modelOptionsForServer(active!, 'codex', null, null, codexAccount, controller.signal)
+      : modelOptions(provider, engine || null, selectedConfig);
+    void request
       .then((r) => {
         if (!alive) return;
         setModelos(r.models);
@@ -150,8 +228,29 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
       });
     return () => {
       alive = false;
+      controller.abort();
     };
-  }, [provider, engine, selectedConfig]);
+  }, [provider, engine, selectedConfig, codexAccount, active, active?.id, active?.baseUrl, active?.token]);
+
+  useEffect(() => {
+    const generation = ++archiveGeneration.current;
+    archiveController.current?.abort();
+    const controller = new AbortController();
+    archiveController.current = controller;
+    setRetomaveis([]);
+    setRetomavel('');
+    setRetomando(false);
+    if (provider !== 'codex' || !picked || !active || !codexAccount) return () => { controller.abort(); archiveGeneration.current++; };
+    void getArchivePorCwd(picked, null, 'codex', codexAccount, active, controller.signal)
+      .then((entries) => {
+        if (generation !== archiveGeneration.current || controller.signal.aborted) return;
+        setRetomaveis(entries.filter((entry) => !entry.live));
+      })
+      .catch(() => {
+        if (generation === archiveGeneration.current && !controller.signal.aborted) setRetomaveis([]);
+      });
+    return () => { controller.abort(); archiveGeneration.current++; };
+  }, [provider, picked, codexAccount, active, active?.id, active?.baseUrl, active?.token]);
 
   const handlePick = useCallback(async (p: string) => {
     setPicked(p);
@@ -177,14 +276,72 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
     if (p) void handlePick(p);
   };
 
-  const canCreate = !!picked && !!name.trim() && !loading && !contextBusy;
+  const canCreate = !!picked && !!name.trim() && codexReady && !loading && !contextBusy && !retomando && !retomavel;
+  const clearCreateLoading = (generation: number) => {
+    if (mounted.current && generation === codexGeneration.current) setLoading(false);
+  };
+
+  async function prepareCodex(target: NonNullable<typeof active>, account: string, generation: number) {
+    const controller = new AbortController();
+    operationController.current?.abort();
+    operationController.current = controller;
+    let sync = await prepareCodexAccountForServer(target, account);
+    if (!mounted.current || generation !== codexGeneration.current || controller.signal.aborted) return null;
+    while (sync.status === 'running') {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      if (!mounted.current || generation !== codexGeneration.current || controller.signal.aborted) return null;
+      sync = await getCodexPreparationForServer(target, account, controller.signal);
+    }
+    return mounted.current && generation === codexGeneration.current && !controller.signal.aborted ? sync : null;
+  }
+
+  const handleResume = async () => {
+    const entry = retomaveis.find((candidate) => candidate.session_id === retomavel);
+    if (!entry || !active || retomando) return;
+    const generation = archiveGeneration.current;
+    const codexGenerationAtStart = codexGeneration.current;
+    const target = active;
+    setRetomando(true);
+    setError('');
+    try {
+      const sync = await prepareCodex(target, entry.codex_account ?? codexAccount, codexGeneration.current);
+      if (!sync || !mounted.current || generation !== archiveGeneration.current || codexGenerationAtStart !== codexGeneration.current) return;
+      if (sync.status !== 'ready') throw new Error(sync.issues.map(codexAccountMessage).join('\n') || m.codex_ui_prepare_error());
+      const session = await resumeArchivedConversation(entry.project, entry.session_id, null, null,
+        'codex', entry.codex_account ?? codexAccount, target);
+      if (!mounted.current || generation !== archiveGeneration.current || codexGenerationAtStart !== codexGeneration.current) return;
+      router.replace((`/s/${target.id}/${session.name}` as never) as never);
+    } catch (cause: unknown) {
+      if (mounted.current && generation === archiveGeneration.current && codexGenerationAtStart === codexGeneration.current) {
+        setError(cause instanceof Error ? cause.message : m.criar_sessao_erro());
+      }
+    } finally {
+      if (mounted.current && generation === archiveGeneration.current && codexGenerationAtStart === codexGeneration.current) setRetomando(false);
+    }
+  };
 
   const handleCreate = async () => {
     if (contextBusy) return;
     if (!picked || !name.trim()) return;
     setLoading(true);
     setError('');
+    const generation = codexGeneration.current;
+    const target = active;
+    const account = codexAccount;
     try {
+      if (provider === 'codex') {
+        if (!target || !account) return;
+        const sync = await prepareCodex(target, account, generation);
+        if (!sync || !mounted.current || generation !== codexGeneration.current) return;
+        if (sync.status !== 'ready') throw new Error(sync.issues.map(codexAccountMessage).join('\n') || m.codex_ui_prepare_error());
+        const s = await createSessionForServer(target, {
+          name: name.trim(), cwd: picked, provider: 'codex', model: modelo || null,
+          effort: esforco || null, codex_account: account,
+        });
+        if (!mounted.current || generation !== codexGeneration.current) return;
+        router.replace((`/s/${target.id}/${s.name}` as never) as never);
+        return;
+      }
       const s = await createSession(
         name.trim(),
         picked,
@@ -196,15 +353,16 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
         provider === 'claude' ? permissao || null : null,
       );
       // sucesso → abre chat da nova sessão — não chamar onClose (router.back) que desfaz o replace
+      if (!mounted.current || generation !== codexGeneration.current) return;
       if (serverId) {
         router.replace((`/s/${serverId}/${s.name}` as never) as never);
       } else {
         router.replace('/' as never);
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : m.criar_sessao_erro());
+      if (mounted.current && generation === codexGeneration.current) setError(e instanceof Error ? e.message : m.criar_sessao_erro());
     } finally {
-      setLoading(false);
+      clearCreateLoading(generation);
     }
   };
 
@@ -264,8 +422,8 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
           <>
             {hasSameFolder ? <Text style={styles.hint}>{m.criar_ja_existe()}</Text> : null}
             <View style={styles.field}>
-              <Text style={styles.label}>{m.comum_nome()}</Text>
-              <TextInput
+                {!retomavel ? <Text style={styles.label}>{m.comum_nome()}</Text> : null}
+              {!retomavel ? <TextInput
                 style={styles.input}
                 value={name}
                 onChangeText={setName}
@@ -273,7 +431,7 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
                 autoCapitalize="none"
                 autoCorrect={false}
                 placeholderTextColor="#8d8489"
-              />
+              /> : null}
             </View>
 
             <View style={styles.field}>
@@ -282,6 +440,35 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
             </View>
 
             {provider === 'codex' ? <CodexContextControl server={active ?? null} onBusy={setContextBusy} /> : null}
+
+            {provider === 'codex' ? (
+              <View style={styles.field}>
+                <Text style={styles.label}>{m.criar_conta_aria()}</Text>
+                {codexLoading ? <Text style={styles.hint}>{m.comum_carregando()}</Text> : null}
+                {codexError ? <Text style={styles.error} accessibilityRole="alert">{codexError}</Text> : null}
+                <MenuSelect
+                  value={codexAccount}
+                  options={codexAccounts.map((account) => ({
+                    value: account.id,
+                    label: account.name,
+                    hint: account.auth.status === 'connected'
+                      ? (account.auth.email ?? m.codex_ui_account())
+                      : account.auth.status === 'disconnected' ? m.contas_nao_conectada() : m.codex_ui_unknown(),
+                  }))}
+                  onChange={(value) => {
+                    codexGeneration.current++;
+                    archiveGeneration.current++;
+                    operationController.current?.abort();
+                    setLoading(false);
+                    setRetomando(false);
+                    setRetomavel('');
+                    setError('');
+                    setCodexAccount(value);
+                  }}
+                />
+                {contaCodex?.auth.status !== 'connected' ? <Text style={styles.hint}>{m.contas_nao_conectada()}</Text> : null}
+              </View>
+            ) : null}
 
             {provider === 'claude' && configs.length > 1 ? (
               <View style={styles.field}>
@@ -320,25 +507,25 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
               </View>
             ) : null}
 
-            {(provider === 'claude' || provider === 'pi' || provider === 'kimi') && (
+            {!retomavel && (provider === 'claude' || provider === 'codex' || provider === 'pi' || provider === 'kimi') && (
               <View style={styles.field}>
                 <Text style={styles.label}>{m.composer_modelo()}</Text>
                 <MenuSelect
                   value={modelo}
                   options={[{ value: '', label: m.criar_padrao() }, ...modelos.map((md) => ({ value: valorModelo(md), label: md.name ?? md.id, hint: [md.provider, (md as any).context ?? ((md as any).context_length ? `${Math.round(((md as any).context_length) / 1000)}K` : null), ((md as any).vision ?? (md as any).images) ? '👁' : null].filter(Boolean).join(' · ') }))]}
-                  onChange={(v) => setModelo(v)}
+                  onChange={(v) => { setModelo(v); if (provider === 'codex' && !esforcosDoModelo(v).includes(esforco)) setEsforco(''); }}
                 />
                 {listaReduzida ? <Text style={styles.hintSm}>{m.criar_lista_reduzida()}</Text> : null}
                 {erroModelos ? <Text style={styles.hintSm}>{m.criar_abre_padrao({ erro: erroModelos } as any)}</Text> : null}
               </View>
             )}
 
-            {(provider === 'claude' || provider === 'pi') && (
+            {!retomavel && niveisEsforco.length > 0 && (
               <View style={styles.field}>
                 <Text style={styles.label}>{provider === 'pi' ? (m.criar_raciocinio()) : (m.composer_esforco())}</Text>
                 <MenuSelect
                   value={esforco}
-                  options={[{ value: '', label: m.criar_padrao() }, ...NIVEIS[provider].map((n) => ({ value: n, label: n }))]}
+                  options={[{ value: '', label: m.criar_padrao() }, ...niveisEsforco.map((n) => ({ value: n, label: n }))]}
                   onChange={(v) => setEsforco(v)}
                 />
               </View>
@@ -354,6 +541,24 @@ export function CreateSessionSheet({ onClose }: { onClose?: () => void }) {
                 />
               </View>
             )}
+
+            {provider === 'codex' && retomaveis.length ? (
+              <View style={styles.field}>
+                <Text style={styles.label}>{m.criar_retomar()}</Text>
+                <MenuSelect
+                  value={retomavel}
+                  options={[{ value: '', label: m.criar_retomar_escolha() }, ...retomaveis.map((entry) => ({ value: entry.session_id, label: entry.ultima || entry.preview || entry.session_id }))]}
+                  onChange={setRetomavel}
+                />
+                <Pressable
+                  onPress={() => void handleResume()}
+                  disabled={!retomavel || retomando || !codexReady}
+                  style={[styles.ghostButton, (!retomavel || retomando || !codexReady) && styles.primaryDis]}
+                >
+                  <Text style={styles.ghostTxt}>{retomando ? m.criar_criando() : m.criar_retomar_acao()}</Text>
+                </Pressable>
+              </View>
+            ) : null}
 
             {error ? (
               <Text style={styles.error} accessibilityRole="alert">
@@ -444,6 +649,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   primaryDis: { opacity: 0.5 },
   primaryTxt: { color: '#fff', fontWeight: '600', fontSize: theme.base.text.base },
+  ghostButton: { height: 44, borderWidth: 1, borderColor: theme.tokens.border.default, borderRadius: theme.base.radius.md, justifyContent: 'center', alignItems: 'center' },
   ghost: { height: 44, justifyContent: 'center', alignItems: 'center' },
   ghostTxt: { color: theme.tokens.text.secondary, fontSize: theme.base.text.sm },
 }));

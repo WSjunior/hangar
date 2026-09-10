@@ -5,6 +5,8 @@
   import FolderScanner from './FolderScanner.svelte';
   import ProviderGlyph from './icons/ProviderGlyph.svelte';
   import CodexContextControl from './CodexContextControl.svelte';
+  import { getCodexAccountsForServer, prepareCodexAccountForServer, getCodexPreparationForServer,
+    createSessionForServer, codexAccountMessage, type CodexAccount } from '@hangar/core';
   import IconFolder from './icons/IconFolder.svelte';
   import { getSessions, listClaudeConfigs, getEngines, getProviders, criarConta, apagarConta,
            getArchivePorCwd, resumeArchivedConversation, getArchiveHistory, getBastao, passarBastao,
@@ -15,7 +17,7 @@
   import { quotaFeed } from '../lib/quotaFeed.svelte';
   import { faixaDeCota, faltaPara, motivoParado } from '../lib/cota';
   import type { ChatEvent } from '@hangar/core';
-  import { selectServer, getActiveId, serverColor } from '../lib/auth';
+  import { selectServer, getActiveId, serverColor, serverIdentidade } from '../lib/auth';
   import type { Server } from '../lib/auth';
   import type { SessionInfo, ConfigDirInfo, Provider } from '@hangar/core';
   import { criarSeletorNativo } from '../lib/pastaNativa.svelte';
@@ -56,6 +58,37 @@
   // Servidor-alvo da nova sessão. Como o scanner/dedupe/criação leem o servidor ATIVO, escolher
   // aqui = selectServer(id): todas as chamadas seguintes do sheet caem nesse backend.
   let targetServer = $state(getActiveId() ?? '');
+  const codexServer = $derived(servers.find((s) => s.id === targetServer) ?? null);
+  const codexIdentity = $derived(serverIdentidade(codexServer));
+  let codexAccounts = $state<CodexAccount[]>([]);
+  let codexAccount = $state('');
+  let codexError = $state('');
+  let codexLoading = $state(false);
+  let codexGeneration = 0;
+  let codexController = new AbortController();
+  const selectedCodex = $derived(codexAccounts.find((a) => a.id === codexAccount));
+  const codexUnavailable = $derived(provider === 'codex' && (codexLoading || selectedCodex?.auth.status !== 'connected'));
+  $effect(() => {
+    void codexIdentity;
+    const s = untrack(() => codexServer), enabled = open && provider === 'codex';
+    const g = ++codexGeneration;
+    codexController.abort(); codexController = new AbortController();
+    codexAccounts = []; codexAccount = ''; codexError = ''; codexLoading = false;
+    if (enabled && s) {
+      codexLoading = true;
+      getCodexAccountsForServer(s, codexController.signal).then((accounts) => {
+        if (g !== codexGeneration) return;
+        codexAccounts = accounts;
+        codexAccount = (accounts.find((a) => a.is_default) ?? accounts[0])?.id ?? '';
+        void carregarModelos();
+      }).catch((e) => { if (g === codexGeneration) codexError = e instanceof Error ? e.message : m.falha_conexao(); })
+        .finally(() => { if (g === codexGeneration) codexLoading = false; });
+    }
+    return () => {
+      ++codexGeneration; codexController.abort();
+      if (enabled) { ++modSeq; loading = false; }
+    };
+  });
   function pickTarget(id: string) {
     targetServer = id;
     selectServer(id);
@@ -171,7 +204,7 @@
   // `targetServer` (acima) é o servidor de destino. Ele entra na chave porque MOTOR É POR SERVIDOR
   // (comentário do loadConfigs): sem isso o app lembraria um modelo de motor que o outro servidor
   // não tem — a sessão subiria com --model de um id que aquele provedor não conhece.
-  const chaveMemoria = () => `cp_last_model:${targetServer}:${provider}:${engine || '-'}`;
+  const chaveMemoria = () => `cp_last_model:${targetServer}:${provider}:${provider === 'codex' ? codexAccount : engine || '-'}`;
 
   // Mesma guarda de sequência que o sheet já usa pra configs/motores (`cfgSeq`), pelo mesmo motivo
   // escrito lá: provider → motor → config em sequência rápida deixa várias respostas em voo, e a
@@ -207,8 +240,10 @@
     const seq = ++modSeq;
     modelos = []; erroModelos = ''; listaReduzida = false; modelo = ''; esforco = '';
     if (!temEscolhaDeModelo(provider)) return;
+    if (provider === 'codex' && (!codexAccount || !codexServer)) return;
     try {
-      const r = await carregarModelosDaConta({ provider, engine, configDir: selectedConfig }, chaveMemoria());
+      const r = await carregarModelosDaConta({ provider, engine, configDir: selectedConfig,
+        ...(provider === 'codex' ? { codexAccount, server: codexServer, signal: codexController.signal } : {}) }, chaveMemoria());
       if (seq !== modSeq) return;
       modelos = r.models;
       listaReduzida = r.reduced;
@@ -322,6 +357,9 @@
     return partes.length ? partes.join(' · ') : undefined;
   }
   const cotaSelecionada = $derived(selectedConfig ? cotaDaConta(cotaLinha, selectedConfig) ?? null : null);
+  const cotaCodexSelecionada = $derived(
+    selectedCodex ? cotaLinha.find((c) => c.id === selectedCodex.credential_id) ?? null : null,
+  );
 
   // Confirmação DENTRO da tela: `confirm()` nativo tem o mesmo defeito do `prompt()` — o navegador
   // pode suprimi-lo e aí apagar vira um clique que não faz nada, ou pior, faz sem perguntar.
@@ -622,7 +660,7 @@
     querRetomar ? retomaveis.find((c) => c.session_id === conversaEscolhida) ?? null : null);
 
   $effect(() => {
-    const cwd = picked, cfg = selectedConfig, prov = provider;
+    const cwd = picked, cfg = selectedConfig, prov = provider, account = codexAccount, server = codexServer;
     void targetServer;   // apiFetch le o servidor ativo na hora: trocar de alvo re-busca
     const seq = ++retSeq;
     // A escolha e da pasta/conta ANTERIOR; carrega-la adiante retomaria outra conversa.
@@ -631,11 +669,12 @@
     // Modo bastão fica de fora: `--resume` reabre um transcript ANTIGO, e passar o bastão é o
     // oposto — sessão nova que recebe o dossiê. Oferecer as duas coisas na mesma tela seria
     // perguntar duas coisas ao mesmo tempo.
-    if (!cwd || prov === 'codex' || bastao) {
+    if (!open || !cwd || (prov === 'codex' && !account) || bastao) {
       retomaveis = [];
       return;
     }
-    getArchivePorCwd(cwd, prov === 'claude' ? cfg : null, prov)
+    (prov === 'codex' ? getArchivePorCwd(cwd, null, prov, account, server)
+      : getArchivePorCwd(cwd, prov === 'claude' ? cfg : null, prov))
       // Conversa ABERTA sai da lista: retomar nao se aplica a ela, e como sao as mais recentes
       // elas ocupariam o topo empurrando pra baixo justamente as que da pra continuar. Quem quer
       // uma sessao viva clica nela na barra lateral.
@@ -678,7 +717,7 @@
     }
     previaCarregando = true;
     previaErro = false;
-    getArchiveHistory(alvo.project, alvo.session_id, 30, alvo.config_dir, alvo.provider)
+    getArchiveHistory(alvo.project, alvo.session_id, 30, alvo.config_dir, alvo.provider, alvo.codex_account, codexServer)
       .then((evs) => { if (seq === prevSeq) previa = evs; })
       .catch((e) => {
         console.error('conversation preview failed', e);
@@ -690,6 +729,7 @@
   async function retomar(c: ArchiveEntry) {
     if (retomando) return;
     const seq = retSeq;
+    const server = codexServer;
     retomando = c.session_id;
     error = '';
     try {
@@ -698,13 +738,14 @@
         c.project, c.session_id,
         c.provider === 'claude' ? (engine || null) : null,
         c.provider === 'claude' ? selectedConfig : null,
-        c.provider);
+        c.provider, c.codex_account, server);
       // O modal pode ter fechado (e reaberto noutra pasta) enquanto isto estava em voo: navegar
       // agora levaria pra uma sessao sem relacao com o que esta na tela. `retSeq` e incrementado
       // no reset de abertura, entao ele responde exatamente "esta chamada ainda vale?".
       if (seq !== retSeq) return;
       onClose();
-      onOpenSession(s.name);
+      if (c.provider === 'codex' && server) window.location.hash = `#/chat/${encodeURIComponent(server.id)}/${encodeURIComponent(s.name)}`;
+      else onOpenSession(s.name);
     } catch (err) {
       if (seq === retSeq) error = err instanceof Error ? err.message : m.criar_sessao_erro();
     } finally {
@@ -719,7 +760,7 @@
   }
 
   async function create() {
-    if (contextBusy) return;
+    if (contextBusy || loading || codexUnavailable) return;
     if (!picked || !name.trim()) return;
     // Guarda de verdade, não só o `disabled` do botão: o precedente aqui é a sonda de provider
     // (C5), cujo teste dispara um clique sintético justamente pra provar que o atributo não basta.
@@ -728,6 +769,10 @@
     if (providers[provider] && !providers[provider].disponivel) return;
     loading = true;
     error = '';
+    const g = codexGeneration, server = codexServer, account = codexAccount;
+    const baton = bastao;
+    const body = { name: name.trim(), cwd: picked, provider, codex_account: account,
+      model: modelo || null, effort: esforco || null };
     try {
       // Memória ANTES do onCreate: se a criação falhar (rede, 400), a escolha não se perde — o
       // valor lembrado é casado contra a lista na próxima abertura, então id de provedor que saiu
@@ -739,22 +784,43 @@
       else localStorage.removeItem(chaveMemoria());
       if (esforco) localStorage.setItem(chaveMemoria() + ':effort', esforco);
       else localStorage.removeItem(chaveMemoria() + ':effort');
-      if (bastao) {
+      if (body.provider === 'codex') {
+        if (!server || !account) return;
+        let sync = await prepareCodexAccountForServer(server, account);
+        while (sync.status === 'running') {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          if (g !== codexGeneration || !open || codexAccount !== account) return;
+          sync = await getCodexPreparationForServer(server, account, codexController.signal);
+        }
+        if (g !== codexGeneration || !open || codexAccount !== account) return;
+        if (sync.status !== 'ready') throw new Error(sync.issues.map(codexAccountMessage).join('\n') || m.codex_ui_prepare_error());
+        if (!baton) {
+          const result = await createSessionForServer(server, body);
+          if (g !== codexGeneration || !open || codexAccount !== account) return;
+          onClose();
+          window.location.hash = `#/chat/${encodeURIComponent(server.id)}/${encodeURIComponent(result.name)}`;
+          return;
+        }
+      }
+      if (baton) {
         // Rota PRÓPRIA, não o POST /api/sessions: é ela que monta o dossiê, grava no disco e
         // enfileira o kick-off. Criar pela rota normal daria uma sessão sem nada disso.
-        const r = await passarBastao(bastao.name, {
-          name: name.trim(),
-          cwd: picked,
-          config_dir: provider === 'claude' ? selectedConfig : null,
-          provider,
-          engine: provider === 'claude' ? (engine || null) : null,
-          model: modelo || null,
-          effort: esforco || null,
-          permission_mode: provider === 'claude' ? (permissao || null) : null,
-          omp_profile: provider === 'omp' ? (perfilOmp.trim() || null) : null,
-        });
+        const r = await passarBastao(baton.name, {
+          name: body.name,
+          cwd: body.cwd,
+          config_dir: body.provider === 'claude' ? selectedConfig : null,
+          provider: body.provider,
+          ...(body.provider === 'codex' ? { codex_account: account } : {}),
+          engine: body.provider === 'claude' ? (engine || null) : null,
+          model: body.model,
+          effort: body.effort,
+          permission_mode: body.provider === 'claude' ? (permissao || null) : null,
+          omp_profile: body.provider === 'omp' ? (perfilOmp.trim() || null) : null,
+        }, ...(body.provider === 'codex' ? [server] : []));
+        if (body.provider === 'codex' && (g !== codexGeneration || !open)) return;
         onClose();
-        onOpenSession(r.name);
+        if (body.provider === 'codex' && server) window.location.hash = `#/chat/${encodeURIComponent(server.id)}/${encodeURIComponent(r.name)}`;
+        else onOpenSession(r.name);
         return;
       }
       await onCreate(name.trim(), picked, provider === 'claude' ? selectedConfig : null, provider,
@@ -764,9 +830,10 @@
                      ...(provider === 'omp' ? [perfilOmp.trim() || null] : []));
       onClose();
     } catch (err) {
+      if (body.provider === 'codex' && g !== codexGeneration) return;
       error = err instanceof Error ? err.message : m.criar_sessao_erro();
     } finally {
-      loading = false;
+      if (body.provider !== 'codex' || g === codexGeneration) loading = false;
     }
   }
 
@@ -932,6 +999,45 @@
       {/if}
       </div>
 
+      {#if provider === 'codex'}
+        <div class="field">
+          <label class="field-label" for="codex-account">{m.codex_ui_account()}</label>
+          <Select id="codex-account" ariaLabel={m.codex_ui_account()} value={codexAccount} disabled={loading || codexLoading}
+            opcoes={codexAccounts.map((a) => ({ value: a.id, label: a.name,
+              hint: [a.is_default ? m.criar_padrao() : '', a.auth.status === 'connected' ? a.auth.email ?? ''
+                : a.auth.status === 'disconnected' ? m.contas_nao_conectada() : m.codex_ui_unknown()].filter(Boolean).join(' · ') }))}
+            onchange={(v) => { codexAccount = v; carregarModelos(); }} />
+          {#if selectedCodex}
+            <p class="hint">{selectedCodex.is_default ? `${m.criar_padrao()} · ` : ''}{selectedCodex.auth.status === 'connected'
+              ? selectedCodex.auth.email ?? (selectedCodex.auth.method === 'oauth' ? m.codex_ui_oauth() : m.contas_tipo_chave())
+              : selectedCodex.auth.status === 'disconnected' ? m.contas_nao_conectada() : m.codex_ui_unknown()}</p>
+          {/if}
+          {#if cotaCodexSelecionada}
+            <p class="conta-hint conta-cota" data-testid="codex-conta-cota">
+              {#if cotaCodexSelecionada.estado === 'lida'}
+                {#each cotaCodexSelecionada.janelas as j, i (j.rotulo)}
+                  {#if i > 0}<span class="cota-sep">·</span>{/if}
+                  <span class="cota-jan" data-nivel={j.nivel}>{j.rotulo} {Math.round(j.pct)}%</span>
+                  {#if faltaPara(j.resetTs, quotaFeed.agora)}
+                    <span class="cota-reset">{m.rate_reseta({ quando: faltaPara(j.resetTs, quotaFeed.agora) })}</span>
+                  {/if}
+                {/each}
+              {:else if cotaCodexSelecionada.estado === 'expirada' || cotaCodexSelecionada.estado === 'sem_credencial'}
+                {m.cota_sem_cota()} {m.cota_precisa_entrar()}
+              {:else}
+                {m.cota_sem_cota()} {motivoParado(cotaCodexSelecionada.motivo) ? m.cota_conta_parada() : ''}
+              {/if}
+            </p>
+          {/if}
+          {#if codexLoading}<p role="status">{m.comum_carregando()}</p>{/if}
+          {#if codexError}<p class="error-msg" role="alert">{codexError}</p>{/if}
+          {#each selectedCodex?.sync.issues ?? [] as issue, i (i)}
+            <p class={selectedCodex?.sync.status === 'ready' ? 'hint' : 'error-msg'}
+              role={selectedCodex?.sync.status === 'ready' ? 'status' : 'alert'}>{codexAccountMessage(issue)}</p>
+          {/each}
+          {#if loading}<p role="status">{m.codex_ui_preparing()}</p>{/if}
+        </div>
+      {/if}
       {#if provider === 'claude'}
         <div class="field">
           <label class="field-label" for="cfg-pick">{m.comum_conta_claude()}</label>
@@ -1180,7 +1286,7 @@
             {retomando ? m.criar_criando() : m.criar_retomar_acao()}
           </button>
         {:else}
-          <button class="primary-btn" onclick={create} disabled={loading || contextBusy || !name.trim() || providersCarregando || bastaoSemServidor || (providers[provider] && !providers[provider].disponivel)}>
+          <button class="primary-btn" onclick={create} disabled={loading || contextBusy || codexUnavailable || !name.trim() || providersCarregando || bastaoSemServidor || (providers[provider] && !providers[provider].disponivel)}>
             {loading ? m.criar_criando() : (bastao ? m.bastao_acao() : m.sessao_nova())}
           </button>
         {/if}

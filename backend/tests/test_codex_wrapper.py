@@ -8,6 +8,8 @@ executavel do PATH, nao um pacote).
 """
 import importlib.machinery
 import importlib.util
+import io
+import json
 import os
 import signal
 from pathlib import Path
@@ -64,7 +66,42 @@ def test_cria_direto_no_tmux_com_o_comando_do_lancador(w):
     assert argv[:4] == ["tmux", "new-session", "-d", "-s"]
     # A identidade vai por env, que e de onde o lancador a le — nao repetida no comando.
     assert f"CP_SESSION_NAME={nome}" in argv
-    assert "hangar-codex-tui --cwd /tmp/proj --prompt revise" in argv[-1]
+    assert "hangar-codex-tui --cwd /tmp/proj" in argv[-1]
+    assert "--prompt revise" in argv[-1]
+
+
+def test_cria_direto_preserva_codex_home_herdado(w, monkeypatch):
+    from app.adapters.codex import lancador
+    chamadas = []
+
+    class _R:
+        returncode = 0
+        stderr = ""
+
+    monkeypatch.setenv("CODEX_HOME", "/tmp/codex-custom")
+    with patch.object(w, "_tmux_vivas", return_value=set()), \
+         patch.object(w.subprocess, "run", lambda *a, **k: chamadas.append(a[0]) or _R()):
+        w._create_local("/tmp/proj", None, lancador)
+    assert "--codex-home /tmp/codex-custom" in chamadas[0][-1]
+    assert "--codex-account custom" in chamadas[0][-1]
+
+
+def test_cria_direto_fixa_home_padrao_do_chamador(w, monkeypatch, tmp_path):
+    from app.adapters.codex import lancador
+    chamadas = []
+
+    class _R:
+        returncode = 0
+        stderr = ""
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    with patch.object(w, "_tmux_vivas", return_value=set()), \
+         patch.object(w.subprocess, "run", lambda *a, **k: chamadas.append(a[0]) or _R()):
+        w._create_local("/tmp/proj", None, lancador)
+
+    assert f"--codex-home {tmp_path / '.codex'}" in chamadas[0][-1]
+    assert "--codex-account default" in chamadas[0][-1]
 
 
 def test_nome_livre_pula_o_que_o_tmux_ja_tem(w):
@@ -152,7 +189,7 @@ def test_main_cria_sessao_nova_e_escolhe_cliente(w, monkeypatch, tmp_path, promp
     def api(method, path, body=None):
         pedidos.append((method, path, body))
         if backend == "fora":
-            raise RuntimeError("backend inacessivel")
+            raise w.BackendTransportError("backend inacessivel")
         if method == "GET":
             return [{"name": tmp_path.name, "cwd": cwd, "provider": "codex"}]
         if method == "POST":
@@ -191,3 +228,65 @@ def test_main_cria_sessao_nova_e_escolhe_cliente(w, monkeypatch, tmp_path, promp
     assert ["tmux", action, "-t", f"={name}"] in chamadas
     assert all("/input" not in path for _, path, _ in pedidos)
     assert codex_sessions.load(tmp_path.name) is not None
+
+
+def test_http_recusado_nao_abre_sessao_local(w, monkeypatch, tmp_path):
+    from app.adapters.codex import lancador
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(w.sys, "argv", ["hangar-codex"])
+    monkeypatch.setattr(w, "_do_backend", lambda: (codex_sessions, lancador))
+    monkeypatch.setattr(w, "_api", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("HTTP 409: codex_account_preparing")))
+    with patch.object(w, "_create_local") as local:
+        assert w.main() == 1
+    local.assert_not_called()
+
+
+def test_so_409_de_nome_ocupado_repete_no_proximo_nome(w, monkeypatch):
+    from app.adapters.codex import lancador
+    tentativas = []
+
+    def api(method, path, body=None):
+        if method == "GET":
+            return []
+        tentativas.append(body["name"])
+        if len(tentativas) == 1:
+            raise w.BackendHttpError(409, {"code": "erro_nome_em_uso"})
+        return {"name": body["name"]}
+
+    monkeypatch.setattr(w, "_api", api)
+    assert w._create("/tmp/proj", None) == "proj-2"
+    assert tentativas == ["proj", "proj-2"]
+
+
+def test_api_desembrulha_detail_do_fastapi(w, monkeypatch):
+    body = json.dumps({"detail": {"code": "erro_nome_em_uso"}}).encode()
+    response = w.urllib.error.HTTPError(
+        "http://127.0.0.1/api/sessions", 409, "Conflict", {}, io.BytesIO(body))
+    monkeypatch.setattr(w, "_env", lambda: {"CP_AUTH_TOKEN": "token"})
+    monkeypatch.setattr(w.urllib.request, "urlopen",
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(response))
+
+    with pytest.raises(w.BackendHttpError) as exc:
+        w._api("POST", "/api/sessions", {})
+
+    assert exc.value.detail == {"code": "erro_nome_em_uso"}
+
+
+@pytest.mark.parametrize("code", ["codex_account_preparing", "session_name_conflict"])
+def test_outro_409_nao_repete_nem_abre_local(w, monkeypatch, code):
+    from app.adapters.codex import lancador
+    tentativas = []
+
+    def api(method, path, body=None):
+        if method == "GET":
+            return []
+        tentativas.append(body["name"])
+        raise w.BackendHttpError(409, {"code": code})
+
+    monkeypatch.setattr(w, "_api", api)
+    with patch.object(w, "_create_local") as local:
+        with pytest.raises(w.BackendHttpError):
+            w._create("/tmp/proj", None)
+    assert tentativas == ["proj"]
+    local.assert_not_called()

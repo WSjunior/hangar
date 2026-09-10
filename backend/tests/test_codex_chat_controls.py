@@ -107,7 +107,9 @@ async def test_reabrir_stream_recupera_turno_e_permite_orientar(chat):
         second = adapter.state_monitor("sess", lambda: "thread-1")
         try:
             assert (await anext(second)).state == "working"
-            assert client.calls[-1] == ("thread/read", {"threadId": "thread-1", "includeTurns": False})
+            assert [call for call in client.calls if call[0] == "thread/read"][-1] == (
+                "thread/read", {"threadId": "thread-1", "includeTurns": False})
+            assert client.calls[-1] == ("account/rateLimits/read", {})
             assert adapter._sessions["sess"]["turn_id"] == "atual"
         finally:
             await second.aclose()

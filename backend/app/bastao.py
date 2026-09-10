@@ -153,13 +153,37 @@ def _tentar(titulo: str, fn) -> list[str]:
 # seções de leitura direta
 # ---------------------------------------------------------------------------
 
-def _conta_do_transcript(jsonl: str) -> str:
+def _conta_do_transcript(jsonl: str, provider: str = "claude",
+                         codex_home: str | None = None,
+                         codex_account: str | None = None) -> str:
     """Rótulo da conta dona do transcript, deduzido do caminho (`<config>/projects/<proj>/<id>.jsonl`).
 
     Sem chamar `conta_estado.listar_contas()` de propósito: aquilo forka o CLI do `claude` por conta,
     com timeout de 10s, pra devolver estado de LOGIN — que não é o que o sucessor precisa saber.
     Fora do Claude o transcript nem mora na conta (Pi/Kimi/Codex), e aí a linha simplesmente não sai.
     """
+    if provider == "codex":
+        from app import codex_contas
+        owner = codex_contas.account_for_rollout(Path(jsonl))
+        if owner is not None:
+            if codex_account is not None and owner.id != codex_account:
+                raise codex_contas.AccountError(
+                    409, "codex_account_archive_mismatch",
+                    {"account_id": codex_account, "origin_account": owner.id},
+                )
+            return owner.id
+        if codex_home is not None:
+            raiz = Path(codex_home).expanduser().resolve(strict=False)
+            for account in codex_contas.list_accounts():
+                if account.home.expanduser().resolve(strict=False) == raiz:
+                    if codex_account is not None and account.id != codex_account:
+                        raise codex_contas.AccountError(
+                            409, "codex_account_archive_mismatch",
+                            {"account_id": codex_account, "origin_account": account.id},
+                        )
+                    return account.id
+        return codex_account or ""
+
     from app.config import list_config_dirs
     try:
         base = Path(jsonl).resolve().parent.parent.parent
@@ -199,14 +223,15 @@ def _modelo_e_esforco(linha: str | None) -> str:
     return modelo
 
 
-def _de_onde_veio(jsonl: str, cwd: str | None, provider: str, nome: str) -> list[str]:
+def _de_onde_veio(jsonl: str, cwd: str | None, provider: str, nome: str,
+                  codex_home: str | None = None, codex_account: str | None = None) -> list[str]:
     from app import statusline
     from app.models import session_key
 
     out = [f"- Sessão de origem: `{nome or '?'}` (harness `{provider}`)",
            f"- Diretório de trabalho: `{cwd or '?'}`",
            f"- Transcript lido: `{jsonl}`"]
-    conta = _conta_do_transcript(jsonl)
+    conta = _conta_do_transcript(jsonl, provider, codex_home, codex_account)
     if conta:
         out.append(f"- Conta: `{conta}`")
     # A statusline é o único lugar onde o "modelo/esforço da origem" existe sem dirigir o terminal
@@ -753,7 +778,8 @@ def _inicio(jsonl: str) -> float | None:
         return None
 
 
-def montar(jsonl: str, cwd: str | None, provider: str = "claude", nome: str = "") -> str:
+def montar(jsonl: str, cwd: str | None, provider: str = "claude", nome: str = "",
+           codex_home: str | None = None, codex_account: str | None = None) -> str:
     """Dossiê em markdown de UMA sessão, pronto pra outra ler com um `Read`.
 
     O alvo chega resolvido: sessão viva vem do `registry` (`SessionInfo.jsonl`/`cwd`/`provider`),
@@ -778,7 +804,8 @@ def montar(jsonl: str, cwd: str | None, provider: str = "claude", nome: str = ""
         "do estado medido, vale o medido. Na dúvida, pergunte em vez de executar.",
         "",
     ]
-    linhas += _tentar("De onde veio", lambda: _de_onde_veio(jsonl, cwd, provider, nome))
+    linhas += _tentar("De onde veio", lambda: _de_onde_veio(
+        jsonl, cwd, provider, nome, codex_home, codex_account))
     linhas += _tentar("O que falta", lambda: _o_que_falta(jsonl, cwd, nome, eventos, plano))
     linhas += _tentar("Onde está o trabalho", lambda: _onde_esta_o_trabalho(cwd, desde, tocados))
     linhas += _tentar("Arquivos e comandos", lambda: _arquivos_e_comandos(eventos, cwd))
@@ -836,7 +863,8 @@ def gravar(destino: str, texto: str) -> Path:
     return alvo
 
 
-def origem_resumida(jsonl: str) -> tuple[str, str]:
+def origem_resumida(jsonl: str, provider: str = "claude", codex_home: str | None = None,
+                    codex_account: str | None = None) -> tuple[str, str]:
     """(conta, modelo) da origem, pro kick-off. `""` em cada campo que não dá pra saber.
 
     Nenhum dos dois é obrigatório: sessão de Pi/Kimi não mora numa conta do Claude, e sessão sem
@@ -846,7 +874,8 @@ def origem_resumida(jsonl: str) -> tuple[str, str]:
     from app import statusline
     from app.models import session_key
 
-    return _conta_do_transcript(jsonl), _modelo_e_esforco(statusline.read(session_key(jsonl)))
+    return (_conta_do_transcript(jsonl, provider, codex_home, codex_account),
+            _modelo_e_esforco(statusline.read(session_key(jsonl))))
 
 
 # Prefixo do recado, mesma família do `[de: <sessão>]` do hangar-send e do

@@ -18,10 +18,10 @@
   import * as m from '../../paraglide/messages';
   import { engineModelos, engineModelosForServer, putEngine, putEngineForServer,
            criarConta, type ModeloProvedor } from '@hangar/core';
-  import { sincronizarNosAgentes, codexLoginIniciar, codexLoginPasso, codexLoginCancelar,
-           type ResultadoSync, type PassoCodex } from '../../lib/credenciais';
+  import { sincronizarNosAgentes, type ResultadoSync } from '../../lib/credenciais';
   import type { Server } from '../../lib/auth';
-  import { onDestroy } from 'svelte';
+  import CodexContaLogin from './CodexContaLogin.svelte';
+  import { listServers, getActiveId } from '../../lib/auth';
 
   interface Props {
     apiTarget: Server | null;
@@ -32,6 +32,7 @@
     nomesExistentes?: string[];
   }
   let { apiTarget, onFechar, onCriada, nomesExistentes = [] }: Props = $props();
+  const codexServer = $derived(apiTarget ?? listServers().find((s) => s.id === getActiveId()) ?? null);
 
   // Catálogo. `url` vazia = o usuário digita (provedor personalizado); `login` = conta do Claude por
   // assinatura, que não tem URL nem chave. Só entra aqui provedor que a gente sabe usar de verdade —
@@ -40,8 +41,7 @@
   // `{base}/v1/models` pra descobrir os modelos, e o Claude Code monta `{base}/v1/...`). Colar a
   // URL como o provedor documenta ("…/coding/v1") virava `/v1/v1/models` — 404 e zero modelo. O
   // backend também tira o `/v1` sozinho agora, então o campo aceita as duas formas.
-  // `login: 'codex'` = conta do ChatGPT por código de dispositivo, que o servidor espalha pro
-  // Codex, Pi e omp (o mesmo OAuth nos três) — nem URL nem chave nem nome.
+  // Codex autentica a conta escolhida pelo código de dispositivo, sem chave de API.
   // Três coisas MUITO diferentes moram nesta folha, e o catálogo sozinho respondia uma pergunta que
   // nunca foi feita — tanto que "modelo pro Claude Code" não tinha porta nenhuma na interface.
   // `caminhos` diz em qual dos três um provedor faz sentido: entrar numa assinatura não é cadastrar
@@ -51,7 +51,7 @@
                 login?: 'claude' | 'codex' };
   const CATALOGO: Item[] = [
     { id: 'claude', nome: m.novacred_claude_nome(), desc: m.novacred_claude_desc(), url: '', login: 'claude', caminhos: ['conta'] },
-    { id: 'codex', nome: m.novacred_codex_nome(), desc: m.novacred_codex_desc(), url: '', login: 'codex', caminhos: ['chave'] },
+    { id: 'codex', nome: m.novacred_codex_nome(), desc: m.novacred_codex_desc(), url: '', login: 'codex', caminhos: ['conta'] },
     { id: 'opencode', nome: 'OpenCode Zen', desc: m.novacred_opencode_desc(), url: 'https://opencode.ai/zen', caminhos: ['modelo', 'chave'] },
     { id: 'kimi', nome: 'Kimi Code', desc: m.novacred_kimi_desc(), url: 'https://api.kimi.com/coding', caminhos: ['modelo', 'chave'] },
     { id: 'omni', nome: 'OmniRoute', desc: m.novacred_omni_desc(), url: 'https://ai.omniwise.com.br', caminhos: ['modelo', 'chave'] },
@@ -73,10 +73,8 @@
   const opcaoAtual = $derived(OPCOES.find((o) => o.id === caminho) ?? null);
   const catalogo = $derived(caminho ? CATALOGO.filter((i) => i.caminhos.includes(caminho!)) : []);
 
-  // "Conta do Claude" tem UM provedor possível: um catálogo de uma linha só seria um passo vazio.
   function escolherCaminho(c: Caminho) {
     caminho = c;
-    if (c === 'conta') abrir(CATALOGO.find((i) => i.login === 'claude')!);
   }
   let nome = $state('');
   let url = $state('');
@@ -96,56 +94,6 @@
   let erroModelos = $state('');
   let modeloEscolhido = $state('');
 
-  // Login do Codex: o servidor pede o código e faz o poll; aqui só o passo e o intervalo de leitura.
-  let codex = $state<PassoCodex>({ etapa: 'idle' });
-  let codexPoll: ReturnType<typeof setInterval> | null = null;
-  // Geração da tentativa: cancelar/fechar com o iniciar ainda em voo invalida a resposta que
-  // chega depois — senão ela rearmava o poll num componente já desmontado.
-  let codexGer = 0;
-
-  function pararCodex() {
-    if (codexPoll) { clearInterval(codexPoll); codexPoll = null; }
-  }
-
-  async function iniciarCodex() {
-    const alvo = apiTarget;
-    const g = ++codexGer;
-    erro = '';
-    codex = { etapa: 'idle' };
-    let passo: PassoCodex;
-    try {
-      passo = await codexLoginIniciar(alvo);
-    } catch (e) {
-      if (g === codexGer) erro = e instanceof Error && e.message ? e.message : String(e);
-      return;
-    }
-    if (g !== codexGer) {
-      // Cancelado enquanto o servidor criava a tentativa: ela existe lá e precisa morrer.
-      codexLoginCancelar(alvo).catch(() => {});
-      return;
-    }
-    codex = passo;
-    codexPoll = setInterval(async () => {
-      try {
-        const p = await codexLoginPasso(alvo);
-        if (g !== codexGer) return;
-        codex = p;
-      } catch { /* erro de rede no poll: a próxima leitura tenta de novo */ }
-      if (codex.etapa !== 'aguardando') {
-        pararCodex();
-        if (codex.etapa === 'concluido') onCriada();
-      }
-    }, 2000);
-  }
-
-  function cancelarCodex() {
-    pararCodex();
-    if (codex.etapa === 'aguardando') codexLoginCancelar(apiTarget).catch(() => {});
-    codexGer++;
-    codex = { etapa: 'idle' };
-  }
-  onDestroy(cancelarCodex);
-
   function abrir(item: Item) {
     escolhido = item;
     nome = item.login ? '' : item.nome;
@@ -156,15 +104,12 @@
     erro = '';
     erroModelos = '';
     sync = null;
-    if (item.login === 'codex') iniciarCodex();
   }
 
-  // Um passo de cada vez: do formulário pro catálogo, do catálogo pro "o quê". O caminho `conta`
-  // não tem catálogo (ver escolherCaminho), então de lá o ← já devolve a pergunta.
+  // Voltar fecha só a etapa local; a tentativa OAuth continua consultável no servidor.
   function voltar() {
-    cancelarCodex();
     erro = '';
-    if (escolhido && caminho !== 'conta') { escolhido = null; return; }
+    if (escolhido) { escolhido = null; return; }
     escolhido = null;
     caminho = null;
   }
@@ -300,7 +245,7 @@
       <div class="nc-lista">
         {#each catalogo as item (item.id)}
           <div class="nc-item">
-            <ProvedorIcone tipo={item.login === 'claude' ? 'claude' : 'chave'} baseUrl={item.url}
+            <ProvedorIcone tipo={item.login ?? 'chave'} baseUrl={item.url}
               iniciais={item.nome.slice(0, 2).toUpperCase()} size={30} />
             <span class="nc-item-txt">
               <span class="nc-item-nome">{item.nome}</span>
@@ -320,40 +265,9 @@
         motor={{ base_url: escolhido.url, model: '', api_key: '', api_key_definida: false }}
         onSalvo={() => onCriada()} {onFechar} />
     {:else if escolhido.login === 'codex'}
-      <p class="nc-leg">{escolhido.desc}</p>
-      {#if codex.etapa === 'aguardando' || codex.etapa === 'concluido'}
-        <div class="nc-modelos">
-          <p class="nc-sync-linha"><b>1</b>{m.novacred_codex_passo1()}</p>
-          <a class="nc-codex-link" href={codex.url} target="_blank" rel="noopener noreferrer">{codex.url}</a>
-          <p class="nc-sync-linha"><b>2</b>{m.novacred_codex_passo2()}</p>
-          <p class="nc-codex-codigo">{codex.user_code}</p>
-          <p class="nc-sync-linha" class:pulado={codex.etapa !== 'concluido'}>
-            <b>3</b>{codex.etapa === 'concluido' ? m.novacred_codex_concluido() : m.novacred_codex_aguardando()}
-          </p>
-        </div>
-      {/if}
-      {#if codex.etapa === 'concluido' && codex.resultado}
-        <div class="nc-modelos">
-          <span class="nc-modelos-tit">{m.novacred_sync_titulo()}</span>
-          {#each Object.entries(codex.resultado) as [alvo, r] (alvo)}
-            <p class="nc-sync-linha" class:pulado={!r.ok && r.motivo === 'nao-instalado'}
-               class:falhou={!r.ok && r.motivo !== 'nao-instalado'}>
-              <b>{alvo}</b>
-              {r.ok ? (r.motivo === 'ja-logado' ? m.novacred_codex_ja_logado() : m.novacred_sync_ok())
-                    : (r.motivo === 'nao-instalado' ? m.novacred_sync_nao_instalado() : r.motivo)}
-            </p>
-          {/each}
-        </div>
-      {/if}
-      {#if codex.etapa === 'falhou'}<p class="nc-erro" role="alert">{codex.erro}</p>
-      {:else if erro}<p class="nc-erro" role="alert">{erro}</p>{/if}
-      <div class="nc-rodape">
-        {#if codex.etapa === 'falhou' || (codex.etapa === 'idle' && erro)}
-          <button type="button" class="nc-btn primario" onclick={iniciarCodex}>{m.novacred_codex_tentar()}</button>
-        {/if}
-        <button type="button" class="nc-btn" onclick={() => { cancelarCodex(); onFechar(); }}
-          >{codex.etapa === 'concluido' ? m.sessao_fechar() : m.comum_cancelar()}</button>
-      </div>
+      {#if codexServer}
+        <CodexContaLogin server={codexServer} oncomplete={onCriada} />
+      {:else}<p class="nc-erro" role="alert">{m.falha_conexao()}</p>{/if}
     {:else}
       <p class="nc-leg">{escolhido.desc}</p>
 
@@ -498,11 +412,6 @@
      resto do formulário. Com a mesma cor pros dois, uma recusa real ("já existe um provedor com
      esse nome fora do nosso bloco") ficava tão discreta quanto "o Codex não existe nesta máquina". */
   .nc-sync-linha.pulado { color: var(--text-muted); }
-  .nc-codex-link { display: block; margin: 2px 0 var(--space-2) 18px; font-size: var(--text-xs);
-                   color: var(--accent); word-break: break-all; }
-  .nc-codex-codigo { margin: 2px 0 var(--space-2) 18px; font-family: var(--font-mono);
-                     font-size: var(--text-lg); letter-spacing: 0.15em; color: var(--text-primary);
-                     user-select: all; }
   .nc-sync-linha.falhou { color: var(--error); }
   .nc-rodape { display: flex; gap: var(--space-2); }
   .nc-btn {

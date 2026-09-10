@@ -19,6 +19,7 @@ export default function ConfigLayout() {
       <Stack.Screen name="geral" options={{ title: m.config_geral_titulo() }} />
       <Stack.Screen name="aparencia" options={{ title: m.config_modal_aparencia() }} />
       <Stack.Screen name="maquinas" options={{ title: m.maquinas_titulo() }} />
+      <Stack.Screen name="contas" options={{ title: m.contas_titulo() }} />
       <Stack.Screen name="sobre" options={{ title: m.config_modal_sobre() }} />
     </Stack>
   );

@@ -15,14 +15,15 @@ que não é de nenhum dos dois lados: é do app.
 `claude_code`, que é a presença da chave no engines.json. Pi e Kimi CLI ainda NÃO são gravados por
 aqui, e por isso não aparecem na lista: caixa marcada que não faz nada é mentira, não é promessa.
 """
+import asyncio
 import logging
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app import agentes_sync, apelidos, contas, cotas, engines, oauth_codex, opencode_cota
+from app import agentes_sync, apelidos, contas, cotas, engines, oauth_codex, opencode_cota, codex_contas
 from app.auth import require_auth
 from app import engine_probe
 from app.config import list_config_dirs
@@ -33,7 +34,7 @@ _log = logging.getLogger("hangar.credenciais")
 
 credenciais_router = APIRouter(prefix="/api/credenciais")
 
-Tipo = Literal["claude", "chave"]
+Tipo = Literal["claude", "chave", "codex"]
 
 
 class CotaResumo(BaseModel):
@@ -57,6 +58,8 @@ class Credencial(BaseModel):
 
     id: str
     tipo: Tipo
+    auth_method: Literal["oauth", "api_key", "none", "unknown"] = "unknown"
+    codex_account: str | None = None
     nome: str                     # o que a tela mostra: apelido, se houver
     nome_natural: str             # o que o disco diz (pasta / nome do motor)
     apelido: str | None = None    # só quando a pessoa deu um; a tela usa pra saber se pode limpar
@@ -99,7 +102,23 @@ def _cota_por_id(forcar: bool = False) -> dict[str, CotaResumo]:
 
 @credenciais_router.get("", dependencies=[Depends(require_auth)],
                         response_model=list[Credencial])
-def listar(forcar: bool = False) -> list[Credencial]:
+async def listar_endpoint(request: Request, forcar: bool = False) -> list[Credencial]:
+    service = getattr(request.app.state, "codex_contas_login", None)
+    async def snapshot(account):
+        auth = service.cached_auth(account)
+        if service.preparation_status(account).get("status") != "running":
+            try:
+                async with asyncio.timeout(3):
+                    auth = await service.read_auth(account, refresh=forcar)
+            except TimeoutError:
+                _log.warning("leitura de autenticação Codex excedeu o prazo: %s", account.id)
+        return {"id": account.id, "auth": auth or {"method": "unknown", "status": "unavailable"}}
+
+    snapshots = await asyncio.gather(*(snapshot(a) for a in codex_contas.list_accounts())) if service else []
+    return await asyncio.to_thread(listar, forcar, codex_snapshots=snapshots)
+
+
+def listar(forcar: bool = False, *, codex_snapshots: list[dict] | tuple = ()) -> list[Credencial]:
     """Contas do Claude e chaves de API na mesma lista, com apelido e cota.
 
     `?forcar=true` re-lê a cota na hora (ignora o cache de 5 min) — é o botão "atualizar"
@@ -117,7 +136,7 @@ def listar(forcar: bool = False) -> list[Credencial]:
         saida.append(Credencial(
             id=cid, tipo="claude", nome=nomes.get(cid) or c.label, nome_natural=c.label,
             apelido=nomes.get(cid), ativa=bool(c.active), path=c.path,
-            login=_login_de(c), cota=cota.get(cid),
+            login=_login_de(c), cota=cota.get(cid), auth_method="oauth",
         ))
 
     # Chaves de API: o engines.json é o cadastro que já existe. Cada motor é uma credencial cujo
@@ -133,15 +152,26 @@ def listar(forcar: bool = False) -> list[Credencial]:
             id=cid, tipo="chave", nome=nomes.get(cid) or natural, nome_natural=natural,
             apelido=nomes.get(cid), base_url=dados.get("base_url"),
             chave_mascarada=_mascarar(chave) if isinstance(chave, str) and chave else None,
-            usos=["claude_code"], cota=cota.get(cid),
+            usos=["claude_code"], cota=cota.get(cid), auth_method="api_key",
             aceita_cookie=aceita, cookie_definido=aceita and cid in cookies,
         ))
 
-    # A cota conhece credenciais que o cadastro não conhece — o provider do Kimi, lido do
-    # config.toml dele, e o OAuth do Codex, que mora no `auth.json` dele. Some-las aqui em vez de
-    # escondê-las: a tela é "todas as credenciais desta máquina", e uma que aparece na faixa do
-    # rodapé mas não na tela seria justo a confusão que este módulo veio desfazer.
-    # O uso declarado sai do prefixo do id, que é quem sabe de qual CLI aquela credencial é.
+    snapshots = {a["id"]: a for a in codex_snapshots}
+    for account in codex_contas.list_accounts():
+        cid = f"codex:{account.home.expanduser().resolve(strict=False)}"
+        auth = snapshots.get(account.id, {}).get("auth", {})
+        status = auth.get("status", "unavailable")
+        saida.append(Credencial(
+            id=cid, tipo="codex", nome=nomes.get(cid) or account.id,
+            nome_natural=account.id, apelido=nomes.get(cid),
+            codex_account=account.id, path=str(account.home), ativa=account.is_default,
+            auth_method=auth.get("method", "unknown"), usos=["codex_cli"], cota=cota.get(cid),
+            login=EstadoLogin(estado="indisponivel" if status == "unavailable" else "ok",
+                             loggedIn=None if status == "unavailable" else status == "connected",
+                             email=auth.get("email"), plano=auth.get("plan")),
+        ))
+
+    # Cota sem cadastro continua visível, mas não comprova autenticação do Codex.
     usos_por_prefixo = {"kimi:": "kimi_cli", "codex:": "codex_cli"}
     ja = {c.id for c in saida}
     for cid, resumo in cota.items():
@@ -150,7 +180,9 @@ def listar(forcar: bool = False) -> list[Credencial]:
             continue
         natural = resumo.label or cid.split(":", 1)[1]
         saida.append(Credencial(
-            id=cid, tipo="chave", nome=nomes.get(cid) or natural, nome_natural=natural,
+            id=cid, tipo="codex" if uso == "codex_cli" else "chave",
+            auth_method="unknown" if uso == "codex_cli" else "api_key",
+            nome=nomes.get(cid) or natural, nome_natural=natural,
             apelido=nomes.get(cid), usos=[uso], cota=resumo,
         ))
     return saida

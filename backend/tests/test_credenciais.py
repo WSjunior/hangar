@@ -9,12 +9,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import apelidos, contas, cotas, credenciais, engines
+from app import apelidos, contas, cotas, credenciais, engines, codex_contas
 
 
 @pytest.fixture
 def casa(tmp_path, monkeypatch):
     """Pasta compartilhada de mentira — é onde o mapa de apelidos é gravado."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(codex_contas, "_DEFAULT_HOME", tmp_path / ".codex")
+    monkeypatch.setattr(codex_contas, "list_accounts", lambda: [])
     monkeypatch.setattr(contas, "compartilhado", lambda: tmp_path)
     return tmp_path
 
@@ -110,16 +113,67 @@ def test_credencial_que_so_a_cota_conhece_aparece_na_lista(casa, monkeypatch):
     assert linhas[0].nome_natural == "apikey"
 
 
-def test_credencial_do_codex_tambem_aparece(casa, monkeypatch):
-    """Mesma regra do Kimi acima: a conta do Codex é um OAuth do CLI dele, não um cadastro do app.
-    Ela virou fonte de cota, então aparecer na faixa e sumir aqui seria a contradição que o
-    comentário do `listar` proíbe — e o botão "atualizar" da tela pagaria a leitura sem mostrá-la."""
-    _monta(monkeypatch, cotas_lista=[_cota("codex:/home/u/.codex", 5.0, label="Codex")])
-    linhas = credenciais.listar()
-    assert [(c.id, c.tipo, c.usos) for c in linhas] == [
-        ("codex:/home/u/.codex", "chave", ["codex_cli"])]
-    # O nome vem do rótulo da FONTE, não do id: sem isso a tela mostraria o caminho cru.
-    assert linhas[0].nome_natural == "Codex"
+@pytest.mark.parametrize("method,status", [("oauth", "connected"), ("api_key", "connected"),
+                                             ("none", "disconnected"), ("unknown", "unavailable")])
+@pytest.mark.parametrize("with_quota", [True, False])
+def test_credencial_do_codex_tambem_aparece(casa, monkeypatch, method, status, with_quota):
+    cid = f"codex:{casa / '.codex'}"
+    _monta(monkeypatch, cotas_lista=[_cota(cid)] if with_quota else [])
+    account = codex_contas.Account("default", casa / ".codex", True)
+    monkeypatch.setattr(codex_contas, "list_accounts", lambda: [account])
+    apelidos.definir(cid, "Trabalho")
+    snapshots = [{"id": "default", "auth": {"method": method, "status": status,
+                  "email": "user@example.test" if method == "oauth" else None,
+                  "plan": "pro" if method == "oauth" else None}}]
+    rows = credenciais.listar(codex_snapshots=snapshots)
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row.id, row.tipo, row.codex_account, row.auth_method) == (cid, "codex", "default", method)
+    assert row.nome == "Trabalho"
+    assert (row.cota is not None) == with_quota
+    assert row.login.loggedIn == (None if status == "unavailable" else status == "connected")
+    if method == "oauth":
+        assert (row.login.email, row.login.plano) == ("user@example.test", "pro")
+
+
+def test_codex_sem_snapshot_nao_inventa_autenticacao(casa, monkeypatch):
+    _monta(monkeypatch)
+    monkeypatch.setattr(codex_contas, "list_accounts", lambda: [codex_contas.Account("default", casa / ".codex", True)])
+    row = credenciais.listar()[0]
+    assert row.auth_method == "unknown"
+    assert row.login.estado == "indisponivel"
+
+
+@pytest.mark.asyncio
+async def test_endpoint_reusa_auth_publica_sem_esperar_preparo(casa, monkeypatch):
+    _monta(monkeypatch)
+    account = codex_contas.Account("default", casa / ".codex", True)
+    monkeypatch.setattr(codex_contas, "list_accounts", lambda: [account])
+    service = SimpleNamespace(
+        preparation_status=lambda a: {"status": "running"},
+        cached_auth=lambda a: {"method": "oauth", "status": "connected", "email": "x@example.test", "plan": "pro"},
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(codex_contas_login=service)))
+    rows = await credenciais.listar_endpoint(request)
+    assert rows[0].auth_method == "oauth"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method,status", [("oauth", "connected"), ("none", "disconnected"),
+                                           ("unknown", "unavailable")])
+async def test_endpoint_le_identidade_nativa_sem_cota(casa, monkeypatch, method, status):
+    from unittest.mock import AsyncMock
+
+    _monta(monkeypatch)
+    account = codex_contas.Account("default", casa / ".codex", True)
+    monkeypatch.setattr(codex_contas, "list_accounts", lambda: [account])
+    read = AsyncMock(return_value={"method": method, "status": status, "email": None, "plan": None})
+    service = SimpleNamespace(preparation_status=lambda a: {"status": "ready"},
+                              cached_auth=lambda a: None, read_auth=read)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(codex_contas_login=service)))
+    rows = await credenciais.listar_endpoint(request, forcar=True)
+    read.assert_awaited_once_with(account, refresh=True)
+    assert len(rows) == 1 and rows[0].auth_method == method and rows[0].cota is None
 
 
 def test_conta_sem_cota_lida_continua_na_lista(casa, monkeypatch):

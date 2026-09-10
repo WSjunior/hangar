@@ -36,11 +36,13 @@ vi.mock('../lib/auth', () => ({
 }));
 
 const sse = vi.hoisted(() => ({ handlers: new Map<string, (event: MessageEvent) => void>() }));
+const harness = vi.hoisted(() => ({ provider: 'codex' as 'claude' | 'codex' }));
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof api>(),
   getHistory: vi.fn().mockResolvedValue([]),
   getHistoryDesde: vi.fn().mockResolvedValue({ eventos: [], etag: null }),
-  getSessions: vi.fn().mockResolvedValue([{ name: 'codex-flow', provider: 'codex', tracked: true, state: 'working', cwd: '/teste' }]),
+  getSessions: vi.fn(async () => [{ name: 'codex-flow', provider: harness.provider, tracked: true, state: 'working', cwd: '/teste' }]),
+  getSessionPlanPreview: vi.fn().mockResolvedValue(null),
   getRunners: vi.fn().mockResolvedValue({ running: false }),
   getPlan: vi.fn().mockResolvedValue(null),
   getWorkflows: vi.fn().mockResolvedValue([]),
@@ -77,6 +79,14 @@ async function montar() {
   await flush(); await flush();
   await emit('state', { session: 'codex-flow', state: 'working', codex_mode: 'default' });
 }
+async function montarClaude() {
+  const target = document.createElement('div'); document.body.appendChild(target);
+  components.push(mount(Chat, { target, props: {
+    sessionName: 'codex-flow', desktop: true, showContextPanel: false,
+    onBack: vi.fn(), onNavigateToChat: vi.fn(),
+  } }));
+  await flush(); await flush();
+}
 async function enfileirar(text: string) {
   const textarea = document.querySelector<HTMLTextAreaElement>('textarea')!;
   textarea.value = text;
@@ -94,6 +104,7 @@ async function enfileirar(text: string) {
 
 beforeEach(() => {
   vi.clearAllMocks(); sse.handlers.clear();
+  harness.provider = 'codex';
   const storage = new Map<string, string>();
   vi.stubGlobal('localStorage', {
     getItem: (key: string) => storage.get(key) ?? null,
@@ -198,6 +209,8 @@ it('aprovar o plano envia uma única vez à sessão atual mesmo com mandar pros 
     text: '<proposed_plan>\n## Plano\nPreservar a configuração e validar a alteração.\n</proposed_plan>',
   });
   await emit('state', { session: 'codex-flow', state: 'idle', codex_mode: 'plan' });
+  const resposta = document.querySelector('.assistant-msg:not(.preview)');
+  expect(resposta?.nextElementSibling?.classList.contains('plan-preview')).toBe(true);
   const implement = document.querySelector<HTMLButtonElement>('.plan-actions .primary-btn')!;
   expect(implement.textContent).toContain(m.chat_plan_implementar());
   expect(implement.disabled).toBe(false);
@@ -210,4 +223,37 @@ it('aprovar o plano envia uma única vez à sessão atual mesmo com mandar pros 
   expect(api.sendInput).toHaveBeenCalledExactlyOnceWith('codex-flow', m.chat_plan_pedido());
   expect(api.broadcast).not.toHaveBeenCalled();
   expect(both.getAttribute('aria-pressed')).toBe('true');
+});
+
+it('Claude redescobre no fim de cada turno e ancora o cartão no plano novo', async () => {
+  harness.provider = 'claude';
+  vi.mocked(api.getHistory).mockResolvedValueOnce([]);
+  vi.mocked(api.getSessionPlanPreview)
+    .mockResolvedValueOnce(null)
+    .mockResolvedValueOnce({ name: 'primeiro', path: '/p/primeiro.md', markdown: '# Primeiro', anchor_id: 'a-plan-1' } as unknown as Awaited<ReturnType<typeof api.getSessionPlanPreview>>)
+    .mockResolvedValueOnce({ name: 'segundo', path: '/p/segundo.md', markdown: '# Segundo', anchor_id: 'a-plan-2' } as unknown as Awaited<ReturnType<typeof api.getSessionPlanPreview>>);
+  await montarClaude();
+  expect(api.getSessionPlanPreview).toHaveBeenCalledTimes(1);
+
+  await emit('state', { session: 'codex-flow', state: 'working' });
+  expect(api.getSessionPlanPreview).toHaveBeenCalledTimes(1);
+  await emit('state', { session: 'codex-flow', state: 'awaiting_input' });
+  expect(api.getSessionPlanPreview).toHaveBeenCalledTimes(2);
+  await emit('state', { session: 'codex-flow', state: 'awaiting_input' });
+  expect(api.getSessionPlanPreview).toHaveBeenCalledTimes(2);
+  await emit('message', { id: 'a-old', kind: 'assistant_msg', text: 'Resposta anterior.', ts: 1 });
+  await emit('message', { id: 'a-plan-1', kind: 'assistant_msg', text: 'Plano primeiro.', ts: 2 });
+  expect(document.querySelector('.plan-name')?.textContent).toBe('Primeiro');
+  const anterior = [...document.querySelectorAll<HTMLElement>('.assistant-msg')]
+    .find((el) => el.textContent?.includes('Resposta anterior.'));
+  expect(anterior?.nextElementSibling?.classList.contains('plan-preview')).toBe(false);
+
+  await emit('state', { session: 'codex-flow', state: 'working' });
+  await emit('state', { session: 'codex-flow', state: 'idle' });
+  expect(api.getSessionPlanPreview).toHaveBeenCalledTimes(3);
+  await emit('message', { id: 'a-plan-2', kind: 'assistant_msg', text: 'Plano segundo.', ts: 3 });
+  const respostas = [...document.querySelectorAll<HTMLElement>('.assistant-msg')];
+  const segunda = respostas.find((el) => el.textContent?.includes('Plano segundo.'));
+  expect(segunda?.nextElementSibling?.classList.contains('plan-preview')).toBe(true);
+  expect(document.body.textContent).not.toContain('Resposta anterior.Plano');
 });

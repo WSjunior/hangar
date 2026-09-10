@@ -93,6 +93,9 @@ from app import pair
 from app import pair_texto
 from app import peers
 from app import alcance, conta_estado, cotas, credenciais, peers_api
+from app import codex_contas as codex_accounts
+from app import codex_contas_api
+from app.codex_contas_login import CodexContasLogin, codex_session_alive
 from app.pair import PairLink, contract_path_for
 from app.hook_state import hook_state
 from app import push
@@ -104,6 +107,119 @@ from app import desktop_palette
 from app import plano_claude
 
 _log = logging.getLogger("hangar")
+
+
+_codex_live_leases: dict[str, dict] = {}
+
+
+def _codex_lease_released(name: str) -> None:
+    state = _codex_live_leases.pop(name, None)
+    if state is not None:
+        state["lease"].release()
+
+
+def _codex_lease_renamed(old: str, new: str) -> None:
+    state = _codex_live_leases.pop(old, None)
+    if state is not None:
+        state["renaming"] = True
+        state["revision"] = state.get("revision", 0) + 1
+        state["name"] = new
+        _codex_live_leases[new] = state
+
+
+def _codex_lease_rename_finished(name: str) -> None:
+    state = _codex_live_leases.get(name)
+    if state is not None:
+        state["renaming"] = False
+        state["revision"] = state.get("revision", 0) + 1
+
+
+async def _watch_codex_lease(state: dict) -> None:
+    try:
+        while True:
+            if state.get("renaming"):
+                await asyncio.sleep(0.05)
+                continue
+            name = state["name"]
+            revision = state.get("revision", 0)
+            try:
+                alive = await asyncio.to_thread(tmux.has_session, name)
+            except Exception:
+                alive = True
+            if (state["name"] != name or state.get("revision", 0) != revision
+                    or state.get("renaming")):
+                continue
+            if not alive:
+                break
+            await asyncio.sleep(1)
+    finally:
+        current = _codex_live_leases.get(state["name"])
+        if current is state:
+            _codex_live_leases.pop(state["name"], None)
+        state["lease"].release()
+
+
+def _hold_codex_lease(name: str, lease) -> None:
+    lease.mark_live(name)
+    state = {"name": name, "lease": lease, "renaming": False, "revision": 0}
+    _codex_live_leases[name] = state
+    task = asyncio.create_task(_watch_codex_lease(state), name=f"codex-lease-{name}")
+    tasks = getattr(app.state, "codex_creation_tasks", None)
+    if tasks is None:
+        tasks = set()
+        app.state.codex_creation_tasks = tasks
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
+
+
+def _codex_service():
+    return getattr(app.state, "codex_contas_login", None)
+
+
+def _resolve_codex_account(account_id: str | None):
+    try:
+        return codex_accounts.resolve_account(account_id or "default")
+    except codex_accounts.AccountError as exc:
+        raise HTTPException(exc.status, detail=erro(exc.code, "conta Codex inválida", **exc.params)) from None
+
+
+def _codex_prepare_or_fail(account, service) -> None:
+    if account.is_default:
+        return
+    if service is None:
+        raise HTTPException(503, detail=erro("codex_account_service_unavailable",
+                                             "serviço de contas Codex indisponível"))
+    status = service.preparation_status(account)
+    if status.get("status") == "running":
+        raise HTTPException(409, detail=erro("codex_account_preparing",
+                                             "a preparação da conta Codex está em andamento",
+                                             account_id=account.id))
+    if status.get("status") != "ready":
+        raise HTTPException(409, detail=erro("codex_account_prepare_failed",
+                                             "a conta Codex tem pendências de preparação",
+                                             account_id=account.id,
+                                             issues=status.get("issues", [])))
+
+
+def _codex_account_in_use(account) -> bool:
+    """Consulta sessões Codex vivas sem alterar a identidade do processo do backend."""
+    from app.adapters.codex import sessions as codex_sessions
+    wanted = account.home.expanduser().resolve(strict=False)
+    for info in registry.list():
+        if getattr(info, "provider", None) != "codex":
+            continue
+        meta = codex_sessions.load(info.name) or {}
+        if not codex_session_alive(info.name, meta):
+            continue
+        selected = getattr(info, "codex_home", None)
+        if selected and Path(selected).expanduser().resolve(strict=False) == wanted:
+            return True
+        rollout = getattr(info, "jsonl", None)
+        if rollout:
+            owner = codex_accounts.account_for_rollout(Path(rollout))
+            if owner is not None and owner.id == account.id:
+                return True
+    return False
 
 
 class _BodyTooLarge(Exception):
@@ -268,6 +384,10 @@ async def _lifespan(app: FastAPI):
     # threads (Timer da confirmacao, gatilho de hook). Ver `_drenar`.
     global _loop_servidor
     _loop_servidor = asyncio.get_running_loop()
+    codex_contas_login = CodexContasLogin(account_in_use=_codex_account_in_use)
+    app.state.codex_contas_login = codex_contas_login
+    cotas.registrar_codex_auth_cache(codex_contas_login.cached_auth)
+    app.state.codex_creation_tasks = set()
     from app.codex_integracao import SERVICO as integracao_codex
     omp_sync = PluginSyncLoop(
         PluginSynchronizer(home=Path.home(), claude_dir=_backend_config_base()),
@@ -280,6 +400,13 @@ async def _lifespan(app: FastAPI):
     try:
         yield
     finally:
+        creation_tasks = list(getattr(app.state, "codex_creation_tasks", ()))
+        for creation_task in creation_tasks:
+            creation_task.cancel()
+        if creation_tasks:
+            await asyncio.gather(*creation_tasks, return_exceptions=True)
+        await codex_contas_login.close()
+        cotas.registrar_codex_auth_cache(None)
         try:
             await integracao_codex.fechar()
         except Exception:
@@ -386,9 +513,12 @@ app.include_router(alcance.alcance_router)
 app.include_router(conta_estado.conta_estado_router)
 app.include_router(cotas.cotas_router)
 app.include_router(credenciais.credenciais_router)
+app.include_router(codex_contas_api.codex_contas_router)
 app.include_router(harness_api.harness_router)
 app.include_router(peers_api.peers_router)
 registry = SessionRegistry()
+registry_mod.apos_saida_codex = _codex_lease_released
+registry_mod.apos_renomear_codex = _codex_lease_renamed
 # Peer avisado pela varredura de morte já pode estar ocioso: sem este drain a fila só esvazia no
 # próximo hook dele, que pode nunca vir.
 registry_mod.apos_saida_por_morte = lambda p: threading.Thread(
@@ -1232,6 +1362,8 @@ class CreateBody(_StrictBody):
     # Qual Adapter cria a sessao (app.adapters.get_adapter). Default "claude" preserva o
     # comportamento de hoje pros clientes que ainda nao mandam o campo.
     provider: str = "claude"
+    # Conta Codex escolhida pelo usuário. Ausente mantém a conta padrão para clientes antigos.
+    codex_account: str | None = None
     # Wrapper interativo do Codex pode iniciar a TUI ja com um prompt. Nao e argv arbitrario:
     # evita que um cliente remoto injete flags que afrouxem sandbox/aprovacoes do backend.
     initial_prompt: str | None = None
@@ -1581,6 +1713,20 @@ async def create_session(body: CreateBody):
             await asyncio.to_thread(prepare, body.cwd, runtime_dirs=(body.config_dir or "",))
         except ValueError as exc:
             raise HTTPException(400, detail=erro("erro_criacao_sessao", str(exc))) from None
+    if body.codex_account is not None and body.provider != "codex":
+        raise HTTPException(400, detail=erro("codex_account_so_codex",
+                                             "codex_account só vale para provider codex"))
+    codex_account_obj = None
+    codex_service = _codex_service() if body.provider == "codex" else None
+    if body.provider == "codex":
+        codex_account_obj = _resolve_codex_account(body.codex_account)
+        if body.read_only:
+            try:
+                await asyncio.to_thread(prepare, body.cwd, runtime_dirs=(str(codex_account_obj.home),))
+            except ValueError as exc:
+                raise HTTPException(400, detail=erro("erro_criacao_sessao", str(exc))) from None
+        if body.codex_account is not None:
+            _codex_prepare_or_fail(codex_account_obj, codex_service)
     if body.config_dir is not None and body.config_dir not in {c.path for c in list_config_dirs()}:
         raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
     # Mesma guarda do config_dir. Codex nao usa spawn_command/tmux desse jeito, entao motor + codex e
@@ -1611,14 +1757,20 @@ async def create_session(body: CreateBody):
     # descarta o nível calado — sucesso reportado sobre escolha que não valeu.
     if body.provider == "codex" and (body.model or body.effort):
         try:
-            await asyncio.to_thread(codex_models.checar_escolha, body.model, body.effort)
+            checar_kw = ({"codex_home": codex_account_obj.home}
+                         if body.codex_account is not None else {})
+            await asyncio.to_thread(codex_models.checar_escolha, body.model, body.effort,
+                                    **checar_kw)
         except ValueError as e:
             raise HTTPException(422, detail=erro("erro_codex_escolha_invalida", str(e), erro=str(e))) from None
-        except (RuntimeError, OSError) as e:
+        except codex_models.CodexIndisponivel as e:
             # Catálogo fora do ar (ou `codex` ausente — o CodexAusente é um RuntimeError) não pode
             # IMPEDIR de abrir sessão: mesma decisão da janela do motor, logo abaixo. A escolha
             # segue pro comando e o CLI decide. A falha não some — fica no log.
             _log.warning("codex: catalogo indisponivel, escolha nao conferida: %s", e)
+        except (codex_models.CodexRecusado, codex_models.CodexRespostaInvalida) as e:
+            raise HTTPException(502, detail=erro("erro_codex_catalogo_invalido", str(e),
+                                                 erro=str(e))) from None
 
     # Janela do modelo escolhido, pra entrar no env do motor (Task 3). O número já está no cache do
     # catálogo do provedor (_engine_models); vir do navegador seria deixar um terceiro escolher uma
@@ -1638,6 +1790,45 @@ async def create_session(body: CreateBody):
             # coisa que hoje não acontece, e que contradiz o Step 5 da Task 5 ("provedor parado: a
             # sessão ainda cria"). A sessão sobe sem a var e o CLI usa o default dele.
             janela = None
+
+    codex_lease = None
+    if body.provider == "codex" and (body.codex_account is not None or codex_service is not None):
+        if codex_service is None:
+            raise HTTPException(503, detail=erro("codex_account_service_unavailable",
+                                                 "serviço de contas Codex indisponível"))
+        try:
+            codex_lease = codex_service.reserve_creation(codex_account_obj)
+        except codex_accounts.AccountError as exc:
+            raise HTTPException(exc.status, detail=erro(exc.code, "criação da conta Codex recusada",
+                                                        **exc.params)) from None
+
+    async def _create_registry(kwargs: dict):
+        """A criação é bloqueante; se o request morrer, o worker ainda precisa terminar."""
+        nonlocal codex_lease
+        if codex_lease is None:
+            return await asyncio.to_thread(registry.create, body.name, body.cwd,
+                                           body.config_dir, **kwargs)
+        worker = asyncio.create_task(asyncio.to_thread(
+            registry.create, body.name, body.cwd, body.config_dir, **kwargs))
+        try:
+            info = await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            try:
+                info = await asyncio.shield(worker)
+            except BaseException:
+                codex_lease.release()
+                codex_lease = None
+                raise
+            _hold_codex_lease(info.name, codex_lease)
+            codex_lease = None
+            raise
+        except BaseException:
+            codex_lease.release()
+            codex_lease = None
+            raise
+        _hold_codex_lease(info.name, codex_lease)
+        codex_lease = None
+        return info
 
     # Reconciliar e criar a sessão sob a MESMA trava (ciclo_conta), só no caminho que consome o
     # config dir (Claude/Pi — o Codex tem conta propria e nao le config dir do Claude). Sem o ciclo, um DELETE da
@@ -1682,7 +1873,8 @@ async def create_session(body: CreateBody):
                         info = await asyncio.to_thread(registry.create, body.name, body.cwd, body.config_dir, **_kw)
                         return info.model_copy(update={"avisos": list(avisos)})
                     except ValueError as e:
-                        raise HTTPException(409, str(e))
+                        code = "erro_nome_em_uso" if "ja existe uma sessao" in str(e) else "erro_criacao_sessao"
+                        raise HTTPException(409, detail=erro(code, str(e)))
                 finally:
                     # Solta a trava sempre — inclusive quando o corpo levanta HTTPException.
                     await asyncio.to_thread(cm.__exit__, None, None, None)
@@ -1698,11 +1890,14 @@ async def create_session(body: CreateBody):
             _kw2["initial_prompt"] = body.initial_prompt
         if body.omp_profile:
             _kw2["omp_profile"] = body.omp_profile
+        if body.codex_account is not None:
+            _kw2["codex_account"] = body.codex_account
         if body.read_only:
             _kw2["read_only"] = True
-        return await asyncio.to_thread(registry.create, body.name, body.cwd, body.config_dir, **_kw2)
+        return await _create_registry(_kw2)
     except ValueError as e:
-        raise HTTPException(409, str(e))
+        code = "erro_nome_em_uso" if "ja existe uma sessao" in str(e) else "erro_criacao_sessao"
+        raise HTTPException(409, detail=erro(code, str(e)))
 
 
 @app.delete("/api/sessions/{name}", dependencies=[Depends(require_auth)])
@@ -1746,8 +1941,22 @@ def rename_session(name: str, body: RenameBody):
         return {"ok": True, "name": name}
     if tmux.has_session(new):
         raise HTTPException(409, detail=erro("erro_nome_em_uso", "ja existe uma sessao com esse nome"))
-    if not tmux.rename_session(name, new):
+    # Atualiza a reserva antes do rename do tmux: durante o boot o sidecar ainda pode não existir.
+    if registry_mod.apos_renomear_codex:
+        registry_mod.apos_renomear_codex(name, new)
+    try:
+        renamed = tmux.rename_session(name, new)
+    except Exception:
+        if registry_mod.apos_renomear_codex:
+            registry_mod.apos_renomear_codex(new, name)
+        _codex_lease_rename_finished(name)
+        raise
+    if not renamed:
+        if registry_mod.apos_renomear_codex:
+            registry_mod.apos_renomear_codex(new, name)
+        _codex_lease_rename_finished(name)
         raise HTTPException(500, detail=erro("sessao_falha_renomear", "falha ao renomear"))
+    _codex_lease_rename_finished(new)
     registry.rename(name, new)  # migra o cache name->jsonl (senao serve transcript errado pos-rename)
     from app.pqueue import PromptQueue
     try:
@@ -1998,6 +2207,8 @@ async def plan_preview(name: str, content: bool = True):
     if plano is None:
         return None
     resposta = {"name": plano.nome, "path": str(plano.caminho)}
+    if plano.anchor_id is not None:
+        resposta["anchor_id"] = plano.anchor_id
     if not content:
         return resposta
     try:
@@ -2010,12 +2221,33 @@ async def plan_preview(name: str, content: bool = True):
 
 
 async def _bastao_alvo(name: str, project: str | None, session_id: str | None,
-                       config_dir: str | None, provider: str) -> SessionInfo:
+                       config_dir: str | None, provider: str,
+                       origem_codex_account: str | None = None) -> SessionInfo:
     """Origem VIVA pelo registry; morta pelo archive (project + session_id, como o resume do
     Arquivo). O gatilho automático pode chegar depois de o 429 derrubar o pane — sem isto o
     bastão só existia enquanto a origem respirava."""
     info = await _cached_info(name)
     if info and info.jsonl:
+        if info.provider == "codex":
+            try:
+                owner = codex_accounts.account_for_rollout(Path(info.jsonl))
+            except codex_accounts.AccountError as e:
+                raise _erro_conta_codex(e) from None
+            if owner is None and info.codex_home:
+                raiz = Path(info.codex_home).expanduser().resolve(strict=False)
+                owner = next((account for account in codex_accounts.list_accounts()
+                              if account.home.expanduser().resolve(strict=False) == raiz), None)
+            if owner is None and origem_codex_account is not None:
+                raise _erro_conta_codex(codex_accounts.AccountError(
+                    409, "codex_account_archive_mismatch",
+                    {"account_id": origem_codex_account}))
+            if owner is not None:
+                if origem_codex_account is not None and owner.id != origem_codex_account:
+                    raise _erro_conta_codex(codex_accounts.AccountError(
+                        409, "codex_account_archive_mismatch",
+                        {"account_id": origem_codex_account, "origin_account": owner.id}))
+                info.codex_home = str(owner.home.resolve(strict=False))
+                info.conta = f"codex:{info.codex_home}"
         return info
     if not (project and session_id):
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "session or transcript not found"))
@@ -2026,8 +2258,25 @@ async def _bastao_alvo(name: str, project: str | None, session_id: str | None,
     if provider != "claude" and provider not in archive_providers.PROVIDERS:
         raise HTTPException(400, detail=erro("erro_provider_invalido", "provider invalido"))
     try:
+        if provider == "codex":
+            p = await asyncio.to_thread(archive_jsonl, project, session_id, config_dir, provider,
+                                        origem_codex_account)
+            owner = codex_accounts.account_for_rollout(p)
+            if owner is None:
+                raise FileNotFoundError(session_id)
+            if origem_codex_account is not None and owner.id != origem_codex_account:
+                raise _erro_conta_codex(codex_accounts.AccountError(
+                    409, "codex_account_archive_mismatch",
+                    {"account_id": origem_codex_account, "origin_account": owner.id}))
+            cwd = await asyncio.to_thread(archive_cwd, project, session_id, config_dir, provider,
+                                          owner.id)
+            return SessionInfo(name=name, cwd=cwd, jsonl=str(p), provider=provider,
+                               codex_home=str(owner.home.resolve(strict=False)),
+                               conta=f"codex:{owner.home.resolve(strict=False)}")
         p = await asyncio.to_thread(archive_jsonl, project, session_id, config_dir, provider)
         cwd = await asyncio.to_thread(archive_cwd, project, session_id, config_dir, provider)
+    except codex_accounts.AccountError as e:
+        raise _erro_conta_codex(e) from None
     except (ValueError, FileNotFoundError):
         raise HTTPException(404, detail=erro("erro_transcript_nao_encontrado", "transcript not found"))
     return SessionInfo(name=name, cwd=cwd, jsonl=str(p), provider=provider)
@@ -2035,7 +2284,8 @@ async def _bastao_alvo(name: str, project: str | None, session_id: str | None,
 
 @app.get("/api/sessions/{name}/bastao", dependencies=[Depends(require_auth)])
 async def bastao(name: str, project: str | None = None, session_id: str | None = None,
-                 config_dir: str | None = None, provider: str = "claude"):
+                 config_dir: str | None = None, provider: str = "claude",
+                 origem_codex_account: str | None = None):
     """Dossiê de continuidade da sessão, em markdown. SÓ leitura — não cria nada e não grava nada.
 
     to_thread não é detalhe: `montar` roda `git status`/`git diff` (subprocess) e parseia a cauda de
@@ -2043,8 +2293,10 @@ async def bastao(name: str, project: str | None = None, session_id: str | None =
     SSE de TODAS as sessões — é o incidente de 2026-07-23, quando um `git status` no tick da lista
     derrubou a conexão inteira.
     """
-    info = await _bastao_alvo(name, project, session_id, config_dir, provider)
-    texto = await asyncio.to_thread(bastao_montar, info.jsonl, info.cwd, info.provider, name)
+    info = await _bastao_alvo(name, project, session_id, config_dir, provider,
+                              origem_codex_account)
+    texto = await asyncio.to_thread(bastao_montar, info.jsonl, info.cwd, info.provider, name,
+                                    info.codex_home)
     return Response(content=texto, media_type="text/markdown; charset=utf-8")
 
 
@@ -2082,11 +2334,13 @@ class BastaoBody(_StrictBody):
     effort: str | None = None
     permission_mode: str | None = None
     omp_profile: str | None = None
+    codex_account: str | None = None
     # Endereçam a origem MORTA no archive (project + session_id); nunca a sucessora, e são
     # ignorados quando a origem está viva.
     project: str | None = None
     session_id: str | None = None
     origem_config_dir: str | None = None
+    origem_codex_account: str | None = None
     origem_provider: str | None = None       # None = mesmo provider da sucessora (`provider`)
 
 
@@ -2103,9 +2357,9 @@ def _bastao_preparar(info: SessionInfo, origem: str, destino: str) -> tuple[str,
     Gravar antes de criar a sessão é o que fecha o caso "sessão nova viva apontando pra um arquivo
     que não existe": se o disco recusar, a exceção sobe daqui e nada foi criado ainda.
     """
-    texto = bastao_montar(info.jsonl, info.cwd, info.provider, origem)
+    texto = bastao_montar(info.jsonl, info.cwd, info.provider, origem, info.codex_home)
     alvo = bastao_mod.gravar(destino, texto)
-    conta, modelo = bastao_mod.origem_resumida(info.jsonl)
+    conta, modelo = bastao_mod.origem_resumida(info.jsonl, info.provider, info.codex_home)
     return texto, alvo, bastao_mod.kickoff(origem, alvo, conta, modelo)
 
 
@@ -2125,7 +2379,34 @@ async def bastao_passar(name: str, body: BastaoBody):
     parseia a cauda do transcript; no loop isso derruba o SSE de todas as sessões (2026-07-23).
     """
     info = await _bastao_alvo(name, body.project, body.session_id, body.origem_config_dir,
-                              body.origem_provider or body.provider)
+                              body.origem_provider or body.provider, body.origem_codex_account)
+    sucessora_codex_account = body.codex_account
+    if sucessora_codex_account is not None and body.provider != "codex":
+        raise HTTPException(400, detail=erro("codex_account_so_codex",
+                                             "codex_account só vale para provider codex"))
+    if body.provider == "codex":
+        try:
+            if sucessora_codex_account is not None:
+                codex_accounts.resolve_account(sucessora_codex_account)
+            if info.provider == "codex":
+                origem = codex_accounts.account_for_rollout(Path(info.jsonl)) if info.jsonl else None
+                if origem is None and info.codex_home:
+                    origem = next((account for account in codex_accounts.list_accounts()
+                                   if account.home.resolve(strict=False)
+                                   == Path(info.codex_home).resolve(strict=False)), None)
+                if origem is None:
+                    raise codex_accounts.AccountError(
+                        409, "codex_account_archive_mismatch", {})
+                if origem is not None:
+                    if sucessora_codex_account is None:
+                        sucessora_codex_account = origem.id
+                    elif sucessora_codex_account != origem.id:
+                        raise codex_accounts.AccountError(
+                            409, "codex_account_archive_mismatch",
+                            {"account_id": sucessora_codex_account, "origin_account": origem.id},
+                        )
+        except codex_accounts.AccountError as e:
+            raise _erro_conta_codex(e) from None
     # UM nome só, sanitizado pelo MESMO lugar que a criação usa (`registry.create` chama isto), e
     # daqui pra frente é ele quem nomeia o arquivo e a sessão. Sanitizar duas vezes por dois
     # caminhos diferentes era o bug: `api.v2` gravava `api.v2.md` mas nascia como `api-v2`, e aí o
@@ -2172,7 +2453,8 @@ async def bastao_passar(name: str, body: BastaoBody):
     novo = await create_session(CreateBody(
         name=destino, cwd=cwd, config_dir=body.config_dir, provider=body.provider,
         engine=body.engine, model=body.model, effort=body.effort,
-        permission_mode=body.permission_mode, omp_profile=body.omp_profile))
+        permission_mode=body.permission_mode, omp_profile=body.omp_profile,
+        codex_account=sucessora_codex_account))
     try:
         await asyncio.to_thread(lambda: PromptQueue(novo.name).append(
             kick, delivered=False, pre_transcript=True))
@@ -4936,6 +5218,18 @@ def _json_dict(linha: str) -> dict | None:
 
 
 # ── Arquivo: conversas mortas (transcripts sem sessao tmux viva) ──────────────
+def _erro_conta_codex(exc: codex_accounts.AccountError) -> HTTPException:
+    mensagens = {
+        "codex_account_ambiguous_rollout": "a conversa Codex existe em mais de uma conta; escolha a conta",
+        "codex_account_archive_mismatch": "a conta escolhida não é a origem desta conversa Codex",
+        "codex_account_not_found": "conta Codex não encontrada",
+        "codex_account_invalid_name": "nome de conta Codex inválido",
+        "codex_account_invalid_marker": "conta Codex inválida",
+    }
+    return HTTPException(exc.status, detail=erro(
+        exc.code, mensagens.get(exc.code, "operação de arquivo Codex recusada"), **exc.params))
+
+
 @app.get("/api/archive", dependencies=[Depends(require_auth)], response_model=list[ArchiveFolder])
 def archive_index():
     # Nivel 1: so as PASTAS (agregado barato). As conversas vem por pasta, no endpoint abaixo.
@@ -4945,7 +5239,7 @@ def archive_index():
 @app.get("/api/archive-por-cwd", dependencies=[Depends(require_auth)],
          response_model=list[ArchiveEntry])
 def archive_por_cwd(cwd: str, config_dir: str | None = None, cap: int = 12,
-                    provider: str = "claude"):
+                    provider: str = "claude", codex_account: str | None = None):
     """Conversas retomaveis de UM cwd, do agente e da conta pedidos — o que o modal de sessao nova
     lista embaixo do formulario. Path proprio (nao `/api/archive/{project}`) pra nao disputar a rota
     com um nome de projeto. Pasta sem conversa nenhuma = lista vazia, nao 404: no modal isso e o
@@ -4958,8 +5252,12 @@ def archive_por_cwd(cwd: str, config_dir: str | None = None, cap: int = 12,
         raise HTTPException(400, detail=erro("erro_provider_invalido", "provider invalido"))
     live = {os.path.realpath(s.jsonl) for s in registry.list() if s.jsonl}
     try:
-        todas = list_conversations(sanitize_cwd(cwd), live, cap=cap * 4,
-                                   config_dir=config_dir if provider == "claude" else None)
+        todas = list_conversations(sanitize_cwd(cwd), live, cap=cap,
+                                   config_dir=config_dir if provider == "claude" else None,
+                                   codex_account=codex_account if provider == "codex" else None,
+                                   provider=provider)
+    except codex_accounts.AccountError as e:
+        raise _erro_conta_codex(e) from None
     except (ValueError, FileNotFoundError):
         return []
     return [e for e in todas if e.provider == provider][:cap]
@@ -4967,11 +5265,13 @@ def archive_por_cwd(cwd: str, config_dir: str | None = None, cap: int = 12,
 
 @app.get("/api/archive/{project}", dependencies=[Depends(require_auth)],
          response_model=list[ArchiveEntry])
-def archive_folder(project: str):
+def archive_folder(project: str, codex_account: str | None = None):
     # live = transcripts em uso agora (badge na lista; a conversa viva abre pelo chat normal).
     live = {os.path.realpath(s.jsonl) for s in registry.list() if s.jsonl}
     try:
-        return list_conversations(project, live)
+        return list_conversations(project, live, codex_account=codex_account)
+    except codex_accounts.AccountError as e:
+        raise _erro_conta_codex(e) from None
     except ValueError:
         raise HTTPException(400, detail=erro("erro_path_invalido", "invalid path"))
     except FileNotFoundError:
@@ -4981,7 +5281,7 @@ def archive_folder(project: str):
 @app.get("/api/archive/{project}/{session_id}/history",
          dependencies=[Depends(require_auth)], response_model=list[ChatEvent])
 def archive_history(project: str, session_id: str, tail: int = 0, config_dir: str | None = None,
-                    provider: str = "claude"):
+                    provider: str = "claude", codex_account: str | None = None):
     # `tail=N` = so as N ultimas mensagens, lidas pelo FIM do arquivo (a previa do modal de sessao
     # nova). Sem ele, o historico inteiro, como sempre — e um transcript de 19MB carregado inteiro
     # so pra mostrar cinco balões era o que essa via evita.
@@ -4991,14 +5291,17 @@ def archive_history(project: str, session_id: str, tail: int = 0, config_dir: st
         raise HTTPException(400, detail=erro("erro_provider_invalido", "provider invalido"))
     try:
         if tail > 0:
-            return tail_events(project, session_id, min(tail, 200), config_dir, provider)
-        p = archive_jsonl(project, session_id, config_dir, provider)
+            return tail_events(project, session_id, min(tail, 200), config_dir, provider,
+                               codex_account)
+        p = archive_jsonl(project, session_id, config_dir, provider, codex_account)
         if provider != "claude":
             # Fora do Claude nao ha fila duravel keyed por este arquivo: o transcript e a conversa
             # inteira, e cada provider tem o parser dele.
             return [ev for linha in p.read_text(encoding="utf-8", errors="replace").splitlines()
                     if (o := _json_dict(linha)) is not None
                     for ev in archive_providers.parse_obj(provider, o)]
+    except codex_accounts.AccountError as e:
+        raise _erro_conta_codex(e) from None
     except ValueError:
         raise HTTPException(400, detail=erro("erro_path_invalido", "invalid path"))
     except FileNotFoundError:
@@ -5034,6 +5337,7 @@ class ResumeArchivedBody(_StrictBody):
     # Agente dono da conversa. Pi e Kimi retomam com o comando DELES (`pi --session-id`,
     # `kimi --session`); Codex nao tem via de resume aqui e e recusado logo abaixo.
     provider: str = "claude"
+    codex_account: str | None = None
 
 
 @app.post("/api/archive/{project}/{session_id}/resume", dependencies=[Depends(require_auth)],
@@ -5049,6 +5353,9 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
         raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
     if body.provider != "claude" and body.provider not in archive_providers.PROVIDERS:
         raise HTTPException(400, detail=erro("erro_provider_invalido", "provider invalido"))
+    if body.codex_account is not None and body.provider != "codex":
+        raise HTTPException(400, detail=erro("codex_account_so_codex",
+                                             "codex_account só vale para provider codex"))
     # O id da conversa Codex e o uuid do FIM do nome do rollout, e e ele que o `codex resume` recebe.
     # Um nome fora desse padrao nao tem id pra retomar — e dizer "caminho invalido" (o que o
     # ValueError generico daqui a pouco daria) manda procurar defeito no lugar errado.
@@ -5066,8 +5373,25 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
             cfg = conta_de(project, session_id)
         except (ValueError, FileNotFoundError):
             cfg = None
+    origem_codex_account = body.codex_account
     try:
-        cwd = archive_cwd(project, session_id, cfg, body.provider)
+        if body.provider == "codex":
+            origem_path = archive_jsonl(project, session_id, cfg, body.provider,
+                                        body.codex_account)
+            owner = codex_accounts.account_for_rollout(origem_path)
+            if owner is None:
+                raise FileNotFoundError(session_id)
+            if origem_codex_account is not None and owner.id != origem_codex_account:
+                raise codex_accounts.AccountError(
+                    409, "codex_account_archive_mismatch",
+                    {"account_id": origem_codex_account, "origin_account": owner.id},
+                )
+            origem_codex_account = owner.id
+            cwd = archive_cwd(project, session_id, cfg, body.provider, origem_codex_account)
+        else:
+            cwd = archive_cwd(project, session_id, cfg, body.provider)
+    except codex_accounts.AccountError as e:
+        raise _erro_conta_codex(e) from None
     except ValueError:
         raise HTTPException(400, detail=erro("erro_path_invalido", "invalid path"))
     except FileNotFoundError:
@@ -5085,8 +5409,10 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
         name = f"{base}-{i}"
         i += 1
     try:
+        extras = {"codex_account": origem_codex_account} \
+            if body.provider == "codex" and origem_codex_account is not None else {}
         return registry.create(name, cwd, config_dir=cfg, provider=body.provider,
-                               resume_session_id=session_id, engine=body.engine)
+                               resume_session_id=session_id, engine=body.engine, **extras)
     except ValueError as e:
         raise HTTPException(409, str(e))
 
@@ -5681,7 +6007,8 @@ async def model_options(name: str):
 
 
 @app.get("/api/model-options", dependencies=[Depends(require_auth)])
-async def model_options_sem_sessao(provider: str = "claude", engine: str = "", config_dir: str = ""):
+async def model_options_sem_sessao(provider: str = "claude", engine: str = "",
+                                   config_dir: str = "", codex_account: str = ""):
     """Modelos oferecidos na tela de ABERTURA, onde ainda não existe sessão.
 
     Irmã de /api/sessions/{name}/model/options, que não serve aqui: no ramo da conta Anthropic
@@ -5719,16 +6046,21 @@ async def model_options_sem_sessao(provider: str = "claude", engine: str = "", c
                                                  "ausente ou sem seções [models.*]"))
         return {"kind": "kimi", "reduced": False, "models": cat["models"], "default": cat["default"]}
     if provider == "codex":
+        account = _resolve_codex_account(codex_account or None)
+        _codex_prepare_or_fail(account, _codex_service())
         # Nem config no disco (o ~/.codex/config.toml guarda o modelo escolhido, nunca a lista) nem
         # `codex --list-models`: a fonte e o `model/list` de um app-server efemero em stdio, a MESMA
         # que a folha da sessao viva usa. Ver app/codex_models.py.
         try:
             return {"kind": "codex", "reduced": False,
-                    "models": await asyncio.to_thread(codex_models.listar)}
+                    "models": await asyncio.to_thread(
+                        codex_models.listar,
+                        **({"codex_home": account.home} if not account.is_default else {}))}
         except codex_models.CodexAusente as e:
             # Codigo proprio pelo mesmo motivo do Pi: "nao achei o codex" nao e "o codex falhou".
             raise HTTPException(502, detail=erro("erro_codex_ausente", str(e), erro=str(e)))
-        except (RuntimeError, OSError) as e:
+        except (codex_models.CodexIndisponivel, codex_models.CodexRecusado,
+                codex_models.CodexRespostaInvalida, RuntimeError, OSError) as e:
             # Sem `TimeoutExpired` aqui, ao contrario do ramo do Pi: o teto de tempo do
             # `codex_models` mata o processo por um Timer, entao ele vira "nao respondeu" (um
             # RuntimeError) — capturar a outra seria um ramo que o codigo nunca produz.

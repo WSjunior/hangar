@@ -9,6 +9,7 @@ import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Callable
+import tomllib
 
 from app import atomico
 
@@ -93,6 +94,36 @@ def transformar(path: Path, fn: Callable[[bytes | None], bytes], backups: Path) 
         except AlteradoExternamente:
             continue
     raise AlteradoExternamente(f"Arquivo continua mudando: {path.name}; tentar novamente")
+
+
+async def editar_config(path: Path, backups: Path, work_dir: Path, nativo, preparar,
+                        *, binario: str = "codex") -> None:
+    """Aplica edições TOML pelo escritor nativo, relendo após cada corrida externa."""
+    work_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    ultima: AlteradoExternamente | None = None
+    for _ in range(3):
+        raw = ler(path)
+        atual = tomllib.loads(raw.decode("utf-8")) if raw else {}
+        edits, confirmar = preparar(atual)
+        if not edits:
+            confirmar()
+            return
+        with tempfile.TemporaryDirectory(prefix="hangar-config-", dir=work_dir) as temp:
+            temp_home = Path(temp)
+            temp_codex = temp_home / ".codex"
+            temp_codex.mkdir()
+            copia = temp_codex / "config.toml"
+            gravar(copia, raw or b"", None)
+            async with nativo(temp_home, temp_codex, binario) as writer:
+                await writer.request("config/batchWrite", {"edits": edits, "reloadUserConfig": False})
+            try:
+                gravar(path, copia.read_bytes(), raw, backups)
+                confirmar()
+                return
+            except AlteradoExternamente as exc:
+                ultima = exc
+    erro = AlteradoExternamente("config.toml continua mudando; nova leitura necessária")
+    raise erro from ultima
 
 
 @asynccontextmanager

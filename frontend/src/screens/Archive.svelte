@@ -76,10 +76,14 @@ import { intlLocale } from '../lib/locale';
       selectServer(deepLink.serverId);
       activeServerId = deepLink.serverId;   // mantem o seletor coerente ao voltar da conversa
       load();
-      openConversation({
-        project: deepLink.project, session_id: deepLink.sessionId,
-        cwd: null, mtime: 0, preview: '', ultima: '', live: false,
-        config_dir: null, conta: '', provider: 'claude',
+      const link = deepLink;
+      getArchiveFolder(link.project).then((items) => {
+        if (deepLink !== link || activeServerId !== link.serverId) return;
+        const matches = items.filter((item) => item.session_id === link.sessionId);
+        if (matches.length === 1) void openConversation(matches[0]);
+        else error = matches.length > 1 ? m.codex_account_ambiguous_rollout() : m.arquivo_conversa_erro();
+      }).catch(() => {
+        if (deepLink === link && activeServerId === link.serverId) error = m.arquivo_conversa_erro();
       });
     } else {
       load();
@@ -101,6 +105,7 @@ import { intlLocale } from '../lib/locale';
   }
 
   async function openConversation(e: ArchiveEntry) {
+    const server = servers.find((s) => s.id === activeServerId);
     selected = e;
     loadingChat = true;
     events = [];
@@ -113,12 +118,15 @@ import { intlLocale } from '../lib/locale';
       .then((r) => { if (seq === motorSeq) motores = r.motores; })
       .catch(() => { if (seq === motorSeq) motores = {}; });
     try {
-      events = await getArchiveHistory(e.project, e.session_id, undefined, e.config_dir, e.provider);
+      const history = await getArchiveHistory(e.project, e.session_id, undefined, e.config_dir, e.provider, e.codex_account, server);
+      if (seq !== motorSeq || selected?.session_id !== e.session_id || activeServerId !== server?.id) return;
+      events = history;
     } catch {
+      if (seq !== motorSeq || selected?.session_id !== e.session_id || activeServerId !== server?.id) return;
       error = m.arquivo_conversa_erro();
       selected = null;
     } finally {
-      loadingChat = false;
+      if (seq === motorSeq && activeServerId === server?.id) loadingChat = false;
     }
   }
 
@@ -127,21 +135,24 @@ import { intlLocale } from '../lib/locale';
   // o chat abrir no servidor DONO da conversa (mesma convencao de openCompareSession no App.svelte).
   async function resumeConversation() {
     if (!selected) return;
+    const entry = selected, server = servers.find((s) => s.id === activeServerId);
     resuming = true;
     resumeError = '';
     try {
       // A conta vai junto: `claude --resume` na conta errada morre com "No conversation found".
-      const info = await resumeArchivedConversation(selected.project, selected.session_id,
-                                                    engine || null, selected.config_dir,
-                                                    selected.provider);
+      const info = await resumeArchivedConversation(entry.project, entry.session_id,
+                                                    engine || null, entry.config_dir,
+                                                    entry.provider, entry.codex_account, server);
+      if (selected !== entry || activeServerId !== server?.id) return;
       if (deepLink) selectServer(deepLink.serverId);
       // Rota server-aware (#/chat/<server>/<nome>): homônimas em servidores diferentes.
-      const sid = getActiveId();
+      const sid = server?.id;
       window.location.hash = '#/chat/' + (sid ? encodeURIComponent(sid) + '/' : '') + encodeURIComponent(info.name);
     } catch (e) {
+      if (selected !== entry || activeServerId !== server?.id) return;
       resumeError = e instanceof Error ? e.message : m.arquivo_retomar_erro();
     } finally {
-      resuming = false;
+      if (selected === entry && activeServerId === server?.id) resuming = false;
     }
   }
 
@@ -212,7 +223,7 @@ import { intlLocale } from '../lib/locale';
       {:else if entries.length === 0}
         <p class="muted">{m.arquivo_vazio_pasta()}</p>
       {:else}
-        {#each entries as e (e.session_id)}
+        {#each entries as e (JSON.stringify([e.provider, e.codex_account ?? e.config_dir, e.session_id]))}
           <button class="row" onclick={() => openConversation(e)}>
             <span class="row-main">
               <!-- A ULTIMA msg identifica a conversa; a 1a nao (todas comecam parecidas). -->

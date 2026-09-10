@@ -9,7 +9,19 @@ import { configureApi } from './apiEnv';
 // `getHistoryDesde` veio da main junto com o histórico condicional (304 + ETag).
 import { getConfig, getConfigForServer, patchConfig, patchConfigForServer, createSession, getHistory, getHistoryDesde, isAbortError, transcribeFile, transcribeFileForServer, getModelOptions, setEngineModel, rotaGenerica } from './api';
 import { mensagemDeErro, formataErro } from './errosApi';
+import { passarBastao } from './api';
 const server = { id: 'a', label: 'Servidor A', baseUrl: 'https://a.test', token: 'token-a' };
+it('bastão captura servidor B e preserva a chamada antiga em A', async () => {
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{}', { status: 200 }));
+  const b = { id: 'b', label: 'B', baseUrl: 'https://b.test', token: 'token-b' };
+  const body = { name: 'next', provider: 'codex' as const, codex_account: 'work' };
+  await passarBastao('origin', body, b);
+  await passarBastao('origin', { name: 'legacy' });
+  expect(fetchMock.mock.calls[0][0]).toBe('https://b.test/api/sessions/origin/bastao');
+  expect(fetchMock.mock.calls[0][1]?.headers).toEqual(expect.objectContaining({ Authorization: 'Bearer token-b' }));
+  expect(JSON.parse(fetchMock.mock.calls[0][1]?.body as string)).toEqual(body);
+  expect(fetchMock.mock.calls[1][0]).toBe('https://a.test/api/sessions/origin/bastao');
+});
 let onUnauthorizedSpy: ReturnType<typeof vi.fn>;
 function stubEventSource() {
   return { addEventListener() {}, removeEventListener() {}, close() {}, onerror: null, onopen: null, readyState: 0 } as unknown as import('./apiEnv').EventSourceLike;

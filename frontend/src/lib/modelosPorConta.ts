@@ -1,7 +1,7 @@
 // Catálogo de modelos de uma conta/provider ANTES de existir sessão (GET /api/model-options), com
 // a memória do último modelo escolhido. Vive fora do CreateSessionSheet porque a tela de
 // orquestração oferece a mesma escolha (provider → conta → modelo) e uma segunda cópia divergiria.
-import { modelOptions, type ModelOption } from '@hangar/core';
+import { modelOptions, modelOptionsForServer, type ModelOption, type Server } from '@hangar/core';
 
 // Os cinco escolhem modelo, cada um de uma fonte diferente (picker do Claude, `pi --list-models`,
 // config.toml do Kimi, `model/list` do Codex; omp reusa a fonte do Pi). Lista explícita:
@@ -26,11 +26,14 @@ export interface CatalogoDaConta {
 }
 
 export async function carregarModelos(
-  q: { provider: string; engine?: string | null; configDir?: string | null },
+  q: { provider: string; engine?: string | null; configDir?: string | null;
+    codexAccount?: string | null; server?: Server | null; signal?: AbortSignal },
   chaveMemoria?: string,
 ): Promise<CatalogoDaConta> {
   if (!temEscolhaDeModelo(q.provider)) return { models: [], reduced: false, lembrado: '', esforcoLembrado: '' };
-  const r = await modelOptions(q.provider, q.engine, q.configDir);
+  const r = q.server
+    ? await modelOptionsForServer(q.server, q.provider, q.engine, q.configDir, q.codexAccount, q.signal)
+    : await modelOptions(q.provider, q.engine, q.configDir, q.codexAccount);
   let lembrado = '';
   let esforcoLembrado = '';
   if (chaveMemoria) {
