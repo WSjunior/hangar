@@ -12,6 +12,10 @@ serde = { version = "=1.0.229", features = ["derive"] }
 # preserve_order: o tool_input reescrito sai com as chaves na ordem do dict do Python.
 serde_json = { version = "=1.0.151", features = ["preserve_order"] }
 hangar-api = { path = "hangar-api" }
+tokio = { version = "=1.53.1" }
+chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
+libc = "=0.2.189"
+windows-sys = "=0.61.2"
 
 [profile.release]
 strip = true
