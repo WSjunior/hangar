@@ -1158,7 +1158,13 @@ fn external_command(name: &str) -> Option<std::process::Command> {
 #[cfg(windows)]
 fn external_command(name: &str) -> Option<std::process::Command> {
     use std::os::windows::process::CommandExt;
-    // `start` abre o psmux num console próprio; o `cmd` que o chama não mostra janela.
+    let wt = std::env::var_os("PATH").and_then(|path| std::env::split_paths(&path).map(|dir| dir.join("wt.exe")).find(|p| p.is_file()));
+    if let Some(wt) = wt {
+        let mut command = std::process::Command::new(wt);
+        command.args(["psmux", "attach", "-t", name]);
+        return Some(command);
+    }
+    // Sem o Windows Terminal, `start` abre o psmux no console padrão; o `cmd` que o chama não mostra janela.
     let mut command = std::process::Command::new("cmd");
     command.args(["/C", "start", "", "psmux", "attach", "-t", name]).creation_flags(0x0800_0000);
     Some(command)
