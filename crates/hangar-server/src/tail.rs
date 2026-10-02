@@ -118,26 +118,37 @@ pub fn log_skipped(key: &str, before: u64) {
     }
 }
 
-fn read_window(f: &mut File, size: u64, window: u64) -> Option<(u64, Vec<u8>)> {
+fn read_window(f: &mut File, size: u64, window: u64) -> std::io::Result<(u64, Vec<u8>)> {
     let start = size.saturating_sub(window);
     let mut buf = Vec::new();
-    f.seek(SeekFrom::Start(start)).ok()?;
-    f.take(size - start).read_to_end(&mut buf).ok()?;
-    Some((start, buf))
+    f.seek(SeekFrom::Start(start))?;
+    f.take(size - start).read_to_end(&mut buf)?;
+    Ok((start, buf))
+}
+
+/// Arquivo ausente vale 0; outro erro sobe, para quem chama não recomeçar do início por um erro
+/// passageiro (o leitor compartilhado reenviaria a conversa inteira a todos).
+fn open_sized(path: &Path) -> std::io::Result<Option<(File, u64)>> {
+    let mut f = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let size = f.seek(SeekFrom::End(0))?;
+    Ok(Some((f, size)))
 }
 
 /// Fim da última linha completa: onde o leitor compartilhado começa.
-fn complete_end(path: &Path) -> u64 {
-    let Ok(mut f) = File::open(path) else { return 0 };
-    let Ok(size) = f.seek(SeekFrom::End(0)) else { return 0 };
+fn complete_end(path: &Path) -> std::io::Result<u64> {
+    let Some((mut f, size)) = open_sized(path)? else { return Ok(0) };
     let mut window = TAIL_WINDOW;
     loop {
-        let Some((start, buf)) = read_window(&mut f, size, window) else { return 0 };
+        let (start, buf) = read_window(&mut f, size, window)?;
         if let Some(i) = buf.iter().rposition(|&b| b == b'\n') {
-            return start + i as u64 + 1;
+            return Ok(start + i as u64 + 1);
         }
         if start == 0 {
-            return 0;
+            return Ok(0);
         }
         window *= 4;
     }
@@ -145,21 +156,20 @@ fn complete_end(path: &Path) -> u64 {
 
 /// Início da `max_lines`-ésima linha contada do fim; poucas linhas, arquivo vazio ou ausente → 0.
 /// Só conta `\n`: cauda sem `\n` (gravação em curso) não entra.
-pub fn tail_offset(path: &Path, max_lines: usize) -> u64 {
-    let Ok(mut f) = File::open(path) else { return 0 };
-    let Ok(size) = f.seek(SeekFrom::End(0)) else { return 0 };
+pub fn tail_offset(path: &Path, max_lines: usize) -> std::io::Result<u64> {
+    let Some((mut f, size)) = open_sized(path)? else { return Ok(0) };
     let mut window = TAIL_WINDOW;
     loop {
-        let Some((start, buf)) = read_window(&mut f, size, window) else { return 0 };
+        let (start, buf) = read_window(&mut f, size, window)?;
         if buf.iter().filter(|&&b| b == b'\n').count() > max_lines {
             let mut idx = buf.len();
             for _ in 0..=max_lines {
                 idx = buf[..idx].iter().rposition(|&b| b == b'\n').expect("contado acima");
             }
-            return start + idx as u64 + 1;
+            return Ok(start + idx as u64 + 1);
         }
         if start == 0 {
-            return 0;
+            return Ok(0);
         }
         // Janela curta, ou uma linha gigante (imagem em base64): cresce.
         window *= 4;
@@ -170,15 +180,20 @@ pub fn tail_offset(path: &Path, max_lines: usize) -> u64 {
 /// `resume` só vale com o stem desta sessão e dentro do arquivo; senão, as últimas 200 linhas.
 pub fn backfill(path: &Path, key: &str, provider: Provider, resume: Option<&str>, cut: u64) -> Vec<Bytes> {
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    let start = resume
-        .and_then(|raw| {
-            let (stem, off) = raw.rsplit_once(':')?;
-            if stem.is_empty() || stem != key {
-                return None;
-            }
-            off.trim().parse::<u64>().ok().filter(|o| *o <= size)
-        })
-        .unwrap_or_else(|| tail_offset(path, BACKFILL_LINES));
+    let resumed = resume.and_then(|raw| {
+        let (stem, off) = raw.rsplit_once(':')?;
+        if stem.is_empty() || stem != key {
+            return None;
+        }
+        off.trim().parse::<u64>().ok().filter(|o| *o <= size)
+    });
+    let start = match resumed.map_or_else(|| tail_offset(path, BACKFILL_LINES), Ok) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(key, path = %path.display(), "cauda do transcript falhou: {e}");
+            return Vec::new();
+        }
+    };
     if start >= cut {
         return Vec::new();
     }
@@ -263,14 +278,17 @@ pub struct TailState {
 impl TailState {
     /// Ponto até onde o leitor compartilhado já leu; na primeira consulta, o fim das linhas
     /// completas (a cauda de cada aparelho cobre o que vem antes).
-    pub fn cut(&mut self) -> u64 {
+    /// Erro (fora arquivo ausente) deixa `pos` vazio: a próxima consulta tenta de novo.
+    pub fn cut(&mut self) -> std::io::Result<u64> {
         if let Some(p) = self.pos {
-            return p;
+            return Ok(p);
         }
-        let end = complete_end(&self.path);
+        let end = complete_end(&self.path).inspect_err(|e| {
+            tracing::warn!(key = %self.key, path = %self.path.display(), "fim do transcript ilegível; tenta de novo: {e}");
+        })?;
         self.seed_rewrite(end);
         self.pos = Some(end);
-        end
+        Ok(end)
     }
 
     /// Sem o relógio das linhas da cauda, a regravação do `claude --resume` sairia ao vivo; o
@@ -279,7 +297,7 @@ impl TailState {
         if self.provider == Provider::Codex {
             return;
         }
-        let start = tail_offset(&self.path, BACKFILL_LINES);
+        let Ok(start) = tail_offset(&self.path, BACKFILL_LINES) else { return };
         let Ok(file) = File::open(&self.path) else { return };
         let mut reader = BufReader::new(file);
         if start >= end || reader.seek(SeekFrom::Start(start)).is_err() {
@@ -301,7 +319,7 @@ impl TailState {
     /// `reset` e releitura do início com parser novo.
     fn poll(&mut self, tx: &broadcast::Sender<Out>) {
         let Some(pos) = self.pos else {
-            self.cut();
+            let _ = self.cut();
             return;
         };
         let Ok(meta) = std::fs::metadata(&self.path) else { return };
@@ -444,9 +462,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("t.jsonl");
         let offs = write(&p, 0..5, "{\"parcial\":");
-        assert_eq!(tail_offset(&p, 2), offs[3]);
-        assert_eq!(tail_offset(&p, 5), 0);
-        assert_eq!(tail_offset(&dir.path().join("nao-existe.jsonl"), 2), 0);
+        assert_eq!(tail_offset(&p, 2).unwrap(), offs[3]);
+        assert_eq!(tail_offset(&p, 5).unwrap(), 0);
+        assert_eq!(tail_offset(&dir.path().join("nao-existe.jsonl"), 2).unwrap(), 0);
     }
 
     #[test]
@@ -458,7 +476,7 @@ mod tests {
         let (frames, end) = read_frames(&p, 0, None, &mut parser, "k").unwrap();
         assert_eq!(frames.len(), 3);
         assert_eq!(first_line(&frames[1]), format!("id: k:{}", offs[1]));
-        assert_eq!(end, complete_end(&p));
+        assert_eq!(end, complete_end(&p).unwrap());
         assert!(end < std::fs::metadata(&p).unwrap().len());
     }
 
@@ -467,7 +485,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("t.jsonl");
         let offs = write(&p, 0..250, "");
-        let cut = complete_end(&p);
+        let cut = complete_end(&p).unwrap();
         let own = backfill(&p, "k", Provider::Claude, Some(&format!("k:{}", offs[245])), cut);
         assert_eq!(own.len(), 5);
         assert_eq!(first_line(&own[0]), format!("id: k:{}", offs[245]));
@@ -490,7 +508,7 @@ mod tests {
             pos: None,
             parser: LineParser::new(provider),
         };
-        st.cut();
+        st.cut().unwrap();
         // A regravação do `--resume`: as mesmas linhas com uuid novo e o relógio original.
         let original = std::fs::read_to_string(&p).unwrap();
         let rewritten = original.replace("\"uuid\":\"u", "\"uuid\":\"r");
@@ -516,6 +534,41 @@ mod tests {
         let (frames, end) = read_frames(&p, 0, None, &mut parser, "k").unwrap();
         assert_eq!(frames.len(), 2, "as linhas em volta da que caiu saem");
         assert_eq!(end, std::fs::metadata(&p).unwrap().len());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_transcript_never_restarts_the_shared_reader_from_zero() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.jsonl");
+        write(&p, 0..10, "");
+        let end = std::fs::metadata(&p).unwrap().len();
+        let mode = |m: u32| std::fs::set_permissions(&p, std::fs::Permissions::from_mode(m)).unwrap();
+        mode(0o000);
+        if File::open(&p).is_ok() {
+            return; // root lê mesmo sem permissão
+        }
+        assert!(complete_end(&p).is_err());
+        assert!(tail_offset(&p, 2).is_err());
+        assert!(backfill(&p, "k", Provider::Claude, None, end).is_empty());
+        let mut st = TailState {
+            path: p.clone(),
+            key: "k".into(),
+            provider: Provider::Claude,
+            generation: 1,
+            pos: None,
+            parser: LineParser::new(Provider::Claude),
+        };
+        let (tx, mut rx) = broadcast::channel(64);
+        st.poll(&tx);
+        assert!(st.cut().is_err());
+        assert_eq!(st.pos, None, "erro passageiro não vira posição 0");
+        mode(0o644);
+        st.poll(&tx);
+        assert_eq!(st.pos, Some(end));
+        st.poll(&tx);
+        assert!(rx.try_recv().is_err(), "nada da conversa é reenviado ao vivo");
     }
 
     #[test]

@@ -250,12 +250,13 @@ impl Hub {
             let resume = resume.clone();
             let mut frames = tokio::task::spawn_blocking(move || {
                 let mut g = guard;
-                let cut = g.cut();
+                // Erro já registrado no `cut`: o aparelho recebe `reset` e reconecta.
+                let cut = g.cut().ok()?;
                 drop(g);
-                tail::backfill(&binding.jsonl, &binding.key, binding.provider, resume.as_deref(), cut)
+                Some(tail::backfill(&binding.jsonl, &binding.key, binding.provider, resume.as_deref(), cut))
             })
             .await
-            .ok()?;
+            .ok()??;
             frames.extend(cached);
             return Some(Attach { generation: b.generation, rx, frames });
         }
