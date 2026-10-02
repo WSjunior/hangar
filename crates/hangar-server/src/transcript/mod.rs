@@ -5,6 +5,7 @@
 
 mod claude;
 mod codex;
+mod history;
 mod peer;
 mod py;
 pub mod pyjson;
@@ -14,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use hangar_api::chat::{ChatEvent, ChatKind};
 use serde_json::Value;
 
+pub use history::{history_etag, merged_history, HistoryRequest, InternalInfo, TAIL_WINDOW};
 pub use py::ts_of_iso;
 
 /// Linhas com texto que não viraram objeto JSON. O Python pula calado; aqui o log mostra a conta.

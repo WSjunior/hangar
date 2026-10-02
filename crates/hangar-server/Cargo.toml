@@ -11,3 +11,7 @@ hangar-api.workspace = true
 regex.workspace = true
 md-5.workspace = true
 sha1_smol.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

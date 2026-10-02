@@ -1,5 +1,5 @@
 // crates/hangar-server/src/transcript/claude.rs
-//! Porte de `parse_obj` e `RewriteFilter` (backend/app/transcript.py).
+//! Porte de `parse_obj`, `RewriteFilter` e `silent_attachment_timestamp` (backend/app/transcript.py).
 //! Campo com tipo errado, que no Python levanta exceção e derruba a leitura, aqui conta como ausente.
 
 use std::collections::HashMap;
@@ -36,6 +36,13 @@ static PEER_PREFIX: LazyLock<Regex> = LazyLock::new(|| py_re(r"\A\[(de|grupo|pai
 static ORIGINAL_PROMPT: LazyLock<Regex> = LazyLock::new(|| {
     py_re(r"(?s)UserPromptSubmit operation blocked by hook:\s*(.*?)\s*Original prompt: (.+)$")
 });
+// transcript.py:375-378
+static ATTACHMENT_HEAD: LazyLock<Regex> = LazyLock::new(|| {
+    py_re(r#"\A\{"parentUuid":(?:null|"[^"\\]*"),"isSidechain":(?:true|false),"attachment":\{"type":"([^"\\]*)""#)
+});
+const ATTACHMENT_TAIL: &str = r#"},"type":"attachment","uuid":""#;
+static ATTACHMENT_TAIL_RE: LazyLock<Regex> =
+    LazyLock::new(|| py_re(r#"\A\},"type":"attachment","uuid":"[^"\\]*","timestamp":"([^"\\]*)""#));
 // transcript.py:57-72
 const COMMAND_META_PREFIXES: [&str; 12] = [
     "<command-name>", "<command-message>", "<command-args>", "<local-command-caveat>",
@@ -78,6 +85,20 @@ impl RewriteFilter {
         }
         true
     }
+}
+
+/// `silent_attachment_timestamp` (transcript.py:381): relógio de um anexo que nunca vira bolha,
+/// lido sem json.
+pub(crate) fn silent_attachment_timestamp(line: &str) -> Option<&str> {
+    if !line.ends_with("}\n") {
+        return None;
+    }
+    let head = ATTACHMENT_HEAD.captures(line)?;
+    if matches!(&head[1], "queued_command" | "hook_additional_context") {
+        return None;
+    }
+    let i = line.rfind(ATTACHMENT_TAIL)?;
+    Some(ATTACHMENT_TAIL_RE.captures(&line[i..])?.get(1)?.as_str())
 }
 
 /// `parse_obj` (transcript.py:397), já com o `scrub_surrogates` do `ChatEvent`.

@@ -17,6 +17,7 @@ chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
 regex = "=1.13.1"
 md-5 = "=0.10.6"
 sha1_smol = "=1.0.1"
+tempfile = "=3.27.0"
 libc = "=0.2.189"
 windows-sys = "=0.61.2"
 

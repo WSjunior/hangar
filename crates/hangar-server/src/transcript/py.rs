@@ -375,3 +375,34 @@ fn repr_str(s: &str) -> String {
     out.push(quote);
     out
 }
+
+/// `isinstance(v, (int, float))`, que no Python inclui `bool`.
+pub(crate) fn number(v: &Value) -> Option<f64> {
+    match v {
+        Value::Bool(b) => Some(f64::from(u8::from(*b))),
+        Value::Number(n) => n.as_f64(),
+        _ => None,
+    }
+}
+
+/// `str.splitlines()`: além de \n e \r, quebra em \v, \f, \x1c-\x1e, \x85, U+2028 e U+2029.
+pub(crate) fn splitlines(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if matches!(c, '\n' | '\r' | '\x0b' | '\x0c' | '\x1c' | '\x1d' | '\x1e' | '\u{85}' | '\u{2028}' | '\u{2029}') {
+            out.push(&s[start..i]);
+            let mut end = i + c.len_utf8();
+            if c == '\r' && chars.peek().is_some_and(|&(_, n)| n == '\n') {
+                chars.next();
+                end += 1;
+            }
+            start = end;
+        }
+    }
+    if start < s.len() {
+        out.push(&s[start..]);
+    }
+    out
+}
