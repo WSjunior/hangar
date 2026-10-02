@@ -4,6 +4,7 @@
 //! deduplicam por id, e um id diferente na troca vira mensagem repetida na tela.
 
 mod claude;
+mod peer;
 mod py;
 pub mod pyjson;
 
@@ -57,11 +58,18 @@ pub fn decode_line(raw: &[u8]) -> Option<Value> {
 pub struct LineParser {
     provider: Provider,
     rewrite: claude::RewriteFilter,
+    peer_resolver: claude::PeerResolver,
 }
 
 impl LineParser {
     pub fn new(provider: Provider) -> Self {
-        Self { provider, rewrite: claude::RewriteFilter::default() }
+        Self { provider, rewrite: claude::RewriteFilter::default(), peer_resolver: peer::name_of_pid }
+    }
+
+    /// Troca o resolvedor do nome tmux do remetente; os testes não dependem do tmux da máquina.
+    pub fn with_peer_resolver(mut self, resolver: fn(i64) -> Option<String>) -> Self {
+        self.peer_resolver = resolver;
+        self
     }
 
     /// Eventos de uma linha completa; `offset` é o byte onde ela começa (vira o `id:` do SSE).
@@ -69,7 +77,7 @@ impl LineParser {
         let Some(value) = line_value(line) else { return Vec::new() };
         let mut evs = match (self.provider, &value) {
             (Provider::Claude | Provider::ClaudeHeadless, Value::Object(obj)) if self.rewrite.keep(obj) => {
-                claude::parse_obj(obj)
+                claude::parse_obj(obj, self.peer_resolver)
             }
             _ => Vec::new(),
         };

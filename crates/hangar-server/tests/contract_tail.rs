@@ -7,7 +7,7 @@ use hangar_server::transcript::{LineParser, Provider};
 /// (offset, evento) de cada linha, como o leitor ao vivo vai alimentar o parser.
 fn tail(fixture: &str, provider: Provider) -> Vec<(u64, String)> {
     let bytes = std::fs::read(contract().join("transcripts").join(fixture)).expect("fixture");
-    let mut parser = LineParser::new(provider);
+    let mut parser = LineParser::new(provider).with_peer_resolver(|_| None);
     let mut out = Vec::new();
     let mut start = 0u64;
     for line in bytes.split_inclusive(|b| *b == b'\n') {
@@ -71,4 +71,23 @@ fn provider_from_python_name() {
     assert_eq!(Provider::parse("claude-headless"), Some(Provider::ClaudeHeadless));
     assert_eq!(Provider::parse("codex"), Some(Provider::Codex));
     assert_eq!(Provider::parse("pi"), None);
+}
+
+#[test]
+fn native_peer_message_is_labeled_with_the_tmux_name() {
+    let feed = |line: serde_json::Value| {
+        let mut parser =
+            LineParser::new(Provider::Claude).with_peer_resolver(|pid| (pid == 123).then(|| "alvo".to_string()));
+        parser.feed(line.to_string().as_bytes(), 0).pop().and_then(|ev| ev.text)
+    };
+    let origin = serde_json::json!({"type": "user", "uuid": "u", "message": {"role": "user", "content": "x"},
+        "origin": {"kind": "peer", "name": "Título da sessão", "verifiedPeerPid": 123, "body": "oi"}});
+    assert_eq!(feed(origin).as_deref(), Some("[de: alvo] oi"));
+    let wrapped = serde_json::json!({"type": "queue-operation", "operation": "remove", "timestamp": "t", "content":
+        "<cross-session-message from=\"/run/cc-socks/123.sock\" from-name=\"Título\">\noi\n</cross-session-message>"});
+    assert_eq!(feed(wrapped).as_deref(), Some("[de: alvo] oi"));
+    // sem o pid resolvido, o título do recado segue valendo
+    let unknown = serde_json::json!({"type": "user", "uuid": "u", "message": {"role": "user", "content": "x"},
+        "origin": {"kind": "peer", "name": "Título", "verifiedPeerPid": 7, "body": "oi"}});
+    assert_eq!(feed(unknown).as_deref(), Some("[de: Título] oi"));
 }

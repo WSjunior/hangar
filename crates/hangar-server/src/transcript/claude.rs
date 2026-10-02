@@ -30,6 +30,7 @@ static PEER_WRAP: LazyLock<Regex> = LazyLock::new(|| {
     py_re(r"(?s)\A<cross-session-message\b([^>]*)>\n?(.*?)\n?</cross-session-message>\z")
 });
 static PEER_ATTR: LazyLock<Regex> = LazyLock::new(|| py_re(r#"([\w-]+)="([^"]*)""#));
+static SOCK_PID: LazyLock<Regex> = LazyLock::new(|| py_re(r"/(\d+)\.sock"));
 static PEER_PREFIX: LazyLock<Regex> = LazyLock::new(|| py_re(r"\A\[(de|grupo|painel):\s*[^\]]+\]"));
 // transcript.py:263
 static ORIGINAL_PROMPT: LazyLock<Regex> = LazyLock::new(|| {
@@ -80,25 +81,25 @@ impl RewriteFilter {
 }
 
 /// `parse_obj` (transcript.py:397), já com o `scrub_surrogates` do `ChatEvent`.
-pub(crate) fn parse_obj(obj: &Map<String, Value>) -> Vec<ChatEvent> {
-    let mut out = parse_raw(obj);
+pub(crate) fn parse_obj(obj: &Map<String, Value>, resolve: PeerResolver) -> Vec<ChatEvent> {
+    let mut out = parse_raw(obj, resolve);
     out.iter_mut().for_each(finish);
     out
 }
 
-fn parse_raw(obj: &Map<String, Value>) -> Vec<ChatEvent> {
+fn parse_raw(obj: &Map<String, Value>, resolve: PeerResolver) -> Vec<ChatEvent> {
     let etype = obj.get("type").and_then(Value::as_str);
     let uid = obj.get("uuid").and_then(Value::as_str).unwrap_or("");
     match etype {
-        Some("system") => return system(obj),
-        Some("queue-operation") => return queue_operation(obj),
+        Some("system") => return system(obj, resolve),
+        Some("queue-operation") => return queue_operation(obj, resolve),
         Some("attachment") => return attachment(obj, uid),
         _ => {}
     }
     let Some(msg) = obj.get("message").and_then(Value::as_object) else { return Vec::new() };
     let content = msg.get("content");
     match (etype, content) {
-        (Some("user"), _) => user(obj, uid, content),
+        (Some("user"), _) => user(obj, uid, content, resolve),
         (Some("assistant"), Some(Value::Array(items))) => assistant(obj, msg, uid, items),
         _ => Vec::new(),
     }
@@ -233,10 +234,14 @@ fn agent_msg(text: Option<&Value>, id: &str) -> Option<Vec<ChatEvent>> {
     Some(vec![task_result(id.to_string(), &m[1])])
 }
 
-/// `_peer_nome` (transcript.py:170) sem a busca do pid no tmux: fica o nome que veio no recado.
-// ponytail: o Python resolve `verifiedPeerPid` pelo tmux (registry.name_of_pid); se o recado
-// nativo sem prefixo "[de: …]" ficar comum, pedir o nome ao Python pela conexão interna.
-fn peer_name(fallback: Option<&str>) -> String {
+/// Resolve o pid do remetente no nome da sessão tmux (`peer::name_of_pid`; nos testes, um fake).
+pub(crate) type PeerResolver = fn(i64) -> Option<String>;
+
+/// `_peer_nome` (transcript.py:170): o nome tmux do pid; sem ele, o título que veio no recado.
+fn peer_name(pid: Option<i64>, fallback: Option<&str>, resolve: PeerResolver) -> String {
+    if let Some(name) = pid.and_then(resolve) {
+        return name;
+    }
     match fallback.map(strip) {
         Some(s) if !s.is_empty() => s.to_string(),
         _ => "sessão".to_string(),
@@ -244,7 +249,7 @@ fn peer_name(fallback: Option<&str>) -> String {
 }
 
 /// `_peer_msg` (transcript.py:194).
-fn peer_msg(obj: &Map<String, Value>) -> Option<String> {
+fn peer_msg(obj: &Map<String, Value>, resolve: PeerResolver) -> Option<String> {
     let origin = obj.get("origin")?.as_object()?;
     if origin.get("kind").and_then(Value::as_str) != Some("peer") {
         return None;
@@ -256,11 +261,13 @@ fn peer_msg(obj: &Map<String, Value>) -> Option<String> {
     if PEER_PREFIX.is_match(lstrip(body)) {
         return Some(strip(body).to_string());
     }
-    Some(format!("[de: {}] {}", peer_name(origin.get("name").and_then(Value::as_str)), strip(body)))
+    let pid = origin.get("verifiedPeerPid").and_then(py::int_of).and_then(|p| i64::try_from(p).ok());
+    let name = peer_name(pid, origin.get("name").and_then(Value::as_str), resolve);
+    Some(format!("[de: {name}] {}", strip(body)))
 }
 
 /// `_peer_msg_embrulhado` (transcript.py:218).
-fn wrapped_peer_msg(text: &str) -> Option<String> {
+fn wrapped_peer_msg(text: &str, resolve: PeerResolver) -> Option<String> {
     let t = strip(text);
     if !t.starts_with("<cross-session-message") || !t.ends_with("</cross-session-message>") {
         return None;
@@ -273,22 +280,24 @@ fn wrapped_peer_msg(text: &str) -> Option<String> {
     if PEER_PREFIX.is_match(body) {
         return Some(body.to_string());
     }
-    Some(format!("[de: {}] {body}", peer_name(attrs(&m[1]).get("from-name").copied())))
+    let attrs = attrs(&m[1]);
+    let pid = SOCK_PID.captures(attrs.get("from").copied().unwrap_or("")).and_then(|c| c[1].parse().ok());
+    Some(format!("[de: {}] {body}", peer_name(pid, attrs.get("from-name").copied(), resolve)))
 }
 
 /// `_blocked_prompt` (transcript.py:267). O aviso de "parece recado" do Python fica de fora: ele
 /// levaria texto da conversa ao log.
-fn blocked_prompt(content: Option<&Value>) -> Option<(String, String)> {
+fn blocked_prompt(content: Option<&Value>, resolve: PeerResolver) -> Option<(String, String)> {
     let m = ORIGINAL_PROMPT.captures(content?.as_str()?)?;
     let text = strip(&m[2]);
     if text.is_empty() {
         return None;
     }
-    Some((wrapped_peer_msg(text).unwrap_or_else(|| text.to_string()), m[1].to_string()))
+    Some((wrapped_peer_msg(text, resolve).unwrap_or_else(|| text.to_string()), m[1].to_string()))
 }
 
-fn system(obj: &Map<String, Value>) -> Vec<ChatEvent> {
-    let Some((text, error)) = blocked_prompt(obj.get("content")) else { return Vec::new() };
+fn system(obj: &Map<String, Value>, resolve: PeerResolver) -> Vec<ChatEvent> {
+    let Some((text, error)) = blocked_prompt(obj.get("content"), resolve) else { return Vec::new() };
     vec![ChatEvent {
         ts: ts(obj),
         desistiu: Some(true),
@@ -297,7 +306,7 @@ fn system(obj: &Map<String, Value>) -> Vec<ChatEvent> {
     }]
 }
 
-fn queue_operation(obj: &Map<String, Value>) -> Vec<ChatEvent> {
+fn queue_operation(obj: &Map<String, Value>, resolve: PeerResolver) -> Vec<ChatEvent> {
     let Some(q) = obj.get("content").and_then(Value::as_str) else { return Vec::new() };
     let queued = obj.get("content");
     let h = md5_8(q);
@@ -320,7 +329,7 @@ fn queue_operation(obj: &Map<String, Value>) -> Vec<ChatEvent> {
         return Vec::new();
     }
     let id = format!("queued:{}:{h}", obj.get("timestamp").map_or_else(String::new, py::py_str));
-    if let Some(peer) = wrapped_peer_msg(q) {
+    if let Some(peer) = wrapped_peer_msg(q, resolve) {
         return vec![text_event(ChatKind::UserMsg, id, peer)];
     }
     if is_command_meta(q) {
@@ -379,13 +388,13 @@ fn attachment(obj: &Map<String, Value>, uid: &str) -> Vec<ChatEvent> {
     Vec::new()
 }
 
-fn user(obj: &Map<String, Value>, uid: &str, content: Option<&Value>) -> Vec<ChatEvent> {
+fn user(obj: &Map<String, Value>, uid: &str, content: Option<&Value>, resolve: PeerResolver) -> Vec<ChatEvent> {
     if let Some(origin) = obj.get("origin").and_then(Value::as_object) {
         if let Some(c) = teammate_events(origin.get("body"), uid) {
             return c;
         }
     }
-    if let Some(peer) = peer_msg(obj) {
+    if let Some(peer) = peer_msg(obj, resolve) {
         return vec![text_event(ChatKind::UserMsg, uid.into(), peer)];
     }
     if obj.get("isCompactSummary") == Some(&Value::Bool(true)) {
