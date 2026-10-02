@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::auth::TrustedHosts;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Config {
     pub listen: SocketAddr,
     pub upstream: SocketAddr,
@@ -12,6 +12,20 @@ pub struct Config {
     pub auth_token: String,
     pub log_path: Option<PathBuf>,
     pub trusted: TrustedHosts,
+}
+
+/// Manual para o token e o segredo nunca saírem num `{:?}` de log ou de pânico.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("listen", &self.listen)
+            .field("upstream", &self.upstream)
+            .field("internal_secret", &"<oculto>")
+            .field("auth_token", &"<oculto>")
+            .field("log_path", &self.log_path)
+            .field("trusted", &self.trusted)
+            .finish()
+    }
 }
 
 impl Config {
@@ -65,6 +79,13 @@ mod tests {
         assert_eq!(cfg.log_path, None);
         assert!(cfg.trusted.contains("127.0.0.1"));
         assert!(!cfg.trusted.contains("192.0.2.1"));
+    }
+
+    #[test]
+    fn debug_hides_token_and_secret() {
+        let shown = format!("{:?}", Config::from_lookup(env(&BASE)).unwrap());
+        assert!(!shown.contains("ab12") && !shown.contains("\"tok\""), "{shown}");
+        assert!(shown.contains("41234"));
     }
 
     #[test]
