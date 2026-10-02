@@ -6304,6 +6304,7 @@
   "native_sidebar_same_title": "Continue the conversation in {n}?",
   "native_sidebar_same_msg": "The session is closed and reopened with the same name in the {n} account, in the same conversation, with no summary. Anything in flight is lost.",
   "native_sidebar_same_ok": "Continue",
+  "native_sidebar_same_moving": "moving the conversation to {n}…",
   "native_sidebar_same_moved": "the conversation continues in {n}",
   "native_sidebar_same_failed": "move the conversation to the other account: {n}",
   "native_sidebar_accounts_failed": "read the accounts: {n}",

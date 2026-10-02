@@ -2633,36 +2633,53 @@ impl Hangar {
         if self.cites.owner != owner { self.cites = CiteCheck { owner: owner.clone(), ..Default::default() }; }
         let (Some(owner), Some(api)) = (owner, self.session_api()) else { return };
         let mut fresh = Vec::new();
+        let mut revived = false;
         for event in &self.chat.events {
             if !(event.kind == "assistant_msg" || peer_of(event).is_some()) || !self.cites.scanned.insert(event.id.clone()) { continue; }
             for path in composer::citation_paths(&composer::citation_markdown(&display_body(event))) {
-                if self.cites.checked.insert(path.clone()) { fresh.push(path); }
+                // Mensagem nova citando um que não abria ("vou criar x.rs" e depois "criei x.rs"): confere de novo.
+                if self.cites.dead.remove(&path) { revived = true; fresh.push(path); }
+                else if self.cites.checked.insert(path.clone()) { fresh.push(path); }
             }
         }
+        if revived { self.refresh_cites(cx); }
         if fresh.is_empty() { return; }
         let job = self.runtime.spawn(async move {
-            let mut dead = Vec::new();
-            // ponytail: lotes de 300, o teto do resolver no backend.
-            for batch in fresh.chunks(300) {
-                let value = api.act(&owner.name, &["files", "resolver"], Some(json!({"caminhos": batch})), false, 30).await?;
-                let missing = value.get("faltam").and_then(Value::as_array).ok_or_else(|| Failure::local("invalid_response"))?;
-                dead.extend(missing.iter().filter_map(Value::as_str).map(str::to_owned));
+            // Cada lote vale sozinho: a falha de um não joga fora o que os outros já responderam.
+            let (mut dead, mut failed, mut error) = (Vec::new(), Vec::new(), None);
+            // ponytail: lotes de 50; o backend procura fora da pasta no máximo 30 por pedido, relendo o transcript.
+            for batch in fresh.chunks(50) {
+                let answer = api.act(&owner.name, &["files", "resolver"], Some(json!({"caminhos": batch})), false, 30).await
+                    .and_then(|value| value.get("faltam").and_then(Value::as_array).cloned().ok_or_else(|| Failure::local("invalid_response")));
+                match answer {
+                    Ok(missing) => dead.extend(missing.iter().filter_map(Value::as_str).map(str::to_owned)),
+                    Err(e) => { failed.extend_from_slice(batch); error = Some(e); }
+                }
             }
-            Ok::<_, Failure>((owner, dead))
+            (owner, dead, failed, error)
         });
         cx.spawn(async move |this, cx| {
-            let result = job.await.unwrap_or_else(|_| Err(Failure::local("invalid_response")));
-            let _ = this.update(cx, |this, cx| match result {
-                Ok((owner, dead)) if this.cites.owner.as_ref() == Some(&owner) && !dead.is_empty() => {
-                    this.cites.dead.extend(dead);
-                    this.sync_tables(appearance::get().table_chart, 0);
-                    this.sync_row_ids(Some(0), cx);
-                    cx.notify();
+            let Ok((owner, dead, failed, error)) = job.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                if this.cites.owner.as_ref() != Some(&owner) { return; }
+                // Falhou: sai do conferido e entra no próximo `sync_rows`. O chip fica clicável até lá.
+                if let Some(error) = error {
+                    eprintln!("conferir {} arquivos citados falhou: {}", failed.len(), Self::fetch_failure(&error));
+                    for path in &failed { this.cites.checked.remove(path); }
                 }
-                Ok(_) => {}
-                Err(error) => eprintln!("conferir arquivos citados falhou: {}", Self::fetch_failure(&error)),
+                if !dead.is_empty() {
+                    this.cites.dead.extend(dead);
+                    this.refresh_cites(cx);
+                }
             });
         }).detach();
+    }
+
+    /// Mensagens preparadas de novo depois que o conjunto de chips mortos mudou.
+    fn refresh_cites(&mut self, cx: &mut Context<Self>) {
+        self.sync_tables(appearance::get().table_chart, 0);
+        self.sync_row_ids(Some(0), cx);
+        cx.notify();
     }
 
     fn sync_tables(&mut self, enabled: bool, stable: usize) {
@@ -3438,7 +3455,7 @@ impl Hangar {
         let busy = self.uploading.contains_key(key);
         // O visor recebe só as imagens, na ordem da faixa: as setas dele passam de uma para a outra.
         let images: Vec<(u64, Source)> = list.iter().filter(|a| a.image.is_some())
-            .map(|a| (a.id, Source::Memory(a.name.clone(), a.bytes.clone()))).collect();
+            .map(|a| (a.id, Source::Memory(a.name.clone(), crate::api::Shared(a.bytes.clone())))).collect();
         let tiles = list.iter().map(|attachment| {
             let id = attachment.id;
             let (status, color) = match &attachment.state {

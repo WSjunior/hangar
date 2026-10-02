@@ -1070,9 +1070,11 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   const contaTrocavel = $derived(sessionProvider === 'claude' && !sessionEngine);
   let trocandoConta = $state(false);
   let contaAlvo = $state<AccountTarget | null>(null);
+  // O texto da confirmação fica no último alvo: zerado no fechamento, o título sumiria durante a animação de saída.
+  let contaMostrada = $state<AccountTarget | null>(null);
   function pedirTrocaConta(conta: AccountTarget) {
     if (trocandoConta || currentState !== 'idle') return;
-    contaAlvo = conta;
+    contaAlvo = contaMostrada = conta;
   }
   async function executarTrocaConta() {
     const alvo = contaAlvo;
@@ -3484,11 +3486,11 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
                 confirmLabel={sessionHeadless ? m.modo_abrir_no_terminal() : m.modo_continuar_sem_terminal()}
                 onConfirm={executarTrocaModo} onClose={() => (confirmaModo = false)} />
   <ConfirmSheet open={contaAlvo !== null}
-                title={m.conta_confirmar_titulo({ conta: contaAlvo?.label ?? '' })}
-                message={contaAlvo?.low && contaAlvo.pct !== null
-                  ? `${m.conta_confirmar_acabando({ conta: contaAlvo.label, pct: String(Math.round(contaAlvo.pct)) })} ${m.conta_confirmar_msg({ conta: contaAlvo.label })}`
-                  : m.conta_confirmar_msg({ conta: contaAlvo?.label ?? '' })}
-                confirmLabel={m.conta_confirmar_titulo({ conta: contaAlvo?.label ?? '' })}
+                title={m.conta_confirmar_titulo({ conta: contaMostrada?.label ?? '' })}
+                message={contaMostrada?.low && contaMostrada.pct !== null
+                  ? `${m.conta_confirmar_acabando({ conta: contaMostrada.label, pct: String(Math.round(contaMostrada.pct)) })} ${m.conta_confirmar_msg({ conta: contaMostrada.label })}`
+                  : m.conta_confirmar_msg({ conta: contaMostrada?.label ?? '' })}
+                confirmLabel={m.conta_confirmar_titulo({ conta: contaMostrada?.label ?? '' })}
                 onConfirm={executarTrocaConta} onClose={() => (contaAlvo = null)} />
   <ConfirmSheet open={pendingShortcut !== null}
                 title={pendingShortcut?.label ?? ''}

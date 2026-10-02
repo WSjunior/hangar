@@ -2662,9 +2662,10 @@ async def _trocar_conta(name: str, destino: str):
     atual = (info.conta or "").removeprefix("claude:")
     if atual and Path(atual).resolve() == Path(destino).resolve():
         return {"ok": True, "config_dir": destino}
-    headless = _headless(name)
     hl = get_adapter(CLAUDE_HEADLESS)
     async with hl.delivery_lock(name):
+        # Lido dentro da trava: uma troca de modo que terminou enquanto este pedido esperava já mudou a resposta.
+        headless = _headless(name)
         motivo = await _motivo_ocupada(name, headless)
         if motivo:
             raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
@@ -2672,16 +2673,11 @@ async def _trocar_conta(name: str, destino: str):
         # processo sobe até a conversa estar no lugar.
         if headless:
             cano = (((headless_sessions.load(name) or {}).get("cano")) or {}).get("pid")
-            pids = [int(cano), *procinfo._descendant_pids(int(cano))] if cano else []
+            pids = await asyncio.to_thread(_arvore_de, cano)
             await hl.parar(name)
-            # O claude grava as últimas linhas pelo caminho ao sair: mover antes disso recria o
-            # arquivo na conta de origem, com o mesmo id.
-            await asyncio.to_thread(registry_mod._esperar_saida, pids, 15.0)
-            if any(procinfo.pid_vivo(p) for p in pids):
-                hl.acordar(name)
-                raise HTTPException(409, detail=erro("erro_troca_conta", "não troquei de conta: o processo antigo não saiu",
-                                                     erro="processo vivo"))
         else:
+            pane = await asyncio.to_thread(registry._pane_of, name)
+            pids = await asyncio.to_thread(_arvore_de, (pane or {}).get("pid"))
             modo = await asyncio.to_thread(perm_mode.ler_modo, name)
             try:
                 await asyncio.to_thread(registry.para_headless, name, modo)
@@ -2689,33 +2685,88 @@ async def _trocar_conta(name: str, destino: str):
                 raise HTTPException(500, str(e))
             except (ValueError, OSError) as e:
                 raise HTTPException(409, detail=erro("erro_troca_conta", f"não troquei de conta: {e}", erro=str(e)))
-        meta = headless_sessions.load(name) or {}
-        jsonl = Path(hl.transcript_path_de(meta))
+
+        async def reabrir() -> str | None:
+            """Reabre como estava; devolve o motivo quando o terminal não voltou (a sessão segue sem terminal)."""
+            if headless:
+                hl.acordar(name)
+                return None
+            try:
+                await asyncio.to_thread(registry.para_terminal, name)
+                return None
+            except Exception as e:
+                _log.exception("troca de conta: terminal de %s não voltou", name)
+                hl.acordar(name)   # sidecar restaurado: a conversa segue sem terminal
+                return str(e)
+
+        # O claude grava as últimas linhas pelo caminho ao sair: mover antes disso recria o arquivo na conta de
+        # origem, com o mesmo id, e o processo novo teria companhia no mesmo .jsonl.
+        if not await asyncio.to_thread(_saiu, pids):
+            await reabrir()
+            raise HTTPException(409, detail=erro("erro_troca_conta", "não troquei de conta: o processo antigo não saiu; a sessão segue na conta de antes",
+                                                 erro="processo vivo"))
         falha = None
+        movida: tuple[str, str, str | None] | None = None
         try:
-            if jsonl.exists():
-                await asyncio.to_thread(move_conversation, jsonl.parent.name, meta["session_id"], destino)
+            meta = headless_sessions.load(name)
+            if meta is None:
+                raise RuntimeError("sessão sem o arquivo de estado")
+            jsonl = Path(hl.transcript_path_de(meta))
+            if jsonl.exists() and await asyncio.to_thread(move_conversation, jsonl.parent.name, meta["session_id"], destino):
+                movida = (jsonl.parent.name, meta["session_id"], meta.get("config_dir"))
             # O aviso da conta anterior (limite batido, sem login) não vale na nova.
-            headless_sessions.update(name, config_dir=destino, problema=None)
+            if headless_sessions.update(name, config_dir=destino, problema=None) is None:
+                raise RuntimeError("não gravei a conta nova no arquivo de estado da sessão")
             hl.esquecer_problema(name)
         except FileExistsError:
             falha = HTTPException(409, detail=erro("erro_conversa_ja_na_conta", "a conta destino ja tem esta conversa"))
-        except (OSError, ValueError) as e:
+        except Exception as e:
             _log.exception("mover conversa de %s para %s falhou", name, destino)
-            falha = HTTPException(500, detail=erro("erro_mover_conversa", f"nao consegui mover a conversa de conta: {e}", erro=str(e)))
-        # Reabre como estava, na conta nova ou, se o move falhou, na de origem.
-        if headless:
-            hl.acordar(name)
-        else:
-            try:
-                await asyncio.to_thread(registry.para_terminal, name)
-            except ValueError as e:
-                hl.acordar(name)   # sidecar restaurado: a conversa segue sem terminal
-                falha = falha or HTTPException(409, detail=erro("erro_troca_conta", f"não troquei de conta: {e}", erro=str(e)))
+            onde = "na conta de antes"
+            if movida:
+                # A conversa já foi, mas a sessão continua apontando para a conta de antes: ela volta junto.
+                try:
+                    await asyncio.to_thread(move_conversation, *movida)
+                except Exception:
+                    _log.exception("troca de conta: a conversa de %s ficou em %s", name, destino)
+                    onde = f"em {destino}, mas a sessão aponta para a conta de antes"
+            falha = HTTPException(500, detail=erro("erro_mover_conversa", f"nao consegui mover a conversa de conta ({e}); ela ficou {onde}", erro=str(e)))
+        motivo_terminal = await reabrir()
         registry._forget(name)
     if falha:
         raise falha
+    if motivo_terminal:
+        raise HTTPException(409, detail=erro("erro_troca_conta", f"a conversa foi para a conta nova, mas o terminal não voltou ({motivo_terminal}); ela segue sem terminal",
+                                             erro=motivo_terminal))
     return {"ok": True, "config_dir": destino}
+
+
+def _arvore_de(pid: object) -> list[int]:
+    """O processo e os descendentes dele; sem pid legível, nenhum."""
+    try:
+        root = int(pid)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return []
+    return [root, *procinfo._descendant_pids(root)]
+
+
+def _saiu(pids: list[int]) -> bool:
+    """Espera os processos saírem; quem passar do prazo é morto à força. False = algum seguiu vivo mesmo assim."""
+    registry_mod._esperar_saida(pids, 15.0)
+    vivos = [p for p in pids if procinfo.pid_vivo(p)]
+    for p in vivos:
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/F", "/PID", str(p)], capture_output=True, timeout=10)
+            else:
+                import signal
+                os.kill(p, signal.SIGKILL)
+        except (OSError, subprocess.SubprocessError):
+            _log.warning("troca de conta: não consegui matar o processo %s", p, exc_info=True)
+    if vivos:
+        _log.warning("troca de conta: processos %s não saíram em 15 s e foram mortos", vivos)
+        registry_mod._esperar_saida(vivos, 3.0)
+    return not any(procinfo.pid_vivo(p) for p in pids)
 
 
 class RenameBody(_StrictBody):
@@ -6610,6 +6661,9 @@ class ResolverBody(_StrictBody):
     caminhos: list[str]
 
 
+_ELSEWHERE_MAX = 30
+
+
 @app.post("/api/sessions/{name}/files/resolver", dependencies=[Depends(require_auth)])
 def files_resolver(name: str, body: ResolverBody):
     """Visão "citados": confere de uma vez quais caminhos citados existem (e resolve os relativos
@@ -6621,6 +6675,7 @@ def files_resolver(name: str, body: ResolverBody):
         from app.transcript import citation_cwds
         cited = citation_cwds(info.jsonl, body.caminhos) if info.jsonl else {}
         found: dict[str, dict] = {}
+        elsewhere = 0
         for path in body.caminhos:
             bases = list(dict.fromkeys([*(cited.get(path) or []), info.cwd]))
             for suffix in (False, True):
@@ -6636,10 +6691,11 @@ def files_resolver(name: str, body: ResolverBody):
                     break
                 if path in found:
                     break
-            if path not in found and info.jsonl:
-                # Nome solto ou relativo de outro repositório; a leitura vai pela rota de arquivo citado, que faz a
-                # mesma busca.
-                whole = _cited_elsewhere(info.jsonl, info.cwd, path)
+            # Nome solto ou relativo de outro repositório, só se a conversa o citou; a leitura vai pela rota de arquivo
+            # citado, que faz a mesma busca. Cada um relê o transcript: teto por pedido.
+            if path not in found and info.jsonl and path in cited and elsewhere < _ELSEWHERE_MAX:
+                elsewhere += 1
+                whole = _cited_elsewhere(info.jsonl, info.cwd, path, cited[path], siblings=True)
                 if whole:
                     found[path] = {"relativo": None, "real": os.path.realpath(whole)}
         return {"ok": {path: found[path] for path in body.caminhos if path in found},
@@ -7615,36 +7671,39 @@ def ask_history(body: AskHistoryBody):
 _CACHE_ARQUIVO = "max-age=60"
 
 
-def _cited_elsewhere(jsonl: str, cwd: str | None, path: str) -> str | None:
-    """Arquivo de um nome solto ou relativo que não está na pasta da sessão: o absoluto que a
-    conversa citou antes, ou um relativo citado (`docs/x/nome`) dentro da pasta da sessão ou de uma
-    pasta irmã dela (outro repositório ao lado, como num `cd ../outro && git status`)."""
-    from app.transcript import cited_absolute, cited_relatives
-    whole = cited_absolute(jsonl, path)
-    if whole:
-        return whole
+def _cited_elsewhere(jsonl: str, cwd: str | None, path: str, worked: list[str], *, siblings: bool) -> str | None:
+    """Arquivo de um nome solto ou relativo que não está na pasta da sessão: o absoluto que a conversa citou antes,
+    ou um relativo citado (`docs/x/nome`) dentro das pastas onde a conversa trabalhou (`worked`, o cwd das linhas
+    que o citaram) e da pasta da sessão. `siblings` também tenta as pastas ao lado da sessão (outro repositório,
+    como num `cd ../outro && git status`): só para LER, porque ali o mesmo relativo pode ser de outro projeto."""
+    from app.transcript import cited_elsewhere
+    absolutes, cited_relatives = cited_elsewhere(jsonl, path)
+    if absolutes:
+        return absolutes[0]
     if not cwd:
         return None
     rel = path.replace("\\", "/").removeprefix("./")
     if ".." in rel.split("/"):
         return None
-    relatives = [rel] if "/" in rel else cited_relatives(jsonl, rel)
+    relatives = [rel] if "/" in rel else cited_relatives
     base = os.path.realpath(cwd)
-    parent = os.path.dirname(base)
-    try:
-        # ponytail: só o primeiro nível ao lado da sessão, e no máximo 200 pastas.
-        siblings = sorted(e.path for e in os.scandir(parent) if e.is_dir() and e.path != base)[:200]
-    except OSError:
-        siblings = []
-    for relative in relatives[:20]:
-        for folder in [base, *siblings]:
+    folders = list(dict.fromkeys([*(os.path.realpath(w) for w in worked), base]))
+    if siblings:
+        parent = os.path.dirname(base)
+        try:
+            # ponytail: só o primeiro nível ao lado da sessão, e no máximo 200 pastas.
+            folders += sorted(e.path for e in os.scandir(parent) if e.is_dir() and e.path not in folders)[:200]
+        except OSError:
+            _log.warning("pastas ao lado de %s ilegíveis ao procurar %s citado", base, path, exc_info=True)
+    for relative in relatives:
+        for folder in folders:
             candidate = os.path.realpath(os.path.join(folder, relative))
             if candidate.startswith(folder + os.sep) and os.path.isfile(candidate):
                 return candidate
     return None
 
 
-def _resolver_citado(name: str, path: str) -> str:
+def _resolver_citado(name: str, path: str, *, write: bool = False) -> str:
     """Devolve o caminho REAL de um arquivo citado no transcript desta sessao.
 
     TRAVA de seguranca compartilhada por quem le e por quem grava fora da raiz da sessao: so
@@ -7680,7 +7739,7 @@ def _resolver_citado(name: str, path: str) -> str:
                 real = candidate
                 break
         if not real:
-            whole = _cited_elsewhere(info.jsonl, info.cwd, path)
+            whole = _cited_elsewhere(info.jsonl, info.cwd, path, cited[path], siblings=not write)
             real = os.path.realpath(whole) if whole else ""
         if not real:
             raise HTTPException(404, detail=erro("erro_arquivo_nao_encontrado", "file not found"))
@@ -7723,7 +7782,7 @@ def serve_file_text(name: str, path: str):
 def write_file_text(name: str, body: FileWriteBody):
     try:
         return filetree.write_at(
-            Path(_resolver_citado(name, body.path)), body.path, body.text, body.digest
+            Path(_resolver_citado(name, body.path, write=True)), body.path, body.text, body.digest
         )
     except FileError as e:
         raise _erro_arq(e)

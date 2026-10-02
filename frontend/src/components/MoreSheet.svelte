@@ -67,15 +67,19 @@
 
   let accounts = $state<AccountTarget[] | null>(null);
   let accountsError = $state('');
+  // Só a última leitura escreve: abrir, voltar e abrir de novo não deixa a resposta velha por cima.
+  let accountsSeq = 0;
   async function openAccounts() {
     if (!sessionName) return;
+    const seq = ++accountsSeq;
     view = 'accounts';
     accounts = null;
     accountsError = '';
     try {
-      accounts = await listAccountTargets(sessionName);
+      const list = await listAccountTargets(sessionName);
+      if (seq === accountsSeq) accounts = list;
     } catch (e) {
-      accountsError = e instanceof Error ? e.message : String(e);
+      if (seq === accountsSeq) accountsError = e instanceof Error ? e.message : String(e);
     }
   }
 </script>

@@ -101,6 +101,20 @@ def test_conta_destino_com_a_mesma_conversa_reabre_na_origem(contas, tmp_path):
     assert origem.exists() and ordem == ["parou", ("acordou", a)]
 
 
+def test_sidecar_que_nao_grava_devolve_a_conversa_para_a_origem(contas, tmp_path, monkeypatch):
+    a, b = contas
+    cwd = str(tmp_path / "repo")
+    S.save("hl", cwd, SID, config_dir=a)
+    origem = _conversa(a, cwd)
+    real_update = S.update
+    monkeypatch.setattr(S, "update", lambda name, **campos: None if "config_dir" in campos else real_update(name, **campos))
+    ordem = []
+    r = _post("hl", b, headless=True, conta=a, hl=_hl(ordem))
+    assert r.status_code == 500 and r.json()["detail"]["code"] == "erro_mover_conversa"
+    assert origem.exists() and not (Path(b) / "projects" / origem.parent.name / f"{SID}.jsonl").exists()
+    assert ordem == ["parou", ("acordou", a)]
+
+
 def test_conta_perto_do_limite_e_recusada_e_vai_para_o_fim_da_lista(contas, tmp_path, monkeypatch):
     import app.api as api_mod
     from app.cotas import CotaConta, JanelaCota

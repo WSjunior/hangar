@@ -735,7 +735,12 @@ impl Hangar {
             None => message,
         };
         chrome::confirm_alert(window, cx, title, message, tr("sidebar_same_ok"), ButtonVariant::Primary,
-            move |_, cx| { let _ = this.update(cx, |this, cx| this.write(target.clone(), Write::Account { path: path.clone(), label: label.clone() }, cx)); true });
+            move |window, cx| {
+                // A troca para e reabre a sessão: sem este aviso nada mudava na tela até a resposta.
+                window.push_notification(Notification::info(tr("sidebar_same_moving").replace("{n}", &label)), cx);
+                let _ = this.update(cx, |this, cx| this.write(target.clone(), Write::Account { path: path.clone(), label: label.clone() }, cx));
+                true
+            });
     }
 
     fn git_write(&mut self, target: Target, what: GitWrite, window: &mut Window, cx: &mut Context<Self>) {

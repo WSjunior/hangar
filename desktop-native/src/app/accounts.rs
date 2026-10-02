@@ -525,7 +525,10 @@ impl Hangar {
         let server = self.open_server();
         // Outra máquina: a lista da anterior não pode aparecer como se fosse desta enquanto a nova não chega.
         if self.accounts.session_server.as_deref() != Some(server.as_str()) {
-            (self.accounts.session_list, self.accounts.session_server) = (Remote::default(), Some(server.clone()));
+            // `reset`, não `default`: o número do pedido segue subindo, e a resposta de uma ida anterior a esta máquina
+            // não passa pela nova.
+            self.accounts.session_list.reset();
+            self.accounts.session_server = Some(server.clone());
         } else if self.accounts.session_list.loading { return; }
         let seq = self.accounts.session_list.start();
         let done = self.accounts_send_later();

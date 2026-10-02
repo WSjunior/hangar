@@ -716,52 +716,43 @@ def citation_cwds(jsonl: str | Path, needles: list[str]) -> dict[str, list[str]]
 _CAMINHO_CHAR = r"[^\\\n\"`'<>|*?]"
 
 
-def cited_absolute(jsonl: str | Path, path: str) -> Optional[str]:
-    """Arquivo que existe, citado em algum ponto do transcript com caminho absoluto que termina em
-    `/path`, do mais recente ao mais antigo. É como um nome solto ("x.sql") ou relativo de outro
-    repositório acha o arquivo que o agente citou inteiro antes."""
+# Onde uma citação começa: depois de espaço, aspas, crase, parêntese ou das sequências `\n`/`\t` do JSON. Sem isso
+# cada `/` do meio de um caminho (ou de um base64 na mesma linha) virava um começo, e um sufixo nunca citado
+# (`/etc/hosts` de `/home/u/etc/hosts`) era candidato.
+_CITACAO_INICIO = r"(?:(?<=[\s\"`'(\[=:,])|(?<=\\n)|(?<=\\t)|^)"
+# Fim da citação: `x.sql` não casa em `x.sql.bak` nem em `x.sql2`, mas casa com o ponto final da frase.
+_CITACAO_FIM = r"(?![\w-]|\.\w)"
+_CAMINHO_MAX = 400
+
+
+def cited_elsewhere(jsonl: str | Path, path: str) -> tuple[list[str], list[str]]:
+    """Numa leitura só do transcript, onde mais a conversa citou o arquivo `path` (nome solto ou relativo), do mais
+    recente ao mais antigo: absolutos que terminam em `/path` e existem, e relativos citados que terminam no nome
+    (um `git status` de outro repositório cita `docs/x/nome` sem dizer de onde)."""
     tail = path.replace("\\", "/").removeprefix("./").strip("/")
     if not tail or ".." in tail.split("/"):
-        return None
-    pattern = re.compile("(?=(/" + _CAMINHO_CHAR + "*?/" + re.escape(tail) + "))")
-    needle = tail.encode()
-    found: list[str] = []
+        return [], []
+    name = tail.rsplit("/", 1)[-1]
+    absolute = re.compile(_CITACAO_INICIO + "(/" + _CAMINHO_CHAR + "{0," + str(_CAMINHO_MAX) + "}?/"
+                          + re.escape(tail) + ")" + _CITACAO_FIM)
+    relative = re.compile(r"(?<![\w./-])((?:[\w.-]+/)+" + re.escape(name) + ")" + _CITACAO_FIM)
+    needle = name.encode()
+    absolutes: list[str] = []
+    relatives: list[str] = []
     try:
         with open(jsonl, "rb") as fh:
             for raw_line in fh:
                 if needle not in raw_line:
                     continue
                 line = raw_line.decode("utf-8", errors="replace")
-                for m in pattern.finditer(line):
-                    end = m.start(1) + len(m.group(1))
-                    # `x.sql` não casa dentro de `x.sql.bak`.
-                    if end < len(line) and (line[end].isalnum() or line[end] in "._-"):
-                        continue
-                    found.append(m.group(1))
+                absolutes.extend(absolute.findall(line))
+                if "/" not in tail:
+                    relatives.extend(relative.findall(line))
     except OSError:
-        return None
-    for candidate in dict.fromkeys(reversed(found)):
-        if os.path.isfile(candidate):
-            return candidate
-    return None
-
-
-def cited_relatives(jsonl: str | Path, name: str) -> list[str]:
-    """Caminhos relativos citados no transcript que terminam no arquivo `name`, do mais recente ao
-    mais antigo: um `git status` de outro repositório cita `docs/x/name` sem dizer de onde."""
-    if not name or "/" in name:
-        return []
-    pattern = re.compile(r"(?<![\w./-])((?:[\w.-]+/)+" + re.escape(name) + r")(?![\w.-])")
-    needle = name.encode()
-    found: list[str] = []
-    try:
-        with open(jsonl, "rb") as fh:
-            for raw_line in fh:
-                if needle in raw_line:
-                    found.extend(pattern.findall(raw_line.decode("utf-8", errors="replace")))
-    except OSError:
-        return []
-    return [p for p in dict.fromkeys(reversed(found)) if ".." not in p.split("/")]
+        _log.warning("transcript ilegível ao procurar %s citado: %s", tail, jsonl, exc_info=True)
+        return [], []
+    found = [c for c in list(dict.fromkeys(reversed(absolutes)))[:50] if os.path.isfile(c)]
+    return found, [p for p in dict.fromkeys(reversed(relatives)) if ".." not in p.split("/")][:20]
 
 
 def last_assistant_text(jsonl: str | Path) -> Optional[str]:

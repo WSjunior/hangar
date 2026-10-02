@@ -38,8 +38,17 @@ const UPLOAD_SECONDS: u64 = 180;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 /// `Memory` é o anexo ainda no compositor (nome, bytes): não passa pela rede.
-// ponytail: a chave do cache do visor faz hash dos bytes do anexo; trocar por um id se pesar.
-pub enum Source { Upload(String), Cited(String), Transcript(String, usize), Remote(String), Memory(String, std::sync::Arc<Vec<u8>>) }
+pub enum Source { Upload(String), Cited(String), Transcript(String, usize), Remote(String), Memory(String, Shared) }
+
+/// Bytes de um anexo na chave do cache do visor: iguais pelo endereço, não pelo conteúdo. Comparar e fazer hash de uma
+/// imagem inteira a cada abertura custava milissegundos, e o `Debug` imprimia os bytes no rastro.
+#[derive(Clone)]
+pub struct Shared(pub std::sync::Arc<Vec<u8>>);
+
+impl PartialEq for Shared { fn eq(&self, other: &Self) -> bool { std::sync::Arc::ptr_eq(&self.0, &other.0) } }
+impl Eq for Shared {}
+impl std::hash::Hash for Shared { fn hash<H: std::hash::Hasher>(&self, state: &mut H) { std::sync::Arc::as_ptr(&self.0).hash(state) } }
+impl std::fmt::Debug for Shared { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{} bytes", self.0.len()) } }
 
 // `plain` busca mídia de terceiros: nunca leva o token do servidor.
 #[derive(Clone)]
@@ -240,7 +249,7 @@ impl Api {
                 url = Url::parse(address).ok().filter(|url| matches!(url.scheme(), "http" | "https")).ok_or_else(|| Failure::local("invalid_url"))?;
                 client = &self.plain;
             }
-            Source::Memory(_, bytes) => return Ok(bytes.to_vec()),
+            Source::Memory(_, bytes) => return Ok(bytes.0.to_vec()),
         }
         let r = client.get(url).timeout(Duration::from_secs(UPLOAD_SECONDS)).send().await.map_err(|_| Failure::transport(false))?;
         // Erro de terceiro não tem o corpo lido: nem memória, nem texto escolhido por ele na tela.

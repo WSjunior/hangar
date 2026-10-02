@@ -6304,6 +6304,7 @@
   "native_sidebar_same_title": "Continuar a conversa em {n}?",
   "native_sidebar_same_msg": "A sessão é encerrada e reaberta com o mesmo nome na conta {n}, na mesma conversa, sem resumo. O que estiver em voo é perdido.",
   "native_sidebar_same_ok": "Continuar",
+  "native_sidebar_same_moving": "levando a conversa para {n}…",
   "native_sidebar_same_moved": "a conversa continua em {n}",
   "native_sidebar_same_failed": "levar a conversa para a outra conta: {n}",
   "native_sidebar_accounts_failed": "ler as contas: {n}",
