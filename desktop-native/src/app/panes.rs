@@ -123,7 +123,8 @@ impl Hangar {
 
     /// Redesenha uma área só, sem acordar as outras: para o que muda só nela (texto chegando, rolagem, digitação).
     pub(super) fn redraw(&self, area: Area, cx: &mut Context<Self>) {
-        self.pane(area).update(cx, |_, cx| cx.notify());
+        // Notificar pelo id, sem `update`: chamado de dentro do desenho da própria área, o `update` dela entra em pânico.
+        App::notify(cx, self.pane(area).entity_id());
     }
 
     /// A faixa de baixo ancorada no pé da caixa: crescendo, ela sobe por cima da conversa no mesmo quadro, e a medida
