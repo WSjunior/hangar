@@ -2752,23 +2752,33 @@ def _arvore_de(pid: object) -> list[int]:
 
 def _saiu(pids: list[int]) -> bool:
     """Espera os processos saírem; quem passar do prazo é morto à força. False = algum seguiu vivo mesmo assim."""
-    registry_mod._esperar_saida(pids, 15.0)
+    windows = os.name == "nt"
+    # No Windows a árvore sai em décimos de segundo quando sai; quem passou de 1,5 s (neto fora do
+    # psmux, servidor MCP preso) não sai sozinho, e esperar 15 s por ele só atrasa a troca.
+    prazo = 1.5 if windows else 15.0
+    registry_mod._esperar_saida(pids, prazo)
     vivos = [p for p in pids if procinfo.pid_vivo(p)]
-    taskkill = shutil.which("taskkill") if os.name == "nt" and vivos else None
-    if os.name == "nt" and vivos and not taskkill:
-        _log.warning("troca de conta: taskkill não encontrado; processos %s seguem vivos", vivos)
-    for p in vivos:
-        try:
-            if os.name == "nt":
-                if taskkill:
-                    subprocess.run([taskkill, "/F", "/PID", str(p)], capture_output=True, timeout=10)
-            else:
-                import signal
+    if vivos and windows:
+        taskkill = shutil.which("taskkill")
+        if not taskkill:
+            _log.warning("troca de conta: taskkill não encontrado; processos %s seguem vivos", vivos)
+        else:
+            # Uma chamada para todos e sem /T: o /T segue o ppid de agora, e num pid já reaproveitado
+            # levaria junto a árvore de um processo alheio. Os netos já estão na foto tirada antes de parar.
+            try:
+                subprocess.run([taskkill, "/F", *(a for p in vivos for a in ("/PID", str(p)))],
+                               capture_output=True, timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                _log.warning("troca de conta: não consegui matar os processos %s", vivos, exc_info=True)
+    elif vivos:
+        import signal
+        for p in vivos:
+            try:
                 os.kill(p, signal.SIGKILL)
-        except (OSError, subprocess.SubprocessError):
-            _log.warning("troca de conta: não consegui matar o processo %s", p, exc_info=True)
+            except OSError:
+                _log.warning("troca de conta: não consegui matar o processo %s", p, exc_info=True)
     if vivos:
-        _log.warning("troca de conta: processos %s não saíram em 15 s e foram mortos", vivos)
+        _log.warning("troca de conta: processos %s não saíram em %.1f s e foram mortos", vivos, prazo)
         registry_mod._esperar_saida(vivos, 3.0)
     return not any(procinfo.pid_vivo(p) for p in pids)
 

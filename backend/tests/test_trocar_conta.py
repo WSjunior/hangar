@@ -137,3 +137,26 @@ def test_conta_fora_da_lista_e_recusada(contas):
     import app.api as api_mod
     r = TestClient(api_mod.app).post("/api/sessions/hl/conta", headers=_H, json={"config_dir": "/etc"})
     assert r.status_code == 400 and r.json()["detail"]["code"] == "erro_config_dir_invalido"
+
+
+@pytest.mark.parametrize("teimoso", [False, True])
+def test_windows_mata_as_sobras_numa_chamada_so_e_sem_arvore(monkeypatch, teimoso):
+    """Os netos que o psmux não derruba morrem logo, num taskkill só; sem /T, que seguiria o ppid
+    de um pid reaproveitado. Quem sobrevive ao taskkill faz a troca falhar."""
+    from types import SimpleNamespace
+    import app.api as api_mod
+    vivos, chamadas, esperas = {11, 12}, [], []
+    monkeypatch.setattr(api_mod, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(api_mod.shutil, "which", lambda n: r"C:\Windows\System32\taskkill.exe")
+    monkeypatch.setattr(api_mod.procinfo, "pid_vivo", lambda p: p in vivos)
+    monkeypatch.setattr(api_mod.registry_mod, "_esperar_saida", lambda pids, teto: esperas.append(teto))
+
+    def run(argv, **kw):
+        chamadas.append(argv)
+        if not teimoso:
+            vivos.clear()
+    monkeypatch.setattr(api_mod.subprocess, "run", run)
+
+    assert api_mod._saiu([10, 11, 12]) is not teimoso
+    assert chamadas == [[r"C:\Windows\System32\taskkill.exe", "/F", "/PID", "11", "/PID", "12"]]
+    assert esperas[0] < 15
