@@ -1058,9 +1058,22 @@ Fonte: backend vivo (3 sessões, 4 conexões) e benchmarks avulsos em Python 3.1
 
 ### Depois da troca
 
-Preenchida na verificação manual com o dono (roteiro no plano, Task 15, Step 4), com os comandos
-dela. O `MainPID` do serviço é o `uv`, não o Python: o backend é o filho dele
-(`pgrep -P <MainPID>`) e o `hangar-server` é filho do backend.
+Preenchida na verificação manual com o dono, mesma máquina e mesmas sessões da linha de base.
+O `MainPID` do serviço é o `uv`, não o Python: o backend é o filho dele e o `hangar-server` é
+filho do backend.
+
+- Backend e `hangar-server` (RSS em KB):
+  `PY=$(pgrep -P $(systemctl --user show -p MainPID --value hangar-backend.service))`,
+  `RS=$(pgrep -f .hangar/bin/hangar-server)`, `ps -o pid,rss,nlwp,args -p $PY,$RS` e
+  `grep RssAnon /proc/$PY/status`.
+- `hangar-cano`: `ps -o pid,rss,nlwp,args -p $(pgrep -f hangar-cano | head -1)`.
+- `/history`, cinco vezes por sessão, mediana (`ls -l` do `jsonl` confere o tamanho):
+  `for i in 1 2 3 4 5; do curl -s -o /dev/null -w '%{time_total}\n' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8765/api/sessions/<nome>/history"; done`;
+  na sessão Claude de 300 MB, sem e com `?limit=200`, se ela ainda existir.
+- Chats abertos: com nenhum aberto, `nlwp` do `$PY` e `ls -l /proc/$PY/fd | grep -c inotify`;
+  abrir 4 chats (2 sessões × celular e web) e repetir.
+
+Anotar valor e unidade, a sessão de cada `/history`, e o que não deu para medir e por quê.
 
 | Métrica | Depois |
 |---|---|
