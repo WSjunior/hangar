@@ -1,32 +1,114 @@
-//! Rotas do hangar-server. As de conversa entram na Task 12; o resto é repasse.
+// crates/hangar-server/src/routes.rs
+//! Rotas do hangar-server: saúde, histórico e chat ao vivo do Claude e do Codex para o dono;
+//! todo o resto é repasse ao Python.
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::body::Body;
+use axum::extract::rejection::PathRejection;
+use axum::extract::{ConnectInfo, Path, Request, State};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use bytes::Bytes;
+use http_body_util::BodyExt;
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use tokio::net::TcpListener;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::auth::{self, Auth};
 use crate::config::Config;
 use crate::proxy::{self, Forward, HttpClient};
+use crate::side::{Binding, Hubs, INFO_TTL, Lease, Out, SideCtx, remember_info};
+use crate::tail::{self, Watchers};
+use crate::transcript::{InternalInfo, SKIPPED_LINES, history_etag, merged_history};
+
+const INFO_TIMEOUT: Duration = Duration::from_secs(10);
+const PING_EVERY: Duration = Duration::from_secs(10);
+const COMMENT_EVERY: Duration = Duration::from_secs(15);
+const SEND_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct AppState {
     pub cfg: Config,
     pub auth: Auth,
     pub http: HttpClient,
+    pub side: SideCtx,
+}
+
+impl AppState {
+    pub fn new(cfg: Config) -> AppState {
+        let http = proxy::client();
+        let side = SideCtx {
+            upstream: cfg.upstream,
+            secret: cfg.internal_secret.clone(),
+            http: http.clone(),
+            watchers: Watchers::default(),
+            hubs: Hubs::default(),
+            infos: Default::default(),
+        };
+        AppState { auth: Auth::new(&cfg.auth_token), http, side, cfg }
+    }
+
+    /// `info` da sessão com cache curto: várias telas abrindo juntas viram uma consulta só.
+    async fn info(&self, name: &str) -> Option<InternalInfo> {
+        if let Some((at, v)) = self.side.infos.lock().unwrap().get(name) {
+            if at.elapsed() < INFO_TTL {
+                return v.clone();
+            }
+        }
+        let v = fetch_info(&self.http, self.cfg.upstream, &self.cfg.internal_secret, name).await;
+        remember_info(&self.side.infos, name, v.clone());
+        v
+    }
+}
+
+async fn fetch_info(http: &HttpClient, upstream: SocketAddr, secret: &str, name: &str) -> Option<InternalInfo> {
+    let url = format!("http://{upstream}/internal/sessions/{}/info", utf8_percent_encode(name, NON_ALPHANUMERIC));
+    let req = axum::http::Request::get(url).header("x-hangar-internal", secret).body(Body::empty()).ok()?;
+    let resp = match tokio::time::timeout(INFO_TIMEOUT, http.request(req)).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            tracing::warn!(session = %name, "info interna falhou: {e}");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(session = %name, "info interna sem resposta");
+            return None;
+        }
+    };
+    if !resp.status().is_success() {
+        // 404 é sessão que não existe: normal, sem log.
+        if resp.status() != StatusCode::NOT_FOUND {
+            tracing::warn!(session = %name, status = %resp.status(), "info interna recusada");
+        }
+        return None;
+    }
+    let body = tokio::time::timeout(INFO_TIMEOUT, resp.into_body().collect()).await.ok()?.ok()?.to_bytes();
+    match serde_json::from_slice(&body) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            // Só a posição: a mensagem do serde pode citar o valor.
+            tracing::warn!(session = %name, line = e.line(), column = e.column(), "info interna inválida");
+            None
+        }
+    }
 }
 
 pub async fn serve(listener: TcpListener, cfg: Config) -> std::io::Result<()> {
-    let state = Arc::new(AppState { auth: Auth::new(&cfg.auth_token), http: proxy::client(), cfg });
+    let state = Arc::new(AppState::new(cfg));
     axum::serve(listener, router(state).into_make_service_with_connect_info::<SocketAddr>()).await
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/__hangar_server/health", get(health))
+        // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.
+        .route("/api/sessions/{name}/history", get(history).fallback(pass_any))
+        .route("/api/sessions/{name}/events", get(events).fallback(pass_any))
         .fallback(pass_any)
         .with_state(state)
 }
@@ -43,7 +125,6 @@ async fn health(headers: HeaderMap) -> Response {
 }
 
 /// Quem pede e se é o dono, resolvidos uma vez por pedido.
-#[allow(dead_code)] // Usado pelos handlers de conversa (Task 12).
 pub(crate) fn gate(st: &AppState, peer: SocketAddr, req: &Request) -> (Forward, bool) {
     let (client_ip, https) = st.cfg.trusted.resolve(peer.ip(), req.headers());
     let token = auth::presented_token(req.headers(), req.uri().query(), req.method(), https);
@@ -74,6 +155,177 @@ async fn pass_any(
     pass(&st, req, &Forward { client_ip, https }).await
 }
 
+/// Id de correlação do diário: cabeçalho x-hangar-req; o EventSource só manda ?diag_req.
+fn diag_req(req: &Request) -> String {
+    let h: String = req
+        .headers()
+        .get("x-hangar-req")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .chars()
+        .take(32)
+        .collect();
+    if !h.is_empty() {
+        return h;
+    }
+    auth::query_param(req.uri().query(), "diag_req")
+        .filter(|c| (1..=32).contains(&c.len()) && c.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
+        .unwrap_or_default()
+}
+
+async fn history(
+    State(st): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    path: Result<Path<String>, PathRejection>,
+    req: Request,
+) -> Response {
+    let (fwd, owner) = gate(&st, peer, &req);
+    let name = match path {
+        Ok(Path(n)) if owner && req.method() == Method::GET => n,
+        _ => return pass(&st, req, &fwd).await,
+    };
+    let limit = match auth::query_param(req.uri().query(), "limit") {
+        None => None,
+        Some(v) => match v.parse::<i64>() {
+            // Como o Python: `limit <= 0` é o histórico inteiro (api.py:2918), nunca um 400.
+            Ok(n) if n > 0 => usize::try_from(n).ok(),
+            Ok(_) => None,
+            // Texto ou vazio fica com o FastAPI e o 422 dele.
+            Err(_) => return pass(&st, req, &fwd).await,
+        },
+    };
+    let Some(hreq) = st.info(&name).await.and_then(|i| i.history_request(limit)) else {
+        return pass(&st, req, &fwd).await;
+    };
+    tracing::info!(session = %name, req = %diag_req(&req), "history");
+    let inm = req.headers().get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).map(str::to_owned);
+    let log_name = name.clone();
+    let done = tokio::task::spawn_blocking(move || -> std::io::Result<(Option<String>, Option<Vec<u8>>)> {
+        let etag = history_etag(&hreq);
+        if etag.is_some() && etag == inm {
+            return Ok((etag, None));
+        }
+        let before = SKIPPED_LINES.load(Ordering::Relaxed);
+        // Já vem com o corte `evs[-limit:]` da rota (Task 9).
+        let evs = merged_history(&hreq)?;
+        tail::log_skipped(&log_name, before);
+        Ok((etag, Some(serde_json::to_vec(&evs)?)))
+    })
+    .await;
+    let (etag, body) = match done {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            tracing::warn!(session = %name, "history no Rust falhou; repassa: {e}");
+            return pass(&st, req, &fwd).await;
+        }
+        Err(e) => {
+            tracing::warn!(session = %name, "history no Rust caiu; repassa: {e}");
+            return pass(&st, req, &fwd).await;
+        }
+    };
+    let mut resp = match body {
+        None => StatusCode::NOT_MODIFIED.into_response(),
+        Some(body) => {
+            let mut r = Response::new(Body::empty());
+            r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            let body = maybe_gzip(req.headers(), r.headers_mut(), body);
+            *r.body_mut() = Body::from(body);
+            r
+        }
+    };
+    if let Some(v) = etag.and_then(|e| HeaderValue::from_str(&e).ok()) {
+        resp.headers_mut().insert(header::ETAG, v);
+    }
+    cors(req.headers(), resp.headers_mut());
+    resp
+}
+
+async fn events(
+    State(st): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    path: Result<Path<String>, PathRejection>,
+    req: Request,
+) -> Response {
+    let (fwd, owner) = gate(&st, peer, &req);
+    let name = match path {
+        Ok(Path(n)) if owner && req.method() == Method::GET => n,
+        _ => return pass(&st, req, &fwd).await,
+    };
+    let Some(binding) = st.info(&name).await.as_ref().and_then(Binding::from_info) else {
+        return pass(&st, req, &fwd).await;
+    };
+    // A query vence: o app recria o EventSource a cada queda, e objeto novo não manda o cabeçalho.
+    let resume = auth::query_param(req.uri().query(), "last_event_id")
+        .filter(|v| !v.is_empty())
+        .or_else(|| req.headers().get("last-event-id").and_then(|v| v.to_str().ok()).map(str::to_owned));
+    tracing::info!(session = %name, req = %diag_req(&req), retomada = resume.is_some(), "events: abriu");
+    let lease = st.side.hubs.acquire(&name, binding, &st.side);
+    let (tx, rx) = mpsc::channel::<Bytes>(64);
+    tokio::spawn(client_loop(lease, resume, tx));
+    let stream = futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|b| (Ok::<Bytes, Infallible>(b), rx))
+    });
+    let mut resp = Response::new(Body::from_stream(stream));
+    let h = resp.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream; charset=utf-8"));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    h.insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
+    h.insert("x-accel-buffering", HeaderValue::from_static("no"));
+    cors(req.headers(), h);
+    resp
+}
+
+async fn client_loop(lease: Lease, resume: Option<String>, out: mpsc::Sender<Bytes>) {
+    let hub = lease.hub.clone();
+    // O front dá 10 s para o primeiro quadro: o ping sai antes de qualquer leitura.
+    if !push(&out, tail::ping_frame()).await {
+        return;
+    }
+    let start = tokio::time::Instant::now();
+    let mut ping = tokio::time::interval_at(start + PING_EVERY, PING_EVERY);
+    let mut comment = tokio::time::interval_at(start + COMMENT_EVERY, COMMENT_EVERY);
+    let mut resume = resume;
+    loop {
+        let Some(att) = hub.attach(resume.take()).await else {
+            let _ = push(&out, tail::reset_frame()).await;
+            return;
+        };
+        for f in att.frames {
+            if !push(&out, f).await {
+                return;
+            }
+        }
+        let (generation, mut rx) = (att.generation, att.rx);
+        let rebind = loop {
+            tokio::select! {
+                _ = out.closed() => return,
+                _ = ping.tick() => if !push(&out, tail::ping_frame()).await { return },
+                _ = comment.tick() => if !push(&out, tail::comment_frame()).await { return },
+                msg = rx.recv() => match msg {
+                    Ok(Out::Tail(g, f)) if g == generation => if !push(&out, f).await { return },
+                    Ok(Out::Tail(..)) => {}
+                    Ok(Out::Side(f)) => if !push(&out, f).await { return },
+                    Ok(Out::Rebind) => break true,
+                    Ok(Out::Close) | Err(broadcast::error::RecvError::Closed) => break false,
+                    // Atrasado demais para o canal: fecha, e o aparelho retoma pelo último id.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        tracing::info!(session = %hub.name, "aparelho atrasado; conexão fechada para retomar");
+                        return;
+                    }
+                },
+            }
+        };
+        if !push(&out, tail::reset_frame()).await || !rebind {
+            return;
+        }
+    }
+}
+
+/// Envio preso por 30 s fecha a conexão, como o send_timeout do Python.
+async fn push(out: &mpsc::Sender<Bytes>, frame: Bytes) -> bool {
+    matches!(tokio::time::timeout(SEND_TIMEOUT, out.send(frame)).await, Ok(Ok(())))
+}
+
 /// CORS das respostas do próprio Rust, como o CORSMiddleware do Python: `*`, sem credenciais,
 /// ETag legível pelo JS. Preflight não chega aqui: vai sem token e é repassado.
 pub(crate) fn cors(req: &HeaderMap, resp: &mut HeaderMap) {
@@ -83,14 +335,17 @@ pub(crate) fn cors(req: &HeaderMap, resp: &mut HeaderMap) {
     }
 }
 
-/// Gzip só quando o cliente pede e o corpo passa de 1 KB. Nunca chamado para text/event-stream.
-#[allow(dead_code)] // Usado pelos handlers de conversa (Task 12).
+/// Gzip só quando o cliente pede e o corpo passa de 1 KB. SSE nunca: o gzip seguraria os quadros.
 pub(crate) fn maybe_gzip(req: &HeaderMap, resp: &mut HeaderMap, body: Vec<u8>) -> Vec<u8> {
     let wants = req
         .get(header::ACCEPT_ENCODING)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.contains("gzip"));
-    if !wants || body.len() < 1024 {
+    let sse = resp
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("text/event-stream"));
+    if !wants || sse || body.len() < 1024 {
         return body;
     }
     let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(5));
@@ -122,7 +377,7 @@ mod tests {
             log_path: None,
             trusted: auth::TrustedHosts::parse("127.0.0.1"),
         };
-        Arc::new(AppState { auth: Auth::new("dono"), http: proxy::client(), cfg })
+        Arc::new(AppState::new(cfg))
     }
 
     fn request(path: &str, ip: &str, ws: bool, token: &str) -> Request {
@@ -200,5 +455,31 @@ mod tests {
         let mut out = Vec::new();
         flate2::read::GzDecoder::new(&packed[..]).read_to_end(&mut out).unwrap();
         assert_eq!(out, big);
+
+        let mut sse = HeaderMap::new();
+        sse.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream; charset=utf-8"));
+        assert_eq!(maybe_gzip(&req, &mut sse, big.clone()), big);
+        assert!(sse.get(header::CONTENT_ENCODING).is_none());
+    }
+
+    #[test]
+    fn diag_req_prefers_header_then_valid_query() {
+        let r = axum::http::Request::builder()
+            .uri("/api/sessions/s/events?diag_req=abc_1-Z")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(diag_req(&r), "abc_1-Z");
+        let r = axum::http::Request::builder()
+            .uri("/api/sessions/s/events?diag_req=tem%20espaco")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(diag_req(&r), "");
+        let long = "x".repeat(40);
+        let r = axum::http::Request::builder()
+            .uri("/api/sessions/s/events?diag_req=q")
+            .header("x-hangar-req", long.as_str())
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(diag_req(&r), "x".repeat(32));
     }
 }

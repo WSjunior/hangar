@@ -31,6 +31,10 @@ reqwest = { version = "=0.13.4", default-features = false, features = ["stream"]
 subtle = "=2.6.1"
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "std"] }
+eventsource-stream = "=0.2.3"
+http-body-util = "=0.1.5"
+notify = "=7.0.0"
+percent-encoding = "=2.3.2"
 
 [profile.release]
 strip = true

@@ -3,6 +3,8 @@ pub mod auth;
 pub mod config;
 pub mod proxy;
 pub mod routes;
+pub mod side;
+pub mod tail;
 pub mod transcript;
 
 /// Versão do contrato com o Python (rotas `/internal`, eventos do side-events, ambiente). O

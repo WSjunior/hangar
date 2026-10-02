@@ -4,9 +4,13 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
@@ -15,11 +19,13 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use axum::routing::get;
 use bytes::Bytes;
+use eventsource_stream::{Event, EventStreamError, Eventsource};
 use futures_util::StreamExt;
+use futures_util::stream::BoxStream;
 use hangar_server::auth::TrustedHosts;
 use hangar_server::config::Config;
 use hyper_util::rt::TokioIo;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Notify, broadcast};
 
@@ -135,6 +141,7 @@ async fn fake_python(State(f): State<Arc<Fake>>, mut req: Request) -> Response {
     match path.as_str() {
         "/redirect" => Response::builder().status(302).header("location", "/outro").body(Body::empty()).unwrap(),
         "/probe" => status(StatusCode::UNAUTHORIZED),
+        "/limited" => status(StatusCode::TOO_MANY_REQUESTS),
         "/stream" => {
             let f2 = f.clone();
             let s = futures_util::stream::once(async { Ok::<_, Infallible>(Bytes::from_static(b"um")) })
@@ -187,4 +194,121 @@ pub async fn spawn_server(cfg: Config) -> SocketAddr {
 
 pub fn client() -> reqwest::Client {
     reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap()
+}
+/// Linha sintética no formato do Claude (nunca conversa real): user com texto e relógio crescente.
+pub fn claude_line(i: usize) -> String {
+    format!(
+        "{{\"type\":\"user\",\"uuid\":\"u{i}\",\"timestamp\":\"2026-10-02T10:{m:02}:{s:02}.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"linha {i}\"}}}}\n",
+        m = i / 60 % 60,
+        s = i % 60
+    )
+}
+
+/// Acrescenta as linhas e devolve o offset do início de cada uma.
+pub fn append_lines(path: &Path, range: std::ops::Range<usize>) -> Vec<u64> {
+    let mut f = OpenOptions::new().create(true).append(true).open(path).unwrap();
+    let mut at = f.metadata().unwrap().len();
+    let mut offs = Vec::new();
+    for i in range {
+        let line = claude_line(i);
+        f.write_all(line.as_bytes()).unwrap();
+        offs.push(at);
+        at += line.len() as u64;
+    }
+    offs
+}
+
+pub fn append_raw(path: &Path, s: &str) {
+    OpenOptions::new().create(true).append(true).open(path).unwrap().write_all(s.as_bytes()).unwrap();
+}
+
+/// Campo `history` do `info` nos testes: o mesmo formato de `info_payload` (internal_api.py).
+pub fn history_field(jsonl: &Path) -> Value {
+    json!({"queue": jsonl.with_extension("fila.jsonl")})
+}
+
+pub fn info_json(provider: &str, jsonl: &Path) -> Value {
+    json!({
+        "provider": provider,
+        "jsonl": jsonl,
+        "session_key": jsonl.file_stem().unwrap().to_str().unwrap(),
+        "history": history_field(jsonl),
+    })
+}
+
+pub type Events = BoxStream<'static, Result<Event, EventStreamError<reqwest::Error>>>;
+
+pub async fn open_events(srv: SocketAddr, name: &str, query: &str, headers: &[(&str, &str)]) -> reqwest::Response {
+    let mut url = format!("http://{srv}/api/sessions/{name}/events?token={OWNER}");
+    if !query.is_empty() {
+        url.push('&');
+        url.push_str(query);
+    }
+    let mut req = client().get(url);
+    for (k, v) in headers {
+        req = req.header(*k, *v);
+    }
+    req.send().await.unwrap()
+}
+
+pub fn sse(resp: reqwest::Response) -> Events {
+    resp.bytes_stream().eventsource().boxed()
+}
+
+pub async fn next_any(es: &mut Events) -> Event {
+    tokio::time::timeout(Duration::from_secs(5), es.next())
+        .await
+        .expect("evento em 5 s")
+        .expect("stream aberto")
+        .expect("SSE válido")
+}
+
+pub async fn next_non_ping(es: &mut Events) -> Event {
+    loop {
+        let ev = next_any(es).await;
+        if ev.event != "ping" {
+            return ev;
+        }
+    }
+}
+
+pub async fn next_named(es: &mut Events, name: &str) -> Event {
+    loop {
+        let ev = next_any(es).await;
+        if ev.event == name {
+            return ev;
+        }
+    }
+}
+
+pub async fn messages(es: &mut Events, n: usize) -> Vec<Event> {
+    let mut out = Vec::new();
+    while out.len() < n {
+        out.push(next_named(es, "message").await);
+    }
+    out
+}
+
+pub async fn stream_ends(es: &mut Events) -> bool {
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), es.next()).await {
+            Ok(None) => return true,
+            Ok(Some(Ok(ev))) if ev.event == "ping" => continue,
+            _ => return false,
+        }
+    }
+}
+
+pub fn id_of(ev: &Event) -> String {
+    serde_json::from_str::<Value>(&ev.data).unwrap()["id"].as_str().unwrap().to_owned()
+}
+
+pub async fn wait_until(cond: impl Fn() -> bool) {
+    for _ in 0..250 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("condição não chegou em 5 s");
 }

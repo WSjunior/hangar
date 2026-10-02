@@ -157,6 +157,10 @@ async fn guest_token_is_always_passed_to_python() {
         .unwrap();
     assert_eq!(r.text().await.unwrap(), "from-python");
     assert_eq!(fake.info_calls(), 0, "convidado nunca chega às rotas internas");
+
+    // Controle: o mesmo pedido com o token do dono passa pelo atalho e consulta a rota interna.
+    client().get(format!("http://{srv}/api/sessions/s/history")).bearer_auth(OWNER).send().await.unwrap();
+    assert_eq!(fake.info_calls(), 1);
 }
 
 #[tokio::test]
@@ -183,4 +187,42 @@ async fn blocked_origin_never_gets_the_owner_shortcut() {
         .unwrap();
     assert_eq!(r.text().await.unwrap(), "from-python");
     assert_eq!(fake.info_calls(), 0, "bloqueado: o token do dono nem é avaliado");
+
+    // Controle: outra origem com o mesmo token segue pelo atalho.
+    client()
+        .get(format!("http://{srv}/api/sessions/s/history"))
+        .header("x-forwarded-for", "198.51.100.8")
+        .bearer_auth(OWNER)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(fake.info_calls(), 1);
+}
+
+#[tokio::test]
+async fn origin_limited_by_python_gets_owner_requests_proxied() {
+    let (fake, up) = spawn_fake().await;
+    let srv = spawn_server(config(up, "127.0.0.1")).await;
+    let ip = "198.51.100.9";
+    let r = client()
+        .get(format!("http://{srv}/limited"))
+        .header("x-forwarded-for", ip)
+        .bearer_auth("errado")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 429);
+    for path in ["history", "events"] {
+        let r = client()
+            .get(format!("http://{srv}/api/sessions/s/{path}"))
+            .header("x-forwarded-for", ip)
+            .bearer_auth(OWNER)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.text().await.unwrap(), "from-python");
+    }
+    assert_eq!(fake.hits_to("/api/sessions/s/history"), 1);
+    assert_eq!(fake.hits_to("/api/sessions/s/events"), 1);
+    assert_eq!(fake.info_calls(), 0, "o 429 do Python desliga o atalho dessa origem");
 }
