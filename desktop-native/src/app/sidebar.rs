@@ -152,6 +152,9 @@ pub(super) struct Sidebar {
     follow: Option<Target>,
     /// A aberta sumiu da lista com o renomear em voo: a resposta decide se ela reabre pelo nome novo.
     lost: Option<Target>,
+    /// Trocando de conta: a sessão fecha e volta com o mesmo nome, então a aberta fica na tela até a resposta (e até a
+    /// lista trazê-la de volta, que pode chegar depois). O instante é o da resposta.
+    pub(super) moving: HashMap<Target, Option<std::time::Instant>>,
     menu: Option<MenuRead>,
     menu_seq: u64,
     rename_seq: u64,
@@ -184,7 +187,7 @@ impl Sidebar {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Hangar>) -> Self {
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder(tr("sidebar_filter")).clean_on_escape());
         cx.subscribe(&filter, |_, _, _: &InputEvent, cx| cx.notify()).detach();
-        Self { filter, collapsed: load_collapsed(), deleting: HashSet::new(), editing: None, renaming: HashSet::new(), follow: None, lost: None,
+        Self { filter, collapsed: load_collapsed(), deleting: HashSet::new(), editing: None, renaming: HashSet::new(), follow: None, lost: None, moving: HashMap::new(),
             menu: None, menu_seq: 0, rename_seq: 0, chain: None, chain_seq: 0, focus_tab: None, remote_focus: HashMap::new(), collapse_gen: 0, button_menu: None, hover: None, hover_seq: 0, pointer_y: 0., preview: None, cache: HashMap::new(), press_seq: 0,
             long_pressed: false, rail_anim: None, resize: None, grouping: Default::default() }
     }
@@ -738,7 +741,10 @@ impl Hangar {
             move |window, cx| {
                 // A troca para e reabre a sessão: sem este aviso nada mudava na tela até a resposta.
                 window.push_notification(Notification::info(tr("sidebar_same_moving").replace("{n}", &label)), cx);
-                let _ = this.update(cx, |this, cx| this.write(target.clone(), Write::Account { path: path.clone(), label: label.clone() }, cx));
+                let _ = this.update(cx, |this, cx| {
+                    this.sidebar.moving.insert(target.clone(), None);
+                    this.write(target.clone(), Write::Account { path: path.clone(), label: label.clone() }, cx)
+                });
                 true
             });
     }
@@ -942,6 +948,16 @@ impl Hangar {
                 // Com status, o motivo do servidor; sem resposta, "falha na conexão". Nunca o texto de entrega de conversa, que o
                 // `failure` dá a um 5xx de POST.
                 let failed = |key: &str, error: &Failure| tr(key).replace("{n}", &Self::fetch_failure(error));
+                if matches!(what, Write::Account { .. }) {
+                    if self.selected_target().as_ref() == Some(&target) {
+                        // A lista que chegou durante a troca ficou de lado: agora ela decide (transcript novo ou sumiço).
+                        self.sidebar.moving.insert(target.clone(), Some(std::time::Instant::now()));
+                        let list = self.sessions_of(&target.server).to_vec();
+                        self.follow_open(&list, window, cx);
+                    } else {
+                        self.sidebar.moving.remove(&target);
+                    }
+                }
                 // Diálogo desta sessão ainda aberto (não cancelado): o resultado aparece nele, não em notificação solta.
                 let in_dialog = match what {
                     Write::Rename(_, seq) => self.sidebar.editing.as_ref().is_some_and(|e| !e.inline && e.status.borrow().sent == Some(seq) && e.target == target),

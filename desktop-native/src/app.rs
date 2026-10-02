@@ -1601,6 +1601,13 @@ impl Hangar {
     pub(super) fn follow_open(&mut self, list: &[SessionInfo], window: &mut Window, cx: &mut Context<Self>) {
         // Antes de soltar a conexão aberta: o renomear em voo é da máquina dela.
         let target = self.selected_target();
+        // Trocando de conta, a sessão some e volta noutro transcript: a conversa fica na tela até a resposta e até a lista
+        // trazê-la de volta; sumida por mais que o prazo depois da resposta, vale o "sessão encerrada" de sempre.
+        if let Some(t) = target.as_ref() && let Some(answered) = self.sidebar.moving.get(t).copied() {
+            let back = list.iter().any(|s| s.name == t.name);
+            if !answered.is_some_and(|at| back || at.elapsed() > Duration::from_secs(15)) { return; }
+            self.sidebar.moving.remove(t);
+        }
         if let Some(old) = self.selected.clone() {
             match list.iter().find(|s| s.name == old.name).cloned() {
                 Some(new) if new.jsonl != old.jsonl || new.tracked != old.tracked => self.open_session(self.open_api.clone(), new, window, cx),
