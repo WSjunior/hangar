@@ -392,3 +392,20 @@ def test_normal_shutdown_killing_the_child_is_not_a_crash(fake_bin, tmp_path, ev
     assert len(_spawns(tmp_path)) == 1                 # não religou
     assert not [e for e in events if e[0] in ("hangar_server.caiu", "hangar_server.reserva")]
     assert _dead(supervisor.proc.pid)
+
+
+def test_watcher_failure_puts_the_cause_in_the_diary(monkeypatch, events):
+    supervisor = rust_server.Supervisor(Path("/nao-existe"), "127.0.0.1", 1, 2, "tok", "", lambda: False)
+
+    async def boom():
+        try:
+            raise PermissionError(13, "negado")
+        except PermissionError as e:
+            raise RuntimeError("vigia") from e
+
+    monkeypatch.setattr(supervisor, "_start", boom)
+    assert asyncio.run(supervisor.run()) == "erro"
+    [(evento, nivel, campos)] = [e for e in events if e[0] == "hangar_server.vigia_falhou"]
+    assert nivel == "erro"
+    assert campos["erro_tipo"] == "RuntimeError"
+    assert (campos["causa_tipo"], campos["errno"]) == ("PermissionError", 13)

@@ -196,8 +196,10 @@ class Supervisor:
                                tentativa=len(crashes))
                 if len(crashes) >= MAX_CRASHES:
                     return "quedas"
-        except Exception:                                # noqa: BLE001 — a porta pública não fica sem dono
+        except Exception as e:                           # noqa: BLE001 — a porta pública não fica sem dono
             _log.exception("a vigia do hangar-server falhou")
+            # A linha `reserva` que vem depois só diz "erro"; a causa fica aqui.
+            diag.registrar("hangar_server.vigia_falhou", "erro", **diag.erro_campos(e))
             await self.stop()
             return "erro"
 
