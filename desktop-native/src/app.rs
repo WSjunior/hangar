@@ -576,7 +576,14 @@ impl Drop for Hangar {
 }
 
 impl Hangar {
-    pub fn new(runtime: Arc<Runtime>, appearance_error: Option<String>, links: async_channel::Receiver<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(runtime: Arc<Runtime>, appearance_error: Option<String>, crash: Option<String>, links: async_channel::Receiver<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        if let Some(error) = crash {
+            cx.defer_in(window, move |_, window, cx| {
+                let desc = tr("crash_desc").replace("{error}", &error);
+                chrome::confirm_alert(window, cx, tr("crash_title"), desc, tr("crash_copy"), ButtonVariant::Primary,
+                    move |_, cx| { cx.write_to_clipboard(ClipboardItem::new_string(error.clone())); true });
+            });
+        }
         Self::watch_system(window, cx);
         Self::watch_dictation(window, cx);
         // Link `hangar://` desta ou de outra execução: abre o diálogo preenchido e traz a janela para a frente. Cada link entra

@@ -106,13 +106,29 @@ fn log_panics() {
         use std::io::Write;
         let dir = log_dir();
         let _ = std::fs::create_dir_all(&dir);
+        let when = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        let thread = std::thread::current().name().unwrap_or("?").to_owned();
+        let line = format!("[{when}] pânico na thread {thread} (v{}): {info}", env!("CARGO_PKG_VERSION"));
         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("native.log")) {
-            let when = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-            let thread = std::thread::current().name().unwrap_or("?").to_owned();
-            let _ = writeln!(file, "[{when}] pânico na thread {thread} (v{}): {info}", env!("CARGO_PKG_VERSION"));
+            let _ = writeln!(file, "{line}");
+        }
+        // Só o pânico da thread principal fecha a janela; o de uma tarefa do tokio fica no log e o app segue.
+        if thread == "main" {
+            let _ = std::fs::write(dir.join(CRASH_FILE), &line);
+            let _ = notify_rust::Notification::new().appname("Hangar").summary(&i18n::tr("crash_title")).body(&i18n::tr("crash_notify")).show();
         }
         default(info);
     }));
+}
+
+const CRASH_FILE: &str = "native-crash.txt";
+
+/// Erro que fechou a execução anterior, lido uma vez: quem abre depois não vê o mesmo aviso.
+fn take_crash() -> Option<String> {
+    let path = log_dir().join(CRASH_FILE);
+    let text = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    Some(text.trim().to_owned()).filter(|text| !text.is_empty())
 }
 
 fn main() {
@@ -124,6 +140,7 @@ fn main() {
         }
         single_instance::Claim::Primary(tx, rx) => (tx, rx),
     };
+    let crash = take_crash();
     let runtime = Arc::new(tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("async runtime"));
     // Lida antes da primeira janela: o tema já nasce na escolha salva. Falha de leitura abre no padrão e aparece na tela.
     let appearance_error = match appearance::load() { Ok(value) => { appearance::set(value); None } Err(e) => Some(e) };
@@ -153,7 +170,7 @@ fn main() {
             ..Default::default()
         }, |window, cx| {
             ui_map::install(window);
-            let view = cx.new(|cx| app::Hangar::new(runtime.clone(), appearance_error.clone(), links.clone(), window, cx));
+            let view = cx.new(|cx| app::Hangar::new(runtime.clone(), appearance_error.clone(), crash.clone(), links.clone(), window, cx));
             cx.new(|cx| Root::new(view, window, cx).bg(rgba(0x00000000)))
         }).expect("open native window");
         update::report_alive();
