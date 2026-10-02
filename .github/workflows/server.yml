@@ -26,13 +26,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # musl estático: o gnu do ubuntu-latest exige a glibc do runner e não abre em Debian 12,
-          # Ubuntu 22.04 ou RHEL 9. O mimalloc (alocador do hangar-server no musl) compila C e usa o musl-gcc.
+          # glibc 2.28 via cargo-zigbuild: o gnu comum do ubuntu-latest exige a glibc do runner e não abre em
+          # sistema mais antigo (Debian 10/11, RHEL 8). O zigbuild linka contra a 2.28 e mantém o alocador do gnu.
           - os: ubuntu-latest
             platform: linux-x86_64
             exe: ""
-            target: x86_64-unknown-linux-musl
-            bindir: target/x86_64-unknown-linux-musl/release
+            target: x86_64-unknown-linux-gnu
+            zigbuild: true
+            bindir: target/x86_64-unknown-linux-gnu/release
             experimental: false
           # Como no native.yml: falha de Windows ou macOS não segura a release do Linux.
           - os: windows-latest
@@ -70,14 +71,26 @@ jobs:
       - run: cargo test --locked --workspace
       - if: matrix.target != ''
         run: rustup target add ${{ matrix.target }}
-      # O mimalloc compila C para o alvo musl; o cc precisa de um compilador que conheça o musl.
-      - if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - run: cargo build --locked --release --workspace ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+      - if: matrix.zigbuild
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: 0.16.0
+      - if: matrix.zigbuild
+        run: cargo install cargo-zigbuild --locked --version =0.23.4
+      # O sufixo .2.28 fixa a glibc mínima; o diretório de saída continua sem ele (target/<triplo>/release).
+      - run: cargo ${{ matrix.zigbuild && 'zigbuild' || 'build' }} --locked --release --workspace ${{ matrix.target && format('--target {0}{1}', matrix.target, matrix.zigbuild && '.2.28' || '') || '' }}
         env:
           CARGO_PROFILE_RELEASE_LTO: fat
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
-          CC_x86_64_unknown_linux_musl: musl-gcc
+      # Guarda: se o zigbuild deixar de fixar a glibc, o binário passa a exigir mais que o prometido.
+      - name: glibc máxima exigida
+        if: matrix.zigbuild
+        run: |
+          for bin in hangar-server hangar-cano; do
+            top=$(objdump -T "${{ matrix.bindir }}/$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+            echo "$bin exige $top"
+            test "$(printf '%s\n' "$top" GLIBC_2.28 | sort -V | tail -1)" = GLIBC_2.28
+          done
       # A suíte de contrato do cano contra o binário que vai ser publicado. Só no Linux: é o único
       # lugar em que ela roda contra o hangar-cano (o ci.yml não compila Rust). Setup igual ao do ci.yml.
       - if: matrix.platform == 'linux-x86_64'

@@ -35,8 +35,6 @@ eventsource-stream = "=0.2.3"
 http-body-util = "=0.1.5"
 notify = "=7.0.0"
 percent-encoding = "=2.3.2"
-# Só o hangar-server no alvo musl usa: ver o #[global_allocator] do main.rs.
-mimalloc = "=0.1.52"
 
 [profile.release]
 strip = true
