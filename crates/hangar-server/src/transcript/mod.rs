@@ -75,6 +75,18 @@ impl LineParser {
         self
     }
 
+    /// Só passa a linha pelo filtro de reescrita, sem gerar evento: o leitor compartilhado começa
+    /// no fim do arquivo e precisa do relógio das linhas anteriores, como o Python que lê a cauda.
+    pub fn seed(&mut self, line: &[u8]) {
+        if self.provider == Provider::Codex {
+            return;
+        }
+        let text = String::from_utf8_lossy(line);
+        if let Some(Value::Object(obj)) = pyjson::loads_lossless(py::strip(&text)) {
+            self.rewrite.keep(&obj);
+        }
+    }
+
     /// Eventos de uma linha completa; `offset` é o byte onde ela começa (vira o `id:` do SSE).
     pub fn feed(&mut self, line: &[u8], offset: u64) -> Vec<ChatEvent> {
         let Some(value) = line_value(line) else { return Vec::new() };

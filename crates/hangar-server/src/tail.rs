@@ -254,7 +254,37 @@ impl TailState {
     /// Ponto até onde o leitor compartilhado já leu; na primeira consulta, o fim das linhas
     /// completas (a cauda de cada aparelho cobre o que vem antes).
     pub fn cut(&mut self) -> u64 {
-        *self.pos.get_or_insert_with(|| complete_end(&self.path))
+        if let Some(p) = self.pos {
+            return p;
+        }
+        let end = complete_end(&self.path);
+        self.seed_rewrite(end);
+        self.pos = Some(end);
+        end
+    }
+
+    /// Sem o relógio das linhas da cauda, a regravação do `claude --resume` sairia ao vivo; o
+    /// leitor do Python começa 200 linhas antes e não a mostra.
+    fn seed_rewrite(&mut self, end: u64) {
+        if self.provider == Provider::Codex {
+            return;
+        }
+        let start = tail_offset(&self.path, BACKFILL_LINES);
+        let Ok(file) = File::open(&self.path) else { return };
+        let mut reader = BufReader::new(file);
+        if start >= end || reader.seek(SeekFrom::Start(start)).is_err() {
+            return;
+        }
+        let mut at = start;
+        let mut line = Vec::new();
+        while at < end {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(n) if n > 0 && line.last() == Some(&b'\n') => at += n as u64,
+                _ => break,
+            }
+            self.parser.seed(&line);
+        }
     }
 
     /// Lê o que chegou e manda a todos, sob a trava. Arquivo menor que a posição = truncado:
@@ -436,5 +466,37 @@ mod tests {
         assert_eq!(first_line(&foreign[0]), format!("id: k:{}", offs[50]));
         assert_eq!(backfill(&p, "k", Provider::Claude, Some("k:999999999"), cut).len(), 200);
         assert_eq!(backfill(&p, "k", Provider::Claude, None, offs[10]).len(), 0, "cauda começa depois do corte");
+    }
+
+    fn live_messages(provider: Provider) -> usize {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.jsonl");
+        write(&p, 0..10, "");
+        let mut st = TailState {
+            path: p.clone(),
+            key: "k".into(),
+            provider,
+            generation: 1,
+            pos: None,
+            parser: LineParser::new(provider),
+        };
+        st.cut();
+        // A regravação do `--resume`: as mesmas linhas com uuid novo e o relógio original.
+        let original = std::fs::read_to_string(&p).unwrap();
+        let rewritten = original.replace("\"uuid\":\"u", "\"uuid\":\"r");
+        std::fs::OpenOptions::new().append(true).open(&p).unwrap().write_all(rewritten.as_bytes()).unwrap();
+        let (tx, mut rx) = broadcast::channel(64);
+        st.poll(&tx);
+        let mut n = 0;
+        while let Ok(Out::Tail(..)) = rx.try_recv() {
+            n += 1;
+        }
+        n
+    }
+
+    #[test]
+    fn shared_tail_drops_resume_rewrite_of_lines_before_the_cut() {
+        assert_eq!(live_messages(Provider::Claude), 0);
+        assert_eq!(live_messages(Provider::ClaudeHeadless), 0);
     }
 }
