@@ -215,6 +215,11 @@ async def new_session(ctx: Context, nome: str, cwd: str, provider: str = "claude
             raise ToolError(f"não consegui confirmar a conta da sessão '{eu}' — passe `conta` "
                             f"com o caminho do config dir, ou use `hangar-send --new --conta`")
         config_dir = str(cfg) if cfg else None
+    aviso = None
+    if conta is None and provider == "claude":
+        # Herdar não é escolher: conta herdada sem cota daria uma sessão que nasce e não responde.
+        from app import cotas
+        config_dir, aviso = await asyncio.to_thread(cotas.conta_com_cota, config_dir, cotas.cotas_claude())
     try:
         info = await api.create_session(api.CreateBody(
             name=nome, cwd=cwd, provider=provider, engine=engine, model=model, effort=effort,
@@ -224,7 +229,7 @@ async def new_session(ctx: Context, nome: str, cwd: str, provider: str = "claude
         raise ToolError(_detalhe(e)) from e
     return {"name": info.name, "cwd": info.cwd, "provider": info.provider, "headless": info.headless,
             # Volta na resposta pra que herdar errado nunca mais passe despercebido.
-            "config_dir": config_dir}
+            "config_dir": config_dir, **({"aviso": aviso} if aviso else {})}
 
 
 VERBOS_NAV = ("snapshot", "click", "fill", "type", "press", "hover", "wait", "eval", "layout", "console",

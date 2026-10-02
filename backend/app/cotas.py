@@ -1032,6 +1032,24 @@ def sugerir_claude(contas_lidas: list[CotaConta]) -> SugestaoConta | None:
                          ativa=c.ativa, folga=folga)
 
 
+def conta_com_cota(config_dir: str | None, contas_lidas: list[CotaConta]) -> tuple[str | None, str | None]:
+    """Conta que ninguém escolheu (herdada ou padrão) e já esgotada: a sessão nova nasce na de mais
+    folga. Devolve (config_dir, aviso); sem leitura confiável, mantém a herdada e não avisa nada."""
+    def mesma(c: CotaConta) -> bool:
+        if config_dir is None:
+            return c.ativa
+        return Path(c.id.removeprefix("claude:")).resolve() == Path(config_dir).resolve()
+
+    atual = next((c for c in contas_lidas if c.provedor == "claude" and mesma(c)), None)
+    if atual is None or atual.estado != "lida" or not atual.janelas \
+            or max(j.pct for j in atual.janelas) < 100:
+        return config_dir, None
+    s = sugerir_claude(contas_lidas)
+    if s is None or s.folga <= 0 or s.id == atual.id:
+        return config_dir, None
+    return s.path, f"conta {atual.label} sem cota; a sessão nasceu em {s.label}"
+
+
 @cotas_router.get("/sugestao", dependencies=[Depends(require_auth)],
                   response_model=SugestaoConta)
 def sugerir_conta() -> SugestaoConta:

@@ -2084,6 +2084,13 @@ async def _kill_unclaimed(name: str) -> None:
 
 @app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=SessionInfo)
 async def create_session(body: CreateBody):
+    if body.config_dir is None and body.provider == "claude":
+        # Sem conta pedida, a padrão só vale se tiver cota; senão nasce na de mais folga.
+        from app import cotas
+        config_dir, aviso = await asyncio.to_thread(cotas.conta_com_cota, None, cotas.cotas_claude())
+        if aviso:
+            _log.warning("create_session %s: %s", body.name, aviso)
+            body = body.model_copy(update={"config_dir": config_dir})
     with _acompanhar_criacao(body.name):
         worktree: dict = {}
         try:
