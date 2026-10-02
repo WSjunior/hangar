@@ -6916,7 +6916,7 @@ def _shortcut_shell(name: str, body: ShortcutShellBody, request: Request, *, pow
     if body.runs_in == "hangar":
         return _shortcut_shell_hangar(name, cwd, command, body)
     from app import shortcut_terminals
-    term = shortcut_terminals.start(name, cwd, command, body.label or "", _shortcut_display_env(),
+    term = shortcut_terminals.start(name, cwd, command, body.label or "", _shortcut_session_env(name),
                                     key=body.key, ask=body.ask, powershell=powershell, shell=shell)
     if term is None:
         raise HTTPException(500, detail=erro("erro_shortcut_shell", "o multiplexador recusou criar o terminal"))
@@ -6927,6 +6927,11 @@ def _shortcut_shell(name: str, body: ShortcutShellBody, request: Request, *, pow
 
 def _shortcut_display_env() -> dict[str, str]:
     return {k: v for k, v in _shortcut_env().items() if k in _DISPLAY_VARS}
+
+
+def _shortcut_session_env(name: str) -> dict[str, str]:
+    # O terminal do atalho é outra sessão tmux: sem isto o comando não sabe de qual sessão veio o clique.
+    return {**_shortcut_display_env(), "CP_SESSION_NAME": name}
 
 
 def _shortcut_started(name: str, term: dict) -> dict:
@@ -6986,7 +6991,7 @@ def _shortcut_shell_hangar(name: str, cwd: str, command: str, body: ShortcutShel
     from app import shortcut_terminals
     try:
         term, reused = shortcut_terminals.start_hangar(key, cwd, command, body.label or "",
-                                                       _shortcut_display_env(), name, body.ask)
+                                                       _shortcut_session_env(name), name, body.ask)
     except shortcut_terminals.MuxUnavailable:
         raise _shortcut_mux_unavailable()
     if term is None:
