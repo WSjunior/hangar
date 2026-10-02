@@ -248,7 +248,8 @@ async fn history(
             return pass(&st, req, &fwd).await;
         }
         Err(e) => {
-            tracing::warn!(session = %name, "history no Rust caiu; repassa: {e}");
+            // Sem `{e}`: a mensagem do pânico pode citar texto da conversa.
+            tracing::warn!(session = %name, panic = e.is_panic(), cancelled = e.is_cancelled(), "history no Rust caiu; repassa");
             return pass(&st, req, &fwd).await;
         }
     };

@@ -35,6 +35,21 @@ pub async fn serve_until(
     }
 }
 
+/// Linha do log de um pânico: só local e thread. A mensagem do pânico pode citar texto de conversa.
+fn panic_line(loc: Option<&std::panic::Location<'_>>, thread: Option<&str>) -> String {
+    let at = loc.map_or_else(|| "?".to_string(), |l| format!("{}:{}", l.file(), l.line()));
+    format!("pânico em {at} (thread {})", thread.unwrap_or("?"))
+}
+
+/// Troca o hook padrão, que imprime a mensagem no stderr (o Python o herda) mesmo quando o
+/// pânico é capturado. Chamar depois de `init_log`, para a linha sair no mesmo destino.
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let t = std::thread::current();
+        tracing::error!("{}", panic_line(info.location(), t.name()));
+    }));
+}
+
 const LOG_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const LOG_BACKUPS: u32 = 3;
 
@@ -84,6 +99,17 @@ fn rotate_log(path: &std::path::Path, max: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panic_line_has_location_and_thread_only() {
+        let loc = std::panic::Location::caller();
+        let line = panic_line(Some(loc), Some("worker"));
+        assert!(line.contains(&format!("{}:{}", loc.file(), loc.line())));
+        assert!(line.contains("worker"));
+        let secret = "texto-da-conversa-xyz";
+        assert!(!line.contains(secret));
+        assert_eq!(panic_line(None, None), "pânico em ? (thread ?)");
+    }
 
     #[test]
     fn log_rotates_past_the_limit_keeping_three_copies() {

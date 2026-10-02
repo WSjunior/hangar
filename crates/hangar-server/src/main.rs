@@ -10,6 +10,7 @@ async fn main() {
         }
     };
     hangar_server::init_log(cfg.log_path.as_deref());
+    hangar_server::install_panic_hook();
     let listener = match tokio::net::TcpListener::bind(cfg.listen).await {
         Ok(l) => l,
         Err(e) => {
