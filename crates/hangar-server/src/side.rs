@@ -67,6 +67,7 @@ pub fn remember_info(cache: &InfoCache, name: &str, info: Option<InternalInfo>) 
 /// `nav` fica de fora: repetir um pedido já atendido reabriria o navegador; quem chega depois o
 /// recebe pela lista de sessões.
 const LATEST: [&str; 7] = ["state", "suggest", "ask_question", "stats", "preview", "pensamento", "ferramenta"];
+const ASK_QUESTION: usize = 2;
 const CHANNEL: usize = 1024;
 const SIDE_CONNECT: Duration = Duration::from_secs(10);
 /// O Python manda `ping` a cada 10 s; três calados = conexão morta.
@@ -89,9 +90,21 @@ struct SideCache {
 }
 
 impl SideCache {
-    fn record(&mut self, event: &str, data: &str, frame: &Bytes) {
+    /// `pane_question`: Claude com terminal, cujo `ask_question` sai uma vez por pergunta e nada o
+    /// apaga depois. Só vale enquanto o último `state` for `awaiting_input`; senão quem chega
+    /// depois abriria uma pergunta já respondida. Codex e Claude sem terminal mandam o próprio
+    /// `ask_question` vazio ao fechar.
+    fn record(&mut self, event: &str, data: &str, frame: &Bytes, pane_question: bool) {
         if let Some(i) = LATEST.iter().position(|e| *e == event) {
             self.latest[i] = Some(frame.clone());
+            if event == "state" && pane_question {
+                let awaiting = serde_json::from_str::<serde_json::Value>(data)
+                    .ok()
+                    .is_some_and(|v| v.get("state").and_then(|s| s.as_str()) == Some("awaiting_input"));
+                if !awaiting {
+                    self.latest[ASK_QUESTION] = None;
+                }
+            }
             return;
         }
         if event != "message" && event != "queue_confirmed" {
@@ -161,18 +174,29 @@ impl Hub {
     /// Aparelho novo com `info` diferente (sessão recriada com o mesmo nome): troca o leitor já,
     /// para ele nunca receber a cauda do transcript morto, e religa a conexão interna, cujo
     /// primeiro `info` confirma ou corrige.
+    /// Hub já fechado (removido do mapa): nada a fazer; o `attach` dá `None` e o aparelho recebe
+    /// `reset` e volta ao Python.
     fn ensure_current(self: &Arc<Self>, binding: &Binding) {
-        let same = self.bound.lock().unwrap().as_ref().is_some_and(|b| b.binding == *binding);
+        let same = match self.bound.lock().unwrap().as_ref() {
+            None => return,
+            Some(b) => b.binding == *binding,
+        };
         if !same {
             self.rebind(binding.clone());
             self.restart_side();
         }
     }
 
+    /// Confere `bound` sob a trava de `side`: o `close` solta `bound` antes de pegar essa trava,
+    /// então ou a conexão nova nem nasce, ou o `close` a encontra e derruba. Fora do mapa, nenhum
+    /// `Lease` a pararia e ela seguiria aberta com app=1.
     fn restart_side(self: &Arc<Self>) {
         let mut side = self.side.lock().unwrap();
         if let Some(h) = side.take() {
             h.abort();
+        }
+        if self.bound.lock().unwrap().is_none() {
+            return;
         }
         *side = Some(tokio::spawn(run_side(self.clone())).abort_handle());
     }
@@ -204,6 +228,10 @@ impl Hub {
     fn close(self: &Arc<Self>) {
         self.ctx.hubs.evict(&self.name, self);
         self.bound.lock().unwrap().take();
+        // Pode ser uma conexão religada por `ensure_current` no meio; a própria sai logo depois.
+        if let Some(h) = self.side.lock().unwrap().take() {
+            h.abort();
+        }
         let _ = self.tx.send(Out::Close);
     }
 
@@ -340,7 +368,9 @@ async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
             event => {
                 let frame = sse_frame(event, &ev.data, None);
                 // Retrato antes do envio: quem assina entre os dois recebe repetido, nunca nada.
-                hub.cache.lock().unwrap().record(event, &ev.data, &frame);
+                let pane_question =
+                    hub.bound.lock().unwrap().as_ref().is_some_and(|b| b.binding.provider == Provider::Claude);
+                hub.cache.lock().unwrap().record(event, &ev.data, &frame, pane_question);
                 let _ = hub.tx.send(Out::Side(frame));
             }
         }
@@ -407,7 +437,7 @@ mod tests {
     #[test]
     fn cache_keeps_last_value_and_queue_by_id_without_nav() {
         let mut c = SideCache::default();
-        let rec = |c: &mut SideCache, e: &str, d: &str| c.record(e, d, &sse_frame(e, d, None));
+        let rec = |c: &mut SideCache, e: &str, d: &str| c.record(e, d, &sse_frame(e, d, None), true);
         rec(&mut c, "state", "{\"state\":\"working\"}");
         rec(&mut c, "state", "{\"state\":\"idle\"}");
         rec(&mut c, "message", "{\"id\":\"queued-1\"}");
@@ -417,5 +447,52 @@ mod tests {
         assert_eq!(r.len(), 2);
         assert!(r[0].starts_with("event: state") && r[0].contains("idle"));
         assert!(r[1].starts_with("event: queue_confirmed"));
+    }
+
+    fn has_question(c: &SideCache) -> bool {
+        c.replay().iter().any(|b| b.starts_with(b"event: ask_question"))
+    }
+
+    #[test]
+    fn pane_question_lives_only_while_awaiting_input() {
+        let rec = |c: &mut SideCache, e: &str, d: &str, pane: bool| c.record(e, d, &sse_frame(e, d, None), pane);
+        let mut c = SideCache::default();
+        rec(&mut c, "state", "{\"state\":\"awaiting_input\"}", true);
+        rec(&mut c, "ask_question", "{\"q\":1}", true);
+        assert!(has_question(&c), "quem chega durante a pergunta a recebe");
+        rec(&mut c, "state", "{\"state\":\"awaiting_input\"}", true);
+        assert!(has_question(&c));
+        rec(&mut c, "state", "{\"state\":\"idle\"}", true);
+        assert!(!has_question(&c), "respondida: quem chega depois não a recebe");
+
+        // Codex / Claude sem terminal: a pergunta vive no próprio evento, que chega vazio ao fechar.
+        let mut c = SideCache::default();
+        rec(&mut c, "ask_question", "{\"q\":1}", false);
+        rec(&mut c, "state", "{\"state\":\"working\"}", false);
+        assert!(has_question(&c));
+    }
+
+    #[tokio::test]
+    async fn closed_hub_never_restarts_the_internal_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let binding = |n: &str| Binding { provider: Provider::Claude, jsonl: dir.path().join(n), key: n.into() };
+        let ctx = SideCtx {
+            // Porta sem ninguém: a conexão interna só tenta e espera.
+            upstream: "127.0.0.1:9".parse().unwrap(),
+            secret: "s".into(),
+            http: crate::proxy::client(),
+            watchers: Watchers::default(),
+            hubs: Hubs::default(),
+            infos: InfoCache::default(),
+        };
+        let lease = ctx.hubs.acquire("s", binding("a"), &ctx);
+        assert!(lease.hub.side.lock().unwrap().is_some());
+        lease.hub.close();
+        assert!(lease.hub.side.lock().unwrap().is_none(), "close derruba a conexão interna");
+        // O aparelho que pegou o hub antes do close chega com outro `info`.
+        lease.hub.ensure_current(&binding("b"));
+        lease.hub.restart_side();
+        assert!(lease.hub.side.lock().unwrap().is_none(), "hub fechado não religa");
+        assert!(lease.hub.bound.lock().unwrap().is_none());
     }
 }

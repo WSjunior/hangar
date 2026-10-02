@@ -53,7 +53,8 @@ impl AppState {
         AppState { auth: Auth::new(&cfg.auth_token), http, side, cfg }
     }
 
-    /// `info` da sessão com cache curto: várias telas abrindo juntas viram uma consulta só.
+    /// `info` da sessão com cache curto: várias telas abrindo juntas viram uma consulta só. Só o
+    /// `/events` usa, porque o primeiro `info` da conexão interna corrige um valor velho com `reset`.
     async fn info(&self, name: &str) -> Option<InternalInfo> {
         if let Some((at, v)) = self.side.infos.lock().unwrap().get(name) {
             if at.elapsed() < INFO_TTL {
@@ -194,7 +195,11 @@ async fn history(
             Err(_) => return pass(&st, req, &fwd).await,
         },
     };
-    let Some(hreq) = st.info(&name).await.and_then(|i| i.history_request(limit)) else {
+    // Sem o cache: sessão recriada com o mesmo nome dentro do TTL devolveria a conversa morta, e
+    // nada a corrigiria depois (o `/events` só a corrige com `reset` por estar ligado ao hub).
+    let info = fetch_info(&st.http, st.cfg.upstream, &st.cfg.internal_secret, &name).await;
+    remember_info(&st.side.infos, &name, info.clone());
+    let Some(hreq) = info.and_then(|i| i.history_request(limit)) else {
         return pass(&st, req, &fwd).await;
     };
     tracing::info!(session = %name, req = %diag_req(&req), "history");

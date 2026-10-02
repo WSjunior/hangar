@@ -304,3 +304,55 @@ async fn history_without_owner_or_supported_provider_goes_to_python() {
     assert_eq!(r.text().await.unwrap(), "from-python");
     assert_eq!(fake.info_calls(), 1, "o dono vindo do loopback consulta a rota interna");
 }
+
+#[tokio::test]
+async fn answered_pane_question_is_not_replayed_to_late_devices() {
+    let (_dir, _jsonl, _offs, fake, srv) = setup(0..1, "sess-q").await;
+    let mut a = sse(open_events(srv, "s", "", &[]).await);
+    messages(&mut a, 1).await;
+    wait_until(|| fake.side_conns() == 1).await;
+
+    let awaiting = r#"{"session":"s","state":"awaiting_input"}"#;
+    let question = r#"{"questions":[{"question":"qual?"}]}"#;
+    fake.push_side("state", awaiting);
+    fake.push_side("ask_question", question);
+    assert_eq!(next_named(&mut a, "ask_question").await.data, question);
+
+    // Chegou durante a pergunta: recebe.
+    let mut b = sse(open_events(srv, "s", "", &[]).await);
+    assert_eq!(next_named(&mut b, "ask_question").await.data, question);
+
+    let idle = r#"{"session":"s","state":"idle"}"#;
+    fake.push_side("state", idle);
+    assert_eq!(next_named(&mut a, "state").await.data, idle);
+
+    // Chegou depois da resposta: estado atual, sem a pergunta velha.
+    let mut c = sse(open_events(srv, "s", "", &[]).await);
+    let marker = r#"{"session":"s","state":"marcador"}"#;
+    fake.push_side("state", marker);
+    loop {
+        let ev = next_any(&mut c).await;
+        assert_ne!(ev.event, "ask_question", "pergunta já respondida");
+        if ev.event == "state" && ev.data == marker {
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn history_never_serves_a_dead_transcript_from_the_info_cache() {
+    let (dir, _jsonl, _offs, fake, srv) = setup(0..2, "sess-velha").await;
+    let url = format!("http://{srv}/api/sessions/s/history");
+    let ids = |v: Value| v.as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+
+    let r = client().get(&url).bearer_auth(OWNER).send().await.unwrap();
+    assert_eq!(ids(serde_json::from_str(&r.text().await.unwrap()).unwrap()), ["u0", "u1"]);
+
+    // Fechada e recriada com o mesmo nome dentro do TTL do cache.
+    let nova = dir.path().join("sess-nova2.jsonl");
+    append_lines(&nova, 100..101);
+    fake.set_info(info_json("claude", &nova));
+    let r = client().get(&url).bearer_auth(OWNER).send().await.unwrap();
+    assert_eq!(ids(serde_json::from_str(&r.text().await.unwrap()).unwrap()), ["u100"]);
+    assert_eq!(fake.info_calls(), 2);
+}
