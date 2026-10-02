@@ -1002,3 +1002,71 @@ resolveria — as máquinas seguiriam no mesmo site entre si. Por isso o `cp_tok
 só vale o `__Host-cp_token`, que outra máquina não consegue gravar; o PWA grava o prefixado e
 apaga o antigo. O sync recusa ação com `Sec-Fetch-Site: same-site`/`cross-site`. O `cp_sync`
 mantém o nome por ora: o `hub()` do app nativo só guarda `Set-Cookie` começando com `cp_sync=`.
+
+## hangar-server: a porta pública em Rust, o Python atrás
+
+O serviço continua subindo `python -m app.main`. Com o binário e sem `CP_RUST_SERVER=0`, o
+uvicorn escuta numa porta livre de `127.0.0.1` e o `hangar-server` assume a porta pública como
+filho (`app/rust_server.py`), com a porta interna, o token, a lista `forwarded_allow_ips` do dono
+e um segredo novo a cada subida. O segredo vai só no ambiente do filho; no Python ele mora na
+memória de `internal_api` (`set_secret`), porque no `os.environ` vazaria para toda sessão que o
+backend sobe. O filho morre com o Python por um mecanismo só, em Linux, Windows e macOS: o
+Python segura o stdin dele como cano, e o binário sai quando o cano fecha. Sem `preexec_fn`, que
+não é seguro com threads vivas. No Windows o `Restart-HangarTask` reconhece o `hangar-server.exe`
+filho do backend: sem isso, a porta "de outro processo" barrava todo reinício.
+
+A reserva é no mesmo processo, sem novo lifespan: dois lifespans rodariam watchers e hooks em
+dobro. O motivo vai ao diário como `hangar_server.reserva` (`sem_binario`, `sem_resposta`,
+`protocolo`, `quedas`, `erro`, `porta_ocupada`); cada queda, como `hangar_server.caiu`. A saúde
+traz `protocol`, e o Python só aceita o mesmo `RUST_SERVER_PROTOCOL`: a `server-latest` é sempre a
+mais nova, e uma máquina atrasada pode baixar um binário que fala outro contrato interno. Com o
+Rust na frente, todo pedido chega ao uvicorn interno por `127.0.0.1`: o `forwarded_allow_ips`
+dele sempre inclui esse endereço, senão a LAN passaria por loopback e escaparia do limite de
+tentativas. O Rust põe no `X-Forwarded-For` o cliente já resolvido, nunca o que veio de fora.
+
+Os binários vêm da release `server-latest` para `~/.hangar/bin/`, pelo instalador, pelo botão
+Atualizar (`_preparar`) e pelo passo `2026-10-02-hangar-server-binarios`; falha vira aviso.
+
+### O contrato interno é versionado à mão
+
+Não há comparação de commit entre o binário e o Python: a `server-latest` acompanha a main, e
+uma máquina atrasada pode ter um `hangar-server` mais novo que as rotas `/internal` dela. Quem
+barra isso é o número. Qualquer mudança nas rotas `/internal`, no conjunto de eventos do
+`side-events` ou nas variáveis de ambiente passadas ao filho sobe `RUST_SERVER_PROTOCOL`
+(`backend/app/rust_server.py`) e `INTERNAL_PROTOCOL` (`crates/hangar-server/src/lib.rs`) juntos,
+no mesmo commit. Subir só um dos dois faz o Python recusar o binário e assumir a porta (visível
+no diário); não subir nenhum não dá aviso: o Python aceita um binário que fala outro contrato, e
+o defeito só aparece no comportamento. O `hangar-cano` segue o mesmo raciocínio com
+o `versao` do snapshot, que acompanha o `VERSAO` de `cano.py`
+(`backend/app/adapters/claude_headless/cano.py`; `VERSION` em `crates/hangar-cano/src/protocol.rs`).
+O download registra no diário o commit do manifesto, só para diagnóstico.
+
+### Linha de base (02/10/2026, antes da troca)
+
+Fonte: backend vivo (3 sessões, 4 conexões) e benchmarks avulsos em Python 3.14, nesta máquina
+(16 núcleos, 31 GB).
+
+| Métrica | Antes |
+|---|---|
+| Memória do backend | 232–312 MB de RSS, 247 MB anônimos, 20 threads |
+| CPU média | ~1,1% de um núcleo |
+| `cano.py` por sessão sem terminal | 22 MB de RSS, 6 threads, 22 ms para subir |
+| `/history` (Claude 0,9 MB / Codex 3 MB / Codex 35 MB) | 5–8 ms / 15–20 ms / 80–110 ms |
+| `/history` completo, Claude 300 MB / `limit=200` | 362 ms / 45 ms |
+| Atraso do laço com 8 leituras de histórico em paralelo | p99 9,6 ms, máx. 16 ms |
+| Recursos presos por chat aberto | 2 threads do pool do anyio (limite 200) e 2 inotify |
+
+### Depois da troca
+
+Preenchida na verificação manual com o dono (roteiro no plano, Task 15, Step 4), com os comandos
+dela. O `MainPID` do serviço é o `uv`, não o Python: o backend é o filho dele
+(`pgrep -P <MainPID>`) e o `hangar-server` é filho do backend.
+
+| Métrica | Depois |
+|---|---|
+| Backend Python (RSS, anônimos, threads) | |
+| `hangar-server` (RSS, threads) | |
+| `hangar-cano` por sessão sem terminal (RSS, threads) | |
+| `/history` (Claude 0,9 MB / Codex 3 MB / Codex 35 MB), mediana de 5 | |
+| `/history` completo, Claude 300 MB / `limit=200` | |
+| Threads e inotify do Python com 4 chats abertos, contra 0 abertos | |

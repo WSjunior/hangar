@@ -108,8 +108,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Codex sem terminal: `thread/start` leva o modelo, o esforço não** — não existe campo pra ele
   ali. Sem um `thread/settings/update` depois, o nível escolhido some no `model_reasoning_effort`
   do `config.toml`.
-- **Claude sem terminal: o `claude` é filho do CANO, nunca do backend.** `cano.py` é stdlib, um
-  por sessão, escuta em socket local, nasce no escopo transiente do systemd e sintetiza um
+- **Claude sem terminal: o `claude` é filho do CANO, nunca do backend.** O cano é o binário
+  `hangar-cano` quando o `rust_bins.find_bin` o acha (`CP_RUST_CANO_BIN`, `crates/target/release`,
+  `~/.hangar/bin`), com o `cano.py` (stdlib) de reserva; os dois falam o mesmo protocolo. Um por
+  sessão, escuta em socket local, nasce no escopo transiente do systemd e sintetiza um
   snapshot do que está em aberto; o backend só reconecta. O adapter (que muda sempre) fica no
   backend. Leitura do socket com `limit=16 MB` e embrulhada — leitor pendurado é sessão presa.
   Órfão é cano sem sidecar, não cano de backend anterior.
