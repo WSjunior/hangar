@@ -1403,9 +1403,9 @@ def lancador_cano(request, monkeypatch) -> list[str]:
     """O backend sobe o hangar-cano quando acha o binário e o cano.py quando não acha; o resto
     do comando é o mesmo nos dois."""
     if request.param == "cano.py":
-        monkeypatch.setattr(A.rust_bins, "find_bin", lambda name, env_var: None)
+        monkeypatch.setattr(A, "_usable_cano_bin", lambda: None)
         return [sys.executable, str(A._CANO_PY)]
-    monkeypatch.setattr(A.rust_bins, "find_bin", lambda name, env_var: _CANO_RUST_FALSO)
+    monkeypatch.setattr(A, "_usable_cano_bin", lambda: _CANO_RUST_FALSO)
     return [str(_CANO_RUST_FALSO)]
 
 

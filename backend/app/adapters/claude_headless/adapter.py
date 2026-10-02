@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import collections
+import functools
 import hashlib
 import json
 import logging
@@ -29,13 +30,15 @@ import os
 import re
 import shutil
 import signal
+import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
 
-from app import atomico, cotas, log_paths, model_args, pensamento, runtime_config, rust_bins
+from app import atomico, cotas, diag, log_paths, model_args, pensamento, runtime_config, rust_bins
 from app.adapters.claude_headless import cano as cano_mod
 from app.adapters.claude_headless import sessions as hl_sessions
 from app.adapters.codex.adapter import _fmt_tok, _format_reset
@@ -2141,6 +2144,38 @@ async def conectar_cano(cano: dict, *, esperar: float = 0.0) -> tuple[_Ligacao, 
     return _Ligacao(reader, writer, snap.get("pid")), snap
 
 
+_cano_probe_lock = threading.Lock()
+
+
+@functools.cache
+def _probe_cano_bin() -> Path | None:
+    exe = rust_bins.find_bin("hangar-cano", "CP_RUST_CANO_BIN")
+    if exe is None:
+        return None
+    # Binário que existe mas não roda nesta máquina (glibc antiga, arquitetura errada) derrubaria
+    # toda sessão sem terminal calado: o stderr do cano é DEVNULL. Sem argumentos o contrato do
+    # cano é sair com 2; qualquer outra coisa volta para o cano.py.
+    try:
+        ret = subprocess.run([str(exe)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, timeout=5).returncode
+    except subprocess.TimeoutExpired:
+        diag.registrar("hangar_cano.indisponivel", "aviso", codigo="timeout")
+        return None
+    except OSError as e:
+        diag.registrar("hangar_cano.indisponivel", "aviso", codigo="exec", **diag.erro_campos(e))
+        return None
+    if ret != 2:
+        diag.registrar("hangar_cano.indisponivel", "aviso", codigo="retorno", retorno=ret)
+        return None
+    return exe
+
+
+def _usable_cano_bin() -> Path | None:
+    """O hangar-cano, se ele roda aqui; sondado uma vez por processo."""
+    with _cano_probe_lock:
+        return _probe_cano_bin()
+
+
 async def subir_cano_processo(argv: list[str], *, cwd: str, env: dict, key: str, log: Path,
                               tarefas: set | None = None) -> tuple[dict, asyncio.subprocess.Process]:
     """Sobe um cano com `argv` como filho, fora do cgroup do backend. Devolve o dict `cano` do
@@ -2153,7 +2188,7 @@ async def subir_cano_processo(argv: list[str], *, cwd: str, env: dict, key: str,
     argv = [exe, *argv[1:]]
     escuta, token = _escuta_nova(key, log.parent)
     # Mesmo contrato do cano.py num processo nativo; sem o binário, o cano.py segue valendo.
-    cano_bin = rust_bins.find_bin("hangar-cano", "CP_RUST_CANO_BIN")
+    cano_bin = await asyncio.to_thread(_usable_cano_bin)
     lancador = [str(cano_bin)] if cano_bin else [sys.executable, str(_CANO_PY)]
     # A chave da sessão chega ao cmdline pelo `--log` (cano-<chave>.log): é por ela que
     # registry.cwd_atual reconhece o processo.
