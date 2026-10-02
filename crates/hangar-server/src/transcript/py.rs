@@ -2,7 +2,14 @@
 //! Semântica do Python que o porte repete: `str.strip`, surrogate solto, `str()`/`repr()` e o relógio
 //! do `datetime.fromisoformat`.
 
+use std::borrow::Cow;
+use std::fmt::Write;
+
+use md5::{Digest, Md5};
+use regex::Regex;
 use serde_json::{Map, Value};
+
+use super::pyjson;
 
 /// Surrogate solto não cabe numa `String`: ele vira um caractere da área privada até a borda do
 /// `ChatEvent`, onde vira U+FFFD como no `scrub_surrogates` (models.py:22). Até lá, os ids que o
@@ -250,3 +257,121 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
+/// `s.encode("utf-8", "replace")`: o surrogate solto vira "?".
+pub(crate) fn utf8_replace(s: &str) -> Cow<'_, [u8]> {
+    if !has_marker(s) {
+        return Cow::Borrowed(s.as_bytes());
+    }
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        out.push(if is_marker(c) { '?' } else { c });
+    }
+    Cow::Owned(out.into_bytes())
+}
+
+pub(crate) fn md5_hex(s: &str) -> String {
+    format!("{:x}", Md5::digest(&*utf8_replace(s)))
+}
+
+pub(crate) fn lstrip(s: &str) -> &str {
+    s.trim_start_matches(is_space)
+}
+
+/// Regex com o `\s` do Python, que também casa \x1c-\x1f.
+pub(crate) fn py_re(pattern: &str) -> Regex {
+    Regex::new(&pattern.replace(r"\s", r"[\s\x1c-\x1f]")).expect("regex do porte")
+}
+
+/// Verdade do Python (`bool(x)`); chave ausente é falso.
+pub(crate) fn truthy(v: Option<&Value>) -> bool {
+    match v {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(Value::Array(a)) => !a.is_empty(),
+        Some(Value::Object(m)) => !m.is_empty(),
+    }
+}
+
+/// `isinstance(v, int)`, com `bool` dentro.
+pub(crate) fn int_of(v: &Value) -> Option<i128> {
+    match v {
+        Value::Bool(b) => Some(i128::from(*b)),
+        Value::Number(n) => n.as_i64().map(i128::from).or_else(|| n.as_u64().map(i128::from)),
+        _ => None,
+    }
+}
+
+/// `int(v)` de um int ou float: o float é truncado em direção a zero.
+pub(crate) fn int_trunc(v: &Value) -> Option<i128> {
+    int_of(v).or_else(|| match v {
+        Value::Number(n) => n.as_f64().filter(|f| f.is_finite()).map(|f| f.trunc() as i128),
+        _ => None,
+    })
+}
+
+/// `str(v)` de um valor vindo do `json.loads`.
+pub(crate) fn py_str(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => py_repr(other),
+    }
+}
+
+pub(crate) fn py_repr(v: &Value) -> String {
+    match v {
+        Value::Null => "None".into(),
+        Value::Bool(true) => "True".into(),
+        Value::Bool(false) => "False".into(),
+        Value::Number(n) => pyjson::number_repr(n),
+        Value::String(s) => repr_str(s),
+        Value::Array(items) => format!("[{}]", items.iter().map(py_repr).collect::<Vec<_>>().join(", ")),
+        Value::Object(m) => format!(
+            "{{{}}}",
+            m.iter().map(|(k, x)| format!("{}: {}", repr_str(k), py_repr(x))).collect::<Vec<_>>().join(", ")
+        ),
+    }
+}
+
+// ponytail: `str.isprintable` aproximado (controle, espaço que não é ' ' e os invisíveis comuns);
+// tabela de categorias do Unicode se um caso raro aparecer.
+fn printable(c: char) -> bool {
+    !(c.is_control()
+        || (c.is_whitespace() && c != ' ')
+        || matches!(c, '\u{ad}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{feff}'))
+}
+
+fn repr_str(s: &str) -> String {
+    let quote = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push(quote);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if is_marker(c) => {
+                let _ = write!(out, "\\u{:04x}", surrogate_of(c));
+            }
+            c if !printable(c) => {
+                let n = c as u32;
+                let _ = if n < 0x100 {
+                    write!(out, "\\x{n:02x}")
+                } else if n < 0x10000 {
+                    write!(out, "\\u{n:04x}")
+                } else {
+                    write!(out, "\\U{n:08x}")
+                };
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
