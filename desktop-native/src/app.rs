@@ -2669,7 +2669,9 @@ impl Hangar {
                 }
                 if !dead.is_empty() {
                     this.cites.dead.extend(dead);
-                    this.refresh_cites(cx);
+                    // A conversa pode ter sido zerada enquanto a conferência rodava: os itens só valem refeitos agora.
+                    this.sync_rows(cx);
+                    cx.notify();
                 }
             });
         }).detach();
