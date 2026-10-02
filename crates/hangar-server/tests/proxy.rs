@@ -226,3 +226,51 @@ async fn origin_limited_by_python_gets_owner_requests_proxied() {
     assert_eq!(fake.hits_to("/api/sessions/s/events"), 1);
     assert_eq!(fake.info_calls(), 0, "o 429 do Python desliga o atalho dessa origem");
 }
+
+#[tokio::test]
+async fn pooled_connection_is_dropped_before_uvicorn_closes_it() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // Upstream que nunca fecha a conexão e conta quantas recebeu.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let up = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let count = accepted.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut s, _) = listener.accept().await.unwrap();
+            count.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                loop {
+                    let Ok(n) = s.read(&mut chunk).await else { return };
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    while let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        buf.drain(..i + 4);
+                        if s.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok").await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    let http = hangar_server::proxy::client();
+    let get = || async {
+        let req = axum::http::Request::get(format!("http://{up}/x")).body(axum::body::Body::empty()).unwrap();
+        let resp = http.request(req).await.unwrap();
+        http_body_util::BodyExt::collect(resp.into_body()).await.unwrap();
+    };
+    get().await;
+    get().await;
+    // O pool às vezes abre uma segunda conexão em paralelo enquanto espera a primeira voltar; a
+    // conta vale depois da espera. Com o padrão de 90 s, o pedido seguinte reaproveitaria uma.
+    tokio::time::sleep(hangar_server::proxy::POOL_IDLE + Duration::from_millis(300)).await;
+    let before = accepted.load(Ordering::SeqCst);
+    get().await;
+    assert_eq!(accepted.load(Ordering::SeqCst), before + 1, "ociosa além do prazo, abre outra");
+}

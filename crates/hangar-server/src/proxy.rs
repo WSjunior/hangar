@@ -1,6 +1,7 @@
 //! Repasse ao Python de tudo que o hangar-server não atende sozinho, inclusive WebSocket,
 //! upload e streaming. Nunca segue redirect: a resposta volta como veio.
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -8,12 +9,19 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 
 pub type HttpClient = Client<HttpConnector, Body>;
 
+/// Abaixo dos 5 s em que o uvicorn fecha a conexão ociosa: reaproveitar uma que ele está
+/// fechando derruba o pedido no meio e vira 502 na tela.
+pub const POOL_IDLE: Duration = Duration::from_secs(3);
+
 pub fn client() -> HttpClient {
-    Client::builder(TokioExecutor::new()).build_http()
+    Client::builder(TokioExecutor::new())
+        .pool_idle_timeout(POOL_IDLE)
+        .pool_timer(TokioTimer::new())
+        .build_http()
 }
 
 /// Cliente já resolvido pelo `TrustedHosts`. Vai ao Python como valor único do X-Forwarded-For:
