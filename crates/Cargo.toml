@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["hangar-api", "hangar-server", "hangar-cano"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+# Mesmas versões do desktop-native/Cargo.toml: o hangar-api entra nos dois builds.
+serde = { version = "=1.0.229", features = ["derive"] }
+# preserve_order: o tool_input reescrito sai com as chaves na ordem do dict do Python.
+serde_json = { version = "=1.0.151", features = ["preserve_order"] }
+hangar-api = { path = "hangar-api" }
+
+[profile.release]
+strip = true
