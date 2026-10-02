@@ -88,7 +88,17 @@ pub fn read_frames(
             break;
         }
         let id = format!("{key}:{at}");
-        for ev in parser.feed(&line, at) {
+        // Pânico numa linha só pula a linha: sem isto o leitor compartilhado morria e os
+        // aparelhos seguiam recebendo ping sem nenhuma mensagem nova.
+        let evs = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parser.feed(&line, at))) {
+            Ok(evs) => evs,
+            Err(_) => {
+                tracing::error!(key, offset = at, "linha do transcript derrubou o parser; pulada");
+                SKIPPED_LINES.fetch_add(1, Ordering::Relaxed);
+                Vec::new()
+            }
+        };
+        for ev in evs {
             let data = serde_json::to_string(&ev).map_err(std::io::Error::other)?;
             frames.push(sse_frame("message", &data, Some(&id)));
         }
@@ -492,6 +502,20 @@ mod tests {
             n += 1;
         }
         n
+    }
+
+    #[test]
+    fn panicking_line_is_skipped_and_reading_goes_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.jsonl");
+        write(&p, 0..1, "");
+        let peer = "{\"type\":\"user\",\"uuid\":\"p\",\"message\":{\"role\":\"user\",\"content\":\"x\"},\"origin\":{\"kind\":\"peer\",\"verifiedPeerPid\":1,\"body\":\"oi\"}}\n";
+        std::fs::OpenOptions::new().append(true).open(&p).unwrap().write_all(peer.as_bytes()).unwrap();
+        write(&p, 1..2, "");
+        let mut parser = LineParser::new(Provider::Claude).with_peer_resolver(|_| panic!("resolvedor quebrado"));
+        let (frames, end) = read_frames(&p, 0, None, &mut parser, "k").unwrap();
+        assert_eq!(frames.len(), 2, "as linhas em volta da que caiu saem");
+        assert_eq!(end, std::fs::metadata(&p).unwrap().len());
     }
 
     #[test]
