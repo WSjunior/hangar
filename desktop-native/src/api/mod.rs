@@ -37,7 +37,9 @@ pub const MAX_BYTES: u64 = 100 * 1024 * 1024;
 const UPLOAD_SECONDS: u64 = 180;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub enum Source { Upload(String), Cited(String), Transcript(String, usize), Remote(String) }
+/// `Memory` é o anexo ainda no compositor (nome, bytes): não passa pela rede.
+// ponytail: a chave do cache do visor faz hash dos bytes do anexo; trocar por um id se pesar.
+pub enum Source { Upload(String), Cited(String), Transcript(String, usize), Remote(String), Memory(String, std::sync::Arc<Vec<u8>>) }
 
 // `plain` busca mídia de terceiros: nunca leva o token do servidor.
 #[derive(Clone)]
@@ -238,6 +240,7 @@ impl Api {
                 url = Url::parse(address).ok().filter(|url| matches!(url.scheme(), "http" | "https")).ok_or_else(|| Failure::local("invalid_url"))?;
                 client = &self.plain;
             }
+            Source::Memory(_, bytes) => return Ok(bytes.to_vec()),
         }
         let r = client.get(url).timeout(Duration::from_secs(UPLOAD_SECONDS)).send().await.map_err(|_| Failure::transport(false))?;
         // Erro de terceiro não tem o corpo lido: nem memória, nem texto escolhido por ele na tela.

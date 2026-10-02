@@ -27,6 +27,9 @@ pub(super) enum Shortcut {
     Shell { label: String, command: String, confirm: bool, icon: Option<String>, pasta: Option<String>, key: String, hangar: bool, home: bool, ask: bool },
     Attach,
     Run,
+    Terminal,
+    Mode,
+    Browser,
 }
 
 impl Shortcut {
@@ -36,6 +39,9 @@ impl Shortcut {
             Shortcut::Send { label, .. } | Shortcut::Shell { label, .. } => label.clone(),
             Shortcut::Attach => tr("attach"),
             Shortcut::Run => tr("shortcuts_native_rodar"),
+            Shortcut::Terminal => tr("shortcuts_native_terminal"),
+            Shortcut::Mode => tr("shortcuts_native_modo"),
+            Shortcut::Browser => tr("shortcuts_native_navegador"),
         }
     }
 
@@ -44,12 +50,11 @@ impl Shortcut {
         match self {
             Shortcut::Send { text, .. } => super::shortcut_transfer::missing_secret(text),
             Shortcut::Shell { command, .. } => super::shortcut_transfer::missing_secret(command),
-            Shortcut::Attach | Shortcut::Run => None,
+            _ => None,
         }
     }
 
-    /// O que o painel roda de um atalho da config; terminal, modo e navegador são módulos à parte aqui. `project` é a
-    /// chave do repositório quando o atalho é do projeto.
+    /// O que o painel roda de um atalho da config. `project` é a chave do repositório quando o atalho é do projeto.
     fn from_item(item: &shortcuts::Item, project: Option<&str>) -> Option<Self> {
         let (label, icon, confirm) = (item.label().to_owned(), item.icon().map(str::to_owned), item.confirm());
         match item.kind() {
@@ -58,6 +63,9 @@ impl Shortcut {
                 key: super::hangar_live::shortcut_key(project, item.id()), hangar: item.runs_in_hangar(), home: item.hangar_home(), ask: item.answer_in_app() }),
             "internal" if item.action() == "anexos" => Some(Shortcut::Attach),
             "internal" if item.action() == "rodar" => Some(Shortcut::Run),
+            "internal" if item.action() == "terminal" => Some(Shortcut::Terminal),
+            "internal" if item.action() == "modo" => Some(Shortcut::Mode),
+            "internal" if item.action() == "navegador" => Some(Shortcut::Browser),
             _ => None,
         }
     }
@@ -424,6 +432,9 @@ impl Hangar {
         match shortcut {
             Shortcut::Attach => self.pick_files(cx),
             Shortcut::Run => self.open_run(window, cx),
+            Shortcut::Terminal => self.show_terminal(window, cx),
+            Shortcut::Browser => self.open_browser(window, cx),
+            Shortcut::Mode => if let Some(target) = self.selected_target() { self.confirm_mode(target, window, cx) },
             Shortcut::Send { text, direct: false, .. } => self.prefill(&text, true, window, cx),
             Shortcut::Send { text, .. } => {
                 if !self.can_send() || self.delivery.pending(&key) || self.uploading.contains_key(&key) {
@@ -804,7 +815,14 @@ impl Hangar {
             Some(Err(reason)) => (&[][..], Some(failure(tr("side_shortcuts_failed").replace("{reason}", reason)))),
             None => (&[][..], None),
         };
-        let list = merged_tiles(globals, project.map_or(&[][..], |p| p.items.as_slice()), project.map_or("", |p| p.key.as_str()));
+        let mut list = merged_tiles(globals, project.map_or(&[][..], |p| p.items.as_slice()), project.map_or("", |p| p.key.as_str()));
+        // Os internos seguem as regras do "+" e do menu da sessão: some o bloco que não vale para esta sessão.
+        let session = self.selected.as_ref();
+        let (terminal, browser) = (self.side_menu_terminal(), self.side_menu_browser());
+        let mode = session.is_some_and(|s| matches!(s.provider.as_str(), "claude" | "codex"));
+        list.retain(|(_, s, _)| match s { Shortcut::Terminal => terminal, Shortcut::Browser => browser, Shortcut::Mode => mode, _ => true });
+        let idle = session.is_some_and(|s| s.state == "idle");
+        let headless = session.is_some_and(|s| s.headless);
         if list.is_empty() {
             let errors: Vec<Div> = global_error.into_iter().chain(project_error).collect();
             return (!errors.is_empty()).then(|| div().flex().flex_col().gap_1().children(errors).into_any_element());
@@ -828,11 +846,20 @@ impl Hangar {
                 Shortcut::Attach => chrome::small_icon(IconName::Paperclip, 18., theme::muted()).into_any_element(),
                 Shortcut::Run if running => chrome::small_icon(IconName::CircleStop, 18., theme::accent()).into_any_element(),
                 Shortcut::Run => chrome::small_icon(IconName::Play, 18., theme::muted()).into_any_element(),
+                Shortcut::Terminal => chrome::small_icon(IconName::SquareTerminal, 18., theme::muted()).into_any_element(),
+                Shortcut::Mode => chrome::small_icon(IconName::GitBranch, 18., theme::muted()).into_any_element(),
+                Shortcut::Browser => chrome::small_icon(IconName::Globe, 18., theme::muted()).into_any_element(),
                 Shortcut::Send { icon, .. } | Shortcut::Shell { icon, .. } => shortcuts::icon_element(icon.as_deref(), 18., theme::muted()),
             };
             let (label, tip) = match &shortcut {
                 Shortcut::Run if running => (tr("run_running"), tr("run_running_open")),
                 Shortcut::Run => (shortcut.label(), tr("run_project")),
+                // O rótulo é o destino, como no menu da sessão; trocar reinicia o processo, então só parada.
+                Shortcut::Mode => {
+                    let label = super::activity::web(if headless { "modo_abrir_no_terminal" } else { "modo_continuar_sem_terminal" });
+                    let tip = super::activity::web(if !idle { "modo_so_ociosa" } else if headless { "modo_abrir_no_terminal_detalhe" } else { "modo_continuar_sem_terminal_detalhe" });
+                    (label, tip)
+                }
                 _ if own => (shortcut.label(), project_tip.clone().unwrap_or_else(|| shortcut.label())),
                 _ => (shortcut.label(), shortcut.label()),
             };
@@ -854,7 +881,7 @@ impl Hangar {
                 // Piso de altura em vez de caixa fixa para o rótulo: o bloco de uma linha deixava de sobra a segunda,
                 // e o ícone flutuava acima de um vão. Os da mesma linha se igualam pelo esticar do flex, como no web.
                 .w(px(tile)).flex_shrink_0().h_auto().min_h(px(58.)).px(px(4.)).pt(px(lift)).pb(px(8.)).rounded(px(10.)).border_1().border_color(edge)
-                .tooltip(tip).accessibility_label(accessible).disabled(!readable || busy)
+                .tooltip(tip).accessibility_label(accessible).disabled(!readable || busy || (shortcut == Shortcut::Mode && !idle))
                 // Credencial em branco: o bloco fica apagado, e o clique avisa em vez de rodar.
                 .when(missing.is_some(), |el| el.opacity(0.55))
                 .child(div().relative().w_full().min_w_0().flex().flex_col().items_center().justify_center().gap(px(if tone.is_some() { 6. } else { 4. }))
@@ -1084,8 +1111,9 @@ mod tests {
 
     #[test]
     fn shortcuts_fall_back_and_drop_bad_items() {
-        assert_eq!(parse_shortcuts(""), vec![Shortcut::Attach, Shortcut::Run]);
-        assert_eq!(parse_shortcuts("{quebrado"), vec![Shortcut::Attach, Shortcut::Run]);
+        let natives = vec![Shortcut::Terminal, Shortcut::Mode, Shortcut::Browser, Shortcut::Attach, Shortcut::Run];
+        assert_eq!(parse_shortcuts(""), natives);
+        assert_eq!(parse_shortcuts("{quebrado"), natives);
         let raw = r#"[{"id":"a","type":"send_text","label":"Relatório","text":"/relatorio","send_direct":false,"confirm":true},
             {"id":"a","type":"shell","label":"dup","command":"x"},{"id":"b","type":"shell","label":"Build","command":"make"},
             {"id":"c","type":"send_text","label":"","text":"x"},{"id":"t","type":"internal","action":"terminal"}]"#;
@@ -1093,6 +1121,7 @@ mod tests {
             Shortcut::Send { label: "Relatório".into(), text: "/relatorio".into(), direct: false, confirm: true, icon: None },
             Shortcut::Shell { label: "Build".into(), command: "make".into(), confirm: false, icon: None, pasta: None,
                 key: "global:b".into(), hangar: false, home: true, ask: true },
+            Shortcut::Terminal,
         ]);
     }
 

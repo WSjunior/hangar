@@ -13,7 +13,7 @@
            getCreationProgress, type CreationProgress,
            type ModelOption, type Motor, type ArchiveEntry, sanitizeSessionName, uniqueSessionName } from '@hangar/core';
   import { carregarModelos as carregarModelosDaConta, temEscolhaDeModelo } from '../lib/modelosPorConta';
-  import { basename, providerName, relativeTime, cotaDaConta, resumoCota, effortLevels, SESSION_PROVIDERS } from '@hangar/core';
+  import { basename, providerName, relativeTime, cotaDaConta, resumoCota, janelaEsgotada, effortLevels, SESSION_PROVIDERS } from '@hangar/core';
   import SessionOpeningFields from './SessionOpeningFields.svelte';
   import { renderMarkdown } from '../lib/markdown';
   import { quotaFeed } from '../lib/quotaFeed.svelte';
@@ -349,6 +349,7 @@
     modelChoiceTouched = false;
     configs = [];
     selectedConfig = null;
+    contaEscolhidaAMao = false;
     motores = {};
     // Zera o estado da linha de conta AQUI porque este `++cfgSeq` invalida qualquer criar/apagar em
     // voo: o `finally` daquela operação só libera o botão se a geração dele ainda for a vigente, e
@@ -536,6 +537,7 @@
         pedindoNome = false;
         nomeConta = '';
         selectedConfig = criada.path;
+        contaEscolhidaAMao = true;
         contaCriadaPath = criada.path;
         avisoConta = m.criar_conta_deslogada();
         // B4 da revisão final: seleção mudou por caminho programático (sem onchange) — sem o
@@ -748,11 +750,15 @@
   // escolha some (desmarcar, desligar o check, trocar de pasta). Sem isto uma sessão NOVA
   // criada em seguida nascia calada na conta da conversa desmarcada.
   let contaAntesDaEscolha = $state<string | null>(null);
+  // Conta escolhida à mão no seletor: a conversa escolhida depois muda para ela, em vez de puxá-la.
+  let contaEscolhidaAMao = $state(false);
   function escolherConversa(c: ArchiveEntry) {
     if (conversaEscolhida === c.session_id) { conversaEscolhida = ''; return; }
     conversaEscolhida = c.session_id;
-    if (c.provider === 'claude' && c.config_dir && c.config_dir !== selectedConfig
-        && configs.some((k) => k.path === c.config_dir)) {
+    // Dona esgotada também não puxa a conta: a conversa reabriria onde não pode responder.
+    if (!contaEscolhidaAMao && c.provider === 'claude' && c.config_dir && c.config_dir !== selectedConfig
+        && configs.some((k) => k.path === c.config_dir)
+        && !janelaEsgotada(cotaDaConta(quotaFeed.contas, c.config_dir))) {
       if (contaAntesDaEscolha === null) contaAntesDaEscolha = selectedConfig;
       selectedConfig = c.config_dir;
       carregarModelos();
@@ -762,7 +768,7 @@
     if (conversaAlvo || contaAntesDaEscolha === null) return;
     const volta = contaAntesDaEscolha;
     contaAntesDaEscolha = null;
-    if (volta !== selectedConfig && (volta === null || configs.some((k) => k.path === volta))) {
+    if (!contaEscolhidaAMao && volta !== selectedConfig && (volta === null || configs.some((k) => k.path === volta))) {
       selectedConfig = volta;
       carregarModelos();
     }
@@ -1247,7 +1253,7 @@
               value={selectedConfig ?? ''}
               opcoes={configs.map((c) => ({
                 value: c.path, label: c.label, hint: cotaHint(c), title: c.path }))}
-              onchange={(v) => { selectedConfig = v; carregarModelos(); }} />
+              onchange={(v) => { selectedConfig = v; contaEscolhidaAMao = true; carregarModelos(); }} />
             <button type="button" class="ghost-btn conta-add" onclick={abrirCampoConta}
               disabled={contaOcupada} aria-busy={contaOcupada}
               aria-label={contaOcupada ? m.criar_criando_conta_aria() : m.criar_adicionar_conta_aria()}>

@@ -94,7 +94,7 @@ impl Hangar {
         Some((kind.to_owned(), title, window))
     }
 
-    pub(in crate::app) fn render_usage_card(&self, window: &Window) -> AnyElement {
+    pub(in crate::app) fn render_usage_card(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let session = self.selected.as_ref();
         let kind = session.map(|s| s.provider.as_str()).filter(|p| !p.is_empty()).unwrap_or("claude");
         // A conta da sessão; sem sessão, ou servidor sem esse campo, cai na conta padrão do provider.
@@ -117,7 +117,14 @@ impl Hangar {
         };
         div().p(px(popup::INSET)).rounded_md().bg(theme::popup_content_fill()).flex().flex_col().gap(px(2.))
             .child(popup::title(tr("usage_card_title"), None))
-            .child(div().id("usage-card-scroll").max_h((window.viewport_size().height - px(140.)).max(px(120.))).overflow_y_scroll().child(body))
+            .child(div().id("usage-card-scroll").max_h((window.viewport_size().height - px(180.)).max(px(120.))).overflow_y_scroll().child(body))
+            // Rodapé do web: atalho para a tela de contas, sem passar pelo menu de configurações.
+            .child(div().px(px(4.)).pt(px(4.)).border_t_1().border_color(theme::border()).flex()
+                .child(Button::new("usage-card-accounts").ghost().small().label(crate::app::activity::web("contas_titulo"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.close_popups();
+                        this.open_settings(super::settings::Page::Accounts, window, cx);
+                    }))))
             .into_any_element()
     }
 }

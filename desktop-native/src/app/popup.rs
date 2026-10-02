@@ -114,7 +114,7 @@ impl Hangar {
             Floating::Controls(open) => (open.anchor(), Align::End, true, self.render_ctl_panel_for(open, window, cx)),
             Floating::Commands => ("composer".to_owned(), Align::Start, false, Some(self.render_command_panel(cx))),
             Floating::Usage => ((if self.accounts.card_top { "topbar-account" } else { "composer-account" }).to_owned(), Align::End, true,
-                Some(self.render_usage_card(window))),
+                Some(self.render_usage_card(window, cx))),
             Floating::Context => ("composer-ctx".to_owned(), Align::End, true, Some(self.render_context_card())),
             Floating::Hangar => ("hangar-chip".to_owned(), Align::Start, true, Some(self.render_hangar_popover(window, cx))),
             Floating::Recent(recent) => {

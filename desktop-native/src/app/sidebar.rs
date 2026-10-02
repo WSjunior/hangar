@@ -41,11 +41,19 @@ pub(super) enum Branches { Loading, Known(BranchList), Failed(String) }
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
 pub(super) struct BranchList { #[serde(default)] branches: Vec<String>, current: Option<String>, #[serde(default)] dirty: bool }
 
-struct MenuRead { target: Target, seq: u64, mute: Mute, branches: Option<Branches> }
+/// Contas Claude para onde a conversa pode ir, sem a da sessão, de `GET …/conta` ao abrir o menu.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Accounts { Loading, Known(Vec<AccountTarget>), Failed(String) }
+
+/// `pct` é a janela de cota mais cheia (None = sem leitura); `full` é conta perto demais do limite para continuar nela.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+pub(super) struct AccountTarget { path: String, label: String, pct: Option<f64>, #[serde(default)] low: bool, #[serde(default)] full: bool }
+
+struct MenuRead { target: Target, seq: u64, mute: Mute, branches: Option<Branches>, accounts: Option<Accounts> }
 
 #[derive(Clone, Debug)]
 /// O renomear leva o número do pedido: resposta de um diálogo cancelado não fecha a tentativa seguinte na mesma sessão.
-pub(super) enum Write { Rename(String, u64), Mute(bool), Editor, Delete, Mode(bool) }
+pub(super) enum Write { Rename(String, u64), Mute(bool), Editor, Delete, Mode(bool), Account { path: String, label: String } }
 
 /// Gravações de git e o remover vínculo: o resultado é a notificação da sessão, já em texto.
 enum GitWrite { Pull, Checkout(String), StashCheckout(String), Unlink }
@@ -54,6 +62,7 @@ pub(super) enum SidebarReply {
     Preview(u64, Target, Result<String, Failure>),
     MuteRead(u64, Result<Value, Failure>),
     BranchRead(u64, Result<Value, Failure>),
+    AccountsRead(u64, Result<Value, Failure>),
     Wrote(Target, Write, Result<Value, Failure>),
     /// Resultado de uma gravação de git: nível e texto da notificação daquela sessão.
     Note(Target, NotificationType, String),
@@ -200,6 +209,10 @@ impl Sidebar {
 
     fn branches_for(&self, target: &Target) -> Option<Branches> {
         self.menu.as_ref().filter(|m| m.target == *target).and_then(|m| m.branches.clone())
+    }
+
+    fn accounts_for(&self, target: &Target) -> Option<Accounts> {
+        self.menu.as_ref().filter(|m| m.target == *target).and_then(|m| m.accounts.clone())
     }
 
     /// Fechada agora na máquina `server`: fora da lista até o servidor responder.
@@ -540,12 +553,21 @@ impl Hangar {
         let git = !read_only && self.target_session(&target).is_some_and(has_git);
         // Convite não tem Silenciar: as preferências de aviso são do servidor inteiro, fora do convite (web: `if (invite) return`).
         let mute = !read_only && !self.invite_target(&target);
+        // Só sessão Claude na conta Anthropic muda de conta (motor vem como "chave:<motor>").
+        let moves = mute && self.target_session(&target)
+            .is_some_and(|s| s.provider == "claude" && s.conta.as_deref().is_some_and(|c| c.starts_with("claude:")));
         let Some(api) = self.machine_api(&target.server) else {
             let failed = self.machine_error(&target.server);
-            self.sidebar.menu = Some(MenuRead { target, seq, mute: Mute::Failed(failed.clone()), branches: git.then_some(Branches::Failed(failed)) });
+            self.sidebar.menu = Some(MenuRead { target, seq, mute: Mute::Failed(failed.clone()), branches: git.then_some(Branches::Failed(failed.clone())),
+                accounts: moves.then_some(Accounts::Failed(failed)) });
             return;
         };
-        self.sidebar.menu = Some(MenuRead { target: target.clone(), seq, mute: Mute::Loading, branches: git.then_some(Branches::Loading) });
+        self.sidebar.menu = Some(MenuRead { target: target.clone(), seq, mute: Mute::Loading, branches: git.then_some(Branches::Loading),
+            accounts: moves.then_some(Accounts::Loading) });
+        if moves {
+            let (api, tell, name) = (api.clone(), self.sidebar_tell(), target.name.clone());
+            self.runtime.spawn(async move { tell.send(SidebarReply::AccountsRead(seq, api.read(&name, &["conta"], &[], 15).await)).await; });
+        }
         if git {
             let (api, tell, name) = (api.clone(), self.sidebar_tell(), target.name.clone());
             self.runtime.spawn(async move { tell.send(SidebarReply::BranchRead(seq, api.read(&name, &["branches"], &[], 30).await)).await; });
@@ -673,6 +695,7 @@ impl Hangar {
                 Write::Delete => api.act(name, &[], None, true, 30).await,
                 Write::Rename(new, _) => api.act(name, &["rename"], Some(json!({"new": new})), false, 30).await,
                 Write::Mode(terminal) => api.act(name, &["modo-execucao"], Some(json!({"terminal": terminal})), false, 60).await,
+                Write::Account { path, .. } => api.act(name, &["conta"], Some(json!({"config_dir": path})), false, 120).await,
             };
             tell.send(SidebarReply::Wrote(target, what, result)).await;
         });
@@ -688,7 +711,7 @@ impl Hangar {
     }
 
     /// Terminal ⇄ sem terminal na mesma conversa: reinicia o processo da sessão, então pergunta antes, como o web.
-    fn confirm_mode(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn confirm_mode(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.target_session(&target) else { return };
         let terminal = session.headless;
         let label = web(if terminal { "modo_abrir_no_terminal" } else { "modo_continuar_sem_terminal" });
@@ -697,6 +720,21 @@ impl Hangar {
         let this = cx.entity().downgrade();
         chrome::confirm_alert(window, cx, label.clone(), message, label, ButtonVariant::Primary,
             move |_, cx| { let _ = this.update(cx, |this, cx| this.write(target.clone(), Write::Mode(terminal), cx)); true });
+    }
+
+    /// A mesma conversa noutra conta: reinicia o processo da sessão, então pergunta antes, como o modo.
+    /// `warn`: % da conta que está acabando; a confirmação diz isso antes de quem escolhe aceitar.
+    fn confirm_account(&mut self, target: Target, path: String, label: String, warn: Option<f64>, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_origin(&target, window, cx);
+        let this = cx.entity().downgrade();
+        let title = tr("sidebar_same_title").replace("{n}", &label);
+        let message = tr("sidebar_same_msg").replace("{n}", &label);
+        let message = match warn {
+            Some(pct) => format!("{}\n\n{message}", tr("sidebar_same_low").replace("{n}", &label).replace("{pct}", &format!("{pct:.0}"))),
+            None => message,
+        };
+        chrome::confirm_alert(window, cx, title, message, tr("sidebar_same_ok"), ButtonVariant::Primary,
+            move |_, cx| { let _ = this.update(cx, |this, cx| this.write(target.clone(), Write::Account { path: path.clone(), label: label.clone() }, cx)); true });
     }
 
     fn git_write(&mut self, target: Target, what: GitWrite, window: &mut Window, cx: &mut Context<Self>) {
@@ -867,6 +905,15 @@ impl Hangar {
                 });
                 cx.notify();
             }
+            SidebarReply::AccountsRead(seq, result) => {
+                let Some(menu) = self.sidebar.menu.as_mut().filter(|m| m.seq == seq) else { return };
+                menu.accounts = Some(match result {
+                    Ok(value) => serde_json::from_value::<Vec<AccountTarget>>(value).map(Accounts::Known)
+                        .unwrap_or_else(|_| Accounts::Failed(tr("invalid_response"))),
+                    Err(error) => Accounts::Failed(Self::fetch_failure(&error)),
+                });
+                cx.notify();
+            }
             SidebarReply::Note(target, kind, text) => window.push_notification(git_note(&target.name, kind, text), cx),
             SidebarReply::Group(seq, reply) => self.receive_group(seq, reply, window, cx),
             SidebarReply::Sheet(reply) => self.receive_sheet(reply, window, cx),
@@ -934,6 +981,8 @@ impl Hangar {
                     (Write::Editor, Err(error)) => Some(Notification::error(failed("sidebar_editor_failed", &error))),
                     (Write::Mode(_), Ok(_)) => None,
                     (Write::Mode(_), Err(error)) => Some(Notification::error(failed("sidebar_mode_failed", &error))),
+                    (Write::Account { label, .. }, Ok(_)) => Some(Notification::success(tr("sidebar_same_moved").replace("{n}", label))),
+                    (Write::Account { .. }, Err(error)) => Some(Notification::error(failed("sidebar_same_failed", &error))),
                     (Write::Delete, Ok(value)) => {
                         // Fechou, mas um par do grupo não foi avisado: o motivo aparece em vez de fechar mudo.
                         value.get("warning").filter(|w| !w.is_null()).map(|w| Notification::warning(
@@ -1104,17 +1153,9 @@ fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, sess
     };
     let (weak, chain_from, current) = (hangar.clone(), target.clone(), session.then_target.clone());
     let (group_weak, group_origin, leave) = (hangar.clone(), target.clone(), super::grouping::can_leave(session));
-    // O diálogo de criar, aberto para continuar esta sessão, travado na máquina dela.
-    let baton = {
-        let (hangar, target, cwd) = (hangar.clone(), target.clone(), session.cwd.clone());
-        PopupMenuItem::new(tr("sidebar_baton")).on_click(move |_, window, cx| {
-            let baton = super::create::Baton { name: target.name.clone(), cwd: cwd.clone(), server: target.server.clone() };
-            let _ = hangar.update(cx, |this, cx| {
-                this.focus_origin(&target, window, cx);
-                this.open_new_session(Some(baton), window, cx);
-            });
-        })
-    };
+    // "Com resumo" abre o criar, travado na máquina dela; "A mesma conversa" leva esta conversa para a conta escolhida.
+    let (baton_weak, baton_target, baton_cwd) = (hangar.clone(), target.clone(), session.cwd.clone());
+    let (same_weak, same_target, idle) = (hangar.clone(), target.clone(), session.state == "idle");
     // Só Claude e Codex trocam de modo, e só parados (o backend responde 409 fora disso); o rótulo é o destino.
     let mode = matches!(session.provider.as_str(), "claude" | "codex").then(|| {
         let label = web(if session.headless { "modo_abrir_no_terminal" } else { "modo_continuar_sem_terminal" });
@@ -1146,7 +1187,20 @@ fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, sess
             .when(leave, |menu| menu.item(item(tr("group_leave"), |this, target, window, cx| this.request_leave(target, window, cx))))
             .separator()
             .when_some(mode, |menu, mode| menu.item(mode))
-            .item(baton))
+            .submenu(tr("sidebar_baton"), window, cx, move |menu, window, cx| {
+                let (hangar, target, cwd) = (baton_weak.clone(), baton_target.clone(), baton_cwd.clone());
+                let menu = menu_style(menu).min_w(px(200.)).item(PopupMenuItem::new(tr("sidebar_baton_summary")).on_click(move |_, window, cx| {
+                    let baton = super::create::Baton { name: target.name.clone(), cwd: cwd.clone(), server: target.server.clone() };
+                    let _ = hangar.update(cx, |this, cx| {
+                        this.focus_origin(&target, window, cx);
+                        this.open_new_session(Some(baton), window, cx);
+                    });
+                }));
+                // Sem leitura de contas a sessão não muda de conta (motor, Codex, outro agente): fica só o resumo.
+                let shows = same_weak.upgrade().is_some_and(|e| e.read(cx).sidebar.accounts_for(&same_target).is_some());
+                let (weak, target) = (same_weak.clone(), same_target.clone());
+                menu.when(shows, |menu| menu.submenu(tr("sidebar_same"), window, cx, move |menu, window, cx| accounts_menu(menu, &weak, &target, idle, window, cx)))
+            }))
         .separator()
         .item(close)
 }
@@ -1186,6 +1240,47 @@ fn fill_branches(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, 
         menu.item(mono_item(branch.clone(), current).on_click(move |_, window, cx| {
             if current { return; }
             let _ = hangar.update(cx, |this, cx| this.pick_branch(target.clone(), branch.clone(), dirty, window, cx));
+        }))
+    })
+}
+
+/// Submenu "A mesma conversa": refeito quando a leitura das contas chega, como o de branches.
+fn accounts_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, idle: bool, window: &mut Window, cx: &mut Context<PopupMenu>) -> PopupMenu {
+    let Some(entity) = hangar.upgrade() else { return menu };
+    let seen = RefCell::new(entity.read(cx).sidebar.accounts_for(target));
+    let now = seen.borrow().clone();
+    let (weak, owner) = (hangar.clone(), target.clone());
+    cx.observe_in(&entity, window, move |menu, entity, window, cx| {
+        let now = entity.read(cx).sidebar.accounts_for(&owner);
+        if *seen.borrow() == now { return; }
+        *seen.borrow_mut() = now.clone();
+        let (weak, owner) = (weak.clone(), owner.clone());
+        menu.rebuild(window, cx, move |menu, _, _| fill_accounts(menu, &weak, &owner, idle, now));
+    }).detach();
+    fill_accounts(menu, hangar, target, idle, now)
+}
+
+fn fill_accounts(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, idle: bool, accounts: Option<Accounts>) -> PopupMenu {
+    let menu = menu_style(menu).min_w(px(200.)).label(tr("sidebar_same"));
+    // Trocar reinicia o processo: com a sessão trabalhando ou perguntando, só o motivo.
+    if !idle { return menu.item(PopupMenuItem::new(web("modo_so_ociosa")).disabled(true)); }
+    let list = match accounts {
+        Some(Accounts::Known(list)) => list,
+        Some(Accounts::Failed(reason)) => {
+            let text = tr("sidebar_accounts_failed").replace("{n}", &reason);
+            return menu.item(PopupMenuItem::element(move |_, _| div().text_color(theme::danger()).child(text.clone())).disabled(true));
+        }
+        Some(Accounts::Loading) | None => return menu.item(PopupMenuItem::new(tr("sidebar_loading")).disabled(true)),
+    };
+    if list.is_empty() { return menu.item(PopupMenuItem::new(tr("sidebar_no_accounts")).disabled(true)); }
+    list.into_iter().fold(menu.max_h(px(260.)).scrollable(true), |menu, AccountTarget { path, label, pct, low, full }| {
+        let (hangar, target) = (hangar.clone(), target.clone());
+        // O % da janela mais cheia ao lado do nome; esgotada não aceita a conversa, acabando aceita com aviso na confirmação.
+        let text = match pct { Some(pct) => format!("{label} · {pct:.0}%"), None => label.clone() };
+        let text = if full { format!("{text} · {}", tr("sidebar_account_full")) } else if low { format!("{text} · {}", tr("sidebar_account_low")) } else { text };
+        let warn = pct.filter(|_| low);
+        menu.item(PopupMenuItem::new(text).disabled(full).on_click(move |_, window, cx| {
+            let _ = hangar.update(cx, |this, cx| this.confirm_account(target.clone(), path.clone(), label.clone(), warn, window, cx));
         }))
     })
 }

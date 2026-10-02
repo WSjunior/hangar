@@ -2520,11 +2520,15 @@ async def recarregar_sessao(name: str):
 async def modo_execucao(name: str, body: ModoExecucaoBody):
     """Troca uma sessão entre terminal (pane tmux) e sem terminal, na mesma conversa.
     Só ociosa; o processo novo sobe já no clique, pra a primeira mensagem não pagar a largada."""
+    return await _durante_troca(name, _trocar_modo(name, body))
+
+
+async def _durante_troca(name: str, troca):
     # A troca muda a identidade da sessão (sidecar <-> pane tmux); sem atualizar, a varredura
     # revogaria o convite de uma sessão que continua viva. `changing_mode` a segura no meio.
     share_api.changing_mode.add(name)
     try:
-        return await _trocar_modo(name, body)
+        return await troca
     finally:
         # Também na falha: uma troca que morreu no meio pode já ter mudado a identidade.
         try:
@@ -2597,6 +2601,119 @@ async def _trocar_modo(name: str, body: ModoExecucaoBody):
                     _log.exception("troca para sem terminal: volta ao terminal falhou name=%s", name)
                 raise HTTPException(409, detail=erro("erro_troca_modo", f"não troquei de modo: {e}", erro=str(e)))
     return {"ok": True, "terminal": body.terminal}
+
+
+class AccountMoveBody(_StrictBody):
+    config_dir: str
+
+
+# Continuar reenvia o contexto inteiro no primeiro turno: conta quase no fim acaba nele. A partir de
+# LOW a tela avisa e pede confirmação; a partir de FULL não aceita.
+ACCOUNT_LOW_PCT = 95.0
+ACCOUNT_FULL_PCT = 99.0
+
+
+def _account_targets(atual: str | None) -> list[dict]:
+    """Contas Claude para onde a conversa pode ir, sem a atual: a de mais folga primeiro, sem
+    leitura de cota depois e as cheias no fim. `pct` é a janela mais cheia (None = sem leitura)."""
+    from app import cotas
+    lidas = {c.id.removeprefix("claude:"): c for c in cotas.cotas_claude()
+             if c.estado == "lida" and c.janelas}
+    out = []
+    for c in list_config_dirs(ordered=False):
+        if atual and Path(c.path).resolve() == Path(atual).resolve():
+            continue
+        cota = lidas.get(c.path)
+        pct = max(j.pct for j in cota.janelas) if cota else None
+        out.append({"path": c.path, "label": c.label, "pct": pct,
+                    "low": pct is not None and pct >= ACCOUNT_LOW_PCT,
+                    "full": pct is not None and pct >= ACCOUNT_FULL_PCT})
+    return sorted(out, key=lambda d: (d["full"], d["pct"] is None, d["pct"] or 0))
+
+
+@app.get("/api/sessions/{name}/conta", dependencies=[Depends(require_auth)])
+async def contas_destino(name: str):
+    info = await _cached_info(name)
+    if not info:
+        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
+    atual = (info.conta or "").removeprefix("claude:") or None
+    return await asyncio.to_thread(_account_targets, atual)
+
+
+@app.post("/api/sessions/{name}/conta", dependencies=[Depends(require_auth)])
+async def trocar_conta(name: str, body: AccountMoveBody):
+    """A mesma conversa continua noutra conta Claude, com o mesmo nome: para o processo, muda o
+    transcript de conta e reabre com `--resume`. Só ociosa, como a troca de modo."""
+    alvo = next((d for d in await asyncio.to_thread(_account_targets, None) if d["path"] == body.config_dir), None)
+    if alvo is None:
+        raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
+    if alvo["full"]:
+        raise HTTPException(409, detail=erro("erro_conta_cheia", f"a conta {alvo['label']} está em {alvo['pct']:.0f}% da cota",
+                                             conta=alvo["label"], pct=alvo["pct"]))
+    return await _durante_troca(name, _trocar_conta(name, body.config_dir))
+
+
+async def _trocar_conta(name: str, destino: str):
+    info = await _cached_info(name)
+    if not info:
+        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
+    if info.provider != "claude" or info.engine:
+        raise HTTPException(409, detail=erro("erro_conta_so_claude", "só sessão Claude na conta Anthropic troca de conta"))
+    atual = (info.conta or "").removeprefix("claude:")
+    if atual and Path(atual).resolve() == Path(destino).resolve():
+        return {"ok": True, "config_dir": destino}
+    headless = _headless(name)
+    hl = get_adapter(CLAUDE_HEADLESS)
+    async with hl.delivery_lock(name):
+        motivo = await _motivo_ocupada(name, headless)
+        if motivo:
+            raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
+        # Terminal passa por sem terminal parada: o sidecar guarda as escolhas e a conta, e nenhum
+        # processo sobe até a conversa estar no lugar.
+        if headless:
+            cano = (((headless_sessions.load(name) or {}).get("cano")) or {}).get("pid")
+            pids = [int(cano), *procinfo._descendant_pids(int(cano))] if cano else []
+            await hl.parar(name)
+            # O claude grava as últimas linhas pelo caminho ao sair: mover antes disso recria o
+            # arquivo na conta de origem, com o mesmo id.
+            await asyncio.to_thread(registry_mod._esperar_saida, pids, 15.0)
+            if any(procinfo.pid_vivo(p) for p in pids):
+                hl.acordar(name)
+                raise HTTPException(409, detail=erro("erro_troca_conta", "não troquei de conta: o processo antigo não saiu",
+                                                     erro="processo vivo"))
+        else:
+            modo = await asyncio.to_thread(perm_mode.ler_modo, name)
+            try:
+                await asyncio.to_thread(registry.para_headless, name, modo)
+            except KillFailed as e:
+                raise HTTPException(500, str(e))
+            except (ValueError, OSError) as e:
+                raise HTTPException(409, detail=erro("erro_troca_conta", f"não troquei de conta: {e}", erro=str(e)))
+        meta = headless_sessions.load(name) or {}
+        jsonl = Path(hl.transcript_path_de(meta))
+        falha = None
+        try:
+            if jsonl.exists():
+                await asyncio.to_thread(move_conversation, jsonl.parent.name, meta["session_id"], destino)
+            headless_sessions.update(name, config_dir=destino)
+        except FileExistsError:
+            falha = HTTPException(409, detail=erro("erro_conversa_ja_na_conta", "a conta destino ja tem esta conversa"))
+        except (OSError, ValueError) as e:
+            _log.exception("mover conversa de %s para %s falhou", name, destino)
+            falha = HTTPException(500, detail=erro("erro_mover_conversa", f"nao consegui mover a conversa de conta: {e}", erro=str(e)))
+        # Reabre como estava, na conta nova ou, se o move falhou, na de origem.
+        if headless:
+            hl.acordar(name)
+        else:
+            try:
+                await asyncio.to_thread(registry.para_terminal, name)
+            except ValueError as e:
+                hl.acordar(name)   # sidecar restaurado: a conversa segue sem terminal
+                falha = falha or HTTPException(409, detail=erro("erro_troca_conta", f"não troquei de conta: {e}", erro=str(e)))
+        registry._forget(name)
+    if falha:
+        raise falha
+    return {"ok": True, "config_dir": destino}
 
 
 class RenameBody(_StrictBody):

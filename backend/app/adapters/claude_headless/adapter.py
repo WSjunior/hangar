@@ -640,12 +640,16 @@ class ClaudeHeadlessAdapter:
     async def recarregar(self, name: str) -> None:
         """Encerra o processo e sobe outro com `--resume`, na mesma conversa. Quem chama já
         garantiu sessão ociosa e nada em aberto (a rota); parada, só acorda."""
+        await self.parar(name)
+        self.acordar(name)
+
+    async def parar(self, name: str) -> None:
+        """Encerra o processo sem religar; o sidecar fica, e o próximo `acordar` sobe outro."""
         sess = self._sessions.get(name)
         if sess is not None and sess.vivo:
             pid = ((sess.meta or {}).get("cano") or {}).get("pid")
             await self._encerrar(sess)
             _esquecer_cano(name, pid)
-        self.acordar(name)
 
     async def _encerrar(self, sess: _Sessao) -> None:
         """Mata o processo e tira a sessão da memória. Saída nossa deixa `returncode` None, então

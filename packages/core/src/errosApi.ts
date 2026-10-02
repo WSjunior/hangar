@@ -412,6 +412,11 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_fila_pendente: () => m.erro_fila_pendente(),
   erro_modo_so_claude: () => m.erro_modo_so_claude(),
   erro_troca_modo: (p) => m.erro_troca_modo({ erro: String(p.erro ?? '') }),
+  erro_conta_so_claude: () => m.erro_conta_so_claude(),
+  erro_conta_cheia: (p) => m.erro_conta_cheia({ conta: String(p.conta ?? ''), pct: String(Math.round(Number(p.pct ?? 0))) }),
+  erro_conversa_ja_na_conta: () => m.erro_conversa_ja_na_conta(),
+  erro_troca_conta: (p) => m.erro_troca_conta({ erro: String(p.erro ?? '') }),
+  erro_mover_conversa: (p) => m.erro_mover_conversa({ erro: String(p.erro ?? '') }),
 
   // Capacidade ausente: extensao do Pi, catalogo, resposta que nao veio
   erro_sem_pergunta_pi: () => m.erro_sem_pergunta_pi(),

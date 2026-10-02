@@ -33,9 +33,14 @@ impl NewSession {
     fn choose(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.creating { return; }
         if self.conversation == id { self.conversation.clear(); } else { self.conversation = id; }
-        if let Some(c) = self.target().cloned() {
+        // A conta escolhida à mão fica, e a conversa muda para ela; dona esgotada também não puxa a conta, senão a conversa
+        // reabriria onde não pode responder.
+        if let Some(c) = self.target().cloned().filter(|_| !self.account_touched) {
             let known = self.configs.ok().is_some_and(|l| l.iter().any(|k| Some(&k.path) == c.config_dir.as_ref()));
-            if c.provider == "claude" && c.config_dir.is_some() && c.config_dir != self.config && known {
+            let now = chrono::Local::now().timestamp() as f64;
+            let spent = c.config_dir.as_ref().and_then(|path| self.quota_of(&format!("claude:{path}")))
+                .is_some_and(|q| super::choices::exhausted(q, now).is_some());
+            if c.provider == "claude" && c.config_dir.is_some() && c.config_dir != self.config && known && !spent {
                 if self.before.is_none() { self.before = Some(self.config.clone()); }
                 self.config = c.config_dir.clone();
                 self.build_config_pick(window, cx);
@@ -61,7 +66,7 @@ impl NewSession {
             self.preview.seq = seq;
             if let Some(back) = self.before.take() {
                 let known = back.is_none() || self.configs.ok().is_some_and(|l| l.iter().any(|k| Some(&k.path) == back.as_ref()));
-                if back != self.config && known {
+                if back != self.config && known && !self.account_touched {
                     self.config = back;
                     self.build_config_pick(window, cx);
                     self.load_models(window, cx);

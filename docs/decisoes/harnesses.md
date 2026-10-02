@@ -208,6 +208,25 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   vencido ou fora do arquivo, resposta que não é 200, formato estranho ou rede fora → app-server,
   com linha `info` no log. O Hangar nunca renova o token. 429 na cota NÃO cai no app-server: ele
   bateria no mesmo backend. Ver [Cota e catálogo do Codex por HTTP](#cota-e-catálogo-do-codex-por-http).
+- **A mesma conversa noutra conta só move o transcript depois que o `claude` antigo SAIU; a partir
+  de 95% de cota a tela pede confirmação com aviso, e a partir de 99% a conta não aceita.**
+  `POST /api/sessions/{name}/conta` espera os pids do cano e filhos antes do `move_conversation`;
+  sem saída, recusa e religa na origem. A lista e a recusa saem de `_account_targets`
+  (`ACCOUNT_LOW_PCT`, `ACCOUNT_FULL_PCT`). Ver
+  [Continuar a mesma conversa noutra conta](#continuar-a-mesma-conversa-noutra-conta).
+
+## Continuar a mesma conversa noutra conta
+
+Medido em 02/10/2026 numa sessão descartável sem terminal: com `parar` sem esperar a saída, o
+`claude` que estava morrendo gravou `last-prompt`, `atis-latch` e `cost-state` pelo CAMINHO antigo
+depois do `rename`, e recriou na conta de origem um `.jsonl` de 3 linhas com o mesmo id. Esse
+arquivo faz o `conta_de` achar a conversa em duas contas. Esperando os pids, a ida e a volta
+entre contas não deixaram nada na origem, e a conversa lembrou a palavra-chave dos turnos
+anteriores (sem terminal e com terminal).
+
+Os limites de 95% e 99% foram escolha do usuário: continuar reenvia o contexto inteiro no primeiro
+turno, então a 99% a conta acaba nele; entre 95% e 98% ela ainda serve, mas quem escolhe precisa
+confirmar sabendo disso. Contar a janela mais cheia, como o `sugerir_claude`.
 
 ## Confirmação de entrega sem reler o transcript
 

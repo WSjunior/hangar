@@ -3389,6 +3389,9 @@ impl Hangar {
     fn render_attachments(&self, key: &SessionKey, cx: &mut Context<Self>) -> Option<AnyElement> {
         let list = self.attachments.get(key).filter(|list| !list.is_empty())?;
         let busy = self.uploading.contains_key(key);
+        // O visor recebe só as imagens, na ordem da faixa: as setas dele passam de uma para a outra.
+        let images: Vec<(u64, Source)> = list.iter().filter(|a| a.image.is_some())
+            .map(|a| (a.id, Source::Memory(a.name.clone(), a.bytes.clone()))).collect();
         let tiles = list.iter().map(|attachment| {
             let id = attachment.id;
             let (status, color) = match &attachment.state {
@@ -3404,7 +3407,14 @@ impl Hangar {
                 .border_color(match &attachment.state { AttachState::Uploading => theme::accent(), AttachState::Failed(_) => theme::danger(), _ => theme::border() })
                 .when(waiting, |el| el.opacity(0.45))
                 .child(match attachment.image.clone() {
-                    Some(picture) => div().size_full().rounded(px(11.)).overflow_hidden().child(img(picture).size_full().object_fit(ObjectFit::Cover)).into_any_element(),
+                    Some(picture) => {
+                        let (key, sources) = (key.clone(), images.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>());
+                        let index = images.iter().position(|(n, _)| *n == id).unwrap_or(0);
+                        div().id(SharedString::from(format!("attachment-view-{id}"))).size_full().rounded(px(11.)).overflow_hidden().cursor_pointer()
+                            .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tr("attach_view")).build(window, cx))
+                            .on_click(cx.listener(move |this, _, window, cx| this.open_image(key.clone(), sources.clone(), index, window, cx)))
+                            .child(img(picture).size_full().object_fit(ObjectFit::Cover)).into_any_element()
+                    }
                     None => div().size_full().flex().flex_col().items_center().justify_center().gap_1().px_1()
                         .child(chrome::small_icon(IconName::File, 18., theme::muted()))
                         .child(div().w_full().text_center().truncate().font_family(crate::theme::MONO).text_size(px(9.)).text_color(theme::faint()).child(attachment.name.clone()))
