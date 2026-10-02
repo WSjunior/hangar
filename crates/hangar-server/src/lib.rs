@@ -43,12 +43,22 @@ pub fn init_log(path: Option<&std::path::Path>) {
     if let Some(p) = path {
         rotate_log(p, LOG_MAX_BYTES);
     }
-    let file = path.and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok());
+    // Sem estes avisos, o log ia para o stderr (o Python o herda) sem dizer por quê.
+    let file = path.and_then(|p| match std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        Ok(f) => Some(f),
+        Err(e) => {
+            eprintln!("hangar-server: log em {} não abriu ({e}); segue no stderr", p.display());
+            None
+        }
+    });
     let builder = tracing_subscriber::fmt().with_target(false);
-    let _ = match file {
+    let init = match file {
         Some(f) => builder.with_writer(std::sync::Mutex::new(f)).try_init(),
         None => builder.with_writer(std::io::stderr).try_init(),
     };
+    if let Err(e) = init {
+        eprintln!("hangar-server: log não iniciou: {e}");
+    }
 }
 
 /// Mesmo teto dos logs privados do Python (4 MB, três cópias `.1`..`.3`), conferido ao subir.
