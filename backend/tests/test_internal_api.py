@@ -71,6 +71,32 @@ def test_no_secret_404():
     assert _get(_client(), headers={"X-Hangar-Internal": ""}).status_code == 404
 
 
+@pytest.fixture
+def events(monkeypatch):
+    got = []
+    # Só o evento desta rota: o middleware também registra cada 404 como `api.servidor`.
+    monkeypatch.setattr(internal_api.diag, "registrar",
+                        lambda evento, nivel="ok", **campos: evento == "internal.recusado"
+                        and got.append((evento, nivel, campos)))
+    return got
+
+
+def test_refused_hangar_server_goes_to_the_diary_without_the_secret(events):
+    assert _get(_client(), headers={"X-Hangar-Internal": "errado"}).status_code == 404
+    internal_api.set_secret(None)
+    assert _get(_client(), headers={"X-Hangar-Internal": SECRET}).status_code == 404
+    assert events == [("internal.recusado", "aviso", {"codigo": "segredo_errado"}),
+                      ("internal.recusado", "aviso", {"codigo": "sem_segredo"})]
+    assert SECRET not in repr(events)
+
+
+def test_requests_that_are_not_the_hangar_server_stay_out_of_the_diary(events):
+    assert _get(_client(), headers={}).status_code == 404              # sem cabeçalho
+    assert _get(_client("10.0.0.5"), headers={"X-Hangar-Internal": "x"}).status_code == 404   # de fora
+    assert _get(_client()).status_code == 200                          # aceito
+    assert events == []
+
+
 def test_secret_never_goes_to_environ(monkeypatch):
     monkeypatch.delenv("HANGAR_INTERNAL_SECRET", raising=False)
     internal_api.set_secret(SECRET)

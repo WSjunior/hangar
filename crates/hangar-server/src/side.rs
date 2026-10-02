@@ -332,6 +332,8 @@ async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
         }
     };
     if resp.status() == StatusCode::NOT_FOUND {
+        // O Python dá 404 também ao segredo recusado: com o hub já ligado, vale o aviso.
+        tracing::warn!(session = %hub.name, "conexão interna: 404 (sessão sumiu ou segredo interno recusado)");
         remember_info(&hub.ctx.infos, &hub.name, None);
         return SideEnd::Gone;
     }

@@ -6,6 +6,7 @@ import secrets
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
+from app import diag
 from app.mensagens import erro
 from app.models import session_key
 from app.sse import merged_events
@@ -29,6 +30,11 @@ def require_internal(request: Request) -> None:
     ip = request.client.host if request.client else None
     given = request.headers.get("x-hangar-internal", "")
     if secret is None or ip not in _LOOPBACK or not secrets.compare_digest(given.encode(), secret.encode()):
+        # Pedido local COM o cabeçalho é o hangar-server: a recusa desliga o atalho dele sem
+        # erro visível, então vai ao diário (nunca o valor do segredo).
+        if ip in _LOOPBACK and "x-hangar-internal" in request.headers:
+            diag.registrar("internal.recusado", "aviso",
+                           codigo="sem_segredo" if secret is None else "segredo_errado")
         raise HTTPException(status_code=404)
 
 

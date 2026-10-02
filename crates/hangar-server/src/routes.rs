@@ -3,9 +3,9 @@
 //! todo o resto é repasse ao Python.
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Body;
@@ -31,6 +31,7 @@ const INFO_TIMEOUT: Duration = Duration::from_secs(10);
 const PING_EVERY: Duration = Duration::from_secs(10);
 const COMMENT_EVERY: Duration = Duration::from_secs(15);
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
+const REFUSED_WARN_EVERY: Duration = Duration::from_secs(60);
 
 pub struct AppState {
     pub cfg: Config,
@@ -82,7 +83,7 @@ async fn fetch_info(http: &HttpClient, upstream: SocketAddr, secret: &str, name:
         }
     };
     if !resp.status().is_success() {
-        // 404 é sessão que não existe: normal, sem log.
+        // 404 é sessão inexistente (normal) ou segredo recusado: `warn_if_internal_refused` separa.
         if resp.status() != StatusCode::NOT_FOUND {
             tracing::warn!(session = %name, status = %resp.status(), "info interna recusada");
         }
@@ -97,6 +98,26 @@ async fn fetch_info(http: &HttpClient, upstream: SocketAddr, secret: &str, name:
             None
         }
     }
+}
+
+/// O `/internal` responde 404 tanto à sessão inexistente quanto ao segredo recusado. Sem `info` e
+/// com a sessão atendida pelo repasse, o atalho está desligado sem ninguém saber: avisa, no máximo
+/// uma vez por minuto. true = avisou.
+fn warn_if_internal_refused(name: &str, info_missing: bool, status: StatusCode) -> bool {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    if !info_missing || !status.is_success() {
+        return false;
+    }
+    let mut last = LAST.lock().unwrap();
+    if last.is_some_and(|t| t.elapsed() < REFUSED_WARN_EVERY) {
+        return false;
+    }
+    *last = Some(Instant::now());
+    tracing::warn!(
+        session = %name,
+        "sem info interna, mas o Python atendeu a sessão: /internal recusou (segredo interno?) ou falhou; atalho do Rust desligado"
+    );
+    true
 }
 
 pub async fn serve(listener: TcpListener, cfg: Config) -> std::io::Result<()> {
@@ -199,8 +220,11 @@ async fn history(
     // nada a corrigiria depois (o `/events` só a corrige com `reset` por estar ligado ao hub).
     let info = fetch_info(&st.http, st.cfg.upstream, &st.cfg.internal_secret, &name).await;
     remember_info(&st.side.infos, &name, info.clone());
+    let info_missing = info.is_none();
     let Some(hreq) = info.and_then(|i| i.history_request(limit)) else {
-        return pass(&st, req, &fwd).await;
+        let resp = pass(&st, req, &fwd).await;
+        warn_if_internal_refused(&name, info_missing, resp.status());
+        return resp;
     };
     tracing::debug!(session = %name, req = %diag_req(&req), "history");
     let inm = req.headers().get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).map(str::to_owned);
@@ -256,8 +280,11 @@ async fn events(
         Ok(Path(n)) if owner && req.method() == Method::GET => n,
         _ => return pass(&st, req, &fwd).await,
     };
-    let Some(binding) = st.info(&name).await.as_ref().and_then(Binding::from_info) else {
-        return pass(&st, req, &fwd).await;
+    let info = st.info(&name).await;
+    let Some(binding) = info.as_ref().and_then(Binding::from_info) else {
+        let resp = pass(&st, req, &fwd).await;
+        warn_if_internal_refused(&name, info.is_none(), resp.status());
+        return resp;
     };
     // A query vence: o app recria o EventSource a cada queda, e objeto novo não manda o cabeçalho.
     let resume = auth::query_param(req.uri().query(), "last_event_id")
@@ -431,6 +458,14 @@ mod tests {
         let r = pass(&st, request("/limited", "127.0.0.1", false, "x"), &fwd("127.0.0.1")).await;
         assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
         assert!(is_owner(&st, "127.0.0.1"));
+    }
+
+    #[test]
+    fn missing_info_on_a_session_python_serves_warns_once_a_minute() {
+        assert!(!warn_if_internal_refused("s", true, StatusCode::NOT_FOUND), "sessão inexistente é normal");
+        assert!(!warn_if_internal_refused("s", false, StatusCode::OK), "provider fora do Rust é normal");
+        assert!(warn_if_internal_refused("s", true, StatusCode::OK));
+        assert!(!warn_if_internal_refused("s", true, StatusCode::OK), "no máximo uma vez por minuto");
     }
 
     #[test]
