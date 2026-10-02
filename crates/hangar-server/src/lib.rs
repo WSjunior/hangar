@@ -35,12 +35,61 @@ pub async fn serve_until(
     }
 }
 
+const LOG_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const LOG_BACKUPS: u32 = 3;
+
 /// Log em arquivo (HANGAR_SERVER_LOG) ou no stderr. Nunca recebe texto de conversa.
 pub fn init_log(path: Option<&std::path::Path>) {
+    if let Some(p) = path {
+        rotate_log(p, LOG_MAX_BYTES);
+    }
     let file = path.and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok());
     let builder = tracing_subscriber::fmt().with_target(false);
     let _ = match file {
         Some(f) => builder.with_writer(std::sync::Mutex::new(f)).try_init(),
         None => builder.with_writer(std::io::stderr).try_init(),
     };
+}
+
+/// Mesmo teto dos logs privados do Python (4 MB, três cópias `.1`..`.3`), conferido ao subir.
+// ponytail: só na subida; um processo que viva muito pode passar do teto até o próximo início.
+// Girar em execução pede um writer próprio, se o arquivo crescer assim na prática.
+fn rotate_log(path: &std::path::Path, max: u64) {
+    if std::fs::metadata(path).map_or(true, |m| m.len() < max) {
+        return;
+    }
+    let numbered = |i: u32| {
+        let mut s = path.as_os_str().to_owned();
+        s.push(format!(".{i}"));
+        std::path::PathBuf::from(s)
+    };
+    // remove antes do rename: no Windows o rename não sobrescreve.
+    let _ = std::fs::remove_file(numbered(LOG_BACKUPS));
+    for i in (1..LOG_BACKUPS).rev() {
+        let _ = std::fs::rename(numbered(i), numbered(i + 1));
+    }
+    let _ = std::fs::rename(path, numbered(1));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_rotates_past_the_limit_keeping_three_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("hangar-server.log");
+        let read = |n: &str| std::fs::read_to_string(dir.path().join(n)).ok();
+        std::fs::write(&p, "abc").unwrap();
+        rotate_log(&p, 10);
+        assert_eq!(read("hangar-server.log").as_deref(), Some("abc"), "abaixo do teto fica");
+        for round in ["g1", "g2", "g3", "g4"] {
+            std::fs::write(&p, format!("{round}-cheio-demais")).unwrap();
+            rotate_log(&p, 10);
+        }
+        assert_eq!(read("hangar-server.log"), None);
+        assert_eq!(read("hangar-server.log.1").as_deref(), Some("g4-cheio-demais"));
+        assert_eq!(read("hangar-server.log.3").as_deref(), Some("g2-cheio-demais"));
+        assert_eq!(read("hangar-server.log.4"), None);
+    }
 }

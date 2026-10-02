@@ -202,7 +202,7 @@ async fn history(
     let Some(hreq) = info.and_then(|i| i.history_request(limit)) else {
         return pass(&st, req, &fwd).await;
     };
-    tracing::info!(session = %name, req = %diag_req(&req), "history");
+    tracing::debug!(session = %name, req = %diag_req(&req), "history");
     let inm = req.headers().get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).map(str::to_owned);
     let log_name = name.clone();
     let done = tokio::task::spawn_blocking(move || -> std::io::Result<(Option<String>, Option<Vec<u8>>)> {
@@ -263,7 +263,7 @@ async fn events(
     let resume = auth::query_param(req.uri().query(), "last_event_id")
         .filter(|v| !v.is_empty())
         .or_else(|| req.headers().get("last-event-id").and_then(|v| v.to_str().ok()).map(str::to_owned));
-    tracing::info!(session = %name, req = %diag_req(&req), retomada = resume.is_some(), "events: abriu");
+    tracing::debug!(session = %name, req = %diag_req(&req), retomada = resume.is_some(), "events: abriu");
     let lease = st.side.hubs.acquire(&name, binding, &st.side);
     let (tx, rx) = mpsc::channel::<Bytes>(64);
     tokio::spawn(client_loop(lease, resume, tx));
