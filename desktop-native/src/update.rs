@@ -93,27 +93,32 @@ fn swap(exe: &Path, bytes: &[u8], sha256: &str) -> Result<PathBuf, String> {
     if sha256_hex(bytes) != sha256 { return Err(tr("app_update_bad_sha")); }
     let fail = |e: std::io::Error| tr("app_update_swap_failed").replace("{reason}", &e.to_string());
     let (new, old) = (sibling(exe, ".new"), old_path(exe));
-    let mut file = std::fs::File::create(&new).map_err(fail)?;
-    file.write_all(bytes).and_then(|_| file.sync_all()).map_err(fail)?;
-    drop(file);
-    #[cfg(unix)] {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755)).map_err(fail)?;
-        // Cópia, não rename: entre dois renames o caminho do app ficaria vazio.
-        std::fs::copy(exe, &old).map_err(fail)?;
-        std::fs::rename(&new, exe).map_err(fail)?;
-    }
-    // No Windows o executável em uso não pode ser sobrescrito, mas pode ser renomeado.
-    #[cfg(windows)] {
-        std::fs::rename(exe, &old).map_err(fail)?;
-        if let Err(error) = std::fs::rename(&new, exe) {
-            // Sem desfazer, o caminho do app fica vazio: essa falha não pode sair como "nada foi trocado".
-            if let Err(back) = std::fs::rename(&old, exe) {
-                return Err(tr("app_update_rollback_failed").replace("{reason}", &format!("{error}; {back}")));
-            }
-            return Err(fail(error));
+    let place = || -> Result<(), String> {
+        let mut file = std::fs::File::create(&new).map_err(fail)?;
+        file.write_all(bytes).and_then(|_| file.sync_all()).map_err(fail)?;
+        drop(file);
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755)).map_err(fail)?;
+            // Cópia, não rename: entre dois renames o caminho do app ficaria vazio.
+            std::fs::copy(exe, &old).map_err(fail)?;
+            std::fs::rename(&new, exe).map_err(fail)?;
         }
-    }
+        // No Windows o executável em uso não pode ser sobrescrito, mas pode ser renomeado.
+        #[cfg(windows)] {
+            std::fs::rename(exe, &old).map_err(fail)?;
+            if let Err(error) = std::fs::rename(&new, exe) {
+                // Sem desfazer, o caminho do app fica vazio: essa falha não pode sair como "nada foi trocado".
+                if let Err(back) = std::fs::rename(&old, exe) {
+                    return Err(tr("app_update_rollback_failed").replace("{reason}", &format!("{error}; {back}")));
+                }
+                return Err(fail(error));
+            }
+        }
+        Ok(())
+    };
+    // Troca que falhou não deixa o binário baixado ao lado do app.
+    place().inspect_err(|_| { let _ = std::fs::remove_file(&new); })?;
     Ok(old)
 }
 
@@ -136,27 +141,38 @@ async fn alive(child: &mut std::process::Child, path: &Path) -> bool {
     false
 }
 
+/// Sobe o binário que está no caminho do app e espera a prova de vida. Sem ela, a janela única volta para este processo.
+async fn relaunch(exe: &Path) -> bool {
+    let signal = sibling(exe, ".alive");
+    let _ = std::fs::remove_file(&signal);
+    // A versão nova assume o arquivo da janela única antes de provar que subiu.
+    let own_address = crate::single_instance::snapshot();
+    let started = std::process::Command::new(exe).args(std::env::args_os().skip(1)).env(ALIVE_ENV, &signal).spawn();
+    let up = match started { Ok(mut child) => alive(&mut child, &signal).await, Err(_) => false };
+    let _ = std::fs::remove_file(&signal);
+    if !up { if let Some(address) = own_address { crate::single_instance::restore(address); } }
+    up
+}
+
 async fn install(client: reqwest::Client, exe: Option<PathBuf>, offer: Offer) -> Result<(), String> {
     // A oferta pode ter horas e a release é republicada a cada push: o sha que vale é o do manifesto de agora.
     let offer = check(&client).await.ok().flatten().unwrap_or(offer);
+    let exe = exe.ok_or_else(|| tr("app_update_swap_failed").replace("{reason}", "current_exe"))?;
+    // O instalador pode ter posto esta versão no caminho do app com ele aberto: não há o que baixar nem trocar.
+    let (disk, wanted) = (exe.clone(), offer.sha256.clone());
+    let placed = tokio::task::spawn_blocking(move || std::fs::read(&disk).is_ok_and(|bytes| sha256_hex(&bytes) == wanted));
+    if placed.await.unwrap_or(false) {
+        return if relaunch(&exe).await { Ok(()) } else { Err(tr("app_update_relaunch_failed")) };
+    }
     let bytes = client.get(&offer.url).send().await.and_then(reqwest::Response::error_for_status).map_err(|e| e.to_string())?
         .bytes().await.map_err(|e| e.to_string())?;
     // O CI sobe os binários antes do manifesto: no meio da publicação o binário já é o novo e o sha ainda o antigo.
     let sha256 = if sha256_hex(&bytes) == offer.sha256 { offer.sha256 }
         else { check(&client).await.ok().flatten().map_or(offer.sha256, |fresh| fresh.sha256) };
-    let exe = exe.ok_or_else(|| tr("app_update_swap_failed").replace("{reason}", "current_exe"))?;
     // Dezenas de MB conferidos, gravados e copiados: fora das duas threads do runtime.
     let target = exe.clone();
     let old = tokio::task::spawn_blocking(move || swap(&target, &bytes, &sha256)).await.map_err(|e| e.to_string())??;
-    let signal = sibling(&exe, ".alive");
-    let _ = std::fs::remove_file(&signal);
-    // A versão nova assume o arquivo da janela única antes de provar que subiu.
-    let own_address = crate::single_instance::snapshot();
-    let started = std::process::Command::new(&exe).args(std::env::args_os().skip(1)).env(ALIVE_ENV, &signal).spawn();
-    let up = match started { Ok(mut child) => alive(&mut child, &signal).await, Err(_) => false };
-    let _ = std::fs::remove_file(&signal);
-    if up { return Ok(()); }
-    if let Some(address) = own_address { crate::single_instance::restore(address); }
+    if relaunch(&exe).await { return Ok(()); }
     rollback(&exe, &old).map_err(|e| tr("app_update_rollback_failed").replace("{reason}", &e.to_string()))?;
     Err(tr("app_update_rolled_back"))
 }
@@ -740,6 +756,17 @@ mod tests {
         assert_eq!(follow(&state(serde_json::json!({"fase": "pronto", "ok": false, "erro": "npm ci falhou.", "ts": "t1"})), true, Some("t0")),
             Follow::Done(Outcome::Failed("npm ci falhou".into())));
         assert_eq!(follow(&Value::Null, true, Some("t0")), Follow::Waiting);
+    }
+
+    #[test]
+    fn failed_swap_leaves_no_download_behind() {
+        let dir = std::env::temp_dir().join(format!("hangar-swap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // O app não existe: a troca falha depois de gravar o `.new`.
+        let exe = dir.join("app");
+        assert!(swap(&exe, b"abc", &sha256_hex(b"abc")).is_err());
+        assert!(!sibling(&exe, ".new").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

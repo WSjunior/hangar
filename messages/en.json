@@ -5222,6 +5222,7 @@
   "native_app_update_swap_failed": "Couldn't replace the app: {reason}. Nothing was replaced.",
   "native_app_update_rolled_back": "The new version didn't open. The previous one is back in place.",
   "native_app_update_rollback_failed": "The new version didn't open and the previous one wasn't restored ({reason}). It's kept next to it, with .old at the end of the name.",
+  "native_app_update_relaunch_failed": "The new version is already installed, but it didn't open. This app stays open.",
   "native_app_update_all_tip": "Updates this machine's server, then the app (version {version}).",
   "native_app_update_server_tip": "This machine's server has a new version. Updates and restarts the server.",
   "native_app_update_confirm_title": "Update this machine's server and the app?",

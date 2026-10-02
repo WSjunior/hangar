@@ -18,9 +18,16 @@ function Erro($msg) { Write-Host "  X   $msg" -ForegroundColor Red }
 function Atualiza-Path {
     # winget instala e mexe no PATH do registro, mas o PowerShell JA ABERTO segue com o
     # PATH velho -> o comando recem-instalado "nao existe". Reler dos dois escopos evita
-    # mandar o usuario fechar e reabrir o terminal no meio do script.
-    $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
+    # mandar o usuario fechar e reabrir o terminal no meio do script. Expandir e ACRESCENTAR:
+    # um %VAR% cru do registro substituindo o PATH some com o proprio powershell.exe.
+    $registro = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
                 [Environment]::GetEnvironmentVariable('Path', 'User')
+    # O winget e um alias de app em WindowsApps; sem essa pasta no PATH ele "nao existe".
+    $aliases = "$env:LOCALAPPDATA\Microsoft\WindowsApps"
+    if ($env:LOCALAPPDATA -and (Test-Path $aliases)) { $registro += ';' + $aliases }
+    $tudo = ($env:Path + ';' + [Environment]::ExpandEnvironmentVariables($registro)) -split ';' |
+            Where-Object { $_ } | Select-Object -Unique
+    $env:Path = $tudo -join ';'
 }
 
 function Tem($cmd) { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }

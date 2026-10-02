@@ -5222,6 +5222,7 @@
   "native_app_update_swap_failed": "Não consegui trocar o app: {reason}. Nada foi trocado.",
   "native_app_update_rolled_back": "A versão nova não abriu. A anterior voltou para o lugar.",
   "native_app_update_rollback_failed": "A versão nova não abriu e a anterior não voltou sozinha ({reason}). Ela está guardada ao lado, com .old no fim do nome.",
+  "native_app_update_relaunch_failed": "A versão nova já está instalada, mas não abriu. Este app continua aberto.",
   "native_app_update_all_tip": "Atualiza o servidor desta máquina e depois o app (versão {version}).",
   "native_app_update_server_tip": "O servidor desta máquina tem versão nova. Atualiza e reinicia o servidor.",
   "native_app_update_confirm_title": "Atualizar o servidor desta máquina e o app?",
