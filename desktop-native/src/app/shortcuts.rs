@@ -8,7 +8,7 @@ use super::settings::{section_head, segments, settings_box};
 use serde_json::Map;
 
 /// Os botões nativos de hoje, na ordem de hoje. Só "anexos" roda no painel nativo; os outros são preservados na ordem.
-pub(super) const NATIVES: [&str; 5] = ["terminal", "modo", "navegador", "anexos", "rodar"];
+pub(super) const NATIVES: [&str; 6] = ["terminal", "modo", "navegador", "anexos", "rodar", "externo"];
 
 /// Glifos curados do web (`ShortcutIcon.svelte`, `GLYPHS`), com o par no Lucide do kit (mesma família de traço).
 const GLYPHS: [(&str, IconName); 12] = [("bolt", IconName::Zap), ("play", IconName::Play), ("rocket", IconName::Rocket),
@@ -138,7 +138,7 @@ pub(super) fn icon_element(icon: Option<&str>, size: f32, color: Hsla) -> AnyEle
 fn native_label(action: &str) -> String { tr(&format!("shortcuts_native_{action}")) }
 
 fn native_icon(action: &str) -> &'static str {
-    match action { "terminal" => "glifo:terminal", "modo" => "glifo:git", "navegador" => "glifo:globe", "anexos" => "glifo:folder", _ => "glifo:play" }
+    match action { "terminal" | "externo" => "glifo:terminal", "modo" => "glifo:git", "navegador" => "glifo:globe", "anexos" => "glifo:folder", _ => "glifo:play" }
 }
 
 /// Até `max` unidades UTF-16, o que o `maxlength` do web conta.

@@ -24,9 +24,11 @@ const NATIVE_LABEL: Record<ShortcutInternalAction, () => string> = {
   navegador: m.native_shortcuts_native_navegador,
   anexos: m.native_shortcuts_native_anexos,
   rodar: m.native_shortcuts_native_rodar,
+  externo: m.native_shortcuts_native_externo,
 };
 const NATIVE_ICON: Record<ShortcutInternalAction, string> = {
   terminal: 'glifo:terminal', modo: 'glifo:git', navegador: 'glifo:globe', anexos: 'glifo:folder', rodar: 'glifo:play',
+  externo: 'glifo:terminal',
 };
 const GLYPHS: [string, IconName][] = [
   ['bolt', 'Zap'], ['play', 'Play'], ['rocket', 'Rocket'], ['gear', 'Settings'], ['git', 'GitBranch'],

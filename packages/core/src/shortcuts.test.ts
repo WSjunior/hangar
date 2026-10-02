@@ -20,7 +20,7 @@ describe('resolveShortcuts', () => {
       expect(resolveShortcuts(raw)).toEqual(defaultShortcuts());
     }
     expect(defaultShortcuts().map((s) => s.id)).toEqual([
-      'terminal', 'modo', 'navegador', 'anexos', 'rodar',
+      'terminal', 'modo', 'navegador', 'anexos', 'rodar', 'externo',
     ]);
   });
 

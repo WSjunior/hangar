@@ -239,7 +239,7 @@ def mascarar(valor: str) -> str:
 
 # As acoes internas que a fileira conhece (os botoes nativos de hoje). Item com action fora
 # daqui seria um botao morto na tela — recusa na gravacao, apontando o item.
-_SHORTCUT_INTERNAL_ACTIONS = {"terminal", "modo", "navegador", "anexos", "rodar"}
+_SHORTCUT_INTERNAL_ACTIONS = {"terminal", "modo", "navegador", "anexos", "rodar", "externo"}
 
 
 def _validate_shortcuts(text: str) -> None:
