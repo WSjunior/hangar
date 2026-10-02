@@ -1,4 +1,10 @@
 //! hangar-server: sobe como filho do Python (app/main.py), na porta pública.
+
+// O alocador do musl serializa sob concorrência (várias conversas lidas ao mesmo tempo); o do gnu não.
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[tokio::main]
 async fn main() {
     let cfg = match hangar_server::config::Config::from_env() {

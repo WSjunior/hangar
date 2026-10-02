@@ -27,7 +27,7 @@ jobs:
       matrix:
         include:
           # musl estático: o gnu do ubuntu-latest exige a glibc do runner e não abre em Debian 12,
-          # Ubuntu 22.04 ou RHEL 9. As dependências são só Rust, sem C para linkar.
+          # Ubuntu 22.04 ou RHEL 9. O mimalloc (alocador do hangar-server no musl) compila C e usa o musl-gcc.
           - os: ubuntu-latest
             platform: linux-x86_64
             exe: ""
@@ -70,10 +70,14 @@ jobs:
       - run: cargo test --locked --workspace
       - if: matrix.target != ''
         run: rustup target add ${{ matrix.target }}
+      # O mimalloc compila C para o alvo musl; o cc precisa de um compilador que conheça o musl.
+      - if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo build --locked --release --workspace ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
         env:
           CARGO_PROFILE_RELEASE_LTO: fat
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+          CC_x86_64_unknown_linux_musl: musl-gcc
       # A suíte de contrato do cano contra o binário que vai ser publicado. Só no Linux: é o único
       # lugar em que ela roda contra o hangar-cano (o ci.yml não compila Rust). Setup igual ao do ci.yml.
       - if: matrix.platform == 'linux-x86_64'
