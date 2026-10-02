@@ -1684,6 +1684,15 @@ class ClaudeHeadlessAdapter:
         sess.meta = hl_sessions.update(sess.name, problema=[codigo, detalhe or None]) or sess.meta
         _log.warning("claude headless: %s name=%s %s", codigo, sess.name, (detalhe or "")[:200])
 
+    def esquecer_problema(self, name: str) -> None:
+        """Sessão que mudou de conta: o limite ou a credencial da conta anterior não valem mais. O sidecar quem limpa
+        é quem chama, junto da troca."""
+        self._problemas.pop(name, None)
+        self._problemas_lidos.add(name)
+        sess = self._sessions.get(name)
+        if sess is not None:
+            sess.problema = sess.problema_detalhe = None
+
     def _limpar_problema(self, sess: _Sessao) -> None:
         sess.problema = sess.problema_detalhe = None
         self._problemas.pop(sess.name, None)

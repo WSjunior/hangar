@@ -293,7 +293,19 @@ fn inline_reference(value: &str, link: bool) -> Option<CodeReference> {
 }
 
 /// Isola as citações para o plugin inline do kit sem transformar código cercado ou URLs.
-pub fn citation_markdown(source: &str) -> String {
+pub fn citation_markdown(source: &str) -> String { citation_markdown_with(source, &|_| false) }
+
+/// Os caminhos que viraram chip num texto já passado por `citation_markdown`.
+pub fn citation_paths(markdown: &str) -> Vec<String> {
+    markdown.match_indices("](hangar-file:?").filter_map(|(at, _)| {
+        let rest = &markdown[at + 2..];
+        let url = url::Url::parse(&rest[..rest.find(')')?]).ok()?;
+        url.query_pairs().find(|(key, _)| key == "path").map(|(_, value)| value.into_owned())
+    }).collect()
+}
+
+/// Como `citation_markdown`, mas o caminho que `dead` diz que não abre fica como texto: chip que não abre não se clica.
+pub fn citation_markdown_with(source: &str, dead: &dyn Fn(&str) -> bool) -> String {
     let mut output = String::with_capacity(source.len());
     let mut fence = None;
     for line in source.split_inclusive('\n') {
@@ -336,7 +348,8 @@ pub fn citation_markdown(source: &str) -> String {
                     let ext = extension(&r.path);
                     !EXTS.contains(&ext.as_str()) || matches!(ext.as_str(), "json" | "tif" | "tiff")
                 })
-                    .filter(|_| at == 0 || !line[..at].ends_with('!')) {
+                    .filter(|_| at == 0 || !line[..at].ends_with('!'))
+                    .filter(|r| !dead(&r.path)) {
                     let suffix = reference.line.map(|n| format!(":{n}")).unwrap_or_default();
                     output.push_str(&format!("[{}{}](hangar-file:?path={}&line={})", basename(&reference.path).replace('[', "\\[").replace(']', "\\]"), suffix,
                         encode_component(&reference.path).replace('(', "%28").replace(')', "%29"), reference.line.unwrap_or(0)));

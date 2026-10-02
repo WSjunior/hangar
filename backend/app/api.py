@@ -2695,7 +2695,9 @@ async def _trocar_conta(name: str, destino: str):
         try:
             if jsonl.exists():
                 await asyncio.to_thread(move_conversation, jsonl.parent.name, meta["session_id"], destino)
-            headless_sessions.update(name, config_dir=destino)
+            # O aviso da conta anterior (limite batido, sem login) não vale na nova.
+            headless_sessions.update(name, config_dir=destino, problema=None)
+            hl.esquecer_problema(name)
         except FileExistsError:
             falha = HTTPException(409, detail=erro("erro_conversa_ja_na_conta", "a conta destino ja tem esta conversa"))
         except (OSError, ValueError) as e:
@@ -6634,6 +6636,12 @@ def files_resolver(name: str, body: ResolverBody):
                     break
                 if path in found:
                     break
+            if path not in found and info.jsonl:
+                # Nome solto ou relativo de outro repositório; a leitura vai pela rota de arquivo citado, que faz a
+                # mesma busca.
+                whole = _cited_elsewhere(info.jsonl, info.cwd, path)
+                if whole:
+                    found[path] = {"relativo": None, "real": os.path.realpath(whole)}
         return {"ok": {path: found[path] for path in body.caminhos if path in found},
                 "faltam": [path for path in body.caminhos if path not in found]}
     except SearchError as e:
@@ -7607,6 +7615,35 @@ def ask_history(body: AskHistoryBody):
 _CACHE_ARQUIVO = "max-age=60"
 
 
+def _cited_elsewhere(jsonl: str, cwd: str | None, path: str) -> str | None:
+    """Arquivo de um nome solto ou relativo que não está na pasta da sessão: o absoluto que a
+    conversa citou antes, ou um relativo citado (`docs/x/nome`) dentro da pasta da sessão ou de uma
+    pasta irmã dela (outro repositório ao lado, como num `cd ../outro && git status`)."""
+    from app.transcript import cited_absolute, cited_relatives
+    whole = cited_absolute(jsonl, path)
+    if whole:
+        return whole
+    if not cwd:
+        return None
+    rel = path.replace("\\", "/").removeprefix("./")
+    if ".." in rel.split("/"):
+        return None
+    relatives = [rel] if "/" in rel else cited_relatives(jsonl, rel)
+    base = os.path.realpath(cwd)
+    parent = os.path.dirname(base)
+    try:
+        # ponytail: só o primeiro nível ao lado da sessão, e no máximo 200 pastas.
+        siblings = sorted(e.path for e in os.scandir(parent) if e.is_dir() and e.path != base)[:200]
+    except OSError:
+        siblings = []
+    for relative in relatives[:20]:
+        for folder in [base, *siblings]:
+            candidate = os.path.realpath(os.path.join(folder, relative))
+            if candidate.startswith(folder + os.sep) and os.path.isfile(candidate):
+                return candidate
+    return None
+
+
 def _resolver_citado(name: str, path: str) -> str:
     """Devolve o caminho REAL de um arquivo citado no transcript desta sessao.
 
@@ -7642,6 +7679,9 @@ def _resolver_citado(name: str, path: str) -> str:
             if os.path.isfile(candidate):
                 real = candidate
                 break
+        if not real:
+            whole = _cited_elsewhere(info.jsonl, info.cwd, path)
+            real = os.path.realpath(whole) if whole else ""
         if not real:
             raise HTTPException(404, detail=erro("erro_arquivo_nao_encontrado", "file not found"))
     if not os.path.isfile(real):

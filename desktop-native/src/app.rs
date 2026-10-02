@@ -307,6 +307,11 @@ impl SystemNotifications {
         }
     }
 }
+
+/// Conferência dos arquivos citados de uma sessão: mensagens já lidas, caminhos já perguntados e os que não abrem.
+#[derive(Default)]
+struct CiteCheck { owner: Option<SessionKey>, scanned: HashSet<String>, checked: HashSet<String>, dead: HashSet<String> }
+
 /// Texto preparado de uma linha: a mensagem pronta para o `TextView`, as linhas do resultado de uma chamada ou o
 /// detalhe aberto (entrada/saída) de uma chamada.
 #[derive(Clone)]
@@ -421,6 +426,8 @@ pub struct Hangar {
     // Texto das linhas já preparado, pela chave da linha ou da parte: esvaziado quando o chat muda, e o desenho
     // só prepara o que falta. Assim contar linhas, formatar JSON e limpar o markdown não roda a cada quadro.
     prepared: HashMap<String, Prepared>,
+    /// Arquivos citados na conversa conferidos no servidor: os que não abrem ficam sem chip.
+    cites: CiteCheck,
     render_tick: u64,
     preview_drop_epoch: u64,
     preview_drop_scheduled: bool,
@@ -706,7 +713,7 @@ impl Hangar {
             flight: InFlight::default(), action_feedback: HashMap::new(), live_terms: Vec::new(), question_open: None, question_card: None,
             hangar_open: false, hangar_focus: cx.focus_handle(), hangar_error: None, live_clock: None, ask_form: AskForm::default(), plans_dismissed: HashSet::new(), answered_tools: HashSet::new(), answering: HashMap::new(), ask_scroll: Default::default(), plan_scroll: Default::default(), plan_view: None,
             list_state, rail_hover: None, follow: Default::default(), row_ids: Vec::new(), row_signatures: Vec::new(), items: Vec::new(), expanded: HashSet::new(), orq_days: HashSet::new(),
-            table_column: HashMap::new(), tables: HashMap::new(), paired: HashMap::new(), activity: Default::default(), pinned: HashSet::new(), last_message: None, live_clear_epoch: [0; 2], rich: HashMap::new(), prepared: HashMap::new(), render_tick: 0,
+            table_column: HashMap::new(), tables: HashMap::new(), paired: HashMap::new(), activity: Default::default(), pinned: HashSet::new(), last_message: None, live_clear_epoch: [0; 2], rich: HashMap::new(), prepared: HashMap::new(), cites: CiteCheck::default(), render_tick: 0,
             preview_drop_epoch: 0, preview_drop_scheduled: false,
             visible_preview: Preview::default(), preview_tick_epoch: 0, preview_tick_scheduled: false,
             preview_last_tick: None, preview_carry: 0., preview_deadline: None,
@@ -1059,8 +1066,8 @@ impl Hangar {
         }
         if let Some(old) = self.selected_key() { self.drafts.insert(old, self.composer.read(cx).value().to_string()); }
         self.open_api = open_api;
-        // Avisos e atalhos globais passam a ser os da máquina desta conversa.
-        if !same_server { self.load_notification_preferences(); }
+        // Avisos, atalhos globais e contas passam a ser os da máquina desta conversa.
+        if !same_server { self.load_notification_preferences(); self.load_session_accounts(cx); }
         // Com as abas no topo (só a lista ativa), a aba da sessão aberta entra na vista da faixa.
         if self.open_api.is_none() && let Some(ix) = self.sessions.iter().position(|s| s.name == session.name) { self.tabs_scroll.scroll_to_item(ix); }
         self.selection += 1;
@@ -2473,6 +2480,7 @@ impl Hangar {
         api::open_trace(|| format!("sync_rows built {} items, {stable} events unchanged", self.items.len()));
         self.sync_row_ids(Some(stable), cx);
         api::open_trace(|| format!("sync_rows prepared {} rows", self.row_ids.len()));
+        self.check_cites(cx);
         let provider = self.provider().0.to_owned();
         if matches!(provider.as_str(), "pi" | "omp" | "kimi") {
             let derived = interaction::ask_from_events(&self.chat.events, &provider)
@@ -2527,7 +2535,7 @@ impl Hangar {
                 let Some(Item::Event(i)) = self.items.get(index) else { return None };
                 // Guardado de outro tipo sob o mesmo id é preparado de novo, em vez de derrubar o app.
                 let message = old.remove(id).filter(|m| *i < stable && matches!(m, Prepared::Message { .. }))
-                    .unwrap_or_else(|| prepare_message(&events[*i]));
+                    .unwrap_or_else(|| prepare_message(&events[*i], &self.cites.dead));
                 let Prepared::Message { markdown, .. } = &message else { return None };
                 let body = markdown.clone();
                 prepared.insert(id.clone(), message);
@@ -2618,6 +2626,45 @@ impl Hangar {
 
     /// Tabelas das respostas gravadas que dão gráfico. Lidas aqui, quando as linhas mudam, e só para a
     /// resposta cuja fonte mudou; o desenho só consulta. Sem a opção, nada é lido nem guardado.
+    /// Confere no servidor, em lote, os arquivos citados nas mensagens ainda não conferidos; os que não abrem perdem o
+    /// chip, e as mensagens são preparadas de novo. Falha na conferência deixa os chips como estão.
+    fn check_cites(&mut self, cx: &mut Context<Self>) {
+        let owner = self.selected_key();
+        if self.cites.owner != owner { self.cites = CiteCheck { owner: owner.clone(), ..Default::default() }; }
+        let (Some(owner), Some(api)) = (owner, self.session_api()) else { return };
+        let mut fresh = Vec::new();
+        for event in &self.chat.events {
+            if !(event.kind == "assistant_msg" || peer_of(event).is_some()) || !self.cites.scanned.insert(event.id.clone()) { continue; }
+            for path in composer::citation_paths(&composer::citation_markdown(&display_body(event))) {
+                if self.cites.checked.insert(path.clone()) { fresh.push(path); }
+            }
+        }
+        if fresh.is_empty() { return; }
+        let job = self.runtime.spawn(async move {
+            let mut dead = Vec::new();
+            // ponytail: lotes de 300, o teto do resolver no backend.
+            for batch in fresh.chunks(300) {
+                let value = api.act(&owner.name, &["files", "resolver"], Some(json!({"caminhos": batch})), false, 30).await?;
+                let missing = value.get("faltam").and_then(Value::as_array).ok_or_else(|| Failure::local("invalid_response"))?;
+                dead.extend(missing.iter().filter_map(Value::as_str).map(str::to_owned));
+            }
+            Ok::<_, Failure>((owner, dead))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = job.await.unwrap_or_else(|_| Err(Failure::local("invalid_response")));
+            let _ = this.update(cx, |this, cx| match result {
+                Ok((owner, dead)) if this.cites.owner.as_ref() == Some(&owner) && !dead.is_empty() => {
+                    this.cites.dead.extend(dead);
+                    this.sync_tables(appearance::get().table_chart, 0);
+                    this.sync_row_ids(Some(0), cx);
+                    cx.notify();
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("conferir arquivos citados falhou: {}", Self::fetch_failure(&error)),
+            });
+        }).detach();
+    }
+
     fn sync_tables(&mut self, enabled: bool, stable: usize) {
         let mut old = std::mem::take(&mut self.tables);
         if !enabled { return; }
@@ -2631,7 +2678,7 @@ impl Hangar {
                 self.tables.insert(event.id.clone(), kept);
                 continue;
             }
-            let source = safe_markdown(&composer::citation_markdown(&display_body(event)));
+            let source = safe_markdown(&composer::citation_markdown_with(&display_body(event), &|p| self.cites.dead.contains(p)));
             let tables = match old.remove(&event.id) {
                 Some((seen, tables)) if seen == source => tables,
                 _ => crate::tables::read(&source, decimal).into(),
@@ -3661,7 +3708,7 @@ impl Hangar {
                 .accessibility_label(format!("{name}: {}", percent(pct)))
                 .child(div().flex().items_center().gap(px(5.)).text_xs()
                     .child(chrome::ring(pct))
-                    .child(div().text_color(theme::faint()).child(name))
+                    .child(div().max_w(px(160.)).truncate().text_color(theme::faint()).child(name))
                     .child(div().font_weight(FontWeight::MEDIUM).text_color(chrome::ring_text(pct)).child(percent(pct))));
             let has_git = !branch.is_empty();
             let place = div().min_w_0().flex().items_center().gap(px(6.)).text_xs().text_color(theme::faint())
@@ -3684,7 +3731,7 @@ impl Hangar {
                 .when_some(cache, |el, cache| el.child(cache_chip(cache)))
                 .child(popup::anchor(div(), "composer-ctx").child(ring("composer-ctx", tr("ring_context"), ctx_pct, self.context_card)
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_context_card(cx)))))
-                .child(popup::anchor(div(), "composer-account").child(ring("composer-account", tr("ring_account"), account, self.accounts.card)
+                .child(popup::anchor(div(), "composer-account").child(ring("composer-account", self.focused_account().map(|(_, name, _)| name).unwrap_or_else(|| tr("ring_account")), account, self.accounts.card)
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_usage_card(cx)))))
                 .when_some(cost, |el, cost| el.child(div().text_color(theme::faint()).opacity(0.6).child("·"))
                     .child(div().h(px(22.)).px(px(6.)).flex().items_center().text_color(theme::muted()).child(cost)));
@@ -3878,7 +3925,7 @@ impl Hangar {
             let local;
             let message = match self.prepared.get(&id) {
                 Some(message) => message,
-                None => { local = prepare_message(&self.chat.events[*event_index]); &local }
+                None => { local = prepare_message(&self.chat.events[*event_index], &self.cites.dead); &local }
             };
             let Prepared::Message { markdown, blank, card, .. } = message else { return div().into_any_element(); };
             match card.clone() {
@@ -4948,12 +4995,12 @@ fn prepare_detail(full: String) -> Prepared {
     Prepared::Detail { fenced, total, clipped, full: full.into() }
 }
 
-fn prepare_message(event: &ChatEvent) -> Prepared {
+fn prepare_message(event: &ChatEvent, dead: &HashSet<String>) -> Prepared {
     let card = message_card(event);
     let body = display_body(event);
     // Recado de outra sessão também é escrito por agente: cita arquivo do mesmo jeito que a resposta.
     let cites = event.kind == "assistant_msg" || peer_of(event).is_some();
-    let source = if cites { composer::citation_markdown(&body) } else { body.clone() };
+    let source = if cites { composer::citation_markdown_with(&body, &|p| dead.contains(p)) } else { body.clone() };
     Prepared::Message { markdown: safe_markdown(&source), blank: body.trim().is_empty(), card }
 }
 
@@ -5703,10 +5750,10 @@ mod tests {
         assert!(super::long_message(&"á".repeat(401)));
         let body = format!("{} /home/x/app.rs:12 e `app.rs:12`.", "a".repeat(345));
         let event = |kind: &str| ChatEvent { kind: kind.into(), text: Some(body.clone()), ..Default::default() };
-        let super::Prepared::Message { markdown, .. } = super::prepare_message(&event("user_msg")) else { panic!() };
+        let super::Prepared::Message { markdown, .. } = super::prepare_message(&event("user_msg"), &HashSet::new()) else { panic!() };
         assert_eq!(markdown, body);
         assert!(!super::long_message(&markdown));
-        let super::Prepared::Message { markdown, .. } = super::prepare_message(&event("assistant_msg")) else { panic!() };
+        let super::Prepared::Message { markdown, .. } = super::prepare_message(&event("assistant_msg"), &HashSet::new()) else { panic!() };
         assert_eq!(markdown.matches("hangar-file:").count(), 2);
         assert_eq!(super::stamp(None), None);
         let now = chrono::Local::now().timestamp() as f64;

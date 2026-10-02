@@ -172,7 +172,8 @@ pub(super) fn unique_name(base: &str, taken: &HashSet<String>) -> String {
     (2..).map(|n| format!("{clean}-{n}")).find(|name| !taken.contains(name)).unwrap_or(clean)
 }
 
-fn basename(path: &str) -> &str { path.trim_end_matches('/').rsplit('/').next().unwrap_or(path) }
+// A pasta pode ser de um servidor Windows: `\` também separa.
+fn basename(path: &str) -> &str { crate::composer::basename(path) }
 
 /// Caminho relativo ao pai da raiz: "pessoal/hangar".
 fn rel_path(root: &str, path: &str) -> String {
@@ -1927,6 +1928,8 @@ mod tests {
         assert_eq!(rel_path(&root.path, "/home/x/pessoal/hangar"), "pessoal/hangar");
         assert_eq!(crumbs(&root, "/home/x/pessoal/hangar/app").into_iter().map(|(l, _)| l).collect::<Vec<_>>(), ["pessoal", "hangar", "app"]);
         assert_eq!(basename("/home/x/pessoal/hangar/"), "hangar");
+        // Pasta de servidor Windows: o nome da sessão é a última pasta, não "C--Users-Jefferson-Batista".
+        assert_eq!(unique_name(basename(r"C:\Users\Jefferson Batista"), &HashSet::new()), "Jefferson-Batista");
     }
 
     #[test]

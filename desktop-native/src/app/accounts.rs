@@ -157,6 +157,9 @@ struct Rename { id: String, input: Entity<InputState>, saving: bool, error: Opti
 #[derive(Default)]
 pub(super) struct Accounts {
     list: Remote<Vec<Credential>>,
+    /// Contas da máquina da sessão aberta quando ela é de outro servidor, e de qual servidor vieram.
+    session_list: Remote<Vec<Credential>>,
+    session_server: Option<String>,
     engines: Remote<Engines>,
     sections: Vec<Section>,
     /// Quando a lista na tela foi lida pela última vez.
@@ -194,6 +197,8 @@ pub(super) struct Accounts {
 pub(super) enum AccountsReply {
     List(u64, Result<Value, Failure>),
     Engines(u64, Result<Value, Failure>),
+    /// Lista da máquina da sessão aberta (outro servidor): número do pedido e o servidor dela.
+    SessionList(u64, String, Result<Value, Failure>),
     Renamed(u64, Result<Value, Failure>),
     Action(ActionReply),
     Keys(KeysReply),
@@ -511,6 +516,28 @@ impl Hangar {
         cx.notify();
     }
 
+    /// Contas da máquina da sessão aberta: a lista do servidor ativo, ou a lida da outra máquina quando a sessão é de lá.
+    pub(super) fn load_session_accounts(&mut self, cx: &mut Context<Self>) {
+        let Some(api) = self.open_api.clone() else {
+            if !self.accounts.list.loading { self.load_accounts(false, cx); }
+            return;
+        };
+        let server = self.open_server();
+        // Outra máquina: a lista da anterior não pode aparecer como se fosse desta enquanto a nova não chega.
+        if self.accounts.session_server.as_deref() != Some(server.as_str()) {
+            (self.accounts.session_list, self.accounts.session_server) = (Remote::default(), Some(server.clone()));
+        } else if self.accounts.session_list.loading { return; }
+        let seq = self.accounts.session_list.start();
+        let done = self.accounts_send_later();
+        self.runtime.spawn(async move { done(AccountsReply::SessionList(seq, server, api.server_read(&["credenciais"], &[], 30).await)).await });
+        cx.notify();
+    }
+
+    /// A lista que o cartão de contas e a pílula do topo leem: a da máquina da sessão aberta.
+    pub(super) fn session_accounts(&self) -> &Remote<Vec<Credential>> {
+        if self.open_api.is_some() { &self.accounts.session_list } else { &self.accounts.list }
+    }
+
     fn load_engines(&mut self, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone() else { return };
         let seq = self.accounts.engines.start();
@@ -597,6 +624,12 @@ impl Hangar {
                 },
                 Err(e) => { accounts.list.finish(seq, Err(Self::failure(&e))); }
                 Ok(Err(_)) => { accounts.list.finish(seq, Err(tr("invalid_response"))); }
+                }
+            }
+            AccountsReply::SessionList(seq, server, result) => {
+                if accounts.session_server.as_deref() == Some(server.as_str()) {
+                    accounts.session_list.finish(seq, result.map_err(|e| Self::failure(&e))
+                        .and_then(|v| serde_json::from_value::<Vec<Credential>>(v).map_err(|_| tr("invalid_response"))));
                 }
             }
             AccountsReply::Engines(seq, result) => {

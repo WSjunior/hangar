@@ -711,6 +711,59 @@ def citation_cwds(jsonl: str | Path, needles: list[str]) -> dict[str, list[str]]
     return {needle: list(reversed(cwds.get(needle, []))) for needle in seen}
 
 
+# Caracteres que não entram num caminho citado: aspas, crase e a barra invertida das sequências do JSON
+# (`\"`, `\n`) delimitam a citação. Espaço entra: "Área de trabalho" é pasta comum.
+_CAMINHO_CHAR = r"[^\\\n\"`'<>|*?]"
+
+
+def cited_absolute(jsonl: str | Path, path: str) -> Optional[str]:
+    """Arquivo que existe, citado em algum ponto do transcript com caminho absoluto que termina em
+    `/path`, do mais recente ao mais antigo. É como um nome solto ("x.sql") ou relativo de outro
+    repositório acha o arquivo que o agente citou inteiro antes."""
+    tail = path.replace("\\", "/").removeprefix("./").strip("/")
+    if not tail or ".." in tail.split("/"):
+        return None
+    pattern = re.compile("(?=(/" + _CAMINHO_CHAR + "*?/" + re.escape(tail) + "))")
+    needle = tail.encode()
+    found: list[str] = []
+    try:
+        with open(jsonl, "rb") as fh:
+            for raw_line in fh:
+                if needle not in raw_line:
+                    continue
+                line = raw_line.decode("utf-8", errors="replace")
+                for m in pattern.finditer(line):
+                    end = m.start(1) + len(m.group(1))
+                    # `x.sql` não casa dentro de `x.sql.bak`.
+                    if end < len(line) and (line[end].isalnum() or line[end] in "._-"):
+                        continue
+                    found.append(m.group(1))
+    except OSError:
+        return None
+    for candidate in dict.fromkeys(reversed(found)):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def cited_relatives(jsonl: str | Path, name: str) -> list[str]:
+    """Caminhos relativos citados no transcript que terminam no arquivo `name`, do mais recente ao
+    mais antigo: um `git status` de outro repositório cita `docs/x/name` sem dizer de onde."""
+    if not name or "/" in name:
+        return []
+    pattern = re.compile(r"(?<![\w./-])((?:[\w.-]+/)+" + re.escape(name) + r")(?![\w.-])")
+    needle = name.encode()
+    found: list[str] = []
+    try:
+        with open(jsonl, "rb") as fh:
+            for raw_line in fh:
+                if needle in raw_line:
+                    found.extend(pattern.findall(raw_line.decode("utf-8", errors="replace")))
+    except OSError:
+        return []
+    return [p for p in dict.fromkeys(reversed(found)) if ".." not in p.split("/")]
+
+
 def last_assistant_text(jsonl: str | Path) -> Optional[str]:
     """Texto do ULTIMO evento de assistant do transcript (modo done_claimed do loop procura
     'LOOP_DONE' aqui). Streaming linha a linha (padrao path_in_transcript); None se ausente."""

@@ -253,8 +253,9 @@ pub(super) fn project_key(cwd: Option<&str>) -> String {
 }
 
 pub(super) fn project_label(cwd: Option<&str>) -> String {
-    cwd.map(|c| c.trim_end_matches('/')).filter(|c| !c.is_empty()).and_then(|c| c.rsplit('/').next())
-        .filter(|b| !b.is_empty()).map(str::to_owned).unwrap_or_else(|| tr("sidebar_no_project"))
+    // `\` também separa: pasta de servidor Windows.
+    cwd.map(crate::composer::basename).filter(|b| !b.is_empty() && !b.chars().all(|c| c == '/' || c == '\\'))
+        .map(str::to_owned).unwrap_or_else(|| tr("sidebar_no_project"))
 }
 
 // ponytail: `localeCompare` sem tabela de colação — minúsculas com os acentos do português dobrados na letra-base, empate pelo
@@ -724,7 +725,7 @@ impl Hangar {
 
     /// A mesma conversa noutra conta: reinicia o processo da sessão, então pergunta antes, como o modo.
     /// `warn`: % da conta que está acabando; a confirmação diz isso antes de quem escolhe aceitar.
-    fn confirm_account(&mut self, target: Target, path: String, label: String, warn: Option<f64>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn confirm_account(&mut self, target: Target, path: String, label: String, warn: Option<f64>, window: &mut Window, cx: &mut Context<Self>) {
         self.focus_origin(&target, window, cx);
         let this = cx.entity().downgrade();
         let title = tr("sidebar_same_title").replace("{n}", &label);

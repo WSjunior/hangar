@@ -61,8 +61,10 @@ impl Shortcut {
             "send_text" => Some(Shortcut::Send { label, text: item.content().to_owned(), direct: item.sends_direct(), confirm, icon }),
             "shell" => Some(Shortcut::Shell { label, command: item.content().to_owned(), confirm, icon, pasta: item.pasta().map(str::to_owned),
                 key: super::hangar_live::shortcut_key(project, item.id()), hangar: item.runs_in_hangar(), home: item.hangar_home(), ask: item.answer_in_app() }),
-            "internal" if item.action() == "anexos" => Some(Shortcut::Attach),
             "internal" if item.action() == "rodar" => Some(Shortcut::Run),
+            // Os outros internos só viram bloco quando marcados nas configurações.
+            "internal" if !item.tile() => None,
+            "internal" if item.action() == "anexos" => Some(Shortcut::Attach),
             "internal" if item.action() == "terminal" => Some(Shortcut::Terminal),
             "internal" if item.action() == "modo" => Some(Shortcut::Mode),
             "internal" if item.action() == "navegador" => Some(Shortcut::Browser),
@@ -223,10 +225,9 @@ impl Side {
 fn parse_shortcuts(raw: &str) -> Vec<Shortcut> { shortcuts::resolve(raw).iter().filter_map(|item| Shortcut::from_item(item, None)).collect() }
 
 /// Blocos do painel: os globais e depois os do projeto (`project_key` = repositório dele), com o id do bloco e se é do
-/// projeto. "Anexar" sai porque já é o clipe do compositor. O id do global é a posição e o do projeto leva o id do item: o
-/// mesmo id nas duas listas não colide.
+/// projeto. O id do global é a posição e o do projeto leva o id do item: o mesmo id nas duas listas não colide.
 fn merged_tiles(globals: &[Shortcut], project: &[shortcuts::Item], project_key: &str) -> Vec<(String, Shortcut, bool)> {
-    let globals = globals.iter().filter(|s| **s != Shortcut::Attach).enumerate().map(|(n, s)| (format!("shortcut-{n}"), s.clone(), false));
+    let globals = globals.iter().enumerate().map(|(n, s)| (format!("shortcut-{n}"), s.clone(), false));
     let own = project.iter().filter_map(|item| Some((format!("shortcut-p-{}", item.id()), Shortcut::from_item(item, Some(project_key))?, true)));
     globals.chain(own).collect()
 }
@@ -1111,12 +1112,13 @@ mod tests {
 
     #[test]
     fn shortcuts_fall_back_and_drop_bad_items() {
-        let natives = vec![Shortcut::Terminal, Shortcut::Mode, Shortcut::Browser, Shortcut::Attach, Shortcut::Run];
-        assert_eq!(parse_shortcuts(""), natives);
-        assert_eq!(parse_shortcuts("{quebrado"), natives);
+        // Sem marcação, dos internos só o Rodar vira bloco.
+        assert_eq!(parse_shortcuts(""), vec![Shortcut::Run]);
+        assert_eq!(parse_shortcuts("{quebrado"), vec![Shortcut::Run]);
         let raw = r#"[{"id":"a","type":"send_text","label":"Relatório","text":"/relatorio","send_direct":false,"confirm":true},
             {"id":"a","type":"shell","label":"dup","command":"x"},{"id":"b","type":"shell","label":"Build","command":"make"},
-            {"id":"c","type":"send_text","label":"","text":"x"},{"id":"t","type":"internal","action":"terminal"}]"#;
+            {"id":"c","type":"send_text","label":"","text":"x"},{"id":"t","type":"internal","action":"terminal","tile":true},
+            {"id":"n","type":"internal","action":"navegador"}]"#;
         assert_eq!(parse_shortcuts(raw), vec![
             Shortcut::Send { label: "Relatório".into(), text: "/relatorio".into(), direct: false, confirm: true, icon: None },
             Shortcut::Shell { label: "Build".into(), command: "make".into(), confirm: false, icon: None, pasta: None,
@@ -1140,7 +1142,7 @@ mod tests {
             {"id":"d","type":"shell","label":"Debug","command":"make debug","pasta":"backend"},
             {"id":"t","type":"internal","action":"rodar"}])));
         let tiles = merged_tiles(&globals, &project, "/repo");
-        // Anexar sai, o interno do projeto não entra e o mesmo id "d" vira dois blocos com ids diferentes.
+        // Anexos sem marcação e o interno do projeto não entram; o mesmo id "d" vira dois blocos com ids diferentes.
         assert_eq!(tiles.iter().map(|(id, _, own)| (id.as_str(), *own)).collect::<Vec<_>>(),
             [("shortcut-0", false), ("shortcut-1", false), ("shortcut-p-d", true)]);
         // A identidade No Hangar separa o "d" global do "d" do repositório.
