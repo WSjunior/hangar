@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -151,21 +151,24 @@ pub struct Attach {
 impl Hub {
     fn start(name: &str, binding: Binding, ctx: SideCtx) -> Arc<Hub> {
         let (tx, _) = broadcast::channel(CHANNEL);
-        let tail = FileTail::spawn(
-            binding.jsonl.clone(),
-            binding.key.clone(),
-            binding.provider,
-            0,
-            tx.clone(),
-            ctx.watchers.clone(),
-        );
-        let hub = Arc::new(Hub {
-            name: name.to_string(),
-            tx,
-            ctx,
-            bound: Mutex::new(Some(Bound { binding, generation: 0, tail })),
-            cache: Mutex::default(),
-            side: Mutex::new(None),
+        let hub = Arc::new_cyclic(|weak| {
+            let tail = FileTail::spawn(
+                binding.jsonl.clone(),
+                binding.key.clone(),
+                binding.provider,
+                0,
+                tx.clone(),
+                ctx.watchers.clone(),
+                close_on_tail_death(weak.clone(), 0),
+            );
+            Hub {
+                name: name.to_string(),
+                tx,
+                ctx,
+                bound: Mutex::new(Some(Bound { binding, generation: 0, tail })),
+                cache: Mutex::default(),
+                side: Mutex::new(None),
+            }
         });
         hub.restart_side();
         hub
@@ -208,7 +211,7 @@ impl Hub {
         self.bound.lock().unwrap().take();
     }
 
-    fn rebind(&self, binding: Binding) {
+    fn rebind(self: &Arc<Self>, binding: Binding) {
         let mut bound = self.bound.lock().unwrap();
         let Some(cur) = bound.as_ref() else { return };
         let generation = cur.generation + 1;
@@ -219,6 +222,7 @@ impl Hub {
             generation,
             self.tx.clone(),
             self.ctx.watchers.clone(),
+            close_on_tail_death(Arc::downgrade(self), generation),
         );
         *bound = Some(Bound { binding, generation, tail });
         self.cache.lock().unwrap().latest = Default::default();
@@ -248,19 +252,37 @@ impl Hub {
             let cached = self.cache.lock().unwrap().replay();
             let binding = b.binding.clone();
             let resume = resume.clone();
-            let mut frames = tokio::task::spawn_blocking(move || {
+            let done = tokio::task::spawn_blocking(move || {
                 let mut g = guard;
                 // Erro já registrado no `cut`: o aparelho recebe `reset` e reconecta.
                 let cut = g.cut().ok()?;
                 drop(g);
                 Some(tail::backfill(&binding.jsonl, &binding.key, binding.provider, resume.as_deref(), cut))
             })
-            .await
-            .ok()??;
+            .await;
+            let mut frames = match done {
+                Ok(f) => f?,
+                Err(e) => {
+                    // Sem a mensagem do pânico: ela pode citar o texto da linha.
+                    tracing::error!(session = %self.name, panic = e.is_panic(), "cauda do aparelho caiu; reset");
+                    return None;
+                }
+            };
             frames.extend(cached);
             return Some(Attach { generation: b.generation, rx, frames });
         }
     }
+}
+
+/// Leitor morto fecha o hub da ligação dele: os aparelhos recebem `reset`, reconectam e o hub novo
+/// nasce com leitor novo. Uma troca de ligação já o substituiu, então a geração confere.
+fn close_on_tail_death(hub: Weak<Hub>, generation: u64) -> tail::OnDead {
+    Box::new(move || {
+        let Some(hub) = hub.upgrade() else { return };
+        if hub.bound.lock().unwrap().as_ref().is_some_and(|b| b.generation == generation) {
+            hub.close();
+        }
+    })
 }
 
 enum SideEnd {
@@ -473,11 +495,8 @@ mod tests {
         assert!(has_question(&c));
     }
 
-    #[tokio::test]
-    async fn closed_hub_never_restarts_the_internal_connection() {
-        let dir = tempfile::tempdir().unwrap();
-        let binding = |n: &str| Binding { provider: Provider::Claude, jsonl: dir.path().join(n), key: n.into() };
-        let ctx = SideCtx {
+    fn idle_ctx() -> SideCtx {
+        SideCtx {
             // Porta sem ninguém: a conexão interna só tenta e espera.
             upstream: "127.0.0.1:9".parse().unwrap(),
             secret: "s".into(),
@@ -485,7 +504,37 @@ mod tests {
             watchers: Watchers::default(),
             hubs: Hubs::default(),
             infos: InfoCache::default(),
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn dead_reader_resets_devices_and_the_next_attach_gets_a_fresh_hub() {
+        let dir = tempfile::tempdir().unwrap();
+        let binding = Binding { provider: Provider::Claude, jsonl: dir.path().join("t.jsonl"), key: tail::PANIC_KEY.into() };
+        let ctx = idle_ctx();
+        let lease = ctx.hubs.acquire("s", binding.clone(), &ctx);
+        let mut rx = lease.hub.tx.subscribe();
+        assert!(lease.hub.attach(None).await.is_none(), "cauda que caiu vira reset, não pânico calado");
+        let closed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await {
+                    Ok(Out::Close) => return,
+                    Err(broadcast::error::RecvError::Closed) => panic!("canal fechou sem Close"),
+                    _ => {}
+                }
+            }
+        })
+        .await;
+        assert!(closed.is_ok(), "leitor morto avisa os aparelhos em vez de deixá-los só com ping");
+        let again = ctx.hubs.acquire("s", binding, &ctx);
+        assert!(!Arc::ptr_eq(&again.hub, &lease.hub), "quem reconecta ganha hub e leitor novos");
+    }
+
+    #[tokio::test]
+    async fn closed_hub_never_restarts_the_internal_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let binding = |n: &str| Binding { provider: Provider::Claude, jsonl: dir.path().join(n), key: n.into() };
+        let ctx = idle_ctx();
         let lease = ctx.hubs.acquire("s", binding("a"), &ctx);
         assert!(lease.hub.side.lock().unwrap().is_some());
         lease.hub.close();

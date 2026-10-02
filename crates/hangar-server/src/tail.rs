@@ -283,6 +283,10 @@ impl TailState {
         if let Some(p) = self.pos {
             return Ok(p);
         }
+        #[cfg(test)]
+        if self.key == PANIC_KEY {
+            panic!("corte de teste");
+        }
         let end = complete_end(&self.path).inspect_err(|e| {
             tracing::warn!(key = %self.key, path = %self.path.display(), "fim do transcript ilegível; tenta de novo: {e}");
         })?;
@@ -307,11 +311,16 @@ impl TailState {
         let mut line = Vec::new();
         while at < end {
             line.clear();
-            match reader.read_until(b'\n', &mut line) {
-                Ok(n) if n > 0 && line.last() == Some(&b'\n') => at += n as u64,
+            let n = match reader.read_until(b'\n', &mut line) {
+                Ok(n) if n > 0 && line.last() == Some(&b'\n') => n as u64,
                 _ => break,
+            };
+            // Como no `feed`: pânico aqui derrubaria o leitor compartilhado.
+            let parser = &mut self.parser;
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parser.seed(&line))).is_err() {
+                tracing::error!(key = %self.key, offset = at, "linha do transcript derrubou o parser na semeadura; pulada");
             }
-            self.parser.seed(&line);
+            at += n;
         }
     }
 
@@ -342,6 +351,13 @@ impl TailState {
     }
 }
 
+/// Chave que faz o `cut` entrar em pânico nos testes.
+#[cfg(test)]
+pub const PANIC_KEY: &str = "panic-cut";
+
+/// Chamado uma vez quando o leitor morre de pânico; o dono do canal avisa os aparelhos.
+pub type OnDead = Box<dyn FnOnce() + Send + 'static>;
+
 /// Leitor compartilhado de um jsonl. Some ao ser solto (troca de transcript ou último aparelho).
 pub struct FileTail {
     pub state: Arc<tokio::sync::Mutex<TailState>>,
@@ -362,6 +378,7 @@ impl FileTail {
         generation: u64,
         tx: broadcast::Sender<Out>,
         watchers: Watchers,
+        on_dead: OnDead,
     ) -> Arc<FileTail> {
         let state = Arc::new(tokio::sync::Mutex::new(TailState {
             path: path.clone(),
@@ -371,7 +388,7 @@ impl FileTail {
             pos: None,
             parser: LineParser::new(provider),
         }));
-        let task = tokio::spawn(run(path, state.clone(), tx, watchers)).abort_handle();
+        let task = tokio::spawn(run(path, state.clone(), tx, watchers, on_dead)).abort_handle();
         Arc::new(FileTail { state, task })
     }
 }
@@ -389,7 +406,13 @@ impl Drop for Subscription {
     }
 }
 
-async fn run(path: PathBuf, state: Arc<tokio::sync::Mutex<TailState>>, tx: broadcast::Sender<Out>, watchers: Watchers) {
+async fn run(
+    path: PathBuf,
+    state: Arc<tokio::sync::Mutex<TailState>>,
+    tx: broadcast::Sender<Out>,
+    watchers: Watchers,
+    on_dead: OnDead,
+) {
     let sub = Subscription { watchers, path, wake: Arc::new(Notify::new()) };
     let mut watching = false;
     let mut misses = 0u32;
@@ -406,8 +429,10 @@ async fn run(path: PathBuf, state: Arc<tokio::sync::Mutex<TailState>>, tx: broad
         let st = state.clone();
         let tx2 = tx.clone();
         if let Err(e) = tokio::task::spawn_blocking(move || st.blocking_lock().poll(&tx2)).await {
+            // Sem o aviso, os aparelhos ficariam só com ping, sem mensagem nova.
             if e.is_panic() {
-                tracing::error!(path = %sub.path.display(), "leitor do transcript caiu");
+                tracing::error!(path = %sub.path.display(), "leitor do transcript caiu; aparelhos reconectam");
+                on_dead();
             }
             return;
         }
