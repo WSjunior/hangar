@@ -2676,7 +2676,9 @@ impl Hangar {
                 }
                 if !dead.is_empty() {
                     this.cites.dead.extend(dead);
-                    // A conversa pode ter sido zerada enquanto a conferência rodava: os itens só valem refeitos agora.
+                    // A conversa pode ter sido zerada enquanto a conferência rodava: os itens só valem refeitos agora,
+                    // e o texto já preparado tem os chips antigos.
+                    this.chat.invalidate();
                     this.sync_rows(cx);
                     cx.notify();
                 }

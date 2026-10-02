@@ -115,7 +115,13 @@ fn log_panics() {
         // Só o pânico da thread principal fecha a janela; o de uma tarefa do tokio fica no log e o app segue.
         if thread == "main" {
             let _ = std::fs::write(dir.join(CRASH_FILE), &line);
-            let _ = notify_rust::Notification::new().appname("Hangar").summary(&i18n::tr("crash_title")).body(&i18n::tr("crash_notify")).show();
+            // Daemon de notificação travado não pode segurar a janela morta aberta.
+            let (done, wait) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = notify_rust::Notification::new().appname("Hangar").summary(&i18n::tr("crash_title")).body(&i18n::tr("crash_notify")).show();
+                let _ = done.send(());
+            });
+            let _ = wait.recv_timeout(std::time::Duration::from_secs(2));
         }
         default(info);
     }));
