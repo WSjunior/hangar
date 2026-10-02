@@ -15,6 +15,7 @@ import os
 import platform
 import secrets
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -27,6 +28,13 @@ NAMES = ("hangar-server", "hangar-cano")
 
 # Constante de módulo pelo motivo do atualizar.py: o teste troca a decisão sem mexer no os.name.
 _E_WINDOWS = os.name == "nt"
+
+# O passo de atualização morre aos 600 s: manifesto + dois binários só cabem com prazo total por
+# download, porque o timeout do urllib vale por operação de socket e não pelo conjunto.
+_MANIFEST_DEADLINE = 30.0
+_ASSET_DEADLINE = 200.0
+_SOCKET_TIMEOUT = 15.0
+_MAX_OLD = 100
 
 # Corpo cortado no meio (IncompleteRead) é HTTPException, não OSError.
 _DOWNLOAD_ERRORS = (OSError, http.client.HTTPException, ValueError)
@@ -47,9 +55,17 @@ def bin_dir() -> Path:
     return Path.home() / ".hangar" / "bin"
 
 
-def _get(url: str, timeout: float) -> bytes:
-    with urllib.request.urlopen(url, timeout=timeout) as r:
-        return r.read()
+def _get(url: str, deadline: float) -> bytes:
+    """Lê em blocos até `deadline` segundos; passou disso é falha comum (TimeoutError)."""
+    limit = time.monotonic() + deadline
+    chunks = []
+    with urllib.request.urlopen(url, timeout=_SOCKET_TIMEOUT) as r:
+        # read1 devolve o que chegou; read(n) seguraria até n bytes e o prazo nunca seria olhado.
+        while block := r.read1(1 << 16):
+            chunks.append(block)
+            if time.monotonic() > limit:
+                raise TimeoutError(f"passou de {deadline:g} s")
+    return b"".join(chunks)
 
 
 def _sha256_file(path: Path) -> str:
@@ -95,11 +111,11 @@ def _sweep_old(target: Path) -> None:
 def _old_name(target: Path) -> Path:
     """`<nome>.old`, ou `<nome>.old-N` quando um anterior ainda preso ocupa o nome."""
     candidate = target.with_name(f"{target.name}.old")
-    n = 0
-    while not _free(candidate):
-        n += 1
+    for n in range(1, _MAX_OLD + 1):
+        if _free(candidate):
+            return candidate
         candidate = target.with_name(f"{target.name}.old-{n}")
-    return candidate
+    raise OSError(f"sem nome livre para {target.name}.old")
 
 
 def _install(data: bytes, target: Path) -> None:
@@ -123,7 +139,8 @@ def _install(data: bytes, target: Path) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def _fetch_one(url: str, files: object, plat: str, name: str, target: Path) -> str | None:
+def _fetch_one(url: str, files: object, plat: str, name: str, target: Path,
+               commit: str) -> str | None:
     entry = files.get(f"{plat}/{name}") if isinstance(files, dict) else None
     if not isinstance(entry, dict) or not isinstance(entry.get("name"), str) \
             or not isinstance(entry.get("sha256"), str):
@@ -133,7 +150,7 @@ def _fetch_one(url: str, files: object, plat: str, name: str, target: Path) -> s
     if _already_there(target, sha):
         return None
     try:
-        data = _get(f"{url}/{entry['name']}", 300)
+        data = _get(f"{url}/{entry['name']}", _ASSET_DEADLINE)
     except _DOWNLOAD_ERRORS as e:
         diag.registrar("hangar_server.baixar", "erro", etapa="download", detalhe=name, **diag.erro_campos(e))
         return f"{name}: o download falhou ({e})"
@@ -145,7 +162,7 @@ def _fetch_one(url: str, files: object, plat: str, name: str, target: Path) -> s
     except OSError as e:
         diag.registrar("hangar_server.baixar", "erro", etapa="gravar", detalhe=name, **diag.erro_campos(e))
         return f"{name}: não consegui gravar em {target.parent} ({e})"
-    diag.registrar("hangar_server.baixar", codigo="trocado", detalhe=name)
+    diag.registrar("hangar_server.baixar", codigo="trocado", detalhe=name, commit=commit)
     return None
 
 
@@ -163,7 +180,10 @@ def fetch(base_url: str | None = None, dest: Path | None = None) -> list[str] | 
     dest = dest or bin_dir()
     ext = ".exe" if plat.startswith("windows") else ""
     try:
-        files = json.loads(_get(f"{url}/server-latest.json", 15))["files"]
+        manifest = json.loads(_get(f"{url}/server-latest.json", _MANIFEST_DEADLINE))
+        files = manifest["files"]
+        # Só vai ao diário, para diagnosticar versão do Python diferente da do binário.
+        commit = str(manifest.get("commit", ""))[:40]
         dest.mkdir(parents=True, exist_ok=True)
     except (*_DOWNLOAD_ERRORS, KeyError, TypeError) as e:
         diag.registrar("hangar_server.baixar", "erro", etapa="manifesto", **diag.erro_campos(e))
@@ -171,13 +191,18 @@ def fetch(base_url: str | None = None, dest: Path | None = None) -> list[str] | 
     for name in NAMES:
         _sweep_old(dest / f"{name}{ext}")
     avisos = [aviso for name in NAMES
-              if (aviso := _fetch_one(url, files, plat, name, dest / f"{name}{ext}"))]
+              if (aviso := _fetch_one(url, files, plat, name, dest / f"{name}{ext}", commit))]
     for aviso in avisos:
         _log.warning(aviso)
     return avisos
 
 
 def main(argv: list[str]) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        # Console do Windows com pipe é cp1252: caminho ou erro fora dela não pode derrubar o passo.
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure:
+            reconfigure(errors="replace")
     avisos = fetch()
     if avisos is None:
         print("binários Rust: a release não tem build para esta máquina; o Python atende sozinho")

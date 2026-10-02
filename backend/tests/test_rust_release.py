@@ -246,3 +246,80 @@ def test_permission_error_outside_windows_is_a_warning(release, tmp_path, monkey
 def test_cli_exit_codes(monkeypatch, result, argv, code):
     monkeypatch.setattr(rust_release, "fetch", lambda: result)
     assert rust_release.main(argv) == code
+
+
+def test_trickling_asset_hits_the_deadline_and_keeps_the_old_binary(tmp_path, monkeypatch):
+    """Servidor que pinga um byte por vez: o prazo total corta, senão o passo estoura os 600 s."""
+    import time
+    from http.server import BaseHTTPRequestHandler
+
+    manifest = json.dumps({"commit": "abc", "files": {
+        "linux-x86_64/hangar-server": {"name": "srv", "sha256": hashlib.sha256(SERVER).hexdigest()},
+        "linux-x86_64/hangar-cano": {"name": "cano", "sha256": hashlib.sha256(CANO).hexdigest()},
+    }}).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            if self.path == "/server-latest.json":
+                self.send_header("Content-Length", str(len(manifest)))
+                self.end_headers()
+                self.wfile.write(manifest)
+                return
+            self.send_header("Content-Length", "100000")
+            self.end_headers()
+            try:
+                for _ in range(1000):
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                    time.sleep(0.05)
+            except OSError:
+                pass
+
+        def log_message(self, *args):
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    monkeypatch.setattr(rust_release, "_ASSET_DEADLINE", 0.3)
+    dest = tmp_path / "bin"
+    dest.mkdir()
+    (dest / "hangar-server").write_bytes(b"velho")
+    try:
+        started = time.monotonic()
+        avisos = rust_release.fetch(f"http://127.0.0.1:{httpd.server_address[1]}", dest)
+        assert time.monotonic() - started < 5
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+    assert len(avisos) == 2 and all("download" in a for a in avisos)
+    assert (dest / "hangar-server").read_bytes() == b"velho"
+    assert not (dest / "hangar-cano").exists()
+
+
+def test_windows_without_a_free_old_name_is_a_warning_not_a_hang(release, windows, monkeypatch):
+    url, pasta, _ = release
+    _publish(pasta, {"hangar-server": SERVER, "hangar-cano": CANO}, plat="windows-x86_64")
+    monkeypatch.setattr(rust_release, "_free", lambda path: False)   # lstat nega em todo candidato
+    avisos = rust_release.fetch(url, windows)
+    assert len(avisos) == 2 and all("gravar" in a for a in avisos)
+    assert (windows / "hangar-server.exe").read_bytes() == b"rodando"
+
+
+def test_main_survives_a_console_that_cannot_encode_the_message(monkeypatch):
+    import io
+    import sys
+    saida = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+    monkeypatch.setattr(sys, "stdout", saida)
+    monkeypatch.setattr(rust_release, "fetch", lambda: ["falhou em C:\\Users\\日本"])
+    assert rust_release.main(["--never-fail"]) == 0
+    saida.flush()
+    assert b"?" in saida.buffer.getvalue()
+
+
+def test_swap_logs_the_manifest_commit(release, tmp_path, events):
+    url, pasta, _ = release
+    _publish(pasta, {"hangar-server": SERVER, "hangar-cano": CANO})
+    assert rust_release.fetch(url, tmp_path / "bin") == []
+    assert ("hangar_server.baixar", "ok",
+            {"codigo": "trocado", "detalhe": "hangar-server", "commit": "abc"}) in events
