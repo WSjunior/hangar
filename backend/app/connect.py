@@ -45,6 +45,7 @@ class Code:
     server: str
     token: str
     host: str
+    key: str | None = None
 
 
 def folder() -> Path:
@@ -58,19 +59,24 @@ def parse_code(text: str) -> Code:
         data = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
     except (binascii.Error, ValueError) as e:
         raise ConnectError(400, "erro_connect_codigo_invalido", "código de ligação ilegível") from e
-    server, token, host = (data.get(k) if isinstance(data, dict) else None for k in ("server", "token", "host"))
+    server, token, host, key = (data.get(k) if isinstance(data, dict) else None
+                                for k in ("server", "token", "host", "key"))
     if not (isinstance(data, dict) and data.get("v") == 1
             and isinstance(server, str) and _NAME.fullmatch(server)
             and isinstance(host, str) and _NAME.fullmatch(host) and host.count(".") >= 2
-            and isinstance(token, str) and _TOKEN.fullmatch(token)):
+            and isinstance(token, str) and _TOKEN.fullmatch(token)
+            and (key is None or (isinstance(key, str) and _TOKEN.fullmatch(key)))):
         raise ConnectError(400, "erro_connect_codigo_invalido", "código de ligação incompleto")
-    return Code(server, token, host)
+    return Code(server, token, host, key)
 
 
 def render_frpc(code: Code) -> str:
     return (
         f'serverAddr = "{code.server}"\nserverPort = 443\ntransport.protocol = "wss"\n'
         f'auth.method = "token"\nauth.token = "{code.token}"\nloginFailExit = false\n'
+        + (f'metadatas.key = "{code.key}"\n' if code.key else "") +
+        # Com multiplexação o frpc não manda Ping (padrão -1): sem isto, conta vencida seguiria no ar.
+        'transport.heartbeatInterval = 30\n'
         'log.to = "console"\nlog.level = "warn"\n\n'
         f'[[proxies]]\nname = "{code.host}"\ntype = "https"\nlocalIP = "127.0.0.1"\n'
         f'localPort = {CADDY_PORT}\ncustomDomains = ["{code.host}"]\n')
