@@ -113,8 +113,9 @@ class Supervisor:
     """Um filho por vez; religa a cada queda até desistir."""
 
     def __init__(self, binary: Path, host: str, port: int, upstream_port: int, token: str,
-                 forwarded: str):
+                 forwarded: str, stopping: Callable[[], bool]):
         self.binary = binary
+        self.stopping = stopping
         self.host = ip_literal(host)
         self.port = port
         self.upstream_port = upstream_port
@@ -168,6 +169,9 @@ class Supervisor:
         try:
             while True:
                 state = await self._start()
+                if state in ("silent", "protocol") and self.stopping():
+                    await self.stop()
+                    return "parada"
                 if state in ("silent", "protocol"):
                     # Religar não adianta: o mesmo binário volta calado ou com o mesmo protocolo.
                     await self.stop()
@@ -179,6 +183,11 @@ class Supervisor:
                     diag.registrar("hangar_server.de_pe")
                 while state == "up" and self.proc.poll() is None:
                     await asyncio.sleep(_POLL)
+                # Parada normal (systemctl, Ctrl+C) leva o filho junto, no mesmo instante em que o uvicorn
+                # recebe o sinal: dá um respiro para a flag dele subir antes de contar queda.
+                await asyncio.sleep(_POLL)
+                if self.stopping():
+                    return "parada"
                 now = time.monotonic()
                 crashes = [t for t in crashes if now - t < CRASH_WINDOW] + [now]
                 _log.warning("hangar-server saiu (código %s), queda %d em %ds",
@@ -220,7 +229,7 @@ async def serve(server: uvicorn.Server, sockets: list[socket.socket], binary: Pa
         await serving
         return True
     supervisor = Supervisor(binary, kw["host"], kw["port"], sockets[0].getsockname()[1], token,
-                            kw["forwarded_allow_ips"])
+                            kw["forwarded_allow_ips"], lambda: server.should_exit)
     watch = asyncio.create_task(supervisor.run())
     await asyncio.wait({serving, watch}, return_when=asyncio.FIRST_COMPLETED)
     if serving.done():
@@ -229,7 +238,11 @@ async def serve(server: uvicorn.Server, sockets: list[socket.socket], binary: Pa
         await supervisor.stop()
         await serving
         return True
-    return await _take_over(server, serving, watch.result(), kw, bind_public)
+    reason = watch.result()
+    if reason == "parada":                       # o uvicorn já está saindo: nada a assumir
+        await serving
+        return True
+    return await _take_over(server, serving, reason, kw, bind_public)
 
 
 async def _take_over(server: uvicorn.Server, serving: asyncio.Task, reason: str, kw: dict,

@@ -373,3 +373,22 @@ def test_hostname_bind_becomes_an_ip_literal_for_the_child():
     assert rust_server.ip_literal("localhost") in ("127.0.0.1", "::1")
     assert rust_server.ip_literal("192.168.1.5") == "192.168.1.5"
     assert rust_server.ip_literal("::") == "::"
+
+
+def test_normal_shutdown_killing_the_child_is_not_a_crash(fake_bin, tmp_path, events):
+    # systemctl stop / Ctrl+C mata o filho junto com o Python: sem queda no diário, sem religar.
+    port, stop = _free_port(), {"now": False}
+    supervisor = rust_server.Supervisor(fake_bin, "127.0.0.1", port, 1, "tok", "127.0.0.1",
+                                        lambda: stop["now"])
+
+    async def scenario():
+        task = asyncio.create_task(supervisor.run())
+        await _wait_get(port, rust_server.HEALTH_PATH, lambda b: json.loads(b)["ok"] is True)
+        stop["now"] = True
+        os.kill(supervisor.proc.pid, 9)
+        return await asyncio.wait_for(task, 5)
+
+    assert asyncio.run(scenario()) == "parada"
+    assert len(_spawns(tmp_path)) == 1                 # não religou
+    assert not [e for e in events if e[0] in ("hangar_server.caiu", "hangar_server.reserva")]
+    assert _dead(supervisor.proc.pid)
