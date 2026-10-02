@@ -1,0 +1,248 @@
+# backend/tests/test_rust_release.py
+"""Download do hangar-server e do hangar-cano da release `server-latest`, contra um HTTP falso."""
+import hashlib
+import http.client
+import json
+import os
+import socket
+import threading
+import types
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
+
+from app import diag, rust_release
+
+SERVER = b"#!/bin/sh\necho server\n"
+CANO = b"#!/bin/sh\necho cano\n"
+REAL_PLATFORM_KEY = rust_release.platform_key
+
+
+@pytest.fixture(autouse=True)
+def _ambiente(monkeypatch):
+    for var in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(rust_release, "platform_key", lambda: "linux-x86_64")
+    monkeypatch.setattr(rust_release, "_E_WINDOWS", False)
+
+
+@pytest.fixture
+def events(monkeypatch):
+    got = []
+    monkeypatch.setattr(diag, "registrar",
+                        lambda evento, nivel="ok", **campos: got.append((evento, nivel, campos)))
+    return got
+
+
+@pytest.fixture
+def release(tmp_path):
+    """Pasta servida como a release. Devolve (url, pasta, caminhos pedidos)."""
+    pasta = tmp_path / "release"
+    pasta.mkdir()
+    pedidos = []
+
+    class Handler(SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(pasta), **kwargs)
+
+        def do_GET(self):
+            pedidos.append(self.path)
+            super().do_GET()
+
+        def log_message(self, *args):
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{httpd.server_address[1]}", pasta, pedidos
+    httpd.shutdown()
+    httpd.server_close()
+
+
+def _publish(pasta, binaries: dict[str, bytes], plat="linux-x86_64", wrong_sha=()):
+    files = {}
+    for name, data in binaries.items():
+        asset = f"{name}-{plat}{'.exe' if plat.startswith('windows') else ''}"
+        (pasta / asset).write_bytes(data)
+        sha = "0" * 64 if name in wrong_sha else hashlib.sha256(data).hexdigest()
+        files[f"{plat}/{name}"] = {"name": asset, "sha256": sha}
+    (pasta / "server-latest.json").write_text(json.dumps({"commit": "abc", "files": files}))
+
+
+def test_downloads_both_checked_and_executable(release, tmp_path):
+    url, pasta, _ = release
+    _publish(pasta, {"hangar-server": SERVER, "hangar-cano": CANO})
+    dest = tmp_path / "bin"
+    assert rust_release.fetch(url, dest) == []
+    assert (dest / "hangar-server").read_bytes() == SERVER
+    assert (dest / "hangar-cano").read_bytes() == CANO
+    assert os.access(dest / "hangar-server", os.X_OK)
+    assert not [p for p in dest.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_same_release_again_downloads_only_the_manifest(release, tmp_path):
+    url, pasta, pedidos = release
+    _publish(pasta, {"hangar-server": SERVER, "hangar-cano": CANO})
+    dest = tmp_path / "bin"
+    rust_release.fetch(url, dest)
+    pedidos.clear()
+    assert rust_release.fetch(url, dest) == []
+    assert pedidos == ["/server-latest.json"]
+
+
+def test_wrong_sha_keeps_the_binary_that_was_there(release, tmp_path, events):
+    url, pasta, _ = release
+    dest = tmp_path / "bin"
+    dest.mkdir()
+    (dest / "hangar-server").write_bytes(b"velho")
+    _publish(pasta, {"hangar-server": SERVER, "hangar-cano": CANO}, wrong_sha={"hangar-server"})
+    avisos = rust_release.fetch(url, dest)
+    assert len(avisos) == 1 and "hangar-server" in avisos[0] and "sha256" in avisos[0]
+    assert (dest / "hangar-server").read_bytes() == b"velho"
+    assert (dest / "hangar-cano").read_bytes() == CANO
+    assert ("hangar_server.baixar", "erro", {"etapa": "sha256", "detalhe": "hangar-server"}) in events
+
+
+def test_release_offline_is_a_warning_never_an_exception(tmp_path, events):
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]                   # porta fechada ao sair do with
+    avisos = rust_release.fetch(f"http://127.0.0.1:{port}", tmp_path / "bin")
+    assert len(avisos) == 1 and "manifesto" in avisos[0]
+    assert any(e[0] == "hangar_server.baixar" and e[2].get("etapa") == "manifesto" for e in events)
+
+
+def test_body_cut_mid_download_is_a_warning_and_keeps_the_old_binary(release, tmp_path, monkeypatch, events):
+    url, pasta, _ = release
+    _publish(pasta, {"hangar-server": SERVER, "hangar-cano": CANO})
+    dest = tmp_path / "bin"
+    dest.mkdir()
+    (dest / "hangar-server").write_bytes(b"velho")
+    real_get = rust_release._get
+
+    def get(u, timeout):
+        if u.endswith("hangar-server-linux-x86_64"):
+            raise http.client.IncompleteRead(b"par", 10)
+        return real_get(u, timeout)
+
+    monkeypatch.setattr(rust_release, "_get", get)
+    avisos = rust_release.fetch(url, dest)
+    assert len(avisos) == 1 and "download" in avisos[0]
+    assert (dest / "hangar-server").read_bytes() == b"velho"
+    assert (dest / "hangar-cano").read_bytes() == CANO
+    assert any(e[2].get("etapa") == "download" for e in events)
+
+
+def test_unreadable_binary_there_is_downloaded_again(release, tmp_path, monkeypatch):
+    url, pasta, _ = release
+    _publish(pasta, {"hangar-server": SERVER, "hangar-cano": CANO})
+    dest = tmp_path / "bin"
+    rust_release.fetch(url, dest)
+
+    def nega(path):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(rust_release, "_sha256_file", nega)
+    assert rust_release.fetch(url, dest) == []
+
+
+def test_platform_missing_from_manifest_warns_per_binary(release, tmp_path):
+    url, pasta, _ = release
+    _publish(pasta, {"hangar-server": SERVER, "hangar-cano": CANO}, plat="macos-aarch64")
+    avisos = rust_release.fetch(url, tmp_path / "bin")
+    assert len(avisos) == 2 and all("linux-x86_64" in a for a in avisos)
+
+
+def test_machine_without_build_returns_none(monkeypatch, tmp_path, events):
+    monkeypatch.setattr(rust_release, "platform_key", lambda: None)
+    assert rust_release.fetch("http://127.0.0.1:1", tmp_path / "bin") is None
+    assert ("hangar_server.baixar", "aviso", {"codigo": "sem_build"}) in events
+
+
+@pytest.mark.parametrize("plat,machine,key", [
+    ("linux", "x86_64", "linux-x86_64"),
+    ("win32", "AMD64", "windows-x86_64"),
+    ("darwin", "arm64", "macos-aarch64"),
+    ("linux", "aarch64", None),
+    ("darwin", "x86_64", None),
+])
+def test_platform_key(monkeypatch, plat, machine, key):
+    # Troca os nomes do módulo, não o `sys`/`platform` globais (ver windows.md, os.name e pathlib).
+    monkeypatch.setattr(rust_release, "sys", types.SimpleNamespace(platform=plat))
+    monkeypatch.setattr(rust_release, "platform", types.SimpleNamespace(machine=lambda: machine))
+    assert REAL_PLATFORM_KEY() == key
+
+
+@pytest.fixture
+def windows(monkeypatch, tmp_path):
+    monkeypatch.setattr(rust_release, "platform_key", lambda: "windows-x86_64")
+    monkeypatch.setattr(rust_release, "_E_WINDOWS", True)
+    dest = tmp_path / "bin"
+    dest.mkdir()
+    (dest / "hangar-server.exe").write_bytes(b"rodando")
+    return dest
+
+
+def test_windows_moves_the_running_exe_aside_and_sweeps_it_next_time(release, windows):
+    url, pasta, _ = release
+    dest = windows
+    _publish(pasta, {"hangar-server": SERVER, "hangar-cano": CANO}, plat="windows-x86_64")
+    assert rust_release.fetch(url, dest) == []
+    assert (dest / "hangar-server.exe").read_bytes() == SERVER
+    assert (dest / "hangar-server.exe.old").read_bytes() == b"rodando"
+    # Release nova: o resto da troca anterior sai na varredura, com outra caixa no nome.
+    (dest / "hangar-server.exe.old").rename(dest / "HANGAR-SERVER.EXE.OLD")
+    _publish(pasta, {"hangar-server": SERVER + b"#2", "hangar-cano": CANO}, plat="windows-x86_64")
+    assert rust_release.fetch(url, dest) == []
+    assert (dest / "hangar-server.exe").read_bytes() == SERVER + b"#2"
+    assert sorted(p.name for p in dest.iterdir()) == [
+        "hangar-cano.exe", "hangar-server.exe", "hangar-server.exe.old"]
+
+
+def test_windows_stuck_old_yields_its_name(release, windows):
+    url, pasta, _ = release
+    dest = windows
+    _publish(pasta, {"hangar-server": SERVER, "hangar-cano": CANO}, plat="windows-x86_64")
+    # Diretório não sai com unlink: faz o papel do .old que ainda é a imagem de um processo vivo.
+    stuck = dest / "hangar-server.exe.old"
+    stuck.mkdir()
+    assert rust_release.fetch(url, dest) == []
+    assert stuck.is_dir()
+    assert (dest / "hangar-server.exe.old-1").read_bytes() == b"rodando"
+    assert (dest / "hangar-server.exe").read_bytes() == SERVER
+
+
+def test_windows_failed_swap_puts_the_running_exe_back(release, windows, monkeypatch):
+    url, pasta, _ = release
+    dest = windows
+    _publish(pasta, {"hangar-server": SERVER, "hangar-cano": CANO}, plat="windows-x86_64")
+
+    def recusa(origem, destino):
+        raise PermissionError(5, "Acesso negado")
+
+    monkeypatch.setattr(rust_release.atomico, "substituir", recusa)
+    avisos = rust_release.fetch(url, dest)
+    assert len(avisos) == 2 and all("gravar" in a for a in avisos)
+    assert (dest / "hangar-server.exe").read_bytes() == b"rodando"
+    assert sorted(p.name for p in dest.iterdir()) == ["hangar-server.exe"]
+
+
+def test_permission_error_outside_windows_is_a_warning(release, tmp_path, monkeypatch):
+    url, pasta, _ = release
+    _publish(pasta, {"hangar-server": SERVER, "hangar-cano": CANO})
+
+    def recusa(origem, destino):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(rust_release.atomico, "substituir", recusa)
+    avisos = rust_release.fetch(url, tmp_path / "bin")
+    assert len(avisos) == 2 and all("gravar" in a for a in avisos)
+
+
+@pytest.mark.parametrize("result,argv,code", [
+    ([], [], 0), (["x"], [], 1), (None, [], 2),
+    (["x"], ["--never-fail"], 0), (None, ["--never-fail"], 0),
+])
+def test_cli_exit_codes(monkeypatch, result, argv, code):
+    monkeypatch.setattr(rust_release, "fetch", lambda: result)
+    assert rust_release.main(argv) == code
