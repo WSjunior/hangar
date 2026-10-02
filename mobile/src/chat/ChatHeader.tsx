@@ -1,4 +1,5 @@
 import { Pressable, Text, View } from 'react-native';
+import { Pressable as EdgePressable } from 'react-native-gesture-handler';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useLocalSearchParams } from 'expo-router';
 import { cwdParts, rotuloEstado, type State, type ThemeTokens } from '@hangar/core';
@@ -47,7 +48,9 @@ export function ChatHeader({
   return (
     <View style={styles.wrap}>
       <View style={styles.bar}>
-        <Pressable
+        {/* Mora na faixa de arrasto da gaveta: no Android o gesto nativo dela engolia o toque de um
+            Pressable comum. O do gesture-handler entra na mesma disputa e o toque parado vence. */}
+        <EdgePressable
           onPress={onBack}
           hitSlop={8}
           style={styles.back}
@@ -55,7 +58,7 @@ export function ChatHeader({
           accessibilityLabel={m.chat_voltar_sessoes()}
         >
           <Icon name="ChevronLeft" size={22} color={theme.tokens.text.primary} />
-        </Pressable>
+        </EdgePressable>
         <Pressable
           onPress={onTitlePress}
           style={({ pressed }) => [styles.titulo, pressed && styles.tocado]}

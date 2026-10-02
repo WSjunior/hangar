@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
-import { Keyboard, Platform, Pressable, View } from 'react-native';
+import { Keyboard, Platform, View } from 'react-native';
+import { Pressable } from 'react-native-gesture-handler';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -25,6 +26,8 @@ export default function Index() {
     drawer.current?.openDrawer();
   };
 
+  // Pressable do gesture-handler: o da barra mora na faixa de arrasto da gaveta, e no Android o
+  // gesto nativo dela engolia o toque do Pressable comum (só passava o toque fora da faixa).
   const topButton = (icon: 'PanelLeft' | 'Server' | 'Settings', label: string, onPress: () => void) => (
     <Pressable onPress={onPress} style={styles.icon} accessibilityRole="button" accessibilityLabel={label} hitSlop={4}>
       <Icon name={icon} size={20} color={theme.tokens.text.secondary} />

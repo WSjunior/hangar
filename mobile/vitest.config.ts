@@ -16,6 +16,7 @@ export default defineConfig({
       'react-native-svg': path.resolve(__dirname, 'src/__mocks__/react-native-svg.ts'),
       'expo-haptics': path.resolve(__dirname, 'src/__mocks__/expo-haptics.ts'),
       'react-native-safe-area-context': path.resolve(__dirname, 'src/__mocks__/react-native-safe-area-context.ts'),
+      'react-native-gesture-handler': path.resolve(__dirname, 'src/__mocks__/react-native-gesture-handler.ts'),
     },
   },
   test: {
