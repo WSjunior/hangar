@@ -10,3 +10,4 @@ serde_json = { workspace = true, features = ["float_roundtrip"] }
 hangar-api.workspace = true
 regex.workspace = true
 md-5.workspace = true
+sha1_smol.workspace = true

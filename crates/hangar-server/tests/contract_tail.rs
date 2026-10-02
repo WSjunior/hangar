@@ -44,6 +44,11 @@ fn claude_with_and_without_terminal_matches_python() {
 }
 
 #[test]
+fn codex_matches_python() {
+    assert_same(tail("codex.jsonl", Provider::Codex), want("codex.tail.json"), "codex");
+}
+
+#[test]
 fn lone_surrogate_with_timestamp_keeps_reading() {
     // No Python esta linha estoura o md5 do RewriteFilter; o golden traz o que o parse_obj daria.
     assert_same(

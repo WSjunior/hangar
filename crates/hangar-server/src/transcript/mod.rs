@@ -4,6 +4,7 @@
 //! deduplicam por id, e um id diferente na troca vira mensagem repetida na tela.
 
 mod claude;
+mod codex;
 mod peer;
 mod py;
 pub mod pyjson;
@@ -76,6 +77,7 @@ impl LineParser {
     pub fn feed(&mut self, line: &[u8], offset: u64) -> Vec<ChatEvent> {
         let Some(value) = line_value(line) else { return Vec::new() };
         let mut evs = match (self.provider, &value) {
+            (Provider::Codex, _) => codex::parse_rollout_obj(&value),
             (Provider::Claude | Provider::ClaudeHeadless, Value::Object(obj)) if self.rewrite.keep(obj) => {
                 claude::parse_obj(obj, self.peer_resolver)
             }
