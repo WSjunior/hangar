@@ -57,6 +57,16 @@ impl Auth {
     /// O Python respondeu 401 a um pedido repassado e contou a falha; a mesma conta aqui impede
     /// que o atalho do dono responda 200 a um palpite certo durante o bloqueio.
     pub fn record_fail(&self, ip: &str) {
+        self.add_fails(ip, 1);
+    }
+
+    /// O Python respondeu 429: a origem já está bloqueada lá, então fica bloqueada aqui também,
+    /// mesmo que as falhas tenham chegado por um caminho que o Rust não viu.
+    pub fn mark_blocked(&self, ip: &str) {
+        self.add_fails(ip, MAX_FAILS);
+    }
+
+    fn add_fails(&self, ip: &str, n: usize) {
         if is_loopback(ip) {
             return;
         }
@@ -67,7 +77,7 @@ impl Auth {
         if hits.len() >= MAX_FAILS {
             return;
         }
-        hits.push(now);
+        hits.resize((hits.len() + n).min(MAX_FAILS), now);
         if hits.len() == MAX_FAILS {
             tracing::warn!(%ip, "token errado {MAX_FAILS} vezes em 30 s; atalho do dono desligado para esta origem");
         }

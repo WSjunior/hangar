@@ -52,9 +52,15 @@ pub(crate) fn gate(st: &AppState, peer: SocketAddr, req: &Request) -> (Forward, 
 }
 
 pub(crate) async fn pass(st: &AppState, req: Request, fwd: &Forward) -> Response {
+    let upgrade = req.headers().contains_key(header::UPGRADE);
     let resp = proxy::forward(&st.http, st.cfg.upstream, req, fwd).await;
-    if resp.status() == StatusCode::UNAUTHORIZED {
-        st.auth.record_fail(&fwd.client_ip);
+    match resp.status() {
+        StatusCode::UNAUTHORIZED => st.auth.record_fail(&fwd.client_ip),
+        // WebSocket recusado antes do aceite chega como 403 e o Python já contou a falha.
+        // Um 403 de origem também conta: só desliga o atalho, o lado seguro.
+        StatusCode::FORBIDDEN if upgrade => st.auth.record_fail(&fwd.client_ip),
+        StatusCode::TOO_MANY_REQUESTS => st.auth.mark_blocked(&fwd.client_ip),
+        _ => {}
     }
     resp
 }
@@ -98,6 +104,74 @@ pub(crate) fn maybe_gzip(req: &HeaderMap, resp: &mut HeaderMap, body: Vec<u8>) -
 mod tests {
     use super::*;
     use std::io::Read;
+
+    /// Estado com um Python mínimo: `/ws` recusa com 403, `/limited` responde 429.
+    async fn state_with_upstream() -> Arc<AppState> {
+        use axum::routing::any;
+        let app = Router::new()
+            .route("/ws", any(|| async { StatusCode::FORBIDDEN }))
+            .route("/limited", any(|| async { StatusCode::TOO_MANY_REQUESTS }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let cfg = Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            upstream,
+            internal_secret: "s".into(),
+            auth_token: "dono".into(),
+            log_path: None,
+            trusted: auth::TrustedHosts::parse("127.0.0.1"),
+        };
+        Arc::new(AppState { auth: Auth::new("dono"), http: proxy::client(), cfg })
+    }
+
+    fn request(path: &str, ip: &str, ws: bool, token: &str) -> Request {
+        let mut b = Request::builder()
+            .uri(path)
+            .header("x-forwarded-for", ip)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"));
+        if ws {
+            b = b.header("connection", "Upgrade").header("upgrade", "websocket");
+        }
+        b.body(axum::body::Body::empty()).unwrap()
+    }
+
+    fn is_owner(st: &AppState, ip: &str) -> bool {
+        let peer: SocketAddr = "127.0.0.1:5000".parse().unwrap();
+        gate(st, peer, &request("/x", ip, false, "dono")).1
+    }
+
+    #[tokio::test]
+    async fn websocket_403_and_429_from_python_lock_the_shortcut() {
+        let st = state_with_upstream().await;
+        let peer: SocketAddr = "127.0.0.1:5000".parse().unwrap();
+        let fwd = |ip: &str| gate(&st, peer, &request("/x", ip, false, "x")).0;
+
+        // 8 palpites errados em WebSocket: o Python conta e fecha com 403.
+        for _ in 0..8 {
+            let r = pass(&st, request("/ws", "198.51.100.7", true, "errado"), &fwd("198.51.100.7")).await;
+            assert_eq!(r.status(), StatusCode::FORBIDDEN);
+        }
+        assert!(!is_owner(&st, "198.51.100.7"), "o token certo não abre o atalho nessa origem");
+        assert!(is_owner(&st, "198.51.100.8"), "outra origem segue normal");
+
+        // Um 429 do Python satura a origem de uma vez.
+        let r = pass(&st, request("/limited", "198.51.100.9", false, "errado"), &fwd("198.51.100.9")).await;
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(!is_owner(&st, "198.51.100.9"));
+
+        // 403 sem Upgrade não é falha de token.
+        let st2 = state_with_upstream().await;
+        for _ in 0..8 {
+            pass(&st2, request("/ws", "198.51.100.10", false, "x"), &fwd("198.51.100.10")).await;
+        }
+        assert!(is_owner(&st2, "198.51.100.10"));
+
+        // Loopback é isento.
+        let r = pass(&st, request("/limited", "127.0.0.1", false, "x"), &fwd("127.0.0.1")).await;
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(is_owner(&st, "127.0.0.1"));
+    }
 
     #[test]
     fn cors_only_with_origin() {
