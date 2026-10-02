@@ -1603,9 +1603,11 @@ impl Hangar {
         let target = self.selected_target();
         // Trocando de conta, a sessão some e volta noutro transcript: a conversa fica na tela até a resposta e até a lista
         // trazê-la de volta; sumida por mais que o prazo depois da resposta, vale o "sessão encerrada" de sempre.
-        if let Some(t) = target.as_ref() && let Some(answered) = self.sidebar.moving.get(t).copied() {
+        // Resposta perdida (conexão trocada no meio) não segura a tela além do prazo do próprio pedido.
+        if let Some(t) = target.as_ref() && let Some((sent, answered)) = self.sidebar.moving.get(t).copied() {
             let back = list.iter().any(|s| s.name == t.name);
-            if !answered.is_some_and(|at| back || at.elapsed() > Duration::from_secs(15)) { return; }
+            let settled = match answered { Some(at) => back || at.elapsed() > Duration::from_secs(15), None => sent.elapsed() > Duration::from_secs(130) };
+            if !settled { return; }
             self.sidebar.moving.remove(t);
         }
         if let Some(old) = self.selected.clone() {

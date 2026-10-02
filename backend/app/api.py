@@ -2766,8 +2766,11 @@ def _saiu(pids: list[int]) -> bool:
             # Uma chamada para todos e sem /T: o /T segue o ppid de agora, e num pid já reaproveitado
             # levaria junto a árvore de um processo alheio. Os netos já estão na foto tirada antes de parar.
             try:
-                subprocess.run([taskkill, "/F", *(a for p in vivos for a in ("/PID", str(p)))],
-                               capture_output=True, timeout=10)
+                r = subprocess.run([taskkill, "/F", *(a for p in vivos for a in ("/PID", str(p)))],
+                                   capture_output=True, text=True, errors="replace", timeout=10)
+                if r.returncode != 0:
+                    _log.warning("troca de conta: taskkill saiu com %s: %s", r.returncode,
+                                 (r.stderr or r.stdout or "").strip()[:400])
             except (OSError, subprocess.SubprocessError):
                 _log.warning("troca de conta: não consegui matar os processos %s", vivos, exc_info=True)
     elif vivos:
@@ -2778,7 +2781,7 @@ def _saiu(pids: list[int]) -> bool:
             except OSError:
                 _log.warning("troca de conta: não consegui matar o processo %s", p, exc_info=True)
     if vivos:
-        _log.warning("troca de conta: processos %s não saíram em %.1f s e foram mortos", vivos, prazo)
+        _log.warning("troca de conta: processos %s não saíram em %.1f s; tentei matá-los", vivos, prazo)
         registry_mod._esperar_saida(vivos, 3.0)
     return not any(procinfo.pid_vivo(p) for p in pids)
 

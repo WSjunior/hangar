@@ -153,8 +153,8 @@ pub(super) struct Sidebar {
     /// A aberta sumiu da lista com o renomear em voo: a resposta decide se ela reabre pelo nome novo.
     lost: Option<Target>,
     /// Trocando de conta: a sessão fecha e volta com o mesmo nome, então a aberta fica na tela até a resposta (e até a
-    /// lista trazê-la de volta, que pode chegar depois). O instante é o da resposta.
-    pub(super) moving: HashMap<Target, Option<std::time::Instant>>,
+    /// lista trazê-la de volta, que pode chegar depois). Instantes do envio e da resposta.
+    pub(super) moving: HashMap<Target, (std::time::Instant, Option<std::time::Instant>)>,
     menu: Option<MenuRead>,
     menu_seq: u64,
     rename_seq: u64,
@@ -742,7 +742,7 @@ impl Hangar {
                 // A troca para e reabre a sessão: sem este aviso nada mudava na tela até a resposta.
                 window.push_notification(Notification::info(tr("sidebar_same_moving").replace("{n}", &label)), cx);
                 let _ = this.update(cx, |this, cx| {
-                    this.sidebar.moving.insert(target.clone(), None);
+                    this.sidebar.moving.insert(target.clone(), (std::time::Instant::now(), None));
                     this.write(target.clone(), Write::Account { path: path.clone(), label: label.clone() }, cx)
                 });
                 true
@@ -951,9 +951,20 @@ impl Hangar {
                 if matches!(what, Write::Account { .. }) {
                     if self.selected_target().as_ref() == Some(&target) {
                         // A lista que chegou durante a troca ficou de lado: agora ela decide (transcript novo ou sumiço).
-                        self.sidebar.moving.insert(target.clone(), Some(std::time::Instant::now()));
+                        if let Some(entry) = self.sidebar.moving.get_mut(&target) { entry.1 = Some(std::time::Instant::now()); }
                         let list = self.sessions_of(&target.server).to_vec();
                         self.follow_open(&list, window, cx);
+                        // A lista pode não mudar mais: passado o prazo, confere de novo para não deixar a conversa congelada.
+                        let again = target.clone();
+                        cx.spawn_in(window, async move |this, cx| {
+                            cx.background_executor().timer(Duration::from_secs(16)).await;
+                            let _ = this.update_in(cx, |this, window, cx| {
+                                if this.sidebar.moving.contains_key(&again) && this.selected_target().as_ref() == Some(&again) {
+                                    let list = this.sessions_of(&again.server).to_vec();
+                                    this.follow_open(&list, window, cx);
+                                }
+                            });
+                        }).detach();
                     } else {
                         self.sidebar.moving.remove(&target);
                     }

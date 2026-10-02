@@ -155,8 +155,20 @@ def test_windows_mata_as_sobras_numa_chamada_so_e_sem_arvore(monkeypatch, teimos
         chamadas.append(argv)
         if not teimoso:
             vivos.clear()
+        return SimpleNamespace(returncode=128 if teimoso else 0, stdout="", stderr="Acesso negado." if teimoso else "")
     monkeypatch.setattr(api_mod.subprocess, "run", run)
 
     assert api_mod._saiu([10, 11, 12]) is not teimoso
     assert chamadas == [[r"C:\Windows\System32\taskkill.exe", "/F", "/PID", "11", "/PID", "12"]]
     assert esperas[0] < 15
+
+
+def test_windows_sem_taskkill_nao_finge_que_matou(monkeypatch):
+    from types import SimpleNamespace
+    import app.api as api_mod
+    monkeypatch.setattr(api_mod, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(api_mod.shutil, "which", lambda n: None)
+    monkeypatch.setattr(api_mod.procinfo, "pid_vivo", lambda p: p == 11)
+    monkeypatch.setattr(api_mod.registry_mod, "_esperar_saida", lambda pids, teto: None)
+    monkeypatch.setattr(api_mod.subprocess, "run", lambda *a, **kw: pytest.fail("rodou sem taskkill"))
+    assert api_mod._saiu([10, 11]) is False
