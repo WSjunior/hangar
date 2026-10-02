@@ -5,3 +5,5 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+# float_roundtrip: o float lido sai com o mesmo valor que o float() do Python, e o repr bate.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
