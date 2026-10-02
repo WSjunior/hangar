@@ -177,7 +177,9 @@ impl Hangar {
         }
         if self.find.reveal > 0 {
             self.find.reveal -= 1;
-            self.redraw(Area::Conversation, cx);
+            // Daqui o desenho da conversa ainda está em curso: o aviso só agenda o próximo quadro depois dele.
+            let pane = self.panes.conversation.entity_id();
+            cx.defer(move |cx| cx.notify(pane));
         }
     }
 

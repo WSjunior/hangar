@@ -17,7 +17,7 @@ import { Icon, type IconName } from '../../src/ui/Icon';
 import { useServers } from '../../src/stores/servers';
 import * as m from '../../src/paraglide/messages';
 
-const NATIVES: ShortcutInternalAction[] = ['terminal', 'modo', 'navegador', 'anexos', 'rodar'];
+const NATIVES: ShortcutInternalAction[] = ['terminal', 'modo', 'navegador', 'anexos', 'rodar', 'externo'];
 const NATIVE_LABEL: Record<ShortcutInternalAction, () => string> = {
   terminal: m.native_shortcuts_native_terminal,
   modo: m.native_shortcuts_native_modo,

@@ -1129,10 +1129,12 @@ fn shortcut_grid(inner: f32, count: usize) -> (usize, f32) {
 }
 
 /// Como cada emulador recebe o comando a rodar; `$TERMINAL` desconhecido segue a convenção do `-e`.
+#[cfg(any(target_os = "linux", test))]
 const TERMINALS: [(&str, &[&str]); 8] = [("kitty", &[]), ("ghostty", &["-e"]), ("wezterm", &["start", "--"]),
     ("alacritty", &["-e"]), ("foot", &[]), ("konsole", &["-e"]), ("gnome-terminal", &["--"]), ("xterm", &["-e"])];
 
 /// Programa e argumentos que abrem `tmux attach` na sessão: o `$TERMINAL`, senão o primeiro emulador conhecido instalado.
+#[cfg(any(target_os = "linux", test))]
 fn linux_launch(chosen: Option<&str>, installed: impl Fn(&str) -> bool, name: &str) -> Option<(String, Vec<String>)> {
     let prefix = |bin: &str| -> Vec<String> {
         let base = std::path::Path::new(bin).file_name().and_then(|n| n.to_str()).unwrap_or(bin);
