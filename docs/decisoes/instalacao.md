@@ -25,7 +25,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   própria atualização pôs o checkout (`<config>/.hangar-update/branch`) escapam da recusa de
   branch de trabalho; esvaziar o campo volta para a main com o mesmo resgate. Branch ausente no
   origin falha antes de tocar no disco, e fora da main a tela é compilada aqui (o CI só publica o
-  dist da main) e o auto-update fica parado.
+  dist da main) e o auto-update fica parado. Passo de `docs/atualizacoes/` aplicado na branch de
+  teste continua no registro ao voltar pra main; e, esvaziado o campo, o auto-update não tira o
+  checkout da branch de teste: a volta é pelo botão.
 - **O botão Atualizar NÃO roda o instalador.** Sozinho ele faz dist do CI, `uv sync`, `npm ci` por
   hash do lock, restart e prova de vida por **pid** (HTTP o processo velho também responde).
   Wrapper/tarefa/statusline só chegam por passo em `docs/atualizacoes/` — o pre-commit e o CI

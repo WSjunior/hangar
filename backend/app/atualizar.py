@@ -124,16 +124,23 @@ def _canal() -> str:
     """
     try:
         return _caminho_canal().read_text(encoding="utf-8").strip()
-    except OSError:
+    except FileNotFoundError:
+        return ""
+    except OSError as e:
+        _log.warning("nao consegui ler a branch da atualizacao: %s", e)
         return ""
 
 
 def _marcar_canal(branch: str) -> None:
-    if branch in _PRINCIPAIS:
-        _caminho_canal().unlink(missing_ok=True)
-        return
-    _caminho_canal().parent.mkdir(parents=True, exist_ok=True)
-    _caminho_canal().write_text(branch, encoding="utf-8")
+    # Nunca levanta: quem chama é o motor (e o rollback), que só fala pelo estado.
+    try:
+        if branch in _PRINCIPAIS:
+            _caminho_canal().unlink(missing_ok=True)
+            return
+        _caminho_canal().parent.mkdir(parents=True, exist_ok=True)
+        _caminho_canal().write_text(branch, encoding="utf-8")
+    except OSError as e:
+        _log.warning("nao consegui gravar a branch da atualizacao (%s): %s", branch, e)
 
 
 # ─── Estado ────────────────────────────────────────────────────────────────────────────────────
@@ -455,6 +462,12 @@ def checar() -> dict:
 
     branch = _git("rev-parse", "--abbrev-ref", "HEAD", timeout=30).stdout.strip()
     destino = alvo()
+    if not _troca_de_branch({"branch": branch, "alvo": destino}):
+        # Contra o `origin/<alvo>`, que é o que o reset alcança, e não contra o upstream: branch sem
+        # upstream dava ahead 0, ficava sem resgate e perdia o commit local no `reset --hard`.
+        r = _git("rev-list", "--left-right", "--count", f"origin/{destino}...HEAD", timeout=30)
+        if r.returncode == 0 and len(contas := r.stdout.split()) == 2:
+            behind, ahead = int(contas[0]), int(contas[1])
     return {
         "pode": not faltando,
         "faltando": faltando,
@@ -516,6 +529,11 @@ def resguardar(pre: dict) -> str | None:
 
 # ─── As etapas ─────────────────────────────────────────────────────────────────────────────────
 
+def _avisar(texto: str) -> None:
+    _escrever(avisos=list(estado().get("avisos") or []) + [texto])
+    _log.warning(texto)
+
+
 def _troca_de_branch(pre: dict) -> bool:
     atual, destino = pre.get("branch"), pre.get("alvo") or "main"
     # Sem branch configurada, a master segue recebendo a main como sempre recebeu.
@@ -536,16 +554,18 @@ def _trocar_para(destino: str) -> None:
             if b.returncode != 0 or _git("rev-parse", "--verify", f"refs/heads/{nome}",
                                          timeout=30).returncode != 0:
                 raise FalhaDeResgate(f"nao consegui guardar a branch local {destino}: {_cauda(b)}")
+            _avisar(f"a branch local {destino} tinha commits fora do origin: guardados em {nome}")
         args = ("checkout", destino)
     else:
         args = ("checkout", "-b", destino, "--track", f"origin/{destino}")
     c = _git(*args, timeout=120)
     if c.returncode != 0:
         # Arquivo solto que colide com a outra branch recusa o checkout: guarda e tenta de novo.
-        s = _git("stash", "push", "--include-untracked", "-m", f"hangar antes de trocar para {destino}",
-                 timeout=120)
+        etiqueta = f"hangar antes de trocar para {destino}"
+        s = _git("stash", "push", "--include-untracked", "-m", etiqueta, timeout=120)
         if s.returncode != 0:
             raise RuntimeError(f"nao consegui guardar o que estava no disco: {_cauda(s)}")
+        _avisar(f"arquivos soltos guardados no stash '{etiqueta}'")
         c = _git(*args, timeout=120)
         if c.returncode != 0:
             raise RuntimeError(f"nao consegui trocar para a branch {destino}: {_cauda(c)}")
@@ -788,7 +808,7 @@ def _executar(porta: int) -> dict:
     # no terminalzinho, mesmo tendo sido registrada.
     _escrever(fase="rodando", ok=None, erro=None, resgate=None, voltou=None, no_ar=None,
               commit_de="", commit_para=None, pid=os.getpid(),
-              reiniciar_manual=False, shell_mudou=False, log=[])
+              reiniciar_manual=False, shell_mudou=False, log=[], avisos=[])
     pre = checar()
     de = pre.get("commit", "")
     _escrever(commit_de=de)
@@ -838,7 +858,12 @@ def _executar(porta: int) -> dict:
         # gira a barra pra sempre, e a pessoa não descobre nem que falhou nem por quê. Medido: a
         # lista de tipos que estava aqui não pegava `PassoFalhou`, e um passo com prova falha
         # produzia exatamente isso.
-        return _falhou(str(e), de=de, porta=porta)
+        msg = str(e)
+        # Falha depois da troca: o checkout não voltou, e a tela precisa dizer onde ele está.
+        atual = _git("rev-parse", "--abbrev-ref", "HEAD", timeout=30).stdout.strip()
+        if atual and pre.get("branch") and atual != pre.get("branch"):
+            msg += f" (o checkout ficou na branch {atual})"
+        return _falhou(msg, de=de, porta=porta)
 
     # O restart fica FORA do try acima, e a diferença não é cosmética: tudo lá em cima falha com o
     # servidor velho ainda no ar (`no_ar=True` é verdade). Aqui não — `systemctl restart` para o
@@ -1174,8 +1199,18 @@ def _atualizar_dist() -> str | None:
         npm = shutil.which("npm")
         if not npm:
             return "tela não atualizada: ela precisa ser compilada aqui e não achei o npm"
+        # Cópia, e não rename: o build escreve no `dist`, e o servidor no ar segue servindo dele.
+        # Sem a cópia o rollback voltaria o código anterior servindo a tela nova.
+        dist, velho = REPO / "frontend" / "dist", _DIST_VELHO()
+        try:
+            shutil.rmtree(velho, ignore_errors=True)
+            if dist.is_dir():
+                shutil.copytree(dist, velho)
+        except OSError as e:
+            return f"tela não atualizada: não consegui guardar a tela anterior ({e})"
         b = _rodar([npm, "--prefix", "frontend", "run", "build"], cwd=REPO, timeout=600)
-        if b.returncode != 0 or not (REPO / "frontend" / "dist" / "index.html").is_file():
+        if b.returncode != 0 or not (dist / "index.html").is_file():
+            _dist_velho_voltar()
             return f"tela não atualizada: o build local do frontend falhou: {_cauda(b, 4)}"
         return None
     sha_local = _git("rev-parse", "HEAD", timeout=30).stdout.strip()

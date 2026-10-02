@@ -5586,16 +5586,27 @@ def _origem_do_terminal_ok(request: Request) -> bool:
 
 # ─── Atualizar ─────────────────────────────────────────────────────────────────────────────────
 
-def _mudancas_pendentes() -> list[dict]:
+_ALVOS_AUSENTES_AVISADOS: set[str] = set()
+
+
+def _mudancas_pendentes() -> list[dict] | None:
     """Os commits que entraram em `origin/<alvo>` e ainda não estão aqui — o changelog da tela.
 
     Título de commit, e não um `CHANGELOG.md` mantido à mão: as mensagens deste repo já são
     descritivas, e um arquivo à parte seria uma segunda cópia pra envelhecer. Passo que merecer
     texto próprio ganha um arquivo em `docs/atualizacoes/`, cujo corpo entra junto.
+
+    `None` quando o git não compara (ref do alvo ainda não buscada): a tela oferece o Atualizar, e
+    é o motor que diz o motivo. Lista vazia ali seria "Tudo em dia" sem sinal nenhum.
     """
-    p = atualizar._git("log", "--format=%h%x00%s", f"HEAD..origin/{atualizar.alvo()}", timeout=30)
+    destino = atualizar.alvo()
+    p = atualizar._git("log", "--format=%h%x00%s", f"HEAD..origin/{destino}", timeout=30)
     if p.returncode != 0:
-        return []
+        # Uma vez por alvo e processo: o polling da tela passa aqui a cada 2s.
+        if destino not in _ALVOS_AUSENTES_AVISADOS:
+            _ALVOS_AUSENTES_AVISADOS.add(destino)
+            diag.registrar("atualizacao.alvo_ausente", "aviso", detalhe=f"git log rc={p.returncode}")
+        return None
     linhas = []
     for linha in p.stdout.splitlines():
         sha, _, titulo = linha.partition("\x00")
@@ -5626,6 +5637,11 @@ async def get_atualizacao(procurar: bool = False):
             atualizar._git("fetch", "origin", timeout=120)
         pre = atualizar.checar()
         mudancas = _mudancas_pendentes()
+        # Checkout fora da branch do alvo (campo esvaziado na branch de teste, ou branch já contida
+        # na main) não tem commit a puxar, mas tem troca a fazer.
+        troca = atualizar._troca_de_branch(pre) and not pre.get("branch_de_trabalho")
+        disponivel = mudancas is None or bool(mudancas) or troca
+        mudancas = mudancas or []
         return {
             "versoes": {"repo": diag._git_describe(), "backend": diag.VERSAO_EM_EXECUCAO},
             # A versão que a pessoa lê: data do commit + hash. `remoto` é o que está em
@@ -5634,7 +5650,7 @@ async def get_atualizacao(procurar: bool = False):
                                "backend": diag.VERSAO_LEGIVEL_EM_EXECUCAO,
                                "remoto": diag.versao_legivel(f"origin/{atualizar.alvo()}")},
             "atras": len(mudancas),
-            "atualizacao_disponivel": bool(mudancas),
+            "atualizacao_disponivel": disponivel,
             "mudancas": mudancas,
             "passos": [{"id": s["id"], "titulo": s["titulo"], "texto": s["texto"]}
                        for s in atualizacoes.pendentes()],
@@ -5656,8 +5672,8 @@ async def post_atualizacao_iniciar():
     if pre.get("branch_de_trabalho"):
         raise HTTPException(409, detail=erro(
             "erro_atualizacao_branch",
-            f"este checkout esta na branch {pre.get('branch')}, nao na main",
-            branch=pre.get("branch")))
+            f"este checkout esta na branch {pre.get('branch')}, nao na {pre.get('alvo') or 'main'}",
+            branch=pre.get("branch"), alvo=pre.get("alvo") or "main"))
     if not pre.get("pode"):
         faltando = pre.get("faltando") or []
         raise HTTPException(409, detail=erro(
@@ -5725,6 +5741,9 @@ def _auto_update_motivo() -> Optional[str]:
         return "dependencias faltando"
     if pre.get("branch_de_trabalho"):
         return f"checkout na branch {pre.get('branch')}"
+    # Trocar de branch é decisão de quem aperta o botão, nunca do laço.
+    if atualizar._troca_de_branch(pre):
+        return f"checkout na branch {pre.get('branch')}, fora do alvo {pre.get('alvo')}"
     # divergiu ANTES de ahead: divergiu = ahead>0 AND behind>0, e o motivo mais preciso e o dela.
     if pre.get("divergiu"):
         return "checkout divergiu de origin/main"

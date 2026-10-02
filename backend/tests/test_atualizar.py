@@ -1170,3 +1170,74 @@ def test_fora_da_main_a_tela_e_compilada_e_nao_baixada(repo, monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("não devia baixar do CI")))
     assert atualizar._atualizar_dist() is None
     assert chamadas == [["/usr/bin/npm", "--prefix", "frontend", "run", "build"]]
+
+
+def test_branch_configurada_sem_upstream_nao_perde_commit_local(repo, canal):
+    """Sem upstream o cabeçalho do status dá ahead 0: sem resgate, o reset levava o commit."""
+    _git(repo, "checkout", "-q", "--no-track", "-b", "teste", "origin/teste")
+    _commit(repo, "local.txt", "commit local\n")
+    local = _rev(repo, "HEAD")
+    _commit(canal, "u.txt", "nova\n")
+    _git(canal, "push", "-q", "origin", "teste")          # divergiu: o ff recusa e vem o reset
+    assert atualizar.checar()["ahead"] == 1
+    final = atualizar.executar()
+    assert final["ok"] is True and _rev(repo, "HEAD") == _rev(canal, "HEAD")
+    assert _rev(repo, f"refs/heads/{final['resgate']}") == local
+
+
+def test_troca_que_falha_depois_diz_onde_o_checkout_ficou(repo, canal, monkeypatch):
+    def _quebra():
+        raise RuntimeError("passo quebrou")
+    monkeypatch.setattr(atualizar, "_aplicar_passos", _quebra)
+    final = atualizar.executar()
+    assert final["ok"] is False and "passo quebrou" in final["erro"]
+    assert "o checkout ficou na branch teste" in final["erro"]
+
+
+def test_resgate_da_branch_local_aparece_nos_avisos(repo, canal):
+    _git(repo, "checkout", "-q", "-b", "teste")
+    _commit(repo, "x.txt", "historia propria\n")
+    _git(repo, "checkout", "-q", "main")
+    final = atualizar.executar()
+    assert final["ok"] is True
+    assert any("resgate/" in a and "teste" in a for a in final["avisos"])
+
+
+def test_marca_da_branch_que_falha_nao_derruba_o_motor(repo):
+    caminho = atualizar._caminho_canal()
+    caminho.mkdir(parents=True)                         # diretório no lugar do arquivo: OSError
+    atualizar._marcar_canal("teste")
+    atualizar._marcar_canal("main")
+    assert atualizar._canal() == ""
+
+
+def _build_local(repo, monkeypatch, ok=True):
+    _git(repo, "checkout", "-q", "-b", "teste")
+    dist = repo / "frontend" / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text("tela da main", encoding="utf-8")
+    monkeypatch.setattr(atualizar.shutil, "which", lambda n: "/usr/bin/npm" if n == "npm" else None)
+    rodar_real = atualizar._rodar
+    def _build(args, cwd=None, timeout=0, log=None):
+        if args[0] != "/usr/bin/npm":
+            return rodar_real(args, cwd=cwd, timeout=timeout, log=log)
+        (dist / "index.html").write_text("tela da teste", encoding="utf-8")
+        return subprocess.CompletedProcess(args, 0 if ok else 1, "", "erro X")
+    monkeypatch.setattr(atualizar, "_rodar", _build)
+    return dist
+
+
+def test_build_local_guarda_a_tela_anterior_pro_rollback(repo, monkeypatch):
+    dist = _build_local(repo, monkeypatch)
+    assert atualizar._atualizar_dist() is None
+    assert (dist / "index.html").read_text(encoding="utf-8") == "tela da teste"
+    assert (atualizar._DIST_VELHO() / "index.html").read_text(encoding="utf-8") == "tela da main"
+    atualizar._dist_velho_voltar()
+    assert (dist / "index.html").read_text(encoding="utf-8") == "tela da main"
+
+
+def test_build_local_que_falha_devolve_a_tela_anterior(repo, monkeypatch):
+    dist = _build_local(repo, monkeypatch, ok=False)
+    aviso = atualizar._atualizar_dist()
+    assert aviso and "erro X" in aviso
+    assert (dist / "index.html").read_text(encoding="utf-8") == "tela da main"
