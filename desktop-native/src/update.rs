@@ -171,8 +171,8 @@ pub fn report_alive() {
 /// Por que o "Atualizar tudo" não mexe no servidor desta máquina.
 #[derive(Clone, Debug, PartialEq)]
 enum Hold {
-    /// A atualização alinha o disco com a main e arrastaria a branch.
-    WorkBranch(String),
+    /// A atualização alinha o disco com a branch alvo (`pre_voo.alvo`, main em servidor antigo) e arrastaria a branch.
+    WorkBranch(String, String),
     /// Mudanças locais, commits não enviados ou divergência: o motor faria stash + reset e tiraria do disco o trabalho de
     /// outras sessões. É o mesmo portão da atualização automática.
     LocalChanges,
@@ -186,7 +186,7 @@ impl Hold {
 
     fn text(&self) -> String {
         match self {
-            Hold::WorkBranch(branch) => tr("app_update_hold_branch").replace("{branch}", branch),
+            Hold::WorkBranch(branch, target) => tr("app_update_hold_branch").replace("{branch}", branch).replace("{alvo}", target),
             Hold::LocalChanges => tr("app_update_hold_changes"),
             Hold::Running => tr("app_update_hold_running"),
             Hold::Missing(what) => tr("app_update_hold_missing").replace("{what}", what),
@@ -217,7 +217,9 @@ fn behind(state: &Value, target: &str) -> bool {
 /// Lido do mesmo `pre_voo` que o servidor usa para recusar o `iniciar`: o botão sabe antes do clique.
 fn hold(state: &Value) -> Option<Hold> {
     let pre = &state["pre_voo"];
-    if pre["branch_de_trabalho"].as_bool() == Some(true) { return Some(Hold::WorkBranch(pre["branch"].as_str().unwrap_or("?").to_owned())); }
+    if pre["branch_de_trabalho"].as_bool() == Some(true) {
+        return Some(Hold::WorkBranch(pre["branch"].as_str().unwrap_or("?").to_owned(), pre["alvo"].as_str().unwrap_or("main").to_owned()));
+    }
     let count = |key: &str| pre[key].as_u64().unwrap_or(0);
     if count("sujo") > 0 || count("ahead") > 0 || pre["divergiu"].as_bool() == Some(true) { return Some(Hold::LocalChanges); }
     if state["estado"]["fase"].as_str() == Some("rodando") { return Some(Hold::Running); }
@@ -694,7 +696,10 @@ mod tests {
     fn plan_leaves_a_work_branch_or_local_changes_alone_and_updates_the_app() {
         let branch = server(serde_json::json!({"atualizacao_disponivel": true, "pre_voo": {"branch": "feat-x", "branch_de_trabalho": true}}));
         assert_eq!(plan(APP, Some("0.1.0.110"), Some(&branch)),
-            Plan { server: ServerStep::Held(Hold::WorkBranch("feat-x".into())), app: true });
+            Plan { server: ServerStep::Held(Hold::WorkBranch("feat-x".into(), "main".into())), app: true });
+        let target = server(serde_json::json!({"atualizacao_disponivel": true, "pre_voo": {"branch": "outra", "alvo": "teste", "branch_de_trabalho": true}}));
+        assert_eq!(plan(APP, Some("0.1.0.110"), Some(&target)).server,
+            ServerStep::Held(Hold::WorkBranch("outra".into(), "teste".into())));
         for extra in [serde_json::json!({"sujo": 2}), serde_json::json!({"ahead": 1}), serde_json::json!({"divergiu": true})] {
             let s = server(serde_json::json!({"atualizacao_disponivel": true, "pre_voo": extra}));
             assert_eq!(plan(APP, Some("0.1.0.110"), Some(&s)), Plan { server: ServerStep::Held(Hold::LocalChanges), app: true });

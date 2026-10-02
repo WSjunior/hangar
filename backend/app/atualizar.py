@@ -140,7 +140,8 @@ def _marcar_canal(branch: str) -> None:
         _caminho_canal().parent.mkdir(parents=True, exist_ok=True)
         _caminho_canal().write_text(branch, encoding="utf-8")
     except OSError as e:
-        _log.warning("nao consegui gravar a branch da atualizacao (%s): %s", branch, e)
+        # `_avisar` põe na tela e no log; o log `hangar.*` chega ao diário pelo `DiaryHandler`.
+        _avisar(f"nao consegui gravar a branch da atualizacao ({branch}): {e}")
 
 
 # ─── Estado ────────────────────────────────────────────────────────────────────────────────────
@@ -431,6 +432,10 @@ def _topologia() -> str:
     return "manual"
 
 
+# Alvos cuja contagem já falhou neste processo: o `checar` roda a cada poll da tela.
+_CONTAGEM_FALHOU: set[str] = set()
+
+
 def _falta(*programas: str) -> list[str]:
     return [p for p in programas if not shutil.which(p)]
 
@@ -462,12 +467,20 @@ def checar() -> dict:
 
     branch = _git("rev-parse", "--abbrev-ref", "HEAD", timeout=30).stdout.strip()
     destino = alvo()
+    ahead_incerto = False
     if not _troca_de_branch({"branch": branch, "alvo": destino}):
         # Contra o `origin/<alvo>`, que é o que o reset alcança, e não contra o upstream: branch sem
         # upstream dava ahead 0, ficava sem resgate e perdia o commit local no `reset --hard`.
         r = _git("rev-list", "--left-right", "--count", f"origin/{destino}...HEAD", timeout=30)
         if r.returncode == 0 and len(contas := r.stdout.split()) == 2:
             behind, ahead = int(contas[0]), int(contas[1])
+            _CONTAGEM_FALHOU.discard(destino)
+        elif _git("remote", "get-url", "origin", timeout=30).returncode == 0:
+            # Sem a contagem, o número do upstream pode ser o 0 que perde commit: o motor resgata.
+            ahead_incerto = True
+            if destino not in _CONTAGEM_FALHOU:
+                _CONTAGEM_FALHOU.add(destino)
+                _log.warning("nao consegui contar os commits contra origin/%s: %s", destino, _cauda(r, 4))
     return {
         "pode": not faltando,
         "faltando": faltando,
@@ -483,6 +496,7 @@ def checar() -> dict:
         "branch_de_trabalho": branch not in (*_PRINCIPAIS, destino, _canal() or destino),
         "sujo": len(sujo_rastreado),
         "ahead": ahead,
+        "ahead_incerto": ahead_incerto,
         "behind": behind,
         "divergiu": ahead > 0 and behind > 0,
         "topologia": _topologia(),
@@ -499,14 +513,15 @@ class FalhaDeResgate(Exception):
 def resguardar(pre: dict) -> str | None:
     """Guarda o que existe hoje numa branch de resgate + stash. Devolve o nome, ou `None`.
 
-    Só faz alguma coisa quando há o que perder: arquivo rastreado modificado, commit local, ou uma
-    branch de trabalho. Sem nada disso, devolve `None` e a atualização segue — criar branch de
+    Só faz alguma coisa quando há o que perder: arquivo rastreado modificado, commit local (ou
+    contagem de commits que falhou), ou uma branch de trabalho. Sem nada disso, devolve `None` e a atualização segue — criar branch de
     resgate a cada `git pull` de repo limpo só encheria o repo de refs mortas.
 
     **Confere que a ref existe antes de devolver.** É o que separa "automático" de "irreversível":
     quem chama só pode dar `reset --hard` depois desta função ter provado que há para onde voltar.
     """
-    tem_o_que_perder = pre.get("sujo") or pre.get("ahead") or pre.get("branch_de_trabalho")
+    tem_o_que_perder = (pre.get("sujo") or pre.get("ahead") or pre.get("ahead_incerto")
+                        or pre.get("branch_de_trabalho"))
     if not tem_o_que_perder:
         return None
 
@@ -1179,6 +1194,15 @@ def _dist_velho_voltar() -> None:
     velho.rename(dist)
 
 
+def _voltar_tela() -> str:
+    """Devolve a tela guardada ao `dist`. Vazio quando voltou (ou não havia o que voltar)."""
+    try:
+        _dist_velho_voltar()
+        return ""
+    except OSError as e:
+        return str(e)
+
+
 def _atualizar_dist() -> str | None:
     """Troca o `frontend/dist` pelo build que o CI publicou. Devolve o aviso quando não deu.
 
@@ -1207,11 +1231,19 @@ def _atualizar_dist() -> str | None:
             if dist.is_dir():
                 shutil.copytree(dist, velho)
         except OSError as e:
+            # Cópia pela metade no `.dist-velho` viraria a tela do rollback.
+            shutil.rmtree(velho, ignore_errors=True)
             return f"tela não atualizada: não consegui guardar a tela anterior ({e})"
-        b = _rodar([npm, "--prefix", "frontend", "run", "build"], cwd=REPO, timeout=600)
+        try:
+            b = _rodar([npm, "--prefix", "frontend", "run", "build"], cwd=REPO, timeout=600)
+        except Exception:
+            if erro := _voltar_tela():
+                _log.warning("a tela anterior nao voltou depois do build interrompido: %s", erro)
+            raise
         if b.returncode != 0 or not (dist / "index.html").is_file():
-            _dist_velho_voltar()
-            return f"tela não atualizada: o build local do frontend falhou: {_cauda(b, 4)}"
+            erro = _voltar_tela()
+            return (f"tela não atualizada: o build local do frontend falhou: {_cauda(b, 4)}"
+                    + (f"; e a tela anterior não voltou: {erro}" if erro else ""))
         return None
     sha_local = _git("rev-parse", "HEAD", timeout=30).stdout.strip()
     tmp = Path(tempfile.mkdtemp(prefix=".dist-baixado.", dir=REPO / "frontend"))

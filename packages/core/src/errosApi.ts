@@ -431,7 +431,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_catalogo_omp_indisponivel: () => m.erro_catalogo_omp_indisponivel(),
   erro_pi_recusou_troca: (p) => m.erro_pi_recusou_troca({ provider: String(p.provider), id: String(p.id), thinking: String(p.thinking) }),
   erro_reinicio_indisponivel: () => m.erro_reinicio_indisponivel(),
-  erro_atualizacao_branch: () => m.erro_atualizacao_branch(),
+  erro_atualizacao_branch: (p) => m.erro_atualizacao_branch({ alvo: String(p.alvo ?? 'main') }),
   erro_atualizacao_dependencia: (p) => m.erro_atualizacao_dependencia({ faltando: fmtParam(p.faltando) }),
   erro_atualizacao_ja_rodando: () => m.erro_atualizacao_ja_rodando(),
 

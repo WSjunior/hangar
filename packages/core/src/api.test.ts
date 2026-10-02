@@ -635,6 +635,13 @@ describe('mensagemDeErro (parecer task 10)', () => {
     );
   });
 
+  it('recusa por branch nomeia o alvo do 409, e main quando o servidor não manda', () => {
+    expect(mensagemDeErro('erro_atualizacao_branch', { branch: 'outra', alvo: 'teste' })).toBe(
+      'A atualização só roda na teste. Este checkout está noutra branch.');
+    expect(mensagemDeErro('erro_atualizacao_branch', { branch: 'outra' })).toBe(
+      'A atualização só roda na main. Este checkout está noutra branch.');
+  });
+
   it('code herdado do prototipo devolve undefined, nao quebra nem chama funcao errada', () => {
     expect(mensagemDeErro('constructor')).toBeUndefined();
     expect(mensagemDeErro('__proto__')).toBeUndefined();

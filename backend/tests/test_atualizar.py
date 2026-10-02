@@ -1209,6 +1209,8 @@ def test_marca_da_branch_que_falha_nao_derruba_o_motor(repo):
     atualizar._marcar_canal("teste")
     atualizar._marcar_canal("main")
     assert atualizar._canal() == ""
+    avisos = atualizar.estado()["avisos"]
+    assert len(avisos) == 2 and all("nao consegui gravar a branch" in a for a in avisos)
 
 
 def _build_local(repo, monkeypatch, ok=True):
@@ -1240,4 +1242,57 @@ def test_build_local_que_falha_devolve_a_tela_anterior(repo, monkeypatch):
     dist = _build_local(repo, monkeypatch, ok=False)
     aviso = atualizar._atualizar_dist()
     assert aviso and "erro X" in aviso
+    assert (dist / "index.html").read_text(encoding="utf-8") == "tela da main"
+
+
+def test_contagem_de_commits_que_falha_resgata_por_precaucao(repo, canal, monkeypatch):
+    """Sem a contagem contra o alvo, o 0 do upstream é o caso que perde commit: o motor resgata."""
+    monkeypatch.setattr(atualizar.config.settings, "update_branch", "")
+    monkeypatch.setattr(atualizar, "_CONTAGEM_FALHOU", set())
+    real = atualizar._git
+    def _sem_contagem(*args, **kw):
+        if args[0] == "rev-list":
+            return subprocess.CompletedProcess(args, 128, "fatal: bad revision", "")
+        return real(*args, **kw)
+    monkeypatch.setattr(atualizar, "_git", _sem_contagem)
+    pre = atualizar.checar()
+    assert pre["ahead_incerto"] is True and pre["ahead"] == 0
+    final = atualizar.executar()
+    assert final["ok"] is True and final["resgate"]
+    assert _git(repo, "rev-parse", "--verify", f"refs/heads/{final['resgate']}").returncode == 0
+
+
+def test_copia_da_tela_que_falha_nao_deixa_metade_pro_rollback(repo, monkeypatch):
+    dist = _build_local(repo, monkeypatch)
+    def _copia_pela_metade(origem, destino):
+        destino.mkdir(parents=True)
+        (destino / "pedaco.js").write_text("x", encoding="utf-8")
+        raise OSError("disco cheio")
+    monkeypatch.setattr(atualizar.shutil, "copytree", _copia_pela_metade)
+    aviso = atualizar._atualizar_dist()
+    assert aviso and "disco cheio" in aviso
+    assert not atualizar._DIST_VELHO().exists()
+    assert (dist / "index.html").read_text(encoding="utf-8") == "tela da main"
+
+
+def test_tela_anterior_que_nao_volta_aparece_no_aviso(repo, monkeypatch):
+    _build_local(repo, monkeypatch, ok=False)
+    def _nao_volta():
+        raise OSError("arquivo preso")
+    monkeypatch.setattr(atualizar, "_dist_velho_voltar", _nao_volta)
+    aviso = atualizar._atualizar_dist()
+    assert "erro X" in aviso and "a tela anterior não voltou: arquivo preso" in aviso
+
+
+def test_build_que_estoura_o_prazo_devolve_a_tela_anterior(repo, monkeypatch):
+    dist = _build_local(repo, monkeypatch)
+    rodar_real = atualizar._rodar
+    def _estoura(args, cwd=None, timeout=0, log=None):
+        if args[0] != "/usr/bin/npm":
+            return rodar_real(args, cwd=cwd, timeout=timeout, log=log)
+        (dist / "index.html").write_text("meia tela", encoding="utf-8")
+        raise subprocess.TimeoutExpired(args, timeout)
+    monkeypatch.setattr(atualizar, "_rodar", _estoura)
+    with pytest.raises(subprocess.TimeoutExpired):
+        atualizar._atualizar_dist()
     assert (dist / "index.html").read_text(encoding="utf-8") == "tela da main"

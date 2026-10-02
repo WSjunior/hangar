@@ -5602,11 +5602,13 @@ def _mudancas_pendentes() -> list[dict] | None:
     destino = atualizar.alvo()
     p = atualizar._git("log", "--format=%h%x00%s", f"HEAD..origin/{destino}", timeout=30)
     if p.returncode != 0:
-        # Uma vez por alvo e processo: o polling da tela passa aqui a cada 2s.
+        # Uma vez por alvo enquanto falhar: o polling da tela passa aqui a cada 2s.
         if destino not in _ALVOS_AUSENTES_AVISADOS:
             _ALVOS_AUSENTES_AVISADOS.add(destino)
-            diag.registrar("atualizacao.alvo_ausente", "aviso", detalhe=f"git log rc={p.returncode}")
+            diag.registrar("atualizacao.alvo_ausente", "aviso",
+                           detalhe=f"origin/{destino} rc={p.returncode}: {atualizar._cauda(p, 3)}")
         return None
+    _ALVOS_AUSENTES_AVISADOS.discard(destino)
     linhas = []
     for linha in p.stdout.splitlines():
         sha, _, titulo = linha.partition("\x00")
@@ -5749,6 +5751,8 @@ def _auto_update_motivo() -> Optional[str]:
         return "checkout divergiu de origin/main"
     if pre.get("ahead"):
         return "checkout adiante de origin/main (commits locais nao pushados)"
+    if pre.get("ahead_incerto"):
+        return "nao deu pra contar os commits locais"
     if not pre.get("behind"):
         return "em dia"
     if pre.get("sujo"):
