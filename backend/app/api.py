@@ -2754,10 +2754,14 @@ def _saiu(pids: list[int]) -> bool:
     """Espera os processos saírem; quem passar do prazo é morto à força. False = algum seguiu vivo mesmo assim."""
     registry_mod._esperar_saida(pids, 15.0)
     vivos = [p for p in pids if procinfo.pid_vivo(p)]
+    taskkill = shutil.which("taskkill") if os.name == "nt" and vivos else None
+    if os.name == "nt" and vivos and not taskkill:
+        _log.warning("troca de conta: taskkill não encontrado; processos %s seguem vivos", vivos)
     for p in vivos:
         try:
             if os.name == "nt":
-                subprocess.run(["taskkill", "/F", "/PID", str(p)], capture_output=True, timeout=10)
+                if taskkill:
+                    subprocess.run([taskkill, "/F", "/PID", str(p)], capture_output=True, timeout=10)
             else:
                 import signal
                 os.kill(p, signal.SIGKILL)
