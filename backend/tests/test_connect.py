@@ -19,7 +19,7 @@ def test_codigo_valido():
 
 
 @pytest.mark.parametrize("over", [
-    {"v": 2}, {"host": "hangar.dev.br"}, {"host": 'x".y.z'}, {"host": "a.b.c\n[x]"}, {"host": "a.b.c\n"},
+    {"v": 2}, {"host": "dev.br"}, {"host": 'x".y.z'}, {"host": "a.b.c\n[x]"}, {"host": "a.b.c\n"},
     {"token": 'abc"def' + "a" * 20}, {"token": "curto"}, {"server": "connect hangar"},
 ])
 def test_codigo_recusado(over):
