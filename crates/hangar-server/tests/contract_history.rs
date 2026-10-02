@@ -68,6 +68,22 @@ fn no_transcript_means_empty_history_and_no_etag() {
     assert_eq!(history_etag(&request(dir.path(), None)), None);
 }
 
+#[cfg(unix)]
+#[test]
+fn unreadable_transcript_is_an_error_not_empty_history() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("s.jsonl");
+    std::fs::write(&p, "{\"type\": \"user\"}\n").unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&p).is_ok() {
+        return; // root lê mesmo sem permissão
+    }
+    for limit in [None, Some(2)] {
+        assert!(merged_history(&request(dir.path(), limit)).is_err());
+    }
+}
+
 #[test]
 fn etag_changes_with_queue_and_limit() {
     let dir = tempfile::tempdir().unwrap();

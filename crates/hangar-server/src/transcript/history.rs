@@ -160,7 +160,12 @@ fn parse_from(req: &HistoryRequest, offset: u64) -> io::Result<Parsed> {
         prev_ts: 0.0,
         start_ts: if offset > 0 { transcript_start_ts(&req.jsonl) } else { 0.0 },
     };
-    let Ok(file) = File::open(&req.jsonl) else { return Ok(p) };
+    // Só a ausência é histórico vazio: um 200 vazio com ETag faria o aparelho apagar a conversa.
+    let file = match File::open(&req.jsonl) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(p),
+        Err(e) => return Err(e),
+    };
     let mut rd = BufReader::new(file);
     rd.seek(SeekFrom::Start(offset))?;
     // Reescrita do `--resume`: só o Claude regrava o jsonl.
