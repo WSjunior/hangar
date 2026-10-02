@@ -4,7 +4,9 @@ stream-json medido contra a CLI (docs/research/claude-sem-terminal-monocode.md).
 import asyncio
 import base64
 import json
+import sys
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1393,7 +1395,21 @@ def test_esforco_vai_como_comando_local_e_espera_o_turno(adapter):
     assert S.load("s1")["effort"] == "low"
 
 
-def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch):
+_CANO_RUST_FALSO = Path("/opt/hangar/bin/hangar-cano")
+
+
+@pytest.fixture(params=["cano.py", "hangar-cano"])
+def lancador_cano(request, monkeypatch) -> list[str]:
+    """O backend sobe o hangar-cano quando acha o binário e o cano.py quando não acha; o resto
+    do comando é o mesmo nos dois."""
+    if request.param == "cano.py":
+        monkeypatch.setattr(A.rust_bins, "find_bin", lambda name, env_var: None)
+        return [sys.executable, str(A._CANO_PY)]
+    monkeypatch.setattr(A.rust_bins, "find_bin", lambda name, env_var: _CANO_RUST_FALSO)
+    return [str(_CANO_RUST_FALSO)]
+
+
+def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch, lancador_cano):
     monkeypatch.setenv("TMUX_PANE", "%9")
     monkeypatch.setenv("TMUX", "/tmp/x")
     visto = {}
@@ -1435,12 +1451,16 @@ def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch):
     # onde ele escuta, pra o próximo backend religar.
     argv = list(visto["argv"])
     ultimo = len(argv) - 1 - argv[::-1].index("--")   # o escopo do systemd também tem um `--`
-    assert argv[ultimo + 1] == "/usr/bin/claude" and str(A._CANO_PY) in argv   # caminho resolvido
+    assert argv[ultimo + 1] == "/usr/bin/claude"       # caminho resolvido
+    inicio = argv.index(lancador_cano[-1]) - (len(lancador_cano) - 1)
+    assert argv[inicio:inicio + len(lancador_cano)] == lancador_cano
+    # A chave no cmdline é o que o registry.cwd_atual confere em /proc/<pid>/cmdline.
+    assert S.load("s1")["key"][:16] in " ".join(argv)
     assert S.load("s1")["cano"] == visto["cano"] and visto["cano"]["pid"] == 1
     assert visto["cano"]["escuta"].startswith(("unix:", "tcp:"))
 
 
-def test_sessao_com_motor_chama_o_hangar_engine_pelo_caminho_resolvido(sidecar, monkeypatch):
+def test_sessao_com_motor_chama_o_hangar_engine_pelo_caminho_resolvido(sidecar, monkeypatch, lancador_cano):
     # No Windows o `hangar-engine` é `.CMD`: o CreateProcess do cano não acha o nome sem extensão.
     visto = {}
 
@@ -1468,7 +1488,7 @@ def test_sessao_com_motor_chama_o_hangar_engine_pelo_caminho_resolvido(sidecar, 
     ad._esperar_initialize = lambda s: asyncio.sleep(0)   # type: ignore[method-assign]
     _run(ad._spawn(sess))
     argv = list(visto["argv"])
-    depois_do_cano = argv[argv.index("--", argv.index(str(A._CANO_PY))) + 1:]
+    depois_do_cano = argv[argv.index("--", argv.index(lancador_cano[-1])) + 1:]
     assert depois_do_cano[:3] == [exe, "--exec", "kimi"]
     assert depois_do_cano[depois_do_cano.index("--") + 1] == "claude"
 

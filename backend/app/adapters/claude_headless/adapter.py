@@ -35,7 +35,7 @@ import uuid
 from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
 
-from app import atomico, cotas, log_paths, model_args, pensamento, runtime_config
+from app import atomico, cotas, log_paths, model_args, pensamento, runtime_config, rust_bins
 from app.adapters.claude_headless import cano as cano_mod
 from app.adapters.claude_headless import sessions as hl_sessions
 from app.adapters.codex.adapter import _fmt_tok, _format_reset
@@ -2152,7 +2152,12 @@ async def subir_cano_processo(argv: list[str], *, cwd: str, env: dict, key: str,
     # acha o nome sem extensão (WinError 2) — sessão com motor não subia.
     argv = [exe, *argv[1:]]
     escuta, token = _escuta_nova(key, log.parent)
-    cmd = [sys.executable, str(_CANO_PY), "--escuta", escuta, "--log", str(log), "--cwd", cwd]
+    # Mesmo contrato do cano.py num processo nativo; sem o binário, o cano.py segue valendo.
+    cano_bin = rust_bins.find_bin("hangar-cano", "CP_RUST_CANO_BIN")
+    lancador = [str(cano_bin)] if cano_bin else [sys.executable, str(_CANO_PY)]
+    # A chave da sessão chega ao cmdline pelo `--log` (cano-<chave>.log): é por ela que
+    # registry.cwd_atual reconhece o processo.
+    cmd = [*lancador, "--escuta", escuta, "--log", str(log), "--cwd", cwd]
     if token:
         cmd += ["--token", token]
     cmd += ["--", *argv]
