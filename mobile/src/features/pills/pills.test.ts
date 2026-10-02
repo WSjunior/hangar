@@ -1,4 +1,4 @@
-import { pillLabels, reconcileChosen, semEsforco } from './pills';
+import { claudeEfforts, pillLabels, reconcileChosen, semEsforco } from './pills';
 import type { StatusFields } from '@hangar/core';
 
 function fakeStatus(over: Partial<StatusFields> = {}): StatusFields {
@@ -25,4 +25,11 @@ test('semEsforco detecta haiku case-insensitive', () => {
   expect(semEsforco('Opus')).toBe(false);
   expect(semEsforco(null)).toBe(false);
   expect(semEsforco(undefined)).toBe(false);
+});
+
+test('claudeEfforts oferece só os níveis do modelo', () => {
+  expect(claudeEfforts('Haiku 4.5')).toEqual([]);
+  expect(claudeEfforts('Sonnet 5.5')).toEqual(['low', 'medium', 'high', 'max']);
+  expect(claudeEfforts('Opus 5.5·1M')).toContain('ultracode');
+  expect(claudeEfforts(null)).toHaveLength(6);
 });

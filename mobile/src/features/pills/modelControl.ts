@@ -1,21 +1,20 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { parseStatusLine, getModelOptions, getPiModels, getKimiModels, getCodexModels, setModelEffort, setEngineModel, setPiModel, setKimiModel, setCodexModel } from '@hangar/core';
 import type { CodexModelsResponse } from '@hangar/core';
 import { chatStore } from '../../stores/chat';
 import * as m from '../../paraglide/messages';
-import { PillMenu, type PillMenuItem } from './PillMenu';
+import type { PillMenuItem } from './PillMenu';
 import { pillLabels, type Chosen } from './pills';
-import { RowPill } from './RowPill';
 import { spacedModel } from '../../chat/usage';
 
-interface Props {
+interface Args {
   serverId: string;
   name: string;
   provider: string | null;
   chosen: Chosen;
   onChosen: (next: Chosen) => void;
-  // Cada incremento abre o seletor (`/model` digitado ou escolhido na lista de comandos).
-  openSignal?: number;
+  // Fecha a folha de ajustes depois de trocar o modelo.
+  close: () => void;
 }
 
 // A statusline escreve "Opus5.5·1M" e a lista do Claude, "Opus 5.5": compara sem espaço, pontuação
@@ -30,7 +29,7 @@ type Catalog =
   | { kind: 'claude' | 'engine'; names: Map<string, string> }
   | { kind: 'other' };
 
-export function ModelPill({ serverId, name, provider, chosen, onChosen, openSignal = 0 }: Props) {
+export function useModelControl({ serverId, name, provider, chosen, onChosen, close }: Args) {
   const chat = chatStore(serverId, name);
   const statusLine = chat.use((s) => s.statusLine);
   const statusFields = useMemo(() => parseStatusLine(statusLine), [statusLine]);
@@ -41,16 +40,11 @@ export function ModelPill({ serverId, name, provider, chosen, onChosen, openSign
   const isKimi = provider === 'kimi';
 
   const [tempError, setTempError] = useState<string | null>(null);
-  const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [items, setItems] = useState<PillMenuItem[]>([]);
   const catalog = useRef<Catalog>({ kind: 'other' });
-
-  useEffect(() => {
-    if (openSignal) setOpen(true);
-  }, [openSignal]);
 
   const flash = useCallback((msg: string) => {
     setTempError(msg);
@@ -83,8 +77,13 @@ export function ModelPill({ serverId, name, provider, chosen, onChosen, openSign
         setItems(res.models.map((mo) => ({ id: mo.alias, label: mo.name, hint: mo.alias, selected: mo.name === current })));
       } else {
         const res = await getModelOptions(name);
-        catalog.current = { kind: res.kind, names: new Map(res.models.map((mo) => [mo.id, mo.name ?? mo.id])) };
-        setItems(res.models.map((mo) => ({
+        // Conta Claude: id longo (`claude-*`) é versão antiga presa no catálogo; o picker só aceita
+        // os apelidos vivos (default/opus/...), então as antigas nem aparecem.
+        const models = res.kind === 'claude' && !res.engine
+          ? res.models.filter((mo) => !mo.id.startsWith('claude-'))
+          : res.models;
+        catalog.current = { kind: res.kind, names: new Map(models.map((mo) => [mo.id, mo.name ?? mo.id])) };
+        setItems(models.map((mo) => ({
           id: mo.id, label: mo.name ?? mo.id, hint: mo.desc ?? undefined,
           selected: chosen.model ? (mo.name ?? mo.id) === chosen.model || mo.id === chosen.model : mesmoModelo(mo.name ?? mo.id, current),
         })));
@@ -96,16 +95,11 @@ export function ModelPill({ serverId, name, provider, chosen, onChosen, openSign
     }
   }, [name, isCodex, isPi, isKimi, chosen.model, statusFields?.model]);
 
-  useEffect(() => {
-    if (open) void load();
-    // Só ao abrir: recarregar a cada statusline nova piscaria a lista aberta.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
-
-  const handleSelect = useCallback(
+  const select = useCallback(
     async (it: PillMenuItem) => {
       const id = it.id ?? it.label;
       let closedEarly = false;
+      setNotice(null);
       try {
         const cat = catalog.current;
         if (isCodex && cat.kind === 'codex') {
@@ -116,17 +110,17 @@ export function ModelPill({ serverId, name, provider, chosen, onChosen, openSign
             : (md?.defaultEffort ?? md?.efforts[0]?.value ?? null);
           await setCodexModel(name, id, effort);
           onChosen({ model: id, effort });
-          setOpen(false);
+          close();
         } else if (isPi) {
           const alias = it.hint ?? it.label;
           const slash = alias.indexOf('/');
           const res = await setPiModel(name, { provider: slash >= 0 ? alias.slice(0, slash) : undefined, model: slash >= 0 ? alias.slice(slash + 1) : alias });
           onChosen({ ...chosen, model: res.current?.name ?? res.current?.id ?? it.label, effort: res.thinking ?? chosen.effort });
-          setOpen(false);
+          close();
         } else if (isKimi) {
           const res = await setKimiModel(name, { model: id });
           onChosen({ ...chosen, model: res.current?.name ?? it.label });
-          setOpen(false);
+          close();
         } else if (cat.kind === 'engine') {
           // Sessão de motor: o id do provedor é o rótulo, e a troca vale só nesta sessão.
           const res = await setEngineModel(name, { model: id, effort: chosen.effort ?? statusFields?.effort ?? undefined });
@@ -135,11 +129,11 @@ export function ModelPill({ serverId, name, provider, chosen, onChosen, openSign
             setNotice(m.modelo_trocado_esforco_nao({ erro: res.effort_error }));
             return;
           }
-          setOpen(false);
+          close();
         } else {
           // Fecha antes da resposta: a troca pode abrir uma confirmação na conversa, que a folha taparia.
           closedEarly = true;
-          setOpen(false);
+          close();
           const res = await setModelEffort(name, { model: id, scope: 'session' });
           if (res?.pending_confirm) return;
           const label = cat.kind === 'claude' ? cat.names.get(id) : undefined;
@@ -152,30 +146,15 @@ export function ModelPill({ serverId, name, provider, chosen, onChosen, openSign
         const status = (e as { status?: number }).status;
         const msg = e instanceof Error ? e.message : String(e);
         if (status === 409 || closedEarly) {
-          setOpen(false);
+          close();
           flash(msg || m.composer_sessao_trabalhando());
         } else {
           setNotice(msg);
         }
       }
     },
-    [name, isCodex, isPi, isKimi, chosen, onChosen, statusFields?.effort, flash],
+    [name, isCodex, isPi, isKimi, chosen, onChosen, statusFields?.effort, flash, close],
   );
 
-  return (
-    <>
-      <RowPill label={m.composer_modelo()} value={display} onPress={() => setOpen(true)} shrink={3} />
-      <PillMenu
-        open={open}
-        onClose={() => setOpen(false)}
-        items={items}
-        loading={loading}
-        error={error}
-        notice={notice}
-        onRetry={() => void load()}
-        onSelect={handleSelect}
-        title={m.composer_modelo()}
-      />
-    </>
-  );
+  return { model, display, failed: tempError !== null, items, loading, error, notice, load, select };
 }

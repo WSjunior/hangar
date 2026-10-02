@@ -8,9 +8,12 @@ import { UserBubble } from './UserBubble';
 import { AssistantBubble } from './AssistantBubble';
 import { PreviewBubble } from './PreviewBubble';
 import { ToolGroup } from './tools/ToolGroup';
+import { ToolCard } from './tools/ToolCard';
+import { AgentesRodando, PensamentoVivo, WorkingLine } from './LiveWork';
+import { turnStart } from './liveWork';
 import { ToolDetailSheet, type ToolDetailHandle } from './tools/ToolDetailSheet';
 import { foldConversation, type ConversationRow } from './tools/fold';
-import { agruparConversa, entraNoPensamento, foldTasks, hexParaRgb, planDisplayText, type ChatEvent, type SessionInfo } from '@hangar/core';
+import { agruparConversa, entraNoPensamento, foldTasks, hexParaRgb, planDisplayText, type AgentRun, type ChatEvent, type SessionInfo, type StateEvent } from '@hangar/core';
 import { useAparencia } from '../stores/aparencia';
 import { TaskList } from './TaskList';
 import type { PendingMsg } from './pending';
@@ -37,7 +40,18 @@ interface Props {
   serverId?: string;
   // Altura da caixa que flutua por cima do fim da lista: o último item rola até ficar acima dela.
   bottomInset?: number;
+  // Bloco "trabalhando" do fim (ausente = lista só de leitura, como a do subagente).
+  stateEvent?: StateEvent | null;
+  turnSeen?: number | null;
+  pensamento?: string;
+  ferramenta?: { nome: string; input: Record<string, unknown> } | null;
+  // Subagentes rodando de verdade, pelo fold de atividade: o cartão deles sai do meio da conversa
+  // e fica grudado no fim até acabarem.
+  agentesRodando?: AgentRun[];
+  onAbrirAgentes?: () => void;
 }
+
+const SEM_AGENTES: AgentRun[] = [];
 
 // Bolha sem texto não vira item nenhum, salvo a de imagem colada no terminal (só `image_count`).
 // O tool_result é descartado pelo agruparConversa (entra na linha do tool_use pareado).
@@ -83,6 +97,12 @@ export function MessageList({
   sessionName,
   serverId,
   bottomInset = 0,
+  stateEvent = null,
+  turnSeen = null,
+  pensamento = '',
+  ferramenta = null,
+  agentesRodando = SEM_AGENTES,
+  onAbrirAgentes,
 }: Props) {
   const codex = session?.provider === 'codex';
   const visiblePreview = codex ? planDisplayText(preview) : preview;
@@ -110,12 +130,24 @@ export function MessageList({
     () => (tarefasLigadas ? foldTasks(events, (id) => results.get(id)) : SEM_TAREFAS),
     [tarefasLigadas, events, results],
   );
+  const rodandoIds = useMemo(() => new Set(agentesRodando.map((a) => a.id)), [agentesRodando]);
+  const inicioDoAgente = useCallback((id: string) => {
+    const ts = events.find((e) => e.kind === 'tool_use' && e.tool_use_id === id)?.ts;
+    return ts ? ts * 1000 : null;
+  }, [events]);
   const data = useMemo(() => {
-    const vis = events.filter((e) => visivel(e) && !(tarefasLigadas && ehTask(e)));
+    const vis = events.filter((e) => visivel(e) && !(tarefasLigadas && ehTask(e))
+      && !(e.kind === 'tool_use' && rodandoIds.has(e.tool_use_id ?? '')));
     const rows = foldConversation(agruparConversa(vis, { entraNoPensamento: (n) => entraNoPensamento(pref, n) }), look === 'tree');
     return tarefasLigadas && tasks.length ? comTarefas(rows, events) : rows;
-  }, [events, pref, look, tarefasLigadas, tasks.length]);
+  }, [events, pref, look, tarefasLigadas, tasks.length, rodandoIds]);
   const abrirDetalhe = useCallback((ev: ChatEvent) => detail.current?.abrir(ev), []);
+  const working = stateEvent?.state === 'working';
+  const desde = useMemo(() => (working ? turnStart(events, turnSeen) : null), [working, events, turnSeen]);
+  const ferramentaEv = useMemo<ChatEvent | null>(
+    () => (ferramenta ? { kind: 'tool_use', id: 'ferramenta-viva', tool_name: ferramenta.nome, tool_input: ferramenta.input } : null),
+    [ferramenta],
+  );
 
   const renderItem = useCallback(({ item }: { item: ConversationRow }) => {
     switch (item.type) {
@@ -223,13 +255,18 @@ export function MessageList({
       }
       ListFooterComponent={
         <View style={styles.footer}>
+          {/* Mesma ordem do fim da conversa na PWA: o trabalho em voo, depois o que a pessoa mandou. */}
+          {pensamento ? <PensamentoVivo texto={pensamento} /> : null}
+          {ferramentaEv ? <ToolCard use={ferramentaEv} result={null} onPress={abrirDetalhe} look={look} escrevendo /> : null}
+          {visiblePreview ? <PreviewBubble text={visiblePreview} md={previewMd} full={previewFull} streaming={working} /> : null}
+          {working && !pensamento && !ferramenta ? <WorkingLine label={stateEvent?.label} since={desde} /> : null}
+          {agentesRodando.length ? <AgentesRodando agentes={agentesRodando} inicio={inicioDoAgente} onAbrir={onAbrirAgentes} /> : null}
           {pending.map((p) => (
             <View key={p.id} style={[styles.pending, p.solid && styles.pendingSolid]}>
               <UserBubble text={p.text} sessionName={sessionName} />
             </View>
           ))}
           {optionsSlot ?? null}
-          {visiblePreview ? <PreviewBubble text={visiblePreview} md={previewMd} full={previewFull} /> : null}
           {bottomInset > 0 ? <View style={{ height: bottomInset }} /> : null}
         </View>
       }
@@ -246,7 +283,7 @@ export function MessageList({
         {temNovas ? <View style={[styles.novasDot, { backgroundColor: theme.tokens.accent.base, borderColor: theme.tokens.bg.base }]} /> : null}
       </Pressable>
     ) : null}
-    <ToolDetailSheet ref={detail} resultOf={resultDe} />
+    <ToolDetailSheet ref={detail} resultOf={resultDe} sessionName={sessionName} />
     </View>
   );
 }

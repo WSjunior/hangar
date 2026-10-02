@@ -4,16 +4,19 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { getSubagent } from '@hangar/core';
 import type { SubagentRun } from '@hangar/core';
 import { MessageList } from '../../chat/MessageList';
+import { subagentRunning } from '../../chat/liveWork';
 import * as m from '../../paraglide/messages';
 import { superficie } from '../../theme/superficie';
 
 interface Props {
   sessionName: string;
   agentId: string;
+  // O que o transcript do PAI diz (Claude): true/false, ou null quando só o disco conhece o subagente.
+  paiRodando?: boolean | null;
 }
 
 // Lida com os três desfechos: sucesso (pinta), falha (texto), pendente (spinner).
-export function SubagentLive({ sessionName, agentId }: Props) {
+export function SubagentLive({ sessionName, agentId, paiRodando = null }: Props) {
   const { theme } = useUnistyles();
   const [detail, setDetail] = useState<SubagentRun | null>(null);
   const [loading, setLoading] = useState(true);
@@ -90,15 +93,29 @@ export function SubagentLive({ sessionName, agentId }: Props) {
     );
   }
 
+  const rodando = subagentRunning(detail, paiRodando);
+
   // quando há eventos, mostra a conversa com o mesmo MessageList do chat
   if (detail.events?.length) {
     return (
       <View style={styles.wrap}>
         <View style={styles.meta}>
-          <Text style={[styles.metaTxt, { color: theme.tokens.text.muted }]}>
-            ◐ {m.atividade_rodando()} · {m.atividade_chamadas({ n: detail.toolCalls })}
-            {detail.agentType ? ` · ${detail.agentType}` : ''}
-          </Text>
+          {/* Ilegível vem zerado: "rodando · 0 chamadas" afirmaria um estado que não foi lido. */}
+          {detail.ilegivel ? (
+            <Text style={[styles.metaTxt, { color: theme.tokens.text.muted }]}>{m.atividade_sub_ilegivel()}</Text>
+          ) : (
+            <Text style={[styles.metaTxt, { color: theme.tokens.text.muted }]}>
+              {/* null = o pedido que criou o subagente saiu da janela carregada: não afirmar estado. */}
+              {rodando === false
+                ? <Text style={{ color: theme.tokens.status.success }}>✓ {m.atividade_sub_concluido()}</Text>
+                : rodando === true
+                  ? <Text style={{ color: theme.tokens.accent.base }}>◐ {m.atividade_rodando()}</Text>
+                  : null}
+              {`${rodando === null ? '' : ' · '}${m.atividade_chamadas({ n: detail.toolCalls })}`}
+              {detail.agentType ? ` · ${detail.agentType}` : ''}
+              {detail.recent.length ? ` · ${detail.recent[detail.recent.length - 1]?.name ?? ''}` : ''}
+            </Text>
+          )}
           {fails > 0 ? <Text style={[styles.metaErr, { color: theme.tokens.status.warning }]}>{error}</Text> : null}
         </View>
         <View style={[styles.chatBox, { backgroundColor: superficie(theme), borderColor: theme.tokens.border.subtle }]}>
@@ -109,6 +126,7 @@ export function SubagentLive({ sessionName, agentId }: Props) {
             onLoadOlder={() => {}}
             pending={[]}
             sessionName={sessionName}
+            stateEvent={rodando ? { session: sessionName, state: 'working' } : null}
           />
         </View>
         {detail.tools.length > 0 ? (

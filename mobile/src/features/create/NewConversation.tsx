@@ -29,7 +29,6 @@ import {
   useNewConversation, type NewConversationInput,
 } from '../../stores/newConversation';
 import { HomeIntroMark } from './HomeAmbient';
-import { QuietPill } from './QuietPill';
 import { useHomeDictation } from './useHomeDictation';
 import * as m from '../../paraglide/messages';
 
@@ -72,8 +71,8 @@ function dropCopy(uri: string): void {
   try { removeDraftAttachment(uri); } catch { /* sem perda de dado */ }
 }
 
-function ToolButton({ icon, label, hint, onPress, disabled, busy, color }: {
-  icon: IconName; label: string; hint?: string; onPress?: () => void; disabled?: boolean; busy?: boolean; color?: string;
+function ToolButton({ icon, label, hint, onPress, disabled, busy, color, size = 20 }: {
+  icon: IconName; label: string; hint?: string; onPress?: () => void; disabled?: boolean; busy?: boolean; color?: string; size?: number;
 }) {
   const { theme } = useUnistyles();
   const press = usePressScale();
@@ -83,7 +82,7 @@ function ToolButton({ icon, label, hint, onPress, disabled, busy, color }: {
       onPressIn={press.onPressIn}
       onPressOut={press.onPressOut}
       disabled={disabled}
-      hitSlop={4}
+      hitSlop={5}
       accessibilityRole="button"
       accessibilityLabel={label}
       accessibilityHint={hint}
@@ -92,7 +91,7 @@ function ToolButton({ icon, label, hint, onPress, disabled, busy, color }: {
     >
       {busy
         ? <ActivityIndicator size="small" color={theme.tokens.text.secondary} />
-        : <Icon name={icon} size={18} color={color ?? theme.tokens.text.secondary} />}
+        : <Icon name={icon} size={size} color={color ?? theme.tokens.text.secondary} />}
     </AnimatedPressable>
   );
 }
@@ -102,7 +101,7 @@ function SendButton({ ready, busy, onPress }: { ready: boolean; busy: boolean; o
   const { theme } = useUnistyles();
   const reduced = useReducedMotion();
   const press = usePressScale();
-  const off = superficie(theme, 0.8);
+  const off = theme.tokens.border.default;
   const lit = theme.tokens.text.primary;
   const progress = useDerivedValue(() => withTiming(ready ? 1 : 0, { duration: reduced ? 0 : 180 }), [ready, reduced]);
   const fill = useAnimatedStyle(() => ({
@@ -423,8 +422,9 @@ export function NewConversation({
         ) : null}
         <View style={styles.row}>
           <ToolButton
-            icon="Paperclip"
-            label={m.composer_anexar_arquivo()}
+            icon="Plus"
+            size={22}
+            label={m.composer_adicionar_ao_chat()}
             onPress={() => setAttachMenuOpen(true)}
             disabled={busy || dictation.gravando}
           />
@@ -446,9 +446,6 @@ export function NewConversation({
             disabled={dictation.transcribing || busy}
             busy={dictation.transcribing}
           />
-          {/* Gravando, a pílula do estilo sai como no PC: o backend lê o estilo no fim e o espaço é da gravação. */}
-          {dictation.gravando ? null
-            : <QuietPill label={dictationStyle} aria={m.ditado_estilo_titulo()} onPress={() => setStyleMenuOpen(true)} />}
           <View style={styles.spacer} />
           {providerChip(() => openSheet('options', null))}
           <SendButton ready={canSend} busy={busy} onPress={() => void handleSend()} />
@@ -499,6 +496,7 @@ export function NewConversation({
         onClose={() => setAttachMenuOpen(false)}
         onPick={pick}
         onError={setAttachError}
+        dictationStyle={{ label: dictationStyle, onPress: () => setStyleMenuOpen(true) }}
       />
     </View>
   );
@@ -523,23 +521,24 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.base.space[3],
     paddingBottom: 6,
   },
+  // A mesma caixa do composer da conversa.
   box: {
     marginHorizontal: theme.base.space[2],
-    borderRadius: theme.base.radius.lg,
+    borderRadius: 22,
     paddingTop: 12,
-    paddingRight: 10,
+    paddingRight: 12,
     paddingBottom: 8,
     paddingLeft: 12,
     gap: theme.base.space[2],
   },
   // O campo é o próprio vidro, sem caixa dentro da caixa.
   inputWrap: { minHeight: 40, justifyContent: 'center' },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 2 },
-  // 36 pt + hitSlop 4 = 44 pt de toque; o ícone fica pequeno e sem fundo, como no PC.
-  tool: { width: 36, height: 36, borderRadius: theme.base.radius.md, alignItems: 'center', justifyContent: 'center' },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  // 34 pt + hitSlop 5 = 44 pt de toque; o ícone fica sem fundo, como no PC.
+  tool: { width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center' },
   dim: { opacity: 0.5 },
   spacer: { flex: 1, minWidth: 4 },
-  send: { width: 34, height: 34, marginLeft: 4, borderRadius: theme.base.radius.full, alignItems: 'center', justifyContent: 'center' },
+  send: { width: 34, height: 34, borderRadius: theme.base.radius.full, alignItems: 'center', justifyContent: 'center' },
   bottomPills: {
     flexDirection: 'row',
     flexWrap: 'wrap',

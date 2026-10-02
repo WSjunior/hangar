@@ -1,7 +1,7 @@
-import { forwardRef, useImperativeHandle, useRef, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { ScrollView, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { extractEdits, extractFilePath, summarizeToolInput, summarizeToolResult, toolPhase, type ChatEvent } from '@hangar/core';
+import { extractEdits, extractFilePath, getBashOutput, summarizeToolInput, summarizeToolResult, toolPhase, type ChatEvent } from '@hangar/core';
 import { Sheet, type SheetRef } from '../../ui/Sheet';
 import { Icon } from '../../ui/Icon';
 import { toast } from '../../ui/Toast';
@@ -19,14 +19,19 @@ export interface ToolDetailHandle { abrir: (use: ChatEvent) => void }
 // A ScrollView é a DONA da rolagem, e o `scrollable` da sheet a adota: no Android o true-sheet
 // PROCURA uma ScrollView descendente pra fixar (TrueSheetContentView.findScrollView) — sem ela o
 // flag não faz nada e o conteúdo longo não rola. Não é rolagem aninhada: não há outra no caminho.
-export const ToolDetailSheet = forwardRef<ToolDetailHandle, { resultOf: (use: ChatEvent) => ChatEvent | null }>(
-  function ToolDetailSheet({ resultOf }, ref) {
+// `sessionName` liga a saída ao vivo do comando que ainda roda (sem ele, só o comando).
+export const ToolDetailSheet = forwardRef<ToolDetailHandle, { resultOf: (use: ChatEvent) => ChatEvent | null; sessionName?: string }>(
+  function ToolDetailSheet({ resultOf, sessionName }, ref) {
     const { theme } = useUnistyles();
     const sheet = useRef<SheetRef>(null);
     const [use, setUse] = useState<ChatEvent | null>(null);
+    const [aberto, setAberto] = useState(false);
+    const [saidaViva, setSaidaViva] = useState<string | null>(null);
     useImperativeHandle(ref, () => ({
       abrir: (ev) => {
         setUse(ev);
+        setSaidaViva(null);
+        setAberto(true);
         // present() rejeita quando a view nunca montou; sem o catch o toque no card não faz nada e
         // não diz por quê.
         sheet.current?.present().catch((e: unknown) => {
@@ -42,8 +47,29 @@ export const ToolDetailSheet = forwardRef<ToolDetailHandle, { resultOf: (use: Ch
     // Resultado vazio ainda precisa dizer o desfecho: um erro sem texto é indistinguível de sucesso,
     // e num Edit o diff sozinho parece que a edição entrou.
     const desfecho = fase === 'pending' ? m.formato_rodando({ n: 1 }) : summarizeToolResult(result, use?.tool_name);
+    const comando = use && typeof use.tool_input?.['command'] === 'string' ? String(use.tool_input['command']) : null;
+    // Saída parcial do Bash que ainda roda, lida a cada 2 s só com a folha aberta. A próxima leitura
+    // espera a anterior voltar: backend lento não empilha pedidos.
+    const pendente = fase === 'pending';
+    useEffect(() => {
+      if (!aberto || !pendente || !comando || !sessionName) return;
+      let vivo = true;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const ler = async () => {
+        try {
+          const t = await getBashOutput(sessionName, comando);
+          if (vivo) setSaidaViva(t);
+        } catch (e) {
+          // Leitura extra: falhar não tira o comando nem o desfecho da tela, só fica no log.
+          console.warn('ToolDetailSheet: saída ao vivo falhou', e);
+        }
+        if (vivo) timer = setTimeout(ler, 2000);
+      };
+      void ler();
+      return () => { vivo = false; clearTimeout(timer); };
+    }, [aberto, pendente, comando, sessionName]);
     return (
-      <Sheet ref={sheet} sizes={['medium', 'large']} scrollable>
+      <Sheet ref={sheet} sizes={['medium', 'large']} scrollable onDismiss={() => setAberto(false)}>
         {use ? (
           <View style={styles.body}>
             <View style={styles.head}>
@@ -57,7 +83,13 @@ export const ToolDetailSheet = forwardRef<ToolDetailHandle, { resultOf: (use: Ch
                   <EditDiff oldText={e.oldText} newText={e.newText} />
                 </View>
               )) : null}
-              {!edits && typeof use.tool_input?.['command'] === 'string' ? <Text style={[styles.mono, { color: theme.tokens.accent.base }]} selectable>$ {String(use.tool_input['command'])}</Text> : null}
+              {!edits && comando !== null ? <Text style={[styles.mono, { color: theme.tokens.accent.base }]} selectable>$ {comando}</Text> : null}
+              {pendente && saidaViva ? (
+                <>
+                  <Text style={[styles.arquivo, { color: theme.tokens.text.muted }]}>{m.tool_saida()} · {m.tool_saida_ao_vivo()}</Text>
+                  <Text style={[styles.mono, { color: theme.tokens.text.primary }]} selectable>{saidaViva}</Text>
+                </>
+              ) : null}
               {result?.result
                 ? <Text style={[styles.mono, { color: fase === 'error' ? theme.tokens.status.error : theme.tokens.text.primary }]} selectable>{result.result}</Text>
                 : <Text style={[styles.mono, { color: fase === 'error' ? theme.tokens.status.error : theme.tokens.text.muted }]}>{desfecho}</Text>}

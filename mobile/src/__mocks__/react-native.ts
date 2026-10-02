@@ -22,6 +22,13 @@ export const FlatList = (props: any) => React.createElement('div', null,
   props.ListEmptyComponent && !(props.data ?? []).length
     ? (typeof props.ListEmptyComponent === 'function' ? React.createElement(props.ListEmptyComponent) : props.ListEmptyComponent) : null);
 export const ActivityIndicator =() => React.createElement('div', null, 'loading');
+// Animação parada: o teste olha o conteúdo, não o movimento.
+const animacao = () => ({ start: () => {}, stop: () => {} });
+export const Animated = {
+  Value: class { constructor(public value: number) {} },
+  View, Text,
+  timing: animacao, sequence: animacao, loop: animacao,
+};
 export const Platform = { OS: 'android', select: (x: any) => x.android ?? x.default };
 export const TextInput = (props: any) => React.createElement('textarea', domProps(props));
 export const StyleSheet = { create: (x: any) => x, flatten: (x: any) => x };

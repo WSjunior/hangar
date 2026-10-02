@@ -2976,6 +2976,7 @@
   "permissao_codex_curta_perguntar": "Ask",
   "permissao_codex_curta_auto": "Auto",
   "permissao_codex_curta_total": "Full",
+  "composer_codex_approval": "Approval",
   "erro_permissao_so_codex": "this permission mode only applies to Codex sessions",
   "erro_permissao_ocupada": "the session is working — wait for it to finish",
   "erro_permissao_picker": "couldn't drive /permissions in the Codex terminal",

@@ -18,8 +18,8 @@ const PILL: Record<State, keyof ThemeTokens['pill']> = {
 
 // Cabeçalho do chat no layout do nativo: ‹ · marca na cor do estado · nome e "pasta @ servidor" ·
 // pílula de estado · ⋯. A cor fica só na marca e no ponto da pílula, que é onde ela diz algo; o resto
-// é texto. O anel de contexto mora no composer e o terminal no ⋯. Plano e loop descem para uma linha
-// própria: na mesma linha espremiam o nome da sessão até as reticências.
+// é texto. O anel de contexto mora no composer e o terminal no ⋯. O loop desce para uma linha
+// própria: na mesma linha espremia o nome da sessão até as reticências.
 export function ChatHeader({
   name,
   state,
@@ -27,7 +27,6 @@ export function ChatHeader({
   onMore,
   onTitlePress,
   chipLoop,
-  chipPlan,
 }: {
   name: string;
   state: State | null;
@@ -35,7 +34,6 @@ export function ChatHeader({
   onMore: () => void;
   onTitlePress: () => void;
   chipLoop?: React.ReactNode;
-  chipPlan?: React.ReactNode;
 }) {
   const { theme } = useUnistyles();
   // Destino lido da rota e da lista: quem monta o cabeçalho não precisa repassar máquina e pasta.
@@ -98,12 +96,7 @@ export function ChatHeader({
           <Icon name="Ellipsis" size={18} color={theme.tokens.text.secondary} />
         </Pressable>
       </View>
-      {chipPlan || chipLoop ? (
-        <View style={styles.chips}>
-          {chipPlan}
-          {chipLoop}
-        </View>
-      ) : null}
+      {chipLoop ? <View style={styles.chips}>{chipLoop}</View> : null}
     </View>
   );
 }
@@ -121,7 +114,7 @@ const styles = StyleSheet.create((theme) => ({
     paddingVertical: theme.base.space[1],
     minHeight: 48,
   },
-  // Linha discreta de plano e loop, alinhada ao nome (depois do ‹ e da marca).
+  // Linha discreta do loop, alinhada ao nome (depois do ‹ e da marca).
   chips: {
     flexDirection: 'row',
     alignItems: 'center',

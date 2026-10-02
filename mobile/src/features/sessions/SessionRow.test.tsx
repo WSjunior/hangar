@@ -20,7 +20,6 @@ vi.mock('react-native', async (original) => ({
 vi.mock('expo-haptics', () => ({ impactAsync: () => Promise.resolve(), ImpactFeedbackStyle: { Medium: 'medium' } }));
 vi.mock('../../ui/Icon', () => ({ Icon: () => null }));
 vi.mock('../../ui/HangarMark', () => ({ HangarMark: () => null }));
-vi.mock('../plan/PlanBar', () => ({ PlanBar: () => null }));
 vi.mock('../../paraglide/messages', () => ({
   ask_perguntas: () => 'ask_perguntas',
   orq_row_badge: () => 'orq_row_badge',

@@ -63,7 +63,6 @@ vi.mock('../features/sessions/SessionsDrawer', () => ({ SessionsDrawer: ({ child
 vi.mock('../features/sessions/ServerSheet', () => ({ ServerSheet: () => null }));
 vi.mock('react-native-keyboard-controller', () => ({ KeyboardAvoidingView: ({ children }: { children: ReactNode }) => createElement('div', null, children) }));
 vi.mock('./LoopChip', () => ({ LoopChip: () => null }));
-vi.mock('../features/plan/PlanChip', () => ({ PlanChip: () => null }));
 vi.mock('./OrqFooter', () => ({ OrqFooter: () => null }));
 vi.mock('./TuiPill', () => ({ TuiPill: () => null }));
 vi.mock('./RecarregarPill', () => ({ RecarregarPill: () => null }));
@@ -93,7 +92,7 @@ vi.mock('./ContextRing', () => ({ ContextRing: () => null }));
 vi.mock('../paraglide/messages', () => Object.fromEntries(
   ('arq_aba askq_sua_resposta bastao_dossie_sub bastao_dossie_titulo chat_voltar_sessoes codex_limites_titulo ctx_anexos ctx_atividade ctx_grupo ctx_limites ctx_repositorio ctx_terminal modo_so_ociosa more_fotos_videos_arquivos more_tarefas_agentes navbar_mais_acoes par_titulo recarregar_sessao recarregar_sessao_detalhe sessao_trocar_de term_titulo '
     + 'askq_enviando board_arquivo board_imagem board_remover_anexo codex_orientar composer_anexar_arquivo composer_desfazer_limpeza composer_ditado_limpo composer_enviando_cancelar composer_enviar_mensagem composer_fila_acao composer_fila_aria composer_fila_contagem composer_gravando_audio composer_gravar_audio composer_mandando_grupo composer_mandar_grupo composer_mandar_tambem composer_mensagem composer_parar composer_parar_gravacao composer_pro_grupo composer_pros_dois composer_sessao_trabalhando composer_transcrevendo_audio composer_transcrever_de_novo')
-    .concat(' composer_mic_style_hint composer_dictation_style composer_session_settings composer_session_settings_hint ditado_estilo_titulo uso_aria')
+    .concat(' composer_mic_style_hint composer_dictation_style composer_session_settings composer_session_settings_hint ditado_estilo_titulo uso_aria codex_orientar_ajuda')
     .concat(' composer_interromper_claude composer_interromper_msg composer_interromper comum_cancelar')
     .concat(' permissao_pedido comum_cancelar msg_aria_mensagens chat_plan_proposto composer_falha_envio nova_conversa_envio_incerto nova_conversa_resultado_salvar_erro nova_conversa_salvar_erro')
     .concat(' askq_enviando board_falha_envio board_falha_upload chat_chegou_mas chat_envio_incerto chat_nao_chegou_em chat_servidor_removido codex_orientar_recebido codex_orientar_sem_envio composer_ditado_anterior composer_ditado_aplicado composer_ditado_indisponivel composer_ditado_interrompido composer_ditado_recuperavel composer_draft_read_again composer_draft_recover_attach_busy composer_falha_gravacao composer_falha_transcricao composer_fila_erro composer_sem_acesso_fotos composer_sem_acesso_mic composer_submission_check composer_submission_rejected composer_submission_sending composer_transcrever_de_novo composer_transcricao_vazia')
@@ -106,6 +105,7 @@ vi.mock('../paraglide/messages', () => Object.fromEntries(
     .concat(' home_usage_30d home_usage_7d home_usage_active_days home_usage_activity home_usage_all home_usage_cost home_usage_day home_usage_empty home_usage_load_failed home_usage_method home_usage_model_count home_usage_models home_usage_overview home_usage_partial home_usage_period_unsupported home_usage_sessions home_usage_today home_usage_tokens home_usage_top_model home_usage_warming home_usage_warming_timeout lista_tentar_novamente')
     .concat(' native_action_uncertain native_ask_fallback native_close native_dictation_active native_dictation_cancel native_dictation_level native_loading native_new_chat_folder native_tasks_all_done native_tasks_completed native_tasks_expand native_tasks_in_progress native_tasks_left native_tasks_left_1 native_tasks_minimize native_tasks_pending native_tasks_untitled native_thinking native_tools_failed native_tools_failed_1 native_tree_thoughts')
     .concat(' new_conversation_no_received_messages new_conversation_received_messages notice_compacted notice_hook_prompt notice_interrupted notice_skill_loaded nova_conversa_abrir nova_conversa_adotar nova_conversa_conferir nova_conversa_descartar nova_conversa_guardada nova_conversa_reenviar')
+    .concat(' native_working_line pensamento_vivo tool_executando_ha estado_em_execucao atividade_subagente tool_abrir_agente tool_fase_escrevendo')
     .concat(' stats_cache stats_chamadas stats_chamadas_1 stats_io stats_llm stats_toks stats_tools stats_ttft stats_turnos stats_turnos_1 sync_retry uso_janela_30d uso_janela_5h uso_janela_7d').split(' ').map((k) => [k, () => k]),
 ));
 
@@ -143,12 +143,9 @@ vi.mock('../ui/MultilineInput', () => ({ MultilineInput: ({ value, onChangeText,
   value: string; onChangeText: (text: string) => void; accessibilityLabel?: string; ref?: import('react').Ref<HTMLTextAreaElement>;
 }) => createElement('textarea', { ref, 'aria-label': accessibilityLabel, value, readOnly: true, onInput: (e: { currentTarget: { value: string } }) => onChangeText(e.currentTarget.value) }),
 }));
-vi.mock('../features/pills/ModelPill', () => ({ ModelPill: () => null }));
-vi.mock('../features/pills/EffortPill', () => ({ EffortPill: () => null }));
-vi.mock('../features/pills/PermissionPill', () => ({ PermissionPill: () => null }));
 vi.mock('../features/pills/PillMenu', () => ({ PillMenu: () => null }));
 vi.mock('../features/ditado/EstiloPill', () => ({ DictationStyleMenu: () => null, useDictationStyleLabel: () => 'estilo' }));
-vi.mock('./SessionSettings', () => ({ SessionSettingsButton: () => createElement('button', { 'aria-label': 'composer_session_settings' }) }));
+vi.mock('./SessionSettings', () => ({ SessionSettingsButton: ({ hidden }: { hidden?: boolean }) => (hidden ? null : createElement('button', { 'aria-label': 'composer_session_settings' })) }));
 vi.mock('../features/ditado/useDitado', () => ({ useDitado: (callbacks: { onFim: typeof voiceInput.onFim }) => {
   voiceInput.onFim = callbacks.onFim;
   return { gravando: false, rms: 0, iniciar: () => {}, parar: () => {} };
@@ -214,9 +211,9 @@ vi.mock('./tools/ToolGroup', () => ({ ToolGroup: () => null }));
 vi.mock('./tools/ToolDetailSheet', () => ({ ToolDetailSheet: () => null }));
 vi.mock('../stores/aparencia', () => ({ useAparencia: (sel: (s: unknown) => unknown) => sel({ pensamentoTools: 'busca' }) }));
 vi.mock('@legendapp/list/react-native', () => ({
-  LegendList: ({ data, renderItem, keyExtractor }: {
-    data: unknown[]; renderItem: (a: { item: unknown }) => ReactNode; keyExtractor: (i: unknown) => string;
-  }) => createElement('div', null, data.map((item) => createElement('div', { key: keyExtractor(item) }, renderItem({ item })))),
+  LegendList: ({ data, renderItem, keyExtractor, ListFooterComponent }: {
+    data: unknown[]; renderItem: (a: { item: unknown }) => ReactNode; keyExtractor: (i: unknown) => string; ListFooterComponent?: ReactNode;
+  }) => createElement('div', null, ...data.map((item) => createElement('div', { key: keyExtractor(item) }, renderItem({ item }))), ListFooterComponent),
 }));
 
 vi.mock('react-native-enriched-markdown', () => ({
@@ -387,18 +384,19 @@ describe('Parar no Composer', () => {
     act(() => root.unmount());
   });
 
-  it('VoiceOver identifica o campo preenchido e o estado de envio enquanto Parar continua disponível', async () => {
+  it('VoiceOver identifica o campo preenchido e o estado de envio; com texto não há Parar', async () => {
     composerChat.state = 'working';
     let finish!: () => void;
     composerChat.send.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
     const { container, root } = await render(createElement(Composer, { ...props, draft: 'texto', onStop: () => {} }));
     const send = container.querySelector<HTMLButtonElement>('[aria-label="composer_enviar_mensagem"]')!;
     expect(container.querySelector('[aria-label="composer_mensagem"]')).not.toBeNull();
+    // Com texto a linha é Orientar + Enviar; o Parar volta quando o campo esvazia.
+    expect(container.querySelector('[aria-label="composer_parar"]')).toBeNull();
     expect(send.getAttribute('aria-disabled')).toBe('false');
     act(() => send.click());
     expect(send.getAttribute('aria-disabled')).toBe('true');
     expect(send.getAttribute('aria-busy')).toBe('true');
-    expect(container.querySelector<HTMLButtonElement>('[aria-label="composer_parar"]')!.disabled).toBe(false);
     await act(async () => finish());
     expect(send.getAttribute('aria-busy')).toBe('false');
     act(() => root.unmount());
@@ -435,7 +433,7 @@ describe('Parar no Composer', () => {
 });
 
 describe('linha de botões do Composer', () => {
-  it('campo em linha própria; botão único de ajustes e microfone com a dica do estilo', async () => {
+  it('campo em linha própria; +, microfone com a dica do estilo e um chip só de ajustes', async () => {
     composerChat.state = 'idle';
     const { container, root } = await render(createElement(Composer, { serverId: 's1', name: 'sess' }));
     const field = container.querySelector('[aria-label="composer_mensagem"]')!;
@@ -444,8 +442,19 @@ describe('linha de botões do Composer', () => {
     // O campo não divide a linha com os botões.
     expect(field.parentElement!.contains(settings)).toBe(false);
     expect(container.querySelector<HTMLButtonElement>('[aria-label="composer_gravar_audio"]')!.title).toBe('composer_mic_style_hint');
-    expect(container.querySelector('[aria-label="comandos_titulo"]')).not.toBeNull();
-    expect(container.querySelector('[aria-label="composer_anexar_arquivo"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="composer_adicionar_ao_chat"]')).not.toBeNull();
+    // Comandos e estilo do ditado moram no +, não na linha.
+    expect(container.querySelector('[aria-label="comandos_titulo"]')).toBeNull();
+    act(() => root.unmount());
+  });
+
+  it('trabalhando com texto sem terminal: Orientar na linha, microfone e chip saem', async () => {
+    composerChat.state = 'working';
+    const { container, root } = await render(createElement(Composer, { serverId: 's1', name: 'sess', draft: 'texto', headless: true, onStop: () => {} }));
+    expect(container.querySelector('[aria-label="codex_orientar"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="composer_gravar_audio"]')).toBeNull();
+    expect(container.querySelector('[aria-label="composer_session_settings"]')).toBeNull();
+    expect(container.querySelector('[aria-label="composer_enviar_mensagem"]')).not.toBeNull();
     act(() => root.unmount());
   });
 });
@@ -930,6 +939,38 @@ describe('plano proposto na lista', () => {
       session: { provider: 'codex' } as never,
     } as never));
     expect(bubbleTexts).toEqual([text]);
+    act(() => root.unmount());
+  });
+});
+
+describe('bloco trabalhando no fim da lista', () => {
+  it('texto e tempo do rótulo do terminal e subagente rodando grudado no fim', async () => {
+    const { container, root } = await render(createElement(MessageList, {
+      events: [{ id: 'u1', kind: 'user_msg', text: 'vai', ts: Date.now() / 1000 - 12 },
+               { id: 'a1', kind: 'tool_use', tool_name: 'Agent', tool_use_id: 'tu1', ts: Date.now() / 1000 - 5, tool_input: { description: 'Revisar diff' } }],
+      preview: '', olderFailed: '', onLoadOlder: () => {},
+      stateEvent: { session: 'sess', state: 'working', label: 'Pensando… (3s · esc to interrupt)' },
+      agentesRodando: [{ id: 'tu1', kind: 'agent', description: 'Revisar diff', running: true, subagentType: 'Explore' }],
+    } as never));
+    expect(container.textContent).toContain('Pensando…');
+    expect(container.textContent).not.toContain('esc to interrupt');
+    // O tempo do terminal vence o contado no app: vale mesmo com o envio fora da janela carregada.
+    expect(container.textContent).toContain('3s');
+    expect(container.textContent).not.toContain('12 s');
+    expect(container.textContent).toContain('Revisar diff');
+    expect(container.textContent).toContain('Explore');
+    act(() => root.unmount());
+  });
+
+  it('raciocínio em voo ocupa o lugar da linha de spinner', async () => {
+    const { container, root } = await render(createElement(MessageList, {
+      events: [], preview: '', olderFailed: '', onLoadOlder: () => {},
+      stateEvent: { session: 'sess', state: 'working', label: null },
+      pensamento: 'considerando as opções',
+    } as never));
+    expect(container.textContent).toContain('pensamento_vivo');
+    expect(container.textContent).toContain('considerando as opções');
+    expect(container.textContent).not.toContain('native_working_line');
     act(() => root.unmount());
   });
 });

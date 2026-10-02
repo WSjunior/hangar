@@ -20,11 +20,15 @@ type Props = {
    * faixa mostra só os cartões Câmera e Fotos.
    */
   recentPhotos?: PickedAttachment[];
+  /** Abre a lista de comandos da sessão; ausente, o item não aparece. */
+  onCommands?: () => void;
+  /** Estilo do ditado vigente e a ação de trocá-lo; ausente, o item não aparece. */
+  dictationStyle?: { label: string; onPress: () => void };
 };
 
 const TILE = 112;
 
-export function AttachSheet({ open, onClose, onPick, onError, onSessionAttachments, recentPhotos }: Props) {
+export function AttachSheet({ open, onClose, onPick, onError, onSessionAttachments, recentPhotos, onCommands, dictationStyle }: Props) {
   const c = useSettingsColors();
   // A ação roda depois que a folha some: o iOS recusa abrir câmera/galeria por cima de uma folha
   // ainda em animação de saída.
@@ -45,10 +49,15 @@ export function AttachSheet({ open, onClose, onPick, onError, onSessionAttachmen
   const photos = run(pickImage);
   const hasRecent = !!recentPhotos?.length;
 
-  const rows: { icon: IconName; label: string; onPress: () => void }[] = [
+  // Comandos e estilo do ditado também abrem outra folha: só depois que esta sumir.
+  const rows: { icon: IconName; label: string; value?: string; onPress: () => void }[] = [
     { icon: 'File', label: m.composer_adicionar_arquivos(), onPress: run(pickFile) },
     ...(onSessionAttachments
       ? [{ icon: 'Paperclip' as IconName, label: m.ctx_anexos_da_sessao(), onPress: () => choose(onSessionAttachments) }]
+      : []),
+    ...(onCommands ? [{ icon: 'SquareSlash' as IconName, label: m.comandos_titulo(), onPress: () => choose(onCommands) }] : []),
+    ...(dictationStyle
+      ? [{ icon: 'AudioLines' as IconName, label: m.ditado_estilo_titulo(), value: dictationStyle.label, onPress: () => choose(dictationStyle.onPress) }]
       : []),
   ];
 
@@ -127,10 +136,12 @@ export function AttachSheet({ open, onClose, onPick, onError, onSessionAttachmen
               onPress={row.onPress}
               accessibilityRole="button"
               accessibilityLabel={row.label}
+              accessibilityValue={row.value ? { text: row.value } : undefined}
               style={({ pressed }) => [styles.row, i > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: c.borderStrong }, pressed && { backgroundColor: c.hover }]}
             >
               <Icon name={row.icon} size={20} color={c.text} />
-              <Text style={[styles.rowLabel, { color: c.text }]}>{row.label}</Text>
+              <Text style={[styles.rowLabel, styles.rowGrow, { color: c.text }]}>{row.label}</Text>
+              {row.value ? <Text style={[styles.rowValue, { color: c.muted }]} numberOfLines={1}>{row.value}</Text> : null}
             </Pressable>
           ))}
         </View>
@@ -184,5 +195,7 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.base.space[4],
   },
   rowLabel: { fontSize: theme.base.text.base },
+  rowGrow: { flex: 1 },
+  rowValue: { flexShrink: 1, maxWidth: '45%', fontSize: theme.base.text.sm },
   pressed: { opacity: 0.6 },
 }));

@@ -2977,6 +2977,7 @@
   "permissao_codex_curta_perguntar": "Perguntar",
   "permissao_codex_curta_auto": "Auto",
   "permissao_codex_curta_total": "Total",
+  "composer_codex_approval": "Aprovação",
   "erro_permissao_so_codex": "este modo de permissão só vale para sessões Codex",
   "erro_permissao_ocupada": "a sessão está trabalhando — espere ela terminar",
   "erro_permissao_picker": "não consegui usar o /permissions no terminal do Codex",
