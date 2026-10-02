@@ -1891,6 +1891,7 @@
   "config_server_env_sync_rate_window": "Tamanho da janela, em segundos, em que as tentativas erradas acima são contadas.",
   "config_server_env_forwarded_allow_ips": "IP do proxy em quem o backend confia pra saber o endereço real e o HTTPS de quem chama. `*` confia em qualquer um — só se ninguém alcança a porta direto.",
   "config_server_env_deploy_secret": "Segredo do webhook do GitHub que dispara o deploy automático no push da main. Vazio = endpoint desligado.",
+  "config_server_env_update_branch": "Branch usada pelo Atualizar. Vazio = main. Serve para testar uma versão em desenvolvimento.",
   "config_server_env_alerta_codex_sync": "Está desligado aqui, então anula a sincronização automática do Codex em Harnesses: ligá-la lá não faz efeito enquanto esta variável não voltar a 1. Automações desligado também a anula.",
   "config_server_sim": "sim",
   "config_server_nao": "não",

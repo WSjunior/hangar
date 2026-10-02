@@ -340,3 +340,19 @@ def test_nome_da_variavel_respeita_o_alias_declarado_no_campo():
     nomes = {v["nome"] for v in variaveis_env(SettingsComAlias(_env_file=None))}
     assert "CP_NOME_DE_VERDADE" in nomes
     assert "CP_ATALHO" not in nomes
+
+
+@pytest.mark.parametrize("valor", ["-x", "a..b", "com espaco", "x;rm", "a" * 101])
+def test_update_branch_invalida_vira_main_e_vai_pro_diario(monkeypatch, valor):
+    from app import diag
+    eventos = []
+    monkeypatch.setattr(diag, "registrar", lambda evento, nivel="ok", **c: eventos.append((evento, nivel)))
+    assert Settings(update_branch=valor).update_branch == ""
+    assert eventos == [("atualizacao.branch_invalida", "aviso")]
+
+
+def test_update_branch_valida_vem_do_ambiente(monkeypatch):
+    monkeypatch.setenv("CP_UPDATE_BRANCH", " feat/hangar-server_1.2 ")
+    assert Settings().update_branch == "feat/hangar-server_1.2"
+    monkeypatch.setenv("CP_UPDATE_BRANCH", "")
+    assert Settings().update_branch == ""

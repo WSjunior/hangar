@@ -265,7 +265,7 @@ def test_mesmo_pid_na_porta_depois_do_restart_vai_pro_rollback(repo, monkeypatch
     monkeypatch.setattr(atualizar, "_pid_do_servidor", lambda topologia, porta: 4242)
     voltou = []
     monkeypatch.setattr(atualizar, "_voltar",
-                        lambda c, m, t, p: (voltou.append(m), {"ok": False})[1])
+                        lambda c, m, t, p, **k: (voltou.append(m), {"ok": False})[1])
     atualizar.executar()
     assert voltou and "mesmo de antes" in voltou[0] and "4242" in voltou[0]
 
@@ -695,7 +695,7 @@ def test_restart_que_falha_vai_pro_rollback(repo, monkeypatch):
     monkeypatch.setattr(atualizar, "_reiniciar", _quebra)
     voltou = []
     monkeypatch.setattr(atualizar, "_voltar",
-                        lambda c, m, t, p: (voltou.append(m), {"ok": False})[1])
+                        lambda c, m, t, p, **k: (voltou.append(m), {"ok": False})[1])
     atualizar.executar()
     assert voltou and "nao reiniciou" in voltou[0]
 
@@ -1033,3 +1033,140 @@ def test_lancamento_escolhe_o_modo_do_sistema(repo, monkeypatch):
     assert capturado.get("creationflags") == 0x00000200 | 0x08000000
     assert not capturado.get("creationflags") & 0x00000008
     assert "start_new_session" not in capturado
+
+
+# ─── Branch do Atualizar (CP_UPDATE_BRANCH) ────────────────────────────────────────────────────
+
+def _commit(d, nome, texto):
+    (d / nome).write_text(texto, encoding="utf-8")
+    _git(d, "add", nome)
+    _git(d, "commit", "-qm", nome)
+
+
+def _rev(d, ref):
+    return _git(d, "rev-parse", ref).stdout.strip()
+
+
+def _branch(d):
+    return _git(d, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+
+
+def _branches(d):
+    return _git(d, "branch", "--format=%(refname:short)").stdout.split()
+
+
+@pytest.fixture
+def canal(repo, tmp_path, monkeypatch):
+    """`repo` com origin de verdade: a main e a branch `teste`, que só existe lá, configurada."""
+    origem = tmp_path / "origem.git"
+    _git(tmp_path, "clone", "-q", "--bare", str(repo), str(origem))
+    _git(repo, "remote", "add", "origin", str(origem))
+    _git(repo, "fetch", "-q", "origin")
+    _git(repo, "branch", "-q", "--set-upstream-to", "origin/main")
+    obra = tmp_path / "obra"
+    _git(tmp_path, "clone", "-q", str(origem), str(obra))
+    _git(obra, "checkout", "-q", "-b", "teste")
+    _commit(obra, "t.txt", "teste\n")
+    _git(obra, "push", "-q", "origin", "teste")
+    monkeypatch.setattr(atualizar, "_aplicar_passos", lambda: None)
+    monkeypatch.setattr(atualizar, "_preparar", lambda t, *a, **k: None)
+    monkeypatch.setattr(atualizar, "_reiniciar", lambda t, *a, **k: None)
+    monkeypatch.setattr(atualizar, "_subiu", lambda porta, teto=0: True)
+    monkeypatch.setattr(atualizar.config.settings, "update_branch", "teste")
+    return obra
+
+
+def test_branch_configurada_alinha_o_checkout_com_ela(repo, canal):
+    final = atualizar.executar()
+    assert final["ok"] is True
+    assert _branch(repo) == "teste" and _rev(repo, "HEAD") == _rev(canal, "HEAD")
+    assert (atualizar._base() / "branch").read_text(encoding="utf-8") == "teste"
+
+
+def test_branch_que_o_origin_nao_tem_falha_sem_tocar_em_nada(repo, canal, monkeypatch):
+    monkeypatch.setattr(atualizar.config.settings, "update_branch", "nao-existe")
+    (repo / "a.txt").write_text("trabalho\n", encoding="utf-8")   # com o resgate, viraria stash
+    antes = _rev(repo, "HEAD")
+    final = atualizar.executar()
+    assert final["ok"] is False
+    assert "nao existe no origin" in final["erro"] and "nada foi alterado" in final["erro"]
+    assert _branch(repo) == "main" and _rev(repo, "HEAD") == antes
+    assert (repo / "a.txt").read_text(encoding="utf-8") == "trabalho\n"
+    assert _git(repo, "stash", "list").stdout == ""
+    assert not [b for b in _branches(repo) if b.startswith("resgate/")]
+
+
+def test_na_branch_configurada_atualiza_sem_recusa(repo, canal):
+    _git(repo, "checkout", "-q", "--track", "origin/teste")
+    _commit(canal, "u.txt", "nova\n")
+    _git(canal, "push", "-q", "origin", "teste")
+    assert atualizar.checar()["branch_de_trabalho"] is False
+    final = atualizar.executar()
+    assert final["ok"] is True and _rev(repo, "HEAD") == _rev(canal, "HEAD")
+    assert not [b for b in _branches(repo) if b.startswith("resgate/")]   # limpo: nada a resgatar
+
+
+def test_outra_branch_de_trabalho_segue_recusada(repo, canal, monkeypatch):
+    _git(repo, "checkout", "-q", "-b", "outra")
+    monkeypatch.setattr(atualizar, "resguardar", lambda pre: pytest.fail("nao pode resguardar"))
+    assert atualizar.checar()["branch_de_trabalho"] is True
+    final = atualizar.executar()
+    assert final["ok"] is False and "'outra'" in final["erro"] and "origin/teste" in final["erro"]
+    assert _branch(repo) == "outra"
+
+
+def test_campo_esvaziado_volta_pra_main_com_resgate(repo, canal, monkeypatch):
+    assert atualizar.executar()["ok"] is True          # a própria atualização pôs o checkout na teste
+    _commit(repo, "local.txt", "commit local\n")
+    local = _rev(repo, "HEAD")
+    (repo / "t.txt").write_text("editado\n", encoding="utf-8")
+    monkeypatch.setattr(atualizar.config.settings, "update_branch", "")
+    pre = atualizar.checar()
+    assert pre["alvo"] == "main" and pre["branch_de_trabalho"] is False
+    final = atualizar.executar()
+    assert final["ok"] is True
+    assert _branch(repo) == "main" and _rev(repo, "HEAD") == _rev(repo, "origin/main")
+    assert _rev(repo, f"refs/heads/{final['resgate']}") == local
+    assert "stash@{0}" in _git(repo, "stash", "list").stdout
+    assert not (atualizar._base() / "branch").exists()
+
+
+def test_rollback_da_troca_volta_pra_branch_de_antes(repo, canal, monkeypatch):
+    antes = _rev(repo, "HEAD")
+    monkeypatch.setattr(atualizar, "_subiu", lambda porta, teto=0: False)
+    final = atualizar.executar()
+    assert final["ok"] is False and final["voltou"] is True
+    assert _branch(repo) == "main" and _rev(repo, "HEAD") == antes
+    assert not (atualizar._base() / "branch").exists()
+
+
+def test_branch_local_do_alvo_com_commit_proprio_ganha_resgate(repo, canal):
+    _git(repo, "checkout", "-q", "-b", "teste")
+    _commit(repo, "x.txt", "historia propria\n")
+    local = _rev(repo, "HEAD")
+    _git(repo, "checkout", "-q", "main")
+    final = atualizar.executar()
+    assert final["ok"] is True and _rev(repo, "HEAD") == _rev(canal, "HEAD")
+    resgates = [b for b in _branches(repo) if b.startswith("resgate/") and b.endswith("-teste")]
+    assert resgates and _rev(repo, resgates[0]) == local
+
+
+def test_fora_da_main_a_tela_e_compilada_e_nao_baixada(repo, monkeypatch):
+    """O CI só publica o dist da main: baixá-lo numa branch de teste serviria a tela errada."""
+    _git(repo, "checkout", "-q", "-b", "teste")
+    chamadas = []
+    monkeypatch.setattr(atualizar.shutil, "which", lambda n: "/usr/bin/npm" if n == "npm" else None)
+    rodar_real = atualizar._rodar
+    def _build(args, cwd=None, timeout=0, log=None):
+        if args[0] != "/usr/bin/npm":
+            return rodar_real(args, cwd=cwd, timeout=timeout, log=log)
+        chamadas.append(args)
+        (repo / "frontend" / "dist").mkdir(parents=True, exist_ok=True)
+        (repo / "frontend" / "dist" / "index.html").write_text("local", encoding="utf-8")
+        return subprocess.CompletedProcess(args, 0, "", "")
+    monkeypatch.setattr(atualizar, "_rodar", _build)
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("não devia baixar do CI")))
+    assert atualizar._atualizar_dist() is None
+    assert chamadas == [["/usr/bin/npm", "--prefix", "frontend", "run", "build"]]

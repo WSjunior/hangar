@@ -248,3 +248,23 @@ def test_auto_update_divergiu_vem_antes_de_ahead():
 
 def test_auto_update_rev_parse_falhou():
     assert _auto_gate(sha_alvo="") == "rev-parse origin/main falhou"
+
+
+def test_changelog_compara_com_a_branch_configurada(monkeypatch):
+    from app import api
+    monkeypatch.setattr(settings, "update_branch", "teste")
+    vistos = []
+
+    class P:
+        returncode = 0
+        stdout = ""
+
+    with patch("app.api.atualizar._git", side_effect=lambda *a, **k: (vistos.append(a), P())[1]):
+        api._mudancas_pendentes()
+    assert vistos[0][-1] == "HEAD..origin/teste"
+
+
+def test_auto_update_fica_parado_com_branch_de_teste(monkeypatch):
+    """O CI só publica o dist da main; a branch de teste atualiza pelo botão."""
+    monkeypatch.setattr(settings, "update_branch", "teste")
+    assert _auto_gate() == "branch de teste configurada (CP_UPDATE_BRANCH)"

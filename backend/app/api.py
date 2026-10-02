@@ -5587,13 +5587,13 @@ def _origem_do_terminal_ok(request: Request) -> bool:
 # ─── Atualizar ─────────────────────────────────────────────────────────────────────────────────
 
 def _mudancas_pendentes() -> list[dict]:
-    """Os commits que entraram em `origin/main` e ainda não estão aqui — o changelog da tela.
+    """Os commits que entraram em `origin/<alvo>` e ainda não estão aqui — o changelog da tela.
 
     Título de commit, e não um `CHANGELOG.md` mantido à mão: as mensagens deste repo já são
     descritivas, e um arquivo à parte seria uma segunda cópia pra envelhecer. Passo que merecer
     texto próprio ganha um arquivo em `docs/atualizacoes/`, cujo corpo entra junto.
     """
-    p = atualizar._git("log", "--format=%h%x00%s", "HEAD..origin/main", timeout=30)
+    p = atualizar._git("log", "--format=%h%x00%s", f"HEAD..origin/{atualizar.alvo()}", timeout=30)
     if p.returncode != 0:
         return []
     linhas = []
@@ -5629,10 +5629,10 @@ async def get_atualizacao(procurar: bool = False):
         return {
             "versoes": {"repo": diag._git_describe(), "backend": diag.VERSAO_EM_EXECUCAO},
             # A versão que a pessoa lê: data do commit + hash. `remoto` é o que está em
-            # origin/main desde o último fetch; `atras` é quantos commits faltam.
+            # origin/<alvo> desde o último fetch; `atras` é quantos commits faltam.
             "versao_legivel": {"repo": diag.versao_legivel(),
                                "backend": diag.VERSAO_LEGIVEL_EM_EXECUCAO,
-                               "remoto": diag.versao_legivel("origin/main")},
+                               "remoto": diag.versao_legivel(f"origin/{atualizar.alvo()}")},
             "atras": len(mudancas),
             "atualizacao_disponivel": bool(mudancas),
             "mudancas": mudancas,
@@ -5651,7 +5651,7 @@ async def get_atualizacao(procurar: bool = False):
 async def post_atualizacao_iniciar():
     """Lança a atualização e devolve na hora — ela roda FORA deste processo, que vai reiniciar."""
     pre = await asyncio.to_thread(atualizar.checar)
-    # Recusa ANTES de lançar o motor: a atualização alinha o disco com `origin/main` e arrastaria a
+    # Recusa ANTES de lançar o motor: a atualização alinha o disco com `origin/<alvo>` e arrastaria a
     # branch de trabalho junto (medido em 25/08/2026 numa máquina com `mobile-expo` no checkout).
     if pre.get("branch_de_trabalho"):
         raise HTTPException(409, detail=erro(
@@ -5717,6 +5717,9 @@ def _auto_update_motivo() -> Optional[str]:
     CI verde + build pronto, que é condição, não aceleração). Sobrava uma corrida de segundos — push entre o gate e o fetch do motor, ou release `dist-latest` móvel —
     em que o build local de fallback podia ainda acontecer: consequencia e lentidao, nao tela errada, entao ficou aceita e registrada aqui.
     """
+    # O CI só publica o dist da main: branch de teste atualiza pelo botão, que compila a tela aqui.
+    if atualizar.alvo() != "main":
+        return "branch de teste configurada (CP_UPDATE_BRANCH)"
     pre = atualizar.checar()
     if not pre.get("pode"):
         return "dependencias faltando"
