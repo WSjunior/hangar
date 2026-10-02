@@ -216,7 +216,7 @@ async def new_session(ctx: Context, nome: str, cwd: str, provider: str = "claude
                             f"com o caminho do config dir, ou use `hangar-send --new --conta`")
         config_dir = str(cfg) if cfg else None
     aviso = None
-    if conta is None and provider == "claude":
+    if conta is None and provider == "claude" and not engine:
         # Herdar não é escolher: conta herdada sem cota daria uma sessão que nasce e não responde.
         from app import cotas
         config_dir, aviso = await asyncio.to_thread(cotas.conta_com_cota, config_dir, cotas.cotas_claude())
