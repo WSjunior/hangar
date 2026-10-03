@@ -2280,7 +2280,11 @@ class SessionRegistry:
         _esperar_saida(filhos)
         self._forget(name)
         try:
+            from app import runtime_coordinator
+            coordinator = runtime_coordinator.current()
+            owner_key = coordinator.slot(name).binding.key if coordinator is not None and coordinator.managed_queue(name) else None
             meta = headless_sessions.save(name, cwd, sid, config_dir=str(cdir) if cdir else None,
+                                          key=owner_key,
                                           engine=motor, model=modelo, effort=esforco,
                                           context_window=int(janela) if janela and janela.isdigit() else None,
                                           permission_mode=permission_mode, subagent_model=subagente,
@@ -2653,3 +2657,8 @@ class SessionRegistry:
         # mas semear evita a janela onde o pane ainda esta subindo e cairia no fallback por mtime.
         self._jsonl_cache[name] = str(jsonl)
         return SessionInfo(name=name, cwd=cwd, jsonl=str(jsonl), tracked=True, engine=motor)
+
+
+from app.runtime_adapter import registry_method as _runtime_registry_method
+for _method_name in ("kill", "rename", "para_terminal", "para_headless"):
+    setattr(SessionRegistry, _method_name, _runtime_registry_method(getattr(SessionRegistry, _method_name)))

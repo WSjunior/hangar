@@ -29,6 +29,15 @@ impl std::fmt::Debug for Config {
 }
 
 impl Config {
+    pub fn runtime_instance() -> Result<Option<String>, String> {
+        let value = std::env::var("HANGAR_RUNTIME_INSTANCE").ok();
+        if value.as_ref().is_some_and(|value|value.is_empty() || value.len() > 128
+            || !value.bytes().all(|byte|byte.is_ascii_alphanumeric() || matches!(byte,b'_' | b'-'))) {
+            return Err("identidade privada do runtime inválida".into());
+        }
+        Ok(value)
+    }
+
     pub fn from_env() -> Result<Config, String> {
         Config::from_lookup(|k| std::env::var(k).ok())
     }

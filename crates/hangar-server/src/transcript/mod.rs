@@ -5,7 +5,7 @@
 
 mod claude;
 mod codex;
-mod history;
+pub(crate) mod history;
 mod peer;
 mod py;
 pub mod pyjson;

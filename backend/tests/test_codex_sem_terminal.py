@@ -113,7 +113,7 @@ def test_esforco_escolhido_chega_na_thread(ambiente):
         assert await ad.ensure_running("cx-esforco") is not None
         ajuste = json.loads((ambiente / "settings.txt").read_text())
         assert ajuste == {"threadId": "th-1", "model": "gpt-6-astra", "effort": "high"}
-        ad.close_sync("cx-esforco")
+        await asyncio.to_thread(ad.close_sync, "cx-esforco")
     asyncio.run(corpo())
 
 
@@ -126,7 +126,7 @@ def test_esforco_recusado_deixa_a_sessao_de_pe_e_o_problema_visivel(ambiente):
         assert codex_sessions.load("cx-esforco-ruim")["thread_id"] == "th-1"
         assert ad.problema_de("cx-esforco-ruim") == "codex_esforco_nao_aplicado"
         assert "effort invalido" in ad._problemas["cx-esforco-ruim"][1]
-        ad.close_sync("cx-esforco-ruim")
+        await asyncio.to_thread(ad.close_sync, "cx-esforco-ruim")
     asyncio.run(corpo())
 
 
@@ -234,7 +234,7 @@ def test_sobe_no_cano_abre_thread_e_religa_com_aprovacao_pendente(ambiente):
         notas = [e for e in PromptQueue("cx-sem-terminal").load() if e.get("papel") == "assistant"]
         assert notas and "mcpServer/elicitation/request" in notas[-1]["text"]
         assert await ad.select("cx-sem-terminal", 1) is False    # nada mais pendente
-        ad.close_sync("cx-sem-terminal")
+        await asyncio.to_thread(ad.close_sync, "cx-sem-terminal")
         for _ in range(50):
             if not Path(f"/proc/{pid_cano}").exists():
                 break
@@ -282,7 +282,7 @@ def test_modo_de_permissao_vai_no_turno_e_troca_de_sandbox_reabre_o_servidor(amb
                           "sandbox": "danger-full-access"}
         with pytest.raises(ValueError):
             await ad.set_permission_mode_sem_terminal("cx-modo", "yolo")
-        ad.close_sync("cx-modo")
+        await asyncio.to_thread(ad.close_sync, "cx-modo")
     asyncio.run(corpo())
 
 
@@ -339,7 +339,7 @@ def test_troca_de_sandbox_apos_restart_preserva_turno_vivo(ambiente, estado):
                     await asyncio.sleep(0.05)
                 assert (ambiente / "elicitacao.txt").exists()
         finally:
-            ad.close_sync("cx-reinicio")
+            await asyncio.to_thread(ad.close_sync, "cx-reinicio")
     asyncio.run(corpo())
 
 
@@ -358,7 +358,7 @@ def test_binario_ausente_para_no_teto_de_subidas(ambiente, monkeypatch):
         ev = [e async for e in ad._state_stream("cx-sem-codex")]
         assert ev[-1].state == "dead" and ev[-1].problema == "codex_headless_nao_subiu"
         assert "codex" in (ev[-1].problema_detalhe or "")
-        ad.close_sync("cx-sem-codex")
+        await asyncio.to_thread(ad.close_sync, "cx-sem-codex")
         assert ad.problema_de("cx-sem-codex") is None
     asyncio.run(corpo())
 

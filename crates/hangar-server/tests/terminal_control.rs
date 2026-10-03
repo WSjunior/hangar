@@ -37,18 +37,20 @@ fn invalid_utf8_and_oversized_or_unfinished_frames_are_errors() {
 }
 
 #[cfg(unix)]
-struct IsolatedTmux { _dir: tempfile::TempDir, socket: PathBuf }
+struct IsolatedTmux { _dir: tempfile::TempDir, socket: PathBuf, label: String }
 #[cfg(unix)]
 impl IsolatedTmux {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("tmux.sock");
-        let server = Self { _dir: dir, socket };
+        let label = format!("hangar-test-{}", dir.path().file_name().unwrap().to_string_lossy());
+        let mut server = Self { _dir: dir, socket, label };
         server.run(&["-f", "/dev/null", "new-session", "-d", "-s", "fixture", "-x", "120", "-y", "30", "-e", "HANGAR_PROBE=kept", "cat"]);
+        server.socket = PathBuf::from(server.run(&["display-message", "-p", "#{socket_path}"]).trim());
         server
     }
     fn run(&self, args: &[&str]) -> String {
-        let output = Command::new("tmux").arg("-u").arg("-S").arg(&self.socket).args(args).output().unwrap();
+        let output = Command::new("tmux").arg("-u").arg("-L").arg(&self.label).args(args).output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         String::from_utf8(output.stdout).unwrap()
     }
@@ -65,7 +67,7 @@ impl IsolatedTmux {
     }
 }
 #[cfg(unix)]
-impl Drop for IsolatedTmux { fn drop(&mut self) { let _ = Command::new("tmux").arg("-S").arg(&self.socket).arg("kill-server").output(); } }
+impl Drop for IsolatedTmux { fn drop(&mut self) { let _ = Command::new("tmux").arg("-L").arg(&self.label).arg("kill-server").output(); } }
 
 #[cfg(unix)]
 #[tokio::test]

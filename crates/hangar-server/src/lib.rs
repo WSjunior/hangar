@@ -3,6 +3,7 @@ pub mod auth;
 pub mod config;
 pub mod proxy;
 pub mod routes;
+pub mod runtime;
 pub mod side;
 pub mod tail;
 pub mod terminal_state;
@@ -12,7 +13,7 @@ pub mod transcript;
 
 /// Versão do contrato com o Python (rotas `/internal`, eventos do side-events, ambiente). O
 /// Python (`RUST_SERVER_PROTOCOL`) recusa um binário de outra versão e atende sozinho.
-pub const INTERNAL_PROTOCOL: u32 = 3;
+pub const INTERNAL_PROTOCOL: u32 = 7;
 
 /// Lê o cano até o fim ou erro. O Python segura a outra ponta; fechou = pai morreu.
 pub async fn parent_gone<R: tokio::io::AsyncRead + Unpin>(mut pipe: R) {
@@ -32,6 +33,21 @@ pub async fn serve_until(
     cfg: config::Config,
     stop: impl std::future::Future<Output = ()>,
 ) -> std::io::Result<()> {
+    if let Some(instance) = config::Config::runtime_instance().map_err(std::io::Error::other)? {
+        let private = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = private.local_addr()?.port();
+        let registry = std::sync::Arc::new(runtime::gateway::RuntimeRegistry::new(cfg.upstream,
+            cfg.internal_secret.clone(),instance.clone()));
+        println!("{}",runtime::gateway::startup_line(INTERNAL_PROTOCOL,&instance,port));
+        let gateway = runtime::gateway::serve(private,registry.clone(),cfg.internal_secret.clone(),instance,INTERNAL_PROTOCOL);
+        let result = tokio::select! {
+            result = routes::serve(listener,cfg) => result,
+            result = gateway => result,
+            () = stop => Ok(()),
+        };
+        registry.shutdown().await.map_err(|error|std::io::Error::other(error.code))?;
+        return result;
+    }
     tokio::select! {
         r = routes::serve(listener, cfg) => r,
         () = stop => Ok(()),

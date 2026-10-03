@@ -96,6 +96,22 @@ def _sem_sessoes_sem_terminal_reais(tmp_path_factory):
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _isolated_runtime_storage(tmp_path_factory):
+    # O novo cadastro do lifespan não pode adquirir a posse das sessões da máquina.
+    from app.config import settings
+    from app.adapters.codex import sessions
+    original_projects, original_dir = settings.projects_dir, sessions._dir
+    root = tmp_path_factory.mktemp("runtime-storage")
+    settings.projects_dir = root / "projects"
+    settings.projects_dir.mkdir()
+    sessions._dir = lambda: root / "codex-sessions"
+    try:
+        yield
+    finally:
+        settings.projects_dir, sessions._dir = original_projects, original_dir
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _sem_endereco_do_plugin_real():
     # O `_lifespan` grava ~/.hangar/plugin.json; sem isto o TestClient trocaria o arquivo da máquina
     # pela config do teste e as sessões vivas do plugin falariam com um backend que não existe.

@@ -121,7 +121,8 @@ for n, line in enumerate(sys.stdin, 2):
     assert_eq!(captured["text"], "ready\n\n\n\n");
     let pid = std::fs::read_to_string(dir.path().join("pids")).unwrap().trim().to_owned();
     let process_exists = || std::process::Command::new("kill").args(["-0", &pid])
-        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().unwrap().success();
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+        .status().is_ok_and(|status| status.success());
     assert!(process_exists());
     for consumer in ["unknown", "state", "preview"] {
         let r = post(serde_json::json!({"op":"release", "consumer":consumer})).send().await.unwrap();
@@ -133,7 +134,7 @@ for n, line in enumerate(sys.stdin, 2):
 
 #[tokio::test]
 async fn specific_public_bind_advertises_private_loopback_and_stop_closes_both() {
-    let public = TcpListener::bind("127.0.0.2:0").await.unwrap();
+    let public = TcpListener::bind("[::1]:0").await.unwrap();
     let public_addr = public.local_addr().unwrap();
     let cfg = Config { listen: public_addr, upstream: "127.0.0.1:1".parse().unwrap(),
         internal_secret: "internal".into(), auth_token: "owner".into(), log_path: None,
@@ -211,6 +212,5 @@ async fn removed_pure_reduce_rpc_is_rejected() {
         "plugin_question":null,"plugin_state":null,"hook_state":null,"hook_grace":8,"status_line":null}});
     let r = reqwest::Client::new().post(url).header("x-hangar-internal", "internal").body(body.to_string()).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(hangar_server::INTERNAL_PROTOCOL, 3);
     task.abort();
 }
