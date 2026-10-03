@@ -564,11 +564,13 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             let mut confirmed = Vec::new();
                             let current = queue.snapshot().await.map_err(io_failure)?;
                             for (id,operation) in &current.operations {
+                                if operation.status == Status::Confirmed { continue; }
                                 if !matches!(operation.payload["kind"].as_str(),Some("input" | "steer")) { continue; }
                                 let Some(entry) = operation.entry_id.as_deref() else { continue };
                                 let Ok(cursor) = serde_json::from_value(operation.dispatch_cursor.clone()) else { continue };
                                 let state = queue.snapshot().await.map_err(io_failure)?;
                                 if let Some(row) = state.rows.iter().find(|r|r["id"] == entry).cloned() {
+                                    if row["confirmed"] == true { continue; }
                                     let receipt = receipt.clone(); let path = target.transcript.clone();
                                     let proof = tokio::task::spawn_blocking(move || {
                                         let mut receipt = receipt.lock().map_err(|_|failure("receipt_panic"))?;

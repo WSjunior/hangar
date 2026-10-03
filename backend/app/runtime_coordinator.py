@@ -152,6 +152,11 @@ class RuntimeCoordinator:
                 return False
             if slot.frozen or slot.phase not in {Phase.Python, Phase.Rust}:
                 raise RuntimeError("sessão em transferência; aguarde a confirmação")
+            if slot.phase == Phase.Rust and binding.jsonl != slot.binding.jsonl:
+                async def changed():
+                    return None
+                field = "session_id" if binding.provider == "claude" else "thread_id"
+                await self.change(name, changed, advance=binding.meta.get(field) != slot.binding.meta.get(field), reopen=False)
             if slot.phase == Phase.Python:
                 with slot.guard:
                     slot.binding.meta = binding.meta
@@ -679,10 +684,11 @@ class RuntimeCoordinator:
                     if slot.store.state["name"] != target_name:
                         slot.store.exec(slot.binding.generation, "rename:" + uuid.uuid4().hex, _clock(), {"kind":"rename", "name":target_name})
                     binding.generation = slot.binding.generation + int(advance)
+                    state = copy.deepcopy(slot.store.state)
                     if advance:
-                        state = copy.deepcopy(slot.store.state)
-                        state["runtime_state"] = {"_binding":binding.descriptor()}
-                        slot.store._persist(state)
+                        state["runtime_state"] = {}
+                    state["runtime_state"]["_binding"] = binding.descriptor()
+                    slot.store._persist(state)
                 self.register(binding)
                 slot.view, slot.cache_valid = {}, False
                 self._signal(slot)

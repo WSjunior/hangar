@@ -21,6 +21,17 @@ fn initialize_then_resume() {
 }
 
 #[test]
+fn takeover_restores_async_question_before_ready() {
+    let question = json!({"provider":"codex", "request_id":"async:thread-1:item:0", "is_async":true,
+        "questions":[{"id":"answer", "question":"Qual opção?", "options":[]}]});
+    let engine = Engine::new(json!({"name":"session", "thread_id":"thread-1", "initialized":true, "ready":true,
+        "async_questions":[["async:thread-1:item:0",question]], "async_seen":["item"]}),1,clock(10.0));
+    assert_eq!(engine.view()["state"], "awaiting_input");
+    assert_eq!(engine.view()["codex_question"]["request_id"], "async:thread-1:item:0");
+    assert_eq!(engine.control_view()["deliverable"], false);
+}
+
+#[test]
 fn reply_ids_and_generations() {
     let mut engine = engine();
     let effects = engine.command(command(OperationKind::ListModels,json!({})),clock(10.0)).unwrap();

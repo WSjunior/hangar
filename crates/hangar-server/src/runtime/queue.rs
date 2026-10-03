@@ -329,10 +329,12 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
         Action::ConfirmOccurrence { id, proof } => {
             if state.used_occurrences.contains_key(&proof.occurrence.id) { return Ok(json!(false)); }
             let operation = state.operations.get(&id).ok_or_else(||invalid("operação não preparada"))?;
+            if operation.status == Status::Confirmed { return Ok(json!(false)); }
             let cursor: super::receipt::DispatchCursor = serde_json::from_value(operation.dispatch_cursor.clone())
                 .map_err(|_|invalid("operação sem cursor de despacho"))?;
             let row = state.rows.iter_mut().find(|r|Some(row_id(r)) == operation.entry_id.as_deref())
                 .ok_or_else(||invalid("entrada da operação não existe"))?;
+            if row["confirmed"] == true { return Ok(json!(false)); }
             if !proof.validates(&cursor,row) { return Err(invalid("prova de entrega não corresponde ao despacho")); }
             row["delivered"] = json!(true); row["confirmed"] = json!(true);
             row.as_object_mut().unwrap().remove("desistiu");

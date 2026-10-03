@@ -91,6 +91,31 @@ async fn no_sse_runtime_still_drains() {
 }
 
 #[tokio::test]
+async fn confirmed_prompt_does_not_consume_next_echo() {
+    use hangar_server::runtime::receipt::ReceiptIndex;
+    let (handle,server,dir) = setup(true).await;
+    let path = dir.path().join("chat.jsonl");
+    std::fs::write(&path, "").unwrap();
+    for id in ["first", "second"] {
+        let cursor = ReceiptIndex::new("codex", "thread-1").capture(&path).unwrap();
+        handle.queue(format!("{id}:append"),Action::Append { text:"Olá".into(),delivered:true,ts:None,
+            pre_transcript:false,entry_id:Some(id.into()) }).await.unwrap();
+        handle.queue(format!("{id}:prepare"),Action::Prepare { id:id.into(),entry_id:Some(id.into()),
+            payload:json!({"kind":"input"}) }).await.unwrap();
+        handle.queue(format!("{id}:cursor"),Action::BindDispatch { id:id.into(),cursor:serde_json::to_value(cursor).unwrap() }).await.unwrap();
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file,"{}",json!({"type":"event_msg", "payload":{"type":"user_message", "message":"Olá"}})).unwrap();
+        assert_eq!(handle.confirm().await.unwrap()["confirmed"],1);
+    }
+    let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+    assert!(state.rows.iter().all(|row|row["confirmed"] == true));
+    assert_eq!(state.used_occurrences.len(),2);
+    handle.shutdown().await.unwrap();
+    assert_eq!(server.await.unwrap(),0);
+}
+
+#[tokio::test]
 async fn prepare_before_every_write_and_cli_reply_before_ack_is_final() {
     let (handle,server,dir) = setup(true).await;
     let result = handle.command(command()).await.unwrap();

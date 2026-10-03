@@ -32,7 +32,7 @@ _log = logging.getLogger("hangar.rust_server")
 HEALTH_PATH = "/__hangar_server/health"
 # Versão do contrato interno (rotas /internal, side-events, ambiente). Tem de casar com o
 # `protocol` da saúde (hangar_server::INTERNAL_PROTOCOL); outro número = o Python atende sozinho.
-RUST_SERVER_PROTOCOL = 6
+RUST_SERVER_PROTOCOL = 7
 START_TIMEOUT = 10.0
 CRASH_WINDOW = 60.0
 MAX_CRASHES = 3
@@ -383,6 +383,8 @@ class Supervisor:
         coordinator = runtime_coordinator.current()
         if coordinator is not None:
             await coordinator.close_events()
+            if coordinator.transport is self.runtime_transport:
+                coordinator.transport, coordinator.instance = None, None
             for slot in tuple(coordinator.slots.values()):
                 if slot.phase != runtime_coordinator.Phase.Python:
                     await coordinator.recover(slot.binding.name, confirmed_dead=True)

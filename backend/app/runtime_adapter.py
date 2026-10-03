@@ -92,7 +92,9 @@ class LegacyIO:
             "request_id":payload.get("id", payload.get("request_id"))}, "entry_id":saved.get("entry_id")})
         from app.runtime_receipt import ReceiptIndex
         conversation = binding["meta"].get("session_id" if binding["provider"] == "claude" else "thread_id") or ""
-        cursor = await asyncio.to_thread(ReceiptIndex(binding["provider"], conversation).capture, binding["jsonl"])
+        is_input = payload.get("type") == "user" or payload.get("method") in {"turn/start", "turn/steer"}
+        cursor = (await asyncio.to_thread(ReceiptIndex(binding["provider"], conversation).capture, binding["jsonl"])
+            if is_input and binding["jsonl"] else None)
         await self._exec(name, {"kind":"bind_dispatch", "id":phase_id, "cursor":cursor})
         if saved["status"] == "prepared":
             await self._exec(name, {"kind":"bind_dispatch", "id":operation_id, "cursor":cursor})
@@ -144,6 +146,9 @@ class LegacyIO:
         failure = frame.get("error") is not None or (frame.get("response") or {}).get("subtype") == "error"
         result = {"operation_id":ticket.operation_id, "disposition":"rejected" if failure else "accepted", "payload":frame}
         await self.finish_wire(ticket, "not_written" if failure else "written", result, definitive=True)
+        future = getattr(endpoint, "runtime_acks", {}).get(ticket.phase_id)
+        if future is not None and not future.done():
+            future.set_result("written")
 
     async def finish_call(self, name, context, *, failed=False, deferred=False):
         slot = self.coordinator.slot(name)
@@ -177,12 +182,18 @@ class LegacyIO:
             writer.write((json.dumps(envelope) + "\n").encode())
             await writer.drain()
             outcome = await asyncio.wait_for(asyncio.shield(future), 30) if version == 2 else "unknown"
-        except BaseException:
+        except asyncio.CancelledError:
             await self.finish_wire(ticket, "unknown")
-            raise RuntimeError("escrita incerta; operação conservada sem reenvio") from None
+            raise
+        except Exception:
+            with self.coordinator.slot(name).guard:
+                phase = copy.deepcopy(self.coordinator.slot(name).store.state["operations"].get(ticket.phase_id))
+            await self.finish_wire(ticket, "unknown")
+            if not (phase and isinstance(phase.get("result"), dict) and phase["result"].get("disposition") in {"accepted", "rejected"}):
+                raise RuntimeError("escrita incerta; operação conservada sem reenvio") from None
+            outcome = "written"
         finally:
-            if future.done():
-                endpoint.runtime_acks.pop(ticket.phase_id, None)
+            endpoint.runtime_acks.pop(ticket.phase_id, None)
         await self.finish_wire(ticket, outcome)
         if outcome != "written":
             raise RuntimeError("entrada não confirmada pelo cano; diário conservado")
@@ -212,6 +223,12 @@ class LegacyBridge:
         if not headless and not state_path.exists():
             return None
         path = self.adapters[provider].transcript_path_de(meta) if provider == "claude" else meta.get("rollout_path") or ""
+        if provider == "codex" and not path and meta.get("thread_id"):
+            from app.adapters.codex.sem_terminal import rollout_de
+            path = rollout_de(meta["thread_id"], meta.get("codex_home"))
+            current = sessions.load(name)
+            if path and current and current.get("key") == meta["key"] and current.get("thread_id") == meta["thread_id"]:
+                meta = sessions.update(name, rollout_path=path) or meta
         generation = (self.coordinator.slots[meta["key"]].binding.generation
             if meta["key"] in self.coordinator.slots else
             json.loads(state_path.read_bytes())["generation"] if state_path.exists() else 1)
@@ -251,6 +268,12 @@ class LegacyBridge:
             carry.update(initialized=True, ready=True, thread_id=sess["thread_id"],
                 model=sess.get("model") or sess.get("default_model"), effort=sess.get("effort") or sess.get("default_effort"),
                 in_progress=sess.get("in_progress", False), turn_id=sess.get("turn_id"))
+            questions = sess.get("async_questions")
+            if questions is not None:
+                carry.update(async_questions=list(copy.deepcopy(questions._pending).items()),
+                    async_seen=sorted(questions._seen), async_resolved=sorted(questions._resolved),
+                    skipped_async_questions=sorted(questions.skipped), async_local_answers=copy.deepcopy(questions._local_answers),
+                    async_echoes=dict(questions._echoes), async_during_load=copy.deepcopy(questions._during_load))
             for collection in (adapter._subscribers, adapter._tmux_watchers):
                 if task := collection.pop(name, None):
                     tasks.append(task)
@@ -308,6 +331,16 @@ class LegacyBridge:
                 for field in ("model", "effort", "mode", "token_usage", "rate_limits"):
                     if field in view:
                         sess[field] = copy.deepcopy(view[field])
+                if "async_questions" in view:
+                    from collections import Counter
+                    questions = sess["async_questions"]
+                    questions._pending = dict(copy.deepcopy(view["async_questions"]))
+                    questions._seen = set(view.get("async_seen") or [])
+                    questions._resolved = set(view.get("async_resolved") or [])
+                    questions.skipped = set(view.get("skipped_async_questions") or [])
+                    questions._local_answers = copy.deepcopy(view.get("async_local_answers") or {})
+                    questions._echoes = Counter(view.get("async_echoes") or {})
+                    questions._during_load = copy.deepcopy(view.get("async_during_load"))
         return {"hydrated":True}
 
     async def op(self, descriptor, command, operation_id):
@@ -391,17 +424,20 @@ class LegacyBridge:
         conversation = descriptor["meta"].get("session_id" if descriptor["provider"] == "claude" else "thread_id") or ""
         index = ReceiptIndex(descriptor["provider"], conversation)
         io = LegacyIO(self.coordinator)
+        if not descriptor["jsonl"]:
+            return {"confirmed":0}
         await asyncio.to_thread(index.scan, descriptor["jsonl"])
         with slot.guard:
             operations = copy.deepcopy(slot.store.state["operations"])
         count = 0
         for operation_id, operation in operations.items():
-            if operation["payload"].get("kind") not in {"input", "steer"} or not operation.get("dispatch_cursor"):
+            if (operation["status"] == "confirmed" or operation["payload"].get("kind") not in {"input", "steer"}
+                    or not operation.get("dispatch_cursor")):
                 continue
             with slot.guard:
                 state = copy.deepcopy(slot.store.state)
             row = next((row for row in state["rows"] if row["id"] == operation.get("entry_id")), None)
-            if row is not None and (proof := index.match_after(operation["dispatch_cursor"], row, state["used_occurrences"])):
+            if row is not None and not row.get("confirmed") and (proof := index.match_after(operation["dispatch_cursor"], row, state["used_occurrences"])):
                 count += await io._exec(descriptor["name"], {"kind":"confirm_occurrence", "id":operation_id, "proof":proof}) is True
         return {"confirmed":count}
 

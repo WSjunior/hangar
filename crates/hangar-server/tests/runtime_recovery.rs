@@ -28,7 +28,7 @@ fn recovery_matrix_preserves_input_without_resending_unknown() {
         assert_eq!(store.state().rows.len(),1,"{point}");
         assert_eq!(store.state().rows[0]["text"],"Olá\r\nação 🚀");
         if dispatched {
-            assert_eq!(store.state().operations["entry"].status,Status::Unknown,"{point}");
+            assert!(matches!(store.state().operations["entry"].status,Status::Unknown),"{point}");
             assert!(store.exec(1,"retry",clock(),Action::BeginDispatch { id:"entry".into(),wire_id:"retry".into() }).is_err());
         }
     }
@@ -47,7 +47,7 @@ fn projection_failure_preserves_definitive_reply() {
         result:json!({"disposition":"accepted","payload":{}}) }).is_err());
     std::fs::remove_dir(projection.join("session.jsonl")).unwrap();
     let store = Store::open(&path,&projection,State::new("key",1,"session",vec![])).unwrap();
-    assert_eq!(store.state().operations["op"].status,Status::Accepted);
+    assert!(matches!(store.state().operations["op"].status,Status::Accepted));
 }
 
 #[test]

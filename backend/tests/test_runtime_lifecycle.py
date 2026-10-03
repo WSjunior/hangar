@@ -178,3 +178,46 @@ def test_stop_error_is_raised_before_cano_cleanup(monkeypatch):
     monkeypatch.setattr(adapter.os, "killpg", lambda *args: (_ for _ in ()).throw(PermissionError("synthetic")))
     with pytest.raises(RuntimeError):
         adapter._matar_grupo(42, "session")
+
+
+def test_dead_runtime_does_not_re_adopt(tmp_path, monkeypatch):
+    from app import rust_server
+    coordinator, slot, target = owner(tmp_path, monkeypatch)
+    target.meta["cano"] = {"versao":2}
+    class Transport:
+        instance = "old"
+        alive = False
+        async def close(self):
+            pass
+    transport = Transport()
+    coordinator.transport, coordinator.instance = transport, "old"
+    supervisor = rust_server.Supervisor("fake", "127.0.0.1", 1, 2, "token", "127.0.0.1", lambda: False)
+    supervisor.runtime_transport = transport
+    async def scenario():
+        await supervisor.deactivate_runtime(confirmed_dead=True)
+        assert coordinator.transport is None and coordinator.instance is None
+        assert await coordinator.prepare_session("session", "claude")
+        assert slot.phase == Phase.Python and not slot.lease.closed
+    try:
+        asyncio.run(scenario())
+    finally:
+        coordinator.close_python_leases()
+
+
+def test_terminal_rename_persists_new_name_without_new_generation(tmp_path, monkeypatch):
+    coordinator, slot, target = owner(tmp_path, monkeypatch)
+    async def terminal():
+        target.headless = False
+    async def rename():
+        target.name = "renamed"
+    async def scenario():
+        await coordinator.change("session", terminal)
+        generation = slot.binding.generation
+        await coordinator.change("session", rename, new_name="renamed", advance=False)
+        assert slot.binding.generation == generation
+        assert slot.store.state["runtime_state"]["_binding"]["name"] == "renamed"
+        assert slot.store.state["name"] == "renamed"
+    try:
+        asyncio.run(scenario())
+    finally:
+        coordinator.close_python_leases()

@@ -248,3 +248,141 @@ def test_reserve_composite_waits_for_both_replies(tmp_path, monkeypatch):
         asyncio.run(scenario())
     finally:
         coordinator.close_python_leases()
+
+
+def test_reserve_bootstrap_before_rollout(tmp_path, monkeypatch):
+    from app.runtime_adapter import LegacyIO
+    from app.runtime_coordinator import Binding, RuntimeCoordinator
+    coordinator = RuntimeCoordinator()
+    monkeypatch.setattr(runtime_coordinator, "_current", coordinator)
+    slot = coordinator.register(Binding("session", "key", "codex", True, {"key":"key"}, "",
+        tmp_path / "projection", tmp_path / "state", tmp_path / "lease", 1))
+    try:
+        ticket = asyncio.run(LegacyIO(coordinator).prepare_wire("session", "initialize",
+            {"id":"bootstrap", "method":"initialize", "params":{}}))
+        assert slot.store.state["operations"][ticket.phase_id]["status"] == "dispatching"
+    finally:
+        coordinator.close_python_leases()
+
+
+def test_reply_without_ack_is_final(tmp_path, monkeypatch):
+    from app.runtime_adapter import LegacyIO, _legacy_operation
+    from app.runtime_coordinator import Binding, RuntimeCoordinator
+    coordinator = RuntimeCoordinator()
+    monkeypatch.setattr(runtime_coordinator, "_current", coordinator)
+    slot = coordinator.register(Binding("session", "key", "codex", True, {"key":"key"},
+        str(tmp_path / "chat"), tmp_path / "projection", tmp_path / "state", tmp_path / "lease", 1))
+    async def scenario():
+        io = LegacyIO(coordinator)
+        endpoint = SimpleNamespace(runtime_acks={})
+        context = {"operation_id":"control", "command":{"kind":"list_models", "payload":{}}}
+        token = _legacy_operation.set(context)
+        coordinator.legacy_active.add("control")
+        class Writer:
+            def write(self, raw):
+                pass
+            async def drain(self):
+                await io.reply("session", endpoint, {"id":"request", "result":{"data":[]}})
+        try:
+            await asyncio.wait_for(io.write("session", endpoint, Writer(),
+                {"id":"request", "method":"model/list", "params":{}}, 2), 2)
+            await io.finish_call("session", context)
+            assert slot.store.state["operations"]["control"]["status"] == "accepted"
+            assert not endpoint.runtime_acks
+        finally:
+            coordinator.legacy_active.discard("control")
+            _legacy_operation.reset(token)
+    try:
+        asyncio.run(scenario())
+    finally:
+        coordinator.close_python_leases()
+
+
+@pytest.mark.parametrize("reload", [False, True])
+def test_confirmed_prompt_does_not_consume_next_echo(tmp_path, monkeypatch, reload):
+    import json
+    from app.runtime_adapter import LegacyBridge
+    from app.runtime_receipt import ReceiptIndex
+    from app.runtime_coordinator import Binding, RuntimeCoordinator
+    from app.runtime_queue import QueueStore, initial_state
+    path = tmp_path / "chat.jsonl"
+    path.touch()
+    coordinator = RuntimeCoordinator()
+    monkeypatch.setattr(runtime_coordinator, "_current", coordinator)
+    slot = coordinator.register(Binding("session", "key", "claude", True, {"key":"key", "session_id":"sid"},
+        str(path), tmp_path / "projection", tmp_path / "state", tmp_path / "lease", 1))
+    bridge = LegacyBridge(coordinator, {})
+    sample = {"monotonic_s":1, "epoch_s":1800000000}
+    async def scenario():
+        for identifier in ("first", "second"):
+            cursor = ReceiptIndex("claude", "sid").capture(path)
+            slot.store.exec(1, identifier + ":append", sample, {"kind":"append", "text":"Olá", "delivered":False,
+                "ts":None, "pre_transcript":False, "entry_id":identifier})
+            slot.store.exec(1, identifier + ":prepare", sample, {"kind":"prepare", "id":identifier,
+                "entry_id":identifier, "payload":{"kind":"input"}})
+            slot.store.exec(1, identifier + ":cursor", sample, {"kind":"bind_dispatch", "id":identifier, "cursor":cursor})
+            slot.store.exec(1, identifier + ":dispatch", sample, {"kind":"begin_dispatch", "id":identifier, "wire_id":identifier})
+            with path.open("a") as stream:
+                stream.write(json.dumps({"type":"user", "uuid":identifier, "message":{"role":"user", "content":"Olá"}}) + "\n")
+            assert (await bridge.confirm(slot.binding.descriptor()))["confirmed"] == 1
+            if reload:
+                slot.store = QueueStore(slot.binding.state_path, slot.binding.projection_dir, initial_state("key", 1, "session", []))
+        assert all(row["confirmed"] for row in slot.store.state["rows"])
+        assert len(slot.store.state["used_occurrences"]) == 2
+    try:
+        asyncio.run(scenario())
+    finally:
+        coordinator.close_python_leases()
+
+
+def test_codex_quiesce_preserves_async_questions(tmp_path, monkeypatch):
+    from app.runtime_adapter import LegacyBridge
+    from app.runtime_coordinator import Binding, RuntimeCoordinator
+    from app.adapters.codex.async_questions import AsyncQuestions
+    coordinator = RuntimeCoordinator()
+    monkeypatch.setattr(runtime_coordinator, "_current", coordinator)
+    slot = coordinator.register(Binding("session", "key", "codex", True, {"key":"key", "thread_id":"thread"},
+        str(tmp_path / "chat"), tmp_path / "projection", tmp_path / "state", tmp_path / "lease", 1))
+    questions = AsyncQuestions("thread")
+    questions.observe({"id":"question", "type":"agentMessage", "delivery":"async",
+        "questions":[{"title":"Qual opção?", "options":["A","B"]}]})
+    class Client:
+        tem_processo_proprio = False
+        async def close(self, **kwargs):
+            pass
+    adapter = SimpleNamespace(_sessions={"session":{"client":Client(), "thread_id":"thread", "async_questions":questions}},
+        _subscribers={}, _tmux_watchers={})
+    try:
+        carry = asyncio.run(LegacyBridge(coordinator, {"codex":adapter}).quiesce(slot.binding.descriptor()))
+        assert carry["runtime_state"]["async_questions"] == list(questions._pending.items())
+        assert carry["runtime_state"]["async_seen"] == sorted(questions._seen)
+    finally:
+        coordinator.close_python_leases()
+
+
+def test_later_rollout_path_rebinds_same_conversation(tmp_path, monkeypatch):
+    from app.runtime_coordinator import Binding, RuntimeCoordinator, Phase
+    target = Binding("session", "key", "codex", True, {"key":"key", "thread_id":"thread"}, "",
+        tmp_path / "projection", tmp_path / "state", tmp_path / "lease", 1)
+    class Legacy:
+        def binding(self, name, provider):
+            import copy
+            new = copy.deepcopy(target)
+            new.jsonl = str(tmp_path / "rollout.jsonl")
+            return new
+    coordinator = RuntimeCoordinator(legacy=Legacy())
+    monkeypatch.setattr(runtime_coordinator, "_current", coordinator)
+    slot = coordinator.register(target)
+    slot.phase = Phase.Rust
+    calls = []
+    async def change(name, action, **kwargs):
+        calls.append(kwargs)
+        slot.binding.jsonl = str(tmp_path / "rollout.jsonl")
+        slot.phase = Phase.Python
+    coordinator.change = change
+    try:
+        assert asyncio.run(coordinator.prepare_session("session", "codex"))
+        assert calls == [{"advance":False, "reopen":False}]
+        assert slot.binding.generation == 1
+    finally:
+        coordinator.close_python_leases()

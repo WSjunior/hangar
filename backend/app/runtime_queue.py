@@ -229,6 +229,8 @@ def apply_action(state, action, clock, call_id):
         if operation is None or operation["dispatch_cursor"] is None:
             raise ValueError("operação sem cursor de despacho")
         row = next((r for r in rows if r.get("id") == operation["entry_id"]), None)
+        if operation["status"] == "confirmed" or row is not None and row.get("confirmed"):
+            return False
         if row is None or not validate_proof(proof, operation["dispatch_cursor"], row):
             raise ValueError("prova de entrega não corresponde ao despacho")
         row.update(delivered=True, confirmed=True)

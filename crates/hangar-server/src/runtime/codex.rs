@@ -152,6 +152,17 @@ impl Engine {
             async_questions.skipped = skipped.iter().filter_map(Value::as_str).map(str::to_owned).collect();
             async_questions.resolved = async_questions.skipped.clone();
         }
+        if let Some(pending) = metadata["async_questions"].as_array() {
+            async_questions.pending = pending.iter().filter_map(|pair|
+                Some((pair.get(0)?.as_str()?.to_owned(),pair.get(1)?.clone()))).collect();
+            async_questions.seen = metadata["async_seen"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect();
+            async_questions.resolved.extend(metadata["async_resolved"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned));
+            async_questions.local_answers = metadata["async_local_answers"].as_object().into_iter().flatten()
+                .filter_map(|(id,text)|Some((id.clone(),text.as_str()?.to_owned()))).collect();
+            async_questions.echoes = metadata["async_echoes"].as_object().into_iter().flatten()
+                .filter_map(|(text,count)|Some((text.clone(),usize::try_from(count.as_u64()?).ok()?))).collect();
+            async_questions.during_load = metadata["async_during_load"].as_array().cloned();
+        }
         let voices = metadata["voice_calls"].as_array().map(|calls|calls.iter().filter_map(|call|
             Some((call["call_id"].as_str()?.into(),Voice { thread_id:string(&call["thread_id"]),starting:call["starting"] == true,
                 unsubscribed:call["unsubscribed"] == true,closed:true,..Voice::default() }))).collect()).unwrap_or_default();
@@ -194,6 +205,8 @@ impl Engine {
             "runtime_counter":self.counter,"state_revision":self.state_revision,"settings_revision":self.settings_revision,"deliverable":self.deliverable(),"pending":self.server_requests.iter()
                 .map(|(id,request)|json!({"request_id":id,"request":request})).collect::<Vec<_>>(),
             "async_questions":self.async_questions.pending,"async_local_answers":self.async_questions.local_answers,
+            "async_seen":self.async_questions.seen,"async_resolved":self.async_questions.resolved,
+            "async_echoes":self.async_questions.echoes,"async_during_load":self.async_questions.during_load,
             "skipped_async_questions":self.async_questions.skipped,"voice_calls":self.voices.iter().map(|(call_id,voice)|
                 json!({"call_id":call_id,"thread_id":voice.thread_id,"closed":voice.closed,"starting":voice.starting,"unsubscribed":voice.unsubscribed})).collect::<Vec<_>>()})
     }
