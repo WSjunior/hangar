@@ -311,9 +311,11 @@ def _inside(s, real: str) -> bool:
     return cwd == real or cwd.startswith(real.rstrip("/") + "/")
 
 
-def status(path: str, sessions=()) -> dict:
-    root = repo_root_of(path) if os.path.isdir(path) else None
-    main = main_repo_of(root) if root else _main_of_missing(path)
+def status(path: str, sessions=(), main: str | None = None) -> dict:
+    """`main`: o repo principal, quando quem chama já sabe (pasta sumida não diz de quem era)."""
+    if main is None:
+        root = repo_root_of(path) if os.path.isdir(path) else None
+        main = main_repo_of(root) if root else _main_of_missing(path)
     exists = os.path.isdir(path)
     branch = head_info(path)[0] if exists else _gitdir_branch(main, path)
     failed: list = []   # por chamada: a listagem roda status em threads diferentes
@@ -344,8 +346,8 @@ def status(path: str, sessions=()) -> dict:
 
 
 def _main_of_missing(path: str) -> str:
-    """Pasta sumida: procura o repo que ainda a lista entre as worktrees, pelo mapa de remoções ou
-    pela pasta-irmã `<repo>-<nome>`."""
+    """Pasta sumida: procura o repo que ainda a lista entre as worktrees, pelo mapa de remoções,
+    pela pasta-irmã `<repo>-<nome>` ou subindo as pastas acima (`<repo>/.claude/worktrees/<nome>`)."""
     mapped = removed().get(path)
     if mapped:
         return mapped
@@ -353,7 +355,7 @@ def _main_of_missing(path: str) -> str:
         cands = sorted(Path(path).parent.iterdir())
     except OSError:
         cands = []
-    for cand in cands:
+    for cand in [*cands, *Path(path).parents]:
         if (cand / ".git").is_dir() and path in worktree_paths(str(cand)):
             return str(cand)
     return path
@@ -375,7 +377,7 @@ def list_all(cwds, sessions, roots=None) -> list[dict]:
             continue
         paths = worktree_paths(main)
         if paths:
-            out.append({"repo": main, "worktrees": [status(p, sessions) for p in paths]})
+            out.append({"repo": main, "worktrees": [status(p, sessions, main) for p in paths]})
     return out
 
 
@@ -499,7 +501,7 @@ def delete(repo: str, path: str, sessions, *, confirm: bool = False,
     busy = sorted(s.name for s in sessions if _inside(s, real))
     if busy:
         raise GitError(409, "sessão aberta dentro: " + ", ".join(busy))
-    st = status(path, ())
+    st = status(path, (), main)
     if st["degraded"]:
         # Leitura que falhou deixa dirty/ignored zerados: apagar assim perderia o que não se viu.
         raise GitError(409, "não consegui ler a worktree; tente de novo")
@@ -542,7 +544,7 @@ def delete_merged(repo: str, sessions) -> list[str]:
     main = main_repo_of(repo_root_of(repo) or repo)
     out = []
     for path in worktree_paths(main):
-        st = status(path, sessions)
+        st = status(path, sessions, main)
         if (st["merged"] and not st["degraded"] and not st["dirty"] and not st["ignored"]
                 and not st["sessions"]):
             try:

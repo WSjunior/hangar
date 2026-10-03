@@ -243,6 +243,17 @@ def test_status_missing_folder(tmp_path):
     assert st["exists"] is False and st["repo"] == main and st["branch"] == "x"
 
 
+def test_status_missing_folder_inside_main_repo(tmp_path):
+    import shutil
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo" / ".claude" / "worktrees" / "x", "x")
+    shutil.rmtree(wt)
+    st = worktrees.status(wt)   # sobe as pastas até achar o repo que ainda a lista
+    assert st["exists"] is False and st["repo"] == main and st["branch"] == "x"
+    listed = worktrees.list_all([main], [])[0]["worktrees"][0]
+    assert listed["repo"] == main and listed["branch"] == "x"
+
+
 def test_list_all_groups_by_main_repo(tmp_path):
     main = _repo(tmp_path / "repo")
     wt = _wt(main, tmp_path / "repo-x", "x")
