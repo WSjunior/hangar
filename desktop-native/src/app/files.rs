@@ -3,8 +3,10 @@
 //! seu rascunho e seu pedido.
 use super::*;
 use gpui_kit::component::input::{Editor, EditorState, Position, RopeExt};
+mod navigation;
+mod lifecycle;
 
-actions!(file_view, [CloseFile, NextFile, PreviousFile, SaveFile]);
+actions!(file_view, [CloseFile, NextFile, PreviousFile, SaveFile, FindFile, GoToFileLine]);
 
 /// Lado maior da imagem decodificada: cabe numa tela grande sem guardar o original inteiro na memória.
 const PICTURE_SIDE: u32 = 4096;
@@ -21,6 +23,8 @@ pub(super) struct Files {
     focus: FocusHandle,
     return_focus: Option<FocusHandle>,
     _focus_lost: Subscription,
+    preview_find: navigation::PreviewFind,
+    _refresh_task: Task<()>,
 }
 
 struct FileTab {
@@ -45,6 +49,7 @@ pub(super) enum FileReply {
     Picture(u64, Result<Arc<RenderImage>, Failure>),
     /// Link relativo clicado na prévia de Markdown, já resolvido contra a pasta do documento.
     Open(String),
+    Refresh(u64, u64, bool, Result<Content, Failure>),
 }
 
 /// Da raiz, direto do disco (servidor nesta máquina); fora dela, pela rota de arquivo citado, que só serve o que a
@@ -58,8 +63,16 @@ struct Document {
     dirty: bool,
     saved: Option<Instant>,
     error: Option<String>,
+    poll_error: Option<String>,
     markdown: Option<Entity<TextViewState>>,
     _changed: Subscription,
+    _cursor: Subscription,
+    cursor: Position,
+    read_seq: u64,
+    checking: bool,
+    reloading: bool,
+    disk_changed: bool,
+    close_after_save: bool,
 }
 
 impl Document {
@@ -72,6 +85,7 @@ fn file_failure(error: &Failure) -> String {
         return Hangar::fetch_failure(error);
     }
     match error.status {
+        Some(404) => activity::web("erro_arq_inexistente"),
         Some(409) => activity::web("erro_arq_mudou_no_disco"),
         Some(413) => activity::web("erro_arq_grande_demais"),
         Some(415) => activity::web("erro_arq_binario"),
@@ -118,11 +132,14 @@ impl Files {
             KeyBinding::new("ctrl-pageup", PreviousFile, Some("FileViewer")),
             KeyBinding::new("ctrl-pagedown", NextFile, Some("FileViewer")),
             KeyBinding::new("secondary-s", SaveFile, Some("FileViewer")),
+            KeyBinding::new("secondary-f", FindFile, Some("FileViewer")),
+            KeyBinding::new("secondary-g", GoToFileLine, Some("FileViewer")),
         ]);
         let focus = cx.focus_handle();
         let lost = cx.on_focus_lost(window, |this, window, cx| this.files_focus_lost(window, cx));
         Self { owner: None, hidden: false, tabs: Vec::new(), active: 0, serial: 0, expanded: false,
-            focus, return_focus: None, _focus_lost: lost }
+            focus, return_focus: None, _focus_lost: lost, preview_find: navigation::PreviewFind::new(window, cx),
+            _refresh_task: lifecycle::watch_files(window, cx) }
     }
 }
 
@@ -179,6 +196,7 @@ impl Hangar {
         // Arquivos da sessão da outra pessoa são recusados pelo servidor dela.
         if self.open_read_only() { return; }
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return };
+        if self.guard_file_owner_change(path.clone(), line, window, cx) { return; }
         if !self.files_visible() {
             let owner = self.session_owner();
             if self.files.owner != owner { for tab in std::mem::take(&mut self.files.tabs) { release(tab, window, cx); } }
@@ -266,7 +284,8 @@ impl Hangar {
     pub(super) fn receive_file_view(&mut self, reply: FileReply, window: &mut Window, cx: &mut Context<Self>) {
         let (id, result) = match reply {
             FileReply::Read(id, result) => (id, result),
-            FileReply::Saved(id, text, result) => { self.file_saved(id, text, result, cx); return; }
+            FileReply::Saved(id, text, result) => { self.file_saved(id, text, result, window, cx); return; }
+            FileReply::Refresh(id, seq, reload, result) => { self.file_refreshed(id, seq, reload, result, window, cx); return; }
             FileReply::Open(path) => { self.open_file(path, None, window, cx); return; }
             FileReply::Picture(id, result) => {
                 let slot = self.files.tabs.iter_mut().find(|tab| tab.id == id).and_then(|tab| tab.picture.as_mut());
@@ -296,8 +315,16 @@ impl Hangar {
                     cx.notify();
                 }
             });
-            let markdown = (file_language(path) == "markdown").then(|| cx.new(|cx| TextViewState::markdown(&content.text, cx)));
-            let doc = Document { editor, base: content, saving: false, dirty: false, saved: None, error: None, markdown, _changed: changed };
+            let cursor = cx.observe(&editor, move |this: &mut Self, editor, cx| {
+                let position = editor.read(cx).cursor_position();
+                if let Some(Ok(doc)) = this.files.tabs.iter_mut().find(|tab| tab.id == id).and_then(|tab| tab.content.as_mut()) {
+                    if doc.cursor != position { doc.cursor = position; cx.notify(); }
+                }
+            });
+            let markdown = (file_language(path) == "markdown").then(|| cx.new(|cx| TextViewState::markdown(&content.text, cx).scrollable(true)));
+            let doc = Document { editor, base: content, saving: false, dirty: false, saved: None, error: None, markdown, _changed: changed,
+                _cursor: cursor, cursor: Position::new(0, 0), poll_error: None,
+                read_seq: 0, checking: false, reloading: false, disk_changed: false, close_after_save: false };
             doc.editor.update(cx, |state, cx| state.set_readonly(!doc.editable(), cx));
             doc
         }).map_err(|error| match error.status {
@@ -316,7 +343,9 @@ impl Hangar {
         let (Some(api), Some(key)) = (self.session_api(), self.selected_key()) else { return };
         let tab = &mut self.files.tabs[self.files.active];
         let Some(Ok(doc)) = &mut tab.content else { return };
-        if doc.saving || !doc.editable() || !doc.dirty() { return; }
+        if doc.saving || doc.reloading || !doc.editable() || !doc.dirty() { return; }
+        doc.read_seq = doc.read_seq.wrapping_add(1);
+        doc.checking = false;
         let text = doc.editor.read(cx).value().to_string();
         let body = json!({"path": doc.base.path, "text": text, "digest": doc.base.digest});
         let route = if doc.base.external { ["file", "text"] } else { ["files", "write"] };
@@ -331,7 +360,7 @@ impl Hangar {
         cx.notify();
     }
 
-    fn file_saved(&mut self, id: u64, text: String, result: Result<Value, Failure>, cx: &mut Context<Self>) {
+    fn file_saved(&mut self, id: u64, text: String, result: Result<Value, Failure>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.files.tabs.iter_mut().find(|tab| tab.id == id) else { return };
         let Some(Ok(doc)) = &mut tab.content else { return };
         doc.saving = false;
@@ -341,6 +370,8 @@ impl Hangar {
             Ok(digest) => {
                 (doc.base.text, doc.base.digest) = (text, Some(digest));
                 doc.dirty = false;
+                doc.disk_changed = false;
+                doc.poll_error = None;
                 let saved = Instant::now();
                 doc.saved = Some(saved);
                 cx.spawn(async move |this, cx| {
@@ -354,22 +385,30 @@ impl Hangar {
                     });
                 }).detach();
             }
-            Err(error) => doc.error = Some(file_failure(&error)),
+            Err(error) => { doc.error = Some(file_failure(&error)); doc.close_after_save = false; }
         }
+        if doc.close_after_save && !doc.dirty { self.finish_close_file(id, window, cx); }
         cx.notify();
     }
 
     fn discard_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.request_discard_file(window, cx) { return; }
+        self.finish_discard_file(window, cx);
+    }
+
+    fn finish_discard_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.files_visible() { return; }
         let Some(Ok(doc)) = &mut self.files.tabs[self.files.active].content else { return };
-        if doc.saving { return; }
+        if doc.saving || doc.reloading { return; }
         doc.editor.update(cx, |state, cx| state.set_value(doc.base.text.clone(), window, cx));
+        if let Some(markdown) = &doc.markdown { markdown.update(cx, |state, cx| state.set_text(&doc.base.text, cx)); }
         doc.dirty = false;
         (doc.error, doc.saved) = (None, None);
         cx.notify();
     }
 
-    fn toggle_preview(&mut self, cx: &mut Context<Self>) {
+    fn toggle_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.files.preview_find.open { self.close_preview_find(window, cx); }
         let tab = &mut self.files.tabs[self.files.active];
         tab.preview = !tab.preview;
         // A prévia mostra o texto do editor, com o que ainda não foi salvo.
@@ -377,11 +416,24 @@ impl Hangar {
             let text = doc.editor.read(cx).value().to_string();
             if let Some(view) = &doc.markdown { view.update(cx, |view, cx| view.set_text(&text, cx)); }
         }
+        self.focus_file(window, cx);
         cx.notify();
     }
 
     fn focus_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.files.preview_find.target.is_some_and(|id| {
+            let tab = &self.files.tabs[self.files.active];
+            tab.id != id || !tab.preview || tab.line.is_some()
+        }) {
+            self.close_preview_find(window, cx);
+        }
         let tab = &mut self.files.tabs[self.files.active];
+        if tab.line.is_some() { tab.preview = false; }
+        if tab.preview {
+            self.files.focus.focus(window, cx);
+            cx.notify();
+            return;
+        }
         let id = tab.id;
         if let Some(Ok(doc)) = &tab.content {
             let line = tab.line.take();
@@ -429,14 +481,21 @@ impl Hangar {
     }
 
     fn close_file(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.request_close_file(id, window, cx) { return; }
+        self.finish_close_file(id, window, cx);
+    }
+
+    fn finish_close_file(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let restore = self.files_visible() && self.files.focus.contains_focused(window, cx);
+        if self.files.preview_find.target == Some(id) { self.close_preview_find(window, cx); }
         let Some(ix) = self.files.tabs.iter().position(|tab| tab.id == id) else { return };
         self.stop_audio(&format!("file:{id}"));
         release(self.files.tabs.remove(ix), window, cx);
-        if self.files.tabs.is_empty() { self.restore_file_focus(window, cx); }
+        if self.files.tabs.is_empty() { if restore { self.restore_file_focus(window, cx); } }
         else {
             if ix < self.files.active { self.files.active -= 1; }
             self.files.active = self.files.active.min(self.files.tabs.len() - 1);
-            self.focus_file(window, cx);
+            if restore { self.focus_file(window, cx); }
         }
         cx.notify();
     }
@@ -448,6 +507,13 @@ impl Hangar {
 
     pub(super) fn files_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if !self.files_visible() { return false; }
+        if self.files.preview_find.open { self.close_preview_find(window, cx); return true; }
+        if let Some(Ok(doc)) = &self.files.tabs[self.files.active].content {
+            if doc.editor.read(cx).search_session().open {
+                doc.editor.update(cx, |state, cx| { state.close_search(cx); state.focus(window, cx); });
+                return true;
+            }
+        }
         self.files.hidden = true;
         self.restore_file_focus(window, cx);
         cx.notify();
@@ -457,7 +523,7 @@ impl Hangar {
     pub(super) fn files_expanded(&self) -> bool { self.files.expanded && self.files_visible() }
 
     /// O "+" do Zeron abre outro arquivo: aqui, a busca da aba Arquivos do painel.
-    fn file_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn file_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.files.expanded = false;
         if !self.side.open { self.toggle_side(cx); }
         self.choose_side_tab(crate::appearance::SideTab::Files, window, cx);
@@ -567,20 +633,30 @@ impl Hangar {
                     .text_color(if ix == last { theme::muted() } else { theme::faint() }).child(part).into_any_element()),
             ]).flatten());
         let doc = tab.content.as_ref().and_then(|result| result.as_ref().ok());
-        let toolbar = div().h(px(34.)).flex_shrink_0().flex().items_center().gap_1().px_2().border_t_1().border_b_1().border_color(theme::border())
+        let toolbar = div().min_h_8().flex_shrink_0().flex().flex_wrap().items_center().gap_1().px_2().py_1().border_t_1().border_b_1().border_color(theme::border())
             .child(div().pl_1().flex_shrink_0().child(crate::fileicons::tree_icon(&name, false, false)))
             .child(crumbs)
             .when_some(doc, |el, doc| el
+                .child(Button::new("file-find").ghost().xsmall().icon(IconName::Search).label(tr("file_find"))
+                    .tooltip(tr("file_find_shortcut")).on_click(cx.listener(|this, _, window, cx| { this.find_in_file(window, cx); })))
+                .when(!tab.preview, |el| {
+                    let position = doc.editor.read(cx).cursor_position();
+                    el.child(Button::new("file-goto-line").ghost().xsmall()
+                        .label(tr("file_position").replace("{line}", &(position.line + 1).to_string()).replace("{column}", &(position.character + 1).to_string()))
+                        .tooltip(tr("file_goto_shortcut")).on_click(cx.listener(|this, _, window, cx| this.open_file_line(window, cx))))
+                })
+                .child(chrome::icon_button("file-reload", IconName::RefreshCw, tr("file_reload"), cx).disabled(doc.saving || doc.reloading)
+                    .on_click(cx.listener(|this, _, window, cx| this.reload_file(window, cx))))
                 .when(doc.saved.is_some(), |el| el.child(div().px_1().text_xs().text_color(theme::success()).child(tr("file_saved"))))
                 .when(doc.editable() && doc.dirty(), |el| el
-                    .child(Button::new("file-discard").ghost().xsmall().label(tr("file_discard")).disabled(doc.saving)
+                    .child(Button::new("file-discard").ghost().xsmall().label(tr("file_discard")).disabled(doc.saving || doc.reloading)
                         .on_click(cx.listener(|this, _, window, cx| this.discard_file(window, cx))))
                     .child(Button::new("file-save").primary().xsmall().label(tr(if doc.saving { "file_saving" } else { "file_save" }))
-                        .tooltip(tr("file_save_shortcut")).disabled(doc.saving)
+                        .tooltip(tr("file_save_shortcut")).disabled(doc.saving || doc.reloading)
                         .on_click(cx.listener(|this, _, _, cx| this.save_file(cx)))))
                 .when(doc.markdown.is_some(), |el| el.child(chrome::icon_button("file-preview",
                         if tab.preview { IconName::FileCode } else { IconName::Eye }, tr(if tab.preview { "file_source" } else { "file_preview" }), cx)
-                    .selected(tab.preview).on_click(cx.listener(|this, _, _, cx| this.toggle_preview(cx))))))
+                    .selected(tab.preview).on_click(cx.listener(|this, _, window, cx| this.toggle_preview(window, cx))))))
             // Arquivo citado fora da raiz não está na árvore da sessão.
             .child(chrome::icon_button("file-reveal", IconName::FolderOpen, tr("file_reveal"), cx).disabled(tab.path.starts_with(['/', '~']))
                 .on_click(cx.listener(|this, _, window, cx| this.file_reveal(window, cx))))
@@ -609,8 +685,8 @@ impl Hangar {
             (Some(Picture::Failed(error)), _) | (None, Some(Err(error))) => state(error.clone(), theme::danger()),
             (None, Some(Ok(doc))) if tab.preview && doc.markdown.is_some() => {
                 let (tx, connection, document) = (self.tx.clone(), self.connection, tab.path.clone());
-                div().id("file-markdown").size_full().overflow_y_scroll().flex().justify_center().items_start().px_6().py_4()
-                    .child(conversation_text(div().w_full().max_w(px(900.)), false).children(doc.markdown.as_ref().map(|view| chat_text(view, cx)
+                div().id("file-markdown").size_full().flex().justify_center().items_start().px_6().py_4()
+                    .child(conversation_text(div().w_full().h_full().max_w(px(900.)), false).children(doc.markdown.as_ref().map(|view| chat_text(view, cx).scrollable(true)
                         .on_link_click(move |url, event, window, cx| match link_target(&document, url) {
                             Some(path) => { let _ = tx.try_send(Envelope { connection, selection: None, payload: Payload::FileView(FileReply::Open(path)) }); }
                             None => open_web_link(url, event, window, cx),
@@ -622,7 +698,7 @@ impl Hangar {
                 .when_some(doc.error.as_ref(), |el, error| el.child(div().id("file-save-error").role(Role::Alert)
                     .flex_shrink_0().px_4().py_2().text_sm().text_color(theme::danger()).child(error.clone())))
                 .child(div().flex_1().min_h_0().overflow_hidden()
-                    .child(Editor::new(&doc.editor).readonly(!doc.editable() || doc.saving).bordered(false).h_full().font_family(theme::MONO).text_sm()
+                    .child(Editor::new(&doc.editor).readonly(!doc.editable() || doc.saving || doc.reloading).bordered(false).h_full().font_family(theme::MONO).text_sm()
                         .line_height(relative(1.7)).aria_label(tab.path.clone())))
                 .into_any_element(),
         };
@@ -635,8 +711,17 @@ impl Hangar {
             .on_action(cx.listener(|this, _: &NextFile, window, cx| this.step_file(true, window, cx)))
             .on_action(cx.listener(|this, _: &PreviousFile, window, cx| this.step_file(false, window, cx)))
             .on_action(cx.listener(|this, _: &SaveFile, _, cx| this.save_file(cx)))
+            .on_action(cx.listener(|this, _: &FindFile, window, cx| { this.find_in_file(window, cx); }))
+            .on_action(cx.listener(|this, _: &GoToFileLine, window, cx| this.open_file_line(window, cx)))
             .child(strip)
             .child(toolbar)
+            .children(doc.filter(|doc| doc.disk_changed).map(|_| div().id("file-disk-changed").role(Role::Alert)
+                .flex_shrink_0().px_3().py_2().text_sm().text_color(theme::warning()).child(tr("file_disk_changed"))))
+            .children(doc.and_then(|doc| doc.poll_error.as_ref()).map(|error| div().id("file-poll-error").role(Role::Alert)
+                .flex_shrink_0().px_3().py_2().text_sm().text_color(theme::danger()).child(error.clone())))
+            .children(doc.and_then(|doc| doc.error.as_ref()).filter(|_| tab.preview).map(|error| div().id("file-preview-error").role(Role::Alert)
+                .flex_shrink_0().px_3().py_2().text_sm().text_color(theme::danger()).child(error.clone())))
+            .children(self.render_preview_find(cx))
             .child(div().flex_1().min_h_0().overflow_hidden().child(content)).into_any_element())
     }
 }

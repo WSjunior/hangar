@@ -1,5 +1,5 @@
 //! Árvore de arquivos da sessão no painel direito, no molde do `files/` do Zeron (MIT, ver `LICENSE-ZERON`):
-//! busca por nome no topo, pastas com seta, ícone por tipo, o nome na cor do estado no git e o clique abrindo o arquivo
+//! busca por nome ou conteúdo no topo, pastas com seta, ícone por tipo, o nome na cor do estado no git e o clique abrindo o arquivo
 //! no visor. Servidor nesta máquina lê o disco e acompanha as mudanças com um vigia; servidor de fora, pelas rotas.
 mod cited;
 mod source;
@@ -23,6 +23,12 @@ enum RowKind { Entry { dir: bool, mark: Option<char> }, Loading, Empty, Failed(S
 #[derive(Clone)]
 struct Row { path: String, name: String, depth: usize, kind: RowKind }
 
+#[derive(Clone, Copy, PartialEq)]
+enum SearchMode { Names, Contents }
+
+#[derive(Clone)]
+struct SearchHit { path: String, line: Option<u32>, text: Option<String> }
+
 pub(super) struct Tree {
     pub open: bool,
     owner: Option<SessionOwner>,
@@ -39,8 +45,10 @@ pub(super) struct Tree {
     focus: FocusHandle,
     search: Entity<InputState>,
     query: String,
+    search_mode: SearchMode,
+    search_generation: u64,
     /// `None` enquanto a busca roda.
-    results: Option<Result<(Vec<String>, bool), String>>,
+    results: Option<Result<(Vec<SearchHit>, bool), String>>,
     active: usize,
     search_task: Option<Task<()>>,
     reloading: bool,
@@ -61,7 +69,7 @@ impl Tree {
         }).detach();
         Self { open: false, owner: None, generation: 0, source: None, picking: None, dirs: HashMap::new(), expanded: HashSet::new(),
             selected: None, reveal: None, rows: Vec::new(), scroll: UniformListScrollHandle::new(), focus: cx.focus_handle(), search,
-            query: String::new(), results: None, active: 0, search_task: None, reloading: false, reload_again: false,
+            query: String::new(), search_mode: SearchMode::Names, search_generation: 0, results: None, active: 0, search_task: None, reloading: false, reload_again: false,
             watcher: None, watched: HashSet::new(), watch_error: false, _watch_task: None, cited: Default::default() }
     }
 
@@ -136,6 +144,8 @@ impl Hangar {
         let tree = &mut self.tree;
         tree.owner = None;
         tree.generation += 1;
+        tree.search_generation += 1;
+        tree.results = None;
         (tree.watcher, tree._watch_task, tree.search_task) = (None, None, None);
         tree.watched.clear();
         tree.cited.reset();
@@ -161,6 +171,7 @@ impl Hangar {
                 if this.tree.generation != generation { return; }
                 this.tree.source = Some(source);
                 this.tree_reload(cx);
+                this.tree_begin_search(cx);
             });
         }).detach();
     }
@@ -272,6 +283,24 @@ impl Hangar {
         self.tree.search.update(cx, |input, cx| input.focus(window, cx));
     }
 
+    pub(super) fn find_project_files(&mut self, contents: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.connection_dialog || window.has_active_dialog(cx) || self.open_read_only()
+            || !self.selected.as_ref().is_some_and(|session| session.readable()) { return; }
+        self.file_add(window, cx);
+        self.tree.cited.on = false;
+        let mode = if contents { SearchMode::Contents } else { SearchMode::Names };
+        self.tree_search_mode(mode, window, cx);
+        let owner = self.session_owner();
+        // O campo precisa estar montado antes de receber o foco.
+        cx.on_next_frame(window, move |this, window, cx| {
+            if this.session_owner() != owner || !this.tree.open || !this.side.open || this.tree.cited.on
+                || this.tree.search_mode != mode || window.has_active_dialog(cx) { return; }
+            this.tree_focus_search(window, cx);
+            this.tree.search.update(cx, |input, cx| input.select_all(window, cx));
+        });
+        self.redraw(Area::Side, cx);
+    }
+
     fn tree_apply_reveal(&mut self, cx: &mut Context<Self>) {
         let (Some(path), Some(source)) = (self.tree.reveal.clone(), self.tree.source.clone()) else { return };
         let parents = parent_dirs(&path);
@@ -330,22 +359,50 @@ impl Hangar {
     fn tree_search_changed(&mut self, cx: &mut Context<Self>) {
         let query = self.tree.search.read(cx).value().trim().to_owned();
         if query == self.tree.query { return; }
-        self.tree.query = query.clone();
+        self.tree.query = query;
+        self.tree_begin_search(cx);
+    }
+
+    fn tree_search_mode(&mut self, mode: SearchMode, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tree.search_mode == mode { return; }
+        self.tree.search_mode = mode;
+        let placeholder = if mode == SearchMode::Contents { tr("tree_search_contents_placeholder") } else { activity::web("arq_buscar") };
+        self.tree.search.update(cx, |input, cx| { input.set_placeholder(placeholder, window, cx); input.focus(window, cx); });
+        self.tree_begin_search(cx);
+    }
+
+    fn tree_begin_search(&mut self, cx: &mut Context<Self>) {
+        self.tree.search_generation += 1;
         self.tree.active = 0;
         self.tree.results = None;
         self.tree.search_task = None;
+        let query = self.tree.query.clone();
         let Some(source) = self.tree.source.clone().filter(|_| !query.is_empty()) else { self.redraw(Area::Side, cx); return };
+        let (Some(api), Some(session)) = (self.session_api(), self.selected.as_ref()) else { return };
+        let (name, mode, generation) = (session.name.clone(), self.tree.search_mode, self.tree.search_generation);
         let runtime = self.runtime.clone();
         self.tree.search_task = Some(cx.spawn(async move |this, cx| {
             // Espera a digitação parar: cada tecla não vira uma busca.
             cx.background_executor().timer(Duration::from_millis(180)).await;
-            let Ok(result) = runtime.spawn(async move { source.search(query.clone()).await.map(|hits| (query, hits)) }).await else { return };
-            let _ = this.update(cx, |this, cx| {
-                match result {
-                    Ok((query, hits)) if query == this.tree.query => this.tree.results = Some(Ok(hits)),
-                    Ok(_) => return,
-                    Err(error) => this.tree.results = Some(Err(Self::fetch_failure(&error))),
+            let result = runtime.spawn(async move {
+                if mode == SearchMode::Names {
+                    return source.search(query).await.map(|(paths, truncated)| (paths.into_iter()
+                        .map(|path| SearchHit { path, line: None, text: None }).collect(), truncated));
                 }
+                // Reutiliza a busca do servidor, que ignora binários e respeita o gitignore.
+                let value = api.read(&name, &["files", "search"], &[("q", query.as_str()), ("mode", "contents")], 30).await?;
+                let hits = value.get("hits").and_then(Value::as_array).ok_or_else(|| Failure::local("invalid_response"))?;
+                let hits = hits.iter().map(|hit| Ok(SearchHit {
+                    path: hit.get("path").and_then(Value::as_str).ok_or_else(|| Failure::local("invalid_response"))?.to_owned(),
+                    line: Some(hit.get("line").and_then(Value::as_u64).and_then(|line| u32::try_from(line).ok()).filter(|line| *line > 0)
+                        .ok_or_else(|| Failure::local("invalid_response"))?),
+                    text: Some(hit.get("text").and_then(Value::as_str).ok_or_else(|| Failure::local("invalid_response"))?.to_owned()),
+                })).collect::<Result<Vec<_>, Failure>>()?;
+                Ok((hits, value.get("truncated").and_then(Value::as_bool).unwrap_or(false)))
+            }).await.unwrap_or_else(|_| Err(Failure::local("invalid_response")));
+            let _ = this.update(cx, |this, cx| {
+                if generation != this.tree.search_generation { return; }
+                this.tree.results = Some(result.map_err(|error| Self::fetch_failure(&error)));
                 this.redraw(Area::Side, cx);
             });
         }));
@@ -361,9 +418,9 @@ impl Hangar {
     }
 
     fn tree_open_result(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.tree.results.as_ref().and_then(|r| r.as_ref().ok()).and_then(|(hits, _)| hits.get(ix)).cloned() else { return };
+        let Some(hit) = self.tree.results.as_ref().and_then(|r| r.as_ref().ok()).and_then(|(hits, _)| hits.get(ix)).cloned() else { return };
         self.tree.active = ix;
-        self.open_file(path, None, window, cx);
+        self.open_file(hit.path, hit.line, window, cx);
     }
 
     fn tree_row(&self, ix: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -407,16 +464,22 @@ impl Hangar {
 
     fn tree_result_row(&self, ix: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (hits, _) = self.tree.results.as_ref()?.as_ref().ok()?;
-        let path = hits.get(ix)?.clone();
+        let hit = hits.get(ix)?.clone();
+        let path = hit.path.clone();
         let (folder, name) = path.rsplit_once('/').map_or(("", path.as_str()), |(folder, name)| (folder, name));
         let active = ix == self.tree.active;
-        Some(div().id(SharedString::from(format!("tree-hit-{path}"))).role(Role::ListBoxOption).aria_selected(active).aria_label(path.clone())
-            .h(px(ROW_H)).mx_1().px_2().flex().items_center().gap(px(6.)).rounded(px(6.)).cursor_pointer()
-            .map(|el| if active { el.bg(theme::accent_dim()) } else { el.hover(|el| el.bg(theme::hover())) })
-            .on_click(cx.listener(move |this, _, window, cx| this.tree_open_result(ix, window, cx)))
+        let label = hit.line.map_or_else(|| path.clone(), |line| format!("{path}:{line}"));
+        let header = div().flex().items_center().gap_1().min_w_0()
             .child(crate::fileicons::tree_icon(name, false, false))
             .child(div().flex_none().max_w(relative(0.6)).truncate().text_size(px(12.)).text_color(theme::text()).child(name.to_owned()))
-            .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).text_color(theme::faint()).child(folder.to_owned()))
+            .when_some(hit.line, |el, line| el.child(div().flex_none().text_xs().text_color(theme::muted()).child(format!(":{line}"))))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(11.)).text_color(theme::faint()).child(folder.to_owned()));
+        Some(div().id(SharedString::from(format!("tree-hit-{label}"))).role(Role::ListBoxOption).aria_selected(active).aria_label(label)
+            .h(px(if hit.text.is_some() { ROW_H * 2. } else { ROW_H })).mx_1().px_2().flex().flex_col().justify_center().gap_1().rounded(px(6.)).cursor_pointer()
+            .map(|el| if active { el.bg(theme::accent_dim()) } else { el.hover(|el| el.bg(theme::hover())) })
+            .on_click(cx.listener(move |this, _, window, cx| this.tree_open_result(ix, window, cx)))
+            .child(header)
+            .when_some(hit.text, |el, text| el.child(div().min_w_0().truncate().font_family(theme::MONO).text_xs().text_color(theme::muted()).child(text.trim().to_owned())))
             .into_any_element())
     }
 
@@ -432,7 +495,18 @@ impl Hangar {
             .child(Button::new("tree-view-tree").ghost().small().selected(!cited_on).label(activity::web("arq_vista_arvore"))
                 .on_click(cx.listener(|this, _, _, cx| this.cited_toggle(false, cx))))
             .child(Button::new("tree-view-cited").ghost().small().selected(cited_on).label(cited_label)
-                .on_click(cx.listener(|this, _, _, cx| this.cited_toggle(true, cx))));
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.tree_search_mode(SearchMode::Names, window, cx);
+                    this.cited_toggle(true, cx);
+                })));
+        let modes = div().flex().items_center().gap_1().px_3().pb_2()
+            .child(div().flex_1().min_w_0().text_xs().text_color(theme::faint()).child(tr("tree_search_scope")))
+            .child(Button::new("tree-search-names").ghost().small().selected(self.tree.search_mode == SearchMode::Names)
+                .label(activity::web("arq_modo_nomes"))
+                .on_click(cx.listener(|this, _, window, cx| this.tree_search_mode(SearchMode::Names, window, cx))))
+            .child(Button::new("tree-search-contents").ghost().small().selected(self.tree.search_mode == SearchMode::Contents)
+                .label(activity::web("arq_modo_conteudo"))
+                .on_click(cx.listener(|this, _, window, cx| this.tree_search_mode(SearchMode::Contents, window, cx))));
         let searching = !self.tree.query.is_empty() && !cited_on;
         let search = div().flex().items_center().gap_1().px_3().pb_2()
             .child(div().id("tree-search").flex_1().min_w_0()
@@ -445,14 +519,16 @@ impl Hangar {
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     if event.keystroke.key == "enter" && !this.tree.query.is_empty() && !this.tree.cited.on { this.tree_open_result(this.tree.active, window, cx); }
                 }))
-                .child(Input::new(&self.tree.search).small().cleanable(true).aria_label(activity::web("arq_buscar"))
+                .child(Input::new(&self.tree.search).small().cleanable(true).aria_label(if self.tree.search_mode == SearchMode::Contents {
+                    tr("tree_search_contents_placeholder")
+                } else { activity::web("arq_buscar") })
                     .prefix(chrome::small_icon(IconName::Search, 14., theme::faint()))))
             .child(chrome::icon_button("tree-collapse", IconName::ChevronsDownUp, activity::web("arq_recolher_tudo"), cx)
                 .disabled(self.tree.expanded.is_empty())
                 .on_click(cx.listener(|this, _, _, cx| this.tree_collapse_all(cx))))
             .child(chrome::icon_button("tree-reload", IconName::RefreshCw, activity::web("arq_recarregar"), cx)
                 .disabled(self.tree.source.is_none())
-                .on_click(cx.listener(|this, _, _, cx| { this.tree.cited.reset(); this.tree_reload(cx); })));
+                .on_click(cx.listener(|this, _, _, cx| { this.tree.cited.reset(); this.tree_reload(cx); this.tree_begin_search(cx); })));
         let note = |text: String, color: Hsla| div().px_4().py_2().text_xs().text_color(color).child(text).into_any_element();
         let body = if cited_on {
             self.render_cited(cx)
@@ -460,9 +536,9 @@ impl Hangar {
             match &self.tree.results {
                 None => note(activity::web("arq_carregando"), theme::muted()),
                 Some(Err(reason)) => note(reason.clone(), theme::warning()),
-                Some(Ok((hits, _))) if hits.is_empty() => note(activity::web("arq_sem_nome"), theme::muted()),
+                Some(Ok((hits, _))) if hits.is_empty() => note(activity::web(if self.tree.search_mode == SearchMode::Contents { "arq_sem_conteudo" } else { "arq_sem_nome" }), theme::muted()),
                 Some(Ok((hits, truncated))) => div().flex_1().min_h_0().flex().flex_col()
-                    .child(uniform_list("tree-results", hits.len(), cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                    .child(uniform_list(if self.tree.search_mode == SearchMode::Contents { "tree-content-results" } else { "tree-results" }, hits.len(), cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
                         range.filter_map(|ix| this.tree_result_row(ix, cx)).collect::<Vec<_>>()
                     })).track_scroll(&self.tree.scroll).flex_1())
                     .when(*truncated, |el| el.child(note(activity::web("arq_primeiros_200"), theme::faint())))
@@ -486,6 +562,7 @@ impl Hangar {
         };
         div().size_full().flex().flex_col().pt_1()
             .child(views)
+            .when(!cited_on, |el| el.child(modes))
             .child(search)
             .child(body)
             .when_some(live, |el, (text, color)| el.child(div().flex_shrink_0().px_4().py(px(6.)).border_t_1().border_color(theme::border())

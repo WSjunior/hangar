@@ -487,6 +487,8 @@ impl Hangar {
 
     /// Ctrl+F com a página aberta leva ao campo de busca dela; fora dela, busca na conversa aberta.
     pub(super) fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.connection_dialog || window.has_active_dialog(cx) { return; }
+        if self.find_in_file(window, cx) { return; }
         if self.settings.is_none() || self.settings_ui.live { self.open_find(window, cx); return; }
         self.settings_ui.search.update(cx, |input, cx| input.focus(window, cx));
     }
