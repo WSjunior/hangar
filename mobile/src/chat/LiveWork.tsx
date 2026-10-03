@@ -81,7 +81,8 @@ export function AgentesRodando({ agentes, inicio, onAbrir }: {
   const { theme } = useUnistyles();
   const agora = useAgora();
   return (
-    <View style={styles.agentes} accessibilityLiveRegion="polite">
+    // Sem região viva: o rótulo de cada agente leva o relógio, e o leitor de tela anunciaria a cada segundo.
+    <View style={styles.agentes}>
       {agentes.map((a) => {
         const t0 = inicio(a.id);
         const tempo = t0 !== null ? m.tool_executando_ha({ tempo: formatElapsed(Math.max(0, agora - t0) / 1000) }) : m.estado_em_execucao();

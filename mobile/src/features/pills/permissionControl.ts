@@ -96,15 +96,21 @@ export function usePermissionControl({ serverId, name, provider }: Args) {
     setApplying(true);
     setNotice(null);
     try {
+      let ficou: string | null | undefined;
       if (isCodex) {
-        const res = await setCodexMode(name, mode as 'default' | 'plan');
-        setCurrent(res.mode ?? mode);
+        ficou = (await setCodexMode(name, mode as 'default' | 'plan')).mode;
       } else {
         seq.current++;
         const res = await setPermissionMode(name, mode);
         // O backend devolve o que FICOU, que pode não ser o pedido.
-        setCurrent(res.mode ?? res.current ?? mode);
+        ficou = res.mode ?? res.current;
       }
+      // Resposta sem o modo: mostrar o pedido como aplicado seria um sucesso inventado.
+      if (!ficou) {
+        setNotice(m.native_mode_not_confirmed());
+        return false;
+      }
+      setCurrent(ficou);
       return true;
     } catch (e) {
       setNotice(e instanceof Error ? e.message : String(e));

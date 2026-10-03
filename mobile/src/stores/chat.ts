@@ -399,7 +399,14 @@ function criarChatStore(serverId: string, name: string): ChatApi {
         // Turno acabou sem bloco de assistente: ninguém mais viria apagar a prévia — mas pela
         // carência, porque o bloco real ainda pode estar a caminho.
         if (ev.state === 'working') cancelPreviewDrop();
-        else dropPreviewSoon();
+        else {
+          dropPreviewSoon();
+          // Turno parado ou evento vazio perdido: sem isto o raciocínio/ferramenta ao vivo
+          // ficava na tela para sempre, escondendo a linha de trabalho.
+          const s = useChatStore.getState();
+          if (s.pensamento && pensamentoTimer === undefined) pensamentoTimer = setTimeout(limparPensamento, 3000);
+          if (s.ferramenta && ferramentaTimer === undefined) ferramentaTimer = setTimeout(limparFerramenta, 3000);
+        }
         const turnSeen = ev.state !== 'working' ? null
           : prevState !== null && prevState !== 'working' ? Date.now()
           : useChatStore.getState().turnSeen;

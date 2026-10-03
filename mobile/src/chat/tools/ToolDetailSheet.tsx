@@ -27,15 +27,18 @@ export const ToolDetailSheet = forwardRef<ToolDetailHandle, { resultOf: (use: Ch
     const [use, setUse] = useState<ChatEvent | null>(null);
     const [aberto, setAberto] = useState(false);
     const [saidaViva, setSaidaViva] = useState<string | null>(null);
+    const [erroVivo, setErroVivo] = useState<string | null>(null);
     useImperativeHandle(ref, () => ({
       abrir: (ev) => {
         setUse(ev);
         setSaidaViva(null);
+        setErroVivo(null);
         setAberto(true);
         // present() rejeita quando a view nunca montou; sem o catch o toque no card não faz nada e
         // não diz por quê.
         sheet.current?.present().catch((e: unknown) => {
           console.error('ToolDetailSheet: present() falhou', e);
+          setAberto(false);
           toast.erro(m.erro_desconhecido());
         });
       },
@@ -60,8 +63,10 @@ export const ToolDetailSheet = forwardRef<ToolDetailHandle, { resultOf: (use: Ch
           const t = await getBashOutput(sessionName, comando);
           if (vivo) setSaidaViva(t);
         } catch (e) {
-          // Leitura extra: falhar não tira o comando nem o desfecho da tela, só fica no log.
+          // 401/404 não se curam sozinhos: repetir a cada 2 s só enchia o log. Para e diz na folha.
           console.warn('ToolDetailSheet: saída ao vivo falhou', e);
+          if (vivo) setErroVivo(e instanceof Error ? e.message : String(e));
+          return;
         }
         if (vivo) timer = setTimeout(ler, 2000);
       };
@@ -89,6 +94,9 @@ export const ToolDetailSheet = forwardRef<ToolDetailHandle, { resultOf: (use: Ch
                   <Text style={[styles.arquivo, { color: theme.tokens.text.muted }]}>{m.tool_saida()} · {m.tool_saida_ao_vivo()}</Text>
                   <Text style={[styles.mono, { color: theme.tokens.text.primary }]} selectable>{saidaViva}</Text>
                 </>
+              ) : null}
+              {pendente && erroVivo ? (
+                <Text style={[styles.arquivo, { color: theme.tokens.text.muted }]}>{m.tool_saida_ao_vivo()} · {m.quiet_erro_carregar()}: {erroVivo}</Text>
               ) : null}
               {result?.result
                 ? <Text style={[styles.mono, { color: fase === 'error' ? theme.tokens.status.error : theme.tokens.text.primary }]} selectable>{result.result}</Text>

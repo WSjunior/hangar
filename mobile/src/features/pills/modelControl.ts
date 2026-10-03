@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { parseStatusLine, getModelOptions, getPiModels, getKimiModels, getCodexModels, setModelEffort, setEngineModel, setPiModel, setKimiModel, setCodexModel } from '@hangar/core';
 import type { CodexModelsResponse } from '@hangar/core';
 import { chatStore } from '../../stores/chat';
@@ -46,9 +46,13 @@ export function useModelControl({ serverId, name, provider, chosen, onChosen, cl
   const [items, setItems] = useState<PillMenuItem[]>([]);
   const catalog = useRef<Catalog>({ kind: 'other' });
 
+  // Um timer só: o de uma falha anterior apagaria a mensagem da nova antes dos 8 s.
+  const flashTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(flashTimer.current), []);
   const flash = useCallback((msg: string) => {
     setTempError(msg);
-    setTimeout(() => setTempError(null), 8000);
+    clearTimeout(flashTimer.current);
+    flashTimer.current = setTimeout(() => setTempError(null), 8000);
   }, []);
 
   const model = pillLabels(statusFields, chosen).model;
@@ -77,15 +81,18 @@ export function useModelControl({ serverId, name, provider, chosen, onChosen, cl
         setItems(res.models.map((mo) => ({ id: mo.alias, label: mo.name, hint: mo.alias, selected: mo.name === current })));
       } else {
         const res = await getModelOptions(name);
+        const isSelected = (mo: (typeof res.models)[number]) =>
+          chosen.model ? (mo.name ?? mo.id) === chosen.model || mo.id === chosen.model : mesmoModelo(mo.name ?? mo.id, current);
         // Conta Claude: id longo (`claude-*`) é versão antiga presa no catálogo; o picker só aceita
-        // os apelidos vivos (default/opus/...), então as antigas nem aparecem.
-        const models = res.kind === 'claude' && !res.engine
-          ? res.models.filter((mo) => !mo.id.startsWith('claude-'))
+        // os apelidos vivos (default/opus/...), então as antigas saem — menos a que está em uso, e a
+        // lista inteira volta se o filtro não deixar nada.
+        const vivos = res.kind === 'claude' && !res.engine
+          ? res.models.filter((mo) => !mo.id.startsWith('claude-') || isSelected(mo))
           : res.models;
+        const models = vivos.length ? vivos : res.models;
         catalog.current = { kind: res.kind, names: new Map(models.map((mo) => [mo.id, mo.name ?? mo.id])) };
         setItems(models.map((mo) => ({
-          id: mo.id, label: mo.name ?? mo.id, hint: mo.desc ?? undefined,
-          selected: chosen.model ? (mo.name ?? mo.id) === chosen.model || mo.id === chosen.model : mesmoModelo(mo.name ?? mo.id, current),
+          id: mo.id, label: mo.name ?? mo.id, hint: mo.desc ?? undefined, selected: isSelected(mo),
         })));
       }
     } catch (e) {

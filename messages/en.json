@@ -4854,6 +4854,7 @@
   "native_codex_permission_probe_hint": "Reading opens the /permissions picker in the session's terminal.",
   "native_mode_probe_not_restored": "Reading the modes could not return to the previous mode. Check the current mode.",
   "native_mode_not_in_cycle": "only when creating the session",
+  "native_mode_not_confirmed": "The server did not confirm the mode change. Check the mode in the session.",
   "native_mode_plan": "Plan",
   "native_mode_auto": "Auto",
   "native_mode_manual": "Manual",

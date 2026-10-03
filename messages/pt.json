@@ -4854,6 +4854,7 @@
   "native_codex_permission_probe_hint": "Ler abre o seletor /permissions no terminal da sessão.",
   "native_mode_probe_not_restored": "A leitura dos modos não conseguiu voltar ao modo anterior. Confira o modo atual.",
   "native_mode_not_in_cycle": "só ao criar a sessão",
+  "native_mode_not_confirmed": "O servidor não confirmou a troca de modo. Confira o modo na sessão.",
   "native_mode_plan": "Plano",
   "native_mode_auto": "Automático",
   "native_mode_manual": "Manual",

@@ -265,6 +265,28 @@ test('pensamento e ferramenta ao vivo: o bloco real tira de cena; o "" só agend
   }
 });
 
+test('pensamento e ferramenta ao vivo saem quando o estado deixa working sem o evento vazio', async () => {
+  vi.useFakeTimers();
+  try {
+    historyResponses = [[]];
+    const chat = chatStore('srv1', 'sess');
+    chat.retain();
+    await vi.advanceTimersByTimeAsync(0);
+
+    created[0].trigger('state', JSON.stringify({ session: 'sess', state: 'working' }));
+    created[0].trigger('pensamento', JSON.stringify({ text: 'pondero' }));
+    created[0].trigger('ferramenta', JSON.stringify({ text: JSON.stringify({ nome: 'Bash', input: {} }) }));
+    created[0].trigger('state', JSON.stringify({ session: 'sess', state: 'idle' }));
+    expect(chat.use.getState().pensamento).toBe('pondero');
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(chat.use.getState().pensamento).toBe('');
+    expect(chat.use.getState().ferramenta).toBeNull();
+    chat.release();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test('virada para working vista ao vivo marca o começo do turno; aberta no meio, não', async () => {
   historyResponses = [[]];
   const chat = chatStore('srv1', 'sess');
