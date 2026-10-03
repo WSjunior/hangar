@@ -127,7 +127,7 @@ class Lease:
     def __init__(self, name, provider, binding_get):
         self.name, self.provider, self.binding_get = name, provider, binding_get
         self.consumer = uuid4().hex
-        self.binding = binding_get()
+        self.binding = None
         self.open = False
         self.remote_generation = None
 
@@ -155,12 +155,20 @@ class Lease:
         return self
 
     async def start(self):
-        self.open = True
-        if self.provider in ("claude", "codex") and isinstance(self.binding, str) and self.binding:
-            if _bindings.get(self.name) != (self.provider, self.binding):
-                _bindings[self.name] = (self.provider, self.binding)
-                forget(self.name)
-        await self.acquire()
+        try:
+            self.binding = self.binding_get()
+            self.open = True
+            if self.provider in ("claude", "codex") and isinstance(self.binding, str) and self.binding:
+                if _bindings.get(self.name) != (self.provider, self.binding):
+                    _bindings[self.name] = (self.provider, self.binding)
+                    forget(self.name)
+            await self.acquire()
+        except Exception as exc:
+            _failure(f"lease_start_{type(exc).__name__}")
+            try:
+                await self.close()
+            except Exception as close_exc:
+                _failure(f"lease_close_{type(close_exc).__name__}")
 
     async def __aexit__(self, *exc):
         _current.reset(self.token)
@@ -168,7 +176,8 @@ class Lease:
 
     async def close(self):
         self.open = False
-        if self.remote_generation == _generation:
+        remote_generation, self.remote_generation = self.remote_generation, None
+        if remote_generation == _generation:
             await _request({"op": "release", "consumer": self.consumer})
 
     async def payload(self, op, started):
@@ -218,7 +227,7 @@ def stamp(name: str) -> tuple:
 
 def retired(name: str) -> bool:
     source = _current.get()
-    return (source is not None and source.name == name and source.provider in ("claude", "codex")
+    return (source is not None and source.open and source.name == name and source.provider in ("claude", "codex")
             and isinstance(source.binding, str) and bool(source.binding) and source.identity() is None)
 
 

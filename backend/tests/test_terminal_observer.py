@@ -914,3 +914,90 @@ def test_preview_cleanup_propagates_unexpected_heartbeat_failure(monkeypatch):
         with pytest.raises(RuntimeError, match="heartbeat failed"):
             await task
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure_site", ["target", "acquire", "acquire-release", "binding"])
+@pytest.mark.parametrize("consumer", ["preview", "state"])
+def test_lease_start_failure_preserves_python_consumer(monkeypatch, caplog, failure_site, consumer):
+    from app import preview
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    def target(name):
+        if failure_site == "target":
+            raise RuntimeError("private-pane-and-secret")
+        return "%8"
+    monkeypatch.setattr(state.tmux, "_pane_target", target)
+    calls = []
+    async def request(payload):
+        calls.append(payload)
+        if ((payload["op"] == "acquire" and failure_site in ("acquire", "acquire-release"))
+                or (payload["op"] == "release" and failure_site == "acquire-release")):
+            raise RuntimeError("private-pane-and-secret")
+        return None
+    monkeypatch.setattr(t, "_request", request)
+    reads = [0]
+    def binding():
+        reads[0] += 1
+        if failure_site == "binding" and reads[0] == 1:
+            raise RuntimeError("private-pane-and-secret")
+        return "thread"
+    monkeypatch.setattr(preview, "read_sidecar", lambda stem: None)
+    pane = ["● Python reserve\n" if consumer == "preview" else "✻ Thinking…\n❯ "]
+    monkeypatch.setattr(state.tmux, "capture_pane", lambda name: pane[0])
+    monkeypatch.setattr(state, "pergunta_aberta", lambda sid: None)
+    monkeypatch.setattr(state, "_sidecar_status", lambda sid: None)
+    monkeypatch.setattr(state.plugin_bridge, "pergunta_pendente", lambda name: None)
+    monkeypatch.setattr(state.plugin_bridge, "estado_recente", lambda name: None)
+    monkeypatch.setattr(state.plugin_bridge, "vivo", lambda name: False)
+    monkeypatch.setattr(state.hook_state, "get_state", lambda sid: None)
+    monkeypatch.setattr(state.hook_state, "shells", lambda sid: [])
+    monkeypatch.setattr(state.StateMonitor, "FRAME_MAX_AGE", 0)
+    from app.loop import LoopLink
+    monkeypatch.setattr(LoopLink, "get", lambda self: None)
+    async def run():
+        if consumer == "preview":
+            broker = preview.PreviewBroker("start-failure-preview", "claude", binding)
+            subscriber = broker.subscribe()
+            task = None
+            try:
+                assert await anext(subscriber) == ("", False, False)
+                assert await asyncio.wait_for(anext(subscriber), 1) == ("Python reserve", False, False)
+                task = broker._task
+                assert not task.done()
+            finally:
+                task = broker._task
+                await subscriber.aclose()
+                if task is not None:
+                    await asyncio.gather(task, return_exceptions=True)
+        else:
+            stream = state.StateMonitor("start-failure-state", poll=0,
+                sid_get=binding, provider="claude").stream()
+            try:
+                assert (await asyncio.wait_for(anext(stream), 1)).state == "working"
+                pane[0] = "❯ "
+                event = await asyncio.wait_for(anext(stream), 1)
+                if event.state == "working":
+                    event = await asyncio.wait_for(anext(stream), 1)
+                assert event.state == "idle"
+            finally:
+                await stream.aclose()
+    asyncio.run(run())
+    assert "RuntimeError" in caplog.text
+    assert "private-pane-and-secret" not in caplog.text
+    assert "test-only" not in caplog.text
+    assert not any(p["op"] in ("capture", "reduce") for p in calls)
+
+
+def test_failed_lease_start_leaves_closed_source_and_allows_python_capture(monkeypatch):
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    def failed_target(name):
+        raise RuntimeError("private-pane-and-secret")
+    monkeypatch.setattr(state.tmux, "_pane_target", failed_target)
+    async def run():
+        async with t.lease("closed-start-failure", "claude", lambda: "thread") as source:
+            assert not source.open
+            assert source.identity() is None
+            assert not t.retired("closed-start-failure")
+            assert await state.shared_capture("closed-start-failure", 0) == "Python"
+    asyncio.run(run())
