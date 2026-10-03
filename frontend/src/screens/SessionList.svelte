@@ -10,6 +10,7 @@ import * as m from '../paraglide/messages';
   import HangarMark from '../components/icons/HangarMark.svelte';
   import HangarRunning from '../components/HangarRunning.svelte';
   import GroupGlyph from '../components/icons/GroupGlyph.svelte';
+  import IconWorktree from '../components/icons/IconWorktree.svelte';
   import SessionCard from '../components/SessionCard.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
   import BottomSheet from '../components/BottomSheet.svelte';
@@ -747,6 +748,10 @@ import * as m from '../paraglide/messages';
       <button class="drawer-nav-item" onclick={() => { drawerOpen = false; window.location.hash = '#/orq'; }}>
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v4"/><circle cx="12" cy="9" r="2"/><path d="M6 21v-4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v4"/><path d="M6 13V9"/><path d="M18 13V9"/></svg>
         {m.shell_orq()}
+      </button>
+      <button class="drawer-nav-item" onclick={() => { drawerOpen = false; window.location.hash = '#/worktrees'; }}>
+        <IconWorktree size={20} />
+        {m.worktrees_titulo()}
       </button>
       <button class="drawer-nav-item" onclick={() => { drawerOpen = false; window.location.hash = '#/costs'; }}>
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 14l4-4 3 3 5-6"/></svg>
