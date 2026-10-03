@@ -585,6 +585,29 @@ fn private_single_thread_pool_can_sync_without_initializing_or_reconfiguring_the
 }
 
 #[test]
+fn bounded_scan_inside_its_single_worker_pool_finishes_multiple_windows() {
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+    let (done, result) = mpsc::channel();
+    let scan = std::thread::spawn(move || {
+        let d = tempfile::tempdir().unwrap();
+        let files = (1..=33).map(|n| {
+            let path = d.path().join(format!("{n}.jsonl"));
+            std::fs::write(&path, format!("{n}\n")).unwrap();
+            path
+        }).collect::<Vec<_>>();
+        let pool = Arc::new(rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap());
+        let ix = Index::open(&d.path().join("idx")).unwrap().with_pool(Arc::clone(&pool));
+        assert!(pool.install(|| sync(&ix, &files)));
+        let rows = ix.read_costs(Some("t"), None, None).unwrap();
+        done.send(rows.iter().map(|r| r.input).collect::<Vec<_>>()).unwrap();
+    });
+    assert_eq!(result.recv_timeout(Duration::from_secs(4)).expect("a janela não deve bloquear o próprio worker"),
+        (1..=33).collect::<Vec<_>>());
+    scan.join().unwrap();
+}
+
+#[test]
 fn saved_tail_is_64_bytes_and_state_excludes_fragment_and_close_mutations() {
     use std::io::Read;
     let d = tempfile::tempdir().unwrap();
@@ -854,6 +877,98 @@ fn completed_batch_commits_while_another_file_is_still_reading() {
     assert!(observed, "o primeiro lote deve estar no disco antes de a segunda leitura terminar");
     assert_eq!(sum(&ix), (3, 2));
     assert_eq!(progress.total(), (2, 2));
+}
+
+#[test]
+fn slow_first_file_keeps_later_reads_bounded_and_preserves_order() {
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, Instant};
+    let d = tempfile::tempdir().unwrap();
+    let files = (0..128).map(|n| {
+        let path = d.path().join(format!("{n}.jsonl"));
+        std::fs::write(&path, format!("{}\n", n + 1)).unwrap();
+        path
+    }).collect::<Vec<_>>();
+    let pool = Arc::new(rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap());
+    let ix = Index::open(&d.path().join("idx")).unwrap().with_pool(pool);
+    let gate = (Mutex::new(false), Condvar::new());
+    let entered = AtomicUsize::new(0);
+    let first_started = std::sync::atomic::AtomicBool::new(false);
+    let progress = Progress::default();
+    let before = ix.generation();
+    let bounded = std::thread::scope(|threads| {
+        let scan = threads.spawn(|| {
+            let new = |path: &Path| {
+                entered.fetch_add(1, Ordering::SeqCst);
+                if path == files[0] {
+                    first_started.store(true, Ordering::SeqCst);
+                    let locked = gate.0.lock().unwrap();
+                    let _ = gate.1.wait_timeout_while(locked, Duration::from_secs(4), |released| !*released).unwrap();
+                }
+                Sum::default()
+            };
+            ix.sync("t", &files, &new, "v1", "sig", &no_areas, &progress)
+        });
+        let start = Instant::now();
+        while !first_started.load(Ordering::SeqCst) && start.elapsed() < Duration::from_secs(2) {
+            std::thread::yield_now();
+        }
+        let started = first_started.load(Ordering::SeqCst);
+        let start = Instant::now();
+        while entered.load(Ordering::SeqCst) <= 8 && start.elapsed() < Duration::from_millis(150) {
+            std::thread::yield_now();
+        }
+        let bounded = started && entered.load(Ordering::SeqCst) <= 8;
+        let empty = ix.read_costs(Some("t"), None, None).unwrap().is_empty();
+        let unchanged = ix.generation() == before;
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        assert!(scan.join().unwrap().unwrap());
+        assert!(empty && unchanged, "a ordem impede publicar arquivos posteriores antes do primeiro");
+        bounded
+    });
+    assert!(bounded, "uma leitura lenta não pode acumular o resultado de todos os arquivos posteriores");
+    assert_eq!(progress.total(), (128, 128));
+    assert_eq!(ix.read_costs(Some("t"), None, None).unwrap().iter().map(|r| r.input).collect::<Vec<_>>(),
+        (1..=128).collect::<Vec<_>>());
+}
+
+#[test]
+fn dense_results_commit_before_more_files_are_read_and_allow_reentrant_reads() {
+    use std::sync::Arc;
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path().join("idx");
+    let files = (0..64).map(|n| {
+        let path = d.path().join(format!("{n}.jsonl"));
+        std::fs::write(&path, "1\n").unwrap();
+        path
+    }).collect::<Vec<_>>();
+    let ix = Index::open(&dir).unwrap().with_pool(Arc::new(
+        rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap()));
+    let before = ix.generation();
+    let read_before_finish = std::sync::atomic::AtomicBool::new(false);
+    let new = |_: &Path| {
+        if !read_before_finish.load(Ordering::SeqCst) && ix.generation() > before
+            && !ix.read_costs(Some("t"), None, None).unwrap().is_empty() {
+            read_before_finish.store(true, Ordering::SeqCst);
+        }
+        Dense { sum: Sum::default() }
+    };
+    ix.sync("t", &files, &new, "v1", "sig", &no_areas, &Progress::default()).unwrap();
+    assert!(read_before_finish.load(Ordering::SeqCst),
+        "um lote denso deve liberar seus resultados e publicar a geração antes de ler todos os arquivos");
+    assert_eq!(ix.read_costs(Some("t"), None, None).unwrap().len(), 64 * 1024);
+}
+
+#[derive(Serialize, Deserialize)]
+struct Dense { sum: Sum }
+
+impl Fold for Dense {
+    fn line(&mut self, raw: &[u8]) { self.sum.line(raw); }
+    fn close(&mut self) -> FoldOutput {
+        let row = self.sum.close().costs.remove(0);
+        FoldOutput { costs: vec![row; 1024], usage: vec![], areas: None }
+    }
 }
 
 #[test]

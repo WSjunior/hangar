@@ -3,7 +3,6 @@
 use super::py::LocalTs;
 use super::rows::{AreaEntries, FoldOutput, UsageRow, UsoLinha};
 use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
-use rayon::prelude::*;
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
@@ -18,6 +17,8 @@ pub const SCHEMA: u32 = 1;
 pub const FILE_NAME: &str = "custos-rust.sqlite3";
 const TAIL_BYTES: u64 = 64;
 const BATCH_TIME: Duration = Duration::from_secs(1);
+const READ_WINDOW: usize = 8;
+const BATCH_ROWS: usize = 2048;
 const COST_FIELDS: &str = "ts, source, provider, model, project, session_id, input, output, cache_write, cache_read, subagente, account_id, codex_long_context, cache_write_1h, fast, regravado, regravado_1h";
 const USAGE_FIELDS: &str = "dia, cwd, model, tipo, nome, plugin, detalhe, origem, chamadas, ctx_chars, tokens_est, input, output, cache_write, cache_read, cache_write_1h, fast, ocupados, respostas, ocupados_eq, fonte, subagente, session_id";
 const TABLES: &str = "
@@ -318,7 +319,10 @@ impl Index {
             };
             let fingerprint = Fingerprint::from_metadata(&metadata);
             if light.as_ref().is_some_and(|r| r.current(&fingerprint, &version)) { continue; }
-            let record = load_record(&conn, &key)?;
+            let record = conn.query_row(
+                "SELECT id, versao, dev, ino, size, mtime_ns FROM files WHERE path=?",
+                [&key], |row| FileRecord::light(row, 0),
+            ).optional()?;
             if record.as_ref().is_some_and(|r| r.current(&fingerprint, &version)) {
                 if conn.execute("UPDATE files SET scope=? WHERE id=? AND scope<>?", params![scope, record.unwrap().id, scope])? > 0 {
                     self.changed();
@@ -331,32 +335,49 @@ impl Index {
         let (sender, receiver) = mpsc::channel();
         // O chamador escreve; só as leituras usam o pool corrente, inclusive um pool privado.
         in_pool_scope(self.pool.as_deref(), |rayon_scope| -> Result<(), IndexError> {
-            let jobs_ref = &jobs;
-            let version_ref = &version;
-            rayon_scope.spawn(move |_| {
-                jobs_ref.par_iter().enumerate().for_each_with(sender, |sender, (order, job)| {
-                    let read = read_new(&job.path, &job.fingerprint, job.record.as_ref(), new_fold, version_ref);
-                    let _ = sender.send((order, read));
-                });
-            });
+            let total = jobs.len();
+            let mut jobs = jobs.into_iter();
+            let mut sender = Some(sender);
+            let mut submitted = 0;
             let mut ready = BTreeMap::new();
             let mut pending = Vec::new();
+            let mut pending_rows = 0;
             let mut next = 0;
             let mut reader_panicked = false;
             let mut batch_started = Instant::now();
-            while next < jobs.len() {
+            while next < total {
+                let mut window = Vec::new();
+                while submitted < total && submitted - next < READ_WINDOW {
+                    let mut job = jobs.next().unwrap();
+                    job.record = load_record(&conn, &job.path.to_string_lossy())?;
+                    window.push((submitted, job));
+                    submitted += 1;
+                }
+                // A fila local do Rayon é LIFO; o primeiro arquivo deve poder terminar num único worker.
+                for (order, mut job) in window.into_iter().rev() {
+                    let sender = sender.as_ref().unwrap().clone();
+                    let version_ref = &version;
+                    rayon_scope.spawn(move |_| {
+                        let read = read_new(&job.path, &job.fingerprint, job.record.as_ref(), new_fold, version_ref);
+                        job.record = None;
+                        let _ = sender.send((order, job, read));
+                    });
+                }
+                if submitted == total { sender.take(); }
                 // Um pool de um núcleo pode ter o escritor dentro dele; ceder evita bloqueá-lo.
                 rayon::yield_now();
                 match receiver.recv_timeout(Duration::from_millis(10)) {
-                    Ok((order, result)) => { ready.insert(order, result); },
+                    Ok((order, job, result)) => { ready.insert(order, (job, result)); },
                     Err(mpsc::RecvTimeoutError::Disconnected) if !ready.contains_key(&next) => return Err(IndexError::ReaderPanic),
                     Err(_) => {},
                 }
-                while let Some(result) = ready.remove(&next) {
-                    let job = &jobs[next];
+                while let Some((job, result)) = ready.remove(&next) {
                     progress.set(scope, job.position + 1, files.len());
                     match result {
-                        Ok(read) => pending.push((job, read)),
+                        Ok(read) => {
+                            pending_rows += read.output.costs.len() + read.output.usage.len();
+                            pending.push((job, read));
+                        },
                         Err(ReadError::Fold) => {
                             reader_panicked = true;
                             tracing::warn!(code = "panico_leitura_custos");
@@ -364,16 +385,23 @@ impl Index {
                         Err(_) => tracing::warn!(code = "leitura_custos"),
                     }
                     next += 1;
+                    // Resultados completos não devem acumular até o próximo segundo em arquivos densos.
+                    if pending.len() >= READ_WINDOW || pending_rows >= BATCH_ROWS {
+                        write_batch(&mut conn, &mut pending, scope, &version, areas_sig, redo_areas, &self.generation)?;
+                        pending_rows = 0;
+                        batch_started = Instant::now();
+                    }
                 }
                 if batch_started.elapsed() >= BATCH_TIME {
                     write_batch(&mut conn, &mut pending, scope, &version, areas_sig, redo_areas, &self.generation)?;
+                    pending_rows = 0;
                     batch_started = Instant::now();
                 }
             }
             let batch_before = conn.total_changes();
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             for (job, read) in pending {
-                write_file(&tx, job, scope, &version, read, false, areas_sig, redo_areas)?;
+                write_file(&tx, &job, scope, &version, read, false, areas_sig, redo_areas)?;
             }
             for record in known.values() { delete_file(&tx, record.id)?; }
             reader_panicked |= redo_saved_areas(&tx, scope, areas_sig, redo_areas)?;
@@ -673,10 +701,10 @@ fn read_file<F: Fold>(path: &Path, fingerprint: &Fingerprint, record: Option<&Fi
     Ok(FileRead { offset, tail, state, output, areas, size: offset + fragment.len() as i64 })
 }
 
-fn write_batch(conn: &mut Connection, pending: &mut Vec<(&ReadJob, FileRead)>, scope: &str, version: &str, areas_sig: &str, redo_areas: &dyn Fn(&AreaEntries) -> Vec<UsoLinha>, generation: &AtomicU64) -> Result<(), IndexError> {
+fn write_batch(conn: &mut Connection, pending: &mut Vec<(ReadJob, FileRead)>, scope: &str, version: &str, areas_sig: &str, redo_areas: &dyn Fn(&AreaEntries) -> Vec<UsoLinha>, generation: &AtomicU64) -> Result<(), IndexError> {
     if pending.is_empty() { return Ok(()); }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    for (job, read) in pending.drain(..) { write_file(&tx, job, scope, version, read, false, areas_sig, redo_areas)?; }
+    for (job, read) in pending.drain(..) { write_file(&tx, &job, scope, version, read, false, areas_sig, redo_areas)?; }
     tx.commit()?;
     // O erro de um lote posterior não pode ocultar dados já confirmados deste lote.
     generation.fetch_add(1, Ordering::Release);
