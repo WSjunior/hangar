@@ -595,9 +595,29 @@ if (-not $SoChecar) {
         Nota 'Se o Hangar ja estiver aberto, feche e reabra pelo atalho ao terminar para aplicar a elevacao.'
     }
 }
+# Abaixo do build 22523 o conhost do sistema impede o Claude de ligar o mouse no psmux e a roda nao
+# rola (psmux/psmux#597); scripts\install-psmux-conpty.ps1 instala o psmux com console proprio.
+$script:psmuxDir = Join-Path $HOME '.hangar\psmux'
+function Psmux-Antigos {
+    @(Get-Process -Name psmux, tmux, pmux -ErrorAction SilentlyContinue |
+      Where-Object { $_.Path -and -not $_.Path.StartsWith("$script:psmuxDir\", [StringComparison]::OrdinalIgnoreCase) })
+}
+function Psmux-Precisa {
+    $build = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
+    if ($build -ge 22523 -or "$env:PROCESSOR_ARCHITEW6432$env:PROCESSOR_ARCHITECTURE" -notmatch 'AMD64') { return 'nao-precisa' }
+    $antigos = Psmux-Antigos
+    if (-not $antigos) { return 'fazer' }
+    $anterior = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $script:psmuxSessoes = @(& $antigos[0].Path ls 2>$null | Where-Object { $_ }).Count }
+    finally { $ErrorActionPreference = $anterior }
+    if ($script:psmuxSessoes -eq 0) { return 'fazer' }
+    return 'perguntar'
+}
+
 if (-not $SoChecar -and -not $Update) {
 Titulo '0/8 Antes de comecar'
-Write-Host '  No maximo duas perguntas agora, e depois o instalador segue sozinho ate o fim.'
+Write-Host '  No maximo duas perguntas agora (tres no Windows 10 com sessoes abertas), e depois o instalador segue sozinho ate o fim.'
 Write-Host '  (Se voce disser que usa fora de casa, logo em seguida o Tailscale abre o navegador'
 Write-Host '   uma vez, para voce entrar na conta dele. Fora isso, nada mais e perguntado.)'
 Write-Host '  Se pedir permissao de administrador (UAC) e so pra uma coisa pontual, e o instalador continua.'
@@ -654,6 +674,13 @@ else {
     Write-Host '  Voce vai usar o Hangar fora de casa (celular fora do Wi-Fi do PC)?'
     Nota 'Sim = instala o Tailscale, uma rede privada entre PC e celular, sem abrir nada pra internet.'
     $script:querTailscale = Pergunte-Mesmo '  Usar fora de casa (instalar Tailscale)?'
+}
+
+$script:psmuxConsole = Psmux-Precisa
+if ($script:psmuxConsole -eq 'perguntar') {
+    Write-Host '  Neste Windows a roda do mouse nao rola dentro do Claude. O conserto reinicia o psmux.'
+    Nota "Fecha as $script:psmuxSessoes sessoes de terminal abertas; a conversa de cada uma continua no app (claude --resume)."
+    $script:psmuxConsole = if (Pergunte-Mesmo '  Consertar a roda do mouse agora?') { 'fazer' } else { 'pular' }
 }
 }
 # Fora da guarda: no -Update nao ha pergunta, mas quem ja tem Tailscale continua publicando nele.
@@ -742,6 +769,39 @@ if ($script:querTailscale -and -not (Tem 'tailscale')) {
     }
 }
 
+# Roda do mouse no Claude em Windows de console antigo: decidido no passo 0.
+if ($script:psmuxConsole -eq 'pular') {
+    Falta 'roda do mouse no Claude segue sem funcionar neste Windows (o psmux nao foi reiniciado)'
+    Nota 'rode o instalador de novo quando puder fechar as sessoes de terminal'
+} elseif ($script:psmuxConsole -eq 'fazer') {
+    # O psmux le PSMUX_CONPTY_DIR uma vez, no servidor: o servidor antigo precisa sair antes.
+    $antigos = Psmux-Antigos
+    if ($antigos) {
+        Nativo $antigos[0].Path kill-server | Out-Null
+        $limite = (Get-Date).AddSeconds(10)
+        while ((Psmux-Antigos) -and (Get-Date) -lt $limite) { Start-Sleep -Milliseconds 300 }
+        Psmux-Antigos | Stop-Process -Force -ErrorAction SilentlyContinue
+        Ok 'servidor antigo do psmux encerrado'
+    }
+    & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File "$raiz\scripts\install-psmux-conpty.ps1"
+    $dirConsole = [Environment]::GetEnvironmentVariable('PSMUX_CONPTY_DIR', 'User')
+    if ($LASTEXITCODE -ne 0 -or -not $dirConsole) {
+        Falta 'roda do mouse: o psmux com console proprio nao instalou (veja a linha acima)'
+        $script:faltaRodaPsmux = $true
+    } else {
+        $env:PSMUX_CONPTY_DIR = $dirConsole
+        $env:Path = "$dirConsole;$env:Path"
+        $fonte = (Get-Command tmux -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+        if ($fonte -like "$dirConsole\*") {
+            Ok 'roda do mouse: psmux com console proprio'
+            Nota 'vale nos terminais NOVOS - feche os abertos antes de rodar o claude de novo.'
+        } else {
+            Falta "roda do mouse: o tmux do PATH ainda e $fonte, nao o de $dirConsole"
+            $script:faltaRodaPsmux = $true
+        }
+    }
+}
+
 if ($SoChecar) {
     $pyVenvCheck = Join-Path $raiz 'backend\.venv\Scripts\python.exe'
     if (Test-Path $pyVenvCheck) {
@@ -756,6 +816,7 @@ if ($SoChecar) {
 }
 if ($pendencias.Count -gt 0) { Erro "faltam: $($pendencias -join ', ')"; Pausa-Log; exit 1 }
 if ($script:faltaDevMode) { $pendencias += 'modo desenvolvedor' }
+if ($script:faltaRodaPsmux) { $pendencias += 'roda do mouse (psmux)' }
 
 # -- 2/8 Backend -------------------------------------------------------------
 Titulo '2/8 Backend'

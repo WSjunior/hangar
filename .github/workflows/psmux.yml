@@ -1,0 +1,78 @@
+# psmux para Windows com console antigo (build < 22523: Windows 10, Windows 11 21H2, Server 2022).
+# Lá o conhost do sistema engole a resposta que o Claude Code espera para ligar o mouse, e a roda não
+# rola (psmux/psmux#597). O conserto é o PSMUX_CONPTY_DIR, que só existe no master do psmux: este
+# workflow compila um commit fixo e junta o conpty.dll + OpenConsole.exe do pacote NuGet da Microsoft
+# numa release FIXA `psmux-latest`, lida por scripts/install-psmux-conpty.ps1. Quando o psmux lançar
+# versão com a variável, troca-se o build daqui pelo winget.
+name: psmux
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/psmux.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: psmux-latest
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  PSMUX_COMMIT: 8c9ef12807c3bd3c6d91bdfd90d040dcaef7c0ac
+  CONPTY_VERSION: 1.24.260710001
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: psmux/psmux
+          ref: ${{ env.PSMUX_COMMIT }}
+          path: psmux
+
+      - name: Compilar
+        working-directory: psmux
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          cargo build --locked --release --target x86_64-pc-windows-msvc
+
+      - name: Empacotar
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = New-Item -ItemType Directory -Force -Path stage
+          $rel = 'psmux/target/x86_64-pc-windows-msvc/release'
+          foreach ($exe in 'psmux.exe', 'pmux.exe', 'tmux.exe') { Copy-Item "$rel/$exe" $stage }
+          Copy-Item psmux/LICENSE "$stage/LICENSE-psmux"
+
+          # conpty.dll e OpenConsole.exe moram em pastas diferentes do pacote; o psmux exige os dois juntos.
+          $v = $env:CONPTY_VERSION
+          Invoke-WebRequest -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.windows.console.conpty/$v/microsoft.windows.console.conpty.$v.nupkg" -OutFile conpty.zip
+          Expand-Archive conpty.zip -DestinationPath conpty
+          Copy-Item conpty/runtimes/win-x64/native/conpty.dll $stage
+          Copy-Item conpty/build/native/runtimes/x64/OpenConsole.exe $stage
+
+          $versao = [ordered]@{ psmux_commit = $env:PSMUX_COMMIT; conpty = $v }
+          $versao | ConvertTo-Json | Set-Content -Encoding ascii "$stage/versao.json"
+          Compress-Archive -Path "$stage/*" -DestinationPath psmux-conpty-windows-x86_64.zip
+
+          $sha = (Get-FileHash -Algorithm SHA256 psmux-conpty-windows-x86_64.zip).Hash.ToLower()
+          $versao['files'] = @{ 'psmux-conpty-windows-x86_64.zip' = $sha }
+          $versao | ConvertTo-Json | Set-Content -Encoding ascii psmux-latest.json
+          Get-Content psmux-latest.json
+
+      - name: Publicar
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # --latest=false: a "Latest" do repo é a do app, não esta.
+          gh release view psmux-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create psmux-latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+                 --title "psmux para Windows com console antigo" \
+                 --notes "psmux ${PSMUX_COMMIT:0:8} (master) + ConPTY $CONPTY_VERSION. Usado pelo instalador só abaixo do build 22523."
+          gh release upload psmux-latest psmux-conpty-windows-x86_64.zip --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload psmux-latest psmux-latest.json --repo "$GITHUB_REPOSITORY" --clobber
