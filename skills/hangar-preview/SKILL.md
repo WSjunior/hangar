@@ -19,8 +19,9 @@ allowed-tools: Bash(hangar-preview:*)
 
 # hangar-preview — dirigir o navegador embutido da sessão
 
-O navegador embutido é um Chromium de verdade (view nativo do Electron; no Windows também o
-WebView2 do app nativo, dirigido por CDP dentro do processo), um por sessão. O CLI
+O navegador embutido é um Chromium de verdade (view nativo do Electron; no app nativo, o WebView2
+no Windows e um Chromium sem janela no Linux, dirigidos por CDP sem porta de depuração), um por
+sessão. O CLI
 resolve sozinho QUAL é o da sua sessão: pela chave estável do sidecar no modo sem terminal e pelo
 nome do tmux no modo com terminal. Depois fala com o servidor local do shell — duas sessões com a
 mesma URL aberta não se confundem.
@@ -205,7 +206,7 @@ sabe onde se está sem pedir `tab list`. Com uma aba só a saída é a mesma de 
 
 No `batch` cada linha pode levar o seu `--aba`, e linhas `tab ...` valem normalmente.
 
-**No app nativo (Windows) não há abas**: é um navegador por sessão, e `tab ...` e `--aba` respondem
+**No app nativo (Windows e Linux) não há abas**: é um navegador por sessão, e `tab ...` e `--aba` respondem
 `erro: o app nativo ainda nao tem abas: e um navegador por sessao`. Use os comandos sem `--aba`.
 Ali o `open` só funciona com o servidor ativo do app nesta máquina (loopback) e não monta o painel
 Navegador na tela sozinho: não diga ao usuário que "o painel montou na sua tela".
