@@ -441,6 +441,7 @@ fn swatch_ring(selected: bool) -> Hsla { if selected { theme::text() } else { tr
 impl Hangar {
     pub(super) fn open_settings(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         self.costs.view = None;
+        (self.worktrees.view, self.worktrees.open) = (None, None);
         self.settings = Some(page);
         self.settings_ui.live = false;
         self.settings_ui.hit = None;

@@ -58,6 +58,8 @@ pub(super) struct Worktrees {
     pub(super) refreshing: bool,
     /// Falha de apagar: fica fora do `detail` para o painel continuar mostrando a worktree.
     pub(super) delete_error: Option<String>,
+    /// Falha de "apagar as juntadas": é do repositório, mostrada na lista e nunca no painel de uma worktree.
+    pub(super) batch_error: Option<String>,
 }
 
 impl Worktrees {
@@ -129,6 +131,8 @@ impl Hangar {
 
     pub(super) fn open_worktree(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
         if self.worktrees.view.is_none() { self.open_worktrees(window, cx); }
+        // A página pode recusar abrir (diálogo de conexão): sem ela, nada de painel.
+        if self.worktrees.view.is_none() { return; }
         self.worktrees.open = Some(path.clone());
         self.worktrees.delete_branch = false;
         self.worktrees.delete_error = None;
@@ -144,6 +148,7 @@ impl Hangar {
 
     fn close_worktree_panel(&mut self, cx: &mut Context<Self>) {
         self.worktrees.open = None;
+        self.worktrees.delete_error = None;
         self.worktrees.detail.reset();
         cx.notify();
     }
@@ -179,7 +184,7 @@ impl Hangar {
         let Some(api) = self.api.clone() else { return };
         if self.worktrees.deleting { return; }
         self.worktrees.deleting = true;
-        self.worktrees.delete_error = None;
+        self.worktrees.batch_error = None;
         let task = self.runtime.spawn(async move {
             api.server_send(reqwest::Method::POST, &["worktrees", "delete-merged"], Some(json!({"repo": repo})), 150).await
         });
@@ -189,8 +194,8 @@ impl Hangar {
                 this.worktrees.deleting = false;
                 match joined {
                     Ok(Ok(_)) => {}
-                    Ok(Err(e)) => this.worktrees.delete_error = Some(Self::failure(&e)),
-                    Err(_) => this.worktrees.delete_error = Some(tr("delivery_uncertain")),
+                    Ok(Err(e)) => this.worktrees.batch_error = Some(Self::failure(&e)),
+                    Err(_) => this.worktrees.batch_error = Some(tr("delivery_uncertain")),
                 }
                 // Mesmo com falha parte pode ter saído: a lista relida mostra o que sobrou.
                 this.load_worktrees(false, cx);
@@ -222,8 +227,7 @@ impl Hangar {
 
     fn render_worktrees_body(&self, cx: &mut Context<Self>) -> Div {
         let page = div().flex().flex_col().gap(px(16.))
-            .when_some(self.worktrees.delete_error.clone().filter(|_| self.worktrees.open.is_none()),
-                |el, error| el.child(note_box(error, theme::danger())));
+            .when_some(self.worktrees.batch_error.clone(), |el, error| el.child(note_box(error, theme::danger())));
         let repos = match &self.worktrees.repos.value {
             None => return page.child(loading_state()),
             Some(Err(error)) => return page.child(error_state(tr_shared("worktrees_erro", &[("motivo", error.as_str())]),
