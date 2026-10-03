@@ -643,12 +643,16 @@ class ClaudeHeadlessAdapter:
     async def recarregar(self, name: str) -> None:
         """Encerra o processo e sobe outro com `--resume`, na mesma conversa. Quem chama já
         garantiu sessão ociosa e nada em aberto (a rota); parada, só acorda."""
+        await self.parar(name)
+        self.acordar(name)
+
+    async def parar(self, name: str) -> None:
+        """Encerra o processo sem religar; o sidecar fica, e o próximo `acordar` sobe outro."""
         sess = self._sessions.get(name)
         if sess is not None and sess.vivo:
             pid = ((sess.meta or {}).get("cano") or {}).get("pid")
             await self._encerrar(sess)
             _esquecer_cano(name, pid)
-        self.acordar(name)
 
     async def _encerrar(self, sess: _Sessao) -> None:
         """Mata o processo e tira a sessão da memória. Saída nossa deixa `returncode` None, então
@@ -1682,6 +1686,15 @@ class ClaudeHeadlessAdapter:
         # Durável: um restart do backend não pode apagar da tela por que a sessão parou.
         sess.meta = hl_sessions.update(sess.name, problema=[codigo, detalhe or None]) or sess.meta
         _log.warning("claude headless: %s name=%s %s", codigo, sess.name, (detalhe or "")[:200])
+
+    def esquecer_problema(self, name: str) -> None:
+        """Sessão que mudou de conta: o limite ou a credencial da conta anterior não valem mais. O sidecar quem limpa
+        é quem chama, junto da troca."""
+        self._problemas.pop(name, None)
+        self._problemas_lidos.add(name)
+        sess = self._sessions.get(name)
+        if sess is not None:
+            sess.problema = sess.problema_detalhe = None
 
     def _limpar_problema(self, sess: _Sessao) -> None:
         sess.problema = sess.problema_detalhe = None

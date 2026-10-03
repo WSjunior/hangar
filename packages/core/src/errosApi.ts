@@ -412,6 +412,11 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_fila_pendente: () => m.erro_fila_pendente(),
   erro_modo_so_claude: () => m.erro_modo_so_claude(),
   erro_troca_modo: (p) => m.erro_troca_modo({ erro: String(p.erro ?? '') }),
+  erro_conta_so_claude: () => m.erro_conta_so_claude(),
+  erro_conta_cheia: (p) => m.erro_conta_cheia({ conta: String(p.conta ?? ''), pct: String(Math.round(Number(p.pct ?? 0))) }),
+  erro_conversa_ja_na_conta: () => m.erro_conversa_ja_na_conta(),
+  erro_troca_conta: (p) => m.erro_troca_conta({ erro: String(p.erro ?? '') }),
+  erro_mover_conversa: (p) => m.erro_mover_conversa({ erro: String(p.erro ?? '') }),
 
   // Capacidade ausente: extensao do Pi, catalogo, resposta que nao veio
   erro_sem_pergunta_pi: () => m.erro_sem_pergunta_pi(),
@@ -426,7 +431,7 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_catalogo_omp_indisponivel: () => m.erro_catalogo_omp_indisponivel(),
   erro_pi_recusou_troca: (p) => m.erro_pi_recusou_troca({ provider: String(p.provider), id: String(p.id), thinking: String(p.thinking) }),
   erro_reinicio_indisponivel: () => m.erro_reinicio_indisponivel(),
-  erro_atualizacao_branch: () => m.erro_atualizacao_branch(),
+  erro_atualizacao_branch: (p) => m.erro_atualizacao_branch({ alvo: String(p.alvo ?? 'main') }),
   erro_atualizacao_dependencia: (p) => m.erro_atualizacao_dependencia({ faltando: fmtParam(p.faltando) }),
   erro_atualizacao_ja_rodando: () => m.erro_atualizacao_ja_rodando(),
 

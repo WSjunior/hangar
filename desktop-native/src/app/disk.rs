@@ -210,6 +210,7 @@ impl Uploads {
             Source::Cited(path) => cited(&cwd, &path).map(|path| read_file(&path)),
             Source::Transcript(id, index) => transcript_image(&jsonl, &id, index).map(Ok),
             Source::Remote(_) => None,
+            Source::Memory(_, bytes) => Some(Ok(bytes.0.to_vec())),
         })).await?;
         match read { Some(result) => result, None => api.fetch(name, source).await }
     }

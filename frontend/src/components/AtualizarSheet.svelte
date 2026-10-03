@@ -474,7 +474,7 @@
         <!-- A atualização alinha o disco com origin/main, e numa branch de trabalho isso arrasta a
              branch junto. Sem o botão aqui, porque a única saída é trocar de branch — e escolher
              isso por quem está trabalhando não é papel do botão de atualizar. -->
-        <p class="aviso">{m.atualizar_branch_bloqueia({ branch: dados?.pre_voo?.branch ?? '?' })}</p>
+        <p class="aviso">{m.atualizar_branch_bloqueia({ branch: dados?.pre_voo?.branch ?? '?', alvo: dados?.pre_voo?.alvo ?? 'main' })}</p>
       {/if}
       {#if erroDeRede}<p class="erro-linha">{erroDeRede}</p>{/if}
       <div class="acoes">

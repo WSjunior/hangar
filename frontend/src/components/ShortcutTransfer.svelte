@@ -63,7 +63,7 @@
   function shortcutLabel(item: Shortcut): string {
     if (item.type !== 'internal') return item.label;
     return { terminal: m.ctx_terminal, modo: m.atalhos_interno_modo, navegador: m.ctx_navegador,
-      anexos: m.ctx_anexos, rodar: m.ctx_rodar }[item.action]();
+      anexos: m.ctx_anexos, rodar: m.ctx_rodar, externo: m.native_shortcuts_native_externo }[item.action]();
   }
 
   function fileStatus(status: 'create' | 'replace' | 'same'): string {

@@ -3,7 +3,8 @@
 // superfícies (fileira desktop, "⋯" da NavBar, command palette) consomem o resolve daqui.
 
 /** Ações internas: os botões nativos de hoje. Rótulo/ícone vêm do front (i18n), não da config. */
-export type ShortcutInternalAction = 'terminal' | 'modo' | 'navegador' | 'anexos' | 'rodar';
+/** `externo`: terminal do sistema anexado à sessão; só o app nativo o executa, e só com servidor local. */
+export type ShortcutInternalAction = 'terminal' | 'modo' | 'navegador' | 'anexos' | 'rodar' | 'externo';
 
 export interface ShortcutInternal {
   id: string;
@@ -39,7 +40,7 @@ export interface ShortcutShell {
 export type Shortcut = ShortcutInternal | ShortcutSendText | ShortcutShell;
 
 const INTERNAL_ACTIONS: ShortcutInternalAction[] = [
-  'terminal', 'modo', 'navegador', 'anexos', 'rodar',
+  'terminal', 'modo', 'navegador', 'anexos', 'rodar', 'externo',
 ];
 
 /** A fileira de hoje, na ordem de hoje. É o que vale com config vazia. */

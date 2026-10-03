@@ -53,6 +53,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     setPermissionMode,
     setModoExecucao,
     recarregarSessao,
+    setSessionAccount, type AccountTarget,
     steerSession,
     broadcast,
     selectOption,
@@ -1065,6 +1066,29 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     return () => clearInterval(timer);
   });
   const modoLivre = $derived(currentState === 'idle');
+  // A mesma conversa noutra conta Claude: reinicia o processo como a troca de modo, então confirma antes.
+  const contaTrocavel = $derived(sessionProvider === 'claude' && !sessionEngine);
+  let trocandoConta = $state(false);
+  let contaAlvo = $state<AccountTarget | null>(null);
+  // O texto da confirmação fica no último alvo: zerado no fechamento, o título sumiria durante a animação de saída.
+  let contaMostrada = $state<AccountTarget | null>(null);
+  function pedirTrocaConta(conta: AccountTarget) {
+    if (trocandoConta || currentState !== 'idle') return;
+    contaAlvo = contaMostrada = conta;
+  }
+  async function executarTrocaConta() {
+    const alvo = contaAlvo;
+    if (!alvo || trocandoConta || currentState !== 'idle') return;
+    trocandoConta = true;
+    try {
+      await setSessionAccount(sessionName, alvo.path);
+      await loadSessionsForNav();
+    } catch (err) {
+      mostrarAviso(err);
+    } finally {
+      trocandoConta = false;
+    }
+  }
   let claudePlanDiscovery = $state<ClaudePlanDiscovery | null>(null);
   let claudePlanDiscoveryLoading = $state(false);
   let claudePlanDiscoveryError = $state('');
@@ -3446,6 +3470,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
              onActivity={(hasActivity || !!planName) ? () => (activityOpen = true) : undefined}
              onAttachments={() => (anexosOpen = true)}
              onBastao={passarBastaoDaqui}
+             onTrocarConta={contaTrocavel ? pedirTrocaConta : undefined}
+             contaBloqueada={!modoLivre || trocandoConta}
              onShare={isActiveInvite() ? undefined : () => (shareOpen = true)}
              onTrocarModo={modoTrocavel ? trocarModo : undefined}
              modoDestinoTerminal={sessionHeadless}
@@ -3459,6 +3485,13 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
                 message={sessionHeadless ? m.modo_confirmar_terminal_msg() : m.modo_confirmar_sem_terminal_msg()}
                 confirmLabel={sessionHeadless ? m.modo_abrir_no_terminal() : m.modo_continuar_sem_terminal()}
                 onConfirm={executarTrocaModo} onClose={() => (confirmaModo = false)} />
+  <ConfirmSheet open={contaAlvo !== null}
+                title={m.conta_confirmar_titulo({ conta: contaMostrada?.label ?? '' })}
+                message={contaMostrada?.low && contaMostrada.pct !== null
+                  ? `${m.conta_confirmar_acabando({ conta: contaMostrada.label, pct: String(Math.round(contaMostrada.pct)) })} ${m.conta_confirmar_msg({ conta: contaMostrada.label })}`
+                  : m.conta_confirmar_msg({ conta: contaMostrada?.label ?? '' })}
+                confirmLabel={m.conta_confirmar_titulo({ conta: contaMostrada?.label ?? '' })}
+                onConfirm={executarTrocaConta} onClose={() => (contaAlvo = null)} />
   <ConfirmSheet open={pendingShortcut !== null}
                 title={pendingShortcut?.label ?? ''}
                 message={pendingShortcut?.type === 'shell' ? pendingShortcut.command : pendingShortcut?.text ?? null}

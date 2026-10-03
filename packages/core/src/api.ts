@@ -2977,6 +2977,23 @@ export function recarregarSessao(name: string): Promise<{ ok: boolean }> {
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/recarregar`, { method: 'POST' });
 }
 
+/** Conta Claude para onde a conversa pode ir: `pct` é a janela de cota mais cheia (null = sem leitura);
+ *  `low` pede confirmação com aviso, `full` não aceita a conversa. */
+export interface AccountTarget { path: string; label: string; pct: number | null; low: boolean; full: boolean }
+
+/** Contas de destino da sessão, sem a atual e com a de mais folga primeiro. */
+export function listAccountTargets(name: string): Promise<AccountTarget[]> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/conta`);
+}
+
+/** Continua a mesma conversa noutra conta Claude (`path` de `listAccountTargets`). Só ociosa (409 com o motivo). */
+export function setSessionAccount(name: string, configDir: string): Promise<{ ok: boolean; config_dir: string }> {
+  return apiFetch(`/api/sessions/${encodeURIComponent(name)}/conta`, {
+    method: 'POST',
+    body: JSON.stringify({ config_dir: configDir }),
+  });
+}
+
 export function setPermissionMode(name: string, mode: string): Promise<{ mode: string; current: string; previous_non_plan: string }> {
   _invalidarCatalogo(name);
   return apiFetch(`/api/sessions/${encodeURIComponent(name)}/permission-mode`, {

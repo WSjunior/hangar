@@ -41,7 +41,7 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from app import atomico, procinfo, rust_release, tmux
+from app import atomico, config, procinfo, rust_release, tmux
 
 _log = logging.getLogger("hangar.atualizar")
 
@@ -102,6 +102,46 @@ def _base() -> Path:
 
 def _caminho_estado() -> Path:
     return _base() / "estado.json"
+
+
+_PRINCIPAIS = ("main", "master")
+
+
+def alvo() -> str:
+    """Branch que o Atualizar segue: `CP_UPDATE_BRANCH`, ou a main."""
+    return config.settings.update_branch or "main"
+
+
+def _caminho_canal() -> Path:
+    return _base() / "branch"
+
+
+def _canal() -> str:
+    """Branch fora da main em que a PRÓPRIA atualização pôs o checkout.
+
+    Sem esta memória, esvaziar o `CP_UPDATE_BRANCH` transformaria a branch de teste em branch de
+    trabalho, e o Atualizar recusaria justamente a volta pra main.
+    """
+    try:
+        return _caminho_canal().read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return ""
+    except OSError as e:
+        _log.warning("nao consegui ler a branch da atualizacao: %s", e)
+        return ""
+
+
+def _marcar_canal(branch: str) -> None:
+    # Nunca levanta: quem chama é o motor (e o rollback), que só fala pelo estado.
+    try:
+        if branch in _PRINCIPAIS:
+            _caminho_canal().unlink(missing_ok=True)
+            return
+        _caminho_canal().parent.mkdir(parents=True, exist_ok=True)
+        _caminho_canal().write_text(branch, encoding="utf-8")
+    except OSError as e:
+        # `_avisar` põe na tela e no log; o log `hangar.*` chega ao diário pelo `DiaryHandler`.
+        _avisar(f"nao consegui gravar a branch da atualizacao ({branch}): {e}")
 
 
 # ─── Estado ────────────────────────────────────────────────────────────────────────────────────
@@ -392,6 +432,10 @@ def _topologia() -> str:
     return "manual"
 
 
+# Alvos cuja contagem já falhou neste processo: o `checar` roda a cada poll da tela.
+_CONTAGEM_FALHOU: set[str] = set()
+
+
 def _falta(*programas: str) -> list[str]:
     return [p for p in programas if not shutil.which(p)]
 
@@ -422,19 +466,37 @@ def checar() -> dict:
         behind = int(m.group(1)) if (m := re.search(r"behind (\d+)", cabecalho)) else 0
 
     branch = _git("rev-parse", "--abbrev-ref", "HEAD", timeout=30).stdout.strip()
+    destino = alvo()
+    ahead_incerto = False
+    if not _troca_de_branch({"branch": branch, "alvo": destino}):
+        # Contra o `origin/<alvo>`, que é o que o reset alcança, e não contra o upstream: branch sem
+        # upstream dava ahead 0, ficava sem resgate e perdia o commit local no `reset --hard`.
+        r = _git("rev-list", "--left-right", "--count", f"origin/{destino}...HEAD", timeout=30)
+        if r.returncode == 0 and len(contas := r.stdout.split()) == 2:
+            behind, ahead = int(contas[0]), int(contas[1])
+            _CONTAGEM_FALHOU.discard(destino)
+        elif _git("remote", "get-url", "origin", timeout=30).returncode == 0:
+            # Sem a contagem, o número do upstream pode ser o 0 que perde commit: o motor resgata.
+            ahead_incerto = True
+            if destino not in _CONTAGEM_FALHOU:
+                _CONTAGEM_FALHOU.add(destino)
+                _log.warning("nao consegui contar os commits contra origin/%s: %s", destino, _cauda(r, 4))
     return {
         "pode": not faltando,
         "faltando": faltando,
         "branch": branch,
-        # A atualização alinha o checkout com `origin/main` — inclusive por `reset --hard`, quando o
-        # fast-forward é recusado. Numa branch de trabalho isso ARRASTA a branch: medido em
+        "alvo": destino,
+        # A atualização alinha o checkout com `origin/<alvo>` — inclusive por `reset --hard`, quando
+        # o fast-forward é recusado. Numa branch de trabalho isso ARRASTA a branch: medido em
         # 25/08/2026 na máquina do desktop, a `mobile-expo` local passou a apontar pra um commit da
         # main e o disco ficou misturado (arquivos da main em alguns caminhos, sobras da outra
         # branch noutros). Nada se perdeu — o `resguardar` fez o trabalho dele —, mas atualizar o
-        # app não pode decidir sobre a branch de ninguém, então aqui ele recusa.
-        "branch_de_trabalho": branch not in ("main", "master"),
+        # app não pode decidir sobre a branch de ninguém, então aqui ele recusa. Só escapam a
+        # branch configurada e a que a própria atualização pôs no checkout.
+        "branch_de_trabalho": branch not in (*_PRINCIPAIS, destino, _canal() or destino),
         "sujo": len(sujo_rastreado),
         "ahead": ahead,
+        "ahead_incerto": ahead_incerto,
         "behind": behind,
         "divergiu": ahead > 0 and behind > 0,
         "topologia": _topologia(),
@@ -451,14 +513,15 @@ class FalhaDeResgate(Exception):
 def resguardar(pre: dict) -> str | None:
     """Guarda o que existe hoje numa branch de resgate + stash. Devolve o nome, ou `None`.
 
-    Só faz alguma coisa quando há o que perder: arquivo rastreado modificado, commit local, ou uma
-    branch que não é a main. Sem nada disso, devolve `None` e a atualização segue — criar branch de
+    Só faz alguma coisa quando há o que perder: arquivo rastreado modificado, commit local (ou
+    contagem de commits que falhou), ou uma branch de trabalho. Sem nada disso, devolve `None` e a atualização segue — criar branch de
     resgate a cada `git pull` de repo limpo só encheria o repo de refs mortas.
 
     **Confere que a ref existe antes de devolver.** É o que separa "automático" de "irreversível":
     quem chama só pode dar `reset --hard` depois desta função ter provado que há para onde voltar.
     """
-    tem_o_que_perder = pre.get("sujo") or pre.get("ahead") or pre.get("branch") not in ("main", "master")
+    tem_o_que_perder = (pre.get("sujo") or pre.get("ahead") or pre.get("ahead_incerto")
+                        or pre.get("branch_de_trabalho"))
     if not tem_o_que_perder:
         return None
 
@@ -481,8 +544,52 @@ def resguardar(pre: dict) -> str | None:
 
 # ─── As etapas ─────────────────────────────────────────────────────────────────────────────────
 
+def _avisar(texto: str) -> None:
+    _escrever(avisos=list(estado().get("avisos") or []) + [texto])
+    _log.warning(texto)
+
+
+def _troca_de_branch(pre: dict) -> bool:
+    atual, destino = pre.get("branch"), pre.get("alvo") or "main"
+    # Sem branch configurada, a master segue recebendo a main como sempre recebeu.
+    return bool(atual) and atual != destino and not (destino == "main" and atual in _PRINCIPAIS)
+
+
+def _trocar_para(destino: str) -> None:
+    """Põe o checkout na branch do alvo, com as mesmas proteções do alinhamento.
+
+    A ref local do alvo é a que o `reset --hard` de `_puxar` alcança: com commit que o origin não
+    tem, ela ganha resgate conferido antes, como no `resguardar`.
+    """
+    local = f"refs/heads/{destino}"
+    if _git("rev-parse", "--verify", "--quiet", local, timeout=30).returncode == 0:
+        if _git("merge-base", "--is-ancestor", local, f"origin/{destino}", timeout=30).returncode != 0:
+            nome = f"resgate/{datetime.now().strftime('%Y-%m-%d-%H%M')}-{destino}"
+            b = _git("branch", "--force", nome, local, timeout=60)
+            if b.returncode != 0 or _git("rev-parse", "--verify", f"refs/heads/{nome}",
+                                         timeout=30).returncode != 0:
+                raise FalhaDeResgate(f"nao consegui guardar a branch local {destino}: {_cauda(b)}")
+            _avisar(f"a branch local {destino} tinha commits fora do origin: guardados em {nome}")
+        args = ("checkout", destino)
+    else:
+        args = ("checkout", "-b", destino, "--track", f"origin/{destino}")
+    c = _git(*args, timeout=120)
+    if c.returncode != 0:
+        # Arquivo solto que colide com a outra branch recusa o checkout: guarda e tenta de novo.
+        etiqueta = f"hangar antes de trocar para {destino}"
+        s = _git("stash", "push", "--include-untracked", "-m", etiqueta, timeout=120)
+        if s.returncode != 0:
+            raise RuntimeError(f"nao consegui guardar o que estava no disco: {_cauda(s)}")
+        _avisar(f"arquivos soltos guardados no stash '{etiqueta}'")
+        c = _git(*args, timeout=120)
+        if c.returncode != 0:
+            raise RuntimeError(f"nao consegui trocar para a branch {destino}: {_cauda(c)}")
+    _marcar_canal(destino)
+
+
 def _puxar(pre: dict) -> None:
     """`fetch` + fast-forward. Só reseta quando o ff é impossível — e o resgate já rodou."""
+    destino = pre.get("alvo") or "main"
     f = _git("fetch", "origin", timeout=300)
     if f.returncode != 0:
         raise RuntimeError(f"nao consegui buscar o codigo novo: {_cauda(f)}")
@@ -494,7 +601,10 @@ def _puxar(pre: dict) -> None:
     if t.returncode != 0:
         _log.warning("tag dist-latest nao atualizada: %s", _cauda(t))
 
-    m = _git("merge", "--ff-only", "origin/main", timeout=120)
+    if _troca_de_branch(pre):
+        _trocar_para(destino)
+
+    m = _git("merge", "--ff-only", f"origin/{destino}", timeout=120)
     if m.returncode == 0:
         return
 
@@ -513,7 +623,7 @@ def _puxar(pre: dict) -> None:
         # `resguardar`: sem prova de que dá pra voltar, nada destrutivo acontece.
         raise RuntimeError(f"nao consegui guardar o que estava no disco: {_cauda(s)}")
 
-    r = _git("reset", "--hard", "origin/main", timeout=120)
+    r = _git("reset", "--hard", f"origin/{destino}", timeout=120)
     if r.returncode != 0:
         raise RuntimeError(f"nao consegui alinhar com o codigo novo: {_cauda(r)}")
 
@@ -558,16 +668,6 @@ def _preparar(topologia: str, *, dist: bool = True) -> None:
     medida em `atualizacoes.py`). O `npm ci` não é barato, então esse compara o hash do lock
     gravado no sidecar — do que JÁ RODOU aqui, não do intervalo.
     """
-    if dist:
-        aviso = _atualizar_dist()
-        if aviso:
-            _escrever(avisos=list(estado().get("avisos") or []) + [aviso])
-            _log.warning(aviso)
-        # Sem o hangar-server o Python atende sozinho: falha aqui é aviso, nunca etapa quebrada.
-        # A volta (`dist=False`) não baixa: a release é a mais nova, não a do commit de antes.
-        binarios = rust_release.fetch() or []
-        if binarios:
-            _escrever(avisos=list(estado().get("avisos") or []) + binarios)
     uv = shutil.which("uv")
     if not uv:
         raise RuntimeError("uv nao encontrado: nao da pra sincronizar as dependencias do backend")
@@ -601,6 +701,17 @@ def _preparar(topologia: str, *, dist: bool = True) -> None:
     if atual:
         marca.parent.mkdir(parents=True, exist_ok=True)
         marca.write_text(atual, encoding="utf-8")
+    # Depois do `npm ci`: fora da main a tela é compilada aqui, já com as dependências dela.
+    if dist:
+        aviso = _atualizar_dist()
+        if aviso:
+            _escrever(avisos=list(estado().get("avisos") or []) + [aviso])
+            _log.warning(aviso)
+        # Sem o hangar-server o Python atende sozinho: falha aqui é aviso, nunca etapa quebrada.
+        # A volta (`dist=False`) não baixa: a release é a mais nova, não a do commit de antes.
+        binarios = rust_release.fetch() or []
+        if binarios:
+            _escrever(avisos=list(estado().get("avisos") or []) + binarios)
 
 
 def _stop_windows_front() -> None:
@@ -717,21 +828,31 @@ def _executar(porta: int) -> dict:
     # no terminalzinho, mesmo tendo sido registrada.
     _escrever(fase="rodando", ok=None, erro=None, resgate=None, voltou=None, no_ar=None,
               commit_de="", commit_para=None, pid=os.getpid(),
-              reiniciar_manual=False, shell_mudou=False, log=[])
+              reiniciar_manual=False, shell_mudou=False, log=[], avisos=[])
     pre = checar()
     de = pre.get("commit", "")
     _escrever(commit_de=de)
 
     # A recusa da branch vem ANTES de tudo, e principalmente antes do `resguardar`: aqui nada
     # aconteceu ainda, e a saída é uma frase, não um resgate pra alguém desfazer depois.
+    destino = pre.get("alvo") or "main"
     if pre.get("branch_de_trabalho"):
         return _falhou(
             f"este checkout esta na branch '{pre.get('branch')}', e a atualizacao alinha o disco "
-            "com origin/main — troque para a main antes de atualizar", porta=porta)
+            f"com origin/{destino} — troque para a {destino} antes de atualizar", porta=porta)
 
     if not pre.get("pode"):
         falta = ", ".join(pre.get("faltando") or []) or pre.get("erro", "desconhecido")
         return _falhou(f"falta o que a atualizacao precisa: {falta}", porta=porta)
+
+    # Branch configurada que o origin não tem: recusa aqui, antes do resgate, com o disco intacto.
+    if destino != "main":
+        r = _git("ls-remote", "--exit-code", "origin", f"refs/heads/{destino}", timeout=60)
+        if r.returncode != 0:
+            motivo = ("nao existe no origin" if r.returncode == 2
+                      else f"nao pode ser consultada no origin ({_cauda(r, 4)})")
+            return _falhou(f"a branch '{destino}' (CP_UPDATE_BRANCH) {motivo}; nada foi alterado",
+                           porta=porta)
 
     try:
         _etapa("resguardar")
@@ -757,7 +878,12 @@ def _executar(porta: int) -> dict:
         # gira a barra pra sempre, e a pessoa não descobre nem que falhou nem por quê. Medido: a
         # lista de tipos que estava aqui não pegava `PassoFalhou`, e um passo com prova falha
         # produzia exatamente isso.
-        return _falhou(str(e), de=de, porta=porta)
+        msg = str(e)
+        # Falha depois da troca: o checkout não voltou, e a tela precisa dizer onde ele está.
+        atual = _git("rev-parse", "--abbrev-ref", "HEAD", timeout=30).stdout.strip()
+        if atual and pre.get("branch") and atual != pre.get("branch"):
+            msg += f" (o checkout ficou na branch {atual})"
+        return _falhou(msg, de=de, porta=porta)
 
     # O restart fica FORA do try acima, e a diferença não é cosmética: tudo lá em cima falha com o
     # servidor velho ainda no ar (`no_ar=True` é verdade). Aqui não — `systemctl restart` para o
@@ -769,19 +895,21 @@ def _executar(porta: int) -> dict:
         _etapa("reiniciar")
         _reiniciar(pre["topologia"], porta)
     except Exception as e:                           # noqa: BLE001 — mesmo motivo do de cima
-        return _voltar(de, f"o servidor nao reiniciou: {e}", pre["topologia"], porta)
+        return _voltar(de, f"o servidor nao reiniciou: {e}", pre["topologia"], porta,
+                       branch=pre.get("branch", ""))
 
     # Prova de vida só onde houve restart de verdade. Na instalação na mão o backend velho segue
     # respondendo — checar aqui devolveria um "subiu" que não prova nada.
     if not estado().get("reiniciar_manual"):
         if not _subiu(porta):
-            return _voltar(de, "o servidor nao respondeu depois de reiniciar", pre["topologia"], porta)
+            return _voltar(de, "o servidor nao respondeu depois de reiniciar", pre["topologia"], porta,
+                           branch=pre.get("branch", ""))
         # HTTP < 500 o processo VELHO também responde. O pid na porta é a prova de que trocou:
         # foi assim que o `-Update` do Windows chegou a dizer ok com a instância anterior no ar.
         pid_depois = _pid_do_servidor(pre["topologia"], porta)
         if pid_antes and pid_depois == pid_antes:
             return _voltar(de, f"o servidor nao reiniciou: o processo na porta e o mesmo de antes (pid {pid_antes})",
-                           pre["topologia"], porta)
+                           pre["topologia"], porta, branch=pre.get("branch", ""))
 
     _dist_velho_apagar()
     _escrever(fase="pronto", ok=True, texto="Atualizado")
@@ -823,8 +951,11 @@ def _falhou(msg: str, de: str = "", no_ar: bool | None = None, porta: int = 8765
     return estado()
 
 
-def _voltar(commit: str, motivo: str, topologia: str, porta: int) -> dict:
+def _voltar(commit: str, motivo: str, topologia: str, porta: int, branch: str = "") -> dict:
     """Rollback: volta ao commit que esta máquina tinha minutos atrás e sobe de novo.
+
+    `branch` é a do checkout antes da atualização: se ela trocou de branch, a volta passa por lá
+    antes do reset, senão a branch nova é que receberia o commit antigo.
 
     Este `reset --hard` é o único que não passa pelo `resguardar`, e pode: o alvo é um commit da
     própria máquina, de minutos atrás, e o pré-voo já garantiu que não havia trabalho solto no
@@ -832,6 +963,12 @@ def _voltar(commit: str, motivo: str, topologia: str, porta: int) -> dict:
     servidor.
     """
     _escrever(fase="rodando", texto="Voltando para a versão anterior")
+    if branch and branch != _git("rev-parse", "--abbrev-ref", "HEAD", timeout=30).stdout.strip():
+        c = _git("checkout", "-f", branch, timeout=120)
+        if c.returncode != 0:
+            return _falhou(f"{motivo}; e nao consegui voltar para a branch {branch}: {_cauda(c)}",
+                           no_ar=False)
+        _marcar_canal(branch)
     r = _git("reset", "--hard", commit, timeout=120)
     if r.returncode != 0:
         # O reset falhou (commit inválido, disco cheio, `.git` travado). Seguir daqui reinstalaria
@@ -1062,6 +1199,15 @@ def _dist_velho_voltar() -> None:
     velho.rename(dist)
 
 
+def _voltar_tela() -> str:
+    """Devolve a tela guardada ao `dist`. Vazio quando voltou (ou não havia o que voltar)."""
+    try:
+        _dist_velho_voltar()
+        return ""
+    except OSError as e:
+        return str(e)
+
+
 def _atualizar_dist() -> str | None:
     """Troca o `frontend/dist` pelo build que o CI publicou. Devolve o aviso quando não deu.
 
@@ -1070,19 +1216,39 @@ def _atualizar_dist() -> str | None:
     As mesmas regras de lá: commit diferente do CI não cancela, só avisa. Árvore com edição em
     `frontend`/`packages` é quem está desenvolvendo e quer o SEU código na tela: aí compila local,
     como o `install.sh` interativo — recusar deixava a máquina de desenvolvimento sem jeito de
-    atualizar a tela pelo app, porque a árvore dela está sempre suja.
+    atualizar a tela pelo app, porque a árvore dela está sempre suja. Fora da main também compila:
+    o CI só publica o dist da main.
     """
     import tarfile
     import tempfile
     import urllib.request
     p = _git("status", "--porcelain", "--", "frontend", "packages", timeout=30)
-    if p.returncode != 0 or p.stdout.strip():
+    fora_da_main = _git("rev-parse", "--abbrev-ref", "HEAD", timeout=30).stdout.strip() not in _PRINCIPAIS
+    if p.returncode != 0 or p.stdout.strip() or fora_da_main:
         npm = shutil.which("npm")
         if not npm:
-            return "tela não atualizada: frontend/ tem mudança local e não achei o npm pra compilar"
-        b = _rodar([npm, "--prefix", "frontend", "run", "build"], cwd=REPO, timeout=600)
-        if b.returncode != 0 or not (REPO / "frontend" / "dist" / "index.html").is_file():
-            return f"tela não atualizada: o build local do frontend falhou: {_cauda(b, 4)}"
+            return "tela não atualizada: ela precisa ser compilada aqui e não achei o npm"
+        # Cópia, e não rename: o build escreve no `dist`, e o servidor no ar segue servindo dele.
+        # Sem a cópia o rollback voltaria o código anterior servindo a tela nova.
+        dist, velho = REPO / "frontend" / "dist", _DIST_VELHO()
+        try:
+            shutil.rmtree(velho, ignore_errors=True)
+            if dist.is_dir():
+                shutil.copytree(dist, velho)
+        except OSError as e:
+            # Cópia pela metade no `.dist-velho` viraria a tela do rollback.
+            shutil.rmtree(velho, ignore_errors=True)
+            return f"tela não atualizada: não consegui guardar a tela anterior ({e})"
+        try:
+            b = _rodar([npm, "--prefix", "frontend", "run", "build"], cwd=REPO, timeout=600)
+        except Exception:
+            if erro := _voltar_tela():
+                _log.warning("a tela anterior nao voltou depois do build interrompido: %s", erro)
+            raise
+        if b.returncode != 0 or not (dist / "index.html").is_file():
+            erro = _voltar_tela()
+            return (f"tela não atualizada: o build local do frontend falhou: {_cauda(b, 4)}"
+                    + (f"; e a tela anterior não voltou: {erro}" if erro else ""))
         return None
     sha_local = _git("rev-parse", "HEAD", timeout=30).stdout.strip()
     tmp = Path(tempfile.mkdtemp(prefix=".dist-baixado.", dir=REPO / "frontend"))

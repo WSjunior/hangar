@@ -2085,6 +2085,13 @@ async def _kill_unclaimed(name: str) -> None:
 
 @app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=SessionInfo)
 async def create_session(body: CreateBody):
+    if body.config_dir is None and body.provider == "claude" and not body.engine:
+        # Sem conta pedida, a padrão só vale se tiver cota; senão nasce na de mais folga.
+        from app import cotas
+        config_dir, aviso = await asyncio.to_thread(cotas.conta_com_cota, None, cotas.cotas_claude())
+        if aviso:
+            _log.warning("create_session %s: %s", body.name, aviso)
+            body = body.model_copy(update={"config_dir": config_dir})
     with _acompanhar_criacao(body.name):
         worktree: dict = {}
         try:
@@ -2514,11 +2521,15 @@ async def recarregar_sessao(name: str):
 async def modo_execucao(name: str, body: ModoExecucaoBody):
     """Troca uma sessão entre terminal (pane tmux) e sem terminal, na mesma conversa.
     Só ociosa; o processo novo sobe já no clique, pra a primeira mensagem não pagar a largada."""
+    return await _durante_troca(name, _trocar_modo(name, body))
+
+
+async def _durante_troca(name: str, troca):
     # A troca muda a identidade da sessão (sidecar <-> pane tmux); sem atualizar, a varredura
     # revogaria o convite de uma sessão que continua viva. `changing_mode` a segura no meio.
     share_api.changing_mode.add(name)
     try:
-        return await _trocar_modo(name, body)
+        return await troca
     finally:
         # Também na falha: uma troca que morreu no meio pode já ter mudado a identidade.
         try:
@@ -2591,6 +2602,189 @@ async def _trocar_modo(name: str, body: ModoExecucaoBody):
                     _log.exception("troca para sem terminal: volta ao terminal falhou name=%s", name)
                 raise HTTPException(409, detail=erro("erro_troca_modo", f"não troquei de modo: {e}", erro=str(e)))
     return {"ok": True, "terminal": body.terminal}
+
+
+class AccountMoveBody(_StrictBody):
+    config_dir: str
+
+
+# Continuar reenvia o contexto inteiro no primeiro turno: conta quase no fim acaba nele. A partir de
+# LOW a tela avisa e pede confirmação; a partir de FULL não aceita.
+ACCOUNT_LOW_PCT = 95.0
+ACCOUNT_FULL_PCT = 99.0
+
+
+def _account_targets(atual: str | None) -> list[dict]:
+    """Contas Claude para onde a conversa pode ir, sem a atual: a de mais folga primeiro, sem
+    leitura de cota depois e as cheias no fim. `pct` é a janela mais cheia (None = sem leitura)."""
+    from app import cotas
+    lidas = {c.id.removeprefix("claude:"): c for c in cotas.cotas_claude()
+             if c.estado == "lida" and c.janelas}
+    out = []
+    for c in list_config_dirs(ordered=False):
+        if atual and Path(c.path).resolve() == Path(atual).resolve():
+            continue
+        cota = lidas.get(c.path)
+        pct = max(j.pct for j in cota.janelas) if cota else None
+        out.append({"path": c.path, "label": c.label, "pct": pct,
+                    "low": pct is not None and pct >= ACCOUNT_LOW_PCT,
+                    "full": pct is not None and pct >= ACCOUNT_FULL_PCT})
+    return sorted(out, key=lambda d: (d["full"], d["pct"] is None, d["pct"] or 0))
+
+
+@app.get("/api/sessions/{name}/conta", dependencies=[Depends(require_auth)])
+async def contas_destino(name: str):
+    info = await _cached_info(name)
+    if not info:
+        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
+    atual = (info.conta or "").removeprefix("claude:") or None
+    return await asyncio.to_thread(_account_targets, atual)
+
+
+@app.post("/api/sessions/{name}/conta", dependencies=[Depends(require_auth)])
+async def trocar_conta(name: str, body: AccountMoveBody):
+    """A mesma conversa continua noutra conta Claude, com o mesmo nome: para o processo, muda o
+    transcript de conta e reabre com `--resume`. Só ociosa, como a troca de modo."""
+    alvo = next((d for d in await asyncio.to_thread(_account_targets, None) if d["path"] == body.config_dir), None)
+    if alvo is None:
+        raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
+    if alvo["full"]:
+        raise HTTPException(409, detail=erro("erro_conta_cheia", f"a conta {alvo['label']} está em {alvo['pct']:.0f}% da cota",
+                                             conta=alvo["label"], pct=alvo["pct"]))
+    return await _durante_troca(name, _trocar_conta(name, body.config_dir))
+
+
+async def _trocar_conta(name: str, destino: str):
+    info = await _cached_info(name)
+    if not info:
+        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
+    if info.provider != "claude" or info.engine:
+        raise HTTPException(409, detail=erro("erro_conta_so_claude", "só sessão Claude na conta Anthropic troca de conta"))
+    atual = (info.conta or "").removeprefix("claude:")
+    if atual and Path(atual).resolve() == Path(destino).resolve():
+        return {"ok": True, "config_dir": destino}
+    hl = get_adapter(CLAUDE_HEADLESS)
+    async with hl.delivery_lock(name):
+        # Lido dentro da trava: uma troca de modo que terminou enquanto este pedido esperava já mudou a resposta.
+        headless = _headless(name)
+        motivo = await _motivo_ocupada(name, headless)
+        if motivo:
+            raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
+        # Terminal passa por sem terminal parada: o sidecar guarda as escolhas e a conta, e nenhum
+        # processo sobe até a conversa estar no lugar.
+        if headless:
+            cano = (((headless_sessions.load(name) or {}).get("cano")) or {}).get("pid")
+            pids = await asyncio.to_thread(_arvore_de, cano)
+            await hl.parar(name)
+        else:
+            pane = await asyncio.to_thread(registry._pane_of, name)
+            pids = await asyncio.to_thread(_arvore_de, (pane or {}).get("pid"))
+            modo = await asyncio.to_thread(perm_mode.ler_modo, name)
+            try:
+                await asyncio.to_thread(registry.para_headless, name, modo)
+            except KillFailed as e:
+                raise HTTPException(500, str(e))
+            except (ValueError, OSError) as e:
+                raise HTTPException(409, detail=erro("erro_troca_conta", f"não troquei de conta: {e}", erro=str(e)))
+
+        async def reabrir() -> str | None:
+            """Reabre como estava; devolve o motivo quando o terminal não voltou (a sessão segue sem terminal)."""
+            if headless:
+                hl.acordar(name)
+                return None
+            try:
+                await asyncio.to_thread(registry.para_terminal, name)
+                return None
+            except Exception as e:
+                _log.exception("troca de conta: terminal de %s não voltou", name)
+                hl.acordar(name)   # sidecar restaurado: a conversa segue sem terminal
+                return str(e)
+
+        # O claude grava as últimas linhas pelo caminho ao sair: mover antes disso recria o arquivo na conta de
+        # origem, com o mesmo id, e o processo novo teria companhia no mesmo .jsonl.
+        if not await asyncio.to_thread(_saiu, pids):
+            await reabrir()
+            raise HTTPException(409, detail=erro("erro_troca_conta", "não troquei de conta: o processo antigo não saiu; a sessão segue na conta de antes",
+                                                 erro="processo vivo"))
+        falha = None
+        movida: tuple[str, str, str | None] | None = None
+        try:
+            meta = headless_sessions.load(name)
+            if meta is None:
+                raise RuntimeError("sessão sem o arquivo de estado")
+            jsonl = Path(hl.transcript_path_de(meta))
+            if jsonl.exists() and await asyncio.to_thread(move_conversation, jsonl.parent.name, meta["session_id"], destino):
+                movida = (jsonl.parent.name, meta["session_id"], meta.get("config_dir"))
+            # O aviso da conta anterior (limite batido, sem login) não vale na nova.
+            if headless_sessions.update(name, config_dir=destino, problema=None) is None:
+                raise RuntimeError("não gravei a conta nova no arquivo de estado da sessão")
+            hl.esquecer_problema(name)
+        except FileExistsError:
+            falha = HTTPException(409, detail=erro("erro_conversa_ja_na_conta", "a conta destino ja tem esta conversa"))
+        except Exception as e:
+            _log.exception("mover conversa de %s para %s falhou", name, destino)
+            onde = "na conta de antes"
+            if movida:
+                # A conversa já foi, mas a sessão continua apontando para a conta de antes: ela volta junto.
+                try:
+                    await asyncio.to_thread(move_conversation, *movida)
+                except Exception:
+                    _log.exception("troca de conta: a conversa de %s ficou em %s", name, destino)
+                    onde = f"em {destino}, mas a sessão aponta para a conta de antes"
+            falha = HTTPException(500, detail=erro("erro_mover_conversa", f"nao consegui mover a conversa de conta ({e}); ela ficou {onde}", erro=str(e)))
+        motivo_terminal = await reabrir()
+        registry._forget(name)
+    if falha:
+        raise falha
+    if motivo_terminal:
+        raise HTTPException(409, detail=erro("erro_troca_conta", f"a conversa foi para a conta nova, mas o terminal não voltou ({motivo_terminal}); ela segue sem terminal",
+                                             erro=motivo_terminal))
+    return {"ok": True, "config_dir": destino}
+
+
+def _arvore_de(pid: object) -> list[int]:
+    """O processo e os descendentes dele; sem pid legível, nenhum."""
+    try:
+        root = int(pid)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return []
+    return [root, *procinfo._descendant_pids(root)]
+
+
+def _saiu(pids: list[int]) -> bool:
+    """Espera os processos saírem; quem passar do prazo é morto à força. False = algum seguiu vivo mesmo assim."""
+    windows = os.name == "nt"
+    # No Windows a árvore sai em décimos de segundo quando sai; quem passou de 1,5 s (neto fora do
+    # psmux, servidor MCP preso) não sai sozinho, e esperar 15 s por ele só atrasa a troca.
+    prazo = 1.5 if windows else 15.0
+    registry_mod._esperar_saida(pids, prazo)
+    vivos = [p for p in pids if procinfo.pid_vivo(p)]
+    if vivos and windows:
+        taskkill = shutil.which("taskkill")
+        if not taskkill:
+            _log.warning("troca de conta: taskkill não encontrado; processos %s seguem vivos", vivos)
+        else:
+            # Uma chamada para todos e sem /T: o /T segue o ppid de agora, e num pid já reaproveitado
+            # levaria junto a árvore de um processo alheio. Os netos já estão na foto tirada antes de parar.
+            try:
+                r = subprocess.run([taskkill, "/F", *(a for p in vivos for a in ("/PID", str(p)))],
+                                   capture_output=True, text=True, errors="replace", timeout=10)
+                if r.returncode != 0:
+                    _log.warning("troca de conta: taskkill saiu com %s: %s", r.returncode,
+                                 (r.stderr or r.stdout or "").strip()[:400])
+            except (OSError, subprocess.SubprocessError):
+                _log.warning("troca de conta: não consegui matar os processos %s", vivos, exc_info=True)
+    elif vivos:
+        import signal
+        for p in vivos:
+            try:
+                os.kill(p, signal.SIGKILL)
+            except OSError:
+                _log.warning("troca de conta: não consegui matar o processo %s", p, exc_info=True)
+    if vivos:
+        _log.warning("troca de conta: processos %s não saíram em %.1f s; tentei matá-los", vivos, prazo)
+        registry_mod._esperar_saida(vivos, 3.0)
+    return not any(procinfo.pid_vivo(p) for p in pids)
 
 
 class RenameBody(_StrictBody):
@@ -5393,16 +5587,29 @@ def _origem_do_terminal_ok(request: Request) -> bool:
 
 # ─── Atualizar ─────────────────────────────────────────────────────────────────────────────────
 
-def _mudancas_pendentes() -> list[dict]:
-    """Os commits que entraram em `origin/main` e ainda não estão aqui — o changelog da tela.
+_ALVOS_AUSENTES_AVISADOS: set[str] = set()
+
+
+def _mudancas_pendentes() -> list[dict] | None:
+    """Os commits que entraram em `origin/<alvo>` e ainda não estão aqui — o changelog da tela.
 
     Título de commit, e não um `CHANGELOG.md` mantido à mão: as mensagens deste repo já são
     descritivas, e um arquivo à parte seria uma segunda cópia pra envelhecer. Passo que merecer
     texto próprio ganha um arquivo em `docs/atualizacoes/`, cujo corpo entra junto.
+
+    `None` quando o git não compara (ref do alvo ainda não buscada): a tela oferece o Atualizar, e
+    é o motor que diz o motivo. Lista vazia ali seria "Tudo em dia" sem sinal nenhum.
     """
-    p = atualizar._git("log", "--format=%h%x00%s", "HEAD..origin/main", timeout=30)
+    destino = atualizar.alvo()
+    p = atualizar._git("log", "--format=%h%x00%s", f"HEAD..origin/{destino}", timeout=30)
     if p.returncode != 0:
-        return []
+        # Uma vez por alvo enquanto falhar: o polling da tela passa aqui a cada 2s.
+        if destino not in _ALVOS_AUSENTES_AVISADOS:
+            _ALVOS_AUSENTES_AVISADOS.add(destino)
+            diag.registrar("atualizacao.alvo_ausente", "aviso",
+                           detalhe=f"origin/{destino} rc={p.returncode}: {atualizar._cauda(p, 3)}")
+        return None
+    _ALVOS_AUSENTES_AVISADOS.discard(destino)
     linhas = []
     for linha in p.stdout.splitlines():
         sha, _, titulo = linha.partition("\x00")
@@ -5433,15 +5640,20 @@ async def get_atualizacao(procurar: bool = False):
             atualizar._git("fetch", "origin", timeout=120)
         pre = atualizar.checar()
         mudancas = _mudancas_pendentes()
+        # Checkout fora da branch do alvo (campo esvaziado na branch de teste, ou branch já contida
+        # na main) não tem commit a puxar, mas tem troca a fazer.
+        troca = atualizar._troca_de_branch(pre) and not pre.get("branch_de_trabalho")
+        disponivel = mudancas is None or bool(mudancas) or troca
+        mudancas = mudancas or []
         return {
             "versoes": {"repo": diag._git_describe(), "backend": diag.VERSAO_EM_EXECUCAO},
             # A versão que a pessoa lê: data do commit + hash. `remoto` é o que está em
-            # origin/main desde o último fetch; `atras` é quantos commits faltam.
+            # origin/<alvo> desde o último fetch; `atras` é quantos commits faltam.
             "versao_legivel": {"repo": diag.versao_legivel(),
                                "backend": diag.VERSAO_LEGIVEL_EM_EXECUCAO,
-                               "remoto": diag.versao_legivel("origin/main")},
+                               "remoto": diag.versao_legivel(f"origin/{atualizar.alvo()}")},
             "atras": len(mudancas),
-            "atualizacao_disponivel": bool(mudancas),
+            "atualizacao_disponivel": disponivel,
             "mudancas": mudancas,
             "passos": [{"id": s["id"], "titulo": s["titulo"], "texto": s["texto"]}
                        for s in atualizacoes.pendentes()],
@@ -5458,13 +5670,13 @@ async def get_atualizacao(procurar: bool = False):
 async def post_atualizacao_iniciar():
     """Lança a atualização e devolve na hora — ela roda FORA deste processo, que vai reiniciar."""
     pre = await asyncio.to_thread(atualizar.checar)
-    # Recusa ANTES de lançar o motor: a atualização alinha o disco com `origin/main` e arrastaria a
+    # Recusa ANTES de lançar o motor: a atualização alinha o disco com `origin/<alvo>` e arrastaria a
     # branch de trabalho junto (medido em 25/08/2026 numa máquina com `mobile-expo` no checkout).
     if pre.get("branch_de_trabalho"):
         raise HTTPException(409, detail=erro(
             "erro_atualizacao_branch",
-            f"este checkout esta na branch {pre.get('branch')}, nao na main",
-            branch=pre.get("branch")))
+            f"este checkout esta na branch {pre.get('branch')}, nao na {pre.get('alvo') or 'main'}",
+            branch=pre.get("branch"), alvo=pre.get("alvo") or "main"))
     if not pre.get("pode"):
         faltando = pre.get("faltando") or []
         raise HTTPException(409, detail=erro(
@@ -5524,16 +5736,24 @@ def _auto_update_motivo() -> Optional[str]:
     CI verde + build pronto, que é condição, não aceleração). Sobrava uma corrida de segundos — push entre o gate e o fetch do motor, ou release `dist-latest` móvel —
     em que o build local de fallback podia ainda acontecer: consequencia e lentidao, nao tela errada, entao ficou aceita e registrada aqui.
     """
+    # O CI só publica o dist da main: branch de teste atualiza pelo botão, que compila a tela aqui.
+    if atualizar.alvo() != "main":
+        return "branch de teste configurada (CP_UPDATE_BRANCH)"
     pre = atualizar.checar()
     if not pre.get("pode"):
         return "dependencias faltando"
     if pre.get("branch_de_trabalho"):
         return f"checkout na branch {pre.get('branch')}"
+    # Trocar de branch é decisão de quem aperta o botão, nunca do laço.
+    if atualizar._troca_de_branch(pre):
+        return f"checkout na branch {pre.get('branch')}, fora do alvo {pre.get('alvo')}"
     # divergiu ANTES de ahead: divergiu = ahead>0 AND behind>0, e o motivo mais preciso e o dela.
     if pre.get("divergiu"):
         return "checkout divergiu de origin/main"
     if pre.get("ahead"):
         return "checkout adiante de origin/main (commits locais nao pushados)"
+    if pre.get("ahead_incerto"):
+        return "nao deu pra contar os commits locais"
     if not pre.get("behind"):
         return "em dia"
     if pre.get("sujo"):
@@ -6485,6 +6705,9 @@ class ResolverBody(_StrictBody):
     caminhos: list[str]
 
 
+_ELSEWHERE_MAX = 30
+
+
 @app.post("/api/sessions/{name}/files/resolver", dependencies=[Depends(require_auth)])
 def files_resolver(name: str, body: ResolverBody):
     """Visão "citados": confere de uma vez quais caminhos citados existem (e resolve os relativos
@@ -6496,6 +6719,7 @@ def files_resolver(name: str, body: ResolverBody):
         from app.transcript import citation_cwds
         cited = citation_cwds(info.jsonl, body.caminhos) if info.jsonl else {}
         found: dict[str, dict] = {}
+        elsewhere = 0
         for path in body.caminhos:
             bases = list(dict.fromkeys([*(cited.get(path) or []), info.cwd]))
             for suffix in (False, True):
@@ -6511,6 +6735,13 @@ def files_resolver(name: str, body: ResolverBody):
                     break
                 if path in found:
                     break
+            # Nome solto ou relativo de outro repositório, só se a conversa o citou; a leitura vai pela rota de arquivo
+            # citado, que faz a mesma busca. Cada um relê o transcript: teto por pedido.
+            if path not in found and info.jsonl and path in cited and elsewhere < _ELSEWHERE_MAX:
+                elsewhere += 1
+                whole = _cited_elsewhere(info.jsonl, info.cwd, path, cited[path], siblings=True)
+                if whole:
+                    found[path] = {"relativo": None, "real": os.path.realpath(whole)}
         return {"ok": {path: found[path] for path in body.caminhos if path in found},
                 "faltam": [path for path in body.caminhos if path not in found]}
     except SearchError as e:
@@ -7484,7 +7715,39 @@ def ask_history(body: AskHistoryBody):
 _CACHE_ARQUIVO = "max-age=60"
 
 
-def _resolver_citado(name: str, path: str) -> str:
+def _cited_elsewhere(jsonl: str, cwd: str | None, path: str, worked: list[str], *, siblings: bool) -> str | None:
+    """Arquivo de um nome solto ou relativo que não está na pasta da sessão: o absoluto que a conversa citou antes,
+    ou um relativo citado (`docs/x/nome`) dentro das pastas onde a conversa trabalhou (`worked`, o cwd das linhas
+    que o citaram) e da pasta da sessão. `siblings` também tenta as pastas ao lado da sessão (outro repositório,
+    como num `cd ../outro && git status`): só para LER, porque ali o mesmo relativo pode ser de outro projeto."""
+    from app.transcript import cited_elsewhere
+    absolutes, cited_relatives = cited_elsewhere(jsonl, path)
+    if absolutes:
+        return absolutes[0]
+    if not cwd:
+        return None
+    rel = path.replace("\\", "/").removeprefix("./")
+    if ".." in rel.split("/"):
+        return None
+    relatives = [rel] if "/" in rel else cited_relatives
+    base = os.path.realpath(cwd)
+    folders = list(dict.fromkeys([*(os.path.realpath(w) for w in worked), base]))
+    if siblings:
+        parent = os.path.dirname(base)
+        try:
+            # ponytail: só o primeiro nível ao lado da sessão, e no máximo 200 pastas.
+            folders += sorted(e.path for e in os.scandir(parent) if e.is_dir() and e.path not in folders)[:200]
+        except OSError:
+            _log.warning("pastas ao lado de %s ilegíveis ao procurar %s citado", base, path, exc_info=True)
+    for relative in relatives:
+        for folder in folders:
+            candidate = os.path.realpath(os.path.join(folder, relative))
+            if candidate.startswith(folder + os.sep) and os.path.isfile(candidate):
+                return candidate
+    return None
+
+
+def _resolver_citado(name: str, path: str, *, write: bool = False) -> str:
     """Devolve o caminho REAL de um arquivo citado no transcript desta sessao.
 
     TRAVA de seguranca compartilhada por quem le e por quem grava fora da raiz da sessao: so
@@ -7519,6 +7782,9 @@ def _resolver_citado(name: str, path: str) -> str:
             if os.path.isfile(candidate):
                 real = candidate
                 break
+        if not real:
+            whole = _cited_elsewhere(info.jsonl, info.cwd, path, cited[path], siblings=not write)
+            real = os.path.realpath(whole) if whole else ""
         if not real:
             raise HTTPException(404, detail=erro("erro_arquivo_nao_encontrado", "file not found"))
     if not os.path.isfile(real):
@@ -7560,7 +7826,7 @@ def serve_file_text(name: str, path: str):
 def write_file_text(name: str, body: FileWriteBody):
     try:
         return filetree.write_at(
-            Path(_resolver_citado(name, body.path)), body.path, body.text, body.digest
+            Path(_resolver_citado(name, body.path, write=True)), body.path, body.text, body.digest
         )
     except FileError as e:
         raise _erro_arq(e)

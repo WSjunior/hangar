@@ -136,6 +136,7 @@
     sync_rate_window: m.config_server_env_sync_rate_window(),
     forwarded_allow_ips: m.config_server_env_forwarded_allow_ips(),
     deploy_secret: m.config_server_env_deploy_secret(),
+    update_branch: m.config_server_env_update_branch(),
   };
   const ALERTA_ENV: Record<string, string> = {
     codex_sync_desligado: m.config_server_env_alerta_codex_sync(),

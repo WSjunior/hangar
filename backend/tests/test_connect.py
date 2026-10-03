@@ -19,7 +19,7 @@ def test_codigo_valido():
 
 
 @pytest.mark.parametrize("over", [
-    {"v": 2}, {"host": "hangar.dev.br"}, {"host": 'x".y.z'}, {"host": "a.b.c\n[x]"}, {"host": "a.b.c\n"},
+    {"v": 2}, {"host": "dev.br"}, {"host": 'x".y.z'}, {"host": "a.b.c\n[x]"}, {"host": "a.b.c\n"},
     {"token": 'abc"def' + "a" * 20}, {"token": "curto"}, {"server": "connect hangar"},
 ])
 def test_codigo_recusado(over):
@@ -145,3 +145,21 @@ def test_hash_errado_nao_grava(_plataforma, monkeypatch):
     with pytest.raises(connect.ConnectError):
         connect.binaries()
     assert not list((connect.folder() / "bin").rglob("frpc"))
+
+
+def test_codigo_com_chave_vai_para_o_frpc():
+    c = connect.parse_code(_codigo(key="k" * 43))
+    assert c.key == "k" * 43
+    assert 'metadatas.key = "' + "k" * 43 + '"' in connect.render_frpc(c)
+    assert "transport.heartbeatInterval = 30" in connect.render_frpc(c)
+
+
+def test_codigo_sem_chave_continua_valendo():
+    c = connect.parse_code(_codigo())
+    assert c.key is None and "metadatas.key" not in connect.render_frpc(c)
+
+
+@pytest.mark.parametrize("key", ['abc"' + "k" * 20, "k" * 20 + "\n", "curta"])
+def test_chave_ruim_recusada(key):
+    with pytest.raises(connect.ConnectError):
+        connect.parse_code(_codigo(key=key))

@@ -156,10 +156,11 @@
     navegador: m.ctx_navegador,
     anexos: m.ctx_anexos,
     rodar: m.ctx_rodar,
+    externo: m.native_shortcuts_native_externo,
   };
   const INTERNAL_ICON: Record<ShortcutInternalAction, string> = {
     terminal: 'glifo:terminal', modo: 'glifo:git', navegador: 'glifo:globe',
-    anexos: 'glifo:folder', rodar: 'glifo:play',
+    anexos: 'glifo:folder', rodar: 'glifo:play', externo: 'glifo:terminal',
   };
   const missingNatives = $derived(
     (Object.keys(INTERNAL_LABEL) as ShortcutInternalAction[]).filter(

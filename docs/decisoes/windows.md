@@ -74,6 +74,11 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   que segue o ponteiro sem olhar o botão) fica presa até o próximo clique. O botão não pode dar
   `stop_propagation`: apertar consumido pelo GPUI pula o `nc_button_pressed` e o sistema nunca fecha,
   minimiza nem maximiza. `start_window_move` é vazio no Windows; quem arrasta é o `HTCAPTION`.
+- **App nativo: o exe anterior guardado na troca pode ser a imagem de um processo vivo**, e aí não
+  se apaga nem se sobrescreve (`os error 5`). Quem guarda o anterior (`update.rs` e
+  `install-native.ps1`) apaga os restos que der e, com o `.old` preso, usa `.old-<horário>`. Exe
+  em disco que já tem o sha256 da oferta não se baixa nem se troca: o app só reabre. Medição em
+  [Troca do app nativo com o exe anterior preso](#troca-do-app-nativo-com-o-exe-anterior-preso).
 
 ## Terminais de atalho no psmux
 
@@ -646,3 +651,24 @@ porque o log não tem hora. O instante do prompt vem do `timestamp` no `.jsonl`.
 - Reinício do backend no meio de uma resposta longa (`Restart-HangarTask`, porta de volta em 19,2 s):
   a mensagem seguinte, enviada ~1,7 s depois da volta da porta, já foi pelo plugin (`modo=user`,
   HTTP 689 ms) e entrou uma vez; a longa também ficou com uma entrada só.
+
+## Troca do app nativo com o exe anterior preso
+
+Medido em 02/10/2026, Windows 11, app nativo 0.1.0.3981. O botão de atualizar do app respondia
+"Não consegui trocar o app: Acesso negado. (os error 5). Nada foi trocado." em toda tentativa.
+
+- O app estava aberto quando o `install-native.ps1` rodou (16 s depois da abertura): ele renomeou
+  o exe em uso para `Hangar.exe.old` e pôs a versão nova no lugar. O processo aberto passou a
+  rodar a imagem `.old`.
+- Na troca do app, `remove_file(.old)` falhava calado e o `rename(Hangar.exe -> .old)` por cima
+  da imagem viva devolvia o erro 5. Com o processo vivo, abrir o `.old` para escrita dava "em
+  uso" e o `Hangar.exe` estava livre; `Hangar.exe`, o `.new` baixado e o manifesto da release
+  tinham o mesmo sha256. Ou seja, não havia o que trocar, só reabrir.
+- Não era permissão: o app, sem elevação, criou o `.new` na mesma pasta.
+- Cada tentativa deixava um `Hangar.exe.new` de 94 MB ao lado do app.
+- O `install-native.ps1` tinha a mesma sequência (`Remove-Item` calado + `Rename-Item`), que
+  estoura na segunda execução com o app aberto.
+
+O nome livre para o exe anterior entrou em `b9650562`/`eaf66071`. Reabrir sem baixar quando o
+disco já tem a versão, apagar o `.new` na falha e a mesma regra de nome no instalador vieram
+depois. No Linux nada disso acontece: o sistema deixa substituir o arquivo de um executável em uso.

@@ -178,6 +178,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
       case 'navegador': return !!onOpenNavegador;
       case 'anexos': return !!onOpenAttachments;
       case 'rodar': return !!onOpenRun;
+      case 'externo': return false;
     }
   }));
   const hasActions = $derived(visibleShortcuts.length > 0);

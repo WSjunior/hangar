@@ -67,7 +67,7 @@ impl QuotaLine {
 /// Cota lida com a janela geral (sessão `5h` ou semana `7d`) cheia e ainda não renovada: `Some` com a volta, a da última
 /// janela cheia (com duas, só volta quando as duas voltarem). Janela por modelo, leitura que não é `lida` ou janela cuja
 /// volta já passou não bloqueiam: a leitura é de antes da renovação.
-fn exhausted(quota: &QuotaLine, now: f64) -> Option<Option<f64>> {
+pub(super) fn exhausted(quota: &QuotaLine, now: f64) -> Option<Option<f64>> {
     if quota.state != "lida" { return None; }
     let full: Vec<&QuotaWindow> = quota.windows()
         .filter(|(w, pct)| matches!(w.label.as_str(), "5h" | "7d") && *pct >= 100. && w.reset_ts.is_none_or(|r| r > now))
@@ -416,7 +416,7 @@ impl NewSession {
         true
     }
 
-    fn quota_of(&self, id: &str) -> Option<&QuotaLine> { self.quotas.ok()?.iter().find(|q| q.id == id) }
+    pub(super) fn quota_of(&self, id: &str) -> Option<&QuotaLine> { self.quotas.ok()?.iter().find(|q| q.id == id) }
 
     pub(super) fn receive_extra(&mut self, reply: CreateReply, window: &mut Window, cx: &mut Context<Self>) {
         match reply {

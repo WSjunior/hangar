@@ -27,6 +27,10 @@ pub(super) enum Shortcut {
     Shell { label: String, command: String, confirm: bool, icon: Option<String>, pasta: Option<String>, key: String, hangar: bool, home: bool, ask: bool },
     Attach,
     Run,
+    Terminal,
+    Mode,
+    Browser,
+    External,
 }
 
 impl Shortcut {
@@ -36,6 +40,10 @@ impl Shortcut {
             Shortcut::Send { label, .. } | Shortcut::Shell { label, .. } => label.clone(),
             Shortcut::Attach => tr("attach"),
             Shortcut::Run => tr("shortcuts_native_rodar"),
+            Shortcut::Terminal => tr("shortcuts_native_terminal"),
+            Shortcut::Mode => tr("shortcuts_native_modo"),
+            Shortcut::Browser => tr("shortcuts_native_navegador"),
+            Shortcut::External => tr("shortcuts_native_externo"),
         }
     }
 
@@ -44,20 +52,25 @@ impl Shortcut {
         match self {
             Shortcut::Send { text, .. } => super::shortcut_transfer::missing_secret(text),
             Shortcut::Shell { command, .. } => super::shortcut_transfer::missing_secret(command),
-            Shortcut::Attach | Shortcut::Run => None,
+            _ => None,
         }
     }
 
-    /// O que o painel roda de um atalho da config; terminal, modo e navegador são módulos à parte aqui. `project` é a
-    /// chave do repositório quando o atalho é do projeto.
+    /// O que o painel roda de um atalho da config. `project` é a chave do repositório quando o atalho é do projeto.
     fn from_item(item: &shortcuts::Item, project: Option<&str>) -> Option<Self> {
         let (label, icon, confirm) = (item.label().to_owned(), item.icon().map(str::to_owned), item.confirm());
         match item.kind() {
             "send_text" => Some(Shortcut::Send { label, text: item.content().to_owned(), direct: item.sends_direct(), confirm, icon }),
             "shell" => Some(Shortcut::Shell { label, command: item.content().to_owned(), confirm, icon, pasta: item.pasta().map(str::to_owned),
                 key: super::hangar_live::shortcut_key(project, item.id()), hangar: item.runs_in_hangar(), home: item.hangar_home(), ask: item.answer_in_app() }),
-            "internal" if item.action() == "anexos" => Some(Shortcut::Attach),
             "internal" if item.action() == "rodar" => Some(Shortcut::Run),
+            // Os outros internos só viram bloco quando marcados nas configurações.
+            "internal" if !item.tile() => None,
+            "internal" if item.action() == "anexos" => Some(Shortcut::Attach),
+            "internal" if item.action() == "terminal" => Some(Shortcut::Terminal),
+            "internal" if item.action() == "modo" => Some(Shortcut::Mode),
+            "internal" if item.action() == "navegador" => Some(Shortcut::Browser),
+            "internal" if item.action() == "externo" => Some(Shortcut::External),
             _ => None,
         }
     }
@@ -215,10 +228,9 @@ impl Side {
 fn parse_shortcuts(raw: &str) -> Vec<Shortcut> { shortcuts::resolve(raw).iter().filter_map(|item| Shortcut::from_item(item, None)).collect() }
 
 /// Blocos do painel: os globais e depois os do projeto (`project_key` = repositório dele), com o id do bloco e se é do
-/// projeto. "Anexar" sai porque já é o clipe do compositor. O id do global é a posição e o do projeto leva o id do item: o
-/// mesmo id nas duas listas não colide.
+/// projeto. O id do global é a posição e o do projeto leva o id do item: o mesmo id nas duas listas não colide.
 fn merged_tiles(globals: &[Shortcut], project: &[shortcuts::Item], project_key: &str) -> Vec<(String, Shortcut, bool)> {
-    let globals = globals.iter().filter(|s| **s != Shortcut::Attach).enumerate().map(|(n, s)| (format!("shortcut-{n}"), s.clone(), false));
+    let globals = globals.iter().enumerate().map(|(n, s)| (format!("shortcut-{n}"), s.clone(), false));
     let own = project.iter().filter_map(|item| Some((format!("shortcut-p-{}", item.id()), Shortcut::from_item(item, Some(project_key))?, true)));
     globals.chain(own).collect()
 }
@@ -424,6 +436,10 @@ impl Hangar {
         match shortcut {
             Shortcut::Attach => self.pick_files(cx),
             Shortcut::Run => self.open_run(window, cx),
+            Shortcut::Terminal => self.show_terminal(window, cx),
+            Shortcut::Browser => self.open_browser(window, cx),
+            Shortcut::External => self.open_external_terminal(window, cx),
+            Shortcut::Mode => if let Some(target) = self.selected_target() { self.confirm_mode(target, window, cx) },
             Shortcut::Send { text, direct: false, .. } => self.prefill(&text, true, window, cx),
             Shortcut::Send { text, .. } => {
                 if !self.can_send() || self.delivery.pending(&key) || self.uploading.contains_key(&key) {
@@ -805,7 +821,16 @@ impl Hangar {
             Some(Err(reason)) => (&[][..], Some(failure(tr("side_shortcuts_failed").replace("{reason}", reason)))),
             None => (&[][..], None),
         };
-        let list = merged_tiles(globals, project.map_or(&[][..], |p| p.items.as_slice()), project.map_or("", |p| p.key.as_str()));
+        let mut list = merged_tiles(globals, project.map_or(&[][..], |p| p.items.as_slice()), project.map_or("", |p| p.key.as_str()));
+        // Os internos seguem as regras do "+" e do menu da sessão: some o bloco que não vale para esta sessão.
+        let session = self.selected.as_ref();
+        let (terminal, browser) = (self.side_menu_terminal(), self.side_menu_browser());
+        let mode = session.is_some_and(|s| matches!(s.provider.as_str(), "claude" | "codex"));
+        let external = self.external_terminal_available();
+        list.retain(|(_, s, _)| match s { Shortcut::Terminal => terminal, Shortcut::Browser => browser, Shortcut::Mode => mode,
+            Shortcut::External => external, _ => true });
+        let idle = session.is_some_and(|s| s.state == "idle");
+        let headless = session.is_some_and(|s| s.headless);
         if list.is_empty() {
             let errors: Vec<Div> = global_error.into_iter().chain(project_error).collect();
             return (!errors.is_empty()).then(|| div().flex().flex_col().gap_1().children(errors).into_any_element());
@@ -829,11 +854,20 @@ impl Hangar {
                 Shortcut::Attach => chrome::small_icon(IconName::Paperclip, 18., theme::muted()).into_any_element(),
                 Shortcut::Run if running => chrome::small_icon(IconName::CircleStop, 18., theme::accent()).into_any_element(),
                 Shortcut::Run => chrome::small_icon(IconName::Play, 18., theme::muted()).into_any_element(),
+                Shortcut::Terminal | Shortcut::External => chrome::small_icon(IconName::SquareTerminal, 18., theme::muted()).into_any_element(),
+                Shortcut::Mode => chrome::small_icon(IconName::GitBranch, 18., theme::muted()).into_any_element(),
+                Shortcut::Browser => chrome::small_icon(IconName::Globe, 18., theme::muted()).into_any_element(),
                 Shortcut::Send { icon, .. } | Shortcut::Shell { icon, .. } => shortcuts::icon_element(icon.as_deref(), 18., theme::muted()),
             };
             let (label, tip) = match &shortcut {
                 Shortcut::Run if running => (tr("run_running"), tr("run_running_open")),
                 Shortcut::Run => (shortcut.label(), tr("run_project")),
+                // O rótulo é o destino, como no menu da sessão; trocar reinicia o processo, então só parada.
+                Shortcut::Mode => {
+                    let label = super::activity::web(if headless { "modo_abrir_no_terminal" } else { "modo_continuar_sem_terminal" });
+                    let tip = super::activity::web(if !idle { "modo_so_ociosa" } else if headless { "modo_abrir_no_terminal_detalhe" } else { "modo_continuar_sem_terminal_detalhe" });
+                    (label, tip)
+                }
                 _ if own => (shortcut.label(), project_tip.clone().unwrap_or_else(|| shortcut.label())),
                 _ => (shortcut.label(), shortcut.label()),
             };
@@ -855,7 +889,7 @@ impl Hangar {
                 // Piso de altura em vez de caixa fixa para o rótulo: o bloco de uma linha deixava de sobra a segunda,
                 // e o ícone flutuava acima de um vão. Os da mesma linha se igualam pelo esticar do flex, como no web.
                 .w(px(tile)).flex_shrink_0().h_auto().min_h(px(58.)).px(px(4.)).pt(px(lift)).pb(px(8.)).rounded(px(10.)).border_1().border_color(edge)
-                .tooltip(tip).accessibility_label(accessible).disabled(!readable || busy)
+                .tooltip(tip).accessibility_label(accessible).disabled(!readable || busy || (shortcut == Shortcut::Mode && !idle))
                 // Credencial em branco: o bloco fica apagado, e o clique avisa em vez de rodar.
                 .when(missing.is_some(), |el| el.opacity(0.55))
                 .child(div().relative().w_full().min_w_0().flex().flex_col().items_center().justify_center().gap(px(if tone.is_some() { 6. } else { 4. }))
@@ -898,6 +932,24 @@ impl Hangar {
 
     // Mesma regra do botão de terminal do cabeçalho.
     fn side_menu_terminal(&self) -> bool { self.selected.as_ref().is_some_and(|s| !s.headless) || self.has_shortcut_terms() }
+
+    // A janela abre nesta máquina: só serve à sessão com terminal do servidor local.
+    fn external_terminal_available(&self) -> bool {
+        cfg!(any(target_os = "linux", windows)) && self.selected.as_ref().is_some_and(|s| !s.headless)
+            && self.session_api().is_some_and(|api| api.is_loopback())
+    }
+
+    fn open_external_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.external_terminal_available() { return; }
+        let Some(name) = self.selected.as_ref().map(|s| s.name.clone()) else { return };
+        let started = external_command(&name).ok_or_else(|| tr("external_terminal_missing")).and_then(|mut command| {
+            let mut child = command.spawn().map_err(|e| tr("external_terminal_failed").replace("{error}", &e.to_string()))?;
+            // Sem quem espere, o terminal fechado vira processo zumbi até o app sair.
+            std::thread::spawn(move || { let _ = child.wait(); });
+            Ok(())
+        });
+        if let Err(error) = started { window.push_notification(Notification::warning(error), cx); }
+    }
 
     // Mesma regra da aba Git.
     fn side_menu_git(&self) -> bool { self.selected.as_ref().is_some_and(|s| s.readable() && super::sidebar::has_git(s)) }
@@ -1077,6 +1129,53 @@ fn shortcut_grid(inner: f32, count: usize) -> (usize, f32) {
     (columns, tile)
 }
 
+/// Como cada emulador recebe o comando a rodar; `$TERMINAL` desconhecido segue a convenção do `-e`.
+#[cfg(any(target_os = "linux", test))]
+const TERMINALS: [(&str, &[&str]); 8] = [("kitty", &[]), ("ghostty", &["-e"]), ("wezterm", &["start", "--"]),
+    ("alacritty", &["-e"]), ("foot", &[]), ("konsole", &["-e"]), ("gnome-terminal", &["--"]), ("xterm", &["-e"])];
+
+/// Programa e argumentos que abrem `tmux attach` na sessão: o `$TERMINAL`, senão o primeiro emulador conhecido instalado.
+#[cfg(any(target_os = "linux", test))]
+fn linux_launch(chosen: Option<&str>, installed: impl Fn(&str) -> bool, name: &str) -> Option<(String, Vec<String>)> {
+    let prefix = |bin: &str| -> Vec<String> {
+        let base = std::path::Path::new(bin).file_name().and_then(|n| n.to_str()).unwrap_or(bin);
+        TERMINALS.iter().find(|(known, _)| *known == base).map_or(vec!["-e".into()], |(_, pre)| pre.iter().map(|p| p.to_string()).collect())
+    };
+    let bin = chosen.map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned)
+        .or_else(|| TERMINALS.iter().map(|(bin, _)| *bin).find(|bin| installed(bin)).map(str::to_owned))?;
+    let mut args = prefix(&bin);
+    args.extend(["tmux".into(), "attach".into(), "-t".into(), format!("={name}:")]);
+    Some((bin, args))
+}
+
+#[cfg(target_os = "linux")]
+fn external_command(name: &str) -> Option<std::process::Command> {
+    let installed = |bin: &str| std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(bin).is_file()));
+    let (bin, args) = linux_launch(std::env::var("TERMINAL").ok().as_deref(), installed, name)?;
+    let mut command = std::process::Command::new(bin);
+    // Aberto de dentro de outro tmux, o attach recusaria o aninhamento.
+    command.args(args).env_remove("TMUX");
+    Some(command)
+}
+
+#[cfg(windows)]
+fn external_command(name: &str) -> Option<std::process::Command> {
+    use std::os::windows::process::CommandExt;
+    let wt = std::env::var_os("PATH").and_then(|path| std::env::split_paths(&path).map(|dir| dir.join("wt.exe")).find(|p| p.is_file()));
+    if let Some(wt) = wt {
+        let mut command = std::process::Command::new(wt);
+        command.args(["psmux", "attach", "-t", name]);
+        return Some(command);
+    }
+    // Sem o Windows Terminal, `start` abre o psmux no console padrão; o `cmd` que o chama não mostra janela.
+    let mut command = std::process::Command::new("cmd");
+    command.args(["/C", "start", "", "psmux", "attach", "-t", name]).creation_flags(0x0800_0000);
+    Some(command)
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn external_command(_name: &str) -> Option<std::process::Command> { None }
+
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` da gpui colide com o atributo padrão.
@@ -1085,15 +1184,18 @@ mod tests {
 
     #[test]
     fn shortcuts_fall_back_and_drop_bad_items() {
-        assert_eq!(parse_shortcuts(""), vec![Shortcut::Attach, Shortcut::Run]);
-        assert_eq!(parse_shortcuts("{quebrado"), vec![Shortcut::Attach, Shortcut::Run]);
+        // Sem marcação, dos internos só o Rodar vira bloco.
+        assert_eq!(parse_shortcuts(""), vec![Shortcut::Run]);
+        assert_eq!(parse_shortcuts("{quebrado"), vec![Shortcut::Run]);
         let raw = r#"[{"id":"a","type":"send_text","label":"Relatório","text":"/relatorio","send_direct":false,"confirm":true},
             {"id":"a","type":"shell","label":"dup","command":"x"},{"id":"b","type":"shell","label":"Build","command":"make"},
-            {"id":"c","type":"send_text","label":"","text":"x"},{"id":"t","type":"internal","action":"terminal"}]"#;
+            {"id":"c","type":"send_text","label":"","text":"x"},{"id":"t","type":"internal","action":"terminal","tile":true},
+            {"id":"n","type":"internal","action":"navegador"}]"#;
         assert_eq!(parse_shortcuts(raw), vec![
             Shortcut::Send { label: "Relatório".into(), text: "/relatorio".into(), direct: false, confirm: true, icon: None },
             Shortcut::Shell { label: "Build".into(), command: "make".into(), confirm: false, icon: None, pasta: None,
                 key: "global:b".into(), hangar: false, home: true, ask: true },
+            Shortcut::Terminal,
         ]);
     }
 
@@ -1112,7 +1214,7 @@ mod tests {
             {"id":"d","type":"shell","label":"Debug","command":"make debug","pasta":"backend"},
             {"id":"t","type":"internal","action":"rodar"}])));
         let tiles = merged_tiles(&globals, &project, "/repo");
-        // Anexar sai, o interno do projeto não entra e o mesmo id "d" vira dois blocos com ids diferentes.
+        // Anexos sem marcação e o interno do projeto não entram; o mesmo id "d" vira dois blocos com ids diferentes.
         assert_eq!(tiles.iter().map(|(id, _, own)| (id.as_str(), *own)).collect::<Vec<_>>(),
             [("shortcut-0", false), ("shortcut-1", false), ("shortcut-p-d", true)]);
         // A identidade No Hangar separa o "d" global do "d" do repositório.
@@ -1182,5 +1284,15 @@ mod tests {
             assert!(leftover < columns as f32, "{count}: sobra {leftover}");
         }
         assert_eq!(shortcut_grid(inner, 9).0, 4);
+    }
+
+    #[test]
+    fn external_terminal_picks_the_command_per_emulator() {
+        let attach = |pre: &[&str]| pre.iter().map(|s| s.to_string()).chain(["tmux", "attach", "-t", "=pm-1:"].map(String::from)).collect::<Vec<_>>();
+        assert_eq!(super::linux_launch(None, |bin| bin == "kitty", "pm-1"), Some(("kitty".into(), attach(&[]))));
+        assert_eq!(super::linux_launch(None, |bin| bin == "wezterm", "pm-1"), Some(("wezterm".into(), attach(&["start", "--"]))));
+        assert_eq!(super::linux_launch(Some("/usr/bin/foot"), |_| false, "pm-1"), Some(("/usr/bin/foot".into(), attach(&[]))));
+        assert_eq!(super::linux_launch(Some("st"), |_| false, "pm-1"), Some(("st".into(), attach(&["-e"]))));
+        assert_eq!(super::linux_launch(Some(" "), |_| false, "pm-1"), None);
     }
 }

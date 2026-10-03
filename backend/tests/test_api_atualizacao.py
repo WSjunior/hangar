@@ -71,7 +71,7 @@ def test_procurar_vai_a_rede_antes_de_comparar():
 def test_polling_normal_nao_vai_a_rede():
     """A tela bate neste endpoint a cada 2s durante a atualização — fetch ali é rede à toa."""
     c = _client()
-    with patch("app.api.atualizar._git") as g, \
+    with patch("app.api.atualizar._git", return_value=subprocess.CompletedProcess([], 0, "", "")) as g, \
          patch("app.api.atualizar.checar", return_value={"pode": True}):
         c.get("/api/atualizacao", headers=_AUTH)
     assert not any(ch.args and ch.args[0] == "fetch" for ch in g.call_args_list)
@@ -177,9 +177,10 @@ def test_git_que_falha_nao_inventa_changelog():
     class P:
         returncode = 128
         stdout = ""
+        stderr = ""
 
-    with patch("app.api.atualizar._git", return_value=P()):
-        assert api._mudancas_pendentes() == []
+    with patch("app.api.atualizar._git", return_value=P()), patch("app.api.diag.registrar"):
+        assert api._mudancas_pendentes() is None
 
 
 # ─── Auto-update: os gates do laço ───────────────────────────────────────────────────────────────────────
@@ -248,3 +249,92 @@ def test_auto_update_divergiu_vem_antes_de_ahead():
 
 def test_auto_update_rev_parse_falhou():
     assert _auto_gate(sha_alvo="") == "rev-parse origin/main falhou"
+
+
+def test_changelog_compara_com_a_branch_configurada(monkeypatch):
+    from app import api
+    monkeypatch.setattr(settings, "update_branch", "teste")
+    vistos = []
+
+    class P:
+        returncode = 0
+        stdout = ""
+
+    with patch("app.api.atualizar._git", side_effect=lambda *a, **k: (vistos.append(a), P())[1]):
+        api._mudancas_pendentes()
+    assert vistos[0][-1] == "HEAD..origin/teste"
+
+
+def test_auto_update_fica_parado_com_branch_de_teste(monkeypatch):
+    """O CI só publica o dist da main; a branch de teste atualiza pelo botão."""
+    monkeypatch.setattr(settings, "update_branch", "teste")
+    assert _auto_gate() == "branch de teste configurada (CP_UPDATE_BRANCH)"
+
+
+def test_auto_update_nao_roda_sem_saber_dos_commits_locais():
+    assert _auto_gate(checar={"ahead_incerto": True}) == "nao deu pra contar os commits locais"
+
+
+def test_auto_update_nao_tira_o_checkout_da_branch_de_teste():
+    """Campo esvaziado na branch de teste: a volta pra main é pelo botão, nunca pelo laço."""
+    assert _auto_gate(checar={"branch": "teste", "alvo": "main"}) == \
+        "checkout na branch teste, fora do alvo main"
+    assert _auto_gate(checar={"branch": "main", "alvo": "main"}) is None
+
+
+def _disponivel(pre, mudancas):
+    c = _client()
+    with patch("app.api.atualizar.checar", return_value=pre), \
+         patch("app.api._mudancas_pendentes", return_value=mudancas):
+        return c.get("/api/atualizacao", headers=_AUTH).json()
+
+
+def test_checkout_fora_do_alvo_oferece_atualizar_sem_commit_novo():
+    """Campo esvaziado na branch de teste: nenhum commit a puxar, mas a troca pra main é o update."""
+    d = _disponivel({"pode": True, "branch": "teste", "alvo": "main", "branch_de_trabalho": False}, [])
+    assert d["atualizacao_disponivel"] is True and d["mudancas"] == []
+    assert _disponivel({"pode": True, "branch": "master", "alvo": "main"}, [])["atualizacao_disponivel"] is False
+    assert _disponivel({"pode": True, "branch": "outra", "alvo": "main", "branch_de_trabalho": True},
+                       [])["atualizacao_disponivel"] is False
+
+
+def test_alvo_que_o_git_nao_compara_oferece_atualizar_e_vai_pro_diario(monkeypatch):
+    from app import api
+    monkeypatch.setattr(api, "_ALVOS_AUSENTES_AVISADOS", set())
+    monkeypatch.setattr(settings, "update_branch", "teste")
+
+    class P:
+        returncode = 128
+        stdout = "fatal: ambiguous argument 'HEAD..origin/teste': unknown revision"
+        stderr = ""
+
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    with patch("app.api.atualizar._git", return_value=P()), \
+         patch("app.api.diag.registrar") as reg, \
+         patch("app.api.atualizar.checar", return_value={"pode": True, "branch": "teste", "alvo": "teste"}):
+        d = _client().get("/api/atualizacao", headers=_AUTH).json()
+        api._mudancas_pendentes()
+    assert d["atualizacao_disponivel"] is True and d["mudancas"] == []
+    eventos = [c for c in reg.call_args_list if c.args[0] == "atualizacao.alvo_ausente"]
+    assert len(eventos) == 1                              # uma vez, mesmo com o polling
+    detalhe = eventos[0].kwargs["detalhe"]
+    assert "origin/teste" in detalhe and "rc=128" in detalhe and "unknown revision" in detalhe
+    # Voltou a comparar: a próxima falha é registrada de novo.
+    with patch("app.api.atualizar._git", return_value=Ok()):
+        assert api._mudancas_pendentes() == []
+    assert "teste" not in api._ALVOS_AUSENTES_AVISADOS
+
+
+def test_409_de_branch_nomeia_o_alvo():
+    c = _client()
+    with patch("app.api.atualizar.checar", return_value={
+            "pode": True, "branch_de_trabalho": True, "branch": "outra", "alvo": "teste"}), \
+         patch("app.api.atualizar.iniciar") as ini:
+        r = c.post("/api/atualizacao/iniciar", headers=_AUTH)
+    assert r.status_code == 409 and "nao na teste" in r.json()["detail"]["msg"]
+    assert r.json()["detail"]["params"]["alvo"] == "teste"
+    assert not ini.called

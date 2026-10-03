@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import socket
 import time
 from pathlib import Path
@@ -9,6 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app import contas
 
 _LOOPBACK = {"127.0.0.1", "localhost", "::1", "0.0.0.0", "auto"}
+_NOME_DE_BRANCH = re.compile(r"[A-Za-z0-9._/-]{1,100}")
 
 
 class ConfigDirInfo(BaseModel):
@@ -295,6 +297,22 @@ class Settings(BaseSettings):
     # Anexo apagado que ainda aparece numa conversa antiga vira o chip "não carregou" — visível,
     # não some calado.
     upload_retention_days: int = Field(30, validation_alias=AliasChoices("CP_UPLOAD_RETENTION_DAYS",))
+    # CP_UPDATE_BRANCH: branch que o Atualizar segue no lugar da main, pra testar uma versão em
+    # desenvolvimento no app de verdade. Vazio = main.
+    update_branch: str = ""
+
+    @field_validator("update_branch", mode="before")
+    @classmethod
+    def _branch_valida(cls, v: object) -> object:
+        # O nome vai pro argv do git: inválido vira vazio (main) e fica registrado, nunca derruba o import.
+        texto = v.strip() if isinstance(v, str) else ""
+        if not texto or (_NOME_DE_BRANCH.fullmatch(texto) and ".." not in texto
+                         and not texto.startswith("-")):
+            return texto
+        logging.getLogger("hangar.config").warning("CP_UPDATE_BRANCH invalido (%r): o Atualizar segue a main", texto)
+        from app import diag
+        diag.registrar("atualizacao.branch_invalida", "aviso", detalhe="CP_UPDATE_BRANCH ignorado")
+        return ""
 
 
 settings = Settings()
@@ -346,6 +364,7 @@ DESCRICAO_DE_CAMPO: dict[str, str] = {
     "forwarded_allow_ips": "forwarded_allow_ips",
     "deploy_secret": "deploy_secret",
     "rust_server": "rust_server",
+    "update_branch": "update_branch",
 }
 
 # Aqui o valor NUNCA sai, nem mascarado — só `definida`. É a diferença desta lista pro `campos` do

@@ -10,7 +10,7 @@ impl Hangar {
         let open = !self.accounts.card || self.accounts.card_top;
         self.close_popups();
         (self.accounts.card, self.accounts.card_top) = (open, false);
-        if open && !self.accounts.list.loading { self.load_accounts(false, cx); }
+        if open { self.load_session_accounts(cx); }
         cx.notify();
     }
 
@@ -61,19 +61,18 @@ impl Hangar {
         let open = !(self.accounts.card && self.accounts.card_top);
         self.close_popups();
         (self.accounts.card, self.accounts.card_top) = (open, open);
-        if open && !self.accounts.list.loading { self.load_accounts(false, cx); }
+        if open { self.load_session_accounts(cx); }
         cx.notify();
     }
 
     /// Relê a lista de contas (com a cota guardada do servidor), para a pílula da barra do topo.
     pub(in crate::app) fn refresh_default_account(&mut self, cx: &mut Context<Self>) {
-        if !self.accounts.list.loading { self.load_accounts(false, cx); }
+        self.load_session_accounts(cx);
     }
 
-    /// Conta da sessão aberta. A lista de contas é a do servidor ativo: sessão de outra máquina cai na padrão dele, em vez
-    /// de procurar ali uma conta que é de lá e sumir com a pílula.
+    /// Conta da sessão aberta, procurada na lista da máquina dela.
     fn focused_conta(&self) -> Option<&str> {
-        self.selected.as_ref().filter(|_| self.open_api.is_none()).and_then(|s| s.conta.as_deref())
+        self.selected.as_ref().and_then(|s| s.conta.as_deref())
     }
 
     /// A conta da sessão em foco para a pílula da barra do topo: provider, nome e a janela mais cheia, com o rótulo dela
@@ -83,7 +82,7 @@ impl Hangar {
         let session = self.selected.as_ref();
         let kind = session.map(|s| s.provider.as_str()).filter(|p| !p.is_empty()).unwrap_or("claude");
         let conta = self.focused_conta();
-        let c = self.accounts.list.ok()?.iter().find(|c| c.kind == kind && conta.map_or(c.active, |id| id == c.id))?;
+        let c = self.session_accounts().ok()?.iter().find(|c| c.kind == kind && conta.map_or(c.active, |id| id == c.id))?;
         let login = c.login.as_ref().filter(|l| l.logged_in == Some(true));
         let title = c.alias.clone().filter(|a| !a.is_empty()).or_else(|| login.and_then(|l| l.email.clone())).unwrap_or_else(|| c.name.clone());
         let model = self.status().and_then(|s| s.model).map(|m| m.to_lowercase());
@@ -94,21 +93,53 @@ impl Hangar {
         Some((kind.to_owned(), title, window))
     }
 
-    pub(in crate::app) fn render_usage_card(&self, window: &Window) -> AnyElement {
+    pub(in crate::app) fn render_usage_card(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let session = self.selected.as_ref();
         let kind = session.map(|s| s.provider.as_str()).filter(|p| !p.is_empty()).unwrap_or("claude");
         // A conta da sessão; sem sessão, ou servidor sem esse campo, cai na conta padrão do provider.
         let conta = self.focused_conta();
         let in_use = |c: &Credential| c.kind == kind && conta.map_or(c.active, |id| id == c.id);
         let note = |text: String, color: Hsla| div().px(px(8.)).py(px(4.)).text_sm().text_color(color).whitespace_normal().child(text).into_any_element();
-        let body = match (&self.accounts.list.value, self.accounts.list.ok()) {
+        let list = self.session_accounts();
+        // Aberto pelo anel de uma sessão Claude na conta Anthropic: as outras contas Claude levam esta conversa para elas.
+        let movable = !self.accounts.card_top && session.is_some_and(|s| s.provider == "claude"
+            && s.conta.as_deref().is_some_and(|c| c.starts_with("claude:")) && !s.read_only());
+        let idle = session.is_some_and(|s| s.state == "idle");
+        let body = match (&list.value, list.ok()) {
             (_, Some(list)) => {
                 let mut mine: Vec<&Credential> = list.iter().filter(|c| matches!(c.kind.as_str(), "claude" | "codex")).collect();
                 mine.sort_by_key(|c| !in_use(c));
                 if mine.is_empty() { note(tr("usage_card_empty"), theme::muted()) } else {
                     let (engines, now) = (HashMap::new(), now());
+                    let rows = mine.into_iter().map(|c| {
+                        let quota = build_row(c, &engines, false, now).quota;
+                        // A janela mais cheia, como a lista do backend: a partir de 95% pede confirmação, a partir de 99% não aceita.
+                        let pct = match &quota { QuotaView::Bars { bars, .. } => bars.iter().map(|b| b.pct).fold(None, |m: Option<f64>, p| Some(m.map_or(p, |m| m.max(p)))), _ => None };
+                        let target = c.id.strip_prefix("claude:").map(str::to_owned)
+                            .filter(|_| movable && idle && c.kind == "claude" && !in_use(c) && pct.is_none_or(|p| p < 99.));
+                        let row = account_row(c, in_use(c), quota);
+                        match target {
+                            Some(path) => {
+                                let label = c.alias.clone().filter(|a| !a.is_empty()).unwrap_or_else(|| c.name.clone());
+                                let warn = pct.filter(|p| *p >= 95.);
+                                // Borda sempre à vista e realce na cor de destaque: o cinza do `hover` some sobre o papel de parede.
+                                div().id(SharedString::from(format!("usage-move-{path}"))).rounded(px(7.)).cursor_pointer()
+                                    .border_1().border_color(theme::border_strong())
+                                    .hover(|el| el.bg(theme::accent_dim()).border_color(theme::accent())).child(row)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.close_popups();
+                                        if let Some(owner) = this.selected_target() {
+                                            this.confirm_account(owner, path.clone(), label.clone(), warn, window, cx);
+                                        }
+                                    })).into_any_element()
+                            }
+                            None => row.when(movable && c.kind == "claude" && !in_use(c) && pct.is_some_and(|p| p >= 99.), |el| el.opacity(0.55))
+                                .into_any_element(),
+                        }
+                    });
                     div().flex().flex_col().gap(px(2.))
-                        .children(mine.into_iter().map(|c| account_row(c, in_use(c), build_row(c, &engines, false, now).quota)))
+                        .when(movable, |el| el.child(note(tr(if idle { "usage_card_move_hint" } else { "usage_card_move_busy" }), theme::faint())))
+                        .children(rows)
                         .into_any_element()
                 }
             }
@@ -117,7 +148,15 @@ impl Hangar {
         };
         div().p(px(popup::INSET)).rounded_md().bg(theme::popup_content_fill()).flex().flex_col().gap(px(2.))
             .child(popup::title(tr("usage_card_title"), None))
-            .child(div().id("usage-card-scroll").max_h((window.viewport_size().height - px(140.)).max(px(120.))).overflow_y_scroll().child(body))
+            .child(div().id("usage-card-scroll").max_h((window.viewport_size().height - px(180.)).max(px(120.))).overflow_y_scroll().child(body))
+            // Rodapé do web: atalho para a tela de contas. As configurações são do servidor ativo, então com sessão de
+            // outra máquina o atalho levaria às contas erradas e some.
+            .when(self.open_api.is_none(), |el| el.child(div().px(px(4.)).pt(px(4.)).border_t_1().border_color(theme::border()).flex()
+                .child(Button::new("usage-card-accounts").ghost().small().label(crate::app::activity::web("contas_titulo"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.close_popups();
+                        this.open_settings(super::settings::Page::Accounts, window, cx);
+                    })))))
             .into_any_element()
     }
 }

@@ -984,6 +984,8 @@ export interface AtualizacaoPreVoo {
   pode: boolean;
   faltando: string[];
   branch?: string;
+  /** Branch que o Atualizar segue (`CP_UPDATE_BRANCH`, ou main). Ausente em servidor antigo. */
+  alvo?: string;
   sujo?: number;
   ahead?: number;
   behind?: number;

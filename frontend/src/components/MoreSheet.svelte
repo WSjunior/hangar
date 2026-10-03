@@ -4,7 +4,7 @@
   import ShortcutTiles from './ShortcutTiles.svelte';
   import ShortcutTransfer from './ShortcutTransfer.svelte';
   import { desktop } from '../lib/desktop.svelte';
-  import type { LiveShortcutTerminal, ShortcutSendText, ShortcutShell } from '@hangar/core';
+  import { listAccountTargets, type AccountTarget, type LiveShortcutTerminal, type ShortcutSendText, type ShortcutShell } from '@hangar/core';
   import type { CustomScoped } from '../lib/shortcuts.svelte';
 
   // Acoes que saíram da NavBar do CELULAR pro menu "⋯". Elas custavam 80px fixos da barra e sao de
@@ -31,6 +31,9 @@
     /** Passagem de bastão. Mora AQUI porque no celular a lista de sessões não tem menu por sessão
      *  (as ações dela são swipe no SessionCard) — o "⋯" do chat aberto é a única entrada. */
     onBastao: () => void;
+    /** A mesma conversa noutra conta Claude. Ausente = sessão fora do Claude na conta Anthropic. */
+    onTrocarConta?: (conta: AccountTarget) => void;
+    contaBloqueada?: boolean;
     /** Compartilhar a sessão. Ausente = sessão de convite (não se recompartilha). */
     onShare?: () => void;
     /** Troca terminal ⇄ sem terminal (só Claude): rótulo é o destino, bloqueado fora de ociosa. */
@@ -48,6 +51,7 @@
     shortcuts = [], projectName = '', projectError = '', projectKey = undefined, sessionName = undefined,
     hangarOf = undefined, sessionTerminal = undefined, onShortcut = undefined, onEditShortcuts = undefined,
     onActivity, activityRunning = false, activityBadge = 0, onAttachments, onBastao, onShare,
+    onTrocarConta, contaBloqueada = false,
     onTrocarModo, modoDestinoTerminal = false, modoBloqueado = false,
     onRecarregar, recarregarBloqueado = false,
   }: Props = $props();
@@ -56,9 +60,82 @@
     onClose();
     fn();
   }
+
+  // "Continuar em outra conta" abre um segundo nível na mesma folha: com resumo ou a mesma conversa.
+  let view = $state<'main' | 'account' | 'accounts'>('main');
+  $effect(() => { if (open) view = 'main'; });
+
+  let accounts = $state<AccountTarget[] | null>(null);
+  let accountsError = $state('');
+  // Só a última leitura escreve: abrir, voltar e abrir de novo não deixa a resposta velha por cima.
+  let accountsSeq = 0;
+  async function openAccounts() {
+    if (!sessionName) return;
+    const seq = ++accountsSeq;
+    view = 'accounts';
+    accounts = null;
+    accountsError = '';
+    try {
+      const list = await listAccountTargets(sessionName);
+      if (seq === accountsSeq) accounts = list;
+    } catch (e) {
+      if (seq === accountsSeq) accountsError = e instanceof Error ? e.message : String(e);
+    }
+  }
 </script>
 
 <BottomSheet {open} {onClose} ariaLabel={m.navbar_mais_acoes()} centered={desktop.atual}>
+  {#if view === 'account'}
+    <div class="more">
+      <div class="more-head">
+        <button class="back" onclick={() => (view = 'main')} aria-label={m.comum_voltar()}>‹</button>
+        <h2 class="more-title">{m.bastao_menu()}</h2>
+      </div>
+      <button class="item" onclick={() => pick(onBastao)}>
+        <span class="txt">
+          <span class="label">{m.conta_com_resumo()}</span>
+          <span class="sub">{m.bastao_sub()}</span>
+        </span>
+        <span class="chev" aria-hidden="true">›</span>
+      </button>
+      <button class="item" onclick={openAccounts} disabled={!onTrocarConta || contaBloqueada}>
+        <span class="txt">
+          <span class="label">{m.conta_mesma_conversa()}</span>
+          <span class="sub">{!onTrocarConta ? m.conta_mesma_so_claude()
+            : contaBloqueada ? m.modo_so_ociosa() : m.conta_mesma_conversa_sub()}</span>
+        </span>
+        <span class="chev" aria-hidden="true">›</span>
+      </button>
+    </div>
+  {:else if view === 'accounts'}
+    <div class="more">
+      <div class="more-head">
+        <button class="back" onclick={() => (view = 'account')} aria-label={m.comum_voltar()}>‹</button>
+        <h2 class="more-title">{m.conta_escolher()}</h2>
+      </div>
+      {#if accountsError}
+        <p class="note error" role="alert">{m.conta_erro_listar({ erro: accountsError })}</p>
+      {:else if accounts === null}
+        <p class="note">{m.comum_carregando()}</p>
+      {:else if accounts.length === 0}
+        <p class="note">{m.conta_nenhuma_outra()}</p>
+      {:else}
+        {#each accounts as conta (conta.path)}
+          <!-- Conta perto do limite aparece, mas não aceita a conversa: o primeiro turno reenvia o contexto inteiro. -->
+          <button class="item" onclick={() => pick(() => onTrocarConta?.(conta))} disabled={contaBloqueada || conta.full}>
+            <span class="txt">
+              <span class="label">{conta.label}</span>
+              <span class="sub">{conta.pct === null ? m.conta_cota_sem_leitura()
+                : conta.full ? m.conta_cota_cheia({ pct: String(Math.round(conta.pct)) })
+                : conta.low ? m.conta_cota_acabando({ pct: String(Math.round(conta.pct)) })
+                : m.conta_cota_uso({ pct: String(Math.round(conta.pct)) })}</span>
+            </span>
+            <span class="chev" aria-hidden="true">›</span>
+          </button>
+        {/each}
+      {/if}
+    </div>
+  {:else}
   <div class="more">
     <h2 class="more-title">{m.navbar_mais_acoes()}</h2>
 
@@ -121,7 +198,7 @@
       <span class="chev" aria-hidden="true">›</span>
     </button>
 
-    <button class="item" onclick={() => pick(onBastao)}>
+    <button class="item" onclick={() => (view = 'account')}>
       <span class="ico" aria-hidden="true">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M3 12h10" /><polyline points="10 8 14 12 10 16" /><path d="M19 4v16" />
@@ -129,7 +206,7 @@
       </span>
       <span class="txt">
         <span class="label">{m.bastao_menu()}</span>
-        <span class="sub">{m.bastao_sub()}</span>
+        <span class="sub">{m.conta_continuar_sub()}</span>
       </span>
       <span class="chev" aria-hidden="true">›</span>
     </button>
@@ -180,6 +257,7 @@
       </button>
     {/if}
   </div>
+  {/if}
 </BottomSheet>
 
 <style>
@@ -196,6 +274,16 @@
     font-weight: 600;
     color: var(--text-primary);
   }
+  .more-head { display: flex; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); }
+  .more-head .more-title { margin-bottom: 0; }
+  .back {
+    width: 32px; height: 32px; flex-shrink: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: transparent; color: var(--text-secondary); font-size: var(--text-lg);
+    border-radius: var(--radius-sm);
+  }
+  .note { margin: var(--space-2); font-size: var(--text-sm); color: var(--text-muted); }
+  .note.error { color: var(--error); }
   .item {
     display: flex;
     align-items: center;

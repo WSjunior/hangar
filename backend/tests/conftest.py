@@ -4,6 +4,10 @@ from pathlib import Path
 
 import pytest
 
+# No import, antes de qualquer teste importar o `app.config`: o `settings` nasce na importação, e
+# um `.env` de desenvolvimento com a branch de teste mudaria o alvo de toda a suíte do Atualizar.
+os.environ["CP_UPDATE_BRANCH"] = ""
+
 
 def _instalar_home_do_windows() -> None:
     """No Windows, `monkeypatch.setenv("HOME", tmp)` NAO isola nada — e a suite escreve no perfil

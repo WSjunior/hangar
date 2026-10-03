@@ -711,6 +711,50 @@ def citation_cwds(jsonl: str | Path, needles: list[str]) -> dict[str, list[str]]
     return {needle: list(reversed(cwds.get(needle, []))) for needle in seen}
 
 
+# Caracteres que não entram num caminho citado: aspas, crase e a barra invertida das sequências do JSON
+# (`\"`, `\n`) delimitam a citação. Espaço entra: "Área de trabalho" é pasta comum.
+_CAMINHO_CHAR = r"[^\\\n\"`'<>|*?]"
+
+
+# Onde uma citação começa: depois de espaço, aspas, crase, parêntese ou das sequências `\n`/`\t` do JSON. Sem isso
+# cada `/` do meio de um caminho (ou de um base64 na mesma linha) virava um começo, e um sufixo nunca citado
+# (`/etc/hosts` de `/home/u/etc/hosts`) era candidato.
+_CITACAO_INICIO = r"(?:(?<=[\s\"`'(\[=:,])|(?<=\\n)|(?<=\\t)|^)"
+# Fim da citação: `x.sql` não casa em `x.sql.bak` nem em `x.sql2`, mas casa com o ponto final da frase.
+_CITACAO_FIM = r"(?![\w-]|\.\w)"
+_CAMINHO_MAX = 400
+
+
+def cited_elsewhere(jsonl: str | Path, path: str) -> tuple[list[str], list[str]]:
+    """Numa leitura só do transcript, onde mais a conversa citou o arquivo `path` (nome solto ou relativo), do mais
+    recente ao mais antigo: absolutos que terminam em `/path` e existem, e relativos citados que terminam no nome
+    (um `git status` de outro repositório cita `docs/x/nome` sem dizer de onde)."""
+    tail = path.replace("\\", "/").removeprefix("./").strip("/")
+    if not tail or ".." in tail.split("/"):
+        return [], []
+    name = tail.rsplit("/", 1)[-1]
+    absolute = re.compile(_CITACAO_INICIO + "(/" + _CAMINHO_CHAR + "{0," + str(_CAMINHO_MAX) + "}?/"
+                          + re.escape(tail) + ")" + _CITACAO_FIM)
+    relative = re.compile(r"(?<![\w./-])((?:[\w.-]+/)+" + re.escape(name) + ")" + _CITACAO_FIM)
+    needle = name.encode()
+    absolutes: list[str] = []
+    relatives: list[str] = []
+    try:
+        with open(jsonl, "rb") as fh:
+            for raw_line in fh:
+                if needle not in raw_line:
+                    continue
+                line = raw_line.decode("utf-8", errors="replace")
+                absolutes.extend(absolute.findall(line))
+                if "/" not in tail:
+                    relatives.extend(relative.findall(line))
+    except OSError:
+        _log.warning("transcript ilegível ao procurar %s citado: %s", tail, jsonl, exc_info=True)
+        return [], []
+    found = [c for c in list(dict.fromkeys(reversed(absolutes)))[:50] if os.path.isfile(c)]
+    return found, [p for p in dict.fromkeys(reversed(relatives)) if ".." not in p.split("/")][:20]
+
+
 def last_assistant_text(jsonl: str | Path) -> Optional[str]:
     """Texto do ULTIMO evento de assistant do transcript (modo done_claimed do loop procura
     'LOOP_DONE' aqui). Streaming linha a linha (padrao path_in_transcript); None se ausente."""

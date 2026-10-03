@@ -8,7 +8,7 @@ use super::settings::{section_head, segments, settings_box};
 use serde_json::Map;
 
 /// Os botões nativos de hoje, na ordem de hoje. Só "anexos" roda no painel nativo; os outros são preservados na ordem.
-pub(super) const NATIVES: [&str; 5] = ["terminal", "modo", "navegador", "anexos", "rodar"];
+pub(super) const NATIVES: [&str; 6] = ["terminal", "modo", "navegador", "anexos", "rodar", "externo"];
 
 /// Glifos curados do web (`ShortcutIcon.svelte`, `GLYPHS`), com o par no Lucide do kit (mesma família de traço).
 const GLYPHS: [(&str, IconName); 12] = [("bolt", IconName::Zap), ("play", IconName::Play), ("rocket", IconName::Rocket),
@@ -43,6 +43,8 @@ impl Item {
     pub(super) fn hangar_home(&self) -> bool { self.0.get("hangar_home") != Some(&Value::Bool(false)) }
     /// Ausente = a pergunta do terminal aparece no app.
     pub(super) fn answer_in_app(&self) -> bool { self.0.get("answer_in_app") != Some(&Value::Bool(false)) }
+    /// Interno que também vira bloco em "Ações"; ausente = só no "+" do painel. O Rodar não depende disto.
+    pub(super) fn tile(&self) -> bool { self.0.get("tile") == Some(&Value::Bool(true)) }
 
     fn native(action: &str) -> Self {
         Item(Map::from_iter([("id".into(), json!(action)), ("type".into(), json!("internal")), ("action".into(), json!(action))]))
@@ -136,7 +138,7 @@ pub(super) fn icon_element(icon: Option<&str>, size: f32, color: Hsla) -> AnyEle
 fn native_label(action: &str) -> String { tr(&format!("shortcuts_native_{action}")) }
 
 fn native_icon(action: &str) -> &'static str {
-    match action { "terminal" => "glifo:terminal", "modo" => "glifo:git", "navegador" => "glifo:globe", "anexos" => "glifo:folder", _ => "glifo:play" }
+    match action { "terminal" | "externo" => "glifo:terminal", "modo" => "glifo:git", "navegador" => "glifo:globe", "anexos" => "glifo:folder", _ => "glifo:play" }
 }
 
 /// Até `max` unidades UTF-16, o que o `maxlength` do web conta.
@@ -688,7 +690,18 @@ impl Hangar {
         let (up, down, remove, edit) = (id.clone(), id.clone(), id.clone(), id.clone());
         // Reordenar é um par; editar e remover são outra coisa. Quatro glifos com o mesmo vão liam como um borrão —
         // o par fica junto, com folga dos vizinhos.
+        // Interno escolhe se também aparece como bloco em "Ações"; o Rodar está sempre lá.
+        let pinnable = native && !project && item.action() != "rodar";
+        let (pin, pinned) = (id.clone(), item.tile());
         let actions = div().flex().flex_shrink_0().items_center().gap(px(8.))
+            .when(pinnable, |el| el.child(Checkbox::new(SharedString::from(format!("{prefix}-tile-{id}"))).label(tr("shortcuts_tile"))
+                .checked(pinned).disabled(saving)
+                .on_change(cx.listener(move |this, checked: &bool, _, cx| {
+                    let checked = *checked;
+                    this.shortcuts_edit(cx, |items| if let Some(item) = items.iter_mut().find(|i| i.id() == pin) {
+                        if checked { item.0.insert("tile".into(), Value::Bool(true)); } else { item.0.remove("tile"); }
+                    });
+                }))))
             .when(!native, |el| el.child(button("edit", IconName::Pencil, "shortcuts_edit", false)
                 .on_click(cx.listener(move |this, _, window, cx| this.open_shortcut_form(Some(edit.clone()), project, window, cx)))))
             .child(div().flex().gap(px(1.))

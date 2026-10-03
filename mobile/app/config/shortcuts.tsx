@@ -17,16 +17,18 @@ import { Icon, type IconName } from '../../src/ui/Icon';
 import { useServers } from '../../src/stores/servers';
 import * as m from '../../src/paraglide/messages';
 
-const NATIVES: ShortcutInternalAction[] = ['terminal', 'modo', 'navegador', 'anexos', 'rodar'];
+const NATIVES: ShortcutInternalAction[] = ['terminal', 'modo', 'navegador', 'anexos', 'rodar', 'externo'];
 const NATIVE_LABEL: Record<ShortcutInternalAction, () => string> = {
   terminal: m.native_shortcuts_native_terminal,
   modo: m.native_shortcuts_native_modo,
   navegador: m.native_shortcuts_native_navegador,
   anexos: m.native_shortcuts_native_anexos,
   rodar: m.native_shortcuts_native_rodar,
+  externo: m.native_shortcuts_native_externo,
 };
 const NATIVE_ICON: Record<ShortcutInternalAction, string> = {
   terminal: 'glifo:terminal', modo: 'glifo:git', navegador: 'glifo:globe', anexos: 'glifo:folder', rodar: 'glifo:play',
+  externo: 'glifo:terminal',
 };
 const GLYPHS: [string, IconName][] = [
   ['bolt', 'Zap'], ['play', 'Play'], ['rocket', 'Rocket'], ['gear', 'Settings'], ['git', 'GitBranch'],

@@ -134,10 +134,10 @@ const VERDICTS: [(&str, &str, &str); 3] = [("automations", "server_recommended_o
 const READ_IN_MACHINES: [&str; 5] = ["port", "lan_bind_ip", "server_id", "public_url", "terminal_origem_ok"];
 const READ_LABELS: [&str; 3] = ["terminal_panel", "traducao_pensamento", "versao"];
 /// Códigos de descrição do `.env` que o web traduz (`DESCRICAO_ENV`); código fora daqui não vira texto nenhum.
-const ENV_CODES: [&str; 30] = ["terminal", "pricing_offline", "claude_config_dirs", "engines_file", "codex_sync_enabled", "auto_resume",
+const ENV_CODES: [&str; 31] = ["terminal", "pricing_offline", "claude_config_dirs", "engines_file", "codex_sync_enabled", "auto_resume",
     "omp_plugin_sync", "omp_claude_context", "lan_bind_ip", "port", "auth_token", "projects_dir", "reload", "diag_term_input", "front_port",
     "public_url", "server_id", "vapid_public", "vapid_private", "vapid_subject", "stall_poll_seconds", "omp_plugin_sync_interval", "sync",
-    "sync_bootstrap", "sync_data", "sync_session_secret", "sync_rate_max", "sync_rate_window", "forwarded_allow_ips", "deploy_secret"];
+    "sync_bootstrap", "sync_data", "sync_session_secret", "sync_rate_max", "sync_rate_window", "forwarded_allow_ips", "deploy_secret", "update_branch"];
 /// `ALERTA_ENV` do web: código do alerta e a mensagem dele.
 const ENV_ALERTS: [(&str, &str); 1] = [("codex_sync_desligado", "config_server_env_alerta_codex_sync")];
 
