@@ -4,6 +4,7 @@ use common::costs::*;
 use hangar_server::costs::collect::*;
 use hangar_server::costs::py::LocalTs;
 use hangar_server::costs::{CacheKey, ReportCache, report_costs};
+use hangar_server::costs::report_uso::{self, UsoFilters};
 use hangar_server::transcript::pyjson;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -66,6 +67,26 @@ fn cost_reports_match_python() {
         });
         let want = rebase(&golden["costs"][period], "__BASE__", &base);
         assert_close(&serde_json::to_value(&got).unwrap(), &want, period);
+    }
+}
+
+#[test]
+fn usage_reports_match_python() {
+    let (_dir, base) = fixtures_copy();
+    let collector = ready_collector(&base);
+    let golden: Value = serde_json::from_slice(&std::fs::read(contract().join("golden/costs_reports.json")).unwrap()).unwrap();
+    let now = LocalTs::from_iso(golden["now"].as_str().unwrap()).unwrap();
+    let origins = indexmap::IndexMap::from([("brainstorming".into(), "superpowers".into()), ("minha-skill".into(), "@pessoal".into())]);
+    let (usage, tokens) = collector.read_usage(None).unwrap();
+    let filters = |accounts: &[&str], projects: &[&str], focus: Option<&str>| UsoFilters {
+        conta: accounts.iter().map(|s| s.to_string()).collect(), projeto: projects.iter().map(|s| s.to_string()).collect(),
+        foco: focus.map(str::to_owned), ..Default::default()
+    };
+    for (key, f) in [("all", filters(&[], &[], None)), ("conta", filters(&["anthropic:u-fixture"], &[], None)),
+        ("projeto", filters(&[], &["/repo/a"], None)), ("foco_skill", filters(&[], &[], Some("brainstorming"))),
+        ("foco_area", filters(&[], &[], Some("back")))] {
+        let got = report_uso::build(&usage, &tokens, "all", now, &f, Some(&origins), &collector.pricing(), &|k| collector.label(k));
+        assert_close(&serde_json::to_value(got).unwrap(), &rebase(&golden["uso"][key], "__BASE__", &base), key);
     }
 }
 

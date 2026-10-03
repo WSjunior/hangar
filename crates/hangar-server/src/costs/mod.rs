@@ -13,6 +13,8 @@ pub mod simple;
 pub mod collect;
 pub mod report_costs;
 pub mod fx;
+pub mod report_uso;
+pub mod origins;
 
 use std::any::Any;
 use std::sync::{Arc, Mutex};

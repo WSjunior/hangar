@@ -43,6 +43,8 @@ pub struct AppState {
     pub costs: Arc<crate::costs::collect::Collector>,
     pub fx: Arc<crate::costs::fx::Fx>,
     pub reports: Arc<crate::costs::ReportCache>,
+    pub origins_home: std::path::PathBuf,
+    pub origins: Mutex<indexmap::IndexMap<std::path::PathBuf, crate::costs::origins::Origins>>,
 }
 
 impl AppState {
@@ -71,7 +73,17 @@ impl AppState {
             infos: Default::default(),
         };
         AppState { auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None,
-            costs, fx, reports: Arc::new(crate::costs::ReportCache::default()) }
+            costs, fx, reports: Arc::new(crate::costs::ReportCache::default()),
+            origins_home: std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default()),
+            origins: Mutex::new(indexmap::IndexMap::new()) }
+    }
+
+    pub(crate) fn skill_origins(&self, repo: &std::path::Path) -> crate::costs::origins::Origins {
+        let mut origins = self.origins.lock().unwrap();
+        let cache = origins.shift_remove(repo).unwrap_or_else(|| crate::costs::origins::Origins::new(self.origins_home.clone(), repo.to_owned()));
+        origins.insert(repo.to_owned(), cache.clone());
+        while origins.len() > 8 { origins.shift_remove_index(0); }
+        cache
     }
 
     /// `info` da sessão com cache curto: várias telas abrindo juntas viram uma consulta só. Só o
@@ -174,6 +186,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/sessions/{name}/events", get(events).fallback(pass_any))
         .route("/api/costs", get(crate::costs_routes::costs).fallback(pass_any))
         .route("/api/cotacao", get(crate::costs_routes::cotacao).fallback(pass_any))
+        .route("/api/uso", get(crate::costs_routes::usage).fallback(pass_any))
         .fallback(pass_any)
         .with_state(state)
 }

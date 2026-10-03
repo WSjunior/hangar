@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use crate::costs::collect::{CollectError, Ready};
 use crate::costs::index::IndexError;
 use crate::costs::py::LocalTs;
-use crate::costs::{CacheKey, report_costs};
+use crate::costs::{CacheKey, report_costs, report_uso};
 use crate::routes::{AppState, cors, gate, maybe_gzip, pass};
 
 pub(crate) fn warming(read: usize, total: usize) -> Response {
@@ -113,6 +113,82 @@ pub async fn cotacao(State(state): State<Arc<AppState>>, ConnectInfo(peer): Conn
         Err(_) => {
             tracing::warn!(code = "cotacao_join");
             pass(&state, request, &forward).await
+        }
+    }
+}
+
+fn usage_filters(query: Option<&str>) -> report_uso::UsoFilters {
+    let mut filters = report_uso::UsoFilters::default();
+    for (key, value) in form_urlencoded::parse(query.unwrap_or_default().as_bytes()) {
+        let values = match key.as_ref() {
+            "conta" => &mut filters.conta, "projeto" => &mut filters.projeto,
+            "modelo" => &mut filters.modelo, "plugin" => &mut filters.plugin,
+            _ => continue,
+        };
+        if !value.is_empty() { values.push(value.into_owned()); }
+    }
+    filters.foco = crate::auth::query_param(query, "foco").filter(|f| !f.is_empty());
+    filters
+}
+
+pub async fn usage(State(state): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>, request: Request) -> Response {
+    let (forward, owner) = gate(&state, peer, &request);
+    if !owner || request.method() != Method::GET { return pass(&state, request, &forward).await; }
+    let Some(fresh) = fresh(crate::auth::query_param(request.uri().query(), "fresco")) else {
+        return pass(&state, request, &forward).await;
+    };
+    let period = crate::auth::query_param(request.uri().query(), "period").filter(|p| {
+        p == "all" || report_costs::PERIODS.iter().any(|(key, _)| p == key)
+    }).unwrap_or_else(|| "all".into());
+    let filters = usage_filters(request.uri().query());
+    let worker = state.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<Prepared, &'static str> {
+        match worker.costs.prepare_blocking(fresh).map_err(|error| error_code(&error))? {
+            Ready::Warming { read, total } => return Ok(Prepared::Warming(read, total)),
+            Ready::Go => {}
+        }
+        let now = LocalTs(chrono::Utc::now().timestamp_micros());
+        let repo = worker.costs.repo().filter(|p| !p.as_os_str().is_empty()).ok_or("uso_escopos")?;
+        let labels = worker.costs.labels_key();
+        let data_version = worker.costs.data_version();
+        let origins = worker.skill_origins(&repo);
+        let (origins_generation, origins_map) = origins.recent();
+        let since = report_costs::PERIODS.iter().find(|(p, _)| *p == period)
+            .map(|(_, n)| LocalTs(now.0 - (n - 1) * 86_400_000_000).day());
+        // A leitura usa Pricing: adquirir a tarifa antes dela travaria o próprio worker.
+        let (usage, tokens) = worker.costs.read_usage(since.as_deref()).map_err(|error| error_code(&error))?;
+        if worker.costs.repo().as_ref() != Some(&repo) { return Err("uso_escopos"); }
+        let pricing = worker.costs.pricing();
+        let filter_key = serde_json::to_string(&serde_json::json!([
+            ["conta", filters.conta], ["foco", filters.foco], ["modelo", filters.modelo],
+            ["plugin", filters.plugin], ["projeto", filters.projeto],
+        ])).map_err(|_| "uso_filtros")?;
+        let key = CacheKey {
+            data_version, pricing_generation: pricing.generation(), area_signature: worker.costs.areas().signature().into(), labels: labels.clone(),
+            route: vec!["uso".into(), period.clone(), now.day(),
+                serde_json::to_string(&repo).map_err(|_| "uso_repo")?, origins_generation.to_string(), filter_key],
+        };
+        let report = match worker.reports.get::<report_uso::UsoReport>(&key) {
+            Some(report) => report,
+            None => {
+                let report = Arc::new(report_uso::build(&usage, &tokens, &period, now, &filters, Some(&origins_map), &pricing, &|key| {
+                    labels.iter().find(|(name, _)| name == key).map(|(_, label)| label.clone())
+                }));
+                worker.reports.insert(key, report.clone()); report
+            }
+        };
+        drop(pricing);
+        let mut report = (*report).clone(); report.usd_brl = worker.fx.usd_brl();
+        serde_json::to_vec(&report).map(Prepared::Body).map_err(|_| "uso_json")
+    }).await;
+    match result {
+        Ok(Ok(Prepared::Body(body))) => response(request.headers(), body),
+        Ok(Ok(Prepared::Warming(read, total))) => {
+            let mut response = warming(read, total); cors(request.headers(), response.headers_mut()); response
+        }
+        other => {
+            let code = match other { Ok(Err(code)) => code, _ => "uso_join" };
+            tracing::warn!(code); pass(&state, request, &forward).await
         }
     }
 }
