@@ -6,10 +6,13 @@ se quiser, mexe: o clique dele e o meu chegam no mesmo lugar.
 
 Três decisões que valem saber:
 
-*  **O backend fala CDP direto** (`127.0.0.1:9223`, porta que `shell/main.cjs` abre), num segundo
-   cliente ao lado do `webContents.debugger` que o shell já mantém anexado. Medido em 07/09/2026:
-   o Chromium aceita os dois, e o screencast rendeu 59,6 quadros/s. O caminho pelo servidor HTTP do
-   shell (`preview_srv`) não serve para quadro: é pergunta-e-resposta, não fluxo.
+*  **O backend fala CDP**, por um de dois caminhos, conforme quem é dono do navegador:
+   - Electron: direto em `127.0.0.1:9223`, porta que `shell/main.cjs` abre, num segundo cliente ao
+     lado do `webContents.debugger` que o shell já mantém anexado. O Chromium aceita os dois.
+   - App nativo (Windows): ele não abre porta de depuração; o servidor local dele (`_srv.json`)
+     repassa em `/cdp` uma lista fechada de comandos do mesmo protocolo, com o mesmo Bearer do
+     `/cmd`. Ali só um espectador por navegador: o que chega depois assume.
+   O `/cmd` não serve para quadro: é pergunta-e-resposta, não fluxo.
 *  **O layout (desktop/celular) NÃO vai por aqui** — vai pelo verbo `layout` do shell. A emulação se
    perde ao navegar e é o controlador de lá que sabe repor (`aplicarViewport`/`aoNavegar`); aplicar
    por fora criaria uma segunda fonte de verdade que a primeira navegação desfaz, calada.
@@ -25,8 +28,10 @@ import json
 import logging
 import secrets
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlencode
 
 import websockets
 from fastapi import WebSocket, WebSocketDisconnect
@@ -81,8 +86,9 @@ def alvo_da_sessao(name: str, *, exige_alvo: bool = True) -> Optional[dict[str, 
 class _Cdp:
     """Cliente CDP mínimo: manda comando, casa resposta por id, entrega evento por fila."""
 
-    def __init__(self, target_id: str):
-        self._url = f"ws://{CDP_HOST}/devtools/page/{target_id}"
+    def __init__(self, url: str, headers: Optional[dict[str, str]] = None):
+        self._url = url
+        self._headers = headers
         self._ws: Any = None
         self._id = 0
         self._pendentes: dict[int, asyncio.Future] = {}
@@ -94,7 +100,8 @@ class _Cdp:
 
     async def __aenter__(self) -> "_Cdp":
         # max_size alto: um quadro jpeg em base64 de tela cheia passa de 1 MiB.
-        self._ws = await websockets.connect(self._url, max_size=32 * 1024 * 1024,
+        self._ws = await websockets.connect(self._url, additional_headers=self._headers,
+                                            max_size=32 * 1024 * 1024,
                                             open_timeout=5, ping_interval=20)
         self._bomba = asyncio.create_task(self._bombear())
         return self
@@ -156,6 +163,27 @@ class _Cdp:
         return t
 
 
+def _conexao(sc: dict[str, Any]) -> Optional[_Cdp]:
+    """Cliente CDP do navegador daquele sidecar, ou `None` quando nenhum dono o atende.
+
+    Com `targetId` é o Electron. Com `pid` é o app nativo, e só se o `_srv.json` for do MESMO
+    processo: os dois abertos juntos disputam esse arquivo, e o token de um não abre o outro.
+    """
+    if sc.get("targetId"):
+        return _Cdp(f"ws://{CDP_HOST}/devtools/page/{sc['targetId']}")
+    if not sc.get("pid") or not sc.get("chave"):
+        return None
+    from app import navshell
+    try:
+        srv = navshell._servidor()
+    except navshell.ShellIndisponivel:
+        return None
+    if srv.get("pid") != sc.get("pid"):
+        return None
+    url = f"ws://127.0.0.1:{int(srv['porta'])}/cdp?{urlencode({'chave': sc['chave']})}"
+    return _Cdp(url, {"Authorization": f"Bearer {srv['token']}"})
+
+
 async def _calado(coro) -> None:
     with contextlib.suppress(Exception):
         await coro
@@ -166,6 +194,13 @@ async def _calado(coro) -> None:
 # o tamanho do viewport do outro lado, e ele muda quando o layout troca.
 
 _BOTOES = {"left", "right", "middle", "none"}
+# Código virtual e texto das teclas nomeadas: a mesma tabela do `press` do nativo e do shell.
+_TECLAS: dict[str, tuple[int, Optional[str]]] = {
+    "Enter": (13, "\r"), "Tab": (9, None), "Escape": (27, None), "Backspace": (8, None),
+    "Delete": (46, None), "ArrowUp": (38, None), "ArrowDown": (40, None), "ArrowLeft": (37, None),
+    "ArrowRight": (39, None), "Home": (36, None), "End": (35, None), "PageUp": (33, None),
+    "PageDown": (34, None),
+}
 
 
 def _px(valor: Any, tamanho: int) -> int:
@@ -206,15 +241,24 @@ async def _aplicar_entrada(cdp: _Cdp, msg: dict, largura: int, altura: int) -> N
         tecla = str(msg.get("key") or "")[:32]
         if not tecla:
             return
-        # `key` sozinho basta pras nomeadas (Enter, Backspace, setas) — é o mesmo atalho que o
-        # controlador do shell usa; texto comum vai por `insertText`, não por tecla.
+        # Tecla nomeada leva o código virtual: só com `key` o evento chega à página, mas o Chromium
+        # não executa a edição (Backspace não apaga, Enter não envia). Texto comum vai por
+        # `insertText`, não por tecla.
+        evento: dict[str, Any] = {"key": tecla, "modifiers": int(msg.get("mod") or 0),
+                                  "windowsVirtualKeyCode": int(msg.get("code") or 0)}
+        texto = None
+        if tecla in _TECLAS:
+            vk, texto = _TECLAS[tecla]
+            evento.update(code=tecla, windowsVirtualKeyCode=vk)
         for acao in ("keyDown", "keyUp"):
-            cdp.envia("Input.dispatchKeyEvent", {"type": acao, "key": tecla,
-                                                 "windowsVirtualKeyCode": int(msg.get("code") or 0),
-                                                 "modifiers": int(msg.get("mod") or 0)})
+            extra = {"text": texto, "unmodifiedText": texto} if texto and acao == "keyDown" else {}
+            cdp.envia("Input.dispatchKeyEvent", {"type": acao, **evento, **extra})
 
 
 # ── quadros ────────────────────────────────────────────────────────────────────
+
+# `reason` do `Inspector.detached` que o app nativo manda quando outro aparelho assume a tela.
+_MOTIVOS_DESLIGOU = {"replaced_by_another_viewer": "a tela remota foi aberta em outro aparelho"}
 
 async def _fluxo_de_quadros(cdp: _Cdp, ws: WebSocket, estado: dict) -> None:
     """Screencast enquanto o view compõe; print em laço quando ele não compõe."""
@@ -254,7 +298,8 @@ async def _fluxo_de_quadros(cdp: _Cdp, ws: WebSocket, estado: dict) -> None:
             if not frame.get("parentId"):
                 await ws.send_text(json.dumps({"t": "url", "url": frame.get("url")}))
         elif metodo == "Inspector.detached":
-            raise ConnectionError("o navegador desta sessão fechou")
+            motivo = (msg.get("params") or {}).get("reason")
+            raise ConnectionError(_MOTIVOS_DESLIGOU.get(str(motivo), "o navegador desta sessão fechou"))
 
 
 async def _print_avulso(cdp: _Cdp, ws: WebSocket, estado: dict) -> None:
@@ -314,6 +359,9 @@ def _largura_pedida(ws: WebSocket) -> int:
 
 
 async def _url_atual(cdp: _Cdp, sc: dict) -> Optional[str]:
+    if not sc.get("targetId"):
+        # O nativo regrava o sidecar a cada navegação, e o repasse dele não abre `Runtime.evaluate`.
+        return sc.get("url")
     try:
         r = await cdp.cmd("Runtime.evaluate", {"expression": "location.href",
                                                "returnByValue": True}, espera=5)
@@ -325,22 +373,29 @@ async def _url_atual(cdp: _Cdp, sc: dict) -> Optional[str]:
     return sc.get("url")
 
 
-async def nav_ws(ws: WebSocket, name: str) -> None:
+async def nav_ws(ws: WebSocket, name: str,
+                 existe: Callable[[str], bool] = tmux.has_session) -> None:
+    """`existe` é a checagem da rota que abre o navegador (`_session_exists`), que conhece também
+    a sessão sem terminal: só o tmux recusava a tela remota de uma sessão que tem navegador."""
     if not await _autorizado(ws):
         return
     # `to_thread` nos dois: varrer os sidecars e perguntar ao tmux são disco e processo, e este é o
     # mesmo event loop que serve o SSE de todas as sessões (incidente de 2026-07-23 no CLAUDE.md).
-    if not await asyncio.to_thread(tmux.has_session, name):
+    if not await asyncio.to_thread(existe, name):
         await ws.close(code=1008, reason="sessao nao existe")
         return
-    sc = await asyncio.to_thread(alvo_da_sessao, name)
-    if not sc:
+    # Com Electron e nativo abertos juntos, o do Electron (com alvo) vem primeiro: a 9223 dele não
+    # depende de quem ganhou o `_srv.json`.
+    sc = (await asyncio.to_thread(alvo_da_sessao, name)
+          or await asyncio.to_thread(alvo_da_sessao, name, exige_alvo=False))
+    conexao = await asyncio.to_thread(_conexao, sc) if sc else None
+    if not sc or not conexao:
         await ws.close(code=1008, reason="sessao sem navegador")
         return
     await ws.accept()
     estado = {"w": 1280, "h": 800, "pedida": _largura_pedida(ws)}
     try:
-        async with _Cdp(str(sc["targetId"])) as cdp:
+        async with conexao as cdp:
             # A url do sidecar é a da última vez que o shell gravou; quem sabe a de agora é a
             # página. Sem isto a barra abre mostrando o endereço anterior até alguém navegar.
             await ws.send_text(json.dumps({"t": "url", "url": await _url_atual(cdp, sc)}))

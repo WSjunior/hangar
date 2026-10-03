@@ -5693,7 +5693,7 @@ impl Render for Hangar {
 mod tests {
     use super::{message_card, preview_step, safe_markdown, stream_motion, working_tokens, working_verb};
     use crate::{api::dto::ChatEvent, cards::Card, i18n::tr};
-    use std::time::Duration;
+    use std::{collections::HashSet, time::Duration};
 
     #[test]
     fn conversation_corner_preserves_delivery_truth_and_session_warnings() {

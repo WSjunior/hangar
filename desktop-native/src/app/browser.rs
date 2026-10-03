@@ -12,6 +12,12 @@ pub(super) struct BrowserPanel {
     key: String,
     #[cfg(target_os = "windows")]
     controller: Option<Rc<crate::browser::control::Controller<crate::browser::control::CdpPage>>>,
+    /// CDP do motor, para o repasse da tela remota (`browser::relay`), que não passa pelo turno do controlador.
+    #[cfg(target_os = "windows")]
+    cdp: Option<Rc<crate::browser::cdp::Cdp>>,
+    /// Quem olha a tela remota; os ouvintes de evento do CDP guardam só referência fraca.
+    #[cfg(target_os = "windows")]
+    viewer: Rc<std::cell::RefCell<Option<crate::browser::relay::Viewer>>>,
     /// Nasce na primeira navegação, que tem a janela. No Linux só cabe um por processo: falhou, não tenta de novo.
     engine: Option<Result<Rc<Engine>, String>>,
     /// Endereço a abrir quando o motor terminar de nascer; `Some` enquanto ele nasce.
@@ -50,7 +56,8 @@ impl BrowserPanel {
             cx.on_focus(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(true) }),
             cx.on_blur(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(false) }),
         ];
-        Self { key, #[cfg(target_os = "windows")] controller: None, engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, focus,
+        Self { key, #[cfg(target_os = "windows")] controller: None, #[cfg(target_os = "windows")] cdp: None,
+            #[cfg(target_os = "windows")] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, focus,
             origin: Rc::default(), shown: false, _drain: drain, _subscriptions: subscriptions }
     }
 
@@ -132,10 +139,52 @@ impl BrowserPanel {
                 eprintln!("[nav] evento {event} sem ouvinte: {e}");
             }
         }
+        for event in crate::browser::relay::WATCHED {
+            let (viewer, page) = (Rc::downgrade(&self.viewer), Rc::downgrade(&cdp));
+            let listened = cdp.on(event, move |params| {
+                let Some(viewer) = viewer.upgrade() else { return };
+                let unsent = match viewer.borrow().as_ref() {
+                    Some(viewer) => viewer.deliver(event, &params),
+                    None => crate::browser::relay::frame_id(event, &params),
+                };
+                // Quadro sem entrega também é confirmado: sem o ack o Chromium para o screencast.
+                if let (Some(id), Some(page)) = (unsent, page.upgrade()) {
+                    drop(page.call("Page.screencastFrameAck", serde_json::json!({"sessionId": id})));
+                }
+            });
+            if let Err(e) = listened { eprintln!("[nav] evento {event} sem ouvinte: {e}"); }
+        }
         let (setup, hidden) = (ctl.clone(), !self.shown);
         cx.spawn(async move |_, _| setup.start(hidden).await).detach();
         self.controller = Some(ctl);
+        self.cdp = Some(cdp);
     }
+
+    /// Espectador novo da tela remota; o anterior recebe o aviso de que outro aparelho assumiu.
+    #[cfg(target_os = "windows")]
+    pub(super) fn watch(&self, viewer: crate::browser::relay::Viewer) -> Result<(), String> {
+        if self.cdp.is_none() { return Err(format!("erro: o navegador da sessao {} ainda esta iniciando, tente de novo em instantes", self.key)); }
+        if let Some(old) = self.viewer.borrow_mut().replace(viewer) { old.detach(crate::browser::relay::REPLACED); }
+        Ok(())
+    }
+
+    /// O espectador `id` saiu: o screencast para, a menos que outro já o tenha substituído.
+    #[cfg(target_os = "windows")]
+    pub(super) fn unwatch(&self, id: u64) {
+        let mut viewer = self.viewer.borrow_mut();
+        if viewer.as_ref().is_none_or(|v| v.id != id) { return; }
+        *viewer = None;
+        if let Some(cdp) = &self.cdp { drop(cdp.call("Page.stopScreencast", serde_json::json!({}))); }
+    }
+
+    /// Navegador fechando: quem olha recebe o fim antes de o painel cair.
+    #[cfg(target_os = "windows")]
+    pub(super) fn end_viewer(&self) {
+        if let Some(viewer) = self.viewer.borrow_mut().take() { viewer.detach("target_closed"); }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(super) fn cdp(&self) -> Option<Rc<crate::browser::cdp::Cdp>> { self.cdp.clone() }
 
     /// Por que ainda não há controlador: `None` = motor nunca pedido, `Some(Ok)` = nascendo, `Some(Err)` = falhou.
     #[cfg(target_os = "windows")]
@@ -340,21 +389,35 @@ impl Hangar {
         }
     }
 
-    /// Pedido do `/cmd` local: vai ao controlador do navegador da sessão pedida, esteja ela na tela ou não.
+    /// Pedido do servidor local: vai ao navegador da sessão pedida, esteja ela na tela ou não.
     #[cfg(target_os = "windows")]
     pub(super) fn dispatch_preview(&mut self, request: crate::browser::server::Request, cx: &mut Context<Self>) {
-        use crate::browser::control::Reply;
+        use crate::browser::{control::Reply, server::Request};
         fn answer(reply: futures::channel::oneshot::Sender<Reply>, text: String) { let _ = reply.send(Reply::Text(text)); }
-        let crate::browser::server::Request { key, verb, args, tab, reply } = request;
+        let missing = |key: &str| format!("erro: a sessao {key} nao tem navegador aberto");
+        let (key, verb, args, tab, reply) = match request {
+            Request::Command { key, verb, args, tab, reply } => (key, verb, args, tab, reply),
+            Request::Cdp { key, method, params, reply } => {
+                let Some(cdp) = self.side.browsers.get(&key).and_then(|b| b.read(cx).cdp()) else { let _ = reply.send(Err(missing(&key))); return };
+                let call = cdp.call(&method, params);
+                return cx.spawn(async move |_, _| { let _ = reply.send(call.await); }).detach();
+            }
+            Request::Watch { key, viewer, reply } => {
+                let _ = reply.send(match self.side.browsers.get(&key) { Some(b) => b.read(cx).watch(viewer), None => Err(missing(&key)) });
+                return;
+            }
+            Request::Unwatch { key, id } => {
+                if let Some(b) = self.side.browsers.get(&key) { b.read(cx).unwatch(id); }
+                return;
+            }
+        };
         if tab.is_some() { return answer(reply, "erro: o app nativo ainda nao tem abas: e um navegador por sessao".into()); }
         if verb == "close" {
-            let closed = self.side.browsers.remove(&key).is_some();
+            let closed = self.side.browsers.remove(&key).inspect(|b| b.read(cx).end_viewer()).is_some();
             if closed { crate::browser::server::remove_sidecar(&key); cx.notify(); }
             return answer(reply, if closed { "ok: close".into() } else { format!("erro: a sessao {key} nao tem navegador aberto") });
         }
-        let Some(browser) = self.side.browsers.get(&key) else {
-            return answer(reply, format!("erro: a sessao {key} nao tem navegador aberto"));
-        };
+        let Some(browser) = self.side.browsers.get(&key) else { return answer(reply, missing(&key)) };
         let panel = browser.read(cx);
         let Some(ctl) = panel.controller() else {
             return answer(reply, match panel.engine_status() {
