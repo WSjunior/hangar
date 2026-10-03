@@ -274,7 +274,7 @@ def test_http_rejects_utf8_json_and_bounded_body(monkeypatch, body):
             requested.append((req, timeout))
             assert req.get_header("X-hangar-internal") == "secret"
             return Response()
-    monkeypatch.setattr(urllib.request, "build_opener", lambda proxy: Opener())
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *handlers: Opener())
     t.configure("127.0.0.1:12345", "secret")
     assert asyncio.run(t._request({"op":"release", "consumer":"c"})) is None
     assert len(requested) == 1
@@ -548,3 +548,133 @@ def test_invalid_plugin_label_keeps_python_behavior_and_facts_are_read_once(monk
     asyncio.run(run())
     assert counters == dict(question=1, plugin_question=1, plugin_state=1, hook=1, status=1)
     assert seen[0]["facts"]["plugin_question"] == question
+
+
+@pytest.mark.parametrize("kind", ["bad-status", "incomplete-read"])
+def test_http_protocol_errors_use_reserve_without_raw_diagnostics(monkeypatch, caplog, kind):
+    import http.client
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    def failure(*args):
+        if kind == "bad-status": raise http.client.BadStatusLine("dummy-private")
+        raise http.client.IncompleteRead(b"dummy-private", 100)
+    monkeypatch.setattr(t, "_http", failure)
+    assert asyncio.run(t._request({"op":"release", "consumer":"c"})) is None
+    assert "http_unavailable" in caplog.text
+    assert "dummy-private" not in caplog.text and "test-only" not in caplog.text
+
+
+@pytest.mark.parametrize("kind", ["bad-status", "incomplete-read"])
+def test_http_protocol_failure_preserves_capture_and_preview_python_reserve(monkeypatch, kind):
+    import http.client
+    from app import preview
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    monkeypatch.setattr(state.tmux, "capture_pane", lambda name: "● Python reserve\n")
+    monkeypatch.setattr(preview, "read_sidecar", lambda stem: None)
+    def http_response(config, payload):
+        if payload["op"] == "capture":
+            if kind == "bad-status": raise http.client.BadStatusLine("dummy-private")
+            raise http.client.IncompleteRead(b"dummy-private", 100)
+        return {}
+    monkeypatch.setattr(t, "_http", http_response)
+    async def run():
+        async with t.lease("s", "claude", lambda: "b"):
+            assert await state.shared_capture("s", 0) == "● Python reserve\n"
+        state.forget_frame("s")
+        broker = preview.PreviewBroker("s", "claude", lambda: "b")
+        source = broker.subscribe()
+        try:
+            assert await anext(source) == ("", False, False)
+            assert await asyncio.wait_for(anext(source), 1) == ("Python reserve", False, False)
+        finally:
+            task = broker._task
+            await source.aclose()
+            if task is not None:
+                await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("kind", ["bad-status", "incomplete-read"])
+def test_http_protocol_failure_hands_reducer_memory_to_python(monkeypatch, kind):
+    import http.client
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    monkeypatch.setattr(state.tmux, "capture_pane", lambda name: "✻ Thinking…\n❯ ")
+    monkeypatch.setattr(state, "pergunta_aberta", lambda sid: None)
+    monkeypatch.setattr(state, "_sidecar_status", lambda sid: None)
+    monkeypatch.setattr(state.plugin_bridge, "pergunta_pendente", lambda name: None)
+    monkeypatch.setattr(state.plugin_bridge, "estado_recente", lambda name: None)
+    monkeypatch.setattr(state.plugin_bridge, "vivo", lambda name: False)
+    monkeypatch.setattr(state.hook_state, "get_state", lambda sid: None)
+    monkeypatch.setattr(state.hook_state, "shells", lambda sid: [])
+    from app.loop import LoopLink
+    monkeypatch.setattr(LoopLink, "get", lambda self: None)
+    memories = []
+    def http_response(config, payload):
+        if payload["op"] != "reduce": return None if payload["op"] == "capture" else {}
+        memories.append(copy.deepcopy(payload["memory"]))
+        if len(memories) == 1:
+            a = analysis()
+            a.update(state="working", label="Thinking…", spinner="✻ Thinking…")
+            return dict(analysis=a, memory=dict(prev_spinner="✻ Thinking…", frozen=2, no_spinner=0,
+                held_state="working", held_label="Thinking…"), diagnostic=dict(before_plugin="working", plugin_applied=False))
+        if kind == "bad-status": raise http.client.BadStatusLine("dummy-private")
+        raise http.client.IncompleteRead(b"dummy-private", 100)
+    monkeypatch.setattr(t, "_http", http_response)
+    async def run():
+        source = state.StateMonitor("s", poll=0, provider="claude", sid_get=lambda: "b").stream()
+        try:
+            assert (await anext(source)).state == "working"
+            assert (await asyncio.wait_for(anext(source), 1)).state == "idle"
+        finally:
+            await source.aclose()
+    asyncio.run(run())
+    assert memories[1]["frozen"] == 2
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("location", ["http://198.51.100.1:12345/other", "http://127.0.0.1:12345/other"])
+def test_terminal_bridge_refuses_every_redirect_before_second_request(monkeypatch, status, location):
+    import email.message
+    import io
+    import urllib.request
+    import urllib.response
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    calls = []
+    class Transport(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            calls.append((req.full_url, req.get_header("X-hangar-internal")))
+            if len(calls) > 1:
+                assert calls[-1][1] == "test-only"
+                raise AssertionError("redirect must never reach another location")
+            headers = email.message.Message()
+            headers["Location"] = location
+            response = urllib.response.addinfourl(io.BytesIO(b""), headers, req.full_url, status)
+            response.msg = "Synthetic redirect"
+            return response
+    original = urllib.request.build_opener
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *handlers: original(*handlers, Transport()))
+    assert asyncio.run(t._request({"op":"release", "consumer":"c"})) is None
+    assert calls == [("http://127.0.0.1:12345/__hangar_server/terminal", "test-only")]
+
+
+def test_http_reserve_does_not_swallow_request_cancellation(monkeypatch):
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    async def run():
+        entered = asyncio.Event()
+        async def pending(*args):
+            entered.set()
+            await asyncio.Future()
+        monkeypatch.setattr(t.asyncio, "to_thread", pending)
+        task = asyncio.create_task(t._request({"op":"release", "consumer":"c"}))
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert task.cancelled()
+    asyncio.run(run())

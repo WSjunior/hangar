@@ -6,6 +6,7 @@ from contextvars import ContextVar
 from contextlib import contextmanager
 import ipaddress
 import json
+from http.client import HTTPException
 import logging
 import math
 import sys
@@ -58,8 +59,14 @@ def _failure(code: str) -> None:
         _log.warning("observação terminal usa reserva Python: %s", code)
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # O segredo interno só pertence ao endereço configurado pelo Supervisor.
+        return None
+
+
 def _http(config: tuple[str, str], payload: dict) -> dict | None:
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     req = urllib.request.Request(f"http://{config[0]}/__hangar_server/terminal",
         data=json.dumps(payload, allow_nan=False).encode("utf-8"),
         headers={"Content-Type": "application/json", "x-hangar-internal": config[1]}, method="POST")
@@ -82,7 +89,7 @@ async def _request(payload: dict) -> dict | None:
         if result is None:
             _failure("invalid_http_response")
         return result
-    except (OSError, ValueError, TimeoutError):
+    except (OSError, ValueError, TimeoutError, HTTPException):
         # Nem pane, segredo, URL ou mensagem de exceção entram no diário.
         _failure("http_unavailable")
         return None
