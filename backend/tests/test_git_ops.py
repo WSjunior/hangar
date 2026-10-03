@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -1136,3 +1137,140 @@ def test_git_log_since_engole_giterror(tmp_path, monkeypatch):
         raise git_ops.GitError(504, "git timeout")
     monkeypatch.setattr(git_ops, "_run", explode)
     assert git_ops.git_log_since(str(tmp_path), 0.0) == []
+
+
+def test_create_worktree_new_branch_records_base_and_copies_config(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    d = _repo(repo)
+    (repo / ".gitignore").write_text(".env\nbig.bin\ncache/\n")
+    git_ops._run(d, "add", ".gitignore")
+    git_ops._run(d, "commit", "-q", "-m", "ignore")
+    # A base precisa do .gitignore: sem ele o .env copiado é untracked e o `worktree remove` recusa.
+    git_ops._run(d, "branch", "-f", "feature")
+    (repo / ".env").write_text("SECRET=1")
+    (repo / "big.bin").write_bytes(b"x" * (1024 * 1024 + 1))
+    (repo / "cache").mkdir()
+    (repo / "cache" / "a").write_text("a")
+
+    path, created = git_ops.create_worktree(d, "nova", "chat", tmp_path, new_branch=True, base="feature")
+    assert created and path == str(tmp_path / "repo-chat")
+    assert git_ops.branch_of(path) == "nova"
+    base = git_ops._run(path, "config", "--get", "branch.nova.hangar-base").stdout.strip()
+    assert base == "feature"
+    assert (tmp_path / "repo-chat" / ".env").read_text() == "SECRET=1"
+    assert not (tmp_path / "repo-chat" / "big.bin").exists()
+    assert not (tmp_path / "repo-chat" / "cache").exists()
+    git_ops.remove_worktree(d, path)
+
+
+def test_create_worktree_new_branch_defaults_to_current(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    d = _repo(repo)
+    path, _ = git_ops.create_worktree(d, "nova", "chat", tmp_path, new_branch=True)
+    assert git_ops._run(path, "config", "--get", "branch.nova.hangar-base").stdout.strip() == "main"
+    git_ops.remove_worktree(d, path)
+
+
+@pytest.mark.parametrize("bad", ["-x", "com espaco", "a..b", ""])
+def test_create_worktree_new_branch_rejects_bad_names(tmp_path, bad):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    d = _repo(repo)
+    with pytest.raises(GitError) as e:
+        git_ops.create_worktree(d, bad, "chat", tmp_path, new_branch=True)
+    assert e.value.status == 400
+    assert not (tmp_path / "repo-chat").exists()
+
+
+def test_create_worktree_new_branch_rejects_existing(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    d = _repo(repo)
+    with pytest.raises(GitError) as e:
+        git_ops.create_worktree(d, "feature", "chat", tmp_path, new_branch=True)
+    assert e.value.status == 409
+
+
+def test_create_session_with_new_branch(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import api, fs
+    from app.models import SessionInfo
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    d = _repo(repo)
+    monkeypatch.setattr(fs, "resolve_scan_roots", lambda _settings: [tmp_path])
+    monkeypatch.setattr(api, "resolve_scan_roots", lambda _settings: [tmp_path])
+    monkeypatch.setattr(api.settings, "auth_token", "test-token")
+    monkeypatch.setattr(api.registry, "create",
+                        lambda name, cwd, config_dir, **kw: SessionInfo(name=name, cwd=cwd, provider="claude"))
+    r = TestClient(api.app).post("/api/sessions", json={"name": "chat", "cwd": d, "branch": "nova",
+                                                        "new_branch": True, "base": "main"},
+                                 headers={"Authorization": "Bearer test-token"})
+    assert r.status_code == 200, r.text
+    assert r.json()["branch"] == "nova" and r.json()["worktree"] is True
+    git_ops.remove_worktree(d, r.json()["cwd"])
+
+
+def test_create_session_rollback_deletes_new_branch(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import api, fs
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    d = _repo(repo)
+    # .env ignorado só no main: na worktree (base feature) ele é untracked e o desfazer precisa forçar.
+    (repo / ".gitignore").write_text(".env\n")
+    git_ops._run(d, "add", ".gitignore")
+    git_ops._run(d, "commit", "-q", "-m", "ignore")
+    (repo / ".env").write_text("SECRET=1")
+    monkeypatch.setattr(fs, "resolve_scan_roots", lambda _settings: [tmp_path])
+    monkeypatch.setattr(api, "resolve_scan_roots", lambda _settings: [tmp_path])
+    monkeypatch.setattr(api.settings, "auth_token", "test-token")
+
+    def fail(*_args, **_kwargs):
+        raise ValueError("ja existe uma sessao com esse nome")
+
+    monkeypatch.setattr(api.registry, "create", fail)
+    r = TestClient(api.app).post("/api/sessions", json={"name": "chat", "cwd": d, "branch": "nova",
+                                                        "new_branch": True, "base": "feature"},
+                                 headers={"Authorization": "Bearer test-token"})
+    assert r.status_code == 409
+    assert not (tmp_path / "repo-chat").exists()
+    assert "nova" not in git_ops.list_branches(d)["branches"]
+
+
+def test_create_worktree_new_branch_does_not_track_base(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    d = _with_remote(repo)
+    path, _ = git_ops.create_worktree(d, "nova", "chat", tmp_path, new_branch=True, base="only-remote")
+    assert git_ops._run(path, "config", "--get", "branch.nova.remote").returncode != 0
+    git_ops.remove_worktree(d, path)
+
+
+def test_copy_ignored_reads_main_repo_and_keeps_versioned_files(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    d = _repo(repo)
+    (repo / ".gitignore").write_text(".env\nlocal.ini\n")
+    (repo / "local.ini").write_text("versioned")
+    git_ops._run(d, "add", ".gitignore")
+    git_ops._run(d, "add", "-f", "local.ini")
+    git_ops._run(d, "commit", "-q", "-m", "ignore")
+    # feature versiona local.ini; no main ele vira só ignorado, com conteúdo local.
+    git_ops._run(d, "branch", "-f", "feature")
+    git_ops._run(d, "rm", "-q", "--cached", "local.ini")
+    git_ops._run(d, "commit", "-q", "-m", "untrack")
+    (repo / "local.ini").write_text("main-local")
+    (repo / ".env").write_text("SECRET=1")
+
+    first, _ = git_ops.create_worktree(d, "feature", "a", tmp_path)
+    Path(first, ".env").write_text("FROM-WORKTREE")
+    second, _ = git_ops.create_worktree(first, "nova", "b", tmp_path, new_branch=True, base="feature")
+    assert Path(second, ".env").read_text() == "SECRET=1"
+    assert Path(second, "local.ini").read_text() == "versioned"
+    git_ops.remove_worktree(d, second)
+    git_ops.remove_worktree(d, first)
