@@ -30,7 +30,7 @@ _log = logging.getLogger("hangar.rust_server")
 HEALTH_PATH = "/__hangar_server/health"
 # Versão do contrato interno (rotas /internal, side-events, ambiente). Tem de casar com o
 # `protocol` da saúde (hangar_server::INTERNAL_PROTOCOL); outro número = o Python atende sozinho.
-RUST_SERVER_PROTOCOL = 3
+RUST_SERVER_PROTOCOL = 5
 START_TIMEOUT = 10.0
 CRASH_WINDOW = 60.0
 MAX_CRASHES = 3
@@ -177,6 +177,8 @@ class Supervisor:
 
     async def run(self) -> str:
         """Mantém o filho de pé. Só volta quando desiste, com o motivo que vai pro diário."""
+        from app import costs_sources
+
         crashes: list[float] = []
         try:
             while True:
@@ -193,8 +195,11 @@ class Supervisor:
                     print(f"[hangar] hangar-server de pé em {listen_addr(self.host, self.port)}; "
                           f"o Python atende atrás dele em 127.0.0.1:{self.upstream_port}", flush=True)
                     diag.registrar("hangar_server.de_pe")
+                if state == "up":
+                    costs_sources.set_served_by_rust(True)
                 while state == "up" and self.proc.poll() is None:
                     await asyncio.sleep(_POLL)
+                costs_sources.set_served_by_rust(False)
                 terminal_observer.configure(None, None)
                 # Parada normal (systemctl, Ctrl+C) leva o filho junto, no mesmo instante em que o uvicorn
                 # recebe o sinal: dá um respiro para a flag dele subir antes de contar queda.
@@ -217,6 +222,9 @@ class Supervisor:
             return "erro"
 
     async def stop(self) -> None:
+        from app import costs_sources
+
+        costs_sources.set_served_by_rust(False)
         terminal_observer.configure(None, None)
         proc = self.proc
         if proc is None:
@@ -266,6 +274,10 @@ async def _take_over(server: uvicorn.Server, serving: asyncio.Task, reason: str,
     """O Python passa a atender a porta pública até o fim do processo."""
     _log.error("hangar-server desligado (%s); o Python assume a porta %s", reason, kw["port"])
     diag.registrar("hangar_server.reserva", "erro", codigo=reason)
+    from app import costs_sources
+
+    costs_sources.set_served_by_rust(False)
+    costs_sources.agendar_aquecimento(0)
     try:
         sock = bind_public()
     except OSError as e:

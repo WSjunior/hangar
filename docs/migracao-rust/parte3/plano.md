@@ -48,7 +48,7 @@
 **Interfaces:**
 - Produces: `costs_sources.scopes_for_rust() -> dict` (formato da spec, seção 2); `costs_sources.set_served_by_rust(on: bool)`; rota `GET /internal/costs/scopes`; `INTERNAL_PROTOCOL == 5`.
 
-- [ ] **Step 1: Testes que falham**
+- [x] **Step 1: Testes que falham**
 
 `backend/tests/test_internal_costs.py`:
 
@@ -157,12 +157,12 @@ def test_rust_up_marks_costs_served_and_takeover_warms_python(fake_bin, tmp_path
 
 `_run_until_takeover` é o corpo de `test_three_crashes_in_a_minute_hand_the_public_port_to_python` extraído para função (mesmo arquivo); o teste antigo passa a chamá-la.
 
-- [ ] **Step 2: Rodar e ver falhar**
+- [x] **Step 2: Rodar e ver falhar**
 
 Run: `(cd backend && uv run pytest tests/test_internal_costs.py tests/test_rust_server.py -q)`
 Expected: FAIL — `scopes_for_rust`, `set_served_by_rust`, `_boot_warmup` e a rota não existem.
 
-- [ ] **Step 3: Implementar no Python**
+- [x] **Step 3: Implementar no Python**
 
 Em `costs_sources.py`, extrair de `_sincronizar` (linhas 850-889) a parte que calcula escopos, sem mudar o comportamento dele:
 
@@ -230,16 +230,16 @@ async def costs_scopes() -> dict:
 
 Em `rust_server.py`: `RUST_SERVER_PROTOCOL = 5`. Em `Supervisor.run`, depois de `state == "up"` (antes do laço `while state == "up"`) chamar `costs_sources.set_served_by_rust(True)`; logo depois do laço (filho saiu) e em `stop()` chamar `set_served_by_rust(False)` (import tardio de `app.costs_sources`, como o de `internal_api`). Em `_take_over`, depois de `diag.registrar(...)`: `costs_sources.set_served_by_rust(False)` e `costs_sources.agendar_aquecimento(0)`.
 
-- [ ] **Step 4: Subir a versão no Rust**
+- [x] **Step 4: Subir a versão no Rust**
 
 `crates/hangar-server/src/lib.rs`: `pub const INTERNAL_PROTOCOL: u32 = 5;` e o comentário acima ganha "5: rota `/internal/costs/scopes`". Trocar `3` por `5` nos dois `assert_eq!` de teste citados.
 
-- [ ] **Step 5: Rodar os testes**
+- [x] **Step 5: Rodar os testes**
 
 Run: `(cd backend && uv run pytest tests/test_internal_costs.py tests/test_rust_server.py tests/test_costs_sources.py tests/test_costs_cache.py -q)` e `cargo test --manifest-path crates/Cargo.toml -p hangar-server --test proxy --test terminal_routes`
 Expected: PASS.
 
-- [ ] **Step 6: Revisão e commit**
+- [x] **Step 6: Revisão e commit**
 
 ```bash
 git add backend/app/costs_sources.py backend/app/internal_api.py backend/app/rust_server.py \
