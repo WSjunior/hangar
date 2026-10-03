@@ -113,6 +113,46 @@ pub fn default_dir() -> PathBuf {
     }
 }
 
+#[doc(hidden)]
+pub fn dump_for_tests(ix: &Index, base: &Path, prefix: &str) -> serde_json::Value {
+    use rusqlite::types::ValueRef;
+    use serde_json::{Map, Value};
+    let conn = ix.connect().unwrap();
+    let mut stmt = conn.prepare("SELECT id, path FROM files ORDER BY path").unwrap();
+    let files = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+        .unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    let mut output = Map::new();
+    for (id, path) in files {
+        let relative = Path::new(&path).strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/");
+        if !relative.starts_with(prefix) { continue; }
+        let mut parts = Map::new();
+        for (name, table, fields, filter) in [
+            ("custo", "custo", COST_FIELDS, ""),
+            ("uso", "uso", USAGE_FIELDS, " AND tipo<>'area'"),
+            ("areas", "uso", USAGE_FIELDS, " AND tipo='area'"),
+        ] {
+            let mut stmt = conn.prepare(&format!("SELECT {fields} FROM {table} WHERE file_id=?{filter} ORDER BY rowid")).unwrap();
+            let count = stmt.column_count();
+            let rows = stmt.query_map([id], |row| {
+                let mut values = Vec::new();
+                for i in 0..count {
+                    values.push(match row.get_ref(i)? {
+                        ValueRef::Null => Value::Null,
+                        ValueRef::Integer(n) => Value::from(n),
+                        ValueRef::Real(n) => Value::from(n),
+                        ValueRef::Text(s) => Value::String(String::from_utf8_lossy(s).into_owned()),
+                        ValueRef::Blob(_) => panic!("coluna de contrato inesperada"),
+                    });
+                }
+                Ok(Value::Array(values))
+            }).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+            parts.insert(name.into(), Value::Array(rows));
+        }
+        output.insert(relative, Value::Object(parts));
+    }
+    Value::Object(output)
+}
+
 impl Index {
     pub fn open(dir: &Path) -> Result<Self, IndexError> {
         let index = Self { path: dir.join(FILE_NAME), pool: None };
