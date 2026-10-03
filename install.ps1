@@ -1656,9 +1656,12 @@ $registrou = $jaAgendado -or (Pergunte '  Registrar backend e frontend pra subir
 # ORFAO que ficou de pe, e reportar "ok" ali seria pior que a pendencia falsa.
 $subiu = $false
 $iniciou = $false
+# MAQUINA\usuario, nunca o nome curto: com o PC chamado igual ao usuario, o nome curto resolve
+# para a conta da maquina e o Agendador recusa com "Parametro incorreto. (7,27):UserId".
+$contaTarefa = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 if ($registrou) {
     try {
-        $taskPrincipal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel $script:installRunLevel
+        $taskPrincipal = New-ScheduledTaskPrincipal -UserId $contaTarefa -LogonType Interactive -RunLevel $script:installRunLevel
         foreach ($t in $tarefas) {
             # -Exe pelo caminho completo: a tarefa nasce com o PATH do sistema, nao com o do
             # seu shell - `uv` instalado em ~\.local\bin nao seria encontrado.
@@ -1686,7 +1689,7 @@ if ($registrou) {
             Escrever-Lancador $vbs ($linhaVbs + "`r`n") 'vbs' | Out-Null
             $acao = New-ScheduledTaskAction -Execute 'wscript.exe' `
                 -Argument "`"$vbs`"" -WorkingDirectory $t.Dir
-            $gatilho = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+            $gatilho = New-ScheduledTaskTrigger -AtLogOn -User $contaTarefa
             # -Priority 4 = normal. Sem ele o Agendador usa 7 (abaixo do normal), herdado pelos
             # filhos: com a CPU cheia o backend demora mais que o limite da vigia e ela o derruba.
             $cfg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
@@ -1874,7 +1877,7 @@ WScript.Quit CreateObject("WScript.Shell").Run("powershell -NoProfile -Execution
     # interativo de verdade (login de manha, por exemplo), enquanto o -Once repetido acima e
     # quem cobre reboot e retomada de suspensao, os dois casos que nao passam por logon e que
     # sao justamente o motivo da vigia existir.
-    $vigiaLogon = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+    $vigiaLogon = New-ScheduledTaskTrigger -AtLogOn -User $contaTarefa
     # -Settings com bateria: o default e DisallowStartIfOnBatteries=$true, e a maquina que suspende
     # e justamente o notebook - a vigia ficaria morta exatamente quando e necessaria, e o teste na
     # tomada passaria. As tarefas existentes ja passam estes dois (acima).

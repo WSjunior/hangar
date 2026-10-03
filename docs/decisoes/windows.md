@@ -44,6 +44,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Tarefa do backend/front nasce com `-Priority 4` (normal).** O padrão do Agendador é 7
   (abaixo do normal) e passa para os filhos: backend e sessões perdiam a CPU para qualquer
   programa, passavam dos 3 s da vigia e eram derrubados.
+- **Conta da tarefa é `MAQUINA\usuario` (`WindowsIdentity.GetCurrent().Name`), nunca
+  `$env:USERNAME`.** Com o PC chamado igual ao usuário, o nome curto resolve para a conta da
+  máquina e o `Register-ScheduledTask` recusa com `0x80070057 (7,27):UserId:<nome>` — reproduzido
+  na DELPHI-02 com `-User $env:COMPUTERNAME`; o nome qualificado registra.
 - **`ln -sf` do Git Bash COPIA e devolve 0**; confira com `test -L` depois. Script sem extensão é
   invisível para o PowerShell, e a falha é muda.
 - **O navegador embutido precisa da sessão gráfica ATIVA**: com a janela ocluída o teclado entrega
