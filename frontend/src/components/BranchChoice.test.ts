@@ -24,6 +24,9 @@ async function pickNewBranch(sessionName: string): Promise<WorktreeChoice | null
   app = mount(BranchChoice, { target, props: { server, cwd: '/r', value: null, sessionName, onChange: (v) => { last = v; } } });
   await flush();
   const select = target.querySelector('select') as HTMLSelectElement;
+  // O happy-dom só casa `:checked` em <input>, e o bind:value do Svelte lê a opção escolhida por ele.
+  const qs = select.querySelector.bind(select);
+  select.querySelector = ((s: string) => (s === ':checked' ? select.options[select.selectedIndex] ?? null : qs(s))) as typeof select.querySelector;
   select.value = 'new';
   select.dispatchEvent(new Event('change'));
   await flush();
