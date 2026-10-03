@@ -21,8 +21,13 @@ async fn health_answers_without_token_and_with_cors() {
     assert_eq!(r.headers()["access-control-expose-headers"], "ETag");
     let v: serde_json::Value = serde_json::from_str(&r.text().await.unwrap()).unwrap();
     // `protocol` é o contrato com o Python (RUST_SERVER_PROTOCOL na Task 13): mudar exige os dois.
-    assert_eq!(v, serde_json::json!({"ok": true, "version": env!("CARGO_PKG_VERSION"), "protocol": 1}));
-    assert_eq!(hangar_server::INTERNAL_PROTOCOL, 1);
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(v["protocol"], 3);
+    // O endereço da ponte de terminal é anunciado aqui, mas só pode ser de loopback.
+    let terminal = v["terminal_address"].as_str().expect("terminal_address");
+    assert!(terminal.starts_with("127.0.0.1:"), "{terminal}");
+    assert_eq!(hangar_server::INTERNAL_PROTOCOL, 3);
 }
 
 #[tokio::test]
