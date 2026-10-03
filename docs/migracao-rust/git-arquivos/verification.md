@@ -21,12 +21,12 @@ de arquivos/Git: somente metadados e as outras rotas são atendidos por ele.
 | Ambiente | Verificação | Resultado |
 |---|---|---|
 | Linux | pytest dos módulos ligados à migração, paridade, transporte e concorrência | 339 passaram |
-| Linux | núcleo Rust, rotas e repasse | 22 passaram |
+| Linux | núcleo Rust, rotas e repasse | 23 passaram |
 | Linux | testes locais de Git e árvore do desktop | 3 passaram |
 | Linux | regressão do salvamento no GitTabs | 12 passaram |
 | Linux | check do frontend, build para uso real e check do desktop | passaram |
 | Linux | Clippy do núcleo com `-D warnings` | passou |
-| Windows | Rust: núcleo, rotas e repasse | 21 passaram |
+| Windows | Rust: núcleo, rotas e repasse | 22 passaram |
 | Windows | paridade Python/Rust e ponte | 46 passaram, 3 casos exclusivos de POSIX ignorados |
 
 A regressão de morte do executor foi executada também no Windows: consulta de estado por
@@ -42,6 +42,13 @@ no numstat; barra invertida literal no POSIX; validação de seleção sem refaz
 por arquivo; encerramento dos descendentes quando o executor morre. O teste do desktop foi
 adaptado à listagem compartilhada. A inspeção adicional também separou vagas de metadados,
 leituras e alterações, e tornou a trava do cache individual por cwd.
+
+## Auditoria posterior à entrega inicial
+
+A nova conferência identificou diferença em `Range`: cabeçalho malformado recebia 416 em vez
+de 400, e intervalos sobrepostos não eram unidos. A regressão reproduziu o erro e a correção
+preserva também unidades sem diferença de maiúsculas, espaços, partes inválidas ignoradas,
+intervalo vazio e sufixo de tamanho zero. O teste foi repetido no Linux e no Windows.
 
 ## Medição local
 

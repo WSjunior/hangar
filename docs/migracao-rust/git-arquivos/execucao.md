@@ -30,3 +30,5 @@ Resultados, limites e medições em `verification.md`.
   a regressão falhou antes da mudança e passou depois, e o uso real confirmou o disco.
 - Testes de concorrência falharam com as vagas únicas e a trava global do cache; passaram
   com a separação de vagas e trava por cwd.
+- A auditoria posterior encontrou paridade incompleta de Range. A regressão falhou antes
+  da correção e passou depois, incluindo erro 400 e união de intervalos sobrepostos.

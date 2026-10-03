@@ -193,6 +193,24 @@ async fn workspace_responses_keep_cors_for_other_servers() {
 }
 
 #[tokio::test]
+async fn ranges_preserve_python_validation_and_merge_overlaps() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("clip.mp4"), b"0123456789").unwrap();
+    std::fs::write(dir.path().join("fixture.jsonl"), json!({"cwd":dir.path(),"text":"clip.mp4"}).to_string()).unwrap();
+    let (addr, _) = fixture(dir.path()).await;
+    let url = format!("http://{addr}/api/sessions/fixture/file?path=clip.mp4");
+    let c = client();
+    for (range, status) in [("invalid", 400), ("items=0-1", 400), ("bytes=7-2", 400), ("bytes=20-30", 416), ("Bytes = 2-5", 206), ("bytes=invalid,2-5",206), ("bytes=5-4",206), ("bytes=-0",416)] {
+        let response = c.get(&url).bearer_auth(OWNER).header("range", range).send().await.unwrap();
+        assert_eq!(response.status().as_u16(), status, "{range}");
+    }
+    let response = c.get(&url).bearer_auth(OWNER).header("range", "bytes=0-3,2-5").send().await.unwrap();
+    assert_eq!(response.status(), 206);
+    assert_eq!(response.headers()["content-range"], "bytes 0-5/10");
+    assert_eq!(response.text().await.unwrap(), "012345");
+}
+
+#[tokio::test]
 async fn every_public_mutation_rejects_private_context_fields_before_execution() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("arquivo.txt"), "original").unwrap();
