@@ -3,6 +3,7 @@ pub mod auth;
 pub mod config;
 pub mod proxy;
 pub mod routes;
+pub mod runtime;
 pub mod side;
 pub mod tail;
 pub mod terminal_state;
