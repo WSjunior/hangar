@@ -98,6 +98,14 @@ describe('SessionRow', () => {
     act(() => root.unmount());
   });
 
+  it('servidor de convite: o chip de worktree é só texto', async () => {
+    const { container, root } = await render(
+      { ...base, name: 'api', provider: 'claude', worktree: true, worktree_path: '/r/hangar-x', cwd: '/r/hangar' }, { onWorktree: undefined });
+    expect(container.textContent).toContain('hangar-x');
+    expect(container.querySelector('[aria-label^="sessao_worktree"]')).toBeNull();
+    act(() => root.unmount());
+  });
+
   it('worktree apagada aparece como texto', async () => {
     const { container, root } = await render({ ...base, name: 'api', provider: 'claude', worktree_gone: true, worktree_path: '/r/hangar-x' });
     expect(container.textContent).toContain('worktree_apagada');

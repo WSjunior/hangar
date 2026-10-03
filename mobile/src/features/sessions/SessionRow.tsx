@@ -37,7 +37,8 @@ interface Props {
   onExcluir: (s: AggSession) => void;
   onRenomear: (s: AggSession) => void;
   onResume: (s: AggSession) => void;
-  onWorktree: (s: AggSession, path: string) => void;
+  // Ausente em servidor de convite: o backend recusa worktrees ao convidado, e o chip é só texto.
+  onWorktree?: (s: AggSession, path: string) => void;
 }
 
 // O iOS já vibra ao abrir o menu de contexto; o PopupMenu do Android não.
@@ -177,11 +178,13 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
         ) : null}
         {s.worktree_gone ? (
           <Text style={[styles.meta, { color: muted }]} numberOfLines={1}>{m.worktree_apagada()}</Text>
-        ) : wtNome && wtPath ? (
+        ) : wtNome && wtPath && onWorktree ? (
           <Pressable onPress={() => onWorktree(s, wtPath)} accessibilityRole="button"
             accessibilityLabel={`${m.sessao_worktree()}: ${wtNome}`} hitSlop={8} style={styles.wt}>
             <Chip icon="GitBranch" mono>{`${wtNome}${juntada ? ' ✓' : ''}`}</Chip>
           </Pressable>
+        ) : wtNome && wtPath ? (
+          <View style={styles.wt}><Chip icon="GitBranch" mono>{wtNome}</Chip></View>
         ) : null}
         {s.limited || loop ? (
           <View style={styles.chips}>

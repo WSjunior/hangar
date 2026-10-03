@@ -101,6 +101,8 @@ export function SessionList({ onClose, onOpenServers }: Props) {
     onClose();
     router.push(`/s/${s.serverId}/${s.name}/files` as never);
   }, [router, onClose]);
+  // Convite fica de fora: o backend recusa worktrees ao convidado.
+  const proprios = useMemo(() => new Set(servers.filter((x) => !x.invite).map((x) => x.id)), [servers]);
   // A folha fala com o servidor da linha, não com o ativo: não precisa trocar de servidor.
   const abrirWorktree = useCallback((s: AggSession, path: string) => {
     const server = useServers.getState().servers.find((x) => x.id === s.serverId);
@@ -371,7 +373,7 @@ export function SessionList({ onClose, onOpenServers }: Props) {
             onExcluir={excluir}
             onRenomear={setRenomeando}
             onResume={retomar}
-            onWorktree={abrirWorktree}
+            onWorktree={proprios.has(item.serverId) ? abrirWorktree : undefined}
           />
         )}
         ListEmptyComponent={busca ? vazio(m.lista_vazia_filtro(), null, true) : vazio(m.lista_nenhuma_ativa(), null)}
