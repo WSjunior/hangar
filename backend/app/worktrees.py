@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -219,8 +220,18 @@ def locate(provider: str, cwd: str | None, jsonl: str | None) -> Location:
     return Location(branch, wt, root if wt else None, False)
 
 
+def _git(cwd: str, *args: str) -> subprocess.CompletedProcess:
+    """`_run` para a situação: timeout de uma worktree lenta degrada o campo dela (falha comum),
+    nunca derruba a lista inteira."""
+    try:
+        return _run(cwd, *args)
+    except GitError as e:
+        _log.warning("worktrees: git %s em %s falhou: %s", args[0], cwd, e.detail)
+        return subprocess.CompletedProcess(args, 1, "", e.detail)
+
+
 def _base_of(path: str, branch: str, main: str) -> str | None:
-    p = _run(path if os.path.isdir(path) else main, "config", "--get", f"branch.{branch}.hangar-base")
+    p = _git(path if os.path.isdir(path) else main, "config", "--get", f"branch.{branch}.hangar-base")
     if p.returncode == 0 and p.stdout.strip():
         return p.stdout.strip()
     # Worktree criada fora do Hangar: compara com a branch da pasta principal.
@@ -228,13 +239,18 @@ def _base_of(path: str, branch: str, main: str) -> str | None:
 
 
 def is_merged(cwd: str, branch: str, base: str) -> bool:
-    if _run(cwd, "merge-base", "--is-ancestor", branch, base).returncode == 0:
+    # Worktree recém-criada aponta pro mesmo commit da base: ancestral trivial, não mesclada.
+    # ponytail: branch sem uso cuja base andou lê como mesclada (apagar não perde nada), e merge
+    # local por fast-forward só lê como mesclada depois que a base anda.
+    tips = _git(cwd, "rev-parse", branch, base)
+    same = tips.returncode == 0 and len(set(tips.stdout.split())) == 1
+    if not same and _git(cwd, "merge-base", "--is-ancestor", branch, base).returncode == 0:
         return True
     # Squash do GitLab não deixa ancestral; o sinal é a branch ter tido upstream e ele ter sumido
     # do servidor (apagado no merge do MR), visto após `fetch --prune`.
-    if _run(cwd, "config", "--get", f"branch.{branch}.merge").returncode != 0:
+    if _git(cwd, "config", "--get", f"branch.{branch}.merge").returncode != 0:
         return False
-    return _run(cwd, "rev-parse", "--abbrev-ref", f"{branch}@{{upstream}}").returncode != 0
+    return _git(cwd, "rev-parse", "--abbrev-ref", f"{branch}@{{upstream}}").returncode != 0
 
 
 def _gitdir_branch(main: str, path: str) -> str | None:
@@ -252,7 +268,7 @@ def _gitdir_branch(main: str, path: str) -> str | None:
 
 def _ignored_lost(path: str, main: str) -> list[str]:
     """Arquivos ignorados (pastas nunca) que só existem aqui; cópia idêntica à da principal não se perde."""
-    p = _run(path, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
+    p = _git(path, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
     out = []
     for rel in p.stdout.split("\0") if p.returncode == 0 else []:
         if not rel or rel.endswith("/"):
@@ -267,20 +283,23 @@ def _ignored_lost(path: str, main: str) -> list[str]:
     return sorted(out)
 
 
-def _closed_count(path: str) -> int:
+def _closed_count(path: str, live: set[str]) -> int:
+    """Conversas guardadas na pasta, menos as das sessões vivas dentro dela."""
     from app.archive import _contas
     from app.registry import sanitize_cwd
     n = 0
     for _cfg, _rot, base in _contas():
-        n += len(list((base / sanitize_cwd(path)).glob("*.jsonl")))
+        n += sum(1 for f in (base / sanitize_cwd(path)).glob("*.jsonl") if os.path.realpath(f) not in live)
     return n
 
 
-def _inside(s, path: str) -> bool:
-    if getattr(s, "worktree_path", None) == path:
+def _inside(s, real: str) -> bool:
+    """Por realpath: home atrás de symlink dá dois textos para a mesma pasta."""
+    wt = getattr(s, "worktree_path", None)
+    if wt and os.path.realpath(wt) == real:
         return True
-    cwd = s.cwd or ""
-    return cwd == path or cwd.startswith(path.rstrip("/") + "/")
+    cwd = os.path.realpath(s.cwd) if s.cwd else ""
+    return cwd == real or cwd.startswith(real.rstrip("/") + "/")
 
 
 def status(path: str, sessions=()) -> dict:
@@ -292,19 +311,21 @@ def status(path: str, sessions=()) -> dict:
     cwd = path if exists else main
     ahead = 0
     if branch and base:
-        c = _run(cwd, "rev-list", "--count", f"{base}..{branch}")
+        c = _git(cwd, "rev-list", "--count", f"{base}..{branch}")
         ahead = int(c.stdout.strip() or 0) if c.returncode == 0 else 0
     dirty = 0
     if exists:
-        s = _run(path, "status", "--porcelain")
+        s = _git(path, "status", "--porcelain")
         dirty = sum(1 for line in s.stdout.splitlines() if line.strip()) if s.returncode == 0 else 0
+    real = os.path.realpath(path)
+    inside = [s for s in sessions if _inside(s, real)]
     return {
         "path": path, "repo": main, "exists": exists, "branch": branch, "base": base,
         "merged": bool(branch and base and branch != base and is_merged(cwd, branch, base)),
         "ahead": ahead, "dirty": dirty,
         "ignored": _ignored_lost(path, main) if exists else [],
-        "sessions": sorted(s.name for s in sessions if _inside(s, path)),
-        "closed": _closed_count(path),
+        "sessions": sorted(s.name for s in inside),
+        "closed": _closed_count(path, {os.path.realpath(s.jsonl) for s in inside if s.jsonl}),
     }
 
 
@@ -324,14 +345,20 @@ def _main_of_missing(path: str) -> str:
     return path
 
 
-def list_all(cwds, sessions) -> list[dict]:
+def list_all(cwds, sessions, roots=None) -> list[dict]:
+    """Worktrees de cada repo principal visto nas pastas. `roots`: só repos dentro delas (o
+    principal sai do ponteiro `.git` da worktree e pode estar fora da raiz que liberou a pasta)."""
+    # ponytail: várias chamadas git por worktree a cada pedido, sem cache; TTL curto se a tela
+    # passar a consultar em intervalo.
     mains: set[str] = set()
-    for c in cwds:
+    for c in set(cwds):
         root = repo_root_of(c) if c else None
         if root:
             mains.add(main_repo_of(root))
     out = []
     for main in sorted(mains):
+        if roots is not None and not any(Path(os.path.realpath(main)).is_relative_to(r) for r in roots):
+            continue
         paths = worktree_paths(main)
         if paths:
             out.append({"repo": main, "worktrees": [status(p, sessions) for p in paths]})

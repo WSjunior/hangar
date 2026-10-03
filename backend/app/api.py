@@ -9004,13 +9004,21 @@ async def worktrees_list():
     cwds = [s.cwd for s in sessions] + [f.cwd for f in folders if f.cwd and f.mtime >= corte]
     roots = allowed_roots()
     allowed = [c for c in cwds if c and any(Path(os.path.realpath(c)).is_relative_to(r) for r in roots)]
-    return {"repos": await asyncio.to_thread(worktrees.list_all, allowed, sessions)}
+    return {"repos": await asyncio.to_thread(worktrees.list_all, allowed, sessions, roots)}
+
+
+def _allowed_worktree(path: str) -> str:
+    path = _allowed_repo(path)
+    # Pasta que existe mas não é raiz de repo/worktree daria uma situação inventada.
+    if os.path.isdir(path) and not os.path.exists(os.path.join(path, ".git")):
+        raise HTTPException(404, detail="não é um repositório git")
+    return path
 
 
 @app.get("/api/worktrees/detail", dependencies=[Depends(require_auth)])
 async def worktrees_detail(path: str):
     _no_guest()
-    path = await asyncio.to_thread(_allowed_repo, path)
+    path = await asyncio.to_thread(_allowed_worktree, path)
     sessions = await asyncio.to_thread(registry.list)
     return await asyncio.to_thread(worktrees.status, path, sessions)
 
@@ -9023,7 +9031,7 @@ class WorktreeRepoBody(_StrictBody):
 async def worktrees_fetch(body: WorktreeRepoBody):
     _no_guest()
     try:
-        await asyncio.to_thread(worktrees.fetch, _allowed_repo(body.repo))
+        await asyncio.to_thread(lambda: worktrees.fetch(_allowed_repo(body.repo)))
     except GitError as exc:
         raise HTTPException(exc.status, detail=exc.detail) from None
     return {"ok": True}

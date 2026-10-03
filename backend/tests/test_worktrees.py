@@ -253,3 +253,100 @@ def test_routes_refuse_outside_root(tmp_path, monkeypatch):
     r = TestClient(api.app).get("/api/worktrees/detail", params={"path": wt},
                                 headers={"Authorization": "Bearer t"})
     assert r.status_code == 403
+
+
+def test_fresh_worktree_is_not_merged(tmp_path):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    assert worktrees.status(wt)["merged"] is False
+    _commit(tmp_path / "repo-x", "a.txt")
+    assert worktrees.status(wt)["merged"] is False
+    git_ops._run(main, "merge", "-q", "--no-ff", "-m", "m", "x")
+    assert worktrees.status(wt)["merged"] is True
+
+
+def test_closed_skips_live_session_transcripts(tmp_path, monkeypatch):
+    from app import archive
+    from app.registry import sanitize_cwd
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    proj = tmp_path / "projects"
+    (proj / sanitize_cwd(wt)).mkdir(parents=True)
+    (proj / sanitize_cwd(wt) / "a.jsonl").write_text("{}\n")
+    (proj / sanitize_cwd(wt) / "b.jsonl").write_text("{}\n")
+    monkeypatch.setattr(archive, "_contas", lambda *_a: [(None, "", proj)])
+    live = SessionInfo(name="s1", cwd=wt, jsonl=str(proj / sanitize_cwd(wt) / "b.jsonl"))
+    st = worktrees.status(wt, [live])
+    assert st["sessions"] == ["s1"] and st["closed"] == 1
+
+
+def test_sessions_match_through_symlink(tmp_path):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    (tmp_path / "link").symlink_to(tmp_path)
+    s = SessionInfo(name="s1", cwd=str(tmp_path / "link" / "repo-x"))
+    assert worktrees.status(wt, [s])["sessions"] == ["s1"]
+
+
+def test_ignored_never_lists_folders(tmp_path):
+    main = _repo(tmp_path / "repo")
+    (tmp_path / "repo" / ".gitignore").write_text("cache\n")
+    _commit(tmp_path / "repo", ".gitignore")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    (tmp_path / "repo-x" / "cache").mkdir()
+    (tmp_path / "repo-x" / "cache" / "dado.bin").write_text("só aqui")
+    assert worktrees.status(wt)["ignored"] == []
+
+
+def test_status_survives_git_timeout(tmp_path, monkeypatch):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    (tmp_path / "repo-x" / "solto.txt").write_text("?")
+    real_run = worktrees._run
+
+    def slow(cwd, *args, **kw):
+        if args[0] == "status":
+            raise git_ops.GitError(504, "git timeout")
+        return real_run(cwd, *args, **kw)
+    monkeypatch.setattr(worktrees, "_run", slow)
+    out = worktrees.list_all([main], [])
+    assert out[0]["worktrees"][0]["dirty"] == 0
+
+
+def test_list_all_skips_repo_outside_roots(tmp_path):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    (tmp_path / "outra").mkdir()
+    assert worktrees.list_all([wt], [], roots=[tmp_path / "outra"]) == []
+    assert [r["repo"] for r in worktrees.list_all([wt], [], roots=[tmp_path])] == [main]
+
+
+def test_detail_on_plain_folder_is_404(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import api, fs
+    (tmp_path / "comum").mkdir()
+    monkeypatch.setattr(fs, "resolve_scan_roots", lambda _s: [tmp_path])
+    monkeypatch.setattr(api, "resolve_scan_roots", lambda _s: [tmp_path])
+    monkeypatch.setattr(api.settings, "auth_token", "t")
+    r = TestClient(api.app).get("/api/worktrees/detail", params={"path": str(tmp_path / "comum")},
+                                headers={"Authorization": "Bearer t"})
+    assert r.status_code == 404
+
+
+def test_guest_gets_403_on_every_route(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import api, guest_users
+    monkeypatch.setattr(guest_users, "_path_override", tmp_path / "guests.json")
+    guest_users._reset()
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    monkeypatch.setattr(api.settings, "auth_token", "secret")
+    _, tok = guest_users.create("bia", str(tmp_path), False, True)
+    h = {"Authorization": f"Bearer {tok}"}
+    c = TestClient(api.app)
+    try:
+        assert c.get("/api/worktrees", headers=h).status_code == 403
+        assert c.get("/api/worktrees/detail", params={"path": wt}, headers=h).status_code == 403
+        assert c.post("/api/worktrees/fetch", json={"repo": main}, headers=h).status_code == 403
+    finally:
+        guest_users._reset()
