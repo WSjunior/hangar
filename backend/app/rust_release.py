@@ -222,6 +222,7 @@ def fetch(base_url: str | None = None, dest: Path | None = None) -> list[str] | 
     url = url.rstrip("/")
     dest = dest or bin_dir()
     ext = ".exe" if plat.startswith("windows") else ""
+    branch_tag = None   # preenchido quando a branch não tem release e caímos na da main
     try:
         try:
             manifest = json.loads(_get(f"{url}/server-latest.json", _MANIFEST_DEADLINE))
@@ -230,19 +231,31 @@ def fetch(base_url: str | None = None, dest: Path | None = None) -> list[str] | 
                 raise
             # O server.yml só publica a branch quando crates/ muda: sem release própria, vale a da main.
             diag.registrar(_EVENT, "aviso", codigo="sem_release_da_branch", tag=tag)
-            tag, url = MAIN_TAG, f"{RELEASES_URL}/{MAIN_TAG}"
+            branch_tag, tag, url = tag, MAIN_TAG, f"{RELEASES_URL}/{MAIN_TAG}"
             manifest = json.loads(_get(f"{url}/server-latest.json", _MANIFEST_DEADLINE))
         files = manifest["files"]
         # Só vai ao diário, para diagnosticar versão do Python diferente da do binário.
         commit = str(manifest.get("commit", ""))[:40]
         dest.mkdir(parents=True, exist_ok=True)
     except (*_DOWNLOAD_ERRORS, KeyError, TypeError) as e:
-        diag.registrar("hangar_server.baixar", "erro", etapa="manifesto", **diag.erro_campos(e))
+        diag.registrar("hangar_server.baixar", "erro", etapa="manifesto", tag=tag, **diag.erro_campos(e))
         return [f"binários Rust não baixados: não consegui ler o manifesto da release ({e})"]
+    avisos, kept, installed = [], [], []
     for name in NAMES:
-        _sweep_old(dest / f"{name}{ext}")
-    avisos = [aviso for name in NAMES
-              if (aviso := _fetch_one(url, files, plat, name, dest / f"{name}{ext}", commit, tag))]
+        target = dest / f"{name}{ext}"
+        _sweep_old(target)
+        # Sem a release da branch, o binário instalado pode ser o dela: o da main só preenche falta.
+        if branch_tag and not _free(target):
+            kept.append(name)
+            continue
+        if aviso := _fetch_one(url, files, plat, name, target, commit, tag):
+            avisos.append(aviso)
+        elif branch_tag:
+            installed.append(name)
+    if kept:
+        avisos.append(f"release {branch_tag} ausente; mantive os binários instalados ({', '.join(kept)})")
+    if installed:
+        avisos.append(f"release {branch_tag} ausente; instalei os da main ({', '.join(installed)})")
     for aviso in avisos:
         _log.warning(aviso)
     return avisos

@@ -358,10 +358,29 @@ def test_branch_without_release_falls_back_to_main_and_logs_it(release, tmp_path
     monkeypatch.setattr(rust_release, "RELEASES_URL", url)
     monkeypatch.delenv("HANGAR_SERVER_RELEASE_URL", raising=False)
     _branch(monkeypatch, "feature/x\n")
-    assert rust_release.fetch(dest=tmp_path / "bin") == []
+    dest = tmp_path / "bin"
+    dest.mkdir()
+    (dest / "hangar-server").write_bytes(b"da branch")
+    assert rust_release.fetch(dest=dest) == [
+        "release server-feature-x ausente; mantive os binários instalados (hangar-server)",
+        "release server-feature-x ausente; instalei os da main (hangar-cano)",
+    ]
     assert pedidos[:2] == ["/server-feature-x/server-latest.json", "/server-latest/server-latest.json"]
+    assert (dest / "hangar-server").read_bytes() == b"da branch"
+    assert (dest / "hangar-cano").read_bytes() == CANO
     assert ("hangar_server.baixar", "aviso", {"codigo": "sem_release_da_branch", "tag": "server-feature-x"}) in events
+    assert [e[2]["detalhe"] for e in events if e[2].get("codigo") == "trocado"] == ["hangar-cano"]
     assert all(e[2]["tag"] == "server-latest" for e in events if e[2].get("codigo") == "trocado")
+
+
+def test_branch_fallback_whose_main_manifest_fails_logs_the_tag(release, tmp_path, monkeypatch, events):
+    url, _, _ = release
+    monkeypatch.setattr(rust_release, "RELEASES_URL", url)
+    monkeypatch.delenv("HANGAR_SERVER_RELEASE_URL", raising=False)
+    _branch(monkeypatch, "feature/x\n")
+    avisos = rust_release.fetch(dest=tmp_path / "bin")
+    assert len(avisos) == 1 and "manifesto" in avisos[0]
+    assert any(e[2].get("etapa") == "manifesto" and e[2].get("tag") == "server-latest" for e in events)
 
 
 def test_main_release_404_is_a_plain_warning(release, tmp_path, monkeypatch, events):
