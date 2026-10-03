@@ -50,6 +50,31 @@ if ($script:temLog) {
 function Pausa-Log  { if ($script:temLog) { try { Stop-Transcript | Out-Null } catch { } } }
 function Retoma-Log { if ($script:temLog) { try { Start-Transcript -Path $logInstall -Append | Out-Null } catch { } } }
 
+# Idempotente: roda antes da pausa final e de novo no finally.
+function Liberar-Instalacao {
+    try {
+        foreach ($taskName in @($script:pausedRecovery.Keys)) {
+            # Tarefa que nao existe mais nao tem o que repor (e um erro aqui, no finally de tudo,
+            # mascararia a falha que trouxe a instalacao ate aqui).
+            if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+                Restaurar-Recuperacao $taskName $script:pausedRecovery[$taskName]
+            }
+        }
+        $script:pausedRecovery.Clear()
+    } finally {
+        if ($script:installLocked) { $script:installMutex.ReleaseMutex(); $script:installLocked = $false }
+        if ($script:installMutex) { $script:installMutex.Dispose(); $script:installMutex = $null }
+    }
+}
+
+# A janela esperando Enter nao segura a trava: atualizador e vigia ficariam barrados ate alguem
+# fecha-la. Pausa so com console interativo: com stdin de pipe o Read-Host volta na hora, e no
+# -Update travaria um `git pull` esperando tecla.
+function Pausa-Fim {
+    Liberar-Instalacao
+    if ($script:Interativo -and -not $Update) { Read-Host '  Enter pra fechar' | Out-Null }
+}
+
 function Titulo($m) {
     # Título numerado ("3/8 ...", "5d/8 ...") ganha a barra de progresso; os demais seguem sem.
     if ($m -match '^(\d+)[a-z]?/8\s') {
@@ -85,7 +110,7 @@ function Pare($mensagem, $dicas) {
     Nota 'instalacao interrompida neste passo. Re-rodar continua de onde parou.'
     # Sem a pausa, a janela aberta por duplo clique FECHA e ninguém lê o motivo — o mesmo
     # cuidado do Read-Host do fim.
-    if ($script:Interativo -and -not $Update) { Read-Host '  Enter pra fechar' | Out-Null }
+    Pausa-Fim
     Pausa-Log
     exit 1
 }
@@ -2388,7 +2413,7 @@ if ($pendencias.Count -gt 0) {
 "@
     # A mesma pausa do fim feliz: sem ela, a janela aberta por duplo clique fecha no exit e
     # ninguem le o que faltou.
-    if ($script:Interativo -and -not $Update) { Read-Host '  Enter pra fechar' | Out-Null }
+    Pausa-Fim
     Pausa-Log
     exit 1
 }
@@ -2473,21 +2498,8 @@ Write-Host ""
 # Pausa SO com console interativo: com o stdin vindo de um pipe (irm|iex chamado por outro
 # processo, SSH, tarefa agendada) o Read-Host voltaria na hora e a pausa nao seguraria nada; e no
 # -Update ela travaria um `git pull` esperando por uma tecla que ninguem vai apertar.
-if ($script:Interativo -and -not $Update) {
-    Read-Host '  Enter pra fechar' | Out-Null
-}
+Pausa-Fim
 Pausa-Log
 } finally {
-    try {
-        foreach ($taskName in $pausedRecovery.Keys) {
-            # Tarefa que nao existe mais nao tem o que repor (e um erro aqui, no finally de tudo,
-            # mascararia a falha que trouxe a instalacao ate aqui).
-            if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
-                Restaurar-Recuperacao $taskName $pausedRecovery[$taskName]
-            }
-        }
-    } finally {
-        if ($installLocked) { $installMutex.ReleaseMutex() }
-        if ($installMutex) { $installMutex.Dispose() }
-    }
+    Liberar-Instalacao
 }
