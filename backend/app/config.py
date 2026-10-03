@@ -13,6 +13,11 @@ _LOOPBACK = {"127.0.0.1", "localhost", "::1", "0.0.0.0", "auto"}
 _NOME_DE_BRANCH = re.compile(r"[A-Za-z0-9._/-]{1,100}")
 
 
+def valid_update_branch(value: str) -> bool:
+    return not value or bool(_NOME_DE_BRANCH.fullmatch(value) and ".." not in value
+                             and not value.startswith("-"))
+
+
 class ConfigDirInfo(BaseModel):
     path: str
     label: str
@@ -297,14 +302,14 @@ class Settings(BaseSettings):
     # CP_UPDATE_BRANCH: branch que o Atualizar segue no lugar da main, pra testar uma versão em
     # desenvolvimento no app de verdade. Vazio = main.
     update_branch: str = ""
+    update_last_branch: str = ""
 
-    @field_validator("update_branch", mode="before")
+    @field_validator("update_branch", "update_last_branch", mode="before")
     @classmethod
     def _branch_valida(cls, v: object) -> object:
         # O nome vai pro argv do git: inválido vira vazio (main) e fica registrado, nunca derruba o import.
         texto = v.strip() if isinstance(v, str) else ""
-        if not texto or (_NOME_DE_BRANCH.fullmatch(texto) and ".." not in texto
-                         and not texto.startswith("-")):
+        if valid_update_branch(texto):
             return texto
         logging.getLogger("hangar.config").warning("CP_UPDATE_BRANCH invalido (%r): o Atualizar segue a main", texto)
         from app import diag
@@ -361,6 +366,7 @@ DESCRICAO_DE_CAMPO: dict[str, str] = {
     "forwarded_allow_ips": "forwarded_allow_ips",
     "deploy_secret": "deploy_secret",
     "update_branch": "update_branch",
+    "update_last_branch": "update_last_branch",
 }
 
 # Aqui o valor NUNCA sai, nem mascarado — só `definida`. É a diferença desta lista pro `campos` do

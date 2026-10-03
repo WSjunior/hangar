@@ -1892,6 +1892,7 @@
   "config_server_env_forwarded_allow_ips": "Proxy IP the backend trusts to learn the real caller address and HTTPS. `*` trusts anyone — only if nothing reaches the port directly.",
   "config_server_env_deploy_secret": "Secret of the GitHub webhook that triggers the automatic deploy on a push to main. Empty = endpoint off.",
   "config_server_env_update_branch": "Branch the Update button follows. Empty = main. For testing a version in development.",
+  "config_server_env_update_last_branch": "Last branch selected for the test channel, kept when returning to main.",
   "config_server_env_alerta_codex_sync": "It is off here, so it overrides the Codex automatic sync in Harnesses: turning that on has no effect while this variable is not back to 1. Automations off cancels it too.",
   "config_server_sim": "yes",
   "config_server_nao": "no",

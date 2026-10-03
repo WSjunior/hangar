@@ -1084,7 +1084,7 @@ def _kw_destacado() -> dict:
     return {"start_new_session": True}   # setsid: sai do grupo de processos do backend
 
 
-def iniciar(porta: int = 8765) -> dict:
+def iniciar(porta: int = 8765, *, expected_branch: str | None = None) -> dict:
     """Lança a atualização fora deste processo e devolve na hora.
 
     Fora do processo porque ela reinicia o backend — dentro, ela se mataria no meio. `setsid` no
@@ -1093,6 +1093,10 @@ def iniciar(porta: int = 8765) -> dict:
     """
     if not _tomar_a_vez():
         return {"ok": False, "erro": "ja_rodando"}
+    # O automático pode ter aprovado a main antes de o dono trocar de canal.
+    if expected_branch is not None and alvo() != expected_branch:
+        _soltar_a_vez()
+        return {"ok": False, "erro": "canal_mudou"}
 
     # `setsid` NÃO basta, e por pouco: ele tira o filho da sessão/grupo de processos, não do
     # **cgroup**. Como este `Popen` acontece dentro do worker do FastAPI, o processo da atualização
