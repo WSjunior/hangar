@@ -165,20 +165,34 @@ impl CanoConnection {
                         if let Some(value) = value {
                             let event = match value["type"].as_str() {
                                 Some("cano_output") => {
-                                    let Some(raw) = value["frame"].as_str().filter(|r| r.len() <= MAX_FRAME) else { return };
-                                    let Ok(frame) = serde_json::from_str::<Value>(raw) else { return };
-                                    if !frame.is_object() { return; }
+                                    let Some(raw) = value["frame"].as_str().filter(|r| r.len() <= MAX_FRAME) else {
+                                        tracing::warn!("cano_output com envelope inválido; leitor encerrado");
+                                        let _ = events.send(IoEvent::End { code:None }).await; return;
+                                    };
+                                    let frame = match serde_json::from_str::<Value>(raw) {
+                                        Ok(frame) if frame.is_object()=>frame,
+                                        _=>{ tracing::warn!("mensagem da CLI fora do JSON esperado; leitura continua"); continue; },
+                                    };
                                     IoEvent::Line(frame)
                                 }
                                 Some("cano_input_ack") => {
-                                    let Some(operation_id) = value["operation_id"].as_str() else { return };
-                                    let Ok(outcome) = serde_json::from_value::<WriteOutcome>(value["outcome"].clone()) else { return };
+                                    let Some(operation_id) = value["operation_id"].as_str() else {
+                                        tracing::warn!("ACK sem identificador; leitor encerrado");
+                                        let _ = events.send(IoEvent::End { code:None }).await; return;
+                                    };
+                                    let Ok(outcome) = serde_json::from_value::<WriteOutcome>(value["outcome"].clone()) else {
+                                        tracing::warn!("ACK com resultado inválido; leitor encerrado");
+                                        let _ = events.send(IoEvent::End { code:None }).await; return;
+                                    };
                                     if pending.lock().unwrap().remove(operation_id).is_none() && !timed_out.remove(operation_id) { continue; }
                                     IoEvent::WriteAck { operation_id: operation_id.to_owned(), outcome }
                                 }
                                 Some("cano_stderr") => IoEvent::Stderr(value["linha"].as_str().unwrap_or("").to_owned()),
                                 Some("cano_saiu") => IoEvent::End { code: value["rc"].as_i64() },
-                                _ => return,
+                                _ => {
+                                    tracing::warn!("envelope desconhecido do cano; leitor encerrado");
+                                    let _ = events.send(IoEvent::End { code:None }).await; return;
+                                },
                             };
                             let end = matches!(&event, IoEvent::End { .. });
                             if events.send(event).await.is_err() || end { return; }

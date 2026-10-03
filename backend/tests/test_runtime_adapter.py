@@ -386,3 +386,82 @@ def test_later_rollout_path_rebinds_same_conversation(tmp_path, monkeypatch):
         assert slot.binding.generation == 1
     finally:
         coordinator.close_python_leases()
+
+
+def test_v1_control_waits_for_cli_reply_without_inventing_ack(tmp_path, monkeypatch):
+    from app.runtime_adapter import LegacyIO, _legacy_operation
+    from app.runtime_coordinator import Binding, RuntimeCoordinator
+    coordinator = RuntimeCoordinator()
+    monkeypatch.setattr(runtime_coordinator, "_current", coordinator)
+    slot = coordinator.register(Binding("session", "key", "codex", True, {"key":"key"},
+        str(tmp_path / "chat"), tmp_path / "projection", tmp_path / "state", tmp_path / "lease", 1))
+    async def scenario():
+        io = LegacyIO(coordinator)
+        endpoint = SimpleNamespace(runtime_acks={})
+        context = {"operation_id":"v1-control", "command":{"kind":"list_models", "payload":{}}}
+        token = _legacy_operation.set(context)
+        coordinator.legacy_active.add("v1-control")
+        writes = []
+        class Writer:
+            def write(self, raw):
+                writes.append(raw)
+            async def drain(self):
+                pass
+        try:
+            ticket = await io.write("session", endpoint, Writer(), {"id":"request", "method":"model/list", "params":{}}, 1)
+            assert slot.store.state["operations"][ticket.phase_id]["status"] == "unknown"
+            await io.reply("session", endpoint, {"id":"request", "result":{"data":[]}})
+            await io.finish_call("session", context)
+            assert slot.store.state["operations"]["v1-control"]["status"] == "accepted"
+            assert len(writes) == 1 and b"cano_input" not in writes[0]
+        finally:
+            coordinator.legacy_active.discard("v1-control")
+            _legacy_operation.reset(token)
+    try:
+        asyncio.run(scenario())
+    finally:
+        coordinator.close_python_leases()
+
+
+def test_v1_prompt_stays_unknown_until_transcript_proof(tmp_path, monkeypatch):
+    import json
+    from app.runtime_adapter import LegacyIO, LegacyBridge, _legacy_operation
+    from app.runtime_coordinator import Binding, RuntimeCoordinator
+    path = tmp_path / "chat.jsonl"
+    path.touch()
+    coordinator = RuntimeCoordinator()
+    monkeypatch.setattr(runtime_coordinator, "_current", coordinator)
+    slot = coordinator.register(Binding("session", "key", "claude", True, {"key":"key", "session_id":"sid"},
+        str(path), tmp_path / "projection", tmp_path / "state", tmp_path / "lease", 1))
+    async def scenario():
+        io = LegacyIO(coordinator)
+        await io._exec("session", {"kind":"append", "text":"Olá", "delivered":False, "ts":None,
+            "pre_transcript":False, "entry_id":"entry"})
+        context = {"operation_id":"entry", "entry_id":"entry", "command":{"kind":"input", "payload":{"text":"Olá"}}}
+        token = _legacy_operation.set(context)
+        coordinator.legacy_active.add("entry")
+        writes = []
+        class Writer:
+            def write(self, raw):
+                writes.append(raw)
+            async def drain(self):
+                pass
+        try:
+            await io.write("session", SimpleNamespace(runtime_acks={}), Writer(),
+                {"type":"user", "message":{"role":"user", "content":"Olá"}}, 1)
+            with pytest.raises(RuntimeError):
+                await io.finish_call("session", context)
+            assert slot.store.state["operations"]["entry"]["status"] == "unknown"
+            with pytest.raises(ValueError):
+                await io._exec("session", {"kind":"set_delivered", "entry_id":"entry", "value":False, "steered":False})
+            path.write_text(json.dumps({"type":"user", "uuid":"echo", "message":{"role":"user", "content":"Olá"}}) + "\n")
+            assert (await LegacyBridge(coordinator, {}).confirm(slot.binding.descriptor()))["confirmed"] == 1
+            assert slot.store.state["rows"][0]["confirmed"]
+            assert len(writes) == 1
+        finally:
+            coordinator.legacy_active.discard("entry")
+            _legacy_operation.reset(token)
+    try:
+        asyncio.run(scenario())
+    finally:
+        coordinator.close_python_leases()

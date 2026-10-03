@@ -195,6 +195,8 @@ class LegacyIO:
         finally:
             endpoint.runtime_acks.pop(ticket.phase_id, None)
         await self.finish_wire(ticket, outcome)
+        if version != 2:
+            return ticket
         if outcome != "written":
             raise RuntimeError("entrada não confirmada pelo cano; diário conservado")
         return ticket
