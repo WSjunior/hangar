@@ -443,7 +443,8 @@ class _CommittedIndex:
             try:
                 with open(path, "rb") as fh:
                     stat = os.fstat(fh.fileno())
-                    signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+                    signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns,
+                                 stat.st_ctime_ns)
                     if self.min_offset:
                         from app.conversation_history import verified_prefix, HistoryError
                         if stat.st_size < self.min_offset:
@@ -490,7 +491,9 @@ class _CommittedIndex:
                     current = os.stat(path)
                     if ((current.st_dev, current.st_ino) != signature[:2]
                             or current.st_size < stat.st_size
-                            or current.st_size == stat.st_size and current.st_mtime_ns != stat.st_mtime_ns):
+                            or current.st_size == stat.st_size and (
+                                current.st_mtime_ns != stat.st_mtime_ns
+                                or current.st_ctime_ns != stat.st_ctime_ns)):
                         raise OSError("transcript mudou durante a confirmação")
                     fh.seek(max(0, self.offset - 256))
                     self.anchor = fh.read(min(self.offset, 256))

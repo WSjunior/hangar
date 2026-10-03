@@ -385,6 +385,20 @@ def archived_image(session_id: str, event_id: str, index: int, codex_account: st
     if codex_account is not None and codex_account != owner.id:
         raise AccountError(409, "codex_account_archive_mismatch",
                            {"account_id": codex_account, "origin_account": owner.id})
+    rollout = Path(boundary.rollout_path)
+    if not rollout.is_file():
+        # O movimento nativo conserva o nome; só a pasta de arquivo desta conta participa.
+        candidates = []
+        for candidate in (owner.home / "archived_sessions").rglob(rollout.name):
+            candidate_owner = account_for_rollout(candidate)
+            if (candidate.is_file() and candidate_owner
+                    and os.path.realpath(candidate_owner.home) == os.path.realpath(owner.home)):
+                candidates.append(candidate)
+        candidates = list({os.path.realpath(candidate): candidate for candidate in candidates}.values())
+        if len(candidates) != 1:
+            raise HistoryError("o rollout arquivado não possui uma origem única nesta conta")
+        rollout = candidates[0]
+    verify_boundary(record, rollout)
     # O ID aponta para um registro e uma thread; não procura imagem noutras contas.
     return historical_image(record, event_id, index)
 

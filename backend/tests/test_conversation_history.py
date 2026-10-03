@@ -413,3 +413,102 @@ def test_complete_record_cannot_silently_lose_one_history_source(joined, monkeyp
     monkeypatch.setattr(history, "transfer_for_session", lambda *args, **kwargs: broken)
     with pytest.raises(history.HistoryError):
         history.session_transfer("s", str(joined.path), "codex")
+
+
+def test_ack_suffix_rewrite_before_anchor_with_restored_mtime_cannot_confirm_new_ok(joined):
+    import os
+    from app import sse
+    suffix = encoded(codex_message("ok", item_id="real-ok", day=4))
+    suffix += encoded(codex_message("padding" * 100, item_id="tail", role="assistant", day=4))
+    joined.path.write_bytes(joined.prefix + suffix)
+    options = history.confirmation_options("s", str(joined.path), "codex")
+    assert "ok" in pqueue.committed_user_lines(str(joined.path), "codex", **options)
+    before = joined.path.stat()
+    tail_anchor = joined.path.read_bytes()[-256:]
+    rewritten = suffix.replace(b'"text": "ok"', b'"text": "no"', 1)
+    joined.path.write_bytes(joined.prefix + rewritten)
+    os.utime(joined.path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert joined.path.read_bytes()[:len(joined.prefix)] == joined.prefix
+    assert joined.path.read_bytes()[-256:] == tail_anchor
+    assert joined.path.stat().st_size == before.st_size
+    assert joined.path.stat().st_mtime_ns == before.st_mtime_ns
+    queue = pqueue.PromptQueue("s")
+    queue.append("ok", delivered=True)
+    queue_before = queue.path.read_bytes()
+    sse._confirm_codex_queue("s", str(joined.path))
+    assert "ok" not in pqueue.committed_user_lines(str(joined.path), "codex", **options)
+    assert queue.path.read_bytes() == queue_before
+
+
+def archive_image_case(joined, monkeypatch, tmp_path):
+    from app import api, codex_contas
+    image = b"frozen-archive-image"
+    joined.rows[0]["message"]["content"] = [{"type": "text", "text": "imagem"}, {"type": "image", "source": {
+        "type": "base64", "media_type": "image/png", "data": base64.b64encode(image).decode()}}]
+    joined.snapshot.write_bytes(b"".join(map(encoded, joined.rows)))
+    joined.record = replace(joined.record, source=replace(joined.record.source,
+                            digest=hashlib.sha256(joined.snapshot.read_bytes()).hexdigest()))
+    monkeypatch.setattr(store, "_base", lambda: tmp_path / "image-boundary-transfers")
+    store.save_transfer(joined.record)
+    owner = SimpleNamespace(id="registered", home=Path(joined.record.destination_meta["codex_home"]))
+    monkeypatch.setattr(codex_contas, "account_for_rollout", lambda path: owner)
+    monkeypatch.setattr(history, "_verified_prefixes", {})
+    def no_global_archive_lookup(*args, **kwargs):
+        raise AssertionError("a imagem por ID não procura noutras contas")
+    monkeypatch.setattr(api, "archive_jsonl", no_global_archive_lookup)
+    client, headers = client_for(joined, monkeypatch)
+    event_id = f"transfer:{TRANSFER}:claude:{joined.collision}"
+    url = f"/api/archive/project/{THREAD}/transcript-image/{event_id}/0"
+    return client, headers, url, owner, image
+
+
+@pytest.mark.parametrize("change", ["rewrite", "truncate"])
+@pytest.mark.parametrize("reset_cache", [False, True])
+def test_archive_image_legacy_url_rejects_changed_prefix_even_after_cache_reset(joined, monkeypatch, tmp_path,
+                                                                               change, reset_cache):
+    client, headers, url, _, image = archive_image_case(joined, monkeypatch, tmp_path)
+    first = client.get(url, headers=headers)
+    assert first.status_code == 200 and first.content == image
+    if change == "rewrite":
+        joined.path.write_bytes(joined.path.read_bytes().replace(b'"text": "ok"', b'"text": "no"', 1))
+    else:
+        joined.path.write_bytes(joined.prefix[:-1])
+    if reset_cache:
+        monkeypatch.setattr(history, "_verified_prefixes", {})
+    assert client.get(url, headers=headers).status_code == 409
+
+
+def test_archive_image_legacy_url_follows_native_archive_move_only_within_registered_account(joined, monkeypatch, tmp_path):
+    client, headers, url, owner, image = archive_image_case(joined, monkeypatch, tmp_path)
+    destination = owner.home / "archived_sessions" / joined.path.name
+    destination.parent.mkdir(parents=True)
+    joined.path.rename(destination)
+    response = client.get(url, headers=headers)
+    assert response.status_code == 200
+    assert response.content == image and response.headers["content-type"] == "image/png"
+    assert not joined.path.exists()
+    destination.write_bytes(destination.read_bytes().replace(b'"text": "ok"', b'"text": "no"', 1))
+    monkeypatch.setattr(history, "_verified_prefixes", {})
+    assert client.get(url, headers=headers).status_code == 409
+
+
+def test_ack_recheck_rejects_suffix_rewrite_during_read_even_with_restored_mtime(joined, monkeypatch):
+    import os
+    from app.adapters.codex.rollout import parse_rollout_obj
+    suffix = encoded(codex_message("ok", item_id="real-ok", day=4))
+    suffix += encoded(codex_message("padding" * 100, item_id="tail", role="assistant", day=4))
+    joined.path.write_bytes(joined.prefix + suffix)
+    before = joined.path.stat()
+    options = history.confirmation_options("s", str(joined.path), "codex")
+    rewritten = False
+    def parse(row):
+        nonlocal rewritten
+        if not rewritten and (row.get("payload") or {}).get("id") == "real-ok":
+            rewritten = True
+            changed = suffix.replace(b'"text": "ok"', b'"text": "no"', 1)
+            joined.path.write_bytes(joined.prefix + changed)
+            os.utime(joined.path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        return parse_rollout_obj(row)
+    monkeypatch.setattr(pqueue._CommittedIndex, "_parser", lambda self: parse)
+    assert pqueue.committed_user_lines(str(joined.path), "codex", **options) is None
+    assert rewritten
