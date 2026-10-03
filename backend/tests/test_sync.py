@@ -14,7 +14,8 @@ def _make_client(tmp_path, monkeypatch, bind_ip="127.0.0.1", **extra_env):
     for k, v in extra_env.items():
         monkeypatch.setenv(k, str(v))
     import app.config as config
-    importlib.reload(config)
+    # Restaura o singleton que os outros módulos usam ao terminar este teste.
+    monkeypatch.setattr(config, "settings", config.Settings())
     from app import auth, runtime_config
     monkeypatch.setattr(auth, "settings", config.settings)
     monkeypatch.setattr(runtime_config, "settings", config.settings)
@@ -40,6 +41,15 @@ def test_status_unregistered(client):
     r = client.get("/api/sync/status")
     assert r.status_code == 200
     assert r.json() == {"enabled": True, "registered": False}
+
+
+def test_client_setup_restores_update_target(tmp_path, monkeypatch):
+    from app import atualizar, config
+    original = config.settings
+    monkeypatch.setattr(original, "update_branch", "test/original")
+    with pytest.MonkeyPatch.context() as patch:
+        _make_client(tmp_path, patch)
+    assert atualizar.alvo() == "test/original"
 
 
 def test_register_requires_bootstrap(client):
