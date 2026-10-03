@@ -329,11 +329,11 @@ impl Collector {
             let pricing = self.pricing.lock().unwrap();
             for scope in &active.claude {
                 tokens.extend(self.claude_rows(scope, since, true, &pricing)?);
-                usage.extend(index.read_usage(&claude_key(scope), since)?.into_iter().map(|row| (row, scope.account.clone())));
+                index.append_usage(&claude_key(scope), since, &mut usage, |row| (row, scope.account.clone()))?;
             }
         }
         for scope in &active.codex {
-            usage.extend(index.read_usage(&scope.account, since)?.into_iter().map(|row| (row, scope.account.clone())));
+            index.append_usage(&scope.account, since, &mut usage, |row| (row, scope.account.clone()))?;
         }
         Ok((usage, tokens))
     }

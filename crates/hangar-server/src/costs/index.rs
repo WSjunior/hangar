@@ -490,22 +490,51 @@ impl Index {
     }
 
     pub fn read_usage(&self, scope: &str, since: Option<&str>) -> Result<Vec<UsoLinha>, IndexError> {
-        self.with_recovery(|| self.read_usage_inner(scope, since))
+        let mut rows = Vec::new();
+        self.append_usage(scope, since, &mut rows, |row| row)?;
+        Ok(rows)
     }
 
-    fn read_usage_inner(&self, scope: &str, since: Option<&str>) -> Result<Vec<UsoLinha>, IndexError> {
-        let conn = self.connect()?;
+    pub(crate) fn append_usage<T>(
+        &self, scope: &str, since: Option<&str>, output: &mut Vec<T>,
+        mut decorate: impl FnMut(UsoLinha) -> T,
+    ) -> Result<(), IndexError> {
+        let checkpoint = output.len();
+        let result = self.with_recovery(|| {
+            // Uma tentativa condenada não pode misturar suas linhas com o banco reconstruído.
+            output.truncate(checkpoint);
+            self.append_usage_inner(scope, since, output, &mut decorate)
+        });
+        if result.is_err() { output.truncate(checkpoint); }
+        result
+    }
+
+    fn append_usage_inner<T>(
+        &self, scope: &str, since: Option<&str>, output: &mut Vec<T>,
+        decorate: &mut impl FnMut(UsoLinha) -> T,
+    ) -> Result<(), IndexError> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
         let (filter, values) = filters(Some(scope), since, None);
-        let mut stmt = conn.prepare(&format!("SELECT {USAGE_FIELDS} FROM uso WHERE {filter} ORDER BY rowid"))?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(values), |r| Ok(UsoLinha {
-            dia: r.get(0)?, cwd: r.get(1)?, model: r.get(2)?, tipo: r.get(3)?, nome: r.get(4)?,
-            plugin: r.get(5)?, detalhe: r.get(6)?, origem: r.get(7)?, chamadas: r.get(8)?,
-            ctx_chars: r.get(9)?, tokens_est: r.get(10)?, input: r.get(11)?, output: r.get(12)?,
-            cache_write: r.get(13)?, cache_read: r.get(14)?, cache_write_1h: r.get(15)?,
-            fast: r.get(16)?, ocupados: r.get(17)?, respostas: r.get(18)?, ocupados_eq: r.get(19)?,
-            fonte: r.get(20)?, subagente: r.get(21)?, session_id: r.get(22)?,
-        }))?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        // A reserva e as linhas precisam do mesmo snapshot diante de commits concorrentes.
+        let count: i64 = tx.query_row(&format!("SELECT COUNT(*) FROM uso WHERE {filter}"),
+            rusqlite::params_from_iter(values.iter()), |r| r.get(0))?;
+        let count = usize::try_from(count).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        output.reserve_exact(count);
+        {
+            let mut stmt = tx.prepare(&format!("SELECT {USAGE_FIELDS} FROM uso WHERE {filter} ORDER BY rowid"))?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), |r| Ok(UsoLinha {
+                dia: r.get(0)?, cwd: r.get(1)?, model: r.get(2)?, tipo: r.get(3)?, nome: r.get(4)?,
+                plugin: r.get(5)?, detalhe: r.get(6)?, origem: r.get(7)?, chamadas: r.get(8)?,
+                ctx_chars: r.get(9)?, tokens_est: r.get(10)?, input: r.get(11)?, output: r.get(12)?,
+                cache_write: r.get(13)?, cache_read: r.get(14)?, cache_write_1h: r.get(15)?,
+                fast: r.get(16)?, ocupados: r.get(17)?, respostas: r.get(18)?, ocupados_eq: r.get(19)?,
+                fonte: r.get(20)?, subagente: r.get(21)?, session_id: r.get(22)?,
+            }))?;
+            for row in rows { output.push(decorate(row?)); }
+        }
+        tx.commit()?;
+        Ok(())
     }
 }
 
@@ -796,6 +825,113 @@ fn filters(scope: Option<&str>, since: Option<&str>, file_id: Option<i64>) -> (S
 #[cfg(test)]
 mod recovery_tests {
     use super::*;
+
+    fn usage_fixture(index: &Index) -> Vec<UsoLinha> {
+        let rows = (1..=3).map(|n| UsoLinha {
+            dia: "2026-10-01".into(), cwd: "projeto".into(), model: "modelo".into(),
+            tipo: "ferramenta".into(), nome: format!("ação-{n}"), plugin: "extensão".into(),
+            detalhe: "detalhe".into(), origem: "origem".into(), chamadas: n, ctx_chars: 2 * n,
+            tokens_est: 3 * n, input: 4 * n, output: 5 * n, cache_write: 6 * n, cache_read: 7 * n,
+            cache_write_1h: 8 * n, fast: true, ocupados: 9 * n, respostas: 10 * n, ocupados_eq: 11 * n,
+            fonte: "fonte".into(), subagente: true, session_id: "sessão".into(),
+        }).collect::<Vec<_>>();
+        let conn = index.connect().unwrap();
+        conn.execute("INSERT INTO files(id, path, scope, versao) VALUES (1, 'fixture', 'scope', '1')", []).unwrap();
+        write_usage(&conn, 1, rows.clone()).unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+        rows
+    }
+
+    #[test]
+    fn usage_append_moves_complete_rows_in_order_and_preserves_the_existing_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::open(dir.path()).unwrap();
+        let rows = usage_fixture(&index);
+        let prefix = (UsoLinha { nome: "prefixo".into(), ..UsoLinha::default() }, "prévia".to_owned());
+        let mut output = vec![prefix.clone()];
+        index.append_usage("scope", Some("2026-10-01"), &mut output, |row| (row, "conta".to_owned())).unwrap();
+        assert_eq!(output, std::iter::once(prefix.clone()).chain(rows.into_iter().map(|row| (row, "conta".to_owned()))).collect::<Vec<_>>());
+        index.append_usage("scope", Some("2026-10-02"), &mut output, |row| (row, "vazia".to_owned())).unwrap();
+        assert_eq!(output.len(), 4);
+        assert_eq!(index.read_usage("outro", None).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn usage_append_keeps_one_snapshot_while_another_connection_commits_new_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::open(dir.path()).unwrap();
+        let expected = usage_fixture(&index);
+        let added = UsoLinha { nome: "nova após a contagem".into(), dia: "2026-10-01".into(), ..UsoLinha::default() };
+        let mut output = Vec::new();
+        let mut first = true;
+        index.append_usage("scope", None, &mut output, |row| {
+            if first {
+                first = false;
+                write_usage(&index.connect().unwrap(), 1, vec![added.clone()]).unwrap();
+            }
+            row
+        }).unwrap();
+        assert_eq!(output, expected);
+        let mut after = expected;
+        after.push(added);
+        assert_eq!(index.read_usage("scope", None).unwrap(), after);
+    }
+
+    #[test]
+    fn usage_append_discards_partial_rows_after_real_sqlite_conversion_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::open(dir.path()).unwrap();
+        usage_fixture(&index);
+        index.connect().unwrap().execute("UPDATE uso SET ctx_chars=x'ff' WHERE chamadas=2", []).unwrap();
+        let before = index.generation();
+        let prefix = (UsoLinha { nome: "prefixo".into(), ..UsoLinha::default() }, "conta".to_owned());
+        let mut output = vec![prefix.clone()];
+        let mut appended = 0;
+        let error = index.append_usage("scope", None, &mut output, |row| {
+            appended += 1;
+            (row, "nova".to_owned())
+        }).unwrap_err();
+        assert!(matches!(error, IndexError::Sqlite(rusqlite::Error::InvalidColumnType(9, _, _))));
+        assert_eq!(appended, 1, "a primeira linha é válida antes da coluna inválida");
+        assert_eq!(output, vec![prefix], "o destino não publica uma leitura parcial com erro");
+        assert_eq!(index.generation(), before, "erro de conversão não recria o banco");
+        assert!(index.read_usage("scope", None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn usage_append_discards_rows_from_the_condemned_attempt_before_recovery() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::open(dir.path()).unwrap();
+        usage_fixture(&index);
+        let conn = index.connect().unwrap();
+        let page: i64 = conn.query_row("SELECT rootpage FROM sqlite_master WHERE name='custo'", [], |r| r.get(0)).unwrap();
+        let size: i64 = conn.pragma_query_value(None, "page_size", |r| r.get(0)).unwrap();
+        drop(conn);
+        let before = index.generation();
+        let prefix = (UsoLinha { nome: "prefixo".into(), ..UsoLinha::default() }, "conta".to_owned());
+        let mut output = vec![prefix.clone()];
+        let mut appended = 0;
+        index.append_usage("scope", None, &mut output, |row| {
+            appended += 1;
+            if appended == 1 {
+                let mut file = fs::OpenOptions::new().write(true).open(&index.path).unwrap();
+                file.seek(SeekFrom::Start(((page - 1) * size) as u64)).unwrap();
+                file.write_all(&[0xff]).unwrap();
+                file.sync_all().unwrap();
+                let error = index.read_costs(None, None, None).unwrap_err();
+                assert!(matches!(error, IndexError::Sqlite(ref error) if error.sqlite_error_code() == Some(ErrorCode::DatabaseCorrupt)));
+                assert!(index.operations.lock().unwrap().pending);
+            }
+            (row, "condenada".to_owned())
+        }).unwrap();
+        assert_eq!(appended, 3, "a tentativa condenada realmente acrescentou linhas antes de repetir");
+        assert_eq!(output, vec![prefix], "o novo banco vazio não recebe linhas da tentativa anterior");
+        assert!(index.generation() > before);
+        assert!(index.read_usage("scope", None).unwrap().is_empty());
+        assert!(!index.operations.lock().unwrap().pending);
+    }
 
     #[test]
     fn real_sqlite_lock_and_disk_full_errors_do_not_remove_the_index() {

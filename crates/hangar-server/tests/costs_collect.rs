@@ -96,6 +96,63 @@ fn first_request_warms_and_reads_sources_accounts_and_usage() {
     assert_eq!(source.calls.load(Ordering::SeqCst), 1);
 }
 #[test]
+fn usage_direct_append_preserves_scope_order_accounts_and_every_row_field() {
+    use hangar_server::costs::index::Fold;
+    use hangar_server::costs::rows::{FoldOutput, UsoLinha};
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct UsageOnly { row: UsoLinha }
+    impl Fold for UsageOnly {
+        fn line(&mut self, _: &[u8]) {}
+        fn close(&mut self) -> FoldOutput {
+            FoldOutput { costs: vec![], usage: vec![self.row.clone()], areas: None }
+        }
+    }
+    let d = tempfile::tempdir().unwrap();
+    let base = d.path().join("base");
+    std::fs::create_dir(&base).unwrap();
+    let claude = vec![
+        ClaudeScope { root: base.join("z"), account: "anthropic:z".into(), label: "z".into() },
+        ClaudeScope { root: base.join("a"), account: "anthropic:a".into(), label: "a".into() },
+    ];
+    let codex = vec![
+        CodexScope { home: base.join("cz"), account: "codex:z".into(), label: "z".into() },
+        CodexScope { home: base.join("ca"), account: "codex:a".into(), label: "a".into() },
+    ];
+    for scope in &codex {
+        std::fs::create_dir_all(scope.home.join("sessions")).unwrap();
+        std::fs::write(scope.home.join("sessions/rollout-fixture.jsonl"), "{}\n").unwrap();
+    }
+    let source = Fixed::new(Ok(Scopes { claude: claude.clone(), codex: codex.clone(),
+        pi: vec![], kimi: None, repo: base.clone() }));
+    let c = collector(&base, source);
+    c.prepare(false).unwrap();
+    wait_ready(&c);
+    let keys = vec![format!("claude:{}", claude[0].root.display()),
+        format!("claude:{}", claude[1].root.display()), codex[0].account.clone(), codex[1].account.clone()];
+    let accounts = ["anthropic:z", "anthropic:a", "codex:z", "codex:a"];
+    let mut expected = Vec::new();
+    for (n, key) in keys.iter().enumerate() {
+        let row = UsoLinha {
+            dia: "2026-10-01".into(), cwd: "projeto".into(), model: "modelo".into(),
+            tipo: "ferramenta".into(), nome: format!("ação-{n}"), plugin: "extensão".into(),
+            detalhe: "detalhe".into(), origem: "origem".into(), chamadas: 1, ctx_chars: 2,
+            tokens_est: 3, input: 4, output: 5, cache_write: 6, cache_read: 7,
+            cache_write_1h: 8, fast: true, ocupados: 9, respostas: 10, ocupados_eq: 11,
+            fonte: "fonte".into(), subagente: true, session_id: "sessão".into(),
+        };
+        let path = base.join(format!("usage-{n}.jsonl"));
+        std::fs::write(&path, "{}\n").unwrap();
+        c.index().unwrap().try_sync_file(&path, &|_| UsageOnly { row: row.clone() },
+            "usage:1", key, "", &|_| vec![]).unwrap();
+        expected.push((row, accounts[n].to_owned()));
+    }
+    let (usage, tokens) = c.read_usage(Some("2026-10-01")).unwrap();
+    assert_eq!(usage, expected);
+    assert!(tokens.is_empty());
+    assert!(c.read_usage(Some("2026-10-02")).unwrap().0.is_empty());
+}
+
+#[test]
 fn missing_scopes_propagate_and_last_good_scopes_survive_failure() {
     let (_d, base) = fixtures_copy();
     let source = Fixed::new(Err(()));
