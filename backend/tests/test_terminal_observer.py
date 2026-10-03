@@ -1266,3 +1266,43 @@ def test_malformed_frame_cannot_report_recovery_before_validated_capture(monkeyp
             assert await t.capture("diagnostic-validation", 3.0) is not None
             assert entries[-1] == (("terminal_observer.recovered", "ok"), {"codigo": "rust_available"})
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("operation", ["payload", "start", "watch"])
+@pytest.mark.parametrize("error", [OSError, TimeoutError, RuntimeError])
+def test_old_resolver_error_does_not_charge_new_generation(monkeypatch, operation, error):
+    t = bridge()
+    t.configure("127.0.0.1:12345", "old-test-only")
+    monkeypatch.setattr(t, "TIMEOUT", 1)
+    monkeypatch.setattr(t, "HEARTBEAT", 0.01)
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def io(fn, *args):
+            entered.set()
+            await release.wait()
+            raise error("private-old-resolver")
+        monkeypatch.setattr(t, "_io", io)
+        source = t.lease("old-resolver", "claude", lambda: "binding")
+        source.binding, source.open = "binding", True
+        t._bindings[source.name] = ("claude", "binding")
+        if operation == "payload":
+            job = asyncio.create_task(source.payload("capture", 1.0))
+        elif operation == "start":
+            job = asyncio.create_task(source.start())
+        else:
+            job = asyncio.create_task(source.watch())
+        await entered.wait()
+        t.configure("127.0.0.1:23456", "new-test-only")
+        t._failure("new-failure-one")
+        t._failure("new-failure-two")
+        release.set()
+        if operation == "watch":
+            await asyncio.sleep(0)
+            job.cancel()
+            await asyncio.gather(job, return_exceptions=True)
+        else:
+            await asyncio.gather(job, return_exceptions=True)
+        assert t._failures == 2
+        assert t._available()
+    asyncio.run(run())
+

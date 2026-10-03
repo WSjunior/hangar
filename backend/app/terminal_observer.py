@@ -229,6 +229,7 @@ class Lease:
         return self
 
     async def start(self):
+        generation = _generation
         try:
             self.binding = self.binding_get()
             self.open = True
@@ -238,11 +239,13 @@ class Lease:
                     forget(self.name)
             await self.acquire()
         except Exception as exc:
-            _failure(f"lease_start_{type(exc).__name__}")
+            if generation == _generation:
+                _failure(f"lease_start_{type(exc).__name__}")
             try:
                 await self.close()
             except Exception as close_exc:
-                _failure(f"lease_close_{type(close_exc).__name__}")
+                if generation == _generation:
+                    _failure(f"lease_close_{type(close_exc).__name__}")
 
     async def __aexit__(self, *exc):
         _current.reset(self.token)
@@ -261,7 +264,8 @@ class Lease:
         try:
             target = await _io(tmux._pane_target, self.name)
         except (OSError, TimeoutError, _IoBusy) as exc:
-            _failure(f"terminal_target_{type(exc).__name__}")
+            if identity[3] == _generation:
+                _failure(f"terminal_target_{type(exc).__name__}")
             return None
         if identity != self.identity():
             return None
@@ -276,11 +280,13 @@ class Lease:
 
     async def watch(self):
         while self.open:
+            generation = _generation
             try:
                 await self.acquire()
             except Exception as exc:
                 # A falha não pode encerrar a renovação nem registrar conteúdo privado.
-                _failure(f"lease_watch_{type(exc).__name__}")
+                if generation == _generation:
+                    _failure(f"lease_watch_{type(exc).__name__}")
             await asyncio.sleep(HEARTBEAT)
 
 
