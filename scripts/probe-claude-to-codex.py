@@ -327,7 +327,12 @@ def create_source(root: Path, *, oversized: bool = False) -> tuple[Path, dict]:
     source.write_bytes(b"".join(json_bytes(entry) + b"\n" for entry in rows))
     if not oversized:
         (root / "artificial.png").write_bytes(image)
+    source_rows = {entry["uuid"]: entry for entry in rows if "uuid" in entry}
     return source, {"output": output, "arguments": arguments, "image": image,
+                    "history": {"pre_compaction": source_rows["old-user"]["message"]["content"][0]["text"],
+                                "instructions": source_rows["instructions"]["attachment"],
+                                "file": source_rows["file"]["attachment"],
+                                "unknown_call": source_rows["unknown-call"]["message"]["content"][0]},
                     "selected_uuids": sorted(entry["uuid"] for entry in rows
                                               if entry.get("uuid") not in {None, "fork", "summary"})}
 
@@ -431,6 +436,43 @@ def inspect_capture(request: dict, context, original: dict) -> dict:
     raw_items = json_bytes(actual)
     for name in ("rejected_fork", "summary"):
         require(MARKERS[name].encode() not in raw_items, f"Ramo descartado apareceu: {name}")
+    history = original["history"]
+    texts = [part["text"] for item in actual if item.get("type") == "message"
+             for part in item.get("content", [])
+             if part.get("type") in {"input_text", "output_text"} and isinstance(part.get("text"), str)]
+    pre_compaction = [text for text in texts if text == history["pre_compaction"]]
+    require(len(pre_compaction) == 1, "Texto integral anterior à compactação ausente, alterado ou duplicado")
+    historical_payloads = []
+    for text in texts:
+        start = text.find("{")
+        if start < 0:
+            continue
+        try:
+            payload = json.loads(text[start:])
+        except ValueError:
+            continue
+        if isinstance(payload, dict):
+            historical_payloads.append((text[:start], payload))
+    independent_history = {}
+    for name, expected in history.items():
+        if name == "pre_compaction":
+            captured = pre_compaction[0]
+            expected_bytes, captured_bytes = expected.encode(), captured.encode()
+        else:
+            matches = [(header, payload) for header, payload in historical_payloads if payload == expected]
+            require(len(matches) == 1, f"Conteúdo histórico original ausente, alterado ou duplicado: {name}")
+            header, captured = matches[0]
+            if name == "unknown_call":
+                label = header.casefold()
+                require("sem resultado" in label and "desconhecido" in label,
+                        "Chamada histórica não identifica ausência e desconhecimento do resultado")
+            expected_bytes, captured_bytes = json_bytes(expected), json_bytes(captured)
+        expected_hash, captured_hash = digest(expected_bytes), digest(captured_bytes)
+        require(captured_bytes == expected_bytes and captured_hash == expected_hash,
+                f"Bytes/digest históricos divergiram da fonte artificial: {name}")
+        independent_history[name] = {"original_bytes": len(expected_bytes), "captured_bytes": len(captured_bytes),
+                                     "original_sha256": expected_hash, "captured_sha256": captured_hash,
+                                     "byte_difference": len(captured_bytes) - len(expected_bytes)}
     call = next(item for item in actual if item.get("type") == "function_call" and item.get("call_id") == "read-call")
     output = next(item["output"] for item in actual if item.get("type") == "function_call_output" and item.get("call_id") == "read-call")
     require(json.loads(call["arguments"]) == original["arguments"], "Argumentos históricos alterados")
@@ -462,7 +504,7 @@ def inspect_capture(request: dict, context, original: dict) -> dict:
             "Não foi reconhecida ferramenta nativa no catálogo capturado")
     expected_items = [without_ids(item) for item in context.items]
     require(selected == expected_items, "Ordem/conteúdo integral divergiram")
-    return {"imported_item_count": len(selected), "positions": positions,
+    return {"imported_item_count": len(selected), "positions": positions, "independent_history": independent_history,
             "expected_projected_bytes": len(json_bytes(expected_items)),
             "captured_projected_bytes": len(json_bytes(selected)),
             "expected_projected_sha256": digest(json_bytes(expected_items)),
