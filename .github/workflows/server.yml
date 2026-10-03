@@ -60,6 +60,11 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - if: runner.os == 'macOS'
+        run: brew install tmux
       # O rustup do runner lê o crates/rust-toolchain.toml (1.98.1) no primeiro cargo.
       - uses: actions/cache@v4
         with:

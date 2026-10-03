@@ -120,11 +120,14 @@ for n, line in enumerate(sys.stdin, 2):
     assert_eq!(captured["started"], 42.5);
     assert_eq!(captured["text"], "ready\n\n\n\n");
     let pid = std::fs::read_to_string(dir.path().join("pids")).unwrap().trim().to_owned();
-    assert!(std::path::Path::new(&format!("/proc/{pid}")).exists());
+    let process_exists = || std::process::Command::new("kill").args(["-0", &pid])
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+        .status().is_ok_and(|status| status.success());
+    assert!(process_exists());
     for consumer in ["unknown", "state", "preview"] {
         let r = post(serde_json::json!({"op":"release", "consumer":consumer})).send().await.unwrap();
         assert_eq!(r.status(), StatusCode::OK);
-        assert_eq!(std::path::Path::new(&format!("/proc/{pid}")).exists(), consumer != "preview");
+        assert_eq!(process_exists(), consumer != "preview");
     }
     task.abort();
 }
