@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+import uuid
 from datetime import datetime
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from dataclasses import asdict
@@ -294,6 +295,9 @@ async def _lifespan(app: FastAPI):
     from app import diag_logging
     diag_logging.instalar()
     diag.registrar("backend.inicio", **diag.recursos())
+    from app import runtime_coordinator
+    runtime = runtime_coordinator.ensure()
+    await runtime.start_sessions({"claude":get_adapter(CLAUDE_HEADLESS), "codex":get_adapter("codex")})
     # Uma vez na subida, nunca por request. O Starlette roda cada rota `def` (sao 65 aqui) num
     # anyio.to_thread, cujo limiter default e de 40 tokens — e cada conexao de chat ainda segura
     # DOIS deles PERMANENTEMENTE, num awatch parado (transcript.py:408 e pqueue.py:366). Com ~20
@@ -469,6 +473,8 @@ async def _lifespan(app: FastAPI):
             yield
     finally:
         diag.registrar("backend.encerrando")
+        await runtime.shutdown()
+        await runtime.close_events()
         connect_task.cancel()
         await asyncio.gather(connect_task, return_exceptions=True)
         await connect_mod.stop()
@@ -1167,6 +1173,11 @@ def _drenar(name: str, jsonl: str, provider: str) -> int:
     O Claude sem terminal segue o mesmo caminho: seu provider e "claude", mas nao ha pane — o
     `terminal_input.drain` reivindicava a entrada e falhava ao resolver o pane, e o prompt ficava
     pendente ate alguem abrir o chat (o drain do SSE)."""
+    from app import runtime_coordinator
+    from app.runtime_adapter import run_sync
+    coordinator = runtime_coordinator.current()
+    if coordinator is not None and coordinator.managed_runtime(name):
+        return run_sync(lambda: coordinator.op(name, {"kind":"drain"}, uuid.uuid4().hex), coordinator.loop)["sent"]
     if provider == "codex":
         chave = "codex"
     elif _headless(name):
@@ -1216,6 +1227,15 @@ def _confirm_and_drain(name: str) -> None:
         if atual is not None and atual[0] is threading.current_thread():
             del _confirm_pend[name]
     try:
+        from app import runtime_coordinator
+        from app.runtime_adapter import run_sync
+        coordinator = runtime_coordinator.current()
+        if coordinator is not None and coordinator.managed_runtime(name):
+            async def confirm():
+                await coordinator.op(name, {"kind":"confirm"}, uuid.uuid4().hex)
+                await coordinator.op(name, {"kind":"drain"}, uuid.uuid4().hex)
+            run_sync(confirm, coordinator.loop)
+            return
         q = PromptQueue(name)
         if not any(r.get("delivered") is True and not r.get("confirmed") for r in q.load()):
             return  # nada a confirmar: nao paga registry nem o scan do transcript
@@ -2464,6 +2484,17 @@ _OCUPADA = {
 async def _motivo_ocupada(name: str, headless: bool) -> str | None:
     """Código de `_OCUPADA` dizendo por que a sessão não pode trocar de modo (None = ociosa)."""
     if headless:
+        from app.runtime_adapter import runtime_data
+        if (view := runtime_data(name)) is not None:
+            state = view["public_state"]
+            if not view.get("initialized"):
+                return "erro_sessao_iniciando"
+            if state.get("state") == "awaiting_input":
+                return "erro_sessao_esperando_resposta"
+            if state.get("state") == "working":
+                return "erro_sessao_trabalhando"
+            fila = await asyncio.to_thread(PromptQueue(name).load)
+            return "erro_fila_pendente" if any(not row.get("confirmed") and not row.get("saida_local") for row in fila) else None
         sess = get_adapter(CLAUDE_HEADLESS)._sessions.get(name)
         if sess is not None and sess.vivo:
             if sess.iniciando:
@@ -2530,8 +2561,13 @@ async def _durante_troca(name: str, troca):
     # revogaria o convite de uma sessão que continua viva. `changing_mode` a segura no meio.
     share_api.changing_mode.add(name)
     try:
+        from app import runtime_coordinator
+        coordinator = runtime_coordinator.current()
+        if coordinator is not None and coordinator.managed_queue(name):
+            return await coordinator.change(name, lambda: troca)
         return await troca
     finally:
+        troca.close()
         # Também na falha: uma troca que morreu no meio pode já ter mudado a identidade.
         try:
             def _move_life():
@@ -2870,9 +2906,7 @@ def _rename_session(name: str, body: RenameBody):
     _rename_guest_claim(name, new)
     from app.pqueue import PromptQueue
     try:
-        oq, nq = PromptQueue(name).path, PromptQueue(new).path
-        if oq.exists():
-            atomico.substituir(oq, nq)
+        PromptQueue(name).rename(new)
         # O dossiê da passagem de bastão é keyed por nome do MESMO jeito que a fila: sem migrar
         # junto, a sucessora renomeada fica com um kick-off apontando pro caminho antigo e o
         # `prune` apaga o arquivo em 7 dias por não achar sessão viva com aquele nome.
@@ -3088,6 +3122,14 @@ async def history(request: Request, response: Response, name: str, limit: int | 
     if not info or not info.jsonl:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "session or transcript not found"))
     from app.pqueue import historico_etag, merged_history
+    from app import runtime_coordinator
+    coordinator = runtime_coordinator.current()
+    if coordinator is not None and coordinator.managed_queue(name):
+        try:
+            await coordinator.op(name, {"kind":"ensure_projection"}, uuid.uuid4().hex)
+        except Exception as exc:
+            diag.registrar("runtime.history_failed", "erro", sessao=name, codigo=type(exc).__name__)
+            raise HTTPException(503, detail=erro("erro_envio_falhou", "projeção da fila indisponível; tente novamente")) from None
     # Entrar numa sessao e a leitura mais repetida do app, e quase sempre nada mudou desde a
     # ultima: medido em 06/09/2026 na `pr-junior` (transcript de 31,9 MB), a cauda custava 313 KB
     # POR ENTRADA pelo caminho do celular. O validador sai de dois `stat` -- barato aqui e, do lado
@@ -3646,6 +3688,13 @@ def _enviar_nativo(name: str, text: str) -> Optional[str]:
 def _ao_recibo_nativo(mid: str, estado: str, detalhe: str) -> None:
     """Recibo `peer_message_status` do receptor (retido/recusado): avisa a sessão remetente pelo
     caminho normal. Roda na thread do inbox; o envio vai pro loop do servidor."""
+    from app import runtime_coordinator
+    from app.runtime_adapter import run_sync
+    coordinator = runtime_coordinator.current()
+    if coordinator is not None and coordinator.loop is not None:
+        if run_sync(lambda: coordinator.native_receipt(mid, estado), coordinator.loop):
+            diag.registrar("recado.nativo.recibo", "aviso", codigo=estado or "delivered")
+            return
     info = _RECADOS_NATIVOS.pop(mid, None)
     diag.registrar("recado.nativo.recibo", "aviso", sessao=info[1] if info else None,
                    detalhe=f"{estado} {detalhe}".strip())
@@ -3695,6 +3744,12 @@ def _send_one(name: str, text: str, track_entry: bool = False) -> dict:
     # append punha a entrada ~ms apos o proprio commit e o dedup ts-aware do merged_history a
     # mantinha pendente (msg em dobro no historico ate o reconcile). A ordem send->append->drain
     # NAO muda — so o valor gravado, que e o unico dado que o dedup le.
+    from app import runtime_coordinator
+    from app.runtime_adapter import run_sync
+    coordinator = runtime_coordinator.current()
+    if coordinator is not None and coordinator.managed_runtime(name):
+        return run_sync(lambda: _send_managed(name, text, coordinator.slot(name).binding.provider,
+            track_entry=track_entry), coordinator.loop)
     t0 = time.time()
     provider, pane_id = _pane_info(name)
     stripped = text.lstrip()
@@ -3922,6 +3977,9 @@ def _pane_info(name: str) -> tuple[str, str | None]:
 
 
 async def _send_one_codex(name: str, text: str, *, track_entry: bool = False) -> dict:
+    managed = await _send_managed(name, text, "codex", track_entry=track_entry)
+    if managed is not None:
+        return managed
     source = await _send_thread(codex_sessions.load, name)
     async with get_adapter("codex").delivery_lock(name):
         current = await _send_thread(codex_sessions.load, name)
@@ -3943,6 +4001,9 @@ async def _enviar(name: str, text: str) -> dict:
 
 async def _send_one_headless(name: str, text: str, *, track_entry: bool = False) -> dict:
     """Mesmo caminho de fila do Codex (adapter em vez de tty), com o adapter do Claude sem terminal."""
+    managed = await _send_managed(name, text, "claude", track_entry=track_entry)
+    if managed is not None:
+        return managed
     adapter = get_adapter(CLAUDE_HEADLESS)
     async with adapter.delivery_lock(name):
         if not await asyncio.to_thread(_session_exists, name):
@@ -3967,6 +4028,33 @@ async def _send_one_headless(name: str, text: str, *, track_entry: bool = False)
         # Parada: o prompt já está na fila e a resposta sai agora; a sessão sobe e entrega depois.
         adapter.acordar(name)
     return res
+
+
+async def _send_managed(name: str, text: str, provider: str, *, track_entry: bool = False) -> dict | None:
+    from app import runtime_coordinator
+    coordinator = runtime_coordinator.current()
+    if coordinator is None:
+        return None
+    operation_id = uuid.uuid4().hex
+    try:
+        if not await coordinator.prepare_session(name, provider):
+            return None
+        if provider == "codex" and text.strip().split(maxsplit=1)[0:1] == ["/compact"]:
+            if text.strip() != "/compact":
+                raise ValueError("O /compact do Codex não aceita argumentos.")
+            command = {"kind":"control", "control":"compact", "payload":{}}
+        else:
+            command = {"kind":"submit", "text":text}
+        reply = await coordinator.op(name, command, operation_id)
+        disposition = reply.get("disposition")
+        if disposition not in {"accepted", "deferred"}:
+            raise RuntimeError("resultado incerto; entrada conservada sem reenvio" if disposition == "unknown" else "entrada recusada pelo runtime")
+        return {"ok":True, "error":None, "delivered":disposition == "accepted",
+            **({"entry_id":operation_id} if track_entry and command["kind"] == "submit" else {})}
+    except Exception as exc:
+        diag.registrar("runtime.send_failed", "erro", sessao=name, codigo=type(exc).__name__)
+        return {"ok":False, "error":erro("erro_envio_falhou", str(exc), erro=str(exc)),
+            **({"entry_id":operation_id} if track_entry else {})}
 
 
 async def _send_one_codex_locked(name: str, text: str, *, track_entry: bool = False,
@@ -8262,6 +8350,10 @@ async def permission_modes(name: str, sondar: bool = False):
         # Sem rodapé pra ler: o modo é o que o processo confirmou (ou o do sidecar, parada), e a
         # lista é a fechada da CLI — `set_permission_mode` aceita qualquer um, sem sondar.
         hl = get_adapter(CLAUDE_HEADLESS)
+        from app.runtime_adapter import runtime_data
+        if (view := runtime_data(name)) is not None:
+            return {"current":view.get("permission_mode"), "modes":list(model_args.MODOS_PERMISSAO_CLAUDE),
+                "sondavel":False, "previous_non_plan":view.get("previous_non_plan")}
         vivo = hl._sessions.get(name)
         meta = headless_sessions.load(name) or {}
         atual = (vivo.permission_mode if vivo and vivo.vivo else None) or meta.get("permission_mode")
@@ -8350,8 +8442,10 @@ async def permission_mode_set(name: str, body: PermissionModeBody):
             raise HTTPException(409, detail=erro("erro_permissao_leitura", f"não consegui trocar o modo: {e}"))
         vivo = hl._sessions.get(name)
         await asyncio.to_thread(_invalidate_lists)
+        from app.runtime_adapter import runtime_data
+        view = runtime_data(name)
         return {"mode": ficou, "current": ficou,
-                "previous_non_plan": vivo.modo_nao_plan if vivo else None}
+                "previous_non_plan":view.get("previous_non_plan") if view is not None else vivo.modo_nao_plan if vivo else None}
     _guard_perm(name, info)
     tracking_key = _tracking_key_perm(name, info)
     try:
@@ -8525,7 +8619,7 @@ async def model_options(name: str):
         except Exception as e:
             raise HTTPException(503, detail=erro("erro_modelos_indisponiveis", f"não consegui listar os modelos: {e}"))
         meta = headless_sessions.load(name) or {}
-        atual = (hl._sessions.get(name).model if hl._sessions.get(name) else None) or meta.get("model")
+        atual = hl.escolhas(name)[0] or meta.get("model")
         return {"kind": "claude", "engine": None, "effort": meta.get("effort"),
                 "models": claude_models.para_tela(modelos, atual)}
     # Conta Anthropic: le o picker de verdade. Abre e fecha um overlay — nao vai pro scrollback,

@@ -130,8 +130,9 @@ async def conectar(cano: dict, *, esperar: float = 0.0) -> tuple[AppServerClient
     if ligacao is None:
         return None
     lig, snap = ligacao
+    cano["versao"] = snap.get("versao", 1)
     client = AppServerClient()
-    client._attach(lig.stdout, lig.stdin)
+    client.cano_snapshot = snap
     for linha in snap.get("stderr_tail") or []:
         client.stderr_tail.append(linha)
     # Pedidos que o servidor fez enquanto o backend estava fora: voltam pela fila como se
@@ -144,6 +145,15 @@ async def conectar(cano: dict, *, esperar: float = 0.0) -> tuple[AppServerClient
         if isinstance(msg, dict) and msg.get("id") is not None and "method" in msg:
             client.server_requests[msg["id"]] = msg
             client._notifications.put_nowait(msg)
+    for thread_id, prefix in ((snap.get("inflight") or {}).get("codex") or {}).items():
+        if prefix.get("complete") and prefix.get("text"):
+            client._notifications.put_nowait({"method": "turn/started", "params": {
+                "threadId": thread_id, "turn": {"id": prefix.get("turnId")}}})
+            client._notifications.put_nowait({"method": "item/agentMessage/delta", "params": {
+                "threadId": thread_id, "turnId": prefix.get("turnId"),
+                "itemId": prefix.get("itemId"), "delta": prefix["text"]}})
+    # Snapshot antes do leitor: notification nova nunca é substituída por uma pendência velha.
+    client._attach(lig.stdout, lig.stdin)
     return client, snap
 
 

@@ -14,7 +14,7 @@ Base: PR #24, commit `128262597d926416cb3a5e91f5ac3a2f99b798e1`.
 
 ## Decisões
 
-- Protocolo 6: os números 4 e 5 estão reservados às partes 2B e 3. Ambos os lados mudam juntos.
+- Protocolo 10 após integrar a parte 2B (7). As partes 3 e 2D reservam 8 e 9; ambos os lados mudam juntos.
 - O núcleo usa operações tipadas e um executor síncrono limitado no servidor, fora do laço HTTP. O desktop conserva seu executor de tarefas.
 - O repasse privado recebe caminhos já autorizados pelo chamador; não consulta novamente o registro de sessões, evitando ciclos.
 - A reserva Python permanece durante a migração. Falha de transporte em alteração enviada não repete a operação.

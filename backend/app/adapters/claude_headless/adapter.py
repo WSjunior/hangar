@@ -424,16 +424,18 @@ class ClaudeHeadlessAdapter:
             sess.ativa_em = time.monotonic()
         if sess is None or not await self.deliverable(name):
             return "deferred"
+        revision = getattr(sess, "runtime_turn_revision", 0)
         try:
             await self._escrever_prompt(sess, text)
         except Exception:
             _log.exception("claude headless: escrita no stdin falhou name=%s", name)
             return "deferred"
-        sess.in_progress = True
-        sess.state = "working"
-        sess.label = None
-        sess.ativa_em = time.monotonic()
-        sess.iniciar_turno()
+        if getattr(sess, "runtime_turn_revision", 0) == revision:
+            sess.in_progress = True
+            sess.state = "working"
+            sess.label = None
+            sess.ativa_em = time.monotonic()
+            sess.iniciar_turno()
         await self._notify(sess)
         if self.apos_entrega is not None:
             self.apos_entrega(name)
@@ -728,6 +730,8 @@ class ClaudeHeadlessAdapter:
             _esquecer_cano(name, pid)
 
     async def _encerrar(self, sess: _Sessao) -> None:
+        from app.runtime_adapter import assert_legacy
+        assert_legacy(sess.name)
         """Mata o processo e tira a sessão da memória. Saída nossa deixa `returncode` None, então
         sem o pop ela seguiria "viva" e o próximo prompt não subiria outro processo."""
         await asyncio.to_thread(self._matar, sess)
@@ -756,6 +760,8 @@ class ClaudeHeadlessAdapter:
         return sess
 
     async def _ligar(self, name: str, *, so_reconectar: bool = False) -> _Sessao | None:
+        from app.runtime_adapter import assert_legacy
+        assert_legacy(name)
         # Um spawn por nome de cada vez: prompt e troca de modelo chegando juntos numa sessão
         # parada subiriam dois `claude` no mesmo .jsonl.
         async with self._spawn_locks.setdefault(name, asyncio.Lock()):
@@ -913,6 +919,8 @@ class ClaudeHeadlessAdapter:
         return base + model_args.args_de("claude", model, effort, permission_mode)
 
     async def _spawn(self, sess: _Sessao, *, so_reconectar: bool = False) -> bool:
+        from app.runtime_adapter import assert_legacy
+        assert_legacy(sess.name)
         """Liga a sessão a um cano: o que já existe (sidecar com `cano`), ou um novo. Devolve
         False só em `so_reconectar` sem cano vivo."""
         meta = sess.meta
@@ -921,17 +929,13 @@ class ClaudeHeadlessAdapter:
             ligado = await self._conectar(cano)
             if ligado is not None:
                 lig, snap = ligado
+                cano["versao"] = snap.get("versao", 1)
+                hl_sessions.update(sess.name, cano=cano)
                 sess.proc = lig
-                sess.leitor = asyncio.create_task(self._ler(sess))
                 await self._aplicar_snapshot(sess, snap)
+                sess.leitor = asyncio.create_task(self._ler(sess))
                 _log.info("claude headless: religou name=%s pid=%s aberto=%s pendentes=%d",
                           sess.name, snap.get("pid"), snap.get("aberto"), len(snap.get("pendentes") or []))
-                if (snap.get("versao") != cano_mod.VERSAO and not snap.get("aberto")
-                        and not snap.get("pendentes") and snap.get("saiu") is None):
-                    # Cano de outra versão e sessão ociosa: troca agora, que não custa nada.
-                    _log.info("claude headless: cano versão %s != %s, reabrindo name=%s",
-                              snap.get("versao"), cano_mod.VERSAO, sess.name)
-                    await self._reabrir(sess)
                 self._agendar_cota(sess)
                 return True
             # Sem snapshot com o cano vivo: outro cliente está preso nele (cano antigo atende em
@@ -1006,6 +1010,8 @@ class ClaudeHeadlessAdapter:
             hl_sessions.update(sess.name, cano=None)
             raise RuntimeError(f"cano não escutou em {_TETO_CANO_S:.0f}s: {cauda}")
         sess.proc, snap = ligado
+        cano["versao"] = snap.get("versao", 1)
+        sess.meta = hl_sessions.update(sess.name, cano=cano) or sess.meta
         sess.leitor = asyncio.create_task(self._ler(sess))
         for linha in snap.get("stderr_tail") or []:
             sess.stderr_tail.append(linha)
@@ -1093,6 +1099,15 @@ class ClaudeHeadlessAdapter:
             except ValueError:
                 continue
         self._recalcular_estado(sess)
+        prefix = (snap.get("inflight") or {}).get("claude") or {}
+        if prefix.get("complete"):
+            for buffer, key in ((sess.preview_buffer, "text"), (sess.thinking_buffer, "thinking")):
+                await buffer.reset(prefix.get(key) or "")
+                await buffer.flush()
+            tool = prefix.get("tool") or {}
+            sess.tool_nome = tool.get("name")
+            await sess.tool_buffer.reset(tool.get("input") or "")
+            await sess.tool_buffer.flush()
         await self._notify(sess)
 
     async def _ler(self, sess: _Sessao) -> None:
@@ -1112,12 +1127,22 @@ class ClaudeHeadlessAdapter:
                     break
                 try:
                     ev = json.loads(linha)
+                    if not isinstance(ev, dict):
+                        raise ValueError("linha não é objeto")
+                    if ev.get("type") == "cano_output":
+                        ev = json.loads(ev["frame"])
+                        if not isinstance(ev, dict):
+                            raise ValueError("frame não é objeto")
                 except ValueError:
                     sess.linhas_ruins += 1
                     if sess.linhas_ruins <= 3:
                         _log.warning("claude headless: linha não-JSON no stdout name=%s: %r", sess.name, linha[:200])
                     continue
                 t = ev.get("type")
+                if t == "cano_input_ack":
+                    from app.runtime_adapter import accept_ack
+                    accept_ack(sess, ev)
+                    continue
                 if t == "cano_stderr":
                     sess.stderr_tail.append(str(ev.get("linha") or ""))
                     continue
@@ -1171,7 +1196,7 @@ class ClaudeHeadlessAdapter:
             # em aberto só desfaz o `awaiting_input` que o adapter gravou.
             if caiu:
                 self._gravar_marcador(sess, "dead")
-            elif sess.state == "awaiting_input":
+            elif sess.state == "awaiting_input" and self._sessions.get(sess.name) is sess:
                 self._gravar_marcador(sess, "idle")
             sess.state = "dead"
             await self._clear_preview(sess)
@@ -1180,14 +1205,29 @@ class ClaudeHeadlessAdapter:
             await self._notify(sess)
 
     async def _write(self, sess: _Sessao, obj: dict) -> None:
+        from app import runtime_coordinator
+        from app.runtime_adapter import LegacyIO, assert_legacy
+        assert_legacy(sess.name)
         if not sess.vivo or sess.proc is None or sess.proc.stdin is None:
             raise RuntimeError("processo não está vivo")
+        coordinator = runtime_coordinator.current()
+        if coordinator is not None and coordinator.managed_queue(sess.name):
+            sess.runtime_acks = getattr(sess, "runtime_acks", {})
+            await LegacyIO(coordinator).write(sess.name, sess, sess.proc.stdin, obj,
+                (sess.meta.get("cano") or {}).get("versao", 1))
+            return
         sess.proc.stdin.write((json.dumps(obj) + "\n").encode())
         await sess.proc.stdin.drain()
 
     async def _ctrl(self, sess: _Sessao, subtype: str, *, esperar: bool = True, **req) -> dict | None:
         sess.n_req += 1
         rid = f"hangar_{sess.n_req}"
+        from app import runtime_coordinator
+        coordinator = runtime_coordinator.current()
+        if coordinator is not None and coordinator.managed_queue(sess.name):
+            binding = coordinator.slot(sess.name).binding
+            sess.runtime_nonce = getattr(sess, "runtime_nonce", uuid.uuid4().hex)
+            rid = f"reserve:{binding.key}:{binding.generation}:{sess.runtime_nonce}:{sess.n_req}"
         fut: asyncio.Future | None = None
         if esperar:
             fut = asyncio.get_running_loop().create_future()
@@ -1208,7 +1248,16 @@ class ClaudeHeadlessAdapter:
     # ── eventos do stdout ──────────────────────────────────────────────────────────────────
 
     async def _on_event(self, sess: _Sessao, ev: dict) -> None:
+        from app import runtime_coordinator
+        from app.runtime_adapter import LegacyIO, assert_legacy
+        assert_legacy(sess.name, reading=True)
         t = ev.get("type")
+        coordinator = runtime_coordinator.current()
+        if coordinator is not None and coordinator.managed_queue(sess.name):
+            if t == "control_response":
+                await LegacyIO(coordinator).reply(sess.name, sess, ev)
+            if t in {"result", "conversation_reset"} and not ev.get("parent_tool_use_id"):
+                sess.runtime_turn_revision = getattr(sess, "runtime_turn_revision", 0) + 1
         if t != "keep_alive":
             sess.ativa_em = time.monotonic()
         if ev.get("parent_tool_use_id") and not str(t).startswith("control_"):
@@ -2224,7 +2273,11 @@ def _matar_grupo(pid: int, name: str) -> None:
     except ProcessLookupError:
         pass
     except OSError:
-        _log.warning("claude headless: não matou o cano name=%s pid=%s", name, pid, exc_info=True)
+        raise RuntimeError("não foi possível encerrar o cano; arquivos conservados") from None
+    from app.registry import _esperar_saida
+    _esperar_saida([pid])
+    if pid_vivo(pid):
+        raise RuntimeError("o cano continua vivo; arquivos conservados")
 
 
 def _marca_config(config_dir: str | None) -> str:
@@ -2268,11 +2321,11 @@ async def conectar_cano(cano: dict, *, esperar: float = 0.0) -> tuple[_Ligacao, 
             # padrão do asyncio (64 KB) estourava a leitura e o leitor ficava pendurado.
             if escuta.startswith("unix:"):
                 reader, writer = await asyncio.wait_for(
-                    asyncio.open_unix_connection(escuta[5:], limit=_LIMITE_LINHA), 3)
+                    asyncio.open_unix_connection(escuta[5:], limit=cano_mod.MAX_ENVELOPE), 3)
             elif escuta.startswith("tcp:"):
                 host, porta = escuta[4:].rsplit(":", 1)
                 reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection(host, int(porta), limit=_LIMITE_LINHA), 3)
+                    asyncio.open_connection(host, int(porta), limit=cano_mod.MAX_ENVELOPE), 3)
             else:
                 return None
             break
@@ -2375,7 +2428,7 @@ def _escuta_nova(key: str, pasta: Path | None = None) -> tuple[str, str | None]:
         # igual faria o novo roubar o socket dele. A limpeza vai por `cano-<chave>*`.
         caminho = (pasta or hl_sessions._dir()) / f"cano-{key[:16]}-{uuid.uuid4().hex[:4]}.sock"
         if len(str(caminho).encode()) < 100:
-            return f"unix:{caminho}", None
+            return f"unix:{caminho}", uuid.uuid4().hex
     import socket
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -2441,3 +2494,7 @@ def matar_orfaos() -> int:
     if sem_permissao:
         _log.info("claude headless: varredura de órfãos sem permissão em %d processo(s) meus", sem_permissao)
     return mortos
+
+
+from app.runtime_adapter import install_adapter as _install_runtime_adapter
+_install_runtime_adapter(ClaudeHeadlessAdapter, "claude")

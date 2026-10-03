@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import http.client
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ import socket
 import subprocess
 import sys
 import time
+import threading
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
@@ -30,7 +32,7 @@ _log = logging.getLogger("hangar.rust_server")
 HEALTH_PATH = "/__hangar_server/health"
 # Versão do contrato interno (rotas /internal, side-events, ambiente). Tem de casar com o
 # `protocol` da saúde (hangar_server::INTERNAL_PROTOCOL); outro número = o Python atende sozinho.
-RUST_SERVER_PROTOCOL = 6
+RUST_SERVER_PROTOCOL = 10
 START_TIMEOUT = 10.0
 CRASH_WINDOW = 60.0
 MAX_CRASHES = 3
@@ -100,7 +102,125 @@ def _spawn(binary: Path, env: dict[str, str]) -> subprocess.Popen:
     # Python morre, de qualquer jeito e em qualquer sistema, ela fecha e o binário sai.
     kw: dict = {"creationflags": _CREATE_NO_WINDOW} if sys.platform == "win32" else {}
     return subprocess.Popen([str(binary)], env=env, stdin=subprocess.PIPE,
-                            stdout=subprocess.DEVNULL, **kw)
+                            stdout=subprocess.PIPE, **kw)
+
+
+def _runtime_ready(proc, instance: str) -> dict:
+    if proc.stdout is None:
+        raise ValueError("partida sem cano de resposta")
+    raw = proc.stdout.readline(4097)
+    if not raw.endswith(b"\n") or len(raw) > 4096:
+        raise ValueError("partida incompleta ou acima do teto")
+    ready = json.loads(raw.decode("utf-8"))
+    if not isinstance(ready, dict) or set(ready) != {"type", "protocol", "instance", "port"}:
+        raise ValueError("resposta de partida inválida")
+    if ready["type"] != "runtime_ready" or ready["instance"] != instance:
+        raise ValueError("resposta de outra instância")
+    if type(ready["protocol"]) is not int or ready["protocol"] != RUST_SERVER_PROTOCOL:
+        raise ValueError("protocolo de partida incompatível")
+    if type(ready["port"]) is not int or not 1 <= ready["port"] <= 65535:
+        raise ValueError("porta privada inválida")
+    return ready
+
+
+class RuntimeTransport:
+    """Um transporte privado por filho, sem retry de operação mutável."""
+
+    def __init__(self, port: int, secret: str, instance: str, alive):
+        self.instance, self.alive = instance, alive
+        self._port = port
+        self._headers = {"x-hangar-internal": secret, "x-hangar-runtime-instance": instance,
+                         "content-type": "application/json"}
+        self._connections = set()
+        self._guard = threading.Lock()
+        self._closed = False
+        self._workers = set()
+
+    async def _blocking(self, function, *args):
+        task = asyncio.create_task(asyncio.to_thread(function, *args))
+        self._workers.add(task)
+        def finished(done):
+            self._workers.discard(done)
+            if not done.cancelled():
+                done.exception()
+        task.add_done_callback(finished)
+        return await asyncio.shield(task)
+
+    def _connection(self):
+        connection = http.client.HTTPConnection("127.0.0.1", self._port, timeout=35)
+        with self._guard:
+            if self._closed:
+                raise RuntimeError("transporte privado encerrado")
+            self._connections.add(connection)
+        return connection
+
+    def _release(self, connection):
+        with self._guard:
+            self._connections.discard(connection)
+        connection.close()
+
+    async def op(self, descriptor: dict, command: dict, operation_id: str, clock: dict):
+        body = {"protocol": RUST_SERVER_PROTOCOL, "instance": self.instance,
+                "key": descriptor["key"], "generation": descriptor["generation"],
+                "operation_id": operation_id, "clock": clock, "command": command}
+        def send():
+            connection = self._connection()
+            if command.get("kind") == "adopt":
+                connection.timeout = 185
+            try:
+                connection.request("POST", "/runtime/op", body=json.dumps(body).encode(), headers=self._headers)
+                response = connection.getresponse()
+                if response.status != 200:
+                    raise RuntimeError("IPC recusou a operação; não houve troca para outro transporte")
+                raw = response.read((32 << 20) + 1025)
+                if len(raw) > (32 << 20) + 1024:
+                    raise ValueError("resposta privada acima do teto")
+                return json.loads(raw)
+            finally:
+                self._release(connection)
+        result = await self._blocking(send)
+        if not isinstance(result, dict) or result.get("ok") is not True or "result" not in result:
+            raise RuntimeError("resposta do IPC inválida")
+        return result["result"]
+
+    async def events(self):
+        connection = self._connection()
+        try:
+            def opening():
+                connection.request("GET", "/runtime/events", headers=self._headers)
+                response = connection.getresponse()
+                if response.status != 200:
+                    raise RuntimeError("stream privado recusado")
+                return response
+            response = await self._blocking(opening)
+            while True:
+                raw = await self._blocking(response.readline, (32 << 20) + 1026)
+                if not raw:
+                    raise RuntimeError("stream privado encerrado")
+                if len(raw) > (32 << 20) + 1025 or not raw.endswith(b"\n"):
+                    raise ValueError("evento privado incompleto ou acima do teto")
+                if raw.startswith(b"data:"):
+                    yield json.loads(raw[5:].lstrip())
+        finally:
+            self._shutdown(connection)
+            self._release(connection)
+
+    @staticmethod
+    def _shutdown(connection):
+        if connection.sock is not None:
+            try:
+                connection.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    async def close(self):
+        with self._guard:
+            self._closed = True
+            connections = tuple(self._connections)
+        for connection in connections:
+            self._shutdown(connection)
+            connection.close()
+        await asyncio.gather(*tuple(self._workers), return_exceptions=True)
 
 
 def _close_stdin(proc: subprocess.Popen) -> None:
@@ -123,6 +243,10 @@ class Supervisor:
         self.forwarded = forwarded
         self.proc: subprocess.Popen | None = None
         self.announced = False
+        self.runtime_ready = None
+        self.runtime_instance = None
+        self.runtime_secret = None
+        self.runtime_transport = None
 
     def _env(self) -> dict[str, str]:
         # Import tardio: internal_api puxa o app, que o uvicorn interno já carregou a esta altura.
@@ -136,6 +260,7 @@ class Supervisor:
                 "HANGAR_SERVER_LISTEN": listen_addr(self.host, self.port),
                 "HANGAR_SERVER_UPSTREAM": f"127.0.0.1:{self.upstream_port}",
                 "HANGAR_INTERNAL_SECRET": secret,
+                "HANGAR_RUNTIME_INSTANCE": secrets.token_hex(16),
                 # Os dois podem estar só no backend/.env, que o pydantic lê sem exportar.
                 "CP_AUTH_TOKEN": self.token,
                 "CP_FORWARDED_ALLOW_IPS": self.forwarded,
@@ -150,6 +275,12 @@ class Supervisor:
             _close_stdin(self.proc)                     # o anterior já saiu
         env = self._env()
         self.proc = _spawn(self.binary, env)
+        try:
+            ready = await asyncio.wait_for(asyncio.to_thread(_runtime_ready, self.proc,
+                                            env["HANGAR_RUNTIME_INSTANCE"]), START_TIMEOUT)
+        except (OSError, ValueError, asyncio.TimeoutError):
+            diag.registrar("hangar_server.partida", "erro", codigo="runtime_invalido")
+            return "silent" if self.proc.poll() is None else "died"
         deadline = time.monotonic() + START_TIMEOUT
         while time.monotonic() < deadline:
             if self.proc.poll() is not None:
@@ -174,6 +305,7 @@ class Supervisor:
                 except ValueError:
                     _log.warning("terminal observer address unavailable; using Python")
                     diag.registrar("terminal_observer.reserva", "aviso", codigo="endereco_invalido")
+                self.configure_runtime(ready, env["HANGAR_INTERNAL_SECRET"], env["HANGAR_RUNTIME_INSTANCE"])
                 return "up"
             await asyncio.sleep(_POLL)
         return "silent"
@@ -201,6 +333,7 @@ class Supervisor:
                 from app import workspace_bridge
                 workspace_bridge.configure(None, None)
                 terminal_observer.configure(None, None)
+                await self.deactivate_runtime(confirmed_dead=self.proc.poll() is not None)
                 # Parada normal (systemctl, Ctrl+C) leva o filho junto, no mesmo instante em que o uvicorn
                 # recebe o sinal: dá um respiro para a flag dele subir antes de contar queda.
                 await asyncio.sleep(_POLL)
@@ -237,6 +370,33 @@ class Supervisor:
                 proc.kill()
                 await asyncio.to_thread(proc.wait)
         _close_stdin(proc)
+        await self.deactivate_runtime(confirmed_dead=proc.poll() is not None)
+
+    def configure_runtime(self, ready: dict, secret: str, instance: str) -> None:
+        from app import runtime_coordinator
+        self.runtime_ready = dict(ready)
+        self.runtime_secret, self.runtime_instance = secret, instance
+        self.runtime_transport = RuntimeTransport(ready["port"], secret, instance,
+            lambda: self.proc is not None and self.proc.poll() is None)
+        coordinator = runtime_coordinator.ensure()
+        coordinator.configure_transport(self.runtime_transport)
+
+    async def deactivate_runtime(self, confirmed_dead: bool) -> None:
+        if not confirmed_dead:
+            raise RuntimeError("morte do Rust não confirmada; reserva bloqueada")
+        from app import runtime_coordinator
+        if self.runtime_transport is not None:
+            await self.runtime_transport.close()
+        coordinator = runtime_coordinator.current()
+        if coordinator is not None:
+            await coordinator.close_events()
+            if coordinator.transport is self.runtime_transport:
+                coordinator.transport, coordinator.instance = None, None
+            for slot in tuple(coordinator.slots.values()):
+                if slot.phase != runtime_coordinator.Phase.Python:
+                    await coordinator.recover(slot.binding.name, confirmed_dead=True)
+        self.runtime_ready = self.runtime_secret = self.runtime_instance = None
+        self.runtime_transport = None
 
 
 async def serve(server: uvicorn.Server, sockets: list[socket.socket], binary: Path, kw: dict,

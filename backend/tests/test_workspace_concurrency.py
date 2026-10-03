@@ -1,5 +1,6 @@
 """Comandos lentos não bloqueiam metadados nem repositórios independentes."""
 import concurrent.futures
+import asyncio
 import json
 import os
 import socket
@@ -12,6 +13,35 @@ import pytest
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="Fixture de Git usa shell POSIX")
 _BINARY = Path(__file__).parents[2] / "crates/target/debug/hangar-server"
+
+
+def test_supervisor_starts_runtime_and_workspace_bridges_together(tmp_path, monkeypatch):
+    from app import internal_api, runtime_coordinator, runtime_queue, rust_server, workspace_bridge
+
+    monkeypatch.setattr(runtime_coordinator, "_current", None)
+    monkeypatch.setattr(runtime_queue, "_coordinator", None)
+    monkeypatch.setattr(rust_server, "server_log_path", lambda: tmp_path / "server.log")
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git/HEAD").write_text("ref: refs/heads/main\n")
+    supervisor = rust_server.Supervisor(_BINARY, "127.0.0.1", port, 9,
+                                        "fixture-owner", "127.0.0.1", lambda: False)
+
+    async def scenario():
+        try:
+            assert await supervisor._start() == "up"
+            assert supervisor.runtime_transport is not None
+            assert await asyncio.to_thread(workspace_bridge.request, "head_info", {"cwd": str(tmp_path)}) == {
+                "ok": True, "result": ["main", False]}
+        finally:
+            await supervisor.stop()
+            internal_api.set_secret(None)
+        assert workspace_bridge.request("head_info", {"cwd": str(tmp_path)}) is None
+        assert supervisor.runtime_transport is None
+
+    asyncio.run(scenario())
 
 
 @pytest.fixture

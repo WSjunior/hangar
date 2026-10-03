@@ -19,6 +19,7 @@ Uso: cano.py --escuta unix:/x.sock|tcp:127.0.0.1:PORT [--token T] [--log F] -- c
 """
 import argparse
 import collections
+import io
 import json
 import os
 import queue
@@ -29,7 +30,9 @@ import sys
 import threading
 import time
 
-VERSAO = 1
+VERSAO = 2
+MAX_FRAME = 16 * 1024 * 1024
+MAX_ENVELOPE = 2 * MAX_FRAME + 1024
 _TETO_LINGER_S = 60.0       # após o claude sair, espera um cliente pra entregar o rc, depois morre
 
 
@@ -40,18 +43,22 @@ class Cano:
         self.log = log
         self.proc: subprocess.Popen | None = None
         self.trava = threading.Lock()          # snapshot + troca de cliente
+        self.stdin_lock = threading.Lock()
         self.saida: queue.Queue[str] = queue.Queue(maxsize=5000)   # linhas pro cliente
         self.saida_cheia = False
         self.cliente: socket.socket | None = None
         self.cliente_arq = None                # makefile do cliente: segura o socket, fecha junto
         self.init: str | None = None
         self.aberto = False
-        self.pendentes: dict[str, str] = {}
+        self.pendentes: dict[tuple, str] = {}
+        self.inflight_claude = self._new_claude_prefix()
+        self.inflight_codex: dict[str, dict] = {}
         self.ultimo_result: str | None = None
         self.rate_limit: str | None = None
         self.stderr_tail: collections.deque[str] = collections.deque(maxlen=20)
         self.saiu: int | None = None
         self.saiu_entregue = threading.Event()
+        self.child_revision = self.result_revision = 0
 
     # ── log ────────────────────────────────────────────────────────────────────────────────
 
@@ -76,13 +83,16 @@ class Cano:
 
     def _ler_stdout(self) -> None:
         assert self.proc and self.proc.stdout
-        for bruto in self.proc.stdout:
+        while bruto := self.proc.stdout.readline(MAX_FRAME + 2):
+            if len(bruto) > MAX_FRAME + 1 or not bruto.endswith(b"\n"):
+                self._log("stdout do filho com linha incompleta ou acima do teto")
+                break
             linha = bruto.decode("utf-8", "replace").rstrip("\r\n")
             if not linha:
                 continue
             with self.trava:
                 self._observar_claude(linha)
-                self._mandar(linha)
+                self._mandar(json.dumps({"type": "cano_output", "frame": linha}, ensure_ascii=False))
         rc = self.proc.wait()
         with self.trava:
             self.saiu = rc
@@ -107,16 +117,21 @@ class Cano:
             return
         if not isinstance(ev, dict):
             return
+        self.child_revision += 1
         t = ev.get("type")
+        if ev.get("parent_tool_use_id") and t not in ("control_request", "sdk_control_request", "control_cancel_request", "control_response"):
+            return
+        self._observe_prefix(ev)
         if t == "system" and ev.get("subtype") == "init":
             self.init = linha
         elif t == "command_lifecycle" and ev.get("state") == "started":
             self.aberto = True
         elif t in ("control_request", "sdk_control_request"):
-            self.pendentes[str(ev.get("request_id"))] = linha
+            self._put_pending(ev.get("request_id"), linha)
         elif t == "control_cancel_request":
-            self.pendentes.pop(str(ev.get("request_id")), None)
+            self.pendentes.pop(self._request_key(ev.get("request_id")), None)
         elif t == "result":
+            self.result_revision = self.child_revision
             self.aberto = False
             self.ultimo_result = linha
             self.pendentes.clear()
@@ -126,9 +141,9 @@ class Cano:
             # JSON-RPC (app-server do Codex): pedido do servidor tem method + id; a resolução vem
             # como notificação própria quando outro cliente responde.
             if ev.get("id") is not None:
-                self.pendentes[str(ev["id"])] = linha
+                self._put_pending(ev["id"], linha)
             elif ev["method"] == "serverRequest/resolved":
-                self.pendentes.pop(str((ev.get("params") or {}).get("requestId")), None)
+                self.pendentes.pop(self._request_key((ev.get("params") or {}).get("requestId")), None)
             elif ev["method"] == "turn/completed":
                 # Turno fechado (interrompido inclusive) leva os pedidos da thread junto, como o
                 # cliente faz — senão o snapshot repovoa um cartão que o servidor já esqueceu.
@@ -153,9 +168,86 @@ class Cano:
             self.aberto = True
         elif t == "control_response":
             rid = (ev.get("response") or {}).get("request_id")
-            self.pendentes.pop(str(rid), None)
+            self.pendentes.pop(self._request_key(rid), None)
         elif t is None and "method" not in ev and ev.get("id") is not None:
-            self.pendentes.pop(str(ev["id"]), None)      # resposta JSON-RPC a um pedido do servidor
+            self.pendentes.pop(self._request_key(ev["id"]), None)
+
+    @staticmethod
+    def _request_key(value):
+        if type(value) in (int, str):
+            return type(value).__name__, value
+        return None
+
+    def _put_pending(self, request_id, line):
+        if (key := self._request_key(request_id)) is not None:
+            self.pendentes[key] = line
+
+    @staticmethod
+    def _new_claude_prefix():
+        return {"complete": True, "text": io.StringIO(), "thinking": io.StringIO(),
+                "tool": {"name": None, "input": io.StringIO(), "index": None}, "bytes": 0}
+
+    def _observe_prefix(self, event):
+        kind = event.get("type")
+        prefix = self.inflight_claude
+        if kind == "stream_event":
+            stream = event.get("event") or {}
+            block = stream.get("content_block") or {}
+            if stream.get("type") == "content_block_start":
+                if block.get("type") == "text":
+                    prefix["text"] = io.StringIO()
+                    prefix["complete"] = True
+                    prefix["bytes"] = len(prefix["thinking"].getvalue().encode()) + len(prefix["tool"]["input"].getvalue().encode())
+                elif block.get("type") == "thinking":
+                    prefix["thinking"] = io.StringIO()
+                elif block.get("type") in ("tool_use", "server_tool_use", "mcp_tool_use"):
+                    prefix["tool"] = {"name": block.get("name"), "input": io.StringIO(), "index": stream.get("index")}
+            elif stream.get("type") == "content_block_delta" and prefix["complete"]:
+                delta = stream.get("delta") or {}
+                piece = delta.get("text") or delta.get("thinking") or delta.get("partial_json") or ""
+                prefix["bytes"] += len(piece.encode("utf-8"))
+                if prefix["bytes"] > MAX_FRAME // 2:
+                    prefix["complete"] = False
+                    prefix["text"], prefix["thinking"], prefix["tool"]["input"] = io.StringIO(), io.StringIO(), io.StringIO()
+                elif delta.get("type") == "text_delta":
+                    prefix["text"].write(piece)
+                elif delta.get("type") == "thinking_delta":
+                    prefix["thinking"].write(piece)
+                elif delta.get("type") == "input_json_delta":
+                    prefix["tool"]["input"].write(piece)
+            elif stream.get("type") == "content_block_stop":
+                prefix["tool"] = {"name": None, "input": io.StringIO(), "index": None}
+        elif kind in ("result", "conversation_reset"):
+            self.inflight_claude = self._new_claude_prefix()
+        elif kind == "assistant" and "local_command_source" not in event:
+            for block in (event.get("message") or {}).get("content") or []:
+                if block.get("type") in ("text", "thinking"):
+                    prefix[block["type"]] = io.StringIO()
+                elif block.get("type") == "tool_use":
+                    prefix["tool"] = {"name": None, "input": io.StringIO(), "index": None}
+        params = event.get("params") or {}
+        thread = params.get("threadId")
+        method = event.get("method")
+        if not isinstance(thread, str) or method not in ("turn/started", "turn/completed", "item/agentMessage/delta", "item/started", "item/completed"):
+            return
+        prefix = self.inflight_codex.setdefault(thread, {"complete": True, "text": io.StringIO(), "bytes": 0, "itemId": None, "turnId": None})
+        if method == "turn/started":
+            prefix.update(complete=True, text=io.StringIO(), bytes=0, itemId=None, turnId=(params.get("turn") or {}).get("id"))
+        elif method == "item/agentMessage/delta":
+            item = params.get("itemId")
+            if prefix["itemId"] is not None and item != prefix["itemId"]:
+                prefix.update(complete=True, text=io.StringIO(), bytes=0)
+            prefix.update(itemId=item, turnId=params.get("turnId"))
+            piece = params.get("delta") or ""
+            prefix["bytes"] += len(piece.encode())
+            if prefix["bytes"] > MAX_FRAME // 2:
+                prefix.update(complete=False, text=io.StringIO())
+            elif prefix["complete"]:
+                prefix["text"].write(piece)
+        elif method == "turn/completed":
+            self.inflight_codex.pop(thread, None)
+        elif (params.get("item") or {}).get("type") == "agentMessage":
+            prefix.update(complete=True, text=io.StringIO(), bytes=0)
 
     # ── cliente ────────────────────────────────────────────────────────────────────────────
 
@@ -167,7 +259,7 @@ class Cano:
         if self.cliente is None:
             return
         try:
-            self.saida.put_nowait(linha)
+            self.saida.put_nowait((self.cliente, linha))
         except queue.Full:
             if not self.saida_cheia:
                 self.saida_cheia = True
@@ -191,10 +283,10 @@ class Cano:
 
     def _enviar(self) -> None:
         while True:
-            linha = self.saida.get()
+            destination, linha = self.saida.get()
             with self.trava:
                 con = self.cliente
-            if con is None:
+            if con is None or con is not destination:
                 continue
             try:
                 con.sendall((linha + "\n").encode("utf-8"))
@@ -211,6 +303,12 @@ class Cano:
             self.cliente = self.cliente_arq = None
 
     def snapshot(self) -> str:
+        prefix = self.inflight_claude
+        inflight = {"claude": {"complete": prefix["complete"], "text": prefix["text"].getvalue(),
+            "thinking": prefix["thinking"].getvalue(), "tool": {**prefix["tool"], "input": prefix["tool"]["input"].getvalue()}},
+            "codex": {thread: {"complete": p["complete"], "text": p["text"].getvalue(),
+                                "itemId": p["itemId"], "turnId": p["turnId"]}
+                      for thread, p in self.inflight_codex.items()}}
         return json.dumps({
             "type": "cano_snapshot", "versao": VERSAO,
             "pid": self.proc.pid if self.proc else None,
@@ -218,6 +316,7 @@ class Cano:
             "pendentes": list(self.pendentes.values()),
             "ultimo_result": self.ultimo_result, "rate_limit": self.rate_limit,
             "stderr_tail": list(self.stderr_tail), "saiu": self.saiu,
+            "inflight": inflight,
         })
 
     def servir(self, srv: socket.socket) -> None:
@@ -232,19 +331,33 @@ class Cano:
 
     def _atender(self, con: socket.socket) -> None:
         arq = con.makefile("rb")
-        if self.token:
-            # Primeira linha do cliente é o token (TCP em loopback: qualquer processo local
-            # alcança a porta; o token é o que faz o cano ser só do backend).
-            try:
-                con.settimeout(10)
-                if arq.readline().decode("utf-8", "replace").strip() != self.token:
-                    _fechar(con, arq)
-                    return
-                con.settimeout(None)
-            except OSError:
+        try:
+            con.settimeout(10)
+            raw = arq.readline(4098)
+            header = raw.decode("utf-8").rstrip("\r\n")
+            peek = header == f"peek {self.token}"
+            if not self.token or not raw.endswith(b"\n") or len(raw) > 4097 or (header != self.token and not peek):
                 _fechar(con, arq)
                 return
-        with self.trava:
+            con.settimeout(None)
+            with self.trava:
+                snapshot = (self.snapshot() + "\n").encode("utf-8")
+            if len(snapshot) > MAX_FRAME + 1:
+                _fechar(con, arq)
+                return
+            if peek:
+                con.sendall(snapshot)
+                _fechar(con, arq)
+                return
+        except (OSError, ValueError):
+            _fechar(con, arq)
+            return
+        with self.stdin_lock, self.trava:
+            # Releitura sob a trava da escrita: peek não é o snapshot do claim.
+            snapshot = (self.snapshot() + "\n").encode("utf-8")
+            if len(snapshot) > MAX_FRAME + 1:
+                _fechar(con, arq)
+                return
             self._fechar_cliente()      # um cliente por vez: o novo backend substitui o antigo
             # Linhas que sobraram pro cliente antigo já estão refletidas no snapshot; mandar
             # de novo duplicaria eventos no backend novo.
@@ -256,7 +369,7 @@ class Cano:
             self.saida_cheia = False
             self.cliente, self.cliente_arq = con, arq
             try:
-                con.sendall((self.snapshot() + "\n").encode("utf-8"))
+                con.sendall(snapshot)
             except OSError:
                 self._fechar_cliente()
                 arq.close()
@@ -271,18 +384,47 @@ class Cano:
 
     def _ler_cliente(self, con: socket.socket, arq) -> None:
         try:
-            for bruto in arq:
-                linha = bruto.decode("utf-8", "replace").rstrip("\r\n")
-                if not linha:
+            while bruto := arq.readline(MAX_ENVELOPE + 2):
+                if not bruto.endswith(b"\n") or len(bruto) > MAX_ENVELOPE + 1:
+                    return
+                try:
+                    envelope = json.loads(bruto)
+                    if not isinstance(envelope, dict):
+                        continue
+                    operation = envelope.get("operation_id") if envelope.get("type") == "cano_input" else None
+                    linha = envelope.get("frame") if envelope.get("type") == "cano_input" else bruto.decode().rstrip("\r\n")
+                    if not isinstance(linha, str) or len(linha.encode()) > MAX_FRAME or "\n" in linha or "\r" in linha or not isinstance(json.loads(linha), dict):
+                        continue
+                    if envelope.get("type") == "cano_input" and not isinstance(operation, str):
+                        continue
+                except (ValueError, UnicodeError):
                     continue
-                with self.trava:
-                    self._observar_cliente(linha)
-                if self.proc and self.proc.stdin and self.saiu is None:
-                    try:
-                        self.proc.stdin.write((linha + "\n").encode("utf-8"))
-                        self.proc.stdin.flush()
-                    except OSError as e:
-                        self._log(f"stdin do claude falhou: {e}")
+                with self.stdin_lock:
+                    with self.trava:
+                        if self.cliente is not con:
+                            return
+                        before = self.child_revision
+                    outcome, written = "not_written", 0
+                    if self.proc and self.proc.stdin and self.saiu is None:
+                        data = (linha + "\n").encode()
+                        try:
+                            while written < len(data):
+                                count = self.proc.stdin.write(data[written:])
+                                if not isinstance(count, int) or count <= 0:
+                                    raise OSError("stdin sem progresso")
+                                written += count
+                            self.proc.stdin.flush()
+                            outcome = "written"
+                        except OSError:
+                            outcome = "unknown" if written else "not_written"
+                            self._log("stdin do filho sem confirmação de escrita")
+                    with self.trava:
+                        if outcome == "written":
+                            self._observar_cliente(linha)
+                            if self.result_revision > before:
+                                self.aberto = False
+                        if operation is not None:
+                            self._mandar(json.dumps({"type": "cano_input_ack", "operation_id": operation, "outcome": outcome}))
         except OSError:
             pass
         finally:
@@ -379,6 +521,9 @@ def main() -> int:
     argv = a.argv[1:] if a.argv and a.argv[0] == "--" else a.argv
     if not argv:
         print("cano: faltou o comando do claude depois de --", file=sys.stderr)
+        return 2
+    if not a.token:
+        print("cano: token obrigatório para o cano v2", file=sys.stderr)
         return 2
     log = open(a.log, "a", encoding="utf-8") if a.log else sys.stderr
     cano = Cano(a.escuta, a.token, log)

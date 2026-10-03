@@ -774,11 +774,14 @@ class CodexAdapter:
 
     async def _ligar_sem_terminal(self, name: str, meta: dict, *, reabrir: bool = True) -> Optional[AppServerClient]:
         """Religa no cano vivo da sessão sem terminal; sem cano (ou cano morto), sobe outro."""
+        from app.runtime_adapter import assert_legacy, bind_client
+        assert_legacy(name)
         cano = meta.get("cano") or {}
         if cano:
             ligado = await sem_terminal.conectar(cano)
             if ligado is not None:
                 client, snap = ligado
+                bind_client(name, client)
                 if snap.get("saiu") is None:
                     try:
                         await sem_terminal.initialize(client)
@@ -809,6 +812,8 @@ class CodexAdapter:
         return await self._subir_sem_terminal(name, meta)
 
     async def _subir_sem_terminal(self, name: str, meta: dict) -> Optional[AppServerClient]:
+        from app.runtime_adapter import assert_legacy, bind_client
+        assert_legacy(name)
         esforco_recusado = None
         falhas = self._falhas_subida.get(name, 0)
         if falhas >= self.TETO_SUBIDAS:
@@ -822,6 +827,7 @@ class CodexAdapter:
             if ligado is None:
                 raise RuntimeError("cano não escutou em 10s")
             client, _ = ligado
+            bind_client(name, client)
             try:
                 await sem_terminal.initialize(client)
                 approval, sandbox = sem_terminal.politica(meta.get("permission_mode"))
@@ -962,7 +968,7 @@ class CodexAdapter:
             cano_pid = (meta.get("cano") or {}).get("pid")
             pids = ([int(cano_pid), *await asyncio.to_thread(_descendant_pids, int(cano_pid))]
                     if cano_pid else [])
-            self.close_sync(name, preserve_preview=True)
+            await asyncio.to_thread(self.close_sync, name, preserve_preview=True)
             await sess["client"].close()
             await asyncio.to_thread(_esperar_saida, pids)
             if any(pid_vivo(pid) for pid in pids):
@@ -993,7 +999,7 @@ class CodexAdapter:
                     if not await asyncio.to_thread(tmux.kill_session, name):
                         raise RuntimeError("Não consegui fechar o terminal; não abri outro processo.") from exc
                 failed_session = self._sessions.get(name)
-                self.close_sync(name, preserve_preview=True)
+                await asyncio.to_thread(self.close_sync, name, preserve_preview=True)
                 if failed_session:
                     await failed_session["client"].close()
                 await asyncio.to_thread(_esperar_saida, new_pids)
@@ -1093,7 +1099,7 @@ class CodexAdapter:
                 codex_sessions.update(name, app_pid=meta.get("app_pid"))
                 self._start_tmux_watcher(name)
                 raise RuntimeError("Não foi possível fechar o terminal; o modo foi mantido.")
-            self.close_sync(name, preserve_preview=True)
+            await asyncio.to_thread(self.close_sync, name, preserve_preview=True)
             await sess["client"].close()
             await asyncio.to_thread(_esperar_saida, pids)
             if any(pid_vivo(pid) for pid in pids):
@@ -1120,7 +1126,7 @@ class CodexAdapter:
                 cano_pid = ((codex_sessions.load(name) or {}).get("cano") or {}).get("pid")
                 new_pids = ([int(cano_pid), *await asyncio.to_thread(_descendant_pids, int(cano_pid))]
                             if cano_pid else [])
-                self.close_sync(name, preserve_preview=True)
+                await asyncio.to_thread(self.close_sync, name, preserve_preview=True)
                 if failed:
                     await failed["client"].close()
                 await asyncio.to_thread(_esperar_saida, new_pids)
@@ -1175,8 +1181,16 @@ class CodexAdapter:
 
         O SIGTERM vai pelo PID do sidecar: desde o lancador unico o servidor nao e filho do backend,
         entao `client.terminate()` sozinho seria um no-op e o servidor sobreviveria ao encerrar."""
+        meta = codex_sessions.load(name) or {}
+        cano_pid = (meta.get("cano") or {}).get("pid") if meta.get("headless") else None
+        from app.registry import _descendant_pids, _esperar_saida
+        pids = [cano_pid, *_descendant_pids(cano_pid)] if cano_pid else []
         matar_app_server(name)
-        sem_terminal.matar(codex_sessions.load(name))
+        sem_terminal.matar(meta)
+        if pids:
+            _esperar_saida(pids)
+            if any(pid_vivo(pid) for pid in pids):
+                raise RuntimeError("o processo antigo continua vivo; sidecar e fila conservados")
         self._falhas_subida.pop(name, None)
         self._problemas.pop(name, None)
         sess = self._sessions.pop(name, None)
@@ -2139,3 +2153,7 @@ class CodexAdapter:
         # O rollout path vem do thread/start (result.thread.path), gravado no sidecar -- nao ha como
         # derivar do cwd+id como no Claude. Nunca chamado no caminho Codex.
         raise NotImplementedError("Codex obtem o rollout path via thread/start, nao por derivacao")
+
+
+from app.runtime_adapter import install_adapter as _install_runtime_adapter
+_install_runtime_adapter(CodexAdapter, "codex")

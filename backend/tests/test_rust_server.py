@@ -73,10 +73,34 @@ class Health(BaseHTTPRequestHandler):
 
 host, port = os.environ["HANGAR_SERVER_LISTEN"].rsplit(":", 1)
 server = ThreadingHTTPServer((host, int(port)), Health)
+print(json.dumps({"type": "runtime_ready", "protocol": __PROTOCOL__,
+                  "instance": os.environ["HANGAR_RUNTIME_INSTANCE"], "port": server.server_port}), flush=True)
 if mode == "cai":
     threading.Timer(0.3, lambda: os._exit(1)).start()
 server.serve_forever()
 '''
+
+
+@pytest.fixture(autouse=True)
+def isolated_runtime(monkeypatch):
+    from app import runtime_coordinator, runtime_queue
+    monkeypatch.setattr(runtime_coordinator, "_current", None)
+    monkeypatch.setattr(runtime_queue, "_coordinator", None)
+
+
+def test_runtime_startup_checks_nonce_protocol_and_limit():
+    import io
+    from types import SimpleNamespace
+    def parse(value):
+        return rust_server._runtime_ready(SimpleNamespace(stdout=io.BytesIO(json.dumps(value).encode() + b"\n")), "instance-test")
+    valid = {"type": "runtime_ready", "protocol": rust_server.RUST_SERVER_PROTOCOL,
+             "instance": "instance-test", "port": 1234}
+    assert parse(valid) == valid
+    for field, value in [("protocol", True), ("instance", "old-instance"), ("port", 0), ("port", True)]:
+        with pytest.raises(ValueError):
+            parse({**valid, field: value})
+    with pytest.raises(ValueError):
+        rust_server._runtime_ready(SimpleNamespace(stdout=io.BytesIO(b"a" * 4097 + b"\n")), "instance-test")
 
 
 class _App:

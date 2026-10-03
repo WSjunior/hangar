@@ -19,7 +19,7 @@ nas partes responsáveis da migração.
 - A porta privada já anunciada em `terminal_address` recebe `POST /__hangar_server/workspace`.
   IP de loopback e segredo são conferidos antes do corpo; a porta pública sempre responde 404.
   Operações privadas recebem o contexto resolvido e não consultam novamente o registro.
-- Protocolo interno 6, nos dois lados; as versões 4 e 5 pertencem às partes 2B e 3.
+- Protocolo interno 10, nos dois lados, após integrar a parte 2B (7); as partes 3 e 2D reservam 8 e 9.
 
 ## Invariantes
 

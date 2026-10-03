@@ -1,13 +1,53 @@
 //! O que o cano observa nos dois sentidos para montar o snapshot, e as linhas que ele mesmo
 //! escreve. Port de `cano.py:103-158` e `cano.py:183,213-221`.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-/// `cano.py:32`. O adapter reabre a sessão ociosa quando o snapshot traz outra versão.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
+pub const MAX_FRAME: usize = 16 * 1024 * 1024;
+pub const MAX_ENVELOPE: usize = 2 * MAX_FRAME + 1024;
+
+#[derive(Serialize)]
+struct ClaudePrefix {
+    complete: bool,
+    text: String,
+    thinking: String,
+    tool: ToolPrefix,
+}
+
+impl Default for ClaudePrefix {
+    fn default() -> Self {
+        Self { complete: true, text: String::new(), thinking: String::new(), tool: ToolPrefix::default() }
+    }
+}
+
+#[derive(Default, Serialize)]
+struct ToolPrefix { name: Option<String>, input: String, index: Option<u64> }
+
+#[derive(Serialize)]
+struct CodexPrefix {
+    complete: bool,
+    text: String,
+    #[serde(rename = "itemId")]
+    item_id: Option<String>,
+    #[serde(rename = "turnId")]
+    turn_id: Option<String>,
+}
+
+impl Default for CodexPrefix {
+    fn default() -> Self {
+        Self { complete: true, text: String::new(), item_id: None, turn_id: None }
+    }
+}
+
+#[derive(Default, Serialize)]
+struct Inflight {
+    claude: ClaudePrefix,
+    codex: BTreeMap<String, CodexPrefix>,
+}
 
 #[derive(Default)]
 pub struct Tracker {
@@ -17,12 +57,21 @@ pub struct Tracker {
     pending: Vec<(String, String)>,
     pub last_result: Option<String>,
     pub rate_limit: Option<String>,
+    inflight: Inflight,
+    pub child_revision: u64,
+    pub result_revision: u64,
 }
 
 impl Tracker {
     /// Linha que o filho escreveu (`cano.py:103`).
     pub fn observe_child(&mut self, line: &str) {
         let Some(ev) = parse_object(line) else { return };
+        self.child_revision += 1;
+        let control = str_field(&ev, "type").is_some_and(|t| t.starts_with("control_") || t == "sdk_control_request");
+        if ev.get("parent_tool_use_id").is_some_and(|v| !v.is_null()) && !control {
+            return;
+        }
+        self.observe_prefix(&ev);
         match ev.get("type").and_then(Value::as_str) {
             Some("system") if str_field(&ev, "subtype") == Some("init") => {
                 self.init = Some(line.to_owned());
@@ -35,6 +84,7 @@ impl Tracker {
             }
             Some("control_cancel_request") => self.remove(&py_str(ev.get("request_id"))),
             Some("result") => {
+                self.result_revision = self.child_revision;
                 self.turn_open = false;
                 self.last_result = Some(line.to_owned());
                 self.pending.clear();
@@ -42,6 +92,87 @@ impl Tracker {
             Some("rate_limit_event") => self.rate_limit = Some(line.to_owned()),
             // Guarda que falha cai aqui, como o `elif` do Python.
             _ if ev.contains_key("method") => self.observe_rpc(&ev, line),
+            _ => {}
+        }
+    }
+
+    fn observe_prefix(&mut self, ev: &Map<String, Value>) {
+        match str_field(ev, "type") {
+            Some("stream_event") => {
+                let event = ev.get("event").unwrap_or(&Value::Null);
+                let prefix = &mut self.inflight.claude;
+                match event["type"].as_str() {
+                    Some("content_block_start") => {
+                        match event["content_block"]["type"].as_str() {
+                            Some("text") => { prefix.text.clear(); prefix.complete = true; }
+                            Some("thinking") => { prefix.thinking.clear(); }
+                            Some("tool_use" | "server_tool_use" | "mcp_tool_use") => {
+                                prefix.tool = ToolPrefix { name: event["content_block"]["name"].as_str().map(str::to_owned),
+                                    input: String::new(), index: event["index"].as_u64() };
+                            }
+                            _ => {}
+                        }
+                    }
+                    Some("content_block_delta") if prefix.complete => {
+                        let delta = &event["delta"];
+                        let piece = delta["text"].as_str().or_else(|| delta["thinking"].as_str())
+                            .or_else(|| delta["partial_json"].as_str()).unwrap_or("");
+                        if prefix.text.len() + prefix.thinking.len() + prefix.tool.input.len() + piece.len() > MAX_FRAME / 2 {
+                            prefix.complete = false;
+                            prefix.text.clear(); prefix.thinking.clear(); prefix.tool.input.clear();
+                            return;
+                        }
+                        match delta["type"].as_str() {
+                            Some("text_delta") => prefix.text.push_str(piece),
+                            Some("thinking_delta") => prefix.thinking.push_str(piece),
+                            Some("input_json_delta") => prefix.tool.input.push_str(piece),
+                            _ => {}
+                        }
+                    }
+                    Some("content_block_stop") => prefix.tool = ToolPrefix::default(),
+                    _ => {}
+                }
+            }
+            Some("result" | "conversation_reset") => self.inflight.claude = ClaudePrefix::default(),
+            Some("assistant") if ev.get("local_command_source").is_none() => {
+                if let Some(blocks) = ev.get("message").and_then(|m| m.get("content")).and_then(Value::as_array) {
+                    for block in blocks {
+                        match block["type"].as_str() {
+                            Some("text") => self.inflight.claude.text.clear(),
+                            Some("thinking") => self.inflight.claude.thinking.clear(),
+                            Some("tool_use") => self.inflight.claude.tool = ToolPrefix::default(),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        let Some(params) = params(ev) else { return };
+        let Some(thread) = str_field(params, "threadId") else { return };
+        if !matches!(str_field(ev, "method"), Some("turn/started" | "turn/completed" | "item/agentMessage/delta" | "item/started" | "item/completed")) { return; }
+        let prefix = self.inflight.codex.entry(thread.to_owned()).or_default();
+        match str_field(ev, "method") {
+            Some("turn/started") => {
+                *prefix = CodexPrefix::default();
+                prefix.turn_id = params.get("turn").and_then(|t| t.get("id")).and_then(Value::as_str).map(str::to_owned);
+            }
+            Some("item/agentMessage/delta") => {
+                let item = str_field(params, "itemId").map(str::to_owned);
+                if prefix.item_id.is_some() && prefix.item_id != item { *prefix = CodexPrefix::default(); }
+                prefix.item_id = item;
+                prefix.turn_id = str_field(params, "turnId").map(str::to_owned);
+                let piece = str_field(params, "delta").unwrap_or("");
+                if prefix.text.len() + piece.len() > MAX_FRAME / 2 {
+                    prefix.complete = false;
+                    prefix.text.clear();
+                } else if prefix.complete { prefix.text.push_str(piece); }
+            }
+            Some("turn/completed") => { self.inflight.codex.remove(thread); }
+            Some("item/started" | "item/completed") if params.get("item")
+                .and_then(|i| i.get("type")).and_then(Value::as_str) == Some("agentMessage") => {
+                prefix.text.clear(); prefix.complete = true;
+            }
             _ => {}
         }
     }
@@ -100,10 +231,12 @@ impl Tracker {
             rate_limit: self.rate_limit.as_deref(),
             stderr_tail,
             saiu: exited,
+            inflight: &self.inflight,
         })
     }
 
     fn put(&mut self, key: String, line: &str) {
+        if key == "invalid" { return; }
         // Chave repetida troca o valor e mantém a posição, como no dict.
         match self.pending.iter_mut().find(|(k, _)| *k == key) {
             Some(slot) => slot.1 = line.to_owned(),
@@ -130,6 +263,7 @@ struct Snapshot<'a> {
     rate_limit: Option<&'a str>,
     stderr_tail: &'a VecDeque<String>,
     saiu: Option<i64>,
+    inflight: &'a Inflight,
 }
 
 #[derive(Serialize)]
@@ -170,16 +304,12 @@ fn params(ev: &Map<String, Value>) -> Option<&Map<String, Value>> {
     ev.get("params").and_then(Value::as_object)
 }
 
-/// `str()` do Python sobre o valor: a chave nunca sai do processo, só precisa casar entre os
-/// dois sentidos (`str(1)` e `str("1")` são a mesma chave lá e aqui).
+// O tipo do ID faz parte da correlação JSON-RPC.
 fn py_str(v: Option<&Value>) -> String {
     match v {
-        None | Some(Value::Null) => "None".to_owned(),
-        Some(Value::Bool(true)) => "True".to_owned(),
-        Some(Value::Bool(false)) => "False".to_owned(),
-        Some(Value::String(s)) => s.clone(),
-        // ponytail: número sai como o serde_json escreve; lista ou objeto como id não acontece.
-        Some(other) => other.to_string(),
+        Some(Value::String(s)) => format!("s:{s}"),
+        Some(Value::Number(n)) if n.is_i64() => format!("i:{n}"),
+        _ => "invalid".to_owned(),
     }
 }
 
@@ -271,14 +401,14 @@ mod tests {
         let keys: Vec<&str> = s.as_object().unwrap().keys().map(String::as_str).collect();
         let mut expected = vec![
             "type", "versao", "pid", "init", "aberto", "pendentes", "ultimo_result", "rate_limit",
-            "stderr_tail", "saiu",
+            "stderr_tail", "saiu", "inflight",
         ];
         let mut got = keys.clone();
         got.sort();
         expected.sort();
         assert_eq!(got, expected);
         assert_eq!(s["type"], "cano_snapshot");
-        assert_eq!(s["versao"], 1);
+        assert_eq!(s["versao"], 2);
         assert_eq!(s["pid"], 42);
         assert_eq!(s["init"], init); // a linha crua, como string
         assert_eq!(s["aberto"], false);
@@ -358,11 +488,11 @@ mod tests {
     }
 
     #[test]
-    fn integer_and_string_ids_are_the_same_key_like_python_str() {
+    fn integer_and_string_ids_remain_distinct() {
         let mut t = Tracker::default();
         t.observe_child(r#"{"jsonrpc": "2.0", "id": 1, "method": "m"}"#);
         t.observe_client(r#"{"id": "1"}"#);
-        assert!(pending_ids(&t).is_empty());
+        assert_eq!(pending_ids(&t), vec![Value::from(1)]);
     }
 
     #[test]

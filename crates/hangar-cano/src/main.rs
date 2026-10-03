@@ -22,6 +22,22 @@ use tokio::sync::{Notify, mpsc, watch};
 
 use protocol::Tracker;
 
+async fn read_frame<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R, limit: usize) -> io::Result<Option<Vec<u8>>> {
+    let mut frame = Vec::new();
+    loop {
+        let bytes = reader.fill_buf().await?;
+        if bytes.is_empty() { return Ok(None); }
+        let end = bytes.iter().position(|b| *b == b'\n');
+        let take = end.map_or(bytes.len(), |n| n + 1);
+        if frame.len() + take > limit + 1 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "linha acima do teto"));
+        }
+        frame.extend_from_slice(&bytes[..take]);
+        reader.consume(take);
+        if end.is_some() { return Ok(Some(frame)); }
+    }
+}
+
 const QUEUE_LIMIT: usize = 5000; // cano.py:43
 const STDERR_TAIL: usize = 20; // cano.py:52
 const TOKEN_DEADLINE: Duration = Duration::from_secs(10); // cano.py:239
@@ -199,17 +215,15 @@ async fn pump_stdout(
     mut rc: watch::Receiver<Option<i64>>,
 ) {
     let mut r = BufReader::new(out);
-    let mut buf = Vec::new();
     loop {
-        buf.clear();
-        match r.read_until(b'\n', &mut buf).await {
-            Ok(0) => break,
-            Ok(_) => {}
+        let buf = match read_frame(&mut r, protocol::MAX_FRAME).await {
+            Ok(None) => break,
+            Ok(Some(buf)) => buf,
             Err(e) => {
                 log(&format!("leitura do stdout do claude falhou: {e}"));
                 break;
             }
-        }
+        };
         let text = String::from_utf8_lossy(&buf);
         let line = text.trim_end_matches(['\r', '\n']);
         if line.is_empty() {
@@ -217,7 +231,7 @@ async fn pump_stdout(
         }
         let mut st = inner.state();
         st.tracker.observe_child(line);
-        st.send(line.to_owned());
+        st.send(serde_json::json!({"type":"cano_output","frame":line}).to_string());
     }
     let code = rc.wait_for(Option::is_some).await.ok().and_then(|v| *v).unwrap_or(-1);
     let _ = tokio::time::timeout(STDERR_GRACE, stderr_task).await;
@@ -273,35 +287,49 @@ async fn serve_client<S>(inner: Arc<Inner>, stream: S)
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
-    let (r, w) = tokio::io::split(stream);
+    let (r, mut w) = tokio::io::split(stream);
     let mut r = BufReader::new(r);
-    let mut buf = Vec::new();
-    if let Some(token) = &inner.token {
-        // TCP em loopback: qualquer processo local alcança a porta; o token faz o cano ser só do backend.
-        let read = tokio::time::timeout(TOKEN_DEADLINE, r.read_until(b'\n', &mut buf)).await;
-        if !matches!(read, Ok(Ok(_))) || String::from_utf8_lossy(&buf).trim() != token {
-            return;
-        }
+    let Some(token) = &inner.token else { return };
+    let header = match tokio::time::timeout(TOKEN_DEADLINE, read_frame(&mut r, 4096)).await {
+        Ok(Ok(Some(buf))) => buf,
+        _ => return,
+    };
+    let header = String::from_utf8_lossy(&header);
+    let header = header.trim_end_matches(['\r', '\n']);
+    let peeking = header.strip_prefix("peek ") == Some(token.as_str());
+    if header != token && !peeking { return; }
+    if peeking {
+        let snapshot = {
+            let st = inner.state();
+            st.tracker.snapshot(inner.pid, &st.stderr_tail, st.exited)
+        };
+        if snapshot.len() <= protocol::MAX_FRAME { let _ = write_line(&mut w, &snapshot).await; }
+        let _ = w.shutdown().await;
+        return;
     }
     let (tx, rx) = mpsc::unbounded_channel();
     let (alive_tx, alive_rx) = watch::channel(());
     let queued = Arc::new(AtomicUsize::new(0));
-    let (id, snapshot) = {
+    // O snapshot da transferência inclui toda escrita antiga já terminada no filho.
+    let stdin_guard = inner.stdin.lock().await;
+    let claimed = {
         let mut st = inner.state();
-        st.next_client += 1;
-        let id = st.next_client;
-        // Um cliente por vez: o antigo cai aqui, e o que sobrou na fila dele já está no snapshot.
-        st.client = Some(Client { id, tx, queued: queued.clone(), full_warned: false, _alive: alive_tx });
         let snapshot = st.tracker.snapshot(inner.pid, &st.stderr_tail, st.exited);
-        if st.exited.is_some() {
-            // Já saiu: quem chegou leva o rc como se acontecesse agora, e aí o cano pode morrer.
-            send_exit(&mut st, &inner);
+        if snapshot.len() > protocol::MAX_FRAME {
+            None
+        } else {
+            st.next_client += 1;
+            let id = st.next_client;
+            st.client = Some(Client { id, tx, queued: queued.clone(), full_warned: false, _alive: alive_tx });
+            if st.exited.is_some() { send_exit(&mut st, &inner); }
+            Some((id, snapshot))
         }
-        (id, snapshot)
     };
+    drop(stdin_guard);
+    let Some((id, snapshot)) = claimed else { return };
     log("cliente conectado");
     tokio::spawn(write_client(inner.clone(), id, w, snapshot, rx, queued, alive_rx.clone()));
-    read_client(&inner, r, buf, alive_rx).await;
+    read_client(&inner, id, r, alive_rx).await;
     inner.drop_client_if(id);
     log("cliente saiu");
 }
@@ -351,43 +379,59 @@ async fn write_line<W: AsyncWrite + Unpin>(w: &mut W, line: &str) -> io::Result<
 
 async fn read_client<R: AsyncRead + Unpin>(
     inner: &Inner,
+    id: u64,
     mut r: BufReader<R>,
-    mut buf: Vec<u8>,
     mut alive: watch::Receiver<()>,
 ) {
     loop {
-        buf.clear();
         let read = tokio::select! {
-            r = r.read_until(b'\n', &mut buf) => r,
+            r = read_frame(&mut r, protocol::MAX_ENVELOPE) => r,
             _ = alive.changed() => return,
         };
-        if !matches!(read, Ok(n) if n > 0) {
-            return;
-        }
-        let text = String::from_utf8_lossy(&buf);
-        let line = text.trim_end_matches(['\r', '\n']);
-        if line.is_empty() {
-            continue;
-        }
-        let exited = {
-            let mut st = inner.state();
-            st.tracker.observe_client(line);
-            st.exited.is_some()
+        let buf = match read { Ok(Some(buf)) => buf, _ => return };
+        let Ok(envelope) = serde_json::from_slice::<serde_json::Value>(&buf) else { continue };
+        if !envelope.is_object() { continue; }
+        let (line, operation) = if envelope["type"] == "cano_input" {
+            let (Some(frame), Some(op)) = (envelope["frame"].as_str(), envelope["operation_id"].as_str()) else { continue };
+            (frame.to_owned(), Some(op.to_owned()))
+        } else {
+            (String::from_utf8_lossy(&buf).trim_end_matches(['\r', '\n']).to_owned(), None)
         };
-        if exited {
+        if line.len() > protocol::MAX_FRAME || line.contains(['\r', '\n'])
+            || !serde_json::from_str::<serde_json::Value>(&line).is_ok_and(|v| v.is_object()) {
             continue;
         }
         let mut stdin = inner.stdin.lock().await;
-        let Some(pipe) = stdin.as_mut() else { continue };
+        if !inner.state().client.as_ref().is_some_and(|c| c.id == id) { return; }
+        let before = inner.state().tracker.child_revision;
         let mut bytes = Vec::with_capacity(line.len() + 1);
         bytes.extend_from_slice(line.as_bytes());
         bytes.push(b'\n');
-        let wrote = match pipe.write_all(&bytes).await {
-            Ok(()) => pipe.flush().await,
-            Err(e) => Err(e),
+        let mut written = 0;
+        let outcome = if inner.state().exited.is_some() || stdin.is_none() { "not_written" } else {
+            let pipe = stdin.as_mut().unwrap();
+            let result = async {
+                while written < bytes.len() {
+                    let n = pipe.write(&bytes[written..]).await?;
+                    if n == 0 { return Err(io::Error::from(io::ErrorKind::WriteZero)); }
+                    written += n;
+                }
+                pipe.flush().await
+            }.await;
+            match result {
+                Ok(()) => "written",
+                Err(_) if written == 0 => "not_written",
+                Err(_) => "unknown",
+            }
         };
-        if let Err(e) = wrote {
-            log(&format!("stdin do claude falhou: {e}"));
+        let mut st = inner.state();
+        if outcome == "written" {
+            st.tracker.observe_client(&line);
+            if st.tracker.result_revision > before { st.tracker.turn_open = false; }
+        }
+        else { log("stdin do filho sem confirmação de escrita"); }
+        if let Some(operation_id) = operation {
+            st.send(serde_json::json!({"type":"cano_input_ack","operation_id":operation_id,"outcome":outcome}).to_string());
         }
     }
 }
@@ -485,6 +529,10 @@ fn watch_sigterm(inner: Arc<Inner>, rc: watch::Receiver<Option<i64>>, spec: Stri
 }
 
 async fn run(args: Args) -> i32 {
+    if args.token.as_deref().is_none_or(str::is_empty) {
+        log("token obrigatório para o cano v2");
+        return 2;
+    }
     // ANTES de subir o filho: escuta que falha (caminho unix > 107 bytes, porta ocupada) derruba o
     // cano com log e código de saída, nunca deixa um filho órfão sem porta.
     let listener = match listen(&args.listen) {

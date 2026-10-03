@@ -2,6 +2,14 @@
 
 Data: 03/10/2026. Base do trabalho: PR #24 em `128262597d926416cb3a5e91f5ac3a2f99b798e1`.
 
+Antes da publicação, a branch foi atualizada com o PR #24 em `ce5cefd5`, incluindo a parte 2B.
+O contrato combinado usa a versão 10, sem reutilizar as versões 7, 8 e 9 das outras partes.
+O CI do backend compila o servidor e o executável de paridade antes de executar o pytest.
+Após a integração, passaram 303 testes Python focados e uma regressão adicional que inicia
+o binário real pelo Supervisor, confere simultaneamente as pontes de runtime e Git/arquivos
+e confirma que ambas são desligadas na parada. Os 23 testes Rust de Linux e 22 de Windows
+também passaram novamente.
+
 ## Uso real
 
 Fixture `desktop-native/tools/workspace_fixture.py`, repositório e remoto bare descartáveis,

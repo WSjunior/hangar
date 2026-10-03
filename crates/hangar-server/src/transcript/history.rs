@@ -246,12 +246,12 @@ fn absorb(p: &mut Parsed, ts: f64, i: u64, evs: Vec<ChatEvent>, held_ids: &mut H
     }
 }
 
-fn strip_attach(text: &str) -> String {
+pub(crate) fn strip_attach(text: &str) -> String {
     ATTACH.replace(text, "").into_owned()
 }
 
 /// `_chaves_de_commit` (pqueue.py:301). Repetição não importa: quem usa só compara o relógio.
-fn chaves_de_commit(text: &str) -> Vec<String> {
+pub(crate) fn chaves_de_commit(text: &str) -> Vec<String> {
     let t = strip(text);
     let base = IMG_PREFIX.replace(t, "").into_owned();
     let fonte = IMG_SOURCE.replace_all(t, |c: &regex::Captures| format!("📎 imagem: {}", &c[1])).into_owned();

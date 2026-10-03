@@ -2,6 +2,8 @@
 """Rotas internas que só o hangar-server, filho deste backend na mesma máquina, consome."""
 import asyncio
 import secrets
+import json
+import copy
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
@@ -54,6 +56,71 @@ def info_payload(name: str, provider: str, jsonl: str | None) -> dict:
 
 
 router = APIRouter(prefix="/internal", dependencies=[Depends(require_internal)], include_in_schema=False)
+_policy_calls = {}
+
+
+@router.post("/runtime/policy")
+async def runtime_policy(request: Request):
+    from app import runtime_coordinator, runtime_policy as service
+    coordinator = runtime_coordinator.current()
+    instance = request.headers.get("x-hangar-runtime-instance", "")
+    if coordinator is None or not coordinator.instance or not secrets.compare_digest(instance, coordinator.instance):
+        raise HTTPException(404)
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > (32 << 20) + 1024:
+            raise HTTPException(413)
+    try:
+        body = json.loads(raw)
+        if (not isinstance(body, dict) or set(body) != {"key", "generation", "request_id", "phase_id", "kind", "payload"}
+                or not isinstance(body["key"], str) or type(body["generation"]) is not int
+                or type(body["request_id"]) not in (int, str) or not isinstance(body["phase_id"], str)
+                or not isinstance(body["kind"], str) or not isinstance(body["payload"], dict)):
+            raise ValueError("serviço inválido")
+        slot = coordinator.slots[body["key"]]
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(400) from None
+
+    def validate():
+        with slot.guard:
+            if (coordinator.instance != instance or slot.binding.key != body["key"]
+                    or slot.binding.generation != body["generation"]
+                    or slot.phase not in {runtime_coordinator.Phase.Rust, runtime_coordinator.Phase.PreparingRust}
+                    or slot.lease is not None and not slot.lease.closed):
+                raise RuntimeError("serviço de outra posse ou geração")
+        state = json.loads(slot.binding.state_path.read_bytes())
+        operation = state["operations"][body["phase_id"]]
+        if (state["owner_key"] != body["key"] or state["generation"] != body["generation"]
+                or operation["status"] != "dispatching" or operation["payload"].get("kind") != body["kind"]
+                or type(operation["payload"].get("request_id")) is not type(body["request_id"])
+                or operation["payload"].get("request_id") != body["request_id"]
+                or operation["payload"].get("payload") != body["payload"]):
+            raise RuntimeError("serviço sem tentativa registrada")
+
+    validate()
+    key = (instance, body["key"], body["generation"], body["phase_id"])
+    for old in tuple(_policy_calls):
+        if old[0] != instance:
+            _policy_calls.pop(old, None)
+    if key not in _policy_calls:
+        metadata = copy.deepcopy(slot.binding.meta)
+        metadata.update(provider=slot.binding.provider, name=slot.binding.name, key=slot.binding.key,
+                        generation=slot.binding.generation, jsonl=slot.binding.jsonl,
+                        state_path=str(slot.binding.state_path),
+                        operation_id=body["request_id"] if isinstance(body["request_id"], str) else body["phase_id"], validate=validate)
+        async def perform():
+            validate()
+            with slot.guard:
+                slot.active += 1
+            try:
+                return await service.execute(body["kind"], body["payload"], metadata)
+            finally:
+                with slot.guard:
+                    slot.active -= 1
+                coordinator._signal(slot)
+        _policy_calls[key] = asyncio.create_task(perform())
+    return await asyncio.shield(_policy_calls[key])
 
 
 @router.get("/workspace/context")
@@ -83,6 +150,15 @@ async def session_info(name: str) -> dict:
     info = await api._cached_info(name)
     if info is None:
         raise HTTPException(status_code=404)
+    from app import runtime_coordinator
+    coordinator = runtime_coordinator.current()
+    if coordinator is not None and coordinator.managed_queue(name):
+        import uuid
+        try:
+            await coordinator.op(name, {"kind":"ensure_projection"}, uuid.uuid4().hex)
+        except Exception as exc:
+            diag.registrar("runtime.history_failed", "erro", sessao=name, codigo=type(exc).__name__)
+            raise HTTPException(503) from None
     return info_payload(name, info.provider, info.jsonl)
 
 
