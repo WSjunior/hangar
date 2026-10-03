@@ -487,3 +487,41 @@ def test_delete_merged_only_takes_clean(tmp_path, monkeypatch):
     (tmp_path / "repo-b" / "solto.txt").write_text("?")
     assert worktrees.delete_merged(main, []) == [a]
     assert (tmp_path / "repo-b").exists()
+
+
+def test_delete_leaves_colliding_subfolder_conversations(tmp_path, monkeypatch):
+    from app.registry import sanitize_cwd
+    main = _repo(tmp_path / "repo")
+    sub = tmp_path / "repo" / "sub"
+    sub.mkdir()
+    wt = _merged_wt(main, tmp_path / "repo-sub", "feat")
+    assert sanitize_cwd(str(sub)) == sanitize_cwd(wt)   # `repo/sub` e `repo-sub`: mesma pasta de projeto
+    base = _claude_project(tmp_path, monkeypatch, str(sub), sid="dasub")
+    live = base / sanitize_cwd(wt) / "viva.jsonl"
+    live.write_text(json.dumps({"cwd": wt}) + "\n")
+    s2 = SessionInfo(name="s2", cwd=str(sub), jsonl=str(live))
+    out = worktrees.delete(main, wt, [s2])
+    assert out["moved"] == 0
+    assert (base / sanitize_cwd(wt) / "dasub.jsonl").exists()
+    assert live.exists()
+
+
+def test_delete_missing_folder_keeps_other_orphan(tmp_path, monkeypatch):
+    import shutil
+    from app import archive
+    monkeypatch.setattr(archive, "_contas", lambda config_dir=None: [])
+    main = _repo(tmp_path / "repo")
+    a = _wt(main, tmp_path / "repo-a", "a")
+    b = _wt(main, tmp_path / "repo-b", "b")
+    shutil.rmtree(a)
+    shutil.rmtree(b)
+    assert worktrees.delete(main, a, [])["removed"] == a
+    assert worktrees.worktree_paths(main) == [b]
+
+
+def test_redirect_through_symlink(tmp_path):
+    main = _repo(tmp_path / "repo")
+    (tmp_path / "link").symlink_to(tmp_path)
+    worktrees.record_removed(str(tmp_path / "repo-x"), main)
+    assert worktrees.redirect(str(tmp_path / "link" / "repo-x" / "sub")) == main
+    assert worktrees.redirect(str(tmp_path / "outra")) == str(tmp_path / "outra")

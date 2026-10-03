@@ -386,14 +386,33 @@ def fetch(repo: str) -> None:
 _removed_lock = threading.Lock()
 
 
-def record_removed(path: str, main: str) -> None:
+def _write_removed(path: str, main: str | None) -> None:
+    """`main=None` tira a entrada (remoção que falhou)."""
     with _removed_lock:   # ler-alterar-gravar: duas remoções juntas perderiam uma entrada
         data = removed()
-        data[path] = main
+        if main is None:
+            data.pop(path, None)
+        else:
+            data[path] = main
         REMOVED_FILE.parent.mkdir(parents=True, exist_ok=True)
         tmp = REMOVED_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
         atomico.substituir(tmp, REMOVED_FILE)
+
+
+def record_removed(path: str, main: str) -> None:
+    _write_removed(path, main)
+
+
+def _under(cwd: str | None, path: str) -> bool:
+    """`cwd` é `path` ou fica dentro dela, pelo texto ou pelo realpath (home atrás de symlink).
+    Pasta sumida: o realpath resolve só a parte que ainda existe, o que basta para o symlink."""
+    if not cwd:
+        return False
+    for c, p in ((cwd, path), (os.path.realpath(cwd), os.path.realpath(path))):
+        if c == p or c.startswith(p.rstrip("/") + "/"):
+            return True
+    return False
 
 
 def redirect(cwd: str | None) -> str | None:
@@ -401,47 +420,66 @@ def redirect(cwd: str | None) -> str | None:
     if not cwd or os.path.isdir(cwd):
         return cwd
     for path, main in removed().items():
-        if cwd == path or cwd.startswith(path.rstrip("/") + "/"):
+        if _under(cwd, path):
             return main
     return cwd
 
 
-def relocate_transcripts(path: str, main: str) -> list[tuple[Path, Path]]:
+def relocate_transcripts(path: str, main: str, sessions=()) -> list[tuple[Path, Path]]:
     """Leva `<uuid>.jsonl` e a pasta irmã `<uuid>/` do projeto da worktree pro da principal, em
     todas as contas. Mover, não copiar: a mesma conversa listada duas vezes confunde o Arquivo."""
-    from app.archive import _contas
+    from app.archive import _contas, _head_info
     from app.registry import sanitize_cwd
+    # O nome da pasta de projeto colide (`repo-x` e `repo/x` viram o mesmo): só sai a conversa
+    # aberta dentro da worktree, e nunca a de uma sessão viva.
+    live = {os.path.realpath(s.jsonl) for s in sessions if getattr(s, "jsonl", None)}
+    names = {sanitize_cwd(path), sanitize_cwd(os.path.realpath(path))}
+    # O Claude indexa pelo cwd do processo, que o getcwd devolve resolvido: o realpath.
+    target = sanitize_cwd(os.path.realpath(main))
     moved: list[tuple[Path, Path]] = []
     try:
         for _cfg, _rot, base in _contas():
-            src = base / sanitize_cwd(path)
-            if not src.is_dir():
-                continue
-            dst = base / sanitize_cwd(main)
-            dst.mkdir(parents=True, exist_ok=True)
-            for f in sorted(src.glob("*.jsonl")):
-                sid = f.stem
-                if (dst / f.name).exists() or (dst / sid).exists():
-                    _log.warning("relocate: %s já existe em %s; fica na worktree", f.name, dst)
+            dst = base / target
+            for name in sorted(names):
+                src = base / name
+                if not src.is_dir():
                     continue
-                os.replace(f, dst / f.name)
-                moved.append((f, dst / f.name))
-                if (src / sid).is_dir():
-                    os.replace(src / sid, dst / sid)
-                    moved.append((src / sid, dst / sid))
+                for f in sorted(src.glob("*.jsonl")):
+                    if os.path.realpath(f) in live or not _under(_head_info(f)[1], path):
+                        continue
+                    sid = f.stem
+                    if (dst / f.name).exists() or (dst / sid).exists():
+                        _log.warning("relocate: %s já existe em %s; fica na worktree", f.name, dst)
+                        continue
+                    dst.mkdir(parents=True, exist_ok=True)
+                    os.replace(f, dst / f.name)
+                    moved.append((f, dst / f.name))
+                    if (src / sid).is_dir():
+                        os.replace(src / sid, dst / sid)
+                        moved.append((src / sid, dst / sid))
     except OSError as e:
         # Metade movida é pior que nada: o jsonl sem a pasta irmã perde tool-results e subagentes.
-        _undo(moved)
-        raise GitError(500, f"não consegui mover as conversas: {e}") from None
+        stuck = _undo(moved)
+        raise GitError(500, f"não consegui mover as conversas: {e}" + _stuck_note(stuck)) from None
     return moved
 
 
-def _undo(moved: list[tuple[Path, Path]]) -> None:
+def _undo(moved: list[tuple[Path, Path]]) -> list[Path]:
+    """Devolve o que não voltou: segue no projeto da principal."""
+    stuck = []
     for src, dst in reversed(moved):
         try:
             os.replace(dst, src)
         except OSError as e:
             _log.error("relocate: não desfez %s -> %s: %s", dst, src, e)
+            stuck.append(dst)
+    return stuck
+
+
+def _stuck_note(stuck: list[Path]) -> str:
+    if not stuck:
+        return ""
+    return "; ficaram no projeto da pasta principal: " + ", ".join(p.name for p in stuck)
 
 
 def delete(repo: str, path: str, sessions, *, confirm: bool = False,
@@ -461,19 +499,26 @@ def delete(repo: str, path: str, sessions, *, confirm: bool = False,
         raise GitError(409, "não consegui ler a worktree; tente de novo")
     if (st["dirty"] or st["ignored"]) and not confirm:
         raise GitError(409, "há arquivos que serão perdidos; confirme")
-    moved = relocate_transcripts(path, main)
+    # O mapa vem antes de mover: falha no meio nunca deixa conversa movida sem o desvio. Com a
+    # pasta ainda de pé ele não age (`redirect` só desvia pasta sumida).
     try:
-        if st["exists"]:
-            remove_worktree(main, path, force=confirm)
-        else:
-            # Pasta já sumiu: só sobrou o registro em `.git/worktrees`, e o prune o leva.
-            p = _run(main, "worktree", "prune")
-            if p.returncode != 0 or path in worktree_paths(main):
-                raise GitError(409, _scrub(p.stderr.strip()) or "a worktree continua registrada (trancada?)")
+        record_removed(path, main)
+    except OSError as e:
+        raise GitError(500, f"não consegui gravar o mapa de remoções: {e}") from None
+    moved: list[tuple[Path, Path]] = []
+    try:
+        moved = relocate_transcripts(path, main, sessions)
+        # `remove` aceita pasta já sumida e leva só o registro desta; o `prune` levaria o de todas.
+        remove_worktree(main, path, force=confirm)
+        if path in worktree_paths(main):
+            raise GitError(409, "a worktree continua registrada (trancada?)")
     except GitError as e:
-        _undo(moved)
-        raise GitError(409, e.detail) from None
-    record_removed(path, main)
+        stuck = _undo(moved)
+        try:
+            _write_removed(path, None)
+        except OSError as w:
+            _log.error("worktrees: não tirei %s do mapa de remoções: %s", path, w)
+        raise GitError(409, e.detail + _stuck_note(stuck)) from None
     branch_deleted = False
     if st["branch"] and (st["merged"] or delete_branch):
         try:
@@ -494,6 +539,11 @@ def delete_merged(repo: str, sessions) -> list[str]:
         st = status(path, sessions)
         if (st["merged"] and not st["degraded"] and not st["dirty"] and not st["ignored"]
                 and not st["sessions"]):
-            delete(main, path, sessions)
+            try:
+                delete(main, path, sessions)
+            except GitError as e:
+                if out:   # as anteriores já saíram: o erro tem que dizer quais
+                    raise GitError(e.status, f"{e.detail} (já removidas: {', '.join(out)})") from None
+                raise
             out.append(path)
     return out
