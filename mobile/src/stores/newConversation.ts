@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import {
   basename, createSessionForServer, fetchSessionsForServer, getCreationProgress, getHistory,
-  sendInputForServer, transitionFirstConversation, uploadFileForServer,
+  sanitizeSessionName, sendInputForServer, transitionFirstConversation, uploadFileForServer,
 } from '@hangar/core';
 import type {
   ChatEvent, CreateSessionBody, FirstConversationAttempt, FirstConversationEvent, Server, SessionInfo,
@@ -177,10 +177,11 @@ async function runCreate(serverId: string, input: NewConversationInput): Promise
     while (taken.has(stableName(input.body.cwd, id))) id = newId();
   }
   const finalName = explicit || stableName(input.body.cwd, id);
-  // Branch nova sem nome digitado segue o nome final da sessão, só conhecido aqui.
+  // Branch nova sem nome digitado segue o nome final da sessão, só conhecido aqui, com a limpeza que o
+  // backend faz no nome: o digitado pode ter espaço e acento.
   const draft: FirstConversationAttempt = Object.assign({
     id, serverId, text: input.text, phase: 'draft' as const, sessionName: null,
-    body: { ...input.body, name: finalName, ...(input.body.new_branch && !input.body.branch?.trim() ? { branch: finalName } : {}) },
+    body: { ...input.body, name: finalName, ...(input.body.new_branch && !input.body.branch?.trim() ? { branch: sanitizeSessionName(finalName) } : {}) },
   }, input.attachment ? { attachment: input.attachment } : {});
   const creating = transitionFirstConversation(draft, { type: 'begin' });
   try { persist(creating); } catch {

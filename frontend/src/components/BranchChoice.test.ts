@@ -1,0 +1,41 @@
+// @vitest-environment happy-dom
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { mount, unmount, tick } from 'svelte';
+import type { FolderBranches, Server, WorktreeChoice } from '@hangar/core';
+import BranchChoice from './BranchChoice.svelte';
+
+const branches = vi.hoisted(() => ({ value: null as FolderBranches | null }));
+vi.mock('@hangar/core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@hangar/core')>()),
+  getFolderBranchesForServer: vi.fn(async () => branches.value),
+}));
+
+const server = { id: 's1', label: 's1', baseUrl: 'http://s1', token: 't' } as unknown as Server;
+let app: ReturnType<typeof mount> | null = null;
+
+async function flush() {
+  for (let i = 0; i < 5; i++) { await Promise.resolve(); await tick(); }
+}
+
+async function pickNewBranch(sessionName: string): Promise<WorktreeChoice | null> {
+  let last: WorktreeChoice | null = null;
+  const target = document.createElement('div');
+  document.body.appendChild(target);
+  app = mount(BranchChoice, { target, props: { server, cwd: '/r', value: null, sessionName, onChange: (v) => { last = v; } } });
+  await flush();
+  const select = target.querySelector('select') as HTMLSelectElement;
+  select.value = 'new';
+  select.dispatchEvent(new Event('change'));
+  await flush();
+  return last;
+}
+
+afterEach(() => { if (app) unmount(app); app = null; document.body.innerHTML = ''; });
+
+describe('BranchChoice', () => {
+  it('branch nova sem nome digitado usa o nome da sessão limpo', async () => {
+    branches.value = { current: 'main', branches: ['main'], remotes: [], dirty: false };
+    const v = await pickNewBranch('Minha Sessão');
+    expect(v).toEqual({ branch: 'Minha-Sessao', new_branch: true, base: 'main' });
+  });
+});

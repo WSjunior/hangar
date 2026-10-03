@@ -227,6 +227,12 @@ describe('newConversation', () => {
     expect(calls.create.mock.calls[1][1]).toMatchObject({ name: 'meu-nome', branch: 'feat-x', new_branch: true });
   });
 
+  it('branch nova sem nome segue o nome digitado da sessão já limpo', async () => {
+    calls.create.mockImplementation(async (_s, body) => ({ name: body.name, state: 'idle' }));
+    await beginAttempt('server-a', { ...input, body: { ...input.body, new_branch: true, branch: '', name: 'Minha Sessão' } });
+    expect(calls.create.mock.calls[0][1]).toMatchObject({ name: 'Minha Sessão', branch: 'Minha-Sessao', new_branch: true });
+  });
+
   it('recusa definitiva (cwd inválido) volta ao rascunho editável com o motivo do servidor', async () => {
     calls.create.mockRejectedValueOnce(httpError(400, '400: diretório não existe'));
     await beginAttempt('server-a', input);

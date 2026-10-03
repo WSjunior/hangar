@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { getFolderBranchesForServer, type FolderBranches, type Server, type WorktreeChoice } from '@hangar/core';
+  import { getFolderBranchesForServer, sanitizeSessionName, type FolderBranches, type Server, type WorktreeChoice } from '@hangar/core';
   import * as m from '../paraglide/messages';
 
   interface Props { server: Server; cwd: string; value: WorktreeChoice | null; sessionName: string;
@@ -26,12 +26,14 @@
     getFolderBranchesForServer(s, alvo).then((r) => { if (atual()) { info = r; base = r.current ?? ''; } })
       .catch(() => { if (atual()) info = null; });   // pasta sem git: o seletor some
   });
+  // O nome da sessão é texto livre; a branch padrão segue a mesma limpeza que o backend faz no nome.
+  const defaultBranch = $derived(sanitizeSessionName(sessionName));
   const others = $derived(info ? [...info.branches, ...info.remotes].filter((b) => b !== info?.current) : []);
 
   $effect(() => {
     if (!info) onChange(null);
     else if (mode === 'existing' && existing) onChange({ branch: existing });
-    else if (mode === 'new') onChange({ branch: (branchName || sessionName).trim(), new_branch: true, base: base || null });
+    else if (mode === 'new') onChange({ branch: branchName.trim() || defaultBranch, new_branch: true, base: base || null });
     else onChange(null);
   });
 </script>
@@ -49,7 +51,7 @@
         {#each others as b (b)}<option value={b}>{b}</option>{/each}
       </select>
     {:else if mode === 'new'}
-      <input class="field-input" type="text" placeholder={sessionName} bind:value={branchName} aria-label={m.worktree_nome_branch()} />
+      <input class="field-input" type="text" placeholder={defaultBranch} bind:value={branchName} aria-label={m.worktree_nome_branch()} />
       <select class="field-input" bind:value={base} aria-label={m.worktree_base()}>
         {#each [info.current, ...others].filter(Boolean) as b (b)}<option value={b}>{b}</option>{/each}
       </select>
