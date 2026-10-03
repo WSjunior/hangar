@@ -1,0 +1,47 @@
+#![cfg(unix)]
+use hangar_server::terminal_input::*;
+use std::{sync::Arc,time::{Duration,SystemTime,UNIX_EPOCH}};
+use tokio::process::Command;
+struct Facts(TerminalBinding);
+impl TerminalServices for Facts {
+ fn facts<'a>(&'a self,_:&'a TerminalBinding)->ServiceFuture<'a,InputFacts>{Box::pin(async{Ok(InputFacts{binding:self.0.clone(),ready:true,idle:true,open_question:false,plugin_live:false,plugin_user:false,clipboard_available:true,native:None})})}
+ fn publish<'a>(&'a self,_:&'a TerminalBinding,_:PluginRequest)->ServiceFuture<'a,PluginReply>{Box::pin(async{Ok(PluginReply::Unavailable)})}
+}
+struct IsolatedMux(String);
+impl Drop for IsolatedMux {fn drop(&mut self){let _=std::process::Command::new("tmux").args(["-L",&self.0,"kill-server"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();}}
+#[tokio::test]
+async fn terminal_input_tmux_isolated_fake_cli_unicode_multiline_and_clear() {
+ let dir=tempfile::tempdir().unwrap();let cli=dir.path().join("fake_cli.py");let receipt=dir.path().join("receipt.json");
+ std::fs::write(&cli,r#"import os, sys, tty, termios, json, codecs
+fd=sys.stdin.fileno(); old=termios.tcgetattr(fd); tty.setraw(fd)
+text=''; incoming=''; messages=[]
+def render():
+ sys.stdout.write('\x1b[2J\x1b[Hhistory\r\n'+'─'*40+'\r\n❯ '+text.replace('\n','\r\n')+'\r\n'+'─'*40+'\r\n⏵⏵ bypass permissions\r\n'); sys.stdout.flush()
+sys.stdout.write('\x1b[?2004h'); render(); decoder=codecs.getincrementaldecoder('utf-8')()
+try:
+ while True:
+  incoming+=decoder.decode(os.read(fd,4096))
+  while incoming:
+   if incoming.startswith('\x1b[200~'):
+    end=incoming.find('\x1b[201~')
+    if end<0: break
+    text+=incoming[6:end].replace('\r','\n'); incoming=incoming[end+6:]; render(); continue
+   if incoming.startswith('\x1b') and len(incoming)<6: break
+   c=incoming[0]; incoming=incoming[1:]
+   if c=='\r':
+    messages.append(text); open(sys.argv[1],'w',encoding='utf-8').write(json.dumps(messages,ensure_ascii=False)); text=''
+   elif c=='\x15': text=''
+   else: text+=c
+   render()
+finally: termios.tcsetattr(fd,termios.TCSADRAIN,old)
+"#).unwrap();
+ let label=format!("hangar-input-test-{}-{}",std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos());let _guard=IsolatedMux(label.clone());
+ let cli_cmd=format!("python3 '{}' '{}'",cli.display(),receipt.display());
+ let new=Command::new("tmux").args(["-L",&label,"new-session","-d","-s","test","-x","100","-y","40",&cli_cmd]).output().await.unwrap();assert!(new.status.success());
+ let meta=Command::new("tmux").args(["-L",&label,"display-message","-p","-t","=test:0.0","#{pane_id}\t#{session_created}"]).output().await.unwrap();assert!(meta.status.success());let meta=String::from_utf8(meta.stdout).unwrap();let mut fields=meta.trim().split('\t');let pane=fields.next().unwrap().to_string();let created=fields.next().unwrap().parse().unwrap();
+ let binding=TerminalBinding{name:"test".into(),pane,conversation:"fake-conversation".into(),generation:1,created,mux_argv:vec!["tmux".into(),"-L".into(),label],windows:false,clipboard_lock_path:None};
+ let d=TerminalDriver::new(binding.clone(),Arc::new(Facts(binding)),Arc::new(ProcessIo::default()),InputLimits{settle:Duration::from_millis(10),literal_settle:Duration::from_millis(25),multiline_settle:Duration::from_millis(25),slash_settle:Duration::from_millis(25),proof_attempts:40,ready_attempts:40,cleanup_attempts:4});
+ for _ in 0..100 {if d.capture().await.is_ok_and(|s|ComposerSnapshot::parse(&s).is_some()){break;}tokio::time::sleep(Duration::from_millis(10)).await;}
+ for (id,text) in [("short","ok"),("unicode","ação 😀 C:\\Users\\test"),("multiline","first\nsecond\nthird"),("clear","/clear"),("semicolon","literal;")] {let r=d.prompt(text,id).await;assert_eq!(r.disposition,Disposition::Accepted,"{id}: {}; fake capture={:?}",r.code,d.capture().await);}
+ let received:Vec<String>=serde_json::from_slice(&std::fs::read(receipt).unwrap()).unwrap();assert_eq!(received,vec!["ok","ação 😀 C:\\Users\\test","first\nsecond\nthird","/clear","literal;"]);
+}

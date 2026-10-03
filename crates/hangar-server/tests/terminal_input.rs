@@ -1,0 +1,248 @@
+use hangar_server::terminal_input::*;
+use std::{collections::VecDeque, sync::{Arc, Mutex}, time::Duration};
+fn screen(s: &str) -> String { format!("history\n{}\n❯ {s}\n{}\n⏵⏵ bypass permissions\n\n", "─".repeat(30), "─".repeat(30)) }
+fn binding() -> TerminalBinding { TerminalBinding { name: "test".into(), pane: "%7".into(), conversation: "uuid".into(), generation: 1, created: 17, mux_argv: vec!["fake".into(), "-L".into(), "isolated".into()], windows: false, clipboard_lock_path: None } }
+struct Services { facts: Mutex<InputFacts>, reply: Mutex<PluginReply>, published: Mutex<Vec<PluginRequest>> }
+impl Services { fn new() -> Self { Self { facts: Mutex::new(InputFacts { binding: binding(), ready: true, idle: true, open_question: false, plugin_live: false, plugin_user: false,clipboard_available:true, native: None }), reply: Mutex::new(PluginReply::Unavailable), published: Mutex::new(vec![]) } } }
+impl TerminalServices for Services {
+ fn facts<'a>(&'a self, _: &'a TerminalBinding) -> ServiceFuture<'a, InputFacts> { Box::pin(async { Ok(self.facts.lock().unwrap().clone()) }) }
+ fn publish<'a>(&'a self, _: &'a TerminalBinding, r: PluginRequest) -> ServiceFuture<'a, PluginReply> { Box::pin(async move { self.published.lock().unwrap().push(r); Ok(self.reply.lock().unwrap().clone()) }) }
+}
+struct FakeIo { screens: Mutex<VecDeque<String>>, calls: Mutex<Vec<CommandRequest>>, socket: Mutex<WriteOutcome>, envelope: Mutex<Vec<u8>>, fail: Mutex<Option<String>> }
+impl FakeIo {
+ fn new(s: Vec<String>) -> Self { Self { screens: Mutex::new(s.into()), calls: Mutex::new(vec![]), socket: Mutex::new(WriteOutcome::NotWritten), envelope: Mutex::new(vec![]), fail: Mutex::new(None) } }
+ fn writes(&self) -> Vec<CommandRequest> { self.calls.lock().unwrap().iter().filter(|r| r.args.iter().any(|a| a == "send-keys" || a == "paste-buffer")).cloned().collect() }
+}
+impl TerminalIo for FakeIo {
+ fn command<'a>(&'a self, r: CommandRequest) -> IoFuture<'a, CommandOutput> { Box::pin(async move {
+ self.calls.lock().unwrap().push(r.clone());
+ if r.args.iter().any(|a| a == "display-message") { return Ok(CommandOutput { success: true, stdout: b"test\t%7\t17\n".to_vec() }); }
+ if r.args.iter().any(|a| a == "capture-pane") { let mut s = self.screens.lock().unwrap(); let t = if s.len()>1 {s.pop_front().unwrap()} else {s.front().cloned().unwrap_or_default()}; return Ok(CommandOutput {success: true, stdout:t.into_bytes()}); }
+ if self.fail.lock().unwrap().as_ref().is_some_and(|k| r.args.last()==Some(k)) {return Err(IoFailure {code:"partial",may_have_written:true});}
+ Ok(CommandOutput {success:true,stdout:vec![]}) }) }
+ fn socket<'a>(&'a self, _: &'a NativeMessage, envelope: Vec<u8>) -> IoFuture<'a, WriteOutcome> {Box::pin(async move {*self.envelope.lock().unwrap()=envelope;Ok(*self.socket.lock().unwrap())})}
+}
+fn driver(io:Arc<FakeIo>,s:Arc<Services>)->TerminalDriver {TerminalDriver::new(binding(),s,io,InputLimits {literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,settle:Duration::ZERO,proof_attempts:2,ready_attempts:2,cleanup_attempts:3})}
+#[test]
+fn terminal_input_composer_proof() {
+ let old=ComposerSnapshot::parse(&screen("[Pasted text #1 +12 lines] [Image #1]")).unwrap();
+ assert_eq!(old.proves("long original message",&old),Proof::Absent);
+ for s in ["[Pasted text #2 +2 lines]","[Image #2]","a long ori\nginal mes sage"] {assert_eq!(ComposerSnapshot::parse(&screen(s)).unwrap().proves("a long original message",&old),Proof::Present);}
+ assert_eq!(ComposerSnapshot::parse(&format!("a long original message\n{}",screen(""))).unwrap().proves("a long original message",&old),Proof::Absent);
+ assert!(ComposerSnapshot::parse("no composer").is_none());
+}
+#[tokio::test]
+async fn terminal_input_short_text_literal_cr() {
+ let io=Arc::new(FakeIo::new(vec![screen(""),screen("ok"),screen("")]));
+ let r=driver(io.clone(),Arc::new(Services::new())).prompt("ok","id").await;
+ assert_eq!(r.disposition,Disposition::Accepted);
+ assert_eq!(io.writes().len(),2); assert_eq!(io.writes()[1].args.last().unwrap(),"\r");
+ assert!(io.writes()[1].args.contains(&"-l".into()));
+}
+#[tokio::test]
+async fn terminal_input_multiline_stdin_placeholder() {
+ let io=Arc::new(FakeIo::new(vec![screen(""),screen("[Pasted text #1 +2 lines]"),screen("")]));
+ assert_eq!(driver(io.clone(),Arc::new(Services::new())).prompt("first\nsecond","id").await.disposition,Disposition::Accepted);
+ let c=io.calls.lock().unwrap(); let load=c.iter().find(|r|r.args.contains(&"load-buffer".into())).unwrap(); assert_eq!(load.stdin,b"first\nsecond");
+}
+#[tokio::test]
+async fn terminal_input_validation_and_stale_guard() {
+ for mode in ["control","overlay","stale"] {let io=Arc::new(FakeIo::new(vec![screen("")]));let s=Arc::new(Services::new());if mode=="overlay"{s.facts.lock().unwrap().open_question=true;}if mode=="stale"{s.facts.lock().unwrap().binding.conversation="other".into();}
+ assert_ne!(driver(io.clone(),s).prompt(if mode=="control"{"x\r"}else{"hello"},"id").await.disposition,Disposition::Accepted);assert!(io.writes().is_empty());}
+}
+#[tokio::test]
+async fn terminal_input_plugin_unknown_never_retypes() {
+ let io=Arc::new(FakeIo::new(vec![screen("")]));let s=Arc::new(Services::new());s.facts.lock().unwrap().plugin_live=true;*s.reply.lock().unwrap()=PluginReply::Unknown;
+ assert_eq!(driver(io.clone(),s).prompt("long original message","id").await.disposition,Disposition::Unknown);assert!(io.writes().is_empty());
+}
+#[tokio::test]
+async fn terminal_input_slash_bypasses_plugin() {
+ let io=Arc::new(FakeIo::new(vec![screen(""),screen("/clear"),screen("")]));let s=Arc::new(Services::new());s.facts.lock().unwrap().plugin_live=true;s.facts.lock().unwrap().plugin_user=true;*s.reply.lock().unwrap()=PluginReply::Filled;
+ assert_eq!(driver(io.clone(),s.clone()).prompt("/clear","id").await.disposition,Disposition::Accepted);
+ assert!(s.published.lock().unwrap().is_empty());assert_eq!(io.writes().len(),2);
+}
+#[tokio::test]
+async fn terminal_input_enter_uncertain_never_retries() {
+ let io=Arc::new(FakeIo::new(vec![screen(""),screen("long original message"),screen("")]));*io.fail.lock().unwrap()=Some("\r".into());
+ let r=driver(io.clone(),Arc::new(Services::new())).prompt("long original message","id").await;
+ assert_eq!(r.disposition,Disposition::Unknown);assert_eq!(r.stage,DeliveryStage::Submit);assert_eq!(io.writes().len(),2);
+}
+#[tokio::test]
+async fn terminal_input_partial_cleanup_only_owned_without_internal_retry() {
+ let io=Arc::new(FakeIo::new(vec![screen(""),screen("long original message"),screen(""),screen("long original message"),screen("")]));*io.fail.lock().unwrap()=Some("long original message".into());
+ let r=driver(io.clone(),Arc::new(Services::new())).prompt("long original message","id").await;
+ assert_eq!(r.disposition,Disposition::Deferred);assert_eq!(r.cleanup,Cleanup::Proved);assert_eq!(io.writes().iter().filter(|r|r.args.last().is_some_and(|a|a=="long original message")).count(),1);
+ let io=Arc::new(FakeIo::new(vec![screen(""),screen("foreign message")]));*io.fail.lock().unwrap()=Some("long original message".into());
+ assert_eq!(driver(io.clone(),Arc::new(Services::new())).prompt("long original message","id").await.disposition,Disposition::Unknown);assert_eq!(io.writes().len(),1);
+}
+#[tokio::test]
+async fn terminal_input_socket_partial_never_falls_back() {
+ let io=Arc::new(FakeIo::new(vec![screen("")]));let s=Arc::new(Services::new());s.facts.lock().unwrap().native=Some(NativeMessage {socket:"/private/socket".into(),origin:"uds:/inbox".into(),sender:"peer".into(),mode:"bypass".into(),message_id:Some("uuid-message".into())});*io.socket.lock().unwrap()=WriteOutcome::Unknown;
+ let r=driver(io.clone(),s).prompt("[de: peer] long message","id").await;
+ assert_eq!(r.disposition,Disposition::Unknown);assert!(io.writes().is_empty());assert_eq!(r.message_id.as_deref(),Some("uuid-message"));
+ let envelope:serde_json::Value=serde_json::from_slice(&io.envelope.lock().unwrap()).unwrap();
+ assert_eq!(envelope,serde_json::json!({"msgV":1,"msg_id":"uuid-message","type":"user","message":{"role":"user","content":"<cross-session-message from=\"uds:/inbox\" from-name=\"peer\" from-mode=\"bypass\">\n[de: peer] long message\n</cross-session-message>"},"priority":"next","from":"uds:/inbox"}));
+}
+#[tokio::test]
+async fn terminal_input_allowlists_explicit_steer() {
+ let io=Arc::new(FakeIo::new(vec![screen("")]));let d=driver(io.clone(),Arc::new(Services::new()));
+ assert_eq!(d.key("C-c",false).await.disposition,Disposition::Rejected);assert_eq!(d.key("C-c",true).await.disposition,Disposition::Accepted);assert_eq!(d.key("PageUp",false).await.disposition,Disposition::Accepted);assert_eq!(d.steer().await.disposition,Disposition::Deferred);assert_eq!(io.writes().len(),2);
+}
+#[tokio::test]
+async fn terminal_input_select_closed_loop() {
+ let p=|row|format!("Question\n{}\nEsc to cancel · to navigate",if row==1{"❯ 1. first\n  2. second"}else{"  1. first\n❯ 2. second"});
+ let io=Arc::new(FakeIo::new(vec![p(1),p(2),screen("")]));
+ assert_eq!(driver(io.clone(),Arc::new(Services::new())).select(2,true).await.disposition,Disposition::Accepted);assert_eq!(io.writes()[0].args.last().unwrap(),"Down");assert_eq!(io.writes()[1].args.last().unwrap(),"\r");
+}
+fn option_answer(index: usize, label: &str) -> QuestionAnswer { QuestionAnswer {kind:AnswerKind::Option,indices:vec![index],labels:vec![label.into()],multi:false,value:None,type_index:None,chat_index:None} }
+fn picker() -> String {"Question\n❯ 1. first\n  2. second\nEsc to cancel · to navigate".into()}
+#[tokio::test]
+async fn terminal_input_plugin_fill_proves_then_enters() {
+ let io=Arc::new(FakeIo::new(vec![screen(""),screen("hello @peer"),screen("")]));let s=Arc::new(Services::new());s.facts.lock().unwrap().plugin_live=true;*s.reply.lock().unwrap()=PluginReply::Filled;
+ assert_eq!(driver(io.clone(),s.clone()).prompt("hello @peer","id").await.disposition,Disposition::Accepted);
+ assert_eq!(s.published.lock().unwrap()[0].mode,PluginMode::Fill);assert_eq!(io.writes().len(),1);
+}
+#[tokio::test]
+async fn terminal_input_plugin_user_requires_capability_idle_and_safe_text() {
+ let io=Arc::new(FakeIo::new(vec![screen("")]));let s=Arc::new(Services::new());s.facts.lock().unwrap().plugin_live=true;s.facts.lock().unwrap().plugin_user=true;*s.reply.lock().unwrap()=PluginReply::Accepted;
+ assert_eq!(driver(io.clone(),s.clone()).prompt("hello","id").await.disposition,Disposition::Accepted);assert_eq!(s.published.lock().unwrap()[0].mode,PluginMode::User);assert!(io.writes().is_empty());
+}
+#[test]
+fn terminal_input_review_matches_per_question_not_cross_question_substrings() {
+ let a=vec![option_answer(0,"first"),option_answer(1,"second")];
+ assert!(review_matches("Review\n→ first\n→ second",&a));assert!(!review_matches("Review\n→ second\n→ first",&a));assert!(!review_matches("Review\n→ firstly\n→ second",&a));
+}
+#[tokio::test]
+async fn terminal_input_answer_single_and_review_mismatch_never_extra_enter() {
+ let io=Arc::new(FakeIo::new(vec![picker(),screen("")]));
+ assert_eq!(driver(io.clone(),Arc::new(Services::new())).answer(&[option_answer(0,"first")]).await.disposition,Disposition::Accepted);assert_eq!(io.writes().len(),1);
+ let io=Arc::new(FakeIo::new(vec![picker(),"Review\n→ wrong\nSubmit answers\nEsc to cancel".into()]));
+ assert_eq!(driver(io.clone(),Arc::new(Services::new())).answer(&[option_answer(0,"first")]).await.disposition,Disposition::Unknown);assert_eq!(io.writes().len(),1);
+}
+#[tokio::test]
+async fn terminal_input_submit_selected_needs_submit_tab() {
+ let multi="Question\n❯ 1. [✔] first\n  2. [ ] second\nEsc to cancel · to navigate";
+ let io=Arc::new(FakeIo::new(vec![multi.into(),multi.into()]));
+ assert_eq!(driver(io.clone(),Arc::new(Services::new())).submit_selected().await.disposition,Disposition::Unknown);assert_eq!(io.writes().len(),1);assert_eq!(io.writes()[0].args.last().unwrap(),"Right");
+}
+#[tokio::test]
+async fn terminal_input_interrupt_clear_checks_nonempty_to_avoid_rewind() {
+ for draft in ["", "draft"] {let io=Arc::new(FakeIo::new(vec![screen(draft)]));assert_eq!(driver(io.clone(),Arc::new(Services::new())).interrupt(true).await.disposition,Disposition::Accepted);assert_eq!(io.writes().len(),if draft.is_empty(){1}else{2});}
+}
+#[tokio::test]
+async fn terminal_input_stale_after_wait_prevents_late_effect() {
+ let io=Arc::new(FakeIo::new(vec![screen("")]));let s=Arc::new(Services::new());s.facts.lock().unwrap().ready=false;
+ let d=Arc::new(TerminalDriver::new(binding(),s.clone(),io.clone(),InputLimits {literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,settle:Duration::from_millis(1),proof_attempts:2,ready_attempts:100,cleanup_attempts:3}));
+ let task=tokio::spawn(async move{d.prompt("hello\nsecond","id").await});
+ tokio::task::yield_now().await;s.facts.lock().unwrap().binding.generation=2;
+ assert_eq!(task.await.unwrap().disposition,Disposition::Deferred);assert!(io.writes().is_empty());
+}
+#[tokio::test]
+async fn terminal_input_no_second_enter_for_plain_slash_residual() {
+ let io=Arc::new(FakeIo::new(vec![screen(""),screen("/clear"),screen("/clear")]));
+ assert_eq!(driver(io.clone(),Arc::new(Services::new())).prompt("/clear","id").await.disposition,Disposition::Unknown);
+ assert_eq!(io.writes().len(),2);
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn terminal_input_process_cli_reads_stdin_to_eof() {
+ let io=ProcessIo::default();let r=io.command(CommandRequest {program:"python3".into(),args:vec!["-c".into(),"import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())".into()],stdin:"ação\\😀\nsecond".as_bytes().to_vec()}).await.unwrap();
+ assert!(r.success);assert_eq!(r.stdout,"ação\\😀\nsecond".as_bytes());
+}
+#[tokio::test]
+async fn terminal_input_clipboard_lock_rechecks_generation_after_wait() {
+ let dir=tempfile::tempdir().unwrap();let path=dir.path().join("clipboard.lock");
+ let lock=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&path).unwrap();lock.lock().unwrap();
+ let mut b=binding();b.windows=true;b.pane="=test:0.0".into();b.clipboard_lock_path=Some(path);
+ let s=Arc::new(Services::new());s.facts.lock().unwrap().binding=b.clone();
+ let io=Arc::new(FakeIo::new(vec![screen("")]));
+ let d=TerminalDriver::new(b,s.clone(),io.clone(),InputLimits {literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,settle:Duration::from_millis(1),proof_attempts:2,ready_attempts:100,cleanup_attempts:3});
+ let task=tokio::spawn(async move{d.prompt("hello\nsecond","id").await});
+ while !io.calls.lock().unwrap().iter().any(|c|c.args.contains(&"capture-pane".into())) {tokio::task::yield_now().await;}
+ s.facts.lock().unwrap().binding.generation=2;drop(lock);
+ assert_eq!(task.await.unwrap().disposition,Disposition::Deferred);
+ assert!(io.writes().is_empty());assert!(!io.calls.lock().unwrap().iter().any(|c|c.program=="powershell.exe"));
+}
+#[tokio::test]
+async fn terminal_input_serial_wait_rechecks_binding_before_control() {
+ struct Blocking {inner:FakeIo,entered:tokio::sync::Notify,resume:tokio::sync::Notify}
+ impl TerminalIo for Blocking {
+  fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput>{Box::pin(async move{if r.args.contains(&"capture-pane".into()){self.entered.notify_one();self.resume.notified().await;}self.inner.command(r).await})}
+  fn socket<'a>(&'a self,d:&'a NativeMessage,e:Vec<u8>)->IoFuture<'a,WriteOutcome>{self.inner.socket(d,e)}
+ }
+ let io=Arc::new(Blocking {inner:FakeIo::new(vec![screen("")]),entered:tokio::sync::Notify::new(),resume:tokio::sync::Notify::new()});let s=Arc::new(Services::new());let d=Arc::new(TerminalDriver::new(binding(),s.clone(),io.clone(),InputLimits {literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,settle:Duration::ZERO,proof_attempts:2,ready_attempts:2,cleanup_attempts:3}));
+ let capture=tokio::spawn({let d=d.clone();async move{d.capture().await}});io.entered.notified().await;
+ let control=tokio::spawn({let d=d.clone();async move{d.key("Enter",false).await}});
+ s.facts.lock().unwrap().binding.conversation="other".into();io.resume.notify_one();capture.await.unwrap().unwrap();
+ assert_eq!(control.await.unwrap().disposition,Disposition::Deferred);assert!(io.inner.writes().is_empty());
+}
+#[tokio::test]
+async fn terminal_input_windows_clipboard_held_until_proof_and_preserves_unicode() {
+ struct Probe {inner:FakeIo,path:std::path::PathBuf,checked:Mutex<bool>}
+ impl TerminalIo for Probe {
+  fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput>{Box::pin(async move{
+   let pasted=self.inner.calls.lock().unwrap().iter().any(|c|c.args.last().is_some_and(|s|s=="M-v"));
+   if pasted && r.args.contains(&"capture-pane".into()) && !*self.checked.lock().unwrap(){let file=std::fs::OpenOptions::new().read(true).write(true).open(&self.path).unwrap();assert!(file.try_lock().is_err());*self.checked.lock().unwrap()=true;}
+   self.inner.command(r).await
+  })}
+  fn socket<'a>(&'a self,d:&'a NativeMessage,e:Vec<u8>)->IoFuture<'a,WriteOutcome>{self.inner.socket(d,e)}
+ }
+ let dir=tempfile::tempdir().unwrap();let path=dir.path().join("clipboard.lock");let mut b=binding();b.windows=true;b.pane="=test:0.0".into();b.clipboard_lock_path=Some(path.clone());
+ let io=Arc::new(Probe {inner:FakeIo::new(vec![screen(""),screen("[Pasted text #1 +2 lines]"),screen("")]),path,checked:Mutex::new(false)});let s=Arc::new(Services::new());s.facts.lock().unwrap().binding=b.clone();
+ let d=TerminalDriver::new(b,s,io.clone(),InputLimits {literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,settle:Duration::ZERO,proof_attempts:2,ready_attempts:2,cleanup_attempts:3});
+ assert_eq!(d.prompt("ação\\😀\nsecond","id").await.disposition,Disposition::Accepted);assert!(*io.checked.lock().unwrap());
+ let calls=io.inner.calls.lock().unwrap();let clip=calls.iter().find(|c|c.program=="powershell.exe").unwrap();assert_eq!(clip.stdin,"ação\\😀\nsecond".as_bytes());assert!(!calls.iter().any(|c|c.args.contains(&"load-buffer".into())));
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn terminal_input_native_process_io_writes_envelope_and_missing_socket_is_safe() {
+ let dir=tempfile::tempdir().unwrap();let path=dir.path().join("native.sock");let listener=tokio::net::UnixListener::bind(&path).unwrap();let native=NativeMessage {socket:path,origin:"uds:/inbox".into(),sender:"peer".into(),mode:"bypass".into(),message_id:Some("uuid-message".into())};
+ let peer=tokio::spawn(async move{use tokio::io::AsyncReadExt;let (mut socket,_)=listener.accept().await.unwrap();let mut bytes=Vec::new();socket.read_to_end(&mut bytes).await.unwrap();bytes});
+ assert_eq!(ProcessIo::default().socket(&native,b"envelope\n".to_vec()).await.unwrap(),WriteOutcome::Written);assert_eq!(peer.await.unwrap(),b"envelope\n");
+ assert_eq!(ProcessIo::default().socket(&native,b"envelope\n".to_vec()).await.unwrap(),WriteOutcome::NotWritten);
+}
+#[tokio::test]
+async fn terminal_input_native_only_recognized_messages_and_safe_fallback() {
+ for prefix in ["[de: peer] ",""] {
+ let io=Arc::new(FakeIo::new(vec![screen(""),screen(&format!("{prefix}hello")),screen("")]));let s=Arc::new(Services::new());s.facts.lock().unwrap().native=Some(NativeMessage {socket:"/private/socket".into(),origin:"uds:/inbox".into(),sender:"peer".into(),mode:"bypass".into(),message_id:Some("uuid-message".into())});
+ assert_eq!(driver(io.clone(),s).prompt(&format!("{prefix}hello"),"id").await.disposition,Disposition::Accepted);assert_eq!(io.writes().len(),2);
+ }
+}
+#[tokio::test]
+async fn terminal_input_partial_own_prefix_with_foreign_suffix_is_not_cleaned() {
+ let io=Arc::new(FakeIo::new(vec![screen(""),screen("long original message foreign suffix")]));*io.fail.lock().unwrap()=Some("long original message".into());
+ assert_eq!(driver(io.clone(),Arc::new(Services::new())).prompt("long original message","id").await.disposition,Disposition::Unknown);assert_eq!(io.writes().len(),1);
+}
+#[tokio::test]
+async fn terminal_input_old_picker_above_composer_does_not_block_prompt() {
+ let past="Question\n❯ 1. first\n  2. second\nEsc to cancel · to navigate\nold answer\nold answer\nold answer\nold answer\n";
+ let io=Arc::new(FakeIo::new(vec![format!("{past}{}",screen("")),screen("hello"),screen("")]));
+ assert_eq!(driver(io,Arc::new(Services::new())).prompt("hello","id").await.disposition,Disposition::Accepted);
+}
+#[tokio::test]
+async fn terminal_input_unnumbered_trust_cursor_is_real_option_position() {
+ let first="Trust this folder?\n❯ Yes, trust\n  No, exit\nEnter to select";
+ let second="Trust this folder?\n  Yes, trust\n❯ No, exit\nEnter to select";
+ let io=Arc::new(FakeIo::new(vec![second.into(),first.into(),screen("")]));
+ assert_eq!(driver(io.clone(),Arc::new(Services::new())).select(1,true).await.disposition,Disposition::Accepted);
+ assert_eq!(io.writes()[0].args.last().unwrap(),"Up");
+}
+#[tokio::test]
+async fn terminal_input_submit_selected_requires_final_proof() {
+ let multi="Question\n❯ 1. [✔] first\n  2. [ ] second\nEsc to cancel · to navigate";
+ let review="Review your answers\n→ first\n❯ 1. Submit answers\nEsc to cancel";
+ let io=Arc::new(FakeIo::new(vec![multi.into(),review.into(),review.into()]));
+ assert_eq!(driver(io,Arc::new(Services::new())).submit_selected().await.disposition,Disposition::Unknown);
+}
+#[tokio::test]
+async fn terminal_input_answer_review_enter_requires_final_proof() {
+ let review="Review your answers\n→ first\n❯ 1. Submit answers\nEsc to cancel";
+ let io=Arc::new(FakeIo::new(vec![picker(),review.into(),review.into()]));
+ assert_eq!(driver(io,Arc::new(Services::new())).answer(&[option_answer(0,"first")]).await.disposition,Disposition::Unknown);
+}
+#[tokio::test]
+async fn terminal_input_clipboard_unavailable_preserves_literal_and_blocks_clipboard() {
+ for text in ["hello","first\nsecond"] {let mut b=binding();b.windows=true;b.pane="=test:0.0".into();let dir=tempfile::tempdir().unwrap();b.clipboard_lock_path=Some(dir.path().join("clip.lock"));let s=Arc::new(Services::new());{let mut f=s.facts.lock().unwrap();f.binding=b.clone();f.clipboard_available=false;}
+ let io=Arc::new(FakeIo::new(vec![screen(""),screen(text),screen("")]));let d=TerminalDriver::new(b,s,io.clone(),InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:2,ready_attempts:2,cleanup_attempts:3});
+ assert_eq!(d.prompt(text,"id").await.disposition,if text.contains('\n'){Disposition::Deferred}else{Disposition::Accepted});assert!(!io.calls.lock().unwrap().iter().any(|r|r.program=="powershell.exe"));}
+}

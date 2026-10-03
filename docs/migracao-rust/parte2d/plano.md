@@ -33,17 +33,18 @@ somente leitura. Python fornece identidade/estado/política e publicação primi
 (disposição, estágio, limpeza, nativo) e serviço assíncrono primitivo de plugin/fatos.
 Driver sem fila; executor da Task 2 fornece serviços registrados antes do efeito.
 
-- [ ] **Step 1: Escrever testes de prova e transportes**
+- [x] **Step 1: Escrever testes de prova e transportes**
 
 Cobrir composer/região/whitespace, novo placeholder de texto/imagem, texto curto, literal CR,
 multiline, overlay, falha parcial, Enter incerto, limpeza somente própria, allowlists e seleção.
-Teste com IO falso deve afirmar zero redigitação após resultado incerto.
+Teste com IO falso deve afirmar zero redigitação após resultado incerto. Bloquear operação na
+serialização, mudar vínculo e liberar: zero publicação/tecla antiga, em envio e controle.
 
-- [ ] **Step 2: Conferir falha antes do código**
+- [x] **Step 2: Conferir falha antes do código**
 
 Rodar `cargo test --locked -p hangar-server terminal_input` em `crates/`; registrar falha esperada.
 
-- [ ] **Step 3: Implementar driver completo**
+- [x] **Step 3: Implementar driver completo**
 
 Executar socket/plugin/tmux na ordem da spec; adaptar primitivas do multiplexador à plataforma.
 Escrita/timeout depois do efeito produz incerteza; não introduzir driver pela tela do Codex.
@@ -52,7 +53,7 @@ Escrita/timeout depois do efeito produz incerteza; não introduzir driver pela t
 
 Mesmo comando, esperado verde. Revisor lê spec e diff inteiro da Task; corrigir problemas relevantes.
 
-- [ ] **Step 5: Marcar progresso e commitar Task 1**
+- [x] **Step 5: Marcar progresso e commitar Task 1**
 
 Stage explícito; mensagem `feat(server): add Claude terminal delivery driver`.
 
@@ -60,6 +61,8 @@ Stage explícito; mensagem `feat(server): add Claude terminal delivery driver`.
 
 **Arquivos:** criar `runtime/terminal.rs`; integrar `runtime/gateway.rs`, `runtime/mod.rs`,
 `runtime/actor.rs` somente interfaces necessárias, `runtime/receipt.rs` se necessário.
+`backend/app/rust_server.py` e `crates/hangar-server/src/lib.rs` fixam protocolo 9 neste commit,
+junto da primeira mudança do descriptor privado.
 **Interfaces:** adotar descriptor terminal via gateway existente; submit/control/queue/snapshot/
 drain/confirm/detach com mesmos envelopes e fila 2B. Serviços primitivos ficam registrados no
 diário e usam `PolicyClient`. Reutilizar lease/Store/QueueActor/ReceiptIndex existentes.
@@ -91,8 +94,9 @@ Stage explícito; mensagem `feat(server): own Claude terminal delivery and queue
 ### Task 3: Transferência Python, todos os gatilhos e contrato 9
 
 **Arquivos:** `backend/app/runtime_coordinator.py`, `runtime_adapter.py`, `runtime_policy.py`,
-`internal_api.py`, `terminal_input.py`, `api.py`, adapter Claude terminal e testes tocados;
-`rust_server.py`, `crates/hangar-server/src/lib.rs` para versão 9.
+`internal_api.py`, `terminal_input.py`, `api.py`, `plugin_bridge.py`,
+`plugins/hangar/hooks/input.ts`, adapter Claude terminal e testes tocados;
+Versão 9 já aplicada junto do contrato privado na Task 2.
 **Interfaces:** Binding terminal resolve pane/conversa registrados; serviço de fatos lê estado;
 serviço plugin publica/aguarda aviso sem dirigir terminal; fachada encaminha todas as ações.
 
@@ -100,7 +104,9 @@ serviço plugin publica/aguarda aviso sem dirigir terminal; fachada encaminha to
 
 Novo terminal gerenciado sem cano; preparar/adotar; envio comum/drain/confirm/teclas seguem Rust;
 plugin primitivo nunca tecla; geração antiga não toca plugin; queda confirmada restaura lease;
-Rust vivo sem resposta não libera Python; slash/clear e estado público preservados.
+Rust vivo sem resposta não libera Python; slash/clear e estado público preservados. Aviso plugin
+com publicação/geração antiga (ou sem correlação) não confirma nova operação. Convidado permitido
+segue mesmo dono; share/par somente leitura recusa escrita com zero efeito.
 
 - [ ] **Step 2: Conferir falha antes do código**
 
@@ -110,7 +116,7 @@ Rodar pytest dos arquivos novos/tocados num comando; esperado falha pelos caminh
 
 Remover seleção exclusiva headless somente para Claude terminal. Registrar identidade durável,
 conferir após locks, encaminhar envio e todos os controles, bloquear escritores antigos. Reserva
-opera mesmo diário e preserva incerto. Subir os dois números de protocolo para 9.
+opera mesmo diário e preserva incerto. Conservar os dois números de protocolo em 9.
 
 - [ ] **Step 4: Conferir testes focados e revisão independente**
 

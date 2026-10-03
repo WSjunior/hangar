@@ -20,16 +20,19 @@ porteiro, autenticação de convidados, portas 8766/8768 e segredo em memória f
 2. Socket nativo apenas para recados reconhecidos. Python resolve endereço/origem/modo;
    Rust escreve o envelope. Ausência/falha de conexão antes da escrita permite próximo transporte.
    Falha após possível escrita produz `unknown` e conserva a entrada.
-3. Plugin: somente long-poll da conversa acompanhada. Rust escolhe `user` apenas com capacidade,
+3. Plugin: somente long-poll da conversa acompanhada; slash fica no teclado da TUI.
+   Rust escolhe `user` apenas com capacidade,
    idle e sem menção `@`, slash ou bash; demais casos usam `fill`. Python publica e retorna aviso,
-   sem tecla. Aviso não recebido produz incerteza, salvo prova segura de não escrita. Rust dirige
+   sem tecla. Aviso carrega publicação/geração; aviso atrasado ou sem correlação não confirma
+   publicação nova. Aviso não recebido produz incerteza, salvo prova segura de não escrita. Rust dirige
    Enter e a prova de composer. Nunca digitar por cima de fill incerto.
 4. Reserva tmux: guard de overlay/pergunta, prontidão, limpeza prévia do composer, paste/literal,
    prova de entrada, Enter e prova de submissão. Preserve slash, placeholders novos e Unicode.
    Windows usa alvo completo e clipboard com exclusão global até provar a colagem; nunca confiar
    em buffer psmux que devolveu zero. POSIX multiline usa buffer via stdin e CR de submissão.
 5. Resultado `accepted/deferred/rejected/unknown` explicita o estágio. Retry somente se não houve
-   submissão e a limpeza do texto próprio foi comprovada; máximo duas tentativas. Após Enter,
+   submissão e a limpeza do texto próprio foi comprovada; máximo duas reentregas, no mesmo
+   contador da fila (original mais duas). Driver não cria orçamento de retry próprio. Após Enter,
    limpeza não comprova ausência de entrega: fica incerto. Logs só contagens/códigos/identidade.
 
 ## Fila e controles

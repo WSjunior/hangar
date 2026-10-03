@@ -8,6 +8,7 @@ pub mod side;
 pub mod tail;
 pub mod terminal_state;
 pub mod terminal_control;
+pub mod terminal_input;
 pub mod terminal_routes;
 pub mod transcript;
 
