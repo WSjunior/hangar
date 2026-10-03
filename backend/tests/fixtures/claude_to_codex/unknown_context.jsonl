@@ -1,0 +1,3 @@
+{"type": "user", "uuid": "unknown-u", "parentUuid": null, "message": {"role": "user", "content": "a"}}
+{"type": "attachment", "uuid": "unknown-att", "parentUuid": "unknown-u", "attachment": {"type": "future_instructions", "content": "não perder"}}
+{"type": "assistant", "uuid": "unknown-a", "parentUuid": "unknown-att", "message": {"role": "assistant", "content": "b"}}

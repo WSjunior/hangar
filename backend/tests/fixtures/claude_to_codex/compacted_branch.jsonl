@@ -1,0 +1,11 @@
+{"type": "user", "uuid": "u0", "parentUuid": null, "message": {"role": "user", "content": "original"}}
+{"type": "assistant", "uuid": "a0", "parentUuid": "u0", "message": {"role": "assistant", "content": "resposta antiga"}}
+{"type": "system", "uuid": "boundary", "parentUuid": null, "logicalParentUuid": "a0", "subtype": "compact_boundary"}
+{"type": "user", "uuid": "summary", "parentUuid": "boundary", "message": {"role": "user", "content": "resumo que não entra"}, "isCompactSummary": true}
+{"type": "attachment", "uuid": "instructions", "parentUuid": "summary", "attachment": {"type": "instructions", "files": [{"path": "/tmp/CLAUDE.md", "type": "project", "content": "regra histórica exclusiva"}]}}
+{"type": "user", "uuid": "u1", "parentUuid": "instructions", "message": {"role": "user", "content": "meta preservada"}, "isMeta": true}
+{"type": "assistant", "uuid": "a1", "parentUuid": "u1", "message": {"role": "assistant", "content": "resposta atual"}}
+{"type": "last-prompt", "leafUuid": "a1", "lastPrompt": "meta preservada"}
+{"type": "assistant", "uuid": "a0", "parentUuid": "u0", "message": {"role": "assistant", "content": "duplicata posterior rejeitada"}}
+{"type": "assistant", "uuid": "rejected", "parentUuid": "u0", "message": {"role": "assistant", "content": "fork rejeitado"}}
+{"type": "assistant", "uuid": "side", "parentUuid": "a1", "message": {"role": "assistant", "content": "sidechain rejeitada"}, "isSidechain": true}
