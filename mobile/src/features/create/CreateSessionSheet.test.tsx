@@ -210,9 +210,11 @@ vi.mock('../../paraglide/messages', () => ({
     'draft_read_error draft_write_error home_usage_30d home_usage_7d home_usage_active_days home_usage_activity home_usage_all home_usage_cost ' +
     'home_usage_day home_usage_empty home_usage_load_failed home_usage_method home_usage_model_count home_usage_models home_usage_overview ' +
     'home_usage_partial home_usage_period_unsupported home_usage_sessions home_usage_today home_usage_tokens home_usage_top_model home_usage_warming ' +
-    'home_usage_warming_timeout native_close native_create_codex_account native_create_provider_missing native_loading native_new_chat_machine ' +
+    'home_usage_warming_timeout native_close native_create_checkout_branch native_create_checkout_current native_create_checkout_worktree ' +
+    'native_create_codex_account native_create_provider_missing native_loading native_new_chat_machine ' +
     'native_new_chat_no_accounts nova_conversa_anexo_falhou nova_conversa_candidata nova_conversa_conferir_erro nova_conversa_criando ' +
-    'nova_conversa_nao_encontrada nova_conversa_nome_conflito nova_conversa_so_terminal nova_conversa_tentativa_invalida sync_retry'
+    'nova_conversa_nao_encontrada nova_conversa_nome_conflito nova_conversa_so_terminal nova_conversa_tentativa_invalida sync_retry ' +
+    'worktree_base worktree_modo worktree_modo_ajuda worktree_nome_branch worktree_nova_branch'
   ).split(' ').map((k) => [k, () => k])),
 }));
 

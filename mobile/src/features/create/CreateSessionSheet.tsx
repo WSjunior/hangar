@@ -8,19 +8,21 @@ import { getArchivePorCwd, getCodexAccountsForServer,
   modelOptionsForServer, resumeArchivedConversation, getProvidersForServer } from '@hangar/core';
 import { basename, providerName, contaComFolga, cotaDaConta, cotaParada, janelaEsgotada, resumoCota, CLAUDE_PERMISSION_MODES, EFFORT_LEVELS,
   SESSION_PROVIDERS, hasExecutionMode } from '@hangar/core';
-import type { ArchiveEntry, CodexAccount, ConfigDirInfo, Provider, ModelOption, CotaContaResumo, Server } from '@hangar/core';
+import type { ArchiveEntry, CodexAccount, ConfigDirInfo, Provider, ModelOption, CotaContaResumo, Server, WorktreeChoice } from '@hangar/core';
 import { MenuView, type MenuAction } from '@react-native-menu/menu';
 import { useServers } from '../../stores/servers';
 import { rememberProject } from '../../stores/createPreferences';
 import type { NewConversationInput } from '../../stores/newConversation';
 import { CwdPicker } from './CwdPicker';
 import { ProviderPicker } from './ProviderPicker';
+import { BranchPicker } from './BranchPicker';
 import { CodexContextControl } from './CodexContextControl';
 import { NewConversation } from './NewConversation';
 import { QuietPill } from './QuietPill';
 import { readChoices, readMachine, rememberChoices, rememberMachine, type NewChatChoices } from './choicesPrefs';
 import { ProviderGlyph } from '../../ui/ProviderGlyph';
 import { superficie } from '../../theme/superficie';
+import { AnchoredPanel } from '../../ui/AnchoredPanel';
 import * as m from '../../paraglide/messages';
 
 type ProviderProbe = Record<string, { disponivel: boolean; motivo: string | null }>;
@@ -88,6 +90,9 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
 
   const [picked, setPicked] = useState<string | null>(null);
   const [name, setName] = useState('');
+  const [worktree, setWorktree] = useState<WorktreeChoice | null>(null);
+  const onWorktree = useCallback((v: WorktreeChoice | null) => setWorktree(v), []);
+  const [branchOpen, setBranchOpen] = useState(false);
   const [hasSameFolder, setHasSameFolder] = useState(false);
   const [contextBusy, setContextBusy] = useState(false);
   const [error, setError] = useState('');
@@ -331,6 +336,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
   const handlePick = useCallback(async (p: string, root?: string) => {
     const generation = ++pickGeneration.current;
     setPicked(p);
+    setWorktree(null);
     setBrowse(false);
     setError('');
     setProjectWarning('');
@@ -363,7 +369,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
       subagent_model: provider === 'claude' && !engine ? subagente || null : null,
       ...(canHeadless ? { headless } : {}),
     };
-  const body = picked && codexReady ? { ...settings, cwd: picked, ...(name.trim() ? { name: name.trim() } : {}) } : null;
+  const body = picked && codexReady ? { ...settings, cwd: picked, ...(name.trim() ? { name: name.trim() } : {}), ...(worktree ?? {}) } : null;
 
   // Toda escolha feita aqui volta na próxima abertura desta máquina.
   const chooseProvider = (p: Provider) => {
@@ -465,6 +471,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
     settings.permission_mode].filter(Boolean).join(' · ');
   const folderLabel = picked ? basename(picked) : m.native_new_chat_folder();
   const folderRef = useRef<View>(null);
+  const branchRef = useRef<View>(null);
 
   const probeOf = (p: string) => providerProbe?.[p];
   const on = (yes: boolean) => (yes ? 'on' : 'off') as 'on' | 'off';
@@ -757,6 +764,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
   );
 
   return (
+    <>
     <NewConversation
       server={active}
       destination={destination}
@@ -775,6 +783,10 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
           />
           <QuietPill ref={folderRef} icon="Folder" label={folderLabel} aria={m.native_new_chat_folder()}
                      onPress={() => openFolder(folderRef.current)} />
+          {picked ? (
+            <QuietPill ref={branchRef} icon="GitBranch" label={worktree?.branch ?? m.native_create_checkout_current()}
+                       aria={m.native_create_checkout_branch()} onPress={() => setBranchOpen(true)} />
+          ) : null}
         </>
       )}
       bottomPills={<>{accountPill}{terminalPill}</>}
@@ -799,6 +811,19 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
       blocked={contextBusy || retomando || !!retomavel || (!!picked && !codexReady)}
       keyboardOffset={keyboardOffset}
     />
+    {/* Mesmo painel preso à pílula que o de pasta abre. */}
+    <AnchoredPanel
+      open={branchOpen && !!picked}
+      anchor={branchRef.current}
+      onClose={() => setBranchOpen(false)}
+      onDismissed={() => { if (branchRef.current) AccessibilityInfo.sendAccessibilityEvent(branchRef.current, 'focus'); }}
+      label={m.native_create_checkout_branch()}
+      closeLabel={m.native_close()}
+    >
+      {picked ? <BranchPicker server={active} cwd={picked} sessionName={name.trim() || basename(picked)}
+                              value={worktree} onChange={onWorktree} /> : null}
+    </AnchoredPanel>
+    </>
   );
 }
 
