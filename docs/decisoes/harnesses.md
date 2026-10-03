@@ -5,6 +5,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 
 ## Regras vigentes
 
+- **Deltas Claude/Codex acumulam antes de publicar.** Prévia, pensamento e input em voo têm
+  buffer por sessão/geração: primeiro imediato, intermediários em 150 ms e último por timer/flush.
+  Limpeza autoritativa cancela timers, aguarda publicação em voo e reconfere a sessão antes de
+  limpar a fonte. Estado, permissões e fila continuam imediatos. Snapshot completo custa seu
+  tamanho; não reconstruir ou parsear por delta. Medição:
+  [coalescimento dos deltas](#deltas-claudecodex-acumular-antes-de-publicar).
+
 - **Modo de abertura omitido herda a preferência do servidor.** `headless_default` nasce
   ligado para Claude/Codex; a escolha humana do dono na criação passa a ser o padrão.
   `headless=false`/`--terminal` e `headless=true`/`--headless` explícitos prevalecem.
@@ -2053,3 +2060,91 @@ sidecar para um nome que nunca responde. A recusa vive num ponto só (`_recusa_o
 `runs.find`), e o 409 traz a frase "fale com o árbitro", porque é ele quem decide pela execução.
 O estado da linha sai da atividade: trabalhando com `advance.lock` preso (lido em `/proc/locks`,
 sem pegar a trava) ou com a linha do tempo/trava mexida nos últimos 2 min.
+
+
+### Deltas Claude/Codex: acumular antes de publicar
+
+**03/10/2026 — parte 2A.** Base Python `aa8eec36`, consumidores finais `7149f6d9`;
+Linux/CachyOS, CPython 3.14.6, mesma máquina e venv preexistente. Sem serviço, instalação,
+credencial ou CLI real. Nenhum runtime foi portado para Rust nesta entrega; protocolo e cano
+continuam na versão 1.
+
+O buffer compartilhado usa StringIO, publica primeiro imediatamente e coalesce intermediários
+em 150 ms. Timer entrega a cauda sem outro delta; flush entrega o último no fim de bloco.
+Limpeza cancela timers e aguarda publicação em voo. Claude mantém texto, pensamento e input
+de ferramenta separados; o input parcial e seu rótulo continuam visíveis até o transcript.
+`_input_parcial` permanece idêntico à base. Codex resolve a fonte na publicação e separa
+preâmbulo/resposta. Estado, uso, pergunta, permissão e fim de turno/drain conservam o caminho
+imediato. A limpeza de uma sessão antiga reconfere a identidade depois de esperar o descarte,
+para não apagar os canais de outra sessão criada com o mesmo nome.
+
+**Método.** Consumidores Claude reais `_Sessao`/`_on_stream` da base e da entrega, carregados
+no mesmo interpretador; eventos stream-json sintéticos. JSON compacto UTF-8: Write com
+`file_path=/tmp/ação-😀\synthetic` e content ASCII de 64/128/200 KiB, ou campo prompt ASCII de
+200 KiB. Pedaços medidos em bytes, decoder incremental preservando Unicode. Três repetições
+por combinação; as tabelas mostram medianas. Rajada sem espera entre eventos, usando o relógio
+normal do loop, sem avançá-lo artificialmente. Cada execução confirma o input final completo;
+a instrumentação retém só primeiro/último texto e conta parse/publicação. O frame `{}` do
+início da ferramenta fica fora das contagens abaixo. Sem assinante e com uma assinatura real
+de PushPreviewSource, sem HTTP/SSE/rede. Assinante pode observar só o último frame da rajada:
+isso é a semântica existente de substituição completa, não perda de conteúdo final.
+
+Parede: perf_counter do primeiro delta até block-stop. CPU: process_time no mesmo trecho,
+incluindo parser/serializer/push/rótulo e instrumentação, sem filhos. Maior publicação: máximo
+de cada execução e mediana desses máximos; antes mede o delta inteiro (concatenação, parser,
+push e rótulo), depois o callback de publicação (parser, push e rótulo). A diferença de escopo
+é explícita: não comparar esses máximos como operações idênticas. Atraso do loop: heartbeat
+com sleep de 1 ms, maior excesso sobre esse prazo, mediana dos máximos. Não é CPU do backend
+vivo nem de vários aparelhos. Primeiro frame permaneceu imediato nos dois caminhos.
+
+**Rajadas — antes → depois, tempos em ms.** Parse e publicação têm a mesma contagem em cada
+linha. O conjunto contém 60 execuções (cinco inputs × dois modos de assinatura × duas versões
+× três repetições), com conteúdo final exato em todas.
+
+| Assinante | Input / pedaço | Bytes / pedaços | Parede | CPU | Parse/publicações | Maior publicação | Atraso do loop |
+|---|---|---:|---:|---:|---:|---:|---:|
+| não | Write 64 KiB / 128 B | 65592 / 513 | 19,602 → 2,049 | 19,552 → 2,041 | 513 → 2 | 0,148 → 0,260 | 18,712 → 1,245 |
+| não | Write 128 KiB / 128 B | 131128 / 1025 | 73,710 → 1,724 | 73,578 → 1,718 | 1025 → 2 | 0,319 → 0,268 | 72,911 → 0,910 |
+| não | Write 200 KiB / 128 B | 204856 / 1601 | 163,671 → 2,709 | 163,305 → 2,697 | 1601 → 2 | 0,473 → 0,435 | 162,970 → 2,067 |
+| não | prompt 200 KiB / 128 B | 204813 / 1601 | 5487,248 → 2,116 | 5473,232 → 2,108 | 1601 → 2 | 10,218 → 0,444 | 5486,547 → 1,364 |
+| não | prompt 200 KiB / 32 B | 204813 / 6401 | 21994,111 → 6,758 | 21947,474 → 6,746 | 6401 → 2 | 11,653 → 0,456 | 21993,396 → 6,026 |
+| sim | Write 64 KiB / 128 B | 65592 / 513 | 18,753 → 0,769 | 18,726 → 0,765 | 513 → 2 | 0,141 → 0,152 | 17,866 → 0,938 |
+| sim | Write 128 KiB / 128 B | 131128 / 1025 | 66,450 → 1,464 | 66,351 → 1,458 | 1025 → 2 | 0,277 → 0,278 | 65,650 → 0,639 |
+| sim | Write 200 KiB / 128 B | 204856 / 1601 | 165,035 → 2,232 | 164,725 → 2,224 | 1601 → 2 | 0,448 → 0,411 | 164,340 → 1,487 |
+| sim | prompt 200 KiB / 128 B | 204813 / 1601 | 5508,786 → 2,160 | 5495,128 → 2,155 | 1601 → 2 | 9,971 → 0,448 | 5508,332 → 1,432 |
+| sim | prompt 200 KiB / 32 B | 204813 / 6401 | 21852,820 → 6,821 | 21801,570 → 6,812 | 6401 → 2 | 10,908 → 0,451 | 21852,125 → 6,090 |
+
+
+**Fluxo espaçado.** Prompt de 1 KiB, envelope de 1037 bytes, nove pedaços de 128 B, chegada
+nominal a cada 40 ms, produção com intervalo de 150 ms. Depois do último delta, o consumidor
+novo espera o timer completar a cauda antes de enviar block-stop: o EOS não fabrica essa prova.
+Doze execuções (dois modos × duas versões × três repetições), input final exato em todas.
+Tempos abaixo são medianas; instantes da prévia são de uma repetição representativa (a segunda).
+Parede inclui as esperas de chegada/cauda; a janela da cauda pode aumentar a parede apesar
+de reduzir o processamento. Não apresentar esse tempo como latência de controle.
+Neste input pequeno a CPU total não caiu; a conta inclui temporizadores e heartbeat durante
+a espera mais longa. A cauda é aguardada por Event, sem polling de conteúdo. Não extrapolar
+a redução de publicações da rajada para ganho uniforme de CPU em fluxos pequenos.
+
+| Assinante | Parede antes → depois (ms) | CPU antes → depois (ms) | Publicações antes → depois | Instantes depois (ms) | Atraso do loop antes → depois (ms) |
+|---|---:|---:|---:|---|---:|
+| não | 366,920 → 452,223 | 8,395 → 8,523 | 9 → 4 | 0,042 / 150,635 / 301,181 / 452,175 | 0,221 → 0,180 |
+| sim | 367,690 → 452,229 | 8,238 → 8,844 | 9 → 4 | 0,041 / 151,091 / 302,058 / 452,181 | 0,245 → 0,240 |
+
+
+**Conferência e limites.** 200 testes focados passaram: test_stream_buffer,
+test_claude_headless, test_codex_adapter e test_preview_push. Cobrem primeiro/periódico/cauda,
+Unicode/escapes, publicação bloqueada, erro de timer, EOS/result/assistant, reset/interrupção,
+EOF antigo durante substituição, rename de outra thread, fonte recriada por unsubscribe,
+separação de agentMessage, geração substituída, preserve_preview e controles/permissão/pergunta/
+drain com prévia pendente. Revisão independente apontou a limpeza pelo EOF antigo; regressão
+falhou antes e passou após reconferir identidade nos três canais.
+
+Uso real no app, dois aparelhos, Claude terminal, Codex nos dois modos com CLI real e Windows
+não foram conferidos: a Task 4, Step 2 permanece pendente para o canal de testes do dono.
+Nenhum serviço foi iniciado/reiniciado/parado. A medição cobre processamento Python sintético,
+não transporte cano, API, UI, rede ou produção. A rajada reduz milhares de prefixos a primeiro
+e final; o fluxo espaçado mantém atualizações intermediárias. Snapshot full-replace continua
+custando seu tamanho. Não afirmar linearidade de todo o pipeline nem usar decode-final-only
+como ganho equivalente de UI. A versão anterior também pode publicar em cada chegada quando
+os pedaços são lentos; o ganho depende da cadência, tamanho e campo do input.
