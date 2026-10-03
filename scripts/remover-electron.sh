@@ -8,7 +8,8 @@
 # importa módulos dele), e o ~/.config/Electron também (o app nativo importa servidores e aparência de lá).
 # Uso: scripts/remover-electron.sh
 set -uo pipefail
-cd "$(dirname "$0")/.."
+[ -n "${HOME:-}" ] || { echo "electron: sem HOME, nada removido"; exit 0; }
+cd "$(dirname "$0")/.." || exit 0
 
 MARCA_DIR="$HOME/.hangar/native"
 NATIVO="$HOME/.local/bin/hangar-native"
@@ -24,11 +25,8 @@ if [ ! -x "$NATIVO" ]; then
   echo "electron: o app nativo não está instalado; o Electron fica"
   marca "sem app nativo: nada removido"; exit 0
 fi
-# App nativo de antes do motor Chromium ainda não atende o hangar-preview: o Electron fica nele.
-if ! grep -aq -- '--remote-debugging-pipe' "$NATIVO"; then
-  echo "electron: o app nativo instalado ainda não tem o navegador Chromium; o Electron fica"
-  marca "app nativo sem o navegador Chromium: nada removido"; exit 0
-fi
+# O nativo instalado pode ainda ser o de antes do Chromium: os passos rodam antes de o app se atualizar no
+# mesmo Atualizar. Recusar aqui gravaria a prova e o passo nunca mais rodaria, então segue assim mesmo.
 # Mesma busca do app (desktop-native/src/browser/chromium/launch.rs); o install-chromium.sh já rodou antes.
 tem_chromium() {
   local nome bin real
@@ -58,7 +56,7 @@ electron_aberto() {
 }
 
 # Só o lançador que abre o Electron deste checkout; outro hangar.desktop não é nosso.
-if [ -f "$LANCADOR" ] && grep -q '/shell/node_modules/electron/' "$LANCADOR"; then
+if [ -f "$LANCADOR" ] && grep -qF "$PWD/shell/node_modules/electron/" "$LANCADOR"; then
   rm -f "$LANCADOR"
   if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database "$(dirname "$LANCADOR")" 2>/dev/null || true; fi
   echo "electron: lançador removido: $LANCADOR"

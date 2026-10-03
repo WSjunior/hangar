@@ -45,8 +45,9 @@ tenta de novo na próxima — é o contrário de marcar como feito e deixar a m�
 
 O botão Atualizar **não roda mais o instalador inteiro**. Sozinho ele faz: `git fetch` +
 fast-forward, troca o `frontend/dist` pelo build do CI, `uv sync` no backend, `npm ci` quando o
-`package-lock.json` mudou (e só onde já existe `node_modules`), reinício do serviço/tarefa e prova
-de vida por pid. Todo o resto só acontece quando um commit declara o passo aqui — e o pre-commit e
+`package-lock.json` mudou (e só onde já existe `node_modules`), no Linux o `install-chromium.sh`
+quando há um chrome-headless-shell baixado (ele não se atualiza como o Chrome da distro), reinício
+do serviço/tarefa e prova de vida por pid. Todo o resto só acontece quando um commit declara o passo aqui — e o pre-commit e
 o CI recusam commit que mexa nesses arquivos sem o passo (`scripts/check-passo-de-atualizacao.sh`).
 
 | O que mudou | `comando` no Linux | `comando` no Windows |
