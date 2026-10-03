@@ -4621,6 +4621,11 @@ impl Hangar {
         let status_label = tr(&format!("sidebar_state_{state}"));
         let label = match folder_name(&session) { Some(folder) => format!("{name} · {folder} · {status_label}"), None => format!("{name} · {status_label}") };
         let branch = shown_branch(&session).filter(|_| !compact);
+        // Como a branch, o chip e o aviso de worktree apagada ficam fora do modo compacto.
+        let worktree = worktree_label(&session).filter(|_| !compact && !session.worktree_gone);
+        let worktree_gone = !compact && session.worktree_gone;
+        let second_line = branch.is_some() || worktree.is_some() || worktree_gone;
+        let worktree_target = session.worktree_path.clone().or_else(|| session.cwd.clone()).unwrap_or_default();
         let time = div().flex_shrink_0().text_size(px(11.)).line_height(px(14.)).text_color(theme::muted())
             .children(session.last_activity.map(side::since));
         // Id da marca com a máquina: a de mesmo nome em outra máquina não divide a animação.
@@ -4659,7 +4664,7 @@ impl Hangar {
         let hover_target = target.clone();
         let row_id = format!("conversation-row-{row_key}");
         div().id(SharedString::from(row_id)).relative().flex_shrink_0()
-            .h(px(if branch.is_some() { 45. } else { 29. }))
+            .h(px(if second_line { 45. } else { 29. }))
             .px(px(8.)).py(px(6.)).flex().flex_col().gap(px(2.)).rounded(px(8.)).text_color(theme::text())
             .when_some(focus, |el, focus| el.track_focus(focus))
             .when(focus.is_some_and(|f| f.is_focused(window)), |el| el.focus_ring_style(window, cx))
@@ -4674,10 +4679,21 @@ impl Hangar {
             .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx))
             .child(title)
             // Recuo do estado mais o vão: a branch começa embaixo do glifo.
-            .when_some(branch, |el, branch| el.child(div().w_full().min_w_0().h(px(14.)).pl(px(17.)).flex().items_center().gap(px(4.))
+            .when(second_line, |el| el.child(div().w_full().min_w_0().h(px(14.)).pl(px(17.)).flex().items_center().gap(px(4.))
                 .text_size(px(11.)).line_height(px(14.)).text_color(theme::muted())
-                .child(chrome::small_icon(IconName::GitBranch, 12., theme::muted()))
-                .child(div().flex_1().min_w_0().truncate().child(branch))))
+                .when_some(branch, |el, branch| el
+                    .child(chrome::small_icon(IconName::GitBranch, 12., theme::muted()))
+                    .child(div().flex_1().min_w_0().truncate().child(branch)))
+                .when_some(worktree, |el, label| {
+                    // ponytail: a T11 troca por `self.worktrees.status(path).is_some_and(|s| s.merged)`.
+                    let merged = false;
+                    el.child(div().id(SharedString::from(format!("wt-chip-{row_key}"))).cursor_pointer()
+                        .flex().items_center().gap(px(3.)).text_color(theme::accent())
+                        .child(chrome::small_icon(IconName::GitBranch, 11., theme::accent()))
+                        .child(if merged { format!("{label} ✓") } else { label })
+                        .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.open_worktree(worktree_target.clone(), window, cx); })))
+                })
+                .when(worktree_gone, |el| el.child(div().text_color(theme::muted()).child(tr_shared("worktree_apagada", &[]))))))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 if !matches!(event.keystroke.key.as_str(), "enter" | "space") || !this.row_focus(&open).is_some_and(|f| f.is_focused(window)) { return; }
                 this.select_target(&open, window, cx);
@@ -4864,6 +4880,13 @@ fn folder_name(session: &SessionInfo) -> Option<String> {
 /// A branch que a linha mostra: main e master são o normal e ficam de fora, como no web.
 fn shown_branch(session: &SessionInfo) -> Option<String> {
     session.branch.clone().filter(|b| !b.is_empty() && b != "main" && b != "master")
+}
+
+/// Nome curto do chip: a pasta da worktree onde o agente está.
+fn worktree_label(session: &SessionInfo) -> Option<String> {
+    let path = session.worktree_path.clone()
+        .or_else(|| session.worktree.unwrap_or(false).then(|| session.cwd.clone()).flatten())?;
+    std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned())
 }
 
 /// Selo da conta do `chipDaConta` do web (lib/conta.ts): o nome é o sufixo da pasta, a pasta sem sufixo é a padrão,
@@ -5214,6 +5237,9 @@ impl Hangar {
         let list = self.sessions_of(&orq.server);
         list.iter().find(|s| s.name == orq.name).and_then(|s| s.arbiter(list))
     }
+
+    // ponytail: provisória, a T11 (página Worktrees) a substitui.
+    fn open_worktree(&mut self, _path: String, _window: &mut Window, _cx: &mut Context<Self>) {}
 
     /// Abre o árbitro com o campo focado, como o clique na linha dele.
     fn open_arbiter(&mut self, orq: &sidebar::Target, window: &mut Window, cx: &mut Context<Self>) {
@@ -5698,6 +5724,15 @@ mod tests {
     use super::{message_card, preview_step, safe_markdown, stream_motion, working_tokens, working_verb};
     use crate::{api::dto::ChatEvent, cards::Card, i18n::tr};
     use std::{collections::HashSet, time::Duration};
+
+    #[test]
+    fn worktree_label_prefers_real_location() {
+        use super::SessionInfo;
+        let s = SessionInfo { name: "a".into(), cwd: Some("/r/hangar".into()), worktree: Some(true),
+                              worktree_path: Some("/r/hangar-x".into()), ..Default::default() };
+        assert_eq!(super::worktree_label(&s).as_deref(), Some("hangar-x"));
+        assert_eq!(super::worktree_label(&SessionInfo { name: "a".into(), ..Default::default() }), None);
+    }
 
     #[test]
     fn conversation_corner_preserves_delivery_truth_and_session_warnings() {

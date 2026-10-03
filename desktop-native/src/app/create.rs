@@ -301,6 +301,10 @@ pub(in crate::app) struct NewSession {
     branch: String,
     /// Escolher branch cria worktree; desligado, troca a branch da própria pasta.
     worktree: bool,
+    /// A worktree nasce numa branch nova, criada a partir de `base`; o nome vazio vira o nome da sessão.
+    new_branch: bool,
+    base: String,
+    new_branch_name: Entity<InputState>,
     /// O gerenciador de git da pasta (tela sem sessão) e o nome da branch nova dele.
     git: folder_git::GitPanel,
     git_name: Entity<InputState>,
@@ -400,10 +404,12 @@ impl NewSession {
         let account_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr("create_account_placeholder")));
         let menu_query = cx.new(|cx| InputState::new(window, cx).placeholder(tr("ctl_search")));
         let git_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr("folder_git_name")));
+        let new_branch_name = cx.new(|cx| InputState::new(window, cx).placeholder(tr_shared("worktree_nome_branch", &[])));
         // O Enter no Nome não cria: no web o campo não está num formulário.
         let subscriptions = vec![
             cx.subscribe(&query, |this: &mut Self, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { this.refilter(cx); cx.notify() }),
             cx.subscribe(&name, |_, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { cx.notify() }),
+            cx.subscribe(&new_branch_name, |_, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { cx.notify() }),
             cx.subscribe(&menu_query, |_, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { cx.notify() }),
             cx.subscribe(&git_name, |this: &mut Self, _, event: &InputEvent, cx| match event {
                 InputEvent::Change => cx.notify(),
@@ -424,7 +430,8 @@ impl NewSession {
         Self {
             link, compact: false, menu: Default::default(), menu_query, servers: Remote::default(),
             roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(), query, picked: None,
-            checkout: Remote::default(), branch: String::new(), worktree: false, git: Default::default(), git_name,
+            checkout: Remote::default(), branch: String::new(), worktree: false, new_branch: false, base: String::new(), new_branch_name,
+            git: Default::default(), git_name,
             sessions: Remote::default(), same_folder: false, name, provider: "claude", providers: Remote::default(), configs: Remote::default(),
             config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true, headless_owner: None, headless_touched: false, headless_saving: false,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
@@ -483,6 +490,8 @@ impl NewSession {
         self.dir.clear();
         self.folders.clear();
         self.branch.clear();
+        (self.new_branch, self.base) = (false, String::new());
+        self.new_branch_name.update(cx, |input, cx| input.set_value("", window, cx));
         self.roots.reset();
         self.scan.reset();
         self.checkout.reset();
@@ -589,7 +598,7 @@ impl NewSession {
         // A pasta da criação em voo não muda: a coluna da esquerda fica parada até a resposta.
         if self.creating { return; }
         self.root = Some(root);
-        if self.compact { self.picked = Some(path.clone()); self.reset_git(); self.load_branches(cx); }
+        if self.compact { self.picked = Some(path.clone()); self.reset_git(); self.load_branches(window, cx); }
         let remember = path.clone();
         self.link.runtime.spawn_blocking(move || crate::appearance::remember_root(&remember));
         self.query.update(cx, |input, cx| input.set_value("", window, cx));
@@ -620,7 +629,7 @@ impl NewSession {
         if self.compact {
             self.menu.set(None);
             self.reset_git();
-            self.load_branches(cx);
+            self.load_branches(window, cx);
             cx.notify();
             return;
         }
@@ -697,7 +706,11 @@ impl NewSession {
             && self.codex.ok().and_then(|list| list.iter().find(|a| a.id == self.codex_account)).is_some_and(|a| a.auth.status == "connected"))
     }
 
-    fn load_branches(&mut self, cx: &mut Context<Self>) { self.read_branches(true, cx); }
+    /// Pasta nova: o nome da branch nova digitado para a anterior não vale aqui.
+    fn load_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_branch_name.update(cx, |input, cx| input.set_value("", window, cx));
+        self.read_branches(true, cx);
+    }
 
     /// Releitura da mesma pasta (depois de trocar a branch, ao fechar o gerenciador): a lista e a escolha ficam até a
     /// resposta chegar, sem o menu esvaziar no meio.
@@ -709,7 +722,7 @@ impl NewSession {
         let (Some(root), Some(path)) = (self.root.as_ref(), self.picked.clone()) else { return };
         let root = root.path.clone();
         let seq = self.checkout.start();
-        if fresh { (self.checkout.value, self.branch) = (None, String::new()); }
+        if fresh { (self.checkout.value, self.branch, self.new_branch, self.base) = (None, String::new(), false, String::new()); }
         self.request(cx, move |api, send| Box::pin(async move {
             let result = api.server_read(&["fs", "branches"], &[("root", root.as_str()), ("path", path.as_str())], 30).await;
             send(CreateReply::Branches(seq, checkout_of(result))).await;
@@ -731,10 +744,19 @@ impl NewSession {
         let Some(cwd) = self.picked.clone() else { return };
         let mut name = if self.compact { basename(&cwd).to_owned() } else { self.name.read(cx).value().trim().to_owned() };
         let provider = self.provider;
-        let requested_branch = (self.compact && !self.branch.is_empty()).then(|| self.branch.clone());
+        let typed = self.new_branch_name.read(cx).value().trim().to_string();
+        let typed_empty = typed.is_empty();
+        let wanted = if self.new_branch { if typed.is_empty() { name.clone() } else { typed } } else { self.branch.clone() };
+        let mut requested_branch = (self.compact && !wanted.is_empty()).then(|| wanted.clone());
+        // Sem nome digitado, a branch é o nome final da sessão, que só sai do `unique_name` abaixo.
+        let branch_is_name = self.compact && self.new_branch && typed_empty && self.baton.is_none();
         let text = |s: &str| if s.is_empty() { Value::Null } else { json!(s) };
         let mut body = json!({"name": name, "cwd": cwd, "provider": provider, "model": text(&self.model), "effort": text(&self.effort)});
-        if self.compact && !self.branch.is_empty() { body["branch"] = json!(self.branch); }
+        if self.compact && !wanted.is_empty() {
+            if let (Some(obj), Value::Object(extra)) = (body.as_object_mut(), worktree_body(&wanted, self.new_branch, &self.base)) {
+                obj.extend(extra);
+            }
+        }
         match provider {
             "claude" => {
                 body["config_dir"] = json!(self.config);
@@ -786,6 +808,10 @@ impl NewSession {
                 };
                 name = unique_name(&name, &sessions.into_iter().map(|session| session.name).collect());
                 body["name"] = json!(name);
+                if branch_is_name {
+                    body["branch"] = json!(name);
+                    requested_branch = Some(name.clone());
+                }
             }
             // O padrão do Jev muda só aqui, ao criar; falhar nele não impede a sessão de nascer com a escolha feita.
             if let Some((on, true)) = jev
@@ -851,7 +877,13 @@ impl NewSession {
                 if let Some(root) = list.iter().find(|r| Some(&r.path) == last.as_ref()).or(list.first()).cloned() { self.select_root(root, window, cx); }
             }
             CreateReply::Scan(seq, result) => { if self.scan.finish(seq, result) { self.refilter(cx); } }
-            CreateReply::Branches(seq, result) => { if !self.compact || !self.checkout.finish(seq, result) { return None; } }
+            CreateReply::Branches(seq, result) => {
+                if !self.compact || !self.checkout.finish(seq, result) { return None; }
+                // A base padrão da branch nova é a branch atual da pasta.
+                if self.base.is_empty() {
+                    self.base = self.checkout.ok().and_then(Option::as_ref).and_then(|c| c.current.clone()).unwrap_or_default();
+                }
+            }
             CreateReply::Sessions(seq, result) => {
                 if seq != self.sessions.seq { return None; }
                 let Some(path) = self.picked.clone() else { return None };
@@ -934,7 +966,15 @@ impl NewSession {
             CreateReply::Created(seq, result) | CreateReply::CreatedWithInput(seq, _, _, _, _, result) => {
                 if seq != self.create_seq || !self.creating { return None; }
                 (self.creating, self.resuming, self.started, self.clock) = (false, false, None, None);
-                match result { Ok(opened) => return Some(opened), Err(error) => self.error = Some(error) }
+                match result {
+                    Ok(opened) => {
+                        // A branch nova já existe: a próxima criação não pode repetir o nome.
+                        (self.new_branch, self.base) = (false, String::new());
+                        self.new_branch_name.update(cx, |input, cx| input.set_value("", window, cx));
+                        return Some(opened);
+                    }
+                    Err(error) => self.error = Some(error),
+                }
             }
         }
         cx.notify();
@@ -981,6 +1021,17 @@ async fn handed(api: &Api, result: Result<Value, Failure>, name: &str, cwd: &str
         None => (SessionInfo { name: created, cwd: Some(cwd.to_owned()), ..SessionInfo::default() }, vec![tr("create_baton_unlisted")]),
     };
     Ok(Opened { session, notes, warning })
+}
+
+/// Campos da worktree no corpo do `POST /api/sessions`; sem base, o backend parte da branch atual.
+fn worktree_body(branch: &str, new_branch: bool, base: &str) -> Value {
+    if new_branch {
+        let mut v = json!({"branch": branch, "new_branch": true});
+        if !base.is_empty() { v["base"] = json!(base); }
+        v
+    } else {
+        json!({"branch": branch})
+    }
 }
 
 // A worktree nasce ao lado do repositório, mesmo quando se escolhe uma subpasta dele.
@@ -1451,6 +1502,10 @@ impl NewSession {
         };
         let branch = match (self.checkout.loading, self.checkout.ok()) {
             (true, _) => Some(tr("create_checkout_loading")),
+            (false, Some(Some(_))) if self.new_branch => {
+                let typed = self.new_branch_name.read(cx).value().trim().to_string();
+                Some(format!("{} · {}", if typed.is_empty() { tr_shared("worktree_nome_branch", &[]) } else { typed }, tr("create_checkout_worktree")))
+            }
             (false, Some(Some(checkout))) => Some(if self.branch.is_empty() {
                 checkout.current.clone().unwrap_or_else(|| tr("create_checkout_current"))
             } else { format!("{} · {}", self.branch, tr("create_checkout_worktree")) }),
@@ -1599,11 +1654,12 @@ impl NewSession {
                     .chain(checkout.branches.iter().chain(&checkout.remotes).filter(|b| checkout.current.as_ref() != Some(*b))
                         .map(|b| (b.clone(), b.clone(), hint.clone())));
                 let locked = !worktree && self.git_locked();
-                let rows = choices.filter(|(_, label, hint)| wanted(&query, label, hint)).map(|(id, label, hint)| {
-                    let on = self.branch == id;
+                let mut rows: Vec<AnyElement> = choices.filter(|(_, label, hint)| wanted(&query, label, hint)).map(|(id, label, hint)| {
+                    let on = !self.new_branch && self.branch == id;
                     menu_row(SharedString::from(format!("new-chat-branch-{id}")), on, label, hint).disabled(locked)
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if this.creating { return; }
+                            this.new_branch = false;
                             // Sem worktree a troca é na pasta: o menu fica aberto para mostrar a recusa ou o resultado.
                             if this.worktree || id.is_empty() { this.menu.set(None); this.branch = id.clone(); }
                             else { this.git_switch(folder_git::GitAction::Switch, id.clone(), cx); }
@@ -1611,22 +1667,39 @@ impl NewSession {
                         }))
                         .into_any_element()
                 }).collect();
-                let help = match (worktree, self.branch.is_empty()) {
-                    (true, false) => "create_checkout_worktree_help",
-                    (true, true) => "create_checkout_pick_worktree_help",
-                    (false, _) => "create_checkout_switch_help",
-                };
+                // O menu fica aberto: o nome e a base da branch nova aparecem logo abaixo.
+                rows.insert(0, menu_row("new-chat-branch-new", self.new_branch, tr_shared("worktree_nova_branch", &[("base", &self.base)]), String::new())
+                    .disabled(self.creating)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.creating { return; }
+                        (this.new_branch, this.worktree) = (true, true);
+                        this.branch.clear();
+                        cx.notify();
+                    }))
+                    .into_any_element());
+                let bases: Vec<AnyElement> = if self.new_branch {
+                    checkout.current.iter().chain(checkout.branches.iter().filter(|b| checkout.current.as_ref() != Some(*b))).map(|b| {
+                        let base = b.clone();
+                        menu_row(SharedString::from(format!("new-chat-base-{b}")), self.base == *b, b.clone(), String::new())
+                            .on_click(cx.listener(move |this, _, _, cx| { this.base = base.clone(); cx.notify(); }))
+                            .into_any_element()
+                    }).collect()
+                } else { Vec::new() };
+                let help = if worktree { tr_shared("worktree_modo_ajuda", &[]) } else { tr("create_checkout_switch_help") };
                 div().child(Self::menu_list("new-chat-branch-list", rows))
+                    .when(self.new_branch, |el| el.child(popup::separator())
+                        .child(div().px(px(8.)).pt(px(4.)).child(Input::new(&self.new_branch_name).small().aria_label(tr_shared("worktree_nome_branch", &[]))))
+                        .child(Self::menu_list("new-chat-base-list", bases)))
                     .child(popup::separator())
                     .child(div().px(px(8.)).pt(px(4.)).child(Checkbox::new("new-chat-branch-worktree").label(tr("create_checkout_use_worktree"))
                         .checked(worktree).disabled(self.creating)
                         .on_change(cx.listener(|this, checked: &bool, _, cx| {
                             this.worktree = *checked;
-                            if !*checked { this.branch.clear(); }
+                            if !*checked { this.branch.clear(); this.new_branch = false; }
                             cx.notify();
                         }))))
                     .child(div().px(px(8.)).py(px(4.)).flex().flex_col().gap(px(2.)).text_xs().text_color(theme::muted()).whitespace_normal()
-                        .child(tr(help))
+                        .child(help)
                         .when(worktree && checkout.dirty, |el| el.child(tr("create_checkout_dirty"))))
                     .when(!worktree, |el| el.children(self.git_feedback(cx)))
                     .into_any_element()
@@ -1942,5 +2015,17 @@ mod tests {
         }
         let ok = scan_of(Ok(json!({"entries": [{"name": "a", "path": "/r/a", "is_git": true, "mtime": 1.0}], "error": null}))).ok().unwrap();
         assert_eq!((ok.entries.len(), ok.error), (1, None));
+    }
+}
+
+#[cfg(test)]
+mod worktree_tests {
+    use super::worktree_body;
+
+    #[test]
+    fn body_for_new_branch() {
+        assert_eq!(worktree_body("nova", true, "develop"),
+                   serde_json::json!({"branch": "nova", "new_branch": true, "base": "develop"}));
+        assert_eq!(worktree_body("x", false, ""), serde_json::json!({"branch": "x"}));
     }
 }
