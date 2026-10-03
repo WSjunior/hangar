@@ -452,6 +452,10 @@ impl Hangar {
         }
         let Some(browser) = self.side.browsers.get(&key) else { return answer(reply, missing(&key)) };
         let panel = browser.read(cx);
+        // Página que caiu não responde: sem isto cada verbo esperava o prazo inteiro do controlador.
+        if panel.engine().is_some_and(|e| !e.alive()) {
+            return answer(reply, format!("erro: a pagina da sessao {key} caiu; abra de novo com hangar-preview open <url>"));
+        }
         let Some(ctl) = panel.controller() else {
             return answer(reply, match panel.engine_status() {
                 Some(Err(e)) => format!("erro: o navegador da sessao {key} falhou ao iniciar: {e}"),

@@ -127,6 +127,8 @@ impl Starter {
         let window = browser.call_blocking(None, "Browser.getWindowForTarget", json!({"targetId": target}), long)?["windowId"]
             .as_i64().ok_or("getWindowForTarget sem windowId")?;
         session.call_blocking("Page.enable", json!({}))?;
+        // Queda do renderer chega só por aqui (`Inspector.targetCrashed`, na sessão da página).
+        session.call_blocking("Inspector.enable", json!({}))?;
         // A página do agente, que ninguém olha, se comporta como focada: `:focus`, `focus()` e o teclado funcionam.
         session.call_blocking("Emulation.setFocusEmulationEnabled", json!({"enabled": true}))?;
         // Mesma regra de endereço do painel: só web (http/https sem usuário e senha); o resto não carrega.
@@ -246,14 +248,20 @@ fn listen(
     let p = publish.clone();
     session.watch(CLOSED, move |_| p(&|page| { page.loading = false; page.error = Some("o Chromium fechou; feche e abra o navegador".into()); }));
     // A página caiu com o Chromium vivo: sem isto o painel congela no último quadro, calado.
-    for (event, key, id) in [("Target.targetCrashed", "targetId", main.clone()), ("Target.detachedFromTarget", "sessionId", session.id().to_owned())] {
+    let fell: Rc<dyn Fn()> = {
         let (weak, p, dead) = (Rc::downgrade(session), publish.clone(), dead.clone());
-        session.watch(event, move |params| {
-            if params[key] != id.as_str() { return; }
-            dead.set(true);
+        Rc::new(move || {
+            if dead.replace(true) { return; }
+            eprintln!("[nav] a pagina caiu");
             if let Some(session) = weak.upgrade() { session.fail_pending(); }
             p(&|page| { page.loading = false; page.error = Some("a pagina caiu; abra o endereco de novo".into()); });
-        });
+        })
+    };
+    let f = fell.clone();
+    let _ = session.on("Inspector.targetCrashed", move |_| f());
+    for (event, key, id) in [("Target.targetCrashed", "targetId", main.clone()), ("Target.detachedFromTarget", "sessionId", session.id().to_owned())] {
+        let f = fell.clone();
+        session.watch(event, move |params| { if params[key] == id.as_str() { f(); } });
     }
     publish
 }
