@@ -259,7 +259,9 @@ impl Index {
         let stale = epoch != state.epoch;
         if state.pending || stale {
             if matches!(result, Err(IndexError::ReaderPanic)) {
-                if state.pending && state.active == 0 { self.rebuild(&mut state)?; }
+                if state.pending && state.active == 0 && self.rebuild(&mut state).is_err() {
+                    tracing::warn!(code = "reconstrucao_indice_custos");
+                }
                 return result.map(Some);
             }
             if state.active != 0 || attempt == 1 {

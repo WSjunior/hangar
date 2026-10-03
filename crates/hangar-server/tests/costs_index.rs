@@ -178,6 +178,40 @@ fn pending_recovery_does_not_turn_a_reader_panic_into_success() {
     assert!(ix.read_costs(None, None, None).unwrap().is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn reader_panic_survives_failed_rebuild_and_pending_reads_fail_until_repaired() {
+    hangar_server::install_panic_hook();
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path().join("idx");
+    let f = d.path().join("a.jsonl");
+    std::fs::write(&f, "2\n").unwrap();
+    let ix = Index::open(&dir).unwrap();
+    let clone = ix.clone();
+    let before = ix.generation();
+    let calls = AtomicUsize::new(0);
+    let database = dir.join(hangar_server::costs::index::FILE_NAME);
+    let new = |_: &Path| -> Sum {
+        calls.fetch_add(1, Ordering::SeqCst);
+        corrupt_table(&dir, "custo");
+        assert!(ix.read_costs(None, None, None).is_err());
+        // A conexão conserva o inode aberto; a pasta impede remove_file sem mudar permissões.
+        std::fs::rename(&database, dir.join("blocked.sqlite3")).unwrap();
+        std::fs::create_dir(&database).unwrap();
+        panic!("falha sintética com reconstrução impedida")
+    };
+    assert!(matches!(ix.try_sync_file(&f, &new, "v1", "t", "sig", &no_areas), Err(IndexError::ReaderPanic)));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(clone.generation() > before);
+    assert!(database.is_dir());
+    assert!(matches!(clone.read_costs(None, None, None), Err(IndexError::NoDisk)));
+    assert!(matches!(clone.read_usage("t", None), Err(IndexError::NoDisk)));
+    std::fs::remove_dir(&database).unwrap();
+    assert!(clone.read_costs(None, None, None).unwrap().is_empty());
+    clone.try_sync_file(&f, &new_sum, "v1", "t", "sig", &no_areas).unwrap();
+    assert_eq!(sum(&ix), (2, 1));
+}
+
 #[test]
 fn checked_single_file_propagates_the_second_real_corruption() {
     let d = tempfile::tempdir().unwrap();
