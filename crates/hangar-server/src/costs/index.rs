@@ -11,7 +11,7 @@ use std::fs::{self, File, Metadata};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}, mpsc};
+use std::sync::{Arc, Mutex, atomic::{AtomicU64, AtomicUsize, Ordering}, mpsc};
 use std::time::{Duration, Instant};
 
 pub const SCHEMA: u32 = 1;
@@ -89,7 +89,7 @@ impl Progress {
         })
     }
 
-    fn set(&self, scope: &str, read: usize, total: usize) {
+    pub(crate) fn set(&self, scope: &str, read: usize, total: usize) {
         let mut scopes = self.scopes.lock().unwrap();
         let value = scopes.entry(scope.to_owned()).or_default();
         value.read.store(read, Ordering::Relaxed);
@@ -97,9 +97,11 @@ impl Progress {
     }
 }
 
+#[derive(Clone)]
 pub struct Index {
     path: PathBuf,
     pool: Option<Arc<rayon::ThreadPool>>,
+    generation: Arc<AtomicU64>,
 }
 
 pub fn default_dir() -> PathBuf {
@@ -155,7 +157,7 @@ pub fn dump_for_tests(ix: &Index, base: &Path, prefix: &str) -> serde_json::Valu
 
 impl Index {
     pub fn open(dir: &Path) -> Result<Self, IndexError> {
-        let index = Self { path: dir.join(FILE_NAME), pool: None };
+        let index = Self { path: dir.join(FILE_NAME), pool: None, generation: Arc::new(AtomicU64::new(0)) };
         index.connect()?;
         Ok(index)
     }
@@ -166,9 +168,13 @@ impl Index {
         self
     }
 
+    pub fn generation(&self) -> u64 { self.generation.load(Ordering::Acquire) }
+
+    fn changed(&self) { self.generation.fetch_add(1, Ordering::Release); }
+
     fn connect(&self) -> Result<Connection, IndexError> {
         fs::create_dir_all(self.path.parent().unwrap()).map_err(|_| IndexError::NoDisk)?;
-        match open_connection(&self.path) {
+        match open_connection(&self.path, &self.generation) {
             Ok(conn) => Ok(conn),
             Err(error) if matches!(error.sqlite_error_code(), Some(ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase)) => {
                 tracing::warn!(code = "indice_custos_ilegivel");
@@ -182,7 +188,8 @@ impl Index {
                         Err(_) => return Err(IndexError::NoDisk),
                     }
                 }
-                open_connection(&self.path).map_err(Into::into)
+                let conn = open_connection(&self.path, &self.generation)?;
+                Ok(conn)
             },
             Err(error) => Err(error.into()),
         }
@@ -232,7 +239,9 @@ impl Index {
             if light.as_ref().is_some_and(|r| r.current(&fingerprint, &version)) { continue; }
             let record = load_record(&conn, &key)?;
             if record.as_ref().is_some_and(|r| r.current(&fingerprint, &version)) {
-                conn.execute("UPDATE files SET scope=? WHERE id=? AND scope<>?", params![scope, record.unwrap().id, scope])?;
+                if conn.execute("UPDATE files SET scope=? WHERE id=? AND scope<>?", params![scope, record.unwrap().id, scope])? > 0 {
+                    self.changed();
+                }
                 continue;
             }
             jobs.push(ReadJob { position, path: path.clone(), fingerprint, record });
@@ -276,10 +285,11 @@ impl Index {
                     next += 1;
                 }
                 if batch_started.elapsed() >= BATCH_TIME {
-                    write_batch(&mut conn, &mut pending, scope, &version, areas_sig, redo_areas)?;
+                    write_batch(&mut conn, &mut pending, scope, &version, areas_sig, redo_areas, &self.generation)?;
                     batch_started = Instant::now();
                 }
             }
+            let batch_before = conn.total_changes();
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             for (job, read) in pending {
                 write_file(&tx, job, scope, &version, read, false, areas_sig, redo_areas)?;
@@ -287,6 +297,7 @@ impl Index {
             for record in known.values() { delete_file(&tx, record.id)?; }
             reader_panicked |= redo_saved_areas(&tx, scope, areas_sig, redo_areas)?;
             tx.commit()?;
+            if conn.total_changes() != batch_before { self.changed(); }
             if reader_panicked { Err(IndexError::ReaderPanic) } else { Ok(()) }
         })?;
         Ok(conn.total_changes() != before)
@@ -310,6 +321,7 @@ impl Index {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let id = write_file(&tx, &job, scope, &version, read, true, areas_sig, redo_areas)?;
             tx.commit()?;
+            self.changed();
             Ok(id)
         })();
         match result {
@@ -332,6 +344,7 @@ impl Index {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for id in removed { delete_file(&tx, id)?; }
         tx.commit()?;
+        self.changed();
         Ok(true)
     }
 
@@ -376,21 +389,24 @@ fn in_pool_scope<'scope, R>(pool: Option<&rayon::ThreadPool>, run: impl FnOnce(&
     }
 }
 
-fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
+fn open_connection(path: &Path, generation: &AtomicU64) -> rusqlite::Result<Connection> {
     let mut conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(30))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     if schema_version(&conn)?.as_deref() != Some(&SCHEMA.to_string()) {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut changed = false;
         if schema_version(&tx)?.as_deref() != Some(&SCHEMA.to_string()) {
             let tables = tx.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")?
                 .query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
             for table in tables { tx.execute_batch(&format!("DROP TABLE \"{}\"", table.replace('"', "\"\"")))?; }
             tx.execute_batch(TABLES)?;
             tx.execute("INSERT INTO meta VALUES ('esquema', ?)", [SCHEMA.to_string()])?;
+            changed = true;
         }
         tx.commit()?;
+        if changed { generation.fetch_add(1, Ordering::Release); }
     }
     Ok(conn)
 }
@@ -558,11 +574,13 @@ fn read_file<F: Fold>(path: &Path, fingerprint: &Fingerprint, record: Option<&Fi
     Ok(FileRead { offset, tail, state, output, areas, size: offset + fragment.len() as i64 })
 }
 
-fn write_batch(conn: &mut Connection, pending: &mut Vec<(&ReadJob, FileRead)>, scope: &str, version: &str, areas_sig: &str, redo_areas: &dyn Fn(&AreaEntries) -> Vec<UsoLinha>) -> Result<(), IndexError> {
+fn write_batch(conn: &mut Connection, pending: &mut Vec<(&ReadJob, FileRead)>, scope: &str, version: &str, areas_sig: &str, redo_areas: &dyn Fn(&AreaEntries) -> Vec<UsoLinha>, generation: &AtomicU64) -> Result<(), IndexError> {
     if pending.is_empty() { return Ok(()); }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     for (job, read) in pending.drain(..) { write_file(&tx, job, scope, version, read, false, areas_sig, redo_areas)?; }
     tx.commit()?;
+    // O erro de um lote posterior não pode ocultar dados já confirmados deste lote.
+    generation.fetch_add(1, Ordering::Release);
     Ok(())
 }
 
