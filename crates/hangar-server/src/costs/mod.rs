@@ -9,4 +9,5 @@ pub mod uso_rules;
 pub mod accumulator;
 pub mod claude;
 pub mod codex;
+pub mod simple;
 pub mod collect;
