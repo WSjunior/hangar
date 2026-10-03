@@ -50,7 +50,8 @@
       "permission_mode": "plan",
       "effort": "medium",
       "context_window": 200000,
-      "previous_non_plan": "bypassPermissions"
+      "previous_non_plan": "bypassPermissions",
+      "initialized": true
     },
     "snapshot": null,
     "clock": {
@@ -127,7 +128,8 @@
       "model": "haiku",
       "permission_mode": "manual",
       "effort": "medium",
-      "context_window": 200000
+      "context_window": 200000,
+      "initialized": true
     },
     "snapshot": null,
     "clock": {
@@ -200,7 +202,8 @@
       "model": "haiku",
       "permission_mode": "manual",
       "effort": "medium",
-      "context_window": 200000
+      "context_window": 200000,
+      "initialized": true
     },
     "snapshot": null,
     "clock": {
@@ -264,7 +267,8 @@
       "model": "haiku",
       "permission_mode": "manual",
       "effort": "medium",
-      "context_window": 200000
+      "context_window": 200000,
+      "initialized": true
     },
     "snapshot": null,
     "clock": {
@@ -310,7 +314,8 @@
       "model": "haiku",
       "permission_mode": "manual",
       "effort": "medium",
-      "context_window": 200000
+      "context_window": 200000,
+      "initialized": true
     },
     "snapshot": null,
     "clock": {
@@ -369,7 +374,8 @@
       "model": "haiku",
       "permission_mode": "manual",
       "effort": "medium",
-      "context_window": 200000
+      "context_window": 200000,
+      "initialized": true
     },
     "snapshot": null,
     "clock": {
@@ -467,7 +473,8 @@
       "model": "haiku",
       "permission_mode": "manual",
       "effort": "medium",
-      "context_window": 200000
+      "context_window": 200000,
+      "initialized": true
     },
     "snapshot": null,
     "clock": {
@@ -504,7 +511,8 @@
       "model": "haiku",
       "permission_mode": "manual",
       "effort": "medium",
-      "context_window": 200000
+      "context_window": 200000,
+      "initialized": true
     },
     "snapshot": null,
     "clock": {
@@ -578,7 +586,8 @@
       "model": "haiku",
       "permission_mode": "manual",
       "effort": "medium",
-      "context_window": 200000
+      "context_window": 200000,
+      "initialized": true
     },
     "snapshot": null,
     "clock": {
@@ -629,7 +638,8 @@
       "model": "haiku",
       "permission_mode": "manual",
       "effort": "medium",
-      "context_window": 200000
+      "context_window": 200000,
+      "initialized": true
     },
     "snapshot": null,
     "clock": {
@@ -745,7 +755,8 @@
       "model": "haiku",
       "permission_mode": "manual",
       "effort": "medium",
-      "context_window": 200000
+      "context_window": 200000,
+      "initialized": true
     },
     "snapshot": null,
     "clock": {
@@ -782,7 +793,8 @@
       "model": "haiku",
       "permission_mode": "manual",
       "effort": "medium",
-      "context_window": 200000
+      "context_window": 200000,
+      "initialized": true
     },
     "snapshot": null,
     "clock": {

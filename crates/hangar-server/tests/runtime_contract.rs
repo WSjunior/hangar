@@ -21,3 +21,47 @@ fn golden_preserves_public_fields() {
         }
     }
 }
+
+#[test]
+fn claude_public_events_match_the_python_oracle() {
+    use hangar_server::runtime::{claude::ClaudeEngine,protocol::*};
+    use serde_json::json;
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../backend/tests/fixtures/headless_runtime");
+    let scenarios:Vec<Value> = serde_json::from_slice(&std::fs::read(root.join("scenarios.json")).unwrap()).unwrap();
+    let golden:Vec<Value> = serde_json::from_slice(&std::fs::read(root.join("claude-golden.json")).expect("gerar o oráculo Python autorizado")).unwrap();
+    let mut compared = 0;
+    for scenario in scenarios.iter().filter(|s|s["provider"] == "claude"
+        && s["conservative_changes"].as_array().unwrap().is_empty()
+        && s["steps"].as_array().unwrap().iter().all(|step|step["kind"] != "command")) {
+        let oracle = golden.iter().find(|g|g["name"] == scenario["name"]).unwrap();
+        let states:Vec<_> = oracle["outputs"].as_array().unwrap().iter().filter(|o|o["channel"] == "state").map(|o|o["data"].clone()).collect();
+        let expected_publications:Vec<_> = oracle["outputs"].as_array().unwrap().iter()
+            .filter(|o|["preview","thinking","tool"].contains(&o["channel"].as_str().unwrap_or(""))).cloned().collect();
+        let mut clock:ClockSample = serde_json::from_value(scenario["clock"].clone()).unwrap();
+        let mut engine = ClaudeEngine::new(scenario["metadata"].clone(),1,clock);
+        let mut publications = Vec::new();
+        for (index,step) in scenario["steps"].as_array().unwrap().iter().enumerate() {
+            if step.get("clock").is_some() { clock = serde_json::from_value(step["clock"].clone()).unwrap(); }
+            let input = if step["kind"] == "tick" { EngineInput::Tick } else { EngineInput::Line(step["payload"].clone()) };
+            let mut effects:std::collections::VecDeque<_> = engine.apply(input,clock).unwrap().into();
+            while let Some(effect) = effects.pop_front() {
+                match effect {
+                    Effect::Publish { channel,data } => publications.push(json!({"channel":channel,"data":data})),
+                    Effect::Write { operation_id:Some(operation_id),.. } => {
+                        effects.extend(engine.apply(EngineInput::WriteAck { operation_id,outcome:WriteOutcome::Written },clock).unwrap());
+                    }
+                    Effect::Policy { kind,request_id,.. } if kind == "format_status" => {
+                        // A formatação administrativa é a fronteira falsa; o reducer permanece real.
+                        engine.apply(EngineInput::PolicyResult { request_id,payload:json!({
+                            "status_line":states[index]["status_line"],"limit_reset":states[index]["limit_reset"]}) },clock).unwrap();
+                    }
+                    _ => {},
+                }
+            }
+            assert_eq!(engine.view()["public_state"],states[index],"{}: etapa {index}",scenario["name"]);
+        }
+        assert_eq!(publications,expected_publications,"{}",scenario["name"]);
+        compared += 1;
+    }
+    assert!(compared >= 6,"comparação precisa incluir estados, texto, pensamento, ferramenta e falhas");
+}
