@@ -403,7 +403,7 @@ async fn actor(program: PathBuf, socket: Option<PathBuf>, key: Key, limits: Limi
                 if consumers.is_empty() && requests.is_empty() { break; }
             }
             request = requests.recv() => match request {
-                Some(Request::Acquire(consumer, reply)) => { if reply.is_closed() { continue; } consumers.insert(consumer, Instant::now()); entries.lock().await.failures.remove(&key); let _ = reply.send(Ok(())); }
+                Some(Request::Acquire(consumer, reply)) => { if reply.is_closed() { continue; } consumers.insert(consumer, Instant::now()); let _ = reply.send(Ok(())); }
                 Some(Request::Capture(request, reply)) => {
                     if reply.is_closed() { continue; }
                     consumers.insert(request.consumer.clone(), Instant::now());

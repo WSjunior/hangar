@@ -352,6 +352,36 @@ async fn observer_retry_pause_grows_expires_and_resets_after_success() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn successful_acquire_preserves_capture_failure_backoff_until_valid_capture() {
+    let (dir, program, _, _) = fake_observer("error");
+    let limits = Limits { retry: Duration::from_millis(250), ..Limits::default() };
+    let pool = TerminalPool::with_program(program, None, limits);
+    let count = || std::fs::read_to_string(dir.path().join("spawns")).unwrap().lines().count();
+    assert!(pool.capture(request("state")).await.is_err());
+    assert_eq!(count(), 1);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    pool.acquire(request("preview")).await.unwrap();
+    assert_eq!(count(), 2);
+    assert!(pool.capture(request("state")).await.is_err());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(pool.acquire(request("preview")).await.is_err());
+    assert_eq!(count(), 2, "acquire bem-sucedido não deve repor a pausa inicial");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    std::fs::write(dir.path().join("mode"), "normal").unwrap();
+    assert_eq!(pool.capture(request("state")).await.unwrap().text, "ready\n\n\n\n");
+    assert_eq!(count(), 3);
+    pool.release("state").await.unwrap();
+    std::fs::write(dir.path().join("mode"), "error").unwrap();
+    assert!(pool.capture(request("state")).await.is_err());
+    assert_eq!(count(), 4);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    pool.acquire(request("preview")).await.unwrap();
+    assert_eq!(count(), 5, "captura válida deve repor a pausa inicial");
+    pool.release("preview").await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn consumer_rebind_waits_for_old_release_without_blocking_another_session() {
     let (dir, program, _, _) = fake_observer("hold");
     let limits = Limits { startup: Duration::from_millis(500), command: Duration::from_millis(700), ..Limits::default() };
