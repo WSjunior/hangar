@@ -60,6 +60,15 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+      - name: Preparar terminal no macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew install tmux
+          # Darwin exige o alias para o teste de bind público distinto do loopback privado.
+          sudo ifconfig lo0 alias 127.0.0.2 up
+      - name: Conferir tmux nos testes Unix
+        if: runner.os != 'Windows'
+        run: tmux -V
       # O rustup do runner lê o crates/rust-toolchain.toml (1.98.1) no primeiro cargo.
       - uses: actions/cache@v4
         with:

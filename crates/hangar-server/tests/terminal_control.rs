@@ -173,7 +173,7 @@ fn fake_observer(mode: &str) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
     let program = dir.path().join("observer");
     let pid = dir.path().join("pid");
     let log = dir.path().join("commands");
-    let source = r#"#!/usr/bin/python3
+    let source = r#"#!/usr/bin/env python3
 import os, sys, time
 from pathlib import Path
 root = Path(__file__).parent
