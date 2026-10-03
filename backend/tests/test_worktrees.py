@@ -506,6 +506,46 @@ def test_delete_leaves_colliding_subfolder_conversations(tmp_path, monkeypatch):
     assert live.exists()
 
 
+def test_delete_moves_conversation_that_entered_the_worktree(tmp_path, monkeypatch):
+    from app.registry import sanitize_cwd
+    main = _repo(tmp_path / "repo")
+    wt = _merged_wt(main, tmp_path / "repo-x", "x")
+    base = _claude_project(tmp_path, monkeypatch, wt)
+    # EnterWorktree: começou na principal, terminou na worktree, e o Claude guarda no projeto dela.
+    (base / sanitize_cwd(wt) / "entrou.jsonl").write_text(
+        json.dumps({"cwd": main}) + "\n" + json.dumps({"cwd": wt}) + "\n")
+    out = worktrees.delete(main, wt, [])
+    assert out["moved"] == 3
+    assert (base / sanitize_cwd(main) / "entrou.jsonl").exists()
+
+
+def test_delete_moves_conversations_of_worktree_subfolders(tmp_path, monkeypatch):
+    from app.registry import sanitize_cwd
+    main = _repo(tmp_path / "repo")
+    wt = _merged_wt(main, tmp_path / "repo-x", "x")
+    (tmp_path / "repo-x" / "sub").mkdir()
+    sub = str(tmp_path / "repo-x" / "sub")
+    base = _claude_project(tmp_path, monkeypatch, sub, sid="dasub")
+    out = worktrees.delete(main, wt, [])
+    assert out["moved"] == 2
+    assert (base / sanitize_cwd(main) / "dasub.jsonl").exists()
+    assert (base / sanitize_cwd(main) / "dasub").is_dir()
+
+
+def test_delete_leaves_colliding_deeper_subfolder_conversations(tmp_path, monkeypatch):
+    from app.registry import sanitize_cwd
+    main = _repo(tmp_path / "repo")
+    deep = tmp_path / "repo" / "sub" / "deep"
+    deep.mkdir(parents=True)
+    wt = _merged_wt(main, tmp_path / "repo-sub", "feat")
+    # `repo/sub/deep` cai no prefixo das subpastas de `repo-sub`, mas nunca esteve nela.
+    assert sanitize_cwd(str(deep)).startswith(sanitize_cwd(wt) + "-")
+    base = _claude_project(tmp_path, monkeypatch, str(deep), sid="funda")
+    out = worktrees.delete(main, wt, [])
+    assert out["moved"] == 0
+    assert (base / sanitize_cwd(str(deep)) / "funda.jsonl").exists()
+
+
 def test_delete_missing_folder_keeps_other_orphan(tmp_path, monkeypatch):
     import shutil
     from app import archive

@@ -431,21 +431,25 @@ def relocate_transcripts(path: str, main: str, sessions=()) -> list[tuple[Path, 
     from app.archive import _contas, _head_info
     from app.registry import sanitize_cwd
     # O nome da pasta de projeto colide (`repo-x` e `repo/x` viram o mesmo): só sai a conversa
-    # aberta dentro da worktree, e nunca a de uma sessão viva.
+    # que esteve dentro da worktree, e nunca a de uma sessão viva. Primeira OU última pasta: quem
+    # entrou por `EnterWorktree` começou na principal e terminou aqui.
     live = {os.path.realpath(s.jsonl) for s in sessions if getattr(s, "jsonl", None)}
     names = {sanitize_cwd(path), sanitize_cwd(os.path.realpath(path))}
+    subs = tuple(n + "-" for n in names)   # projetos das subpastas da worktree
     # O Claude indexa pelo cwd do processo, que o getcwd devolve resolvido: o realpath.
     target = sanitize_cwd(os.path.realpath(main))
     moved: list[tuple[Path, Path]] = []
     try:
         for _cfg, _rot, base in _contas():
             dst = base / target
-            for name in sorted(names):
-                src = base / name
-                if not src.is_dir():
-                    continue
+            if not base.is_dir():
+                continue
+            srcs = sorted(d for d in base.iterdir()
+                          if d.name != target and (d.name in names or d.name.startswith(subs)) and d.is_dir())
+            for src in srcs:
                 for f in sorted(src.glob("*.jsonl")):
-                    if os.path.realpath(f) in live or not _under(_head_info(f)[1], path):
+                    if os.path.realpath(f) in live or not (
+                            _under(_head_info(f)[1], path) or _under(claude_cwd(str(f)), path)):
                         continue
                     sid = f.stem
                     if (dst / f.name).exists() or (dst / sid).exists():
