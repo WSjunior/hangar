@@ -2117,12 +2117,22 @@ async def create_session(body: CreateBody):
         except BaseException:
             if worktree.get("path") and not worktree.get("session_created"):
                 try:
-                    await asyncio.shield(asyncio.to_thread(
-                        remove_worktree, worktree["source"], worktree["path"]))
+                    await asyncio.shield(asyncio.to_thread(_undo_worktree, worktree))
                 except GitError as exc:
                     raise HTTPException(500, detail=erro("erro_criacao_sessao",
                                                           f"falha ao desfazer a worktree: {exc.detail}")) from exc
             raise
+
+
+def _undo_worktree(worktree: dict) -> None:
+    """Desfaz a worktree que o próprio pedido criou. Força: os arquivos de config copiados podem
+    não estar ignorados na base. A branch nova vai junto, senão a nova tentativa daria 409."""
+    remove_worktree(worktree["source"], worktree["path"], force=True)
+    branch = worktree.get("new_branch")
+    if branch:
+        deleted = git_ops._run(worktree["source"], "branch", "-D", branch)
+        if deleted.returncode != 0:
+            raise GitError(500, git_ops._scrub(deleted.stderr.strip()) or "não consegui apagar a branch")
 
 
 def _allowed_scan_root(path: str) -> Path:
@@ -2254,12 +2264,14 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
             except asyncio.CancelledError:
                 path, created = await asyncio.shield(worker)
                 if created:
-                    worktree.update(source=source, path=path)
+                    worktree.update(source=source, path=path,
+                                    new_branch=body.branch if body.new_branch else None)
                 raise
         except (FsError, GitError) as exc:
             raise HTTPException(exc.status, detail=erro("erro_criacao_sessao", exc.detail)) from None
         if created:
-            worktree.update(source=source, path=path)
+            worktree.update(source=source, path=path,
+                            new_branch=body.branch if body.new_branch else None)
         body.cwd = worktree["cwd"] = path
 
     # Janela do modelo escolhido, pra entrar no env do motor (Task 3). O número já está no cache do
