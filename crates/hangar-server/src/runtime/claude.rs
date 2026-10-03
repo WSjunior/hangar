@@ -207,6 +207,27 @@ impl ClaudeEngine {
         effects.push(Effect::Write { frame:json!({"type":"control_request","request_id":request_id,"request":request}),operation_id:Some(operation_id) });
     }
 
+    pub fn restore_control(&mut self,operation_id:String,frame:&Value) {
+        if frame["type"] != "control_request" {
+            let kind = match frame["type"].as_str() {
+                Some("control_response")=>"recovered_answer",
+                Some("user") if self.effort_intent.as_ref().is_some_and(|intent|
+                    operation_id == format!("{}:effort",intent["operation_id"].as_str().unwrap_or("")))=>"effort",
+                Some("user")=>"input",
+                _=>return,
+            };
+            self.wires.insert(operation_id,Wire { kind:kind.into(),request_id:None,final_result:false });
+            return;
+        }
+        let (Ok(request_id),Some(subtype)) = (serde_json::from_value::<RequestId>(frame["request_id"].clone()),frame["request"]["subtype"].as_str()) else { return };
+        if self.waiters.contains_key(&request_id) { return; }
+        let mut payload = frame["request"].clone();
+        if let Some(fields) = payload.as_object_mut() { fields.remove("subtype"); }
+        self.waiters.insert(request_id.clone(),Waiter { operation_id:operation_id.clone(),subtype:subtype.into(),payload,
+            deadline:self.clock.monotonic_s,timed_out:true });
+        self.wires.insert(operation_id,Wire { kind:"control".into(),request_id:Some(request_id),final_result:false });
+    }
+
     fn answer(&mut self,operation_id:String,request_id:RequestId,body:Value,effects:&mut Vec<Effect>) {
         self.wires.insert(operation_id.clone(),Wire { kind:"answer".into(),request_id:Some(request_id.clone()),final_result:false });
         effects.push(Effect::Write { frame:json!({"type":"control_response","response":{

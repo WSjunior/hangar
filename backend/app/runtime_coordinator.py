@@ -26,6 +26,13 @@ def current():
     return _current
 
 
+def ensure():
+    global _current
+    if _current is None:
+        _current = RuntimeCoordinator()
+    return _current
+
+
 class Phase(Enum):
     Python = "python"
     PreparingRust = "preparing_rust"
@@ -438,6 +445,8 @@ class RuntimeCoordinator:
             snapshot = json.loads(raw)
             if snapshot.get("type") != "cano_snapshot" or snapshot.get("versao") != 2:
                 raise ValueError("snapshot incompatível")
+            if type(snapshot.get("pid")) is not int or snapshot["pid"] != cano.get("pid"):
+                raise ValueError("snapshot de outro cano")
             for line in snapshot["pendentes"]:
                 if not isinstance(json.loads(line), dict):
                     raise ValueError("pedido pendente inválido")

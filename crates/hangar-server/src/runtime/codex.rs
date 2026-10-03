@@ -141,7 +141,7 @@ impl Engine {
             alive:true,initialized:metadata["initialized"] == true,ready:metadata["ready"] == true,reconnect:false,
             thread_id:metadata["thread_id"].as_str().unwrap_or("").into(),turn_id:None,in_progress:false,
             state:StateEvent { session:metadata["name"].as_str().unwrap_or("").into(),state:"idle".into(),headless:true,
-                status_line:string(&metadata["status_line"]),..StateEvent::default() },state_revision:0,settings_revision:0,
+                status_line:string(&metadata["status_line"]),..StateEvent::default() },state_revision:metadata["state_revision"].as_u64().unwrap_or(0),settings_revision:metadata["settings_revision"].as_u64().unwrap_or(0),
             model:string(&metadata["model"]),effort:string(&metadata["effort"]),mode:string(&metadata["mode"]),
             permission_mode:metadata["permission_mode"].as_str().unwrap_or("Full Access").into(),token_usage:Value::Null,rate_limits:Value::Null,
             preview:LiveBuffer::default(),response_started:false,compacting:false,rpc:BTreeMap::new(),server_requests:Vec::new(),
@@ -173,7 +173,7 @@ impl Engine {
         json!({"alive":self.alive,"initialized":self.initialized,"ready":self.ready,"in_progress":self.in_progress,
             "thread_id":self.thread_id,"turn_id":self.turn_id,"model":self.model,"effort":self.effort,"mode":self.mode,
             "permission_mode":self.permission_mode,"token_usage":self.token_usage,"rate_limits":self.rate_limits,
-            "runtime_counter":self.counter,"deliverable":self.deliverable(),"pending":self.server_requests.iter()
+            "runtime_counter":self.counter,"state_revision":self.state_revision,"settings_revision":self.settings_revision,"deliverable":self.deliverable(),"pending":self.server_requests.iter()
                 .map(|(id,request)|json!({"request_id":id,"request":request})).collect::<Vec<_>>(),
             "async_questions":self.async_questions.pending,"async_local_answers":self.async_questions.local_answers,
             "skipped_async_questions":self.async_questions.skipped})
@@ -213,6 +213,20 @@ impl Engine {
             deadline:self.clock.monotonic_s+30.0,timed_out:false,continuation,state_revision:self.state_revision,settings_revision:self.settings_revision });
         self.wires.insert(operation_id.clone(),Wire { request_id:Some(request_id.clone()),server_request:None,server_epoch:None,final_result:false });
         effects.push(Effect::Write { operation_id:Some(operation_id),frame:json!({"jsonrpc":"2.0","id":request_id,"method":method,"params":params}) });
+    }
+
+    pub fn restore_rpc(&mut self,operation_id:String,frame:&Value,state_revision:u64,settings_revision:u64) {
+        let Ok(request_id) = serde_json::from_value::<RequestId>(frame["id"].clone()) else { return };
+        let Some(method) = frame["method"].as_str() else {
+            if frame.get("result").is_some() || frame.get("error").is_some() {
+                self.wires.insert(operation_id,Wire { request_id:None,server_request:Some(request_id),server_epoch:None,final_result:false });
+            }
+            return;
+        };
+        if self.rpc.contains_key(&request_id) { return; }
+        self.rpc.insert(request_id.clone(),Rpc { operation_id:operation_id.clone(),method:method.into(),params:frame["params"].clone(),
+            deadline:self.clock.monotonic_s,timed_out:true,continuation:None,state_revision,settings_revision });
+        self.wires.insert(operation_id,Wire { request_id:Some(request_id),server_request:None,server_epoch:None,final_result:false });
     }
 
     pub fn bootstrap(&mut self,reconnect:bool,operation_id:String) -> Result<Vec<Effect>,RuntimeError> {

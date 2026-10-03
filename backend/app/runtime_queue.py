@@ -164,6 +164,8 @@ def apply_action(state, action, clock, call_id):
         if old := operations.get(operation_id):
             if old["payload"] != action["payload"] or old["entry_id"] != action.get("entry_id"):
                 raise ValueError("intenção da operação mudou")
+            if old["status"] == "deferred":
+                old.update(status="prepared", result=None)
             return old
         operations[operation_id] = _operation(operation_id, action["payload"], action.get("entry_id"))
         return operations[operation_id]
@@ -199,6 +201,10 @@ def apply_action(state, action, clock, call_id):
                 operation.update(status="accepted", result=action["result"])
         else:
             status = action.get("status", "accepted")
+            if (operation["status"] in {"accepted", "confirmed", "rejected"}
+                    and isinstance(operation["result"], dict) and "disposition" in operation["result"]
+                    and isinstance(action.get("result"), dict) and "write_outcome" in action["result"]):
+                return operation
             if operation["status"] in {"accepted", "confirmed", "rejected"} and status == "unknown":
                 return operation
             if operation["status"] == "unknown" and status in {"prepared", "dispatching", "deferred"}:

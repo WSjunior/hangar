@@ -280,6 +280,9 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             if let Some(old) = state.operations.get(&id) {
                 if old.payload != payload || old.entry_id != entry_id { return Err(invalid("intenção da operação mudou")); }
             } else { state.operations.insert(id.clone(),Operation::new(&id,payload,entry_id)); }
+            if state.operations[&id].status == Status::Deferred {
+                let old = state.operations.get_mut(&id).unwrap(); old.status = Status::Prepared; old.result = Value::Null;
+            }
             serde_json::to_value(&state.operations[&id])?
         }
         Action::BindDispatch { id, cursor } => {
@@ -298,6 +301,10 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
         }
         Action::Finish { id, status, result } => {
             let op = state.operations.get_mut(&id).ok_or_else(||invalid("operação não preparada"))?;
+            if matches!(op.status,Status::Accepted | Status::Confirmed | Status::Rejected)
+                && op.result.get("disposition").is_some() && result.get("write_outcome").is_some() {
+                return Ok(serde_json::to_value(op)?);
+            }
             if matches!(op.status,Status::Accepted | Status::Confirmed | Status::Rejected) && status == Status::Unknown {
                 return Ok(serde_json::to_value(op)?);
             }
@@ -477,21 +484,30 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 enum QueueMessage {
     Exec { generation:u64, call_id:String, clock:ClockSample, action:Action, reply:oneshot::Sender<io::Result<Value>> },
     Stop,
+    Snapshot(oneshot::Sender<io::Result<State>>),
 }
 
 pub struct QueueActor {
     sender: mpsc::Sender<QueueMessage>,
     task: tokio::task::JoinHandle<()>,
+    initial: State,
+    lease: Arc<File>,
 }
 
 impl QueueActor {
     pub fn start(store: Store, lease: Arc<File>) -> Self {
+        let initial = store.state().clone();
+        let actor_lease = lease.clone();
         let (sender,mut receiver) = mpsc::channel(32);
         let task = tokio::spawn(async move {
             let mut store = store;
             while let Some(message) = receiver.recv().await {
                 match message {
                     QueueMessage::Stop => break,
+                    QueueMessage::Snapshot(reply) => {
+                        let result = if store.fenced { Err(invalid("estado bloqueado após falha de persistência")) } else { Ok(store.state.clone()) };
+                        let _ = reply.send(result);
+                    }
                     QueueMessage::Exec { generation,call_id,clock,action,reply } => {
                         let lease = lease.clone();
                         let job = tokio::task::spawn_blocking(move || {
@@ -507,14 +523,23 @@ impl QueueActor {
                 }
             }
         });
-        Self { sender,task }
+        Self { sender,task,initial,lease:actor_lease }
     }
+
+    pub fn initial_state(&self) -> &State { &self.initial }
+    pub fn lease(&self) -> Arc<File> { self.lease.clone() }
 
     pub async fn exec(&self, generation:u64, call_id:&str, clock:ClockSample, action:Action) -> io::Result<Value> {
         let (reply,response) = oneshot::channel();
         self.sender.send(QueueMessage::Exec { generation,call_id:call_id.into(),clock,action,reply }).await
             .map_err(|_|invalid("fila encerrada"))?;
         response.await.map_err(|_|invalid("fila encerrada sem recibo"))?
+    }
+
+    pub async fn snapshot(&self) -> io::Result<State> {
+        let (reply,response) = oneshot::channel();
+        self.sender.send(QueueMessage::Snapshot(reply)).await.map_err(|_|invalid("fila encerrada"))?;
+        response.await.map_err(|_|invalid("fila encerrada sem estado"))?
     }
 
     pub async fn shutdown(self) -> io::Result<()> {

@@ -38,6 +38,15 @@ pub struct IoTasks {
 }
 
 impl IoTasks {
+    pub fn hold_lease(mut self, lease: std::sync::Arc<std::fs::File>) -> Self {
+        let reader = self.reader_task;
+        let writer = self.writer_task;
+        let reader_lease = lease.clone();
+        self.reader_task = tokio::spawn(async move { let _lease = reader_lease; let _ = reader.await; });
+        self.writer_task = tokio::spawn(async move { let _lease = lease; let _ = writer.await; });
+        self
+    }
+
     pub async fn stop(self) {
         let _ = self.stop.send(true);
         let _ = tokio::join!(self.reader_task, self.writer_task);
@@ -113,12 +122,15 @@ pub async fn peek(binding: &CanoBinding) -> Result<CanoSnapshot, RuntimeError> {
     let mut reader = open(binding, true).await?;
     let result = snapshot(&mut reader).await;
     let _ = reader.get_mut().shutdown().await;
-    result
+    result.and_then(|snapshot| {
+        if snapshot.pid != binding.pid { Err(RuntimeError::new("cano_binding","snapshot de outro cano")) } else { Ok(snapshot) }
+    })
 }
 
 pub async fn connect(binding: &CanoBinding) -> Result<CanoConnection, RuntimeError> {
     let mut stream = open(binding, false).await?;
     let snapshot = snapshot(&mut stream).await?;
+    if snapshot.pid != binding.pid { return Err(RuntimeError::new("cano_binding","snapshot de outro cano")); }
     Ok(CanoConnection { snapshot, stream })
 }
 
@@ -138,6 +150,7 @@ impl CanoConnection {
                 let work = async {
                     let mut read = BufReader::new(read);
                     let mut frame = Vec::new();
+                    let mut timed_out = HashSet::new();
                     loop {
                         let deadline = pending.lock().unwrap().values().copied().min()
                             .unwrap_or_else(|| Instant::now() + Duration::from_secs(30));
@@ -160,7 +173,7 @@ impl CanoConnection {
                                 Some("cano_input_ack") => {
                                     let Some(operation_id) = value["operation_id"].as_str() else { return };
                                     let Ok(outcome) = serde_json::from_value::<WriteOutcome>(value["outcome"].clone()) else { return };
-                                    if pending.lock().unwrap().remove(operation_id).is_none() { continue; }
+                                    if pending.lock().unwrap().remove(operation_id).is_none() && !timed_out.remove(operation_id) { continue; }
                                     IoEvent::WriteAck { operation_id: operation_id.to_owned(), outcome }
                                 }
                                 Some("cano_stderr") => IoEvent::Stderr(value["linha"].as_str().unwrap_or("").to_owned()),
@@ -177,6 +190,7 @@ impl CanoConnection {
                             ids
                         };
                         for operation_id in expired {
+                            timed_out.insert(operation_id.clone());
                             if events.send(IoEvent::WriteAck { operation_id, outcome: WriteOutcome::Unknown }).await.is_err() { return; }
                         }
                     }

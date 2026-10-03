@@ -5,6 +5,8 @@ pub mod queue;
 pub mod receipt;
 pub mod claude;
 pub mod codex;
+pub mod actor;
+pub mod gateway;
 
 #[derive(Default)]
 pub(crate) struct LiveBuffer {
