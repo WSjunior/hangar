@@ -1,6 +1,7 @@
 """Canal do Atualizar escolhido pelo dono, persistido sem reiniciar o servidor."""
 import io
 import os
+import re
 import tempfile
 import threading
 from pathlib import Path
@@ -71,8 +72,22 @@ def _write_env(branch: str, last: str) -> None:
                 if binding.key in values:
                     key = binding.key
                     if key not in seen:
-                        ending = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
-                        output.append(f"{key}={values[key]}{ending}")
+                        assignment = re.match(r"^(\s*(?:export[^\S\r\n]+)?(?:'[^']+'|[^=\#\s]+)[^\S\r\n]*=[^\S\r\n]*)", line)
+                        if assignment:
+                            prefix = assignment[0]
+                            rest = line[len(prefix):]
+                            quoted = re.match(r"'(?:\\'|[^'])*'|\"(?:\\\"|[^\"])*\"", rest)
+                            if quoted:
+                                suffix = rest[quoted.end():]
+                            else:
+                                value_line = rest.splitlines()[0] if rest and rest[0] not in "\r\n" else ""
+                                comment = re.search(r"[^\S\r\n]+#", value_line)
+                                end = comment.start() if comment else len(value_line.rstrip())
+                                suffix = rest[end:]
+                            output.append(prefix + values[key] + suffix)
+                        else:
+                            ending = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
+                            output.append(f"{key}={values[key]}{ending}")
                         seen.add(key)
                 else:
                     output.append(line)

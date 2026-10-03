@@ -107,7 +107,9 @@ def test_update_channel_export_duplicates_and_empty_file(isolated):
     client, env, _ = isolated
     env.write_bytes(b"export CP_UPDATE_BRANCH = 'old'\nCP_UPDATE_BRANCH=duplicate\nOTHER=x\n")
     assert client.put("/api/update-channel", headers=AUTH, json={"branch": "test/channel"}).status_code == 200
-    assert env.read_text().count("CP_UPDATE_BRANCH=") == 1
+    import io
+    from dotenv.parser import parse_stream
+    assert [binding.key for binding in parse_stream(io.StringIO(env.read_text()))].count("CP_UPDATE_BRANCH") == 1
     assert "OTHER=x\n" in env.read_text()
     env.unlink()
     assert client.put("/api/update-channel", headers=AUTH, json={"branch": ""}).status_code == 200
@@ -148,6 +150,14 @@ def test_update_channel_preserves_multiline_variable(isolated):
     assert env.read_bytes().startswith(other)
     from dotenv import dotenv_values
     assert dotenv_values(env)["CP_UPDATE_BRANCH"] == "test/channel"
+
+
+@pytest.mark.parametrize("old", ["old", "'old'", '"old # inside"'])
+def test_update_channel_preserves_spacing_and_comment(isolated, old):
+    client, env, _ = isolated
+    env.write_bytes(f"OTHER=x\r\n\r\n  export CP_UPDATE_BRANCH = {old}  # keep this\r\nAFTER=y\r\n".encode())
+    assert client.put("/api/update-channel", headers=AUTH, json={"branch": "test/channel"}).status_code == 200
+    assert env.read_bytes().startswith(b"OTHER=x\r\n\r\n  export CP_UPDATE_BRANCH = test/channel  # keep this\r\nAFTER=y\r\n")
 
 
 def test_update_channel_auto_start_rechecks_target_under_lock(isolated):

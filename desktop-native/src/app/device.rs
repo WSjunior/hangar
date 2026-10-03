@@ -42,6 +42,7 @@ struct ChannelEditor {
 }
 
 impl ChannelEditor {
+    fn after_update(&mut self) { self.applied = false; self.request.reset(); }
     fn target(&self) -> &str { if self.enabled { self.draft.trim() } else { "" } }
     fn is_dirty(&self) -> bool {
         self.current.as_ref().is_some_and(|current| {
@@ -53,10 +54,13 @@ impl ChannelEditor {
         self.request.loading || self.is_dirty() || (self.current.is_some() && matches!(self.request.value, Some(Err(_))))
     }
     fn receive(&mut self, seq: u64, saved: bool, result: Result<Channel, String>) -> bool {
+        let preserve_draft = !saved && self.is_dirty();
         if !self.request.finish(seq, result.as_ref().map(|_| ()).map_err(Clone::clone)) { return false; }
         if let Ok(channel) = result {
-            self.enabled = !channel.branch.is_empty();
-            self.draft = if self.enabled { channel.branch.clone() } else { channel.last_branch.clone() };
+            if !preserve_draft {
+                self.enabled = !channel.branch.is_empty();
+                self.draft = if self.enabled { channel.branch.clone() } else { channel.last_branch.clone() };
+            }
             self.current = Some(channel);
             self.applied = saved;
         }
@@ -391,10 +395,12 @@ impl Hangar {
         }));
     }
 
-    fn finish_update(&mut self, ok: bool, text: String) {
+    fn finish_update(&mut self, ok: bool, text: String, cx: &mut Context<Self>) {
         self.device.run = Some(Run::Done { ok, text });
         if let Some(task) = self.device.run_task.take() { task.abort(); }
         self.device.search = None;
+        self.device.channel.after_update();
+        self.load_channel(cx);
     }
 
     pub(super) fn receive_device(&mut self, reply: DeviceReply, window: &mut Window, cx: &mut Context<Self>) {
@@ -456,14 +462,14 @@ impl Hangar {
                         self.follow_update();
                     }
                     Err(error) if error.uncertain => { (self.device.run, self.device.saw_running) = (Some(Run::Uncertain), false); self.follow_update(); }
-                    Err(error) => self.finish_update(false, tr("update_refused").replace("{reason}", &Self::failure(&error))),
+                    Err(error) => self.finish_update(false, tr("update_refused").replace("{reason}", &Self::failure(&error)), cx),
                 }
             }
             DeviceReply::Tick(seq, result) => {
                 if seq != self.device.run_seq { return; }
                 match result {
-                    Err(error) if error.status.is_none() && error.detail == "update_silent" => self.finish_update(false, tr("update_silent")),
-                    Err(error) if matches!(error.status, Some(401 | 403)) => self.finish_update(false, tr("auth_error")),
+                    Err(error) if error.status.is_none() && error.detail == "update_silent" => self.finish_update(false, tr("update_silent"), cx),
+                    Err(error) if matches!(error.status, Some(401 | 403)) => self.finish_update(false, tr("auth_error"), cx),
                     // Reiniciando: sem resposta por alguns segundos.
                     Err(_) => if self.device.saw_running { self.device.run = Some(Run::Restarting); },
                     Ok(value) => {
@@ -478,7 +484,7 @@ impl Hangar {
                                 self.device.run = Some(Run::Running { step: number("passo"), total: number("total"), text: text("texto") });
                             }
                             "pronto" if !self.device.saw_running && state.get("ts").and_then(Value::as_str) == self.device.baseline_ts.as_deref() =>
-                                self.finish_update(false, tr("update_not_started")),
+                                self.finish_update(false, tr("update_not_started"), cx),
                             "pronto" => {
                                 let ok = state.get("ok").and_then(Value::as_bool) == Some(true);
                                 let message = if !ok {
@@ -491,7 +497,7 @@ impl Hangar {
                                 } else {
                                     tr("update_done").replace("{version}", &parse_version(&value).version)
                                 };
-                                self.finish_update(ok, message);
+                                self.finish_update(ok, message, cx);
                             }
                             _ => {}
                         }
@@ -815,6 +821,21 @@ mod tests {
         editor.enabled = true;
         assert!(editor.is_dirty());
         assert!(editor.blocks_update());
+    }
+
+    #[test]
+    fn update_channel_refresh_after_update_clears_offer_and_preserves_draft() {
+        let mut editor = super::ChannelEditor::default();
+        let old = editor.request.start();
+        editor.receive(old, true, Ok(super::Channel { branch: "test/channel".into(), checkout_branch: "main".into(), last_branch: "test/channel".into() }));
+        editor.draft = "test/next".into();
+        editor.after_update();
+        assert!(!editor.applied);
+        let seq = editor.request.start();
+        editor.receive(seq, false, Ok(super::Channel { branch: "test/channel".into(), checkout_branch: "test/channel".into(), last_branch: "test/channel".into() }));
+        assert_eq!(editor.current.as_ref().unwrap().checkout_branch, "test/channel");
+        assert_eq!(editor.draft, "test/next");
+        assert!(editor.is_dirty());
     }
 
     #[test]
