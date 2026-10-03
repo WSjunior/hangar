@@ -608,6 +608,8 @@ supports_websockets = false
                 ConversationSource(str(path), "claude", context.source_digest, tuple(sorted(context.selected_uuids))),
                 {"name": "artificial-capture", "key": "artificial-key", "cwd": str(workspace)}, None, None, None)
             store.save_transfer(record)
+            # O importador registra seu dono no manifesto privado da preparação.
+            store.prepare_runtime(record)
             return record
 
         source, original = create_source(root)
