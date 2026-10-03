@@ -599,7 +599,10 @@ class PreviewBroker:
             finally:
                 if heartbeat is not None:
                     heartbeat.cancel()
-                    await asyncio.gather(heartbeat, return_exceptions=True)
+                    try:
+                        await heartbeat
+                    except asyncio.CancelledError:
+                        pass
 
     async def _observe_loop(self) -> None:
         # SEMPRE extrai o último bloco ● (NÃO gateia por spinner): a detecção de spinner pisca falso

@@ -852,3 +852,65 @@ def test_preview_new_subscriber_restarts_completed_producer(monkeypatch):
             if task is not None:
                 await asyncio.gather(task, return_exceptions=True)
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure_site", ["target", "binding"])
+def test_lease_watch_logs_exception_type_and_recovers_heartbeat(monkeypatch, caplog, failure_site):
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(t, "HEARTBEAT", 0.01)
+    fail_next = [False]
+    def target(name):
+        if failure_site == "target" and fail_next[0]:
+            fail_next[0] = False
+            raise RuntimeError("private-pane-and-secret")
+        return "%8"
+    def binding():
+        if failure_site == "binding" and fail_next[0]:
+            fail_next[0] = False
+            raise RuntimeError("private-pane-and-secret")
+        return "thread"
+    monkeypatch.setattr(state.tmux, "_pane_target", target)
+    async def run():
+        recovered = asyncio.Event()
+        calls = []
+        async def request(payload):
+            calls.append(payload)
+            if len([p for p in calls if p["op"] == "acquire"]) >= 2:
+                recovered.set()
+            return {}
+        monkeypatch.setattr(t, "_request", request)
+        source = t.lease("watch-exception", "claude", binding)
+        await source.start()
+        fail_next[0] = True
+        watcher = asyncio.create_task(source.watch())
+        try:
+            await asyncio.wait_for(recovered.wait(), 0.2)
+            assert source.open and not watcher.done()
+        finally:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+            await source.close()
+    asyncio.run(run())
+    assert "RuntimeError" in caplog.text
+    assert "private-pane-and-secret" not in caplog.text
+    assert "test-only" not in caplog.text
+
+
+def test_preview_cleanup_propagates_unexpected_heartbeat_failure(monkeypatch):
+    from app import preview
+    t = bridge()
+    t.configure(None, None)
+    async def broken_watch(self):
+        raise RuntimeError("heartbeat failed")
+    monkeypatch.setattr(t.Lease, "watch", broken_watch)
+    monkeypatch.setattr(preview, "read_sidecar", lambda stem: "preview")
+    async def run():
+        broker = preview.PreviewBroker("heartbeat-cleanup", "claude", lambda: "a")
+        task = asyncio.create_task(broker._loop())
+        async with broker._cond:
+            await asyncio.wait_for(broker._cond.wait_for(lambda: broker.text == "preview"), 1)
+        task.cancel()
+        with pytest.raises(RuntimeError, match="heartbeat failed"):
+            await task
+    asyncio.run(run())

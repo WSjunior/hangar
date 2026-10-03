@@ -188,8 +188,12 @@ class Lease:
             await _request(payload)
 
     async def watch(self):
-        while self.identity() is not None:
-            await self.acquire()
+        while self.open:
+            try:
+                await self.acquire()
+            except Exception as exc:
+                # A falha não pode encerrar a renovação nem registrar conteúdo privado.
+                _failure(f"lease_watch_{type(exc).__name__}")
             await asyncio.sleep(HEARTBEAT)
 
 
