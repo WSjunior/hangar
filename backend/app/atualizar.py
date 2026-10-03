@@ -628,10 +628,15 @@ def _puxar(pre: dict) -> None:
         raise RuntimeError(f"nao consegui alinhar com o codigo novo: {_cauda(r)}")
 
 
+def _electron_instalado() -> bool:
+    """Instalação nova não traz mais o Electron, e o passo de remoção o tira do Windows."""
+    return (REPO / "shell" / "node_modules" / "electron").is_dir()
+
+
 def _shell_mudou(de: str, para: str) -> bool:
     """A janela nativa (Electron) roda o `main.cjs` que estava no disco quando abriu: o restart do
     backend não a alcança, e só fechar e abrir o app traz o shell novo. A tela precisa dizer isso."""
-    if not de or not para or de == para:
+    if not de or not para or de == para or not _electron_instalado():
         return False
     p = _git("diff", "--name-only", f"{de}..{para}", "--", "shell/", timeout=30)
     if p.returncode != 0:

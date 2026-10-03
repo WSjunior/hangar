@@ -13,16 +13,22 @@ const BODY_MAX: usize = 128 * 1024;
 /// O verbo mais lento (wait, eval, shot) tem teto de 15 s; este cobre a fila de dois deles.
 const REPLY_SECS: u64 = 45;
 
-pub struct Request {
-    pub key: String,
-    pub verb: String,
-    pub args: Vec<String>,
-    pub tab: Option<i64>,
-    pub reply: oneshot::Sender<Reply>,
+pub enum Request {
+    /// Verbo do `/cmd`, o do hangar-preview.
+    Command { key: String, verb: String, args: Vec<String>, tab: Option<i64>, reply: oneshot::Sender<Reply> },
+    /// Comando CDP do `/cdp`, já conferido contra `relay::RELAYED`.
+    Cdp { key: String, method: String, params: Value, reply: oneshot::Sender<Result<Value, String>> },
+    /// Espectador novo da tela remota; tira o anterior daquele navegador.
+    Watch { key: String, viewer: super::relay::Viewer, reply: oneshot::Sender<Result<(), String>> },
+    /// O espectador `id` saiu; não vale se outro já o substituiu.
+    Unwatch { key: String, id: u64 },
 }
 
 #[derive(Debug)]
-struct Head { method: String, path: String, auth: Option<String>, length: usize }
+struct Head { method: String, path: String, auth: Option<String>, length: usize, upgrade: Option<String>, ws_key: Option<String> }
+
+#[derive(Debug, PartialEq, Eq)]
+enum Route { Cmd, Cdp(String) }
 
 struct Body { key: String, verb: String, args: Vec<String>, tab: Option<i64> }
 
@@ -86,11 +92,13 @@ fn parse_head(text: &str) -> Result<Head, (u16, String)> {
     let mut lines = text.split("\r\n");
     let mut first = lines.next().unwrap_or("").split(' ');
     let (method, path) = (first.next().unwrap_or("").to_owned(), first.next().unwrap_or("").to_owned());
-    let mut head = Head { method, path, auth: None, length: 0 };
+    let mut head = Head { method, path, auth: None, length: 0, upgrade: None, ws_key: None };
     for line in lines {
         let Some((name, value)) = line.split_once(':') else { continue };
         match name.trim().to_ascii_lowercase().as_str() {
             "authorization" => head.auth = Some(value.trim().to_owned()),
+            "upgrade" => head.upgrade = Some(value.trim().to_owned()),
+            "sec-websocket-key" => head.ws_key = Some(value.trim().to_owned()),
             "content-length" => head.length = value.trim().parse().map_err(|_| (400, "erro: corpo invalido".to_string()))?,
             _ => {}
         }
@@ -99,10 +107,22 @@ fn parse_head(text: &str) -> Result<Head, (u16, String)> {
     Ok(head)
 }
 
-fn check(head: &Head, token: &str) -> Result<(), (u16, String)> {
-    if head.method != "POST" || head.path != "/cmd" { return Err((404, "erro: rota desconhecida".into())); }
+fn check(head: &Head, token: &str) -> Result<Route, (u16, String)> {
+    let (path, query) = head.path.split_once('?').unwrap_or((&head.path, ""));
+    let route = match (head.method.as_str(), path) {
+        ("POST", "/cmd") => Route::Cmd,
+        ("GET", "/cdp") => Route::Cdp(url::form_urlencoded::parse(query.as_bytes())
+            .find_map(|(name, value)| (name == "chave").then(|| value.into_owned())).unwrap_or_default()),
+        _ => return Err((404, "erro: rota desconhecida".into())),
+    };
     if !same(head.auth.as_deref().unwrap_or("").as_bytes(), format!("Bearer {token}").as_bytes()) { return Err((401, "erro: token invalido".into())); }
-    Ok(())
+    if let Route::Cdp(key) = &route {
+        if key.is_empty() { return Err((400, "erro: /cdp precisa de ?chave=".into())); }
+        if !head.upgrade.as_deref().is_some_and(|u| u.eq_ignore_ascii_case("websocket")) || head.ws_key.is_none() {
+            return Err((400, "erro: /cdp so aceita WebSocket".into()));
+        }
+    }
+    Ok(route)
 }
 
 fn parse_body(bytes: &[u8]) -> Result<Body, String> {
@@ -142,9 +162,18 @@ async fn serve(mut stream: TcpStream, token: Arc<str>, requests: async_channel::
         Ok(Err(fail)) => fail,
         Ok(Ok((head, body))) => match check(&head, &token) {
             Err(fail) => fail,
-            Ok(()) => (200, answer(&body, &requests).await),
+            Ok(Route::Cmd) => (200, answer(&body, &requests).await),
+            Ok(Route::Cdp(key)) => {
+                let ws_key = head.ws_key.unwrap_or_default();
+                return super::relay::serve(stream, &ws_key, key, requests).await;
+            }
         },
     };
+    respond(&mut stream, status, &text).await;
+}
+
+/// Resposta HTTP de texto, uma por conexão, como o servidor do Electron.
+pub(super) async fn respond(stream: &mut TcpStream, status: u16, text: &str) {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -185,7 +214,7 @@ async fn answer(bytes: &[u8], requests: &async_channel::Sender<Request>) -> Stri
     let path = (body.verb == "shot").then(|| body.args.first().cloned()).flatten();
     if body.verb == "shot" && path.is_none() { return "erro: shot precisa de um caminho de arquivo".into(); }
     let (tx, rx) = oneshot::channel();
-    if requests.send(Request { key: body.key, verb: body.verb, args: body.args, tab: body.tab, reply: tx }).await.is_err() {
+    if requests.send(Request::Command { key: body.key, verb: body.verb, args: body.args, tab: body.tab, reply: tx }).await.is_err() {
         return "erro: o app nativo esta fechando".into();
     }
     match tokio::time::timeout(Duration::from_secs(REPLY_SECS), rx).await {
@@ -212,11 +241,25 @@ mod tests {
     fn head_is_parsed_and_checked_in_electron_order() {
         let head = parse_head("POST /cmd HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer abc\r\nContent-Length: 12").unwrap();
         assert_eq!((head.length, head.auth.as_deref()), (12, Some("Bearer abc")));
-        assert_eq!(check(&head, "abc"), Ok(()));
+        assert_eq!(check(&head, "abc"), Ok(Route::Cmd));
         assert_eq!(check(&head, "zzz"), Err((401, "erro: token invalido".into())));
         let other = parse_head("GET /cmd HTTP/1.1").unwrap();
         assert_eq!(check(&other, "abc"), Err((404, "erro: rota desconhecida".into())));
         assert_eq!(parse_head("POST /cmd HTTP/1.1\r\nContent-Length: 999999").err(), Some((413, "erro: corpo grande demais".into())));
+    }
+
+    #[test]
+    fn cdp_route_needs_token_key_and_websocket() {
+        let upgrade = "\r\nAuthorization: Bearer abc\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==";
+        let head = parse_head(&format!("GET /cdp?chave=srv%3A%3Anav-teste HTTP/1.1{upgrade}")).unwrap();
+        assert_eq!(check(&head, "abc"), Ok(Route::Cdp("srv::nav-teste".into())));
+        assert_eq!(check(&head, "zzz"), Err((401, "erro: token invalido".into())));
+        let plain = parse_head("GET /cdp?chave=s%3A%3Aa HTTP/1.1\r\nAuthorization: Bearer abc").unwrap();
+        assert_eq!(check(&plain, "abc"), Err((400, "erro: /cdp so aceita WebSocket".into())));
+        let keyless = parse_head(&format!("GET /cdp HTTP/1.1{upgrade}")).unwrap();
+        assert_eq!(check(&keyless, "abc"), Err((400, "erro: /cdp precisa de ?chave=".into())));
+        let post = parse_head(&format!("POST /cdp?chave=a HTTP/1.1{upgrade}")).unwrap();
+        assert_eq!(check(&post, "abc"), Err((404, "erro: rota desconhecida".into())));
     }
 
     #[test]

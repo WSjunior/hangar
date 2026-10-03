@@ -6,6 +6,8 @@ pub mod preview_fmt;
 pub mod control;
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub mod server;
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub mod relay;
 #[cfg(target_os = "windows")]
 pub mod cdp;
 
