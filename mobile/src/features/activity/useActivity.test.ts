@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { createActivityFolder } from '@hangar/core';
 import type { ChatEvent } from '@hangar/core';
+import { feedFolder } from './useActivity';
 
 // teste do Step 1 da Task 9: 3 tool_use → agents.length === 3; reset([]) zera
 function agentEvent(toolUseId: string, seq: number): ChatEvent {
@@ -25,6 +26,15 @@ describe('useActivity — createActivityFolder incremental', () => {
     expect(after.agents.length).toBe(0);
     expect(after.total).toBe(0);
     expect(after.tasks.length).toBe(0);
+  });
+
+  it('histórico antigo entrando na frente refaz a pasta, sem repetir a cauda', () => {
+    const folder = createActivityFolder();
+    let cursor = feedFolder(folder, { count: 0, firstId: undefined }, [agentEvent('n1', 3)]);
+    cursor = feedFolder(folder, cursor, [agentEvent('o1', 1), agentEvent('o2', 2), agentEvent('n1', 3)]);
+    expect(folder.snapshot().agents.map((a) => a.description).sort()).toEqual(['Agent 1', 'Agent 2', 'Agent 3']);
+    cursor = feedFolder(folder, cursor, [agentEvent('o1', 1), agentEvent('o2', 2), agentEvent('n1', 3), agentEvent('n2', 4)]);
+    expect(folder.snapshot().agents.length).toBe(4);
   });
 
   it('reset com 3 eventos e depois reset vazio zera incremental', () => {

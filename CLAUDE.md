@@ -209,8 +209,11 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   Decisão e alcance em [frontend.md](docs/decisoes/frontend.md#desktop-no-rust-web-para-pwamobile).
   O nativo é o único app de desktop do instalador: ele o baixa da release `native-latest` no
   pacote da máquina (`scripts/install-native.sh`/`.ps1`); sem o nativo, a reserva é o navegador.
-  O instalador não instala mais o Electron; quem já o tinha fica com ele. No Windows o nativo
-  atende o `hangar-preview` (CDP dentro do processo, um navegador por sessão, sem abas).
+  O instalador não instala mais o Electron. No Windows e no Linux o nativo atende o
+  `hangar-preview` e a tela remota do navegador no celular (um navegador por sessão, sem abas,
+  repasse em `/cdp`): no Windows por CDP dentro do WebView2; no Linux por um Chromium sem janela
+  com CDP por pipe, pintado no painel pelo screencast. Os passos `2026-10-02-electron-removido-*`
+  tiram o Electron de quem ainda o tem. No macOS, quem já o tinha fica com ele.
 - **A web existente tem duas vistas (820px):** `Sidebar` (desktop legado) e `SessionList`
   (mobile). Trabalho novo na web é só para PWA/mobile; a vista desktop não ganha recurso.
   Preserve o desktop existente ao tocar código compartilhado. Lógica da lista vai

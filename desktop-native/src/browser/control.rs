@@ -404,14 +404,14 @@ impl<P: Page> Controller<P> {
     }
 }
 
-/// A página de verdade: o CDP do WebView2 e o relógio da GPUI.
-#[cfg(target_os = "windows")]
+/// A página de verdade: o CDP do motor (WebView2 no Windows, Chromium sem janela no Linux) e o relógio da GPUI.
+#[cfg(not(target_os = "macos"))]
 pub struct CdpPage {
     pub cdp: std::rc::Rc<super::cdp::Cdp>,
     pub executor: gpui_kit::BackgroundExecutor,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(not(target_os = "macos"))]
 impl Page for CdpPage {
     fn call(&self, method: &str, params: Value) -> impl Future<Output = Result<Value, String>> { self.cdp.call(method, params) }
     fn sleep(&self, ms: u64) -> impl Future<Output = ()> {

@@ -26,6 +26,7 @@ dependencies = [
     # por sessao, e nao sobra motivo pra 1,2 MB de binario de terceiro. Hoje o pty do Windows e
     # `app/conpty.py`: ctypes puro sobre o kernel32, stdlib e nada mais.
     "mcp>=2.2.0",
+    "python-dotenv>=1.2.2",
 ]
 
 [dependency-groups]

@@ -22,6 +22,7 @@
       "aparencia.idioma": "stores/aparencia.ts — chave do armazenamento local do idioma escolhido a mao, nao texto de tela. Mesma razao de 'aparencia.tema'.",
       "Aparência: picker voltou sem cancelar e sem imagem": "app/config/aparencia.tsx — mensagem de console.warn (o expo-image-picker devolveu um resultado que a tipagem permite mas nao deveria acontecer), nao texto de tela: o aviso pra pessoa e um toast com chave. Mesmo precedente de 'Background: papel de parede nao abriu'.",
       "Background: papel de parede não abriu": "ui/Background.tsx — mensagem de console.warn (arquivo do papel de parede sumiu do disco), nao texto de tela: quem le e quem abre o log pra diagnosticar. O aviso pra pessoa e um toast com chave.",
+      "ToolDetailSheet: saída ao vivo falhou": "mobile tools/ToolDetailSheet.tsx — mensagem de console.warn da leitura extra da saida do Bash ao vivo, nao texto de tela: a folha continua mostrando o comando e o desfecho. Mesmo precedente de 'Background: papel de parede não abriu'.",
       "Check": "NOME DE ICONE do lucide, mesma razao de 'Terminal': ServerSheet.tsx (marca do servidor ativo). Vale para 'Plus' (ServerSheet.tsx), 'Hourglass' e 'Cog' (SessionRow.tsx) e 'Server'/'Settings' (app/index.tsx).",
       "Pause": "NOME DE ICONE do lucide, mesma razao de 'Terminal': mobile AudioChip.tsx (tocar/pausar o audio citado). Vale para 'Send' (OptionButtons.tsx, enviar as opcoes marcadas) e 'Share' (DocumentViewer.tsx, compartilhar o documento); o rotulo acessivel de cada um usa m.*.",
       "Palette": "NOME DE ICONE do lucide, mesma razao de 'Terminal': app/config/index.tsx (linha Aparencia). Vale para 'Info' (mesma tela) e 'Plug' (app/config/maquinas.tsx, botao de testar conexao); os compostos (Settings2, ChevronRight, ExternalLink, Trash2) nao caem na heuristica.",
@@ -344,10 +345,12 @@
   "Info",
   "Plug",
   "Plus",
+  "Diamond",
   "Git",
   "Hourglass",
   "Cog",
   "Server",
   "Settings",
-  "Background: papel de parede não abriu"
+  "Background: papel de parede não abriu",
+  "ToolDetailSheet: saída ao vivo falhou"
 ]

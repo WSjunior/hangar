@@ -26,7 +26,7 @@ from sse_starlette.sse import EventSourceResponse
 from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, diag, harness_api,
                  loop_monitor, pensamento_pt, permission_mode, plugin_bridge, procinfo, quem_chama, tmux,
                  uds_messaging)
-from app import external_pair_api, external_pairs, internal_api
+from app import external_pair_api, external_pairs, internal_api, update_channel
 from app.auth import require_auth, require_loopback
 from app.send_executor import send_thread as _send_thread
 from app import bastao as bastao_mod   # `bastao` sem sufixo é a ROTA GET, mais abaixo neste arquivo
@@ -630,6 +630,7 @@ app.include_router(credenciais.credenciais_router)
 app.include_router(codex_contas_api.codex_contas_router)
 app.include_router(harness_api.harness_router)
 app.include_router(peers_api.peers_router)
+app.include_router(update_channel.router)
 app.include_router(plugin_bridge.plugin_router)
 app.include_router(config_sync_api.config_sync_router)
 app.include_router(share_api.router)
@@ -808,7 +809,7 @@ async def nav_ws_route(ws: WebSocket, name: str):
     # Mesma porta de entrada do painel de terminal (token + Origin) -- o de la abre um shell, este
     # abre o navegador que o agente esta dirigindo.
     from app import navsock
-    await navsock.nav_ws(ws, name)
+    await navsock.nav_ws(ws, name, _session_exists)
 
 
 @app.post("/api/sessions/{name}/shell", dependencies=[Depends(require_auth)])
@@ -5808,7 +5809,7 @@ async def _auto_update_loop():
                         motivo = "sessao trabalhando"
                 if motivo is None:
                     _log.info("auto-update: disparando atualizacao")
-                    r = await asyncio.to_thread(atualizar.iniciar, settings.port)
+                    r = await asyncio.to_thread(atualizar.iniciar, settings.port, expected_branch="main")
                     if not r.get("ok"):
                         _log.warning("auto-update: iniciar recusou (%s)", r.get("erro"))
                 elif motivo != "em dia":

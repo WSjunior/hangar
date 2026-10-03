@@ -72,7 +72,7 @@ mod stats;
 mod search;
 mod topbar;
 
-actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, NextSession, PreviousSession, ToggleDictation, NewChat, OpenCosts, OpenSearch,
+actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, FindProjectFile, FindProjectText, NextSession, PreviousSession, ToggleDictation, NewChat, OpenCosts, OpenSearch,
     ToggleSidebar, CyclePermission]);
 
 const LIVE_THINKING: &str = "__thinking__";
@@ -649,6 +649,7 @@ impl Hangar {
             KeyBinding::new("secondary-up", PreviousSession, Some("!Terminal")), KeyBinding::new("secondary-n", NewChat, Some("!Terminal")),
             // Ctrl+Shift+C já copia a última resposta: Custos fica no Ctrl+Alt+C.
             KeyBinding::new("secondary-alt-c", OpenCosts, Some("!Terminal")), KeyBinding::new("secondary-k", OpenSearch, Some("!Terminal")),
+            KeyBinding::new("secondary-p", FindProjectFile, Some("!Terminal")), KeyBinding::new("secondary-shift-f", FindProjectText, Some("!Terminal")),
             KeyBinding::new("secondary-b", ToggleSidebar, Some("!Terminal")), KeyBinding::new("alt-shift-p", CyclePermission, Some("!Terminal"))]);
         cx.bind_keys([KeyBinding::new("ctrl-shift-c", terminal::CopyTerminal, Some("Terminal")),
             KeyBinding::new("ctrl-shift-v", terminal::PasteTerminal, Some("Terminal")),
@@ -693,7 +694,7 @@ impl Hangar {
                 }
             }).detach();
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(not(target_os = "macos"))]
         {
             let (requests, received) = async_channel::unbounded::<crate::browser::server::Request>();
             match crate::browser::server::start(&runtime, requests) {
@@ -733,7 +734,7 @@ impl Hangar {
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
             desktop_note: None,
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
-            device: device::Device::default(), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), orq_history: None, orq_history_serial: 0, home_usage: Default::default(), recents: Default::default(), reopen: None, shortcuts: shortcuts::Shortcuts::default(),
+            device: device::Device::new(window, cx), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), orq_history: None, orq_history_serial: 0, home_usage: Default::default(), recents: Default::default(), reopen: None, shortcuts: shortcuts::Shortcuts::default(),
             server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), connect: connect::Connect::default(), shared: shared_config::SharedConfig::default(), machines: machines::Machines::default(),
             costs: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
             terminal: None, terminal_serial: 0,
@@ -940,7 +941,7 @@ impl Hangar {
             if tx.send(Envelope { connection, selection: None, payload: Payload::Sessions(result) }).await.is_err() || fatal { return; }
             forward_stream(api, None, connection, None, tx).await;
         }));
-        self.reset_device(cx);
+        self.reset_device(window, cx);
         // Convite só enxerga a própria sessão: custos, contas, busca, configuração e avisos do servidor responderiam 403.
         if !self.active_invite() {
             self.costs_reconnected(cx);
@@ -989,6 +990,7 @@ impl Hangar {
         self.mention.close();
         self.active_token.clear();
         self.connection += 1;
+        self.files_connection_dropped(cx);
         self.selection += 1;
         self.revision += 1;
         for slot in [&mut self.list_task, &mut self.session_task, &mut self.history_task] { if let Some(t) = slot.take() { t.abort(); } }
@@ -1478,7 +1480,7 @@ impl Hangar {
                     window.push_notification(Notification::warning(tr("notify_settings_failed")), cx);
                 }
             }
-            Payload::Device(reply) => { self.receive_device(reply, cx); return; }
+            Payload::Device(reply) => { self.receive_device(reply, window, cx); return; }
             Payload::Accounts(reply) => { self.receive_accounts(reply, window, cx); return; }
             Payload::Orchestration(reply) => { self.receive_orchestration(reply, cx); return; }
             Payload::Shortcuts(reply) => { self.receive_shortcuts(reply, window, cx); return; }
@@ -5540,6 +5542,8 @@ impl Render for Hangar {
             .on_action(cx.listener(|this, _: &OpenCosts, window, cx| this.toggle_costs(window, cx)))
             .on_action(cx.listener(|this, _: &OpenSearch, window, cx| this.toggle_search(window, cx)))
             .on_action(cx.listener(|this, _: &FocusSettingsSearch, window, cx| this.focus_search(window, cx)))
+            .on_action(cx.listener(|this, _: &FindProjectFile, window, cx| this.find_project_files(false, window, cx)))
+            .on_action(cx.listener(|this, _: &FindProjectText, window, cx| this.find_project_files(true, window, cx)))
             .on_action(cx.listener(|this, _: &NextSession, window, cx| this.step_session(1, window, cx)))
             .on_action(cx.listener(|this, _: &PreviousSession, window, cx| this.step_session(-1, window, cx)))
             .on_action(cx.listener(|this, _: &NewChat, window, cx| this.go_home(window, cx)))
@@ -5693,7 +5697,7 @@ impl Render for Hangar {
 mod tests {
     use super::{message_card, preview_step, safe_markdown, stream_motion, working_tokens, working_verb};
     use crate::{api::dto::ChatEvent, cards::Card, i18n::tr};
-    use std::time::Duration;
+    use std::{collections::HashSet, time::Duration};
 
     #[test]
     fn conversation_corner_preserves_delivery_truth_and_session_warnings() {

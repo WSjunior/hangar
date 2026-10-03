@@ -3,7 +3,7 @@ import { ActionSheetIOS, Platform, Pressable, Text, View } from 'react-native';
 import { MenuView, type NativeActionEvent } from '@react-native-menu/menu';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import * as Haptics from 'expo-haptics';
-import { cwdParts, isOrq, loopBadge, planBadge, providerName, relativeTime, rotuloEstado, untrackedReason, type AggSession, type State } from '@hangar/core';
+import { cwdParts, isOrq, loopBadge, providerName, relativeTime, rotuloEstado, untrackedReason, type AggSession, type State } from '@hangar/core';
 import { Chip, type Tone } from '../../ui/Chip';
 import { HangarMark } from '../../ui/HangarMark';
 import { Icon } from '../../ui/Icon';
@@ -77,7 +77,6 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
   const untracked = s.tracked === false;
   const cwd = cwdParts(s.cwd);
   const loop = loopBadge(s.loop_status, s.loop_iter, s.loop_max);
-  const plan = planBadge(s);
   const pendingQuestions = s.pending_questions ?? 0;
   const sub = s.question ?? (s.state === 'working' ? s.label : null) ?? null;
   const peers = s.pair_peers ?? [];
@@ -170,11 +169,10 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
             {meta.join(' · ')}
           </Text>
         ) : null}
-        {s.limited || loop || plan ? (
+        {s.limited || loop ? (
           <View style={styles.chips}>
             {s.limited ? <Chip tone="warning" icon="Hourglass">{s.limit_reset ?? ''}</Chip> : null}
             {loop ? <Chip tone={TOM_DO_LOOP[loop.tone]}>{loop.label}</Chip> : null}
-            {plan ? <Chip tone={plan.complete ? 'success' : 'neutral'} icon={plan.complete ? 'CircleCheck' : 'ClipboardList'}>{plan.text}</Chip> : null}
           </View>
         ) : null}
         {untracked && s.provider !== 'kimi' && s.provider !== 'pi' && s.provider !== 'omp' ? (

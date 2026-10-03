@@ -19,11 +19,14 @@ export const ToolCard = memo(function ToolCard({
   result,
   onPress,
   look = 'tree',
+  escrevendo = false,
 }: {
   use: ChatEvent;
   result?: ChatEvent | null;
   onPress: (use: ChatEvent) => void;
   look?: Ferramentas;
+  /** Pedido da chamada ainda sendo escrito pelo modelo (SSE `ferramenta`): não roda ainda. */
+  escrevendo?: boolean;
 }) {
   const { theme } = useUnistyles();
   const fase = toolPhase(result ?? null);
@@ -33,9 +36,10 @@ export const ToolCard = memo(function ToolCard({
   const falhou = fase === 'error';
   const cor = falhou ? theme.tokens.status.warning : theme.tokens.text.muted;
   const erro = falhou ? summarizeToolResult(result, use.tool_name) : '';
+  const rodando = escrevendo ? m.tool_fase_escrevendo() : m.estado_em_execucao();
 
   if (look === 'chips') {
-    const desfecho = vivo ? m.native_chip_running() : summarizeToolResult(result, use.tool_name);
+    const desfecho = escrevendo ? m.tool_fase_escrevendo() : vivo ? m.native_chip_running() : summarizeToolResult(result, use.tool_name);
     const verbo = toolVerbo(use.tool_name);
     return (
       <Pressable
@@ -63,13 +67,13 @@ export const ToolCard = memo(function ToolCard({
 
   const classico = look === 'classic';
   const rotulo = classico || vivo ? nomeFerramenta(use.tool_name) : toolVerbo(use.tool_name);
-  const fim = vivo ? `· ${m.estado_em_execucao()}` : erro && erro !== alvo ? `· ${erro}` : '';
+  const fim = vivo ? `· ${rodando}` : erro && erro !== alvo ? `· ${erro}` : '';
   return (
     <Pressable
       onPress={() => onPress(use)}
       style={({ pressed }) => [styles.line, pressed && { backgroundColor: theme.tokens.bg.hover }]}
       accessibilityRole="button"
-      accessibilityLabel={[rotulo, alvo, vivo ? m.estado_em_execucao() : falhou ? erro || m.formato_tool_falhou() : ''].filter(Boolean).join(', ')}
+      accessibilityLabel={[rotulo, alvo, vivo ? rodando : falhou ? erro || m.formato_tool_falhou() : ''].filter(Boolean).join(', ')}
     >
       <Text
         style={[

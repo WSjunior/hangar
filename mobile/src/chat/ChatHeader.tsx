@@ -1,4 +1,5 @@
 import { Pressable, Text, View } from 'react-native';
+import { Pressable as EdgePressable } from 'react-native-gesture-handler';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { useLocalSearchParams } from 'expo-router';
 import { cwdParts, rotuloEstado, type State, type ThemeTokens } from '@hangar/core';
@@ -18,8 +19,8 @@ const PILL: Record<State, keyof ThemeTokens['pill']> = {
 
 // Cabeçalho do chat no layout do nativo: ‹ · marca na cor do estado · nome e "pasta @ servidor" ·
 // pílula de estado · ⋯. A cor fica só na marca e no ponto da pílula, que é onde ela diz algo; o resto
-// é texto. O anel de contexto mora no composer e o terminal no ⋯. Plano e loop descem para uma linha
-// própria: na mesma linha espremiam o nome da sessão até as reticências.
+// é texto. O anel de contexto mora no composer e o terminal no ⋯. O loop desce para uma linha
+// própria: na mesma linha espremia o nome da sessão até as reticências.
 export function ChatHeader({
   name,
   state,
@@ -27,7 +28,6 @@ export function ChatHeader({
   onMore,
   onTitlePress,
   chipLoop,
-  chipPlan,
 }: {
   name: string;
   state: State | null;
@@ -35,7 +35,6 @@ export function ChatHeader({
   onMore: () => void;
   onTitlePress: () => void;
   chipLoop?: React.ReactNode;
-  chipPlan?: React.ReactNode;
 }) {
   const { theme } = useUnistyles();
   // Destino lido da rota e da lista: quem monta o cabeçalho não precisa repassar máquina e pasta.
@@ -49,7 +48,9 @@ export function ChatHeader({
   return (
     <View style={styles.wrap}>
       <View style={styles.bar}>
-        <Pressable
+        {/* Mora na faixa de arrasto da gaveta: no Android o gesto nativo dela engolia o toque de um
+            Pressable comum. O do gesture-handler entra na mesma disputa e o toque parado vence. */}
+        <EdgePressable
           onPress={onBack}
           hitSlop={8}
           style={styles.back}
@@ -57,7 +58,7 @@ export function ChatHeader({
           accessibilityLabel={m.chat_voltar_sessoes()}
         >
           <Icon name="ChevronLeft" size={22} color={theme.tokens.text.primary} />
-        </Pressable>
+        </EdgePressable>
         <Pressable
           onPress={onTitlePress}
           style={({ pressed }) => [styles.titulo, pressed && styles.tocado]}
@@ -98,12 +99,7 @@ export function ChatHeader({
           <Icon name="Ellipsis" size={18} color={theme.tokens.text.secondary} />
         </Pressable>
       </View>
-      {chipPlan || chipLoop ? (
-        <View style={styles.chips}>
-          {chipPlan}
-          {chipLoop}
-        </View>
-      ) : null}
+      {chipLoop ? <View style={styles.chips}>{chipLoop}</View> : null}
     </View>
   );
 }
@@ -121,7 +117,7 @@ const styles = StyleSheet.create((theme) => ({
     paddingVertical: theme.base.space[1],
     minHeight: 48,
   },
-  // Linha discreta de plano e loop, alinhada ao nome (depois do ‹ e da marca).
+  // Linha discreta do loop, alinhada ao nome (depois do ‹ e da marca).
   chips: {
     flexDirection: 'row',
     alignItems: 'center',

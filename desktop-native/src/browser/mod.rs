@@ -1,18 +1,26 @@
 //! Navegador embutido do painel lateral. Motor por sistema, mesma superfície de chamada:
-//! Windows/macOS usam o webview do sistema (wry) como janela filha; Linux, WPE.
+//! Windows/macOS usam o webview do sistema (wry) como janela filha; Linux, um Chromium sem janela pintado pela GPUI.
+//! Windows e Linux falam CDP, e neles o app atende o hangar-preview e a tela remota.
 pub mod model;
 pub mod preview_fmt;
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub mod control;
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub mod server;
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub mod relay;
 #[cfg(target_os = "windows")]
 pub mod cdp;
+/// Mesmo nome nos dois sistemas: uma sessão CDP no pipe do Chromium faz o papel do CDP do WebView2.
+#[cfg(target_os = "linux")]
+pub mod cdp {
+    pub use super::chromium::pipe::Session as Cdp;
+}
 
 #[cfg(target_os = "linux")]
-mod linux;
+mod chromium;
 #[cfg(target_os = "linux")]
-pub use linux::Engine;
+pub use chromium::Engine;
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod wry_engine;

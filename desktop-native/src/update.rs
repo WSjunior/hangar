@@ -194,10 +194,11 @@ enum Hold {
     LocalChanges,
     Running,
     Missing(String),
+    ChannelDraft,
 }
 
 impl Hold {
-    /// Os dois primeiros deixam o app seguir sozinho; os outros se resolvem e tenta-se de novo, com os dois juntos.
+    /// Só impedimentos à execução conjunta bloqueiam também o app.
     fn stops(&self) -> bool { matches!(self, Hold::Running | Hold::Missing(_)) }
 
     fn text(&self) -> String {
@@ -206,6 +207,7 @@ impl Hold {
             Hold::LocalChanges => tr("app_update_hold_changes"),
             Hold::Running => tr("app_update_hold_running"),
             Hold::Missing(what) => tr("app_update_hold_missing").replace("{what}", what),
+            Hold::ChannelDraft => tr("settings_channel_pending"),
         }
     }
 }
@@ -319,6 +321,7 @@ pub struct Updater {
     /// Procura do app em andamento e o desfecho da última, para a página Sobre.
     checking: bool,
     checked: Option<Result<(), String>>,
+    channel_blocked: Option<String>,
 }
 
 /// O que a página Sobre mostra na linha do app.
@@ -332,7 +335,7 @@ pub fn start(runtime: Arc<Runtime>, cx: &mut App) {
     let client = reqwest::Client::builder().timeout(Duration::from_secs(300)).user_agent(concat!("hangar-native/", env!("HANGAR_NATIVE_RELEASE")))
         .build().unwrap_or_default();
     let entity = cx.new(|_| Updater { runtime, client, exe: std::env::current_exe().ok(), offer: None, local: None, server: None,
-        server_seq: 0, active: None, active_state: None, active_seq: 0, run: Run::Idle, checking: false, checked: None });
+        server_seq: 0, active: None, active_state: None, active_seq: 0, run: Run::Idle, checking: false, checked: None, channel_blocked: None });
     let weak = entity.downgrade();
     cx.spawn(async move |cx| loop {
         let Ok(()) = weak.update(cx, |this, cx| {
@@ -351,6 +354,16 @@ fn read_state(runtime: &Runtime, api: &Api, query: &'static [(&'static str, &'st
 }
 
 impl Updater {
+    pub fn set_channel_blocked(&mut self, address: Option<String>, cx: &mut Context<Self>) {
+        if self.channel_blocked == address { return; }
+        self.channel_blocked = address;
+        cx.notify();
+    }
+
+    pub fn is_channel_blocked(&self) -> bool {
+        self.local.as_ref().is_some_and(|api| self.channel_blocked.as_deref() == Some(api.identity().as_str()))
+    }
+
     /// A lista de servidores ou o servidor ativo mudou: relê o estado dos dois.
     pub fn set_servers(&mut self, local: Option<Api>, active: Option<Api>, cx: &mut Context<Self>) {
         self.local = local;
@@ -427,6 +440,7 @@ impl Updater {
     fn busy(&self) -> bool { !matches!(self.run, Run::Idle | Run::Failed(_)) }
 
     fn plan(&self) -> Plan {
+        if self.is_channel_blocked() { return Plan { server: ServerStep::Held(Hold::ChannelDraft), app: self.offer.is_some() }; }
         let server = self.local.as_ref().and(self.server.as_ref());
         plan(CURRENT, self.offer.as_ref().map(|o| o.version.as_str()), server)
     }
@@ -498,6 +512,7 @@ impl Updater {
     }
 
     fn start_server(&mut self, api: Api, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_channel_blocked() { self.fail(tr("settings_channel_pending"), cx); return; }
         let baseline = self.server.as_ref().and_then(|s| s["estado"]["ts"].as_str()).map(str::to_owned);
         self.run = Run::Server { step: 0, total: 0, text: String::new() };
         cx.notify();
@@ -645,6 +660,27 @@ mod tests {
     use core::prelude::v1::test;
 
     #[test]
+    fn update_channel_draft_holds_only_its_local_server_update() {
+        let local = Api::new("http://127.0.0.1:8765", "synthetic-token").unwrap();
+        let mut updater = Updater { runtime: Arc::new(Runtime::new().unwrap()), client: reqwest::Client::new(), exe: None,
+            offer: Some(Offer { version: "9999.0.0.0".into(), url: String::new(), sha256: String::new() }),
+            local: Some(local.clone()), server: Some(server(serde_json::json!({"atualizacao_disponivel": true}))),
+            server_seq: 0, active: None, active_state: None, active_seq: 0, run: Run::Idle, checking: false, checked: None,
+            channel_blocked: Some(local.identity()) };
+        assert_eq!(updater.plan(), Plan { server: ServerStep::Held(Hold::ChannelDraft), app: true });
+        assert!(!Hold::ChannelDraft.stops());
+        updater.channel_blocked = Some("http://other-machine:8765".into());
+        assert!(updater.plan().app);
+        assert_eq!(updater.plan().server, ServerStep::Update);
+        updater.channel_blocked = None;
+        assert_eq!(updater.plan().server, ServerStep::Update);
+        updater.channel_blocked = Some(local.identity());
+        updater.offer = None;
+        assert!(!updater.plan().app);
+        assert!(!updater.plan().visible());
+    }
+
+    #[test]
     fn newer_compares_number_by_number() {
         assert!(newer("0.1.0.2540", "0.1.0.2533"));
         assert!(newer("0.1.0.10", "0.1.0.9"));
@@ -678,7 +714,7 @@ mod tests {
 
     #[test]
     fn plan_updates_only_the_app_when_the_server_is_current() {
-        let s = server(serde_json::json!({}));
+        let s = server(serde_json::json!({"versao_legivel": {"backend": "0.1.0.110"}}));
         assert_eq!(plan(APP, Some("0.1.0.110"), Some(&s)), Plan { server: ServerStep::Skip, app: true });
         assert_eq!(plan(APP, Some("0.1.0.110"), None), Plan { server: ServerStep::Skip, app: true }, "sem servidor local");
         assert!(!plan(APP, None, Some(&s)).visible(), "nada a fazer: botão some");

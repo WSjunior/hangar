@@ -45,6 +45,13 @@ export interface ChatState {
   preview: string;
   previewMd: boolean;
   previewFull: boolean;
+  // Raciocínio em voo (SSE `pensamento`, Claude sem terminal) e a chamada cujo pedido ainda está
+  // sendo escrito (SSE `ferramenta`). Quem os tira de cena é o bloco real do transcript; o "" do
+  // servidor chega antes dele, então só agenda a saída.
+  pensamento: string;
+  ferramenta: { nome: string; input: Record<string, unknown> } | null;
+  // Quando a virada para `working` foi vista ao vivo (ms epoch); null = aberta no meio do turno.
+  turnSeen: number | null;
   askPayload: AskQuestionPayload | null;
   askOpen: boolean;
   askPiId: string | null;
@@ -102,6 +109,9 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     preview: '',
     previewMd: false,
     previewFull: false,
+    pensamento: '',
+    ferramenta: null,
+    turnSeen: null,
     askPayload: null,
     askOpen: false,
     askPiId: null,
@@ -137,6 +147,37 @@ function criarChatStore(serverId: string, name: string): ChatApi {
   let previewFull = false;
   let pendingSeq = 0;
   let prevState: string | null = null;
+  // O fim do turno chega antes do bloco real pelo tail do .jsonl: apagar a prévia na hora abria um
+  // buraco e a bolha voltava. Sair de working só agenda; o timer vence se o bloco nunca vier.
+  let previewDropTimer: ReturnType<typeof setTimeout> | undefined;
+  let pensamentoTimer: ReturnType<typeof setTimeout> | undefined;
+  let ferramentaTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function limparPreview(): void {
+    clearTimeout(previewDropTimer);
+    previewDropTimer = undefined;
+    previewMd = false;
+    previewFull = false;
+    useChatStore.setState({ preview: '', previewMd: false, previewFull: false });
+  }
+  function dropPreviewSoon(): void {
+    if (previewDropTimer !== undefined || !useChatStore.getState().preview) return;
+    previewDropTimer = setTimeout(limparPreview, 5000);
+  }
+  function cancelPreviewDrop(): void {
+    clearTimeout(previewDropTimer);
+    previewDropTimer = undefined;
+  }
+  function limparPensamento(): void {
+    clearTimeout(pensamentoTimer);
+    pensamentoTimer = undefined;
+    useChatStore.setState({ pensamento: '' });
+  }
+  function limparFerramenta(): void {
+    clearTimeout(ferramentaTimer);
+    ferramentaTimer = undefined;
+    useChatStore.setState({ ferramenta: null });
+  }
 
   function rebuildIndex(events: ChatEvent[]) {
     idIndex.clear();
@@ -313,12 +354,10 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     const nextPending = curPending.length ? reconcilePending(curPending, ev) : curPending;
     const pendingPatch = nextPending.length !== curPending.length ? { pending: nextPending } : {};
     useChatStore.setState({ events: next, ...pendingPatch });
+    if (ev.kind === 'thinking' && useChatStore.getState().pensamento) limparPensamento();
+    if (ev.kind === 'tool_use' && useChatStore.getState().ferramenta) limparFerramenta();
     // Swap prévia->bolha: o bloco real chegou, a prévia sai no MESMO flush.
-    if (ev.kind === 'assistant_msg' && ev.text && useChatStore.getState().preview) {
-      previewMd = false;
-      previewFull = false;
-      useChatStore.setState({ preview: '', previewMd: false, previewFull: false });
-    }
+    if (ev.kind === 'assistant_msg' && ev.text && useChatStore.getState().preview) limparPreview();
   }
 
   function connectSSE(): void {
@@ -357,12 +396,20 @@ function criarChatStore(serverId: string, name: string): ChatApi {
     es.addEventListener('state', (e) => {
       try {
         const ev = JSON.parse(e.data as string) as StateEvent;
-        // Turno acabou sem bloco de assistente: ninguém mais viria apagar a prévia.
-        const limparPreview = ev.state !== 'working' && useChatStore.getState().preview !== '';
-        if (limparPreview) {
-          previewMd = false;
-          previewFull = false;
+        // Turno acabou sem bloco de assistente: ninguém mais viria apagar a prévia — mas pela
+        // carência, porque o bloco real ainda pode estar a caminho.
+        if (ev.state === 'working') cancelPreviewDrop();
+        else {
+          dropPreviewSoon();
+          // Turno parado ou evento vazio perdido: sem isto o raciocínio/ferramenta ao vivo
+          // ficava na tela para sempre, escondendo a linha de trabalho.
+          const s = useChatStore.getState();
+          if (s.pensamento && pensamentoTimer === undefined) pensamentoTimer = setTimeout(limparPensamento, 3000);
+          if (s.ferramenta && ferramentaTimer === undefined) ferramentaTimer = setTimeout(limparFerramenta, 3000);
         }
+        const turnSeen = ev.state !== 'working' ? null
+          : prevState !== null && prevState !== 'working' ? Date.now()
+          : useChatStore.getState().turnSeen;
         // Solidifica pending quando volta a idle (igual ao Chat.svelte): msgs enviadas
         // enquanto working que não viraram entrada gravada viram bolha sólida.
         const curPending = useChatStore.getState().pending;
@@ -374,7 +421,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
         useChatStore.setState({
           stateEvent: ev,
           statusLine: ev.status_line ?? null,
-          ...(limparPreview ? { preview: '', previewMd: false, previewFull: false } : {}),
+          turnSeen,
           ...solidPatch,
         });
       } catch {
@@ -402,13 +449,48 @@ function criarChatStore(serverId: string, name: string): ChatApi {
         }
         // VAZIO enquanto working não apaga a bolha (entre ferramentas o extrator manda "");
         // quem apaga de verdade são o assistant_msg real e a saída de working, acima.
-        if (!t && useChatStore.getState().stateEvent?.state === 'working') return;
+        if (!t) {
+          if (useChatStore.getState().stateEvent?.state !== 'working') dropPreviewSoon();
+          return;
+        }
+        cancelPreviewDrop();
         previewMd = !!ev.md;
         previewFull = !!ev.full;
         useChatStore.setState({ preview: t, previewMd: !!ev.md, previewFull: !!ev.full });
       } catch {
         quadroFalhou('preview');
         // frame ilegível: mantém o último bom
+      }
+    });
+
+    es.addEventListener('pensamento', (e) => {
+      try {
+        const t = (JSON.parse(e.data as string) as { text?: string }).text ?? '';
+        if (t) {
+          clearTimeout(pensamentoTimer);
+          pensamentoTimer = undefined;
+          useChatStore.setState({ pensamento: t });
+        } else if (useChatStore.getState().pensamento && pensamentoTimer === undefined) {
+          pensamentoTimer = setTimeout(limparPensamento, 3000);
+        }
+      } catch {
+        quadroFalhou('pensamento');
+      }
+    });
+
+    es.addEventListener('ferramenta', (e) => {
+      try {
+        const t = (JSON.parse(e.data as string) as { text?: string }).text ?? '';
+        if (t) {
+          clearTimeout(ferramentaTimer);
+          ferramentaTimer = undefined;
+          const v = JSON.parse(t) as { nome?: string; input?: Record<string, unknown> };
+          useChatStore.setState({ ferramenta: { nome: v.nome ?? 'tool', input: v.input ?? {} } });
+        } else if (useChatStore.getState().ferramenta && ferramentaTimer === undefined) {
+          ferramentaTimer = setTimeout(limparFerramenta, 3000);
+        }
+      } catch {
+        quadroFalhou('ferramenta');
       }
     });
 
@@ -447,7 +529,15 @@ function criarChatStore(serverId: string, name: string): ChatApi {
       baseLoaded = false;
       previewMd = false;
       previewFull = false;
+      cancelPreviewDrop();
+      clearTimeout(pensamentoTimer);
+      pensamentoTimer = undefined;
+      clearTimeout(ferramentaTimer);
+      ferramentaTimer = undefined;
       useChatStore.setState({
+        pensamento: '',
+        ferramenta: null,
+        turnSeen: null,
         stateEvent: null,
         statusLine: null,
         stats: null,

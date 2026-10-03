@@ -5,6 +5,7 @@ use super::*;
 use super::settings::{Page, segments, settings_box};
 use crate::appearance::{self, Currency, Language};
 use gpui_kit::component::progress::Progress;
+use gpui_kit::component::switch::Switch;
 
 /// Um pedido ao servidor e o último resultado: carregando, erro, vazio e com dados saem daqui.
 pub(super) struct Remote<T> { pub(super) value: Option<Result<T, String>>, pub(super) loading: bool, pub(super) seq: u64 }
@@ -26,6 +27,67 @@ impl<T> Remote<T> {
     pub(super) fn set(&mut self, value: Result<T, String>) { self.seq += 1; (self.loading, self.value) = (false, Some(value)); }
     /// Volta ao vazio sem reusar o número: a resposta do pedido em voo passa a ser descartada.
     pub(super) fn reset(&mut self) { self.seq += 1; (self.loading, self.value) = (false, None); }
+}
+
+#[derive(serde::Deserialize)]
+struct Channel { branch: String, checkout_branch: String, last_branch: String }
+
+fn record_channel_404(path: &std::path::Path, saved: bool) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(file, "[{}] update_channel.failed route=/api/update-channel method={} status=404",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), if saved { "PUT" } else { "GET" })
+}
+
+fn record_channel_404_or_report(path: &std::path::Path, saved: bool, report: impl FnOnce(std::io::Error)) {
+    if let Err(error) = record_channel_404(path, saved) { report(error); }
+}
+
+#[derive(Default)]
+struct ChannelEditor {
+    request: Remote<()>,
+    current: Option<Channel>,
+    enabled: bool,
+    draft: String,
+    applied: bool,
+    unsupported: bool,
+}
+
+impl ChannelEditor {
+    fn receive_unsupported(&mut self, seq: u64, saved: bool, message: String) -> bool {
+        if saved { return self.receive(seq, true, Err(message)); }
+        if !self.request.finish(seq, Ok(())) { return false; }
+        self.unsupported = true;
+        self.current = None;
+        self.applied = false;
+        true
+    }
+    fn after_update(&mut self) { self.applied = false; self.request.reset(); }
+    fn target(&self) -> &str { if self.enabled { self.draft.trim() } else { "" } }
+    fn is_dirty(&self) -> bool {
+        self.current.as_ref().is_some_and(|current| {
+            let enabled = !current.branch.is_empty();
+            self.enabled != enabled || current.branch != self.target()
+        })
+    }
+    fn blocks_update(&self) -> bool {
+        self.request.loading || self.is_dirty()
+    }
+    fn receive(&mut self, seq: u64, saved: bool, result: Result<Channel, String>) -> bool {
+        let preserve_draft = !saved && self.is_dirty();
+        if !self.request.finish(seq, result.as_ref().map(|_| ()).map_err(Clone::clone)) { return false; }
+        if let Ok(channel) = result {
+            self.unsupported = false;
+            if !preserve_draft {
+                self.enabled = !channel.branch.is_empty();
+                self.draft = if self.enabled { channel.branch.clone() } else { channel.last_branch.clone() };
+            }
+            self.current = Some(channel);
+            self.applied = saved;
+        }
+        true
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -50,6 +112,9 @@ pub(super) struct Device {
     download: Remote<String>,
     saving: bool,
     about: Remote<ServerVersion>,
+    channel: ChannelEditor,
+    channel_input: Option<Entity<InputState>>,
+    _channel_subscription: Option<Subscription>,
     /// Resultado da última procura: quantas mudanças há (0 = em dia).
     search: Option<Result<usize, String>>,
     searching: bool,
@@ -68,6 +133,24 @@ impl Drop for Device {
 }
 
 impl Device {
+    pub(super) fn new(window: &mut Window, cx: &mut Context<Hangar>) -> Self {
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(tr("settings_channel_branch_placeholder")));
+        let sub = cx.subscribe_in(&input, window, |this: &mut Hangar, input, event: &InputEvent, _, cx| {
+            if matches!(event, InputEvent::Change) {
+                let value = input.read(cx).value().to_string();
+                if this.device.channel.draft != value {
+                    this.device.channel.draft = value;
+                    this.device.channel.applied = false;
+                    this.sync_channel_update_guard(cx);
+                    cx.notify();
+                }
+            }
+        });
+        let mut device = Self::default();
+        device.channel_input = Some(input);
+        device._channel_subscription = Some(sub);
+        device
+    }
     fn rate_value(&self) -> Option<f64> { self.rate.ok().copied().flatten() }
     fn run_active(&self) -> bool { self.run.as_ref().is_some_and(|run| !matches!(run, Run::Done { .. })) }
 }
@@ -77,6 +160,7 @@ pub(super) enum DeviceReply {
     Diary(u64, Result<Value, Failure>),
     Downloaded(u64, Result<PathBuf, String>),
     About(u64, bool, Result<Value, Failure>),
+    Channel(u64, bool, Result<Value, Failure>),
     Started(u64, Result<Value, Failure>),
     Tick(u64, Result<Value, Failure>),
 }
@@ -150,8 +234,9 @@ impl Hangar {
     pub(super) fn money(&self, usd: f64) -> String { money(usd, appearance::get().currency, self.device.rate_value()) }
 
     /// Nova conexão: nada do servidor anterior fica na tela, e a cotação é pedida para os custos.
-    pub(super) fn reset_device(&mut self, cx: &mut Context<Self>) {
-        self.device = Device::default();
+    pub(super) fn reset_device(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.device = Device::new(window, cx);
+        self.sync_channel_update_guard(cx);
         self.load_rate(cx);
     }
 
@@ -164,7 +249,10 @@ impl Hangar {
         match page {
             Page::General if !self.device.rate.loading && self.device.rate_value().is_none() => self.load_rate(cx),
             Page::Diary => self.load_diary(cx),
-            Page::About if !self.device.about.loading => self.load_about(false, cx),
+            Page::About => {
+                if !self.device.about.loading { self.load_about(false, cx); }
+                if !self.device.channel.request.loading && !self.device.channel.is_dirty() { self.load_channel(cx); }
+            }
             Page::Accounts => self.accounts_opened(cx),
             Page::Orchestration => self.orchestration_opened(cx),
             Page::Shortcuts => self.shortcuts_opened(cx),
@@ -210,6 +298,42 @@ impl Hangar {
             done(DeviceReply::About(seq, search, api.server_read(&["atualizacao"], query, if search { 150 } else { 20 }).await)).await
         });
         cx.notify();
+    }
+
+    fn load_channel(&mut self, cx: &mut Context<Self>) {
+        let Some(api) = self.api.clone().filter(|_| !self.active_invite()) else { return };
+        if self.device.channel.request.loading { return; }
+        let seq = self.device.channel.request.start();
+        self.sync_channel_update_guard(cx);
+        let done = self.device_send_later();
+        self.runtime.spawn(async move { done(DeviceReply::Channel(seq, false, api.server_read(&["update-channel"], &[], 30).await)).await });
+        cx.notify();
+    }
+
+    fn apply_channel(&mut self, cx: &mut Context<Self>) {
+        let Some(api) = self.api.clone().filter(|_| !self.active_invite()) else { return };
+        let channel = &mut self.device.channel;
+        if channel.request.loading || channel.current.is_none() || !channel.is_dirty() || (channel.enabled && channel.target().is_empty()) { return; }
+        if self.device.run_active() || self.device.about.loading || self.channel_updater_busy(cx) { return; }
+        let branch = self.device.channel.target().to_owned();
+        let seq = self.device.channel.request.start();
+        self.device.channel.applied = false;
+        self.sync_channel_update_guard(cx);
+        let done = self.device_send_later();
+        self.runtime.spawn(async move {
+            done(DeviceReply::Channel(seq, true, api.server_send(reqwest::Method::PUT, &["update-channel"], Some(json!({"branch": branch})), 45).await)).await
+        });
+        cx.notify();
+    }
+
+    fn sync_channel_update_guard(&self, cx: &mut Context<Self>) {
+        let Some(updater) = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone()) else { return };
+        let address = self.api.as_ref().filter(|_| self.device.channel.blocks_update()).map(Api::identity);
+        updater.update(cx, |updater, cx| updater.set_channel_blocked(address, cx));
+    }
+
+    fn channel_updater_busy(&self, cx: &App) -> bool {
+        self.api.as_ref().is_some_and(Api::is_loopback) && cx.try_global::<crate::update::Handle>().is_some_and(|handle| handle.0.read(cx).is_busy())
     }
 
     /// Envio de resposta para depois, amarrado à conexão de agora.
@@ -267,7 +391,7 @@ impl Hangar {
 
     fn start_update(&mut self, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone() else { return };
-        if self.device.run_active() { return; }
+        if self.device.run_active() || self.device.channel.blocks_update() { return; }
         self.device.baseline_ts = self.device.about.ok().and_then(|v| v.ts.clone());
         self.device.run = Some(Run::Starting);
         self.device.run_seq += 1;
@@ -293,14 +417,39 @@ impl Hangar {
         }));
     }
 
-    fn finish_update(&mut self, ok: bool, text: String) {
+    fn finish_update(&mut self, ok: bool, text: String, cx: &mut Context<Self>) {
         self.device.run = Some(Run::Done { ok, text });
         if let Some(task) = self.device.run_task.take() { task.abort(); }
         self.device.search = None;
+        self.device.channel.after_update();
+        self.load_channel(cx);
     }
 
-    pub(super) fn receive_device(&mut self, reply: DeviceReply, cx: &mut Context<Self>) {
+    pub(super) fn receive_device(&mut self, reply: DeviceReply, window: &mut Window, cx: &mut Context<Self>) {
         match reply {
+            DeviceReply::Channel(seq, saved, result) => {
+                if result.as_ref().is_err_and(|error| error.status == Some(404)) {
+                    record_channel_404_or_report(&crate::log_dir().join("native.log"), saved, |error| {
+                        window.push_notification(Notification::error(tr("settings_channel_log_failed")), cx);
+                        eprintln!("não consegui registrar o 404 do canal de testes: {error}");
+                    });
+                    let message = Self::setting_failure(result.as_ref().unwrap_err());
+                    if self.device.channel.receive_unsupported(seq, saved, message) { self.sync_channel_update_guard(cx); cx.notify(); }
+                    return;
+                }
+                let value = result.map_err(|e| Self::setting_failure(&e)).and_then(|value|
+                    serde_json::from_value::<Channel>(value).map_err(|_| tr("settings_channel_invalid_response")));
+                let succeeded = value.is_ok();
+                if !self.device.channel.receive(seq, saved, value) { return; }
+                self.sync_channel_update_guard(cx);
+                if succeeded {
+                    if let Some(input) = self.device.channel_input.clone() {
+                        let draft = self.device.channel.draft.clone();
+                        input.update(cx, |input, cx| input.set_value(draft, window, cx));
+                    }
+                    if saved { self.device.search = None; self.load_about(false, cx); }
+                }
+            }
             DeviceReply::Rate(seq, result) => {
                 let parsed = result.map_err(|e| Self::failure(&e))
                     .map(|v| v.get("usd_brl").and_then(Value::as_f64).filter(|r| r.is_finite() && *r > 0.));
@@ -344,14 +493,14 @@ impl Hangar {
                         self.follow_update();
                     }
                     Err(error) if error.uncertain => { (self.device.run, self.device.saw_running) = (Some(Run::Uncertain), false); self.follow_update(); }
-                    Err(error) => self.finish_update(false, tr("update_refused").replace("{reason}", &Self::failure(&error))),
+                    Err(error) => self.finish_update(false, tr("update_refused").replace("{reason}", &Self::failure(&error)), cx),
                 }
             }
             DeviceReply::Tick(seq, result) => {
                 if seq != self.device.run_seq { return; }
                 match result {
-                    Err(error) if error.status.is_none() && error.detail == "update_silent" => self.finish_update(false, tr("update_silent")),
-                    Err(error) if matches!(error.status, Some(401 | 403)) => self.finish_update(false, tr("auth_error")),
+                    Err(error) if error.status.is_none() && error.detail == "update_silent" => self.finish_update(false, tr("update_silent"), cx),
+                    Err(error) if matches!(error.status, Some(401 | 403)) => self.finish_update(false, tr("auth_error"), cx),
                     // Reiniciando: sem resposta por alguns segundos.
                     Err(_) => if self.device.saw_running { self.device.run = Some(Run::Restarting); },
                     Ok(value) => {
@@ -366,7 +515,7 @@ impl Hangar {
                                 self.device.run = Some(Run::Running { step: number("passo"), total: number("total"), text: text("texto") });
                             }
                             "pronto" if !self.device.saw_running && state.get("ts").and_then(Value::as_str) == self.device.baseline_ts.as_deref() =>
-                                self.finish_update(false, tr("update_not_started")),
+                                self.finish_update(false, tr("update_not_started"), cx),
                             "pronto" => {
                                 let ok = state.get("ok").and_then(Value::as_bool) == Some(true);
                                 let message = if !ok {
@@ -379,7 +528,7 @@ impl Hangar {
                                 } else {
                                     tr("update_done").replace("{version}", &parse_version(&value).version)
                                 };
-                                self.finish_update(ok, message);
+                                self.finish_update(ok, message, cx);
                             }
                             _ => {}
                         }
@@ -400,6 +549,9 @@ impl Hangar {
             input.update(cx, |input, cx| input.set_placeholder(tr(key), window, cx));
         }
         for input in self.ask_form.inputs.clone() { input.update(cx, |input, cx| input.set_placeholder(tr("ask_placeholder"), window, cx)); }
+        if let Some(input) = self.device.channel_input.clone() {
+            input.update(cx, |input, cx| input.set_placeholder(tr("settings_channel_branch_placeholder"), window, cx));
+        }
         self.relabel_settings(window, cx);
         self.rebuild_accounts();
         // O texto preparado das mensagens de aviso e o separador decimal das tabelas dependem do idioma.
@@ -564,12 +716,12 @@ impl Hangar {
         };
         let available = matches!(self.device.search, Some(Ok(n)) if n > 0) && !searching;
         let control = if available {
-            Button::new("update-start").primary().small().label(tr("settings_about_update_now")).disabled(active)
+            Button::new("update-start").primary().small().label(tr("settings_about_update_now")).disabled(active || self.device.channel.blocks_update())
                 .on_click(cx.listener(|this, _, window, cx| this.open_update_confirm(window, cx)))
         } else {
             Button::new("update-search").outline().small().icon(IconName::RefreshCw)
                 .label(tr(if searching { "settings_about_searching_short" } else { "settings_about_search" }))
-                .disabled(searching || active || self.api.is_none())
+                .disabled(searching || active || self.api.is_none() || self.device.channel.blocks_update())
                 .on_click(cx.listener(|this, _, _, cx| this.load_about(true, cx)))
         };
         let update_row = self.row_with(IconName::RefreshCw, "settings_about_update",
@@ -599,13 +751,195 @@ impl Hangar {
             .child(self.heading("settings_about_app_group")).child(settings_box().child(app_row))
             .child(self.heading("settings_about_server_group"))
             .child(settings_box().child(server_row).child(update_row).children(progress))
+            .when(!self.active_invite() && !self.device.channel.unsupported, |el| el.child(self.heading("settings_channel_title")).child(self.render_channel(cx)))
             .into_any_element()
+    }
+
+    fn render_channel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let channel = &self.device.channel;
+        let busy = channel.request.loading || self.device.run_active() || self.device.about.loading || self.device.searching || self.channel_updater_busy(cx);
+        let unavailable = self.api.is_none() || channel.current.is_none();
+        let (status, failed) = match (&channel.request.value, channel.request.loading) {
+            _ if self.api.is_none() => (tr("settings_offline"), false),
+            (_, true) => (tr("settings_channel_loading"), false),
+            (Some(Err(error)), false) => (error.clone(), true),
+            _ if channel.applied && !channel.is_dirty() => (tr("settings_channel_applied"), false),
+            _ if channel.is_dirty() => (tr("settings_channel_pending"), false),
+            _ => (String::new(), false),
+        };
+        let toggle = Switch::new("update-channel-toggle").checked(channel.enabled).accessibility_label(tr("settings_channel_title"))
+            .disabled(unavailable || busy).on_click(cx.listener(|this, enabled: &bool, _, cx| {
+                if this.device.channel.request.loading || this.device.run_active() || this.channel_updater_busy(cx) { return; }
+                this.device.channel.enabled = *enabled;
+                this.device.channel.applied = false;
+                this.sync_channel_update_guard(cx);
+                cx.notify();
+            }));
+        let controls = div().flex().items_center().gap_2()
+            .child(Button::new("update-channel-apply").small().label(tr("settings_channel_apply"))
+                .disabled(unavailable || busy || !channel.is_dirty() || (channel.enabled && channel.target().is_empty()))
+                .on_click(cx.listener(|this, _, _, cx| this.apply_channel(cx))))
+            .when(failed, |el| el.child(Button::new("update-channel-retry").outline().small().label(tr("settings_channel_reload"))
+                .disabled(busy || self.api.is_none()).on_click(cx.listener(|this, _, _, cx| this.load_channel(cx)))))
+            .when(channel.applied && !channel.blocks_update(), |el| el.child(Button::new("update-channel-update").primary().small()
+                .label(tr("settings_about_update_now")).disabled(busy || self.api.is_none())
+                .on_click(cx.listener(|this, _, window, cx| this.open_update_confirm(window, cx)))));
+        let content = div().p_4().flex().flex_col().gap_3()
+            .child(div().text_sm().text_color(theme::muted()).whitespace_normal().child(tr("settings_channel_help")))
+            .when_some(channel.current.as_ref(), |el, current| el.child(div().text_sm().text_color(theme::muted()).whitespace_normal()
+                .child(tr("settings_channel_current").replace("{branch}", if current.branch.is_empty() { "main" } else { &current.branch })
+                    .replace("{checkout}", &current.checkout_branch))))
+            .child(div().text_sm().child(tr("settings_channel_branch")))
+            .children(self.device.channel_input.as_ref().map(|input| Input::new(input).small()
+                .aria_label(tr("settings_channel_branch")).disabled(unavailable || busy || !channel.enabled)))
+            .child(controls)
+            .when(!status.is_empty(), |el| el.child(div().id("update-channel-status").role(Role::Status).text_sm().whitespace_normal()
+                .text_color(if failed { theme::danger() } else if channel.applied { theme::success() } else { theme::muted() }).child(status)));
+        settings_box().child(self.row_with(IconName::GitBranch, "settings_channel_title", div(), !unavailable, toggle.into_any_element()))
+            .child(content).into_any_element()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Currency, Level, diary_line, legible, money, pending};
+
+    #[test]
+    fn update_channel_remembers_last_branch_and_requires_apply() {
+        let mut editor = super::ChannelEditor::default();
+        let seq = editor.request.start();
+        assert!(editor.receive(seq, false, Ok(super::Channel { branch: String::new(), checkout_branch: "main".into(), last_branch: "test/channel".into() })));
+        assert_eq!(editor.draft, "test/channel");
+        assert!(!editor.enabled);
+        editor.enabled = true;
+        assert_eq!(editor.target(), "test/channel");
+        assert!(editor.is_dirty());
+        let seq = editor.request.start();
+        assert!(editor.receive(seq, true, Ok(super::Channel { branch: "test/channel".into(), checkout_branch: "main".into(), last_branch: "test/channel".into() })));
+        assert!(editor.applied);
+        assert!(!editor.is_dirty());
+        editor.enabled = false;
+        assert_eq!(editor.target(), "");
+        assert!(editor.is_dirty());
+        editor.enabled = true;
+        assert_eq!(editor.draft, "test/channel");
+    }
+
+    #[test]
+    fn update_channel_failure_keeps_draft_and_old_reply_is_ignored() {
+        let mut editor = super::ChannelEditor::default();
+        let old = editor.request.start();
+        let seq = editor.request.start();
+        assert!(editor.receive(seq, false, Ok(super::Channel { branch: String::new(), checkout_branch: "main".into(), last_branch: String::new() })));
+        editor.enabled = true;
+        editor.draft = "my/tests".into();
+        assert!(!editor.receive(old, false, Ok(super::Channel { branch: "obsolete".into(), checkout_branch: "main".into(), last_branch: "obsolete".into() })));
+        assert_eq!(editor.target(), "my/tests");
+        let seq = editor.request.start();
+        editor.receive(seq, true, Err("origin offline".into()));
+        assert_eq!(editor.draft, "my/tests");
+        assert!(editor.is_dirty());
+        assert!(!editor.applied);
+        assert!(!editor.request.loading);
+        assert_eq!(editor.current.as_ref().unwrap().branch, "");
+    }
+
+    #[test]
+    fn update_channel_enabled_empty_branch_blocks_update() {
+        let mut editor = super::ChannelEditor::default();
+        let seq = editor.request.start();
+        editor.receive(seq, false, Ok(super::Channel { branch: String::new(), checkout_branch: "main".into(), last_branch: String::new() }));
+        editor.enabled = true;
+        assert!(editor.is_dirty());
+        assert!(editor.blocks_update());
+    }
+
+    #[test]
+    fn update_channel_refresh_after_update_clears_offer_and_preserves_draft() {
+        let mut editor = super::ChannelEditor::default();
+        let old = editor.request.start();
+        editor.receive(old, true, Ok(super::Channel { branch: "test/channel".into(), checkout_branch: "main".into(), last_branch: "test/channel".into() }));
+        editor.draft = "test/next".into();
+        editor.after_update();
+        assert!(!editor.applied);
+        let seq = editor.request.start();
+        editor.receive(seq, false, Ok(super::Channel { branch: "test/channel".into(), checkout_branch: "test/channel".into(), last_branch: "test/channel".into() }));
+        assert_eq!(editor.current.as_ref().unwrap().checkout_branch, "test/channel");
+        assert_eq!(editor.draft, "test/next");
+        assert!(editor.is_dirty());
+    }
+
+    #[test]
+    fn update_channel_read_error_does_not_block_applied_channel() {
+        let mut editor = super::ChannelEditor::default();
+        let seq = editor.request.start();
+        editor.receive(seq, false, Ok(super::Channel { branch: "test/channel".into(), checkout_branch: "test/channel".into(), last_branch: "test/channel".into() }));
+        let seq = editor.request.start();
+        assert!(editor.blocks_update());
+        editor.receive(seq, false, Err("network error".into()));
+        assert!(!editor.is_dirty());
+        assert!(!editor.blocks_update());
+        editor.draft = "test/next".into();
+        assert!(editor.blocks_update());
+    }
+
+    #[test]
+    fn update_channel_missing_route_hides_only_for_current_reply() {
+        let mut editor = super::ChannelEditor::default();
+        let old = editor.request.start();
+        let seq = editor.request.start();
+        assert!(!editor.receive_unsupported(old, false, "get-404".into()));
+        assert!(!editor.unsupported);
+        assert!(editor.receive_unsupported(seq, false, "get-404".into()));
+        assert!(editor.unsupported);
+        assert!(!editor.blocks_update());
+        assert!(editor.request.ok().is_some());
+        let seq = editor.request.start();
+        editor.receive(seq, false, Ok(super::Channel { branch: String::new(), checkout_branch: "main".into(), last_branch: String::new() }));
+        assert!(!editor.unsupported);
+    }
+
+    #[test]
+    fn update_channel_put_404_keeps_section_draft_and_error() {
+        let mut editor = super::ChannelEditor::default();
+        let seq = editor.request.start();
+        editor.receive(seq, false, Ok(super::Channel { branch: String::new(), checkout_branch: "main".into(), last_branch: "test/channel".into() }));
+        editor.enabled = true;
+        let seq = editor.request.start();
+        assert!(editor.receive_unsupported(seq, true, "save-404".into()));
+        assert!(!editor.unsupported);
+        assert_eq!(editor.current.as_ref().unwrap().branch, "");
+        assert_eq!(editor.draft, "test/channel");
+        assert_eq!(editor.request.value, Some(Err("save-404".into())));
+        assert!(!editor.applied);
+        assert!(editor.is_dirty());
+    }
+
+    #[test]
+    fn update_channel_404_is_recorded_for_get_and_put() {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("hangar-channel-log-{}-{stamp}", std::process::id()));
+        let path = dir.join("native.log");
+        super::record_channel_404(&path, false).unwrap();
+        super::record_channel_404(&path, true).unwrap();
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert!(log.contains("method=GET status=404"));
+        assert!(log.contains("method=PUT status=404"));
+        assert_eq!(log.lines().count(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn update_channel_log_failure_reaches_feedback_channel() {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let blocker = std::env::temp_dir().join(format!("hangar-log-blocker-{}-{stamp}", std::process::id()));
+        std::fs::write(&blocker, "blocked").unwrap();
+        let mut failures = 0;
+        super::record_channel_404_or_report(&blocker.join("native.log"), false, |_| failures += 1);
+        super::record_channel_404_or_report(&blocker.join("native.log"), true, |_| failures += 1);
+        assert_eq!(failures, 2);
+        std::fs::remove_file(blocker).unwrap();
+    }
 
     #[test]
     fn money_converts_only_with_a_rate() {

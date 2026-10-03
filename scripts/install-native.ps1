@@ -1,6 +1,6 @@
 # Instala o app nativo do Hangar (desktop-native) da release `native-latest` no Windows, conferido
 # pelo sha256 do manifesto antes de tocar em qualquer coisa. Maquina sem build na release sai 0 com
-# aviso: a janela continua sendo o Electron. Arquivo so em ASCII: o PowerShell 5.1 le sem BOM como cp1252.
+# aviso: a maquina fica com o Electron que ja tinha, ou com o navegador. Arquivo so em ASCII: o PowerShell 5.1 le sem BOM como cp1252.
 # Uso: powershell -ExecutionPolicy Bypass -File scripts/install-native.ps1 [-Forcar]
 param([switch]$Forcar)
 $ErrorActionPreference = 'Stop'
@@ -20,7 +20,7 @@ function Versao-De($texto) { if ("$texto" -match '"version":\s*"([0-9.]+)"') { $
 
 $arq = "$env:PROCESSOR_ARCHITEW6432$env:PROCESSOR_ARCHITECTURE"
 if ($arq -notmatch 'AMD64') {
-    Write-Host "app nativo: a release nao tem build para Windows $arq; a janela segue sendo o Electron"
+    Write-Host "app nativo: a release nao tem build para Windows $arq; o Hangar segue no navegador"
     Marca '{"sem_build": true}'
     # Sem build nao ha o que registrar: a marca do passo do link hangar:// so diz "passo feito nesta maquina".
     [IO.File]::WriteAllText((Join-Path $marcaDir 'scheme-hangar'), '')

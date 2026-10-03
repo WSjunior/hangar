@@ -31,7 +31,7 @@ impl fmt::Display for Error {
 }
 
 pub enum Event { Connected, Data(Vec<u8>), Closed }
-struct Frame { opcode: u8, fin: bool, data: Vec<u8> }
+pub(crate) struct Frame { pub opcode: u8, fin: bool, pub data: Vec<u8> }
 
 /// A janela possui este cliente; descartá-lo cancela inclusive a conexão pendente.
 pub struct Terminal {
@@ -115,7 +115,7 @@ fn terminal_url(api: &Api, session: &str, shortcut: Option<&str>, hangar: bool, 
     url
 }
 
-fn accept_key(key: &str) -> String {
+pub(crate) fn accept_key(key: &str) -> String {
     let bytes = format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
     STANDARD.encode(digest::digest(&digest::SHA1_FOR_LEGACY_USE_ONLY, bytes.as_bytes()))
 }
@@ -149,16 +149,34 @@ async fn handshake(url: url::Url) -> Result<reqwest::Upgraded, Error> {
     }).await.map_err(|_| Error::Network)?
 }
 
-fn encode(opcode: u8, bytes: &[u8], mask: [u8; 4]) -> Vec<u8> {
+fn encode(opcode: u8, bytes: &[u8], mask: [u8; 4]) -> Vec<u8> { frame_bytes(opcode, bytes, Some(mask)) }
+
+/// Cliente mascara o que escreve; servidor, nunca (RFC 6455, 5.1).
+fn frame_bytes(opcode: u8, bytes: &[u8], mask: Option<[u8; 4]>) -> Vec<u8> {
+    let bit = if mask.is_some() { 0x80 } else { 0 };
     let mut frame = vec![0x80 | opcode];
     match bytes.len() {
-        n @ 0..=125 => frame.push(0x80 | n as u8),
-        n @ 126..=65535 => { frame.push(0xfe); frame.extend_from_slice(&(n as u16).to_be_bytes()); }
-        n => { frame.push(0xff); frame.extend_from_slice(&(n as u64).to_be_bytes()); }
+        n @ 0..=125 => frame.push(bit | n as u8),
+        n @ 126..=65535 => { frame.push(bit | 126); frame.extend_from_slice(&(n as u16).to_be_bytes()); }
+        n => { frame.push(bit | 127); frame.extend_from_slice(&(n as u64).to_be_bytes()); }
     }
-    frame.extend_from_slice(&mask);
-    frame.extend(bytes.iter().enumerate().map(|(ix, byte)| byte ^ mask[ix % 4]));
+    match mask {
+        Some(mask) => {
+            frame.extend_from_slice(&mask);
+            frame.extend(bytes.iter().enumerate().map(|(ix, byte)| byte ^ mask[ix % 4]));
+        }
+        None => frame.extend_from_slice(bytes),
+    }
     frame
+}
+
+/// Escrita do lado servidor (o `/cdp` do navegador): sem máscara.
+pub(crate) async fn write_server_frame(writer: &mut (impl AsyncWrite + Unpin), opcode: u8, bytes: &[u8]) -> Result<(), Error> {
+    timeout(IO_TIMEOUT, async {
+        writer.write_all(&frame_bytes(opcode, bytes, None)).await?;
+        writer.flush().await
+    }).await
+        .map_err(|_| Error::Network)?.map_err(|_| Error::Network)
 }
 
 async fn write_frame(writer: &mut (impl AsyncWrite + Unpin), opcode: u8, bytes: &[u8]) -> Result<(), Error> {
@@ -171,11 +189,16 @@ async fn write_frame(writer: &mut (impl AsyncWrite + Unpin), opcode: u8, bytes: 
         .map_err(|_| Error::Network)?.map_err(|_| Error::Network)
 }
 
-async fn read_frame(reader: &mut (impl AsyncRead + Unpin)) -> Result<Frame, Error> {
+async fn read_frame(reader: &mut (impl AsyncRead + Unpin)) -> Result<Frame, Error> { read_frame_as(reader, false).await }
+
+/// Leitura do lado servidor: o cliente é obrigado a mascarar.
+pub(crate) async fn read_client_frame(reader: &mut (impl AsyncRead + Unpin)) -> Result<Frame, Error> { read_frame_as(reader, true).await }
+
+async fn read_frame_as(reader: &mut (impl AsyncRead + Unpin), masked: bool) -> Result<Frame, Error> {
     let mut head = [0; 2];
     reader.read_exact(&mut head).await.map_err(|_| Error::Network)?;
     let (opcode, fin, short) = (head[0] & 15, head[0] & 128 != 0, head[1] & 127);
-    if head[0] & 0x70 != 0 || head[1] & 128 != 0 || !matches!(opcode, 0 | 1 | 2 | 8 | 9 | 10)
+    if head[0] & 0x70 != 0 || (head[1] & 128 != 0) != masked || !matches!(opcode, 0 | 1 | 2 | 8 | 9 | 10)
         || (opcode >= 8 && (!fin || short > 125)) { return Err(Error::Protocol); }
     let len = match short {
         126 => reader.read_u16().await.map(u64::from),
@@ -186,16 +209,19 @@ async fn read_frame(reader: &mut (impl AsyncRead + Unpin)) -> Result<Frame, Erro
         return Err(Error::Protocol);
     }
     if len > MAX_MESSAGE as u64 { return Err(Error::TooLarge); }
+    let mut mask = [0; 4];
+    if masked { reader.read_exact(&mut mask).await.map_err(|_| Error::Network)?; }
     let mut data = vec![0; len as usize];
     reader.read_exact(&mut data).await.map_err(|_| Error::Network)?;
+    if masked { for (ix, byte) in data.iter_mut().enumerate() { *byte ^= mask[ix % 4]; } }
     Ok(Frame { opcode, fin, data })
 }
 
 #[derive(Default)]
-struct Message { opcode: Option<u8>, data: Vec<u8> }
+pub(crate) struct Message { opcode: Option<u8>, data: Vec<u8> }
 
 impl Message {
-    fn push(&mut self, frame: Frame) -> Result<Option<Vec<u8>>, Error> {
+    pub(crate) fn push(&mut self, frame: Frame) -> Result<Option<Vec<u8>>, Error> {
         match (self.opcode, frame.opcode) {
             (None, 1 | 2) => self.opcode = Some(frame.opcode),
             (Some(_), 0) => {},
@@ -210,7 +236,7 @@ impl Message {
     }
 }
 
-fn close_code(bytes: &[u8]) -> Result<Option<u16>, Error> {
+pub(crate) fn close_code(bytes: &[u8]) -> Result<Option<u16>, Error> {
     if bytes.is_empty() { return Ok(None); }
     if bytes.len() == 1 { return Err(Error::Protocol); }
     let code = u16::from_be_bytes([bytes[0], bytes[1]]);

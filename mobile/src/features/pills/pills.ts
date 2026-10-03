@@ -34,3 +34,14 @@ export function reconcileChosen(
 export function semEsforco(model: string | null | undefined): boolean {
   return !!model && model.toLowerCase().includes('haiku');
 }
+
+const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'];
+
+// Níveis que o picker do Claude oferece por modelo (medição em backend/app/model_picker.py):
+// Sonnet tem só quatro, Haiku nenhum. Modelo desconhecido recebe a lista inteira, como antes.
+// ponytail: casa pelo nome; trocar pela lista lida do picker quando o backend expuser uma.
+export function claudeEfforts(model: string | null | undefined): string[] {
+  if (semEsforco(model)) return [];
+  if (model?.toLowerCase().includes('sonnet')) return ['low', 'medium', 'high', 'max'];
+  return CLAUDE_EFFORTS;
+}

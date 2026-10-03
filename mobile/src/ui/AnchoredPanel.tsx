@@ -18,6 +18,11 @@ type Props = {
   onDismissed?: () => void;
   label: string;
   closeLabel: string;
+  // Cartão do popover do PC (raio 12, recuo 4) em vez do menu nativo.
+  radius?: number;
+  padding?: number;
+  // Fração da tela que o painel pode ocupar; o espaço acima do gatilho continua sendo o teto.
+  maxHeightRatio?: number;
   children: ReactNode;
 };
 
@@ -25,11 +30,13 @@ type Props = {
 const GAP = 8;
 const MAX_WIDTH = 420;
 // Raio do menu nativo que as outras pílulas abrem (UIMenu do iOS 26); no Android, o do menu Material.
-const RADIUS = Platform.OS === 'ios' ? 24 : 16;
+const MENU_RADIUS = Platform.OS === 'ios' ? 24 : 16;
 
 // Painel flutuante preso a um gatilho, como o popover do app de PC: brota dele sem escurecer o
 // fundo, fecha no toque fora, no voltar do Android e sobe acima do teclado.
-export function AnchoredPanel({ open, anchor, onClose, onDismissed, label, closeLabel, children }: Props) {
+export function AnchoredPanel({
+  open, anchor, onClose, onDismissed, label, closeLabel, radius = MENU_RADIUS, padding = 12, maxHeightRatio = 0.45, children,
+}: Props) {
   const { rt, theme } = useUnistyles();
   const insets = useSafeAreaInsets();
   const reduced = useReducedMotion();
@@ -81,7 +88,7 @@ export function AnchoredPanel({ open, anchor, onClose, onDismissed, label, close
     const p = progress.value;
     return {
       bottom,
-      maxHeight: Math.max(160, Math.min(H * 0.45, H - bottom - top)),
+      maxHeight: Math.max(160, Math.min(H * maxHeightRatio, H - bottom - top)),
       opacity: Math.min(1, p),
       transform: [{ scale: 0.96 + 0.04 * p }],
     };
@@ -110,22 +117,23 @@ export function AnchoredPanel({ open, anchor, onClose, onDismissed, label, close
           <Animated.View
             style={[
               styles.shadow,
-              { right, width, borderRadius: RADIUS, transformOrigin: [originX, '100%', 0] },
+              { right, width, borderRadius: radius, transformOrigin: [originX, '100%', 0] },
               { boxShadow: `0 8px 28px rgba(0,0,0,${dark ? 0.4 : 0.16})` },
               motion,
             ]}
           >
             {/* O vidro dentro do Modal não tem o que desfocar e saía transparente: o que estava atrás
-                (cartão de uso) atravessava a lista. A camada de cor garante o fundo do menu. */}
+                (cartão de uso) atravessava a lista. A tinta é quase sólida, como o popup_fill do PC:
+                menu flutuante sobre papel de parede vivo precisa ser legível. */}
             <View
               pointerEvents="none"
-              style={[StyleSheet.absoluteFill, { borderRadius: RADIUS, backgroundColor: `rgba(${theme.tokens.glass.panelRgb.join(',')},${dark ? 0.9 : 0.94})` }]}
+              style={[StyleSheet.absoluteFill, { borderRadius: radius, backgroundColor: `rgba(${theme.tokens.glass.panelRgb.join(',')},${dark ? 0.97 : 0.98})` }]}
             />
             <Glass
               variant="modal"
               accessibilityViewIsModal
               onAccessibilityEscape={onClose}
-              style={[styles.panel, { borderRadius: RADIUS }]}
+              style={[styles.panel, { borderRadius: radius, padding }]}
             >
               {children}
             </Glass>
@@ -139,6 +147,5 @@ export function AnchoredPanel({ open, anchor, onClose, onDismissed, label, close
 const styles = StyleSheet.create({
   layer: { flex: 1 },
   shadow: { position: 'absolute' },
-  // p_3 do render_menu do PC.
-  panel: { flexShrink: 1, padding: 12 },
+  panel: { flexShrink: 1 },
 });

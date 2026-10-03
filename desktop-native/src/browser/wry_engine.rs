@@ -40,7 +40,7 @@ impl HasWindowHandle for Starter {
 impl Engine {
     pub fn available() -> Result<(), String> { Ok(()) }
 
-    pub fn prepare(window: &Window) -> Result<Starter, String> {
+    pub fn prepare(window: &Window, _cx: &App) -> Result<Starter, String> {
         // Caminho completo: a `Window` tem um `window_handle()` próprio, que devolve o identificador da GPUI.
         Ok(Starter(HasWindowHandle::window_handle(window).map_err(|e| e.to_string())?.as_raw()))
     }
@@ -105,10 +105,14 @@ impl Engine {
     pub fn reload(&self) { self.report(self.view.reload()); }
 
     #[cfg(target_os = "windows")]
-    pub fn cdp(&self) -> super::cdp::Cdp {
+    pub fn cdp(&self) -> std::rc::Rc<super::cdp::Cdp> {
         use wry::WebViewExtWindows;
-        super::cdp::Cdp::new(self.view.webview())
+        std::rc::Rc::new(super::cdp::Cdp::new(self.view.webview()))
     }
+
+    /// O WebView2 nasce e morre com o painel.
+    #[cfg(target_os = "windows")]
+    pub fn alive(&self) -> bool { true }
 
     pub fn place(&self, bounds: Bounds<Pixels>, _window: &mut Window) {
         let hidden = self.placed.get().is_none();

@@ -12,27 +12,3 @@ const LABEL: Record<string, () => string> = {
 };
 
 export const permissionLabel = (mode: string) => LABEL[mode]?.() ?? mode;
-
-// Rótulo curto da pílula na linha do composer, o mesmo do PWA.
-const SHORT: Record<string, () => string> = {
-  plan: m.permissao_modo_plan,
-  auto: m.permissao_modo_auto,
-  manual: m.permissao_modo_manual,
-  acceptEdits: m.permissao_modo_acceptEdits,
-  bypassPermissions: m.permissao_modo_bypassPermissions,
-  dontAsk: m.permissao_modo_dontAsk,
-};
-
-export const permissionShortLabel = (mode: string) => SHORT[mode]?.() ?? mode;
-
-// Consequência prática de cada modo: no celular não há tooltip, a frase vai na própria linha.
-const DESCRIPTION: Record<string, () => string> = {
-  plan: m.permissao_desc_plan,
-  auto: m.permissao_desc_auto,
-  manual: m.permissao_desc_manual,
-  acceptEdits: m.permissao_desc_acceptEdits,
-  bypassPermissions: m.permissao_desc_bypassPermissions,
-  dontAsk: m.permissao_desc_dontAsk,
-};
-
-export const permissionDescription = (mode: string) => DESCRIPTION[mode]?.();

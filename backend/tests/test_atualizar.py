@@ -238,6 +238,8 @@ def test_backend_que_nao_sobe_volta_pro_commit_anterior(repo, monkeypatch):
     ("backend/x.py", False),
 ])
 def test_shell_mudou_so_quando_o_pull_toca_a_janela(repo, monkeypatch, arquivo, esperado):
+    monkeypatch.setattr(atualizar, "_electron_instalado", lambda: True)
+
     def _puxar_avanca(pre):
         alvo = repo / arquivo
         alvo.parent.mkdir(parents=True, exist_ok=True)
@@ -253,6 +255,23 @@ def test_shell_mudou_so_quando_o_pull_toca_a_janela(repo, monkeypatch, arquivo, 
     final = atualizar.executar()
     assert final["ok"] is True
     assert final["shell_mudou"] is esperado
+
+
+def test_shell_mudou_nao_avisa_sem_electron_instalado(repo, monkeypatch):
+    def _puxar_avanca(pre):
+        (repo / "shell").mkdir(exist_ok=True)
+        (repo / "shell" / "main.cjs").write_text("novo\n", encoding="utf-8")
+        _git(repo, "add", "shell/main.cjs")
+        _git(repo, "commit", "-m", "shell novo")
+
+    monkeypatch.setattr(atualizar, "_puxar", _puxar_avanca)
+    monkeypatch.setattr(atualizar, "_aplicar_passos", lambda: None)
+    monkeypatch.setattr(atualizar, "_preparar", lambda t, *a, **k: None)
+    monkeypatch.setattr(atualizar, "_reiniciar", lambda t, *a, **k: None)
+    monkeypatch.setattr(atualizar, "_subiu", lambda porta, teto=0: True)
+    final = atualizar.executar()
+    assert final["ok"] is True
+    assert final["shell_mudou"] is False
 
 
 def test_mesmo_pid_na_porta_depois_do_restart_vai_pro_rollback(repo, monkeypatch):
@@ -366,6 +385,7 @@ def _preparo_gravado(repo, monkeypatch, *, lock_igual: bool, node_modules: bool,
     monkeypatch.setattr(atualizar, "_rodar", lambda args, **kw: (chamadas.append(args), P())[1])
     monkeypatch.setattr(atualizar, "_atualizar_dist", lambda: None)
     monkeypatch.setattr(atualizar.rust_release, "fetch", fetch)
+    monkeypatch.setattr(atualizar, "_renovar_chromium", lambda: None)
     monkeypatch.setattr(atualizar.shutil, "which", lambda nome: f"/bin/{nome}")
     (repo / "backend").mkdir(exist_ok=True)
     (repo / "package-lock.json").write_text("{}", encoding="utf-8")
@@ -377,6 +397,22 @@ def _preparo_gravado(repo, monkeypatch, *, lock_igual: bool, node_modules: bool,
                      encoding="utf-8")
     atualizar._preparar(topologia)
     return [" ".join(c) for c in chamadas]
+
+
+def test_renovar_chromium_so_com_o_baixado_e_sem_derrubar(tmp_path, monkeypatch):
+    chamadas = []
+    class P:
+        returncode = 1
+        stdout = ""
+        stderr = "sem rede"
+    monkeypatch.setattr(atualizar, "_rodar", lambda args, **kw: (chamadas.append(args), P())[1])
+    monkeypatch.setattr(atualizar.sys, "platform", "linux")
+    monkeypatch.setattr(atualizar.Path, "home", lambda: tmp_path)
+    atualizar._renovar_chromium()
+    assert chamadas == []
+    (tmp_path / ".hangar" / "native" / "chromium").mkdir(parents=True)
+    atualizar._renovar_chromium()
+    assert len(chamadas) == 1 and chamadas[0][0].endswith("install-chromium.sh")
 
 
 def test_preparar_sincroniza_o_uv_e_nao_chama_o_instalador(repo, monkeypatch):
@@ -416,6 +452,7 @@ def test_preparar_sem_marca_assume_o_node_modules_do_instalador(repo, monkeypatc
     monkeypatch.setattr(atualizar, "_rodar", lambda args, **kw: (chamadas.append(args), P())[1])
     monkeypatch.setattr(atualizar, "_atualizar_dist", lambda: None)
     monkeypatch.setattr(atualizar.rust_release, "fetch", lambda: [])
+    monkeypatch.setattr(atualizar, "_renovar_chromium", lambda: None)
     monkeypatch.setattr(atualizar.shutil, "which", lambda nome: f"/bin/{nome}")
     (repo / "backend").mkdir(exist_ok=True)
     (repo / "package-lock.json").write_text("{}", encoding="utf-8")

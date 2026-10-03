@@ -25,7 +25,6 @@ import { SessionSettingsButton } from './SessionSettings';
 import { SideQuestionSheet } from './SideQuestionSheet';
 import { SlashSuggest } from './SlashSuggest';
 import { comandoParcial } from './comandoParcial';
-import { superficie } from '../theme/superficie';
 import type { PickedAttachment } from '../ui/attachmentPicker';
 import { AttachSheet } from '../ui/AttachSheet';
 import { AttachmentPreview } from '../ui/AttachmentPreview';
@@ -357,7 +356,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   const [styleMenuOpen, setStyleMenuOpen] = useState(false);
   const dictationStyle = useDictationStyleLabel();
   const [commandSheetOpen, setCommandSheetOpen] = useState(false);
-  // `/model` e `/effort` abrem o seletor da linha; o número sobe a cada pedido.
+  // `/model` e `/effort` abrem a folha do chip da sessão; o número sobe a cada pedido.
   const [selectorRequest, setSelectorRequest] = useState<{ which: 'model' | 'effort'; n: number } | null>(null);
   // null = pergunta lateral fechada; string = a pergunta que veio com o `/btw` (pode ser vazia).
   const [sideQuestion, setSideQuestion] = useState<string | null>(null);
@@ -893,7 +892,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   const canInterrupt = state === 'working' || (headless && state === 'awaiting_input');
   // Campo vazio: o Parar ocupa o lugar do Enviar (como no PC). Com texto ou fila os dois ficam,
   // porque a mensagem entra na fila.
-  const showStop = !!onStop && canInterrupt;
+  // Com texto a linha é Orientar + Enviar, como no PWA; parar pede o campo vazio.
+  const showStop = !!onStop && canInterrupt && !hasContent;
   const showSend = !showStop || hasContent || sending || uploading || filaCount > 0;
   const showSteerText = (isCodex || headless) && state === 'working' && hasContent && !sendToPair;
 
@@ -1021,8 +1021,9 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           <Pressable
             onPress={handleSteer}
             disabled={steering}
+            hitSlop={7}
             accessibilityState={{ disabled: steering, busy: steering }}
-            style={[styles.steerBtn, { borderColor: theme.tokens.accent.base }]}
+            style={({ pressed }) => [styles.steerBtn, { backgroundColor: pressed ? theme.tokens.bg.hover : theme.tokens.fillSubtle }]}
             accessibilityLabel={m.composer_fila_aria()}
             accessibilityHint={m.composer_fila_titulo()}
             accessibilityRole="button"
@@ -1039,14 +1040,15 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           </Pressable>
         ) : null}
 
-        {steerFeedback && state === 'working' ? <Text style={[styles.steerText, { color: theme.tokens.text.secondary }]} accessibilityLiveRegion="polite">{steerFeedback}</Text> : null}
+        {steerFeedback && state === 'working' ? <Text style={[styles.hint, { color: theme.tokens.text.secondary }]} accessibilityLiveRegion="polite">{steerFeedback}</Text> : null}
 
-        {/* Modelo, nível e permissão foram para o botão único da linha de baixo; o par fica à vista
+        {/* Modelo, nível e permissão foram para o chip da linha de baixo; o par fica à vista
             porque muda para quem a mensagem vai. */}
         {pairPeers?.length ? (
           <Pressable
             onPress={() => setSendToPair((current) => !current)}
-            style={[styles.pairChip, { borderColor: sendToPair ? theme.tokens.accent.base : theme.tokens.border.subtle, backgroundColor: sendToPair ? superficie(theme, 0.8) : 'transparent' }]}
+            hitSlop={7}
+            style={[styles.pairChip, { backgroundColor: sendToPair ? theme.tokens.accent.dim : theme.tokens.fillSubtle }]}
             accessibilityRole="switch"
             accessibilityState={{ checked: sendToPair }}
             accessibilityLabel={m.composer_mandar_grupo()}
@@ -1082,63 +1084,55 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           />
         </View>
 
-        {/* Linha do app de PC: ferramentas pequenas à esquerda, modo · modelo · nível ocupam a sobra
-            e Enviar/Parar fecham a linha, sempre à vista. */}
+        {/* Linha do app de PC: + e microfone sem moldura à esquerda; o chip da sessão e o Enviar
+            fecham a linha. Com o Orientar na linha, microfone e chip saem para dar espaço. */}
         <View style={styles.row}>
-          <Pressable
-            onPress={() => setCommandSheetOpen(true)}
-            disabled={sending || gravando}
-            hitSlop={4}
-            accessibilityState={{ disabled: sending || gravando }}
-            style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed, (sending || gravando) && styles.iconBtnDisabled]}
-            accessibilityLabel={m.comandos_titulo()}
-            accessibilityRole="button"
-          >
-            <Icon name="SquareSlash" size={18} color={theme.tokens.text.secondary} />
-          </Pressable>
-
           <Pressable
             onPress={() => setAttachMenuOpen(true)}
             disabled={uploading || sending || gravando}
-            hitSlop={4}
+            hitSlop={5}
             accessibilityState={{ disabled: uploading || sending || gravando, busy: uploading }}
             style={({ pressed }) => [styles.iconBtn, pressed && styles.iconBtnPressed, (uploading || sending || gravando) && styles.iconBtnDisabled]}
-            accessibilityLabel={m.composer_anexar_arquivo()}
+            accessibilityLabel={m.composer_adicionar_ao_chat()}
             accessibilityRole="button"
           >
             {uploading ? (
               <ActivityIndicator size="small" color={theme.tokens.text.secondary} />
             ) : (
-              <Icon name="Paperclip" size={18} color={theme.tokens.text.secondary} />
+              <Icon name="Plus" size={22} color={theme.tokens.text.secondary} />
             )}
           </Pressable>
 
-          <Pressable
-            onPress={handleMicPress}
-            disabled={transcribing || sending || (!!dictation && !gravando)}
-            hitSlop={4}
-            accessibilityState={{ disabled: transcribing || sending || (!!dictation && !gravando), busy: transcribing }}
-            style={({ pressed }) => [
-              styles.iconBtn,
-              pressed && styles.iconBtnPressed,
-              (transcribing || sending || (!!dictation && !gravando)) && styles.iconBtnDisabled,
-            ]}
-            accessibilityLabel={gravando ? m.composer_parar_gravacao() : m.composer_gravar_audio()}
-            accessibilityRole="button"
-            // O estilo do ditado saiu da linha e mora no toque longo; o leitor de tela recebe a mesma
-            // ação nomeada, e a dica diz qual estilo vale antes de falar.
-            onLongPress={gravando ? undefined : () => setStyleMenuOpen(true)}
-            accessibilityHint={m.composer_mic_style_hint({ estilo: dictationStyle })}
-            accessibilityActions={gravando ? undefined : [{ name: 'longpress', label: m.ditado_estilo_titulo() }]}
-            onAccessibilityAction={(e) => {
-              if (e.nativeEvent.actionName === 'longpress' && !gravando) setStyleMenuOpen(true);
-            }}
-          >
-            {/* Gravando, o vermelho é o aviso: o quadrado diz "toque para parar". */}
-            {gravando
-              ? <Icon name="Square" size={16} color={theme.tokens.status.error} />
-              : <Icon name="Mic" size={18} color={theme.tokens.text.secondary} />}
-          </Pressable>
+          {showSteerText && !gravando ? null : (
+            <Pressable
+              onPress={handleMicPress}
+              disabled={transcribing || sending || (!!dictation && !gravando)}
+              hitSlop={5}
+              accessibilityState={{ disabled: transcribing || sending || (!!dictation && !gravando), busy: transcribing }}
+              style={({ pressed }) => [
+                styles.iconBtn,
+                pressed && styles.iconBtnPressed,
+                (transcribing || sending || (!!dictation && !gravando)) && styles.iconBtnDisabled,
+              ]}
+              accessibilityLabel={gravando ? m.composer_parar_gravacao() : m.composer_gravar_audio()}
+              accessibilityRole="button"
+              // O estilo do ditado mora no + e no toque longo; o leitor de tela recebe a mesma ação
+              // nomeada, e a dica diz qual estilo vale antes de falar.
+              onLongPress={gravando ? undefined : () => setStyleMenuOpen(true)}
+              accessibilityHint={m.composer_mic_style_hint({ estilo: dictationStyle })}
+              accessibilityActions={gravando ? undefined : [{ name: 'longpress', label: m.ditado_estilo_titulo() }]}
+              onAccessibilityAction={(e) => {
+                if (e.nativeEvent.actionName === 'longpress' && !gravando) setStyleMenuOpen(true);
+              }}
+            >
+              {/* Gravando, o vermelho é o aviso: o quadrado diz "toque para parar". */}
+              {gravando
+                ? <Icon name="Square" size={16} color={theme.tokens.status.error} />
+                : <Icon name="Mic" size={20} color={theme.tokens.text.secondary} />}
+            </Pressable>
+          )}
+
+          <View style={styles.spacer} />
 
           <SessionSettingsButton serverId={serverId} name={name} provider={provider} headless={headless} openRequest={selectorRequest}
                                  hidden={showSteerText} />
@@ -1148,17 +1142,19 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
             <Pressable
               onPress={() => { void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); void handleSend(true); }}
               disabled={!canSend}
-              hitSlop={{ top: 8, bottom: 8 }}
-              style={({ pressed }) => [styles.steerPill, { borderColor: theme.tokens.accent.base }, (pressed || !canSend) && styles.iconBtnDisabled]}
+              hitSlop={5}
+              style={({ pressed }) => [styles.steerPill, { borderColor: theme.tokens.border.strong }, (pressed || !canSend) && styles.iconBtnDisabled]}
               accessibilityRole="button"
               accessibilityLabel={m.codex_orientar()}
               accessibilityHint={m.codex_orientar_ajuda()}
               accessibilityState={{ disabled: !canSend }}
             >
-              <Text style={[styles.steerText, { color: theme.tokens.accent.base }]}>{m.codex_orientar()}</Text>
+              <Icon name="Undo2" size={15} color={theme.tokens.accent.base} />
+              <Text style={[styles.steerPillText, { color: theme.tokens.text.primary }]}>{m.codex_orientar()}</Text>
             </Pressable>
           ) : null}
 
+          {/* Parar: só o quadrado vermelho, sem círculo em volta, como no PC. */}
           {showStop ? (
             <Pressable
               onPress={confirmStop}
@@ -1177,7 +1173,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
             </Pressable>
           ) : null}
 
-          {/* Desabilitado vira círculo de superfície com seta apagada: o claro cheio sumiria no tema claro. */}
+          {/* Vazio, o círculo fica apagado em vez de sumir: o claro cheio só acende com o que mandar. */}
           {showSend ? (
             <Pressable
               onPress={() => { void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); void handleSend(); }}
@@ -1186,7 +1182,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
               accessibilityState={{ disabled: !canSend, busy: sending || uploading }}
               style={({ pressed }) => [
                 styles.roundBtn,
-                canSend ? { backgroundColor: theme.tokens.text.primary } : styles.sendBtnDisabled,
+                { backgroundColor: canSend ? theme.tokens.text.primary : theme.tokens.border.default },
                 pressed && canSend && styles.sendBtnPressed,
               ]}
               accessibilityLabel={m.composer_enviar_mensagem()}
@@ -1242,7 +1238,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
         ) : null}
 
         {autoN !== null ? (
-          <Pressable onPress={cancelarAuto} style={[styles.autoChip, { backgroundColor: superficie(theme, 0.8), borderColor: theme.tokens.border.subtle }]} accessibilityRole="button">
+          <Pressable onPress={cancelarAuto} hitSlop={7} style={[styles.autoChip, { backgroundColor: theme.tokens.fillSubtle }]} accessibilityRole="button">
             <Text style={[styles.autoText, { color: theme.tokens.text.primary }]}>{m.composer_enviando_cancelar({ n: autoN })}</Text>
           </Pressable>
         ) : null}
@@ -1343,6 +1339,8 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           onSessionAttachments={hasSentAttachments
             ? () => router.push(`/s/${origin.serverId}/${origin.name}/attachments` as never)
             : undefined}
+          onCommands={() => setCommandSheetOpen(true)}
+          dictationStyle={{ label: dictationStyle, onPress: () => setStyleMenuOpen(true) }}
         />
     </Glass>
   );
@@ -1352,51 +1350,53 @@ const styles = StyleSheet.create((theme) => ({
   // Caixa flutuante do app de PC; a linha de status vem logo embaixo, por isso a margem curta.
   glass: {
     marginHorizontal: theme.base.space[2],
-    paddingHorizontal: theme.base.space[2],
-    paddingTop: theme.base.space[2],
-    paddingBottom: 6,
+    borderRadius: 22,
+    paddingHorizontal: 12,
+    paddingTop: 12,
+    paddingBottom: 8,
     gap: theme.base.space[1],
   },
+  // Chips acima da caixa (fila, par): a mesma silhueta do chip da sessão; hitSlop leva a 44 pt.
   steerBtn: {
     alignSelf: 'flex-start',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    minWidth: 44,
-    minHeight: 44,
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderRadius: theme.base.radius.full,
-    paddingHorizontal: theme.base.space[2],
-    paddingVertical: 4,
+    gap: 5,
+    height: 30,
+    borderRadius: 15,
+    paddingHorizontal: 10,
   },
   steerText: {
     fontSize: theme.base.text.xs,
-    fontWeight: '700',
+    fontWeight: '600',
   },
   steerCount: {
     fontSize: theme.base.text.xs,
-    fontWeight: '600',
   },
-  // Mesmo tamanho das pílulas da linha; o contorno de destaque diz que é ação, não ajuste.
+  // Botão de texto da altura do Enviar; a borda fina diz que é ação, não ajuste.
   steerPill: {
-    height: 28,
-    justifyContent: 'center',
+    height: 34,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
     borderWidth: 1,
-    borderRadius: theme.base.radius.full,
-    paddingHorizontal: theme.base.space[2],
+    borderRadius: 17,
+    paddingHorizontal: 13,
+    marginRight: 4,
+  },
+  steerPillText: {
+    fontSize: theme.base.text.xs,
+    fontWeight: '600',
   },
   pairChip: {
     alignSelf: 'flex-start',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.base.space[1],
-    minWidth: 44,
-    minHeight: 44,
-    maxWidth: 220,
-    borderWidth: 1,
-    borderRadius: theme.base.radius.full,
-    paddingHorizontal: theme.base.space[2],
+    gap: 5,
+    height: 30,
+    maxWidth: 240,
+    borderRadius: 15,
+    paddingHorizontal: 10,
   },
   pairChipLabel: {
     flexShrink: 1,
@@ -1406,7 +1406,11 @@ const styles = StyleSheet.create((theme) => ({
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 2,
+    gap: 6,
+  },
+  spacer: {
+    flex: 1,
+    minWidth: 0,
   },
   // O campo é o próprio vidro, sem caixa dentro da caixa.
   inputWrap: {
@@ -1414,11 +1418,11 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: 'center',
     paddingHorizontal: theme.base.space[1],
   },
-  // 36 pt + hitSlop 4 = 44 pt de toque; o ícone fica pequeno e sem fundo, como no PC.
+  // 34 pt + hitSlop 5 = 44 pt de toque; o ícone fica sem fundo, como no PC.
   iconBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: theme.base.radius.md,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1436,9 +1440,9 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: 'center',
   },
   stopMark: {
-    width: 12,
-    height: 12,
-    borderRadius: 2,
+    width: 13,
+    height: 13,
+    borderRadius: 3,
   },
   queueBadge: {
     position: 'absolute',
@@ -1456,23 +1460,16 @@ const styles = StyleSheet.create((theme) => ({
     fontWeight: '700',
     lineHeight: 13,
   },
-  sendBtnDisabled: {
-    backgroundColor: superficie(theme, 0.8),
-    borderWidth: 1,
-    borderColor: theme.tokens.border.subtle,
-  },
   sendBtnPressed: {
     opacity: 0.8,
   },
   autoChip: {
     minWidth: 44,
-    minHeight: 44,
+    height: 30,
     justifyContent: 'center',
     alignSelf: 'flex-start',
-    borderWidth: 1,
-    borderRadius: theme.base.radius.full,
-    paddingHorizontal: theme.base.space[3],
-    paddingVertical: 6,
+    borderRadius: 15,
+    paddingHorizontal: 10,
   },
   autoText: {
     fontSize: theme.base.text.xs,

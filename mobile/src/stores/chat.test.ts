@@ -204,22 +204,99 @@ test('(c) preview some quando o assistant_msg real chega', async () => {
   expect(chat.use.getState().events).toHaveLength(1);
 });
 
-test('(c2) preview vazio durante working NÃO apaga a bolha; sair de working apaga', async () => {
+test('(c2) preview vazio durante working NÃO apaga a bolha; sair de working apaga após a carência', async () => {
+  vi.useFakeTimers();
+  try {
+    historyResponses = [[]];
+    const chat = chatStore('srv1', 'sess');
+    chat.retain();
+    await vi.advanceTimersByTimeAsync(0);
+
+    created[0].trigger('state', JSON.stringify({ session: 'sess', state: 'working' }));
+    created[0].trigger('preview', JSON.stringify({ text: 'rascunho' }));
+    expect(chat.use.getState().preview).toBe('rascunho');
+
+    // entre ferramentas o extrator manda "" — bolha fica
+    created[0].trigger('preview', JSON.stringify({ text: '' }));
+    expect(chat.use.getState().preview).toBe('rascunho');
+
+    // fim do turno: a prévia espera o bloco real em vez de piscar
+    created[0].trigger('state', JSON.stringify({ session: 'sess', state: 'idle' }));
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(chat.use.getState().preview).toBe('rascunho');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(chat.use.getState().preview).toBe('');
+
+    // turno novo antes da carência vencer cancela a saída
+    created[0].trigger('state', JSON.stringify({ session: 'sess', state: 'working' }));
+    created[0].trigger('preview', JSON.stringify({ text: 'outro' }));
+    created[0].trigger('state', JSON.stringify({ session: 'sess', state: 'idle' }));
+    created[0].trigger('state', JSON.stringify({ session: 'sess', state: 'working' }));
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(chat.use.getState().preview).toBe('outro');
+    chat.release();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('pensamento e ferramenta ao vivo: o bloco real tira de cena; o "" só agenda', async () => {
+  vi.useFakeTimers();
+  try {
+    historyResponses = [[]];
+    const chat = chatStore('srv1', 'sess');
+    chat.retain();
+    await vi.advanceTimersByTimeAsync(0);
+
+    created[0].trigger('pensamento', JSON.stringify({ text: 'pondero' }));
+    created[0].trigger('ferramenta', JSON.stringify({ text: JSON.stringify({ nome: 'Bash', input: { command: 'ls' } }) }));
+    expect(chat.use.getState().pensamento).toBe('pondero');
+    expect(chat.use.getState().ferramenta).toEqual({ nome: 'Bash', input: { command: 'ls' } });
+
+    created[0].trigger('message', JSON.stringify(ev({ id: 't:1', kind: 'thinking', text: 'pondero' })));
+    expect(chat.use.getState().pensamento).toBe('');
+    created[0].trigger('ferramenta', JSON.stringify({ text: '' }));
+    expect(chat.use.getState().ferramenta).not.toBeNull();
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(chat.use.getState().ferramenta).toBeNull();
+    chat.release();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('pensamento e ferramenta ao vivo saem quando o estado deixa working sem o evento vazio', async () => {
+  vi.useFakeTimers();
+  try {
+    historyResponses = [[]];
+    const chat = chatStore('srv1', 'sess');
+    chat.retain();
+    await vi.advanceTimersByTimeAsync(0);
+
+    created[0].trigger('state', JSON.stringify({ session: 'sess', state: 'working' }));
+    created[0].trigger('pensamento', JSON.stringify({ text: 'pondero' }));
+    created[0].trigger('ferramenta', JSON.stringify({ text: JSON.stringify({ nome: 'Bash', input: {} }) }));
+    created[0].trigger('state', JSON.stringify({ session: 'sess', state: 'idle' }));
+    expect(chat.use.getState().pensamento).toBe('pondero');
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(chat.use.getState().pensamento).toBe('');
+    expect(chat.use.getState().ferramenta).toBeNull();
+    chat.release();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test('virada para working vista ao vivo marca o começo do turno; aberta no meio, não', async () => {
   historyResponses = [[]];
   const chat = chatStore('srv1', 'sess');
   chat.retain();
   await tick();
-
   created[0].trigger('state', JSON.stringify({ session: 'sess', state: 'working' }));
-  created[0].trigger('preview', JSON.stringify({ text: 'rascunho' }));
-  expect(chat.use.getState().preview).toBe('rascunho');
-
-  // entre ferramentas o extrator manda "" — bolha fica
-  created[0].trigger('preview', JSON.stringify({ text: '' }));
-  expect(chat.use.getState().preview).toBe('rascunho');
-
+  expect(chat.use.getState().turnSeen).toBeNull();
   created[0].trigger('state', JSON.stringify({ session: 'sess', state: 'idle' }));
-  expect(chat.use.getState().preview).toBe('');
+  created[0].trigger('state', JSON.stringify({ session: 'sess', state: 'working' }));
+  expect(chat.use.getState().turnSeen).toEqual(expect.any(Number));
 });
 
 test('(d) message duplicado (mesmo id) não entra; conteúdo novo substitui', async () => {

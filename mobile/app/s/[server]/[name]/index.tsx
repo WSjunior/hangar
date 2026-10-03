@@ -10,7 +10,7 @@ import { confirmFirstInput, readFirstInput, useNewConversation } from '../../../
 import { Screen } from '../../../../src/ui/Screen';
 import { ChatHeader } from '../../../../src/chat/ChatHeader';
 import { LoopChip } from '../../../../src/chat/LoopChip';
-import { PlanChip } from '../../../../src/features/plan/PlanChip';
+import { useActivity } from '../../../../src/features/activity/useActivity';
 import { MessageList } from '../../../../src/chat/MessageList';
 import { pararTts } from '../../../../src/chat/BubbleActions';
 import { Composer } from '../../../../src/chat/Composer';
@@ -91,6 +91,13 @@ export default function ChatScreen() {
   const preview = chat.use((s) => s.preview);
   const previewMd = chat.use((s) => s.previewMd);
   const previewFull = chat.use((s) => s.previewFull);
+  const pensamento = chat.use((s) => s.pensamento);
+  const ferramenta = chat.use((s) => s.ferramenta);
+  const turnSeen = chat.use((s) => s.turnSeen);
+  // Mesma fonte do painel Atividade: um Agent em background devolve resultado na hora e só o fold
+  // sabe que ele segue rodando.
+  const activity = useActivity(events);
+  const agentesRodando = useMemo(() => activity.agents.filter((a) => a.running), [activity]);
   const loading = chat.use((s) => s.loading);
   const error = chat.use((s) => s.error);
   const olderFailed = chat.use((s) => s.olderFailed);
@@ -145,8 +152,8 @@ export default function ChatScreen() {
   // Sem SSE adicional: acompanha a abertura e o Git do Codex pela lista.
   const rowsProvider = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name)?.provider ?? null) as Provider | null;
   const [fetchedSession, setFetchedSession] = useState<SessionInfo | null | undefined>(undefined);
-  const planSession = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name) ?? null);
-  const currentSession = fetchedSession === undefined ? planSession : fetchedSession;
+  const listSession = useSessions((s) => s.rows.find((r) => r.serverId === serverId && r.name === name) ?? null);
+  const currentSession = fetchedSession === undefined ? listSession : fetchedSession;
   const codexPreThread = currentSession?.provider === 'codex' && currentSession.tracked === false;
   useEffect(() => {
     if (!ready || servidorSumiu) return;
@@ -380,7 +387,6 @@ export default function ChatScreen() {
           }}
           onMore={() => setMoreOpen(true)}
           onTitlePress={() => setPickerOpen(true)}
-          chipPlan={planSession ? <PlanChip session={planSession} onPress={() => router.push(`/s/${serverId}/${name}/activity` as never)} /> : null}
           chipLoop={
             stateEvent?.loop_status ? (
               <LoopChip
@@ -481,6 +487,12 @@ export default function ChatScreen() {
                 sessionName={name}
                 serverId={serverId}
                 bottomInset={dockH}
+                stateEvent={stateEvent}
+                turnSeen={turnSeen}
+                pensamento={pensamento}
+                ferramenta={ferramenta}
+                agentesRodando={agentesRodando}
+                onAbrirAgentes={() => router.push(`/s/${serverId}/${name}/activity` as never)}
               />
             )}
           </View>

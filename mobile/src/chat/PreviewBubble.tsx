@@ -12,6 +12,9 @@ interface Props {
   // Mantida no contrato da Task 1; hoje não muda nada no mobile (sem teto de 10 linhas como na PWA).
   md: boolean;
   full: boolean;
+  // Turno ainda correndo: só aí o caret pisca. Acabado, a prévia fica parada até o bloco real
+  // chegar (carência do store), sem fingir que ainda escreve.
+  streaming?: boolean;
 }
 
 // Caret piscando (▍): sempre visível na prévia, em todos os ramos (espelha AssistantBubble.svelte).
@@ -33,7 +36,7 @@ function Caret() {
 // Prévia ao vivo (irmã da AssistantBubble.svelte): markdown quando veio do agente, texto mono
 // quando é raspagem do pane. Painel de Todos do TUI separado por splitTodoBlock (core):
 // cabeçalho vira markdown, árvore de itens fica num bloco mono.
-export function PreviewBubble({ text, md, full }: Props) {
+export function PreviewBubble({ text, md, full, streaming = true }: Props) {
   void full; // mantida por contrato (Task 1), sem uso atual no mobile
   const { theme } = useUnistyles();
   const todo = useMemo(() => splitTodoBlock(text), [text]);
@@ -52,18 +55,18 @@ export function PreviewBubble({ text, md, full }: Props) {
           <Text style={[styles.todoBody, { color: theme.tokens.text.secondary }]}>
             {todo.body}
           </Text>
-          {!prose ? <Caret /> : null}
+          {!prose && streaming ? <Caret /> : null}
         </View>
       ) : null}
       {!prose ? null : md ? (
         <>
           <EnrichedMarkdownText markdown={prose} markdownStyle={mdStyle} flavor="github" />
-          <Caret />
+          {streaming ? <Caret /> : null}
         </>
       ) : (
         <Text style={[styles.plain, { color: theme.tokens.text.secondary }]}>
           {prose}
-          <Caret />
+          {streaming ? <Caret /> : null}
         </Text>
       )}
     </View>

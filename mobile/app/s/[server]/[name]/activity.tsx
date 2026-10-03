@@ -2,18 +2,16 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, ScrollView, Text, View } from 'react-native';
 import { Stack, useLocalSearchParams } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { getSubagents, getWorkflow, getWorkflowAgent, getWorkflows, planBadge } from '@hangar/core';
+import { formatElapsed, getSubagents, getWorkflow, getWorkflowAgent, getWorkflows } from '@hangar/core';
 import type { SubagentRun, WorkflowDetail, WorkflowAgentDetail, WorkflowSummary } from '@hangar/core';
 import { chatStore } from '../../../../src/stores/chat';
 import { useServers } from '../../../../src/stores/servers';
-import { useSessions } from '../../../../src/stores/sessions';
 import { useActivity } from '../../../../src/features/activity/useActivity';
 import { TaskRows } from '../../../../src/features/activity/TaskRows';
 import { WorkflowList } from '../../../../src/features/activity/WorkflowList';
 import { WorkflowDetailView } from '../../../../src/features/activity/WorkflowDetailView';
 import { AgentDetailView } from '../../../../src/features/activity/AgentDetailView';
 import { SubagentLive } from '../../../../src/features/activity/SubagentLive';
-import { PlanPanel } from '../../../../src/features/plan/PlanPanel';
 import * as m from '../../../../src/paraglide/messages';
 import { superficie } from '../../../../src/theme/superficie';
 
@@ -27,9 +25,16 @@ export default function ActivitySheet() {
 
   const chat = chatStore(serverId, name);
   const events = chat.use((s) => s.events);
+  // Processos vivos lidos do sistema pelo backend (vêm no `state` do stream que o chat já mantém).
+  const processos = chat.use((s) => s.stateEvent?.shells) ?? [];
   const activity = useActivity(events);
+  // Relógio do "há N" dos shells; com a folha aberta só.
+  const [agora, setAgora] = useState(Date.now() / 1000);
+  useEffect(() => {
+    const t = setInterval(() => setAgora(Date.now() / 1000), 20_000);
+    return () => clearInterval(t);
+  }, []);
 
-  const session = useSessions((s: any) => s.rows.find((r: any) => r.serverId === serverId && r.name === name) ?? null);
   const server = useServers((s: any) => s.servers.find((x: any) => x.id === serverId) ?? null);
 
   const [level, setLevel] = useState<Level>('list');
@@ -52,8 +57,6 @@ export default function ActivitySheet() {
   const [subTitle, setSubTitle] = useState('');
   const genWf = useRef(0);
   const genAgent = useRef(0);
-
-  const hasPlan = !!planBadge(session) || session?.plan_hidden === true;
 
   const fetchAll = useCallback(async () => {
     setWfLoading(true);
@@ -100,6 +103,16 @@ export default function ActivitySheet() {
 
   const orfaos = subs.filter((s2) => !activity.agents.some((a: any) => matchSub(a.prompt)?.agentId === s2.agentId));
   const runningAgents = activity.agents.filter((a: any) => a.kind === 'agent' && a.running);
+  const shellsVivos = activity.shells.filter((s2) => s2.running);
+  const ha = (desde: number) => m.atividade_shell_ha({ t: formatElapsed(agora - desde) });
+
+  // O subagente aberto ainda roda? No Claude quem sabe é o transcript do pai; null = só o disco o
+  // conhece (o próprio arquivo dele pode dizer, no Kimi/Pi).
+  const paiRodando = (() => {
+    if (!subAgentId) return null;
+    const pai = activity.agents.find((a) => matchSub(a.prompt)?.agentId === subAgentId);
+    return pai ? pai.running : null;
+  })();
 
   function tituloDoSub(s2: SubagentRun): string {
     const linhas = (s2.prompt ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
@@ -215,13 +228,6 @@ export default function ActivitySheet() {
 
         {level === 'list' ? (
           <ScrollView contentContainerStyle={styles.body} showsVerticalScrollIndicator={false}>
-            {hasPlan ? (
-              <View style={styles.section}>
-                <Text style={[styles.label, { color: theme.tokens.text.muted }]}>{m.ctx_plano()}</Text>
-                <PlanPanel key={`${serverId}::${name}`} session={session} name={name} server={server} />
-              </View>
-            ) : null}
-
             {workflows.length > 0 ? <WorkflowList workflows={workflows} onSelect={openWorkflow} /> : null}
             {wfLoading && workflows.length === 0 ? (
               <View style={styles.center}>
@@ -272,7 +278,8 @@ export default function ActivitySheet() {
               <View style={styles.section}>
                 <Text style={[styles.label, { color: theme.tokens.text.muted }]}>{m.atividade_subagentes()}</Text>
                 {orfaos.map((s2) => (
-                  <Pressable key={s2.agentId} onPress={() => abrirDoDisco(s2)} style={[styles.agentRow, styles.agentOpenable]} accessibilityRole="button">
+                  // Concluído recua em vez de sumir: o histórico explica o que já rodou.
+                  <Pressable key={s2.agentId} onPress={() => abrirDoDisco(s2)} style={[styles.agentRow, styles.agentOpenable, s2.finished && styles.concluido]} accessibilityRole="button">
                     <View style={styles.agentBody}>
                       <View style={styles.agentHead}>
                         <Text style={[styles.agentDesc, { color: theme.tokens.text.primary }]} numberOfLines={1}>
@@ -281,8 +288,14 @@ export default function ActivitySheet() {
                         {s2.agentType ? <Text style={[styles.tag, { color: theme.tokens.text.secondary, backgroundColor: superficie(theme, 0.8) }]}>{s2.agentType}</Text> : null}
                       </View>
                       <Text style={[styles.agentNow, { color: theme.tokens.text.muted }]} numberOfLines={1}>
-                        {m.atividade_chamadas({ n: s2.toolCalls })}
-                        {s2.recent.length ? ` · ${s2.recent[s2.recent.length - 1]?.name ?? ''}` : ''}
+                        {/* Ilegível vem com tudo zerado: "0 chamadas" ali afirmaria que ele não fez nada. */}
+                        {s2.ilegivel ? m.atividade_sub_ilegivel() : (
+                          <>
+                            {s2.finished ? `${m.atividade_sub_concluido()} · ` : ''}
+                            {m.atividade_chamadas({ n: s2.toolCalls })}
+                            {s2.recent.length ? ` · ${s2.recent[s2.recent.length - 1]?.name ?? ''}` : ''}
+                          </>
+                        )}
                       </Text>
                     </View>
                     <Text style={[styles.chevron, { color: theme.tokens.text.muted }]}>›</Text>
@@ -291,9 +304,53 @@ export default function ActivitySheet() {
               </View>
             ) : null}
 
+            {/* Shells de fundo que ainda rodam: o terminal diz "N shells still running", aqui diz qual.
+                Sem toque: a saída de cada um volta pro chat quando ele termina. */}
+            {shellsVivos.length > 0 ? (
+              <View style={styles.section}>
+                <Text style={[styles.label, { color: theme.tokens.text.muted }]}>
+                  {m.atividade_shells()} <Text style={{ color: theme.tokens.accent.base }}>{m.atividade_shells_rodando({ n: shellsVivos.length })}</Text>
+                </Text>
+                {shellsVivos.map((s2) => (
+                  <View key={s2.id} style={styles.agentRow} accessible accessibilityLabel={s2.command}>
+                    <ActivityIndicator size="small" color={theme.tokens.accent.base} />
+                    <View style={styles.agentBody}>
+                      <Text style={[styles.shellCmd, { color: theme.tokens.text.primary }]} numberOfLines={2}>{s2.rotulo}</Text>
+                      {s2.description || s2.ts ? (
+                        <Text style={[styles.agentNow, { color: theme.tokens.text.muted }]} numberOfLines={1}>
+                          {[s2.description, s2.ts ? ha(s2.ts) : ''].filter(Boolean).join(' · ')}
+                        </Text>
+                      ) : null}
+                    </View>
+                  </View>
+                ))}
+              </View>
+            ) : null}
+
+            {/* Processos vivos agora, lidos do sistema: pega o que o transcript não sabe (comando de
+                subagente, de antes de um /clear). É o que explica a sessão parada com shell pendurado. */}
+            {processos.length > 0 ? (
+              <View style={styles.section}>
+                <Text style={[styles.label, { color: theme.tokens.text.muted }]}>
+                  {m.atividade_processos()} <Text style={{ color: theme.tokens.accent.base }}>{m.atividade_processos_n({ n: processos.length })}</Text>
+                </Text>
+                {processos.map((p) => (
+                  <View key={p.pid} style={styles.agentRow} accessible accessibilityLabel={p.cmd}>
+                    <ActivityIndicator size="small" color={theme.tokens.accent.base} />
+                    <View style={styles.agentBody}>
+                      <Text style={[styles.shellCmd, { color: theme.tokens.text.primary }]} numberOfLines={2}>{p.cmd}</Text>
+                      <Text style={[styles.agentNow, { color: theme.tokens.text.muted }]} numberOfLines={1}>
+                        pid {p.pid}{p.desde ? ` · ${ha(p.desde)}` : ''}
+                      </Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            ) : null}
+
             {activity.tasks.length > 0 ? <TaskRows tasks={activity.tasks} /> : null}
             {subError ? <Text style={[styles.err, { color: theme.tokens.status.warning }]}>⚠ {subError}</Text> : null}
-            {workflows.length === 0 && activity.tasks.length === 0 && runningAgents.length === 0 && orfaos.length === 0 && !subError ? <Text style={[styles.empty, { color: theme.tokens.text.muted }]}>{m.atividade_vazio()}</Text> : null}
+            {workflows.length === 0 && activity.tasks.length === 0 && runningAgents.length === 0 && orfaos.length === 0 && shellsVivos.length === 0 && processos.length === 0 && !subError ? <Text style={[styles.empty, { color: theme.tokens.text.muted }]}>{m.atividade_vazio()}</Text> : null}
           </ScrollView>
         ) : level === 'workflow' ? (
           <WorkflowDetailView
@@ -311,7 +368,7 @@ export default function ActivitySheet() {
             onTentar={() => openAgent(agentAberto)}
           />
         ) : level === 'subagent' && subAgentId ? (
-          <SubagentLive sessionName={name} agentId={subAgentId} />
+          <SubagentLive sessionName={name} agentId={subAgentId} paiRodando={paiRodando} />
         ) : (
           <View style={styles.center}>
             <Text style={[styles.muted, { color: theme.tokens.text.muted }]}>{m.atividade_sem_transcript()}</Text>
@@ -346,6 +403,8 @@ const styles = StyleSheet.create((theme) => ({
   tag: { fontFamily: theme.base.fontMono, fontSize: 11, paddingHorizontal: 6, paddingVertical: 1, borderRadius: theme.base.radius.full, overflow: 'hidden' },
   tagMuted: {},
   agentNow: { fontFamily: theme.base.fontMono, fontSize: 11 },
+  shellCmd: { fontFamily: theme.base.fontMono, fontSize: theme.base.text.xs },
+  concluido: { opacity: 0.6 },
   chevron: { fontSize: theme.base.text.base, lineHeight: theme.base.text.base },
   error: { fontSize: theme.base.text.sm, textAlign: 'center', padding: theme.base.space[4] },
 }));
