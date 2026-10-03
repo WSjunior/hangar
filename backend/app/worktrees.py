@@ -220,37 +220,44 @@ def locate(provider: str, cwd: str | None, jsonl: str | None) -> Location:
     return Location(branch, wt, root if wt else None, False)
 
 
-def _git(cwd: str, *args: str) -> subprocess.CompletedProcess:
-    """`_run` para a situação: timeout de uma worktree lenta degrada o campo dela (falha comum),
-    nunca derruba a lista inteira."""
+def _git(cwd: str, *args: str, failed: list) -> subprocess.CompletedProcess:
+    """`_run` para a situação: timeout de uma worktree lenta degrada o campo dela, nunca derruba a
+    lista inteira. A falha fica em `failed` para a situação sair marcada e nunca parecer segura."""
     try:
         return _run(cwd, *args)
     except GitError as e:
         _log.warning("worktrees: git %s em %s falhou: %s", args[0], cwd, e.detail)
+        failed.append(args[0])
         return subprocess.CompletedProcess(args, 1, "", e.detail)
 
 
-def _base_of(path: str, branch: str, main: str) -> str | None:
-    p = _git(path if os.path.isdir(path) else main, "config", "--get", f"branch.{branch}.hangar-base")
+def _base_of(path: str, branch: str, main: str, failed: list) -> str | None:
+    p = _git(path if os.path.isdir(path) else main, "config", "--get", f"branch.{branch}.hangar-base",
+             failed=failed)
     if p.returncode == 0 and p.stdout.strip():
         return p.stdout.strip()
     # Worktree criada fora do Hangar: compara com a branch da pasta principal.
     return head_info(main)[0]
 
 
-def is_merged(cwd: str, branch: str, base: str) -> bool:
+def is_merged(cwd: str, branch: str, base: str, failed: list | None = None) -> bool:
+    failed = [] if failed is None else failed
+    start = len(failed)
     # Worktree recém-criada aponta pro mesmo commit da base: ancestral trivial, não mesclada.
     # ponytail: branch sem uso cuja base andou lê como mesclada (apagar não perde nada), e merge
     # local por fast-forward só lê como mesclada depois que a base anda.
-    tips = _git(cwd, "rev-parse", branch, base)
+    tips = _git(cwd, "rev-parse", branch, base, failed=failed)
     same = tips.returncode == 0 and len(set(tips.stdout.split())) == 1
-    if not same and _git(cwd, "merge-base", "--is-ancestor", branch, base).returncode == 0:
+    if len(failed) == start and not same and _git(
+            cwd, "merge-base", "--is-ancestor", branch, base, failed=failed).returncode == 0:
         return True
     # Squash do GitLab não deixa ancestral; o sinal é a branch ter tido upstream e ele ter sumido
     # do servidor (apagado no merge do MR), visto após `fetch --prune`.
-    if _git(cwd, "config", "--get", f"branch.{branch}.merge").returncode != 0:
+    if _git(cwd, "config", "--get", f"branch.{branch}.merge", failed=failed).returncode != 0:
         return False
-    return _git(cwd, "rev-parse", "--abbrev-ref", f"{branch}@{{upstream}}").returncode != 0
+    gone = _git(cwd, "rev-parse", "--abbrev-ref", f"{branch}@{{upstream}}", failed=failed).returncode != 0
+    # Timeout não é upstream sumido: na dúvida, não mesclada.
+    return gone and len(failed) == start
 
 
 def _gitdir_branch(main: str, path: str) -> str | None:
@@ -266,9 +273,10 @@ def _gitdir_branch(main: str, path: str) -> str | None:
     return None
 
 
-def _ignored_lost(path: str, main: str) -> list[str]:
+def _ignored_lost(path: str, main: str, failed: list) -> list[str]:
     """Arquivos ignorados (pastas nunca) que só existem aqui; cópia idêntica à da principal não se perde."""
-    p = _git(path, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
+    p = _git(path, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z",
+             failed=failed)
     out = []
     for rel in p.stdout.split("\0") if p.returncode == 0 else []:
         if not rel or rel.endswith("/"):
@@ -307,23 +315,26 @@ def status(path: str, sessions=()) -> dict:
     main = main_repo_of(root) if root else _main_of_missing(path)
     exists = os.path.isdir(path)
     branch = head_info(path)[0] if exists else _gitdir_branch(main, path)
-    base = _base_of(path, branch, main) if branch else None
+    failed: list = []   # por chamada: a listagem roda status em threads diferentes
+    base = _base_of(path, branch, main, failed) if branch else None
     cwd = path if exists else main
     ahead = 0
     if branch and base:
-        c = _git(cwd, "rev-list", "--count", f"{base}..{branch}")
+        c = _git(cwd, "rev-list", "--count", f"{base}..{branch}", failed=failed)
         ahead = int(c.stdout.strip() or 0) if c.returncode == 0 else 0
     dirty = 0
     if exists:
-        s = _git(path, "status", "--porcelain")
+        s = _git(path, "status", "--porcelain", failed=failed)
         dirty = sum(1 for line in s.stdout.splitlines() if line.strip()) if s.returncode == 0 else 0
+    merged = bool(branch and base and branch != base and is_merged(cwd, branch, base, failed))
+    ignored = _ignored_lost(path, main, failed) if exists else []
     real = os.path.realpath(path)
     inside = [s for s in sessions if _inside(s, real)]
     return {
         "path": path, "repo": main, "exists": exists, "branch": branch, "base": base,
-        "merged": bool(branch and base and branch != base and is_merged(cwd, branch, base)),
-        "ahead": ahead, "dirty": dirty,
-        "ignored": _ignored_lost(path, main) if exists else [],
+        # Leitura que falhou deixa dirty/ignored zerados: a situação nunca pode parecer segura.
+        "merged": merged and not failed, "degraded": bool(failed),
+        "ahead": ahead, "dirty": dirty, "ignored": ignored,
         "sessions": sorted(s.name for s in inside),
         "closed": _closed_count(path, {os.path.realpath(s.jsonl) for s in inside if s.jsonl}),
     }

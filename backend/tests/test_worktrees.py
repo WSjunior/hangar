@@ -310,7 +310,29 @@ def test_status_survives_git_timeout(tmp_path, monkeypatch):
         return real_run(cwd, *args, **kw)
     monkeypatch.setattr(worktrees, "_run", slow)
     out = worktrees.list_all([main], [])
-    assert out[0]["worktrees"][0]["dirty"] == 0
+    st = out[0]["worktrees"][0]
+    assert st["dirty"] == 0 and st["degraded"] is True and st["merged"] is False
+
+
+def test_upstream_timeout_is_not_merged(tmp_path, monkeypatch):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    _commit(tmp_path / "repo-x", "a.txt")
+    # Branch que já teve upstream e ele não existe mais: a regra do squash lê como mesclada.
+    git_ops._run(wt, "config", "branch.x.remote", "origin")
+    git_ops._run(wt, "config", "branch.x.merge", "refs/heads/x")
+    st = worktrees.status(wt)
+    assert st["merged"] is True and st["degraded"] is False
+    real_run = worktrees._run
+
+    def slow(cwd, *args, **kw):
+        if args[:2] == ("rev-parse", "--abbrev-ref"):
+            raise git_ops.GitError(504, "git timeout")
+        return real_run(cwd, *args, **kw)
+    monkeypatch.setattr(worktrees, "_run", slow)
+    st = worktrees.status(wt)
+    assert st["merged"] is False and st["degraded"] is True
+    assert worktrees.is_merged(wt, "x", "main") is False
 
 
 def test_list_all_skips_repo_outside_roots(tmp_path):
