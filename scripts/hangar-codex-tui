@@ -363,10 +363,12 @@ def main() -> int:
     os.environ["CODEX_HOME"] = str(selected_home)
     approval = args.approval_policy or APPROVAL
     sandbox = args.sandbox or SANDBOX
+    resumed_mode = next((mode for mode, policy in PERMISSION_POLICIES.items()
+                         if policy == (approval, sandbox)), None)
+    if imported_resume and resumed_mode is None:
+        ap.error("combinação de aprovação e sandbox não suportada para conversa importada; sessão preservada")
     resumed_metadata = ({"codex_home": str(selected_home), "codex_account": args.codex_account,
-                         "cwd": cwd, "permission_mode": next(
-                             (mode for mode, policy in PERMISSION_POLICIES.items()
-                              if policy == (approval, sandbox)), None)} if imported_resume else {})
+                         "cwd": cwd, "permission_mode": resumed_mode} if imported_resume else {})
     from app import codex_contas
     from app.codex_instrucoes import (LIMITE_INSTRUCOES, limite_instrucoes,
                                       preparar_instrucoes, preparar_projeto)

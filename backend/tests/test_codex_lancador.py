@@ -700,3 +700,66 @@ def test_imported_resume_rejects_invalid_metadata_before_opening_server(tmp_path
     assert "metadados da conversa importada inválidos" in result.stderr
     assert not Path(env["FAKE_SERVER_OUT"]).exists()
     assert json.loads(sidecar.read_text()) == meta
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+@pytest.mark.parametrize("valid_override", [False, True])
+def test_imported_partial_policy_override_is_validated_before_spawn_and_persisted(tmp_path, valid_override):
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    env = _ambiente(tmp_path, cwd)
+    env["FAKE_TUI_SLEEP"] = "3"
+    env["FAKE_SERVER_OUT"] = str(tmp_path / "server-argv.json")
+    env["FAKE_SEM_THREAD"] = "1"
+    home = tmp_path / "secondary"
+    thread_id = "same-thread"
+    rollout = home / "sessions" / "2026" / "10" / "03" / f"rollout-example-{thread_id}.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("{}\n")
+    sidecar = _sidecar(env, "sess")
+    sidecar.parent.mkdir(parents=True)
+    meta = {"name": "sess", "thread_id": thread_id, "transfer_id": "import", "key": "durable-key",
+            "cwd": str(cwd), "codex_home": str(home), "codex_account": "work",
+            "rollout_path": str(rollout), "permission_mode": "Ask for approval",
+            "tool_output_token_limit": 144000, "model": "native-model", "effort": "high"}
+    sidecar.write_text(json.dumps(meta))
+    original = sidecar.read_bytes()
+    argv = [sys.executable, str(_LANCADOR), "--name", "sess", "--resume", thread_id]
+    if not valid_override:
+        rejected = subprocess.run([*argv, "--approval-policy", "never"], env=env,
+                                  capture_output=True, text=True, timeout=15)
+        assert rejected.returncode != 0
+        assert "combinação de aprovação e sandbox não suportada" in rejected.stderr
+        assert not Path(env["FAKE_SERVER_OUT"]).exists()
+        assert not Path(env["FAKE_TUI_OUT"]).exists()
+        assert sidecar.read_bytes() == original
+        # A tentativa seguinte usa o registro original, sem qualquer reparo pelo teste.
+    overrides = ["--sandbox", "workspace-write"] if valid_override else []
+    proc = subprocess.Popen([*argv, *overrides], env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+    try:
+        assert _espera(lambda: sidecar.exists() and json.loads(sidecar.read_text()).get("tui_pid"))
+        saved = json.loads(sidecar.read_text())
+        assert saved["permission_mode"] == ("Approve for me" if valid_override else "Ask for approval")
+        assert saved["key"] == meta["key"] and saved["codex_account"] == "work"
+        assert saved["thread_id"] == thread_id and saved["tool_output_token_limit"] == 144000
+        server_args = json.loads(Path(env["FAKE_SERVER_OUT"]).read_text())
+        assert 'approval_policy="on-request"' in server_args
+        assert ('sandbox_mode="workspace-write"' if valid_override else 'sandbox_mode="read-only"') in server_args
+        assert 'sandbox_mode="danger-full-access"' not in server_args
+    finally:
+        proc.wait(timeout=20)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+def test_non_imported_resume_keeps_legacy_independent_permission_flags(tmp_path):
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    env = _ambiente(tmp_path, cwd)
+    env["FAKE_SERVER_OUT"] = str(tmp_path / "server-argv.json")
+    result = subprocess.run([sys.executable, str(_LANCADOR), "--name", "legacy", "--cwd", str(cwd),
+                             "--resume", "legacy-thread", "--approval-policy", "never", "--sandbox", "read-only"],
+                            env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    server_args = json.loads(Path(env["FAKE_SERVER_OUT"]).read_text())
+    assert 'approval_policy="never"' in server_args and 'sandbox_mode="read-only"' in server_args
