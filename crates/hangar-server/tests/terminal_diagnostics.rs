@@ -35,16 +35,35 @@ async fn terminal_error_statuses_preserve_static_cause_without_private_data() {
             ("private-not-json".to_string(), StatusCode::BAD_REQUEST, "invalid terminal request"),
             (invalid_target.to_string(), StatusCode::BAD_REQUEST, "invalid terminal request"),
             (valid.to_string(), StatusCode::SERVICE_UNAVAILABLE, "terminal observer unavailable"),
-        ] {
+        ].into_iter().cycle().take(60) {
             let request = Request::builder().header("x-hangar-internal", "private-secret").body(Body::from(body)).unwrap();
             let result = terminal(State(state.clone()), ConnectInfo("127.0.0.1:12345".parse().unwrap()), request).await;
             assert_eq!(result.status(), status);
             assert_eq!(to_bytes(result.into_body(), 1024).await.unwrap().as_ref(), response.as_bytes());
         }
+        for (name, provider, target) in [("another", "claude", "bad-target"), ("fixture", "kimi", "%8"), ("private-unsafe/name", "claude", "%8")] {
+            let mut body = valid.clone();
+            body["name"] = name.into(); body["provider"] = provider.into(); body["target"] = target.into();
+            for _ in 0..20 {
+                let request = Request::builder().header("x-hangar-internal", "private-secret").body(Body::from(body.to_string())).unwrap();
+                assert_eq!(terminal(State(state.clone()), ConnectInfo("127.0.0.1:12345".parse().unwrap()), request).await.status(), StatusCode::BAD_REQUEST);
+            }
+        }
+        let before = output.lock().unwrap().len();
+        let request = Request::builder().header("x-hangar-internal", "wrong").body(Body::from("private-not-json")).unwrap();
+        assert_eq!(terminal(State(state.clone()), ConnectInfo("127.0.0.1:12345".parse().unwrap()), request).await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(output.lock().unwrap().len(), before, "pedido sem autenticação não pode gerar diagnóstico");
     }.await;
     let log = String::from_utf8(output.lock().unwrap().clone()).unwrap();
     for code in ["invalid terminal request", "invalid terminal target", "cannot start terminal observer", "NotFound"] {
         assert!(log.contains(code), "missing safe cause {code}: {log}");
     }
     assert!(!log.contains("private-"), "private request data reached diagnostics");
+    assert_eq!(log.lines().filter(|line| line.contains("observação terminal recusada")).count(), 1, "corpo inválido não deve gerar aviso a cada chamada: {log}");
+    for code in ["invalid terminal target", "cannot start terminal observer"] {
+        assert_eq!(log.lines().filter(|line| line.contains("observação terminal usa reserva Python") && line.contains("fixture") && line.contains(code) && !line.contains("io_kind")).count(), 1, "falha repetida deve gerar um aviso por sessão e causa: {log}");
+    }
+    assert_eq!(log.lines().filter(|line| line.contains("another") && line.contains("invalid terminal target")).count(), 1, "outra sessão deve ter seu próprio aviso: {log}");
+    assert_eq!(log.lines().filter(|line| line.contains("fixture") && line.contains("invalid capture request")).count(), 1, "outra causa na mesma sessão deve gerar aviso: {log}");
+    assert_eq!(log.lines().filter(|line| line.contains("invalid capture request") && !line.contains("session=")).count(), 1, "nome inválido deve usar limite global: {log}");
 }
