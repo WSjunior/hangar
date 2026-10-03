@@ -45,7 +45,7 @@ async fn provider_switch_no_double_state() {
     python.set_info(info_json("claude-headless", &path));
     let server = spawn_server(config(upstream, "127.0.0.1")).await;
     let mut events = sse(open_events(server, "s", "", &[]).await);
-    next_any(&mut events).await;
+    assert_eq!(id_of(&messages(&mut events, 1).await[0]), "u0");
     wait_until(|| python.side_conns() == 1).await;
     let info = info_json("codex", &path);
     python.set_info(info.clone());
