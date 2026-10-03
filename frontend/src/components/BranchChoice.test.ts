@@ -38,4 +38,10 @@ describe('BranchChoice', () => {
     const v = await pickNewBranch('Minha Sessão');
     expect(v).toEqual({ branch: 'Minha-Sessao', new_branch: true, base: 'main' });
   });
+
+  it('HEAD solto: a base é a primeira branch de verdade', async () => {
+    branches.value = { current: null, branches: ['dev', 'main'], remotes: [], dirty: false };
+    const v = await pickNewBranch('s');
+    expect(v?.base).toBe('dev');
+  });
 });

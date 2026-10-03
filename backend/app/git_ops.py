@@ -315,7 +315,8 @@ def list_branches(cwd: str) -> dict:
     p = _run(cwd, "branch", "--sort=-committerdate", "--format=%(refname:short)")
     if p.returncode != 0:
         raise GitError(409, (p.stderr or "git branch falhou").strip() or "git branch falhou")
-    branches = [b.strip() for b in p.stdout.splitlines() if b.strip()]
+    # HEAD solto aparece como "(HEAD detached at x)": não é branch, não pode virar escolha nem base.
+    branches = [b.strip() for b in p.stdout.splitlines() if b.strip() and not b.strip().startswith("(")]
     local = set(branches)
 
     # Remotas: -r lista refs/remotes/*. Nome curto = tira o primeiro segmento (o nome do remote).
@@ -337,6 +338,8 @@ def list_branches(cwd: str) -> dict:
 
     cur = _run(cwd, "rev-parse", "--abbrev-ref", "HEAD")
     current = cur.stdout.strip() if cur.returncode == 0 else None
+    if current == "HEAD":   # HEAD solto: sem branch atual
+        current = None
     st = _run(cwd, "status", "--porcelain")
     dirty = st.returncode == 0 and bool(st.stdout.strip())
     return {"current": current, "branches": branches, "remotes": remotes, "dirty": dirty}

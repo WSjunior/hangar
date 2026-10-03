@@ -13,8 +13,9 @@ vi.mock('../../paraglide/messages', () => ({
   worktree_nova_branch: ({ base }: { base: string }) => `nova:${base}`, worktree_nome_branch: () => 'nome',
   worktree_base: () => 'base', worktree_modo: () => 'modo', worktree_modo_ajuda: () => 'ajuda',
   native_create_checkout_loading: () => 'lendo', native_create_checkout_failed: ({ reason }: { reason: string }) => `falha:${reason}` }));
+const folder = vi.hoisted(() => ({ value: { current: 'main' as string | null, branches: ['main', 'x'], remotes: [] as string[], dirty: false } }));
 vi.mock('@hangar/core', async (original) => ({ ...await original<typeof import('@hangar/core')>(),
-  getFolderBranchesForServer: () => Promise.resolve({ current: 'main', branches: ['main', 'x'], remotes: [], dirty: false }) }));
+  getFolderBranchesForServer: () => Promise.resolve(folder.value) }));
 import { BranchPicker } from './BranchPicker';
 
 describe('BranchPicker', () => {
@@ -37,5 +38,19 @@ describe('BranchPicker', () => {
     expect(el.querySelector('[aria-label="nome"]')).toBeTruthy();
     expect(onChange).toHaveBeenLastCalledWith({ branch: 'x', new_branch: true, base: 'main' });
     expect(onChange).not.toHaveBeenCalledWith(null);
+  });
+
+  it('HEAD solto: a base da branch nova é a primeira branch de verdade', async () => {
+    folder.value = { current: null, branches: ['dev', 'main'], remotes: [], dirty: false };
+    try {
+      const onChange = vi.fn();
+      const el = document.createElement('div');
+      await act(async () => { createRoot(el).render(createElement(BranchPicker,
+        { server: { id: 's' } as never, cwd: '/r', sessionName: 's', value: null, onChange })); });
+      await act(async () => { (el.querySelector('[aria-label="nova:dev"]') as HTMLElement).click(); });
+      expect(onChange).toHaveBeenLastCalledWith({ branch: '', new_branch: true, base: 'dev' });
+    } finally {
+      folder.value = { current: 'main', branches: ['main', 'x'], remotes: [], dirty: false };
+    }
   });
 });

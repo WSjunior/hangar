@@ -33,6 +33,14 @@ def test_list_branches(tmp_path):
     assert info["dirty"] is False
 
 
+def test_list_branches_detached_head_has_no_current(tmp_path):
+    d = _repo(tmp_path)
+    git_ops._run(d, "switch", "-q", "--detach")
+    info = git_ops.list_branches(d)
+    assert info["current"] is None
+    assert set(info["branches"]) == {"main", "feature"}
+
+
 def test_list_branches_dirty(tmp_path):
     d = _repo(tmp_path)
     (tmp_path / "novo.txt").write_text("x")  # arquivo untracked -> tree suja

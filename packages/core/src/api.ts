@@ -981,6 +981,11 @@ export interface FolderBranches {
   dirty: boolean;
 }
 
+// Base padrão da branch nova: a atual, ou com HEAD solto a primeira branch local (o backend recusa base vazia).
+export function defaultBase(info: FolderBranches): string {
+  return info.current ?? info.branches[0] ?? '';
+}
+
 export interface FolderGit {
   repo: boolean;       // false = pasta fora de repositório; os demais campos não vêm
   current?: string | null;

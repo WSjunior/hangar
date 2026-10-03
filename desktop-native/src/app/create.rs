@@ -63,6 +63,8 @@ fn checkout_of(result: Result<Value, Failure>) -> Result<Option<Checkout>, Strin
     }
 }
 
+fn default_base(c: &Checkout) -> Option<String> { c.current.clone().or_else(|| c.branches.first().cloned()) }
+
 #[derive(Clone, Debug, Deserialize)]
 struct ConfigDir { path: String, label: String, #[serde(default)] active: bool }
 
@@ -879,9 +881,9 @@ impl NewSession {
             CreateReply::Scan(seq, result) => { if self.scan.finish(seq, result) { self.refilter(cx); } }
             CreateReply::Branches(seq, result) => {
                 if !self.compact || !self.checkout.finish(seq, result) { return None; }
-                // A base padrão da branch nova é a branch atual da pasta.
+                // A base padrão da branch nova é a branch atual da pasta; com HEAD solto, a primeira local.
                 if self.base.is_empty() {
-                    self.base = self.checkout.ok().and_then(Option::as_ref).and_then(|c| c.current.clone()).unwrap_or_default();
+                    self.base = self.checkout.ok().and_then(Option::as_ref).and_then(default_base).unwrap_or_default();
                 }
             }
             CreateReply::Sessions(seq, result) => {
@@ -1945,6 +1947,13 @@ impl Hangar {
 #[cfg(test)]
 mod tests {
     use super::{Failure, HashSet, Root, basename, crumbs, json, rel_path, sanitize, scan_of, successor, tr, unique_name};
+
+    #[test]
+    fn detached_head_base_is_first_local_branch() {
+        let checkout = super::checkout_of(Ok(json!({"current": null, "branches": ["dev", "main"],
+            "remotes": ["r"], "dirty": false}))).unwrap().unwrap();
+        assert_eq!(super::default_base(&checkout).as_deref(), Some("dev"));
+    }
 
     #[test]
     fn checkout_hides_only_unsupported_or_non_git_and_rejects_old_folders() {

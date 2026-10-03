@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { getFolderBranchesForServer, type FolderBranches, type Server, type WorktreeChoice } from '@hangar/core';
+import { defaultBase, getFolderBranchesForServer, type FolderBranches, type Server, type WorktreeChoice } from '@hangar/core';
 import { superficie } from '../../theme/superficie';
 import * as m from '../../paraglide/messages';
 
@@ -31,7 +31,7 @@ export function BranchPicker({ server, cwd, sessionName, value, onChange }: Prop
     setFailed('');
     setLoading(true);
     getFolderBranchesForServer(server, cwd)
-      .then((r) => { if (vivo) { setInfo(r); setBase((b) => b || (r.current ?? '')); } })
+      .then((r) => { if (vivo) { setInfo(r); setBase((b) => b || defaultBase(r)); } })
       .catch((e: unknown) => {
         if (vivo && !isNotRepo(e)) setFailed(m.native_create_checkout_failed({ reason: e instanceof Error ? e.message : String(e) }));
       })

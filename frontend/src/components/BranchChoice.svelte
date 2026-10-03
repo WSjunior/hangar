@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { getFolderBranchesForServer, sanitizeSessionName, type FolderBranches, type Server, type WorktreeChoice } from '@hangar/core';
+  import { defaultBase, getFolderBranchesForServer, sanitizeSessionName, type FolderBranches, type Server, type WorktreeChoice } from '@hangar/core';
   import * as m from '../paraglide/messages';
 
   interface Props { server: Server; cwd: string; value: WorktreeChoice | null; sessionName: string;
@@ -23,7 +23,7 @@
     // Pasta nova: escolha da anterior não vale aqui (a branch pode nem existir neste repositório).
     info = null; mode = 'current'; existing = undefined; branchName = '';
     const atual = () => alvo === cwd && id === serverId;
-    getFolderBranchesForServer(s, alvo).then((r) => { if (atual()) { info = r; base = r.current ?? ''; } })
+    getFolderBranchesForServer(s, alvo).then((r) => { if (atual()) { info = r; base = defaultBase(r); } })
       .catch(() => { if (atual()) info = null; });   // pasta sem git: o seletor some
   });
   // O nome da sessão é texto livre; a branch padrão segue a mesma limpeza que o backend faz no nome.

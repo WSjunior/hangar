@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { basename, createSession, pickFolderRoot, providerName, type Provider, type WorktreeChoice } from '@hangar/core';
+  import { basename, createSession, defaultBase, pickFolderRoot, providerName, type Provider, type WorktreeChoice } from '@hangar/core';
   import HomeUsage from '../components/HomeUsage.svelte';
   import FolderGitPill from '../components/FolderGitPill.svelte';
   import BottomSheet from '../components/BottomSheet.svelte';
@@ -190,7 +190,7 @@
       </li>
       <li>
         <button type="button" class="row" class:on={draft.newBranch} aria-pressed={draft.newBranch}
-          onclick={() => { draft.newBranch = true; draft.branch = ''; draft.base = draft.base || (draft.branches?.current ?? ''); }}>
+          onclick={() => { draft.newBranch = true; draft.branch = ''; draft.base = draft.base || (draft.branches ? defaultBase(draft.branches) : ''); }}>
           <span>{m.worktree_nova_branch({ base: draft.base || draft.branches?.current || '' })}</span>
         </button>
       </li>
