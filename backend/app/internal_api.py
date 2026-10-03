@@ -56,6 +56,25 @@ def info_payload(name: str, provider: str, jsonl: str | None) -> dict:
 router = APIRouter(prefix="/internal", dependencies=[Depends(require_internal)], include_in_schema=False)
 
 
+@router.get("/workspace/context")
+async def workspace_context(name: str | None = None) -> dict:
+    """Só metadados; o consumidor privado não consulta novamente este registro."""
+    from app import api
+    from app.fs import allowed_roots
+
+    infos = await asyncio.to_thread(api._guardar_snap)
+    info = next((s for s in infos if s.name == name), None) if name else None
+    if name and (info is None or not info.cwd):
+        info = await api._cached_info(name)
+        if info is None or not info.cwd:
+            raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
+    return {
+        "roots": [str(root) for root in allowed_roots()],
+        "sessions": [{"name": s.name, "cwd": s.cwd} for s in infos if s.cwd],
+        "session": {"name": info.name, "cwd": info.cwd, "jsonl": info.jsonl} if info else None,
+    }
+
+
 @router.get("/sessions/{name}/info")
 async def session_info(name: str) -> dict:
     # Import tardio: api.py importa este módulo no topo.
