@@ -602,7 +602,8 @@ class PreviewBroker:
                     try:
                         await heartbeat
                     except asyncio.CancelledError:
-                        pass
+                        if asyncio.current_task().cancelling():
+                            raise
 
     async def _observe_loop(self) -> None:
         # SEMPRE extrai o último bloco ● (NÃO gateia por spinner): a detecção de spinner pisca falso
