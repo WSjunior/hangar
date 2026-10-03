@@ -931,11 +931,12 @@ class RateBody(BaseModel):
     token: str
     tokens: int = Field(gt=0, le=1_000_000)
     seconds: float = Field(gt=0, le=3600, allow_inf_nan=False)
+    session_id: str
 
 
 @plugin_router.post("/rate")
 async def rate(body: RateBody):
     """Velocidade de uma resposta, medida pelo `turn.step` do plugin no próprio processo."""
     _confere(body.sessao, body.token)
-    live_rate(body.sessao).close(body.tokens, body.seconds)
+    live_rate(body.sessao).close(body.tokens, body.seconds, body.session_id)
     return {"ok": True}

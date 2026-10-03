@@ -1442,7 +1442,7 @@ class ClaudeHeadlessAdapter:
             if isinstance(real, int):
                 sess.tokens_msg = real
                 if sess.gen_inicio is not None:
-                    live_rate(sess.name).close(real, time.monotonic() - sess.gen_inicio)
+                    live_rate(sess.name).close(real, time.monotonic() - sess.gen_inicio, sess.sid)
                     sess.gen_inicio = None
         elif tipo == "message_start":
             sess.fechar_mensagem()

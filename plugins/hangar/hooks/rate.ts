@@ -9,7 +9,7 @@ async function enviar($: EngineInterface, tokens: number, seconds: number) {
     await $.http.fetch(`${p.url}/rate`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessao: p.sessao, token: p.token, tokens, seconds }),
+      body: JSON.stringify({ sessao: p.sessao, token: p.token, tokens, seconds, session_id: await $.session.id() }),
     });
   } catch {
     // Backend fora do ar: perde-se a medida, nunca um pedaço da resposta.

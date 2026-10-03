@@ -30,32 +30,26 @@ class LiveRate:
     estimativa em voo, porque contar caracteres desse resumo dava metade do real."""
 
     def __init__(self) -> None:
-        self._calls: deque[tuple[int, float]] = deque(maxlen=RECENT_CALLS)
-        self._last_close: float | None = None   # relógio de parede, comparável ao do transcript
-        self._transcript: str | None = None
+        # (tokens, segundos, conversa, relógio de parede do fim)
+        self._calls: deque[tuple[int, float, str, float]] = deque(maxlen=RECENT_CALLS)
 
-    def close(self, tokens: int, seconds: float) -> None:
+    def close(self, tokens: int, seconds: float, conversation: str) -> None:
         if tokens > 0 and seconds >= MIN_GEN_S:
-            self._calls.append((tokens, seconds))
-            self._last_close = time.time()
+            self._calls.append((tokens, seconds, conversation, time.time()))
 
-    def snapshot(self, transcript: str, transcript_call_ts: float | None) -> dict:
-        # Outro transcript (/clear, sessão nova com o mesmo nome): as medidas eram da conversa velha.
-        if self._transcript != transcript:
-            if self._transcript is not None:
-                self._calls.clear()
-                self._last_close = None
-            self._transcript = transcript
-        if self._last_close is None:
+    def snapshot(self, conversation: str, transcript_call_ts: float | None) -> dict:
+        # Só a conversa mostrada: /clear e sessão nova com o mesmo nome trocam o id.
+        calls = [c for c in self._calls if c[2] == conversation]
+        if not calls:
             return {}
-        if transcript_call_ts is not None and transcript_call_ts > self._last_close + _STALE_S:
+        if transcript_call_ts is not None and transcript_call_ts > calls[-1][3] + _STALE_S:
             return {}
-        out = rates(self._calls)
+        out = rates([(t, s) for t, s, _, _ in calls])
         out["tok_s_exact"] = True
         return out
 
 
-# ponytail: um por nome de sessão, sem limpeza; cada um guarda 10 pares.
+# ponytail: um por nome de sessão, sem limpeza; cada um guarda 10 medidas.
 _live_rates: dict[str, LiveRate] = {}
 
 
@@ -63,6 +57,6 @@ def live_rate(name: str) -> LiveRate:
     return _live_rates.setdefault(name, LiveRate())
 
 
-def live_snapshot(name: str, transcript: str, transcript_call_ts: float | None) -> dict:
+def live_snapshot(name: str, conversation: str, transcript_call_ts: float | None) -> dict:
     rate = _live_rates.get(name)
-    return rate.snapshot(transcript, transcript_call_ts) if rate else {}
+    return rate.snapshot(conversation, transcript_call_ts) if rate else {}

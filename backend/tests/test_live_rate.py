@@ -6,18 +6,20 @@ from app.live_rate import LiveRate
 from app.stats import Accumulator
 
 
-def test_medida_vale_so_para_o_transcript_e_ate_ele_passar_a_frente():
+def test_medida_vale_so_para_a_conversa_e_ate_o_transcript_passar_a_frente():
     r = LiveRate()
-    r.close(100, 1.0)
-    r.close(10, 0.1)                      # curta demais: ruído de relógio
-    assert r.snapshot("a.jsonl", time.time()) == {"tok_s_now": 100.0, "tok_s_recent": 100.0,
-                                                  "tok_s_exact": True}
+    r.close(100, 1.0, "a")
+    r.close(10, 0.1, "a")                 # curta demais: ruído de relógio
+    assert r.snapshot("a", time.time()) == {"tok_s_now": 100.0, "tok_s_recent": 100.0,
+                                            "tok_s_exact": True}
     # Transcript com resposta bem mais nova: quem media parou (plugin fora, CLI sem ele).
-    assert r.snapshot("a.jsonl", time.time() + 60) == {}
-    # /clear ou sessão nova com o mesmo nome: as medidas eram da conversa anterior.
-    assert r.snapshot("b.jsonl", None) == {}
-    r.close(50, 1.0)
-    assert r.snapshot("b.jsonl", None)["tok_s_recent"] == 50.0
+    assert r.snapshot("a", time.time() + 60) == {}
+    # /clear ou sessão nova com o mesmo nome: outra conversa não herda as medidas.
+    assert r.snapshot("b", None) == {}
+    r.close(50, 1.0, "b")
+    assert r.snapshot("b", None)["tok_s_recent"] == 50.0
+    # Ler não apaga: duas conexões olhando conversas diferentes não se atrapalham.
+    assert r.snapshot("a", None)["tok_s_now"] == 100.0
 
 
 def test_reserva_vai_ate_o_ultimo_bloco_e_parte_do_recado(tmp_path):
