@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from contextlib import contextmanager
 import ipaddress
@@ -10,6 +11,7 @@ from http.client import HTTPException
 import logging
 import math
 import sys
+import threading
 import time
 import urllib.request
 from uuid import uuid4
@@ -17,7 +19,14 @@ from uuid import uuid4
 from app import tmux
 
 _log = logging.getLogger("hangar.terminal_observer")
-TIMEOUT = 6.0
+TIMEOUT = 0.25
+MAX_FAILURES = 3
+MAX_BACKOFF = 30.0
+_io_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="hangar-terminal")
+_io_slots = threading.BoundedSemaphore(4)
+_failures = 0
+_retry_at = 0.0
+_backoff = 1.0
 MAX_BODY = 16 * 1024 * 1024
 HEARTBEAT = 20.0
 _config: tuple[str, str] | None = None
@@ -31,11 +40,12 @@ _STATES = {"idle", "working", "awaiting_input", "dead"}
 
 
 def configure(address: str | None, secret: str | None) -> None:
-    global _config, _generation
+    global _config, _generation, _failures, _retry_at, _backoff
     _config = None
     _generation += 1
     _analysis.clear()
     _warned.clear()
+    _failures, _retry_at, _backoff = 0, 0.0, 1.0
     if address is not None and secret:
         # O Supervisor fornece um IP literal: não resolvemos nomes nem usamos proxies.
         if not isinstance(address, str) or len(address) > 128:
@@ -54,9 +64,43 @@ def forget(name: str) -> None:
 
 
 def _failure(code: str) -> None:
+    global _failures, _retry_at, _backoff
+    now = time.monotonic()
+    if now >= _retry_at:
+        _failures += 1
+        if _failures >= MAX_FAILURES:
+            _retry_at = now + _backoff
+            _backoff = min(_backoff * 2, MAX_BACKOFF)
     if code not in _warned:
         _warned.add(code)
         _log.warning("observação terminal usa reserva Python: %s", code)
+
+
+def _success() -> None:
+    global _failures, _retry_at, _backoff
+    _failures, _retry_at, _backoff = 0, 0.0, 1.0
+
+
+def _available() -> bool:
+    return _config is not None and sys.platform != "win32" and time.monotonic() >= _retry_at
+
+
+class _IoBusy(Exception):
+    pass
+
+
+async def _io(fn, *args):
+    if not _io_slots.acquire(blocking=False):
+        raise _IoBusy()
+    slots = _io_slots
+    try:
+        job = _io_pool.submit(fn, *args)
+    except BaseException:
+        slots.release()
+        raise
+    # Cancelar a espera não libera a vaga de um trabalho que ainda está executando.
+    job.add_done_callback(lambda _: slots.release())
+    return await asyncio.wait_for(asyncio.wrap_future(job), TIMEOUT)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -82,16 +126,25 @@ def _http(config: tuple[str, str], payload: dict) -> dict | None:
 
 async def _request(payload: dict) -> dict | None:
     config = _config
-    if config is None or sys.platform == "win32":
+    generation = _generation
+    if not _available():
         return None
     try:
-        result = await asyncio.wait_for(asyncio.to_thread(_http, config, payload), TIMEOUT + 0.5)
+        result = await _io(_http, config, payload)
+        if generation != _generation:
+            return None
         if result is None:
             _failure("invalid_http_response")
+        elif payload.get("op") in ("acquire", "release"):
+            if result != {}:
+                _failure("invalid_http_response")
+                return None
+            _success()
         return result
-    except (OSError, ValueError, TimeoutError, HTTPException):
+    except (OSError, ValueError, TimeoutError, HTTPException, _IoBusy):
         # Nem pane, segredo, URL ou mensagem de exceção entram no diário.
-        _failure("http_unavailable")
+        if generation == _generation:
+            _failure("http_unavailable")
         return None
 
 
@@ -182,9 +235,13 @@ class Lease:
 
     async def payload(self, op, started):
         identity = self.identity()
-        if identity is None or _config is None or sys.platform == "win32":
+        if identity is None or not _available():
             return None
-        target = await asyncio.to_thread(tmux._pane_target, self.name)
+        try:
+            target = await _io(tmux._pane_target, self.name)
+        except (OSError, TimeoutError, _IoBusy) as exc:
+            _failure(f"terminal_target_{type(exc).__name__}")
+            return None
         if identity != self.identity():
             return None
         self.remote_generation = _generation
@@ -242,6 +299,8 @@ async def capture(name: str, started: float) -> dict | None:
     result = await _request(payload)
     if before != stamp(name):
         return None
+    if result is None:
+        return None
     if not isinstance(result, dict) or set(result) != {"binding", "started", "text", "analysis"}:
         _failure("invalid_frame")
         return None
@@ -250,6 +309,7 @@ async def capture(name: str, started: float) -> dict | None:
         _failure("invalid_frame")
         return None
     _analysis[name] = (before, started, result["text"], result["analysis"])
+    _success()
     return result
 
 
@@ -264,11 +324,13 @@ def frame_analysis(name: str, pane: str) -> dict | None:
 
 
 async def reduce(name: str, pane: str, memory: dict, facts: dict) -> dict | None:
-    if _config is None or sys.platform == "win32" or stamp(name)[0] is None:
+    if not _available() or stamp(name)[0] is None:
         return None
     before = stamp(name)
     result = await _request(dict(op="reduce", pane=pane, memory=memory, facts=facts))
     if before != stamp(name):
+        return None
+    if result is None:
         return None
     if (not isinstance(result, dict) or set(result) != {"analysis", "memory", "diagnostic"}
             or not valid_analysis(result["analysis"]) or not valid_memory(result["memory"])):
@@ -286,4 +348,5 @@ async def reduce(name: str, pane: str, memory: dict, facts: dict) -> dict | None
                 or diagnostic["before_plugin"] not in ("working", "idle")))):
         _failure("invalid_reducer")
         return None
+    _success()
     return result

@@ -242,6 +242,10 @@ for n, line in enumerate(sys.stdin, 1):
         continue
     if wrapped:
         frame(n * 100, start)
+    if mode == 'hold' and name == 'fixture' and n == 3:
+        root.joinpath('blocked').write_text('yes')
+        while not root.joinpath('resume').exists():
+            time.sleep(.01)
     if mode == 'static-error':
         sys.stdout.write(f'%begin 1 {n * 100 + 17} 0\nfailed\n%error 1 {n * 100 + 17} 0\n')
         sys.stdout.flush()
@@ -375,6 +379,89 @@ async fn observer_retry_pause_grows_expires_and_resets_after_success() {
     tokio::time::sleep(Duration::from_millis(130)).await;
     assert!(pool.capture(request("state")).await.is_err());
     assert_eq!(count(), 5, "sucesso deve repor a pausa inicial");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn consumer_rebind_waits_for_old_release_without_blocking_another_session() {
+    let (dir, program, _, _) = fake_observer("hold");
+    let limits = Limits { startup: Duration::from_millis(500), command: Duration::from_millis(700), ..Limits::default() };
+    let pool = TerminalPool::with_program(program, None, limits);
+    pool.acquire(request("state")).await.unwrap();
+    let old = pool.clone();
+    let capture = tokio::spawn(async move { old.capture(request("state")).await });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !dir.path().join("blocked").exists() { tokio::time::sleep(Duration::from_millis(5)).await; }
+    }).await.unwrap();
+    let migrating = pool.clone();
+    let migration = tokio::spawn(async move {
+        let mut r = request("state"); r.binding = "conversation-b".into();
+        migrating.acquire(r).await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let releasing = pool.clone();
+    let release = tokio::spawn(async move { releasing.release("state").await });
+    let mut other = request("other"); other.name = "another".into(); other.target = "=another:".into();
+    tokio::time::timeout(Duration::from_millis(250), async {
+        pool.acquire(other.clone()).await.unwrap();
+        assert_eq!(pool.capture(other).await.unwrap().text, "ready\n\n\n\n");
+        pool.release("other").await.unwrap();
+    }).await.expect("release da sessão A não pode prender acquire/capture/release da B");
+    std::fs::write(dir.path().join("resume"), "yes").unwrap();
+    capture.await.unwrap().unwrap();
+    migration.await.unwrap().unwrap();
+    release.await.unwrap().unwrap();
+    let pids = std::fs::read_to_string(dir.path().join("spawns")).unwrap();
+    for pid in pids.lines() { assert!(!process_exists(pid), "release concorrente deve alcançar o actor novo: {pid}"); }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn terminal_consumer_locks_are_bounded_and_reusable_after_release() {
+    let (_dir, program, pid_file, _) = fake_observer("normal");
+    let pool = TerminalPool::with_program(program, None, Limits::default());
+    for n in 0..256 { pool.acquire(request(&format!("consumer-{n}"))).await.unwrap(); }
+    pool.release("not-active").await.unwrap();
+    assert_eq!(pool.acquire(request("overflow")).await.unwrap_err().0, "too many terminal consumers");
+    pool.release("consumer-0").await.unwrap();
+    pool.acquire(request("overflow")).await.unwrap();
+    for n in 1..256 { pool.release(&format!("consumer-{n}")).await.unwrap(); }
+    pool.release("overflow").await.unwrap();
+    assert!(!process_exists(&std::fs::read_to_string(pid_file).unwrap()));
+    for n in 0..300 { pool.release(&format!("absent-{n}")).await.unwrap(); }
+    pool.acquire(request("fresh")).await.unwrap();
+    pool.release("fresh").await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn terminal_actor_queue_is_bounded_while_capture_is_blocked() {
+    let (dir, program, _, _) = fake_observer("hold");
+    let limits = Limits { command: Duration::from_secs(2), ..Limits::default() };
+    let pool = TerminalPool::with_program(program, None, limits);
+    pool.acquire(request("state")).await.unwrap();
+    let old = pool.clone();
+    let capture = tokio::spawn(async move { old.capture(request("state")).await });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !dir.path().join("blocked").exists() { tokio::time::sleep(Duration::from_millis(5)).await; }
+    }).await.unwrap();
+    let (completed, mut results) = tokio::sync::mpsc::channel(64);
+    let mut tasks = Vec::new();
+    for n in 0..64 {
+        let (queued, completed) = (pool.clone(), completed.clone());
+        tasks.push(tokio::spawn(async move {
+            completed.send(queued.capture(request(&format!("queued-{n}"))).await).await.unwrap();
+        }));
+    }
+    tokio::time::timeout(Duration::from_millis(250), async {
+        for _ in 0..32 { assert_eq!(results.recv().await.unwrap().unwrap_err().0, "terminal queue full"); }
+    }).await.expect("fila cheia deve recusar sem aguardar o comando preso");
+    std::fs::write(dir.path().join("resume"), "yes").unwrap();
+    capture.await.unwrap().unwrap();
+    for _ in 0..32 { results.recv().await.unwrap().unwrap(); }
+    for task in tasks { task.await.unwrap(); }
+    for n in 0..64 { pool.release(&format!("queued-{n}")).await.unwrap(); }
+    pool.release("state").await.unwrap();
 }
 
 #[cfg(unix)]

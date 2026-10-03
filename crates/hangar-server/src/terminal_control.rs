@@ -223,7 +223,12 @@ enum Request {
     Release(String, oneshot::Sender<Result<()>>),
 }
 #[derive(Default)]
-struct Entries { actors: HashMap<Key, mpsc::Sender<Request>>, consumers: HashMap<String, (Key, Instant)>, failures: HashMap<Key, Failure> }
+struct Entries {
+    actors: HashMap<Key, mpsc::Sender<Request>>,
+    consumers: HashMap<String, (Key, Instant)>,
+    failures: HashMap<Key, Failure>,
+    consumer_locks: HashMap<String, Arc<Mutex<()>>>,
+}
 struct Failure { attempts: u32, until: Instant, error: TerminalError }
 #[derive(Clone)]
 pub struct TerminalPool {
@@ -238,9 +243,24 @@ impl TerminalPool {
     pub fn with_program(program: impl Into<PathBuf>, socket: Option<PathBuf>, limits: Limits) -> Self {
         Self { entries: Arc::new(Mutex::new(Entries::default())), program: program.into(), socket, limits }
     }
+    async fn consumer_lock(&self, consumer: &str) -> Result<Arc<Mutex<()>>> {
+        let mut entries = self.entries.lock().await;
+        entries.actors.retain(|_, tx| !tx.is_closed());
+        let live: std::collections::HashSet<_> = entries.actors.keys().cloned().collect();
+        entries.consumers.retain(|_, (key, renewed)| live.contains(key) && renewed.elapsed() < self.limits.lease);
+        let Entries { consumers, consumer_locks, .. } = &mut *entries;
+        consumer_locks.retain(|name, lock| consumers.contains_key(name) || Arc::strong_count(lock) > 1);
+        if !consumer_locks.contains_key(consumer) && consumer_locks.len() >= MAX_CONSUMERS {
+            return Err(TerminalError("too many terminal consumers"));
+        }
+        Ok(consumer_locks.entry(consumer.into()).or_insert_with(|| Arc::new(Mutex::new(()))).clone())
+    }
     async fn enqueue(&self, request: &CaptureRequest, message: Request) -> Result<()> {
         validate(request)?;
         if cfg!(windows) { return Err(TerminalError("terminal control unavailable")); }
+        // Migração e release do mesmo consumidor precisam conservar sua ordem sem prender outras sessões.
+        let serial = self.consumer_lock(&request.consumer).await?;
+        let _consumer = serial.lock().await;
         let key = Key::from(request);
         let mut entries = self.entries.lock().await;
         entries.actors.retain(|_, tx| !tx.is_closed());
@@ -251,11 +271,20 @@ impl TerminalPool {
         let live: std::collections::HashSet<_> = entries.actors.keys().cloned().collect();
         entries.consumers.retain(|_, (k, renewed)| live.contains(k) && renewed.elapsed() < self.limits.lease);
         if let Some(old) = entries.consumers.get(&request.consumer).filter(|(old, _)| *old != key).map(|(key, _)| key.clone()) {
-            if let Some(tx) = entries.actors.get(&old) {
+            let receive = if let Some(tx) = entries.actors.get(&old) {
                 let (reply, receive) = oneshot::channel();
                 tx.try_send(Request::Release(request.consumer.clone(), reply)).map_err(|_| TerminalError("terminal queue full"))?;
+                Some(receive)
+            } else { None };
+            drop(entries);
+            if let Some(receive) = receive {
                 timeout(self.limits.command + self.limits.startup, receive).await.map_err(|_| TerminalError("terminal release timeout"))?
                     .map_err(|_| TerminalError("terminal observer closed"))??;
+            }
+            entries = self.entries.lock().await;
+            entries.actors.retain(|_, tx| !tx.is_closed());
+            if let Some(failure) = entries.failures.get(&key).filter(|failure| Instant::now() < failure.until) {
+                return Err(failure.error.clone());
             }
             entries.consumers.remove(&request.consumer);
         }
@@ -289,6 +318,13 @@ impl TerminalPool {
             .map_err(|_| TerminalError("terminal observer closed"))?
     }
     pub async fn release(&self, consumer: &str) -> Result<()> {
+        {
+            let entries = self.entries.lock().await;
+            if !entries.consumers.contains_key(consumer)
+                && entries.consumer_locks.get(consumer).is_none_or(|lock| Arc::strong_count(lock) == 1) { return Ok(()); }
+        }
+        let serial = self.consumer_lock(consumer).await?;
+        let _consumer = serial.lock().await;
         let (reply, receive) = oneshot::channel();
         {
             let mut entries = self.entries.lock().await;

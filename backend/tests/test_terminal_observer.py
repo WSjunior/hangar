@@ -22,17 +22,25 @@ def analysis():
 
 @pytest.fixture(autouse=True)
 def clean_frames(monkeypatch):
-    state._frames.clear()
-    state._frames_inflight.clear()
-    monkeypatch.setattr(state.tmux, "capture_pane", lambda *args: "Python")
-    monkeypatch.setattr(state.tmux, "sessao_existe", lambda *args: True)
     blocked = []
     def deny(*args, **kwargs):
         blocked.append(args)
         raise AssertionError("real tmux forbidden in terminal observer tests")
     monkeypatch.setattr(state.tmux, "_run", deny)
     monkeypatch.setattr(state.tmux, "RUN", deny)
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from app import diag
+    monkeypatch.setattr(diag, "registrar", lambda *args, **kwargs: None)
+    pool = ThreadPoolExecutor(max_workers=4)
+    monkeypatch.setattr(bridge(), "_io_pool", pool)
+    monkeypatch.setattr(bridge(), "_io_slots", threading.BoundedSemaphore(4))
+    state._frames.clear()
+    state._frames_inflight.clear()
+    monkeypatch.setattr(state.tmux, "capture_pane", lambda *args: "Python")
+    monkeypatch.setattr(state.tmux, "sessao_existe", lambda *args: True)
     yield
+    pool.shutdown(wait=True)
     assert not blocked, "a fallback swallowed a forbidden tmux call"
     try:
         bridge().configure(None, None)
@@ -663,20 +671,27 @@ def test_terminal_bridge_refuses_every_redirect_before_second_request(monkeypatc
 
 
 def test_http_reserve_does_not_swallow_request_cancellation(monkeypatch):
+    import threading
     t = bridge()
     t.configure("127.0.0.1:12345", "test-only")
+    release = threading.Event()
     async def run():
         entered = asyncio.Event()
-        async def pending(*args):
-            entered.set()
-            await asyncio.Future()
-        monkeypatch.setattr(t.asyncio, "to_thread", pending)
+        loop = asyncio.get_running_loop()
+        def pending(*args):
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(2)
+            return {}
+        monkeypatch.setattr(t, "_http", pending)
         task = asyncio.create_task(t._request({"op":"release", "consumer":"c"}))
-        await entered.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        assert task.cancelled()
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert task.cancelled()
+        finally:
+            release.set()
     asyncio.run(run())
 
 
@@ -1000,4 +1015,166 @@ def test_failed_lease_start_leaves_closed_source_and_allows_python_capture(monke
             assert source.identity() is None
             assert not t.retired("closed-start-failure")
             assert await state.shared_capture("closed-start-failure", 0) == "Python"
+    asyncio.run(run())
+
+
+def test_stalled_bridge_many_chats_keep_default_executor_free_and_bound_jobs(monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(t, "TIMEOUT", 0.05)
+    release = threading.Event()
+    lock = threading.Lock()
+    active, peak = [0], [0]
+    def stalled(config, payload):
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        try:
+            assert release.wait(2)
+            return {}
+        finally:
+            with lock:
+                active[0] -= 1
+    monkeypatch.setattr(t, "_http", stalled)
+    async def run():
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        started = loop.time()
+        try:
+            results = await asyncio.wait_for(asyncio.gather(*(
+                t._request({"op": "release", "consumer": f"chat-{i}"}) for i in range(20))), 1)
+            assert results == [None] * 20
+            assert loop.time() - started < 0.3
+            assert await asyncio.wait_for(asyncio.to_thread(lambda: "free"), 0.1) == "free"
+            assert 1 <= peak[0] <= 4
+        finally:
+            release.set()
+    asyncio.run(run())
+
+
+def test_request_cancellation_keeps_running_io_capacity_until_job_finishes(monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    pool = ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(t, "_io_pool", pool, raising=False)
+    monkeypatch.setattr(t, "_io_slots", threading.BoundedSemaphore(1), raising=False)
+    release = threading.Event()
+    calls = []
+    async def run():
+        entered = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        def stalled(config, payload):
+            calls.append(payload)
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(2)
+            return {}
+        monkeypatch.setattr(t, "_http", stalled)
+        task = asyncio.create_task(t._request({"op": "release", "consumer": "first"}))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert await asyncio.wait_for(t._request({"op": "release", "consumer": "second"}), 0.1) is None
+            assert len(calls) == 1
+        finally:
+            release.set()
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    try:
+        asyncio.run(run())
+    finally:
+        release.set()
+        pool.shutdown(wait=True)
+
+
+def test_bridge_circuit_pauses_after_three_failures_grows_and_resets(monkeypatch):
+    from types import SimpleNamespace
+    t = bridge()
+    now = [100.0]
+    monkeypatch.setattr(t, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    t.configure("127.0.0.1:12345", "test-only")
+    calls = []
+    fail = [True]
+    def response(config, payload):
+        calls.append(payload)
+        if fail[0]:
+            raise TimeoutError("private-pane-and-secret")
+        return {}
+    monkeypatch.setattr(t, "_http", response)
+    async def run():
+        for _ in range(3):
+            assert await t._request({"op": "release", "consumer": "c"}) is None
+        assert await t._request({"op": "release", "consumer": "c"}) is None
+        assert len(calls) == 3
+        now[0] = 101.0
+        assert await t._request({"op": "release", "consumer": "c"}) is None
+        now[0] = 102.0
+        assert await t._request({"op": "release", "consumer": "c"}) is None
+        assert len(calls) == 4
+        now[0] = 103.0
+        fail[0] = False
+        assert await t._request({"op": "release", "consumer": "c"}) == {}
+        fail[0] = True
+        for _ in range(3):
+            assert await t._request({"op": "release", "consumer": "c"}) is None
+        t.configure("127.0.0.1:23456", "another-test-only")
+        fail[0] = False
+        assert await t._request({"op": "release", "consumer": "c"}) == {}
+    asyncio.run(run())
+
+
+def test_malformed_capture_counts_as_failure_and_stops_io_until_retry(monkeypatch):
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    calls = []
+    def response(config, payload):
+        calls.append(payload)
+        return {}  # Corpo válido, quadro incompleto.
+    monkeypatch.setattr(t, "_http", response)
+    async def run():
+        async with t.lease("malformed-circuit", "claude", lambda: "b"):
+            for i in range(4):
+                assert await t.capture("malformed-circuit", float(i)) is None
+    asyncio.run(run())
+    assert len([p for p in calls if p["op"] == "capture"]) == 3
+
+
+def test_old_generation_io_failure_cannot_close_reconfigured_bridge(monkeypatch):
+    import threading
+    t = bridge()
+    t.configure("127.0.0.1:12345", "old-test-only")
+    release = threading.Event()
+    async def run():
+        entered = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        attempts = [0]
+        def response(config, payload):
+            if config[1] == "old-test-only":
+                loop.call_soon_threadsafe(entered.set)
+                assert release.wait(2)
+                return None
+            attempts[0] += 1
+            if attempts[0] <= 2:
+                raise TimeoutError("private-pane-and-secret")
+            return {}
+        monkeypatch.setattr(t, "_http", response)
+        old = asyncio.create_task(t._request({"op": "release", "consumer": "old"}))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            t.configure("127.0.0.1:23456", "new-test-only")
+            for _ in range(2):
+                assert await t._request({"op": "release", "consumer": "new"}) is None
+            release.set()
+            assert await old is None
+            assert await t._request({"op": "release", "consumer": "new"}) == {}
+        finally:
+            release.set()
+            await asyncio.gather(old, return_exceptions=True)
     asyncio.run(run())
