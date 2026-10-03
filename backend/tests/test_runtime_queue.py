@@ -219,3 +219,144 @@ def test_terminal_claim_recovery_requires_proof_before_dispatch(tmp_path, status
     store = open_store(tmp_path)
     store.exec(1, "recover", CLOCK, {"kind": "recover"})
     assert store.state["rows"][0]["delivered"] is expected
+
+
+@pytest.mark.parametrize("claimed", [False, True])
+@pytest.mark.parametrize("attempts", [0, 1, 2])
+@pytest.mark.parametrize("rejected", [False, True])
+def test_terminal_finish_commits_counter_and_row_atomically(tmp_path, claimed, attempts, rejected):
+    store = open_store(tmp_path)
+    store.exec(1, "append", CLOCK, append())
+    for number in range(attempts):
+        store.exec(1, f"bump:{number}", CLOCK, {"kind": "bump_attempts", "entry_id": "entry-1"})
+    if claimed:
+        store.exec(1, "terminal:queue:999", CLOCK, {"kind": "claim", "min_ts": 1.0, "limit": 1, "entry_id": None})
+    store.exec(1, "terminal:queue:1000", CLOCK, {"kind": "prepare", "id": "attempt", "entry_id": "entry-1",
+        "payload": {"operation_id": "attempt", "kind": "input", "payload": {"text": "Olá", "pre_transcript": False, "_terminal_generation": 1}}})
+    store.exec(1, "dispatch", CLOCK, {"kind": "begin_dispatch", "id": "attempt", "wire_id": "terminal:1:attempt"})
+    status = "rejected" if rejected else "deferred"
+    result = {"operation_id": "attempt", "disposition": status, "payload": {"cleanup": "proved"}}
+    finish = {"kind": "finish", "id": "attempt", "status": status, "result": result}
+    store.exec(1, "finish", CLOCK, finish)
+    abandoned = rejected or attempts == 2
+    assert store.state["rows"][0]["delivered"] is abandoned
+    if abandoned:
+        assert store.state["rows"][0]["desistiu"] is True
+    else:
+        assert store.state["rows"][0]["attempts"] == attempts + 1
+    row = dict(store.state["rows"][0])
+    store = open_store(tmp_path)
+    store.exec(1, "recover1", CLOCK, {"kind": "recover"})
+    store.exec(1, "finish-new-id", CLOCK, finish)
+    store.exec(1, "recover2", CLOCK, {"kind": "recover"})
+    assert store.state["rows"][0] == row
+
+
+def test_terminal_prepare_missing_row_is_recovered_with_same_body(tmp_path):
+    store = open_store(tmp_path)
+    payload = {"operation_id": "missing", "kind": "input", "payload": {
+        "text": "Olá 🌎 — 📎 imagem: /tmp/x.png", "pre_transcript": True, "_terminal_generation": 1}}
+    store.exec(1, "terminal:queue:1", CLOCK, {"kind": "prepare", "id": "missing", "payload": payload, "entry_id": "missing"})
+    store = open_store(tmp_path)
+    store.exec(1, "recover1", CLOCK, {"kind": "recover"})
+    assert len(store.state["rows"]) == 1
+    row = store.state["rows"][0]
+    assert row["id"] == "missing"
+    assert row["text"] == payload["payload"]["text"]
+    assert row["pre_transcript"] is True
+    assert row["delivered"] is False
+    store.exec(1, "recover2", CLOCK, {"kind": "recover"})
+    assert store.state["rows"] == [row]
+
+
+@pytest.mark.parametrize("claimed", [False, True])
+@pytest.mark.parametrize("attempts", [0, 1, 2])
+@pytest.mark.parametrize("rejected", [False, True])
+def test_terminal_legacy_finish_recovery_is_idempotent(tmp_path, claimed, attempts, rejected):
+    store = open_store(tmp_path)
+    store.exec(1, "append", CLOCK, append())
+    if claimed:
+        store.exec(1, "terminal:queue:1000", CLOCK, {"kind": "claim", "min_ts": 1.0, "limit": 1, "entry_id": None})
+    store.exec(1, "terminal:queue:1001", CLOCK, {"kind": "prepare", "id": "attempt", "entry_id": "entry-1",
+        "payload": {"operation_id": "attempt", "kind": "input", "payload": {"text": "Olá", "pre_transcript": False}}})
+    store.exec(1, "dispatch", CLOCK, {"kind": "begin_dispatch", "id": "attempt", "wire_id": "terminal:1:attempt"})
+    frozen = json.loads(store.state_path.read_text())
+    frozen["rows"][0]["attempts"] = attempts
+    status = "rejected" if rejected else "deferred"
+    frozen["operations"]["attempt"].update(status=status, result={"operation_id": "attempt", "disposition": status, "payload": {"cleanup": "proved"}})
+    store.state_path.write_text(json.dumps(frozen))
+    store = open_store(tmp_path)
+    store.exec(1, "recover1", CLOCK, {"kind": "recover"})
+    row = dict(store.state["rows"][0])
+    assert row["delivered"] is (rejected or attempts == 2)
+    if rejected or attempts == 2:
+        assert row["desistiu"] is True
+    else:
+        assert row["attempts"] == attempts + 1
+    store.exec(1, "recover2", CLOCK, {"kind": "recover"})
+    assert store.state["rows"][0] == row
+
+
+@pytest.mark.parametrize("status", ["unknown", "dispatching", "accepted", "confirmed", "prepared"])
+@pytest.mark.parametrize("marker", [False, True])
+def test_missing_row_never_reconstructed_for_effect_or_headless(tmp_path, status, marker):
+    store = open_store(tmp_path)
+    payload = {"operation_id": "root", "kind": "input", "payload": {"text": "Olá", "pre_transcript": True}}
+    if marker:
+        payload["payload"]["_terminal_generation"] = 1
+    store.exec(1, "headless-prepare", CLOCK, {"kind": "prepare", "id": "root", "entry_id": "entry-1", "payload": payload})
+    if status == "dispatching":
+        store.exec(1, "dispatch", CLOCK, {"kind": "begin_dispatch", "id": "root", "wire_id": "wire"})
+    elif status != "prepared":
+        store.exec(1, "finish", CLOCK, {"kind": "finish", "id": "root", "status": status, "result": {}})
+    if status == "prepared":
+        store.exec(1, "phase", CLOCK, {"kind": "prepare", "id": "phase", "entry_id": None, "payload": {"logical_id": "root"}})
+        store.exec(1, "phase-dispatch", CLOCK, {"kind": "begin_dispatch", "id": "phase", "wire_id": "wire"})
+    store.exec(1, "recover", CLOCK, {"kind": "recover"})
+    assert store.state["rows"] == []
+
+
+@pytest.mark.parametrize("transition", ["after_bump", "after_unclaim", "after_abandon"])
+def test_legacy_terminal_finish_completed_parts_are_not_counted_twice(tmp_path, transition):
+    store = open_store(tmp_path)
+    store.exec(1, "append", CLOCK, append())
+    store.exec(1, "terminal:queue:1", CLOCK, {"kind": "prepare", "id": "attempt", "entry_id": "entry-1", "payload": {
+        "operation_id": "attempt", "kind": "input", "payload": {"text": "Olá", "pre_transcript": False}}})
+    store.exec(1, "dispatch", CLOCK, {"kind": "begin_dispatch", "id": "attempt", "wire_id": "terminal:1:attempt"})
+    frozen = json.loads(store.state_path.read_text())
+    from app.runtime_queue import _operation
+    status = "rejected" if transition == "after_abandon" else "deferred"
+    result = {"operation_id": "attempt", "disposition": status, "payload": {"cleanup": "proved"}}
+    frozen["operations"]["attempt"].update(status=status, result=result)
+    finish = {"kind": "finish", "id": "attempt", "status": status, "result": result}
+    frozen["operations"]["call::terminal:queue:2"] = _operation("call::terminal:queue:2", finish)
+    frozen["operations"]["call::terminal:queue:2"].update(status="accepted", result={})
+    frozen["rows"][0]["attempts"] = 1
+    if transition == "after_unclaim":
+        frozen["rows"][0]["delivered"] = False
+    elif transition == "after_abandon":
+        frozen["rows"][0].update(desistiu=True, desistiu_ts=CLOCK["epoch_s"] - 10)
+    if transition != "after_abandon":
+        bump = {"kind": "bump_attempts", "entry_id": "entry-1"}
+        frozen["operations"]["call::terminal:queue:3"] = _operation("call::terminal:queue:3", bump)
+        frozen["operations"]["call::terminal:queue:3"].update(status="accepted", result=1)
+    store.state_path.write_text(json.dumps(frozen))
+    store = open_store(tmp_path)
+    store.exec(1, "recover", CLOCK, {"kind": "recover"})
+    row = store.state["rows"][0]
+    assert row["attempts"] == 1
+    if transition == "after_abandon":
+        assert row["desistiu_ts"] == CLOCK["epoch_s"] - 10
+    else:
+        assert row["delivered"] is False
+
+
+def test_terminal_rejected_before_dispatch_abandons_pending_row(tmp_path):
+    store = open_store(tmp_path)
+    store.exec(1, "append", CLOCK, append())
+    store.exec(1, "prepare", CLOCK, {"kind": "prepare", "id": "op", "entry_id": "entry-1", "payload": {
+        "operation_id": "op", "kind": "input", "payload": {"text": "Olá", "_terminal_generation": 1}}})
+    store.exec(1, "finish", CLOCK, {"kind": "finish", "id": "op", "status": "rejected", "result": {
+        "operation_id": "op", "disposition": "rejected", "payload": {"code": "refused"}}})
+    assert store.state["rows"][0]["delivered"] is True
+    assert store.state["rows"][0]["desistiu"] is True

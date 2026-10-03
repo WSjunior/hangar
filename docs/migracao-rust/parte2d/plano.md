@@ -99,6 +99,8 @@ Stage explícito; mensagem `feat(server): own Claude terminal delivery and queue
 `internal_api.py`, `terminal_input.py`, `api.py`, `plugin_bridge.py`,
 `plugins/hangar/hooks/input.ts`, adapter Claude terminal e testes tocados;
 Versão 9 já aplicada junto do contrato privado na Task 2.
+`backend/app/runtime_process.py` e `rust_server.py` contêm e encerram os descendentes do Rust,
+para provar fim dos escritores antes de liberar a reserva ou readotar a vida após morte abrupta.
 **Interfaces:** Binding terminal resolve pane/conversa registrados; serviço de fatos lê estado;
 serviço plugin publica/aguarda aviso sem dirigir terminal; fachada encaminha todas as ações.
 
@@ -108,7 +110,9 @@ Novo terminal gerenciado sem cano; preparar/adotar; envio comum/drain/confirm/te
 plugin primitivo nunca tecla; geração antiga não toca plugin; queda confirmada restaura lease;
 Rust vivo sem resposta não libera Python; slash/clear e estado público preservados. Aviso plugin
 com publicação/geração antiga (ou sem correlação) não confirma nova operação. Convidado permitido
-segue mesmo dono; share/par somente leitura recusa escrita com zero efeito.
+segue mesmo dono; share/par somente leitura recusa escrita com zero efeito. Filho mux/PowerShell
+bloqueado e pai Rust morto: nenhum novo escritor antes de provar término dos descendentes próprios
+(grupo POSIX/Job Windows); canos e sessões reais preservados.
 
 - [ ] **Step 2: Conferir falha antes do código**
 

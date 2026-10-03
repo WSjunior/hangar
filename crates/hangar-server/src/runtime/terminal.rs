@@ -172,11 +172,16 @@ impl Executor {
     }
     async fn execute(&mut self,id:&str,kind:&str,payload:Value,entry:Option<String>)->Result<RuntimeReply,RuntimeError> {
         if id.is_empty() || id.starts_with("call::") || id.starts_with("terminal-") {return Err(error("operation_id"));}
-        let original=json!({"operation_id":id,"kind":kind,"payload":payload});
+        validate(kind,&payload)?;
+        let requested=json!({"operation_id":id,"kind":kind,"payload":payload});
+        let mut original=requested.clone();
+        if kind=="input" && !payload["text"].as_str().unwrap_or("").trim_start().starts_with('/') {
+            original["payload"]["_terminal_generation"]=json!(self.target.generation);
+        }
         let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
         if state.generation!=self.target.generation{return Err(error("runtime_generation"));}
         if let Some(old)=state.operations.get(id) {
-            if old.payload!=original{return Err(error("operation_payload"));}
+            if old.payload!=original && !(old.payload["payload"].get("_terminal_generation").is_none() && old.payload==requested) {return Err(error("operation_payload"));}
             if let Ok(stored)=serde_json::from_value::<RuntimeReply>(old.result.clone()){return Ok(stored);}
             if matches!(old.status,Status::Prepared|Status::Deferred) {
                 return Ok(reply(id,Disposition::Deferred,json!({"code":"prepared_before_dispatch","queued":old.entry_id.is_some(),"cleanup":"not_needed"})));
@@ -184,7 +189,6 @@ impl Executor {
             return Ok(reply(id,Disposition::Unknown,json!({"code":"recovered_operation"})));
         }
         if self.cleared(&state){return Err(error("runtime_clear_barrier"));}
-        validate(kind,&payload)?;
         let text=payload["text"].as_str().unwrap_or("");
         let prompt=kind=="input"; let slash=prompt && text.trim_start().starts_with('/');
         let row_id=if prompt && !slash {Some(entry.unwrap_or_else(||id.into()))}else{None};
@@ -242,19 +246,6 @@ impl Executor {
             result.payload["preserve_binding"]=json!(true);
         }
         self.action(Action::Finish {id:id.into(),status:status(result.disposition),result:serde_json::to_value(&result).unwrap()}).await?;
-        if let Some(row)=row_id {
-            match result.disposition {
-                Disposition::Deferred=>{
-                    if result.payload["cleanup"]=="proved" {
-                        let attempts=state.rows.iter().find(|r|r["id"]==row).and_then(|r|r["attempts"].as_u64()).unwrap_or(0);
-                        if attempts>=2 {self.action(Action::Abandon {entry_id:row.clone()}).await?;}
-                        else {self.action(Action::BumpAttempts {entry_id:row.clone()}).await?;self.action(Action::SetDelivered {entry_id:row.clone(),value:false,steered:false}).await?;}
-                    }else {self.action(Action::SetDelivered {entry_id:row.clone(),value:false,steered:false}).await?;}
-                },
-                Disposition::Rejected=>{self.action(Action::Abandon {entry_id:row}).await?;},
-                _=>{}
-            }
-        }
         self.last_error=None; self.publish().await?;Ok(result)
     }
     async fn drain_once(&mut self,entry:Option<String>)->Result<Value,RuntimeError> {
@@ -295,10 +286,12 @@ impl Executor {
             || result["payload"].as_object().is_none_or(|o|o.len()!=1)
             || serde_json::to_value(receipt_status).unwrap()!=serde_json::to_value(status(disposition)).unwrap() {return Err(error("native_receipt"));}
         let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
-        let root=state.operations.get(id).filter(|op|op.payload["kind"]=="input" && op.entry_id.as_deref()==Some(id))
-            .ok_or_else(||error("native_receipt"))?;
-        let attempts:Vec<_>=state.operations.values().filter(|op|op.entry_id==root.entry_id && op.result["payload"]["native"]==true
-            && op.result["payload"]["message_id"].is_string()).collect();
+        if !state.rows.iter().any(|row|row["id"]==id) {return Err(error("native_receipt"));}
+        let root=state.operations.get(id).filter(|op|op.payload["kind"]=="input" && op.entry_id.as_deref()==Some(id));
+        let attempts:Vec<_>=state.operations.values().filter(|op|op.entry_id.as_deref()==Some(id) && op.payload["kind"]=="input"
+            && (op.payload["payload"]["_terminal_generation"].as_u64()==Some(self.target.generation)
+                || op.payload["payload"].get("_terminal_generation").is_none() && op.wire_attempts.keys().any(|wire|wire.starts_with(&format!("terminal:{}:",self.target.generation))))
+            && op.result["payload"]["native"]==true && op.result["payload"]["message_id"].is_string()).collect();
         let source=attempts.last().ok_or_else(||error("native_receipt"))?;
         let mut payload=source.result["payload"].clone(); payload["native_status"]=json!(native_status);
         for attempt in &attempts {
@@ -307,10 +300,9 @@ impl Executor {
             self.action(Action::Finish {id:attempt.id.clone(),status:receipt_status,result:serde_json::to_value(resolved).unwrap()}).await?;
         }
         let resolved=reply(id,disposition,payload);
-        if root.status!=Status::Confirmed {
+        if root.is_some_and(|root|root.status!=Status::Confirmed) {
             self.action(Action::Finish {id:id.into(),status:receipt_status,result:serde_json::to_value(&resolved).unwrap()}).await?;
         }
-        if disposition==Disposition::Rejected {self.action(Action::Abandon {entry_id:id.into()}).await?;}
         Ok(serde_json::to_value(resolved).unwrap())
     }
 }

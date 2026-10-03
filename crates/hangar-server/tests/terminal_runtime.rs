@@ -326,3 +326,39 @@ async fn terminal_runtime_clear_new_conversation_after_enter_is_unknown_and_old_
     assert_eq!(*f.io.conversation.lock().unwrap(),"new-sid"); let snapshot=h.snapshot().await.unwrap(); assert_eq!(snapshot["view"]["conversation"],"sid"); assert_eq!(snapshot["view"]["preserve_binding"],true);
     assert!(h.command(f.command("after-sid-change","Olá")).await.is_err()); h.stop().await.unwrap();
 }
+
+#[tokio::test]
+async fn terminal_runtime_prepare_without_append_restores_prompt_and_delivers_once() {
+    let f=Fixture::new().await; f.ready.store(false,std::sync::atomic::Ordering::Release);
+    let text="Olá 🌎 C:\\text — 📎 imagem: /tmp/x.png";
+    let mut command=f.command("prepared-missing",text); command.payload["pre_transcript"]=json!(true);
+    let mut original=serde_json::to_value(&command).unwrap(); original["payload"]["_terminal_generation"]=json!(1);
+    let mut store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    store.exec(1,"terminal:queue:1",ClockSample {monotonic_s:0.0,epoch_s:chrono::Utc::now().timestamp() as f64},Action::Prepare {id:command.operation_id.clone(),payload:original,entry_id:Some(command.operation_id.clone())}).unwrap(); drop(store);
+    let h=f.start(); h.snapshot().await.unwrap();
+    let rows=f.state()["rows"].clone(); assert_eq!(rows.as_array().unwrap().len(),1); assert_eq!(rows[0]["id"],"prepared-missing"); assert_eq!(rows[0]["text"],text); assert_eq!(rows[0]["pre_transcript"],true);
+    let replay=h.command(command.clone()).await.unwrap(); assert_eq!(replay.disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+    f.ready.store(true,std::sync::atomic::Ordering::Release); h.drain().await.unwrap(); h.command(command).await.unwrap(); h.drain().await.unwrap();
+    assert_eq!(f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="send-keys" && r.args.last().unwrap()==text).count(),1); assert_eq!(f.state()["rows"].as_array().unwrap().len(),1); h.stop().await.unwrap();
+}
+#[tokio::test]
+async fn terminal_runtime_native_receipt_matches_queue_append_without_submit_root() {
+    for (native_status,status) in [("delivered",queue::Status::Accepted),("refused",queue::Status::Rejected)] {
+        let f=Fixture::new().await; f.ready.store(false,std::sync::atomic::Ordering::Release); let h=f.start();
+        h.queue("producer".into(),Action::Append {text:"[de: peer] Olá".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("producer-entry".into())}).await.unwrap();
+        f.ready.store(true,std::sync::atomic::Ordering::Release); f.native.store(true,std::sync::atomic::Ordering::Release); h.drain().await.unwrap();
+        assert!(f.state()["operations"].get("producer-entry").is_none());
+        h.queue("native-ack".into(),Action::Finish {id:"producer-entry".into(),status,result:json!({"operation_id":"producer-entry","disposition":if native_status=="delivered"{"accepted"}else{"rejected"},"payload":{"native_status":native_status}})}).await.unwrap();
+        let row=f.state()["rows"][0].clone(); assert_ne!(row["confirmed"],true); if native_status=="refused" {assert_eq!(row["desistiu"],true);}
+        h.drain().await.unwrap(); assert_eq!(f.io.socket_calls.lock().unwrap().len(),1); assert!(f.io.calls.lock().unwrap().iter().all(|r|r.args[0]!="send-keys")); h.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn terminal_runtime_input_primitive_payload_is_rejected_without_stopping_actor() {
+    let f=Fixture::new().await; let h=f.start();
+    for payload in [Value::Null,json!(false),json!([]),json!("")] {
+        assert!(h.control("malformed".into(),"input".into(),payload).await.is_err()); h.snapshot().await.unwrap();
+    }
+    assert!(f.state()["rows"].as_array().unwrap().is_empty());assert!(f.io.calls.lock().unwrap().is_empty());h.stop().await.unwrap();
+}

@@ -26,12 +26,14 @@ pub struct Operation {
     pub result: Value,
     pub dispatch_cursor: Value,
     pub wire_attempts: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub terminal_finalized: bool,
 }
 
 impl Operation {
     fn new(id: &str, payload: Value, entry_id: Option<String>) -> Self {
         Self { id:id.into(), payload, entry_id, status:Status::Prepared,
-            result:Value::Null, dispatch_cursor:Value::Null, wire_attempts:BTreeMap::new() }
+            result:Value::Null, dispatch_cursor:Value::Null, wire_attempts:BTreeMap::new(),terminal_finalized:false }
     }
 }
 
@@ -109,6 +111,7 @@ pub fn acquire_lease(path: &Path) -> io::Result<Arc<File>> {
     Ok(Arc::new(file))
 }
 fn row_id(row: &Value) -> &str { row["id"].as_str().unwrap_or("") }
+fn is_false(value:&bool)->bool {!*value}
 fn current(row: &Value, min_ts: f64) -> bool {
     row["ts"].as_f64().unwrap_or(0.0) >= min_ts - if row["pre_transcript"] == true { 900.0 } else { 0.0 }
 }
@@ -202,6 +205,74 @@ fn append_row(state: &mut State, row: Value) -> io::Result<Value> {
     Ok(row)
 }
 
+fn terminal_input(state:&State,op:&Operation)->bool {
+    if op.entry_id.is_none() || op.payload["kind"]!="input" || !op.payload["payload"]["text"].is_string() {return false;}
+    if let Some(generation)=op.payload["payload"].get("_terminal_generation") {return generation.as_u64()==Some(state.generation);}
+    op.wire_attempts.keys().any(|wire|wire.starts_with(&format!("terminal:{}:",state.generation)))
+        || state.operations.iter().any(|(call,receipt)|call.starts_with("call::terminal:queue:") && receipt.payload["kind"]=="prepare"
+            && receipt.payload["id"]==op.id && receipt.payload["payload"]==op.payload
+            && receipt.payload["entry_id"].as_str()==op.entry_id.as_deref())
+}
+
+fn terminal_protected(state:&State,entry:&str,except:&str)->bool {
+    let protected_status=|status|matches!(status,Status::Accepted|Status::Unknown|Status::Dispatching|Status::Confirmed);
+    state.operations.values().any(|op|op.entry_id.as_deref()==Some(entry) && ((op.id!=except && protected_status(op.status))
+        || state.operations.values().any(|phase|phase.payload["logical_id"]==op.id && protected_status(phase.status))))
+}
+
+fn terminal_finish_sequence(state:&State,id:&str,result:&Value)->Option<u64> {
+    state.operations.iter().filter(|(call,receipt)|call.starts_with("call::terminal:queue:") && receipt.payload["kind"]=="finish"
+        && receipt.payload["id"]==id && receipt.payload["result"]==*result)
+        .filter_map(|(call,_)|call.rsplit(':').next()?.parse().ok()).max()
+}
+
+fn finalize_terminal(state:&mut State,id:&str,clock:ClockSample)->io::Result<()> {
+    let op=state.operations.get(id).ok_or_else(||invalid("operação terminal ausente"))?.clone();
+    if !terminal_input(state,&op) || op.terminal_finalized || !matches!(op.status,Status::Deferred|Status::Rejected) {return Ok(());}
+    let entry=op.entry_id.as_deref().unwrap();
+    let protected=terminal_protected(state,entry,id);
+    let attempts=state.rows.iter().find(|row|row_id(row)==entry).and_then(|row|row["attempts"].as_u64()).unwrap_or(0);
+    // O diário antigo pode já ter gravado o contador antes da queda.
+    let counted=terminal_finish_sequence(state,id,&op.result).is_some_and(|finish|state.operations.iter().any(|(call,receipt)|call.starts_with("call::terminal:queue:")
+        && call.rsplit(':').next().and_then(|suffix|suffix.parse::<u64>().ok()).is_some_and(|sequence|sequence>finish)
+        && receipt.payload["kind"]=="bump_attempts" && receipt.payload["entry_id"]==entry && receipt.result.as_u64()==Some(attempts)));
+    let row=state.rows.iter_mut().find(|row|row_id(row)==entry).ok_or_else(||invalid("entrada terminal ausente na finalização"))?;
+    if row["confirmed"]!=true && row["desistiu"]!=true && (op.status==Status::Rejected || row["delivered"]!=false) {
+        if op.status==Status::Rejected {
+            row["delivered"]=json!(true);row["desistiu"]=json!(true);row["desistiu_ts"]=json!(clock.epoch_s);
+        }else if !protected {
+            let cleanup=op.result["payload"]["cleanup"].as_str().ok_or_else(||invalid("resultado terminal sem prova de limpeza"))?;
+            if !matches!(cleanup,"proved"|"not_needed") {return Err(invalid("limpeza incerta não permite reentrega"));}
+            if cleanup=="proved" && !counted && attempts>=2 {
+                row["delivered"]=json!(true);row["desistiu"]=json!(true);row["desistiu_ts"]=json!(clock.epoch_s);
+            }else {
+                if cleanup=="proved" && !counted {row["attempts"]=json!(attempts+1);}
+                row["delivered"]=json!(false);row.as_object_mut().unwrap().remove("steered");
+            }
+        }
+    }
+    state.operations.get_mut(id).unwrap().terminal_finalized=true;Ok(())
+}
+
+fn recover_terminal(state:&mut State,clock:ClockSample)->io::Result<()> {
+    let prepared:Vec<_>=state.operations.values().filter(|op|op.status==Status::Prepared && op.wire_attempts.is_empty() && terminal_input(state,op)
+        && !terminal_protected(state,op.entry_id.as_deref().unwrap(),&op.id)).cloned().collect();
+    for op in prepared {
+        let entry=op.entry_id.as_deref().unwrap();
+        if state.rows.iter().any(|row|row_id(row)==entry) {continue;}
+        let text=op.payload["payload"]["text"].as_str().unwrap();
+        if text.trim().is_empty() || text.trim_start().starts_with('/') || text.chars().any(|c|c.is_control() && !matches!(c,'\n'|'\t')) {return Err(invalid("intenção terminal inválida"));}
+        let mut row=json!({"id":entry,"text":text,"ts":clock.epoch_s,"delivered":false});
+        if op.payload["payload"]["pre_transcript"]==true {row["pre_transcript"]=json!(true);}
+        append_row(state,row)?;
+    }
+    let mut finished:Vec<_>=state.operations.values().filter(|op|terminal_input(state,op) && matches!(op.status,Status::Deferred|Status::Rejected))
+        .map(|op|(terminal_finish_sequence(state,&op.id,&op.result).unwrap_or(0),op.id.clone())).collect();
+    finished.sort_by(|left,right|right.0.cmp(&left.0));
+    for (_,id) in finished {finalize_terminal(state,&id,clock)?;}
+    Ok(())
+}
+
 fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -> io::Result<Value> {
     let protected: BTreeSet<String> = state.rows.iter().filter(|r| state.protected(row_id(r))).map(|r| row_id(r).into()).collect();
     let result = match action {
@@ -281,7 +352,7 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
                 if old.payload != payload || old.entry_id != entry_id { return Err(invalid("intenção da operação mudou")); }
             } else { state.operations.insert(id.clone(),Operation::new(&id,payload,entry_id)); }
             if state.operations[&id].status == Status::Deferred {
-                let old = state.operations.get_mut(&id).unwrap(); old.status = Status::Prepared; old.result = Value::Null;
+                let old = state.operations.get_mut(&id).unwrap(); old.status = Status::Prepared; old.result = Value::Null;old.terminal_finalized=false;
             }
             serde_json::to_value(&state.operations[&id])?
         }
@@ -300,7 +371,11 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             serde_json::to_value(op)?
         }
         Action::Finish { id, status, result } => {
+            let terminal=state.operations.get(&id).is_some_and(|op|terminal_input(state,op));
             let op = state.operations.get_mut(&id).ok_or_else(||invalid("operação não preparada"))?;
+            if terminal && status==Status::Deferred && matches!(op.status,Status::Accepted|Status::Unknown|Status::Confirmed|Status::Rejected) {
+                return Err(invalid("resultado terminal protegido não permite reentrega"));
+            }
             if matches!(op.status,Status::Accepted | Status::Confirmed | Status::Rejected)
                 && op.result.get("disposition").is_some() && result.get("write_outcome").is_some() {
                 return Ok(serde_json::to_value(op)?);
@@ -311,8 +386,10 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             if op.status == Status::Unknown && matches!(status,Status::Prepared | Status::Dispatching | Status::Deferred) {
                 return Err(invalid("resultado incerto não permite reenvio"));
             }
-            op.status = status; op.result = result;
-            serde_json::to_value(op)?
+            let finalized=op.terminal_finalized && op.status==status;
+            op.status = status; op.result = result;op.terminal_finalized=finalized;
+            if terminal {finalize_terminal(state,&id,clock)?;}
+            serde_json::to_value(&state.operations[&id])?
         }
         Action::LateRpcResolution { id, wire_id, request_id, generation, result } => {
             if generation != state.generation { return Err(invalid("resposta de outra geração")); }
@@ -349,9 +426,10 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
                     if attempt["status"] == "dispatching" { attempt["status"] = json!("unknown"); }
                 }
             }
+            recover_terminal(state,clock)?;
             let phases:BTreeSet<_> = state.operations.values().filter(|op|matches!(op.status,Status::Accepted|Status::Unknown|Status::Dispatching|Status::Confirmed))
                 .filter_map(|op|op.payload["logical_id"].as_str()).collect();
-            let protected:BTreeSet<_> = state.operations.values().filter(|op|matches!(op.status,Status::Accepted|Status::Unknown|Status::Dispatching|Status::Confirmed)
+            let protected:BTreeSet<_> = state.operations.values().filter(|op|matches!(op.status,Status::Accepted|Status::Unknown|Status::Dispatching|Status::Confirmed|Status::Rejected)
                 || phases.contains(op.id.as_str())).filter_map(|op|op.entry_id.as_deref()).collect();
             let claimed:BTreeSet<_> = state.operations.iter().filter(|(call,op)|call.starts_with("call::terminal:queue:") && op.payload["kind"]=="claim")
                 .flat_map(|(_,op)|op.result.as_array().into_iter().flatten()).filter_map(|row|row["id"].as_str()).collect();
