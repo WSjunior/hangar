@@ -1087,3 +1087,27 @@ def test_prosa_citando_shell_commands_no_meio_continua_inteira():
         "  ficou pendente na fila.",
     ])
     assert extract_assistant_text(pane).endswith("ficou pendente na fila.")
+
+
+def test_faixa_de_mod_com_bullet_nao_vira_previa():
+    # A faixa que um mod desenha acima do prompt pode começar com ● (o de progresso começa) e ficava
+    # eleita a prosa em andamento. A âncora é o primeiro texto da árvore que o plugin mandou.
+    from app import plugin_bridge as pb
+
+    pb._bands["faixa"] = (1, {"type": "Box", "children": [
+        {"type": "Text", "children": ["● "]}, {"type": "Text", "children": ["Migração do relatório"]}]})
+    try:
+        pane = "\n".join([
+            "❯ faça tal coisa",
+            "● Resposta em andamento",
+            "",
+            "● Migração do relatório                      2/6 passos",
+            "  ━━━━━━━━━━━━━━━━━━━━━━━━━  33%",
+            "─" * 40,
+            "❯ ",
+            "─" * 40,
+        ])
+        assert extract_assistant_text(pane).startswith("Migração do relatório")
+        assert extract_assistant_text(pane, "claude", pb.band_anchor("faixa")) == "Resposta em andamento"
+    finally:
+        pb.esquecer("faixa")

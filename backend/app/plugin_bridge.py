@@ -385,6 +385,28 @@ def band(name: str) -> tuple[int, dict | None]:
     with _lock:
         return _bands.get(name, (0, None))
 
+
+# Trecho da âncora: o terminal corta a linha da faixa com reticências quando o pane é estreito.
+_ANCHOR_CHARS = 16
+
+
+def band_anchor(name: str) -> str | None:
+    """O começo do primeiro texto legível da faixa, como ele aparece no pane.
+
+    É por ele que a prévia sabe onde a conversa acaba: a faixa fica entre a última resposta e a
+    caixa de digitar, e um mod que começa a linha com ● seria lido como prosa em andamento."""
+    _, tree = band(name)
+    pilha: list = [tree]
+    while pilha:
+        no = pilha.pop()
+        if isinstance(no, str):
+            texto = no.strip()
+            if sum(c.isalnum() for c in texto) >= 3:
+                return texto[:_ANCHOR_CHARS]
+        elif isinstance(no, dict):
+            pilha.extend(reversed(no.get("children") or []))
+    return None
+
 # Depois disso a leitura do pane volta a mandar sozinha. O plugin não repete estado — ele avisa
 # transição —, então o prazo cobre uma sessão parada em `idle` por horas: o que expira aqui é a
 # CONFIANÇA de que o plugin ainda está vivo, e quem a renova é a batida do long-poll.

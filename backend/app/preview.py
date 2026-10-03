@@ -5,7 +5,7 @@ import re
 import time
 from typing import AsyncIterator, Callable, Optional
 
-from app import tmux
+from app import plugin_bridge, tmux
 from app.hook_state import hook_state
 from app.state import _RULE_RE, _is_boundary, _live_spinner, run_tmux, shared_capture
 # _dirs: MESMO cache de diretorios de config que a statusline usa, e pelo mesmo motivo (roda por
@@ -287,7 +287,7 @@ def _pi_bloco_de_tool(lines: list[str], i: int, corpo: str) -> bool:
     return False
 
 
-def extract_assistant_text(pane: str, provider: str = "claude") -> str:
+def extract_assistant_text(pane: str, provider: str = "claude", band_anchor: str | None = None) -> str:
     """Texto do ÚLTIMO bloco de PROSA do assistente (●) do pane, VERBATIM (sem reflow — núcleo seguro).
 
     Acha o último ● que NÃO é tool-call (início do bloco em voo; blocos anteriores já caíram no
@@ -315,6 +315,11 @@ def extract_assistant_text(pane: str, provider: str = "claude") -> str:
     fim = max((i for i, ln in enumerate(lines)
                if _RULE_RE.match(ln) or _OVERLAY_RULE_RE.match(ln) or _PI_BOX_RE.match(ln)),
               default=len(lines))
+    # A faixa que os mods desenham fica entre a conversa e a caixa de digitar, e pode começar com ●
+    # (o mod de progresso começa): sem este corte ela era eleita a prosa em andamento. A âncora é o
+    # primeiro texto da árvore que o plugin do Hangar mandou; a ocorrência mais baixa é a da faixa.
+    if band_anchor:
+        fim = max((i for i, ln in enumerate(lines[:fim]) if band_anchor in ln), default=fim)
     # E a conversa COMEÇA na última mensagem do usuário: prosa em voo é sempre posterior a ela.
     # O que motivou: o Claude Code imprime o aviso de largada (plugin com chave fora do schema no
     # hooks.json, CLAUDE.md acima do limite) com o MESMO ● do bloco do assistente, e como a varredura
@@ -635,7 +640,8 @@ class PreviewBroker:
                 if kimi:
                     pane = sem_pensamento_kimi(pane)
                 working = _live_spinner(pane) is not None
-                text = extract_assistant_text(pane, self.provider)
+                text = (extract_assistant_text(pane, self.provider, plugin_bridge.band_anchor(self.name))
+                        if self.provider == "claude" else extract_assistant_text(pane, self.provider))
                 if kimi:
                     if not text and self._kimi_acum:
                         # O bloco estourou a janela e o ● subiu junto (medido nos quadros de
