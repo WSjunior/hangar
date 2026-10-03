@@ -611,7 +611,9 @@ class PreviewBroker:
         from app import terminal_observer
         while True:
             if terminal_observer.retired(self.name):
-                return
+                # As conexões SSE podem reconhecer o /clear em rodadas diferentes.
+                await asyncio.sleep(0.75)
+                continue
             # Epoca do poll: se o reset() (/clear) cair no MEIO desta iteracao, o frame capturado
             # e da conversa apagada — o publish la embaixo confere e descarta.
             gen = self._gen
@@ -708,7 +710,7 @@ class PreviewBroker:
         o trio calado, e a bolha renderizaria markdown de uma leitura com o texto de outra."""
         async with self._cond:
             self._subs += 1
-            if self._task is None:
+            if self._task is None or self._task.done():
                 self._task = asyncio.create_task(self._loop())
         last = -1
         try:

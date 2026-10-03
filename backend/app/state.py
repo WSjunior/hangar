@@ -860,13 +860,16 @@ class StateMonitor:
         from app import terminal_observer
         while True:
             if terminal_observer.retired(self.name):
-                return
+                # As conexões SSE podem reconhecer o /clear em rodadas diferentes.
+                await asyncio.sleep(self.poll)
+                continue
             # Um spawn por tick, nao dois: o capture-pane de uma sessao sumida devolve "" (rc != 0),
             # e so ai vale pagar o has-session pra separar "morreu" de "pane em branco". No psmux
             # cada comando custa ~50ms (medido na VM), e isto roda a 0,75s por chat aberto.
             frame_tag = terminal_observer.stamp(self.name)
             pane = await shared_capture(self.name, max_age)
             if frame_tag != terminal_observer.stamp(self.name) or terminal_observer.retired(self.name):
+                await asyncio.sleep(self.poll)
                 continue
             if not pane:
                 # None = tmux nao respondeu: nao e morte (o watcher do Codex ja matou app-servers

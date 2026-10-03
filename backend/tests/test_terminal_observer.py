@@ -389,8 +389,8 @@ def test_retired_monitor_never_publishes_again(monkeypatch):
         replacement = t.lease("s", "claude", lambda: "new")
         await replacement.start()
         monkeypatch.setattr(state.tmux, "capture_pane", lambda name: "✻ Thinking…")
-        with pytest.raises(StopAsyncIteration):
-            await asyncio.wait_for(anext(monitor), 1)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(anext(monitor), 0.05)
         await replacement.close()
         await monitor.aclose()
     asyncio.run(run())
@@ -719,3 +719,136 @@ def test_preview_lease_follows_replaced_getter_after_clear_without_restarting_su
                 await monitor.close()
     asyncio.run(run())
     assert bool(calls) is enabled
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_delayed_sse_clear_keeps_preview_producer_and_discards_old_sidecar(monkeypatch, enabled):
+    from app import preview
+    import threading
+    t = bridge()
+    t.configure("127.0.0.1:12345" if enabled else None, "test-only" if enabled else None)
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    monkeypatch.setattr(t, "_request", fake_http([]))
+    first, delayed = ["a"], ["a"]
+    name = "preview-delayed-clear"
+    release = threading.Event()
+    reads = [0]
+    async def run():
+        entered = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        def sidecar(stem):
+            reads[0] += 1
+            if reads[0] == 2:
+                loop.call_soon_threadsafe(entered.set)
+                assert release.wait(2)
+                return "discarded-old-sidecar"
+            return f"preview-{stem}"
+        monkeypatch.setattr(preview, "read_sidecar", sidecar)
+        broker = preview.PreviewBroker.get(name, "claude", lambda: first[0])
+        left = broker.subscribe()
+        right = None
+        task = None
+        fast = None
+        try:
+            await anext(left)
+            assert await asyncio.wait_for(anext(left), 1) == ("preview-a", True, True)
+            assert preview.PreviewBroker.get(name, "claude", lambda: delayed[0]) is broker
+            right = broker.subscribe()
+            assert await anext(right) == ("preview-a", True, True)
+            task = broker._task
+            await asyncio.wait_for(entered.wait(), 1)
+            first[0] = "b"
+            fast = t.lease(name, "claude", lambda: first[0])
+            await fast.start()
+            broker.reset()
+            release.set()
+            await asyncio.sleep(0.3)
+            assert not task.done(), "a delayed SSE getter terminated the shared producer"
+            assert broker.text == ""
+            delayed[0] = "b"
+            assert await asyncio.wait_for(anext(left), 2) == ("preview-b", True, True)
+            assert await asyncio.wait_for(anext(right), 1) == ("preview-b", True, True)
+            assert broker._task is task
+        finally:
+            release.set()
+            await left.aclose()
+            if right is not None:
+                await right.aclose()
+            if task is not None:
+                await asyncio.gather(task, return_exceptions=True)
+            if fast is not None:
+                await fast.close()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_delayed_sse_clear_keeps_state_stream_until_getter_converges(monkeypatch, enabled):
+    t = bridge()
+    t.configure("127.0.0.1:12345" if enabled else None, "test-only" if enabled else None)
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    monkeypatch.setattr(t, "_request", fake_http([], fail=True))
+    monkeypatch.setattr(state, "pergunta_aberta", lambda sid: None)
+    monkeypatch.setattr(state, "_sidecar_status", lambda sid: None)
+    monkeypatch.setattr(state.plugin_bridge, "pergunta_pendente", lambda name: None)
+    monkeypatch.setattr(state.plugin_bridge, "estado_recente", lambda name: None)
+    monkeypatch.setattr(state.plugin_bridge, "vivo", lambda name: False)
+    monkeypatch.setattr(state.hook_state, "get_state", lambda sid: None)
+    monkeypatch.setattr(state.hook_state, "shells", lambda sid: [])
+    from app.loop import LoopLink
+    monkeypatch.setattr(LoopLink, "get", lambda self: None)
+    delayed = ["a"]
+    pane = ["✻ Thinking…\n❯ "]
+    monkeypatch.setattr(state.tmux, "capture_pane", lambda name: pane[0])
+    monkeypatch.setattr(state.StateMonitor, "FRAME_MAX_AGE", 0)
+    async def run():
+        stream = state.StateMonitor("state-delayed-clear", poll=0.01,
+            sid_get=lambda: delayed[0], provider="claude").stream()
+        fast = None
+        pending = None
+        try:
+            assert (await anext(stream)).state == "working"
+            fast = t.lease("state-delayed-clear", "claude", lambda: "b")
+            await fast.start()
+            state.forget_frame("state-delayed-clear")
+            pending = asyncio.create_task(anext(stream))
+            await asyncio.sleep(0.03)
+            assert not pending.done(), "a delayed SSE getter terminated the state stream"
+            delayed[0] = "b"
+            pane[0] = "❯ "
+            resumed = await asyncio.wait_for(pending, 1)
+            assert resumed.state in ("working", "idle")
+            if resumed.state == "working":
+                assert (await asyncio.wait_for(anext(stream), 1)).state == "idle"
+        finally:
+            if pending is not None:
+                if not pending.done():
+                    pending.cancel()
+                await asyncio.gather(pending, return_exceptions=True)
+            await stream.aclose()
+            if fast is not None:
+                await fast.close()
+    asyncio.run(run())
+
+
+def test_preview_new_subscriber_restarts_completed_producer(monkeypatch):
+    from app import preview
+    t = bridge()
+    t.configure(None, None)
+    monkeypatch.setattr(preview, "read_sidecar", lambda stem: "resumed-preview")
+    async def run():
+        broker = preview.PreviewBroker("preview-dead-producer", "claude", lambda: "a")
+        broker._task = asyncio.create_task(asyncio.sleep(0))
+        await broker._task
+        subscriber = broker.subscribe()
+        task = None
+        try:
+            assert await anext(subscriber) == ("", False, False)
+            assert await asyncio.wait_for(anext(subscriber), 1) == ("resumed-preview", True, True)
+            task = broker._task
+            assert not task.done()
+        finally:
+            task = broker._task
+            await subscriber.aclose()
+            if task is not None:
+                await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(run())
