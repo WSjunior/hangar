@@ -1494,17 +1494,7 @@ class CodexAdapter:
         ouvintes: list[asyncio.Queue] = sess.setdefault("ouvintes", [])
         ouvintes.append(fila)
         bomba = self._start_bomba(name, sess)
-        observer = None
         try:
-            if not sess.get("headless"):
-                from app import terminal_observer
-                def observer_binding():
-                    return sess.get("thread_id") if self._sessions.get(name) is sess and not sess.get("headless") else None
-                async def observe_terminal():
-                    async with terminal_observer.lease(name, "codex", observer_binding) as source:
-                        await source.watch()
-                # O monitor nativo não espera tmux/HTTP, nem perde renovação enquanto a fila está vazia.
-                observer = asyncio.create_task(observe_terminal())
             # Retrato do que ja se sabe: quem reabre o chat no meio de um turno nao espera a
             # proxima notification pra ver estado, contexto e limites.
             try:
@@ -1526,9 +1516,6 @@ class CodexAdapter:
                     raise ev     # a bomba quebrou: sobe ate o pump do SSE, que fecha e reconecta
                 yield ev
         finally:
-            if observer is not None:
-                observer.cancel()
-                await asyncio.gather(observer, return_exceptions=True)
             if fila in ouvintes:
                 ouvintes.remove(fila)
 
