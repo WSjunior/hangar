@@ -744,7 +744,10 @@ async def _capture_and_store(name: str, started: float) -> str:
             _frames[name] = (started, pane)
             _frame_tags[name] = tag
         for n in [n for n, (t, _) in _frames.items() if started - t > _FRAME_EVICT_AGE]:
-            forget_frame(n)
+            # Expirar cache de outra sessão não troca a época do transcript dela.
+            _frames.pop(n, None)
+            _frame_tags.pop(n, None)
+            terminal_observer._analysis.pop(n, None)
     return pane
 
 
