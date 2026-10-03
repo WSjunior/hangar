@@ -353,7 +353,8 @@
         {#if cpAviso}{@render avisoCliproxy()}{/if}
         <label class="nc-campo">
           <span>{m.contas_chave_url()}</span>
-          <input type="url" bind:value={url} disabled={salvando}
+          <!-- Com o CLIProxyAPI detectado o endereço trava: a chave e os modelos só valem para ele. -->
+          <input type="url" bind:value={url} disabled={salvando} readonly={semChave}
             placeholder="https://api.exemplo.com" />
         </label>
         {#if !semChave}

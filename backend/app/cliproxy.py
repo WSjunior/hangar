@@ -38,7 +38,10 @@ def local() -> dict[str, str] | None:
         raise ValueError(f"{config_path()}: YAML inválido") from None
     if not isinstance(dados, dict):
         return None
-    chaves = [k.strip() for k in (dados.get("api-keys") or []) if isinstance(k, str) and k.strip()]
+    lista = dados.get("api-keys")
+    if lista is not None and not isinstance(lista, list):
+        raise ValueError(f"{config_path()}: api-keys deve ser uma lista")
+    chaves = [k.strip() for k in (lista or []) if isinstance(k, str) and k.strip()]
     if not chaves:
         raise ValueError(f"{config_path()}: sem api-keys")
     host = str(dados.get("host") or "").strip()
@@ -51,11 +54,18 @@ def local() -> dict[str, str] | None:
         porta = int(dados.get("port") or _PORTA_PADRAO)
     except (TypeError, ValueError):
         raise ValueError(f"{config_path()}: port inválida") from None
+    if not 0 < porta < 65536:
+        raise ValueError(f"{config_path()}: port inválida")
     tls = dados.get("tls")
-    esquema = "https" if isinstance(tls, dict) and tls.get("enable") else "http"
+    esquema = "https" if isinstance(tls, dict) and tls.get("enable") is True else "http"
     return {"base_url": f"{esquema}://{host}:{porta}", "api_key": chaves[0]}
 
 
-def is_engine_model(model_id: str) -> bool:
+def is_engine_model(model_id: object) -> bool:
     # gpt-image-* gera imagem e não responde /v1/messages: não serve de motor.
-    return not model_id.startswith("gpt-image-")
+    return isinstance(model_id, str) and not model_id.startswith("gpt-image-")
+
+
+def redact(texto: str, api_key: str) -> str:
+    # O erro do proxy pode repetir a chave ("invalid key …"), e ele vai para a tela.
+    return texto.replace(api_key, "***") if api_key else texto

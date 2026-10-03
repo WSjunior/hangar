@@ -43,6 +43,24 @@ def test_local_sem_chave_levanta(tmp_path):
         cliproxy.local()
 
 
+def test_local_com_api_keys_que_nao_e_lista_levanta(tmp_path):
+    _config(tmp_path, "api-keys: abc\n")
+    with pytest.raises(ValueError, match="lista"):
+        cliproxy.local()
+
+
+def test_get_tira_a_chave_do_erro_do_proxy(cli, tmp_path, monkeypatch):
+    _config(tmp_path, f"api-keys:\n  - {CHAVE}\n")
+
+    def _fake(base_url, api_key):
+        raise RuntimeError(f"401 invalid key {api_key}")
+
+    monkeypatch.setattr("app.engine_probe.listar_modelos", _fake)
+    r = cli.get("/api/engines/cliproxy", headers=AUTH)
+    assert r.json()["error"] == "401 invalid key ***"
+    assert CHAVE not in r.text
+
+
 def test_local_com_yaml_quebrado_levanta(tmp_path):
     _config(tmp_path, "api-keys: [\n")
     with pytest.raises(ValueError):

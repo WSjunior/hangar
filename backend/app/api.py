@@ -5962,7 +5962,7 @@ async def put_engine(nome: str, request: Request):
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(400, detail=erro("erro_corpo_deve_ser_objeto", "corpo deve ser um objeto"))
-    if body.pop("use_cliproxy_key", False):
+    if body.pop("use_cliproxy_key", None) is True:
         try:
             inst = await asyncio.to_thread(cliproxy.local)
         except ValueError as e:
@@ -6081,7 +6081,8 @@ async def engine_cliproxy():
     try:
         modelos = await asyncio.to_thread(engine_probe.listar_modelos, inst["base_url"], inst["api_key"])
     except (RuntimeError, ValueError) as e:
-        return {"found": True, "base_url": inst["base_url"], "models": [], "error": str(e)}
+        return {"found": True, "base_url": inst["base_url"], "models": [],
+                "error": cliproxy.redact(str(e), inst["api_key"])}
     return {"found": True, "base_url": inst["base_url"], "error": None,
             "models": [m for m in modelos if cliproxy.is_engine_model(m["id"])]}
 

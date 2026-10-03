@@ -288,15 +288,19 @@
 
   <label class="campo">
     <span class="rot">{m.config_motores_endereco()}</span>
+    <!-- Com o CLIProxyAPI detectado o endereço trava: a chave e os modelos só valem para ele. -->
     <input type="text" name="base_url" autocapitalize="off" spellcheck={false} placeholder="https://…"
+           readonly={!!cliproxy} class:travado={!!cliproxy}
            value={form.base_url} oninput={(e) => (form.base_url = e.currentTarget.value)} />
     {@render ajudaLonga(m.config_motores_endereco(), aEndereco)}
     <!-- Dois endereços que não se adivinham; digitá-los à mão é onde nasce o 404 do provedor. -->
-    <span class="dicas">
-      {#each DICAS as d (d.base_url)}
-        <button type="button" class="dica" onclick={() => (form.base_url = d.base_url)}>{d.label}</button>
-      {/each}
-    </span>
+    {#if !cliproxy}
+      <span class="dicas">
+        {#each DICAS as d (d.base_url)}
+          <button type="button" class="dica" onclick={() => (form.base_url = d.base_url)}>{d.label}</button>
+        {/each}
+      </span>
+    {/if}
   </label>
 
   {#if !semChave}

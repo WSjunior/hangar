@@ -344,7 +344,9 @@ impl Hangar {
     fn form_edited(&mut self, provider_changed: bool, cx: &mut Context<Self>) {
         let taken = self.engine_names();
         let Some(form) = self.accounts.form.as_mut() else { return };
-        if provider_changed { (form.testing, form.tested, form.models, form.picks, form.pick_subscriptions) = (None, None, None, None, Vec::new()); }
+        // Com o CLIProxyAPI detectado o endereço é travado: a mudança veio do próprio preenchimento e não pode
+        // apagar os modelos que ele trouxe.
+        if provider_changed && !form.keyless { (form.testing, form.tested, form.models, form.picks, form.pick_subscriptions) = (None, None, None, None, Vec::new()); }
         form.refresh(&taken, cx);
         cx.notify();
     }
@@ -606,11 +608,13 @@ impl Hangar {
                     .and_then(|v| serde_json::from_value::<Detected>(v).map_err(|_| tr("invalid_response")));
                 let found = match detected {
                     Ok(Detected { found: true, base_url: Some(url), models, error }) => {
+                        // `keyless` antes do valor: o `Change` do preenchimento já o encontra ligado.
+                        form.keyless = error.is_none();
                         form.url.update(cx, |input, cx| input.set_value(url.clone(), window, cx));
                         match error {
                             Some(erro) => { form.detected = Some((tr_shared("cliproxy_error", &[("url", &url), ("erro", &erro)]), true)); None }
                             None => {
-                                (form.keyless, form.detected) = (true, Some((tr_shared("cliproxy_found", &[("url", &url)]), false)));
+                                form.detected = Some((tr_shared("cliproxy_found", &[("url", &url)]), false));
                                 Some(models)
                             }
                         }
