@@ -355,10 +355,35 @@ def test_missing_historical_file_never_reads_current_disk(tmp_path):
     current = tmp_path / "current.txt"
     current.write_text("versão de agora")
     records = fixture_records("compacted_branch.jsonl")
-    records[4]["attachment"] = {"type": "compact_file_reference", "filename": str(current)}
+    records[4]["attachment"] = {"type": "file", "filename": str(current)}
     with pytest.raises(ConversionError) as error:
         convert_snapshot(save_records(tmp_path, records))
     assert error.value.code == "session_transfer_source_media_missing"
+
+
+def test_compact_file_reference_preserves_pointer_without_reading_file(tmp_path, monkeypatch):
+    current = tmp_path / "current.txt"
+    current.write_text("versão atual que não pertence ao histórico")
+    records = fixture_records("compacted_branch.jsonl")
+    reference = {"type": "compact_file_reference", "filename": str(current), "displayPath": "current.txt"}
+    records[4]["attachment"] = reference
+    snapshot = save_records(tmp_path, records)
+    original_open = Path.open
+    opened = []
+
+    def open_snapshot_only(path, *args, **kwargs):
+        assert path == snapshot
+        opened.append(path)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_snapshot_only)
+    ctx = convert_snapshot(snapshot)
+    content = next(item["content"][0]["text"] for item in ctx.items
+                   if "compact_file_reference" in item.get("content", [{}])[0].get("text", ""))
+    assert json.loads(content.split("\n", 1)[1]) == reference
+    assert opened == [snapshot]
+    assert "versão atual" not in historical_text(ctx)
+    assert ctx.source_limitations == ()
 
 
 @pytest.mark.parametrize("field,value", [

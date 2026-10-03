@@ -43,7 +43,7 @@ _CONTEXT_ATTACHMENTS = frozenset({
     "instructions", "session_context", "date", "prompt_snapshot",
     "deferred_tools_record", "async_hook_response", "queued_command", "diagnostics",
     "nested_memory", "silent_turn_reminder", "edited_text_file", "file", "task_status",
-    "hook_success",
+    "hook_success", "compact_file_reference",
 })
 _OPERATIONAL_ATTACHMENTS = {"credential_org": "identidade da organização, não instrução"}
 _OPERATIONAL_SYSTEM = {
@@ -217,7 +217,8 @@ def _history(label: str, value: object) -> dict:
 def _attachment_content(payload: dict) -> list[dict]:
     kind = payload["type"]
     if kind == "compact_file_reference":
-        raise ConversionError("session_transfer_source_media_missing")
+        _string(payload.get("filename"))
+        _string(payload.get("displayPath"))
     if kind == "instructions":
         files = payload.get("files")
         if not isinstance(files, list):
@@ -303,7 +304,7 @@ def convert_snapshot(path: Path) -> ImportedContext:
             attachment_type = _string(payload.get("type") if kind == "attachment" else row.get("subtype"))
             if kind == "attachment" and attachment_type in _OPERATIONAL_ATTACHMENTS:
                 continue
-            if kind == "attachment" and attachment_type not in _CONTEXT_ATTACHMENTS | {"compact_file_reference"}:
+            if kind == "attachment" and attachment_type not in _CONTEXT_ATTACHMENTS:
                 raise ConversionError("session_transfer_unsupported_context")
             if kind == "system" and attachment_type != "stop_hook_summary":
                 raise ConversionError("session_transfer_unsupported_context")
