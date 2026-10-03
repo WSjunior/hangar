@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Continue'
 $raiz = Split-Path -Parent $PSScriptRoot
 $marcaDir = Join-Path $HOME '.hangar\native'
 $marca = Join-Path $marcaDir 'electron-removido'
-$nativo = Join-Path $env:LOCALAPPDATA 'Programs\Hangar\Hangar.exe'
+$nativo = "$env:LOCALAPPDATA\Programs\Hangar\Hangar.exe"
 $modulos = Join-Path $raiz 'shell\node_modules'
 
 function Marca($texto) {
@@ -19,7 +19,7 @@ function Marca($texto) {
     [IO.File]::WriteAllText($marca, $texto)
 }
 
-if (-not (Test-Path -LiteralPath $nativo)) {
+if (-not $env:LOCALAPPDATA -or -not (Test-Path -LiteralPath $nativo)) {
     Write-Host "electron: o app nativo nao esta instalado; o Electron fica"
     Marca 'sem app nativo: nada removido'
     exit 0
@@ -36,13 +36,20 @@ foreach ($pasta in @([Environment]::GetFolderPath('Programs'), [Environment]::Ge
 }
 
 # Pelo fim do caminho, nao pela raiz: o mesmo checkout pode aparecer com dois nomes (unidade mapeada e UNC).
+# Path vazio e Electron elevado visto de um processo comum: conta como aberto, senao o node_modules sai pela metade.
 $aberto = @(Get-Process -Name electron -ErrorAction SilentlyContinue |
-    Where-Object { $_.Path -and $_.Path -like '*\shell\node_modules\electron\dist\electron.exe' })
+    Where-Object { -not $_.Path -or $_.Path -like '*\shell\node_modules\electron\dist\electron.exe' })
 if (-not (Test-Path -LiteralPath $modulos)) {
     Marca 'atalhos removidos; shell\node_modules ja nao existia'
 } elseif ($aberto.Count -gt 0) {
     Write-Host "electron: o Hangar (Electron) esta aberto; os atalhos sairam, e o shell\node_modules fica ate a pasta ser apagada com ele fechado"
     Marca 'atalhos removidos; shell\node_modules mantido porque o Electron estava aberto'
+} elseif ((Get-Item -LiteralPath $modulos -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+    # Link de pasta: o Remove-Item -Recurse do 5.1 apagaria o conteudo do destino; o rd sem /s tira so o link.
+    cmd /c "rd `"$modulos`"" 2>$null | Out-Null
+    if (Test-Path -LiteralPath $modulos) { Write-Host "electron: nao consegui apagar o link $modulos" }
+    else { Write-Host "electron: link $modulos removido" }
+    Marca 'atalhos removidos; shell\node_modules era um link de pasta'
 } else {
     Remove-Item -LiteralPath $modulos -Recurse -Force -ErrorAction SilentlyContinue
     # O Remove-Item do 5.1 falha em caminho longo e em link de pasta; o rd do cmd passa nos dois.
