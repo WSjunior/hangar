@@ -32,6 +32,14 @@ impl<T> Remote<T> {
 #[derive(serde::Deserialize)]
 struct Channel { branch: String, checkout_branch: String, last_branch: String }
 
+fn record_channel_404(path: &std::path::Path, saved: bool) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(file, "[{}] update_channel.failed route=/api/update-channel method={} status=404",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), if saved { "PUT" } else { "GET" })
+}
+
 #[derive(Default)]
 struct ChannelEditor {
     request: Remote<()>,
@@ -43,7 +51,8 @@ struct ChannelEditor {
 }
 
 impl ChannelEditor {
-    fn receive_unsupported(&mut self, seq: u64) -> bool {
+    fn receive_unsupported(&mut self, seq: u64, saved: bool, message: String) -> bool {
+        if saved { return self.receive(seq, true, Err(message)); }
         if !self.request.finish(seq, Ok(())) { return false; }
         self.unsupported = true;
         self.current = None;
@@ -416,7 +425,11 @@ impl Hangar {
         match reply {
             DeviceReply::Channel(seq, saved, result) => {
                 if result.as_ref().is_err_and(|error| error.status == Some(404)) {
-                    if self.device.channel.receive_unsupported(seq) { self.sync_channel_update_guard(cx); cx.notify(); }
+                    if let Err(error) = record_channel_404(&crate::log_dir().join("native.log"), saved) {
+                        eprintln!("não consegui registrar o 404 do canal de testes: {error}");
+                    }
+                    let message = Self::setting_failure(result.as_ref().unwrap_err());
+                    if self.device.channel.receive_unsupported(seq, saved, message) { self.sync_channel_update_guard(cx); cx.notify(); }
                     return;
                 }
                 let value = result.map_err(|e| Self::setting_failure(&e)).and_then(|value|
@@ -870,15 +883,45 @@ mod tests {
         let mut editor = super::ChannelEditor::default();
         let old = editor.request.start();
         let seq = editor.request.start();
-        assert!(!editor.receive_unsupported(old));
+        assert!(!editor.receive_unsupported(old, false, "get-404".into()));
         assert!(!editor.unsupported);
-        assert!(editor.receive_unsupported(seq));
+        assert!(editor.receive_unsupported(seq, false, "get-404".into()));
         assert!(editor.unsupported);
         assert!(!editor.blocks_update());
         assert!(editor.request.ok().is_some());
         let seq = editor.request.start();
         editor.receive(seq, false, Ok(super::Channel { branch: String::new(), checkout_branch: "main".into(), last_branch: String::new() }));
         assert!(!editor.unsupported);
+    }
+
+    #[test]
+    fn update_channel_put_404_keeps_section_draft_and_error() {
+        let mut editor = super::ChannelEditor::default();
+        let seq = editor.request.start();
+        editor.receive(seq, false, Ok(super::Channel { branch: String::new(), checkout_branch: "main".into(), last_branch: "test/channel".into() }));
+        editor.enabled = true;
+        let seq = editor.request.start();
+        assert!(editor.receive_unsupported(seq, true, "save-404".into()));
+        assert!(!editor.unsupported);
+        assert_eq!(editor.current.as_ref().unwrap().branch, "");
+        assert_eq!(editor.draft, "test/channel");
+        assert_eq!(editor.request.value, Some(Err("save-404".into())));
+        assert!(!editor.applied);
+        assert!(editor.is_dirty());
+    }
+
+    #[test]
+    fn update_channel_404_is_recorded_for_get_and_put() {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("hangar-channel-log-{}-{stamp}", std::process::id()));
+        let path = dir.join("native.log");
+        super::record_channel_404(&path, false).unwrap();
+        super::record_channel_404(&path, true).unwrap();
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert!(log.contains("method=GET status=404"));
+        assert!(log.contains("method=PUT status=404"));
+        assert_eq!(log.lines().count(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
