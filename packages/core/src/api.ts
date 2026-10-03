@@ -1872,6 +1872,24 @@ export function engineModelosForServer(s: Server, corpo: EngineModelosBody): Pro
   return apiFetchForServer(s, '/api/engines/modelos', { method: 'POST', body: JSON.stringify(corpo) });
 }
 
+// CLIProxyAPI local da máquina do servidor. A chave não vem: quem grava manda
+// `use_cliproxy_key: true` no PUT e o servidor a lê do config dele.
+// `found=false,error=null` = não instalado; `found=true,error` = achou e não respondeu.
+export interface CliproxyDeteccao {
+  found: boolean;
+  base_url: string | null;
+  models: ModeloProvedor[];
+  error: string | null;
+}
+
+export function engineCliproxy(): Promise<CliproxyDeteccao> {
+  return apiFetch('/api/engines/cliproxy');
+}
+
+export function engineCliproxyForServer(s: Server): Promise<CliproxyDeteccao> {
+  return apiFetchForServer(s, '/api/engines/cliproxy');
+}
+
 /**
  * Sobe um anexo da sessão. `onProgresso` recebe 0..100 conforme os bytes saem.
  *

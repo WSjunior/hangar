@@ -6,6 +6,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount, unmount, tick } from 'svelte';
 import NovaCredencialSheet from './NovaCredencialSheet.svelte';
 import * as m from '../../paraglide/messages';
+import * as core from '@hangar/core';
 
 vi.mock('@hangar/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@hangar/core')>()),
@@ -14,6 +15,8 @@ vi.mock('@hangar/core', async (importOriginal) => ({
   putEngineForServer: vi.fn(async () => ({ motores: {} })),
   engineModelos: vi.fn(async () => ({ modelos: [] })),
   engineModelosForServer: vi.fn(async () => ({ modelos: [] })),
+  engineCliproxy: vi.fn(async () => ({ found: false, base_url: null, models: [], error: null })),
+  engineCliproxyForServer: vi.fn(async () => ({ found: false, base_url: null, models: [], error: null })),
 }));
 vi.mock('../../lib/credenciais', () => ({
   sincronizarNosAgentes: vi.fn(async () => ({ resultado: { pi: { ok: true, motivo: '' } } })),
@@ -166,6 +169,69 @@ describe('NovaCredencialSheet — o passo "o quê"', () => {
     expect(document.body.querySelector('.nc-lista')).not.toBeNull();
     expect(document.body.textContent).toContain('Groq');
     expect(onFechar).not.toHaveBeenCalled();
+    t.fim();
+  });
+});
+
+describe('NovaCredencialSheet — CLIProxyAPI detectado pelo servidor', () => {
+  const URL_CP = 'http://127.0.0.1:8317';
+  const achou = { found: true, base_url: URL_CP, models: [{ id: 'gpt-x', context_length: 400000, vision: true }], error: null };
+  // A detecção é uma promessa: um tick só não basta pra resposta aterrissar na tela.
+  const assentar = async () => { await new Promise((r) => setTimeout(r, 0)); await tick(); };
+
+  async function abrirCliproxy(caminho: string) {
+    const t = montar();
+    await tick();
+    conectarDe(caminho).click();
+    await tick();
+    conectarDe('CLIProxyAPI').click();
+    await assentar();
+    return t;
+  }
+
+  it('achou: sem campo de chave, e salvar pede a chave do servidor em vez de mandá-la', async () => {
+    vi.mocked(core.engineCliproxy).mockResolvedValueOnce(achou);
+    const t = await abrirCliproxy(m.contas_add_chave());
+    expect(document.body.textContent).toContain(m.cliproxy_found({ url: URL_CP }));
+    expect(document.querySelector('input[type="password"]')).toBeNull();
+    document.body.querySelector<HTMLButtonElement>('.nc-btn.primario')!.click();
+    await assentar();
+    const [id, dados] = vi.mocked(core.putEngine).mock.calls[0];
+    expect(id).toBe('cliproxyapi');
+    expect(dados).toMatchObject({ base_url: URL_CP, model: 'gpt-x', use_cliproxy_key: true });
+    expect(dados).not.toHaveProperty('api_key');
+    t.fim();
+  });
+
+  it('achou no caminho "modelo": o formulário do motor também some com a chave', async () => {
+    vi.mocked(core.engineCliproxy).mockResolvedValueOnce(achou);
+    const t = await abrirCliproxy(m.contas_add_modelo());
+    expect(document.querySelector('input[name="api_key"]')).toBeNull();
+    const nomeEl = document.querySelector<HTMLInputElement>('input[name="nome"]')!;
+    nomeEl.value = 'cp';
+    nomeEl.dispatchEvent(new Event('input', { bubbles: true }));
+    await tick();
+    document.body.querySelector<HTMLButtonElement>('.mf .btn.primario')!.click();
+    await assentar();
+    const [, dados] = vi.mocked(core.putEngine).mock.calls[0];
+    expect(dados).toMatchObject({ base_url: URL_CP, model: 'gpt-x', context_window: 400000, use_cliproxy_key: true });
+    expect(dados).not.toHaveProperty('api_key');
+    t.fim();
+  });
+
+  it('não instalado: avisa e cai no formulário manual com chave', async () => {
+    const t = await abrirCliproxy(m.contas_add_chave());
+    expect(document.body.textContent).toContain(m.cliproxy_missing());
+    expect(document.querySelector('input[type="password"]')).not.toBeNull();
+    t.fim();
+  });
+
+  it('achou mas não respondeu: mostra o erro e deixa digitar a chave, com a URL preenchida', async () => {
+    vi.mocked(core.engineCliproxy).mockResolvedValueOnce({ found: true, base_url: URL_CP, models: [], error: 'connection refused' });
+    const t = await abrirCliproxy(m.contas_add_chave());
+    expect(document.body.textContent).toContain(m.cliproxy_error({ url: URL_CP, erro: 'connection refused' }));
+    expect(document.querySelector('input[type="password"]')).not.toBeNull();
+    expect(document.querySelector<HTMLInputElement>('input[type="url"]')!.value).toBe(URL_CP);
     t.fim();
   });
 });

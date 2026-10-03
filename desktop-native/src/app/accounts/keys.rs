@@ -19,6 +19,7 @@ pub(super) const PROVIDERS: &[Provider] = &[
     Provider { id: "openrouter", name: "OpenRouter", desc: "accounts_provider_openrouter", url: "https://openrouter.ai/api" },
     Provider { id: "groq", name: "Groq", desc: "accounts_provider_groq", url: "https://api.groq.com/openai" },
     Provider { id: "deepseek", name: "DeepSeek", desc: "accounts_provider_deepseek", url: "https://api.deepseek.com" },
+    Provider { id: "cliproxy", name: "CLIProxyAPI", desc: "cliproxy_desc", url: "http://127.0.0.1:8317" },
     Provider { id: "custom", name: "", desc: "accounts_provider_custom_desc", url: "" },
 ];
 
@@ -27,6 +28,8 @@ const HINTS: [(&str, &str); 2] = [("Kimi Code", "https://api.kimi.com/coding"), 
 
 impl Provider {
     fn name(&self) -> String { if self.name.is_empty() { tr("accounts_provider_custom") } else { self.name.to_owned() } }
+    /// A descrição do CLIProxyAPI é a do web (sem `native_`).
+    fn desc(&self) -> String { if self.id == "cliproxy" { tr_shared(self.desc, &[]) } else { tr(self.desc) } }
 }
 
 /// Selo do provedor: a cor da marca quando o app a conhece, e duas letras.
@@ -46,7 +49,7 @@ pub(super) fn provider_choice(provider: &Provider, action: Button) -> Div {
         .child(provider_badge(provider.url, &name, 30.))
         .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
             .child(div().font_weight(FontWeight::MEDIUM).child(name))
-            .child(div().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal().child(tr(provider.desc))))
+            .child(div().text_size(px(12.5)).text_color(theme::muted()).whitespace_normal().child(provider.desc())))
         .child(div().flex_shrink_0().child(action))
 }
 
@@ -76,6 +79,10 @@ fn number(text: &str) -> Option<Option<u64>> {
 
 /// "256k" a partir de tokens.
 fn thousands(tokens: u64) -> String { format!("{}k", (tokens as f64 / 1000.).round()) }
+
+/// `GET /api/engines/cliproxy`: o CLIProxyAPI desta máquina do servidor.
+#[derive(Deserialize)]
+struct Detected { found: bool, base_url: Option<String>, #[serde(default)] models: Vec<ProviderModel>, error: Option<String> }
 
 #[derive(Clone, Deserialize)]
 struct ProviderModel { id: String, context_length: Option<u64>, vision: Option<bool> }
@@ -162,6 +169,11 @@ pub(super) struct EngineForm {
     syncing: Option<u64>,
     synced: Option<Result<Synced, String>>,
     why: Option<usize>,
+    /// CLIProxyAPI: a detecção em voo e o que ela disse (texto, se é erro).
+    detecting: Option<u64>,
+    detected: Option<(String, bool)>,
+    /// Achado: o servidor põe a chave do config dele, e o endereço fica o detectado (só com ele o servidor aceita).
+    keyless: bool,
     derived: Derived,
     _subscriptions: Vec<Subscription>,
     /// As dos dois seletores: trocadas junto com eles a cada teste.
@@ -187,8 +199,8 @@ impl EngineForm {
             terminal_id: if name.is_empty() { "kimi".into() } else { id.clone() },
             no_vision,
             can_test: !url.is_empty() && (!key.is_empty() || (self.kind != FormKind::Key && self.key_set)),
-            can_save: !url.is_empty() && !bad_number && !(creating && taken.is_none()) && match self.kind {
-                FormKind::Key => !name.is_empty() && !key.is_empty(),
+            can_save: !url.is_empty() && !bad_number && !(creating && taken.is_none()) && self.detecting.is_none() && match self.kind {
+                FormKind::Key => !name.is_empty() && (!key.is_empty() || self.keyless),
                 _ => !model.is_empty() && (!creating || !name.is_empty()),
             },
             url_moved: !creating && self.key_set && key.is_empty() && url != self.saved_url,
@@ -218,6 +230,7 @@ pub(in crate::app) enum KeysReply {
     Synced(u64, Result<Value, Failure>),
     Cookie(u64, Result<Value, Failure>),
     Cleared(String, String, Result<Value, Failure>),
+    Detected(u64, Result<Value, Failure>),
 }
 
 fn input(window: &mut Window, cx: &mut Context<Hangar>, value: String, placeholder: String) -> Entity<InputState> {
@@ -267,7 +280,19 @@ impl Hangar {
         let kind = if model { FormKind::Model } else { FormKind::Key };
         // Como no web: os ligados por padrão nascem ligados, o resto desligado.
         let flags = [false, false, true, true, false, false, false, false];
-        self.build_form(kind, None, p.name(), Some(tr(p.desc)), engine, flags, String::new(), window, cx);
+        self.build_form(kind, None, p.name(), Some(p.desc()), engine, flags, String::new(), window, cx);
+        if p.id == "cliproxy" { self.detect_cliproxy(cx); }
+    }
+
+    /// Procura o CLIProxyAPI na máquina do servidor; a chave dele nunca vem para cá.
+    fn detect_cliproxy(&mut self, cx: &mut Context<Self>) {
+        let Some(api) = self.api.clone() else { return };
+        self.accounts.keys_seq += 1;
+        let seq = self.accounts.keys_seq;
+        let Some(form) = self.accounts.form.as_mut() else { return };
+        (form.detecting, form.detected) = (Some(seq), Some((tr_shared("cliproxy_detecting", &[]), false)));
+        self.keys_send(async move { KeysReply::Detected(seq, api.server_read(&["engines", "cliproxy"], &[], 15).await) });
+        cx.notify();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -296,7 +321,8 @@ impl Hangar {
         }
         let mut form = EngineForm { kind, saved: saved.clone(), title, lead, badge_url: engine.base_url.clone(), label, name, url, key, model, subagent,
             window: context, compact, output, flags, saved_url: engine.base_url, key_set, vision: engine.vision, models: None, picks: None,
-            testing: None, tested: None, saving: None, error: None, syncing: None, synced: None, why: None, derived: Derived::default(),
+            testing: None, tested: None, saving: None, error: None, syncing: None, synced: None, why: None,
+            detecting: None, detected: None, keyless: false, derived: Derived::default(),
             _subscriptions: subscriptions, pick_subscriptions: Vec::new() };
         form.refresh(&self.engine_names(), cx);
         self.accounts.outcome = None;
@@ -406,7 +432,7 @@ impl Hangar {
             "label": match form.kind { FormKind::Edit => form.label.clone(), _ if name.is_empty() => form.title.clone(), _ => name },
             "base_url": url, "model": model,
         });
-        if !key.is_empty() { body["api_key"] = json!(key); }
+        if form.keyless { body["use_cliproxy_key"] = json!(true); } else if !key.is_empty() { body["api_key"] = json!(key); }
         if form.kind != FormKind::Key {
             let blank = |n: Option<Option<u64>>| n.flatten().map_or(json!(""), |n| json!(n));
             body["subagent_model"] = json!(EngineForm::value(&form.subagent, cx));
@@ -573,6 +599,27 @@ impl Hangar {
                 });
                 self.load_accounts(true, cx);
             }
+            KeysReply::Detected(seq, result) => {
+                let Some(form) = self.accounts.form.as_mut().filter(|f| f.detecting == Some(seq)) else { return };
+                form.detecting = None;
+                let detected = result.map_err(|e| Self::failure(&e))
+                    .and_then(|v| serde_json::from_value::<Detected>(v).map_err(|_| tr("invalid_response")));
+                let found = match detected {
+                    Ok(Detected { found: true, base_url: Some(url), models, error }) => {
+                        form.url.update(cx, |input, cx| input.set_value(url.clone(), window, cx));
+                        match error {
+                            Some(erro) => { form.detected = Some((tr_shared("cliproxy_error", &[("url", &url), ("erro", &erro)]), true)); None }
+                            None => {
+                                (form.keyless, form.detected) = (true, Some((tr_shared("cliproxy_found", &[("url", &url)]), false)));
+                                Some(models)
+                            }
+                        }
+                    }
+                    Ok(Detected { error: Some(error), .. }) | Err(error) => { form.detected = Some((error, true)); None }
+                    Ok(_) => { form.detected = Some((tr_shared("cliproxy_missing", &[]), false)); None }
+                };
+                if let Some(models) = found { self.tested(models, window, cx); }
+            }
         }
         if let Some(form) = self.accounts.form.as_mut() { form.refresh(&taken, cx); }
     }
@@ -606,12 +653,12 @@ impl Hangar {
         }
 
         let url_label = tr(if short { "accounts_key_url" } else { "accounts_engine_url" });
-        let mut url = field(url_label.clone(), Input::new(&f.url).disabled(busy).aria_label(url_label));
+        let mut url = field(url_label.clone(), Input::new(&f.url).disabled(busy || f.keyless).aria_label(url_label));
         if !short {
             url = url.child(help(tr("accounts_engine_url_help")))
                 .child(div().flex().gap(px(6.)).children(HINTS.iter().map(|(name, address)| {
                     let address = *address;
-                    Button::new(SharedString::from(format!("accounts-engine-hint-{name}"))).outline().xsmall().label(*name).disabled(busy)
+                    Button::new(SharedString::from(format!("accounts-engine-hint-{name}"))).outline().xsmall().label(*name).disabled(busy || f.keyless)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             let Some(url) = this.accounts.form.as_ref().map(|f| f.url.clone()) else { return };
                             url.update(cx, |input, cx| input.set_value(address, window, cx));
@@ -619,11 +666,18 @@ impl Hangar {
                         }))
                 })));
         }
+        if let Some((text, error)) = &f.detected {
+            let color = if f.keyless { theme::success() } else if *error { theme::danger() } else { theme::muted() };
+            url = url.child(tone(text.clone(), color));
+        }
         body = body.child(url);
 
-        let key_label = tr(if short { "accounts_key_secret" } else { "accounts_engine_key" });
-        body = body.child(field(key_label.clone(), Input::new(&f.key).disabled(busy).aria_label(key_label))
-            .when(f.key_set && !short, |el| el.child(tone(tr("accounts_engine_key_set"), theme::success()))));
+        // CLIProxyAPI achado: a chave fica no servidor, não há o que digitar.
+        if !f.keyless {
+            let key_label = tr(if short { "accounts_key_secret" } else { "accounts_engine_key" });
+            body = body.child(field(key_label.clone(), Input::new(&f.key).disabled(busy).aria_label(key_label))
+                .when(f.key_set && !short, |el| el.child(tone(tr("accounts_engine_key_set"), theme::success()))));
+        }
 
         // Testar e listar: no formulário curto é o bloco "Modelos" com a lista.
         let testing = f.testing.is_some();

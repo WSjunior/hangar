@@ -37,6 +37,7 @@ from app.model_picker import PickerError
 from app.mensagens import erro
 from app import kimi_models
 from app import claude_models
+from app import cliproxy
 from app import codex_models
 from app import model_args
 from app import filesearch, filetree, git_ops, worktrees
@@ -5961,6 +5962,17 @@ async def put_engine(nome: str, request: Request):
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(400, detail=erro("erro_corpo_deve_ser_objeto", "corpo deve ser um objeto"))
+    if body.pop("use_cliproxy_key", False):
+        try:
+            inst = await asyncio.to_thread(cliproxy.local)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        if not inst:
+            raise HTTPException(400, detail=erro("erro_cliproxy_ausente", "CLIProxyAPI local sem config ou sem api-keys"))
+        # A chave do config só vai para a instância dele, nunca para um endereço escolhido pelo cliente.
+        if cliproxy.normalize_base(str(body.get("base_url") or "")) != inst["base_url"]:
+            raise HTTPException(400, detail=erro("erro_cliproxy_endereco", "endereço diferente do CLIProxyAPI local"))
+        body["api_key"] = inst["api_key"]
     # I/O de disco no threadpool, igual ao resto deste handler (ver comentário acima de create_session).
     atual = (await asyncio.to_thread(engines.listar)).get(nome, {})
     chave_atual = atual.get("api_key", "")
@@ -6055,6 +6067,23 @@ async def engine_modelos(body: EngineProbeBody):
         # RuntimeError pro uvicorn logar (traceback com a key no journal). 400 sem ecoar o valor.
         raise HTTPException(400, str(e))
     return {"modelos": modelos}
+
+
+@app.get("/api/engines/cliproxy", dependencies=[Depends(require_auth)])
+async def engine_cliproxy():
+    """CLIProxyAPI desta máquina: endereço e modelos, sem a chave."""
+    try:
+        inst = await asyncio.to_thread(cliproxy.local)
+    except ValueError as e:
+        return {"found": False, "base_url": None, "models": [], "error": str(e)}
+    if not inst:
+        return {"found": False, "base_url": None, "models": [], "error": None}
+    try:
+        modelos = await asyncio.to_thread(engine_probe.listar_modelos, inst["base_url"], inst["api_key"])
+    except (RuntimeError, ValueError) as e:
+        return {"found": True, "base_url": inst["base_url"], "models": [], "error": str(e)}
+    return {"found": True, "base_url": inst["base_url"], "error": None,
+            "models": [m for m in modelos if cliproxy.is_engine_model(m["id"])]}
 
 
 def _id_upload(info: SessionInfo) -> str:

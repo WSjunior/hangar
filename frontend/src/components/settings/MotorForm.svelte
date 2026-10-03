@@ -37,8 +37,12 @@
     nomesExistentes?: string[];
     onSalvo: (motores: Record<string, Motor>, alvo: Server | null) => void;
     onFechar: () => void;
+    // CLIProxyAPI detectado no servidor: modelos já lidos e a chave fica lá (o PUT pede
+    // `use_cliproxy_key`), então o campo de chave e o Testar somem.
+    cliproxy?: { base_url: string; modelos: ModeloProvedor[] } | null;
   }
-  let { apiTarget, nome, motor, criando = false, nomesExistentes = [], onSalvo, onFechar }: Props = $props();
+  let { apiTarget, nome, motor, criando = false, nomesExistentes = [], onSalvo, onFechar,
+        cliproxy = null }: Props = $props();
 
   // Atalhos de endereço: dois provedores que a pessoa desta casa usa e cujo endereço não se
   // adivinha (nem um nem outro é o domínio do produto).
@@ -99,7 +103,9 @@
   const numero = (k: ChaveNum) => form[k];
   const setNumero = (k: ChaveNum, v: string) => { form[k] = v; };
 
-  let modelos = $state<ModeloProvedor[]>([]);
+  let modelos = $state<ModeloProvedor[]>(untrack(() => cliproxy?.modelos ?? []));
+  // O servidor só preenche a chave pro endereço que ele detectou; editou a URL, volta o manual.
+  const semChave = $derived(!!cliproxy && form.base_url.trim() === cliproxy.base_url);
   let buscando = $state(false);
   let erroBusca = $state('');
   let okBusca = $state('');
@@ -193,7 +199,8 @@
         base_url: form.base_url.trim(),
         model: form.model.trim(),
       };
-      if (form.api_key.trim()) corpo.api_key = form.api_key.trim();
+      if (semChave) corpo.use_cliproxy_key = true;
+      else if (form.api_key.trim()) corpo.api_key = form.api_key.trim();
       // Campo ausente do corpo do PUT herda o valor do disco, e `null` conta como ausente. Quem
       // LIMPA é o campo presente e vazio: `''` sai do registro. Por isso os opcionais vão SEMPRE —
       // omiti-los quando vazios fazia a limpeza voltar HTTP 200 com o valor antigo, calado.
@@ -292,23 +299,25 @@
     </span>
   </label>
 
-  <label class="campo">
-    <span class="rot">{m.config_motores_chave()}</span>
-    {#if form.api_key_definida}<span class="def">{m.config_motores_chave_definida()}</span>{/if}
-    <input type="text" name="api_key" autocomplete="off" autocapitalize="off" spellcheck={false}
-           placeholder={form.api_key_definida ? m.config_motores_colar_nova() : m.config_motores_colar()}
-           value={form.api_key} oninput={(e) => (form.api_key = e.currentTarget.value)} />
-  </label>
+  {#if !semChave}
+    <label class="campo">
+      <span class="rot">{m.config_motores_chave()}</span>
+      {#if form.api_key_definida}<span class="def">{m.config_motores_chave_definida()}</span>{/if}
+      <input type="text" name="api_key" autocomplete="off" autocapitalize="off" spellcheck={false}
+             placeholder={form.api_key_definida ? m.config_motores_colar_nova() : m.config_motores_colar()}
+             value={form.api_key} oninput={(e) => (form.api_key = e.currentTarget.value)} />
+    </label>
 
-  <div class="campo">
-    <button type="button" class="btn" onclick={buscarModelos}
-            disabled={buscando || !form.base_url.trim() || (!form.api_key.trim() && !form.api_key_definida)}>
-      {buscando ? m.config_motores_consultando() : m.config_motores_testar()}
-    </button>
-    {#if okBusca}<span class="ok">{okBusca}</span>{/if}
-    {#if enderecoMudouSemChave}<span class="ajuda erro">{m.config_motores_endereco_mudou()}</span>{/if}
-    {#if erroBusca}<span class="ajuda erro">{erroBusca}</span>{/if}
-  </div>
+    <div class="campo">
+      <button type="button" class="btn" onclick={buscarModelos}
+              disabled={buscando || !form.base_url.trim() || (!form.api_key.trim() && !form.api_key_definida)}>
+        {buscando ? m.config_motores_consultando() : m.config_motores_testar()}
+      </button>
+      {#if okBusca}<span class="ok">{okBusca}</span>{/if}
+      {#if enderecoMudouSemChave}<span class="ajuda erro">{m.config_motores_endereco_mudou()}</span>{/if}
+      {#if erroBusca}<span class="ajuda erro">{erroBusca}</span>{/if}
+    </div>
+  {/if}
 
   <label class="campo">
     <span class="rot">{m.composer_modelo()}</span>
