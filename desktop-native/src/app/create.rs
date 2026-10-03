@@ -491,6 +491,7 @@ impl NewSession {
         self.folders.clear();
         self.branch.clear();
         (self.new_branch, self.base) = (false, String::new());
+        self.new_branch_name.update(cx, |input, cx| input.set_value("", window, cx));
         self.roots.reset();
         self.scan.reset();
         self.checkout.reset();
@@ -597,7 +598,7 @@ impl NewSession {
         // A pasta da criação em voo não muda: a coluna da esquerda fica parada até a resposta.
         if self.creating { return; }
         self.root = Some(root);
-        if self.compact { self.picked = Some(path.clone()); self.reset_git(); self.load_branches(cx); }
+        if self.compact { self.picked = Some(path.clone()); self.reset_git(); self.load_branches(window, cx); }
         let remember = path.clone();
         self.link.runtime.spawn_blocking(move || crate::appearance::remember_root(&remember));
         self.query.update(cx, |input, cx| input.set_value("", window, cx));
@@ -628,7 +629,7 @@ impl NewSession {
         if self.compact {
             self.menu.set(None);
             self.reset_git();
-            self.load_branches(cx);
+            self.load_branches(window, cx);
             cx.notify();
             return;
         }
@@ -705,7 +706,11 @@ impl NewSession {
             && self.codex.ok().and_then(|list| list.iter().find(|a| a.id == self.codex_account)).is_some_and(|a| a.auth.status == "connected"))
     }
 
-    fn load_branches(&mut self, cx: &mut Context<Self>) { self.read_branches(true, cx); }
+    /// Pasta nova: o nome da branch nova digitado para a anterior não vale aqui.
+    fn load_branches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_branch_name.update(cx, |input, cx| input.set_value("", window, cx));
+        self.read_branches(true, cx);
+    }
 
     /// Releitura da mesma pasta (depois de trocar a branch, ao fechar o gerenciador): a lista e a escolha ficam até a
     /// resposta chegar, sem o menu esvaziar no meio.
@@ -740,8 +745,11 @@ impl NewSession {
         let mut name = if self.compact { basename(&cwd).to_owned() } else { self.name.read(cx).value().trim().to_owned() };
         let provider = self.provider;
         let typed = self.new_branch_name.read(cx).value().trim().to_string();
+        let typed_empty = typed.is_empty();
         let wanted = if self.new_branch { if typed.is_empty() { name.clone() } else { typed } } else { self.branch.clone() };
-        let requested_branch = (self.compact && !wanted.is_empty()).then(|| wanted.clone());
+        let mut requested_branch = (self.compact && !wanted.is_empty()).then(|| wanted.clone());
+        // Sem nome digitado, a branch é o nome final da sessão, que só sai do `unique_name` abaixo.
+        let branch_is_name = self.compact && self.new_branch && typed_empty && self.baton.is_none();
         let text = |s: &str| if s.is_empty() { Value::Null } else { json!(s) };
         let mut body = json!({"name": name, "cwd": cwd, "provider": provider, "model": text(&self.model), "effort": text(&self.effort)});
         if self.compact && !wanted.is_empty() {
@@ -800,6 +808,10 @@ impl NewSession {
                 };
                 name = unique_name(&name, &sessions.into_iter().map(|session| session.name).collect());
                 body["name"] = json!(name);
+                if branch_is_name {
+                    body["branch"] = json!(name);
+                    requested_branch = Some(name.clone());
+                }
             }
             // O padrão do Jev muda só aqui, ao criar; falhar nele não impede a sessão de nascer com a escolha feita.
             if let Some((on, true)) = jev
@@ -954,7 +966,15 @@ impl NewSession {
             CreateReply::Created(seq, result) | CreateReply::CreatedWithInput(seq, _, _, _, _, result) => {
                 if seq != self.create_seq || !self.creating { return None; }
                 (self.creating, self.resuming, self.started, self.clock) = (false, false, None, None);
-                match result { Ok(opened) => return Some(opened), Err(error) => self.error = Some(error) }
+                match result {
+                    Ok(opened) => {
+                        // A branch nova já existe: a próxima criação não pode repetir o nome.
+                        (self.new_branch, self.base) = (false, String::new());
+                        self.new_branch_name.update(cx, |input, cx| input.set_value("", window, cx));
+                        return Some(opened);
+                    }
+                    Err(error) => self.error = Some(error),
+                }
             }
         }
         cx.notify();
@@ -1995,5 +2015,17 @@ mod tests {
         }
         let ok = scan_of(Ok(json!({"entries": [{"name": "a", "path": "/r/a", "is_git": true, "mtime": 1.0}], "error": null}))).ok().unwrap();
         assert_eq!((ok.entries.len(), ok.error), (1, None));
+    }
+}
+
+#[cfg(test)]
+mod worktree_tests {
+    use super::worktree_body;
+
+    #[test]
+    fn body_for_new_branch() {
+        assert_eq!(worktree_body("nova", true, "develop"),
+                   serde_json::json!({"branch": "nova", "new_branch": true, "base": "develop"}));
+        assert_eq!(worktree_body("x", false, ""), serde_json::json!({"branch": "x"}));
     }
 }
