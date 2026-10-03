@@ -188,7 +188,7 @@ async fn terminal_input_windows_clipboard_held_until_proof_and_preserves_unicode
   fn socket<'a>(&'a self,d:&'a NativeMessage,e:Vec<u8>)->IoFuture<'a,WriteOutcome>{self.inner.socket(d,e)}
  }
  let dir=tempfile::tempdir().unwrap();let path=dir.path().join("clipboard.lock");let mut b=binding();b.windows=true;b.pane="=test:0.0".into();b.clipboard_lock_path=Some(path.clone());
- let io=Arc::new(Probe {inner:FakeIo::new(vec![screen(""),screen("[Pasted text #1 +2 lines]"),screen("")]),path,checked:Mutex::new(false)});let s=Arc::new(Services::new());s.facts.lock().unwrap().binding=b.clone();
+ let io=Arc::new(Probe {inner:FakeIo::new(vec![screen(""),screen(""),screen("[Pasted text #1 +2 lines]"),screen("")]),path,checked:Mutex::new(false)});let s=Arc::new(Services::new());s.facts.lock().unwrap().binding=b.clone();
  let d=TerminalDriver::new(b,s,io.clone(),InputLimits {literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,settle:Duration::ZERO,proof_attempts:2,ready_attempts:2,cleanup_attempts:3});
  assert_eq!(d.prompt("ação\\😀\nsecond","id").await.disposition,Disposition::Accepted);assert!(*io.checked.lock().unwrap());
  let calls=io.inner.calls.lock().unwrap();let clip=calls.iter().find(|c|c.program=="powershell.exe").unwrap();assert_eq!(clip.stdin,"ação\\😀\nsecond".as_bytes());assert!(!calls.iter().any(|c|c.args.contains(&"load-buffer".into())));
@@ -245,4 +245,66 @@ async fn terminal_input_clipboard_unavailable_preserves_literal_and_blocks_clipb
  for text in ["hello","first\nsecond"] {let mut b=binding();b.windows=true;b.pane="=test:0.0".into();let dir=tempfile::tempdir().unwrap();b.clipboard_lock_path=Some(dir.path().join("clip.lock"));let s=Arc::new(Services::new());{let mut f=s.facts.lock().unwrap();f.binding=b.clone();f.clipboard_available=false;}
  let io=Arc::new(FakeIo::new(vec![screen(""),screen(text),screen("")]));let d=TerminalDriver::new(b,s,io.clone(),InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:2,ready_attempts:2,cleanup_attempts:3});
  assert_eq!(d.prompt(text,"id").await.disposition,if text.contains('\n'){Disposition::Deferred}else{Disposition::Accepted});assert!(!io.calls.lock().unwrap().iter().any(|r|r.program=="powershell.exe"));}
+}
+
+fn instant_limits() -> InputLimits { InputLimits { settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:2,ready_attempts:2,cleanup_attempts:3 } }
+#[tokio::test]
+async fn terminal_input_interleaved_interactive_pastes_keep_each_pane_bytes() {
+ struct Interleaved {buffers:Mutex<std::collections::HashMap<String,Vec<u8>>>,received:Mutex<std::collections::HashMap<String,Vec<u8>>>,loaded:tokio::sync::Barrier}
+ impl TerminalIo for Interleaved {
+  fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput>{Box::pin(async move {
+   let arg=|flag:&str|r.args.iter().position(|s|s==flag).map(|i|r.args[i+1].clone()).unwrap();
+   if r.args.contains(&"display-message".into()){return Ok(CommandOutput {success:true,stdout:format!("test\t{}\t17\n",arg("-t")).into_bytes()});}
+   if r.args.contains(&"load-buffer".into()){self.buffers.lock().unwrap().insert(arg("-b"),r.stdin);self.loaded.wait().await;return Ok(CommandOutput {success:true,stdout:vec![]});}
+   if r.args.contains(&"paste-buffer".into()){let bytes=self.buffers.lock().unwrap().remove(&arg("-b"));let success=bytes.is_some();if let Some(bytes)=bytes{self.received.lock().unwrap().insert(arg("-t"),bytes);}return Ok(CommandOutput {success,stdout:vec![]});}
+   panic!("unexpected command");
+  })}
+  fn socket<'a>(&'a self,_:&'a NativeMessage,_:Vec<u8>)->IoFuture<'a,WriteOutcome>{Box::pin(async{Ok(WriteOutcome::NotWritten)})}
+ }
+ let io=Arc::new(Interleaved {buffers:Mutex::new(std::collections::HashMap::new()),received:Mutex::new(std::collections::HashMap::new()),loaded:tokio::sync::Barrier::new(2)});
+ let a=TerminalDriver::new(binding(),Arc::new(Services::new()),io.clone(),instant_limits());
+ let mut b_binding=binding();b_binding.pane="%8".into();let b_services=Arc::new(Services::new());b_services.facts.lock().unwrap().binding=b_binding.clone();
+ let b=TerminalDriver::new(b_binding,b_services,io.clone(),instant_limits());
+ let (a_result,b_result)=tokio::join!(a.text("first A\nsecond A"),b.text("first B\nsecond B"));
+ assert_eq!(a_result.disposition,Disposition::Accepted);assert_eq!(b_result.disposition,Disposition::Accepted);
+ let received=io.received.lock().unwrap();assert_eq!(received.get("%7").unwrap(),b"first A\nsecond A");assert_eq!(received.get("%8").unwrap(),b"first B\nsecond B");
+}
+#[tokio::test]
+async fn terminal_input_plugin_no_write_rechecks_all_guards_without_erasing_new_draft() {
+ struct Gate {inner:Services,entered:tokio::sync::Notify,resume:tokio::sync::Notify}
+ impl TerminalServices for Gate {
+  fn facts<'a>(&'a self,b:&'a TerminalBinding)->ServiceFuture<'a,InputFacts>{self.inner.facts(b)}
+  fn publish<'a>(&'a self,b:&'a TerminalBinding,r:PluginRequest)->ServiceFuture<'a,PluginReply>{Box::pin(async move{self.entered.notify_one();self.resume.notified().await;self.inner.publish(b,r).await})}
+ }
+ for reply in [PluginReply::Unavailable,PluginReply::NotWritten] {for change in ["question","ready","overlay","draft"] {
+  let s=Arc::new(Gate {inner:Services::new(),entered:tokio::sync::Notify::new(),resume:tokio::sync::Notify::new()});s.inner.facts.lock().unwrap().plugin_live=true;*s.inner.reply.lock().unwrap()=reply.clone();
+  let io=Arc::new(FakeIo::new(vec![screen("")]));let d=TerminalDriver::new(binding(),s.clone(),io.clone(),instant_limits());let task=tokio::spawn(async move{d.prompt("message","id").await});s.entered.notified().await;
+  match change {"question"=>s.inner.facts.lock().unwrap().open_question=true,"ready"=>s.inner.facts.lock().unwrap().ready=false,"overlay"=>*io.screens.lock().unwrap()=vec![picker()].into(),"draft"=>*io.screens.lock().unwrap()=vec![screen("new owner draft")].into(),_=>unreachable!()}
+  s.resume.notify_one();let r=task.await.unwrap();assert_eq!(r.disposition,Disposition::Deferred,"{reply:?}/{change}");assert!(io.writes().is_empty(),"{reply:?}/{change}");assert_eq!(s.inner.published.lock().unwrap().len(),1);
+ }}
+}
+#[tokio::test]
+async fn terminal_input_clipboard_wait_rechecks_all_guards_without_erasing_new_draft() {
+ for change in ["question","ready","overlay","draft"] {
+  let dir=tempfile::tempdir().unwrap();let path=dir.path().join("clipboard.lock");let lock=std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&path).unwrap();lock.lock().unwrap();
+  let mut b=binding();b.windows=true;b.pane="=test:0.0".into();b.clipboard_lock_path=Some(path);let s=Arc::new(Services::new());s.facts.lock().unwrap().binding=b.clone();let io=Arc::new(FakeIo::new(vec![screen("")]));let mut limits=instant_limits();limits.settle=Duration::from_millis(1);limits.ready_attempts=100;
+  let d=TerminalDriver::new(b,s.clone(),io.clone(),limits);let task=tokio::spawn(async move{d.prompt("message\nsecond","id").await});while !io.calls.lock().unwrap().iter().any(|c|c.args.contains(&"capture-pane".into())){tokio::task::yield_now().await;}
+  match change {"question"=>s.facts.lock().unwrap().open_question=true,"ready"=>s.facts.lock().unwrap().ready=false,"overlay"=>*io.screens.lock().unwrap()=vec![picker()].into(),"draft"=>*io.screens.lock().unwrap()=vec![screen("new owner draft")].into(),_=>unreachable!()}
+  drop(lock);let r=task.await.unwrap();assert_eq!(r.disposition,Disposition::Deferred,"{change}");assert!(io.writes().is_empty(),"{change}");assert!(!io.calls.lock().unwrap().iter().any(|r|r.program=="powershell.exe"),"{change}");
+ }
+}
+#[tokio::test]
+async fn terminal_input_answer_first_arrow_uncertain_never_defers_or_submits() {
+ let io=Arc::new(FakeIo::new(vec![picker()]));*io.fail.lock().unwrap()=Some("Down".into());let r=driver(io.clone(),Arc::new(Services::new())).answer(&[option_answer(1,"second")]).await;
+ assert_eq!(r.disposition,Disposition::Unknown);assert_eq!(io.writes().len(),1);assert_eq!(io.writes()[0].args.last().unwrap(),"Down");
+}
+#[tokio::test]
+async fn terminal_input_answer_arrow_accepted_then_capture_failed_is_unknown() {
+ struct CaptureFailure(FakeIo);
+ impl TerminalIo for CaptureFailure {
+  fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput>{Box::pin(async move{let navigated=!self.0.writes().is_empty();if navigated && r.args.contains(&"capture-pane".into()){return Err(IoFailure {code:"capture_failed",may_have_written:false});}self.0.command(r).await})}
+  fn socket<'a>(&'a self,d:&'a NativeMessage,e:Vec<u8>)->IoFuture<'a,WriteOutcome>{self.0.socket(d,e)}
+ }
+ let io=Arc::new(CaptureFailure(FakeIo::new(vec![picker()])));let d=TerminalDriver::new(binding(),Arc::new(Services::new()),io.clone(),instant_limits());let r=d.answer(&[option_answer(1,"second")]).await;
+ assert_eq!(r.disposition,Disposition::Unknown);assert_eq!(io.0.writes().len(),1);assert_eq!(io.0.writes()[0].args.last().unwrap(),"Down");
 }

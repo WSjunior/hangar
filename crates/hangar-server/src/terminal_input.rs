@@ -1,7 +1,7 @@
 //! Escritor Claude terminal; a fila e a política pertencem ao executor do runtime.
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, future::Future, path::PathBuf, pin::Pin, sync::{Arc, LazyLock}, time::Duration};
+use std::{collections::BTreeSet, future::Future, path::PathBuf, pin::Pin, sync::{Arc, LazyLock, atomic::{AtomicU64, Ordering}}, time::Duration};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, process::Command, sync::Mutex, time::timeout};
 
 pub type ServiceFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ServiceError>> + Send + 'a>>;
@@ -171,6 +171,7 @@ pub enum Proof { Present, Absent, Unreadable }
 pub struct ComposerSnapshot { pub content: String, pub placeholders: BTreeSet<String> }
 static PLACEHOLDER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[(Pasted text|Image) #(\d+)").unwrap());
 static CURSOR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^\s*[❯›]\s*(\d+)\.\s").unwrap());
+static NEXT_BUFFER: AtomicU64 = AtomicU64::new(0);
 fn compact(text: &str) -> String { text.chars().filter(|c| !c.is_whitespace() && !"│┃║".contains(*c)).collect() }
 impl ComposerSnapshot {
     pub fn parse(screen: &str) -> Option<Self> {
@@ -302,7 +303,8 @@ impl TerminalDriver {
         Ok(())
     }
     async fn paste(&self, text: &str, id: &str) -> Result<(), IoFailure> {
-        let buffer = format!("hangar-{}-{}", std::process::id(), id.chars().filter(|c| c.is_ascii_alphanumeric()).take(64).collect::<String>());
+        let buffer = format!("hangar-{}-{}-{}", std::process::id(), NEXT_BUFFER.fetch_add(1, Ordering::Relaxed),
+            id.chars().filter(|c| c.is_ascii_alphanumeric()).take(64).collect::<String>());
         self.verify().await?;
         let load = self.raw(vec!["load-buffer".into(), "-b".into(), buffer.clone(), "-".into()], text.as_bytes().to_vec()).await?;
         if !load.success { return Err(IoFailure { code: "buffer_failed", may_have_written: false }); }
@@ -329,6 +331,16 @@ impl TerminalDriver {
         let screen = self.capture_inner().await?;
         if overlay(&screen) { return Err(IoFailure { code: "overlay", may_have_written: false }); }
         ComposerSnapshot::parse(&screen).ok_or(IoFailure { code: "composer_unreadable", may_have_written: false })
+    }
+    async fn refresh_input_guard(&self) -> Result<ComposerSnapshot, IoFailure> {
+        let facts = self.verify().await?;
+        if facts.open_question || !facts.ready {
+            return Err(IoFailure { code: "input_unavailable", may_have_written: false });
+        }
+        let before = self.snapshot().await?;
+        // O rascunho surgido durante a espera pertence ao dono.
+        if !before.is_empty() { return Err(IoFailure { code: "composer_busy", may_have_written: false }); }
+        Ok(before)
     }
     async fn initial_composer(&self) -> Result<ComposerSnapshot, IoFailure> {
         let mut before = self.snapshot().await?;
@@ -421,13 +433,14 @@ impl TerminalDriver {
             facts = match self.verify().await { Ok(f) => f, Err(e) => return Self::failed(e, DeliveryStage::Identity) };
         }
         if !facts.ready { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Ready, "not_ready"); }
-        let before = match self.initial_composer().await { Ok(b) => b, Err(e) => return Self::failed(e, DeliveryStage::Composer) };
+        let mut before = match self.initial_composer().await { Ok(b) => b, Err(e) => return Self::failed(e, DeliveryStage::Composer) };
         facts = match self.verify().await { Ok(f) => f, Err(e) => return Self::failed(e, DeliveryStage::Identity) };
+        let mut refresh_guard = false;
         if facts.plugin_live && !text.trim_start().starts_with('/') {
             let mode = if facts.plugin_user && facts.idle && !text.contains('@') && !text.trim_start().starts_with('!') { PluginMode::User } else { PluginMode::Fill };
             let request = PluginRequest { id: id.into(), text: text.into(), mode: mode.clone() };
             match self.services.publish(&self.binding, request).await {
-                Ok(PluginReply::Unavailable | PluginReply::NotWritten) => (),
+                Ok(PluginReply::Unavailable | PluginReply::NotWritten) => refresh_guard = true,
                 Ok(PluginReply::Accepted) if mode == PluginMode::User => return DeliveryResult::new(Disposition::Accepted, DeliveryStage::Plugin, "plugin_accepted"),
                 Ok(PluginReply::Filled) if mode == PluginMode::Fill => {
                     if self.prove_input(text, &before).await { return self.submit(text, &before).await; }
@@ -438,6 +451,9 @@ impl TerminalDriver {
         }
         let use_clipboard = self.binding.windows && (text.contains('\n') || text.contains('\\'));
         let clipboard = if use_clipboard { match self.clipboard_lock().await { Ok(lock) => lock, Err(e) => return Self::failed(e, DeliveryStage::Write) } } else { None };
+        if refresh_guard || use_clipboard {
+            before = match self.refresh_input_guard().await { Ok(b) => b, Err(e) => return Self::failed(e, DeliveryStage::Composer) };
+        }
         let write = if use_clipboard { self.clipboard(text).await }
             else if text.contains('\n') { self.paste(text, id).await } else { self.literal(text).await };
         if let Err(e) = write {
@@ -482,20 +498,29 @@ impl TerminalDriver {
         DeliveryResult::new(Disposition::Accepted, DeliveryStage::Steer, "steered")
     }
     async fn navigate(&self, target: usize, mut screen: String, require_cursor: bool) -> Result<String, IoFailure> {
+        let mut effects = false;
         let mut row = cursor(&screen).or_else(|| unnumbered_cursor(&screen));
         if row.is_none() && require_cursor { return Err(IoFailure { code: "cursor_unreadable", may_have_written: false }); }
         if row.is_none() {
-            for _ in 1..target { self.key_inner("Down").await?; self.settle().await; }
-            return self.capture_inner().await;
+            for _ in 1..target {
+                self.key_inner("Down").await.map_err(|mut e| { e.may_have_written |= effects; e })?;
+                effects = true;
+                self.settle().await;
+            }
+            return self.capture_inner().await.map_err(|mut e| { e.may_have_written |= effects; e });
         }
         for _ in 0..4 {
-            let current = row.ok_or(IoFailure { code: "cursor_lost", may_have_written: false })?;
+            let current = row.ok_or(IoFailure { code: "cursor_lost", may_have_written: effects })?;
             if current == target { return Ok(screen); }
-            for _ in 0..target.abs_diff(current) { self.key_inner(if current < target { "Down" } else { "Up" }).await?; self.settle().await; }
-            screen = self.capture_inner().await?;
+            for _ in 0..target.abs_diff(current) {
+                self.key_inner(if current < target { "Down" } else { "Up" }).await.map_err(|mut e| { e.may_have_written |= effects; e })?;
+                effects = true;
+                self.settle().await;
+            }
+            screen = self.capture_inner().await.map_err(|mut e| { e.may_have_written |= effects; e })?;
             row = cursor(&screen).or_else(|| unnumbered_cursor(&screen));
         }
-        Err(IoFailure { code: "cursor_drift", may_have_written: false })
+        Err(IoFailure { code: "cursor_drift", may_have_written: effects })
     }
     pub async fn select(&self, option: usize, require_cursor: bool) -> DeliveryResult {
         if option == 0 || option > 100 { return DeliveryResult::new(Disposition::Rejected, DeliveryStage::Validate, "invalid_option"); }
@@ -542,7 +567,7 @@ impl TerminalDriver {
             let mut screen = screen;
             for target in answer.targets() {
                 if let Err(e) = self.navigate(target, screen, true).await {
-                    return DeliveryResult::new(if effects { Disposition::Unknown } else { Disposition::Deferred }, DeliveryStage::Answer, e.code);
+                    return DeliveryResult::new(if effects || e.may_have_written { Disposition::Unknown } else { Disposition::Deferred }, DeliveryStage::Answer, e.code);
                 }
                 effects = true;
                 if let Err(e) = self.key_inner(if answer.kind == AnswerKind::Option && answer.multi { "Space" } else { "Enter" }).await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Answer, e.code); }
