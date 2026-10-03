@@ -4,7 +4,7 @@ import re
 import socket
 import time
 from pathlib import Path
-from pydantic import AliasChoices, BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app import contas
@@ -306,14 +306,15 @@ class Settings(BaseSettings):
 
     @field_validator("update_branch", "update_last_branch", mode="before")
     @classmethod
-    def _branch_valida(cls, v: object) -> object:
+    def _branch_valida(cls, v: object, info: ValidationInfo) -> object:
         # O nome vai pro argv do git: inválido vira vazio (main) e fica registrado, nunca derruba o import.
         texto = v.strip() if isinstance(v, str) else ""
         if valid_update_branch(texto):
             return texto
-        logging.getLogger("hangar.config").warning("CP_UPDATE_BRANCH invalido (%r): o Atualizar segue a main", texto)
+        name = f"CP_{info.field_name.upper()}"
+        logging.getLogger("hangar.config").warning("%s inválido (%r): valor ignorado", name, texto)
         from app import diag
-        diag.registrar("atualizacao.branch_invalida", "aviso", detalhe="CP_UPDATE_BRANCH ignorado")
+        diag.registrar("atualizacao.branch_invalida", "aviso", detalhe=f"{name} ignorado")
         return ""
 
 

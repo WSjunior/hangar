@@ -1,7 +1,9 @@
 """Canal do Atualizar escolhido pelo dono, persistido sem reiniciar o servidor."""
 import io
+import logging
 import os
 import re
+import subprocess
 import tempfile
 import threading
 from pathlib import Path
@@ -18,6 +20,29 @@ from app.share_gate import guest_of
 
 ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 _lock = threading.Lock()
+_log = logging.getLogger("hangar.update_channel")
+
+
+def _record_failure(code: str, *, exception: Exception | None = None, result: subprocess.CompletedProcess | None = None, branch: str = "") -> None:
+    fields = diag.erro_campos(exception) if exception is not None else {}
+    detail = branch
+    if result is not None:
+        fields["retorno"] = result.returncode
+        tail = git_ops._scrub("\n".join((result.stderr or "").splitlines()[-3:]))
+        # URLs do Git podem carregar credenciais também na query e no fragmento.
+        tail = re.sub(r"https?://[^\s'\"<>]+", lambda match: re.split(r"[?#]", match[0])[0], tail)
+        detail = tail.strip()[:300]
+    diag.registrar("update_channel.failed", "erro", codigo=code, detalhe=detail, **fields)
+    _log.error("update_channel.failed codigo=%s causa=%s detalhe=%s", code, fields, detail)
+
+
+def _git_request(code: str, *args: str, timeout: float = 20) -> subprocess.CompletedProcess:
+    try:
+        return git_ops._run(str(atualizar.REPO), *args, timeout=timeout)
+    except git_ops.GitError as exc:
+        _record_failure(code, exception=exc)
+        message = "Não foi possível ler a branch instalada." if code == "checkout" else "Não foi possível conferir a branch no origin. Tente novamente."
+        raise HTTPException(503, detail=erro(f"update_channel_{code}", message)) from exc
 
 
 def require_owner(request: Request) -> None:
@@ -33,8 +58,9 @@ class ChannelRequest(BaseModel):
 
 
 def _checkout_branch() -> str:
-    result = git_ops._run(str(atualizar.REPO), "rev-parse", "--abbrev-ref", "HEAD")
+    result = _git_request("checkout", "rev-parse", "--abbrev-ref", "HEAD")
     if result.returncode or "\ufffd" in result.stdout:
+        _record_failure("checkout", result=result)
         raise HTTPException(503, detail=erro("update_channel_checkout", "Não foi possível ler a branch instalada."))
     return result.stdout.strip()
 
@@ -49,7 +75,10 @@ def read_channel() -> dict:
     try:
         with _lock:
             return _snapshot(_checkout_branch())
-    except git_ops.GitError as exc:
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _record_failure("checkout", exception=exc)
         raise HTTPException(503, detail=erro("update_channel_checkout", "Não foi possível ler a branch instalada.")) from exc
 
 
@@ -125,14 +154,16 @@ def write_channel(body: ChannelRequest) -> dict:
             if atualizar.estado_para_tela().get("fase") == "rodando":
                 raise HTTPException(409, detail=erro("update_channel_busy", "Aguarde a atualização terminar antes de mudar o canal."))
             checkout = _checkout_branch()
-            ref = f"refs/heads/{target}"
-            result = git_ops._run(str(atualizar.REPO), "ls-remote", "--exit-code", "--heads", "origin", ref, timeout=20)
-            if result.returncode == 2:
-                raise HTTPException(400, detail=erro("update_channel_missing", "A branch não existe no origin.", branch=target))
-            if result.returncode or "\ufffd" in result.stdout:
-                raise HTTPException(503, detail=erro("update_channel_origin", "Não foi possível conferir a branch no origin. Tente novamente."))
-            if not any(line.split("\t")[-1] == ref for line in result.stdout.splitlines()):
-                raise HTTPException(400, detail=erro("update_channel_missing", "A branch não existe no origin.", branch=target))
+            if branch:
+                ref = f"refs/heads/{target}"
+                result = _git_request("origin", "ls-remote", "--exit-code", "--heads", "origin", ref)
+                if result.returncode == 2:
+                    raise HTTPException(400, detail=erro("update_channel_missing", "A branch não existe no origin.", branch=target))
+                if result.returncode or "\ufffd" in result.stdout:
+                    _record_failure("origin", result=result)
+                    raise HTTPException(503, detail=erro("update_channel_origin", "Não foi possível conferir a branch no origin. Tente novamente."))
+                if not any(line.split("\t")[-1] == ref for line in result.stdout.splitlines()):
+                    raise HTTPException(400, detail=erro("update_channel_missing", "A branch não existe no origin.", branch=target))
             # Usa a mesma vez do Atualizar para ele não nascer durante a troca do canal.
             if not atualizar._tomar_a_vez():
                 raise HTTPException(409, detail=erro("update_channel_busy", "Aguarde a atualização terminar antes de mudar o canal."))
@@ -140,16 +171,16 @@ def write_channel(body: ChannelRequest) -> dict:
                 last = branch or settings.update_last_branch or settings.update_branch
                 _write_env(branch, last)
                 settings.update_branch, settings.update_last_branch = branch, last
-                # O filho herda o ambiente, que tem prioridade sobre o .env no Settings.
-                os.environ["CP_UPDATE_BRANCH"] = branch
-                os.environ["CP_UPDATE_LAST_BRANCH"] = last
+                # Só substitui overrides herdados; sem eles, o motor lê o .env.
+                for key, value in (("CP_UPDATE_BRANCH", branch), ("CP_UPDATE_LAST_BRANCH", last)):
+                    if key in os.environ:
+                        os.environ[key] = value
             finally:
                 atualizar._soltar_a_vez()
             diag.registrar("update_channel.changed", codigo="applied", detalhe=target)
             return _snapshot(checkout)
-    except git_ops.GitError as exc:
-        diag.registrar("update_channel.failed", "erro", codigo="origin", detalhe=target)
-        raise HTTPException(503, detail=erro("update_channel_origin", "Não foi possível conferir a branch no origin. Tente novamente.")) from exc
-    except (OSError, UnicodeError) as exc:
-        diag.registrar("update_channel.failed", "erro", codigo="write", detalhe=target)
-        raise HTTPException(500, detail=erro("update_channel_write", "Não foi possível gravar o canal. " + atomico.explicar(exc))) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        _record_failure("write", exception=exc, branch=target)
+        raise HTTPException(500, detail=erro("update_channel_write", "Não foi possível gravar o canal. O canal anterior continua valendo.", motivo=type(exc).__name__)) from exc

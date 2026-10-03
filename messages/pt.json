@@ -6662,5 +6662,5 @@
   "update_channel_busy": "Aguarde a atualização terminar antes de mudar o canal.",
   "update_channel_missing": "A branch {branch} não existe no origin.",
   "update_channel_origin": "Não foi possível conferir a branch no origin. Tente novamente.",
-  "update_channel_write": "Não foi possível gravar o canal. Recarregue e tente novamente."
+  "update_channel_write": "Não foi possível gravar o canal. O canal anterior continua valendo. Recarregue e tente novamente."
 }

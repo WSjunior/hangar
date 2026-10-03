@@ -356,3 +356,14 @@ def test_update_branch_valida_vem_do_ambiente(monkeypatch):
     assert Settings().update_branch == "feat/hangar-server_1.2"
     monkeypatch.setenv("CP_UPDATE_BRANCH", "")
     assert Settings().update_branch == ""
+
+
+def test_invalid_update_last_branch_reports_correct_variable(monkeypatch, caplog):
+    from app import diag
+    events = []
+    monkeypatch.setattr(diag, "registrar", lambda event, level="ok", **fields: events.append(fields))
+    result = Settings(update_branch="test/channel", update_last_branch="bad..branch", _env_file=None)
+    assert result.update_branch == "test/channel"
+    assert result.update_last_branch == ""
+    assert "CP_UPDATE_LAST_BRANCH" in caplog.text
+    assert events[-1]["detalhe"] == "CP_UPDATE_LAST_BRANCH ignorado"

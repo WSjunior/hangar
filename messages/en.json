@@ -6662,5 +6662,5 @@
   "update_channel_busy": "Wait for the update to finish before changing the channel.",
   "update_channel_missing": "Branch {branch} does not exist on origin.",
   "update_channel_origin": "Could not check the branch on origin. Try again.",
-  "update_channel_write": "Could not save the channel. Reload and try again."
+  "update_channel_write": "Could not save the channel. The previous channel remains in effect. Reload and try again."
 }

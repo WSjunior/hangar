@@ -88,7 +88,6 @@ def test_update_channel_missing_branch_and_origin_fail_without_write(isolated):
     assert client.put("/api/update-channel", headers=AUTH, json={"branch": "missing"}).status_code == 400
     git(repo, "remote", "set-url", "origin", str(repo / "absent"))
     assert client.put("/api/update-channel", headers=AUTH, json={"branch": "test/channel"}).status_code == 503
-    assert client.put("/api/update-channel", headers=AUTH, json={"branch": ""}).status_code == 503
     assert env.read_bytes() == before
     assert settings.update_branch == ""
 
@@ -195,3 +194,117 @@ def test_update_channel_auto_loop_cannot_use_stale_approval(isolated, monkeypatc
         with pytest.raises(asyncio.CancelledError):
             asyncio.run(api._auto_update_loop())
         assert launch.call_count == 0
+
+
+@pytest.mark.parametrize("mode", ["absent", "present"])
+def test_update_channel_changes_only_existing_process_env(isolated, monkeypatch, mode):
+    import os
+    client, env, _ = isolated
+    keys = ("CP_UPDATE_BRANCH", "CP_UPDATE_LAST_BRANCH")
+    for key in keys:
+        if mode == "absent":
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, "old/channel")
+    assert client.put("/api/update-channel", headers=AUTH, json={"branch": "test/channel"}).status_code == 200
+    assert settings.update_branch == "test/channel"
+    from app.config import Settings
+    assert Settings(_env_file=env).update_branch == "test/channel"
+    for key in keys:
+        if mode == "absent":
+            assert key not in os.environ
+        else:
+            assert os.environ[key] == "test/channel"
+
+
+def test_update_channel_disable_needs_no_origin_connection(isolated):
+    client, env, repo = isolated
+    assert client.put("/api/update-channel", headers=AUTH, json={"branch": "test/channel"}).status_code == 200
+    git(repo, "remote", "remove", "origin")
+    response = client.put("/api/update-channel", headers=AUTH, json={"branch": ""})
+    assert response.status_code == 200
+    assert response.json()["last_branch"] == "test/channel"
+    assert settings.update_branch == ""
+    assert b"CP_UPDATE_BRANCH=\r\n" in env.read_bytes()
+
+
+def test_update_channel_write_failure_reports_safe_cause_and_keeps_channel(isolated, monkeypatch, caplog):
+    from app import update_channel
+    client, env, _ = isolated
+    events = []
+    monkeypatch.setattr(update_channel.diag, "registrar", lambda event, level="ok", **fields: events.append((event, fields)))
+    before = env.read_bytes()
+    with patch("app.update_channel.atomico.substituir", side_effect=PermissionError(13, "sensitive-value")):
+        response = client.put("/api/update-channel", headers=AUTH, json={"branch": "test/channel"})
+    assert response.status_code == 500
+    failure = next(fields for event, fields in events if event == "update_channel.failed")
+    assert failure["codigo"] == "write"
+    assert failure["erro_tipo"] == "PermissionError"
+    assert failure["errno"] == 13
+    assert "sensitive-value" not in str(events)
+    assert "PermissionError" in caplog.text
+    assert "sensitive-value" not in caplog.text
+    assert "anterior continua valendo" in response.json()["detail"]["msg"]
+    assert "sensitive-value" not in str(response.json())
+    assert settings.update_branch == ""
+    assert env.read_bytes() == before
+
+
+def test_update_channel_unexpected_parse_failure_is_reported(isolated, monkeypatch, caplog):
+    from app import update_channel
+    client, env, _ = isolated
+    events = []
+    monkeypatch.setattr(update_channel.diag, "registrar", lambda event, level="ok", **fields: events.append((event, fields)))
+    before = env.read_bytes()
+    with patch("app.update_channel.parse_stream", side_effect=RuntimeError("sensitive-parser-input")):
+        response = client.put("/api/update-channel", headers=AUTH, json={"branch": "test/channel"})
+    assert response.status_code == 500
+    failure = next(fields for event, fields in events if event == "update_channel.failed")
+    assert failure["erro_tipo"] == "RuntimeError"
+    assert "RuntimeError" in caplog.text
+    assert "sensitive-parser-input" not in caplog.text + str(events) + str(response.json())
+    assert env.read_bytes() == before
+    assert settings.update_branch == ""
+
+
+@pytest.mark.parametrize("stage,method", [("checkout", "get"), ("checkout", "put"), ("origin", "put")])
+def test_update_channel_git_exit_records_stage_rc_and_scrubbed_tail(isolated, monkeypatch, caplog, stage, method):
+    from urllib.parse import urlunsplit
+    from app import update_channel
+    client, _, _ = isolated
+    events = []
+    monkeypatch.setattr(update_channel.diag, "registrar", lambda event, level="ok", **fields: events.append((event, fields)))
+    original = update_channel.git_ops._run
+    remote = urlunsplit(("https", "synthetic-user:synthetic-password@example.invalid", "/repo", "token=synthetic-query", ""))
+    stderr = f"old noise\nfatal: unable to access {remote}: permission denied\n"
+
+    def fail(cwd, *args, **kw):
+        if args[0] == ("rev-parse" if stage == "checkout" else "ls-remote"):
+            return subprocess.CompletedProcess([], 128, "", stderr)
+        return original(cwd, *args, **kw)
+
+    monkeypatch.setattr(update_channel.git_ops, "_run", fail)
+    response = getattr(client, method)("/api/update-channel", headers=AUTH, **({"json": {"branch": "test/channel"}} if method == "put" else {}))
+    assert response.status_code == 503
+    failure = next(fields for event, fields in events if event == "update_channel.failed")
+    assert failure["codigo"] == stage
+    assert failure["retorno"] == 128
+    assert "permission denied" in failure["detalhe"]
+    assert "synthetic-password" not in str(events) + caplog.text
+    assert "synthetic-query" not in str(events) + caplog.text
+    assert stage in caplog.text
+
+
+@pytest.mark.parametrize("method", ["get", "put"])
+def test_update_channel_checkout_exception_records_its_cause(isolated, monkeypatch, caplog, method):
+    from app import update_channel
+    client, _, _ = isolated
+    events = []
+    monkeypatch.setattr(update_channel.diag, "registrar", lambda event, level="ok", **fields: events.append((event, fields)))
+    with patch("app.update_channel.git_ops._run", side_effect=update_channel.git_ops.GitError(504, "sensitive-timeout-input")):
+        response = getattr(client, method)("/api/update-channel", headers=AUTH, **({"json": {"branch": "test/channel"}} if method == "put" else {}))
+    assert response.status_code == 503
+    failure = next(fields for event, fields in events if event == "update_channel.failed")
+    assert failure["codigo"] == "checkout"
+    assert failure["erro_tipo"] == "GitError"
+    assert "sensitive-timeout-input" not in str(events) + caplog.text
