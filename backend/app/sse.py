@@ -7,6 +7,7 @@ import re
 import sys
 import time
 import traceback
+import uuid
 from pathlib import Path
 from app import atomico, diag, guest_users, plugin_bridge, share_store
 from app.adapters import CLAUDE_HEADLESS, chave_de, get_adapter
@@ -659,6 +660,12 @@ async def list_events(ping_secs: float = 8.0, only=None, viewer=None, token=None
 
 
 def _confirm_codex_queue(name: str, jsonl: str) -> None:
+    from app import runtime_coordinator
+    from app.runtime_adapter import run_sync
+    coordinator = runtime_coordinator.current()
+    if coordinator is not None and coordinator.managed_runtime(name):
+        run_sync(lambda: coordinator.op(name, {"kind":"confirm"}, uuid.uuid4().hex), coordinator.loop)
+        return
     queue = PromptQueue(name)
     if not any(r.get("delivered") and not r.get("confirmed") for r in queue.load()):
         return

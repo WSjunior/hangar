@@ -193,6 +193,29 @@ class LegacyBridge:
     def __init__(self, coordinator, adapters):
         self.coordinator, self.adapters = coordinator, adapters
 
+    def binding(self, name, provider):
+        from app.pqueue import _queue_dir
+        if provider == "claude":
+            from app.adapters.claude_headless import sessions
+        elif provider == "codex":
+            from app.adapters.codex import sessions
+        else:
+            return None
+        meta = sessions.load(name)
+        if not meta or not meta.get("key"):
+            return None
+        directory = _queue_dir()
+        state_path = directory / "runtime" / (meta["key"] + ".json")
+        headless = bool(meta.get("headless"))
+        if not headless and not state_path.exists():
+            return None
+        path = self.adapters[provider].transcript_path_de(meta) if provider == "claude" else meta.get("rollout_path") or ""
+        generation = (self.coordinator.slots[meta["key"]].binding.generation
+            if meta["key"] in self.coordinator.slots else
+            json.loads(state_path.read_bytes())["generation"] if state_path.exists() else 1)
+        return runtime_coordinator.Binding(name, meta["key"], provider, headless, meta, path,
+            directory, state_path, directory / "runtime" / (meta["key"] + ".lock"), generation)
+
     async def quiesce(self, descriptor):
         name, provider = descriptor["name"], descriptor["provider"]
         adapter = self.adapters[provider]
@@ -396,6 +419,11 @@ def bind_client(name, client):
     assert_legacy(name)
     slot = coordinator.slot(name)
     client.runtime_owner = (name, slot.binding.key, slot.binding.generation)
+
+
+def runtime_data(name):
+    slot = native_slot(name)
+    return RuntimeAdapter(slot.binding.provider).view(name).data if slot is not None else None
 
 
 def run_sync(factory, loop):
@@ -831,6 +859,13 @@ def install_adapter(cls, provider):
                 bound = _signature.bind(self, *args, **kwargs)
                 bound.apply_defaults()
                 name = bound.arguments["name"]
+                coordinator = runtime_coordinator.current()
+                context = _legacy_operation.get()
+                if context is not None and coordinator is not None and context.get("operation_id") in coordinator.legacy_active:
+                    return await _original(self, *args, **kwargs)
+                if (coordinator is not None and getattr(coordinator, "legacy", None) is not None
+                        and not (coordinator.managed_queue(name) and coordinator.in_lifecycle(coordinator.slot(name)))):
+                    await coordinator.prepare_session(name, _facade.provider)
                 if native_slot(name) is not None:
                     return await _facade.dispatch(_method, name, bound.arguments)
                 coordinator = runtime_coordinator.current()

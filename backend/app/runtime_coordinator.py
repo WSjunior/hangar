@@ -134,6 +134,61 @@ class RuntimeCoordinator:
         self.refreshing = {}
         self.voice_clients = {}
         self.legacy_active = set()
+        self.registration_locks = {}
+
+    async def prepare_session(self, name, provider):
+        if self.legacy is None:
+            return self.managed_runtime(name)
+        async with self.registration_locks.setdefault(name, asyncio.Lock()):
+            binding = await asyncio.to_thread(self.legacy.binding, name, provider)
+            if binding is None:
+                return False
+            slot = self.slots.get(binding.key)
+            if slot is None:
+                slot = await asyncio.to_thread(self.register, binding)
+            if slot is None or not slot.binding.headless:
+                return False
+            if slot.frozen or slot.phase not in {Phase.Python, Phase.Rust}:
+                raise RuntimeError("sessão em transferência; aguarde a confirmação")
+            if slot.phase == Phase.Python:
+                with slot.guard:
+                    slot.binding.meta = binding.meta
+                if self.transport is not None and (binding.meta.get("cano") or {}).get("versao") == 2:
+                    await self.adopt(name)
+            return True
+
+    async def start_sessions(self, adapters):
+        from app.runtime_adapter import LegacyBridge
+        self.loop = asyncio.get_running_loop()
+        self.legacy = LegacyBridge(self, adapters)
+        from app.adapters.claude_headless import sessions as claude_sessions
+        from app.adapters.codex import sessions as codex_sessions
+        for provider, sessions in (("claude", claude_sessions), ("codex", codex_sessions)):
+            for meta in await asyncio.to_thread(sessions.list_all):
+                if meta.get("headless"):
+                    try:
+                        await self.prepare_session(meta["name"], provider)
+                    except Exception as exc:
+                        from app import diag
+                        diag.registrar("runtime.registration_failed", "erro", sessao=meta["name"], codigo=type(exc).__name__)
+
+    async def native_receipt(self, message_id, status):
+        for slot in tuple(self.slots.values()):
+            state = await asyncio.to_thread(lambda: json.loads(slot.binding.state_path.read_bytes()))
+            for operation_id, operation in state["operations"].items():
+                if operation["payload"].get("kind") not in {"input", "steer"}:
+                    continue
+                expected = str(uuid.uuid5(uuid.NAMESPACE_URL, "hangar:" + slot.binding.key + ":" + operation_id))
+                if message_id != expected:
+                    continue
+                disposition = "accepted" if status in {"delivered", "released", ""} else "rejected" if status in {"rejected", "refused"} else "unknown"
+                await self.op(slot.binding.name, {"kind":"queue", "action":{"kind":"finish", "id":operation_id,
+                    "status":disposition, "result":{"operation_id":operation_id, "disposition":disposition,
+                        "payload":{"native_status":status}}}}, "native-receipt:" + message_id + ":" + status)
+                if disposition == "accepted":
+                    await self.op(slot.binding.name, {"kind":"confirm"}, uuid.uuid4().hex)
+                return True
+        return False
 
     def configure_transport(self, transport):
         if self.events_task is not None and not self.events_task.done():
