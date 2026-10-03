@@ -7,7 +7,7 @@ import shutil
 import sys
 import tempfile
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePath
 from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
@@ -115,6 +115,32 @@ def _write(path: Path, value) -> None:
     path.write_text(json.dumps(value, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def _normalize_reports(reports, base: PurePath):
+    identity = "codex:" + str(base / "codex")
+
+    def normalize(value):
+        if isinstance(value, dict):
+            return {key: normalize(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [normalize(item) for item in value]
+        if not isinstance(value, str):
+            return value
+        if value == identity:
+            return "codex:__BASE__/codex"
+        # session_ids contém outro JSON: a identidade precisa ser lida antes de ser substituída.
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return value
+        if isinstance(decoded, (dict, list)):
+            normalized = normalize(decoded)
+            if normalized != decoded:
+                return json.dumps(normalized, ensure_ascii=False)
+        return value
+
+    return normalize(reports)
+
+
 def main(output: Path | None = None) -> None:
     golden = output if output is not None else HERE / "golden"
     golden.mkdir(parents=True, exist_ok=True)
@@ -151,8 +177,7 @@ def main(output: Path | None = None) -> None:
                                 "anthropic:u-fixture": "fixture@exemplo", scopes["codex"][0][0]: "Codex · default"}), \
                             patch.object(costs, "usd_brl", lambda: None):
                         # A conta Codex contém a raiz temporária; o consumidor repõe a sua cópia.
-                        escaped_base = json.dumps(str(base), ensure_ascii=False)[1:-1]
-                        reports = json.loads(json.dumps(_reports(), ensure_ascii=False).replace(escaped_base, "__BASE__"))
+                        reports = _normalize_reports(_reports(), base)
                 index.update(rows if not resumed else {"__resumed__": rows})
         assert index["__resumed__"] == {key: value for key, value in index.items() if key != "__resumed__"}
         _write(golden / "costs_index.json", index)

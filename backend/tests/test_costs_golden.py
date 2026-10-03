@@ -1,9 +1,10 @@
 """Prende o contrato Rust aos leitores Python sem reescrever os golden versionados."""
 import json
 import os
+import runpy
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
@@ -13,6 +14,26 @@ GOLDEN_NAMES = ("costs_index.json", "costs_reports.json", "costs_pricing.json", 
 
 def _golden(name):
     return json.loads((CONTRACT / "golden" / name).read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("base", [PurePosixPath("/tmp/fixture/inteiro"),
+                                 PureWindowsPath(r"C:\Temp\fixture\inteiro"),
+                                 PureWindowsPath(r"D:\Temporário\outra-fixture\inteiro")])
+def test_costs_reports_normalize_codex_identity_across_platforms(base):
+    normalize = runpy.run_path(str(CONTRACT / "gen_costs.py"))["_normalize_reports"]
+    identity = "codex:" + str(base / "codex")
+    session = ["codex", identity, "c1", False]
+    nested = json.dumps({"session_ids": [json.dumps(session)]}, ensure_ascii=False)
+    report = {"provider": identity, "buckets": [{"key": identity, "session_ids": [json.dumps(session)]}],
+              "nested": nested, "amounts": [1.25, 0, None], "text": "Texto sintético sem identidade."}
+    expected_session = ["codex", "codex:__BASE__/codex", "c1", False]
+    expected = {"provider": "codex:__BASE__/codex",
+                "buckets": [{"key": "codex:__BASE__/codex", "session_ids": [json.dumps(expected_session)]}],
+                "nested": json.dumps({"session_ids": [json.dumps(expected_session)]}, ensure_ascii=False),
+                "amounts": [1.25, 0, None], "text": "Texto sintético sem identidade."}
+    original = json.dumps(report, ensure_ascii=False)
+    assert normalize(report, base) == expected
+    assert json.dumps(report, ensure_ascii=False) == original
 
 
 @pytest.mark.parametrize("hash_seed", ["0", "1", "42"])

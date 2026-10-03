@@ -293,9 +293,9 @@ costs/
 
 Datas entre `2026-09-24` e `2026-10-01`, e uma linha às `02:30Z` (vira o dia anterior em UTC-3). `now` fixo: `2026-10-01T12:00:00-03:00`.
 
-- [ ] **Step 1: Escrever as fixtures** conforme a árvore. Cada linha JSON com só os campos que os leitores olham (ver `costs_claude_transcript.py:122-163`, `uso_claude.py:318-545`, `costs_sources.py:210-280`, `uso_codex.py:84-170`, `costs_sources.py:400-561`).
+- [x] **Step 1: Escrever as fixtures** conforme a árvore. Cada linha JSON com só os campos que os leitores olham (ver `costs_claude_transcript.py:122-163`, `uso_claude.py:318-545`, `costs_sources.py:210-280`, `uso_codex.py:84-170`, `costs_sources.py:400-561`).
 
-- [ ] **Step 2: Escrever o gerador**
+- [x] **Step 2: Escrever o gerador**
 
 `backend/tests/fixtures/contract/gen_costs.py`:
 
@@ -457,12 +457,12 @@ if __name__ == "__main__":
 
 O caminho `/repo/a` em `projeto` é o `cwd` usado em `s1.jsonl`/`s2.jsonl`; mantenha o fixture e o filtro iguais.
 
-- [ ] **Step 3: Gerar e conferir à mão**
+- [x] **Step 3: Gerar e conferir à mão**
 
 Run: `(cd backend && uv run python tests/fixtures/contract/gen_costs.py)`
 Conferir no JSON: cada caso da árvore aparece (ex.: `s3.jsonl` tem as linhas boas contadas e as ruins puladas; `rollout-c2` não soma o histórico do pai; `__resumed__` igual ao inteiro). Se um caso não aparece, a fixture está errada: corrija a fixture, não o gerador.
 
-- [ ] **Step 4: Teste que prende o golden ao Python atual**
+- [x] **Step 4: Teste que prende o golden ao Python atual**
 
 `backend/tests/test_costs_golden.py`:
 
@@ -488,11 +488,11 @@ def test_costs_golden_matches_current_python(tmp_path):
         assert json.loads(depois[n]) == json.loads(antes[n]), f"{n} desatualizado: rode gen_costs.py"
 ```
 
-- [ ] **Step 5: Rodar**
+- [x] **Step 5: Rodar**
 
 Run: `(cd backend && uv run pytest tests/test_costs_golden.py -q)` — Expected: PASS.
 
-- [ ] **Step 6: Revisão e commit**
+- [x] **Step 6: Revisão e commit**
 
 ```bash
 git add backend/tests/fixtures/contract/costs backend/tests/fixtures/contract/gen_costs.py \
