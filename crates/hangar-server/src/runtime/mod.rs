@@ -4,6 +4,7 @@ pub mod cano;
 pub mod queue;
 pub mod receipt;
 pub mod claude;
+pub mod codex;
 
 #[derive(Default)]
 pub(crate) struct LiveBuffer {

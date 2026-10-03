@@ -68,6 +68,19 @@ async def _generate(provider: str, scenarios: list[dict]) -> list[dict]:
         async def drain(*args):
             emit("wake_queue", {})
 
+        class Queue:
+            def __init__(self, queue_name):
+                self.name = queue_name
+
+            def append_saida_local(self, text):
+                emit("local", {"text": text})
+                return {"id": "synthetic-local", "text": text, "delivered": True,
+                        "confirmed": True, "papel": "assistant", "ts": clock["epoch_s"]}
+
+            def confirm_delivered(self, predicate=None):
+                emit("confirm", {})
+                return 0
+
         def update(session_name, **changes):
             metadata.update(changes)
             emit("patch_meta", changes)
@@ -108,6 +121,9 @@ async def _generate(provider: str, scenarios: list[dict]) -> list[dict]:
         with ExitStack() as stack:
             stack.enter_context(patch.object(PushPreviewSource, "_sources", {}))
             stack.enter_context(patch.object(PushPreviewSource, "push", push))
+            stack.enter_context(patch.object(claude, "PromptQueue", Queue))
+            stack.enter_context(patch.object(codex, "PromptQueue", Queue))
+            stack.enter_context(patch.object(claude.diag, "registrar", lambda *args, **kwargs: None))
             # Os relógios dos reducers e dos buffers usam o mesmo domínio sintético.
             stack.enter_context(patch.object(asyncio.get_running_loop(), "time", lambda: clock["monotonic_s"]))
             for module in (claude, codex):
@@ -121,6 +137,8 @@ async def _generate(provider: str, scenarios: list[dict]) -> list[dict]:
                 session = claude._Sessao(name, metadata)
                 session.proc = SimpleNamespace(pid=4242, returncode=None)
                 session.janelas_ts = clock["epoch_s"]
+                if metadata.get("initialized"):
+                    session.initialized.set()
                 adapter._sessions[name] = session
                 adapter._write, adapter._nota_local = write, note
                 async def ensure_running(n, **kwargs):
