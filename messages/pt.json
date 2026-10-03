@@ -6643,5 +6643,22 @@
   "native_par_so_leitura": "Sessão de outra pessoa, pareada com a tua: você acompanha, e quem fala com ela é a tua sessão.",
   "erro_par_incerto": "Não deu para confirmar se a outra máquina pareou. Se ela continuar mostrando o par, desfaça lá.",
   "erro_pareamento_desfeito_parcial": "O pareamento foi desfeito aqui, mas não deu para avisar a outra máquina: ela pode continuar mostrando o par. Desfaça lá.",
-  "erro_par_attach_invalido": "O token a ligar é inválido ou não tem sessão viva."
+  "erro_par_attach_invalido": "O token a ligar é inválido ou não tem sessão viva.",
+  "native_session_transfer_check_session": "Feche este diálogo e confira o estado atual da sessão antes de tentar novamente.",
+  "native_session_transfer_account_aria": "Escolher conta Codex {account} para “{name}”…",
+  "native_session_transfer_history_invalid": "Não consegui conferir as fontes do histórico transferido. O histórico não foi substituído por uma conversa vazia.",
+  "native_session_transfer_title": "Trocar “{name}” para Codex",
+  "native_session_transfer_confirm": "Trocar para Codex",
+  "native_session_transfer_progress": "Transferindo a conversa…",
+  "native_session_transfer_source_changed": "A sessão de origem mudou. Feche este diálogo e escolha a conta novamente.",
+  "native_session_transfer_restore_failed": "A transferência falhou e o Claude não pôde ser restaurado. O histórico continua disponível; confira a recuperação da sessão.",
+  "native_session_transfer_refresh_failed": "A troca foi confirmada, mas a sessão atual não pôde ser conferida. Feche este diálogo e atualize a lista.",
+  "native_session_transfer_help": "A mesma sessão continuará no Codex, com o histórico completo. A troca recusa ações ou respostas pendentes. Cancelar mantém o Claude.",
+  "native_session_transfer_accounts_empty": "Nenhuma conta Codex cadastrada neste servidor",
+  "native_session_transfer_account_removed": "A conta escolhida não está mais disponível. Escolha outra conta cadastrada.",
+  "native_session_transfer_models_empty": "Nenhum modelo disponível nesta conta. Confira o login e tente novamente.",
+  "native_session_transfer_quota_low": "Esta conta Codex já usou {pct}% da cota. Confira antes de confirmar a troca.",
+  "native_session_transfer_quota_full": "Esta conta Codex já usou {pct}% da cota e não pode receber a conversa agora.",
+  "native_session_transfer_unavailable": "A sessão precisa estar parada, sem perguntas pendentes e com histórico identificado.",
+  "native_session_transfer_accounts_hint": "Escolha uma conta Claude para mover a conversa ou uma conta Codex para escolher modelo e esforço antes da troca."
 }

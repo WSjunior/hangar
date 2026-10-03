@@ -6643,5 +6643,22 @@
   "native_par_so_leitura": "Someone else's session, paired with yours: you follow along, and your session is the one that talks to it.",
   "erro_par_incerto": "Could not confirm whether the other machine paired. If it still shows the pair, undo it there.",
   "erro_pareamento_desfeito_parcial": "The pairing was undone here, but the other machine could not be told: it may still show the pair. Undo it there.",
-  "erro_par_attach_invalido": "The token to attach is invalid or has no live session."
+  "erro_par_attach_invalido": "The token to attach is invalid or has no live session.",
+  "native_session_transfer_check_session": "Close this dialog and check the current session state before trying again.",
+  "native_session_transfer_account_aria": "Choose Codex account {account} for “{name}”…",
+  "native_session_transfer_history_invalid": "The transferred history sources could not be verified. The history was not replaced with an empty conversation.",
+  "native_session_transfer_title": "Switch “{name}” to Codex",
+  "native_session_transfer_confirm": "Switch to Codex",
+  "native_session_transfer_progress": "Transferring conversation…",
+  "native_session_transfer_source_changed": "The source session changed. Close this dialog and select the account again.",
+  "native_session_transfer_restore_failed": "The transfer failed and Claude could not be restored. The history remains available; check session recovery.",
+  "native_session_transfer_refresh_failed": "The switch was confirmed, but the current session could not be verified. Close this dialog and refresh the list.",
+  "native_session_transfer_help": "The same session will continue in Codex with the full history. The switch refuses pending actions or replies. Cancel keeps Claude.",
+  "native_session_transfer_accounts_empty": "No Codex accounts registered on this server",
+  "native_session_transfer_account_removed": "The selected account is no longer available. Select another registered account.",
+  "native_session_transfer_models_empty": "No models available for this account. Check your login and try again.",
+  "native_session_transfer_quota_low": "This Codex account has used {pct}% of its quota. Check before confirming the switch.",
+  "native_session_transfer_quota_full": "This Codex account has used {pct}% of its quota and cannot receive the conversation now.",
+  "native_session_transfer_unavailable": "The session must be idle, with no pending questions and an identified history.",
+  "native_session_transfer_accounts_hint": "Select a Claude account to move the conversation or a Codex account to choose a model and effort before switching."
 }

@@ -30,6 +30,17 @@ impl Target {
     pub(super) fn id(&self) -> String { format!("{}::{}", self.server, self.name) }
 }
 
+/// O servidor confere as guardas novamente; a tela só oferece uma origem identificável e parada.
+pub(super) fn transfer_source(session: &SessionInfo) -> Option<(&str, &str)> {
+    if session.provider != "claude" || session.read_only() || session.tracked == Some(false) || !matches!(session.state.as_str(), "idle" | "dead")
+        || !session.conta.as_deref().is_some_and(|c| c.starts_with("claude:"))
+        || session.pending_questions != 0 || session.question.is_some() || session.options.as_ref().is_some_and(|o| !o.is_empty())
+        || session.transfer_phase.as_deref().is_some_and(|p| !matches!(p, "rejected" | "rolled_back")) { return None; }
+    let life = session.lifecycle_id.as_deref().filter(|s| s.len() > 2 && (s.starts_with("k:") || s.starts_with("t:")))?;
+    let jsonl = session.jsonl.as_deref().filter(|s| !s.is_empty())?;
+    Some((life, jsonl))
+}
+
 /// Estado de silenciar da sessão do menu aberto, lido de `GET /api/push/settings`.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum Mute { Loading, Known(bool), Failed(String) }
@@ -1548,6 +1559,50 @@ impl Hangar {
 mod tests {
     // Sem glob: o `test` do gpui_kit, que o `super::*` traz, esconderia o `#[test]` da linguagem.
     use super::{BranchList, HashSet, SessionInfo, first_line, has_git, layout, rail_label, save_collapsed};
+
+    #[test]
+    fn transfer_requires_captured_life_and_original_history_without_pending_actions() {
+        let mut source = SessionInfo { provider: "claude".into(), name: "session".into(), state: "idle".into(),
+            conta: Some("claude:/registered".into()), lifecycle_id: Some("k:original".into()), jsonl: Some("/original.jsonl".into()),
+            ..Default::default() };
+        assert_eq!(super::transfer_source(&source), Some(("k:original", "/original.jsonl")));
+        source.state = "dead".into();
+        assert!(super::transfer_source(&source).is_some());
+        for state in ["working", "awaiting_input", "loading", ""] {
+            source.state = state.into();
+            assert!(super::transfer_source(&source).is_none());
+        }
+        source.state = "idle".into();
+        source.pending_questions = 1;
+        assert!(super::transfer_source(&source).is_none());
+        source.pending_questions = 0;
+        source.question = Some("question".into());
+        assert!(super::transfer_source(&source).is_none());
+        source.question = None;
+        for phase in ["preparing", "source_stopped", "imported", "publishing", "restoring", "restore_failed", "complete"] {
+            source.transfer_phase = Some(phase.into());
+            assert!(super::transfer_source(&source).is_none());
+        }
+        for phase in ["rejected", "rolled_back"] {
+            source.transfer_phase = Some(phase.into());
+            assert!(super::transfer_source(&source).is_some());
+        }
+        source.transfer_phase = None;
+        source.guest_kind = Some("pair".into());
+        assert!(super::transfer_source(&source).is_none());
+        source.guest_kind = None;
+        source.tracked = Some(false);
+        assert!(super::transfer_source(&source).is_none());
+        source.tracked = Some(true);
+        source.conta = Some("engine:key".into());
+        assert!(super::transfer_source(&source).is_none());
+        source.conta = Some("claude:/registered".into());
+        source.lifecycle_id = None;
+        assert!(super::transfer_source(&source).is_none());
+        source.lifecycle_id = Some("t:original".into());
+        source.jsonl = None;
+        assert!(super::transfer_source(&source).is_none());
+    }
 
     #[test]
     fn rail_label_splits_like_the_web() {

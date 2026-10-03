@@ -105,6 +105,9 @@ impl Hangar {
         let movable = !self.accounts.card_top && session.is_some_and(|s| s.provider == "claude"
             && s.conta.as_deref().is_some_and(|c| c.starts_with("claude:")) && !s.read_only());
         let idle = session.is_some_and(|s| s.state == "idle");
+        let transfer = session.and_then(super::sidebar::transfer_source).zip(self.selected_target())
+            .filter(|(_, target)| !self.accounts.card_top && !self.sidebar.moving.contains_key(target))
+            .map(|((life, jsonl), target)| (target, life.to_owned(), jsonl.to_owned()));
         let body = match (&list.value, list.ok()) {
             (_, Some(list)) => {
                 let mut mine: Vec<&Credential> = list.iter().filter(|c| matches!(c.kind.as_str(), "claude" | "codex")).collect();
@@ -118,6 +121,23 @@ impl Hangar {
                         let target = c.id.strip_prefix("claude:").map(str::to_owned)
                             .filter(|_| movable && idle && c.kind == "claude" && !in_use(c) && pct.is_none_or(|p| p < 99.));
                         let row = account_row(c, in_use(c), quota);
+                        if c.kind == "codex" && movable {
+                            let account = c.codex_account.clone();
+                            let connected = c.login.as_ref().is_some_and(|l| l.logged_in == Some(true));
+                            let source = transfer.clone();
+                            let available = source.is_some() && account.is_some() && connected && c.id.starts_with("codex:");
+                            let title = tr("session_transfer_account_aria").replace("{name}", &session.map(|s| s.name.clone()).unwrap_or_default())
+                                .replace("{account}", c.alias.as_deref().filter(|a| !a.is_empty()).unwrap_or(&c.name));
+                            return Button::new(SharedString::from(format!("usage-transfer-{}", c.id))).ghost().w_full().h_auto()
+                                .disabled(!available).accessibility_label(title).child(row)
+                                .when(!connected, |b| b.tooltip(tr("create_codex_disconnected")))
+                                .when(!available && connected, |b| b.tooltip(tr("session_transfer_unavailable")))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    let (Some((target, life, jsonl)), Some(account)) = (&source, &account) else { return };
+                                    this.close_popups();
+                                    this.open_transfer(target.clone(), life.clone(), jsonl.clone(), account.clone(), window, cx);
+                                })).into_any_element();
+                        }
                         match target {
                             Some(path) => {
                                 let label = c.alias.clone().filter(|a| !a.is_empty()).unwrap_or_else(|| c.name.clone());
@@ -138,7 +158,8 @@ impl Hangar {
                         }
                     });
                     div().flex().flex_col().gap(px(2.))
-                        .when(movable, |el| el.child(note(tr(if idle { "usage_card_move_hint" } else { "usage_card_move_busy" }), theme::faint())))
+                        .when(movable, |el| el.child(note(tr(if transfer.is_some() { "session_transfer_accounts_hint" }
+                            else if idle { "usage_card_move_hint" } else { "usage_card_move_busy" }), theme::faint())))
                         .children(rows)
                         .into_any_element()
                 }

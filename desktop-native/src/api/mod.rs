@@ -76,6 +76,9 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
         Value::String(message) => Some(message.clone()),
         Value::Object(fields) => {
             let msg = fields.get("msg").and_then(Value::as_str).filter(|message| !message.is_empty());
+            if let Some(code @ ("session_transfer_source_changed" | "session_transfer_restore_failed")) = fields.get("code").and_then(Value::as_str) {
+                return Some(msg.map_or_else(|| code.to_owned(), |msg| format!("{code}: {msg}")));
+            }
             // Configuração compartilhada: a frase do web pelo código, com os parâmetros dela.
             if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("config_sync_")) {
                 let params = fields.get("params").and_then(Value::as_object).map(|p| p.iter()
@@ -676,6 +679,11 @@ mod tests {
         assert_eq!(failure_detail(Some(json!({"detail": {"code": "turn_missing", "params": {}, "msg": "Nenhum turno ativo"}})), 409), "Nenhum turno ativo");
         assert_eq!(failure_detail(Some(json!({"detail": {"code": "turn_missing", "params": {}}})), 409), "turn_missing");
         assert_eq!(failure_detail(Some(json!({"detail": [{"msg": "at most 40 characters"}]})), 422), "at most 40 characters");
+        for code in ["session_transfer_source_changed", "session_transfer_restore_failed"] {
+            assert_eq!(failure_detail(Some(json!({"detail": {"code":code, "msg":"backend reason", "params":{}}})), 409),
+                format!("{code}: backend reason"));
+            assert_eq!(failure_detail(Some(json!({"detail": {"code":code, "params":{}}})), 409), code);
+        }
         // Atalhos do projeto: a frase traduzida pelo código leva o motivo do backend, de `params.detalhe` ou do `msg`.
         let pasta = failure_detail(Some(json!({"detail": {"code": "erro_shortcut_pasta", "params": {"detalhe": "pasta nao existe: /x"}, "msg": "pasta nao existe: /x"}})), 400);
         assert!(pasta != "pasta nao existe: /x" && pasta.contains("pasta nao existe: /x"), "{pasta}");

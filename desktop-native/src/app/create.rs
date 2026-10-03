@@ -11,6 +11,7 @@ use super::accounts::ModelChoice;
 use super::device::Remote;
 use super::machines::{FocusOnClick, enter_to_focused};
 use super::settings::Disclosure;
+use super::sidebar::Target;
 use gpui_kit::component::{IndexPath, WindowExt, select::{Select, SelectEvent, SelectState}, searchable_list::{SearchableListItem, SearchableVec}};
 use super::chrome::Skeleton;
 use serde::Deserialize;
@@ -93,6 +94,69 @@ impl CodexAccount {
         parts.push(self.auth_text());
         parts.join(" · ")
     }
+}
+
+fn choose_codex_account(accounts: &[CodexAccount], requested: Option<&str>) -> Option<usize> {
+    match requested {
+        Some(id) => accounts.iter().position(|a| a.id == id),
+        None => accounts.iter().position(|a| a.is_default).or((!accounts.is_empty()).then_some(0)),
+    }
+}
+
+enum SessionDialogPurpose {
+    Create,
+    TransferClaudeToCodex { target: Target, source_life: String, source_jsonl: String },
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct TransferRequest {
+    target: Target, source_life: String, source_jsonl: String, credential_id: String,
+    model: Option<String>, effort: Option<String>, seq: u64,
+}
+
+impl TransferRequest {
+    fn body(&self) -> Value {
+        json!({"credential_id": self.credential_id, "source_life": self.source_life,
+            "source_jsonl": self.source_jsonl, "model": self.model, "effort": self.effort})
+    }
+
+    fn source_matches(&self, session: &SessionInfo) -> bool {
+        session.name == self.target.name && super::sidebar::transfer_source(session) == Some((self.source_life.as_str(), self.source_jsonl.as_str()))
+    }
+}
+
+pub(super) enum TransferReply {
+    Canceled,
+    Requested(TransferRequest),
+    Finished(TransferRequest, Result<SessionInfo, Failure>),
+}
+
+fn transfer_dialog_matches(current: Option<EntityId>, reply: EntityId) -> bool { current == Some(reply) }
+
+fn transfer_failure(error: &Failure) -> String {
+    let key = ["session_transfer_restore_failed", "session_transfer_source_changed"].into_iter().find(|key| error.detail.starts_with(*key));
+    match key {
+        Some(key) => match error.detail.strip_prefix(&format!("{key}: ")) {
+            Some(reason) => format!("{} {reason}", tr(key)),
+            None => tr(key),
+        },
+        None => Hangar::fetch_failure(error),
+    }
+}
+
+async fn transferred(api: &Api, request: &TransferRequest) -> Result<SessionInfo, Failure> {
+    let value = api.act(&request.target.name, &["conta"], Some(request.body()), false, 300).await?;
+    let id = value.get("transfer_id").and_then(Value::as_str).filter(|id| !id.is_empty());
+    if value.get("ok").and_then(Value::as_bool) != Some(true) || value.get("provider").and_then(Value::as_str) != Some("codex")
+        || value.get("conta").and_then(Value::as_str) != Some(request.credential_id.as_str()) || id.is_none() {
+        return Err(Failure::local(tr("invalid_response")));
+    }
+    let id = id.unwrap();
+    api.sessions().await.map_err(|error| Failure::local(format!("{} {}", tr("session_transfer_refresh_failed"), Hangar::fetch_failure(&error))))?
+        .into_iter().find(|s| s.name == request.target.name && s.provider == "codex" && s.readable()
+        && s.conta.as_deref() == Some(request.credential_id.as_str()) && s.transfer_id.as_deref() == Some(id)
+        && s.transfer_phase.as_deref().is_none_or(|p| p == "complete"))
+        .ok_or_else(|| Failure::local(tr("session_transfer_refresh_failed")))
 }
 
 /// A sessão aberta pela resposta do backend e os avisos já em texto (reconciliação da conta, sessão achada pela lista).
@@ -255,7 +319,7 @@ fn picker<T: SearchableListItem<Value = String> + 'static>(choices: Vec<T>, at: 
 /// A conexão da abertura. Guardada no diálogo porque as respostas chegam com o `Hangar` em atualização, e o pedido seguinte
 /// (a pasta da raiz que chegou) não pode passar por ele. `api` é a máquina onde a sessão vai nascer: começa na ativa e troca
 /// no seletor de máquina sem mexer na conexão do app.
-struct Link { api: Api, runtime: Arc<Runtime>, tx: async_channel::Sender<Envelope>, connection: u64,
+pub(in crate::app) struct Link { api: Api, runtime: Arc<Runtime>, tx: async_channel::Sender<Envelope>, connection: u64,
     servers: Vec<ServerChoice>, servers_rev: u64 }
 
 /// Uma máquina da lista do app; `key` é o endereço normalizado. `offline`: a lista dela falhou na abertura do diálogo.
@@ -282,6 +346,8 @@ impl Menu {
 /// escrito. Cada resposta volta com o número do pedido; a de um pedido velho (outra pasta, outro provider) cai.
 pub(in crate::app) struct NewSession {
     link: Link,
+    purpose: SessionDialogPurpose,
+    transfer_blocked: bool,
     compact: bool,
     menu: Rc<std::cell::Cell<Option<Menu>>>,
     /// A busca dos menus de lista (máquina, modelo, conta, branch); a pasta usa a `query` da lista de pastas.
@@ -422,7 +488,7 @@ impl NewSession {
             }),
         ];
         Self {
-            link, compact: false, menu: Default::default(), menu_query, servers: Remote::default(),
+            link, purpose: SessionDialogPurpose::Create, transfer_blocked: false, compact: false, menu: Default::default(), menu_query, servers: Remote::default(),
             roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(), query, picked: None,
             checkout: Remote::default(), branch: String::new(), worktree: false, git: Default::default(), git_name,
             sessions: Remote::default(), same_folder: false, name, provider: "claude", providers: Remote::default(), configs: Remote::default(),
@@ -437,6 +503,106 @@ impl NewSession {
             preview_scroll: ScrollHandle::new(), resuming: false, baton, baton_by_model: false, baton_open: false,
             baton_preview: Remote::default(), _subscriptions: subscriptions,
         }
+    }
+
+    pub(in crate::app) fn for_transfer(link: Link, target: Target, source_life: String, source_jsonl: String,
+        account: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut dialog = Self::new(link, None, window, cx);
+        dialog.purpose = SessionDialogPurpose::TransferClaudeToCodex { target, source_life, source_jsonl };
+        dialog.provider = "codex";
+        dialog.codex_account = account;
+        dialog.permission_touched = true;
+        dialog.load_codex(cx);
+        let seq = dialog.quotas.start();
+        dialog.request(cx, move |api, send| Box::pin(async move {
+            send(CreateReply::Quotas(seq, api.server_read(&["cotas"], &[], 30).await)).await
+        }));
+        dialog
+    }
+
+    fn is_transfer(&self) -> bool { matches!(self.purpose, SessionDialogPurpose::TransferClaudeToCodex { .. }) }
+
+    pub(super) fn transfer_busy_for(&self, target: Option<&Target>) -> bool {
+        self.creating && matches!(&self.purpose, SessionDialogPurpose::TransferClaudeToCodex { target: captured, .. } if Some(captured) == target)
+    }
+
+    fn accepts_transfer(&self, request: &TransferRequest) -> bool {
+        self.creating && self.create_seq == request.seq && matches!(&self.purpose,
+            SessionDialogPurpose::TransferClaudeToCodex { target, source_life, source_jsonl }
+                if *target == request.target && *source_life == request.source_life && *source_jsonl == request.source_jsonl)
+    }
+
+    fn can_transfer(&self) -> bool {
+        self.is_transfer() && !self.creating && !self.transfer_blocked && !self.quotas.loading && self.codex_ready()
+            && !self.models.loading && self.has_transfer_models()
+            && self.codex.ok().and_then(|l| l.iter().find(|a| a.id == self.codex_account))
+                .and_then(|a| a.credential_id.as_deref()).is_some_and(|id| id.starts_with("codex:"))
+            && self.transfer_quota_pct().is_none_or(|pct| pct < 99.)
+    }
+
+    fn transfer(&mut self, cx: &mut Context<Self>) {
+        if !self.can_transfer() { return; }
+        let SessionDialogPurpose::TransferClaudeToCodex { target, source_life, source_jsonl } = &self.purpose else { return };
+        let Some(credential_id) = self.codex.ok().and_then(|l| l.iter().find(|a| a.id == self.codex_account))
+            .and_then(|a| a.credential_id.clone()) else { return };
+        self.create_seq += 1;
+        let choice = |s: &String| (!s.is_empty()).then(|| s.clone());
+        let request = TransferRequest { target: target.clone(), source_life: source_life.clone(), source_jsonl: source_jsonl.clone(),
+            credential_id, model: choice(&self.model), effort: choice(&self.effort), seq: self.create_seq };
+        self.creating = true;
+        self.menu.set(None);
+        self.error = None;
+        if self.link.tx.try_send(Envelope { connection: self.link.connection, selection: None,
+            payload: Payload::Transfer(cx.entity_id(), TransferReply::Requested(request)) }).is_err() {
+            self.creating = false;
+            self.error = Some(tr("connection_failed"));
+        }
+        cx.notify();
+    }
+
+    fn render_transfer(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let SessionDialogPurpose::TransferClaudeToCodex { target, .. } = &self.purpose else { return div() };
+        let account = self.codex.ok().and_then(|l| l.iter().find(|a| a.id == self.codex_account));
+        let quota = self.transfer_quota_pct();
+        let height = (window.viewport_size().height - px(DIALOG_TOP + 80.)).min(window.rem_size() * 36.).max(window.rem_size() * 12.);
+        div().w_full().max_h(height).flex().flex_col().gap_4()
+            .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child(tr("session_transfer_title").replace("{name}", &target.name)))
+            .child(div().id("session-transfer-fields").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap_4()
+                .child(muted(tr("session_transfer_help")))
+                .child(self.render_codex_account(cx))
+                .when_some(account.filter(|a| a.credential_id.as_deref().is_none_or(|id| !id.starts_with("codex:"))),
+                    |el, _| el.child(alert("transfer-account-invalid", tr("session_transfer_account_removed"))))
+                .when(self.quotas.loading, |el| el.child(muted(tr("loading"))))
+                .when_some(self.quotas.value.as_ref().and_then(|q| q.as_ref().err()),
+                    |el, error| el.child(muted(tr("accounts_failed").replace("{reason}", error))))
+                .when_some(quota.filter(|pct| *pct >= 95.), |el, pct| el.child(muted(tr(if pct >= 99. {
+                    "session_transfer_quota_full" } else { "session_transfer_quota_low" }).replace("{pct}", &format!("{pct:.0}")))))
+                .child(self.render_transfer_model(cx))
+                .when(self.models.loading || self.models.value.is_none(), |el| el.child(popup::skeleton("transfer-models-loading", 2)))
+                .when(!self.models.loading && self.models.ok().is_some() && !self.has_transfer_models(),
+                    |el| el.child(muted(tr("session_transfer_models_empty"))))
+                .when(!self.models.loading && self.models.value.as_ref().is_some_and(|v| v.is_err()), |el|
+                    el.child(alert("transfer-models-error", format!("{}: {}", tr("create_models_failed"),
+                        self.models.value.as_ref().and_then(|v| v.as_ref().err()).cloned().unwrap_or_default())))
+                    .child(Button::new("transfer-models-retry").outline().small().label(tr("create_try_again")).disabled(self.creating)
+                        .on_click(cx.listener(|this, _, window, cx| { this.load_models(window, cx); cx.notify(); }))))
+                .when_some(self.error.clone(), |el, error| el.child(alert("session-transfer-error", error))))
+            .when(self.transfer_blocked, |el| el.child(muted(tr("session_transfer_check_session"))))
+            .child(div().flex().items_center().justify_end().gap_2()
+                .when(self.creating, |el| el.child(div().id("session-transfer-progress").role(Role::Status)
+                    .text_sm().text_color(theme::muted()).child(tr("session_transfer_progress"))))
+                .child(Button::new("session-transfer-cancel").outline().label(tr("cancel")).disabled(self.creating)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.creating { return; }
+                        if this.link.tx.try_send(Envelope { connection: this.link.connection, selection: None,
+                            payload: Payload::Transfer(cx.entity_id(), TransferReply::Canceled) }).is_err() {
+                            this.error = Some(tr("connection_failed"));
+                            cx.notify();
+                        }
+                    })))
+                .child(Button::new("session-transfer-confirm").primary().label(tr("session_transfer_confirm"))
+                    .disabled(!self.can_transfer() || self.quotas.loading).loading(self.creating)
+                    .on_click(cx.listener(|this, _, _, cx| this.transfer(cx)))))
     }
 
     /// Manda o pedido; a resposta volta a este diálogo pelo id dele, e só se a conexão ainda for a da abertura.
@@ -580,7 +746,8 @@ impl NewSession {
     fn load_codex(&mut self, cx: &mut Context<Self>) {
         // O número continua do anterior: resposta da ida passada ao Codex não passa por desta.
         let seq = self.codex.start();
-        (self.codex_account, self.codex_pick) = (String::new(), None);
+        if !self.is_transfer() { self.codex_account.clear(); }
+        self.codex_pick = None;
         self.request(cx, move |api, send| Box::pin(async move { send(CreateReply::Codex(seq, api.server_read(&["codex-contas"], &[], 30).await)).await }));
     }
 
@@ -658,7 +825,7 @@ impl NewSession {
 
     /// Trocar de provider preserva o modo escolhido e relê as opções e permissões dele.
     fn set_provider(&mut self, provider: &'static str, window: &mut Window, cx: &mut Context<Self>) {
-        if provider == self.provider || self.creating { return; }
+        if self.is_transfer() || provider == self.provider || self.creating { return; }
         (self.provider, self.error) = (provider, None);
         self.permission = match provider { "codex" => "Full Access".into(), "claude" => "bypassPermissions".into(), _ => String::new() };
         self.permission_touched = false;
@@ -719,7 +886,7 @@ impl NewSession {
     }
 
     pub(super) fn can_create(&self, cx: &App) -> bool {
-        !self.creating && !self.headless_saving && !self.jev.loading && self.picked.is_some() && !self.sessions.loading && (self.compact || !self.name.read(cx).value().trim().is_empty())
+        !self.is_transfer() && !self.creating && !self.headless_saving && !self.jev.loading && self.picked.is_some() && !self.sessions.loading && (self.compact || !self.name.read(cx).value().trim().is_empty())
             && self.provider_ready() == Some(true) && self.codex_ready() && !(self.provider == "codex" && self.context_busy)
             && (!self.compact || ((self.provider != "claude" || (!self.configs.loading && self.configs.ok().is_some_and(|list| !list.is_empty())))
                 && !self.models.loading && self.models.ok().is_some()
@@ -906,16 +1073,18 @@ impl NewSession {
                     .and_then(|v| serde_json::from_value::<Vec<CodexAccount>>(v).map_err(|_| tr("invalid_response")));
                 if !self.codex.finish(seq, list) { return None; }
                 let list = self.codex.ok().cloned().unwrap_or_default();
-                let at = list.iter().position(|a| a.is_default).or((!list.is_empty()).then_some(0));
-                self.codex_account = at.map(|n| list[n].id.clone()).unwrap_or_default();
+                let at = choose_codex_account(&list, self.is_transfer().then_some(self.codex_account.as_str()));
+                if !self.is_transfer() { self.codex_account = at.map(|n| list[n].id.clone()).unwrap_or_default(); }
                 let choices = list.iter().map(|a| ModelChoice { id: a.id.clone(), label: a.name.clone(), hint: a.hint() }).collect();
                 self.codex_pick = Some(picker(choices, at, |this, id, window, cx| {
+                    if this.creating { return; }
                     this.codex_account = id;
+                    this.error = None;
                     this.load_models(window, cx);
-                    this.load_archive(window, cx);
+                    if !this.is_transfer() { this.load_archive(window, cx); }
                 }, window, cx));
                 self.load_models(window, cx);
-                self.load_archive(window, cx);
+                if !self.is_transfer() { self.load_archive(window, cx); }
             }
             reply @ (CreateReply::Models(..) | CreateReply::Engines(..) | CreateReply::Config(..) | CreateReply::Quotas(..)
                 | CreateReply::Context(..) | CreateReply::Account(..)) => self.receive_extra(reply, window, cx),
@@ -1227,6 +1396,33 @@ impl NewSession {
             .child(footer)
     }
 
+    fn render_codex_account(&self, cx: &mut Context<Self>) -> Div {
+        let account = self.codex.ok().and_then(|list| list.iter().find(|a| a.id == self.codex_account)).cloned();
+        div().flex().flex_col().gap(px(6.))
+            .child(label(tr("create_codex_account")))
+            .map(|el| match (&self.codex_pick, self.codex.value.as_ref()) {
+                (_, _) if self.codex.loading => el.child(div().id("create-codex-loading").role(Role::Status).child(muted(tr("loading")))),
+                (_, Some(Err(error))) => el.child(alert("create-codex-error", error.clone())),
+                (Some((pick, _)), _) => el.child(Select::new(pick).disabled(self.creating).accessibility_label(tr("create_codex_account"))),
+                _ => el,
+            })
+            .when(self.is_transfer() && !self.codex.loading && self.codex.ok().is_some_and(|l| l.is_empty()),
+                |el| el.child(muted(tr("session_transfer_accounts_empty"))))
+            .when(self.is_transfer() && !self.codex.loading && self.codex.ok().is_some_and(|l| !l.is_empty()) && account.is_none(),
+                |el| el.child(alert("transfer-account-removed", tr("session_transfer_account_removed"))))
+            .when(self.is_transfer() && !self.codex.loading && self.codex.value.as_ref().is_some_and(|v| v.is_err()), |el|
+                el.child(Button::new("transfer-accounts-retry").outline().small().label(tr("create_try_again")).disabled(self.creating)
+                    .on_click(cx.listener(|this, _, _, cx| { this.load_codex(cx); cx.notify(); }))))
+            .when_some(account, |el, a| el.child(muted(a.hint())).children(self.render_codex_quota(a.credential_id.as_deref()))
+                .children(a.sync.issues.iter().enumerate().map(|(n, issue)| {
+                    let text = crate::i18n::tr_web(&issue.code, &issue.params).or_else(|| crate::i18n::tr_web("codex_account_error_unknown", &HashMap::new()))
+                        .unwrap_or_else(|| issue.code.clone());
+                    let ready = a.sync.status == "ready";
+                    div().id(SharedString::from(format!("create-codex-issue-{n}"))).role(if ready { Role::Status } else { Role::Alert })
+                        .text_size(px(12.5)).whitespace_normal().text_color(if ready { theme::muted() } else { theme::danger() }).child(text)
+                })))
+    }
+
     fn render_form(&self, path: &str, cx: &mut Context<Self>) -> Div {
         let checking = self.sessions.loading;
         let ready = self.provider_ready();
@@ -1248,25 +1444,7 @@ impl NewSession {
         let target = self.target().cloned();
         let fresh = target.is_none();
         let claude = (self.provider == "claude").then(|| self.render_claude_account(cx));
-        let codex = (self.provider == "codex").then(|| {
-            let account = self.codex.ok().and_then(|list| list.iter().find(|a| a.id == self.codex_account)).cloned();
-            div().flex().flex_col().gap(px(6.))
-                .child(label(tr("create_codex_account")))
-                .map(|el| match (&self.codex_pick, self.codex.value.as_ref()) {
-                    (_, _) if self.codex.loading => el.child(div().id("create-codex-loading").role(Role::Status).child(muted(tr("loading")))),
-                    (_, Some(Err(error))) => el.child(alert("create-codex-error", error.clone())),
-                    (Some((pick, _)), _) => el.child(Select::new(pick).disabled(busy).accessibility_label(tr("create_codex_account"))),
-                    _ => el,
-                })
-                .when_some(account, |el, a| el.child(muted(a.hint())).children(self.render_codex_quota(a.credential_id.as_deref()))
-                    .children(a.sync.issues.iter().enumerate().map(|(n, issue)| {
-                        let text = crate::i18n::tr_web(&issue.code, &issue.params).or_else(|| crate::i18n::tr_web("codex_account_error_unknown", &HashMap::new()))
-                            .unwrap_or_else(|| issue.code.clone());
-                        let ready = a.sync.status == "ready";
-                        div().id(SharedString::from(format!("create-codex-issue-{n}"))).role(if ready { Role::Status } else { Role::Alert })
-                            .text_size(px(12.5)).whitespace_normal().text_color(if ready { theme::muted() } else { theme::danger() }).child(text)
-                    })))
-        });
+        let codex = (self.provider == "codex").then(|| self.render_codex_account(cx));
         let modes = (fresh && matches!(self.provider, "claude" | "codex")).then(|| {
             let codex = self.provider == "codex";
             let inherited = self.headless_inherited();
@@ -1657,6 +1835,7 @@ impl NewSession {
 
 impl Render for NewSession {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.is_transfer() { return self.render_transfer(window, cx); }
         // A tela sem sessão é desenhada pelo `Hangar` (`render_new_chat`), em volta do compositor dele.
         if self.compact { return div(); }
         // Topo, margem de baixo do kit e o preenchimento do diálogo: o resto da janela, até a altura do web.
@@ -1675,6 +1854,121 @@ impl Render for NewSession {
 }
 
 impl Hangar {
+    pub(super) fn open_transfer(&mut self, target: Target, source_life: String, source_jsonl: String, account: String,
+        window: &mut Window, cx: &mut Context<Self>) {
+        if self.new_session.as_ref().is_some_and(|d| d.read(cx).creating) { return; }
+        let Some(api) = self.machine_api(&target.server) else {
+            window.push_notification(Notification::error(self.machine_error(&target.server)), cx);
+            return;
+        };
+        self.focus_origin(&target, window, cx);
+        let link = Link { api, runtime: self.runtime.clone(), tx: self.tx.clone(), connection: self.connection,
+            servers: Vec::new(), servers_rev: self.servers_rev };
+        let dialog = cx.new(|cx| NewSession::for_transfer(link, target.clone(), source_life, source_jsonl, account, window, cx));
+        self.new_session = Some(dialog.clone());
+        let weak = cx.entity().downgrade();
+        let width = (window.viewport_size().width * 0.94).min(px(640.));
+        window.open_dialog(cx, move |d, _, cx| {
+            let busy = dialog.read(cx).creating;
+            let (weak, me, target) = (weak.clone(), dialog.entity_id(), target.clone());
+            popup::dialog(d).w(width).margin_top(px(DIALOG_TOP)).child(dialog.clone())
+                .keyboard(!busy).overlay_closable(!busy).close_button(!busy).on_ok(enter_to_focused)
+                .on_close(move |_, window, cx| { let _ = weak.update(cx, |this, cx| {
+                    if transfer_dialog_matches(this.new_session.as_ref().map(Entity::entity_id), me) {
+                        this.new_session = None;
+                        this.focus_origin(&target, window, cx);
+                        cx.notify();
+                    }
+                }); })
+        });
+        cx.notify();
+    }
+
+    pub(super) fn receive_transfer(&mut self, dialog: EntityId, reply: TransferReply, window: &mut Window, cx: &mut Context<Self>) {
+        if !transfer_dialog_matches(self.new_session.as_ref().map(Entity::entity_id), dialog) { return; }
+        let Some(entity) = self.new_session.clone() else { return };
+        if matches!(&reply, TransferReply::Canceled) {
+            if entity.read(cx).creating { return; }
+            let SessionDialogPurpose::TransferClaudeToCodex { target, .. } = &entity.read(cx).purpose else { return };
+            let target = target.clone();
+            self.new_session = None;
+            window.close_dialog(cx);
+            self.focus_origin(&target, window, cx);
+            cx.notify();
+            return;
+        }
+        let request = match &reply { TransferReply::Requested(request) | TransferReply::Finished(request, _) => request, TransferReply::Canceled => return };
+        if !entity.read(cx).accepts_transfer(request) { return; }
+        match reply {
+            TransferReply::Canceled => {}
+            TransferReply::Requested(request) => {
+                if !self.sessions_of(&request.target.server).iter().any(|s| request.source_matches(s)) {
+                    entity.update(cx, |d, cx| {
+                        d.creating = false;
+                        d.transfer_blocked = true;
+                        d.error = Some(tr("session_transfer_source_changed"));
+                        cx.notify();
+                    });
+                    return;
+                }
+                self.sidebar.moving.insert(request.target.clone(), (Instant::now(), None));
+                let api = entity.read(cx).link.api.clone();
+                let (tx, connection) = (self.tx.clone(), self.connection);
+                self.runtime.spawn(async move {
+                    let result = transferred(&api, &request).await;
+                    let _ = tx.send(Envelope { connection, selection: None,
+                        payload: Payload::Transfer(dialog, TransferReply::Finished(request, result)) }).await;
+                });
+            }
+            TransferReply::Finished(request, result) => {
+                self.sidebar.moving.remove(&request.target);
+                let result = result.and_then(|session| {
+                    // O mesmo nome recriado durante o pedido não recebe a resposta da vida anterior.
+                    let current = self.sessions_of(&request.target.server).iter().find(|s| s.name == request.target.name);
+                    if current.is_some_and(|s| !(s.lifecycle_id.as_deref() == Some(request.source_life.as_str())
+                        && s.jsonl.as_deref() == Some(request.source_jsonl.as_str())) && s.transfer_id != session.transfer_id) {
+                        return Err(Failure::local("session_transfer_source_changed"));
+                    }
+                    Ok(session)
+                });
+                entity.update(cx, |d, cx| {
+                    d.creating = false;
+                    if let Err(error) = &result {
+                        d.transfer_blocked = error.uncertain || error.detail.contains("session_transfer_source_changed")
+                            || error.detail.contains("session_transfer_restore_failed") || error.status.is_none();
+                        d.error = Some(transfer_failure(error));
+                    }
+                    cx.notify();
+                });
+                match result {
+                    Ok(session) => {
+                        if self.is_active_key(&request.target.server) {
+                            if let Some(row) = self.sessions.iter_mut().find(|s| s.name == request.target.name) { *row = session.clone(); }
+                        } else if let Some(list) = self.remote.get_mut(&request.target.server) {
+                            if let Some(row) = list.sessions.iter_mut().find(|s| s.name == request.target.name) { *row = session.clone(); }
+                        }
+                        let open = self.selected_target().as_ref() == Some(&request.target);
+                        self.new_session = None;
+                        window.close_dialog(cx);
+                        if open {
+                            self.select_on(&request.target.server, session, window, cx);
+                            self.load_session_accounts(cx);
+                            self.composer.update(cx, |input, cx| input.focus(window, cx));
+                        }
+                        self.sidebar_sessions_changed(window, cx);
+                    }
+                    Err(_) => {
+                        if self.selected_target().as_ref() == Some(&request.target) {
+                            let list = self.sessions_of(&request.target.server).to_vec();
+                            self.follow_open(&list, window, cx);
+                        }
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
     /// Sem sessão escolhida e com servidor: a faixa de baixo vira a tela de nova conversa.
     pub(super) fn new_chat_screen(&self) -> bool { self.selected.is_none() && self.api.is_some() }
 
@@ -1872,6 +2166,102 @@ impl Hangar {
 #[cfg(test)]
 mod tests {
     use super::{Failure, HashSet, Root, basename, crumbs, json, rel_path, sanitize, scan_of, successor, tr, unique_name};
+
+    #[test]
+    fn transfer_keeps_clicked_account_and_rejects_removed_account() {
+        let accounts: Vec<super::CodexAccount> = serde_json::from_value(json!([
+            {"id":"account-a", "name":"A", "is_default":true}, {"id":"account-b", "name":"B", "is_default":false}
+        ])).unwrap();
+        assert_eq!(super::choose_codex_account(&accounts, Some("account-b")), Some(1));
+        assert_eq!(super::choose_codex_account(&accounts, Some("removed")), None);
+        assert_eq!(super::choose_codex_account(&accounts, None), Some(0));
+        assert_eq!(super::choose_codex_account(&accounts[1..], None), Some(0));
+        assert_eq!(super::choose_codex_account(&[], Some("account-b")), None);
+    }
+
+    fn transfer_request() -> super::TransferRequest {
+        super::TransferRequest { target: super::Target::new("server-a", "same-name"), source_life: "k:original".into(),
+            source_jsonl: "/original.jsonl".into(), credential_id: "codex:/registered".into(), model: None, effort: None, seq: 1 }
+    }
+
+    #[test]
+    fn transfer_captures_server_life_history_and_dialog_without_default_overrides() {
+        let request = transfer_request();
+        let selected_later = super::Target::new("server-b", "same-name");
+        assert_ne!(request.target, selected_later);
+        assert_eq!(request.body(), json!({"credential_id":"codex:/registered", "source_life":"k:original",
+            "source_jsonl":"/original.jsonl", "model":null, "effort":null}));
+        let dialog = super::EntityId::from(1);
+        let replacement = super::EntityId::from(2);
+        assert!(super::transfer_dialog_matches(Some(dialog), dialog));
+        assert!(!super::transfer_dialog_matches(Some(replacement), dialog));
+        assert!(!super::transfer_dialog_matches(None, dialog));
+        let mut source = super::SessionInfo { provider: "claude".into(), name: "same-name".into(), state: "idle".into(),
+            conta: Some("claude:/account".into()), lifecycle_id: Some("k:original".into()), jsonl: Some("/original.jsonl".into()),
+            ..Default::default() };
+        assert!(request.source_matches(&source));
+        source.lifecycle_id = Some("k:recreated".into());
+        assert!(!request.source_matches(&source));
+        source.lifecycle_id = Some("k:original".into());
+        source.jsonl = Some("/switched.jsonl".into());
+        assert!(!request.source_matches(&source));
+    }
+
+    #[test]
+    fn transfer_errors_keep_recovery_code_and_backend_reason() {
+        for code in ["session_transfer_restore_failed", "session_transfer_source_changed"] {
+            let error = Failure { status: Some(409), detail: format!("{code}: backend reason"), retry_after: None, uncertain: false };
+            let text = super::transfer_failure(&error);
+            assert!(text.starts_with(&tr(code)));
+            assert!(text.ends_with("backend reason"));
+            assert!(!text.contains(&format!("{code}:")));
+        }
+    }
+
+    #[tokio::test]
+    async fn transfer_posts_to_captured_server_and_requires_published_session() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for case in [0, 1, 2, 3] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let api = super::Api::new(&format!("http://{}", listener.local_addr().unwrap()), "test").unwrap();
+            let server = tokio::spawn(async move {
+                let mut captured = Vec::new();
+                let mut replies = vec![json!({"ok":case != 0, "provider":"codex", "conta":"codex:/registered", "transfer_id":"transfer-a"})];
+                if case != 0 { replies.push(json!([{"name":"same-name", "provider":"codex", "conta":"codex:/registered",
+                    "transfer_id":if case == 2 {"other-transfer"} else {"transfer-a"},
+                    "transfer_phase":if case == 3 {"publishing"} else {"complete"},
+                    "lifecycle_id":"k:original", "jsonl":"/destination.jsonl"}])); }
+                for reply in replies {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut bytes = Vec::new();
+                    let mut chunk = [0; 4096];
+                    loop {
+                        let n = stream.read(&mut chunk).await.unwrap();
+                        if n == 0 { break; }
+                        bytes.extend_from_slice(&chunk[..n]);
+                        if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let headers = String::from_utf8_lossy(&bytes[..end]);
+                            let length = headers.lines().find_map(|l| l.to_lowercase().strip_prefix("content-length:")
+                                .and_then(|l| l.trim().parse::<usize>().ok())).unwrap_or(0);
+                            if bytes.len() >= end + 4 + length { break; }
+                        }
+                    }
+                    captured.push(String::from_utf8(bytes).unwrap());
+                    let body = reply.to_string();
+                    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                }
+                captured
+            });
+            let result = super::transferred(&api, &transfer_request()).await;
+            assert_eq!(result.is_ok(), case == 1);
+            let captured = tokio::time::timeout(std::time::Duration::from_secs(2), server).await.unwrap().unwrap();
+            assert!(captured[0].starts_with("POST /api/sessions/same-name/conta "));
+            let body = captured[0].split_once("\r\n\r\n").unwrap().1;
+            assert_eq!(serde_json::from_str::<serde_json::Value>(body).unwrap(), transfer_request().body());
+            assert_eq!(captured.len(), if case != 0 { 2 } else { 1 });
+            if case != 0 { assert!(captured[1].starts_with("GET /api/sessions ")); }
+        }
+    }
 
     #[test]
     fn checkout_hides_only_unsupported_or_non_git_and_rejects_old_folders() {

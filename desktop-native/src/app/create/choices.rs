@@ -38,6 +38,25 @@ impl ModelOption {
 
 pub(super) struct Catalog { models: Vec<ModelOption>, reduced: bool }
 
+fn remembered_choice(catalog: &[ModelOption], provider: &str, remembered: (String, String)) -> (String, String) {
+    let (model, effort) = remembered;
+    let model = catalog.iter().find(|m| m.value() == model);
+    let value = model.map(ModelOption::value).unwrap_or_default();
+    let levels = match provider {
+        "codex" => model.map(|m| m.efforts.clone()).unwrap_or_default(),
+        "claude" => CLAUDE_EFFORTS.map(String::from).to_vec(),
+        "pi" | "omp" => PI_EFFORTS.map(String::from).to_vec(),
+        _ => Vec::new(),
+    };
+    let effort = if levels.contains(&effort) { effort } else { String::new() };
+    (value, effort)
+}
+
+fn model_memory_key(server: &str, provider: &str, account: &str, engine: &str) -> String {
+    let who = if provider == "codex" { account } else if engine.is_empty() { "-" } else { engine };
+    format!("cp_last_model:{server}:{provider}:{who}")
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub(super) struct Motor { label: Option<String>, #[serde(default)] model: String }
 
@@ -162,8 +181,7 @@ impl NewSession {
 
     /// A chave da memória do último modelo: servidor, provider e a conta do Codex ou o motor (`chaveMemoria` do web).
     pub(super) fn memory_key(&self) -> String {
-        let who = if self.provider == "codex" { self.codex_account.clone() } else { Some(self.engine.clone()).filter(|e| !e.is_empty()).unwrap_or("-".into()) };
-        format!("cp_last_model:{}:{}:{who}", self.link.api.identity(), self.provider)
+        model_memory_key(&self.link.api.identity(), self.provider, &self.codex_account, &self.engine)
     }
 
     /// O catálogo da conta escolhida. Pedir de novo zera modelo, esforço e subagente: o que valia para outra conta não vale aqui.
@@ -197,7 +215,8 @@ impl NewSession {
     }
 
     fn current_choice(&self) -> (String, String, String) {
-        let permission = if self.permissions().is_some() { self.permission.clone() } else { String::new() };
+        let permission = if self.is_transfer() { self.saved_default.as_ref().map(|s| s.2.clone()).unwrap_or_default() }
+            else if self.permissions().is_some() { self.permission.clone() } else { String::new() };
         (self.model.clone(), self.effort.clone(), permission)
     }
 
@@ -236,16 +255,25 @@ impl NewSession {
             self.build_permission_pick(window, cx);
         }
         self.saved_default = saved;
-        let (model, effort) = remembered;
         // O lembrado só volta com a lista lida, se ainda estiver nela, e o esforço só se couber no modelo que ficou.
         if self.models.ok().is_some() {
-            if self.catalog().iter().any(|m| m.value() == model) { self.model = model; }
-            if self.levels().contains(&effort) { self.effort = effort; }
+            (self.model, self.effort) = remembered_choice(self.catalog(), self.provider, remembered);
         }
         self.build_model_picks(window, cx);
     }
 
     fn catalog(&self) -> &[ModelOption] { self.models.ok().map(|c| c.models.as_slice()).unwrap_or_default() }
+
+    pub(super) fn has_transfer_models(&self) -> bool { self.models.ok().is_some_and(|c| !c.models.is_empty()) }
+
+    pub(super) fn transfer_quota_pct(&self) -> Option<f64> {
+        let credential = self.codex.ok()?.iter().find(|a| a.id == self.codex_account)?.credential_id.as_deref()?;
+        let quota = self.quota_of(credential)?;
+        if quota.state != "lida" { return None; }
+        let now = chrono::Local::now().timestamp() as f64;
+        quota.windows().filter(|(w, _)| matches!(w.label.as_str(), "5h" | "7d") && w.reset_ts.is_none_or(|r| r > now))
+            .map(|(_, pct)| pct).reduce(f64::max)
+    }
 
     /// Os níveis do modelo escolhido: fechados por provider, e os do próprio modelo no Codex.
     pub(super) fn levels(&self) -> Vec<String> {
@@ -259,6 +287,7 @@ impl NewSession {
 
     /// A permissão existe para o Claude e para o Codex sem terminal, cada um com a própria lista.
     pub(super) fn permissions(&self) -> Option<&'static [&'static str]> {
+        if self.is_transfer() { return None; }
         match (self.provider, self.headless && !self.headless_inherited()) { ("claude", _) => Some(&PERMISSIONS), ("codex", true) => Some(&CODEX_PERMISSIONS), _ => None }
     }
 
@@ -320,6 +349,26 @@ impl NewSession {
             .on_click(cx.listener(|this, _, window, cx| this.toggle_menu(Menu::Model, window, cx))))
     }
 
+    pub(super) fn render_transfer_model(&self, cx: &mut Context<Self>) -> Div {
+        use gpui_kit::component::popover::Popover;
+        let title = self.catalog().iter().find(|m| m.value() == self.model).map(ModelOption::label).unwrap_or_else(|| tr("create_default"));
+        let view = cx.entity().downgrade();
+        let opening = view.clone();
+        div().flex().flex_col().gap_2().child(label(tr("create_model")))
+            .child(Popover::new("transfer-model-menu").open(self.menu.get() == Some(Menu::Model))
+                .trigger(Button::new("transfer-model-trigger").outline().label(title).icon(IconName::ChevronDown)
+                    .disabled(self.creating || self.models.loading || !self.has_transfer_models()).accessibility_label(tr("create_model")))
+                .content(move |_, window, cx| view.update(cx, |view, cx| view.render_model_menu(cx)
+                    .w((window.rem_size() * 24.).min(window.viewport_size().width - window.rem_size() * 2.))
+                    .into_any_element()).unwrap_or_else(|_| div().into_any_element()))
+                .on_open_change(move |open, window, cx| { let _ = opening.update(cx, |view, cx| {
+                    view.menu.set(open.then_some(Menu::Model));
+                    if *open { view.menu_query.update(cx, |input, cx| { input.set_value("", window, cx); input.focus(window, cx); }); }
+                    cx.notify();
+                }); }))
+            .when(!self.effort.is_empty(), |el| el.child(muted(format!("{}: {}", tr("create_effort"), self.effort))))
+    }
+
     /// O menu da pílula de modelo, no desenho do Zeron: o provider em abas, a busca, a lista e o esforço no rodapé.
     pub(super) fn render_model_menu(&self, cx: &mut Context<Self>) -> Div {
         let query = self.menu_filter(cx);
@@ -342,6 +391,7 @@ impl NewSession {
                     .map(|(id, label, hint)| {
                         let on = self.model == id;
                         menu_row(SharedString::from(format!("new-chat-model-{id}")), on, label, hint)
+                            .disabled(self.creating)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 // O menu fica aberto: o esforço, logo abaixo, costuma ser a escolha seguinte.
                                 this.model_choice_touched = true;
@@ -366,11 +416,12 @@ impl NewSession {
                 .gap(px(2.)).children(std::iter::once(String::new()).chain(levels).map(|level| {
                     let label = if level.is_empty() { tr("create_default") } else { level.clone() };
                     Button::new(SharedString::from(format!("new-chat-effort-{level}"))).ghost().xsmall().when(!many, |b| b.flex_1().min_w_0())
-                        .selected(self.effort == level).label(label)
+                        .selected(self.effort == level).label(label).disabled(self.creating)
                         .on_click(cx.listener(move |this, _, window, cx| { this.model_choice_touched = true; this.effort = level.clone(); this.build_effort_pick(window, cx); cx.notify(); }))
                 }))));
         let default = self.render_default_check(cx).map(|check| div().flex().flex_col().gap(px(4.)).child(popup::separator()).child(check.py(px(4.))));
-        div().p(px(popup::INSET)).flex().flex_col().gap(px(2.)).child(tabs).child(self.menu_search()).child(list).children(effort).children(default)
+        div().p(px(popup::INSET)).flex().flex_col().gap(px(2.)).when(!self.is_transfer(), |el| el.child(tabs))
+            .child(self.menu_search()).child(list).children(effort).children(default)
     }
 
     pub(super) fn build_config_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -447,6 +498,7 @@ impl NewSession {
             CreateReply::Quotas(seq, result) => {
                 let list = result.map_err(|e| Hangar::fetch_failure(&e)).and_then(|v| serde_json::from_value(v).map_err(|_| tr("invalid_response")));
                 if !self.quotas.finish(seq, list) { return; }
+                if self.is_transfer() { return; }
                 // A escolhida antes da cota chegar pode ser uma pasta que não é conta.
                 let stale = self.config.as_ref().is_some_and(|path| !self.accounts().any(|c| &c.path == path));
                 if stale { self.config = self.fallback_config(); }
@@ -774,6 +826,29 @@ impl NewSession {
 #[cfg(test)]
 mod tests {
     use super::{ModelOption, QuotaLine, exhausted, quota_switch, until};
+
+    #[test]
+    fn remembered_codex_choices_are_scoped_and_never_invent_a_model_or_effort() {
+        let models: Vec<ModelOption> = serde_json::from_value(serde_json::json!([
+            {"id":"model-a", "efforts":["low","high"]}, {"id":"model-b", "efforts":["medium"]}
+        ])).unwrap();
+        let remembered = |model: &str, effort: &str| super::remembered_choice(&models, "codex", (model.into(), effort.into()));
+        assert_eq!(remembered("model-a", "high"), ("model-a".into(), "high".into()));
+        assert_eq!(remembered("model-b", "high"), ("model-b".into(), String::new()));
+        assert_eq!(remembered("claude-model", "high"), (String::new(), String::new()));
+        assert_eq!(remembered("", "high"), (String::new(), String::new()));
+        assert_eq!(remembered("model-b", "medium"), ("model-b".into(), "medium".into()));
+        let key = super::model_memory_key("server-a", "codex", "account-a", "");
+        assert_ne!(key, super::model_memory_key("server-b", "codex", "account-a", ""));
+        assert_ne!(key, super::model_memory_key("server-a", "claude", "account-a", ""));
+        assert_ne!(key, super::model_memory_key("server-a", "codex", "account-b", ""));
+        let mut remote = super::Remote::<super::Catalog>::default();
+        let old = remote.start();
+        let current = remote.start();
+        assert!(remote.finish(current, Ok(super::Catalog { models, reduced: false })));
+        assert!(!remote.finish(old, Ok(super::Catalog { models: Vec::new(), reduced: false })));
+        assert_eq!(remote.ok().unwrap().models.len(), 2);
+    }
 
     #[tokio::test]
     async fn config_is_only_requested_for_owner_or_legacy_backend() {
