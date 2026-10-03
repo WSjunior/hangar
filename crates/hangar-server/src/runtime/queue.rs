@@ -82,6 +82,7 @@ pub enum Action {
     BindDispatch { id:String, cursor:Value },
     BeginDispatch { id:String, wire_id:String },
     Finish { id:String, status:Status, result:Value },
+    ConfirmOccurrence { id:String, proof:super::receipt::ReceiptProof },
     LateRpcResolution { id:String, wire_id:String, request_id:RequestId, generation:u64, result:Value },
     Recover,
     EnsureProjection,
@@ -308,6 +309,20 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             }
             serde_json::to_value(op)?
         }
+        Action::ConfirmOccurrence { id, proof } => {
+            if state.used_occurrences.contains_key(&proof.occurrence.id) { return Ok(json!(false)); }
+            let operation = state.operations.get(&id).ok_or_else(||invalid("operação não preparada"))?;
+            let cursor: super::receipt::DispatchCursor = serde_json::from_value(operation.dispatch_cursor.clone())
+                .map_err(|_|invalid("operação sem cursor de despacho"))?;
+            let row = state.rows.iter_mut().find(|r|Some(row_id(r)) == operation.entry_id.as_deref())
+                .ok_or_else(||invalid("entrada da operação não existe"))?;
+            if !proof.validates(&cursor,row) { return Err(invalid("prova de entrega não corresponde ao despacho")); }
+            row["delivered"] = json!(true); row["confirmed"] = json!(true);
+            row.as_object_mut().unwrap().remove("desistiu");
+            state.used_occurrences.insert(proof.occurrence.id.clone(),json!({"operation_id":id,"generation":state.generation}));
+            state.operations.get_mut(&id).unwrap().status = Status::Confirmed;
+            json!(true)
+        }
         Action::Recover => {
             for op in state.operations.values_mut() {
                 if op.status == Status::Dispatching { op.status = Status::Unknown; }
@@ -336,7 +351,7 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
     Ok(result)
 }
 
-fn entry_lines(row: &Value) -> BTreeSet<String> {
+pub(crate) fn entry_lines(row: &Value) -> BTreeSet<String> {
     let raw = row["text"].as_str().unwrap_or("").trim();
     let stripped = crate::transcript::history::strip_attach(raw);
     let mut lines: BTreeSet<_> = [raw,stripped.trim()].into_iter()

@@ -213,6 +213,23 @@ def apply_action(state, action, clock, call_id):
                     if attempt["status"] == "dispatching":
                         attempt["status"] = "unknown"
         return None
+    if kind == "confirm_occurrence":
+        from app.runtime_receipt import validate_proof
+        proof = action["proof"]
+        occurrence_id = proof["occurrence"]["id"]
+        if occurrence_id in state["used_occurrences"]:
+            return False
+        operation = operations.get(action["id"])
+        if operation is None or operation["dispatch_cursor"] is None:
+            raise ValueError("operação sem cursor de despacho")
+        row = next((r for r in rows if r.get("id") == operation["entry_id"]), None)
+        if row is None or not validate_proof(proof, operation["dispatch_cursor"], row):
+            raise ValueError("prova de entrega não corresponde ao despacho")
+        row.update(delivered=True, confirmed=True)
+        row.pop("desistiu", None)
+        state["used_occurrences"][occurrence_id] = {"operation_id": action["id"], "generation": state["generation"]}
+        operation["status"] = "confirmed"
+        return True
     if kind == "set_runtime_state":
         if not isinstance(action["state"], dict):
             raise ValueError("estado privado inválido")

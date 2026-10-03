@@ -171,3 +171,26 @@ def test_facade_and_reserve_share_authoritative_state(tmp_path, monkeypatch):
         assert queue.load() == []
     finally:
         runtime_queue.configure(None)
+
+
+def test_distinct_occurrence_is_committed_with_confirmation(tmp_path):
+    from app.runtime_receipt import ReceiptIndex
+    store = open_store(tmp_path)
+    transcript = tmp_path / "chat.jsonl"
+    transcript.touch()
+    index = ReceiptIndex("claude", "sid")
+    cursor = index.capture(transcript)
+    for operation_id in ("op-1", "op-2"):
+        row_id = "entry-" + operation_id
+        store.exec(1, "append-" + operation_id, CLOCK, append(entry_id=row_id))
+        store.exec(1, "prepare-" + operation_id, CLOCK, {"kind": "prepare", "id": operation_id, "payload": {}, "entry_id": row_id})
+        store.exec(1, "bind-" + operation_id, CLOCK, {"kind": "bind_dispatch", "id": operation_id, "cursor": cursor})
+        store.exec(1, "begin-" + operation_id, CLOCK, {"kind": "begin_dispatch", "id": operation_id, "wire_id": "wire:" + operation_id})
+    transcript.write_text('{"type":"user","uuid":"echo-1","message":{"content":"Olá"}}\n')
+    index.scan(transcript)
+    proof = index.match_after(cursor, store.state["rows"][0], {})
+    assert store.exec(1, "confirm-1", CLOCK, {"kind": "confirm_occurrence", "id": "op-1", "proof": proof}) is True
+    assert store.exec(1, "confirm-2", CLOCK, {"kind": "confirm_occurrence", "id": "op-2", "proof": proof}) is False
+    store = open_store(tmp_path)
+    assert sum(bool(row.get("confirmed")) for row in store.state["rows"]) == 1
+    assert len(store.state["used_occurrences"]) == 1

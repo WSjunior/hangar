@@ -2,3 +2,4 @@
 pub mod protocol;
 pub mod cano;
 pub mod queue;
+pub mod receipt;
