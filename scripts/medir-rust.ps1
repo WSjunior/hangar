@@ -26,8 +26,12 @@ $pythonHost = $match.Matches[0].Groups[1].Value
 
 function Media-Ms([string]$hostPort, [string]$name) {
     $url = "http://$hostPort/api/sessions/$name/history?limit=200"
+    # curl.exe, nao Invoke-WebRequest: o custo fixo do iwr no 5.1 (~30 ms) esconde a diferenca.
     $times = foreach ($i in 1..6) {
-        (Measure-Command { Invoke-WebRequest -UseBasicParsing -Headers $headers $url | Out-Null }).TotalMilliseconds
+        $out = curl.exe -s -m 30 -o NUL -w '%{http_code} %{time_total}' -H "Authorization: Bearer $token" $url
+        $code, $secs = $out -split ' '
+        if ($LASTEXITCODE -ne 0 -or $code -ne '200') { Write-Host "erro HTTP $code (curl $LASTEXITCODE) em $url"; exit 1 }
+        [double]$secs * 1000
     }
     # A primeira leitura e o aquecimento.
     [math]::Round((($times | Select-Object -Skip 1) | Measure-Object -Average).Average)
