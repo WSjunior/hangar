@@ -313,3 +313,15 @@ def test_sessao_compartilhada_e_pareada_no_mesmo_token_resolve_para_o_convite():
     guest = share_store.lookup_token(tok)
     # A cópia do par é mais nova, mas o convite de verdade vence.
     assert guest.kind_of("proj") == "share"
+
+
+
+def test_session_life_uses_batch_birth_without_subprocess(monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("a listagem já trouxe o nascimento")
+    monkeypatch.setattr(share_life, "_tmux_birth", forbidden)
+    monkeypatch.setattr(share_life.headless_sessions, "load", forbidden)
+    monkeypatch.setattr(share_life.codex_sessions, "load", forbidden)
+    assert share_life.session_life("terminal", meta=None, birth=100) == "t:100"
+    assert share_life.session_life("terminal", meta=None, birth=None) is None
+    assert share_life.session_life("codex", meta={"key": "preserved"}, birth=100) == "k:preserved"

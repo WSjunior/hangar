@@ -154,6 +154,51 @@ def _decorate_plan(info) -> None:
     info.plan_tasks = [(t.done, t.total) for t in p.tasks[:_MAX_PLAN_TASK_SEGMENTS]]
 
 
+
+def _decorate_transfers(infos: list[SessionInfo]) -> None:
+    from app import conversation_transfer as transfers
+    rows = {info.name: info for info in infos}
+    for info in infos:
+        record = transfers.transfer_for_session(info.name, lifecycle_id=info.lifecycle_id, source_path=info.jsonl)
+        if record is None and info.provider == "codex" and info.codex_home:
+            meta = codex_sessions.load(info.name)
+            if meta and meta.get("thread_id"):
+                prepared = transfers.transfer_for_thread(info.codex_home, meta["thread_id"])
+                if (prepared and prepared.name == info.name and prepared.phase not in
+                        {transfers.TransferPhase.COMPLETE, transfers.TransferPhase.REJECTED,
+                         transfers.TransferPhase.ROLLED_BACK}):
+                    record = prepared
+        if record:
+            info.transfer_id, info.transfer_phase = record.id, record.phase.value
+    for record in transfers.list_incomplete():
+        info = rows.get(record.name)
+        if info and info.transfer_id != record.id:
+            # Uma sessão recriada com o nome antigo não pertence à recuperação.
+            continue
+        origin = record.origin_meta
+        if info is None:
+            info = SessionInfo(name=record.name)
+            infos.append(info)
+            rows[record.name] = info
+        # A fase é apresentação; não inventa um estado físico de turno em execução.
+        info.cwd = origin.get("cwd")
+        info.jsonl = record.source.path if record.source else origin.get("jsonl")
+        info.provider = "claude"
+        info.headless = bool(origin.get("headless"))
+        info.engine = origin.get("engine")
+        info.codex_home = None
+        cdir = origin.get("config_dir") or Path.home() / ".claude"
+        info.conta = f"claude:{Path(cdir).resolve(strict=False)}"
+        info.lifecycle_id = record.source_life
+        info.transfer_id, info.transfer_phase = record.id, record.phase.value
+        info.problema = record.error_code
+        pair = PairLink(record.name).get() or {}
+        info.pair_peers, info.pair_gid, info.pair_task = pair.get("peers"), pair.get("gid"), pair.get("task")
+        info.pair_external = _pair_external(record.name, pair.get("peers"))
+        info.then_target = (ThenLink(record.name).get() or {}).get("target")
+        infos[:] = [row for row in infos if row.name != record.name or row is info]
+
+
 def sanitize_cwd(cwd: str) -> str:
     # O Claude indexa pelo cwd sem separador final ("/home/x/" e "C:\\x\\" caem em "-home-x" e
     # "C--x"); só a raiz ("/", "C:\\") mantém o seu.
@@ -1202,9 +1247,12 @@ class SessionRegistry:
         # state (sai 'idle' default): este caminho so resolve transcript; quem quer state usa
         # list_with_state(). Usado por varios endpoints que so precisam do jsonl por nome.
         children = _proc_children_map()
+        from app.share_life import session_life
         out = []
         sids: dict[str, Optional[str]] = {}
-        for panes in tmux.list_panes_all().values():
+        pane_groups = tmux.list_panes_all()
+        terminal_births = {name: panes[0].get("session_created") for name, panes in pane_groups.items() if panes}
+        for panes in pane_groups.values():
             # Sessao de shell ESCONDIDA (Task 6, botao "+" do painel de terminal): marcada por
             # opcao de usuario tmux (@cp_hidden), herdada por TODOS os panes/janelas da sessao (
             # confirmado na revisao), lida de carona no MESMO list-panes acima -- sem isto ela
@@ -1274,6 +1322,7 @@ class SessionRegistry:
             pair = PairLink(p["name"]).get()
             br, wt = head_info(p["cwd"])
             info = SessionInfo(name=p["name"], cwd=p["cwd"], jsonl=jsonl, tracked=tracked,
+                               lifecycle_id=session_life(p["name"], meta=None, birth=p.get("session_created")),
                                branch=br, worktree=wt,
                                then_target=link.get("target") if link else None,
                                pair_peers=pair.get("peers") if pair else None,
@@ -1325,13 +1374,14 @@ class SessionRegistry:
         self._dedupe_collisions(out, sids)
         # Sessoes Codex: a TUI vive no tmux, mas a identidade vem dos sidecars duraveis (sobrevivem
         # a restart; o historico esta no rollout). O client vivo e reaberto sob demanda.
-        for meta in codex_sessions.list_all():
+        for meta in codex_sessions.list_all(include_incomplete=True):
             codex_home = str(Path(meta.get("codex_home") or codex_contas.default_home())
                              .expanduser().resolve(strict=False))
             cwd = cwd_atual(meta)
             br, wt = head_info(cwd)
             out.append(SessionInfo(
                 name=meta["name"], cwd=cwd, jsonl=meta.get("rollout_path") or None,
+                lifecycle_id=session_life(meta["name"], meta=meta, birth=terminal_births.get(meta["name"])),
                 provider="codex", tracked=True, conta=f"codex:{codex_home}",
                 codex_home=codex_home, headless=bool(meta.get("headless")),
                 branch=br, worktree=wt,
@@ -1351,6 +1401,7 @@ class SessionRegistry:
             cdir = meta.get("config_dir")
             out.append(SessionInfo(
                 name=meta["name"], cwd=cwd, jsonl=hl.transcript_path_de(meta),
+                lifecycle_id=session_life(meta["name"], meta=meta, birth=None),
                 provider="claude", headless=True, tracked=True, engine=meta.get("engine"),
                 conta=f"claude:{Path(cdir or Path.home() / '.claude').resolve()}",
                 branch=br, worktree=wt,
@@ -1371,6 +1422,7 @@ class SessionRegistry:
             out.append(SessionInfo(
                 name=run["name"], cwd=run["repo"], jsonl=run["timeline"], provider="orq",
                 tracked=True, pair_gid=run["gid"], orq_arbiter=run["arbiter"]))
+        _decorate_transfers(out)
         try:
             self._varrer_pares_mortos({i.name for i in out})
         except Exception as e:
@@ -1410,6 +1462,10 @@ class SessionRegistry:
             infos = await asyncio.to_thread(self.list)
         # Orquestrador: sem pane, hook, statusline nem git próprio. O estado sai só da atividade da
         # linha do tempo, e a linha fica fora de tudo abaixo (captura de pane, marcador, radar).
+        from app.conversation_transfer import TransferPhase
+        terminal_phases = {p.value for p in (TransferPhase.COMPLETE, TransferPhase.REJECTED, TransferPhase.ROLLED_BACK)}
+        transfers = [i for i in infos if i.transfer_phase and i.transfer_phase not in terminal_phases]
+        infos = [i for i in infos if not i.transfer_phase or i.transfer_phase in terminal_phases]
         orqs = [i for i in infos if getattr(i, "provider", "claude") == "orq"]
         if orqs:
             def _orq_state():
@@ -1418,7 +1474,7 @@ class SessionRegistry:
             await asyncio.to_thread(_orq_state)
             infos = [i for i in infos if getattr(i, "provider", "claude") != "orq"]
         if not infos:
-            return orqs
+            return orqs + transfers
         # Estado pela marca dos hooks quando existe (custo ~0); senao cai no pane (fallback).
         # NOTA: o sweep de STATUSLINE (mais abaixo) captura pane mesmo de sessao com marcador —
         # a statusline nao tem outra fonte. O "custo ~0" continua valendo pra CLASSIFICACAO; o
@@ -1819,7 +1875,7 @@ class SessionRegistry:
                 for info in infos:
                     info.owner = guest_users.owner_name(info.name)
             await asyncio.to_thread(_owners)
-        return infos + orqs
+        return infos + orqs + transfers
 
     @diag.rastrear("sessao.criar")
     def create(self, name: str, cwd: str, config_dir: str | None = None,
@@ -2314,6 +2370,8 @@ class SessionRegistry:
             ThenLink(old).rename(new)
             rename_pair(old, new)
             shortcut_terminals.rename_owner(old, new)
+            from app.conversation_transfer import rename_transfer
+            rename_transfer(old, new)
             return
         if codex_sessions.exists(old):
             from app.adapters import get_adapter
@@ -2368,6 +2426,8 @@ class SessionRegistry:
         # `term-<velho>-2`.
         # Terminais de atalho seguem a conversa pelo dono gravado neles (nao pelo nome tmux).
         shortcut_terminals.rename_owner(old, new)
+        from app.conversation_transfer import rename_transfer
+        rename_transfer(old, new)
         alvo = f"term-{old}"
         if tmux.is_hidden(alvo) and not tmux.rename_session(alvo, f"term-{new}"):
             _log.info("rename: %r nao pode virar %r (nome ja ocupado?) — matando o shell escondido",

@@ -58,7 +58,7 @@ def switch_thread(name: str, thread: dict, previous: str, *, endpoint: str, app_
             return True
         if meta["thread_id"] != previous:
             return False
-        _write(name, {**meta, "thread_id": thread["id"], "rollout_path": thread["path"]})
+        _write(name, _merge_conversation(meta, {"thread_id": thread["id"], "rollout_path": thread["path"]}))
         return True
 
 
@@ -94,7 +94,8 @@ def save(name: str, thread_id: str | None, rollout_path: str, cwd: str,
          codex_home: str | Path | None = None,
          codex_account: str | None = None,
          headless: bool = False, key: str | None = None,
-         permission_mode: str | None = None, jev: bool = False) -> None:
+         permission_mode: str | None = None, jev: bool = False,
+         transfer_id: str | None = None, tool_output_token_limit: int | None = None) -> None:
     """Grava (ou sobrescreve) o sidecar duravel da sessao Codex. Escrita ATOMICA (tmp + replace,
     mesmo padrao de PromptQueue._write_atomic em pqueue.py) -- write_text direto podia corromper
     o sidecar em crash/concorrencia no meio da escrita.
@@ -123,12 +124,32 @@ def save(name: str, thread_id: str | None, rollout_path: str, cwd: str,
         meta["codex_home"] = str(Path(codex_home).expanduser().absolute())
     if codex_account is not None:
         meta["codex_account"] = codex_account
+    if key is not None:
+        meta["key"] = key
+    if transfer_id is not None:
+        meta["transfer_id"] = transfer_id
+    if tool_output_token_limit is not None:
+        if type(tool_output_token_limit) is not int or tool_output_token_limit <= 0:
+            raise ValueError("limite de resultado de ferramenta inválido")
+        meta["tool_output_token_limit"] = tool_output_token_limit
     if headless:
         # Sem terminal: o app-server roda atrás de um cano (sem_terminal.py). `key` é a chave do
         # cano (varredura de órfãos) e `permission_mode` o modo do app, que vira sandbox/approval.
-        meta.update(headless=True, key=key, permission_mode=permission_mode, cano=None, jev=jev)
+        meta.update(headless=True, permission_mode=permission_mode, cano=None, jev=jev)
     with _locked(name):
+        previous = load(name) or {}
+        same_thread = previous.get("thread_id") == thread_id
+        for field in ("key", "transfer_id", "tool_output_token_limit", "codex_home", "codex_account"):
+            if field not in meta and field in previous and (field == "key" or same_thread):
+                meta[field] = previous[field]
         _write(name, meta)
+
+
+def _merge_conversation(meta: dict, fields: dict) -> dict:
+    if (meta.get("thread_id") and "thread_id" in fields
+            and fields["thread_id"] != meta["thread_id"]):
+        meta = {k: v for k, v in meta.items() if k not in {"transfer_id", "tool_output_token_limit"}}
+    return {**meta, **fields}
 
 
 def update(name: str, **campos) -> dict | None:
@@ -137,7 +158,7 @@ def update(name: str, **campos) -> dict | None:
         meta = load(name)
         if meta is None:
             return None
-        meta = {**meta, **campos}
+        meta = _merge_conversation(meta, campos)
         _write(name, meta)
         return meta
 
@@ -190,8 +211,8 @@ def rename(old: str, new: str) -> None:
             _write(new, {**meta, "name": new})
 
 
-def list_all() -> list[dict]:
-    """Todas as sessoes Codex gravadas (pula arquivos corrompidos). Usado pelo registry.list()."""
+def list_all(*, include_incomplete: bool = False) -> list[dict]:
+    """Sidecars publicados; o registry inclui preparações para mostrar a origem em recuperação."""
     out: list[dict] = []
     try:
         files = sorted(_dir().glob("*.json"))
@@ -199,9 +220,23 @@ def list_all() -> list[dict]:
         return out
     for f in files:
         try:
-            out.append(json.loads(f.read_text(encoding="utf-8")))
+            raw = f.read_text(encoding="utf-8")
+            meta = json.loads(raw)
         except (OSError, ValueError):
             continue
+        if not isinstance(meta, dict):
+            continue
+        if not include_incomplete:
+            # A preparação não é uma sessão Codex publicada e não pode ser aquecida.
+            from app.conversation_transfer import TransferPhase, transfer_for_thread, load_transfer
+            record = (load_transfer(meta["transfer_id"]) if meta.get("transfer_id") else
+                      transfer_for_thread(meta["codex_home"], meta["thread_id"])
+                      if meta.get("codex_home") and meta.get("thread_id") else None)
+            if meta.get("transfer_id") and record is None:
+                raise RuntimeError("sidecar aponta para transferência ausente")
+            if record and record.phase != TransferPhase.COMPLETE:
+                continue
+        out.append(meta)
     return out
 
 

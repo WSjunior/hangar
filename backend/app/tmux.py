@@ -395,7 +395,7 @@ def list_panes_all() -> dict[str, list[dict]]:
     # o formato de 6 campos.
     cp = _run(["tmux", "list-panes", "-a", "-F",
                "#{session_name}\t#{pane_active}\t#{pane_pid}\t#{pane_current_path}\t#{pane_id}"
-               "\t#{@cp_hidden}\t#{CP_PROVIDER}"])
+               "\t#{@cp_hidden}\t#{CP_PROVIDER}\t#{session_created}"])
     _exige_resposta(cp)
     if cp.returncode != 0:
         return {}
@@ -407,10 +407,12 @@ def list_panes_all() -> dict[str, list[dict]]:
         name, active, pid, cwd, pane_id = parts[:5]
         hidden = parts[5] if len(parts) > 5 else ""
         provider = parts[6] if len(parts) > 6 else ""
+        birth = parts[7] if len(parts) > 7 else ""
         out.setdefault(name, []).append({
             "name": name, "pid": int(pid) if pid.isdigit() else None, "cwd": cwd,
             "pane_id": pane_id, "active": active == "1", "hidden": hidden == "1",
             "provider": provider if provider in {"claude", "codex", "pi", "omp", "kimi"} else None,
+            "session_created": int(birth) if birth.isdigit() and int(birth) > 0 else None,
         })
     return out
 

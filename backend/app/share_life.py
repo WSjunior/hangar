@@ -10,11 +10,16 @@ from app.adapters.claude_headless import sessions as headless_sessions
 from app.adapters.codex import sessions as codex_sessions
 
 
-def session_life(name: str) -> str | None:
-    for meta in (headless_sessions.load(name), codex_sessions.load(name)):
-        if meta and meta.get("key"):
-            return f"k:{meta['key']}"
-    created = _tmux_birth(name)
+_UNSET = object()
+
+
+def session_life(name: str, *, meta=_UNSET, birth=_UNSET) -> str | None:
+    metadata = ((headless_sessions.load(name), codex_sessions.load(name))
+                if meta is _UNSET else (meta,))
+    for item in metadata:
+        if item and item.get("key"):
+            return f"k:{item['key']}"
+    created = _tmux_birth(name) if birth is _UNSET else birth
     return f"t:{created}" if created else None
 
 

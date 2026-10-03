@@ -72,6 +72,9 @@ def session_key(jsonl_path: str) -> str:
 
 class SessionInfo(BaseModel):
     name: str
+    lifecycle_id: Optional[str] = None
+    transfer_id: Optional[str] = None
+    transfer_phase: Optional[str] = None
     cwd: Optional[str] = None
     jsonl: Optional[str] = None
     # Qual Adapter dirige esta sessao (app.adapters.get_adapter). "claude" cobre TODA sessao de hoje
