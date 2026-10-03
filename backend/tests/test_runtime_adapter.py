@@ -15,7 +15,7 @@ class Coordinator:
         self.voice_clients = {}
         self.target = SimpleNamespace(phase=runtime_coordinator.Phase.Rust,
             binding=SimpleNamespace(key="key", generation=2, provider="codex", headless=True),
-            view={"key":"key","generation":2,"revision":7,"view":{"alive":True,"ready":True,
+            view={"key":"key","generation":2,"revision":7,"channels":{},"view":{"alive":True,"ready":True,
                 "thread_id":"thread-2","model":"test-model","effort":"high","deliverable":True,
                 "public_state":{"session":"session","state":"idle","headless":True}}},
             cache_valid=True, changed=asyncio.Event())

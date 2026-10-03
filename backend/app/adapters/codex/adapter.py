@@ -968,7 +968,7 @@ class CodexAdapter:
             cano_pid = (meta.get("cano") or {}).get("pid")
             pids = ([int(cano_pid), *await asyncio.to_thread(_descendant_pids, int(cano_pid))]
                     if cano_pid else [])
-            self.close_sync(name, preserve_preview=True)
+            await asyncio.to_thread(self.close_sync, name, preserve_preview=True)
             await sess["client"].close()
             await asyncio.to_thread(_esperar_saida, pids)
             if any(pid_vivo(pid) for pid in pids):
@@ -999,7 +999,7 @@ class CodexAdapter:
                     if not await asyncio.to_thread(tmux.kill_session, name):
                         raise RuntimeError("Não consegui fechar o terminal; não abri outro processo.") from exc
                 failed_session = self._sessions.get(name)
-                self.close_sync(name, preserve_preview=True)
+                await asyncio.to_thread(self.close_sync, name, preserve_preview=True)
                 if failed_session:
                     await failed_session["client"].close()
                 await asyncio.to_thread(_esperar_saida, new_pids)
@@ -1099,7 +1099,7 @@ class CodexAdapter:
                 codex_sessions.update(name, app_pid=meta.get("app_pid"))
                 self._start_tmux_watcher(name)
                 raise RuntimeError("Não foi possível fechar o terminal; o modo foi mantido.")
-            self.close_sync(name, preserve_preview=True)
+            await asyncio.to_thread(self.close_sync, name, preserve_preview=True)
             await sess["client"].close()
             await asyncio.to_thread(_esperar_saida, pids)
             if any(pid_vivo(pid) for pid in pids):
@@ -1126,7 +1126,7 @@ class CodexAdapter:
                 cano_pid = ((codex_sessions.load(name) or {}).get("cano") or {}).get("pid")
                 new_pids = ([int(cano_pid), *await asyncio.to_thread(_descendant_pids, int(cano_pid))]
                             if cano_pid else [])
-                self.close_sync(name, preserve_preview=True)
+                await asyncio.to_thread(self.close_sync, name, preserve_preview=True)
                 if failed:
                     await failed["client"].close()
                 await asyncio.to_thread(_esperar_saida, new_pids)

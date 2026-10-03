@@ -42,9 +42,10 @@ async fn unknown_command_fields_are_rejected() {
     let server = tokio::spawn(gateway::serve(listener,registry,"secret-test".into(),"instance-test".into(),hangar_server::INTERNAL_PROTOCOL));
     let response = reqwest::Client::new().post(format!("http://{address}/runtime/op"))
         .header("x-hangar-internal","secret-test").header("x-hangar-runtime-instance","instance-test")
-        .json(&serde_json::json!({"protocol":hangar_server::INTERNAL_PROTOCOL,"instance":"instance-test","key":"key",
+        .header("content-type","application/json")
+        .body(serde_json::json!({"protocol":hangar_server::INTERNAL_PROTOCOL,"instance":"instance-test","key":"key",
             "generation":1,"operation_id":"op","clock":{"monotonic_s":0.0,"epoch_s":0.0},
-            "command":{"kind":"detach","unexpected":true}})).send().await.unwrap();
+            "command":{"kind":"detach","unexpected":true}}).to_string()).send().await.unwrap();
     assert!(!response.status().is_success());
     server.abort();
 }

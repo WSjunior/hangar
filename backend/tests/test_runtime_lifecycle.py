@@ -40,7 +40,8 @@ def test_rename_while_command_waits(tmp_path, monkeypatch):
             assert slot.frozen
             target.name = "renamed"
         lifecycle = asyncio.create_task(coordinator.change("session", rename, new_name="renamed", advance=False))
-        await asyncio.sleep(0)
+        while not slot.frozen:
+            await asyncio.sleep(0)
         assert slot.frozen
         with pytest.raises(RuntimeError):
             with coordinator.queue_gate("session"):
@@ -156,6 +157,7 @@ def test_combined_supervisor_deactivates_b_and_c(monkeypatch):
         def poll(self):
             return 0
     class Coordinator:
+        transport = None
         slots = {"key":SimpleNamespace(binding=SimpleNamespace(name="session"), phase=Phase.Rust)}
         async def close_events(self):
             events.append("events")

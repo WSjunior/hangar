@@ -86,7 +86,7 @@ async fn no_sse_runtime_still_drains() {
             tokio::task::yield_now().await;
         }
     }).await.unwrap();
-    handle.shutdown().await.unwrap();
+    handle.stop().await.unwrap();
     assert_eq!(server.await.unwrap(),1);
 }
 
@@ -105,13 +105,14 @@ async fn confirmed_prompt_does_not_consume_next_echo() {
         handle.queue(format!("{id}:cursor"),Action::BindDispatch { id:id.into(),cursor:serde_json::to_value(cursor).unwrap() }).await.unwrap();
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
-        writeln!(file,"{}",json!({"type":"event_msg", "payload":{"type":"user_message", "message":"Olá"}})).unwrap();
+        writeln!(file,"{}",json!({"type":"response_item", "payload":{"type":"message", "role":"user",
+            "content":[{"type":"input_text","text":"Olá"}]}})).unwrap();
         assert_eq!(handle.confirm().await.unwrap()["confirmed"],1);
     }
     let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
     assert!(state.rows.iter().all(|row|row["confirmed"] == true));
     assert_eq!(state.used_occurrences.len(),2);
-    handle.shutdown().await.unwrap();
+    handle.stop().await.unwrap();
     assert_eq!(server.await.unwrap(),0);
 }
 

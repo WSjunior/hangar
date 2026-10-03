@@ -38,7 +38,9 @@ fn claude_public_events_match_the_python_oracle() {
         let expected_publications:Vec<_> = oracle["outputs"].as_array().unwrap().iter()
             .filter(|o|["preview","thinking","tool"].contains(&o["channel"].as_str().unwrap_or(""))).cloned().collect();
         let mut clock:ClockSample = serde_json::from_value(scenario["clock"].clone()).unwrap();
-        let mut engine = ClaudeEngine::new(scenario["metadata"].clone(),1,clock);
+        let mut metadata = scenario["metadata"].clone();
+        metadata["status_line"] = oracle["initial_state"]["status_line"].clone();
+        let mut engine = ClaudeEngine::new(metadata,1,clock);
         let mut publications = Vec::new();
         for (index,step) in scenario["steps"].as_array().unwrap().iter().enumerate() {
             if step.get("clock").is_some() { clock = serde_json::from_value(step["clock"].clone()).unwrap(); }
@@ -52,8 +54,8 @@ fn claude_public_events_match_the_python_oracle() {
                     }
                     Effect::Policy { kind,request_id,.. } if kind == "format_status" => {
                         // A formatação administrativa é a fronteira falsa; o reducer permanece real.
-                        engine.apply(EngineInput::PolicyResult { request_id,payload:json!({
-                            "status_line":states[index]["status_line"],"limit_reset":states[index]["limit_reset"]}) },clock).unwrap();
+                        effects.extend(engine.apply(EngineInput::PolicyResult { request_id,payload:json!({
+                            "status_line":states[index]["status_line"],"limit_reset":states[index]["limit_reset"]}) },clock).unwrap());
                     }
                     _ => {},
                 }
@@ -80,8 +82,12 @@ fn codex_public_events_match_the_python_oracle() {
         let states:Vec<_> = oracle["outputs"].as_array().unwrap().iter().filter(|o|o["channel"] == "state").map(|o|o["data"].clone()).collect();
         let mut clock:ClockSample = serde_json::from_value(scenario["clock"].clone()).unwrap();
         let mut metadata = scenario["metadata"].clone(); metadata["initialized"] = json!(true); metadata["ready"] = json!(true);
+        metadata["status_line"] = oracle["initial_state"]["status_line"].clone();
         let mut engine = Engine::new(metadata,1,clock);
         let mut state_index = 0;
+        let expected_notices:Vec<_> = oracle["outputs"].as_array().unwrap().iter()
+            .filter(|output|output["channel"] == "local" || output["channel"] == "response").cloned().collect();
+        let mut notices = Vec::new();
         for step in scenario["steps"].as_array().unwrap() {
             if step.get("clock").is_some() { clock = serde_json::from_value(step["clock"].clone()).unwrap(); }
             let effects = engine.apply(EngineInput::Line(step["payload"].clone()),clock).unwrap();
@@ -89,9 +95,15 @@ fn codex_public_events_match_the_python_oracle() {
             let mut effects:std::collections::VecDeque<_> = effects.into();
             while let Some(effect) = effects.pop_front() {
                 match effect {
-                    Effect::Write { operation_id:Some(operation_id),.. } => effects.extend(engine.apply(EngineInput::WriteAck { operation_id,outcome:WriteOutcome::Written },clock).unwrap()),
+                    Effect::Write { operation_id:Some(operation_id),frame } => {
+                        if frame.get("method").is_none() && frame.get("id").is_some() {
+                            notices.push(json!({"channel":"response", "data":{"id":frame["id"], "result":frame["result"], "erro":frame["error"]}}));
+                        }
+                        effects.extend(engine.apply(EngineInput::WriteAck { operation_id,outcome:WriteOutcome::Written },clock).unwrap());
+                    }
+                    Effect::Policy { kind,payload,.. } if kind == "local_output" => notices.push(json!({"channel":"local", "data":{"text":payload["text"]}})),
                     Effect::Policy { kind,request_id,.. } if kind == "format_status" => {
-                        engine.apply(EngineInput::PolicyResult { request_id,payload:json!({"status_line":states[state_index]["status_line"]}) },clock).unwrap();
+                        effects.extend(engine.apply(EngineInput::PolicyResult { request_id,payload:json!({"status_line":states[state_index]["status_line"]}) },clock).unwrap());
                     }
                     _ => {},
                 }
@@ -102,6 +114,7 @@ fn codex_public_events_match_the_python_oracle() {
             }
         }
         assert_eq!(engine.view(),*states.last().unwrap(),"{}: estado final",scenario["name"]);
+        assert_eq!(notices,expected_notices,"{}: recusa e aviso local",scenario["name"]);
         compared += 1;
     }
     assert!(compared >= 2,"oráculo precisa comparar perguntas e fim de turno");

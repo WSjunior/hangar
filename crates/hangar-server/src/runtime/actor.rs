@@ -1,4 +1,4 @@
-use super::{cano::{CanoConnection,IoEvent,IoTasks,WireFrame},claude::ClaudeEngine,codex::Engine as CodexEngine,
+use super::{cano::{CanoConnection,IoEvent,WireFrame},claude::ClaudeEngine,codex::Engine as CodexEngine,
     protocol::*,queue::{Action,QueueActor,Status},receipt::ReceiptIndex};
 use serde_json::{Value,json};
 use std::collections::{BTreeMap,VecDeque};
@@ -263,7 +263,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
     let mut sequence = initial.operations.keys().filter_map(|id|id.rsplit(':').next()?.parse::<u64>().ok()).max().unwrap_or(0);
     let mut write_order = 0u64;
     let mut next_write = 1u64;
-    let mut prepared_writes = BTreeMap::new();
+    let mut prepared_writes:BTreeMap<u64,(String,Result<(),RuntimeError>)> = BTreeMap::new();
     let mut error:Option<RuntimeError> = None;
     let mut io_open = true;
     let mut drain_requested = true;

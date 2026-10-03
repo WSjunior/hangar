@@ -114,7 +114,8 @@ class QueueStore:
                 raise ValueError("identificador reutilizado com outra operação")
             self.ensure_projection()
             return copy.deepcopy(previous["result"])
-        self.ensure_projection()
+        if action["kind"] in {"load", "entry_delivered", "ensure_projection"}:
+            self.ensure_projection()
         state = copy.deepcopy(self.state)
         result = apply_action(state, action, clock, call_id)
         if action["kind"] not in {"load", "entry_delivered", "ensure_projection"}:

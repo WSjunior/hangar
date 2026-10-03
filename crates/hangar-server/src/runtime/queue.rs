@@ -172,8 +172,8 @@ impl Store {
             self.ensure_projection()?;
             return Ok(result);
         }
-        self.ensure_projection()?;
         let readonly = matches!(&action, Action::Load | Action::EntryDelivered { .. } | Action::EnsureProjection);
+        if readonly { self.ensure_projection()?; }
         let mut state = self.state.clone();
         let result = apply(&mut state, action, clock, call_id)?;
         if !readonly {

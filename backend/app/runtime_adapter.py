@@ -396,6 +396,8 @@ class LegacyBridge:
         self.coordinator.legacy_active.add(operation_id)
         try:
             original = inspect.unwrap(getattr(adapter, method))
+            if inspect.ismethod(original):
+                original = original.__func__
             arguments = {key:value for key,value in payload.items() if key in inspect.signature(original).parameters}
             if method == "set_model":
                 arguments.setdefault("model", None)

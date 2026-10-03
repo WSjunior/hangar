@@ -154,6 +154,7 @@ async def _generate(provider: str, scenarios: list[dict]) -> list[dict]:
                 adapter._gravar_desconhecido = unknown
                 stack.enter_context(patch.object(claude.hl_sessions, "update", update))
                 stack.enter_context(patch.object(claude, "_esforco_padrao", lambda config_dir: None))
+                initial_state = adapter._evento(session).model_dump()
 
                 async def command(step):
                     method = getattr(adapter, step["method"])
@@ -192,6 +193,7 @@ async def _generate(provider: str, scenarios: list[dict]) -> list[dict]:
                     return client
 
                 adapter.ensure_running = ensure_running
+                initial_state = adapter._question_state(name, session).model_dump()
 
                 async def command(step):
                     value = await getattr(adapter, step["method"])(name, **step.get("args", {}))
@@ -199,7 +201,7 @@ async def _generate(provider: str, scenarios: list[dict]) -> list[dict]:
 
                 await adapter._consumir(name, client, session, lambda event: emit("state", event))
                 emit("state", adapter._question_state(name, session))
-        result.append({"name": scenario["name"], "provider": provider, "base": BASE,
+        result.append({"name": scenario["name"], "provider": provider, "base": BASE, "initial_state":initial_state,
                        "outputs": outputs, "conservative_changes": scenario.get("conservative_changes", [])})
     return result
 

@@ -145,6 +145,12 @@ fn string(value:&Value) -> Option<String> { value.as_str().map(str::to_owned) }
 fn approval(mode:&str) -> &str { if mode == "Full Access" { "never" } else { "on-request" } }
 fn sandbox(mode:&str) -> &str { match mode { "Ask for approval"=>"read-only","Approve for me"=>"workspace-write",_=>"danger-full-access" } }
 
+fn unsupported_notice(request:&Value) -> Option<String> {
+    let method = request["method"].as_str()?;
+    if matches!(method,"item/commandExecution/requestApproval" | "item/fileChange/requestApproval" | "item/tool/requestUserInput") { return None; }
+    Some(format!("O Codex pediu `{method}`, que a sessão sem terminal não atende; o pedido foi recusado."))
+}
+
 impl Engine {
     pub fn new(metadata:Value,generation:u64,clock:ClockSample) -> Self {
         let mut async_questions = AsyncQuestions { during_load:Some(Vec::new()),..AsyncQuestions::default() };
@@ -220,7 +226,7 @@ impl Engine {
         Some(json!({"provider":"codex","request_id":id,"questions":questions}))
     }
 
-    fn deliverable(&self) -> bool { self.alive && self.ready && !self.in_progress && self.server_requests.is_empty()
+    fn deliverable(&self) -> bool { self.alive && self.ready && !self.in_progress && self.server_requests.is_empty() && self.async_questions.pending.is_empty()
         && self.skill_preparations.is_empty()
         && !self.rpc.values().any(|rpc|!voice_rpc(rpc) && (matches!(rpc.method.as_str(),"turn/start" | "turn/steer" | "thread/compact/start")
             || rpc.continuation.as_ref().is_some_and(|next|next["kind"] == "skill_lookup"))) }
@@ -455,7 +461,9 @@ impl Engine {
                     wire.final_result = outcome != WriteOutcome::Unknown;
                     if let Some(id) = server {
                         if outcome == WriteOutcome::Written && self.request_epochs.get(&id).copied() == server_epoch {
+                            let notice = self.server_requests.iter().find(|(key,_)|key == &id).and_then(|(_,request)|unsupported_notice(request));
                             self.server_requests.retain(|(key,_)|key != &id); self.answering.remove(&id); self.request_epochs.remove(&id);
+                            if let Some(text) = notice { self.policy("local_output",json!({"text":text}),&mut effects); }
                         }
                     }
                     if outcome == WriteOutcome::NotWritten {
@@ -789,7 +797,7 @@ impl Engine {
             if !["item/commandExecution/requestApproval","item/fileChange/requestApproval","item/tool/requestUserInput"].contains(&method) {
                 self.counter += 1;
                 self.answer(format!("server:{}:{}",self.generation,self.counter),request_id,Value::Null,
-                    Some(json!({"code":-32601,"message":"método não suportado pelo Hangar"})),effects)?;
+                    Some(json!({"code":-32601,"message":format!("{method} não é atendido pelo Hangar sem terminal")})),effects)?;
                 self.policy("unknown_private",json!({"kind":method,"event":line}),effects);
             }
             self.changed(effects,true); return Ok(());
@@ -797,6 +805,8 @@ impl Engine {
         match method {
             "serverRequest/resolved" => {
                 let request_id:RequestId = serde_json::from_value(params["requestId"].clone()).map_err(|_|error("ID de resolução inválido"))?;
+                let notice = self.server_requests.iter().find(|(key,_)|key == &request_id).and_then(|(_,request)|unsupported_notice(request));
+                if let Some(text) = notice { self.policy("local_output",json!({"text":text}),effects); }
                 self.server_requests.retain(|(id,_)|id != &request_id); self.answering.remove(&request_id); self.request_epochs.remove(&request_id);
             }
             "turn/started" => {
