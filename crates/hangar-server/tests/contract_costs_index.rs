@@ -2,6 +2,7 @@ mod common;
 use common::costs::*;
 use hangar_server::costs::areas::AreaMap;
 use hangar_server::costs::claude;
+use hangar_server::costs::codex;
 use hangar_server::costs::index::Index;
 use hangar_server::costs::index::Fold;
 use serde_json::json;
@@ -18,6 +19,284 @@ fn sync_claude(ix: &Index, base: &Path, areas: &AreaMap) {
 fn claude_golden(g: &Value) -> Value {
     Value::Object(g.as_object().unwrap().iter().filter(|(k, _)| k.starts_with("claude/"))
         .map(|(k, v)| (k.clone(), v.clone())).collect::<Map<_, _>>())
+}
+
+fn sync_codex(ix: &Index, base: &Path, areas: &AreaMap) {
+    let mut files = hangar_server::costs::collect::list_files(&base.join("codex/sessions"),
+        |n| n.starts_with("rollout-") && n.ends_with(".jsonl"));
+    files.sort();
+    ix.sync(&format!("codex:{}", base.join("codex").display()), &files, &codex::new_fold,
+        codex::VERSION, areas.signature(), &|e| areas.area_lines(e), &progress()).unwrap();
+}
+
+fn codex_golden(g: &Value) -> Value {
+    Value::Object(g.as_object().unwrap().iter().filter(|(k, _)| k.starts_with("codex/"))
+        .map(|(k, v)| (k.clone(), v.clone())).collect::<Map<_, _>>())
+}
+
+#[test]
+fn codex_index_matches_python() {
+    let (_d, base) = fixtures_copy();
+    let areas = AreaMap::load(Path::new("/nao/existe.json"));
+    let ix = Index::open(&base.join("../idx")).unwrap();
+    sync_codex(&ix, &base, &areas);
+    assert_close(&dump(&ix, &base, "codex/"), &codex_golden(&golden_index()), "codex");
+}
+
+#[test]
+fn codex_resumed_in_two_halves_matches_python() {
+    let (_d, base) = fixtures_copy();
+    let areas = AreaMap::load(Path::new("/nao/existe.json"));
+    let ix = Index::open(&base.join("../idx")).unwrap();
+    let rest = halve_all(&base);
+    sync_codex(&ix, &base, &areas);
+    for (p, tail) in rest { append(&p, &tail); }
+    sync_codex(&ix, &base, &areas);
+    assert_close(&dump(&ix, &base, "codex/"), &codex_golden(&golden_index()["__resumed__"]), "codex retomado");
+}
+
+#[test]
+fn single_rollout_cost_reads_only_growth_and_keeps_existing_scope() {
+    let (_d, base) = fixtures_copy();
+    let areas = AreaMap::load(Path::new("/nao/existe.json"));
+    let ix = Index::open(&base.join("../idx")).unwrap();
+    let p = base.join("codex/sessions/2026/09/30/rollout-c1.jsonl");
+    let rows = codex::session_rows(&ix, &p, &areas).unwrap();
+    assert!(!rows.is_empty());
+    sync_codex(&ix, &base, &areas);
+    assert_eq!(codex::session_rows(&ix, &p, &areas).unwrap(), rows);
+    assert_eq!(ix.read_costs(Some("codex:avulso"), None, None).unwrap().len(), 0);
+    assert_eq!(rows, ix.read_costs(None, None, None).unwrap().into_iter()
+        .filter(|r| r.session_id == rows[0].session_id).collect::<Vec<_>>());
+    assert!(codex::session_rows(&ix, &base.join("missing.jsonl"), &areas).is_none());
+}
+
+fn codex_record(kind: &str, second: u32, payload: Value) -> Vec<u8> {
+    let mut raw = serde_json::to_vec(&json!({"type":kind, "timestamp":format!("2026-10-01T12:00:{second:02}Z"), "payload":payload})).unwrap();
+    raw.push(b'\n');
+    raw
+}
+
+fn codex_start() -> codex::CodexFold {
+    let mut fold = codex::new_fold(Path::new("rollout-synthetic.jsonl"));
+    fold.line(&codex_record("session_meta", 0, json!({"id":"synthetic","model_provider":"openai-codex","source":"subagent"})));
+    fold.line(&codex_record("turn_context", 1, json!({"turn_id":"turn","model":"gpt-5.6-sol","cwd":"/repo/synthetic"})));
+    fold
+}
+
+#[test]
+fn codex_turn_order_preserves_legacy_then_modern_insertion() {
+    let mut fold = codex_start();
+    fold.line(&codex_record("turn_context", 1, json!({"turn_id":"modern-first"})));
+    fold.line(&codex_record("token_usage_record", 2, json!({"thread_id":"synthetic","usage":{"input_tokens":100}})));
+    fold.line(&codex_record("turn_context", 3, json!({"turn_id":"legacy-first"})));
+    fold.line(&codex_record("event_msg", 4, json!({"type":"token_count","info":{"total_token_usage":{"input_tokens":200}}})));
+    let out = fold.close();
+    assert_eq!(out.costs[0].ts.iso(), "2026-10-01T09:00:04-03:00");
+    assert_eq!(out.costs[0].input, 300);
+    let entries = out.areas.unwrap();
+    assert_eq!(entries.turns[0].1[0].values[0], 200);
+    assert_eq!(entries.turns[1].1[0].values[0], 100);
+}
+
+#[test]
+fn codex_clamps_cache_and_marks_only_above_long_threshold() {
+    let mut fold = codex_start();
+    for (id, input, read, write, output) in [("threshold", 272000, 300000, 50, -2), ("long", 272001, 200000, 100000, 3)] {
+        fold.line(&codex_record("token_usage_record", 2, json!({"thread_id":"synthetic","response_id":id,
+            "usage":{"input_tokens":input,"cached_input_tokens":read,"cache_write_input_tokens":write,"output_tokens":output}})));
+    }
+    let saved = serde_json::to_vec(&fold).unwrap();
+    let out = fold.close();
+    assert_eq!(saved, serde_json::to_vec(&fold).unwrap());
+    assert_eq!(out.costs, fold.close().costs);
+    assert_eq!(out.costs.len(), 2);
+    assert_eq!(out.costs[0].project, "desconhecido");
+    assert_eq!(out.costs[0].provider, "openai");
+    assert_eq!((out.costs[0].input, out.costs[0].cache_read, out.costs[0].cache_write, out.costs[0].output), (0, 272000, 0, 0));
+    assert!(!out.costs[0].codex_long_context);
+    assert_eq!((out.costs[1].input, out.costs[1].cache_read, out.costs[1].cache_write), (0, 200000, 72001));
+    assert!(out.costs[1].codex_long_context);
+    assert!(out.costs.iter().all(|r| r.subagente && r.account_id.is_none() && !r.fast && r.cache_write_1h == 0));
+}
+
+#[test]
+fn codex_script_quoted_literal_rejects_escaped_newline_like_python() {
+    let mut fold = codex_start();
+    fold.line(&codex_record("response_item", 2, json!({"type":"custom_tool_call", "name":"exec", "input":"tools.exec_command({cmd: 'cat\\\nbackend/a.py'})"})));
+    let out = fold.close();
+    assert_eq!(out.usage.len(), 1);
+    assert_eq!(out.usage[0].nome, "exec_command");
+}
+
+#[test]
+fn codex_json_literal_keeps_lone_surrogate_as_one_character() {
+    let mut fold = codex_start();
+    fold.line(&codex_record("response_item", 2, json!({"type":"custom_tool_call","name":"exec","call_id":"script",
+        "input":r#"tools.exec_command({cmd: "cat /h/skills/a\ud800/SKILL.md"})"#})));
+    fold.line(&codex_record("response_item", 3, json!({"type":"custom_tool_call_output","call_id":"script","output":"é".repeat(100)})));
+    let out = fold.close();
+    let skill = out.usage.iter().find(|r| r.tipo == "skill").unwrap();
+    assert_eq!(skill.nome.chars().count(), 2, "json.loads decodifica o escape solto");
+    assert_eq!(skill.ctx_chars, 100);
+}
+
+#[test]
+fn codex_long_context_effective_resume_and_single_growth_keep_scope() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (_d, base) = fixtures_copy();
+    let path = base.join("codex/sessions/2026/09/30/rollout-c3.jsonl");
+    let areas = AreaMap::load(Path::new("/nao/existe.json"));
+    let ix = Index::open(&base.join("../idx")).unwrap();
+    let creations = AtomicUsize::new(0);
+    let tracked = |p: &Path| { creations.fetch_add(1, Ordering::Relaxed); codex::new_fold(p) };
+    let sync = || ix.sync("codex:synthetic", &[path.clone()], &tracked, codex::VERSION,
+        areas.signature(), &|e| areas.area_lines(e), &progress()).unwrap();
+    sync();
+    append(&path, &codex_record("token_usage_record", 3, json!({"thread_id":"c3","turn_id":"long-turn","response_id":"long-second",
+        "usage":{"input_tokens":400000,"cached_input_tokens":30000,"cache_write_input_tokens":6000,"output_tokens":300}})));
+    append(&path, &codex_record("token_usage_record", 4, json!({"thread_id":"c3","turn_id":"long-turn","response_id":"short-third",
+        "usage":{"input_tokens":100,"cached_input_tokens":10,"output_tokens":5}})));
+    sync();
+    assert_eq!(creations.load(Ordering::Relaxed), 1, "a cauda precisa acumular sobre o estado salvo");
+    let rows = ix.read_costs(Some("codex:synthetic"), None, None).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!((rows[0].input, rows[0].output, rows[0].cache_read, rows[0].cache_write), (639000, 500, 50000, 11000));
+    assert_eq!((rows[1].input, rows[1].output), (90, 5));
+    assert!(rows[0].codex_long_context && rows[0].subagente);
+    assert_eq!(codex::session_rows(&ix, &path, &areas).unwrap(), rows);
+    append(&path, &codex_record("token_usage_record", 5, json!({"thread_id":"c3","turn_id":"long-turn","response_id":"short-fourth",
+        "usage":{"input_tokens":20,"output_tokens":2}})));
+    let grown = codex::session_rows(&ix, &path, &areas).unwrap();
+    assert_eq!(grown[1].input, 110);
+    assert_eq!(ix.read_costs(Some("codex:synthetic"), None, None).unwrap(), grown);
+    assert!(ix.read_costs(Some("codex:avulso"), None, None).unwrap().is_empty());
+    let got = dump(&ix, &base, "codex/");
+    let areas = &got["codex/sessions/2026/09/30/rollout-c3.jsonl"]["areas"];
+    assert_eq!(areas[0][11], 639110);
+    assert_eq!(areas[0][12], 507);
+    assert_eq!(areas[0][13], 11000);
+    assert_eq!(areas[0][14], 50010);
+    assert_eq!(areas[0][21], 1);
+}
+
+#[test]
+fn codex_legacy_counter_reset_counts_entire_response_and_other_thread_suppresses_turn() {
+    let mut fold = codex_start();
+    for (second, total) in [(2, json!({"input_tokens":100,"cached_input_tokens":20,"output_tokens":10})),
+        (3, json!({"input_tokens":150,"cached_input_tokens":30,"output_tokens":15})),
+        (4, json!({"input_tokens":150,"cached_input_tokens":30,"output_tokens":15})),
+        (5, json!({"input_tokens":20,"cached_input_tokens":5,"output_tokens":3}))] {
+        fold.line(&codex_record("event_msg", second, json!({"type":"token_count","info":{"total_token_usage":total}})));
+    }
+    let out = fold.close();
+    assert_eq!((out.costs[0].input, out.costs[0].cache_read, out.costs[0].output), (135, 35, 18));
+    let snapshot = serde_json::to_vec(&fold).unwrap();
+    fold.line(&codex_record("token_usage_record", 6, json!({"thread_id":"parent","turn_id":"turn","usage":{"input_tokens":9999}})));
+    assert!(fold.close().costs.is_empty(), "outra thread só abre o turno moderno vazio");
+    let mut resumed: codex::CodexFold = serde_json::from_slice(&snapshot).unwrap();
+    for input in [150, 9999] {
+        resumed.line(&codex_record("token_usage_record", 7, json!({"thread_id":"synthetic","response_id":"new",
+            "usage":{"input_tokens":input,"cached_input_tokens":30,"output_tokens":15}})));
+    }
+    let rows = resumed.close().costs;
+    assert_eq!((rows[0].input, rows[0].cache_read, rows[0].output), (135, 35, 18));
+}
+
+#[test]
+fn codex_scripts_unicode_window_outputs_agents_and_compaction_match_python() {
+    let mut fold = codex_start();
+    let input = format!("tools.apply_patch(\"*** Update File: backend/a.py\\n*** Add File: frontend/a.svelte\"); tools.view_image({{path:'a\\'b.png'}}); tools.exec_command({{/*{}*/ cmd: `cat /h/skills/database-x/SKILL.md`, workdir: \"/repo/synthetic\"}})", "é".repeat(3000));
+    fold.line(&codex_record("response_item", 2, json!({"type":"custom_tool_call","name":"exec","call_id":"script","input":input})));
+    fold.line(&codex_record("response_item", 3, json!({"type":"custom_tool_call_output","call_id":"script","output":[{"text":"é".repeat(302)},{"text":"a"}, "ignored"]})));
+    fold.line(&codex_record("response_item", 4, json!({"type":"function_call","name":"spawn_agent","arguments":"{\"agent_type\":[\"worker\",true]}"})));
+    fold.line(&codex_record("event_msg", 5, json!({"type":"token_count","info":{"total_token_usage":{"input_tokens":100},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20}}})));
+    fold.line(&codex_record("compacted", 6, json!({})));
+    fold.line(&codex_record("event_msg", 7, json!({"type":"token_count","info":{"total_token_usage":{"input_tokens":120},"last_token_usage":{"input_tokens":20}}})));
+    let out = fold.close();
+    let skill = out.usage.iter().find(|r| r.tipo == "skill").unwrap();
+    assert_eq!((skill.ctx_chars, skill.chamadas, skill.ocupados, skill.respostas, skill.ocupados_eq), (101, 1, 101, 1, 83));
+    assert_eq!(skill.nome, "database-x");
+    assert!(out.usage.iter().any(|r| r.tipo == "agente" && r.nome == "['worker', True]" && r.origem == "sozinho"));
+    assert_eq!(out.usage.iter().find(|r| r.nome == "exec_command").unwrap().ctx_chars, 0);
+    assert_eq!(out.usage.iter().find(|r| r.nome == "apply_patch").unwrap().ctx_chars, 101);
+    assert!(out.usage.iter().any(|r| r.tipo == "imagem" && r.nome == "lida:view_image"));
+    let entries = out.areas.unwrap();
+    assert_eq!(entries.header.fonte.as_deref(), Some("codex"));
+    let regs = &entries.turns[0].0;
+    assert!(matches!(&regs[1], hangar_server::costs::areas::ToolReg::C { cwd, .. } if cwd == "/repo/synthetic"));
+    assert!(matches!(&regs[0], hangar_server::costs::areas::ToolReg::P { paths, .. } if paths == &vec!["backend/a.py".to_string(),"frontend/a.svelte".to_string()]));
+    assert_eq!(entries.turns[0].1[0].values, [100, 0, 0, 0, 0]);
+    assert_eq!(entries.turns[0].1[1].values, [20, 0, 0, 0, 0]);
+}
+
+#[test]
+fn codex_last_call_window_uses_characters_and_prior_call_runs_to_next_mark() {
+    let mut fold = codex_start();
+    for (second, input) in [
+        (2, format!("tools.exec_command({{/*{}*/ cmd: 'cat backend/a.py'}})", "é".repeat(3900))),
+        (3, format!("tools.exec_command({{/*{}*/ cmd: 'ignored backend/b.py'}})", "é".repeat(4000))),
+        (4, format!("tools.exec_command({{/*{}*/ cmd: 'pwd'}}); tools.unknown()", "é".repeat(4100))),
+    ] {
+        fold.line(&codex_record("response_item", second, json!({"type":"custom_tool_call","name":"exec","input":input})));
+    }
+    let out = fold.close();
+    assert_eq!(out.usage.iter().find(|r| r.nome == "exec_command").unwrap().chamadas, 3);
+    let commands = out.usage.iter().filter(|r| r.tipo == "bash").map(|r| r.nome.as_str()).collect::<Vec<_>>();
+    assert_eq!(commands, ["cat", "pwd"]);
+}
+
+#[test]
+fn codex_area_signature_rebuild_keeps_costs_usage_and_saved_targets() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (_d, base) = fixtures_copy();
+    let path = base.join("codex/sessions/2026/09/30/rollout-c1.jsonl");
+    let ix = Index::open(&base.join("../idx")).unwrap();
+    let areas = AreaMap::load(Path::new("/nao/existe.json"));
+    let creations = AtomicUsize::new(0);
+    let tracked = |p: &Path| { creations.fetch_add(1, Ordering::Relaxed); codex::new_fold(p) };
+    ix.sync("synthetic", &[path.clone()], &tracked, codex::VERSION,
+        areas.signature(), &|e| areas.area_lines(e), &progress()).unwrap();
+    let before = dump(&ix, &base, "codex/");
+    let mapping = base.join("areas.json");
+    std::fs::write(&mapping, br#"{"padrao":[["changed",["*"]]]}"#).unwrap();
+    let changed = AreaMap::load(&mapping);
+    ix.sync("synthetic", &[path], &tracked, codex::VERSION,
+        changed.signature(), &|e| changed.area_lines(e), &progress()).unwrap();
+    assert_eq!(creations.load(Ordering::Relaxed), 1, "assinatura refaz alvos sem consumir o rollout");
+    let after = dump(&ix, &base, "codex/");
+    let name = "codex/sessions/2026/09/30/rollout-c1.jsonl";
+    assert_eq!(before[name]["custo"], after[name]["custo"]);
+    assert_eq!(before[name]["uso"], after[name]["uso"]);
+    assert_eq!(after[name]["areas"].as_array().unwrap().len(), 1);
+    assert_eq!(after[name]["areas"][0][4], "changed");
+    assert_eq!(after[name]["areas"][0][11], 1000);
+}
+
+#[test]
+fn codex_fork_metadata_context_and_counter_survive_snapshot() {
+    let mut fold = codex_start();
+    fold.line(&codex_record("session_meta", 0, json!({"id":"parent","cwd":"/parent","source":"cli","model_provider":"anthropic"})));
+    fold.line(&serde_json::to_vec(&json!({"type":"turn_context","timestamp":"2026-09-01T12:00:00Z","payload":{"turn_id":"parent-turn","model":"gpt-5.5"}})).unwrap());
+    fold.line(&codex_record("event_msg", 2, json!({"type":"token_count","info":{"total_token_usage":{"input_tokens":100}}})));
+    fold.line(&codex_record("response_item", 3, json!({"type":"function_call","name":"Inherited"})));
+    let snapshot = serde_json::to_vec(&fold).unwrap();
+    assert!(fold.close().costs.is_empty());
+    assert!(fold.close().usage.is_empty());
+    let mut resumed: codex::CodexFold = serde_json::from_slice(&snapshot).unwrap();
+    resumed.line(&codex_record("turn_context", 4, json!({"turn_id":"child-turn","model":"gpt-5.6-sol","cwd":"/child"})));
+    resumed.line(&codex_record("event_msg", 5, json!({"type":"token_count","info":{"total_token_usage":{"input_tokens":130}}})));
+    resumed.line(&codex_record("response_item", 6, json!({"type":"function_call","name":"Own"})));
+    let out = resumed.close();
+    assert_eq!(out.costs[0].input, 30);
+    assert_eq!(out.costs[0].project, "desconhecido");
+    assert_eq!(out.costs[0].provider, "openai");
+    assert_eq!(out.costs[0].session_id, "synthetic");
+    assert!(out.costs[0].subagente);
+    assert_eq!(out.usage.len(), 1);
+    assert_eq!(out.usage[0].nome, "Own");
+    assert_eq!(out.usage[0].cwd, "/child");
+    assert!(out.usage[0].subagente);
 }
 
 #[test]

@@ -8,4 +8,5 @@ pub mod areas;
 pub mod uso_rules;
 pub mod accumulator;
 pub mod claude;
+pub mod codex;
 pub mod collect;

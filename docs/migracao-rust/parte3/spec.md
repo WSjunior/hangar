@@ -105,7 +105,11 @@ A posse de cada rollout do Codex é calculada no Rust com a regra de
 - Mapa de áreas (`~/.hangar/uso-areas.json`) lido uma vez por processo, como hoje. Mudou o mapa →
   refaz só as linhas de área a partir dos alvos guardados, sem reler transcript.
 - Áreas distintas de cada ferramenta são percorridas por nome nos dois leitores; a ordem de
-  ferramentas e turnos fica intacta. Divisão/assinatura versão 3 refaz áreas salvas. Ordem de
+  ferramentas fica intacta. Turnos Codex usam legado seguido de moderno, preservando a
+  inserção de cada dicionário; um turno comum aparece na posição do legado. Não é a primeira
+  ocorrência global entre os dois streams. Leitor `codex:1:3` refaz somente o índice Codex
+  afetado pela ordem, incluindo o timestamp retido no agrupamento. Divisão/assinatura versão 3
+  refaz áreas salvas. Ordem de
   linhas e de JSON permanece igual entre Python e Rust, inclusive com múltiplas áreas numa tool.
 
 ### 5. Relatórios e preço

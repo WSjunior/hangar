@@ -1107,7 +1107,7 @@ git commit -m "feat(server): Claude cost and usage reader with index parity"
 
 **Interfaces:**
 - Consumes: Tasks 3–6 (`Accumulator` e seus métodos `pub(crate)`).
-- Produces: `costs::codex::CodexFold` (porte de `DobraCodex` = `RespostasCodex` `costs_sources.py:192-319` + `AcumuladorCodex` `uso_codex.py:72-170` + `_agrupar_rollout` `:330-339`), `pub fn new_fold(p: &Path) -> CodexFold`, `pub const VERSION: &str = "codex:1:2";` (`CACHE_VERSAO`:`_USO_CODEX_VERSAO`); `pub fn session_rows(ix: &Index, rollout: &Path, areas: &AreaMap) -> Option<Vec<UsageRow>>` (porte de `custos_do_rollout`, escopo `codex:avulso`).
+- Produces: `costs::codex::CodexFold` (porte de `DobraCodex` = `RespostasCodex` `costs_sources.py:192-319` + `AcumuladorCodex` `uso_codex.py:72-170` + `_agrupar_rollout` `:330-339`), `pub fn new_fold(p: &Path) -> CodexFold`, `pub const VERSION: &str = "codex:1:3";` (`CACHE_VERSAO`:`_USO_CODEX_VERSAO`); `pub fn session_rows(ix: &Index, rollout: &Path, areas: &AreaMap) -> Option<Vec<UsageRow>>` (porte de `custos_do_rollout`, escopo `codex:avulso`).
 
 - [ ] **Step 1: Testes que falham** — acrescentar a `contract_costs_index.rs`:
 
@@ -1170,6 +1170,9 @@ fn single_rollout_cost_reads_only_growth_and_keeps_existing_scope() {
 - `token_usage_record` de outra thread só abre o turno; `response_id` repetido ignora; contador legado com reinício (algum campo menor) conta a resposta inteira.
 - `entrada > 272_000` marca contexto longo; `cache = min(entrada, cached)`; `escrita = min(entrada - cache, cache_write)`; `input = entrada - cache - escrita`.
 - `por_turno` não muda o estado (pode ser chamada a cada retomada): o `close()` do índice chama depois de serializar.
+- Ordem dos turnos: legado seguido de moderno, preservando a inserção de cada dicionário;
+  turno comum ocupa a posição do legado. Não é a primeira ocorrência global entre streams.
+  Versão `codex:1:3` invalida somente esse leitor, inclusive custos agrupados com timestamp anterior.
 - Uso: regex `_CHAMADA`, `_CMD`, `_WORKDIR`, `_PATH`, `_PATCH`, janela de 4000 **caracteres**; `_literal` (JSON entre aspas duplas, senão troca de escapes); saída dividida igual (`chars // n`); `spawn_agent` lê `arguments` como JSON.
 - `entradas_de_area_codex`: cabeçalho `{"fonte": "codex", "session_id", "subagente"}`, unidade com dia local da resposta, `fast=false`, 1h=0.
 - `provider` = `canonizar_provedor(model_provider) or "openai"`.

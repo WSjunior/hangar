@@ -29,7 +29,7 @@ LOCAL = timezone(timedelta(hours=-3))
 _REPO = Path(__file__).resolve().parents[2]
 PROJETO_DESCONHECIDO = "desconhecido"
 # Suba ao mudar o que `uso_codex` grava por rollout.
-_USO_CODEX_VERSAO = 2
+_USO_CODEX_VERSAO = 3
 _log = logging.getLogger("hangar.costs")
 # Raízes já avisadas: `coletar()` roda a cada abertura da tela de custos, e o aviso é um só.
 _AVISOU_RAIZ_UNICA: set[str] = set()
@@ -289,7 +289,8 @@ class RespostasCodex:
             return (r.model, *(getattr(r, campo) for campo in campos))
 
         por_turno: dict[str, list[UsageRow]] = {}
-        for key in legado.keys() | respostas.keys():
+        # Legado seguido de moderno conserva a inserção de cada dicionário.
+        for key in dict.fromkeys((*legado, *respostas)):
             modernos = respostas.get(key, [])
             linhas = por_turno.setdefault(key, [])
             linhas.extend(modernos)
