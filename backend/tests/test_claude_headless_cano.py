@@ -386,8 +386,16 @@ def _vivo(pid: int) -> bool:
     try:
         with open(f"/proc/{pid}/stat", encoding="ascii") as f:
             return f.read().rsplit(") ", 1)[1][0] != "Z"
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return False
+
+
+def test_process_disappears_during_stat_read(monkeypatch):
+    from unittest.mock import mock_open
+    opened = mock_open()
+    opened.return_value.read.side_effect = ProcessLookupError("process exited")
+    monkeypatch.setattr("builtins.open", opened)
+    assert not _vivo(123)
 
 
 def _porta_livre() -> int:

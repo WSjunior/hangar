@@ -134,7 +134,7 @@ for n, line in enumerate(sys.stdin, 2):
 
 #[tokio::test]
 async fn specific_public_bind_advertises_private_loopback_and_stop_closes_both() {
-    let public = TcpListener::bind("127.0.0.2:0").await.unwrap();
+    let public = TcpListener::bind("[::1]:0").await.unwrap();
     let public_addr = public.local_addr().unwrap();
     let cfg = Config { listen: public_addr, upstream: "127.0.0.1:1".parse().unwrap(),
         internal_secret: "internal".into(), auth_token: "owner".into(), log_path: None,
