@@ -23,6 +23,17 @@ def test_scrub_preserves_path_after_redacting_valid_credentials():
     assert git_ops._scrub(remote) == "https://***@example.invalid:8443/repo@revision"
 
 
+@pytest.mark.parametrize("authority,suffix", [
+    ("host:8443", "/repo@rev"),
+    ("host", "/repo@rev"),
+    ("[2001:db8::1]:8443", "/repo@rev"),
+    ("host:8443", "?email=synthetic@example.invalid"),
+])
+def test_scrub_preserves_authority_and_path_without_credentials(authority, suffix):
+    remote = "https://" + authority + suffix
+    assert git_ops._scrub(remote) == remote
+
+
 def _repo(tmp_path):
     d = str(tmp_path)
     for args in (

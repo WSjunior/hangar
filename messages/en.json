@@ -6685,5 +6685,6 @@
   "native_file_other_session_title": "Unsaved files in {session}",
   "native_file_other_session_body": "Return to the session to save your changes, or discard them to open this file.",
   "native_file_discard_open": "Discard and open",
-  "native_file_operation_unknown": "The connection changed during the operation. Your text was kept, but the result on disk still needs to be checked."
+  "native_file_operation_unknown": "The connection changed during the operation. Your text was kept, but the result on disk still needs to be checked.",
+  "native_settings_channel_log_failed": "Could not record the channel error in the diagnostic file."
 }

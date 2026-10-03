@@ -40,6 +40,10 @@ fn record_channel_404(path: &std::path::Path, saved: bool) -> std::io::Result<()
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), if saved { "PUT" } else { "GET" })
 }
 
+fn record_channel_404_or_report(path: &std::path::Path, saved: bool, report: impl FnOnce(std::io::Error)) {
+    if let Err(error) = record_channel_404(path, saved) { report(error); }
+}
+
 #[derive(Default)]
 struct ChannelEditor {
     request: Remote<()>,
@@ -425,9 +429,10 @@ impl Hangar {
         match reply {
             DeviceReply::Channel(seq, saved, result) => {
                 if result.as_ref().is_err_and(|error| error.status == Some(404)) {
-                    if let Err(error) = record_channel_404(&crate::log_dir().join("native.log"), saved) {
+                    record_channel_404_or_report(&crate::log_dir().join("native.log"), saved, |error| {
+                        window.push_notification(Notification::error(tr("settings_channel_log_failed")), cx);
                         eprintln!("não consegui registrar o 404 do canal de testes: {error}");
-                    }
+                    });
                     let message = Self::setting_failure(result.as_ref().unwrap_err());
                     if self.device.channel.receive_unsupported(seq, saved, message) { self.sync_channel_update_guard(cx); cx.notify(); }
                     return;
@@ -922,6 +927,18 @@ mod tests {
         assert!(log.contains("method=PUT status=404"));
         assert_eq!(log.lines().count(), 2);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn update_channel_log_failure_reaches_feedback_channel() {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let blocker = std::env::temp_dir().join(format!("hangar-log-blocker-{}-{stamp}", std::process::id()));
+        std::fs::write(&blocker, "blocked").unwrap();
+        let mut failures = 0;
+        super::record_channel_404_or_report(&blocker.join("native.log"), false, |_| failures += 1);
+        super::record_channel_404_or_report(&blocker.join("native.log"), true, |_| failures += 1);
+        assert_eq!(failures, 2);
+        std::fs::remove_file(blocker).unwrap();
     }
 
     #[test]

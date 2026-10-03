@@ -5,6 +5,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from app.mensagens import erro
 
@@ -21,9 +22,18 @@ _TIMEOUT = 20
 def _scrub(text: str) -> str:
     """Redige userinfo (user:token@) de URLs no texto -> um remote HTTPS com PAT embutido nao vaza a
     credencial no stderr do push (que vai pro git.error da UI / estado do celular)."""
-    text = re.sub(r"(://)[^/\s]*@", r"\1***@", text)
-    # Em senha malformada, a barra não pode deixar o segredo escapar para o log.
-    return re.sub(r"(://)(?!\*\*\*@)[^/\s]*:[^\s]*@", r"\1***@", text)
+    text = re.sub(r"(://)[^/?#\s]*@", r"\1***@", text)
+
+    def redact_malformed(match: re.Match) -> str:
+        authority = match[2].split("/", 1)[0]
+        try:
+            urlsplit("https://" + authority).port
+        except ValueError:
+            return match[1] + "***@"
+        # Porta válida é parte do endereço, não uma senha com barra.
+        return match[0]
+
+    return re.sub(r"(://)(?!\*\*\*@)([^/?#\s]*:[^?#\s]*)@", redact_malformed, text)
 
 
 def head_info(cwd: str | None) -> tuple[str | None, bool]:
