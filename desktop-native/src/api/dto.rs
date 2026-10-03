@@ -460,6 +460,9 @@ pub struct Stats {
     pub tok_s: Option<f64>,
     pub cache_pct: Option<f64>,
     pub ttft_ms: Option<f64>,
+    pub tok_s_now: Option<f64>,
+    pub tok_s_recent: Option<f64>,
+    #[serde(default)] pub tok_s_exact: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]

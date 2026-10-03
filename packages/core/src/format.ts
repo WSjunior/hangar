@@ -1,3 +1,8 @@
+// tok/s com "~" quando a medida veio do transcript, que mistura a espera pelo 1º token.
+export function rateLabel(v: number, exact?: boolean): string {
+  return `${exact ? '' : '~'}${Math.round(v)}`;
+}
+
 // Tempo relativo curto a partir de um timestamp epoch em segundos, no idioma escolhido
 // (as frases sao mensagens; a data acima de 24h usa o intlLocale).
 // Mesma semântica do antigo formatActivity do SessionCard, agora compartilhada.

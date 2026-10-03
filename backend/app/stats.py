@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import json
 import threading
+from collections import deque
 from pathlib import Path
 
 # Mesmo filtro de linha sintética do parser de chat: eco de /comando, <task-notification> de
 # subagente e bloco <system-reminder> chegam como `type: user` SEM isMeta (transcript.py:261).
 # Importar em vez de duplicar — duas heurísticas iguais divergem com o tempo.
 from app.adapters.codex.rollout import _is_context_wrapper
+from app.live_rate import MIN_GEN_S, RECENT_CALLS, rates
 from app.transcript import _is_command_meta, _strip_meta_blocks
 
 # Gap acima disto não é trabalho, é sessão parada (pane aberto de um dia pro outro).
@@ -42,6 +44,9 @@ class _Fold:
         self.tool_ms = 0.0
         self.in_tok = 0
         self.out_tok = 0
+        self.out_tok_untimed = 0   # tokens sem tempo de LLM na conta (subagente)
+        self._calls: deque[tuple[int, float]] = deque(maxlen=RECENT_CALLS)
+        self._pend: list | None = None   # [tokens, início, fim, message.id] da resposta mais nova
         self.cache_read_tok = 0
         self.cache_write_tok = 0
         self._invalid_usage = False
@@ -79,6 +84,19 @@ class _Fold:
         if gap is not None:
             self.llm_ms += gap * 1000.0
 
+    def _pend_call(self) -> tuple[int, float] | None:
+        p = self._pend
+        return (p[0], p[2] - p[1]) if p and p[2] - p[1] >= MIN_GEN_S else None
+
+    def _close_call(self) -> None:
+        if call := self._pend_call():
+            self._calls.append(call)
+        self._pend = None
+
+    def last_call_ts(self) -> float | None:
+        """Fim da resposta mais nova no transcript (relógio de parede)."""
+        return self._pend[2] if self._pend else None
+
     def _ttft(self, ts: float | None) -> None:
         if self._prompt_ts is not None and ts is not None and 0 <= ts - self._prompt_ts <= _GAP_TETO_S:
             self.ttft_ms += (ts - self._prompt_ts) * 1000.0
@@ -92,8 +110,11 @@ class _Fold:
                      "in_tok": self.in_tok, "out_tok": self.out_tok}
         if self.llm_ms > 0:
             out["llm_ms"] = int(self.llm_ms)
-            if self.out_tok:
-                out["tok_s"] = round(self.out_tok / (self.llm_ms / 1000.0), 1)
+            if self.out_tok - self.out_tok_untimed > 0:
+                out["tok_s"] = round((self.out_tok - self.out_tok_untimed) / (self.llm_ms / 1000.0), 1)
+        # Reserva sem stream: o tempo de cada chamada inclui a espera pelo primeiro token.
+        pend = self._pend_call()
+        out.update(rates([*self._calls, pend][-RECENT_CALLS:] if pend else self._calls))
         if self.tool_ms > 0:
             out["tool_ms"] = int(self.tool_ms)
         if self.in_tok > 0:
@@ -115,15 +136,21 @@ class _FoldClaude(_Fold):
 
     def feed(self, obj: dict) -> None:
         t = obj.get("type")
-        if t not in ("user", "assistant") or obj.get("isMeta"):
+        if t not in ("user", "assistant"):
             return
         ts = _iso_ts(obj.get("timestamp"))
         sidechain = bool(obj.get("isSidechain"))
+        if obj.get("isMeta"):
+            # Recado de outra sessão chega como meta: não é turno, mas o relógio parte dele.
+            if t == "user" and not sidechain:
+                self._gap(ts)
+            return
 
         if t == "assistant":
             msg = obj.get("message") or {}
             mid = msg.get("id")
             usage = msg.get("usage")
+            out = 0
             if isinstance(usage, dict) and mid and mid != self._last_msg_id:
                 self._last_msg_id = mid
                 self.steps += 1
@@ -133,11 +160,24 @@ class _FoldClaude(_Fold):
                 self.in_tok += inp + cr + cc
                 self.cache_read_tok += cr
                 self.cache_write_tok += cc
-                self.out_tok += _int(usage.get("output_tokens"))
+                out = _int(usage.get("output_tokens"))
+                self.out_tok += out
+                if sidechain:
+                    self.out_tok_untimed += out
             if not sidechain:
+                t0 = self._prev_ts
                 gap = self._gap(ts)
                 if gap is not None:
                     self.llm_ms += gap * 1000.0
+                # Cada bloco da resposta vira uma linha quando ELE termina: a chamada vai do
+                # cursor antes da 1ª linha até a última linha da mesma mensagem, mesmo com
+                # resultado de ferramenta gravado entre os blocos.
+                if out:
+                    self._close_call()
+                    if gap is not None:
+                        self._pend = [out, t0, ts, mid]
+                elif self._pend is not None and self._pend[3] == mid and ts is not None:
+                    self._pend[2] = ts
                 self._ttft(ts)
                 for b in _blocks(msg):
                     if b.get("type") == "tool_use":
@@ -405,6 +445,10 @@ class Accumulator:
     def collect(self) -> dict | None:
         with self._trava:
             return self._collect()
+
+    def last_call_ts(self) -> float | None:
+        with self._trava:
+            return self._fold.last_call_ts()
 
     def usage_totals(self) -> dict[str, int]:
         """Totais exatos e limite das linhas completas, sem arredondar o cache do SSE."""

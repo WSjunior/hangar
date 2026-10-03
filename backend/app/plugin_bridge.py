@@ -29,10 +29,11 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app import atomico
 from app.auth import require_loopback
+from app.live_rate import live_rate
 
 _log = logging.getLogger("hangar.plugin_bridge")
 
@@ -922,4 +923,20 @@ async def state(body: StateBody, request: Request):
             _sugestoes.pop(body.sessao, None)
     _acordar(body.sessao)
     _log.debug("plugin estado sessao=%s estado=%s motivo=%s", body.sessao, body.estado, body.motivo)
+    return {"ok": True}
+
+
+class RateBody(BaseModel):
+    sessao: str
+    token: str
+    tokens: int = Field(gt=0, le=1_000_000)
+    seconds: float = Field(gt=0, le=3600, allow_inf_nan=False)
+    session_id: str
+
+
+@plugin_router.post("/rate")
+async def rate(body: RateBody):
+    """Velocidade de uma resposta, medida pelo `turn.step` do plugin no próprio processo."""
+    _confere(body.sessao, body.token)
+    live_rate(body.sessao).close(body.tokens, body.seconds, body.session_id)
     return {"ok": True}

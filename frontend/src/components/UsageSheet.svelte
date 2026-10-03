@@ -7,7 +7,7 @@
   import type { ContaChip } from '../lib/conta';
   import * as m from '../paraglide/messages';
   import { intlLocale } from '../lib/locale';
-  import { abbrevNum } from '@hangar/core';
+  import { abbrevNum, rateLabel } from '@hangar/core';
   import type { StatusFields, StatsEvent } from '@hangar/core';
 
   interface Props {
@@ -78,6 +78,8 @@
     if (s.llm_ms) out.push({ value: fmtDur(s.llm_ms), label: m.uso_num_llm() });
     if (s.tool_ms) out.push({ value: fmtDur(s.tool_ms), label: m.uso_num_tools() });
     if (s.tok_s) out.push({ value: `~${Math.round(s.tok_s)}`, label: m.uso_num_toks() });
+    if (s.tok_s_now) out.push({ value: rateLabel(s.tok_s_now, s.tok_s_exact), label: m.uso_num_toks_now() });
+    if (s.tok_s_recent) out.push({ value: rateLabel(s.tok_s_recent, s.tok_s_exact), label: m.uso_num_toks_recent() });
     if (s.ttft_ms) out.push({ value: `~${fmtDur(s.ttft_ms)}`, label: m.uso_num_ttft() });
     if (s.cache_pct != null) out.push({ value: `${s.cache_pct}%`, label: m.uso_num_cache() });
     out.push({ value: `${abbrevNum(s.in_tok)} / ${abbrevNum(s.out_tok)}`, label: m.uso_num_io(), largo: true });

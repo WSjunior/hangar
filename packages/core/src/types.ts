@@ -248,6 +248,11 @@ export interface StatsEvent {
   tok_s?: number;
   cache_pct?: number;
   ttft_ms?: number;
+  // Velocidade da resposta em voo (ou da última) e das últimas 10 chamadas. `tok_s_exact`: medida
+  // no stream, sem a espera pelo primeiro token; ausente, é a reserva do transcript ("~").
+  tok_s_now?: number;
+  tok_s_recent?: number;
+  tok_s_exact?: boolean;
 }
 
 export interface CommandInfo {

@@ -306,6 +306,10 @@ pub(super) fn stats_cells(stats: &Stats) -> Vec<(String, String)> {
         if let Some(tool) = stats.tool_ms.filter(|v| *v > 0.) { cells.push((tr("ctx_card_tools"), duration(tool))); }
     }
     if let Some(rate) = stats.tok_s.filter(|v| *v > 0.) { cells.push((tr("ctx_card_rate"), tr("stats_rate").replace("{n}", &rate.round().to_string()))); }
+    // Sem "~" quando a medida veio do stream da resposta, não do transcript.
+    let rate = |v: f64| tr(if stats.tok_s_exact { "stats_rate_exact" } else { "stats_rate" }).replace("{n}", &v.round().to_string());
+    if let Some(v) = stats.tok_s_now.filter(|v| *v > 0.) { cells.push((tr("ctx_card_rate_now"), rate(v))); }
+    if let Some(v) = stats.tok_s_recent.filter(|v| *v > 0.) { cells.push((tr("ctx_card_rate_recent"), rate(v))); }
     if let Some(ms) = stats.ttft_ms.filter(|v| *v > 0.) { cells.push((tr("ctx_card_ttft"), format!("~{}", duration(ms)))); }
     if let Some(cache) = stats.cache_pct { cells.push((tr("ctx_card_cache"), format!("{}%", cache.round()))); }
     cells
