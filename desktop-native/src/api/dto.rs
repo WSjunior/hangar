@@ -39,6 +39,10 @@ pub struct SessionInfo {
     pub last_reply: Option<String>,
     pub last_reply_at: Option<f64>,
     pub worktree: Option<bool>,
+    /// Raiz da worktree onde o agente está agora; `None` fora de worktree.
+    pub worktree_path: Option<String>,
+    #[serde(default)]
+    pub worktree_gone: bool,
     /// Membros do grupo de trabalho além dela; `srv::nome` é par de outro servidor.
     pub pair_peers: Option<Vec<String>>,
     /// Id estável do grupo: a lista junta num bloco quem tem o mesmo.
@@ -546,6 +550,15 @@ pub struct Steered {
 mod tests {
     use super::{ChatEvent, OrqEntry, OrqLine, OrqPanel, SessionInfo};
     use serde_json::json;
+
+    #[test]
+    fn session_reads_worktree_location() {
+        let s: SessionInfo = serde_json::from_value(json!({"name": "a", "worktree": true,
+            "worktree_path": "/r/hangar-x", "worktree_gone": false})).unwrap();
+        assert_eq!(s.worktree_path.as_deref(), Some("/r/hangar-x"));
+        let old: SessionInfo = serde_json::from_value(json!({"name": "a"})).unwrap();
+        assert!(!old.worktree_gone && old.worktree_path.is_none());
+    }
 
     #[test]
     fn orq_entry_reads_a_real_decision() {
