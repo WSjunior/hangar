@@ -3,7 +3,7 @@
 use super::py::LocalTs;
 use serde::{Deserialize, Serialize};
 
-pub type AreaEntries = serde_json::Value;
+pub use crate::costs::areas::AreaEntries;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UsageRow {

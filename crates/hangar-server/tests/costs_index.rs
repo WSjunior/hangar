@@ -1,6 +1,7 @@
 use hangar_server::costs::index::{Fold, Index, IndexError, Progress};
 use hangar_server::costs::py::LocalTs;
 use hangar_server::costs::rows::{AreaEntries, FoldOutput, UsageRow, UsoLinha};
+use hangar_server::costs::areas::{AreaHeader, Unit};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -252,7 +253,13 @@ impl Fold for WithAreas {
         cost.regravado = 14;
         cost.regravado_1h = 15;
         output.usage = vec![usage_row()];
-        output.areas = Some(serde_json::json!({"n": cost.input}));
+        output.areas = Some(AreaEntries {
+            header: AreaHeader { fonte: None, session_id: None, subagente: None },
+            turns: vec![(vec![], vec![Unit {
+                dia: "2026-09-30".into(), cwd: "projeto".into(), model: "modelo".into(),
+                fast: false, values: [cost.input, 0, 0, 0, 0],
+            }])],
+        });
         output
     }
 }
@@ -260,7 +267,7 @@ impl Fold for WithAreas {
 fn new_areas(_: &Path) -> WithAreas { WithAreas::default() }
 
 fn area_rows(areas: &AreaEntries) -> Vec<UsoLinha> {
-    vec![UsoLinha { tipo: "area".into(), input: areas["n"].as_i64().unwrap(), ..usage_row() }]
+    vec![UsoLinha { tipo: "area".into(), input: areas.turns[0].1[0].values[0], ..usage_row() }]
 }
 
 #[test]
