@@ -1109,7 +1109,7 @@ git commit -m "feat(server): Claude cost and usage reader with index parity"
 - Consumes: Tasks 3–6 (`Accumulator` e seus métodos `pub(crate)`).
 - Produces: `costs::codex::CodexFold` (porte de `DobraCodex` = `RespostasCodex` `costs_sources.py:192-319` + `AcumuladorCodex` `uso_codex.py:72-170` + `_agrupar_rollout` `:330-339`), `pub fn new_fold(p: &Path) -> CodexFold`, `pub const VERSION: &str = "codex:1:3";` (`CACHE_VERSAO`:`_USO_CODEX_VERSAO`); `pub fn session_rows(ix: &Index, rollout: &Path, areas: &AreaMap) -> Option<Vec<UsageRow>>` (porte de `custos_do_rollout`, escopo `codex:avulso`).
 
-- [ ] **Step 1: Testes que falham** — acrescentar a `contract_costs_index.rs`:
+- [x] **Step 1: Testes que falham** — acrescentar a `contract_costs_index.rs`:
 
 ```rust
 use hangar_server::costs::codex;
@@ -1163,9 +1163,9 @@ fn single_rollout_cost_reads_only_growth_and_keeps_existing_scope() {
 }
 ```
 
-- [ ] **Step 2: Rodar e ver falhar.**
+- [x] **Step 2: Rodar e ver falhar.**
 
-- [ ] **Step 3: Implementar** — porte linha a linha. Regras conferidas:
+- [x] **Step 3: Implementar** — porte linha a linha. Regras conferidas:
 - `session_meta`: só a primeira identifica o arquivo; a seguinte com outra identidade marca `herdado`, que `turn_context` posterior ao início desfaz.
 - `token_usage_record` de outra thread só abre o turno; `response_id` repetido ignora; contador legado com reinício (algum campo menor) conta a resposta inteira.
 - `entrada > 272_000` marca contexto longo; `cache = min(entrada, cached)`; `escrita = min(entrada - cache, cache_write)`; `input = entrada - cache - escrita`.
@@ -1177,9 +1177,9 @@ fn single_rollout_cost_reads_only_growth_and_keeps_existing_scope() {
 - `entradas_de_area_codex`: cabeçalho `{"fonte": "codex", "session_id", "subagente"}`, unidade com dia local da resposta, `fast=false`, 1h=0.
 - `provider` = `canonizar_provedor(model_provider) or "openai"`.
 
-- [ ] **Step 4: Rodar** — PASS.
+- [x] **Step 4: Rodar** — PASS.
 
-- [ ] **Step 5: Revisão e commit**
+- [x] **Step 5: Revisão e commit**
 
 ```bash
 git add crates/hangar-server/src/costs crates/hangar-server/tests/contract_costs_index.rs
@@ -1197,7 +1197,7 @@ git commit -m "feat(server): Codex cost and usage reader with index parity"
 **Interfaces:**
 - Produces: `costs::simple::PiFold` (porte de `DobraPi`, `costs_sources.py:400-449`; `new_pi_fold(root: &Path, source: &str) -> impl Fn(&Path) -> PiFold + Sync`, id pelo caminho relativo sem extensão), `KimiFold` (porte de `DobraKimi`, `:520-567`; `new_kimi_fold(p: &Path) -> KimiFold`, id = nome de `parent.parent.parent`, subagente por `kimi_sessions.is_subagent_wire` — porte da regra: o diretório do agente não é `main`), `pub const PI_VERSION: &str = "pi:1"; pub const KIMI_VERSION: &str = "kimi:1";`, `pub fn kimi_projects(index_file: &Path) -> HashMap<String, String>` (porte de `_kimi_index`), aplicada na leitura (Task 9).
 
-- [ ] **Step 1: Teste que falha** — acrescentar:
+- [x] **Step 1: Teste que falha** — acrescentar:
 
 ```rust
 use hangar_server::costs::simple;
@@ -1223,10 +1223,10 @@ fn pi_and_kimi_index_match_python() {
 }
 ```
 
-- [ ] **Step 2: Rodar e ver falhar.**
-- [ ] **Step 3: Implementar.** Kimi: pré-filtro `usage.record` em bytes; `time` em ms vira `LocalTs::from_millis_f64`; provedor = prefixo do alias canonizado, senão o prefixo, senão `"?"`; projeto sempre `desconhecido` no índice. Pi: `model_change` com `/` separa provedor e id; soma `input/output/cacheRead/cacheWrite`; sem uso ou sem `ts` → nada.
-- [ ] **Step 4: Rodar** — PASS.
-- [ ] **Step 5: Revisão e commit**
+- [x] **Step 2: Rodar e ver falhar.**
+- [x] **Step 3: Implementar.** Kimi: pré-filtro `usage.record` em bytes; `time` em ms vira `LocalTs::from_millis_f64`; provedor = prefixo do alias canonizado, senão o prefixo, senão `"?"`; projeto sempre `desconhecido` no índice. Pi: `model_change` com `/` separa provedor e id; soma `input/output/cacheRead/cacheWrite`; sem uso ou sem `ts` → nada.
+- [x] **Step 4: Rodar** — PASS.
+- [x] **Step 5: Revisão e commit**
 
 ```bash
 git add crates/hangar-server/src/costs/simple.rs crates/hangar-server/src/costs/mod.rs crates/hangar-server/tests/contract_costs_index.rs
