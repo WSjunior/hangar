@@ -75,7 +75,8 @@ A posse de cada rollout do Codex é calculada no Rust com a regra de
 ### 3. Índice próprio do Rust
 
 - Arquivo `custos-rust.sqlite3` na mesma pasta do índice do Python
-  (`~/.claude/.hangar-custos/`; no Windows `%LOCALAPPDATA%\hangar\custos\`, fora do OneDrive).
+  (`<XDG_CACHE_HOME>/hangar/custos` quando XDG é absoluto, senão `~/.cache/hangar/custos`;
+  no Windows `%LOCALAPPDATA%\hangar\custos\`, com reserva em `~/AppData/Local/hangar/custos`).
   Um não escreve no do outro. O do Python continua servindo a orquestração e a reserva.
 - Mesmo desenho do `costs_cache`: tabela `files` (caminho, escopo, versão, dev/ino, tamanho,
   mtime, offset, últimos 64 bytes, estado da leitura) e tabelas `custo` e `uso` com as mesmas
@@ -84,6 +85,15 @@ A posse de cada rollout do Codex é calculada no Rust com a regra de
   ou os 64 bytes antes do offset mudados → relê do zero; linha sem `\n` no fim entra no
   resultado mas não no estado salvo; arquivo que sumiu sai; falha de leitura de um arquivo vira
   log e mantém as linhas anteriores; esquema diferente apaga e refaz.
+- Corrupção SQLite (`DatabaseCorrupt` ou `NotADatabase`) durante abertura ou operação invalida
+  a geração compartilhada, fecha os recursos, remove somente o arquivo Rust e seus WAL/SHM e
+  repete a operação uma vez. Lista de arquivos permanece completa na repetição. Erros de
+  lock, disco e integridade são propagados sem remoção; a segunda corrupção também é propagada.
+  Com outra operação ativa, inclusive callback reentrante, a falha retorna erro para a reserva:
+  a última operação fecha sua conexão, refaz e repete a própria operação. Nenhuma operação nova
+  entra no arquivo condenado enquanto falta drenar conexões. Um erro de época anterior nunca
+  apaga o banco reconstruído. `ReaderPanic` permanece erro mesmo havendo recuperação pendente.
+  `try_sync_file` expõe o erro tipado para a reserva; `sync_file` conserva o wrapper opcional.
 - `rusqlite` com SQLite embutido (`bundled`), WAL, `synchronous=NORMAL`, gravação em lotes de 1 s.
   Dependência nova; o build compila o SQLite em C nas três plataformas (o `zigbuild` já tem C).
 

@@ -102,16 +102,48 @@ pub struct Index {
     path: PathBuf,
     pool: Option<Arc<rayon::ThreadPool>>,
     generation: Arc<AtomicU64>,
+    operations: Arc<Mutex<OperationState>>,
+}
+
+#[derive(Default)]
+struct OperationState {
+    active: usize,
+    epoch: u64,
+    pending: bool,
+}
+
+struct OperationLease<'a> {
+    state: &'a Mutex<OperationState>,
+    epoch: u64,
+}
+
+impl Drop for OperationLease<'_> {
+    fn drop(&mut self) { self.state.lock().unwrap().active -= 1; }
+}
+
+fn corruption_error() -> IndexError {
+    rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT), None).into()
+}
+
+fn is_corrupt(error: &IndexError) -> bool {
+    matches!(error, IndexError::Sqlite(error) if matches!(error.sqlite_error_code(), Some(ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase)))
 }
 
 pub fn default_dir() -> PathBuf {
     let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(PathBuf::from).unwrap_or_default();
+    let cache = std::env::var_os(if cfg!(windows) { "LOCALAPPDATA" } else { "XDG_CACHE_HOME" });
+    default_dir_from(&home, cache.as_deref())
+}
+
+#[doc(hidden)]
+pub fn default_dir_from(home: &Path, cache: Option<&std::ffi::OsStr>) -> PathBuf {
     if cfg!(windows) {
-        std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()).map(PathBuf::from)
+        cache.filter(|v| !v.is_empty()).map(PathBuf::from)
             .unwrap_or_else(|| home.join("AppData").join("Local")).join("hangar").join("custos")
     } else {
-        home.join(".claude").join(".hangar-custos")
+        cache.map(PathBuf::from).filter(|path| path.is_absolute())
+            .unwrap_or_else(|| home.join(".cache")).join("hangar").join("custos")
     }
 }
 
@@ -157,8 +189,8 @@ pub fn dump_for_tests(ix: &Index, base: &Path, prefix: &str) -> serde_json::Valu
 
 impl Index {
     pub fn open(dir: &Path) -> Result<Self, IndexError> {
-        let index = Self { path: dir.join(FILE_NAME), pool: None, generation: Arc::new(AtomicU64::new(0)) };
-        index.connect()?;
+        let index = Self { path: dir.join(FILE_NAME), pool: None, generation: Arc::new(AtomicU64::new(0)), operations: Arc::new(Mutex::new(OperationState::default())) };
+        index.with_recovery(|| index.connect().map(drop))?;
         Ok(index)
     }
 
@@ -174,25 +206,69 @@ impl Index {
 
     fn connect(&self) -> Result<Connection, IndexError> {
         fs::create_dir_all(self.path.parent().unwrap()).map_err(|_| IndexError::NoDisk)?;
-        match open_connection(&self.path, &self.generation) {
-            Ok(conn) => Ok(conn),
-            Err(error) if matches!(error.sqlite_error_code(), Some(ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase)) => {
-                tracing::warn!(code = "indice_custos_ilegivel");
-                // A conexão anterior já fechou; no Windows um arquivo aberto não pode ser apagado.
-                for suffix in ["", "-wal", "-shm"] {
-                    let mut path = self.path.as_os_str().to_os_string();
-                    path.push(suffix);
-                    match fs::remove_file(PathBuf::from(path)) {
-                        Ok(()) => {},
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-                        Err(_) => return Err(IndexError::NoDisk),
-                    }
-                }
-                let conn = open_connection(&self.path, &self.generation)?;
-                Ok(conn)
-            },
-            Err(error) => Err(error.into()),
+        open_connection(&self.path, &self.generation).map_err(Into::into)
+    }
+
+    fn rebuild(&self, state: &mut OperationState) -> Result<(), IndexError> {
+        // Só a última operação pode apagar: callbacks podem consultar o mesmo índice.
+        debug_assert_eq!(state.active, 0);
+        state.epoch += 1;
+        self.changed();
+        tracing::warn!(code = "indice_custos_ilegivel");
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = self.path.as_os_str().to_os_string();
+            path.push(suffix);
+            match fs::remove_file(PathBuf::from(path)) {
+                Ok(()) => {},
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                Err(_) => return Err(IndexError::NoDisk),
+            }
         }
+        drop(open_connection(&self.path, &self.generation)?);
+        state.pending = false;
+        Ok(())
+    }
+
+    fn with_recovery<T>(&self, mut run: impl FnMut() -> Result<T, IndexError>) -> Result<T, IndexError> {
+        for attempt in 0..2 {
+            let lease = {
+                let mut state = self.operations.lock().unwrap();
+                if state.pending {
+                    if state.active != 0 { return Err(corruption_error()); }
+                    self.rebuild(&mut state)?;
+                }
+                state.active += 1;
+                OperationLease { state: &self.operations, epoch: state.epoch }
+            };
+            let epoch = lease.epoch;
+            let result = run();
+            // O retorno da tentativa fecha conexões, statements e transações antes da remoção.
+            drop(lease);
+            if let Some(value) = self.finish_attempt(epoch, attempt, result)? { return Ok(value); }
+        }
+        unreachable!()
+    }
+
+    fn finish_attempt<T>(&self, epoch: u64, attempt: usize, result: Result<T, IndexError>) -> Result<Option<T>, IndexError> {
+        let mut state = self.operations.lock().unwrap();
+        let corrupt = result.as_ref().err().is_some_and(is_corrupt);
+        if corrupt && epoch == state.epoch && !state.pending {
+            state.pending = true;
+            self.changed();
+        }
+        let stale = epoch != state.epoch;
+        if state.pending || stale {
+            if matches!(result, Err(IndexError::ReaderPanic)) {
+                if state.pending && state.active == 0 { self.rebuild(&mut state)?; }
+                return result.map(Some);
+            }
+            if state.active != 0 || attempt == 1 {
+                return result.and_then(|_| Err(corruption_error()));
+            }
+            if state.pending { self.rebuild(&mut state)?; }
+            return Ok(None);
+        }
+        result.map(Some)
     }
 
     pub fn sync<F: Fold>(
@@ -201,7 +277,10 @@ impl Index {
         progress: &Progress,
     ) -> Result<bool, IndexError> {
         progress.set(scope, 0, files.len());
-        let result = self.sync_inner(scope, files, new_fold, version, areas_sig, redo_areas, progress);
+        let result = self.with_recovery(|| {
+            progress.set(scope, 0, files.len());
+            self.sync_inner(scope, files, new_fold, version, areas_sig, redo_areas, progress)
+        });
         // Fontes concluídas continuam na soma exibida durante o aquecimento.
         progress.set(scope, files.len(), files.len());
         result
@@ -307,7 +386,17 @@ impl Index {
         &self, path: &Path, new_fold: &dyn Fn(&Path) -> F, version: &str, scope: &str,
         areas_sig: &str, redo_areas: &dyn Fn(&AreaEntries) -> Vec<UsoLinha>,
     ) -> Option<i64> {
-        let result = (|| -> Result<i64, IndexError> {
+        match self.try_sync_file(path, new_fold, version, scope, areas_sig, redo_areas) {
+            Ok(id) => Some(id),
+            Err(_) => { tracing::warn!(code = "leitura_custos"); None },
+        }
+    }
+
+    pub fn try_sync_file<F: Fold>(
+        &self, path: &Path, new_fold: &dyn Fn(&Path) -> F, version: &str, scope: &str,
+        areas_sig: &str, redo_areas: &dyn Fn(&AreaEntries) -> Vec<UsoLinha>,
+    ) -> Result<i64, IndexError> {
+        self.with_recovery(|| {
             let mut conn = self.connect()?;
             let fingerprint = Fingerprint::from_metadata(&fs::metadata(path).map_err(|_| IndexError::NoDisk)?);
             let version = format!("{SCHEMA}:{version}");
@@ -316,21 +405,21 @@ impl Index {
                 return Ok(record.id);
             }
             let read = read_new(path, &fingerprint, record.as_ref(), new_fold, &version)
-                .map_err(|_| IndexError::NoDisk)?;
+                .map_err(|error| match error { ReadError::Fold => IndexError::ReaderPanic, _ => IndexError::NoDisk })?;
             let job = ReadJob { position: 0, path: path.to_owned(), fingerprint, record };
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let id = write_file(&tx, &job, scope, &version, read, true, areas_sig, redo_areas)?;
             tx.commit()?;
             self.changed();
             Ok(id)
-        })();
-        match result {
-            Ok(id) => Some(id),
-            Err(_) => { tracing::warn!(code = "leitura_custos"); None },
-        }
+        })
     }
 
     pub fn forget_outside(&self, active: &[String]) -> Result<bool, IndexError> {
+        self.with_recovery(|| self.forget_outside_inner(active))
+    }
+
+    fn forget_outside_inner(&self, active: &[String]) -> Result<bool, IndexError> {
         let mut conn = self.connect()?;
         let mut removed = Vec::new();
         {
@@ -349,6 +438,10 @@ impl Index {
     }
 
     pub fn read_costs(&self, scope: Option<&str>, since: Option<&str>, file_id: Option<i64>) -> Result<Vec<UsageRow>, IndexError> {
+        self.with_recovery(|| self.read_costs_inner(scope, since, file_id))
+    }
+
+    fn read_costs_inner(&self, scope: Option<&str>, since: Option<&str>, file_id: Option<i64>) -> Result<Vec<UsageRow>, IndexError> {
         let conn = self.connect()?;
         let (filter, values) = filters(scope, since, file_id);
         let mut stmt = conn.prepare(&format!("SELECT {COST_FIELDS} FROM custo WHERE {filter} ORDER BY rowid"))?;
@@ -367,6 +460,10 @@ impl Index {
     }
 
     pub fn read_usage(&self, scope: &str, since: Option<&str>) -> Result<Vec<UsoLinha>, IndexError> {
+        self.with_recovery(|| self.read_usage_inner(scope, since))
+    }
+
+    fn read_usage_inner(&self, scope: &str, since: Option<&str>) -> Result<Vec<UsoLinha>, IndexError> {
         let conn = self.connect()?;
         let (filter, values) = filters(Some(scope), since, None);
         let mut stmt = conn.prepare(&format!("SELECT {USAGE_FIELDS} FROM uso WHERE {filter} ORDER BY rowid"))?;
@@ -664,4 +761,75 @@ fn filters(scope: Option<&str>, since: Option<&str>, file_id: Option<i64>) -> (S
     if let Some(id) = file_id { clauses.push("file_id=?"); values.push(id.into()); }
     if let Some(since) = since.filter(|s| !s.is_empty()) { clauses.push("dia>=?"); values.push(since.to_owned().into()); }
     (if clauses.is_empty() { "1".into() } else { clauses.join(" AND ") }, values)
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    #[test]
+    fn real_sqlite_lock_and_disk_full_errors_do_not_remove_the_index() {
+        for expected in [ErrorCode::DatabaseBusy, ErrorCode::DatabaseLocked, ErrorCode::DiskFull] {
+            let dir = tempfile::tempdir().unwrap();
+            let index = Index::open(dir.path()).unwrap();
+            let conn = Connection::open(&index.path).unwrap();
+            conn.execute_batch("CREATE TABLE preserved(value BLOB); INSERT INTO preserved VALUES (1)").unwrap();
+            let before = index.generation();
+            let calls = AtomicUsize::new(0);
+            let result = index.with_recovery(|| -> Result<(), IndexError> {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let error = match expected {
+                    ErrorCode::DatabaseBusy => {
+                        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+                        let other = Connection::open(&index.path).unwrap();
+                        other.busy_timeout(Duration::ZERO).unwrap();
+                        let error = other.execute_batch("INSERT INTO preserved VALUES (2)").unwrap_err();
+                        conn.execute_batch("ROLLBACK").unwrap();
+                        error
+                    },
+                    ErrorCode::DatabaseLocked => {
+                        let mut stmt = conn.prepare("SELECT * FROM preserved").unwrap();
+                        let mut rows = stmt.query([]).unwrap();
+                        assert!(rows.next().unwrap().is_some());
+                        conn.execute_batch("DROP TABLE preserved").unwrap_err()
+                    },
+                    _ => {
+                        let count: i64 = conn.pragma_query_value(None, "page_count", |r| r.get(0)).unwrap();
+                        conn.pragma_update(None, "max_page_count", count).unwrap();
+                        conn.execute_batch("INSERT INTO preserved VALUES (zeroblob(1000000))").unwrap_err()
+                    },
+                };
+                assert_eq!(error.sqlite_error_code(), Some(expected));
+                Err(error.into())
+            });
+            assert!(if expected == ErrorCode::DiskFull { matches!(result, Err(IndexError::NoDisk)) } else { matches!(result, Err(IndexError::Sqlite(_))) });
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(index.generation(), before);
+            for suffix in ["", "-wal", "-shm"] { assert!(dir.path().join(format!("{FILE_NAME}{suffix}")).exists()); }
+            assert_eq!(conn.query_row("SELECT value FROM preserved", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+            let reopened = Connection::open(&index.path).unwrap();
+            assert_eq!(reopened.query_row("SELECT value FROM preserved", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn late_error_from_a_rebuilt_epoch_retries_without_removing_new_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::open(dir.path()).unwrap();
+        let old_epoch = index.operations.lock().unwrap().epoch;
+        let broken = dir.path().join("broken.sqlite3");
+        fs::write(&broken, b"not a database").unwrap();
+        let error = Connection::open(broken).unwrap().execute_batch("SELECT * FROM sqlite_master").unwrap_err();
+        assert_eq!(error.sqlite_error_code(), Some(ErrorCode::NotADatabase));
+        index.rebuild(&mut index.operations.lock().unwrap()).unwrap();
+        let conn = index.connect().unwrap();
+        conn.execute("INSERT INTO meta VALUES ('preserved', 'new')", []).unwrap();
+        drop(conn);
+        let before = index.generation();
+        assert!(index.finish_attempt::<()>(old_epoch, 0, Err(error.into())).unwrap().is_none());
+        assert_eq!(index.generation(), before);
+        let conn = index.connect().unwrap();
+        assert_eq!(conn.query_row("SELECT v FROM meta WHERE k='preserved'", [], |r| r.get::<_, String>(0)).unwrap(), "new");
+        assert!(!index.operations.lock().unwrap().pending);
+    }
 }

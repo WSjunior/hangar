@@ -38,6 +38,223 @@ impl Fold for Sum {
 fn new_sum(_: &Path) -> Sum { Sum::default() }
 fn no_areas(_: &AreaEntries) -> Vec<UsoLinha> { vec![] }
 
+#[test]
+fn default_directory_uses_synthetic_local_cache_without_changing_environment() {
+    use hangar_server::costs::index::default_dir_from;
+    let d = tempfile::tempdir().unwrap();
+    let home = d.path().join("home");
+    let cache = d.path().join("cache");
+    let fallback = if cfg!(windows) { home.join("AppData").join("Local") } else { home.join(".cache") }.join("hangar").join("custos");
+    assert_eq!(default_dir_from(&home, None), fallback);
+    assert_eq!(default_dir_from(&home, Some("".as_ref())), fallback);
+    assert_eq!(default_dir_from(&home, Some(cache.as_os_str())), cache.join("hangar").join("custos"));
+    if !cfg!(windows) { assert_eq!(default_dir_from(&home, Some("relative".as_ref())), fallback); }
+}
+
+fn corrupt_table(dir: &Path, table: &str) {
+    use std::io::{Seek, SeekFrom};
+    let conn = database(dir);
+    let page: i64 = conn.query_row("SELECT rootpage FROM sqlite_master WHERE name=?", [table], |r| r.get(0)).unwrap();
+    let size: i64 = conn.pragma_query_value(None, "page_size", |r| r.get(0)).unwrap();
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+    drop(conn);
+    let mut file = std::fs::OpenOptions::new().write(true).open(dir.join(hangar_server::costs::index::FILE_NAME)).unwrap();
+    file.seek(SeekFrom::Start(((page - 1) * size) as u64)).unwrap();
+    file.write_all(&[0xff]).unwrap();
+    file.sync_all().unwrap();
+    let conn = database(dir);
+    assert_eq!(conn.query_row("SELECT v FROM meta WHERE k='esquema'", [], |r| r.get::<_, String>(0)).unwrap(), "1");
+    let error = conn.execute_batch(&format!("SELECT * FROM {table}")).unwrap_err();
+    assert_eq!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseCorrupt));
+}
+
+#[test]
+fn corrupt_data_page_rebuilds_the_complete_list_and_invalidates_clones() {
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path().join("idx");
+    let a = d.path().join("a.jsonl");
+    let b = d.path().join("b.jsonl");
+    std::fs::write(&a, "2\n").unwrap();
+    std::fs::write(&b, "3\n").unwrap();
+    let ix = Index::open(&dir).unwrap();
+    let python = dir.join("custos.sqlite3");
+    std::fs::write(&python, b"cache Python preservado").unwrap();
+    sync(&ix, &[a.clone(), b.clone()]);
+    let clone = ix.clone();
+    let before = clone.generation();
+    corrupt_table(&dir, "files");
+    assert!(sync(&ix, &[a, b]));
+    assert_eq!(sum(&clone), (5, 2));
+    assert!(clone.generation() > before);
+    assert_eq!(std::fs::read(python).unwrap(), b"cache Python preservado");
+}
+
+#[test]
+fn corrupt_data_pages_are_recovered_by_reads_and_forgetting() {
+    for operation in ["costs", "usage", "forget"] {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("idx");
+        let f = d.path().join("a.jsonl");
+        std::fs::write(&f, "2\n").unwrap();
+        let ix = Index::open(&dir).unwrap();
+        if operation == "usage" {
+            ix.sync_file(&f, &new_areas, "v1", "t", "sig", &area_rows).unwrap();
+        } else {
+            sync(&ix, &[f]);
+        }
+        let before = ix.generation();
+        corrupt_table(&dir, match operation { "costs" => "custo", "usage" => "uso", _ => "files" });
+        match operation {
+            "costs" => assert!(ix.read_costs(None, None, None).unwrap().is_empty()),
+            "usage" => assert!(ix.read_usage("t", None).unwrap().is_empty()),
+            _ => { ix.forget_outside(&[]).unwrap(); },
+        }
+        assert!(ix.generation() > before, "operação: {operation}");
+    }
+}
+
+#[test]
+fn single_file_corruption_after_open_retries_only_once() {
+    for persistent in [false, true] {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("idx");
+        let f = d.path().join("a.jsonl");
+        std::fs::write(&f, "2\n").unwrap();
+        let ix = Index::open(&dir).unwrap();
+        let calls = AtomicUsize::new(0);
+        let new = |_: &Path| {
+            let attempt = calls.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 || persistent { corrupt_table(&dir, "custo"); }
+            Sum::default()
+        };
+        let result = ix.sync_file(&f, &new, "v1", "t", "sig", &no_areas);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(result.is_some(), !persistent);
+        if !persistent { assert_eq!(sum(&ix), (2, 1)); }
+    }
+}
+
+#[test]
+fn reentrant_corruption_defers_recovery_without_blocking_the_outer_operation() {
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path().join("idx");
+    let f = d.path().join("a.jsonl");
+    std::fs::write(&f, "2\n").unwrap();
+    let ix = Index::open(&dir).unwrap();
+    let calls = AtomicUsize::new(0);
+    let new = |_: &Path| {
+        if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            corrupt_table(&dir, "custo");
+            assert!(matches!(ix.read_costs(None, None, None), Err(IndexError::Sqlite(ref error)) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseCorrupt)));
+            assert!(ix.try_sync_file(&f, &new_sum, "v1", "t", "sig", &no_areas).is_err());
+            assert!(ix.sync_file(&f, &new_sum, "v1", "t", "sig", &no_areas).is_none());
+        }
+        Sum::default()
+    };
+    ix.try_sync_file(&f, &new, "v1", "t", "sig", &no_areas).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(sum(&ix), (2, 1));
+}
+
+#[test]
+fn pending_recovery_does_not_turn_a_reader_panic_into_success() {
+    hangar_server::install_panic_hook();
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path().join("idx");
+    let f = d.path().join("a.jsonl");
+    std::fs::write(&f, "2\n").unwrap();
+    let ix = Index::open(&dir).unwrap();
+    let before = ix.generation();
+    let calls = AtomicUsize::new(0);
+    let new = |_: &Path| -> Sum {
+        calls.fetch_add(1, Ordering::SeqCst);
+        corrupt_table(&dir, "custo");
+        assert!(ix.read_costs(None, None, None).is_err());
+        panic!("falha sintética após corrupção")
+    };
+    assert!(matches!(ix.try_sync_file(&f, &new, "v1", "t", "sig", &no_areas), Err(IndexError::ReaderPanic)));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(ix.generation() > before);
+    assert!(ix.read_costs(None, None, None).unwrap().is_empty());
+}
+
+#[test]
+fn checked_single_file_propagates_the_second_real_corruption() {
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path().join("idx");
+    let f = d.path().join("a.jsonl");
+    std::fs::write(&f, "2\n").unwrap();
+    let ix = Index::open(&dir).unwrap();
+    let calls = AtomicUsize::new(0);
+    let new = |_: &Path| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        corrupt_table(&dir, "custo");
+        Sum::default()
+    };
+    assert!(matches!(ix.try_sync_file(&f, &new, "v1", "t", "sig", &no_areas), Err(IndexError::Sqlite(ref error)) if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseCorrupt)));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn concurrent_corruption_keeps_the_open_connection_then_recovers_on_drain() {
+    use std::sync::{Mutex, mpsc};
+    use std::time::Duration;
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path().join("idx");
+    let f = d.path().join("a.jsonl");
+    std::fs::write(&f, "2\n").unwrap();
+    let ix = Index::open(&dir).unwrap();
+    let clone = ix.clone();
+    let before = clone.generation();
+    let (entered, waiting) = mpsc::channel();
+    let (release, gate) = mpsc::channel();
+    let gate = Mutex::new(gate);
+    let calls = AtomicUsize::new(0);
+    std::thread::scope(|threads| {
+        let scan = threads.spawn(|| {
+            let new = |_: &Path| {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    entered.send(()).unwrap();
+                    gate.lock().unwrap().recv_timeout(Duration::from_secs(4)).unwrap();
+                }
+                Sum::default()
+            };
+            ix.try_sync_file(&f, &new, "v1", "t", "sig", &no_areas)
+        });
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        corrupt_table(&dir, "custo");
+        assert!(clone.read_costs(None, None, None).is_err());
+        assert!(clone.generation() > before, "a invalidação não espera a drenagem");
+        let conn = database(&dir);
+        assert!(conn.execute_batch("SELECT * FROM custo").is_err(), "a conexão ativa impede a remoção prematura");
+        drop(conn);
+        release.send(()).unwrap();
+        scan.join().unwrap().unwrap();
+    });
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(sum(&clone), (2, 1));
+}
+
+#[test]
+fn integrity_failure_preserves_database_and_sidecars() {
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path().join("idx");
+    let f = d.path().join("a.jsonl");
+    std::fs::write(&f, "2\n").unwrap();
+    let ix = Index::open(&dir).unwrap();
+    sync(&ix, &[f.clone()]);
+    let conn = database(&dir);
+    conn.execute_batch("CREATE TRIGGER reject_cost BEFORE INSERT ON custo BEGIN SELECT RAISE(ABORT, 'falha sintética'); END").unwrap();
+    let before = ix.generation();
+    append(&f, b"3\n");
+    let error = ix.sync("t", &[f], &new_sum, "v1", "sig", &no_areas, &Progress::default()).unwrap_err();
+    assert!(matches!(error, IndexError::Sqlite(ref e) if e.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation)));
+    for suffix in ["", "-wal", "-shm"] { assert!(dir.join(format!("{}{}", hangar_server::costs::index::FILE_NAME, suffix)).exists()); }
+    assert_eq!(ix.generation(), before);
+    assert_eq!(sum(&ix), (2, 1));
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name='reject_cost'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+}
+
 fn sync(ix: &Index, files: &[PathBuf]) -> bool {
     ix.sync("t", files, &new_sum, "v1", "sig", &no_areas, &Progress::default()).unwrap()
 }

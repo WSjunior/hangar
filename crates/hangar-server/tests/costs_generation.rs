@@ -129,3 +129,94 @@ fn rebuilding_the_schema_invalidates_rows_even_when_reading_only() {
     assert!(index.read_costs(None, None, None).unwrap().is_empty());
     assert!(index.generation() > before, "a recriação do esquema também confirma uma mudança");
 }
+
+#[test]
+fn emptied_database_after_open_invalidates_the_generation_for_every_clone() {
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path().join("index");
+    let path = d.path().join("file.jsonl");
+    std::fs::write(&path, "{}\n").unwrap();
+    let index = Index::open(&dir).unwrap();
+    index.try_sync_file(&path, &fold, "v1", "scope", "", &|_| vec![]).unwrap();
+    let clone = index.clone();
+    let before = clone.generation();
+    std::fs::write(dir.join(hangar_server::costs::index::FILE_NAME), []).unwrap();
+    assert!(index.read_costs(None, None, None).unwrap().is_empty());
+    assert!(clone.generation() > before);
+    assert_eq!(clone.generation(), index.generation());
+}
+
+#[test]
+fn corruption_after_a_partial_commit_repeats_the_complete_scan_and_invalidates_reports() {
+    use std::io::{Seek, SeekFrom, Write};
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::{Duration, Instant};
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path().join("index");
+    let good = d.path().join("good.jsonl");
+    let later = d.path().join("later.jsonl");
+    std::fs::write(&good, "{}\n").unwrap();
+    std::fs::write(&later, "{}\n").unwrap();
+    let index = Index::open(&dir).unwrap().with_pool(Arc::new(rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap()));
+    let clone = index.clone();
+    let before = clone.generation();
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let (release, gate) = mpsc::channel();
+    let gate = Mutex::new(gate);
+    let progress = Progress::default();
+    std::thread::scope(|threads| {
+        let scan = threads.spawn(|| {
+            let new = |path: &Path| {
+                if path == later && calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    gate.lock().unwrap().recv_timeout(Duration::from_secs(4)).unwrap();
+                }
+                Cost
+            };
+            index.sync("scope", &[good, later.clone()], &new, "v1", "", &|_| vec![], &progress)
+        });
+        let start = Instant::now();
+        while clone.generation() == before && start.elapsed() < Duration::from_secs(3) { std::thread::yield_now(); }
+        let partial = clone.generation();
+        assert!(partial > before);
+        let conn = rusqlite::Connection::open(dir.join(hangar_server::costs::index::FILE_NAME)).unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+        let page: i64 = conn.query_row("SELECT rootpage FROM sqlite_master WHERE name='custo'", [], |r| r.get(0)).unwrap();
+        let size: i64 = conn.pragma_query_value(None, "page_size", |r| r.get(0)).unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+        drop(conn);
+        let mut file = std::fs::OpenOptions::new().write(true).open(dir.join(hangar_server::costs::index::FILE_NAME)).unwrap();
+        file.seek(SeekFrom::Start(((page - 1) * size) as u64)).unwrap();
+        file.write_all(&[0xff]).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let conn = rusqlite::Connection::open(dir.join(hangar_server::costs::index::FILE_NAME)).unwrap();
+        conn.execute("UPDATE meta SET v=v WHERE k='esquema'", []).unwrap();
+        let error = conn.execute_batch("SELECT * FROM custo").unwrap_err();
+        assert_eq!(error.sqlite_error_code(), Some(rusqlite::ErrorCode::DatabaseCorrupt));
+        drop(conn);
+        release.send(()).unwrap();
+        assert!(scan.join().unwrap().unwrap());
+        assert!(clone.generation() > partial);
+    });
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(progress.total(), (2, 2));
+    let conn = rusqlite::Connection::open(dir.join(hangar_server::costs::index::FILE_NAME)).unwrap();
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM files", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+    assert_eq!(conn.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0)).unwrap(), "ok");
+}
+
+#[derive(Serialize, Deserialize)]
+struct Cost;
+impl Fold for Cost {
+    fn line(&mut self, _: &[u8]) {}
+    fn close(&mut self) -> FoldOutput {
+        use hangar_server::costs::{py::LocalTs, rows::UsageRow};
+        FoldOutput { costs: vec![UsageRow {
+            ts: LocalTs::from_iso("2026-09-30T12:00:00Z").unwrap(), source: "t".into(),
+            provider: "".into(), model: "m".into(), project: "".into(), session_id: "s".into(),
+            input: 1, output: 0, cache_write: 0, cache_read: 0, subagente: false,
+            account_id: None, codex_long_context: false, cache_write_1h: 0, fast: false,
+            regravado: 0, regravado_1h: 0,
+        }], usage: vec![], areas: None }
+    }
+}
