@@ -47,7 +47,9 @@
   {:else if el.type === 'Text'}
     <span style={textStyle(p)}>{#each el.children ?? [] as child, i (i)}<PluginNode node={child} />{/each}</span>
   {:else if el.type === 'Raster'}
-    <span class="raster">{#each raster as row, r (r)}<span class="raster-row">{#each row as run, i (i)}<span style:color={run.fg} style:background={run.bg}>{run.text}</span>{/each}</span>{/each}</span>
+    <!-- O Raster vem com a largura do pane do terminal: em coluna mais estreita cada trecho encolhe na
+         proporção das suas células, em vez de a faixa rolar de lado. -->
+    <span class="raster" style:max-width="{Number(p.columns) || 0}ch">{#each raster as row, r (r)}<span class="raster-row">{#each row as run, i (i)}<span class="run" style:flex-grow={run.text.length} style:color={run.fg} style:background={run.bg}>{run.text}</span>{/each}</span>{/each}</span>
   {:else if el.type === 'Svg'}
     <img class="svg" src={svgSrc} alt={str(p.alt)} width={Number(p.width) || undefined} height={Number(p.height) || undefined} />
   {:else if el.type === 'Markdown'}
@@ -73,8 +75,9 @@
 
 <style>
   .box { box-sizing: border-box; }
-  .raster { display: inline-flex; flex-direction: column; white-space: pre; line-height: 1; }
-  .raster-row { display: block; }
+  .raster { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; white-space: pre; line-height: 1; }
+  .raster-row { display: flex; min-width: 0; }
+  .run { flex-basis: 0; flex-shrink: 1; min-width: 0; overflow: hidden; }
   .svg { display: block; max-width: 100%; height: auto; align-self: center; }
   .md :global(p) { margin: 0; }
   .md.dim { opacity: 0.6; }

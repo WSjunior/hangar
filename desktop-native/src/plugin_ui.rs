@@ -153,14 +153,15 @@ fn plain_deep(kids: &[Value]) -> String {
 }
 
 /// Células do `Raster`: base64 de triplas u32 little-endian `[código, frente, fundo]`, por linha.
-/// Vizinhas da mesma cor viram um trecho só.
+/// Vizinhas da mesma cor viram um trecho só. O Raster vem com a largura do pane do terminal: em
+/// coluna mais estreita cada trecho encolhe na proporção das suas células, sem rolar de lado.
 fn raster(p: &Value) -> AnyElement {
     use base64::Engine as _;
     let columns = p["columns"].as_u64().unwrap_or(0) as usize;
     let rows = p["rows"].as_u64().unwrap_or(0) as usize;
     let bytes = base64::engine::general_purpose::STANDARD.decode(p["cells"].as_str().unwrap_or("")).unwrap_or_default();
     let word = |at: usize| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
-    let mut grid = div().flex().flex_col().flex_shrink_0();
+    let mut grid = div().flex().flex_col().flex_grow(1.).min_w_0().max_w(px(columns as f32 * CELL_W));
     for r in 0..rows {
         let mut runs: Vec<(String, Option<Hsla>, Option<Hsla>)> = Vec::new();
         for c in 0..columns {
@@ -173,8 +174,9 @@ fn raster(p: &Value) -> AnyElement {
                 _ => runs.push((ch.to_string(), fg, bg)),
             }
         }
-        grid = grid.child(div().flex().flex_row().whitespace_nowrap().children(runs.into_iter().map(|(t, fg, bg)| {
-            div().when_some(fg, |el, c| el.text_color(c)).when_some(bg, |el, c| el.bg(c)).child(t)
+        grid = grid.child(div().flex().flex_row().w_full().min_w_0().whitespace_nowrap().children(runs.into_iter().map(|(t, fg, bg)| {
+            div().flex_basis(px(0.)).flex_grow(t.chars().count() as f32).flex_shrink(1.).min_w_0().overflow_hidden()
+                .when_some(fg, |el, c| el.text_color(c)).when_some(bg, |el, c| el.bg(c)).child(t)
         })));
     }
     grid.into_any_element()
