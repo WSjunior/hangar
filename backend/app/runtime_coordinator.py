@@ -745,8 +745,10 @@ class RuntimeCoordinator:
             snapshot = json.loads(raw)
             if snapshot.get("type") != "cano_snapshot" or snapshot.get("versao") != 2:
                 raise ValueError("snapshot incompatível")
-            if type(snapshot.get("pid")) is not int or snapshot["pid"] != cano.get("pid"):
-                raise ValueError("snapshot de outro cano")
+            # O pid do snapshot é o do agente filho, não o do cano gravado no sidecar; quem prova
+            # que é o cano certo é o token único por subida.
+            if type(snapshot.get("pid")) is not int:
+                raise ValueError("snapshot sem pid")
             for line in snapshot["pendentes"]:
                 if not isinstance(json.loads(line), dict):
                     raise ValueError("pedido pendente inválido")
