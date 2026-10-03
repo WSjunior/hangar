@@ -114,6 +114,8 @@ class Slot:
     guard: threading.Lock = field(default_factory=threading.Lock)
     lifecycle: asyncio.Lock = field(default_factory=asyncio.Lock)
     changed: asyncio.Event = field(default_factory=asyncio.Event)
+    cache_valid: bool = False
+    lifecycle_token: object | None = None
 
 
 def _clock():
@@ -128,6 +130,111 @@ class RuntimeCoordinator:
         self.slots: dict[str, Slot] = {}
         self.names: dict[str, str] = {}
         self.loop = None
+        self.events_task = None
+        self.refreshing = {}
+        self.voice_clients = {}
+        self.legacy_active = set()
+
+    def configure_transport(self, transport):
+        if self.events_task is not None and not self.events_task.done():
+            raise RuntimeError("leitor privado anterior ainda ativo")
+        self.transport, self.instance = transport, transport.instance
+        self.loop = asyncio.get_running_loop()
+        self.events_task = self.loop.create_task(self._events(transport, transport.instance))
+
+    async def close_events(self):
+        tasks = [task for task in [self.events_task, *self.refreshing.values()] if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self.events_task = None
+        self.refreshing.clear()
+        for client in tuple(self.voice_clients.values()):
+            client.fail(RuntimeError("runtime encerrado; chamada de voz invalidada"))
+
+    async def _push_channels(self, slot):
+        from app.adapters.preview_push import PushPreviewSource, fonte_ferramenta, fonte_pensamento
+        for channel, data in (slot.view.get("channels") or {}).items():
+            source = {"preview":PushPreviewSource.get, "thinking":fonte_pensamento, "tool":fonte_ferramenta}.get(channel)
+            if source is not None:
+                await source(slot.binding.name).push(data["text"])
+
+    async def refresh_snapshot(self, name):
+        from app.runtime_adapter import apply_event
+        slot = self.slot(name)
+        descriptor, instance = slot.binding.descriptor(), self.instance
+        data = await self._rpc(descriptor, {"kind":"snapshot"}, uuid.uuid4().hex)
+        if (self.instance != instance or slot.binding.generation != descriptor["generation"]
+                or slot.phase not in {Phase.Rust, Phase.PreparingRust}):
+            return False
+        event = {"key":descriptor["key"], "generation":descriptor["generation"], "revision":data.get("revision"), "channel":"snapshot", "data":data}
+        valid = apply_event(slot, event)
+        if valid:
+            await self._push_channels(slot)
+        self._signal(slot)
+        return valid
+
+    def _refresh(self, slot):
+        key = slot.binding.key
+        if key in self.refreshing and not self.refreshing[key].done():
+            return
+        async def refresh():
+            try:
+                await self.refresh_snapshot(slot.binding.name)
+            except Exception:
+                slot.cache_valid = False
+                self._signal(slot)
+        self.refreshing[key] = asyncio.create_task(refresh())
+
+    def request_drain(self, name):
+        async def drain():
+            try:
+                await self.op(name, {"kind":"drain"}, uuid.uuid4().hex)
+            except Exception:
+                self.slot(name).cache_valid = False
+                self._signal(self.slot(name))
+        self.loop.create_task(drain())
+
+    async def _events(self, transport, instance):
+        from app.runtime_adapter import apply_event
+        delay = 0.25
+        while self.transport is transport and self.instance == instance:
+            try:
+                async for event in transport.events():
+                    if self.transport is not transport or self.instance != instance:
+                        return
+                    if not isinstance(event, dict) or not isinstance(event.get("key"), str):
+                        raise ValueError("evento privado inválido")
+                    slot = self.slots.get(event["key"])
+                    if slot is None or slot.phase not in {Phase.Rust, Phase.PreparingRust}:
+                        continue
+                    if type(event.get("generation")) is int and event["generation"] != slot.binding.generation:
+                        continue
+                    previous = slot.view.get("revision", -1)
+                    if not apply_event(slot, event):
+                        slot.cache_valid = False
+                        self._refresh(slot)
+                    elif event.get("revision", -1) > previous or event.get("channel") == "snapshot":
+                        if event["channel"] in {"preview", "thinking", "tool", "snapshot"}:
+                            await self._push_channels(slot)
+                        if event["channel"] in {"voice", "voice_target"}:
+                            client = self.voice_clients.get((event["key"], event["data"].get("call_id")))
+                            if client is not None:
+                                client.receive(event["channel"], event["data"]["event"])
+                    self._signal(slot)
+                    delay = 0.25
+                raise RuntimeError("stream privado encerrado sem aviso")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                for slot in tuple(self.slots.values()):
+                    if slot.phase == Phase.Rust:
+                        slot.cache_valid = False
+                        self._signal(slot)
+                for client in tuple(self.voice_clients.values()):
+                    client.fail(RuntimeError("stream privado interrompido; voz invalidada"))
+            await asyncio.sleep(delay)
+            delay = min(5.0, delay * 2)
 
     def register(self, binding: Binding):
         global _current
@@ -209,8 +316,12 @@ class RuntimeCoordinator:
         if slot is None:
             return True
         with slot.guard:
-            return (slot.phase == Phase.Python and not slot.frozen and slot.binding.generation == generation
+            return (slot.phase == Phase.Python and (not slot.frozen or self.in_lifecycle(slot)) and slot.binding.generation == generation
                     and slot.lease is not None and not slot.lease.closed)
+
+    @staticmethod
+    def in_lifecycle(slot):
+        return slot.lifecycle_token is not None and _lifecycle.get() is slot.lifecycle_token
 
     def _signal(self, slot):
         if self.loop is not None and self.loop.is_running():
@@ -223,7 +334,7 @@ class RuntimeCoordinator:
             return
         slot = self.slot(name)
         with slot.guard:
-            if slot.frozen or slot.phase not in {Phase.Python, Phase.Rust}:
+            if (slot.frozen and not self.in_lifecycle(slot)) or slot.phase not in {Phase.Python, Phase.Rust}:
                 raise RuntimeError("sessão em transferência; aguarde a posse ser confirmada")
             if slot.phase == Phase.Python and (slot.lease is None or slot.lease.closed):
                 raise RuntimeError("reserva sem posse da sessão")
@@ -290,14 +401,16 @@ class RuntimeCoordinator:
     @asynccontextmanager
     async def _barrier(self, slot):
         self.loop = asyncio.get_running_loop()
-        if _lifecycle.get() is slot:
+        if self.in_lifecycle(slot):
             yield
         else:
             async with slot.lifecycle:
-                token = _lifecycle.set(slot)
+                slot.lifecycle_token = object()
+                token = _lifecycle.set(slot.lifecycle_token)
                 try:
                     yield
                 finally:
+                    slot.lifecycle_token = None
                     _lifecycle.reset(token)
 
     async def _rpc(self, descriptor, command, operation_id):
@@ -334,6 +447,7 @@ class RuntimeCoordinator:
                 if self.legacy is None:
                     raise RuntimeError("serviço da reserva indisponível")
                 slot.carry = await self.legacy.quiesce(descriptor)
+                await self._wait_active(slot)
                 json.dumps(slot.carry)
                 with slot.guard:
                     slot.store.exec(descriptor["generation"], "quiesce:" + uuid.uuid4().hex, _clock(), {"kind": "recover"})
@@ -346,7 +460,9 @@ class RuntimeCoordinator:
                     raise RuntimeError("readiness não corresponde à vida atual")
                 with slot.guard:
                     slot.view = ready["state"]
+                    slot.cache_valid = True
                     slot.phase = Phase.Rust
+                self._signal(slot)
                 return True
             except BaseException:
                 with slot.guard:
@@ -364,6 +480,8 @@ class RuntimeCoordinator:
         slot.store = runtime_queue.QueueStore(slot.binding.state_path, slot.binding.projection_dir,
             runtime_queue.initial_state(slot.binding.key, slot.binding.generation, slot.binding.name, []))
         slot.store.exec(slot.binding.generation, "recover:" + uuid.uuid4().hex, _clock(), {"kind": "recover"})
+        recovered_view = slot.store.state.get("runtime_state", {}).get("view") or {}
+        slot.carry = {"runtime_state":copy.deepcopy(recovered_view)} if recovered_view else slot.carry
         if self.legacy is None:
             raise RuntimeError("serviço da reserva indisponível")
         ready = await self.legacy.reconnect(slot.binding.descriptor(), slot.carry)

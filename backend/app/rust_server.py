@@ -32,7 +32,7 @@ _log = logging.getLogger("hangar.rust_server")
 HEALTH_PATH = "/__hangar_server/health"
 # Versão do contrato interno (rotas /internal, side-events, ambiente). Tem de casar com o
 # `protocol` da saúde (hangar_server::INTERNAL_PROTOCOL); outro número = o Python atende sozinho.
-RUST_SERVER_PROTOCOL = 4
+RUST_SERVER_PROTOCOL = 5
 START_TIMEOUT = 10.0
 CRASH_WINDOW = 60.0
 MAX_CRASHES = 3
@@ -134,6 +134,17 @@ class RuntimeTransport:
         self._connections = set()
         self._guard = threading.Lock()
         self._closed = False
+        self._workers = set()
+
+    async def _blocking(self, function, *args):
+        task = asyncio.create_task(asyncio.to_thread(function, *args))
+        self._workers.add(task)
+        def finished(done):
+            self._workers.discard(done)
+            if not done.cancelled():
+                done.exception()
+        task.add_done_callback(finished)
+        return await asyncio.shield(task)
 
     def _connection(self):
         connection = http.client.HTTPConnection("127.0.0.1", self._port, timeout=35)
@@ -167,7 +178,7 @@ class RuntimeTransport:
                 return json.loads(raw)
             finally:
                 self._release(connection)
-        result = await asyncio.to_thread(send)
+        result = await self._blocking(send)
         if not isinstance(result, dict) or result.get("ok") is not True or "result" not in result:
             raise RuntimeError("resposta do IPC inválida")
         return result["result"]
@@ -181,9 +192,9 @@ class RuntimeTransport:
                 if response.status != 200:
                     raise RuntimeError("stream privado recusado")
                 return response
-            response = await asyncio.to_thread(opening)
+            response = await self._blocking(opening)
             while True:
-                raw = await asyncio.to_thread(response.readline, (32 << 20) + 1026)
+                raw = await self._blocking(response.readline, (32 << 20) + 1026)
                 if not raw:
                     raise RuntimeError("stream privado encerrado")
                 if len(raw) > (32 << 20) + 1025 or not raw.endswith(b"\n"):
@@ -209,6 +220,7 @@ class RuntimeTransport:
         for connection in connections:
             self._shutdown(connection)
             connection.close()
+        await asyncio.gather(*tuple(self._workers), return_exceptions=True)
 
 
 def _close_stdin(proc: subprocess.Popen) -> None:
@@ -360,8 +372,7 @@ class Supervisor:
         self.runtime_transport = RuntimeTransport(ready["port"], secret, instance,
             lambda: self.proc is not None and self.proc.poll() is None)
         coordinator = runtime_coordinator.ensure()
-        coordinator.transport, coordinator.instance = self.runtime_transport, instance
-        coordinator.loop = asyncio.get_running_loop()
+        coordinator.configure_transport(self.runtime_transport)
 
     async def deactivate_runtime(self, confirmed_dead: bool) -> None:
         if not confirmed_dead:
@@ -371,6 +382,7 @@ class Supervisor:
             await self.runtime_transport.close()
         coordinator = runtime_coordinator.current()
         if coordinator is not None:
+            await coordinator.close_events()
             for slot in tuple(coordinator.slots.values()):
                 if slot.phase != runtime_coordinator.Phase.Python:
                     await coordinator.recover(slot.binding.name, confirmed_dead=True)

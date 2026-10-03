@@ -21,8 +21,8 @@ impl PolicyClient {
     pub fn new(upstream:std::net::SocketAddr,secret:String,instance:String) -> Self {
         Self { upstream,secret,instance,http:crate::proxy::client() }
     }
-    async fn run(&self,target:&RuntimeTarget,kind:&str,request_id:&RequestId,payload:Value) -> Result<Value,RuntimeError> {
-        let body = json!({"key":target.key,"generation":target.generation,"request_id":request_id,"kind":kind,"payload":payload});
+    async fn run(&self,target:&RuntimeTarget,kind:&str,request_id:&RequestId,payload:Value,phase_id:&str) -> Result<Value,RuntimeError> {
+        let body = json!({"key":target.key,"generation":target.generation,"request_id":request_id,"phase_id":phase_id,"kind":kind,"payload":payload});
         let request = axum::http::Request::post(format!("http://{}/internal/runtime/policy",self.upstream))
             .header("x-hangar-internal",&self.secret).header("x-hangar-runtime-instance",&self.instance)
             .header("content-type","application/json").body(axum::body::Body::from(body.to_string()))
@@ -83,9 +83,22 @@ impl RuntimeEngine {
         for phase in state.operations.values().filter(|phase|recover_phase(state,phase)) {
             if let Some(id) = phase.payload["logical_id"].as_str() {
                 match &mut self.core {
-                    Core::Codex(core)=>core.restore_rpc(id.into(),&phase.payload["frame"],phase.payload["state_revision"].as_u64().unwrap_or(0),
-                        phase.payload["settings_revision"].as_u64().unwrap_or(0)),
-                    Core::Claude(core)=>core.restore_control(id.into(),&phase.payload["frame"]),
+                    Core::Codex(core)=>{
+                        core.restore_rpc(id.into(),&phase.payload["frame"],phase.payload["state_revision"].as_u64().unwrap_or(0),
+                            phase.payload["settings_revision"].as_u64().unwrap_or(0));
+                        if let Some(call_id) = state.operations.get(id).and_then(|root|root.payload["payload"]["call_id"].as_str()) {
+                            core.restore_voice_scope(id,call_id);
+                        }
+                    },
+                    Core::Claude(core)=>{
+                        let mut frame = phase.payload["frame"].clone();
+                        if frame["request"]["subtype"] == "set_model" {
+                            if let Some(effort) = state.operations.get(id).and_then(|root|root.payload["payload"].get("effort")).filter(|effort|effort.is_string()) {
+                                frame["request"]["effort"] = effort.clone();
+                            }
+                        }
+                        core.restore_control(id.into(),&frame);
+                    },
                 }
             }
         }
@@ -201,6 +214,8 @@ enum Job {
     Drained(Result<Vec<RuntimeCommand>,RuntimeError>),
     DrainFinished(Result<RuntimeReply,RuntimeError>),
     Confirmed { response:oneshot::Sender<Result<Value,RuntimeError>>,result:Result<Vec<String>,RuntimeError> },
+    Steered { id:String,result:Result<Vec<String>,RuntimeError> },
+    NativeInput { id:String,result:Result<Value,RuntimeError> },
 }
 
 fn unique() -> String {
@@ -270,6 +285,45 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
             let pending = roots.get_mut(&id).unwrap();
             pending.preparing = false;
             if pending.cancelled || pending.timed_out { continue; }
+            if pending.command.kind == OperationKind::SteerQueue {
+                let queue = queue.clone(); let target = target.clone(); let sender = internal.clone(); let sample = clock(start);
+                let entry_id = pending.command.payload["entry_id"].as_str().map(str::to_owned);
+                jobs.spawn(async move {
+                    let result = async {
+                        let claimed = queue.exec(target.generation,&format!("steer-claim:{id}"),sample,
+                            Action::Claim { min_ts:target.created,limit:None,entry_id }).await.map_err(io_failure)?;
+                        let mut replies = Vec::new();
+                        for row in claimed.as_array().ok_or_else(||failure("queue_shape"))? {
+                            let entry = row["id"].as_str().ok_or_else(||failure("queue_entry"))?.to_owned();
+                            let command = RuntimeCommand { operation_id:format!("{id}:{entry}"),kind:OperationKind::Steer,
+                                payload:json!({"text":row["text"],"entry_id":entry,"pre_transcript":row["pre_transcript"].as_bool().unwrap_or(false)}) };
+                            let (response,receive) = oneshot::channel();
+                            sender.send(Message::Command { command,response,from_queue:false }).await.map_err(|_|failure("runtime_closed"))?;
+                            replies.push((entry,receive));
+                        }
+                        let mut accepted = Vec::new();
+                        let mut uncertain = false;
+                        for (entry,receive) in replies {
+                            let result = receive.await.map_err(|_|failure("runtime_closed"))?;
+                            match result {
+                                Ok(reply) if reply.disposition == Disposition::Accepted => {
+                                    queue.exec(target.generation,&format!("steered:{id}:{entry}"),sample,
+                                        Action::SetDelivered { entry_id:entry.clone(),value:true,steered:true }).await.map_err(io_failure)?;
+                                    accepted.push(entry);
+                                }
+                                Ok(reply) if reply.disposition == Disposition::Unknown => { uncertain = true; },
+                                _=>{
+                                    if queue.exec(target.generation,&format!("steer-unclaim:{id}:{entry}"),sample,
+                                        Action::SetDelivered { entry_id:entry,value:false,steered:false }).await.is_err() { uncertain = true; }
+                                }
+                            }
+                        }
+                        if uncertain { Err(failure("steer_unknown")) } else { Ok(accepted) }
+                    }.await;
+                    Job::Steered { id,result }
+                });
+                continue;
+            }
             match engine.command(pending.command.clone(),clock(start)) {
                 Ok(next)=>effects.extend(next),Err(error)=>fail_root(&mut roots,&id,error),
             }
@@ -312,6 +366,8 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                 Effect::Publish { channel,data } => {
                     if ["preview","thinking","tool"].contains(&channel.as_str()) {
                         channels.insert(channel.clone(),data.clone()); publish(&events,&target,&mut revision,&channel,data);
+                    } else if ["voice","voice_target"].contains(&channel.as_str()) {
+                        publish(&events,&target,&mut revision,&channel,data);
                     }
                 }
                 Effect::StateChanged => {
@@ -353,12 +409,14 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                     sequence += 1;
                     let phase_id = format!("policy:{}:{sequence}",target.generation);
                     let queue = queue.clone(); let target = target.clone(); let policy = engine.policy.clone(); let sample = clock(start);
+                    let view = engine.view(); let state_gate = state_gate.clone(); let version = state_version;
                     jobs.spawn(async move {
                         let result = async {
                             queue.exec(target.generation,&format!("prepare:{phase_id}"),sample,Action::Prepare { id:phase_id.clone(),
                                 payload:json!({"kind":kind,"request_id":request_id,"payload":payload}),entry_id:None }).await.map_err(io_failure)?;
+                            save_view(&queue,target.generation,sample,&state_gate,version,&view).await?;
                             queue.exec(target.generation,&format!("dispatch:{phase_id}"),sample,Action::BeginDispatch { id:phase_id.clone(),wire_id:phase_id.clone() }).await.map_err(io_failure)?;
-                            let result = policy.ok_or_else(||failure("policy_unavailable"))?.run(&target,&kind,&request_id,payload).await;
+                            let result = policy.ok_or_else(||failure("policy_unavailable"))?.run(&target,&kind,&request_id,payload,&phase_id).await;
                             let (status,stored) = match &result {
                                 Ok(payload)=>(Status::Accepted,payload.clone()),
                                 Err(error)=>(Status::Unknown,json!({"error_code":error.code})),
@@ -458,14 +516,16 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             }
                             let result = async {
                                 if matches!(command.kind,OperationKind::Input | OperationKind::Steer) {
+                                    let entry_id = command.payload["entry_id"].as_str().unwrap_or(&id);
                                     let rows = queue.exec(target.generation,&format!("load:{id}"),sample,Action::Load).await.map_err(io_failure)?;
-                                    if !rows.as_array().is_some_and(|rows|rows.iter().any(|row|row["id"] == id)) {
+                                    if !rows.as_array().is_some_and(|rows|rows.iter().any(|row|row["id"] == entry_id)) {
                                         queue.exec(target.generation,&format!("append:{id}"),sample,Action::Append { text:command.payload["text"].as_str().ok_or_else(||failure("input_text"))?.into(),
-                                            delivered:false,ts:None,pre_transcript:command.payload["pre_transcript"] == true,entry_id:Some(id.clone()) }).await.map_err(io_failure)?;
+                                            delivered:false,ts:None,pre_transcript:command.payload["pre_transcript"] == true,entry_id:Some(entry_id.into()) }).await.map_err(io_failure)?;
                                     }
                                 }
                                 queue.exec(target.generation,&format!("prepare:{id}:{}",unique()),sample,Action::Prepare { id:id.clone(),payload:serde_json::to_value(&command).unwrap(),
-                                    entry_id:matches!(command.kind,OperationKind::Input | OperationKind::Steer).then(||id.clone()) }).await.map_err(io_failure)?;
+                                    entry_id:matches!(command.kind,OperationKind::Input | OperationKind::Steer)
+                                        .then(||command.payload["entry_id"].as_str().unwrap_or(&id).into()) }).await.map_err(io_failure)?;
                                 Ok(())
                             }.await;
                             *preparation.0.lock().await += 1;
@@ -580,9 +640,10 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             jobs.spawn(async move {
                                 let result = async {
                                     let phase = format!("{id}:prepare_prompt");
-                                    queue.exec(target.generation,&format!("prepare:{phase}"),sample,Action::Prepare { id:phase.clone(),payload:command.payload.clone(),entry_id:None }).await.map_err(io_failure)?;
+                                    queue.exec(target.generation,&format!("prepare:{phase}"),sample,Action::Prepare { id:phase.clone(),payload:json!({"kind":"prepare_prompt",
+                                        "request_id":id,"payload":command.payload}),entry_id:None }).await.map_err(io_failure)?;
                                     queue.exec(target.generation,&format!("dispatch:{phase}"),sample,Action::BeginDispatch { id:phase.clone(),wire_id:phase }).await.map_err(io_failure)?;
-                                    let payload = policy.run(&target,"prepare_prompt",&RequestId::String(id.clone()),command.payload).await?;
+                                    let payload = policy.run(&target,"prepare_prompt",&RequestId::String(id.clone()),command.payload,&format!("{id}:prepare_prompt")).await?;
                                     queue.exec(target.generation,&format!("finish:{id}:prepare_prompt"),sample,Action::Finish {
                                         id:format!("{id}:prepare_prompt"),status:Status::Accepted,result:payload.clone() }).await.map_err(io_failure)?;
                                     Ok(payload)
@@ -599,7 +660,34 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                         match result {
                             Ok(payload) => {
                                 for (key,value) in payload.as_object().cloned().unwrap_or_default() { pending.command.payload[key] = value; }
-                                pending.ready_to_run = true;
+                                if target.provider == "claude" && pending.command.payload["native_candidate"] == true {
+                                    let queue = queue.clone(); let target = target.clone(); let policy = engine.policy.clone().unwrap();
+                                    let command = pending.command.clone(); let original = pending.original.clone(); let view = engine.view(); let sample = clock(start);
+                                    jobs.spawn(async move {
+                                        let result = async {
+                                            let phase = format!("{id}:native_message");
+                                            let payload = json!({"text":command.payload["text"]});
+                                            queue.exec(target.generation,&format!("prepare:{phase}"),sample,Action::Prepare { id:phase.clone(),
+                                                payload:json!({"kind":"native_message","request_id":id,"payload":payload}),entry_id:None }).await.map_err(io_failure)?;
+                                            let cursor = capture_cursor(&target,&view).await?;
+                                            queue.exec(target.generation,&format!("native-cursor:{id}"),sample,Action::BindDispatch { id:id.clone(),cursor }).await.map_err(io_failure)?;
+                                            queue.exec(target.generation,&format!("native-dispatch:{id}"),sample,Action::BeginDispatch { id:id.clone(),wire_id:phase.clone() }).await.map_err(io_failure)?;
+                                            queue.exec(target.generation,&format!("dispatch:{phase}"),sample,Action::BeginDispatch { id:phase.clone(),wire_id:phase.clone() }).await.map_err(io_failure)?;
+                                            let result = policy.run(&target,"native_message",&RequestId::String(id.clone()),payload,&phase).await?;
+                                            let outcome = result["outcome"].as_str().ok_or_else(||failure("native_outcome"))?;
+                                            let status = match outcome { "written"=>Status::Accepted,"not_written"=>Status::Rejected,"unknown"=>Status::Unknown,_=>return Err(failure("native_outcome")) };
+                                            queue.exec(target.generation,&format!("finish:{phase}"),sample,Action::Finish { id:phase,status,result:result.clone() }).await.map_err(io_failure)?;
+                                            if outcome == "not_written" {
+                                                queue.exec(target.generation,&format!("native-defer:{id}"),sample,Action::Finish { id:id.clone(),status:Status::Deferred,result:json!({"not_written":true}) }).await.map_err(io_failure)?;
+                                                let state = queue.snapshot().await.map_err(io_failure)?;
+                                                let entry_id = state.operations[&id].entry_id.clone();
+                                                queue.exec(target.generation,&format!("native-fallback:{id}"),sample,Action::Prepare { id:id.clone(),payload:original,entry_id }).await.map_err(io_failure)?;
+                                            }
+                                            Ok(result)
+                                        }.await;
+                                        Job::NativeInput { id,result }
+                                    });
+                                } else { pending.ready_to_run = true; }
                             }
                             Err(error)=>fail_root(&mut roots,&id,error),
                         }
@@ -708,6 +796,27 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                                 let _ = response.send(Ok(json!({"confirmed":ids.len()})));
                             }
                             Err(error)=>{ let _ = response.send(Err(error)); }
+                        }
+                    }
+                    Job::Steered { id,result } => {
+                        let (disposition,payload) = match result {
+                            Ok(ids)=>(Disposition::Accepted,json!({"ids":ids})),
+                            Err(error)=>(Disposition::Unknown,json!({"error":error.message,"error_code":error.code})),
+                        };
+                        effects.push_back(Effect::Reply { operation_id:id,disposition,payload });
+                    }
+                    Job::NativeInput { id,result } => {
+                        match result {
+                            Ok(result) if result["outcome"] == "not_written" => {
+                                if let Some(root) = roots.get_mut(&id) {
+                                    if !root.cancelled && !root.timed_out { root.ready_to_run = true; }
+                                }
+                            }
+                            Ok(result)=>effects.push_back(Effect::Reply { operation_id:id,
+                                disposition:if result["outcome"] == "written" { Disposition::Accepted } else { Disposition::Unknown },payload:result }),
+                            Err(error)=>{
+                                effects.push_back(Effect::Reply { operation_id:id,disposition:Disposition::Unknown,payload:json!({"error_code":error.code,"error":error.message}) });
+                            }
                         }
                     }
                 }

@@ -1,6 +1,27 @@
 use hangar_server::runtime::{claude::ClaudeEngine, protocol::*};
 use serde_json::{Value, json};
 
+#[test]
+fn model_effort_intent_is_not_an_extra_cli_model_field() {
+    let mut engine = ClaudeEngine::new(json!({"name":"session","session_id":"sid","initialized":true}),1,
+        ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 });
+    let effects = engine.command(RuntimeCommand { operation_id:"model".into(),kind:OperationKind::SetModel,
+        payload:json!({"model":"test-model","effort":"high"}) },ClockSample { monotonic_s:1.0,epoch_s:1_800_000_001.0 }).unwrap();
+    let request = effects.iter().find_map(|effect|match effect { Effect::Write { frame,.. }=>Some(&frame["request"]),_=>None }).unwrap();
+    assert_eq!(request,&json!({"subtype":"set_model","model":"test-model"}));
+}
+
+#[test]
+fn hydrated_reader_requests_usage_and_reload_stamp_without_viewers() {
+    let mut engine = engine(json!({"name":"session","session_id":"sid","initialized":true}));
+    let snapshot = CanoSnapshot::parse(json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,
+        "aberto":false,"pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}})).unwrap();
+    let effects = engine.hydrate(snapshot).unwrap();
+    for service in ["last_usage","reload_stamp"] {
+        assert!(effects.iter().any(|effect|matches!(effect,Effect::Policy { kind,.. } if kind == service)));
+    }
+}
+
 fn clock(seconds:f64) -> ClockSample { ClockSample { monotonic_s:seconds,epoch_s:1_800_000_000.0 + seconds } }
 fn engine(metadata:Value) -> ClaudeEngine { ClaudeEngine::new(metadata,1,clock(10.0)) }
 fn line(engine:&mut ClaudeEngine,value:Value,seconds:f64) -> Vec<Effect> { engine.apply(EngineInput::Line(value),clock(seconds)).unwrap() }

@@ -774,11 +774,14 @@ class CodexAdapter:
 
     async def _ligar_sem_terminal(self, name: str, meta: dict, *, reabrir: bool = True) -> Optional[AppServerClient]:
         """Religa no cano vivo da sessão sem terminal; sem cano (ou cano morto), sobe outro."""
+        from app.runtime_adapter import assert_legacy, bind_client
+        assert_legacy(name)
         cano = meta.get("cano") or {}
         if cano:
             ligado = await sem_terminal.conectar(cano)
             if ligado is not None:
                 client, snap = ligado
+                bind_client(name, client)
                 if snap.get("saiu") is None:
                     try:
                         await sem_terminal.initialize(client)
@@ -809,6 +812,8 @@ class CodexAdapter:
         return await self._subir_sem_terminal(name, meta)
 
     async def _subir_sem_terminal(self, name: str, meta: dict) -> Optional[AppServerClient]:
+        from app.runtime_adapter import assert_legacy, bind_client
+        assert_legacy(name)
         esforco_recusado = None
         falhas = self._falhas_subida.get(name, 0)
         if falhas >= self.TETO_SUBIDAS:
@@ -822,6 +827,7 @@ class CodexAdapter:
             if ligado is None:
                 raise RuntimeError("cano não escutou em 10s")
             client, _ = ligado
+            bind_client(name, client)
             try:
                 await sem_terminal.initialize(client)
                 approval, sandbox = sem_terminal.politica(meta.get("permission_mode"))
@@ -2139,3 +2145,7 @@ class CodexAdapter:
         # O rollout path vem do thread/start (result.thread.path), gravado no sidecar -- nao ha como
         # derivar do cwd+id como no Claude. Nunca chamado no caminho Codex.
         raise NotImplementedError("Codex obtem o rollout path via thread/start, nao por derivacao")
+
+
+from app.runtime_adapter import install_adapter as _install_runtime_adapter
+_install_runtime_adapter(CodexAdapter, "codex")

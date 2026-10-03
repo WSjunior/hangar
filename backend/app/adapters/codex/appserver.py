@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import socket
+import uuid
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -40,7 +41,7 @@ class AppServerClient:
         self._endpoint: str | None = None
         self._reader_task: asyncio.Task | None = None
         self._next_id = 0
-        self._pending: dict[int, asyncio.Future] = {}
+        self._pending: dict[int | str, asyncio.Future] = {}
         self._notifications: asyncio.Queue = asyncio.Queue()
         self.server_requests: dict[int | str, dict] = {}
         self._respondendo: set[int | str] = set()
@@ -51,6 +52,10 @@ class AppServerClient:
         # código de saída dele, pra dizer na tela por que a sessão morreu.
         self.stderr_tail: collections.deque[str] = collections.deque(maxlen=20)
         self.rc_cano: int | None = None
+        self.runtime_acks = {}
+        self.runtime_tickets = {}
+        self.runtime_owner = None
+        self.runtime_nonce = uuid.uuid4().hex
 
     @property
     def closed(self) -> bool:
@@ -216,6 +221,10 @@ class AppServerClient:
                         if not isinstance(msg, dict):
                             continue
                     tipo_cano = msg.get("type")
+                    if tipo_cano == "cano_input_ack":
+                        from app.runtime_adapter import accept_ack
+                        accept_ack(self, msg)
+                        continue
                     if tipo_cano == "cano_stderr":
                         self.stderr_tail.append(str(msg.get("linha", "")))
                         continue
@@ -240,6 +249,13 @@ class AppServerClient:
                                     self._respondendo.discard(rid)
                         await self._notifications.put(msg)
                     elif msg_id is not None:
+                        if type(msg_id) not in (int, str):
+                            raise ValueError("ID RPC inválido")
+                        if self.runtime_owner is not None:
+                            from app import runtime_coordinator
+                            from app.runtime_adapter import LegacyIO
+                            coordinator = runtime_coordinator.current()
+                            await LegacyIO(coordinator).reply(self.runtime_owner[0], self, msg)
                         # Resposta de request: casa o Future pendente. Se o id nao tem Future
                         # (resposta tardia de request que ja deu timeout), dropa com warning -
                         # NAO enfileira em notifications (resposta nao tem `method`, poluiria a
@@ -274,7 +290,7 @@ class AppServerClient:
     async def respond(self, request_id: int | str, result: dict | None, *, erro: dict | None = None) -> None:
         """Responde uma vez ao pedido nativo; o servidor publica a resolução para todos.
         `erro` responde com erro JSON-RPC (método que este cliente não atende) em vez de result."""
-        if self.closed or request_id not in self.server_requests:
+        if type(request_id) not in (int, str) or self.closed or request_id not in self.server_requests:
             raise ValueError("A pergunta já foi respondida ou cancelada.")
         if request_id in self._respondendo:
             raise ValueError("A resposta desta pergunta já está sendo enviada.")
@@ -285,8 +301,7 @@ class AppServerClient:
             if self._ws is not None:
                 await self._ws.send(line)
             else:
-                self._writer.write((line + "\n").encode())
-                await self._writer.drain()
+                await self._send_frame(json.loads(line))
         except Exception:
             self._respondendo.discard(request_id)
             raise
@@ -296,14 +311,16 @@ class AppServerClient:
             raise RuntimeError("AppServerClient.start() precisa rodar antes de request()")
         self._next_id += 1
         req_id = self._next_id
+        if self.runtime_owner is not None:
+            name, key, generation = self.runtime_owner
+            req_id = f"reserve:{key}:{generation}:{self.runtime_nonce}:{self._next_id}"
         fut = asyncio.get_running_loop().create_future()
         self._pending[req_id] = fut
         line = json.dumps({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
         if self._ws is not None:
             await self._ws.send(line)
         else:
-            self._writer.write((line + "\n").encode())
-            await self._writer.drain()
+            await self._send_frame(json.loads(line))
         try:
             msg = await asyncio.wait_for(fut, timeout=timeout)
         finally:
@@ -311,6 +328,23 @@ class AppServerClient:
         if "error" in msg:
             raise RuntimeError(f"codex app-server error em '{method}': {msg['error']}")
         return msg.get("result", {})
+
+    async def _send_frame(self, frame: dict) -> None:
+        if self.runtime_owner is not None:
+            from app import runtime_coordinator
+            from app.runtime_adapter import LegacyIO, assert_legacy
+            name, key, generation = self.runtime_owner
+            coordinator = runtime_coordinator.current()
+            if coordinator is None:
+                raise RuntimeError("cliente gerenciado sem responsável")
+            binding = coordinator.slot(name).binding
+            if binding.key != key or binding.generation != generation:
+                raise RuntimeError("cliente de outra geração")
+            assert_legacy(name)
+            await LegacyIO(coordinator).write(name, self, self._writer, frame, self.cano_snapshot["versao"])
+        else:
+            self._writer.write((json.dumps(frame) + "\n").encode())
+            await self._writer.drain()
 
     async def notifications(self) -> AsyncIterator[dict]:
         while True:
@@ -334,7 +368,7 @@ class AppServerClient:
         with contextlib.suppress(ProcessLookupError, Exception):
             self._proc.terminate()
 
-    async def close(self) -> None:
+    async def close(self, *, strict: bool = False) -> None:
         if self._reader_task is not None:
             self._reader_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -346,8 +380,11 @@ class AppServerClient:
             self._ws = None
         if self._writer is not None:
             self._writer.close()
-            with contextlib.suppress(Exception):
+            if strict:
                 await self._writer.wait_closed()
+            else:
+                with contextlib.suppress(Exception):
+                    await self._writer.wait_closed()
             self._writer = None
         if self._proc is not None:
             with contextlib.suppress(ProcessLookupError):

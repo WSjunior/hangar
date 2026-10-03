@@ -424,16 +424,18 @@ class ClaudeHeadlessAdapter:
             sess.ativa_em = time.monotonic()
         if sess is None or not await self.deliverable(name):
             return "deferred"
+        revision = getattr(sess, "runtime_turn_revision", 0)
         try:
             await self._escrever_prompt(sess, text)
         except Exception:
             _log.exception("claude headless: escrita no stdin falhou name=%s", name)
             return "deferred"
-        sess.in_progress = True
-        sess.state = "working"
-        sess.label = None
-        sess.ativa_em = time.monotonic()
-        sess.iniciar_turno()
+        if getattr(sess, "runtime_turn_revision", 0) == revision:
+            sess.in_progress = True
+            sess.state = "working"
+            sess.label = None
+            sess.ativa_em = time.monotonic()
+            sess.iniciar_turno()
         await self._notify(sess)
         if self.apos_entrega is not None:
             self.apos_entrega(name)
@@ -728,6 +730,8 @@ class ClaudeHeadlessAdapter:
             _esquecer_cano(name, pid)
 
     async def _encerrar(self, sess: _Sessao) -> None:
+        from app.runtime_adapter import assert_legacy
+        assert_legacy(sess.name)
         """Mata o processo e tira a sessão da memória. Saída nossa deixa `returncode` None, então
         sem o pop ela seguiria "viva" e o próximo prompt não subiria outro processo."""
         await asyncio.to_thread(self._matar, sess)
@@ -756,6 +760,8 @@ class ClaudeHeadlessAdapter:
         return sess
 
     async def _ligar(self, name: str, *, so_reconectar: bool = False) -> _Sessao | None:
+        from app.runtime_adapter import assert_legacy
+        assert_legacy(name)
         # Um spawn por nome de cada vez: prompt e troca de modelo chegando juntos numa sessão
         # parada subiriam dois `claude` no mesmo .jsonl.
         async with self._spawn_locks.setdefault(name, asyncio.Lock()):
@@ -913,6 +919,8 @@ class ClaudeHeadlessAdapter:
         return base + model_args.args_de("claude", model, effort, permission_mode)
 
     async def _spawn(self, sess: _Sessao, *, so_reconectar: bool = False) -> bool:
+        from app.runtime_adapter import assert_legacy
+        assert_legacy(sess.name)
         """Liga a sessão a um cano: o que já existe (sidecar com `cano`), ou um novo. Devolve
         False só em `so_reconectar` sem cano vivo."""
         meta = sess.meta
@@ -1131,6 +1139,10 @@ class ClaudeHeadlessAdapter:
                         _log.warning("claude headless: linha não-JSON no stdout name=%s: %r", sess.name, linha[:200])
                     continue
                 t = ev.get("type")
+                if t == "cano_input_ack":
+                    from app.runtime_adapter import accept_ack
+                    accept_ack(sess, ev)
+                    continue
                 if t == "cano_stderr":
                     sess.stderr_tail.append(str(ev.get("linha") or ""))
                     continue
@@ -1184,7 +1196,7 @@ class ClaudeHeadlessAdapter:
             # em aberto só desfaz o `awaiting_input` que o adapter gravou.
             if caiu:
                 self._gravar_marcador(sess, "dead")
-            elif sess.state == "awaiting_input":
+            elif sess.state == "awaiting_input" and self._sessions.get(sess.name) is sess:
                 self._gravar_marcador(sess, "idle")
             sess.state = "dead"
             await self._clear_preview(sess)
@@ -1193,14 +1205,29 @@ class ClaudeHeadlessAdapter:
             await self._notify(sess)
 
     async def _write(self, sess: _Sessao, obj: dict) -> None:
+        from app import runtime_coordinator
+        from app.runtime_adapter import LegacyIO, assert_legacy
+        assert_legacy(sess.name)
         if not sess.vivo or sess.proc is None or sess.proc.stdin is None:
             raise RuntimeError("processo não está vivo")
+        coordinator = runtime_coordinator.current()
+        if coordinator is not None and coordinator.managed_queue(sess.name):
+            sess.runtime_acks = getattr(sess, "runtime_acks", {})
+            await LegacyIO(coordinator).write(sess.name, sess, sess.proc.stdin, obj,
+                (sess.meta.get("cano") or {}).get("versao", 1))
+            return
         sess.proc.stdin.write((json.dumps(obj) + "\n").encode())
         await sess.proc.stdin.drain()
 
     async def _ctrl(self, sess: _Sessao, subtype: str, *, esperar: bool = True, **req) -> dict | None:
         sess.n_req += 1
         rid = f"hangar_{sess.n_req}"
+        from app import runtime_coordinator
+        coordinator = runtime_coordinator.current()
+        if coordinator is not None and coordinator.managed_queue(sess.name):
+            binding = coordinator.slot(sess.name).binding
+            sess.runtime_nonce = getattr(sess, "runtime_nonce", uuid.uuid4().hex)
+            rid = f"reserve:{binding.key}:{binding.generation}:{sess.runtime_nonce}:{sess.n_req}"
         fut: asyncio.Future | None = None
         if esperar:
             fut = asyncio.get_running_loop().create_future()
@@ -1221,7 +1248,16 @@ class ClaudeHeadlessAdapter:
     # ── eventos do stdout ──────────────────────────────────────────────────────────────────
 
     async def _on_event(self, sess: _Sessao, ev: dict) -> None:
+        from app import runtime_coordinator
+        from app.runtime_adapter import LegacyIO, assert_legacy
+        assert_legacy(sess.name, reading=True)
         t = ev.get("type")
+        coordinator = runtime_coordinator.current()
+        if coordinator is not None and coordinator.managed_queue(sess.name):
+            if t == "control_response":
+                await LegacyIO(coordinator).reply(sess.name, sess, ev)
+            if t in {"result", "conversation_reset"} and not ev.get("parent_tool_use_id"):
+                sess.runtime_turn_revision = getattr(sess, "runtime_turn_revision", 0) + 1
         if t != "keep_alive":
             sess.ativa_em = time.monotonic()
         if ev.get("parent_tool_use_id") and not str(t).startswith("control_"):
@@ -2454,3 +2490,7 @@ def matar_orfaos() -> int:
     if sem_permissao:
         _log.info("claude headless: varredura de órfãos sem permissão em %d processo(s) meus", sem_permissao)
     return mortos
+
+
+from app.runtime_adapter import install_adapter as _install_runtime_adapter
+_install_runtime_adapter(ClaudeHeadlessAdapter, "claude")

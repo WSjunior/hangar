@@ -39,6 +39,7 @@ pub struct ClaudeEngine {
     wires: BTreeMap<String,Wire>,
     policies: BTreeMap<RequestId,String>,
     last_format_request: Option<RequestId>,
+    reload_deadline: f64,
     rate_limit_info: Value,
     commands: Option<Value>,
     terminal_commands: Value,
@@ -85,11 +86,12 @@ impl ClaudeEngine {
             initialized:metadata["initialized"] == true,initializing:metadata["initialized"] != true,
             init_warning:None,in_progress:false,state,model:string(&metadata["model"]),effort:string(&metadata["effort"]),
             permission_mode,previous_non_plan,restore_plan:None,pending:Vec::new(),question:None,
-            waiters:BTreeMap::new(),wires:BTreeMap::new(),policies:BTreeMap::new(),last_format_request:None,rate_limit_info:Value::Null,commands:None,terminal_commands:json!([]),
+            waiters:BTreeMap::new(),wires:BTreeMap::new(),policies:BTreeMap::new(),last_format_request:None,reload_deadline:clock.monotonic_s+10.0,
+            rate_limit_info:Value::Null,commands:metadata.get("commands").filter(|commands|!commands.is_null()).cloned(),terminal_commands:metadata.get("terminal_commands").cloned().unwrap_or_else(||json!([])),
             preview:LiveBuffer::default(),thinking:LiveBuffer::default(),tool_input:LiveBuffer::default(),tool_name:None,tool_visible:false,
             label:None,compacting:false,turn_start:None,label_deadline:None,tokens_closed:0,tokens_message:None,
-            token_chars:0,thinking_start:None,thought_s:0.0,tasks:Vec::new(),usage:Value::Null,
-            context_window:metadata["context_window"].as_u64(),cost:None,effort_intent,effort_deadline:None,active_input:None,unknown:BTreeSet::new(),metadata };
+            token_chars:0,thinking_start:None,thought_s:0.0,tasks:Vec::new(),usage:metadata.get("usage").cloned().unwrap_or(Value::Null),
+            context_window:metadata["context_window"].as_u64(),cost:metadata["cost"].as_f64(),effort_intent,effort_deadline:None,active_input:None,unknown:BTreeSet::new(),metadata };
         if let Some(controls) = engine.metadata["control_carry"].as_array() {
             for control in controls {
                 let Ok(request_id) = serde_json::from_value::<RequestId>(control["request_id"].clone()) else { continue };
@@ -266,6 +268,8 @@ impl ClaudeEngine {
             self.apply_usage(&result,&mut effects);
         }
         self.changed(&mut effects,true);
+        if self.usage.is_null() { self.policy("last_usage",json!({}),&mut effects); }
+        self.policy("reload_stamp",json!({}),&mut effects);
         Ok(effects)
     }
 
@@ -331,7 +335,10 @@ impl ClaudeEngine {
             }
             OperationKind::SetModel | OperationKind::SetEffort => {
                 if let Some(model) = payload["model"].as_str().filter(|m|!m.is_empty()) {
-                    self.control(operation_id,"set_model",payload.clone(),&mut effects);
+                    self.control(operation_id.clone(),"set_model",json!({"model":model}),&mut effects);
+                    if let Some(waiter) = self.waiters.values_mut().find(|waiter|waiter.operation_id == operation_id) {
+                        waiter.payload = payload.clone();
+                    }
                 } else { self.request_effort(operation_id,&payload,&mut effects)?; }
             }
             OperationKind::ListModels => self.control(operation_id,"list_models",json!({}),&mut effects),
@@ -395,6 +402,11 @@ impl ClaudeEngine {
                             if payload.get("limit_reset").is_some() { self.state.limit_reset = string(&payload["limit_reset"]); }
                         }
                         "reload_stamp" => self.state.recarregar_motivo = string(&payload["reason"]),
+                        "last_usage" => {
+                            if self.usage.is_null() && payload["usage"].is_object() { self.usage = payload["usage"].clone(); }
+                            self.changed(&mut effects,true);
+                            return Ok(effects);
+                        }
                         "quota" => {},
                         _ => {},
                     }
@@ -739,6 +751,10 @@ impl ClaudeEngine {
 
     fn on_tick(&mut self,effects:&mut Vec<Effect>) {
         let now = self.clock.monotonic_s;
+        if now >= self.reload_deadline {
+            self.reload_deadline = now + 10.0;
+            self.policy("reload_stamp",json!({}),effects);
+        }
         if let Some(text) = self.preview.tick(now) { self.publish("preview",text,effects); }
         if let Some(text) = self.thinking.tick(now) { self.publish("thinking",text,effects); }
         if let Some(text) = self.tool_input.tick(now) { self.publish_tool(text,effects); }
@@ -772,7 +788,7 @@ impl ClaudeEngine {
     }
 
     pub fn next_deadline(&self) -> Option<f64> {
-        [self.preview.deadline(),self.thinking.deadline(),self.tool_input.deadline(),self.init_warning,self.label_deadline,self.effort_deadline]
+        [self.preview.deadline(),self.thinking.deadline(),self.tool_input.deadline(),self.init_warning,self.label_deadline,self.effort_deadline,Some(self.reload_deadline)]
             .into_iter().flatten().chain(self.waiters.values().filter(|w|!w.timed_out).map(|w|w.deadline))
             .min_by(f64::total_cmp)
     }
