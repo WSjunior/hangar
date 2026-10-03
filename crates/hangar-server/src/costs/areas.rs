@@ -153,7 +153,7 @@ impl AreaMap {
             rules
         };
         if !inside(&path, &root) { return "outros".into(); }
-        self.area_of_target(&relative_path(&path, &root), rules).unwrap_or_else(|| "outros".into())
+        self.area_of_target(&relative_path(&path, &root), rules).filter(|area| !area.is_empty()).unwrap_or_else(|| "outros".into())
     }
 
     pub fn count_areas(&self, regs: &[ToolReg]) -> IndexMap<String, i64> {
@@ -161,7 +161,7 @@ impl AreaMap {
         for reg in regs {
             let (rules_cwd, cwd, targets, command) = match reg {
                 ToolReg::S { rules_cwd, target } => {
-                    if let Some(area) = self.area_of_target(target, &self.rules_for(rules_cwd)) { *counts.entry(area).or_insert(0) += 1; }
+                    if let Some(area) = self.area_of_target(target, &self.rules_for(rules_cwd)).filter(|area| !area.is_empty()) { *counts.entry(area).or_insert(0) += 1; }
                     continue;
                 }
                 ToolReg::P { rules_cwd, cwd, paths } => (rules_cwd, cwd, paths, false),
@@ -208,7 +208,11 @@ pub fn repartir(value: i64, weights: &IndexMap<String, i64>) -> IndexMap<String,
     let total: i128 = weights.values().map(|n| i128::from(*n)).sum();
     assert!(weights.is_empty() || total != 0, "soma dos pesos nula");
     let exact: IndexMap<_, _> = weights.iter().map(|(area, n)| (area.clone(), integer_ratio(i128::from(value) * i128::from(*n), total))).collect();
-    let mut integers: IndexMap<_, _> = exact.iter().map(|(area, x)| (area.clone(), *x as i64)).collect();
+    let mut integers: IndexMap<_, _> = exact.iter().map(|(area, x)| {
+        // MAX convertido em f64 já vale 2^63; a comparação superior precisa ser exclusiva.
+        assert!(*x >= -9223372036854775808.0 && *x < 9223372036854775808.0, "area_allocation_out_of_range");
+        (area.clone(), *x as i64)
+    }).collect();
     let sum: i128 = integers.values().map(|n| i128::from(*n)).sum();
     let mut order: Vec<_> = exact.keys().collect();
     order.sort_by(|a, b| ((integers[*a] as f64) - exact[*a]).total_cmp(&((integers[*b] as f64) - exact[*b])).then_with(|| a.cmp(b)));

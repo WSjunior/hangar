@@ -68,10 +68,14 @@ pub fn pede_agente(prompt: &str) -> bool {
     };
     // O re do Python não inclui marcas/conectores em \w e equipara os quatro I.
     let pattern = AGENT.get_or_init(|| Regex::new(r"(?i)(sub-?agentes?|agentes?|agents?|explore|paralelo|parallel|d[iİı]spara|delega|workflow|fan-?out|subagent-dr[iİı]ven)").unwrap());
-    pattern.find_iter(prompt).any(|found| {
-        !prompt[..found.start()].chars().next_back().is_some_and(is_word)
-            && !prompt[found.end()..].chars().next().is_some_and(is_word)
-    })
+    let mut start = 0;
+    while let Some(found) = pattern.find_at(prompt, start) {
+        if !prompt[..found.start()].chars().next_back().is_some_and(is_word)
+            && !prompt[found.end()..].chars().next().is_some_and(is_word) { return true; }
+        // Um início rejeitado pode conter outra ocorrência válida depois de um hífen.
+        start = found.start() + prompt[found.start()..].chars().next().unwrap().len_utf8();
+    }
+    false
 }
 
 pub fn plugin_de(name: &str) -> String {

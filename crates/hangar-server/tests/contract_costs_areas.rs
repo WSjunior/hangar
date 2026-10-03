@@ -226,6 +226,59 @@ fn agent_request_boundaries_and_turkish_i_follow_python_re() {
 }
 
 #[test]
+fn rejected_agent_matches_do_not_consume_valid_overlapping_matches() {
+    for prompt in ["xsub-agente", "xsub-agentes", "éxsub-agente", "éxsub-agentes", "xsub-agente\u{301}"] {
+        assert!(pede_agente(prompt), "{prompt}");
+    }
+    for prompt in ["xsub-agente_", "xsub-agentesé", "xsubagente", "xsubagentes", "éxsub-agenteⅧ"] {
+        assert!(!pede_agente(prompt), "{prompt}");
+    }
+}
+
+#[test]
+fn allocation_outside_i64_panics_with_static_code_before_casting() {
+    for (value, pairs) in [
+        (i64::MAX, vec![("a", 1)]),
+        (i64::MAX, vec![("a", 2), ("b", -1)]),
+        (i64::MIN, vec![("a", 2), ("b", -1)]),
+        (i64::MIN, vec![("a", -1), ("b", 2)]),
+    ] {
+        let weights: IndexMap<String, i64> = pairs.into_iter().map(|(k,v)| (k.into(),v)).collect();
+        let error = std::panic::catch_unwind(|| repartir(value, &weights)).expect_err("o rateio fora de faixa deve falhar");
+        assert_eq!(error.downcast_ref::<&'static str>(), Some(&"area_allocation_out_of_range"));
+    }
+    let weights = IndexMap::from([("a".into(), 1)]);
+    for value in [i64::MIN, i64::MIN + 1024, i64::MAX - 1023] {
+        assert_eq!(repartir(value, &weights)["a"], value);
+    }
+}
+
+#[test]
+fn empty_area_name_is_kept_by_target_but_not_by_paths_or_skills() {
+    let d = tempfile::tempdir().unwrap();
+    let file = d.path().join("areas.json");
+    std::fs::write(&file, r#"{"padrao":[["",["*.py","skill:*"]]]}"#).unwrap();
+    let map = AreaMap::load(&file);
+    let cwd = d.path().to_str().unwrap();
+    let rules = map.rules_for(cwd);
+    assert_eq!(map.area_of_target("a.py", &rules), Some(String::new()));
+    assert_eq!(map.area_of_path("a.py", cwd, &rules), "outros");
+    let skill = ToolReg::S { rules_cwd: cwd.into(), target: "skill:database".into() };
+    assert!(map.count_areas(&[skill.clone()]).is_empty());
+    let path = ToolReg::P { rules_cwd: cwd.into(), cwd: cwd.into(), paths: vec!["a.py".into()] };
+    assert_eq!(map.count_areas(&[path]), IndexMap::from([("outros".into(), 1)]));
+    let command = ToolReg::C { rules_cwd: cwd.into(), cwd: cwd.into(), candidates: vec!["a.py".into()] };
+    assert!(map.count_areas(&[command]).is_empty());
+    let entries = AreaEntries {
+        header: AreaHeader { fonte: None, session_id: None, subagente: None },
+        turns: vec![(vec![skill], vec![unit("d", false, [3,2,1,0,0])])],
+    };
+    let rows = map.area_lines(&entries);
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].nome.as_str(), rows[0].input, rows[0].chamadas), ("conversa", 3, 0));
+}
+
+#[test]
 fn project_folder_matching_discards_the_dot_component_like_pathlib() {
     let d = tempfile::tempdir().unwrap();
     let file = d.path().join("areas.json");
