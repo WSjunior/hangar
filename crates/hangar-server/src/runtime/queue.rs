@@ -98,6 +98,16 @@ pub struct Store {
 }
 
 fn invalid(message: &str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message) }
+
+pub fn acquire_lease(path: &Path) -> io::Result<Arc<File>> {
+    if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+    let file = options.open(path)?;
+    file.try_lock().map_err(io::Error::from)?;
+    Ok(Arc::new(file))
+}
 fn row_id(row: &Value) -> &str { row["id"].as_str().unwrap_or("") }
 fn current(row: &Value, min_ts: f64) -> bool {
     row["ts"].as_f64().unwrap_or(0.0) >= min_ts - if row["pre_transcript"] == true { 900.0 } else { 0.0 }
