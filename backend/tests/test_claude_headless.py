@@ -218,8 +218,10 @@ def test_rotulo_da_tool_mostra_o_alvo_enquanto_o_input_escreve(adapter):
         await pedaco('{"comm')
         assert sess.label == "Bash…"
         await pedaco('and": "uv run py')
+        await sess.tool_buffer.flush()
         assert sess.label == "Bash: uv run py"   # string ainda sem aspa final
         await pedaco('test -k \\"x\\"\\nsegunda linha", "description": "roda"}')
+        await sess.tool_buffer.flush()
         assert sess.label == 'Bash: uv run pytest -k "x"'
         await stream({"type": "content_block_stop", "index": 1})
         assert sess.label == 'Bash: uv run pytest -k "x"' and sess.tool_json == ""
@@ -244,6 +246,7 @@ def test_pensamento_em_voo_vai_pra_fonte_propria_e_sai_quando_o_bloco_cai_no_jso
         for p in ("Vou ", "conferir o teste."):
             await stream({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": p}})
         await stream({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "abc"}})
+        await sess.thinking_buffer.flush()
         assert fonte_pensamento("s1").text == "Vou conferir o teste."
         assert PushPreviewSource.get("s1").text == ""   # nunca vira bolha de resposta
         await adapter._on_event(sess, {"type": "assistant", "message": {"content": [
@@ -1649,3 +1652,142 @@ def test_transcript_path_segue_o_jsonl_movido_pela_worktree(tmp_path):
     original.parent.mkdir(parents=True)
     original.write_text("{}\n")
     assert ad.transcript_path(cwd, sid, str(tmp_path)) == str(original)
+
+
+def test_tool_partial_is_parsed_on_publication_and_final_block(adapter, monkeypatch):
+    from app.adapters.preview_push import fonte_ferramenta
+    sess = adapter._sessions["s1"]
+    sess.tool_buffer._interval = 60  # o teste isola a publicação inicial e a do EOS
+    parsed = []
+    original = A._input_parcial
+    def parse(text):
+        parsed.append(text)
+        return original(text)
+    monkeypatch.setattr(A, "_input_parcial", parse)
+    async def run():
+        await adapter._on_stream(sess, {"type": "content_block_start", "content_block": {"type": "tool_use", "name": "Write"}})
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": '{"file_path":"/tmp/synthetic",'}})
+        assert json.loads(fonte_ferramenta("s1").text)["input"]["file_path"] == "/tmp/synthetic"
+        for part in ('"content":"', "body", '"}'):
+            await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": part}})
+        assert len(parsed) == 1
+        await adapter._on_stream(sess, {"type": "content_block_stop"})
+        assert json.loads(fonte_ferramenta("s1").text)["input"] == {"file_path": "/tmp/synthetic", "content": "body"}
+        assert len(parsed) == 2
+        await adapter._on_event(sess, {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Write", "input": {"file_path": "/tmp/synthetic", "content": "body"}}]}})
+        assert fonte_ferramenta("s1").text == ""
+        assert sess.tool_json == ""
+    _run(run())
+
+
+def test_committed_text_cancels_late_preview_timer(adapter):
+    sess = adapter._sessions["s1"]
+    async def run():
+        await adapter._on_stream(sess, {"type": "content_block_start", "content_block": {"type": "text"}})
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "first"}})
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "text_delta", "text": " final"}})
+        await adapter._on_event(sess, {"type": "assistant", "message": {"content": [{"type": "text", "text": "first final"}]}})
+        await asyncio.sleep(0.18)
+        assert PushPreviewSource.get("s1").text == ""
+        assert sess.previa == ""
+    _run(run())
+
+
+@pytest.mark.parametrize("boundary", ["result", "conversation_reset", "interrupt"])
+def test_turn_boundary_cancels_all_partial_channels(adapter, boundary):
+    from app.adapters.preview_push import fonte_ferramenta, fonte_pensamento
+    sess = adapter._sessions["s1"]
+
+    async def run():
+        sess.in_progress = True
+        sess.janelas_ts = A.time.time()
+        for channel, delta in (("text", {"type": "text_delta", "text": "first"}),
+                               ("thinking", {"type": "thinking_delta", "thinking": "thought"}),
+                               ("tool_use", {"type": "input_json_delta", "partial_json": '{"command":"echo'})):
+            await adapter._on_stream(sess, {"type": "content_block_start", "content_block": {"type": channel, "name": "Bash"}})
+            await adapter._on_stream(sess, {"type": "content_block_delta", "delta": delta})
+            await adapter._on_stream(sess, {"type": "content_block_delta", "delta": delta})
+        if boundary == "interrupt":
+            assert await adapter.interrupt("s1")
+        else:
+            await adapter._on_event(sess, {"type": boundary, "subtype": "success"})
+        assert PushPreviewSource.get("s1").text == ""
+        assert fonte_pensamento("s1").text == ""
+        assert fonte_ferramenta("s1").text == ""
+        await asyncio.sleep(0.18)
+        assert PushPreviewSource.get("s1").text == ""
+        assert fonte_pensamento("s1").text == ""
+        assert fonte_ferramenta("s1").text == ""
+        if sess.drenador is not None:
+            await sess.drenador
+    _run(run())
+
+
+def test_permission_and_usage_do_not_wait_for_pending_preview(adapter):
+    sess = adapter._sessions["s1"]
+
+    async def run():
+        sess.preview_buffer._interval = 60
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "first"}})
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "tail"}})
+        await adapter._on_stream(sess, {"type": "message_delta", "usage": {"output_tokens": 27}})
+        await adapter._on_event(sess, {"type": "control_request", "request_id": "live-permission", "request": {
+            "subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "echo synthetic"}}})
+        assert adapter._evento(sess).state == "awaiting_input"
+        assert "live-permission" in sess.pending
+        assert sess.tokens_msg == 27 and sess.tokens_msg_chars == 9
+        assert PushPreviewSource.get("s1").text == "first"
+        await sess.preview_buffer.discard()
+    _run(run())
+
+
+def test_partial_timer_failure_reports_without_turn_error(adapter, monkeypatch):
+    sess = adapter._sessions["s1"]
+    reports = []
+
+    async def run():
+        failed = asyncio.Event()
+        source = PushPreviewSource.get("s1")
+        original = source.push
+
+        async def push(text):
+            if text == "firsttail":
+                raise RuntimeError("synthetic preview failure")
+            await original(text)
+
+        def report(event, *args, **kwargs):
+            reports.append((event, kwargs))
+            failed.set()
+
+        monkeypatch.setattr(source, "push", push)
+        monkeypatch.setattr(A.diag, "registrar", report)
+        sess.preview_buffer._interval = 0.01
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "first"}})
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "tail"}})
+        await asyncio.wait_for(failed.wait(), 1)
+        await asyncio.gather(*adapter._tarefas)
+        assert reports == [("headless.previa_falhou", {"sessao": "s1", "provider": "claude", "erro_tipo": "RuntimeError"})]
+        assert sess.problema is None
+        assert sess.version > 0
+        assert not adapter._tarefas
+        await sess.preview_buffer.discard()
+    _run(run())
+
+
+def test_rename_on_owner_loop_cancels_old_partial_channels(adapter):
+    from app.adapters.preview_push import fonte_pensamento
+    sess = adapter._sessions["s1"]
+
+    async def run():
+        sess.loop = asyncio.get_running_loop()
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "old"}})
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "tail"}})
+        await asyncio.to_thread(adapter.rename, "s1", "renamed")
+        assert adapter._sessions["renamed"] is sess
+        assert fonte_pensamento("s1").text == ""
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "new"}})
+        await asyncio.sleep(0.18)
+        assert fonte_pensamento("renamed").text == "new"
+        assert fonte_pensamento("s1").text == ""
+        await sess.thinking_buffer.discard()
+    _run(run())
