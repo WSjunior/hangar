@@ -4,9 +4,14 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import traceback
 from collections.abc import Awaitable, Callable
 
 _log = logging.getLogger(__name__)
+
+
+def error_frames(error: BaseException) -> str:
+    return "; ".join(f"{frame.filename}:{frame.lineno}" for frame in traceback.extract_tb(error.__traceback__))
 
 
 class StreamBuffer:
@@ -62,12 +67,13 @@ class StreamBuffer:
             raise
         except Exception as exc:
             failed = True
-            _log.warning("publicação parcial falhou: %s", type(exc).__name__, exc_info=True)
+            _log.warning("publicação parcial falhou: %s frames=%s", type(exc).__name__, error_frames(exc))
             if self._on_error is not None:
                 try:
                     self._on_error(exc)
                 except Exception as callback_error:
-                    _log.warning("aviso da publicação parcial falhou: %s", type(callback_error).__name__, exc_info=True)
+                    _log.warning("aviso da publicação parcial falhou: %s frames=%s",
+                                 type(callback_error).__name__, error_frames(callback_error))
         finally:
             if self._pending is asyncio.current_task():
                 self._pending = None

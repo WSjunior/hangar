@@ -1744,6 +1744,7 @@ def test_permission_and_usage_do_not_wait_for_pending_preview(adapter):
 def test_partial_timer_failure_reports_without_turn_error(adapter, monkeypatch, caplog):
     sess = adapter._sessions["s1"]
     reports = []
+    private_text = "private-conversation-fragment"
 
     async def run():
         failed = asyncio.Event()
@@ -1753,9 +1754,9 @@ def test_partial_timer_failure_reports_without_turn_error(adapter, monkeypatch, 
         async def push(text):
             if text == "firsttail":
                 try:
-                    raise OSError(5, "synthetic source failure")
+                    raise OSError(5, private_text)
                 except OSError as cause:
-                    raise RuntimeError("synthetic preview failure") from cause
+                    raise RuntimeError(private_text) from cause
             await original(text)
 
         def report(event, *args, **kwargs):
@@ -1772,12 +1773,52 @@ def test_partial_timer_failure_reports_without_turn_error(adapter, monkeypatch, 
         assert reports == [("headless.previa_falhou", {"sessao": "s1", "provider": "claude", "erro_tipo": "RuntimeError",
                                                      "causa_tipo": "OSError", "errno": 5, "winerror": None})]
         failure = next(record for record in caplog.records if record.name == "hangar.claude_headless")
-        assert failure.exc_info and failure.exc_info[2]
-        assert isinstance(failure.exc_info[1].__cause__, OSError)
+        assert private_text not in caplog.text
+        assert private_text not in json.dumps(reports)
+        assert failure.exc_info is None
+        assert "test_claude_headless.py:" in failure.getMessage()
         assert sess.problema is None
         assert sess.version > 0
         assert not adapter._tarefas
         await sess.preview_buffer.discard()
+    _run(run())
+
+
+@pytest.mark.parametrize("path", ["fallback", "publisher", "notification"])
+def test_preview_validation_error_never_logs_input_value(adapter, monkeypatch, caplog, path):
+    from pydantic import BaseModel, ValidationError
+
+    class Input(BaseModel):
+        count: int
+
+    private_text = "private-validation-input-value"
+    with pytest.raises(ValidationError) as failure:
+        Input.model_validate({"count": private_text})
+    error = failure.value
+    reports = []
+    monkeypatch.setattr(A.diag, "registrar", lambda event, *args, **kwargs: reports.append((event, kwargs)))
+    sess = adapter._sessions["s1"]
+
+    async def run():
+        if path == "fallback":
+            sess._live_failed(error)
+        else:
+            if path == "notification":
+                async def notify(session):
+                    raise error
+                monkeypatch.setattr(adapter, "_notify", notify)
+            adapter._stream_error(sess, error)
+            await asyncio.gather(*adapter._tarefas, return_exceptions=True)
+        assert private_text not in caplog.text
+        assert private_text not in json.dumps(reports)
+        assert "ValidationError" in caplog.text
+        assert "test_claude_headless.py:" in caplog.text
+        assert all(record.exc_info is None for record in caplog.records)
+        if path != "fallback":
+            assert reports[0] == ("headless.previa_falhou", {"sessao": "s1", "provider": "claude",
+                                                          "erro_tipo": "ValidationError", "errno": None, "winerror": None})
+        if path == "notification":
+            assert reports[1][0] == "headless.previa_aviso_falhou"
     _run(run())
 
 

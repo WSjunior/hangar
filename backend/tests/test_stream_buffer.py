@@ -65,6 +65,7 @@ def test_seeded_reset_appends_after_prefix():
 
 
 def test_timer_failure_is_reported_without_hot_retry_loop(caplog):
+    private_text = "private-conversation-fragment"
     async def run():
         errors = []
         failed = asyncio.Event()
@@ -72,11 +73,11 @@ def test_timer_failure_is_reported_without_hot_retry_loop(caplog):
         async def publish(value):
             calls.append(value)
             if value != "first":
-                raise RuntimeError("synthetic publication error")
+                raise RuntimeError(private_text)
         def on_error(error):
             errors.append(type(error).__name__)
             failed.set()
-            raise LookupError("synthetic report error")
+            raise LookupError(private_text)
         buffer = StreamBuffer(publish, on_error=on_error, interval=0.01)
         await buffer.append("first")
         await buffer.append(" next")
@@ -88,8 +89,11 @@ def test_timer_failure_is_reported_without_hot_retry_loop(caplog):
     asyncio.run(run())
     failures = [record for record in caplog.records if record.name == "app.adapters.stream_buffer"]
     assert len(failures) == 2
-    assert all(record.exc_info and record.exc_info[2] for record in failures)
-    assert {type(record.exc_info[1]) for record in failures} == {RuntimeError, LookupError}
+    assert private_text not in caplog.text
+    assert all(record.exc_info is None for record in failures)
+    assert all("test_stream_buffer.py:" in record.getMessage() for record in failures)
+    assert "RuntimeError" in failures[0].getMessage()
+    assert "LookupError" in failures[1].getMessage()
 
 
 def test_rebind_preserves_pending_prefix_and_publishes_without_new_delta():

@@ -32,7 +32,7 @@ from app.hook_state import hook_state
 from app.models import session_key
 from app.procinfo import pid_vivo
 from app.adapters.preview_push import PushPreviewSource
-from app.adapters.stream_buffer import StreamBuffer
+from app.adapters.stream_buffer import StreamBuffer, error_frames
 from app.adapters.codex.rollout import parse_rollout_line
 from app import codex_contas, diag
 from app import tmux
@@ -1556,8 +1556,8 @@ class CodexAdapter:
 
         def failed(exc: Exception) -> None:
             if self._sessions.get(name) is sess:
-                _log.warning("codex: publicação da prévia falhou name=%s tipo=%s",
-                             name, type(exc).__name__, exc_info=(type(exc), exc, exc.__traceback__))
+                _log.warning("codex: publicação da prévia falhou name=%s tipo=%s frames=%s",
+                             name, type(exc).__name__, error_frames(exc))
                 diag.registrar("codex.previa_falhou", "erro", sessao=name,
                                provider="codex", **diag.erro_campos(exc))
                 espalhar(self._question_state(name, sess))

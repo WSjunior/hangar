@@ -1581,13 +1581,14 @@ async def test_preview_timer_failure_keeps_both_state_streams_alive(monkeypatch,
     source = PushPreviewSource.get(name)
     original_push = source.push
     reports = []
+    private_text = "private-conversation-fragment"
 
     async def push(text):
         if text == "firsttail":
             try:
-                raise OSError(5, "synthetic source failure")
+                raise OSError(5, private_text)
             except OSError as cause:
-                raise RuntimeError("synthetic preview failure") from cause
+                raise RuntimeError(private_text) from cause
         await original_push(text)
 
     monkeypatch.setattr(source, "push", push)
@@ -1610,8 +1611,10 @@ async def test_preview_timer_failure_keeps_both_state_streams_alive(monkeypatch,
         assert reports == [("codex.previa_falhou", {"sessao": name, "provider": "codex", "erro_tipo": "RuntimeError",
                                                   "causa_tipo": "OSError", "errno": 5, "winerror": None})]
         failure = next(record for record in caplog.records if "publicação da prévia falhou" in record.getMessage())
-        assert failure.exc_info and failure.exc_info[2]
-        assert isinstance(failure.exc_info[1].__cause__, OSError)
+        assert private_text not in caplog.text
+        assert private_text not in json.dumps(reports)
+        assert failure.exc_info is None
+        assert "test_codex_adapter.py:" in failure.getMessage()
         assert "bomba_error" not in sess and not sess["bomba"].done()
         await client._q.put({"method": "turn/completed", "params": {"threadId": "t"}})
         for monitor in monitors:

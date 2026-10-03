@@ -43,7 +43,7 @@ from app.adapters.claude_headless import cano as cano_mod
 from app.adapters.claude_headless import sessions as hl_sessions
 from app.adapters.codex.adapter import _fmt_tok, _format_reset
 from app.adapters.preview_push import PushPreviewSource, fonte_ferramenta, fonte_pensamento
-from app.adapters.stream_buffer import StreamBuffer
+from app.adapters.stream_buffer import StreamBuffer, error_frames
 from app.config import settings
 from app.pqueue import PromptQueue
 from app.procinfo import pid_vivo
@@ -276,8 +276,8 @@ class _Sessao:
         if self.live_error_handler is not None:
             self.live_error_handler(error)
         else:
-            _log.warning("claude headless: publicação parcial falhou name=%s error_type=%s",
-                         self.name, type(error).__name__, exc_info=(type(error), error, error.__traceback__))
+            _log.warning("claude headless: publicação parcial falhou name=%s error_type=%s frames=%s",
+                         self.name, type(error).__name__, error_frames(error))
 
     async def _publish_preview(self, value: str) -> None:
         if self.live_active():
@@ -1604,8 +1604,8 @@ class ClaudeHeadlessAdapter:
     def _stream_error(self, sess: _Sessao, error: Exception) -> None:
         if self._sessions.get(sess.name) is not sess:
             return
-        _log.warning("claude headless: prévia falhou name=%s error_type=%s",
-                     sess.name, type(error).__name__, exc_info=(type(error), error, error.__traceback__))
+        _log.warning("claude headless: prévia falhou name=%s error_type=%s frames=%s",
+                     sess.name, type(error).__name__, error_frames(error))
         diag.registrar("headless.previa_falhou", "erro", sessao=sess.name,
                        provider="claude", **diag.erro_campos(error))
         task = asyncio.get_running_loop().create_task(self._notify(sess))
@@ -1616,8 +1616,8 @@ class ClaudeHeadlessAdapter:
                 return
             error = done.exception()
             if error is not None:
-                _log.warning("claude headless: aviso da prévia falhou name=%s error_type=%s",
-                             sess.name, type(error).__name__, exc_info=(type(error), error, error.__traceback__))
+                _log.warning("claude headless: aviso da prévia falhou name=%s error_type=%s frames=%s",
+                             sess.name, type(error).__name__, error_frames(error))
                 diag.registrar("headless.previa_aviso_falhou", "erro", sessao=sess.name,
                                provider="claude", **diag.erro_campos(error))
         task.add_done_callback(notified)
