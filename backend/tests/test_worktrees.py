@@ -52,6 +52,7 @@ def test_claude_cwd_without_cwd_is_none(tmp_path):
 def test_locate_claude_moved_into_worktree(tmp_path):
     main = _repo(tmp_path / "repo")
     wt = _wt(main, tmp_path / "repo-x", "x")
+    (tmp_path / "repo-x" / "sub").mkdir()
     f = tmp_path / "s.jsonl"
     f.write_text(json.dumps({"cwd": main}) + "\n" + json.dumps({"cwd": wt + "/sub"}) + "\n")
     loc = worktrees.locate("claude", main, str(f))
@@ -185,7 +186,8 @@ def _commit(path, name):
 def test_status_ahead_dirty_and_ignored(tmp_path):
     main = _repo(tmp_path / "repo")
     (tmp_path / "repo" / ".gitignore").write_text(".env\nnotas.txt\nnode_modules/\n")
-    _commit(tmp_path / "repo", ".gitignore")
+    git_ops._run(main, "add", ".gitignore")
+    git_ops._run(main, "commit", "-q", "-m", "ignore")
     (tmp_path / "repo" / ".env").write_text("S=1")
     wt = _wt(main, tmp_path / "repo-x", "x")
     git_ops._run(wt, "config", "branch.x.hangar-base", "main")
@@ -312,7 +314,8 @@ def test_sessions_match_through_symlink(tmp_path):
 def test_ignored_never_lists_folders(tmp_path):
     main = _repo(tmp_path / "repo")
     (tmp_path / "repo" / ".gitignore").write_text("cache\n")
-    _commit(tmp_path / "repo", ".gitignore")
+    git_ops._run(main, "add", ".gitignore")
+    git_ops._run(main, "commit", "-q", "-m", "ignore")
     wt = _wt(main, tmp_path / "repo-x", "x")
     (tmp_path / "repo-x" / "cache").mkdir()
     (tmp_path / "repo-x" / "cache" / "dado.bin").write_text("só aqui")

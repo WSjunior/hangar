@@ -21,8 +21,12 @@ def _make_client(tmp_path, monkeypatch, bind_ip="127.0.0.1", **extra_env):
     monkeypatch.setattr(runtime_config, "settings", config.settings)
     monkeypatch.setattr(runtime_config, "_backend_config_base", lambda: tmp_path)
     import app.sync as sync
-    importlib.reload(sync)
     import app.api as api
+    # O reload religa `settings` nesses módulos ao singleton deste teste; sem devolver o original,
+    # o `api.settings.auth_token` dos testes seguintes deixa de ser o que o `auth` confere (401).
+    for mod in (sync, api):
+        monkeypatch.setattr(mod, "settings", config.settings)
+    importlib.reload(sync)
     importlib.reload(api)
     return TestClient(api.app)
 
