@@ -15,11 +15,17 @@ pub(super) fn watch_files(_: &mut Window, cx: &mut Context<Hangar>) -> Task<()> 
 impl Hangar {
     pub(in crate::app) fn files_connection_dropped(&mut self, cx: &mut Context<Self>) {
         if let Some(owner) = &mut self.files.owner { owner.0 = self.connection; }
+        let active = self.files.tabs.get(self.files.active).map(|tab| tab.id);
+        // Essas leituras perderam a resposta da conexão anterior e ainda não têm rascunho.
+        self.files.tabs.retain(|tab| !(tab.picture.is_none() && tab.content.is_none()) && !matches!(tab.picture, Some(Picture::Loading)));
+        self.files.active = active.and_then(|id| self.files.tabs.iter().position(|tab| tab.id == id))
+            .unwrap_or_else(|| self.files.active.min(self.files.tabs.len().saturating_sub(1)));
         for tab in &mut self.files.tabs {
             let Some(Ok(doc)) = &mut tab.content else { continue; };
             if doc.saving || doc.reloading { doc.error = Some(tr("file_operation_unknown")); }
             doc.read_seq = doc.read_seq.wrapping_add(1);
             (doc.saving, doc.reloading, doc.checking, doc.close_after_save) = (false, false, false, false);
+            doc.poll_error = None;
             doc.editor.update(cx, |state, cx| state.set_readonly(!doc.editable(), cx));
         }
     }
@@ -184,6 +190,7 @@ impl Hangar {
         doc.read_seq = doc.read_seq.wrapping_add(1);
         let seq = doc.read_seq;
         let path = doc.base.path.clone();
+        let external = doc.base.external;
         doc.checking = !reload;
         doc.reloading = reload;
         if reload {
@@ -193,7 +200,7 @@ impl Hangar {
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
             let here = local.is_some() || (api.is_loopback() && cwd.is_some_and(|cwd| std::path::Path::new(&cwd).is_dir()));
-            let result = read_file(api, key.name, path, vec![], local, here).await;
+            let result = read_open_file(api, key.name, path, external, local, here).await;
             let _ = tx.send(Envelope { connection, selection: None,
                 payload: Payload::FileView(FileReply::Refresh(id, seq, reload, result)) }).await;
         });
@@ -207,7 +214,7 @@ impl Hangar {
         let Some(tab) = self.files.tabs.iter_mut().find(|tab| tab.id == id) else { return };
         let Some(Ok(doc)) = &mut tab.content else { return };
         if doc.read_seq != seq || doc.saving { return; }
-        let previous = (doc.disk_changed, doc.error.clone());
+        let previous = (doc.disk_changed, doc.error.clone(), doc.poll_error.clone());
         (doc.checking, doc.reloading) = (false, false);
         match result {
             Ok(content) if reload => {
@@ -223,11 +230,45 @@ impl Hangar {
                 doc.base = content;
                 (doc.dirty, doc.disk_changed, doc.close_after_save) = (false, false, false);
                 (doc.error, doc.saved) = (None, None);
+                doc.poll_error = None;
             }
-            Ok(content) => doc.disk_changed = content.digest != doc.base.digest || content.text != doc.base.text,
-            Err(error) => doc.error = Some(file_failure(&error)),
+            Ok(content) => {
+                doc.disk_changed = content.digest != doc.base.digest || content.text != doc.base.text;
+                doc.poll_error = None;
+            }
+            Err(error) if reload => doc.error = Some(file_failure(&error)),
+            Err(error) => doc.poll_error = Some(file_failure(&error)),
         }
         if reload { doc.editor.update(cx, |state, cx| state.set_readonly(!doc.editable(), cx)); }
-        if reload || previous != (doc.disk_changed, doc.error.clone()) { cx.notify(); }
+        if reload || previous != (doc.disk_changed, doc.error.clone(), doc.poll_error.clone()) { cx.notify(); }
     }
+}
+
+async fn read_open_file(api: Api, name: String, path: String, external: bool, local: Option<PathBuf>, here: bool) -> Result<Content, Failure> {
+    if !external {
+        if let Some(root) = local {
+            return tokio::task::spawn_blocking(move || super::super::tree::read_local(&root, &path).map(|read|
+                Content { path, text: read.text, truncated: read.truncated, digest: read.digest, external: false }))
+                .await.unwrap_or_else(|_| Err(Failure::local("invalid_response")));
+        }
+    } else if here {
+        let file = path.strip_prefix("~/").and_then(|rest| super::super::tree::home_dir().map(|home| home.join(rest)))
+            .unwrap_or_else(|| PathBuf::from(&path));
+        if file.is_absolute() {
+            return tokio::task::spawn_blocking(move || {
+                let real = std::fs::canonicalize(file).map_err(|_| Failure::local("erro_arq_inexistente"))?;
+                if real.components().any(|part| part.as_os_str() == ".git") { return Err(Failure::local("erro_arq_area_do_git")); }
+                let (Some(folder), Some(file_name)) = (real.parent(), real.file_name().and_then(|name| name.to_str()))
+                    else { return Err(Failure::local("erro_arq_inexistente")) };
+                super::super::tree::read_local(folder, file_name).map(|read|
+                    Content { path, text: read.text, truncated: read.truncated, digest: read.digest, external: true })
+            }).await.unwrap_or_else(|_| Err(Failure::local("invalid_response")));
+        }
+    }
+    let route = if external { ["file", "text"] } else { ["files", "read"] };
+    let mut content: Content = serde_json::from_value(api.read(&name, &route, &[("path", &path)], 30).await?)
+        .map_err(|_| Failure::local("invalid_response"))?;
+    if content.path != path { return Err(Failure::local("invalid_response")); }
+    content.external = external;
+    Ok(content)
 }

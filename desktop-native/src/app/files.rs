@@ -63,6 +63,7 @@ struct Document {
     dirty: bool,
     saved: Option<Instant>,
     error: Option<String>,
+    poll_error: Option<String>,
     markdown: Option<Entity<TextViewState>>,
     _changed: Subscription,
     _cursor: Subscription,
@@ -84,6 +85,7 @@ fn file_failure(error: &Failure) -> String {
         return Hangar::fetch_failure(error);
     }
     match error.status {
+        Some(404) => activity::web("erro_arq_inexistente"),
         Some(409) => activity::web("erro_arq_mudou_no_disco"),
         Some(413) => activity::web("erro_arq_grande_demais"),
         Some(415) => activity::web("erro_arq_binario"),
@@ -321,7 +323,7 @@ impl Hangar {
             });
             let markdown = (file_language(path) == "markdown").then(|| cx.new(|cx| TextViewState::markdown(&content.text, cx).scrollable(true)));
             let doc = Document { editor, base: content, saving: false, dirty: false, saved: None, error: None, markdown, _changed: changed,
-                _cursor: cursor, cursor: Position::new(0, 0),
+                _cursor: cursor, cursor: Position::new(0, 0), poll_error: None,
                 read_seq: 0, checking: false, reloading: false, disk_changed: false, close_after_save: false };
             doc.editor.update(cx, |state, cx| state.set_readonly(!doc.editable(), cx));
             doc
@@ -369,6 +371,7 @@ impl Hangar {
                 (doc.base.text, doc.base.digest) = (text, Some(digest));
                 doc.dirty = false;
                 doc.disk_changed = false;
+                doc.poll_error = None;
                 let saved = Instant::now();
                 doc.saved = Some(saved);
                 cx.spawn(async move |this, cx| {
@@ -714,6 +717,8 @@ impl Hangar {
             .child(toolbar)
             .children(doc.filter(|doc| doc.disk_changed).map(|_| div().id("file-disk-changed").role(Role::Alert)
                 .flex_shrink_0().px_3().py_2().text_sm().text_color(theme::warning()).child(tr("file_disk_changed"))))
+            .children(doc.and_then(|doc| doc.poll_error.as_ref()).map(|error| div().id("file-poll-error").role(Role::Alert)
+                .flex_shrink_0().px_3().py_2().text_sm().text_color(theme::danger()).child(error.clone())))
             .children(doc.and_then(|doc| doc.error.as_ref()).filter(|_| tab.preview).map(|error| div().id("file-preview-error").role(Role::Alert)
                 .flex_shrink_0().px_3().py_2().text_sm().text_color(theme::danger()).child(error.clone())))
             .children(self.render_preview_find(cx))
