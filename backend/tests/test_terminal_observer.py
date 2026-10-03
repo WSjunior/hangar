@@ -1313,16 +1313,19 @@ def test_failing_session_reaches_circuit_while_healthy_captures_continue(monkeyp
                     assert await state.shared_capture("good", 0) == "Rust"
             assert len([p for p in calls if p["op"] == "capture" and p["name"] == "bad"]) == 3
             assert len([p for p in calls if p["op"] == "capture" and p["name"] == "good"]) == 10
-            assert len(entries) == 1
+            assert len(entries) == 2
             assert entries[0][0] == ("terminal_observer.fallback", "aviso")
             assert entries[0][1]["sessao"] == "bad"
             assert entries[0][1]["codigo"] == "http_503"
             assert isinstance(entries[0][1]["ms"], int)
+            assert entries[1][0] == ("terminal_observer.paused", "aviso")
+            assert entries[1][1] == {"sessao": "bad", "codigo": "http_503", "limite_ms": 1000}
             failing.clear()
             now[0] = 102.0
             with t.use(bad):
                 assert await t.capture("bad", 102.0) is not None
-            assert [entry[0][0] for entry in entries] == ["terminal_observer.fallback", "terminal_observer.recovered"]
+            assert [entry[0][0] for entry in entries] == [
+                "terminal_observer.fallback", "terminal_observer.paused", "terminal_observer.recovered"]
             assert entries[-1][1]["sessao"] == "bad"
             assert entries[-1][1]["ms"] == 2000
         finally:
@@ -1612,3 +1615,66 @@ def test_cancelled_start_releases_partial_remote_ref_and_propagates(monkeypatch)
         assert source.consumer not in t._consumers
     asyncio.run(run())
     assert [p["op"] for p in calls] == ["acquire", "release"]
+
+
+def test_pause_diagnostic_records_session_backoff_only_when_scheduled(monkeypatch):
+    from types import SimpleNamespace
+    from app import diag
+    t = bridge()
+    now = [100.0]
+    monkeypatch.setattr(t, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    entries = []
+    monkeypatch.setattr(diag, "registrar", lambda *args, **fields: entries.append((args, fields)))
+    fail = [True]
+    def response(config, payload):
+        if payload["op"] == "capture":
+            if payload["name"] == "paused-bad" and fail[0]:
+                raise TimeoutError("private-timeout")
+            return dict(binding=payload["binding"], started=payload["started"], text="Rust", analysis=analysis())
+        return {}
+    monkeypatch.setattr(t, "_http", response)
+    async def run():
+        bad = t.lease("paused-bad", "claude", lambda: "b")
+        good = t.lease("unpaused-good", "claude", lambda: "g")
+        await bad.start()
+        await good.start()
+        try:
+            with t.use(bad):
+                for i in range(10):
+                    assert await t.capture(bad.name, float(i)) is None
+            assert [(e[0][0], e[1].get("limite_ms")) for e in entries] == [
+                ("terminal_observer.fallback", None), ("terminal_observer.paused", 1000)]
+            now[0] = 100.9
+            with t.use(good):
+                assert await t.capture(good.name, 1.0) is not None
+            with t.use(bad):
+                assert await t.capture(bad.name, 20.0) is None
+            assert len(entries) == 2
+            now[0] = 101.0
+            await bad.acquire()  # Um ack não abre o circuito nem anuncia recuperação.
+            assert len(entries) == 2
+            with t.use(bad):
+                assert await t.capture(bad.name, 21.0) is None
+                assert await t.capture(bad.name, 22.0) is None
+            assert len(entries) == 3
+            assert entries[-1][0] == ("terminal_observer.paused", "aviso")
+            assert entries[-1][1]["limite_ms"] == 2000
+            assert {e[1]["sessao"] for e in entries} == {bad.name}
+            assert entries[-1][1]["codigo"] == "http_timeout"
+            fail[0] = False
+            now[0] = 102.9
+            with t.use(bad):
+                assert await t.capture(bad.name, 23.0) is None
+            assert len(entries) == 3
+            now[0] = 103.0
+            with t.use(bad):
+                assert await t.capture(bad.name, 24.0) is not None
+            assert entries[-1][0] == ("terminal_observer.recovered", "ok")
+            assert len(entries) == 4
+        finally:
+            await bad.close()
+            await good.close()
+    asyncio.run(run())
+    assert "private-" not in repr(entries)

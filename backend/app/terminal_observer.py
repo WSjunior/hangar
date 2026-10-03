@@ -82,9 +82,11 @@ def _session(name: str) -> _SessionState:
 def _failure(name: str, code: str, started: float | None = None) -> None:
     session = _session(name)
     now = time.monotonic()
+    pause_ms = 0
     if now >= session.retry_at:
         session.failures += 1
         if session.failures >= MAX_FAILURES:
+            pause_ms = int(session.backoff * 1000)
             session.retry_at = now + session.backoff
             session.backoff = min(session.backoff * 2, MAX_BACKOFF)
     if session.fallback_since is None:
@@ -92,6 +94,9 @@ def _failure(name: str, code: str, started: float | None = None) -> None:
         diag.registrar("terminal_observer.fallback", "aviso", sessao=name, codigo=code,
                        ms=max(0, int((now - started) * 1000)) if started is not None else 0)
         _log.warning("observação terminal de %s usa reserva Python: %s", name, code)
+    if pause_ms:
+        diag.registrar("terminal_observer.paused", "aviso", sessao=name, codigo=code,
+                       limite_ms=pause_ms)
 
 
 def _success(name: str) -> None:
