@@ -5,6 +5,12 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 
 ## Regras vigentes
 
+- **Observação terminal tem uma captura canônica por rodada, sem grade auxiliar.** O controle
+  tmux confere sessão/pane a cada leitura; a análise acompanha esse quadro e o estado temporal
+  permanece no Python, sem outro HTTP. O cliente da ponte usa somente HTTP sem proxy/redirect
+  e não carrega certificados por pedido. Medição:
+  [custo da observação terminal](#custo-da-observação-terminal).
+
 - **Deltas Claude/Codex acumulam antes de publicar.** Prévia, pensamento e input em voo têm
   buffer por sessão/geração: primeiro imediato, intermediários em 150 ms e último por timer/flush.
   Limpeza autoritativa cancela timers, aguarda publicação em voo e reconfere a sessão antes de
@@ -2148,3 +2154,56 @@ e final; o fluxo espaçado mantém atualizações intermediárias. Snapshot full
 custando seu tamanho. Não afirmar linearidade de todo o pipeline nem usar decode-final-only
 como ganho equivalente de UI. A versão anterior também pode publicar em cada chegada quando
 os pedaços são lentos; o ganho depende da cadência, tamanho e campo do input.
+
+## Custo da observação terminal
+
+(03/10/2026, Linux 7.1.3, i5-13400F, Python 3.14.6, tmux 3.7b, Rust release.) A 2C original
+`d21a445b` fazia 12 comandos tmux e dois HTTP por captura; a grade analisava o mesmo texto
+que o capture. O estado temporal foi devolvido ao Python, sem outro RPC; o observador usa
+`no-output`, confere sessão/pane a cada rodada e captura uma vez, sem grade/checkpoint ANSI.
+A captura e sua conferência mantêm as duas molduras de nonce: seis comandos tmux por rodada.
+
+O maior excesso estava em `_http`: `build_opener()` incluía HTTPS e carregava certificados
+por pedido, mesmo em HTTP loopback. Mil construções consumiram 3,386 ms CPU/construção;
+cProfile de 100 chamadas atribuiu 0,315 de 0,354 s à criação do contexto HTTPS. O opener
+final é reutilizado e monta somente os handlers HTTP, sem proxy ou redirect.
+
+| Chats simultâneos | Python anterior, CPU/chat/rodada | 2C original, CPU/chat/rodada | Final, CPU/chat/rodada | Redução contra Python reexecutado |
+|---:|---:|---:|---:|---:|
+| 1 | 2,803 ms | 10,404 ms | 1,668 ms | 40,50% |
+| 4 | 2,745 ms | 15,327 ms | 1,784 ms | 35,02% |
+
+Método: quatro lotes independentes de 700 capturas/chat por caminho, ordem alternada,
+20 rodadas de aquecimento excluídas; mesmos panes sintéticos 100×40, 180 linhas e spinner
+congelado, mesmos classificador e valores de hook/plugin/sidecar. O `StateMonitor.stream`
+Python e a rota Rust de produção rodaram completos; nenhum backend/provedor/conversa real.
+Fixture HTTP de loopback com segredo sintético e tmux privado `-S`, configuração `/dev/null`.
+O poll/cache foi acelerado para cobrar uma captura por rodada. Todos os lotes finais
+exigiram zero fallback, exatamente um HTTP capture por rodada e paridade exata dos eventos.
+
+CPU = delta `utime+stime` de `/proc` do Python produtor, Rust, servidor tmux, clientes
+residentes e panes + `RUSAGE_CHILDREN` dos clientes tmux encerrados. Dividido por 700×chats;
+ticks de 10 ms, lotes com segundos de CPU. Com um chat, Python/Rust/tmux finais custam
+1,261/0,200/0,207 ms por captura; quatro chats, 1,347/0,229/0,207 ms. Clientes vivos/panes
+ficaram abaixo de um tick. O Python anterior cria um processo por captura; final cria zero
+durante o lote e conserva um cliente de controle por chat aberto, mais o Rust já existente.
+A fixture inicia um Rust por lote, contabilizado separadamente.
+
+A contagem separada do protocolo provou dez capturas = 63 comandos (três iniciais +
+seis por captura), um cliente criado, attach `no-output`; CPU sem o wrapper de contagem.
+Sessenta ciclos acquire+release custaram 2,000 ms CPU/ciclo (inclui filhos encerrados),
+120 HTTP e 60 observadores; não entram nas médias contínuas. Amortizado em 700 rodadas,
+é 1/700 criação de cliente por chat/rodada, contra um subprocesso a cada rodada Python.
+
+Parede por rodada: um chat, Python 2,803 ms/final 1,655 ms; quatro chats, Python 4,804 ms/
+final 5,072 ms. O ganho medido é de CPU e processos novos; a rodada concorrente ficou
+0,268 ms mais longa. Intervalos entre os quatro lotes finais: 1,629–1,700 ms com um chat
+e 1,779–1,789 ms/chat com quatro, sem sobreposição aos lotes Python. Redução =
+1 − CPU final ÷ CPU Python reexecutado no mesmo ensaio.
+
+Agregados por lote e fontes de reprodução ficam em
+`.superpowers/sdd/2026-10-03-hangar-server-parte2c-revision/perf-baseline.md` e nos auxiliares
+`perf-final-*.py` do mesmo diretório. Os snapshots/binários/socket privados foram temporários;
+o relatório não contém conversa real. O cálculo puro Rust segue conferido pelas fixtures
+Python. Remover a operação privada `reduce` sobe ambos os protocolos para 3; a coordenação
+com `rust-parte2` reservou 4 ao contrato posterior da 2B.

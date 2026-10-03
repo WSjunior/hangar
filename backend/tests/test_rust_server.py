@@ -52,7 +52,7 @@ mode = os.environ.get("FAKE_MODE", "ok")
 if mode == "mudo":
     time.sleep(60)
     sys.exit(0)
-protocol = os.environ.get("FAKE_PROTOCOL", "2")
+protocol = os.environ.get("FAKE_PROTOCOL", "__PROTOCOL__")
 
 
 class Health(BaseHTTPRequestHandler):
@@ -103,7 +103,8 @@ class _App:
 @pytest.fixture
 def fake_bin(tmp_path, monkeypatch):
     path = tmp_path / "hangar-server"
-    path.write_text(f"#!{sys.executable}\n{FAKE}", encoding="utf-8")
+    source = FAKE.replace("__PROTOCOL__", str(rust_server.RUST_SERVER_PROTOCOL))
+    path.write_text(f"#!{sys.executable}\n{source}", encoding="utf-8")
     path.chmod(0o755)
     monkeypatch.setenv("FAKE_LOG", str(tmp_path / "spawns.jsonl"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))

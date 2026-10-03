@@ -54,7 +54,7 @@ async fn typed_operations_limit_body_and_capture_failure_is_not_empty_success() 
 }
 
 #[tokio::test]
-async fn semantic_capture_errors_are_bad_requests_and_reduce_is_strict() {
+async fn semantic_capture_errors_are_bad_requests() {
     let (url, task) = server().await;
     let client = reqwest::Client::new();
     let capture = serde_json::json!({"op":"capture", "consumer":"c", "name":"s", "provider":"claude", "binding":"b",
@@ -66,25 +66,6 @@ async fn semantic_capture_errors_are_bad_requests_and_reduce_is_strict() {
         let r = client.post(&url).header("x-hangar-internal", "internal").body(body.to_string()).send().await.unwrap();
         assert_eq!(r.status(), StatusCode::BAD_REQUEST, "{field}");
         assert_eq!(r.text().await.unwrap(), "invalid terminal request");
-    }
-    let reduce = serde_json::json!({"op":"reduce", "pane":"✻ Thinking…", "memory": {"prev_spinner":null,"frozen":0,
-        "no_spinner":0,"held_state":"idle","held_label":null}, "facts":{"open_question":null,
-        "plugin_question":null,"plugin_state":"idle","hook_state":null,"hook_grace":8,"status_line":null}});
-    let r = client.post(&url).header("x-hangar-internal", "internal").body(reduce.to_string()).send().await.unwrap();
-    assert_eq!(r.status(), StatusCode::OK);
-    let response: serde_json::Value = serde_json::from_str(&r.text().await.unwrap()).unwrap();
-    assert_eq!(response["analysis"]["state"], "idle");
-    assert_eq!(response["diagnostic"]["before_plugin"], "working");
-    assert_eq!(response["diagnostic"]["plugin_applied"], true);
-    for change in ["extra-memory", "missing-fact", "plugin-label"] {
-        let mut body = reduce.clone();
-        match change {
-            "extra-memory" => body["memory"]["extra"] = serde_json::json!(1),
-            "missing-fact" => { body["facts"].as_object_mut().unwrap().remove("hook_grace"); },
-            _ => body["facts"]["plugin_question"] = serde_json::json!({"id":"q","questions":[{"options":[{"label":null}]}]}),
-        }
-        let r = client.post(&url).header("x-hangar-internal", "internal").body(body.to_string()).send().await.unwrap();
-        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
     }
     let r = client.post(&url).header("x-hangar-internal", "internal").body(vec![b'x'; hangar_server::terminal_routes::MAX_BODY + 1]).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::BAD_REQUEST);
@@ -109,13 +90,13 @@ for n, line in enumerate(sys.stdin, 2):
     with root.joinpath('commands').open('a') as log: log.write(line)
     parts = line.rstrip('\n').split(' ; ')
     assert len(parts) == 3
-    assert parts[0].startswith('display-message -p -l HG_START_')
-    assert parts[2].startswith('display-message -p -l HG_END_')
-    frame(n * 100, parts[0].removeprefix('display-message -p -l ') + '\n')
+    assert parts[0].startswith('display-message -p HG_START_')
+    assert parts[2].startswith('display-message -p HG_END_')
+    frame(n * 100, parts[0].removeprefix('display-message -p ') + '\n')
     command = parts[1]
     assert command.startswith(('display-message -p -t ', 'capture-pane -p '))
     frame(n * 100 + 17, '%3\tfixture\t20\t4\t0\t0\t0\n' if command.startswith('display-message') else 'ready\n\n\n\n')
-    frame(n * 100 + 39, parts[2].removeprefix('display-message -p -l ') + '\n')
+    frame(n * 100 + 39, parts[2].removeprefix('display-message -p ') + '\n')
 "#).unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
     let (url, task) = server_with_pool(TerminalPool::with_program(program, None, Limits::default())).await;
@@ -169,14 +150,13 @@ async fn specific_public_bind_advertises_private_loopback_and_stop_closes_both()
     let private: std::net::SocketAddr = health["terminal_address"].as_str().unwrap().parse().unwrap();
     assert_eq!(private.ip(), "127.0.0.1".parse::<std::net::IpAddr>().unwrap());
     assert_ne!(private.port(), 0);
-    let reduce = serde_json::json!({"op":"reduce", "pane":"hello", "memory":{"prev_spinner":null,"frozen":0,"no_spinner":0,"held_state":"idle","held_label":null},
-        "facts":{"open_question":null,"plugin_question":null,"plugin_state":null,"hook_state":null,"hook_grace":8,"status_line":null}});
+    let release = serde_json::json!({"op":"release", "consumer":"unknown"});
     let r = client.post(format!("http://{private}/__hangar_server/terminal")).header("x-hangar-internal", "internal")
-        .body(reduce.to_string()).send().await.unwrap();
+        .body(release.to_string()).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     assert_eq!(client.get(format!("http://{private}/__hangar_server/health")).send().await.unwrap().status(), StatusCode::NOT_FOUND);
     assert_eq!(client.post(format!("http://{public_addr}/__hangar_server/terminal")).header("x-hangar-internal", "internal")
-        .body(reduce.to_string()).send().await.unwrap().status(), StatusCode::NOT_FOUND);
+        .body(release.to_string()).send().await.unwrap().status(), StatusCode::NOT_FOUND);
     stop.send(()).unwrap();
     task.await.unwrap();
     assert!(tokio::net::TcpStream::connect(public_addr).await.is_err());
@@ -219,4 +199,16 @@ async fn forwarded_external_origin_in_any_header_cannot_authorize() {
         let r = hangar_server::terminal_routes::terminal(axum::extract::State(state.clone()), axum::extract::ConnectInfo("127.0.0.1:12345".parse().unwrap()), req).await;
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
     }
+}
+
+#[tokio::test]
+async fn removed_pure_reduce_rpc_is_rejected() {
+    let (url, task) = server().await;
+    let body = serde_json::json!({"op":"reduce","pane":"ready", "memory":{"prev_spinner":null,"frozen":0,
+        "no_spinner":0,"held_state":"idle","held_label":null}, "facts":{"open_question":null,
+        "plugin_question":null,"plugin_state":null,"hook_state":null,"hook_grace":8,"status_line":null}});
+    let r = reqwest::Client::new().post(url).header("x-hangar-internal", "internal").body(body.to_string()).send().await.unwrap();
+    assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(hangar_server::INTERNAL_PROTOCOL, 3);
+    task.abort();
 }

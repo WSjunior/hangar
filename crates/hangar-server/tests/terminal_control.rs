@@ -1,4 +1,4 @@
-use hangar_server::terminal_control::{CaptureRequest, ControlEvent, ControlParser, FrameIdentity, Screen, TerminalPool, Limits};
+use hangar_server::terminal_control::{CaptureRequest, ControlEvent, ControlParser, FrameIdentity, TerminalPool, Limits};
 use std::{path::PathBuf, process::Command, time::Duration};
 
 fn request(consumer: &str) -> CaptureRequest {
@@ -18,10 +18,9 @@ fn fragmented_frames_preserve_percent_body_and_exact_blank_lines() {
 }
 
 #[test]
-fn output_decodes_octal_bytes_without_consuming_frame_body() {
+fn output_notifications_are_ignored_without_consuming_frame_body() {
     let mut parser = ControlParser::default();
     assert_eq!(parser.push(b"%output %3 ol\\303\\241\\134\n%begin 2 8 0\n%output %4 literal\n%error 2 8 0\n").unwrap(), vec![
-        ControlEvent::Output { pane: "%3".into(), bytes: "olá\\".as_bytes().to_vec() },
         ControlEvent::Frame { identity: FrameIdentity { timestamp: 2, command: 8, flags: 0 }, text: "%output %4 literal\n".into(), error: true },
     ]);
 }
@@ -35,36 +34,6 @@ fn invalid_utf8_and_oversized_or_unfinished_frames_are_errors() {
     let mut parser = ControlParser::default();
     parser.push(b"%begin 1 1 0\nbody\n").unwrap();
     assert!(parser.finish().is_err());
-    let mut parser = ControlParser::default();
-    assert!(parser.push(b"%output %2 bad\\12\n").is_err());
-}
-
-#[test]
-fn screen_tracks_split_utf8_color_cursor_and_alternate_without_answering_ansi() {
-    let mut screen = Screen::new(20, 4).unwrap();
-    screen.feed(b"\x1b[31mol\xc3").unwrap();
-    screen.feed(b"\xa1\x1b[0m\x1b[6n").unwrap();
-    assert_eq!(screen.text(), "olá\n\n\n\n");
-    assert_eq!(screen.cursor(), (3, 0));
-    assert_eq!(screen.cell(0, 0).unwrap().fg, alacritty_terminal::vte::ansi::Color::Named(alacritty_terminal::vte::ansi::NamedColor::Red));
-    screen.feed(b"\x1b[?1049hALT").unwrap();
-    assert!(screen.alternate());
-    assert!(screen.text().contains("ALT"));
-    screen.feed(b"\x1b[?1049l").unwrap();
-    assert_eq!(screen.text(), "olá\n\n\n\n");
-    assert!(Screen::new(0, 4).is_err());
-}
-
-#[test]
-fn restoring_pending_wrap_cursor_wraps_the_next_character_without_overwrite() {
-    let mut screen = Screen::new(80, 3).unwrap();
-    screen.feed("x".repeat(80).as_bytes()).unwrap();
-    screen.restore_cursor(80, 0).unwrap();
-    assert_eq!(screen.cursor(), (80, 0));
-    screen.feed(b"Z").unwrap();
-    assert_eq!(screen.text(), format!("{}\nZ\n\n", "x".repeat(80)));
-    assert_eq!(screen.cursor(), (1, 1));
-    assert!(screen.restore_cursor(81, 0).is_err());
 }
 
 #[cfg(unix)]
@@ -233,7 +202,7 @@ for n, line in enumerate(sys.stdin, 1):
         sys.stdout.write(f'%begin 1 {n} 0\nunsupported option\n%error 1 {n} 0\n')
         sys.stdout.flush()
         continue
-    if n == 4 and mode == 'late':
+    if n == 3 and mode == 'late':
         body = '%begin 1 99 0\nstale\n\n\n\n%end 1 99 0\n'
         for chunk in [body[:7], body[7:21], body[21:]]:
             time.sleep(.01)
@@ -273,12 +242,12 @@ for n, line in enumerate(sys.stdin, 1):
     columns, rows = (1024, 512) if mode == 'dimensions' else ((21, 4) if mode == 'resize' and n == 6 else (20, 4))
     frame(n * 100 + 17, f'%3\t{name}\t{columns}\t{rows}\t0\t0\t0\n' if command.startswith('display-message') else 'ready\n\n\n\n')
     if wrapped:
-        if n == 4 and mode == 'missing-end':
+        if n == 3 and mode == 'missing-end':
             continue
-        if n == 4 and mode == 'late-end':
+        if n == 3 and mode == 'late-end':
             time.sleep(.12)
             root.joinpath('end-sent').write_text('yes')
-        frame(n * 100 + 39, 'wrong-marker\n' if n == 4 and mode == 'wrong-end' else end)
+        frame(n * 100 + 39, 'wrong-marker\n' if n == 3 and mode == 'wrong-end' else end)
 "#.replace("__MODE__", mode);
     std::fs::write(&program, source).unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -325,7 +294,7 @@ async fn ansi_queries_do_not_write_to_terminal_and_final_release_reaps_child() {
 #[cfg(unix)]
 #[tokio::test]
 async fn persistent_observer_failures_do_not_spawn_on_every_capture_or_acquire() {
-    for mode in ["static-error", "dimensions", "resize", "eof", "timeout"] {
+    for mode in ["static-error", "eof", "timeout"] {
         let (dir, program, _, _) = fake_observer(mode);
         let limits = Limits { startup: Duration::from_millis(500), command: Duration::from_millis(80), ..Limits::default() };
         let pool = TerminalPool::with_program(program, None, limits);
@@ -550,12 +519,7 @@ async fn another_session_pane_and_changed_active_target_fail_without_substitutio
 }
 
 #[test]
-fn unterminated_ansi_stream_is_bounded_and_invalid_notification_utf8_is_error() {
-    let mut screen = Screen::new(20, 4).unwrap();
-    screen.feed(b"\x1b]0;").unwrap();
-    let data = vec![b'x'; 1024 * 1024];
-    for _ in 0..7 { screen.feed(&data).unwrap(); }
-    assert!(screen.feed(&data).is_err());
+fn invalid_notification_utf8_is_error() {
     let mut parser = ControlParser::default();
     assert!(parser.push(b"%notice \xff\n").is_err());
 }
@@ -582,5 +546,40 @@ async fn actual_alternate_screen_capture_and_numeric_session_keep_exact_target()
     let mut numeric = request("numeric"); numeric.name = "0".into(); numeric.target = "=0:".into();
     assert!(server.await_text(&pool, &numeric, "NUMERIC_SESSION").await.contains("NUMERIC_SESSION"));
     pool.release("numeric").await.unwrap();
+    pool.release("state").await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn each_round_has_one_canonical_capture_and_scope_proof() {
+    let (_dir, program, _, log) = fake_observer("normal");
+    let pool = TerminalPool::with_program(program, None, Limits::default());
+    pool.acquire(request("state")).await.unwrap();
+    let before = std::fs::read_to_string(&log).unwrap();
+    let captured = pool.capture(request("state")).await.unwrap();
+    assert_eq!(captured.text, "ready\n\n\n\n");
+    let after = std::fs::read_to_string(&log).unwrap();
+    let round = &after[before.len()..];
+    assert_eq!(round.lines().count(), 2, "scope proof and one canonical capture, without grade checkpoints");
+    let commands: Vec<_> = round.lines().flat_map(|line| line.split(" ; ")).collect();
+    assert_eq!(commands.len(), 6);
+    assert_eq!(commands.iter().filter(|cmd| cmd.starts_with("capture-pane ")).count(), 1);
+    assert!(!commands.iter().any(|cmd| cmd.contains("-S 0")));
+    pool.release("state").await.unwrap();
+}
+
+#[test]
+fn terminal_capture_does_not_compile_a_second_terminal_grid() {
+    assert!(!include_str!("../Cargo.toml").contains("alacritty_terminal"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn read_only_control_observer_never_subscribes_to_pane_output() {
+    let server = IsolatedTmux::new();
+    let pool = server.pool();
+    pool.acquire(request("state")).await.unwrap();
+    let flags = server.run(&["list-clients", "-t", "=fixture", "-F", "#{client_flags}"]);
+    assert!(flags.contains("read-only") && flags.contains("ignore-size") && flags.contains("no-output"), "{flags}");
     pool.release("state").await.unwrap();
 }

@@ -118,12 +118,18 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+# A ponte só usa HTTP de loopback; não carrega certificados nem handlers de outros protocolos.
+_opener = urllib.request.OpenerDirector()
+for _handler in (urllib.request.ProxyHandler({}), urllib.request.HTTPHandler(),
+                 urllib.request.HTTPDefaultErrorHandler(), urllib.request.HTTPErrorProcessor(), _NoRedirect()):
+    _opener.add_handler(_handler)
+
+
 def _http(config: tuple[str, str], payload: dict) -> dict | None:
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     req = urllib.request.Request(f"http://{config[0]}/__hangar_server/terminal",
         data=json.dumps(payload, allow_nan=False).encode("utf-8"),
         headers={"Content-Type": "application/json", "x-hangar-internal": config[1]}, method="POST")
-    with opener.open(req, timeout=TIMEOUT) as response:
+    with _opener.open(req, timeout=TIMEOUT) as response:
         if response.status != 200:
             raise urllib.error.HTTPError(req.full_url, response.status, "terminal status", None, None)
         body = response.read(MAX_BODY + 1)
@@ -188,13 +194,6 @@ def valid_analysis(value) -> bool:
         and isinstance(value["preview"], str)
         and (menu is None or (isinstance(menu, dict) and set(menu) == {"question", "options"}
             and (menu["question"] is None or isinstance(menu["question"], str)) and _strings(menu["options"]))))
-
-
-def valid_memory(value) -> bool:
-    return (isinstance(value, dict) and set(value) == {"prev_spinner", "frozen", "no_spinner", "held_state", "held_label"}
-        and isinstance(value["held_state"], str) and value["held_state"] in _STATES
-        and all(type(value[k]) is int and 0 <= value[k] <= 0xffffffff for k in ("frozen", "no_spinner"))
-        and all(value[k] is None or isinstance(value[k], str) for k in ("prev_spinner", "held_label")))
 
 
 class Lease:
@@ -348,32 +347,3 @@ def frame_analysis(name: str, pane: str) -> dict | None:
     from app import state
     hit = state._frames.get(name)
     return frame[3] if hit is not None and hit == (frame[1], pane) else None
-
-
-async def reduce(name: str, pane: str, memory: dict, facts: dict) -> dict | None:
-    if not _available() or stamp(name)[0] is None:
-        return None
-    before = stamp(name)
-    result = await _request(dict(op="reduce", pane=pane, memory=memory, facts=facts))
-    if before != stamp(name):
-        return None
-    if result is None:
-        return None
-    if (not isinstance(result, dict) or set(result) != {"analysis", "memory", "diagnostic"}
-            or not valid_analysis(result["analysis"]) or not valid_memory(result["memory"])):
-        _failure("invalid_reducer")
-        return None
-    diagnostic = result["diagnostic"]
-    if (not isinstance(diagnostic, dict) or set(diagnostic) != {"before_plugin", "plugin_applied"}
-            or not isinstance(diagnostic["before_plugin"], str) or diagnostic["before_plugin"] not in _STATES
-            or type(diagnostic["plugin_applied"]) is not bool):
-        _failure("invalid_reducer")
-        return None
-    if (result["memory"]["held_state"] != result["analysis"]["state"]
-            or result["memory"]["held_label"] != result["analysis"]["label"]
-            or (diagnostic["plugin_applied"] and (facts["plugin_state"] not in ("working", "idle")
-                or diagnostic["before_plugin"] not in ("working", "idle")))):
-        _failure("invalid_reducer")
-        return None
-    _success()
-    return result

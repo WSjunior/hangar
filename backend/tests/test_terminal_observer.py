@@ -1,6 +1,5 @@
 """Ponte terminal em memória; todos os pedidos usam transporte sintético."""
 import asyncio
-import copy
 import sys
 from unittest.mock import patch
 
@@ -153,44 +152,6 @@ def test_generation_change_discards_inflight(monkeypatch):
     asyncio.run(run())
 
 
-def test_claude_reducer_hands_memory_to_python_on_failure(monkeypatch):
-    t = bridge()
-    t.configure("127.0.0.1:12345", "secret")
-    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
-    pane = "✻ Thinking…\n❯ "
-    monkeypatch.setattr(state.tmux, "capture_pane", lambda name: pane)
-    monkeypatch.setattr(state, "pergunta_aberta", lambda sid: None)
-    monkeypatch.setattr(state, "_sidecar_status", lambda sid: None)
-    monkeypatch.setattr(state.plugin_bridge, "pergunta_pendente", lambda name: None)
-    monkeypatch.setattr(state.plugin_bridge, "estado_recente", lambda name: None)
-    monkeypatch.setattr(state.plugin_bridge, "vivo", lambda name: False)
-    monkeypatch.setattr(state.hook_state, "get_state", lambda sid: None)
-    monkeypatch.setattr(state.hook_state, "shells", lambda sid: [])
-    from app.loop import LoopLink
-    monkeypatch.setattr(LoopLink, "get", lambda self: None)
-    memories = []
-    async def request(payload):
-        if payload["op"] != "reduce":
-            return None
-        memories.append(copy.deepcopy(payload["memory"]))
-        if len(memories) > 1:
-            return None
-        a = analysis()
-        a.update(state="working", label="Thinking…", spinner="✻ Thinking…")
-        return dict(analysis=a, memory=dict(prev_spinner="✻ Thinking…", frozen=2, no_spinner=0,
-            held_state="working", held_label="Thinking…"), diagnostic=dict(before_plugin="working", plugin_applied=False))
-    monkeypatch.setattr(t, "_request", request)
-    async def run():
-        monitor = state.StateMonitor("s", poll=0, sid_get=lambda: "thread", provider="claude")
-        stream = monitor.stream()
-        try:
-            assert (await anext(stream)).state == "working"
-            assert (await asyncio.wait_for(anext(stream), 1)).state == "idle"
-        finally:
-            await stream.aclose()
-    asyncio.run(run())
-    assert memories[0]["frozen"] == 0
-    assert memories[1]["frozen"] == 2
 
 
 def test_preview_empty_sidecar_and_rust_pane_analysis(monkeypatch):
@@ -282,7 +243,7 @@ def test_http_rejects_utf8_json_and_bounded_body(monkeypatch, body):
             requested.append((req, timeout))
             assert req.get_header("X-hangar-internal") == "secret"
             return Response()
-    monkeypatch.setattr(urllib.request, "build_opener", lambda *handlers: Opener())
+    monkeypatch.setattr(t, "_opener", Opener())
     t.configure("127.0.0.1:12345", "secret")
     assert asyncio.run(t._request({"op":"release", "consumer":"c"})) is None
     assert len(requested) == 1
@@ -377,7 +338,7 @@ def test_supervisor_bad_health_address_keeps_bridge_disabled(monkeypatch, addres
         def poll(self): return None
     monkeypatch.setattr(rust_server, "_spawn", lambda *args: Process())
     monkeypatch.setattr(rust_server, "server_log_path", lambda: "/tmp/unused-test-log")
-    monkeypatch.setattr(rust_server, "_health", lambda *args: dict(ok=True, protocol=2, terminal_address=address))
+    monkeypatch.setattr(rust_server, "_health", lambda *args: dict(ok=True, protocol=rust_server.RUST_SERVER_PROTOCOL, terminal_address=address))
     supervisor = rust_server.Supervisor(None, "0.0.0.0", 12345, 12346, "owner", "", lambda: False)
     assert asyncio.run(supervisor._start()) == "up"
     assert t._config is None
@@ -457,23 +418,6 @@ def test_bridge_error_is_visible_without_raw_response_or_secret(monkeypatch, cap
     assert "private pane" not in caplog.text and "secret" not in caplog.text
 
 
-@pytest.mark.parametrize("problem", ["memory-state", "plugin-without-fact"])
-def test_reducer_rejects_inconsistent_complete_response_before_memory_update(monkeypatch, problem):
-    t = bridge()
-    t.configure("127.0.0.1:12345", "secret")
-    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
-    memory = dict(prev_spinner=None, frozen=2, no_spinner=3, held_state="idle", held_label=None)
-    facts = dict(open_question=None, plugin_question=None, plugin_state=None, hook_state=None, hook_grace=8, status_line=None)
-    response = dict(analysis=analysis(), memory=copy.deepcopy(memory), diagnostic=dict(before_plugin="idle", plugin_applied=False))
-    if problem == "memory-state": response["memory"]["held_state"] = "working"
-    else: response["diagnostic"]["plugin_applied"] = True
-    async def request(payload): return response if payload["op"] == "reduce" else {}
-    monkeypatch.setattr(t, "_request", request)
-    async def run():
-        async with t.lease("s", "claude", lambda: "b"):
-            assert await t.reduce("s", "pane", memory, facts) is None
-    asyncio.run(run())
-    assert memory == dict(prev_spinner=None, frozen=2, no_spinner=3, held_state="idle", held_label=None)
 
 
 def test_stdlib_bridge_performs_real_loopback_http_without_environment_proxy(monkeypatch):
@@ -491,8 +435,6 @@ def test_stdlib_bridge_performs_real_loopback_http_without_environment_proxy(mon
             result = {}
             if payload["op"] == "capture":
                 result = dict(binding=payload["binding"], started=payload["started"], text="Rust", analysis=analysis())
-            elif payload["op"] == "reduce":
-                result = dict(analysis=analysis(), memory=payload["memory"], diagnostic=dict(before_plugin="idle", plugin_applied=False))
             body = json.dumps(result).encode()
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
@@ -509,16 +451,13 @@ def test_stdlib_bridge_performs_real_loopback_http_without_environment_proxy(mon
     async def run():
         async with t.lease("s", "claude", lambda: "b"):
             assert await state.shared_capture("s", 0) == "Rust"
-            memory = dict(prev_spinner=None, frozen=0, no_spinner=0, held_state="idle", held_label=None)
-            facts = dict(open_question=None, plugin_question=None, plugin_state=None, hook_state=None, hook_grace=8, status_line=None)
-            assert (await t.reduce("s", "Rust", memory, facts))["analysis"] == analysis()
     try:
         asyncio.run(run())
     finally:
         server.shutdown()
         server.server_close()
         thread.join(1)
-    assert [c["op"] for c in calls] == ["acquire", "capture", "reduce", "release"]
+    assert [c["op"] for c in calls] == ["acquire", "capture", "release"]
 
 
 def test_invalid_plugin_label_keeps_python_behavior_and_facts_are_read_once(monkeypatch):
@@ -554,8 +493,8 @@ def test_invalid_plugin_label_keeps_python_behavior_and_facts_are_read_once(monk
         finally:
             await stream.aclose()
     asyncio.run(run())
-    assert counters == dict(question=1, plugin_question=1, plugin_state=1, hook=1, status=1)
-    assert seen[0]["facts"]["plugin_question"] == question
+    assert counters == dict(question=1, plugin_question=1, plugin_state=0, hook=0, status=1)
+    assert not seen
 
 
 @pytest.mark.parametrize("kind", ["bad-status", "incomplete-read"])
@@ -604,43 +543,6 @@ def test_http_protocol_failure_preserves_capture_and_preview_python_reserve(monk
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("kind", ["bad-status", "incomplete-read"])
-def test_http_protocol_failure_hands_reducer_memory_to_python(monkeypatch, kind):
-    import http.client
-    t = bridge()
-    t.configure("127.0.0.1:12345", "test-only")
-    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
-    monkeypatch.setattr(state.tmux, "capture_pane", lambda name: "✻ Thinking…\n❯ ")
-    monkeypatch.setattr(state, "pergunta_aberta", lambda sid: None)
-    monkeypatch.setattr(state, "_sidecar_status", lambda sid: None)
-    monkeypatch.setattr(state.plugin_bridge, "pergunta_pendente", lambda name: None)
-    monkeypatch.setattr(state.plugin_bridge, "estado_recente", lambda name: None)
-    monkeypatch.setattr(state.plugin_bridge, "vivo", lambda name: False)
-    monkeypatch.setattr(state.hook_state, "get_state", lambda sid: None)
-    monkeypatch.setattr(state.hook_state, "shells", lambda sid: [])
-    from app.loop import LoopLink
-    monkeypatch.setattr(LoopLink, "get", lambda self: None)
-    memories = []
-    def http_response(config, payload):
-        if payload["op"] != "reduce": return None if payload["op"] == "capture" else {}
-        memories.append(copy.deepcopy(payload["memory"]))
-        if len(memories) == 1:
-            a = analysis()
-            a.update(state="working", label="Thinking…", spinner="✻ Thinking…")
-            return dict(analysis=a, memory=dict(prev_spinner="✻ Thinking…", frozen=2, no_spinner=0,
-                held_state="working", held_label="Thinking…"), diagnostic=dict(before_plugin="working", plugin_applied=False))
-        if kind == "bad-status": raise http.client.BadStatusLine("dummy-private")
-        raise http.client.IncompleteRead(b"dummy-private", 100)
-    monkeypatch.setattr(t, "_http", http_response)
-    async def run():
-        source = state.StateMonitor("s", poll=0, provider="claude", sid_get=lambda: "b").stream()
-        try:
-            assert (await anext(source)).state == "working"
-            assert (await asyncio.wait_for(anext(source), 1)).state == "idle"
-        finally:
-            await source.aclose()
-    asyncio.run(run())
-    assert memories[1]["frozen"] == 2
 
 
 @pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
@@ -664,8 +566,10 @@ def test_terminal_bridge_refuses_every_redirect_before_second_request(monkeypatc
             response = urllib.response.addinfourl(io.BytesIO(b""), headers, req.full_url, status)
             response.msg = "Synthetic redirect"
             return response
-    original = urllib.request.build_opener
-    monkeypatch.setattr(urllib.request, "build_opener", lambda *handlers: original(*handlers, Transport()))
+    opener = urllib.request.OpenerDirector()
+    for handler in (Transport(), urllib.request.HTTPDefaultErrorHandler(), urllib.request.HTTPErrorProcessor(), t._NoRedirect()):
+        opener.add_handler(handler)
+    monkeypatch.setattr(t, "_opener", opener)
     assert asyncio.run(t._request({"op":"release", "consumer":"c"})) is None
     assert calls == [("http://127.0.0.1:12345/__hangar_server/terminal", "test-only")]
 
@@ -1189,6 +1093,55 @@ def test_old_generation_io_failure_cannot_close_reconfigured_bridge(monkeypatch)
     asyncio.run(run())
 
 
+def test_monitor_reduces_captured_text_without_second_http(monkeypatch):
+    t = bridge()
+    calls = []
+    t.configure("127.0.0.1:12345", "secret")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    pane = "✻ Thinking…\n❯ "
+    async def request(payload):
+        calls.append(payload["op"])
+        if payload["op"] == "capture":
+            return dict(binding=payload["binding"], started=payload["started"], text=pane, analysis=analysis())
+        return {}
+    monkeypatch.setattr(t, "_request", request)
+    monkeypatch.setattr(state, "pergunta_aberta", lambda sid: None)
+    monkeypatch.setattr(state, "_sidecar_status", lambda sid: None)
+    monkeypatch.setattr(state.plugin_bridge, "pergunta_pendente", lambda name: None)
+    monkeypatch.setattr(state.plugin_bridge, "estado_recente", lambda name: None)
+    monkeypatch.setattr(state.plugin_bridge, "vivo", lambda name: False)
+    monkeypatch.setattr(state.hook_state, "get_state", lambda sid: None)
+    monkeypatch.setattr(state.hook_state, "shells", lambda sid: [])
+    from app.loop import LoopLink
+    monkeypatch.setattr(LoopLink, "get", lambda self: None)
+    async def run():
+        stream = state.StateMonitor("s", poll=0, sid_get=lambda: "b", provider="claude").stream()
+        try:
+            assert (await anext(stream)).state == "working"
+            assert (await asyncio.wait_for(anext(stream), 1)).state == "idle"
+        finally:
+            await stream.aclose()
+    asyncio.run(run())
+    assert "reduce" not in calls
+    assert calls.count("capture") >= 1
+
+
+def test_http_does_not_initialize_tls_for_loopback(monkeypatch):
+    import http.client
+    class Response:
+        status = code = 200
+        msg = "OK"
+        def info(self): return {}
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self, limit): return b"{}"
+    monkeypatch.setattr(http.client, "_create_https_context", lambda *a, **k: (_ for _ in ()).throw(AssertionError("TLS created for plain loopback HTTP")))
+    monkeypatch.setattr(bridge().urllib.request.HTTPHandler, "http_open", lambda self, req: Response())
+    assert bridge()._http(("127.0.0.1:1", "synthetic"), {"op": "release", "consumer": "c"}) == {}
+
+
+
+
 @pytest.mark.parametrize("failure,code", [(400, "http_400"), (503, "http_503"),
     ("timeout", "http_timeout"), ("connection", "http_connection"), ("protocol", "http_protocol"),
     ("url-timeout", "http_timeout")])
@@ -1305,4 +1258,3 @@ def test_old_resolver_error_does_not_charge_new_generation(monkeypatch, operatio
         assert t._failures == 2
         assert t._available()
     asyncio.run(run())
-

@@ -35,7 +35,6 @@ eventsource-stream = "=0.2.3"
 http-body-util = "=0.1.5"
 notify = "=7.0.0"
 percent-encoding = "=2.3.2"
-alacritty_terminal = "=0.26.0"
 
 [profile.release]
 strip = true

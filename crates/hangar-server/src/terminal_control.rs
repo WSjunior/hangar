@@ -1,7 +1,5 @@
 //! Observador tmux: somente display/capture, sem entrada ou respostas ao PTY.
 use crate::terminal_state::{self, PaneAnalysis};
-use alacritty_terminal::{Term, event::VoidListener, grid::Dimensions, index::{Column, Line},
-    term::{Config, TermMode}, vte::ansi::Processor};
 use serde::{Deserialize, Serialize};
 use std::{collections::{HashMap, VecDeque}, path::PathBuf, sync::{Arc, atomic::{AtomicU64, Ordering}}, time::Duration};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, process::{Child, ChildStdin, ChildStdout, Command},
@@ -51,7 +49,6 @@ fn io_failure(code: &'static str, error: std::io::Error) -> TerminalError {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ControlEvent {
     Frame { identity: FrameIdentity, text: String, error: bool },
-    Output { pane: String, bytes: Vec<u8> },
     Exit,
 }
 
@@ -96,11 +93,6 @@ impl ControlParser {
                 }
             } else if let Some(identity) = marker(&line, b"%begin ") {
                 self.frame = Some((identity, Vec::new()));
-            } else if let Some(output) = line.strip_prefix(b"%output ") {
-                let split = output.iter().position(|b| *b == b' ').ok_or(TerminalError("invalid output notification"))?;
-                let pane = std::str::from_utf8(&output[..split]).map_err(|_| TerminalError("invalid pane id"))?;
-                if !pane_id(pane) { return Err(TerminalError("invalid pane id")); }
-                events.push(ControlEvent::Output { pane: pane.into(), bytes: unescape(&output[split + 1..])? });
             } else if std::str::from_utf8(&line).is_err() { return Err(TerminalError("invalid notification UTF-8")); }
             else if line.starts_with(b"%exit") { events.push(ControlEvent::Exit); }
             else if !line.starts_with(b"%") || line.starts_with(b"%begin ") || line.starts_with(b"%end ") || line.starts_with(b"%error ") {
@@ -118,95 +110,6 @@ impl ControlParser {
 fn pane_id(pane: &str) -> bool {
     pane.strip_prefix('%').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
-fn unescape(bytes: &[u8]) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] != b'\\' { out.push(bytes[i]); i += 1; continue; }
-        let octal = bytes.get(i + 1..i + 4).ok_or(TerminalError("invalid output escape"))?;
-        if !octal.iter().all(|b| (b'0'..=b'7').contains(b)) { return Err(TerminalError("invalid output escape")); }
-        let value = (octal[0] - b'0') as u16 * 64 + (octal[1] - b'0') as u16 * 8 + (octal[2] - b'0') as u16;
-        if value > 255 { return Err(TerminalError("invalid output escape")); }
-        out.push(value as u8); i += 4;
-    }
-    Ok(out)
-}
-
-struct Size { columns: usize, rows: usize }
-impl Dimensions for Size {
-    fn total_lines(&self) -> usize { self.rows }
-    fn screen_lines(&self) -> usize { self.rows }
-    fn columns(&self) -> usize { self.columns }
-}
-
-pub struct Screen {
-    terminal: Term<VoidListener>,
-    processor: Processor,
-    size: Size,
-    processed: usize,
-}
-impl Screen {
-    pub fn new(columns: usize, rows: usize) -> Result<Self> {
-        if columns == 0 || rows == 0 || columns > 1024 || rows > 512 || columns * rows > 65_536 {
-            return Err(TerminalError("invalid terminal dimensions"));
-        }
-        let size = Size { columns, rows };
-        let config = Config { scrolling_history: 0, ..Config::default() };
-        // VoidListener descarta PtyWrite, clipboard e pedidos de consulta do aplicativo.
-        Ok(Self { terminal: Term::new(config, &size, VoidListener), processor: Processor::new(), size, processed: 0 })
-    }
-    pub fn feed(&mut self, bytes: &[u8]) -> Result<()> {
-        if bytes.len() > MAX_FRAME.saturating_sub(self.processed) { return Err(TerminalError("terminal stream limit exceeded")); }
-        self.processed += bytes.len();
-        self.processor.advance(&mut self.terminal, bytes);
-        Ok(())
-    }
-    pub fn text(&self) -> String {
-        let mut text = String::new();
-        for row in 0..self.size.rows {
-            let mut line = String::new();
-            for column in 0..self.size.columns {
-                let cell = &self.terminal.grid()[Line(row as i32)][Column(column)];
-                if !cell.flags.contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER) {
-                    line.push(cell.c);
-                    if let Some(extra) = cell.zerowidth() { line.extend(extra); }
-                }
-            }
-            text.push_str(line.trim_end_matches(' ')); text.push('\n');
-        }
-        text
-    }
-    pub fn cursor(&self) -> (usize, usize) {
-        let cursor = &self.terminal.grid().cursor;
-        (cursor.point.column.0 + usize::from(cursor.input_needs_wrap), cursor.point.line.0 as usize)
-    }
-    pub fn restore_cursor(&mut self, column: usize, row: usize) -> Result<()> {
-        if column > self.size.columns || row >= self.size.rows { return Err(TerminalError("invalid terminal cursor")); }
-        let cursor = &mut self.terminal.grid_mut().cursor;
-        // O tmux guarda a coluna virtual após a margem; alacritty guarda a última célula e o wrap.
-        cursor.point.column = Column(if column == self.size.columns { column - 1 } else { column });
-        cursor.point.line = Line(row as i32);
-        cursor.input_needs_wrap = column == self.size.columns;
-        Ok(())
-    }
-    pub fn alternate(&self) -> bool { self.terminal.mode().contains(TermMode::ALT_SCREEN) }
-    pub fn cell(&self, column: usize, row: usize) -> Option<&alacritty_terminal::term::cell::Cell> {
-        if column >= self.size.columns || row >= self.size.rows { return None; }
-        Some(&self.terminal.grid()[Line(row as i32)][Column(column)])
-    }
-    fn checkpoint(&mut self, ansi: &str, dimensions: &PaneInfo) -> Result<()> {
-        *self = Self::new(dimensions.columns, dimensions.rows)?;
-        if dimensions.alternate { self.feed(b"\x1b[?1049h")?; }
-        // A captura traz linhas, sem os movimentos de cursor que as desenharam.
-        let lines: Vec<_> = ansi.strip_suffix('\n').unwrap_or(ansi).split('\n').collect();
-        for (row, line) in lines.iter().take(dimensions.rows).enumerate() {
-            self.feed(format!("\x1b[{};1H", row + 1).as_bytes())?; self.feed(line.as_bytes())?;
-        }
-        self.restore_cursor(dimensions.cursor_x, dimensions.cursor_y)?;
-        Ok(())
-    }
-}
-
 #[derive(Clone)]
 pub struct Limits {
     pub startup: Duration,
@@ -381,23 +284,25 @@ struct Observer {
     parser: ControlParser,
     events: VecDeque<ControlEvent>,
     pane: Option<PaneInfo>,
-    screen: Option<Screen>,
     limits: Limits,
 }
 impl Observer {
     async fn spawn(program: PathBuf, socket: Option<PathBuf>, key: &Key, limits: Limits) -> Result<Self> {
         let mut command = Command::new(program);
         if let Some(socket) = socket { command.arg("-S").arg(socket); }
-        command.args(["-u", "-C", "-N", "attach-session", "-E", "-f", "read-only,ignore-size", "-t"]).arg(format!("={}", key.name))
+        command.args(["-u", "-C", "-N", "attach-session", "-E", "-f", "read-only,ignore-size,no-output", "-t"]).arg(format!("={}", key.name))
             .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).kill_on_drop(true);
         let mut child = command.spawn().map_err(|e| io_failure("cannot start terminal observer", e))?;
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
-        let mut observer = Self { child, stdin, stdout, parser: ControlParser::default(), events: VecDeque::new(), pane: None, screen: None, limits };
+        let mut observer = Self { child, stdin, stdout, parser: ControlParser::default(), events: VecDeque::new(), pane: None, limits };
         let initialized = timeout(observer.limits.startup, observer.frame()).await
             .map_err(|_| TerminalError("terminal startup timeout")).and_then(|r| r);
         if let Err(e) = initialized { observer.stop().await; return Err(e); }
-        if let Err(e) = observer.seed(key).await { observer.stop().await; return Err(e); }
+        match observer.info(key).await {
+            Ok(info) => observer.pane = Some(info),
+            Err(e) => { observer.stop().await; return Err(e); }
+        }
         Ok(observer)
     }
     fn event(&mut self, event: ControlEvent) -> Result<Option<(FrameIdentity, String)>> {
@@ -405,12 +310,7 @@ impl Observer {
             ControlEvent::Frame { identity, text, error: false } => Ok(Some((identity, text))),
             ControlEvent::Frame { error: true, .. } => Err(TerminalError("tmux command failed")),
             ControlEvent::Exit => Err(TerminalError("terminal observer exited")),
-            ControlEvent::Output { pane, bytes } => {
-                if self.pane.as_ref().is_some_and(|info| info.id == pane) {
-                    if let Some(screen) = &mut self.screen { screen.feed(&bytes)?; }
-                }
-                Ok(None)
-            }
+
         }
     }
     async fn read(&mut self) -> Result<()> {
@@ -458,35 +358,15 @@ impl Observer {
         if self.pane.as_ref().is_some_and(|old| old.id != info.id) { return Err(TerminalError("terminal target changed")); }
         Ok(info)
     }
-    async fn seed(&mut self, key: &Key) -> Result<()> {
-        let info = self.info(key).await?;
-        self.screen = Some(Screen::new(info.columns, info.rows)?);
-        self.pane = Some(info.clone());
-        let ansi = self.command(format!("capture-pane -p -e -t {} -S 0\n", quote(&info.id))).await?;
-        self.screen.as_mut().unwrap().checkpoint(&ansi, &info)?;
-        Ok(())
-    }
     async fn capture(&mut self, key: &Key, request: CaptureRequest) -> Result<CaptureResult> {
         let info = self.info(key).await?;
-        if self.pane.as_ref().is_none_or(|old| old.columns != info.columns || old.rows != info.rows) {
-            self.screen = Some(Screen::new(info.columns, info.rows)?);
-        }
         self.pane = Some(info.clone());
         let text = self.command(format!("capture-pane -p {}{}-t {} -S -{}\n", if request.colors { "-e " } else { "" }, if request.join { "-J " } else { "" }, quote(&info.id), request.lines)).await?;
-        // A grade só fornece análise quando a captura prova paridade; histórico e wrap ficam no tmux.
-        let grade = self.screen.as_ref().map(Screen::text);
-        let analysis = if !request.colors && !request.join && grade.as_deref() == Some(&text) {
-            terminal_state::analyze(grade.as_deref().unwrap())
-        } else { terminal_state::analyze(&text) };
-        let ansi = self.command(format!("capture-pane -p -e -t {} -S 0\n", quote(&info.id))).await?;
-        let after = self.info(key).await?;
-        if info.columns != after.columns || info.rows != after.rows { return Err(TerminalError("terminal resized during capture")); }
-        self.screen.as_mut().unwrap().checkpoint(&ansi, &after)?;
-        self.pane = Some(after);
+        let analysis = terminal_state::analyze(&text);
         Ok(CaptureResult { binding: request.binding, started: request.started, text, analysis })
     }
     async fn stop(&mut self) {
-        self.screen = None; self.pane = None; self.events.clear();
+        self.pane = None; self.events.clear();
         let _ = self.child.start_kill();
         let _ = self.child.wait().await;
     }

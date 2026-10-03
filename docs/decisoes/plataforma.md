@@ -1096,12 +1096,16 @@ aviso. A porta pública recusa o endpoint terminal e a privada só monta esse en
 `POST /__hangar_server/terminal` confere origem TCP de loopback e segredo interno em tempo
 constante antes de ler o corpo. Cabeçalho encaminhado externo, inclusive duplicado ou inválido,
 recusa com 404; token do dono/convidado não serve. O corpo tem teto de 16 MiB e prazo de 6 s,
-operações tipadas `acquire`, `capture`, `release`, `reduce`, sem comando livre. Corpo inválido
+operações tipadas `acquire`, `capture`, `release`, sem comando livre. Corpo inválido
 responde frase fixa com 400; falha do controle responde 503, nunca pane vazio com sucesso.
 O pool mantém os limites da Parte 2C/Task 2 e a captura exata do alvo que `tmux._pane_target`
-resolveu. `acquire` inicial semeia a grade; renovações não recapturam.
+resolveu. `acquire` inicial confere o alvo; renovações não recapturam. O cliente anexa com
+`read-only,ignore-size,no-output` e `-E`, sem grade auxiliar. Cada rodada confere a sessão/pane
+e lê um único `capture-pane`; duas molduras identificam cada comando. Mudança de alvo continua
+invalidando a leitura, e panes maiores não pagam um limite de células de outra grade.
 
-A ponte Python usa `urllib` sem proxy em thread, corpo/UTF-8/JSON limitados, sem dependência
+A ponte Python usa um opener `urllib` somente HTTP, sem proxy/redirect, em thread dedicada,
+corpo/UTF-8/JSON limitados, sem dependência
 runtime de `httpx`. Endereço e segredo ficam em memória, fora do ambiente global, e somem
 antes da nova geração do filho, na saída e no `stop`, inclusive sem processo guardado.
 A configuração recebe geração própria. Cache, captura em voo e análise acompanham provider,
@@ -1112,27 +1116,26 @@ não vaza para quem consome eventos do monitor.
 Claude mantém uma lease por monitor e uma por produtor de prévia; a prévia renova mesmo
 quando recebe só sidecar. `None` no sidecar cai no pane; `""` publica vazio com markdown/full.
 Análise Rust do pane só fornece spinner/texto no mesmo quadro, com markdown/full desligados.
-O reducer Claude recebe cinco campos de memória e seis fatos lidos uma vez no tick. A resposta
-é conferida inteira antes de substituir os locais. Erro executa o bloco Python original com
-a mesma memória/pane/fatos. O diagnóstico tipado registra o estado imediatamente anterior à
-âncora plugin, sem reconstituí-lo por classificação estática. Permissão, loop, shells, dedupe,
-drain e SSE continuam no Python.
+O estado temporal, debounce e a precedência das perguntas/plugin/hooks permanecem no bloco
+Python original, sobre o texto já capturado. Não existe outro HTTP para o cálculo puro, nem
+coleta antecipada de fatos que esse estado não usa. O cálculo puro Rust permanece como
+referência testada contra as fixtures Python, sem operação privada. Permissão, loop, shells,
+dedupe, drain e SSE continuam no Python.
 
-Codex terminal adquire só após `ensure_running` e renova em task independente da fila nativa,
-inclusive ocioso. Mudança de thread atualiza o vínculo; fonte encerrada cancela/aguarda a task
-e libera antes de voltar ao chamador. Sem terminal não adquire nem resolve alvo tmux. Estado,
-pergunta, prévia por push e app-server continuam nativos. Kimi/Pi/omp seguem o caminho anterior.
+Codex terminal não abre observador tmux sem consumidor de captura. Estado, pergunta, prévia
+por push e app-server continuam nativos. Kimi/Pi/omp seguem o caminho anterior.
 Windows usa captura/reducer Python, sem tentar controle tmux/psmux.
 
 Prova isolada: listener público em `127.0.0.2`, privado em `127.0.0.1` com porta efêmera;
 processador privado respondeu 200 e ambas as portas fecharam na parada. Executável fake provou
 um PID compartilhado entre dois produtores, renovação sem recaptura e reap na última liberação.
-A suíte focada cobre reserva, memória Rust→Python, `/clear` em voo com vínculo/texto idênticos,
+A suíte focada cobre reserva, estado temporal Python, `/clear` em voo com vínculo/texto idênticos,
 troca de geração, sidecar vazio, autenticação antes do corpo e eventos Codex durante HTTP lento.
 O gerador das fixtures força a referência Python: não compara Rust contra Rust.
 
-`RUST_SERVER_PROTOCOL` e `INTERNAL_PROTOCOL` sobem juntos de 1 para 2. `side-events` permanece
-igual; a integração posterior da Parte 2B deve reconciliar o número do contrato conjunto.
+`RUST_SERVER_PROTOCOL` e `INTERNAL_PROTOCOL` ficam em 3 após retirar a operação privada `reduce`.
+`side-events` permanece igual. Em 03/10/2026 a coordenação com `rust-parte2` combinou 3 nesta 2C
+e 4 para o contrato posterior da Parte 2B; não reutilizar 3 para dois contratos diferentes.
 Não houve reinício/instalação nem validação no app ou backend vivo. Windows não foi executado.
 Uma rodada vermelha tentou leitura real `tmux capture-pane -p -t %8 -S -200` em alvo fictício e
 recebeu `can't find pane: %8`; nenhuma conversa foi lida. A guarda dos novos testes passou a
