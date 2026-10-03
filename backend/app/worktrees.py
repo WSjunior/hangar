@@ -162,18 +162,30 @@ def codex_cwd(cwd: str, rollout: str) -> str | None:
     if not root:
         return None
     main = main_repo_of(root)
-    gone = list(removed())
+    gone = [k for k, v in removed().items() if v == main]
     candidates = [main, *worktree_paths(main), *gone]
     for p, is_dir in _codex_paths(rollout):
         if os.path.exists(p):
             owner = _owner(p, candidates)
             if owner:
                 return owner
-        elif is_dir:
+        elif is_dir and _of_this_repo(p, main, gone):
             # Pasta que sumiu: a worktree foi removida. Volta como está para o `locate` marcar
             # "apagada". Arquivo de patch inexistente não conta (um "Delete File" é legítimo).
             return _owner(p, gone) or p
     return None
+
+
+def _of_this_repo(path: str, main: str, gone: list[str]) -> bool:
+    """Pasta sumida só conta se for deste repo: dentro dele, de uma worktree removida dele ou de
+    uma irmã no padrão do Hangar (`<repo>-<x>`). Pasta sumida de outro repo não diz nada."""
+    if _owner(path, [main, *gone]):
+        return True
+    parent, name = os.path.split(main.rstrip("/"))
+    prefix = parent.rstrip("/") + "/"
+    if not path.startswith(prefix):
+        return False
+    return path[len(prefix):].split("/", 1)[0].startswith(name + "-")
 
 
 def removed() -> dict[str, str]:

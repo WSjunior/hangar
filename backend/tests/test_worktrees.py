@@ -109,6 +109,16 @@ def test_locate_codex_removed_worktree_is_gone(tmp_path):
     assert loc.worktree_gone and loc.worktree_path == wt
 
 
+def test_locate_codex_missing_folder_of_other_repo_does_not_count(tmp_path):
+    main = _repo(tmp_path / "repo")
+    f = tmp_path / "rollout.jsonl"
+    call = {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command",
+            "arguments": json.dumps({"cmd": "ls", "workdir": str(tmp_path / "outro" / "sumiu")})}}
+    f.write_text(json.dumps(call) + "\n")
+    loc = worktrees.locate("codex", main, str(f))
+    assert (loc.branch, loc.worktree, loc.worktree_path, loc.worktree_gone) == ("main", False, None, False)
+
+
 def test_locate_codex_deleted_patch_file_does_not_count(tmp_path):
     main = _repo(tmp_path / "repo")
     f = tmp_path / "rollout.jsonl"
