@@ -20,7 +20,8 @@ try {
 }
 $logRoot = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $HOME 'AppData\Local' }
 $log = Join-Path $logRoot 'hangar\logs\privado\hangar-server.log'
-$match = Select-String -Path $log -Pattern 'upstream=(127\.0\.0\.1:\d+)' | Select-Object -Last 1
+$match = Select-String -Path $log -Pattern 'upstream=(127\.0\.0\.1:\d+)' -ErrorAction SilentlyContinue | Select-Object -Last 1
+if (-not $match) { Write-Host "porta do Python nao encontrada em $log"; exit 1 }
 $pythonHost = $match.Matches[0].Groups[1].Value
 
 function Media-Ms([string]$hostPort, [string]$name) {
@@ -32,8 +33,10 @@ function Media-Ms([string]$hostPort, [string]$name) {
     [math]::Round((($times | Select-Object -Skip 1) | Measure-Object -Average).Average)
 }
 
-$sessions = Invoke-RestMethod -UseBasicParsing -Headers $headers 'http://127.0.0.1:8765/api/sessions' |
+# Parenteses: no PowerShell 5.1 a lista JSON chega ao pipeline como um objeto so.
+$sessions = (Invoke-RestMethod -UseBasicParsing -Headers $headers 'http://127.0.0.1:8765/api/sessions') |
     Where-Object { $_.jsonl }
+if (-not $sessions) { Write-Host 'nenhuma sessao aberta com conversa'; exit 1 }
 
 '{0,-28} {1,-16} {2,9} {3,9} {4,7}' -f 'sessao', 'tipo', 'Rust', 'Python', 'ganho'
 foreach ($s in $sessions) {
