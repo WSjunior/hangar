@@ -570,3 +570,258 @@ def test_credential_path_is_only_matched_to_registered_account(tmp_path, monkeyp
     with pytest.raises(store.TransferError, match="session_transfer_unknown_account"):
         store._resolve_target(f"codex:{tmp_path / 'arbitrary'}")
     assert not resolve.called
+
+
+@pytest.fixture
+def terminal_ingress(scenario, monkeypatch):
+    """Transportes simulados; decisão de envio e fila continuam nas funções de produção."""
+    monkeypatch.setattr(api, "_headless", lambda name: False)
+    monkeypatch.setattr(api, "_pane_info", lambda name: ("claude", None))
+    monkeypatch.setattr(api, "_enviar_nativo", lambda *args: None)
+    monkeypatch.setattr(api.plugin_bridge, "aguardando", lambda name: False)
+    monkeypatch.setattr(api, "_recusa_orq", Mock())
+    monkeypatch.setattr(api, "_session_exists", lambda name: True)
+    monkeypatch.setattr(api, "_agendar_confirmacao", Mock())
+    monkeypatch.setattr(api, "_drain_session", Mock())
+    monkeypatch.setattr(api.tmux, "list_panes_active", lambda: [])
+    monkeypatch.setattr(scenario.reg, "resolve_tracked", lambda *args: (str(scenario.source), True))
+    monkeypatch.setattr(api.terminal, "interrupt", Mock())
+    return scenario
+
+
+@pytest.mark.parametrize("delivery", ["sent", "deferred"])
+async def test_enviar_holds_destination_until_terminal_receipt_is_persisted(terminal_ingress, monkeypatch, delivery):
+    import threading
+    scenario = terminal_ingress
+    entered, release = threading.Event(), threading.Event()
+    append = pqueue.PromptQueue.append
+
+    def transport(name, *args, **kwargs):
+        with api.terminal_input._send_lock(name):
+            return delivery
+
+    def paused_append(queue, *args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return append(queue, *args, **kwargs)
+
+    monkeypatch.setattr(api.terminal, "send_prompt", transport)
+    monkeypatch.setattr(pqueue.PromptQueue, "append", paused_append)
+    request = asyncio.create_task(api._enviar("s", "recado"))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        # A entrega já soltou o mutex terminal; falta persistir o recibo.
+        terminal_lock = api.terminal_input._send_lock("s")
+        assert terminal_lock.acquire(blocking=False)
+        terminal_lock.release()
+        assert pqueue.PromptQueue("s").load() == []
+        with pytest.raises(store.TransferError, match="session_transfer_busy"):
+            await scenario.run()
+        assert scenario.live.vivo and not scenario.calls
+    finally:
+        release.set()
+        response = await request
+    assert response["ok"] and response["delivered"] is (delivery == "sent")
+    rows = pqueue.PromptQueue("s").load()
+    assert len(rows) == 1 and rows[0]["delivered"] is (delivery == "sent") and not rows[0].get("confirmed")
+    with pytest.raises(store.TransferError, match="session_transfer_queue_pending"):
+        await scenario.run()
+    assert scenario.live.vivo
+
+
+async def test_cancelled_common_send_keeps_participation_until_receipt(terminal_ingress, monkeypatch):
+    import threading
+    entered, release = threading.Event(), threading.Event()
+    append = pqueue.PromptQueue.append
+    monkeypatch.setattr(api.terminal, "send_prompt", lambda *args, **kwargs: "sent")
+
+    def paused_append(queue, *args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return append(queue, *args, **kwargs)
+
+    monkeypatch.setattr(pqueue.PromptQueue, "append", paused_append)
+    request = asyncio.create_task(api._enviar("s", "recado cancelado"))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        request.cancel()
+        await asyncio.sleep(0)
+        assert not request.done()
+        with pytest.raises(store.TransferError, match="session_transfer_busy"):
+            await terminal_ingress.run()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+    assert len(pqueue.PromptQueue("s").load()) == 1
+    with store.session_operation("s"):
+        pass
+
+
+@pytest.mark.parametrize("slow_route", ["transcribe", "git/diff"])
+async def test_slow_query_does_not_exclude_input_or_interrupt(terminal_ingress, monkeypatch, slow_route):
+    import threading
+    from httpx import ASGITransport, AsyncClient
+    entered, release = threading.Event(), threading.Event()
+
+    def slow(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return "resultado"
+
+    monkeypatch.setattr(api, "save_upload", lambda *args: str(terminal_ingress.source.parent / "audio.wav"))
+    monkeypatch.setattr(api, "transcribe", slow)
+    monkeypatch.setattr(api, "file_diff", slow)
+    monkeypatch.setattr(api, "_session_cwd", lambda name: terminal_ingress.info.cwd)
+    monkeypatch.setattr(api.terminal, "send_prompt", lambda *args, **kwargs: "deferred")
+    headers = {"Authorization": "Bearer test-secret"}
+    async with AsyncClient(transport=ASGITransport(app=api.app), base_url="http://test", headers=headers) as client:
+        kwargs = {"content": b"audio", "headers": {"X-Filename": "audio.wav"}} if slow_route == "transcribe" else {"json": {"path": "example.py"}}
+        pending = asyncio.create_task(client.post(f"/api/sessions/s/{slow_route}", **kwargs))
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            # Consulta pendente também não prende a operação exclusiva de troca.
+            with store.session_operation("s"):
+                pass
+            sent = await client.post("/api/sessions/s/input", json={"text": "mensagem"})
+            interrupted = await client.post("/api/sessions/s/interrupt")
+            assert sent.status_code == 200 and interrupted.status_code == 200
+            assert api.terminal.interrupt.called and not pending.done()
+        finally:
+            release.set()
+            response = await pending
+        assert response.status_code == 200
+
+
+async def test_two_normal_http_inputs_share_the_ingress_gate(terminal_ingress, monkeypatch):
+    import threading
+    from httpx import ASGITransport, AsyncClient
+    first, both, release = threading.Event(), threading.Event(), threading.Event()
+    arrivals, lock = [], threading.Lock()
+    append = pqueue.PromptQueue.append
+    monkeypatch.setattr(api.terminal, "send_prompt", lambda *args, **kwargs: "deferred")
+
+    def paused_append(queue, text, **kwargs):
+        with lock:
+            arrivals.append(text)
+            first.set()
+            if len(arrivals) == 2:
+                both.set()
+        assert release.wait(5)
+        return append(queue, text, **kwargs)
+
+    monkeypatch.setattr(pqueue.PromptQueue, "append", paused_append)
+    headers = {"Authorization": "Bearer test-secret"}
+    async with AsyncClient(transport=ASGITransport(app=api.app), base_url="http://test", headers=headers) as client:
+        requests = [asyncio.create_task(client.post("/api/sessions/s/input", json={"text": "primeira"}))]
+        try:
+            assert await asyncio.to_thread(first.wait, 5)
+            requests.append(asyncio.create_task(client.post("/api/sessions/s/input", json={"text": "segunda"})))
+            assert await asyncio.to_thread(both.wait, 5)
+            with pytest.raises(store.TransferError, match="session_transfer_busy"):
+                await terminal_ingress.run()
+        finally:
+            release.set()
+            responses = await asyncio.gather(*requests)
+        assert all(response.status_code == 200 for response in responses)
+    assert {row["text"] for row in pqueue.PromptQueue("s").load()} == {"primeira", "segunda"}
+
+
+async def test_transfer_still_refuses_queries_input_and_interrupt(terminal_ingress, monkeypatch):
+    from httpx import ASGITransport, AsyncClient
+    scenario = terminal_ingress
+    record = store.TransferRecord(str(uuid.uuid4()), "s", "k:source-key", store.TransferPhase.PREPARING,
+                                  None, {**scenario.meta, "jsonl": str(scenario.source)}, None, None, None)
+    store.save_transfer(record)
+    never = Mock(side_effect=AssertionError("handler não deve executar durante a transferência"))
+    monkeypatch.setattr(api, "transcribe", never)
+    monkeypatch.setattr(api, "file_diff", never)
+    monkeypatch.setattr(api.terminal, "send_prompt", never)
+    monkeypatch.setattr(api.terminal, "interrupt", never)
+    headers = {"Authorization": "Bearer test-secret"}
+    async with AsyncClient(transport=ASGITransport(app=api.app), base_url="http://test", headers=headers) as client:
+        requests = [client.post("/api/sessions/s/transcribe", content=b"audio"),
+                    client.post("/api/sessions/s/git/diff", json={"path": "example.py"}),
+                    client.post("/api/sessions/s/input", json={"text": "mensagem"}),
+                    client.post("/api/sessions/s/interrupt")]
+        responses = await asyncio.gather(*requests)
+    assert all(response.status_code == 409 for response in responses)
+    assert all(response.json()["detail"]["code"] == "session_transfer_busy" for response in responses)
+    assert not never.called and pqueue.PromptQueue("s").load() == []
+
+
+async def test_delivery_wait_rechecks_durable_transfer_before_enqueue(scenario):
+    lock = scenario.hl.delivery_lock("s")
+    await lock.acquire()
+    request = asyncio.create_task(api._send_one_headless("s", "mensagem"))
+    try:
+        await asyncio.sleep(0)
+        assert not request.done()
+        record = store.TransferRecord(str(uuid.uuid4()), "s", "k:source-key", store.TransferPhase.PREPARING,
+                                      None, {**scenario.meta, "jsonl": str(scenario.source)}, None, None, None)
+        store.save_transfer(record)
+    finally:
+        lock.release()
+    response = await request
+    assert not response["ok"] and response["error"]["code"] == "session_transfer_busy"
+    assert pqueue.PromptQueue("s").load() == [] and not scenario.hl.send_prompt.called
+
+
+def cleanup_record(scenario):
+    record = store.TransferRecord(str(uuid.uuid4()), "s", "k:source-key", store.TransferPhase.SOURCE_STOPPED,
+                                  None, scenario.meta, None, None, None)
+    store.prepare_runtime(record)
+    store._write_json(store._runtime_path(record), {"original": {}, "processes": {}, "import_pid": 9,
+        "import_tree_final": True, "import_processes": {
+            "9": {"started": 1, "command": "root"}, "10": {"started": 1, "command": "child"}}})
+    return record
+
+
+async def test_normal_import_cleanup_waits_for_captured_child_after_root_exits(scenario, monkeypatch):
+    from app import procinfo
+    record = cleanup_record(scenario)
+    child_polls = 0
+
+    def alive(pid):
+        nonlocal child_polls
+        if pid == 9:
+            return False
+        assert pid == 10
+        child_polls += 1
+        return child_polls < 3
+
+    monkeypatch.setattr(procinfo, "pid_vivo", alive)
+    monkeypatch.setattr(store, "_process_identity", lambda pid: {"started": 1, "command": "child"})
+    kill = Mock(side_effect=AssertionError("fechamento normal só espera a árvore capturada"))
+    monkeypatch.setattr(store.os, "kill", kill)
+    await store.wait_import_exit(record)
+    assert child_polls == 3 and store._runtime(record)["import_stopped"] is True
+    assert not kill.called
+
+
+@pytest.mark.parametrize("identity", [None, {"started": 1, "command": "child"},
+                                      {"started": 1, "command": "different-command"}])
+async def test_normal_cleanup_deadline_does_not_confirm_live_or_unknown_child(scenario, monkeypatch, identity):
+    from app import procinfo
+    record = cleanup_record(scenario)
+    monkeypatch.setattr(procinfo, "pid_vivo", lambda pid: pid == 10)
+    monkeypatch.setattr(store, "_process_identity", lambda pid: identity)
+    kill = Mock(side_effect=AssertionError("prazo esgotado não autoriza sinalizar o processo"))
+    monkeypatch.setattr(store.os, "kill", kill)
+    with pytest.raises(store.TransferError, match="session_transfer_import_not_stopped"):
+        await store.wait_import_exit(record, timeout=0)
+    assert not store._runtime(record).get("import_stopped") and not kill.called
+
+
+async def test_normal_cleanup_leaves_reused_pid_untouched(scenario, monkeypatch):
+    from app import procinfo
+    record = cleanup_record(scenario)
+    monkeypatch.setattr(procinfo, "pid_vivo", lambda pid: pid == 10)
+    monkeypatch.setattr(store, "_process_identity", lambda pid: {"started": 2, "command": "unrelated"})
+    kill = Mock(side_effect=AssertionError("PID de outro nascimento não é o filho capturado"))
+    monkeypatch.setattr(store.os, "kill", kill)
+    await store.wait_import_exit(record, timeout=0)
+    private = store._runtime(record)
+    assert private["import_stopped"] is True
+    assert private["import_processes"]["10"] == {"started": 1, "command": "child"}
+    assert not kill.called

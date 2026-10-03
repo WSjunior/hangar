@@ -528,11 +528,20 @@ async def _lifespan(app: FastAPI):
 
 
 async def _transfer_guard(name: str):
-    from app.conversation_transfer import session_operation, require_available, TransferError, public_error
+    from app.conversation_transfer import session_ingress, require_available, TransferError, public_error
     try:
-        with session_operation(name):
+        with session_ingress(name):
             await asyncio.to_thread(require_available, name)
             yield
+    except TransferError as exc:
+        raise HTTPException(exc.status, detail=public_error(exc)) from None
+
+
+async def _transfer_check(name: str):
+    from app.conversation_transfer import session_ingress, require_available, TransferError, public_error
+    try:
+        with session_ingress(name):
+            await asyncio.to_thread(require_available, name)
     except TransferError as exc:
         raise HTTPException(exc.status, detail=public_error(exc)) from None
 
@@ -3801,6 +3810,16 @@ def _jsonl_atual(name: str) -> str | None:
 
 
 def _send_one(name: str, text: str, track_entry: bool = False) -> dict:
+    from app.conversation_transfer import session_ingress, TransferError, public_error
+    try:
+        # A thread conserva a participação mesmo se o await HTTP for cancelado.
+        with session_ingress(name):
+            return _send_one_available(name, text, track_entry)
+    except TransferError as exc:
+        return {"ok": False, "error": public_error(exc), "delivered": False}
+
+
+def _send_one_available(name: str, text: str, track_entry: bool = False) -> dict:
     if error := _transfer_send_error(name):
         return error
 
@@ -4058,6 +4077,22 @@ async def _send_one_codex(name: str, text: str, *, track_entry: bool = False) ->
 
 
 async def _enviar(name: str, text: str) -> dict:
+    from app.conversation_transfer import session_ingress, TransferError, public_error
+    try:
+        with session_ingress(name):
+            operation = asyncio.create_task(_send_available(name, text))
+            try:
+                return await asyncio.shield(operation)
+            except asyncio.CancelledError:
+                try:
+                    await operation
+                finally:
+                    raise
+    except TransferError as exc:
+        return {"ok": False, "error": public_error(exc), "delivered": False}
+
+
+async def _send_available(name: str, text: str) -> dict:
     if error := _transfer_send_error(name):
         return error
 
@@ -4600,7 +4635,7 @@ class GroupMsgBody(_StrictBody):
     forcar_tmux: bool = False
 
 
-@app.post("/api/sessions/{name}/group-message", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/group-message", dependencies=[Depends(require_auth), Depends(_transfer_check)])
 async def group_message(name: str, body: GroupMsgBody):
     """Aviso pro GRUPO todo (hangar-send --group): entrega o texto a CADA companheiro de `name` numa
     tacada, como `[grupo: <name>]`. Unidirecional por contrato (o prompt instrui a NUNCA responder
@@ -5430,7 +5465,7 @@ class BashOutputBody(_StrictBody):
 
 
 # POST porque o comando vai inteiro no corpo: numa URL ele estoura o limite com heredoc.
-@app.post("/api/sessions/{name}/bash-output", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/bash-output", dependencies=[Depends(require_auth), Depends(_transfer_check)])
 async def bash_output(name: str, body: BashOutputBody):
     return {"text": await asyncio.to_thread(procinfo.saida_de_comando, body.command)}
 
@@ -6181,7 +6216,7 @@ def _id_upload(info: SessionInfo) -> str:
     return session_key(info.jsonl) if info.jsonl else info.name
 
 
-@app.post("/api/sessions/{name}/upload", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/upload", dependencies=[Depends(require_auth), Depends(_transfer_check)])
 async def upload(name: str, request: Request):
     # Resolve o cwd da sessao (registry.list() ja traz cwd via tmux #{pane_current_path}).
     # handler async -> registry.list() (subprocess tmux) no threadpool pra nao bloquear o loop.
@@ -6233,7 +6268,7 @@ async def upload(name: str, request: Request):
     return {"path": path, "frames": frames, "transcript": fala.strip()}
 
 
-@app.post("/api/sessions/{name}/transcribe", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/transcribe", dependencies=[Depends(require_auth), Depends(_transfer_check)])
 async def transcribe_audio(name: str, request: Request, limpar: bool = False, estilo: str | None = None):
     # Salva o audio (pra anexar o path no chat) E transcreve via Groq num round-trip. Mesmo padrao
     # de upload (raw body + X-Filename). Devolve {path, text} -> o front monta "texto — 📎 audio: path".
@@ -6632,7 +6667,7 @@ def git_log_route(name: str, q: str | None = None, n: int = 50):
         raise HTTPException(e.status, e.detail)
 
 
-@app.post("/api/sessions/{name}/git/diff", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/git/diff", dependencies=[Depends(require_auth), Depends(_transfer_check)])
 def git_diff(name: str, body: GitPathBody):
     try:
         return file_diff(_session_cwd(name), body.path)
@@ -6844,7 +6879,7 @@ class ResolverBody(_StrictBody):
 _ELSEWHERE_MAX = 30
 
 
-@app.post("/api/sessions/{name}/files/resolver", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/files/resolver", dependencies=[Depends(require_auth), Depends(_transfer_check)])
 def files_resolver(name: str, body: ResolverBody):
     """Visão "citados": confere de uma vez quais caminhos citados existem (e resolve os relativos
     a outra pasta pelo sufixo). Quem não existe não entra na lista."""
@@ -6885,7 +6920,7 @@ def files_resolver(name: str, body: ResolverBody):
         raise _erro_arq(e)
 
 
-@app.post("/api/sessions/{name}/git/path-diff", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+@app.post("/api/sessions/{name}/git/path-diff", dependencies=[Depends(require_auth), Depends(_transfer_check)])
 def git_path_diff(name: str, body: GitPathDiffBody):
     try:
         return git_ops.path_diff(_session_cwd(name), body.path, body.escopo)

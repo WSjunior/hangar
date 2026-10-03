@@ -230,6 +230,31 @@ async def _wait_persisted(path: Path, thread_id: str, items: tuple[dict, ...]) -
         await asyncio.sleep(0.05)
 
 
+async def _close_preparation(client: AppServerClient, record: store.TransferRecord,
+                             failure: BaseException | None) -> None:
+    cleanup_error = None
+    try:
+        await asyncio.to_thread(store.refresh_import_process, record)
+    except (Exception, asyncio.CancelledError) as exc:
+        cleanup_error = exc
+    try:
+        await client.close()
+    except (Exception, asyncio.CancelledError) as exc:
+        cleanup_error = cleanup_error or exc
+    try:
+        await store.wait_import_exit(record)
+    except (Exception, asyncio.CancelledError) as exc:
+        cleanup_error = cleanup_error or exc
+    if cleanup_error is None:
+        return
+    error = (cleanup_error if isinstance(cleanup_error, (TransferError, asyncio.CancelledError))
+             else TransferError("session_transfer_import_cleanup_unconfirmed"))
+    if failure is None:
+        raise error from None
+    code = error.code if isinstance(error, TransferError) else "session_transfer_cleanup_cancelled"
+    failure.add_note(f"Falha adicional ao confirmar a saída do importador: {code}.")
+
+
 async def prepare_import(account: codex_contas.Account, cwd: str, context: ImportedContext,
                          model: str | None, effort: str | None, permission_mode: str,
                          *, transfer_id: str, collaboration_mode: str = "default") -> PreparedCodexThread:
@@ -249,6 +274,7 @@ async def prepare_import(account: codex_contas.Account, cwd: str, context: Impor
     budget = max(1, context.max_output_bytes, *(_bytes(i.get("output")) for i in items
                    if i.get("type") == "function_call_output"))
     client = AppServerClient()
+    failure = None
     try:
         await asyncio.to_thread(store.mark_import_starting, record)
         await client.start(codex_home=account.home, cwd=cwd, tool_output_token_limit=budget,
@@ -318,18 +344,17 @@ async def prepare_import(account: codex_contas.Account, cwd: str, context: Impor
         return PreparedCodexThread(thread_id, rollout, effective_model, effective_effort,
                                    collaboration_mode, budget, boundary)
     except codex_models.CodexRespostaInvalida:
-        raise _unknown() from None
+        failure = _unknown()
+        raise failure from None
     except ConversionError as exc:
-        raise TransferError(exc.code) from None
-    except (TransferError, asyncio.CancelledError):
+        failure = TransferError(exc.code)
+        raise failure from None
+    except (TransferError, asyncio.CancelledError) as exc:
+        failure = exc
         raise
     except Exception:
         # __context__ retém a causa para inspeção privada, sem payload no texto público.
-        error = TransferError("session_transfer_native_import_failed")
-        raise error from None
+        failure = TransferError("session_transfer_native_import_failed")
+        raise failure from None
     finally:
-        try:
-            await asyncio.to_thread(store.refresh_import_process, record)
-        finally:
-            await client.close()
-        await asyncio.to_thread(store.confirm_import_exit, record)
+        await _close_preparation(client, record, failure)

@@ -369,3 +369,49 @@ async def test_each_failed_batch_keeps_owner_and_partial_import_unpublished(fake
     assert record.destination_meta["thread_id"] == fake_client.thread_id
     assert store._runtime(record)["import_stopped"] is True
     assert not sessions.list_all()
+
+
+async def test_successful_preparation_waits_for_delayed_process_cleanup(fake_client, monkeypatch):
+    polls = 0
+
+    def stopped(processes):
+        nonlocal polls
+        polls += 1
+        assert fake_client.finished
+        return polls >= 3
+
+    monkeypatch.setattr(store, "_processes_stopped", stopped)
+    prepared = await prepare(fake_client)
+    assert polls == 3 and prepared.thread_id == fake_client.thread_id
+    private = store._runtime(fake_client.record)
+    assert private["import_stopped"] is True and private["import_tree_final"] is True
+    assert store.load_transfer(fake_client.record.id).boundary == prepared.boundary
+
+
+@pytest.mark.parametrize("stage,expected", [("inject", "session_transfer_native_import_failed"),
+                                          ("capacity", "session_transfer_model_capacity_unknown"),
+                                          ("cancel", None)])
+async def test_cleanup_failure_does_not_replace_original_failure(fake_client, monkeypatch, stage, expected):
+    from unittest.mock import AsyncMock
+    if stage == "inject":
+        fake_client.fail_method = "thread/inject_items"
+    elif stage == "capacity":
+        monkeypatch.setattr(transfer.codex_models, "raw_model", lambda *args: {})
+    else:
+        original = fake_client.request
+        async def cancelled(method, params, **kwargs):
+            if method == "thread/inject_items":
+                raise asyncio.CancelledError()
+            return await original(method, params, **kwargs)
+        fake_client.request = cancelled
+    monkeypatch.setattr(store, "wait_import_exit", AsyncMock(
+        side_effect=store.TransferError("session_transfer_import_not_stopped")))
+    error_type = asyncio.CancelledError if stage == "cancel" else store.TransferError
+    with pytest.raises(error_type) as result:
+        await prepare(fake_client)
+    if expected:
+        assert result.value.code == expected
+    assert fake_client.finished
+    assert any("session_transfer_import_not_stopped" in note for note in result.value.__notes__)
+    assert not store._runtime(fake_client.record).get("import_stopped")
+    assert store.load_transfer(fake_client.record.id).phase == TransferPhase.SOURCE_STOPPED

@@ -437,18 +437,38 @@ def rename_transfer(old: str, new: str) -> None:
 
 
 _operation_locks: dict[str, threading.Lock] = {}
+_ingress_counts: dict[str, int] = {}
 
 
 @contextmanager
 def session_operation(name: str):
     with _lock:
         operation = _operation_locks.setdefault(name, threading.Lock())
-    if not operation.acquire(blocking=False):
-        raise TransferError("session_transfer_busy")
+        if _ingress_counts.get(name, 0) or not operation.acquire(blocking=False):
+            raise TransferError("session_transfer_busy")
     try:
         yield
     finally:
         operation.release()
+
+
+@contextmanager
+def session_ingress(name: str):
+    """Ingressos coexistem; a troca exclusiva só começa depois de seus recibos."""
+    with _lock:
+        operation = _operation_locks.get(name)
+        if operation is not None and operation.locked():
+            raise TransferError("session_transfer_busy")
+        _ingress_counts[name] = _ingress_counts.get(name, 0) + 1
+    try:
+        yield
+    finally:
+        with _lock:
+            remaining = _ingress_counts[name] - 1
+            if remaining:
+                _ingress_counts[name] = remaining
+            else:
+                _ingress_counts.pop(name, None)
 
 
 def require_available(name: str) -> None:
@@ -569,6 +589,21 @@ def confirm_import_exit(record: TransferRecord) -> None:
         raise TransferError("session_transfer_import_not_stopped")
     private["import_stopped"] = True
     _write_json(_runtime_path(record), private)
+
+
+async def wait_import_exit(record: TransferRecord, *, timeout: float = 5.0) -> None:
+    import asyncio
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        try:
+            await asyncio.to_thread(confirm_import_exit, record)
+            return
+        except TransferError as exc:
+            if exc.code != "session_transfer_import_not_stopped" or loop.time() >= deadline:
+                raise
+        # O wait da raiz pode terminar antes dos filhos que já receberam a saída.
+        await asyncio.sleep(min(0.05, max(0.0, deadline - loop.time())))
 
 
 async def stop_import_process(record: TransferRecord) -> None:
