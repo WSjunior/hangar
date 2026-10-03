@@ -61,7 +61,7 @@ fn haystack(event: &ChatEvent) -> String {
 }
 
 /// Onde `needle` (já em minúsculas) aparece em `text`, sem diferenciar maiúsculas, em bytes de `text`.
-fn occurrences(text: &str, needle: &str) -> Vec<std::ops::Range<usize>> {
+pub(super) fn occurrences(text: &str, needle: &str) -> Vec<std::ops::Range<usize>> {
     let mut out = Vec::new();
     if needle.is_empty() { return out; }
     let mut from = 0;

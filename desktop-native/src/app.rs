@@ -72,7 +72,7 @@ mod stats;
 mod search;
 mod topbar;
 
-actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, NextSession, PreviousSession, ToggleDictation, NewChat, OpenCosts, OpenSearch,
+actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, FindProjectFile, FindProjectText, NextSession, PreviousSession, ToggleDictation, NewChat, OpenCosts, OpenSearch,
     ToggleSidebar, CyclePermission]);
 
 const LIVE_THINKING: &str = "__thinking__";
@@ -649,6 +649,7 @@ impl Hangar {
             KeyBinding::new("secondary-up", PreviousSession, Some("!Terminal")), KeyBinding::new("secondary-n", NewChat, Some("!Terminal")),
             // Ctrl+Shift+C já copia a última resposta: Custos fica no Ctrl+Alt+C.
             KeyBinding::new("secondary-alt-c", OpenCosts, Some("!Terminal")), KeyBinding::new("secondary-k", OpenSearch, Some("!Terminal")),
+            KeyBinding::new("secondary-p", FindProjectFile, Some("!Terminal")), KeyBinding::new("secondary-shift-f", FindProjectText, Some("!Terminal")),
             KeyBinding::new("secondary-b", ToggleSidebar, Some("!Terminal")), KeyBinding::new("alt-shift-p", CyclePermission, Some("!Terminal"))]);
         cx.bind_keys([KeyBinding::new("ctrl-shift-c", terminal::CopyTerminal, Some("Terminal")),
             KeyBinding::new("ctrl-shift-v", terminal::PasteTerminal, Some("Terminal")),
@@ -989,6 +990,7 @@ impl Hangar {
         self.mention.close();
         self.active_token.clear();
         self.connection += 1;
+        self.files_connection_dropped(cx);
         self.selection += 1;
         self.revision += 1;
         for slot in [&mut self.list_task, &mut self.session_task, &mut self.history_task] { if let Some(t) = slot.take() { t.abort(); } }
@@ -5540,6 +5542,8 @@ impl Render for Hangar {
             .on_action(cx.listener(|this, _: &OpenCosts, window, cx| this.toggle_costs(window, cx)))
             .on_action(cx.listener(|this, _: &OpenSearch, window, cx| this.toggle_search(window, cx)))
             .on_action(cx.listener(|this, _: &FocusSettingsSearch, window, cx| this.focus_search(window, cx)))
+            .on_action(cx.listener(|this, _: &FindProjectFile, window, cx| this.find_project_files(false, window, cx)))
+            .on_action(cx.listener(|this, _: &FindProjectText, window, cx| this.find_project_files(true, window, cx)))
             .on_action(cx.listener(|this, _: &NextSession, window, cx| this.step_session(1, window, cx)))
             .on_action(cx.listener(|this, _: &PreviousSession, window, cx| this.step_session(-1, window, cx)))
             .on_action(cx.listener(|this, _: &NewChat, window, cx| this.go_home(window, cx)))
