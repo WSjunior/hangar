@@ -123,6 +123,14 @@ impl TransferRequest {
     fn source_matches(&self, session: &SessionInfo) -> bool {
         session.name == self.target.name && super::sidebar::transfer_source(session) == Some((self.source_life.as_str(), self.source_jsonl.as_str()))
     }
+
+    fn confirmed_choices<'a>(&self, value: &'a Value) -> Option<(&'a str, Option<&'a str>)> {
+        let (model, effort) = effective_transfer_choices(value)?;
+        if self.model.as_deref().is_some_and(|chosen| chosen != model) || self.effort.as_deref().is_some_and(|chosen| Some(chosen) != effort) {
+            return None;
+        }
+        Some((model, effort))
+    }
 }
 
 pub(super) enum TransferReply {
@@ -144,18 +152,40 @@ fn transfer_failure(error: &Failure) -> String {
     }
 }
 
+fn effective_transfer_choices(value: &Value) -> Option<(&str, Option<&str>)> {
+    let model = value.get("model")?.as_str()?;
+    if model.is_empty() || model.len() > 128 || model.starts_with('-') || model == "default"
+        || !model.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:~/[]-".contains(&b)) { return None; }
+    // Os níveis variam por modelo; a forma segue a validação do backend, sem lista fechada.
+    let effort = match value.get("effort")? {
+        Value::Null => None,
+        Value::String(effort) if (2..=32).contains(&effort.len()) && effort != "default"
+            && effort.bytes().all(|b| b.is_ascii_lowercase()) => Some(effort.as_str()),
+        _ => return None,
+    };
+    Some((model, effort))
+}
+
 async fn transferred(api: &Api, request: &TransferRequest) -> Result<SessionInfo, Failure> {
     let value = api.act(&request.target.name, &["conta"], Some(request.body()), false, 300).await?;
     let id = value.get("transfer_id").and_then(Value::as_str).filter(|id| !id.is_empty());
+    let choices = request.confirmed_choices(&value);
     if value.get("ok").and_then(Value::as_bool) != Some(true) || value.get("provider").and_then(Value::as_str) != Some("codex")
-        || value.get("conta").and_then(Value::as_str) != Some(request.credential_id.as_str()) || id.is_none() {
+        || value.get("conta").and_then(Value::as_str) != Some(request.credential_id.as_str()) || id.is_none() || choices.is_none() {
         return Err(Failure::local(tr("invalid_response")));
     }
     let id = id.unwrap();
-    api.sessions().await.map_err(|error| Failure::local(format!("{} {}", tr("session_transfer_refresh_failed"), Hangar::fetch_failure(&error))))?
-        .into_iter().find(|s| s.name == request.target.name && s.provider == "codex" && s.readable()
+    let (model, effort) = choices.unwrap();
+    let snapshot = api.server_read(&["sessions"], &[], 15).await
+        .map_err(|error| Failure::local(format!("{} {}", tr("session_transfer_refresh_failed"), Hangar::fetch_failure(&error))))?;
+    let sessions: Vec<SessionInfo> = serde_json::from_value(snapshot.clone()).map_err(|_| Failure::local(tr("invalid_response")))?;
+    let Some(rows) = snapshot.as_array() else { return Err(Failure::local(tr("invalid_response"))) };
+    sessions.into_iter().zip(rows).find(|(s, row)| s.name == request.target.name && s.provider == "codex" && s.readable()
         && s.conta.as_deref() == Some(request.credential_id.as_str()) && s.transfer_id.as_deref() == Some(id)
-        && s.transfer_phase.as_deref().is_none_or(|p| p == "complete"))
+        && s.transfer_phase.as_deref() == Some("complete")
+        && row.get("model").is_none_or(|value| value.as_str() == Some(model))
+        && row.get("effort").is_none_or(|value| match value { Value::Null => effort.is_none(), Value::String(value) => Some(value.as_str()) == effort, _ => false }))
+        .map(|(session, _)| session)
         .ok_or_else(|| Failure::local(tr("session_transfer_refresh_failed")))
 }
 
@@ -2218,19 +2248,56 @@ mod tests {
         }
     }
 
+    #[test]
+    fn transfer_requires_effective_choices_and_preserves_native_defaults() {
+        let mut request = transfer_request();
+        let native = json!({"model":"native-resolved-model", "effort":"ultra"});
+        assert_eq!(request.confirmed_choices(&native), Some(("native-resolved-model", Some("ultra"))));
+        assert!(request.model.is_none() && request.effort.is_none());
+        let native_without_effort = json!({"model":"native-resolved-model", "effort":null});
+        assert_eq!(request.confirmed_choices(&native_without_effort), Some(("native-resolved-model", None)));
+        for invalid in [
+            json!({"effort":null}), json!({"model":null,"effort":null}), json!({"model":12,"effort":null}),
+            json!({"model":"","effort":null}), json!({"model":"default","effort":null}),
+            json!({"model":"model with spaces","effort":null}), json!({"model":"--flag","effort":null}),
+            json!({"model":"native-resolved-model"}), json!({"model":"native-resolved-model","effort":12}),
+            json!({"model":"native-resolved-model","effort":""}), json!({"model":"native-resolved-model","effort":"default"}),
+            json!({"model":"native-resolved-model","effort":"HIGH"}), json!({"model":"native-resolved-model","effort":"high-level"}),
+        ] {
+            assert!(request.confirmed_choices(&invalid).is_none(), "{invalid}");
+        }
+        request.model = Some("selected-model".into());
+        request.effort = Some("high".into());
+        let confirmed = json!({"model":"selected-model","effort":"high"});
+        assert_eq!(request.confirmed_choices(&confirmed), Some(("selected-model", Some("high"))));
+        for different in [native, native_without_effort, json!({"model":"selected-model","effort":null}),
+            json!({"model":"selected-model","effort":"low"}), json!({"model":"another-model","effort":"high"})] {
+            assert!(request.confirmed_choices(&different).is_none(), "{different}");
+        }
+    }
+
     #[tokio::test]
     async fn transfer_posts_to_captured_server_and_requires_published_session() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        for case in [0, 1, 2, 3] {
+        for case in [0, 1, 2, 3, 4, 5, 6, 7, 8] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let api = super::Api::new(&format!("http://{}", listener.local_addr().unwrap()), "test").unwrap();
             let server = tokio::spawn(async move {
                 let mut captured = Vec::new();
-                let mut replies = vec![json!({"ok":case != 0, "provider":"codex", "conta":"codex:/registered", "transfer_id":"transfer-a"})];
-                if case != 0 { replies.push(json!([{"name":"same-name", "provider":"codex", "conta":"codex:/registered",
+                let mut replies = vec![json!({"ok":case != 0, "provider":"codex", "conta":"codex:/registered", "transfer_id":"transfer-a",
+                    "model":"native-resolved-model", "effort":if matches!(case, 7 | 8) {json!("ultra")} else {serde_json::Value::Null}})];
+                if case != 0 {
+                    let mut session = json!({"name":"same-name", "provider":"codex", "conta":"codex:/registered",
                     "transfer_id":if case == 2 {"other-transfer"} else {"transfer-a"},
                     "transfer_phase":if case == 3 {"publishing"} else {"complete"},
-                    "lifecycle_id":"k:original", "jsonl":"/destination.jsonl"}])); }
+                    "lifecycle_id":"k:original", "jsonl":"/destination.jsonl"});
+                    if case == 4 { session.as_object_mut().unwrap().remove("transfer_phase"); }
+                    if case == 5 { session["model"] = json!("other-model"); }
+                    if case == 6 { session["effort"] = json!("high"); }
+                    if case == 7 { session["model"] = json!("native-resolved-model"); session["effort"] = json!("ultra"); }
+                    if case == 8 { session["effort"] = serde_json::Value::Null; }
+                    replies.push(json!([session]));
+                }
                 for reply in replies {
                     let (mut stream, _) = listener.accept().await.unwrap();
                     let mut bytes = Vec::new();
@@ -2253,7 +2320,7 @@ mod tests {
                 captured
             });
             let result = super::transferred(&api, &transfer_request()).await;
-            assert_eq!(result.is_ok(), case == 1);
+            assert_eq!(result.is_ok(), matches!(case, 1 | 7));
             let captured = tokio::time::timeout(std::time::Duration::from_secs(2), server).await.unwrap().unwrap();
             assert!(captured[0].starts_with("POST /api/sessions/same-name/conta "));
             let body = captured[0].split_once("\r\n\r\n").unwrap().1;
