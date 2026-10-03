@@ -104,6 +104,9 @@ A posse de cada rollout do Codex é calculada no Rust com a regra de
   deu. Uma varredura por vez.
 - Mapa de áreas (`~/.hangar/uso-areas.json`) lido uma vez por processo, como hoje. Mudou o mapa →
   refaz só as linhas de área a partir dos alvos guardados, sem reler transcript.
+- Áreas distintas de cada ferramenta são percorridas por nome nos dois leitores; a ordem de
+  ferramentas e turnos fica intacta. Divisão/assinatura versão 3 refaz áreas salvas. Ordem de
+  linhas e de JSON permanece igual entre Python e Rust, inclusive com múltiplas áreas numa tool.
 
 ### 5. Relatórios e preço
 

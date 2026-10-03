@@ -77,7 +77,7 @@ impl AreaMap {
             .unwrap_or_else(|| (String::new(), Value::Null));
         let defaults = default_rules();
         // O padrão do código participa da assinatura para invalidar áreas após uma atualização.
-        let signature = format!("{:x}", Md5::digest(format!("divisao:2{}{}", serde_json::to_string(&defaults).unwrap(), text).as_bytes()));
+        let signature = format!("{:x}", Md5::digest(format!("divisao:3{}{}", serde_json::to_string(&defaults).unwrap(), text).as_bytes()));
         let mut projects = IndexMap::new();
         let defaults = if let Some(obj) = raw.as_object() {
             if let Some(project_rules) = obj.get("projetos").and_then(Value::as_object) {
@@ -170,6 +170,8 @@ impl AreaMap {
             let rules = self.rules_for(rules_cwd);
             let distinct: IndexSet<_> = targets.iter().map(|p| self.area_of_path(p, cwd, &rules))
                 .filter(|area| !command || area != "outros").collect();
+            let mut distinct: Vec<_> = distinct.into_iter().collect();
+            distinct.sort();
             for area in distinct { *counts.entry(area).or_insert(0) += 1; }
         }
         counts

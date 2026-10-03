@@ -339,3 +339,85 @@ fn windows_paths_join_roots_and_drives_and_compare_case_insensitively() {
     assert!(map.rules_for("C:/Root").is_empty());
     assert_eq!(map.rules_for("C:Root")[0].0, "drive");
 }
+
+#[test]
+fn areas_per_tool_have_common_name_order_without_reordering_tools() {
+    let d = tempfile::tempdir().unwrap();
+    let cwd = d.path().to_str().unwrap();
+    let map = default_map();
+    let regs = vec![
+        ToolReg::S { rules_cwd: cwd.into(), target: "skill:database".into() },
+        ToolReg::P { rules_cwd: cwd.into(), cwd: cwd.into(), paths: vec!["a.css".into(), "a.py".into(), "b.css".into()] },
+        ToolReg::C { rules_cwd: cwd.into(), cwd: cwd.into(), candidates: vec!["a.md".into(), "a.py".into(), "/outside/file.py".into()] },
+    ];
+    let counts = map.count_areas(&regs);
+    assert_eq!(counts.into_iter().collect::<Vec<_>>(), vec![
+        ("banco".into(), 1), ("back".into(), 2), ("front".into(), 1), ("docs".into(), 1),
+    ]);
+    let entries = AreaEntries {
+        header: AreaHeader { fonte: None, session_id: None, subagente: None },
+        turns: vec![(regs, vec![unit("d", false, [11,7,5,3,2])])],
+    };
+    let rows = map.area_lines(&entries);
+    assert_eq!(rows.iter().map(|r| (r.nome.as_str(), r.chamadas, r.input, r.output, r.cache_write, r.cache_read, r.cache_write_1h)).collect::<Vec<_>>(), vec![
+        ("banco", 1, 2, 2, 1, 1, 1), ("back", 2, 5, 3, 2, 1, 1),
+        ("front", 1, 2, 1, 1, 0, 0), ("docs", 1, 2, 1, 1, 1, 0),
+    ]);
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedAreasFold { entries: AreaEntries }
+
+impl hangar_server::costs::index::Fold for SavedAreasFold {
+    fn line(&mut self, _: &[u8]) {}
+
+    fn close(&mut self) -> hangar_server::costs::rows::FoldOutput {
+        use hangar_server::costs::rows::{FoldOutput, UsageRow, UsoLinha};
+        let cost = UsageRow {
+            ts: hangar_server::costs::py::LocalTs(0), source: "synthetic".into(),
+            provider: "".into(), model: "m".into(), project: "p".into(), session_id: "s".into(),
+            input: 11, output: 7, cache_write: 5, cache_read: 3, cache_write_1h: 2,
+            subagente: false, account_id: None, codex_long_context: false, fast: false,
+            regravado: 0, regravado_1h: 0,
+        };
+        let tool = UsoLinha { dia: "d".into(), cwd: "p".into(), model: "m".into(),
+            tipo: "tool".into(), nome: "Read".into(), chamadas: 1, ..UsoLinha::default() };
+        FoldOutput { costs: vec![cost], usage: vec![tool], areas: Some(self.entries.clone()) }
+    }
+}
+
+#[test]
+fn division_signature_refolds_only_saved_areas_without_reading_the_transcript() {
+    use hangar_server::costs::index::{Index, Progress};
+    use md5::{Digest, Md5};
+    let d = tempfile::tempdir().unwrap();
+    let cwd = d.path().to_str().unwrap();
+    let transcript = d.path().join("synthetic.jsonl");
+    std::fs::write(&transcript, "synthetic\n").unwrap();
+    let map = default_map();
+    let old_signature = format!("{:x}", Md5::digest(format!("divisao:2{}", serde_json::to_string(&map.rules_for("/synthetic")).unwrap()).as_bytes()));
+    let entries = AreaEntries {
+        header: AreaHeader { fonte: None, session_id: None, subagente: None },
+        turns: vec![(vec![ToolReg::P { rules_cwd: cwd.into(), cwd: cwd.into(), paths: vec!["a.css".into(), "a.py".into()] }], vec![unit("d", false, [11,7,5,3,2])])],
+    };
+    let ix = Index::open(&d.path().join("idx")).unwrap();
+    let seed = |_: &Path| SavedAreasFold { entries: entries.clone() };
+    let legacy = |e: &AreaEntries| {
+        let mut rows = map.area_lines(e);
+        rows.sort_by(|a,b| b.nome.cmp(&a.nome));
+        rows
+    };
+    ix.sync("synthetic", &[transcript.clone()], &seed, "v1", &old_signature, &legacy, &Progress::default()).unwrap();
+    let costs_before = ix.read_costs(Some("synthetic"), None, None).unwrap();
+    let usage_before = ix.read_usage("synthetic", None).unwrap();
+    assert_eq!(usage_before.iter().filter(|r| r.tipo == "area").map(|r| r.nome.as_str()).collect::<Vec<_>>(), ["front", "back"]);
+    assert_ne!(old_signature, map.signature());
+    let forbid_read = |_: &Path| -> SavedAreasFold { panic!("a troca de assinatura não pode reler o transcript") };
+    let redo = |e: &AreaEntries| map.area_lines(e);
+    assert!(ix.sync("synthetic", &[transcript.clone()], &forbid_read, "v1", map.signature(), &redo, &Progress::default()).unwrap());
+    assert_eq!(ix.read_costs(Some("synthetic"), None, None).unwrap(), costs_before);
+    let usage = ix.read_usage("synthetic", None).unwrap();
+    assert_eq!(usage.iter().filter(|r| r.tipo != "area").cloned().collect::<Vec<_>>(), usage_before.into_iter().filter(|r| r.tipo != "area").collect::<Vec<_>>());
+    assert_eq!(usage.iter().filter(|r| r.tipo == "area").map(|r| (r.nome.as_str(), r.input, r.output, r.cache_write, r.cache_read, r.cache_write_1h)).collect::<Vec<_>>(), [("back",6,4,3,2,1), ("front",5,3,2,1,1)]);
+    assert!(!ix.sync("synthetic", &[transcript], &forbid_read, "v1", map.signature(), &redo, &Progress::default()).unwrap());
+}

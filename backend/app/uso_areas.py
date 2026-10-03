@@ -29,8 +29,8 @@ from pathlib import Path
 
 OUTROS = "outros"
 CONVERSA = "conversa"
-# Suba ao mudar como `repartir` divide: o resultado fica gravado no cache das leituras.
-_DIVISAO = 2
+# Suba ao mudar a divisão ou a ordem das áreas: as linhas ficam gravadas no cache.
+_DIVISAO = 3
 
 PADRAO: list[tuple[str, list[str]]] = [
     ("banco", ["*.sql", "migrations/*", "prisma/*", "skill:*database*"]),
@@ -194,6 +194,6 @@ def contar_areas(registros) -> dict[str, int]:
     """Cada tool conta 1 em cada área distinta que tocou."""
     out: dict[str, int] = {}
     for reg in registros:
-        for a in areas_do_registro(reg):
+        for a in sorted(areas_do_registro(reg)):
             out[a] = out.get(a, 0) + 1
     return out

@@ -869,7 +869,7 @@ pub fn default_map_file() -> PathBuf;             // ~/.hangar/uso-areas.json
 
 - Produces (em `costs::uso_rules`): `pub fn comando_bash(cmd: &str) -> String`, `pub fn skill_do_caminho(p: &str) -> Option<(String, bool)>`, `pub fn plugin_de(nome: &str) -> String`, `pub fn plugin_de_hook(primeira: &str) -> String`, `pub fn pede_agente(prompt: &str) -> bool`, `pub fn tokens_de_imagem(bloco: &Map<String, Value>) -> (i64, i64)`, `pub fn texto_len(c: Option<&Value>) -> i64` (`_texto`).
 
-- [ ] **Step 1: Teste que falha**
+- [x] **Step 1: Teste que falha**
 
 `crates/hangar-server/tests/contract_costs_areas.rs`:
 
@@ -925,23 +925,25 @@ fn repo_root_comes_from_the_file_not_the_cwd() {
 }
 ```
 
-- [ ] **Step 2: Rodar e ver falhar** — `cargo test ... --test contract_costs_areas` → FAIL.
+- [x] **Step 2: Rodar e ver falhar** — `cargo test ... --test contract_costs_areas` → FAIL.
 
-- [ ] **Step 3: Implementar**
+- [x] **Step 3: Implementar**
 
 Porte de `uso_areas.py:44-199` e `uso_claude.py:74-238`. Regras que o golden e a revisão conferem:
 - `fnmatch.translate` portado à mão em `areas.rs` (`*` → `.*` com asteriscos seguidos colapsados, `?` → `.`, `[...]`/`[!...]` como conjunto, resto escapado com `regex::escape`), dentro de `(?s:...)\z`; o casador é `^(?:/(?s:P)\z|(?s:.*/P)\z)` por padrão, unidos por `|` (mesma forma de `_casador`), sensível a caixa. Memorize por tupla de padrões.
-- `repartir`: maior resto, desempate pelo nome (`sorted(..., key=(inteiro - exato, nome))`), em `f64` como o Python.
+- `repartir`: maior resto, desempate pelo nome (`sorted(..., key=(inteiro - exato, nome))`), em `f64` como o Python, arredondando a razão inteira uma vez. Resultado fora de `[-2^63, 2^63)` levanta panic de código estático antes do cast, para repasse ao Python, sem saturação silenciosa.
+- `count_areas`/`contar_areas`: normalizar por nome as áreas distintas de cada ferramenta nos dois lados, preservando a ordem das ferramentas. Subir divisão/assinatura para 3; nenhuma ordenação global ou arbitrária do golden.
+- Regressão de multiáreas: testar P/C com alvos repetidos e skill anterior, ordem explícita e mesmos valores; Python com sementes 0/1/42; comparar golden gerado em pastas temporárias, leitura inteira e retomada.
 - `raiz_do_repo`: sobe procurando `.git` (arquivo ou pasta); cache `Mutex<HashMap>` limitado a 4096 entradas, limpo ao recarregar.
 - `area_of_path`: `os.path.normpath`/`isabs`/`join`/`relpath` em POSIX; no Windows (`cfg(windows)`) `normcase` (minúsculas e `\`). Porte linha a linha de `area_do_caminho` (`:143-154`).
 - `comando_bash`: separadores `&&|\|\||[;|\n]`, prefixos e palavras de shell iguais (`uso_claude.py:31-116`); `str.split()` do Python separa por qualquer espaço Unicode — use `char::is_whitespace`.
-- `pede_agente`: a regex `_PEDE_AGENTE` com `(?i)` e `\b` Unicode (padrão do crate `regex`, igual ao `re` com `str`).
+- `pede_agente`: portar `_PEDE_AGENTE` com fronteiras do Python (`_` e categorias Unicode L/N) e casefold, incluindo I/i/İ/ı. O `\b` do crate `regex` inclui outras categorias e não equivale ao Python; após rejeitar um início, retomar a busca no próximo caractere para conservar ocorrências sobrepostas.
 - `tokens_de_imagem`: `base64` dos primeiros 32 caracteres (decodificar à mão os 24 bytes necessários, sem crate novo), PNG por assinatura, `largura * altura // 750`.
 - `area_lines`: porte de `linhas_de_area` (`uso_claude.py:213-238`), saída na ordem de inserção do dicionário `(dia, cwd, model, area)`; `header` preenche `fonte`/`session_id`/`subagente` (ausentes = padrão de `UsoLinha`).
 
-- [ ] **Step 4: Rodar** — Expected: PASS.
+- [x] **Step 4: Rodar** — Expected: PASS.
 
-- [ ] **Step 5: Revisão e commit**
+- [x] **Step 5: Revisão e commit**
 
 ```bash
 git add crates/hangar-server/src/costs crates/hangar-server/tests/contract_costs_areas.rs
