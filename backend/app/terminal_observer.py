@@ -113,12 +113,24 @@ def _available(name: str = "") -> bool:
             and time.monotonic() >= _session(name).retry_at)
 
 
-def _owner(payload: dict) -> str:
+def _owner(payload: dict) -> tuple[str, str | None]:
     name = payload.get("name") or _consumers.get(payload.get("consumer"))
     if name in _sessions:
-        return name
+        return name, payload.get("consumer")
     source = _current.get()
-    return source.name if source is not None and source.consumer in _consumers else ""
+    if source is not None and source.consumer in _consumers:
+        return source.name, source.consumer
+    return "", None
+
+
+def _attempt(name: str, consumer: str | None) -> tuple:
+    return name, consumer, _generation, _session(name)
+
+
+def _belongs(attempt: tuple) -> bool:
+    name, consumer, generation, session = attempt
+    return (generation == _generation and session is _session(name)
+            and (not name or (_consumers.get(consumer) == name and consumer in session.consumers)))
 
 
 class _IoBusy(Exception):
@@ -168,15 +180,14 @@ def _http(config: tuple[str, str], payload: dict) -> dict | None:
 
 async def _request(payload: dict) -> dict | None:
     config = _config
-    generation = _generation
-    name = _owner(payload)
-    session = _session(name)
+    name, consumer = _owner(payload)
+    attempt = _attempt(name, consumer)
     started = time.monotonic()
-    if not _available(name):
+    if not _available(name) or not _belongs(attempt):
         return None
     try:
         result = await _io(_http, config, payload)
-        if generation != _generation or session is not _session(name):
+        if not _belongs(attempt):
             return None
         if result is None:
             _failure(name, "invalid_http_response", started)
@@ -187,7 +198,7 @@ async def _request(payload: dict) -> dict | None:
         return result
     except (OSError, ValueError, TimeoutError, HTTPException, _IoBusy) as exc:
         # Nem pane, segredo, URL ou mensagem de exceção entram no diário.
-        if generation == _generation and session is _session(name):
+        if _belongs(attempt):
             if isinstance(exc, urllib.error.HTTPError):
                 code = f"http_{exc.code}"
             elif isinstance(exc, TimeoutError) or (isinstance(exc, urllib.error.URLError)
@@ -238,12 +249,14 @@ class Lease:
     def identity(self):
         if not self.open or self.provider not in ("claude", "codex"):
             return None
-        generation = _generation
+        attempt = _attempt(self.name, self.consumer)
         try:
             binding = self.binding_get()
         except Exception as exc:
-            if generation == _generation:
+            if _belongs(attempt):
                 _failure(self.name, f"terminal_binding_{type(exc).__name__}")
+            return None
+        if not _belongs(attempt):
             return None
         if not isinstance(binding, str) or not binding:
             return None
@@ -270,7 +283,7 @@ class Lease:
         if self.consumer not in _consumers:
             _consumers[self.consumer] = self.name
             _sessions.setdefault(self.name, _SessionState()).consumers.add(self.consumer)
-        generation = _generation
+        attempt = _attempt(self.name, self.consumer)
         self.open = True
         try:
             self.binding = self.binding_get()
@@ -280,13 +293,14 @@ class Lease:
                     forget(self.name)
             await self.acquire()
         except Exception as exc:
-            if generation == _generation:
-                _failure(self.name, f"lease_start_{type(exc).__name__}")
+            if not self.open or not _belongs(attempt):
+                return
+            _failure(self.name, f"lease_start_{type(exc).__name__}")
             try:
                 # Libere só a referência remota parcial: o produtor tentará de novo.
                 await self._release_remote()
             except Exception as close_exc:
-                if generation == _generation:
+                if self.open and _belongs(attempt):
                     _failure(self.name, f"lease_release_{type(close_exc).__name__}")
 
     async def __aexit__(self, *exc):
@@ -301,16 +315,17 @@ class Lease:
     async def close(self):
         self.open = False
         self._closed = True
-        generation = _generation
+        attempt = _attempt(self.name, self.consumer)
         try:
             await self._release_remote()
         except Exception as exc:
-            if generation == _generation:
+            if _belongs(attempt):
                 _failure(self.name, f"lease_close_{type(exc).__name__}")
         finally:
-            _consumers.pop(self.consumer, None)
             session = _sessions.get(self.name)
-            if session is not None:
+            if (session is not None and _consumers.get(self.consumer) == self.name
+                    and self.consumer in session.consumers):
+                _consumers.pop(self.consumer, None)
                 session.consumers.discard(self.consumer)
                 if not session.consumers:
                     _sessions.pop(self.name, None)
@@ -322,14 +337,15 @@ class Lease:
         identity = self.identity()
         if identity is None or not _available(self.name):
             return None
+        attempt = _attempt(self.name, self.consumer)
         attempt_started = time.monotonic()
         try:
             target = await _io(tmux._pane_target, self.name)
         except Exception as exc:
-            if identity[3] == _generation:
+            if self.open and _belongs(attempt):
                 _failure(self.name, f"terminal_target_{type(exc).__name__}", attempt_started)
             return None
-        if identity != self.identity():
+        if not self.open or not _belongs(attempt) or identity != self.identity():
             return None
         self.remote_generation = _generation
         return dict(op=op, consumer=self.consumer, name=self.name, provider=self.provider,
@@ -342,12 +358,12 @@ class Lease:
 
     async def watch(self):
         while self.open:
-            generation = _generation
+            attempt = _attempt(self.name, self.consumer)
             try:
                 await self.acquire()
             except Exception as exc:
                 # A falha não pode encerrar a renovação nem registrar conteúdo privado.
-                if generation == _generation:
+                if self.open and _belongs(attempt):
                     _failure(self.name, f"lease_watch_{type(exc).__name__}")
             await asyncio.sleep(HEARTBEAT)
 
@@ -385,12 +401,13 @@ async def capture(name: str, started: float) -> dict | None:
     before = stamp(name)
     if source is None or source.name != name or type(started) not in (int, float) or not math.isfinite(started):
         return None
+    attempt = _attempt(source.name, source.consumer)
     payload = await source.payload("capture", started)
     if payload is None:
         return None
     attempt_started = time.monotonic()
     result = await _request(payload)
-    if before != stamp(name):
+    if not source.open or not _belongs(attempt) or before != stamp(name):
         return None
     if result is None:
         return None

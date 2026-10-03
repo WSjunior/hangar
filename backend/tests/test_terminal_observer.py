@@ -1253,10 +1253,11 @@ def test_old_resolver_error_does_not_charge_new_generation(monkeypatch, operatio
             entered.set()
             await release.wait()
             raise error("private-old-resolver")
-        monkeypatch.setattr(t, "_io", io)
         source = t.lease("old-resolver", "claude", lambda: "binding")
-        source.binding, source.open = "binding", True
-        t._bindings[source.name] = ("claude", "binding")
+        monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+        monkeypatch.setattr(t, "_http", lambda config, payload: {})
+        await source.start()
+        monkeypatch.setattr(t, "_io", io)
         if operation == "payload":
             job = asyncio.create_task(source.payload("capture", 1.0))
         elif operation == "start":
@@ -1678,3 +1679,165 @@ def test_pause_diagnostic_records_session_backoff_only_when_scheduled(monkeypatc
             await good.close()
     asyncio.run(run())
     assert "private-" not in repr(entries)
+
+
+@pytest.mark.parametrize("operation", ["payload", "start", "watch", "close", "start-cleanup"])
+@pytest.mark.parametrize("error", [TimeoutError, RuntimeError])
+def test_late_lease_errors_do_not_charge_reused_session(monkeypatch, operation, error):
+    from app import diag
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    entries = []
+    monkeypatch.setattr(diag, "registrar", lambda *args, **fields: entries.append((args, fields)))
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        armed = [False]
+        async def pending():
+            armed[0] = False
+            entered.set()
+            await release.wait()
+            raise error("private-old-error")
+        async def io(fn, *args):
+            if operation == "payload" and armed[0]:
+                return await pending()
+            return fn(*args)
+        async def request(payload):
+            if armed[0]:
+                if operation == "start-cleanup" and payload["op"] == "acquire":
+                    raise RuntimeError("private-first-error")
+                if ((operation in ("start", "watch") and payload["op"] == "acquire")
+                        or (operation in ("close", "start-cleanup") and payload["op"] == "release")):
+                    return await pending()
+            return {}
+        monkeypatch.setattr(t, "_io", io)
+        monkeypatch.setattr(t, "_request", request)
+        name = f"reused-{operation}"
+        old = t.lease(name, "claude", lambda: "old")
+        if operation not in ("start", "start-cleanup"):
+            await old.start()
+        generation = t._generation
+        armed[0] = True
+        if operation == "payload":
+            job = asyncio.create_task(old.payload("capture", 1.0))
+        elif operation in ("start", "start-cleanup"):
+            job = asyncio.create_task(old.start())
+        elif operation == "watch":
+            job = asyncio.create_task(old.watch())
+        else:
+            job = asyncio.create_task(old.close())
+        replacement = None
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            old_state = t._sessions[name]
+            await old.close()
+            replacement = t.lease(name, "claude", lambda: "new")
+            await replacement.start()
+            successor = t._sessions[name]
+            assert successor is not old_state
+            assert old.consumer not in t._consumers
+            assert not old.open and t._generation == generation
+            t._failure(name, "own_failure_one")
+            t._failure(name, "own_failure_two")
+            before = (successor.failures, successor.retry_at, successor.backoff, successor.fallback_since)
+            records = list(entries)
+            release.set()
+            if operation == "watch":
+                await asyncio.sleep(0)
+                job.cancel()
+                await asyncio.gather(job, return_exceptions=True)
+            else:
+                await asyncio.wait_for(job, 1)
+            assert t._sessions[name] is successor
+            assert (successor.failures, successor.retry_at, successor.backoff, successor.fallback_since) == before
+            assert entries == records
+            assert replacement.identity() is not None
+        finally:
+            release.set()
+            if not job.done():
+                job.cancel()
+            await asyncio.gather(job, return_exceptions=True)
+            await old.close()
+            if replacement is not None:
+                await replacement.close()
+    asyncio.run(run())
+    assert "private-" not in repr(entries)
+
+
+def test_late_http_error_from_removed_consumer_does_not_charge_shared_session(monkeypatch):
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    monkeypatch.setattr(t, "_http", lambda config, payload: {})
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def io(fn, *args):
+            if fn is t._http and args[1]["op"] == "capture":
+                entered.set()
+                await release.wait()
+                raise TimeoutError("private-old-http")
+            return fn(*args)
+        monkeypatch.setattr(t, "_io", io)
+        old = t.lease("shared-http-owner", "claude", lambda: "same")
+        remaining = t.lease(old.name, "claude", lambda: "same")
+        await old.start()
+        await remaining.start()
+        session = t._sessions[old.name]
+        job = asyncio.create_task(t._request({"op": "capture", "name": old.name, "consumer": old.consumer}))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            await old.close()
+            assert t._sessions[old.name] is session
+            t._failure(remaining.name, "own_failure_one")
+            t._failure(remaining.name, "own_failure_two")
+            release.set()
+            assert await asyncio.wait_for(job, 1) is None
+            assert session.failures == 2 and session.retry_at == 0
+        finally:
+            release.set()
+            await asyncio.gather(job, return_exceptions=True)
+            await old.close()
+            await remaining.close()
+    asyncio.run(run())
+
+
+def test_late_valid_capture_does_not_recover_reused_session(monkeypatch):
+    from app import diag
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    entries = []
+    monkeypatch.setattr(diag, "registrar", lambda *args, **fields: entries.append((args, fields)))
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def request(payload):
+            if payload["op"] == "capture":
+                entered.set()
+                await release.wait()
+                return dict(binding=payload["binding"], started=payload["started"], text="old", analysis=analysis())
+            return {}
+        monkeypatch.setattr(t, "_request", request)
+        old = t.lease("reused-success", "claude", lambda: "same")
+        await old.start()
+        with t.use(old):
+            job = asyncio.create_task(t.capture(old.name, 1.0))
+        successor = None
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            await old.close()
+            successor = t.lease(old.name, "claude", lambda: "same")
+            await successor.start()
+            t._failure(successor.name, "own_failure")
+            records = list(entries)
+            release.set()
+            assert await asyncio.wait_for(job, 1) is None
+            assert t._sessions[successor.name].failures == 1
+            assert entries == records
+            assert successor.name not in t._analysis
+        finally:
+            release.set()
+            await asyncio.gather(job, return_exceptions=True)
+            await old.close()
+            if successor is not None:
+                await successor.close()
+    asyncio.run(run())
