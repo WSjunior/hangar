@@ -1,5 +1,7 @@
 # backend/app/rust_release.py
-"""Baixa o hangar-server e o hangar-cano da release `server-latest` para ~/.hangar/bin/.
+"""Baixa o hangar-server e o hangar-cano da release do checkout para ~/.hangar/bin/.
+
+Na main é a `server-latest`; noutra branch, a `server-<branch>` que o server.yml publica.
 
 Um módulo só para os dois instaladores e o botão Atualizar. Sem os binários o Python atende
 sozinho, então nada aqui levanta: cada falha vira aviso e linha no diário.
@@ -13,7 +15,9 @@ import json
 import logging
 import os
 import platform
+import re
 import secrets
+import subprocess
 import sys
 import time
 import urllib.request
@@ -23,7 +27,9 @@ from app import atomico, diag
 
 _log = logging.getLogger("hangar.rust_release")
 
-RELEASE_URL = "https://github.com/jeffer1312/hangar/releases/download/server-latest"
+REPO = Path(__file__).resolve().parents[2]
+RELEASES_URL = "https://github.com/jeffer1312/hangar/releases/download"
+MAIN_TAG = "server-latest"
 NAMES = ("hangar-server", "hangar-cano")
 
 # Constante de módulo pelo motivo do atualizar.py: o teste troca a decisão sem mexer no os.name.
@@ -49,6 +55,21 @@ def platform_key() -> str | None:
     if sys.platform == "darwin" and machine == "arm64":
         return "macos-aarch64"
     return None
+
+
+def release_tag() -> str:
+    """Release da branch do checkout; main, master, HEAD solto ou git mudo caem na `server-latest`."""
+    try:
+        p = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO, capture_output=True,
+                           text=True, timeout=5, encoding="utf-8", errors="replace",
+                           creationflags=0x08000000 if _E_WINDOWS else 0)   # CREATE_NO_WINDOW
+        branch = p.stdout.strip() if p.returncode == 0 else ""
+    except Exception:                                # noqa: BLE001 — sem branch, a da main serve
+        branch = ""
+    if branch in ("", "main", "master", "HEAD"):
+        return MAIN_TAG
+    # Mesma limpeza do passo de publicação do .github/workflows/server.yml.
+    return "server-" + re.sub(r"[^A-Za-z0-9._-]", "-", branch)
 
 
 def bin_dir() -> Path:
@@ -176,7 +197,8 @@ def fetch(base_url: str | None = None, dest: Path | None = None) -> list[str] | 
     if plat is None:
         diag.registrar("hangar_server.baixar", "aviso", codigo="sem_build")
         return None
-    url = (base_url or os.environ.get("HANGAR_SERVER_RELEASE_URL") or RELEASE_URL).rstrip("/")
+    url = (base_url or os.environ.get("HANGAR_SERVER_RELEASE_URL")
+           or f"{RELEASES_URL}/{release_tag()}").rstrip("/")
     dest = dest or bin_dir()
     ext = ".exe" if plat.startswith("windows") else ""
     try:

@@ -323,3 +323,42 @@ def test_swap_logs_the_manifest_commit(release, tmp_path, events):
     assert rust_release.fetch(url, tmp_path / "bin") == []
     assert ("hangar_server.baixar", "ok",
             {"codigo": "trocado", "detalhe": "hangar-server", "commit": "abc"}) in events
+
+
+def _branch(monkeypatch, stdout="", returncode=0, raises=None):
+    def run(*args, **kwargs):
+        if raises:
+            raise raises
+        return types.SimpleNamespace(stdout=stdout, returncode=returncode)
+    monkeypatch.setattr(rust_release, "subprocess", types.SimpleNamespace(run=run))
+
+
+@pytest.mark.parametrize(("stdout", "returncode", "raises", "tag"), [
+    ("main\n", 0, None, "server-latest"),
+    ("master\n", 0, None, "server-latest"),
+    ("feature/x\n", 0, None, "server-feature-x"),
+    ("hangar-server-parte1\n", 0, None, "server-hangar-server-parte1"),
+    ("HEAD\n", 0, None, "server-latest"),                  # checkout solto
+    ("", 128, None, "server-latest"),                      # git recusou
+    ("", 0, FileNotFoundError("git"), "server-latest"),    # sem git
+])
+def test_release_tag_follows_the_checkout_branch(monkeypatch, stdout, returncode, raises, tag):
+    _branch(monkeypatch, stdout, returncode, raises)
+    assert rust_release.release_tag() == tag
+
+
+def test_fetch_uses_the_branch_release_and_env_wins(monkeypatch, tmp_path):
+    urls = []
+
+    def get(url, deadline):
+        urls.append(url)
+        raise OSError("offline")
+    monkeypatch.setattr(rust_release, "_get", get)
+    monkeypatch.delenv("HANGAR_SERVER_RELEASE_URL", raising=False)
+    _branch(monkeypatch, "feature/x\n")
+    rust_release.fetch(dest=tmp_path / "bin")
+    assert urls[-1] == f"{rust_release.RELEASES_URL}/server-feature-x/server-latest.json"
+
+    monkeypatch.setenv("HANGAR_SERVER_RELEASE_URL", "http://127.0.0.1:1/x/")
+    rust_release.fetch(dest=tmp_path / "bin")
+    assert urls[-1] == "http://127.0.0.1:1/x/server-latest.json"

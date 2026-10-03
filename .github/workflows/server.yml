@@ -1,11 +1,13 @@
 # hangar-server e hangar-cano (crates/, Rust): testa e compila Linux, Windows e macOS e publica numa release FIXA
 # `server-latest`, reescrita a cada push na main, como o `native-latest` do native.yml. O instalador e a atualização
 # leem o `server-latest.json` dessa release e conferem o sha256 de cada binário antes de usar.
+# Push em outra branch publica na pré-release `server-<branch>` (fora de [A-Za-z0-9._-] vira `-`), que é a que o
+# backend/app/rust_release.py procura quando o checkout está nessa branch. O manifesto mantém o nome em toda release.
 name: Server
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
     paths:
       - "crates/**"
       - "backend/tests/fixtures/**"
@@ -17,7 +19,7 @@ on:
 
 # Dois pushes seguidos não publicam ao mesmo tempo: o segundo espera, e a release termina no commit mais novo.
 concurrency:
-  group: server-latest
+  group: ${{ github.ref_name == 'main' && 'server-latest' || format('server-{0}', github.ref_name) }}
   cancel-in-progress: false
 
 jobs:
@@ -123,7 +125,7 @@ jobs:
   # Só este job escreve.
   publish:
     needs: build
-    if: github.ref == 'refs/heads/main'
+    if: startsWith(github.ref, 'refs/heads/')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -156,10 +158,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view server-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
-            || gh release create server-latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
-                 --title 'hangar-server e hangar-cano (topo da main)' \
-                 --notes 'Reescrita a cada push na main. O instalador e a atualização do Hangar baixam daqui e conferem o sha256 pelo server-latest.json.'
-          gh release upload server-latest hangar-server-* hangar-cano-* --repo "$GITHUB_REPOSITORY" --clobber
-          gh release upload server-latest server-latest.json --repo "$GITHUB_REPOSITORY" --clobber
-          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/server-latest" -f sha="$GITHUB_SHA" -F force=true >/dev/null
+          # Mesma limpeza do release_tag() do backend/app/rust_release.py: mudar uma exige mudar a outra.
+          if [ "$GITHUB_REF_NAME" = main ]; then
+            tag=server-latest
+            criar=(--title 'hangar-server e hangar-cano (topo da main)'
+                   --notes 'Reescrita a cada push na main. O instalador e a atualização do Hangar baixam daqui e conferem o sha256 pelo server-latest.json.')
+          else
+            tag="server-${GITHUB_REF_NAME//[^A-Za-z0-9._-]/-}"
+            criar=(--prerelease --title "hangar-server e hangar-cano (branch $GITHUB_REF_NAME)"
+                   --notes "Reescrita a cada push na branch $GITHUB_REF_NAME. A atualização baixa daqui quando o checkout está nessa branch.")
+          fi
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false "${criar[@]}"
+          gh release upload "$tag" hangar-server-* hangar-cano-* --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$tag" server-latest.json --repo "$GITHUB_REPOSITORY" --clobber
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$tag" -f sha="$GITHUB_SHA" -F force=true >/dev/null
