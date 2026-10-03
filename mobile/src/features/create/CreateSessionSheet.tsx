@@ -472,6 +472,10 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
   const folderLabel = picked ? basename(picked) : m.native_new_chat_folder();
   const folderRef = useRef<View>(null);
   const branchRef = useRef<View>(null);
+  // Branch nova sem nome digitado leva o nome final da sessão, que só existe ao criar.
+  const branchLabel = !worktree ? m.native_create_checkout_current()
+    : !worktree.new_branch ? worktree.branch
+    : worktree.branch || name.trim() || m.worktree_nova_branch({ base: worktree.base ?? '' });
 
   const probeOf = (p: string) => providerProbe?.[p];
   const on = (yes: boolean) => (yes ? 'on' : 'off') as 'on' | 'off';
@@ -784,7 +788,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
           <QuietPill ref={folderRef} icon="Folder" label={folderLabel} aria={m.native_new_chat_folder()}
                      onPress={() => openFolder(folderRef.current)} />
           {picked ? (
-            <QuietPill ref={branchRef} icon="GitBranch" label={worktree?.branch ?? m.native_create_checkout_current()}
+            <QuietPill ref={branchRef} icon="GitBranch" label={branchLabel}
                        aria={m.native_create_checkout_branch()} onPress={() => setBranchOpen(true)} />
           ) : null}
         </>

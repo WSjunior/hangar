@@ -176,9 +176,11 @@ async function runCreate(serverId: string, input: NewConversationInput): Promise
     try { taken = new Set((await fetchSessionsForServer(server)).map((s) => s.name)); } catch { /* backend decide */ }
     while (taken.has(stableName(input.body.cwd, id))) id = newId();
   }
+  const finalName = explicit || stableName(input.body.cwd, id);
+  // Branch nova sem nome digitado segue o nome final da sessão, só conhecido aqui.
   const draft: FirstConversationAttempt = Object.assign({
     id, serverId, text: input.text, phase: 'draft' as const, sessionName: null,
-    body: { ...input.body, name: explicit || stableName(input.body.cwd, id) },
+    body: { ...input.body, name: finalName, ...(input.body.new_branch && !input.body.branch?.trim() ? { branch: finalName } : {}) },
   }, input.attachment ? { attachment: input.attachment } : {});
   const creating = transitionFirstConversation(draft, { type: 'begin' });
   try { persist(creating); } catch {

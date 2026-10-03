@@ -11,18 +11,31 @@ vi.mock('react-native', async (original) => ({ ...await original(),
 vi.mock('../../paraglide/messages', () => ({
   native_create_checkout_current: () => 'atual', native_create_checkout_worktree: () => 'worktree',
   worktree_nova_branch: ({ base }: { base: string }) => `nova:${base}`, worktree_nome_branch: () => 'nome',
-  worktree_base: () => 'base', worktree_modo: () => 'modo', worktree_modo_ajuda: () => 'ajuda' }));
+  worktree_base: () => 'base', worktree_modo: () => 'modo', worktree_modo_ajuda: () => 'ajuda',
+  native_create_checkout_loading: () => 'lendo', native_create_checkout_failed: ({ reason }: { reason: string }) => `falha:${reason}` }));
 vi.mock('@hangar/core', async (original) => ({ ...await original(),
   getFolderBranchesForServer: () => Promise.resolve({ current: 'main', branches: ['main', 'x'], remotes: [], dirty: false }) }));
 import { BranchPicker } from './BranchPicker';
 
 describe('BranchPicker', () => {
-  it('escolher branch nova devolve new_branch com a base atual e o nome da sessão', async () => {
+  // Sem nome digitado a branch vai vazia: o store a preenche com o nome final da sessão.
+  it('escolher branch nova devolve new_branch com a base atual e sem nome digitado', async () => {
     const onChange = vi.fn();
     const el = document.createElement('div');
     await act(async () => { createRoot(el).render(createElement(BranchPicker,
       { server: { id: 's' } as never, cwd: '/r', sessionName: 'rust-parte3', value: null, onChange })); });
     await act(async () => { (el.querySelector('[aria-label="nova:main"]') as HTMLElement).click(); });
-    expect(onChange).toHaveBeenLastCalledWith({ branch: 'rust-parte3', new_branch: true, base: 'main' });
+    expect(onChange).toHaveBeenLastCalledWith({ branch: '', new_branch: true, base: 'main' });
+  });
+
+  it('remontar com uma branch nova escolhida mantém o nome digitado e a base', async () => {
+    const onChange = vi.fn();
+    const el = document.createElement('div');
+    await act(async () => { createRoot(el).render(createElement(BranchPicker,
+      { server: { id: 's' } as never, cwd: '/r', sessionName: 'rust-parte3',
+        value: { branch: 'x', new_branch: true, base: 'main' }, onChange })); });
+    expect(el.querySelector('[aria-label="nome"]')).toBeTruthy();
+    expect(onChange).toHaveBeenLastCalledWith({ branch: 'x', new_branch: true, base: 'main' });
+    expect(onChange).not.toHaveBeenCalledWith(null);
   });
 });

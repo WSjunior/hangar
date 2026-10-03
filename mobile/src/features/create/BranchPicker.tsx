@@ -11,29 +11,44 @@ type Props = { server: Server; cwd: string; sessionName: string; value: Worktree
 
 // O painel desmonta ao fechar: a escolha volta de `value` para não zerar a cada abertura.
 const modeOf = (v: WorktreeChoice | null): Mode => (!v ? 'current' : v.new_branch ? 'new' : { existing: v.branch });
+// Pasta fora de repositório não é falha: só não há o que escolher (mesma regra do web, `isNotRepo`).
+const isNotRepo = (e: unknown) => {
+  const status = (e as { status?: number } | null)?.status;
+  return status === 404 || (status === 409 && e instanceof Error && e.message.includes('not a git repository'));
+};
 
 export function BranchPicker({ server, cwd, sessionName, value, onChange }: Props) {
   const [info, setInfo] = useState<FolderBranches | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState('');
   const [mode, setMode] = useState<Mode>(() => modeOf(value));
-  const [name, setName] = useState(() => (value?.new_branch && value.branch !== sessionName ? value.branch : ''));
+  const [name, setName] = useState(() => (value?.new_branch ? value.branch : ''));
   const [base, setBase] = useState(value?.base ?? '');
 
   useEffect(() => {
     let vivo = true;
     setInfo(null);
+    setFailed('');
+    setLoading(true);
     getFolderBranchesForServer(server, cwd)
       .then((r) => { if (vivo) { setInfo(r); setBase((b) => b || (r.current ?? '')); } })
-      .catch(() => { if (vivo) setInfo(null); });   // pasta sem git: o seletor some
+      .catch((e: unknown) => {
+        if (vivo && !isNotRepo(e)) setFailed(m.native_create_checkout_failed({ reason: e instanceof Error ? e.message : String(e) }));
+      })
+      .finally(() => { if (vivo) setLoading(false); });
     return () => { vivo = false; };
   }, [server, cwd]);
 
   useEffect(() => {
-    if (mode === 'new') onChange({ branch: (name || sessionName).trim(), new_branch: true, base: base || null });
+    // Nome em branco: o store preenche com o nome final da sessão ao criar.
+    if (mode === 'new') onChange({ branch: name.trim(), new_branch: true, base: base || null });
     else if (typeof mode === 'object') onChange({ branch: mode.existing });
     else onChange(null);
-  }, [mode, name, base, sessionName, onChange]);
+  }, [mode, name, base, onChange]);
 
-  if (!info) return null;
+  if (loading) return <Text style={styles.help} accessibilityLiveRegion="polite">{m.native_create_checkout_loading()}</Text>;
+  if (failed) return <Text style={styles.error} accessibilityRole="alert">{failed}</Text>;
+  if (!info) return null;   // pasta sem git: nada a escolher
   const others = [...info.branches, ...info.remotes].filter((b) => b !== info.current);
   const row = (key: string, label: string, on: boolean, onPress: () => void) => (
     <Pressable key={key} onPress={onPress} accessibilityRole="button" accessibilityLabel={label}
@@ -72,4 +87,5 @@ const styles = StyleSheet.create((theme) => ({
   },
   label: { color: theme.tokens.text.secondary, fontSize: theme.base.text.sm },
   help: { color: theme.tokens.text.secondary, fontSize: theme.base.text.sm },
+  error: { color: theme.tokens.status.error, fontSize: theme.base.text.sm },
 }));
