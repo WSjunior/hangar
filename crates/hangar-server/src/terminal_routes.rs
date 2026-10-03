@@ -66,7 +66,10 @@ pub async fn terminal(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connec
         || !bool::from(supplied.ct_eq(st.cfg.internal_secret.as_bytes())) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    let invalid = || (StatusCode::BAD_REQUEST, "invalid terminal request").into_response();
+    let invalid = || {
+        tracing::warn!(code = "invalid terminal request", "observação terminal recusada");
+        (StatusCode::BAD_REQUEST, "invalid terminal request").into_response()
+    };
     let bytes = match tokio::time::timeout(Duration::from_secs(6), to_bytes(req.into_body(), MAX_BODY)).await {
         Ok(Ok(bytes)) => bytes,
         _ => return invalid(),
@@ -88,7 +91,13 @@ pub async fn terminal(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connec
     };
     match result {
         Ok(value) => json(value),
-        Err(e) if matches!(e.0, "invalid capture request" | "invalid terminal target") => invalid(),
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "terminal observer unavailable").into_response(),
+        Err(e) => {
+            tracing::warn!(code = e.0, "observação terminal usa reserva Python");
+            if matches!(e.0, "invalid capture request" | "invalid terminal target") {
+                invalid()
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, "terminal observer unavailable").into_response()
+            }
+        }
     }
 }

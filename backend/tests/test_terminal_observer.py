@@ -568,7 +568,7 @@ def test_http_protocol_errors_use_reserve_without_raw_diagnostics(monkeypatch, c
         raise http.client.IncompleteRead(b"dummy-private", 100)
     monkeypatch.setattr(t, "_http", failure)
     assert asyncio.run(t._request({"op":"release", "consumer":"c"})) is None
-    assert "http_unavailable" in caplog.text
+    assert "http_protocol" in caplog.text
     assert "dummy-private" not in caplog.text and "test-only" not in caplog.text
 
 
@@ -1099,15 +1099,22 @@ def test_bridge_circuit_pauses_after_three_failures_grows_and_resets(monkeypatch
     now = [100.0]
     monkeypatch.setattr(t, "time", SimpleNamespace(monotonic=lambda: now[0]))
     t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
     calls = []
     fail = [True]
     def response(config, payload):
+        if payload["op"] == "acquire":
+            return {}
         calls.append(payload)
         if fail[0]:
             raise TimeoutError("private-pane-and-secret")
+        if payload["op"] == "capture":
+            return dict(binding=payload["binding"], started=payload["started"], text="", analysis=analysis())
         return {}
     monkeypatch.setattr(t, "_http", response)
     async def run():
+        source = t.lease("circuit-recovery", "claude", lambda: "b")
+        await source.start()
         for _ in range(3):
             assert await t._request({"op": "release", "consumer": "c"}) is None
         assert await t._request({"op": "release", "consumer": "c"}) is None
@@ -1119,13 +1126,15 @@ def test_bridge_circuit_pauses_after_three_failures_grows_and_resets(monkeypatch
         assert len(calls) == 4
         now[0] = 103.0
         fail[0] = False
-        assert await t._request({"op": "release", "consumer": "c"}) == {}
+        with t.use(source):
+            assert await t.capture("circuit-recovery", 103.0) is not None
         fail[0] = True
         for _ in range(3):
             assert await t._request({"op": "release", "consumer": "c"}) is None
         t.configure("127.0.0.1:23456", "another-test-only")
         fail[0] = False
         assert await t._request({"op": "release", "consumer": "c"}) == {}
+        await source.close()
     asyncio.run(run())
 
 
@@ -1177,4 +1186,83 @@ def test_old_generation_io_failure_cannot_close_reconfigured_bridge(monkeypatch)
         finally:
             release.set()
             await asyncio.gather(old, return_exceptions=True)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure,code", [(400, "http_400"), (503, "http_503"),
+    ("timeout", "http_timeout"), ("connection", "http_connection"), ("protocol", "http_protocol"),
+    ("url-timeout", "http_timeout")])
+def test_bridge_diagnostics_preserve_safe_failure_reason_and_recovery(monkeypatch, caplog, failure, code):
+    import http.client
+    import urllib.error
+    from app import diag
+    t = bridge()
+    t.configure("127.0.0.1:12345", "private-secret")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    entries = []
+    monkeypatch.setattr(diag, "registrar", lambda *args, **fields: entries.append((args, fields)))
+    failing = [True]
+    def response(config, payload):
+        if payload["op"] == "acquire":
+            return {}
+        if not failing[0]:
+            if payload["op"] == "capture":
+                return dict(binding=payload["binding"], started=payload["started"], text="", analysis=analysis())
+            return {}
+        if isinstance(failure, int):
+            raise urllib.error.HTTPError("http://private-url", failure, "private-message", None, None)
+        if failure == "timeout":
+            raise TimeoutError("private-message")
+        if failure == "url-timeout":
+            raise urllib.error.URLError(TimeoutError("private-message"))
+        if failure == "connection":
+            raise urllib.error.URLError(ConnectionRefusedError("private-message"))
+        raise http.client.BadStatusLine("private-message")
+    monkeypatch.setattr(t, "_http", response)
+    async def run():
+        source = t.lease("reason-recovery", "claude", lambda: "b")
+        await source.start()
+        for _ in range(2):
+            assert await t._request({"op": "release", "consumer": "private-consumer"}) is None
+        assert entries == [(("terminal_observer.fallback", "aviso"), {"codigo": code})]
+        failing[0] = False
+        assert await t._request({"op": "acquire"}) == {}
+        assert entries == [(("terminal_observer.fallback", "aviso"), {"codigo": code})]
+        with t.use(source):
+            assert await t.capture("reason-recovery", 1.0) is not None
+        assert entries[-1] == (("terminal_observer.recovered", "ok"), {"codigo": "rust_available"})
+        failing[0] = True
+        assert await t._request({"op": "release", "consumer": "private-consumer"}) is None
+        assert entries[-1] == (("terminal_observer.fallback", "aviso"), {"codigo": code})
+        await source.close()
+    asyncio.run(run())
+    assert caplog.text.count(code) == 2
+    assert "private-" not in caplog.text
+    assert "private-" not in repr(entries)
+
+
+def test_malformed_frame_cannot_report_recovery_before_validated_capture(monkeypatch):
+    from app import diag
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    entries = []
+    monkeypatch.setattr(diag, "registrar", lambda *args, **fields: entries.append((args, fields)))
+    valid = [False]
+    def response(config, payload):
+        if payload["op"] != "capture":
+            return {}
+        if not valid[0]:
+            return {}
+        return dict(binding=payload["binding"], started=payload["started"], text="", analysis=analysis())
+    monkeypatch.setattr(t, "_http", response)
+    async def run():
+        async with t.lease("diagnostic-validation", "claude", lambda: "b"):
+            assert await t.capture("diagnostic-validation", 1.0) is None
+            assert await t.capture("diagnostic-validation", 2.0) is None
+            assert await t._request({"op": "acquire"}) == {}
+            assert entries == [(("terminal_observer.fallback", "aviso"), {"codigo": "invalid_frame"})]
+            valid[0] = True
+            assert await t.capture("diagnostic-validation", 3.0) is not None
+            assert entries[-1] == (("terminal_observer.recovered", "ok"), {"codigo": "rust_available"})
     asyncio.run(run())

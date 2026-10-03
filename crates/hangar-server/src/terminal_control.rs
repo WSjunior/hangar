@@ -43,6 +43,11 @@ impl std::fmt::Display for TerminalError {
 impl std::error::Error for TerminalError {}
 type Result<T> = std::result::Result<T, TerminalError>;
 
+fn io_failure(code: &'static str, error: std::io::Error) -> TerminalError {
+    tracing::warn!(code, io_kind = ?error.kind(), "observação terminal usa reserva Python");
+    TerminalError(code)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ControlEvent {
     Frame { identity: FrameIdentity, text: String, error: bool },
@@ -385,7 +390,7 @@ impl Observer {
         if let Some(socket) = socket { command.arg("-S").arg(socket); }
         command.args(["-u", "-C", "-N", "attach-session", "-E", "-f", "read-only,ignore-size", "-t"]).arg(format!("={}", key.name))
             .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).kill_on_drop(true);
-        let mut child = command.spawn().map_err(|_| TerminalError("cannot start terminal observer"))?;
+        let mut child = command.spawn().map_err(|e| io_failure("cannot start terminal observer", e))?;
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let mut observer = Self { child, stdin, stdout, parser: ControlParser::default(), events: VecDeque::new(), pane: None, screen: None, limits };
@@ -410,7 +415,7 @@ impl Observer {
     }
     async fn read(&mut self) -> Result<()> {
         let mut buffer = [0u8; 8192];
-        let n = self.stdout.read(&mut buffer).await.map_err(|_| TerminalError("terminal read failed"))?;
+        let n = self.stdout.read(&mut buffer).await.map_err(|e| io_failure("terminal read failed", e))?;
         if n == 0 { self.parser.finish()?; return Err(TerminalError("terminal observer EOF")); }
         self.events.extend(self.parser.push(&buffer[..n])?);
         if self.events.len() > 4096 { return Err(TerminalError("terminal event queue full")); }
@@ -434,8 +439,8 @@ impl Observer {
         let end = format!("HG_END_{nonce}");
         let command = format!("display-message -p {start} ; {} ; display-message -p {end}\n", command.trim_end_matches('\n'));
         timeout(self.limits.command, async {
-            self.stdin.write_all(command.as_bytes()).await.map_err(|_| TerminalError("terminal write failed"))?;
-            self.stdin.flush().await.map_err(|_| TerminalError("terminal write failed"))?;
+            self.stdin.write_all(command.as_bytes()).await.map_err(|e| io_failure("terminal write failed", e))?;
+            self.stdin.flush().await.map_err(|e| io_failure("terminal write failed", e))?;
             let (first, text) = self.frame().await?;
             if text != format!("{start}\n") { return Err(TerminalError("terminal command marker mismatch")); }
             let (middle, body) = self.frame().await?;

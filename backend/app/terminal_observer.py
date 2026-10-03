@@ -16,7 +16,7 @@ import time
 import urllib.request
 from uuid import uuid4
 
-from app import tmux
+from app import diag, tmux
 
 _log = logging.getLogger("hangar.terminal_observer")
 TIMEOUT = 0.25
@@ -27,6 +27,7 @@ _io_slots = threading.BoundedSemaphore(4)
 _failures = 0
 _retry_at = 0.0
 _backoff = 1.0
+_fallback = False
 MAX_BODY = 16 * 1024 * 1024
 HEARTBEAT = 20.0
 _config: tuple[str, str] | None = None
@@ -40,12 +41,13 @@ _STATES = {"idle", "working", "awaiting_input", "dead"}
 
 
 def configure(address: str | None, secret: str | None) -> None:
-    global _config, _generation, _failures, _retry_at, _backoff
+    global _config, _generation, _failures, _retry_at, _backoff, _fallback
     _config = None
     _generation += 1
     _analysis.clear()
     _warned.clear()
     _failures, _retry_at, _backoff = 0, 0.0, 1.0
+    _fallback = False
     if address is not None and secret:
         # O Supervisor fornece um IP literal: não resolvemos nomes nem usamos proxies.
         if not isinstance(address, str) or len(address) > 128:
@@ -64,21 +66,28 @@ def forget(name: str) -> None:
 
 
 def _failure(code: str) -> None:
-    global _failures, _retry_at, _backoff
+    global _failures, _retry_at, _backoff, _fallback
     now = time.monotonic()
     if now >= _retry_at:
         _failures += 1
         if _failures >= MAX_FAILURES:
             _retry_at = now + _backoff
             _backoff = min(_backoff * 2, MAX_BACKOFF)
+    if not _fallback:
+        _fallback = True
+        diag.registrar("terminal_observer.fallback", "aviso", codigo=code)
     if code not in _warned:
         _warned.add(code)
         _log.warning("observação terminal usa reserva Python: %s", code)
 
 
 def _success() -> None:
-    global _failures, _retry_at, _backoff
+    global _failures, _retry_at, _backoff, _fallback
     _failures, _retry_at, _backoff = 0, 0.0, 1.0
+    if _fallback:
+        diag.registrar("terminal_observer.recovered", "ok", codigo="rust_available")
+        _fallback = False
+    _warned.clear()
 
 
 def _available() -> bool:
@@ -116,7 +125,7 @@ def _http(config: tuple[str, str], payload: dict) -> dict | None:
         headers={"Content-Type": "application/json", "x-hangar-internal": config[1]}, method="POST")
     with opener.open(req, timeout=TIMEOUT) as response:
         if response.status != 200:
-            return None
+            raise urllib.error.HTTPError(req.full_url, response.status, "terminal status", None, None)
         body = response.read(MAX_BODY + 1)
         if len(body) > MAX_BODY:
             return None
@@ -139,12 +148,24 @@ async def _request(payload: dict) -> dict | None:
             if result != {}:
                 _failure("invalid_http_response")
                 return None
-            _success()
         return result
-    except (OSError, ValueError, TimeoutError, HTTPException, _IoBusy):
+    except (OSError, ValueError, TimeoutError, HTTPException, _IoBusy) as exc:
         # Nem pane, segredo, URL ou mensagem de exceção entram no diário.
         if generation == _generation:
-            _failure("http_unavailable")
+            if isinstance(exc, urllib.error.HTTPError):
+                code = f"http_{exc.code}"
+            elif isinstance(exc, TimeoutError) or (isinstance(exc, urllib.error.URLError)
+                                                  and isinstance(exc.reason, TimeoutError)):
+                code = "http_timeout"
+            elif isinstance(exc, HTTPException):
+                code = "http_protocol"
+            elif isinstance(exc, _IoBusy):
+                code = "io_busy"
+            elif isinstance(exc, ValueError):
+                code = "invalid_http_response"
+            else:
+                code = "http_connection"
+            _failure(code)
         return None
 
 
