@@ -84,6 +84,54 @@ fn rate_text_numbers_accept_python_float_syntax() {
 }
 
 #[test]
+fn local_time_accepts_python_iso_week_dates() {
+    for (raw, expected) in [
+        ("2026-W40-5", "2026-10-02T00:00:00-03:00"),
+        ("2026W405", "2026-10-02T00:00:00-03:00"),
+        ("2026-W40", "2026-09-28T00:00:00-03:00"),
+        ("2026W40", "2026-09-28T00:00:00-03:00"),
+        ("2026-W40-5T10:00:00+00:00", "2026-10-02T07:00:00-03:00"),
+        ("2026W405T10:00:00Z", "2026-10-02T07:00:00-03:00"),
+        ("2026W405T10:00:00", "2026-10-02T10:00:00-03:00"),
+        ("2026-W40T10:00:00.000001", "2026-09-28T10:00:00.000001-03:00"),
+        ("2026W40T10:00:00.000001-03:00", "2026-09-28T10:00:00.000001-03:00"),
+        ("2020-W53-7", "2021-01-03T00:00:00-03:00"),
+        ("2020W537", "2021-01-03T00:00:00-03:00"),
+        ("0001-W01-1", "0001-01-01T00:00:00-03:00"),
+    ] {
+        assert_eq!(LocalTs::from_iso(raw).map(|t| t.iso()).as_deref(), Some(expected), "{raw}");
+    }
+    for raw in ["2021-W53-1", "2026-W00-1", "2026-W54-1", "2026-W40-0", "2026-W40-8",
+                "2026W400", "2026W408", "2026-W401", "2026W40-1", "9999-W52-7"] {
+        assert!(LocalTs::from_iso(raw).is_none(), "{raw}");
+    }
+}
+
+#[test]
+fn number_whitespace_matches_python_conversions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut models = serde_json::Map::new();
+    for code in 0x1c..=0x1f {
+        let control = char::from_u32(code).unwrap();
+        let raw = format!("{control}12{control}");
+        assert_eq!(py_int(Some(&json!(raw))), 0, "controle {code:#x}");
+        models.insert(format!("invalid-{code}"), json!({"input": raw, "output": 2}));
+    }
+    for (index, raw) in ["\t12\r\n", "\u{a0}12\u{a0}", "\u{2003}１２\u{2003}", "\u{202f}1_2\u{202f}"].into_iter().enumerate() {
+        assert_eq!(py_int(Some(&json!(raw))), 12, "{raw:?}");
+        models.insert(format!("valid-{index}"), json!({"input": raw, "output": 2}));
+    }
+    std::fs::write(dir.path().join("models.dev.json"), serde_json::to_vec(&json!({"modelos": models})).unwrap()).unwrap();
+    let p = Pricing::load(dir.path());
+    for code in 0x1c..=0x1f {
+        assert!(p.rate_for(&format!("invalid-{code}")).is_none(), "controle float {code:#x}");
+    }
+    for index in 0..4 {
+        assert_eq!(p.rate_for(&format!("valid-{index}")).unwrap().input, 12.0);
+    }
+}
+
+#[test]
 fn line_objects_preserve_python_character_counts() {
     let obj = parse_obj(b" \t{\"text\":\"a\\ud800\\ud83d\\ude00\"}\r\n").unwrap();
     assert_eq!(char_len(obj["text"].as_str().unwrap()), 3);
