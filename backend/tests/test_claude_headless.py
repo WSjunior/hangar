@@ -1791,3 +1791,38 @@ def test_rename_on_owner_loop_cancels_old_partial_channels(adapter):
         assert fonte_pensamento("s1").text == ""
         await sess.thinking_buffer.discard()
     _run(run())
+
+
+def test_old_eof_cannot_clear_replacement_partial_channels(adapter):
+    from app.adapters.preview_push import fonte_ferramenta, fonte_pensamento
+    old = adapter._sessions["s1"]
+
+    async def run():
+        stream = asyncio.StreamReader()
+        stream.feed_eof()
+        old.proc = A._Ligacao(stream, SimpleNamespace(close=lambda: None), 4242)
+        old.desligando = True
+        for delta in ({"type": "text_delta", "text": "old"},
+                      {"type": "thinking_delta", "thinking": "old"}):
+            await adapter._on_stream(old, {"type": "content_block_delta", "delta": delta})
+            await adapter._on_stream(old, {"type": "content_block_delta", "delta": delta})
+        await adapter._on_stream(old, {"type": "content_block_start", "content_block": {"type": "tool_use", "name": "Bash"}})
+        await adapter._on_stream(old, {"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": '{"command":"old'} })
+        await adapter._on_stream(old, {"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": '-tail"}'} })
+        finishing = asyncio.create_task(adapter._ler(old))
+        await asyncio.sleep(0)
+        assert not finishing.done()
+        new = _Sessao("s1", old.meta)
+        adapter._sessions["s1"] = new
+        await adapter._on_stream(new, {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "new"}})
+        await adapter._on_stream(new, {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "new"}})
+        await adapter._on_stream(new, {"type": "content_block_start", "content_block": {"type": "tool_use", "name": "Bash"}})
+        await adapter._on_stream(new, {"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": '{"command":"new"}'} })
+        await finishing
+        assert PushPreviewSource.get("s1").text == "new"
+        assert fonte_pensamento("s1").text == "new"
+        assert json.loads(fonte_ferramenta("s1").text)["input"] == {"command": "new"}
+        await new.preview_buffer.discard()
+        await new.thinking_buffer.discard()
+        await new.tool_buffer.discard()
+    _run(run())

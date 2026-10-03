@@ -1628,20 +1628,20 @@ class ClaudeHeadlessAdapter:
         sess.thinking_buffer.invalidate()
         sess.tool_buffer.invalidate()
 
-    @staticmethod
-    async def _clear_preview(sess: _Sessao) -> None:
+    async def _clear_preview(self, sess: _Sessao) -> None:
         await sess.preview_buffer.discard()
-        await PushPreviewSource.get(sess.name).push("")
+        if self._sessions.get(sess.name) is sess:
+            await PushPreviewSource.get(sess.name).push("")
 
-    @staticmethod
-    async def _limpar_pensamento(sess: _Sessao) -> None:
+    async def _limpar_pensamento(self, sess: _Sessao) -> None:
         await sess.thinking_buffer.discard()
-        await fonte_pensamento(sess.name).push("")
+        if self._sessions.get(sess.name) is sess:
+            await fonte_pensamento(sess.name).push("")
 
-    @staticmethod
-    async def _limpar_ferramenta(sess: _Sessao) -> None:
+    async def _limpar_ferramenta(self, sess: _Sessao) -> None:
         await sess.tool_buffer.discard()
-        await fonte_ferramenta(sess.name).push("")
+        if self._sessions.get(sess.name) is sess:
+            await fonte_ferramenta(sess.name).push("")
 
     # ── estado pro SSE ─────────────────────────────────────────────────────────────────────
 
