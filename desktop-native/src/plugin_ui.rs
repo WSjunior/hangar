@@ -161,7 +161,7 @@ fn raster(p: &Value) -> AnyElement {
     let rows = p["rows"].as_u64().unwrap_or(0) as usize;
     let bytes = base64::engine::general_purpose::STANDARD.decode(p["cells"].as_str().unwrap_or("")).unwrap_or_default();
     let word = |at: usize| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
-    let mut grid = div().flex().flex_col().flex_grow(1.).min_w_0().max_w(px(columns as f32 * CELL_W));
+    let mut grid = div().flex().flex_col().flex_basis(px(0.)).flex_grow(1.).min_w_0().max_w(px(columns as f32 * CELL_W));
     for r in 0..rows {
         let mut runs: Vec<(String, Option<Hsla>, Option<Hsla>)> = Vec::new();
         for c in 0..columns {

@@ -75,7 +75,7 @@
 
 <style>
   .box { box-sizing: border-box; }
-  .raster { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; white-space: pre; line-height: 1; }
+  .raster { display: flex; flex-direction: column; flex: 1 1 0; min-width: 0; white-space: pre; line-height: 1; }
   .raster-row { display: flex; min-width: 0; }
   .run { flex-basis: 0; flex-shrink: 1; min-width: 0; overflow: hidden; }
   .svg { display: block; max-width: 100%; height: auto; align-self: center; }
