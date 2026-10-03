@@ -6,9 +6,10 @@ import logging
 import os
 import re
 import time
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Iterable, Optional
 from watchfiles import awatch
 from app.models import ChatEvent
 
@@ -675,7 +676,8 @@ def path_in_transcript(jsonl: str | Path, needle: str) -> bool:
     return False
 
 
-def citation_cwds(jsonl: str | Path, needles: list[str]) -> dict[str, list[str]]:
+def citation_cwds(jsonl: str | Path, needles: list[str], *,
+                  rows: Iterable[bytes] | None = None) -> dict[str, list[str]]:
     """Caminho citado -> cwd das linhas que o citaram, do mais recente ao mais antigo."""
     wanted = {needle for needle in needles if needle}
     if not wanted:
@@ -687,7 +689,7 @@ def citation_cwds(jsonl: str | Path, needles: list[str]) -> dict[str, list[str]]
     seen: set[str] = set()
     cwds: dict[str, list[str]] = {}
     try:
-        with open(jsonl, "rb") as fh:
+        with (open(jsonl, "rb") if rows is None else nullcontext(rows)) as fh:
             for raw_line in fh:
                 if not any(raw in raw_line for raw in encoded):
                     continue
@@ -725,7 +727,8 @@ _CITACAO_FIM = r"(?![\w-]|\.\w)"
 _CAMINHO_MAX = 400
 
 
-def cited_elsewhere(jsonl: str | Path, path: str) -> tuple[list[str], list[str]]:
+def cited_elsewhere(jsonl: str | Path, path: str, *,
+                    rows: Iterable[bytes] | None = None) -> tuple[list[str], list[str]]:
     """Numa leitura só do transcript, onde mais a conversa citou o arquivo `path` (nome solto ou relativo), do mais
     recente ao mais antigo: absolutos que terminam em `/path` e existem, e relativos citados que terminam no nome
     (um `git status` de outro repositório cita `docs/x/nome` sem dizer de onde)."""
@@ -740,7 +743,7 @@ def cited_elsewhere(jsonl: str | Path, path: str) -> tuple[list[str], list[str]]
     absolutes: list[str] = []
     relatives: list[str] = []
     try:
-        with open(jsonl, "rb") as fh:
+        with (open(jsonl, "rb") if rows is None else nullcontext(rows)) as fh:
             for raw_line in fh:
                 if needle not in raw_line:
                     continue

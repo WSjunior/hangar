@@ -1220,6 +1220,8 @@ def _confirm_and_drain(name: str) -> None:
         info = _cached_info_sync(name)
         if not info or not info.jsonl:
             return
+        from app.conversation_history import confirmation_options
+        confirmation = confirmation_options(name, info.jsonl, info.provider)
         # MID-TURN o prompt entregue ainda pode nao ter virado entrada no transcript (vive na fila
         # interna do Claude Code) — decidir requeue agora arriscaria redigitar mensagem ja recebida.
         # Adia pro proximo ciclo (o turno acabando dispara transicao -> novo timer).
@@ -1248,11 +1250,11 @@ def _confirm_and_drain(name: str) -> None:
             # gravar o prompt. Sem isto a entrada ficava entregue e calada pra sempre.
             committed, inicio_ts = [], 0.0
         else:
-            committed = committed_user_lines(info.jsonl, info.provider)
+            committed = committed_user_lines(info.jsonl, info.provider, **confirmation)
             inicio_ts = _transcript_start_ts(info.jsonl)
         # Enfileirada na TUI e ainda nao consumida: entregue, mas sem bolha real — segue visivel
         # como bolha da fila em vez de ser confirmada (escondida) pela linha de enqueue.
-        na_fila = fila_interna_pendente(info.jsonl, info.provider)
+        na_fila = fila_interna_pendente(info.jsonl, info.provider, **confirmation)
         if committed is None or inicio_ts is None:
             _log.warning("confirmacao adiada name=%s: transcript ilegivel agora (nada foi "
                          "reenfileirado nem dado por perdido)", name)
@@ -3092,7 +3094,11 @@ async def history(request: Request, response: Response, name: str, limit: int | 
     # do cliente, dispensa qualquer regra de "quando invalidar o cache": quem responde e o disco,
     # entao msg deste aparelho, de outro, do terminal, /clear e sessao que continuou trabalhando
     # caem todos no mesmo caminho.
-    etag = await asyncio.to_thread(historico_etag, name, info.jsonl, info.provider, limit)
+    from app.conversation_history import HistoryError
+    try:
+        etag = await asyncio.to_thread(historico_etag, name, info.jsonl, info.provider, limit)
+    except (HistoryError, OSError) as exc:
+        raise HTTPException(409, detail=erro("session_transfer_history_invalid", "histórico da transferência indisponível")) from exc
     if etag:
         if request.headers.get("if-none-match") == etag:
             return Response(status_code=304, headers={"ETag": etag})
@@ -3103,7 +3109,10 @@ async def history(request: Request, response: Response, name: str, limit: int | 
     # backfill do tail; reabrir apos ficar horas em segundo plano perdia o que passou do tail-200).
     # Com limit, merged_history faz tail-read (parseia so o fim do arquivo); to_thread porque o
     # parse (mesmo da cauda) e CPU/IO sincrono.
-    evs = await asyncio.to_thread(merged_history, name, info.jsonl, info.provider, limit)
+    try:
+        evs = await asyncio.to_thread(merged_history, name, info.jsonl, info.provider, limit)
+    except (HistoryError, OSError) as exc:
+        raise HTTPException(409, detail=erro("session_transfer_history_invalid", "histórico da transferência indisponível")) from exc
     # Cauda CRUA de proposito: o corte no 1o
     # user_msg (pra nao desenhar resposta orfa) e preferencia de RENDERIZACAO do card do quadro e vive
     # no BoardCard.svelte. Aplicado AQUI, valia pra todo consumidor e matava a espiada do hover da
@@ -6716,7 +6725,8 @@ def files_resolver(name: str, body: ResolverBody):
         if info is None or not info.cwd:
             raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
         from app.transcript import citation_cwds
-        cited = citation_cwds(info.jsonl, body.caminhos) if info.jsonl else {}
+        rows = _conversation_rows(info) if info.jsonl else None
+        cited = citation_cwds(info.jsonl, body.caminhos, rows=rows) if info.jsonl else {}
         found: dict[str, dict] = {}
         elsewhere = 0
         for path in body.caminhos:
@@ -6738,7 +6748,7 @@ def files_resolver(name: str, body: ResolverBody):
             # citado, que faz a mesma busca. Cada um relê o transcript: teto por pedido.
             if path not in found and info.jsonl and path in cited and elsewhere < _ELSEWHERE_MAX:
                 elsewhere += 1
-                whole = _cited_elsewhere(info.jsonl, info.cwd, path, cited[path], siblings=True)
+                whole = _cited_elsewhere(info.jsonl, info.cwd, path, cited[path], siblings=True, rows=rows)
                 if whole:
                     found[path] = {"relativo": None, "real": os.path.realpath(whole)}
         return {"ok": {path: found[path] for path in body.caminhos if path in found},
@@ -7257,8 +7267,11 @@ def transcript_image(name: str, uuid: str, idx: int):
     jsonl = info.jsonl if info else None
     if not jsonl:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "session or transcript not found"))
-    from app.transcript import get_transcript_image
-    got = get_transcript_image(jsonl, uuid, idx)
+    from app.conversation_history import transcript_image as conversation_image, HistoryError
+    try:
+        got = conversation_image(info, uuid, idx)
+    except (HistoryError, OSError) as exc:
+        raise HTTPException(409, detail=erro("session_transfer_history_invalid", "histórico da transferência indisponível")) from exc
     if got is None:
         raise HTTPException(404, detail=erro("erro_imagem_nao_encontrada", "image not found"))
     raw, media = got
@@ -7347,6 +7360,7 @@ def archive_folder(project: str, codex_account: str | None = None):
          dependencies=[Depends(require_auth)], response_model=list[ChatEvent])
 def archive_history(project: str, session_id: str, tail: int = 0, config_dir: str | None = None,
                     provider: str = "claude", codex_account: str | None = None):
+    from app.conversation_history import HistoryError
     # `tail=N` = so as N ultimas mensagens, lidas pelo FIM do arquivo (a previa do modal de sessao
     # nova). Sem ele, o historico inteiro, como sempre — e um transcript de 19MB carregado inteiro
     # so pra mostrar cinco balões era o que essa via evita.
@@ -7355,6 +7369,13 @@ def archive_history(project: str, session_id: str, tail: int = 0, config_dir: st
     if provider != "claude" and provider not in archive_providers.PROVIDERS:
         raise HTTPException(400, detail=erro("erro_provider_invalido", "provider invalido"))
     try:
+        if provider == "codex":
+            p = archive_jsonl(project, session_id, config_dir, provider, codex_account)
+            composed = archive_providers.transferred_history(p)
+            if composed is not None:
+                if tail > 0:
+                    return [event for event in composed if event.kind in ("user_msg", "assistant_msg") and event.text][-min(tail, 200):]
+                return composed
         if tail > 0:
             return tail_events(project, session_id, min(tail, 200), config_dir, provider,
                                codex_account)
@@ -7369,6 +7390,8 @@ def archive_history(project: str, session_id: str, tail: int = 0, config_dir: st
                         for ev in archive_providers.parse_obj(provider, o)]
     except codex_accounts.AccountError as e:
         raise _erro_conta_codex(e) from None
+    except HistoryError as exc:
+        raise HTTPException(409, detail=erro("session_transfer_history_invalid", "histórico da transferência indisponível")) from exc
     except ValueError:
         raise HTTPException(400, detail=erro("erro_path_invalido", "invalid path"))
     except FileNotFoundError:
@@ -7380,13 +7403,31 @@ def archive_history(project: str, session_id: str, tail: int = 0, config_dir: st
 
 @app.get("/api/archive/{project}/{session_id}/transcript-image/{uuid}/{idx}",
          dependencies=[Depends(require_auth)])
-def archive_image(project: str, session_id: str, uuid: str, idx: int):
+def archive_image(project: str, session_id: str, uuid: str, idx: int,
+                  config_dir: str | None = None, provider: str = "claude",
+                  codex_account: str | None = None):
+    from app.conversation_history import archive_transfer, historical_image, archived_image, HistoryError
+    if config_dir is not None and config_dir not in {c.path for c in list_config_dirs()}:
+        raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
+    if provider != "claude" and provider not in archive_providers.PROVIDERS:
+        raise HTTPException(400, detail=erro("erro_provider_invalido", "provider invalido"))
     try:
-        p = archive_jsonl(project, session_id)
+        if uuid.startswith("transfer:"):
+            got = archived_image(session_id, uuid, idx, codex_account)
+        else:
+            p = archive_jsonl(project, session_id, config_dir, provider, codex_account)
+            record = archive_transfer(p) if provider == "codex" else None
+            if record:
+                got = historical_image(record, uuid, idx)
+            else:
+                from app.transcript import get_transcript_image
+                got = get_transcript_image(str(p), uuid, idx)
+    except codex_accounts.AccountError as exc:
+        raise _erro_conta_codex(exc) from None
+    except HistoryError as exc:
+        raise HTTPException(409, detail=erro("session_transfer_history_invalid", "histórico da transferência indisponível")) from exc
     except (ValueError, FileNotFoundError):
         raise HTTPException(404, detail=erro("erro_nao_encontrado", "not found"))
-    from app.transcript import get_transcript_image
-    got = get_transcript_image(str(p), uuid, idx)
     if got is None:
         raise HTTPException(404, detail=erro("erro_imagem_nao_encontrada", "image not found"))
     raw, media = got
@@ -7420,6 +7461,7 @@ def _sessao_com_transcript(jsonl: Path) -> str | None:
 @app.post("/api/archive/{project}/{session_id}/resume", dependencies=[Depends(require_auth)],
           response_model=SessionInfo)
 def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = ResumeArchivedBody()):
+    from app.conversation_history import archive_transfer, source_rows, verify_boundary, HistoryError
     # "Retomar conversa" do Arquivo: sobe uma sessao tmux NOVA no cwd original com `claude --resume
     # <uuid>` -- reusa registry.create (nome/config_dir/spawn tmux ja tratados), so troca o comando pro
     # uuid EXISTENTE (nao um novo transcript). Nome derivado do basename do cwd, igual ao
@@ -7478,11 +7520,17 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
                     {"account_id": origem_codex_account, "origin_account": owner.id},
                 )
             origem_codex_account = owner.id
+            transfer = archive_transfer(origem_path)
+            if transfer:
+                source_rows(transfer.source)
+                verify_boundary(transfer, origem_path)
             cwd = archive_cwd(project, session_id, cfg, body.provider, origem_codex_account)
         else:
             cwd = archive_cwd(project, session_id, mover[0] if mover else cfg, body.provider)
     except codex_accounts.AccountError as e:
         raise _erro_conta_codex(e) from None
+    except HistoryError as exc:
+        raise HTTPException(409, detail=erro("session_transfer_history_invalid", "histórico da transferência indisponível")) from exc
     except ValueError:
         raise HTTPException(400, detail=erro("erro_path_invalido", "invalid path"))
     except FileNotFoundError:
@@ -7714,13 +7762,14 @@ def ask_history(body: AskHistoryBody):
 _CACHE_ARQUIVO = "max-age=60"
 
 
-def _cited_elsewhere(jsonl: str, cwd: str | None, path: str, worked: list[str], *, siblings: bool) -> str | None:
+def _cited_elsewhere(jsonl: str, cwd: str | None, path: str, worked: list[str], *,
+                     siblings: bool, rows=None) -> str | None:
     """Arquivo de um nome solto ou relativo que não está na pasta da sessão: o absoluto que a conversa citou antes,
     ou um relativo citado (`docs/x/nome`) dentro das pastas onde a conversa trabalhou (`worked`, o cwd das linhas
     que o citaram) e da pasta da sessão. `siblings` também tenta as pastas ao lado da sessão (outro repositório,
     como num `cd ../outro && git status`): só para LER, porque ali o mesmo relativo pode ser de outro projeto."""
     from app.transcript import cited_elsewhere
-    absolutes, cited_relatives = cited_elsewhere(jsonl, path)
+    absolutes, cited_relatives = cited_elsewhere(jsonl, path, rows=rows)
     if absolutes:
         return absolutes[0]
     if not cwd:
@@ -7746,6 +7795,14 @@ def _cited_elsewhere(jsonl: str, cwd: str | None, path: str, worked: list[str], 
     return None
 
 
+def _conversation_rows(info):
+    from app.conversation_history import citation_rows, HistoryError
+    try:
+        return citation_rows(info)
+    except (HistoryError, OSError) as exc:
+        raise HTTPException(409, detail=erro("session_transfer_history_invalid", "histórico da transferência indisponível")) from exc
+
+
 def _resolver_citado(name: str, path: str, *, write: bool = False) -> str:
     """Devolve o caminho REAL de um arquivo citado no transcript desta sessao.
 
@@ -7760,7 +7817,8 @@ def _resolver_citado(name: str, path: str, *, write: bool = False) -> str:
     if info is None or not info.jsonl:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "session or transcript not found"))
     from app.transcript import citation_cwds
-    cited = citation_cwds(info.jsonl, [path])
+    rows = _conversation_rows(info)
+    cited = citation_cwds(info.jsonl, [path], rows=rows)
     if path not in cited:
         raise HTTPException(403, detail=erro("erro_arquivo_nao_citado", "file not referenced in this conversation"))
     expanded = os.path.expanduser(path)
@@ -7782,7 +7840,7 @@ def _resolver_citado(name: str, path: str, *, write: bool = False) -> str:
                 real = candidate
                 break
         if not real:
-            whole = _cited_elsewhere(info.jsonl, info.cwd, path, cited[path], siblings=not write)
+            whole = _cited_elsewhere(info.jsonl, info.cwd, path, cited[path], siblings=not write, rows=rows)
             real = os.path.realpath(whole) if whole else ""
         if not real:
             raise HTTPException(404, detail=erro("erro_arquivo_nao_encontrado", "file not found"))
