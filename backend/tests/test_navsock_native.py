@@ -115,3 +115,24 @@ async def test_tecla_nomeada_leva_codigo_virtual():
     # Enter leva `\r` só na descida: é o que faz o formulário enviar.
     assert (enter["windowsVirtualKeyCode"], enter["text"]) == (13, "\r")
     assert "text" not in enter_sobe
+
+
+@pytest.mark.parametrize("nome, motivo", [("sem-terminal", "sessao sem navegador"),
+                                          ("nenhuma", "sessao nao existe")])
+def test_rota_aceita_sessao_sem_terminal(monkeypatch, nome, motivo):
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    import app.api as api_mod
+    from app import tmux
+    from app.config import settings
+    monkeypatch.setattr(settings, "auth_token", "secret")
+    monkeypatch.setattr(tmux, "has_session", lambda n: False)
+    monkeypatch.setattr(api_mod, "_session_exists", lambda n: n == "sem-terminal")
+    monkeypatch.setattr(navsock, "alvo_da_sessao", lambda n, exige_alvo=True: None)
+    cliente = TestClient(api_mod.app, base_url="http://127.0.0.1:8765", client=("127.0.0.1", 1))
+    with pytest.raises(WebSocketDisconnect) as e:
+        with cliente.websocket_connect(f"/api/sessions/{nome}/nav-remoto?token=secret"):
+            pass
+    # Sem terminal passa da checagem de sessão e só para por não ter navegador.
+    assert (e.value.code, e.value.reason) == (1008, motivo)
