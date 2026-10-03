@@ -391,6 +391,7 @@ impl Hangar {
         self.search.previous_focus = None;
         self.close_search(window, cx);
         self.close_costs(window, cx);
+        self.close_worktrees(window, cx);
         self.close_settings(window, cx);
         self.open_target(target, window, cx);
     }
@@ -422,6 +423,7 @@ impl Hangar {
                         this.search.previous_focus = None;
                         this.close_search(window, cx);
                         this.close_costs(window, cx);
+                        this.close_worktrees(window, cx);
                         this.close_settings(window, cx);
                         let readable = session.readable();
                         // Nasceu em outra máquina: entra na lista guardada dela, senão a leitura que chega primeiro a fecharia.

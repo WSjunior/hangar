@@ -17,7 +17,8 @@ from app.config import settings
 from app import plugin_bridge
 from app import runtime_config
 from app.names import sanitize_session_name
-from app.git_ops import git_summary, git_diffstat, head_info
+from app.git_ops import git_summary, git_diffstat
+from app import worktrees
 from app.models import SessionInfo, session_key
 from app.pqueue import PromptQueue, _sanitize, merged_history
 from app.archive import _texto_simples
@@ -1272,9 +1273,11 @@ class SessionRegistry:
                 jsonl, tracked = self.resolve_tracked(p["name"], p["cwd"], p["pid"], children)
             link = ThenLink(p["name"]).get()
             pair = PairLink(p["name"]).get()
-            br, wt = head_info(p["cwd"])
+            # Transcript de chute (untracked) pode ser de outra sessão: não decide onde esta está.
+            loc = worktrees.locate(prov, p["cwd"], jsonl if tracked else None)
             info = SessionInfo(name=p["name"], cwd=p["cwd"], jsonl=jsonl, tracked=tracked,
-                               branch=br, worktree=wt,
+                               branch=loc.branch, worktree=loc.worktree,
+                               worktree_path=loc.worktree_path, worktree_gone=loc.worktree_gone,
                                then_target=link.get("target") if link else None,
                                pair_peers=pair.get("peers") if pair else None,
                                pair_external=_pair_external(p["name"], pair.get("peers") if pair else None),
@@ -1329,12 +1332,13 @@ class SessionRegistry:
             codex_home = str(Path(meta.get("codex_home") or codex_contas.default_home())
                              .expanduser().resolve(strict=False))
             cwd = cwd_atual(meta)
-            br, wt = head_info(cwd)
+            loc = worktrees.locate("codex", cwd, meta.get("rollout_path"))
             out.append(SessionInfo(
                 name=meta["name"], cwd=cwd, jsonl=meta.get("rollout_path") or None,
                 provider="codex", tracked=True, conta=f"codex:{codex_home}",
                 codex_home=codex_home, headless=bool(meta.get("headless")),
-                branch=br, worktree=wt,
+                branch=loc.branch, worktree=loc.worktree,
+                worktree_path=loc.worktree_path, worktree_gone=loc.worktree_gone,
                 then_target=(ThenLink(meta["name"]).get() or {}).get("target"),
                 pair_peers=(PairLink(meta["name"]).get() or {}).get("peers"),
                 pair_external=_pair_external(meta["name"], (PairLink(meta["name"]).get() or {}).get("peers")),
@@ -1347,13 +1351,15 @@ class SessionRegistry:
         hl = get_adapter(CLAUDE_HEADLESS)
         for meta in headless_sessions.list_all():
             cwd = cwd_atual(meta)
-            br, wt = head_info(cwd)
+            jsonl = hl.transcript_path_de(meta)
+            loc = worktrees.locate("claude", cwd, jsonl)
             cdir = meta.get("config_dir")
             out.append(SessionInfo(
-                name=meta["name"], cwd=cwd, jsonl=hl.transcript_path_de(meta),
+                name=meta["name"], cwd=cwd, jsonl=jsonl,
                 provider="claude", headless=True, tracked=True, engine=meta.get("engine"),
                 conta=f"claude:{Path(cdir or Path.home() / '.claude').resolve()}",
-                branch=br, worktree=wt,
+                branch=loc.branch, worktree=loc.worktree,
+                worktree_path=loc.worktree_path, worktree_gone=loc.worktree_gone,
                 then_target=(ThenLink(meta["name"]).get() or {}).get("target"),
                 pair_peers=(PairLink(meta["name"]).get() or {}).get("peers"),
                 pair_external=_pair_external(meta["name"], (PairLink(meta["name"]).get() or {}).get("peers")),

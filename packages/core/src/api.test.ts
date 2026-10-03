@@ -11,7 +11,7 @@ function overwriteGetLocale(fn: () => 'en' | 'pt') {
 import { configureApi } from './apiEnv';
 // `getHistoryDesde` veio da main junto com o histórico condicional (304 + ETag).
 import { getConfig, getConfigForServer, patchConfig, patchConfigForServer, createSession, getHistory, getHistoryDesde, isAbortError, transcribeFile, transcribeFileForServer, getModelOptions, setEngineModel, rotaGenerica, pairSession } from './api';
-import { createSessionForServer, getFolderGitForServer, folderGitActionForServer } from './api';
+import { createSessionForServer, getFolderGitForServer, folderGitActionForServer, defaultBase } from './api';
 import { mensagemDeErro, formataErro } from './errosApi';
 import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from './api';
 import { probeServerResponse } from './api';
@@ -977,5 +977,13 @@ describe('prazos e raiz explícita (sessão e git de pasta)', () => {
     expect(new URL(urls[0]).searchParams.get('root')).toBe('/home/a');
     expect(timeout).toHaveBeenCalledWith(30_000);
     expect(timeout).toHaveBeenCalledWith(150_000);
+  });
+});
+
+describe('defaultBase', () => {
+  it('usa a branch atual e, com HEAD solto, a primeira local', () => {
+    expect(defaultBase({ current: 'main', branches: ['dev', 'main'], remotes: [], dirty: false })).toBe('main');
+    expect(defaultBase({ current: null, branches: ['dev', 'main'], remotes: ['r'], dirty: false })).toBe('dev');
+    expect(defaultBase({ current: null, branches: [], remotes: ['r'], dirty: false })).toBe('');
   });
 });

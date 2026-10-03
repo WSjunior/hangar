@@ -18,6 +18,7 @@
   import SessionList from './screens/SessionList.svelte';
   import NewChatHome from './screens/NewChatHome.svelte';
   import Orq from './screens/Orq.svelte';
+  import Worktrees from './screens/Worktrees.svelte';
   import Costs from './screens/Costs.svelte';
   import Uso from './screens/Uso.svelte';
   import Archive from './screens/Archive.svelte';
@@ -596,6 +597,8 @@
     <!-- Orquestração TEM tela no celular (diferente do quadro/canvas): é leitura, não arrasto de
          card, e é a tela que o usuário abre longe da máquina. -->
     <Orq onBack={navigateToSessions} onNavigateToChat={navigateToChat} />
+  {:else if route.name === 'worktrees'}
+    <Worktrees onBack={navigateToSessions} />
   {:else if route.name === 'home'}
     <!-- Celular abre na nova conversa; no desktop `home` caiu no DesktopShell acima, como a lista. -->
     <NewChatHome onOpenList={navigateToSessions} />

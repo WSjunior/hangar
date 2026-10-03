@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -326,7 +327,8 @@ def list_branches(cwd: str) -> dict:
     p = _run(cwd, "branch", "--sort=-committerdate", "--format=%(refname:short)")
     if p.returncode != 0:
         raise GitError(409, (p.stderr or "git branch falhou").strip() or "git branch falhou")
-    branches = [b.strip() for b in p.stdout.splitlines() if b.strip()]
+    # HEAD solto aparece como "(HEAD detached at x)": não é branch, não pode virar escolha nem base.
+    branches = [b.strip() for b in p.stdout.splitlines() if b.strip() and not b.strip().startswith("(")]
     local = set(branches)
 
     # Remotas: -r lista refs/remotes/*. Nome curto = tira o primeiro segmento (o nome do remote).
@@ -348,6 +350,8 @@ def list_branches(cwd: str) -> dict:
 
     cur = _run(cwd, "rev-parse", "--abbrev-ref", "HEAD")
     current = cur.stdout.strip() if cur.returncode == 0 else None
+    if current == "HEAD":   # HEAD solto: sem branch atual
+        current = None
     st = _run(cwd, "status", "--porcelain")
     dirty = st.returncode == 0 and bool(st.stdout.strip())
     return {"current": current, "branches": branches, "remotes": remotes, "dirty": dirty}
@@ -371,8 +375,20 @@ def switch_branch(cwd: str, branch: str) -> dict:
 _worktree_lock = threading.Lock()
 
 
-def create_worktree(cwd: str, branch: str, name: str, allowed_root: Path) -> tuple[str, bool]:
-    """Resolve a branch escolhida sem trocar a árvore de origem."""
+_COPY_MAX = 1024 * 1024
+
+
+def _branch_name_ok(cwd: str, name: str) -> bool:
+    # Nome começando com "-" viraria flag do `worktree add -b`.
+    if not name or name.startswith("-") or name != name.strip():
+        return False
+    return _run(cwd, "check-ref-format", "--branch", name).returncode == 0
+
+
+def create_worktree(cwd: str, branch: str, name: str, allowed_root: Path, *,
+                    new_branch: bool = False, base: str | None = None) -> tuple[str, bool]:
+    """Resolve a branch escolhida sem trocar a árvore de origem. `new_branch` cria `branch` a
+    partir de `base` (padrão: a branch atual da pasta)."""
     with _worktree_lock:
         p = _run(cwd, "rev-parse", "--show-toplevel")
         if p.returncode != 0:
@@ -382,10 +398,20 @@ def create_worktree(cwd: str, branch: str, name: str, allowed_root: Path) -> tup
             raise GitError(400, "repositório fora da raiz autorizada")
 
         info = list_branches(cwd)
-        if branch not in set(info["branches"]) | set(info["remotes"]):
-            raise GitError(400, "branch inexistente")
-        if branch == info["current"]:
-            return cwd, False
+        known = set(info["branches"]) | set(info["remotes"])
+        if new_branch:
+            if not _branch_name_ok(cwd, branch):
+                raise GitError(400, "nome de branch inválido")
+            if branch in known:
+                raise GitError(409, "já existe uma branch com esse nome")
+            base = base or info["current"]
+            if not base or base not in known:
+                raise GitError(400, "branch base inexistente")
+        else:
+            if branch not in known:
+                raise GitError(400, "branch inexistente")
+            if branch == info["current"]:
+                return cwd, False
 
         target = repo.parent / f"{repo.name}-{name}"
         if not target.is_relative_to(allowed_root):
@@ -393,14 +419,69 @@ def create_worktree(cwd: str, branch: str, name: str, allowed_root: Path) -> tup
         if target.exists() or target.is_symlink():
             raise GitError(409, "destino da worktree já existe")
 
-        if branch in info["branches"]:
+        if new_branch:
+            start = base if base in info["branches"] else _remote_ref(cwd, base)
+            # Sem --no-track a branch nova herdaria o upstream da base: o pull puxaria a base.
+            args = ("worktree", "add", "--no-track", "-b", branch, str(target), start)
+        elif branch in info["branches"]:
             args = ("worktree", "add", str(target), branch)
         else:
             args = ("worktree", "add", "--track", "-b", branch, str(target), _remote_ref(cwd, branch))
         created = _run(cwd, *args)
         if created.returncode != 0:
             raise GitError(409, _scrub(created.stderr.strip()) or "não consegui criar a worktree")
+        if new_branch:
+            # A worktree já existe: falha em registrar a base só fica no log.
+            try:
+                cfg = _run(str(target), "config", f"branch.{branch}.hangar-base", base)
+                if cfg.returncode != 0:
+                    _log.warning("hangar-base de %s não gravada: %s", branch, cfg.stderr.strip())
+            except GitError as e:
+                _log.warning("hangar-base de %s não gravada: %s", branch, e.detail)
+        copy_ignored(_main_root(cwd, repo, allowed_root), str(target))
         return str(target), True
+
+
+def _main_root(cwd: str, repo: Path, allowed_root: Path) -> str:
+    """Raiz do repositório principal: com `cwd` numa worktree ligada, a config mora no principal."""
+    try:
+        p = _run(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    except GitError:
+        return str(repo)
+    if p.returncode != 0:
+        return str(repo)
+    main = Path(os.path.realpath(p.stdout.strip())).parent
+    # Fora da raiz autorizada não é lido; fica a raiz de onde se partiu.
+    return str(main) if main.is_relative_to(allowed_root) else str(repo)
+
+
+def copy_ignored(repo: str, target: str) -> list[str]:
+    """A worktree nasce sem os arquivos ignorados (`.env`, `pserver.ini`) e o projeto não sobe;
+    copia os da raiz. Falha aqui só registra: a worktree já existe e serve."""
+    try:
+        p = _run(repo, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z")
+    except GitError as e:
+        _log.warning("copy_ignored: ls-files falhou em %s: %s", repo, e.detail)
+        return []
+    if p.returncode != 0:
+        _log.warning("copy_ignored: ls-files falhou em %s: %s", repo, p.stderr.strip())
+        return []
+    copied: list[str] = []
+    for rel in p.stdout.split("\0"):
+        if not rel or "/" in rel:   # pasta ignorada vem com "/" no fim; subpastas ficam de fora
+            continue
+        src, dst = Path(repo, rel), Path(target, rel)
+        try:
+            if src.is_symlink() or not src.is_file() or src.stat().st_size > _COPY_MAX:
+                continue
+            # Nunca sobrescreve o que a branch versiona nem segue link para fora da worktree.
+            if dst.exists() or dst.is_symlink():
+                continue
+            shutil.copy2(src, dst)
+            copied.append(rel)
+        except OSError as e:
+            _log.warning("copy_ignored: %s não copiado: %s", rel, e)
+    return copied
 
 
 def _remote_ref(cwd: str, branch: str) -> str:
@@ -415,8 +496,8 @@ def _remote_ref(cwd: str, branch: str) -> str:
     return matches[0]
 
 
-def remove_worktree(cwd: str, path: str) -> None:
-    removed = _run(cwd, "worktree", "remove", path)
+def remove_worktree(cwd: str, path: str, *, force: bool = False) -> None:
+    removed = _run(cwd, "worktree", "remove", *(("--force",) if force else ()), path)
     if removed.returncode != 0:
         raise GitError(500, _scrub(removed.stderr.strip()) or "não consegui remover a worktree")
 

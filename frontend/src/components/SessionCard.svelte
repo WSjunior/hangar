@@ -3,7 +3,10 @@
   import type { AggSession, SessionInfo } from '@hangar/core';
 import * as m from '../paraglide/messages';
 import { textoProblema } from '../lib/problema';
-  import { cwdParts, rotuloEstado, stateColors, untrackedReason, providerName, relativeTime, fmtWhen, isOrq } from '@hangar/core';
+  import { cwdParts, rotuloEstado, stateColors, untrackedReason, providerName, relativeTime, fmtWhen, isOrq, worktreeLabel } from '@hangar/core';
+  import { worktreeStatus } from '../lib/worktreeStatus.svelte';
+  import { listOwnServers } from '../lib/auth';
+  import WorktreeSheet from './WorktreeSheet.svelte';
   import { chipDaConta } from '../lib/conta';
   import { loopBadge, LOOP_TONE_COLOR } from '@hangar/core';
   import IconFolder from './icons/IconFolder.svelte';
@@ -52,9 +55,16 @@ import { textoProblema } from '../lib/problema';
   // sessao ("hangar" + "/home/jeff…/hangar"), a linha inteira e redundante e so
   // roubava largura do nome/branch.
   const showCwd = $derived(!!session.cwd && cwdPartes.base.toLowerCase() !== session.name.toLowerCase());
+  const wtPath = $derived(session.worktree_path ?? (session.worktree ? session.cwd : null));
+  const wtNome = $derived(worktreeLabel(session));
+  const wtJuntada = $derived(wtPath ? worktreeStatus.get(serverId, wtPath)?.merged === true : false);
+  let wtAberta = $state(false);
+  // A sessão só traz o id do servidor; a janela precisa do objeto para chamar a API. Convite fica
+  // de fora: o backend recusa worktrees ao convidado, e o chip volta a ser só texto.
+  const wtServer = $derived(wtPath && serverId ? listOwnServers().find((s) => s.id === serverId) ?? null : null);
   // Worktree é a EXCEÇÃO: a pasta aparece mesmo repetindo o nome da sessão, porque é ela que
   // carrega a marca de worktree — e é o nome dela que distingue duas cópias do mesmo repositório.
-  const mostraPasta = $derived(showCwd || session.worktree === true);
+  const mostraPasta = $derived(showCwd || session.worktree === true || session.worktree_gone === true || !!wtNome);
 
   // Chip de estado so quando o estado PEDE atencao. "pronto" repetido em toda linha e ruido: o
   // ponto colorido do lead ja diz que esta parada.
@@ -411,7 +421,19 @@ import { textoProblema } from '../lib/problema';
             <!-- sr-only com o caminho inteiro: mesma razão da Sidebar, onde está o comentário. -->
             <!-- Worktree troca o ÍCONE da pasta em vez de uma pílula escrita "worktree": a worktree
                  é a pasta, e é o nome dela que distingue duas cópias do mesmo repo na mesma branch. -->
+            {#if session.worktree_gone}
+              <span class="cwd cwd--gone" title={session.worktree_path ?? ''}><span class="cwd-icone" aria-hidden="true"><IconWorktree size={11} /></span><span class="cwd-base">{m.worktree_apagada()}</span></span>
+            {:else if wtNome && wtPath && wtServer}
+              <!-- keydown também para aqui: o Enter subiria até a linha e abriria o chat. -->
+              <button type="button" class="cwd cwd--worktree cwd--botao" title={`${m.sessao_worktree()}: ${wtPath}`}
+                onpointerdown={(e) => e.stopPropagation()}
+                onkeydown={(e) => e.stopPropagation()}
+                onclick={(e) => { e.stopPropagation(); wtAberta = true; }}>
+                <span class="cwd-icone" aria-hidden="true"><IconWorktree size={11} /></span><span class="cwd-base">{wtNome}{wtJuntada ? ' ✓' : ''}</span>
+              </button>
+            {:else}
             <span class="cwd" class:cwd--worktree={session.worktree} title={session.worktree ? `${m.sessao_worktree()}: ${session.cwd}` : session.cwd}><span class="sr-only">{session.worktree ? `${m.sessao_worktree()}: ${session.cwd}` : session.cwd}</span><span class="cwd-icone" aria-hidden="true">{#if session.worktree}<IconWorktree size={11} />{:else}<IconFolder size={11} />{/if}</span><span class="cwd-base" aria-hidden="true">{cwdPartes.base}</span></span>
+            {/if}
           {/if}
           {#if agoLabel}
             {#if !orq || serverBadge || session.branch || mostraPasta}<span class="meta-sep" aria-hidden="true">·</span>{/if}
@@ -567,6 +589,7 @@ import { textoProblema } from '../lib/problema';
     {/if}
   </div>
 </BottomSheet>
+{#if wtPath && wtServer}<WorktreeSheet open={wtAberta} server={wtServer} path={wtPath} onClose={() => (wtAberta = false)} />{/if}
 
 <style>
   /* Wrapper do swipe: esconde o "Excluir" que fica atras da linha. */
@@ -850,6 +873,9 @@ import { textoProblema } from '../lib/problema';
      lia; é o NOME da pasta que diz qual das cópias é esta. */
   .cwd--worktree,
   .cwd--worktree .cwd-icone { color: var(--pill-working-fg); }
+  /* Sem o alvo de toque global de 44px: o chip mora dentro da linha de meta, que tem uma linha só. */
+  .cwd--botao { background: none; border: 0; padding: 0; font: inherit; font-family: var(--font-mono); cursor: pointer; min-height: 0; min-width: 0; }
+  .cwd--gone, .cwd--gone .cwd-icone { color: var(--text-muted); }
   /* "+128 −24" do working tree: mono como a branch ao lado, nas cores semânticas de sempre
      (verde/vermelho do diff, não accent — é dado de código, não identidade). Não trunca: são 2
      números curtos e é informação que muda; quem cede é o cwd, como sempre. */

@@ -104,6 +104,10 @@ class SessionInfo(BaseModel):
     # True quando o cwd e uma worktree ligada (`.git` arquivo apontando pro repo principal) — a mesma
     # branch em worktrees diferentes tem arquivos diferentes, entao a lista marca qual e qual.
     worktree: bool = False
+    # Raiz da worktree onde o agente está AGORA (transcript do Claude / comandos do Codex); None
+    # fora de worktree. `worktree_gone`: ele estava numa worktree que não existe mais.
+    worktree_path: Optional[str] = None
+    worktree_gone: bool = False
     # Estado de git do cwd, decorado em list_with_state (git_summary, cacheado). dirty = arquivos
     # não-commitados; ahead = commits não-pushados (None sem upstream real); behind idem. Non-repo
     # -> tudo None (sem badge no painel).
