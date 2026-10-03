@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const api = vi.hoisted(() => ({ getWorktreeForServer: vi.fn(), deleteWorktreeForServer: vi.fn() }));
-vi.mock('react-native', async (original) => ({ ...await original(),
+vi.mock('react-native', async (original) => ({ ...await original<typeof import('react-native')>(),
   Pressable: (p: { accessibilityLabel?: string; onPress?: () => void; children?: unknown }) =>
     createElement('button', { 'aria-label': p.accessibilityLabel, onClick: p.onPress }, p.children as never),
   Switch: (p: { accessibilityLabel?: string; value?: boolean; onValueChange?: (v: boolean) => void }) =>
@@ -20,7 +20,7 @@ vi.mock('../../paraglide/messages', () => ({
   worktree_apagar_conversas: () => 'conversas', worktree_apagar_branch_juntada: () => 'branch_juntada',
   worktree_apagar_branch_fica: () => 'branch_fica', worktree_apagar_branch_tambem: () => 'branch_tambem',
   worktree_apagar: () => 'Apagar' }));
-vi.mock('@hangar/core', async (original) => ({ ...await original(), ...api }));
+vi.mock('@hangar/core', async (original) => ({ ...await original<typeof import('@hangar/core')>(), ...api }));
 import { WorktreeSheet } from './WorktreeSheet';
 
 const st = { path: '/r/hangar-x', repo: '/r/hangar', exists: true, branch: 'x', base: 'main', merged: false, ahead: 3,

@@ -8,7 +8,7 @@ import { SectionCard } from '../../src/features/config/SectionCard';
 import { SettingsRow } from '../../src/features/config/SettingsRow';
 import { InfoNotice } from '../../src/features/config/InfoNotice';
 import { WorktreeSheet } from '../../src/features/worktrees/WorktreeSheet';
-import { putWorktreeStatus } from '../../src/features/worktrees/worktreeStatus';
+import { dropWorktreeStatus, putWorktreeStatus } from '../../src/features/worktrees/worktreeStatus';
 import { toast } from '../../src/ui/Toast';
 import { useServers } from '../../src/stores/servers';
 import * as m from '../../src/paraglide/messages';
@@ -25,6 +25,7 @@ export default function Worktrees() {
   const [erro, setErro] = useState('');
   const [atualizando, setAtualizando] = useState(false);
   const [aberta, setAberta] = useState<string | null>(null);
+  const apagandoJuntadas = useRef(false);
 
   const carregar = useCallback(async (): Promise<WorktreeRepo[] | null> => {
     const alvo = serverRef.current;
@@ -62,11 +63,16 @@ export default function Worktrees() {
 
   const apagarJuntadas = async (repo: string) => {
     const alvo = serverRef.current;
-    if (!alvo) return;
+    // Toque repetido enquanto a primeira chamada corre mandaria o mesmo pedido de novo.
+    if (!alvo || apagandoJuntadas.current) return;
+    apagandoJuntadas.current = true;
     try {
-      await deleteMergedWorktreesForServer(alvo, repo);
+      const removidas = await deleteMergedWorktreesForServer(alvo, repo);
+      removidas.forEach((p) => dropWorktreeStatus(alvo.id, p));
     } catch (e) {
       toast.erro(e instanceof Error ? e.message : String(e));
+    } finally {
+      apagandoJuntadas.current = false;
     }
     await carregar();
   };

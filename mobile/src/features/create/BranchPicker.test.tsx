@@ -3,7 +3,7 @@ import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { describe, expect, it, vi } from 'vitest';
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-vi.mock('react-native', async (original) => ({ ...await original(),
+vi.mock('react-native', async (original) => ({ ...await original<typeof import('react-native')>(),
   Pressable: (p: { accessibilityLabel?: string; onPress?: () => void; children?: unknown }) =>
     createElement('button', { 'aria-label': p.accessibilityLabel, onClick: p.onPress }, p.children as never),
   TextInput: (p: { accessibilityLabel?: string; onChangeText?: (t: string) => void }) =>
@@ -13,7 +13,7 @@ vi.mock('../../paraglide/messages', () => ({
   worktree_nova_branch: ({ base }: { base: string }) => `nova:${base}`, worktree_nome_branch: () => 'nome',
   worktree_base: () => 'base', worktree_modo: () => 'modo', worktree_modo_ajuda: () => 'ajuda',
   native_create_checkout_loading: () => 'lendo', native_create_checkout_failed: ({ reason }: { reason: string }) => `falha:${reason}` }));
-vi.mock('@hangar/core', async (original) => ({ ...await original(),
+vi.mock('@hangar/core', async (original) => ({ ...await original<typeof import('@hangar/core')>(),
   getFolderBranchesForServer: () => Promise.resolve({ current: 'main', branches: ['main', 'x'], remotes: [], dirty: false }) }));
 import { BranchPicker } from './BranchPicker';
 
