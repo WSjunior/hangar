@@ -9,7 +9,7 @@ use std::{
     sync::OnceLock,
 };
 
-/// Ordem de busca: o pedido explícito, o baixado pelo instalador do app e o do sistema.
+/// Ordem de busca: o pedido explícito, o do sistema (a distro o atualiza) e o baixado pelo instalador do app.
 const SYSTEM: [&str; 4] = ["google-chrome-stable", "google-chrome", "chromium", "chromium-browser"];
 
 /// Achado uma vez por processo: roda a cada desenho do menu do painel.
@@ -27,7 +27,6 @@ fn search(explicit: Option<PathBuf>, downloaded: Option<PathBuf>, path: Option<s
     if let Some(bin) = explicit {
         return usable(&bin).then_some(bin.clone()).ok_or_else(|| format!("HANGAR_CHROMIUM aponta para {}, que nao e um executavel", bin.display()));
     }
-    if let Some(bin) = downloaded.filter(|b| usable(b)) { return Ok(bin); }
     let dirs: Vec<PathBuf> = path.map(|p| env::split_paths(&p).collect()).unwrap_or_default();
     for name in SYSTEM {
         for dir in &dirs {
@@ -35,6 +34,7 @@ fn search(explicit: Option<PathBuf>, downloaded: Option<PathBuf>, path: Option<s
             if usable(&bin) && !snap(&bin) { return Ok(bin); }
         }
     }
+    if let Some(bin) = downloaded.filter(|b| usable(b)) { return Ok(bin); }
     Err("nenhum Chrome ou Chromium encontrado (instale o google-chrome ou o chromium, ou rode scripts/install-native.sh)".into())
 }
 
@@ -84,6 +84,12 @@ pub struct Launched {
 }
 
 pub fn spawn(bin: &Path, profile: &Path, scale: f32) -> io::Result<Launched> {
+    // O perfil guarda cookies e sessões logadas: só o dono entra.
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(profile)?;
+        std::fs::set_permissions(profile, std::fs::Permissions::from_mode(0o700))?;
+    }
     let (their_in, writer) = io::pipe()?;
     let (reader, their_out) = io::pipe()?;
     let (fd_in, fd_out) = (their_in.as_raw_fd(), their_out.as_raw_fd());
@@ -126,20 +132,22 @@ mod tests {
     }
 
     #[test]
-    fn search_prefers_explicit_then_downloaded_then_system() {
+    fn search_prefers_explicit_then_system_then_downloaded() {
         let dir = std::env::temp_dir().join(format!("hangar-chromium-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let system = exe(&dir, "chromium");
         let shell = exe(&dir, "chrome-headless-shell");
         let path = Some(dir.clone().into_os_string());
         assert_eq!(search(None, None, path.clone()), Ok(system.clone()));
-        assert_eq!(search(None, Some(shell.clone()), path.clone()), Ok(shell.clone()));
-        assert_eq!(search(Some(system.clone()), Some(shell.clone()), path.clone()), Ok(system.clone()));
+        assert_eq!(search(None, Some(shell.clone()), path.clone()), Ok(system.clone()));
+        assert_eq!(search(None, Some(shell.clone()), None), Ok(shell.clone()));
+        assert_eq!(search(Some(shell.clone()), None, path.clone()), Ok(shell.clone()));
         assert!(search(Some(dir.join("nada")), None, path).is_err());
         assert!(search(None, Some(dir.join("nada")), None).is_err());
-        // O wrapper do Ubuntu em /usr/bin, que só chama o snap, não conta.
+        // O wrapper do Ubuntu em /usr/bin, que só chama o snap, não conta: cai no baixado.
         std::fs::write(&system, "#!/bin/sh\nexec /snap/bin/chromium \"$@\"\n").unwrap();
         assert!(search(None, None, Some(dir.clone().into_os_string())).is_err());
+        assert_eq!(search(None, Some(shell.clone()), Some(dir.clone().into_os_string())), Ok(shell.clone()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

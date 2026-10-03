@@ -101,6 +101,8 @@ pub struct Engine {
     placed: Cell<Option<(Size<Pixels>, f32)>>,
     visible: Cell<bool>,
     pressed: Cell<bool>,
+    /// A página caiu ou se soltou com o Chromium vivo.
+    dead: Rc<Cell<bool>>,
 }
 
 impl Engine {
@@ -119,6 +121,7 @@ impl Starter {
         let long = Duration::from_secs(10);
         let created = browser.call_blocking(None, "Target.createTarget", json!({"url": "about:blank", "newWindow": true}), long)?;
         let target = created["targetId"].as_str().ok_or("createTarget sem targetId")?.to_owned();
+        browser.own(&target, true);
         browser.close_initial();
         let session = Rc::new(Session::attach(&browser, &target)?);
         let window = browser.call_blocking(None, "Browser.getWindowForTarget", json!({"targetId": target}), long)?["windowId"]
@@ -135,16 +138,20 @@ impl Starter {
         let surface = Arc::new(Surface { shown: Mutex::new(None), pending: AtomicBool::new(false), events: events.clone() });
         let sink = surface.clone();
         browser.sink(session.id(), Box::new(move |params| sink.frame(params)));
-        let publish = listen(&session, &target, &state, &events, &self.executor);
+        let dead = Rc::new(Cell::new(false));
+        let publish = listen(&session, &target, &state, &events, &self.executor, &dead);
         Ok(Engine {
-            session, publish, target, window, decoration, executor: self.executor, surface,
+            session, publish, target, window, decoration, executor: self.executor, surface, dead,
             placed: Cell::new(None), visible: Cell::new(false), pressed: Cell::new(false),
         })
     }
 }
 
 /// Estado da barra (endereço, título, carregando, voltar/avançar), diálogos e janelas novas.
-fn listen(session: &Rc<Session>, target: &str, state: &Rc<RefCell<model::PageState>>, events: &async_channel::Sender<Event>, executor: &ForegroundExecutor) -> Publish {
+fn listen(
+    session: &Rc<Session>, target: &str, state: &Rc<RefCell<model::PageState>>, events: &async_channel::Sender<Event>, executor: &ForegroundExecutor,
+    dead: &Rc<Cell<bool>>,
+) -> Publish {
     let publish: Publish = {
         let (state, events) = (state.clone(), events.clone());
         Rc::new(move |edit: &dyn Fn(&mut model::PageState)| {
@@ -194,13 +201,16 @@ fn listen(session: &Rc<Session>, target: &str, state: &Rc<RefCell<model::PageSta
         drop(session.call("Fetch.failRequest", json!({"requestId": id, "errorReason": "BlockedByClient"})));
         if params["frameId"] == m.as_str() { p(&|page| page.error = Some(crate::i18n::tr("browser_blocked").replace("{url}", &url))); }
     });
-    // Sem resposta o diálogo trava a página: no app não há quem o veja.
+    // Sem resposta o diálogo trava a página, e no app não há quem o veja: `alert` e `beforeunload` passam, mas
+    // `confirm`/`prompt` são recusados, para nada ser confirmado sem alguém ter lido.
     let weak = Rc::downgrade(session);
     let _ = session.on("Page.javascriptDialogOpening", move |params| {
-        eprintln!("[nav] dialogo {} aceito: {}", params["type"], params["message"]);
+        let kind = params["type"].as_str().unwrap_or("");
+        let accept = matches!(kind, "alert" | "beforeunload");
+        let message: String = params["message"].as_str().unwrap_or("").chars().take(200).collect();
+        eprintln!("[nav] dialogo {kind} {}: {message}", if accept { "aceito" } else { "recusado" });
         let Some(session) = weak.upgrade() else { return };
-        let answer = json!({"accept": true, "promptText": params["defaultPrompt"].as_str().unwrap_or("")});
-        drop(session.call("Page.handleJavaScriptDialog", answer));
+        drop(session.call("Page.handleJavaScriptDialog", json!({"accept": accept})));
     });
     let (p, m) = (publish.clone(), main.clone());
     session.watch("Target.targetInfoChanged", move |params| {
@@ -212,27 +222,44 @@ fn listen(session: &Rc<Session>, target: &str, state: &Rc<RefCell<model::PageSta
             p(&|page| page.title = title.clone());
         }
     });
-    // O nativo não tem abas: link com `target=_blank` e `window.open` abrem nesta mesma página.
-    let (weak, m, opened) = (Rc::downgrade(session), main.clone(), Rc::new(RefCell::new(HashSet::<String>::new())));
+    // O nativo não tem abas: link com `target=_blank` e `window.open` abrem nesta mesma página. Página que nenhum
+    // navegador do app abriu (popup `noopener`, sem dono) fecha: sem painel, ninguém veria o JS dela rodando.
+    let (weak, m, closing) = (Rc::downgrade(session), main.clone(), Rc::new(RefCell::new(HashSet::<String>::new())));
     for event in ["Target.targetCreated", "Target.targetInfoChanged"] {
-        let (weak, m, opened) = (weak.clone(), m.clone(), opened.clone());
+        let (weak, m, closing) = (weak.clone(), m.clone(), closing.clone());
         session.watch(event, move |params| {
             let info = &params["targetInfo"];
-            let (Some(id), Some(url)) = (info["targetId"].as_str(), info["url"].as_str()) else { return };
-            if info["openerId"] != m.as_str() || info["type"] != "page" || url.is_empty() || url == "about:blank" { return; }
-            if !opened.borrow_mut().insert(id.to_owned()) { return; }
+            let Some(id) = info["targetId"].as_str() else { return };
             let Some(session) = weak.upgrade() else { return };
-            drop(session.call("Page.navigate", json!({"url": url})));
-            drop(session.browser().call(None, "Target.closeTarget", json!({"targetId": id})));
+            let browser = session.browser();
+            if info["type"] != "page" || browser.owns(id) { return; }
+            let (opener, url) = (info["openerId"].as_str().unwrap_or(""), info["url"].as_str().unwrap_or(""));
+            let mine = opener == m;
+            // Aberta por esta página: espera o endereço chegar. Por outra do app: o navegador dela cuida.
+            if (mine && (url.is_empty() || url == "about:blank")) || (!mine && browser.owns(opener)) { return; }
+            if !closing.borrow_mut().insert(id.to_owned()) { return; }
+            if mine { drop(session.call("Page.navigate", json!({"url": url}))); }
+            drop(browser.call(None, "Target.closeTarget", json!({"targetId": id})));
         });
     }
+    session.watch("Target.targetDestroyed", move |params| { if let Some(id) = params["targetId"].as_str() { closing.borrow_mut().remove(id); } });
     let p = publish.clone();
     session.watch(CLOSED, move |_| p(&|page| { page.loading = false; page.error = Some("o Chromium fechou; feche e abra o navegador".into()); }));
+    // A página caiu com o Chromium vivo: sem isto o painel congela no último quadro, calado.
+    for (event, key, id) in [("Target.targetCrashed", "targetId", main.clone()), ("Target.detachedFromTarget", "sessionId", session.id().to_owned())] {
+        let (weak, p, dead) = (Rc::downgrade(session), publish.clone(), dead.clone());
+        session.watch(event, move |params| {
+            if params[key] != id.as_str() { return; }
+            dead.set(true);
+            if let Some(session) = weak.upgrade() { session.fail_pending(); }
+            p(&|page| { page.loading = false; page.error = Some("a pagina caiu; abra o endereco de novo".into()); });
+        });
+    }
     publish
 }
 
 impl Engine {
-    pub fn alive(&self) -> bool { self.session.browser().alive() }
+    pub fn alive(&self) -> bool { self.session.browser().alive() && !self.dead.get() }
 
     /// A sessão do painel, para o controlador do hangar-preview.
     pub fn cdp(&self) -> Rc<Session> { self.session.clone() }
@@ -339,6 +366,7 @@ impl Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
+        self.session.browser().own(&self.target, false);
         drop(self.session.browser().call(None, "Target.closeTarget", json!({"targetId": self.target})));
     }
 }

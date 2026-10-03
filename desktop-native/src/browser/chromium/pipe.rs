@@ -2,7 +2,7 @@
 //! Respostas voltam direto da thread de leitura; eventos são entregues na thread da interface, como no WebView2.
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     future::Future,
     io::{BufRead, BufReader, Write},
     path::Path,
@@ -30,7 +30,8 @@ pub type Sink = Box<dyn Fn(&Value) + Send>;
 struct Wire {
     writer: Mutex<std::io::PipeWriter>,
     next: AtomicU64,
-    pending: Mutex<HashMap<u64, Box<dyn FnOnce(Reply) + Send>>>,
+    /// id → (sessão, quem espera).
+    pending: Mutex<HashMap<u64, (Option<String>, Box<dyn FnOnce(Reply) + Send>)>>,
     /// Quadro de screencast por sessão, tratado antes de chegar à interface.
     sinks: Mutex<HashMap<String, Sink>>,
 }
@@ -40,13 +41,19 @@ impl Wire {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let mut message = json!({"id": id, "method": method, "params": params});
         if let Some(session) = session { message["sessionId"] = session.into(); }
-        if let Some(done) = done { lock(&self.pending).insert(id, done); }
+        if let Some(done) = done { lock(&self.pending).insert(id, (session.map(str::to_owned), done)); }
         let mut bytes = message.to_string().into_bytes();
         bytes.push(0);
         if let Err(e) = lock(&self.writer).write_all(&bytes) {
             // Sem o pipe não haverá resposta: quem espera recebe o erro agora.
-            if let Some(done) = lock(&self.pending).remove(&id) { done(Err(format!("o Chromium fechou: {e}"))); }
+            if let Some((_, done)) = lock(&self.pending).remove(&id) { done(Err(format!("o Chromium fechou: {e}"))); }
         }
+    }
+
+    /// Sessão que caiu não responde o que já estava em curso: quem espera por ela recebe o erro agora.
+    fn fail(&self, session: &str) {
+        let gone: Vec<_> = lock(&self.pending).extract_if(|_, (s, _)| s.as_deref() == Some(session)).collect();
+        for (_, (_, done)) in gone { done(Err("a pagina fechou".into())); }
     }
 }
 
@@ -69,6 +76,8 @@ pub struct Browser {
     watchers: RefCell<HashMap<String, Vec<(String, Handler)>>>,
     /// Abas que o Chromium abre sozinho ao nascer; o primeiro navegador as fecha.
     initial: RefCell<Vec<String>>,
+    /// Páginas que os navegadores do app abriram; qualquer outra é janela que a página abriu.
+    owned: RefCell<HashSet<String>>,
     alive: std::cell::Cell<bool>,
     _drain: RefCell<Option<Task<()>>>,
 }
@@ -103,7 +112,7 @@ impl Browser {
             .map_err(|e| e.to_string())?;
         let browser = Rc::new(Browser {
             wire, child: RefCell::new(launched.child), handlers: RefCell::default(), watchers: RefCell::default(),
-            initial: RefCell::default(), alive: std::cell::Cell::new(true), _drain: RefCell::new(None),
+            initial: RefCell::default(), owned: RefCell::default(), alive: std::cell::Cell::new(true), _drain: RefCell::new(None),
         });
         let weak = Rc::downgrade(&browser);
         *browser._drain.borrow_mut() = Some(executor.spawn(async move {
@@ -125,6 +134,12 @@ impl Browser {
     }
 
     pub fn alive(&self) -> bool { self.alive.get() }
+
+    pub fn own(&self, target: &str, owned: bool) {
+        if owned { self.owned.borrow_mut().insert(target.to_owned()); } else { self.owned.borrow_mut().remove(target); }
+    }
+
+    pub fn owns(&self, target: &str) -> bool { self.owned.borrow().contains(target) }
 
     /// Fecha as abas que nasceram com o processo, depois que já existe outra (sem nenhuma o Chromium sairia).
     pub fn close_initial(&self) {
@@ -190,7 +205,13 @@ pub const CLOSED: &str = "Hangar.closed";
 
 impl Drop for Browser {
     fn drop(&mut self) {
+        // Saída limpa primeiro: o perfil é persistente, e o SIGKILL perde cookies e localStorage ainda não gravados.
+        self.wire.send(None, "Browser.close", json!({}), None);
         let mut child = self.child.borrow_mut();
+        for _ in 0..40 {
+            if !matches!(child.try_wait(), Ok(None)) { return; }
+            std::thread::sleep(Duration::from_millis(50));
+        }
         let _ = child.kill();
         let _ = child.wait();
     }
@@ -210,13 +231,13 @@ fn read(reader: std::io::PipeReader, wire: &Wire, events: &async_channel::Sender
         let Ok(message) = serde_json::from_slice::<Value>(&buffer) else { continue };
         route(message, wire, events);
     }
-    for (_, done) in lock(&wire.pending).drain() { done(Err("o Chromium fechou".into())); }
+    for (_, (_, done)) in lock(&wire.pending).drain() { done(Err("o Chromium fechou".into())); }
     events.close();
 }
 
 fn route(message: Value, wire: &Wire, events: &async_channel::Sender<Value>) {
     if let Some(id) = message["id"].as_u64() {
-        if let Some(done) = lock(&wire.pending).remove(&id) { done(reply_of(&message)); }
+        if let Some((_, done)) = lock(&wire.pending).remove(&id) { done(reply_of(&message)); }
         return;
     }
     if message["method"] == "Page.screencastFrame"
@@ -246,6 +267,9 @@ impl Session {
 
     pub fn id(&self) -> &str { &self.id }
     pub fn browser(&self) -> &Rc<Browser> { &self.browser }
+
+    /// O alvo caiu ou a sessão se soltou: as chamadas em curso recebem erro em vez de esperar para sempre.
+    pub fn fail_pending(&self) { self.browser.wire.fail(&self.id); }
 
     pub fn call(&self, method: &str, params: Value) -> impl Future<Output = Reply> + use<> {
         self.browser.call(Some(&self.id), method, params)
@@ -307,6 +331,20 @@ mod tests {
         assert_eq!(rx.recv().unwrap(), Ok(json!({"v": 1})));
         route(json!({"method": "Page.frameNavigated", "sessionId": "S", "params": {}}), &wire, &events);
         assert_eq!(received.try_recv().unwrap()["method"], "Page.frameNavigated");
+    }
+
+    #[test]
+    fn a_dropped_session_fails_only_its_own_calls() {
+        let (wire, _reader) = wire();
+        let (tx, rx) = mpsc::channel();
+        for s in [Some("S"), Some("T"), None] {
+            let tx = tx.clone();
+            wire.send(s, "A", json!({}), Some(Box::new(move |r| tx.send((s, r)).unwrap())));
+        }
+        wire.fail("S");
+        assert_eq!(rx.try_recv().unwrap(), (Some("S"), Err("a pagina fechou".into())));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(lock(&wire.pending).len(), 2);
     }
 
     #[test]
