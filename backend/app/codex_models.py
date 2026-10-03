@@ -17,6 +17,8 @@ do Codex por HTTP" em docs/decisoes/harnesses.md.
 
 Cache pelo motivo do pi_catalog: a lista muda de mês em mês.
 """
+import json
+import copy
 import hashlib
 import logging
 import time
@@ -61,9 +63,13 @@ def invalidar(codex_home: str | Path | None = None) -> None:
     if not isinstance(_cache, dict):
         _cache = {}
     if codex_home is None:
+        _raw_catalogs.clear()
         _cache.clear()
         return
     raiz = _cache_key(codex_home)[0]
+    for key in list(_raw_catalogs):
+        if key[0][0] == raiz:
+            _raw_catalogs.pop(key, None)
     for key in list(_cache):
         if key[0] == raiz:
             _cache.pop(key, None)
@@ -127,6 +133,7 @@ def _listar_http(raiz: Path) -> list[dict] | None:
         brutos = corpo.get("models") if status == 200 and isinstance(corpo, dict) else None
         if not isinstance(brutos, list):
             raise CodexIndisponivel(f"http {status}")
+        _raw_catalogs[(_cache_key(raiz), versao)] = (time.monotonic(), copy.deepcopy(brutos))
         data = []
         # O app-server ordena por `priority`; sem isso o primeiro da tela mudaria.
         for m in sorted((m for m in brutos if isinstance(m, dict)),
@@ -199,3 +206,46 @@ def checar_escolha(model: str | None, effort: str | None, *,
                                  f"(use um de {', '.join(m['efforts']) or 'nenhum'})")
             return
     raise ValueError(f"modelo fora do catalogo do Codex: {model}")
+
+
+# O catálogo de UI perde campos necessários para provar capacidade.
+_raw_catalogs: dict[tuple, tuple[float, list[dict]]] = {}
+
+
+def raw_model(codex_home: str | Path, effective_config: dict, slug: str,
+              version: str) -> dict:
+    """Metadado completo, ligado à conta, à configuração efetiva e ao CLI."""
+    root = Path(codex_home).expanduser().resolve(strict=False)
+    local = effective_config.get("model_catalog_json")
+    if local:
+        path = Path(local)
+        if not path.is_absolute():
+            raise CodexRespostaInvalida("session_transfer_model_capacity_unknown")
+        try:
+            catalog = json.loads(path.read_text(encoding="utf-8"))
+            models = catalog["models"]
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise CodexRespostaInvalida("session_transfer_model_capacity_unknown") from exc
+    else:
+        if (effective_config.get("model_provider") not in (None, "openai")
+                or effective_config.get("chatgpt_base_url")
+                or (effective_config.get("model_providers") or {}).get("openai")):
+            raise CodexRespostaInvalida("session_transfer_model_capacity_unknown")
+        key = (_cache_key(root), version)
+        cached = _raw_catalogs.get(key)
+        if cached and time.monotonic() - cached[0] < _TTL:
+            models = cached[1]
+        else:
+            status, payload = codex_appserver.backend_get(
+                f"/codex/models?client_version={urllib.parse.quote(version)}", codex_home=root)
+            if status != 200 or not isinstance(payload, dict):
+                raise CodexRespostaInvalida("session_transfer_model_capacity_unknown")
+            models = payload.get("models")
+            if isinstance(models, list):
+                _raw_catalogs[key] = (time.monotonic(), copy.deepcopy(models))
+    if not isinstance(models, list):
+        raise CodexRespostaInvalida("session_transfer_model_capacity_unknown")
+    matches = [m for m in models if isinstance(m, dict) and m.get("slug") == slug]
+    if len(matches) != 1 or matches[0].get("used_fallback_model_metadata"):
+        raise CodexRespostaInvalida("session_transfer_model_capacity_unknown")
+    return copy.deepcopy(matches[0])

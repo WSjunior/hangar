@@ -318,7 +318,10 @@ def main() -> int:
     ap.add_argument("--codex-account", default="default", help=argparse.SUPPRESS)
     ap.add_argument("--approval-policy", choices=("never", "on-request"), default=None)
     ap.add_argument("--sandbox", choices=("read-only", "workspace-write", "danger-full-access"), default=None)
+    ap.add_argument("--tool-output-token-limit", type=int, default=None)
     args = ap.parse_args()
+    if args.tool_output_token_limit is not None and args.tool_output_token_limit <= 0:
+        ap.error("--tool-output-token-limit precisa ser positivo")
     if not args.name:
         print("hangar-codex-tui: --name (ou CP_SESSION_NAME) e obrigatorio", file=sys.stderr)
         return 2
@@ -332,7 +335,15 @@ def main() -> int:
     _com_websockets()
     sys.path.insert(0, str(_REPO / "backend"))
     from app.adapters.codex import sessions as codex_sessions
-    from app.adapters.codex.lancador import APPROVAL, SANDBOX
+    from app.adapters.codex.lancador import APPROVAL, SANDBOX, tool_output_override
+    existing = codex_sessions.load(args.name)
+    imported_resume = bool(existing and existing.get("transfer_id") and existing.get("thread_id") == args.resume)
+    if existing and existing.get("thread_id") == args.resume:
+        if args.tool_output_token_limit is None:
+            args.tool_output_token_limit = existing.get("tool_output_token_limit")
+        if existing.get("transfer_id"):
+            args.model = args.model or existing.get("model")
+            args.effort = args.effort if args.effort is not None else existing.get("effort")
     approval = args.approval_policy or APPROVAL
     sandbox = args.sandbox or SANDBOX
     from app import codex_contas
@@ -347,7 +358,7 @@ def main() -> int:
     os.environ.clear()
     os.environ.update(ambiente)
 
-    if not account.is_default:
+    if not account.is_default and not imported_resume:
         try:
             print("hangar-codex-tui: sincronizando a conta Codex…", file=sys.stderr)
             resultado = _preparar_conta_codex(account.id, cwd)
@@ -364,15 +375,16 @@ def main() -> int:
     # Falha (override pessoal, config.toml ilegível) não impede a TUI: fica sem alias e sem limite maior.
     codex_home = selected_home
     limite = LIMITE_INSTRUCOES
-    print("hangar-codex-tui: preparando as instruções do Codex…", file=sys.stderr)
-    if account.is_default:
+    if not imported_resume:
+        print("hangar-codex-tui: preparando as instruções do Codex…", file=sys.stderr)
+    if account.is_default and not imported_resume:
         try:
             preparar_instrucoes(Path.home(), codex_home, Path(cwd))
             limite = limite_instrucoes(codex_home)
         except Exception as exc:                          # noqa: BLE001
             print(f"hangar-codex-tui: instruções nativas não preparadas ({exc}); a sessão abre assim mesmo",
                   file=sys.stderr)
-    else:
+    elif not imported_resume:
         try:
             preparar_projeto(codex_home, Path(cwd))
             limite = limite_instrucoes(codex_home)
@@ -382,7 +394,7 @@ def main() -> int:
 
     # A sessão lê a configuração já reconciliada; quem reconcilia é o BACKEND (um executor só, e
     # uma instalação longa termina lá) — aqui só se avisa e se espera um pouco. Falha não impede a TUI.
-    if account.is_default:
+    if account.is_default and not imported_resume:
         try:
             print("hangar-codex-tui: verificando a integração do Codex…", file=sys.stderr)
             resultado = _integracao_codex()
@@ -403,14 +415,17 @@ def main() -> int:
     # arquivo temporario: PIPE sem consumidor encheria numa sessao longa, e DEVNULL jogaria fora
     # justamente a mensagem que explica uma largada que falhou.
     erros = tempfile.TemporaryFile()
+    # O preparo conferiu a configuração da conta; a retomada não amplia as instruções.
+    instruction_overrides = [] if imported_resume else ["-c", f"project_doc_max_bytes={limite}"]
 
     def subir_servidor() -> subprocess.Popen:
         try:
             return subprocess.Popen(
                 # Sandbox e aprovacao tambem no SERVIDOR: o thread/resume que a TUI faz ao reconectar
                 # nao repassa as flags dela, e a conversa caia em `Workspace` com aprovacao.
-                [_codex(), "app-server", "--listen", endpoint, "-c", f"project_doc_max_bytes={limite}",
-                 "-c", f'sandbox_mode="{sandbox}"', "-c", f'approval_policy="{approval}"'],
+                [_codex(), "app-server", "--listen", endpoint, *instruction_overrides,
+                 "-c", f'sandbox_mode="{sandbox}"', "-c", f'approval_policy="{approval}"',
+                 *tool_output_override(args.tool_output_token_limit)],
                 stdout=subprocess.DEVNULL, stderr=erros,
             )
         except (OSError, SystemExit) as exc:
@@ -432,13 +447,15 @@ def main() -> int:
             if existing and existing.get("key") and existing.get("thread_id") == args.resume == thread_id:
                 codex_sessions.update(args.name, headless=False, cano=None,
                                       endpoint=endpoint, app_pid=servidor.pid, launcher_pid=os.getpid(),
-                                      model=args.model, effort=args.effort, rollout_path=rollout)
+                                      model=args.model, effort=args.effort, rollout_path=rollout,
+                                      tool_output_token_limit=args.tool_output_token_limit)
             else:
                 codex_sessions.save(args.name, thread_id, rollout, cwd,
                                 model=args.model, effort=args.effort,
                                 endpoint=endpoint, app_pid=servidor.pid,
                                 codex_home=str(codex_home),
-                                codex_account=args.codex_account)
+                                codex_account=args.codex_account,
+                                tool_output_token_limit=args.tool_output_token_limit)
         elif thread_id != previous_thread and thread is not None:
             codex_sessions.switch_thread(args.name, thread, previous_thread,
                                          endpoint=endpoint, app_pid=servidor.pid)

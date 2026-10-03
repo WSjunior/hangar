@@ -17,7 +17,7 @@ from app import codex_contas, runtime_config
 from app.adapters.claude_headless import adapter as hl_adapter
 from app.adapters.codex import sessions as codex_sessions
 from app.adapters.codex.appserver import AppServerClient
-from app.adapters.codex.lancador import CLIENT_INFO
+from app.adapters.codex.lancador import CLIENT_INFO, tool_output_override
 
 
 class Ocupada(RuntimeError):
@@ -88,7 +88,8 @@ def modos_para_tela(atual: str | None) -> dict:
 def argv(meta: dict) -> list[str]:
     approval, sandbox = politica(meta.get("permission_mode"))
     return ["codex", "app-server", "--stdio",
-            "-c", f'sandbox_mode="{sandbox}"', "-c", f'approval_policy="{approval}"']
+            "-c", f'sandbox_mode="{sandbox}"', "-c", f'approval_policy="{approval}"',
+            *tool_output_override(meta.get("tool_output_token_limit"))]
 
 
 def _ambiente(meta: dict) -> dict:

@@ -22,10 +22,13 @@ pytestmark = pytest.mark.skipif(os.name == "nt", reason="socket unix")
 # aprovação de comando, thread/read.
 _CODEX_FALSO = r'''#!/usr/bin/env python3
 import json, sys
+with open("server-starts.jsonl", "a") as recorded:
+    recorded.write(json.dumps(sys.argv[1:]) + "\n")
 def out(o):
     sys.stdout.write(json.dumps(o) + "\n"); sys.stdout.flush()
 iniciado = False
 status = "idle"
+effort = None
 for linha in sys.stdin:
     ev = json.loads(linha)
     m = ev.get("method")
@@ -40,8 +43,11 @@ for linha in sys.stdin:
     elif m == "thread/resume":
         with open("resume.txt", "w") as f:
             f.write(json.dumps(ev["params"]))
+        with open("resume-history.jsonl", "a") as f:
+            f.write(json.dumps(ev["params"]) + "\n")
         out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": ev["params"]["threadId"]}, "model": "gpt-falso"}})
     elif m == "thread/settings/update":
+        effort = ev["params"].get("effort")
         with open("settings.txt", "w") as f:
             f.write(json.dumps(ev["params"]))
         if ev["params"].get("effort") == "recusado":
@@ -49,7 +55,7 @@ for linha in sys.stdin:
         else:
             out({"jsonrpc": "2.0", "id": ev["id"], "result": {}})
     elif m == "thread/read":
-        out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": "th-1", "status": {"type": status}, "turns": []}}})
+        out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": "th-1", "model": "gpt-falso", "reasoningEffort": effort, "status": {"type": status}, "turns": []}}})
     elif m == "turn/start":
         status = "active"
         with open("turno.txt", "w") as f:
@@ -372,3 +378,33 @@ def test_politica_por_modo():
     assert 'approval_policy="never"' in sem_terminal.argv({"permission_mode": "Full Access"})
 
 
+
+def test_transferred_stdio_budget_survives_restart_and_resume(ambiente):
+    async def body():
+        adapter = CodexAdapter()
+        _sidecar("imported", ambiente, model="gpt-falso", effort="high",
+                 transfer_id="transfer", tool_output_token_limit=144000)
+        codex_sessions.update("imported", thread_id="th-1")
+        try:
+            assert await adapter.ensure_running("imported") is not None
+            await adapter.restart("imported")
+            starts = [json.loads(line) for line in (ambiente / "server-starts.jsonl").read_text().splitlines()]
+            resumes = [json.loads(line) for line in (ambiente / "resume-history.jsonl").read_text().splitlines()]
+            assert len(starts) == len(resumes) == 2
+            assert all("tool_output_token_limit=144000" in args for args in starts)
+            assert all(params["threadId"] == "th-1" for params in resumes)
+            meta = codex_sessions.load("imported")
+            assert meta["tool_output_token_limit"] == 144000 and meta["transfer_id"] == "transfer"
+            assert not (ambiente / "turno.txt").exists()
+        finally:
+            adapter.close_sync("imported")
+    asyncio.run(body())
+
+
+def test_stdio_budget_is_optional_and_validated():
+    argv = sem_terminal.argv({"permission_mode": "Full Access", "tool_output_token_limit": 144000})
+    assert argv[:3] == ["codex", "app-server", "--stdio"]
+    assert "tool_output_token_limit=144000" in argv
+    assert not any("tool_output_token_limit" in arg for arg in sem_terminal.argv({}))
+    with pytest.raises(ValueError):
+        sem_terminal.argv({"tool_output_token_limit": True})

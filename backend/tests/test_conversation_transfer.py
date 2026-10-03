@@ -395,3 +395,33 @@ def test_registry_prepared_thread_without_published_marker_keeps_origin(tmp_path
     registry._decorate_transfers(infos)
     assert len(infos) == 1 and infos[0].provider == "claude"
     assert infos[0].transfer_id == record.id and infos[0].lifecycle_id == "t:100"
+
+
+def test_boundary_digest_roundtrips_and_legacy_missing_digest_is_accepted(tmp_path):
+    record = sample_record(tmp_path)
+    record = replace(record, boundary=replace(record.boundary, prefix_digest="a" * 64))
+    store.save_transfer(record)
+    assert store.load_transfer(record.id).boundary.prefix_digest == "a" * 64
+    path = store._record_path(record.id)
+    legacy = json.loads(path.read_text())
+    legacy["boundary"].pop("prefix_digest")
+    path.write_text(json.dumps(legacy))
+    assert store.load_transfer(record.id).boundary.prefix_digest is None
+
+
+@pytest.mark.parametrize("digest", ["short", "z" * 64, 1])
+def test_boundary_rejects_invalid_digest(tmp_path, digest):
+    record = sample_record(tmp_path)
+    with pytest.raises(ValueError, match="digest da fronteira"):
+        store.save_transfer(replace(record, boundary=replace(record.boundary, prefix_digest=digest)))
+
+
+def test_transfer_error_has_one_safe_public_contract():
+    from app.adapters.codex.transfer import TransferError as importer_error
+    assert importer_error is store.TransferError
+    error = store.TransferError("session_transfer_model_capacity_unknown", status=422,
+                                params={"model": "test-model"})
+    assert (error.code, error.status, error.params) == (
+        "session_transfer_model_capacity_unknown", 422, {"model": "test-model"})
+    with pytest.raises(ValueError):
+        store.TransferError("session_transfer_failed", params={"payload": "private"})

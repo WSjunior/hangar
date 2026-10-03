@@ -139,7 +139,8 @@ def save(name: str, thread_id: str | None, rollout_path: str, cwd: str,
     with _locked(name):
         previous = load(name) or {}
         same_thread = previous.get("thread_id") == thread_id
-        for field in ("key", "transfer_id", "tool_output_token_limit", "codex_home", "codex_account"):
+        for field in ("key", "transfer_id", "tool_output_token_limit", "codex_home", "codex_account",
+                      "permission_mode", "jev"):
             if field not in meta and field in previous and (field == "key" or same_thread):
                 meta[field] = previous[field]
         _write(name, meta)

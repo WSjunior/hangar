@@ -20,6 +20,26 @@ from app import atomico
 from app.share_life import session_life
 
 
+class TransferError(ValueError):
+    """Erro público da troca; os parâmetros nunca carregam conversa/configuração."""
+
+    def __init__(self, code: str, *, status: int = 409,
+                 params: dict[str, str | int] | None = None):
+        if not isinstance(code, str) or not code.startswith("session_transfer_") \
+                or not all(c.islower() or c == "_" or c.isdigit() for c in code):
+            raise ValueError("código de transferência inválido")
+        if type(status) is not int or not 400 <= status <= 599:
+            raise ValueError("status de transferência inválido")
+        allowed = {"model", "effort", "account", "phase", "limit", "estimated"}
+        if params is not None and (not isinstance(params, dict) or set(params) - allowed
+                or any(type(v) not in (str, int) or
+                       (isinstance(v, str) and (len(v) > 200 or "\n" in v or "\r" in v))
+                       for v in params.values())):
+            raise ValueError("parâmetros públicos de transferência inválidos")
+        self.code, self.status, self.params = code, status, dict(params or {})
+        super().__init__(code)
+
+
 class TransferPhase(StrEnum):
     PREPARING = "preparing"
     SOURCE_STOPPED = "source_stopped"
@@ -46,6 +66,7 @@ class ImportBoundary:
     rollout_path: str
     min_offset: int
     imported_item_ids: tuple[str, ...]
+    prefix_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -197,11 +218,19 @@ def _decode(value: object) -> TransferRecord:
                                     _strings(s["selected_uuids"]))
     boundary = None
     if data["boundary"] is not None:
-        b = _object(data["boundary"], {"thread_id", "rollout_path", "min_offset", "imported_item_ids"})
+        if not isinstance(data["boundary"], dict):
+            raise ValueError("fronteira de importação inválida")
+        b = _object({"prefix_digest": None, **data["boundary"]},
+                    {"thread_id", "rollout_path", "min_offset", "imported_item_ids", "prefix_digest"})
+        prefix_digest = b["prefix_digest"]
+        if prefix_digest is not None and (not isinstance(prefix_digest, str)
+                or len(prefix_digest) != 64
+                or any(c not in "0123456789abcdef" for c in prefix_digest)):
+            raise ValueError("digest da fronteira inválido")
         if type(b["min_offset"]) is not int or b["min_offset"] < 0:
             raise ValueError("fronteira de importação inválida")
         boundary = ImportBoundary(_string(b["thread_id"]), _string(b["rollout_path"]),
-                                  b["min_offset"], _strings(b["imported_item_ids"]))
+                                  b["min_offset"], _strings(b["imported_item_ids"]), prefix_digest)
     error = None if data["error_code"] is None else _string(data["error_code"])
     destination = None if data["destination_meta"] is None else _metadata(data["destination_meta"])
     if boundary and destination and destination.get("thread_id") not in (None, boundary.thread_id):

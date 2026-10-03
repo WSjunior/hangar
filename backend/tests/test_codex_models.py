@@ -352,3 +352,41 @@ def test_listar_usa_o_http_antes_do_app_server(monkeypatch, tmp_path):
     monkeypatch.setattr(cm, "_listar_http", lambda raiz: [{"id": "x"}])
     monkeypatch.setattr(cx, "perguntar", lambda *a, **kw: pytest.fail("app-server chamado"))
     assert cm.listar(fresco=True, codex_home=tmp_path) == [{"id": "x"}]
+
+
+def test_raw_catalog_is_separate_from_ui_and_scoped_to_account_version_config(tmp_path, monkeypatch):
+    cm._raw_catalogs.clear()
+    calls = []
+    def backend_get(path, *, codex_home):
+        calls.append((path, codex_home))
+        return 200, {"models": [{"slug": "model", "context_window": 272000,
+                                "input_modalities": ["text", "image"]}]}
+    monkeypatch.setattr(cx, "backend_get", backend_get)
+    first = tmp_path / "one"
+    first.mkdir()
+    raw = cm.raw_model(first, {}, "model", "0.159.3")
+    raw["context_window"] = 1
+    assert cm.raw_model(first, {}, "model", "0.159.3")["context_window"] == 272000
+    assert len(calls) == 1
+    cm.raw_model(tmp_path / "two", {}, "model", "0.159.3")
+    cm.raw_model(first, {}, "model", "0.159.4")
+    (first / "config.toml").write_text('model = "model"\n')
+    cm.raw_model(first, {}, "model", "0.159.3")
+    assert len(calls) == 4
+
+
+def test_raw_catalog_does_not_use_minicatalog_or_custom_provider_defaults(tmp_path, monkeypatch):
+    monkeypatch.setattr(cm, "listar", lambda **kw: pytest.fail("catálogo de UI não comprova capacidade"))
+    monkeypatch.setattr(cx, "backend_get", lambda *a, **kw: pytest.fail("outro provedor"))
+    with pytest.raises(cm.CodexRespostaInvalida, match="capacity_unknown"):
+        cm.raw_model(tmp_path, {"model_provider": "custom"}, "model", "0.159.3")
+
+
+def test_explicit_local_catalog_matches_exact_model(tmp_path, monkeypatch):
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text(json.dumps({"models": [{"slug": "exact", "context_window": 12345}]}))
+    monkeypatch.setattr(cx, "backend_get", lambda *a, **kw: pytest.fail("catálogo local selecionado"))
+    config = {"model_catalog_json": str(catalog), "model_provider": "local"}
+    assert cm.raw_model(tmp_path, config, "exact", "0.159.3")["context_window"] == 12345
+    with pytest.raises(cm.CodexRespostaInvalida, match="capacity_unknown"):
+        cm.raw_model(tmp_path, config, "unknown", "0.159.3")

@@ -723,14 +723,28 @@ class CodexAdapter:
             if meta.get("codex_account"):
                 home_kw["codex_account"] = meta["codex_account"]
             try:
-                endpoint = await client.start_shared(**home_kw)
+                endpoint = await client.start_shared(
+                    **({"codex_home": meta["codex_home"]} if meta.get("codex_home") else {}),
+                    **({"tool_output_token_limit": meta["tool_output_token_limit"]}
+                       if meta.get("tool_output_token_limit") is not None else {}))
                 await client.request("initialize", {"clientInfo": CLIENT_INFO, "capabilities": {"experimentalApi": True}})
+                approval, sandbox = sem_terminal.politica(meta.get("permission_mode"))
                 result = await client.request("thread/resume", {
                     "threadId": meta["thread_id"],
                     "cwd": meta.get("cwd"),
-                    "sandbox": SANDBOX,
-                    "approvalPolicy": APPROVAL,
+                    "sandbox": sandbox,
+                    "approvalPolicy": approval,
                 })
+                if meta.get("transfer_id"):
+                    await client.request("thread/settings/update", {
+                        "threadId": meta["thread_id"], "model": meta.get("model"),
+                        "effort": meta.get("effort")})
+                    confirmed = (await client.request("thread/read", {
+                        "threadId": meta["thread_id"], "includeTurns": False})).get("thread") or {}
+                    if (confirmed.get("id") != meta["thread_id"]
+                            or confirmed.get("model") != meta.get("model")
+                            or confirmed.get("reasoningEffort") != meta.get("effort")):
+                        raise RuntimeError("session_transfer_native_settings_mismatch")
             except Exception:
                 # resume falhou (app-server morreu, thread perdido, etc.): nao deixa o subprocess orfao.
                 await client.close()
@@ -829,7 +843,7 @@ class CodexAdapter:
                         try:
                             result = await client.request("thread/resume", retomada)
                         except RuntimeError as exc:
-                            if "Model provider" not in str(exc) or "not found" not in str(exc):
+                            if meta.get("transfer_id") or "Model provider" not in str(exc) or "not found" not in str(exc):
                                 raise
                             # A conversa guarda o provedor em que nasceu; se ele saiu da config, o
                             # resume recusa e o histórico ficaria preso. Volta pro provedor nativo.
@@ -839,7 +853,7 @@ class CodexAdapter:
                     except RuntimeError as exc:
                         # Thread aberta por RPC que nunca teve turno não tem rollout, e o resume
                         # a recusa: nada a perder, abre outra.
-                        if "no rollout found" not in str(exc):
+                        if meta.get("transfer_id") or "no rollout found" not in str(exc):
                             raise
                         _log.info("codex sem terminal: thread %s sem rollout — abrindo outra name=%s",
                                   meta["thread_id"], name)
@@ -848,7 +862,7 @@ class CodexAdapter:
                     if meta.get("model"):
                         params["model"] = meta["model"]
                     result = await client.request("thread/start", params)
-                if meta.get("effort"):
+                if meta.get("effort") or meta.get("transfer_id"):
                     # `thread/start` aceita `model`, mas não tem campo de esforço: sem este update
                     # o nível escolhido na tela cai calado no `model_reasoning_effort` do
                     # config.toml. Sem TUI, ninguém mais aplica a escolha.
@@ -856,14 +870,23 @@ class CodexAdapter:
                         await client.request("thread/settings/update", {
                             "threadId": (result.get("thread") or {}).get("id") or meta.get("thread_id"),
                             "model": meta.get("model") or result.get("model"),
-                            "effort": meta["effort"]})
+                            "effort": meta.get("effort")})
                     except Exception as exc:
                         # A thread já está aberta: derrubar a sessão por causa do nível seria trocar
                         # uma escolha perdida por uma sessão que não existe. O nível fica o do
                         # config.toml e isso APARECE.
+                        if meta.get("transfer_id"):
+                            raise
                         esforco_recusado = str(exc)[:300]
                         _log.warning("codex sem terminal: esforço %s recusado name=%s: %s",
                                      meta["effort"], name, exc)
+                if meta.get("transfer_id"):
+                    confirmed = (await client.request("thread/read", {
+                        "threadId": meta["thread_id"], "includeTurns": False})).get("thread") or {}
+                    if (confirmed.get("id") != meta["thread_id"]
+                            or confirmed.get("model") != meta.get("model")
+                            or confirmed.get("reasoningEffort") != meta.get("effort")):
+                        raise RuntimeError("session_transfer_native_settings_mismatch")
             except Exception:
                 await client.close()
                 raise
@@ -951,7 +974,8 @@ class CodexAdapter:
             command = tmux.join_cmd(comando_do_lancador(
                 meta["cwd"], thread_id=meta["thread_id"], model=meta["model"], effort=meta["effort"],
                 codex_home=meta["codex_home"], codex_account=account.id,
-                approval=approval, sandbox=sandbox))
+                approval=approval, sandbox=sandbox,
+                tool_output_token_limit=meta.get("tool_output_token_limit")))
             env = _env_sessao(None, bool(meta.get("jev")), provider="codex")["env"]
             if meta.get("key"):
                 env["CP_SESSION_KEY"] = meta["key"]
@@ -1073,7 +1097,8 @@ class CodexAdapter:
                            if meta.get("app_pid") or pane_pid else bool(meta.get("jev"))}
             command = tmux.join_cmd(comando_do_lancador(
                 meta["cwd"], thread_id=meta["thread_id"], model=meta["model"], effort=meta["effort"],
-                codex_home=meta["codex_home"], codex_account=account.id, approval=approval, sandbox=sandbox))
+                codex_home=meta["codex_home"], codex_account=account.id, approval=approval, sandbox=sandbox,
+                tool_output_token_limit=meta.get("tool_output_token_limit")))
             env = _env_sessao(None, bool(meta.get("jev")), provider="codex")["env"]
             env["CP_SESSION_KEY"] = meta["key"]
             pids = [meta[k] for k in ("app_pid", "tui_pid", "launcher_pid") if meta.get(k)]

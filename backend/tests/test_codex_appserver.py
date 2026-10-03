@@ -278,10 +278,12 @@ async def test_shared_websocket_transport_returns_endpoint_and_handles_request(t
         client = AppServerClient()
         # Caminho absoluto do próprio sistema: `/tmp/x` vira `C:\tmp\x` no Windows.
         home = tmp_path / "codex-work"
-        endpoint = await client.start_shared("ws://127.0.0.1:45123", codex_home=str(home))
+        endpoint = await client.start_shared("ws://127.0.0.1:45123", codex_home=str(home),
+                                             tool_output_token_limit=144000)
         assert endpoint == "ws://127.0.0.1:45123"
         spawn.assert_awaited_once()
         assert spawn.call_args.kwargs["env"]["CODEX_HOME"] == str(home)
+        assert "tool_output_token_limit=144000" in spawn.call_args.args
 
         task = asyncio.create_task(client.request("thread/list", {"limit": 1}))
         await asyncio.sleep(0)
@@ -307,3 +309,26 @@ async def test_real_codex_initialize_smoke():
         assert result
     finally:
         await client.close()
+
+
+async def test_stdio_preparation_scopes_account_budget_and_cwd(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from app.adapters.codex import appserver
+    process = SimpleNamespace(stdout=object(), stdin=object())
+    spawn = AsyncMock(return_value=process)
+    monkeypatch.setattr(appserver.asyncio, "create_subprocess_exec", spawn)
+    client = AppServerClient()
+    monkeypatch.setattr(client, "_attach", lambda reader, writer: None)
+    monkeypatch.setenv("OPENAI_API_KEY", "inherited-key")
+    monkeypatch.setenv("TMUX_PANE", "%operator")
+    account_home = tmp_path / "secondary"
+    await client.start(codex_home=account_home, cwd=str(tmp_path), tool_output_token_limit=144000,
+                       session_name="original", session_key="durable-key")
+    assert spawn.call_args.args[:3] == ("codex", "app-server", "--stdio")
+    assert "tool_output_token_limit=144000" in spawn.call_args.args
+    assert spawn.call_args.kwargs["env"]["CODEX_HOME"] == str(account_home)
+    assert "OPENAI_API_KEY" not in spawn.call_args.kwargs["env"]
+    assert spawn.call_args.kwargs["cwd"] == str(tmp_path)
+    assert spawn.call_args.kwargs["env"]["CP_SESSION_KEY"] == "durable-key"
+    assert spawn.call_args.kwargs["env"]["CP_SESSION_NAME"] == "original"
+    assert "TMUX_PANE" not in spawn.call_args.kwargs["env"]

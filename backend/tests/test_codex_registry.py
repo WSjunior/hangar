@@ -795,3 +795,21 @@ def test_transfer_record_corruption_is_not_silently_skipped(tmp_path):
     codex_sessions.save("s", "t", "/tmp/rollout", str(tmp_path), transfer_id=transfer_id)
     with pytest.raises(ValueError):
         codex_sessions.list_all()
+
+
+async def test_legacy_restart_keeps_budget_account_and_resume_request(tmp_path):
+    home = str(tmp_path / "account")
+    codex_sessions.save("cx", "tid-1", "/x/rollout.jsonl", str(tmp_path),
+                        codex_home=home, codex_account="work", tool_output_token_limit=144000)
+    fake = _FakeClient()
+    from unittest.mock import AsyncMock
+    fake.start_shared = AsyncMock(return_value="ws://127.0.0.1:45123")
+    with patch.object(codex_adapter.tmux, "has_session", return_value=False), \
+         patch.object(codex_adapter, "AppServerClient", lambda: fake), \
+         patch.object(codex_adapter, "ensure_tmux_tui") as tui:
+        adapter = CodexAdapter()
+        await adapter.ensure_running("cx")
+    fake.start_shared.assert_awaited_once_with(codex_home=home, tool_output_token_limit=144000)
+    assert tui.call_args.kwargs["codex_account"] == "work"
+    assert next(p for m, p in fake.requests if m == "thread/resume")["threadId"] == "tid-1"
+    assert "turn/start" not in [m for m, _ in fake.requests]

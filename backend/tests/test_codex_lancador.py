@@ -273,13 +273,17 @@ def test_lancador_ressobe_o_servidor_na_mesma_porta_com_a_tui_viva(tmp_path):
     cwd.mkdir()
     env = _ambiente(tmp_path, cwd)
     env["FAKE_TUI_SLEEP"] = "12"
+    env["FAKE_SERVER_OUT"] = str(tmp_path / "server-argv.json")
     proc = subprocess.Popen(
-        [sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd)],
+        [sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd),
+         "--tool-output-token-limit", "144000"],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     try:
         assert _espera(_sidecar(env, "sess").exists), "o sidecar nunca apareceu"
         meta = json.loads(_sidecar(env, "sess").read_text())
+        assert meta["tool_output_token_limit"] == 144000
+        assert "tool_output_token_limit=144000" in json.loads((tmp_path / "server-argv.json").read_text())
         os.kill(meta["app_pid"], 9)
         assert _espera(lambda: not pid_vivo(meta["app_pid"]))
 
@@ -289,6 +293,8 @@ def test_lancador_ressobe_o_servidor_na_mesma_porta_com_a_tui_viva(tmp_path):
         assert _espera(ressubiu, 10), "o app-server nao foi ressubido"
         novo = json.loads(_sidecar(env, "sess").read_text())
         assert novo["endpoint"] == meta["endpoint"]
+        assert novo["tool_output_token_limit"] == 144000
+        assert "tool_output_token_limit=144000" in json.loads((tmp_path / "server-argv.json").read_text())
         assert proc.poll() is None, "a TUI nao pode ser relançada"
     finally:
         if proc.poll() is None:
@@ -608,3 +614,37 @@ def test_lancador_nao_reclassifica_conta_pelo_codex_home_herdado(tmp_path):
         )
     assert r.returncode == 0, r.stderr
     assert Path(env["FAKE_TUI_TOKEN"]).read_text() == ""
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+@pytest.mark.parametrize("durable_key", [None, "same-key"])
+def test_launcher_resume_preserves_import_metadata_on_save_and_update(tmp_path, durable_key):
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    env = _ambiente(tmp_path, cwd)
+    env["FAKE_TUI_SLEEP"] = "3"
+    env["FAKE_SERVER_OUT"] = str(tmp_path / "server-argv.json")
+    thread_id = "01a052d1-3e59-7441-9ed3-6bbd9e2704fc"
+    sidecar = _sidecar(env, "sess")
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    meta = {"name": "sess", "thread_id": thread_id, "rollout_path": env["FAKE_ROLLOUT"],
+            "cwd": str(cwd), "codex_home": str(Path(env["HOME"]) / ".codex"),
+            "codex_account": "default", "transfer_id": "import", "tool_output_token_limit": 144000,
+            "permission_mode": "Full Access", "jev": False, "model": "native-model", "effort": "high"}
+    if durable_key:
+        meta["key"] = durable_key
+    sidecar.write_text(json.dumps(meta))
+    proc = subprocess.Popen([sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd),
+                             "--resume", thread_id], env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+    try:
+        assert _espera(lambda: sidecar.exists() and json.loads(sidecar.read_text()).get("app_pid"))
+        saved = json.loads(sidecar.read_text())
+        assert saved["tool_output_token_limit"] == 144000 and saved["transfer_id"] == "import"
+        assert saved["model"] == "native-model" and saved["effort"] == "high"
+        assert saved.get("key") == durable_key and saved["thread_id"] == thread_id
+        assert "tool_output_token_limit=144000" in json.loads((tmp_path / "server-argv.json").read_text())
+        assert not any("project_doc_max_bytes" in arg for arg in
+                       json.loads((tmp_path / "server-argv.json").read_text()))
+    finally:
+        proc.wait(timeout=20)
