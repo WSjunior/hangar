@@ -2,14 +2,14 @@
 
 use std::sync::Arc;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Request, State};
+use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use crate::costs::collect::{CollectError, Ready};
 use crate::costs::index::IndexError;
 use crate::costs::py::LocalTs;
-use crate::costs::{CacheKey, report_costs, report_uso};
-use crate::routes::{AppState, cors, gate, maybe_gzip, pass};
+use crate::costs::{CacheKey, codex, report_costs, report_uso, session_cost};
+use crate::routes::{AppState, cors, fetch_info, gate, maybe_gzip, pass};
 
 pub(crate) fn warming(read: usize, total: usize) -> Response {
     (StatusCode::ACCEPTED, [(header::CONTENT_TYPE, "application/json")],
@@ -112,6 +112,44 @@ pub async fn cotacao(State(state): State<Arc<AppState>>, ConnectInfo(peer): Conn
         Ok(rate) => response(request.headers(), serde_json::json!({"usd_brl":rate}).to_string().into_bytes()),
         Err(_) => {
             tracing::warn!(code = "cotacao_join");
+            pass(&state, request, &forward).await
+        }
+    }
+}
+
+fn session_not_found(headers: &HeaderMap, message: &'static str) -> Response {
+    let body = serde_json::json!({"detail":{"code":"erro_sessao_inexistente", "params":{}, "msg":message}});
+    let mut response = response(headers, body.to_string().into_bytes());
+    *response.status_mut() = StatusCode::NOT_FOUND;
+    response
+}
+
+pub async fn session_cost(State(state): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>, Path(name): Path<String>, request: Request) -> Response {
+    let (forward, owner) = gate(&state, peer, &request);
+    if !owner || request.method() != Method::GET { return pass(&state, request, &forward).await; }
+    let info = fetch_info(&state.http, state.cfg.upstream, &state.cfg.internal_secret, &name).await;
+    let Some(rollout) = info.filter(|info| info.provider == "codex").and_then(|info| info.jsonl)
+        .filter(|path| !path.as_os_str().is_empty()) else {
+        return session_not_found(request.headers(), "Codex session not found");
+    };
+    let worker = state.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, &'static str> {
+        let Ok(path) = std::fs::canonicalize(rollout) else { return Ok(None); };
+        let index = worker.costs.index().map_err(|error| error_code(&error))?;
+        let rows = codex::try_session_rows(index, &path, worker.costs.areas())
+            .map_err(|error| error_code(&CollectError::Index(error)))?;
+        // A sessão avulsa não inicia a coleta global; reler tarifas só depois do índice.
+        let mut pricing = worker.costs.pricing();
+        pricing.reload_if_changed();
+        let cost = session_cost::estimate(rows, &pricing);
+        serde_json::to_vec(&cost).map(Some).map_err(|_| "custo_sessao_json")
+    }).await;
+    match result {
+        Ok(Ok(Some(body))) => response(request.headers(), body),
+        Ok(Ok(None)) => session_not_found(request.headers(), "Codex rollout not found"),
+        other => {
+            let code = match other { Ok(Err(code)) => code, _ => "custo_sessao_join" };
+            tracing::warn!(code);
             pass(&state, request, &forward).await
         }
     }

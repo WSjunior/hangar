@@ -15,6 +15,7 @@ pub mod report_costs;
 pub mod fx;
 pub mod report_uso;
 pub mod origins;
+pub mod session_cost;
 
 use std::any::Any;
 use std::sync::{Arc, Mutex};

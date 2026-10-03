@@ -2,7 +2,7 @@
 
 use super::accumulator::{Accumulator, Sum, ordered_pairs, python_string, skill_path, text, truthy};
 use super::areas::{AreaEntries, AreaHeader, AreaMap, ToolReg, Unit, candidates};
-use super::index::{Fold, Index};
+use super::index::{Fold, Index, IndexError};
 use super::pricing::canonizar_provedor;
 use super::py::{LocalTs, char_len, parse_obj, py_int};
 use super::rows::{FoldOutput, UsageRow, UsoLinha};
@@ -357,6 +357,10 @@ impl Fold for CodexFold {
 }
 
 pub fn session_rows(ix: &Index, rollout: &Path, areas: &AreaMap) -> Option<Vec<UsageRow>> {
-    let id = ix.sync_file(rollout, &new_fold, VERSION, "codex:avulso", areas.signature(), &|entries| areas.area_lines(entries))?;
-    ix.read_costs(None, None, Some(id)).ok()
+    try_session_rows(ix, rollout, areas).ok()
+}
+
+pub fn try_session_rows(ix: &Index, rollout: &Path, areas: &AreaMap) -> Result<Vec<UsageRow>, IndexError> {
+    let id = ix.try_sync_file(rollout, &new_fold, VERSION, "codex:avulso", areas.signature(), &|entries| areas.area_lines(entries))?;
+    ix.read_costs(None, None, Some(id))
 }

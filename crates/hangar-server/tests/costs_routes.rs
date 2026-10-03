@@ -1,6 +1,6 @@
 mod common;
 
-use axum::{Router, extract::{Request, State}, http::StatusCode, response::{IntoResponse, Response}, routing::get};
+use axum::{Router, extract::{Path, Request, State}, http::StatusCode, response::{IntoResponse, Response}, routing::get};
 use common::costs::fixtures_copy;
 use hangar_server::{auth::TrustedHosts, config::Config, costs::collect::{Collector, HttpScopes, Scopes, ClaudeScope, CodexScope, PiScope, KimiScope}, costs::fx::Fx, routes::{AppState, router}};
 use serde_json::{Value, json};
@@ -12,9 +12,32 @@ use std::time::{Duration, Instant};
 const OWNER: &str = "dono-de-teste";
 const SECRET: &str = "interno-de-teste";
 
+fn session_error(message: &str) -> Value {
+    json!({"detail": {"code": "erro_sessao_inexistente", "params": {}, "msg": message}})
+}
+
+fn session_rollout(path: &std::path::Path, model: &str, input: i64) {
+    let lines = [
+        json!({"type":"session_meta", "timestamp":"2026-10-01T12:00:00Z", "payload":{"id":"synthetic", "model_provider":"openai"}}),
+        json!({"type":"turn_context", "timestamp":"2026-10-01T12:00:01Z", "payload":{"model":model, "turn_id":"turn"}}),
+        json!({"type":"token_usage_record", "timestamp":"2026-10-01T12:00:02Z", "payload":{"thread_id":"synthetic", "usage":{"input_tokens":input}}}),
+    ];
+    std::fs::write(path, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
+}
+
 struct Upstream {
     scopes: Mutex<Option<Scopes>>,
+    infos: Mutex<indexmap::IndexMap<String, Value>>,
     hits: Mutex<Vec<(String, String)>>,
+}
+
+async fn session_info(State(up): State<Arc<Upstream>>, Path(name): Path<String>, request: Request) -> Response {
+    up.hits.lock().unwrap().push((request.method().to_string(), request.uri().to_string()));
+    assert_eq!(request.headers()["x-hangar-internal"], SECRET);
+    match up.infos.lock().unwrap().get(&name) {
+        Some(info) => ([("content-type", "application/json")], info.to_string()).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn scopes(State(up): State<Arc<Upstream>>, request: Request) -> Response {
@@ -65,10 +88,11 @@ impl Harness {
             kimi: Some(KimiScope { root: base.join("kimi/sessions"), index: base.join("kimi/session_index.jsonl") }),
             repo: base.clone(),
         };
-        let upstream = Arc::new(Upstream { scopes: Mutex::new(has_scopes.then_some(scopes)), hits: Mutex::new(Vec::new()) });
+        let upstream = Arc::new(Upstream { scopes: Mutex::new(has_scopes.then_some(scopes)), infos: Mutex::new(indexmap::IndexMap::new()), hits: Mutex::new(Vec::new()) });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let up_address = listener.local_addr().unwrap();
-        let app = Router::new().route("/internal/costs/scopes", get(self::scopes)).fallback(python).with_state(upstream.clone());
+        let app = Router::new().route("/internal/costs/scopes", get(self::scopes))
+            .route("/internal/sessions/{name}/info", get(session_info)).fallback(python).with_state(upstream.clone());
         let up_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let index = if bad_disk {
             let blocked = dir.path().join("blocked");
@@ -508,6 +532,196 @@ async fn labels_and_pricing_changes_invalidate_the_served_report() {
     let repriced = h.ready().await;
     assert_ne!(repriced["totals"]["cost"], before["totals"]["cost"]);
     assert!(repriced["rates"].as_array().unwrap().iter().any(|value| value["model"] == model && value["origin"] == "override"));
+}
+
+#[tokio::test]
+async fn session_cost_reads_fixture_without_scopes_or_warming_scan() {
+    let h = Harness::new(false, false).await;
+    let rollout = h.base.join("codex/sessions/2026/09/30/rollout-c1.jsonl");
+    h.upstream.infos.lock().unwrap().insert("codex-session".into(), json!({"provider":"codex", "jsonl":rollout}));
+    let response = h.request(reqwest::Method::GET, "/api/sessions/codex-session/cost").send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "application/json");
+    let body: Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    common::costs::assert_close(&body, &json!({"cost_usd":0.0049875, "missing_models":[], "has_usage":true}), "custo da sessão");
+    assert!(!h.forwarded("GET", "/api/sessions/codex-session/cost"));
+    assert!(h.forwarded("GET", "/internal/sessions/codex%2Dsession/info"));
+    assert!(!h.forwarded("GET", "/internal/costs/scopes"));
+}
+
+#[tokio::test]
+async fn session_cost_other_provider_has_python_404_body() {
+    let h = Harness::new(false, false).await;
+    for provider in ["claude", "pi", "kimi", "omp"] {
+        h.upstream.infos.lock().unwrap().insert("session".into(), json!({"provider":provider, "jsonl":h.base.join("codex/sessions/2026/09/30/rollout-c1.jsonl")}));
+        let response = h.request(reqwest::Method::GET, "/api/sessions/session/cost").send().await.unwrap();
+        assert_eq!(response.status(), 404, "{provider}");
+        assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(), session_error("Codex session not found"));
+    }
+    assert!(!h.forwarded("GET", "/api/sessions/session/cost"));
+}
+
+#[tokio::test]
+async fn session_cost_missing_internal_info_has_python_404_body() {
+    let h = Harness::new(false, false).await;
+    let response = h.request(reqwest::Method::GET, "/api/sessions/absent/cost").send().await.unwrap();
+    assert_eq!(response.status(), 404);
+    assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(), session_error("Codex session not found"));
+    assert!(h.forwarded("GET", "/internal/sessions/absent/info"));
+    assert!(!h.forwarded("GET", "/api/sessions/absent/cost"));
+}
+
+#[tokio::test]
+async fn session_cost_missing_or_empty_rollout_field_has_session_404_body() {
+    let h = Harness::new(false, false).await;
+    for info in [json!({"provider":"codex"}), json!({"provider":"codex", "jsonl":null}), json!({"provider":"codex", "jsonl":""})] {
+        h.upstream.infos.lock().unwrap().insert("session".into(), info);
+        let response = h.request(reqwest::Method::GET, "/api/sessions/session/cost").send().await.unwrap();
+        assert_eq!(response.status(), 404);
+        assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(), session_error("Codex session not found"));
+    }
+}
+
+#[tokio::test]
+async fn session_cost_deleted_rollout_has_python_404_body_and_cors() {
+    let h = Harness::new(false, false).await;
+    h.upstream.infos.lock().unwrap().insert("session".into(), json!({"provider":"codex", "jsonl":h.base.join("deleted.jsonl")}));
+    let response = h.request(reqwest::Method::GET, "/api/sessions/session/cost").header("origin", "https://teste.exemplo").send().await.unwrap();
+    assert_eq!(response.status(), 404);
+    assert_eq!(response.headers()["access-control-allow-origin"], "*");
+    assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(), session_error("Codex rollout not found"));
+    assert!(!h.forwarded("GET", "/api/sessions/session/cost"));
+}
+
+#[tokio::test]
+async fn session_cost_recreated_session_reads_new_info_without_cache() {
+    let h = Harness::new(false, false).await;
+    let first = h.base.join("first.jsonl");
+    let second = h.base.join("second.jsonl");
+    session_rollout(&first, "gpt-5.6-sol", 1_000_000);
+    session_rollout(&second, "gpt-5.5", 1_000_000);
+    h.upstream.infos.lock().unwrap().insert("session".into(), json!({"provider":"codex", "jsonl":first}));
+    let response = h.request(reqwest::Method::GET, "/api/sessions/session/cost").send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(), json!({"cost_usd":5.0, "missing_models":[], "has_usage":true}));
+    h.upstream.infos.lock().unwrap().insert("session".into(), json!({"provider":"codex", "jsonl":second}));
+    let response = h.request(reqwest::Method::GET, "/api/sessions/session/cost").send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(), json!({"cost_usd":2.0, "missing_models":[], "has_usage":true}));
+    assert_eq!(h.upstream.hits.lock().unwrap().iter().filter(|(method, uri)| method == "GET" && uri == "/internal/sessions/session/info").count(), 2);
+}
+
+#[tokio::test]
+async fn session_cost_unavailable_index_falls_back_to_python() {
+    let h = Harness::new(false, true).await;
+    h.upstream.infos.lock().unwrap().insert("session".into(), json!({"provider":"codex", "jsonl":h.base.join("codex/sessions/2026/09/30/rollout-c1.jsonl")}));
+    let response = h.request(reqwest::Method::GET, "/api/sessions/session/cost").send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(), json!({"from_python":true}));
+    assert!(h.forwarded("GET", "/internal/sessions/session/info"));
+    assert!(h.forwarded("GET", "/api/sessions/session/cost"));
+    assert!(!h.forwarded("GET", "/internal/costs/scopes"));
+}
+
+#[tokio::test]
+async fn session_cost_index_disk_loss_after_open_falls_back_to_python() {
+    let h = Harness::new(false, false).await;
+    h.upstream.infos.lock().unwrap().insert("session".into(), json!({"provider":"codex", "jsonl":h.base.join("codex/sessions/2026/09/30/rollout-c1.jsonl")}));
+    let response = h.request(reqwest::Method::GET, "/api/sessions/session/cost").send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap()["has_usage"], true);
+    let index_dir = h._dir.path().join("idx");
+    std::fs::remove_dir_all(&index_dir).unwrap();
+    std::fs::write(&index_dir, b"bloqueio").unwrap();
+    let response = h.request(reqwest::Method::GET, "/api/sessions/session/cost").send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(), json!({"from_python":true}));
+    assert!(h.forwarded("GET", "/api/sessions/session/cost"));
+}
+
+#[tokio::test]
+async fn session_cost_reader_panic_and_read_error_fall_back_to_python() {
+    let h = Harness::new(false, false).await;
+    let path = h.base.join("rollout-malformed.jsonl");
+    std::fs::write(&path, format!("{}\n", json!({"type":"session_meta", "payload":{"id":true}}))).unwrap();
+    h.upstream.infos.lock().unwrap().insert("session".into(), json!({"provider":"codex", "jsonl":path}));
+    let response = h.request(reqwest::Method::GET, "/api/sessions/session/cost").send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(), json!({"from_python":true}));
+    assert!(h.forwarded("GET", "/api/sessions/session/cost"));
+    session_rollout(&path, "gpt-5.5", 1_000_000);
+    let response = h.request(reqwest::Method::GET, "/api/sessions/session/cost").send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap()["cost_usd"], 2.0);
+    let conn = rusqlite::Connection::open(h._dir.path().join("idx").join(hangar_server::costs::index::FILE_NAME)).unwrap();
+    conn.execute("UPDATE custo SET ts='invalid'", []).unwrap();
+    drop(conn);
+    let response = h.request(reqwest::Method::GET, "/api/sessions/session/cost").send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(), json!({"from_python":true}));
+}
+
+#[tokio::test]
+async fn session_cost_owner_gate_methods_and_query_token_preserve_contract() {
+    let h = Harness::new(false, false).await;
+    h.upstream.infos.lock().unwrap().insert("session".into(), json!({"provider":"codex", "jsonl":h.base.join("codex/sessions/2026/09/30/rollout-c1.jsonl")}));
+    for token in [None, Some("convidado")] {
+        let mut request = reqwest::Client::new().get(format!("http://{}/api/sessions/session/cost", h.address));
+        if let Some(token) = token { request = request.bearer_auth(token); }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), 401);
+        assert_eq!(response.bytes().await.unwrap().len(), 0);
+    }
+    assert!(!h.forwarded("GET", "/internal/sessions/session/info"));
+    for method in [reqwest::Method::POST, reqwest::Method::HEAD, reqwest::Method::OPTIONS] {
+        let response = h.request(method.clone(), "/api/sessions/session/cost").send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        if method == reqwest::Method::HEAD { assert_eq!(response.bytes().await.unwrap().len(), 0); }
+        else { assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(), json!({"from_python":true})); }
+        assert!(h.forwarded(method.as_str(), "/api/sessions/session/cost"));
+    }
+    assert!(!h.forwarded("GET", "/internal/sessions/session/info"));
+    let response = reqwest::Client::new().get(format!("http://{}/api/sessions/session/cost?token={OWNER}", h.address)).send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap()["has_usage"], true);
+    assert!(h.forwarded("GET", "/internal/sessions/session/info"));
+    assert!(!h.forwarded("GET", &format!("/api/sessions/session/cost?token={OWNER}")));
+}
+
+#[tokio::test]
+async fn session_cost_empty_usage_is_null_and_pricing_reload_is_independent() {
+    let h = Harness::new(false, false).await;
+    let path = h.base.join("rollout-synthetic.jsonl");
+    session_rollout(&path, "gpt-5.5", 0);
+    h.upstream.infos.lock().unwrap().insert("session".into(), json!({"provider":"codex", "jsonl":path}));
+    let response = h.request(reqwest::Method::GET, "/api/sessions/session/cost").send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(), json!({"cost_usd":null, "missing_models":[], "has_usage":false}));
+    session_rollout(&path, "gpt-5.5", 1_000_000);
+    std::fs::write(h.base.join("pricing/overrides.json"), json!({"gpt-5.5":{"input":7,"output":8,"provider":"openai"}}).to_string()).unwrap();
+    let response = h.request(reqwest::Method::GET, "/api/sessions/session/cost").send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(), json!({"cost_usd":7.0, "missing_models":[], "has_usage":true}));
+    assert!(!h.forwarded("GET", "/internal/costs/scopes"));
+}
+
+#[tokio::test]
+async fn session_cost_missing_tariff_uses_shared_gzip_and_cors() {
+    use std::io::Read;
+    let h = Harness::new(false, false).await;
+    let path = h.base.join("rollout-synthetic.jsonl");
+    let missing = "modelo-a".repeat(160);
+    session_rollout(&path, &format!("openai/{missing}"), 1);
+    h.upstream.infos.lock().unwrap().insert("session".into(), json!({"provider":"codex", "jsonl":path}));
+    let response = h.request(reqwest::Method::GET, "/api/sessions/session/cost").header("accept-encoding", "gzip").header("origin", "https://teste.exemplo").send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-encoding"], "gzip");
+    assert_eq!(response.headers()["access-control-allow-origin"], "*");
+    assert_eq!(response.headers()["access-control-expose-headers"], "ETag");
+    let bytes = response.bytes().await.unwrap();
+    let mut body = Vec::new();
+    flate2::read::GzDecoder::new(bytes.as_ref()).read_to_end(&mut body).unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), json!({"cost_usd":null, "missing_models":[missing], "has_usage":true}));
 }
 
 #[tokio::test]

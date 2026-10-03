@@ -100,7 +100,7 @@ impl AppState {
     }
 }
 
-async fn fetch_info(http: &HttpClient, upstream: SocketAddr, secret: &str, name: &str) -> Option<InternalInfo> {
+pub(crate) async fn fetch_info(http: &HttpClient, upstream: SocketAddr, secret: &str, name: &str) -> Option<InternalInfo> {
     let url = format!("http://{upstream}/internal/sessions/{}/info", utf8_percent_encode(name, NON_ALPHANUMERIC));
     let req = axum::http::Request::get(url).header("x-hangar-internal", secret).body(Body::empty()).ok()?;
     let resp = match tokio::time::timeout(INFO_TIMEOUT, http.request(req)).await {
@@ -184,6 +184,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.
         .route("/api/sessions/{name}/history", get(history).fallback(pass_any))
         .route("/api/sessions/{name}/events", get(events).fallback(pass_any))
+        .route("/api/sessions/{name}/cost", get(crate::costs_routes::session_cost).fallback(pass_any))
         .route("/api/costs", get(crate::costs_routes::costs).fallback(pass_any))
         .route("/api/cotacao", get(crate::costs_routes::cotacao).fallback(pass_any))
         .route("/api/uso", get(crate::costs_routes::usage).fallback(pass_any))
