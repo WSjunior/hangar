@@ -20,6 +20,7 @@ import secrets
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -31,6 +32,7 @@ REPO = Path(__file__).resolve().parents[2]
 RELEASES_URL = "https://github.com/jeffer1312/hangar/releases/download"
 MAIN_TAG = "server-latest"
 NAMES = ("hangar-server", "hangar-cano")
+_EVENT = "hangar_server.baixar"
 
 # Constante de módulo pelo motivo do atualizar.py: o teste troca a decisão sem mexer no os.name.
 _E_WINDOWS = os.name == "nt"
@@ -58,18 +60,33 @@ def platform_key() -> str | None:
 
 
 def release_tag() -> str:
-    """Release da branch do checkout; main, master, HEAD solto ou git mudo caem na `server-latest`."""
+    """Release da branch do checkout; main e master usam a `server-latest`.
+
+    Fora delas, cair na `server-latest` é desvio e vai ao diário: senão a máquina roda o binário
+    da main achando que roda o da branch.
+    """
     try:
         p = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO, capture_output=True,
                            text=True, timeout=5, encoding="utf-8", errors="replace",
                            creationflags=0x08000000 if _E_WINDOWS else 0)   # CREATE_NO_WINDOW
-        branch = p.stdout.strip() if p.returncode == 0 else ""
-    except Exception:                                # noqa: BLE001 — sem branch, a da main serve
-        branch = ""
-    if branch in ("", "main", "master", "HEAD"):
+    except Exception as e:                           # noqa: BLE001 — sem branch, a da main serve
+        diag.registrar(_EVENT, "aviso", codigo="branch_ilegivel", **diag.erro_campos(e))
+        return MAIN_TAG
+    branch = p.stdout.strip()
+    if p.returncode != 0 or not branch:
+        diag.registrar(_EVENT, "aviso", codigo="branch_ilegivel", retorno=p.returncode)
+        return MAIN_TAG
+    if branch in ("main", "master"):
+        return MAIN_TAG
+    if branch == "HEAD":
+        diag.registrar(_EVENT, "aviso", codigo="head_solto")
         return MAIN_TAG
     # Mesma limpeza do passo de publicação do .github/workflows/server.yml.
-    return "server-" + re.sub(r"[^A-Za-z0-9._-]", "-", branch)
+    tag = "server-" + re.sub(r"[^A-Za-z0-9._-]", "-", branch)
+    if tag == MAIN_TAG:
+        # O server.yml recusa publicar esta branch, que sobrescreveria a release da main.
+        diag.registrar(_EVENT, "erro", codigo="branch_colide_com_main", tag=tag)
+    return tag
 
 
 def bin_dir() -> Path:
@@ -161,7 +178,7 @@ def _install(data: bytes, target: Path) -> None:
 
 
 def _fetch_one(url: str, files: object, plat: str, name: str, target: Path,
-               commit: str) -> str | None:
+               commit: str, tag: str | None) -> str | None:
     entry = files.get(f"{plat}/{name}") if isinstance(files, dict) else None
     if not isinstance(entry, dict) or not isinstance(entry.get("name"), str) \
             or not isinstance(entry.get("sha256"), str):
@@ -183,7 +200,7 @@ def _fetch_one(url: str, files: object, plat: str, name: str, target: Path,
     except OSError as e:
         diag.registrar("hangar_server.baixar", "erro", etapa="gravar", detalhe=name, **diag.erro_campos(e))
         return f"{name}: não consegui gravar em {target.parent} ({e})"
-    diag.registrar("hangar_server.baixar", codigo="trocado", detalhe=name, commit=commit)
+    diag.registrar("hangar_server.baixar", codigo="trocado", detalhe=name, commit=commit, tag=tag)
     return None
 
 
@@ -197,12 +214,24 @@ def fetch(base_url: str | None = None, dest: Path | None = None) -> list[str] | 
     if plat is None:
         diag.registrar("hangar_server.baixar", "aviso", codigo="sem_build")
         return None
-    url = (base_url or os.environ.get("HANGAR_SERVER_RELEASE_URL")
-           or f"{RELEASES_URL}/{release_tag()}").rstrip("/")
+    # `tag` None = URL dada por quem chama: sem release da main para onde recuar.
+    url, tag = base_url or os.environ.get("HANGAR_SERVER_RELEASE_URL"), None
+    if not url:
+        tag = release_tag()
+        url = f"{RELEASES_URL}/{tag}"
+    url = url.rstrip("/")
     dest = dest or bin_dir()
     ext = ".exe" if plat.startswith("windows") else ""
     try:
-        manifest = json.loads(_get(f"{url}/server-latest.json", _MANIFEST_DEADLINE))
+        try:
+            manifest = json.loads(_get(f"{url}/server-latest.json", _MANIFEST_DEADLINE))
+        except urllib.error.HTTPError as e:
+            if e.code != 404 or tag in (None, MAIN_TAG):
+                raise
+            # O server.yml só publica a branch quando crates/ muda: sem release própria, vale a da main.
+            diag.registrar(_EVENT, "aviso", codigo="sem_release_da_branch", tag=tag)
+            tag, url = MAIN_TAG, f"{RELEASES_URL}/{MAIN_TAG}"
+            manifest = json.loads(_get(f"{url}/server-latest.json", _MANIFEST_DEADLINE))
         files = manifest["files"]
         # Só vai ao diário, para diagnosticar versão do Python diferente da do binário.
         commit = str(manifest.get("commit", ""))[:40]
@@ -213,7 +242,7 @@ def fetch(base_url: str | None = None, dest: Path | None = None) -> list[str] | 
     for name in NAMES:
         _sweep_old(dest / f"{name}{ext}")
     avisos = [aviso for name in NAMES
-              if (aviso := _fetch_one(url, files, plat, name, dest / f"{name}{ext}", commit))]
+              if (aviso := _fetch_one(url, files, plat, name, dest / f"{name}{ext}", commit, tag))]
     for aviso in avisos:
         _log.warning(aviso)
     return avisos

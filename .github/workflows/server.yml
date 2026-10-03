@@ -165,6 +165,10 @@ jobs:
                    --notes 'Reescrita a cada push na main. O instalador e a atualização do Hangar baixam daqui e conferem o sha256 pelo server-latest.json.')
           else
             tag="server-${GITHUB_REF_NAME//[^A-Za-z0-9._-]/-}"
+            if [ "$tag" = server-latest ]; then
+              echo "::error::a branch '$GITHUB_REF_NAME' vira o tag server-latest, que é a release da main; renomeie a branch"
+              exit 1
+            fi
             criar=(--prerelease --title "hangar-server e hangar-cano (branch $GITHUB_REF_NAME)"
                    --notes "Reescrita a cada push na branch $GITHUB_REF_NAME. A atualização baixa daqui quando o checkout está nessa branch.")
           fi

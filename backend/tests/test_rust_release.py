@@ -322,7 +322,7 @@ def test_swap_logs_the_manifest_commit(release, tmp_path, events):
     _publish(pasta, {"hangar-server": SERVER, "hangar-cano": CANO})
     assert rust_release.fetch(url, tmp_path / "bin") == []
     assert ("hangar_server.baixar", "ok",
-            {"codigo": "trocado", "detalhe": "hangar-server", "commit": "abc"}) in events
+            {"codigo": "trocado", "detalhe": "hangar-server", "commit": "abc", "tag": None}) in events
 
 
 def _branch(monkeypatch, stdout="", returncode=0, raises=None):
@@ -333,18 +333,46 @@ def _branch(monkeypatch, stdout="", returncode=0, raises=None):
     monkeypatch.setattr(rust_release, "subprocess", types.SimpleNamespace(run=run))
 
 
-@pytest.mark.parametrize(("stdout", "returncode", "raises", "tag"), [
-    ("main\n", 0, None, "server-latest"),
-    ("master\n", 0, None, "server-latest"),
-    ("feature/x\n", 0, None, "server-feature-x"),
-    ("hangar-server-parte1\n", 0, None, "server-hangar-server-parte1"),
-    ("HEAD\n", 0, None, "server-latest"),                  # checkout solto
-    ("", 128, None, "server-latest"),                      # git recusou
-    ("", 0, FileNotFoundError("git"), "server-latest"),    # sem git
+@pytest.mark.parametrize(("stdout", "returncode", "raises", "tag", "codigo"), [
+    ("main\n", 0, None, "server-latest", None),
+    ("master\n", 0, None, "server-latest", None),
+    ("feature/x\n", 0, None, "server-feature-x", None),
+    ("hangar-server-parte1\n", 0, None, "server-hangar-server-parte1", None),
+    ("HEAD\n", 0, None, "server-latest", "head_solto"),
+    ("", 128, None, "server-latest", "branch_ilegivel"),
+    ("", 0, None, "server-latest", "branch_ilegivel"),
+    ("", 0, FileNotFoundError("git"), "server-latest", "branch_ilegivel"),
+    ("latest\n", 0, None, "server-latest", "branch_colide_com_main"),
 ])
-def test_release_tag_follows_the_checkout_branch(monkeypatch, stdout, returncode, raises, tag):
+def test_release_tag_follows_the_checkout_branch(monkeypatch, events, stdout, returncode, raises,
+                                                 tag, codigo):
     _branch(monkeypatch, stdout, returncode, raises)
     assert rust_release.release_tag() == tag
+    assert [e[2].get("codigo") for e in events] == ([codigo] if codigo else [])
+
+
+def test_branch_without_release_falls_back_to_main_and_logs_it(release, tmp_path, monkeypatch, events):
+    url, pasta, pedidos = release
+    (pasta / "server-latest").mkdir()
+    _publish(pasta / "server-latest", {"hangar-server": SERVER, "hangar-cano": CANO})
+    monkeypatch.setattr(rust_release, "RELEASES_URL", url)
+    monkeypatch.delenv("HANGAR_SERVER_RELEASE_URL", raising=False)
+    _branch(monkeypatch, "feature/x\n")
+    assert rust_release.fetch(dest=tmp_path / "bin") == []
+    assert pedidos[:2] == ["/server-feature-x/server-latest.json", "/server-latest/server-latest.json"]
+    assert ("hangar_server.baixar", "aviso", {"codigo": "sem_release_da_branch", "tag": "server-feature-x"}) in events
+    assert all(e[2]["tag"] == "server-latest" for e in events if e[2].get("codigo") == "trocado")
+
+
+def test_main_release_404_is_a_plain_warning(release, tmp_path, monkeypatch, events):
+    url, _, pedidos = release
+    monkeypatch.setattr(rust_release, "RELEASES_URL", url)
+    monkeypatch.delenv("HANGAR_SERVER_RELEASE_URL", raising=False)
+    _branch(monkeypatch, "main\n")
+    avisos = rust_release.fetch(dest=tmp_path / "bin")
+    assert len(avisos) == 1 and "manifesto" in avisos[0]
+    assert pedidos == ["/server-latest/server-latest.json"]
+    assert not any(e[2].get("codigo") == "sem_release_da_branch" for e in events)
 
 
 def test_fetch_uses_the_branch_release_and_env_wins(monkeypatch, tmp_path):
