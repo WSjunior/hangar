@@ -43,6 +43,15 @@ Os avisos preexistentes do desktop, Svelte e depreciações do websocket não fo
 Não foi executada a suíte completa do repositório. macOS e execução dos workflows remotos
 ficam para o CI; o workflow do nativo agora observa também `hangar-workspace`.
 
+## CI após a publicação
+
+A primeira rodada do PR #30 passou no frontend, build web, statusline e verificações de
+atualização. O workflow Rust passou em Linux, Windows e macOS. No backend, 6.970 testes
+passaram, 84 foram ignorados e 11 falharam: oito mocks do Supervisor ainda não simulavam
+o aviso de partida do runtime; outros três expunham a troca indevida do objeto global de
+configuração pelos testes de sincronização. As causas foram reproduzidas em recortes locais,
+e as correções ficam nas fixtures de teste, preservando o código de produção.
+
 ## Revisão independente
 
 Corrigidos e cobertos por regressões: CORS; campos privados/extras nos POSTs; nomes escapados
