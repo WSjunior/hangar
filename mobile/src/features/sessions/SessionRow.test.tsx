@@ -27,6 +27,8 @@ vi.mock('../../paraglide/messages', () => ({
   sessao_renomear: () => 'sessao_renomear',
   sessao_retomar: () => 'sessao_retomar',
   sessao_sem_id: () => 'sessao_sem_id',
+  sessao_worktree: () => 'sessao_worktree',
+  worktree_apagada: () => 'worktree_apagada',
 }));
 
 import { useUnistyles } from 'react-native-unistyles';
@@ -42,12 +44,12 @@ useUnistyles().theme.tokens.pill = {
 
 const base = { serverId: 's1', serverLabel: 'casa', serverColor: '#8b5cf6', tracked: true, state: 'idle' as const, last_activity: 1_700_000_000 };
 
-async function render(session: AggSession) {
+async function render(session: AggSession, extra: Record<string, unknown> = {}) {
   const container = document.createElement('div');
   const root = createRoot(container);
   const noop = () => {};
   await act(async () =>
-    root.render(createElement(SessionRow, { session, mostrarServidor: false, onPress: noop, onGit: noop, onExcluir: noop, onRenomear: noop, onResume: noop })),
+    root.render(createElement(SessionRow, { session, mostrarServidor: false, onPress: noop, onGit: noop, onExcluir: noop, onRenomear: noop, onResume: noop, onWorktree: noop, ...extra })),
   );
   return { container, root };
 }
@@ -84,6 +86,22 @@ describe('SessionRow', () => {
     const linha = container.querySelector<HTMLButtonElement>('button[aria-label^="nova,"]');
     expect(linha).not.toBeNull();
     expect(linha!.disabled).toBe(bloqueada);
+    act(() => root.unmount());
+  });
+
+  it('chip de worktree chama onWorktree com o caminho real', async () => {
+    const onWorktree = vi.fn();
+    const { container, root } = await render(
+      { ...base, name: 'api', provider: 'claude', worktree: true, worktree_path: '/r/hangar-x', cwd: '/r/hangar' }, { onWorktree });
+    await act(async () => { (container.querySelector('[aria-label="sessao_worktree: hangar-x"]') as HTMLElement).click(); });
+    expect(onWorktree).toHaveBeenCalledWith(expect.objectContaining({ name: 'api' }), '/r/hangar-x');
+    act(() => root.unmount());
+  });
+
+  it('worktree apagada aparece como texto', async () => {
+    const { container, root } = await render({ ...base, name: 'api', provider: 'claude', worktree_gone: true, worktree_path: '/r/hangar-x' });
+    expect(container.textContent).toContain('worktree_apagada');
+    expect(container.querySelector('[aria-label^="sessao_worktree"]')).toBeNull();
     act(() => root.unmount());
   });
 });

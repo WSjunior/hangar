@@ -3,11 +3,12 @@ import { ActionSheetIOS, Platform, Pressable, Text, View } from 'react-native';
 import { MenuView, type NativeActionEvent } from '@react-native-menu/menu';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import * as Haptics from 'expo-haptics';
-import { cwdParts, isOrq, loopBadge, providerName, relativeTime, rotuloEstado, untrackedReason, type AggSession, type State } from '@hangar/core';
+import { cwdParts, isOrq, loopBadge, providerName, relativeTime, rotuloEstado, untrackedReason, worktreeLabel, type AggSession, type State } from '@hangar/core';
 import { Chip, type Tone } from '../../ui/Chip';
 import { HangarMark } from '../../ui/HangarMark';
 import { Icon } from '../../ui/Icon';
 import { superficie } from '../../theme/superficie';
+import { useWorktreeStatus } from '../worktrees/worktreeStatus';
 import * as m from '../../paraglide/messages';
 
 // LOOP_TONE_COLOR do core é CSS var (`var(--accent)`) — não serve em RN; o tom vira `Chip tone`.
@@ -36,13 +37,14 @@ interface Props {
   onExcluir: (s: AggSession) => void;
   onRenomear: (s: AggSession) => void;
   onResume: (s: AggSession) => void;
+  onWorktree: (s: AggSession, path: string) => void;
 }
 
 // O iOS já vibra ao abrir o menu de contexto; o PopupMenu do Android não.
 const vibrarAoAbrir =
   Platform.OS === 'android' ? () => void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {}) : undefined;
 
-export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor, onPress, onGit, onExcluir, onRenomear, onResume }: Props) {
+export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor, onPress, onGit, onExcluir, onRenomear, onResume, onWorktree }: Props) {
   const { theme } = useUnistyles();
   // O orquestrador não se renomeia nem se fecha: o backend recusa, então a linha nem oferece.
   const orq = isOrq(s);
@@ -89,6 +91,9 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
     s.branch,
     pairLabel,
   ].filter((p): p is string => !!p);
+  const wtPath = s.worktree_path ?? (s.worktree ? s.cwd ?? null : null);
+  const wtNome = worktreeLabel(s);
+  const juntada = useWorktreeStatus(s.serverId, wtPath)?.merged === true;
   const corEstado = theme.tokens.pill[PILL_DO_ESTADO[s.state]].fg;
   const muted = theme.tokens.text.muted;
 
@@ -162,12 +167,21 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
           {sub ?? rotuloEstado(s.state)}
         </Text>
         {/* Uma linha discreta de contexto, sem ícones: provedor · máquina · pasta · ramo · par.
-            Diff e worktree ficam na tela de Git; a pasta some quando repete o nome da sessão. */}
+            Diff fica na tela de Git; a pasta some quando repete o nome da sessão. A pasta da
+            worktree vem logo abaixo, num chip próprio que abre a folha dela. */}
         {meta.length || mostrarServidor ? (
           <Text style={[styles.meta, { color: muted }]} numberOfLines={1}>
             {mostrarServidor ? <Text style={{ color: s.serverColor }}>{s.serverLabel}{meta.length ? ' · ' : ''}</Text> : null}
             {meta.join(' · ')}
           </Text>
+        ) : null}
+        {s.worktree_gone ? (
+          <Text style={[styles.meta, { color: muted }]} numberOfLines={1}>{m.worktree_apagada()}</Text>
+        ) : wtNome && wtPath ? (
+          <Pressable onPress={() => onWorktree(s, wtPath)} accessibilityRole="button"
+            accessibilityLabel={`${m.sessao_worktree()}: ${wtNome}`} hitSlop={8} style={styles.wt}>
+            <Chip icon="GitBranch" mono>{`${wtNome}${juntada ? ' ✓' : ''}`}</Chip>
+          </Pressable>
         ) : null}
         {s.limited || loop ? (
           <View style={styles.chips}>
@@ -200,5 +214,6 @@ const styles = StyleSheet.create((theme) => ({
   meta: { fontSize: theme.base.text.xs, lineHeight: 18 },
   metaTxt: { fontSize: theme.base.text.xs },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: 4 },
+  wt: { alignSelf: 'flex-start', marginTop: theme.base.space[1] },
   resume: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4, minHeight: 32, alignSelf: 'flex-start' },
 }));
