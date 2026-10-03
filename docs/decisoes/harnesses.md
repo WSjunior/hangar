@@ -5,12 +5,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 
 ## Regras vigentes
 
-- **tok/s "agora" é medido no stream da resposta, nunca no transcript.** Do primeiro pedaço
-  da resposta ao fim dela, com o `output_tokens` real: sem terminal pelo `message_start` →
-  `message_delta` do `stream_event`; com terminal pelo `turn.step` do plugin (`rate.ts` →
-  `POST /api/plugin/rate`). Só o loop principal entra. Sem nenhum dos dois, a reserva sai do
-  jsonl e leva "~", porque inclui a espera pelo primeiro token. Ver
-  [velocidade de geração](#velocidade-de-geração-tok-s).
+- **tok/s "agora" é medido no stream da resposta, nunca no transcript.** Do `message_start`
+  ao fim da resposta, com o `output_tokens` real: sem terminal pelo `stream_event`; com
+  terminal pelo `turn.step` do plugin (`rate.ts` → `POST /api/plugin/rate`). Nunca a partir
+  do primeiro texto: o pensamento resumido chega segundos depois de gerado. Só o loop
+  principal entra. Medida de outro transcript ou mais velha que a última resposta do
+  transcript não vale; aí a reserva sai do jsonl e leva "~", porque inclui a espera pelo
+  primeiro token. Ver [velocidade de geração](#velocidade-de-geração-tok-s).
 
 - **Modo de abertura omitido herda a preferência do servidor.** `headless_default` nasce
   ligado para Claude/Codex; a escolha humana do dono na criação passa a ser o padrão.
@@ -2077,3 +2078,9 @@ Sem estimativa durante a geração: a primeira versão mostrava caracteres ÷ 4 
 escrevia, e o número medido foi ~67 tok/s em voo contra ~122 exatos quando a mesma resposta
 fechava. O pensamento chega resumido (`--thinking-display summarized`), então os caracteres
 não acompanham os tokens. O "agora" é a última resposta fechada.
+
+O relógio parte do `message_start`, não do primeiro pedaço de conteúdo. Medido no mesmo dia
+com `claude -p --include-partial-messages --thinking-display summarized` (Opus 5.5):
+`message_start` em 5,04 s, primeiro `thinking_delta` em 7,31 s, fim em 11,00 s com 431 tokens.
+Partindo do primeiro pedaço daria 117 tok/s; partindo do `message_start`, 72. Os tokens do
+pensamento foram gerados antes de o resumo dele chegar.

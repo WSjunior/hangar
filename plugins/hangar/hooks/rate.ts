@@ -16,8 +16,9 @@ async function enviar($: EngineInterface, tokens: number, seconds: number) {
   }
 }
 
-/** Velocidade de geração: do primeiro pedaço da resposta ao último, com o `output_tokens` real
- * que chega no fim. A espera antes do primeiro pedaço fica de fora de propósito. */
+/** Velocidade de geração: do primeiro pedaço do stream (o envelope do `message_start`) ao último,
+ * com o `output_tokens` real que chega no fim. Partir do primeiro texto inflaria: o pensamento
+ * resumido chega segundos depois de gerado. O envio não é aguardado para não segurar o passo. */
 export function registerRate(on: On) {
   on("turn.step", async function* ($, e, next) {
     // Subagente roda em paralelo ao principal: misturar os relógios falsearia a medida.
@@ -30,6 +31,6 @@ export function registerRate(on: On) {
       if (c.kind === "stop" && c.usage?.output_tokens) final = [c.usage.output_tokens, (agora - inicio) / 1000];
       yield c;
     }
-    if (final) await enviar($, final[0], final[1]);
+    if (final) void enviar($, final[0], final[1]);
   });
 }

@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app import atomico
 from app.auth import require_loopback
@@ -929,8 +929,8 @@ async def state(body: StateBody, request: Request):
 class RateBody(BaseModel):
     sessao: str
     token: str
-    tokens: int
-    seconds: float
+    tokens: int = Field(gt=0, le=1_000_000)
+    seconds: float = Field(gt=0, le=3600, allow_inf_nan=False)
 
 
 @plugin_router.post("/rate")

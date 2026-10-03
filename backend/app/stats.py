@@ -46,7 +46,7 @@ class _Fold:
         self.out_tok = 0
         self.out_tok_untimed = 0   # tokens sem tempo de LLM na conta (subagente)
         self._calls: deque[tuple[int, float]] = deque(maxlen=RECENT_CALLS)
-        self._pend: list | None = None   # [tokens, início, fim] da resposta ainda aberta
+        self._pend: list | None = None   # [tokens, início, fim, message.id] da resposta mais nova
         self.cache_read_tok = 0
         self.cache_write_tok = 0
         self._invalid_usage = False
@@ -92,6 +92,10 @@ class _Fold:
         if call := self._pend_call():
             self._calls.append(call)
         self._pend = None
+
+    def last_call_ts(self) -> float | None:
+        """Fim da resposta mais nova no transcript (relógio de parede)."""
+        return self._pend[2] if self._pend else None
 
     def _ttft(self, ts: float | None) -> None:
         if self._prompt_ts is not None and ts is not None and 0 <= ts - self._prompt_ts <= _GAP_TETO_S:
@@ -139,7 +143,6 @@ class _FoldClaude(_Fold):
         if obj.get("isMeta"):
             # Recado de outra sessão chega como meta: não é turno, mas o relógio parte dele.
             if t == "user" and not sidechain:
-                self._close_call()
                 self._gap(ts)
             return
 
@@ -167,12 +170,13 @@ class _FoldClaude(_Fold):
                 if gap is not None:
                     self.llm_ms += gap * 1000.0
                 # Cada bloco da resposta vira uma linha quando ELE termina: a chamada vai do
-                # cursor antes da 1ª linha até a última linha da mesma mensagem.
+                # cursor antes da 1ª linha até a última linha da mesma mensagem, mesmo com
+                # resultado de ferramenta gravado entre os blocos.
                 if out:
                     self._close_call()
                     if gap is not None:
-                        self._pend = [out, t0, ts]
-                elif self._pend is not None and ts is not None:
+                        self._pend = [out, t0, ts, mid]
+                elif self._pend is not None and self._pend[3] == mid and ts is not None:
                     self._pend[2] = ts
                 self._ttft(ts)
                 for b in _blocks(msg):
@@ -183,7 +187,6 @@ class _FoldClaude(_Fold):
         # t == "user": ou resultado de tool, ou prompt humano de verdade
         if sidechain:
             return
-        self._close_call()
         msg = obj.get("message") or {}
         content = msg.get("content")
         blocks = content if isinstance(content, list) else []
@@ -442,6 +445,10 @@ class Accumulator:
     def collect(self) -> dict | None:
         with self._trava:
             return self._collect()
+
+    def last_call_ts(self) -> float | None:
+        with self._trava:
+            return self._fold.last_call_ts()
 
     def usage_totals(self) -> dict[str, int]:
         """Totais exatos e limite das linhas completas, sem arredondar o cache do SSE."""
