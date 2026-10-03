@@ -657,8 +657,8 @@ confere o navegador nativo por esse pid, e o `navshell._chave` do backend acha o
   pendente espera o prazo dela.
 - **`open` com a sessão na tela cria o navegador, mas não abre a aba Navegador sozinho** (o
   Electron monta o painel). Linha `pendente` em `desktop-native/docs/chat-parity.md`.
-- **A tela remota do navegador no celular** (`backend/app/navsock.py`, porta 9223) continua só no
-  Electron.
+- **A tela remota do navegador no celular** (`backend/app/navsock.py`) ficou só no Electron até
+  02/10/2026; hoje o nativo a atende pelo repasse `/cdp` (entrada abaixo).
 - **macOS e Linux não mudam**: um navegador por janela, sem controle pelo CLI.
 
 Medição (29/09/2026, build debug, app rodando como Administrator, DevTools desligado):
@@ -678,3 +678,52 @@ Medição (29/09/2026, build debug, app rodando como Administrator, DevTools des
   outro pid são apagados.
 - **Atalho `hangar-preview.cmd` + PowerShell 5.1** estragam aspas e `||` em `eval` (anterior a
   este trabalho); pelo Git Bash funciona.
+
+## Tela remota do navegador no app nativo do Windows, e o Electron sai dessas máquinas (02/10/2026)
+
+02/10/2026. A tela remota do navegador no celular era a última função que, no Windows, só o
+Electron atendia: o `navsock.py` falava CDP direto com a porta 9223 que o `shell/main.cjs` abre, e o
+nativo não tem porta de depuração. O pedido do usuário foi tirar o Electron uma plataforma por vez,
+um PR para cada, começando pelo Windows.
+
+- **O nativo repassa, não abre porta.** O servidor local dele (`browser/server.rs`, o mesmo do
+  `/cmd`, porta efêmera e token no `_srv.json`) ganhou `GET /cdp?chave=<servidor::sessão>`, um
+  WebSocket com o mesmo Bearer. Ali passa só a lista fechada que o `navsock` usa
+  (`browser/relay.rs`, `RELAYED`): screencast, ack, print e `Input.*`. `Runtime.evaluate` fica de
+  fora; a url inicial vem do sidecar, que o nativo regrava a cada navegação.
+- **O formato é o do CDP**, então o `_Cdp` do backend só troca URL e cabeçalho (`_conexao`). Sidecar
+  com `targetId` é o Electron; com `pid` é o nativo, e só se o `_srv.json` for do mesmo `pid`.
+- **Um espectador por navegador; o último assume.** O WebView2 tem uma sessão CDP só. O anterior
+  recebe `Inspector.detached` com `reason: replaced_by_another_viewer`, que o celular mostra como
+  "a tela remota foi aberta em outro aparelho".
+- **Quadro sem entrega é confirmado pelo nativo.** A fila do espectador guarda 4 quadros; o mais
+  velho sai quando chega outro (`force_send`), e o ack dele é mandado ali mesmo, senão o Chromium
+  para o screencast esperando.
+- **Os comandos do celular não passam pelo turno do controlador**, como no Electron, em que o
+  celular era outra sessão CDP: um toque não espera o `wait` de 15 s do agente.
+- **Remoção do Electron no Windows** pelo passo `2026-10-02-electron-removido-windows`
+  (`scripts/remover-electron.ps1`). Ele nunca falha, porque passo que falha derruba o Atualizar
+  inteiro: sem o nativo instalado não mexe em nada; com o Electron aberto tira só os atalhos e
+  deixa o `shell\node_modules` (binário em uso não se apaga). Ficam o código de `shell/` (o
+  `hangar-preview` importa `preview_fmt.cjs`, `folha.cjs` e `jev_objetivo.cjs`) e o
+  `%APPDATA%\Electron` (o nativo importa servidores e aparência de lá, `src/electron.rs`).
+- **O aviso "feche e abra o app" do Atualizar** só aparece com `shell/node_modules/electron`
+  presente.
+- **A tela remota aceita sessão sem terminal.** O `nav_ws` conferia só o tmux e recusava (403 no
+  handshake, "Conexão caiu" na tela) a sessão sem terminal que tem navegador; agora usa a mesma
+  checagem da rota que abre o navegador (`_session_exists`). Valia também para o Electron.
+- **Tecla nomeada do celular leva código virtual** (`_TECLAS` no `navsock`, a tabela do `press`).
+  Só com `key`, o evento chegava à página, mas o Chromium não editava: Backspace não apagava e
+  Enter não enviava. Valia também para o Electron.
+- **Fora do escopo:** Linux e macOS (o motor deles não fala CDP) e o app Expo, que não tem a tela
+  remota.
+
+Medição (02/10/2026, Windows 11, app nativo compilado da branch com MSVC, backend na mesma
+máquina, PWA em 390×844 pelo túnel SSH): quadros chegam com o navegador escondido (WebView2
+estacionado fora da tela); com a página parada o screencast não emite e o `navsock` cai no print
+em laço, como no Electron. Toque, texto acentuado (`insertText`), Backspace, rolagem por arrasto
+(220 px), navegação com a barra acompanhando a url, troca de layout (390×844 no navegador do
+nativo), troca de aparelho ("a tela remota foi aberta em outro aparelho") e `hangar-preview close`
+("o navegador desta sessão fechou"), todos conferidos lendo o estado da página pelo
+`hangar-preview eval`. O script de remoção foi conferido nos cenários sem nativo, Electron aberto,
+Electron fechado (com arquivo somente-leitura dentro do `node_modules`) e segunda execução.

@@ -238,6 +238,8 @@ def test_backend_que_nao_sobe_volta_pro_commit_anterior(repo, monkeypatch):
     ("backend/x.py", False),
 ])
 def test_shell_mudou_so_quando_o_pull_toca_a_janela(repo, monkeypatch, arquivo, esperado):
+    monkeypatch.setattr(atualizar, "_electron_instalado", lambda: True)
+
     def _puxar_avanca(pre):
         alvo = repo / arquivo
         alvo.parent.mkdir(parents=True, exist_ok=True)
@@ -253,6 +255,23 @@ def test_shell_mudou_so_quando_o_pull_toca_a_janela(repo, monkeypatch, arquivo, 
     final = atualizar.executar()
     assert final["ok"] is True
     assert final["shell_mudou"] is esperado
+
+
+def test_shell_mudou_nao_avisa_sem_electron_instalado(repo, monkeypatch):
+    def _puxar_avanca(pre):
+        (repo / "shell").mkdir(exist_ok=True)
+        (repo / "shell" / "main.cjs").write_text("novo\n", encoding="utf-8")
+        _git(repo, "add", "shell/main.cjs")
+        _git(repo, "commit", "-m", "shell novo")
+
+    monkeypatch.setattr(atualizar, "_puxar", _puxar_avanca)
+    monkeypatch.setattr(atualizar, "_aplicar_passos", lambda: None)
+    monkeypatch.setattr(atualizar, "_preparar", lambda t, *a, **k: None)
+    monkeypatch.setattr(atualizar, "_reiniciar", lambda t, *a, **k: None)
+    monkeypatch.setattr(atualizar, "_subiu", lambda porta, teto=0: True)
+    final = atualizar.executar()
+    assert final["ok"] is True
+    assert final["shell_mudou"] is False
 
 
 def test_mesmo_pid_na_porta_depois_do_restart_vai_pro_rollback(repo, monkeypatch):
