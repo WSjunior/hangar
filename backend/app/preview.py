@@ -592,7 +592,7 @@ class PreviewBroker:
     async def _loop(self) -> None:
         from app import terminal_observer
         async with terminal_observer.lease(self.name, self.provider if self.provider == "claude" else None,
-                                           self.stem_get or (lambda: None)) as source:
+                                           lambda: self.stem_get() if self.stem_get is not None else None) as source:
             heartbeat = asyncio.create_task(source.watch()) if self.provider == "claude" else None
             try:
                 await self._observe_loop()

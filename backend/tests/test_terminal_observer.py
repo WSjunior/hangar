@@ -678,3 +678,44 @@ def test_http_reserve_does_not_swallow_request_cancellation(monkeypatch):
             await task
         assert task.cancelled()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_preview_lease_follows_replaced_getter_after_clear_without_restarting_subscriber(monkeypatch, enabled):
+    from app import preview
+    t = bridge()
+    t.configure("127.0.0.1:12345" if enabled else None, "test-only" if enabled else None)
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    calls = []
+    monkeypatch.setattr(t, "_request", fake_http(calls))
+    monkeypatch.setattr(preview, "read_sidecar", lambda stem: f"preview-{stem}")
+    old_stem, current_stem = ["a"], ["a"]
+    old_getter = lambda: old_stem[0]
+    current_getter = lambda: current_stem[0]
+    name = "preview-current-getter"
+    async def run():
+        broker = preview.PreviewBroker.get(name, "claude", old_getter)
+        subscriber = broker.subscribe()
+        monitor = None
+        task = None
+        try:
+            assert await anext(subscriber) == ("", False, False)
+            assert await asyncio.wait_for(anext(subscriber), 1) == ("preview-a", True, True)
+            task = broker._task
+            assert preview.PreviewBroker.get(name, "claude", current_getter) is broker
+            current_stem[0] = "b"
+            assert old_getter() == "a"
+            monitor = t.lease(name, "claude", current_getter)
+            await monitor.start()
+            broker.reset()
+            assert await asyncio.wait_for(anext(subscriber), 1) == ("preview-b", True, True)
+            assert broker._task is task and not task.done()
+            assert broker._subs == 1
+        finally:
+            await subscriber.aclose()
+            if task is not None:
+                await asyncio.gather(task, return_exceptions=True)
+            if monitor is not None:
+                await monitor.close()
+    asyncio.run(run())
+    assert bool(calls) is enabled
