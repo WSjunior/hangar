@@ -1,4 +1,4 @@
-//! Runtime exclusivo das sessões Claude e Codex sem terminal.
+//! Runtime exclusivo do Claude terminal/sem terminal e do Codex sem terminal.
 pub mod protocol;
 pub mod cano;
 pub mod queue;
@@ -7,6 +7,7 @@ pub mod claude;
 pub mod codex;
 pub mod actor;
 pub mod gateway;
+pub mod terminal;
 
 #[derive(Default)]
 pub(crate) struct LiveBuffer {

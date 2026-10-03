@@ -219,6 +219,19 @@ def apply_action(state, action, clock, call_id):
                 for attempt in operation["wire_attempts"].values():
                     if attempt["status"] == "dispatching":
                         attempt["status"] = "unknown"
+        protected_status = {"accepted", "unknown", "dispatching", "confirmed"}
+        phases = {op["payload"].get("logical_id") for op in operations.values()
+                  if op["status"] in protected_status}
+        protected = {op["entry_id"] for op in operations.values()
+                     if op["status"] in protected_status or op["id"] in phases}
+        claimed = {row.get("id") for call, op in operations.items()
+                   if call.startswith("call::terminal:queue:") and op["payload"].get("kind") == "claim"
+                   for row in op["result"]}
+        # Só o claim do executor terminal, sem despacho, prova ausência de efeito na TUI.
+        for row in rows:
+            if (row.get("delivered") is True and not row.get("confirmed") and not row.get("desistiu")
+                    and row.get("id") in claimed and row.get("id") not in protected):
+                row["delivered"] = False
         return None
     if kind == "confirm_occurrence":
         from app.runtime_receipt import validate_proof

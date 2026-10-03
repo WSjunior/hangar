@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 
 
@@ -52,8 +53,11 @@ class ReceiptIndex:
                 data = stream.read(min(offset, 256))
         except FileNotFoundError:
             identity, data, offset = None, b"", 0
-        return {"conversation": self.conversation, "file_identity": identity,
-                "offset": offset, "anchor": _anchor(data, len(data))}
+        cursor = {"conversation": self.conversation, "file_identity": identity,
+                  "offset": offset, "anchor": _anchor(data, len(data))}
+        if identity is None:
+            cursor["absent_since"] = time.time()
+        return cursor
 
     def scan(self, path: Path) -> list[dict]:
         try:
@@ -114,20 +118,24 @@ class ReceiptIndex:
             record_id = f"id:{provider_id}" if isinstance(provider_id, str) and provider_id else f"offset:{start}"
             occurrences.append({"id": f"{self.conversation}|{identity}|{record_id}",
                 "conversation": self.conversation, "file_identity": identity, "offset": start,
-                "end_offset": offset, "text": text, "kind": kind, "timestamp": _ts_of_obj(obj) or None})
+                "end_offset": offset, "text": text, "kind": kind, "timestamp": _ts_of_obj(obj) or None,
+                "recorded_conversation": obj.get("sessionId") if isinstance(obj.get("sessionId"), str) else None})
         self.data, self.file_identity, self.occurrences = data, identity, occurrences
         self.scan_offset = complete_offset
         return copy.deepcopy(occurrences)
 
     def match_after(self, cursor: dict, row: dict, used_occurrences: dict) -> dict | None:
         from app.pqueue import _chaves_de_commit, _linhas_da_entrada
-        if cursor["conversation"] != self.conversation or not cursor["file_identity"] or cursor["file_identity"] != self.file_identity:
+        if (cursor["conversation"] != self.conversation or not self.file_identity
+                or cursor["file_identity"] is not None and cursor["file_identity"] != self.file_identity):
             return None
         observed = _anchor(self.data, cursor["offset"])
         if observed is None or observed != cursor["anchor"]:
             return None
         for occurrence in self.occurrences:
             if occurrence["id"] in used_occurrences or occurrence["offset"] < cursor["offset"]:
+                continue
+            if not _cursor_accepts(cursor, occurrence):
                 continue
             matches = _linhas_da_entrada(row) & _chaves_de_commit(occurrence["text"])
             if matches:
@@ -139,10 +147,19 @@ class ReceiptIndex:
 def validate_proof(proof: dict, cursor: dict, row: dict) -> bool:
     from app.pqueue import _chaves_de_commit, _linhas_da_entrada
     occurrence = proof["occurrence"]
-    return (proof["cursor"] == cursor and cursor["file_identity"] is not None
+    return (proof["cursor"] == cursor and _cursor_accepts(cursor, occurrence)
         and occurrence["conversation"] == cursor["conversation"]
-        and occurrence["file_identity"] == cursor["file_identity"]
         and occurrence["offset"] >= cursor["offset"] and occurrence["end_offset"] > occurrence["offset"]
         and occurrence["kind"] in {"user", "dequeue", "steer"}
         and proof["observed_anchor"] == cursor["anchor"]
         and proof["normalized_text"] in _linhas_da_entrada(row) & _chaves_de_commit(occurrence["text"]))
+
+
+def _cursor_accepts(cursor: dict, occurrence: dict) -> bool:
+    if cursor["file_identity"] is not None:
+        return occurrence["file_identity"] == cursor["file_identity"]
+    # Arquivo novo só comprova a conversa explícita e uma ocorrência posterior ao despacho.
+    since, timestamp = cursor.get("absent_since"), occurrence.get("timestamp")
+    return (cursor["offset"] == 0 and cursor["anchor"] == _anchor(b"", 0)
+        and occurrence.get("recorded_conversation") == cursor["conversation"]
+        and type(since) in {int, float} and type(timestamp) in {int, float} and timestamp >= since)

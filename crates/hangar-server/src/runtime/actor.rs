@@ -22,7 +22,10 @@ impl PolicyClient {
         Self { upstream,secret,instance,http:crate::proxy::client() }
     }
     async fn run(&self,target:&RuntimeTarget,kind:&str,request_id:&RequestId,payload:Value,phase_id:&str) -> Result<Value,RuntimeError> {
-        let body = json!({"key":target.key,"generation":target.generation,"request_id":request_id,"phase_id":phase_id,"kind":kind,"payload":payload});
+        self.run_for(&target.key,target.generation,kind,request_id,payload,phase_id).await
+    }
+    pub async fn run_for(&self,key:&str,generation:u64,kind:&str,request_id:&RequestId,payload:Value,phase_id:&str) -> Result<Value,RuntimeError> {
+        let body = json!({"key":key,"generation":generation,"request_id":request_id,"phase_id":phase_id,"kind":kind,"payload":payload});
         let request = axum::http::Request::post(format!("http://{}/internal/runtime/policy",self.upstream))
             .header("x-hangar-internal",&self.secret).header("x-hangar-runtime-instance",&self.instance)
             .header("content-type","application/json").body(axum::body::Body::from(body.to_string()))

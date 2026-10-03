@@ -100,3 +100,35 @@ fn late_reply_matches_generation_and_type() {
     }
     assert!(store.state().operations["op"].status == Status::Dispatching);
 }
+
+#[test]
+fn terminal_runtime_store_recovery_only_unclaims_proved_unsent_terminal_claim() {
+    for (case,root_status,side_effect,terminal_claim,expected) in [
+        ("safe",None,false,true,false),
+        ("prepared",Some(Status::Prepared),false,true,false),
+        ("unknown",Some(Status::Unknown),false,true,true),
+        ("dispatching",Some(Status::Dispatching),false,true,true),
+        ("accepted",Some(Status::Accepted),false,true,true),
+        ("confirmed",Some(Status::Confirmed),false,true,true),
+        ("side_effect",Some(Status::Prepared),true,true,true),
+        ("legacy",None,false,false,true),
+    ] {
+        let dir=tempfile::tempdir().unwrap();
+        let path=dir.path().join("state"); let projection=dir.path().join("projection");
+        let mut store=Store::open(&path,&projection,State::new("key",1,"session",vec![])).unwrap();
+        let clock=ClockSample {monotonic_s:0.0,epoch_s:1800000000.0};
+        store.exec(1,"append",clock,Action::Append {text:"Olá".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("entry".into())}).unwrap();
+        store.exec(1,if terminal_claim{"terminal:queue:999"}else{"legacy-claim"},clock,Action::Claim {min_ts:1.0,limit:Some(1),entry_id:None}).unwrap();
+        if let Some(status)=root_status {
+            store.exec(1,"root",clock,Action::Prepare {id:"root".into(),entry_id:Some("entry".into()),payload:json!({"kind":"input"})}).unwrap();
+            if status==Status::Dispatching {store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"root".into(),wire_id:"wire".into()}).unwrap();}
+            else if status!=Status::Prepared {store.exec(1,"finish",clock,Action::Finish {id:"root".into(),status,result:json!({})}).unwrap();}
+        }
+        if side_effect {
+            store.exec(1,"phase",clock,Action::Prepare {id:"phase".into(),entry_id:None,payload:json!({"logical_id":"root"})}).unwrap();
+            store.exec(1,"phase-dispatch",clock,Action::BeginDispatch {id:"phase".into(),wire_id:"rpc".into()}).unwrap();
+        }
+        drop(store); let mut store=Store::open(&path,&projection,State::new("key",1,"session",vec![])).unwrap();
+        store.exec(1,"recover",clock,Action::Recover).unwrap(); assert_eq!(store.state().rows[0]["delivered"],expected,"{case}");
+    }
+}

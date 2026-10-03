@@ -12,6 +12,8 @@ pub struct DispatchCursor {
     pub file_identity: Option<String>,
     pub offset: u64,
     pub anchor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub absent_since: Option<f64>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -25,6 +27,8 @@ pub struct Occurrence {
     pub text: String,
     pub kind: String,
     pub timestamp: Option<f64>,
+    #[serde(default)]
+    pub recorded_conversation: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -96,7 +100,9 @@ impl ReceiptIndex {
             Err(error) if error.kind() == io::ErrorKind::NotFound => (None,Vec::new(),0),
             Err(error) => return Err(error),
         };
-        Ok(DispatchCursor { conversation:self.conversation.clone(),file_identity:identity,
+        let absent_since = if identity.is_none() { Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map_err(io::Error::other)?.as_secs_f64()) } else { None };
+        Ok(DispatchCursor { conversation:self.conversation.clone(),file_identity:identity,absent_since,
             offset,anchor:anchor(&data,data.len() as u64).unwrap() })
     }
 
@@ -150,7 +156,8 @@ impl ReceiptIndex {
             let record = provider_id.filter(|s|!s.is_empty()).map_or_else(||format!("offset:{start}"),|id|format!("id:{id}"));
             let timestamp = obj["timestamp"].as_str().and_then(crate::transcript::ts_of_iso);
             occurrences.push(Occurrence { id:format!("{}|{id}|{record}",self.conversation),conversation:self.conversation.clone(),
-                file_identity:id.clone(),offset:start,end_offset:offset,text,kind:kind.into(),timestamp });
+                file_identity:id.clone(),offset:start,end_offset:offset,text,kind:kind.into(),timestamp,
+                recorded_conversation:obj["sessionId"].as_str().map(str::to_owned) });
         }
         self.data = data; self.identity = Some(id); self.occurrences = occurrences;
         self.scan_offset = complete_offset;
@@ -158,11 +165,13 @@ impl ReceiptIndex {
     }
 
     pub fn match_after(&self, cursor: &DispatchCursor, row: &Value, used: &BTreeMap<String,Value>) -> Option<ReceiptProof> {
-        if cursor.conversation != self.conversation || cursor.file_identity.is_none() || cursor.file_identity != self.identity { return None; }
+        if cursor.conversation != self.conversation || self.identity.is_none()
+            || (cursor.file_identity.is_some() && cursor.file_identity != self.identity) { return None; }
         let observed = anchor(&self.data,cursor.offset)?;
         if observed != cursor.anchor { return None; }
         for occurrence in &self.occurrences {
             if used.contains_key(&occurrence.id) || occurrence.offset < cursor.offset { continue; }
+            if !cursor_accepts(cursor,occurrence) { continue; }
             let candidates = super::queue::entry_lines(row);
             let committed = crate::transcript::history::chaves_de_commit(&occurrence.text);
             if let Some(normalized_text) = candidates.into_iter().find(|c|committed.contains(c)) {
@@ -181,11 +190,21 @@ fn content_text(content: &Value) -> String {
 
 impl ReceiptProof {
     pub fn validates(&self, cursor: &DispatchCursor, row: &Value) -> bool {
-        self.cursor == *cursor && cursor.file_identity.as_deref() == Some(self.occurrence.file_identity.as_str())
+        self.cursor == *cursor && cursor_accepts(cursor,&self.occurrence)
             && self.occurrence.conversation == cursor.conversation && self.occurrence.offset >= cursor.offset
             && self.occurrence.end_offset > self.occurrence.offset && self.observed_anchor == cursor.anchor
             && matches!(self.occurrence.kind.as_str(),"user" | "dequeue" | "steer")
             && super::queue::entry_lines(row).contains(&self.normalized_text)
             && crate::transcript::history::chaves_de_commit(&self.occurrence.text).contains(&self.normalized_text)
+    }
+}
+
+fn cursor_accepts(cursor:&DispatchCursor,occurrence:&Occurrence)->bool {
+    match &cursor.file_identity {
+        Some(identity)=>identity==&occurrence.file_identity,
+        // Arquivo novo só comprova a conversa explícita e uma ocorrência posterior ao despacho.
+        None=>cursor.offset==0 && cursor.anchor==anchor(&[],0).unwrap()
+            && occurrence.recorded_conversation.as_deref()==Some(cursor.conversation.as_str())
+            && cursor.absent_since.is_some_and(|since|occurrence.timestamp.is_some_and(|ts|ts>=since)),
     }
 }

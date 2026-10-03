@@ -349,6 +349,19 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
                     if attempt["status"] == "dispatching" { attempt["status"] = json!("unknown"); }
                 }
             }
+            let phases:BTreeSet<_> = state.operations.values().filter(|op|matches!(op.status,Status::Accepted|Status::Unknown|Status::Dispatching|Status::Confirmed))
+                .filter_map(|op|op.payload["logical_id"].as_str()).collect();
+            let protected:BTreeSet<_> = state.operations.values().filter(|op|matches!(op.status,Status::Accepted|Status::Unknown|Status::Dispatching|Status::Confirmed)
+                || phases.contains(op.id.as_str())).filter_map(|op|op.entry_id.as_deref()).collect();
+            let claimed:BTreeSet<_> = state.operations.iter().filter(|(call,op)|call.starts_with("call::terminal:queue:") && op.payload["kind"]=="claim")
+                .flat_map(|(_,op)|op.result.as_array().into_iter().flatten()).filter_map(|row|row["id"].as_str()).collect();
+            // Só o claim do executor terminal, sem despacho, prova ausência de efeito na TUI.
+            for row in &mut state.rows {
+                let id=row_id(row);
+                if row["delivered"]==true && row["confirmed"]!=true && row["desistiu"]!=true && claimed.contains(id) && !protected.contains(id) {
+                    row["delivered"]=json!(false);
+                }
+            }
             Value::Null
         }
         Action::SetRuntimeState { state: runtime_state } => {

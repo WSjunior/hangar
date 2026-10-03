@@ -49,7 +49,7 @@ Rodar `cargo test --locked -p hangar-server terminal_input` em `crates/`; regist
 Executar socket/plugin/tmux na ordem da spec; adaptar primitivas do multiplexador à plataforma.
 Escrita/timeout depois do efeito produz incerteza; não introduzir driver pela tela do Codex.
 
-- [ ] **Step 4: Conferir testes focados e revisar diff independente**
+- [x] **Step 4: Conferir testes focados e revisar diff independente**
 
 Mesmo comando, esperado verde. Revisor lê spec e diff inteiro da Task; corrigir problemas relevantes.
 
@@ -61,23 +61,25 @@ Stage explícito; mensagem `feat(server): add Claude terminal delivery driver`.
 
 **Arquivos:** criar `runtime/terminal.rs`; integrar `runtime/gateway.rs`, `runtime/mod.rs`,
 `runtime/actor.rs` somente interfaces necessárias, `runtime/receipt.rs` se necessário.
+`backend/app/runtime_receipt.py` e seus testes acompanham o cursor do primeiro transcript e a
+identidade da conversa, para a reserva Python consumir as provas novas sem perder confirmação.
 `backend/app/rust_server.py` e `crates/hangar-server/src/lib.rs` fixam protocolo 9 neste commit,
 junto da primeira mudança do descriptor privado.
 **Interfaces:** adotar descriptor terminal via gateway existente; submit/control/queue/snapshot/
 drain/confirm/detach com mesmos envelopes e fila 2B. Serviços primitivos ficam registrados no
 diário e usam `PolicyClient`. Reutilizar lease/Store/QueueActor/ReceiptIndex existentes.
 
-- [ ] **Step 1: Escrever testes de exclusividade e diário**
+- [x] **Step 1: Escrever testes de exclusividade e diário**
 
 Adotar terminal sem cano; repetir operação não escreve novamente; troca de geração é recusada;
 duas entradas iguais confirmam em ocorrências distintas; unknown sobrevive a restart; idle drena
 sem SSE; claim limita uma entrada; lease permanece até terminar operações em voo.
 
-- [ ] **Step 2: Conferir falha antes do código**
+- [x] **Step 2: Conferir falha antes do código**
 
 Rodar `cargo test --locked -p hangar-server terminal_runtime`; esperado falha por runtime ausente.
 
-- [ ] **Step 3: Implementar executor e gateway**
+- [x] **Step 3: Implementar executor e gateway**
 
 Serializar o driver da Task 1, gravar intento/cursor/dispatch antes de efeitos e finish depois;
 usar confirmação incremental com identificação da conversa; timer não redigita incerto.
@@ -87,7 +89,7 @@ Não publicar segunda fonte de estado/prévia; controles seguem allowlists e pos
 
 Rodar testes de runtime terminal, fila, recibos e gateway; esperado verde.
 
-- [ ] **Step 5: Marcar progresso e commitar Task 2**
+- [x] **Step 5: Marcar progresso e commitar Task 2**
 
 Stage explícito; mensagem `feat(server): own Claude terminal delivery and queue`.
 

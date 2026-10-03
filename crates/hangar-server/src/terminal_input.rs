@@ -93,11 +93,17 @@ pub trait TerminalIo: Send + Sync {
 #[derive(Clone)]
 pub struct ProcessIo { pub command_timeout: Duration, pub socket_timeout: Duration }
 impl Default for ProcessIo { fn default() -> Self { Self { command_timeout: Duration::from_secs(3), socket_timeout: Duration::from_secs(3) } } }
+fn child_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    // O multiplexador e o clipboard não recebem a autoridade privada do servidor.
+    for name in ["HANGAR_INTERNAL_SECRET", "HANGAR_RUNTIME_INSTANCE", "CP_AUTH_TOKEN"] { command.env_remove(name); }
+    command
+}
 impl TerminalIo for ProcessIo {
     fn command<'a>(&'a self, request: CommandRequest) -> IoFuture<'a, CommandOutput> {
         Box::pin(async move {
             use std::process::Stdio;
-            let mut child = Command::new(request.program).args(request.args).stdin(Stdio::piped())
+            let mut child = child_command(request.program).args(request.args).stdin(Stdio::piped())
                 .stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true).spawn()
                 .map_err(|_| IoFailure { code: "spawn_failed", may_have_written: false })?;
             let mut stdin = child.stdin.take().unwrap();
@@ -123,7 +129,7 @@ impl TerminalIo for ProcessIo {
                 _ => {
                     #[cfg(windows)]
                     if let Some(pid) = child.id() {
-                        let mut killer = Command::new("taskkill.exe").args(["/PID", &pid.to_string(), "/T", "/F"])
+                        let mut killer = child_command("taskkill.exe").args(["/PID", &pid.to_string(), "/T", "/F"])
                             .stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true).spawn().ok();
                         if let Some(killer) = &mut killer { let _ = timeout(Duration::from_secs(3), killer.wait()).await; }
                     }

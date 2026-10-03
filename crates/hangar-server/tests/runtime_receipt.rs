@@ -84,3 +84,13 @@ fn steer_attachment_is_delivery() {
     index.scan(&path).unwrap();
     assert!(index.match_after(&cursor,&json!({"text":"Olá 🌎"}),&BTreeMap::new()).is_some());
 }
+
+#[test]
+fn terminal_runtime_absent_cursor_needs_current_conversation_and_new_timestamp() {
+    let dir=tempfile::tempdir().unwrap(); let path=dir.path().join("chat.jsonl");
+    let mut index=ReceiptIndex::new("claude","sid"); let cursor=index.capture(&path).unwrap();
+    for (sid,ts) in [("sid","2020-01-01T00:00:00Z".to_string()),("other",chrono::Utc::now().to_rfc3339())] {
+        std::fs::write(&path,format!("{}\n",json!({"type":"user","sessionId":sid,"timestamp":ts,"message":{"content":"Olá"}}))).unwrap();
+        index.scan(&path).unwrap(); assert!(index.match_after(&cursor,&json!({"text":"Olá"}),&BTreeMap::new()).is_none());
+    }
+}

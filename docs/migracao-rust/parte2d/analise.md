@@ -35,3 +35,12 @@ O mesmo coordenador bloqueia caminhos Python quando Rust possui a vida. A reserv
 diário e só assume após liberação confirmada ou morte confirmada do filho.
 
 Não foi feita medição de ganho nem uso real. Não operar sessões reais, serviços ou instaladores.
+
+## Fronteira remanescente do Codex terminal
+
+A afirmação do pedido de que a 2D fecha toda a parte 2 não corresponde à base desta árvore.
+Codex com terminal continua no WebSocket/RPC Python: `runtime_coordinator.py:151` e `:410`
+selecionam headless; `runtime_adapter.py:225` e `:928` deixam terminal no adapter original;
+`adapters/codex/adapter.py:1775` chama `turn/start`, e `appserver.py:309` escreve no WebSocket.
+A extensão de descriptor da 2D aceita terminal somente para Claude. Esse envio Codex permanece
+fora do escopo desta execução; a entrega da 2D não comprova seu porte nem o fechamento da parte 2.

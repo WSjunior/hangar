@@ -194,3 +194,28 @@ def test_distinct_occurrence_is_committed_with_confirmation(tmp_path):
     store = open_store(tmp_path)
     assert sum(bool(row.get("confirmed")) for row in store.state["rows"]) == 1
     assert len(store.state["used_occurrences"]) == 1
+
+
+@pytest.mark.parametrize("status,side_effect,terminal_claim,expected", [
+    (None, False, True, False), ("prepared", False, True, False),
+    ("unknown", False, True, True), ("dispatching", False, True, True),
+    ("accepted", False, True, True), ("confirmed", False, True, True),
+    ("prepared", True, True, True), (None, False, False, True),
+])
+def test_terminal_claim_recovery_requires_proof_before_dispatch(tmp_path, status, side_effect, terminal_claim, expected):
+    store = open_store(tmp_path)
+    store.exec(1, "append", CLOCK, append())
+    store.exec(1, "terminal:queue:999" if terminal_claim else "legacy-claim", CLOCK,
+               {"kind": "claim", "min_ts": 1.0, "limit": 1, "entry_id": None})
+    if status:
+        store.exec(1, "root", CLOCK, {"kind": "prepare", "id": "root", "payload": {"kind": "input"}, "entry_id": "entry-1"})
+        if status == "dispatching":
+            store.exec(1, "dispatch", CLOCK, {"kind": "begin_dispatch", "id": "root", "wire_id": "wire"})
+        elif status != "prepared":
+            store.exec(1, "finish", CLOCK, {"kind": "finish", "id": "root", "status": status, "result": {}})
+    if side_effect:
+        store.exec(1, "phase", CLOCK, {"kind": "prepare", "id": "phase", "payload": {"logical_id": "root"}, "entry_id": None})
+        store.exec(1, "phase-dispatch", CLOCK, {"kind": "begin_dispatch", "id": "phase", "wire_id": "rpc"})
+    store = open_store(tmp_path)
+    store.exec(1, "recover", CLOCK, {"kind": "recover"})
+    assert store.state["rows"][0]["delivered"] is expected

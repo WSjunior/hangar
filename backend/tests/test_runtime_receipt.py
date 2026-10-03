@@ -101,3 +101,37 @@ def test_attachments_and_unicode(tmp_path):
     write_echo(path, "Olá 🌎\n[Image #1]\n📎 imagem: C:\\Fotos\\ação.png")
     index.scan(path)
     assert index.match_after(cursor, {"text": "Olá 🌎 — 📎 imagem: C:\\Fotos\\ação.png"}, {}) is not None
+
+
+def test_first_prompt_missing_file_needs_new_timestamp_and_same_conversation(tmp_path):
+    from datetime import datetime, timezone
+    from app.runtime_receipt import validate_proof
+    path = tmp_path / "chat.jsonl"
+    index = ReceiptIndex("claude", "sid")
+    cursor = index.capture(path)
+    path.write_text(json.dumps({"type": "user", "sessionId": "sid", "uuid": "first",
+        "timestamp": datetime.now(timezone.utc).isoformat(), "message": {"content": "Olá"}}) + "\n")
+    index.scan(path)
+    proof = index.match_after(cursor, {"text": "Olá"}, {})
+    assert proof is not None
+    assert validate_proof(proof, cursor, {"text": "Olá"})
+    assert cursor["absent_since"] > 0
+    assert proof["occurrence"]["recorded_conversation"] == "sid"
+    assert index.match_after(cursor, {"text": "Olá"}, {proof["occurrence"]["id"]: {}}) is None
+
+
+def test_absent_cursor_does_not_accept_old_or_unidentified_conversation(tmp_path):
+    from datetime import datetime, timezone
+    from app.runtime_receipt import validate_proof
+    path = tmp_path / "chat.jsonl"
+    index = ReceiptIndex("claude", "sid")
+    cursor = index.capture(path)
+    for sid, timestamp in [("sid", "2020-01-01T00:00:00Z"), ("other", datetime.now(timezone.utc).isoformat()),
+                           (None, datetime.now(timezone.utc).isoformat())]:
+        path.write_text(json.dumps({"type": "user", "sessionId": sid, "timestamp": timestamp,
+            "message": {"content": "Olá"}}) + "\n")
+        index.scan(path)
+        assert index.match_after(cursor, {"text": "Olá"}, {}) is None
+        occurrence = index.occurrences[0]
+        assert not validate_proof({"cursor": cursor, "occurrence": occurrence, "normalized_text": "Olá",
+            "observed_anchor": cursor["anchor"]}, cursor, {"text": "Olá"})
