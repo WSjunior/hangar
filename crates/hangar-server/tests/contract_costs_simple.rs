@@ -74,6 +74,9 @@ fn omp_preserves_relative_id_final_model_and_all_message_deltas() {
     assert_eq!(out.costs, fold.close().costs);
     assert!(out.usage.is_empty() && out.areas.is_none());
     let row = &out.costs[0];
+    #[cfg(windows)]
+    assert_eq!(row.session_id, r"é\t\run-1\session");
+    #[cfg(not(windows))]
     assert_eq!(row.session_id, "é/t/run-1/session");
     assert_eq!((row.source.as_str(), row.provider.as_str(), row.model.as_str()), ("omp", "moonshotai", "novo/modelo"));
     assert_eq!((row.input, row.output, row.cache_read, row.cache_write), (6, 5, 13, 2));
@@ -209,6 +212,26 @@ fn kimi_snapshot_resume_keeps_empty_alias_fallback_and_utf8_replacement() {
     assert_eq!(fold.close().costs, resumed.close().costs);
     let row = resumed.close().costs.remove(0);
     assert_eq!((row.input, row.model.as_str(), row.provider.as_str()), (15, "/k�", "?"));
+}
+
+#[test]
+fn pi_and_omp_relative_id_uses_native_separator_and_removes_only_last_extension() {
+    let root = Path::new("sessions");
+    let path = root.join("é").join("t").join("run-1").join("session.tar.jsonl");
+    #[cfg(windows)]
+    let expected = r"é\t\run-1\session.tar";
+    #[cfg(not(windows))]
+    let expected = "é/t/run-1/session.tar";
+    for source in ["pi", "omp"] {
+        let mut fold = simple::new_pi_fold(root, source)(&path);
+        feed(&mut fold, json!({"type":"session","timestamp":"2026-10-01T12:00:00Z"}));
+        feed(&mut fold, json!({"type":"message","message":{"usage":{"input":1}}}));
+        let mut resumed: simple::PiFold = serde_json::from_slice(&serde_json::to_vec(&fold).unwrap()).unwrap();
+        let row = fold.close().costs.remove(0);
+        assert_eq!(row.session_id, expected);
+        assert_eq!(row.source, source);
+        assert_eq!(resumed.close().costs[0].session_id, expected);
+    }
 }
 
 #[test]

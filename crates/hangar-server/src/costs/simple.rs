@@ -87,7 +87,7 @@ pub fn new_pi_fold(root: &Path, source: &str) -> impl Fn(&Path) -> PiFold + Sync
     let source = source.to_owned();
     move |path| {
         let relative = path.strip_prefix(&root).expect("transcript dentro da raiz").with_extension("");
-        let session_id = relative.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/");
+        let session_id = relative.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join(std::path::MAIN_SEPARATOR_STR);
         PiFold { session_id, source: source.clone(), cwd: String::new(), model: String::new(),
             provider: String::new(), ts: None, tokens: Tokens::default(), seen: false }
     }
