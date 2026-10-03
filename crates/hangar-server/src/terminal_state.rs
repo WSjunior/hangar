@@ -4,6 +4,8 @@ use serde_json::Value;
 use std::sync::LazyLock;
 
 const SPINNERS: &str = "✻✽✶✺✢·∗✳✦✧";
+pub const STALE_LIMIT: u32 = 3;
+pub const IDLE_DEBOUNCE: u32 = 4;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
@@ -384,12 +386,12 @@ pub fn reduce_with_diagnostics(pane: &str, mut memory: ReducerMemory, facts: Red
         animating = memory.prev_spinner.as_ref().is_some_and(|s| s != spinner) && spinner.contains('…');
         memory.frozen = if memory.prev_spinner.as_ref() == Some(spinner) { memory.frozen.saturating_add(1) } else { 0 };
         memory.prev_spinner = Some(spinner.clone());
-        if memory.frozen >= 3 { analysis.state = "idle".into(); analysis.label = None; }
+        if memory.frozen >= STALE_LIMIT { analysis.state = "idle".into(); analysis.label = None; }
         else { analysis.state = "working".into(); }
     } else {
         memory.no_spinner = memory.no_spinner.saturating_add(1);
         memory.prev_spinner = None; memory.frozen = 0;
-        if memory.held_state == "working" && memory.no_spinner < 4 {
+        if memory.held_state == "working" && memory.no_spinner < IDLE_DEBOUNCE {
             analysis.state = "working".into(); analysis.label = memory.held_label.clone();
         }
     }

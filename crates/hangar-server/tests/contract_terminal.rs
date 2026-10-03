@@ -1,4 +1,23 @@
-use hangar_server::terminal_state::{analyze, reduce, ReducerFacts, ReducerMemory};
+use hangar_server::terminal_state::{analyze, reduce, ReducerFacts, ReducerMemory, STALE_LIMIT, IDLE_DEBOUNCE};
+
+#[test]
+fn terminal_debounce_limits_match_python_state_monitor() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../backend/app/state.py");
+    let source = std::fs::read_to_string(path).expect("referência Python deve existir");
+    let class = regex::Regex::new(r"(?m)^class StateMonitor:\r?$").unwrap()
+        .find(&source).expect("classe StateMonitor deve existir");
+    let rest = &source[class.end()..];
+    let end = regex::Regex::new(r"(?m)^(?:class|def) ").unwrap().find(rest)
+        .map_or(rest.len(), |next| next.start());
+    let body = &rest[..end];
+    for (name, rust) in [("STALE_LIMIT", STALE_LIMIT), ("IDLE_DEBOUNCE", IDLE_DEBOUNCE)] {
+        let declaration = regex::Regex::new(&format!(r"(?m)^    {name}[ \t]*=[ \t]*([0-9]+)[ \t]*(?:#.*)?\r?$")).unwrap();
+        let values: Vec<_> = declaration.captures_iter(body).collect();
+        assert_eq!(values.len(), 1, "StateMonitor deve declarar {name} uma vez");
+        let python: u32 = values[0][1].parse().expect("limite Python deve caber em u32");
+        assert_eq!(rust, python, "limite {name} precisa acompanhar a referência Python");
+    }
+}
 
 #[test]
 fn terminal_parsers_and_sequences_match_python() {
