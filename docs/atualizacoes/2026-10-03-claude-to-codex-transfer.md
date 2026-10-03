@@ -11,6 +11,11 @@ Atualiza o lançador para receber `--tool-output-token-limit`. A configuração 
 abertura, reinício e retomada da sessão transferida; não muda o `config.toml` da conta.
 Os instaladores já existentes publicam o lançador de forma idempotente nas duas plataformas.
 
+Na retomada de uma conversa importada, escolhas omitidas vêm do registro da mesma thread:
+conta, pasta, chave, permissões, modelo, esforço e orçamento. Registro incompleto não abre
+um servidor com permissões padrão. A preparação usa a pasta do processo sem solicitar
+promoção de confiança ao abrir a thread nativa.
+
 A prova de existência acima é a exigida pelo atualizador. A aceitação do contrato exige
 conferir `hangar-codex-tui --help` na instalação atualizada e capturar o conteúdo completo
 no pedido nativo após retomada. Essas provas e Windows ficam para a validação autorizada.

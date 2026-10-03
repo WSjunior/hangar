@@ -261,7 +261,8 @@ async def prepare_import(account: codex_contas.Account, cwd: str, context: Impor
         if not isinstance(config, dict):
             raise _unknown()
         approval, sandbox = politica(permission_mode)
-        params = {"cwd": cwd, "approvalPolicy": approval, "sandbox": sandbox,
+        # cwd explícito no RPC pode promover confiança; o processo já nasceu na pasta certa.
+        params = {"approvalPolicy": approval, "sandbox": sandbox,
                   "developerInstructions": "\n\n".join(filter(None, [config.get("developer_instructions"), IMPORT_NOTICE]))}
         if model is not None:
             params["model"] = model
@@ -276,6 +277,15 @@ async def prepare_import(account: codex_contas.Account, cwd: str, context: Impor
                          "tool_output_token_limit": budget, "cwd": cwd, "permission_mode": permission_mode,
                          "transfer_id": transfer_id})
         store.save_transfer(record)
+        if (not isinstance(started.get("cwd"), str) or not isinstance(thread.get("cwd"), str)
+                or Path(started["cwd"]).resolve() != Path(cwd).resolve()
+                or Path(thread["cwd"]).resolve() != Path(cwd).resolve()):
+            raise TransferError("session_transfer_native_settings_mismatch")
+        confirmed_config = (await client.request("config/read", {
+            "cwd": cwd, "includeLayers": False})).get("config")
+        if confirmed_config != config:
+            raise TransferError("session_transfer_native_config_changed")
+        config = confirmed_config
         effective_model = started.get("model")
         if not isinstance(effective_model, str) or not effective_model or (model is not None and model != effective_model):
             raise TransferError("session_transfer_native_settings_mismatch")

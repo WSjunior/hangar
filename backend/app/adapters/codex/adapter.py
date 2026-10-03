@@ -723,10 +723,14 @@ class CodexAdapter:
             if meta.get("codex_account"):
                 home_kw["codex_account"] = meta["codex_account"]
             try:
+                if meta.get("transfer_id") and not meta.get("key"):
+                    raise RuntimeError("session_transfer_invalid_record")
                 endpoint = await client.start_shared(
                     **({"codex_home": meta["codex_home"]} if meta.get("codex_home") else {}),
                     **({"tool_output_token_limit": meta["tool_output_token_limit"]}
-                       if meta.get("tool_output_token_limit") is not None else {}))
+                       if meta.get("tool_output_token_limit") is not None else {}),
+                    **({"session_name": name, "session_key": meta["key"]}
+                       if meta.get("transfer_id") else {}))
                 await client.request("initialize", {"clientInfo": CLIENT_INFO, "capabilities": {"experimentalApi": True}})
                 approval, sandbox = sem_terminal.politica(meta.get("permission_mode"))
                 result = await client.request("thread/resume", {

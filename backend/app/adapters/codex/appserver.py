@@ -66,12 +66,7 @@ class AppServerClient:
                     session_name: str | None = None, session_key: str | None = None) -> None:
         """Spawna `codex app-server --stdio` com stdin/stdout em PIPE e mantem o stdin aberto
         (nunca fechado ate close()) - fechar cedo faz o processo sair sem responder."""
-        env = self._environment(codex_home)
-        if session_key is not None:
-            env["CP_SESSION_KEY"] = session_key
-            env["CP_SESSION_NAME"] = session_name or ""
-            for key in ("TMUX", "TMUX_PANE", "HANGAR_CANO_KEY"):
-                env.pop(key, None)
+        env = self._environment(codex_home, session_name=session_name, session_key=session_key)
         self._proc = await asyncio.create_subprocess_exec(
             self._codex_bin, "app-server", "--stdio",
             *tool_output_override(tool_output_token_limit),
@@ -94,7 +89,8 @@ class AppServerClient:
         return f"ws://127.0.0.1:{port}"
 
     @staticmethod
-    def _environment(codex_home: str | Path | None) -> dict:
+    def _environment(codex_home: str | Path | None, *, session_name: str | None = None,
+                     session_key: str | None = None) -> dict:
         env = dict(os.environ)
         if codex_home is not None:
             path = Path(codex_home).expanduser().absolute()
@@ -102,11 +98,19 @@ class AppServerClient:
             account = codex_contas.Account("default", path, True) if path == default else \
                 codex_contas.Account("selected", path, False)
             env = codex_contas.environment(account, base=env)
+        if session_name is not None or session_key is not None:
+            for key in ("CP_SESSION_NAME", "CP_SESSION_KEY", "TMUX", "TMUX_PANE", "HANGAR_CANO_KEY"):
+                env.pop(key, None)
+            if session_name is not None:
+                env["CP_SESSION_NAME"] = session_name
+            if session_key is not None:
+                env["CP_SESSION_KEY"] = session_key
         return env
 
     async def start_shared(self, endpoint: str | None = None, *,
                            codex_home: str | Path | None = None,
-                           tool_output_token_limit: int | None = None) -> str:
+                           tool_output_token_limit: int | None = None,
+                           session_name: str | None = None, session_key: str | None = None) -> str:
         """Spawna app-server WebSocket local e conecta este cliente.
 
         O endpoint retornado pode ser passado a ``codex --remote`` dentro do tmux. stdout/stderr
@@ -119,7 +123,7 @@ class AppServerClient:
             *tool_output_override(tool_output_token_limit),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
-            env=self._environment(codex_home),
+            env=self._environment(codex_home, session_name=session_name, session_key=session_key),
         )
         last_error: Exception | None = None
         for _ in range(50):

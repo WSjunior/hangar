@@ -315,7 +315,7 @@ def main() -> int:
     ap.add_argument("--effort", default=None,
                     help="nivel de raciocinio; vira sobrescrita de config, nao flag")
     ap.add_argument("--codex-home", default=None, help=argparse.SUPPRESS)
-    ap.add_argument("--codex-account", default="default", help=argparse.SUPPRESS)
+    ap.add_argument("--codex-account", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--approval-policy", choices=("never", "on-request"), default=None)
     ap.add_argument("--sandbox", choices=("read-only", "workspace-write", "danger-full-access"), default=None)
     ap.add_argument("--tool-output-token-limit", type=int, default=None)
@@ -325,27 +325,48 @@ def main() -> int:
     if not args.name:
         print("hangar-codex-tui: --name (ou CP_SESSION_NAME) e obrigatorio", file=sys.stderr)
         return 2
-    os.environ["CP_SESSION_NAME"] = args.name
-    cwd = os.path.abspath(args.cwd or os.getcwd())
-    selected_home = (Path(args.codex_home).expanduser().absolute()
-                     if args.codex_home else Path(os.environ.get("CODEX_HOME") or
-                                                  Path.home() / ".codex").absolute())
-    os.environ["CODEX_HOME"] = str(selected_home)
-
     _com_websockets()
     sys.path.insert(0, str(_REPO / "backend"))
     from app.adapters.codex import sessions as codex_sessions
-    from app.adapters.codex.lancador import APPROVAL, SANDBOX, tool_output_override
+    from app.adapters.codex.lancador import APPROVAL, SANDBOX, PERMISSION_POLICIES, tool_output_override
     existing = codex_sessions.load(args.name)
     imported_resume = bool(existing and existing.get("transfer_id") and existing.get("thread_id") == args.resume)
+    if imported_resume:
+        required = ("codex_home", "codex_account", "key", "cwd", "permission_mode")
+        if (existing.get("name") != args.name
+                or any(not isinstance(existing.get(field), str) or not existing[field] for field in required)
+                or not Path(existing["codex_home"]).is_absolute()
+                or not Path(existing["cwd"]).is_absolute()
+                or existing["permission_mode"] not in PERMISSION_POLICIES):
+            ap.error("metadados da conversa importada inválidos; nenhuma sessão foi aberta")
+        args.codex_home = args.codex_home if args.codex_home is not None else existing["codex_home"]
+        args.codex_account = args.codex_account if args.codex_account is not None else existing["codex_account"]
+        args.cwd = args.cwd if args.cwd is not None else existing["cwd"]
+        saved_approval, saved_sandbox = PERMISSION_POLICIES[existing["permission_mode"]]
+        args.approval_policy = args.approval_policy if args.approval_policy is not None else saved_approval
+        args.sandbox = args.sandbox if args.sandbox is not None else saved_sandbox
+        for key in ("CP_SESSION_KEY", "TMUX", "TMUX_PANE", "HANGAR_CANO_KEY"):
+            os.environ.pop(key, None)
+        os.environ["CP_SESSION_KEY"] = existing["key"]
     if existing and existing.get("thread_id") == args.resume:
         if args.tool_output_token_limit is None:
             args.tool_output_token_limit = existing.get("tool_output_token_limit")
         if existing.get("transfer_id"):
-            args.model = args.model or existing.get("model")
+            args.model = args.model if args.model is not None else existing.get("model")
             args.effort = args.effort if args.effort is not None else existing.get("effort")
+    args.codex_account = args.codex_account if args.codex_account is not None else "default"
+    cwd = os.path.abspath(args.cwd or os.getcwd())
+    selected_home = (Path(args.codex_home).expanduser().absolute()
+                     if args.codex_home else Path(os.environ.get("CODEX_HOME") or
+                                                  Path.home() / ".codex").absolute())
+    os.environ["CP_SESSION_NAME"] = args.name
+    os.environ["CODEX_HOME"] = str(selected_home)
     approval = args.approval_policy or APPROVAL
     sandbox = args.sandbox or SANDBOX
+    resumed_metadata = ({"codex_home": str(selected_home), "codex_account": args.codex_account,
+                         "cwd": cwd, "permission_mode": next(
+                             (mode for mode, policy in PERMISSION_POLICIES.items()
+                              if policy == (approval, sandbox)), None)} if imported_resume else {})
     from app import codex_contas
     from app.codex_instrucoes import (LIMITE_INSTRUCOES, limite_instrucoes,
                                       preparar_instrucoes, preparar_projeto)
@@ -426,7 +447,7 @@ def main() -> int:
                 [_codex(), "app-server", "--listen", endpoint, *instruction_overrides,
                  "-c", f'sandbox_mode="{sandbox}"', "-c", f'approval_policy="{approval}"',
                  *tool_output_override(args.tool_output_token_limit)],
-                stdout=subprocess.DEVNULL, stderr=erros,
+                stdout=subprocess.DEVNULL, stderr=erros, cwd=cwd,
             )
         except (OSError, SystemExit) as exc:
             _registrar_falha_servidor(erros, "criar_processo", exc=exc)
@@ -448,7 +469,7 @@ def main() -> int:
                 codex_sessions.update(args.name, headless=False, cano=None,
                                       endpoint=endpoint, app_pid=servidor.pid, launcher_pid=os.getpid(),
                                       model=args.model, effort=args.effort, rollout_path=rollout,
-                                      tool_output_token_limit=args.tool_output_token_limit)
+                                      tool_output_token_limit=args.tool_output_token_limit, **resumed_metadata)
             else:
                 codex_sessions.save(args.name, thread_id, rollout, cwd,
                                 model=args.model, effort=args.effort,

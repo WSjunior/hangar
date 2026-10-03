@@ -38,6 +38,11 @@ import json, os, sys, time
 
 args = sys.argv[1:]
 if args[:1] == ["app-server"]:
+    if os.environ.get("FAKE_SERVER_ENV"):
+        with open(os.environ["FAKE_SERVER_ENV"], "w") as fh:
+            json.dump({"cwd": os.getcwd(), "identity": {key: os.environ.get(key) for key in (
+                "CODEX_HOME", "CP_SESSION_NAME", "CP_SESSION_KEY", "TMUX", "TMUX_PANE", "HANGAR_CANO_KEY")},
+                "has_openai_key": "OPENAI_API_KEY" in os.environ}, fh)
     if os.environ.get("FAKE_SERVER_OUT"):
         with open(os.environ["FAKE_SERVER_OUT"], "w") as fh:
             json.dump(args, fh)
@@ -617,34 +622,81 @@ def test_lancador_nao_reclassifica_conta_pelo_codex_home_herdado(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
-@pytest.mark.parametrize("durable_key", [None, "same-key"])
-def test_launcher_resume_preserves_import_metadata_on_save_and_update(tmp_path, durable_key):
+@pytest.mark.parametrize("explicit_overrides", [False, True])
+def test_launcher_resume_uses_imported_account_policy_identity_and_explicit_overrides(tmp_path, explicit_overrides):
     cwd = tmp_path / "project"
     cwd.mkdir()
     env = _ambiente(tmp_path, cwd)
     env["FAKE_TUI_SLEEP"] = "3"
     env["FAKE_SERVER_OUT"] = str(tmp_path / "server-argv.json")
+    env["FAKE_SERVER_ENV"] = str(tmp_path / "server-env.json")
+    env["FAKE_SEM_THREAD"] = "1"
+    env.update(CP_SESSION_NAME="operator", CP_SESSION_KEY="operator-key", TMUX="operator-tmux",
+               TMUX_PANE="%operator", HANGAR_CANO_KEY="operator-cano", OPENAI_API_KEY="operator-token")
     thread_id = "01a052d1-3e59-7441-9ed3-6bbd9e2704fc"
+    account_home = tmp_path / "codex-work"
+    explicit_home = tmp_path / "codex-alternate"
+    for home in (account_home, explicit_home):
+        rollout = home / "sessions" / "2026" / "10" / "03" / f"rollout-example-{thread_id}.jsonl"
+        rollout.parent.mkdir(parents=True)
+        rollout.write_text("{}\n")
     sidecar = _sidecar(env, "sess")
     sidecar.parent.mkdir(parents=True, exist_ok=True)
     meta = {"name": "sess", "thread_id": thread_id, "rollout_path": env["FAKE_ROLLOUT"],
-            "cwd": str(cwd), "codex_home": str(Path(env["HOME"]) / ".codex"),
-            "codex_account": "default", "transfer_id": "import", "tool_output_token_limit": 144000,
-            "permission_mode": "Full Access", "jev": False, "model": "native-model", "effort": "high"}
-    if durable_key:
-        meta["key"] = durable_key
+            "cwd": str(cwd), "codex_home": str(account_home), "key": "same-key",
+            "codex_account": "work", "transfer_id": "import", "tool_output_token_limit": 144000,
+            "permission_mode": "Ask for approval", "jev": False, "model": "native-model", "effort": "high"}
     sidecar.write_text(json.dumps(meta))
-    proc = subprocess.Popen([sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd),
-                             "--resume", thread_id], env=env, stdout=subprocess.PIPE,
+    overrides = (["--codex-home", str(explicit_home), "--codex-account", "alternate",
+                  "--approval-policy", "never", "--sandbox", "danger-full-access",
+                  "--model", "override-model", "--effort", "low", "--tool-output-token-limit", "288000"]
+                 if explicit_overrides else [])
+    proc = subprocess.Popen([sys.executable, str(_LANCADOR), "--name", "sess",
+                             "--resume", thread_id, *overrides], env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True)
     try:
-        assert _espera(lambda: sidecar.exists() and json.loads(sidecar.read_text()).get("app_pid"))
+        assert _espera(lambda: sidecar.exists() and json.loads(sidecar.read_text()).get("tui_pid")
+                       and Path(env["FAKE_SERVER_ENV"]).exists())
         saved = json.loads(sidecar.read_text())
-        assert saved["tool_output_token_limit"] == 144000 and saved["transfer_id"] == "import"
-        assert saved["model"] == "native-model" and saved["effort"] == "high"
-        assert saved.get("key") == durable_key and saved["thread_id"] == thread_id
-        assert "tool_output_token_limit=144000" in json.loads((tmp_path / "server-argv.json").read_text())
-        assert not any("project_doc_max_bytes" in arg for arg in
-                       json.loads((tmp_path / "server-argv.json").read_text()))
+        budget = 288000 if explicit_overrides else 144000
+        expected_home = str(explicit_home if explicit_overrides else account_home)
+        assert saved["tool_output_token_limit"] == budget and saved["transfer_id"] == "import"
+        assert saved["model"] == ("override-model" if explicit_overrides else "native-model")
+        assert saved["effort"] == ("low" if explicit_overrides else "high")
+        assert saved["codex_home"] == expected_home
+        assert saved["codex_account"] == ("alternate" if explicit_overrides else "work")
+        assert saved["permission_mode"] == ("Full Access" if explicit_overrides else "Ask for approval")
+        assert saved["key"] == "same-key" and saved["thread_id"] == thread_id
+        server_args = json.loads((tmp_path / "server-argv.json").read_text())
+        assert f"tool_output_token_limit={budget}" in server_args
+        assert ('approval_policy="never"' if explicit_overrides else 'approval_policy="on-request"') in server_args
+        assert ('sandbox_mode="danger-full-access"' if explicit_overrides else 'sandbox_mode="read-only"') in server_args
+        assert not any("project_doc_max_bytes" in arg for arg in server_args)
+        process_environment = json.loads(Path(env["FAKE_SERVER_ENV"]).read_text())
+        assert process_environment == {"cwd": str(cwd), "has_openai_key": False, "identity": {
+            "CODEX_HOME": expected_home, "CP_SESSION_NAME": "sess", "CP_SESSION_KEY": "same-key",
+            "TMUX": None, "TMUX_PANE": None, "HANGAR_CANO_KEY": None}}
     finally:
         proc.wait(timeout=20)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+@pytest.mark.parametrize("field,value", [("key", None), ("permission_mode", "unknown"), ("codex_home", "relative")])
+def test_imported_resume_rejects_invalid_metadata_before_opening_server(tmp_path, field, value):
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    env = _ambiente(tmp_path, cwd)
+    env["FAKE_SERVER_OUT"] = str(tmp_path / "server-argv.json")
+    sidecar = _sidecar(env, "sess")
+    sidecar.parent.mkdir(parents=True)
+    meta = {"name": "sess", "thread_id": "thread", "transfer_id": "import", "key": "key",
+            "cwd": str(cwd), "codex_home": str(tmp_path / "secondary"), "codex_account": "work",
+            "permission_mode": "Ask for approval", "tool_output_token_limit": 144000}
+    meta[field] = value
+    sidecar.write_text(json.dumps(meta))
+    result = subprocess.run([sys.executable, str(_LANCADOR), "--name", "sess", "--resume", "thread"],
+                            env=env, capture_output=True, text=True, timeout=15)
+    assert result.returncode != 0
+    assert "metadados da conversa importada inválidos" in result.stderr
+    assert not Path(env["FAKE_SERVER_OUT"]).exists()
+    assert json.loads(sidecar.read_text()) == meta

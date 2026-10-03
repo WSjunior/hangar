@@ -64,11 +64,11 @@ def fake_client(tmp_path, monkeypatch):
                 assert params["clientInfo"] == transfer.CLIENT_INFO
                 return {}
             if method == "config/read":
-                return {"config": self.config}
+                return {"config": json.loads(json.dumps(self.config))}
             if method == "thread/start":
                 self.path.write_text(json.dumps({"type": "session_meta", "payload": {"id": self.thread_id}}) + "\n")
                 return {"thread": self.thread(), "model": "test-model", "reasoningEffort": self.effort,
-                        "modelProvider": "openai", "instructionSources": []}
+                        "modelProvider": "openai", "cwd": self.start_args["cwd"], "instructionSources": []}
             if method == "thread/settings/update":
                 self.effort = params.get("effort", self.effort)
                 self.mode = params.get("collaborationMode", {}).get("mode", self.mode)
@@ -99,7 +99,8 @@ def fake_client(tmp_path, monkeypatch):
 
         def thread(self):
             return {"id": self.thread_id, "path": str(self.path), "model": "test-model",
-                    "reasoningEffort": self.effort, "turns": [], "status": {"type": "idle"}}
+                    "cwd": self.start_args["cwd"], "reasoningEffort": self.effort,
+                    "turns": [], "status": {"type": "idle"}}
 
         async def close(self):
             self.finished = True
@@ -273,3 +274,66 @@ async def test_discovery_failure_is_unknown_capacity(fake_client):
     with pytest.raises(transfer.TransferError, match="capacity_unknown"):
         await prepare(fake_client)
     assert not fake_client.injected
+
+
+async def test_untrusted_git_project_is_not_promoted_or_locally_reconfigured(fake_client, tmp_path, monkeypatch):
+    import tomllib
+    fake = fake_client
+    fake.account.home.mkdir()
+    account_config = fake.account.home / "config.toml"
+    original_config = b'model_context_window = 300000\n'
+    account_config.write_bytes(original_config)
+    (tmp_path / ".git").mkdir()
+    project_config = tmp_path / ".codex" / "config.toml"
+    project_config.parent.mkdir()
+    project_config.write_text('model_context_window = 1000\ndeveloper_instructions = "local-after-trust"\n')
+    fake.config = tomllib.loads(original_config.decode())
+    captured_configs = []
+    monkeypatch.setattr(transfer.codex_models, "raw_model", lambda home, config, *args:
+                        captured_configs.append(dict(config)) or dict(MODEL))
+    original_request = fake.request
+
+    async def native_request(method, params, **kwargs):
+        # A API nativa exige cwd solicitado, projeto sem confiança e permissão de escrita.
+        if (method == "thread/start" and params.get("cwd") is not None
+                and (tmp_path / ".git").exists() and "trust_level" not in account_config.read_text()
+                and params.get("sandbox") in {"danger-full-access", "workspace-write"}):
+            account_config.write_bytes(original_config + b'\n[projects."example"]\ntrust_level = "trusted"\n')
+            fake.config = {**fake.config, **tomllib.loads(project_config.read_text())}
+        return await original_request(method, params, **kwargs)
+
+    fake.request = native_request
+    prepared = await prepare(fake)
+    assert prepared.thread_id == fake.thread_id
+    assert account_config.read_bytes() == original_config
+    assert fake.start_args["cwd"] == str(tmp_path)
+    assert "cwd" not in next(params for method, params in fake.calls if method == "thread/start")
+    assert captured_configs == [{"model_context_window": 300000}]
+    assert [method for method, _ in fake.calls].count("config/read") == 2
+
+
+async def test_config_drift_after_start_refuses_before_injection(fake_client):
+    original_request = fake_client.request
+    async def changed(method, params, **kwargs):
+        response = await original_request(method, params, **kwargs)
+        if method == "thread/start":
+            fake_client.config["model_auto_compact_token_limit"] = 1
+        return response
+    fake_client.request = changed
+    with pytest.raises(transfer.TransferError, match="native_config_changed"):
+        await prepare(fake_client)
+    assert fake_client.finished and not fake_client.injected
+    assert store.load_transfer(fake_client.record.id).destination_meta["thread_id"] == fake_client.thread_id
+
+
+async def test_implicit_thread_cwd_must_match_preparation_process(fake_client):
+    original_request = fake_client.request
+    async def different_cwd(method, params, **kwargs):
+        response = await original_request(method, params, **kwargs)
+        if method == "thread/start":
+            response["cwd"] = str(fake_client.account.home)
+        return response
+    fake_client.request = different_cwd
+    with pytest.raises(transfer.TransferError, match="native_settings_mismatch"):
+        await prepare(fake_client)
+    assert fake_client.finished and not fake_client.injected

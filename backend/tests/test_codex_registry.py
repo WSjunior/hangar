@@ -800,16 +800,28 @@ def test_transfer_record_corruption_is_not_silently_skipped(tmp_path):
 async def test_legacy_restart_keeps_budget_account_and_resume_request(tmp_path):
     home = str(tmp_path / "account")
     codex_sessions.save("cx", "tid-1", "/x/rollout.jsonl", str(tmp_path),
-                        codex_home=home, codex_account="work", tool_output_token_limit=144000)
+                        codex_home=home, codex_account="work", tool_output_token_limit=144000,
+                        transfer_id="import", key="original-key", model="native-model", effort="low")
+    codex_sessions.update("cx", permission_mode="Ask for approval")
     fake = _FakeClient()
+    fake._thread_id = "tid-1"
     from unittest.mock import AsyncMock
+    previous_request = fake.request
+    async def request(method, params, timeout=30.0):
+        if method == "thread/read":
+            fake.requests.append((method, params))
+            return {"thread": {"id": "tid-1", "model": "native-model", "reasoningEffort": "low"}}
+        return await previous_request(method, params, timeout)
+    fake.request = request
     fake.start_shared = AsyncMock(return_value="ws://127.0.0.1:45123")
     with patch.object(codex_adapter.tmux, "has_session", return_value=False), \
          patch.object(codex_adapter, "AppServerClient", lambda: fake), \
          patch.object(codex_adapter, "ensure_tmux_tui") as tui:
         adapter = CodexAdapter()
         await adapter.ensure_running("cx")
-    fake.start_shared.assert_awaited_once_with(codex_home=home, tool_output_token_limit=144000)
+    fake.start_shared.assert_awaited_once_with(codex_home=home, tool_output_token_limit=144000,
+                                               session_name="cx", session_key="original-key")
     assert tui.call_args.kwargs["codex_account"] == "work"
     assert next(p for m, p in fake.requests if m == "thread/resume")["threadId"] == "tid-1"
+    assert next(p for m, p in fake.requests if m == "thread/resume")["approvalPolicy"] == "on-request"
     assert "turn/start" not in [m for m, _ in fake.requests]

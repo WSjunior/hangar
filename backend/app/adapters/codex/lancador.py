@@ -25,6 +25,11 @@ CLIENT_INFO = {"name": "hangar", "title": None, "version": "0.1.0"}
 # `--dangerously-bypass-approvals-and-sandbox` so existe no CLI, e deixaria as duas divergentes).
 SANDBOX = "danger-full-access"
 APPROVAL = "never"
+PERMISSION_POLICIES = {
+    "Ask for approval": ("on-request", "read-only"),
+    "Approve for me": ("on-request", "workspace-write"),
+    "Full Access": ("never", "danger-full-access"),
+}
 # Nome do lancador no PATH (symlink do install-claude-wrapper.sh).
 EXECUTAVEL = "hangar-codex-tui"
 
