@@ -4,6 +4,7 @@ import { baseOf } from './rota';
 import type { CodexAccount, CodexIntegracaoEstado, CodexLoginAttempt, CodexResetOutcome, Credencial } from './credenciais';
 import * as m from './paraglide/messages';
 import { localeAtual } from './i18n';
+import { basename } from './format';
 import { mensagemDeErro, formataErro, type EnvelopeErro } from './errosApi';
 // diag NÃO importa api (ele usa `fetch` direto) — é o que mantém esta dependência de mão única.
 import { registrar as registrarDiag, novoReq } from './diag';
@@ -691,12 +692,16 @@ export interface CreateSessionBody {
   jev?: boolean;
   // Branch já existente (local ou remota) em que a sessão nasce; vazio = a atual da pasta.
   branch?: string | null;
+  // Com new_branch, `branch` é a branch NOVA criada a partir de `base` (vazio = a atual da pasta).
+  new_branch?: boolean;
+  base?: string | null;
 }
 
 export function buildCreateSessionBody(body: CreateSessionBody): CreateSessionBody {
-  const { codex_account, branch, ...rest } = body;
+  const { codex_account, branch, new_branch, base, ...rest } = body;
   const out: CreateSessionBody = rest.provider === 'codex' && codex_account ? { ...rest, codex_account } : rest;
-  return branch ? { ...out, branch } : out;
+  if (!branch) return out;
+  return new_branch ? { ...out, branch, new_branch: true, ...(base ? { base } : {}) } : { ...out, branch };
 }
 
 // A MESMA regra do backend (`app/names.py:sanitize_session_name`): NFKD antes do filtro, senão a
@@ -736,6 +741,7 @@ export function createSession(
   headless?: boolean,
   subagentModel?: string | null,
   jev?: boolean,
+  worktree?: WorktreeChoice,
 ): Promise<SessionInfo> {
   // `model`/`effort`/`permissionMode`/`ompProfile` no FIM de propósito: chamador antigo com 5 argumentos continua válido e abre
   // no padrão, byte por byte (o backend valida None = comportamento de hoje).
@@ -746,6 +752,7 @@ export function createSession(
   if (headless !== undefined && (provider === 'claude' || provider === 'codex')) body.headless = headless;
   if (subagentModel && provider === 'claude') body.subagent_model = subagentModel;
   if (jev) body.jev = true;
+  if (worktree?.branch) Object.assign(body, worktree);
   return apiFetch<SessionInfo>('/api/sessions', {
     method: 'POST',
     body: JSON.stringify(buildCreateSessionBody(body)),
@@ -1027,6 +1034,40 @@ export async function getFolderGitForServer(server: Server, cwd: string, signal?
 export async function folderGitActionForServer(server: Server, cwd: string, action: 'fetch' | 'pull', root?: string): Promise<FolderGit> {
   const body = JSON.stringify({ root: await folderRoot(server, cwd, undefined, root), path: cwd });
   return apiFetchForServer(server, `/api/fs/git/${action}`, { method: 'POST', body }, FOLDER_ACTION_MS);
+}
+
+export interface WorktreeChoice { branch: string; new_branch?: boolean; base?: string | null }
+export interface WorktreeStatus {
+  path: string; repo: string; exists: boolean; branch: string | null; base: string | null;
+  merged: boolean; ahead: number; dirty: number; ignored: string[]; sessions: string[]; closed: number;
+}
+export interface WorktreeRepo { repo: string; worktrees: WorktreeStatus[] }
+
+export async function getWorktreesForServer(server: Server, signal?: AbortSignal): Promise<WorktreeRepo[]> {
+  const r = await apiFetchForServer<{ repos: WorktreeRepo[] }>(server, '/api/worktrees',
+    { signal: comTeto(signal, FOLDER_READ_MS) }, FOLDER_READ_MS);
+  return r.repos;
+}
+export function getWorktreeForServer(server: Server, path: string, signal?: AbortSignal): Promise<WorktreeStatus> {
+  return apiFetchForServer(server, `/api/worktrees/detail?${new URLSearchParams({ path })}`,
+    { signal: comTeto(signal, FOLDER_READ_MS) }, FOLDER_READ_MS);
+}
+export async function fetchWorktreesForServer(server: Server, repo: string): Promise<void> {
+  await apiFetchForServer(server, '/api/worktrees/fetch', { method: 'POST', body: JSON.stringify({ repo }) }, FOLDER_ACTION_MS);
+}
+export function deleteWorktreeForServer(server: Server, body: { repo: string; path: string; confirm: boolean; delete_branch: boolean }):
+  Promise<{ removed: string; branch_deleted: boolean; moved: number }> {
+  return apiFetchForServer(server, '/api/worktrees/delete', { method: 'POST', body: JSON.stringify(body) }, FOLDER_ACTION_MS);
+}
+export async function deleteMergedWorktreesForServer(server: Server, repo: string): Promise<string[]> {
+  const r = await apiFetchForServer<{ removed: string[] }>(server, '/api/worktrees/delete-merged',
+    { method: 'POST', body: JSON.stringify({ repo }) }, FOLDER_ACTION_MS);
+  return r.removed;
+}
+/** Nome curto do chip: a pasta da worktree onde o agente está. */
+export function worktreeLabel(s: SessionInfo): string | null {
+  const p = s.worktree_path ?? (s.worktree ? s.cwd : null);
+  return p ? basename(p) : null;
 }
 
 // Importação Claude → Codex da conta padrão (a mesma do "Reconciliar agora" em Harnesses).

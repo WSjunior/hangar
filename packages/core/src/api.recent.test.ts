@@ -15,6 +15,12 @@ describe('buildCreateSessionBody branch', () => {
     expect('branch' in buildCreateSessionBody({ name: 'a', branch: '' })).toBe(false);
     expect('branch' in buildCreateSessionBody({ name: 'a', branch: null })).toBe(false);
   });
+  it('leva branch nova e base só quando new_branch', () => {
+    expect(buildCreateSessionBody({ name: 'a', branch: 'nova', new_branch: true, base: 'main' }))
+      .toEqual({ name: 'a', branch: 'nova', new_branch: true, base: 'main' });
+    expect(buildCreateSessionBody({ name: 'a', branch: 'x', new_branch: false, base: 'main' }))
+      .toEqual({ name: 'a', branch: 'x' });
+  });
 });
 
 describe('pickFolderRoot', () => {

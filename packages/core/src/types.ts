@@ -51,6 +51,10 @@ export interface SessionInfo {
   branch?: string | null;   // branch git atual do cwd (mostrada na lista de sessões)
   /** cwd é uma worktree ligada (`.git` arquivo) — marcador ⧉ ao lado da branch nas duas listas. */
   worktree?: boolean;
+  /** Raiz da worktree onde o agente está agora (transcript/comandos), não onde a sessão abriu. */
+  worktree_path?: string | null;
+  /** Estava numa worktree que já foi apagada. */
+  worktree_gone?: boolean;
   // Linhas adicionadas/removidas no working tree vs HEAD (git diff --numstat, staged+unstaged;
   // untracked não conta). null = cwd sem repo ou repo sem commit nenhum -> sem badge.
   git_added?: number | null;
