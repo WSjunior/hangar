@@ -9,7 +9,7 @@ const core = vi.hoisted(() => ({
 vi.mock('@hangar/core', async (orig) => ({ ...(await orig<object>()), ...core }));
 vi.mock('./auth', () => ({ listOwnServers: () => [srv], selectServer: vi.fn(() => true), getActiveId: () => 'pc' }));
 
-import { createNewChatDraft, isNotRepo } from './newChatDraft.svelte';
+import { createNewChatDraft, isNotRepo, worktreeChoiceOf } from './newChatDraft.svelte';
 
 function never() { return new Promise(() => {}); }
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -82,6 +82,23 @@ describe('NewChatDraft.send', () => {
     expect(core.createSessionForServer).toHaveBeenCalledTimes(2);
     expect(core.createSessionForServer).toHaveBeenLastCalledWith(srv, expect.objectContaining({ branch: 'feature' }));
     expect(core.sendInputForServer).toHaveBeenLastCalledWith(srv, 'proj-2', 'oi');
+  });
+
+  it('branch nova sem nome nasce com o nome da sessão, e tentar de novo não cria outra sessão', async () => {
+    core.fetchSessionsForServer.mockResolvedValue([{ name: 'proj' }]);
+    core.createSessionForServer.mockResolvedValue({ name: 'proj-2' });
+    core.sendInputForServer.mockRejectedValueOnce(new Error('500: caiu')).mockResolvedValueOnce(undefined);
+    const draft = await ready();
+    draft.newBranch = true;
+    draft.base = 'develop';
+
+    await expect(draft.send('oi')).rejects.toThrow('caiu');
+    await draft.send('oi');
+
+    expect(core.createSessionForServer).toHaveBeenCalledTimes(1);
+    expect(core.createSessionForServer).toHaveBeenCalledWith(srv, expect.objectContaining({
+      name: 'proj-2', branch: 'proj-2', new_branch: true, base: 'develop' }));
+    expect(draft.branchName).toBe('proj-2');
   });
 
   it('contas ainda carregando: não envia', async () => {
@@ -187,5 +204,18 @@ describe('NewChatDraft.switchFromExhausted', () => {
     const draft = await ready();
     draft.switchFromExhausted([conta('/c', 100, true), conta('/d', 100)]);
     expect(draft.configDir).toBe('/c');
+  });
+});
+
+describe('worktreeChoiceOf', () => {
+  it('branch existente', () => {
+    expect(worktreeChoiceOf({ branch: 'x', newBranch: false, base: '', branchName: '' })).toEqual({ branch: 'x' });
+  });
+  it('branch nova a partir da base', () => {
+    expect(worktreeChoiceOf({ branch: '', newBranch: true, base: 'develop', branchName: 'rust-parte3' }))
+      .toEqual({ branch: 'rust-parte3', new_branch: true, base: 'develop' });
+  });
+  it('nada escolhido', () => {
+    expect(worktreeChoiceOf({ branch: '', newBranch: false, base: '', branchName: '' })).toBeNull();
   });
 });
