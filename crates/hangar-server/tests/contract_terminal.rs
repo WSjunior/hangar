@@ -7,9 +7,13 @@ fn terminal_parsers_and_sequences_match_python() {
     let rows: serde_json::Value = serde_json::from_slice(
         &std::fs::read(root.join("golden/terminal.json")).unwrap(),
     ).unwrap();
+    let mut failures = Vec::new();
     for row in rows.as_array().unwrap() {
         if let Some(pane) = row["pane"].as_str() {
-            assert_eq!(serde_json::to_value(analyze(pane)).unwrap(), row["expected"], "{}", row["name"]);
+            let actual = serde_json::to_value(analyze(pane)).unwrap();
+            if actual != row["expected"] {
+                failures.push(format!("{}: Rust {actual}; Python {}", row["name"], row["expected"]));
+            }
         } else {
             let mut memory = ReducerMemory::default();
             for (index, frame) in row["sequence"].as_array().unwrap().iter().enumerate() {
@@ -20,4 +24,5 @@ fn terminal_parsers_and_sequences_match_python() {
             }
         }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

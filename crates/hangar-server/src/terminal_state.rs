@@ -85,13 +85,21 @@ struct Patterns {
     unnumbered: Regex, user: Regex, banner: Regex, warning: Regex,
     tool: Regex, finished: Regex, activity: Regex, mcp: Regex,
     pi_box: Regex, overlay_rule: Regex, todo: Regex, ascii_spinner: Regex,
-    subagent: Regex, subagent_body: Regex, digit: Regex,
+    subagent: Regex, subagent_body: Regex, digit: Regex, word: Regex,
 }
 
 static P: LazyLock<Patterns> = LazyLock::new(|| {
     // Python considera também os separadores de informação como espaço.
     let r = |s: &str| Regex::new(&s.replace(r"\s", r"[\s\x1c-\x1f]")
         .replace(r"\S", r"[^\s\x1c-\x1f]").replace(r"\w", r"[\p{L}\p{N}_]")).unwrap();
+    // O re.I do Python reúne também as duas formas turcas de i.
+    let insensitive = |s: &str| {
+        let expanded: String = s.chars().map(|c| match c {
+            'i' | 'I' => "[iIıİ]".into(),
+            _ => c.to_string(),
+        }).collect();
+        r(&format!("(?i){expanded}"))
+    };
     Patterns {
         lines: r(r"\r\n|[\n\r\x0b\x0c\x1c-\x1e\u{85}\u{2028}\u{2029}]"),
         option: r(r"^\s*[❯>]?\s*\d+\.\s+(.*\S)\s*$"),
@@ -105,9 +113,9 @@ static P: LazyLock<Patterns> = LazyLock::new(|| {
         box_bottom: r(r"^\s*╰[─\s]*╯\s*$"),
         frame: r(r"^[\s│─╭╮╰╯┌┐└┘├┤┬┴┼]*$"),
         footer: r(r"to navigate|Esc to cancel|Enter to select|Enter select"),
-        login: r(r"(?i)/oauth/authorize|Paste code here|Select login method|Choose the text style"),
+        login: insensitive(r"/oauth/authorize|Paste code here|Select login method|Choose the text style"),
         composer: r(r"⏵⏵|⏸"),
-        limit: r(r"(?i)(?:usage limit reached|hit your \w+ limit|limit reached)[^\n]{0,80}?(?:resets?|continuing automatically|try again)\s*(?:at\s*)?([0-9]{1,2}(?::[0-9]{2})?\s*(?:am|pm)?)"),
+        limit: insensitive(r"(?:usage limit reached|hit your \w+ limit|limit reached)[^\n]{0,80}?(?:resets?|continuing automatically|try again)\s*(?:at\s*)?([0-9]{1,2}(?::[0-9]{2})?\s*(?:am|pm)?)"),
         codex_option: r(r"^\s*[›>]?\s*(\d+)\.\s+(.*\S)\s*$"),
         unnumbered: r(r"^(\s*❯\s+)\S"),
         user: r(r"^\s*❯"),
@@ -124,6 +132,7 @@ static P: LazyLock<Patterns> = LazyLock::new(|| {
         subagent: r(r"^Subagent\s+\S"),
         subagent_body: r(r"^\s*└"),
         digit: r(r"^\d$"),
+        word: r(r"^\w$"),
     }
 });
 
@@ -131,7 +140,10 @@ fn whitespace(c: char) -> bool { c.is_whitespace() || ('\u{1c}'..='\u{1f}').cont
 fn trim(s: &str) -> &str { s.trim_matches(whitespace) }
 fn left(s: &str) -> &str { s.trim_start_matches(whitespace) }
 fn right(s: &str) -> &str { s.trim_end_matches(whitespace) }
-fn word(c: char) -> bool { c.is_alphanumeric() || c == '_' }
+fn word(c: char) -> bool {
+    let mut encoded = [0; 4];
+    P.word.is_match(c.encode_utf8(&mut encoded))
+}
 fn end_word(pattern: &Regex, s: &str) -> bool {
     pattern.find(s).is_some_and(|m| s[m.end()..].chars().next().is_none_or(|c| !word(c)))
 }

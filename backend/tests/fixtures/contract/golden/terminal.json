@@ -855,6 +855,176 @@
     }
   },
   {
+    "name": "combining_running",
+    "pane": "● Runningͅ palavras\n  continuação",
+    "expected": {
+      "state": "idle",
+      "label": null,
+      "question": null,
+      "options": null,
+      "spinner": null,
+      "status_line": "● Runningͅ palavras\n  continuação",
+      "overlay": false,
+      "login": false,
+      "limit_reset": null,
+      "preview": "",
+      "codex_menu": null
+    }
+  },
+  {
+    "name": "combining_calling",
+    "pane": "● Callingְ serviço…\n  continuação",
+    "expected": {
+      "state": "idle",
+      "label": null,
+      "question": null,
+      "options": null,
+      "spinner": null,
+      "status_line": "● Callingְ serviço…\n  continuação",
+      "overlay": false,
+      "login": false,
+      "limit_reset": null,
+      "preview": "",
+      "codex_menu": null
+    }
+  },
+  {
+    "name": "combining_finished",
+    "pane": "● Resposta\n● Agent \"worker\" finishedͅ\n  atividade",
+    "expected": {
+      "state": "idle",
+      "label": null,
+      "question": null,
+      "options": null,
+      "spinner": null,
+      "status_line": "● Agent \"worker\" finishedͅ\n  atividade",
+      "overlay": false,
+      "login": false,
+      "limit_reset": null,
+      "preview": "Resposta",
+      "codex_menu": null
+    }
+  },
+  {
+    "name": "combining_summary",
+    "pane": "● Resposta\n  ְran 2 shell commands\n  fora",
+    "expected": {
+      "state": "idle",
+      "label": null,
+      "question": null,
+      "options": null,
+      "spinner": null,
+      "status_line": "  ְran 2 shell commands\n  fora",
+      "overlay": false,
+      "login": false,
+      "limit_reset": null,
+      "preview": "Resposta",
+      "codex_menu": null
+    }
+  },
+  {
+    "name": "login_dotless",
+    "pane": "Select logın method",
+    "expected": {
+      "state": "idle",
+      "label": null,
+      "question": null,
+      "options": null,
+      "spinner": null,
+      "status_line": "Select logın method",
+      "overlay": false,
+      "login": true,
+      "limit_reset": null,
+      "preview": "",
+      "codex_menu": null
+    }
+  },
+  {
+    "name": "login_dotted",
+    "pane": "Select logİn method",
+    "expected": {
+      "state": "idle",
+      "label": null,
+      "question": null,
+      "options": null,
+      "spinner": null,
+      "status_line": "Select logİn method",
+      "overlay": false,
+      "login": true,
+      "limit_reset": null,
+      "preview": "",
+      "codex_menu": null
+    }
+  },
+  {
+    "name": "limit_dotless",
+    "pane": "Usage lımıt reached · continuing automatically at 9:10pm",
+    "expected": {
+      "state": "idle",
+      "label": null,
+      "question": null,
+      "options": null,
+      "spinner": null,
+      "status_line": "Usage lımıt reached · continuing automatically at 9:10pm",
+      "overlay": false,
+      "login": false,
+      "limit_reset": "9:10pm",
+      "preview": "",
+      "codex_menu": null
+    }
+  },
+  {
+    "name": "limit_dotted",
+    "pane": "Usage lİmİt reached · contİnuİng automatİcally at 9:10pm",
+    "expected": {
+      "state": "idle",
+      "label": null,
+      "question": null,
+      "options": null,
+      "spinner": null,
+      "status_line": "Usage lİmİt reached · contİnuİng automatİcally at 9:10pm",
+      "overlay": false,
+      "login": false,
+      "limit_reset": "9:10pm",
+      "preview": "",
+      "codex_menu": null
+    }
+  },
+  {
+    "name": "login_long_s",
+    "pane": "ſelect login method",
+    "expected": {
+      "state": "idle",
+      "label": null,
+      "question": null,
+      "options": null,
+      "spinner": null,
+      "status_line": "ſelect login method",
+      "overlay": false,
+      "login": true,
+      "limit_reset": null,
+      "preview": "",
+      "codex_menu": null
+    }
+  },
+  {
+    "name": "login_ordinary",
+    "pane": "Select LOGIN method",
+    "expected": {
+      "state": "idle",
+      "label": null,
+      "question": null,
+      "options": null,
+      "spinner": null,
+      "status_line": "Select LOGIN method",
+      "overlay": false,
+      "login": true,
+      "limit_reset": null,
+      "preview": "",
+      "codex_menu": null
+    }
+  },
+  {
     "name": "information_whitespace",
     "pane": "● texto\n\u001f\u001f\n────────────\n\u001f",
     "expected": {
