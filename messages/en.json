@@ -1094,6 +1094,7 @@
   "chat_sessao_encerrada": "This session was ended.",
   "chat_sse_recusado": "The server refused this session's stream.",
   "chat_sse_tentar": "Try again",
+  "plugin_band_label": "Claude Code plugins band",
   "servidores_aviso_persistencia": "Couldn't save the server list on this device. It works now, but it may be gone next time you open the app.",
   "servidores_aviso_token": "The token for {label} is no longer valid — the server rejected it. Pair again to use it.",
   "chat_carregando_historico": "Loading history",

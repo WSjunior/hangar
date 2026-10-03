@@ -275,6 +275,7 @@ def esquecer(name: str) -> None:
         _batidas.pop(name, None)
         _fechadas.pop(name, None)
         _sugestoes.pop(name, None)
+        _bands.pop(name, None)
         _confirmacoes.pop(name, None)
         _preenchido.pop(name, None)
     _eventos.pop(name, None)
@@ -383,6 +384,18 @@ def sugestao(name: str) -> str:
     """A sugestão viva desta sessão, ou string vazia."""
     with _lock:
         return _sugestoes.get(name, "")
+
+
+# Faixa acima do prompt que os mods desenham: (versão, árvore de elementos do Claude Code ou None).
+# A versão é de todas as sessões juntas: o SSE só compara se mudou desde o que já mandou.
+_bands: dict[str, tuple[int, dict | None]] = {}
+_band_seq = 0
+
+
+def band(name: str) -> tuple[int, dict | None]:
+    """A faixa atual da sessão e a versão dela; (0, None) quando nada foi desenhado."""
+    with _lock:
+        return _bands.get(name, (0, None))
 
 # Depois disso a leitura do pane volta a mandar sozinha. O plugin não repete estado — ele avisa
 # transição —, então o prazo cobre uma sessão parada em `idle` por horas: o que expira aqui é a
@@ -731,6 +744,33 @@ async def suggest(body: SuggestBody):
         # `mostrada=False` é proposta que a TUI não pôs na caixa (diálogo aberto, headless): mostrar
         # no app o que nem o terminal mostrou seria inventar estado.
         _sugestoes[body.sessao] = body.texto if body.mostrada else ""
+    return {"ok": True}
+
+
+# O plugin já corta árvore acima de 256 KB; a folga cobre sessão e token no mesmo corpo.
+MAX_BAND_BYTES = 300 * 1024
+
+
+class BandBody(BaseModel):
+    sessao: str
+    token: str
+    above: dict | None = None
+
+
+@plugin_router.post("/ui")
+async def ui(body: BandBody, request: Request):
+    """A faixa acima do prompt, como o plugin a recebeu de todos os mods, só quando muda.
+
+    O Hangar não interpreta a árvore: ela vai como veio para o app, que desenha os elementos do
+    Claude Code sem saber de que mod vieram."""
+    if int(request.headers.get("content-length") or 0) > MAX_BAND_BYTES:
+        raise HTTPException(413, detail="faixa grande demais")
+    _confere(body.sessao, body.token)
+    global _band_seq
+    with _lock:
+        _band_seq += 1
+        _bands[body.sessao] = (_band_seq, body.above)
+    _acordar(body.sessao)
     return {"ok": True}
 
 

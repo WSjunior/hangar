@@ -454,6 +454,8 @@ pub struct Hangar {
     confirm: Option<Confirm>,
     confirm_no_ask: bool,
     terminal_suggestion: String,
+    /// Faixa acima do prompt que os mods do Claude Code desenham, como veio do SSE `plugin_ui`.
+    plugin_band: Value,
     recent: Option<Recent>,
     media: MediaCache<(SessionKey, Source)>,
     full_images: viewer::FullImages,
@@ -732,7 +734,7 @@ impl Hangar {
             attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
             suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
-            terminal_suggestion: String::new(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
+            terminal_suggestion: String::new(), plugin_band: Value::Null, recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
             settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
@@ -1117,6 +1119,7 @@ impl Hangar {
         self.composer.update(cx, |input, cx| input.set_value(draft, window, cx));
         self.confirm = None;
         self.terminal_suggestion.clear();
+        self.plugin_band = Value::Null;
         self.recent = None;
         self.command_panel = false;
         // Os menus são da tela sem sessão: sem isto, o Esc seguinte seria gasto num deles, já fora da tela.
@@ -1657,6 +1660,10 @@ impl Hangar {
                 self.terminal_suggestion = data.get("text").and_then(Value::as_str).unwrap_or("").to_owned();
                 return (true, Changed::Screen);
             }
+            "plugin_ui" => {
+                self.plugin_band = data.get("above").cloned().unwrap_or(Value::Null);
+                return (true, Changed::Screen);
+            }
             "stats" => {
                 return match serde_json::from_value::<Option<Stats>>(data) {
                     // Só o rodapé do compositor lê as estatísticas.
@@ -1775,6 +1782,7 @@ impl Hangar {
                 }
                 self.revision += 1;
                 self.terminal_suggestion.clear();
+                self.plugin_band = Value::Null;
                 if let Some(task) = self.history_task.take() { task.abort(); }
                 self.chat = Chat::default();
                 self.turn_seen = None;
@@ -5357,6 +5365,7 @@ impl Hangar {
                 }))))))
             .when_some(delivery_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
             .when_some(stop_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
+            .when_some(crate::plugin_ui::band(&self.plugin_band).filter(|_| readable), |el, band| el.child(in_column(band)))
             .map(|el| match orq {
                 Some(orq) => el.child(in_column(self.render_orq_footer(&orq, cx))),
                 None if read_only => el.child(in_column(div().py_2().text_sm().text_color(theme::muted()).whitespace_normal().child(tr("par_so_leitura")))),

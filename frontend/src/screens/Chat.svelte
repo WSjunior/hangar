@@ -5,6 +5,8 @@
   import Spinner from '../components/Spinner.svelte';
   import MessageList from '../components/MessageList.svelte';
   import Composer from '../components/Composer.svelte';
+  import PluginBand from '../components/PluginBand.svelte';
+  import type { PluginNode as PluginTree } from '@hangar/core';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
   import UsageSheet from '../components/UsageSheet.svelte';
@@ -452,6 +454,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // o timer só vence se ele nunca vier (interrupção).
   let pensamentoVivo = $state('');
   let sugestao = $state('');
+  // Faixa acima do prompt que os mods do Claude Code desenham (SSE 'plugin_ui').
+  let pluginBand = $state<PluginTree>(null);
   let pensamentoTimer: ReturnType<typeof setTimeout> | undefined;
   function limparPensamento() {
     clearTimeout(pensamentoTimer);
@@ -2247,6 +2251,16 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       }
     });
 
+    // Árvore crua dos mods: o Hangar não sabe de que mod veio, só desenha os elementos.
+    es.addEventListener('plugin_ui', (e) => {
+      noteAlive();
+      try {
+        pluginBand = (JSON.parse(e.data) as { above?: PluginTree }).above ?? null;
+      } catch {
+        quadroFalhou('plugin_ui');
+      }
+    });
+
     es.addEventListener('pensamento', (e) => {
       noteAlive();
       try {
@@ -2294,6 +2308,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       etagCauda = null;
       events = [];
       sugestao = '';        // era do contexto que o /clear acabou de apagar
+      pluginBand = null;    // idem: o mod redesenha para a conversa nova
       retiredQueuedIds.clear();
       idIndex.clear();
       reseedDerived();          // zera activity/asstCount junto (loadHistory re-semeia com o novo)
@@ -3348,6 +3363,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
                   onclick={() => (problemaDispensado = problemaChave)}>×</button>
         </div>
       {/if}
+      <PluginBand tree={pluginBand} />
       <!-- Composer SEMPRE visivel (exceto sessao morta). Antes ele sumia em awaiting_input e,
            se as opcoes nao fossem parseadas, o usuario ficava sem input E sem botoes = preso.
            Os OptionButtons continuam aparecendo na lista; o composer fica como saida garantida. -->

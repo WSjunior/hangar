@@ -1094,6 +1094,7 @@
   "chat_sessao_encerrada": "Esta sessão foi encerrada.",
   "chat_sse_recusado": "O servidor recusou a conexão desta sessão.",
   "chat_sse_tentar": "Tentar de novo",
+  "plugin_band_label": "Faixa dos plugins do Claude Code",
   "servidores_aviso_persistencia": "Não consegui guardar a lista de servidores neste aparelho. Ela vale agora, mas pode não estar aqui quando você abrir o app de novo.",
   "servidores_aviso_token": "O token de {label} não vale mais — o servidor recusou. Pareie de novo para voltar a usar.",
   "chat_carregando_historico": "Carregando histórico",

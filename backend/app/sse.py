@@ -950,6 +950,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
             await queue.put(("__error__", exc))
 
     sugestao_emitida = ""          # ultima sugestao que saiu; so a mudanca vira evento
+    band_sent = 0                  # versão da faixa dos mods que já saiu; 0 = nenhuma
     ask_q_emitted = False          # impede reemissao enquanto o mesmo prompt permanece na tela
     codex_question_emitted = ""
     ultimo_estado = None           # ultimo `state` emitido; None ate o primeiro tick
@@ -1112,6 +1113,11 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 if sug != sugestao_emitida:
                     sugestao_emitida = sug
                     yield {"event": "suggest", "data": json.dumps({"text": sug}, ensure_ascii=False)}
+                # A faixa dos mods pega a mesma carona; a versão diz se mudou desde a última.
+                band_version, band_tree = plugin_bridge.band(name)
+                if band_version != band_sent:
+                    band_sent = band_version
+                    yield {"event": "plugin_ui", "data": json.dumps({"above": band_tree}, ensure_ascii=False)}
                 # Rastreia transicoes do awaiting_input pra resetar o guard de emissao unica.
                 # Quando awaiting_input + overlay (rodape de abas = AskUserQuestion estruturado),
                 # emite ask_question UMA VEZ por prompt; reseta ao sair do estado.
