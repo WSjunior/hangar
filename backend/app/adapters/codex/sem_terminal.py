@@ -113,15 +113,22 @@ def _ambiente(meta: dict) -> dict:
     return env
 
 
-async def subir(meta: dict, tarefas: set | None = None) -> dict:
+async def subir(meta: dict, tarefas: set | None = None, *, prepared: bool = False) -> dict:
     """Sobe o cano com o app-server dentro e grava `cano` no sidecar. Devolve o dict do cano."""
     if shutil.which("codex") is None:
         raise RuntimeError("binário não encontrado: codex")
     log = codex_sessions._dir() / f"cano-{meta['key'][:16]}.log"
     comando = argv(meta)
+    if prepared:
+        codex_sessions.update_transfer_runtime(meta["name"], meta["transfer_id"], launching=True)
     cano, _ = await hl_adapter.subir_cano_processo(comando, cwd=meta["cwd"], env=_ambiente(meta),
                                                    key=meta["key"], log=log, tarefas=tarefas)
-    codex_sessions.update(meta["name"], cano=cano)
+    if prepared:
+        from app.conversation_transfer import _processes
+        codex_sessions.update_transfer_runtime(meta["name"], meta["transfer_id"], cano=cano,
+                                                processes=_processes(cano["pid"]), launching=False)
+    else:
+        codex_sessions.update(meta["name"], cano=cano)
     return cano
 
 

@@ -43,13 +43,13 @@ def save(name: str, cwd: str, session_id: str, *, config_dir: str | None = None,
          engine: str | None = None, model: str | None = None, effort: str | None = None,
          context_window: int | None = None, permission_mode: str | None = None,
          previous_non_plan: str | None = None, subagent_model: str | None = None,
-         jev: bool = False) -> dict:
+         jev: bool = False, key: str | None = None, transfer_id: str | None = None) -> dict:
     meta = {
         "name": name, "provider": "claude", "headless": True,
         # Identidade estável do processo pros scripts de dentro da sessão (hangar-send, hooks):
         # o nome muda no rename e o session_id no /clear; a chave, nunca. Vai no env como
         # CP_SESSION_KEY e o script acha o sidecar por ela.
-        "key": uuid.uuid4().hex,
+        "key": key or uuid.uuid4().hex,
         "cwd": cwd, "session_id": session_id,
         "config_dir": config_dir, "engine": engine,
         "model": model, "effort": effort, "context_window": context_window,
@@ -59,6 +59,8 @@ def save(name: str, cwd: str, session_id: str, *, config_dir: str | None = None,
         # troca para terminal o repassa pro `-e` do pane.
         "jev": jev,
     }
+    if transfer_id is not None:
+        meta["transfer_id"] = transfer_id
     _write(name, meta)
     return meta
 
@@ -79,7 +81,8 @@ def marcar_troca(name: str) -> None:
 
 
 def em_troca(name: str) -> bool:
-    return _trocando.get(name, 0.0) > time.monotonic()
+    from app.conversation_transfer import transfer_active
+    return _trocando.get(name, 0.0) > time.monotonic() or transfer_active(name)
 
 
 def update(name: str, **campos) -> dict | None:

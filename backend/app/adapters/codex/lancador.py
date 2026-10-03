@@ -40,7 +40,8 @@ def comando_do_lancador(cwd: str, initial_prompt: str | None = None,
                         codex_home: str | None = None,
                         codex_account: str | None = None,
                         approval: str | None = None, sandbox: str | None = None,
-                        tool_output_token_limit: int | None = None) -> list[str]:
+                        tool_output_token_limit: int | None = None,
+                        transfer_id: str | None = None) -> list[str]:
     """O comando do pane de uma sessao Codex: o lancador unico, o MESMO nos tres chamadores.
 
     O nome da sessao nao entra aqui — `tmux new-session` carimba CP_SESSION_NAME no pane e o
@@ -70,6 +71,9 @@ def comando_do_lancador(cwd: str, initial_prompt: str | None = None,
         argv += ["--sandbox", sandbox]
     if tool_output_token_limit is not None:
         argv += tool_output_override(tool_output_token_limit, launcher=True)
+    if transfer_id is not None:
+        import uuid
+        argv += ["--transfer-id", str(uuid.UUID(transfer_id))]
     if initial_prompt:
         argv += ["--prompt", initial_prompt]
     return argv

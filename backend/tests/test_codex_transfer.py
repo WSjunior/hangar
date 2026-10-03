@@ -36,6 +36,7 @@ def fake_client(tmp_path, monkeypatch):
                                                tuple(sorted(context.selected_uuids))),
                             {"name": "session", "key": "key", "cwd": str(tmp_path)}, None, None, None)
     store.save_transfer(record)
+    store.prepare_runtime(record)
 
     class FakeClient(AppServerClient):
         def __init__(self):
@@ -53,6 +54,8 @@ def fake_client(tmp_path, monkeypatch):
             self.fail_method = None
 
         async def start(self, **kwargs):
+            from types import SimpleNamespace
+            self._proc = SimpleNamespace(pid=90001)
             self.start_args = kwargs
 
         async def request(self, method, params, timeout=30):
@@ -106,6 +109,10 @@ def fake_client(tmp_path, monkeypatch):
             self.finished = True
 
     fake = FakeClient()
+    monkeypatch.setattr(store, "_processes", lambda pid: {str(pid): {"started": 1, "command": "fake-importer"}})
+    monkeypatch.setattr(store, "_processes_stopped", lambda processes: fake.finished)
+    monkeypatch.setattr(store, "_process_identity", lambda pid: {"started": 1, "command": "fake-importer"})
+    monkeypatch.setattr("app.procinfo.pid_vivo", lambda pid: pid == 90001 and not fake.finished)
     monkeypatch.setattr(transfer, "AppServerClient", lambda: fake)
     monkeypatch.setattr(transfer.codex_appserver, "versao", lambda: "0.159.3")
     monkeypatch.setattr(transfer.codex_models, "raw_model", lambda *args: dict(MODEL))
@@ -337,3 +344,28 @@ async def test_implicit_thread_cwd_must_match_preparation_process(fake_client):
     with pytest.raises(transfer.TransferError, match="native_settings_mismatch"):
         await prepare(fake_client)
     assert fake_client.finished and not fake_client.injected
+
+
+@pytest.mark.parametrize("failed_batch", [1, 2, 3])
+async def test_each_failed_batch_keeps_owner_and_partial_import_unpublished(fake_client, monkeypatch, failed_batch):
+    original = fake_client.request
+    batches = 0
+    monkeypatch.setattr(transfer, "serialized_batches", lambda items, limit: [[item] for item in items])
+
+    async def fail_batch(method, params, **kwargs):
+        nonlocal batches
+        if method == "thread/inject_items":
+            batches += 1
+            if batches == failed_batch:
+                raise RuntimeError("saída privada da falha")
+        return await original(method, params, **kwargs)
+
+    fake_client.request = fail_batch
+    with pytest.raises(transfer.TransferError, match="native_import_failed"):
+        await prepare(fake_client)
+    assert batches == failed_batch and len(fake_client.injected) == failed_batch - 1
+    record = store.load_transfer(fake_client.record.id)
+    assert record.phase == TransferPhase.SOURCE_STOPPED and record.boundary is None
+    assert record.destination_meta["thread_id"] == fake_client.thread_id
+    assert store._runtime(record)["import_stopped"] is True
+    assert not sessions.list_all()

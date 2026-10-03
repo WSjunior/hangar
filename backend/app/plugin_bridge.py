@@ -483,7 +483,12 @@ def entregar(name: str, texto: str, modo: str = MODO_PADRAO, jsonl: str | None =
     juntas roubariam o aviso uma da outra.
     """
     from app import terminal_input
+    from app.conversation_transfer import transfer_active
+    if transfer_active(name):
+        return False
     with terminal_input._send_lock(name):
+        if transfer_active(name):
+            return False
         return _entregar(name, texto, modo, jsonl)
 
 

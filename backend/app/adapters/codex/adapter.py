@@ -521,10 +521,13 @@ class CodexAdapter:
             revision = sess.get("state_revision", 0)
             try:
                 # Assinar eventos não pode sobrescrever as permissões escolhidas na sessão.
+                meta = codex_sessions.load(name) or {}
                 result = await sess["client"].request("thread/resume", {
                     "threadId": sess["thread_id"],
-                    "cwd": cwd,
+                    **({} if meta.get("transfer_id") else {"cwd": cwd}),
                 })
+                if meta.get("transfer_id"):
+                    sess["mode"] = "plan" if meta.get("previous_non_plan") else "default"
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -675,8 +678,13 @@ class CodexAdapter:
         vivo spawnavam 2 AppServerClient e o 2o attach() sobrescrevia o 1o no dict, vazando o
         subprocess orfao do 1o. setdefault no dict de locks e seguro sem lock proprio: nao ha
         `await` entre o get e o set, entao nenhuma outra corrotina roda no meio (cooperativo)."""
+        from app.conversation_transfer import transfer_active
+        if transfer_active(name):
+            return None
         sess = self._sessions.get(name)
         meta = codex_sessions.load(name)
+        if meta and meta.get("launching"):
+            return None
         if sess is not None and (not meta or not meta.get("endpoint") or meta.get("thread_id") == sess["thread_id"]):
             return sess["client"]
         lock = self._locks.setdefault(name, asyncio.Lock())
@@ -684,6 +692,8 @@ class CodexAdapter:
             # Double-check: outro chamador pode ter terminado de spawnar enquanto esperavamos o lock.
             sess = self._sessions.get(name)
             meta = codex_sessions.load(name)
+            if meta and meta.get("launching"):
+                return None
             if sess is not None and (not meta or not meta.get("endpoint") or meta.get("thread_id") == sess["thread_id"]):
                 return sess["client"]
             if meta is None:
@@ -781,6 +791,13 @@ class CodexAdapter:
             return client
 
     # ── sem terminal ───────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    async def _restore_imported_mode(client, meta: dict) -> None:
+        await client.request("thread/settings/update", {"threadId": meta["thread_id"],
+            "collaborationMode": {"mode": "plan" if meta.get("previous_non_plan") else "default",
+                                  "settings": {"model": meta["model"], "reasoning_effort": meta.get("effort"),
+                                               "developer_instructions": None}}})
 
     # Subidas seguidas que falharam (por sessão). No teto, para de tentar até ação do usuário
     # (encerrar/recriar) — o watch_sessions passa a cada 2s e viraria um spam de spawn.
@@ -885,6 +902,7 @@ class CodexAdapter:
                         _log.warning("codex sem terminal: esforço %s recusado name=%s: %s",
                                      meta["effort"], name, exc)
                 if meta.get("transfer_id"):
+                    await self._restore_imported_mode(client, meta)
                     confirmed = (await client.request("thread/read", {
                         "threadId": meta["thread_id"], "includeTurns": False})).get("thread") or {}
                     if (confirmed.get("id") != meta["thread_id"]
@@ -929,11 +947,220 @@ class CodexAdapter:
                     default_model=result.get("model"), default_effort=_effort_da_thread(result),
                     subscribed=True)
         self._sessions[name].update(headless=True, cano=meta.get("cano"))
+        if meta.get("transfer_id"):
+            self._sessions[name]["mode"] = "plan" if meta.get("previous_non_plan") else "default"
         self._sessions[name]["async_questions"].hydrate(thread)
         self._restore_turn(self._sessions[name], thread)
         _log.info("codex sem terminal: subiu name=%s thread=%s cano=%s", name, thread_id,
                   (meta.get("cano") or {}).get("pid"))
         return client
+
+    async def adopt_imported(self, name: str, prepared, meta: dict, *, terminal: bool) -> None:
+        from app.conversation_transfer import TransferError, _processes
+        from app.registry import _env_sessao, _exigir_lancador_codex
+        account = codex_contas.resolve_account(meta["codex_account"])
+        if str(account.home.expanduser().absolute()) != meta["codex_home"]:
+            raise TransferError("session_transfer_unknown_account")
+        if name in self._sessions or codex_sessions.load(name):
+            raise TransferError("session_transfer_runtime_identity_changed")
+        codex_sessions.write_prepared(name, meta["transfer_id"], dict(meta))
+        client = None
+        try:
+            if terminal:
+                await asyncio.to_thread(_exigir_lancador_codex)
+                if await asyncio.to_thread(tmux.has_session, name):
+                    raise TransferError("session_transfer_runtime_identity_changed")
+                approval, sandbox = sem_terminal.politica(meta["permission_mode"])
+                command = tmux.join_cmd(comando_do_lancador(
+                    meta["cwd"], thread_id=prepared.thread_id, model=prepared.model, effort=prepared.effort,
+                    codex_home=meta["codex_home"], codex_account=meta["codex_account"],
+                    approval=approval, sandbox=sandbox, tool_output_token_limit=prepared.tool_output_token_limit,
+                    transfer_id=meta["transfer_id"]))
+                env = _env_sessao(None, bool(meta.get("jev")), provider="codex")["env"]
+                env["CP_SESSION_KEY"] = meta["key"]
+                codex_sessions.update_transfer_runtime(name, meta["transfer_id"], launching=True)
+                if not await asyncio.to_thread(tmux.new_session, name, meta["cwd"], command, provider="codex", env=env):
+                    raise TransferError("session_transfer_terminal_failed")
+                pane_pid = await asyncio.to_thread(tmux.pane_pid, name)
+                codex_sessions.update_transfer_runtime(name, meta["transfer_id"], pane_pid=pane_pid,
+                                                        processes=await asyncio.to_thread(_processes, pane_pid), launching=False)
+                runtime = await self._wait_terminal(name, prepared.thread_id, transfer_id=meta["transfer_id"])
+                client = AppServerClient()
+                await client.connect(runtime["endpoint"])
+                await client.request("initialize", {"clientInfo": CLIENT_INFO, "capabilities": {"experimentalApi": True}})
+                resumed = await client.request("thread/resume", {"threadId": prepared.thread_id})
+                if (resumed.get("thread") or {}).get("id") != prepared.thread_id:
+                    raise TransferError("session_transfer_native_settings_mismatch")
+                result = resumed
+            else:
+                cano = await sem_terminal.subir(meta, prepared=True)
+                connected = await sem_terminal.conectar(cano, esperar=10.0)
+                if connected is None:
+                    raise TransferError("session_transfer_runtime_unavailable")
+                client, snapshot = connected
+                if snapshot.get("saiu") is not None:
+                    raise TransferError("session_transfer_runtime_unavailable")
+                await sem_terminal.initialize(client)
+                approval, sandbox = sem_terminal.politica(meta["permission_mode"])
+                # O cwd do processo já é o da origem; o RPC não deve promover confiança.
+                result = await client.request("thread/resume", {"threadId": prepared.thread_id,
+                    "approvalPolicy": approval, "sandbox": sandbox})
+                if (result.get("thread") or {}).get("id") != prepared.thread_id:
+                    raise TransferError("session_transfer_native_settings_mismatch")
+            actual_sandbox = {"readOnly": "read-only", "workspaceWrite": "workspace-write",
+                              "dangerFullAccess": "danger-full-access"}.get((result.get("sandbox") or {}).get("type"))
+            if (result.get("approvalPolicy"), actual_sandbox) != sem_terminal.politica(meta["permission_mode"]):
+                raise TransferError("session_transfer_native_settings_mismatch")
+            await client.request("thread/settings/update", {"threadId": prepared.thread_id,
+                "model": prepared.model, "effort": prepared.effort,
+                "collaborationMode": {"mode": prepared.mode, "settings": {
+                    "model": prepared.model, "reasoning_effort": prepared.effort, "developer_instructions": None}}})
+            await self._verify_imported_runtime(client, meta)
+            runtime = codex_sessions.load_prepared(name, meta["transfer_id"])
+            root = (runtime.get("cano") or {}).get("pid") if meta["headless"] else runtime.get("pane_pid")
+            codex_sessions.update_transfer_runtime(name, meta["transfer_id"], tree_final=True,
+                                                    processes=await asyncio.to_thread(_processes, root))
+            # Só o coordenador publica e libera o adapter para o envio comum.
+            if not hasattr(self, "_adoptions"):
+                self._adoptions = {}
+            self._adoptions[name] = (meta["transfer_id"], client, prepared.mode)
+            client = None
+        finally:
+            if client is not None:
+                await client.close()
+
+    async def _verify_imported_runtime(self, client, meta: dict) -> dict:
+        from app.conversation_transfer import TransferError, load_transfer, TransferPhase
+        from app.conversation_history import verify_boundary
+        from dataclasses import replace
+        loaded = await client.request("thread/loaded/list", {})
+        config = (await client.request("config/read", {"cwd": meta["cwd"], "includeLayers": False})).get("config") or {}
+        if config.get("tool_output_token_limit") != meta["tool_output_token_limit"]:
+            raise TransferError("session_transfer_native_settings_mismatch")
+        thread = (await client.request("thread/read", {"threadId": meta["thread_id"], "includeTurns": True})).get("thread") or {}
+        if (meta["thread_id"] not in loaded.get("data", []) or thread.get("id") != meta["thread_id"]
+                or thread.get("model") != meta["model"] or thread.get("reasoningEffort") != meta.get("effort")
+                or thread.get("path") != meta["rollout_path"] or thread.get("cwd") != meta["cwd"]
+                or (thread.get("status") or {}).get("type") != "idle"
+                or client.server_requests):
+            raise TransferError("session_transfer_native_settings_mismatch")
+        record = load_transfer(meta["transfer_id"])
+        if not record or not record.boundary:
+            raise TransferError("session_transfer_invalid_record")
+        await asyncio.to_thread(verify_boundary, replace(record, phase=TransferPhase.COMPLETE), meta["rollout_path"])
+        def no_automatic_turn():
+            import json
+            with Path(meta["rollout_path"]).open("rb") as source:
+                source.seek(record.boundary.min_offset)
+                for raw in source:
+                    row = json.loads(raw)
+                    if row.get("type") == "response_item" or (row.get("type") == "event_msg" and
+                            row.get("payload", {}).get("type") in {"task_started", "user_message", "agent_message"}):
+                        raise TransferError("session_transfer_unexpected_import_turn")
+        await asyncio.to_thread(no_automatic_turn)
+        return thread
+
+    async def publish_imported(self, record) -> None:
+        from app.conversation_transfer import TransferError
+        pending = getattr(self, "_adoptions", {}).get(record.name)
+        if not pending or pending[0] != record.id:
+            raise TransferError("session_transfer_runtime_unavailable")
+        _, client, mode = pending
+        meta = codex_sessions.load_prepared(record.name, record.id)
+        thread = await self._verify_imported_runtime(client, meta)
+        meta = codex_sessions.publish_prepared(record.name, record.id)
+        self.attach(record.name, client, meta["thread_id"], model=meta["model"], effort=meta.get("effort"),
+                    watch_tmux=not meta["headless"], subscribed=True)
+        self._sessions[record.name].update(headless=meta["headless"], cano=meta.get("cano"), mode=mode,
+                                          endpoint=meta.get("endpoint"), app_pid=meta.get("app_pid"))
+        self._restore_turn(self._sessions[record.name], thread)
+        self._adoptions.pop(record.name, None)
+
+    async def abort_imported(self, record) -> None:
+        from app.conversation_transfer import TransferError, _processes_stopped, _process_identity
+        from app import procinfo
+        from app.registry import _esperar_saida
+        meta = codex_sessions.transfer_runtime(record.name, record.id)
+        if meta is None:
+            return
+        if any(meta.get(k) != (record.destination_meta or {}).get(k) for k in ("thread_id", "key", "codex_home")):
+            raise TransferError("session_transfer_runtime_identity_changed")
+        processes = meta.get("processes", {})
+        if meta.get("launching"):
+            raise TransferError("session_transfer_process_identity_unknown")
+        roots = [meta.get(field) for field in ("pane_pid", "app_pid", "tui_pid", "launcher_pid")]
+        roots.append((meta.get("cano") or {}).get("pid"))
+        root = (meta.get("cano") or {}).get("pid") if meta.get("headless") else meta.get("pane_pid")
+        if root and not meta.get("tree_final") and not procinfo.pid_vivo(root):
+            raise TransferError("session_transfer_runtime_cleanup_unconfirmed")
+        if any(pid and procinfo.pid_vivo(pid) and str(pid) not in processes for pid in roots):
+            raise TransferError("session_transfer_process_identity_unknown")
+        stopped = _processes_stopped(processes)
+        if not stopped and any(procinfo.pid_vivo(int(pid)) and _process_identity(int(pid)) != identity
+               for pid, identity in processes.items()):
+            raise TransferError("session_transfer_process_identity_changed")
+        if not stopped:
+            pending = getattr(self, "_adoptions", {}).get(record.name)
+            attached = self._sessions.get(record.name)
+            owned_client = pending[1] if pending else (attached or {}).get("client")
+            temporary = owned_client is None
+            try:
+                if temporary and meta.get("headless"):
+                    connection = await sem_terminal.conectar(meta.get("cano") or {}, esperar=2.0)
+                    if connection is None:
+                        raise TransferError("session_transfer_runtime_owner_unconfirmed")
+                    owned_client, _ = connection
+                    await sem_terminal.initialize(owned_client)
+                elif temporary:
+                    owned_client = AppServerClient()
+                    await owned_client.connect(meta["endpoint"])
+                    await owned_client.request("initialize", {"clientInfo": CLIENT_INFO})
+                loaded = (await owned_client.request("thread/loaded/list", {})).get("data")
+                if not isinstance(loaded, list) or any(thread != meta["thread_id"] for thread in loaded):
+                    raise TransferError("session_transfer_runtime_identity_changed")
+                if meta["thread_id"] in loaded:
+                    thread = (await owned_client.request("thread/read", {
+                        "threadId": meta["thread_id"], "includeTurns": False})).get("thread") or {}
+                    if (thread.get("id") != meta["thread_id"] or thread.get("cwd") != meta["cwd"]
+                            or thread.get("path") != meta["rollout_path"]
+                            or (thread.get("status") or {}).get("type") != "idle"):
+                        raise TransferError("session_transfer_runtime_owner_unconfirmed")
+            finally:
+                if temporary and owned_client is not None:
+                    await owned_client.close()
+            from app.conversation_transfer import _processes
+            processes = {**processes, **await asyncio.to_thread(_processes, root)}
+            codex_sessions.update_transfer_runtime(record.name, record.id, processes=processes, tree_final=True)
+        if not stopped and meta.get("headless"):
+            pid = (meta.get("cano") or {}).get("pid")
+            if pid and str(pid) not in processes:
+                raise TransferError("session_transfer_process_identity_unknown")
+            await asyncio.to_thread(sem_terminal.matar, meta)
+        elif not stopped and await asyncio.to_thread(tmux.has_session, record.name):
+            pid = await asyncio.to_thread(tmux.pane_pid, record.name)
+            if str(pid) not in processes or pid != meta.get("pane_pid"):
+                raise TransferError("session_transfer_process_identity_changed")
+            if not await asyncio.to_thread(tmux.kill_session, record.name):
+                raise TransferError("session_transfer_runtime_not_stopped")
+        pending = getattr(self, "_adoptions", {}).pop(record.name, None)
+        if pending:
+            await pending[1].close()
+        attached = self._sessions.get(record.name)
+        if attached and attached.get("thread_id") == meta["thread_id"]:
+            for task in (attached.get("bomba"), self._tmux_watchers.pop(record.name, None),
+                         self._subscribers.pop(record.name, None)):
+                if task:
+                    task.cancel()
+            await attached["client"].close()
+            self._sessions.pop(record.name, None)
+        await asyncio.to_thread(_esperar_saida, [int(pid) for pid in processes])
+        if not _processes_stopped(processes):
+            raise TransferError("session_transfer_runtime_not_stopped")
+        live = codex_sessions.load(record.name)
+        if live:
+            if live.get("transfer_id") != record.id or live.get("thread_id") != meta["thread_id"]:
+                raise TransferError("session_transfer_runtime_identity_changed")
+            codex_sessions.delete(record.name)
 
     async def restart(self, name: str) -> None:
         """Mata o app-server da sessão sem terminal e sobe outro na mesma conversa. É a saída de
@@ -1037,13 +1264,14 @@ class CodexAdapter:
                     raise RuntimeError(f"A troca falhou ({exc}) e a sessão não reiniciou: {restore_error}") from restore_error
                 raise RuntimeError(f"A troca falhou; a conversa continua sem terminal: {exc}") from exc
 
-    async def _wait_terminal(self, name: str, thread_id: str) -> dict:
+    async def _wait_terminal(self, name: str, thread_id: str, *, transfer_id: str | None = None) -> dict:
         # Pane criado não prova que a TUI carregou a conversa.
         deadline = time.monotonic() + 45
         probe = AppServerClient()
         try:
             while time.monotonic() < deadline:
-                launched = codex_sessions.load(name) or {}
+                launched = (codex_sessions.transfer_runtime(name, transfer_id) if transfer_id
+                            else codex_sessions.load(name)) or {}
                 if launched.get("tui_pid") and pid_vivo(launched["tui_pid"]):
                     if not probe.endpoint:
                         await probe.connect(launched["endpoint"])
@@ -1622,6 +1850,11 @@ class CodexAdapter:
                 sess["effort"] = sess["default_effort"] = settings.get("effort")
                 sess["mode"] = (settings.get("collaborationMode") or {}).get("mode", "default")
                 sess["settings_revision"] = sess.get("settings_revision", 0) + 1
+                if "collaborationMode" in settings and sess["mode"] in {"plan", "default"}:
+                    meta = codex_sessions.load(name) or {}
+                    if meta.get("transfer_id") and meta.get("thread_id") == sess["thread_id"]:
+                        codex_sessions.update(name, previous_non_plan=meta["permission_mode"]
+                                              if sess["mode"] == "plan" else None)
             turn_problem = _turn_problem(notif) if current_turn else None
             problem_updated = False
             if turn_problem is not None:
@@ -1712,6 +1945,9 @@ class CodexAdapter:
             espalhar(StateEvent(session=name, state="dead"))
 
     async def send_prompt(self, name: str, text: str) -> str:
+        from app.conversation_transfer import transfer_active
+        if transfer_active(name):
+            return "deferred"
         """Envia o prompt como `turn/start` no app-server — NAO digitando no pane do tmux.
 
         MEDIDO (probe contra codex-cli 0.144.6, docs/codex-app-server-contract.md): a TUI
@@ -1827,6 +2063,9 @@ class CodexAdapter:
     async def drain(self, name: str, path: str) -> int:
         sess = self._sessions.get(name)
         async with self.delivery_lock(name):
+            from app.conversation_transfer import transfer_active
+            if transfer_active(name):
+                return 0
             if self._sessions.get(name) is not sess:
                 return 0
             return await self._drain(name, path)
@@ -1992,6 +2231,9 @@ class CodexAdapter:
             }},
         })
         sess["mode"] = mode
+        meta = codex_sessions.load(name) or {}
+        if meta.get("transfer_id"):
+            codex_sessions.update(name, previous_non_plan=meta["permission_mode"] if mode == "plan" else None)
         return {**current, "mode": mode}
 
     async def compact(self, name: str) -> None:

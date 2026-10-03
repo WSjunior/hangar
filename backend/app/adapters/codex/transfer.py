@@ -250,8 +250,10 @@ async def prepare_import(account: codex_contas.Account, cwd: str, context: Impor
                    if i.get("type") == "function_call_output"))
     client = AppServerClient()
     try:
+        await asyncio.to_thread(store.mark_import_starting, record)
         await client.start(codex_home=account.home, cwd=cwd, tool_output_token_limit=budget,
                            session_name=record.name, session_key=record.origin_meta["key"])
+        await asyncio.to_thread(store.record_import_process, record, client._proc.pid)
         await client.request("initialize", {"clientInfo": CLIENT_INFO,
                                            "capabilities": {"experimentalApi": True}})
         version = await asyncio.to_thread(codex_appserver.versao)
@@ -326,4 +328,8 @@ async def prepare_import(account: codex_contas.Account, cwd: str, context: Impor
         error = TransferError("session_transfer_native_import_failed")
         raise error from None
     finally:
-        await client.close()
+        try:
+            await asyncio.to_thread(store.refresh_import_process, record)
+        finally:
+            await client.close()
+        await asyncio.to_thread(store.confirm_import_exit, record)

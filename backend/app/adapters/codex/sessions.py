@@ -95,7 +95,8 @@ def save(name: str, thread_id: str | None, rollout_path: str, cwd: str,
          codex_account: str | None = None,
          headless: bool = False, key: str | None = None,
          permission_mode: str | None = None, jev: bool = False,
-         transfer_id: str | None = None, tool_output_token_limit: int | None = None) -> None:
+         transfer_id: str | None = None, tool_output_token_limit: int | None = None,
+         previous_non_plan: str | None = None, launching: bool = False) -> None:
     """Grava (ou sobrescreve) o sidecar duravel da sessao Codex. Escrita ATOMICA (tmp + replace,
     mesmo padrao de PromptQueue._write_atomic em pqueue.py) -- write_text direto podia corromper
     o sidecar em crash/concorrencia no meio da escrita.
@@ -128,6 +129,12 @@ def save(name: str, thread_id: str | None, rollout_path: str, cwd: str,
         meta["key"] = key
     if transfer_id is not None:
         meta["transfer_id"] = transfer_id
+    if permission_mode is not None:
+        meta["permission_mode"] = permission_mode
+    if previous_non_plan is not None:
+        meta["previous_non_plan"] = previous_non_plan
+    if launching:
+        meta["launching"] = True
     if tool_output_token_limit is not None:
         if type(tool_output_token_limit) is not int or tool_output_token_limit <= 0:
             raise ValueError("limite de resultado de ferramenta inválido")
@@ -140,7 +147,7 @@ def save(name: str, thread_id: str | None, rollout_path: str, cwd: str,
         previous = load(name) or {}
         same_thread = previous.get("thread_id") == thread_id
         for field in ("key", "transfer_id", "tool_output_token_limit", "codex_home", "codex_account",
-                      "permission_mode", "jev"):
+                      "permission_mode", "previous_non_plan", "jev"):
             if field not in meta and field in previous and (field == "key" or same_thread):
                 meta[field] = previous[field]
         _write(name, meta)
@@ -306,3 +313,68 @@ def pretrust_cwd(cwd: str, codex_home: str | Path | None = None) -> None:
             # parada na pergunta de confianca, e sem esta linha nao ha nada no log ligando uma
             # coisa a outra.
             _log.warning("pretrust do codex falhou pra %s: %r", cwd, e)
+
+
+def prepared_path(transfer_id: str) -> Path:
+    import uuid
+    return _dir() / "prepared" / f"{uuid.UUID(transfer_id)}.json"
+
+
+def load_prepared(name: str, transfer_id: str) -> dict | None:
+    """Runtime privado da adoção; nunca participa de list_all nem de descoberta."""
+    path = prepared_path(transfer_id)
+    try:
+        meta = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    if not isinstance(meta, dict) or meta.get("name") != name or meta.get("transfer_id") != transfer_id:
+        raise ValueError("session_transfer_runtime_identity_changed")
+    return meta
+
+
+def write_prepared(name: str, transfer_id: str, meta: dict) -> None:
+    from app.conversation_transfer import _write_json
+    if meta.get("name") != name or meta.get("transfer_id") != transfer_id:
+        raise ValueError("session_transfer_runtime_identity_changed")
+    with _locked(name):
+        previous = load_prepared(name, transfer_id)
+        if previous and any(previous.get(k) != meta.get(k) for k in ("key", "thread_id", "codex_home")):
+            raise ValueError("session_transfer_runtime_identity_changed")
+        _write_json(prepared_path(transfer_id), meta)
+
+
+def transfer_runtime(name: str, transfer_id: str) -> dict | None:
+    live = load(name)
+    if live and live.get("transfer_id") == transfer_id:
+        return live
+    return load_prepared(name, transfer_id)
+
+
+def update_transfer_runtime(name: str, transfer_id: str, **fields) -> dict:
+    from app.conversation_transfer import _write_json
+    with _locked(name):
+        live = load(name)
+        meta = live if live and live.get("transfer_id") == transfer_id else load_prepared(name, transfer_id)
+        if not meta or any(k in fields and fields[k] != meta.get(k)
+                           for k in ("name", "key", "thread_id", "codex_home", "transfer_id")):
+            raise ValueError("session_transfer_runtime_identity_changed")
+        if "processes" in fields:
+            fields["processes"] = {**meta.get("processes", {}), **fields["processes"]}
+        updated = {**meta, **fields}
+        if meta is live:
+            _write(name, updated)
+        else:
+            _write_json(prepared_path(transfer_id), updated)
+        return updated
+
+
+def publish_prepared(name: str, transfer_id: str) -> dict:
+    with _locked(name):
+        meta = load_prepared(name, transfer_id)
+        if not meta:
+            raise ValueError("session_transfer_runtime_missing")
+        live = load(name)
+        if live and any(live.get(k) != meta.get(k) for k in ("transfer_id", "key", "thread_id")):
+            raise ValueError("session_transfer_runtime_identity_changed")
+        _write(name, meta)
+        return meta

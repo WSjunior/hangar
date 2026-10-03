@@ -1,7 +1,7 @@
-"""Origem privada e etapas confirmadas da transferência de uma conversa.
+"""Origem privada, etapas confirmadas e coordenação da troca de agente.
 
-O registro é a verdade; índices só apontam para ele e nunca confirmam uma etapa.
-Não abre processos, não grava rollout e não guarda configuração ou credenciais.
+O registro é a verdade; índices não confirmam etapas. Dados privados dos processos
+ficam no manifesto de runtime, separados da associação histórica.
 """
 from __future__ import annotations
 
@@ -434,3 +434,388 @@ def rename_transfer(old: str, new: str) -> None:
             if _belongs(record, life, meta):
                 save_transfer(replace(record, name=new))
                 return
+
+
+_operation_locks: dict[str, threading.Lock] = {}
+
+
+@contextmanager
+def session_operation(name: str):
+    with _lock:
+        operation = _operation_locks.setdefault(name, threading.Lock())
+    if not operation.acquire(blocking=False):
+        raise TransferError("session_transfer_busy")
+    try:
+        yield
+    finally:
+        operation.release()
+
+
+def require_available(name: str) -> None:
+    if transfer_active(name):
+        raise TransferError("session_transfer_busy")
+
+
+def public_error(error: TransferError) -> dict:
+    messages = {
+        "session_transfer_source_changed": "A conversa mudou; abra a seleção de conta novamente.",
+        "session_transfer_restore_failed": "A troca falhou e o Claude não voltou. Use Recarregar para tentar recuperar.",
+        "session_transfer_busy": "A sessão está trocando de agente; tente novamente quando terminar.",
+    }
+    message = messages.get(error.code, "Não foi possível transferir a conversa.")
+    if error.code == "session_transfer_restore_failed":
+        reasons = {"session_transfer_source_changed": "A identidade da origem mudou.",
+                   "session_transfer_process_identity_changed": "O processo agora pertence a outra execução.",
+                   "session_transfer_process_identity_unknown": "Não foi possível confirmar o dono do processo.",
+                   "session_transfer_source_not_stopped": "O processo da origem ainda não encerrou.",
+                   "session_transfer_runtime_not_stopped": "O processo de destino ainda não encerrou.",
+                   "session_transfer_import_not_stopped": "O importador ainda não encerrou.",
+                   "session_transfer_import_cleanup_unconfirmed": "A queda interrompeu a confirmação dos processos filhos do importador.",
+                   "session_transfer_runtime_cleanup_unconfirmed": "A queda interrompeu a confirmação dos processos filhos do destino."}
+        message += " " + reasons.get(error.params.get("phase"), "Não foi possível confirmar o carregamento da origem.")
+    return {"code": error.code, "msg": message,
+            "params": error.params}
+
+
+def _runtime_path(record: TransferRecord) -> Path:
+    return _base() / "runtime" / f"{_id(record.id)}.json"
+
+
+def _runtime(record: TransferRecord) -> dict:
+    return json.loads(_runtime_path(record).read_text(encoding="utf-8"))
+
+
+def prepare_runtime(record: TransferRecord, *, original: dict | None = None,
+                    processes: dict | None = None) -> None:
+    """Inicializa o manifesto privado; a prova isolada do importador pode omitir a origem física."""
+    path = _runtime_path(record)
+    if path.exists():
+        raise TransferError("session_transfer_runtime_exists")
+    _write_json(path, {"original": dict(original or {}), "processes": dict(processes or {})})
+
+
+def _process_identity(pid: int) -> dict | None:
+    from app import procinfo
+    born, command = procinfo._proc_start_time(pid), procinfo._cmdline(pid)
+    if born is None or not command:
+        return None
+    return {"started": born, "command": hashlib.sha256(command.encode()).hexdigest()}
+
+
+def _processes(pid: int | None) -> dict[str, dict]:
+    from app import procinfo
+    if not pid:
+        return {}
+    result = {}
+    for child in procinfo._descendant_pids(int(pid), procinfo._proc_children_map(max_age=0)):
+        if not procinfo.pid_vivo(child):
+            continue
+        identity = _process_identity(child)
+        if identity is None:
+            raise TransferError("session_transfer_process_identity_unknown")
+        result[str(child)] = identity
+    return result
+
+
+def _processes_stopped(processes: dict[str, dict]) -> bool:
+    from app import procinfo
+    # PID reaproveitado não é nosso e nunca recebe sinal para completar uma parada.
+    for pid, identity in processes.items():
+        if procinfo.pid_vivo(int(pid)):
+            current = _process_identity(int(pid))
+            if current is None or current.get("started") == identity.get("started"):
+                return False
+    return True
+
+
+def record_import_process(record: TransferRecord, pid: int) -> None:
+    private = _runtime(record)
+    private["import_processes"] = {**private.get("import_processes", {}), **_processes(pid)}
+    if str(pid) not in private["import_processes"]:
+        raise TransferError("session_transfer_process_identity_unknown")
+    private["import_pid"] = pid
+    private["import_launching"] = False
+    _write_json(_runtime_path(record), private)
+
+
+def mark_import_starting(record: TransferRecord) -> None:
+    private = _runtime(record)
+    private["import_launching"] = True
+    _write_json(_runtime_path(record), private)
+
+
+def refresh_import_process(record: TransferRecord) -> None:
+    from app import procinfo
+    private = _runtime(record)
+    pid = private.get("import_pid")
+    if pid and procinfo.pid_vivo(pid):
+        if _process_identity(pid) != private.get("import_processes", {}).get(str(pid)):
+            raise TransferError("session_transfer_process_identity_changed")
+        record_import_process(record, pid)
+        private = _runtime(record)
+        private["import_tree_final"] = True
+        _write_json(_runtime_path(record), private)
+    elif pid and not private.get("import_tree_final"):
+        raise TransferError("session_transfer_import_cleanup_unconfirmed")
+
+
+def confirm_import_exit(record: TransferRecord) -> None:
+    private = _runtime(record)
+    if private.get("import_launching"):
+        raise TransferError("session_transfer_process_identity_unknown")
+    if private.get("import_pid") and not private.get("import_tree_final"):
+        raise TransferError("session_transfer_import_cleanup_unconfirmed")
+    if not _processes_stopped(private.get("import_processes", {})):
+        raise TransferError("session_transfer_import_not_stopped")
+    private["import_stopped"] = True
+    _write_json(_runtime_path(record), private)
+
+
+async def stop_import_process(record: TransferRecord) -> None:
+    import asyncio
+    import signal
+    from app import procinfo
+    from app.registry import _esperar_saida
+    private = _runtime(record)
+    if private.get("import_launching"):
+        raise TransferError("session_transfer_process_identity_unknown")
+    if private.get("import_stopped"):
+        return
+    processes = private.get("import_processes", {})
+    root = private.get("import_pid")
+    if root and procinfo.pid_vivo(root):
+        if _process_identity(root) != processes.get(str(root)):
+            raise TransferError("session_transfer_process_identity_changed")
+        processes = {**processes, **await asyncio.to_thread(_processes, root)}
+    if root and not private.get("import_tree_final"):
+        raise TransferError("session_transfer_import_cleanup_unconfirmed")
+    for pid, identity in reversed(list(processes.items())):
+        if not procinfo.pid_vivo(int(pid)):
+            continue
+        if _process_identity(int(pid)) != identity:
+            raise TransferError("session_transfer_process_identity_changed")
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    await asyncio.to_thread(_esperar_saida, [int(pid) for pid in processes])
+    if not _processes_stopped(processes):
+        raise TransferError("session_transfer_import_not_stopped")
+    await asyncio.to_thread(confirm_import_exit, record)
+
+
+def _map_permission(meta: dict) -> tuple[str, str]:
+    current = meta.get("permission_mode")
+    base = meta.get("previous_non_plan") if current == "plan" else current
+    permission = {"bypassPermissions": "Full Access", "manual": "Ask for approval",
+                  "default": "Ask for approval", "acceptEdits": "Approve for me"}.get(base)
+    if permission is None:
+        raise TransferError("session_transfer_invalid_permission_mode")
+    return permission, "plan" if current == "plan" else "default"
+
+
+def _resolve_target(credential_id: str):
+    from app import codex_contas, cotas
+    for listed in codex_contas.list_accounts():
+        if f"codex:{listed.home.expanduser().resolve(strict=False)}" == credential_id:
+            try:
+                account = codex_contas.resolve_account(listed.id)
+            except codex_contas.AccountError:
+                raise TransferError("session_transfer_unknown_account", status=400) from None
+            if account.home.resolve(strict=False) != listed.home.resolve(strict=False):
+                break
+            if cotas.id_conta_codex(account.home) != credential_id:
+                raise TransferError("session_transfer_login_required")
+            return account
+    raise TransferError("session_transfer_unknown_account", status=400)
+
+
+async def _check_target(account, model: str | None, effort: str | None) -> None:
+    import asyncio
+    from app import codex_models, codex_appserver, cotas
+    from app.adapters.codex.transfer import SUPPORTED_VERSION
+    try:
+        version = await asyncio.to_thread(codex_appserver.versao)
+    except Exception:
+        raise TransferError("session_transfer_native_unavailable") from None
+    if version != SUPPORTED_VERSION:
+        raise TransferError("session_transfer_codex_version_unsupported")
+    try:
+        state, windows, _ = await asyncio.to_thread(cotas._ler_codex, account.home)
+    except Exception:
+        raise TransferError("session_transfer_account_unavailable") from None
+    if state in {"sem_credencial", "expirada"}:
+        raise TransferError("session_transfer_login_required")
+    if state == "lida" and any(window.pct >= 99 for window in windows):
+        raise TransferError("session_transfer_account_full")
+    try:
+        await asyncio.to_thread(codex_models.checar_escolha, model, effort, codex_home=account.home)
+    except codex_models.CodexRecusado:
+        raise TransferError("session_transfer_login_required") from None
+    except ValueError:
+        raise TransferError("session_transfer_invalid_model_choice") from None
+    except Exception:
+        raise TransferError("session_transfer_native_unavailable") from None
+
+
+def _source_info(registry, name: str, source_life: str, source_jsonl: str):
+    from app.adapters.claude_headless import sessions
+    info = next((row for row in registry.list() if row.name == name), None)
+    if (not info or info.provider != "claude" or info.engine or not info.tracked
+            or not info.jsonl or session_life(name) != source_life
+            or os.path.realpath(info.jsonl) != os.path.realpath(source_jsonl)):
+        raise TransferError("session_transfer_source_changed")
+    meta = sessions.load(name)
+    if meta and Path(info.jsonl).stem != meta.get("session_id"):
+        raise TransferError("session_transfer_source_changed")
+    return info
+
+
+async def _check_source_idle(registry, name: str, meta: dict) -> None:
+    import asyncio
+    from app import procinfo, tmux
+    from app.adapters import get_adapter, CLAUDE_HEADLESS
+    from app.pqueue import PromptQueue
+    from app.askquestion import read_pending_askq as read_question
+    queue = await asyncio.to_thread(PromptQueue(name).load)
+    if any(not row.get("delivered") or not row.get("confirmed") for row in queue):
+        raise TransferError("session_transfer_queue_pending")
+    if meta["headless"]:
+        hl = get_adapter(CLAUDE_HEADLESS)
+        sess = await hl.ensure_running(name, so_reconectar=True)
+        if sess and sess.vivo and (sess.iniciando or sess.in_progress or sess.pending or sess.question):
+            raise TransferError("session_transfer_source_busy")
+    else:
+        pane = await asyncio.to_thread(registry._pane_of, name)
+        if pane is None or pane.get("pid") != meta.get("pane_pid"):
+            raise TransferError("session_transfer_source_changed")
+        from app.registry import _pid_do_agente, provider_of_pane
+        children = await asyncio.to_thread(procinfo._proc_children_map, max_age=0)
+        if await asyncio.to_thread(provider_of_pane, pane["pid"], children) != "claude":
+            raise TransferError("session_transfer_source_changed")
+        agent = await asyncio.to_thread(_pid_do_agente, pane["pid"])
+        if agent:
+            if await asyncio.to_thread(procinfo._engine_of, agent):
+                raise TransferError("session_transfer_source_changed")
+            native = Path(meta["config_dir"]) / "sessions" / f"{agent}.json"
+            try:
+                state = json.loads(await asyncio.to_thread(native.read_text, encoding="utf-8"))
+            except (OSError, ValueError):
+                raise TransferError("session_transfer_source_state_unknown") from None
+            if state.get("sessionId") != meta["session_id"] or state.get("pid") != agent:
+                raise TransferError("session_transfer_source_changed")
+            if state.get("status") != "idle":
+                raise TransferError("session_transfer_source_busy")
+    if await asyncio.to_thread(read_question, meta["jsonl"]):
+        raise TransferError("session_transfer_source_busy")
+
+
+async def transfer_claude_to_codex(registry, name: str, credential_id: str, source_life: str,
+                                  model: str | None, effort: str | None, *, source_jsonl: str) -> dict:
+    import asyncio
+    from app.adapters import get_adapter, CLAUDE_HEADLESS
+    from app.adapters.claude_headless import sessions as hl_sessions
+    from app.adapters.codex import transfer as importer
+    from app.claude_to_codex import convert_snapshot, ConversionError
+    from app import terminal_input
+    with session_operation(name):
+        require_available(name)
+        await asyncio.to_thread(_source_info, registry, name, source_life, source_jsonl)
+        account = await asyncio.to_thread(_resolve_target, credential_id)
+        await _check_target(account, model, effort)
+        hl = get_adapter(CLAUDE_HEADLESS)
+        async with hl.delivery_lock(name):
+            terminal_lock = terminal_input._send_lock(name)
+            if not terminal_lock.acquire(blocking=False):
+                raise TransferError("session_transfer_busy")
+            record = None
+            stop_attempted = False
+            try:
+                info = await asyncio.to_thread(_source_info, registry, name, source_life, source_jsonl)
+                meta, private = await asyncio.to_thread(registry.transfer_origin, info)
+                permission, collaboration = _map_permission(meta)
+                await _check_source_idle(registry, name, meta)
+                record = TransferRecord(str(uuid.uuid4()), name, source_life, TransferPhase.PREPARING,
+                                        None, prepare_origin(meta), None, None, None)
+                await asyncio.to_thread(prepare_runtime, record, **private)
+                await asyncio.to_thread(save_transfer, record)
+                # O estado nativo é relido imediatamente antes da parada; teclas humanas não usam nossas travas.
+                await _check_source_idle(registry, name, meta)
+                await asyncio.to_thread(_source_info, registry, name, source_life, source_jsonl)
+                stop_attempted = True
+                await registry.stop_transfer_source(record, private)
+                record = replace(record, phase=TransferPhase.SOURCE_STOPPED)
+                await asyncio.to_thread(save_transfer, record)
+                record = await asyncio.to_thread(capture_snapshot, record, meta["jsonl"], ())
+                context = await asyncio.to_thread(convert_snapshot, Path(record.source.path))
+                record = replace(record, source=replace(record.source, selected_uuids=tuple(sorted(context.selected_uuids))))
+                await asyncio.to_thread(save_transfer, record)
+                prepared = await importer.prepare_import(account, meta["cwd"], context, model, effort,
+                                                         permission, transfer_id=record.id,
+                                                         collaboration_mode=collaboration)
+                record = load_transfer(record.id)
+                record = replace(record, phase=TransferPhase.IMPORTED,
+                                 destination_meta={**record.destination_meta, "name": name, "provider": "codex",
+                                    "key": record.origin_meta["key"], "headless": meta["headless"], "jev": bool(meta.get("jev")),
+                                    "lifecycle_id": f"k:{record.origin_meta['key']}",
+                                    "previous_non_plan": permission if collaboration == "plan" else None})
+                await asyncio.to_thread(save_transfer, record)
+                await get_adapter("codex").adopt_imported(name, prepared, record.destination_meta,
+                                                          terminal=not meta["headless"])
+                record = replace(record, phase=TransferPhase.PUBLISHING)
+                await asyncio.to_thread(save_transfer, record)
+                await registry.publish_transfer(record)
+                record = replace(record, phase=TransferPhase.COMPLETE)
+                await asyncio.to_thread(save_transfer, record)
+                return {"ok": True, "provider": "codex", "conta": credential_id,
+                        "model": prepared.model, "effort": prepared.effort, "transfer_id": record.id}
+            except BaseException as exc:
+                error = (exc if isinstance(exc, TransferError) else
+                         TransferError(exc.code) if isinstance(exc, ConversionError) else
+                         TransferError("session_transfer_failed"))
+                if record is not None:
+                    record = load_transfer(record.id) or record
+                    if stop_attempted:
+                        await _restore_transfer(registry, record, error.code)
+                    else:
+                        await asyncio.to_thread(save_transfer, replace(record, phase=TransferPhase.REJECTED,
+                                                                     error_code=error.code))
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                raise error from None
+            finally:
+                terminal_lock.release()
+
+
+async def _restore_transfer(registry, record: TransferRecord, cause: str) -> dict:
+    import asyncio
+    record = replace(record, phase=TransferPhase.RESTORING, error_code=cause)
+    await asyncio.to_thread(save_transfer, record)
+    try:
+        await stop_import_process(record)
+        await registry.restore_transfer_source(record, _runtime(record))
+    except Exception as exc:
+        reason = exc.code if isinstance(exc, TransferError) else "session_transfer_restore_unconfirmed"
+        await asyncio.to_thread(save_transfer, replace(record, phase=TransferPhase.RESTORE_FAILED,
+                                                       error_code=reason))
+        raise TransferError("session_transfer_restore_failed", params={"phase": reason}) from None
+    await asyncio.to_thread(save_transfer, replace(record, phase=TransferPhase.ROLLED_BACK))
+    return {"ok": True, "provider": "claude", "transfer_id": record.id}
+
+
+async def recover_transfer(registry, record: TransferRecord) -> dict:
+    from app.adapters import get_adapter, CLAUDE_HEADLESS
+    from app import terminal_input
+    with session_operation(record.name):
+        async with get_adapter(CLAUDE_HEADLESS).delivery_lock(record.name):
+            terminal_lock = terminal_input._send_lock(record.name)
+            if not terminal_lock.acquire(blocking=False):
+                raise TransferError("session_transfer_busy")
+            try:
+                current = load_transfer(record.id)
+                if not current or current.phase in _TERMINAL:
+                    raise TransferError("session_transfer_source_changed")
+                # Um crash antes de COMPLETE sempre recupera a origem; nunca infere commit por PID/data.
+                return await _restore_transfer(registry, current, current.error_code or "session_transfer_interrupted")
+            finally:
+                terminal_lock.release()
