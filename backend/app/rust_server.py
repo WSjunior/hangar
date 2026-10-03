@@ -171,7 +171,18 @@ class RuntimeTransport:
                 connection.request("POST", "/runtime/op", body=json.dumps(body).encode(), headers=self._headers)
                 response = connection.getresponse()
                 if response.status != 200:
-                    raise RuntimeError("IPC recusou a operação; não houve troca para outro transporte")
+                    # O motivo do Rust (código e frase fixa, sem conversa) é o que diz onde falhou.
+                    motivo = ""
+                    try:
+                        erro = json.loads(response.read(4096) or b"{}")
+                        if isinstance(erro, dict):
+                            motivo = f": {erro.get('error_code', '')} {erro.get('message', '')}".rstrip()
+                    except (ValueError, OSError, http.client.HTTPException):
+                        pass
+                    if response.status == 409:
+                        motivo = ": protocolo ou instância do Rust diferente"
+                    raise RuntimeError(f"IPC recusou a operação ({response.status}{motivo}); "
+                                       "não houve troca para outro transporte")
                 raw = response.read((32 << 20) + 1025)
                 if len(raw) > (32 << 20) + 1024:
                     raise ValueError("resposta privada acima do teto")
