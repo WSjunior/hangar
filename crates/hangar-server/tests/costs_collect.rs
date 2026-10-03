@@ -449,3 +449,30 @@ fn failed_lazy_index_open_can_recover_on_the_next_scan() {
     assert!(matches!(c.prepare(true).unwrap(), Ready::Go));
     assert!(!c.read_costs(None).unwrap().is_empty());
 }
+
+#[test]
+fn fresh_blocking_inside_tokio_waits_while_async_prepare_stays_responsive() {
+    let (_d, base) = fixtures_copy();
+    let source = Fixed::new(Ok(scopes(&base)));
+    let c = collector(&base, source.clone()); c.prepare(false).unwrap(); wait_ready(&c);
+    source.hold();
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let mut fresh = {
+            let c = c.clone();
+            tokio::task::spawn_blocking(move || c.prepare_blocking(true))
+        };
+        {
+            let source = source.clone();
+            tokio::task::spawn_blocking(move || source.wait_calls(2, Duration::from_secs(2))).await.unwrap();
+        }
+        let quick = Instant::now();
+        assert!(matches!(c.prepare(true).unwrap(), Ready::Warming { .. }));
+        assert!(quick.elapsed() < Duration::from_millis(100));
+        let waiting = tokio::time::timeout(Duration::from_millis(40), &mut fresh).await.is_err();
+        source.release();
+        assert!(waiting, "spawn_blocking deve esperar a varredura em vez de responder Warming");
+        assert!(matches!(fresh.await.unwrap().unwrap(), Ready::Go));
+        assert_eq!(source.calls.load(Ordering::SeqCst), 2, "ambos compartilham a varredura");
+    });
+}

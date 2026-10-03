@@ -134,7 +134,16 @@ impl Collector {
         });
     }
 
+    /// Workers síncronos podem esperar mesmo quando carregam o Handle do Tokio.
+    pub fn prepare_blocking(self: &Arc<Self>, fresh: bool) -> Result<Ready, CollectError> {
+        self.prepare_inner(fresh, true)
+    }
+
     pub fn prepare(self: &Arc<Self>, fresh: bool) -> Result<Ready, CollectError> {
+        self.prepare_inner(fresh, tokio::runtime::Handle::try_current().is_err())
+    }
+
+    fn prepare_inner(self: &Arc<Self>, fresh: bool, can_wait: bool) -> Result<Ready, CollectError> {
         let observed = self.completed_scans.load(Ordering::Acquire);
         self.pricing.lock().unwrap().reload_if_changed();
         let mut scanner = self.scanner.lock().unwrap();
@@ -157,8 +166,8 @@ impl Collector {
             ticket.clone()
         } else { self.start_scan(&mut scanner) };
         drop(scanner);
-        // Rotas assíncronas devem usar spawn_blocking para esperar; o executor nunca dorme.
-        if tokio::runtime::Handle::try_current().is_ok() {
+        // A entrada explícita evita confundir o Handle de spawn_blocking com o executor.
+        if !can_wait {
             return match *ticket.result.lock().unwrap() {
                 Some(Ok(())) => Ok(Ready::Go), Some(Err(failure)) => Err(failure.error()), None => Ok(self.warming()),
             };
