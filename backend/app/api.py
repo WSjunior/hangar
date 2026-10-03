@@ -9037,6 +9037,40 @@ async def worktrees_fetch(body: WorktreeRepoBody):
     return {"ok": True}
 
 
+class WorktreeDeleteBody(_StrictBody):
+    repo: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    confirm: bool = Field(default=False, strict=True)
+    delete_branch: bool = Field(default=False, strict=True)
+
+
+@app.post("/api/worktrees/delete", dependencies=[Depends(require_auth)])
+async def worktrees_delete(body: WorktreeDeleteBody):
+    _no_guest()
+    repo, path = await asyncio.to_thread(lambda: (_allowed_repo(body.repo), _allowed_repo(body.path)))
+    sessions = await asyncio.to_thread(registry.list)
+    try:
+        out = await asyncio.to_thread(worktrees.delete, repo, path, sessions,
+                                      confirm=body.confirm, delete_branch=body.delete_branch)
+    except GitError as exc:
+        raise HTTPException(exc.status, detail=exc.detail) from None
+    await asyncio.to_thread(_invalidate_lists)
+    return out
+
+
+@app.post("/api/worktrees/delete-merged", dependencies=[Depends(require_auth)])
+async def worktrees_delete_merged(body: WorktreeRepoBody):
+    _no_guest()
+    repo = await asyncio.to_thread(_allowed_repo, body.repo)
+    sessions = await asyncio.to_thread(registry.list)
+    try:
+        removed = await asyncio.to_thread(worktrees.delete_merged, repo, sessions)
+    except GitError as exc:
+        raise HTTPException(exc.status, detail=exc.detail) from None
+    await asyncio.to_thread(_invalidate_lists)
+    return {"removed": removed}
+
+
 # Git da pasta escolhida na tela de nova conversa: a mesma fronteira do seletor de pastas
 # (`scan_dir`), e o git sempre fora do laço de eventos.
 class FolderGitBody(_StrictBody):

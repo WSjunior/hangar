@@ -9,7 +9,8 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.git_ops import _FETCH_TIMEOUT, GitError, _run, _scrub, head_info
+from app import atomico
+from app.git_ops import _FETCH_TIMEOUT, GitError, _run, _scrub, head_info, remove_worktree
 
 _log = logging.getLogger("hangar.worktrees")
 
@@ -380,3 +381,119 @@ def fetch(repo: str) -> None:
     p = _run(repo, "fetch", "--all", "--prune", timeout=_FETCH_TIMEOUT)
     if p.returncode != 0:
         raise GitError(409, _scrub(p.stderr.strip()) or "fetch falhou")
+
+
+_removed_lock = threading.Lock()
+
+
+def record_removed(path: str, main: str) -> None:
+    with _removed_lock:   # ler-alterar-gravar: duas remoções juntas perderiam uma entrada
+        data = removed()
+        data[path] = main
+        REMOVED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = REMOVED_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        atomico.substituir(tmp, REMOVED_FILE)
+
+
+def redirect(cwd: str | None) -> str | None:
+    """Retomar uma conversa cuja worktree foi apagada abre na pasta principal."""
+    if not cwd or os.path.isdir(cwd):
+        return cwd
+    for path, main in removed().items():
+        if cwd == path or cwd.startswith(path.rstrip("/") + "/"):
+            return main
+    return cwd
+
+
+def relocate_transcripts(path: str, main: str) -> list[tuple[Path, Path]]:
+    """Leva `<uuid>.jsonl` e a pasta irmã `<uuid>/` do projeto da worktree pro da principal, em
+    todas as contas. Mover, não copiar: a mesma conversa listada duas vezes confunde o Arquivo."""
+    from app.archive import _contas
+    from app.registry import sanitize_cwd
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for _cfg, _rot, base in _contas():
+            src = base / sanitize_cwd(path)
+            if not src.is_dir():
+                continue
+            dst = base / sanitize_cwd(main)
+            dst.mkdir(parents=True, exist_ok=True)
+            for f in sorted(src.glob("*.jsonl")):
+                sid = f.stem
+                if (dst / f.name).exists() or (dst / sid).exists():
+                    _log.warning("relocate: %s já existe em %s; fica na worktree", f.name, dst)
+                    continue
+                os.replace(f, dst / f.name)
+                moved.append((f, dst / f.name))
+                if (src / sid).is_dir():
+                    os.replace(src / sid, dst / sid)
+                    moved.append((src / sid, dst / sid))
+    except OSError as e:
+        # Metade movida é pior que nada: o jsonl sem a pasta irmã perde tool-results e subagentes.
+        _undo(moved)
+        raise GitError(500, f"não consegui mover as conversas: {e}") from None
+    return moved
+
+
+def _undo(moved: list[tuple[Path, Path]]) -> None:
+    for src, dst in reversed(moved):
+        try:
+            os.replace(dst, src)
+        except OSError as e:
+            _log.error("relocate: não desfez %s -> %s: %s", dst, src, e)
+
+
+def delete(repo: str, path: str, sessions, *, confirm: bool = False,
+           delete_branch: bool = False) -> dict:
+    main = main_repo_of(repo_root_of(repo) or repo)
+    real = os.path.realpath(path)
+    # O caminho que o git guarda é o canônico: é ele que a lista mostra e as conversas citam.
+    path = next((p for p in worktree_paths(main) if p == path or os.path.realpath(p) == real), None)
+    if path is None:
+        raise GitError(404, "não é uma worktree deste repositório")
+    busy = sorted(s.name for s in sessions if _inside(s, real))
+    if busy:
+        raise GitError(409, "sessão aberta dentro: " + ", ".join(busy))
+    st = status(path, ())
+    if st["degraded"]:
+        # Leitura que falhou deixa dirty/ignored zerados: apagar assim perderia o que não se viu.
+        raise GitError(409, "não consegui ler a worktree; tente de novo")
+    if (st["dirty"] or st["ignored"]) and not confirm:
+        raise GitError(409, "há arquivos que serão perdidos; confirme")
+    moved = relocate_transcripts(path, main)
+    try:
+        if st["exists"]:
+            remove_worktree(main, path, force=confirm)
+        else:
+            # Pasta já sumiu: só sobrou o registro em `.git/worktrees`, e o prune o leva.
+            p = _run(main, "worktree", "prune")
+            if p.returncode != 0 or path in worktree_paths(main):
+                raise GitError(409, _scrub(p.stderr.strip()) or "a worktree continua registrada (trancada?)")
+    except GitError as e:
+        _undo(moved)
+        raise GitError(409, e.detail) from None
+    record_removed(path, main)
+    branch_deleted = False
+    if st["branch"] and (st["merged"] or delete_branch):
+        try:
+            b = _run(main, "branch", "-D", st["branch"])
+            branch_deleted = b.returncode == 0
+            if not branch_deleted:
+                _log.warning("worktrees: branch %s ficou: %s", st["branch"], b.stderr.strip())
+        except GitError as e:   # a worktree já saiu; a branch que ficou vai em branch_deleted
+            _log.warning("worktrees: branch %s ficou: %s", st["branch"], e.detail)
+    return {"removed": path, "branch_deleted": branch_deleted, "moved": len(moved)}
+
+
+def delete_merged(repo: str, sessions) -> list[str]:
+    """Só as que passariam sem aviso: juntadas, sem não commitados, sem ignorados, sem sessão."""
+    main = main_repo_of(repo_root_of(repo) or repo)
+    out = []
+    for path in worktree_paths(main):
+        st = status(path, sessions)
+        if (st["merged"] and not st["degraded"] and not st["dirty"] and not st["ignored"]
+                and not st["sessions"]):
+            delete(main, path, sessions)
+            out.append(path)
+    return out

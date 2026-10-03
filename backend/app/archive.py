@@ -493,13 +493,15 @@ def archive_cwd(project: str, session_id: str, config_dir: Optional[str] = None,
     validacao de archive_jsonl (propaga ValueError/FileNotFoundError); None = cwd nao ficou gravado
     nas primeiras linhas do transcript (conversa nao pode ser retomada)."""
     p = archive_jsonl(project, session_id, config_dir, provider, codex_account)
+    # Worktree apagada pelo Hangar: retomar abre na pasta principal.
+    from app.worktrees import redirect
     if provider == "claude":
         _, cwd = _head_info(p)
-        return cwd
+        return redirect(cwd)
     # Pi e Codex gravam o cwd num cabecalho de formato proprio; o Kimi nem grava (vem do indice).
     from app import archive_providers
     alvo = os.path.realpath(str(p))
     for c in archive_providers.conversas():
         if c.provider == provider and os.path.realpath(str(c.path)) == alvo:
-            return c.cwd
+            return redirect(c.cwd)
     return None

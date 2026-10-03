@@ -3,6 +3,7 @@ import json
 import pytest
 
 from app import git_ops, worktrees
+from app.git_ops import GitError
 from app.models import SessionInfo
 
 
@@ -370,5 +371,119 @@ def test_guest_gets_403_on_every_route(tmp_path, monkeypatch):
         assert c.get("/api/worktrees", headers=h).status_code == 403
         assert c.get("/api/worktrees/detail", params={"path": wt}, headers=h).status_code == 403
         assert c.post("/api/worktrees/fetch", json={"repo": main}, headers=h).status_code == 403
+        assert c.post("/api/worktrees/delete", json={"repo": main, "path": wt},
+                      headers=h).status_code == 403
+        assert c.post("/api/worktrees/delete-merged", json={"repo": main}, headers=h).status_code == 403
+        assert (tmp_path / "repo-x").exists()
     finally:
         guest_users._reset()
+
+
+def _claude_project(tmp_path, monkeypatch, wt, sid="abc"):
+    from app import archive
+    from app.registry import sanitize_cwd
+    base = tmp_path / "cfg" / "projects"
+    (base / sanitize_cwd(wt)).mkdir(parents=True)
+    (base / sanitize_cwd(wt) / f"{sid}.jsonl").write_text(json.dumps({"cwd": wt}) + "\n")
+    (base / sanitize_cwd(wt) / sid).mkdir()
+    monkeypatch.setattr(archive, "_contas", lambda config_dir=None: [(None, "", base)])
+    return base
+
+
+def _merged_wt(main, path, branch):
+    """Worktree com um commit já juntado na principal: a recém-criada não conta como mesclada."""
+    wt = _wt(main, path, branch)
+    _commit(path, f"{branch}.txt")
+    assert git_ops._run(main, "merge", "-q", "--no-ff", "-m", "m", branch).returncode == 0
+    return wt
+
+
+def test_delete_clean_merged_moves_conversations_and_branch(tmp_path, monkeypatch):
+    main = _repo(tmp_path / "repo")
+    wt = _merged_wt(main, tmp_path / "repo-x", "x")
+    base = _claude_project(tmp_path, monkeypatch, wt)
+    from app.registry import sanitize_cwd
+    out = worktrees.delete(main, wt, [])
+    assert out == {"removed": wt, "branch_deleted": True, "moved": 2}
+    assert not (tmp_path / "repo-x").exists()
+    assert (base / sanitize_cwd(main) / "abc.jsonl").exists()
+    assert (base / sanitize_cwd(main) / "abc").is_dir()
+    assert worktrees.removed()[wt] == main
+    assert worktrees.redirect(wt) == main
+    assert "x" not in git_ops.list_branches(main)["branches"]
+
+
+def test_delete_refuses_open_session_and_main(tmp_path):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    with pytest.raises(GitError) as busy:
+        worktrees.delete(main, wt, [SessionInfo(name="s1", cwd=main, worktree_path=wt)])
+    assert busy.value.status == 409 and "s1" in busy.value.detail
+    with pytest.raises(GitError) as principal:
+        worktrees.delete(main, main, [])
+    assert principal.value.status == 404
+
+
+def test_delete_dirty_needs_confirm_and_keeps_unmerged_branch(tmp_path, monkeypatch):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    _claude_project(tmp_path, monkeypatch, wt)
+    _commit(tmp_path / "repo-x", "a.txt")
+    (tmp_path / "repo-x" / "solto.txt").write_text("?")
+    with pytest.raises(GitError) as e:
+        worktrees.delete(main, wt, [])
+    assert e.value.status == 409
+    assert (tmp_path / "repo-x").exists()
+    out = worktrees.delete(main, wt, [], confirm=True)
+    assert out["branch_deleted"] is False
+    assert "x" in git_ops.list_branches(main)["branches"]
+
+
+def test_delete_refuses_degraded_even_confirmed(tmp_path, monkeypatch):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    real_run = worktrees._run
+
+    def slow(cwd, *args, **kw):
+        if args[0] == "status":
+            raise GitError(504, "git timeout")
+        return real_run(cwd, *args, **kw)
+    monkeypatch.setattr(worktrees, "_run", slow)
+    with pytest.raises(GitError) as e:
+        worktrees.delete(main, wt, [], confirm=True)
+    assert e.value.status == 409
+    assert (tmp_path / "repo-x").exists()
+
+
+def test_delete_folder_already_gone(tmp_path, monkeypatch):
+    import shutil
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    _claude_project(tmp_path, monkeypatch, wt)
+    shutil.rmtree(wt)
+    out = worktrees.delete(main, wt, [])
+    assert out["removed"] == wt
+    assert worktrees.worktree_paths(main) == []
+
+
+def test_delete_does_not_overwrite_same_uuid(tmp_path, monkeypatch):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    base = _claude_project(tmp_path, monkeypatch, wt)
+    from app.registry import sanitize_cwd
+    (base / sanitize_cwd(main)).mkdir()
+    (base / sanitize_cwd(main) / "abc.jsonl").write_text("principal\n")
+    out = worktrees.delete(main, wt, [])
+    assert out["moved"] == 0
+    assert (base / sanitize_cwd(main) / "abc.jsonl").read_text() == "principal\n"
+    assert (base / sanitize_cwd(wt) / "abc.jsonl").exists()
+
+
+def test_delete_merged_only_takes_clean(tmp_path, monkeypatch):
+    main = _repo(tmp_path / "repo")
+    a = _merged_wt(main, tmp_path / "repo-a", "a")
+    _merged_wt(main, tmp_path / "repo-b", "b")
+    _claude_project(tmp_path, monkeypatch, a)
+    (tmp_path / "repo-b" / "solto.txt").write_text("?")
+    assert worktrees.delete_merged(main, []) == [a]
+    assert (tmp_path / "repo-b").exists()
