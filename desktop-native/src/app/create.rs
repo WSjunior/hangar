@@ -1914,7 +1914,7 @@ impl Hangar {
         cx.notify();
     }
 
-    pub(super) fn receive_transfer(&mut self, dialog: EntityId, reply: TransferReply, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn receive_agent_transfer(&mut self, dialog: EntityId, reply: TransferReply, window: &mut Window, cx: &mut Context<Self>) {
         if !transfer_dialog_matches(self.new_session.as_ref().map(Entity::entity_id), dialog) { return; }
         let Some(entity) = self.new_session.clone() else { return };
         if matches!(&reply, TransferReply::Canceled) {

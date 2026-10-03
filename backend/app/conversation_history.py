@@ -167,7 +167,7 @@ def source_rows(source: ConversationSource) -> list[dict]:
     if not raw.endswith(b"\n"):
         raise HistoryError("o snapshot da origem tem linha incompleta")
     try:
-        rows = [json.loads(line) for line in raw.decode("utf-8").splitlines()]
+        rows = [json.loads(line) for line in raw.decode("utf-8").split("\n")[:-1]]
         chain = reconstruct_chain(rows)
     except (ValueError, UnicodeError) as exc:
         raise HistoryError("o ramo da origem não pode ser reconstruído") from exc

@@ -379,12 +379,38 @@ def test_politica_por_modo():
 
 
 
-def test_transferred_stdio_budget_survives_restart_and_resume(ambiente):
+def test_transferred_stdio_budget_survives_restart_and_resume(ambiente, monkeypatch):
+    import hashlib
+    import uuid
+    from app import conversation_transfer as transfers
+    monkeypatch.setattr(transfers, "_base", lambda: ambiente / "transfers")
+    transfer_id = str(uuid.uuid4())
+    thread_id = str(uuid.uuid4())
+    key = sem_terminal.nova_chave()
+    (ambiente / "bin" / "codex").write_text(_CODEX_FALSO.replace('"th-1"', json.dumps(thread_id)))
+    home = ambiente / "account"
+    from app import codex_contas
+    account = codex_contas.Account("test-transfer", home, False)
+    monkeypatch.setattr(codex_contas, "resolve_account", lambda name: account)
+    rollout = home / "sessions" / f"rollout-test-{thread_id}.jsonl"
+    rollout.parent.mkdir(parents=True)
+    prefix = (json.dumps({"type": "session_meta", "payload": {"id": thread_id}}) + "\n").encode()
+    rollout.write_bytes(prefix)
+    source = ambiente / "source.jsonl"
+    source.write_text(json.dumps({"type": "user", "uuid": "u", "parentUuid": None,
+                                  "message": {"role": "user", "content": "histórico"}}) + "\n")
+    record = transfers.TransferRecord(transfer_id, "imported", f"k:{key}", transfers.TransferPhase.COMPLETE,
+        transfers.ConversationSource(str(source), "claude", hashlib.sha256(source.read_bytes()).hexdigest(), ("u",)),
+        {"name": "imported", "key": key, "cwd": str(ambiente)},
+        {"codex_home": str(home), "codex_account": account.id, "thread_id": thread_id, "rollout_path": str(rollout),
+         "tool_output_token_limit": 144000},
+        transfers.ImportBoundary(thread_id, str(rollout), len(prefix), (), hashlib.sha256(prefix).hexdigest()), None)
+    transfers.save_transfer(record)
     async def body():
         adapter = CodexAdapter()
         _sidecar("imported", ambiente, model="gpt-falso", effort="high",
-                 transfer_id="transfer", tool_output_token_limit=144000)
-        codex_sessions.update("imported", thread_id="th-1")
+                 transfer_id=transfer_id, codex_home=str(home), codex_account=account.id, tool_output_token_limit=144000)
+        codex_sessions.update("imported", thread_id=thread_id, rollout_path=str(rollout), key=key)
         try:
             assert await adapter.ensure_running("imported") is not None
             await adapter.restart("imported")
@@ -392,9 +418,11 @@ def test_transferred_stdio_budget_survives_restart_and_resume(ambiente):
             resumes = [json.loads(line) for line in (ambiente / "resume-history.jsonl").read_text().splitlines()]
             assert len(starts) == len(resumes) == 2
             assert all("tool_output_token_limit=144000" in args for args in starts)
-            assert all(params["threadId"] == "th-1" for params in resumes)
+            assert all(params["threadId"] == thread_id for params in resumes)
             meta = codex_sessions.load("imported")
-            assert meta["tool_output_token_limit"] == 144000 and meta["transfer_id"] == "transfer"
+            assert meta["tool_output_token_limit"] == 144000 and meta["transfer_id"] == transfer_id
+            assert transfers.transfer_for_session("imported").id == transfer_id
+            assert transfers.load_transfer(transfer_id).phase == transfers.TransferPhase.COMPLETE
             assert not (ambiente / "turno.txt").exists()
         finally:
             adapter.close_sync("imported")

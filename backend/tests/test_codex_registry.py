@@ -798,19 +798,39 @@ def test_transfer_record_corruption_is_not_silently_skipped(tmp_path):
 
 
 async def test_legacy_restart_keeps_budget_account_and_resume_request(tmp_path):
+    import hashlib
+    import uuid
+    from app import conversation_transfer as transfers
     home = str(tmp_path / "account")
-    codex_sessions.save("cx", "tid-1", "/x/rollout.jsonl", str(tmp_path),
+    transfer_id = str(uuid.uuid4())
+    thread_id = str(uuid.uuid4())
+    rollout = tmp_path / "account" / "sessions" / f"rollout-test-{thread_id}.jsonl"
+    rollout.parent.mkdir(parents=True)
+    prefix = (json.dumps({"type": "session_meta", "payload": {"id": thread_id}}) + "\n").encode()
+    rollout.write_bytes(prefix)
+    source = tmp_path / "source.jsonl"
+    source.write_text(json.dumps({"type": "user", "uuid": "u", "parentUuid": None,
+                                  "message": {"role": "user", "content": "histórico"}}) + "\n")
+    record = transfers.TransferRecord(transfer_id, "cx", "k:original-key", transfers.TransferPhase.COMPLETE,
+        transfers.ConversationSource(str(source), "claude", hashlib.sha256(source.read_bytes()).hexdigest(), ("u",)),
+        {"name": "cx", "key": "original-key", "cwd": str(tmp_path)},
+        {"codex_home": home, "codex_account": "work", "thread_id": thread_id,
+         "rollout_path": str(rollout), "tool_output_token_limit": 144000},
+        transfers.ImportBoundary(thread_id, str(rollout), len(prefix), (), hashlib.sha256(prefix).hexdigest()), None)
+    transfers.save_transfer(record)
+    codex_sessions.save("cx", thread_id, str(rollout), str(tmp_path),
                         codex_home=home, codex_account="work", tool_output_token_limit=144000,
-                        transfer_id="import", key="original-key", model="native-model", effort="low")
+                        transfer_id=transfer_id, key="original-key", model="native-model", effort="low")
     codex_sessions.update("cx", permission_mode="Ask for approval")
     fake = _FakeClient()
-    fake._thread_id = "tid-1"
+    fake._thread_id = thread_id
+    fake._path = str(rollout)
     from unittest.mock import AsyncMock
     previous_request = fake.request
     async def request(method, params, timeout=30.0):
         if method == "thread/read":
             fake.requests.append((method, params))
-            return {"thread": {"id": "tid-1", "model": "native-model", "reasoningEffort": "low"}}
+            return {"thread": {"id": thread_id, "model": "native-model", "reasoningEffort": "low"}}
         return await previous_request(method, params, timeout)
     fake.request = request
     fake.start_shared = AsyncMock(return_value="ws://127.0.0.1:45123")
@@ -822,6 +842,8 @@ async def test_legacy_restart_keeps_budget_account_and_resume_request(tmp_path):
     fake.start_shared.assert_awaited_once_with(codex_home=home, tool_output_token_limit=144000,
                                                session_name="cx", session_key="original-key")
     assert tui.call_args.kwargs["codex_account"] == "work"
-    assert next(p for m, p in fake.requests if m == "thread/resume")["threadId"] == "tid-1"
+    assert next(p for m, p in fake.requests if m == "thread/resume")["threadId"] == thread_id
     assert next(p for m, p in fake.requests if m == "thread/resume")["approvalPolicy"] == "on-request"
     assert "turn/start" not in [m for m, _ in fake.requests]
+    assert transfers.transfer_for_session("cx").id == transfer_id
+    assert transfers.load_transfer(transfer_id).phase == transfers.TransferPhase.COMPLETE

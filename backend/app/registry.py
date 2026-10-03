@@ -1894,7 +1894,8 @@ class SessionRegistry:
                headless: bool = False,
                subagent_model: str | None = None,
                jev: bool = False, transfer_id: str | None = None,
-               tool_output_token_limit: int | None = None) -> SessionInfo:
+               tool_output_token_limit: int | None = None,
+               transfer_rollout_path: str | None = None) -> SessionInfo:
         # Nome tmux nao aceita "."/":"/espaco -> sanitiza igual ao rename. Varias sessoes na MESMA
         # pasta sao permitidas: cada uma tem nome unico + --session-id proprio -> jsonl proprio.
         name = sanitize_session_name(name)
@@ -1911,6 +1912,8 @@ class SessionRegistry:
             # "padrão" na tela vira o modo da conta AQUI, não lá no arranque: assim a sessão nasce
             # no modo que o app mostra, na máquina que define `defaultMode` e na que não define.
             permission_mode = modo_permissao.modo_da_conta(config_dir)
+        if transfer_rollout_path is not None and transfer_id is None:
+            raise ValueError("session_transfer_invalid_record")
         if transfer_id is not None:
             from app.conversation_transfer import load_transfer, TransferPhase
             from app.conversation_history import source_rows, verify_boundary
@@ -1921,7 +1924,8 @@ class SessionRegistry:
                     or target.get("codex_account") != (codex_account or "default")):
                 raise ValueError("session_transfer_invalid_record")
             source_rows(record.source)
-            verify_boundary(record, target["rollout_path"])
+            transfer_rollout_path = transfer_rollout_path or target["rollout_path"]
+            verify_boundary(record, transfer_rollout_path)
             if tool_output_token_limit != target.get("tool_output_token_limit"):
                 raise ValueError("session_transfer_invalid_record")
             model = model if model is not None else target.get("model")
@@ -1937,7 +1941,7 @@ class SessionRegistry:
                     raise ValueError("motor so vale para provider claude")
                 return self._create_codex_headless(name, cwd, resume_session_id, model, effort,
                                                    permission_mode, codex_account, jev,
-                                                   transfer_id, tool_output_token_limit)
+                                                   transfer_id, tool_output_token_limit, transfer_rollout_path)
             return self._create_headless(name, cwd, config_dir, resume_session_id, engine, model,
                                          effort, context_window, permission_mode, subagent_model,
                                          jev)
@@ -2148,7 +2152,7 @@ class SessionRegistry:
         env_pane = _env_sessao(subagent_model, jev, provider, nome=name)
         if transfer_id is not None:
             key = uuid.uuid4().hex
-            codex_sessions.save(name, sid, target["rollout_path"], cwd, model=model, effort=effort,
+            codex_sessions.save(name, sid, transfer_rollout_path, cwd, model=model, effort=effort,
                                 codex_home=codex_home, codex_account=account.id, key=key,
                                 transfer_id=transfer_id, tool_output_token_limit=tool_output_token_limit,
                                 permission_mode=permission_mode, previous_non_plan=target.get("previous_non_plan"),
@@ -2239,7 +2243,8 @@ class SessionRegistry:
                                model: str | None, effort: str | None, permission_mode: str | None,
                                codex_account: str | None, jev: bool = False,
                                transfer_id: str | None = None,
-                               tool_output_token_limit: int | None = None) -> SessionInfo:
+                               tool_output_token_limit: int | None = None,
+                               transfer_rollout_path: str | None = None) -> SessionInfo:
         """Sessão Codex SEM terminal: grava o sidecar; o app-server sobe no cano logo em seguida
         pelo `watch_sessions` do adapter (aquece na criação, não no primeiro prompt)."""
         from app.adapters.codex import sem_terminal
@@ -2264,7 +2269,7 @@ class SessionRegistry:
         if transfer_id:
             from app.conversation_transfer import load_transfer
             target = load_transfer(transfer_id).destination_meta
-        rollout = target.get("rollout_path") or (sem_terminal.rollout_de(resume_thread_id, codex_home) if resume_thread_id else "")
+        rollout = transfer_rollout_path or target.get("rollout_path") or (sem_terminal.rollout_de(resume_thread_id, codex_home) if resume_thread_id else "")
         codex_sessions.save(name, resume_thread_id, rollout, cwd, model=model, effort=effort,
                             codex_home=codex_home, codex_account=codex_account,
                             headless=True, key=sem_terminal.nova_chave(), permission_mode=permission_mode,
@@ -2433,7 +2438,7 @@ class SessionRegistry:
             meta = {"name": info.name, "cwd": info.cwd, "session_id": Path(info.jsonl).stem,
                     "config_dir": cdir or str(Path.home() / ".claude"), "provider": "claude", "headless": False,
                     "model": model, "effort": _esforco_de_abertura(effort), "permission_mode": mode,
-                    "previous_non_plan": modo_permissao.ultimo_nao_plan(info.name, modo_permissao.modo_da_conta(cdir))
+                    "previous_non_plan": modo_permissao.known_non_plan(info.name)
                                          if mode == "plan" else None,
                     "pane_pid": root, "pane_id": pane.get("pane_id"),
                     "subagent_model": procinfo._env_var_of(agent, "CLAUDE_CODE_SUBAGENT_MODEL") if agent else None,

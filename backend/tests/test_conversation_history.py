@@ -512,3 +512,39 @@ def test_ack_recheck_rejects_suffix_rewrite_during_read_even_with_restored_mtime
     monkeypatch.setattr(pqueue._CommittedIndex, "_parser", lambda self: parse)
     assert pqueue.committed_user_lines(str(joined.path), "codex", **options) is None
     assert rewritten
+
+
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n"])
+def test_literal_unicode_separators_survive_history_citations_and_archive(joined, monkeypatch, tmp_path, newline):
+    from app import archive_providers, codex_contas
+    from app.claude_to_codex import convert_snapshot
+    target = tmp_path / "literal-report.md"
+    target.write_text("arquivo citado", encoding="utf-8")
+    text = f"antes\u2028meio\u2029depois\u0085fim\n{target}"
+    joined.rows[0]["message"]["content"] = text
+    raw = newline.join(json.dumps(row, ensure_ascii=False).encode("utf-8") for row in joined.rows) + newline
+    joined.original.write_bytes(raw)
+    joined.snapshot.write_bytes(raw)
+    converted = convert_snapshot(joined.snapshot)
+    joined.record = replace(joined.record, source=ConversationSource(str(joined.snapshot), "claude",
+        converted.source_digest, tuple(sorted(converted.selected_uuids))))
+    assert b"\xe2\x80\xa8" in raw and b"\xe2\x80\xa9" in raw and b"\xc2\x85" in raw
+    assert history.source_rows(joined.record.source)[0]["message"]["content"] == text
+    assert compose(joined)[0].text == text
+    monkeypatch.setattr(history, "transfer_for_session", lambda *args, **kwargs: joined.record)
+    client, headers = client_for(joined, monkeypatch)
+    response = client.get("/api/sessions/s/history", headers=headers)
+    assert response.status_code == 200 and response.json()[0]["text"] == text
+    cited = client.get("/api/sessions/s/file/text", headers=headers, params={"path": str(target)})
+    assert cited.status_code == 200 and cited.json()["text"] == "arquivo citado"
+    monkeypatch.setattr(store, "_base", lambda: tmp_path / "transfers")
+    store.save_transfer(joined.record)
+    monkeypatch.setattr(history, "transfer_for_session", lambda *args, **kwargs: None)
+    monkeypatch.setattr(codex_contas, "account_for_rollout", lambda path: SimpleNamespace(
+        home=Path(joined.record.destination_meta["codex_home"])))
+    monkeypatch.setattr(history, "archive_transfer", REAL_ARCHIVE_TRANSFER)
+    assert archive_providers.transferred_history(joined.path)[0].text == text
+    joined.snapshot.write_bytes(raw[:-1])
+    incomplete = replace(joined.record.source, digest=hashlib.sha256(raw[:-1]).hexdigest())
+    with pytest.raises(history.HistoryError, match="linha incompleta"):
+        history.source_rows(incomplete)

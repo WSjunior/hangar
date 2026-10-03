@@ -8,7 +8,7 @@ import uuid
 import pytest
 
 from app import codex_contas, conversation_transfer as store
-from app.claude_to_codex import convert_snapshot
+from app.claude_to_codex import ConversionError, convert_snapshot
 from app.conversation_transfer import ConversationSource, TransferPhase, TransferRecord
 from app.adapters.codex import transfer
 from app.adapters.codex.appserver import AppServerClient
@@ -21,7 +21,7 @@ MODEL = {"slug": "test-model", "context_window": 1000000, "max_context_window": 
 
 
 @pytest.fixture
-def fake_client(tmp_path, monkeypatch):
+def fake_client(tmp_path, monkeypatch, request):
     monkeypatch.setattr(store, "_base", lambda: tmp_path / "transfers")
     monkeypatch.setattr(sessions, "_dir", lambda: tmp_path / "sidecars")
     source = tmp_path / "claude.jsonl"
@@ -29,7 +29,11 @@ def fake_client(tmp_path, monkeypatch):
                                             "mixed_blocks.jsonl").read_text().splitlines()]
     # Exercita também escapes no wire, sem inferir versão atual de arquivo.
     records[0]["message"]["content"][0]["text"] += " ação\u2028🙂"
-    source.write_text("".join(json.dumps(row) + "\n" for row in records))
+    if getattr(request, "param", None) == "multimodal":
+        records[0]["message"]["content"].append({"type": "image", "source": {
+            "type": "base64", "media_type": "image/png",
+            "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aBXsAAAAASUVORK5CYII="}})
+    source.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in records))
     context = convert_snapshot(source)
     record = TransferRecord(str(uuid.uuid4()), "session", "k:key", TransferPhase.SOURCE_STOPPED,
                             ConversationSource(str(source), "claude", context.source_digest,
@@ -125,6 +129,7 @@ async def prepare(fake, **kwargs):
                                          "Full Access", transfer_id=fake.record.id, **kwargs)
 
 
+@pytest.mark.parametrize("fake_client", ["multimodal"], indirect=True)
 async def test_native_import_preserves_long_output_and_does_not_start_turn(fake_client):
     fake = fake_client
     prepared = await prepare(fake)
@@ -192,6 +197,7 @@ async def test_unknown_capacity_fails_before_injection(fake_client, monkeypatch)
     assert not fake_client.injected and fake_client.finished
 
 
+@pytest.mark.parametrize("fake_client", ["multimodal"], indirect=True)
 async def test_unsupported_media_fails_before_injection(fake_client, monkeypatch):
     monkeypatch.setattr(transfer.codex_models, "raw_model", lambda *a: {**MODEL, "input_modalities": ["text"]})
     with pytest.raises(transfer.TransferError, match="media_unsupported"):
@@ -236,7 +242,7 @@ async def test_indivisible_real_frame_rejects_without_cut(monkeypatch):
     client = AppServerClient()
     monkeypatch.setattr(transfer, "MAX_REQUEST_BYTES", 350)
     item = {"type": "message", "content": [{"type": "input_text", "text": "🙂" * 25}]}
-    with pytest.raises(transfer.TransferError, match="item_too_large"):
+    with pytest.raises(ConversionError, match="item_too_large"):
         await transfer._inject(client, "thread", (item,))
 
 

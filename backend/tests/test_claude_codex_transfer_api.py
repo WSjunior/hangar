@@ -105,7 +105,7 @@ def scenario(tmp_path, monkeypatch):
         record = store.load_transfer(transfer_id)
         assert record.phase == store.TransferPhase.SOURCE_STOPPED
         assert not cs.list_all()
-        raw = (json.dumps({"type": "session_meta", "payload": {"id": thread_id}}) + "\n").encode()
+        raw = (json.dumps({"type": "session_meta", "payload": {"id": thread_id, "cwd": cwd}}) + "\n").encode()
         rollout.write_bytes(raw)
         boundary = store.ImportBoundary(thread_id, str(rollout), len(raw), (), hashlib.sha256(raw).hexdigest())
         target = {"thread_id": thread_id, "rollout_path": str(rollout), "codex_home": str(account.home),
@@ -423,7 +423,12 @@ async def test_ingress_and_controls_are_temporarily_unavailable(scenario, monkey
 async def test_archived_thread_reapplies_budget_and_keeps_explicit_choices(scenario, monkeypatch, headless):
     result = await scenario.run()
     record = store.load_transfer(result["transfer_id"])
+    old = Path(record.boundary.rollout_path)
+    destination = scenario.account.home / "archived_sessions" / old.name
+    destination.parent.mkdir(parents=True)
+    old.rename(destination)
     cs.delete("s")
+    monkeypatch.setattr(registry_module.codex_contas, "list_accounts", lambda: [scenario.account])
     scenario.account.is_default = False
     monkeypatch.setattr(registry_module.codex_contas, "resolve_account", lambda name: scenario.account)
     monkeypatch.setattr(registry_module, "_exigir_lancador_codex", Mock())
@@ -436,6 +441,7 @@ async def test_archived_thread_reapplies_budget_and_keeps_explicit_choices(scena
     def spawn(name, cwd, command, *args, **kwargs):
         meta = cs.load(name)
         assert meta["transfer_id"] == record.id and meta["tool_output_token_limit"] == 5000
+        assert meta["rollout_path"] == str(destination)
         assert meta["model"] == "explicit-model" and meta["effort"] == "high"
         assert "--tool-output-token-limit 5000" in command and "explicit-model" in command
         calls.append(command)
@@ -444,10 +450,12 @@ async def test_archived_thread_reapplies_budget_and_keeps_explicit_choices(scena
     monkeypatch.setattr(registry_module.tmux, "new_session", spawn)
     scenario.reg.create("archive", scenario.info.cwd, provider="codex", codex_account=scenario.account.id,
                         resume_session_id=scenario.thread_id, transfer_id=record.id, tool_output_token_limit=5000,
-                        model="explicit-model", effort="high", headless=headless)
+                        model="explicit-model", effort="high", headless=headless, transfer_rollout_path=str(destination))
     meta = cs.load("archive")
     assert meta["transfer_id"] == record.id and meta["tool_output_token_limit"] == 5000
     assert meta["model"] == "explicit-model" and meta["effort"] == "high"
+    assert meta["rollout_path"] == str(destination) and not old.exists()
+    assert store.load_transfer(record.id) == record
     assert bool(calls) is not headless
 
 
@@ -825,3 +833,124 @@ async def test_normal_cleanup_leaves_reused_pid_untouched(scenario, monkeypatch)
     assert private["import_stopped"] is True
     assert private["import_processes"]["10"] == {"started": 1, "command": "child"}
     assert not kill.called
+
+
+@pytest.mark.parametrize("previous", [None, "manual", "bypassPermissions"])
+async def test_terminal_plan_uses_only_observed_base_after_backend_restart(scenario, monkeypatch, previous):
+    from collections import OrderedDict
+    from app import permission_mode
+    hs.delete("s")
+    scenario.info.headless = False
+    account = Path(scenario.meta["config_dir"])
+    (account / "settings.json").write_text(json.dumps({"permissions": {"defaultMode": "bypassPermissions"}}))
+    monkeypatch.setattr(permission_mode, "_ultimos_nao_plan", OrderedDict())
+    monkeypatch.setattr(permission_mode, "_modos_confirmados", {})
+    if previous is not None:
+        permission_mode.observar_ou_confirmado("s", previous)
+    monkeypatch.setattr(scenario.reg, "_pane_of", lambda name: {"pane_id": "%test", "pid": None})
+    monkeypatch.setattr(registry_module, "provider_of_pane", lambda pid: "claude")
+    monkeypatch.setattr(registry_module, "_escolhas_status", lambda sid: (None, None))
+    monkeypatch.setattr(permission_mode, "ler_modo", lambda name: "plan")
+    stop = AsyncMock(side_effect=AssertionError("não estacionar com base desconhecida"))
+    monkeypatch.setattr(scenario.reg, "stop_transfer_source", stop)
+    public, private = scenario.reg.transfer_origin(scenario.info)
+    assert public["previous_non_plan"] == private["original"]["previous_non_plan"] == previous
+    assert permission_mode.modo_da_conta(str(account)) == "bypassPermissions"
+    if previous is None:
+        with pytest.raises(store.TransferError, match="session_transfer_invalid_permission_mode"):
+            await scenario.run()
+        assert not stop.called and not scenario.calls
+    else:
+        assert store._map_permission(public) == (
+            "Ask for approval" if previous == "manual" else "Full Access", "plan")
+
+
+async def test_archive_api_passes_moved_rollout_to_first_runtime_spawn(scenario, monkeypatch):
+    from app import archive_providers, codex_contas
+    result = await scenario.run()
+    record = store.load_transfer(result["transfer_id"])
+    old = Path(record.boundary.rollout_path)
+    destination = scenario.account.home / "archived_sessions" / old.name
+    destination.parent.mkdir(parents=True)
+    old.rename(destination)
+    cs.delete("s")
+    scenario.account.is_default = False
+    monkeypatch.setattr(codex_contas, "list_accounts", lambda: [scenario.account])
+    monkeypatch.setattr(codex_contas, "resolve_account", lambda name: scenario.account)
+    monkeypatch.setattr(archive_providers, "conversas", lambda: archive_providers._codex_conversas())
+    monkeypatch.setattr(scenario.reg, "list", lambda: [])
+    monkeypatch.setattr(api, "_nome_ocupado", lambda name: False)
+    monkeypatch.setattr(registry_module, "_exigir_lancador_codex", Mock())
+    monkeypatch.setattr(registry_module, "_encerrar_pares_externos", Mock())
+    monkeypatch.setattr(registry_module, "ThenLink", Mock())
+    monkeypatch.setattr(scenario.reg, "_clear_pair", Mock())
+    monkeypatch.setattr(cs, "pretrust_cwd", Mock(side_effect=AssertionError("não alterar confiança")))
+
+    class FakeRuntime:
+        starts = []
+
+        def spawn(self, name, cwd, command, *args, **kwargs):
+            meta = cs.load(name)
+            assert meta["rollout_path"] == str(destination)
+            assert meta["transfer_id"] == record.id and meta["tool_output_token_limit"] == 5000
+            assert meta["codex_home"] == str(scenario.account.home)
+            assert meta["thread_id"] == scenario.thread_id
+            assert meta["model"] == "test-model" and meta["effort"] == "low"
+            assert "--tool-output-token-limit 5000" in command
+            assert scenario.thread_id in command
+            self.starts.append(meta)
+            return True
+
+    runtime = FakeRuntime()
+    monkeypatch.setattr(registry_module.tmux, "new_session", runtime.spawn)
+    client = TestClient(api.app)
+    response = client.post(f"/api/archive/project/{scenario.thread_id}/resume",
+        headers={"Authorization": "Bearer test-secret"},
+        json={"provider": "codex", "codex_account": scenario.account.id})
+    assert response.status_code == 200, response.text
+    assert len(runtime.starts) == 1 and not old.exists()
+    assert store.load_transfer(record.id) == record
+
+
+@pytest.mark.parametrize("code,reason", [
+    ("session_transfer_context_budget_exceeded", "excede a capacidade"),
+    ("session_transfer_model_capacity_unknown", "confirmar a capacidade"),
+    ("session_transfer_model_media_unsupported", "não aceita as imagens"),
+    ("session_transfer_codex_version_unsupported", "versão instalada"),
+    ("session_transfer_login_required", "Entre na conta"),
+    ("session_transfer_account_full", "sem cota"),
+    ("session_transfer_invalid_model_choice", "catálogo"),
+    ("session_transfer_queue_pending", "mensagens na fila"),
+    ("session_transfer_source_busy", "permissão pendente"),
+])
+def test_account_api_keeps_specific_safe_transfer_reasons(scenario, monkeypatch, code, reason):
+    failure = store.TransferError(code, params={"model": "selected-model", "estimated": 123, "limit": 100})
+    monkeypatch.setattr(store, "transfer_claude_to_codex", AsyncMock(side_effect=failure))
+    client = TestClient(api.app)
+    response = client.post("/api/sessions/s/conta", headers={"Authorization": "Bearer test-secret"},
+                           json=scenario.body)
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["code"] == code and reason in detail["msg"]
+    assert detail["params"] == {"model": "selected-model", "estimated": 123, "limit": 100}
+    assert str(scenario.source) not in response.text and "test-secret" not in response.text
+
+
+async def test_archive_current_path_cannot_change_transfer_account(scenario, monkeypatch):
+    from app import codex_contas
+    from app.conversation_history import HistoryError
+    result = await scenario.run()
+    record = store.load_transfer(result["transfer_id"])
+    foreign = SimpleNamespace(id="other", home=Path(scenario.info.cwd) / "other-account")
+    path = foreign.home / "archived_sessions" / Path(record.boundary.rollout_path).name
+    path.parent.mkdir(parents=True)
+    Path(record.boundary.rollout_path).rename(path)
+    cs.delete("s")
+    monkeypatch.setattr(codex_contas, "list_accounts", lambda: [scenario.account, foreign])
+    with pytest.raises(HistoryError, match="não pertence"):
+        scenario.reg.create("archive", scenario.info.cwd, provider="codex", codex_account=scenario.account.id,
+            resume_session_id=scenario.thread_id, transfer_id=record.id, tool_output_token_limit=5000,
+            transfer_rollout_path=str(path), headless=True)
+    assert not cs.exists("archive")
+    with pytest.raises(ValidationError):
+        api.ResumeArchivedBody(provider="codex", transfer_rollout_path=str(path))

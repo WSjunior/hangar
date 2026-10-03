@@ -7736,7 +7736,7 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
         extras = {"codex_account": origem_codex_account} \
             if body.provider == "codex" and origem_codex_account is not None else {}
         if body.provider == "codex" and transfer:
-            extras.update(transfer_id=transfer.id,
+            extras.update(transfer_id=transfer.id, transfer_rollout_path=str(origem_path),
                           tool_output_token_limit=transfer.destination_meta["tool_output_token_limit"])
         info = registry.create(name, cwd, config_dir=cfg, provider=body.provider,
                                resume_session_id=session_id, engine=body.engine, **extras)

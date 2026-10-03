@@ -1498,7 +1498,7 @@ impl Hangar {
             Payload::Machines(reply) => { self.receive_machines(reply, window, cx); return; }
             Payload::Computer(reply) => { self.receive_computer(reply, window, cx); return; }
             Payload::Create(dialog, reply) => { self.receive_create(dialog, reply, window, cx); return; }
-            Payload::Transfer(dialog, reply) => { self.receive_transfer(dialog, reply, window, cx); return; }
+            Payload::Transfer(dialog, reply) => { self.receive_agent_transfer(dialog, reply, window, cx); return; }
             Payload::Sidebar(reply) => {
                 // Só o silenciar da máquina da conversa aberta muda as preferências que os avisos desta janela leem.
                 if matches!(&reply, sidebar::SidebarReply::Wrote(t, sidebar::Write::Mute(_), _) if t.server == self.open_server()) { self.load_notification_preferences(); }
