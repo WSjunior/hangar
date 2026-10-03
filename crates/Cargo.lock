@@ -393,6 +393,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "indexmap",
  "md-5",
  "notify",
  "percent-encoding",

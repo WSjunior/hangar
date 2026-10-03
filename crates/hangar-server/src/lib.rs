@@ -1,6 +1,7 @@
 //! Servidor do Hangar: lê as conversas do Claude e do Codex e repassa o resto ao backend Python.
 pub mod auth;
 pub mod config;
+pub mod costs;
 pub mod proxy;
 pub mod routes;
 pub mod side;
