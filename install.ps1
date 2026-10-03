@@ -71,7 +71,8 @@ function Liberar-Instalacao {
 # fecha-la. Pausa so com console interativo: com stdin de pipe o Read-Host volta na hora, e no
 # -Update travaria um `git pull` esperando tecla.
 function Pausa-Fim {
-    Liberar-Instalacao
+    # Falha aqui nao pode fechar a janela antes de alguem ler; o finally tenta de novo e a mostra.
+    try { Liberar-Instalacao } catch { Erro "nao consegui liberar a instalacao: $_" }
     if ($script:Interativo -and -not $Update) { Read-Host '  Enter pra fechar' | Out-Null }
 }
 
@@ -598,20 +599,41 @@ if (-not $SoChecar) {
 # Abaixo do build 22523 o conhost do sistema impede o Claude de ligar o mouse no psmux e a roda nao
 # rola (psmux/psmux#597); scripts\install-psmux-conpty.ps1 instala o psmux com console proprio.
 $script:psmuxDir = Join-Path $HOME '.hangar\psmux'
+# Processo do psmux fora da nossa pasta. Path nulo (acesso negado) conta como antigo; tmux.exe so
+# conta com psmux.exe ao lado, para nao pegar o tmux de MSYS2/Cygwin.
 function Psmux-Antigos {
-    @(Get-Process -Name psmux, tmux, pmux -ErrorAction SilentlyContinue |
-      Where-Object { $_.Path -and -not $_.Path.StartsWith("$script:psmuxDir\", [StringComparison]::OrdinalIgnoreCase) })
+    @(Get-Process -Name psmux, tmux, pmux -ErrorAction SilentlyContinue | Where-Object {
+        if (-not $_.Path) { return $true }
+        if ($_.Path.StartsWith("$script:psmuxDir\", [StringComparison]::OrdinalIgnoreCase)) { return $false }
+        $_.Name -ne 'tmux' -or (Test-Path (Join-Path (Split-Path -Parent $_.Path) 'psmux.exe'))
+    })
+}
+# $true quando nao sobrou processo antigo.
+function Psmux-Encerrar-Antigos {
+    $comPath = Psmux-Antigos | Where-Object { $_.Path } | Select-Object -First 1
+    if ($comPath) { Nativo $comPath.Path kill-server | Out-Null }
+    $limite = (Get-Date).AddSeconds(10)
+    while ((Psmux-Antigos) -and (Get-Date) -lt $limite) { Start-Sleep -Milliseconds 300 }
+    Psmux-Antigos | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+    return -not (Psmux-Antigos)
 }
 function Psmux-Precisa {
     $build = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
     if ($build -ge 22523 -or "$env:PROCESSOR_ARCHITEW6432$env:PROCESSOR_ARCHITECTURE" -notmatch 'AMD64') { return 'nao-precisa' }
     $antigos = Psmux-Antigos
     if (-not $antigos) { return 'fazer' }
-    $anterior = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try { $script:psmuxSessoes = @(& $antigos[0].Path ls 2>$null | Where-Object { $_ }).Count }
-    finally { $ErrorActionPreference = $anterior }
-    if ($script:psmuxSessoes -eq 0) { return 'fazer' }
+    $comPath = $antigos | Where-Object { $_.Path } | Select-Object -First 1
+    $script:psmuxSessoes = '?'
+    if ($comPath) {
+        $anterior = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { $linhas = @(& $comPath.Path ls 2>$null | Where-Object { $_ }); $rc = $LASTEXITCODE }
+        finally { $ErrorActionPreference = $anterior }
+        # rc != 0 e "sem servidor" ou falha: na duvida pergunta, nunca fecha sessao calado.
+        if ($rc -eq 0 -and $linhas.Count -eq 0) { return 'fazer' }
+        if ($rc -eq 0) { $script:psmuxSessoes = $linhas.Count }
+    }
     return 'perguntar'
 }
 
@@ -679,7 +701,7 @@ else {
 $script:psmuxConsole = Psmux-Precisa
 if ($script:psmuxConsole -eq 'perguntar') {
     Write-Host '  Neste Windows a roda do mouse nao rola dentro do Claude. O conserto reinicia o psmux.'
-    Nota "Fecha as $script:psmuxSessoes sessoes de terminal abertas; a conversa de cada uma continua no app (claude --resume)."
+    Nota "Fecha as sessoes de terminal abertas (agora: $script:psmuxSessoes); a conversa de cada uma continua no app (claude --resume)."
     $script:psmuxConsole = if (Pergunte-Mesmo '  Consertar a roda do mouse agora?') { 'fazer' } else { 'pular' }
 }
 }
@@ -774,29 +796,30 @@ if ($script:psmuxConsole -eq 'pular') {
     Falta 'roda do mouse no Claude segue sem funcionar neste Windows (o psmux nao foi reiniciado)'
     Nota 'rode o instalador de novo quando puder fechar as sessoes de terminal'
 } elseif ($script:psmuxConsole -eq 'fazer') {
-    # O psmux le PSMUX_CONPTY_DIR uma vez, no servidor: o servidor antigo precisa sair antes.
-    $antigos = Psmux-Antigos
-    if ($antigos) {
-        Nativo $antigos[0].Path kill-server | Out-Null
-        $limite = (Get-Date).AddSeconds(10)
-        while ((Psmux-Antigos) -and (Get-Date) -lt $limite) { Start-Sleep -Milliseconds 300 }
-        Psmux-Antigos | Stop-Process -Force -ErrorAction SilentlyContinue
-        Ok 'servidor antigo do psmux encerrado'
-    }
+    # Instala antes de derrubar: falha de download nao pode custar as sessoes.
     & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File "$raiz\scripts\install-psmux-conpty.ps1"
+    $rcConsole = $LASTEXITCODE
     $dirConsole = [Environment]::GetEnvironmentVariable('PSMUX_CONPTY_DIR', 'User')
-    if ($LASTEXITCODE -ne 0 -or -not $dirConsole) {
+    # Ordem de um terminal novo: PATH da maquina antes do do usuario.
+    $ordem = ([Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
+              [Environment]::GetEnvironmentVariable('Path', 'User')) -split ';' |
+             Where-Object { $_ } | ForEach-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') }
+    $primeiroTmux = $ordem | Where-Object { Test-Path (Join-Path $_ 'tmux.exe') } | Select-Object -First 1
+    if ($rcConsole -ne 0 -or -not $dirConsole) {
         Falta 'roda do mouse: o psmux com console proprio nao instalou (veja a linha acima)'
+        $script:faltaRodaPsmux = $true
+    } elseif ($primeiroTmux -ne $dirConsole.TrimEnd('\')) {
+        Falta "roda do mouse: no PATH, o tmux.exe de $primeiroTmux vem antes do de $dirConsole"
         $script:faltaRodaPsmux = $true
     } else {
         $env:PSMUX_CONPTY_DIR = $dirConsole
         $env:Path = "$dirConsole;$env:Path"
-        $fonte = (Get-Command tmux -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
-        if ($fonte -like "$dirConsole\*") {
+        # O psmux le PSMUX_CONPTY_DIR uma vez, no servidor: o antigo precisa sair.
+        if (Psmux-Encerrar-Antigos) {
             Ok 'roda do mouse: psmux com console proprio'
             Nota 'vale nos terminais NOVOS - feche os abertos antes de rodar o claude de novo.'
         } else {
-            Falta "roda do mouse: o tmux do PATH ainda e $fonte, nao o de $dirConsole"
+            Falta 'roda do mouse: o servidor antigo do psmux nao encerrou; reinicie o Windows para valer'
             $script:faltaRodaPsmux = $true
         }
     }
@@ -2337,6 +2360,14 @@ if ($Update) {
         }
     } else {
         Nota 'pulado - depois de um git pull, rode:  powershell -ExecutionPolicy Bypass -File install.ps1 -Update'
+    }
+}
+
+# O backend antigo pode ter subido um servidor do psmux sem a correcao antes de reiniciar no 7/8.
+if ($script:psmuxConsole -eq 'fazer' -and -not $script:faltaRodaPsmux -and (Psmux-Antigos)) {
+    if (-not (Psmux-Encerrar-Antigos)) {
+        Falta 'roda do mouse: um servidor antigo do psmux voltou e nao encerrou; reinicie o Windows para valer'
+        $pendencias += 'roda do mouse (psmux)'
     }
 }
 
