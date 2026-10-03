@@ -172,8 +172,28 @@ def _dead(pid: int) -> bool:
     try:
         with open(f"/proc/{pid}/stat") as f:
             return f.read().rsplit(") ", 1)[1].startswith("Z")
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):   # o segundo: colhido entre o open e o read
         return True
+
+
+def _proc_info(pid: int, tmp_path: Path) -> str:
+    # Diagnóstico temporário do CI: quem é o pid, quem é o pai e para onde apontam os fds.
+    def read(path):
+        try:
+            return Path(path).read_text(errors="replace").replace("\0", " ")
+        except OSError as e:
+            return repr(e)
+    status = read(f"/proc/{pid}/status")
+    ppid = next((l.split()[1] for l in status.splitlines() if l.startswith("PPid:")), "?")
+    fds = {}
+    for fd in ("0", "1", "2"):
+        try:
+            fds[fd] = os.readlink(f"/proc/{pid}/fd/{fd}")
+        except OSError as e:
+            fds[fd] = repr(e)
+    return "\n".join([status[:400], "cmdline=" + read(f"/proc/{pid}/cmdline"), f"fds={fds}",
+                      f"parent {ppid}: " + read(f"/proc/{ppid}/cmdline"),
+                      "log=" + read(tmp_path / "spawns.jsonl")[:300]])
 
 
 def test_child_takes_public_port_and_gets_the_contract_env(fake_bin, tmp_path, events):
@@ -287,6 +307,7 @@ def test_child_dies_when_python_is_killed(fake_bin, tmp_path, monkeypatch):
             "p = rust_server._spawn(Path(sys.argv[1]), env)\n"
             "print(p.pid, flush=True)\n"
             "os.kill(os.getpid(), 9)\n")
+    t0 = time.monotonic()
     out = subprocess.run([sys.executable, "-c", code, str(fake_bin), json.dumps(_CHILD_ENV)],
                          cwd=Path(rust_server.__file__).resolve().parents[1],
                          capture_output=True, text=True, timeout=60)
@@ -294,7 +315,8 @@ def test_child_dies_when_python_is_killed(fake_bin, tmp_path, monkeypatch):
     deadline = time.monotonic() + 5
     while not _dead(pid) and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert _dead(pid)
+    assert _dead(pid), (f"run={deadline - 5 - t0:.2f}s stderr={out.stderr[-300:]!r}\n"
+                        + _proc_info(pid, tmp_path))
 
 
 @pytest.mark.parametrize("answer,got", [("2", 2), ("sem", None)])
