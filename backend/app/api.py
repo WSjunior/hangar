@@ -39,7 +39,7 @@ from app import kimi_models
 from app import claude_models
 from app import codex_models
 from app import model_args
-from app import filesearch, filetree, git_ops
+from app import filesearch, filetree, git_ops, worktrees
 from app.file_response import file_response
 from app.filesearch import SearchError
 from app.filetree import FileError
@@ -8978,6 +8978,63 @@ def fs_branches(root: str, path: str | None = None):
         return list_branches(str(Path(os.path.realpath(os.path.expanduser(path or root)))))
     except (FsError, GitError) as exc:
         raise HTTPException(exc.status, detail=erro("erro_criacao_sessao", exc.detail)) from None
+
+
+def _no_guest() -> None:
+    if guest_users.current.get() is not None:
+        raise HTTPException(403, detail="convidado não acessa worktrees")
+
+
+def _allowed_repo(path: str) -> str:
+    """Repo/worktree dentro de uma raiz autorizada; pasta sumida valida pela pasta-mãe."""
+    probe = path if os.path.isdir(path) else str(Path(path).parent)
+    try:
+        _allowed_scan_root(probe)
+    except FsError as exc:
+        raise HTTPException(exc.status, detail=exc.detail) from None
+    return os.path.realpath(path) if os.path.isdir(path) else path
+
+
+@app.get("/api/worktrees", dependencies=[Depends(require_auth)])
+async def worktrees_list():
+    _no_guest()
+    sessions = await asyncio.to_thread(registry.list)
+    corte = time.time() - 30 * 86400
+    folders = await asyncio.to_thread(list_folders)
+    cwds = [s.cwd for s in sessions] + [f.cwd for f in folders if f.cwd and f.mtime >= corte]
+    roots = allowed_roots()
+    allowed = [c for c in cwds if c and any(Path(os.path.realpath(c)).is_relative_to(r) for r in roots)]
+    return {"repos": await asyncio.to_thread(worktrees.list_all, allowed, sessions, roots)}
+
+
+def _allowed_worktree(path: str) -> str:
+    path = _allowed_repo(path)
+    # Pasta que existe mas não é raiz de repo/worktree daria uma situação inventada.
+    if os.path.isdir(path) and not os.path.exists(os.path.join(path, ".git")):
+        raise HTTPException(404, detail="não é um repositório git")
+    return path
+
+
+@app.get("/api/worktrees/detail", dependencies=[Depends(require_auth)])
+async def worktrees_detail(path: str):
+    _no_guest()
+    path = await asyncio.to_thread(_allowed_worktree, path)
+    sessions = await asyncio.to_thread(registry.list)
+    return await asyncio.to_thread(worktrees.status, path, sessions)
+
+
+class WorktreeRepoBody(_StrictBody):
+    repo: str = Field(min_length=1)
+
+
+@app.post("/api/worktrees/fetch", dependencies=[Depends(require_auth)])
+async def worktrees_fetch(body: WorktreeRepoBody):
+    _no_guest()
+    try:
+        await asyncio.to_thread(lambda: worktrees.fetch(_allowed_repo(body.repo)))
+    except GitError as exc:
+        raise HTTPException(exc.status, detail=exc.detail) from None
+    return {"ok": True}
 
 
 # Git da pasta escolhida na tela de nova conversa: a mesma fronteira do seletor de pastas

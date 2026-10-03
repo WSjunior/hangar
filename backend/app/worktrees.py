@@ -1,13 +1,15 @@
 """Worktrees: onde a sessão está de verdade, a situação de cada worktree e a remoção segura."""
+import filecmp
 import json
 import logging
 import os
 import re
+import subprocess
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.git_ops import head_info
+from app.git_ops import _FETCH_TIMEOUT, GitError, _run, _scrub, head_info
 
 _log = logging.getLogger("hangar.worktrees")
 
@@ -216,3 +218,165 @@ def locate(provider: str, cwd: str | None, jsonl: str | None) -> Location:
     root = repo_root_of(real) or real
     branch, wt = head_info(root)
     return Location(branch, wt, root if wt else None, False)
+
+
+def _git(cwd: str, *args: str, failed: list) -> subprocess.CompletedProcess:
+    """`_run` para a situação: timeout de uma worktree lenta degrada o campo dela, nunca derruba a
+    lista inteira. A falha fica em `failed` para a situação sair marcada e nunca parecer segura."""
+    try:
+        return _run(cwd, *args)
+    except GitError as e:
+        _log.warning("worktrees: git %s em %s falhou: %s", args[0], cwd, e.detail)
+        failed.append(args[0])
+        return subprocess.CompletedProcess(args, 1, "", e.detail)
+
+
+def _base_of(path: str, branch: str, main: str, failed: list) -> str | None:
+    p = _git(path if os.path.isdir(path) else main, "config", "--get", f"branch.{branch}.hangar-base",
+             failed=failed)
+    if p.returncode == 0 and p.stdout.strip():
+        return p.stdout.strip()
+    # Worktree criada fora do Hangar: compara com a branch da pasta principal.
+    return head_info(main)[0]
+
+
+def is_merged(cwd: str, branch: str, base: str, failed: list | None = None) -> bool:
+    failed = [] if failed is None else failed
+    start = len(failed)
+    # Worktree recém-criada aponta pro mesmo commit da base: ancestral trivial, não mesclada.
+    # ponytail: branch sem uso cuja base andou lê como mesclada (apagar não perde nada), e merge
+    # local por fast-forward só lê como mesclada depois que a base anda.
+    tips = _git(cwd, "rev-parse", branch, base, failed=failed)
+    same = tips.returncode == 0 and len(set(tips.stdout.split())) == 1
+    if len(failed) == start and not same and _git(
+            cwd, "merge-base", "--is-ancestor", branch, base, failed=failed).returncode == 0:
+        return True
+    # Squash do GitLab não deixa ancestral; o sinal é a branch ter tido upstream e ele ter sumido
+    # do servidor (apagado no merge do MR), visto após `fetch --prune`.
+    if _git(cwd, "config", "--get", f"branch.{branch}.merge", failed=failed).returncode != 0:
+        return False
+    gone = _git(cwd, "rev-parse", "--abbrev-ref", f"{branch}@{{upstream}}", failed=failed).returncode != 0
+    # Timeout não é upstream sumido: na dúvida, não mesclada.
+    return gone and len(failed) == start
+
+
+def _gitdir_branch(main: str, path: str) -> str | None:
+    """Branch de uma worktree cuja pasta sumiu, pelo HEAD guardado em `.git/worktrees/<n>`."""
+    for e in Path(main, ".git", "worktrees").glob("*"):
+        try:
+            g = (e / "gitdir").read_text(encoding="utf-8", errors="replace").strip()
+            if os.path.dirname(os.path.normpath(os.path.join(e, g))) == path:
+                head = (e / "HEAD").read_text(encoding="utf-8", errors="replace").strip()
+                return head[len("ref: refs/heads/"):] if head.startswith("ref: refs/heads/") else None
+        except OSError:
+            continue
+    return None
+
+
+def _ignored_lost(path: str, main: str, failed: list) -> list[str]:
+    """Arquivos ignorados (pastas nunca) que só existem aqui; cópia idêntica à da principal não se perde."""
+    p = _git(path, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z",
+             failed=failed)
+    out = []
+    for rel in p.stdout.split("\0") if p.returncode == 0 else []:
+        if not rel or rel.endswith("/"):
+            continue
+        twin = Path(main, rel)
+        try:
+            if twin.is_file() and filecmp.cmp(Path(path, rel), twin, shallow=False):
+                continue
+        except OSError:
+            pass
+        out.append(rel)
+    return sorted(out)
+
+
+def _closed_count(path: str, live: set[str]) -> int:
+    """Conversas guardadas na pasta, menos as das sessões vivas dentro dela."""
+    from app.archive import _contas
+    from app.registry import sanitize_cwd
+    n = 0
+    for _cfg, _rot, base in _contas():
+        n += sum(1 for f in (base / sanitize_cwd(path)).glob("*.jsonl") if os.path.realpath(f) not in live)
+    return n
+
+
+def _inside(s, real: str) -> bool:
+    """Por realpath: home atrás de symlink dá dois textos para a mesma pasta."""
+    wt = getattr(s, "worktree_path", None)
+    if wt and os.path.realpath(wt) == real:
+        return True
+    cwd = os.path.realpath(s.cwd) if s.cwd else ""
+    return cwd == real or cwd.startswith(real.rstrip("/") + "/")
+
+
+def status(path: str, sessions=()) -> dict:
+    root = repo_root_of(path) if os.path.isdir(path) else None
+    main = main_repo_of(root) if root else _main_of_missing(path)
+    exists = os.path.isdir(path)
+    branch = head_info(path)[0] if exists else _gitdir_branch(main, path)
+    failed: list = []   # por chamada: a listagem roda status em threads diferentes
+    base = _base_of(path, branch, main, failed) if branch else None
+    cwd = path if exists else main
+    ahead = 0
+    if branch and base:
+        c = _git(cwd, "rev-list", "--count", f"{base}..{branch}", failed=failed)
+        ahead = int(c.stdout.strip() or 0) if c.returncode == 0 else 0
+    dirty = 0
+    if exists:
+        s = _git(path, "status", "--porcelain", failed=failed)
+        dirty = sum(1 for line in s.stdout.splitlines() if line.strip()) if s.returncode == 0 else 0
+    merged = bool(branch and base and branch != base and is_merged(cwd, branch, base, failed))
+    ignored = _ignored_lost(path, main, failed) if exists else []
+    real = os.path.realpath(path)
+    inside = [s for s in sessions if _inside(s, real)]
+    return {
+        "path": path, "repo": main, "exists": exists, "branch": branch, "base": base,
+        # Leitura que falhou deixa dirty/ignored zerados: a situação nunca pode parecer segura.
+        "merged": merged and not failed, "degraded": bool(failed),
+        "ahead": ahead, "dirty": dirty, "ignored": ignored,
+        "sessions": sorted(s.name for s in inside),
+        "closed": _closed_count(path, {os.path.realpath(s.jsonl) for s in inside if s.jsonl}),
+    }
+
+
+def _main_of_missing(path: str) -> str:
+    """Pasta sumida: procura o repo que ainda a lista entre as worktrees, pelo mapa de remoções ou
+    pela pasta-irmã `<repo>-<nome>`."""
+    mapped = removed().get(path)
+    if mapped:
+        return mapped
+    try:
+        cands = sorted(Path(path).parent.iterdir())
+    except OSError:
+        cands = []
+    for cand in cands:
+        if (cand / ".git").is_dir() and path in worktree_paths(str(cand)):
+            return str(cand)
+    return path
+
+
+def list_all(cwds, sessions, roots=None) -> list[dict]:
+    """Worktrees de cada repo principal visto nas pastas. `roots`: só repos dentro delas (o
+    principal sai do ponteiro `.git` da worktree e pode estar fora da raiz que liberou a pasta)."""
+    # ponytail: várias chamadas git por worktree a cada pedido, sem cache; TTL curto se a tela
+    # passar a consultar em intervalo.
+    mains: set[str] = set()
+    for c in set(cwds):
+        root = repo_root_of(c) if c else None
+        if root:
+            mains.add(main_repo_of(root))
+    out = []
+    for main in sorted(mains):
+        if roots is not None and not any(Path(os.path.realpath(main)).is_relative_to(r) for r in roots):
+            continue
+        paths = worktree_paths(main)
+        if paths:
+            out.append({"repo": main, "worktrees": [status(p, sessions) for p in paths]})
+    return out
+
+
+def fetch(repo: str) -> None:
+    p = _run(repo, "fetch", "--all", "--prune", timeout=_FETCH_TIMEOUT)
+    if p.returncode != 0:
+        raise GitError(409, _scrub(p.stderr.strip()) or "fetch falhou")

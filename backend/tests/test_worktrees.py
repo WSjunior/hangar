@@ -3,6 +3,7 @@ import json
 import pytest
 
 from app import git_ops, worktrees
+from app.models import SessionInfo
 
 
 def _repo(path):
@@ -172,3 +173,202 @@ def test_locate_never_raises_on_reader_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(worktrees, "claude_cwd", boom)
     loc = worktrees.locate("claude", main, str(f))
     assert (loc.branch, loc.worktree_path, loc.worktree_gone) == ("main", None, False)
+
+
+def _commit(path, name):
+    (path / name).write_text(name)
+    git_ops._run(str(path), "add", name)
+    git_ops._run(str(path), "commit", "-q", "-m", name)
+
+
+def test_status_ahead_dirty_and_ignored(tmp_path):
+    main = _repo(tmp_path / "repo")
+    (tmp_path / "repo" / ".gitignore").write_text(".env\nnotas.txt\nnode_modules/\n")
+    _commit(tmp_path / "repo", ".gitignore")
+    (tmp_path / "repo" / ".env").write_text("S=1")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    git_ops._run(wt, "config", "branch.x.hangar-base", "main")
+    _commit(tmp_path / "repo-x", "a.txt")
+    (tmp_path / "repo-x" / "solto.txt").write_text("?")
+    (tmp_path / "repo-x" / ".env").write_text("S=1")        # cópia idêntica: não se perde nada
+    (tmp_path / "repo-x" / "notas.txt").write_text("minha")  # só existe aqui
+    (tmp_path / "repo-x" / "node_modules").mkdir()
+    st = worktrees.status(wt, [SessionInfo(name="s1", cwd=main, worktree_path=wt)])
+    assert st["branch"] == "x" and st["base"] == "main" and st["ahead"] == 1
+    assert st["merged"] is False and st["dirty"] == 1
+    assert st["ignored"] == ["notas.txt"]
+    assert st["sessions"] == ["s1"] and st["exists"] is True and st["repo"] == main
+
+
+def test_status_merged_by_ancestor(tmp_path):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    _commit(tmp_path / "repo-x", "a.txt")
+    git_ops._run(main, "merge", "-q", "--no-ff", "-m", "m", "x")
+    assert worktrees.status(wt)["merged"] is True
+
+
+def test_merged_when_upstream_gone(tmp_path):
+    remote = _repo(tmp_path / "remote")
+    git_ops._run(remote, "branch", "x")
+    main = str(tmp_path / "clone")
+    git_ops._run(str(tmp_path), "clone", "-q", remote, main)
+    git_ops._run(main, "config", "user.email", "t@t")
+    git_ops._run(main, "config", "user.name", "t")
+    git_ops._run(main, "switch", "-q", "x")
+    _commit(tmp_path / "clone", "a.txt")            # squash do servidor: não é ancestral
+    git_ops._run(main, "switch", "-q", "main")
+    assert worktrees.is_merged(main, "x", "main") is False
+    git_ops._run(remote, "branch", "-D", "x")
+    git_ops._run(main, "fetch", "-q", "--prune")
+    assert worktrees.is_merged(main, "x", "main") is True
+
+
+def test_status_missing_folder(tmp_path):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    import shutil
+    shutil.rmtree(wt)
+    st = worktrees.status(wt)
+    assert st["exists"] is False and st["repo"] == main and st["branch"] == "x"
+
+
+def test_list_all_groups_by_main_repo(tmp_path):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    _repo(tmp_path / "sem-worktree")
+    out = worktrees.list_all([main, wt, str(tmp_path / "sem-worktree")], [])
+    assert [r["repo"] for r in out] == [main]
+    assert [w["path"] for w in out[0]["worktrees"]] == [wt]
+
+
+def test_routes_refuse_outside_root(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import api, fs
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    monkeypatch.setattr(fs, "resolve_scan_roots", lambda _s: [tmp_path / "repo"])
+    monkeypatch.setattr(api, "resolve_scan_roots", lambda _s: [tmp_path / "repo"])
+    monkeypatch.setattr(api.settings, "auth_token", "t")
+    r = TestClient(api.app).get("/api/worktrees/detail", params={"path": wt},
+                                headers={"Authorization": "Bearer t"})
+    assert r.status_code == 403
+
+
+def test_fresh_worktree_is_not_merged(tmp_path):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    assert worktrees.status(wt)["merged"] is False
+    _commit(tmp_path / "repo-x", "a.txt")
+    assert worktrees.status(wt)["merged"] is False
+    git_ops._run(main, "merge", "-q", "--no-ff", "-m", "m", "x")
+    assert worktrees.status(wt)["merged"] is True
+
+
+def test_closed_skips_live_session_transcripts(tmp_path, monkeypatch):
+    from app import archive
+    from app.registry import sanitize_cwd
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    proj = tmp_path / "projects"
+    (proj / sanitize_cwd(wt)).mkdir(parents=True)
+    (proj / sanitize_cwd(wt) / "a.jsonl").write_text("{}\n")
+    (proj / sanitize_cwd(wt) / "b.jsonl").write_text("{}\n")
+    monkeypatch.setattr(archive, "_contas", lambda *_a: [(None, "", proj)])
+    live = SessionInfo(name="s1", cwd=wt, jsonl=str(proj / sanitize_cwd(wt) / "b.jsonl"))
+    st = worktrees.status(wt, [live])
+    assert st["sessions"] == ["s1"] and st["closed"] == 1
+
+
+def test_sessions_match_through_symlink(tmp_path):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    (tmp_path / "link").symlink_to(tmp_path)
+    s = SessionInfo(name="s1", cwd=str(tmp_path / "link" / "repo-x"))
+    assert worktrees.status(wt, [s])["sessions"] == ["s1"]
+
+
+def test_ignored_never_lists_folders(tmp_path):
+    main = _repo(tmp_path / "repo")
+    (tmp_path / "repo" / ".gitignore").write_text("cache\n")
+    _commit(tmp_path / "repo", ".gitignore")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    (tmp_path / "repo-x" / "cache").mkdir()
+    (tmp_path / "repo-x" / "cache" / "dado.bin").write_text("só aqui")
+    assert worktrees.status(wt)["ignored"] == []
+
+
+def test_status_survives_git_timeout(tmp_path, monkeypatch):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    (tmp_path / "repo-x" / "solto.txt").write_text("?")
+    real_run = worktrees._run
+
+    def slow(cwd, *args, **kw):
+        if args[0] == "status":
+            raise git_ops.GitError(504, "git timeout")
+        return real_run(cwd, *args, **kw)
+    monkeypatch.setattr(worktrees, "_run", slow)
+    out = worktrees.list_all([main], [])
+    st = out[0]["worktrees"][0]
+    assert st["dirty"] == 0 and st["degraded"] is True and st["merged"] is False
+
+
+def test_upstream_timeout_is_not_merged(tmp_path, monkeypatch):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    _commit(tmp_path / "repo-x", "a.txt")
+    # Branch que já teve upstream e ele não existe mais: a regra do squash lê como mesclada.
+    git_ops._run(wt, "config", "branch.x.remote", "origin")
+    git_ops._run(wt, "config", "branch.x.merge", "refs/heads/x")
+    st = worktrees.status(wt)
+    assert st["merged"] is True and st["degraded"] is False
+    real_run = worktrees._run
+
+    def slow(cwd, *args, **kw):
+        if args[:2] == ("rev-parse", "--abbrev-ref"):
+            raise git_ops.GitError(504, "git timeout")
+        return real_run(cwd, *args, **kw)
+    monkeypatch.setattr(worktrees, "_run", slow)
+    st = worktrees.status(wt)
+    assert st["merged"] is False and st["degraded"] is True
+    assert worktrees.is_merged(wt, "x", "main") is False
+
+
+def test_list_all_skips_repo_outside_roots(tmp_path):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    (tmp_path / "outra").mkdir()
+    assert worktrees.list_all([wt], [], roots=[tmp_path / "outra"]) == []
+    assert [r["repo"] for r in worktrees.list_all([wt], [], roots=[tmp_path])] == [main]
+
+
+def test_detail_on_plain_folder_is_404(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import api, fs
+    (tmp_path / "comum").mkdir()
+    monkeypatch.setattr(fs, "resolve_scan_roots", lambda _s: [tmp_path])
+    monkeypatch.setattr(api, "resolve_scan_roots", lambda _s: [tmp_path])
+    monkeypatch.setattr(api.settings, "auth_token", "t")
+    r = TestClient(api.app).get("/api/worktrees/detail", params={"path": str(tmp_path / "comum")},
+                                headers={"Authorization": "Bearer t"})
+    assert r.status_code == 404
+
+
+def test_guest_gets_403_on_every_route(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import api, guest_users
+    monkeypatch.setattr(guest_users, "_path_override", tmp_path / "guests.json")
+    guest_users._reset()
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    monkeypatch.setattr(api.settings, "auth_token", "secret")
+    _, tok = guest_users.create("bia", str(tmp_path), False, True)
+    h = {"Authorization": f"Bearer {tok}"}
+    c = TestClient(api.app)
+    try:
+        assert c.get("/api/worktrees", headers=h).status_code == 403
+        assert c.get("/api/worktrees/detail", params={"path": wt}, headers=h).status_code == 403
+        assert c.post("/api/worktrees/fetch", json={"repo": main}, headers=h).status_code == 403
+    finally:
+        guest_users._reset()
