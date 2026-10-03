@@ -257,7 +257,7 @@ def convert_snapshot(path: Path) -> ImportedContext:
         raise ConversionError("session_transfer_source_partial_line")
     try:
         records = [json.loads(line, parse_constant=_invalid_constant, object_pairs_hook=_unique_object)
-                   for line in source.decode("utf-8").splitlines()]
+                   for line in source.decode("utf-8").split("\n")[:-1]]
     except (ValueError, UnicodeDecodeError) as exc:
         raise ConversionError("session_transfer_invalid_source_json") from exc
     chain = reconstruct_chain(records)

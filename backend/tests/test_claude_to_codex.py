@@ -336,6 +336,27 @@ def test_snapshot_requires_complete_valid_jsonl(tmp_path, raw, code):
     assert error.value.code == code
 
 
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\u0085"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_literal_unicode_separators_remain_message_content(tmp_path, separator, newline):
+    user_text = f"antes{separator}depois"
+    assistant_text = f"resposta{separator}completa"
+    records = [
+        {"type": "user", "uuid": "unicode-u", "parentUuid": None,
+         "message": {"role": "user", "content": user_text}},
+        {"type": "assistant", "uuid": "unicode-a", "parentUuid": "unicode-u",
+         "message": {"role": "assistant", "content": assistant_text}},
+    ]
+    raw = (newline.join(json.dumps(row, ensure_ascii=False) for row in records) + newline).encode()
+    assert separator.encode() in raw
+    path = tmp_path / "unicode.jsonl"
+    path.write_bytes(raw)
+    ctx = convert_snapshot(path)
+    assert ctx.items[0]["content"][0]["text"] == user_text
+    assert ctx.items[1]["content"][0]["text"] == assistant_text
+    assert ctx.selected_uuids == frozenset({"unicode-u", "unicode-a"})
+
+
 @pytest.mark.parametrize("field,value,code", [
     ("media_type", "application/pdf", "session_transfer_unsupported_media_mime"),
     ("data", "not-base64", "session_transfer_invalid_media_schema"),
