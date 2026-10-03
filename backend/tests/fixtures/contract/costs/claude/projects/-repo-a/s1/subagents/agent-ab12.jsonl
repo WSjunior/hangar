@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-09-30T02:31:00Z","cwd":"/repo/a","promptId":"sub","message":{"content":"Confira a fixture."}}
+{"type":"assistant","cwd":"/repo/a","timestamp":"2026-09-30T02:31:01Z","requestId":"child","message":{"id":"child-1","model":"claude-haiku-4.5","usage":{"input_tokens":12,"output_tokens":8,"cache_creation_input_tokens":30,"cache_read_input_tokens":60},"content":[{"type":"tool_use","id":"child-read","name":"Read","input":{"file_path":"/repo/a/backend/app/child.py"}}]}}

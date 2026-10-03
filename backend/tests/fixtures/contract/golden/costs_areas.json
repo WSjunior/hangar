@@ -1,0 +1,195 @@
+{
+ "comando_bash": [
+  [
+   "cd x && npm run build",
+   "npm"
+  ],
+  [
+   "FOO=$(git rev-parse) make",
+   "git"
+  ],
+  [
+   "sudo -E rtk pytest -q",
+   "pytest"
+  ],
+  [
+   "timeout 300 npx vitest",
+   "npx"
+  ],
+  [
+   "(cd a; ls) | wc",
+   "ls)"
+  ],
+  [
+   "for f in *.py; do echo $f; done",
+   "for"
+  ],
+  [
+   "./scripts/x.sh --flag",
+   "x.sh"
+  ],
+  [
+   "'/usr/bin/env' node a.js",
+   "env'"
+  ]
+ ],
+ "candidatos": [
+  [
+   "cd x && npm run build",
+   []
+  ],
+  [
+   "FOO=$(git rev-parse) make",
+   []
+  ],
+  [
+   "sudo -E rtk pytest -q",
+   []
+  ],
+  [
+   "timeout 300 npx vitest",
+   []
+  ],
+  [
+   "(cd a; ls) | wc",
+   []
+  ],
+  [
+   "for f in *.py; do echo $f; done",
+   [
+    "*.py"
+   ]
+  ],
+  [
+   "./scripts/x.sh --flag",
+   [
+    "./scripts/x.sh"
+   ]
+  ],
+  [
+   "'/usr/bin/env' node a.js",
+   [
+    "/usr/bin/env",
+    "a.js"
+   ]
+  ]
+ ],
+ "skill_do_caminho": [
+  [
+   "/h/.claude/skills/minha/SKILL.md",
+   [
+    "minha",
+    true
+   ]
+  ],
+  [
+   "/h/.claude/skills/minha/references/a.md",
+   [
+    "minha",
+    false
+   ]
+  ],
+  [
+   "/h/.claude/plugins/cache/mkt/superpowers/6.4/skills/brainstorming/SKILL.md",
+   [
+    "superpowers:brainstorming",
+    true
+   ]
+  ],
+  [
+   "/h/.claude/plugins/marketplaces/pmedico-marketplace/skills/x/SKILL.md",
+   [
+    "pmedico:x",
+    true
+   ]
+  ],
+  [
+   "/tmp/a.md",
+   null
+  ],
+  [
+   "/h/skills/x.txt",
+   null
+  ]
+ ],
+ "repartir": [
+  [
+   10,
+   {
+    "front": 1,
+    "back": 2
+   },
+   {
+    "front": 3,
+    "back": 7
+   }
+  ],
+  [
+   7,
+   {
+    "a": 1,
+    "b": 1,
+    "c": 1
+   },
+   {
+    "a": 3,
+    "b": 2,
+    "c": 2
+   }
+  ],
+  [
+   0,
+   {
+    "x": 3
+   },
+   {
+    "x": 0
+   }
+  ],
+  [
+   101,
+   {
+    "z": 2,
+    "y": 2
+   },
+   {
+    "z": 50,
+    "y": 51
+   }
+  ]
+ ],
+ "area_do_alvo": [
+  [
+   "backend/app/x.py",
+   "back"
+  ],
+  [
+   "frontend/src/a.svelte",
+   "front"
+  ],
+  [
+   "docs/a.md",
+   "docs"
+  ],
+  [
+   "migrations/001.sql",
+   "banco"
+  ],
+  [
+   "a/b/Dockerfile.dev",
+   "infra"
+  ],
+  [
+   "skill:database-x",
+   "banco"
+  ],
+  [
+   "README",
+   null
+  ],
+  [
+   "x.ps1",
+   "infra"
+  ]
+ ]
+}
