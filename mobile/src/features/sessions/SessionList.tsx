@@ -13,6 +13,7 @@ import {
   resumeSession,
   type AggSession,
   type GroupBy,
+  type Server,
 } from '@hangar/core';
 import { useServers } from '../../stores/servers';
 import { useSessions } from '../../stores/sessions';
@@ -24,6 +25,7 @@ import { SessionRow } from './SessionRow';
 import { ConversationList } from './ConversationList';
 import { splitAttention } from './AttentionStrip';
 import { RenameSheet } from './RenameSheet';
+import { WorktreeSheet } from '../worktrees/WorktreeSheet';
 import * as m from '../../paraglide/messages';
 import { superficie } from '../../theme/superficie';
 
@@ -74,6 +76,7 @@ export function SessionList({ onClose, onOpenServers }: Props) {
   const [refreshing, setRefreshing] = useState(false);
   // guarda a sessão inteira, não o nome: dois servidores podem ter sessões de mesmo nome
   const [renomeando, setRenomeando] = useState<AggSession | null>(null);
+  const [wt, setWt] = useState<{ server: Server; path: string } | null>(null);
 
   // 1 stream por servidor via refcount compartilhado
   useEffect(() => {
@@ -98,6 +101,12 @@ export function SessionList({ onClose, onOpenServers }: Props) {
     onClose();
     router.push(`/s/${s.serverId}/${s.name}/files` as never);
   }, [router, onClose]);
+  // A folha fala com o servidor da linha, não com o ativo: não precisa trocar de servidor.
+  const abrirWorktree = useCallback((s: AggSession, path: string) => {
+    const server = useServers.getState().servers.find((x) => x.id === s.serverId);
+    if (server) setWt({ server, path });
+    else toast.erro(m.servidor_nao_existe());
+  }, []);
 
   const excluir = useCallback(
     (s: AggSession) =>
@@ -362,6 +371,7 @@ export function SessionList({ onClose, onOpenServers }: Props) {
             onExcluir={excluir}
             onRenomear={setRenomeando}
             onResume={retomar}
+            onWorktree={abrirWorktree}
           />
         )}
         ListEmptyComponent={busca ? vazio(m.lista_vazia_filtro(), null, true) : vazio(m.lista_nenhuma_ativa(), null)}
@@ -383,6 +393,7 @@ export function SessionList({ onClose, onOpenServers }: Props) {
         {rodape}
       </View>
       <RenameSheet nome={renomeando?.name ?? null} onConfirmar={renomear} onFechar={() => setRenomeando(null)} />
+      <WorktreeSheet server={wt?.server ?? null} path={wt?.path ?? null} onClose={() => setWt(null)} />
     </>
   );
 }

@@ -39,6 +39,7 @@ const SERVER: Page[] = [
   { route: '/config/notifications', icon: 'Bell', title: m.native_settings_page_notifications, rows: [] },
   { route: '/config/shortcuts', icon: 'Keyboard', title: m.native_settings_page_shortcuts, rows: [] },
   { route: '/config/attachments', icon: 'Paperclip', title: m.native_settings_page_attachments, rows: [] },
+  { route: '/config/worktrees', icon: 'GitBranch', title: m.worktrees_titulo, rows: [] },
   { route: '/config/advanced', icon: 'SlidersHorizontal', title: m.native_settings_page_advanced, rows: [] },
 ];
 
