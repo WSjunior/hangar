@@ -99,18 +99,6 @@ type Agents = IndexMap<String, Agent>;
 
 fn usage_tokens(t: &UsoLinha) -> [i64; 4] { [t.input, t.output, t.cache_write, t.cache_read] }
 
-fn sum_cost(values: [f64; 4]) -> f64 {
-    // sum() compensa os componentes; += conserva a ordem original entre linhas.
-    let mut high: f64 = 0.0;
-    let mut low = 0.0;
-    for value in values {
-        let next = high + value;
-        low += if high.abs() >= value.abs() { (high - next) + value } else { (value - next) + high };
-        high = next;
-    }
-    if low != 0.0 && low.is_finite() { high + low } else { high }
-}
-
 fn real_cost(t: &UsoLinha, pricing: &Pricing) -> Share {
     if usage_tokens(t).iter().all(|n| *n == 0) { return Share::default(); }
     let row = UsageRow {
@@ -122,7 +110,7 @@ fn real_cost(t: &UsoLinha, pricing: &Pricing) -> Share {
         account_id: None, codex_long_context: false, regravado: 0, regravado_1h: 0,
     };
     let split = report_costs::row_cost(&row, pricing).unwrap_or([0.0; 4]);
-    Share { total: sum_cost(split), split }
+    Share { total: report_costs::cost_sum(split), split }
 }
 
 fn agent_costs<'a>(rows: impl Iterator<Item = &'a UsageRow>, pricing: &Pricing) -> Agents {
@@ -133,7 +121,7 @@ fn agent_costs<'a>(rows: impl Iterator<Item = &'a UsageRow>, pricing: &Pricing) 
         let a = agents.entry(id.to_owned()).or_default();
         for (sum, value) in a.tokens.iter_mut().zip([row.input, row.output, row.cache_write, row.cache_read]) { *sum += value; }
         if let Some(split) = report_costs::row_cost(row, pricing) {
-            a.cost.total += sum_cost(split);
+            a.cost.total += report_costs::cost_sum(split);
             for (sum, value) in a.cost.split.iter_mut().zip(split) { *sum += value; }
         }
     }
