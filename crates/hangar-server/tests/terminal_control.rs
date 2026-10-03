@@ -1,4 +1,4 @@
-use hangar_server::terminal_control::{CaptureRequest, ControlEvent, ControlParser, Screen, TerminalPool, Limits};
+use hangar_server::terminal_control::{CaptureRequest, ControlEvent, ControlParser, FrameIdentity, Screen, TerminalPool, Limits};
 use std::{path::PathBuf, process::Command, time::Duration};
 
 fn request(consumer: &str) -> CaptureRequest {
@@ -14,7 +14,7 @@ fn fragmented_frames_preserve_percent_body_and_exact_blank_lines() {
     for chunk in b"%begin 1 7 0\n%begin exemplo literal\n%end 1 8 0\n\na\n%end 1 7 0\n".chunks(2) {
         events.extend(parser.push(chunk).unwrap());
     }
-    assert_eq!(events, vec![ControlEvent::Frame { text: "%begin exemplo literal\n%end 1 8 0\n\na\n".into(), error: false }]);
+    assert_eq!(events, vec![ControlEvent::Frame { identity: FrameIdentity { timestamp: 1, command: 7, flags: 0 }, text: "%begin exemplo literal\n%end 1 8 0\n\na\n".into(), error: false }]);
 }
 
 #[test]
@@ -22,7 +22,7 @@ fn output_decodes_octal_bytes_without_consuming_frame_body() {
     let mut parser = ControlParser::default();
     assert_eq!(parser.push(b"%output %3 ol\\303\\241\\134\n%begin 2 8 0\n%output %4 literal\n%error 2 8 0\n").unwrap(), vec![
         ControlEvent::Output { pane: "%3".into(), bytes: "olá\\".as_bytes().to_vec() },
-        ControlEvent::Frame { text: "%output %4 literal\n".into(), error: true },
+        ControlEvent::Frame { identity: FrameIdentity { timestamp: 2, command: 8, flags: 0 }, text: "%output %4 literal\n".into(), error: true },
     ]);
 }
 
@@ -53,6 +53,18 @@ fn screen_tracks_split_utf8_color_cursor_and_alternate_without_answering_ansi() 
     screen.feed(b"\x1b[?1049l").unwrap();
     assert_eq!(screen.text(), "olá\n\n\n\n");
     assert!(Screen::new(0, 4).is_err());
+}
+
+#[test]
+fn restoring_pending_wrap_cursor_wraps_the_next_character_without_overwrite() {
+    let mut screen = Screen::new(80, 3).unwrap();
+    screen.feed("x".repeat(80).as_bytes()).unwrap();
+    screen.restore_cursor(80, 0).unwrap();
+    assert_eq!(screen.cursor(), (80, 0));
+    screen.feed(b"Z").unwrap();
+    assert_eq!(screen.text(), format!("{}\nZ\n\n", "x".repeat(80)));
+    assert_eq!(screen.cursor(), (1, 1));
+    assert!(screen.restore_cursor(81, 0).is_err());
 }
 
 #[cfg(unix)]
@@ -205,29 +217,52 @@ frame(0)
 for n, line in enumerate(sys.stdin, 1):
     with root.joinpath('commands').open('a') as log:
         log.write(line)
-    if not line.startswith(('display-message -p -t ', 'capture-pane -p ')):
+    commands = line.rstrip('\n').split(' ; ')
+    wrapped = len(commands) == 3
+    command = commands[1] if wrapped else commands[0]
+    if not command.startswith(('display-message -p -t ', 'capture-pane -p ')):
         sys.exit(7)
+    if wrapped and (not commands[0].startswith('display-message -p -l HG_START_') or not commands[2].startswith('display-message -p -l HG_END_')):
+        sys.exit(8)
+    start = commands[0].removeprefix('display-message -p -l ') + '\n'
+    end = commands[2].removeprefix('display-message -p -l ') + '\n' if wrapped else ''
+    if n == 4 and mode == 'late':
+        body = '%begin 1 99 0\nstale\n\n\n\n%end 1 99 0\n'
+        for chunk in [body[:7], body[7:21], body[21:]]:
+            time.sleep(.01)
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
+        continue
+    if wrapped:
+        frame(n * 100, start)
     if n >= 3 and mode == 'timeout':
         time.sleep(30)
     if n >= 3 and mode == 'eof':
         sys.exit(0)
     if n >= 3 and mode == 'utf8':
-        sys.stdout.buffer.write(f'%begin 1 {n} 0\n'.encode() + b'\xff\n' + f'%end 1 {n} 0\n'.encode())
+        sys.stdout.buffer.write(f'%begin 1 {n * 100 + 17} 0\n'.encode() + b'\xff\n' + f'%end 1 {n * 100 + 17} 0\n'.encode())
         sys.stdout.buffer.flush()
         continue
     if n >= 3 and mode == 'error':
-        sys.stdout.write(f'%begin 1 {n} 0\nfailed\n%error 1 {n} 0\n')
+        sys.stdout.write(f'%begin 1 {n * 100 + 17} 0\nfailed\n%error 1 {n * 100 + 17} 0\n')
         sys.stdout.flush()
         continue
     if n == 3 and mode == 'prefill':
-        frames = [(3, '%3\tfixture\t20\t4\t0\t0\t0\n'), (78, 'stale\n\n\n\n'),
+        frames = [(n * 100 + 17, '%3\tfixture\t20\t4\t0\t0\t0\n'), (78, 'stale\n\n\n\n'),
                   (79, 'stale\n\n\n\n'), (80, '%3\tfixture\t20\t4\t0\t0\t0\n')]
         sys.stdout.write(''.join(f'%begin 1 {index} 0\n' + body + f'%end 1 {index} 0\n' for index, body in frames))
         sys.stdout.flush()
         continue
     if n == 2:
         sys.stdout.write('%output %9 wrong-pane\n%output %3 \\033[6n\n')
-    frame(n, '%3\tfixture\t20\t4\t0\t0\t0\n' if line.startswith('display-message') else 'ready\n\n\n\n')
+    frame(n * 100 + 17, '%3\tfixture\t20\t4\t0\t0\t0\n' if command.startswith('display-message') else 'ready\n\n\n\n')
+    if wrapped:
+        if n == 4 and mode == 'missing-end':
+            continue
+        if n == 4 and mode == 'late-end':
+            time.sleep(.12)
+            root.joinpath('end-sent').write_text('yes')
+        frame(n * 100 + 39, 'wrong-marker\n' if n == 4 and mode == 'wrong-end' else end)
 "#.replace("__MODE__", mode);
     std::fs::write(&program, source).unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -267,7 +302,7 @@ async fn ansi_queries_do_not_write_to_terminal_and_final_release_reaps_child() {
     pool.release("state").await.unwrap();
     assert!(!process_exists(&pid));
     let commands = std::fs::read_to_string(log).unwrap();
-    assert!(commands.lines().all(|line| line.starts_with("display-message -p -t ") || line.starts_with("capture-pane -p ")));
+    assert!(commands.lines().flat_map(|line| line.split(" ; ")).all(|command| command.starts_with("display-message -p -t ") || command.starts_with("capture-pane -p ") || command.starts_with("display-message -p -l HG_")));
     assert!(!commands.contains('\x1b'));
 }
 
@@ -277,6 +312,50 @@ async fn unsolicited_queued_frames_never_supply_a_successful_capture() {
     let (_dir, program, _, _) = fake_observer("prefill");
     let pool = TerminalPool::with_program(program, None, Limits::default());
     assert!(pool.capture(request("state")).await.is_err());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn late_fragmented_unsolicited_frame_never_serves_the_next_request() {
+    let (_dir, program, _, _) = fake_observer("late");
+    let pool = TerminalPool::with_program(program, None, Limits::default());
+    assert!(pool.capture(request("state")).await.is_err());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn capture_waits_for_end_marker_and_rejects_missing_or_wrong_end() {
+    for mode in ["missing-end", "wrong-end", "late-end"] {
+        let (dir, program, _, _) = fake_observer(mode);
+        let limits = Limits { command: Duration::from_millis(250), ..Limits::default() };
+        let pool = TerminalPool::with_program(program, None, limits);
+        let result = pool.capture(request("state")).await;
+        if mode == "late-end" {
+            assert_eq!(result.unwrap().text, "ready\n\n\n\n");
+            assert!(dir.path().join("end-sent").exists());
+            pool.release("state").await.unwrap();
+        } else {
+            assert!(matches!(result.unwrap_err().0, "terminal command timeout" | "terminal command marker mismatch"));
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exact_full_line_without_newline_preserves_pending_wrap_cursor() {
+    let server = IsolatedTmux::new();
+    server.run(&["resize-window", "-t", "=fixture:", "-x", "80", "-y", "30"]);
+    server.run(&["respawn-pane", "-k", "-t", "=fixture:", "python3 -u -c 'import sys,time; sys.stdout.write(\"x\"*80); sys.stdout.flush(); time.sleep(30)'"]);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while server.run(&["display-message", "-p", "-t", "=fixture:", "#{pane_width}\t#{cursor_x}"]) != "80\t80\n" {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    let pool = server.pool();
+    let text = pool.capture(request("state")).await.unwrap().text;
+    assert_eq!(text, server.run(&["capture-pane", "-p", "-t", "=fixture:", "-S", "-200"]));
+    assert!(text.starts_with(&format!("{}\n", "x".repeat(80))));
+    pool.release("state").await.unwrap();
 }
 
 #[cfg(unix)]

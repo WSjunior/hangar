@@ -3,7 +3,7 @@ use crate::terminal_state::{self, PaneAnalysis};
 use alacritty_terminal::{Term, event::VoidListener, grid::Dimensions, index::{Column, Line},
     term::{Config, TermMode}, vte::ansi::Processor};
 use serde::{Deserialize, Serialize};
-use std::{collections::{HashMap, VecDeque}, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::{HashMap, VecDeque}, path::PathBuf, sync::{Arc, atomic::{AtomicU64, Ordering}}, time::Duration};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, process::{Child, ChildStdin, ChildStdout, Command},
     sync::{Mutex, mpsc, oneshot}, time::{Instant, timeout}};
 
@@ -11,6 +11,7 @@ const MAX_FRAME: usize = 8 * 1024 * 1024;
 const MAX_LINE: usize = 1024 * 1024;
 const MAX_ACTORS: usize = 64;
 const MAX_CONSUMERS: usize = 256;
+static NEXT_COMMAND: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,22 +45,29 @@ type Result<T> = std::result::Result<T, TerminalError>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ControlEvent {
-    Frame { text: String, error: bool },
+    Frame { identity: FrameIdentity, text: String, error: bool },
     Output { pane: String, bytes: Vec<u8> },
     Exit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameIdentity {
+    pub timestamp: u64,
+    pub command: u64,
+    pub flags: u32,
 }
 
 #[derive(Default)]
 pub struct ControlParser {
     pending: Vec<u8>,
-    frame: Option<(String, Vec<u8>)>,
+    frame: Option<(FrameIdentity, Vec<u8>)>,
 }
-fn marker(line: &[u8], prefix: &[u8]) -> Option<String> {
+fn marker(line: &[u8], prefix: &[u8]) -> Option<FrameIdentity> {
     let suffix = line.strip_prefix(prefix)?;
     let text = std::str::from_utf8(suffix).ok()?;
     let parts: Vec<_> = text.split(' ').collect();
     if parts.len() != 3 || parts.iter().any(|p| p.is_empty() || !p.bytes().all(|c| c.is_ascii_digit())) { return None; }
-    Some(text.into())
+    Some(FrameIdentity { timestamp: parts[0].parse().ok()?, command: parts[1].parse().ok()?, flags: parts[2].parse().ok()? })
 }
 impl ControlParser {
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<ControlEvent>> {
@@ -74,9 +82,9 @@ impl ControlParser {
                 let success = marker(&line, b"%end ").as_ref() == Some(identity);
                 let error = marker(&line, b"%error ").as_ref() == Some(identity);
                 if success || error {
-                    let (_, body) = self.frame.take().unwrap();
+                    let (identity, body) = self.frame.take().unwrap();
                     let text = String::from_utf8(body).map_err(|_| TerminalError("invalid frame UTF-8"))?;
-                    events.push(ControlEvent::Frame { text, error });
+                    events.push(ControlEvent::Frame { identity, text, error });
                 } else {
                     if body.len() + line.len() + 1 > MAX_FRAME { return Err(TerminalError("control frame too large")); }
                     body.extend(line); body.push(b'\n');
@@ -164,8 +172,17 @@ impl Screen {
         text
     }
     pub fn cursor(&self) -> (usize, usize) {
-        let point = self.terminal.grid().cursor.point;
-        (point.column.0, point.line.0 as usize)
+        let cursor = &self.terminal.grid().cursor;
+        (cursor.point.column.0 + usize::from(cursor.input_needs_wrap), cursor.point.line.0 as usize)
+    }
+    pub fn restore_cursor(&mut self, column: usize, row: usize) -> Result<()> {
+        if column > self.size.columns || row >= self.size.rows { return Err(TerminalError("invalid terminal cursor")); }
+        let cursor = &mut self.terminal.grid_mut().cursor;
+        // O tmux guarda a coluna virtual após a margem; alacritty guarda a última célula e o wrap.
+        cursor.point.column = Column(if column == self.size.columns { column - 1 } else { column });
+        cursor.point.line = Line(row as i32);
+        cursor.input_needs_wrap = column == self.size.columns;
+        Ok(())
     }
     pub fn alternate(&self) -> bool { self.terminal.mode().contains(TermMode::ALT_SCREEN) }
     pub fn cell(&self, column: usize, row: usize) -> Option<&alacritty_terminal::term::cell::Cell> {
@@ -180,7 +197,7 @@ impl Screen {
         for (row, line) in lines.iter().take(dimensions.rows).enumerate() {
             self.feed(format!("\x1b[{};1H", row + 1).as_bytes())?; self.feed(line.as_bytes())?;
         }
-        self.feed(format!("\x1b[{};{}H", dimensions.cursor_y + 1, dimensions.cursor_x + 1).as_bytes())?;
+        self.restore_cursor(dimensions.cursor_x, dimensions.cursor_y)?;
         Ok(())
     }
 }
@@ -302,7 +319,7 @@ impl PaneInfo {
         }
         let number = |index: usize| fields[index].parse::<usize>().map_err(|_| TerminalError("invalid terminal metadata"));
         let info = Self { id: fields[0].into(), name: fields[1].into(), columns: number(2)?, rows: number(3)?, cursor_x: number(4)?, cursor_y: number(5)?, alternate: fields[6] == "1" };
-        if info.cursor_x >= info.columns || info.cursor_y >= info.rows { return Err(TerminalError("invalid terminal cursor")); }
+        if info.columns == 0 || info.rows == 0 || info.cursor_x > info.columns || info.cursor_y >= info.rows { return Err(TerminalError("invalid terminal cursor")); }
         Ok(info)
     }
 }
@@ -332,9 +349,9 @@ impl Observer {
         if let Err(e) = observer.seed(key).await { observer.stop().await; return Err(e); }
         Ok(observer)
     }
-    fn event(&mut self, event: ControlEvent) -> Result<Option<String>> {
+    fn event(&mut self, event: ControlEvent) -> Result<Option<(FrameIdentity, String)>> {
         match event {
-            ControlEvent::Frame { text, error: false } => Ok(Some(text)),
+            ControlEvent::Frame { identity, text, error: false } => Ok(Some((identity, text))),
             ControlEvent::Frame { error: true, .. } => Err(TerminalError("tmux command failed")),
             ControlEvent::Exit => Err(TerminalError("terminal observer exited")),
             ControlEvent::Output { pane, bytes } => {
@@ -353,7 +370,7 @@ impl Observer {
         if self.events.len() > 4096 { return Err(TerminalError("terminal event queue full")); }
         Ok(())
     }
-    async fn frame(&mut self) -> Result<String> {
+    async fn frame(&mut self) -> Result<(FrameIdentity, String)> {
         loop {
             while let Some(event) = self.events.pop_front() {
                 if let Some(frame) = self.event(event)? { return Ok(frame); }
@@ -366,10 +383,22 @@ impl Observer {
             if self.event(event)?.is_some() { return Err(TerminalError("unexpected control frame")); }
         }
         if self.parser.frame.is_some() { return Err(TerminalError("unexpected control frame")); }
+        let nonce = format!("{}_{}", std::process::id(), NEXT_COMMAND.fetch_add(1, Ordering::Relaxed));
+        let start = format!("HG_START_{nonce}");
+        let end = format!("HG_END_{nonce}");
+        let command = format!("display-message -p -l {start} ; {} ; display-message -p -l {end}\n", command.trim_end_matches('\n'));
         timeout(self.limits.command, async {
             self.stdin.write_all(command.as_bytes()).await.map_err(|_| TerminalError("terminal write failed"))?;
             self.stdin.flush().await.map_err(|_| TerminalError("terminal write failed"))?;
-            self.frame().await
+            let (first, text) = self.frame().await?;
+            if text != format!("{start}\n") { return Err(TerminalError("terminal command marker mismatch")); }
+            let (middle, body) = self.frame().await?;
+            let (last, text) = self.frame().await?;
+            if text != format!("{end}\n") || first.command >= middle.command || middle.command >= last.command
+                || first.flags != middle.flags || middle.flags != last.flags {
+                return Err(TerminalError("terminal command marker mismatch"));
+            }
+            Ok(body)
         }).await.map_err(|_| TerminalError("terminal command timeout"))?
     }
     async fn info(&mut self, key: &Key) -> Result<PaneInfo> {
