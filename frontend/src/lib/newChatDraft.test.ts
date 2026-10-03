@@ -84,6 +84,23 @@ describe('NewChatDraft.send', () => {
     expect(core.sendInputForServer).toHaveBeenLastCalledWith(srv, 'proj-2', 'oi');
   });
 
+  it('branch nova sem nome nasce com o nome da sessão, e tentar de novo não cria outra sessão', async () => {
+    core.fetchSessionsForServer.mockResolvedValue([{ name: 'proj' }]);
+    core.createSessionForServer.mockResolvedValue({ name: 'proj-2' });
+    core.sendInputForServer.mockRejectedValueOnce(new Error('500: caiu')).mockResolvedValueOnce(undefined);
+    const draft = await ready();
+    draft.newBranch = true;
+    draft.base = 'develop';
+
+    await expect(draft.send('oi')).rejects.toThrow('caiu');
+    await draft.send('oi');
+
+    expect(core.createSessionForServer).toHaveBeenCalledTimes(1);
+    expect(core.createSessionForServer).toHaveBeenCalledWith(srv, expect.objectContaining({
+      name: 'proj-2', branch: 'proj-2', new_branch: true, base: 'develop' }));
+    expect(draft.branchName).toBe('proj-2');
+  });
+
   it('contas ainda carregando: não envia', async () => {
     core.listClaudeConfigs.mockImplementation(never);
     const draft = createNewChatDraft();

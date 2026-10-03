@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { getFolderBranchesForServer, type FolderBranches, type Server, type WorktreeChoice } from '@hangar/core';
   import * as m from '../paraglide/messages';
 
@@ -13,12 +14,17 @@
   let base = $state('');
   let branchName = $state('');
 
+  const serverId = $derived(server.id);
   $effect(() => {
-    const alvo = cwd;
+    const alvo = cwd, id = serverId;
+    // A lista de servidores é refeita com objetos novos a cada recarga: só a identidade reabre a leitura,
+    // senão a recarga apagava o que a pessoa digitou.
+    const s = untrack(() => server);
     // Pasta nova: escolha da anterior não vale aqui (a branch pode nem existir neste repositório).
     info = null; mode = 'current'; existing = undefined; branchName = '';
-    getFolderBranchesForServer(server, alvo).then((r) => { if (alvo === cwd) { info = r; base = r.current ?? ''; } })
-      .catch(() => { info = null; });   // pasta sem git: o seletor some
+    const atual = () => alvo === cwd && id === serverId;
+    getFolderBranchesForServer(s, alvo).then((r) => { if (atual()) { info = r; base = r.current ?? ''; } })
+      .catch(() => { if (atual()) info = null; });   // pasta sem git: o seletor some
   });
   const others = $derived(info ? [...info.branches, ...info.remotes].filter((b) => b !== info?.current) : []);
 
