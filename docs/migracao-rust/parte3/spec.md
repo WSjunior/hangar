@@ -2,7 +2,7 @@
 
 **Data:** 2026-10-03
 **Status:** aguardando aprovação do dono
-**Base:** `hangar-server-parte1` em `2c66a347`; contrato interno da parte 2B = versão 4, esta = **5**
+**Base:** `hangar-server-parte1` em `ce5cefd5`, com a 2B integrada em `eae31286`; contrato interno da parte 2B = versão 7, esta = **8**
 **Medições:** [`analise.md`](analise.md)
 
 ## O que muda para quem usa
@@ -44,7 +44,7 @@ pânico, escopos que não chegam do Python: o pedido é repassado ao Python e o 
 do motivo (sem caminho de conversa nem texto). O Python atende como hoje: a primeira chamada a ele
 dispara a varredura dele e responde 202 enquanto ela alcança.
 
-### 2. De onde vêm as contas: `GET /internal/costs/scopes` (contrato versão 5)
+### 2. De onde vêm as contas: `GET /internal/costs/scopes` (contrato versão 8)
 
 Rota nova no Python, só loopback com o segredo interno, fora do catálogo, como a `info` da parte
 1. Devolve o que o `_sincronizar()` hoje calcula antes de ler arquivo:
@@ -65,8 +65,8 @@ Rota nova no Python, só loopback com o segredo interno, fora do catálogo, como
 - `repo` é a raiz do checkout: a origem de skill `@repo` depende dela.
 - O Rust pede os escopos a cada varredura (como o Python relê hoje) e guarda a última resposta
   boa; sem resposta e sem nenhuma guardada, os pedidos são repassados.
-- **Versão:** `RUST_SERVER_PROTOCOL = 5` (Python) e `INTERNAL_PROTOCOL = 5` (Rust), no mesmo
-  commit. **Depende da 2B (versão 4) entrar antes**; se a 2B mudar de número, esta vira o seguinte.
+- **Versão:** `RUST_SERVER_PROTOCOL = 8` (Python) e `INTERNAL_PROTOCOL = 8` (Rust), no mesmo
+  commit. **A 2B (versão 7) foi integrada antes da Task 6**; esta junção usa o número seguinte.
 
 A posse de cada rollout do Codex é calculada no Rust com a regra de
 `codex_contas.account_for_rollout`: caminho canônico dentro de `<home>/sessions` ou
@@ -125,7 +125,7 @@ A posse de cada rollout do Codex é calculada no Rust com a regra de
 
 ### 6. O Python com o Rust de pé
 
-- O `rust_server` marca "custos no Rust" quando a saúde responde versão 5. Com a marca, o
+- O `rust_server` marca "custos no Rust" quando a saúde responde versão 8. Com a marca, o
   aquecimento de boot do Python (`agendar_aquecimento(30)`) não varre nada.
 - `_take_over` (o Python assume a porta) limpa a marca e agenda o aquecimento na hora. O índice do
   Python retoma de onde parou: só o que cresceu desde a última varredura dele.
@@ -148,7 +148,7 @@ A posse de cada rollout do Codex é calculada no Rust com a regra de
 - **Dados reais, só leitura:** um exemplo do crate (`cargo run --example custos`) varre esta
   máquina num índice descartável e imprime os relatórios; um script compara com o Python avulso
   (o mesmo processo de `analise.md`). Diferença aceita: zero em inteiros e chaves.
-- **Reserva:** teste do `rust_server` em que a saúde v5 desliga o aquecimento e o `_take_over`
+- **Reserva:** teste do `rust_server` em que a saúde v8 desliga o aquecimento e o `_take_over`
   religa; teste de rota em que índice ilegível e escopos ausentes viram repasse.
 - **Uso real com o dono, no fim:** abrir Custos e Uso no web, no celular (card) e no nativo;
   "Atualizar dados"; filtro e clique num item do Uso; custo de sessão Codex no painel; apagar o

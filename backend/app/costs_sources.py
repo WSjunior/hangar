@@ -876,7 +876,7 @@ def _pi_roots() -> list[tuple[Path, str]]:
 
 
 def scopes_for_rust() -> dict:
-    """Escopos e rótulos decididos antes da leitura, no formato do contrato versão 5."""
+    """Escopos e rótulos decididos antes da leitura, no formato do contrato versão 8."""
     claude = [{"root": str(costs_claude_transcript.raiz_projetos(Path(path))), "account": account,
                "label": _ROTULOS.get(account) or account}
               for path, account in _config_dirs()]

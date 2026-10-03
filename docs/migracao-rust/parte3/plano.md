@@ -4,7 +4,7 @@
 
 **Goal:** `/api/costs`, `/api/uso`, `/api/cotacao` e `/api/sessions/{name}/cost` atendidos pelo `hangar-server` com índice SQLite próprio, mesmos números e chaves do Python, e o Python como reserva.
 
-**Architecture:** O Python entrega as contas por `GET /internal/costs/scopes` (contrato versão 5) e deixa de varrer no boot quando o Rust v5 está de pé. O Rust porta os leitores (Claude, Codex, Pi/omp, Kimi), o índice incremental (`custos-rust.sqlite3`), os dois relatórios, o preço e a cotação. Toda falha do lado Rust vira repasse ao Python. A paridade é provada por golden gerado pelos leitores Python a partir de transcripts sintéticos.
+**Architecture:** O Python entrega as contas por `GET /internal/costs/scopes` (contrato versão 8) e deixa de varrer no boot quando o Rust v8 está de pé. O Rust porta os leitores (Claude, Codex, Pi/omp, Kimi), o índice incremental (`custos-rust.sqlite3`), os dois relatórios, o preço e a cotação. Toda falha do lado Rust vira repasse ao Python. A paridade é provada por golden gerado pelos leitores Python a partir de transcripts sintéticos.
 
 **Tech Stack:** Rust 1.98.1 (axum, tokio, serde_json com `preserve_order`, `rusqlite` com `bundled`, `rayon`, `flate2`, `indexmap`, `regex`, `chrono`), Python 3.14 / FastAPI.
 
@@ -14,7 +14,7 @@
 
 ## Global Constraints
 
-- Branch `hangar-server-parte3`, base `00be339c`. Contrato interno **versão 5**: `RUST_SERVER_PROTOCOL = 5` (`backend/app/rust_server.py`) e `INTERNAL_PROTOCOL = 5` (`crates/hangar-server/src/lib.rs`) no **mesmo commit**. Depende da 2B (versão 4) entrar antes; na integração, se a 2B tiver outro número, esta vira o seguinte.
+- Branch `hangar-server-parte3`, base da integração `c2008171` com `ce5cefd5`. Contrato interno **versão 8**: `RUST_SERVER_PROTOCOL = 8` (`backend/app/rust_server.py`) e `INTERNAL_PROTOCOL = 8` (`crates/hangar-server/src/lib.rs`) no **mesmo commit**. A 2B (versão 7, integrada em `eae31286`) entrou antes da Task 6; esta junção usa o número seguinte.
 - Nunca subir, reiniciar ou parar o backend nem o `hangar-backend.service`; nunca um segundo backend; nunca instalador. Medições contra arquivos reais só em processo avulso com índice numa pasta descartável.
 - Nunca tocar `~/.claude/.hangar-custos/custos.sqlite3` (do Python) nem `custos-rust.sqlite3` real em teste: todo teste recebe a pasta do índice por parâmetro.
 - Versões fixadas com `=` no `crates/Cargo.toml`, como as existentes. Dependências novas: `rusqlite` (feature `bundled`), `rayon`, `indexmap` (a do `Cargo.lock`, `=2.14.2`).
@@ -36,24 +36,24 @@
 
 ---
 
-### Task 1: Contrato versão 5 — escopos no Python, aquecimento só sem o Rust
+### Task 1: Contrato versão 8 — escopos no Python, aquecimento só sem o Rust
 
 **Files:**
 - Modify: `backend/app/costs_sources.py` (extrair os escopos de `_sincronizar`, marca "servido pelo Rust", alvo do timer de boot)
 - Modify: `backend/app/internal_api.py` (rota `/internal/costs/scopes`)
-- Modify: `backend/app/rust_server.py:33` (versão 5), `Supervisor.run` (marca), `_take_over` (aquecimento)
+- Modify: `backend/app/rust_server.py:33` (versão 8), `Supervisor.run` (marca), `_take_over` (aquecimento)
 - Modify: `crates/hangar-server/src/lib.rs:15`, `crates/hangar-server/tests/proxy.rs:30`, `crates/hangar-server/tests/terminal_routes.rs:214`
 - Test: `backend/tests/test_internal_costs.py` (novo), `backend/tests/test_rust_server.py`
 
 **Interfaces:**
-- Produces: `costs_sources.scopes_for_rust() -> dict` (formato da spec, seção 2); `costs_sources.set_served_by_rust(on: bool)`; rota `GET /internal/costs/scopes`; `INTERNAL_PROTOCOL == 5`.
+- Produces: `costs_sources.scopes_for_rust() -> dict` (formato da spec, seção 2); `costs_sources.set_served_by_rust(on: bool)`; rota `GET /internal/costs/scopes`; `INTERNAL_PROTOCOL == 8`.
 
 - [x] **Step 1: Testes que falham**
 
 `backend/tests/test_internal_costs.py`:
 
 ```python
-"""Escopos de custos para o hangar-server (contrato versão 5)."""
+"""Escopos de custos para o hangar-server (contrato versão 8)."""
 from pathlib import Path
 
 import pytest
@@ -172,7 +172,7 @@ _servido_pelo_rust = False
 
 
 def set_served_by_rust(on: bool) -> None:
-    """Com o hangar-server v5 de pé, o boot não varre: as telas falam com o índice dele."""
+    """Com o hangar-server v8 de pé, o boot não varre: as telas falam com o índice dele."""
     global _servido_pelo_rust
     _servido_pelo_rust = on
 
@@ -197,7 +197,7 @@ def _raizes_pi() -> list[tuple[Path, str]]:
 
 
 def scopes_for_rust() -> dict:
-    """O que `_sincronizar` decide antes de ler arquivo, no formato do contrato versão 5."""
+    """O que `_sincronizar` decide antes de ler arquivo, no formato do contrato versão 8."""
     claude = [{"root": str(costs_claude_transcript.raiz_projetos(Path(caminho))), "account": conta,
                "label": _ROTULOS.get(conta) or conta}
               for caminho, conta in _config_dirs()]
@@ -228,11 +228,11 @@ async def costs_scopes() -> dict:
     return await asyncio.to_thread(costs_sources.scopes_for_rust)
 ```
 
-Em `rust_server.py`: `RUST_SERVER_PROTOCOL = 5`. Em `Supervisor.run`, depois de `state == "up"` (antes do laço `while state == "up"`) chamar `costs_sources.set_served_by_rust(True)`; logo depois do laço (filho saiu) e em `stop()` chamar `set_served_by_rust(False)` (import tardio de `app.costs_sources`, como o de `internal_api`). Em `_take_over`, depois de `diag.registrar(...)`: `costs_sources.set_served_by_rust(False)` e `costs_sources.agendar_aquecimento(0)`.
+Em `rust_server.py`: `RUST_SERVER_PROTOCOL = 8`. Em `Supervisor.run`, depois de `state == "up"` (antes do laço `while state == "up"`) chamar `costs_sources.set_served_by_rust(True)`; logo depois do laço (filho saiu) e em `stop()` chamar `set_served_by_rust(False)` (import tardio de `app.costs_sources`, como o de `internal_api`). Em `_take_over`, depois de `diag.registrar(...)`: `costs_sources.set_served_by_rust(False)` e `costs_sources.agendar_aquecimento(0)`.
 
 - [x] **Step 4: Subir a versão no Rust**
 
-`crates/hangar-server/src/lib.rs`: `pub const INTERNAL_PROTOCOL: u32 = 5;` e o comentário acima ganha "5: rota `/internal/costs/scopes`". Trocar `3` por `5` nos dois `assert_eq!` de teste citados.
+`crates/hangar-server/src/lib.rs`: `pub const INTERNAL_PROTOCOL: u32 = 8;` e o comentário acima registra a junção do runtime sem terminal da 2B com a rota `/internal/costs/scopes`. Os `assert_eq!` citados devem conferir o contrato integrado versão 8.
 
 - [x] **Step 5: Rodar os testes**
 
@@ -245,7 +245,7 @@ Expected: PASS.
 git add backend/app/costs_sources.py backend/app/internal_api.py backend/app/rust_server.py \
   backend/tests/test_internal_costs.py backend/tests/test_rust_server.py \
   crates/hangar-server/src/lib.rs crates/hangar-server/tests/proxy.rs crates/hangar-server/tests/terminal_routes.rs
-git commit -m "feat(server): internal contract v5 exposes cost scopes and skips Python boot scan behind Rust"
+git commit -m "feat(server): internal contract v8 exposes cost scopes and skips Python boot scan behind Rust"
 ```
 
 ---
@@ -1697,7 +1697,7 @@ Expected: `diferenças: 0`, varredura abaixo de 5 s, pico abaixo de 100 MB. Dife
 
 - [ ] **Step 3: Documentar**
 
-- `docs/migracao-rust/README.md`: linha da parte 3 → "Feita na branch `hangar-server-parte3`, contrato versão 5 (depende da 2B); falta uso real".
+- `docs/migracao-rust/README.md`: linha da parte 3 → "Feita na branch `hangar-server-parte3`, contrato versão 8 (2B versão 7 integrada); falta uso real".
 - `docs/decisoes/plataforma.md`: entrada "Custos e uso no hangar-server" com as medidas antes (de `analise.md`) e depois (Step 2), o porquê de cotas/stats ficarem no Python e o índice próprio.
 - `CLAUDE.md`, regra da porta 8765: acrescentar "e `/api/costs`, `/api/uso`, `/api/cotacao` e o custo de sessão Codex, com índice próprio (`custos-rust.sqlite3`); cotas ficam no Python".
 

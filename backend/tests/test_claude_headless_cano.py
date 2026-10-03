@@ -20,6 +20,8 @@ import pytest
 from app import rust_bins
 from app.adapters.claude_headless import cano as cano_mod
 
+_TOKEN = "synthetic-cano-token"
+
 CANO = Path(__file__).resolve().parents[1] / "app" / "adapters" / "claude_headless" / "cano.py"
 
 _CLAUDE_FALSO = r'''
@@ -70,7 +72,7 @@ def cano(tmp_path, cano_cmd):
     falso.write_text(_CLAUDE_FALSO, encoding="utf-8")
     sock = tmp_path / "c.sock"
     log = tmp_path / "cano.log"
-    p = subprocess.Popen([*cano_cmd, "--escuta", f"unix:{sock}", "--log", str(log),
+    p = subprocess.Popen([*cano_cmd, "--escuta", f"unix:{sock}", "--token", _TOKEN, "--log", str(log),
                           "--cwd", str(tmp_path), "--", sys.executable, str(falso)],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(100):
@@ -89,13 +91,15 @@ class _Cliente:
         self.s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.s.connect(str(sock))
         self.s.settimeout(5)
+        self.s.sendall((_TOKEN + "\n").encode())
         self.arq = self.s.makefile("rb")
 
     def manda(self, obj) -> None:
         self.s.sendall((json.dumps(obj) + "\n").encode())
 
     def le(self) -> dict:
-        return json.loads(self.arq.readline())
+        event = json.loads(self.arq.readline())
+        return json.loads(event["frame"]) if event.get("type") == "cano_output" else event
 
     def le_ate(self, tipo: str) -> dict:
         while True:
@@ -115,7 +119,7 @@ def test_snapshot_tem_os_campos_e_a_versao_do_cano_py(cano):
     a = _Cliente(sock)
     snap = a.le()
     assert set(snap) == {"type", "versao", "pid", "init", "aberto", "pendentes", "ultimo_result",
-                         "rate_limit", "stderr_tail", "saiu"}
+                         "rate_limit", "stderr_tail", "saiu", "inflight"}
     assert snap["versao"] == cano_mod.VERSAO and isinstance(snap["pid"], int)
     assert snap["pendentes"] == [] and snap["stderr_tail"] == [] and snap["saiu"] is None
     a.fecha()
@@ -231,10 +235,10 @@ def test_codigos_de_saida(cano_cmd, tmp_path):
     assert sem_comando.returncode == 2
     log = tmp_path / "cano.log"
     longo = f"unix:{tmp_path / ('x' * 120 + '.sock')}"     # passa do limite do kernel para socket unix
-    r = subprocess.run([*cano_cmd, "--escuta", longo, "--log", str(log), "--", sys.executable, "-c", "pass"],
+    r = subprocess.run([*cano_cmd, "--escuta", longo, "--token", _TOKEN, "--log", str(log), "--", sys.executable, "-c", "pass"],
                        capture_output=True, timeout=10)
     assert r.returncode == 1 and "não consegui escutar" in log.read_text(encoding="utf-8")
-    r = subprocess.run([*cano_cmd, "--escuta", f"unix:{tmp_path / 'b.sock'}", "--log", str(log),
+    r = subprocess.run([*cano_cmd, "--escuta", f"unix:{tmp_path / 'b.sock'}", "--token", _TOKEN, "--log", str(log),
                         "--", str(tmp_path / "nao-existe")], capture_output=True, timeout=10)
     assert r.returncode == 1 and "claude não subiu" in log.read_text(encoding="utf-8")
 
@@ -267,7 +271,7 @@ def test_pedido_jsonrpc_do_servidor_fica_pendente_no_snapshot(tmp_path, cano_cmd
     falso = tmp_path / "app_server_falso.py"
     falso.write_text(_APP_SERVER_FALSO, encoding="utf-8")
     sock = tmp_path / "c.sock"
-    p = subprocess.Popen([*cano_cmd, "--escuta", f"unix:{sock}", "--log", str(tmp_path / "cano.log"),
+    p = subprocess.Popen([*cano_cmd, "--escuta", f"unix:{sock}", "--token", _TOKEN, "--log", str(tmp_path / "cano.log"),
                           "--cwd", str(tmp_path), "--", sys.executable, str(falso)],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
@@ -351,7 +355,10 @@ def test_cliente_novo_substitui_o_ligado_em_tcp(tmp_path, cano_cmd):
             pass
         b.sendall((json.dumps({"type": "control_request", "request_id": "r1",
                                "request": {"subtype": "initialize"}}) + "\n").encode())
-        assert json.loads(arq_b.readline())["type"] == "system"   # o novo fala com o claude
+        event = json.loads(arq_b.readline())
+        if event.get("type") == "cano_output":
+            event = json.loads(event["frame"])
+        assert event["type"] == "system"   # o novo fala com o claude
         assert p.poll() is None
     finally:
         p.kill()
@@ -379,8 +386,16 @@ def _vivo(pid: int) -> bool:
     try:
         with open(f"/proc/{pid}/stat", encoding="ascii") as f:
             return f.read().rsplit(") ", 1)[1][0] != "Z"
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return False
+
+
+def test_process_disappears_during_stat_read(monkeypatch):
+    from unittest.mock import mock_open
+    opened = mock_open()
+    opened.return_value.read.side_effect = ProcessLookupError("process exited")
+    monkeypatch.setattr("builtins.open", opened)
+    assert not _vivo(123)
 
 
 def _porta_livre() -> int:

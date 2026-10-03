@@ -1727,7 +1727,7 @@ def test_resume_archived_codex_desvia_de_nome_de_sessao_codex_viva(api_client):
          patch("app.api.archive_jsonl", return_value=Path("/tmp/codex/sessions/rollout.jsonl")), \
          patch("app.api.codex_accounts.account_for_rollout", return_value=origem), \
          patch.object(tmux, "has_session", return_value=False), \
-         patch("app.api.codex_sessions.exists", side_effect=[True, False]), \
+         patch("app.api.codex_sessions.exists", side_effect=lambda name: name == "my-proj"), \
          patch("app.api.registry.create",
                return_value=SessionInfo(name="my-proj-2", cwd="/home/u/my-proj")) as create:
         r = api_client.post(f"/api/archive/codex/{_SID}/resume", headers=_h(),

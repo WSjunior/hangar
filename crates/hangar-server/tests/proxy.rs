@@ -23,11 +23,11 @@ async fn health_answers_without_token_and_with_cors() {
     // `protocol` é o contrato com o Python (RUST_SERVER_PROTOCOL na Task 13): mudar exige os dois.
     assert_eq!(v["ok"], true);
     assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(v["protocol"], 5);
+    assert_eq!(v["protocol"], hangar_server::INTERNAL_PROTOCOL);
     // O endereço da ponte de terminal é anunciado aqui, mas só pode ser de loopback.
     let terminal = v["terminal_address"].as_str().expect("terminal_address");
     assert!(terminal.starts_with("127.0.0.1:"), "{terminal}");
-    assert_eq!(hangar_server::INTERNAL_PROTOCOL, 5);
+    assert_eq!(hangar_server::INTERNAL_PROTOCOL, 8);
 }
 
 #[tokio::test]

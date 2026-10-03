@@ -1,4 +1,4 @@
-"""Escopos de custos para o hangar-server (contrato versão 5)."""
+"""Escopos de custos para o hangar-server (contrato versão 8)."""
 from pathlib import Path
 
 import pytest
