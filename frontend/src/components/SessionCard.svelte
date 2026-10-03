@@ -5,7 +5,7 @@ import * as m from '../paraglide/messages';
 import { textoProblema } from '../lib/problema';
   import { cwdParts, rotuloEstado, stateColors, untrackedReason, providerName, relativeTime, fmtWhen, isOrq, worktreeLabel } from '@hangar/core';
   import { worktreeStatus } from '../lib/worktreeStatus.svelte';
-  import { listServers } from '../lib/auth';
+  import { listOwnServers } from '../lib/auth';
   import WorktreeSheet from './WorktreeSheet.svelte';
   import { chipDaConta } from '../lib/conta';
   import { loopBadge, LOOP_TONE_COLOR } from '@hangar/core';
@@ -59,8 +59,9 @@ import { textoProblema } from '../lib/problema';
   const wtNome = $derived(worktreeLabel(session));
   const wtJuntada = $derived(wtPath ? worktreeStatus.get(serverId, wtPath)?.merged === true : false);
   let wtAberta = $state(false);
-  // A sessão só traz o id do servidor; a janela precisa do objeto para chamar a API.
-  const wtServer = $derived(wtPath && serverId ? listServers().find((s) => s.id === serverId) ?? null : null);
+  // A sessão só traz o id do servidor; a janela precisa do objeto para chamar a API. Convite fica
+  // de fora: o backend recusa worktrees ao convidado, e o chip volta a ser só texto.
+  const wtServer = $derived(wtPath && serverId ? listOwnServers().find((s) => s.id === serverId) ?? null : null);
   // Worktree é a EXCEÇÃO: a pasta aparece mesmo repetindo o nome da sessão, porque é ela que
   // carrega a marca de worktree — e é o nome dela que distingue duas cópias do mesmo repositório.
   const mostraPasta = $derived(showCwd || session.worktree === true || session.worktree_gone === true || !!wtNome);

@@ -42,12 +42,22 @@
     await carregar();
   }
 
+  // Por `serverId::repo`: o lote em andamento (botão desligado) e o erro dele, que não é de leitura.
+  let loteAndando = $state<string | null>(null);
+  let erroLote = $state<Record<string, string>>({});
+  const chaveLote = (b: Bloco, repo: string) => `${b.servidor.id}::${repo}`;
+
   async function apagarJuntadas(b: Bloco, repo: string) {
+    const k = chaveLote(b, repo);
+    loteAndando = k;
+    delete erroLote[k];
     try {
       await deleteMergedWorktreesForServer(b.servidor, repo);
     } catch (e) {
-      b.erro = e instanceof Error ? e.message : String(e);
+      erroLote[k] = e instanceof Error ? e.message : String(e);
       return;
+    } finally {
+      loteAndando = null;
     }
     await carregar();
   }
@@ -77,10 +87,11 @@
         <section class="repo">
           <h2>{basename(r.repo)}{servidores.length > 1 ? ` · ${b.servidor.label}` : ''}</h2>
           {#if limpas(r).length}
-            <button type="button" class="lote" onclick={() => apagarJuntadas(b, r.repo)}>
+            <button type="button" class="lote" disabled={loteAndando === chaveLote(b, r.repo)} onclick={() => apagarJuntadas(b, r.repo)}>
               {m.worktree_apagar_juntadas({ n: limpas(r).length })}
             </button>
           {/if}
+          {#if erroLote[chaveLote(b, r.repo)]}<p class="erro" role="alert">{erroLote[chaveLote(b, r.repo)]}</p>{/if}
           <ul>
             {#each r.worktrees as w (w.path)}
               <li>

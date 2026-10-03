@@ -159,3 +159,23 @@ describe('SessionCard: orquestrador sem LLM', () => {
     unmount(comp);
   });
 });
+
+describe('SessionCard: chip da worktree', () => {
+  const wt = (serverId: string) =>
+    ({ ...sessao({ cwd: '/r/app-x', worktree: true, worktree_path: '/r/app-x' }), serverId }) as AggSession;
+
+  it('servidor próprio vira botão; convite fica só texto (o backend recusa worktrees ao convidado)', () => {
+    localStorage.setItem('cp_servers', JSON.stringify([
+      { id: 'meu', label: 'PC', baseUrl: 'http://pc:8765', token: 't' },
+      { id: 'conv', label: 'Fora', baseUrl: 'https://x.ts.net:8443', token: 'g', invite: true },
+    ]));
+    const proprio = montar(wt('meu'));
+    expect(proprio.el.querySelector('.cwd--botao')).not.toBeNull();
+    unmount(proprio.comp);
+    const convite = montar(wt('conv'));
+    expect(convite.el.querySelector('.cwd--botao')).toBeNull();
+    expect(convite.el.querySelector('.cwd')).not.toBeNull();
+    unmount(convite.comp);
+    localStorage.removeItem('cp_servers');
+  });
+});
