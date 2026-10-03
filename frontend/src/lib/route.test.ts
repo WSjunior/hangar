@@ -42,6 +42,7 @@ describe('parseHash sem painel segue como era', () => {
     expect(parseHash('#/chat/undefined')).toEqual({ name: 'sessions' });
     expect(parseHash('#/chat/null')).toEqual({ name: 'sessions' });
   });
+  it('worktrees', () => { expect(parseHash('#/worktrees')).toEqual({ name: 'worktrees' }); });
   it('overlay do quadro continua lendo servidor e sessao', () => {
     expect(parseHash('#/board/127/minha')).toEqual({ name: 'board', sessionName: 'minha', serverId: '127' });
   });
