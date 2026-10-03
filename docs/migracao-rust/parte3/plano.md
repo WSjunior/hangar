@@ -678,7 +678,7 @@ pub fn default_dir() -> PathBuf; // Linux/macOS ~/.claude/.hangar-custos; Window
 
 `sync` lê os arquivos que mudaram em paralelo (`rayon`, `par_iter` no pool global montado pela Task 9; nesta Task a ordem de gravação é a da lista) e grava numa thread só, em transações de até 1 s, como `costs_cache.sincronizar` (`costs_cache.py:362-447`).
 
-- [ ] **Step 1: Testes que falham**
+- [x] **Step 1: Testes que falham**
 
 `crates/hangar-server/tests/costs_index.rs` — com uma dobra de teste que soma um número por linha:
 
@@ -788,11 +788,11 @@ fn unreadable_database_is_rebuilt() {
 }
 ```
 
-- [ ] **Step 2: Rodar e ver falhar**
+- [x] **Step 2: Rodar e ver falhar**
 
 Run: `cargo test --manifest-path crates/Cargo.toml -p hangar-server --test costs_index` — Expected: FAIL (módulo inexistente).
 
-- [ ] **Step 3: Implementar**
+- [x] **Step 3: Implementar**
 
 Esquema (mesmos nomes do Python; `estado` e `areas` são `serde_json` + `flate2` nível 1):
 
@@ -815,11 +815,11 @@ CREATE INDEX uso_file ON uso(file_id);";
 
 Porte de `costs_cache.py`: `_preparar` (`:158-188`, esquema diferente apaga e refaz numa transação), `_abrir` (`:202-234`: arquivo ilegível → apaga `''`, `-wal`, `-shm` e refaz; sem disco → `IndexError::NoDisk`, e quem chama repassa ao Python em vez de usar memória), `_ler` (`:266-301`: retomada só com estado, mesma versão, mesmo `(dev, ino)`, `offset <= size` e os 64 bytes antes do offset iguais; estado serializado ANTES do fragmento), `_gravar_arquivo` (`:308-327`, upsert com `manter_escopo`), `_refazer_areas` (`:330-345`, chamada com `redo_areas`), `sincronizar` (`:362-447`: `conhecidos` sem o estado; arquivo `NotFound` some do conjunto mas não do índice; outro erro de `stat` mantém; leitura que falha vira `tracing::warn!(code = "leitura_custos", ...)` sem caminho de conversa e mantém as linhas; sumidos apagados no fim), `sincronizar_arquivo` (`:450-480`), `esquecer_fora` (`:483-503`), `ler_custos`/`iter_usage_rows` (`:508-553`, `ORDER BY rowid`, filtro por subconsulta de escopo). `(dev, ino)` com máscara de 63 bits (`std::os::unix::fs::MetadataExt` / no Windows `file_index` indisponível → `(0, 0)`, como o Python que recebe `st_ino` 0). `mtime_ns` inteiro.
 
-- [ ] **Step 4: Rodar**
+- [x] **Step 4: Rodar**
 
 Run: `cargo test --manifest-path crates/Cargo.toml -p hangar-server --test costs_index` — Expected: PASS.
 
-- [ ] **Step 5: Revisão e commit**
+- [x] **Step 5: Revisão e commit**
 
 ```bash
 git add crates/Cargo.toml crates/Cargo.lock crates/hangar-server/Cargo.toml \

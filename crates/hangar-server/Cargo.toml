@@ -30,6 +30,8 @@ eventsource-stream = { workspace = true }
 http-body-util = { workspace = true }
 notify = { workspace = true }
 percent-encoding = { workspace = true }
+rusqlite.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
