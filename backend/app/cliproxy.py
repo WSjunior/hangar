@@ -21,10 +21,10 @@ def normalize_base(url: str) -> str:
 
 
 def local() -> dict[str, str] | None:
-    """`{base_url, api_key}` da instância desta máquina; None sem config ou sem chave.
+    """`{base_url, api_key}` da instância desta máquina; None sem config.
 
-    Config que existe e não se lê levanta ValueError: "não instalado" e "quebrado" são respostas
-    diferentes para quem configura.
+    Config que existe e não serve (ilegível, sem api-keys) levanta ValueError: "não instalado" e
+    "instalado sem chave" são respostas diferentes para quem configura.
     """
     try:
         texto = config_path().read_text(encoding="utf-8")
@@ -40,7 +40,7 @@ def local() -> dict[str, str] | None:
         return None
     chaves = [k.strip() for k in (dados.get("api-keys") or []) if isinstance(k, str) and k.strip()]
     if not chaves:
-        return None
+        raise ValueError(f"{config_path()}: sem api-keys")
     host = str(dados.get("host") or "").strip()
     # Escutar em todas as interfaces inclui o loopback, que é por onde este servidor fala com ele.
     if host in ("", "0.0.0.0", "::"):

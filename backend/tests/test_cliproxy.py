@@ -33,10 +33,14 @@ def test_local_le_host_porta_e_primeira_chave(tmp_path):
     assert cliproxy.local() == {"base_url": "http://127.0.0.1:9000", "api_key": CHAVE}
 
 
-def test_local_sem_config_ou_sem_chave_e_none(tmp_path):
+def test_local_sem_config_e_none(tmp_path):
     assert cliproxy.local() is None
+
+
+def test_local_sem_chave_levanta(tmp_path):
     _config(tmp_path, "port: 8317\napi-keys: []\n")
-    assert cliproxy.local() is None
+    with pytest.raises(ValueError, match="api-keys"):
+        cliproxy.local()
 
 
 def test_local_com_yaml_quebrado_levanta(tmp_path):
