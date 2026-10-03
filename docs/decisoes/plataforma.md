@@ -1002,3 +1002,20 @@ resolveria — as máquinas seguiriam no mesmo site entre si. Por isso o `cp_tok
 só vale o `__Host-cp_token`, que outra máquina não consegue gravar; o PWA grava o prefixado e
 apaga o antigo. O sync recusa ação com `Sec-Fetch-Site: same-site`/`cross-site`. O `cp_sync`
 mantém o nome por ora: o `hub()` do app nativo só guarda `Set-Cookie` começando com `cp_sync=`.
+
+## Índice de custos fora de pasta sincronizada, e refeito quando corrompe (03/10/2026)
+
+03/10/2026. O índice SQLite dos custos (`costs_cache.py`, em WAL) morava em
+`~/.claude/.hangar-custos` no Linux e no macOS. Quem sincroniza o `~/.claude` entre máquinas
+copiava o banco no meio da escrita, e ele corrompeu nas duas pontas ("database disk image is
+malformed", `quick_check` com linhas fora de ordem). A abertura não percebia a página estragada:
+o erro aparecia ao gravar, e o quadro de uso da tela inicial respondia 500 a cada coleta.
+
+- **O índice fica em `${XDG_CACHE_HOME:-~/.cache}/hangar/custos`**, como no Windows já ficava no
+  `LOCALAPPDATA`. O arquivo da pasta antiga é apagado na subida do backend; é cache, não migra.
+- **Banco corrompido no meio do uso é apagado e a operação repete uma vez** no arquivo novo
+  (`_refaz_se_corrompido`). Só a classe base `sqlite3.DatabaseError` conta como arquivo
+  estragado; `OperationalError` (travado, sem disco) sobe como antes.
+- Outros estados do Hangar continuam no `~/.claude/.hangar-*`, inclusive o registro dos passos de
+  atualização: quem sincroniza essa pasta precisa ignorar `.hangar-*`, senão o Atualizar de uma
+  máquina marca os passos como feitos na outra sem rodá-los.

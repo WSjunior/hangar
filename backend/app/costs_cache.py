@@ -6,10 +6,11 @@ acrescentado. Arquivo que encolheu, trocou de inode ou mudou antes do offset é 
 
 As linhas resultantes (custo e uso) ficam em tabelas e os relatórios as leem sob demanda; nada
 do histórico fica em memória entre coletas. O índice é descartável: esquema diferente apaga e
-refaz. Os `.json` do cache antigo na mesma pasta não são mais lidos.
+refaz, e banco corrompido também. Fica fora das pastas sincronizadas entre máquinas.
 """
 from __future__ import annotations
 
+import functools
 import itertools
 import logging
 import os
@@ -29,12 +30,16 @@ from app.uso_claude import UsoLinha, linhas_de_area
 
 _log = logging.getLogger(__name__)
 
-def _pasta_padrao() -> Path:
-    # No Windows fica fora do perfil que roaming/OneDrive sincronizam: SQLite em WAL não
-    # sobrevive a cópia no meio da escrita.
+def _pasta_padrao(env=None, home: Path | None = None) -> Path:
+    # Fora de qualquer pasta que se sincroniza entre máquinas (roaming/OneDrive no Windows, o
+    # `~/.claude` no Linux e no macOS): SQLite em WAL não sobrevive a cópia no meio da escrita.
+    env = os.environ if env is None else env
+    home = Path.home() if home is None else home
     if os.name == "nt":
-        return Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")) / "hangar" / "custos"
-    return Path.home() / ".claude" / ".hangar-custos"
+        return Path(env.get("LOCALAPPDATA") or (home / "AppData" / "Local")) / "hangar" / "custos"
+    xdg = env.get("XDG_CACHE_HOME")
+    base = Path(xdg) if xdg and Path(xdg).is_absolute() else home / ".cache"
+    return base / "hangar" / "custos"
 
 
 _CACHE_DIR = _pasta_padrao()
@@ -199,6 +204,50 @@ def _abrir_arquivo(caminho: Path) -> sqlite3.Connection:
     return conn
 
 
+def _apagar(caminho: Path) -> None:
+    for sufixo in ("", "-wal", "-shm"):
+        Path(f"{caminho}{sufixo}").unlink(missing_ok=True)
+
+
+def remover_indice_antigo(home: Path | None = None) -> None:
+    """Apaga o índice de onde ele morava no Linux e no macOS (`~/.claude/.hangar-custos`). É só
+    cache, então não é migrado, e pode estar corrompido pela sincronização que motivou a mudança.
+    Chamado na subida do backend."""
+    if os.name == "nt":
+        return
+    try:
+        _apagar(((home or Path.home()) / ".claude" / ".hangar-custos") / _ARQUIVO)
+    except OSError as e:
+        _log.warning("índice de custos antigo não saiu (%r)", e)
+
+
+def _corrompido(e: BaseException) -> bool:
+    # Só a classe base: OperationalError (travado, sem disco) e IntegrityError não são o arquivo
+    # estragado, e apagar o índice por eles jogaria fora a leitura à toa.
+    return type(e) is sqlite3.DatabaseError
+
+
+def _descartar(e: BaseException) -> None:
+    _log.warning("índice de custos corrompido (%r); refazendo", e)
+    _apagar(_CACHE_DIR / _ARQUIVO)
+    mudou()
+
+
+def _refaz_se_corrompido(fn):
+    """Banco que corrompe no meio do uso (página estragada que a abertura não lê) apaga o índice
+    e repete a operação uma vez, no arquivo novo: sem isso cada coleta respondia 500."""
+    @functools.wraps(fn)
+    def envolto(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except sqlite3.DatabaseError as e:
+            if not _corrompido(e):
+                raise
+            _descartar(e)
+            return fn(*args, **kwargs)
+    return envolto
+
+
 def _abrir() -> sqlite3.Connection:
     """Uma conexão por operação, fechada por quem abriu: nada fica preso a thread nem segura o
     arquivo depois (o Windows não apaga arquivo aberto)."""
@@ -215,8 +264,7 @@ def _abrir() -> sqlite3.Connection:
             # foi fechada em `_abrir_arquivo`; aberto em outra, o Windows recusa o unlink e cai
             # na memória abaixo.
             _log.warning("índice de custos ilegível (%r); refazendo", e)
-            for sufixo in ("", "-wal", "-shm"):
-                Path(f"{caminho}{sufixo}").unlink(missing_ok=True)
+            _apagar(caminho)
             return _abrir_arquivo(caminho)
     except sqlite3.OperationalError as e:
         # Outro escritor segurando o banco não é falta de disco: quem chamou tenta de novo.
@@ -364,7 +412,12 @@ def sincronizar(scope: str, arquivos: Iterable[Path], nova_dobra: Callable[[Path
     """Deixa o índice do escopo igual aos `arquivos`: lê o que cresceu, relê o que mudou e
     esquece o que sumiu. Nunca vai à rede. Arquivo que falha na leitura vira log e mantém as
     linhas anteriores."""
-    lista = list(arquivos)
+    # Lista antes da repetição: um gerador chegaria vazio na segunda tentativa.
+    _sincronizar(scope, list(arquivos), nova_dobra, versao)
+
+
+@_refaz_se_corrompido
+def _sincronizar(scope: str, lista: list[Path], nova_dobra: Callable[[Path], Dobra], versao: str) -> None:
     versao = f"{ESQUEMA}:{versao}"
     conn = _abrir()
     try:
@@ -447,6 +500,7 @@ def sincronizar(scope: str, arquivos: Iterable[Path], nova_dobra: Callable[[Path
         conn.close()
 
 
+@_refaz_se_corrompido
 def sincronizar_arquivo(p: Path, nova_dobra: Callable[[Path], Dobra], versao: str,
                         scope: str) -> int | None:
     """Um arquivo só (custo de uma sessão aberta), fora da varredura. Mantém o escopo que ele já
@@ -480,6 +534,7 @@ def sincronizar_arquivo(p: Path, nova_dobra: Callable[[Path], Dobra], versao: st
         conn.close()
 
 
+@_refaz_se_corrompido
 def esquecer_fora(ativos: set[str]) -> None:
     """Apaga do índice o arquivo que sumiu do disco e não está em nenhum escopo varrido (conta
     removida, sessão avulsa apagada). Os escopos varridos já esquecem os seus em `sincronizar`."""
@@ -505,6 +560,7 @@ def esquecer_fora(ativos: set[str]) -> None:
 
 # -- leitura -----------------------------------------------------------------------------------
 
+@_refaz_se_corrompido
 def ler_custos(scope: str | None = None, desde: str | None = None, file_id: int | None = None) -> list[tuple]:
     """Linhas de custo (colunas `CAMPOS_CUSTO`, `ts` em ISO) de um escopo ou de um arquivo, na
     ordem em que cada arquivo as produziu. `desde` = primeiro dia (YYYY-MM-DD) incluído."""
@@ -527,6 +583,7 @@ def ler_usos(scope: str, conta: str, desde: str | None = None) -> list[UsoLinha]
 _SELECT_USAGE = "SELECT " + ", ".join("?" if f.name == "conta" else f"u.{f.name}" for f in fields(UsoLinha))
 
 
+@_refaz_se_corrompido
 def iter_usage_rows(scope: str, conta: str, desde: str | None = None) -> Iterable[tuple]:
     """Linhas de uso como tuplas na ordem dos campos de `UsoLinha` (booleanos como 0/1), sem um
     objeto por linha. Lidas de uma vez: leitura aberta durante a soma segura o checkpoint do WAL."""

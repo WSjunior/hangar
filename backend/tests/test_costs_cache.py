@@ -171,6 +171,60 @@ def test_esquema_diferente_ou_banco_ilegivel_refaz_o_indice(tmp_path, monkeypatc
         assert _soma(raiz) == (3, 0)
 
 
+def test_banco_que_corrompe_no_meio_do_uso_e_refeito(tmp_path, monkeypatch):
+    """Página estragada que a abertura não lê só aparece ao gravar ou ler: o índice é apagado e a
+    operação repete no arquivo novo, em vez de cada coleta responder 500."""
+    raiz = tmp_path / "projects"
+    arq = raiz / "p" / "s.jsonl"
+    arq.parent.mkdir(parents=True)
+    arq.write_text(_linhas(_resposta("r1", 3, 0)), encoding="utf-8")
+    assert _soma(raiz) == (3, 0)
+    _anexar(arq, _linhas(_resposta("r2", 4, 1)))
+    original, falhas = cc._gravar_arquivo, []
+
+    def estragado(*args, **kwargs):
+        if not falhas:
+            falhas.append(1)
+            raise sqlite3.DatabaseError("database disk image is malformed")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(cc, "_gravar_arquivo", estragado)
+    assert _soma(raiz) == (7, 1)
+    assert falhas == [1]
+
+
+def test_indice_travado_nao_e_apagado(tmp_path, monkeypatch):
+    raiz = tmp_path / "projects"
+    arq = raiz / "p" / "s.jsonl"
+    arq.parent.mkdir(parents=True)
+    arq.write_text(_linhas(_resposta("r1", 3, 0)), encoding="utf-8")
+    assert _soma(raiz) == (3, 0)
+
+    def travado(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(cc, "_gravar_arquivo", travado)
+    _anexar(arq, _linhas(_resposta("r2", 4, 1)))
+    with pytest.raises(sqlite3.OperationalError):
+        cc.sincronizar("s", [arq], ct._nova_dobra(raiz), "v")
+    assert (cc._CACHE_DIR / cc._ARQUIVO).exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="no Windows o índice fica no LOCALAPPDATA")
+def test_indice_fica_fora_do_claude_sincronizado(tmp_path):
+    home = tmp_path / "home"
+    assert cc._pasta_padrao({}, home) == home / ".cache" / "hangar" / "custos"
+    assert cc._pasta_padrao({"XDG_CACHE_HOME": "/xdg"}, home) == Path("/xdg/hangar/custos")
+    # XDG relativo é inválido pela especificação: vale o padrão.
+    assert cc._pasta_padrao({"XDG_CACHE_HOME": "rel"}, home) == home / ".cache" / "hangar" / "custos"
+    antiga = home / ".claude" / ".hangar-custos"
+    antiga.mkdir(parents=True)
+    for nome in ("custos.sqlite3", "custos.sqlite3-wal", "custos.sqlite3-shm", "codex-x.json"):
+        (antiga / nome).write_text("x")
+    cc.remover_indice_antigo(home)
+    assert sorted(p.name for p in antiga.iterdir()) == ["codex-x.json"]
+
+
 def test_sem_disco_o_indice_vai_pra_memoria(tmp_path, monkeypatch):
     """Índice é otimização: pasta que não pode ser criada vira log, não erro no relatório."""
     raiz = tmp_path / "projects"
