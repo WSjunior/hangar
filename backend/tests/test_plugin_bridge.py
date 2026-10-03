@@ -76,7 +76,6 @@ def test_resposta_do_app_chega_ao_hook_e_so_vale_com_o_aviso_dele(monkeypatch):
 
 
 def test_portao_desligado_nao_poe_nada_na_sessao_e_ligado_poe_o_plugin(monkeypatch):
-    monkeypatch.setattr(pb, "plugin_in_skills_dir", lambda config_dir=None: False)
     # Desligado, a sessão nasce byte a byte como antes: sem flag, sem env. É a promessa do fallback.
     from app.adapters import get_adapter
     monkeypatch.setattr(pb, "ligado", lambda: False)
@@ -136,26 +135,12 @@ def test_versao_do_cli_diz_se_os_mods_vem_ligados(monkeypatch):
     pb.esquecer_capacidade()
 
 
-def test_plugin_na_pasta_de_skills_da_conta_dispensa_o_plugin_dir(monkeypatch, tmp_path):
+def test_plugin_entra_por_plugin_dir_mesmo_com_mods_por_padrao(monkeypatch):
+    # Pela pasta de skills ele ficaria abaixo dos plugins do marketplace e não veria a faixa deles.
     monkeypatch.setattr(pb, "ligado", lambda: True)
-    monkeypatch.setattr(pb, "mods_by_default", lambda: True)
-    assert pb.raizes_dos_plugins(tmp_path) == [str(pb.PLUGIN_SRC)]
-    manifesto = tmp_path / "skills" / "hangar" / ".claude-plugin" / "plugin.json"
-    manifesto.parent.mkdir(parents=True)
-    manifesto.write_text('{"name": "outro"}', encoding="utf-8")
-    assert pb.raizes_dos_plugins(tmp_path) == [str(pb.PLUGIN_SRC)]
-    manifesto.write_text('{"name": "hangar"}', encoding="utf-8")
-    assert pb.raizes_dos_plugins(tmp_path) == []
-
-
-def test_cli_sem_mods_por_padrao_mantem_o_plugin_dir_mesmo_com_o_plugin_nas_skills(monkeypatch, tmp_path):
-    # A pasta de skills só foi medida carregando o plugin no CLI com mods por padrão.
-    monkeypatch.setattr(pb, "ligado", lambda: True)
-    monkeypatch.setattr(pb, "mods_by_default", lambda: False)
-    manifesto = tmp_path / "skills" / "hangar" / ".claude-plugin" / "plugin.json"
-    manifesto.parent.mkdir(parents=True)
-    manifesto.write_text('{"name": "hangar"}', encoding="utf-8")
-    assert pb.raizes_dos_plugins(tmp_path) == [str(pb.PLUGIN_SRC)]
+    for mods in (True, False):
+        monkeypatch.setattr(pb, "mods_by_default", lambda mods=mods: mods)
+        assert pb.raizes_dos_plugins() == [str(pb.PLUGIN_SRC)]
 
 
 def test_interruptor_desligado_tira_o_plugin_mesmo_com_mods_por_padrao(monkeypatch):

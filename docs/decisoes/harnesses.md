@@ -5,6 +5,14 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 
 ## Regras vigentes
 
+- **O plugin do Hangar entra por `--plugin-dir` mesmo estando na pasta de skills.** Na cadeia
+  de hooks, o primeiro plugin carregado fica por fora: `--plugin-dir` vem antes do marketplace,
+  e a pasta de skills vem depois. A faixa dos mods (`plugins/hangar/hooks/ui.ts`) só recebe por
+  `next(e)` o que os plugins de dentro desenham, e um mod que responde a faixa sem chamar
+  `next` esconde tudo dos que estão por dentro dele. Sessão aberta fora do Hangar carrega só
+  pela pasta de skills e não espelha a faixa dos mods do marketplace. Ver
+  [faixa dos mods](#faixa-dos-mods-ordem-na-cadeia-medida-03102026).
+
 - **tok/s "agora" é medido no stream da resposta, nunca no transcript.** Do `message_start`
   ao fim da resposta, com o `output_tokens` real: sem terminal pelo `stream_event`; com
   terminal pelo `turn.step` do plugin (`rate.ts` → `POST /api/plugin/rate`). Nunca a partir
@@ -1403,6 +1411,30 @@ com terminal criada por `hangar-send --new`, conta `~/.claude-200-01`, que já n
 Fora do mod: pelo `/input` do app, `!echo oi` chegou ao modelo como texto (`promptSource:"typed"`,
 o modelo rodou o Bash sozinho), não como modo bash; e `@README.md resuma…` enviado com o turno
 rodando foi absorvido nele (`queue-operation remove`, `reason: absorbed_mid_turn`).
+
+### Faixa dos mods: ordem na cadeia medida (03/10/2026)
+
+Claude Code 2.1.289 (Linux) e 2.1.288 (Windows), mod descartável que hooka `ui.render`
+`{ component: 'AbovePrompt' }`, grava o que `await next(e)` devolve e devolve igual; ao lado, o
+mod de progresso do pmedico, que responde a faixa com a própria árvore e NÃO chama `next`
+enquanto tem barra.
+
+| | o que foi medido |
+|---|---|
+| sonda por `--plugin-dir`, pmedico do marketplace | a sonda recebeu a árvore inteira da barra (`Box`/`Text`/`Raster`, `surface: "terminal"`, `bodyColumns` = largura do pane): ela fica por fora |
+| sonda pela pasta de skills, pmedico do marketplace | só `{"type":"engine"}` antes da barra; com a barra, o hook nem roda: a pasta de skills fica por dentro do marketplace |
+| plugin do Hangar pela pasta de skills, pmedico por `CLAUDE_CODE_PLUGIN_DIRS` | o backend recebeu só `above: null`: carga de sessão fica por fora da pasta de skills |
+| frequência | o hook roda a cada redesenho; com relógio na faixa, uma vez por segundo (36 vezes em ~30 s). O `ui.ts` junta os quadros em 500 ms e só envia quando a árvore muda |
+
+A API não tem prioridade nem ordem configurável (`Tier`: `prepend`, `user`, `append`, `builtin`,
+`core`; dentro de `user`, a ordem de carga). Por isso a sessão do Hangar leva `--plugin-dir`
+sempre: o par com a pasta de skills já estava medido (B acima), carrega um só e sem carga dupla.
+
+Sem terminal o caminho é outro e não depende de ordem: o backend entra como superfície remota
+(`control_request` `ui_attach`, depois `ui_render` do `AbovePrompt`) e o CLI avisa a mudança
+com `system`/`ui_invalidate`. Medido num `claude -p` stream-json: a resposta traz a árvore da
+superfície pedida (`desktop`/`mobile`: a barra vem como `Svg`, não `Raster`). Fica para depois da
+migração do runtime sem terminal para o Rust.
 
 ## O `wire.jsonl` do Kimi não é um transcript bem-comportado
 

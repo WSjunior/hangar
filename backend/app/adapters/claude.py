@@ -40,8 +40,8 @@ class ClaudeAdapter:
                       model: str | None = None, effort: str | None = None,
                       permission_mode: str | None = None) -> list[str]:
         argv = ["claude", "--session-id", session_id]
-        # O plugin também carrega da pasta de skills da conta, inclusive fora do Hangar; o
-        # `--plugin-dir` só entra quando ele não está lá ou o CLI não liga mods por padrão.
+        # O plugin também carrega da pasta de skills da conta, inclusive fora do Hangar; aqui entra
+        # por `--plugin-dir` mesmo assim, que é o que o põe por fora dos plugins do marketplace.
         for raiz in plugin_bridge.raizes_dos_plugins():
             argv += ["--plugin-dir", raiz]
         return argv + model_args.args_de("claude", model, effort, permission_mode)

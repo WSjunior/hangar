@@ -94,17 +94,6 @@ def mods_by_default() -> bool:
     return versao is not None and versao >= MODS_BY_DEFAULT
 
 
-def plugin_in_skills_dir(config_dir: Path | None = None) -> bool:
-    """O plugin está na pasta de skills da conta da sessão (link ou cópia)? Lá o CLI o carrega
-    sozinho em toda sessão."""
-    base = config_dir or Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
-    manifesto = Path(base) / "skills" / "hangar" / ".claude-plugin" / "plugin.json"
-    try:
-        return json.loads(manifesto.read_text(encoding="utf-8")).get("name") == "hangar"
-    except (OSError, ValueError, AttributeError):
-        return False
-
-
 def aceita_plugin_dir() -> bool:
     """O `claude` desta máquina conhece `--plugin-dir`? Em cache, com prazo."""
     global _capacidade
@@ -147,14 +136,13 @@ def ligado() -> bool:
     return _ligado_de_verdade()
 
 
-def raizes_dos_plugins(config_dir: Path | None = None) -> list[str]:
-    """`--plugin-dir` só quando o plugin não está na pasta de skills da conta: lá ele já carrega.
+def raizes_dos_plugins() -> list[str]:
+    """`--plugin-dir` sempre, mesmo com o plugin na pasta de skills da conta.
 
-    A pasta de skills só foi medida carregando plugin no CLI com mods por padrão; no anterior,
-    `--plugin-dir` continua sendo o único caminho."""
+    Só o plugin de `--plugin-dir` fica POR FORA dos instalados pelo marketplace na cadeia de hooks,
+    e a faixa dos mods (`ui.ts`) só enxerga o que os plugins abaixo dele desenham. Com o mesmo nome
+    nos dois lugares, o CLI carrega só o de `--plugin-dir`."""
     if not ligado():
-        return []
-    if plugin_in_skills_dir(config_dir) and mods_by_default():
         return []
     return [str(PLUGIN_SRC)]
 
