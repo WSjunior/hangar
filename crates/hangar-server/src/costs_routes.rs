@@ -142,6 +142,7 @@ pub async fn session_cost(State(state): State<Arc<AppState>>, ConnectInfo(peer):
         let mut pricing = worker.costs.pricing();
         pricing.reload_if_changed();
         let cost = session_cost::estimate(rows, &pricing);
+        if cost.cost_usd.is_some_and(|value| !value.is_finite()) { return Err("session_cost_non_finite"); }
         serde_json::to_vec(&cost).map(Some).map_err(|_| "custo_sessao_json")
     }).await;
     match result {

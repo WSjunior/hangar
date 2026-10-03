@@ -743,6 +743,31 @@ async fn usage_labels_and_pricing_generations_invalidate_cached_dimensions() {
 }
 
 #[tokio::test]
+async fn session_cost_finite_tariff_overflow_falls_back_but_zero_remains_numeric() {
+    let h = Harness::new(false, false).await;
+    let path = h.base.join("rollout-overflow.jsonl");
+    session_rollout(&path, "gpt-5.5", 2_000_000);
+    std::fs::write(h.base.join("pricing/overrides.json"), json!({"gpt-5.5":{
+        "input":1e308, "output":0, "cache_write":0, "cache_read":0, "provider":"openai"
+    }}).to_string()).unwrap();
+    h.upstream.infos.lock().unwrap().insert("session".into(), json!({"provider":"codex", "jsonl":path}));
+    let response = h.request(reqwest::Method::GET, "/api/sessions/session/cost").send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(), json!({"from_python":true}));
+    assert!(h.forwarded("GET", "/internal/sessions/session/info"));
+    assert!(h.forwarded("GET", "/api/sessions/session/cost"));
+    assert!(!h.forwarded("GET", "/internal/costs/scopes"));
+    h.upstream.hits.lock().unwrap().clear();
+    std::fs::write(h.base.join("pricing/overrides.json"), json!({"gpt-5.5":{
+        "input":0, "output":0, "cache_write":0, "cache_read":0, "provider":"openai"
+    }}).to_string()).unwrap();
+    let response = h.request(reqwest::Method::GET, "/api/sessions/session/cost").send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(), json!({"cost_usd":0.0, "missing_models":[], "has_usage":true}));
+    assert!(!h.forwarded("GET", "/api/sessions/session/cost"));
+}
+
+#[tokio::test]
 async fn usage_failed_quote_is_null_and_panicking_worker_falls_back() {
     let h = Harness::with_fx(true, false, Arc::new(Fx::with_fetch(|| None))).await;
     assert!(h.usage("/api/uso").await["usd_brl"].is_null());
