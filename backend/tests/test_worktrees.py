@@ -84,3 +84,81 @@ def test_locate_without_signal_uses_opening_folder(tmp_path):
     main = _repo(tmp_path / "repo")
     loc = worktrees.locate("codex", main, None)
     assert (loc.branch, loc.worktree, loc.worktree_path) == ("main", False, None)
+
+
+def test_locate_codex_cd_wins_over_workdir_in_same_call(tmp_path):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    f = tmp_path / "rollout.jsonl"
+    call = {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command",
+            "arguments": json.dumps({"cmd": f"cd {wt} && ls", "workdir": main})}}
+    f.write_text(json.dumps(call) + "\n")
+    loc = worktrees.locate("codex", main, str(f))
+    assert loc.worktree_path == wt and loc.branch == "x"
+
+
+def test_locate_codex_removed_worktree_is_gone(tmp_path):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    assert git_ops._run(main, "worktree", "remove", wt).returncode == 0
+    f = tmp_path / "rollout.jsonl"
+    call = {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec",
+            "input": f'tools.exec_command({{cmd:"ls", workdir:"{wt}"}})'}}
+    f.write_text(json.dumps(call) + "\n")
+    loc = worktrees.locate("codex", main, str(f))
+    assert loc.worktree_gone and loc.worktree_path == wt
+
+
+def test_locate_codex_deleted_patch_file_does_not_count(tmp_path):
+    main = _repo(tmp_path / "repo")
+    f = tmp_path / "rollout.jsonl"
+    call = {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "apply_patch",
+            "input": f"*** Begin Patch\n*** Delete File: {tmp_path / 'outro' / 'a.txt'}\n*** End Patch"}}
+    f.write_text(json.dumps(call) + "\n")
+    loc = worktrees.locate("codex", main, str(f))
+    assert (loc.branch, loc.worktree, loc.worktree_path, loc.worktree_gone) == ("main", False, None, False)
+
+
+def test_worktree_paths_with_relative_pointers(tmp_path):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    # Ponteiros relativos, como grava `worktree.useRelativePaths`.
+    (tmp_path / "repo-x" / ".git").write_text("gitdir: ../repo/.git/worktrees/repo-x\n")
+    (tmp_path / "repo" / ".git" / "worktrees" / "repo-x" / "gitdir").write_text("../../../../repo-x/.git\n")
+    assert worktrees.main_repo_of(wt) == main
+    assert worktrees.worktree_paths(main) == [wt]
+
+
+@pytest.mark.parametrize("lines", [
+    ['["function_call", "cwd"]'],
+    ["42"],
+    [json.dumps({"type": "response_item", "payload": ["function_call"]})],
+    [json.dumps({"type": "response_item", "payload": "custom_tool_call"})],
+    ['{"type": "response_item", "payload": {"type": "function_call", "arguments": "{\\"cmd\\": \\"cd /'],
+])
+def test_locate_survives_malformed_lines(tmp_path, lines):
+    main = _repo(tmp_path / "repo")
+    f = tmp_path / "t.jsonl"
+    f.write_text("\n".join(lines))
+    for provider in ("codex", "claude"):
+        loc = worktrees.locate(provider, main, str(f))
+        assert (loc.branch, loc.worktree, loc.worktree_path, loc.worktree_gone) == ("main", False, None, False)
+
+
+def test_locate_missing_transcript_uses_opening_folder(tmp_path):
+    main = _repo(tmp_path / "repo")
+    for provider in ("codex", "claude"):
+        loc = worktrees.locate(provider, main, str(tmp_path / "nao-existe.jsonl"))
+        assert (loc.branch, loc.worktree_path, loc.worktree_gone) == ("main", None, False)
+
+
+def test_locate_never_raises_on_reader_failure(tmp_path, monkeypatch):
+    main = _repo(tmp_path / "repo")
+    f = tmp_path / "s.jsonl"
+    f.write_text("{}\n")
+
+    def boom(*_):
+        raise RuntimeError("transcript torto")
+    monkeypatch.setattr(worktrees, "claude_cwd", boom)
+    loc = worktrees.locate("claude", main, str(f))
+    assert (loc.branch, loc.worktree_path, loc.worktree_gone) == ("main", None, False)

@@ -1273,7 +1273,8 @@ class SessionRegistry:
                 jsonl, tracked = self.resolve_tracked(p["name"], p["cwd"], p["pid"], children)
             link = ThenLink(p["name"]).get()
             pair = PairLink(p["name"]).get()
-            loc = worktrees.locate(prov, p["cwd"], jsonl)
+            # Transcript de chute (untracked) pode ser de outra sessão: não decide onde esta está.
+            loc = worktrees.locate(prov, p["cwd"], jsonl if tracked else None)
             info = SessionInfo(name=p["name"], cwd=p["cwd"], jsonl=jsonl, tracked=tracked,
                                branch=loc.branch, worktree=loc.worktree,
                                worktree_path=loc.worktree_path, worktree_gone=loc.worktree_gone,

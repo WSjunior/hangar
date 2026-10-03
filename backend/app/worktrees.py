@@ -41,7 +41,8 @@ def main_repo_of(root: str) -> str:
         if dot.is_file():
             txt = dot.read_text(encoding="utf-8", errors="replace").strip()
             if txt.startswith("gitdir: "):
-                gitdir = Path(root, txt[len("gitdir: "):])
+                # normpath: com `worktree.useRelativePaths` o ponteiro vem com `..`.
+                gitdir = Path(os.path.normpath(os.path.join(root, txt[len("gitdir: "):])))
                 if gitdir.parent.name == "worktrees":
                     return str(gitdir.parent.parent.parent)
     except OSError:
@@ -62,7 +63,7 @@ def worktree_paths(main: str) -> list[str]:
         except OSError:
             continue
         if g:
-            out.append(str(Path(e, g).parent))
+            out.append(os.path.dirname(os.path.normpath(os.path.join(e, g))))
     return out
 
 
@@ -117,26 +118,30 @@ _CD_RE = re.compile(r'"?cmd"?\s*:\s*"\s*cd\s+(/[^\s&;"]+)')
 _PATCH_RE = re.compile(r'\*\*\* (?:Add|Update|Delete) File: (/[^\s\\"]+)')
 
 
-def _codex_paths(rollout: str) -> list[str]:
-    """Pastas citadas pelos comandos do Codex, da mais recente para a mais antiga. O Codex não
-    troca de pasta: trabalha numa worktree por `workdir`, `cd X &&` ou patch com caminho absoluto."""
-    def read(p: str) -> list[str]:
-        out: list[str] = []
+def _codex_paths(rollout: str) -> list[tuple[str, bool]]:
+    """(caminho, é pasta?) citados pelos comandos do Codex, da chamada mais recente para a mais
+    antiga. O Codex não troca de pasta: trabalha numa worktree por `workdir`, `cd X &&` ou patch
+    com caminho absoluto. Dentro de uma chamada, `cd` vence `workdir` (o comando roda onde entrou),
+    e os dois vencem o arquivo do patch."""
+    def read(p: str) -> list[tuple[str, bool]]:
+        out: list[tuple[str, bool]] = []
         for raw in reversed(_tail_lines(p)):
             if b"_call" not in raw:   # function_call e custom_tool_call
                 continue
             try:
-                payload = json.loads(raw).get("payload") or {}
-            except (ValueError, AttributeError):
+                line = json.loads(raw)
+            except ValueError:
+                continue
+            payload = line.get("payload") if isinstance(line, dict) else None
+            if not isinstance(payload, dict):
                 continue
             if payload.get("type") not in ("function_call", "custom_tool_call"):
                 continue
             text = payload.get("arguments") or payload.get("input") or ""
             if not isinstance(text, str):
                 continue
-            hits = sorted((m.start(), m.group(1)) for rx in (_WORKDIR_RE, _CD_RE, _PATCH_RE)
-                          for m in rx.finditer(text))
-            out.extend(h for _, h in reversed(hits))
+            for rx, is_dir in ((_CD_RE, True), (_WORKDIR_RE, True), (_PATCH_RE, False)):
+                out.extend((m.group(1), is_dir) for m in reversed(list(rx.finditer(text))))
             if len(out) >= 50:
                 break
         return out
@@ -157,11 +162,17 @@ def codex_cwd(cwd: str, rollout: str) -> str | None:
     if not root:
         return None
     main = main_repo_of(root)
-    candidates = [main, *worktree_paths(main)]
-    for p in _codex_paths(rollout):
-        owner = _owner(p, candidates)
-        if owner:
-            return owner
+    gone = list(removed())
+    candidates = [main, *worktree_paths(main), *gone]
+    for p, is_dir in _codex_paths(rollout):
+        if os.path.exists(p):
+            owner = _owner(p, candidates)
+            if owner:
+                return owner
+        elif is_dir:
+            # Pasta que sumiu: a worktree foi removida. Volta como está para o `locate` marcar
+            # "apagada". Arquivo de patch inexistente não conta (um "Delete File" é legítimo).
+            return _owner(p, gone) or p
     return None
 
 
@@ -180,7 +191,7 @@ def locate(provider: str, cwd: str | None, jsonl: str | None) -> Location:
             real = claude_cwd(jsonl)
         elif jsonl and provider == "codex" and cwd:
             real = codex_cwd(cwd, jsonl)
-    except OSError as e:
+    except Exception as e:   # transcript torto nunca derruba a listagem inteira
         _log.debug("locate: sem leitura de %s: %s", jsonl, e)
     real = real or cwd
     if not real:
