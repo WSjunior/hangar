@@ -20,7 +20,7 @@ import * as m from '../paraglide/messages';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import { createSession, canPair, type DropResult } from '@hangar/core';
   import { listAllServers, getActiveId, selectServer, removeServer, renameServer, updateServer, onServersChanged, snapshotRemocao, removalStillMatches } from '../lib/auth';
-  import type { AggSession, Provider } from '@hangar/core';
+  import type { AggSession, Provider, WorktreeChoice } from '@hangar/core';
   import type { RemovalSnapshot } from '../lib/auth';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { createSessionListModel, groupItems, pairCodigo, pairResto } from '../lib/sessionListModel.svelte';
@@ -202,8 +202,10 @@ import * as m from '../paraglide/messages';
   async function handleCreate(name: string, cwd?: string, configDir?: string | null, provider?: Provider,
                               engine?: string | null, model?: string | null, effort?: string | null,
                               permissionMode?: string | null, ompProfile?: string | null,
-                              headless?: boolean, subagentModel?: string | null, jev?: boolean) {
-    await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile, null, headless, subagentModel, jev);
+                              headless?: boolean, subagentModel?: string | null, jev?: boolean,
+                              worktree?: WorktreeChoice | null) {
+    await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile, null, headless, subagentModel, jev,
+                              worktree ?? undefined);
   }
 
   // Abrir/apagar precisam mirar o servidor DA sessão: selectServer(serverId) antes, pois api.ts lê

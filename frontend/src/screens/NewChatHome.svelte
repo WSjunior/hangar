@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { basename, createSession, pickFolderRoot, providerName, type Provider } from '@hangar/core';
+  import { basename, createSession, pickFolderRoot, providerName, type Provider, type WorktreeChoice } from '@hangar/core';
   import HomeUsage from '../components/HomeUsage.svelte';
   import FolderGitPill from '../components/FolderGitPill.svelte';
   import BottomSheet from '../components/BottomSheet.svelte';
@@ -43,6 +43,7 @@
   const machineLabel = $derived(draft.serverObj?.label ?? m.native_new_chat_machine());
   const branchLabel = $derived.by(() => {
     if (draft.branchesLoading) return m.native_create_checkout_loading();
+    if (draft.newBranch) return `${draft.branchName || m.worktree_nome_branch()} · ${m.native_create_checkout_worktree()}`;
     if (draft.branch) return `${draft.branch} · ${m.native_create_checkout_worktree()}`;
     return draft.branches?.current ?? m.native_create_checkout_current();
   });
@@ -70,9 +71,10 @@
   async function createFromSheet(name: string, cwd?: string, configDir?: string | null, provider?: Provider,
                                  engine?: string | null, model?: string | null, effort?: string | null,
                                  permissionMode?: string | null, ompProfile?: string | null,
-                                 headless?: boolean, subagentModel?: string | null, jev?: boolean) {
+                                 headless?: boolean, subagentModel?: string | null, jev?: boolean,
+                                 worktree?: WorktreeChoice | null) {
     const info = await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile,
-                                     null, headless, subagentModel, jev);
+                                     null, headless, subagentModel, jev, worktree ?? undefined);
     openChat(info.name);
   }
   function openChat(name: string) {
@@ -180,21 +182,46 @@
     <h2 class="title">{m.native_create_checkout_branch()}</h2>
     <ul class="list">
       <li>
-        <button type="button" class="row" class:on={draft.branch === ''} aria-pressed={draft.branch === ''}
-          onclick={() => { menu = null; draft.branch = ''; }}>
+        <button type="button" class="row" class:on={draft.branch === '' && !draft.newBranch}
+          aria-pressed={draft.branch === '' && !draft.newBranch}
+          onclick={() => { menu = null; draft.branch = ''; draft.newBranch = false; }}>
           <span>{m.native_create_checkout_current()}{draft.branches?.current ? ` · ${draft.branches.current}` : ''}</span>
         </button>
       </li>
+      <li>
+        <button type="button" class="row" class:on={draft.newBranch} aria-pressed={draft.newBranch}
+          onclick={() => { draft.newBranch = true; draft.branch = ''; draft.base = draft.base || (draft.branches?.current ?? ''); }}>
+          <span>{m.worktree_nova_branch({ base: draft.base || draft.branches?.current || '' })}</span>
+        </button>
+      </li>
+      {#if draft.newBranch}
+        <li class="campos">
+          <label class="campo">{m.worktree_nome_branch()}
+            <input class="field-input" type="text" bind:value={draft.branchName} autocapitalize="off" spellcheck="false" />
+          </label>
+          <label class="campo">{m.worktree_base()}
+            <select class="field-input" bind:value={draft.base}>
+              {#each [draft.branches?.current, ...otherBranches].filter(Boolean) as b (b)}
+                <option value={b}>{b}</option>
+              {/each}
+            </select>
+          </label>
+        </li>
+      {/if}
       {#each otherBranches as b (b)}
         <li>
           <button type="button" class="row" class:on={draft.branch === b} aria-pressed={draft.branch === b}
-            onclick={() => { menu = null; draft.branch = b; }}>
+            onclick={() => { menu = null; draft.branch = b; draft.newBranch = false; }}>
             <span>{b}</span><span class="muted">{m.native_create_checkout_worktree()}</span>
           </button>
         </li>
       {/each}
     </ul>
-    <p class="help">{draft.branch ? m.native_create_checkout_worktree_help() : m.native_create_checkout_current_help()}</p>
+    {#if draft.branch || draft.newBranch}
+      <p class="help"><strong>{m.worktree_modo()}</strong> — {m.worktree_modo_ajuda()}</p>
+    {:else}
+      <p class="help">{m.native_create_checkout_current_help()}</p>
+    {/if}
     {#if draft.branches?.dirty}<p class="help">{m.native_create_checkout_dirty()}</p>{/if}
   </div>
 </BottomSheet>
@@ -236,4 +263,7 @@
   .row.on { background: var(--accent-dim); }
   .muted { font-size: var(--text-xs); color: var(--text-muted); }
   .help { margin: var(--space-2) 0 0; font-size: var(--text-xs); color: var(--text-muted); }
+  /* .field-input é global (app.css), o mesmo campo da folha completa. */
+  .campos { display: flex; flex-direction: column; gap: 6px; padding: 4px 12px 8px; }
+  .campo { display: flex; flex-direction: column; gap: 6px; font-size: var(--text-xs); color: var(--text-muted); }
 </style>

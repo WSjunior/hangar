@@ -22,7 +22,7 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   import ProviderGlyph from './icons/ProviderGlyph.svelte';
   import GroupGlyph from './icons/GroupGlyph.svelte';
   import SessionSignals from './SessionSignals.svelte';
-  import type { SessionInfo, AggSession, Provider } from '@hangar/core';
+  import type { SessionInfo, AggSession, Provider, WorktreeChoice } from '@hangar/core';
   import { cwdParts, rotuloEstado, stateColors, countAwaiting, railLabel, fmtWhen, relativeTime, latestAssistantEvent, untrackedReason, providerTag, isOrq } from '@hangar/core';
   import { arrastarGrupo, mensagemRecusa } from '../lib/arrastarGrupo.svelte';
   import { createDragToGroup, dragChave } from '../lib/dragToGroup';
@@ -227,9 +227,11 @@ import ConfirmDialog from './ConfirmDialog.svelte';
   async function handleCreate(name: string, cwd?: string, configDir?: string | null, provider?: Provider,
                               engine?: string | null, model?: string | null, effort?: string | null,
                               permissionMode?: string | null, ompProfile?: string | null,
-                              headless?: boolean, subagentModel?: string | null, jev?: boolean) {
+                              headless?: boolean, subagentModel?: string | null, jev?: boolean,
+                              worktree?: WorktreeChoice | null) {
     // O CreateSessionSheet já posicionou o servidor-alvo como ativo (selectServer).
-    const info = await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile, null, headless, subagentModel, jev);
+    const info = await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile, null, headless, subagentModel, jev,
+                                     worktree ?? undefined);
     abrirSessaoDoSheet(name);
     // Aviso da reconciliação da conta (plugin ligado sem instalação etc): antes só ia pro log do
     // backend e a sessão abria "normal" sem o plugin. Texto vem pronto do backend.

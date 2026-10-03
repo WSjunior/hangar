@@ -9,7 +9,7 @@ const core = vi.hoisted(() => ({
 vi.mock('@hangar/core', async (orig) => ({ ...(await orig<object>()), ...core }));
 vi.mock('./auth', () => ({ listOwnServers: () => [srv], selectServer: vi.fn(() => true), getActiveId: () => 'pc' }));
 
-import { createNewChatDraft, isNotRepo } from './newChatDraft.svelte';
+import { createNewChatDraft, isNotRepo, worktreeChoiceOf } from './newChatDraft.svelte';
 
 function never() { return new Promise(() => {}); }
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -187,5 +187,18 @@ describe('NewChatDraft.switchFromExhausted', () => {
     const draft = await ready();
     draft.switchFromExhausted([conta('/c', 100, true), conta('/d', 100)]);
     expect(draft.configDir).toBe('/c');
+  });
+});
+
+describe('worktreeChoiceOf', () => {
+  it('branch existente', () => {
+    expect(worktreeChoiceOf({ branch: 'x', newBranch: false, base: '', branchName: '' })).toEqual({ branch: 'x' });
+  });
+  it('branch nova a partir da base', () => {
+    expect(worktreeChoiceOf({ branch: '', newBranch: true, base: 'develop', branchName: 'rust-parte3' }))
+      .toEqual({ branch: 'rust-parte3', new_branch: true, base: 'develop' });
+  });
+  it('nada escolhido', () => {
+    expect(worktreeChoiceOf({ branch: '', newBranch: false, base: '', branchName: '' })).toBeNull();
   });
 });
