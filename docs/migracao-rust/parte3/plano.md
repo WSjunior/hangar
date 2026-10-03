@@ -1022,7 +1022,7 @@ pub fn progress() -> Progress { Progress::default() }
 
 `costs::index::dump_for_tests(ix: &Index, base: &Path, prefix: &str) -> Value` (função livre, pública, `#[doc(hidden)]`) devolve `{rel: {"custo": [...], "uso": [...], "areas": [...]}}` com as mesmas colunas e ordem do `_dump` Python (sem `dia` no custo; booleanos como `0/1`, porque o golden lê do SQLite do Python).
 
-- [ ] **Step 1: Teste que falha**
+- [x] **Step 1: Teste que falha**
 
 `crates/hangar-server/tests/contract_costs_index.rs`:
 
@@ -1070,9 +1070,9 @@ fn claude_resumed_in_two_halves_matches_python() {
 
 Acrescentar a `tests/common/costs.rs` `halve_all` (mesma regra de `_copiar_em_metades`: corte no primeiro `\n` depois da metade, ignora `session_index.jsonl`, ordem de `rglob` ordenada) e `append`. `collect::list_files` nasce nesta Task em `costs/collect.rs` como porte de `costs_cache.listar` (`:556-575`, sem seguir link de pasta); a Task 9 completa o resto do módulo.
 
-- [ ] **Step 2: Rodar e ver falhar** — `cargo test ... --test contract_costs_index` → FAIL.
+- [x] **Step 2: Rodar e ver falhar** — `cargo test ... --test contract_costs_index` → FAIL.
 
-- [ ] **Step 3: Implementar**
+- [x] **Step 3: Implementar**
 
 Porte linha a linha. Regras que o golden e a revisão conferem:
 - Pré-filtro de bytes antes de decodificar (`"usage"`, `"user"`, `"attachment"`, `"compact_boundary"`, com aspas), `numero` incrementa em toda linha, inclusive as filtradas.
@@ -1085,9 +1085,9 @@ Porte linha a linha. Regras que o golden e a revisão conferem:
 - Contagem de caracteres com `py::char_len`, nunca `str::len`.
 - `_respostas` do acumulador (`:520-531`) e `_turnos` (`:533-545`) com `ToolReg` (Task 5).
 
-- [ ] **Step 4: Rodar** — Expected: PASS nos dois testes.
+- [x] **Step 4: Rodar** — Expected: PASS nos dois testes.
 
-- [ ] **Step 5: Revisão e commit**
+- [x] **Step 5: Revisão e commit**
 
 ```bash
 git add crates/hangar-server/src/costs crates/hangar-server/tests/common/costs.rs crates/hangar-server/tests/common/mod.rs \

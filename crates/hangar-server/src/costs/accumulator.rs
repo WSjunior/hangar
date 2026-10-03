@@ -289,8 +289,13 @@ impl Accumulator {
             if let Some(skill) = hook_skill(&start) { self.carregar(&skill, "hook", chars, 1, None); return; }
             let event = a.get("hookName").filter(|v| truthy(Some(v))).or_else(|| a.get("hookEvent").filter(|v| truthy(Some(v))))
                 .map(python_string).unwrap_or("?".into());
-            let first = pieces.iter().filter_map(|v| v.as_str().or_else(|| v.as_object().and_then(|b| text(b, "text"))))
-                .map(|s| s.trim_matches(python_space)).find(|s| !s.is_empty()).unwrap_or("").split('\n').next().unwrap_or("")
+            let first = match raw {
+                Some(Value::String(body)) => Some(body.as_str()),
+                Some(Value::Array(blocks)) => blocks.iter()
+                    .filter_map(|v| v.as_str().or_else(|| v.as_object().and_then(|b| text(b, "text"))))
+                    .find(|s| !s.trim_matches(python_space).is_empty()),
+                _ => None,
+            }.unwrap_or("").trim_matches(python_space).split('\n').next().unwrap_or("")
                 .chars().take(60).collect::<String>();
             plugin = plugin_de_hook(&first);
             format!("{kind}:{event}{}", if first.is_empty() { String::new() } else { format!(" · {first}") })

@@ -191,3 +191,36 @@ fn claude_factory_distinguishes_absolute_and_relative_subagent_markers() {
     assert!(!out.usage[0].subagente);
     assert_eq!(out.areas.unwrap().header.subagente, Some(false));
 }
+
+#[test]
+fn claude_hook_label_accepts_only_string_or_list_content() {
+    for (content, name, plugin) in [
+        (json!({"text":"[fixture] Contexto"}), "hook_context:Start", ""),
+        (json!("[fixture] Contexto"), "hook_context:Start · [fixture] Contexto", "fixture"),
+        (json!([{}, "  ", {"text":"[fixture] Contexto\nSegunda linha"}]), "hook_context:Start · [fixture] Contexto", "fixture"),
+    ] {
+        let mut fold = claude::ClaudeFold::new(String::new(), false, false);
+        let raw = serde_json::to_vec(&json!({"type":"attachment", "rendered":"conteúdo renderizado",
+            "attachment":{"type":"hook_context", "hookName":"Start", "content":content}})).unwrap();
+        fold.line(&raw);
+        let out = fold.close();
+        assert_eq!(out.usage.len(), 1);
+        assert_eq!(out.usage[0].nome, name);
+        assert_eq!(out.usage[0].plugin, plugin);
+        assert_eq!(out.usage[0].ctx_chars, 20);
+    }
+}
+
+#[test]
+fn claude_hook_skill_search_still_accepts_object_content() {
+    let mut fold = claude::ClaudeFold::new(String::new(), false, false);
+    fold.line(&serde_json::to_vec(&json!({"type":"attachment", "rendered":"conteúdo renderizado",
+        "attachment":{"type":"hook_context", "hookName":"Start",
+        "content":{"text":"full content of your 'database-x' skill"}}})).unwrap());
+    let out = fold.close();
+    assert_eq!(out.usage.len(), 1);
+    assert_eq!(out.usage[0].tipo, "skill");
+    assert_eq!(out.usage[0].nome, "database-x");
+    assert_eq!(out.usage[0].origem, "hook");
+    assert_eq!(out.usage[0].ctx_chars, 20);
+}
