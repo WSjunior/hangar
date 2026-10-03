@@ -215,6 +215,91 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   (`ACCOUNT_LOW_PCT`, `ACCOUNT_FULL_PCT`). Ver
   [Continuar a mesma conversa noutra conta](#continuar-a-mesma-conversa-noutra-conta).
 
+- **Transferência Claude → Codex não está aceita só porque a importação persistiu.** A prova
+  precisa conferir os itens enviados pelo CLI após retomada, incluindo resultados completos.
+  Na captura stdio 0.159.3, manter `tool_output_token_limit` da sessão conservou 144.000
+  caracteres após reinício. Essa captura simulada não comprova interface, modelo real ou
+  restauração física. Ver [transferência em validação](#transferência-claude--codex-captura-nativa-em-validação).
+
+## Transferência Claude → Codex: captura nativa em validação
+
+Medido em 03/10/2026 com o binário ELF bruto `codex-cli 0.159.3` no Linux, pelo roteiro
+`scripts/probe-claude-to-codex.py`. O código está integrado na árvore isolada de implementação;
+não foi ativado no serviço nem recebeu aceitação completa. Esta é a única versão conferida
+para esta captura.
+
+Método: fonte Claude artificial → `convert_snapshot` → `prepare_import` → app-server stdio
+nativo → pedido Responses HTTP com resposta SSE simulada em `127.0.0.1`. `HOME`, `CODEX_HOME`,
+workspace, fontes e captura ficam em diretórios privados descartáveis. Não há autenticação,
+inferência real ou desvio de sessões existentes para o simulador. `gpt-5.6-luna` identifica o
+modelo do catálogo usado na captura, não um padrão fixado pelo recurso.
+
+| Conferência | Resultado da segunda execução |
+| --- | --- |
+| Fonte artificial | 159.496 bytes; ramo selecionado sem o fork rejeitado nem resumo substituto. |
+| Itens importados nas duas capturas | 11 itens na mesma ordem, projeção de 158.374 bytes e SHA-256 `82b21b55e1325dcf7e17842e326ac07e1020e0e5ed774baf1089b88ecc8a9120`. |
+| Resultado longo / argumentos | 144.000 caracteres completos e mesmos hashes após importação e após reinício do app-server. |
+| Conteúdo anterior à compactação, instruções, arquivo e chamada sem resultado | Comparados com originais independentes; zero diferença de bytes em ambas as capturas. |
+| Imagem PNG artificial | 69 bytes e SHA-256 idêntico; confere transporte, não compreensão da imagem. |
+| Ferramentas ativas | `exec`, `functions`, `request_user_input`, `wait`; `Read`, `Edit`, `Bash` ficam no histórico. |
+| Pedidos ao simulador | Zero antes do turno; dois turnos simulados concluídos, um em cada captura; zero pedidos de compactação. |
+| Fonte maior | 559.496 bytes recusados com `session_transfer_context_budget_exceeded`, sem pedido HTTP; não havia Claude físico a restaurar. |
+
+A projeção compara os campos históricos originais, omitindo IDs gerados pelo Codex e campos
+adicionais do protocolo. O pedido HTTP inteiro não tem hash igual entre capturas: inclui
+conteúdo nativo além da projeção. A fonte é maior que a projeção porque contém envelopes e
+registros operacionais que não são itens de contexto. Os hashes dos textos anteriores à
+compactação, instruções, arquivo, chamada sem resultado, argumentos, resultado longo e imagem
+são conferidos separadamente; a referência não vem apenas da saída do conversor.
+
+A primeira execução falhou ao confirmar a saída dos filhos do processo de preparação: o
+fechamento normal foi consultado cedo demais. A correção incorporada em `cb23906e` espera
+até 5 s por `wait_import_exit`, conferindo o dono do processo e preservando a causa original
+quando o fechamento também falha. A segunda execução passou a captura; isso não prova
+restauração da origem, comportamento de queda dura ou ausência de filhos em toda plataforma.
+
+Os limites desta prova vêm do [catálogo oficial na revisão fixa
+`01fc69f4026735edfdf6789820549727a4867b11`](https://raw.githubusercontent.com/openai/codex/01fc69f4026735edfdf6789820549727a4867b11/codex-rs/models-manager/models.json)
+e do [padrão do protocolo da mesma revisão](https://github.com/openai/codex/blob/01fc69f4026735edfdf6789820549727a4867b11/codex-rs/protocol/src/openai_models.rs#L389):
+janela configurada de 272.000, parcela utilizável de 258.400 (95%) e limiar de compactação
+de 244.800 (90%). Esses valores não comprovam acesso ou capacidade atual de um servidor real;
+o máximo anunciado pelo catálogo não foi usado como janela desta captura.
+
+O orçamento soma bytes UTF-8 dos itens serializados, 10.000 por imagem, instruções/ferramentas
+conhecidas e reserva de continuação; compara o total com o menor limite utilizável/de
+compactação. É uma estimativa conservadora, não uma contagem de tokens pelo tokenizer, e pode
+recusar conteúdo que caberia. Capacidade desconhecida ou mídia não suportada têm erros
+próprios; não levam a resumo, compactação ou descarte para fazer caber. O limite de resultado
+é por sessão e acompanha a importação/retomada, sem alterar a configuração global da conta.
+Os zeros de uso da resposta simulada não medem tokens ou custo do primeiro turno.
+
+Para repetir a captura, com autorização de execução e o ambiente Python já instalado, a
+partir da raiz do checkout que contém a implementação:
+
+```bash
+uv run --project backend --no-sync python scripts/probe-claude-to-codex.py \
+  --binary "<caminho-absoluto-do-binário-ELF-bruto-Codex-0.159.3>" \
+  --output-dir /tmp/claude-to-codex/native-proof-nova
+```
+
+O diretório de saída precisa ser novo, diretamente sob `/tmp/claude-to-codex`; o roteiro não
+reutiliza nem apaga uma captura. `results.json`, fonte e pedidos brutos permanecem privados,
+fora do versionamento. O comando não instala dependências nem substitui a aceitação do produto.
+
+Permanecem pendentes: conversa real integral e inferência com modelo/conta reais; interface e
+foco; guardas com origem/processos reais; modo Plano e permissões efetivas; WebSocket/TUI
+desta implementação; história/citações/mídia, fila e Arquivo no fluxo completo; recarga e
+falhas físicas; Windows e tokens/custo reais. Pesquisa anterior de TUI/WebSocket não aceita
+esta implementação. Testes automatizados, lint e typecheck não foram executados nesta etapa.
+
+Limite de recuperação: a trava do backend não controla digitação direta na TUI da origem;
+o estado é revalidado logo antes de pará-la. Queda dura sem dono ou captura final da árvore
+de processos mantém `restore_failed`: a ausência do processo raiz não prova que todos os
+filhos saíram, e não se mata um processo por semelhança. O erro e o histórico da origem
+continuam disponíveis; `POST /api/sessions/{name}/recarregar` tenta recuperar, sem promessa de
+recuperação automática em toda falha. Texto disponível de pensamento é histórico identificado;
+assinatura não vira raciocínio Codex, e conteúdo redigido/criptografado não é recuperável.
+
 ## Continuar a mesma conversa noutra conta
 
 Medido em 02/10/2026 numa sessão descartável sem terminal: com `parar` sem esperar a saída, o
