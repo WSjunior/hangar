@@ -209,7 +209,10 @@ import os, sys, time
 from pathlib import Path
 root = Path(__file__).parent
 root.joinpath('pid').write_text(str(os.getpid()))
-mode = '__MODE__'
+with root.joinpath('spawns').open('a') as log:
+    log.write(str(os.getpid()) + '\n')
+name = sys.argv[-1].removeprefix('=')
+mode = root.joinpath('mode').read_text() if root.joinpath('mode').exists() else '__MODE__'
 def frame(n, body=''):
     sys.stdout.write(f'%begin 1 {n} 0\n' + body + f'%end 1 {n} 0\n')
     sys.stdout.flush()
@@ -222,10 +225,14 @@ for n, line in enumerate(sys.stdin, 1):
     command = commands[1] if wrapped else commands[0]
     if not command.startswith(('display-message -p -t ', 'capture-pane -p ')):
         sys.exit(7)
-    if wrapped and (not commands[0].startswith('display-message -p -l HG_START_') or not commands[2].startswith('display-message -p -l HG_END_')):
+    if wrapped and (not commands[0].removeprefix('display-message -p ').removeprefix('-l ').startswith('HG_START_') or not commands[2].removeprefix('display-message -p ').removeprefix('-l ').startswith('HG_END_')):
         sys.exit(8)
-    start = commands[0].removeprefix('display-message -p -l ') + '\n'
-    end = commands[2].removeprefix('display-message -p -l ') + '\n' if wrapped else ''
+    start = commands[0].removeprefix('display-message -p ').removeprefix('-l ') + '\n'
+    end = commands[2].removeprefix('display-message -p ').removeprefix('-l ') + '\n' if wrapped else ''
+    if mode == 'legacy' and any(command.startswith('display-message -p -l ') for command in commands):
+        sys.stdout.write(f'%begin 1 {n} 0\nunsupported option\n%error 1 {n} 0\n')
+        sys.stdout.flush()
+        continue
     if n == 4 and mode == 'late':
         body = '%begin 1 99 0\nstale\n\n\n\n%end 1 99 0\n'
         for chunk in [body[:7], body[7:21], body[21:]]:
@@ -235,6 +242,10 @@ for n, line in enumerate(sys.stdin, 1):
         continue
     if wrapped:
         frame(n * 100, start)
+    if mode == 'static-error':
+        sys.stdout.write(f'%begin 1 {n * 100 + 17} 0\nfailed\n%error 1 {n * 100 + 17} 0\n')
+        sys.stdout.flush()
+        continue
     if n >= 3 and mode == 'timeout':
         time.sleep(30)
     if n >= 3 and mode == 'eof':
@@ -255,7 +266,8 @@ for n, line in enumerate(sys.stdin, 1):
         continue
     if n == 2:
         sys.stdout.write('%output %9 wrong-pane\n%output %3 \\033[6n\n')
-    frame(n * 100 + 17, '%3\tfixture\t20\t4\t0\t0\t0\n' if command.startswith('display-message') else 'ready\n\n\n\n')
+    columns, rows = (1024, 512) if mode == 'dimensions' else ((21, 4) if mode == 'resize' and n == 6 else (20, 4))
+    frame(n * 100 + 17, f'%3\t{name}\t{columns}\t{rows}\t0\t0\t0\n' if command.startswith('display-message') else 'ready\n\n\n\n')
     if wrapped:
         if n == 4 and mode == 'missing-end':
             continue
@@ -302,8 +314,67 @@ async fn ansi_queries_do_not_write_to_terminal_and_final_release_reaps_child() {
     pool.release("state").await.unwrap();
     assert!(!process_exists(&pid));
     let commands = std::fs::read_to_string(log).unwrap();
-    assert!(commands.lines().flat_map(|line| line.split(" ; ")).all(|command| command.starts_with("display-message -p -t ") || command.starts_with("capture-pane -p ") || command.starts_with("display-message -p -l HG_")));
+    assert!(commands.lines().flat_map(|line| line.split(" ; ")).all(|command| command.starts_with("display-message -p -t ") || command.starts_with("capture-pane -p ") || command.starts_with("display-message -p HG_")));
     assert!(!commands.contains('\x1b'));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn persistent_observer_failures_do_not_spawn_on_every_capture_or_acquire() {
+    for mode in ["static-error", "dimensions", "resize", "eof", "timeout"] {
+        let (dir, program, _, _) = fake_observer(mode);
+        let limits = Limits { startup: Duration::from_millis(500), command: Duration::from_millis(80), ..Limits::default() };
+        let pool = TerminalPool::with_program(program, None, limits);
+        assert!(pool.capture(request("state")).await.is_err(), "{mode}");
+        for _ in 0..4 {
+            assert!(pool.capture(request("state")).await.is_err());
+            assert!(pool.acquire(request("preview")).await.is_err());
+        }
+        assert_eq!(std::fs::read_to_string(dir.path().join("spawns")).unwrap().lines().count(), 1, "{mode}: falha repetida abriu outro processo");
+        let mut another = request("other"); another.name = "another".into(); another.target = "=another:".into();
+        assert!(pool.capture(another).await.is_err());
+        assert_eq!(std::fs::read_to_string(dir.path().join("spawns")).unwrap().lines().count(), 2, "{mode}: outra sessão deve ter tentativa independente");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn literal_command_markers_work_without_tmux_34_flag() {
+    let (_dir, program, _, log) = fake_observer("legacy");
+    let pool = TerminalPool::with_program(program, None, Limits::default());
+    assert_eq!(pool.capture(request("state")).await.unwrap().text, "ready\n\n\n\n");
+    let commands = std::fs::read_to_string(log).unwrap();
+    assert!(!commands.contains("display-message -p -l "));
+    assert!(commands.contains("HG_START_") && commands.contains("HG_END_"));
+    pool.release("state").await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn observer_retry_pause_grows_expires_and_resets_after_success() {
+    let (dir, program, _, _) = fake_observer("static-error");
+    let limits = Limits { retry: Duration::from_millis(100), ..Limits::default() };
+    let pool = TerminalPool::with_program(program, None, limits);
+    let count = || std::fs::read_to_string(dir.path().join("spawns")).unwrap().lines().count();
+    assert!(pool.capture(request("state")).await.is_err());
+    assert_eq!(count(), 1);
+    tokio::time::sleep(Duration::from_millis(130)).await;
+    assert!(pool.acquire(request("preview")).await.is_err());
+    assert_eq!(count(), 2, "prazo expirado permite nova tentativa");
+    tokio::time::sleep(Duration::from_millis(130)).await;
+    assert!(pool.capture(request("state")).await.is_err());
+    assert_eq!(count(), 2, "segunda falha deve esperar o dobro");
+    tokio::time::sleep(Duration::from_millis(130)).await;
+    std::fs::write(dir.path().join("mode"), "normal").unwrap();
+    assert_eq!(pool.capture(request("state")).await.unwrap().text, "ready\n\n\n\n");
+    assert_eq!(count(), 3);
+    pool.release("state").await.unwrap();
+    std::fs::write(dir.path().join("mode"), "static-error").unwrap();
+    assert!(pool.capture(request("state")).await.is_err());
+    assert_eq!(count(), 4);
+    tokio::time::sleep(Duration::from_millis(130)).await;
+    assert!(pool.capture(request("state")).await.is_err());
+    assert_eq!(count(), 5, "sucesso deve repor a pausa inicial");
 }
 
 #[cfg(unix)]

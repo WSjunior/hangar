@@ -207,9 +207,10 @@ pub struct Limits {
     pub startup: Duration,
     pub command: Duration,
     pub lease: Duration,
+    pub retry: Duration,
 }
 impl Default for Limits {
-    fn default() -> Self { Self { startup: Duration::from_secs(3), command: Duration::from_secs(2), lease: Duration::from_secs(90) } }
+    fn default() -> Self { Self { startup: Duration::from_secs(3), command: Duration::from_secs(2), lease: Duration::from_secs(90), retry: Duration::from_secs(2) } }
 }
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct Key { name: String, provider: String, binding: String, target: String }
@@ -222,7 +223,8 @@ enum Request {
     Release(String, oneshot::Sender<Result<()>>),
 }
 #[derive(Default)]
-struct Entries { actors: HashMap<Key, mpsc::Sender<Request>>, consumers: HashMap<String, (Key, Instant)> }
+struct Entries { actors: HashMap<Key, mpsc::Sender<Request>>, consumers: HashMap<String, (Key, Instant)>, failures: HashMap<Key, Failure> }
+struct Failure { attempts: u32, until: Instant, error: TerminalError }
 #[derive(Clone)]
 pub struct TerminalPool {
     entries: Arc<Mutex<Entries>>,
@@ -242,6 +244,10 @@ impl TerminalPool {
         let key = Key::from(request);
         let mut entries = self.entries.lock().await;
         entries.actors.retain(|_, tx| !tx.is_closed());
+        entries.failures.retain(|_, failure| Instant::now() < failure.until + self.limits.lease);
+        if let Some(failure) = entries.failures.get(&key).filter(|failure| Instant::now() < failure.until) {
+            return Err(failure.error.clone());
+        }
         let live: std::collections::HashSet<_> = entries.actors.keys().cloned().collect();
         entries.consumers.retain(|_, (k, renewed)| live.contains(k) && renewed.elapsed() < self.limits.lease);
         if let Some(old) = entries.consumers.get(&request.consumer).filter(|(old, _)| *old != key).map(|(key, _)| key.clone()) {
@@ -256,10 +262,14 @@ impl TerminalPool {
         if !entries.consumers.contains_key(&request.consumer) && entries.consumers.len() >= MAX_CONSUMERS { return Err(TerminalError("too many terminal consumers")); }
         if !entries.actors.contains_key(&key) {
             if entries.actors.len() >= MAX_ACTORS { return Err(TerminalError("too many terminal observers")); }
+            if !entries.failures.contains_key(&key) && entries.actors.len() + entries.failures.len() >= MAX_CONSUMERS {
+                return Err(TerminalError("too many terminal retries"));
+            }
             let (tx, rx) = mpsc::channel(32);
             entries.actors.insert(key.clone(), tx);
             let (program, socket, limits) = (self.program.clone(), self.socket.clone(), self.limits.clone());
-            tokio::spawn(async move { actor(program, socket, key, limits, rx).await; });
+            let shared = self.entries.clone();
+            tokio::spawn(async move { actor(program, socket, key, limits, rx, shared).await; });
         }
         let key = Key::from(request);
         entries.actors[&key].try_send(message).map_err(|_| TerminalError("terminal queue full"))?;
@@ -386,7 +396,7 @@ impl Observer {
         let nonce = format!("{}_{}", std::process::id(), NEXT_COMMAND.fetch_add(1, Ordering::Relaxed));
         let start = format!("HG_START_{nonce}");
         let end = format!("HG_END_{nonce}");
-        let command = format!("display-message -p -l {start} ; {} ; display-message -p -l {end}\n", command.trim_end_matches('\n'));
+        let command = format!("display-message -p {start} ; {} ; display-message -p {end}\n", command.trim_end_matches('\n'));
         timeout(self.limits.command, async {
             self.stdin.write_all(command.as_bytes()).await.map_err(|_| TerminalError("terminal write failed"))?;
             self.stdin.flush().await.map_err(|_| TerminalError("terminal write failed"))?;
@@ -440,15 +450,23 @@ impl Observer {
         let _ = self.child.wait().await;
     }
 }
-async fn actor(program: PathBuf, socket: Option<PathBuf>, key: Key, limits: Limits, mut requests: mpsc::Receiver<Request>) {
+async fn record_failure(entries: &Mutex<Entries>, key: &Key, limits: &Limits, requests: &mut mpsc::Receiver<Request>, error: &TerminalError) {
+    let mut entries = entries.lock().await;
+    requests.close();
+    let attempts = entries.failures.get(key).map_or(0, |failure| failure.attempts.saturating_add(1));
+    let pause = limits.retry.saturating_mul(1 << attempts.min(5)).min(Duration::from_secs(60));
+    entries.failures.insert(key.clone(), Failure { attempts, until: Instant::now() + pause, error: error.clone() });
+}
+async fn actor(program: PathBuf, socket: Option<PathBuf>, key: Key, limits: Limits, mut requests: mpsc::Receiver<Request>, entries: Arc<Mutex<Entries>>) {
     let mut observer = match Observer::spawn(program, socket, &key, limits.clone()).await {
         Ok(observer) => observer,
-        Err(e) => { requests.close(); while let Some(r) = requests.recv().await { reject(r, e.clone()); } return; }
+        Err(e) => { record_failure(&entries, &key, &limits, &mut requests, &e).await; while let Some(r) = requests.recv().await { reject(r, e.clone()); } return; }
     };
     let mut consumers: HashMap<String, Instant> = HashMap::new();
     let mut expiry = tokio::time::interval(limits.lease.min(Duration::from_secs(1)).max(Duration::from_millis(10)));
     expiry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut failure = TerminalError("terminal observer closed");
+    let mut failure_recorded = false;
     loop {
         while let Some(event) = observer.events.pop_front() {
             match observer.event(event) {
@@ -464,12 +482,16 @@ async fn actor(program: PathBuf, socket: Option<PathBuf>, key: Key, limits: Limi
                 if consumers.is_empty() && requests.is_empty() { break; }
             }
             request = requests.recv() => match request {
-                Some(Request::Acquire(consumer, reply)) => { if reply.is_closed() { continue; } consumers.insert(consumer, Instant::now()); let _ = reply.send(Ok(())); }
+                Some(Request::Acquire(consumer, reply)) => { if reply.is_closed() { continue; } consumers.insert(consumer, Instant::now()); entries.lock().await.failures.remove(&key); let _ = reply.send(Ok(())); }
                 Some(Request::Capture(request, reply)) => {
                     if reply.is_closed() { continue; }
                     consumers.insert(request.consumer.clone(), Instant::now());
                     let result = observer.capture(&key, request).await;
-                    if let Err(e) = &result { failure = e.clone(); }
+                    if let Err(e) = &result {
+                        failure = e.clone();
+                        record_failure(&entries, &key, &limits, &mut requests, e).await;
+                        failure_recorded = true;
+                    } else { entries.lock().await.failures.remove(&key); }
                     let _ = reply.send(result);
                     if failure.0 != "terminal observer closed" { break; }
                 }
@@ -482,6 +504,9 @@ async fn actor(program: PathBuf, socket: Option<PathBuf>, key: Key, limits: Limi
             },
             read = observer.read() => if let Err(e) = read { failure = e; break; },
         }
+    }
+    if !failure_recorded && failure.0 != "terminal observer closed" {
+        record_failure(&entries, &key, &limits, &mut requests, &failure).await;
     }
     requests.close(); observer.stop().await;
     while let Some(request) = requests.recv().await { reject(request, failure.clone()); }
