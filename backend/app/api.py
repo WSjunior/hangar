@@ -2101,8 +2101,9 @@ async def create_session(body: CreateBody):
             if body.branch is not None:
                 # O cwd da worktree vem do dict: `_criar_sessao` pode trabalhar numa cópia do body.
                 cwd = worktree.get("cwd", body.cwd)
-                info = info.model_copy(update={"cwd": cwd, "branch": body.branch,
-                                               "worktree": Path(cwd, ".git").is_file()})
+                is_wt = Path(cwd, ".git").is_file()
+                info = info.model_copy(update={"cwd": cwd, "branch": body.branch, "worktree": is_wt,
+                                               "worktree_path": cwd if is_wt else None})
             guest = guest_users.current.get()
             if guest is not None:
                 try:
