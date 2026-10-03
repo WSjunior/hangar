@@ -198,8 +198,8 @@ enum Hold {
 }
 
 impl Hold {
-    /// Os dois primeiros deixam o app seguir sozinho; os outros se resolvem e tenta-se de novo, com os dois juntos.
-    fn stops(&self) -> bool { matches!(self, Hold::Running | Hold::Missing(_) | Hold::ChannelDraft) }
+    /// Só impedimentos à execução conjunta bloqueiam também o app.
+    fn stops(&self) -> bool { matches!(self, Hold::Running | Hold::Missing(_)) }
 
     fn text(&self) -> String {
         match self {
@@ -440,7 +440,7 @@ impl Updater {
     fn busy(&self) -> bool { !matches!(self.run, Run::Idle | Run::Failed(_)) }
 
     fn plan(&self) -> Plan {
-        if self.is_channel_blocked() { return Plan { server: ServerStep::Held(Hold::ChannelDraft), app: false }; }
+        if self.is_channel_blocked() { return Plan { server: ServerStep::Held(Hold::ChannelDraft), app: self.offer.is_some() }; }
         let server = self.local.as_ref().and(self.server.as_ref());
         plan(CURRENT, self.offer.as_ref().map(|o| o.version.as_str()), server)
     }
@@ -643,7 +643,7 @@ impl Render for Updater {
             Run::Failed(reason) => ("topbar-update-retry", tr("app_update_retry"), reason.clone(), theme::danger()),
         };
         Button::new(id).ghost().small().h(px(26.)).px(px(10.)).rounded_full().border_1().border_color(color)
-            .disabled(self.busy() || self.is_channel_blocked())
+            .disabled(self.busy())
             .child(div().flex().items_center().gap(px(6.)).text_size(px(12.5))
                 .child(Icon::new(IconName::Download).size(px(14.)).text_color(color))
                 .child(label))
@@ -667,12 +667,17 @@ mod tests {
             local: Some(local.clone()), server: Some(server(serde_json::json!({"atualizacao_disponivel": true}))),
             server_seq: 0, active: None, active_state: None, active_seq: 0, run: Run::Idle, checking: false, checked: None,
             channel_blocked: Some(local.identity()) };
-        assert_eq!(updater.plan(), Plan { server: ServerStep::Held(Hold::ChannelDraft), app: false });
+        assert_eq!(updater.plan(), Plan { server: ServerStep::Held(Hold::ChannelDraft), app: true });
+        assert!(!Hold::ChannelDraft.stops());
         updater.channel_blocked = Some("http://other-machine:8765".into());
         assert!(updater.plan().app);
         assert_eq!(updater.plan().server, ServerStep::Update);
         updater.channel_blocked = None;
         assert_eq!(updater.plan().server, ServerStep::Update);
+        updater.channel_blocked = Some(local.identity());
+        updater.offer = None;
+        assert!(!updater.plan().app);
+        assert!(!updater.plan().visible());
     }
 
     #[test]

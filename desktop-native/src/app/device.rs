@@ -39,9 +39,17 @@ struct ChannelEditor {
     enabled: bool,
     draft: String,
     applied: bool,
+    unsupported: bool,
 }
 
 impl ChannelEditor {
+    fn receive_unsupported(&mut self, seq: u64) -> bool {
+        if !self.request.finish(seq, Ok(())) { return false; }
+        self.unsupported = true;
+        self.current = None;
+        self.applied = false;
+        true
+    }
     fn after_update(&mut self) { self.applied = false; self.request.reset(); }
     fn target(&self) -> &str { if self.enabled { self.draft.trim() } else { "" } }
     fn is_dirty(&self) -> bool {
@@ -51,12 +59,13 @@ impl ChannelEditor {
         })
     }
     fn blocks_update(&self) -> bool {
-        self.request.loading || self.is_dirty() || (self.current.is_some() && matches!(self.request.value, Some(Err(_))))
+        self.request.loading || self.is_dirty()
     }
     fn receive(&mut self, seq: u64, saved: bool, result: Result<Channel, String>) -> bool {
         let preserve_draft = !saved && self.is_dirty();
         if !self.request.finish(seq, result.as_ref().map(|_| ()).map_err(Clone::clone)) { return false; }
         if let Ok(channel) = result {
+            self.unsupported = false;
             if !preserve_draft {
                 self.enabled = !channel.branch.is_empty();
                 self.draft = if self.enabled { channel.branch.clone() } else { channel.last_branch.clone() };
@@ -406,6 +415,10 @@ impl Hangar {
     pub(super) fn receive_device(&mut self, reply: DeviceReply, window: &mut Window, cx: &mut Context<Self>) {
         match reply {
             DeviceReply::Channel(seq, saved, result) => {
+                if result.as_ref().is_err_and(|error| error.status == Some(404)) {
+                    if self.device.channel.receive_unsupported(seq) { self.sync_channel_update_guard(cx); cx.notify(); }
+                    return;
+                }
                 let value = result.map_err(|e| Self::setting_failure(&e)).and_then(|value|
                     serde_json::from_value::<Channel>(value).map_err(|_| tr("settings_channel_invalid_response")));
                 let succeeded = value.is_ok();
@@ -641,7 +654,7 @@ impl Hangar {
         let with_local = |text: String, local: bool| div().flex().flex_col().gap(px(2.)).child(mono(text))
             .when(local, |el| el.child(div().child(tr("settings_about_local"))));
         let updater = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone());
-        let (check, updating) = updater.as_ref().map(|u| (u.read(cx).app_check(), u.read(cx).is_busy() || u.read(cx).is_channel_blocked())).unwrap_or((crate::update::AppCheck::Never, false));
+        let (check, updating) = updater.as_ref().map(|u| (u.read(cx).app_check(), u.read(cx).is_busy())).unwrap_or((crate::update::AppCheck::Never, false));
         let (check_text, check_color) = match &check {
             crate::update::AppCheck::Never => (None, theme::muted()),
             crate::update::AppCheck::Checking => (Some(tr("settings_about_searching")), theme::muted()),
@@ -720,7 +733,7 @@ impl Hangar {
             .child(self.heading("settings_about_app_group")).child(settings_box().child(app_row))
             .child(self.heading("settings_about_server_group"))
             .child(settings_box().child(server_row).child(update_row).children(progress))
-            .when(!self.active_invite(), |el| el.child(self.heading("settings_channel_title")).child(self.render_channel(cx)))
+            .when(!self.active_invite() && !self.device.channel.unsupported, |el| el.child(self.heading("settings_channel_title")).child(self.render_channel(cx)))
             .into_any_element()
     }
 
@@ -836,6 +849,36 @@ mod tests {
         assert_eq!(editor.current.as_ref().unwrap().checkout_branch, "test/channel");
         assert_eq!(editor.draft, "test/next");
         assert!(editor.is_dirty());
+    }
+
+    #[test]
+    fn update_channel_read_error_does_not_block_applied_channel() {
+        let mut editor = super::ChannelEditor::default();
+        let seq = editor.request.start();
+        editor.receive(seq, false, Ok(super::Channel { branch: "test/channel".into(), checkout_branch: "test/channel".into(), last_branch: "test/channel".into() }));
+        let seq = editor.request.start();
+        assert!(editor.blocks_update());
+        editor.receive(seq, false, Err("network error".into()));
+        assert!(!editor.is_dirty());
+        assert!(!editor.blocks_update());
+        editor.draft = "test/next".into();
+        assert!(editor.blocks_update());
+    }
+
+    #[test]
+    fn update_channel_missing_route_hides_only_for_current_reply() {
+        let mut editor = super::ChannelEditor::default();
+        let old = editor.request.start();
+        let seq = editor.request.start();
+        assert!(!editor.receive_unsupported(old));
+        assert!(!editor.unsupported);
+        assert!(editor.receive_unsupported(seq));
+        assert!(editor.unsupported);
+        assert!(!editor.blocks_update());
+        assert!(editor.request.ok().is_some());
+        let seq = editor.request.start();
+        editor.receive(seq, false, Ok(super::Channel { branch: String::new(), checkout_branch: "main".into(), last_branch: String::new() }));
+        assert!(!editor.unsupported);
     }
 
     #[test]
