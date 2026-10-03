@@ -315,26 +315,92 @@ def main() -> int:
     ap.add_argument("--effort", default=None,
                     help="nivel de raciocinio; vira sobrescrita de config, nao flag")
     ap.add_argument("--codex-home", default=None, help=argparse.SUPPRESS)
-    ap.add_argument("--codex-account", default="default", help=argparse.SUPPRESS)
+    ap.add_argument("--codex-account", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--approval-policy", choices=("never", "on-request"), default=None)
     ap.add_argument("--sandbox", choices=("read-only", "workspace-write", "danger-full-access"), default=None)
+    ap.add_argument("--tool-output-token-limit", type=int, default=None)
+    ap.add_argument("--transfer-id", default=None, help=argparse.SUPPRESS)
     args = ap.parse_args()
+    if args.tool_output_token_limit is not None and args.tool_output_token_limit <= 0:
+        ap.error("--tool-output-token-limit precisa ser positivo")
     if not args.name:
         print("hangar-codex-tui: --name (ou CP_SESSION_NAME) e obrigatorio", file=sys.stderr)
         return 2
-    os.environ["CP_SESSION_NAME"] = args.name
+    _com_websockets()
+    sys.path.insert(0, str(_REPO / "backend"))
+    from app.adapters.codex import sessions as codex_sessions
+    from app.adapters.codex.lancador import APPROVAL, SANDBOX, PERMISSION_POLICIES, tool_output_override
+    launch_key = None
+    def runtime():
+        live = codex_sessions.load(args.name)
+        if args.transfer_id and launch_key and live and live.get("key") == launch_key:
+            return live
+        return (codex_sessions.transfer_runtime(args.name, args.transfer_id) if args.transfer_id
+                else live)
+
+    def update_runtime(**fields):
+        if args.transfer_id:
+            current = runtime() or {}
+            if current.get("transfer_id") != args.transfer_id:
+                with codex_sessions._locked(args.name):
+                    live = codex_sessions.load(args.name)
+                    if not live or live.get("key") != launch_key:
+                        raise RuntimeError("session_transfer_runtime_identity_changed")
+                    updated = {**live, **fields}
+                    codex_sessions._write(args.name, updated)
+                    return updated
+            from app.conversation_transfer import _processes
+            processes = dict(current.get("processes", {}))
+            for field in ("app_pid", "tui_pid", "launcher_pid"):
+                if fields.get(field):
+                    processes.update(_processes(fields[field]))
+            fields["processes"] = processes
+        return (codex_sessions.update_transfer_runtime(args.name, args.transfer_id, **fields)
+                if args.transfer_id else codex_sessions.update(args.name, **fields))
+
+    existing = runtime()
+    launch_key = (existing or {}).get("key")
+    if args.transfer_id and (not existing or existing.get("thread_id") != args.resume):
+        ap.error("runtime preparado não pertence à conversa pedida")
+    imported_resume = bool(existing and existing.get("transfer_id") and existing.get("thread_id") == args.resume)
+    if imported_resume:
+        required = ("codex_home", "codex_account", "key", "cwd", "permission_mode")
+        if (existing.get("name") != args.name
+                or any(not isinstance(existing.get(field), str) or not existing[field] for field in required)
+                or not Path(existing["codex_home"]).is_absolute()
+                or not Path(existing["cwd"]).is_absolute()
+                or existing["permission_mode"] not in PERMISSION_POLICIES):
+            ap.error("metadados da conversa importada inválidos; nenhuma sessão foi aberta")
+        args.codex_home = args.codex_home if args.codex_home is not None else existing["codex_home"]
+        args.codex_account = args.codex_account if args.codex_account is not None else existing["codex_account"]
+        args.cwd = args.cwd if args.cwd is not None else existing["cwd"]
+        saved_approval, saved_sandbox = PERMISSION_POLICIES[existing["permission_mode"]]
+        args.approval_policy = args.approval_policy if args.approval_policy is not None else saved_approval
+        args.sandbox = args.sandbox if args.sandbox is not None else saved_sandbox
+        for key in ("CP_SESSION_KEY", "TMUX", "TMUX_PANE", "HANGAR_CANO_KEY"):
+            os.environ.pop(key, None)
+        os.environ["CP_SESSION_KEY"] = existing["key"]
+    if existing and existing.get("thread_id") == args.resume:
+        if args.tool_output_token_limit is None:
+            args.tool_output_token_limit = existing.get("tool_output_token_limit")
+        if existing.get("transfer_id"):
+            args.model = args.model if args.model is not None else existing.get("model")
+            args.effort = args.effort if args.effort is not None else existing.get("effort")
+    args.codex_account = args.codex_account if args.codex_account is not None else "default"
     cwd = os.path.abspath(args.cwd or os.getcwd())
     selected_home = (Path(args.codex_home).expanduser().absolute()
                      if args.codex_home else Path(os.environ.get("CODEX_HOME") or
                                                   Path.home() / ".codex").absolute())
+    os.environ["CP_SESSION_NAME"] = args.name
     os.environ["CODEX_HOME"] = str(selected_home)
-
-    _com_websockets()
-    sys.path.insert(0, str(_REPO / "backend"))
-    from app.adapters.codex import sessions as codex_sessions
-    from app.adapters.codex.lancador import APPROVAL, SANDBOX
     approval = args.approval_policy or APPROVAL
     sandbox = args.sandbox or SANDBOX
+    resumed_mode = next((mode for mode, policy in PERMISSION_POLICIES.items()
+                         if policy == (approval, sandbox)), None)
+    if imported_resume and resumed_mode is None:
+        ap.error("combinação de aprovação e sandbox não suportada para conversa importada; sessão preservada")
+    resumed_metadata = ({"codex_home": str(selected_home), "codex_account": args.codex_account,
+                         "cwd": cwd, "permission_mode": resumed_mode} if imported_resume else {})
     from app import codex_contas
     from app.codex_instrucoes import (LIMITE_INSTRUCOES, limite_instrucoes,
                                       preparar_instrucoes, preparar_projeto)
@@ -347,7 +413,7 @@ def main() -> int:
     os.environ.clear()
     os.environ.update(ambiente)
 
-    if not account.is_default:
+    if not account.is_default and not imported_resume:
         try:
             print("hangar-codex-tui: sincronizando a conta Codex…", file=sys.stderr)
             resultado = _preparar_conta_codex(account.id, cwd)
@@ -364,15 +430,16 @@ def main() -> int:
     # Falha (override pessoal, config.toml ilegível) não impede a TUI: fica sem alias e sem limite maior.
     codex_home = selected_home
     limite = LIMITE_INSTRUCOES
-    print("hangar-codex-tui: preparando as instruções do Codex…", file=sys.stderr)
-    if account.is_default:
+    if not imported_resume:
+        print("hangar-codex-tui: preparando as instruções do Codex…", file=sys.stderr)
+    if account.is_default and not imported_resume:
         try:
             preparar_instrucoes(Path.home(), codex_home, Path(cwd))
             limite = limite_instrucoes(codex_home)
         except Exception as exc:                          # noqa: BLE001
             print(f"hangar-codex-tui: instruções nativas não preparadas ({exc}); a sessão abre assim mesmo",
                   file=sys.stderr)
-    else:
+    elif not imported_resume:
         try:
             preparar_projeto(codex_home, Path(cwd))
             limite = limite_instrucoes(codex_home)
@@ -382,7 +449,7 @@ def main() -> int:
 
     # A sessão lê a configuração já reconciliada; quem reconcilia é o BACKEND (um executor só, e
     # uma instalação longa termina lá) — aqui só se avisa e se espera um pouco. Falha não impede a TUI.
-    if account.is_default:
+    if account.is_default and not imported_resume:
         try:
             print("hangar-codex-tui: verificando a integração do Codex…", file=sys.stderr)
             resultado = _integracao_codex()
@@ -403,15 +470,18 @@ def main() -> int:
     # arquivo temporario: PIPE sem consumidor encheria numa sessao longa, e DEVNULL jogaria fora
     # justamente a mensagem que explica uma largada que falhou.
     erros = tempfile.TemporaryFile()
+    # O preparo conferiu a configuração da conta; a retomada não amplia as instruções.
+    instruction_overrides = [] if imported_resume else ["-c", f"project_doc_max_bytes={limite}"]
 
     def subir_servidor() -> subprocess.Popen:
         try:
             return subprocess.Popen(
                 # Sandbox e aprovacao tambem no SERVIDOR: o thread/resume que a TUI faz ao reconectar
                 # nao repassa as flags dela, e a conversa caia em `Workspace` com aprovacao.
-                [_codex(), "app-server", "--listen", endpoint, "-c", f"project_doc_max_bytes={limite}",
-                 "-c", f'sandbox_mode="{sandbox}"', "-c", f'approval_policy="{approval}"'],
-                stdout=subprocess.DEVNULL, stderr=erros,
+                [_codex(), "app-server", "--listen", endpoint, *instruction_overrides,
+                 "-c", f'sandbox_mode="{sandbox}"', "-c", f'approval_policy="{approval}"',
+                 *tool_output_override(args.tool_output_token_limit)],
+                stdout=subprocess.DEVNULL, stderr=erros, cwd=cwd,
             )
         except (OSError, SystemExit) as exc:
             _registrar_falha_servidor(erros, "criar_processo", exc=exc)
@@ -428,18 +498,25 @@ def main() -> int:
         # (o `-m` da TUI) e a pill mostrava vazio — o ramo `_conectar` do sidecar com endpoint so
         # conecta, entao o `default_model` da thread nunca chega a ser lido.
         if previous_thread is None:
-            existing = codex_sessions.load(args.name)
+            existing = runtime()
             if existing and existing.get("key") and existing.get("thread_id") == args.resume == thread_id:
-                codex_sessions.update(args.name, headless=False, cano=None,
+                update_runtime(headless=False, cano=None, launching=False,
                                       endpoint=endpoint, app_pid=servidor.pid, launcher_pid=os.getpid(),
-                                      model=args.model, effort=args.effort, rollout_path=rollout)
+                                      model=args.model, effort=args.effort, rollout_path=rollout,
+                                      tool_output_token_limit=args.tool_output_token_limit, **resumed_metadata)
             else:
                 codex_sessions.save(args.name, thread_id, rollout, cwd,
                                 model=args.model, effort=args.effort,
                                 endpoint=endpoint, app_pid=servidor.pid,
                                 codex_home=str(codex_home),
-                                codex_account=args.codex_account)
+                                codex_account=args.codex_account,
+                                tool_output_token_limit=args.tool_output_token_limit)
         elif thread_id != previous_thread and thread is not None:
+            if args.transfer_id:
+                from app.conversation_transfer import load_transfer, TransferPhase
+                record = load_transfer(args.transfer_id)
+                if not record or record.phase != TransferPhase.COMPLETE:
+                    raise RuntimeError("session_transfer_unexpected_import_turn")
             codex_sessions.switch_thread(args.name, thread, previous_thread,
                                          endpoint=endpoint, app_pid=servidor.pid)
         previous_thread = thread_id
@@ -506,7 +583,7 @@ def main() -> int:
         if not _esperar_porta(endpoint, servidor, erros, _ESPERA_THREAD):
             return 1
         tui = subprocess.Popen(argv)
-        codex_sessions.update(args.name, tui_pid=tui.pid)
+        update_runtime(tui_pid=tui.pid)
         # O servidor pode morrer com a TUI viva (SIGTERM alheio, crash). A TUI `--remote` tenta
         # reconectar por ~1 min e depois desiste PRA SEMPRE — nem mensagem nova a acorda. Subir
         # outro na MESMA porta dentro dessa janela faz ela retomar a thread sozinha, sem relançar
@@ -529,7 +606,10 @@ def main() -> int:
                     # Vivo sem porta enganaria o `poll()` acima; morto, conta como queda.
                     servidor.kill()
                     continue
-                codex_sessions.update_app_pid(args.name, servidor.pid)
+                if args.transfer_id:
+                    update_runtime(app_pid=servidor.pid)
+                else:
+                    codex_sessions.update_app_pid(args.name, servidor.pid)
                 # A escuta antiga morreu com o socket. Sem uma nova, sessao que caiu antes do
                 # primeiro thread/started nunca ganharia sidecar (update_app_pid e no-op sem ele).
                 escuta = threading.Thread(target=_espera_thread,
@@ -555,8 +635,14 @@ def main() -> int:
         # So apaga o sidecar que e NOSSO: uma sessao recriada com o mesmo nome ja teria reescrito o
         # arquivo, e apagar o dela deixaria a sessao viva invisivel pro app.
         meta = codex_sessions.load(args.name)
-        if meta and meta.get("app_pid") == servidor.pid:
-            codex_sessions.delete(args.name)
+        if meta and meta.get("app_pid") == servidor.pid and (not args.transfer_id or meta.get("key") == launch_key):
+            if args.transfer_id:
+                from app.conversation_transfer import load_transfer, TransferPhase
+                record = load_transfer(args.transfer_id)
+                if record and record.phase == TransferPhase.COMPLETE:
+                    codex_sessions.delete(args.name)
+            else:
+                codex_sessions.delete(args.name)
 
 
 if __name__ == "__main__":

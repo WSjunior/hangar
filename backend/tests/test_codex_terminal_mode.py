@@ -15,7 +15,8 @@ def transition(tmp_path, monkeypatch):
     rollout.write_text("{}\n")
     sessions.save("sess", "thread-1", str(rollout), str(tmp_path), headless=True,
                   key="identity", codex_home=str(tmp_path), codex_account="work",
-                  permission_mode="Ask for approval", jev=True)
+                  permission_mode="Ask for approval", jev=True,
+                  transfer_id="transfer", tool_output_token_limit=144000)
     adapter = module.CodexAdapter()
     client = SimpleNamespace(server_requests={}, close=AsyncMock())
     adapter._sessions["sess"] = dict(client=client, turn_state_known=True, in_progress=False,
@@ -53,10 +54,12 @@ async def test_terminal_preserves_identity_and_permissions(transition, monkeypat
     assert "--resume thread-1" in command and "--codex-account work" in command
     assert "--model model" in command and "--effort high" in command
     assert "--approval-policy on-request" in command and "--sandbox read-only" in command
+    assert "--tool-output-token-limit 144000" in command
     assert kwargs["env"]["CP_SESSION_KEY"] == "identity"
     meta = sessions.load("sess")
     assert not meta["headless"] and meta["key"] == "identity" and meta["jev"]
     assert meta["permission_mode"] == "Ask for approval"
+    assert meta["tool_output_token_limit"] == 144000 and meta["transfer_id"] == "transfer"
     adapter.set_mode.assert_awaited_once_with("sess", "plan")
     probe.close.assert_awaited_once()
 
@@ -69,6 +72,7 @@ async def test_failed_terminal_restores_headless_conversation(transition, monkey
     restored = sessions.load("sess")
     assert restored["headless"] and restored["thread_id"] == "thread-1"
     assert restored["key"] == "identity" and restored["permission_mode"] == "Ask for approval"
+    assert restored["tool_output_token_limit"] == 144000 and restored["transfer_id"] == "transfer"
     adapter._subir_sem_terminal.assert_awaited_once_with("sess", restored)
 
 
@@ -108,6 +112,8 @@ async def test_headless_preserves_current_permissions_and_thread(terminal_transi
     assert (meta["model"], meta["effort"]) == ("current-model", "low")
     assert meta["key"] == "identity" and meta["codex_account"] == "work" and meta["jev"]
     assert meta["endpoint"] is None and meta["app_pid"] is None
+    assert adapter._subir_sem_terminal.call_args.args[1]["tool_output_token_limit"] == 144000
+    assert meta["transfer_id"] == "transfer"
     client.close.assert_awaited_once()
     client.request.assert_awaited_once_with("thread/resume", {"threadId": "thread-1"})
     adapter.set_mode.assert_awaited_once_with("sess", "plan")
@@ -125,6 +131,8 @@ async def test_headless_failure_restores_terminal(terminal_transition, monkeypat
     assert not meta["headless"] and meta["thread_id"] == "thread-1"
     assert len(launched) == 1 and "--resume thread-1" in launched[0][2]
     assert "--sandbox read-only" in launched[0][2]
+    assert "--tool-output-token-limit 144000" in launched[0][2]
+    assert meta["transfer_id"] == "transfer"
     adapter._conectar.assert_awaited_once()
 
 

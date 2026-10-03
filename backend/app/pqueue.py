@@ -325,7 +325,9 @@ def _chaves_de_commit(text: str) -> set[str]:
     return out
 
 
-def fila_interna_pendente(jsonl: str, provider: str = "claude") -> set[str]:
+def fila_interna_pendente(jsonl: str, provider: str = "claude", *,
+                          min_offset: int = 0, prefix_digest: str | None = None,
+                          imported_item_ids: tuple[str, ...] = ()) -> set[str]:
     """Textos que o Claude Code ENFILEIROU (`queue-operation`/enqueue) e ainda nao consumiu.
 
     Entre o enqueue e o dequeue/remove a mensagem existe so na fila interna da TUI: o
@@ -337,7 +339,8 @@ def fila_interna_pendente(jsonl: str, provider: str = "claude") -> set[str]:
     """
     if provider != "claude":
         return set()
-    lido = _ler_indice(jsonl, provider)
+    lido = _ler_indice(jsonl, provider, min_offset=min_offset, prefix_digest=prefix_digest,
+                       imported_item_ids=imported_item_ids)
     if lido is None:
         return set()
     out: set[str] = set()
@@ -358,17 +361,22 @@ class _CommittedIndex:
     dezenas de MB a cada vez prendia um núcleo inteiro. Troca de arquivo, truncamento ou reescrita
     (âncora dos bytes antes do offset não bate) zeram o índice e releem do início."""
 
-    def __init__(self, provider: str):
+    def __init__(self, provider: str, min_offset: int = 0, prefix_digest: str | None = None,
+                 imported_item_ids: tuple[str, ...] = ()):
         self.provider = provider
+        self.min_offset = min_offset
+        self.prefix_digest = prefix_digest
+        self.boundary_digest = prefix_digest
+        self.imported_item_ids = frozenset(imported_item_ids)
         self.lock = threading.Lock()
-        self.offset = 0
+        self.offset = min_offset
         self.signature = None
         self.anchor = b""
         self.lines: set[str] = set()
         self.pendente: list[str] = []   # fila interna do Claude Code, na ordem do enqueue
 
     def _zera(self) -> None:
-        self.offset = 0
+        self.offset = self.min_offset
         self.lines.clear()
         self.pendente.clear()
 
@@ -435,7 +443,17 @@ class _CommittedIndex:
             try:
                 with open(path, "rb") as fh:
                     stat = os.fstat(fh.fileno())
-                    signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+                    signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns,
+                                 stat.st_ctime_ns)
+                    if self.min_offset:
+                        from app.conversation_history import verified_prefix, HistoryError
+                        if stat.st_size < self.min_offset:
+                            raise OSError("transcript truncado antes da importação")
+                        try:
+                            digest, _ = verified_prefix(path, self.min_offset, self.boundary_digest)
+                        except HistoryError as exc:
+                            raise OSError("fronteira da importação mudou") from exc
+                        self.boundary_digest = digest
                     fh.seek(max(0, self.offset - len(self.anchor)))
                     unchanged = fh.read(len(self.anchor)) == self.anchor
                     if self.signature and (signature[:2] != self.signature[:2]
@@ -451,10 +469,18 @@ class _CommittedIndex:
                             break  # Linha incompleta não comprova entrega nem avança o índice.
                         self.offset = fh.tell()
                         try:
-                            obj = json.loads(raw.decode("utf-8", "replace"))
-                        except ValueError:
+                            obj = json.loads(raw.decode("utf-8", "strict" if self.min_offset else "replace"))
+                        except (ValueError, UnicodeError) as exc:
+                            if self.min_offset:
+                                raise OSError("linha inválida após a importação") from exc
                             continue
                         if not isinstance(obj, dict):
+                            if self.min_offset:
+                                raise OSError("registro inválido após a importação")
+                            continue
+                        payload = obj.get("payload") or {}
+                        item_id = payload.get("id") if isinstance(payload, dict) else None
+                        if item_id in self.imported_item_ids or obj.get("id") in self.imported_item_ids:
                             continue
                         if parse is None:
                             self._alimenta_claude(obj)
@@ -465,7 +491,9 @@ class _CommittedIndex:
                     current = os.stat(path)
                     if ((current.st_dev, current.st_ino) != signature[:2]
                             or current.st_size < stat.st_size
-                            or current.st_size == stat.st_size and current.st_mtime_ns != stat.st_mtime_ns):
+                            or current.st_size == stat.st_size and (
+                                current.st_mtime_ns != stat.st_mtime_ns
+                                or current.st_ctime_ns != stat.st_ctime_ns)):
                         raise OSError("transcript mudou durante a confirmação")
                     fh.seek(max(0, self.offset - 256))
                     self.anchor = fh.read(min(self.offset, 256))
@@ -479,16 +507,23 @@ class _CommittedIndex:
                 return None
 
 
-_indices: dict[tuple[str, str], _CommittedIndex] = {}
+_indices: dict[tuple[str, str, int], _CommittedIndex] = {}
 _indices_lock = threading.Lock()
 _INDICES_MAX = 32
 _INDICE_CHARS = 1_000_000
 
 
-def _ler_indice(jsonl: str, provider: str) -> tuple[set[str], list[str]] | None:
-    chave = (str(Path(jsonl)), provider if provider in ("codex", "pi", "omp", "kimi") else "claude")
+def _ler_indice(jsonl: str, provider: str, *, min_offset: int = 0,
+                prefix_digest: str | None = None,
+                imported_item_ids: tuple[str, ...] = ()) -> tuple[set[str], list[str]] | None:
+    if min_offset < 0:
+        raise ValueError("fronteira de confirmação inválida")
+    chave = (str(Path(jsonl)), provider if provider in ("codex", "pi", "omp", "kimi") else "claude", min_offset)
     with _indices_lock:
-        index = _indices.pop(chave, None) or _CommittedIndex(chave[1])
+        index = _indices.pop(chave, None)
+        if (index is None or index.prefix_digest != prefix_digest
+                or index.imported_item_ids != frozenset(imported_item_ids)):
+            index = _CommittedIndex(chave[1], min_offset, prefix_digest, imported_item_ids)
         _indices[chave] = index
         while len(_indices) > _INDICES_MAX:
             del _indices[next(iter(_indices))]
@@ -501,7 +536,9 @@ def _ler_indice(jsonl: str, provider: str) -> tuple[set[str], list[str]] | None:
     return lido
 
 
-def committed_user_lines(jsonl: str, provider: str = "claude") -> set[str] | None:
+def committed_user_lines(jsonl: str, provider: str = "claude", *,
+                         min_offset: int = 0, prefix_digest: str | None = None,
+                         imported_item_ids: tuple[str, ...] = ()) -> set[str] | None:
     """Textos que ATERRISSARAM no transcript (inteiros + por linha), pra confirmar entregas.
 
     None = NAO DEU PRA LER o transcript. Nunca um set vazio nesse caso, e a diferenca e o bug:
@@ -526,7 +563,8 @@ def committed_user_lines(jsonl: str, provider: str = "claude") -> set[str] | Non
     # Variantes (cru, sem "[Image #N]", sem marcador de anexo, por linha): ver _chaves_de_commit.
     # Falha de leitura devolve None, nunca o set parcial: "estas 40 chegaram e as suas nao" fazia
     # a que faltava ser redigitada.
-    lido = _ler_indice(jsonl, provider)
+    lido = _ler_indice(jsonl, provider, min_offset=min_offset, prefix_digest=prefix_digest,
+                       imported_item_ids=imported_item_ids)
     return None if lido is None else lido[0]
 
 
@@ -994,6 +1032,10 @@ def merged_history(name: str, jsonl: str, provider: str = "claude",
     dimensiona a janela. Trade-off aceito (ponytail): committed_ts enxerga so a janela, entao
     entrada de fila NAO-confirmada cujo commit ficou fora dela reapareceria como pendente -- na
     pratica o reconcile marca `confirmed` e a entrada nem chega aqui."""
+    from app.conversation_history import session_transfer, composed_history
+    record = session_transfer(name, jsonl, provider)
+    if record:
+        return composed_history(name, jsonl, provider, record, limit)
     _pi_stream = None
     if provider == "codex":
         from app.adapters.codex.rollout import parse_rollout_obj as _parse
@@ -1104,6 +1146,13 @@ def merged_history(name: str, jsonl: str, provider: str = "claude",
     else:
         _parse_from(0)
 
+    return merge_current_queue(name, items, committed_ts, prev_ts, start_ts)
+
+
+def merge_current_queue(name: str, items: list[tuple[float, int, ChatEvent]],
+                        committed_ts: dict[str, float], prev_ts: float,
+                        start_ts: float) -> list[ChatEvent]:
+    """Reconcilia uma fila com commits apenas da fonte ativa."""
     # Entradas da fila entram com tiebreaker alto -> caem DEPOIS de eventos do transcript de mesmo ts.
     for entry in PromptQueue(name).load():
         text = (entry.get("text") or "").strip()
@@ -1163,6 +1212,11 @@ def historico_etag(name: str, jsonl: str, provider: str, limit: int | None) -> s
     nao mexe no tamanho nem no relogio nao existe aqui. Sem o transcript nao ha validador (None):
     melhor sempre baixar do que servir 304 sobre um arquivo que nem da pra medir.
     """
+    from app.conversation_history import session_transfer, composition_etag
+    record = session_transfer(name, jsonl, provider)
+    if record:
+        return composition_etag(name, jsonl, provider, record, limit, _CODIGO)
+
     def marca(p: str | Path) -> str:
         try:
             st = os.stat(p)

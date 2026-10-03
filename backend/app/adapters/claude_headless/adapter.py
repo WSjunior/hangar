@@ -321,6 +321,10 @@ class ClaudeHeadlessAdapter:
         return self._delivery_locks.setdefault(name, asyncio.Lock())
 
     async def deliverable(self, name: str) -> bool:
+        from app.conversation_transfer import transfer_active
+        if transfer_active(name):
+            return False
+
         # Parada ou subindo: o prompt vai pra fila e a resposta HTTP sai na hora. Quem sobe é o
         # `acordar`, e quem entrega é o fim do `initialize` — nunca o POST esperando os hooks.
         sess = self._sessions.get(name)
@@ -329,6 +333,10 @@ class ClaudeHeadlessAdapter:
         return not (sess.iniciando or sess.in_progress or sess.pending or sess.question)
 
     def acordar(self, name: str) -> None:
+        from app.conversation_transfer import transfer_active
+        if transfer_active(name):
+            return None
+
         """Sobe (ou religa) a sessão em segundo plano e entrega a fila quando ela estiver pronta."""
         self._subidas.pop(name, None)   # ação do usuário: nova rodada de tentativas
         sess = self._sessions.get(name)
@@ -348,6 +356,10 @@ class ClaudeHeadlessAdapter:
             await self._drenar_fim_de_turno(sess)
 
     async def send_prompt(self, name: str, text: str) -> str:
+        from app.conversation_transfer import transfer_active
+        if transfer_active(name):
+            return "deferred"
+
         sess = await self.ensure_running(name, esperar_pronta=False)
         if sess is not None:
             # Antes de qualquer outra espera: a vigia confere isto logo antes de encerrar.
@@ -370,6 +382,8 @@ class ClaudeHeadlessAdapter:
         return "sent"
 
     async def _escrever_prompt(self, sess: _Sessao, text: str) -> None:
+        from app.conversation_transfer import require_available
+        require_available(sess.name)
         blocos, avisos = await asyncio.to_thread(_blocos_do_prompt, text)
         await self._write(sess, {
             "type": "user", "session_id": "", "parent_tool_use_id": None,
@@ -379,7 +393,12 @@ class ClaudeHeadlessAdapter:
             await self._nota_local(sess, aviso)
 
     async def drain(self, name: str, path: str) -> int:
+        from app.conversation_transfer import transfer_active
+        if transfer_active(name):
+            return 0
         async with self.delivery_lock(name):
+            if transfer_active(name):
+                return 0
             q = PromptQueue(name)
             if not any(e.get("delivered") is False for e in await asyncio.to_thread(q.load)):
                 return 0
@@ -674,17 +693,22 @@ class ClaudeHeadlessAdapter:
     # snapshot em cano.py e a decisão em docs/decisoes/harnesses.md.
 
     async def ensure_running(self, name: str, *, so_reconectar: bool = False,
-                             esperar_pronta: bool = True) -> _Sessao | None:
-        sess = await self._ligar(name, so_reconectar=so_reconectar)
+                             esperar_pronta: bool = True, transfer_id: str | None = None) -> _Sessao | None:
+        sess = await self._ligar(name, so_reconectar=so_reconectar, transfer_id=transfer_id)
         if sess is not None and esperar_pronta and sess.iniciando:
             # Controles (set_model, modo, lista de modelos) só valem depois do `initialize`.
             await asyncio.wait_for(sess.initialized.wait(), _TETO_INIT_S + 5)
         return sess
 
-    async def _ligar(self, name: str, *, so_reconectar: bool = False) -> _Sessao | None:
+    async def _ligar(self, name: str, *, so_reconectar: bool = False, transfer_id: str | None = None) -> _Sessao | None:
         # Um spawn por nome de cada vez: prompt e troca de modelo chegando juntos numa sessão
         # parada subiriam dois `claude` no mesmo .jsonl.
         async with self._spawn_locks.setdefault(name, asyncio.Lock()):
+            from app.conversation_transfer import transfer_for_session, TransferPhase
+            record = transfer_for_session(name)
+            if record and record.phase not in {TransferPhase.COMPLETE, TransferPhase.REJECTED, TransferPhase.ROLLED_BACK}:
+                if not so_reconectar and (transfer_id != record.id or record.phase != TransferPhase.RESTORING):
+                    return None
             sess = self._sessions.get(name)
             if sess is not None and sess.vivo:
                 return sess

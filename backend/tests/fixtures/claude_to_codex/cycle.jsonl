@@ -1,0 +1,2 @@
+{"type": "user", "uuid": "u-cycle", "parentUuid": "a-cycle", "message": {"role": "user", "content": "a"}}
+{"type": "assistant", "uuid": "a-cycle", "parentUuid": "u-cycle", "message": {"role": "assistant", "content": "b"}}

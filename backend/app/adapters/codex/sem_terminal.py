@@ -17,7 +17,7 @@ from app import codex_contas, runtime_config
 from app.adapters.claude_headless import adapter as hl_adapter
 from app.adapters.codex import sessions as codex_sessions
 from app.adapters.codex.appserver import AppServerClient
-from app.adapters.codex.lancador import CLIENT_INFO
+from app.adapters.codex.lancador import CLIENT_INFO, PERMISSION_POLICIES, tool_output_override
 
 
 class Ocupada(RuntimeError):
@@ -32,11 +32,11 @@ class ShutdownPending(RuntimeError):
 # o que separa os dois primeiros é só o sandbox — e sandbox não troca ao vivo por RPC
 # (`codex_permissions.py`), por isso ele vai no `-c` da subida e trocar é reiniciar o servidor.
 MODOS: list[tuple[str, str, str, str]] = [
-    ("Ask for approval", "on-request", "read-only",
+    ("Ask for approval", *PERMISSION_POLICIES["Ask for approval"],
      "Codex só lê o workspace; editar ou rodar comando pede aprovação."),
-    ("Approve for me", "on-request", "workspace-write",
+    ("Approve for me", *PERMISSION_POLICIES["Approve for me"],
      "Codex edita o workspace sozinho; fora dele ou com rede, pede aprovação."),
-    ("Full Access", "never", "danger-full-access",
+    ("Full Access", *PERMISSION_POLICIES["Full Access"],
      "Codex faz tudo sem perguntar."),
 ]
 MODO_PADRAO = "Full Access"
@@ -88,7 +88,8 @@ def modos_para_tela(atual: str | None) -> dict:
 def argv(meta: dict) -> list[str]:
     approval, sandbox = politica(meta.get("permission_mode"))
     return ["codex", "app-server", "--stdio",
-            "-c", f'sandbox_mode="{sandbox}"', "-c", f'approval_policy="{approval}"']
+            "-c", f'sandbox_mode="{sandbox}"', "-c", f'approval_policy="{approval}"',
+            *tool_output_override(meta.get("tool_output_token_limit"))]
 
 
 def _ambiente(meta: dict) -> dict:
@@ -112,15 +113,22 @@ def _ambiente(meta: dict) -> dict:
     return env
 
 
-async def subir(meta: dict, tarefas: set | None = None) -> dict:
+async def subir(meta: dict, tarefas: set | None = None, *, prepared: bool = False) -> dict:
     """Sobe o cano com o app-server dentro e grava `cano` no sidecar. Devolve o dict do cano."""
     if shutil.which("codex") is None:
         raise RuntimeError("binário não encontrado: codex")
     log = codex_sessions._dir() / f"cano-{meta['key'][:16]}.log"
     comando = argv(meta)
+    if prepared:
+        codex_sessions.update_transfer_runtime(meta["name"], meta["transfer_id"], launching=True)
     cano, _ = await hl_adapter.subir_cano_processo(comando, cwd=meta["cwd"], env=_ambiente(meta),
                                                    key=meta["key"], log=log, tarefas=tarefas)
-    codex_sessions.update(meta["name"], cano=cano)
+    if prepared:
+        from app.conversation_transfer import _processes
+        codex_sessions.update_transfer_runtime(meta["name"], meta["transfer_id"], cano=cano,
+                                                processes=_processes(cano["pid"]), launching=False)
+    else:
+        codex_sessions.update(meta["name"], cano=cano)
     return cano
 
 

@@ -155,6 +155,51 @@ def _decorate_plan(info) -> None:
     info.plan_tasks = [(t.done, t.total) for t in p.tasks[:_MAX_PLAN_TASK_SEGMENTS]]
 
 
+
+def _decorate_transfers(infos: list[SessionInfo]) -> None:
+    from app import conversation_transfer as transfers
+    rows = {info.name: info for info in infos}
+    for info in infos:
+        record = transfers.transfer_for_session(info.name, lifecycle_id=info.lifecycle_id, source_path=info.jsonl)
+        if record is None and info.provider == "codex" and info.codex_home:
+            meta = codex_sessions.load(info.name)
+            if meta and meta.get("thread_id"):
+                prepared = transfers.transfer_for_thread(info.codex_home, meta["thread_id"])
+                if (prepared and prepared.name == info.name and prepared.phase not in
+                        {transfers.TransferPhase.COMPLETE, transfers.TransferPhase.REJECTED,
+                         transfers.TransferPhase.ROLLED_BACK}):
+                    record = prepared
+        if record:
+            info.transfer_id, info.transfer_phase = record.id, record.phase.value
+    for record in transfers.list_incomplete():
+        info = rows.get(record.name)
+        if info and info.transfer_id != record.id:
+            # Uma sessão recriada com o nome antigo não pertence à recuperação.
+            continue
+        origin = record.origin_meta
+        if info is None:
+            info = SessionInfo(name=record.name)
+            infos.append(info)
+            rows[record.name] = info
+        # A fase é apresentação; não inventa um estado físico de turno em execução.
+        info.cwd = origin.get("cwd")
+        info.jsonl = record.source.path if record.source else origin.get("jsonl")
+        info.provider = "claude"
+        info.headless = bool(origin.get("headless"))
+        info.engine = origin.get("engine")
+        info.codex_home = None
+        cdir = origin.get("config_dir") or Path.home() / ".claude"
+        info.conta = f"claude:{Path(cdir).resolve(strict=False)}"
+        info.lifecycle_id = record.source_life
+        info.transfer_id, info.transfer_phase = record.id, record.phase.value
+        info.problema = record.error_code
+        pair = PairLink(record.name).get() or {}
+        info.pair_peers, info.pair_gid, info.pair_task = pair.get("peers"), pair.get("gid"), pair.get("task")
+        info.pair_external = _pair_external(record.name, pair.get("peers"))
+        info.then_target = (ThenLink(record.name).get() or {}).get("target")
+        infos[:] = [row for row in infos if row.name != record.name or row is info]
+
+
 def sanitize_cwd(cwd: str) -> str:
     # O Claude indexa pelo cwd sem separador final ("/home/x/" e "C:\\x\\" caem em "-home-x" e
     # "C--x"); só a raiz ("/", "C:\\") mantém o seu.
@@ -1203,9 +1248,12 @@ class SessionRegistry:
         # state (sai 'idle' default): este caminho so resolve transcript; quem quer state usa
         # list_with_state(). Usado por varios endpoints que so precisam do jsonl por nome.
         children = _proc_children_map()
+        from app.share_life import session_life
         out = []
         sids: dict[str, Optional[str]] = {}
-        for panes in tmux.list_panes_all().values():
+        pane_groups = tmux.list_panes_all()
+        terminal_births = {name: panes[0].get("session_created") for name, panes in pane_groups.items() if panes}
+        for panes in pane_groups.values():
             # Sessao de shell ESCONDIDA (Task 6, botao "+" do painel de terminal): marcada por
             # opcao de usuario tmux (@cp_hidden), herdada por TODOS os panes/janelas da sessao (
             # confirmado na revisao), lida de carona no MESMO list-panes acima -- sem isto ela
@@ -1276,6 +1324,7 @@ class SessionRegistry:
             # Transcript de chute (untracked) pode ser de outra sessão: não decide onde esta está.
             loc = worktrees.locate(prov, p["cwd"], jsonl if tracked else None)
             info = SessionInfo(name=p["name"], cwd=p["cwd"], jsonl=jsonl, tracked=tracked,
+                               lifecycle_id=session_life(p["name"], meta=None, birth=p.get("session_created")),
                                branch=loc.branch, worktree=loc.worktree,
                                worktree_path=loc.worktree_path, worktree_gone=loc.worktree_gone,
                                then_target=link.get("target") if link else None,
@@ -1328,13 +1377,14 @@ class SessionRegistry:
         self._dedupe_collisions(out, sids)
         # Sessoes Codex: a TUI vive no tmux, mas a identidade vem dos sidecars duraveis (sobrevivem
         # a restart; o historico esta no rollout). O client vivo e reaberto sob demanda.
-        for meta in codex_sessions.list_all():
+        for meta in codex_sessions.list_all(include_incomplete=True):
             codex_home = str(Path(meta.get("codex_home") or codex_contas.default_home())
                              .expanduser().resolve(strict=False))
             cwd = cwd_atual(meta)
             loc = worktrees.locate("codex", cwd, meta.get("rollout_path"))
             out.append(SessionInfo(
                 name=meta["name"], cwd=cwd, jsonl=meta.get("rollout_path") or None,
+                lifecycle_id=session_life(meta["name"], meta=meta, birth=terminal_births.get(meta["name"])),
                 provider="codex", tracked=True, conta=f"codex:{codex_home}",
                 codex_home=codex_home, headless=bool(meta.get("headless")),
                 branch=loc.branch, worktree=loc.worktree,
@@ -1356,6 +1406,7 @@ class SessionRegistry:
             cdir = meta.get("config_dir")
             out.append(SessionInfo(
                 name=meta["name"], cwd=cwd, jsonl=jsonl,
+                lifecycle_id=session_life(meta["name"], meta=meta, birth=None),
                 provider="claude", headless=True, tracked=True, engine=meta.get("engine"),
                 conta=f"claude:{Path(cdir or Path.home() / '.claude').resolve()}",
                 branch=loc.branch, worktree=loc.worktree,
@@ -1377,6 +1428,7 @@ class SessionRegistry:
             out.append(SessionInfo(
                 name=run["name"], cwd=run["repo"], jsonl=run["timeline"], provider="orq",
                 tracked=True, pair_gid=run["gid"], orq_arbiter=run["arbiter"]))
+        _decorate_transfers(out)
         try:
             self._varrer_pares_mortos({i.name for i in out})
         except Exception as e:
@@ -1416,6 +1468,10 @@ class SessionRegistry:
             infos = await asyncio.to_thread(self.list)
         # Orquestrador: sem pane, hook, statusline nem git próprio. O estado sai só da atividade da
         # linha do tempo, e a linha fica fora de tudo abaixo (captura de pane, marcador, radar).
+        from app.conversation_transfer import TransferPhase
+        terminal_phases = {p.value for p in (TransferPhase.COMPLETE, TransferPhase.REJECTED, TransferPhase.ROLLED_BACK)}
+        transfers = [i for i in infos if i.transfer_phase and i.transfer_phase not in terminal_phases]
+        infos = [i for i in infos if not i.transfer_phase or i.transfer_phase in terminal_phases]
         orqs = [i for i in infos if getattr(i, "provider", "claude") == "orq"]
         if orqs:
             def _orq_state():
@@ -1423,8 +1479,19 @@ class SessionRegistry:
                     i.state, i.last_activity = orq_runs.activity(i.jsonl)
             await asyncio.to_thread(_orq_state)
             infos = [i for i in infos if getattr(i, "provider", "claude") != "orq"]
+        async def decorate_access(rows):
+            active = share_store.active_sessions()
+            for row in rows:
+                row.shared = row.name in active
+            if guest_users.has_claims():
+                def owners():
+                    for row in rows:
+                        row.owner = guest_users.owner_name(row.name)
+                await asyncio.to_thread(owners)
+
         if not infos:
-            return orqs
+            await decorate_access(orqs + transfers)
+            return orqs + transfers
         # Estado pela marca dos hooks quando existe (custo ~0); senao cai no pane (fallback).
         # NOTA: o sweep de STATUSLINE (mais abaixo) captura pane mesmo de sessao com marcador —
         # a statusline nao tem outra fonte. O "custo ~0" continua valendo pra CLASSIFICACAO; o
@@ -1817,15 +1884,8 @@ class SessionRegistry:
         await asyncio.to_thread(_decorate_planos)
         for info in infos:
             _decorate_loop(info)
-        ativos = share_store.active_sessions()
-        for info in infos:
-            info.shared = info.name in ativos
-        if guest_users.has_claims():
-            def _owners() -> None:
-                for info in infos:
-                    info.owner = guest_users.owner_name(info.name)
-            await asyncio.to_thread(_owners)
-        return infos + orqs
+        await decorate_access(infos + orqs + transfers)
+        return infos + orqs + transfers
 
     @diag.rastrear("sessao.criar")
     def create(self, name: str, cwd: str, config_dir: str | None = None,
@@ -1839,13 +1899,17 @@ class SessionRegistry:
                read_only: bool = False,
                headless: bool = False,
                subagent_model: str | None = None,
-               jev: bool = False) -> SessionInfo:
+               jev: bool = False, transfer_id: str | None = None,
+               tool_output_token_limit: int | None = None,
+               transfer_rollout_path: str | None = None) -> SessionInfo:
         # Nome tmux nao aceita "."/":"/espaco -> sanitiza igual ao rename. Varias sessoes na MESMA
         # pasta sao permitidas: cada uma tem nome unico + --session-id proprio -> jsonl proprio.
         name = sanitize_session_name(name)
         diag.registrar("sessao.criar_etapa", sessao=name, provider=provider, etapa="validar")
         if not name:
             raise ValueError("nome invalido")
+        from app.conversation_transfer import require_available
+        require_available(name)
         if subagent_model is not None:
             if provider != "claude" or engine:
                 raise ValueError("modelo dos subagentes so vale para claude sem motor")
@@ -1854,6 +1918,25 @@ class SessionRegistry:
             # "padrão" na tela vira o modo da conta AQUI, não lá no arranque: assim a sessão nasce
             # no modo que o app mostra, na máquina que define `defaultMode` e na que não define.
             permission_mode = modo_permissao.modo_da_conta(config_dir)
+        if transfer_rollout_path is not None and transfer_id is None:
+            raise ValueError("session_transfer_invalid_record")
+        if transfer_id is not None:
+            from app.conversation_transfer import load_transfer, TransferPhase
+            from app.conversation_history import source_rows, verify_boundary
+            record = load_transfer(transfer_id)
+            target = record.destination_meta if record else None
+            if (provider != "codex" or record is None or record.phase != TransferPhase.COMPLETE
+                    or not target or target.get("thread_id") != resume_session_id
+                    or target.get("codex_account") != (codex_account or "default")):
+                raise ValueError("session_transfer_invalid_record")
+            source_rows(record.source)
+            transfer_rollout_path = transfer_rollout_path or target["rollout_path"]
+            verify_boundary(record, transfer_rollout_path)
+            if tool_output_token_limit != target.get("tool_output_token_limit"):
+                raise ValueError("session_transfer_invalid_record")
+            model = model if model is not None else target.get("model")
+            effort = effort if effort is not None else target.get("effort")
+            permission_mode = permission_mode if permission_mode is not None else target.get("permission_mode")
         if headless:
             if provider not in ("claude", "codex"):
                 raise ValueError("sessao sem terminal so vale para provider claude ou codex")
@@ -1863,7 +1946,8 @@ class SessionRegistry:
                 if engine:
                     raise ValueError("motor so vale para provider claude")
                 return self._create_codex_headless(name, cwd, resume_session_id, model, effort,
-                                                   permission_mode, codex_account, jev)
+                                                   permission_mode, codex_account, jev,
+                                                   transfer_id, tool_output_token_limit, transfer_rollout_path)
             return self._create_headless(name, cwd, config_dir, resume_session_id, engine, model,
                                          effort, context_window, permission_mode, subagent_model,
                                          jev)
@@ -1968,7 +2052,9 @@ class SessionRegistry:
                 from app.adapters.codex.lancador import comando_do_lancador
                 cmd = tmux.join_cmd(comando_do_lancador(cwd, thread_id=sid,
                                                        codex_home=codex_home,
-                                                       codex_account=account.id))
+                                                       codex_account=account.id,
+                                                       model=model, effort=effort,
+                                                       tool_output_token_limit=tool_output_token_limit))
             elif provider == "omp":
                 # Retoma por CAMINHO: o id interno do omp nao e o do nome do arquivo, e spawn e
                 # resume sao verbos diferentes — reusar o spawn abriria conversa nova.
@@ -2061,7 +2147,7 @@ class SessionRegistry:
         if provider == "kimi":
             from app.adapters.kimi import sessions as kimi_sessions
             kimi_sessions.pretrust_cwd(cwd)
-        elif provider == "codex" and account.is_default:
+        elif provider == "codex" and account.is_default and transfer_id is None:
             codex_sessions.pretrust_cwd(cwd, codex_home=codex_home)
         elif provider not in ("pi", "omp", "codex"):
             _pretrust_cwd(cwd, config_dir)
@@ -2070,7 +2156,19 @@ class SessionRegistry:
         diag.registrar("sessao.criar_etapa", sessao=name, provider=provider, etapa="criar_terminal")
         self._forget(name)
         env_pane = _env_sessao(subagent_model, jev, provider, nome=name)
+        if transfer_id is not None:
+            key = uuid.uuid4().hex
+            codex_sessions.save(name, sid, transfer_rollout_path, cwd, model=model, effort=effort,
+                                codex_home=codex_home, codex_account=account.id, key=key,
+                                transfer_id=transfer_id, tool_output_token_limit=tool_output_token_limit,
+                                permission_mode=permission_mode, previous_non_plan=target.get("previous_non_plan"),
+                                launching=True)
+            env_pane.setdefault("env", {})["CP_SESSION_KEY"] = key
         if not tmux.new_session(name, cwd, cmd, config_dir, provider=provider, **env_pane):
+            if transfer_id is not None and not tmux.has_session(name):
+                current = codex_sessions.load(name)
+                if current and current.get("key") == key and current.get("launching"):
+                    codex_sessions.delete(name)
             diag.registrar("sessao.criar_recusada", "erro", sessao=name, provider=provider,
                            detalhe="terminal_nao_criado")
             raise ValueError("falha ao criar sessao no tmux")
@@ -2149,7 +2247,10 @@ class SessionRegistry:
 
     def _create_codex_headless(self, name: str, cwd: str, resume_thread_id: str | None,
                                model: str | None, effort: str | None, permission_mode: str | None,
-                               codex_account: str | None, jev: bool = False) -> SessionInfo:
+                               codex_account: str | None, jev: bool = False,
+                               transfer_id: str | None = None,
+                               tool_output_token_limit: int | None = None,
+                               transfer_rollout_path: str | None = None) -> SessionInfo:
         """Sessão Codex SEM terminal: grava o sidecar; o app-server sobe no cano logo em seguida
         pelo `watch_sessions` do adapter (aquece na criação, não no primeiro prompt)."""
         from app.adapters.codex import sem_terminal
@@ -2167,13 +2268,20 @@ class SessionRegistry:
                 m[0].lower() == permission_mode.strip().lower() for m in sem_terminal.MODOS):
             raise ValueError("permission_mode: use um de " + ", ".join(m[0] for m in sem_terminal.MODOS))
         diag.registrar("sessao.criar_etapa", sessao=name, provider="codex", etapa="confiar_pasta")
-        codex_sessions.pretrust_cwd(cwd, codex_home=codex_home)
+        if transfer_id is None:
+            codex_sessions.pretrust_cwd(cwd, codex_home=codex_home)
         self._forget(name)
-        rollout = sem_terminal.rollout_de(resume_thread_id, codex_home) if resume_thread_id else ""
+        target = {}
+        if transfer_id:
+            from app.conversation_transfer import load_transfer
+            target = load_transfer(transfer_id).destination_meta
+        rollout = transfer_rollout_path or target.get("rollout_path") or (sem_terminal.rollout_de(resume_thread_id, codex_home) if resume_thread_id else "")
         codex_sessions.save(name, resume_thread_id, rollout, cwd, model=model, effort=effort,
                             codex_home=codex_home, codex_account=codex_account,
                             headless=True, key=sem_terminal.nova_chave(), permission_mode=permission_mode,
-                            jev=jev)
+                            jev=jev, transfer_id=transfer_id,
+                            tool_output_token_limit=tool_output_token_limit,
+                            previous_non_plan=target.get("previous_non_plan"))
         PromptQueue(name).clear()
         ThenLink(name).clear()
         # Nome reusado não herda o par externo da sessão antiga.
@@ -2243,7 +2351,7 @@ class SessionRegistry:
             cmd = tmux.join_cmd(pre + ["--"]) + " " + cmd
         return cmd
 
-    def para_headless(self, name: str, permission_mode: str | None) -> dict:
+    def para_headless(self, name: str, permission_mode: str | None, *, transfer_meta: dict | None = None) -> dict:
         """Pane tmux vira sessão sem terminal. Devolve o sidecar gravado; subir o processo é da
         API (async). `permission_mode` é o que o rodapé mostra agora (lido por quem chama)."""
         if codex_sessions.exists(name) or headless_sessions.exists(name):
@@ -2278,6 +2386,9 @@ class SessionRegistry:
             vivo_m, vivo_e = _escolhas_status(sid)
             modelo, esforco = vivo_m or modelo, _esforco_de_abertura(vivo_e) or esforco
         model_args.validar("claude", modelo, esforco, permission_mode)
+        if transfer_meta and (sid != transfer_meta["session_id"] or cwd != transfer_meta["cwd"]
+                              or pid != transfer_meta.get("pane_pid")):
+            raise ValueError("session_transfer_source_changed")
         filhos = _descendant_pids(pid) if pid else []
         headless_sessions.marcar_troca(name)
         if not tmux.kill_session(name):
@@ -2291,6 +2402,8 @@ class SessionRegistry:
                                           context_window=int(janela) if janela and janela.isdigit() else None,
                                           permission_mode=permission_mode, subagent_model=subagente,
                                           jev=jev,
+                                          **({"key": transfer_meta["key"], "transfer_id": transfer_meta["transfer_id"]}
+                                             if transfer_meta else {}),
                                           previous_non_plan=(modo_permissao.ultimo_nao_plan(
                                               name, modo_permissao.modo_da_conta(str(cdir) if cdir else None))
                                               if permission_mode == "plan" else None))
@@ -2305,7 +2418,175 @@ class SessionRegistry:
         self._jsonl_cache[name] = jsonl
         return meta
 
+    def transfer_origin(self, info: SessionInfo) -> tuple[dict, dict]:
+        from app.conversation_transfer import prepare_origin, _processes, TransferError
+        from app.adapters import get_adapter, CLAUDE_HEADLESS
+        meta = headless_sessions.load(info.name)
+        if meta:
+            original = dict(meta)
+            model, effort = get_adapter(CLAUDE_HEADLESS).escolhas(info.name)
+            meta = {**meta, "model": model or meta.get("model"), "effort": effort or meta.get("effort")}
+            root = (meta.get("cano") or {}).get("pid")
+        else:
+            pane = self._pane_of(info.name)
+            if not pane:
+                raise TransferError("session_transfer_source_changed")
+            self._refuse_non_claude_resume(pane)
+            root = pane.get("pid")
+            agent = _pid_do_agente(root) if root else None
+            if agent and procinfo._engine_of(agent):
+                raise TransferError("session_transfer_source_changed")
+            if agent and procinfo._env_var_of(agent, "HANGAR_ORQ_READ_ONLY") == "1":
+                raise TransferError("session_transfer_read_only")
+            cdir = str(_config_dir_of(agent)) if agent and _config_dir_of(agent) else (info.conta or "").removeprefix("claude:")
+            mode = modo_permissao.ler_modo(info.name)
+            model, effort = _escolhas_status(Path(info.jsonl).stem)
+            meta = {"name": info.name, "cwd": info.cwd, "session_id": Path(info.jsonl).stem,
+                    "config_dir": cdir or str(Path.home() / ".claude"), "provider": "claude", "headless": False,
+                    "model": model, "effort": _esforco_de_abertura(effort), "permission_mode": mode,
+                    "previous_non_plan": modo_permissao.known_non_plan(info.name)
+                                         if mode == "plan" else None,
+                    "pane_pid": root, "pane_id": pane.get("pane_id"),
+                    "subagent_model": procinfo._env_var_of(agent, "CLAUDE_CODE_SUBAGENT_MODEL") if agent else None,
+                    "jev": _jev_do_processo(agent)}
+            original = dict(meta)
+        from app.conversation_transfer import _META_FIELDS
+        public = prepare_origin({key: value for key, value in meta.items() if key in _META_FIELDS})
+        public.update(jsonl=info.jsonl, headless=bool(info.headless))
+        return public, {"original": original, "processes": _processes(root)}
+
+    async def stop_transfer_source(self, record, private: dict) -> None:
+        from app.conversation_transfer import _processes_stopped, _process_identity, TransferError
+        from app.adapters import get_adapter, CLAUDE_HEADLESS
+        processes = private["processes"]
+        for pid, identity in processes.items():
+            if procinfo.pid_vivo(int(pid)) and _process_identity(int(pid)) != identity:
+                raise TransferError("session_transfer_process_identity_changed")
+        meta = record.origin_meta
+        if meta["headless"]:
+            headless_sessions.update(record.name, transfer_id=record.id)
+            hl = get_adapter(CLAUDE_HEADLESS)
+            await hl.parar(record.name)
+            if not _processes_stopped(processes):
+                for pid, identity in processes.items():
+                    if procinfo.pid_vivo(int(pid)) and _process_identity(int(pid)) != identity:
+                        raise TransferError("session_transfer_process_identity_changed")
+                await asyncio.to_thread(hl.close_sync, record.name, private["original"])
+        else:
+            await asyncio.to_thread(self.para_headless, record.name, meta["permission_mode"],
+                                    transfer_meta={**meta, "transfer_id": record.id})
+        await asyncio.to_thread(_esperar_saida, [int(pid) for pid in processes])
+        if not await asyncio.to_thread(_processes_stopped, processes):
+            raise TransferError("session_transfer_source_not_stopped")
+
+    async def publish_transfer(self, record) -> None:
+        from app.conversation_transfer import verify_source, TransferError
+        from app.conversation_history import verify_boundary
+        from app.adapters import get_adapter, CLAUDE_HEADLESS
+        import hashlib
+        await asyncio.to_thread(verify_source, record.source)
+        if await asyncio.to_thread(lambda: hashlib.sha256(Path(record.origin_meta["jsonl"]).read_bytes()).hexdigest()) != record.source.digest:
+            raise TransferError("session_transfer_source_changed")
+        from dataclasses import replace
+        from app.conversation_transfer import TransferPhase
+        await asyncio.to_thread(verify_boundary, replace(record, phase=TransferPhase.COMPLETE), record.boundary.rollout_path)
+        await get_adapter("codex").publish_imported(record)
+        original = headless_sessions.load(record.name)
+        if original:
+            if original.get("session_id") != record.origin_meta["session_id"] or original.get("key") != record.origin_meta["key"]:
+                raise TransferError("session_transfer_source_changed")
+            headless_sessions.delete(record.name)
+        get_adapter(CLAUDE_HEADLESS)._sessions.pop(record.name, None)
+        self._forget(record.name)
+        self._jsonl_cache[record.name] = record.boundary.rollout_path
+
+    async def restore_transfer_source(self, record, private: dict) -> None:
+        from app.conversation_transfer import _processes_stopped, TransferError
+        from app.adapters import get_adapter, CLAUDE_HEADLESS
+        await get_adapter("codex").abort_imported(record)
+        meta = record.origin_meta
+        import hashlib
+        if record.source and await asyncio.to_thread(
+                lambda: hashlib.sha256(Path(meta["jsonl"]).read_bytes()).hexdigest()) != record.source.digest:
+            raise TransferError("session_transfer_source_changed")
+        current = headless_sessions.load(record.name)
+        if current and (current.get("session_id") != meta["session_id"]
+                        or current.get("key") != meta["key"]):
+            raise TransferError("session_transfer_source_changed")
+        if not _processes_stopped(private["processes"]):
+            # Uma parada recusada pode conservar exatamente a origem viva.
+            from app.conversation_transfer import _check_source_idle
+            await _check_source_idle(self, record.name, meta)
+            if meta["headless"]:
+                sess = get_adapter(CLAUDE_HEADLESS)._sessions.get(record.name)
+                if not sess or not sess.vivo or sess.iniciando:
+                    raise TransferError("session_transfer_source_not_stopped")
+            else:
+                pane = await asyncio.to_thread(self._pane_of, record.name)
+                if not pane or pane.get("pid") != meta.get("pane_pid"):
+                    raise TransferError("session_transfer_source_changed")
+                if not await asyncio.to_thread(_pid_do_agente, pane["pid"]):
+                    raise TransferError("session_transfer_source_not_stopped")
+            return
+        restored = {**private["original"], **meta, "headless": True, "transfer_id": record.id, "cano": None}
+        if meta["headless"]:
+            if await asyncio.to_thread(tmux.has_session, record.name):
+                raise TransferError("session_transfer_source_changed")
+            old_pid = (current or {}).get("cano", {}).get("pid") if (current or {}).get("cano") else None
+            from app.conversation_transfer import _process_identity
+            stale_process = (old_pid and str(old_pid) in private["processes"] and
+                             _process_identity(old_pid) != private["processes"][str(old_pid)])
+            if not current or stale_process:
+                headless_sessions.restaurar(restored)
+            hl = get_adapter(CLAUDE_HEADLESS)
+            hl._subidas.pop(record.name, None)
+            sess = await hl.ensure_running(record.name, transfer_id=record.id)
+            if not sess or not sess.vivo or sess.iniciando or sess.sid != meta["session_id"]:
+                raise TransferError("session_transfer_restore_failed")
+        else:
+            from app.conversation_transfer import _processes, _process_identity, _runtime_path, _write_json
+            command = self._comando_terminal(meta, resume=True)
+            env = _env_sessao(meta.get("subagent_model"), bool(meta.get("jev")))["env"]
+            env["CP_SESSION_KEY"] = meta["key"]
+            if await asyncio.to_thread(tmux.has_session, record.name):
+                pid = await asyncio.to_thread(tmux.pane_pid, record.name)
+                if (pid != private.get("restore_pane_pid") or
+                        _process_identity(pid) != private.get("restore_processes", {}).get(str(pid))):
+                    raise TransferError("session_transfer_source_changed")
+            else:
+                headless_sessions.restaurar(restored)
+                if not await asyncio.to_thread(tmux.new_session, record.name, meta["cwd"], command,
+                                               meta.get("config_dir"), provider="claude", env=env):
+                    raise TransferError("session_transfer_restore_failed")
+                pid = await asyncio.to_thread(tmux.pane_pid, record.name)
+                private.update(restore_pane_pid=pid, restore_processes=await asyncio.to_thread(_processes, pid))
+                await asyncio.to_thread(_write_json, _runtime_path(record), private)
+            deadline = time.monotonic() + 45
+            loaded = False
+            while time.monotonic() < deadline:
+                pane = await asyncio.to_thread(self._pane_of, record.name)
+                agent = await asyncio.to_thread(_pid_do_agente, (pane or {}).get("pid")) if pane else None
+                if agent:
+                    path = Path(meta["config_dir"]) / "sessions" / f"{agent}.json"
+                    try:
+                        native = json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
+                        loaded = native.get("sessionId") == meta["session_id"] and native.get("status") == "idle"
+                    except (OSError, ValueError):
+                        pass
+                if loaded:
+                    break
+                await asyncio.sleep(0.1)
+            if not loaded:
+                raise TransferError("session_transfer_restore_failed")
+            headless_sessions.delete(record.name)
+        self._forget(record.name)
+        self._jsonl_cache[record.name] = meta["jsonl"]
+
     def rename(self, old: str, new: str) -> None:
+        from app.conversation_transfer import require_available
+        require_available(old)
+        require_available(new)
+
         if headless_sessions.exists(old):
             from app.adapters import get_adapter, CLAUDE_HEADLESS
             new = sanitize_session_name(new)
@@ -2320,6 +2601,8 @@ class SessionRegistry:
             ThenLink(old).rename(new)
             rename_pair(old, new)
             shortcut_terminals.rename_owner(old, new)
+            from app.conversation_transfer import rename_transfer
+            rename_transfer(old, new)
             return
         if codex_sessions.exists(old):
             from app.adapters import get_adapter
@@ -2374,6 +2657,8 @@ class SessionRegistry:
         # `term-<velho>-2`.
         # Terminais de atalho seguem a conversa pelo dono gravado neles (nao pelo nome tmux).
         shortcut_terminals.rename_owner(old, new)
+        from app.conversation_transfer import rename_transfer
+        rename_transfer(old, new)
         alvo = f"term-{old}"
         if tmux.is_hidden(alvo) and not tmux.rename_session(alvo, f"term-{new}"):
             _log.info("rename: %r nao pode virar %r (nome ja ocupado?) — matando o shell escondido",
@@ -2395,6 +2680,9 @@ class SessionRegistry:
             _log.debug("kill: shell escondido de %r nao saiu (pode nao existir)", name)
 
     def kill(self, name: str) -> None:
+        from app.conversation_transfer import require_available
+        require_available(name)
+
         # Levanta KillFailed quando a sessao SOBREVIVE. Antes o retorno do tmux era descartado e a
         # limpeza duravel (cache, fila, then, pareamento) rodava do mesmo jeito: o card sumia da UI, o
         # pareamento se desfazia, a rota respondia {"ok": true} — e a sessao reaparecia na varredura

@@ -212,6 +212,37 @@ Your local agent sessions
 
 Chat content comes from structured session data rather than scraping the terminal transcript. The terminal multiplexer is used only by sessions with a terminal; headless Claude and Codex sessions use managed pipes and durable sidecars. The backend is the bridge and does not add a vendor relay; the CLIs and providers you configure may still send data according to their own policies.
 
+## Claude → Codex (em validação)
+
+O código da transferência está disponível em uma árvore isolada, sem ativação no serviço ou
+aceitação completa. A entrada implementada fica no anel de contas do desktop nativo: escolher
+uma conta Codex abre conta, modelo e esforço antes da confirmação. A mesma sessão conserva
+nome, cartão, chave, pasta, modo de execução e vínculos. O Hangar compõe o histórico Claude
+preservado com os turnos novos do Codex; a TUI mostra somente os turnos novos. A volta
+Codex → Claude não faz parte do recurso.
+
+A captura com Codex CLI 0.159.3 e API simulada em loopback conferiu conteúdo artificial após
+importação e reinício. Uso com modelo real, interface, WebSocket/TUI e Windows continuam
+pendentes. Veja [uso e recuperação](docs/USAGE.md#continuar-uma-sessão-claude-no-codex-em-validação)
+e [medição e limites](docs/decisoes/harnesses.md#transferência-claude--codex-captura-nativa-em-validação).
+
+Contrato aditivo da API autenticada:
+
+| Método e rota | Corpo / comportamento |
+| --- | --- |
+| `GET /api/sessions/{name}/conta` | Mantém a lista de destinos Claude do fluxo existente. |
+| `POST /api/sessions/{name}/conta` | Legado Claude → Claude: somente `{ "config_dir": "<conta Claude cadastrada>" }`. |
+| `POST /api/sessions/{name}/conta` | Claude → Codex: `{ "credential_id": "<id codex:… cadastrado>", "source_life": "<identidade atual>", "source_jsonl": "<transcript atual>", "model": null, "effort": null }`. |
+| `POST /api/sessions/{name}/recarregar` | Sem corpo. Em `restore_failed`, tenta recuperar a origem da transferência; nos demais casos mantém o comportamento de recarga existente. |
+
+Os dois corpos de `/conta` são exclusivos. `credential_id` identifica uma conta cadastrada no
+servidor da sessão; `source_life` e `source_jsonl` conferem se a origem ainda é a mesma, sem
+autorizar um caminho arbitrário. Modelo/esforço omitidos ou nulos deixam o Codex resolver os
+padrões da conta. A resposta de transferência concluída contém `ok`, `provider: "codex"`,
+`conta`, `model`, `effort` e `transfer_id`; o cliente também relê a sessão e exige
+`transfer_phase: "complete"`. Falhas retornam o erro, inclusive quando a restauração não pôde
+ser confirmada. Recarregar tenta a recuperação; não garante que ela sempre será possível.
+
 ## Security model
 
 This is a LAN/VPN-only tool and should be treated like a remote shell:

@@ -114,6 +114,12 @@ def ultimo_nao_plan(name: str, padrao: str = "manual") -> str:
         return _ultimos_nao_plan.get(name, padrao)
 
 
+def known_non_plan(name: str) -> str | None:
+    """Só devolve a base observada nesta sessão, sem assumir a configuração da conta."""
+    with _mem_lock:
+        return _ultimos_nao_plan.get(name)
+
+
 def observar_pane(name: str, pane: str, sessao: str | None = None) -> str | None:
     """Atualiza a memória a partir de uma captura já feita e devolve o modo confirmado."""
     modo = parse_permission_mode(pane)

@@ -198,6 +198,7 @@ enum Payload {
     Computer(computer::ComputerReply),
     // Diálogo Nova sessão: a resposta vai ao diálogo que a pediu, se ele ainda for o aberto.
     Create(EntityId, create::CreateReply),
+    Transfer(EntityId, create::TransferReply),
     // Lista de outra máquina: a geração dos SSE de lista, a chave do servidor e o que chegou.
     Remote(u64, String, servers::RemoteUpdate),
     HeadlessPlan(SessionKey, controls::PlanOutcome),
@@ -1503,6 +1504,7 @@ impl Hangar {
             Payload::Machines(reply) => { self.receive_machines(reply, window, cx); return; }
             Payload::Computer(reply) => { self.receive_computer(reply, window, cx); return; }
             Payload::Create(dialog, reply) => { self.receive_create(dialog, reply, window, cx); return; }
+            Payload::Transfer(dialog, reply) => { self.receive_agent_transfer(dialog, reply, window, cx); return; }
             Payload::Sidebar(reply) => {
                 // Só o silenciar da máquina da conversa aberta muda as preferências que os avisos desta janela leem.
                 if matches!(&reply, sidebar::SidebarReply::Wrote(t, sidebar::Write::Mute(_), _) if t.server == self.open_server()) { self.load_notification_preferences(); }
@@ -1607,6 +1609,7 @@ impl Hangar {
     pub(super) fn follow_open(&mut self, list: &[SessionInfo], window: &mut Window, cx: &mut Context<Self>) {
         // Antes de soltar a conexão aberta: o renomear em voo é da máquina dela.
         let target = self.selected_target();
+        if self.new_session.as_ref().is_some_and(|d| d.read(cx).transfer_busy_for(target.as_ref())) { return; }
         // Trocando de conta, a sessão some e volta noutro transcript: a conversa fica na tela até a resposta e até a lista
         // trazê-la de volta; sumida por mais que o prazo depois da resposta, vale o "sessão encerrada" de sempre.
         // Resposta perdida (conexão trocada no meio) não segura a tela além do prazo do próprio pedido.

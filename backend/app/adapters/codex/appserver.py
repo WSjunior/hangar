@@ -17,6 +17,7 @@ from typing import AsyncIterator
 import websockets
 
 from app import codex_contas
+from app.adapters.codex.lancador import tool_output_override
 
 logger = logging.getLogger(__name__)
 
@@ -60,11 +61,17 @@ class AppServerClient:
     def endpoint(self) -> str | None:
         return self._endpoint
 
-    async def start(self) -> None:
+    async def start(self, *, codex_home: str | Path | None = None,
+                    tool_output_token_limit: int | None = None, cwd: str | None = None,
+                    session_name: str | None = None, session_key: str | None = None) -> None:
         """Spawna `codex app-server --stdio` com stdin/stdout em PIPE e mantem o stdin aberto
         (nunca fechado ate close()) - fechar cedo faz o processo sair sem responder."""
+        env = self._environment(codex_home, session_name=session_name, session_key=session_key)
         self._proc = await asyncio.create_subprocess_exec(
             self._codex_bin, "app-server", "--stdio",
+            *tool_output_override(tool_output_token_limit),
+            env=env, cwd=cwd,
+            stderr=asyncio.subprocess.DEVNULL if tool_output_token_limit is not None else None,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             limit=_READ_LIMIT,
@@ -81,15 +88,9 @@ class AppServerClient:
             port = sock.getsockname()[1]
         return f"ws://127.0.0.1:{port}"
 
-    async def start_shared(self, endpoint: str | None = None, *,
-                           codex_home: str | Path | None = None) -> str:
-        """Spawna app-server WebSocket local e conecta este cliente.
-
-        O endpoint retornado pode ser passado a ``codex --remote`` dentro do tmux. stdout/stderr
-        vao para DEVNULL: no modo WebSocket o protocolo nao passa por eles e pipes sem consumidor
-        poderiam encher durante uma sessao longa.
-        """
-        self._endpoint = endpoint or self._free_loopback_endpoint()
+    @staticmethod
+    def _environment(codex_home: str | Path | None, *, session_name: str | None = None,
+                     session_key: str | None = None) -> dict:
         env = dict(os.environ)
         if codex_home is not None:
             path = Path(codex_home).expanduser().absolute()
@@ -97,11 +98,32 @@ class AppServerClient:
             account = codex_contas.Account("default", path, True) if path == default else \
                 codex_contas.Account("selected", path, False)
             env = codex_contas.environment(account, base=env)
+        if session_name is not None or session_key is not None:
+            for key in ("CP_SESSION_NAME", "CP_SESSION_KEY", "TMUX", "TMUX_PANE", "HANGAR_CANO_KEY"):
+                env.pop(key, None)
+            if session_name is not None:
+                env["CP_SESSION_NAME"] = session_name
+            if session_key is not None:
+                env["CP_SESSION_KEY"] = session_key
+        return env
+
+    async def start_shared(self, endpoint: str | None = None, *,
+                           codex_home: str | Path | None = None,
+                           tool_output_token_limit: int | None = None,
+                           session_name: str | None = None, session_key: str | None = None) -> str:
+        """Spawna app-server WebSocket local e conecta este cliente.
+
+        O endpoint retornado pode ser passado a ``codex --remote`` dentro do tmux. stdout/stderr
+        vao para DEVNULL: no modo WebSocket o protocolo nao passa por eles e pipes sem consumidor
+        poderiam encher durante uma sessao longa.
+        """
+        self._endpoint = endpoint or self._free_loopback_endpoint()
         self._proc = await asyncio.create_subprocess_exec(
             self._codex_bin, "app-server", "--listen", self._endpoint,
+            *tool_output_override(tool_output_token_limit),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
-            env=env,
+            env=self._environment(codex_home, session_name=session_name, session_key=session_key),
         )
         last_error: Exception | None = None
         for _ in range(50):
@@ -287,18 +309,24 @@ class AppServerClient:
             self._respondendo.discard(request_id)
             raise
 
+    def request_bytes(self, method: str, params: dict) -> bytes:
+        """Mesmo envelope da próxima chamada, inclusive id e escapes do transporte."""
+        return (json.dumps({"jsonrpc": "2.0", "id": self._next_id + 1,
+                            "method": method, "params": params}) + "\n").encode()
+
     async def request(self, method: str, params: dict, timeout: float = 30.0) -> dict:
         if self._writer is None and self._ws is None:
             raise RuntimeError("AppServerClient.start() precisa rodar antes de request()")
+        wire = self.request_bytes(method, params)
         self._next_id += 1
         req_id = self._next_id
         fut = asyncio.get_running_loop().create_future()
         self._pending[req_id] = fut
-        line = json.dumps({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
+        line = wire.decode().rstrip("\n")
         if self._ws is not None:
             await self._ws.send(line)
         else:
-            self._writer.write((line + "\n").encode())
+            self._writer.write(wire)
             await self._writer.drain()
         try:
             msg = await asyncio.wait_for(fut, timeout=timeout)
@@ -348,6 +376,11 @@ class AppServerClient:
         if self._proc is not None:
             with contextlib.suppress(ProcessLookupError):
                 self._proc.terminate()
-            await self._proc.wait()
+            try:
+                await asyncio.wait_for(self._proc.wait(), timeout=5.0)
+            except TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    self._proc.kill()
+                await asyncio.wait_for(self._proc.wait(), timeout=5.0)
             self._proc = None
         self._endpoint = None

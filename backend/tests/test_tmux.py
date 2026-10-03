@@ -1032,3 +1032,22 @@ def test_new_hidden_shell_config_dir_chega_no_ambiente_do_pane():
         assert f"CLAUDE_CONFIG_DIR={cfg}" in env
     finally:
         tmux.kill_session(alvo)
+
+
+
+def test_list_panes_all_reads_session_birth_in_same_batch():
+    output = "one\t1\t12\t/tmp\t%1\t\tclaude\t100\n" + "two\t1\t13\t/tmp\t%2\t\tcodex\t200\n"
+    with patch.object(tmux, "_run", return_value=MagicMock(stdout=output, returncode=0)) as run:
+        rows = tmux.list_panes_all()
+    assert rows["one"][0]["session_created"] == 100
+    assert rows["two"][0]["session_created"] == 200
+    assert run.call_count == 1
+    assert "#{session_created}" in run.call_args.args[0][-1]
+
+
+@pytest.mark.parametrize("birth", ["", "#{session_created}", "invalid", "0", "-1"])
+def test_list_panes_all_unknown_birth_does_not_invent_life(birth):
+    output = f"one\t1\t12\t/tmp\t%1\t\tclaude\t{birth}\n"
+    with patch.object(tmux, "_run", return_value=MagicMock(stdout=output, returncode=0)):
+        row = tmux.list_panes_all()["one"][0]
+    assert row["pid"] == 12 and row["session_created"] is None

@@ -5,6 +5,7 @@ kill dos dois processos e ensure_running pos-restart (dict vazio -> thread/resum
 import asyncio
 import json
 import os
+from dataclasses import replace
 
 import pytest
 from unittest.mock import patch
@@ -24,6 +25,8 @@ def _isolate(tmp_path, monkeypatch):
     # Cache de classe compartilhado -> zera entre testes. Sidecars redirecionados pra tmp.
     # pair.settings.projects_dir tambem: reg.list() varre pareamento (Task 8) a cada chamada, e
     # sem isto varria o .hangar-pair REAL de quem roda (achado do review).
+    from app import conversation_transfer
+    monkeypatch.setattr(conversation_transfer, "_base", lambda: tmp_path / "transfers")
     SessionRegistry._jsonl_cache.clear()
     SessionRegistry._fd_locked.clear()
     monkeypatch.setattr(pair.settings, "projects_dir", tmp_path / "projects")
@@ -729,3 +732,118 @@ async def test_state_monitor_emits_dead_on_client_close():
     adapter.attach("sess", _DyingClient(), "t")
     events = [ev async for ev in adapter.state_monitor("sess", lambda: "sess")]
     assert events[-1] == StateEvent(session="sess", state="dead")
+
+
+@pytest.mark.parametrize("headless", [False, True])
+def test_sidecar_save_keeps_transfer_budget_and_key_on_same_thread(tmp_path, headless):
+    codex_sessions.save("s", "t", "/tmp/rollout", "/tmp/project", key="original", headless=headless,
+                        transfer_id="transfer-1", tool_output_token_limit=144000, codex_home=tmp_path / "account")
+    codex_sessions.update_model("s", "model", "high")
+    codex_sessions.update_app_pid("s", 123)
+    codex_sessions.save("s", "t", "/tmp/rollout", "/tmp/project", headless=headless)
+    meta = codex_sessions.load("s")
+    assert meta["key"] == "original"
+    assert meta["transfer_id"] == "transfer-1"
+    assert meta["tool_output_token_limit"] == 144000
+    assert meta["codex_home"] == str(tmp_path / "account")
+    codex_sessions.rename("s", "renamed")
+    assert codex_sessions.load("renamed")["transfer_id"] == "transfer-1"
+
+
+@pytest.mark.parametrize("mutation", ["save", "update", "switch_thread"])
+def test_new_thread_removes_active_import_association(tmp_path, mutation):
+    codex_sessions.save("s", "t", "/tmp/rollout", "/tmp/project", key="original",
+                        transfer_id="transfer-1", tool_output_token_limit=144000,
+                        endpoint="ws://127.0.0.1:9", app_pid=123)
+    if mutation == "save":
+        codex_sessions.save("s", "new", "/tmp/new-rollout", "/tmp/project")
+    elif mutation == "update":
+        codex_sessions.update("s", thread_id="new", rollout_path="/tmp/new-rollout")
+    else:
+        assert codex_sessions.switch_thread("s", {"id": "new", "path": "/tmp/new-rollout",
+                                                   "cwd": "/tmp/project", "source": "cli"},
+                                           "t", endpoint="ws://127.0.0.1:9", app_pid=123)
+    meta = codex_sessions.load("s")
+    assert meta["key"] == "original" and meta["thread_id"] == "new"
+    assert "transfer_id" not in meta and "tool_output_token_limit" not in meta
+
+
+def test_incomplete_sidecar_is_not_warmed_and_stays_visible_to_registry(tmp_path):
+    import uuid
+    from app import conversation_transfer as transfers
+    record = transfers.TransferRecord(str(uuid.uuid4()), "s", "k:old", transfers.TransferPhase.IMPORTED,
+                                      None, {"name": "s", "key": "old", "cwd": str(tmp_path)},
+                                      {"codex_home": str(tmp_path / "account"), "thread_id": "t"}, None, None)
+    transfers.save_transfer(record)
+    codex_sessions.save("s", "t", "/tmp/rollout", str(tmp_path), key="old", transfer_id=record.id,
+                        codex_home=tmp_path / "account")
+    assert codex_sessions.list_all() == []
+    assert len(codex_sessions.list_all(include_incomplete=True)) == 1
+    # Índice por conta/thread também bloqueia a preparação antes de publicar transfer_id.
+    codex_sessions.update("s", transfer_id=None)
+    assert codex_sessions.list_all() == []
+    transfers.save_transfer(replace(record, phase=transfers.TransferPhase.COMPLETE))
+    assert len(codex_sessions.list_all()) == 1
+
+
+def test_transfer_record_corruption_is_not_silently_skipped(tmp_path):
+    import uuid
+    from app import conversation_transfer as transfers
+    transfer_id = str(uuid.uuid4())
+    transfers._base().mkdir()
+    transfers._record_path(transfer_id).write_text("null")
+    codex_sessions.save("s", "t", "/tmp/rollout", str(tmp_path), transfer_id=transfer_id)
+    with pytest.raises(ValueError):
+        codex_sessions.list_all()
+
+
+async def test_legacy_restart_keeps_budget_account_and_resume_request(tmp_path):
+    import hashlib
+    import uuid
+    from app import conversation_transfer as transfers
+    home = str(tmp_path / "account")
+    transfer_id = str(uuid.uuid4())
+    thread_id = str(uuid.uuid4())
+    rollout = tmp_path / "account" / "sessions" / f"rollout-test-{thread_id}.jsonl"
+    rollout.parent.mkdir(parents=True)
+    prefix = (json.dumps({"type": "session_meta", "payload": {"id": thread_id}}) + "\n").encode()
+    rollout.write_bytes(prefix)
+    source = tmp_path / "source.jsonl"
+    source.write_text(json.dumps({"type": "user", "uuid": "u", "parentUuid": None,
+                                  "message": {"role": "user", "content": "histórico"}}) + "\n")
+    record = transfers.TransferRecord(transfer_id, "cx", "k:original-key", transfers.TransferPhase.COMPLETE,
+        transfers.ConversationSource(str(source), "claude", hashlib.sha256(source.read_bytes()).hexdigest(), ("u",)),
+        {"name": "cx", "key": "original-key", "cwd": str(tmp_path)},
+        {"codex_home": home, "codex_account": "work", "thread_id": thread_id,
+         "rollout_path": str(rollout), "tool_output_token_limit": 144000},
+        transfers.ImportBoundary(thread_id, str(rollout), len(prefix), (), hashlib.sha256(prefix).hexdigest()), None)
+    transfers.save_transfer(record)
+    codex_sessions.save("cx", thread_id, str(rollout), str(tmp_path),
+                        codex_home=home, codex_account="work", tool_output_token_limit=144000,
+                        transfer_id=transfer_id, key="original-key", model="native-model", effort="low")
+    codex_sessions.update("cx", permission_mode="Ask for approval")
+    fake = _FakeClient()
+    fake._thread_id = thread_id
+    fake._path = str(rollout)
+    from unittest.mock import AsyncMock
+    previous_request = fake.request
+    async def request(method, params, timeout=30.0):
+        if method == "thread/read":
+            fake.requests.append((method, params))
+            return {"thread": {"id": thread_id, "model": "native-model", "reasoningEffort": "low"}}
+        return await previous_request(method, params, timeout)
+    fake.request = request
+    fake.start_shared = AsyncMock(return_value="ws://127.0.0.1:45123")
+    with patch.object(codex_adapter.tmux, "has_session", return_value=False), \
+         patch.object(codex_adapter, "AppServerClient", lambda: fake), \
+         patch.object(codex_adapter, "ensure_tmux_tui") as tui:
+        adapter = CodexAdapter()
+        await adapter.ensure_running("cx")
+    fake.start_shared.assert_awaited_once_with(codex_home=home, tool_output_token_limit=144000,
+                                               session_name="cx", session_key="original-key")
+    assert tui.call_args.kwargs["codex_account"] == "work"
+    assert next(p for m, p in fake.requests if m == "thread/resume")["threadId"] == thread_id
+    assert next(p for m, p in fake.requests if m == "thread/resume")["approvalPolicy"] == "on-request"
+    assert "turn/start" not in [m for m, _ in fake.requests]
+    assert transfers.transfer_for_session("cx").id == transfer_id
+    assert transfers.load_transfer(transfer_id).phase == transfers.TransferPhase.COMPLETE

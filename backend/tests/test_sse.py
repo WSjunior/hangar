@@ -285,3 +285,13 @@ async def test_troca_de_provider_refaz_o_stream(monkeypatch):
     await asyncio.wait_for(_consumir(), timeout=15)
     # `reset` primeiro (o front tem que reler o history), a bolha do adapter certo depois.
     assert "reset" in vistos and vistos.index("reset") < vistos.index("message")
+
+
+
+def test_list_sig_reemits_when_conversation_life_or_transfer_changes():
+    from app.models import SessionInfo
+    from app.sse import _list_sig
+    original = SessionInfo(name="s", lifecycle_id="k:old")
+    for fields in ({"lifecycle_id": "k:new"}, {"transfer_id": "operation"},
+                   {"transfer_phase": "source_stopped"}, {"transfer_phase": "restore_failed"}):
+        assert _list_sig([original]) != _list_sig([original.model_copy(update=fields)])

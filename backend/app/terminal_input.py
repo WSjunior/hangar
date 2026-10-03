@@ -714,6 +714,9 @@ def drain(name: str, jsonl: str, provider: str = "claude") -> int:
     # caminho, entao digitar seria a mensagem do usuario entrando duas vezes na conversa — o mesmo
     # incidente ja registrado no Pi e no Kimi, aqui com o agravante de a entrega original ter sido
     # bem-sucedida. A entrada fica pendente de proposito: quem a entrega e `CodexAdapter.drain`.
+    from app.conversation_transfer import transfer_active
+    if transfer_active(name):
+        return 0
     if provider in _SEM_TECLA:
         _log.debug("drain name=%s: provider %s nao entrega por tecla (fila fica pro adapter)",
                    name, provider)
@@ -1638,6 +1641,9 @@ class TerminalInput:
         # subprocess e encodado em utf-8 e estouraria UnicodeEncodeError — um ValueError, que o
         # caller ja traduz pra 400 "control characters". A msg era recusada com erro trocado e
         # nunca entrava na fila. Troca por U+FFFD como no resto do app (ver app.models).
+        from app.conversation_transfer import transfer_active
+        if transfer_active(name):
+            return "deferred"
         text = scrub_surrogates(text)
         # Validacao PRE-envio: input ruim nunca toca a TUI nem entra na fila. \n/\t ok; outros controles nao.
         if any(ord(c) < 32 and c not in "\t\n" for c in text):
@@ -1645,6 +1651,12 @@ class TerminalInput:
         # Serializa por sessao (gate + digitacao + Enter como unidade): sem o lock, envios
         # concorrentes intercalavam teclas no mesmo tty e as mensagens saiam concatenadas.
         with _send_lock(name):
+            if transfer_active(name):
+                return "deferred"
+            if provider == "claude":
+                from app.adapters.codex import sessions as codex_sessions
+                if codex_sessions.exists(name):
+                    return "deferred"
             # Sessão Pi com a extensão conectada: entrega por chamada de função dentro do processo
             # do Pi, sem digitar e sem ler a tela — a remoção da causa raiz dos bugs de 01-02/08.
             #

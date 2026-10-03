@@ -76,6 +76,15 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
         Value::String(message) => Some(message.clone()),
         Value::Object(fields) => {
             let msg = fields.get("msg").and_then(Value::as_str).filter(|message| !message.is_empty());
+            if let Some(code @ ("session_transfer_source_changed" | "session_transfer_restore_failed")) = fields.get("code").and_then(Value::as_str) {
+                return Some(msg.map_or_else(|| code.to_owned(), |msg| format!("{code}: {msg}")));
+            }
+            if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("session_transfer_")) {
+                let params = fields.get("params").and_then(Value::as_object).map(|p| p.iter()
+                    .filter(|(key, _)| matches!(key.as_str(), "model" | "effort" | "account" | "phase" | "limit" | "estimated"))
+                    .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
+                if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
+            }
             // Configurações do servidor usam a frase compartilhada, com os parâmetros dela.
             if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("config_sync_") || code.starts_with("update_channel_")) {
                 let params = fields.get("params").and_then(Value::as_object).map(|p| p.iter()
@@ -685,11 +694,40 @@ mod tests {
         assert_eq!(failure_detail(Some(json!({"detail": {"code": "turn_missing", "params": {}, "msg": "Nenhum turno ativo"}})), 409), "Nenhum turno ativo");
         assert_eq!(failure_detail(Some(json!({"detail": {"code": "turn_missing", "params": {}}})), 409), "turn_missing");
         assert_eq!(failure_detail(Some(json!({"detail": [{"msg": "at most 40 characters"}]})), 422), "at most 40 characters");
+        for code in ["session_transfer_source_changed", "session_transfer_restore_failed"] {
+            assert_eq!(failure_detail(Some(json!({"detail": {"code":code, "msg":"backend reason", "params":{}}})), 409),
+                format!("{code}: backend reason"));
+            assert_eq!(failure_detail(Some(json!({"detail": {"code":code, "params":{}}})), 409), code);
+        }
         // Atalhos do projeto: a frase traduzida pelo código leva o motivo do backend, de `params.detalhe` ou do `msg`.
         let pasta = failure_detail(Some(json!({"detail": {"code": "erro_shortcut_pasta", "params": {"detalhe": "pasta nao existe: /x"}, "msg": "pasta nao existe: /x"}})), 400);
         assert!(pasta != "pasta nao existe: /x" && pasta.contains("pasta nao existe: /x"), "{pasta}");
         let items = failure_detail(Some(json!({"detail": {"code": "erro_project_shortcuts", "params": {}, "msg": "item 1 (shell) com pasta vazia"}})), 400);
         assert!(items != "item 1 (shell) com pasta vazia" && items.contains("item 1 (shell) com pasta vazia"), "{items}");
+    }
+
+    #[test]
+    fn transfer_refusals_show_specific_localized_reasons_without_private_message() {
+        for (code, pt, en) in [
+            ("session_transfer_context_budget_exceeded", "excede a capacidade", "exceeds the selected"),
+            ("session_transfer_model_capacity_unknown", "confirmar a capacidade", "capacity could not be verified"),
+            ("session_transfer_model_media_unsupported", "não aceita as imagens", "does not support the images"),
+            ("session_transfer_codex_version_unsupported", "versão instalada", "installed Codex version"),
+            ("session_transfer_login_required", "Entre na conta", "Sign in"),
+            ("session_transfer_account_full", "sem cota", "no quota"),
+            ("session_transfer_invalid_model_choice", "catálogo", "catalog"),
+            ("session_transfer_queue_pending", "mensagens na fila", "Messages are queued"),
+            ("session_transfer_source_busy", "permissão pendente", "pending question or approval"),
+        ] {
+            let text = failure_detail(Some(json!({"detail": {"code": code,
+                "msg": "private-payload", "params": {"model": "chosen", "estimated": 123, "limit": 100}}})), 409);
+            assert!(text.contains(pt) || text.contains(en), "{code}: {text}");
+            assert!(!text.contains("private-payload") && !text.contains(code));
+            for (source, expected) in [(include_str!("../../../messages/pt.json"), pt), (include_str!("../../../messages/en.json"), en)] {
+                let catalog: Value = serde_json::from_str(source).unwrap();
+                assert!(catalog[code].as_str().unwrap().contains(expected));
+            }
+        }
     }
 
     #[test]
