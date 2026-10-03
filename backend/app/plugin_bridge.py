@@ -33,6 +33,7 @@ from pydantic import BaseModel
 
 from app import atomico
 from app.auth import require_loopback
+from app.live_rate import live_rate
 
 _log = logging.getLogger("hangar.plugin_bridge")
 
@@ -922,4 +923,19 @@ async def state(body: StateBody, request: Request):
             _sugestoes.pop(body.sessao, None)
     _acordar(body.sessao)
     _log.debug("plugin estado sessao=%s estado=%s motivo=%s", body.sessao, body.estado, body.motivo)
+    return {"ok": True}
+
+
+class RateBody(BaseModel):
+    sessao: str
+    token: str
+    tokens: int
+    seconds: float
+
+
+@plugin_router.post("/rate")
+async def rate(body: RateBody):
+    """Velocidade de uma resposta, medida pelo `turn.step` do plugin no próprio processo."""
+    _confere(body.sessao, body.token)
+    live_rate(body.sessao).close(body.tokens, body.seconds)
     return {"ok": True}

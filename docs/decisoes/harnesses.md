@@ -5,6 +5,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 
 ## Regras vigentes
 
+- **tok/s "agora" é medido no stream da resposta, nunca no transcript.** Do primeiro pedaço
+  da resposta ao fim dela, com o `output_tokens` real: sem terminal pelo `message_start` →
+  `message_delta` do `stream_event`; com terminal pelo `turn.step` do plugin (`rate.ts` →
+  `POST /api/plugin/rate`). Só o loop principal entra. Sem nenhum dos dois, a reserva sai do
+  jsonl e leva "~", porque inclui a espera pelo primeiro token. Ver
+  [velocidade de geração](#velocidade-de-geração-tok-s).
+
 - **Modo de abertura omitido herda a preferência do servidor.** `headless_default` nasce
   ligado para Claude/Codex; a escolha humana do dono na criação passa a ser o padrão.
   `headless=false`/`--terminal` e `headless=true`/`--headless` explícitos prevalecem.
@@ -2051,3 +2058,22 @@ sidecar para um nome que nunca responde. A recusa vive num ponto só (`_recusa_o
 `runs.find`), e o 409 traz a frase "fale com o árbitro", porque é ele quem decide pela execução.
 O estado da linha sai da atividade: trabalhando com `advance.lock` preso (lido em `/proc/locks`,
 sem pegar a trava) ou com a linha do tempo/trava mexida nos últimos 2 min.
+
+## Velocidade de geração (tok/s)
+
+O `tok_s` da faixa (média da sessão) somava os `output_tokens` e dividia pelo intervalo entre a
+linha anterior do jsonl e a linha da resposta. O Claude Code só grava a resposta quando ela
+termina, então esse intervalo inclui fila, leitura do contexto e o caminho entre o resultado da
+ferramenta e o próximo pedido. Medido em 03/10/2026 nas sessões do hangar: espera média até a
+primeira resposta de ~4,8 s, e o número ficava entre 60 e 80 tok/s na sessão inteira, sem mexer
+(283 chamadas na `0c62a065`). Resposta curta, a maioria das chamadas de ferramenta, puxava o
+número para baixo. Os tokens de subagente entravam na soma sem o tempo deles, puxando para cima.
+
+Correção: subagente saiu do `tok_s`, e a velocidade "agora" e "últimas 10" passou a vir do
+stream. O `output_tokens` do jsonl estava certo (igual em todas as linhas da mesma mensagem);
+o problema era só o relógio.
+
+Sem estimativa durante a geração: a primeira versão mostrava caracteres ÷ 4 enquanto a resposta
+escrevia, e o número medido foi ~67 tok/s em voo contra ~122 exatos quando a mesma resposta
+fechava. O pensamento chega resumido (`--thinking-display summarized`), então os caracteres
+não acompanham os tokens. O "agora" é a última resposta fechada.

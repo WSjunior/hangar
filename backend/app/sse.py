@@ -15,6 +15,7 @@ from app.difusor import Difusor
 from app.pqueue import PromptQueue, _transcript_start_ts, committed_user_lines
 from app.preview import PreviewBroker, _norm
 from app.models import PreviewEvent, session_key
+from app.live_rate import live_snapshot
 from app.stats import Accumulator as StatsAccumulator
 from app.registry import SessionRegistry
 from app.share_guest_api import guest_safe
@@ -826,10 +827,13 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
             last = None
             while True:
                 snap = await asyncio.to_thread(acc.collect)
+                if snap:
+                    # Medida do stream (adapter sem terminal ou plugin) vence a reserva do transcript.
+                    snap.update(live_snapshot(name))
                 if snap and snap != last:
                     last = snap
                     await queue.put(("stats", json.dumps(snap)))
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(1.0)   # 1 s: o tok/s "agora" é ao vivo
         except asyncio.CancelledError:
             raise                            # rebind do /clear cancela de propósito
         except Exception:

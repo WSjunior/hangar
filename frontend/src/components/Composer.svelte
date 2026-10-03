@@ -1,6 +1,6 @@
 <script module lang="ts">
   import type { CommandInfo } from '@hangar/core';
-  import { stateColors, abbrevNum } from '@hangar/core';
+  import { stateColors, abbrevNum, rateLabel } from '@hangar/core';
   // Cache de comandos por sessao: sobrevive a remontagens do Composer (ex: voltar de
   // awaiting_input) pra buscar a lista so uma vez por sessao.
   const commandCache = new Map<string, CommandInfo[]>();
@@ -2477,6 +2477,14 @@ import { cachePrazo } from '../lib/cachePrazo';
       {#if stats.tok_s}
         <span class="sep">|</span>
         <span>{m.stats_toks({ n: Math.round(stats.tok_s) })}</span>
+      {/if}
+      {#if stats.tok_s_now}
+        <span class="sep">|</span>
+        <span>{m.stats_toks_now({ n: rateLabel(stats.tok_s_now, stats.tok_s_exact) })}</span>
+        {#if stats.tok_s_recent}
+          <span class="dot">·</span>
+          <span>{m.stats_toks_recent({ n: rateLabel(stats.tok_s_recent, stats.tok_s_exact) })}</span>
+        {/if}
       {/if}
       {#if stats.ttft_ms}
         <span class="dot">·</span>

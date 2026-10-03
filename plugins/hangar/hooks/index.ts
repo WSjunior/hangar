@@ -2,6 +2,7 @@ import type { Register } from "claude-code";
 import { registerAsk } from "./ask";
 import { registerInput } from "./input";
 import { registerPerm } from "./perm";
+import { registerRate } from "./rate";
 import { registerState } from "./state";
 import { registerSuggest } from "./suggest";
 
@@ -15,4 +16,5 @@ export const register: Register = (on) => {
   registerSuggest(on);
   registerAsk(on);
   registerPerm(on);
+  registerRate(on);
 };
