@@ -1393,3 +1393,180 @@ async def test_state_monitor_abre_com_o_estado_e_a_statusline_ja_conhecidos():
     assert events[0].state == "working"
     assert "💬" in (events[0].status_line or "")
     assert "gpt-6-astra" in events[0].status_line
+
+
+async def _wait_preview_text(name: str, expected: str) -> None:
+    async with asyncio.timeout(2):
+        while PushPreviewSource.get(name).text != expected:
+            await asyncio.sleep(0)
+
+
+async def _finish_preview_client(adapter: CodexAdapter, name: str, client) -> None:
+    task = adapter._sessions.get(name, {}).get("bomba")
+    await client._q.put(None)
+    if task is not None:
+        await task
+
+
+async def test_coalesced_preview_cannot_reappear_after_turn_completed():
+    adapter = CodexAdapter()
+    client = _LiveQueueClient()
+    name = "preview-turn-clear"
+    adapter.attach(name, client, "t")
+    monitor = adapter.state_monitor(name, lambda: name)
+    await monitor.__anext__()
+    try:
+        await client._q.put({"method": "turn/started", "params": {"threadId": "t"}})
+        assert (await monitor.__anext__()).state == "working"
+        await client._q.put({"method": "item/agentMessage/delta", "params": {"delta": "first"}})
+        await _wait_preview_text(name, "first")
+        await client._q.put({"method": "item/agentMessage/delta", "params": {"delta": "-late"}})
+        await client._q.put({"method": "turn/completed", "params": {"threadId": "t"}})
+        assert (await monitor.__anext__()).state == "idle"
+        assert PushPreviewSource.get(name).text == ""
+        await asyncio.sleep(0.2)
+        assert PushPreviewSource.get(name).text == ""
+    finally:
+        await monitor.aclose()
+        await _finish_preview_client(adapter, name, client)
+
+
+async def test_coalesced_preview_does_not_join_distinct_agent_messages():
+    adapter = CodexAdapter()
+    client = _LiveQueueClient()
+    name = "preview-item-clear"
+    adapter.attach(name, client, "t")
+    try:
+        await client._q.put({"method": "turn/started", "params": {"threadId": "t"}})
+        await client._q.put({"method": "item/agentMessage/delta", "params": {"delta": "Preamble"}})
+        await _wait_preview_text(name, "Preamble")
+        await client._q.put({"method": "item/agentMessage/delta", "params": {"delta": "-stale"}})
+        await client._q.put({"method": "item/completed", "params": {"item": {"type": "agentMessage", "text": "Preamble-stale"}}})
+        await client._q.put({"method": "item/started", "params": {"item": {"type": "agentMessage", "text": ""}}})
+        await client._q.put({"method": "item/agentMessage/delta", "params": {"delta": "Reply"}})
+        await _wait_preview_text(name, "Reply")
+        await asyncio.sleep(0.2)
+        assert PushPreviewSource.get(name).text == "Reply"
+    finally:
+        await _finish_preview_client(adapter, name, client)
+
+
+async def test_final_pending_prefix_reaches_recreated_source_after_last_sse_closes():
+    adapter = CodexAdapter()
+    client = _LiveQueueClient()
+    name = "preview-source-recreate"
+    adapter.attach(name, client, "t")
+    old = PushPreviewSource.get(name)
+    subscription = old.subscribe()
+    await subscription.__anext__()
+    try:
+        await client._q.put({"method": "item/agentMessage/delta", "params": {"delta": "first"}})
+        await _wait_preview_text(name, "first")
+        await subscription.aclose()
+        assert name not in PushPreviewSource._sources
+        current = PushPreviewSource.get(name)
+        assert current is not old
+        await client._q.put({"method": "item/agentMessage/delta", "params": {"delta": "-last"}})
+        await _wait_preview_text(name, "first-last")
+        assert old.text == "first"
+        assert current.text == "first-last"
+    finally:
+        await subscription.aclose()
+        await _finish_preview_client(adapter, name, client)
+
+
+async def test_replaced_session_generation_cannot_publish_old_pending_prefix():
+    adapter = CodexAdapter()
+    old_client = _LiveQueueClient()
+    new_client = _LiveQueueClient()
+    name = "preview-generation"
+    adapter.attach(name, old_client, "old-thread")
+    await old_client._q.put({"method": "item/agentMessage/delta", "params": {"delta": "old"}})
+    await _wait_preview_text(name, "old")
+    await old_client._q.put({"method": "item/agentMessage/delta", "params": {"delta": "-pending"}})
+    await asyncio.sleep(0)
+    old_task = adapter._sessions[name]["bomba"]
+    adapter.attach(name, new_client, "new-thread")
+    try:
+        await new_client._q.put({"method": "turn/started", "params": {"threadId": "new-thread"}})
+        await new_client._q.put({"method": "item/agentMessage/delta", "params": {"delta": "new"}})
+        await _wait_preview_text(name, "new")
+        await asyncio.sleep(0.2)
+        assert PushPreviewSource.get(name).text == "new"
+    finally:
+        await _finish_preview_client(adapter, name, new_client)
+        await asyncio.gather(old_task, return_exceptions=True)
+
+
+async def test_close_preserve_preview_keeps_last_published_text_without_late_timer(monkeypatch):
+    monkeypatch.setattr(codex_adapter, "matar_app_server", lambda name: None)
+    monkeypatch.setattr(codex_adapter.sem_terminal, "matar", lambda meta: None)
+    adapter = CodexAdapter()
+    client = _LiveQueueClient()
+    name = "preview-preserve-close"
+    adapter.attach(name, client, "t")
+    await client._q.put({"method": "item/agentMessage/delta", "params": {"delta": "first"}})
+    await _wait_preview_text(name, "first")
+    await client._q.put({"method": "item/agentMessage/delta", "params": {"delta": "-pending"}})
+    await asyncio.sleep(0)
+    task = adapter._sessions[name]["bomba"]
+    adapter.close_sync(name, preserve_preview=True)
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(0.2)
+    assert PushPreviewSource.get(name).text == "first"
+
+
+@pytest.mark.parametrize("headless", [False, True])
+async def test_pending_preview_keeps_control_and_drain_immediate(monkeypatch, headless):
+    adapter = CodexAdapter()
+    client = _LiveQueueClient()
+    client.server_requests = {}
+    name = "preview-controls"
+    adapter.attach(name, client, "t")
+    sess = adapter._sessions[name]
+    sess["headless"] = headless
+    drained = asyncio.Event()
+    observed = []
+
+    async def drain(*args):
+        observed.append((sess["state"], sess["in_progress"], PushPreviewSource.get(name).text))
+        drained.set()
+    monkeypatch.setattr(adapter, "drain", drain)
+    monitor = adapter.state_monitor(name, lambda: name)
+    await monitor.__anext__()
+    try:
+        await client._q.put({"method": "turn/started", "params": {"threadId": "t", "turn": {"id": "turn"}}})
+        assert (await monitor.__anext__()).state == "working"
+        await client._q.put({"method": "item/agentMessage/delta", "params": {"delta": "first"}})
+        await _wait_preview_text(name, "first")
+        sess["preview_buffer"]._interval = 60
+        await client._q.put({"method": "item/agentMessage/delta", "params": {"delta": "tail"}})
+        await client._q.put({"method": "thread/settings/updated", "params": {"threadId": "t", "threadSettings": {"model": "synthetic", "effort": "high"}}})
+        await monitor.__anext__()
+        assert sess["model"] == "synthetic" and sess["effort"] == "high"
+        assert PushPreviewSource.get(name).text == "first"
+        request = {"id": 42, "method": "item/tool/requestUserInput", "params": {"threadId": "t", "questions": [
+            {"id": "scope", "header": "Scope", "question": "Synthetic scope?", "options": [{"label": "A", "description": "Synthetic choice"}]}]}}
+        client.server_requests[42] = request
+        await client._q.put(request)
+        question = await monitor.__anext__()
+        assert question.state == "awaiting_input"
+        assert question.codex_question["request_id"] == 42
+        assert PushPreviewSource.get(name).text == "first"
+        client.server_requests.clear()
+        if headless:
+            approval = {"id": 43, "method": "item/commandExecution/requestApproval", "params": {
+                "threadId": "t", "command": "echo synthetic", "cwd": "/synthetic"}}
+            client.server_requests[43] = approval
+            await client._q.put(approval)
+            permission = await monitor.__anext__()
+            assert permission.state == "awaiting_input" and permission.options
+            assert PushPreviewSource.get(name).text == "first"
+            client.server_requests.clear()
+        await client._q.put({"method": "turn/completed", "params": {"threadId": "t"}})
+        assert (await monitor.__anext__()).state == "idle"
+        await asyncio.wait_for(drained.wait(), 1)
+        assert observed == [("idle", False, "")]
+    finally:
+        await monitor.aclose()
+        await _finish_preview_client(adapter, name, client)
