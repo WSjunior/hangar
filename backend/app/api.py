@@ -1579,6 +1579,9 @@ class CreateBody(_StrictBody):
     name: str = Field(min_length=1)
     cwd: str = Field(min_length=1)
     branch: str | None = Field(default=None, min_length=1)
+    # Com `new_branch`, `branch` é o nome da branch NOVA e `base` a de partida (None = a atual).
+    new_branch: bool = Field(default=False, strict=True)
+    base: str | None = Field(default=None, min_length=1)
     config_dir: str | None = None
     # Qual Adapter cria a sessao (app.adapters.get_adapter). Default "claude" preserva o
     # comportamento de hoje pros clientes que ainda nao mandam o campo.
@@ -2234,6 +2237,8 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
             raise HTTPException(502, detail=erro("erro_codex_catalogo_invalido", str(e),
                                                  erro=str(e))) from None
 
+    if body.new_branch and body.branch is None:
+        raise HTTPException(400, detail=erro("erro_criacao_sessao", "branch nova sem nome"))
     if body.branch is not None:
         try:
             root = await asyncio.to_thread(_allowed_scan_root, body.cwd)
@@ -2242,7 +2247,8 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
             if not name:
                 raise GitError(400, "nome de sessão inválido")
             worker = asyncio.create_task(asyncio.to_thread(
-                create_worktree, source, body.branch, name, root))
+                create_worktree, source, body.branch, name, root,
+                new_branch=body.new_branch, base=body.base))
             try:
                 path, created = await asyncio.shield(worker)
             except asyncio.CancelledError:

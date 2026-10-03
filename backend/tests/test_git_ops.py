@@ -1136,3 +1136,78 @@ def test_git_log_since_engole_giterror(tmp_path, monkeypatch):
         raise git_ops.GitError(504, "git timeout")
     monkeypatch.setattr(git_ops, "_run", explode)
     assert git_ops.git_log_since(str(tmp_path), 0.0) == []
+
+
+def test_create_worktree_new_branch_records_base_and_copies_config(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    d = _repo(repo)
+    (repo / ".gitignore").write_text(".env\nbig.bin\ncache/\n")
+    git_ops._run(d, "add", ".gitignore")
+    git_ops._run(d, "commit", "-q", "-m", "ignore")
+    # A base precisa do .gitignore: sem ele o .env copiado é untracked e o `worktree remove` recusa.
+    git_ops._run(d, "branch", "-f", "feature")
+    (repo / ".env").write_text("SECRET=1")
+    (repo / "big.bin").write_bytes(b"x" * (1024 * 1024 + 1))
+    (repo / "cache").mkdir()
+    (repo / "cache" / "a").write_text("a")
+
+    path, created = git_ops.create_worktree(d, "nova", "chat", tmp_path, new_branch=True, base="feature")
+    assert created and path == str(tmp_path / "repo-chat")
+    assert git_ops.branch_of(path) == "nova"
+    base = git_ops._run(path, "config", "--get", "branch.nova.hangar-base").stdout.strip()
+    assert base == "feature"
+    assert (tmp_path / "repo-chat" / ".env").read_text() == "SECRET=1"
+    assert not (tmp_path / "repo-chat" / "big.bin").exists()
+    assert not (tmp_path / "repo-chat" / "cache").exists()
+    git_ops.remove_worktree(d, path)
+
+
+def test_create_worktree_new_branch_defaults_to_current(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    d = _repo(repo)
+    path, _ = git_ops.create_worktree(d, "nova", "chat", tmp_path, new_branch=True)
+    assert git_ops._run(path, "config", "--get", "branch.nova.hangar-base").stdout.strip() == "main"
+    git_ops.remove_worktree(d, path)
+
+
+@pytest.mark.parametrize("bad", ["-x", "com espaco", "a..b", ""])
+def test_create_worktree_new_branch_rejects_bad_names(tmp_path, bad):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    d = _repo(repo)
+    with pytest.raises(GitError) as e:
+        git_ops.create_worktree(d, bad, "chat", tmp_path, new_branch=True)
+    assert e.value.status == 400
+    assert not (tmp_path / "repo-chat").exists()
+
+
+def test_create_worktree_new_branch_rejects_existing(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    d = _repo(repo)
+    with pytest.raises(GitError) as e:
+        git_ops.create_worktree(d, "feature", "chat", tmp_path, new_branch=True)
+    assert e.value.status == 409
+
+
+def test_create_session_with_new_branch(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import api, fs
+    from app.models import SessionInfo
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    d = _repo(repo)
+    monkeypatch.setattr(fs, "resolve_scan_roots", lambda _settings: [tmp_path])
+    monkeypatch.setattr(api, "resolve_scan_roots", lambda _settings: [tmp_path])
+    monkeypatch.setattr(api.settings, "auth_token", "test-token")
+    monkeypatch.setattr(api.registry, "create",
+                        lambda name, cwd, config_dir, **kw: SessionInfo(name=name, cwd=cwd, provider="claude"))
+    r = TestClient(api.app).post("/api/sessions", json={"name": "chat", "cwd": d, "branch": "nova",
+                                                        "new_branch": True, "base": "main"},
+                                 headers={"Authorization": "Bearer test-token"})
+    assert r.status_code == 200, r.text
+    assert r.json()["branch"] == "nova" and r.json()["worktree"] is True
+    git_ops.remove_worktree(d, r.json()["cwd"])
