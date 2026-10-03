@@ -211,6 +211,10 @@ class AppServerClient:
                     msg = json.loads(raw)
                     if not isinstance(msg, dict):
                         continue  # JSON valido mas nao-objeto (ex: "42", "[]") - ignora
+                    if msg.get("type") == "cano_output":
+                        msg = json.loads(msg["frame"])
+                        if not isinstance(msg, dict):
+                            continue
                     tipo_cano = msg.get("type")
                     if tipo_cano == "cano_stderr":
                         self.stderr_tail.append(str(msg.get("linha", "")))

@@ -921,17 +921,13 @@ class ClaudeHeadlessAdapter:
             ligado = await self._conectar(cano)
             if ligado is not None:
                 lig, snap = ligado
+                cano["versao"] = snap.get("versao", 1)
+                hl_sessions.update(sess.name, cano=cano)
                 sess.proc = lig
-                sess.leitor = asyncio.create_task(self._ler(sess))
                 await self._aplicar_snapshot(sess, snap)
+                sess.leitor = asyncio.create_task(self._ler(sess))
                 _log.info("claude headless: religou name=%s pid=%s aberto=%s pendentes=%d",
                           sess.name, snap.get("pid"), snap.get("aberto"), len(snap.get("pendentes") or []))
-                if (snap.get("versao") != cano_mod.VERSAO and not snap.get("aberto")
-                        and not snap.get("pendentes") and snap.get("saiu") is None):
-                    # Cano de outra versão e sessão ociosa: troca agora, que não custa nada.
-                    _log.info("claude headless: cano versão %s != %s, reabrindo name=%s",
-                              snap.get("versao"), cano_mod.VERSAO, sess.name)
-                    await self._reabrir(sess)
                 self._agendar_cota(sess)
                 return True
             # Sem snapshot com o cano vivo: outro cliente está preso nele (cano antigo atende em
@@ -1006,6 +1002,8 @@ class ClaudeHeadlessAdapter:
             hl_sessions.update(sess.name, cano=None)
             raise RuntimeError(f"cano não escutou em {_TETO_CANO_S:.0f}s: {cauda}")
         sess.proc, snap = ligado
+        cano["versao"] = snap.get("versao", 1)
+        sess.meta = hl_sessions.update(sess.name, cano=cano) or sess.meta
         sess.leitor = asyncio.create_task(self._ler(sess))
         for linha in snap.get("stderr_tail") or []:
             sess.stderr_tail.append(linha)
@@ -1093,6 +1091,15 @@ class ClaudeHeadlessAdapter:
             except ValueError:
                 continue
         self._recalcular_estado(sess)
+        prefix = (snap.get("inflight") or {}).get("claude") or {}
+        if prefix.get("complete"):
+            for buffer, key in ((sess.preview_buffer, "text"), (sess.thinking_buffer, "thinking")):
+                await buffer.reset(prefix.get(key) or "")
+                await buffer.flush()
+            tool = prefix.get("tool") or {}
+            sess.tool_nome = tool.get("name")
+            await sess.tool_buffer.reset(tool.get("input") or "")
+            await sess.tool_buffer.flush()
         await self._notify(sess)
 
     async def _ler(self, sess: _Sessao) -> None:
@@ -1112,6 +1119,12 @@ class ClaudeHeadlessAdapter:
                     break
                 try:
                     ev = json.loads(linha)
+                    if not isinstance(ev, dict):
+                        raise ValueError("linha não é objeto")
+                    if ev.get("type") == "cano_output":
+                        ev = json.loads(ev["frame"])
+                        if not isinstance(ev, dict):
+                            raise ValueError("frame não é objeto")
                 except ValueError:
                     sess.linhas_ruins += 1
                     if sess.linhas_ruins <= 3:
@@ -2268,11 +2281,11 @@ async def conectar_cano(cano: dict, *, esperar: float = 0.0) -> tuple[_Ligacao, 
             # padrão do asyncio (64 KB) estourava a leitura e o leitor ficava pendurado.
             if escuta.startswith("unix:"):
                 reader, writer = await asyncio.wait_for(
-                    asyncio.open_unix_connection(escuta[5:], limit=_LIMITE_LINHA), 3)
+                    asyncio.open_unix_connection(escuta[5:], limit=cano_mod.MAX_ENVELOPE), 3)
             elif escuta.startswith("tcp:"):
                 host, porta = escuta[4:].rsplit(":", 1)
                 reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection(host, int(porta), limit=_LIMITE_LINHA), 3)
+                    asyncio.open_connection(host, int(porta), limit=cano_mod.MAX_ENVELOPE), 3)
             else:
                 return None
             break
@@ -2375,7 +2388,7 @@ def _escuta_nova(key: str, pasta: Path | None = None) -> tuple[str, str | None]:
         # igual faria o novo roubar o socket dele. A limpeza vai por `cano-<chave>*`.
         caminho = (pasta or hl_sessions._dir()) / f"cano-{key[:16]}-{uuid.uuid4().hex[:4]}.sock"
         if len(str(caminho).encode()) < 100:
-            return f"unix:{caminho}", None
+            return f"unix:{caminho}", uuid.uuid4().hex
     import socket
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
