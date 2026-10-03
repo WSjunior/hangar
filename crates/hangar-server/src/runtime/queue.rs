@@ -28,12 +28,14 @@ pub struct Operation {
     pub wire_attempts: BTreeMap<String, Value>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub terminal_finalized: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub entry_materialized: bool,
 }
 
 impl Operation {
     fn new(id: &str, payload: Value, entry_id: Option<String>) -> Self {
         Self { id:id.into(), payload, entry_id, status:Status::Prepared,
-            result:Value::Null, dispatch_cursor:Value::Null, wire_attempts:BTreeMap::new(),terminal_finalized:false }
+            result:Value::Null, dispatch_cursor:Value::Null, wire_attempts:BTreeMap::new(),terminal_finalized:false,entry_materialized:false }
     }
 }
 
@@ -202,6 +204,7 @@ fn append_row(state: &mut State, row: Value) -> io::Result<Value> {
     if candidates.len() < overflow { return Err(invalid("fila cheia de entradas pendentes")); }
     state.rows.retain(|r| !candidates.iter().any(|id| id == row_id(r)));
     state.rows.push(row.clone());
+    mark_materialized(state,row_id(&row));
     Ok(row)
 }
 
@@ -212,6 +215,22 @@ fn terminal_input(state:&State,op:&Operation)->bool {
         || state.operations.iter().any(|(call,receipt)|call.starts_with("call::terminal:queue:") && receipt.payload["kind"]=="prepare"
             && receipt.payload["id"]==op.id && receipt.payload["payload"]==op.payload
             && receipt.payload["entry_id"].as_str()==op.entry_id.as_deref())
+}
+
+fn entry_was_materialized(state:&State,entry:&str)->bool {
+    state.rows.iter().any(|row|row_id(row)==entry)
+        || state.operations.values().any(|op|op.entry_id.as_deref()==Some(entry)
+            && (op.entry_materialized || terminal_input(state,op) && !op.wire_attempts.is_empty()))
+        || state.operations.iter().any(|(call,receipt)|call.starts_with(CALL_PREFIX) && (matches!(receipt.payload["kind"].as_str(),Some("append"|"append_local"))
+            && receipt.result["id"]==entry || receipt.payload["kind"]=="claim"
+            && receipt.result.as_array().is_some_and(|rows|rows.iter().any(|row|row["id"]==entry))
+            || receipt.payload["kind"]=="remove" && receipt.payload["entry_id"]==entry && receipt.result==true))
+}
+
+fn mark_materialized(state:&mut State,entry:&str) {
+    let ids:Vec<_>=state.operations.values().filter(|op|op.entry_id.as_deref()==Some(entry) && terminal_input(state,op))
+        .map(|op|op.id.clone()).collect();
+    for id in ids {state.operations.get_mut(&id).unwrap().entry_materialized=true;}
 }
 
 fn terminal_protected(state:&State,entry:&str,except:&str)->bool {
@@ -255,7 +274,10 @@ fn finalize_terminal(state:&mut State,id:&str,clock:ClockSample)->io::Result<()>
 }
 
 fn recover_terminal(state:&mut State,clock:ClockSample)->io::Result<()> {
-    let prepared:Vec<_>=state.operations.values().filter(|op|op.status==Status::Prepared && op.wire_attempts.is_empty() && terminal_input(state,op)
+    let materialized:Vec<_>=state.operations.values().filter(|op|terminal_input(state,op)
+        && entry_was_materialized(state,op.entry_id.as_deref().unwrap())).filter_map(|op|op.entry_id.clone()).collect();
+    for entry in materialized {mark_materialized(state,&entry);}
+    let prepared:Vec<_>=state.operations.values().filter(|op|op.status==Status::Prepared && !op.entry_materialized && op.wire_attempts.is_empty() && terminal_input(state,op)
         && !terminal_protected(state,op.entry_id.as_deref().unwrap(),&op.id)).cloned().collect();
     for op in prepared {
         let entry=op.entry_id.as_deref().unwrap();
@@ -354,6 +376,7 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             if state.operations[&id].status == Status::Deferred {
                 let old = state.operations.get_mut(&id).unwrap(); old.status = Status::Prepared; old.result = Value::Null;old.terminal_finalized=false;
             }
+            if let Some(entry)=state.operations[&id].entry_id.clone().filter(|entry|entry_was_materialized(state,entry)) {mark_materialized(state,&entry);}
             serde_json::to_value(&state.operations[&id])?
         }
         Action::BindDispatch { id, cursor } => {

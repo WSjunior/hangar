@@ -362,3 +362,22 @@ async fn terminal_runtime_input_primitive_payload_is_rejected_without_stopping_a
     }
     assert!(f.state()["rows"].as_array().unwrap().is_empty());assert!(f.io.calls.lock().unwrap().is_empty());h.stop().await.unwrap();
 }
+
+#[tokio::test]
+async fn terminal_runtime_removed_recovered_root_has_no_further_delivery_or_publication() {
+    for exhausted in [false,true] {
+        let f=Fixture::new().await;let clock=ClockSample {monotonic_s:0.0,epoch_s:chrono::Utc::now().timestamp() as f64};
+        let mut original=serde_json::to_value(f.command("removed-root","[de: peer] Olá")).unwrap();original["payload"]["_terminal_generation"]=json!(1);
+        let mut store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+        store.exec(1,"prepare-root",clock,Action::Prepare {id:"removed-root".into(),entry_id:Some("removed-root".into()),payload:original}).unwrap();
+        store.exec(1,"recover-create",clock,Action::Recover).unwrap();
+        if exhausted {for n in 0..2 {store.exec(1,&format!("bump:{n}"),clock,Action::BumpAttempts {entry_id:"removed-root".into()}).unwrap();}}
+        store.exec(1,"prepare-attempt",clock,Action::Prepare {id:"old-attempt".into(),entry_id:Some("removed-root".into()),payload:json!({"operation_id":"old-attempt","kind":"input","payload":{"text":"[de: peer] Olá","_terminal_generation":1}})}).unwrap();
+        store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"old-attempt".into(),wire_id:"terminal:1:old-attempt".into()}).unwrap();
+        store.exec(1,"finish",clock,Action::Finish {id:"old-attempt".into(),status:if exhausted{queue::Status::Deferred}else{queue::Status::Rejected},result:json!({"operation_id":"old-attempt","disposition":if exhausted{"deferred"}else{"rejected"},"payload":{"cleanup":"proved"}})}).unwrap();
+        store.exec(1,"remove",clock,Action::Remove {entry_id:"removed-root".into()}).unwrap();drop(store);
+        f.native.store(true,std::sync::atomic::Ordering::Release);f.unknown.store(true,std::sync::atomic::Ordering::Release);
+        let h=f.start();h.snapshot().await.unwrap();h.drain().await.unwrap();h.drain().await.unwrap();
+        assert!(f.state()["rows"].as_array().unwrap().is_empty());assert!(f.calls.lock().unwrap().is_empty());assert!(f.io.socket_calls.lock().unwrap().is_empty());assert!(f.io.calls.lock().unwrap().is_empty());h.stop().await.unwrap();
+    }
+}

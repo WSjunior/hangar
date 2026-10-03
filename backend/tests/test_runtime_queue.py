@@ -360,3 +360,27 @@ def test_terminal_rejected_before_dispatch_abandons_pending_row(tmp_path):
         "operation_id": "op", "disposition": "rejected", "payload": {"code": "refused"}}})
     assert store.state["rows"][0]["delivered"] is True
     assert store.state["rows"][0]["desistiu"] is True
+
+
+@pytest.mark.parametrize("exhausted", [False, True])
+def test_recovered_terminal_row_removed_after_failure_stays_removed(tmp_path, exhausted):
+    store = open_store(tmp_path)
+    store.exec(1, "prepare-root", CLOCK, {"kind": "prepare", "id": "root", "entry_id": "entry-1", "payload": {
+        "operation_id": "root", "kind": "input", "payload": {"text": "Olá 🌎", "pre_transcript": True, "_terminal_generation": 1}}})
+    store.exec(1, "recover-first-creation", CLOCK, {"kind": "recover"})
+    assert len(store.state["rows"]) == 1
+    if exhausted:
+        for n in range(2):
+            store.exec(1, f"bump:{n}", CLOCK, {"kind": "bump_attempts", "entry_id": "entry-1"})
+    store.exec(1, "prepare-attempt", CLOCK, {"kind": "prepare", "id": "attempt", "entry_id": "entry-1", "payload": {
+        "operation_id": "attempt", "kind": "input", "payload": {"text": "Olá 🌎", "_terminal_generation": 1}}})
+    store.exec(1, "dispatch", CLOCK, {"kind": "begin_dispatch", "id": "attempt", "wire_id": "terminal:1:attempt"})
+    status = "deferred" if exhausted else "rejected"
+    store.exec(1, "finish", CLOCK, {"kind": "finish", "id": "attempt", "status": status, "result": {
+        "operation_id": "attempt", "disposition": status, "payload": {"cleanup": "proved"}}})
+    assert store.state["rows"][0]["desistiu"] is True
+    assert store.exec(1, "remove", CLOCK, {"kind": "remove", "entry_id": "entry-1"}) is True
+    store = open_store(tmp_path)
+    for n in range(2):
+        store.exec(1, f"recover-again:{n}", CLOCK, {"kind": "recover"})
+        assert store.state["rows"] == []

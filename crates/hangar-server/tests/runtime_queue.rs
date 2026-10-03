@@ -248,16 +248,42 @@ from app.runtime_queue import QueueStore,initial_state
 s=QueueStore(Path(sys.argv[1]),Path(sys.argv[2]),initial_state('key',1,'session',[]))
 c={'monotonic_s':0.0,'epoch_s':1800000000.0}
 assert s.state['operations']['attempt']['terminal_finalized'] is True
+assert s.state['operations']['attempt']['entry_materialized'] is True
 s.exec(1,'python-recover',c,{'kind':'recover'})
 s.exec(1,'python-finish',c,{'kind':'finish','id':'attempt','status':'deferred','result':{'operation_id':'attempt','disposition':'deferred','payload':{'cleanup':'proved'}}})
 assert s.state['rows'][0]['attempts']==1
 s.exec(1,'python-missing-prepare',c,{'kind':'prepare','id':'missing','entry_id':'missing','payload':{'operation_id':'missing','kind':'input','payload':{'text':'Unicode 🌎','pre_transcript':True,'_terminal_generation':1}}})
 s.exec(1,'python-missing-recover',c,{'kind':'recover'})
 assert len(s.state['rows'])==2
+assert s.state['operations']['missing']['entry_materialized'] is True
+assert s.state['rows'][1]['text']=='Unicode 🌎'
+s.exec(1,'python-failed-prepare',c,{'kind':'prepare','id':'failed','entry_id':'missing','payload':{'operation_id':'failed','kind':'input','payload':{'text':'Unicode 🌎','_terminal_generation':1}}})
+s.exec(1,'python-failed-dispatch',c,{'kind':'begin_dispatch','id':'failed','wire_id':'terminal:1:failed'})
+s.exec(1,'python-failed-finish',c,{'kind':'finish','id':'failed','status':'rejected','result':{'operation_id':'failed','disposition':'rejected','payload':{'code':'refused'}}})
+assert s.exec(1,'python-remove',c,{'kind':'remove','entry_id':'missing'}) is True
 "#;
     let backend=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../backend");
     let output=std::process::Command::new(python).args(["-c",script]).arg(&path).arg(&projection).env("PYTHONPATH",backend).output().unwrap();assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
     let mut store=Store::open(&path,&projection,State::new("key",1,"session",vec![])).unwrap();store.exec(1,"rust-recover",clock,Action::Recover).unwrap();
-    assert!(store.state().operations["attempt"].terminal_finalized);assert_eq!(store.state().rows.len(),2);assert_eq!(store.state().rows[0]["attempts"],1);assert_eq!(store.state().rows[1]["text"],"Unicode 🌎");
-    assert_eq!(store.state().rows[1]["pre_transcript"],true);
+    assert!(store.state().operations["attempt"].terminal_finalized);assert!(store.state().operations["attempt"].entry_materialized);
+    assert!(store.state().operations["missing"].entry_materialized);assert_eq!(store.state().rows.len(),1);assert_eq!(store.state().rows[0]["attempts"],1);
+    store.exec(1,"rust-recover-again",clock,Action::Recover).unwrap();assert_eq!(store.state().rows.len(),1);
+}
+
+#[test]
+fn terminal_runtime_recovered_entry_removed_after_failure_is_not_materialized_again() {
+    for exhausted in [false,true] {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("state");let projection=dir.path().join("projection");
+        let mut store=Store::open(&path,&projection,State::new("key",1,"session",vec![])).unwrap();let clock=ClockSample {monotonic_s:0.0,epoch_s:1800000000.0};
+        let payload=json!({"operation_id":"root","kind":"input","payload":{"text":"Olá 🌎","pre_transcript":true,"_terminal_generation":1}});
+        store.exec(1,"prepare-root",clock,Action::Prepare {id:"root".into(),entry_id:Some("entry".into()),payload}).unwrap();
+        store.exec(1,"recover-first-creation",clock,Action::Recover).unwrap();assert_eq!(store.state().rows.len(),1);
+        if exhausted {for n in 0..2 {store.exec(1,&format!("bump:{n}"),clock,Action::BumpAttempts {entry_id:"entry".into()}).unwrap();}}
+        store.exec(1,"prepare-attempt",clock,Action::Prepare {id:"attempt".into(),entry_id:Some("entry".into()),payload:json!({"operation_id":"attempt","kind":"input","payload":{"text":"Olá 🌎","_terminal_generation":1}})}).unwrap();
+        store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"attempt".into(),wire_id:"terminal:1:attempt".into()}).unwrap();
+        store.exec(1,"finish",clock,Action::Finish {id:"attempt".into(),status:if exhausted {Status::Deferred}else{Status::Rejected},result:json!({"operation_id":"attempt","disposition":if exhausted{"deferred"}else{"rejected"},"payload":{"cleanup":"proved"}})}).unwrap();
+        assert_eq!(store.state().rows[0]["desistiu"],true);assert_eq!(store.exec(1,"remove",clock,Action::Remove {entry_id:"entry".into()}).unwrap(),true);drop(store);
+        let mut store=Store::open(&path,&projection,State::new("key",1,"session",vec![])).unwrap();
+        for n in 0..2 {store.exec(1,&format!("recover-again:{n}"),clock,Action::Recover).unwrap();assert!(store.state().rows.is_empty(),"exhausted={exhausted}");}
+    }
 }

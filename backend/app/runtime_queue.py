@@ -148,6 +148,23 @@ def _terminal_input(state, operation):
             and receipt["payload"].get("entry_id") == operation["entry_id"] for call, receipt in state["operations"].items()))
 
 
+def _entry_was_materialized(state, entry_id):
+    return (any(row.get("id") == entry_id for row in state["rows"])
+        or any(op["entry_id"] == entry_id and (op.get("entry_materialized") is True
+               or _terminal_input(state, op) and op["wire_attempts"]) for op in state["operations"].values())
+        or any(call.startswith(_CALL_PREFIX) and (receipt["payload"].get("kind") in {"append", "append_local"}
+               and isinstance(receipt["result"], dict) and receipt["result"].get("id") == entry_id
+               or receipt["payload"].get("kind") == "claim" and any(row.get("id") == entry_id for row in receipt["result"])
+               or receipt["payload"].get("kind") == "remove" and receipt["payload"].get("entry_id") == entry_id and receipt["result"] is True)
+               for call, receipt in state["operations"].items()))
+
+
+def _mark_materialized(state, entry_id):
+    for operation in state["operations"].values():
+        if operation["entry_id"] == entry_id and _terminal_input(state, operation):
+            operation["entry_materialized"] = True
+
+
 def _terminal_protected(state, entry_id, except_id):
     statuses = {"accepted", "unknown", "dispatching", "confirmed"}
     return any(op["entry_id"] == entry_id and (op["id"] != except_id and op["status"] in statuses
@@ -197,8 +214,12 @@ def _finalize_terminal(state, operation_id, clock):
 
 
 def _recover_terminal(state, clock):
+    materialized = {op["entry_id"] for op in state["operations"].values() if _terminal_input(state, op)
+                    and _entry_was_materialized(state, op["entry_id"])}
+    for entry_id in materialized:
+        _mark_materialized(state, entry_id)
     for operation in tuple(state["operations"].values()):
-        if (operation["status"] != "prepared" or operation["wire_attempts"] or not _terminal_input(state, operation)
+        if (operation["status"] != "prepared" or operation.get("entry_materialized") or operation["wire_attempts"] or not _terminal_input(state, operation)
                 or _terminal_protected(state, operation["entry_id"], operation["id"])):
             continue
         if any(row.get("id") == operation["entry_id"] for row in state["rows"]):
@@ -242,6 +263,7 @@ def apply_action(state, action, clock, call_id):
         for candidate in candidates[:max(0, overflow)]:
             rows.remove(candidate)
         rows.append(row)
+        _mark_materialized(state, entry_id)
         return row
     if kind == "prepare":
         operation_id = action["id"]
@@ -253,8 +275,12 @@ def apply_action(state, action, clock, call_id):
             if old["status"] == "deferred":
                 old.update(status="prepared", result=None)
                 old.pop("terminal_finalized", None)
+            if old["entry_id"] is not None and _entry_was_materialized(state, old["entry_id"]):
+                _mark_materialized(state, old["entry_id"])
             return old
         operations[operation_id] = _operation(operation_id, action["payload"], action.get("entry_id"))
+        if action.get("entry_id") is not None and _entry_was_materialized(state, action["entry_id"]):
+            _mark_materialized(state, action["entry_id"])
         return operations[operation_id]
     if kind in {"bind_dispatch", "begin_dispatch", "finish", "late_rpc_resolution"}:
         operation = operations.get(action["id"])
