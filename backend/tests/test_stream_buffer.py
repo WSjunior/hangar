@@ -64,7 +64,7 @@ def test_seeded_reset_appends_after_prefix():
     asyncio.run(run())
 
 
-def test_timer_failure_is_reported_without_hot_retry_loop():
+def test_timer_failure_is_reported_without_hot_retry_loop(caplog):
     async def run():
         errors = []
         failed = asyncio.Event()
@@ -76,6 +76,7 @@ def test_timer_failure_is_reported_without_hot_retry_loop():
         def on_error(error):
             errors.append(type(error).__name__)
             failed.set()
+            raise LookupError("synthetic report error")
         buffer = StreamBuffer(publish, on_error=on_error, interval=0.01)
         await buffer.append("first")
         await buffer.append(" next")
@@ -83,6 +84,32 @@ def test_timer_failure_is_reported_without_hot_retry_loop():
         await asyncio.sleep(0.03)
         assert errors == ["RuntimeError"]
         assert calls == ["first", "first next"]
+        await buffer.discard()
+    asyncio.run(run())
+    failures = [record for record in caplog.records if record.name == "app.adapters.stream_buffer"]
+    assert len(failures) == 2
+    assert all(record.exc_info and record.exc_info[2] for record in failures)
+    assert {type(record.exc_info[1]) for record in failures} == {RuntimeError, LookupError}
+
+
+def test_rebind_preserves_pending_prefix_and_publishes_without_new_delta():
+    async def run():
+        published = []
+        emitted = asyncio.Event()
+
+        async def publish(value):
+            published.append(value)
+            if value == "firsttail":
+                emitted.set()
+
+        buffer = StreamBuffer(publish, interval=1e10)
+        await buffer.append("first")
+        await buffer.append("tail")
+        buffer.rebind()
+        await asyncio.wait_for(emitted.wait(), 1)
+        await buffer.append("next")
+        await buffer.flush()
+        assert published == ["first", "firsttail", "firsttailnext"]
         await buffer.discard()
     asyncio.run(run())
 

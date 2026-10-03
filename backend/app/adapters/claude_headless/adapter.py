@@ -277,7 +277,7 @@ class _Sessao:
             self.live_error_handler(error)
         else:
             _log.warning("claude headless: publicação parcial falhou name=%s error_type=%s",
-                         self.name, type(error).__name__)
+                         self.name, type(error).__name__, exc_info=(type(error), error, error.__traceback__))
 
     async def _publish_preview(self, value: str) -> None:
         if self.live_active():
@@ -1605,9 +1605,9 @@ class ClaudeHeadlessAdapter:
         if self._sessions.get(sess.name) is not sess:
             return
         _log.warning("claude headless: prévia falhou name=%s error_type=%s",
-                     sess.name, type(error).__name__)
+                     sess.name, type(error).__name__, exc_info=(type(error), error, error.__traceback__))
         diag.registrar("headless.previa_falhou", "erro", sessao=sess.name,
-                       provider="claude", erro_tipo=type(error).__name__)
+                       provider="claude", **diag.erro_campos(error))
         task = asyncio.get_running_loop().create_task(self._notify(sess))
         self._tarefas.add(task)
         def notified(done: asyncio.Task) -> None:
@@ -1617,9 +1617,9 @@ class ClaudeHeadlessAdapter:
             error = done.exception()
             if error is not None:
                 _log.warning("claude headless: aviso da prévia falhou name=%s error_type=%s",
-                             sess.name, type(error).__name__)
+                             sess.name, type(error).__name__, exc_info=(type(error), error, error.__traceback__))
                 diag.registrar("headless.previa_aviso_falhou", "erro", sessao=sess.name,
-                               provider="claude", erro_tipo=type(error).__name__)
+                               provider="claude", **diag.erro_campos(error))
         task.add_done_callback(notified)
 
     @staticmethod
@@ -1917,7 +1917,8 @@ class ClaudeHeadlessAdapter:
         def rename_on_loop() -> None:
             sess = self._sessions.get(old)
             if sess is not None:
-                self._invalidate_streams(sess)
+                for buffer in (sess.preview_buffer, sess.thinking_buffer, sess.tool_buffer):
+                    buffer.rebind()
                 for key in (old, f"{old}#pensamento", f"{old}#ferramenta"):
                     source = PushPreviewSource._sources.get(key)
                     if source is not None:

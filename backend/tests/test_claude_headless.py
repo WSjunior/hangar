@@ -1741,7 +1741,7 @@ def test_permission_and_usage_do_not_wait_for_pending_preview(adapter):
     _run(run())
 
 
-def test_partial_timer_failure_reports_without_turn_error(adapter, monkeypatch):
+def test_partial_timer_failure_reports_without_turn_error(adapter, monkeypatch, caplog):
     sess = adapter._sessions["s1"]
     reports = []
 
@@ -1752,7 +1752,10 @@ def test_partial_timer_failure_reports_without_turn_error(adapter, monkeypatch):
 
         async def push(text):
             if text == "firsttail":
-                raise RuntimeError("synthetic preview failure")
+                try:
+                    raise OSError(5, "synthetic source failure")
+                except OSError as cause:
+                    raise RuntimeError("synthetic preview failure") from cause
             await original(text)
 
         def report(event, *args, **kwargs):
@@ -1766,7 +1769,11 @@ def test_partial_timer_failure_reports_without_turn_error(adapter, monkeypatch):
         await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "tail"}})
         await asyncio.wait_for(failed.wait(), 1)
         await asyncio.gather(*adapter._tarefas)
-        assert reports == [("headless.previa_falhou", {"sessao": "s1", "provider": "claude", "erro_tipo": "RuntimeError"})]
+        assert reports == [("headless.previa_falhou", {"sessao": "s1", "provider": "claude", "erro_tipo": "RuntimeError",
+                                                     "causa_tipo": "OSError", "errno": 5, "winerror": None})]
+        failure = next(record for record in caplog.records if record.name == "hangar.claude_headless")
+        assert failure.exc_info and failure.exc_info[2]
+        assert isinstance(failure.exc_info[1].__cause__, OSError)
         assert sess.problema is None
         assert sess.version > 0
         assert not adapter._tarefas
@@ -1787,7 +1794,7 @@ def test_rename_on_owner_loop_cancels_old_partial_channels(adapter):
         assert fonte_pensamento("s1").text == ""
         await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "new"}})
         await asyncio.sleep(0.18)
-        assert fonte_pensamento("renamed").text == "new"
+        assert fonte_pensamento("renamed").text == "oldtailnew"
         assert fonte_pensamento("s1").text == ""
         await sess.thinking_buffer.discard()
     _run(run())
@@ -1825,4 +1832,28 @@ def test_old_eof_cannot_clear_replacement_partial_channels(adapter):
         await new.preview_buffer.discard()
         await new.thinking_buffer.discard()
         await new.tool_buffer.discard()
+    _run(run())
+
+
+def test_rename_preserves_pending_tool_input_and_label(adapter):
+    from app.adapters.preview_push import fonte_ferramenta
+    sess = adapter._sessions["s1"]
+
+    async def run():
+        sess.loop = asyncio.get_running_loop()
+        sess.tool_buffer._interval = 60
+        await adapter._on_stream(sess, {"type": "content_block_start", "content_block": {"type": "tool_use", "name": "Write"}})
+        for part in ('{"file_path":"/tmp/ação",', '"content":"first'):
+            await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": part}})
+        await asyncio.to_thread(adapter.rename, "s1", "renamed")
+        async with asyncio.timeout(1):
+            while not fonte_ferramenta("renamed").text:
+                await asyncio.sleep(0)
+        assert json.loads(fonte_ferramenta("renamed").text)["input"]["file_path"] == "/tmp/ação"
+        await adapter._on_stream(sess, {"type": "content_block_delta", "delta": {"type": "input_json_delta", "partial_json": 'tail"}'}})
+        await adapter._on_stream(sess, {"type": "content_block_stop"})
+        assert json.loads(fonte_ferramenta("renamed").text) == {
+            "nome": "Write", "input": {"file_path": "/tmp/ação", "content": "firsttail"}}
+        assert sess.label == "Write: ação"
+        assert fonte_ferramenta("s1").text == ""
     _run(run())

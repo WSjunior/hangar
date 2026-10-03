@@ -55,19 +55,19 @@ class StreamBuffer:
     async def _later(self, generation: int) -> None:
         failed = False
         try:
-            delay = max(0.0, self._last + self._interval - asyncio.get_running_loop().time())
+            delay = max(0.0, self._last + self._interval - asyncio.get_running_loop().time()) if self._published else 0.0
             await asyncio.sleep(delay)
             await self._emit(generation)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             failed = True
-            _log.warning("publicação parcial falhou: %s", type(exc).__name__)
+            _log.warning("publicação parcial falhou: %s", type(exc).__name__, exc_info=True)
             if self._on_error is not None:
                 try:
                     self._on_error(exc)
                 except Exception as callback_error:
-                    _log.warning("aviso da publicação parcial falhou: %s", type(callback_error).__name__)
+                    _log.warning("aviso da publicação parcial falhou: %s", type(callback_error).__name__, exc_info=True)
         finally:
             if self._pending is asyncio.current_task():
                 self._pending = None
@@ -87,6 +87,10 @@ class StreamBuffer:
 
     async def flush(self) -> None:
         await self._emit(self._generation)
+
+    def rebind(self) -> None:
+        self.invalidate(self.value)
+        self._schedule()
 
     def invalidate(self, value: str = "") -> None:
         # Chamada só no event loop: uma geração encerrada nunca publica no bloco seguinte.

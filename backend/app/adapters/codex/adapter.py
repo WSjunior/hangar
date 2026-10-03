@@ -34,7 +34,7 @@ from app.procinfo import pid_vivo
 from app.adapters.preview_push import PushPreviewSource
 from app.adapters.stream_buffer import StreamBuffer
 from app.adapters.codex.rollout import parse_rollout_line
-from app import codex_contas
+from app import codex_contas, diag
 from app import tmux
 from app.pqueue import PromptQueue
 from app.send_executor import send_thread
@@ -1557,8 +1557,10 @@ class CodexAdapter:
         def failed(exc: Exception) -> None:
             if self._sessions.get(name) is sess:
                 _log.warning("codex: publicação da prévia falhou name=%s tipo=%s",
-                             name, type(exc).__name__)
-                espalhar(exc)
+                             name, type(exc).__name__, exc_info=(type(exc), exc, exc.__traceback__))
+                diag.registrar("codex.previa_falhou", "erro", sessao=name,
+                               provider="codex", **diag.erro_campos(exc))
+                espalhar(self._question_state(name, sess))
 
         buffer = StreamBuffer(publish, on_error=failed)
         sess["preview_buffer"] = buffer

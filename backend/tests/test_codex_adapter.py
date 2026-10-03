@@ -1570,3 +1570,54 @@ async def test_pending_preview_keeps_control_and_drain_immediate(monkeypatch, he
     finally:
         await monitor.aclose()
         await _finish_preview_client(adapter, name, client)
+
+
+async def test_preview_timer_failure_keeps_both_state_streams_alive(monkeypatch, caplog):
+    adapter = CodexAdapter()
+    client = _LiveQueueClient()
+    name = "preview-failure"
+    adapter.attach(name, client, "t")
+    sess = adapter._sessions[name]
+    source = PushPreviewSource.get(name)
+    original_push = source.push
+    reports = []
+
+    async def push(text):
+        if text == "firsttail":
+            try:
+                raise OSError(5, "synthetic source failure")
+            except OSError as cause:
+                raise RuntimeError("synthetic preview failure") from cause
+        await original_push(text)
+
+    monkeypatch.setattr(source, "push", push)
+    from app import diag
+    monkeypatch.setattr(diag, "registrar", lambda event, *args, **kwargs: reports.append((event, kwargs)))
+    monitors = [adapter.state_monitor(name, lambda: name) for _ in range(2)]
+    try:
+        for monitor in monitors:
+            await monitor.__anext__()
+        await client._q.put({"method": "turn/started", "params": {"threadId": "t"}})
+        for monitor in monitors:
+            assert (await monitor.__anext__()).state == "working"
+        await client._q.put({"method": "item/agentMessage/delta", "params": {"delta": "first"}})
+        await _wait_preview_text(name, "first")
+        sess["preview_buffer"]._interval = 0.01
+        await client._q.put({"method": "item/agentMessage/delta", "params": {"delta": "tail"}})
+        for monitor in monitors:
+            warning = await asyncio.wait_for(monitor.__anext__(), 1)
+            assert warning.state == "working" and warning.problema is None
+        assert reports == [("codex.previa_falhou", {"sessao": name, "provider": "codex", "erro_tipo": "RuntimeError",
+                                                  "causa_tipo": "OSError", "errno": 5, "winerror": None})]
+        failure = next(record for record in caplog.records if "publicação da prévia falhou" in record.getMessage())
+        assert failure.exc_info and failure.exc_info[2]
+        assert isinstance(failure.exc_info[1].__cause__, OSError)
+        assert "bomba_error" not in sess and not sess["bomba"].done()
+        await client._q.put({"method": "turn/completed", "params": {"threadId": "t"}})
+        for monitor in monitors:
+            assert (await asyncio.wait_for(monitor.__anext__(), 1)).state == "idle"
+        assert source.text == ""
+    finally:
+        for monitor in monitors:
+            await monitor.aclose()
+        await _finish_preview_client(adapter, name, client)
