@@ -8,17 +8,21 @@ use crate::browser::{Engine, Pointer, model};
 
 pub(super) struct BrowserPanel {
     /// `servidor::sessão` dona deste navegador: nome do sidecar que o hangar-preview lê.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     key: String,
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     controller: Option<Rc<crate::browser::control::Controller<crate::browser::control::CdpPage>>>,
-    /// CDP do motor, para o repasse da tela remota (`browser::relay`), que não passa pelo turno do controlador.
-    #[cfg(target_os = "windows")]
+    /// CDP do motor, que o controlador usa.
+    #[cfg(not(target_os = "macos"))]
     cdp: Option<Rc<crate::browser::cdp::Cdp>>,
+    /// CDP do repasse da tela remota (`browser::relay`), que não passa pelo turno do controlador. No Windows é o do
+    /// motor; no Linux é uma sessão própria no alvo, criada no primeiro espectador, com o screencast dele.
+    #[cfg(not(target_os = "macos"))]
+    relay: std::cell::RefCell<Option<Rc<crate::browser::cdp::Cdp>>>,
     /// Quem olha a tela remota; os ouvintes de evento do CDP guardam só referência fraca.
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     viewer: Rc<std::cell::RefCell<Option<crate::browser::relay::Viewer>>>,
-    /// Nasce na primeira navegação, que tem a janela. No Linux só cabe um por processo: falhou, não tenta de novo.
+    /// Nasce na primeira navegação, que tem a janela.
     engine: Option<Result<Rc<Engine>, String>>,
     /// Endereço a abrir quando o motor terminar de nascer; `Some` enquanto ele nasce.
     starting: Option<String>,
@@ -56,8 +60,8 @@ impl BrowserPanel {
             cx.on_focus(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(true) }),
             cx.on_blur(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(false) }),
         ];
-        Self { key, #[cfg(target_os = "windows")] controller: None, #[cfg(target_os = "windows")] cdp: None,
-            #[cfg(target_os = "windows")] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, focus,
+        Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
+            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, focus,
             origin: Rc::default(), shown: false, _drain: drain, _subscriptions: subscriptions }
     }
 
@@ -71,7 +75,7 @@ impl BrowserPanel {
                 self.address.update(cx, |input, cx| input.set_value(url, window, cx));
             }
             self.page = page;
-            #[cfg(target_os = "windows")]
+            #[cfg(not(target_os = "macos"))]
             crate::browser::server::write_sidecar(&self.key, self.page.url.as_deref().unwrap_or(""), &self.page.title);
         }
         cx.notify();
@@ -89,9 +93,9 @@ impl BrowserPanel {
     /// Navega, ou faz o motor nascer e navega quando ele ficar pronto.
     pub(super) fn go(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
         self.invalid = None;
-        // No Windows o WebView2 pode nascer de novo: motor que falhou volta a ser tentado no próximo `open`.
-        #[cfg(target_os = "windows")]
-        if matches!(self.engine, Some(Err(_))) { self.engine = None; }
+        // Motor que falhou (ou o Chromium que caiu) volta a ser tentado no próximo `open`.
+        #[cfg(not(target_os = "macos"))]
+        if matches!(&self.engine, Some(Err(_))) || self.engine().is_some_and(|e| !e.alive()) { self.drop_engine(); }
         if self.engine.is_some() {
             self.navigate(url, window, cx);
         } else if self.starting.replace(url).is_none() {
@@ -109,7 +113,7 @@ impl BrowserPanel {
     }
 
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let starter = Engine::prepare(window);
+        let starter = Engine::prepare(window, cx);
         let events = self.events.clone();
         self._start = Some(cx.spawn_in(window, async move |this, cx| {
             // Corpo da tarefa, fora de `update`: a App não está emprestada, então o laço de mensagens que o WebView2
@@ -119,7 +123,7 @@ impl BrowserPanel {
             // Painel fechado no meio: o motor cai junto com o resultado.
             let _ = this.update_in(cx, |this, window, cx| {
                 this.engine = Some(engine);
-                #[cfg(target_os = "windows")]
+                #[cfg(not(target_os = "macos"))]
                 if let Some(Ok(engine)) = &this.engine { let engine = engine.clone(); this.attach(&engine, cx); }
                 if let Some(url) = this.starting.take() { this.navigate(url, window, cx); }
                 cx.notify();
@@ -128,10 +132,10 @@ impl BrowserPanel {
     }
 
     /// Liga o controlador do hangar-preview ao CDP do motor recém-nascido.
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     fn attach(&mut self, engine: &Rc<Engine>, cx: &mut Context<Self>) {
         use crate::browser::control::{CdpPage, Controller, EVENTS};
-        let cdp = Rc::new(engine.cdp());
+        let cdp = engine.cdp();
         let ctl = Rc::new(Controller::new(CdpPage { cdp: cdp.clone(), executor: cx.background_executor().clone() }));
         for event in EVENTS {
             let weak = Rc::downgrade(&ctl);
@@ -139,8 +143,19 @@ impl BrowserPanel {
                 eprintln!("[nav] evento {event} sem ouvinte: {e}");
             }
         }
+        #[cfg(target_os = "windows")]
+        { self.listen_relay(&cdp); *self.relay.borrow_mut() = Some(cdp.clone()); }
+        let (setup, hidden) = (ctl.clone(), !self.shown);
+        cx.spawn(async move |_, _| setup.start(hidden).await).detach();
+        self.controller = Some(ctl);
+        self.cdp = Some(cdp);
+    }
+
+    /// Entrega ao espectador atual os eventos que a tela remota acompanha.
+    #[cfg(not(target_os = "macos"))]
+    fn listen_relay(&self, cdp: &Rc<crate::browser::cdp::Cdp>) {
         for event in crate::browser::relay::WATCHED {
-            let (viewer, page) = (Rc::downgrade(&self.viewer), Rc::downgrade(&cdp));
+            let (viewer, page) = (Rc::downgrade(&self.viewer), Rc::downgrade(cdp));
             let listened = cdp.on(event, move |params| {
                 let Some(viewer) = viewer.upgrade() else { return };
                 let unsent = match viewer.borrow().as_ref() {
@@ -154,40 +169,58 @@ impl BrowserPanel {
             });
             if let Err(e) = listened { eprintln!("[nav] evento {event} sem ouvinte: {e}"); }
         }
-        let (setup, hidden) = (ctl.clone(), !self.shown);
-        cx.spawn(async move |_, _| setup.start(hidden).await).detach();
-        self.controller = Some(ctl);
-        self.cdp = Some(cdp);
+    }
+
+    /// Motor que falhou ou cujo Chromium caiu: some com tudo o que falava com ele, e o próximo `open` o refaz.
+    #[cfg(not(target_os = "macos"))]
+    fn drop_engine(&mut self) {
+        self.end_viewer();
+        self.relay.borrow_mut().take();
+        self.controller = None;
+        self.cdp = None;
+        self.engine = None;
     }
 
     /// Espectador novo da tela remota; o anterior recebe o aviso de que outro aparelho assumiu.
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     pub(super) fn watch(&self, viewer: crate::browser::relay::Viewer) -> Result<(), String> {
         if self.cdp.is_none() { return Err(format!("erro: o navegador da sessao {} ainda esta iniciando, tente de novo em instantes", self.key)); }
+        #[cfg(target_os = "linux")]
+        if self.relay.borrow().is_none() {
+            let engine = self.engine().ok_or_else(|| format!("erro: a sessao {} nao tem navegador aberto", self.key))?;
+            let session = engine.viewer_session().map_err(|e| format!("erro: tela remota sem sessao no navegador: {e}"))?;
+            self.listen_relay(&session);
+            *self.relay.borrow_mut() = Some(session);
+        }
         if let Some(old) = self.viewer.borrow_mut().replace(viewer) { old.detach(crate::browser::relay::REPLACED); }
         Ok(())
     }
 
     /// O espectador `id` saiu: o screencast para, a menos que outro já o tenha substituído.
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     pub(super) fn unwatch(&self, id: u64) {
         let mut viewer = self.viewer.borrow_mut();
         if viewer.as_ref().is_none_or(|v| v.id != id) { return; }
         *viewer = None;
+        // No Linux a sessão do espectador cai inteira, e o screencast dela junto.
+        #[cfg(target_os = "linux")]
+        self.relay.borrow_mut().take();
+        #[cfg(target_os = "windows")]
         if let Some(cdp) = &self.cdp { drop(cdp.call("Page.stopScreencast", serde_json::json!({}))); }
     }
 
     /// Navegador fechando: quem olha recebe o fim antes de o painel cair.
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     pub(super) fn end_viewer(&self) {
         if let Some(viewer) = self.viewer.borrow_mut().take() { viewer.detach("target_closed"); }
     }
 
-    #[cfg(target_os = "windows")]
-    pub(super) fn cdp(&self) -> Option<Rc<crate::browser::cdp::Cdp>> { self.cdp.clone() }
+    /// CDP da tela remota: os comandos repassados do celular vão por ele.
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn relay_cdp(&self) -> Option<Rc<crate::browser::cdp::Cdp>> { self.relay.borrow().clone() }
 
     /// Por que ainda não há controlador: `None` = motor nunca pedido, `Some(Ok)` = nascendo, `Some(Err)` = falhou.
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     pub(super) fn engine_status(&self) -> Option<Result<(), &str>> {
         match &self.engine {
             Some(Err(e)) => Some(Err(e)),
@@ -196,7 +229,7 @@ impl BrowserPanel {
         }
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     pub(super) fn controller(&self) -> Option<Rc<crate::browser::control::Controller<crate::browser::control::CdpPage>>> { self.controller.clone() }
 
     fn restore_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -223,9 +256,9 @@ impl BrowserPanel {
         if self.shown == shown { return false; }
         self.shown = shown;
         if !shown && let Some(engine) = self.engine() { engine.hide(); }
-        #[cfg(target_os = "windows")]
+        #[cfg(not(target_os = "macos"))]
         if let Some(ctl) = self.controller.clone() { cx.spawn(async move |_, _| ctl.set_hidden(!shown).await).detach(); }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "macos")]
         let _ = cx;
         true
     }
@@ -324,7 +357,7 @@ impl Hangar {
     }
 
     /// O × da aba Navegador: a aba sai e a página se esconde, mas o painel e o motor ficam para o "+" reabrir a mesma
-    /// página (no Linux um segundo motor no processo não nasce).
+    /// página.
     pub(super) fn close_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let showing = self.side_tab() == SideTab::Browser;
         self.side.browser_open = false;
@@ -360,9 +393,9 @@ impl Hangar {
         }
     }
 
-    /// Dono do navegador na tela: a sessão aberta, com a máquina dela, no Windows; uma chave só nos outros sistemas.
+    /// Dono do navegador na tela: a sessão aberta, com a máquina dela; uma chave só no macOS.
     pub(super) fn browser_key(&self) -> Option<String> {
-        if cfg!(target_os = "windows") {
+        if !cfg!(target_os = "macos") {
             Some(format!("{}::{}", super::servers::norm(&self.session_server()?), self.selected.as_ref()?.name))
         } else { Some("*".into()) }
     }
@@ -374,7 +407,7 @@ impl Hangar {
     /// `hangar-preview open` → backend → evento `nav` na lista. O navegador nasce escondido se a sessão não estiver na
     /// tela, e o CLI já consegue dirigi-lo. Só do servidor desta máquina: o CLI que pediu roda nela.
     pub(super) fn receive_nav(&mut self, data: serde_json::Value, window: &mut Window, cx: &mut Context<Self>) {
-        if !cfg!(target_os = "windows") { return; }
+        if cfg!(target_os = "macos") { return; }
         if !self.api.as_ref().is_some_and(|api| api.is_loopback()) { eprintln!("[nav] nav ignorado: servidor ativo nao e desta maquina"); return; }
         let (Some(name), Some(url)) = (data["name"].as_str(), data["url"].as_str()) else { eprintln!("[nav] nav ignorado: sem name/url: {data}"); return };
         // Mesma chave de `browser_key` com essa sessão aberta: a lista que traz o evento é a do servidor ativo.
@@ -390,7 +423,7 @@ impl Hangar {
     }
 
     /// Pedido do servidor local: vai ao navegador da sessão pedida, esteja ela na tela ou não.
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     pub(super) fn dispatch_preview(&mut self, request: crate::browser::server::Request, cx: &mut Context<Self>) {
         use crate::browser::{control::Reply, server::Request};
         fn answer(reply: futures::channel::oneshot::Sender<Reply>, text: String) { let _ = reply.send(Reply::Text(text)); }
@@ -398,7 +431,7 @@ impl Hangar {
         let (key, verb, args, tab, reply) = match request {
             Request::Command { key, verb, args, tab, reply } => (key, verb, args, tab, reply),
             Request::Cdp { key, method, params, reply } => {
-                let Some(cdp) = self.side.browsers.get(&key).and_then(|b| b.read(cx).cdp()) else { let _ = reply.send(Err(missing(&key))); return };
+                let Some(cdp) = self.side.browsers.get(&key).and_then(|b| b.read(cx).relay_cdp()) else { let _ = reply.send(Err(missing(&key))); return };
                 let call = cdp.call(&method, params);
                 return cx.spawn(async move |_, _| { let _ = reply.send(call.await); }).detach();
             }
@@ -419,6 +452,10 @@ impl Hangar {
         }
         let Some(browser) = self.side.browsers.get(&key) else { return answer(reply, missing(&key)) };
         let panel = browser.read(cx);
+        // Página que caiu não responde: sem isto cada verbo esperava o prazo inteiro do controlador.
+        if panel.engine().is_some_and(|e| !e.alive()) {
+            return answer(reply, format!("erro: a pagina da sessao {key} caiu; abra de novo com hangar-preview open <url>"));
+        }
         let Some(ctl) = panel.controller() else {
             return answer(reply, match panel.engine_status() {
                 Some(Err(e)) => format!("erro: o navegador da sessao {key} falhou ao iniciar: {e}"),

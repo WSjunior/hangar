@@ -37,9 +37,19 @@ fn nav_dir() -> Option<PathBuf> { std::env::home_dir().map(|h| h.join(".hangar")
 /// Escrita em tmp + rename: o CLI nunca lê um arquivo pela metade.
 fn write_json(name: &str, value: &Value) -> std::io::Result<()> {
     let dir = nav_dir().ok_or_else(|| std::io::Error::other("sem pasta do usuario"))?;
-    std::fs::create_dir_all(&dir)?;
     let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
-    std::fs::write(&tmp, value.to_string())?;
+    // O `_srv.json` leva o token: só o dono lê, como no shell Electron.
+    #[cfg(unix)]
+    {
+        use std::{io::Write, os::unix::fs::{DirBuilderExt, OpenOptionsExt}};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+        std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?.write_all(value.to_string().as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&tmp, value.to_string())?;
+    }
     std::fs::rename(tmp, dir.join(format!("{name}.json")))
 }
 

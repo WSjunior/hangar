@@ -693,7 +693,7 @@ impl Hangar {
                 }
             }).detach();
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(not(target_os = "macos"))]
         {
             let (requests, received) = async_channel::unbounded::<crate::browser::server::Request>();
             match crate::browser::server::start(&runtime, requests) {

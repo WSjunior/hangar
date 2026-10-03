@@ -606,8 +606,9 @@ Pedido do usuário: o nativo passa a ser o único app de desktop baixado. `insta
 não rodam mais o `npm ci` do `shell/`, não gravam o lançador `hangar.desktop` nem os atalhos
 "Hangar (Electron)", e o fim da instalação abre o nativo ou, sem ele, o navegador. Instalação
 existente mantém o Electron que já tinha (o botão Atualizar não roda o instalador). No Linux o
-navegador embutido com tela remota e abas do `hangar-preview` só existe no Electron, então
-instalação nova no Linux fica sem ele.
+navegador embutido com tela remota e abas do `hangar-preview` só existia no Electron, então
+instalação nova no Linux ficou sem ele até o nativo do Linux passar a atendê-lo (entrada de
+02/10/2026 sobre o Chromium sem janela).
 
 O plano original da troca, mantido como registro:
 
@@ -659,7 +660,8 @@ confere o navegador nativo por esse pid, e o `navshell._chave` do backend acha o
   Electron monta o painel). Linha `pendente` em `desktop-native/docs/chat-parity.md`.
 - **A tela remota do navegador no celular** (`backend/app/navsock.py`) ficou só no Electron até
   02/10/2026; hoje o nativo a atende pelo repasse `/cdp` (entrada abaixo).
-- **macOS e Linux não mudam**: um navegador por janela, sem controle pelo CLI.
+- **macOS não muda**: um navegador por janela, sem controle pelo CLI. O Linux passou a ter o
+  mesmo arranjo do Windows em 02/10/2026, sobre um Chromium sem janela (entrada abaixo).
 
 Medição (29/09/2026, build debug, app rodando como Administrator, DevTools desligado):
 
@@ -716,7 +718,7 @@ um PR para cada, começando pelo Windows.
   Só com `key`, o evento chegava à página, mas o Chromium não editava: Backspace não apagava e
   Enter não enviava. Valia também para o Electron.
 - **Fora do escopo:** Linux e macOS (o motor deles não fala CDP) e o app Expo, que não tem a tela
-  remota.
+  remota. O Linux veio no PR seguinte, trocando o motor (entrada abaixo).
 
 Medição (02/10/2026, Windows 11, app nativo compilado da branch com MSVC, backend na mesma
 máquina, PWA em 390×844 pelo túnel SSH): quadros chegam com o navegador escondido (WebView2
@@ -727,3 +729,69 @@ nativo), troca de aparelho ("a tela remota foi aberta em outro aparelho") e `han
 ("o navegador desta sessão fechou"), todos conferidos lendo o estado da página pelo
 `hangar-preview eval`. O script de remoção foi conferido nos cenários sem nativo, Electron aberto,
 Electron fechado (com arquivo somente-leitura dentro do `node_modules`) e segunda execução.
+
+## No Linux, o navegador do app nativo é um Chromium sem janela, e o Electron sai (02/10/2026)
+
+02/10/2026. Segundo PR da retirada do Electron, depois do Windows. No Linux o nativo usava a WPE
+WebKit (um navegador por processo, sem CDP) e não atendia o `hangar-preview` nem a tela remota;
+como o instalador já não instalava o Electron, instalação nova no Linux estava sem os dois.
+
+- **Por que Chromium e não a WPE.** Para o agente, o que importa é o motor em que os sites são
+  feitos e testados, a árvore de acessibilidade real (`Accessibility.getFullAXTree`, que dá as
+  refs `@eN`), entrada nativa (`Input.*`) e screencast. A WPE não fala CDP: seria um tradutor
+  inteiro, com o `snapshot` montado em JavaScript e sem tema nem toque. O inspetor remoto do
+  WebKit e o WebDriver do WPE não têm `Input`, screencast nem a árvore. O CEF dentro do processo
+  daria o painel mais fluido, a um pacote de ~250 MB e um build com processos auxiliares. Com o
+  Chromium, `control.rs`, `relay.rs`, `server.rs` e o `navsock.py` servem aos dois sistemas sem
+  mudar.
+- **Um Chromium por app, um alvo por sessão.** Nasce no primeiro navegador aberto e termina quando
+  o último fecha (e com o app: `PR_SET_PDEATHSIG`). O perfil é persistente
+  (`<config do app>/chromium`), compartilhado entre as sessões como no Electron.
+- **CDP por pipe, sem porta** (`--remote-debugging-pipe`, fd 3 e 4, mensagens terminadas em NUL),
+  sessões multiplexadas por `sessionId`. Respostas resolvem direto da thread de leitura; eventos
+  vão à thread da interface, como no WebView2. `browser::cdp::Cdp` é o mesmo nome nos dois
+  sistemas.
+- **O painel pinta o screencast.** Cada quadro (JPEG) é decodificado na thread de leitura e
+  gravado numa textura do device wgpu da GPUI, a mesma a cada quadro (`paint_surface`); o ack sai
+  dali mesmo. Painel escondido para o screencast; o controlador mantém a página em 1280×800 para
+  o `shot`.
+- **Duas sessões por alvo.** A do painel serve o controlador, o screencast do painel e a entrada.
+  O espectador da tela remota ganha uma sessão própria no primeiro `Watch`, com screencast do
+  tamanho do aparelho, e ela cai no `Unwatch`.
+- **Escala inteira, arredondada para cima** (`--force-device-scale-factor`). Com escala
+  fracionária o Chromium arredonda o viewport (`layout 800 600` dava 801×600); com inteira o
+  tamanho sai exato e o quadro sai no máximo do tamanho físico do painel.
+- **Chrome completo e `chrome-headless-shell`.** Ordem de busca: `HANGAR_CHROMIUM`, o shell baixado
+  em `~/.hangar/native/chromium`, e Chrome/Chromium do sistema. O do snap é recusado (não lê o
+  perfil em pasta oculta da home). No Chrome completo cada alvo pede janela própria
+  (`newWindow`), e a barra que ele desconta da altura (`outerHeight - innerHeight`) é medida no
+  nascimento.
+- **Página do agente se comporta como focada** (`Emulation.setFocusEmulationEnabled`), diálogo de
+  JavaScript é aceito sozinho (sem resposta a página trava), `target=_blank` e `window.open`
+  abrem na mesma página (sem abas), download é negado, e a regra de endereço do painel
+  (`model::allowed_request`) vale por `Fetch` só para documentos.
+- **Limitação conhecida:** a lista aberta de um `<select>` não aparece nos quadros (o Chromium sem
+  janela não pinta o popup). O agente escolhe opção por `click`/`fill` na ref ou pelo Jev; no
+  painel, as setas do teclado trocam a opção.
+- **Instalação.** `scripts/install-chromium.sh` (chamado pelo `install-native.sh` e pelo passo
+  `2026-10-02-chromium-navegador-nativo-linux`) usa o Chrome/Chromium da máquina ou baixa o
+  `chrome-headless-shell` estável do Chrome for Testing (~100 MB de download, ~260 MB em disco).
+  Nunca falha. A WPE deixa de ser necessária.
+- **Remoção do Electron no Linux** pelo passo `2026-10-02-electron-removido-linux`
+  (`scripts/remover-electron.sh`), com as mesmas regras do Windows e duas guardas a mais: só
+  remove com um Chromium disponível e com o app nativo instalado já no motor novo (o binário
+  contém `--remote-debugging-pipe`). Electron aberto é reconhecido pelo executável em `/proc`,
+  não pela linha de comando, que também aparece em shells. Sai o lançador `hangar.desktop` só se
+  ele abre o Electron deste checkout; ficam o código de `shell/` e o `~/.config/Electron`.
+- **macOS continua no Electron.**
+
+Medição (02/10/2026, Linux, monitor com escala 1,2, app nativo compilado da branch, Chrome 154 do
+sistema e `chrome-headless-shell` 154 baixado): o Chromium responde em ~0,13 s; screencast a
+60 quadros/s com animação e dois screencasts simultâneos no mesmo alvo em tamanhos diferentes;
+`snapshot`, `fill` com acento, `click`, `type`, `press`, `hover`, `eval`, `console`, `tema`,
+`layout` (390×844, 800×600 e 1280×800 exatos), `wait --idle`, `text`, `network` e `shot` pelo
+`hangar-preview`; o painel mostra a página nítida. Tela remota por um cliente no papel do
+celular: quadros, url, layout celular/desktop, toque e rolagem, troca de aparelho e `close`
+("o navegador desta sessão fechou"). Fechar o último navegador e fechar o app encerram o
+Chromium. O script de remoção foi conferido sem nativo, com nativo antigo, sem Chromium, com o
+Electron aberto, fechado e numa segunda execução.

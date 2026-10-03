@@ -712,6 +712,18 @@ def _preparar(topologia: str, *, dist: bool = True) -> None:
         if aviso:
             _escrever(avisos=list(estado().get("avisos") or []) + [aviso])
             _log.warning(aviso)
+        _renovar_chromium()
+
+
+def _renovar_chromium() -> None:
+    """O chrome-headless-shell baixado não se atualiza como o Chrome da distro, e é ele que abre
+    qualquer site para o agente: cada Atualizar confere a versão estável e baixa de novo se mudou.
+    O script nunca falha; um código diferente de zero só vira log, sem derrubar a atualização."""
+    if not sys.platform.startswith("linux") or not (Path.home() / ".hangar" / "native" / "chromium").is_dir():
+        return
+    p = _rodar([str(REPO / "scripts" / "install-chromium.sh")], cwd=REPO, timeout=900)
+    if p.returncode != 0:
+        _log.warning("install-chromium.sh saiu com %s: %s", p.returncode, _cauda(p, 4))
 
 
 def _stop_windows_front() -> None:

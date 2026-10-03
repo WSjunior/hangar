@@ -1,6 +1,6 @@
 # Hangar Native
 
-Cliente desktop em Rust/GPUI para o backend Hangar **já em execução**. É a janela padrão do Hangar: o `install.sh`/`install.ps1` o baixam da release `native-latest` no pacote da máquina (`scripts/install-native.sh` ou `scripts/install-native.ps1`, que também servem sozinhos) e ele se atualiza pelo botão do topo ou pela página Sobre. No Windows o nativo atende o `hangar-preview` (um navegador por sessão, sem abas) e a tela remota do navegador no celular, e a atualização remove o Electron dessas máquinas. No macOS e no Linux o navegador embutido do `hangar-preview` e a tela remota ainda moram no Electron, que fica onde já estava instalado como "Hangar (Electron)".
+Cliente desktop em Rust/GPUI para o backend Hangar **já em execução**. É a janela padrão do Hangar: o `install.sh`/`install.ps1` o baixam da release `native-latest` no pacote da máquina (`scripts/install-native.sh` ou `scripts/install-native.ps1`, que também servem sozinhos) e ele se atualiza pelo botão do topo ou pela página Sobre. No Windows e no Linux o nativo atende o `hangar-preview` (um navegador por sessão, sem abas) e a tela remota do navegador no celular, e a atualização remove o Electron dessas máquinas. No Linux o navegador é um Chromium sem janela (o Chrome ou o Chromium do sistema, ou o `chrome-headless-shell` que `scripts/install-chromium.sh` baixa). No macOS o navegador embutido do `hangar-preview` e a tela remota ainda moram no Electron, que fica onde já estava instalado como "Hangar (Electron)".
 
 ## Compilar e abrir
 

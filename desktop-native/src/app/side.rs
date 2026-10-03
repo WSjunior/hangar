@@ -953,7 +953,7 @@ impl Hangar {
     // Mesma regra da aba Git.
     fn side_menu_git(&self) -> bool { self.selected.as_ref().is_some_and(|s| s.readable() && super::sidebar::has_git(s)) }
 
-    // Nesta máquina o motor roda (no Linux, a biblioteca do WPE está instalada).
+    // Nesta máquina o motor roda (no Linux, há um Chrome ou Chromium).
     fn side_menu_browser(&self) -> bool {
         let available = crate::browser::Engine::available();
         // A linha some sem dizer por quê: o motivo vai ao log, uma vez só (isto roda a cada desenho).

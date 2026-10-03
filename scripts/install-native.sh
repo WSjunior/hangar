@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Instala o app nativo do Hangar (desktop-native) da release `native-latest`, no pacote do sistema e
 # do processador desta máquina, conferido pelo sha256 do manifesto antes de tocar em qualquer coisa.
-# Máquina sem build na release sai 0 com aviso: a janela continua sendo o Electron.
+# Máquina sem build na release sai 0 com aviso: fica a interface no navegador (ou o Electron de quem já o tinha).
+# No Linux também garante o Chromium do navegador do painel (scripts/install-chromium.sh).
 # Uso: scripts/install-native.sh [--forcar]   (sem --forcar, pula quando a versão instalada já é a da release)
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -22,33 +23,14 @@ marca() { mkdir -p "$MARCA_DIR"; printf '%s\n' "$1" > "$MARCA"; }
 marca_esquema() { mkdir -p "$MARCA_DIR"; : > "$MARCA_DIR/scheme-hangar"; }
 versao_de() { grep -o '"version": *"[^"]*"' "$1" 2>/dev/null | grep -o '[0-9][0-9.]*' || true; }
 
-# O navegador do painel lateral carrega a WPE WebKit só na hora de abrir: sem ela o app funciona e
-# só some a linha "Navegador". Por isso aqui é aviso, nunca parada nem instalação (o update não pede senha).
-avisa_wpe() {
-  local lib=libWPEWebKit-2.0.so.1 d ids cmd
-  case "$(ldconfig -p 2>/dev/null || /sbin/ldconfig -p 2>/dev/null || true)" in *"$lib"*) return 0 ;; esac
-  for d in /usr/lib /usr/lib64 /usr/lib/x86_64-linux-gnu /usr/local/lib; do
-    if [ -e "$d/$lib" ]; then return 0; fi
-  done
-  ids=" $(grep -hE '^(ID|ID_LIKE)=' /etc/os-release 2>/dev/null | cut -d= -f2 | tr -d '"' | tr '\n' ' ' || true) "
-  case "$ids" in
-    *" arch "*|*" cachyos "*) cmd="sudo pacman -S wpewebkit" ;;
-    # O Ubuntu não empacota a WPE WebKit 2.0; sem este caso ele cairia no apt do Debian (ID_LIKE=debian).
-    *" ubuntu "*) cmd="a sua distro não empacota a WPE WebKit 2.0; veja https://wpewebkit.org" ;;
-    *" debian "*) cmd="sudo apt install libwpewebkit-2.0-1   (Debian 13 ou mais novo)" ;;
-    *" fedora "*) cmd="sudo dnf install wpewebkit" ;;
-    *) cmd="instale o pacote da WPE WebKit 2.0 (em geral, wpewebkit) pelo gerenciador da sua distro" ;;
-  esac
-  echo "app nativo: aviso — o navegador do painel lateral precisa da WPE WebKit ($lib), que não foi encontrada."
-  echo "  O app funciona sem ela, só sem o Navegador. Para instalar: $cmd"
-}
-
 if [ -z "$PACOTE" ]; then
-  echo "app nativo: a release não tem build para $(uname -s) $(uname -m); a janela segue sendo o Electron"
+  echo "app nativo: a release não tem build para $(uname -s) $(uname -m); use o Hangar pelo navegador"
   marca '{"sem_build": true}'; marca_esquema
   exit 0
 fi
-case "$PACOTE" in *linux*) avisa_wpe ;; esac
+# O navegador do painel lateral é um Chromium sem janela: sem ele o app funciona, só sem a linha "Navegador".
+# Por isso nunca para a instalação, e roda antes da checagem de versão para valer também em quem já está em dia.
+case "$PACOTE" in *linux*) ./scripts/install-chromium.sh || true ;; esac
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 baixa() { curl -fsSL --retry 2 --connect-timeout 15 -o "$2" "$1"; }
