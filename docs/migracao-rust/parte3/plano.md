@@ -520,7 +520,7 @@ git commit -m "test(costs): synthetic transcripts and Python golden for the Rust
   - `pub fn parse_obj(raw: &[u8]) -> Option<Map<String, Value>>` — mesma regra de `_dict_da_linha`/`DobraClaude.linha`: tira espaços, decodifica UTF-8 com substituição, aceita surrogate solto (usa `crate::transcript::decode_line`), só objeto.
 - Produces (em `costs::pricing`): `pub struct Rate { input, output, cache_read, cache_write: f64, provider: String, origin: String, cache_estimado: bool }`; `pub struct Pricing` com `fn load(dir: &Path) -> Pricing` (lê `models.dev.json` e `overrides.json` de `dir`; sem catálogo, o snapshot embutido `include_str!("../../../../backend/app/pricing_data.json")`), `fn generation(&self) -> u64`, `fn reload_if_changed(&mut self) -> bool` (mtimes dos dois arquivos), `fn canonizar(&self, m: &str) -> String`, `fn rate_for(&self, m: &str) -> Option<Rate>`, `fn rate_fast(&self, r: &Rate, m: &str) -> Rate`, `fn rate_codex(&self, r: &Rate, m: &str, long: bool) -> Rate`, `fn provider_for(&self, m: &str) -> Option<String>`; `pub fn custo(r: &Rate, i: i64, o: i64, cw: i64, cr: i64) -> [f64; 4]` (ordem input, output, cache_write, cache_read); `pub fn canonizar_provedor(p: &str) -> String`; `pub const IGNORADOS: [&str; 4]`; `pub fn default_dir() -> PathBuf` (`~/.claude/.hangar-pricing`).
 
-- [ ] **Step 1: Teste de paridade que falha**
+- [x] **Step 1: Teste de paridade que falha**
 
 `crates/hangar-server/tests/contract_costs_pricing.rs`:
 
@@ -580,12 +580,12 @@ fn local_time_matches_python_isoformat() {
 }
 ```
 
-- [ ] **Step 2: Rodar e ver falhar**
+- [x] **Step 2: Rodar e ver falhar**
 
 Run: `cargo test --manifest-path crates/Cargo.toml -p hangar-server --test contract_costs_pricing`
 Expected: FAIL — módulo `costs` não existe.
 
-- [ ] **Step 3: Implementar**
+- [x] **Step 3: Implementar**
 
 `costs/mod.rs`:
 
@@ -603,11 +603,11 @@ pub mod pricing;
 
 `costs/pricing.rs` — porte de `pricing.py:44-104` (`slim` não: só `_rate`), `:110-160` (`_PREFIXOS`, `_APELIDOS`, `IGNORADOS`, `_APELIDOS_PROVEDOR`, `canonizar_provedor`), `:212-250` (carga: cache `{"modelos": {...}}` → origem `models.dev`; senão snapshot `{"modelos": ...}` → `snapshot`; overrides só com `input` e `output`), `:300-405` (`_canonizar` com laço de prefixos, catálogo, cru, apelido, minúsculas; `rate_for`; `custo`; `_FAST`; `rate_fast`; `rate_codex`). `_rate` usa `float()` do Python: aceite número ou texto numérico no JSON. Memorize `canonizar`/`rate_for` num `Mutex<HashMap>` limpo em `reload_if_changed`. `generation()` sobe a cada recarga.
 
-- [ ] **Step 4: Rodar**
+- [x] **Step 4: Rodar**
 
 Run: `cargo test --manifest-path crates/Cargo.toml -p hangar-server --test contract_costs_pricing` — Expected: PASS.
 
-- [ ] **Step 5: Revisão e commit**
+- [x] **Step 5: Revisão e commit**
 
 ```bash
 git add crates/Cargo.toml crates/Cargo.lock crates/hangar-server/Cargo.toml crates/hangar-server/src/lib.rs \

@@ -53,12 +53,33 @@ impl LocalTs {
 fn week_timestamp(text: &str) -> Option<(i64, Option<i64>)> {
     let chars: Vec<char> = text.chars().collect();
     let extended = chars.get(4) == Some(&'-') && chars.get(5) == Some(&'W');
-    let (week_start, mut date_end) = if extended {
+    let (week_start, week_end) = if extended {
         (6, 8)
     } else if chars.get(4) == Some(&'W') {
         (5, 7)
     } else {
         return None;
+    };
+    let date_end = if extended {
+        if chars.len() < 8 {
+            return None;
+        }
+        if chars.get(8) == Some(&'-') {
+            if chars.len() == 9 {
+                return None;
+            }
+            // O Python prefere o hífen como separador diante de dois algarismos.
+            if chars.get(10).is_some_and(char::is_ascii_digit) { 8 } else { 10 }
+        } else {
+            8
+        }
+    } else {
+        let mut index = 7;
+        while chars.get(index).is_some_and(char::is_ascii_digit) {
+            index += 1;
+        }
+        // A paridade distingue dia da semana de separador numérico sem tentar ambos.
+        if index < 9 { index } else if index % 2 == 0 { 7 } else { 8 }
     };
     let parse_digits = |digits: &[char]| -> Option<u32> {
         if !digits.iter().all(char::is_ascii_digit) {
@@ -70,12 +91,8 @@ fn week_timestamp(text: &str) -> Option<(i64, Option<i64>)> {
     if !(1..=9999).contains(&year) {
         return None;
     }
-    let week = parse_digits(chars.get(week_start..date_end)?)?;
-    let day = if extended && chars.get(date_end) == Some(&'-') {
-        date_end += 2;
-        parse_digits(chars.get(date_end - 1..date_end)?)?
-    } else if !extended && chars.get(date_end).is_some_and(char::is_ascii_digit) {
-        date_end += 1;
+    let week = parse_digits(chars.get(week_start..week_end)?)?;
+    let day = if date_end > week_end {
         parse_digits(chars.get(date_end - 1..date_end)?)?
     } else {
         1

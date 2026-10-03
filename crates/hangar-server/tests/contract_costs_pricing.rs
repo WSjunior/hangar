@@ -132,6 +132,29 @@ fn number_whitespace_matches_python_conversions() {
 }
 
 #[test]
+fn iso_week_separators_follow_python_disambiguation() {
+    for (raw, expected) in [
+        ("2026W40810:00", "2026-09-28T10:00:00-03:00"),
+        ("2026W40810", "2026-09-28T10:00:00-03:00"),
+        ("2026W40810:00Z", "2026-09-28T07:00:00-03:00"),
+        ("2026W405810:00", "2026-10-02T10:00:00-03:00"),
+        ("2026W4010000", "2026-09-28T00:00:00-03:00"),
+        ("2026W405100000", "2026-09-28T10:00:00-03:00"),
+        ("2026-W40-1000", "2026-09-28T10:00:00-03:00"),
+        ("2026-W40-10:00", "2026-09-28T10:00:00-03:00"),
+        ("2026W40水10:00", "2026-09-28T10:00:00-03:00"),
+        ("2026W405水10:00", "2026-10-02T10:00:00-03:00"),
+        ("2026-W40水10:00", "2026-09-28T10:00:00-03:00"),
+        ("2026-W40-5水10:00", "2026-10-02T10:00:00-03:00"),
+    ] {
+        assert_eq!(LocalTs::from_iso(raw).map(|t| t.iso()).as_deref(), Some(expected), "{raw}");
+    }
+    for raw in ["2026W408", "2026W4010", "2026-W40-", "2026-W40-510:00"] {
+        assert!(LocalTs::from_iso(raw).is_none(), "{raw}");
+    }
+}
+
+#[test]
 fn line_objects_preserve_python_character_counts() {
     let obj = parse_obj(b" \t{\"text\":\"a\\ud800\\ud83d\\ude00\"}\r\n").unwrap();
     assert_eq!(char_len(obj["text"].as_str().unwrap()), 3);
