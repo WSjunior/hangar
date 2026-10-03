@@ -5,6 +5,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 import ipaddress
 import json
 from http.client import HTTPException
@@ -24,10 +25,6 @@ MAX_FAILURES = 3
 MAX_BACKOFF = 30.0
 _io_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="hangar-terminal")
 _io_slots = threading.BoundedSemaphore(4)
-_failures = 0
-_retry_at = 0.0
-_backoff = 1.0
-_fallback = False
 MAX_BODY = 16 * 1024 * 1024
 HEARTBEAT = 20.0
 _config: tuple[str, str] | None = None
@@ -35,19 +32,32 @@ _generation = 0
 _epochs: dict[str, int] = {}
 _bindings: dict[str, tuple[str, str]] = {}
 _analysis: dict[str, tuple[tuple, float, str, dict]] = {}
-_warned: set[str] = set()
+
+
+@dataclass
+class _SessionState:
+    consumers: set[str] = field(default_factory=set)
+    failures: int = 0
+    retry_at: float = 0.0
+    backoff: float = 1.0
+    fallback_since: float | None = None
+
+
+_sessions: dict[str, _SessionState] = {}
+_consumers: dict[str, str] = {}
+_unowned = _SessionState()
 _current: ContextVar[Lease | None] = ContextVar("terminal_observer", default=None)
 _STATES = {"idle", "working", "awaiting_input", "dead"}
 
 
 def configure(address: str | None, secret: str | None) -> None:
-    global _config, _generation, _failures, _retry_at, _backoff, _fallback
+    global _config, _generation, _unowned
     _config = None
     _generation += 1
     _analysis.clear()
-    _warned.clear()
-    _failures, _retry_at, _backoff = 0, 0.0, 1.0
-    _fallback = False
+    for name, session in _sessions.items():
+        _sessions[name] = _SessionState(consumers=session.consumers)
+    _unowned = _SessionState()
     if address is not None and secret:
         # O Supervisor fornece um IP literal: não resolvemos nomes nem usamos proxies.
         if not isinstance(address, str) or len(address) > 128:
@@ -65,33 +75,45 @@ def forget(name: str) -> None:
     _analysis.pop(name, None)
 
 
-def _failure(code: str) -> None:
-    global _failures, _retry_at, _backoff, _fallback
+def _session(name: str) -> _SessionState:
+    return _sessions.get(name, _unowned)
+
+
+def _failure(name: str, code: str, started: float | None = None) -> None:
+    session = _session(name)
     now = time.monotonic()
-    if now >= _retry_at:
-        _failures += 1
-        if _failures >= MAX_FAILURES:
-            _retry_at = now + _backoff
-            _backoff = min(_backoff * 2, MAX_BACKOFF)
-    if not _fallback:
-        _fallback = True
-        diag.registrar("terminal_observer.fallback", "aviso", codigo=code)
-    if code not in _warned:
-        _warned.add(code)
-        _log.warning("observação terminal usa reserva Python: %s", code)
+    if now >= session.retry_at:
+        session.failures += 1
+        if session.failures >= MAX_FAILURES:
+            session.retry_at = now + session.backoff
+            session.backoff = min(session.backoff * 2, MAX_BACKOFF)
+    if session.fallback_since is None:
+        session.fallback_since = now
+        diag.registrar("terminal_observer.fallback", "aviso", sessao=name, codigo=code,
+                       ms=max(0, int((now - started) * 1000)) if started is not None else 0)
+        _log.warning("observação terminal de %s usa reserva Python: %s", name, code)
 
 
-def _success() -> None:
-    global _failures, _retry_at, _backoff, _fallback
-    _failures, _retry_at, _backoff = 0, 0.0, 1.0
-    if _fallback:
-        diag.registrar("terminal_observer.recovered", "ok", codigo="rust_available")
-        _fallback = False
-    _warned.clear()
+def _success(name: str) -> None:
+    session = _session(name)
+    session.failures, session.retry_at, session.backoff = 0, 0.0, 1.0
+    if session.fallback_since is not None:
+        diag.registrar("terminal_observer.recovered", "ok", sessao=name, codigo="rust_available",
+                       ms=max(0, int((time.monotonic() - session.fallback_since) * 1000)))
+        session.fallback_since = None
 
 
-def _available() -> bool:
-    return _config is not None and sys.platform != "win32" and time.monotonic() >= _retry_at
+def _available(name: str = "") -> bool:
+    return (_config is not None and sys.platform != "win32"
+            and time.monotonic() >= _session(name).retry_at)
+
+
+def _owner(payload: dict) -> str:
+    name = payload.get("name") or _consumers.get(payload.get("consumer"))
+    if name in _sessions:
+        return name
+    source = _current.get()
+    return source.name if source is not None and source.consumer in _consumers else ""
 
 
 class _IoBusy(Exception):
@@ -142,22 +164,25 @@ def _http(config: tuple[str, str], payload: dict) -> dict | None:
 async def _request(payload: dict) -> dict | None:
     config = _config
     generation = _generation
-    if not _available():
+    name = _owner(payload)
+    session = _session(name)
+    started = time.monotonic()
+    if not _available(name):
         return None
     try:
         result = await _io(_http, config, payload)
-        if generation != _generation:
+        if generation != _generation or session is not _session(name):
             return None
         if result is None:
-            _failure("invalid_http_response")
+            _failure(name, "invalid_http_response", started)
         elif payload.get("op") in ("acquire", "release"):
             if result != {}:
-                _failure("invalid_http_response")
+                _failure(name, "invalid_http_response", started)
                 return None
         return result
     except (OSError, ValueError, TimeoutError, HTTPException, _IoBusy) as exc:
         # Nem pane, segredo, URL ou mensagem de exceção entram no diário.
-        if generation == _generation:
+        if generation == _generation and session is _session(name):
             if isinstance(exc, urllib.error.HTTPError):
                 code = f"http_{exc.code}"
             elif isinstance(exc, TimeoutError) or (isinstance(exc, urllib.error.URLError)
@@ -171,7 +196,7 @@ async def _request(payload: dict) -> dict | None:
                 code = "invalid_http_response"
             else:
                 code = "http_connection"
-            _failure(code)
+            _failure(name, code, started)
         return None
 
 
@@ -228,6 +253,9 @@ class Lease:
         return self
 
     async def start(self):
+        if self.consumer not in _consumers:
+            _consumers[self.consumer] = self.name
+            _sessions.setdefault(self.name, _SessionState()).consumers.add(self.consumer)
         generation = _generation
         try:
             self.binding = self.binding_get()
@@ -239,12 +267,12 @@ class Lease:
             await self.acquire()
         except Exception as exc:
             if generation == _generation:
-                _failure(f"lease_start_{type(exc).__name__}")
+                _failure(self.name, f"lease_start_{type(exc).__name__}")
             try:
                 await self.close()
             except Exception as close_exc:
                 if generation == _generation:
-                    _failure(f"lease_close_{type(close_exc).__name__}")
+                    _failure(self.name, f"lease_close_{type(close_exc).__name__}")
 
     async def __aexit__(self, *exc):
         _current.reset(self.token)
@@ -253,18 +281,30 @@ class Lease:
     async def close(self):
         self.open = False
         remote_generation, self.remote_generation = self.remote_generation, None
-        if remote_generation == _generation:
-            await _request({"op": "release", "consumer": self.consumer})
+        try:
+            if remote_generation == _generation:
+                await _request({"op": "release", "consumer": self.consumer})
+        finally:
+            _consumers.pop(self.consumer, None)
+            session = _sessions.get(self.name)
+            if session is not None:
+                session.consumers.discard(self.consumer)
+                if not session.consumers:
+                    _sessions.pop(self.name, None)
+                    _analysis.pop(self.name, None)
+                    _bindings.pop(self.name, None)
+                    _epochs.pop(self.name, None)
 
     async def payload(self, op, started):
         identity = self.identity()
-        if identity is None or not _available():
+        if identity is None or not _available(self.name):
             return None
+        attempt_started = time.monotonic()
         try:
             target = await _io(tmux._pane_target, self.name)
         except (OSError, TimeoutError, _IoBusy) as exc:
             if identity[3] == _generation:
-                _failure(f"terminal_target_{type(exc).__name__}")
+                _failure(self.name, f"terminal_target_{type(exc).__name__}", attempt_started)
             return None
         if identity != self.identity():
             return None
@@ -285,7 +325,7 @@ class Lease:
             except Exception as exc:
                 # A falha não pode encerrar a renovação nem registrar conteúdo privado.
                 if generation == _generation:
-                    _failure(f"lease_watch_{type(exc).__name__}")
+                    _failure(self.name, f"lease_watch_{type(exc).__name__}")
             await asyncio.sleep(HEARTBEAT)
 
 
@@ -322,20 +362,21 @@ async def capture(name: str, started: float) -> dict | None:
     payload = await source.payload("capture", started)
     if payload is None:
         return None
+    attempt_started = time.monotonic()
     result = await _request(payload)
     if before != stamp(name):
         return None
     if result is None:
         return None
     if not isinstance(result, dict) or set(result) != {"binding", "started", "text", "analysis"}:
-        _failure("invalid_frame")
+        _failure(name, "invalid_frame", attempt_started)
         return None
     if (result["binding"] != payload["binding"] or type(result["started"]) not in (int, float)
             or result["started"] != started or not isinstance(result["text"], str) or not valid_analysis(result["analysis"])):
-        _failure("invalid_frame")
+        _failure(name, "invalid_frame", attempt_started)
         return None
     _analysis[name] = (before, started, result["text"], result["analysis"])
-    _success()
+    _success(name)
     return result
 
 

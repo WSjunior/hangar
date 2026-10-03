@@ -1020,13 +1020,13 @@ def test_bridge_circuit_pauses_after_three_failures_grows_and_resets(monkeypatch
         source = t.lease("circuit-recovery", "claude", lambda: "b")
         await source.start()
         for _ in range(3):
-            assert await t._request({"op": "release", "consumer": "c"}) is None
-        assert await t._request({"op": "release", "consumer": "c"}) is None
+            assert await t._request({"op": "release", "consumer": source.consumer}) is None
+        assert await t._request({"op": "release", "consumer": source.consumer}) is None
         assert len(calls) == 3
         now[0] = 101.0
-        assert await t._request({"op": "release", "consumer": "c"}) is None
+        assert await t._request({"op": "release", "consumer": source.consumer}) is None
         now[0] = 102.0
-        assert await t._request({"op": "release", "consumer": "c"}) is None
+        assert await t._request({"op": "release", "consumer": source.consumer}) is None
         assert len(calls) == 4
         now[0] = 103.0
         fail[0] = False
@@ -1034,10 +1034,10 @@ def test_bridge_circuit_pauses_after_three_failures_grows_and_resets(monkeypatch
             assert await t.capture("circuit-recovery", 103.0) is not None
         fail[0] = True
         for _ in range(3):
-            assert await t._request({"op": "release", "consumer": "c"}) is None
+            assert await t._request({"op": "release", "consumer": source.consumer}) is None
         t.configure("127.0.0.1:23456", "another-test-only")
         fail[0] = False
-        assert await t._request({"op": "release", "consumer": "c"}) == {}
+        assert await t._request({"op": "release", "consumer": source.consumer}) == {}
         await source.close()
     asyncio.run(run())
 
@@ -1176,17 +1176,30 @@ def test_bridge_diagnostics_preserve_safe_failure_reason_and_recovery(monkeypatc
         source = t.lease("reason-recovery", "claude", lambda: "b")
         await source.start()
         for _ in range(2):
-            assert await t._request({"op": "release", "consumer": "private-consumer"}) is None
-        assert entries == [(("terminal_observer.fallback", "aviso"), {"codigo": code})]
+            assert await t._request({"op": "release", "consumer": source.consumer}) is None
+        assert len(entries) == 1
+        assert entries[0][0] == ("terminal_observer.fallback", "aviso")
+        assert entries[0][1]["codigo"] == code
+        assert entries[0][1]["sessao"] == "reason-recovery"
+        assert isinstance(entries[0][1]["ms"], int)
         failing[0] = False
-        assert await t._request({"op": "acquire"}) == {}
-        assert entries == [(("terminal_observer.fallback", "aviso"), {"codigo": code})]
+        assert await t._request({"op": "acquire", "consumer": source.consumer}) == {}
+        assert len(entries) == 1
+        assert entries[0][0] == ("terminal_observer.fallback", "aviso")
+        assert entries[0][1]["codigo"] == code
+        assert entries[0][1]["sessao"] == "reason-recovery"
+        assert isinstance(entries[0][1]["ms"], int)
         with t.use(source):
             assert await t.capture("reason-recovery", 1.0) is not None
-        assert entries[-1] == (("terminal_observer.recovered", "ok"), {"codigo": "rust_available"})
+        assert entries[-1][0] == ("terminal_observer.recovered", "ok")
+        assert entries[-1][1]["codigo"] == "rust_available"
+        assert entries[-1][1]["sessao"] == "reason-recovery"
+        assert isinstance(entries[-1][1]["ms"], int)
         failing[0] = True
-        assert await t._request({"op": "release", "consumer": "private-consumer"}) is None
-        assert entries[-1] == (("terminal_observer.fallback", "aviso"), {"codigo": code})
+        assert await t._request({"op": "release", "consumer": source.consumer}) is None
+        assert entries[-1][0] == ("terminal_observer.fallback", "aviso")
+        assert entries[-1][1]["codigo"] == code
+        assert entries[-1][1]["sessao"] == "reason-recovery"
         await source.close()
     asyncio.run(run())
     assert caplog.text.count(code) == 2
@@ -1214,10 +1227,16 @@ def test_malformed_frame_cannot_report_recovery_before_validated_capture(monkeyp
             assert await t.capture("diagnostic-validation", 1.0) is None
             assert await t.capture("diagnostic-validation", 2.0) is None
             assert await t._request({"op": "acquire"}) == {}
-            assert entries == [(("terminal_observer.fallback", "aviso"), {"codigo": "invalid_frame"})]
+            assert len(entries) == 1
+            assert entries[0][0] == ("terminal_observer.fallback", "aviso")
+            assert entries[0][1]["codigo"] == "invalid_frame"
+            assert entries[0][1]["sessao"] == "diagnostic-validation"
+            assert isinstance(entries[0][1]["ms"], int)
             valid[0] = True
             assert await t.capture("diagnostic-validation", 3.0) is not None
-            assert entries[-1] == (("terminal_observer.recovered", "ok"), {"codigo": "rust_available"})
+            assert entries[-1][0] == ("terminal_observer.recovered", "ok")
+            assert entries[-1][1]["codigo"] == "rust_available"
+            assert entries[-1][1]["sessao"] == "diagnostic-validation"
     asyncio.run(run())
 
 
@@ -1246,8 +1265,8 @@ def test_old_resolver_error_does_not_charge_new_generation(monkeypatch, operatio
             job = asyncio.create_task(source.watch())
         await entered.wait()
         t.configure("127.0.0.1:23456", "new-test-only")
-        t._failure("new-failure-one")
-        t._failure("new-failure-two")
+        t._failure("", "new-failure-one")
+        t._failure("", "new-failure-two")
         release.set()
         if operation == "watch":
             await asyncio.sleep(0)
@@ -1255,6 +1274,174 @@ def test_old_resolver_error_does_not_charge_new_generation(monkeypatch, operatio
             await asyncio.gather(job, return_exceptions=True)
         else:
             await asyncio.gather(job, return_exceptions=True)
-        assert t._failures == 2
+        assert t._session("").failures == 2
         assert t._available()
+    asyncio.run(run())
+
+
+def test_failing_session_reaches_circuit_while_healthy_captures_continue(monkeypatch, caplog):
+    import urllib.error
+    from types import SimpleNamespace
+    from app import diag
+    t = bridge()
+    now = [100.0]
+    monkeypatch.setattr(t, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    entries, calls = [], []
+    monkeypatch.setattr(diag, "registrar", lambda *args, **fields: entries.append((args, fields)))
+    failing = {"bad"}
+    def response(config, payload):
+        calls.append(payload.copy())
+        if payload["op"] == "capture":
+            if payload["name"] in failing:
+                raise urllib.error.HTTPError("http://private-url", 503, "private-pane", None, None)
+            return dict(binding=payload["binding"], started=payload["started"], text="Rust", analysis=analysis())
+        return {}
+    monkeypatch.setattr(t, "_http", response)
+    async def run():
+        bad, good = t.lease("bad", "claude", lambda: "b"), t.lease("good", "claude", lambda: "g")
+        await bad.start()
+        await good.start()
+        try:
+            for i in range(10):
+                now[0] = 100 + i * 0.05
+                with t.use(bad):
+                    assert await state.shared_capture("bad", 0) == "Python"
+                with t.use(good):
+                    assert await state.shared_capture("good", 0) == "Rust"
+            assert len([p for p in calls if p["op"] == "capture" and p["name"] == "bad"]) == 3
+            assert len([p for p in calls if p["op"] == "capture" and p["name"] == "good"]) == 10
+            assert len(entries) == 1
+            assert entries[0][0] == ("terminal_observer.fallback", "aviso")
+            assert entries[0][1]["sessao"] == "bad"
+            assert entries[0][1]["codigo"] == "http_503"
+            assert isinstance(entries[0][1]["ms"], int)
+            failing.clear()
+            now[0] = 102.0
+            with t.use(bad):
+                assert await t.capture("bad", 102.0) is not None
+            assert [entry[0][0] for entry in entries] == ["terminal_observer.fallback", "terminal_observer.recovered"]
+            assert entries[-1][1]["sessao"] == "bad"
+            assert entries[-1][1]["ms"] == 2000
+        finally:
+            await bad.close()
+            await good.close()
+    asyncio.run(run())
+    assert caplog.text.count("http_503") == 1
+    assert "private-" not in caplog.text + repr(entries)
+
+
+def test_session_cooldown_and_cleanup_follow_last_consumer(monkeypatch):
+    from types import SimpleNamespace
+    t = bridge()
+    now = [100.0]
+    monkeypatch.setattr(t, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    calls = []
+    def response(config, payload):
+        calls.append(payload.copy())
+        if payload["op"] == "capture":
+            raise TimeoutError("private")
+        return {}
+    monkeypatch.setattr(t, "_http", response)
+    async def run():
+        first = t.lease("shared-failure", "claude", lambda: "b")
+        second = t.lease("shared-failure", "claude", lambda: "b")
+        await first.start()
+        await second.start()
+        with t.use(first):
+            for i in range(3):
+                assert await t.capture(first.name, float(i)) is None
+        await first.close()
+        with t.use(second):
+            assert await t.capture(second.name, 4.0) is None
+        assert len([p for p in calls if p["op"] == "capture"]) == 3
+        now[0] = 101.0
+        await second.acquire()
+        with t.use(second):
+            assert await t.capture(second.name, 5.0) is None
+            assert await t.capture(second.name, 6.0) is None
+        assert len([p for p in calls if p["op"] == "capture"]) == 4
+        assert second.name in t._sessions
+        await second.close()
+        assert second.name not in t._sessions
+        assert second.name not in t._bindings
+        assert second.name not in t._epochs
+        assert second.name not in t._analysis
+        assert not any(name == second.name for name in t._consumers.values())
+    asyncio.run(run())
+
+
+def test_recovery_is_independent_and_late_error_cannot_charge_replacement(monkeypatch):
+    import threading
+    from app import diag
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    entries = []
+    monkeypatch.setattr(diag, "registrar", lambda *args, **fields: entries.append((args, fields)))
+    failing = {"first", "second"}
+    pending = [False]
+    release = threading.Event()
+    async def run():
+        entered = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        def response(config, payload):
+            if payload["op"] == "capture":
+                if pending[0] and payload["name"] == "first":
+                    loop.call_soon_threadsafe(entered.set)
+                    assert release.wait(2)
+                    raise TimeoutError("old-private-error")
+                if payload["name"] in failing:
+                    raise TimeoutError("private")
+                return dict(binding=payload["binding"], started=payload["started"], text="Rust", analysis=analysis())
+            return {}
+        monkeypatch.setattr(t, "_http", response)
+        first, second = t.lease("first", "claude", lambda: "a"), t.lease("second", "claude", lambda: "b")
+        await first.start()
+        await second.start()
+        old = replacement = None
+        try:
+            with t.use(first):
+                assert await t.capture("first", 1.0) is None
+            with t.use(second):
+                assert await t.capture("second", 1.0) is None
+            failing.remove("first")
+            with t.use(first):
+                assert await t.capture("first", 2.0) is not None
+            assert [(e[0][0], e[1]["sessao"]) for e in entries] == [
+                ("terminal_observer.fallback", "first"), ("terminal_observer.fallback", "second"),
+                ("terminal_observer.recovered", "first")]
+            with t.use(second):
+                assert await t.capture("second", 2.0) is None
+            assert len(entries) == 3
+            pending[0] = True
+            with t.use(first):
+                old = asyncio.create_task(t.capture("first", 3.0))
+            await asyncio.wait_for(entered.wait(), 1)
+            await first.close()
+            replacement = t.lease("first", "claude", lambda: "new")
+            await replacement.start()
+            release.set()
+            assert await old is None
+            pending[0] = False
+            with t.use(replacement):
+                assert await t.capture("first", 4.0) is not None
+            assert len(entries) == 3
+        finally:
+            release.set()
+            if old is not None:
+                await asyncio.gather(old, return_exceptions=True)
+            await first.close()
+            await second.close()
+            if replacement is not None:
+                await replacement.close()
+        for i in range(20):
+            source = t.lease(f"finished-{i}", "claude", lambda: "b")
+            await source.start()
+            await source.close()
+        assert not any(name.startswith("finished-") for name in t._sessions)
+        assert not any(name.startswith("finished-") for name in t._consumers.values())
     asyncio.run(run())
