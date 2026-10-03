@@ -1,3 +1,6 @@
+//! `analyze` fornece os fatos da captura usada em produção.
+//! O redutor temporal abaixo é só referência da Parte 2B para as fixtures;
+//! na Parte 2C, o Python mantém a memória e calcula o estado final.
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -38,6 +41,7 @@ impl Default for PaneAnalysis {
     }
 }
 
+/// Memória da referência da Parte 2B; não é mantida pelo observador em produção.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct ReducerMemory {
@@ -54,6 +58,7 @@ impl Default for ReducerMemory {
     }
 }
 
+/// Entradas da referência da Parte 2B; o contrato privado não as recebe.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ReducerFacts {
@@ -72,6 +77,7 @@ impl Default for ReducerFacts {
     }
 }
 
+/// Resultado da referência da Parte 2B, comparado às fixtures Python.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct ReducedState {
@@ -349,16 +355,19 @@ fn set_question(analysis: &mut PaneAnalysis, question: TerminalQuestion) {
     analysis.question = question.question; analysis.options = Some(question.options);
 }
 
+/// Diagnóstico da referência da Parte 2B, sem uso no observador em produção.
 #[derive(Serialize)]
 pub struct ReducerDiagnostic {
     pub before_plugin: String,
     pub plugin_applied: bool,
 }
 
+/// Referência da Parte 2B para as fixtures; o estado final em produção é calculado no Python.
 pub fn reduce(pane: &str, memory: ReducerMemory, facts: ReducerFacts) -> ReducedState {
     reduce_with_diagnostics(pane, memory, facts).0
 }
 
+/// Referência da Parte 2B com diagnóstico; não participa do contrato privado de captura.
 pub fn reduce_with_diagnostics(pane: &str, mut memory: ReducerMemory, facts: ReducerFacts) -> (ReducedState, ReducerDiagnostic) {
     let mut analysis = analyze(pane);
     if analysis.state != "awaiting_input" && analysis.options.as_ref().is_none_or(Vec::is_empty) {
