@@ -136,11 +136,53 @@ def test_late_ready_rejected(tmp_path):
         gateway.op = stale
         coordinator = RuntimeCoordinator(gateway, legacy, peek)
         coordinator.register(binding(tmp_path))
-        with pytest.raises(RuntimeError):
-            await coordinator.adopt("session")
+        assert await coordinator.adopt("session") is False
         assert gateway.lease is None
         assert coordinator.legacy_allowed("key", 1)
         coordinator.close_python_leases()
+    asyncio.run(flow())
+
+
+def test_refused_adopt_stays_in_python_for_this_generation(tmp_path):
+    async def flow():
+        legacy, gateway = Legacy(), Gateway()
+        calls = []
+        original = gateway.op
+        async def refuse(target, command, operation_id, clock):
+            calls.append(command["kind"])
+            if command["kind"] == "adopt":
+                raise RuntimeError("IPC recusou a operação (503: cano_binding snapshot de outro cano)")
+            return await original(target, command, operation_id, clock)
+        gateway.op = refuse
+        coordinator = RuntimeCoordinator(gateway, legacy, peek)
+        coordinator.register(binding(tmp_path))
+        assert await coordinator.adopt("session") is False
+        assert legacy.events == ["quiesce", "reconnect"]
+        assert coordinator.legacy_allowed("key", 1)
+        assert coordinator.slot("session").rust_refused == 1
+        coordinator.close_python_leases()
+    asyncio.run(flow())
+
+
+def test_unconfirmed_detach_never_makes_two_owners(tmp_path):
+    async def flow():
+        legacy, gateway = Legacy(), Gateway()
+        original = gateway.op
+        async def dead_actor(target, command, operation_id, clock):
+            if command["kind"] == "adopt":
+                await original(target, command, operation_id, clock)
+                raise RuntimeError("IPC recusou a operação (503: runtime_initialize)")
+            if command["kind"] == "detach":
+                raise RuntimeError("IPC recusou a operação (503: runtime_closed)")
+            return await original(target, command, operation_id, clock)
+        gateway.op = dead_actor
+        coordinator = RuntimeCoordinator(gateway, legacy, peek)
+        coordinator.register(binding(tmp_path))
+        # O Rust ainda segura o lock: a reserva não pode assumir.
+        with pytest.raises(BlockingIOError):
+            await coordinator.adopt("session")
+        assert legacy.events == ["quiesce"]
+        gateway.lease.close()
     asyncio.run(flow())
 
 

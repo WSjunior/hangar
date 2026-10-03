@@ -116,6 +116,8 @@ class Slot:
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     cache_valid: bool = False
     lifecycle_token: object | None = None
+    # Geração em que o Rust recusou adotar a sessão: ela fica no Python até a próxima vida.
+    rust_refused: int | None = None
 
 
 def _clock():
@@ -160,7 +162,8 @@ class RuntimeCoordinator:
             if slot.phase == Phase.Python:
                 with slot.guard:
                     slot.binding.meta = binding.meta
-                if self.transport is not None and (binding.meta.get("cano") or {}).get("versao") == 2:
+                if (self.transport is not None and (binding.meta.get("cano") or {}).get("versao") == 2
+                        and slot.rust_refused != slot.binding.generation):
                     await self.adopt(name)
             return True
 
@@ -569,15 +572,31 @@ class RuntimeCoordinator:
                     slot.phase = Phase.Rust
                 self._signal(slot)
                 return True
-            except BaseException:
+            except BaseException as exc:
                 with slot.guard:
                     slot.phase = Phase.RecoveringPython
                 if released:
-                    detached = await self._rpc(descriptor, {"kind": "detach"}, uuid.uuid4().hex)
+                    try:
+                        detached = await self._rpc(descriptor, {"kind": "detach"}, uuid.uuid4().hex)
+                    except Exception:
+                        detached = {}
+                    # Sem confirmação, quem decide é o lock: se o Rust ainda segura a sessão, o
+                    # _restore falha ao pegá-lo e o erro sobe; nunca dois donos.
                     if detached.get("detached") is not True:
-                        raise RuntimeError("Rust não confirmou a liberação da sessão")
+                        from app import diag
+                        diag.registrar("runtime.detach_unconfirmed", "erro", sessao=name)
                 await self._restore(slot)
-                raise
+                if not isinstance(exc, Exception):
+                    raise
+                # Adotar ainda não entregou nada do usuário: a sessão segue no Python, sem erro na tela.
+                with slot.guard:
+                    slot.rust_refused = slot.binding.generation
+                from app import diag
+                # Só a recusa do IPC vai no detalhe: ela é código e frase fixa, nunca conversa.
+                detalhe = str(exc)[:200] if str(exc).startswith("IPC recusou") else ""
+                diag.registrar("runtime.adopt_refused", "erro", sessao=name, codigo=type(exc).__name__,
+                               detalhe=detalhe)
+                return False
 
     async def _restore(self, slot):
         if slot.lease is None or slot.lease.closed:
