@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[2]))
-from app import state
+from app import state, terminal_observer
 from app.loop import LoopLink
 from app.preview import extract_assistant_text
 
@@ -36,7 +36,7 @@ async def reference_sequence(frames):
     """Executa o reducer original; observa os locais na próxima aquisição de pane."""
     outputs, current = [], {}
     index = 0
-    monitor = state.StateMonitor("fixture", sid_get=lambda: "fixture", poll=0)
+    monitor = state.StateMonitor("fixture", sid_get=lambda: "fixture", poll=0, provider=None)
 
     async def capture(*args):
         nonlocal index, current
@@ -69,6 +69,7 @@ async def reference_sequence(frames):
         pass
 
     with patch.object(state, "shared_capture", capture), \
+         patch.object(terminal_observer, "_config", None), \
          patch.object(state, "pergunta_aberta", open_question), \
          patch.object(state.plugin_bridge, "pergunta_pendente", lambda *a: fact("plugin_question")), \
          patch.object(state.plugin_bridge, "estado_recente", lambda *a: None if fact("plugin_state") is None else (fact("plugin_state"), 0)), \

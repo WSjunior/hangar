@@ -721,47 +721,65 @@ async def run_tmux(fn, *args):
 _frames: dict[str, tuple[float, str]] = {}
 # nome -> (início, captura em voo)
 _frames_inflight: dict[str, tuple[float, asyncio.Future]] = {}
+_frame_tags: dict[str, tuple] = {}
+_inflight_tags: dict[str, tuple] = {}
 # Sessão que morre fora do monitor (kill por outra rota, sumiço do tmux) não passa por forget_frame.
 _FRAME_EVICT_AGE = 60.0
 
 
 async def _capture_and_store(name: str, started: float) -> str:
+    from app import terminal_observer
+    tag = terminal_observer.stamp(name)
     # Idade conta do INÍCIO da captura: o quadro pode ser até isso mais velho, nunca mais novo.
     # Um argumento só, como antes: há dublê de teste com essa assinatura.
-    pane = await run_tmux(tmux.capture_pane, name)
+    result = await terminal_observer.capture(name, started)
+    if tag != terminal_observer.stamp(name):
+        return ""
+    pane = result["text"] if result is not None else await run_tmux(tmux.capture_pane, name)
+    if tag != terminal_observer.stamp(name):
+        return ""
     if pane:
         prev = _frames.get(name)
         if prev is None or prev[0] <= started:   # captura antiga que terminou depois não sobrescreve
             _frames[name] = (started, pane)
+            _frame_tags[name] = tag
         for n in [n for n, (t, _) in _frames.items() if started - t > _FRAME_EVICT_AGE]:
-            _frames.pop(n, None)
+            forget_frame(n)
     return pane
 
 
 async def shared_capture(name: str, max_age: float) -> str:
     """Quadro do pane com no máximo `max_age` s; senão captura (ou espera a captura em voo)."""
     now = time.monotonic()
+    from app import terminal_observer
+    tag = terminal_observer.stamp(name)
     hit = _frames.get(name)
-    if hit is not None and now - hit[0] <= max_age:
+    if hit is not None and _frame_tags.get(name) == tag and now - hit[0] <= max_age:
         return hit[1]
     inflight = _frames_inflight.get(name)
     # Captura em voo que começou antes da janela pedida (max_age=0 depois de um wake do plugin)
     # traria o pane de antes do evento: começa outra.
-    if (inflight is None or inflight[0] < now - max_age or inflight[1].done()
+    if (inflight is None or _inflight_tags.get(name) != tag or inflight[0] < now - max_age or inflight[1].done()
             or inflight[1].get_loop() is not asyncio.get_running_loop()):
         fut = asyncio.ensure_future(_capture_and_store(name, now))
         _frames_inflight[name] = (now, fut)
+        _inflight_tags[name] = tag
         fut.add_done_callback(
             lambda f: _frames_inflight.pop(name, None)
             if (_frames_inflight.get(name) or (0, None))[1] is f else None)
     else:
         fut = inflight[1]
     # shield: quem desiste (conexão caiu) não cancela a captura que o outro consumidor espera.
-    return await asyncio.shield(fut)
+    pane = await asyncio.shield(fut)
+    return pane if tag == terminal_observer.stamp(name) else ""
 
 
 def forget_frame(name: str) -> None:
     _frames.pop(name, None)
+    _frame_tags.pop(name, None)
+    _inflight_tags.pop(name, None)
+    from app import terminal_observer
+    terminal_observer.forget(name)
 
 
 class StateMonitor:
@@ -783,7 +801,7 @@ class StateMonitor:
                  sid_get: Optional[Callable[[], Optional[str]]] = None,
                  hook_grace: Optional[int] = HOOK_WORKING_GRACE,
                  transcript_get: Optional[Callable[[], Optional[str]]] = None,
-                 observe_permission: bool = False):
+                 observe_permission: bool = False, provider: Optional[str] = None):
         self.name = name
         self.poll = poll
         # hook_grace: apos quantos polls SEM SPINNER o marcador "working" deixa de valer. None =
@@ -802,6 +820,7 @@ class StateMonitor:
         # um turno vindo da fila da TUI (ver a docstring da funcao). None = comportamento de sempre.
         self.transcript_get = transcript_get
         self.observe_permission = observe_permission
+        self.provider = provider
 
     def _marcador(self):
         """Marcador do hook, ja corrigido quando ha transcript pra contradizer um idle velho."""
@@ -811,6 +830,23 @@ class StateMonitor:
         return corrige_ocioso_kimi(m, self.transcript_get())
 
     async def stream(self) -> AsyncIterator[StateEvent]:
+        from app import terminal_observer
+        source = terminal_observer.lease(self.name, self.provider, self.sid_get or (lambda: None))
+        inner = self._stream()
+        try:
+            await source.start()
+            while True:
+                with terminal_observer.use(source):
+                    try:
+                        event = await anext(inner)
+                    except StopAsyncIteration:
+                        return
+                yield event
+        finally:
+            await inner.aclose()
+            await source.close()
+
+    async def _stream(self) -> AsyncIterator[StateEvent]:
         last_key = object()
         prev_spinner = None
         frozen = 0          # polls com o mesmo spinner (congelado = turn acabou)
@@ -821,11 +857,17 @@ class StateMonitor:
         permission_mode = None
         previous_non_plan = None
         max_age = self.FRAME_MAX_AGE
+        from app import terminal_observer
         while True:
+            if terminal_observer.retired(self.name):
+                return
             # Um spawn por tick, nao dois: o capture-pane de uma sessao sumida devolve "" (rc != 0),
             # e so ai vale pagar o has-session pra separar "morreu" de "pane em branco". No psmux
             # cada comando custa ~50ms (medido na VM), e isto roda a 0,75s por chat aberto.
+            frame_tag = terminal_observer.stamp(self.name)
             pane = await shared_capture(self.name, max_age)
+            if frame_tag != terminal_observer.stamp(self.name) or terminal_observer.retired(self.name):
+                continue
             if not pane:
                 # None = tmux nao respondeu: nao e morte (o watcher do Codex ja matou app-servers
                 # vivos lendo timeout como sessao sumida); espera o proximo tick.
@@ -846,123 +888,157 @@ class StateMonitor:
                 if observed_permission is not None:
                     permission_mode, previous_non_plan = observar_ou_confirmado(
                         permission_key, observed_permission, sessao=self.name)
-            state, label, question, options = classify(pane)
-            spinner = _live_spinner(pane)
-            animating = False
-
-            # Aprovacao do Kimi: vem do WIRE, nao do pane (ver `aprovacao_kimi`). Vence o classify
-            # de proposito — enquanto o painel esta aberto o pane ainda mostra o spinner do turno,
-            # que sem isto ganharia a disputa e a sessao apareceria "trabalhando" com os botoes
-            # escondidos. So o Kimi passa `transcript_get`, entao os outros providers nem chegam
-            # aqui. Le disco -> to_thread, mesma regra do capture_pane acima.
-            if self.transcript_get is not None:
-                aprov = await asyncio.to_thread(aprovacao_kimi, self.transcript_get(), lambda: pane)
-                if aprov is not None:
-                    state, label, question, options = "awaiting_input", None, aprov[0], aprov[1]
-
-            # AskUserQuestion que ROLOU PRA FORA da area visivel: a TUI imprimiu texto longo (um
-            # recado de outra sessao) sem levar a viewport pro fim, o menu ficou abaixo do que o
-            # pane mostra e a sessao aparecia `idle` — pergunta feita, ninguem avisado. O sidecar do
-            # hook nao depende do que coube na tela. So quando o pane nao tem menu NENHUM: com menu
-            # visivel quem manda e ele, que e a leitura de sempre.
-            if state != "awaiting_input" and not options and self.sid_get is not None:
-                pend = await asyncio.to_thread(pergunta_aberta, self.sid_get())
-                if pend is not None:
-                    q = pend.questions[0]
-                    state, label = "awaiting_input", None
-                    question, options = q.question, [o.label for o in q.options]
-
-            # Pergunta que o PLUGIN segura: é a própria chamada do AskUserQuestion em aberto, com as
-            # perguntas como a ferramenta as recebeu — não depende do menu caber ou ser lido no pane.
-            if state != "awaiting_input":
-                do_plugin_q = plugin_bridge.pergunta_pendente(self.name)
-                if do_plugin_q is not None and str(do_plugin_q["id"]).startswith("perm:"):
-                    # Pedido de permissão segurado pelo plugin: não há menu no pane para raspar,
-                    # então o card sai do próprio pedido. Duas opções, na ordem que o /select lê.
-                    state, label = "awaiting_input", None
-                    question = f"{do_plugin_q.get('tool') or '?'}: {do_plugin_q.get('resumo') or ''}"
-                    options = ["Yes", "No"]
-                elif do_plugin_q is not None and do_plugin_q["questions"]:
-                    q0 = do_plugin_q["questions"][0]
-                    state, label = "awaiting_input", None
-                    question = q0.get("question")
-                    options = [o.get("label") for o in q0.get("options") or []]
-
-            if state == "awaiting_input":
-                # Menu real (AskUserQuestion/permissão) -> estado autoritativo, sem debounce.
-                prev_spinner = None
-                frozen = 0
-                no_spinner = 0
-            elif spinner is not None:
-                no_spinner = 0
-                animating = prev_spinner is not None and spinner != prev_spinner and "…" in spinner
-                frozen = frozen + 1 if spinner == prev_spinner else 0
-                prev_spinner = spinner
-                # Spinner CONGELADO (byte-idêntico) por STALE_LIMIT polls = marcador de turn concluído.
-                state, label = ("idle", None) if frozen >= self.STALE_LIMIT else ("working", label)
+            reduced = None
+            if self.provider == "claude":
+                collected_question = (await asyncio.to_thread(pergunta_aberta, self.sid_get())
+                                      if self.sid_get is not None else None)
+                collected_plugin_question = plugin_bridge.pergunta_pendente(self.name)
+                collected_plugin_state = plugin_bridge.estado_recente(self.name)
+                collected_hook = (await asyncio.to_thread(self._marcador)
+                                  if self.sid_get is not None else None)
+                collected_status = _sidecar_status(self.sid_get() if self.sid_get else None)
+                q = collected_question.questions[0] if collected_question is not None else None
+                memory = dict(prev_spinner=prev_spinner, frozen=frozen, no_spinner=no_spinner,
+                              held_state=held_state, held_label=held_label)
+                facts = dict(open_question=None if q is None else dict(question=q.question, options=[o.label for o in q.options]),
+                             plugin_question=collected_plugin_question,
+                             plugin_state=collected_plugin_state[0] if collected_plugin_state is not None else None,
+                             hook_state=collected_hook[0] if collected_hook is not None else None,
+                             hook_grace=self.hook_grace, status_line=collected_status)
+                reduced = await terminal_observer.reduce(self.name, pane, memory, facts)
+            if frame_tag != terminal_observer.stamp(self.name):
+                continue
+            if reduced is not None:
+                a, memory = reduced["analysis"], reduced["memory"]
+                state, label, question, options = (a[k] for k in ("state", "label", "question", "options"))
+                spinner, status, overlay, login, limit_reset = (a[k] for k in ("spinner", "status_line", "overlay", "login", "limit_reset"))
+                prev_spinner, frozen, no_spinner, held_state, held_label = (memory[k] for k in
+                    ("prev_spinner", "frozen", "no_spinner", "held_state", "held_label"))
+                d = reduced["diagnostic"]
+                if d["plugin_applied"]:
+                    plugin_state = collected_plugin_state[0]
+                    before_plugin = d["before_plugin"]
+                    if plugin_state != before_plugin and (plugin_state, before_plugin) != ultima_divergencia:
+                        _log.info("estado %s: plugin diz %s, pane dizia %s", self.name, plugin_state, before_plugin)
+                    ultima_divergencia = (plugin_state, before_plugin) if plugin_state != before_plugin else None
             else:
-                # Sem spinner NESTE frame: pode ser redraw transiente. Só vira idle após IDLE_DEBOUNCE
-                # polls seguidos sem spinner; antes disso, SEGURA o último working (debounce anti-flicker).
-                no_spinner += 1
-                prev_spinner = None
-                frozen = 0
-                if held_state == "working" and no_spinner < self.IDLE_DEBOUNCE:
-                    state, label = "working", held_label
+                state, label, question, options = classify(pane)
+                spinner = _live_spinner(pane)
+                animating = False
 
-            # Ancora de hook: working/idle dos marcadores (UserPromptSubmit/PreToolUse/Stop) e
-            # deterministico — corrige o pane mal-lido (spinner congelado, redraw). O pane segue
-            # dono de awaiting_input/overlay (menus NAO disparam hook) e de dead. Marcador
-            # "working" preso (claude morto mid-turn) expira via HOOK_WORKING_GRACE.
-            # Âncora do PLUGIN, acima da de hook: `turn.start`/`turn.complete` são o próprio começo
-            # e fim do turno, enquanto o pane infere isso de spinner congelado (STALE_LIMIT polls de
-            # atraso, por construção) e o marcador de hook chega por arquivo. Só corrige
-            # working/idle: menu e morte continuam do pane, que é quem os enxerga.
-            if state in ("working", "idle"):
-                do_plugin = plugin_bridge.estado_recente(self.name)
-                if do_plugin is not None and do_plugin[0] in ("working", "idle") \
-                        and not (do_plugin[0] == "idle" and animating):
-                    if do_plugin[0] != state and (do_plugin[0], state) != ultima_divergencia:
-                        # Discordância é o valor desta âncora: aqui se vê o pane errando, e é o
-                        # único lugar onde dá pra notar que o caminho novo parou de corrigir. Uma
-                        # linha por DIVERGÊNCIA, não por poll: a mesma correção se repete a 0,75s
-                        # enquanto o pane não alcança, e isso encheria o log de cópias.
-                        _log.info("estado %s: plugin diz %s, pane dizia %s",
-                                  self.name, do_plugin[0], state)
-                    ultima_divergencia = (do_plugin[0], state) if do_plugin[0] != state else None
-                    state = do_plugin[0]
-                    if state == "idle":
-                        label = None
-                    prev_spinner, frozen, no_spinner = None, 0, 0
+                # Aprovacao do Kimi: vem do WIRE, nao do pane (ver `aprovacao_kimi`). Vence o classify
+                # de proposito — enquanto o painel esta aberto o pane ainda mostra o spinner do turno,
+                # que sem isto ganharia a disputa e a sessao apareceria "trabalhando" com os botoes
+                # escondidos. So o Kimi passa `transcript_get`, entao os outros providers nem chegam
+                # aqui. Le disco -> to_thread, mesma regra do capture_pane acima.
+                if self.transcript_get is not None:
+                    aprov = await asyncio.to_thread(aprovacao_kimi, self.transcript_get(), lambda: pane)
+                    if aprov is not None:
+                        state, label, question, options = "awaiting_input", None, aprov[0], aprov[1]
 
-            if self.sid_get is not None and state in ("working", "idle"):
-                # `_marcador` LE disco quando ha transcript (corrige_ocioso_kimi -> rabo do wire +
-                # scandir da pasta de agentes) e este laco e uma corrotina que roda a cada 0.75s por
-                # chat aberto: sincrono aqui, seguraria o event loop do backend inteiro. Mesma regra
-                # do `capture_pane` logo acima e do git status em registry._decorate_git.
-                m = await asyncio.to_thread(self._marcador)
-                if m is not None:
-                    # Spinner mudando entre dois quadros é turno vivo: o turno aberto pela volta de um
-                    # agente em segundo plano não dispara UserPromptSubmit e o marcador fica no idle do Stop.
-                    if m[0] == "idle" and state == "working" and not animating:
-                        state, label = "idle", None
-                    elif m[0] == "working" and state == "idle" \
-                            and (self.hook_grace is None or no_spinner < self.hook_grace):
-                        state = "working"
+                # AskUserQuestion que ROLOU PRA FORA da area visivel: a TUI imprimiu texto longo (um
+                # recado de outra sessao) sem levar a viewport pro fim, o menu ficou abaixo do que o
+                # pane mostra e a sessao aparecia `idle` — pergunta feita, ninguem avisado. O sidecar do
+                # hook nao depende do que coube na tela. So quando o pane nao tem menu NENHUM: com menu
+                # visivel quem manda e ele, que e a leitura de sempre.
+                if state != "awaiting_input" and not options and self.sid_get is not None:
+                    pend = collected_question if self.provider == "claude" else await asyncio.to_thread(pergunta_aberta, self.sid_get())
+                    if pend is not None:
+                        q = pend.questions[0]
+                        state, label = "awaiting_input", None
+                        question, options = q.question, [o.label for o in q.options]
 
-            # Sidecar primeiro: a linha do pane ja vem cortada na largura da janela (ver
-            # app/statusline.py). Sem sidecar, segue o pane.
-            status = _sidecar_status(self.sid_get() if self.sid_get else None) or status_line(pane)
-            # Overlay so-TUI aberto: rodape de navegacao presente NO FUNDO do pane. So as ultimas linhas
-            # (nao o pane inteiro): o overlay sempre renderiza o rodape no rodape; procurar no pane todo
-            # dava FALSO-POSITIVO quando a MESMA frase ("Esc to cancel") aparecia na CONVERSA/scrollback
-            # (ex: uma msg citando o rodape abria o espelho por cima do chat). Inclui pickers (/model) e
-            # paineis sem opcoes numeradas (/status, /config, /help). O front decide: com `options` (menu
-            # nativo) usa botoes; sem opcoes mas overlay=True abre o espelho pra navegar via teclas.
-            overlay = is_overlay(pane)
-            login = is_login(pane)
-            # Rate-limit radar (feature #8): banner de limite de uso no pane, best-effort (ver
-            # rate_limit_reset/_LIMIT_RE). limited deriva do proprio reset (achou horario -> limited).
-            limit_reset = rate_limit_reset(pane)
+                # Pergunta que o PLUGIN segura: é a própria chamada do AskUserQuestion em aberto, com as
+                # perguntas como a ferramenta as recebeu — não depende do menu caber ou ser lido no pane.
+                if state != "awaiting_input":
+                    do_plugin_q = collected_plugin_question if self.provider == "claude" else plugin_bridge.pergunta_pendente(self.name)
+                    if do_plugin_q is not None and str(do_plugin_q["id"]).startswith("perm:"):
+                        # Pedido de permissão segurado pelo plugin: não há menu no pane para raspar,
+                        # então o card sai do próprio pedido. Duas opções, na ordem que o /select lê.
+                        state, label = "awaiting_input", None
+                        question = f"{do_plugin_q.get('tool') or '?'}: {do_plugin_q.get('resumo') or ''}"
+                        options = ["Yes", "No"]
+                    elif do_plugin_q is not None and do_plugin_q["questions"]:
+                        q0 = do_plugin_q["questions"][0]
+                        state, label = "awaiting_input", None
+                        question = q0.get("question")
+                        options = [o.get("label") for o in q0.get("options") or []]
+
+                if state == "awaiting_input":
+                    # Menu real (AskUserQuestion/permissão) -> estado autoritativo, sem debounce.
+                    prev_spinner = None
+                    frozen = 0
+                    no_spinner = 0
+                elif spinner is not None:
+                    no_spinner = 0
+                    animating = prev_spinner is not None and spinner != prev_spinner and "…" in spinner
+                    frozen = frozen + 1 if spinner == prev_spinner else 0
+                    prev_spinner = spinner
+                    # Spinner CONGELADO (byte-idêntico) por STALE_LIMIT polls = marcador de turn concluído.
+                    state, label = ("idle", None) if frozen >= self.STALE_LIMIT else ("working", label)
+                else:
+                    # Sem spinner NESTE frame: pode ser redraw transiente. Só vira idle após IDLE_DEBOUNCE
+                    # polls seguidos sem spinner; antes disso, SEGURA o último working (debounce anti-flicker).
+                    no_spinner += 1
+                    prev_spinner = None
+                    frozen = 0
+                    if held_state == "working" and no_spinner < self.IDLE_DEBOUNCE:
+                        state, label = "working", held_label
+
+                # Ancora de hook: working/idle dos marcadores (UserPromptSubmit/PreToolUse/Stop) e
+                # deterministico — corrige o pane mal-lido (spinner congelado, redraw). O pane segue
+                # dono de awaiting_input/overlay (menus NAO disparam hook) e de dead. Marcador
+                # "working" preso (claude morto mid-turn) expira via HOOK_WORKING_GRACE.
+                # Âncora do PLUGIN, acima da de hook: `turn.start`/`turn.complete` são o próprio começo
+                # e fim do turno, enquanto o pane infere isso de spinner congelado (STALE_LIMIT polls de
+                # atraso, por construção) e o marcador de hook chega por arquivo. Só corrige
+                # working/idle: menu e morte continuam do pane, que é quem os enxerga.
+                if state in ("working", "idle"):
+                    do_plugin = collected_plugin_state if self.provider == "claude" else plugin_bridge.estado_recente(self.name)
+                    if do_plugin is not None and do_plugin[0] in ("working", "idle") \
+                            and not (do_plugin[0] == "idle" and animating):
+                        if do_plugin[0] != state and (do_plugin[0], state) != ultima_divergencia:
+                            # Discordância é o valor desta âncora: aqui se vê o pane errando, e é o
+                            # único lugar onde dá pra notar que o caminho novo parou de corrigir. Uma
+                            # linha por DIVERGÊNCIA, não por poll: a mesma correção se repete a 0,75s
+                            # enquanto o pane não alcança, e isso encheria o log de cópias.
+                            _log.info("estado %s: plugin diz %s, pane dizia %s",
+                                      self.name, do_plugin[0], state)
+                        ultima_divergencia = (do_plugin[0], state) if do_plugin[0] != state else None
+                        state = do_plugin[0]
+                        if state == "idle":
+                            label = None
+                        prev_spinner, frozen, no_spinner = None, 0, 0
+
+                if self.sid_get is not None and state in ("working", "idle"):
+                    # `_marcador` LE disco quando ha transcript (corrige_ocioso_kimi -> rabo do wire +
+                    # scandir da pasta de agentes) e este laco e uma corrotina que roda a cada 0.75s por
+                    # chat aberto: sincrono aqui, seguraria o event loop do backend inteiro. Mesma regra
+                    # do `capture_pane` logo acima e do git status em registry._decorate_git.
+                    m = collected_hook if self.provider == "claude" else await asyncio.to_thread(self._marcador)
+                    if m is not None:
+                        # Spinner mudando entre dois quadros é turno vivo: o turno aberto pela volta de um
+                        # agente em segundo plano não dispara UserPromptSubmit e o marcador fica no idle do Stop.
+                        if m[0] == "idle" and state == "working" and not animating:
+                            state, label = "idle", None
+                        elif m[0] == "working" and state == "idle" \
+                                and (self.hook_grace is None or no_spinner < self.hook_grace):
+                            state = "working"
+
+                # Sidecar primeiro: a linha do pane ja vem cortada na largura da janela (ver
+                # app/statusline.py). Sem sidecar, segue o pane.
+                status = (collected_status if self.provider == "claude" else _sidecar_status(self.sid_get() if self.sid_get else None)) or status_line(pane)
+                # Overlay so-TUI aberto: rodape de navegacao presente NO FUNDO do pane. So as ultimas linhas
+                # (nao o pane inteiro): o overlay sempre renderiza o rodape no rodape; procurar no pane todo
+                # dava FALSO-POSITIVO quando a MESMA frase ("Esc to cancel") aparecia na CONVERSA/scrollback
+                # (ex: uma msg citando o rodape abria o espelho por cima do chat). Inclui pickers (/model) e
+                # paineis sem opcoes numeradas (/status, /config, /help). O front decide: com `options` (menu
+                # nativo) usa botoes; sem opcoes mas overlay=True abre o espelho pra navegar via teclas.
+                overlay = is_overlay(pane)
+                login = is_login(pane)
+                # Rate-limit radar (feature #8): banner de limite de uso no pane, best-effort (ver
+                # rate_limit_reset/_LIMIT_RE). limited deriva do proprio reset (achou horario -> limited).
+                limit_reset = rate_limit_reset(pane)
             limited = limit_reset is not None
             # Loop runner: le o sidecar (barato) e leva no MESMO evento -> chip 🔁 no Chat mobile sem
             # reter o sessionsStore. Entra no key pra re-emitir quando SO o loop muda (sessao parada).
@@ -979,6 +1055,8 @@ class StateMonitor:
             key = (state, label, question, tuple(options or ()), status, overlay, login,
                    limited, limit_reset, loop_status, loop_iter, loop_max,
                    permission_mode, previous_non_plan, tuple(s["pid"] for s in shells))
+            if frame_tag != terminal_observer.stamp(self.name):
+                continue
             if key != last_key:
                 last_key = key
                 held_state, held_label = state, label

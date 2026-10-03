@@ -1,0 +1,550 @@
+"""Ponte terminal em memória; todos os pedidos usam transporte sintético."""
+import asyncio
+import copy
+import sys
+from unittest.mock import patch
+
+import pytest
+
+from app import state
+
+
+def bridge():
+    from app import terminal_observer
+    return terminal_observer
+
+
+def analysis():
+    return dict(state="idle", label=None, question=None, options=None, spinner=None,
+                status_line=None, overlay=False, login=False, limit_reset=None,
+                preview="resposta Rust", codex_menu=None)
+
+
+@pytest.fixture(autouse=True)
+def clean_frames(monkeypatch):
+    state._frames.clear()
+    state._frames_inflight.clear()
+    monkeypatch.setattr(state.tmux, "capture_pane", lambda *args: "Python")
+    monkeypatch.setattr(state.tmux, "sessao_existe", lambda *args: True)
+    blocked = []
+    def deny(*args, **kwargs):
+        blocked.append(args)
+        raise AssertionError("real tmux forbidden in terminal observer tests")
+    monkeypatch.setattr(state.tmux, "_run", deny)
+    monkeypatch.setattr(state.tmux, "RUN", deny)
+    yield
+    assert not blocked, "a fallback swallowed a forbidden tmux call"
+    try:
+        bridge().configure(None, None)
+    except ImportError:
+        pass
+
+
+def fake_http(calls, fail=False):
+    async def request(payload):
+        calls.append(payload)
+        if fail:
+            return None
+        if payload["op"] == "capture":
+            return dict(binding=payload["binding"], started=payload["started"],
+                        text="● resposta Rust", analysis=analysis())
+        return {}
+    return request
+
+
+def test_disabled_and_windows_never_request(monkeypatch):
+    t = bridge()
+    calls = []
+    monkeypatch.setattr(t, "_request", fake_http(calls))
+    async def run():
+        async with t.lease("s", "claude", lambda: "thread"):
+            assert await t.capture("s", 1.0) is None
+        t.configure("127.0.0.1:12345", "secret")
+        monkeypatch.setattr(sys, "platform", "win32")
+        async with t.lease("s", "claude", lambda: "thread"):
+            assert await t.capture("s", 1.0) is None
+    asyncio.run(run())
+    assert not calls
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_shared_capture_prefers_bridge_and_keeps_python_reserve(monkeypatch, fail):
+    t = bridge()
+    calls = []
+    t.configure("127.0.0.1:12345", "secret")
+    monkeypatch.setattr(t, "_request", fake_http(calls, fail))
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    monkeypatch.setattr(state.tmux, "capture_pane", lambda name: "Python")
+    async def run():
+        async with t.lease("s", "claude", lambda: "thread"):
+            assert await state.shared_capture("s", 0) == ("Python" if fail else "● resposta Rust")
+    asyncio.run(run())
+    assert calls[0]["op"] == "acquire"
+    assert calls[-1]["op"] == "release"
+
+
+@pytest.mark.parametrize("field,value", [("binding", "old"), ("started", 2.0),
+    ("started", True), ("text", 3), ("analysis", {}), ("analysis", None)])
+def test_invalid_capture_returns_absence(monkeypatch, field, value):
+    t = bridge()
+    t.configure("127.0.0.1:12345", "secret")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    async def request(payload):
+        if payload["op"] != "capture":
+            return {}
+        answer = dict(binding=payload["binding"], started=payload["started"], text="", analysis=analysis())
+        answer[field] = value
+        return answer
+    monkeypatch.setattr(t, "_request", request)
+    async def run():
+        async with t.lease("s", "claude", lambda: "thread"):
+            assert await t.capture("s", 1.0) is None
+    asyncio.run(run())
+
+
+def test_clear_and_binding_change_discard_inflight(monkeypatch):
+    t = bridge()
+    t.configure("127.0.0.1:12345", "secret")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    current = ["a"]
+    async def run():
+        started = asyncio.Event()
+        finish = asyncio.Event()
+        async def request(payload):
+            if payload["op"] != "capture":
+                return {}
+            started.set()
+            await finish.wait()
+            return dict(binding=payload["binding"], started=payload["started"], text="old", analysis=analysis())
+        monkeypatch.setattr(t, "_request", request)
+        async with t.lease("s", "claude", lambda: current[0]):
+            task = asyncio.create_task(state.shared_capture("s", 0))
+            await started.wait()
+            current[0] = "b"
+            state.forget_frame("s")
+            finish.set()
+            assert await task == ""
+            assert "s" not in state._frames
+            assert t.frame_analysis("s", "old") is None
+    asyncio.run(run())
+
+
+def test_generation_change_discards_inflight(monkeypatch):
+    t = bridge()
+    t.configure("127.0.0.1:12345", "secret")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    async def request(payload):
+        if payload["op"] == "capture":
+            t.configure("127.0.0.1:23456", "new")
+            return dict(binding=payload["binding"], started=payload["started"], text="old", analysis=analysis())
+        return {}
+    monkeypatch.setattr(t, "_request", request)
+    async def run():
+        async with t.lease("s", "claude", lambda: "thread"):
+            assert await t.capture("s", 1.0) is None
+    asyncio.run(run())
+
+
+def test_claude_reducer_hands_memory_to_python_on_failure(monkeypatch):
+    t = bridge()
+    t.configure("127.0.0.1:12345", "secret")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    pane = "✻ Thinking…\n❯ "
+    monkeypatch.setattr(state.tmux, "capture_pane", lambda name: pane)
+    monkeypatch.setattr(state, "pergunta_aberta", lambda sid: None)
+    monkeypatch.setattr(state, "_sidecar_status", lambda sid: None)
+    monkeypatch.setattr(state.plugin_bridge, "pergunta_pendente", lambda name: None)
+    monkeypatch.setattr(state.plugin_bridge, "estado_recente", lambda name: None)
+    monkeypatch.setattr(state.plugin_bridge, "vivo", lambda name: False)
+    monkeypatch.setattr(state.hook_state, "get_state", lambda sid: None)
+    monkeypatch.setattr(state.hook_state, "shells", lambda sid: [])
+    from app.loop import LoopLink
+    monkeypatch.setattr(LoopLink, "get", lambda self: None)
+    memories = []
+    async def request(payload):
+        if payload["op"] != "reduce":
+            return None
+        memories.append(copy.deepcopy(payload["memory"]))
+        if len(memories) > 1:
+            return None
+        a = analysis()
+        a.update(state="working", label="Thinking…", spinner="✻ Thinking…")
+        return dict(analysis=a, memory=dict(prev_spinner="✻ Thinking…", frozen=2, no_spinner=0,
+            held_state="working", held_label="Thinking…"), diagnostic=dict(before_plugin="working", plugin_applied=False))
+    monkeypatch.setattr(t, "_request", request)
+    async def run():
+        monitor = state.StateMonitor("s", poll=0, sid_get=lambda: "thread", provider="claude")
+        stream = monitor.stream()
+        try:
+            assert (await anext(stream)).state == "working"
+            assert (await asyncio.wait_for(anext(stream), 1)).state == "idle"
+        finally:
+            await stream.aclose()
+    asyncio.run(run())
+    assert memories[0]["frozen"] == 0
+    assert memories[1]["frozen"] == 2
+
+
+def test_preview_empty_sidecar_and_rust_pane_analysis(monkeypatch):
+    from app import preview
+    t = bridge()
+    t.configure("127.0.0.1:12345", "secret")
+    calls = []
+    monkeypatch.setattr(t, "_request", fake_http(calls))
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    sidecar = [""]
+    monkeypatch.setattr(preview, "read_sidecar", lambda stem: sidecar[0])
+    async def run():
+        broker = preview.PreviewBroker("s", "claude", lambda: "thread")
+        source = broker.subscribe()
+        try:
+            assert await asyncio.wait_for(anext(source), 1) == ("", False, False)
+            assert await asyncio.wait_for(anext(source), 1) == ("", True, True)
+            assert not any(c["op"] == "capture" for c in calls)
+            sidecar[0] = None
+            assert await asyncio.wait_for(anext(source), 2) == ("resposta Rust", False, False)
+        finally:
+            await source.aclose()
+            if broker._task is not None:
+                await asyncio.gather(broker._task, return_exceptions=True)
+    asyncio.run(run())
+
+
+def test_supervisor_enables_only_after_health_and_clears_even_without_proc(monkeypatch):
+    from app import rust_server
+    t = bridge()
+    calls = []
+    original = t.configure
+    def configure(address, secret):
+        calls.append((address, secret))
+        original(address, secret)
+    monkeypatch.setattr(t, "configure", configure)
+    class Process:
+        stdin = None
+        def poll(self):
+            return None
+    monkeypatch.setattr(rust_server, "_spawn", lambda *args: Process())
+    def health(*args):
+        assert t._config is None
+        return {"ok": True, "protocol": rust_server.RUST_SERVER_PROTOCOL, "terminal_address": "127.0.0.1:12347"}
+    monkeypatch.setattr(rust_server, "_health", health)
+    monkeypatch.setattr(rust_server, "server_log_path", lambda: "/tmp/unused-test-log")
+    supervisor = rust_server.Supervisor(None, "0.0.0.0", 12345, 12346, "owner", "", lambda: False)
+    async def run():
+        assert await supervisor._start() == "up"
+        assert t._config[0] == "127.0.0.1:12347"
+        supervisor.proc = None
+        await supervisor.stop()
+        assert t._config is None
+    asyncio.run(run())
+    assert calls[0] == (None, None)
+    assert calls[-1] == (None, None)
+
+
+def test_monitor_lease_does_not_leak_into_consumer_context(monkeypatch):
+    t = bridge()
+    monkeypatch.setattr(state, "shared_capture", lambda *args: asyncio.sleep(0, result="● hello"))
+    from app.loop import LoopLink
+    monkeypatch.setattr(LoopLink, "get", lambda self: None)
+    async def run():
+        source = state.StateMonitor("s", provider="claude", sid_get=lambda: "thread").stream()
+        try:
+            await anext(source)
+            assert t.stamp("s")[0] is None
+        finally:
+            await source.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("body", [b'\xff', b'not-json', b'[]', b'{}' + b' ' * 32])
+def test_http_rejects_utf8_json_and_bounded_body(monkeypatch, body):
+    import urllib.request
+    t = bridge()
+    monkeypatch.setattr(t, "MAX_BODY", 16)
+    requested = []
+    class Response:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def read(self, size):
+            assert size == 17
+            return body[:size]
+    class Opener:
+        def open(self, req, timeout):
+            requested.append((req, timeout))
+            assert req.get_header("X-hangar-internal") == "secret"
+            return Response()
+    monkeypatch.setattr(urllib.request, "build_opener", lambda proxy: Opener())
+    t.configure("127.0.0.1:12345", "secret")
+    assert asyncio.run(t._request({"op":"release", "consumer":"c"})) is None
+    assert len(requested) == 1
+
+
+def test_unconfigured_windows_and_excluded_provider_skip_target_resolution(monkeypatch):
+    t = bridge()
+    blocked = []
+    def target(name):
+        blocked.append(name)
+        raise AssertionError("target resolution forbidden")
+    monkeypatch.setattr(state.tmux, "_pane_target", target)
+    async def run():
+        async with t.lease("s", "claude", lambda: "b"):
+            assert await t.capture("s", 1) is None
+        t.configure("127.0.0.1:12345", "secret")
+        async with t.lease("s", "kimi", lambda: "b"):
+            assert await t.capture("s", 1) is None
+        monkeypatch.setattr(sys, "platform", "win32")
+        async with t.lease("s", "claude", lambda: "b"):
+            assert await t.capture("s", 1) is None
+    asyncio.run(run())
+    assert not blocked
+
+
+def test_same_binding_consumers_share_inflight_but_old_binding_cannot_reclaim(monkeypatch):
+    t = bridge()
+    t.configure("127.0.0.1:12345", "secret")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    calls = []
+    async def request(payload):
+        calls.append(payload)
+        if payload["op"] == "capture":
+            await asyncio.sleep(0.02)
+            return dict(binding=payload["binding"], started=payload["started"], text="same", analysis=analysis())
+        return {}
+    monkeypatch.setattr(t, "_request", request)
+    async def run():
+        old = t.lease("s", "claude", lambda: "a")
+        preview = t.lease("s", "claude", lambda: "a")
+        await old.start()
+        await preview.start()
+        async def capture(source):
+            with t.use(source):
+                return await state.shared_capture("s", 0.5)
+        assert await asyncio.gather(capture(old), capture(preview)) == ["same", "same"]
+        assert len([c for c in calls if c["op"] == "capture"]) == 1
+        replacement = t.lease("s", "claude", lambda: "b")
+        await replacement.start()
+        assert old.identity() is None
+        with t.use(replacement):
+            assert await state.shared_capture("s", 0.5) == "same"
+            assert t.frame_analysis("s", "same") == analysis()
+        await old.close()
+        assert replacement.identity() is not None
+        await preview.close()
+        await replacement.close()
+    asyncio.run(run())
+
+
+def test_clear_with_identical_binding_and_text_still_discards_frame(monkeypatch):
+    t = bridge()
+    t.configure("127.0.0.1:12345", "secret")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    calls = []
+    async def run():
+        entered, finish = asyncio.Event(), asyncio.Event()
+        async def request(payload):
+            calls.append(payload)
+            if payload["op"] != "capture": return {}
+            entered.set()
+            await finish.wait()
+            return dict(binding=payload["binding"], started=payload["started"], text="same", analysis=analysis())
+        monkeypatch.setattr(t, "_request", request)
+        async with t.lease("s", "claude", lambda: "b"):
+            task = asyncio.create_task(state.shared_capture("s", 0))
+            await entered.wait()
+            state.forget_frame("s")
+            finish.set()
+            assert await task == ""
+            assert "s" not in state._frames
+            assert t.frame_analysis("s", "same") is None
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("address", [None, "198.51.100.1:8765", "localhost:8765", "127.0.0.1:0", "0.0.0.0:8765", "http://127.0.0.1:8765", 1])
+def test_supervisor_bad_health_address_keeps_bridge_disabled(monkeypatch, address):
+    from app import rust_server
+    t = bridge()
+    class Process:
+        stdin = None
+        def poll(self): return None
+    monkeypatch.setattr(rust_server, "_spawn", lambda *args: Process())
+    monkeypatch.setattr(rust_server, "server_log_path", lambda: "/tmp/unused-test-log")
+    monkeypatch.setattr(rust_server, "_health", lambda *args: dict(ok=True, protocol=2, terminal_address=address))
+    supervisor = rust_server.Supervisor(None, "0.0.0.0", 12345, 12346, "owner", "", lambda: False)
+    assert asyncio.run(supervisor._start()) == "up"
+    assert t._config is None
+
+
+def test_retired_monitor_never_publishes_again(monkeypatch):
+    t = bridge()
+    from app.loop import LoopLink
+    monkeypatch.setattr(LoopLink, "get", lambda self: None)
+    monkeypatch.setattr(state, "pergunta_aberta", lambda sid: None)
+    monkeypatch.setattr(state.hook_state, "get_state", lambda sid: None)
+    monkeypatch.setattr(state.hook_state, "shells", lambda sid: [])
+    monkeypatch.setattr(state.plugin_bridge, "vivo", lambda name: False)
+    async def run():
+        monitor = state.StateMonitor("s", poll=0, provider="claude", sid_get=lambda: "old").stream()
+        assert (await anext(monitor)).state == "idle"
+        replacement = t.lease("s", "claude", lambda: "new")
+        await replacement.start()
+        monkeypatch.setattr(state.tmux, "capture_pane", lambda name: "✻ Thinking…")
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(anext(monitor), 1)
+        await replacement.close()
+        await monitor.aclose()
+    asyncio.run(run())
+
+
+def test_python_contract_generator_explicitly_disables_bridge(monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    t = bridge()
+    t.configure("127.0.0.1:12345", "secret")
+    blocked = []
+    async def request(payload):
+        blocked.append(payload)
+        raise AssertionError("reference generator cannot use Rust")
+    monkeypatch.setattr(t, "_request", request)
+    path = Path(__file__).parent / "fixtures" / "contract" / "gen_terminal.py"
+    spec = importlib.util.spec_from_file_location("terminal_reference", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    frames = [dict(pane="✻ Thinking…", facts={})] * 4
+    result = asyncio.run(module.reference_sequence(frames))
+    assert result[-1]["analysis"]["state"] == "idle"
+    assert result[-1]["memory"]["frozen"] == 3
+    assert not blocked
+
+
+def test_sidecar_preview_producer_keeps_lease_alive_without_capture(monkeypatch):
+    from app import preview
+    t = bridge()
+    t.configure("127.0.0.1:12345", "secret")
+    monkeypatch.setattr(t, "HEARTBEAT", 0.01)
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    calls = []
+    monkeypatch.setattr(t, "_request", fake_http(calls))
+    monkeypatch.setattr(preview, "read_sidecar", lambda stem: "sidecar")
+    async def run():
+        broker = preview.PreviewBroker("s", "claude", lambda: "b")
+        task = asyncio.create_task(broker._loop())
+        await asyncio.sleep(0.04)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(run())
+    assert len([c for c in calls if c["op"] == "acquire"]) >= 2
+    assert not any(c["op"] == "capture" for c in calls)
+    assert calls[-1]["op"] == "release"
+
+
+def test_bridge_error_is_visible_without_raw_response_or_secret(monkeypatch, caplog):
+    t = bridge()
+    t.configure("127.0.0.1:12345", "secret")
+    def failure(*args):
+        raise ValueError("private pane and secret")
+    monkeypatch.setattr(t, "_http", failure)
+    assert asyncio.run(t._request({"op":"release", "consumer":"c"})) is None
+    assert any(r.levelname == "WARNING" for r in caplog.records)
+    assert "private pane" not in caplog.text and "secret" not in caplog.text
+
+
+@pytest.mark.parametrize("problem", ["memory-state", "plugin-without-fact"])
+def test_reducer_rejects_inconsistent_complete_response_before_memory_update(monkeypatch, problem):
+    t = bridge()
+    t.configure("127.0.0.1:12345", "secret")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    memory = dict(prev_spinner=None, frozen=2, no_spinner=3, held_state="idle", held_label=None)
+    facts = dict(open_question=None, plugin_question=None, plugin_state=None, hook_state=None, hook_grace=8, status_line=None)
+    response = dict(analysis=analysis(), memory=copy.deepcopy(memory), diagnostic=dict(before_plugin="idle", plugin_applied=False))
+    if problem == "memory-state": response["memory"]["held_state"] = "working"
+    else: response["diagnostic"]["plugin_applied"] = True
+    async def request(payload): return response if payload["op"] == "reduce" else {}
+    monkeypatch.setattr(t, "_request", request)
+    async def run():
+        async with t.lease("s", "claude", lambda: "b"):
+            assert await t.reduce("s", "pane", memory, facts) is None
+    asyncio.run(run())
+    assert memory == dict(prev_spinner=None, frozen=2, no_spinner=3, held_state="idle", held_label=None)
+
+
+def test_stdlib_bridge_performs_real_loopback_http_without_environment_proxy(monkeypatch):
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    t = bridge()
+    calls = []
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            assert self.path == "/__hangar_server/terminal"
+            assert self.headers["x-hangar-internal"] == "test-only"
+            payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            calls.append(payload)
+            result = {}
+            if payload["op"] == "capture":
+                result = dict(binding=payload["binding"], started=payload["started"], text="Rust", analysis=analysis())
+            elif payload["op"] == "reduce":
+                result = dict(analysis=analysis(), memory=payload["memory"], diagnostic=dict(before_plugin="idle", plugin_applied=False))
+            body = json.dumps(result).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        def log_message(self, *args): pass
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("HTTP_PROXY", "http://198.51.100.1:12345")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    t.configure(f"127.0.0.1:{server.server_port}", "test-only")
+    async def run():
+        async with t.lease("s", "claude", lambda: "b"):
+            assert await state.shared_capture("s", 0) == "Rust"
+            memory = dict(prev_spinner=None, frozen=0, no_spinner=0, held_state="idle", held_label=None)
+            facts = dict(open_question=None, plugin_question=None, plugin_state=None, hook_state=None, hook_grace=8, status_line=None)
+            assert (await t.reduce("s", "Rust", memory, facts))["analysis"] == analysis()
+    try:
+        asyncio.run(run())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(1)
+    assert [c["op"] for c in calls] == ["acquire", "capture", "reduce", "release"]
+
+
+def test_invalid_plugin_label_keeps_python_behavior_and_facts_are_read_once(monkeypatch):
+    from pydantic import ValidationError
+    t = bridge()
+    t.configure("127.0.0.1:12345", "secret")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    counters = dict(question=0, plugin_question=0, plugin_state=0, hook=0, status=0)
+    question = {"id":"q", "questions":[{"question":"choose", "options":[{"label":None}]}]}
+    def collect(key, value):
+        def get(*args):
+            counters[key] += 1
+            return value
+        return get
+    monkeypatch.setattr(state, "pergunta_aberta", collect("question", None))
+    monkeypatch.setattr(state.plugin_bridge, "pergunta_pendente", collect("plugin_question", question))
+    monkeypatch.setattr(state.plugin_bridge, "estado_recente", collect("plugin_state", ("working", None)))
+    monkeypatch.setattr(state.hook_state, "get_state", collect("hook", None))
+    monkeypatch.setattr(state.hook_state, "shells", lambda sid: [])
+    monkeypatch.setattr(state, "_sidecar_status", collect("status", "sidecar"))
+    from app.loop import LoopLink
+    monkeypatch.setattr(LoopLink, "get", lambda self: None)
+    seen = []
+    async def request(payload):
+        if payload["op"] == "reduce": seen.append(payload)
+        return None
+    monkeypatch.setattr(t, "_request", request)
+    async def run():
+        stream = state.StateMonitor("s", sid_get=lambda: "thread", provider="claude").stream()
+        try:
+            with pytest.raises(ValidationError, match="options.0"):
+                await anext(stream)
+        finally:
+            await stream.aclose()
+    asyncio.run(run())
+    assert counters == dict(question=1, plugin_question=1, plugin_state=1, hook=1, status=1)
+    assert seen[0]["facts"]["plugin_question"] == question

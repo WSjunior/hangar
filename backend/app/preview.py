@@ -586,18 +586,36 @@ class PreviewBroker:
         self.md = False
         self.full = False
         self._gen += 1
+        from app.state import forget_frame
+        forget_frame(self.name)
 
     async def _loop(self) -> None:
+        from app import terminal_observer
+        async with terminal_observer.lease(self.name, self.provider if self.provider == "claude" else None,
+                                           self.stem_get or (lambda: None)) as source:
+            heartbeat = asyncio.create_task(source.watch()) if self.provider == "claude" else None
+            try:
+                await self._observe_loop()
+            finally:
+                if heartbeat is not None:
+                    heartbeat.cancel()
+                    await asyncio.gather(heartbeat, return_exceptions=True)
+
+    async def _observe_loop(self) -> None:
         # SEMPRE extrai o último bloco ● (NÃO gateia por spinner): a detecção de spinner pisca falso
         # por 1 frame durante o redraw, e gatear nisso fazia o broker emitir "" -> a bolha SUMIA e
         # voltava toda hora (flicker). O front limpa o preview por reconcile (coberto pelo .jsonl) /
         # idle. O spinner serve só pra CADÊNCIA: rápido trabalhando, devagar ocioso. Diff-gate (só
         # notifica em mudança) evita spam.
         working = False
+        from app import terminal_observer
         while True:
+            if terminal_observer.retired(self.name):
+                return
             # Epoca do poll: se o reset() (/clear) cair no MEIO desta iteracao, o frame capturado
             # e da conversa apagada — o publish la embaixo confere e descarta.
             gen = self._gen
+            frame_tag = terminal_observer.stamp(self.name)
             # Kimi: pane COM cor, porque so o italico separa raciocinio de resposta (ver
             # sem_pensamento_kimi). Os outros seguem no texto puro de sempre — `-e` ali seria
             # custo e risco por nada.
@@ -634,8 +652,9 @@ class PreviewBroker:
                     pane = ""
                 if kimi:
                     pane = sem_pensamento_kimi(pane)
-                working = _live_spinner(pane) is not None
-                text = extract_assistant_text(pane, self.provider)
+                analysis = terminal_observer.frame_analysis(self.name, pane) if self.provider == "claude" else None
+                working = (analysis["spinner"] if analysis is not None else _live_spinner(pane)) is not None
+                text = analysis["preview"] if analysis is not None else extract_assistant_text(pane, self.provider)
                 if kimi:
                     if not text and self._kimi_acum:
                         # O bloco estourou a janela e o ● subiu junto (medido nos quadros de
@@ -659,7 +678,7 @@ class PreviewBroker:
                                    self.name, len(acum_antes))
                 else:
                     full = False
-            if self._gen != gen:
+            if self._gen != gen or frame_tag != terminal_observer.stamp(self.name):
                 # reset() caiu no MEIO deste poll: o frame capturado e da conversa APAGADA —
                 # nem publica, nem deixa o acumulado renascer com ela (achado da review).
                 # Cobre SO o frame em voo: um pane velho ainda nao redesenhado na iteracao

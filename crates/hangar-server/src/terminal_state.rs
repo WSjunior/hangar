@@ -347,7 +347,17 @@ fn set_question(analysis: &mut PaneAnalysis, question: TerminalQuestion) {
     analysis.question = question.question; analysis.options = Some(question.options);
 }
 
-pub fn reduce(pane: &str, mut memory: ReducerMemory, facts: ReducerFacts) -> ReducedState {
+#[derive(Serialize)]
+pub struct ReducerDiagnostic {
+    pub before_plugin: String,
+    pub plugin_applied: bool,
+}
+
+pub fn reduce(pane: &str, memory: ReducerMemory, facts: ReducerFacts) -> ReducedState {
+    reduce_with_diagnostics(pane, memory, facts).0
+}
+
+pub fn reduce_with_diagnostics(pane: &str, mut memory: ReducerMemory, facts: ReducerFacts) -> (ReducedState, ReducerDiagnostic) {
     let mut analysis = analyze(pane);
     if analysis.state != "awaiting_input" && analysis.options.as_ref().is_none_or(Vec::is_empty) {
         if let Some(q) = facts.open_question { set_question(&mut analysis, q); }
@@ -383,9 +393,11 @@ pub fn reduce(pane: &str, mut memory: ReducerMemory, facts: ReducerFacts) -> Red
             analysis.state = "working".into(); analysis.label = memory.held_label.clone();
         }
     }
+    let mut diagnostic = ReducerDiagnostic { before_plugin: analysis.state.clone(), plugin_applied: false };
     if matches!(analysis.state.as_str(), "working" | "idle") {
         if let Some(plugin) = facts.plugin_state.filter(|s| matches!(s.as_str(), "working" | "idle")) {
             if !(plugin == "idle" && animating) {
+                diagnostic.plugin_applied = true;
                 analysis.state = plugin;
                 if analysis.state == "idle" { analysis.label = None; }
                 memory.prev_spinner = None; memory.frozen = 0; memory.no_spinner = 0;
@@ -402,5 +414,5 @@ pub fn reduce(pane: &str, mut memory: ReducerMemory, facts: ReducerFacts) -> Red
     if let Some(status) = facts.status_line.filter(|s| !s.is_empty()) { analysis.status_line = Some(status); }
     // Sem emissão, estado e rótulo já são os mesmos que o monitor guardou.
     memory.held_state = analysis.state.clone(); memory.held_label = analysis.label.clone();
-    ReducedState { analysis, memory }
+    (ReducedState { analysis, memory }, diagnostic)
 }

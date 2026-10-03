@@ -1083,3 +1083,57 @@ Anotar valor e unidade, a sessão de cada `/history`, e o que não deu para medi
 | `/history` (Claude 0,9 MB / Codex 3 MB / Codex 35 MB), mediana de 5 | |
 | `/history` completo, Claude 300 MB / `limit=200` | |
 | Threads e inotify do Python com 4 chats abertos, contra 0 abertos | |
+
+## Observação terminal Rust com reserva Python
+
+(03/10/2026, Parte 2C, ensaios isolados.) O `hangar-server` abre uma segunda porta em
+`127.0.0.1:0`, no mesmo processo e sob a mesma parada do listener público. Isso cobre também
+um bind público em IP LAN específico, que não aceita conexões destinadas a `127.0.0.1`.
+A saúde anuncia `terminal_address`; o Supervisor só o usa depois de confirmar o protocolo e
+conferir IP literal de loopback e porta válida. Endereço ausente/torto desliga a ponte com
+aviso. A porta pública recusa o endpoint terminal e a privada só monta esse endpoint.
+
+`POST /__hangar_server/terminal` confere origem TCP de loopback e segredo interno em tempo
+constante antes de ler o corpo. Cabeçalho encaminhado externo, inclusive duplicado ou inválido,
+recusa com 404; token do dono/convidado não serve. O corpo tem teto de 16 MiB e prazo de 6 s,
+operações tipadas `acquire`, `capture`, `release`, `reduce`, sem comando livre. Corpo inválido
+responde frase fixa com 400; falha do controle responde 503, nunca pane vazio com sucesso.
+O pool mantém os limites da Parte 2C/Task 2 e a captura exata do alvo que `tmux._pane_target`
+resolveu. `acquire` inicial semeia a grade; renovações não recapturam.
+
+A ponte Python usa `urllib` sem proxy em thread, corpo/UTF-8/JSON limitados, sem dependência
+runtime de `httpx`. Endereço e segredo ficam em memória, fora do ambiente global, e somem
+antes da nova geração do filho, na saída e no `stop`, inclusive sem processo guardado.
+A configuração recebe geração própria. Cache, captura em voo e análise acompanham provider,
+vínculo da conversa, época local, geração da ponte e início da leitura. `/clear` invalida tudo;
+mesmo texto e mesmo nome não autorizam reaproveitar uma análise velha. O contexto do produtor
+não vaza para quem consome eventos do monitor.
+
+Claude mantém uma lease por monitor e uma por produtor de prévia; a prévia renova mesmo
+quando recebe só sidecar. `None` no sidecar cai no pane; `""` publica vazio com markdown/full.
+Análise Rust do pane só fornece spinner/texto no mesmo quadro, com markdown/full desligados.
+O reducer Claude recebe cinco campos de memória e seis fatos lidos uma vez no tick. A resposta
+é conferida inteira antes de substituir os locais. Erro executa o bloco Python original com
+a mesma memória/pane/fatos. O diagnóstico tipado registra o estado imediatamente anterior à
+âncora plugin, sem reconstituí-lo por classificação estática. Permissão, loop, shells, dedupe,
+drain e SSE continuam no Python.
+
+Codex terminal adquire só após `ensure_running` e renova em task independente da fila nativa,
+inclusive ocioso. Mudança de thread atualiza o vínculo; fonte encerrada cancela/aguarda a task
+e libera antes de voltar ao chamador. Sem terminal não adquire nem resolve alvo tmux. Estado,
+pergunta, prévia por push e app-server continuam nativos. Kimi/Pi/omp seguem o caminho anterior.
+Windows usa captura/reducer Python, sem tentar controle tmux/psmux.
+
+Prova isolada: listener público em `127.0.0.2`, privado em `127.0.0.1` com porta efêmera;
+processador privado respondeu 200 e ambas as portas fecharam na parada. Executável fake provou
+um PID compartilhado entre dois produtores, renovação sem recaptura e reap na última liberação.
+A suíte focada cobre reserva, memória Rust→Python, `/clear` em voo com vínculo/texto idênticos,
+troca de geração, sidecar vazio, autenticação antes do corpo e eventos Codex durante HTTP lento.
+O gerador das fixtures força a referência Python: não compara Rust contra Rust.
+
+`RUST_SERVER_PROTOCOL` e `INTERNAL_PROTOCOL` sobem juntos de 1 para 2. `side-events` permanece
+igual; a integração posterior da Parte 2B deve reconciliar o número do contrato conjunto.
+Não houve reinício/instalação nem validação no app ou backend vivo. Windows não foi executado.
+Uma rodada vermelha tentou leitura real `tmux capture-pane -p -t %8 -S -200` em alvo fictício e
+recebeu `can't find pane: %8`; nenhuma conversa foi lida. A guarda dos novos testes passou a
+bloquear `_run`/`RUN` antes de I/O e conferir no teardown se alguma chamada bloqueada foi engolida.

@@ -38,10 +38,16 @@ pub struct AppState {
     pub auth: Auth,
     pub http: HttpClient,
     pub side: SideCtx,
+    pub terminal: crate::terminal_control::TerminalPool,
+    pub terminal_address: Option<SocketAddr>,
 }
 
 impl AppState {
     pub fn new(cfg: Config) -> AppState {
+        Self::with_terminal_pool(cfg, crate::terminal_control::TerminalPool::new())
+    }
+
+    pub fn with_terminal_pool(cfg: Config, terminal: crate::terminal_control::TerminalPool) -> AppState {
         let http = proxy::client();
         let side = SideCtx {
             upstream: cfg.upstream,
@@ -51,7 +57,7 @@ impl AppState {
             hubs: Hubs::default(),
             infos: Default::default(),
         };
-        AppState { auth: Auth::new(&cfg.auth_token), http, side, cfg }
+        AppState { auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None }
     }
 
     /// `info` da sessão com cache curto: várias telas abrindo juntas viram uma consulta só. Só o
@@ -121,13 +127,31 @@ fn warn_if_internal_refused(name: &str, info_missing: bool, status: StatusCode) 
 }
 
 pub async fn serve(listener: TcpListener, cfg: Config) -> std::io::Result<()> {
-    let state = Arc::new(AppState::new(cfg));
-    axum::serve(listener, router(state).into_make_service_with_connect_info::<SocketAddr>()).await
+    serve_with_terminal_pool(listener, cfg, crate::terminal_control::TerminalPool::new()).await
+}
+
+pub async fn serve_with_terminal_pool(listener: TcpListener, cfg: Config, pool: crate::terminal_control::TerminalPool) -> std::io::Result<()> {
+    // Bind LAN específico não recebe tráfego de loopback: a observação tem uma porta própria.
+    let private = TcpListener::bind("127.0.0.1:0").await?;
+    let mut state = AppState::with_terminal_pool(cfg, pool);
+    state.terminal_address = Some(private.local_addr()?);
+    let state = Arc::new(state);
+    tokio::select! {
+        result = axum::serve(listener, router(state.clone()).into_make_service_with_connect_info::<SocketAddr>()) => result,
+        result = axum::serve(private, terminal_router(state).into_make_service_with_connect_info::<SocketAddr>()) => result,
+    }
+}
+
+pub fn terminal_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/__hangar_server/terminal", axum::routing::post(crate::terminal_routes::terminal))
+        .with_state(state)
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/__hangar_server/health", get(health))
+        .route("/__hangar_server/terminal", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.
         .route("/api/sessions/{name}/history", get(history).fallback(pass_any))
         .route("/api/sessions/{name}/events", get(events).fallback(pass_any))
@@ -135,12 +159,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-async fn health(headers: HeaderMap) -> Response {
-    let body = format!(
-        "{{\"ok\":true,\"version\":\"{}\",\"protocol\":{}}}",
-        env!("CARGO_PKG_VERSION"),
-        crate::INTERNAL_PROTOCOL
-    );
+async fn health(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let body = serde_json::json!({"ok": true, "version": env!("CARGO_PKG_VERSION"),
+        "protocol": crate::INTERNAL_PROTOCOL,
+        "terminal_address": st.terminal_address.map(|a| a.to_string())}).to_string();
     let mut resp = ([(header::CONTENT_TYPE, "application/json")], body).into_response();
     cors(&headers, resp.headers_mut());
     resp

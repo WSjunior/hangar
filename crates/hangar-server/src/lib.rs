@@ -7,11 +7,12 @@ pub mod side;
 pub mod tail;
 pub mod terminal_state;
 pub mod terminal_control;
+pub mod terminal_routes;
 pub mod transcript;
 
 /// Versão do contrato com o Python (rotas `/internal`, eventos do side-events, ambiente). O
 /// Python (`RUST_SERVER_PROTOCOL`) recusa um binário de outra versão e atende sozinho.
-pub const INTERNAL_PROTOCOL: u32 = 1;
+pub const INTERNAL_PROTOCOL: u32 = 2;
 
 /// Lê o cano até o fim ou erro. O Python segura a outra ponta; fechou = pai morreu.
 pub async fn parent_gone<R: tokio::io::AsyncRead + Unpin>(mut pipe: R) {

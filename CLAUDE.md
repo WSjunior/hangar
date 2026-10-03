@@ -413,6 +413,13 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   `side-events`, variáveis do filho): suba `RUST_SERVER_PROTOCOL` (Python) e `INTERNAL_PROTOCOL`
   (Rust) juntos. O `versao` do snapshot do `hangar-cano` acompanha o `VERSAO` do `cano.py`.
   Medidas e motivo em [plataforma.md](docs/decisoes/plataforma.md#hangar-server-a-porta-pública-em-rust-o-python-atrás).
+- **Observação terminal Rust usa porta privada de loopback no mesmo filho**, anunciada na saúde
+  somente como endereço; o segredo vem do Supervisor em memória após conferir o protocolo.
+  Lease pertence ao produtor Claude/Codex, não ao aparelho. Captura/análise conservam provider,
+  vínculo, época e geração; `/clear` ou troca do filho descartam leituras antigas. Erro usa a
+  captura/reducer Python com a mesma memória e os mesmos fatos; Windows fica nesse caminho.
+  Codex conserva estado e prévia nativos; sidecar Claude vazio continua sendo uma resposta.
+  Evidência isolada em [plataforma.md](docs/decisoes/plataforma.md#observação-terminal-rust-com-reserva-python).
 
 ## tmux + Claude Code truecolor
 

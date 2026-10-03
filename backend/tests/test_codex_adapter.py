@@ -1624,3 +1624,136 @@ async def test_preview_timer_failure_keeps_both_state_streams_alive(monkeypatch,
         for monitor in monitors:
             await monitor.aclose()
         await _finish_preview_client(adapter, name, client)
+
+
+@pytest.mark.parametrize("headless", [False, True])
+async def test_terminal_observer_lease_renews_while_native_idle_and_releases(monkeypatch, headless):
+    from app import terminal_observer
+    import asyncio
+    blocked = []
+    def deny(*args, **kwargs):
+        blocked.append(args)
+        raise AssertionError("real tmux forbidden")
+    monkeypatch.setattr(codex_adapter.tmux, "_run", deny)
+    monkeypatch.setattr(codex_adapter.tmux, "RUN", deny)
+    monkeypatch.setattr(codex_adapter.tmux, "_pane_target", lambda name: "%8")
+    terminal_observer.configure("127.0.0.1:12345", "secret")
+    monkeypatch.setattr(terminal_observer, "HEARTBEAT", 0.01)
+    calls = []
+    async def request(payload):
+        calls.append(payload)
+        return {}
+    monkeypatch.setattr(terminal_observer, "_request", request)
+    adapter = CodexAdapter()
+    client = _LiveQueueClient()
+    name = "observer-idle"
+    client.server_requests = {}
+    adapter.attach(name, client, "thread-a")
+    sess = adapter._sessions[name]
+    sess["headless"] = headless
+    monitor = adapter._state_stream(name)
+    try:
+        assert (await anext(monitor)).state == "idle"
+        await asyncio.sleep(0.035)
+        if headless:
+            assert calls == []
+        else:
+            assert len([c for c in calls if c["op"] == "acquire"]) >= 2
+            sess["thread_id"] = "thread-b"
+            await asyncio.sleep(0.03)
+            assert any(c.get("binding") == "thread-b" for c in calls)
+            # O evento nativo chega mesmo se a renovação ficar esperando HTTP.
+            entered, release = asyncio.Event(), asyncio.Event()
+            async def slow(payload):
+                calls.append(payload)
+                if payload["op"] == "acquire":
+                    entered.set()
+                    await release.wait()
+                return {}
+            monkeypatch.setattr(terminal_observer, "_request", slow)
+            await asyncio.wait_for(entered.wait(), 1)
+            sess["ouvintes"][0].put_nowait(StateEvent(session=name, state="working"))
+            assert (await asyncio.wait_for(anext(monitor), 0.1)).state == "working"
+            release.set()
+    finally:
+        await monitor.aclose()
+        await _finish_preview_client(adapter, name, client)
+        terminal_observer.configure(None, None)
+    assert not blocked
+    assert not calls if headless else calls[-1]["op"] == "release"
+
+
+async def test_outer_codex_monitor_closes_observer_before_return_and_new_transport_is_separate(monkeypatch):
+    from app import terminal_observer
+    blocked = []
+    def deny(*args, **kwargs):
+        blocked.append(args)
+        raise AssertionError("real tmux forbidden")
+    monkeypatch.setattr(codex_adapter.tmux, "_run", deny)
+    monkeypatch.setattr(codex_adapter.tmux, "RUN", deny)
+    monkeypatch.setattr(codex_adapter.tmux, "_pane_target", lambda name: "%8")
+    terminal_observer.configure("127.0.0.1:12345", "secret")
+    monkeypatch.setattr(terminal_observer, "HEARTBEAT", 0.01)
+    calls = []
+    async def request(payload):
+        calls.append(payload)
+        return {}
+    monkeypatch.setattr(terminal_observer, "_request", request)
+    adapter = CodexAdapter()
+    name = "observer-transport"
+    try:
+        for thread in ("old", "new"):
+            client = _LiveQueueClient()
+            client.server_requests = {}
+            adapter.attach(name, client, thread)
+            monitor = adapter.state_monitor(name, lambda: name)
+            await anext(monitor)
+            await asyncio.sleep(0.02)
+            old_consumer = calls[-1]["consumer"]
+            assert calls[-1]["binding"] == thread
+            await monitor.aclose()
+            assert calls[-1] == {"op":"release", "consumer":old_consumer}
+            await _finish_preview_client(adapter, name, client)
+        acquisitions = [c for c in calls if c["op"] == "acquire"]
+        assert acquisitions[0]["consumer"] != acquisitions[-1]["consumer"]
+    finally:
+        terminal_observer.configure(None, None)
+    assert not blocked
+
+
+async def test_cancel_during_first_observer_acquire_releases_consumer(monkeypatch):
+    from app import terminal_observer
+    blocked = []
+    def deny(*args, **kwargs):
+        blocked.append(args)
+        raise AssertionError("real tmux forbidden")
+    monkeypatch.setattr(codex_adapter.tmux, "_run", deny)
+    monkeypatch.setattr(codex_adapter.tmux, "RUN", deny)
+    monkeypatch.setattr(codex_adapter.tmux, "_pane_target", lambda name: "%8")
+    terminal_observer.configure("127.0.0.1:12345", "secret")
+    entered = asyncio.Event()
+    calls = []
+    async def request(payload):
+        calls.append(payload)
+        if payload["op"] == "acquire":
+            entered.set()
+            await asyncio.Future()
+        return {}
+    monkeypatch.setattr(terminal_observer, "_request", request)
+    adapter = CodexAdapter()
+    client = _LiveQueueClient()
+    client.server_requests = {}
+    name = "observer-first-acquire"
+    adapter.attach(name, client, "t")
+    monitor = adapter.state_monitor(name, lambda: name)
+    try:
+        assert (await anext(monitor)).state == "idle"
+        await asyncio.wait_for(entered.wait(), 1)
+        await monitor.aclose()
+        assert calls[-1]["op"] == "release"
+        assert calls[-1]["consumer"] == calls[0]["consumer"]
+    finally:
+        await monitor.aclose()
+        await _finish_preview_client(adapter, name, client)
+        terminal_observer.configure(None, None)
+    assert not blocked

@@ -52,12 +52,13 @@ mode = os.environ.get("FAKE_MODE", "ok")
 if mode == "mudo":
     time.sleep(60)
     sys.exit(0)
-protocol = os.environ.get("FAKE_PROTOCOL", "1")
+protocol = os.environ.get("FAKE_PROTOCOL", "2")
 
 
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):
-        health = {"ok": True, "version": "0.0.0-test"}
+        health = {"ok": True, "version": "0.0.0-test",
+                  "terminal_address": f"127.0.0.1:{self.server.server_port}"}
         if protocol != "sem":
             health["protocol"] = int(protocol)
         body = json.dumps(health).encode()
@@ -319,7 +320,7 @@ def test_child_dies_when_python_is_killed(fake_bin, tmp_path, monkeypatch):
                         + _proc_info(pid, tmp_path))
 
 
-@pytest.mark.parametrize("answer,got", [("2", 2), ("sem", None)])
+@pytest.mark.parametrize("answer,got", [("1", 1), ("sem", None)])
 def test_other_protocol_means_python_alone_and_a_diary_line(
         fake_bin, tmp_path, monkeypatch, events, relog, answer, got):
     monkeypatch.setenv("FAKE_PROTOCOL", answer)

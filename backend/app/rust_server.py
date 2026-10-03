@@ -23,14 +23,14 @@ from pathlib import Path
 
 import uvicorn
 
-from app import diag, diag_logging, log_paths, rust_bins
+from app import diag, diag_logging, log_paths, rust_bins, terminal_observer
 
 _log = logging.getLogger("hangar.rust_server")
 
 HEALTH_PATH = "/__hangar_server/health"
 # Versão do contrato interno (rotas /internal, side-events, ambiente). Tem de casar com o
 # `protocol` da saúde (hangar_server::INTERNAL_PROTOCOL); outro número = o Python atende sozinho.
-RUST_SERVER_PROTOCOL = 1
+RUST_SERVER_PROTOCOL = 2
 START_TIMEOUT = 10.0
 CRASH_WINDOW = 60.0
 MAX_CRASHES = 3
@@ -143,9 +143,11 @@ class Supervisor:
 
     async def _start(self) -> str:
         """`up`, `died` (morreu subindo), `silent` (vivo e calado até o prazo) ou `protocol`."""
+        terminal_observer.configure(None, None)
         if self.proc is not None:
             _close_stdin(self.proc)                     # o anterior já saiu
-        self.proc = _spawn(self.binary, self._env())
+        env = self._env()
+        self.proc = _spawn(self.binary, env)
         deadline = time.monotonic() + START_TIMEOUT
         while time.monotonic() < deadline:
             if self.proc.poll() is not None:
@@ -159,6 +161,16 @@ class Supervisor:
                     diag.registrar("hangar_server.protocolo", "erro",
                                    esperado=RUST_SERVER_PROTOCOL, recebido=got)
                     return "protocol"
+                if self.proc.poll() is not None:
+                    return "died"
+                address = health.get("terminal_address")
+                try:
+                    if address is None:
+                        raise ValueError("missing terminal address")
+                    terminal_observer.configure(address, env["HANGAR_INTERNAL_SECRET"])
+                except ValueError:
+                    _log.warning("terminal observer address unavailable; using Python")
+                    diag.registrar("terminal_observer.reserva", "aviso", codigo="endereco_invalido")
                 return "up"
             await asyncio.sleep(_POLL)
         return "silent"
@@ -183,6 +195,7 @@ class Supervisor:
                     diag.registrar("hangar_server.de_pe")
                 while state == "up" and self.proc.poll() is None:
                     await asyncio.sleep(_POLL)
+                terminal_observer.configure(None, None)
                 # Parada normal (systemctl, Ctrl+C) leva o filho junto, no mesmo instante em que o uvicorn
                 # recebe o sinal: dá um respiro para a flag dele subir antes de contar queda.
                 await asyncio.sleep(_POLL)
@@ -204,6 +217,7 @@ class Supervisor:
             return "erro"
 
     async def stop(self) -> None:
+        terminal_observer.configure(None, None)
         proc = self.proc
         if proc is None:
             return
