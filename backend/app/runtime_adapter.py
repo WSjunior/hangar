@@ -203,6 +203,8 @@ class LegacyBridge:
             return None
         meta = sessions.load(name)
         if not meta or not meta.get("key"):
+            if self.coordinator.managed_queue(name) and not self.coordinator.slot(name).binding.headless:
+                return copy.deepcopy(self.coordinator.slot(name).binding)
             return None
         directory = _queue_dir()
         state_path = directory / "runtime" / (meta["key"] + ".json")
@@ -219,7 +221,7 @@ class LegacyBridge:
     async def quiesce(self, descriptor):
         name, provider = descriptor["name"], descriptor["provider"]
         adapter = self.adapters[provider]
-        slot = self.coordinator.slot(name)
+        slot = self.coordinator.slots[descriptor["key"]]
         with slot.guard:
             carry = copy.deepcopy(slot.store.state.get("runtime_state", {}).get("view") or {})
         sess = adapter._sessions.get(name)
@@ -424,6 +426,24 @@ def bind_client(name, client):
 def runtime_data(name):
     slot = native_slot(name)
     return RuntimeAdapter(slot.binding.provider).view(name).data if slot is not None else None
+
+
+def registry_method(original):
+    signature = inspect.signature(original)
+    @functools.wraps(original)
+    def wrapper(self, *args, **kwargs):
+        arguments = signature.bind(self, *args, **kwargs).arguments
+        name = arguments.get("name", arguments.get("old"))
+        coordinator = runtime_coordinator.current()
+        if (coordinator is None or not coordinator.managed_queue(name)
+                or coordinator.in_lifecycle(coordinator.slot(name))):
+            return original(self, *args, **kwargs)
+        async def action():
+            return await asyncio.to_thread(original, self, *args, **kwargs)
+        return run_sync(lambda: coordinator.change(name, action,
+            new_name=arguments.get("new"), advance=original.__name__ != "rename",
+            remove=original.__name__ == "kill"), coordinator.loop)
+    return wrapper
 
 
 def run_sync(factory, loop):
@@ -880,6 +900,20 @@ def install_adapter(cls, provider):
         def wake(self, name, _original=original):
             if native_slot(name) is not None:
                 runtime_coordinator.current().request_drain(name)
+                return
+            coordinator = runtime_coordinator.current()
+            if coordinator is not None and coordinator.legacy is not None:
+                async def start():
+                    try:
+                        await self.ensure_running(name)
+                        await coordinator.prepare_session(name, provider)
+                        await coordinator.op(name, {"kind":"drain"}, uuid.uuid4().hex)
+                    except Exception as exc:
+                        from app import diag
+                        diag.registrar("runtime.wake_failed", "erro", sessao=name, codigo=type(exc).__name__)
+                task = coordinator.loop.create_task(start())
+                self._tarefas.add(task)
+                task.add_done_callback(self._tarefas.discard)
                 return
             _original(self, name)
         wake.runtime_wrapped = True

@@ -46,7 +46,8 @@ async fn setup_recovered(reply_before_ack:bool,blocked_rpc:bool,compound:bool,pr
             sent += 1;
             let result = if compound && frame["method"] == "thread/read" {
                 json!({"thread":{"id":"thread-1","status":{"type":"active"},"turns":[{"id":"turn-1","status":"inProgress"}]}})
-            } else { json!({"data":[]}) };
+            } else if frame["method"] == "turn/start" { json!({"turn":{"id":"turn-1","status":"inProgress"}}) }
+            else { json!({"data":[]}) };
             let reply = json!({"type":"cano_output","frame":json!({"id":frame["id"],"result":result}).to_string()});
             let ack = json!({"type":"cano_input_ack","operation_id":wire,"outcome":"written"});
             if blocked_rpc && frame["method"] == "model/list" {
@@ -72,6 +73,22 @@ async fn setup_recovered(reply_before_ack:bool,blocked_rpc:bool,compound:bool,pr
 }
 
 fn command() -> RuntimeCommand { RuntimeCommand { operation_id:"op-1".into(),kind:OperationKind::ListModels,payload:json!({}) } }
+
+#[tokio::test]
+async fn no_sse_runtime_still_drains() {
+    let (handle,server,dir) = setup(true).await;
+    handle.queue("append".into(),Action::Append { text:"Olá".into(),delivered:false,ts:None,
+        pre_transcript:false,entry_id:Some("input-entry".into()) }).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        loop {
+            let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+            if state.operations.get("input-entry").is_some_and(|operation|operation.status == Status::Accepted) { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    handle.shutdown().await.unwrap();
+    assert_eq!(server.await.unwrap(),1);
+}
 
 #[tokio::test]
 async fn prepare_before_every_write_and_cli_reply_before_ack_is_final() {

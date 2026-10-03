@@ -125,6 +125,20 @@ fn unknown_control_is_neutral() {
 }
 
 #[test]
+fn clear_discards_old_control_and_queued_write() {
+    let mut engine = engine(json!({"name":"session", "initialized":true, "session_id":"before"}));
+    let effects = engine.command(command(OperationKind::SetModel,json!({"model":"next"})),clock(10.0)).unwrap();
+    let request_id = writes(&effects)[0]["request_id"].clone();
+    let reset = line(&mut engine,json!({"type":"system", "subtype":"init", "session_id":"after"}),11.0);
+    assert!(reset.iter().any(|effect|matches!(effect,Effect::Reply { disposition:Disposition::Unknown,.. })));
+    assert!(!engine.write_is_current("op-1"));
+    line(&mut engine,json!({"type":"control_response", "response":{"request_id":request_id,
+        "subtype":"success", "response":{}}}),12.0);
+    assert_ne!(engine.view()["model"], "next");
+    assert_eq!(engine.view()["conversation"], "after");
+}
+
+#[test]
 fn effort_is_deferred_until_a_safe_boundary() {
     let mut engine = engine(json!({"name":"session","initialized":true,"effort":"medium"}));
     line(&mut engine,json!({"type":"command_lifecycle","state":"started"}),10.0);

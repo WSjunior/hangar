@@ -74,7 +74,7 @@ impl RuntimeEngine {
     fn initialize(&mut self,id:String) -> Result<Vec<Effect>,RuntimeError> {
         match &mut self.core { Core::Claude(core)=>core.start_initialize(id),Core::Codex(core)=>core.bootstrap(true,id) }
     }
-    fn write_is_current(&self,id:&str) -> bool { match &self.core { Core::Claude(_)=>true,Core::Codex(core)=>core.write_is_current(id) } }
+    fn write_is_current(&self,id:&str) -> bool { match &self.core { Core::Claude(core)=>core.write_is_current(id),Core::Codex(core)=>core.write_is_current(id) } }
     fn confirm_input(&mut self,id:&str) -> Vec<Effect> {
         match &mut self.core { Core::Claude(_)=>vec![Effect::Reply { operation_id:id.into(),disposition:Disposition::Accepted,payload:json!({"confirmed":true}) }],
             Core::Codex(core)=>core.confirm_input(id) }
@@ -210,6 +210,7 @@ enum Job {
     Policy { request_id:RequestId,kind:String,phase_id:String,result:Result<Value,RuntimeError> },
     PreparedInput { id:String,result:Result<Value,RuntimeError> },
     Saved(Result<(),RuntimeError>),
+    Queued { wake:bool,result:Result<(),RuntimeError> },
     View { version:u64,view:Value,result:Result<(),RuntimeError> },
     Drained(Result<Vec<RuntimeCommand>,RuntimeError>),
     DrainFinished(Result<RuntimeReply,RuntimeError>),
@@ -349,6 +350,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             }
                             queue.exec(target.generation,&format!("prepare:{wire}"),sample,Action::Prepare {
                                 id:wire.clone(),payload:json!({"logical_id":logical_id,"frame":frame,"request_id":frame.get("id").or_else(||frame.get("request_id")),
+                                    "generation":target.generation,"conversation":view["conversation"],
                                     "state_revision":view["state_revision"],"settings_revision":view["settings_revision"]}),entry_id }).await.map_err(io_failure)?;
                             save_view(&queue,target.generation,sample,&state_gate,state_version,&view).await?;
                             let cursor = capture_cursor(&target,&view).await?;
@@ -535,7 +537,13 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                     }
                     Message::Queue { call_id,action,response } => {
                         let queue = queue.clone(); let generation = target.generation; let sample = clock(start);
-                        jobs.spawn(async move { let _ = response.send(queue.exec(generation,&call_id,sample,action).await.map_err(io_failure)); Job::Saved(Ok(())) });
+                        let wake = matches!(&action,Action::Append { delivered:false,.. });
+                        jobs.spawn(async move {
+                            let result = queue.exec(generation,&call_id,sample,action).await.map_err(io_failure);
+                            let saved = result.as_ref().map(|_|()).map_err(Clone::clone);
+                            let _ = response.send(result);
+                            Job::Queued { wake,result:saved }
+                        });
                     }
                     Message::Snapshot(response) => {
                         let _ = response.send(Ok(json!({"key":target.key,"generation":target.generation,"revision":revision.value,
@@ -726,6 +734,13 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                           }
                         }
                     }
+                    Job::Queued { wake,result } => {
+                        match result {
+                            Ok(()) if wake=>drain_requested = true,
+                            Ok(())=>{},
+                            Err(failure)=>error = Some(failure),
+                        }
+                    }
                     Job::Policy { request_id,kind:_,phase_id,result } => {
                         let _ = phase_id;
                         match result {
@@ -862,7 +877,8 @@ fn status(disposition:Disposition) -> Status {
 }
 
 fn recover_phase(state:&super::queue::State,phase:&super::queue::Operation) -> bool {
-    phase.payload["frame"].is_object() && (matches!(phase.status,Status::Unknown | Status::Dispatching)
+    phase.payload["generation"].as_u64() == Some(state.generation)
+        && phase.payload["frame"].is_object() && (matches!(phase.status,Status::Unknown | Status::Dispatching)
         || phase.payload["logical_id"].as_str().and_then(|id|state.operations.get(id))
             .is_some_and(|root|matches!(root.status,Status::Unknown | Status::Dispatching)))
 }

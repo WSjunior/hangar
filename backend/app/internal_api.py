@@ -131,6 +131,15 @@ async def session_info(name: str) -> dict:
     info = await api._cached_info(name)
     if info is None:
         raise HTTPException(status_code=404)
+    from app import runtime_coordinator
+    coordinator = runtime_coordinator.current()
+    if coordinator is not None and coordinator.managed_queue(name):
+        import uuid
+        try:
+            await coordinator.op(name, {"kind":"ensure_projection"}, uuid.uuid4().hex)
+        except Exception as exc:
+            diag.registrar("runtime.history_failed", "erro", sessao=name, codigo=type(exc).__name__)
+            raise HTTPException(503) from None
     return info_payload(name, info.provider, info.jsonl)
 
 

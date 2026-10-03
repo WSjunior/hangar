@@ -2273,7 +2273,11 @@ def _matar_grupo(pid: int, name: str) -> None:
     except ProcessLookupError:
         pass
     except OSError:
-        _log.warning("claude headless: não matou o cano name=%s pid=%s", name, pid, exc_info=True)
+        raise RuntimeError("não foi possível encerrar o cano; arquivos conservados") from None
+    from app.registry import _esperar_saida
+    _esperar_saida([pid])
+    if pid_vivo(pid):
+        raise RuntimeError("o cano continua vivo; arquivos conservados")
 
 
 def _marca_config(config_dir: str | None) -> str:

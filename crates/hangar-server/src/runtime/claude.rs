@@ -37,6 +37,7 @@ pub struct ClaudeEngine {
     question: Option<Value>,
     waiters: BTreeMap<RequestId,Waiter>,
     wires: BTreeMap<String,Wire>,
+    retired_writes: BTreeSet<String>,
     policies: BTreeMap<RequestId,String>,
     last_format_request: Option<RequestId>,
     reload_deadline: f64,
@@ -86,7 +87,7 @@ impl ClaudeEngine {
             initialized:metadata["initialized"] == true,initializing:metadata["initialized"] != true,
             init_warning:None,in_progress:false,state,model:string(&metadata["model"]),effort:string(&metadata["effort"]),
             permission_mode,previous_non_plan,restore_plan:None,pending:Vec::new(),question:None,
-            waiters:BTreeMap::new(),wires:BTreeMap::new(),policies:BTreeMap::new(),last_format_request:None,reload_deadline:clock.monotonic_s+10.0,
+            waiters:BTreeMap::new(),wires:BTreeMap::new(),retired_writes:BTreeSet::new(),policies:BTreeMap::new(),last_format_request:None,reload_deadline:clock.monotonic_s+10.0,
             rate_limit_info:Value::Null,commands:metadata.get("commands").filter(|commands|!commands.is_null()).cloned(),terminal_commands:metadata.get("terminal_commands").cloned().unwrap_or_else(||json!([])),
             preview:LiveBuffer::default(),thinking:LiveBuffer::default(),tool_input:LiveBuffer::default(),tool_name:None,tool_visible:false,
             label:None,compacting:false,turn_start:None,label_deadline:None,tokens_closed:0,tokens_message:None,
@@ -102,6 +103,24 @@ impl ClaudeEngine {
             }
         }
         engine
+    }
+
+    pub fn write_is_current(&self,id:&str) -> bool { !self.retired_writes.contains(id) }
+
+    fn reset_conversation(&mut self,effects:&mut Vec<Effect>) {
+        for (id,wire) in &mut self.wires {
+            self.retired_writes.insert(id.clone());
+            if !wire.final_result {
+                effects.push(Effect::Reply { operation_id:id.clone(),disposition:Disposition::Unknown,
+                    payload:json!({"reason":"conversation_changed"}) });
+                wire.final_result = true;
+            }
+        }
+        self.waiters.clear(); self.policies.clear(); self.last_format_request = None;
+        self.pending.clear(); self.question = None; self.effort_intent = None;
+        self.effort_deadline = None; self.active_input = None; self.restore_plan = None;
+        self.in_progress = false; self.turn_start = None; self.label_deadline = None;
+        self.clear_streams(effects);
     }
 
     pub fn view(&self) -> Value {
@@ -599,7 +618,7 @@ impl ClaudeEngine {
                     "effort":self.effort,"usage":self.usage,"context_window":self.context_window,"cost":self.cost}),effects);
                 self.changed(effects,false);
             }
-            "conversation_reset" => { self.clear_streams(effects); }
+            "conversation_reset" => { self.reset_conversation(effects); }
             "cano_saiu" => {
                 self.alive = false; self.in_progress = false; self.initializing = false;
                 self.turn_start = None; self.label_deadline = None; self.init_warning = None; self.effort_deadline = None;
@@ -645,6 +664,7 @@ impl ClaudeEngine {
             "init" => {
                 if let Some(sid) = event["session_id"].as_str() {
                     if self.metadata["session_id"].as_str() != Some(sid) {
+                        if self.metadata["session_id"].is_string() { self.reset_conversation(effects); }
                         self.metadata["session_id"] = json!(sid); self.clear_streams(effects);
                         self.policy("session.patch_meta",json!({"session_id":sid}),effects);
                     }

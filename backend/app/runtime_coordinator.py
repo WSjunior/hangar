@@ -135,6 +135,8 @@ class RuntimeCoordinator:
         self.voice_clients = {}
         self.legacy_active = set()
         self.registration_locks = {}
+        self.adoption_task = None
+        self.rebindings = {}
 
     async def prepare_session(self, name, provider):
         if self.legacy is None:
@@ -161,6 +163,15 @@ class RuntimeCoordinator:
         from app.runtime_adapter import LegacyBridge
         self.loop = asyncio.get_running_loop()
         self.legacy = LegacyBridge(self, adapters)
+        from app.pqueue import _queue_dir
+        for path in (_queue_dir() / "runtime").glob("*.json"):
+            state = await asyncio.to_thread(lambda: json.loads(path.read_bytes()))
+            descriptor = state.get("runtime_state", {}).get("_binding")
+            if descriptor and not descriptor.get("headless"):
+                values = {**descriptor, "generation":state["generation"]}
+                for field in ("projection_dir", "state_path", "lock_path"):
+                    values[field] = Path(values[field])
+                await asyncio.to_thread(self.register, Binding(**values))
         from app.adapters.claude_headless import sessions as claude_sessions
         from app.adapters.codex import sessions as codex_sessions
         for provider, sessions in (("claude", claude_sessions), ("codex", codex_sessions)):
@@ -196,9 +207,19 @@ class RuntimeCoordinator:
         self.transport, self.instance = transport, transport.instance
         self.loop = asyncio.get_running_loop()
         self.events_task = self.loop.create_task(self._events(transport, transport.instance))
+        if self.legacy is not None:
+            async def adopt_registered():
+                for slot in tuple(self.slots.values()):
+                    if slot.binding.headless:
+                        try:
+                            await self.prepare_session(slot.binding.name, slot.binding.provider)
+                        except Exception as exc:
+                            from app import diag
+                            diag.registrar("runtime.adoption_failed", "erro", sessao=slot.binding.name, codigo=type(exc).__name__)
+            self.adoption_task = self.loop.create_task(adopt_registered())
 
     async def close_events(self):
-        tasks = [task for task in [self.events_task, *self.refreshing.values()] if task is not None]
+        tasks = [task for task in [self.events_task, self.adoption_task, *self.refreshing.values(), *self.rebindings.values()] if task is not None]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -277,6 +298,11 @@ class RuntimeCoordinator:
                             if client is not None:
                                 client.receive(event["channel"], event["data"]["event"])
                     self._signal(slot)
+                    if event.get("channel") in {"view", "snapshot"}:
+                        conversation = (slot.view.get("view") or {}).get("conversation")
+                        field = "session_id" if slot.binding.provider == "claude" else "thread_id"
+                        if conversation and conversation != slot.binding.meta.get(field):
+                            self._rebind(slot)
                     delay = 0.25
                 raise RuntimeError("stream privado encerrado sem aviso")
             except asyncio.CancelledError:
@@ -290,6 +316,23 @@ class RuntimeCoordinator:
                     client.fail(RuntimeError("stream privado interrompido; voz invalidada"))
             await asyncio.sleep(delay)
             delay = min(5.0, delay * 2)
+
+    def _rebind(self, slot):
+        key = slot.binding.key
+        if key in self.rebindings and not self.rebindings[key].done():
+            return
+        slot.frozen = True
+        async def rebind():
+            async def changed():
+                return None
+            try:
+                await self.change(slot.binding.name, changed)
+            except Exception as exc:
+                slot.cache_valid = False
+                self._signal(slot)
+                from app import diag
+                diag.registrar("runtime.rebind_failed", "erro", sessao=slot.binding.name, codigo=type(exc).__name__)
+        self.rebindings[key] = asyncio.create_task(rebind())
 
     def register(self, binding: Binding):
         global _current
@@ -480,6 +523,8 @@ class RuntimeCoordinator:
                 raise RuntimeError("sessão sem responsável gerenciado")
             slot, phase, descriptor = route
             if phase == Phase.Rust:
+                if command["kind"] not in {"snapshot", "ensure_projection"} and not slot.cache_valid:
+                    raise RuntimeError("estado do runtime indisponível; aguarde a reposição")
                 return await self._rpc(descriptor, command, operation_id)
             if self.legacy is None:
                 raise RuntimeError("serviço da reserva indisponível")
@@ -584,12 +629,88 @@ class RuntimeCoordinator:
                     slot.frozen = False
 
     def close_python_leases(self):
+        global _current
         for slot in self.slots.values():
             with slot.guard:
                 if slot.active:
                     raise RuntimeError("persistência ainda em curso; posse conservada")
                 if slot.lease is not None:
                     slot.lease.close()
+        if _current is self:
+            _current = None
+        if runtime_queue._coordinator is self:
+            runtime_queue.configure(None)
+
+    async def change(self, name, action, *, new_name=None, advance=True, remove=False, reopen=True):
+        if not self.managed_queue(name):
+            return await action()
+        slot = self.slot(name)
+        if self.in_lifecycle(slot):
+            return await action()
+
+        async def perform():
+            async with self.freeze(name):
+                if slot.phase != Phase.Python:
+                    await self.detach(name)
+                if remove and self.legacy is not None:
+                    await self.legacy.quiesce(slot.binding.descriptor())
+                result = await action()
+                await self._wait_active(slot)
+                if remove:
+                    if self.legacy is not None:
+                        await self.legacy.quiesce(slot.binding.descriptor())
+                    with slot.guard:
+                        slot.lease.close()
+                        slot.lease = None
+                        self.names.pop(slot.binding.name, None)
+                        self.slots.pop(slot.binding.key, None)
+                    return result
+                target_name = new_name or name
+                binding = await asyncio.to_thread(self.legacy.binding, target_name, slot.binding.provider)
+                if binding is None:
+                    binding = copy.deepcopy(slot.binding)
+                    binding.name, binding.headless = target_name, False
+                    binding.meta = {**binding.meta, "headless":False, "cano":None}
+                if binding.key != slot.binding.key:
+                    raise RuntimeError("mudança de modo não pode trocar a chave durável")
+                if self.legacy is not None:
+                    await self.legacy.quiesce(binding.descriptor())
+                with slot.guard:
+                    if slot.store.state["name"] != target_name:
+                        slot.store.exec(slot.binding.generation, "rename:" + uuid.uuid4().hex, _clock(), {"kind":"rename", "name":target_name})
+                    binding.generation = slot.binding.generation + int(advance)
+                    if advance:
+                        state = copy.deepcopy(slot.store.state)
+                        state["runtime_state"] = {"_binding":binding.descriptor()}
+                        slot.store._persist(state)
+                self.register(binding)
+                slot.view, slot.cache_valid = {}, False
+                self._signal(slot)
+                return result
+
+        task = asyncio.create_task(perform())
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+        if reopen and not remove and slot.binding.headless:
+            await self.prepare_session(slot.binding.name, slot.binding.provider)
+        return result
+
+    async def lifecycle_call(self, name, method, arguments):
+        if self.legacy is None:
+            raise RuntimeError("serviço administrativo indisponível")
+        adapter = self.legacy.adapters[self.slot(name).binding.provider]
+        import inspect
+        original = inspect.unwrap(getattr(adapter, method))
+        params = {key:value for key,value in arguments.items() if key not in {"self", "name", "old"}}
+        async def action():
+            if inspect.iscoroutinefunction(original):
+                return await original(adapter, name, **params)
+            return await asyncio.to_thread(original, adapter, name, **params)
+        return await self.change(name, action, new_name=params.get("new") if method == "rename" else None,
+            advance=method != "rename", remove=False, reopen=method not in {"close_sync", "parar"})
 
     @staticmethod
     async def _peek(descriptor):

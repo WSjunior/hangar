@@ -1181,8 +1181,16 @@ class CodexAdapter:
 
         O SIGTERM vai pelo PID do sidecar: desde o lancador unico o servidor nao e filho do backend,
         entao `client.terminate()` sozinho seria um no-op e o servidor sobreviveria ao encerrar."""
+        meta = codex_sessions.load(name) or {}
+        cano_pid = (meta.get("cano") or {}).get("pid") if meta.get("headless") else None
+        from app.registry import _descendant_pids, _esperar_saida
+        pids = [cano_pid, *_descendant_pids(cano_pid)] if cano_pid else []
         matar_app_server(name)
-        sem_terminal.matar(codex_sessions.load(name))
+        sem_terminal.matar(meta)
+        if pids:
+            _esperar_saida(pids)
+            if any(pid_vivo(pid) for pid in pids):
+                raise RuntimeError("o processo antigo continua vivo; sidecar e fila conservados")
         self._falhas_subida.pop(name, None)
         self._problemas.pop(name, None)
         sess = self._sessions.pop(name, None)

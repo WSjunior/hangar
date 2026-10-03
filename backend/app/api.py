@@ -473,6 +473,8 @@ async def _lifespan(app: FastAPI):
             yield
     finally:
         diag.registrar("backend.encerrando")
+        await runtime.shutdown()
+        await runtime.close_events()
         connect_task.cancel()
         await asyncio.gather(connect_task, return_exceptions=True)
         await connect_mod.stop()
@@ -2558,8 +2560,13 @@ async def _durante_troca(name: str, troca):
     # revogaria o convite de uma sessão que continua viva. `changing_mode` a segura no meio.
     share_api.changing_mode.add(name)
     try:
+        from app import runtime_coordinator
+        coordinator = runtime_coordinator.current()
+        if coordinator is not None and coordinator.managed_queue(name):
+            return await coordinator.change(name, lambda: troca)
         return await troca
     finally:
+        troca.close()
         # Também na falha: uma troca que morreu no meio pode já ter mudado a identidade.
         try:
             def _move_life():
@@ -3114,6 +3121,14 @@ async def history(request: Request, response: Response, name: str, limit: int | 
     if not info or not info.jsonl:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "session or transcript not found"))
     from app.pqueue import historico_etag, merged_history
+    from app import runtime_coordinator
+    coordinator = runtime_coordinator.current()
+    if coordinator is not None and coordinator.managed_queue(name):
+        try:
+            await coordinator.op(name, {"kind":"ensure_projection"}, uuid.uuid4().hex)
+        except Exception as exc:
+            diag.registrar("runtime.history_failed", "erro", sessao=name, codigo=type(exc).__name__)
+            raise HTTPException(503, detail=erro("erro_envio_falhou", "projeção da fila indisponível; tente novamente")) from None
     # Entrar numa sessao e a leitura mais repetida do app, e quase sempre nada mudou desde a
     # ultima: medido em 06/09/2026 na `pr-junior` (transcript de 31,9 MB), a cauda custava 313 KB
     # POR ENTRADA pelo caminho do celular. O validador sai de dois `stat` -- barato aqui e, do lado
