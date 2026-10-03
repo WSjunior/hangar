@@ -1,7 +1,8 @@
-//! Servidor do Hangar: lê as conversas do Claude e do Codex e repassa o resto ao backend Python.
+//! Servidor do Hangar: lê conversas e custos das sessões e repassa o restante ao backend Python.
 pub mod auth;
 pub mod config;
 pub mod costs;
+pub mod costs_routes;
 pub mod proxy;
 pub mod routes;
 pub mod runtime;
@@ -35,6 +36,15 @@ pub async fn serve_until(
     cfg: config::Config,
     stop: impl std::future::Future<Output = ()>,
 ) -> std::io::Result<()> {
+    serve_until_with_state(listener, routes::AppState::new(cfg), stop).await
+}
+
+pub async fn serve_until_with_state(
+    listener: tokio::net::TcpListener,
+    state: routes::AppState,
+    stop: impl std::future::Future<Output = ()>,
+) -> std::io::Result<()> {
+    let cfg = state.cfg.clone();
     if let Some(instance) = config::Config::runtime_instance().map_err(std::io::Error::other)? {
         let private = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = private.local_addr()?.port();
@@ -43,7 +53,7 @@ pub async fn serve_until(
         println!("{}",runtime::gateway::startup_line(INTERNAL_PROTOCOL,&instance,port));
         let gateway = runtime::gateway::serve(private,registry.clone(),cfg.internal_secret.clone(),instance,INTERNAL_PROTOCOL);
         let result = tokio::select! {
-            result = routes::serve(listener,cfg) => result,
+            result = routes::serve_with_state(listener,state) => result,
             result = gateway => result,
             () = stop => Ok(()),
         };
@@ -51,7 +61,7 @@ pub async fn serve_until(
         return result;
     }
     tokio::select! {
-        r = routes::serve(listener, cfg) => r,
+        r = routes::serve_with_state(listener, state) => r,
         () = stop => Ok(()),
     }
 }

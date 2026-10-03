@@ -32,7 +32,7 @@ notify = { workspace = true }
 percent-encoding = { workspace = true }
 rusqlite.workspace = true
 rayon.workspace = true
+reqwest = { workspace = true, features = ["rustls"] }
 
 [dev-dependencies]
 tempfile.workspace = true
-reqwest = { workspace = true }

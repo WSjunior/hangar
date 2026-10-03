@@ -1,5 +1,5 @@
 // crates/hangar-server/src/routes.rs
-//! Rotas do hangar-server: saúde, histórico e chat ao vivo do Claude e do Codex para o dono;
+//! Rotas do hangar-server: saúde, custos, histórico e chat ao vivo do Claude e do Codex para o dono;
 //! todo o resto é repasse ao Python.
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -40,6 +40,9 @@ pub struct AppState {
     pub side: SideCtx,
     pub terminal: crate::terminal_control::TerminalPool,
     pub terminal_address: Option<SocketAddr>,
+    pub costs: Arc<crate::costs::collect::Collector>,
+    pub fx: Arc<crate::costs::fx::Fx>,
+    pub reports: Arc<crate::costs::ReportCache>,
 }
 
 impl AppState {
@@ -48,6 +51,16 @@ impl AppState {
     }
 
     pub fn with_terminal_pool(cfg: Config, terminal: crate::terminal_control::TerminalPool) -> AppState {
+        let costs = Arc::new(crate::costs::collect::Collector::new(
+            crate::costs::index::default_dir(), crate::costs::pricing::default_dir(),
+            crate::costs::areas::default_map_file(),
+            Arc::new(crate::costs::collect::HttpScopes::new(cfg.upstream, cfg.internal_secret.clone())),
+        ));
+        Self::with_parts(cfg, terminal, costs, Arc::new(crate::costs::fx::Fx::new()))
+    }
+
+    pub fn with_parts(cfg: Config, terminal: crate::terminal_control::TerminalPool,
+                      costs: Arc<crate::costs::collect::Collector>, fx: Arc<crate::costs::fx::Fx>) -> AppState {
         let http = proxy::client();
         let side = SideCtx {
             upstream: cfg.upstream,
@@ -57,7 +70,8 @@ impl AppState {
             hubs: Hubs::default(),
             infos: Default::default(),
         };
-        AppState { auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None }
+        AppState { auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None,
+            costs, fx, reports: Arc::new(crate::costs::ReportCache::default()) }
     }
 
     /// `info` da sessão com cache curto: várias telas abrindo juntas viram uma consulta só. Só o
@@ -131,9 +145,12 @@ pub async fn serve(listener: TcpListener, cfg: Config) -> std::io::Result<()> {
 }
 
 pub async fn serve_with_terminal_pool(listener: TcpListener, cfg: Config, pool: crate::terminal_control::TerminalPool) -> std::io::Result<()> {
+    serve_with_state(listener, AppState::with_terminal_pool(cfg, pool)).await
+}
+
+pub async fn serve_with_state(listener: TcpListener, mut state: AppState) -> std::io::Result<()> {
     // Bind LAN específico não recebe tráfego de loopback: a observação tem uma porta própria.
     let private = TcpListener::bind("127.0.0.1:0").await?;
-    let mut state = AppState::with_terminal_pool(cfg, pool);
     state.terminal_address = Some(private.local_addr()?);
     let state = Arc::new(state);
     tokio::select! {
@@ -155,6 +172,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.
         .route("/api/sessions/{name}/history", get(history).fallback(pass_any))
         .route("/api/sessions/{name}/events", get(events).fallback(pass_any))
+        .route("/api/costs", get(crate::costs_routes::costs).fallback(pass_any))
+        .route("/api/cotacao", get(crate::costs_routes::cotacao).fallback(pass_any))
         .fallback(pass_any)
         .with_state(state)
 }
