@@ -904,10 +904,10 @@ def test_lease_start_failure_preserves_python_consumer(monkeypatch, caplog, fail
     assert "RuntimeError" in caplog.text
     assert "private-pane-and-secret" not in caplog.text
     assert "test-only" not in caplog.text
-    assert not any(p["op"] in ("capture", "reduce") for p in calls)
+    assert not any(p["op"] == "reduce" for p in calls)
 
 
-def test_failed_lease_start_leaves_closed_source_and_allows_python_capture(monkeypatch):
+def test_failed_lease_target_stays_retryable_and_allows_python_capture(monkeypatch):
     t = bridge()
     t.configure("127.0.0.1:12345", "test-only")
     def failed_target(name):
@@ -915,8 +915,8 @@ def test_failed_lease_start_leaves_closed_source_and_allows_python_capture(monke
     monkeypatch.setattr(state.tmux, "_pane_target", failed_target)
     async def run():
         async with t.lease("closed-start-failure", "claude", lambda: "thread") as source:
-            assert not source.open
-            assert source.identity() is None
+            assert source.open
+            assert source.identity() is not None
             assert not t.retired("closed-start-failure")
             assert await state.shared_capture("closed-start-failure", 0) == "Python"
     asyncio.run(run())
@@ -1276,6 +1276,7 @@ def test_old_resolver_error_does_not_charge_new_generation(monkeypatch, operatio
             await asyncio.gather(job, return_exceptions=True)
         assert t._session("").failures == 2
         assert t._available()
+        await source.close()
     asyncio.run(run())
 
 
@@ -1445,3 +1446,169 @@ def test_recovery_is_independent_and_late_error_cannot_charge_replacement(monkey
         assert not any(name.startswith("finished-") for name in t._sessions)
         assert not any(name.startswith("finished-") for name in t._consumers.values())
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure_site", ["binding", "target", "acquire"])
+@pytest.mark.parametrize("consumer", ["state", "preview"])
+def test_start_failure_retries_rust_in_same_live_consumer(monkeypatch, failure_site, consumer):
+    from app import preview
+    from app.loop import LoopLink
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(t, "HEARTBEAT", 0.01)
+    monkeypatch.setattr(state.StateMonitor, "FRAME_MAX_AGE", 0)
+    monkeypatch.setattr(state, "pergunta_aberta", lambda sid: None)
+    monkeypatch.setattr(state, "_sidecar_status", lambda sid: None)
+    monkeypatch.setattr(state.plugin_bridge, "pergunta_pendente", lambda name: None)
+    monkeypatch.setattr(state.plugin_bridge, "estado_recente", lambda name: None)
+    monkeypatch.setattr(state.plugin_bridge, "vivo", lambda name: False)
+    monkeypatch.setattr(state.hook_state, "get_state", lambda sid: None)
+    monkeypatch.setattr(state.hook_state, "shells", lambda sid: [])
+    monkeypatch.setattr(LoopLink, "get", lambda self: None)
+    monkeypatch.setattr(preview, "read_sidecar", lambda stem: None)
+    failed = [False]
+    def fail_once(site):
+        if failure_site == site and not failed[0]:
+            failed[0] = True
+            raise RuntimeError("private-startup")
+    def binding():
+        fail_once("binding")
+        return "thread"
+    def target(name):
+        fail_once("target")
+        return "%8"
+    monkeypatch.setattr(state.tmux, "_pane_target", target)
+    calls = []
+    def response(config, payload):
+        calls.append(payload.copy())
+        fail_once(payload["op"])
+        if payload["op"] == "capture":
+            value = analysis()
+            value["spinner"] = "Thinking"
+            return dict(binding=payload["binding"], started=payload["started"],
+                        text="✻ Thinking…\n❯ ", analysis=value)
+        return {}
+    monkeypatch.setattr(t, "_http", response)
+    name = f"retry-{consumer}-{failure_site}"
+    async def run():
+        if consumer == "state":
+            stream = state.StateMonitor(name, poll=0, sid_get=binding, provider="claude").stream()
+            try:
+                assert (await asyncio.wait_for(anext(stream), 1)).state == "working"
+                assert (await asyncio.wait_for(anext(stream), 1)).state == "idle"
+                assert len(t._sessions[name].consumers) == 1
+            finally:
+                await stream.aclose()
+        else:
+            broker = preview.PreviewBroker(name, "claude", binding)
+            subscriber = broker.subscribe()
+            task = None
+            try:
+                assert await anext(subscriber) == ("", False, False)
+                assert await asyncio.wait_for(anext(subscriber), 1) == ("resposta Rust", False, False)
+                task = broker._task
+                assert not task.done() and broker._subs == 1
+                assert len(t._sessions[name].consumers) == 1
+            finally:
+                await subscriber.aclose()
+                if task is not None:
+                    await asyncio.gather(task, return_exceptions=True)
+        assert name not in t._sessions
+    asyncio.run(run())
+    assert failed[0]
+    captures = [p for p in calls if p["op"] == "capture"]
+    assert captures
+    assert len({p["consumer"] for p in calls}) == 1
+    assert calls[-1]["op"] == "release"
+    if failure_site == "acquire":
+        assert [p["op"] for p in calls[:2]] == ["acquire", "release"]
+
+
+def test_explicit_close_prevents_later_acquire_and_start(monkeypatch):
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    calls = []
+    monkeypatch.setattr(t, "_request", fake_http(calls))
+    async def run():
+        source = t.lease("explicitly-closed", "claude", lambda: "thread")
+        await source.start()
+        await source.close()
+        before = len(calls)
+        await source.acquire()
+        await source.start()
+        assert not source.open
+        assert len(calls) == before
+        assert source.name not in t._sessions
+    asyncio.run(run())
+
+
+def test_binding_read_failure_does_not_retire_live_lease(monkeypatch):
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    monkeypatch.setattr(t, "_request", fake_http([]))
+    fail = [False]
+    def binding():
+        if fail[0]:
+            fail[0] = False
+            raise RuntimeError("private-binding")
+        return "thread"
+    async def run():
+        async with t.lease("binding-retry", "claude", binding) as source:
+            fail[0] = True
+            assert not t.retired(source.name)
+            assert source.open
+            assert await state.shared_capture(source.name, 0) == "● resposta Rust"
+    asyncio.run(run())
+
+
+def test_unexpected_release_failure_closes_locally_without_private_error(monkeypatch, caplog):
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    async def request(payload):
+        if payload["op"] == "release":
+            raise RuntimeError("private-release")
+        return {}
+    monkeypatch.setattr(t, "_request", request)
+    async def run():
+        source = t.lease("release-error", "claude", lambda: "thread")
+        await source.start()
+        await source.close()
+        assert not source.open and source.remote_generation is None
+        assert source.name not in t._sessions and source.consumer not in t._consumers
+    asyncio.run(run())
+    assert "lease_close_RuntimeError" in caplog.text
+    assert "private-release" not in caplog.text
+
+
+def test_cancelled_start_releases_partial_remote_ref_and_propagates(monkeypatch):
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    calls = []
+    async def run():
+        entered = asyncio.Event()
+        async def request(payload):
+            calls.append(payload.copy())
+            if payload["op"] == "acquire":
+                entered.set()
+                await asyncio.Future()
+            return {}
+        monkeypatch.setattr(t, "_request", request)
+        source = t.lease("cancelled-start", "claude", lambda: "thread")
+        async def producer():
+            async with source:
+                pytest.fail("cancelled start entered producer")
+        job = asyncio.create_task(producer())
+        await asyncio.wait_for(entered.wait(), 1)
+        job.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await job
+        assert not source.open
+        assert source.remote_generation is None
+        assert source.name not in t._sessions
+        assert source.consumer not in t._consumers
+    asyncio.run(run())
+    assert [p["op"] for p in calls] == ["acquire", "release"]

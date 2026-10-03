@@ -227,12 +227,19 @@ class Lease:
         self.consumer = uuid4().hex
         self.binding = None
         self.open = False
+        self._closed = False
         self.remote_generation = None
 
     def identity(self):
         if not self.open or self.provider not in ("claude", "codex"):
             return None
-        binding = self.binding_get()
+        generation = _generation
+        try:
+            binding = self.binding_get()
+        except Exception as exc:
+            if generation == _generation:
+                _failure(self.name, f"terminal_binding_{type(exc).__name__}")
+            return None
         if not isinstance(binding, str) or not binding:
             return None
         if binding != self.binding:
@@ -253,13 +260,15 @@ class Lease:
         return self
 
     async def start(self):
+        if self._closed:
+            return
         if self.consumer not in _consumers:
             _consumers[self.consumer] = self.name
             _sessions.setdefault(self.name, _SessionState()).consumers.add(self.consumer)
         generation = _generation
+        self.open = True
         try:
             self.binding = self.binding_get()
-            self.open = True
             if self.provider in ("claude", "codex") and isinstance(self.binding, str) and self.binding:
                 if _bindings.get(self.name) != (self.provider, self.binding):
                     _bindings[self.name] = (self.provider, self.binding)
@@ -269,21 +278,30 @@ class Lease:
             if generation == _generation:
                 _failure(self.name, f"lease_start_{type(exc).__name__}")
             try:
-                await self.close()
+                # Libere só a referência remota parcial: o produtor tentará de novo.
+                await self._release_remote()
             except Exception as close_exc:
                 if generation == _generation:
-                    _failure(self.name, f"lease_close_{type(close_exc).__name__}")
+                    _failure(self.name, f"lease_release_{type(close_exc).__name__}")
 
     async def __aexit__(self, *exc):
         _current.reset(self.token)
         await self.close()
 
+    async def _release_remote(self):
+        remote_generation, self.remote_generation = self.remote_generation, None
+        if remote_generation == _generation:
+            await _request({"op": "release", "consumer": self.consumer})
+
     async def close(self):
         self.open = False
-        remote_generation, self.remote_generation = self.remote_generation, None
+        self._closed = True
+        generation = _generation
         try:
-            if remote_generation == _generation:
-                await _request({"op": "release", "consumer": self.consumer})
+            await self._release_remote()
+        except Exception as exc:
+            if generation == _generation:
+                _failure(self.name, f"lease_close_{type(exc).__name__}")
         finally:
             _consumers.pop(self.consumer, None)
             session = _sessions.get(self.name)
@@ -302,7 +320,7 @@ class Lease:
         attempt_started = time.monotonic()
         try:
             target = await _io(tmux._pane_target, self.name)
-        except (OSError, TimeoutError, _IoBusy) as exc:
+        except Exception as exc:
             if identity[3] == _generation:
                 _failure(self.name, f"terminal_target_{type(exc).__name__}", attempt_started)
             return None
@@ -350,8 +368,11 @@ def stamp(name: str) -> tuple:
 
 def retired(name: str) -> bool:
     source = _current.get()
-    return (source is not None and source.open and source.name == name and source.provider in ("claude", "codex")
-            and isinstance(source.binding, str) and bool(source.binding) and source.identity() is None)
+    if source is None or not source.open or source.name != name or source.provider not in ("claude", "codex"):
+        return False
+    source.identity()
+    return (isinstance(source.binding, str) and bool(source.binding)
+            and _bindings.get(name) != (source.provider, source.binding))
 
 
 async def capture(name: str, started: float) -> dict | None:
