@@ -1096,7 +1096,7 @@ impl Hangar {
         }
         self.drop_connection(window, cx);
         (self.api, self.server, self.unsaved_connection) = (None, None, None);
-        self.reset_device(cx);
+        self.reset_device(window, cx);
         self.server_config.reconnected(String::new());
         // Voltar pede o token de novo, como no web.
         self.token.update(cx, |input, cx| input.set_value("", window, cx));

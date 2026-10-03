@@ -733,7 +733,7 @@ impl Hangar {
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
             desktop_note: None,
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
-            device: device::Device::default(), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), orq_history: None, orq_history_serial: 0, home_usage: Default::default(), recents: Default::default(), reopen: None, shortcuts: shortcuts::Shortcuts::default(),
+            device: device::Device::new(window, cx), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), orq_history: None, orq_history_serial: 0, home_usage: Default::default(), recents: Default::default(), reopen: None, shortcuts: shortcuts::Shortcuts::default(),
             server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), connect: connect::Connect::default(), shared: shared_config::SharedConfig::default(), machines: machines::Machines::default(),
             costs: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
             terminal: None, terminal_serial: 0,
@@ -940,7 +940,7 @@ impl Hangar {
             if tx.send(Envelope { connection, selection: None, payload: Payload::Sessions(result) }).await.is_err() || fatal { return; }
             forward_stream(api, None, connection, None, tx).await;
         }));
-        self.reset_device(cx);
+        self.reset_device(window, cx);
         // Convite só enxerga a própria sessão: custos, contas, busca, configuração e avisos do servidor responderiam 403.
         if !self.active_invite() {
             self.costs_reconnected(cx);
@@ -1478,7 +1478,7 @@ impl Hangar {
                     window.push_notification(Notification::warning(tr("notify_settings_failed")), cx);
                 }
             }
-            Payload::Device(reply) => { self.receive_device(reply, cx); return; }
+            Payload::Device(reply) => { self.receive_device(reply, window, cx); return; }
             Payload::Accounts(reply) => { self.receive_accounts(reply, window, cx); return; }
             Payload::Orchestration(reply) => { self.receive_orchestration(reply, cx); return; }
             Payload::Shortcuts(reply) => { self.receive_shortcuts(reply, window, cx); return; }

@@ -76,8 +76,8 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
         Value::String(message) => Some(message.clone()),
         Value::Object(fields) => {
             let msg = fields.get("msg").and_then(Value::as_str).filter(|message| !message.is_empty());
-            // Configuração compartilhada: a frase do web pelo código, com os parâmetros dela.
-            if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("config_sync_")) {
+            // Configurações do servidor usam a frase compartilhada, com os parâmetros dela.
+            if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("config_sync_") || code.starts_with("update_channel_")) {
                 let params = fields.get("params").and_then(Value::as_object).map(|p| p.iter()
                     .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
                 if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
@@ -669,6 +669,15 @@ mod tests {
     use super::*;
     // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
     use core::prelude::v1::test;
+
+    #[test]
+    fn update_channel_errors_translate_with_branch_parameter() {
+        let message = failure_detail(Some(json!({"detail": {"code": "update_channel_missing",
+            "params": {"branch": "test/channel"}, "msg": "server fallback"}})), 400);
+        assert!(message.contains("test/channel"), "{message}");
+        assert!(!message.contains("{branch}"));
+        assert_ne!(message, "server fallback");
+    }
 
     #[test]
     fn backend_error_detail_keeps_string_and_object_messages() {
