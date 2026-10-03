@@ -1,13 +1,19 @@
 import { inkColor } from '@hangar/core';
 
 // Medidas dos mods são em células de terminal: largura em `ch`, altura em linhas (`lh`).
+const PERCENT = /^\d+(\.\d+)?%$/;
 const cols = (v: unknown): string | null =>
-  typeof v === 'number' ? `${v}ch` : typeof v === 'string' && v ? v : null;
-const lines = (v: unknown): string | null => (typeof v === 'number' ? `${v}lh` : null);
+  typeof v === 'number' && Number.isFinite(v) ? `${v}ch` : typeof v === 'string' && PERCENT.test(v) ? v : null;
+const lines = (v: unknown): string | null => (typeof v === 'number' && Number.isFinite(v) ? `${v}lh` : null);
+
+// Os valores vêm do mod e vão para um `style`: só palavras de CSS (`flex-start`, `row`), números e
+// os de cima. Qualquer coisa que feche a declaração ou abra `url(` cai fora.
+const SAFE_VALUE = /^[\w#%.,\s()-]*$/;
 
 function css(parts: Record<string, string | number | null | undefined | false>): string {
   return Object.entries(parts)
     .filter(([, v]) => v !== null && v !== undefined && v !== false && v !== '')
+    .filter(([, v]) => typeof v === 'number' || (SAFE_VALUE.test(v as string) && !/url\(/i.test(v as string)))
     .map(([k, v]) => `${k}:${v}`)
     .join(';');
 }
@@ -31,7 +37,7 @@ export function boxStyle(p: Props): string {
     'row-gap': lines(pick('rowGap', 'gap')),
     // Largura fixa do terminal vira teto: no celular a coluna é mais estreita que a do pane.
     'max-width': cols(p.width),
-    width: typeof p.width === 'number' ? '100%' : typeof p.width === 'string' ? p.width : null,
+    width: typeof p.width === 'number' ? '100%' : cols(p.width),
     'min-width': cols(p.minWidth) ?? '0',
     'padding-top': lines(pick('paddingTop', 'paddingY', 'padding')),
     'padding-bottom': lines(pick('paddingBottom', 'paddingY', 'padding')),

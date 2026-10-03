@@ -34,6 +34,12 @@ it('inkColor traduz nomes do Ink e mantém hex', () => {
   expect(inkColor(undefined)).toBeNull();
 });
 
+it('inkColor recusa texto que injetaria CSS', () => {
+  expect(inkColor('red;position:fixed')).toBeNull();
+  expect(inkColor('url(https://x)')).toBeNull();
+  expect(inkColor('rgb(1, 2, 3)')).toBe('rgb(1, 2, 3)');
+});
+
 it('textOf junta só texto e número', () => {
   expect(textOf(['a', 1, { type: 'Text' }, null])).toBe('a1');
 });

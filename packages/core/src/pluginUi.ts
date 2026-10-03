@@ -90,10 +90,13 @@ const INK_COLORS: Record<string, string> = {
   whiteBright: '#ffffff',
 };
 
+// A cor vem do mod e vai para um `style`: só formatos de cor, nunca texto que feche a declaração.
+const SAFE_COLOR = /^(#[0-9a-f]{3,8}|rgba?\([\d\s.,%]+\)|[a-z]+)$/i;
+
 /** Cor de um `Text`/`Box` em CSS: hex e `rgb()` passam; nome do Ink vira o tom do terminal. */
 export function inkColor(value: unknown): string | null {
   if (typeof value !== 'string' || !value) return null;
-  return INK_COLORS[value] ?? value;
+  return INK_COLORS[value] ?? (SAFE_COLOR.test(value) ? value : null);
 }
 
 /** Texto direto dos filhos (strings e números), na ordem. */

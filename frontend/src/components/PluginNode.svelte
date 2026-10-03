@@ -12,6 +12,8 @@
   const el = $derived(node && typeof node === 'object' ? (node as PluginElement) : null);
   const p = $derived((el?.props ?? {}) as Record<string, unknown>);
   const str = (v: unknown) => (typeof v === 'string' ? v : '');
+  // O href vem do mod: só http(s) vira link, como no renderMarkdown; `javascript:` executaria no clique.
+  const safeHref = (v: unknown) => (typeof v === 'string' && /^https?:\/\//i.test(v) ? v : null);
 
   // Células vizinhas da mesma cor viram um trecho só: uma barra de 100 colunas não vira 100 spans.
   type Run = { text: string; fg: string | null; bg: string | null };
@@ -53,7 +55,12 @@
   {:else if el.type === 'Code'}
     <pre class="code">{str(p.source)}</pre>
   {:else if el.type === 'Link'}
-    <a href={str(p.href)} target="_blank" rel="noopener noreferrer">{str(p.label) || textOf(el.children) || str(p.href)}</a>
+    {@const label = str(p.label) || textOf(el.children) || str(p.href)}
+    {#if safeHref(p.href)}
+      <a href={safeHref(p.href)} target="_blank" rel="noopener noreferrer">{label}</a>
+    {:else}
+      <span>{label}</span>
+    {/if}
   {:else if el.type === 'Button'}
     <!-- Botão de mod ainda não responde no Hangar: aparece como rótulo, sem fingir que clica. -->
     <span class="button" class:primary={p.variant === 'primary'}>{str(p.label) || textOf(el.children)}</span>
