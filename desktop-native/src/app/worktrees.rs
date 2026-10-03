@@ -12,6 +12,8 @@ pub(super) struct WorktreeStatus {
     pub exists: bool,
     pub branch: Option<String>,
     pub base: Option<String>,
+    #[serde(default)]
+    pub main_branch: Option<String>,
     pub merged: bool,
     pub ahead: i64,
     pub dirty: i64,
@@ -298,7 +300,7 @@ impl Hangar {
         panel
             .when(!lost.is_empty(), |el| el.child(warn(tr_shared("worktree_apagar_perde", &[])))
                 .children(lost.into_iter().map(|f| div().pl(px(8.)).font_family(theme::MONO).text_size(px(12.)).child(format!("• {f}")))))
-            .child(muted(tr_shared("worktree_apagar_conversas", &[("branch", &base)])))
+            .child(muted(tr_shared("worktree_apagar_conversas", &[("branch", st.main_branch.as_deref().unwrap_or(&base))])))
             .map(|el| if st.merged {
                 el.child(muted(tr_shared("worktree_apagar_branch_juntada", &[("branch", &branch), ("base", &base)])))
             } else {
@@ -335,5 +337,14 @@ mod tests {
         let busy = st(json!({"path": "/r/b", "repo": "/r", "exists": true, "branch": "b", "base": "main", "merged": true,
                              "ahead": 0, "dirty": 0, "ignored": [], "sessions": ["s1"], "closed": 0}));
         assert_eq!(clean_merged(&[ok, busy]), 1);
+    }
+
+    #[test]
+    fn main_branch_is_optional() {
+        let mut v = json!({"path": "/r/x", "repo": "/r", "exists": true, "branch": "x", "base": "main", "merged": false,
+                           "ahead": 0, "dirty": 0, "closed": 0});
+        assert_eq!(st(v.clone()).main_branch, None);
+        v["main_branch"] = json!("dev");
+        assert_eq!(st(v).main_branch.as_deref(), Some("dev"));
     }
 }

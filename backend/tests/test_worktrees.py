@@ -201,6 +201,15 @@ def test_status_ahead_dirty_and_ignored(tmp_path):
     assert st["sessions"] == ["s1"] and st["exists"] is True and st["repo"] == main
 
 
+def test_status_main_branch_is_the_main_folder_branch(tmp_path):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    git_ops._run(wt, "config", "branch.x.hangar-base", "main")
+    git_ops._run(main, "switch", "-q", "-c", "dev")
+    st = worktrees.status(wt)
+    assert st["base"] == "main" and st["main_branch"] == "dev"
+
+
 def test_status_merged_by_ancestor(tmp_path):
     main = _repo(tmp_path / "repo")
     wt = _wt(main, tmp_path / "repo-x", "x")

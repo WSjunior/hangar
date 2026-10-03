@@ -64,7 +64,7 @@
           <p class="aviso">{m.worktree_apagar_perde()}</p>
           <ul class="perde">{#each perde as p (p)}<li>{p}</li>{/each}</ul>
         {/if}
-        <p class="linha muted">{m.worktree_apagar_conversas({ branch: st.base ?? '' })}</p>
+        <p class="linha muted">{m.worktree_apagar_conversas({ branch: st.main_branch ?? st.base ?? '' })}</p>
         {#if st.merged}
           <p class="linha muted">{m.worktree_apagar_branch_juntada({ branch: st.branch ?? '', base: st.base ?? '' })}</p>
         {:else}

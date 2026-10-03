@@ -60,7 +60,7 @@ export function WorktreeSheet({ server, path, onClose, onDeleted }: Props) {
             ) : (
               <>
                 {perde.length ? <Text style={styles.aviso}>{m.worktree_apagar_perde()} {perde.join(', ')}</Text> : null}
-                <Text style={styles.muted}>{m.worktree_apagar_conversas({ branch: st.base ?? '' })}</Text>
+                <Text style={styles.muted}>{m.worktree_apagar_conversas({ branch: st.main_branch ?? st.base ?? '' })}</Text>
                 {st.merged
                   ? <Text style={styles.muted}>{m.worktree_apagar_branch_juntada({ branch: st.branch ?? '', base: st.base ?? '' })}</Text>
                   : (

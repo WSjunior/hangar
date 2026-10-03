@@ -1039,6 +1039,7 @@ export async function folderGitActionForServer(server: Server, cwd: string, acti
 export interface WorktreeChoice { branch: string; new_branch?: boolean; base?: string | null }
 export interface WorktreeStatus {
   path: string; repo: string; exists: boolean; branch: string | null; base: string | null;
+  main_branch: string | null;   // branch da pasta principal, onde as conversas retomam
   merged: boolean; ahead: number; dirty: number; ignored: string[]; sessions: string[]; closed: number;
 }
 export interface WorktreeRepo { repo: string; worktrees: WorktreeStatus[] }

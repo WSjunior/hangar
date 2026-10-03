@@ -332,7 +332,9 @@ def status(path: str, sessions=()) -> dict:
     real = os.path.realpath(path)
     inside = [s for s in sessions if _inside(s, real)]
     return {
+        # A conversa retomada abre na principal, que pode estar noutra branch que não a base.
         "path": path, "repo": main, "exists": exists, "branch": branch, "base": base,
+        "main_branch": head_info(main)[0],
         # Leitura que falhou deixa dirty/ignored zerados: a situação nunca pode parecer segura.
         "merged": merged and not failed, "degraded": bool(failed),
         "ahead": ahead, "dirty": dirty, "ignored": ignored,

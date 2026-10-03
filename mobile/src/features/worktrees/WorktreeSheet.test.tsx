@@ -17,13 +17,13 @@ vi.mock('../../paraglide/messages', () => ({
   worktree_conversas_fechadas: ({ n }: { n: number }) => `fechadas:${n}`,
   worktree_bloqueada: ({ nomes }: { nomes: string }) => `worktree_bloqueada:${nomes}`,
   worktree_apagar_perde: () => 'perde', worktree_nao_commitados: ({ n }: { n: number }) => `nao_commitados:${n}`,
-  worktree_apagar_conversas: () => 'conversas', worktree_apagar_branch_juntada: () => 'branch_juntada',
+  worktree_apagar_conversas: ({ branch }: { branch: string }) => `conversas:${branch}`, worktree_apagar_branch_juntada: () => 'branch_juntada',
   worktree_apagar_branch_fica: () => 'branch_fica', worktree_apagar_branch_tambem: () => 'branch_tambem',
   worktree_apagar: () => 'Apagar' }));
 vi.mock('@hangar/core', async (original) => ({ ...await original<typeof import('@hangar/core')>(), ...api }));
 import { WorktreeSheet } from './WorktreeSheet';
 
-const st = { path: '/r/hangar-x', repo: '/r/hangar', exists: true, branch: 'x', base: 'main', merged: false, ahead: 3,
+const st = { path: '/r/hangar-x', repo: '/r/hangar', exists: true, branch: 'x', base: 'main', main_branch: 'dev', merged: false, ahead: 3,
   dirty: 2, ignored: ['.env.local'], sessions: [] as string[], closed: 0 };
 
 async function montar() {
@@ -40,6 +40,7 @@ describe('WorktreeSheet', () => {
     const el = await montar();
     expect(el.textContent).toContain('nao_commitados:2');
     expect(el.textContent).toContain('.env.local');
+    expect(el.textContent).toContain('conversas:dev');   // retoma na branch da principal, não na base
     await act(async () => { (el.querySelector('[aria-label="Apagar"]') as HTMLElement).click(); });
     expect(api.deleteWorktreeForServer).toHaveBeenCalledWith(expect.anything(),
       expect.objectContaining({ repo: '/r/hangar', path: '/r/hangar-x', confirm: true, delete_branch: false }));
