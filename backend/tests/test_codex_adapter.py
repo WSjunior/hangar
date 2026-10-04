@@ -1592,6 +1592,10 @@ async def test_preview_timer_failure_keeps_both_state_streams_alive(monkeypatch,
         await original_push(text)
 
     monkeypatch.setattr(source, "push", push)
+    # Sessão anexada sem sidecar: a checagem de transferência perguntaria a época ao tmux, e sem
+    # servidor tmux (CI) isso vira um `mux.comando` a mais no diário que este teste conta.
+    from app import conversation_transfer
+    monkeypatch.setattr(conversation_transfer, "transfer_active", lambda name: False)
     from app import diag
     monkeypatch.setattr(diag, "registrar", lambda event, *args, **kwargs: reports.append((event, kwargs)))
     monitors = [adapter.state_monitor(name, lambda: name) for _ in range(2)]
