@@ -97,6 +97,7 @@ def test_first_claude_resolution_unknown_never_legacy(monkeypatch, tmp_path):
 def test_outside_provider_keeps_legacy(monkeypatch):
     owner = rc.RuntimeCoordinator()
     owner.legacy = SimpleNamespace(binding=lambda *args: None)
+    monkeypatch.setattr(terminal, 'being_born', lambda name, after=0: False)
     monkeypatch.setattr(terminal, 'outside_scope', lambda name: True, raising=False)
     assert asyncio.run(owner.prepare_session('pi-session', 'claude')) is False
 
@@ -223,3 +224,39 @@ while True:
         assert {name:(tmp_path/(name+'.out')).read_bytes() for name in texts} == {name:text.encode() for name,text in texts.items()}
     finally:
         raw(['tmux','-L',label,'kill-server'],capture_output=True)
+
+
+def test_terminal_being_born_waits_for_binding_instead_of_suspending(monkeypatch):
+    # Pane recém-criado: o agente e a prova da conversa chegam segundos depois do pane.
+    owner = rc.RuntimeCoordinator()
+    bound = SimpleNamespace(key='terminal_k')
+    answers = [None, None, bound]
+    owner.legacy = SimpleNamespace(binding=lambda *args: answers.pop(0))
+    monkeypatch.setattr(terminal, 'being_born', lambda name, after=0: True)
+    monkeypatch.setattr(rc, '_BIRTH_POLL_S', 0)
+    registered = []
+    monkeypatch.setattr(owner, 'register', lambda binding: registered.append(binding))
+    assert asyncio.run(owner.prepare_session('session', 'claude')) is False
+    assert registered == [bound] and answers == []
+
+
+def test_terminal_not_being_born_still_suspends(monkeypatch):
+    owner = rc.RuntimeCoordinator()
+    calls = []
+    owner.legacy = SimpleNamespace(binding=lambda *args: calls.append(1))
+    monkeypatch.setattr(terminal, 'being_born', lambda name, after=0: False)
+    monkeypatch.setattr(terminal, 'outside_scope', lambda name: False)
+    with pytest.raises(RuntimeError, match='escrita suspensa'):
+        asyncio.run(owner.prepare_session('session', 'claude'))
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('created_ago,after,outside,expected', [
+    (2, 0, False, True), (600, 0, False, False), (2, 0, True, False), (2, 'later', False, False)])
+def test_being_born_needs_young_pane_of_a_new_life(monkeypatch, created_ago, after, outside, expected):
+    import time
+    now = int(time.time())
+    monkeypatch.setattr(tmux, 'list_panes_all', lambda: {'session': [{'session_created': now - created_ago}]})
+    monkeypatch.setattr(terminal, 'outside_scope', lambda name: outside)
+    assert terminal.being_born('session', now + 1 if after == 'later' else after) is expected
+    assert terminal.being_born('missing') is False
