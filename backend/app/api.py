@@ -9634,6 +9634,8 @@ class WorktreeDeleteMergedBody(_StrictBody):
     # As worktrees que a tela mostrou na confirmação; sem a lista, só as que não perdem nada.
     paths: list[str] | None = None
     confirm: bool = Field(default=False, strict=True)
+    # Das mostradas, as que a confirmação exibiu perdendo arquivos; as demais só saem se limpas.
+    lossy: list[str] | None = None
 
 
 @app.post("/api/worktrees/delete-merged", dependencies=[Depends(require_auth)])
@@ -9645,7 +9647,7 @@ async def worktrees_delete_merged(body: WorktreeDeleteMergedBody):
     sessions = await asyncio.to_thread(registry.list)
     try:
         return {"removed": await asyncio.to_thread(worktrees.delete_merged, repo, sessions,
-                                                   body.paths, body.confirm)}
+                                                   body.paths, body.confirm, body.lossy)}
     except GitError as exc:
         raise HTTPException(exc.status, detail=exc.detail) from None
     finally:   # as que saíram antes do erro também mudam a lista

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { basename, deleteMergedWorktreesForServer, type Server, type WorktreeStatus } from '@hangar/core';
@@ -10,21 +10,26 @@ export type WorktreeBatch = { repo: string; deletable: WorktreeStatus[]; blocked
 type Props = { server: Server | null; batch: WorktreeBatch | null; onClose: () => void; onDeleted: (leftOut: string[]) => void };
 
 /** Confirmação do lote de mescladas: mostra o que cada uma perde e apaga só as que a pessoa viu. */
-export function WorktreeBatchSheet({ server, batch, onClose, onDeleted }: Props) {
+export function WorktreeBatchSheet({ server, batch: aberto, onClose, onDeleted }: Props) {
   const [apagando, setApagando] = useState(false);
   const [erro, setErro] = useState('');
+  // O último lote continua desenhado enquanto a folha anima a saída.
+  const [batch, setBatch] = useState(aberto);
+  useEffect(() => {
+    if (aberto) { setBatch(aberto); setErro(''); }
+  }, [aberto]);
 
   async function apagar() {
     if (!server || !batch || apagando) return;
     setApagando(true); setErro('');
     try {
-      const removidas = await deleteMergedWorktreesForServer(server, batch.repo,
-        { paths: batch.deletable.map((w) => w.path), confirm: true });
+      const removidas = await deleteMergedWorktreesForServer(server, batch.repo, batch.deletable);
       removidas.forEach((p) => dropWorktreeStatus(server.id, p));
       onDeleted(batch.deletable.filter((w) => !removidas.includes(w.path)).map((w) => basename(w.path)));
       onClose();
     } catch (e) {
       setErro(e instanceof Error ? e.message : String(e));
+      onDeleted([]);   // algumas podem ter saído antes do erro: a lista recarrega
     } finally {
       setApagando(false);
     }
@@ -32,7 +37,7 @@ export function WorktreeBatchSheet({ server, batch, onClose, onDeleted }: Props)
 
   const n = batch?.deletable.length ?? 0;
   return (
-    <Sheet open={!!batch} sizes={['auto']} onDismiss={onClose}>
+    <Sheet open={!!aberto} sizes={['auto']} onDismiss={onClose}>
       <View style={styles.inner}>
         <Text style={styles.title}>{m.worktree_lote_titulo({ n })}</Text>
         {batch?.deletable.map((w) => (
@@ -62,7 +67,8 @@ export function WorktreeBatchSheet({ server, batch, onClose, onDeleted }: Props)
         ) : null}
         {erro ? <Text accessibilityRole="alert" style={styles.erro}>{erro}</Text> : null}
         <View style={styles.acoes}>
-          <Pressable onPress={onClose} accessibilityRole="button" style={styles.cancelar}>
+          <Pressable onPress={onClose} disabled={apagando} accessibilityRole="button"
+            accessibilityState={{ disabled: apagando }} style={styles.cancelar}>
             <Text style={styles.text}>{m.comum_cancelar()}</Text>
           </Pressable>
           <Pressable onPress={apagar} disabled={apagando} accessibilityRole="button" accessibilityLabel={m.worktree_lote_confirmar()}

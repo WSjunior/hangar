@@ -64,8 +64,7 @@
     loteAndando = k;
     delete erroLote[k];
     try {
-      const removidas = await deleteMergedWorktreesForServer(b.servidor, repo,
-        { paths: deletable.map((w) => w.path), confirm: true });
+      const removidas = await deleteMergedWorktreesForServer(b.servidor, repo, deletable);
       for (const p of removidas) worktreeStatus.drop(b.servidor.id, p);
       const ficaram = deletable.filter((w) => !removidas.includes(w.path));
       if (ficaram.length) erroLote[k] = m.worktree_lote_nao_apagou({ nomes: ficaram.map((w) => basename(w.path)).join(', ') });

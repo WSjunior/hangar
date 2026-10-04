@@ -549,8 +549,17 @@ def test_delete_merged_confirmed_takes_only_the_listed(tmp_path, monkeypatch):
     (tmp_path / "repo-b" / "solto.txt").write_text("?")
     (tmp_path / "repo-c" / "solto.txt").write_text("?")
     assert worktrees.delete_merged(main, [], paths=[b]) == []
-    assert worktrees.delete_merged(main, [], paths=[b], confirm=True) == [b]
+    assert worktrees.delete_merged(main, [], paths=[b], confirm=True, lossy=[b]) == [b]
     assert not (tmp_path / "repo-b").exists() and (tmp_path / "repo-c").exists()
+
+
+def test_delete_merged_keeps_one_that_got_dirty_after_the_confirmation(tmp_path, monkeypatch):
+    main = _repo(tmp_path / "repo")
+    a = _merged_wt(main, tmp_path / "repo-a", "a")
+    _claude_project(tmp_path, monkeypatch, a)
+    (tmp_path / "repo-a" / "novo.txt").write_text("escrito depois da tela")
+    assert worktrees.delete_merged(main, [], paths=[a], confirm=True, lossy=[]) == []
+    assert (tmp_path / "repo-a" / "novo.txt").exists()
 
 
 def test_delete_merged_confirm_requires_paths(tmp_path, monkeypatch):

@@ -48,6 +48,8 @@ claude() {
         IFS= read -r plugdir <"$HOME/.hangar/plugin-dir" || true
         if [ -n "$plugdir" ] && [ -d "$plugdir" ]; then
             plug=(--plugin-dir "$plugdir")
+        elif [ -n "$plugdir" ]; then
+            echo "hangar: plugin-dir '$plugdir' não existe; a faixa dos mods não vai para o app" >&2
         fi
     fi
 

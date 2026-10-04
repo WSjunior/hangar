@@ -1108,10 +1108,14 @@ export function deleteWorktreeForServer(server: Server, body: { repo: string; pa
   Promise<{ removed: string; branch_deleted: boolean; moved: number }> {
   return apiFetchForServer(server, '/api/worktrees/delete', { method: 'POST', body: JSON.stringify(body) }, FOLDER_ACTION_MS);
 }
-/** Sem `paths`, só as mescladas que não perdem nada. Com `paths` e `confirm`, as que a tela
- *  mostrou na confirmação, mesmo com arquivos a perder. */
+/** Sem `confirmed`, só as mescladas que não perdem nada. Com `confirmed`, as que a tela mostrou na
+ *  confirmação; perde arquivos só a que a tela mostrou perdendo, nunca uma que sujou depois. */
 export async function deleteMergedWorktreesForServer(server: Server, repo: string,
-  opts?: { paths: string[]; confirm: boolean }): Promise<string[]> {
+  confirmed?: WorktreeStatus[]): Promise<string[]> {
+  const opts = confirmed && {
+    paths: confirmed.map((w) => w.path), confirm: true,
+    lossy: confirmed.filter((w) => w.dirty || w.ignored.length).map((w) => w.path),
+  };
   const r = await apiFetchForServer<{ removed: string[] }>(server, '/api/worktrees/delete-merged',
     { method: 'POST', body: JSON.stringify({ repo, ...opts }) }, FOLDER_ACTION_MS);
   return r.removed;

@@ -34,6 +34,8 @@ function claude {
         $plugDir = $plugDir.Trim()
         if ($plugDir -and (Test-Path -LiteralPath $plugDir -PathType Container)) {
             $plug = @('--plugin-dir', $plugDir)
+        } elseif ($plugDir) {
+            [Console]::Error.WriteLine("hangar: plugin-dir '$plugDir' nao existe; a faixa dos mods nao vai para o app")
         }
     }
 

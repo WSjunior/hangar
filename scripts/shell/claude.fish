@@ -42,6 +42,8 @@ function claude
         read plugdir <"$HOME/.hangar/plugin-dir"
         if test -n "$plugdir"; and test -d "$plugdir"
             set plug --plugin-dir $plugdir
+        else if test -n "$plugdir"
+            echo "hangar: plugin-dir '$plugdir' não existe; a faixa dos mods não vai para o app" >&2
         end
     end
 

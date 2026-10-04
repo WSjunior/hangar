@@ -226,8 +226,11 @@ def _publish_plugin_dir(home: Path | None = None) -> None:
 
 
 def _publish_for_machine(home: Path | None = None) -> None:
-    _publish_address(home)
-    _publish_plugin_dir(home)
+    # Um não segura o outro: endereço que falhou não pode deixar o wrapper com o plugin-dir velho.
+    try:
+        _publish_address(home)
+    finally:
+        _publish_plugin_dir(home)
 
 
 # O conftest troca `publish_address`; o teste chega na implementação por `_publish_address` e

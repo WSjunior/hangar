@@ -540,11 +540,14 @@ def delete(repo: str, path: str, sessions, *, confirm: bool = False,
     return {"removed": path, "branch_deleted": branch_deleted, "moved": len(moved)}
 
 
-def delete_merged(repo: str, sessions, paths: list[str] | None = None, confirm: bool = False) -> list[str]:
+def delete_merged(repo: str, sessions, paths: list[str] | None = None, confirm: bool = False,
+                  lossy: list[str] | None = None) -> list[str]:
     """Mescladas, sem sessão e lidas sem falha. Sem `confirm`, só as que não perdem nada. `paths`
-    restringe às que a tela mostrou: o lote nunca leva uma worktree que a pessoa não viu."""
+    restringe às que a tela mostrou: o lote nunca leva uma worktree que a pessoa não viu. `lossy`
+    são as que a tela mostrou perdendo algo: só essas saem com perda, nunca uma que sujou depois."""
     main = main_repo_of(repo_root_of(repo) or repo)
     wanted = {os.path.realpath(p) for p in paths} if paths is not None else None
+    accepted = {os.path.realpath(p) for p in lossy or ()}
     out = []
     for path in worktree_paths(main):
         if wanted is not None and os.path.realpath(path) not in wanted:
@@ -553,7 +556,7 @@ def delete_merged(repo: str, sessions, paths: list[str] | None = None, confirm: 
         if not st["merged"] or st["degraded"] or st["sessions"]:
             continue
         loses = bool(st["dirty"] or st["ignored"])
-        if not loses or confirm:
+        if not loses or confirm and os.path.realpath(path) in accepted:
             try:
                 delete(main, path, sessions, confirm=loses)
             except GitError as e:
