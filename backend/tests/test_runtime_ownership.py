@@ -100,13 +100,15 @@ def test_timeout_is_not_fallback(tmp_path):
         coordinator.register(binding(tmp_path))
         await coordinator.adopt("session")
         gateway.fail = True
-        with pytest.raises(TimeoutError):
-            await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1")
+        # Sem resposta do Rust o envio fica incerto (pode estar na fila), nunca passa ao Python.
+        result = await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1")
+        assert result["disposition"] == "unknown"
         with pytest.raises(RuntimeError):
             await coordinator.recover("session", confirmed_dead=True)
         assert legacy.events == ["quiesce"]
         assert not coordinator.legacy_allowed("key", 1)
         gateway.lease.close()
+        coordinator.close_python_leases()
     asyncio.run(flow())
 
 
@@ -143,32 +145,6 @@ def test_late_ready_rejected(tmp_path):
     asyncio.run(flow())
 
 
-def test_refused_adopt_goes_to_python_only_after_the_fourth_failure(tmp_path):
-    async def flow():
-        legacy, gateway = Legacy(), Gateway()
-        calls = []
-        original = gateway.op
-        async def refuse(target, command, operation_id, clock):
-            calls.append(command["kind"])
-            if command["kind"] == "open":
-                raise RuntimeError("IPC recusou a operação (503: cano_binding snapshot de outro cano)")
-            return await original(target, command, operation_id, clock)
-        gateway.op = refuse
-        coordinator = RuntimeCoordinator(gateway, legacy, peek)
-        coordinator.register(binding(tmp_path))
-        for _ in range(3):
-            assert await coordinator.adopt("session") is False
-            # Cada recusa devolve a sessão ao Python, mas a próxima ação ainda tenta o Rust.
-            assert coordinator.legacy_allowed("key", 1)
-            assert coordinator.slot("session").rust_refused is None
-        assert await coordinator.adopt("session") is False
-        assert coordinator.slot("session").rust_refused == 1
-        assert calls.count("open") == 4
-        assert legacy.events == ["quiesce", "reconnect"] * 4
-        coordinator.close_python_leases()
-    asyncio.run(flow())
-
-
 def test_unconfirmed_detach_never_makes_two_owners(tmp_path):
     async def flow():
         legacy, gateway = Legacy(), Gateway()
@@ -188,6 +164,7 @@ def test_unconfirmed_detach_never_makes_two_owners(tmp_path):
             await coordinator.adopt("session")
         assert legacy.events == ["quiesce"]
         gateway.lease.close()
+        coordinator.close_python_leases()
     asyncio.run(flow())
 
 
@@ -238,36 +215,6 @@ def test_recover_dispatch_as_unknown(tmp_path):
     asyncio.run(flow())
 
 
-def test_rust_stuck_in_error_hands_session_back_to_python(tmp_path):
-    async def flow():
-        legacy, gateway = Legacy(), Gateway()
-        sent = []
-        async def legacy_op(target, command, operation_id):
-            sent.append(command["kind"])
-            return {"accepted": True}
-        legacy.op = legacy_op
-        original = gateway.op
-        async def broken(target, command, operation_id, clock):
-            if command["kind"] == "snapshot":
-                return {"key": "key", "generation": 1, "revision": 5, "channels": {}, "error": "cano_closed",
-                        "view": {"public_state": {"session": "session", "state": "idle", "headless": True}}}
-            if command["kind"] == "submit":
-                raise AssertionError("o Rust em erro não pode receber o envio")
-            return await original(target, command, operation_id, clock)
-        gateway.op = broken
-        coordinator = RuntimeCoordinator(gateway, legacy, peek)
-        slot = coordinator.register(binding(tmp_path))
-        await coordinator.adopt("session")
-        slot.cache_valid = False
-        await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1")
-        assert sent == ["submit"]
-        assert legacy.events == ["quiesce", "reconnect"]
-        assert slot.rust_refused == 1
-        assert coordinator.legacy_allowed("key", 1)
-        coordinator.close_python_leases()
-    asyncio.run(flow())
-
-
 def _python_ops(legacy):
     sent = []
     async def legacy_op(target, command, operation_id):
@@ -275,34 +222,6 @@ def _python_ops(legacy):
         return {"accepted": True, "via": "python"}
     legacy.op = legacy_op
     return sent
-
-
-@pytest.fixture
-def no_pause(monkeypatch):
-    from app import runtime_coordinator
-    monkeypatch.setattr(runtime_coordinator, "_RETRY_PAUSE_S", 0)
-
-
-def test_lost_state_without_answer_goes_to_python_after_four_tries(tmp_path, no_pause):
-    async def flow():
-        legacy, gateway = Legacy(), Gateway()
-        sent = _python_ops(legacy)
-        original = gateway.op
-        async def silent(target, command, operation_id, clock):
-            if command["kind"] == "snapshot":
-                raise TimeoutError("synthetic IPC")
-            return await original(target, command, operation_id, clock)
-        gateway.op = silent
-        coordinator = RuntimeCoordinator(gateway, legacy, peek)
-        slot = coordinator.register(binding(tmp_path))
-        await coordinator.adopt("session")
-        slot.cache_valid = False
-        result = await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1")
-        assert result["via"] == "python"
-        assert sent == ["submit"]
-        assert slot.rust_refused == 1
-        coordinator.close_python_leases()
-    asyncio.run(flow())
 
 
 def _refusing(gateway, code, fail_times):
@@ -318,41 +237,7 @@ def _refusing(gateway, code, fail_times):
     return attempts
 
 
-def test_pre_effect_refusal_is_retried_and_stays_in_rust(tmp_path, no_pause):
-    async def flow():
-        legacy, gateway = Legacy(), Gateway()
-        sent = _python_ops(legacy)
-        attempts = _refusing(gateway, "cano_connect", fail_times=3)
-        coordinator = RuntimeCoordinator(gateway, legacy, peek)
-        slot = coordinator.register(binding(tmp_path))
-        await coordinator.adopt("session")
-        assert await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1") == {"accepted": True}
-        assert attempts == ["op-1"] * 4
-        assert sent == [] and slot.rust_refused is None
-        gateway.lease.close()
-    asyncio.run(flow())
-
-
-def test_fourth_pre_effect_refusal_sends_through_python(tmp_path, no_pause):
-    async def flow():
-        legacy, gateway = Legacy(), Gateway()
-        sent = _python_ops(legacy)
-        attempts = _refusing(gateway, "cano_connect", fail_times=99)
-        coordinator = RuntimeCoordinator(gateway, legacy, peek)
-        slot = coordinator.register(binding(tmp_path))
-        await coordinator.adopt("session")
-        result = await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1")
-        assert len(attempts) == 4
-        assert result["via"] == "python" and sent == ["submit"]
-        assert slot.rust_refused == 1
-        # Depois de passar para o Python, a sessão não volta a tentar o Rust nesta vida do backend.
-        await coordinator.op("session", {"kind": "submit", "text": "de novo"}, "op-2")
-        assert len(attempts) == 4 and sent == ["submit", "submit"]
-        coordinator.close_python_leases()
-    asyncio.run(flow())
-
-
-def test_failure_after_possible_effect_is_never_repeated(tmp_path, no_pause):
+def test_failure_after_possible_effect_is_never_repeated(tmp_path):
     async def flow():
         from app.rust_server import RustOpError
         legacy, gateway = Legacy(), Gateway()
@@ -363,14 +248,15 @@ def test_failure_after_possible_effect_is_never_repeated(tmp_path, no_pause):
         await coordinator.adopt("session")
         with pytest.raises(RustOpError):
             await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1")
-        # Uma tentativa só, nada reenviado pelo Python; a sessão já passou para ele.
+        # Uma tentativa só, nada reenviado pelo Python; a sessão segue no Rust.
         assert attempts == ["op-1"] and sent == []
-        assert slot.rust_refused == 1 and coordinator.legacy_allowed("key", 1)
+        assert slot.phase.name == "Rust" and not coordinator.legacy_allowed("key", 1)
+        gateway.lease.close()
         coordinator.close_python_leases()
     asyncio.run(flow())
 
 
-def test_normal_answer_from_rust_is_not_a_failure(tmp_path, no_pause):
+def test_normal_answer_from_rust_is_not_a_failure(tmp_path):
     async def flow():
         from app.rust_server import RustOpError
         legacy, gateway = Legacy(), Gateway()
@@ -383,8 +269,9 @@ def test_normal_answer_from_rust_is_not_a_failure(tmp_path, no_pause):
         with pytest.raises(RustOpError):
             await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1")
         assert attempts == ["op-1"] and sent == []
-        assert slot.rust_refused is None and not coordinator.legacy_allowed("key", 1)
+        assert slot.phase.name == "Rust" and not coordinator.legacy_allowed("key", 1)
         gateway.lease.close()
+        coordinator.close_python_leases()
     asyncio.run(flow())
 
 
@@ -412,22 +299,6 @@ def test_slow_disk_write_does_not_block_the_event_loop(tmp_path, monkeypatch):
     asyncio.run(flow())
 
 
-def test_python_side_handoff_failure_does_not_count_against_rust(tmp_path):
-    async def flow():
-        legacy, gateway = Legacy(), Gateway()
-        async def broken_quiesce(target):
-            legacy.events.append("quiesce")
-            raise ValueError("synthetic Python")
-        legacy.quiesce = broken_quiesce
-        coordinator = RuntimeCoordinator(gateway, legacy, peek)
-        slot = coordinator.register(binding(tmp_path))
-        for _ in range(5):
-            assert await coordinator.adopt("session") is False
-        assert slot.adopt_failures == 0 and slot.rust_refused is None
-        coordinator.close_python_leases()
-    asyncio.run(flow())
-
-
 def test_dead_cano_after_rust_lets_go_parks_the_session_in_python(tmp_path):
     # O Rust soltou e a trava voltou: sem cano para religar, a sessão não pode ficar presa em
     # "recuperando" recusando tudo; ela fica no Python e sobe de novo no próximo envio.
@@ -442,4 +313,215 @@ def test_dead_cano_after_rust_lets_go_parks_the_session_in_python(tmp_path):
         await coordinator.detach("session")
         assert coordinator.legacy_allowed("key", 1)
         coordinator.close_python_leases()
+    asyncio.run(flow())
+
+
+# --- Falha vira erro visível, com reabertura única no Rust (dono único, Task 3) ---
+
+class Reopenable(Gateway):
+    """Rust falso com snapshot e reabertura: `broken` faz o ator responder em erro até reabrir."""
+
+    def __init__(self, broken=None, reopen_fails=False):
+        super().__init__()
+        self.kinds, self.broken, self.reopen_fails, self.revision = [], broken, reopen_fails, 6
+
+    async def op(self, target, command, operation_id, clock):
+        from app.rust_server import RustOpError
+        kind = command["kind"]
+        self.kinds.append(kind)
+        if kind == "snapshot":
+            if self.broken == "gone":
+                raise RustOpError("IPC recusou a operação (503: runtime_binding)", 503, "runtime_binding")
+            self.revision += 1
+            return {"key": "key", "generation": 1, "revision": self.revision, "channels": {}, "error": self.broken,
+                    "view": {"alive": self.broken is None, "public_state": {"session": "session", "state": "idle", "headless": True}}}
+        if kind == "open" and self.lease is not None:
+            if self.reopen_fails:
+                raise RustOpError("IPC recusou a operação (503: cano_connect)", 503, "cano_connect")
+            self.broken = None
+            self.revision += 1
+            return {"opened": True, "instance": self.instance, "key": "key", "generation": 1,
+                    "state": {"key": "key", "generation": 1, "revision": self.revision, "channels": {}, "error": None,
+                              "view": {"alive": True, "public_state": {"session": "session", "state": "idle", "headless": True}}}}
+        if kind == "close" and self.lease is not None:
+            return {"closed": True}      # a trava do falso fica: o Rust real a reabre na mesma chave
+        if kind == "ensure_projection" and self.broken == "gone":
+            raise RustOpError("IPC recusou a operação (503: runtime_binding)", 503, "runtime_binding")
+        if kind == "submit":
+            return {"operation_id": operation_id, "disposition": "accepted", "payload": {}}
+        return await super().op(target, command, operation_id, clock)
+
+
+class ReopenLegacy(Legacy):
+    def __init__(self, target):
+        super().__init__()
+        self.target = target
+        launches = self.launches = []
+        class Adapter:
+            async def launch_process(self, name, *, engine_models=None, launch=True):
+                launches.append(name)
+                return dict(target.meta["cano"]), False
+            def open_failed(self, name, detail):
+                pass
+            def open_succeeded(self, name):
+                pass
+        self.adapters = {"claude": Adapter()}
+
+    def binding(self, name, provider):
+        return self.target
+
+
+def _rust_session(tmp_path, gateway):
+    target = binding(tmp_path)
+    legacy = ReopenLegacy(target)
+    sent = _python_ops(legacy)
+    coordinator = RuntimeCoordinator(gateway, legacy, peek)
+    slot = coordinator.register(target)
+    return coordinator, slot, legacy, sent
+
+
+def test_rust_failure_raises_with_code_and_session_stays_rust(tmp_path):
+    async def flow():
+        from app.rust_server import RustOpError
+        gateway = Gateway()
+        coordinator, slot, _, sent = _rust_session(tmp_path, gateway)
+        await coordinator.adopt("session")
+        attempts = _refusing(gateway, "cano_connect", fail_times=99)
+        for n in range(4):
+            with pytest.raises(RustOpError) as caught:
+                await coordinator.op("session", {"kind": "submit", "text": "Olá"}, f"op-{n}")
+            assert caught.value.code == "cano_connect"
+        assert attempts == ["op-0", "op-1", "op-2", "op-3"], "uma tentativa por operação"
+        assert slot.phase.name == "Rust" and sent == []
+        gateway.lease.close()
+        coordinator.close_python_leases()
+    asyncio.run(flow())
+
+
+def test_headless_in_error_reopens_in_rust_once(tmp_path):
+    async def flow():
+        from app.rust_server import RustOpError
+        gateway = Reopenable()
+        coordinator, slot, legacy, sent = _rust_session(tmp_path, gateway)
+        await coordinator.adopt("session")
+        gateway.broken, slot.cache_valid = "cano_closed", False
+        assert (await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1"))["disposition"] == "accepted"
+        assert gateway.kinds[-4:] == ["snapshot", "close", "open", "submit"]
+        assert legacy.launches == ["session"] and sent == [] and slot.phase.name == "Rust"
+        gateway.kinds.clear()
+        gateway.broken, gateway.reopen_fails, slot.cache_valid = "cano_closed", True, False
+        with pytest.raises(RustOpError):
+            await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-2")
+        assert gateway.kinds == ["snapshot", "close", "open"], "uma reabertura; a falha sobe sem enviar"
+        assert slot.phase.name == "Rust" and sent == []
+        assert slot.view.get("error") == "cano_closed", "o problema fica na tela"
+        gateway.lease.close()
+        coordinator.close_python_leases()
+    asyncio.run(flow())
+
+
+def test_history_reopens_dead_session_once(tmp_path):
+    async def flow():
+        gateway = Reopenable()
+        coordinator, slot, legacy, sent = _rust_session(tmp_path, gateway)
+        await coordinator.adopt("session")
+        gateway.broken, slot.cache_valid = "gone", False
+        await coordinator.op("session", {"kind": "ensure_projection"}, "projection")
+        assert gateway.kinds[-4:] == ["snapshot", "close", "open", "ensure_projection"]
+        assert sent == []
+        from app.rust_server import RustOpError
+        gateway.kinds.clear()
+        gateway.broken, gateway.reopen_fails, slot.cache_valid = "gone", True, False
+        with pytest.raises(RustOpError):
+            await coordinator.op("session", {"kind": "ensure_projection"}, "projection-2")
+        from app.runtime_adapter import runtime_problem
+        assert runtime_problem("session") == ("runtime_falhou", "runtime_binding: ator do runtime ausente")
+        gateway.lease.close()
+        coordinator.close_python_leases()
+    asyncio.run(flow())
+
+
+def test_invalid_cache_waits_for_resync(tmp_path):
+    async def flow():
+        gateway = Reopenable()
+        coordinator, slot, _, sent = _rust_session(tmp_path, gateway)
+        await coordinator.adopt("session")
+        original = gateway.op
+        async def silent(target, command, operation_id, clock):
+            if command["kind"] == "snapshot":
+                raise TimeoutError("canal oscilando")
+            return await original(target, command, operation_id, clock)
+        gateway.op = silent
+        slot.cache_valid = False
+        async def resync():
+            await asyncio.sleep(0.3)
+            slot.cache_valid = True
+            coordinator._signal(slot)
+        asyncio.create_task(resync())
+        result = await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1")
+        assert result["disposition"] == "accepted" and sent == []
+        gateway.lease.close()
+        coordinator.close_python_leases()
+    asyncio.run(flow())
+
+
+def test_transport_loss_on_send_is_uncertain_not_failed(tmp_path):
+    async def flow():
+        gateway = Gateway()
+        coordinator, slot, _, sent = _rust_session(tmp_path, gateway)
+        await coordinator.adopt("session")
+        original = gateway.op
+        async def dropped(target, command, operation_id, clock):
+            if command["kind"] == "submit":
+                raise ConnectionResetError("conexão caiu")
+            return await original(target, command, operation_id, clock)
+        gateway.op = dropped
+        result = await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1")
+        assert result["disposition"] == "unknown" and result["payload"]["transport_lost"] is True
+        assert slot.phase.name == "Rust" and sent == []
+        assert not slot.cache_valid, "a próxima operação relê o estado"
+        async def refused(target, command, operation_id, clock):
+            raise ConnectionRefusedError("Rust fora do ar")
+        gateway.op = refused
+        slot.cache_valid = True
+        with pytest.raises(ConnectionRefusedError):    # o pedido nem saiu: erro, não incerto
+            await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-2")
+        gateway.lease.close()
+        coordinator.close_python_leases()
+    asyncio.run(flow())
+
+
+def test_problem_event_reaches_session_problem(tmp_path):
+    async def flow():
+        from app.runtime_adapter import RuntimeAdapter, apply_event
+        gateway = Reopenable()
+        coordinator, slot, _, _ = _rust_session(tmp_path, gateway)   # `register` o torna o atual
+        await coordinator.adopt("session")
+        await coordinator.refresh_snapshot("session")
+        assert apply_event(slot, {"key": "key", "generation": 1, "revision": slot.view["revision"] + 1, "channel": "problem",
+                                  "data": {"error_code": "queue_io", "message": "fila recusou: disco cheio"}})
+        state = RuntimeAdapter("claude").snapshot("session")
+        assert state.problema == "runtime_falhou"
+        assert state.problema_detalhe == "queue_io: fila recusou: disco cheio"
+        gateway.lease.close()
+        coordinator.close_python_leases()
+    asyncio.run(flow())
+
+
+def test_background_drain_never_reopens(tmp_path):
+    async def flow():
+        gateway = Reopenable()
+        coordinator, slot, _, sent = _rust_session(tmp_path, gateway)
+        await coordinator.adopt("session")
+        gateway.broken, slot.cache_valid = "queue_io", False
+        gateway.kinds.clear()
+        try:
+            from app.runtime_coordinator import RustCacheInvalid
+            with pytest.raises(RustCacheInvalid):      # recusa na hora, sem esperar nem reabrir
+                await coordinator.op("session", {"kind": "drain"}, "drain")
+            assert "close" not in gateway.kinds and "open" not in gateway.kinds, "erro persistente não vira laço de reabertura"
+            assert sent == []
+        finally:
+            gateway.lease.close()
+            coordinator.close_python_leases()
     asyncio.run(flow())

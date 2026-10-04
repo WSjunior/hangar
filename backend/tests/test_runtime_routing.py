@@ -62,6 +62,18 @@ def test_unknown_not_marked_unsent(monkeypatch):
     assert len(owner.calls) == 1
 
 
+def test_send_without_rust_answer_is_uncertain_not_failed(monkeypatch):
+    owner = Owner("unknown")
+    async def lost(name, command, operation_id):
+        owner.calls.append((command, operation_id))
+        return {"operation_id":operation_id, "disposition":"unknown", "payload":{"transport_lost":True}}
+    owner.op = lost
+    monkeypatch.setattr(runtime_coordinator, "_current", owner)
+    result = asyncio.run(api._send_managed("session", "Olá", "claude", track_entry=True))
+    assert result["ok"] and not result["delivered"] and result["uncertain"]
+    assert result["error"] is None and result["entry_id"] == owner.calls[0][1]
+
+
 @pytest.mark.parametrize("source", ["hook", "drain_session", "turn_end", "codex_confirm"])
 def test_background_producers_reach_owner(monkeypatch, source):
     owner = Owner()
@@ -319,14 +331,3 @@ def test_python_registration_without_cano_moves_to_rust_on_send(birth, monkeypat
     assert slot.phase == runtime_coordinator.Phase.Rust and slot.lease is None
     assert transport.kinds() == ["open", "submit"]
 
-
-def test_refused_session_stays_in_python_on_send(birth):
-    owner = birth.build(Transport())
-    async def scenario():
-        owner.loop = asyncio.get_running_loop()
-        await birth.adapter.deliverable("s1")
-        owner.slot("s1").rust_refused = owner.slot("s1").binding.generation
-        assert await owner.prepare_session("s1", "claude", launch=True)
-    asyncio.run(scenario())
-    assert owner.slot("s1").phase == runtime_coordinator.Phase.Python, "recusada nesta vida não volta ao Rust"
-    assert birth.launches == []

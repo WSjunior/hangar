@@ -619,6 +619,20 @@ def native_slot(name):
     return slot
 
 
+def _problem_text(data):
+    message = data.get("message")
+    return (f"{data['error_code']}: {message}" if isinstance(message, str) and message else data["error_code"])[:300]
+
+
+def runtime_problem(name):
+    """Problema publicado pelo Rust para a sessão: `("runtime_falhou", "<código>: <frase>")` ou None."""
+    coordinator = runtime_coordinator.current()
+    slot = coordinator.slots.get(coordinator.names.get(name, "")) if coordinator is not None else None
+    if slot is None or slot.phase != runtime_coordinator.Phase.Rust or not (slot.view or {}).get("problem"):
+        return None
+    return "runtime_falhou", slot.view["problem"]
+
+
 def apply_event(slot, event):
     if (not isinstance(event, dict) or set(event) != {"key", "generation", "revision", "channel", "data"}
             or event["key"] != slot.binding.key or type(event["generation"]) is not int
@@ -648,6 +662,10 @@ def apply_event(slot, event):
         if revision < previous:
             return True
         slot.view = copy.deepcopy(data)
+        if data.get("error") is not None:
+            # A frase veio no `problem`; o snapshot só traz o código.
+            same = (cached.get("problem") or "").split(":", 1)[0] == data["error"]
+            slot.view["problem"] = cached["problem"] if same else data["error"]
         slot.cache_valid = data.get("error") is None
         return True
     if revision <= previous:
@@ -658,7 +676,8 @@ def apply_event(slot, event):
         if revision != previous + 1:
             slot.cache_valid = False
             return False
-        slot.view = {**copy.deepcopy(cached), "revision": revision, "error": data["error_code"]}
+        slot.view = {**copy.deepcopy(cached), "revision": revision, "error": data["error_code"],
+                     "problem": _problem_text(data)}
         slot.cache_valid = False
         return True
     if not getattr(slot, "cache_valid", False) or revision != previous + 1:
@@ -683,6 +702,7 @@ def apply_event(slot, event):
             if not isinstance(data, dict) or not isinstance(data.get("error_code"), str):
                 raise ValueError("falha inválida")
             updated["error"] = data["error_code"]
+            updated["problem"] = _problem_text(data)
             slot.cache_valid = False
         elif channel in {"voice", "voice_target"}:
             if not isinstance(data, dict) or not isinstance(data.get("event"), dict):
@@ -750,7 +770,9 @@ class RuntimeAdapter:
             raise RuntimeError("snapshot de outra conversa")
         state = StateEvent.model_validate(view.data["public_state"])
         slot = runtime_coordinator.current().slot(name)
-        if not slot.cache_valid:
+        if problem := runtime_problem(name):
+            state = state.model_copy(update={"problema":problem[0], "problema_detalhe":problem[1]})
+        elif not slot.cache_valid:
             state = state.model_copy(update={"problema":"headless_turno_erro", "problema_detalhe":"Estado do runtime indisponível; aguarde a reposição."})
         return state
 

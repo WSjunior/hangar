@@ -4427,6 +4427,10 @@ async def _send_managed(name: str, text: str, provider: str, *, track_entry: boo
             command = {"kind":"submit", "text":text}
         reply = await coordinator.op(name, command, operation_id)
         disposition = reply.get("disposition")
+        if disposition == "unknown" and (reply.get("payload") or {}).get("transport_lost") is True:
+            # O Rust caiu no meio: a entrada pode estar na fila durável, que decide; a bolha espera.
+            return {"ok":True, "error":None, "delivered":False, "uncertain":True,
+                **({"entry_id":operation_id} if track_entry and command["kind"] == "submit" and not text.lstrip().startswith("/") else {})}
         if disposition not in {"accepted", "deferred"}:
             raise RuntimeError("resultado incerto; entrada conservada sem reenvio" if disposition == "unknown" else "entrada recusada pelo runtime")
         return {"ok":True, "error":None, "delivered":disposition == "accepted",

@@ -21,6 +21,7 @@ const problemLabels: Record<string, () => string> = {
   headless_processo_caiu: m.problema_headless_processo_caiu,
   headless_turno_erro: m.problema_headless_turno_erro,
   headless_sem_login: m.problema_headless_sem_login,
+  runtime_falhou: m.problema_runtime_falhou,
 };
 
 export function SessionProblem({ problem, detail }: Props) {
@@ -34,12 +35,15 @@ export function SessionProblem({ problem, detail }: Props) {
   const exitCode = match ? Number(match[1]) : NaN;
   const hasDetail = Number.isSafeInteger(exitCode);
   const label = problem && Object.hasOwn(problemLabels, problem) ? problemLabels[problem]() : m.session_problem_unknown();
+  // O do runtime é código e frase fixa do Rust, sem texto da conversa: pode ir à tela.
+  const runtimeDetail = problem === 'runtime_falhou' ? detail?.split('\n')[0] : null;
 
   if (!problem) return null;
 
   return (
     <View style={styles.wrap}>
       <Text style={styles.message} accessibilityRole="alert" accessibilityLiveRegion="polite">{label}</Text>
+      {runtimeDetail ? <Text style={styles.detail} selectable>{runtimeDetail}</Text> : null}
       {hasDetail ? (
         <Pressable
           onPress={() => setExpanded((value) => !value)}

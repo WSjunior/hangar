@@ -187,12 +187,80 @@ vira `problema="runtime_falhou"`, `problema_detalhe="<código>: <frase>"`).
 **Regra corrigida:** `docs/migracao-rust/parte2d/spec.md`, seção "Falhas do Rust" (o "três +
 uma" e "só a sessão passa ao Python") vira nota apontando para `dono-unico/desenho.md`.
 
-- [ ] **Step 13: Testes acima, vistos falhar**
-- [ ] **Step 14: `op` com uma tentativa; erro do Rust sobe com `failure_reason`; diário `runtime.rust_op_failed {codigo, detalhe, kind}`; `_ANSWER_CODES` não conta como defeito**
-- [ ] **Step 15: Reabertura única no Rust para sem terminal e com terminal, disparada por operação e por `ensure_projection`; diário `runtime.reopened`/`runtime.reopen_failed`**
-- [ ] **Step 16: Espera de reposição do cache (5 s) e envio com perda de transporte respondido como incerto (`runtime.send_uncertain`)**
-- [ ] **Step 17: `apply_event` publica `runtime_falhou`; texto na web e no app, chaves em pt e en; conferir que o nativo mostra a frase**
-- [ ] **Step 18: Remover o código morto e corrigir a regra da 2D; testes focados; revisar**
+- [x] **Step 13: Testes acima, vistos falhar**
+- [x] **Step 14: `op` com uma tentativa; erro do Rust sobe com `failure_reason`; diário `runtime.rust_op_failed {codigo, detalhe, kind}`; `_ANSWER_CODES` não conta como defeito**
+- [x] **Step 15: Reabertura única no Rust para sem terminal e com terminal, disparada por operação e por `ensure_projection`; diário `runtime.reopened`/`runtime.reopen_failed`**
+- [x] **Step 16: Espera de reposição do cache (5 s) e envio com perda de transporte respondido como incerto (`runtime.send_uncertain`)**
+- [x] **Step 17: `apply_event` publica `runtime_falhou`; texto na web e no app, chaves em pt e en; conferir que o nativo mostra a frase**
+- [x] **Step 18: Remover o código morto e corrigir a regra da 2D; testes focados; revisar**
+
+**Registro da execução (Task 3).** `op` faz uma tentativa: erro do Rust sobe com o código
+(`failure_reason` passa a usar o `code` do `RustOpError` em `codigo`) e vai ao diário
+`runtime.rust_op_failed` com `etapa` = tipo da operação; respostas de `_ANSWER_CODES` sobem sem
+diário. Antes de qualquer operação (inclusive `ensure_projection`, que o `/info` e o histórico usam),
+`_reopen_if_failed` consulta o snapshot quando a vista está inválida ou em erro e, se o ator está em
+erro, o cano caiu (`alive: false`) ou o Rust não tem mais o ator (`runtime_binding`/`runtime_closed`/
+`runtime_panic`), faz uma reabertura sob `freeze`: `close`, relança o processo do cano só se o `pid`
+morreu (sem terminal) ou relê o vínculo (com terminal), `open`, mesmo slot e vista nova
+(`runtime.reopened`/`runtime.reopen_failed`). Erros de manutenção do terminal (`terminal_facts`,
+`receipt_scan`) não reabrem: o Rust os resolve no `confirm`/`drain`, que também não esperam a
+reposição. Vista inválida espera o snapshot até 5 s (`_RESYNC_WAIT_S`) antes de recusar. Erro de
+transporte (sem resposta do Rust) num envio volta `unknown` com `transport_lost`, e o `_send_managed`
+responde `ok`, `delivered: false`, `uncertain: true` (`runtime.send_uncertain`); a resposta
+`unknown` do próprio Rust continua erro com a entrada conservada. O `problem` guarda
+`"<código>: <frase>"` na vista; `runtime_problem(name)` alimenta a fachada (`problema="runtime_falhou"`),
+o cartão da lista e o estado do chat de sessão com terminal (decorado no SSE na próxima emissão
+de estado); o snapshot com erro conserva a frase do mesmo código. Web (`problema.ts`) e app
+(`SessionProblem.tsx`, que mostra a frase) ganharam `problema_runtime_falhou` em pt e en; o nativo já
+mostra o `problema_detalhe` cru. Saíram `_hand_to_python`, `_settle_rust`, o laço de tentativas,
+`_RUST_TRIES`, `_RETRY_PAUSE_S`, `_PRE_EFFECT_CODES`, `_safe_to_repeat`, `Slot.rust_refused`,
+`adopt_failures`, a regra de entrega incerta do `op` e o diário `runtime.parte_para_python`;
+`_TERMINAL_PRE_EFFECT_ERRORS` ficou, só para a manutenção. Testes: os da lista; apagados os de
+passagem (`test_runtime_ownership.py` "quarta falha", "Rust em erro passa", "quatro tentativas",
+"pré-efeito repetido", "quarta recusa", "falha do Python não conta"; `test_runtime_terminal_failure_policy.py`
+"orçamento de tentativas" e "geração nova na repetição"); reescritos o de efeito possível, resposta
+normal, entrega incerta (vira `test_terminal_unknown_delivery_reopens_in_rust`) e manutenção do
+terminal. `test_invalid_cache_waits_for_resync` passava na base por acaso (a pausa de 2 s das
+tentativas); falha sem a espera nova. Sem `node_modules` na pasta, o front não teve
+`npm run check`; a mudança é uma chave nova nos dois JSON e um `case`.
+Revisão: recusa de conexão (`ConnectionRefusedError`, nada saiu) é erro, não incerto; perda de
+transporte invalida a vista para a próxima operação reler; ator sumido grava a frase na faixa;
+a reabertura reconfere o erro dentro do `freeze` (duas operações juntas não reabrem duas vezes);
+operações de fundo (`snapshot`, `drain`, `confirm`, `queue`) nem reabrem nem esperam a reposição
+(senão um erro persistente vira laço de reabertura a cada evento); reabertura sem terminal zera o
+teto (`open_succeeded`) e mata o cano recém-lançado que o Rust não alcançou; todo evento `problem`
+pede um snapshot, que tira a faixa quando a falha foi cosmética (política). O chat web mostra a
+frase inteira do `runtime_falhou` (até 300), como o app.
+
+## Ponto de parada (sessão `dono-unico-exec`, 04/10/2026)
+
+Tasks 1, 2 e 3 feitas e no CI (hashes no recado à `migracao-rust-2` e no `git log`); a próxima
+sessão começa na Task 4, Step 19, sobre esta branch. Contrato interno ainda 14.
+
+Armadilhas achadas nesta execução:
+
+- **Teste Python que registra coordenador termina com `close_python_leases()`.** O `register`
+  grava o `_current` global; sem soltar, os testes seguintes de `test_tmux.py` (e outros) falham
+  por ordem com `MuxIndisponivel`/"Claude terminal sem vínculo". Não use `monkeypatch` no
+  `_current` depois do `register`: ele restaura o coordenador velho no fim.
+- **Rust falso nos testes devolve revisão crescente.** `apply_event` ignora snapshot com revisão
+  menor que a guardada; um falso com revisão fixa congela a vista e o teste espera 5 s.
+- **Nesta máquina algum processo sonda portas efêmeras.** Cano falso dos testes Rust aceita em laço
+  e ignora conexão sem o token (`tests/runtime_open.rs`).
+- **CI:** o resumo do `server.yml` fica `success` com job vermelho; conferir job por job. Vistos
+  intermitentes: macOS `tests/terminal_routes.rs:165` (porta pública aceitou conexão logo depois de
+  parar; a repetição passou) e o pytest `test_three_crashes_in_a_minute_hand_the_public_port_to_python`
+  sob carga (passa isolado).
+- **Push:** o hook pede revisores uma vez por commit e bloqueia o comando inteiro; faça o commit e
+  o push em comandos separados (o segundo push passa).
+- **Worktree sem `node_modules`:** checagem de front não roda aqui; `uv run` cria `.venv` própria
+  (o aviso de `VIRTUAL_ENV` é inofensivo).
+- **O que ficou para as próximas Tasks:** sessão registrada no Python no boot com cano vivo ainda
+  passa pelo `adopt` (Task 5 tira); troca de conta ainda faz `parar` → `change` antes do
+  `ensure_open` (Task 4); a faixa do runtime na sessão com terminal aparece no chat na próxima
+  emissão de estado do monitor do pane (decoração no SSE), não na hora; `prepare_session(launch=…)`
+  decide quem pode subir processo, e leitura de histórico (`ensure_projection`) reabre e relança
+  cano morto por desenho do plano.
 
 ### Task 4: Administração da sessão sem terminal por `close`/`open`
 

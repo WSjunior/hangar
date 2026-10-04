@@ -1669,6 +1669,10 @@ class SessionRegistry:
                 if prob:
                     info.problema = prob[0]
                 continue
+            if getattr(info, "provider", None) == "claude" and not getattr(info, "problema", None):
+                from app.runtime_adapter import runtime_problem
+                if problem := runtime_problem(info.name):
+                    info.problema = problem[0]
             aprov = aprovacoes.get(info.name)
             if aprov is not None:
                 # Wire manda: o painel de aprovacao esta na tela AGORA. Nao entra no `pending` (nao
