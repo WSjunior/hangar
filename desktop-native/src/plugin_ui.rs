@@ -1,6 +1,7 @@
-//! Faixa acima do prompt que os mods do Claude Code desenham (SSE `plugin_ui`). A árvore chega
-//! como o engine a monta (`Box`, `Text`, `Raster`, `Svg`...) e é traduzida aqui sem saber de que
-//! mod veio: mod novo aparece sem código novo.
+//! Faixa acima do prompt e painéis que os mods do Claude Code desenham (SSE `plugin_ui`). A árvore
+//! chega como o engine a monta (`Box`, `Text`, `Raster`, `Svg`...) e é traduzida aqui sem saber de
+//! que mod veio: mod novo aparece sem código novo.
+use std::rc::Rc;
 use std::sync::Arc;
 use gpui_kit::*;
 use gpui_kit::prelude::FluentBuilder;
@@ -8,25 +9,68 @@ use serde_json::Value;
 use crate::theme;
 
 /// Medidas dos mods são em células de terminal; estas são as da fonte mono de 12 px.
-const CELL_W: f32 = 7.2;
+pub const CELL_W: f32 = 7.2;
 const CELL_H: f32 = 17.;
 const TEXT_PX: f32 = 12.;
 
 /// Faixa sem nada para mostrar: ninguém desenhou, ou só o marcador do próprio engine.
 pub fn is_empty(tree: &Value) -> bool { !tree.is_object() || tree["type"] == "engine" }
 
-pub fn band(tree: &Value) -> Option<AnyElement> {
-    if is_empty(tree) { return None; }
-    Some(div().w_full().px(px(10.)).py(px(6.)).mb(px(4.)).rounded(px(8.)).bg(theme::inset())
-        .font_family(theme::MONO).text_size(px(TEXT_PX)).line_height(px(CELL_H)).text_color(theme::text())
-        .overflow_hidden().child(node(tree)).into_any_element())
+/// Clique num botão de mod: (site, key). O site é `above-prompt` ou o id do painel.
+pub type Press = Rc<dyn Fn(&str, &str, &mut Window, &mut App)>;
+pub const BAND_SITE: &str = "above-prompt";
+pub const PANE_CLOSE_KEY: &str = "__close__";
+
+/// Onde a árvore está desenhada e quem atende o clique; sem `press`, botão é só rótulo.
+struct Ctx<'a> { site: &'a str, press: &'a Option<Press> }
+
+pub fn button_key(v: &Value) -> Option<String> {
+    (v["type"] == "Button").then(|| v["props"]["key"].as_str().filter(|k| !k.is_empty()).map(str::to_owned)).flatten()
 }
 
-fn node(v: &Value) -> AnyElement {
+/// Só http(s) vira link, como no web: `javascript:` ou `file:` abririam o que o mod não deveria.
+pub fn safe_href(v: &Value) -> Option<String> {
+    v.as_str().filter(|h| h.starts_with("https://") || h.starts_with("http://")).map(str::to_owned)
+}
+
+pub fn is_dock(pane: &Value) -> bool { pane["placement"] == "dock" }
+
+fn frame() -> Div {
+    div().px(px(10.)).py(px(6.)).rounded(px(8.)).bg(theme::inset())
+        .font_family(theme::MONO).text_size(px(TEXT_PX)).line_height(px(CELL_H)).text_color(theme::text())
+}
+
+pub fn band(tree: &Value, press: Option<Press>) -> Option<AnyElement> {
+    if is_empty(tree) { return None; }
+    let c = Ctx { site: BAND_SITE, press: &press };
+    Some(frame().w_full().mb(px(4.)).overflow_hidden().child(node(tree, &c)).into_any_element())
+}
+
+/// Um painel que um mod abriu: título, fechar (o ✕ do engine) e o corpo rolável.
+pub fn pane(pane: &Value, press: Option<Press>) -> AnyElement {
+    let id = pane["id"].as_str().unwrap_or("").to_owned();
+    let title = pane["title"].as_str().filter(|t| !t.is_empty()).unwrap_or(&id).to_owned();
+    let header = div().flex().items_center().justify_between().gap_2()
+        .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(title))
+        .when_some(press.clone(), |el, press| {
+            let site = id.clone();
+            el.child(div().id(SharedString::from(format!("plg-close-{site}"))).flex_shrink_0().cursor_pointer().px(px(4.))
+                .text_color(theme::muted()).child("✕")
+                .on_click(move |_, window, cx| press(&site, PANE_CLOSE_KEY, window, cx)))
+        });
+    let c = Ctx { site: &id, press: &press };
+    frame().flex().flex_col().gap_1().min_h_0()
+        .child(header)
+        .child(div().id(SharedString::from(format!("plg-body-{id}"))).flex_1().min_h_0().overflow_y_scroll()
+            .child(node(&pane["tree"], &c)))
+        .into_any_element()
+}
+
+fn node(v: &Value, c: &Ctx) -> AnyElement {
     match v {
         Value::String(s) => div().flex_shrink_0().child(s.clone()).into_any_element(),
         Value::Number(n) => div().flex_shrink_0().child(n.to_string()).into_any_element(),
-        Value::Object(_) => element(v),
+        Value::Object(_) => element(v, c),
         _ => div().into_any_element(),
     }
 }
@@ -40,11 +84,11 @@ fn plain(v: &Value) -> String {
     children(v).iter().map(|c| match c { Value::String(s) => s.clone(), Value::Number(n) => n.to_string(), _ => String::new() }).collect()
 }
 
-fn element(v: &Value) -> AnyElement {
+fn element(v: &Value, c: &Ctx) -> AnyElement {
     let p = &v["props"];
     match v["type"].as_str().unwrap_or("") {
-        "Box" => boxed(p, children(v)),
-        "Text" => text(p, children(v)),
+        "Box" => boxed(p, children(v), c),
+        "Text" => text(p, children(v), c),
         "Raster" => raster(p),
         "Svg" => svg(p),
         "Markdown" => div().whitespace_normal().when(p["dimColor"] == true, |el| el.opacity(0.6))
@@ -52,17 +96,34 @@ fn element(v: &Value) -> AnyElement {
         "Code" => div().whitespace_normal().text_color(theme::muted()).child(text_of(&p["source"])).into_any_element(),
         "Link" => {
             let label = Some(text_of(&p["label"])).filter(|s| !s.is_empty()).unwrap_or_else(|| plain(v));
-            div().text_color(theme::accent()).underline()
-                .child(if label.is_empty() { text_of(&p["href"]) } else { label }).into_any_element()
+            let shown = if label.is_empty() { text_of(&p["href"]) } else { label };
+            let base = div().text_color(theme::accent()).underline();
+            match safe_href(&p["href"]) {
+                Some(href) => base.id(SharedString::from(format!("lnk-{href}"))).cursor_pointer()
+                    .on_click(move |_, _, cx| cx.open_url(&href)).child(shown).into_any_element(),
+                None => base.child(shown).into_any_element(),
+            }
         }
-        // Botão de mod ainda não responde no Hangar: aparece como rótulo, sem fingir que clica.
         "Button" => {
             let label = Some(text_of(&p["label"])).filter(|s| !s.is_empty()).unwrap_or_else(|| plain(v));
-            div().flex_shrink_0().px(px(CELL_W)).rounded(px(4.)).bg(theme::raised())
-                .when(p["variant"] == "primary", |el| el.text_color(theme::accent())).child(label).into_any_element()
+            // `plain` sai como no terminal: texto, sem pílula.
+            let base = div().flex_shrink_0()
+                .when(p["plain"] != true, |el| el.px(px(CELL_W)).rounded(px(4.)).bg(theme::raised()))
+                .when(p["dimColor"] == true, |el| el.opacity(0.6))
+                .when(p["variant"] == "primary", |el| el.text_color(theme::accent()));
+            match (button_key(v), c.press.clone()) {
+                (Some(key), Some(press)) => {
+                    let site = c.site.to_owned();
+                    base.id(SharedString::from(format!("plg-{site}-{key}"))).cursor_pointer()
+                        .hover(|el| el.underline())
+                        .on_click(move |_, window, cx| press(&site, &key, window, cx))
+                        .child(label).into_any_element()
+                }
+                _ => base.child(label).into_any_element(),
+            }
         }
         "Image" => div().text_color(theme::muted()).child(text_of(&p["alt"])).into_any_element(),
-        _ => div().flex().children(children(v).iter().map(node)).into_any_element(),
+        _ => div().flex().children(children(v).iter().map(|k| node(k, c))).into_any_element(),
     }
 }
 
@@ -73,7 +134,7 @@ fn lines(v: &Value) -> Option<f32> { v.as_f64().map(|n| n as f32 * CELL_H) }
 fn first(p: &Value, keys: &[&str]) -> Value { keys.iter().map(|k| p[*k].clone()).find(Value::is_number).unwrap_or(Value::Null) }
 
 /// `Box` do Ink em flexbox do gpui. O padrão do Ink é linha, não coluna.
-fn boxed(p: &Value, kids: &[Value]) -> AnyElement {
+fn boxed(p: &Value, kids: &[Value], c: &Ctx) -> AnyElement {
     if p["display"] == "none" { return div().into_any_element(); }
     let mut el = div().flex().min_w_0();
     el = match p["flexDirection"].as_str() {
@@ -116,11 +177,11 @@ fn boxed(p: &Value, kids: &[Value]) -> AnyElement {
         el = el.border_1().rounded(px(4.)).border_color(color(&p["borderColor"]).unwrap_or_else(theme::border));
     }
     if p["overflow"] == "hidden" { el = el.overflow_hidden(); }
-    el.children(kids.iter().map(node)).into_any_element()
+    el.children(kids.iter().map(|k| node(k, c))).into_any_element()
 }
 
 /// `Text` do Ink: cor, ênfase e corte. `dimColor` é opacidade, como no terminal.
-fn text(p: &Value, kids: &[Value]) -> AnyElement {
+fn text(p: &Value, kids: &[Value], c: &Ctx) -> AnyElement {
     let fg = color(&p["color"]);
     let bg = color(&p["backgroundColor"]);
     let (fg, bg) = if p["inverse"] == true { (bg.or(Some(theme::background())), fg.or(Some(theme::text()))) } else { (fg, bg) };
@@ -139,7 +200,7 @@ fn text(p: &Value, kids: &[Value]) -> AnyElement {
         el = el.overflow_hidden().whitespace_nowrap();
         return el.child(div().truncate().child(plain_deep(kids))).into_any_element();
     }
-    el.children(kids.iter().map(node)).into_any_element()
+    el.children(kids.iter().map(|k| node(k, c))).into_any_element()
 }
 
 /// Texto de uma subárvore inteira, para o corte com reticências que o gpui só faz num texto só.
@@ -236,6 +297,27 @@ mod tests {
     fn default_terminal_color_is_none() {
         assert_eq!(cell_color(0x0100_0000), None);
         assert!(cell_color(0x5aa6ff).is_some());
+    }
+
+    #[test]
+    fn button_key_reads_only_buttons() {
+        assert_eq!(button_key(&json!({"type": "Button", "props": {"key": "cp-1"}})), Some("cp-1".to_owned()));
+        assert_eq!(button_key(&json!({"type": "Button", "props": {}})), None);
+        assert_eq!(button_key(&json!({"type": "Text", "props": {"key": "x"}})), None);
+    }
+
+    #[test]
+    fn only_http_links_open() {
+        assert_eq!(safe_href(&json!("https://gitlab.exemplo/mr/1")), Some("https://gitlab.exemplo/mr/1".to_owned()));
+        assert_eq!(safe_href(&json!("javascript:alert(1)")), None);
+        assert_eq!(safe_href(&json!("file:///etc/passwd")), None);
+    }
+
+    #[test]
+    fn dock_is_the_terminal_placement() {
+        assert!(is_dock(&json!({"placement": "dock"})));
+        assert!(!is_dock(&json!({"placement": "inline"})));
+        assert!(!is_dock(&json!({})));
     }
 
     #[test]
