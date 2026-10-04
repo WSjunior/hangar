@@ -18,6 +18,16 @@ it('mostra o Git do Claude headless sem depender da statusline', () => {
     .toMatchObject({ repo: 'hangar', branch: 'feature/headless', dirty: true });
 });
 
+it('tira o nome do modelo da lista quando a statusline não o traz', () => {
+  const session = { name: 'cl', state: 'idle' as const, provider: 'claude' as const, model: 'claude-fable-5-1[1m]' };
+  // Barra própria da pessoa: o app não lê o nome dela.
+  expect(parseStatusLine('.../hangar | [main] | Fable 5.1 | 7d:12%', session)?.model).toBe('Fable 5.1 1M');
+  // Sessão recém-aberta, sem linha nenhuma.
+  expect(parseStatusLine(null, session)?.model).toBe('Fable 5.1 1M');
+  // A linha do Hangar, quando traz o nome, vence.
+  expect(parseStatusLine('🤖 Opus5.5·1M (high) │ 💬 1k/2k', session)?.model).toBe('Opus5.5·1M');
+});
+
 describe('parseStatusLine — uso de contexto', () => {
   it('deriva ctxPct do 2º par (usado/janela) quando há métrica de contexto', () => {
     const s = parseStatusLine('💬 20k/1k 40k/200k');

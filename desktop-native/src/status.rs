@@ -120,6 +120,22 @@ fn window(raw: &str, emoji: char, stops: &[char]) -> Option<(f64, Option<String>
     None
 }
 
+/// `claude-opus-5-5` → `Opus 5.5`, `opus[1m]` → `Opus 1M`; id de outro formato volta como veio (`rotuloModelo`).
+pub fn model_label(id: &str) -> String {
+    let lower = id.trim().to_lowercase();
+    let (body, one) = match lower.strip_suffix("[1m]") { Some(body) => (body, true), None => (lower.as_str(), false) };
+    let mut parts = body.strip_prefix("claude-").unwrap_or(body).split('-');
+    let family = parts.next().unwrap_or_default();
+    let numbers: Vec<&str> = parts.collect();
+    if !["opus", "sonnet", "haiku", "fable"].contains(&family) || numbers.len() > 2
+        || numbers.iter().any(|n| n.is_empty() || !n.chars().all(|c| c.is_ascii_digit())) { return id.to_owned(); }
+    let mut out: String = family[..1].to_uppercase() + &family[1..];
+    if let Some(major) = numbers.first() { out += &format!(" {major}"); }
+    if let Some(minor) = numbers.get(1) { out += &format!(".{minor}"); }
+    if one { out += " 1M"; }
+    out
+}
+
 pub fn parse(raw: Option<&str>, session: Option<&SessionInfo>) -> Option<StatusFields> {
     // Codex e Claude sem terminal não publicam Git na linha; a lista já consulta o repositório.
     let git = session.filter(|s| s.provider == "codex" || s.headless).and_then(|s| {
@@ -127,7 +143,8 @@ pub fn parse(raw: Option<&str>, session: Option<&SessionInfo>) -> Option<StatusF
     });
     let raw = raw.unwrap_or("");
     let context = session.and_then(|s| s.context.as_ref()).filter(|c| c.window > 0.0);
-    if raw.is_empty() && git.is_none() && context.is_none() { return None; }
+    let model = session.and_then(|s| s.model.as_deref()).map(str::trim).filter(|m| !m.is_empty());
+    if raw.is_empty() && git.is_none() && context.is_none() && model.is_none() { return None; }
     let mut out = StatusFields::default();
 
     if let Some(i) = raw.find('🤖') {
@@ -147,6 +164,8 @@ pub fn parse(raw: Option<&str>, session: Option<&SessionInfo>) -> Option<StatusF
             if !word.is_empty() { out.effort = Some(word); }
         }
     }
+    // Barra que não é a do Hangar, ou sessão que ainda não a desenhou: o nome sai do modelo que a lista informa.
+    if out.model.is_none() { out.model = model.map(model_label); }
 
     if let Some(i) = raw.find('💬') {
         let rest = &raw[i + '💬'.len_utf8()..];
@@ -238,6 +257,19 @@ mod tests {
         let f = parse(Some("🤖 Opus │ 💬 1k/2k 40k/200k"), Some(&session)).unwrap();
         assert_eq!(f.ctx_pct, Some(20.0));
         assert_eq!(parse(None, Some(&session)).and_then(|f| f.ctx_pct), Some(25.0));
+    }
+
+    #[test]
+    fn model_from_the_list_fills_a_line_without_it() {
+        let session = SessionInfo { name: "s".into(), provider: "claude".into(), model: Some("claude-fable-5-1[1m]".into()), ..Default::default() };
+        // Barra própria da pessoa: o app não lê o nome dela.
+        let f = parse(Some(".../hangar | [main] | Fable 5.1 | 7d:12%"), Some(&session)).unwrap();
+        assert_eq!(f.model.as_deref(), Some("Fable 5.1 1M"));
+        // Sessão recém-aberta, sem linha nenhuma.
+        assert_eq!(parse(None, Some(&session)).and_then(|f| f.model).as_deref(), Some("Fable 5.1 1M"));
+        // A linha do Hangar, quando traz o nome, vence.
+        let f = parse(Some("🤖 Opus5.5·1M (high) │ 💬 1k/2k"), Some(&session)).unwrap();
+        assert_eq!(f.model.as_deref(), Some("Opus5.5·1M"));
     }
 
     #[test]

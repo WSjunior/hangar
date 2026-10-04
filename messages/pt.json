@@ -4914,7 +4914,7 @@
   "native_mode_auto": "Automático",
   "native_mode_manual": "Manual",
   "native_mode_acceptEdits": "Aceitar edições",
-  "native_mode_bypassPermissions": "Sem permissões",
+  "native_mode_bypassPermissions": "Bypass",
   "native_mode_dontAsk": "Não perguntar",
   "native_codex_mode_default": "Padrão",
   "native_codex_mode_plan": "Plano",

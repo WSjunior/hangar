@@ -8,6 +8,7 @@ use super::create::choice;
 use super::orchestration::provider_name;
 use super::settings::Page;
 use super::Role as A11y;
+use crate::status::model_label;
 use gpui_kit::component::{IndexPath, WindowExt, searchable_list::SearchableVec, select::{Select, SelectEvent, SelectState}};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
@@ -157,22 +158,6 @@ fn purpose(base: &str) -> Option<String> {
         "par de research" => "orqcfg_fim_research", _ => return None,
     };
     Some(t(key))
-}
-
-/// `claude-opus-5-5` → `Opus 5.5`, `opus[1m]` → `Opus 1M`; id de outro formato volta como veio (`rotuloModelo`).
-fn model_label(id: &str) -> String {
-    let lower = id.trim().to_lowercase();
-    let (body, one) = match lower.strip_suffix("[1m]") { Some(body) => (body, true), None => (lower.as_str(), false) };
-    let mut parts = body.strip_prefix("claude-").unwrap_or(body).split('-');
-    let family = parts.next().unwrap_or_default();
-    let numbers: Vec<&str> = parts.collect();
-    if !["opus", "sonnet", "haiku", "fable"].contains(&family) || numbers.len() > 2
-        || numbers.iter().any(|n| n.is_empty() || !n.chars().all(|c| c.is_ascii_digit())) { return id.to_owned(); }
-    let mut out: String = family[..1].to_uppercase() + &family[1..];
-    if let Some(major) = numbers.first() { out += &format!(" {major}"); }
-    if let Some(minor) = numbers.get(1) { out += &format!(".{minor}"); }
-    if one { out += " 1M"; }
-    out
 }
 
 /// Família do modelo, o que sobrevive entre id e rótulo: `opus[1m]` e `Opus4.8·1M` dão ("opus", true) (`familiaDe`).

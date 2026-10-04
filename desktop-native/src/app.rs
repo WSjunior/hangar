@@ -4862,14 +4862,20 @@ impl Hangar {
         let avatar = div().relative().size(px(18.)).flex_shrink_0().flex().items_center().justify_center().child(mark);
         let state_label = tr(&format!("chip_{}", if limited { "limited" } else { state }));
         let reply = session.last_reply.as_deref().filter(|r| state == "idle" && !r.trim().is_empty());
-        let sub = match reply {
-            Some(r) => Some((conversation::one_line(r, 120), theme::muted(), false)),
+        let fresh = match reply {
+            Some(r) => Some((conversation::one_line(r, 120), sidebar::Sub::Reply)),
             None if state == "awaiting_input" || session.pending_questions > 0 =>
-                session.question.clone().map(|q| (conversation::one_line(&q, 80), theme::warning(), false)),
+                session.question.clone().map(|q| (conversation::one_line(&q, 80), sidebar::Sub::Question)),
             None if state == "working" => session.label.clone().filter(|l| !l.trim().is_empty())
-                .map(|l| (conversation::one_line(l.split(" (").next().unwrap_or(&l), 80), theme::muted(), true)),
+                .map(|l| (conversation::one_line(l.split(" (").next().unwrap_or(&l), 80), sidebar::Sub::Working)),
             None => None,
         };
+        // O tipo de linha que este estado mostra, na mesma ordem do `fresh`.
+        let kind = if state == "idle" && session.pending_questions == 0 { Some(sidebar::Sub::Reply) }
+            else if state == "awaiting_input" || session.pending_questions > 0 { Some(sidebar::Sub::Question) }
+            else if state == "working" { Some(sidebar::Sub::Working) } else { None };
+        let sub = self.sidebar.keep_sub(&target, session.jsonl.as_deref(), kind, fresh);
+        let sub_color = if matches!(sub, Some((_, sidebar::Sub::Question))) { theme::warning() } else { theme::muted() };
         let when = session.last_reply_at.filter(|_| state == "idle").map(side::since);
         let account = account_chip(session.conta.as_deref());
         // Como o web: a pasta só com a lista por servidor (por projeto o cabeçalho já a diz), e sempre na worktree.
@@ -4950,10 +4956,10 @@ impl Hangar {
                     .child(div().size(px(5.)).flex_shrink_0().rounded_full().bg(color))
                     .child(div().min_w_0().truncate().child(label))))
                 .when_some(when, |el, w| el.child(div().flex_shrink_0().text_size(px(10.)).text_color(theme::faint()).child(w))))
-            .when_some(sub, |el, (text, color, working)| el.child(div().flex().items_center().gap(px(8.)).child(lane())
-                .child(div().flex_1().min_w_0().flex().items_center().gap(px(4.)).text_xs().text_color(color)
-                    .when(reply.is_some(), |el| el.child(div().flex_shrink_0().text_size(px(8.)).text_color(theme::faint()).child("◆")))
-                    .child(div().min_w_0().truncate().when(working, |el| el.italic()).child(text)))))
+            .when_some(sub, |el, (text, kind)| el.child(div().flex().items_center().gap(px(8.)).child(lane())
+                .child(div().flex_1().min_w_0().flex().items_center().gap(px(4.)).text_xs().text_color(sub_color)
+                    .when(kind == sidebar::Sub::Reply, |el| el.child(div().flex_shrink_0().text_size(px(8.)).text_color(theme::faint()).child("◆")))
+                    .child(div().min_w_0().truncate().when(kind == sidebar::Sub::Working && working, |el| el.italic()).child(text)))))
             .when(provider_label.is_some() || folder.is_some() || branch.is_some() || added.is_some() || removed.is_some() || ahead.is_some() || behind.is_some(), |el| el.child(div().flex().items_center().gap(px(8.))
                 .text_size(px(11.5)).text_color(theme::faint()).child(lane())
                 .child(div().flex_1().min_w_0().flex().items_center().gap(px(6.))
