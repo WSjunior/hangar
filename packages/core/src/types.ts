@@ -161,6 +161,9 @@ export interface ResumeCandidate {
 // Resposta do /resume: ou a sessão já religada, ou (caso ambíguo) os candidatos pra confirmar.
 export type ResumeResult = SessionInfo | { ambiguous: true; candidates: ResumeCandidate[] };
 
+/** Trecho de um Edit/Write como o Claude Code gravou: posição real no arquivo e linhas em formato de diff. */
+export interface PatchHunk { old_start: number; new_start: number; lines: string[] }
+
 export interface ChatEvent {
   queued_delivered?: boolean | null;
   queued_confirmed?: boolean | null;
@@ -180,6 +183,8 @@ export interface ChatEvent {
   tool_use_id?: string | null;
   result?: string | null;
   is_error?: boolean | null;
+  /** Só em tool_result de Edit/Write do Claude. Ausente nos outros providers e em arquivo novo. */
+  patch?: PatchHunk[] | null;
   ts?: number | null;
   // Cache de prompt (só em assistant_msg): tokens lidos do cache + janela de expiração em segundos.
   // O TTL vem medido do usage do transcript (1h ou 5min), não suposto.
