@@ -5,6 +5,7 @@ use super::*;
 use gpui_kit::component::input::{Editor, EditorState, Position, RopeExt};
 mod navigation;
 mod lifecycle;
+pub(crate) mod grammars;
 
 actions!(file_view, [CloseFile, NextFile, PreviousFile, SaveFile, FindFile, GoToFileLine]);
 
@@ -94,17 +95,19 @@ fn file_failure(error: &Failure) -> String {
 }
 
 pub(super) fn file_language(path: &str) -> &'static str {
-    let extension = std::path::Path::new(path).extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+    let file = std::path::Path::new(path);
+    if file.file_name().and_then(|s| s.to_str()).is_some_and(|name| matches!(name, "Makefile" | "makefile" | "GNUmakefile")) { return "make"; }
+    let extension = file.extension().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
     match extension.as_str() {
         "rs" => "rust",
         "ts" | "mts" | "cts" => "typescript",
         "tsx" => "tsx",
         "js" | "mjs" | "cjs" | "jsx" => "javascript",
-        "py" => "python",
-        "json" => "json",
+        "py" | "pyi" => "python",
+        "json" | "jsonc" => "json",
         "toml" => "toml",
         "yaml" | "yml" => "yaml",
-        "md" | "markdown" => "markdown",
+        "md" | "markdown" | "mdx" => "markdown",
         "sh" | "bash" | "zsh" => "bash",
         "css" => "css",
         "html" | "htm" => "html",
@@ -115,18 +118,26 @@ pub(super) fn file_language(path: &str) -> &'static str {
         "cc" | "cpp" | "hpp" => "cpp",
         "java" => "java",
         "cs" => "csharp",
-        "kt" => "kotlin",
+        "kt" | "kts" => "kotlin",
         "go" => "go",
         "rb" => "ruby",
         "lua" => "lua",
         "swift" => "swift",
         "php" => "php",
+        "pas" | "pp" | "dpr" | "dpk" | "lpr" | "inc" | "dfm" | "lfm" | "fmx" => "pascal",
+        "dart" => "dart",
+        "diff" | "patch" => "diff",
+        "mk" => "make",
+        "zig" => "zig",
+        "scala" | "sc" => "scala",
+        "ex" | "exs" => "elixir",
         _ => "text",
     }
 }
 
 impl Files {
     pub fn new(window: &mut Window, cx: &mut Context<Hangar>) -> Self {
+        grammars::register();
         cx.bind_keys([
             KeyBinding::new("alt-w", CloseFile, Some("FileViewer")),
             KeyBinding::new("ctrl-pageup", PreviousFile, Some("FileViewer")),
@@ -145,7 +156,7 @@ impl Files {
 
 async fn read_file(api: Api, name: String, mut path: String, candidates: Vec<String>, local: Option<PathBuf>, here: bool) -> Result<Content, Failure> {
     // Servidor nesta máquina (a árvore já provou): caminho da raiz sai do disco, com as mesmas travas.
-    if let Some(root) = local.filter(|root| !path.starts_with('/') && root.join(&path).exists()) {
+    if let Some(root) = local.filter(|root| !path.starts_with('/') && !std::path::Path::new(&path).is_absolute() && root.join(&path).exists()) {
         return tokio::task::spawn_blocking(move || super::tree::read_local(&root, &path).map(|read|
             Content { path, text: read.text, truncated: read.truncated, digest: read.digest, external: false }))
             .await.unwrap_or_else(|_| Err(Failure::local("invalid_response")));
@@ -785,16 +796,40 @@ mod tests {
             ("App.svelte", "svelte"), ("query.sql", "sql"), ("main.c", "c"),
             ("header.h", "c"), ("main.cc", "cpp"), ("main.cpp", "cpp"),
             ("header.hpp", "cpp"), ("Main.java", "java"), ("Program.cs", "csharp"),
-            ("Main.kt", "kotlin"), ("Main.kts", "text"), ("main.go", "go"),
+            ("Main.kt", "kotlin"), ("Main.kts", "kotlin"), ("main.go", "go"),
             ("main.rb", "ruby"), ("main.lua", "lua"), ("Main.swift", "swift"),
             ("index.php", "php"), ("README.markdown", "markdown"),
             ("run.zsh", "bash"), ("App.vue", "html"),
-            ("sample.unknown", "text"), ("config.jsonc", "text"),
-            ("notes.mdx", "text"), ("theme.scss", "text"),
-            ("types.pyi", "text"), ("main.pas", "text"), ("main.dart", "text"),
+            ("sample.unknown", "text"), ("config.jsonc", "json"),
+            ("notes.mdx", "markdown"), ("theme.scss", "text"),
+            ("types.pyi", "python"), ("main.pas", "pascal"), ("Projeto.DPR", "pascal"),
+            ("Form1.dfm", "pascal"), ("main.dart", "dart"), ("fix.patch", "diff"),
+            ("Makefile", "make"), ("rules.mk", "make"), ("main.zig", "zig"),
+            ("App.scala", "scala"), ("app.ex", "elixir"),
         ] {
             assert_eq!(super::file_language(path), expected, "{path}");
         }
+    }
+
+    #[test]
+    fn every_mapped_language_has_a_grammar_with_color_rules() {
+        use gpui_kit::component::highlighter::LanguageRegistry;
+        super::grammars::register();
+        let mut broken = Vec::new();
+        for name in [
+            "a.rs", "a.ts", "a.tsx", "a.js", "a.py", "a.json", "a.toml", "a.yml", "a.md", "a.sh", "a.css", "a.html",
+            "a.svelte", "a.sql", "a.c", "a.cpp", "a.java", "a.cs", "a.kt", "a.go", "a.rb", "a.lua", "a.swift", "a.php",
+            "a.pas", "a.dart", "a.diff", "a.mk", "a.zig", "a.scala", "a.ex",
+        ].map(super::file_language) {
+            match LanguageRegistry::singleton().language(name).and_then(|config| Some((config.language?, config.highlights))) {
+                None => broken.push(format!("{name}: sem gramática")),
+                Some((_, highlights)) if highlights.trim().is_empty() => broken.push(format!("{name}: sem regras de cor")),
+                Some((language, highlights)) => if let Err(error) = tree_sitter::Query::new(&language, &highlights) {
+                    broken.push(format!("{name}: regra quebrada ({error})"));
+                },
+            }
+        }
+        assert!(broken.is_empty(), "{broken:#?}");
     }
 
     #[test]

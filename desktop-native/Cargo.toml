@@ -7,11 +7,11 @@ publish = false
 [dependencies]
 gpui-kit = { version = "=0.7.0", features = [
     "tree-sitter-bash", "tree-sitter-c", "tree-sitter-cpp", "tree-sitter-csharp",
-    "tree-sitter-css", "tree-sitter-go", "tree-sitter-html", "tree-sitter-java",
-    "tree-sitter-javascript", "tree-sitter-kotlin", "tree-sitter-lua", "tree-sitter-markdown",
-    "tree-sitter-php", "tree-sitter-python", "tree-sitter-ruby", "tree-sitter-rust",
-    "tree-sitter-sql", "tree-sitter-svelte", "tree-sitter-swift", "tree-sitter-toml",
-    "tree-sitter-tsx", "tree-sitter-typescript", "tree-sitter-yaml",
+    "tree-sitter-css", "tree-sitter-diff", "tree-sitter-elixir", "tree-sitter-go", "tree-sitter-html",
+    "tree-sitter-java", "tree-sitter-javascript", "tree-sitter-kotlin", "tree-sitter-lua", "tree-sitter-make",
+    "tree-sitter-markdown", "tree-sitter-php", "tree-sitter-python", "tree-sitter-ruby", "tree-sitter-rust",
+    "tree-sitter-scala", "tree-sitter-sql", "tree-sitter-svelte", "tree-sitter-swift", "tree-sitter-toml",
+    "tree-sitter-tsx", "tree-sitter-typescript", "tree-sitter-yaml", "tree-sitter-zig",
 ] }
 tokio = { version = "=1.53.1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "json", "stream"] }
@@ -31,6 +31,12 @@ notify = "=7.0.0"
 cpal = "=0.18.2"
 notify-rust = "=4.18.0"
 symphonia = { version = "=0.5.4", features = ["mp3", "aac", "isomp4"] }
+tree-sitter = "=0.26.13"
+tree-sitter-c-sharp = "=0.23.5"
+tree-sitter-swift = "=0.7.3"
+tree-sitter-pascal = "=0.10.2"
+tree-sitter-dart = "=0.2.0"
+tree-sitter-kotlin-sg = "=0.4.1"
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 wry = "=0.55.1"
