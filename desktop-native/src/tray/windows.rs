@@ -7,9 +7,9 @@ use windows::{core::{w, HSTRING, PCWSTR}, Win32::{
     System::LibraryLoader::GetModuleHandleW,
     UI::{Shell::{Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW},
         WindowsAndMessaging::{AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW,
-            GetCursorPos, GetMessageW, LoadIconW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow,
-            TrackPopupMenu, TranslateMessage, MF_SEPARATOR, MF_STRING, MSG, TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-            WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSW}}}};
+            GetCursorPos, GetMessageW, LoadIconW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SendMessageW,
+            SetForegroundWindow, TrackPopupMenu, TranslateMessage, MF_SEPARATOR, MF_STRING, MSG, TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD,
+            TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW}}}};
 
 const CALLBACK: u32 = WM_APP + 1;
 const ICON_ID: u32 = 1;
@@ -29,7 +29,8 @@ impl Handle {
 }
 
 impl Drop for Handle {
-    fn drop(&mut self) { unsafe { let _ = PostMessageW(Some(HWND(self.hwnd as _)), WM_CLOSE, WPARAM(0), LPARAM(0)); } }
+    // Síncrono: quem solta o ícone para encerrar o app só segue depois de ele sair da bandeja.
+    fn drop(&mut self) { unsafe { SendMessageW(HWND(self.hwnd as _), WM_CLOSE, None, None); } }
 }
 
 pub fn start(events: async_channel::Sender<TrayEvent>) -> Result<Handle, String> {
@@ -98,6 +99,8 @@ fn menu(hwnd: HWND) {
         // Sem trazer a janela dona para a frente, o menu não fecha ao clicar fora.
         let _ = SetForegroundWindow(hwnd);
         let picked = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RETURNCMD | TPM_NONOTIFY, at.x, at.y, Some(0), hwnd, None);
+        // Receita do sistema para o menu seguinte não sumir sozinho.
+        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(menu);
         picked.0 as usize
     };

@@ -120,7 +120,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      pub fn new(
          handle: AnyWindowHandle,
          globals: Globals,
-@@ -1035,6 +1096,70 @@
+@@ -1035,6 +1096,72 @@
          self.schedule_frame();
      }
  
@@ -140,6 +140,8 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +        if hidden {
 +            state.pending_frame_callback = None;
 +            state.in_progress_configure = None;
++            // A superfície volta a não ter buffer: uma falha no primeiro quadro tem de repetir por timer.
++            state.presentation = PresentationState::Unpresented;
 +            if let Some(decoration) = state.surface_state.decoration() {
 +                decoration.destroy();
 +            }
@@ -191,7 +193,29 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      fn update_ime_enabled(&self) {
          let mut state = self.state.borrow_mut();
          if !state.active {
-@@ -1818,9 +1943,11 @@
+@@ -1062,6 +1189,10 @@
+     }
+ 
+     pub fn handle_xdg_surface_event(&self, event: xdg_surface::Event) {
++        // Hangar: configure do `xdg_surface` antigo não pode ser confirmado no novo.
++        if self.state.borrow().hidden {
++            return;
++        }
+         if let xdg_surface::Event::Configure { serial } = event {
+             {
+                 let mut state = self.state.borrow_mut();
+@@ -1189,6 +1320,10 @@
+     }
+ 
+     pub fn handle_toplevel_event(&self, event: xdg_toplevel::Event) -> bool {
++        // Hangar: escondida, o que chega é resto do toplevel que `set_hidden` destruiu; o novo só fala depois do commit.
++        if self.state.borrow().hidden {
++            return false;
++        }
+         match event {
+             xdg_toplevel::Event::Configure {
+                 width,
+@@ -1818,9 +1953,11 @@
      }
  
      fn set_title(&mut self, title: &str) {
@@ -204,7 +228,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      }
  
      fn set_app_id(&mut self, app_id: &str) {
-@@ -1861,6 +1988,10 @@
+@@ -1861,6 +1998,10 @@
          }
      }
  
@@ -215,7 +239,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      fn zoom(&self) {
          let state = self.borrow();
          if let Some(toplevel) = state.surface_state.toplevel() {
-@@ -1935,47 +2066,11 @@
+@@ -1935,47 +2076,11 @@
      }
  
      fn draw(&self, scene: &Scene) {

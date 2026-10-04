@@ -41,7 +41,11 @@ pub struct Handle { tray: ksni::blocking::Handle<Item>, online: Arc<AtomicBool> 
 
 impl Handle {
     pub fn online(&self) -> bool { self.online.load(Ordering::Relaxed) }
-    pub fn refresh(&self) { let _ = self.tray.update(|_| {}); }
+    // Em outra thread: `update` espera o serviço, que pode estar preso no registro com a barra reiniciando.
+    pub fn refresh(&self) {
+        let tray = self.tray.clone();
+        std::thread::spawn(move || { let _ = tray.update(|_| {}); });
+    }
 }
 
 impl Drop for Handle {

@@ -10,11 +10,17 @@ pub(super) struct WindowTray {
     pub(super) error: Option<String>,
     /// A janela está escondida na bandeja.
     pub(super) hidden: bool,
+    last_toggle: Option<Instant>,
 }
 
 impl WindowTray {
-    pub(super) fn new(events: async_channel::Sender<TrayEvent>) -> Self { Self { events, icon: None, starting: false, error: None, hidden: false } }
+    pub(super) fn new(events: async_channel::Sender<TrayEvent>) -> Self { Self { events, icon: None, starting: false, error: None, hidden: false, last_toggle: None } }
 }
+
+/// O segundo clique de um duplo clique no ícone chega como outro pedido: sem isto a janela aparecia e sumia.
+const DOUBLE_CLICK: Duration = Duration::from_millis(500);
+
+fn is_bounce(since_last: Option<Duration>) -> bool { since_last.is_some_and(|gap| gap < DOUBLE_CLICK) }
 
 /// Fechar só esconde com o ícone de pé e uma bandeja que o mostre: sem isso o app ficaria vivo e invisível.
 pub(super) fn hides_on_close(keep: bool, icon_online: Option<bool>) -> bool { keep && icon_online == Some(true) }
@@ -29,7 +35,7 @@ impl Hangar {
             return;
         }
         if self.window_tray.icon.is_some() || self.window_tray.starting { return; }
-        self.window_tray.starting = true;
+        (self.window_tray.starting, self.window_tray.error) = (true, None);
         let events = self.window_tray.events.clone();
         let task = self.runtime.spawn_blocking(move || crate::tray::start(events));
         cx.spawn(async move |this, cx| {
@@ -39,8 +45,8 @@ impl Hangar {
                 match result {
                     // Desligada enquanto o ícone subia: o que chegou é solto, e some.
                     Ok(icon) if appearance::get().keep_in_tray => { this.window_tray.icon = Some(icon); this.window_tray.error = None; }
-                    Ok(_) => {}
-                    Err(reason) => { eprintln!("tray: {reason}"); this.window_tray.error = Some(reason); }
+                    Err(reason) if appearance::get().keep_in_tray => { eprintln!("tray: {reason}"); this.window_tray.error = Some(reason); }
+                    _ => {}
                 }
                 cx.notify();
             });
@@ -69,10 +75,16 @@ impl Hangar {
     }
 
     pub(super) fn on_tray_event(&mut self, event: TrayEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if event == TrayEvent::Toggle {
+            let now = Instant::now();
+            if is_bounce(self.window_tray.last_toggle.map(|last| now.duration_since(last))) { return; }
+            self.window_tray.last_toggle = Some(now);
+        }
         match event {
             TrayEvent::Toggle if !self.window_tray.hidden && self.closes_to_tray() => self.hide_to_tray(window, cx),
             TrayEvent::Toggle | TrayEvent::Show => self.show_from_tray(window, cx),
-            TrayEvent::Quit => cx.quit(),
+            // O ícone sai antes: encerrar com ele de pé deixa um ícone morto na bandeja do Windows.
+            TrayEvent::Quit => { self.window_tray.icon = None; cx.quit(); }
             TrayEvent::Host(online) => {
                 // A bandeja sumiu com a janela escondida: sem ícone não haveria como voltar.
                 if !online && self.window_tray.hidden { self.show_from_tray(window, cx); }
@@ -84,8 +96,16 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::hides_on_close;
+    use super::{hides_on_close, is_bounce};
     use core::prelude::v1::test;
+    use std::time::Duration;
+
+    #[test]
+    fn the_second_click_of_a_double_click_is_ignored() {
+        assert!(!is_bounce(None));
+        assert!(is_bounce(Some(Duration::from_millis(120))));
+        assert!(!is_bounce(Some(Duration::from_millis(900))));
+    }
 
     #[test]
     fn closing_only_hides_with_the_option_on_and_a_tray_showing_the_icon() {

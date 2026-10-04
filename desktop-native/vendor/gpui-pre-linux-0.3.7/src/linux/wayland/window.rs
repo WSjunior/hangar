@@ -1112,6 +1112,8 @@ impl WaylandWindowStatePtr {
         if hidden {
             state.pending_frame_callback = None;
             state.in_progress_configure = None;
+            // A superfície volta a não ter buffer: uma falha no primeiro quadro tem de repetir por timer.
+            state.presentation = PresentationState::Unpresented;
             if let Some(decoration) = state.surface_state.decoration() {
                 decoration.destroy();
             }
@@ -1187,6 +1189,10 @@ impl WaylandWindowStatePtr {
     }
 
     pub fn handle_xdg_surface_event(&self, event: xdg_surface::Event) {
+        // Hangar: configure do `xdg_surface` antigo não pode ser confirmado no novo.
+        if self.state.borrow().hidden {
+            return;
+        }
         if let xdg_surface::Event::Configure { serial } = event {
             {
                 let mut state = self.state.borrow_mut();
@@ -1314,6 +1320,10 @@ impl WaylandWindowStatePtr {
     }
 
     pub fn handle_toplevel_event(&self, event: xdg_toplevel::Event) -> bool {
+        // Hangar: escondida, o que chega é resto do toplevel que `set_hidden` destruiu; o novo só fala depois do commit.
+        if self.state.borrow().hidden {
+            return false;
+        }
         match event {
             xdg_toplevel::Event::Configure {
                 width,
