@@ -268,6 +268,8 @@ def esquecer(name: str) -> None:
         _preenchido.pop(name, None)
         _pressed.pop(name, None)
         _copied.pop(name, None)
+        _opened.pop(name, None)
+        _esperado.pop(name, None)
     _eventos.pop(name, None)
     _band_wakers.pop(name, None)
     _press_wakers.pop(name, None)
@@ -466,13 +468,36 @@ async def esperar_press(name: str, site: str, key: str, desde: float, timeout: f
     return bool(await _esperar_ate(name, achou, timeout))
 
 
-async def esperar_copia(name: str, desde: float, timeout: float) -> str | None:
-    """O texto que um mod copiou depois de `desde`, se copiou."""
+async def esperar_efeito(name: str, desde: float, timeout: float) -> tuple[str | None, str | None]:
+    """O que o clique do app fez depois de `desde`: (texto copiado, URL aberta). Volta assim que um
+    dos dois chega, ou vazio depois de `timeout`."""
     def achou():
         with _lock:
-            t, texto = _copied.get(name, (0.0, ""))
-        return texto if t >= desde else None
-    return await _esperar_ate(name, achou, timeout)
+            tc, texto = _copied.get(name, (0.0, ""))
+            to, url = _opened.get(name, (0.0, ""))
+        efeito = (texto if tc >= desde else None, url if to >= desde else None)
+        return efeito if any(efeito) else None
+    return await _esperar_ate(name, achou, timeout) or (None, None)
+
+
+# Clique que o app pediu e o backend acabou de mandar ao terminal: o plugin pergunta no `ui.press`
+# se é esse, para abrir URL e copiar no aparelho de quem clicou.
+_esperado: dict[str, tuple[str, str, float]] = {}
+_opened: dict[str, tuple[float, str]] = {}
+
+
+def esperar_clique_do_app(name: str, site: str, key: str, prazo: float) -> None:
+    with _lock:
+        _esperado[name] = (site, key, time.monotonic() + prazo)
+
+
+def _do_app(name: str, site: str, key: str) -> bool:
+    with _lock:
+        esperado = _esperado.get(name)
+        if not esperado or esperado[:2] != (site, key) or time.monotonic() > esperado[2]:
+            return False
+        del _esperado[name]
+        return True
 
 
 # Trecho da âncora: o terminal corta a linha da faixa com reticências quando o pane é estreito.
@@ -911,6 +936,38 @@ async def copied(body: CopiedBody):
     _confere(body.sessao, body.token)
     with _lock:
         _copied[body.sessao] = (time.monotonic(), body.text)
+    _acordar_press(body.sessao)
+    return {"ok": True}
+
+
+class PressStartBody(BaseModel):
+    sessao: str
+    token: str
+    requestId: str = Field(min_length=1, max_length=64)
+    element: str = Field(min_length=1, max_length=256)
+
+
+@plugin_router.post("/press-start")
+async def press_start(body: PressStartBody):
+    """O press que começou no terminal é o clique que o app pediu? Responde sim uma vez só."""
+    _confere(body.sessao, body.token)
+    return {"fromApp": _do_app(body.sessao, body.requestId, body.element)}
+
+
+class OpenedBody(BaseModel):
+    sessao: str
+    token: str
+    url: str = Field(max_length=4096)
+
+
+@plugin_router.post("/opened")
+async def opened(body: OpenedBody):
+    """Um mod mandou abrir uma URL num clique do app: o app abre no aparelho de quem clicou."""
+    _confere(body.sessao, body.token)
+    if not re.match(r"^https?://", body.url, re.IGNORECASE):
+        raise HTTPException(400, detail="só http(s)")
+    with _lock:
+        _opened[body.sessao] = (time.monotonic(), body.url)
     _acordar_press(body.sessao)
     return {"ok": True}
 

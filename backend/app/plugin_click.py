@@ -16,7 +16,8 @@ BAND_SITE = "above-prompt"
 CLOSE_KEY = "__close__"
 CLOSE_LABEL = "✕"
 CONFIRM_S = 2.0
-COPY_S = 0.3
+# O `onPress` do mod costuma copiar ou abrir sem `await`: o efeito pode chegar logo depois do press.
+EFFECT_S = 0.3
 _locks: dict[str, asyncio.Lock] = {}
 
 
@@ -111,6 +112,8 @@ async def press(name: str, site: str, key: str) -> dict:
         if len(achados) > 1:
             raise PressRefused("erro_mod_botao_ambiguo", f"“{rotulo}” aparece mais de uma vez na tela.", rotulo=rotulo)
         linha, coluna = achados[0]
+        if key != CLOSE_KEY:
+            plugin_bridge.esperar_clique_do_app(name, site, key, CONFIRM_S)
         desde = time.monotonic()
         if not await run_tmux(click, name, linha, coluna):
             raise PressRefused("erro_mod_clique_sem_resposta", "O clique não chegou ao terminal.")
@@ -120,5 +123,10 @@ async def press(name: str, site: str, key: str) -> dict:
             return {"ok": True}
         if not await plugin_bridge.esperar_press(name, site, key, desde, CONFIRM_S):
             raise PressRefused("erro_mod_clique_sem_resposta", "O mod não confirmou o clique.")
-        copiado = await plugin_bridge.esperar_copia(name, desde, COPY_S)
-        return {"ok": True, "copied": copiado} if copiado else {"ok": True}
+        copiado, aberto = await plugin_bridge.esperar_efeito(name, desde, EFFECT_S)
+        resposta: dict = {"ok": True}
+        if copiado:
+            resposta["copied"] = copiado
+        if aberto:
+            resposta["opened"] = aberto
+        return resposta

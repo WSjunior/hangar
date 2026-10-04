@@ -579,7 +579,7 @@ async def test_confirmacao_de_clique_casa_site_e_chave_depois_do_clique():
         assert await pb.esperar_press("pane-d", "review-mr", "cp-1", desde, 0.5)
         assert not await pb.esperar_press("pane-d", "above-prompt", "cp-1", desde, 0.05)
         await pb.copied(pb.CopiedBody(**_ponte("pane-d", text="https://gitlab.exemplo/mr/1")))
-        assert await pb.esperar_copia("pane-d", desde, 0.5) == "https://gitlab.exemplo/mr/1"
+        assert await pb.esperar_efeito("pane-d", desde, 0.5) == ("https://gitlab.exemplo/mr/1", None)
     finally:
         pb.esquecer("pane-d")
 
@@ -587,3 +587,26 @@ async def test_confirmacao_de_clique_casa_site_e_chave_depois_do_clique():
 def test_confirmacao_com_token_errado_e_recusada():
     r = _cliente().post("/api/plugin/pressed", json={"sessao": "pane-e", "token": "x", "requestId": "a", "element": "b"})
     assert r.status_code == 403
+
+
+def test_press_start_responde_sim_uma_vez_para_o_clique_esperado():
+    c = _cliente()
+    try:
+        pb.esperar_clique_do_app("pane-f", "above-prompt", "rv-1", 2)
+        corpo = _ponte("pane-f", requestId="above-prompt", element="rv-1")
+        assert c.post("/api/plugin/press-start", json=corpo).json() == {"fromApp": True}
+        assert c.post("/api/plugin/press-start", json=corpo).json() == {"fromApp": False}
+        pb.esperar_clique_do_app("pane-f", "above-prompt", "rv-1", 2)
+        outro = _ponte("pane-f", requestId="above-prompt", element="outro")
+        assert c.post("/api/plugin/press-start", json=outro).json() == {"fromApp": False}
+    finally:
+        pb.esquecer("pane-f")
+
+
+def test_opened_so_aceita_http():
+    c = _cliente()
+    try:
+        assert c.post("/api/plugin/opened", json=_ponte("pane-g", url="file:///etc/passwd")).status_code == 400
+        assert c.post("/api/plugin/opened", json=_ponte("pane-g", url="https://x.exemplo")).status_code == 200
+    finally:
+        pb.esquecer("pane-g")

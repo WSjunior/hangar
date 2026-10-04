@@ -1,5 +1,6 @@
 import type { EngineInterface, On } from "claude-code";
 import { bridge } from "./bridge";
+import { openerUrl } from "./uiIntercept";
 import { bandBody, type PaneEntry } from "./uiPayload";
 
 // A faixa redesenha a cada segundo enquanto um mod mostra relógio: o envio junta os quadros.
@@ -42,8 +43,18 @@ function schedule($: EngineInterface) {
   }
 }
 
-// Clique e cópia confirmam ao backend o clique que o app pediu; sem ponte, ninguém pediu.
-async function tell($: EngineInterface, path: "pressed" | "copied", fields: Record<string, unknown>) {
+// Janela do clique que o app pediu: abrir URL e copiar vão para o aparelho de quem clicou. Não acaba
+// no fim do `next`: o `onPress` do mod costuma disparar a cópia sem `await`. Clique feito no próprio
+// terminal fecha a janela na hora.
+const APP_PRESS_MS = 1500;
+let appUntil = 0;
+
+async function inAppPress($: EngineInterface): Promise<boolean> {
+  return appUntil > 0 && (await $.clock.now()) < appUntil;
+}
+
+// Clique, cópia e abertura confirmam ao backend o clique que o app pediu; sem ponte, ninguém pediu.
+async function tell($: EngineInterface, path: "pressed" | "copied" | "opened", fields: Record<string, unknown>) {
   const p = bridge();
   if (!p) return;
   try {
@@ -54,6 +65,22 @@ async function tell($: EngineInterface, path: "pressed" | "copied", fields: Reco
     });
   } catch {
     // O backend responde ao app por tempo esgotado.
+  }
+}
+
+// O press que começou no terminal é o clique que o app pediu? O backend responde sim uma vez só.
+async function fromApp($: EngineInterface, requestId: string, element: string): Promise<boolean> {
+  const p = bridge();
+  if (!p) return false;
+  try {
+    const r = await $.http.fetch(`${p.url}/press-start`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessao: p.sessao, token: p.token, requestId, element }),
+    });
+    return r.status === 200 && (JSON.parse(r.text) as { fromApp?: boolean }).fromApp === true;
+  } catch {
+    return false;
   }
 }
 
@@ -93,14 +120,27 @@ export function registerUi(on: On) {
   });
 
   on("ui.press", async ($, e, next) => {
-    const r = await next(e);
-    if (e.surface === "terminal") void tell($, "pressed", { requestId: e.requestId, element: e.element });
-    return r;
+    if (e.surface === "terminal") {
+      const app = await fromApp($, e.requestId, e.element);
+      appUntil = app ? (await $.clock.now()) + APP_PRESS_MS : 0;
+    }
+    try {
+      return await next(e);
+    } finally {
+      if (e.surface === "terminal") void tell($, "pressed", { requestId: e.requestId, element: e.element });
+    }
   });
 
   on("ui.copy", async ($, e, next) => {
-    const r = await next(e);
-    if (r.value?.isCopied) void tell($, "copied", { text: e.text });
-    return r;
+    if (!(await inAppPress($))) return next(e);
+    await tell($, "copied", { text: e.text });
+    return { value: { isCopied: true } };
+  });
+
+  on("process.run", async ($, e, next) => {
+    const url = (await inAppPress($)) ? openerUrl(e.argv) : null;
+    if (!url) return next(e);
+    await tell($, "opened", { url });
+    return { value: { exitCode: 0, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false } };
   });
 }
