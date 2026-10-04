@@ -29,6 +29,7 @@ mod group_sheet;
 mod hangar_live;
 mod harness;
 mod viewer;
+mod window_tray;
 mod disk;
 mod player;
 mod machines;
@@ -524,6 +525,7 @@ pub struct Hangar {
     // Paleta "Buscar conversas" (Ctrl+K).
     search: search::Search,
     topbar: topbar::TopBar,
+    window_tray: window_tray::WindowTray,
     system_notifications: SystemNotifications,
     computer: computer::Computer,
     new_session: Option<Entity<create::NewSession>>,
@@ -610,6 +612,13 @@ impl Hangar {
         }
         Self::watch_system(window, cx);
         Self::watch_dictation(window, cx);
+        let (tray_tx, tray_rx) = async_channel::unbounded::<crate::tray::TrayEvent>();
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok(event) = tray_rx.recv().await {
+                if this.update_in(cx, |this, window, cx| this.on_tray_event(event, window, cx)).is_err() { break; }
+            }
+        }).detach();
+        cx.defer_in(window, |this, _, cx| this.sync_tray(cx));
         // Link `hangar://` desta ou de outra execução: abre o diálogo preenchido e traz a janela para a frente. Cada link entra
         // por um update novo, nunca de dentro de outro update do Hangar (reentrar dá pânico no GPUI).
         cx.spawn_in(window, async move |this, cx| {
@@ -760,6 +769,7 @@ impl Hangar {
             costs: Default::default(), worktrees: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
             terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
+            window_tray: window_tray::WindowTray::new(tray_tx),
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), keyboard: keyboard::Keyboard::new(window, cx), session_picker: Default::default(),
             tree: tree::Tree::new(window, cx), find: find::Find::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
             new_chat: None, new_chat_focus: cx.focus_handle().tab_stop(true),

@@ -44,6 +44,9 @@ windows = "=0.61.3"
 # O navegador é um Chromium sem janela: o pipe do CDP vai nos fd 3 e 4 dele, e o quadro numa textura do device da GPUI.
 libc = "=0.2.189"
 gpui-pre-wgpu = "=0.3.7"
+# Ícone na bandeja (StatusNotifierItem) sobre o zbus que o notify-rust já traz. Sem a feature padrão `tokio`: ela
+# trocaria o executor do zbus para todos os usuários dele.
+ksni = { version = "=0.3.6", default-features = false, features = ["async-io", "blocking"] }
 
 [build-dependencies]
 embed-resource = "=3.0.11"

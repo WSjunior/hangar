@@ -254,6 +254,8 @@ pub struct Appearance {
     pub code_font: CodeFont,
     /// Meio pixel por unidade, para permitir 12,5 px sem arredondar o controle.
     pub code_size: u16,
+    /// Geral: fechar a janela esconde o app na bandeja em vez de encerrar.
+    pub keep_in_tray: bool,
 }
 
 const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeMode::Dark, palette: Palette::Classic,
@@ -264,7 +266,7 @@ const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeM
     side_width: 300., side_browser_width: None, terminal_height: 260.,
     tool_look: ToolLook::Classic, task_list: false, thinking_tools: ThinkingTools::Search, table_chart: false, ask_highlight: AskHighlight::Accent,
     language: Language::System, currency: Currency::Usd, hands_free: false, skip_chat_confirmations: false, accounts_compact: false, sidebar_group: SidebarGroup::None, side_tab: SideTab::Context,
-    terminal_font: CodeFont::JetBrainsMono, terminal_size: 12, code_font: CodeFont::JetBrainsMono, code_size: 25 };
+    terminal_font: CodeFont::JetBrainsMono, terminal_size: 12, code_font: CodeFont::JetBrainsMono, code_size: 25, keep_in_tray: false };
 
 impl Default for Appearance {
     fn default() -> Self { DEFAULT }
@@ -455,6 +457,14 @@ mod tests {
     use super::*;
     // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
     use core::prelude::v1::test;
+
+    #[test]
+    fn file_from_before_the_tray_option_opens_with_it_off() {
+        let old: Appearance = serde_json::from_str("{}").unwrap();
+        assert!(!old.keep_in_tray);
+        let on: Appearance = serde_json::from_str(r#"{"keep_in_tray": true}"#).unwrap();
+        assert!(on.keep_in_tray);
+    }
 
     #[test]
     fn compact_style_preserves_other_choices_and_keeps_adjustments_after_reload() {
