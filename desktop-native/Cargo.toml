@@ -47,6 +47,8 @@ gpui-pre-wgpu = "=0.3.7"
 # Ícone na bandeja (StatusNotifierItem) sobre o zbus que o notify-rust já traz. Sem a feature padrão `tokio`: ela
 # trocaria o executor do zbus para todos os usuários dele.
 ksni = { version = "=0.3.6", default-features = false, features = ["async-io", "blocking"] }
+# O mesmo zbus do ksni, para perguntar à bandeja se há uma barra hospedando os ícones.
+zbus = { version = "=5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
 
 [build-dependencies]
 embed-resource = "=3.0.11"

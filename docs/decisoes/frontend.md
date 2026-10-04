@@ -844,6 +844,15 @@ na bandeja e faz o pedido de fechar esconder a janela em vez de encerrar o app.
   runtime. Entram as features `async-io` e `blocking`. O ícone vai como pixmap, que não depende
   do tema de ícones instalado, e `assume_sni_available(true)` deixa o serviço esperando a barra
   que sobe depois do app.
+- **No Linux, "bandeja presente" é haver um HOSPEDEIRO, não só o serviço.** O serviço
+  (`org.kde.StatusNotifierWatcher`) pode sobreviver à barra: com o `kded6` no ar, ele assume o
+  nome quando a barra cai e responde `IsStatusNotifierHostRegistered = true` mesmo sem barra
+  nenhuma. O app acompanha os nomes que as barras registram no barramento
+  (`org.kde.StatusNotifierHost-*`, `org.freedesktop.StatusNotifierHost-*`); com o `kded` de dono
+  do serviço só esses nomes valem, e com outro dono vale a resposta do próprio serviço.
+- **O registro do ícone é repetido quando o serviço o recusa.** Ao voltar, a barra derruba e
+  reinicia o `kded6`, e o registro chega antes de ele atender (`No such object path`). O `ksni`
+  não tenta de novo; o app repete em 1, 2, 4, 8 e 16 s, pelo nome que o `ksni` deu ao ícone.
 - **Windows: `Shell_NotifyIconW` numa thread própria**, com janela oculta e laço de mensagens
   dela. Não é janela "só de mensagens": essas não recebem o `TaskbarCreated`, usado para pôr o
   ícone de volta quando o Explorer reinicia.
@@ -882,6 +891,12 @@ o ícone. Navegador embutido com a janela na bandeja (sessão fora da tela): `ev
 `press`, `shot` de uma página repintada depois de escondida e `click` num link que navegou
 responderam igual a com a janela à mostra.
 
-Não conferido no uso real: a bandeja sumindo com a janela escondida (Linux); no Windows, o
+Barra caindo com a janela escondida (04/10/2026, Quickshell 0.2.1 como hospedeiro e `kded6` como
+serviço): ao derrubar a barra, duas janelas escondidas voltaram sozinhas e fechar sem barra
+encerrou; com a barra de volta o ícone foi registrado de novo, fechar escondeu e o clique no
+ícone mostrou a janela. Antes do conserto a janela ficava escondida sem ícone em lugar nenhum, e
+depois da volta da barra fechar encerrava o app.
+
+Não conferido no uso real: o serviço da bandeja sumindo de vez, sem outro assumir (Linux); no Windows, o
 duplo clique físico, o Explorer que demora a aceitar o ícone e o navegador embutido com o
 painel dele aberto na tela na hora de esconder; compositores Wayland além do Hyprland.

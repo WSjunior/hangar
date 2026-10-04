@@ -3546,6 +3546,7 @@ dependencies = [
  "webview2-com",
  "windows 0.61.3",
  "wry",
+ "zbus",
 ]
 
 [[package]]
