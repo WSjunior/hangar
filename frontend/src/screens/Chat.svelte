@@ -6,7 +6,8 @@
   import MessageList from '../components/MessageList.svelte';
   import Composer from '../components/Composer.svelte';
   import PluginBand from '../components/PluginBand.svelte';
-  import type { PluginNode as PluginTree } from '@hangar/core';
+  import PluginPane from '../components/PluginPane.svelte';
+  import { parsePluginUi, pressPluginButton, type PluginNode as PluginTree, type PluginPane as PluginPaneData } from '@hangar/core';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
   import UsageSheet from '../components/UsageSheet.svelte';
@@ -456,6 +457,33 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   let sugestao = $state('');
   // Faixa acima do prompt que os mods do Claude Code desenham (SSE 'plugin_ui').
   let pluginBand = $state<PluginTree>(null);
+  let pluginPanes = $state<PluginPaneData[]>([]);
+  // Resultado do último clique num botão de mod; some sozinho.
+  let pluginNotice = $state<{ text: string; error: boolean; href?: string } | null>(null);
+  let pluginNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+  function showPluginNotice(text: string, error: boolean, href?: string) {
+    clearTimeout(pluginNoticeTimer);
+    pluginNotice = { text, error, href };
+    pluginNoticeTimer = setTimeout(() => (pluginNotice = null), href ? 10000 : 4000);
+  }
+  // O clique vira clique de mouse no terminal da sessão; o que o mod copiar ou mandar abrir acontece
+  // aqui, no aparelho de quem clicou, e não na máquina do terminal.
+  async function pressPlugin(site: string, key: string) {
+    try {
+      const r = await pressPluginButton(sessionName, site, key);
+      if (r.copied) {
+        await navigator.clipboard.writeText(r.copied);
+        showPluginNotice(m.plugin_copiado(), false);
+      }
+      if (r.opened && /^https?:\/\//i.test(r.opened)) {
+        const janela = window.open(r.opened, '_blank', 'noopener,noreferrer');
+        // Depois do `await` o navegador pode não contar mais como gesto da pessoa e bloquear a janela.
+        if (!janela) showPluginNotice(m.plugin_link_bloqueado(), false, r.opened);
+      }
+    } catch (err) {
+      showPluginNotice(String((err as Error)?.message ?? err).replace(/^\d+: /, ''), true);
+    }
+  }
   let pensamentoTimer: ReturnType<typeof setTimeout> | undefined;
   function limparPensamento() {
     clearTimeout(pensamentoTimer);
@@ -2255,7 +2283,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     es.addEventListener('plugin_ui', (e) => {
       noteAlive();
       try {
-        pluginBand = (JSON.parse(e.data) as { above?: PluginTree }).above ?? null;
+        const s = parsePluginUi(JSON.parse(e.data));
+        pluginBand = s.above;
+        pluginPanes = s.panes;
       } catch {
         quadroFalhou('plugin_ui');
       }
@@ -2309,6 +2339,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       events = [];
       sugestao = '';        // era do contexto que o /clear acabou de apagar
       pluginBand = null;    // idem: o mod redesenha para a conversa nova
+      pluginPanes = [];
       retiredQueuedIds.clear();
       idIndex.clear();
       reseedDerived();          // zera activity/asstCount junto (loadHistory re-semeia com o novo)
@@ -3363,7 +3394,10 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
                   onclick={() => (problemaDispensado = problemaChave)}>×</button>
         </div>
       {/if}
-      <PluginBand tree={pluginBand} />
+      {#each pluginPanes as pane (pane.id)}
+        <PluginPane {pane} onPress={pressPlugin} />
+      {/each}
+      <PluginBand tree={pluginBand} onPress={pressPlugin} notice={pluginNotice} />
       <!-- Composer SEMPRE visivel (exceto sessao morta). Antes ele sumia em awaiting_input e,
            se as opcoes nao fossem parseadas, o usuario ficava sem input E sem botoes = preso.
            Os OptionButtons continuam aparecendo na lista; o composer fica como saida garantida. -->
