@@ -279,6 +279,11 @@ impl TerminalDriver {
     }
     async fn verify(&self) -> Result<InputFacts, IoFailure> {
         let facts = self.facts().await?;
+        self.verify_pane().await?;
+        Ok(facts)
+    }
+    /// Mesmo pane e mesma vida do multiplexador, sem perguntar pela conversa.
+    async fn verify_pane(&self) -> Result<(), IoFailure> {
         let output = self.raw(vec!["display-message".into(), "-p".into(), "-t".into(), self.binding.pane.clone(), "#{session_name}\t#{pane_id}\t#{session_created}".into()], vec![]).await?;
         if !output.success { return Err(IoFailure { code: "identity_failed", may_have_written: false }); }
         let output = std::str::from_utf8(&output.stdout).map_err(|_| IoFailure { code: "identity_utf8", may_have_written: false })?;
@@ -288,7 +293,7 @@ impl TerminalDriver {
             || fields[2].parse::<u64>().ok() != Some(self.binding.created) {
             return Err(IoFailure { code: "stale_mux", may_have_written: false });
         }
-        Ok(facts)
+        Ok(())
     }
     async fn effect(&self, args: Vec<String>, stdin: Vec<u8>) -> Result<(), IoFailure> {
         self.verify().await?;
@@ -307,7 +312,7 @@ impl TerminalDriver {
         self.verify().await?;
         self.composer_capture_unverified().await
     }
-    /// Leitura sem conferir o vínculo: só para provar o próprio `/clear`, que troca a conversa.
+    /// Leitura sem conferir a conversa: só para provar o próprio `/clear`, que a troca.
     async fn composer_capture_unverified(&self) -> Result<(String, String), IoFailure> {
         let mut args = vec!["capture-pane".into(), "-p".into()];
         // psmux sem prova de que entende `-e`: no Windows a leitura continua sem estilo.
@@ -447,7 +452,9 @@ impl TerminalDriver {
         let clear = text.split_whitespace().next() == Some("/clear");
         for _ in 0..self.limits.proof_attempts.max(1) {
             self.settle().await;
-            let capture = if clear { self.composer_capture_unverified().await } else { self.composer_capture().await };
+            let capture = if clear {
+                match self.verify_pane().await { Ok(()) => self.composer_capture_unverified().await, Err(e) => Err(e) }
+            } else { self.composer_capture().await };
             if let Ok((screen, typed)) = capture {
                 if ComposerSnapshot::parse(&typed).is_some_and(|now| now.is_empty()) {
                     return DeliveryResult::new(Disposition::Accepted, DeliveryStage::SubmitProof, "submitted");
