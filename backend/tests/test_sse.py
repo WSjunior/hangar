@@ -285,3 +285,51 @@ async def test_troca_de_provider_refaz_o_stream(monkeypatch):
     await asyncio.wait_for(_consumir(), timeout=15)
     # `reset` primeiro (o front tem que reler o history), a bolha do adapter certo depois.
     assert "reset" in vistos and vistos.index("reset") < vistos.index("message")
+
+
+@pytest.mark.asyncio
+async def test_clear_reinstalls_the_live_preview_getter_after_another_chat_closed(monkeypatch):
+    """O broker de prévia usa o leitor de transcript da conexão mais recente. Fechada essa conexão,
+    o leitor dela fica congelado no transcript anterior; no /clear da conexão viva a prévia achava
+    que a sessão tinha trocado de dono e parava de vez. O reset reinstala o leitor de quem segue aberto."""
+    from app.registry import session_key
+    monkeypatch.setattr("app.sse.get_adapter", lambda provider: _AdapterPorProvider(provider))
+
+    class _Info:
+        name = "s1"
+        jsonl = "/c/a.jsonl"
+        provider = "claude"
+
+    async def _lista():
+        return [_Info()]
+
+    monkeypatch.setattr("app.sse._cached_list", _lista)
+    getters = []
+
+    def _get(name, provider, stem_get=None):
+        if stem_get is not None:
+            getters.append(stem_get)
+        return type("_S", (), {"subscribe": lambda self: _empty_agen(), "reset": lambda self: None})()
+
+    monkeypatch.setattr("app.sse.PreviewBroker", type("_B", (), {"get": staticmethod(_get)}))
+    live = merged_events("s1", "/c/a.jsonl", provider="claude")
+    closed = merged_events("s1", "/c/a.jsonl", provider="claude")
+    vistos = []
+
+    async def _consumir():
+        async for ev in live:
+            vistos.append(ev["event"])
+            if ev["event"] == "reset":
+                return
+
+    consumer = asyncio.create_task(_consumir())
+    other = asyncio.create_task(anext(closed))
+    await asyncio.sleep(0.2)
+    other.cancel()
+    await asyncio.gather(other, return_exceptions=True)
+    await closed.aclose()
+    assert len(getters) == 2
+    _Info.jsonl = "/c/b.jsonl"
+    await asyncio.wait_for(consumer, timeout=15)
+    await live.aclose()
+    assert getters[-1]() == session_key("/c/b.jsonl")

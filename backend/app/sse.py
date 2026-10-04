@@ -1076,6 +1076,10 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                                          # broker republicava a conversa velha na 1a reconexao
                                          # (a supressao acabou de ser desarmada na linha acima)
                 current_jsonl = data
+                # O broker lê o transcript pela conexão que o pegou por último; se ela já fechou, o
+                # leitor dela ficou no transcript apagado e a prévia parava de vez. Quem fez o reset
+                # está viva: reinstala o leitor dela.
+                broker = _broker_de(current_provider)
                 ask_q_emitted = False
                 tail_task = asyncio.create_task(tail_pump(data))
                 tasks.append(tail_task)
