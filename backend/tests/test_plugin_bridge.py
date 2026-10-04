@@ -578,8 +578,9 @@ async def test_confirmacao_de_clique_casa_site_e_chave_depois_do_clique():
         await pb.pressed(pb.PressedBody(**_ponte("pane-d", requestId="review-mr", element="cp-1")))
         assert await pb.esperar_press("pane-d", "review-mr", "cp-1", desde, 0.5)
         assert not await pb.esperar_press("pane-d", "above-prompt", "cp-1", desde, 0.05)
-        await pb.copied(pb.CopiedBody(**_ponte("pane-d", text="https://gitlab.exemplo/mr/1")))
-        assert await pb.esperar_efeito("pane-d", desde, 0.5) == ("https://gitlab.exemplo/mr/1", None)
+        tentativa = pb.esperar_clique_do_app("pane-d", "review-mr", "cp-1", 2)
+        await pb.copied(pb.CopiedBody(**_ponte("pane-d", attempt=tentativa, text="https://gitlab.exemplo/mr/1")))
+        assert await pb.esperar_efeito("pane-d", tentativa, 0.5) == ("https://gitlab.exemplo/mr/1", None)
     finally:
         pb.esquecer("pane-d")
 
@@ -592,13 +593,13 @@ def test_confirmacao_com_token_errado_e_recusada():
 def test_press_start_responde_sim_uma_vez_para_o_clique_esperado():
     c = _cliente()
     try:
-        pb.esperar_clique_do_app("pane-f", "above-prompt", "rv-1", 2)
+        tentativa = pb.esperar_clique_do_app("pane-f", "above-prompt", "rv-1", 2)
         corpo = _ponte("pane-f", requestId="above-prompt", element="rv-1")
-        assert c.post("/api/plugin/press-start", json=corpo).json() == {"fromApp": True}
-        assert c.post("/api/plugin/press-start", json=corpo).json() == {"fromApp": False}
+        assert c.post("/api/plugin/press-start", json=corpo).json() == {"fromApp": True, "attempt": tentativa}
+        assert c.post("/api/plugin/press-start", json=corpo).json() == {"fromApp": False, "attempt": None}
         pb.esperar_clique_do_app("pane-f", "above-prompt", "rv-1", 2)
         outro = _ponte("pane-f", requestId="above-prompt", element="outro")
-        assert c.post("/api/plugin/press-start", json=outro).json() == {"fromApp": False}
+        assert c.post("/api/plugin/press-start", json=outro).json() == {"fromApp": False, "attempt": None}
     finally:
         pb.esquecer("pane-f")
 
@@ -606,8 +607,9 @@ def test_press_start_responde_sim_uma_vez_para_o_clique_esperado():
 def test_opened_so_aceita_http():
     c = _cliente()
     try:
-        assert c.post("/api/plugin/opened", json=_ponte("pane-g", url="file:///etc/passwd")).status_code == 400
-        assert c.post("/api/plugin/opened", json=_ponte("pane-g", url="https://x.exemplo")).status_code == 200
+        tentativa = pb.esperar_clique_do_app("pane-g", "above-prompt", "a", 2)
+        assert c.post("/api/plugin/opened", json=_ponte("pane-g", attempt=tentativa, url="file:///etc/passwd")).status_code == 400
+        assert c.post("/api/plugin/opened", json=_ponte("pane-g", attempt=tentativa, url="https://x.exemplo")).status_code == 200
     finally:
         pb.esquecer("pane-g")
 
@@ -621,3 +623,33 @@ def test_ancora_da_faixa_considera_o_rotulo_do_botao():
         assert pb.band_anchor("ancora") == "[ abrir sonda ]"
     finally:
         pb.esquecer("ancora")
+
+
+@pytest.mark.asyncio
+async def test_efeito_so_vale_para_a_tentativa_aberta():
+    # A cópia atrasada de um clique não pode cair no clique seguinte (outro aparelho, outro convidado).
+    try:
+        t1 = pb.esperar_clique_do_app("pane-h", "above-prompt", "a", 2)
+        assert (await pb.press_start(pb.PressStartBody(**_ponte("pane-h", requestId="above-prompt", element="a"))))["attempt"] == t1
+        pb.encerrar_clique_do_app("pane-h", t1)
+        t2 = pb.esperar_clique_do_app("pane-h", "above-prompt", "b", 2)
+        with pytest.raises(HTTPException) as e:
+            await pb.copied(pb.CopiedBody(**_ponte("pane-h", attempt=t1, text="do clique 1")))
+        assert e.value.status_code == 409
+        await pb.copied(pb.CopiedBody(**_ponte("pane-h", attempt=t2, text="do clique 2")))
+        assert await pb.esperar_efeito("pane-h", t2, 0.1) == ("do clique 2", None)
+        assert await pb.esperar_efeito("pane-h", t1, 0.05) == (None, None)
+    finally:
+        pb.esquecer("pane-h")
+
+
+@pytest.mark.asyncio
+async def test_efeito_depois_da_resposta_volta_para_o_terminal():
+    try:
+        t = pb.esperar_clique_do_app("pane-i", "above-prompt", "a", 2)
+        pb.encerrar_clique_do_app("pane-i", t)
+        with pytest.raises(HTTPException) as e:
+            await pb.opened(pb.OpenedBody(**_ponte("pane-i", attempt=t, url="https://x.exemplo")))
+        assert e.value.status_code == 409
+    finally:
+        pb.esquecer("pane-i")

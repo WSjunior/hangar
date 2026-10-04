@@ -270,6 +270,7 @@ def esquecer(name: str) -> None:
         _copied.pop(name, None)
         _opened.pop(name, None)
         _esperado.pop(name, None)
+        _tentativa.pop(name, None)
     _eventos.pop(name, None)
     _band_wakers.pop(name, None)
     _press_wakers.pop(name, None)
@@ -447,7 +448,8 @@ async def esperar_faixa(name: str, vista: int, timeout: float) -> int:
 
 # Cliques e cópias que o plugin confirmou: o pedido de clique do app espera por eles.
 _pressed: dict[str, list[tuple[float, str, str]]] = {}
-_copied: dict[str, tuple[float, str]] = {}
+# Efeito do clique do app, pela tentativa a que pertence: (tentativa, texto ou URL).
+_copied: dict[str, tuple[str, str]] = {}
 _press_wakers: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Event]] = {}
 
 
@@ -479,36 +481,58 @@ async def esperar_press(name: str, site: str, key: str, desde: float, timeout: f
     return bool(await _esperar_ate(name, achou, timeout))
 
 
-async def esperar_efeito(name: str, desde: float, timeout: float) -> tuple[str | None, str | None]:
-    """O que o clique do app fez depois de `desde`: (texto copiado, URL aberta). Volta assim que um
+async def esperar_efeito(name: str, tentativa: str, timeout: float) -> tuple[str | None, str | None]:
+    """O que o clique do app fez nesta tentativa: (texto copiado, URL aberta). Volta assim que um
     dos dois chega, ou vazio depois de `timeout`."""
     def achou():
         with _lock:
-            tc, texto = _copied.get(name, (0.0, ""))
-            to, url = _opened.get(name, (0.0, ""))
-        efeito = (texto if tc >= desde else None, url if to >= desde else None)
+            tc, texto = _copied.get(name, ("", ""))
+            to, url = _opened.get(name, ("", ""))
+        efeito = (texto if tc == tentativa else None, url if to == tentativa else None)
         return efeito if any(efeito) else None
     return await _esperar_ate(name, achou, timeout) or (None, None)
 
 
 # Clique que o app pediu e o backend acabou de mandar ao terminal: o plugin pergunta no `ui.press`
-# se é esse, para abrir URL e copiar no aparelho de quem clicou.
-_esperado: dict[str, tuple[str, str, float]] = {}
-_opened: dict[str, tuple[float, str]] = {}
+# se é esse, para abrir URL e copiar no aparelho de quem clicou. A tentativa fica aberta até a
+# resposta ir ao app; efeito que chega depois volta para o terminal.
+_esperado: dict[str, tuple[str, str, float, str]] = {}
+_tentativa: dict[str, str] = {}
+_opened: dict[str, tuple[str, str]] = {}
 
 
-def esperar_clique_do_app(name: str, site: str, key: str, prazo: float) -> None:
+def esperar_clique_do_app(name: str, site: str, key: str, prazo: float) -> str:
+    tentativa = secrets.token_hex(8)
     with _lock:
-        _esperado[name] = (site, key, time.monotonic() + prazo)
+        _esperado[name] = (site, key, time.monotonic() + prazo, tentativa)
+        _tentativa[name] = tentativa
+    return tentativa
 
 
-def _do_app(name: str, site: str, key: str) -> bool:
+def encerrar_clique_do_app(name: str, tentativa: str) -> None:
+    with _lock:
+        if _tentativa.get(name) == tentativa:
+            del _tentativa[name]
+        if name in _esperado and _esperado[name][3] == tentativa:
+            del _esperado[name]
+
+
+def _do_app(name: str, site: str, key: str) -> str | None:
     with _lock:
         esperado = _esperado.get(name)
         if not esperado or esperado[:2] != (site, key) or time.monotonic() > esperado[2]:
-            return False
+            return None
         del _esperado[name]
-        return True
+        return esperado[3]
+
+
+def _guardar_efeito(tabela: dict, name: str, tentativa: str, valor: str) -> None:
+    with _lock:
+        if _tentativa.get(name) != tentativa:
+            # 409: o plugin segue com o `next` e a ação acontece no terminal, em vez de sumir.
+            raise HTTPException(409, detail="clique do app já respondido")
+        tabela[name] = (tentativa, valor)
+    _acordar_press(name)
 
 
 # Trecho da âncora: o terminal corta a linha da faixa com reticências quando o pane é estreito.
@@ -943,16 +967,15 @@ async def pressed(body: PressedBody):
 class CopiedBody(BaseModel):
     sessao: str
     token: str
-    text: str = Field(max_length=8192)
+    attempt: str = Field(min_length=1, max_length=64)
+    text: str = Field(max_length=65536)
 
 
 @plugin_router.post("/copied")
 async def copied(body: CopiedBody):
     """Um mod copiou um texto num clique do app: vai ao app, que copia no aparelho de quem clicou."""
     _confere(body.sessao, body.token)
-    with _lock:
-        _copied[body.sessao] = (time.monotonic(), body.text)
-    _acordar_press(body.sessao)
+    _guardar_efeito(_copied, body.sessao, body.attempt, body.text)
     return {"ok": True}
 
 
@@ -967,13 +990,15 @@ class PressStartBody(BaseModel):
 async def press_start(body: PressStartBody):
     """O press que começou no terminal é o clique que o app pediu? Responde sim uma vez só."""
     _confere(body.sessao, body.token)
-    return {"fromApp": _do_app(body.sessao, body.requestId, body.element)}
+    tentativa = _do_app(body.sessao, body.requestId, body.element)
+    return {"fromApp": tentativa is not None, "attempt": tentativa}
 
 
 class OpenedBody(BaseModel):
     sessao: str
     token: str
-    url: str = Field(max_length=4096)
+    attempt: str = Field(min_length=1, max_length=64)
+    url: str = Field(max_length=8192)
 
 
 @plugin_router.post("/opened")
@@ -982,9 +1007,7 @@ async def opened(body: OpenedBody):
     _confere(body.sessao, body.token)
     if not re.match(r"^https?://", body.url, re.IGNORECASE):
         raise HTTPException(400, detail="só http(s)")
-    with _lock:
-        _opened[body.sessao] = (time.monotonic(), body.url)
-    _acordar_press(body.sessao)
+    _guardar_efeito(_opened, body.sessao, body.attempt, body.url)
     return {"ok": True}
 
 

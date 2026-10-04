@@ -39,14 +39,19 @@ def prompt_top(screen: list[str]) -> int | None:
     return None
 
 
-def band_start(screen: list[str], top: int, anchor: str | None) -> int:
-    """Primeira linha da faixa: a da âncora (primeiro texto da árvore) mais perto da caixa de digitar."""
-    limite = max(0, top - MAX_BAND_ROWS)
+def anchor_row(screen: list[str], top: int, anchor: str | None) -> int | None:
+    """A linha da âncora (primeiro texto da faixa) mais perto da caixa de digitar, se aparece."""
     if anchor:
-        for r in range(top - 1, limite - 1, -1):
+        for r in range(top - 1, max(0, top - MAX_BAND_ROWS) - 1, -1):
             if anchor in screen[r]:
                 return r
-    return limite
+    return None
+
+
+def band_start(screen: list[str], top: int, anchor: str | None) -> int:
+    """Primeira linha da faixa: a da âncora; sem ela, o teto de linhas acima da caixa de digitar."""
+    linha = anchor_row(screen, top, anchor)
+    return max(0, top - MAX_BAND_ROWS) if linha is None else linha
 
 
 def find_label(screen: list[str], label: str, rows: range, lo: int, hi: int | None) -> list[tuple[int, int]]:
