@@ -428,7 +428,9 @@ def test_transferred_stdio_budget_survives_restart_and_resume(ambiente, monkeypa
             assert transfers.load_transfer(transfer_id).phase == transfers.TransferPhase.COMPLETE
             assert not (ambiente / "turno.txt").exists()
         finally:
-            adapter.close_sync("imported")
+            # Fora do laço, como nos outros testes: o encerramento espera o cano sair de fato, e o
+            # laço preso aqui não recolheria o processo filho.
+            await asyncio.to_thread(adapter.close_sync, "imported")
     asyncio.run(body())
 
 

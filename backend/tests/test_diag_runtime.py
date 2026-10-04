@@ -205,6 +205,10 @@ def test_clipboard_exports_real_failure_stage(monkeypatch, stage):
     # os.name altera também pathlib; a pasta do diário já é um Path do host real.
     base = diag._base()
     monkeypatch.setattr(diag, "_base", lambda: base)
+    # A trava do clipboard também mora numa pasta do host: resolvida antes de fingir Windows.
+    from app import runtime_terminal
+    lock = runtime_terminal._clipboard_lock_path()
+    monkeypatch.setattr(runtime_terminal, "_clipboard_lock_path", lambda: lock)
     with monkeypatch.context() as win:
         win.setattr(tmux.os, "name", "nt")
         assert tmux.paste_via_clipboard("sessao", "segredo") is False
