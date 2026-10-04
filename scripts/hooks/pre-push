@@ -54,7 +54,8 @@ while read -r _localref localsha _remoteref remotesha; do
         # já buscado de outro remote escapa da varredura mesmo sendo novo pro alvo. Teto aceito.
         intervalo="$localsha --not --remotes"          # branch nova: só o que o remoto ainda não tem
     else
-        intervalo="$remotesha..$localsha"
+        # Merge da main traz commits que já estão publicados em outra branch: não são deste push.
+        intervalo="$remotesha..$localsha --not --remotes"
     fi
     # Só linhas ADICIONADAS pelos commits que vão sair; a própria trava fica de fora (precisa
     # conter os padrões pra procurá-los — mesmo motivo do pre-commit).
