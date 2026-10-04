@@ -1875,9 +1875,13 @@ class SessionRegistry:
                 asyncio.to_thread(_claude_reading, i, self._agent_pid.get(i.name))
                 for i in claudes])
             for info, (ctx, model) in zip(claudes, lidos):
-                _, jsonl_antes, anterior, _ = self._context_cache.get(info.name, (0.0, None, None, None))
-                # Sem resposta lida, o valor anterior só vale para o MESMO transcript.
-                manter = anterior if jsonl_antes == info.jsonl else None
+                _, jsonl_antes, anterior, modelo_antes = self._context_cache.get(info.name, (0.0, None, None, None))
+                # Sem resposta lida, o valor anterior só vale para o MESMO transcript; o modelo também,
+                # senão a pílula cai no da conta quando a resposta sai do trecho lido.
+                mesmo = jsonl_antes == info.jsonl
+                manter = anterior if mesmo else None
+                if ctx is None and mesmo and modelo_antes:
+                    model = modelo_antes
                 self._context_cache[info.name] = (time.monotonic(), info.jsonl, ctx or manter, model)
         for info in infos:
             if getattr(info, "provider", "claude") == "claude":

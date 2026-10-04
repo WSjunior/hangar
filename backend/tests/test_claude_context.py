@@ -112,6 +112,31 @@ async def test_lista_traz_o_modelo_da_conta_logo_depois_do_clear(tmp_path, monke
     assert (await reg.list_with_state())[0].model == "claude-fable-5-1[1m]"
 
 
+async def test_fim_sem_resposta_no_mesmo_transcript_mantem_o_modelo(tmp_path, monkeypatch):
+    import time
+    from app import registry
+    from app.models import SessionInfo
+    from app.registry import SessionRegistry
+    (tmp_path / "settings.json").write_text(json.dumps({"model": "claude-fable-5-1[1m]"}), encoding="utf-8")
+    p = _transcript(tmp_path, _resposta(model="claude-sonnet-5-5", lido=90_000))
+    reg = SessionRegistry(projects_dir=tmp_path)
+    monkeypatch.setattr(SessionRegistry, "_context_cache", {})
+    monkeypatch.setattr(SessionRegistry, "_status_cache", {"s": (time.monotonic(), None)})
+    monkeypatch.setattr(registry, "_escolhas_status", lambda _sid: (None, None))
+    monkeypatch.setattr(registry.hook_state, "get_state", lambda _sid: ("idle", 1.0))
+    monkeypatch.setattr(registry, "pergunta_aberta", lambda _sid: None)
+    info = SessionInfo(name="s", jsonl=str(p), tracked=True, conta=f"claude:{tmp_path}")
+    monkeypatch.setattr(reg, "list", lambda: [info])
+    assert (await reg.list_with_state())[0].model == "claude-sonnet-5-5"
+    # Um resultado de ferramenta enorme empurra a última resposta para fora do trecho lido: a pílula
+    # não pode trocar para o modelo da conta enquanto o transcript é o mesmo.
+    p.write_text(json.dumps({"type": "user", "message": {"content": "x" * 100}}) + "\n", encoding="utf-8")
+    t, jsonl, ctx, model = SessionRegistry._context_cache["s"]
+    SessionRegistry._context_cache["s"] = (0.0, jsonl, ctx, model)
+    info.model = None
+    assert (await reg.list_with_state())[0].model == "claude-sonnet-5-5"
+
+
 async def test_clear_zera_o_contexto_ate_a_primeira_resposta(tmp_path, monkeypatch):
     import time
     from app import registry
