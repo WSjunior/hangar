@@ -9,7 +9,7 @@
   import { listOwnServers, onServersChanged, type Server } from '../lib/auth';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { worktreeStatus } from '../lib/worktreeStatus.svelte';
-  import { goToSession, sessionStateLabel, worktreeSizeLabel, worktreesSizeBytes as somaTamanho, worktreesSizeSum,
+  import { goToSession, reposAfterError, sessionStateLabel, worktreeSizeLabel, worktreesSizeBytes as somaTamanho, worktreesSizeSum,
            worktreeStateColor, worktreeStateLabel } from '../lib/worktreeView';
   import * as m from '../paraglide/messages';
 
@@ -37,7 +37,7 @@
         const repos = await getWorktreesForServer(s);
         for (const r of repos) for (const w of r.worktrees) worktreeStatus.put(s.id, w);
         return { servidor: s, repos, erro: '' };
-      } catch (e) { return { servidor: s, repos: [], erro: e instanceof Error ? e.message : String(e) }; }
+      } catch (e) { return { servidor: s, repos: reposAfterError(blocos, s.id), erro: e instanceof Error ? e.message : String(e) }; }
     }));
     if (meu !== geracao) return;
     blocos = out;
