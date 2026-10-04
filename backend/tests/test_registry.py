@@ -350,7 +350,7 @@ def test_engine_context_uses_the_window_from_its_recorded_agent_pid(tmp_path, mo
     reg = SessionRegistry(projects_dir=tmp_path / "projects")
     monkeypatch.setattr(registry.tmux, "list_panes_all", lambda: {name: [{
         "name": name, "pid": 4242, "cwd": str(tmp_path), "pane_id": "%1", "active": True}]})
-    monkeypatch.setattr(registry.procinfo, "_children_map", lambda: {})
+    monkeypatch.setattr(registry, "_proc_children_map", lambda *a, **k: {})
     monkeypatch.setattr(registry, "agente_do_pane", lambda pid, children=None: ("claude", 4243))
     monkeypatch.setattr(registry, "_engine_of", lambda pid: "proxy")
     monkeypatch.setattr(registry.procinfo, "_env_var_of", lambda pid, key: {

@@ -1050,8 +1050,9 @@ class ClaudeHeadlessAdapter:
             sess.initialize_done.set()
         await self._notify(sess)
         self._agendar_cota(sess)
-        # O que chegou enquanto subia está na fila: sai agora, na ordem.
-        if sess.initialize_ok and sess.vivo:
+        # O que chegou enquanto subia está na fila: sai agora, na ordem. Processo morto também drena:
+        # é o drain que religa até o teto e marca a entrada como desistida; sem ele a fila trava calada.
+        if sess.initialize_ok or not sess.vivo:
             await self._drenar_fim_de_turno(sess)
 
     async def _conectar(self, cano: dict, *, esperar: float = 0.0) -> tuple[_Ligacao, dict] | None:
