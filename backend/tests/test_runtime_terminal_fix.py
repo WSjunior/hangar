@@ -97,6 +97,7 @@ def test_first_claude_resolution_unknown_never_legacy(monkeypatch, tmp_path):
 def test_outside_provider_keeps_legacy(monkeypatch):
     owner = rc.RuntimeCoordinator()
     owner.legacy = SimpleNamespace(binding=lambda *args: None)
+    monkeypatch.setattr(terminal, 'being_born', lambda name, after=0: False)
     monkeypatch.setattr(terminal, 'outside_scope', lambda name: True, raising=False)
     assert asyncio.run(owner.prepare_session('pi-session', 'claude')) is False
 
