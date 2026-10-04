@@ -380,6 +380,26 @@ fn record_terminal_write_barrier(state:&mut State,id:&str) {
     }
 }
 
+// Sem exigir a geração atual: a trava atravessa a troca de geração da mesma conversa.
+fn holds_terminal_write(op:&Operation,conversation:&Value)->bool {
+    op.status==Status::Unknown && op.entry_id.is_some() && op.payload["kind"]=="input" && op.payload["payload"]["text"].is_string()
+        && (op.payload["payload"].get("_terminal_generation").is_some() || op.wire_attempts.keys().any(|wire|wire.starts_with("terminal:")))
+        && op.result["payload"]["native"]!=true && (conversation.is_null() || op.dispatch_cursor["conversation"]==*conversation)
+}
+
+/// A trava só sai quando a dona deixou de ser incerta e nenhuma outra da conversa resta.
+fn release_terminal_write_barrier(state:&mut State) {
+    let barrier=&state.runtime_state["terminal_write_barrier"];
+    if !barrier.is_object() {return;}
+    if barrier["operation_id"].as_str().and_then(|id|state.operations.get(id)).is_some_and(|op|op.status==Status::Unknown) {return;}
+    let conversation=barrier["conversation"].clone();
+    let heir=state.operations.iter().find(|(key,op)|!key.starts_with(CALL_PREFIX) && holds_terminal_write(op,&conversation)).map(|(key,_)|key.clone());
+    match heir {
+        Some(id)=>state.runtime_state["terminal_write_barrier"]=json!({"operation_id":id,"generation":state.generation,"conversation":conversation}),
+        None=>{state.runtime_state.as_object_mut().unwrap().remove("terminal_write_barrier");}
+    }
+}
+
 fn finalize_terminal(state:&mut State,id:&str,clock:ClockSample)->io::Result<()> {
     let op=state.operations.get(id).ok_or_else(||invalid("operação terminal ausente"))?.clone();
     if !terminal_input(state,&op) || op.terminal_finalized || !matches!(op.status,Status::Deferred|Status::Rejected) {return Ok(());}
@@ -412,6 +432,7 @@ fn recover_terminal(state:&mut State,clock:ClockSample)->io::Result<()> {
     let legacy:Vec<_>=state.operations.values().filter(|op|terminal_input(state,op)
         && op.payload["payload"].get("_terminal_generation").is_none()).map(|op|op.id.clone()).collect();
     for id in legacy {state.operations.get_mut(&id).unwrap().payload["payload"]["_terminal_generation"]=json!(state.generation);}
+    release_terminal_write_barrier(state);
     let unknown:Vec<_>=state.operations.values().filter(|op|op.status==Status::Unknown).map(|op|op.id.clone()).collect();
     for id in unknown {record_terminal_write_barrier(state,&id);}
     let materialized:Vec<_>=state.operations.values().filter(|op|terminal_input(state,op)
@@ -562,6 +583,7 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             let finalized=op.terminal_finalized && op.status==status;
             op.status = status; op.result = result;op.terminal_finalized=finalized;
             record_terminal_write_barrier(state,&id);
+            release_terminal_write_barrier(state);
             if terminal {finalize_terminal(state,&id,clock)?;}
             serde_json::to_value(&state.operations[&id])?
         }
@@ -574,8 +596,9 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             attempt["status"] = json!("accepted"); attempt["result"] = result.clone();
             if op.wire_attempts.values().all(|a|a["status"] == "accepted") && op.status != Status::Confirmed {
                 op.status = Status::Accepted; op.result = result;
+                release_terminal_write_barrier(state);
             }
-            serde_json::to_value(op)?
+            serde_json::to_value(&state.operations[&id])?
         }
         Action::ConfirmOccurrence { id, proof } => {
             if state.used_occurrences.contains_key(&proof.occurrence.id) { return Ok(json!(false)); }
@@ -592,6 +615,7 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             state.used_occurrences.insert(proof.occurrence.id.clone(),json!({"operation_id":id,"generation":state.generation,
                 "conversation":proof.occurrence.conversation,"file_identity":proof.occurrence.file_identity,"offset":proof.occurrence.offset}));
             state.operations.get_mut(&id).unwrap().status = Status::Confirmed;
+            release_terminal_write_barrier(state);
             json!(true)
         }
         Action::Recover => {

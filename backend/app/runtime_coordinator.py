@@ -194,13 +194,17 @@ class RuntimeCoordinator:
                 return False
             if self.managed_queue(name) and self.slot(name).binding.key != binding.key:
                 previous = self.slot(name)
-                async with self.freeze(name):
-                    if previous.phase != Phase.Python:
-                        await self.detach(name, restore=False)
-                    previous.lease.close()
-                    previous.lease = None
-                    previous.phase = Phase.RecoveringPython
+                if previous.awaiting_identity:
+                    # Registro em espera nunca teve posse, fila nem dono no Rust: não há o que soltar.
                     self.names.pop(name, None)
+                else:
+                    async with self.freeze(name):
+                        if previous.phase != Phase.Python:
+                            await self.detach(name, restore=False)
+                        previous.lease.close()
+                        previous.lease = None
+                        previous.phase = Phase.RecoveringPython
+                        self.names.pop(name, None)
             slot = self.slots.get(binding.key)
             if slot is None:
                 slot = await asyncio.to_thread(self.register, binding)

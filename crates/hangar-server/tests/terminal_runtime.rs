@@ -82,13 +82,16 @@ mode=sys.argv[1]
 if mode in ('--child','--grand'):
  open(path+mode+'.pid','w').write(str(os.getpid()))
  if mode=='--child':subprocess.Popen([sys.executable,__file__,'--grand'])
- else:time.sleep(.5);open(path,'w').write('late')
+ else:time.sleep(2.5);open(path,'w').write('late')
  time.sleep(10)
 elif mode=='--other':time.sleep(10)
 elif mode=='display-message':print('session\t%1\t1')
 elif mode=='capture-pane':print('─'*32+'\n❯ \n'+'─'*32)
 elif mode=='send-keys' and '-l' in sys.argv:
  subprocess.Popen([sys.executable,__file__,'--child'])
+ # O prazo só pode vencer com o neto já nascido; senão o teste não prova nada.
+ deadline=time.monotonic()+10
+ while not os.path.exists(path+'--grand.pid') and time.monotonic()<deadline:time.sleep(.005)
  time.sleep(10)
 "#,json!(late.to_str().unwrap()));
     std::fs::write(&script,code).unwrap();
@@ -96,13 +99,15 @@ elif mode=='send-keys' and '-l' in sys.argv:
     let mut other=std::process::Command::new(&python).arg(&script).arg("--other").spawn().unwrap();
     f.target.binding.mux_argv=vec![python,"-X".into(),"utf8".into(),script.to_str().unwrap().into()];*f.mux.lock().unwrap()=f.target.binding.mux_argv.clone();
     let lease=queue::acquire_lease(&f.target.lease_path).unwrap();let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
-    let options=TerminalOptions {io:Arc::new(ProcessIo {command_timeout:Duration::from_millis(150),socket_timeout:Duration::from_millis(150)}),
+    let options=TerminalOptions {io:Arc::new(ProcessIo {command_timeout:Duration::from_millis(1500),socket_timeout:Duration::from_millis(150)}),
         limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1,..InputLimits::default()},tick:Duration::from_secs(10)};
     let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
-    let result=tokio::time::timeout(Duration::from_secs(4),h.command(f.command("timeout","A"))).await.unwrap().unwrap();
+    let result=tokio::time::timeout(Duration::from_secs(10),h.command(f.command("timeout","A"))).await.unwrap().unwrap();
     assert_eq!(result.disposition,hangar_server::runtime::protocol::Disposition::Unknown);
     h.stop().await.unwrap();let python_lease=queue::acquire_lease(&f.target.lease_path).unwrap();
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    let grandchild_born=std::path::Path::new(&format!("{}--grand.pid",late.display())).exists();
+    // O neto escreveria 2,5 s depois de nascer, e ele nasce antes do prazo de 1,5 s.
+    tokio::time::sleep(Duration::from_secs(3)).await;
     let old_writer=late.exists();let unrelated_alive=other.try_wait().unwrap().is_none();
     for suffix in if old_writer {vec!["--child.pid","--grand.pid"]}else{vec![]} {
         if let Ok(pid)=std::fs::read_to_string(format!("{}{suffix}",late.display())) {
@@ -111,7 +116,42 @@ elif mode=='send-keys' and '-l' in sys.argv:
         }
     }
     other.kill().unwrap();other.wait().unwrap();drop(python_lease);
+    assert!(grandchild_born,"timeout fired before the grandchild existed; nothing was proved");
     assert!(unrelated_alive);assert!(!old_writer,"auxiliary grandchild wrote after detach released the lease");
+}
+
+#[cfg(target_os="linux")]
+#[tokio::test]
+async fn command_leader_stays_unreaped_until_its_group_is_gone() {
+    // O neto vigia o líder: se o número dele some enquanto o grupo ainda vive, outro processo
+    // poderia herdá-lo e levar o SIGKILL do grupo.
+    let dir=tempfile::tempdir().unwrap();let script=dir.path().join("leader.py");let base=dir.path().join("probe");
+    let code=format!(r#"import os,sys,time,subprocess
+base={}
+if sys.argv[1]=='--grand':
+ leader=sys.argv[2];open(base+".ready","w").write("1")
+ while True:
+  if not os.path.exists('/proc/'+leader):open(base+'.reaped','w').write('1');break
+  time.sleep(.0002)
+ time.sleep(10)
+else:
+ subprocess.Popen([sys.executable,__file__,'--grand',str(os.getpid())],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL)
+ deadline=time.monotonic()+5
+ while not os.path.exists(base+'.ready') and time.monotonic()<deadline:time.sleep(.005)
+ print('leader-done')
+"#,json!(base.to_str().unwrap()));
+    std::fs::write(&script,code).unwrap();
+    let python=std::env::var("HANGAR_TEST_PYTHON").unwrap_or_else(|_|"python3".into());
+    let io=ProcessIo {command_timeout:Duration::from_secs(10),socket_timeout:Duration::from_secs(1)};
+    for _ in 0..5 {
+        for suffix in [".ready",".reaped"] {let _=std::fs::remove_file(format!("{}{suffix}",base.display()));}
+        let output=io.command(CommandRequest {program:python.clone(),args:vec![script.to_str().unwrap().into(),"--leader".into()],stdin:vec![]}).await.unwrap();
+        assert!(output.success);assert_eq!(String::from_utf8_lossy(&output.stdout).trim(),"leader-done");
+        assert!(std::path::Path::new(&format!("{}.ready",base.display())).exists(),"grandchild never started");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let reaped=std::path::Path::new(&format!("{}.reaped",base.display())).exists();
+        assert!(!reaped,"leader was reaped while its group was still alive");
+    }
 }
 
 #[tokio::test]
@@ -157,6 +197,18 @@ async fn unknown_fill_blocks_second_input_after_detach_restart_and_same_sid_gene
     assert_eq!(h.command(f.command("C","C")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
     assert_eq!(f.io.calls.lock().unwrap().len(),effects);assert_eq!(f.calls.lock().unwrap().len(),publications);
     assert_eq!(*f.io.text.lock().unwrap(),"A");h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn clear_with_arguments_passes_terminal_write_barrier_like_python() {
+    for text in ["/clear","  /clear keep"] {
+        let f=Fixture::new().await;f.unknown.store(true,std::sync::atomic::Ordering::Release);
+        let h=f.start();assert_eq!(h.command(f.command("A","A")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Unknown);
+        f.unknown.store(false,std::sync::atomic::Ordering::Release);
+        let result=h.command(f.command("clear",text)).await.unwrap();
+        assert_ne!(result.payload["code"],"terminal_write_barrier","{text}");
+        h.stop().await.unwrap();
+    }
 }
 
 #[tokio::test]

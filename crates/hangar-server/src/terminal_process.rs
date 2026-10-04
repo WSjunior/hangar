@@ -7,16 +7,46 @@ pub(crate) trait OwnedTree: Send {
     fn active(&mut self)->io::Result<bool>;
 }
 
-pub(crate) async fn finish(tree:&mut impl OwnedTree) {
+pub(crate) async fn finish(tree:&mut impl OwnedTree) {finish_after(tree,Duration::from_secs(5)).await}
+// Sinal aceito sem a árvore acabar (estado D) não libera a posse; só passa a ficar visível.
+async fn finish_after(tree:&mut impl OwnedTree,stuck_after:Duration) {
+    let started=tokio::time::Instant::now();let mut warned=false;
     loop {
         match tree.active() {
             Ok(false)=>return,
             Ok(true)=>if let Err(error)=tree.terminate(){report(&error);},
             Err(error)=>report(&error),
         }
+        if !warned && started.elapsed()>=stuck_after {
+            warned=true;
+            if crate::warn_limit::allow(None,"command_tree_stuck") {
+                tracing::warn!(code="command_tree_stuck",waited_ms=stuck_after.as_millis() as u64,reason="auxiliares não terminaram após o sinal; posse conservada");
+            }
+        }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
+
+/// Espera o líder sair sem recolhê-lo: o zumbi segura o número do grupo até o `finish`.
+#[cfg(any(target_os="linux",target_os="macos"))]
+pub(crate) async fn leader_exited(child:&mut Child)->io::Result<()> {
+    unsafe extern "C" {fn waitid(idtype:i32,id:u32,info:*mut u64,options:i32)->i32;}
+    const P_PID:i32=1;const WEXITED:i32=4;
+    #[cfg(target_os="linux")] const WNOWAIT:i32=0x0100_0000;
+    #[cfg(target_os="macos")] const WNOWAIT:i32=0x20;
+    let pid=child.id().ok_or_else(||io::Error::other("auxiliar sem identidade"))?;
+    tokio::task::spawn_blocking(move || {
+        let mut info=[0u64;32];
+        loop {
+            if unsafe {waitid(P_PID,pid,info.as_mut_ptr(),WEXITED|WNOWAIT)}==0 {return Ok(());}
+            let error=io::Error::last_os_error();
+            if error.kind()!=io::ErrorKind::Interrupted {return Err(error);}
+        }
+    }).await.map_err(io::Error::other)?
+}
+// Windows: o Job não depende do número do processo; demais Unix ficam com a espera comum.
+#[cfg(not(any(target_os="linux",target_os="macos")))]
+pub(crate) async fn leader_exited(child:&mut Child)->io::Result<()> {child.wait().await.map(|_|())}
 fn report(error:&io::Error) {
     if crate::warn_limit::allow(None,"command_tree_cleanup") {
         tracing::warn!(code="command_tree_cleanup",io_kind=?error.kind(),os_error=?error.raw_os_error(),reason="fim dos auxiliares ainda sem prova; posse conservada");
@@ -165,6 +195,29 @@ mod tests {
         let task=tokio::spawn(async move {finish(&mut tree).await});
         tokio::time::sleep(Duration::from_millis(60)).await;
         assert!(!task.is_finished());assert!(attempts.load(Ordering::Acquire)>0);
+        active.store(false,Ordering::Release);tokio::time::timeout(Duration::from_secs(1),task).await.unwrap().unwrap();
+    }
+    #[derive(Clone)]struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self,data:&[u8])->io::Result<usize>{self.0.lock().unwrap().extend_from_slice(data);Ok(data.len())}
+        fn flush(&mut self)->io::Result<()>{Ok(())}
+    }
+    struct UnkillableTree {active:Arc<AtomicBool>}
+    impl OwnedTree for UnkillableTree {
+        fn active(&mut self)->io::Result<bool>{Ok(self.active.load(Ordering::Acquire))}
+        fn terminate(&mut self)->io::Result<()>{Ok(())}
+    }
+    #[tokio::test]
+    async fn killed_tree_that_never_ends_warns_and_keeps_ownership() {
+        let output=Arc::new(std::sync::Mutex::new(Vec::new()));let capture=Capture(output.clone());
+        let subscriber=tracing_subscriber::fmt().without_time().with_ansi(false).with_writer(move||capture.clone()).finish();
+        let _guard=tracing::subscriber::set_default(subscriber);
+        let active=Arc::new(AtomicBool::new(true));let mut tree=UnkillableTree {active:active.clone()};
+        let task=tokio::spawn(async move {finish_after(&mut tree,Duration::from_millis(40)).await});
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!task.is_finished());
+        let text=String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert_eq!(text.matches("command_tree_stuck").count(),1,"{text}");
         active.store(false,Ordering::Release);tokio::time::timeout(Duration::from_secs(1),task).await.unwrap().unwrap();
     }
 }

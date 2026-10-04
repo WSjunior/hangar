@@ -92,8 +92,11 @@ def publish_terminal(name, conversation, generation, publication, validate):
         return pending["result"]
     finally:
         with _lock:
-            if _publications.get(name) is pending and pending["result"] != "unknown":
-                del _publications[name]
+            if _publications.get(name) is pending:
+                if pending["result"] != "unknown":
+                    del _publications[name]
+                else:
+                    pending["returned"] = True
 
 
 def _terminal_ack(body, mode):
@@ -105,6 +108,9 @@ def _terminal_ack(body, mode):
                 and body.session_id == pending["conversation"] and mode == pending["mode"]):
             pending["result"] = ("filled" if mode == "fill" else "accepted") if body.ok else "unknown"
             pending["event"].set()
+            # Aviso tardio só tira a publicação de voo; a entrada segue incerta na fila até o transcript.
+            if pending.get("returned"):
+                del _publications[body.sessao]
         return True
 
 
@@ -752,6 +758,11 @@ async def pull(body: PullBody):
         dono = _donos.get(body.sessao)
         if dono and dono[0] != body.instance and agora - dono[2] < ESPERA_S + 10:
             raise HTTPException(409, detail="outra instância do plugin já atende esta sessão")
+        retida = _publications.get(body.sessao)
+        if (not dono or dono[0] != body.instance) and retida and retida.get("returned"):
+            # Instância nova: a que podia escrever a publicação incerta não atende mais, e a trava
+            # da fila continua segurando a entrada até o transcript.
+            del _publications[body.sessao]
         _donos[body.sessao] = (body.instance, set(body.modos) or {"fill"}, agora)
         # Só semeia: com entrada do `/state`, quem manda é ela.
         if body.estado and body.sessao not in _estados:

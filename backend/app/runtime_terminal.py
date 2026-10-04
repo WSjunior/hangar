@@ -552,7 +552,7 @@ def _reserve_execute(coordinator, descriptor, command, operation_id, *, entry_id
     root = entry_id or operation_id
     binding = descriptor['meta']['terminal']
     from app.runtime_queue import terminal_write_blocked
-    if control == 'input' and payload['text'].strip() != '/clear' and terminal_write_blocked(slot.store.state, binding['conversation']):
+    if control == 'input' and payload['text'].split()[:1] != ['/clear'] and terminal_write_blocked(slot.store.state, binding['conversation']):
         result = _reply(operation_id, 'deferred', code='terminal_write_barrier', queued=bool(entry_id), cleanup='not_needed')
         _queue(coordinator, descriptor, {'kind':'finish','id':operation_id,'status':'deferred','result':result})
         return result

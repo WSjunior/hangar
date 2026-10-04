@@ -351,6 +351,34 @@ def _record_terminal_write_barrier(state, operation):
             "conversation": (operation.get("dispatch_cursor") or {}).get("conversation")}
 
 
+def _holds_terminal_write(operation, conversation):
+    # Sem exigir a geração atual: a trava atravessa a troca de geração da mesma conversa.
+    payload = operation["payload"]
+    body = payload.get("payload") if isinstance(payload, dict) else None
+    return (operation["status"] == "unknown" and operation["entry_id"] is not None and isinstance(body, dict)
+        and payload.get("kind") == "input" and isinstance(body.get("text"), str)
+        and ("_terminal_generation" in body or any(wire.startswith("terminal:") for wire in operation["wire_attempts"]))
+        and ((operation.get("result") or {}).get("payload") or {}).get("native") is not True
+        and (conversation is None or (operation.get("dispatch_cursor") or {}).get("conversation") == conversation))
+
+
+def _release_terminal_write_barrier(state):
+    """A trava só sai quando a dona deixou de ser incerta e nenhuma outra da conversa resta."""
+    barrier = state["runtime_state"].get("terminal_write_barrier")
+    if not isinstance(barrier, dict):
+        return
+    owner = state["operations"].get(barrier.get("operation_id"))
+    if owner is not None and owner["status"] == "unknown":
+        return
+    heir = min((key for key, op in state["operations"].items() if not key.startswith(_CALL_PREFIX)
+                and _holds_terminal_write(op, barrier.get("conversation"))), default=None)
+    if heir is None:
+        del state["runtime_state"]["terminal_write_barrier"]
+    else:
+        state["runtime_state"]["terminal_write_barrier"] = {
+            "operation_id": heir, "generation": state["generation"], "conversation": barrier.get("conversation")}
+
+
 def _finalize_terminal(state, operation_id, clock):
     operation = state["operations"][operation_id]
     if (not _terminal_input(state, operation) or operation.get("terminal_finalized")
@@ -385,6 +413,7 @@ def _finalize_terminal(state, operation_id, clock):
 
 
 def _recover_terminal(state, clock):
+    _release_terminal_write_barrier(state)
     for operation in state["operations"].values():
         if _terminal_input(state, operation):
             operation["payload"]["payload"].setdefault("_terminal_generation", state["generation"])
@@ -494,6 +523,7 @@ def apply_action(state, action, clock, call_id):
             attempt.update(status="accepted", result=action["result"])
             if all(wire["status"] == "accepted" for wire in operation["wire_attempts"].values()) and operation["status"] != "confirmed":
                 operation.update(status="accepted", result=action["result"])
+                _release_terminal_write_barrier(state)
         else:
             status = action.get("status", "accepted")
             terminal = _terminal_input(state, operation)
@@ -510,6 +540,7 @@ def apply_action(state, action, clock, call_id):
             finalized = operation.get("terminal_finalized") and operation["status"] == status
             operation.update(status=status, result=action.get("result"))
             _record_terminal_write_barrier(state, operation)
+            _release_terminal_write_barrier(state)
             if terminal:
                 if finalized:
                     operation["terminal_finalized"] = True
@@ -560,6 +591,7 @@ def apply_action(state, action, clock, call_id):
             "conversation": occurrence["conversation"], "file_identity": occurrence["file_identity"],
             "offset": occurrence["offset"]}
         operation["status"] = "confirmed"
+        _release_terminal_write_barrier(state)
         return True
     if kind == "set_runtime_state":
         if not isinstance(action["state"], dict):

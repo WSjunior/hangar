@@ -129,13 +129,14 @@ impl TerminalIo for ProcessIo {
                     Ok(bytes)
                 };
                 let (_, bytes) = tokio::try_join!(input, output)?;
-                let status = child.wait().await?;
-                Ok::<_, std::io::Error>(CommandOutput { success: status.success(), stdout: bytes })
+                // Líder recolhido antes do `finish` soltaria o número do grupo para reuso.
+                crate::terminal_process::leader_exited(&mut child).await?;
+                Ok::<_, std::io::Error>(bytes)
             };
             let result=timeout(self.command_timeout,work).await;
             crate::terminal_process::finish(&mut tree).await;
-            child.wait().await.map_err(|_|IoFailure {code:"command_wait_failed",may_have_written:true})?;
-            match result {Ok(Ok(output))=>Ok(output),_=>Err(IoFailure {code:"command_uncertain",may_have_written:true})}
+            let status=child.wait().await.map_err(|_|IoFailure {code:"command_wait_failed",may_have_written:true})?;
+            match result {Ok(Ok(stdout))=>Ok(CommandOutput {success:status.success(),stdout}),_=>Err(IoFailure {code:"command_uncertain",may_have_written:true})}
         })
     }
     fn socket<'a>(&'a self, descriptor: &'a NativeMessage, envelope: Vec<u8>) -> IoFuture<'a, WriteOutcome> {

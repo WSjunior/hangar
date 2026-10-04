@@ -172,3 +172,42 @@ fn absent_transcript_one_echo_cannot_confirm_two_equal_inputs_after_compact_reop
     assert_eq!(store.exec(1,"confirm-second",clock(),Action::ConfirmOccurrence {id:"input-2".into(),proof}).unwrap(),false);
     assert_eq!(store.state().rows[0]["confirmed"],true);assert_ne!(store.state().rows[1]["confirmed"],true);
 }
+
+#[test]
+fn terminal_write_barrier_follows_remaining_uncertain_input_and_lifts_after_last() {
+    use hangar_server::runtime::receipt::ReceiptIndex;
+    for resolution in ["confirm","late_accepted"] {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("state");let transcript=dir.path().join("sid.jsonl");
+        let mut index=ReceiptIndex::new("claude","sid");let cursor=index.capture(&transcript).unwrap();
+        let mut store=Store::open(&path,dir.path(),State::new("key",1,"session",vec![])).unwrap();
+        for text in ["A","B"] {
+            store.exec(1,&format!("append:{text}"),clock(),Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(text.into())}).unwrap();
+            store.exec(1,&format!("prepare:{text}"),clock(),Action::Prepare {id:text.into(),payload:json!({"kind":"input","payload":{"text":text,"_terminal_generation":1}}),entry_id:Some(text.into())}).unwrap();
+            store.exec(1,&format!("cursor:{text}"),clock(),Action::BindDispatch {id:text.into(),cursor:serde_json::to_value(&cursor).unwrap()}).unwrap();
+            store.exec(1,&format!("dispatch:{text}"),clock(),Action::BeginDispatch {id:text.into(),wire_id:format!("terminal:1:{text}")}).unwrap();
+            store.exec(1,&format!("finish:{text}"),clock(),Action::Finish {id:text.into(),status:Status::Unknown,
+                result:json!({"operation_id":text,"disposition":"unknown","payload":{"cleanup":"uncertain"}})}).unwrap();
+        }
+        let millis=((cursor.absent_since.unwrap()+1.0)*1000.0) as i64;
+        let timestamp=chrono::DateTime::from_timestamp_millis(millis).unwrap().to_rfc3339();
+        std::fs::write(&transcript,["A","B"].iter().map(|text|format!("{}\n",json!({"type":"user","uuid":format!("echo-{text}"),"sessionId":"sid","timestamp":timestamp,"message":{"content":text}}))).collect::<String>()).unwrap();
+        index.scan(&transcript).unwrap();
+        let confirm=|store:&mut Store,index:&ReceiptIndex,text:&str| {
+            let row=store.state().rows.iter().find(|row|row["id"]==text).unwrap().clone();
+            let proof=index.match_after(&cursor,&row,&store.state().used_occurrences).unwrap();
+            store.exec(1,&format!("confirm:{text}"),clock(),Action::ConfirmOccurrence {id:text.into(),proof}).unwrap()
+        };
+        assert_eq!(store.state().runtime_state["terminal_write_barrier"]["operation_id"],"A");
+        assert!(store.state().terminal_write_blocked("sid"));
+        if resolution=="confirm" {assert_eq!(confirm(&mut store,&index,"A"),true);}
+        else {store.exec(1,"late:A",clock(),Action::Finish {id:"A".into(),status:Status::Accepted,result:json!({"operation_id":"A","disposition":"accepted","payload":{}})}).unwrap();}
+        // B continua incerta na mesma conversa: a trava passa para ela.
+        assert_eq!(store.state().runtime_state["terminal_write_barrier"]["operation_id"],"B","{resolution}");
+        assert!(store.state().terminal_write_blocked("sid"));
+        assert_eq!(confirm(&mut store,&index,"B"),true);
+        assert!(store.state().runtime_state.get("terminal_write_barrier").is_none(),"{resolution}");
+        assert!(!store.state().terminal_write_blocked("sid"));
+        drop(store);let store=Store::open(&path,dir.path(),State::new("key",1,"session",vec![])).unwrap();
+        assert!(!store.state().terminal_write_blocked("sid"));
+    }
+}
