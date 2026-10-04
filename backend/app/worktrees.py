@@ -193,8 +193,9 @@ def _repo_candidates(path: str | None) -> tuple[str, list[str], list[str]] | Non
 
 def claude_worktree(cwd: str | None, jsonl: str) -> str | None:
     """A pasta do mesmo repo onde o Claude trabalha. Numa worktree irmã o `cwd` do transcript nunca
-    sai da pasta de abertura: o sinal é `cd X`/`git -C X` e o arquivo editado. Editar arquivo da
-    principal não tira a sessão da worktree; `cd`, sim."""
+    sai da pasta de abertura: o sinal é `cd X`/`git -C X` e o arquivo editado. Nada na principal
+    (`cd` ou edição) tira a sessão da worktree: consultar a principal é rotina e faria o rótulo
+    alternar a cada comando."""
     last, hits = _claude_tail(jsonl)
     base = last or cwd
     repo = _repo_candidates(base)
@@ -208,7 +209,7 @@ def claude_worktree(cwd: str | None, jsonl: str) -> str | None:
         p = os.path.normpath(os.path.join(line_cwd or base, os.path.expanduser(raw)))
         if os.path.exists(p):
             owner = _owner(p, candidates)
-            if owner and (is_cd or owner != main):
+            if owner and owner != main:
                 return owner
         elif is_cd and raw.startswith(("/", "~")) and _of_this_repo(p, main, gone):
             # Pasta absoluta que sumiu: a worktree foi removida. `cd -` e `cd $W` não dizem nada.

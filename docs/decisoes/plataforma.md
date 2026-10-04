@@ -1164,9 +1164,15 @@ bloquear `_run`/`RUN` antes de I/O e conferir no teardown se alguma chamada bloq
 ele saiu do da pasta de abertura. Rotas `/git*`, `/branches` e `/checkout`, o resumo de git da
 lista, o painel de git local do nativo e o rodapé do chat usam essa pasta; arquivos, uploads,
 citações e execução continuam no `cwd`. No Claude, a pasta sai do `cwd` do transcript e das
-chamadas recentes: `cd X`/`git -C X` levam a sessão para X (inclusive de volta à principal),
-Edit/Write num arquivo de worktree levam para ela, e editar arquivo da principal não tira da
-worktree. Chamadas anteriores à última troca de `cwd` não contam.
+chamadas recentes: `cd X`/`git -C X` e Edit/Write numa worktree levam a sessão para ela. Nada na
+principal (`cd` ou edição) tira a sessão da worktree; ela volta à principal pelo `ExitWorktree`,
+quando a worktree é apagada ou quando os sinais saem da janela lida. Chamadas anteriores à última
+troca de `cwd` não contam.
+
+**Por que a principal não conta (04/10/2026):** o agente numa worktree consulta a principal o
+tempo todo (`cd <principal> && rg …`, anotações locais). Refazendo a regra comando a comando em
+cinco transcripts reais, contar o `cd` para a principal trocava o rótulo de 7 a 13 vezes por
+sessão, sempre principal ↔ worktree; sem ele, 1 a 2 trocas (a entrada na worktree).
 
 **Por quê (04/10/2026, Claude Code 2.1.289):** numa worktree irmã (`../<repo>-<x>`) o Claude Code
 devolve o shell à pasta de abertura a cada comando ("Shell cwd was reset"), e o `cwd` e o
@@ -1182,9 +1188,11 @@ Imagem lida pela sessão entra em base64 e encheu sozinha os últimos 256 KB num
 ler mais fundo, a sessão voltava a parecer na principal. Medido: 2 a 9 ms por transcript de 4 a
 23 MB, sem cache.
 
-**Limites conhecidos:** caminho em variável (`W=/x; cat > $W/a`) não é reconhecido; `cd` numa
-worktree só para inspecionar leva a sessão para lá até o próximo sinal (o mesmo do Codex). O
-Codex ainda lê só os últimos 256 KB.
+**Limites conhecidos:** caminho em variável (`W=/x; cat > $W/a`) não é reconhecido; `cd` em
+OUTRA worktree só para inspecionar leva a sessão para lá; sessão que sai da worktree para
+trabalhar de verdade na principal (sem `ExitWorktree`) segue mostrando a worktree até ela ser
+apagada ou os sinais saírem da janela. O Codex ainda lê só os últimos 256 KB e ainda conta o `cd`
+para a principal.
 
 **Contrato interno 14:** `/internal/workspace/context` passou a levar `session.git_cwd`, e o
 `workspace_routes.rs` usa essa pasta só nas operações de git. Contexto sem o campo cai no `cwd`.

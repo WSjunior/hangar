@@ -97,7 +97,8 @@ def test_locate_claude_edit_in_worktree_and_main_note_keeps_worktree(tmp_path):
     assert loc.git_cwd == wt and loc.branch == "x"
 
 
-def test_locate_claude_cd_back_to_main_and_git_c(tmp_path):
+def test_locate_claude_cd_to_main_to_look_keeps_the_worktree(tmp_path):
+    # Consultar a principal é rotina: se o `cd` para ela contasse, o rótulo alternaria a cada comando.
     main = _repo(tmp_path / "repo")
     wt = _wt(main, tmp_path / "repo-x", "x")
     f = tmp_path / "s.jsonl"
@@ -106,7 +107,19 @@ def test_locate_claude_cd_back_to_main_and_git_c(tmp_path):
         _claude_line(main, ("Bash", {"command": f"cd {wt}; ls; cd {main} && git status"})),
     ]) + "\n")
     loc = worktrees.locate("claude", main, str(f))
-    assert (loc.branch, loc.worktree_path, loc.git_cwd) == ("main", None, None)
+    assert (loc.branch, loc.worktree_path, loc.git_cwd) == ("x", wt, wt)
+
+
+def test_locate_claude_cd_into_another_worktree_moves(tmp_path):
+    main = _repo(tmp_path / "repo")
+    _wt(main, tmp_path / "repo-x", "x")
+    wy = _wt(main, tmp_path / "repo-y", "y")
+    f = tmp_path / "s.jsonl"
+    f.write_text("\n".join([
+        _claude_line(main, ("Bash", {"command": f"cd {tmp_path / 'repo-x'} && ls"})),
+        _claude_line(main, ("Bash", {"command": f"git -C {wy} status"})),
+    ]) + "\n")
+    assert worktrees.locate("claude", main, str(f)).git_cwd == wy
 
 
 def test_locate_claude_calls_before_the_last_cwd_change_do_not_count(tmp_path):

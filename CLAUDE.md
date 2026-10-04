@@ -377,7 +377,9 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   endpoint que já existe; o CLI continua como fallback e resolve identidade sozinho.
 - **O git da sessão é o da worktree onde o agente trabalha (`git_cwd`), não o da pasta de
   abertura.** O Claude Code não grava a worktree irmã no `cwd` do transcript: o sinal são as
-  chamadas recentes (`cd`, `git -C`, arquivo editado). Arquivos e execução seguem no `cwd`.
+  chamadas recentes (`cd`, `git -C`, arquivo editado). Nada na principal tira a sessão da
+  worktree: consultar a principal é rotina e faria o rótulo alternar. Arquivos e execução seguem
+  no `cwd`.
   Evidência em [plataforma.md](docs/decisoes/plataforma.md#git-da-sessão-segue-a-worktree-onde-o-agente-trabalha).
 - **Arquivo citado na conversa é LEGÍVEL e EDITÁVEL; a citação é o consentimento.** Fora da raiz
   da sessão a política de caminho é `_resolver_citado()` (aparece no transcript), não a raiz — e
