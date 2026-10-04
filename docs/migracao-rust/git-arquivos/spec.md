@@ -34,6 +34,12 @@ nas partes responsáveis da migração.
   sem serializar repositórios independentes. Falha conserva o último resumo válido na listagem.
 - Alteração possivelmente enviada nunca é repetida na reserva. O usuário recebe aviso de
   resultado sem confirmação. A implementação Python fica disponível durante a migração.
+- Reserva: vaga cheia (`workspace_busy`) recusa na hora; `git` que não iniciou, pânico em leitura
+  e metadados indisponíveis (`workspace_unavailable`) significam que nada rodou. Nesses casos o
+  pedido vai ao Python com `x-hangar-workspace-fallback`, e o Python roda o próprio código em vez
+  de voltar ao Rust pela ponte. Só `workspace_unavailable` conta no `Fallback` da sessão (a quarta
+  seguida deixa o Git/arquivos dela no Python até reiniciar). Toda falha sai no
+  `hangar-server.log` com código, sem o stderr do git; o Python registra o repasse no diário.
 - Arquivos ativos mantêm isolamento, Range, cache condicionado à autorização e ausência do token
   no documento interno do HTML.
 
