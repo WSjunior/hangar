@@ -1114,7 +1114,7 @@ export function worktreeAgeDays(w: WorktreeStatus, now = Date.now() / 1000): num
 }
 
 export function worktreeReady(w: WorktreeStatus): boolean {
-  return w.merged && !w.dirty && !w.sessions.length && !w.degraded;
+  return w.merged && !w.dirty && !w.ignored.length && !w.sessions.length && !w.degraded;
 }
 
 /** Worktree que o Claude cria para um subagente: nome gerado, agrupada à parte na lista. */

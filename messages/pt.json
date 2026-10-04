@@ -6899,6 +6899,8 @@
   "worktree_abrir_sessao_aqui": "Abrir sessão aqui",
   "worktree_nova_base_publicada": "a versão publicada",
   "worktree_tamanho_falhou": "não consegui medir",
+  "worktree_lote_com_arquivos": "Também mescladas, mas perdem arquivos. Marque só as que podem sair:",
+  "worktree_lote_apagar_n": "Apagar {n}",
   "worktree_tamanho_parcial": "≥ {tamanho}",
   "worktree_leitura_incompleta": "Não consegui ler tudo desta worktree pelo git: o que aparece pode estar incompleto.",
   "worktrees_busca_remoto_falhou": "Não consegui buscar o remoto de {repo}: mesclada e atrasada podem estar desatualizadas.",

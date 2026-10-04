@@ -83,16 +83,25 @@
   const chaveLote = (b: Bloco, repo: string) => `${b.servidor.id}::${repo}`;
 
   // A confirmação congela o que a pessoa viu: o lote apaga essas e só essas.
-  type Confirmacao = { bloco: Bloco; repo: string; deletable: WorktreeStatus[]; blocked: WorktreeStatus[] };
+  // As prontas entram sempre; as mescladas que perdem arquivos só se a pessoa marcar cada uma.
+  type Confirmacao = { bloco: Bloco; repo: string; prontas: WorktreeStatus[]; comArquivos: WorktreeStatus[];
+                       blocked: WorktreeStatus[] };
   let confirmando = $state<Confirmacao | null>(null);
+  let marcadas = $state<Record<string, boolean>>({});
+  const selecionadas = $derived(confirmando
+    ? [...confirmando.prontas, ...confirmando.comArquivos.filter((w) => marcadas[w.path])] : []);
 
   function pedirLote(b: Bloco, r: WorktreeRepo) {
-    confirmando = { bloco: b, repo: r.repo, ...mergedWorktreeBatch(r) };
+    const { deletable, blocked } = mergedWorktreeBatch(r);
+    marcadas = {};
+    confirmando = { bloco: b, repo: r.repo, prontas: deletable.filter(worktreeReady),
+                    comArquivos: deletable.filter((w) => !worktreeReady(w)), blocked };
   }
 
   async function apagarMescladas() {
-    if (!confirmando) return;
-    const { bloco: b, repo, deletable } = confirmando;
+    if (!confirmando || !selecionadas.length) return;
+    const { bloco: b, repo } = confirmando;
+    const deletable = selecionadas;
     const k = chaveLote(b, repo);
     confirmando = null;
     loteAndando = k;
@@ -342,27 +351,40 @@
   <WorktreeSheet open={true} server={aberta.servidor} path={aberta.path} onClose={() => (aberta = null)} onDeleted={carregar} />
 {/if}
 {#if confirmando}
-  {@const libera = somaTamanho(confirmando.deletable)}
-  <BottomSheet open={true} onClose={() => (confirmando = null)} ariaLabel={m.worktree_lote_titulo({ n: confirmando.deletable.length })}>
+  {@const libera = somaTamanho(selecionadas)}
+  <BottomSheet open={true} onClose={() => (confirmando = null)} ariaLabel={m.worktree_lote_titulo({ n: selecionadas.length })}>
     <div class="sheet">
-      <h2 class="title">{m.worktree_lote_titulo({ n: confirmando.deletable.length })}</h2>
-      {#if libera}<p class="libera">{m.worktree_libera({ tamanho: worktreesSizeSum(confirmando.deletable) })}</p>{/if}
-      <ul class="itens">
-        {#each confirmando.deletable as w (w.path)}
-          <li>
-            <span class="nome">{basename(w.path)}</span>
-            {#if w.dirty || w.ignored.length}
-              <span class="aviso">{m.worktree_apagar_perde()}</span>
-              <ul class="perde">
-                {#if w.dirty}<li>{m.worktree_nao_commitados({ n: w.dirty })}</li>{/if}
-                {#each w.ignored as f (f)}<li>{f}</li>{/each}
-              </ul>
-            {:else}
-              <span class="muted">{m.worktree_lote_nada_perde()}</span>
-            {/if}
-          </li>
-        {/each}
-      </ul>
+      <h2 class="title">{m.worktree_lote_titulo({ n: selecionadas.length })}</h2>
+      {#if libera}<p class="libera">{m.worktree_libera({ tamanho: worktreesSizeSum(selecionadas) })}</p>{/if}
+      {#snippet perdas(w: WorktreeStatus)}
+        {#if w.dirty || w.ignored.length}
+          <span class="aviso">{m.worktree_apagar_perde()}</span>
+          <ul class="perde">
+            {#if w.dirty}<li>{m.worktree_nao_commitados({ n: w.dirty })}</li>{/if}
+            {#each w.ignored as f (f)}<li>{f}</li>{/each}
+          </ul>
+        {:else}
+          <span class="muted">{m.worktree_lote_nada_perde()}</span>
+        {/if}
+      {/snippet}
+      {#if confirmando.prontas.length}
+        <ul class="itens">
+          {#each confirmando.prontas as w (w.path)}
+            <li><span class="nome">{basename(w.path)}</span>{@render perdas(w)}</li>
+          {/each}
+        </ul>
+      {/if}
+      {#if confirmando.comArquivos.length}
+        <p class="aviso">{m.worktree_lote_com_arquivos()}</p>
+        <ul class="itens">
+          {#each confirmando.comArquivos as w (w.path)}
+            <li>
+              <label class="marca-lote"><input type="checkbox" bind:checked={marcadas[w.path]} /> <span class="nome">{basename(w.path)}</span></label>
+              {@render perdas(w)}
+            </li>
+          {/each}
+        </ul>
+      {/if}
       {#if confirmando.blocked.length}
         <p class="aviso">{m.worktree_lote_ficam()}</p>
         <ul class="itens">
@@ -376,7 +398,7 @@
       {/if}
       <div class="acoes">
         <button type="button" class="cancelar" onclick={() => (confirmando = null)}>{m.comum_cancelar()}</button>
-        <button type="button" class="apagar" onclick={apagarMescladas}>{m.worktree_lote_confirmar()}</button>
+        <button type="button" class="apagar" disabled={!selecionadas.length} onclick={apagarMescladas}>{m.worktree_lote_apagar_n({ n: selecionadas.length })}</button>
       </div>
     </div>
   </BottomSheet>
@@ -472,4 +494,6 @@
   .acoes { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
   .cancelar { padding: 0 16px; border-radius: 8px; border: 1px solid var(--border-default); }
   .apagar { padding: 0 16px; border-radius: 8px; background: var(--error); color: #fff; font-weight: 600; }
+  .apagar:disabled { opacity: 0.5; }
+  .marca-lote { display: flex; align-items: center; gap: 8px; }
 </style>

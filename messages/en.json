@@ -6899,6 +6899,8 @@
   "worktree_abrir_sessao_aqui": "Open a session here",
   "worktree_nova_base_publicada": "the published version",
   "worktree_tamanho_falhou": "couldn't measure",
+  "worktree_lote_com_arquivos": "Also merged, but they lose files. Check only the ones that can go:",
+  "worktree_lote_apagar_n": "Delete {n}",
   "worktree_tamanho_parcial": "≥ {tamanho}",
   "worktree_leitura_incompleta": "Couldn't read all of this worktree through git: what's shown may be incomplete.",
   "worktrees_busca_remoto_falhou": "Couldn't fetch the remote of {repo}: merged and behind may be out of date.",
