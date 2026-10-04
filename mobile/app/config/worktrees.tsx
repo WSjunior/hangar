@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { basename, fetchWorktreesForServer, fmtBytes, getWorktreesForServer, mergedWorktreeBatch, relativeTime,
-         WORKTREE_STALE_DAYS, worktreeAgeDays, worktreeIsAgent, worktreeReady, worktreeState,
+import { basename, fetchWorktreesForServer, getWorktreesForServer, mergedWorktreeBatch, relativeTime,
+         WORKTREE_STALE_DAYS, worktreeAgeDays, worktreeIsAgent, worktreeReady, worktreesSizeTotal, worktreeState,
          type WorktreeRepo, type WorktreeStatus } from '@hangar/core';
 import { Pagina } from '../../src/features/config/Pagina';
 import { PageHeader, Pill } from '../../src/features/config/PageHeader';
@@ -12,7 +12,7 @@ import { useSettingsColors } from '../../src/features/config/colors';
 import { WorktreeSheet } from '../../src/features/worktrees/WorktreeSheet';
 import { WorktreeBatchSheet, type WorktreeBatch } from '../../src/features/worktrees/WorktreeBatchSheet';
 import { putWorktreeStatus } from '../../src/features/worktrees/worktreeStatus';
-import { displayTitle, SessionChips, sizeLabel, STATE_TONE, stateLabel, useStateColor } from '../../src/features/worktrees/worktreeUi';
+import { displayTitle, SessionChips, sizeLabel, sizeSumLabel, STATE_TONE, stateLabel, useStateColor } from '../../src/features/worktrees/worktreeUi';
 import { Chip } from '../../src/ui/Chip';
 import { Icon } from '../../src/ui/Icon';
 import { toast } from '../../src/ui/Toast';
@@ -34,7 +34,6 @@ const MATCH: Record<Filter, (w: WorktreeStatus) => boolean> = {
   paradas: stale,
   sem_branch: (w) => !w.branch,
 };
-const sumSize = (ws: WorktreeStatus[]) => ws.reduce((a, w) => a + (w.size ?? 0), 0);
 
 export default function Worktrees() {
   const server = useServers((s) => s.active());
@@ -134,7 +133,7 @@ export default function Worktrees() {
 
   const todas = useMemo(() => repos?.flatMap((r) => r.worktrees) ?? [], [repos]);
   const conta = (f: Filter) => todas.filter(MATCH[f]).length;
-  const prontasTamanho = fmtBytes(sumSize(todas.filter(worktreeReady)));
+  const prontasTamanho = sizeSumLabel(todas.filter(worktreeReady));
   const emUsoNomes = todas.flatMap((w) => w.sessions);
   const contadores: { f: Filter; label: string; hint: string; color: string }[] = [
     { f: 'uso', label: m.worktrees_contador_em_uso(), color: cor('session'),
@@ -219,13 +218,13 @@ export default function Worktrees() {
                 key={r.repo}
                 icon="GitBranch"
                 title={basename(r.repo)}
-                subtitle={[m.worktree_repo_resumo({ n: r.worktrees.length, tamanho: fmtBytes(sumSize(r.worktrees)) }),
+                subtitle={[m.worktree_repo_resumo({ n: r.worktrees.length, tamanho: sizeSumLabel(r.worktrees) }),
                   ...(principal ? [m.worktree_repo_principal({ branch: principal })] : [])].join(' · ')}
               >
                 {b.deletable.length ? (
                   <View style={[styles.limpar, { borderTopColor: c.border }]}>
                     <Pill icon="Trash2" onPress={() => setLote({ repo: r.repo, ...b })}
-                      label={m.worktree_limpar_mescladas({ n: limpar.length, tamanho: fmtBytes(sumSize(limpar)) })} />
+                      label={m.worktree_limpar_mescladas({ n: limpar.length, tamanho: sizeSumLabel(limpar) })} />
                   </View>
                 ) : null}
                 {principais.map((w) => <Linha key={w.path} w={w} serverId={server.id} onPick={setAberta} />)}
@@ -296,7 +295,7 @@ function Disco({ todas, onPick, demorando, onRetry }: { todas: WorktreeStatus[];
   const cor = useStateColor();
   const medidas = todas.filter((w) => (w.size ?? 0) > 0).sort((a, b) => (b.size ?? 0) - (a.size ?? 0));
   const pendente = todas.some((w) => w.size_pending);
-  const total = sumSize(medidas);
+  const prontas = todas.filter(worktreeReady);
   const maior = medidas[0]?.size ?? 1;
   const topo = medidas.slice(0, DISK_TOP);
   const resto = medidas.slice(DISK_TOP);
@@ -309,8 +308,8 @@ function Disco({ todas, onPick, demorando, onRetry }: { todas: WorktreeStatus[];
   ] as const;
   return (
     <SectionCard icon="HardDrive" title={m.worktrees_disco_titulo()}
-      subtitle={[m.worktrees_disco_resumo({ total: fmtBytes(total), n: medidas.length }),
-        m.worktrees_disco_libera({ tamanho: fmtBytes(sumSize(todas.filter(worktreeReady))) }),
+      subtitle={[m.worktrees_disco_resumo({ total: sizeSumLabel(todas), n: medidas.length }),
+        ...(worktreesSizeTotal(prontas).bytes ? [m.worktrees_disco_libera({ tamanho: sizeSumLabel(prontas) })] : []),
         ...(pendente ? [demorando ? m.worktrees_disco_demorando() : m.worktrees_disco_calculando()] : [])].join(' · ')}>
       <View style={[styles.disco, { borderTopColor: c.border }]}>
         {pendente && demorando ? (
@@ -340,7 +339,7 @@ function Disco({ todas, onPick, demorando, onRetry }: { todas: WorktreeStatus[];
         {resto.length ? (
           <View style={[styles.linhaTopo, styles.discoLinha]}>
             <Text style={[styles.meta, styles.flex, { color: c.muted }]}>{m.worktrees_disco_outras({ n: resto.length })}</Text>
-            <Text style={[styles.meta, { color: c.muted }]}>{fmtBytes(sumSize(resto))}</Text>
+            <Text style={[styles.meta, { color: c.muted }]}>{sizeSumLabel(resto)}</Text>
           </View>
         ) : null}
         <View style={styles.legendaLinha}>

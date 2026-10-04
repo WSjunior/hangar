@@ -1117,6 +1117,14 @@ export function worktreeReady(w: WorktreeStatus): boolean {
   return w.merged && !w.dirty && !w.ignored.length && !w.sessions.length && !w.degraded;
 }
 
+/** Soma do disco de várias: com alguma pendente, falha ou parcial, o total é só um mínimo. */
+export function worktreesSizeTotal(ws: WorktreeStatus[]): { bytes: number; partial: boolean } {
+  return {
+    bytes: ws.reduce((a, w) => a + (w.size ?? 0), 0),
+    partial: ws.some((w) => w.size_partial || w.size_error || w.size_pending),
+  };
+}
+
 /** Worktree que o Claude cria para um subagente: nome gerado, agrupada à parte na lista. */
 export function worktreeIsAgent(w: WorktreeStatus): boolean {
   return /[\\/]agent-[0-9a-f]{8,}$/.test(w.path.replace(/[\\/]+$/, ''));
