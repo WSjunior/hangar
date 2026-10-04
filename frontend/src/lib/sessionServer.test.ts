@@ -85,6 +85,9 @@ describe('servidor da sessão fixado no chat', () => {
     // Já fora da lista quando o chat abriu: o mesmo, nunca o ativo.
     await expect(sendInput('hangar', 'oi', sessionServerFor('sumido')())).rejects.toMatchObject({ status: 410 });
     expect(chamadas).toEqual([]);
+    // URL montada sem passar pelo fetch (anexo, imagem, WebSocket) também não cai na origem da
+    // página, que levaria o cookie de login dela.
+    expect(uploadUrl('hangar', 'a.png', false, sessao())).toMatch(/^http:\/\/servidor-removido\.invalid\//);
     expect(sessionServerFor('')()).toBeUndefined();
   });
 

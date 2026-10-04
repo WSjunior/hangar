@@ -1,4 +1,5 @@
 import { getContext, onDestroy, setContext } from 'svelte';
+import { REMOVED_BASE } from '@hangar/core';
 import { listAllServers, type Server } from './auth';
 
 // Servidor da sessão aberta no chat, fixado na entrada. O chat e as folhas dele chamam a API por
@@ -10,13 +11,13 @@ const ID_KEY = Symbol('sessionServerId');
 export type SessionServer = () => Server | undefined;
 
 // Resolve na hora da chamada: token ou endereço atualizados valem já. Desligada inclusive, como o
-// ativo (`getActiveId` também a enxerga). Fora da lista, um marcador sem endereço nem token que o
-// core recusa em toda chamada: cair no ativo mandaria a chamada a outra máquina sem ninguém ver, e
+// ativo (`getActiveId` também a enxerga). Fora da lista, um marcador sem token, com endereço que
+// nunca resolve, que o core recusa em toda chamada: cair no ativo mandaria a chamada a outra máquina sem ninguém ver, e
 // lançar aqui quebrava o chat, que lê o servidor em `$derived`, `$effect` e no reconectar do SSE.
 export function sessionServerFor(id: string): SessionServer {
   return () => {
     if (!id) return undefined;
-    return listAllServers().find((x) => x.id === id) ?? { id, label: id, baseUrl: '', token: '', removed: true };
+    return listAllServers().find((x) => x.id === id) ?? { id, label: id, baseUrl: REMOVED_BASE, token: '', removed: true };
   };
 }
 

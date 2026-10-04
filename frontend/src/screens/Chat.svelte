@@ -2004,7 +2004,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     // Codex junto: sem thread o /events 404a igual, e o EventSource fecha em CLOSED — a faixa
     // "o servidor recusou" aparecia sobre uma sessao que so ainda nao comecou.
     if (kimiPreNascimento || codexPreThread) return;
-    // Servidor que saiu da lista não tem endereço: sem ele o stream iria à origem da página.
+    // Servidor que saiu da lista: não há para onde abrir o stream.
     if (sessionServer()?.removed) { sseRecusado = true; return; }
     const destino = sessionServer()?.baseUrl ?? getBaseUrl();
     const inicio = Date.now();
