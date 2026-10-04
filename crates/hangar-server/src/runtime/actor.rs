@@ -86,6 +86,7 @@ impl RuntimeEngine {
         match &mut self.core { Core::Claude(core)=>core.start_initialize(id),Core::Codex(core)=>core.bootstrap(true,id) }
     }
     fn write_is_current(&self,id:&str) -> bool { match &self.core { Core::Claude(core)=>core.write_is_current(id),Core::Codex(core)=>core.write_is_current(id) } }
+    fn forget_policy(&mut self,id:&RequestId) { match &mut self.core { Core::Claude(core)=>core.forget_policy(id),Core::Codex(core)=>core.forget_policy(id) } }
     fn confirm_input(&mut self,id:&str) -> Vec<Effect> {
         match &mut self.core { Core::Claude(_)=>vec![Effect::Reply { operation_id:id.into(),disposition:Disposition::Accepted,payload:json!({"confirmed":true}) }],
             Core::Codex(core)=>core.confirm_input(id) }
@@ -757,9 +758,11 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             Ok(payload) => {
                                 effects.extend(engine.apply(EngineInput::PolicyResult { request_id,payload },clock(start))?);
                             }
+                            // Linha de status, carimbo ou sidecar que falhou só perde aquela parte: a sessão
+                            // segue no Rust. O motivo já foi para o log pelo cliente da política.
                             Err(failure)=>{
+                                engine.forget_policy(&request_id);
                                 publish(&events,&target,&mut revision,"problem",json!({"error_code":failure.code,"message":failure.message}));
-                                enter_error(&mut error,&target,failure);
                             },
                         }
                     }

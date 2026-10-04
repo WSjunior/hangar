@@ -180,6 +180,8 @@ impl ClaudeEngine {
     fn deliverable(&self) -> bool { self.alive && self.initialized && !self.initializing && !self.in_progress
         && self.pending.is_empty() && self.question.is_none() && self.active_input.is_none() }
 
+    pub fn forget_policy(&mut self,request_id:&RequestId) { self.policies.remove(request_id); }
+
     fn policy(&mut self, kind:&str,payload:Value,effects:&mut Vec<Effect>) {
         self.counter += 1;
         let request_id = RequestId::String(format!("policy:{}:{}",self.generation,self.counter));
