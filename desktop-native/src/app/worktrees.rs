@@ -328,7 +328,11 @@ impl Worktrees {
     fn take_list(&mut self, seq: u64, result: Result<Vec<WorktreeRepo>, String>) -> bool {
         if !self.repos.finish(seq, result) { return false; }
         if let Some(Ok(repos)) = &self.repos.value {
-            for w in repos.iter().flat_map(|r| &r.worktrees) { self.cache.insert(w.path.clone(), w.clone()); }
+            for w in repos.iter().flat_map(|r| &r.worktrees) {
+                // O painel e a confirmação de apagar leem o `detail`: lido só ao abrir, ficaria para trás da lista.
+                if !self.detail.loading && self.detail.ok().is_some_and(|d| d.path == w.path) { self.detail.value = Some(Ok(w.clone())); }
+                self.cache.insert(w.path.clone(), w.clone());
+            }
         }
         true
     }
@@ -1398,6 +1402,17 @@ mod tests {
         wt.detail.start();
         assert!(!wt.take_detail(old, Ok(st(base("/r/a")))));
         assert!(wt.cache.is_empty());
+    }
+
+    #[test]
+    fn list_reload_refreshes_the_open_detail() {
+        let mut wt = Worktrees::default();
+        let seq = wt.detail.start();
+        let mut old = base("/r/a"); old["dirty"] = json!(2);
+        wt.take_detail(seq, Ok(st(old)));
+        let seq = wt.repos.start();
+        wt.take_list(seq, Ok(vec![WorktreeRepo { repo: "/r".into(), worktrees: vec![st(base("/r/a"))] }]));
+        assert_eq!(wt.detail.ok().map(|d| d.dirty), Some(0));
     }
 
     #[test]
