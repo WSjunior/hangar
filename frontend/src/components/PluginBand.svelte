@@ -1,3 +1,9 @@
+<script lang="ts" module>
+  /** Resultado do último clique num botão de mod: "Copiado", o erro, o link que o navegador
+   *  bloqueou ou um toque que copia. */
+  export type PluginNotice = { text: string; error: boolean; href?: string; action?: () => void };
+</script>
+
 <script lang="ts">
   import { BAND_SITE, isEmptyBand, type PluginNode as Node } from '@hangar/core';
   import * as m from '../paraglide/messages';
@@ -8,8 +14,8 @@
     tree: Node;
     /** Clique num botão de mod; sem ele, os botões são só rótulo. */
     onPress?: (site: string, key: string) => void;
-    /** Resultado do último clique ("Copiado", o erro, ou o link que o navegador bloqueou); some sozinho. */
-    notice?: { text: string; error: boolean; href?: string; action?: () => void } | null;
+    /** Resultado do último clique; some sozinho. */
+    notice?: PluginNotice | null;
   }
   let { tree, onPress, notice = null }: Props = $props();
 </script>

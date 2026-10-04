@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { buttonKey, decodeRaster, textOf, type PluginElement, type PluginNode as Node, type RasterCell } from '@hangar/core';
+  import { buttonKey, decodeRaster, safeHref, textOf, type PluginElement, type PluginNode as Node, type RasterCell } from '@hangar/core';
   import { boxStyle, textStyle } from '../lib/pluginUiStyle';
   import { renderMarkdown } from '../lib/markdown';
   import PluginNode from './PluginNode.svelte';
@@ -14,8 +14,6 @@
   const el = $derived(node && typeof node === 'object' ? (node as PluginElement) : null);
   const p = $derived((el?.props ?? {}) as Record<string, unknown>);
   const str = (v: unknown) => (typeof v === 'string' ? v : '');
-  // O href vem do mod: só http(s) vira link, como no renderMarkdown; `javascript:` executaria no clique.
-  const safeHref = (v: unknown) => (typeof v === 'string' && /^https?:\/\//i.test(v) ? v : null);
 
   // Células vizinhas da mesma cor viram um trecho só: uma barra de 100 colunas não vira 100 spans.
   type Run = { text: string; fg: string | null; bg: string | null };

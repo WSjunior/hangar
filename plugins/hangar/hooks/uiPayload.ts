@@ -13,9 +13,10 @@ const isEngine = (tree: unknown) => !tree || (tree as { type?: string }).type ==
  *  painéis, depois a faixa: a faixa é o que todo mod tem. */
 export function bandBody(above: unknown, columns: number | null, panes: readonly PaneEntry[], max: number): string {
   const faixa = isEngine(above) ? null : above;
-  for (const [a, p] of [[faixa, panes], [faixa, []], [null, []]] as const) {
-    const json = `"above":${JSON.stringify(a)},"columns":${columns ?? "null"},"panes":${JSON.stringify(p)}`;
-    if (json.length <= max) return json;
-  }
-  return `"above":null,"columns":null,"panes":[]`;
+  const corpo = (a: unknown, p: readonly PaneEntry[]) =>
+    `"above":${JSON.stringify(a)},"columns":${columns ?? "null"},"panes":${JSON.stringify(p)}`;
+  const tudo = corpo(faixa, panes);
+  if (tudo.length <= max) return tudo;
+  const soFaixa = corpo(faixa, []);
+  return soFaixa.length <= max ? soFaixa : corpo(null, []);
 }

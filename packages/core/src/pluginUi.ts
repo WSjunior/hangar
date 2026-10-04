@@ -143,6 +143,11 @@ export function parsePluginUi(data: unknown): PluginSurfaces {
   };
 }
 
+/** Endereço que pode virar link ou ser aberto: só http(s). `javascript:` executaria no clique. */
+export function safeHref(v: unknown): string | null {
+  return typeof v === 'string' && /^https?:\/\//i.test(v) ? v : null;
+}
+
 /** A chave de um botão de mod, que é o que o clique manda ao backend. */
 export function buttonKey(el: PluginElement): string | null {
   const key = el.props?.key;

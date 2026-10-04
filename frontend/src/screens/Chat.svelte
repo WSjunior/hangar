@@ -5,10 +5,10 @@
   import Spinner from '../components/Spinner.svelte';
   import MessageList from '../components/MessageList.svelte';
   import Composer from '../components/Composer.svelte';
-  import PluginBand from '../components/PluginBand.svelte';
+  import PluginBand, { type PluginNotice } from '../components/PluginBand.svelte';
   import PluginPane from '../components/PluginPane.svelte';
   import { copyText } from '../lib/clipboard';
-  import { parsePluginUi, pressPluginButton, type PluginNode as PluginTree, type PluginPane as PluginPaneData } from '@hangar/core';
+  import { parsePluginUi, pressPluginButton, safeHref, type PluginNode as PluginTree, type PluginPane as PluginPaneData } from '@hangar/core';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
   import UsageSheet from '../components/UsageSheet.svelte';
@@ -460,7 +460,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   let pluginBand = $state<PluginTree>(null);
   let pluginPanes = $state<PluginPaneData[]>([]);
   // Resultado do último clique num botão de mod; some sozinho.
-  let pluginNotice = $state<{ text: string; error: boolean; href?: string; action?: () => void } | null>(null);
+  let pluginNotice = $state<PluginNotice | null>(null);
   let pluginNoticeTimer: ReturnType<typeof setTimeout> | undefined;
   function showPluginNotice(text: string, error: boolean, extra: { href?: string; action?: () => void } = {}) {
     clearTimeout(pluginNoticeTimer);
@@ -472,26 +472,22 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   async function pressPlugin(site: string, key: string) {
     try {
       const r = await pressPluginButton(sessionName, site, key);
-      if (r.copied) {
-        const texto = r.copied;
-        try {
-          await navigator.clipboard.writeText(texto);
-          showPluginNotice(m.plugin_copiado(), false);
-        } catch {
-          // Depois do `await` o iOS já não conta o toque como gesto, e na LAN por http nem há
-          // Clipboard API: o aviso vira um botão que copia dentro do próximo toque.
-          showPluginNotice(m.plugin_toque_para_copiar(), false, {
-            action: () => void copyText(texto).then(() => showPluginNotice(m.plugin_copiado(), false)),
-          });
-        }
+      const texto = r.copied;
+      if (texto) {
+        // Depois do `await` o iOS já não conta o toque como gesto: o aviso vira um botão que copia
+        // dentro do próximo toque.
+        if (await copyText(texto)) showPluginNotice(m.plugin_copiado(), false);
+        else showPluginNotice(m.plugin_toque_para_copiar(), false, {
+          action: () => void copyText(texto).then((ok) => ok && showPluginNotice(m.plugin_copiado(), false)),
+        });
       }
-      if (r.opened && /^https?:\/\//i.test(r.opened)) {
-        const janela = window.open(r.opened, '_blank', 'noopener,noreferrer');
-        // Depois do `await` o navegador pode não contar mais como gesto da pessoa e bloquear a janela.
-        if (!janela) showPluginNotice(m.plugin_link_bloqueado(), false, { href: r.opened });
+      const url = safeHref(r.opened);
+      // Depois do `await` o navegador pode não contar mais como gesto da pessoa e bloquear a janela.
+      if (url && !window.open(url, '_blank', 'noopener,noreferrer')) {
+        showPluginNotice(m.plugin_link_bloqueado(), false, { href: url });
       }
     } catch (err) {
-      showPluginNotice(String((err as Error)?.message ?? err).replace(/^\d+: /, ''), true);
+      showPluginNotice(err instanceof Error ? err.message : String(err), true);
     }
   }
   let pensamentoTimer: ReturnType<typeof setTimeout> | undefined;

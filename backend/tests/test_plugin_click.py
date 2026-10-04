@@ -23,6 +23,10 @@ async def _sem_efeito(*a):
     return None, None
 
 
+async def _confirma(*a):
+    return True
+
+
 @pytest.fixture
 def sessao(monkeypatch):
     pb._guardar_faixa("clk", FAIXA, 87, [{"id": "review-mr", "title": "Review", "placement": "dock", "columns": 30, "tree": PAINEL}])
@@ -30,6 +34,9 @@ def sessao(monkeypatch):
     monkeypatch.setattr(pc, "terminal_refusal", lambda name: None)
     monkeypatch.setattr(pc, "screen", lambda name: list(TELA))
     monkeypatch.setattr(pc, "click", lambda name, row, col: cliques.append((row, col)) or True)
+    # Padrão: o plugin confirma e o clique não copia nem abre; quem precisa de outro, sobrescreve.
+    monkeypatch.setattr(pb, "esperar_press", _confirma)
+    monkeypatch.setattr(pb, "esperar_efeito", _sem_efeito)
     yield cliques
     pb.esquecer("clk")
 
@@ -44,7 +51,6 @@ async def test_clique_na_faixa_confirmado(sessao, monkeypatch):
     async def confirma(name, site, key, desde, timeout):
         return (site, key) == ("above-prompt", "rv-1")
     monkeypatch.setattr(pb, "esperar_press", confirma)
-    monkeypatch.setattr(pb, "esperar_efeito", _sem_efeito)
     assert await pc.press("clk", "above-prompt", "rv-1") == {"ok": True}
     # a linha da faixa, dentro da coluna da conversa
     assert sessao[0][0] == 2 and sessao[0][1] < 87
@@ -53,10 +59,6 @@ async def test_clique_na_faixa_confirmado(sessao, monkeypatch):
 @pytest.mark.asyncio
 async def test_rotulo_igual_na_conversa_nao_conta_para_o_painel(sessao, monkeypatch):
     # "fechar" aparece na conversa (coluna < 87) e no painel: a região do painel ancorado só olha a direita.
-    async def confirma(*a):
-        return True
-    monkeypatch.setattr(pb, "esperar_press", confirma)
-    monkeypatch.setattr(pb, "esperar_efeito", _sem_efeito)
     await pc.press("clk", "review-mr", "x-1")
     (linha, col), = sessao
     assert linha == 2 and col >= 87
@@ -64,11 +66,8 @@ async def test_rotulo_igual_na_conversa_nao_conta_para_o_painel(sessao, monkeypa
 
 @pytest.mark.asyncio
 async def test_copia_volta_ao_app(sessao, monkeypatch):
-    async def confirma(*a):
-        return True
     async def copia(*a):
         return "https://gitlab.exemplo/mr/577", None
-    monkeypatch.setattr(pb, "esperar_press", confirma)
     monkeypatch.setattr(pb, "esperar_efeito", copia)
     assert await pc.press("clk", "review-mr", "cp-1") == {"ok": True, "copied": "https://gitlab.exemplo/mr/577"}
 
@@ -125,18 +124,14 @@ async def test_dois_cliques_da_mesma_sessao_nao_se_cruzam(sessao, monkeypatch):
         ordem.append(("fim", key))
         return True
     monkeypatch.setattr(pb, "esperar_press", confirma)
-    monkeypatch.setattr(pb, "esperar_efeito", _sem_efeito)
     await asyncio.gather(pc.press("clk", "review-mr", "cp-1"), pc.press("clk", "review-mr", "x-1"))
     assert [o[0] for o in ordem] == ["inicio", "fim", "inicio", "fim"]
 
 
 @pytest.mark.asyncio
 async def test_abertura_volta_ao_app(sessao, monkeypatch):
-    async def confirma(*a):
-        return True
     async def abre(*a):
         return None, "https://gitlab.exemplo/mr/577"
-    monkeypatch.setattr(pb, "esperar_press", confirma)
     monkeypatch.setattr(pb, "esperar_efeito", abre)
     assert await pc.press("clk", "above-prompt", "rv-1") == {"ok": True, "opened": "https://gitlab.exemplo/mr/577"}
 
@@ -145,10 +140,6 @@ async def test_abertura_volta_ao_app(sessao, monkeypatch):
 async def test_clique_avisa_a_ponte_que_e_do_app(sessao, monkeypatch):
     marcados = []
     monkeypatch.setattr(pb, "esperar_clique_do_app", lambda *a: marcados.append(a[1:3]) or "t1")
-    async def confirma(*a):
-        return True
-    monkeypatch.setattr(pb, "esperar_press", confirma)
-    monkeypatch.setattr(pb, "esperar_efeito", _sem_efeito)
     await pc.press("clk", "above-prompt", "rv-1")
     assert marcados == [("above-prompt", "rv-1")]
 
@@ -176,9 +167,5 @@ async def test_painel_inline_sem_ancora_acha_o_botao_logo_acima_do_prompt(sessao
     tela = ["● resposta", "", "╭ Review ─╮", "│ [ copiar link ] │", "╰──────────╯", "─" * 40, "❯ ", "─" * 40]
     pb._guardar_faixa("clk", None, 40, [{"id": "rv", "title": "Review", "placement": "inline", "columns": 30, "tree": PAINEL}])
     monkeypatch.setattr(pc, "screen", lambda name: tela)
-    async def confirma(*a):
-        return True
-    monkeypatch.setattr(pb, "esperar_press", confirma)
-    monkeypatch.setattr(pb, "esperar_efeito", _sem_efeito)
     await pc.press("clk", "rv", "cp-1")
     assert sessao[0][0] == 3

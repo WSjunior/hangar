@@ -91,14 +91,9 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
                     .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
                 if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
             }
-            // Par externo: a frase do web pelo código; o `detalhe` de uma recusa vem nos parâmetros.
-            if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("erro_par_")) {
-                let params = fields.get("params").and_then(Value::as_object).map(|p| p.iter()
-                    .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
-                if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
-            }
-            // Botões dos mods: a frase do web pelo código, com o rótulo do botão nos parâmetros.
-            if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("erro_mod_")) {
+            // Par externo e botões dos mods: a frase do web pelo código; o `detalhe` de uma recusa e o
+            // rótulo do botão vêm nos parâmetros.
+            if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("erro_par_") || code.starts_with("erro_mod_")) {
                 let params = fields.get("params").and_then(Value::as_object).map(|p| p.iter()
                     .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
                 if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }

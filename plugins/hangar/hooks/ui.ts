@@ -1,5 +1,5 @@
 import type { EngineInterface, On } from "claude-code";
-import { bridge } from "./bridge";
+import { bridge, onBridgeReady } from "./bridge";
 import { openerUrl } from "./uiIntercept";
 import { bandBody, type PaneEntry } from "./uiPayload";
 
@@ -7,52 +7,55 @@ import { bandBody, type PaneEntry } from "./uiPayload";
 const SEND_DELAY_MS = 500;
 // Um Raster cheio passa de 1 MB; acima disto saem os painéis e depois a faixa.
 const MAX_BODY_CHARS = 256 * 1024;
-// O backend guarda a faixa só na memória: reiniciado, ele só a recebe de novo num redesenho. Sem
-// isto, a faixa que não muda ficava fora do app até mudar.
-const RESEND_MS = 30_000;
-// Sem ponte (sessão recém-aberta, ou o backend recusou a instância), a faixa espera por ela.
-const BRIDGE_RETRY_MS = 2_000;
 
 let above: unknown = null;
 let columns: number | null = null;
 const panes = new Map<string, PaneEntry>();
-let latest: string | null = null;
 let sent: string | null = null;
 let scheduled = false;
+// O `$` do último hook: a ponte que volta reenvia a faixa fora de qualquer hook.
+let engine: EngineInterface | null = null;
 
-// Mesmo motivo do state.ts: `$` não atravessa import, então o envio é local.
-async function flush($: EngineInterface) {
+// JSON de objeto sem as chaves de fora, para juntar à ponte no corpo do POST.
+const fields = (o: Record<string, unknown>) => JSON.stringify(o).slice(1, -1);
+
+// Mesmo motivo do state.ts: `$` não atravessa import, então o POST é local. Sem ponte, null.
+async function post($: EngineInterface, path: string, extra: string): Promise<{ status: number; text: string } | null> {
   const p = bridge();
-  if (!p) {
-    // Desistir aqui perdia a faixa de vez: com a sessão parada, nada a redesenha depois.
-    $.clock.after(BRIDGE_RETRY_MS, () => void flush($));
-    return;
-  }
-  scheduled = false;
-  const body = latest;
-  if (body === null || body === sent) return;
-  sent = body;
+  if (!p) return null;
   try {
-    const r = await $.http.fetch(`${p.url}/ui`, {
+    return await $.http.fetch(`${p.url}/${path}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: `{"sessao":${JSON.stringify(p.sessao)},"token":${JSON.stringify(p.token)},${body}}`,
+      body: `{"sessao":${JSON.stringify(p.sessao)},"token":${JSON.stringify(p.token)},${extra}}`,
     });
-    if (r.status !== 200) sent = null;
-    else $.clock.after(RESEND_MS, () => { if (sent === body) { sent = null; schedule($); } });
   } catch {
-    // Backend fora do ar: o próximo redesenho tenta de novo.
-    sent = null;
+    return null;
   }
 }
 
+// Serializa só aqui, no máximo a cada SEND_DELAY_MS: o hook de render só marca que mudou. Sem
+// ponte ou com recusa, a faixa sai de novo quando a ponte voltar (`onBridgeReady`).
+async function flush($: EngineInterface) {
+  scheduled = false;
+  const body = bandBody(above, columns, [...panes.values()], MAX_BODY_CHARS);
+  if (body === sent || !bridge()) return;
+  sent = body;
+  if ((await post($, "ui", body))?.status !== 200) sent = null;
+}
+
 function schedule($: EngineInterface) {
-  latest = bandBody(above, columns, [...panes.values()], MAX_BODY_CHARS);
-  if (!scheduled && latest !== sent) {
+  engine = $;
+  if (!scheduled) {
     scheduled = true;
     $.clock.after(SEND_DELAY_MS, () => void flush($));
   }
 }
+
+onBridgeReady(() => {
+  sent = null;
+  if (engine) schedule(engine);
+});
 
 // Janela do clique que o app pediu: abrir URL e copiar vão para o aparelho de quem clicou. Não acaba
 // no fim do `next`: o `onPress` do mod costuma disparar a cópia sem `await`. Só vale para chamadas do
@@ -71,40 +74,19 @@ function originOf(next: unknown): string | undefined {
   return (next as { origin?: { plugin?: string } }).origin?.plugin;
 }
 
-// Clique, cópia e abertura confirmam ao backend o clique que o app pediu; sem ponte, ninguém pediu.
-// Devolve se o backend aceitou: recusado, a cópia ou a abertura acontece no terminal.
-async function tell($: EngineInterface, path: "pressed" | "copied" | "opened", fields: Record<string, unknown>): Promise<boolean> {
-  const p = bridge();
-  if (!p) return false;
-  try {
-    const r = await $.http.fetch(`${p.url}/${path}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessao: p.sessao, token: p.token, ...fields }),
-    });
-    return r.status === 200;
-  } catch {
-    return false;
-  }
+// Clique, cópia e abertura confirmam ao backend o clique que o app pediu. Devolve se o backend
+// aceitou: recusado, a cópia ou a abertura acontece no terminal.
+async function tell($: EngineInterface, path: "pressed" | "copied" | "opened", o: Record<string, unknown>): Promise<boolean> {
+  return (await post($, path, fields(o)))?.status === 200;
 }
 
 // O press que começou no terminal é o clique que o app pediu? O backend responde com a tentativa,
 // uma vez só.
 async function fromApp($: EngineInterface, requestId: string, element: string): Promise<string | null> {
-  const p = bridge();
-  if (!p) return null;
-  try {
-    const r = await $.http.fetch(`${p.url}/press-start`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessao: p.sessao, token: p.token, requestId, element }),
-    });
-    if (r.status !== 200) return null;
-    const { attempt } = JSON.parse(r.text) as { attempt?: string | null };
-    return typeof attempt === "string" && attempt ? attempt : null;
-  } catch {
-    return null;
-  }
+  const r = await post($, "press-start", fields({ requestId, element }));
+  if (r?.status !== 200) return null;
+  const { attempt } = JSON.parse(r.text) as { attempt?: string | null };
+  return typeof attempt === "string" && attempt ? attempt : null;
 }
 
 /** Espelha no Hangar a faixa acima do prompt e os painéis, os de TODOS os mods.

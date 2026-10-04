@@ -73,8 +73,7 @@ def screen(name: str) -> list[str]:
 
 
 def click(name: str, row: int, col: int) -> bool:
-    seq = f"\x1b[<0;{col + 1};{row + 1}M\x1b[<0;{col + 1};{row + 1}m"
-    return tmux._run(["tmux", "send-keys", "-t", tmux._pane_target(name), "-l", "--", seq]).returncode == 0
+    return tmux.send_keys(name, f"\x1b[<0;{col + 1};{row + 1}M\x1b[<0;{col + 1};{row + 1}m", literal=True)
 
 
 def _site(name: str, site: str) -> tuple[dict | None, str | None]:
@@ -103,18 +102,6 @@ def _regiao(tela: list[str], name: str, site: str, placement: str | None) -> tup
     return range(0, top if linha is None else linha), 0, None
 
 
-async def _esperar_fechar(name: str, site: str, timeout: float) -> bool:
-    fim = time.monotonic() + timeout
-    versao, dados = plugin_bridge.band(name)
-    while any(p.get("id") == site for p in dados["panes"]):
-        resta = fim - time.monotonic()
-        if resta <= 0:
-            return False
-        versao = await plugin_bridge.esperar_faixa(name, versao, resta)
-        dados = plugin_bridge.band(name)[1]
-    return True
-
-
 async def press(name: str, site: str, key: str) -> dict:
     async with _locks.setdefault(name, asyncio.Lock()):
         tree, placement = _site(name, site)
@@ -135,7 +122,7 @@ async def press(name: str, site: str, key: str) -> dict:
         if key == CLOSE_KEY:
             if not await run_tmux(click, name, linha, coluna):
                 raise PressRefused("erro_mod_clique_sem_resposta", "O clique não chegou ao terminal.")
-            if not await _esperar_fechar(name, site, CONFIRM_S):
+            if not await plugin_bridge.esperar_sem_painel(name, site, CONFIRM_S):
                 raise PressRefused("erro_mod_clique_sem_resposta", "O painel não fechou.")
             return {"ok": True}
         tentativa = plugin_bridge.esperar_clique_do_app(name, site, key, CONFIRM_S)

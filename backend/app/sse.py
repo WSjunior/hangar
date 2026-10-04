@@ -1121,8 +1121,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 yield {"event": event, "data": json.dumps({"text": slot["text"]})}
                 continue
             if event == "plugin_ui":
-                _, dados = plugin_bridge.band(name)
-                yield {"event": "plugin_ui", "data": json.dumps(dados, ensure_ascii=False)}
+                yield {"event": "plugin_ui", "data": plugin_bridge.band_json(name)}
                 continue
             if event == "state":
                 # Sugestão do terminal (a frase cinza que o Tab aceita lá): sem fonte própria, ela

@@ -572,10 +572,10 @@ async def test_esperar_faixa_acorda_quando_muda():
 @pytest.mark.asyncio
 async def test_confirmacao_de_clique_casa_site_e_chave_depois_do_clique():
     try:
-        await pb.pressed(pb.PressedBody(**_ponte("pane-d", requestId="above-prompt", element="velho")))
+        await pb.pressed(pb.PressBody(**_ponte("pane-d", requestId="above-prompt", element="velho")))
         desde = time.monotonic()
         assert not await pb.esperar_press("pane-d", "above-prompt", "velho", desde, 0.05)
-        await pb.pressed(pb.PressedBody(**_ponte("pane-d", requestId="review-mr", element="cp-1")))
+        await pb.pressed(pb.PressBody(**_ponte("pane-d", requestId="review-mr", element="cp-1")))
         assert await pb.esperar_press("pane-d", "review-mr", "cp-1", desde, 0.5)
         assert not await pb.esperar_press("pane-d", "above-prompt", "cp-1", desde, 0.05)
         tentativa = pb.esperar_clique_do_app("pane-d", "review-mr", "cp-1", 2)
@@ -630,7 +630,7 @@ async def test_efeito_so_vale_para_a_tentativa_aberta():
     # A cópia atrasada de um clique não pode cair no clique seguinte (outro aparelho, outro convidado).
     try:
         t1 = pb.esperar_clique_do_app("pane-h", "above-prompt", "a", 2)
-        assert (await pb.press_start(pb.PressStartBody(**_ponte("pane-h", requestId="above-prompt", element="a"))))["attempt"] == t1
+        assert (await pb.press_start(pb.PressBody(**_ponte("pane-h", requestId="above-prompt", element="a"))))["attempt"] == t1
         pb.encerrar_clique_do_app("pane-h", t1)
         t2 = pb.esperar_clique_do_app("pane-h", "above-prompt", "b", 2)
         with pytest.raises(HTTPException) as e:

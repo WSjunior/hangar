@@ -267,10 +267,7 @@ def esquecer(name: str) -> None:
         _confirmacoes.pop(name, None)
         _preenchido.pop(name, None)
         _pressed.pop(name, None)
-        _copied.pop(name, None)
-        _opened.pop(name, None)
-        _esperado.pop(name, None)
-        _tentativa.pop(name, None)
+        _cliques.pop(name, None)
     _eventos.pop(name, None)
     _band_wakers.pop(name, None)
     _press_wakers.pop(name, None)
@@ -381,14 +378,17 @@ def sugestao(name: str) -> str:
         return _sugestoes.get(name, "")
 
 
-# Faixa e painéis que os mods desenham: (versão, {"above", "columns", "panes"}). A versão é de todas
-# as sessões juntas: o SSE só compara se mudou desde o que já mandou.
-_bands: dict[str, tuple[int, dict]] = {}
+# Faixa e painéis que os mods desenham: (versão, {"above", "columns", "panes"}, JSON do app). A
+# versão é de todas as sessões juntas: o SSE só compara se mudou desde o que já mandou. O JSON é
+# feito uma vez por mudança, não uma vez por conexão aberta.
+_bands: dict[str, tuple[int, dict, str]] = {}
 _band_seq = 0
 _VAZIA: dict = {"above": None, "columns": None, "panes": []}
-# Quem espera a faixa mudar: um Event por sessão, trocado a cada mudança, acorda todos os SSE de uma vez.
+_VAZIA_JSON = json.dumps({"above": None, "panes": []})
+# Quem espera algo da sessão: um Event por sessão, trocado a cada aviso, acorda todos de uma vez.
 # Guardado com o loop que o criou: Event usado em outro loop levanta RuntimeError.
 _band_wakers: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Event]] = {}
+_press_wakers: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Event]] = {}
 
 
 def _waker(tabela: dict, name: str) -> asyncio.Event:
@@ -405,59 +405,8 @@ def _acordar_todos(tabela: dict, name: str) -> None:
         guardado[1].set()
 
 
-def _guardar_faixa(name: str, above: dict | None, columns: int | None, panes: list[dict]) -> None:
-    global _band_seq
-    with _lock:
-        _band_seq += 1
-        _bands[name] = (_band_seq, {"above": above, "columns": columns, "panes": panes})
-    _acordar_todos(_band_wakers, name)
-
-
-def band(name: str) -> tuple[int, dict]:
-    """A faixa e os painéis da sessão, como o app recebe, e a versão; versão 0 quando nada foi desenhado."""
-    with _lock:
-        versao, dados = _bands.get(name, (0, _VAZIA))
-    return versao, {"above": dados["above"], "panes": dados["panes"]}
-
-
-def band_columns(name: str) -> int | None:
-    """Largura da coluna da conversa no pane, em células, como o plugin mediu."""
-    with _lock:
-        return _bands.get(name, (0, _VAZIA))[1]["columns"]
-
-
-def transcript_columns(name: str) -> int | None:
-    """Onde cortar as linhas do pane para a prévia: só com painel ancorado ao lado da conversa."""
-    with _lock:
-        dados = _bands.get(name, (0, _VAZIA))[1]
-    return dados["columns"] if any(p.get("placement") == "dock" for p in dados["panes"]) else None
-
-
-async def esperar_faixa(name: str, vista: int, timeout: float) -> int:
-    """Dorme até a faixa sair da versão `vista`, ou até `timeout`; devolve a versão atual."""
-    atual = band(name)[0]
-    if atual != vista:
-        return atual
-    ev = _waker(_band_wakers, name)
-    try:
-        await asyncio.wait_for(ev.wait(), timeout)
-    except asyncio.TimeoutError:
-        pass
-    return band(name)[0]
-
-
-# Cliques e cópias que o plugin confirmou: o pedido de clique do app espera por eles.
-_pressed: dict[str, list[tuple[float, str, str]]] = {}
-# Efeito do clique do app, pela tentativa a que pertence: (tentativa, texto ou URL).
-_copied: dict[str, tuple[str, str]] = {}
-_press_wakers: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Event]] = {}
-
-
-def _acordar_press(name: str) -> None:
-    _acordar_todos(_press_wakers, name)
-
-
-async def _esperar_ate(name: str, achou, timeout: float):
+async def _esperar_ate(tabela: dict, name: str, achou, timeout: float):
+    """Espera `achou()` dar verdadeiro, acordando a cada aviso da tabela, até `timeout`."""
     fim = time.monotonic() + timeout
     while True:
         valor = achou()
@@ -466,11 +415,69 @@ async def _esperar_ate(name: str, achou, timeout: float):
         resta = fim - time.monotonic()
         if resta <= 0:
             return None
-        ev = _waker(_press_wakers, name)
         try:
-            await asyncio.wait_for(ev.wait(), resta)
+            await asyncio.wait_for(_waker(tabela, name).wait(), resta)
         except asyncio.TimeoutError:
             return achou() or None
+
+
+def _guardar_faixa(name: str, above: dict | None, columns: int | None, panes: list[dict]) -> None:
+    global _band_seq
+    dados = {"above": above, "columns": columns, "panes": panes}
+    with _lock:
+        # Reenvio igual (o plugin reenvia de tempos em tempos) não vira evento para todo app aberto.
+        if name in _bands and _bands[name][1] == dados:
+            return
+        _band_seq += 1
+        _bands[name] = (_band_seq, dados, json.dumps({"above": above, "panes": panes}, ensure_ascii=False))
+    _acordar_todos(_band_wakers, name)
+
+
+def band(name: str) -> tuple[int, dict]:
+    """A faixa e os painéis da sessão, como o app recebe, e a versão; versão 0 quando nada foi desenhado."""
+    with _lock:
+        versao, dados, _ = _bands.get(name, (0, _VAZIA, ""))
+    return versao, {"above": dados["above"], "panes": dados["panes"]}
+
+
+def band_json(name: str) -> str:
+    """O mesmo de `band`, já em JSON, para o evento `plugin_ui`."""
+    with _lock:
+        return _bands[name][2] if name in _bands else _VAZIA_JSON
+
+
+def band_columns(name: str) -> int | None:
+    """Largura da coluna da conversa no pane, em células, como o plugin mediu."""
+    with _lock:
+        return _bands.get(name, (0, _VAZIA, ""))[1]["columns"]
+
+
+def transcript_columns(name: str) -> int | None:
+    """Onde cortar as linhas do pane para a prévia: só com painel ancorado ao lado da conversa."""
+    with _lock:
+        dados = _bands.get(name, (0, _VAZIA, ""))[1]
+    return dados["columns"] if any(p.get("placement") == "dock" for p in dados["panes"]) else None
+
+
+async def esperar_faixa(name: str, vista: int, timeout: float) -> int:
+    """Dorme até a faixa sair da versão `vista`, ou até `timeout`; devolve a versão atual."""
+    await _esperar_ate(_band_wakers, name, lambda: band(name)[0] != vista, timeout)
+    return band(name)[0]
+
+
+async def esperar_sem_painel(name: str, painel: str, timeout: float) -> bool:
+    """O painel saiu da sessão (o plugin viu o `ui.close`) dentro de `timeout`?"""
+    def fechou():
+        return not any(p.get("id") == painel for p in band(name)[1]["panes"])
+    return bool(await _esperar_ate(_band_wakers, name, fechou, timeout))
+
+
+# Cliques que o plugin confirmou: o pedido de clique do app espera por eles.
+_pressed: dict[str, list[tuple[float, str, str]]] = {}
+# O clique do app em andamento, um por sessão: o que se espera (site, key, prazo), a tentativa, se o
+# plugin já casou o press com ela e o efeito (texto copiado, URL aberta). Fica aberto até a resposta
+# ir ao app; efeito que chega depois volta para o terminal.
+_cliques: dict[str, dict] = {}
 
 
 async def esperar_press(name: str, site: str, key: str, desde: float, timeout: float) -> bool:
@@ -478,7 +485,7 @@ async def esperar_press(name: str, site: str, key: str, desde: float, timeout: f
     def achou():
         with _lock:
             return any(t >= desde and r == site and k == key for t, r, k in _pressed.get(name, []))
-    return bool(await _esperar_ate(name, achou, timeout))
+    return bool(await _esperar_ate(_press_wakers, name, achou, timeout))
 
 
 async def esperar_efeito(name: str, tentativa: str, timeout: float) -> tuple[str | None, str | None]:
@@ -486,53 +493,47 @@ async def esperar_efeito(name: str, tentativa: str, timeout: float) -> tuple[str
     dos dois chega, ou vazio depois de `timeout`."""
     def achou():
         with _lock:
-            tc, texto = _copied.get(name, ("", ""))
-            to, url = _opened.get(name, ("", ""))
-        efeito = (texto if tc == tentativa else None, url if to == tentativa else None)
+            clique = _cliques.get(name)
+            if not clique or clique["tentativa"] != tentativa:
+                return None
+            efeito = (clique["copied"], clique["opened"])
         return efeito if any(efeito) else None
-    return await _esperar_ate(name, achou, timeout) or (None, None)
-
-
-# Clique que o app pediu e o backend acabou de mandar ao terminal: o plugin pergunta no `ui.press`
-# se é esse, para abrir URL e copiar no aparelho de quem clicou. A tentativa fica aberta até a
-# resposta ir ao app; efeito que chega depois volta para o terminal.
-_esperado: dict[str, tuple[str, str, float, str]] = {}
-_tentativa: dict[str, str] = {}
-_opened: dict[str, tuple[str, str]] = {}
+    return await _esperar_ate(_press_wakers, name, achou, timeout) or (None, None)
 
 
 def esperar_clique_do_app(name: str, site: str, key: str, prazo: float) -> str:
     tentativa = secrets.token_hex(8)
     with _lock:
-        _esperado[name] = (site, key, time.monotonic() + prazo, tentativa)
-        _tentativa[name] = tentativa
+        _cliques[name] = {"site": site, "key": key, "prazo": time.monotonic() + prazo, "tentativa": tentativa,
+                          "casado": False, "copied": None, "opened": None}
     return tentativa
 
 
 def encerrar_clique_do_app(name: str, tentativa: str) -> None:
     with _lock:
-        if _tentativa.get(name) == tentativa:
-            del _tentativa[name]
-        if name in _esperado and _esperado[name][3] == tentativa:
-            del _esperado[name]
+        if _cliques.get(name, {}).get("tentativa") == tentativa:
+            del _cliques[name]
 
 
 def _do_app(name: str, site: str, key: str) -> str | None:
+    """A tentativa do clique do app que este press é, uma vez só; None para press do terminal."""
     with _lock:
-        esperado = _esperado.get(name)
-        if not esperado or esperado[:2] != (site, key) or time.monotonic() > esperado[2]:
+        clique = _cliques.get(name)
+        if (not clique or clique["casado"] or (clique["site"], clique["key"]) != (site, key)
+                or time.monotonic() > clique["prazo"]):
             return None
-        del _esperado[name]
-        return esperado[3]
+        clique["casado"] = True
+        return clique["tentativa"]
 
 
-def _guardar_efeito(tabela: dict, name: str, tentativa: str, valor: str) -> None:
+def _guardar_efeito(campo: str, name: str, tentativa: str, valor: str) -> None:
     with _lock:
-        if _tentativa.get(name) != tentativa:
+        clique = _cliques.get(name)
+        if not clique or clique["tentativa"] != tentativa:
             # 409: o plugin segue com o `next` e a ação acontece no terminal, em vez de sumir.
             raise HTTPException(409, detail="clique do app já respondido")
-        tabela[name] = (tentativa, valor)
-    _acordar_press(name)
+        clique[campo] = valor
+    _acordar_todos(_press_wakers, name)
 
 
 # Trecho da âncora: o terminal corta a linha da faixa com reticências quando o pane é estreito.
@@ -941,11 +942,10 @@ async def ui(body: BandBody, request: Request):
         raise HTTPException(413, detail="faixa grande demais")
     _confere(body.sessao, body.token)
     _guardar_faixa(body.sessao, body.above, body.columns, [p.model_dump() for p in body.panes])
-    _acordar(body.sessao)
     return {"ok": True}
 
 
-class PressedBody(BaseModel):
+class PressBody(BaseModel):
     sessao: str
     token: str
     requestId: str = Field(min_length=1, max_length=64)
@@ -953,14 +953,14 @@ class PressedBody(BaseModel):
 
 
 @plugin_router.post("/pressed")
-async def pressed(body: PressedBody):
+async def pressed(body: PressBody):
     """Um botão de mod foi pressionado no terminal: confirma o clique que o app pediu."""
     _confere(body.sessao, body.token)
     with _lock:
         fila = _pressed.setdefault(body.sessao, [])
         fila.append((time.monotonic(), body.requestId, body.element))
         del fila[:-20]
-    _acordar_press(body.sessao)
+    _acordar_todos(_press_wakers, body.sessao)
     return {"ok": True}
 
 
@@ -975,19 +975,12 @@ class CopiedBody(BaseModel):
 async def copied(body: CopiedBody):
     """Um mod copiou um texto num clique do app: vai ao app, que copia no aparelho de quem clicou."""
     _confere(body.sessao, body.token)
-    _guardar_efeito(_copied, body.sessao, body.attempt, body.text)
+    _guardar_efeito("copied", body.sessao, body.attempt, body.text)
     return {"ok": True}
 
 
-class PressStartBody(BaseModel):
-    sessao: str
-    token: str
-    requestId: str = Field(min_length=1, max_length=64)
-    element: str = Field(min_length=1, max_length=256)
-
-
 @plugin_router.post("/press-start")
-async def press_start(body: PressStartBody):
+async def press_start(body: PressBody):
     """O press que começou no terminal é o clique que o app pediu? Responde sim uma vez só."""
     _confere(body.sessao, body.token)
     tentativa = _do_app(body.sessao, body.requestId, body.element)
@@ -1007,7 +1000,7 @@ async def opened(body: OpenedBody):
     _confere(body.sessao, body.token)
     if not re.match(r"^https?://", body.url, re.IGNORECASE):
         raise HTTPException(400, detail="só http(s)")
-    _guardar_efeito(_opened, body.sessao, body.attempt, body.url)
+    _guardar_efeito("opened", body.sessao, body.attempt, body.url)
     return {"ok": True}
 
 
