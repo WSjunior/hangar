@@ -395,7 +395,9 @@ def test_resume_le_a_janela_antes_de_matar_o_pane(tmp_path, monkeypatch):
     morto = {"sim": False}
 
     def _env(pid, nome):
-        return None if morto["sim"] else "262144"
+        if morto["sim"] or nome != "CLAUDE_CODE_MAX_CONTEXT_TOKENS":
+            return None
+        return "262144"
 
     def _kill(nome):
         morto["sim"] = True
