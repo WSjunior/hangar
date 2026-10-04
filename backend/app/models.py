@@ -164,6 +164,9 @@ class SessionInfo(BaseModel):
     # Contexto da sessão Claude lido do transcript ({"used", "window"}, em tokens): a statusline só
     # traz o contexto quando é a do Hangar, e o app usa este quando ela não traz.
     context: Optional[dict] = None
+    # Id do modelo em uso na sessão Claude (`claude-opus-5-5[1m]`), pelo mesmo motivo: a tela mostra
+    # o nome quando a statusline não é a do Hangar ou ainda não chegou.
+    model: Optional[str] = None
     # Pareamento ativo (feature "trabalhando juntas"): os OUTROS membros do grupo, ou None.
     # Grupo de 2 = lista de 1 (o antigo 1:1 é caso particular). Badge/chip na UI.
     pair_peers: Optional[list[str]] = None

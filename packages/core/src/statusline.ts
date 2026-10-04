@@ -32,6 +32,16 @@ export interface StatusFields {
   raw: string;
 }
 
+/** Rótulo curto de um id do Claude quando o catálogo não traz nome: `claude-opus-5-5` → `Opus 5.5`,
+ * `opus[1m]` → `Opus 1M`. Id de outro formato volta como veio. */
+export function rotuloModelo(id: string): string {
+  const m = /^(?:claude-)?(opus|sonnet|haiku|fable)(?:-(\d+)(?:-(\d+))?)?(\[1m\])?$/i.exec(id.trim());
+  if (!m) return id;
+  const nome = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
+  const versao = m[2] ? ` ${m[2]}${m[3] ? `.${m[3]}` : ''}` : '';
+  return `${nome}${versao}${m[4] ? ' 1M' : ''}`;
+}
+
 // "44k" -> 44000, "1M" -> 1_000_000, "1.5k" -> 1500
 function toNumber(n: string, unit?: string): number {
   const base = parseFloat(n.replace(/,/g, ''));
@@ -53,7 +63,8 @@ export function parseStatusLine(raw: string | null | undefined, session?: Sessio
     ? { repo: basename(session.cwd), branch: session.branch,
         dirty: session.git_dirty == null ? undefined : session.git_dirty > 0 }
     : null;
-  if (!raw && !git) return null;
+  const listed = session?.model?.trim() || null;
+  if (!raw && !git && !listed) return null;
   raw ??= '';
   const out: StatusFields = { raw };
 
@@ -67,6 +78,8 @@ export function parseStatusLine(raw: string | null | undefined, session?: Sessio
       if (e) out.effort = e;
     }
   }
+  // Barra que não é a do Hangar, ou sessão que ainda não a desenhou: o nome sai do modelo que a lista informa.
+  if (!out.model && listed) out.model = rotuloModelo(listed);
 
   // 💬 20k/1k 40k/200k — o 1º par é tokens-do-turno (in/out); o 2º, quando existe, é o uso de
   // contexto (usado/janela). Numa sessão zerada (pós /clear) a statusline traz só o par in/out —

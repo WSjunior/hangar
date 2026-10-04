@@ -3,7 +3,7 @@
 // contrato × medido, que tem TRÊS estados: o contrato guarda id (`opus[1m]`), a statusline traz
 // rótulo (`Opus4.8·1M`), e sessão sem statusline não é "diferente" — é "não medido".
 // (`lib/orq.ts` é outra coisa: a retrospectiva das execuções.)
-import { parseStatusLine } from './statusline';
+import { parseStatusLine, rotuloModelo } from './statusline';
 import type { SessionInfo, Provider } from './types';
 
 export interface Papel {
@@ -239,15 +239,7 @@ export function familiaDe(modelo: string): { familia: string; um: boolean } | nu
   return { familia: m[0], um };
 }
 
-/** Rótulo curto de um id do Claude quando o catálogo não traz nome: `claude-opus-5-5` → `Opus 5.5`,
- * `opus[1m]` → `Opus 1M`. Id de outro formato volta como veio. */
-export function rotuloModelo(id: string): string {
-  const m = /^(?:claude-)?(opus|sonnet|haiku|fable)(?:-(\d+)(?:-(\d+))?)?(\[1m\])?$/i.exec(id.trim());
-  if (!m) return id;
-  const nome = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
-  const versao = m[2] ? ` ${m[2]}${m[3] ? `.${m[3]}` : ''}` : '';
-  return `${nome}${versao}${m[4] ? ' 1M' : ''}`;
-}
+export { rotuloModelo };
 
 const ESFORCO_ALIAS: Record<string, string> = { med: 'medium', min: 'minimal' };
 const normEsforco = (e: string) => {

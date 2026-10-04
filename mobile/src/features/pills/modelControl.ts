@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { parseStatusLine, getModelOptions, getPiModels, getKimiModels, getCodexModels, setModelEffort, setEngineModel, setPiModel, setKimiModel, setCodexModel } from '@hangar/core';
 import type { CodexModelsResponse } from '@hangar/core';
 import { chatStore } from '../../stores/chat';
+import { useSessions } from '../../stores/sessions';
 import * as m from '../../paraglide/messages';
 import type { PillMenuItem } from './PillMenu';
 import { pillLabels, type Chosen } from './pills';
@@ -32,7 +33,10 @@ type Catalog =
 export function useModelControl({ serverId, name, provider, chosen, onChosen, close }: Args) {
   const chat = chatStore(serverId, name);
   const statusLine = chat.use((s) => s.statusLine);
-  const statusFields = useMemo(() => parseStatusLine(statusLine), [statusLine]);
+  // A sessão da lista traz o modelo quando a statusline não é a do Hangar ou ainda não chegou.
+  const session = useSessions((s) => s.byServerRecord?.[serverId]?.find((x) => x.name === name)
+    ?? s.rows.find((x) => x.serverId === serverId && x.name === name) ?? null);
+  const statusFields = useMemo(() => parseStatusLine(statusLine, session), [statusLine, session]);
 
   const isCodex = provider === 'codex';
   // omp é o fork do Pi: mesmo seletor, mesmos endpoints.

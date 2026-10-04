@@ -97,6 +97,9 @@ export interface SessionInfo {
   // Statusline crua da sessão (cache ~20s no backend) — o card do board/canvas parseia com
   // parseStatusLine (modelo/contexto no composer; ⚡5h/📅7d na RateStrip). Chat usa a versão ao vivo.
   status_line?: string | null;
+  // Id do modelo em uso na sessão Claude (`claude-opus-5-5[1m]`), resolvido pelo backend: dá nome à
+  // pílula quando a statusline não é a do Hangar ou ainda não chegou.
+  model?: string | null;
   // Feature loop runner (Task 9+): estado de um loop autônomo por sessão
   loop_status?: LoopState['status'] | null;
   loop_iter?: number | null;    // iteração atual dentro do loop
