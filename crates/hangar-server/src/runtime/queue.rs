@@ -56,7 +56,8 @@ impl Operation {
         let cursor = &self.dispatch_cursor;
         if !cursor.is_object() { return false; }
         let (Some(offset),Some(cursor_offset)) = (record["offset"].as_i64(),cursor["offset"].as_i64()) else { return true };
-        cursor["conversation"] == record["conversation"] && cursor["file_identity"] == record["file_identity"] && offset >= cursor_offset
+        let same_file = cursor["file_identity"] == record["file_identity"] || cursor["file_identity"].is_null() && cursor_offset == 0;
+        cursor["conversation"] == record["conversation"] && same_file && offset >= cursor_offset
     }
 }
 

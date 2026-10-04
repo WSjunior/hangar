@@ -161,13 +161,17 @@ impl ReceiptIndex {
 
     /// A âncora do cursor é relida do arquivo: confere que os bytes antes do despacho não mudaram.
     pub fn match_after(&self, path: &Path, cursor: &DispatchCursor, row: &Value, used: &BTreeMap<String,Value>) -> io::Result<Option<ReceiptProof>> {
-        if cursor.conversation != self.conversation || cursor.file_identity.is_none() || cursor.file_identity != self.identity { return Ok(None); }
+        // Cursor sem arquivo: o despacho veio antes de o transcript existir (primeira mensagem da
+        // sessão), então tudo no arquivo da mesma conversa é posterior a ele.
+        let born_after = cursor.file_identity.is_none() && cursor.offset == 0;
+        if cursor.conversation != self.conversation || self.identity.is_none() || !born_after && cursor.file_identity != self.identity { return Ok(None); }
         let mut file = match File::open(path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
-        if Some(identity(&file)?) != self.identity || cursor.offset > self.scan_offset { return Ok(None); }
+        let current = Some(identity(&file)?);
+        if current != self.identity || !born_after && current != cursor.file_identity || cursor.offset > self.scan_offset { return Ok(None); }
         let Some(before) = bytes_before(&mut file,cursor.offset)? else { return Ok(None) };
         let observed = anchor(&before);
         if observed != cursor.anchor { return Ok(None); }
@@ -191,7 +195,7 @@ fn content_text(content: &Value) -> String {
 
 impl ReceiptProof {
     pub fn validates(&self, cursor: &DispatchCursor, row: &Value) -> bool {
-        self.cursor == *cursor && cursor.file_identity.as_deref() == Some(self.occurrence.file_identity.as_str())
+        self.cursor == *cursor && cursor.file_identity.as_deref().map_or(cursor.offset == 0,|id|id == self.occurrence.file_identity)
             && self.occurrence.conversation == cursor.conversation && self.occurrence.offset >= cursor.offset
             && self.occurrence.end_offset > self.occurrence.offset && self.observed_anchor == cursor.anchor
             && matches!(self.occurrence.kind.as_str(),"user" | "dequeue" | "steer")

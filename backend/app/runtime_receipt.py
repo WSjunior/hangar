@@ -120,8 +120,11 @@ class ReceiptIndex:
     def match_after(self, cursor: dict, row: dict, used_occurrences: dict) -> dict | None:
         """A âncora do cursor é relida do arquivo: confere que os bytes antes do despacho não mudaram."""
         from app.pqueue import _chaves_de_commit, _linhas_da_entrada
-        if (cursor["conversation"] != self.conversation or not cursor["file_identity"]
-                or cursor["file_identity"] != self.file_identity or self.path is None
+        # Cursor sem arquivo: o despacho veio antes de o transcript existir (primeira mensagem da
+        # sessão), então tudo no arquivo da mesma conversa é posterior a ele.
+        born_after = cursor["file_identity"] is None and cursor["offset"] == 0
+        if (cursor["conversation"] != self.conversation or self.file_identity is None
+                or not born_after and cursor["file_identity"] != self.file_identity or self.path is None
                 or cursor["offset"] > self.scan_offset):
             return None
         try:
@@ -149,9 +152,10 @@ class ReceiptIndex:
 def validate_proof(proof: dict, cursor: dict, row: dict) -> bool:
     from app.pqueue import _chaves_de_commit, _linhas_da_entrada
     occurrence = proof["occurrence"]
-    return (proof["cursor"] == cursor and cursor["file_identity"] is not None
+    same_file = (occurrence["file_identity"] == cursor["file_identity"]
+                 or cursor["file_identity"] is None and cursor["offset"] == 0)
+    return (proof["cursor"] == cursor and same_file
         and occurrence["conversation"] == cursor["conversation"]
-        and occurrence["file_identity"] == cursor["file_identity"]
         and occurrence["offset"] >= cursor["offset"] and occurrence["end_offset"] > occurrence["offset"]
         and occurrence["kind"] in {"user", "dequeue", "steer"}
         and proof["observed_anchor"] == cursor["anchor"]

@@ -106,3 +106,22 @@ fn rewrite_before_the_read_tail_is_seen_in_the_file_not_in_a_memory_copy() {
     index.scan(&path).unwrap();
     assert!(index.match_after(&path,&cursor,&json!({"text":"Olá"}),&BTreeMap::new()).unwrap().is_none());
 }
+
+#[test]
+fn first_message_dispatched_before_the_transcript_exists_is_confirmed() {
+    // A primeira mensagem de uma sessão nova sai antes de a CLI criar o arquivo: o cursor não tem
+    // identidade, e tudo o que o arquivo da mesma conversa traz depois é posterior a ele.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("chat.jsonl");
+    let mut index = ReceiptIndex::new("claude","sid");
+    let cursor = index.capture(&path).unwrap();
+    assert!(cursor.file_identity.is_none());
+    std::fs::write(&path,"{\"type\":\"user\",\"message\":{\"content\":\"um\"}}\n").unwrap();
+    index.scan(&path).unwrap();
+    let row = json!({"text":"um"});
+    let proof = index.match_after(&path,&cursor,&row,&BTreeMap::new()).unwrap().expect("primeira mensagem confirma");
+    assert!(proof.validates(&cursor,&row));
+    let mut other = ReceiptIndex::new("claude","outra");
+    other.scan(&path).unwrap();
+    assert!(other.match_after(&path,&cursor,&row,&BTreeMap::new()).unwrap().is_none());
+}

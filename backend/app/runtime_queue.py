@@ -223,8 +223,9 @@ def _may_confirm(operation, record) -> bool:
     offset, cursor_offset = record.get("offset"), cursor.get("offset")
     if type(offset) is not int or type(cursor_offset) is not int:
         return True
-    return (cursor.get("conversation") == record.get("conversation")
-            and cursor.get("file_identity") == record.get("file_identity") and offset >= cursor_offset)
+    same_file = (cursor.get("file_identity") == record.get("file_identity")
+                 or cursor.get("file_identity") is None and cursor_offset == 0)
+    return cursor.get("conversation") == record.get("conversation") and same_file and offset >= cursor_offset
 
 
 def compact(state):

@@ -118,3 +118,16 @@ def test_rewrite_before_the_read_tail_is_seen_in_the_file_not_in_a_memory_copy(t
         stream.write(first.replace("Anterior", "Trocado!").encode())
     index.scan(path)
     assert index.match_after(cursor, {"text": "Olá"}, {}) is None
+
+
+def test_first_message_dispatched_before_the_transcript_exists_is_confirmed(tmp_path):
+    from app.runtime_receipt import validate_proof
+    path = tmp_path / "chat.jsonl"
+    index = ReceiptIndex("claude", "sid")
+    cursor = index.capture(path)
+    assert cursor["file_identity"] is None
+    path.write_text('{"type":"user","message":{"content":"um"}}\n', encoding="utf-8")
+    index.scan(path)
+    row = {"text": "um"}
+    proof = index.match_after(cursor, row, {})
+    assert proof is not None and validate_proof(proof, cursor, row)
