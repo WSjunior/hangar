@@ -71,6 +71,9 @@ fn engine_id(text: &str) -> String {
 }
 
 /// Número de um campo: vazio é "em branco" (`Some(None)`); `None` é texto que não é inteiro maior que zero.
+/// Contexto estendido, como o interruptor do Codex: ligado grava 1M; desligado, o que o provedor informa.
+const EXTENDED_WINDOW: u64 = 1_000_000;
+
 fn number(text: &str) -> Option<Option<u64>> {
     let text = text.trim();
     if text.is_empty() { return Some(None); }
@@ -173,6 +176,8 @@ pub(super) struct EngineForm {
     models: Option<Vec<ProviderModel>>,
     picks: Option<(Picker, Picker)>,
     testing: Option<u64>,
+    /// O teste em voo é o automático da abertura: só traz a lista, não escolhe nem mostra erro.
+    auto_test: bool,
     tested: Option<Result<usize, String>>,
     saving: Option<u64>,
     error: Option<String>,
@@ -285,7 +290,10 @@ impl Hangar {
             engine.adaptive_thinking != Some(false), engine.tool_search == Some(true), engine.gateway_model_discovery == Some(true),
             engine.fine_grained_tool_streaming == Some(true), engine.auth_via_api_key == Some(true)];
         let label = engine.label.clone().unwrap_or_else(|| name.clone());
+        let key_set = engine.api_key_definida;
         self.build_form(FormKind::Edit, Some(name.clone()), title, None, engine, flags, label, window, cx);
+        // Provedor salvo abre já com a lista: sem ela os dois campos de modelo são texto livre.
+        if key_set { self.test_models(true, cx); }
     }
 
     /// "+ Conectar" num provedor do catálogo: modelo novo (formulário completo) ou chave (formulário curto).
@@ -340,7 +348,7 @@ impl Hangar {
         }
         let mut form = EngineForm { kind, saved: saved.clone(), title, lead, badge_url: engine.base_url.clone(), label, name, url, key, model, subagent,
             window: context, compact, output, flags, gateway: None, betas_touched: false, saved_url: engine.base_url, key_set, vision: engine.vision, models: None, picks: None,
-            testing: None, tested: None, saving: None, error: None, syncing: None, synced: None, why: None,
+            testing: None, auto_test: false, tested: None, saving: None, error: None, syncing: None, synced: None, why: None,
             detecting: None, detected: None, keyless: false, unnamed: 0, naming_error: None, mgmt, naming: None,
             derived: Derived::default(),
             _subscriptions: subscriptions, pick_subscriptions: Vec::new() };
@@ -382,27 +390,30 @@ impl Hangar {
     }
 
     /// Testar e listar: com chave digitada vai o endereço e a chave; sem ela, o nome (o servidor usa a chave dele).
-    fn test_models(&mut self, cx: &mut Context<Self>) {
+    fn test_models(&mut self, auto: bool, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone() else { return };
         self.accounts.keys_seq += 1;
         let seq = self.accounts.keys_seq;
         let Some(form) = self.accounts.form.as_mut().filter(|f| f.derived.can_test && f.testing.is_none()) else { return };
         let key = EngineForm::value(&form.key, cx);
         let body = if key.is_empty() { json!({"nome": form.derived.id}) } else { json!({"base_url": EngineForm::value(&form.url, cx), "api_key": key}) };
-        (form.testing, form.tested) = (Some(seq), None);
+        (form.testing, form.tested, form.auto_test) = (Some(seq), None, auto);
         if form.kind == FormKind::Key { (form.models, form.picks) = (None, None); }
         self.keys_send(async move { KeysReply::Tested(seq, api.server_send(reqwest::Method::POST, &["engines", "modelos"], Some(body), 40).await) });
         cx.notify();
     }
 
-    /// Escolher um modelo traz a janela dele; modelo sem janela limpa o campo (a do anterior passaria da real).
+    /// Escolher um modelo traz a janela dele; modelo sem janela limpa a do anterior (passaria da real), mas mantém o
+    /// contexto estendido que a pessoa ligou.
     fn choose_model(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         let taken = self.engine_names();
         let Some(form) = self.accounts.form.as_mut() else { return };
         let context = form.models.as_ref().and_then(|m| m.iter().find(|m| m.id == id)).and_then(|m| m.context_length);
         form.model.update(cx, |input, cx| input.set_value(id, window, cx));
         if form.kind != FormKind::Key {
-            form.window.update(cx, |input, cx| input.set_value(context.map(|n| n.to_string()).unwrap_or_default(), window, cx));
+            let extended = number(&form.window.read(cx).value()).flatten().is_some_and(|n| n >= EXTENDED_WINDOW);
+            let value = match context { Some(n) => n.to_string(), None if extended => EXTENDED_WINDOW.to_string(), None => String::new() };
+            form.window.update(cx, |input, cx| input.set_value(value, window, cx));
         }
         form.refresh(&taken, cx);
         cx.notify();
@@ -411,7 +422,9 @@ impl Hangar {
     fn tested(&mut self, list: Vec<ProviderModel>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = self.accounts.form.as_mut() else { return };
         let current = EngineForm::value(&form.model, cx);
-        let pick = list.iter().find(|m| m.id == current).or(list.first()).map(|m| m.id.clone());
+        let auto = form.auto_test;
+        // O automático não troca o gravado: sem o modelo atual na lista, o seletor fica sem escolha em vez de pular pro primeiro.
+        let pick = list.iter().find(|m| m.id == current).or(if auto { None } else { list.first() }).map(|m| m.id.clone());
         let choices: Vec<ModelChoice> = list.iter()
             .map(|m| ModelChoice { id: m.id.clone(), label: m.id.clone(), hint: m.context_length.map(thousands).unwrap_or_default() }).collect();
         let subagent = EngineForm::value(&form.subagent, cx);
@@ -432,6 +445,7 @@ impl Hangar {
         }));
         (form.tested, form.models, form.picks) = (Some(Ok(list.len())), Some(list), Some((main, sub)));
         match pick {
+            _ if auto => {}
             // Formulário curto: só preenche quando não havia escolha, como no web.
             Some(id) if form.kind != FormKind::Key || current.is_empty() => self.choose_model(id, window, cx),
             _ => {}
@@ -581,7 +595,8 @@ impl Hangar {
                         self.tested(list, window, cx)
                     }
                     // A mensagem do provedor é o que diz o que corrigir (401, host errado): ela aparece crua.
-                    Err(error) => { form.gateway = None; form.tested = Some(Err(error)) }
+                    // Falha do teste automático não vira erro: a pessoa só abriu o formulário; o Testar mostra o motivo.
+                    Err(error) => { form.gateway = None; form.tested = if form.auto_test { None } else { Some(Err(error)) } }
                 }
             }
             KeysReply::Saved(seq, id, result) => {
@@ -759,7 +774,7 @@ impl Hangar {
         let testing = f.testing.is_some();
         let test = Button::new("accounts-engine-test").outline().small().icon(IconName::RefreshCw)
             .label(tr(if testing { "accounts_engine_testing" } else if short { "accounts_key_fetch" } else { "accounts_engine_test" }))
-            .disabled(busy || testing || !d.can_test).on_click(cx.listener(|this, _, _, cx| this.test_models(cx)));
+            .disabled(busy || testing || !d.can_test).on_click(cx.listener(|this, _, _, cx| this.test_models(false, cx)));
         let mut test_block = div().flex().flex_col().gap(px(6.)).when(short, |el| el.child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM)
             .child(tr("accounts_key_models")))).child(div().flex().child(test));
         match (&f.tested, f.models.as_ref()) {
@@ -785,14 +800,36 @@ impl Hangar {
                     .child(help(tr("accounts_engine_model_help"))).into_any_element(),
             };
             body = body.child(field(tr("accounts_engine_model"), model)
+                .child(help(tr("accounts_engine_model_default_help")))
                 .when(d.no_vision, |el| el.child(tone(tr("accounts_engine_no_vision"), theme::danger()))));
             let subagent = match picks {
                 Some((_, sub)) => Select::new(sub).disabled(busy).accessibility_label(tr("accounts_engine_subagent")).into_any_element(),
                 None => Input::new(&f.subagent).disabled(busy).aria_label(tr("accounts_engine_subagent")).into_any_element(),
             };
+            // Interruptor no lugar do número: modelo que o provedor diz ir a menos de 1M trava, porque 1M ali estouraria a sessão.
+            let provider_window = f.model_now(cx).and_then(|m| m.context_length);
+            let extended = number(&f.window.read(cx).value()).flatten().is_some_and(|n| n >= EXTENDED_WINDOW);
+            let impossible = provider_window.is_some_and(|n| n < EXTENDED_WINDOW) && !extended;
+            let saved = number(&f.window.read(cx).value()).flatten().filter(|n| Some(*n) != provider_window);
+            let k = |n: u64| (n / 1000).to_string();
+            let state = if impossible { tr("accounts_engine_window_limit").replace("{n}", &k(provider_window.unwrap_or(0))) }
+                else if extended { tr("accounts_engine_window_on") }
+                else if let Some(n) = saved { tr("accounts_engine_window_saved").replace("{n}", &k(n)) }
+                else if let Some(n) = provider_window { tr("accounts_engine_window_provider").replace("{n}", &k(n)) }
+                else { tr("accounts_engine_window_200k") };
+            let toggle = Switch::new("accounts-engine-window-extended").checked(extended).disabled(busy || impossible)
+                .label(tr("accounts_engine_window_extended"))
+                .on_click(cx.listener(move |this, on: &bool, window, cx| {
+                    let Some(form) = this.accounts.form.as_mut() else { return };
+                    // Desligar com o provedor informando 1M ou mais grava vazio: o número dele continuaria "ligado".
+                    let value = if *on { EXTENDED_WINDOW.to_string() }
+                        else { provider_window.filter(|n| *n < EXTENDED_WINDOW).map(|n| n.to_string()).unwrap_or_default() };
+                    form.window.update(cx, |input, cx| input.set_value(value, window, cx));
+                    cx.notify();
+                }));
             body = body.child(field(tr("accounts_engine_subagent"), subagent).child(help(tr("accounts_engine_subagent_help"))))
-                .child(field(tr("accounts_engine_window"), Input::new(&f.window).disabled(busy).aria_label(tr("accounts_engine_window")))
-                    .child(help(coded(&tr("accounts_engine_window_help")))));
+                .child(field(tr("accounts_engine_window"), toggle.into_any_element())
+                    .child(help(state)).child(help(coded(&tr("accounts_engine_window_help")))));
         }
         let mut panel = settings_box().mt(px(24.)).p(px(20.)).gap(px(20.)).child(head).child(body);
         if !short { panel = panel.child(self.render_advanced(f, busy, cx)); }
