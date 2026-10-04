@@ -291,6 +291,21 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   abre o painel: tarefas + workflows → fases/agentes → prompt+resultado de cada agente (3 níveis).
 - **Interromper:** botão **⏹ stop** (manda `Esc`).
 
+### Mods do Claude Code (faixa e painéis)
+Sessões com terminal espelham o que os mods do Claude Code desenham, sem código de mod nenhum
+no Hangar:
+- **Faixa acima do prompt** (barra de progresso, acompanhamento de review…): aparece acima do
+  composer e se atualiza na hora, mesmo com a sessão parada.
+- **Painel que um mod abre:** no app de desktop, coluna à direita da conversa quando o terminal o
+  ancora e há espaço para os dois; senão, e sempre no celular, bloco acima do composer, com o ✕
+  que fecha o painel no terminal também.
+- **Botões dos mods clicam pelo app** quando o terminal da sessão está com o mouse ligado (Claude
+  Code em tela cheia). Se o botão não estiver na tela ou aparecer duas vezes, o app avisa e não
+  clica.
+- **Copiar e abrir link** num botão clicado pelo app acontecem no aparelho de quem clicou, não na
+  máquina do terminal: o texto vai para a área de transferência dele e o link abre no navegador
+  dele. Clique feito no próprio terminal segue como sempre.
+
 ### Multi-PC
 Cada PC roda backend+vite+`tailscale serve` com o **mesmo** `CP_AUTH_TOKEN`. O app guarda **N
 servidores** e troca entre eles (switcher) — útil pra dirigir o Claude de máquinas diferentes do

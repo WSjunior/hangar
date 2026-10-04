@@ -13,6 +13,24 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   pela pasta de skills e não espelha a faixa dos mods do marketplace. Ver
   [faixa dos mods](#faixa-dos-mods-ordem-na-cadeia-medida-03102026).
 
+- **Faixa e painéis dos mods saem no SSE por fonte própria, nunca na carona do `state`.** O
+  `state` só sai quando a chave muda; o mod que relê com a sessão parada ficava velho no app. O
+  plugin também segura a faixa até a ponte existir e a reenvia 30 s depois de cada envio, para um
+  backend reiniciado não ficar sem ela. Ver [painel e clique](#mods-painel-clique-e-o-que-acontece-no-aparelho-04102026).
+
+- **Botão de mod clicado no app é clique de mouse SGR no pane, achado pelo rótulo e confirmado
+  pelo `ui.press`.** Nenhuma API do engine dispara o botão de outro plugin. Sem mouse ligado,
+  rótulo ausente ou repetido na região do site, o backend recusa em vez de clicar às cegas. A
+  âncora da faixa (primeiro texto) conta o `label` de botão: sem isso, faixa que começa por botão
+  deixava a linha dele fora da região.
+
+- **Clique do app que copia ou abre URL acontece no aparelho de quem clicou.** O plugin responde
+  no lugar do `ui.copy` e do `process.run` de abridor de URL durante 1,5 s depois de um press que
+  o backend confirmou como vindo do app; clique feito no terminal fecha a janela na hora.
+
+- **A prévia corta cada linha na largura da conversa quando há painel ancorado.** A largura é o
+  `bodyColumns` da faixa + 5; sem o corte, a borda `│` do painel vira texto da prévia.
+
 - **tok/s "agora" é medido no stream da resposta, nunca no transcript.** Do `message_start`
   ao fim da resposta, com o `output_tokens` real: sem terminal pelo `stream_event`; com
   terminal pelo `turn.step` do plugin (`rate.ts` → `POST /api/plugin/rate`). Nunca a partir
@@ -1435,6 +1453,27 @@ Sem terminal o caminho é outro e não depende de ordem: o backend entra como su
 com `system`/`ui_invalidate`. Medido num `claude -p` stream-json: a resposta traz a árvore da
 superfície pedida (`desktop`/`mobile`: a barra vem como `Svg`, não `Raster`). Fica para depois da
 migração do runtime sem terminal para o Rust.
+
+### Mods: painel, clique e o que acontece no aparelho (04/10/2026)
+
+Claude Code 2.1.289 (Linux), sondas descartáveis carregadas por `--plugin-dir` ao lado do mod
+`review-mr` do pmedico (MR mergeado: lê o GitLab e encerra, sem efeito).
+
+| | o que foi medido |
+|---|---|
+| `ui.render` de `{ component: 'Pane' }` sem `requestId` | recebe o painel de OUTRO plugin com a árvore inteira e as props `title`, `placement` (`dock`/`inline`), `bodyColumns`, `scroll` |
+| `ui.press` sem matcher | vê o clique de outro plugin: `{plugin, element (key), component, requestId, surface}`; `requestId` é `above-prompt` na faixa e o id do painel no painel |
+| `ui.copy`, `ui.open`, `ui.close` | vistos com o texto copiado, o id/título/colunas do painel aberto e o `origin` de quem fechou |
+| chamadas do `$` (`OpEventOf`) | `process.run` de outro plugin é interceptável por nome; responder `{ value }` sem `next` impede o `xdg-open` de rodar na máquina do terminal. `origin.plugin` diz quem chamou |
+| disparar press de outro plugin | não existe método no `$`; só a superfície remota (`ui_client_press`, sessão por stream-json) ou o próprio terminal |
+| clique SGR por `send-keys -l` | `ESC[<0;x;yM` + `ESC[<0;x;ym` chega ao Claude Code em tela cheia (`#{mouse_sgr_flag}` = 1): abriu o painel, copiou o link e fechou o painel pelo `✕` do engine |
+| botão sem `plain` | o terminal desenha `[ rótulo ]` em volta do `label`; a busca pelo rótulo acha o texto dentro |
+| `onPress` do mod | dispara `$.ui.copy`/`$.process.run` sem `await`: a cópia pode chegar ao backend depois do `pressed`. Por isso a janela de 1,5 s no plugin e a espera de 0,3 s pelo efeito no backend |
+| prévia com painel ancorado | antes do corte, o SSE mandava `"text":"ok   …   │\n   …   │"` |
+
+O `$.clock.now()` não entra no hook de render: o reenvio periódico da faixa é um `$.clock.after`
+armado no envio bem-sucedido. Um painel que o mod abre sem pedido da pessoa só é desenhado a
+partir de 144 colunas (110 depois de pedido); abaixo disso não há árvore para espelhar.
 
 ## O `wire.jsonl` do Kimi não é um transcript bem-comportado
 
