@@ -169,12 +169,12 @@ pub(super) fn fmt_size(bytes: u64) -> String {
 
 fn sum_size<'a>(list: impl IntoIterator<Item = &'a WorktreeStatus>) -> u64 { list.into_iter().filter_map(|w| w.size).sum() }
 
-/// Soma para mostrar: com alguma medida falha ou parcial, vira um mínimo ("≥").
+/// Soma para mostrar: com alguma medida falha, parcial ou ainda por vir, vira um mínimo ("≥").
 fn sum_label<'a>(list: impl IntoIterator<Item = &'a WorktreeStatus>) -> String {
     let (mut total, mut partial) = (0, false);
     for w in list {
         total += w.size.unwrap_or(0);
-        partial |= w.size_partial || w.size_error;
+        partial |= w.size_partial || w.size_error || w.size_pending;
     }
     if partial { tr_shared("worktree_tamanho_parcial", &[("tamanho", &fmt_size(total))]) } else { fmt_size(total) }
 }
@@ -803,7 +803,8 @@ impl Hangar {
         let pending = all.iter().any(|w| w.size_pending);
         if sized.is_empty() && !pending { return None; }
         sized.sort_by_key(|w| std::cmp::Reverse(w.size.unwrap_or(0)));
-        let total = sum_label(sized.iter().copied());
+        // Sobre todas, como no web: as ainda sem medida tornam o total um mínimo.
+        let total = sum_label(all.iter().copied());
         let freed = sum_size(all.iter().copied().filter(|w| ready(w)));
         let freed_text = sum_label(all.iter().copied().filter(|w| ready(w)));
         // Teto de releituras atingido com medida pendente: diz que demora e deixa tentar de novo.
@@ -1337,7 +1338,7 @@ const COL_SIZE: f32 = 76.;
 
 #[cfg(test)]
 mod tests {
-    use super::{lost_files, merged_batch, ready, slug, state_of, title, is_agent, WorktreeRepo, WorktreeStatus, Worktrees, WtState};
+    use super::{fmt_size, lost_files, merged_batch, ready, slug, state_of, sum_label, title, tr_shared, is_agent, WorktreeRepo, WorktreeStatus, Worktrees, WtState};
     use serde_json::json;
 
     fn st(v: serde_json::Value) -> WorktreeStatus { serde_json::from_value(v).unwrap() }
@@ -1413,6 +1414,14 @@ mod tests {
         let seq = wt.repos.start();
         wt.take_list(seq, Ok(vec![WorktreeRepo { repo: "/r".into(), worktrees: vec![st(base("/r/a"))] }]));
         assert_eq!(wt.detail.ok().map(|d| d.dirty), Some(0));
+    }
+
+    #[test]
+    fn pending_size_makes_the_sum_a_minimum() {
+        let mut pending = base("/r/a"); pending["size_pending"] = json!(true);
+        let mut sized = base("/r/b"); sized["size"] = json!(2048);
+        let list = [st(pending), st(sized)];
+        assert_eq!(sum_label(&list), tr_shared("worktree_tamanho_parcial", &[("tamanho", &fmt_size(2048))]));
     }
 
     #[test]
