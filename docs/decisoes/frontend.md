@@ -856,6 +856,11 @@ na bandeja e faz o pedido de fechar esconder a janela em vez de encerrar o app.
   dois cliques, e sem isso a janela aparecia e sumia.
 - **"Sair" solta o ícone antes de encerrar**, e no Windows soltar espera a janela oculta morrer
   (`SendMessageW`): encerrar com o ícone de pé deixa um ícone morto na bandeja.
+- **O clique só esconde a janela que está na tela.** Minimizada conta como fora da tela
+  (`Window::is_visible`), e o clique a traz de volta.
+- **No Windows o ícone tem estado.** O `TaskbarCreated` também chega com o ícone ainda lá (mudança
+  de escala): acrescentar falha e atualizar confirma que ele existe. Se o Explorer voltou e ainda
+  não aceita ícone, o app tenta de novo a cada 2 s e, enquanto isso, fechar não esconde.
 
 Medição (04/10/2026, Hyprland 0.56.2 com a bandeja do Quickshell 0.2.1, build de
 desenvolvimento): três ciclos de esconder e mostrar no Wayland e três no X11 (XWayland), com a
@@ -872,9 +877,11 @@ janela com o processo vivo e o aviso único aparece; clique esquerdo mostra e es
 execução sai e a janela aparece; depois de reiniciar o Explorer o ícone continua registrado e o
 clique volta a mostrar a janela; o clique direito abre o menu com "Abrir Hangar" e "Sair", e
 "Sair" encerra o processo e a janela oculta; com a opção desligada não há ícone e fechar
-encerra.
+encerra; com a janela minimizada o clique a restaura; um `TaskbarCreated` repetido não derruba
+o ícone. Navegador embutido com a janela na bandeja (sessão fora da tela): `eval`, `snapshot`,
+`press`, `shot` de uma página repintada depois de escondida e `click` num link que navegou
+responderam igual a com a janela à mostra.
 
 Não conferido no uso real: a bandeja sumindo com a janela escondida (Linux); no Windows, o
-navegador embutido e o `hangar-preview` com a janela escondida (o WebView2 é janela filha, e
-filha escondida para de compor quadro), o duplo clique físico e a janela que estava minimizada;
-compositores Wayland além do Hyprland.
+duplo clique físico, o Explorer que demora a aceitar o ícone e o navegador embutido com o
+painel dele aberto na tela na hora de esconder; compositores Wayland além do Hyprland.
