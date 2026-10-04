@@ -980,7 +980,8 @@ class RuntimeCoordinator:
                 await self._wait_active(slot)
                 if remove:
                     if self.legacy is not None:
-                        await self.legacy.quiesce(slot.binding.descriptor())
+                        # Removida, a sessão não tem mais vínculo a conferir: só se esperam os escritores.
+                        await self.legacy.quiesce({**slot.binding.descriptor(), "removed":True})
                     with slot.guard:
                         slot.lease.close()
                         slot.lease = None

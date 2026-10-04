@@ -416,3 +416,18 @@ def test_uncertain_input_of_a_second_conversation_blocks_writes_while_old_barrie
         'result': {'operation_id': 'C', 'disposition': 'accepted', 'payload': {}}})
     assert not rq.terminal_write_blocked(store.state, 'new-sid')
     assert rq.terminal_write_blocked(store.state, 'sid')
+
+
+def test_killing_a_terminal_session_does_not_revalidate_the_dead_binding(tmp_path, monkeypatch):
+    from app import runtime_terminal as terminal
+    owner, slot, collected = live_owner(monkeypatch, tmp_path)
+    killed = []
+    async def kill():
+        # O pane morre com o kill: daqui em diante não há vínculo para resolver.
+        monkeypatch.setattr(terminal, '_collect', lambda name: None)
+        killed.append(True)
+    async def flow():
+        owner.loop = asyncio.get_running_loop()
+        await owner.change('session', kill, remove=True)
+    asyncio.run(flow())
+    assert killed and 'session' not in owner.names and slot.binding.key not in owner.slots

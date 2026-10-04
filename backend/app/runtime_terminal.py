@@ -173,6 +173,8 @@ async def quiesce(coordinator, descriptor):
     def wait_legacy():
         from app.terminal_input import _send_lock
         with _send_lock(descriptor['name']):
+            if descriptor.get('removed'):
+                return
             if descriptor['meta'].get('pending_terminal'):
                 if _session_proof(descriptor['name']) != descriptor['meta']['pending_terminal']:
                     raise RuntimeError('vida terminal pendente mudou')
