@@ -310,7 +310,8 @@ async def _lifespan(app: FastAPI):
     if uds_messaging.INBOX.ligar(_ao_recibo_nativo):
         _log.info("inbox nativo ligado em %s", uds_messaging.INBOX.path)
     try:
-        plugin_bridge.publish_address()
+        # Em thread: a publicação sonda o `claude` (versão e flags) e não pode segurar o laço.
+        await asyncio.to_thread(plugin_bridge.publish_address)
     except OSError:
         _log.warning("plugin: endereço da ponte não gravado; sessão de terminal fica no tmux",
                      exc_info=True)
@@ -6395,6 +6396,12 @@ async def patch_config(request: Request):
         await asyncio.to_thread(runtime_config.aplicar, mudancas, remover=remover)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    if "claude_function_hooks" in body:
+        # O wrapper do shell lê o caminho do plugin de um arquivo; ele acompanha o interruptor.
+        try:
+            await asyncio.to_thread(plugin_bridge.publish_address)
+        except OSError:
+            _log.warning("plugin: caminho do plugin não regravado", exc_info=True)
     return {"campos": runtime_config.estado(), "somente_leitura": _somente_leitura(request)}
 
 
@@ -6589,7 +6596,38 @@ async def engine_cliproxy():
         return {"found": True, "base_url": inst["base_url"], "models": [],
                 "error": cliproxy.redact(str(e), inst["api_key"])}
     return {"found": True, "base_url": inst["base_url"], "error": None,
-            "models": [m for m in modelos if cliproxy.is_engine_model(m["id"])]}
+            "models": [m for m in modelos if cliproxy.is_engine_model(m["id"])],
+            **await asyncio.to_thread(_cliproxy_naming)}
+
+
+def _cliproxy_naming() -> dict:
+    """Nomeia as contas que der e diz quantas ficaram sem nome — a tela pede a senha só aí."""
+    erro_nome = None
+    try:
+        cliproxy.name_accounts()
+    except ValueError as e:
+        erro_nome = str(e)
+    try:
+        faltam: int | None = len(cliproxy.unnamed_accounts())
+    except ValueError as e:
+        # Credencial ilegível: a senha não resolve, então a tela mostra só o motivo.
+        faltam, erro_nome = None, erro_nome or str(e)
+    return {"unnamed_accounts": faltam, "management_key_set": cliproxy.management_key() is not None,
+            "naming_error": erro_nome}
+
+
+class CliproxyManagementBody(_StrictBody):
+    management_key: str = Field(default="", max_length=512)
+
+
+@app.put("/api/engines/cliproxy/management-key", dependencies=[Depends(require_auth)])
+async def engine_cliproxy_management_key(body: CliproxyManagementBody):
+    """Guarda a senha de gerenciamento do CLIProxyAPI e já nomeia as contas; o valor nunca volta."""
+    try:
+        await asyncio.to_thread(cliproxy.set_management_key, body.management_key)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return await asyncio.to_thread(_cliproxy_naming)
 
 
 def _id_upload(info: SessionInfo) -> str:
@@ -9683,8 +9721,29 @@ def _allowed_repo(path: str) -> str:
     try:
         _allowed_scan_root(probe)
     except FsError as exc:
-        raise HTTPException(exc.status, detail=exc.detail) from None
+        if not _registered_in_allowed_repo(path):
+            raise HTTPException(exc.status, detail=exc.detail) from None
     return os.path.realpath(path) if os.path.isdir(path) else path
+
+
+def _registered_in_allowed_repo(path: str) -> bool:
+    """Worktree fora das raízes (o Codex cria em `~/.codex/worktrees`) vale pelo repo principal que
+    a registra, se ele estiver numa raiz: a mesma regra da lista e do lote."""
+    if os.path.isdir(path):
+        root = worktrees.repo_root_of(path)
+        if not root or os.path.realpath(root) != os.path.realpath(path):
+            return False
+        main = worktrees.main_repo_of(root)
+    else:
+        main = worktrees._main_of_missing(path)
+    if os.path.realpath(main) == os.path.realpath(path):
+        return False
+    try:
+        _allowed_scan_root(main)
+    except FsError:
+        return False
+    real = os.path.realpath(path)
+    return any(p == path or os.path.realpath(p) == real for p in worktrees.worktree_paths(main))
 
 
 @app.get("/api/worktrees", dependencies=[Depends(require_auth)])
@@ -9750,13 +9809,25 @@ async def worktrees_delete(body: WorktreeDeleteBody):
         await asyncio.to_thread(_invalidate_lists)
 
 
+class WorktreeDeleteMergedBody(_StrictBody):
+    repo: str = Field(min_length=1)
+    # As worktrees que a tela mostrou na confirmação; sem a lista, só as que não perdem nada.
+    paths: list[str] | None = None
+    confirm: bool = Field(default=False, strict=True)
+    # Das mostradas, as que a confirmação exibiu perdendo arquivos; as demais só saem se limpas.
+    lossy: list[str] | None = None
+
+
 @app.post("/api/worktrees/delete-merged", dependencies=[Depends(require_auth)])
-async def worktrees_delete_merged(body: WorktreeRepoBody):
+async def worktrees_delete_merged(body: WorktreeDeleteMergedBody):
     _no_guest()
+    if body.confirm and body.paths is None:
+        raise HTTPException(422, detail="confirmar exige a lista das worktrees mostradas")
     repo = await asyncio.to_thread(_allowed_repo, body.repo)
     sessions = await asyncio.to_thread(registry.list)
     try:
-        return {"removed": await asyncio.to_thread(worktrees.delete_merged, repo, sessions)}
+        return {"removed": await asyncio.to_thread(worktrees.delete_merged, repo, sessions,
+                                                   body.paths, body.confirm, body.lossy)}
     except GitError as exc:
         raise HTTPException(exc.status, detail=exc.detail) from None
     finally:   # as que saíram antes do erro também mudam a lista

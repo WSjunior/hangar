@@ -1078,8 +1078,19 @@ export interface WorktreeStatus {
   path: string; repo: string; exists: boolean; branch: string | null; base: string | null;
   main_branch: string | null;   // branch da pasta principal, onde as conversas retomam
   merged: boolean; ahead: number; dirty: number; ignored: string[]; sessions: string[]; closed: number;
+  degraded?: boolean;   // leitura do git falhou: dirty/ignored podem estar zerados sem ser verdade
 }
 export interface WorktreeRepo { repo: string; worktrees: WorktreeStatus[] }
+
+/** O lote de mescladas: o que entra na confirmação (com o que cada uma perde) e o que fica de fora
+ *  porque tem sessão aberta ou não foi lida direito. */
+export function mergedWorktreeBatch(r: WorktreeRepo): { deletable: WorktreeStatus[]; blocked: WorktreeStatus[] } {
+  const merged = r.worktrees.filter((w) => w.merged);
+  return {
+    deletable: merged.filter((w) => !w.sessions.length && !w.degraded),
+    blocked: merged.filter((w) => w.sessions.length || w.degraded),
+  };
+}
 
 export async function getWorktreesForServer(server: Server, signal?: AbortSignal): Promise<WorktreeRepo[]> {
   const r = await apiFetchForServer<{ repos: WorktreeRepo[] }>(server, '/api/worktrees',
@@ -1097,9 +1108,16 @@ export function deleteWorktreeForServer(server: Server, body: { repo: string; pa
   Promise<{ removed: string; branch_deleted: boolean; moved: number }> {
   return apiFetchForServer(server, '/api/worktrees/delete', { method: 'POST', body: JSON.stringify(body) }, FOLDER_ACTION_MS);
 }
-export async function deleteMergedWorktreesForServer(server: Server, repo: string): Promise<string[]> {
+/** Sem `confirmed`, só as mescladas que não perdem nada. Com `confirmed`, as que a tela mostrou na
+ *  confirmação; perde arquivos só a que a tela mostrou perdendo, nunca uma que sujou depois. */
+export async function deleteMergedWorktreesForServer(server: Server, repo: string,
+  confirmed?: WorktreeStatus[]): Promise<string[]> {
+  const opts = confirmed && {
+    paths: confirmed.map((w) => w.path), confirm: true,
+    lossy: confirmed.filter((w) => w.dirty || w.ignored.length).map((w) => w.path),
+  };
   const r = await apiFetchForServer<{ removed: string[] }>(server, '/api/worktrees/delete-merged',
-    { method: 'POST', body: JSON.stringify({ repo }) }, FOLDER_ACTION_MS);
+    { method: 'POST', body: JSON.stringify({ repo, ...opts }) }, FOLDER_ACTION_MS);
   return r.removed;
 }
 /** Nome curto do chip: a pasta da worktree onde o agente está. */
@@ -1910,6 +1928,20 @@ export interface CliproxyDeteccao {
   base_url: string | null;
   models: ModeloProvedor[];
   error: string | null;
+  // Contas ChatGPT ainda sem nome no proxy: a tela pede a senha de gerenciamento só quando > 0.
+  unnamed_accounts?: number | null;
+  management_key_set?: boolean;
+  naming_error?: string | null;
+}
+
+export type CliproxyNomeacao = Required<Pick<CliproxyDeteccao, 'unnamed_accounts' | 'management_key_set' | 'naming_error'>>;
+
+export function putCliproxyManagementKey(management_key: string): Promise<CliproxyNomeacao> {
+  return apiFetch('/api/engines/cliproxy/management-key', { method: 'PUT', body: JSON.stringify({ management_key }) });
+}
+
+export function putCliproxyManagementKeyForServer(s: Server, management_key: string): Promise<CliproxyNomeacao> {
+  return apiFetchForServer(s, '/api/engines/cliproxy/management-key', { method: 'PUT', body: JSON.stringify({ management_key }) });
 }
 
 export function engineCliproxy(): Promise<CliproxyDeteccao> {

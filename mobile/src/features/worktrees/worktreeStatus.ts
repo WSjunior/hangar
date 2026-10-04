@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import type { WorktreeStatus } from '@hangar/core';
 
-// A linha não roda git: o ✓ de "juntada" vem do que a tela ou a folha da worktree já leu.
+// A linha não roda git: o ✓ de "mesclada" vem do que a tela ou a folha da worktree já leu.
 const mapa = new Map<string, WorktreeStatus>();
 const ouvintes = new Set<() => void>();
 const chave = (serverId: string, path: string) => `${serverId}::${path}`;

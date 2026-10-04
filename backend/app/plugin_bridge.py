@@ -266,8 +266,39 @@ def _publish_address(home: Path | None = None) -> None:
     atomico.substituir(tmp, alvo)
 
 
-# O conftest troca `publish_address`; o teste chega na implementação por `_publish_address`.
-publish_address = _publish_address
+def plugin_dir_file(home: Path | None = None) -> Path:
+    return (home or Path.home()) / ".hangar" / "plugin-dir"
+
+
+def _publish_plugin_dir(home: Path | None = None) -> None:
+    """Caminho do plugin para o wrapper do shell, que não sabe onde o repositório mora.
+
+    Sessão aberta no terminal precisa do mesmo `--plugin-dir` das que o backend abre: só pela pasta
+    de skills o plugin fica por dentro do marketplace e não enxerga a faixa dos mods. Sem
+    `raizes_dos_plugins()` o arquivo sai, porque flag que o CLI não conhece mata a sessão ao nascer."""
+    alvo = plugin_dir_file(home)
+    raizes = raizes_dos_plugins()
+    if not raizes:
+        alvo.unlink(missing_ok=True)
+        return
+    alvo.parent.mkdir(parents=True, exist_ok=True)
+    tmp = alvo.with_name(alvo.name + ".tmp")
+    # Uma linha, texto puro: quem lê é shell (bash, zsh, fish, PowerShell), sem parser de JSON.
+    tmp.write_text(raizes[0] + "\n", encoding="utf-8", newline="\n")
+    atomico.substituir(tmp, alvo)
+
+
+def _publish_for_machine(home: Path | None = None) -> None:
+    # Um não segura o outro: endereço que falhou não pode deixar o wrapper com o plugin-dir velho.
+    try:
+        _publish_address(home)
+    finally:
+        _publish_plugin_dir(home)
+
+
+# O conftest troca `publish_address`; o teste chega na implementação por `_publish_address` e
+# `_publish_plugin_dir`.
+publish_address = _publish_for_machine
 
 
 def _socket_do_tmux() -> str | None:

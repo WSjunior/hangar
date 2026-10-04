@@ -370,7 +370,8 @@ def list_all(cwds, sessions, roots=None) -> list[dict]:
     for c in set(cwds):
         root = repo_root_of(c) if c else None
         if root:
-            mains.add(main_repo_of(root))
+            # realpath: o mesmo repo por um symlink (`~/hangar` -> `~/projetos/hangar`) apareceria duas vezes.
+            mains.add(os.path.realpath(main_repo_of(root)))
     out = []
     for main in sorted(mains):
         if roots is not None and not any(Path(os.path.realpath(main)).is_relative_to(r) for r in roots):
@@ -539,16 +540,25 @@ def delete(repo: str, path: str, sessions, *, confirm: bool = False,
     return {"removed": path, "branch_deleted": branch_deleted, "moved": len(moved)}
 
 
-def delete_merged(repo: str, sessions) -> list[str]:
-    """Só as que passariam sem aviso: juntadas, sem não commitados, sem ignorados, sem sessão."""
+def delete_merged(repo: str, sessions, paths: list[str] | None = None, confirm: bool = False,
+                  lossy: list[str] | None = None) -> list[str]:
+    """Mescladas, sem sessão e lidas sem falha. Sem `confirm`, só as que não perdem nada. `paths`
+    restringe às que a tela mostrou: o lote nunca leva uma worktree que a pessoa não viu. `lossy`
+    são as que a tela mostrou perdendo algo: só essas saem com perda, nunca uma que sujou depois."""
     main = main_repo_of(repo_root_of(repo) or repo)
+    wanted = {os.path.realpath(p) for p in paths} if paths is not None else None
+    accepted = {os.path.realpath(p) for p in lossy or ()}
     out = []
     for path in worktree_paths(main):
+        if wanted is not None and os.path.realpath(path) not in wanted:
+            continue
         st = status(path, sessions, main)
-        if (st["merged"] and not st["degraded"] and not st["dirty"] and not st["ignored"]
-                and not st["sessions"]):
+        if not st["merged"] or st["degraded"] or st["sessions"]:
+            continue
+        loses = bool(st["dirty"] or st["ignored"])
+        if not loses or confirm and os.path.realpath(path) in accepted:
             try:
-                delete(main, path, sessions)
+                delete(main, path, sessions, confirm=loses)
             except GitError as e:
                 if out:   # as anteriores já saíram: o erro tem que dizer quais
                     raise GitError(e.status, f"{e.detail} (já removidas: {', '.join(out)})") from None

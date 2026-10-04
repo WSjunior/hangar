@@ -82,7 +82,12 @@ fn thousands(tokens: u64) -> String { format!("{}k", (tokens as f64 / 1000.).rou
 
 /// `GET /api/engines/cliproxy`: o CLIProxyAPI desta máquina do servidor.
 #[derive(Deserialize)]
-struct Detected { found: bool, base_url: Option<String>, #[serde(default)] models: Vec<ProviderModel>, error: Option<String> }
+struct Detected { found: bool, base_url: Option<String>, #[serde(default)] models: Vec<ProviderModel>, error: Option<String>,
+    #[serde(default)] unnamed_accounts: Option<u32>, #[serde(default)] naming_error: Option<String> }
+
+/// `PUT /api/engines/cliproxy/management-key`: quantas contas ficaram sem nome e por quê.
+#[derive(Deserialize)]
+struct Named { unnamed_accounts: Option<u32>, naming_error: Option<String> }
 
 #[derive(Clone, Deserialize)]
 struct ProviderModel { id: String, context_length: Option<u64>, vision: Option<bool> }
@@ -177,6 +182,11 @@ pub(super) struct EngineForm {
     /// CLIProxyAPI: a detecção em voo e o que ela disse (texto, se é erro).
     detecting: Option<u64>,
     detected: Option<(String, bool)>,
+    /// Contas ChatGPT do proxy sem nome: só a senha de gerenciamento deixa o proxy gravá-lo.
+    unnamed: u32,
+    naming_error: Option<String>,
+    mgmt: Entity<InputState>,
+    naming: Option<u64>,
     /// Achado: o servidor põe a chave do config dele, e o endereço fica o detectado (só com ele o servidor aceita).
     keyless: bool,
     derived: Derived,
@@ -236,6 +246,7 @@ pub(in crate::app) enum KeysReply {
     Cookie(u64, Result<Value, Failure>),
     Cleared(String, String, Result<Value, Failure>),
     Detected(u64, Result<Value, Failure>),
+    Named(u64, Result<Value, Failure>),
 }
 
 fn input(window: &mut Window, cx: &mut Context<Hangar>, value: String, placeholder: String) -> Entity<InputState> {
@@ -320,6 +331,7 @@ impl Hangar {
         let context = input(window, cx, numeric(engine.context_window), tr("accounts_engine_tokens"));
         let compact = input(window, cx, numeric(engine.auto_compact_window), tr("accounts_engine_default"));
         let output = input(window, cx, numeric(engine.max_output_tokens), tr("accounts_engine_default"));
+        let mgmt = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder(tr_shared("cliproxy_senha_placeholder", &[])));
         let mut subscriptions = Vec::new();
         for (field, which) in [(&name, 0), (&url, 1), (&key, 2), (&model, 3), (&subagent, 4), (&context, 5), (&compact, 6), (&output, 7)] {
             subscriptions.push(cx.subscribe_in(field, window, move |this: &mut Hangar, _, event: &InputEvent, _, cx| {
@@ -329,7 +341,8 @@ impl Hangar {
         let mut form = EngineForm { kind, saved: saved.clone(), title, lead, badge_url: engine.base_url.clone(), label, name, url, key, model, subagent,
             window: context, compact, output, flags, gateway: None, betas_touched: false, saved_url: engine.base_url, key_set, vision: engine.vision, models: None, picks: None,
             testing: None, tested: None, saving: None, error: None, syncing: None, synced: None, why: None,
-            detecting: None, detected: None, keyless: false, derived: Derived::default(),
+            detecting: None, detected: None, keyless: false, unnamed: 0, naming_error: None, mgmt, naming: None,
+            derived: Derived::default(),
             _subscriptions: subscriptions, pick_subscriptions: Vec::new() };
         form.refresh(&self.engine_names(), cx);
         self.accounts.outcome = None;
@@ -501,6 +514,20 @@ impl Hangar {
         cx.notify();
     }
 
+    /// Senha de gerenciamento do CLIProxyAPI: o servidor a guarda e já pede ao proxy que nomeie as contas.
+    fn save_management_key(&mut self, cx: &mut Context<Self>) {
+        let Some(api) = self.api.clone() else { return };
+        self.accounts.keys_seq += 1;
+        let seq = self.accounts.keys_seq;
+        let Some(form) = self.accounts.form.as_mut().filter(|f| f.naming.is_none()) else { return };
+        let key = EngineForm::value(&form.mgmt, cx);
+        if key.is_empty() { return; }
+        (form.naming, form.naming_error) = (Some(seq), None);
+        let body = json!({"management_key": key});
+        self.keys_send(async move { KeysReply::Named(seq, api.server_send(reqwest::Method::PUT, &["engines", "cliproxy", "management-key"], Some(body), 30).await) });
+        cx.notify();
+    }
+
     fn save_cookie(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone() else { return };
         self.accounts.keys_seq += 1;
@@ -623,9 +650,10 @@ impl Hangar {
                 let detected = result.map_err(|e| Self::failure(&e))
                     .and_then(|v| serde_json::from_value::<Detected>(v).map_err(|_| tr("invalid_response")));
                 let found = match detected {
-                    Ok(Detected { found: true, base_url: Some(url), models, error }) => {
+                    Ok(Detected { found: true, base_url: Some(url), models, error, unnamed_accounts, naming_error }) => {
                         // `keyless` antes do valor: o `Change` do preenchimento já o encontra ligado.
                         form.keyless = error.is_none();
+                        (form.unnamed, form.naming_error) = (unnamed_accounts.unwrap_or(0), naming_error);
                         form.url.update(cx, |input, cx| input.set_value(url.clone(), window, cx));
                         match error {
                             Some(erro) => { form.detected = Some((tr_shared("cliproxy_error", &[("url", &url), ("erro", &erro)]), true)); None }
@@ -639,6 +667,18 @@ impl Hangar {
                     Ok(_) => { form.detected = Some((tr_shared("cliproxy_missing", &[]), false)); None }
                 };
                 if let Some(models) = found { self.tested(models, window, cx); }
+            }
+            KeysReply::Named(seq, result) => {
+                let Some(form) = self.accounts.form.as_mut().filter(|f| f.naming == Some(seq)) else { return };
+                form.naming = None;
+                match result.map_err(|e| Self::failure(&e))
+                    .and_then(|v| serde_json::from_value::<Named>(v).map_err(|_| tr("invalid_response"))) {
+                    Ok(named) => {
+                        (form.unnamed, form.naming_error) = (named.unnamed_accounts.unwrap_or(0), named.naming_error);
+                        form.mgmt.update(cx, |input, cx| input.set_value("", window, cx));
+                    }
+                    Err(error) => form.naming_error = Some(error),
+                }
             }
         }
         if let Some(form) = self.accounts.form.as_mut() { form.refresh(&taken, cx); }
@@ -691,6 +731,22 @@ impl Hangar {
             url = url.child(tone(text.clone(), color));
         }
         body = body.child(url);
+
+        if f.keyless && (f.unnamed > 0 || f.naming_error.is_some()) {
+            let label = tr_shared("cliproxy_senha_placeholder", &[]);
+            let mut naming = div().flex().flex_col().gap(px(6.));
+            // Sem conta pendente a senha não resolve nada: fica só o motivo.
+            if f.unnamed > 0 {
+                naming = naming.child(help(tr_shared("cliproxy_sem_nome", &[("n", &f.unnamed.to_string())])))
+                    .child(div().flex().items_center().gap(px(8.))
+                        .child(div().flex_1().min_w_0().child(Input::new(&f.mgmt).disabled(busy || f.naming.is_some()).aria_label(label)))
+                        .child(Button::new("accounts-cliproxy-mgmt-save").outline().small().label(tr_shared("cliproxy_senha_salvar", &[]))
+                            .loading(f.naming.is_some()).disabled(busy || f.naming.is_some())
+                            .on_click(cx.listener(|this, _, _, cx| this.save_management_key(cx)))));
+            }
+            if let Some(error) = &f.naming_error { naming = naming.child(tone(error.clone(), theme::danger())); }
+            body = body.child(naming);
+        }
 
         // CLIProxyAPI achado: a chave fica no servidor, não há o que digitar.
         if !f.keyless {
