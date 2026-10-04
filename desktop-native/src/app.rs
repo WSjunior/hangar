@@ -1242,9 +1242,14 @@ impl Hangar {
                 cx.notify();
                 return;
             }
-            Payload::Files(key, files) => { self.receive_files(key, files); cx.notify(); return; }
-            Payload::UploadStep(key, id, result) => { self.receive_upload(key, id, result); cx.notify(); return; }
-            Payload::UploadsDone(key, draft, steer, known, group) => { self.finish_uploads(key, draft, steer, known, group, cx); cx.notify(); return; }
+            Payload::Files(key, files) => { let key = self.delivery.current(key); self.receive_files(key, files); cx.notify(); return; }
+            Payload::UploadStep(key, id, result) => { let key = self.delivery.current(key); self.receive_upload(key, id, result); cx.notify(); return; }
+            Payload::UploadsDone(key, draft, steer, known, group) => {
+                let key = self.delivery.current(key);
+                self.finish_uploads(key, draft, steer, known, group, cx);
+                cx.notify();
+                return;
+            }
             Payload::Saved(key, open, result) => {
                 let note = match result {
                     Ok(path) if open => { cx.open_with_system(&path); None }
@@ -1642,13 +1647,15 @@ impl Hangar {
         self.sidebar_sessions_changed(window, cx);
     }
 
-    /// Transcript trocado na mesma sessão (`/clear`): envio em voo, espera, campo e "mandar pro grupo" seguem para a chave
-    /// nova. Devolve a antiga, que a abertura ainda preenche com o campo e deve sair depois.
+    /// Transcript trocado na mesma sessão (`/clear`): envio em voo, espera, campo, anexos e "mandar pro grupo" seguem para a
+    /// chave nova. Devolve a antiga, que a abertura ainda preenche com o campo e deve sair depois.
     fn follow_transcript(&mut self, old: &SessionInfo, new: &SessionInfo, cx: &mut Context<Self>) -> Option<SessionKey> {
         if new.jsonl == old.jsonl || new.lifecycle_id != old.lifecycle_id { return None; }
         let server = self.session_server()?;
         let (from, to) = (SessionKey::new(&server, old)?, SessionKey::new(&server, new)?);
         self.delivery.rekey(&from, &to);
+        if let Some(list) = self.attachments.remove(&from) { self.attachments.insert(to.clone(), list); }
+        if let Some(batch) = self.uploading.remove(&from) { self.uploading.insert(to.clone(), batch); }
         if let Some((on, _)) = self.sidebar.grouping.send_to_group.as_mut().filter(|(on, _)| *on == from) { *on = to.clone(); }
         self.drafts.remove(&from);
         self.drafts.insert(to, self.composer.read(cx).value().to_string());
