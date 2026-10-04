@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Compara, nas sessões abertas, o tempo de abrir o chat pelo hangar-server (Rust, porta 8765) e
-# pelo Python (porta interna). Só leitura: não muda nada no servidor.
+# Compara o mesmo pedido pelo hangar-server (Rust, porta 8765) e direto no Python (porta interna),
+# para cada parte já migrada. Só leitura: não muda nada no servidor. Parte que o Rust ainda não
+# atende ele repassa ao Python, e aí os dois tempos ficam parecidos.
 set -euo pipefail
 
 pid=$(pgrep -f "python3 -m app.main" | head -1 || true)
@@ -14,28 +15,62 @@ if ! curl -sf http://127.0.0.1:8765/__hangar_server/health >/dev/null; then
 fi
 python_port=$(grep -o 'upstream=127.0.0.1:[0-9]*' "$log" 2>/dev/null | tail -1 | cut -d= -f2 || true)
 [ -n "$python_port" ] || { echo "porta do Python não encontrada em $log"; exit 1; }
+RUST=127.0.0.1:8765
+PY="$python_port"
 
-media_ms() {  # $1 = host:porta, $2 = sessão
-  # Resposta que não é 200 (token errado, porta velha) não pode virar tempo baixo.
-  for _ in 1 2 3 4 5 6; do
-    curl -s -o /dev/null -w '%{http_code} %{time_total}\n' -H "Authorization: Bearer $token" \
-      "http://$1/api/sessions/$2/history?limit=200"
-  done | tail -5 | awk '$1 != 200 {print "erro HTTP " $1 > "/dev/stderr"; bad=1; exit 1}
-    {s+=$2} END {if (!bad) printf "%.0f", s/NR*1000}'
+pedido_ms() {  # $1 = host:porta, $2 = caminho
+  curl -s -o /dev/null -w '%{http_code} %{time_total}\n' -H "Authorization: Bearer $token" "http://$1$2" |
+    awk '$1 != 200 {print "erro HTTP " $1 > "/dev/stderr"; exit 1} {printf "%.0f", $2 * 1000}'
 }
 
-sessoes=$(curl -s -H "Authorization: Bearer $token" http://127.0.0.1:8765/api/sessions |
-  python3 -c 'import json,sys; [print(x["name"], x.get("provider")) for x in json.load(sys.stdin) if x.get("jsonl")]')
+primeira_mensagem_ms() {  # $1 = host:porta, $2 = sessão; o ping inicial não conta
+  local start end
+  start=$(date +%s%N)
+  end=$( { curl -sN --max-time 3 -H "Authorization: Bearer $token" "http://$1/api/sessions/$2/events" || true; } |
+    { grep -m1 -q '^event: message' && date +%s%N; } ) || true
+  [ -n "$end" ] || { echo "sem mensagem em 3 s" >&2; return 1; }
+  echo $(( (end - start) / 1000000 ))
+}
 
+par() {  # $1 = função, $2.. = argumentos; Rust e Python alternados, 1 aquecimento + 5 medidas
+  local fn=$1; shift
+  local r=0 p=0 i a b
+  for i in 0 1 2 3 4 5; do
+    a=$($fn "$RUST" "$@") || return 1
+    b=$($fn "$PY" "$@") || return 1
+    [ "$i" -gt 0 ] && { r=$((r + a)); p=$((p + b)); }
+  done
+  echo "$((r / 5)) $((p / 5))"
+}
+
+linha() {  # $1 = rótulo, $2 = tipo, $3 = "Rust Python"
+  read -r r p <<< "$3"
+  local ganho
+  ganho=$(awk -v r="$r" -v p="$p" 'BEGIN { if (r > 0) printf "%.1fx", p / r; else print "-" }')
+  printf '%-34s %-16s %6s ms %6s ms %7s\n' "$1" "$2" "$r" "$p" "$ganho"
+}
+
+sessoes=$(curl -s -H "Authorization: Bearer $token" "http://$RUST/api/sessions" |
+  python3 -c 'import json,sys; [print(x["name"], x.get("provider")) for x in json.load(sys.stdin) if x.get("jsonl")]')
 [ -n "$sessoes" ] || { echo "nenhuma sessão aberta com conversa"; exit 1; }
-printf '%-28s %-16s %9s %9s %7s\n' sessão tipo Rust Python ganho
+
+printf '%-34s %-16s %9s %9s %7s\n' medida tipo Rust Python ganho
+echo "— Abrir o chat (últimas 200 mensagens, parte 1)"
 while read -r nome tipo; do
   [ -n "$nome" ] || continue
-  r=$(media_ms 127.0.0.1:8765 "$nome")
-  p=$(media_ms "$python_port" "$nome")
-  ganho=$(awk -v r="$r" -v p="$p" 'BEGIN { if (r > 0) printf "%.1fx", p / r; else print "-" }')
-  printf '%-28s %-16s %6s ms %6s ms %7s\n' "$nome" "$tipo" "$r" "$p" "$ganho"
+  t=$(par pedido_ms "/api/sessions/$nome/history?limit=200") && linha "$nome" "$tipo" "$t"
 done <<< "$sessoes"
+
+echo "— Chat ao vivo: até a primeira mensagem (parte 1 e 2B)"
+while read -r nome tipo; do
+  [ -n "$nome" ] || continue
+  t=$(par primeira_mensagem_ms "$nome") && linha "$nome" "$tipo" "$t"
+done <<< "$sessoes"
+
+echo "— Telas de Custos e Uso (parte 3)"
+t=$(par pedido_ms /api/costs) && linha custos - "$t"
+t=$(par pedido_ms /api/uso) && linha uso - "$t"
+
 echo
-echo "Média de 5 aberturas (últimas 200 mensagens) depois de 1 de aquecimento. Menos é melhor."
-echo "Pi, Kimi e omp ainda passam pelo Python: nelas os dois tempos ficam parecidos."
+echo "Média de 5 medidas depois de 1 de aquecimento, Rust e Python alternados. Menos é melhor."
+echo "Ganho perto de 1x = o Rust ainda repassa essa parte ao Python."
