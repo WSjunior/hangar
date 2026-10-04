@@ -278,7 +278,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   de 95% de cota a tela pede confirmação com aviso, e a partir de 99% a conta não aceita.**
   `POST /api/sessions/{name}/conta` espera os pids do cano e filhos antes do `move_conversation`;
   sem saída, recusa e religa na origem. A lista e a recusa saem de `_account_targets`
-  (`ACCOUNT_LOW_PCT`, `ACCOUNT_FULL_PCT`). Ver
+  (`ACCOUNT_LOW_PCT`, `ACCOUNT_FULL_PCT`). Na sessão com terminal o pane que reabre é outra vida
+  de terminal da MESMA sessão: o runtime herda a chave pela prova da vida nova
+  (`reborn_binding`), e só conversa nova esvazia a fila. Ver
   [Continuar a mesma conversa noutra conta](#continuar-a-mesma-conversa-noutra-conta).
 
 - **Transferência Claude → Codex não está aceita só porque a importação persistiu.** A prova
@@ -403,6 +405,17 @@ anteriores (sem terminal e com terminal).
 Os limites de 95% e 99% foram escolha do usuário: continuar reenvia o contexto inteiro no primeiro
 turno, então a 99% a conta acaba nele; entre 95% e 98% ela ainda serve, mas quem escolhe precisa
 confirmar sabendo disso. Contar a janela mais cheia, como o `sugerir_claude`.
+
+Medido em 04/10/2026 (commit `584e65c5`, servidor Rust na frente), em duas sessões descartáveis
+com terminal: `POST /conta` respondia 500 com e sem mensagem na conversa, e a conta trocava mesmo
+assim. A troca mata o pane e abre outro dentro de uma ação só do `coordinator.change`; o vínculo
+resolvido depois tinha outra impressão digital, e o `change` recusava a chave nova (`mudança de
+modo não pode trocar a chave durável`) ou, com o agente ainda fora de vista, a espera dos
+escritores estourava `BindingChanged (sem vida atual)`. O slot ficava com o vínculo velho, e a
+lista e o SSE da sessão passavam a estourar `BindingChanged`. Com tmux e `claude` reais e o
+coordenador isolado do backend, a mesma sequência falhou sem o conserto e, com ele, manteve a
+chave e validou o vínculo novo. O `clear` da fila comparava o caminho do transcript, que muda com
+a conta; passou a comparar a conversa.
 
 ## Confirmação de entrega sem reler o transcript
 

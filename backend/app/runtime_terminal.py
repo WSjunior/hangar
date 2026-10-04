@@ -935,6 +935,23 @@ def pending_binding(name, previous):
     return binding
 
 
+def terminal_life(binding):
+    """Prova da vida do terminal de um vínculo Claude com pane, confirmado ou pendente."""
+    if binding.provider != 'claude' or not (binding.meta.get('terminal') or binding.meta.get('pending_terminal')):
+        return None
+    return _session_proof(binding.name)
+
+
+def reborn_binding(name, previous, life_before):
+    """Terminal recriado dentro de uma troca: a vida muda, a sessão não, e a chave é da sessão."""
+    pending = pending_binding(name, previous)
+    if pending is None or pending.meta['pending_terminal'] == life_before:
+        return None
+    # O pane antigo morreu com a vida antiga: nenhuma escrita pode mirar nele.
+    pending.meta.pop('terminal', None)
+    return resolve_binding(name, pending) or pending
+
+
 def _native_record(current):
     pid = current.meta.get('agent_pid')
     if not pid:
