@@ -848,11 +848,33 @@ na bandeja e faz o pedido de fechar esconder a janela em vez de encerrar o app.
   dela. Não é janela "só de mensagens": essas não recebem o `TaskbarCreated`, usado para pôr o
   ícone de volta quando o Explorer reinicia.
 
+- **Escondida, a janela Wayland ignora os eventos do toplevel e do `xdg_surface`**: o que chega
+  nesse intervalo é resto dos objetos trocados, e confirmar um configure antigo no objeto novo
+  seria erro de protocolo. O estado de apresentação volta a "sem quadro", para uma falha no
+  primeiro desenho repetir por timer.
+- **Dois pedidos do ícone em menos de meio segundo contam como um.** O duplo clique chega como
+  dois cliques, e sem isso a janela aparecia e sumia.
+- **"Sair" solta o ícone antes de encerrar**, e no Windows soltar espera a janela oculta morrer
+  (`SendMessageW`): encerrar com o ícone de pé deixa um ícone morto na bandeja.
+
 Medição (04/10/2026, Hyprland 0.56.2 com a bandeja do Quickshell 0.2.1, build de
 desenvolvimento): três ciclos de esconder e mostrar no Wayland e três no X11 (XWayland), com a
 janela redesenhada a cada volta e o processo vivo; fechar pelo compositor esconde com o ícone de
-pé; clique no ícone mostra e esconde; segunda execução e link `hangar://` mostram a janela
-escondida, o link com o diálogo de convite preenchido; conversa em andamento aberta volta atual
-depois de escondida; troca de idioma muda os textos do menu; desligar a opção remove o ícone e
-fechar encerra; "Sair" encerra; numa sessão D-Bus sem bandeja a linha avisa e fechar encerra.
-Não conferido no uso real: a bandeja sumindo com a janela escondida.
+pé; clique no ícone mostra e esconde, e dois pedidos seguidos valem por um; segunda execução e
+link `hangar://` mostram a janela escondida, o link com o diálogo de convite preenchido; conversa
+em andamento aberta volta atual depois de escondida; troca de idioma muda os textos do menu;
+desligar a opção remove o ícone e fechar encerra; "Sair" encerra; numa sessão D-Bus sem bandeja a
+linha avisa e fechar encerra.
+
+Medição no Windows (04/10/2026, Windows 11 build 26200 numa VM, build de desenvolvimento, com os
+cliques do ícone entregues como a mensagem que o Shell manda): fechar (`WM_CLOSE`) esconde a
+janela com o processo vivo e o aviso único aparece; clique esquerdo mostra e esconde; a segunda
+execução sai e a janela aparece; depois de reiniciar o Explorer o ícone continua registrado e o
+clique volta a mostrar a janela; o clique direito abre o menu com "Abrir Hangar" e "Sair", e
+"Sair" encerra o processo e a janela oculta; com a opção desligada não há ícone e fechar
+encerra.
+
+Não conferido no uso real: a bandeja sumindo com a janela escondida (Linux); no Windows, o
+navegador embutido e o `hangar-preview` com a janela escondida (o WebView2 é janela filha, e
+filha escondida para de compor quadro), o duplo clique físico e a janela que estava minimizada;
+compositores Wayland além do Hyprland.
