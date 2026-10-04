@@ -4848,6 +4848,7 @@
   "native_keyboard_wrong_server": "Este atalho pertence a outra máquina. Abra uma sessão daquela máquina para usá-lo.",
   "native_keyboard_wrong_project": "Este atalho pertence a outro projeto. Abra uma sessão daquele projeto para usá-lo.",
   "native_keyboard_shortcut_missing": "A ação deste atalho não está mais cadastrada. Confira os atalhos da sessão.",
+  "native_keyboard_external_unavailable": "Terminal externo só está disponível no Linux ou Windows, em sessões com terminal desta máquina.",
   "native_keyboard_focus_composer": "Focar campo de mensagem",
   "native_keyboard_open_settings": "Abrir Configurações",
   "native_keyboard_copy_reply": "Copiar última resposta",

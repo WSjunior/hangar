@@ -376,7 +376,7 @@ impl Keyboard {
     }
 
     pub(super) fn is_editing(&self) -> bool { self.edit.is_some() }
-    pub(super) fn cancel_edit(&mut self) { self.edit = None; self.save_error = None; }
+    pub(super) fn cancel_edit(&mut self) { self.edit = None; }
     pub(super) fn hold_modifiers(&self) -> Modifiers { self.config.hold }
 
     fn apply(&self, cx: &mut App) -> Result<(), String> {
@@ -463,6 +463,9 @@ impl Hangar {
                         }
                     }
                     Err(error) => this.keyboard.save_error = Some(tr("keyboard_save_failed").replace("{error}", &error)),
+                }
+                if let Some(error) = &this.keyboard.save_error {
+                    window.push_notification(Notification::warning(error.clone()), cx);
                 }
                 cx.notify();
             });
@@ -599,6 +602,9 @@ impl Hangar {
                 this.keyboard.shortcut_running = false;
                 if this.selection != selection || this.selected_key().as_ref() != Some(&key) { return; }
                 match result {
+                    Ok(side::Shortcut::External) if !this.external_terminal_available() => {
+                        window.push_notification(Notification::warning(tr("keyboard_external_unavailable")), cx);
+                    }
                     Ok(shortcut) => this.run_shortcut(shortcut, false, window, cx),
                     Err(error) => window.push_notification(Notification::warning(error), cx),
                 }
@@ -735,6 +741,14 @@ fn keyboard_shortcut(item: &shortcuts::Item, project: Option<&str>) -> Option<si
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[test]
+    fn cancelling_key_capture_preserves_the_last_persistence_error() {
+        let mut keyboard = Keyboard { config: Config::default(), loading: false, load_error: None,
+            save_error: Some("disk failure".into()), saving: false, edit: None, shortcut_running: false };
+        keyboard.cancel_edit();
+        assert_eq!(keyboard.save_error.as_deref(), Some("disk failure"));
+    }
 
     #[test]
     fn edited_binding_replaces_default_without_removing_other_keymaps() {

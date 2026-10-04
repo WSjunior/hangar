@@ -4848,6 +4848,7 @@
   "native_keyboard_wrong_server": "This shortcut belongs to another machine. Open a session on that machine to use it.",
   "native_keyboard_wrong_project": "This shortcut belongs to another project. Open a session in that project to use it.",
   "native_keyboard_shortcut_missing": "This shortcut's action is no longer configured. Check the session shortcuts.",
+  "native_keyboard_external_unavailable": "External terminal is only available on Linux or Windows, for terminal sessions on this machine.",
   "native_keyboard_focus_composer": "Focus message field",
   "native_keyboard_open_settings": "Open Settings",
   "native_keyboard_copy_reply": "Copy last response",
