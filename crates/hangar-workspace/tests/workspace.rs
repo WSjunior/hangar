@@ -142,3 +142,17 @@ fn empty_folder_path_means_the_root_like_python() {
     let listed = execute(request).unwrap();
     assert!(listed.to_string().contains("projeto"), "{listed}");
 }
+
+#[cfg(unix)]
+#[test]
+fn listed_symlink_shows_the_size_of_its_target() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("alvo.txt"), "1").unwrap();
+    std::os::unix::fs::symlink(dir.path().join("alvo.txt"), dir.path().join("atalho.txt")).unwrap();
+    let request = serde_json::from_value(json!({"op":"list_dir", "args":{
+        "cwd": dir.path(), "path": null, "so_modificados": false}}))
+    .unwrap();
+    let listed = execute(request).unwrap();
+    let link = listed["entries"].as_array().unwrap().iter().find(|e| e["name"] == "atalho.txt").unwrap().clone();
+    assert_eq!(link["size"], 1);
+}

@@ -370,7 +370,8 @@ pub fn list_with_state(
             size: if dir {
                 0
             } else {
-                entry.metadata().map(|m| m.len()).unwrap_or(0)
+                // Segue o atalho, como o `e.stat()` do Python; quebrado fica sem tamanho.
+                std::fs::metadata(entry.path()).map(|m| m.len()).unwrap_or(0)
             },
             changed: mark.and_then(|v| v.as_str().map(str::to_owned)),
             add: descendants
