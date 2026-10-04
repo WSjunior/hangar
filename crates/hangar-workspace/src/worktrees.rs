@@ -38,7 +38,9 @@ fn normpath(path: &Path) -> PathBuf {
         match part {
             Component::CurDir => {}
             Component::ParentDir => {
-                if !out.pop() && !out.has_root() {
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                    out.pop();
+                } else if !out.has_root() {
                     out.push("..");
                 }
             }
@@ -51,6 +53,53 @@ fn normpath(path: &Path) -> PathBuf {
 fn text(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
+
+/// Caminhos iguais: no Windows sem distinguir maiúsculas, como o `normcase` do Python.
+fn same_path(a: &Path, b: &Path) -> bool {
+    if cfg!(windows) {
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    } else {
+        a == b
+    }
+}
+
+/// `target` dentro de `root`, os dois pelo mesmo `real`: a caixa que o macOS devolve no
+/// `canonicalize` pode não ser a do texto das raízes que o Python manda.
+fn within(target: &Path, root: &str) -> bool {
+    target.starts_with(real(Path::new(root)))
+}
+
+/// Teto de `git` simultâneos da lista, somando todos os pedidos: dois aparelhos abrindo a tela
+/// juntos não dobram os processos.
+struct Gate {
+    used: Mutex<usize>,
+    freed: std::sync::Condvar,
+}
+
+impl Gate {
+    fn run<T>(&self, f: impl FnOnce() -> T) -> T {
+        let mut used = self.used.lock().unwrap_or_else(|e| e.into_inner());
+        while *used >= PARALLEL {
+            used = self.freed.wait(used).unwrap_or_else(|e| e.into_inner());
+        }
+        *used += 1;
+        drop(used);
+        struct Release<'a>(&'a Gate);
+        impl Drop for Release<'_> {
+            fn drop(&mut self) {
+                *self.0.used.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+                self.0.freed.notify_one();
+            }
+        }
+        let _release = Release(self);
+        f()
+    }
+}
+
+static GATE: Gate = Gate {
+    used: Mutex::new(0),
+    freed: std::sync::Condvar::new(),
+};
 
 fn is_dir(path: &str) -> bool {
     !path.is_empty() && Path::new(path).is_dir()
@@ -127,7 +176,7 @@ pub fn removed() -> HashMap<String, String> {
 
 /// Pasta sumida: o repo que ainda a lista, pelo mapa de remoções, pela irmã ou subindo.
 pub fn main_of_missing(path: &str) -> String {
-    if let Some(mapped) = removed().get(path) {
+    if let Some(mapped) = removed().get(path).filter(|m| !m.is_empty()) {
         return mapped.clone();
     }
     let p = Path::new(path);
@@ -190,7 +239,7 @@ impl Repo {
         let wanted = real(Path::new(path));
         self.admins
             .iter()
-            .find(|(_, p)| real(Path::new(p)) == wanted)
+            .find(|(_, p)| same_path(&real(Path::new(p)), &wanted))
             .map(|(e, _)| e)
     }
 
@@ -224,7 +273,7 @@ struct Probe {
 
 impl Probe {
     fn git(&mut self, cwd: &str, args: &[&str]) -> Option<crate::process::Output> {
-        match git::command(Path::new(cwd), args) {
+        match GATE.run(|| git::command(Path::new(cwd), args)) {
             Ok(out) => Some(out),
             Err(e) => {
                 // Sem o detalhe: o stderr do git pode citar caminhos do usuário.
@@ -275,13 +324,34 @@ fn ignored_lost(probe: &mut Probe, path: &str, main: &str) -> Vec<String> {
     lost
 }
 
+/// Em blocos, como o `filecmp`: um dump grande ignorado não vai inteiro para a memória.
 fn same_file(a: &Path, b: &Path) -> bool {
+    use std::io::Read;
     let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
         return false;
     };
-    mb.is_file()
-        && ma.len() == mb.len()
-        && matches!((std::fs::read(a), std::fs::read(b)), (Ok(x), Ok(y)) if x == y)
+    if !mb.is_file() || ma.len() != mb.len() {
+        return false;
+    }
+    let (Ok(mut fa), Ok(mut fb)) = (std::fs::File::open(a), std::fs::File::open(b)) else {
+        return false;
+    };
+    let (mut ba, mut bb) = (vec![0u8; 64 * 1024], vec![0u8; 64 * 1024]);
+    loop {
+        let (Ok(n), Ok(m)) = (fa.read(&mut ba), fb.read(&mut bb)) else {
+            return false;
+        };
+        // `read` pode devolver menos que o pedido; só segue em passo igual, senão relê inteiro.
+        if n != m {
+            return matches!((std::fs::read(a), std::fs::read(b)), (Ok(x), Ok(y)) if x == y);
+        }
+        if n == 0 {
+            return true;
+        }
+        if ba[..n] != bb[..n] {
+            return false;
+        }
+    }
 }
 
 /// Por realpath: home atrás de symlink dá dois textos para a mesma pasta.
@@ -463,10 +533,12 @@ pub fn list_all(
     measure: bool,
     bases: &[String],
 ) -> Value {
-    let wanted: Vec<&str> = match repo {
+    let mut wanted: Vec<&str> = match repo {
         Some(r) => vec![r],
         None => cwds.iter().map(String::as_str).collect(),
     };
+    wanted.sort_unstable();
+    wanted.dedup();
     let mut mains = wanted
         .into_iter()
         .filter_map(repo_root_of)
@@ -480,7 +552,7 @@ pub fn list_all(
         .filter(|m| {
             roots.is_none_or(|roots| {
                 let m = real(Path::new(m));
-                roots.iter().any(|r| m.starts_with(r))
+                roots.iter().any(|r| within(&m, r))
             })
         })
         .map(|m| Repo::read(&m))
@@ -520,11 +592,8 @@ pub fn list_all(
 /// Pasta dentro de uma raiz liberada: a fronteira do `_allowed_scan_root` do `api.py`.
 fn allowed_scan_root(path: &str, roots: &[String]) -> Result<()> {
     let target = real(Path::new(path));
-    let Some(root) = roots.iter().find(|r| target.starts_with(r)) else {
+    if !roots.iter().any(|r| within(&target, r)) {
         return Err(error(403, "root not allowed"));
-    };
-    if !target.starts_with(real(Path::new(root))) {
-        return Err(error(400, "path escapes its root"));
     }
     if !target.exists() {
         return Err(error(404, "path not found"));
@@ -617,21 +686,30 @@ pub fn disk_usage(path: &str, created_at: Option<i64>, schedule: bool) -> Option
     let hit = sizes.done.get(&key).cloned();
     let stale = hit.as_ref().is_none_or(|(due, _)| Instant::now() >= *due);
     if schedule && stale && !sizes.running.contains(&key) {
-        let queue = sizes.queue.get_or_insert_with(|| {
+        if sizes.queue.is_none() {
             let (tx, rx) = mpsc::channel::<SizeKey>();
             // ponytail: uma medição por vez para não disputar disco com o resto da máquina.
-            std::thread::Builder::new()
+            let spawned = std::thread::Builder::new()
                 .name("wt-size".into())
                 .spawn(move || {
                     for key in rx {
                         measure(key);
                     }
-                })
-                .expect("thread de medição");
-            tx
-        });
-        if queue.send(key.clone()).is_ok() {
+                });
+            match spawned {
+                Ok(_) => sizes.queue = Some(tx),
+                // Sem thread a medição fica pendente e a próxima leitura tenta de novo.
+                Err(_) => tracing::error!("worktrees: não abri a thread de medição"),
+            }
+        }
+        if let Some(queue) = &sizes.queue
+            && queue.send(key.clone()).is_ok()
+        {
             sizes.running.insert(key);
+        } else {
+            // A fila morreu: sem isto, toda worktree ficaria "medindo" para sempre, calada.
+            tracing::error!("worktrees: fila de medição parou; recriando");
+            sizes.queue = None;
         }
     }
     hit.map(|(_, size)| size)
@@ -653,6 +731,9 @@ fn measure(key: SizeKey) {
     };
     let mut sizes = SIZES.lock().unwrap_or_else(|e| e.into_inner());
     sizes.running.remove(&key);
+    // Chave de worktree apagada ou recriada nunca mais é lida: sai quando venceu há tempo.
+    let now = Instant::now();
+    sizes.done.retain(|_, (due, _)| now < *due + SIZE_TTL);
     // Apagada durante a medição: não volta para o cache.
     if path.is_dir() {
         sizes.done.insert(key, (due, size));
@@ -755,6 +836,8 @@ mod tests {
     #[test]
     fn normpath_is_lexical() {
         assert_eq!(normpath(Path::new("/a/b/../c/./d")), PathBuf::from("/a/c/d"));
+        assert_eq!(normpath(Path::new("../../x")), PathBuf::from("../../x"));
+        assert_eq!(normpath(Path::new("/../x")), PathBuf::from("/x"));
     }
 
     #[test]

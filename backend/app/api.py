@@ -9808,7 +9808,8 @@ async def _worktree_inputs():
     folders = await asyncio.to_thread(list_folders)
     cwds = [s.cwd for s in sessions] + [f.cwd for f in folders if f.cwd and f.mtime >= corte]
     roots = allowed_roots()
-    allowed = [c for c in cwds if c and any(Path(os.path.realpath(c)).is_relative_to(r) for r in roots)]
+    allowed = await asyncio.to_thread(
+        lambda: [c for c in cwds if c and any(Path(os.path.realpath(c)).is_relative_to(r) for r in roots)])
     return sessions, allowed, roots
 
 

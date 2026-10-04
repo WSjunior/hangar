@@ -54,23 +54,30 @@ async fn context(st: &AppState) -> Result<Context, &'static str> {
     .header("x-hangar-internal", &st.cfg.internal_secret)
     .body(Body::empty())
     .map_err(|_| "pedido")?;
-    // A lista de pastas do Arquivo pode levar alguns segundos na primeira leitura.
-    let resp = tokio::time::timeout(Duration::from_secs(20), st.http.request(req))
+    // A lista de pastas do Arquivo pode levar dezenas de segundos na primeira leitura.
+    let resp = tokio::time::timeout(Duration::from_secs(60), st.http.request(req))
         .await
         .map_err(|_| "prazo")?
-        .map_err(|_| "conexao")?;
+        .map_err(|e| {
+            tracing::warn!(error = %e, "worktrees: contexto sem conexão com o Python");
+            "conexao"
+        })?;
     if !resp.status().is_success() {
+        tracing::warn!(status = %resp.status(), "worktrees: contexto recusado pelo Python");
         return Err("status");
     }
-    let bytes = tokio::time::timeout(Duration::from_secs(20), resp.into_body().collect())
+    // O teto vale durante a leitura: corpo grande não chega a ser guardado inteiro.
+    let body = http_body_util::Limited::new(resp.into_body(), MAX_CONTEXT);
+    let bytes = tokio::time::timeout(Duration::from_secs(60), body.collect())
         .await
         .map_err(|_| "prazo")?
-        .map_err(|_| "conexao")?
+        .map_err(|_| "tamanho")?
         .to_bytes();
-    if bytes.len() > MAX_CONTEXT {
-        return Err("tamanho");
-    }
-    serde_json::from_slice(&bytes).map_err(|_| "json")
+    // O erro do serde diz linha e coluna, nunca o conteúdo.
+    serde_json::from_slice(&bytes).map_err(|e| {
+        tracing::warn!(error = %e, "worktrees: contexto do Python fora do formato");
+        "json"
+    })
 }
 
 /// Não rodou: 503 com código e motivo, como as outras rotas do Rust; o Python nunca atende.
@@ -83,7 +90,17 @@ fn refuse(st: &AppState, route: &str, code: &'static str, motivo: &str) -> Respo
     if crate::warn_limit::allow(None, &format!("{code}:{motivo}")) {
         tracing::warn!(route = %route, code, motivo = %motivo, "worktrees recusado");
     }
-    st.diag.report("rust.worktrees_failed", "", code, "lista de worktrees indisponível");
+    // O diário só leva frase fixa; o motivo separa as causas.
+    let reason = match motivo {
+        "prazo" => "contexto do Python sem resposta no prazo",
+        "conexao" => "sem conexão com o Python",
+        "status" => "Python recusou o contexto",
+        "json" | "tamanho" => "contexto do Python fora do formato",
+        "vagas cheias" => "vagas cheias",
+        "pânico na leitura" => "pânico na leitura",
+        _ => "lista de worktrees indisponível",
+    };
+    st.diag.report("rust.worktrees_failed", "", code, reason);
     let mut resp = response(
         json!({"ok":false,"error_code":code,"message":msg,
             "detail":{"code":code,"params":{"motivo":motivo},"msg":msg}}),
@@ -112,12 +129,10 @@ pub async fn public(st: Arc<AppState>, req: Request, forward: Forward) -> Respon
         Ok(ctx) => ctx,
         Err(motivo) => return refuse(&st, &route, CONTEXT, motivo),
     };
-    let Ok(permit) = st.workspace_read_slots.clone().try_acquire_owned() else {
-        return refuse(&st, &route, hangar_workspace::BUSY, "vagas cheias");
-    };
+    // Sem vaga de leitura: quem limita os `git` da lista é o teto global do núcleo, e pedido
+    // que espera por ele não vira 503 de "ocupado" como no Python, que também esperava.
     let repo = params.get("repo").cloned();
     let done = tokio::task::spawn_blocking(move || -> hangar_workspace::Result<Value> {
-        let _permit = permit;
         if detail {
             let path = worktrees::allowed_worktree(&path.unwrap_or_default(), &ctx.roots)?;
             Ok(worktrees::status_of(
@@ -146,6 +161,9 @@ pub async fn public(st: Arc<AppState>, req: Request, forward: Forward) -> Respon
         Ok(Ok(value)) => response(value, 200),
         // Recusa de caminho: o mesmo `{"detail": ...}` do HTTPException do Python.
         Ok(Err(e)) => response(json!({"detail": e.detail}), e.status),
-        Err(_) => refuse(&st, &route, hangar_workspace::UNAVAILABLE, "pânico na leitura"),
+        Err(e) => {
+            tracing::error!(panic = e.is_panic(), "worktrees: leitura não terminou");
+            refuse(&st, &route, hangar_workspace::UNAVAILABLE, "pânico na leitura")
+        }
     }
 }

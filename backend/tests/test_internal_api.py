@@ -1,4 +1,7 @@
 # backend/tests/test_internal_api.py
+import asyncio
+import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -70,7 +73,7 @@ def test_workspace_context_contains_only_registry_metadata(tmp_path):
 
 
 def test_worktrees_context_has_folders_inside_roots_and_account_projects(tmp_path):
-    inside, outside = tmp_path / "repo", "/fora"
+    inside = tmp_path / "repo"
     inputs = AsyncMock(return_value=([_info(cwd=str(inside), worktree_path=str(inside))], [str(inside)], [tmp_path]))
     with patch("app.api._worktree_inputs", inputs), \
             patch("app.archive._contas", return_value=[(None, "", tmp_path / "projects")]):
@@ -81,19 +84,25 @@ def test_worktrees_context_has_folders_inside_roots_and_account_projects(tmp_pat
         "sessions": [{"name": "s1", "cwd": str(inside), "worktree_path": str(inside), "jsonl": "/p/abc-123.jsonl"}],
         "project_bases": [str(tmp_path / "projects")],
     }
-    assert outside not in response.text
 
 
-def test_worktree_inputs_keep_only_folders_inside_the_roots(tmp_path):
-    import asyncio
-    from types import SimpleNamespace
+def test_worktrees_context_refuses_before_reading_anything():
+    with patch("app.api._worktree_inputs") as inputs:
+        response = _client("203.0.113.7").get("/internal/worktrees/context", headers={"X-Hangar-Internal": SECRET})
+        assert _client().get("/internal/worktrees/context", headers={"X-Hangar-Internal": "errado"}).status_code == 404
+    assert response.status_code == 404
+    inputs.assert_not_called()
+
+
+def test_worktree_inputs_keep_recent_folders_inside_the_roots(tmp_path):
     (tmp_path / "repo").mkdir()
     sessions = [_info(cwd=str(tmp_path / "repo")), _info(name="s2", cwd="/fora")]
-    old = SimpleNamespace(cwd=str(tmp_path), mtime=0)
-    with patch("app.api.registry.list", return_value=sessions), patch("app.api.list_folders", return_value=[old]), \
+    folders = [SimpleNamespace(cwd=str(tmp_path), mtime=0), SimpleNamespace(cwd="/fora-recente", mtime=time.time()),
+               SimpleNamespace(cwd=str(tmp_path / "recente"), mtime=time.time())]
+    with patch("app.api.registry.list", return_value=sessions), patch("app.api.list_folders", return_value=folders), \
             patch("app.api.allowed_roots", return_value=[tmp_path]):
         _sessions, cwds, roots = asyncio.run(api_mod._worktree_inputs())
-    assert cwds == [str(tmp_path / "repo")] and roots == [tmp_path]
+    assert cwds == [str(tmp_path / "repo"), str(tmp_path / "recente")] and roots == [tmp_path]
 
 
 def test_workspace_context_refuses_before_reading_the_registry():
