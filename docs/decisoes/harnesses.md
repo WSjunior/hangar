@@ -176,6 +176,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   (`<skill name="…" location="…">`) e ainda não é tratado.
 - **A preferência da barra do Claude Code não autoriza sobrescrever `statusLine`**: desligada,
   o instalador preserva o que está lá.
+- **Contexto e cota da sessão Claude não dependem da statusline.** Quem mantém a barra própria
+  tem o contexto lido do transcript (`claude_context.py`, campo `context` da lista) e a cota da
+  API de uso; a barra do Hangar, quando traz o número, continua valendo.
 - **Hook nosso nunca bloqueia prompt, e a falha dele não some calada.** Em `SessionStart` e
   `UserPromptSubmit` o sufixo é `|| echo "<aviso>"` (texto puro, ASCII): sai com 0 e o aviso
   entra no contexto do modelo. Nos demais eventos o stdout não chega a ninguém e fica
@@ -2198,3 +2201,28 @@ com `claude -p --include-partial-messages --thinking-display summarized` (Opus 5
 `message_start` em 5,04 s, primeiro `thinking_delta` em 7,31 s, fim em 11,00 s com 431 tokens.
 Partindo do primeiro pedaço daria 117 tok/s; partindo do `message_start`, 72. Os tokens do
 pensamento foram gerados antes de o resumo dele chegar.
+
+## Contexto e cota sem a statusline do Hangar (03/10/2026)
+
+03/10/2026. Com a preferência da barra desligada, o `statusLine` é o da pessoa, num formato que o
+app não lê, e os anéis de Contexto e da conta no rodapé do composer do nativo mostravam "sem
+dado" o tempo todo, embora a informação existisse.
+
+- **Contexto:** o `usage` da última resposta do agente principal no transcript é o pedido inteiro
+  (`input + cache_read + cache_creation`). Subagente (`isSidechain`) e resposta `<synthetic>`
+  ficam de fora. O id do modelo no transcript não diz se é a variante de 1M, então a janela sai
+  do modelo da PRÓPRIA sessão (o que a statusline recebeu, o `--model` do processo ou o sidecar
+  da sessão sem terminal) e só na falta dele do `model` do `settings.json` da conta: o Hangar abre
+  a sessão com `--model opus[1m]` sem mexer nesse arquivo. Termina em `[1m]` ou o uso já passou
+  de 200k (só cabe na de 1M) → 1M; senão 200k. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` do processo (ou
+  `context_window` do sidecar) vence os dois. Lido com o mesmo TTL da statusline e entra na
+  assinatura da lista em baldes de 5%. O cache guarda o `jsonl` lido: depois do `/clear` o anel
+  fica sem dado até a primeira resposta, em vez de mostrar o número da conversa anterior.
+- **Cota:** o anel da conta usa a da API de uso, a mesma da pílula do topo, quando a linha não
+  traz a janela de 5 h ou a semanal.
+- **A linha do Hangar vence:** quando ela traz o contexto, o número dela é o exato
+  (`context_window_size` do Claude Code) e continua sendo o usado.
+
+Medição (03/10/2026, sessão Claude com barra própria, Opus em `[1m]`): o transcript deu 539.351
+tokens contra 489k a 510k da barra minutos antes (a conversa crescendo entre uma e outra); no
+nativo os anéis passaram de "sem dado" para Contexto 54% e a conta 100% (semanal).
