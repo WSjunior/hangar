@@ -11,5 +11,7 @@ Bandeja: `PlatformWindow::set_hidden` nos dois backends. No Wayland (`src/linux/
 o toplevel e o `xdg_surface`, tira o buffer da `wl_surface` e cria os dois de novo nela, sem commit; mostrar reaplica
 título, `app_id`, tamanhos e modo de decoração e faz o commit inicial, que traz o configure como na criação da janela.
 A superfície e o renderer são os mesmos do começo ao fim, e o laço de quadros fica em `Unconfigured` enquanto a janela
-está escondida. Só desmapear com buffer nulo não serve: o Hyprland não manda configure no commit seguinte. No X11
+está escondida. Vale só para a janela principal (sem pai e sem diálogo), e não toca nos callbacks, porque o app chama
+de dentro do aviso de fechar. Só desmapear com buffer nulo não serve: o Hyprland não manda configure no commit
+seguinte. No X11
 (`src/linux/x11/window.rs`) é `UnmapWindow`/`MapWindow`.

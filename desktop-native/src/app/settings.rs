@@ -566,6 +566,7 @@ impl Hangar {
             self.list_state.remeasure();
             self.restyle_subagent(cx);
         }
+        if before.keep_in_tray != next.keep_in_tray { self.sync_tray(cx); }
         if save {
             let (connection, tx) = (self.connection, self.tx.clone());
             self.runtime.spawn(async move {

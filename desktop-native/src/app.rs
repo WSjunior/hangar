@@ -601,6 +601,13 @@ impl Drop for Hangar {
     }
 }
 
+/// Bloqueante: o daemon de notificação pode demorar. Chamar fora da thread da janela.
+fn show_system_notification(title: &str, body: &str) {
+    if let Err(error) = notify_rust::Notification::new().appname("Hangar").summary(title).body(body).show() {
+        eprintln!("notification: {error}");
+    }
+}
+
 impl Hangar {
     pub fn new(runtime: Arc<Runtime>, appearance_error: Option<String>, crash: Option<String>, links: async_channel::Receiver<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         if let Some(error) = crash {
@@ -623,11 +630,7 @@ impl Hangar {
         window.on_window_should_close(cx, move |window, cx| {
             let Some(this) = tray_owner.upgrade() else { return true };
             if !this.read(cx).closes_to_tray() { return true; }
-            // Esconder depois do retorno: o Wayland chama este aviso com os callbacks da janela emprestados.
-            let handle = window.window_handle();
-            cx.defer(move |cx| {
-                let _ = handle.update(cx, |_, window, cx| this.update(cx, |this, cx| this.hide_to_tray(window, cx)));
-            });
+            this.update(cx, |this, cx| this.hide_to_tray(window, cx));
             false
         });
         // Link `hangar://` desta ou de outra execução: abre o diálogo preenchido e traz a janela para a frente. Cada link entra
@@ -1837,11 +1840,7 @@ impl Hangar {
                     if let (Some(message), Some(session), Some(prefs)) = (notice, &self.selected, &self.system_notifications.prefs) {
                         if !prefs.suppressed(&session.name, chrono::Local::now().time()) {
                             let (title, body) = (format!("Hangar · {}", session.name), tr(message));
-                            self.runtime.spawn_blocking(move || {
-                                if let Err(error) = notify_rust::Notification::new().appname("Hangar").summary(&title).body(&body).show() {
-                                    eprintln!("notification: {error}");
-                                }
-                            });
+                            self.runtime.spawn_blocking(move || show_system_notification(&title, &body));
                         }
                     }
                 }

@@ -1099,9 +1099,13 @@ impl WaylandWindowStatePtr {
     /// Hangar: esconde a janela sem destruir a superfície nem o renderer. O toplevel e o `xdg_surface` são trocados
     /// por novos na mesma `wl_surface`: assim mostrar de novo é o commit inicial de sempre, com configure garantido.
     /// Só desmapear com buffer nulo não serve: o Hyprland não manda configure no commit seguinte.
+    /// O app chama isto de dentro do aviso de fechar, com `callbacks` emprestado: nada aqui pode tocar neles.
     pub fn set_hidden(&self, hidden: bool) {
         let mut state = self.state.borrow_mut();
-        if state.hidden == hidden || state.surface_state.toplevel().is_none() {
+        // Só a janela principal: diálogo e janela com pai voltariam sem o vínculo.
+        let main_window = state.parent.is_none()
+            && matches!(&state.surface_state, WaylandSurfaceState::Xdg(xdg) if xdg.dialog.is_none());
+        if state.hidden == hidden || !main_window {
             return;
         }
         state.hidden = hidden;

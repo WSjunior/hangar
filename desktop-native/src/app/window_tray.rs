@@ -54,14 +54,8 @@ impl Hangar {
     pub(super) fn hide_to_tray(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.set_hidden(true);
         self.window_tray.hidden = true;
-        if appearance::take_tray_notice() {
-            let (title, body) = (tr("tray_notice_title"), tr("tray_notice_body"));
-            self.runtime.spawn_blocking(move || {
-                if let Err(error) = notify_rust::Notification::new().appname("Hangar").summary(&title).body(&body).show() {
-                    eprintln!("notification: {error}");
-                }
-            });
-        }
+        let (title, body) = (tr("tray_notice_title"), tr("tray_notice_body"));
+        self.runtime.spawn_blocking(move || if appearance::take_tray_notice() { show_system_notification(&title, &body) });
         cx.notify();
     }
 

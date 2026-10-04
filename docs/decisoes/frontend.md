@@ -821,13 +821,16 @@ na bandeja e faz o pedido de fechar esconder a janela em vez de encerrar o app.
 
 - **A janela é escondida, nunca destruída.** A tela (`app::Hangar`) guarda dezenas de assinaturas
   presas à janela e não sobrevive a fechar e reabrir. O pedido de fechar é interceptado com
-  `on_window_should_close`; o app responde `false` e esconde depois do retorno (`cx.defer`),
-  porque o backend Wayland chama esse aviso com os callbacks da janela emprestados.
+  `on_window_should_close`; o app esconde ali mesmo e responde `false`. O backend Wayland chama
+  esse aviso com os callbacks da janela emprestados, e um `cx.defer` não sai desse empréstimo (o
+  efeito adiado roda antes de o aviso voltar): por isso `set_hidden` não toca nos callbacks.
 - **`Window::set_hidden` é ajuste nosso no GPUI vendorizado** (`vendor/PATCHES.md`). Windows:
   `SW_HIDE`/`SW_SHOW`. X11: `UnmapWindow`/`MapWindow`. Wayland: esconder destrói o toplevel e o
   `xdg_surface`, tira o buffer da `wl_surface` e cria os dois de novo nela, sem commit; mostrar
   reaplica título, `app_id`, tamanhos e decoração e faz o commit inicial. A superfície e o
-  renderer continuam os mesmos.
+  renderer continuam os mesmos. Vale só para a janela principal (sem pai e sem diálogo), e o
+  estado de maximizada ou tela cheia não é reaplicado: quem decide o tamanho na volta é o
+  compositor.
 - **Só desmapear com buffer nulo não serve.** Medido com `WAYLAND_DEBUG=1` no Hyprland 0.56.2: o
   buffer nulo desmapeia a janela, mas o commit sem buffer que viria depois não recebe
   `xdg_surface.configure`, e a janela não volta. Desenhar sem esperar o configure funcionaria

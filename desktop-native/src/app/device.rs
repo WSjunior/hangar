@@ -608,7 +608,6 @@ impl Hangar {
                     let mut next = appearance::get();
                     next.keep_in_tray = *on;
                     this.apply_appearance(next, true, cx);
-                    this.sync_tray(cx);
                 }));
             settings_box().child(self.row(IconName::ArrowDownToLine, "settings_tray", Some(note), true, toggle.into_any_element()))
         });

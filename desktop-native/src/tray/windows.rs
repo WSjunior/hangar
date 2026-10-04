@@ -61,9 +61,8 @@ fn create() -> Result<HWND, String> {
 }
 
 fn icon_data(hwnd: HWND) -> NOTIFYICONDATAW {
-    let mut data = NOTIFYICONDATAW { cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32, hWnd: hwnd, uID: ICON_ID, ..Default::default() };
-    data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-    data.uCallbackMessage = CALLBACK;
+    let mut data = NOTIFYICONDATAW { cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32, hWnd: hwnd, uID: ICON_ID,
+        uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP, uCallbackMessage: CALLBACK, ..Default::default() };
     // Recurso 1 do executável (`assets/brand/icon.rc`).
     unsafe {
         if let Ok(module) = GetModuleHandleW(PCWSTR::null()) {
@@ -119,7 +118,7 @@ unsafe extern "system" fn proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam:
             }
             LRESULT(0)
         }
-        WM_CLOSE => { let _ = unsafe { DestroyWindow(hwnd) }; LRESULT(0) }
+        // O `WM_CLOSE` que o `Drop` manda cai no padrão do sistema, que destrói a janela e chega aqui.
         WM_DESTROY => {
             unsafe {
                 let _ = Shell_NotifyIconW(NIM_DELETE, &icon_data(hwnd));
