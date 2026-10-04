@@ -426,3 +426,20 @@ def test_python_side_handoff_failure_does_not_count_against_rust(tmp_path):
         assert slot.adopt_failures == 0 and slot.rust_refused is None
         coordinator.close_python_leases()
     asyncio.run(flow())
+
+
+def test_dead_cano_after_rust_lets_go_parks_the_session_in_python(tmp_path):
+    # O Rust soltou e a trava voltou: sem cano para religar, a sessão não pode ficar presa em
+    # "recuperando" recusando tudo; ela fica no Python e sobe de novo no próximo envio.
+    async def flow():
+        legacy, gateway = Legacy(), Gateway()
+        coordinator = RuntimeCoordinator(gateway, legacy, peek)
+        coordinator.register(binding(tmp_path))
+        await coordinator.adopt("session")
+        async def dead(target, carry):
+            raise RuntimeError("reserva não reconectou ao cano existente")
+        legacy.reconnect = dead
+        await coordinator.detach("session")
+        assert coordinator.legacy_allowed("key", 1)
+        coordinator.close_python_leases()
+    asyncio.run(flow())

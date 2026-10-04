@@ -735,9 +735,16 @@ class RuntimeCoordinator:
         slot.carry = {"runtime_state":copy.deepcopy(recovered_view)} if recovered_view else slot.carry
         if self.legacy is None:
             raise RuntimeError("serviço da reserva indisponível")
-        ready = await self.legacy.reconnect(slot.binding.descriptor(), slot.carry)
-        if ready.get("hydrated") is not True:
-            raise RuntimeError("reserva não restaurou o snapshot")
+        try:
+            ready = await self.legacy.reconnect(slot.binding.descriptor(), slot.carry)
+            if ready.get("hydrated") is not True:
+                raise RuntimeError("reserva não restaurou o snapshot")
+        except Exception as exc:
+            # A trava e a fila já são do Python: sem cano para religar (morreu com a sessão), ela
+            # fica estacionada e o próximo envio a sobe de novo, como o adapter antigo. Ficar em
+            # "recuperando" recusava toda operação daquela sessão até o backend reiniciar.
+            from app import diag
+            diag.registrar("runtime.restore_sem_cliente", "erro", sessao=slot.binding.name, **failure_reason(exc))
         with slot.guard:
             slot.phase = Phase.Python
 
