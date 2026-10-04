@@ -1369,6 +1369,9 @@ class SessionRegistry:
             # /proc/<pid>/environ por sessão (a mesma ordem de custo do _config_dir_of ao lado) —
             # não é de graça, mas é local e sem rede. Feature em tick do SSE tem que ser barata.
             info.engine = _engine_of(pid_env) if pid_env else None
+            info.engine_account = procinfo._env_var_of(pid_env, "CP_ENGINE_ACCOUNT") if pid_env and info.engine else None
+            if prov == "claude" and pid_env:
+                self._agent_pid[p["name"]] = pid_env
             # Conta pra pílula de cota (id do /api/cotas): com motor, a chave do engines.json; sem
             # motor e Claude, o config dir do pane — ou o default (~/.claude) quando o processo não
             # declara CLAUDE_CONFIG_DIR (o fallback é idiom dos call sites, não do _config_dir_of).
@@ -1376,7 +1379,8 @@ class SessionRegistry:
             # com $HOME symlinkado ou path não-canônico de alias, o id cru nunca casaria e a pílula
             # degradava calada pro pior-geral.
             if info.engine:
-                info.conta = f"chave:{info.engine}"
+                info.conta = (procinfo._env_var_of(pid_env, "CP_ENGINE_CREDENTIAL_ID")
+                              if info.engine_account else f"chave:{info.engine}")
             elif prov == "kimi":
                 # Sessão Kimi sem motor gasta o provider do default_model do config dela
                 # ("apikey/k3" -> conta "kimi:apikey"). Cache por mtime dentro de cotas — isto
@@ -1402,8 +1406,6 @@ class SessionRegistry:
             else:
                 cdir = (_config_dir_of(pid_env) if pid_env else None) or (Path.home() / ".claude")
                 info.conta = f"claude:{Path(cdir).resolve()}"
-                if pid_env:
-                    self._agent_pid[p["name"]] = pid_env
             out.append(info)
             sids[p["name"]] = self._repl_sid(p["pid"], children)
         # Guarda de colisao: 2+ sessoes no mesmo jsonl -> so a dona mantem (mata a duplicata/cross-wire).
@@ -1441,7 +1443,10 @@ class SessionRegistry:
                 name=meta["name"], cwd=cwd, jsonl=jsonl,
                 lifecycle_id=session_life(meta["name"], meta=meta, birth=None),
                 provider="claude", headless=True, tracked=True, engine=meta.get("engine"),
-                conta=f"claude:{Path(cdir or Path.home() / '.claude').resolve()}",
+                engine_account=meta.get("engine_account"),
+                conta=(meta.get("engine_credential_id") if meta.get("engine_account") else
+                       f"chave:{meta['engine']}" if meta.get("engine") else
+                       f"claude:{Path(cdir or Path.home() / '.claude').resolve()}"),
                 branch=loc.branch, worktree=loc.worktree,
                 worktree_path=loc.worktree_path, worktree_gone=loc.worktree_gone,
                 then_target=(ThenLink(meta["name"]).get() or {}).get("target"),
@@ -1954,7 +1959,8 @@ class SessionRegistry:
                subagent_model: str | None = None,
                jev: bool = False, transfer_id: str | None = None,
                tool_output_token_limit: int | None = None,
-               transfer_rollout_path: str | None = None) -> SessionInfo:
+               transfer_rollout_path: str | None = None,
+               engine_account: str | None = None, engine_models: list[dict] | None = None) -> SessionInfo:
         # Nome tmux nao aceita "."/":"/espaco -> sanitiza igual ao rename. Varias sessoes na MESMA
         # pasta sao permitidas: cada uma tem nome unico + --session-id proprio -> jsonl proprio.
         name = sanitize_session_name(name)
@@ -1963,6 +1969,16 @@ class SessionRegistry:
             raise ValueError("nome invalido")
         from app.conversation_transfer import require_available
         require_available(name)
+        fixed_account = None
+        if engine_account is not None:
+            from app import cliproxy, engines
+            if provider != "claude" or not engine:
+                raise ValueError("conta ChatGPT exige Claude com motor CLIProxyAPI local")
+            fixed_account = cliproxy.account_for_engine(engines.listar().get(engine, {}), engine_account)
+            binding = cliproxy.engine_env(engine, model, context_window, engine_account,
+                                         home=fixed_account["home"], models=engine_models)
+            model = binding["ANTHROPIC_MODEL"]
+            context_window = int(binding["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]) if binding.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS") else None
         if subagent_model is not None:
             if provider != "claude" or engine:
                 raise ValueError("modelo dos subagentes so vale para claude sem motor")
@@ -2003,7 +2019,9 @@ class SessionRegistry:
                                                    transfer_id, tool_output_token_limit, transfer_rollout_path)
             return self._create_headless(name, cwd, config_dir, resume_session_id, engine, model,
                                          effort, context_window, permission_mode, subagent_model,
-                                         jev)
+                                         jev, engine_account,
+                                         fixed_account["credential_id"] if fixed_account else None,
+                                         fixed_account["base_url"] if fixed_account else None)
         codex_home = None
         if provider == "codex":
             try:
@@ -2169,6 +2187,9 @@ class SessionRegistry:
             # simplesmente não exporta a var — o CLI usa o default dele.
             _exigir_cp_engine()
             pre = ["hangar-engine", "--exec", engine]
+            if engine_account is not None:
+                pre += ["--account", engine_account, "--account-home", fixed_account["home"],
+                        "--account-base-url", fixed_account["base_url"]]
             if model:
                 pre += ["--model", model]
                 if context_window:
@@ -2247,14 +2268,17 @@ class SessionRegistry:
             self._jsonl_cache[name] = jsonl
         diag.registrar("sessao.criada", sessao=name, provider=provider, etapa="terminal_criado")
         return SessionInfo(name=name, cwd=cwd, jsonl=jsonl, tracked=jsonl is not None,
-                           provider=provider, engine=engine,
+                           provider=provider, engine=engine, engine_account=engine_account,
+                           conta=fixed_account["credential_id"] if fixed_account else None,
                            codex_home=codex_home)
 
     def _create_headless(self, name: str, cwd: str, config_dir: str | None,
                          resume_session_id: str | None, engine: str | None, model: str | None,
                          effort: str | None, context_window: int | None,
                          permission_mode: str | None, subagent_model: str | None = None,
-                         jev: bool = False) -> SessionInfo:
+                         jev: bool = False, engine_account: str | None = None,
+                         engine_credential_id: str | None = None,
+                         engine_account_base_url: str | None = None) -> SessionInfo:
         """Sessão Claude SEM terminal: criar é gravar o sidecar. O processo `claude` sobe no
         primeiro prompt (e de novo, com --resume, depois de um restart do backend) — abrir a
         sessão não custa um processo, e nada aqui depende de tmux."""
@@ -2286,7 +2310,10 @@ class SessionRegistry:
         meta = headless_sessions.save(name, cwd, sid, config_dir=config_dir, engine=engine,
                                       model=model, effort=effort, context_window=context_window,
                                       permission_mode=permission_mode, previous_non_plan=anterior,
-                                      subagent_model=subagent_model, jev=jev)
+                                      subagent_model=subagent_model, jev=jev,
+                                      engine_account=engine_account,
+                                      engine_credential_id=engine_credential_id,
+                                      engine_account_base_url=engine_account_base_url)
         PromptQueue(name).clear()
         ThenLink(name).clear()
         # Nome reusado não herda o par externo da sessão antiga.
@@ -2296,7 +2323,8 @@ class SessionRegistry:
         self._jsonl_cache[name] = jsonl
         diag.registrar("sessao.criada", sessao=name, provider="claude", etapa="sidecar_gravado")
         return SessionInfo(name=name, cwd=cwd, jsonl=jsonl, tracked=True, provider="claude",
-                           headless=True, engine=engine)
+                           headless=True, engine=engine, engine_account=engine_account,
+                           conta=engine_credential_id if engine_account else None)
 
     def _create_codex_headless(self, name: str, cwd: str, resume_thread_id: str | None,
                                model: str | None, effort: str | None, permission_mode: str | None,
@@ -2348,7 +2376,7 @@ class SessionRegistry:
     # É troca, não cópia: o antigo morre antes do novo nascer, e fila, `then` e pareamento ficam
     # (são da sessão, não do transporte). Quem garante que a sessão está ociosa é a API.
 
-    def para_terminal(self, name: str) -> SessionInfo:
+    def para_terminal(self, name: str, *, engine_models: list[dict] | None = None) -> SessionInfo:
         """Sessão sem terminal vira pane tmux com `claude --resume`. Falhando o pane, o sidecar
         volta e quem chama religa o processo — a sessão nunca fica sem nenhum dos dois."""
         from app.adapters import get_adapter, CLAUDE_HEADLESS
@@ -2364,7 +2392,7 @@ class SessionRegistry:
             escolha = {**meta, "model": vivo_m or meta.get("model"),
                        "effort": _esforco_de_abertura(vivo_e) or meta.get("effort")}
         # Comando inteiro ANTES de matar: validação que estoura depois deixaria a sessão sem nada.
-        cmd = self._comando_terminal(escolha, resume=Path(jsonl).exists())
+        cmd = self._comando_terminal(escolha, resume=Path(jsonl).exists(), engine_models=engine_models)
         headless_sessions.marcar_troca(name)
         headless_sessions.delete(name)
         try:
@@ -2381,15 +2409,52 @@ class SessionRegistry:
             raise ValueError("falha ao criar o terminal; a sessao segue sem terminal")
         self._jsonl_cache[name] = jsonl
         return SessionInfo(name=name, cwd=meta["cwd"], jsonl=jsonl, tracked=True,
-                           provider="claude", engine=meta.get("engine"))
+                           provider="claude", engine=meta.get("engine"),
+                           engine_account=meta.get("engine_account"),
+                           conta=meta.get("engine_credential_id"))
+
+    def wait_for_claude(self, name: str, meta: dict, timeout: float = 20.0) -> None:
+        from app.terminal_input import _wait_input_ready
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            procinfo._invalidar_children_map()
+            pane = self._pane_of(name)
+            agent = _pid_do_agente((pane or {}).get("pid"))
+            if agent and procinfo.pid_vivo(agent):
+                if _session_id_from_cmdline(_cmdline(agent)) == meta["session_id"]:
+                    expected_config = Path(meta.get("config_dir") or Path.home() / ".claude").resolve()
+                    actual_config = Path(_config_dir_of(agent) or Path.home() / ".claude").resolve()
+                    if (_engine_of(agent) != meta.get("engine") or actual_config != expected_config
+                            or procinfo._env_var_of(agent, "CP_ENGINE_ACCOUNT") != meta.get("engine_account")
+                            or (meta.get("engine_account") and procinfo._env_var_of(agent, "CP_ENGINE_CREDENTIAL_ID")
+                                != meta.get("engine_credential_id"))
+                            or (meta.get("engine_account_base_url") and procinfo._env_var_of(agent, "CP_ENGINE_ACCOUNT_BASE_URL")
+                                != meta["engine_account_base_url"])):
+                        raise ValueError("o Claude reabriu com uma identidade diferente da escolhida")
+                    if not _wait_input_ready(name, timeout=max(0.0, deadline - time.monotonic())):
+                        raise ValueError("o terminal não ficou pronto; confira login, confiança ou pergunta pendente")
+                    if not procinfo.pid_vivo(agent):
+                        raise ValueError("o Claude saiu durante a reabertura")
+                    return
+            if not tmux.has_session(name):
+                raise ValueError("o terminal encerrou antes de retomar o Claude")
+            time.sleep(0.25)
+        raise ValueError("o Claude não retomou a conversa e a identidade escolhidas no prazo")
 
     @staticmethod
-    def _comando_terminal(meta: dict, *, resume: bool) -> str:
+    def _comando_terminal(meta: dict, *, resume: bool, engine_models: list[dict] | None = None) -> str:
         sid = meta["session_id"]
         uuid.UUID(sid)
         # Modo de permissão vai junto: sem a flag a TUI nasce no defaultMode da conta.
+        model = meta.get("model")
+        if meta.get("engine_account"):
+            from app import cliproxy, engines
+            binding = cliproxy.engine_env(meta["engine"], model, meta.get("context_window"), meta["engine_account"],
+                                          home=(meta.get("engine_credential_id") or "").removeprefix("codex:"),
+                                          expected_base=meta.get("engine_account_base_url"), models=engine_models)
+            model = binding["ANTHROPIC_MODEL"]
         cmd = tmux.join_cmd(["claude", "--resume" if resume else "--session-id", sid]
-                            + model_args.args_de("claude", meta.get("model"), meta.get("effort"),
+                            + model_args.args_de("claude", model, meta.get("effort"),
                                                  meta.get("permission_mode")))
         if meta.get("engine"):
             from app import engines
@@ -2397,14 +2462,19 @@ class SessionRegistry:
                 raise ValueError(f"motor '{meta['engine']}' nao existe")
             _exigir_cp_engine()
             pre = ["hangar-engine", "--exec", meta["engine"]]
-            if meta.get("model"):
-                pre += ["--model", meta["model"]]
+            if meta.get("engine_account"):
+                pre += ["--account", meta["engine_account"], "--account-home",
+                        binding["CP_ENGINE_CREDENTIAL_ID"].removeprefix("codex:"),
+                        "--account-base-url", binding["CP_ENGINE_ACCOUNT_BASE_URL"]]
+            if model:
+                pre += ["--model", model]
                 if meta.get("context_window"):
                     pre += ["--context", str(meta["context_window"])]
             cmd = tmux.join_cmd(pre + ["--"]) + " " + cmd
         return cmd
 
-    def para_headless(self, name: str, permission_mode: str | None, *, transfer_meta: dict | None = None) -> dict:
+    def para_headless(self, name: str, permission_mode: str | None, *, transfer_meta: dict | None = None,
+                      for_account_move: bool = False) -> dict:
         """Pane tmux vira sessão sem terminal. Devolve o sidecar gravado; subir o processo é da
         API (async). `permission_mode` é o que o rodapé mostra agora (lido por quem chama)."""
         if codex_sessions.exists(name) or headless_sessions.exists(name):
@@ -2423,6 +2493,9 @@ class SessionRegistry:
         ag = _pid_do_agente(pid)
         cdir = _config_dir_of(ag) if ag else None
         motor = _engine_of(ag) if ag else None
+        engine_account = procinfo._env_var_of(ag, "CP_ENGINE_ACCOUNT") if ag and motor else None
+        engine_credential_id = procinfo._env_var_of(ag, "CP_ENGINE_CREDENTIAL_ID") if engine_account else None
+        engine_account_base_url = procinfo._env_var_of(ag, "CP_ENGINE_ACCOUNT_BASE_URL") if engine_account else None
         modelo, esforco = procinfo._model_of(ag) if ag else (None, None)
         janela = procinfo._env_var_of(ag, "CLAUDE_CODE_MAX_CONTEXT_TOKENS") if ag else None
         # Com motor a variável é do motor (engines.env_de); sem motor veio do `-e` da criação.
@@ -2430,7 +2503,9 @@ class SessionRegistry:
         jev = _jev_do_processo(ag)
         if motor:
             from app import engines
-            if motor not in engines.listar():
+            if motor not in engines.listar() and not for_account_move:
+                if engine_account:
+                    raise ValueError("motor da conta ChatGPT fixa indisponível")
                 # Mesmo fallback do resume(): escolha de motor apagado não vale na conta Anthropic.
                 motor = modelo = esforco = janela = None
         else:
@@ -2438,6 +2513,12 @@ class SessionRegistry:
             # só aparecem no que a statusline recebeu. Com `[1m]` no id, a janela vai junto.
             vivo_m, vivo_e = _escolhas_status(sid)
             modelo, esforco = vivo_m or modelo, _esforco_de_abertura(vivo_e) or esforco
+        if engine_account and not for_account_move:
+            from app import cliproxy
+            binding = cliproxy.engine_env(motor, modelo, None, engine_account,
+                                          home=(engine_credential_id or "").removeprefix("codex:"),
+                                          expected_base=engine_account_base_url)
+            modelo = binding["ANTHROPIC_MODEL"]
         model_args.validar("claude", modelo, esforco, permission_mode)
         if transfer_meta and (sid != transfer_meta["session_id"] or cwd != transfer_meta["cwd"]
                               or pid != transfer_meta.get("pane_pid")):
@@ -2452,6 +2533,9 @@ class SessionRegistry:
         try:
             meta = headless_sessions.save(name, cwd, sid, config_dir=str(cdir) if cdir else None,
                                           engine=motor, model=modelo, effort=esforco,
+                                          engine_account=engine_account,
+                                          engine_credential_id=engine_credential_id,
+                                          engine_account_base_url=engine_account_base_url,
                                           context_window=int(janela) if janela and janela.isdigit() else None,
                                           permission_mode=permission_mode, subagent_model=subagente,
                                           jev=jev,
@@ -2462,7 +2546,9 @@ class SessionRegistry:
                                               if permission_mode == "plan" else None))
         except OSError:
             meta = {"name": name, "cwd": cwd, "session_id": sid, "config_dir": str(cdir) if cdir else None,
-                    "engine": motor, "model": modelo, "effort": esforco, "permission_mode": permission_mode}
+                    "engine": motor, "model": modelo, "effort": esforco, "permission_mode": permission_mode,
+                    "engine_account": engine_account, "engine_credential_id": engine_credential_id,
+                    "engine_account_base_url": engine_account_base_url}
             if not tmux.new_session(name, cwd, self._comando_terminal(meta, resume=Path(jsonl).exists()),
                                     meta["config_dir"], provider="claude",
                                     **_env_sessao(subagente, jev)):
@@ -2938,10 +3024,15 @@ class SessionRegistry:
         # Anthropic continuando um transcript de Kimi — calado. Tem que ler ANTES do kill_session: o
         # /proc do pane some com ele.
         motor = _engine_of(ag) if ag else None
+        engine_account = procinfo._env_var_of(ag, "CP_ENGINE_ACCOUNT") if ag and motor else None
+        engine_credential_id = procinfo._env_var_of(ag, "CP_ENGINE_CREDENTIAL_ID") if engine_account else None
+        engine_account_base_url = procinfo._env_var_of(ag, "CP_ENGINE_ACCOUNT_BASE_URL") if engine_account else None
         motor_sumiu = False
         if motor:
             from app import engines
             if motor not in engines.listar():
+                if engine_account:
+                    raise ValueError("motor da conta ChatGPT fixa indisponível")
                 # Motor apagado no app depois de a sessão nascer: melhor voltar na conta Anthropic (o
                 # badge mostra isso) do que recusar o resume e deixar a sessão inacessível. Nesse
                 # fallback a escolha lida abaixo é DO MOTOR — reaplicá-la na conta Anthropic criaria
@@ -2957,6 +3048,12 @@ class SessionRegistry:
         # do kill (B2 da revisão final: o kill derruba o processo e a leitura pós-kill devolve
         # nada, e a sessão ressuscitava sem --context, calado).
         janela = procinfo._env_var_of(ag, "CLAUDE_CODE_MAX_CONTEXT_TOKENS") if ag else None
+        if engine_account:
+            from app import cliproxy
+            binding = cliproxy.engine_env(motor, modelo, None, engine_account,
+                                          home=(engine_credential_id or "").removeprefix("codex:"),
+                                          expected_base=engine_account_base_url)
+            modelo = binding["ANTHROPIC_MODEL"]
         if motor_sumiu:
             modelo = esforco = janela = None
         # Sem motor, a variável veio do `-e` da criação e sumiria no relançamento; com motor, é dele.
@@ -2986,6 +3083,10 @@ class SessionRegistry:
             # depois do kill trocaria "resume recusado" por "sessao destruida e nao relancada".
             _exigir_cp_engine()
             pre = ["hangar-engine", "--exec", motor]
+            if engine_account:
+                pre += ["--account", engine_account, "--account-home",
+                        binding["CP_ENGINE_CREDENTIAL_ID"].removeprefix("codex:"),
+                        "--account-base-url", binding["CP_ENGINE_ACCOUNT_BASE_URL"]]
             if modelo:
                 pre += ["--model", modelo]
                 if janela:
@@ -2999,4 +3100,5 @@ class SessionRegistry:
         # Fixa o transcript resumido no cache: resolve() ja o devolveria (o --resume esta no cmdline),
         # mas semear evita a janela onde o pane ainda esta subindo e cairia no fallback por mtime.
         self._jsonl_cache[name] = str(jsonl)
-        return SessionInfo(name=name, cwd=cwd, jsonl=str(jsonl), tracked=True, engine=motor)
+        return SessionInfo(name=name, cwd=cwd, jsonl=str(jsonl), tracked=True, engine=motor,
+                           engine_account=engine_account, conta=engine_credential_id)

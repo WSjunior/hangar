@@ -101,6 +101,8 @@ struct Engine {
     auto_compact_window: Option<u64>,
     max_output_tokens: Option<u64>,
     #[serde(default)] api_key_definida: bool,
+    cliproxy_accounts: Option<Vec<crate::api::dto::CliProxyAccount>>,
+    cliproxy_error: Option<String>,
 }
 
 pub(super) struct Engines { map: HashMap<String, Engine>, broken_file: Option<String> }
@@ -160,6 +162,8 @@ pub(super) struct Accounts {
     /// Contas da máquina da sessão aberta quando ela é de outro servidor, e de qual servidor vieram.
     session_list: Remote<Vec<Credential>>,
     session_server: Option<String>,
+    session_engines: Remote<Engines>,
+    engine_server: Option<String>,
     engines: Remote<Engines>,
     sections: Vec<Section>,
     /// Quando a lista na tela foi lida pela última vez.
@@ -199,6 +203,7 @@ pub(super) enum AccountsReply {
     Engines(u64, Result<Value, Failure>),
     /// Lista da máquina da sessão aberta (outro servidor): número do pedido e o servidor dela.
     SessionList(u64, String, Result<Value, Failure>),
+    SessionEngines(u64, String, Result<Value, Failure>),
     Renamed(u64, Result<Value, Failure>),
     Action(ActionReply),
     Keys(KeysReply),
@@ -471,6 +476,30 @@ fn parse_engines(value: &Value) -> Result<Engines, String> {
     Ok(Engines { map, broken_file: broken.then(|| value.get("arquivo_caminho").and_then(Value::as_str).unwrap_or("engines.json").to_owned()) })
 }
 
+fn proxy_account_targets(session: &SessionInfo, list: &[Credential], engine: &Engine) -> Vec<super::sidebar::AccountTarget> {
+    if engine.cliproxy_error.is_some() { return Vec::new(); }
+    engine.cliproxy_accounts.as_deref().unwrap_or_default().iter().filter_map(|a| {
+        let c = list.iter().find(|c| c.kind == "codex" && c.id == a.credential_id && c.id.starts_with("codex:")
+            && c.codex_account.as_deref() == Some(a.account.as_str()) && c.logged_in() == Some(true))?;
+        if session.engine_account.as_deref() == Some(a.account.as_str()) && session.conta.as_deref() == Some(c.id.as_str()) { return None; }
+        let pct = c.read_windows().and_then(|windows| windows.iter().filter(|w| matches!(w.label.as_str(), "5h" | "7d")
+            && w.reset_at.is_none_or(|at| at > now())).map(|w| w.pct).reduce(f64::max));
+        let label = c.alias.clone().filter(|a| !a.is_empty()).unwrap_or_else(||
+            if a.label.is_empty() { a.email.clone() } else { a.label.clone() });
+        Some(super::sidebar::AccountTarget { path: String::new(), label, pct, low: pct.is_some_and(|p| p >= 95.),
+            full: pct.is_some_and(|p| p >= 99.), engine_account: Some(a.account.clone()) })
+    }).collect()
+}
+
+pub(super) fn session_proxy_targets(session: &SessionInfo, credentials: Value, engines: Value) -> Result<Option<Vec<super::sidebar::AccountTarget>>, String> {
+    let list: Vec<Credential> = serde_json::from_value(credentials).map_err(|_| tr("invalid_response"))?;
+    let engines = parse_engines(&engines)?;
+    let engine = session.engine.as_deref().and_then(|name| engines.map.get(name)).ok_or_else(|| tr("create_proxy_no_accounts"))?;
+    if let Some(error) = &engine.cliproxy_error { return Err(tr("create_proxy_error").replace("{reason}", error)); }
+    if engine.cliproxy_accounts.is_none() { return Ok(None); }
+    Ok(Some(proxy_account_targets(session, &list, engine)))
+}
+
 /// Cor da barra pelo quanto já foi usado.
 fn level(pct: f64) -> Hsla { if pct > 90. { theme::danger() } else if pct > 80. { theme::warning() } else { theme::accent() } }
 
@@ -518,6 +547,9 @@ impl Hangar {
 
     /// Contas da máquina da sessão aberta: a lista do servidor ativo, ou a lida da outra máquina quando a sessão é de lá.
     pub(super) fn load_session_accounts(&mut self, cx: &mut Context<Self>) {
+        if self.selected.as_ref().is_some_and(|s| s.engine.as_deref().is_some_and(|e| !e.is_empty()) || s.uses_engine_account()) {
+            self.load_session_engines(cx);
+        }
         let Some(api) = self.open_api.clone() else {
             if !self.accounts.list.loading { self.load_accounts(false, cx); }
             return;
@@ -539,6 +571,25 @@ impl Hangar {
     /// A lista que o cartão de contas e a pílula do topo leem: a da máquina da sessão aberta.
     pub(super) fn session_accounts(&self) -> &Remote<Vec<Credential>> {
         if self.open_api.is_some() { &self.accounts.session_list } else { &self.accounts.list }
+    }
+
+    fn load_session_engines(&mut self, cx: &mut Context<Self>) {
+        let Some(api) = self.open_api.clone().or_else(|| self.api.clone()) else { return; };
+        let server = self.open_server();
+        if self.accounts.engine_server.as_deref() != Some(server.as_str()) {
+            self.accounts.session_engines.reset();
+            self.accounts.engine_server = Some(server.clone());
+        } else if self.accounts.session_engines.loading { return; }
+        let seq = self.accounts.session_engines.start();
+        let done = self.accounts_send_later();
+        self.runtime.spawn(async move { done(AccountsReply::SessionEngines(seq, server, api.server_read(&["engines"], &[], 15).await)).await; });
+        cx.notify();
+    }
+
+    fn session_engine(&self) -> Option<&Engine> {
+        if self.accounts.engine_server.as_deref() != Some(self.open_server().as_str()) { return None; }
+        let engine = self.selected.as_ref().filter(|s| s.provider == "claude")?.engine.as_deref()?;
+        self.accounts.session_engines.ok()?.map.get(engine)
     }
 
     fn load_engines(&mut self, cx: &mut Context<Self>) {
@@ -633,6 +684,11 @@ impl Hangar {
                 if accounts.session_server.as_deref() == Some(server.as_str()) {
                     accounts.session_list.finish(seq, result.map_err(|e| Self::failure(&e))
                         .and_then(|v| serde_json::from_value::<Vec<Credential>>(v).map_err(|_| tr("invalid_response"))));
+                }
+            }
+            AccountsReply::SessionEngines(seq, server, result) => {
+                if accounts.engine_server.as_deref() == Some(server.as_str()) {
+                    accounts.session_engines.finish(seq, result.map_err(|e| Self::failure(&e)).and_then(|v| parse_engines(&v)));
                 }
             }
             AccountsReply::Engines(seq, result) => {
@@ -1099,6 +1155,28 @@ mod tests {
     use std::collections::HashMap;
 
     fn credential(value: Value) -> Credential { serde_json::from_value(value).expect("synthetic credential") }
+
+    #[test]
+    fn proxy_targets_use_exact_credential_ids_and_never_unlisted_accounts() {
+        let session = crate::api::dto::SessionInfo { provider: "claude".into(), engine: Some("proxy".into()),
+            engine_account: Some("default".into()), conta: Some("codex:/first".into()), ..Default::default() };
+        let engine: Engine = serde_json::from_value(json!({"cliproxy_accounts":[
+            {"account":"default", "credential_id":"codex:/first", "email":"first@example.com", "label":"First"},
+            {"account":"other", "credential_id":"codex:/second", "email":"second@example.com", "label":"Second"}
+        ]})).unwrap();
+        let list = [
+            credential(json!({"id":"codex:/first", "tipo":"codex", "nome":"First", "codex_account":"default", "login":{"estado":"ok", "loggedIn":true}})),
+            credential(json!({"id":"codex:/second", "tipo":"codex", "nome":"Second", "codex_account":"other", "login":{"estado":"ok", "loggedIn":true}})),
+            credential(json!({"id":"codex:/unlisted", "tipo":"codex", "nome":"Unlisted", "codex_account":"unlisted", "login":{"estado":"ok", "loggedIn":true}})),
+            credential(json!({"id":"claude:/storage", "tipo":"claude", "nome":"Storage"}))
+        ];
+        let targets = super::proxy_account_targets(&session, &list, &engine);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].engine_account.as_deref(), Some("other"));
+        assert_eq!(targets[0].label, "Second");
+        let invalid = Engine { cliproxy_error: Some("invalid discovery".into()), ..engine };
+        assert!(super::proxy_account_targets(&session, &list, &invalid).is_empty());
+    }
 
     #[test]
     fn summary_counts_full_weeks_nearest_login_and_saved_resets() {

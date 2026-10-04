@@ -11,7 +11,9 @@ import json
 import logging
 import os
 import pathlib
+import runpy
 import subprocess
+from types import SimpleNamespace
 import sys
 
 import pytest
@@ -36,6 +38,50 @@ def _kimi() -> dict:
         "context_window": 262144,
         "vision": True,
     }
+
+
+def test_fixed_account_prefixes_main_and_subagents(monkeypatch):
+    from app import cliproxy_accounts
+    monkeypatch.setattr(cliproxy_accounts, "resolve", lambda account, home=None: {
+        "account": account, "prefix": "fixed", "credential_id": "codex:/tmp/codex"})
+    eng.salvar("proxy", {"base_url": "http://127.0.0.1:8317", "api_key": "test",
+                         "model": "gpt-5.5", "subagent_model": "gpt-5-mini"})
+    env = eng.env_de("proxy", "gpt-5.5", engine_account="default", engine_account_home="/tmp/codex",
+                         engine_account_base_url="http://127.0.0.1:8317")
+    assert env["CP_ENGINE_ACCOUNT"] == "default"
+    assert env["CP_ENGINE_CREDENTIAL_ID"] == "codex:/tmp/codex"
+    assert env["ANTHROPIC_MODEL"] == "fixed/gpt-5.5"
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "fixed/gpt-5.5"
+    assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "fixed/gpt-5-mini"
+    with pytest.raises(ValueError):
+        eng.env_de("proxy", "other/gpt-5.5", engine_account="default", engine_account_home="/tmp/codex",
+                         engine_account_base_url="http://127.0.0.1:8317")
+    assert "CP_ENGINE_ACCOUNT" not in eng.env_de("proxy")
+
+
+def test_fixed_account_requires_validated_local_binding(monkeypatch):
+    from app import cliproxy_accounts
+    monkeypatch.setattr(cliproxy_accounts, "resolve", lambda *a, **k: {"account": "default", "prefix": "fixed",
+                                                                 "credential_id": "codex:/tmp/codex"})
+    eng.salvar("remote", {"base_url": "https://remote.example.test", "api_key": "test", "model": "gpt-5.5"})
+    with pytest.raises(ValueError, match="raiz Codex"):
+        eng.env_de("remote", engine_account="default")
+    with pytest.raises(ValueError, match="endereço"):
+        eng.env_de("remote", engine_account="default", engine_account_home="/tmp/codex",
+                   engine_account_base_url="http://127.0.0.1:8317")
+
+
+def test_fixed_account_preserves_configured_window_only_for_same_base(monkeypatch):
+    from app import cliproxy_accounts
+    monkeypatch.setattr(cliproxy_accounts, "resolve", lambda *a, **k: {"account": "default", "prefix": "fixed",
+                                                                 "credential_id": "codex:/tmp/codex"})
+    eng.salvar("proxy", {"base_url": "http://127.0.0.1:8317", "api_key": "test", "model": "gpt-6.1-sol",
+                         "context_window": 1000000})
+    kwargs = {"engine_account": "default", "engine_account_home": "/tmp/codex",
+              "engine_account_base_url": "http://127.0.0.1:8317"}
+    assert eng.env_de("proxy", "fixed/gpt-6.1-sol", **kwargs)["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] == "1000000"
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in eng.env_de("proxy", "gpt-other", **kwargs)
+    assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in eng.env_de("proxy", "gpt-6.1-sol")
 
 
 def test_env_repete_o_modelo_nas_seis_vars():
@@ -306,6 +352,65 @@ def _cli(*args, cfg=None):
                           encoding="utf-8", errors="replace")
 
 
+def test_cli_exec_without_account_clears_parent_identity(monkeypatch):
+    eng.salvar("kimi", _kimi())
+    monkeypatch.setenv("CP_ENGINE_ACCOUNT", "default")
+    monkeypatch.setenv("CP_ENGINE_CREDENTIAL_ID", "codex:/old")
+    result = _cli("--exec", "kimi", "--", sys.executable, "-c",
+                  "import os;print(os.getenv('CP_ENGINE_ACCOUNT'),os.getenv('CP_ENGINE_CREDENTIAL_ID'))")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "None None"
+
+
+def test_cli_fixed_account_works_without_backend_dependencies(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    proxy, codex = home / ".cli-proxy-api", home / ".codex"
+    proxy.mkdir(parents=True)
+    codex.mkdir()
+    (codex / "auth.json").write_text(json.dumps({"tokens": {"account_id": "one"}}))
+    (proxy / "one.json").write_text(json.dumps({"type": "codex", "account_id": "one", "prefix": "fixed"}))
+    eng.salvar("proxy", {"base_url": "http://127.0.0.1:8317", "api_key": "test", "model": "gpt-5.5"})
+    inherited = home / ".codex-other"
+    inherited.mkdir()
+    (inherited / "auth.json").write_text(json.dumps({"tokens": {"account_id": "another"}}))
+    (proxy / "another.json").write_text(json.dumps({"type": "codex", "account_id": "another", "prefix": "other"}))
+    env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home), "CODEX_HOME": str(inherited),
+           "CP_ENGINES_FILE": str(eng.caminho())}
+    result = subprocess.run([sys.executable, "-S", str(CLI), "--exec", "proxy", "--account", "default",
+                             "--account-home", str(codex), "--account-base-url", "http://127.0.0.1:8317",
+                             "--model", "gpt-5.5", "--", sys.executable, "-c",
+                             "import os;print(os.environ['ANTHROPIC_MODEL'],os.environ['CLAUDE_CODE_SUBAGENT_MODEL'])"],
+                            env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "fixed/gpt-5.5 fixed/gpt-5.5"
+
+
+@pytest.mark.parametrize("account,generated,expected", [
+    ("default", {}, None),
+    ("default", {"CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000"}, "1000000"),
+    (None, {}, "1000000"),
+])
+def test_cli_fixed_account_drops_only_unselected_inherited_window(monkeypatch, account, generated, expected):
+    wrapper = runpy.run_path(str(CLI))
+    seen = []
+    monkeypatch.setenv("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "1000000")
+    for key in ("CP_ENGINE_ACCOUNT", "CP_ENGINE_CREDENTIAL_ID", "CP_ENGINE_ACCOUNT_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(eng, "env_de", lambda *a, **k: generated)
+    monkeypatch.setattr(os, "execvpe", lambda cmd, argv, env: seen.append(env))
+
+    def run(cmd, *, env):
+        seen.append(env)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    args = [str(CLI), "--exec", "proxy"]
+    if account is not None:
+        args += ["--account", account, "--account-home", "/tmp/codex", "--account-base-url", "http://127.0.0.1:8317"]
+    wrapper["main"](args + ["--", "fake-command"])
+    assert seen[-1].get("CLAUDE_CODE_MAX_CONTEXT_TOKENS") == expected
+
+
 def test_cli_env_imprime_chave_igual_valor():
     # É este formato que o claude-engine consome. O monkeypatch de eng.caminho não vale no
     # subprocess, então o filho recebe CP_ENGINES_FILE — que é o que caminho() lê de verdade.
@@ -409,11 +514,8 @@ def _nomes_importados_de_app(caminho: pathlib.Path) -> set[str]:
             if isinstance(n, ast.ImportFrom) and n.module == "app" for a in n.names}
 
 
-# Unico modulo de `app` que o engines.py pode importar. Entrou porque o `os.replace` cru falha no
-# Windows quando outro processo tem o destino aberto (e o hangar-engine LE o engines.json — e
-# exatamente esse leitor), e duplicar a retentativa aqui seria uma segunda verdade. Qualquer nome
-# novo nesta lista tem que ser stdlib puro, e o caso abaixo cobra isso.
-_APP_PERMITIDO = {"atomico"}
+# Helpers locais permitidos no wrapper; a guarda cobre seus imports transitivamente.
+_APP_PERMITIDO = {"atomico", "cliproxy_accounts", "codex_contas"}
 
 
 def test_modulo_e_stdlib_pura():
@@ -433,7 +535,8 @@ def test_o_que_o_engines_importa_de_app_tambem_e_stdlib_puro(nome):
     modulo = pathlib.Path(eng.__file__).parent / f"{nome}.py"
     assert modulo.is_file(), f"app/{nome}.py nao existe"
     importados = _importados_de(modulo)
-    assert not (importados & {"app", "pydantic", "fastapi", "httpx", "httpx2"})
+    assert not (importados & {"pydantic", "fastapi", "httpx", "httpx2", "yaml"})
+    assert _nomes_importados_de_app(modulo) <= _APP_PERMITIDO
 
 
 def test_bundled_skills_desligadas_por_padrao_no_motor():

@@ -23,10 +23,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-# UNICO import de `app` aqui, e ele nao fere a regra do stdlib-only: `app.atomico` tambem e
-# stdlib puro (os + time), e o `test_modulo_e_stdlib_pura` cobre os DOIS agora. O que aquela
-# sentinela barra e o que arrasta pydantic e quebra o `scripts/hangar-engine`, que roda no python do
-# SISTEMA — e o hangar-engine ja poe o backend no sys.path pra importar este modulo.
+# Os helpers compartilhados com o wrapper também precisam ser stdlib-only.
 from app import atomico
 from typing import Any
 from urllib.parse import urlparse
@@ -289,7 +286,9 @@ def _inteiro_positivo(campo: str, valor: Any) -> int:
     return n
 
 
-def env_de(nome: str, modelo: str | None = None, context_window: int | None = None) -> dict[str, str]:
+def env_de(nome: str, modelo: str | None = None, context_window: int | None = None,
+           engine_account: str | None = None, *, engine_account_home: str | None = None,
+           engine_account_base_url: str | None = None) -> dict[str, str]:
     """Variáveis de ambiente que fazem uma sessão rodar neste motor.
 
     `modelo`/`context_window` vêm da escolha da tela de abertura. Precisam entrar AQUI, e não só
@@ -321,6 +320,20 @@ def env_de(nome: str, modelo: str | None = None, context_window: int | None = No
         # O modelo escolhido na abertura não passa pelo _normalizar (que só roda no SAVE): a
         # checagem de shell-safety tem que rodar aqui também — o valor vai pro `export` do wrapper.
         raise ValueError("model: contém caractere proibido (quebra de linha ou nulo)")
+    account = None
+    subagent = e.get("subagent_model") or modelo_final
+    if engine_account is not None:
+        from app import cliproxy_accounts
+        if not engine_account_home or not engine_account_base_url:
+            raise ValueError("CLIProxyAPI: conta fixa exige raiz Codex e endereço local validados")
+        expected_base = validar_base_url(engine_account_base_url)
+        if not _host_local(urlparse(expected_base).hostname or ""):
+            raise ValueError("CLIProxyAPI: conta fixa exige um endereço local")
+        if validar_base_url(e["base_url"]) != expected_base:
+            raise ValueError("CLIProxyAPI: endereço do motor mudou; conta fixa não pode usar outro provedor")
+        account = cliproxy_accounts.resolve(engine_account, home=engine_account_home)
+        modelo_final = cliproxy_accounts.prefix_model(modelo_final, account["prefix"])
+        subagent = cliproxy_accounts.prefix_model(subagent, account["prefix"])
     env = {
         # Marca lida do /proc/<pid>/environ para descobrir o motor de uma sessão viva (Task 5).
         "CP_ENGINE": nome,
@@ -334,8 +347,12 @@ def env_de(nome: str, modelo: str | None = None, context_window: int | None = No
         "ANTHROPIC_DEFAULT_FABLE_MODEL": modelo_final,
         # Subagentes fazem muita busca mecânica; um modelo mais barato aí é dinheiro de verdade.
         # Vazio (campo ausente) cai no mesmo modelo principal — nunca uma env var vazia.
-        "CLAUDE_CODE_SUBAGENT_MODEL": e.get("subagent_model") or modelo_final,
+        "CLAUDE_CODE_SUBAGENT_MODEL": subagent,
     }
+    if account is not None:
+        env["CP_ENGINE_ACCOUNT"] = account["account"]
+        env["CP_ENGINE_CREDENTIAL_ID"] = account["credential_id"]
+        env["CP_ENGINE_ACCOUNT_BASE_URL"] = expected_base
     if _booleano("auth_via_api_key", e.get("auth_via_api_key")) is True:
         # Provedor que lê a key SÓ em `x-api-key` e ignora `Authorization: Bearer`. opencode zen
         # (opencode.ai/zen/go) é um: medido em 06/08/2026, `Bearer` sozinho devolve o MESMO
@@ -357,6 +374,10 @@ def env_de(nome: str, modelo: str | None = None, context_window: int | None = No
     # `--context` do prefixo aceito e ignorado, calado. Sem número pra ele, omitir — exportar a do
     # motor com outro modelo é exatamente o bug que esta variável existe pra corrigir.
     janela = context_window if modelo else e.get("context_window")
+    if account is not None and janela is None:
+        from app.cliproxy_accounts import base_model
+        if base_model(modelo_final, account["prefix"]) == base_model(e["model"], account["prefix"]):
+            janela = e.get("context_window")
     if janela:
         env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(_inteiro_positivo("context_window", janela))
     if _booleano("bundled_skills", e.get("bundled_skills")) is not True:

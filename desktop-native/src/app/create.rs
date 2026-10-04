@@ -446,6 +446,8 @@ pub(in crate::app) struct NewSession {
     permission_touched: bool,
     subagent: String,
     engine: String,
+    engine_account: String,
+    engine_account_pick: Option<Picker>,
     model_pick: Option<Picker>,
     effort_pick: Option<Picker>,
     permission_pick: Option<Picker>,
@@ -534,7 +536,7 @@ impl NewSession {
             config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true, headless_owner: None, headless_touched: false, headless_saving: false,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
             step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), model_choice_touched: false, account_touched: false, effort: String::new(),
-            permission: "bypassPermissions".into(), saved_default: None, permission_touched: false, subagent: String::new(), engine: String::new(), model_pick: None, effort_pick: None,
+            permission: "bypassPermissions".into(), saved_default: None, permission_touched: false, subagent: String::new(), engine: String::new(), engine_account: String::new(), engine_account_pick: None, model_pick: None, effort_pick: None,
             permission_pick: None, subagent_pick: None, engine_pick: None, engines: Remote::default(), jev: Remote::default(), jev_on: false,
             more: false, omp, quotas: Remote::default(), reopen_config: None, reopen_default: false, asking: false, confirming: false, account_busy: false, account_seq: 0, account_name,
             notice: None, created_path: None, context_seq: 0, context_busy: false, context_on: None, context_want: None, context_error: None,
@@ -696,6 +698,11 @@ impl NewSession {
         self.sessions.reset();
         self.providers.reset();
         self.configs.reset();
+        self.engines.reset();
+        self.engine.clear();
+        self.engine_account.clear();
+        self.engine_pick = None;
+        self.engine_account_pick = None;
         // O catálogo da outra máquina não vale aqui; o novo vem depois das contas.
         self.models.reset();
         self.before = None;
@@ -739,12 +746,11 @@ impl NewSession {
 
     /// O que é da máquina de destino. Contas Codex e o contexto delas só com o Codex escolhido.
     fn load_target(&mut self, cx: &mut Context<Self>) {
-        if self.compact { self.load_quotas(cx); }
         self.load_roots(cx);
         self.load_providers(cx);
         self.load_configs(cx);
         if self.provider == "codex" { self.load_codex(cx); self.load_context(cx); }
-        if !self.compact { self.load_extras(cx); }
+        self.load_extras(cx);
     }
 
     fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -871,6 +877,7 @@ impl NewSession {
         self.permission = match provider { "codex" => "Full Access".into(), "claude" => "bypassPermissions".into(), _ => String::new() };
         self.permission_touched = false;
         if provider == "codex" { self.load_codex(cx); self.load_context(cx); } else { self.drop_context(); self.drop_codex(); }
+        self.build_engine_account_pick(window, cx);
         self.load_models(window, cx);
         // A tela sem sessão não retoma conversa antiga: o arquivo da pasta não serve a ela.
         if !self.compact { self.load_archive(window, cx); }
@@ -932,7 +939,7 @@ impl NewSession {
 
     pub(super) fn can_create(&self, cx: &App) -> bool {
         !self.is_transfer() && !self.creating && !self.headless_saving && !self.jev.loading && self.picked.is_some() && !self.sessions.loading && (self.compact || !self.name.read(cx).value().trim().is_empty())
-            && self.provider_ready() == Some(true) && self.codex_ready() && !(self.provider == "codex" && self.context_busy)
+            && self.provider_ready() == Some(true) && self.codex_ready() && self.engine_ready() && !(self.provider == "codex" && self.context_busy)
             && (!self.compact || ((self.provider != "claude" || (!self.configs.loading && self.configs.ok().is_some_and(|list| !list.is_empty())))
                 && !self.models.loading && self.models.ok().is_some()
                 && !self.checkout.loading))
@@ -960,6 +967,7 @@ impl NewSession {
             "claude" => {
                 body["config_dir"] = json!(self.config);
                 body["engine"] = text(&self.engine);
+                if self.proxy_accounts().is_some() { body["engine_account"] = json!(self.engine_account); }
                 if !self.permission.is_empty() { body["permission_mode"] = json!(self.permission); }
                 // O motor exporta o próprio modelo de subagente: com ele, o campo nem aparece.
                 if self.engine.is_empty() && !self.subagent.is_empty() { body["subagent_model"] = json!(self.subagent); }
@@ -987,6 +995,7 @@ impl NewSession {
                 "headless": matches!(provider, "claude" | "codex") && self.headless,
                 "resumo_por_modelo": self.baton_by_model});
             if provider == "codex" { body["codex_account"] = json!(self.codex_account); }
+            if claude && self.proxy_accounts().is_some() { body["engine_account"] = json!(self.engine_account); }
             if self.headless_inherited() { body.as_object_mut().unwrap().remove("headless"); }
         }
         // A memória vai antes do POST: a escolha não se perde se a criação falhar.
@@ -1563,7 +1572,7 @@ impl NewSession {
             .when(checking, |el| el.child(div().id("create-checking").role(Role::Status).child(muted(tr("create_checking")))))
             .when(!checking && self.same_folder, |el| el.child(div().id("create-same-folder").role(Role::Status).child(muted(tr("create_same_folder")))));
         let field = |title: String, control: AnyElement| div().flex().flex_col().gap(px(6.)).child(label(title)).child(control).into_any_element();
-        // Nome, modo, modelo, esforço e permissão não chegam ao retomar: com uma conversa escolhida, somem.
+        // Retomar pelo proxy recebe modelo; nome, modo, esforço e permissão continuam fora desse pedido.
         let session = [
             fresh.then(|| field(tr("create_name"), Input::new(&self.name).disabled(busy).aria_label(tr("create_name")).into_any_element())),
             Some(div().flex().flex_col().gap(px(6.)).child(label(tr("create_provider"))).child(providers)
@@ -1581,7 +1590,7 @@ impl NewSession {
             self.render_baton(cx).map(IntoElement::into_any_element),
         ];
         let agent = [
-            fresh.then(|| self.render_trio()).flatten().map(IntoElement::into_any_element),
+            (fresh || self.proxy_accounts().is_some()).then(|| self.render_trio(!fresh)).flatten().map(IntoElement::into_any_element),
             fresh.then(|| self.render_default_check(cx)).flatten().map(IntoElement::into_any_element),
             (fresh && self.provider == "codex").then(|| self.render_context(cx).into_any_element()),
             self.render_more(cx).map(IntoElement::into_any_element),
@@ -1596,7 +1605,7 @@ impl NewSession {
         let step = if self.step.is_empty() { tr("create_creating") } else { self.step.clone() };
         // Uma ação primária só: com uma conversa escolhida, o botão continua aquela conversa em vez de criar.
         let submit = match &target {
-            Some(c) => Button::new("create-resume-submit").primary().large().w_full().label(self.resume_label(c)).loading(busy).disabled(busy)
+            Some(c) => Button::new("create-resume-submit").primary().large().w_full().label(self.resume_label(c)).loading(busy).disabled(busy || !self.resume_ready())
                 .on_click(cx.listener(|this, _, _, cx| this.resume(cx))),
             None => Button::new("create-submit").primary().large().w_full()
                 .label(tr(if busy { "create_creating" } else if self.baton.is_some() { "create_baton_submit" } else { "create_submit" }))
@@ -1700,6 +1709,8 @@ impl NewSession {
     pub(super) fn render_bottom_pills(&self, cx: &mut Context<Self>) -> Div {
         let open = self.menu.get();
         let account = match self.provider {
+            "claude" if self.proxy_accounts().is_some() => Some((self.proxy_account().map(|a|
+                if a.label.is_empty() { a.email.clone() } else { a.label.clone() }).unwrap_or_else(|| tr("create_proxy_choose_account")), tr("create_chatgpt_account"))),
             "claude" => self.configs.ok().filter(|list| !list.is_empty()).map(|list| {
                 let label = list.iter().find(|c| Some(&c.path) == self.config.as_ref()).map(|c| c.label.clone()).unwrap_or_else(|| tr("create_default"));
                 (label, tr("create_claude_account"))
@@ -1764,6 +1775,7 @@ impl NewSession {
         let claude = self.provider == "claude";
         [
             self.error.clone(),
+            self.proxy_note(),
             failed(&self.roots).map(|e| format!("{} {e}", tr("create_roots_failed"))),
             failed(&self.configs).filter(|_| claude).cloned(),
             failed(&self.codex).filter(|_| self.provider == "codex").cloned(),
@@ -1818,6 +1830,27 @@ impl NewSession {
                         .into_any_element()
                 })).collect();
                 Self::menu_list("reopen-account-list", rows)
+            }
+            Menu::Account if self.proxy_accounts().is_some() => {
+                let rows = self.proxy_accounts().unwrap_or_default().iter().filter(|a| wanted(&query, &a.label, &a.email)).map(|account| {
+                    let id = account.account.clone();
+                    let quota = self.quota_line(format!("new-chat-engine-quota-{id}"), &account.credential_id);
+                    menu_row_with(SharedString::from(format!("new-chat-engine-account-{id}")), id == self.engine_account,
+                        if account.label.is_empty() { account.email.clone() } else { account.label.clone() }, account.email.clone(), quota)
+                        .disabled(self.creating || self.engines.loading)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if this.creating { return; }
+                            this.menu.set(None);
+                            if this.engine_account != id {
+                                this.engine_account = id.clone();
+                                this.build_engine_account_pick(window, cx);
+                                this.load_models(window, cx);
+                            }
+                            cx.notify();
+                        })).into_any_element()
+                }).collect();
+                div().when_some(self.proxy_note(), |el, note| el.child(alert("new-chat-proxy-error", note)))
+                    .child(Self::menu_list("new-chat-engine-accounts", rows)).into_any_element()
             }
             Menu::Account if self.provider == "codex" => {
                 let rows = self.codex.ok().into_iter().flatten().filter(|a| wanted(&query, &a.name, &a.hint())).map(|account| {

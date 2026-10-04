@@ -2,7 +2,35 @@
 //! últimas mensagens no lugar da lista de pastas e o retomar pela rota do arquivo. Escolher uma conversa leva a conta à dona dela.
 use super::*;
 pub(super) use super::super::recent::{ArchiveEntry, PreviewLine};
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn proxy_resume_keeps_the_selected_base_model_and_claude_storage() {
+        let body = super::resume_body("claude", Some("/claude-storage"), "proxy", Some(("other", "gpt-base")), None);
+        assert_eq!(body, serde_json::json!({"provider":"claude", "config_dir":"/claude-storage",
+            "engine":"proxy", "engine_account":"other", "model":"gpt-base"}));
+        assert!(body.get("effort").is_none() && body.get("permission_mode").is_none());
+        let native = super::resume_body("claude", Some("/claude-storage"), "", None, None);
+        assert!(native.get("model").is_none() && native.get("engine_account").is_none());
+        let codex = super::resume_body("codex", Some("/claude-storage"), "proxy", None, Some("codex-account"));
+        assert_eq!(codex["codex_account"], "codex-account");
+        assert!(codex["config_dir"].is_null() && codex["engine"].is_null());
+    }
+}
 use super::super::recent::{preview_lines, render_preview_lines};
+
+fn resume_body(provider: &str, config: Option<&str>, engine: &str, proxy: Option<(&str, &str)>, codex_account: Option<&str>) -> Value {
+    let claude = provider == "claude";
+    let mut body = json!({"engine": if claude && !engine.is_empty() { json!(engine) } else { Value::Null },
+        "config_dir": if claude { json!(config) } else { Value::Null }, "provider": provider});
+    if claude && let Some((account, model)) = proxy {
+        body["engine_account"] = json!(account);
+        body["model"] = json!(model);
+    }
+    if provider == "codex" && let Some(account) = codex_account { body["codex_account"] = json!(account); }
+    body
+}
 
 impl NewSession {
     /// A lista da pasta e do agente escolhidos; a escolha anterior não vale para outra pasta ou conta.
@@ -102,11 +130,9 @@ impl NewSession {
     /// Retoma pela rota do web; motor e conta só existem no Claude.
     pub(super) fn resume(&mut self, cx: &mut Context<Self>) {
         let Some(c) = self.target().cloned() else { return };
-        if self.creating { return; }
-        let claude = c.provider == "claude";
-        let mut body = json!({"engine": if claude && !self.engine.is_empty() { json!(self.engine) } else { Value::Null },
-            "config_dir": if claude { json!(self.config) } else { Value::Null }, "provider": c.provider});
-        if c.provider == "codex" && let Some(account) = &c.codex_account { body["codex_account"] = json!(account); }
+        if self.creating || !self.resume_ready() { return; }
+        let proxy = self.proxy_accounts().is_some().then_some((self.engine_account.as_str(), self.model.as_str()));
+        let body = resume_body(&c.provider, self.config.as_deref(), &self.engine, proxy, c.codex_account.as_deref());
         self.create_seq += 1;
         let seq = self.create_seq;
         (self.creating, self.resuming, self.error) = (true, true, None);
@@ -122,6 +148,10 @@ impl NewSession {
     /// O rótulo do botão com uma conversa escolhida: continuar, continuar na conta dela, ou mover para a conta do seletor.
     pub(super) fn resume_label(&self, c: &ArchiveEntry) -> String {
         if self.creating { return tr("create_creating"); }
+        if c.provider == "claude" && let Some(account) = self.proxy_account() {
+            let label = if account.label.is_empty() { &account.email } else { &account.label };
+            return tr("create_resume_in").replace("{conta}", label);
+        }
         let moving = c.provider == "claude" && c.config_dir.is_some() && self.config.is_some() && c.config_dir != self.config;
         if moving {
             let account = self.configs.ok().and_then(|l| l.iter().find(|k| Some(&k.path) == self.config.as_ref())).map(|k| k.label.clone()).unwrap_or_default();

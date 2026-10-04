@@ -338,6 +338,39 @@ def test_list_maps_sessions_to_jsonl(tmp_path):
     assert out[0].name == "cc" and out[0].jsonl == "/x/s.jsonl"
 
 
+def test_engine_context_uses_the_window_from_its_recorded_agent_pid(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    name = "test-pinned-context"
+    transcript = tmp_path / f"{_UUID}.jsonl"
+    transcript.write_text(json.dumps({"type": "assistant", "message": {
+        "model": "gpt-test", "usage": {"input_tokens": 250_000}}}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(SessionRegistry, "_agent_pid", {})
+    reg = SessionRegistry(projects_dir=tmp_path / "projects")
+    monkeypatch.setattr(registry.tmux, "list_panes_all", lambda: {name: [{
+        "name": name, "pid": 4242, "cwd": str(tmp_path), "pane_id": "%1", "active": True}]})
+    monkeypatch.setattr(registry.procinfo, "_children_map", lambda: {})
+    monkeypatch.setattr(registry, "agente_do_pane", lambda pid, children=None: ("claude", 4243))
+    monkeypatch.setattr(registry, "_engine_of", lambda pid: "proxy")
+    monkeypatch.setattr(registry.procinfo, "_env_var_of", lambda pid, key: {
+        "CP_ENGINE_ACCOUNT": "default", "CP_ENGINE_CREDENTIAL_ID": f"codex:{tmp_path / 'codex'}",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "400000"}.get(key))
+    monkeypatch.setattr(registry.procinfo, "_model_of", lambda pid: ("fixed/gpt-test", None))
+    monkeypatch.setattr(registry, "_escolhas_status", lambda sid: (None, None))
+    monkeypatch.setattr(registry.codex_sessions, "list_all", lambda **kwargs: [])
+    monkeypatch.setattr(registry.headless_sessions, "list_all", lambda: [])
+    monkeypatch.setattr(registry.orq_runs, "active", lambda: [])
+    monkeypatch.setattr(registry.worktrees, "locate", lambda *args: SimpleNamespace(
+        branch=None, worktree=False, worktree_path=None, worktree_gone=False))
+    monkeypatch.setattr(reg, "resolve_tracked", lambda *args: (str(transcript), True))
+    monkeypatch.setattr(reg, "_repl_sid", lambda *args: _UUID)
+
+    info = next(session for session in reg.list() if session.name == name)
+    assert info.conta is not None and info.conta.startswith("codex:")
+    assert registry._claude_context(info, reg._agent_pid.get(name)) == {"used": 250_000, "window": 400_000}
+
+
 async def test_list_with_state_classifies(tmp_path, monkeypatch):
     # list_with_state anexa o estado vivo: idle (sem spinner/menu), awaiting_input (menu ❯ N.) e
     # working (spinner que ANIMA entre os 2 frames). Reusa list() pra resolucao (mockada aqui).

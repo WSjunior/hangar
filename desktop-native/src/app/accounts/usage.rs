@@ -4,6 +4,16 @@
 //! devolve a cota guardada, sem releitura periódica daqui.
 use super::*;
 
+fn account_in_use<'a>(list: &'a [Credential], session: Option<&SessionInfo>) -> Option<&'a Credential> {
+    let provider = session.map(|s| s.provider.as_str()).filter(|p| !p.is_empty()).unwrap_or("claude");
+    let account = session.and_then(|s| s.conta.as_deref());
+    if session.is_some_and(SessionInfo::uses_engine_account) {
+        return list.iter().find(|c| c.kind == "codex" && c.id.starts_with("codex:") && account == Some(c.id.as_str()));
+    }
+    if provider == "claude" && session.is_some_and(|s| s.engine.as_deref().is_some_and(|e| !e.is_empty())) { return None; }
+    list.iter().find(|c| c.kind == provider && account.map_or(c.active, |id| id == c.id))
+}
+
 impl Hangar {
     /// Abre ou fecha o cartão, fechando o painel que estiver aberto sobre o compositor.
     pub(in crate::app) fn toggle_usage_card(&mut self, cx: &mut Context<Self>) {
@@ -70,19 +80,11 @@ impl Hangar {
         self.load_session_accounts(cx);
     }
 
-    /// Conta da sessão aberta, procurada na lista da máquina dela.
-    fn focused_conta(&self) -> Option<&str> {
-        self.selected.as_ref().and_then(|s| s.conta.as_deref())
-    }
-
     /// A conta da sessão em foco para a pílula da barra do topo: provider, nome e a janela mais cheia, com o rótulo dela
     /// (o `piorJanela` do web). Sem sessão, o Claude; conta ausente (servidor sem o campo) é a padrão do provider.
     /// `None` antes da lista chegar ou sem conta daquele provider.
     pub(in crate::app) fn focused_account(&self) -> Option<(String, String, Option<(String, f64)>)> {
-        let session = self.selected.as_ref();
-        let kind = session.map(|s| s.provider.as_str()).filter(|p| !p.is_empty()).unwrap_or("claude");
-        let conta = self.focused_conta();
-        let c = self.session_accounts().ok()?.iter().find(|c| c.kind == kind && conta.map_or(c.active, |id| id == c.id))?;
+        let c = account_in_use(self.session_accounts().ok()?, self.selected.as_ref())?;
         let login = c.login.as_ref().filter(|l| l.logged_in == Some(true));
         let title = c.alias.clone().filter(|a| !a.is_empty()).or_else(|| login.and_then(|l| l.email.clone())).unwrap_or_else(|| c.name.clone());
         let model = self.status().and_then(|s| s.model).map(|m| m.to_lowercase());
@@ -90,27 +92,48 @@ impl Hangar {
             QuotaView::Bars { bars, .. } => fullest(&bars, model.as_deref()).map(|b| (b.label.clone(), b.pct)),
             _ => None,
         };
-        Some((kind.to_owned(), title, window))
+        Some((c.kind.clone(), title, window))
+    }
+
+    pub(in crate::app) fn has_proxy_session(&self) -> bool {
+        self.selected.as_ref().is_some_and(SessionInfo::uses_engine_account)
+            || self.session_engine().is_some_and(|e| e.cliproxy_accounts.is_some())
+    }
+
+    pub(in crate::app) fn focused_proxy_pct(&self) -> Option<f64> {
+        let session = self.selected.as_ref().filter(|s| s.uses_engine_account())?;
+        let c = account_in_use(self.session_accounts().ok()?, Some(session))?;
+        let windows = c.read_windows()?;
+        windows.iter().find(|w| w.label == "5h").or_else(|| windows.iter().find(|w| w.label == "7d")).map(|w| w.pct)
+    }
+
+    pub(in crate::app) fn focused_proxy_quota(&self) -> String {
+        let Some(c) = self.selected.as_ref().filter(|s| s.uses_engine_account())
+            .and_then(|s| account_in_use(self.session_accounts().ok()?, Some(s))) else { return String::new() };
+        c.read_windows().into_iter().flatten().filter(|w| matches!(w.label.as_str(), "5h" | "7d"))
+            .map(|w| format!("{} {}%", w.label, w.pct.round())).collect::<Vec<_>>().join(" · ")
     }
 
     pub(in crate::app) fn render_usage_card(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let session = self.selected.as_ref();
-        let kind = session.map(|s| s.provider.as_str()).filter(|p| !p.is_empty()).unwrap_or("claude");
-        // A conta da sessão; sem sessão, ou servidor sem esse campo, cai na conta padrão do provider.
-        let conta = self.focused_conta();
-        let in_use = |c: &Credential| c.kind == kind && conta.map_or(c.active, |id| id == c.id);
+        let current = self.session_accounts().ok().and_then(|list| account_in_use(list, session)).map(|c| c.id.as_str());
+        let in_use = |c: &Credential| current == Some(c.id.as_str());
+        let proxy = self.has_proxy_session();
+        let engine_session = session.is_some_and(|s| s.engine.as_deref().is_some_and(|e| !e.is_empty()) || s.uses_engine_account());
         let note = |text: String, color: Hsla| div().px(px(8.)).py(px(4.)).text_sm().text_color(color).whitespace_normal().child(text).into_any_element();
         let list = self.session_accounts();
         // Aberto pelo anel de uma sessão Claude na conta Anthropic: as outras contas Claude levam esta conversa para elas.
-        let movable = !self.accounts.card_top && session.is_some_and(|s| s.provider == "claude"
-            && s.conta.as_deref().is_some_and(|c| c.starts_with("claude:")) && !s.read_only());
+        let movable = (!self.accounts.card_top || proxy) && session.is_some_and(|s| s.provider == "claude"
+            && (proxy || (s.engine.as_deref().is_none_or(|e| e.is_empty()) && s.conta.as_deref().is_some_and(|c| c.starts_with("claude:"))))
+            && !s.read_only() && !self.selected_target().is_some_and(|t| self.sidebar.moving.contains_key(&t)));
         let idle = session.is_some_and(|s| s.state == "idle");
         let transfer = session.and_then(super::sidebar::transfer_source).zip(self.selected_target())
             .filter(|(_, target)| !self.accounts.card_top && !self.sidebar.moving.contains_key(target))
             .map(|((life, jsonl), target)| (target, life.to_owned(), jsonl.to_owned()));
         let body = match (&list.value, list.ok()) {
             (_, Some(list)) => {
-                let mut mine: Vec<&Credential> = list.iter().filter(|c| matches!(c.kind.as_str(), "claude" | "codex")).collect();
+                let mut mine: Vec<&Credential> = list.iter().filter(|c| c.kind == "claude" || (c.kind == "codex" && (!proxy || in_use(c)
+                    || self.session_engine().and_then(|e| e.cliproxy_accounts.as_ref()).is_some_and(|accounts| accounts.iter().any(|a| a.credential_id == c.id))))).collect();
                 mine.sort_by_key(|c| !in_use(c));
                 if mine.is_empty() { note(tr("usage_card_empty"), theme::muted()) } else {
                     let (engines, now) = (HashMap::new(), now());
@@ -120,8 +143,25 @@ impl Hangar {
                         let pct = match &quota { QuotaView::Bars { bars, .. } => bars.iter().map(|b| b.pct).fold(None, |m: Option<f64>, p| Some(m.map_or(p, |m| m.max(p)))), _ => None };
                         let target = c.id.strip_prefix("claude:").map(str::to_owned)
                             .filter(|_| movable && idle && c.kind == "claude" && !in_use(c) && pct.is_none_or(|p| p < 99.));
-                        let row = account_row(c, in_use(c), quota);
-                        if c.kind == "codex" && movable {
+                        let row = account_row(c, in_use(c), proxy && c.kind == "codex", quota);
+                        if proxy && c.kind == "codex" && movable && !in_use(c) {
+                            let account = self.session_engine().filter(|e| e.cliproxy_error.is_none())
+                                .and_then(|e| e.cliproxy_accounts.as_ref()).and_then(|accounts| accounts.iter().find(|a|
+                                    a.credential_id == c.id && c.codex_account.as_deref() == Some(a.account.as_str()))).map(|a| a.account.clone());
+                            let available = idle && account.is_some() && c.logged_in() == Some(true) && pct.is_none_or(|p| p < 99.);
+                            let label = c.alias.clone().filter(|a| !a.is_empty()).unwrap_or_else(|| c.name.clone());
+                            let aria = tr("sidebar_proxy_title").replace("{n}", &label);
+                            let warn = pct.filter(|p| *p >= 95.);
+                            return Button::new(SharedString::from(format!("usage-proxy-{}", c.id))).ghost().w_full().h_auto()
+                                .disabled(!available).accessibility_label(aria).child(row)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    if let (Some(owner), Some(account)) = (this.selected_target(), account.as_ref()) {
+                                        this.close_popups();
+                                        this.confirm_engine_account(owner, account.clone(), label.clone(), warn, window, cx);
+                                    }
+                                })).into_any_element();
+                        }
+                        if c.kind == "codex" && movable && !proxy {
                             let account = c.codex_account.clone();
                             let connected = c.login.as_ref().is_some_and(|l| l.logged_in == Some(true));
                             let source = transfer.clone();
@@ -142,10 +182,9 @@ impl Hangar {
                             Some(path) => {
                                 let label = c.alias.clone().filter(|a| !a.is_empty()).unwrap_or_else(|| c.name.clone());
                                 let warn = pct.filter(|p| *p >= 95.);
-                                // Borda sempre à vista e realce na cor de destaque: o cinza do `hover` some sobre o papel de parede.
-                                div().id(SharedString::from(format!("usage-move-{path}"))).rounded(px(7.)).cursor_pointer()
-                                    .border_1().border_color(theme::border_strong())
-                                    .hover(|el| el.bg(theme::accent_dim()).border_color(theme::accent())).child(row)
+                                let aria = tr(if proxy { "sidebar_return_claude_account" } else { "sidebar_same_title" }).replace("{n}", &label);
+                                Button::new(SharedString::from(format!("usage-move-{path}"))).outline().w_full().h_auto()
+                                    .accessibility_label(aria).child(row)
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.close_popups();
                                         if let Some(owner) = this.selected_target() {
@@ -158,8 +197,14 @@ impl Hangar {
                         }
                     });
                     div().flex().flex_col().gap(px(2.))
+                        .when(proxy, |el| el.child(note(tr("usage_card_proxy_hint"), theme::faint())))
+                        .when_some(self.session_engine().and_then(|e| e.cliproxy_error.as_ref()), |el, error|
+                            el.child(note(tr("create_proxy_error").replace("{reason}", error), theme::warning())))
+                        .when(engine_session && self.accounts.session_engines.loading, |el| el.child(note(tr("loading"), theme::muted())))
+                        .when_some(self.accounts.session_engines.value.as_ref().and_then(|e| e.as_ref().err()).filter(|_| engine_session), |el, error|
+                            el.child(note(tr("create_proxy_error").replace("{reason}", error), theme::warning())))
                         .when(movable, |el| el.child(note(tr(if transfer.is_some() { "session_transfer_accounts_hint" }
-                            else if idle { "usage_card_move_hint" } else { "usage_card_move_busy" }), theme::faint())))
+                            else if !idle { "usage_card_move_busy" } else if proxy { "usage_card_proxy_move_hint" } else { "usage_card_move_hint" }), theme::faint())))
                         .children(rows)
                         .into_any_element()
                 }
@@ -168,7 +213,7 @@ impl Hangar {
             _ => popup::skeleton("usage-card-loading", 1).into_any_element(),
         };
         div().p(px(popup::INSET)).rounded_md().bg(theme::popup_content_fill()).flex().flex_col().gap(px(2.))
-            .child(popup::title(tr("usage_card_title"), None))
+            .child(popup::title(tr(if proxy { "usage_card_proxy_title" } else { "usage_card_title" }), None))
             .child(div().id("usage-card-scroll").max_h((window.viewport_size().height - px(180.)).max(px(120.))).overflow_y_scroll().child(body))
             // Rodapé do web: atalho para a tela de contas. As configurações são do servidor ativo, então com sessão de
             // outra máquina o atalho levaria às contas erradas e some.
@@ -182,7 +227,7 @@ impl Hangar {
     }
 }
 
-fn account_row(c: &Credential, in_use: bool, quota: QuotaView) -> Div {
+fn account_row(c: &Credential, in_use: bool, chatgpt: bool, quota: QuotaView) -> Div {
     let login = c.login.as_ref().filter(|l| l.logged_in == Some(true));
     let email = login.and_then(|l| l.email.clone()).filter(|e| !e.is_empty());
     let title = c.alias.clone().filter(|a| !a.is_empty()).or_else(|| login.and_then(|l| l.email.clone())).unwrap_or_else(|| c.name.clone());
@@ -192,7 +237,7 @@ fn account_row(c: &Credential, in_use: bool, quota: QuotaView) -> Div {
         chars.next().map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
     });
     let meta = div().flex().items_center().gap(px(6.)).text_size(px(12.)).text_color(theme::muted())
-        .child(side::agent_label(&c.kind))
+        .child(if chatgpt { "ChatGPT".to_owned() } else { side::agent_label(&c.kind) })
         .when(plan.is_some(), |el| el.child(div().text_color(theme::faint()).child("·")))
         .when_some(plan.clone(), |el, plan| el.child(plan))
         .when(in_use, |el| el.child(div().text_color(theme::faint()).child("·")))
@@ -211,6 +256,37 @@ fn account_row(c: &Credential, in_use: bool, quota: QuotaView) -> Div {
             .when_some(email.filter(|e| *e != title), |el, email| el.child(div().truncate().text_size(px(11.5)).text_color(theme::faint()).child(email)))
             .child(meta))
         .child(div().w(px(176.)).flex_shrink_0().child(meters))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::Credential;
+    use crate::api::dto::SessionInfo;
+    use serde_json::json;
+
+    #[test]
+    fn claude_proxy_usage_resolves_only_the_pinned_codex_credential() {
+        let list: Vec<Credential> = serde_json::from_value(json!([
+            {"id":"claude:/storage", "tipo":"claude", "nome":"Storage", "ativa":true},
+            {"id":"codex:/first", "tipo":"codex", "nome":"First", "ativa":true},
+            {"id":"codex:/second", "tipo":"codex", "nome":"Second", "ativa":false}
+        ])).unwrap();
+        let mut session = SessionInfo { provider:"claude".into(), engine:Some("proxy".into()),
+            engine_account:Some("second".into()), conta:Some("codex:/second".into()), ..Default::default() };
+        assert_eq!(super::account_in_use(&list, Some(&session)).unwrap().id, "codex:/second");
+        session.conta = Some("codex:/missing".into());
+        assert!(super::account_in_use(&list, Some(&session)).is_none());
+        session.conta = Some("claude:/storage".into());
+        assert!(super::account_in_use(&list, Some(&session)).is_none());
+        session.conta = None;
+        assert!(super::account_in_use(&list, Some(&session)).is_none());
+        session.engine_account = None;
+        session.conta = Some("claude:/storage".into());
+        assert!(super::account_in_use(&list, Some(&session)).is_none());
+        session.conta = None;
+        session.engine = None;
+        assert_eq!(super::account_in_use(&list, Some(&session)).unwrap().id, "claude:/storage");
+    }
 }
 
 /// A janela mais cheia; janela de um modelo só conta quando é o modelo da sessão, e no empate vence a que renova antes.
