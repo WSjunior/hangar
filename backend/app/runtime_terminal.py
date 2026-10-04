@@ -54,6 +54,18 @@ def outside_scope(name):
     return True
 
 
+# Do pane ao agente com a conversa provada leva poucos segundos; além disso não é nascimento.
+BIRTH_WINDOW_S = 15
+
+
+def being_born(name, after=0):
+    """Pane criado há pouco, de uma vida não anterior a `after`, cujo agente ainda não provou a conversa."""
+    from app import tmux
+    panes = tmux.list_panes_all().get(name)
+    born = max((pane.get('session_created') or 0 for pane in panes or ()), default=0)
+    return bool(born) and born >= after and time.time() - born < BIRTH_WINDOW_S and not outside_scope(name)
+
+
 def _collect(name):
     from app import api, tmux, registry as registry_mod, procinfo
     import psutil

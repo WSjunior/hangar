@@ -154,6 +154,7 @@ _ANSWER_CODES = frozenset({
     "claude_command", "codex_command", "lifecycle_required", "operation_reused", "input_text",
     "queue_busy", "queue_entry", "steer_unknown", "policy_refused"})
 _RUST_TRIES = 4          # 3 tentativas, uma pausa e a última; depois a parte vai para o Python
+_BIRTH_POLL_S = 0.25
 _RETRY_PAUSE_S = 2.0     # cobre a volta do canal de eventos, que recompõe o estado sozinho
 
 
@@ -190,6 +191,8 @@ class RuntimeCoordinator:
             return self.managed_runtime(name)
         async with self.registration_locks.setdefault(name, asyncio.Lock()):
             binding = await asyncio.to_thread(self.legacy.binding, name, provider)
+            if binding is None and provider == "claude":
+                binding = await self._await_birth(name, provider)
             if binding is None:
                 from app.runtime_terminal import outside_scope
                 if self.managed_runtime(name) or provider == "claude" and not await asyncio.to_thread(outside_scope, name):
@@ -243,6 +246,20 @@ class RuntimeCoordinator:
                         or binding.meta.get("terminal")) and slot.rust_refused is None:
                     await self.adopt(name)
             return True
+
+    async def _await_birth(self, name, provider):
+        # Sessão com terminal recém-criada não é vínculo perdido: o envio espera o agente provar a
+        # conversa, como a espera da TUI fazia antes. Suspensão fica para a vida que já tinha vínculo.
+        from app import runtime_terminal
+        after = 0
+        if self.managed_queue(name):
+            after = (self.slot(name).binding.meta.get("terminal") or {}).get("created") or 0
+        while await asyncio.to_thread(runtime_terminal.being_born, name, after):
+            await asyncio.sleep(_BIRTH_POLL_S)
+            binding = await asyncio.to_thread(self.legacy.binding, name, provider)
+            if binding is not None:
+                return binding
+        return None
 
     async def start_sessions(self, adapters):
         from app.runtime_process import reconcile_startup
