@@ -935,7 +935,19 @@ class RuntimeCoordinator:
             with slot.guard:
                 slot.phase = Phase.RecoveringPython
             await self._wait_active(slot)
-            await self._restore(slot)
+            try:
+                await self._restore(slot)
+            except BaseException:
+                # Rust morto e contido: o registro sai, e o próximo prepare_session refaz a sessão a
+                # partir do estado durável. Sem isto o nome ficava preso em recuperação até o restart.
+                with slot.guard:
+                    if slot.lease is not None:
+                        slot.lease.close()
+                        slot.lease = None
+                    if self.names.get(name) == slot.binding.key:
+                        self.names.pop(name, None)
+                    self.slots.pop(slot.binding.key, None)
+                raise
 
     @asynccontextmanager
     async def freeze(self, name):
@@ -986,7 +998,8 @@ class RuntimeCoordinator:
                 if slot.phase != Phase.Python:
                     await self.detach(name)
                 if remove and self.legacy is not None:
-                    await self.legacy.quiesce(slot.binding.descriptor())
+                    # Fechar não escreve na conversa: basta esperar os escritores, mesmo com vínculo mudado.
+                    await self.legacy.quiesce({**slot.binding.descriptor(), "removed":True})
                 result = await action()
                 await self._wait_active(slot)
                 if remove:

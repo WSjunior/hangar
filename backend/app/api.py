@@ -5267,8 +5267,11 @@ def select(name: str, body: SelectBody):
         payload["request_id"] = pending["id"]
         if str(pending["id"]).startswith("perm:") and body.option not in (1, 2):
             raise HTTPException(409, detail=erro("erro_opcao_nao_convergiu", "opção fora do pedido de permissão"))
-    else:
+    if pending is None or not str(pending["id"]).startswith("perm:"):
+        # Pergunta `ask:` pode acabar no teclado da TUI: aí vale a trava do painel e o cursor tem de ser lido.
         _recusa_se_painel_aberto(name)
+        if pending is not None:
+            payload["require_cursor"] = True
     if route_sync(name, {"kind":"control", "control":"select", "payload":payload}) is not None:
         return {"ok": True}
     # Mesma guarda do /input — e aqui ela é a ÚNICA: a cadeia abaixo não sabe falhar. terminal.select

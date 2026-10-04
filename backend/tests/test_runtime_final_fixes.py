@@ -489,3 +489,52 @@ def test_one_session_failing_to_recover_does_not_stop_the_takeover(monkeypatch):
     asyncio.run(supervisor.deactivate_runtime(confirmed_dead=True))
     assert recovered == ['b'] and ('runtime.recover_failed', 'a') in logged
     assert ('runtime.recover_failed', 'c') not in logged
+
+
+def test_failed_recovery_retires_the_record_so_the_name_is_not_stuck(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from app import runtime_coordinator as rc, runtime_terminal as terminal
+    owner, slot, collected = live_owner(monkeypatch, tmp_path)
+    slot.phase = rc.Phase.Rust
+    monkeypatch.setattr(terminal, '_collect', lambda name: None)
+    async def flow():
+        owner.loop = asyncio.get_running_loop()
+        with pytest.raises(RuntimeError):
+            await owner.recover('session', confirmed_dead=True, containment=SimpleNamespace(containment_clean=lambda: True))
+        assert not owner.managed_queue('session') and slot.binding.key not in owner.slots
+        assert slot.lease is None
+        # A vida volta: o nome se registra de novo, com o estado durável.
+        monkeypatch.setattr(terminal, '_collect', lambda name: {**collected, 'name': name})
+        assert await owner.prepare_session('session', 'claude') is True
+        assert owner.slot('session').phase == rc.Phase.Python
+        owner.slot('session').lease.close()
+    asyncio.run(flow())
+
+
+def test_kill_after_the_binding_changed_before_closing_still_kills(tmp_path, monkeypatch):
+    from app import runtime_terminal as terminal
+    owner, slot, collected = live_owner(monkeypatch, tmp_path)
+    # /clear feito direto na TUI antes do fechar: a conversa mudou.
+    monkeypatch.setattr(terminal, '_collect', lambda name: {**collected, 'name': name,
+        'jsonl': str(tmp_path / 'other.jsonl'), 'session_id': 'other'})
+    killed = []
+    async def kill():
+        killed.append(True)
+    async def flow():
+        owner.loop = asyncio.get_running_loop()
+        await owner.change('session', kill, remove=True)
+    asyncio.run(flow())
+    assert killed and not owner.managed_queue('session')
+
+
+@pytest.mark.parametrize('pending,expect_panel_check,expect_cursor', [
+    ({'id': 'ask:t1'}, True, True), (None, True, False), ({'id': 'perm:t1'}, False, False)])
+def test_select_on_question_respects_open_panel_and_requires_cursor(monkeypatch, pending, expect_panel_check, expect_cursor):
+    from app import api, plugin_bridge as pb, runtime_terminal
+    checked, routed = [], []
+    monkeypatch.setattr(pb, 'pergunta_pendente', lambda name: pending)
+    monkeypatch.setattr(api, '_recusa_se_painel_aberto', lambda name: checked.append(name))
+    monkeypatch.setattr(runtime_terminal, 'route_sync', lambda name, command: routed.append(command) or {'ok': True})
+    assert api.select('s', api.SelectBody(option=1)) == {'ok': True}
+    assert bool(checked) == expect_panel_check
+    assert routed[0]['payload'].get('require_cursor', False) == expect_cursor
