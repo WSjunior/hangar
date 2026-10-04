@@ -1124,6 +1124,11 @@ a ordem dos arquivos variava. Python e Rust agora ordenam os caminhos na listage
 consultas do índice, preservando a sequência interna de cada arquivo. Ordenar a consulta
 também corrige índices existentes, cuja ordem de inserção muda após atualizar um arquivo.
 
+O CI de 03/10/2026 também expôs dois pontos de portabilidade: a raiz do repositório deve
+ser resolvida antes de classificar origens, e a seleção de regras de projeto deve aceitar
+ambos os separadores de caminho. Python e Rust usam essa seleção comum; o marcador
+`project-paths:1` nas assinaturas reconstrói somente as áreas salvas, preservando os custos.
+
 Cotas permanecem no Python: dependem das APIs dos provedores e compartilham cache/espera de
 429 com criação de sessão, loop e MCP. Duplicar isso no Rust criaria duas consultas e duas
 políticas de espera. `stats` continua no fluxo de chat Python; custo por papel da orquestração

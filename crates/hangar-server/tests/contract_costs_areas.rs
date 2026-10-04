@@ -69,6 +69,26 @@ fn map_overrides_are_ordered_and_invalid_entries_are_ignored() {
 }
 
 #[test]
+fn project_overrides_accept_both_path_separators_without_changing_case_or_boundaries() {
+    let d = tempfile::tempdir().unwrap();
+    let file = d.path().join("areas.json");
+    for key in ["C:/acme", r"C:\acme"] {
+        std::fs::write(&file, json!({"padrao":[["generic",["*.py"]]], "projetos":{
+            "acme":[["first",["backend/*"]]], key:[["second",["*.py"]]]
+        }}).to_string()).unwrap();
+        let map = AreaMap::load(&file);
+        for cwd in ["C:/acme", r"C:\acme", "C:/acme/sub", r"C:\acme\sub", r"C:/acme\sub"] {
+            assert_eq!(map.rules_for(cwd).iter().map(|rule| rule.0.as_str()).collect::<Vec<_>>(),
+                ["first", "second", "generic"], "{key}: {cwd}");
+        }
+        for cwd in ["C:/acme-other", r"C:\acme-other", "C:/ACME/sub", r"C:\ACME\sub"] {
+            assert_eq!(map.rules_for(cwd).iter().map(|rule| rule.0.as_str()).collect::<Vec<_>>(),
+                ["generic"], "{key}: {cwd}");
+        }
+    }
+}
+
+#[test]
 fn fnmatch_handles_suffixes_newlines_case_and_character_sets() {
     let map = default_map();
     for (pattern, target, want) in [
@@ -387,7 +407,7 @@ impl hangar_server::costs::index::Fold for SavedAreasFold {
 }
 
 #[test]
-fn division_signature_refolds_only_saved_areas_without_reading_the_transcript() {
+fn matching_signature_refolds_only_saved_areas_without_reading_the_transcript() {
     use hangar_server::costs::index::{Index, Progress};
     use md5::{Digest, Md5};
     let d = tempfile::tempdir().unwrap();
@@ -395,7 +415,7 @@ fn division_signature_refolds_only_saved_areas_without_reading_the_transcript() 
     let transcript = d.path().join("synthetic.jsonl");
     std::fs::write(&transcript, "synthetic\n").unwrap();
     let map = default_map();
-    let old_signature = format!("{:x}", Md5::digest(format!("divisao:2{}", serde_json::to_string(&map.rules_for("/synthetic")).unwrap()).as_bytes()));
+    let old_signature = format!("{:x}", Md5::digest(format!("divisao:3{}", serde_json::to_string(&map.rules_for("/synthetic")).unwrap()).as_bytes()));
     let entries = AreaEntries {
         header: AreaHeader { fonte: None, session_id: None, subagente: None },
         turns: vec![(vec![ToolReg::P { rules_cwd: cwd.into(), cwd: cwd.into(), paths: vec!["a.css".into(), "a.py".into()] }], vec![unit("d", false, [11,7,5,3,2])])],

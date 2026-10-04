@@ -30,6 +30,8 @@ fn deep_skills(path: &Path, out: &mut Vec<PathBuf>) {
 
 fn origin(path: &Path, home: &Path, repo: &Path) -> String {
     let real = fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+    // A raiz e a skill precisam usar o mesmo caminho depois de resolver aliases.
+    let repo = fs::canonicalize(repo).unwrap_or_else(|_| repo.to_owned());
     if real.starts_with(repo.join("skills")) { return "@repo".into(); }
     let text = real.to_string_lossy().replace('\\', "/");
     let parts: Vec<_> = text.split('/').collect();

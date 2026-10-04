@@ -77,7 +77,8 @@ impl AreaMap {
             .unwrap_or_else(|| (String::new(), Value::Null));
         let defaults = default_rules();
         // O padrão do código participa da assinatura para invalidar áreas após uma atualização.
-        let signature = format!("{:x}", Md5::digest(format!("divisao:3{}{}", serde_json::to_string(&defaults).unwrap(), text).as_bytes()));
+        // A seleção corrigida precisa reconstruir também as áreas já salvas no índice.
+        let signature = format!("{:x}", Md5::digest(format!("divisao:3project-paths:1{}{}", serde_json::to_string(&defaults).unwrap(), text).as_bytes()));
         let mut projects = IndexMap::new();
         let defaults = if let Some(obj) = raw.as_object() {
             if let Some(project_rules) = obj.get("projetos").and_then(Value::as_object) {
@@ -91,12 +92,15 @@ impl AreaMap {
     pub fn signature(&self) -> &str { &self.signature }
 
     pub fn rules_for(&self, cwd: &str) -> Rules {
+        // O transcript pode usar barras diferentes das do host que lê o mapa.
+        let cwd = cwd.replace('\\', "/");
         let mut rules = Vec::new();
-        let parts = project_parts(cwd);
+        let parts = project_parts(&cwd);
         for (key, project_rules) in &self.projects {
-            let matches = if key.contains('/') || key.contains(std::path::MAIN_SEPARATOR) {
-                cwd == key || cwd.starts_with(&format!("{}{}", key.trim_end_matches(['/', '\\']), std::path::MAIN_SEPARATOR))
-            } else { parts.contains(key) };
+            let key = key.replace('\\', "/");
+            let matches = if key.contains('/') {
+                cwd == key || cwd.starts_with(&format!("{}/", key.trim_end_matches('/')))
+            } else { parts.contains(&key) };
             if matches { rules.extend(project_rules.clone()); }
         }
         rules.extend(self.defaults.clone());

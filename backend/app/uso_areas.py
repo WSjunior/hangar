@@ -76,7 +76,8 @@ def _mapa() -> tuple[str, list, dict[str, list]]:
         bruto = json.loads(texto)
     except (OSError, ValueError):
         texto, bruto = "", None
-    assinatura = hashlib.sha256((f"divisao:{_DIVISAO}" + repr(PADRAO) + texto).encode()).hexdigest()[:12]
+    # A seleção corrigida precisa reconstruir também as áreas já salvas no índice.
+    assinatura = hashlib.sha256((f"divisao:{_DIVISAO}project-paths:1" + repr(PADRAO) + texto).encode()).hexdigest()[:12]
     if not isinstance(bruto, dict):
         return assinatura, PADRAO, {}
     padrao = _regras(bruto["padrao"]) if "padrao" in bruto else PADRAO
@@ -105,12 +106,15 @@ def raiz_do_repo(pasta: str) -> str:
 
 
 def regras_de(cwd: str) -> list[tuple[str, list[str]]]:
+    # O transcript pode usar barras diferentes das do host que lê o mapa.
+    cwd = cwd.replace("\\", "/")
     _, padrao, projetos = _mapa()
     partes = Path(cwd).parts
     do_projeto = []
     for chave, regras in projetos.items():
-        if "/" in chave or os.sep in chave:
-            if cwd == chave or cwd.startswith(chave.rstrip("/\\") + os.sep):
+        chave = chave.replace("\\", "/")
+        if "/" in chave:
+            if cwd == chave or cwd.startswith(chave.rstrip("/") + "/"):
                 do_projeto += regras
         elif chave in partes:
             do_projeto += regras

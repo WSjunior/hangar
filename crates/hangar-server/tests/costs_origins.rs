@@ -20,6 +20,29 @@ fn roots_are_sorted_and_first_discovery_wins() {
 
 #[cfg(unix)]
 #[test]
+fn repository_alias_is_compared_with_the_resolved_skill_path() {
+    use std::os::unix::fs::symlink;
+    let directory = tempfile::tempdir().unwrap();
+    let real = directory.path().join("real");
+    let alias = directory.path().join("alias");
+    let home = real.join("home");
+    let repo = real.join("repo");
+    skill(&home.join(".claude/skills/shared"));
+    skill(&repo.join("skills/shared"));
+    skill(&repo.join("skills/repository"));
+    symlink(repo.join("skills/repository"), home.join(".claude/skills/repo-link")).unwrap();
+    symlink(&real, &alias).unwrap();
+
+    let expected = origins::scan(&home, &repo);
+    let found = origins::scan(&alias.join("home"), &alias.join("repo"));
+    assert_eq!(found, expected);
+    assert_eq!(found["shared"], "@pessoal");
+    assert_eq!(found["repository"], "@repo");
+    assert_eq!(found["repo-link"], "@repo");
+}
+
+#[cfg(unix)]
+#[test]
 fn symlink_origin_is_resolved_and_agents_alias_keeps_python_precedence() {
     use std::os::unix::fs::symlink;
     let d = tempfile::tempdir().unwrap(); let home = d.path().join("home"); let repo = d.path().join("repo");
