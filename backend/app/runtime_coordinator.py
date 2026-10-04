@@ -707,10 +707,18 @@ class RuntimeCoordinator:
                 await task
                 raise
         read_only = command.get("kind") in {"snapshot", "ensure_projection"}
+        initial = self.slots.get(self.names.get(name, ""))
+        terminal_identity = (initial.binding.key, initial.binding.generation) if initial and initial.binding.meta.get("terminal") else None
         failures = 0
         while True:
+            current = self.slots.get(self.names.get(name, ""))
+            if terminal_identity and (current is None or (current.binding.key, current.binding.generation) != terminal_identity):
+                raise RuntimeError("vida terminal mudou durante a tentativa; entrada não repetida")
             if not read_only:
                 await self._settle_rust(name)
+            current = self.slots.get(self.names.get(name, ""))
+            if terminal_identity and (current is None or (current.binding.key, current.binding.generation) != terminal_identity):
+                raise RuntimeError("vida terminal mudou durante a tentativa; entrada não repetida")
             try:
                 source = self.slots.get(self.names.get(name, ""))
                 identity = (source.binding.key, source.binding.generation) if source and source.phase == Phase.Rust and source.binding.meta.get("terminal") else None
@@ -743,6 +751,9 @@ class RuntimeCoordinator:
                         await asyncio.sleep(_RETRY_PAUSE_S)
                     continue
                 await self._hand_to_python(name, "falhas_seguidas", exc)
+                current = self.slots.get(self.names.get(name, ""))
+                if terminal_identity and (current is None or (current.binding.key, current.binding.generation) != terminal_identity):
+                    raise RuntimeError("vida terminal mudou durante a tentativa; entrada não repetida")
                 return await self._op_once(name, command, operation_id)
 
     async def _op_once(self, name, command, operation_id):

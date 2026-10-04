@@ -93,8 +93,8 @@ trecho; conservou forks de Pi comprovados. A execução final selecionada passou
 com 68 fora da seleção. A segunda releitura independente aprovou conformidade e qualidade,
 fechando os seis problemas. Commits da Task 3: `bead8a45`, `58c75289` e `a767febd`.
 
-A política comum de falhas de `74177469` será integrada com a parte1 após a revisão desta Task.
-O caminho terminal já separa `_op_once`, evitando duplicar essa política.
+A política comum de falhas de `74177469` foi integrada na Task 4 após a aprovação desta Task.
+O caminho terminal separa `_op_once`, evitando duplicar essa política.
 
 ## Task 4 — integração e verificações finais
 
@@ -114,10 +114,14 @@ transferência somente da sessão afetada. A resposta `unknown` mantém seu cont
 protegido, registra o motivo e transfere a posse sem repetir o efeito. Resultados normais de
 adiamento/recusa continuam fora da contagem de defeito.
 
-As sete provas Python da política passaram, incluindo pausa, mesmo id, outra sessão no Rust,
+As oito provas Python da política passaram, incluindo pausa, mesmo id, outra sessão no Rust,
 resposta incerta, aviso automático sem aparelho e diagnóstico sem texto. Os dois casos Rust
 novos reproduziram a ausência do aviso antes da correção; depois o arquivo de runtime passou
 em **33 casos**, incluindo interrupção do timer e recuperação posterior da leitura.
+A regressão adicional reproduziu o envio de texto antigo na quarta tentativa depois de mudar
+a geração durante a pausa. A operação agora confere a vida original antes de cada tentativa e
+da reserva. O comando focado de política, posse e ciclo de vida passou em **36 casos**; a prova
+da geração passou novamente após a última guarda. Nenhum quarto envio foi realizado.
 
 `cargo test --locked --workspace`, em `crates/`: **324 passaram, zero falhou, dois ignorados**.
 Método: soma das contagens `test result` dos 35 blocos da execução, sem somar rodadas anteriores.

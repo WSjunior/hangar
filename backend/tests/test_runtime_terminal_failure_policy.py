@@ -177,6 +177,26 @@ def test_terminal_normal_refusal_does_not_retry_or_change_owner(monkeypatch, tmp
         owner.close_python_leases()
 
 
+def test_terminal_retry_never_moves_original_input_to_new_generation(monkeypatch, tmp_path):
+    gateway = Gateway('runtime_lease', 3)
+    owner, slot, effects, _ = setup(monkeypatch, tmp_path, gateway)
+    async def rotate(delay):
+        slot.binding.generation += 1
+        slot.binding.meta['terminal']['generation'] = slot.binding.generation
+        slot.binding.meta['terminal']['conversation'] = 'new-sid'
+    monkeypatch.setattr(rc.asyncio, 'sleep', rotate)
+    async def flow():
+        assert await owner.adopt('session')
+        with pytest.raises(RuntimeError, match='vida'):
+            await owner.op('session', {'kind': 'submit', 'text': 'old-generation-input'}, 'root')
+        assert gateway.attempts == ['root'] * 3 and effects == []
+    try:
+        asyncio.run(flow())
+    finally:
+        gateway.close()
+        owner.close_python_leases()
+
+
 def test_terminal_private_snapshot_is_accepted_without_public_state(monkeypatch, tmp_path):
     gateway = Gateway('runtime_lease', 0)
     owner, slot, _, _ = setup(monkeypatch, tmp_path, gateway)
