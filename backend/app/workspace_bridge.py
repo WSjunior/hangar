@@ -128,9 +128,13 @@ def delegate(operation: str, exception, *, mutation=False, prepare=None, decode=
             bound = signature.bind(*args, **kwargs)
             bound.apply_defaults()
             arguments = dict(bound.arguments)
-            for key, default in (python_args or {}).items():
-                if arguments.pop(key, default) != default:
+            if any(arguments.pop(key, default) != default for key, default in list((python_args or {}).items())):
+                # As chamadas de dentro (ex.: list_branches sob a trava da worktree) seguem no Python.
+                token = _fallback.set(True)
+                try:
                     return original(*args, **kwargs)
+                finally:
+                    _fallback.reset(token)
             if prepare is not None:
                 arguments = prepare(arguments)
             changing = mutation

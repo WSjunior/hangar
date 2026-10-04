@@ -8396,7 +8396,9 @@ def _resolver_citado(name: str, path: str, *, write: bool = False) -> str:
     if info is None or not info.jsonl:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "session or transcript not found"))
     from app import workspace_bridge
-    if info.cwd or os.path.isabs(os.path.expanduser(path)):
+    rows = _conversation_rows(info)
+    # Sessão Codex transferida: a conversa inclui o histórico de antes da troca, que o Rust não lê.
+    if rows is None and (info.cwd or os.path.isabs(os.path.expanduser(path))):
         result = workspace_bridge.request("resolve_cited", {"cwd": info.cwd or "", "jsonl": info.jsonl,
             "path": path, "write": write})
         if result is not None:
@@ -8408,7 +8410,6 @@ def _resolver_citado(name: str, path: str, *, write: bool = False) -> str:
                 detail = erro(failure["code"], str(detail))
             raise HTTPException(failure["status"], detail=detail)
     from app.transcript import citation_cwds
-    rows = _conversation_rows(info)
     cited = citation_cwds(info.jsonl, [path], rows=rows)
     if path not in cited:
         raise HTTPException(403, detail=erro("erro_arquivo_nao_citado", "file not referenced in this conversation"))

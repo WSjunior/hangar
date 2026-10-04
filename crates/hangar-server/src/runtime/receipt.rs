@@ -144,8 +144,6 @@ impl ReceiptIndex {
             if !obj.is_object() { continue; }
             if self.provider == "codex" && obj["type"] == "session_meta" {
                 self.meta_conversation = obj["payload"]["id"].as_str().map(str::to_owned);
-                // O parser do rollout também vê a linha: o estado dele segue o arquivo inteiro.
-                let _ = parser.feed(&raw,start);
                 continue;
             }
             let (text,kind) = if self.provider == "codex" {

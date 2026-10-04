@@ -328,9 +328,16 @@ class AppServerClient:
             self._respondendo.discard(request_id)
             raise
 
+    def _wire_id(self, n: int) -> int | str:
+        # Cliente da reserva do runtime: o id carrega dono e geração, e a resposta volta por ele.
+        if self.runtime_owner is None:
+            return n
+        _name, key, generation = self.runtime_owner
+        return f"reserve:{key}:{generation}:{self.runtime_nonce}:{n}"
+
     def request_bytes(self, method: str, params: dict) -> bytes:
         """Mesmo envelope da próxima chamada, inclusive id e escapes do transporte."""
-        return (json.dumps({"jsonrpc": "2.0", "id": self._next_id + 1,
+        return (json.dumps({"jsonrpc": "2.0", "id": self._wire_id(self._next_id + 1),
                             "method": method, "params": params}) + "\n").encode()
 
     async def request(self, method: str, params: dict, timeout: float = 30.0) -> dict:
@@ -338,10 +345,7 @@ class AppServerClient:
             raise RuntimeError("AppServerClient.start() precisa rodar antes de request()")
         wire = self.request_bytes(method, params)
         self._next_id += 1
-        req_id = self._next_id
-        if self.runtime_owner is not None:
-            name, key, generation = self.runtime_owner
-            req_id = f"reserve:{key}:{generation}:{self.runtime_nonce}:{self._next_id}"
+        req_id = self._wire_id(self._next_id)
         fut = asyncio.get_running_loop().create_future()
         self._pending[req_id] = fut
         line = wire.decode().rstrip("\n")
