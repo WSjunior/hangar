@@ -19,6 +19,7 @@ on:
       - "backend/app/runtime_coordinator.py"
       - "backend/app/rust_server.py"
       - "backend/tests/test_runtime_process.py"
+      - "backend/tests/test_runtime_queue_terminal_v2.py"
       - "backend/tests/test_runtime_terminal_fix*.py"
       - "backend/tests/test_runtime_terminal_failure_policy.py"
       - "plugins/hangar/hooks/**"
@@ -129,7 +130,7 @@ jobs:
         run: uv sync
       - name: Contenção e regressões da entrega terminal
         working-directory: backend
-        run: uv run pytest tests/test_runtime_process.py tests/test_runtime_terminal_fix.py tests/test_runtime_terminal_fix2.py tests/test_runtime_terminal_failure_policy.py -q
+        run: uv run pytest tests/test_runtime_process.py tests/test_runtime_queue_terminal_v2.py tests/test_runtime_terminal_fix.py tests/test_runtime_terminal_fix2.py tests/test_runtime_terminal_failure_policy.py -q
       - name: Contrato do cano contra o hangar-cano
         if: matrix.platform == 'linux-x86_64'
         working-directory: backend

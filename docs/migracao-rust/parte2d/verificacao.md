@@ -149,11 +149,28 @@ pertencem ao estado anterior e serão repetidos para a nova integração.
 
 A comparação identificou cinco adaptações: conservar metadados pequenos de recibo ao reduzir
 respostas, respeitar Prepare já finalizado, reconhecer a prova de Finish reduzida, recuperar
-as flags terminal antes da poda v1 e continuar a sequência por `next_seq`. A integração está
-em andamento; o merge permanece sem commit até as regressões e a interoperabilidade passarem.
+as flags terminal antes da poda v1 e continuar a sequência por `next_seq`. Foram integradas em
+`984801af`, com protocolo 10 pareado. A recuperação também grava `_terminal_generation` das
+intenções antigas comprovadas antes de podar o recibo que as identificava.
+
+Provas focadas após a última alteração: **152 Python**, **58 Rust** e **dois testes explícitos
+Rust → Python → Rust passaram**. Cobrem lease alternada, contador/finalização, metadados nativos,
+remoção após poda, intenção antes do Append e zero efeito para linha já confirmada. A janela
+limitada e o oráculo de compactação 2B continuaram passando.
+
+Verificação final sobre v2/protocolo 10: `cargo test --locked --workspace` passou em **335 casos**,
+com zero falha e três ignorados. Método: soma dos 36 blocos `test result` dessa execução, sem
+somar rodadas anteriores. Dois ignorados de interoperabilidade foram executados explicitamente
+na junção; o terceiro de exclusão de lease passou na Task 2. O check GNU Windows de todos os
+testes passou novamente.
+
+Pytest final pertinente em **45 arquivos**, uma única invocação: **1446 passaram, zero falhou,
+um caso Windows ignorado**. Esse caso é executado no runner Windows pelo `server.yml`, junto
+das provas v2 e do hook TypeScript real com Node 24. Os avisos preexistentes permanecem nos logs.
+`git diff --check` passou. A revisão final e o CI ainda estão pendentes.
 
 ## Ainda pendente
 
-- Task 4: fechar fila v2/protocolo 10, repetir checks afetados, revisão final, push e CI nas três plataformas.
+- Task 4: revisão final, push e CI nas três plataformas sobre v2/protocolo 10.
 - Uso real do Claude e Windows instalado: somente com o dono, conforme o pedido.
 - Porte do envio/controle Codex com terminal: permanece Python/RPC nesta árvore; fora da 2D.
