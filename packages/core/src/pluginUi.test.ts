@@ -71,8 +71,8 @@ describe('parsePluginUi', () => {
 
 describe('parsePluginToast', () => {
   it('lê o aviso e o mod que o emitiu', () => {
-    expect(parsePluginToast({ id: 'ab-1', text: 'Jenkins configurado.', plugin: 'pmedico', timeoutMs: 9000 }))
-      .toEqual({ id: 'ab-1', text: 'Jenkins configurado.', plugin: 'pmedico', timeoutMs: 9000 });
+    expect(parsePluginToast({ id: 'ab-1', text: 'Jenkins configurado.', plugin: 'demo', timeoutMs: 9000 }))
+      .toEqual({ id: 'ab-1', text: 'Jenkins configurado.', plugin: 'demo', timeoutMs: 9000 });
   });
 
   it('sem id, sem texto ou sem prazo não é aviso', () => {

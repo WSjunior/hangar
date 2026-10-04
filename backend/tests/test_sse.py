@@ -359,11 +359,11 @@ async def test_mod_toast_reaches_the_stream_with_the_session_idle(monkeypatch):
                 return ev
 
     # Emitido ANTES de o app conectar e ainda dentro do prazo: quem abre a conversa agora o vê.
-    pb._store_toast("aviso1", "Jenkins configurado.", 9000, "pmedico")
+    pb._store_toast("aviso1", "Jenkins configurado.", 9000, "demo")
     try:
         ev = await asyncio.wait_for(_consumir(), timeout=5)
         dado = json.loads(ev["data"])
-        assert (dado["text"], dado["plugin"]) == ("Jenkins configurado.", "pmedico")
+        assert (dado["text"], dado["plugin"]) == ("Jenkins configurado.", "demo")
         assert dado["id"] and 0 < dado["timeoutMs"] <= 9000
         assert "id" not in ev  # sem id de SSE: quem repõe na reconexão é a bomba
     finally:

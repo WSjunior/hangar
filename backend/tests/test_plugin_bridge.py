@@ -571,11 +571,11 @@ def test_mod_toast_stays_until_it_expires_and_carries_the_time_left(monkeypatch)
     agora = [1000.0]
     monkeypatch.setattr(pb.time, "monotonic", lambda: agora[0])
     try:
-        r = c.post("/api/plugin/toast", json=_ponte("aviso-a", text="Jenkins configurado.", timeoutMs=9000, plugin="pmedico"))
+        r = c.post("/api/plugin/toast", json=_ponte("aviso-a", text="Jenkins configurado.", timeoutMs=9000, plugin="demo"))
         assert r.status_code == 200
         agora[0] += 2
         ultimo, avisos = pb.toasts_after("aviso-a", 0)
-        assert [(a["text"], a["plugin"], a["timeoutMs"]) for a in avisos] == [("Jenkins configurado.", "pmedico", 7000)]
+        assert [(a["text"], a["plugin"], a["timeoutMs"]) for a in avisos] == [("Jenkins configurado.", "demo", 7000)]
         # Quem já viu este não o recebe de novo; quem conecta do zero recebe.
         assert pb.toasts_after("aviso-a", ultimo) == (ultimo, [])
         agora[0] += 8

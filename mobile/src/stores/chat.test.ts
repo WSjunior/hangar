@@ -273,13 +273,13 @@ test('aviso de mod vira toast uma vez só, mesmo reposto pela reconexão', async
   chat.retain();
   await vi.waitFor(() => expect(created).toHaveLength(1));
 
-  const frame = JSON.stringify({ id: 'ab-1', text: 'Jenkins configurado.', plugin: 'pmedico', timeoutMs: 9000 });
+  const frame = JSON.stringify({ id: 'ab-1', text: 'Jenkins configurado.', plugin: 'demo', timeoutMs: 9000 });
   created[0].trigger('plugin_toast', frame);
   created[0].trigger('plugin_toast', frame);
   created[0].trigger('plugin_toast', JSON.stringify({ text: 'sem id' }));
 
   await vi.waitFor(() => expect(toasts.mod).toHaveBeenCalled());
-  expect(toasts.mod.mock.calls).toEqual([['Jenkins configurado.', 'pmedico', 9000]]);
+  expect(toasts.mod.mock.calls).toEqual([['Jenkins configurado.', 'demo', 9000]]);
   chat.release();
 });
 

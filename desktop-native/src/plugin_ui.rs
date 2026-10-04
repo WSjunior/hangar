@@ -325,8 +325,8 @@ mod tests {
 
     #[test]
     fn toast_keeps_the_mod_and_its_timeout_and_refuses_what_is_not_a_toast() {
-        assert_eq!(toast(&json!({"id": "ab-1", "text": "Jenkins configurado.", "plugin": "pmedico", "timeoutMs": 9000})),
-            Some(Toast { id: "ab-1".into(), text: "Jenkins configurado.".into(), plugin: "pmedico".into(), timeout: Duration::from_millis(9000) }));
+        assert_eq!(toast(&json!({"id": "ab-1", "text": "Jenkins configurado.", "plugin": "demo", "timeoutMs": 9000})),
+            Some(Toast { id: "ab-1".into(), text: "Jenkins configurado.".into(), plugin: "demo".into(), timeout: Duration::from_millis(9000) }));
         assert_eq!(toast(&json!({"id": "ab-2", "text": "oi", "timeoutMs": 1})).map(|t| t.plugin), Some(String::new()));
         assert_eq!(toast(&json!({"text": "oi", "timeoutMs": 4000})), None);
         assert_eq!(toast(&json!({"id": "ab-3", "text": "  ", "timeoutMs": 4000})), None);
