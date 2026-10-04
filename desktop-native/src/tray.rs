@@ -3,6 +3,10 @@
 mod linux;
 #[cfg(target_os = "linux")]
 use linux as imp;
+#[cfg(target_os = "windows")]
+mod windows;
+#[cfg(target_os = "windows")]
+use windows as imp;
 
 pub const SUPPORTED: bool = cfg!(any(target_os = "linux", target_os = "windows"));
 
@@ -16,7 +20,7 @@ pub enum TrayEvent {
     Host(bool),
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 mod imp {
     pub struct Handle;
     impl Handle {
