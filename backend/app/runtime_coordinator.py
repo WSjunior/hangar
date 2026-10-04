@@ -116,12 +116,49 @@ class Slot:
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     cache_valid: bool = False
     lifecycle_token: object | None = None
-    # Geração em que o Rust recusou adotar a sessão: ela fica no Python até a próxima vida.
+    # Geração em que o Rust falhou com a sessão: ela fica no Python até o backend reiniciar, que é
+    # quando chega a versão com a correção.
     rust_refused: int | None = None
+    adopt_failures: int = 0
 
 
 def _clock():
     return {"monotonic_s": time.monotonic(), "epoch_s": time.time()}
+
+
+def failure_reason(exc: BaseException) -> dict:
+    """Tipo e motivo de uma falha do runtime para o diário. Só falhas do caminho Rust levam o
+    detalhe: lá a mensagem é código e frase fixa. As do Python podem embutir texto da sessão."""
+    from_rust = getattr(exc, "_hangar_rust", False) or type(exc).__name__ in {"RustOpError", "RustCacheInvalid"}
+    plain = from_rust or isinstance(exc, (TimeoutError, ConnectionError))
+    return {"codigo": type(exc).__name__, "detalhe": str(exc)[:200] if plain else ""}
+
+
+# Recusas do Rust que acontecem antes de qualquer efeito (nada escrito no cano nem na fila):
+# repetir é seguro. Fora delas, repetir pode digitar a mesma mensagem duas vezes.
+_PRE_EFFECT_CODES = frozenset({
+    "command_kind", "command_fields", "descriptor_shape", "descriptor_binding", "cano_pid",
+    "cano_token", "cano_address", "cano_version", "cano_connect", "cano_auth", "runtime_binding",
+    "runtime_provider", "runtime_lease", "runtime_generation", "runtime_stopping", "control_kind",
+    "queue_action"})
+# Respostas normais do Rust ao pedido (botão velho, sessão ocupada, entrada inválida): não são
+# defeito, então não contam nem trocam de dono; só sobem como erro.
+_ANSWER_CODES = frozenset({
+    "claude_command", "codex_command", "lifecycle_required", "operation_reused", "input_text",
+    "queue_busy", "queue_entry", "steer_unknown", "policy_refused"})
+_RUST_TRIES = 4          # 3 tentativas, uma pausa e a última; depois a parte vai para o Python
+_RETRY_PAUSE_S = 2.0     # cobre a volta do canal de eventos, que recompõe o estado sozinho
+
+
+class RustCacheInvalid(RuntimeError):
+    """O Python perdeu a cópia do estado da sessão no Rust; nada foi enviado."""
+
+
+def _safe_to_repeat(exc: BaseException) -> bool:
+    if isinstance(exc, RustCacheInvalid):
+        return True
+    status, code = getattr(exc, "status", None), getattr(exc, "code", "")
+    return status in (400, 409, 413) or (status == 503 and code in _PRE_EFFECT_CODES)
 
 
 class RuntimeCoordinator:
@@ -163,7 +200,7 @@ class RuntimeCoordinator:
                 with slot.guard:
                     slot.binding.meta = binding.meta
                 if (self.transport is not None and (binding.meta.get("cano") or {}).get("versao") == 2
-                        and slot.rust_refused != slot.binding.generation):
+                        and slot.rust_refused is None):
                     await self.adopt(name)
             return True
 
@@ -189,7 +226,7 @@ class RuntimeCoordinator:
                         await self.prepare_session(meta["name"], provider)
                     except Exception as exc:
                         from app import diag
-                        diag.registrar("runtime.registration_failed", "erro", sessao=meta["name"], codigo=type(exc).__name__)
+                        diag.registrar("runtime.registration_failed", "erro", sessao=meta["name"], **failure_reason(exc))
 
     async def native_receipt(self, message_id, status):
         for slot in tuple(self.slots.values()):
@@ -223,7 +260,7 @@ class RuntimeCoordinator:
                             await self.prepare_session(slot.binding.name, slot.binding.provider)
                         except Exception as exc:
                             from app import diag
-                            diag.registrar("runtime.adoption_failed", "erro", sessao=slot.binding.name, codigo=type(exc).__name__)
+                            diag.registrar("runtime.adoption_failed", "erro", sessao=slot.binding.name, **failure_reason(exc))
             self.adoption_task = self.loop.create_task(adopt_registered())
 
     async def close_events(self):
@@ -265,9 +302,11 @@ class RuntimeCoordinator:
         async def refresh():
             try:
                 await self.refresh_snapshot(slot.binding.name)
-            except Exception:
+            except Exception as exc:
                 slot.cache_valid = False
                 self._signal(slot)
+                from app import diag
+                diag.registrar("runtime.refresh_failed", "erro", sessao=slot.binding.name, **failure_reason(exc))
         self.refreshing[key] = asyncio.create_task(refresh())
 
     def request_drain(self, name):
@@ -315,7 +354,9 @@ class RuntimeCoordinator:
                 raise RuntimeError("stream privado encerrado sem aviso")
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                from app import diag
+                diag.registrar("runtime.events_interrupted", "aviso", ms=int(delay * 1000), **failure_reason(exc))
                 for slot in tuple(self.slots.values()):
                     if slot.phase == Phase.Rust:
                         slot.cache_valid = False
@@ -339,7 +380,7 @@ class RuntimeCoordinator:
                 slot.cache_valid = False
                 self._signal(slot)
                 from app import diag
-                diag.registrar("runtime.rebind_failed", "erro", sessao=slot.binding.name, codigo=type(exc).__name__)
+                diag.registrar("runtime.rebind_failed", "erro", sessao=slot.binding.name, **failure_reason(exc))
         self.rebindings[key] = asyncio.create_task(rebind())
 
     def register(self, binding: Binding):
@@ -524,6 +565,24 @@ class RuntimeCoordinator:
             raise RuntimeError("IPC do runtime indisponível")
         return await self.transport.op(descriptor, command, operation_id, _clock())
 
+    async def _hand_to_python(self, name, reason: str, exc: BaseException | None = None):
+        """Passa só esta sessão para o Python até o backend reiniciar; o resto segue no Rust.
+        O detach recupera a fila marcando o que estava em voo como incerto: nada é redigitado."""
+        slot = self.slots.get(self.names.get(name, ""))
+        if slot is None or slot.phase != Phase.Rust:
+            return
+        from app import diag
+        cause = failure_reason(exc) if exc is not None else {}
+        try:
+            await self.detach(name)
+        except Exception as err:
+            diag.registrar("runtime.parte_para_python", "erro", sessao=name, etapa="detach falhou:" + reason,
+                           **failure_reason(err))
+            raise
+        with slot.guard:
+            slot.rust_refused = slot.binding.generation
+        diag.registrar("runtime.parte_para_python", "erro", sessao=name, etapa=reason, **cause)
+
     async def _settle_rust(self, name):
         """Rust parado em erro não volta sozinho: devolve a sessão ao Python, que segue atendendo."""
         slot = self.slots.get(self.names.get(name, ""))
@@ -531,35 +590,60 @@ class RuntimeCoordinator:
             return
         try:
             await self.refresh_snapshot(name)
-        except Exception:
-            return          # sem resposta do Rust não dá para saber; o erro de sempre segue valendo
+        except Exception as exc:
+            from app import diag
+            diag.registrar("runtime.refresh_failed", "erro", sessao=name, **failure_reason(exc))
+            return          # sem resposta do Rust não dá para saber; quem decide é a contagem do op
         error = (slot.view or {}).get("error")
         if slot.phase != Phase.Rust or slot.cache_valid or not error:
             return
-        from app import diag
-        # O detach recupera a fila marcando o que estava em voo como incerto: nada é redigitado.
-        try:
-            await self.detach(name)
-        except Exception as exc:
-            diag.registrar("runtime.rust_failed_fallback", "erro", sessao=name, codigo=str(error)[:60],
-                           etapa="detach", detalhe=type(exc).__name__)
-            raise
-        with slot.guard:
-            slot.rust_refused = slot.binding.generation
-        diag.registrar("runtime.rust_failed_fallback", "erro", sessao=name, codigo=str(error)[:60])
+        await self._hand_to_python(name, "rust_em_erro:" + str(error)[:60])
 
     async def op(self, name, command, operation_id):
+        """Falha do Rust antes de qualquer efeito: 3 tentativas, uma pausa e a última; aí só esta
+        sessão vai para o Python e a mesma operação sai por ele. Falha que pode ter tido efeito não
+        se repete (duplicaria a mensagem): a sessão vai para o Python e o erro sobe."""
         self.loop = asyncio.get_running_loop()
-        if command.get("kind") not in {"snapshot", "ensure_projection"}:
-            await self._settle_rust(name)
+        read_only = command.get("kind") in {"snapshot", "ensure_projection"}
+        failures = 0
+        while True:
+            if not read_only:
+                await self._settle_rust(name)
+            try:
+                return await self._op_once(name, command, operation_id)
+            except Exception as exc:
+                if not getattr(exc, "_hangar_rust", False) or getattr(exc, "code", "") in _ANSWER_CODES:
+                    raise
+                failures += 1
+                from app import diag
+                diag.registrar("runtime.rust_op_failed", "erro", sessao=name, etapa=str(command.get("kind")),
+                               quantidade=failures, **failure_reason(exc))
+                if not (read_only or _safe_to_repeat(exc)):
+                    try:
+                        await self._hand_to_python(name, "falha_com_efeito_possivel", exc)
+                    except Exception:
+                        pass        # o motivo do detach já foi para o diário; o erro original é o que sobe
+                    raise
+                if failures < _RUST_TRIES:
+                    if failures == _RUST_TRIES - 1:
+                        await asyncio.sleep(_RETRY_PAUSE_S)
+                    continue
+                await self._hand_to_python(name, "falhas_seguidas", exc)
+                return await self._op_once(name, command, operation_id)
+
+    async def _op_once(self, name, command, operation_id):
         with self.queue_gate(name) as route:
             if route is None:
                 raise RuntimeError("sessão sem responsável gerenciado")
             slot, phase, descriptor = route
             if phase == Phase.Rust:
-                if command["kind"] not in {"snapshot", "ensure_projection"} and not slot.cache_valid:
-                    raise RuntimeError("estado do runtime indisponível; aguarde a reposição")
-                return await self._rpc(descriptor, command, operation_id)
+                try:
+                    if command["kind"] not in {"snapshot", "ensure_projection"} and not slot.cache_valid:
+                        raise RustCacheInvalid("estado do runtime indisponível; aguarde a reposição")
+                    return await self._rpc(descriptor, command, operation_id)
+                except Exception as exc:
+                    exc._hangar_rust = True     # só falha do caminho Rust entra na contagem
+                    raise
             if self.legacy is None:
                 raise RuntimeError("serviço da reserva indisponível")
             return await self.legacy.op(descriptor, command, operation_id)
@@ -588,40 +672,56 @@ class RuntimeCoordinator:
                     slot.lease.close()
                     slot.lease = None
                     released = True
-                ready = await self._rpc(descriptor, {"kind": "adopt", "descriptor": descriptor, "carry": slot.carry}, uuid.uuid4().hex)
-                if not (ready.get("ready") is True and ready.get("instance") == self.instance
-                        and ready.get("key") == descriptor["key"] and ready.get("generation") == descriptor["generation"]):
-                    raise RuntimeError("readiness não corresponde à vida atual")
+                try:
+                    ready = await self._rpc(descriptor, {"kind": "adopt", "descriptor": descriptor, "carry": slot.carry}, uuid.uuid4().hex)
+                    if not (ready.get("ready") is True and ready.get("instance") == self.instance
+                            and ready.get("key") == descriptor["key"] and ready.get("generation") == descriptor["generation"]):
+                        raise RuntimeError("readiness não corresponde à vida atual")
+                except Exception as exc:
+                    exc._hangar_rust = True     # só falha do Rust conta para passar a sessão ao Python
+                    raise
                 with slot.guard:
                     slot.view = ready["state"]
                     slot.cache_valid = True
                     slot.phase = Phase.Rust
+                    slot.adopt_failures = 0
                 self._signal(slot)
                 return True
             except BaseException as exc:
                 with slot.guard:
                     slot.phase = Phase.RecoveringPython
                 if released:
+                    detach_error = None
                     try:
                         detached = await self._rpc(descriptor, {"kind": "detach"}, uuid.uuid4().hex)
-                    except Exception:
-                        detached = {}
+                    except Exception as err:
+                        detached, detach_error = {}, err
+                        err._hangar_rust = True
                     # Sem confirmação, quem decide é o lock: se o Rust ainda segura a sessão, o
                     # _restore falha ao pegá-lo e o erro sobe; nunca dois donos.
                     if detached.get("detached") is not True:
                         from app import diag
-                        diag.registrar("runtime.detach_unconfirmed", "erro", sessao=name)
+                        diag.registrar("runtime.detach_unconfirmed", "erro", sessao=name,
+                                       **(failure_reason(detach_error) if detach_error else {}))
                 await self._restore(slot)
                 if not isinstance(exc, Exception):
                     raise
-                # Adotar ainda não entregou nada do usuário: a sessão segue no Python, sem erro na tela.
-                with slot.guard:
-                    slot.rust_refused = slot.binding.generation
+                # Adotar ainda não entregou nada do usuário: a sessão segue no Python, sem erro na
+                # tela, e a próxima ação tenta o Rust de novo até a quarta falha.
                 from app import diag
-                # Só a recusa do IPC vai no detalhe: ela é código e frase fixa, nunca conversa.
-                detalhe = str(exc)[:200] if str(exc).startswith("IPC recusou") else ""
-                diag.registrar("runtime.adopt_refused", "erro", sessao=name, codigo=type(exc).__name__,
-                               detalhe=detalhe)
+                if not getattr(exc, "_hangar_rust", False):
+                    # Falhou do lado do Python (preparar a passagem): não é defeito do Rust e não conta.
+                    diag.registrar("runtime.adopt_failed_python", "erro", sessao=name, **failure_reason(exc))
+                    return False
+                with slot.guard:
+                    slot.adopt_failures += 1
+                    if slot.adopt_failures >= _RUST_TRIES:
+                        slot.rust_refused = slot.binding.generation
+                diag.registrar("runtime.adopt_refused", "erro", sessao=name, quantidade=slot.adopt_failures,
+                               **failure_reason(exc))
+                if slot.rust_refused is not None:
+                    diag.registrar("runtime.parte_para_python", "erro", sessao=name, etapa="adocao_recusada",
+                                   **failure_reason(exc))
                 return False
 
     async def _restore(self, slot):

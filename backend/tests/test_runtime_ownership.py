@@ -143,7 +143,7 @@ def test_late_ready_rejected(tmp_path):
     asyncio.run(flow())
 
 
-def test_refused_adopt_stays_in_python_for_this_generation(tmp_path):
+def test_refused_adopt_goes_to_python_only_after_the_fourth_failure(tmp_path):
     async def flow():
         legacy, gateway = Legacy(), Gateway()
         calls = []
@@ -156,10 +156,15 @@ def test_refused_adopt_stays_in_python_for_this_generation(tmp_path):
         gateway.op = refuse
         coordinator = RuntimeCoordinator(gateway, legacy, peek)
         coordinator.register(binding(tmp_path))
+        for _ in range(3):
+            assert await coordinator.adopt("session") is False
+            # Cada recusa devolve a sessão ao Python, mas a próxima ação ainda tenta o Rust.
+            assert coordinator.legacy_allowed("key", 1)
+            assert coordinator.slot("session").rust_refused is None
         assert await coordinator.adopt("session") is False
-        assert legacy.events == ["quiesce", "reconnect"]
-        assert coordinator.legacy_allowed("key", 1)
         assert coordinator.slot("session").rust_refused == 1
+        assert calls.count("adopt") == 4
+        assert legacy.events == ["quiesce", "reconnect"] * 4
         coordinator.close_python_leases()
     asyncio.run(flow())
 
@@ -263,9 +268,25 @@ def test_rust_stuck_in_error_hands_session_back_to_python(tmp_path):
     asyncio.run(flow())
 
 
-def test_rust_without_answer_keeps_the_error(tmp_path):
+def _python_ops(legacy):
+    sent = []
+    async def legacy_op(target, command, operation_id):
+        sent.append(command["kind"])
+        return {"accepted": True, "via": "python"}
+    legacy.op = legacy_op
+    return sent
+
+
+@pytest.fixture
+def no_pause(monkeypatch):
+    from app import runtime_coordinator
+    monkeypatch.setattr(runtime_coordinator, "_RETRY_PAUSE_S", 0)
+
+
+def test_lost_state_without_answer_goes_to_python_after_four_tries(tmp_path, no_pause):
     async def flow():
         legacy, gateway = Legacy(), Gateway()
+        sent = _python_ops(legacy)
         original = gateway.op
         async def silent(target, command, operation_id, clock):
             if command["kind"] == "snapshot":
@@ -276,8 +297,108 @@ def test_rust_without_answer_keeps_the_error(tmp_path):
         slot = coordinator.register(binding(tmp_path))
         await coordinator.adopt("session")
         slot.cache_valid = False
-        with pytest.raises(RuntimeError, match="aguarde a reposição"):
-            await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1")
-        assert legacy.events == ["quiesce"]
+        result = await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1")
+        assert result["via"] == "python"
+        assert sent == ["submit"]
+        assert slot.rust_refused == 1
+        coordinator.close_python_leases()
+    asyncio.run(flow())
+
+
+def _refusing(gateway, code, fail_times):
+    from app.rust_server import RustOpError
+    original, attempts = gateway.op, []
+    async def op(target, command, operation_id, clock):
+        if command["kind"] == "submit":
+            attempts.append(operation_id)
+            if len(attempts) <= fail_times:
+                raise RustOpError(f"IPC recusou a operação (503: {code})", 503, code)
+        return await original(target, command, operation_id, clock)
+    gateway.op = op
+    return attempts
+
+
+def test_pre_effect_refusal_is_retried_and_stays_in_rust(tmp_path, no_pause):
+    async def flow():
+        legacy, gateway = Legacy(), Gateway()
+        sent = _python_ops(legacy)
+        attempts = _refusing(gateway, "cano_connect", fail_times=3)
+        coordinator = RuntimeCoordinator(gateway, legacy, peek)
+        slot = coordinator.register(binding(tmp_path))
+        await coordinator.adopt("session")
+        assert await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1") == {"accepted": True}
+        assert attempts == ["op-1"] * 4
+        assert sent == [] and slot.rust_refused is None
         gateway.lease.close()
+    asyncio.run(flow())
+
+
+def test_fourth_pre_effect_refusal_sends_through_python(tmp_path, no_pause):
+    async def flow():
+        legacy, gateway = Legacy(), Gateway()
+        sent = _python_ops(legacy)
+        attempts = _refusing(gateway, "cano_connect", fail_times=99)
+        coordinator = RuntimeCoordinator(gateway, legacy, peek)
+        slot = coordinator.register(binding(tmp_path))
+        await coordinator.adopt("session")
+        result = await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1")
+        assert len(attempts) == 4
+        assert result["via"] == "python" and sent == ["submit"]
+        assert slot.rust_refused == 1
+        # Depois de passar para o Python, a sessão não volta a tentar o Rust nesta vida do backend.
+        await coordinator.op("session", {"kind": "submit", "text": "de novo"}, "op-2")
+        assert len(attempts) == 4 and sent == ["submit", "submit"]
+        coordinator.close_python_leases()
+    asyncio.run(flow())
+
+
+def test_failure_after_possible_effect_is_never_repeated(tmp_path, no_pause):
+    async def flow():
+        from app.rust_server import RustOpError
+        legacy, gateway = Legacy(), Gateway()
+        sent = _python_ops(legacy)
+        attempts = _refusing(gateway, "queue_io", fail_times=99)
+        coordinator = RuntimeCoordinator(gateway, legacy, peek)
+        slot = coordinator.register(binding(tmp_path))
+        await coordinator.adopt("session")
+        with pytest.raises(RustOpError):
+            await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1")
+        # Uma tentativa só, nada reenviado pelo Python; a sessão já passou para ele.
+        assert attempts == ["op-1"] and sent == []
+        assert slot.rust_refused == 1 and coordinator.legacy_allowed("key", 1)
+        coordinator.close_python_leases()
+    asyncio.run(flow())
+
+
+def test_normal_answer_from_rust_is_not_a_failure(tmp_path, no_pause):
+    async def flow():
+        from app.rust_server import RustOpError
+        legacy, gateway = Legacy(), Gateway()
+        sent = _python_ops(legacy)
+        attempts = _refusing(gateway, "claude_command", fail_times=99)
+        coordinator = RuntimeCoordinator(gateway, legacy, peek)
+        slot = coordinator.register(binding(tmp_path))
+        await coordinator.adopt("session")
+        # Ex.: "nenhuma permissão pendente" de um botão velho: sobe como erro, a sessão fica no Rust.
+        with pytest.raises(RustOpError):
+            await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1")
+        assert attempts == ["op-1"] and sent == []
+        assert slot.rust_refused is None and not coordinator.legacy_allowed("key", 1)
+        gateway.lease.close()
+    asyncio.run(flow())
+
+
+def test_python_side_handoff_failure_does_not_count_against_rust(tmp_path):
+    async def flow():
+        legacy, gateway = Legacy(), Gateway()
+        async def broken_quiesce(target):
+            legacy.events.append("quiesce")
+            raise ValueError("synthetic Python")
+        legacy.quiesce = broken_quiesce
+        coordinator = RuntimeCoordinator(gateway, legacy, peek)
+        slot = coordinator.register(binding(tmp_path))
+        for _ in range(5):
+            assert await coordinator.adopt("session") is False
+        assert slot.adopt_failures == 0 and slot.rust_refused is None
+        coordinator.close_python_leases()
     asyncio.run(flow())

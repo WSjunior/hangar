@@ -123,6 +123,14 @@ def _runtime_ready(proc, instance: str) -> dict:
     return ready
 
 
+class RustOpError(RuntimeError):
+    """Recusa do Rust com status HTTP e código da falha, para quem decide repetir ou trocar de dono."""
+
+    def __init__(self, text: str, status: int, code: str = ""):
+        super().__init__(text)
+        self.status, self.code = status, code
+
+
 class RuntimeTransport:
     """Um transporte privado por filho, sem retry de operação mutável."""
 
@@ -172,17 +180,18 @@ class RuntimeTransport:
                 response = connection.getresponse()
                 if response.status != 200:
                     # O motivo do Rust (código e frase fixa, sem conversa) é o que diz onde falhou.
-                    motivo = ""
+                    motivo, code = "", ""
                     try:
                         erro = json.loads(response.read(4096) or b"{}")
                         if isinstance(erro, dict):
-                            motivo = f": {erro.get('error_code', '')} {erro.get('message', '')}".rstrip()
+                            code = str(erro.get("error_code") or "")
+                            motivo = f": {code} {erro.get('message', '')}".rstrip()
                     except (ValueError, OSError, http.client.HTTPException):
                         pass
                     if response.status == 409:
                         motivo = ": protocolo ou instância do Rust diferente"
-                    raise RuntimeError(f"IPC recusou a operação ({response.status}{motivo}); "
-                                       "não houve troca para outro transporte")
+                    raise RustOpError(f"IPC recusou a operação ({response.status}{motivo}); "
+                                      "não houve troca para outro transporte", response.status, code)
                 raw = response.read((32 << 20) + 1025)
                 if len(raw) > (32 << 20) + 1024:
                     raise ValueError("resposta privada acima do teto")
