@@ -39,6 +39,33 @@ fn new_sum(_: &Path) -> Sum { Sum::default() }
 fn no_areas(_: &AreaEntries) -> Vec<UsoLinha> { vec![] }
 
 #[test]
+fn existing_index_orders_files_by_path_after_insertion_and_update() {
+    for reverse in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.jsonl");
+        let b = dir.path().join("b.jsonl");
+        std::fs::write(&a, "2\n").unwrap();
+        std::fs::write(&b, "5\n").unwrap();
+        let index = Index::open(&dir.path().join("index")).unwrap();
+        for path in if reverse { [&b, &a] } else { [&a, &b] } {
+            index.try_sync_file(path, &new_areas, "v1", "scope", "sig", &area_rows).unwrap();
+        }
+        let assert_order = || {
+            assert_eq!(index.read_costs(Some("scope"), None, None).unwrap().iter().map(|row| row.input).collect::<Vec<_>>(), [2, 5]);
+            let usage = index.read_usage("scope", None).unwrap();
+            assert_eq!(usage.iter().map(|row| row.input).collect::<Vec<_>>(), [14, 2, 14, 5]);
+            let values = index.fold_usage("scope", None, Vec::new(), &mut |values, row| values.push(row.input)).unwrap();
+            assert_eq!(values, [14, 2, 14, 5]);
+        };
+        assert_order();
+        std::fs::write(&a, "3\n").unwrap();
+        index.try_sync_file(&a, &new_areas, "v1", "scope", "sig", &area_rows).unwrap();
+        assert_eq!(index.read_costs(Some("scope"), None, None).unwrap().iter().map(|row| row.input).collect::<Vec<_>>(), [3, 5]);
+        assert_eq!(index.read_usage("scope", None).unwrap().iter().map(|row| row.input).collect::<Vec<_>>(), [14, 3, 14, 5]);
+    }
+}
+
+#[test]
 fn default_directory_uses_synthetic_local_cache_without_changing_environment() {
     use hangar_server::costs::index::default_dir_from;
     let d = tempfile::tempdir().unwrap();
@@ -592,7 +619,7 @@ fn bounded_scan_inside_its_single_worker_pool_finishes_multiple_windows() {
     let scan = std::thread::spawn(move || {
         let d = tempfile::tempdir().unwrap();
         let files = (1..=33).map(|n| {
-            let path = d.path().join(format!("{n}.jsonl"));
+            let path = d.path().join(format!("{n:02}.jsonl"));
             std::fs::write(&path, format!("{n}\n")).unwrap();
             path
         }).collect::<Vec<_>>();
@@ -891,7 +918,7 @@ fn slow_first_file_keeps_later_reads_bounded_and_preserves_order() {
     use std::time::{Duration, Instant};
     let d = tempfile::tempdir().unwrap();
     let files = (0..128).map(|n| {
-        let path = d.path().join(format!("{n}.jsonl"));
+        let path = d.path().join(format!("{n:03}.jsonl"));
         std::fs::write(&path, format!("{}\n", n + 1)).unwrap();
         path
     }).collect::<Vec<_>>();

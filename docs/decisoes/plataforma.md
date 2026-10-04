@@ -1119,6 +1119,11 @@ do binário, protocolo incompatível e `CP_RUST_SERVER=0` conservam a reserva ge
 pública. A recuperação do índice corrompido fecha os recursos da tentativa antes de reconstruir
 e repetir, sem copiar o índice Python.
 
+A validação entre máquinas em 03/10/2026 revelou diferenças no último bit das somas quando
+a ordem dos arquivos variava. Python e Rust agora ordenam os caminhos na listagem e nas
+consultas do índice, preservando a sequência interna de cada arquivo. Ordenar a consulta
+também corrige índices existentes, cuja ordem de inserção muda após atualizar um arquivo.
+
 Cotas permanecem no Python: dependem das APIs dos provedores e compartilham cache/espera de
 429 com criação de sessão, loop e MCP. Duplicar isso no Rust criaria duas consultas e duas
 políticas de espera. `stats` continua no fluxo de chat Python; custo por papel da orquestração

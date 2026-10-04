@@ -426,5 +426,7 @@ pub fn list_files(root: &Path, matches: impl Fn(&str) -> bool) -> Vec<PathBuf> {
             else if matches(&entry.file_name().to_string_lossy()) { output.push(entry.path()); }
         }
     }
+    // O caminho textual acompanha a ordem usada na leitura do índice.
+    output.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
     output
 }

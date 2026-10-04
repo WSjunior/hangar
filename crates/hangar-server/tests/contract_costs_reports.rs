@@ -67,6 +67,10 @@ fn cost_reports_match_python() {
         });
         let want = rebase(&golden["costs"][period], "__BASE__", &base);
         assert_close(&serde_json::to_value(&got).unwrap(), &want, period);
+        if period == "all" {
+            assert_eq!(got.totals.cost_output.to_bits(), want["totals"]["cost_output"].as_f64().unwrap().to_bits());
+            assert_eq!(got.by_provider[1].cost_cache_write.to_bits(), want["by_provider"][1]["cost_cache_write"].as_f64().unwrap().to_bits());
+        }
     }
 }
 

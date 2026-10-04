@@ -476,7 +476,7 @@ impl Index {
     fn read_costs_inner(&self, scope: Option<&str>, since: Option<&str>, file_id: Option<i64>) -> Result<Vec<UsageRow>, IndexError> {
         let conn = self.connect()?;
         let (filter, values) = filters(scope, since, file_id);
-        let mut stmt = conn.prepare(&format!("SELECT {COST_FIELDS} FROM custo WHERE {filter} ORDER BY rowid"))?;
+        let mut stmt = conn.prepare(&format!("SELECT {COST_FIELDS} FROM custo WHERE {filter} ORDER BY (SELECT path FROM files WHERE id=custo.file_id), rowid"))?;
         let rows = stmt.query_map(rusqlite::params_from_iter(values), |r| {
             let text: String = r.get(0)?;
             let ts = LocalTs::from_iso(&text).ok_or(rusqlite::Error::InvalidQuery)?;
@@ -524,7 +524,7 @@ impl Index {
         let count = usize::try_from(count).map_err(|_| rusqlite::Error::InvalidQuery)?;
         output.reserve_exact(count);
         {
-            let mut stmt = tx.prepare(&format!("SELECT {USAGE_FIELDS} FROM uso WHERE {filter} ORDER BY rowid"))?;
+            let mut stmt = tx.prepare(&format!("SELECT {USAGE_FIELDS} FROM uso WHERE {filter} ORDER BY (SELECT path FROM files WHERE id=uso.file_id), rowid"))?;
             let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), usage_row)?;
             for row in rows { output.push(decorate(row?)); }
         }
@@ -546,7 +546,7 @@ impl Index {
     fn each_usage(&self, scope: &str, since: Option<&str>, visit: &mut dyn FnMut(UsoLinha)) -> Result<(), IndexError> {
         let conn = self.connect()?;
         let (filter, values) = filters(Some(scope), since, None);
-        let mut stmt = conn.prepare(&format!("SELECT {USAGE_FIELDS} FROM uso WHERE {filter} ORDER BY rowid"))?;
+        let mut stmt = conn.prepare(&format!("SELECT {USAGE_FIELDS} FROM uso WHERE {filter} ORDER BY (SELECT path FROM files WHERE id=uso.file_id), rowid"))?;
         for row in stmt.query_map(rusqlite::params_from_iter(values), usage_row)? { visit(row?); }
         Ok(())
     }

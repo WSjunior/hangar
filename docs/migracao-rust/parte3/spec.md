@@ -81,6 +81,9 @@ A posse de cada rollout do Codex é calculada no Rust com a regra de
 - Mesmo desenho do `costs_cache`: tabela `files` (caminho, escopo, versão, dev/ino, tamanho,
   mtime, offset, últimos 64 bytes, estado da leitura) e tabelas `custo` e `uso` com as mesmas
   colunas. Diferença: o estado da leitura é `serde_json` comprimido com `flate2`, não pickle.
+- Listagem e leitura do índice seguem caminho de arquivo ordenado em Python e Rust, com a
+  sequência interna de cada arquivo preservada. A consulta aplica essa ordem também a índices
+  existentes, sem depender da ordem de inserção ou atualização das linhas no SQLite.
 - Mesmas regras de retomada: lê só o que cresceu; tamanho menor, outro inode, versão diferente
   ou os 64 bytes antes do offset mudados → relê do zero; linha sem `\n` no fim entra no
   resultado mas não no estado salvo; arquivo que sumiu sai; falha de leitura de um arquivo vira
