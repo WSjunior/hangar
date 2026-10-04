@@ -151,6 +151,105 @@ def test_send_keys_literal_uses_dashdash():
     assert run.call_args[0][0] == ["tmux", "send-keys", "-t", "=cc:", "-l", "--", "echo hi"]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="cliente de controle somente de leitura do tmux POSIX")
+@pytest.mark.parametrize("key,literal", [("Texto de teste", True), ("-c", True), ("Enter", False), ("C-u", False)])
+def test_send_keys_recovers_from_an_inferred_readonly_client(key, literal):
+    refused = subprocess.CompletedProcess([], 1, stdout="", stderr="client is read-only\n")
+    accepted = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+    with patch.object(tmux, "_pane_target", return_value="=cc:"), \
+         patch.object(tmux, "RUN", side_effect=[refused, accepted]) as run:
+        assert tmux.send_keys("cc", key, literal=literal) is True
+    original, retry = [call.args[0] for call in run.call_args_list]
+    assert retry == [*original[:2], "-c", "", *original[2:]]
+
+
+@pytest.mark.parametrize("stderr", ["can't find pane\n", "permission denied\n", "invalid option\n"])
+def test_send_keys_does_not_repeat_other_failures(stderr):
+    with patch.object(tmux, "_pane_target", return_value="=cc:"), \
+         patch.object(tmux, "RUN", return_value=subprocess.CompletedProcess([], 1, "", stderr)) as run:
+        assert tmux.send_keys("cc", "Texto de teste", literal=True) is False
+    assert run.call_count == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="recuperação do cliente inferido do tmux POSIX")
+def test_readonly_client_recovery_stops_after_one_retry():
+    refused = subprocess.CompletedProcess([], 1, stdout="", stderr="client is read-only\n")
+    with patch.object(tmux, "_pane_target", return_value="=cc:"), \
+         patch.object(tmux, "RUN", return_value=refused) as run:
+        assert tmux.send_keys("cc", "Texto de teste", literal=True) is False
+    assert run.call_count == 2
+
+
+def test_explicit_readonly_client_is_not_overridden():
+    refused = subprocess.CompletedProcess([], 1, stdout="", stderr="client is read-only\n")
+    with patch.object(tmux, "RUN", return_value=refused) as run:
+        result = tmux._run(["tmux", "send-keys", "-c", "observer", "-t", "%1", "Enter"])
+    assert result.returncode == 1 and run.call_count == 1
+
+
+def test_windows_does_not_use_the_posix_readonly_client_retry():
+    refused = subprocess.CompletedProcess([], 1, stdout="", stderr="client is read-only\n")
+    with patch.object(tmux, "os", SimpleNamespace(name="nt")), \
+         patch.object(tmux, "RUN", return_value=refused) as run:
+        result = tmux._run(["tmux", "send-keys", "-t", "%1", "Enter"])
+    assert result.returncode == 1 and run.call_count == 1
+
+
+@pytest.mark.skipif(os.name != "posix" or not shutil.which("tmux"), reason="exige tmux POSIX real")
+def test_send_keys_reaches_real_pane_with_readonly_observer(monkeypatch):
+    socket = novo_socket()
+    command = ["tmux", "-L", socket]
+    env = {key: value for key, value in os.environ.items() if key not in {"TMUX", "TMUX_PANE"}}
+    observer = None
+
+    def run(args, **kwargs):
+        return subprocess.run([args[0], "-L", socket, *args[1:]], env=env, **kwargs)
+
+    try:
+        subprocess.run([*command, "-f", "/dev/null", "new-session", "-d", "-s", "send-test", "cat"],
+                       env=env, check=True, capture_output=True)
+        usage = subprocess.run([*command, "list-commands"], env=env, text=True,
+                               check=True, capture_output=True).stdout
+        if not any(line.startswith("send-keys ") and "-c target-client" in line for line in usage.splitlines()):
+            pytest.skip("este tmux não infere um cliente para send-keys")
+        observer = subprocess.Popen([*command, "-C", "attach-session", "-t", "send-test",
+                                     "-f", "read-only,ignore-size,no-output"], env=env,
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        deadline = time.monotonic() + 3
+        while True:
+            clients = subprocess.run([*command, "list-clients", "-F", "#{client_flags}"], env=env,
+                                     capture_output=True, text=True, check=True).stdout
+            if "read-only" in clients:
+                break
+            assert observer.poll() is None, "o observador saiu antes da reprodução"
+            assert time.monotonic() < deadline, "o observador não se anexou ao servidor de teste"
+            time.sleep(0.02)
+        baseline = run(["tmux", "send-keys", "-t", "=send-test:", "-l", "--", "BASELINE"],
+                       capture_output=True, text=True)
+        if baseline.returncode == 0:
+            pytest.skip("este tmux não recusa envios por causa do observador somente de leitura")
+        assert baseline.returncode == 1 and baseline.stderr.strip() == "client is read-only"
+        monkeypatch.setattr(tmux, "RUN", run)
+        monkeypatch.setattr(tmux, "_pane_target", lambda _: "=send-test:")
+        assert tmux.send_keys("send-test", "ENTREGA_REAL", literal=True) is True
+        assert tmux.send_keys("send-test", "Enter") is True
+        deadline = time.monotonic() + 3
+        while True:
+            pane = run(["tmux", "capture-pane", "-p", "-t", "=send-test:"],
+                       capture_output=True, text=True).stdout
+            if pane.splitlines().count("ENTREGA_REAL") >= 2:
+                break
+            assert time.monotonic() < deadline, "o cat não recebeu a linha submetida"
+            time.sleep(0.02)
+        assert "BASELINE" not in pane
+        assert "read-only" in run(["tmux", "list-clients", "-F", "#{client_flags}"],
+                                  capture_output=True, text=True).stdout
+    finally:
+        matar_servidor(socket)
+        if observer is not None:
+            observer.communicate(timeout=3)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows usa o formato de evento de teclado para Esc")
 def test_send_keys_named_key():
     with patch.object(tmux, "RUN", return_value=MagicMock(returncode=0)) as run:

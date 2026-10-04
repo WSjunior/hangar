@@ -162,6 +162,17 @@ def _run(args: list[str], input: bytes | None = None) -> subprocess.CompletedPro
         else:
             cp = RUN(args, capture_output=True, text=True, encoding="utf-8", errors="replace",
                      timeout=5)
+        if (os.name != "nt" and input is None and args[:2] == ["tmux", "send-keys"]
+                and cp.returncode == 1 and isinstance(cp.stderr, str)
+                and cp.stderr.strip() == "client is read-only"):
+            options = args[2:args.index("--")] if "--" in args else args[2:]
+            if "-c" not in options:
+                # A recusa acontece antes de qualquer tecla. Cliente vazio evita herdar o
+                # observador somente de leitura; o pane e a proteção do observador permanecem.
+                diag.registrar("mux.readonly_client", "aviso", comando="send-keys", retorno=1)
+                retry_args = [*args[:2], "-c", "", *args[2:]]
+                cp = RUN(retry_args, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                         timeout=5)
         return cp
     except (subprocess.TimeoutExpired, OSError) as exc:
         failure = exc

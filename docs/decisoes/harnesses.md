@@ -100,6 +100,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   é por AUSÊNCIA de long-poll vivo; entrega só vale com prova (rascunho confirmado, Enter aceito,
   composer vazio). `classic.*` não chega a plugin de `--plugin-dir`, `$` não atravessa `import`, e
   é um módulo por plugin. Meça no SSE, não em linha de log.
+- **Observador tmux somente de leitura não pode bloquear o envio ao pane.** Após a recusa exata
+  `client is read-only`, antes de qualquer tecla, `send-keys` tenta uma vez com cliente vazio,
+  mantendo o pane de destino. Cliente explícito, outras falhas e psmux não entram nessa recuperação.
+  Ver [cliente somente de leitura](#cliente-tmux-somente-de-leitura-não-bloqueia-envios-ao-pane).
 - **Pedido de permissão só fica com o plugin com alguém no app E ninguém no terminal**: `tool.check`
   roda antes do diálogo, e segurar esconde o pedido de quem olha o terminal. Na dúvida (tmux mudo,
   Windows), não segura.
@@ -228,6 +232,31 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   Na captura stdio 0.159.3, manter `tool_output_token_limit` da sessão conservou 144.000
   caracteres após reinício. Essa captura simulada não comprova interface, modelo real ou
   restauração física. Ver [transferência em validação](#transferência-claude--codex-captura-nativa-em-validação).
+
+## Cliente tmux somente de leitura não bloqueia envios ao pane
+
+Medido em 04/10/2026, Linux com tmux 3.7c. Envios ao Claude pelo celular falharam repetidamente
+com `client is read-only`; a rota os apresentou como envio incompleto, e as teclas de limpeza
+do composer também foram recusadas. Havia um observador de controle anexado com as flags
+`read-only,ignore-size,no-output`.
+
+O `-t` escolhe o pane, mas `send-keys` também infere um cliente. Quando o cliente escolhido é o
+observador, o tmux recusa o comando antes de enviar qualquer tecla, como confirma o
+[código do tmux 3.7c](https://github.com/tmux/tmux/blob/3.7c/cmd-send-keys.c#L159).
+Essa recusa não significa que o texto foi digitado pela metade.
+
+A recuperação em `tmux._run` se limita ao código 1 e à mensagem exata dessa recusa. Repete o
+comando uma vez com `-c ""`, conservando alvo e teclas. O cliente vazio não resolve para um
+cliente anexado, conforme a [resolução de clientes do tmux](https://github.com/tmux/tmux/blob/3.7c/cmd-find.c),
+e a proteção do observador permanece. A recusa fica registrada como `mux.readonly_client` no
+diário, sem texto enviado. Não há repetição para outras falhas, cliente explícito ou Windows.
+O caminho de sucesso continua com uma chamada e não exige uma sondagem de versão.
+
+Reprodução em servidor tmux isolado: com apenas o observador somente de leitura anexado, o
+comando original voltou com a mesma recusa. Após a correção, texto e Enter chegaram a um
+processo `cat`, que devolveu a linha submetida. O observador continuou somente de leitura,
+e o servidor de teste foi encerrado. Os testes também cobrem retorno de erro após a única
+tentativa de recuperação, envio literal de `-c`, cliente explícito e isolamento do psmux.
 
 ## Transferência Claude → Codex: captura nativa em validação
 
