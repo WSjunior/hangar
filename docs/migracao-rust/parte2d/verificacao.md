@@ -176,8 +176,106 @@ que não se recupera quando o vínculo volta. As regressões combinadas estão e
 Os checks verdes acima não cobriam essas quatro combinações; publicação bloqueada até corrigi-las
 e aprovar a releitura independente.
 
+## Releitura dos quatro consertos e correções seguintes
+
+A releitura independente de `1f28144b` aprovou os quatro consertos: cada teste novo falhou com o
+trecho revertido numa cópia. Ela achou um bloqueio permanente novo: a trava de escrita nunca saía
+depois de o transcript confirmar a entrada incerta, e a fila parava. `09829f55` passa a trava
+para a próxima incerta da conversa ou a retira, nos dois lados. Também aposenta o registro em
+espera que volta com outra chave, só recolhe o líder do comando depois do grupo, avisa
+`command_tree_stuck` sem soltar a posse e alinha `/clear` com argumentos. Uma segunda releitura
+achou a lacuna da segunda conversa: incerta depois de `/clear` ficava sem trava. `7ddb27dd`
+barra a escrita enquanto houver incerta na conversa pedida, nos dois lados.
+
+## Testes reais com Claude Haiku
+
+Ambiente: backend desta branch com `HOME` temporário, portas 18765/18766/18768, `CP_AUTH_TOKEN`
+próprio e tmux `-L hangar-2d-real` via embrulho no `PATH`. O embrulho do `claude` fixava
+`--model claude-haiku-4-5` e a conta; todas as sessões mostraram "Haiku 4.5" na linha de status.
+A conta 200-3 estava sem `refreshToken` ("Login expired"); por decisão de `Migracao-Rust` os
+casos com resposta usaram a 02-200. Entregas contadas no transcript cru (mensagem do usuário ou
+`queued_command` da fila interna da TUI).
+
+| Caso | Resultado | Evidência |
+|---|---|---|
+| Abrir sessão com terminal | ok | `POST /api/sessions`; Rust dono (sem `rust_op_failed`) |
+| Mensagem simples | ok, 1 entrega | `ok tres`: contagem 1; caminho do plugin (`Prompt from the hangar plugin`) |
+| Várias linhas, Unicode, contrabarras | ok, 1 entrega | três linhas, `ção 🚀` e `\\` intactos; contagem 1 |
+| Mensagem com o Claude ocupado | ok, 1 entrega | entrou pela fila interna da TUI (`queue-operation` + `queued_command`); fila do Hangar vazia depois |
+| Responder pergunta (`AskUserQuestion`) | ok após `9d2e2c10` | antes: `erro_opcao_nao_convergiu`; depois: "Qual cor você prefere? → Verde" |
+| Esc | ok | "Interrupted · What should Claude do instead?"; estado ocioso |
+| `/clear` | ok após `fcca5525` | antes: entrega incerta e sessão ao Python; depois: conversa nova e mensagem seguinte com 1 entrega |
+| Restart do backend com mensagem na fila | ok, nada redigitado | com o seletor aberto a entrada ficou `delivered:false` antes e depois do restart; após a resposta, 1 entrega |
+| Queda do `hangar-server` | ok após `c7046d0f`/`97cc3f9c` | três `kill -9` em 60 s: "o Python assume a porta 18765"; mensagem da fila entregue 1 vez (com SSE aberto); mensagem nova 1 vez |
+| Falha antes de efeito, só uma sessão | ok | ver abaixo |
+
+Falha antes de efeito, com `t2d-b` e `t2d-c` no Rust, seletor aberto na `t2d-c` e SIGTERM no
+backend: o Python recusa os fatos durante o encerramento. Diário só da `t2d-c`:
+`runtime.rust_op_failed` 1, 2 e 3 em 07:00:42.713–.723, pausa, 4 em 07:00:44.733 e
+`runtime.parte_para_python` em 07:00:44.767, código `RustOpError`, motivo
+`IPC recusou a operação (503: terminal_facts …)`. Log do Rust: `política do Python falhou …
+code=policy_transport`, `entrada terminal entrou em erro … code=terminal_facts` e
+`runtime recusou operação kind=drain code=terminal_facts`. Nada foi digitado no seletor.
+
+Defeitos que só os testes reais mostraram, cada um com teste que falha sem o conserto:
+
+- `c3f7705c`: o Claude 2.1.289 desenha uma sugestão esmaecida no composer vazio; o Rust adiava
+  toda entrada com `composer_busy` e a prova de submissão nunca via o composer vazio.
+- `9d2e2c10`: `select` em pergunta `ask:` ia ao plugin e voltava recusado; agora cai no teclado
+  da TUI. Pedido de permissão continua recusado.
+- `fcca5525`: a prova de submissão do `/clear` exigia o vínculo antigo.
+- `b78bcd26`: fechar sessão de terminal dava 500 ao revalidar o vínculo do pane já morto.
+- `09b330b5` e `524447f9`: criar e fechar sessão com nome reaproveitado dava 500. A causa era o
+  registro da vida antiga, esperando identidade depois de restart.
+- `c7046d0f` e `97cc3f9c`: a morte do `hangar-server` derrubava o backend Python inteiro, porque
+  a recuperação de um registro morto lançava exceção. Agora cada sessão recupera sozinha, com
+  `runtime.recover_failed` no diário. Registros em espera não são recuperados. O erro de vínculo
+  diz quais campos mudaram.
+
+Incidentes do teste: a subida do backend isolado matou o cano real do `Migracao-Rust`, porque
+`matar_orfaos` varre todo o `/proc` do usuário. `bb80cf31` grava `HANGAR_CANO_OWNER` e colhe só os
+canos do próprio backend; o lançador de teste também desligava a varredura. Com `CP_PROJECTS_DIR`
+na pasta da conta, a fila e os demais arquivos do Hangar saíam de `projects_dir.parent`, que na
+conta é link para o `~/.claude` real. Foram apagados só os seis arquivos do teste, conferidos por
+nome, horário e chave; depois o `CP_PROJECTS_DIR` passou a ser um link dentro do `HOME` temporário.
+
+## Verificação final
+
+A revisão independente dos consertos vindos dos testes reais (`bb80cf31`, `c3f7705c..97cc3f9c`)
+reprovou três pontos, corrigidos em `80cd98d9` e `3ce0693b` com testes que falham sem o conserto:
+sessão cuja recuperação falhava ficava presa até o restart (o registro agora é aposentado e o
+próximo `prepare_session` o refaz pelo estado durável); `select` em pergunta `ask:` chegava ao
+teclado sem a trava do painel aberto (agora com a trava e `require_cursor`); fechar sessão com
+vínculo já mudado antes do kill dava 500. A leitura que prova o `/clear` continua conferindo o
+pane. O teste de runtime que fixava `/clear` como incerto passou a exigir aceito (`7457941a`).
+Esses fluxos foram repetidos no backend isolado depois do conserto: escolha "Dois" aceita,
+`/clear` aceito, queda do Rust sem `recover_failed` e entrega seguinte com 1, fechar com `ok`.
+
+Sobre `3ce0693b`, uma única execução, sem somar rodadas anteriores:
+
+- `cargo test --locked --workspace` em `crates/`: **347 passaram, zero falhou, três ignorados**
+  (soma dos 36 blocos `test result`).
+- `cargo check --locked --target x86_64-pc-windows-gnu -p hangar-server --tests`: passou.
+- pytest em **47 arquivos** ligados à 2D e aos consertos, uma invocação: **1506 passaram, zero
+  falhou, um caso Windows pulado**.
+- `git diff --check`: passou.
+
+Uma rodada intermediária do workspace falhou em um caso: o teste antigo do `/clear`, ainda com a
+expectativa de incerto. Isolado, ele falhou 4 vezes seguidas com `Unknown`; depois de restaurar
+os arquivos instrumentados, passou 5 de 5 e na suíte inteira. A causa daquelas 4 falhas não foi
+comprovada.
+
+`test_runtime_final_fixes.py` entrou no `server.yml` (caminho e etapa de pytest nos três sistemas).
+Nenhuma sessão real, serviço ou instalador foi operado depois dos dois incidentes registrados acima.
+Observação fora da 2D: o backend não apaga `cc-socks/<pid>.sock` ao sair; os 15 do teste foram
+removidos à mão, conferindo que nenhum PID estava vivo.
+
 ## Ainda pendente
 
-- Task 4: revisão final, push e CI nas três plataformas sobre v2/protocolo 10.
-- Uso real do Claude e Windows instalado: somente com o dono, conforme o pedido.
+- Reserva Python sem aparelho conectado não drena a fila sozinha; com o Rust de pé o timer cobre.
+  Era assim antes da 2D (`api.py`, comentário do gatilho do drain).
+- Entrada nova enviada com a sessão pronta passa na frente de entrada antiga parada na fila.
+- Registro durável de sessão fechada volta como "esperando identidade" a cada restart.
+- O backend não apaga o próprio socket em `cc-socks` ao sair.
+- Uso real com o dono e Windows instalado; captura `-e` do composer fica só no POSIX (psmux sem prova).
 - Porte do envio/controle Codex com terminal: permanece Python/RPC nesta árvore; fora da 2D.

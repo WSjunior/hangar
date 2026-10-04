@@ -152,7 +152,7 @@ Em `backend/`: pytest de todos os arquivos tocados num comando. Esperado tudo ve
 As verificações anteriores passaram no contrato 9. A instrução `c195a6a4` exige juntar a fila
 v2, conservar as provas da 2D, usar protocolo 10 e repetir os checks afetados antes da publicação.
 
-- [ ] **Step 2: Revisão independente final da branch**
+- [x] **Step 2: Revisão independente final da branch**
 
 Revisor novo confere `eae31286..HEAD`, spec/plano/provas, segurança e paridade; corrigir problemas
 relevantes com testes de regressão e repetir checks afetados.
