@@ -8,7 +8,11 @@
 **Objetivo:** com o Rust de pé, o que migrou é só dele do nascimento ao fim; falha vira erro com
 código e motivo; o Python atende o migrado só quando é dono da porta inteira.
 **Desenho:** `desenho.md`. **Inventário:** `inventario.md`.
-**Base:** `origin/hangar-server-parte1` em `665fac8e`; branch de execução a criar a partir dela.
+**Base:** a execução só começa depois que a `main` for trazida para a `hangar-server-parte1`; a
+branch de execução nasce dessa ponta (que já inclui o PR #43, `cb244ccc`). As linhas citadas foram
+conferidas em `665fac8e`; o PR #43 desloca as de `runtime_coordinator.py` a partir de `:1043`
+(+7) e acrescenta `terminal_life`/`reborn_binding` em `runtime_terminal.py:938-953`. Cada Task
+reconfere as linhas dela na base antes de codar.
 
 ## Restrições globais
 
@@ -158,7 +162,9 @@ arquivo/processo/pane" ou "precisa da CLI" → `control` do Rust): as dez açõe
 (`kill`, `rename`, `para_terminal`, `para_headless`, `parar`, `recarregar`, `restart`,
 `open_terminal`, `open_headless`, `set_permission_mode_sem_terminal`), a transferência Claude →
 Codex (`registry.py:2611-2700`, `conversation_transfer.py:766`), a troca de conta/motor
-(`api.py:2936-2964`) e a troca para sem terminal (`api.py:2770`).
+(`api.py:2936-2964`, sem e com terminal), a troca para sem terminal (`api.py:2770`) e o
+renascimento do terminal dentro de uma troca (PR #43: `terminal_life` guarda a prova da vida antes
+da ação, `reborn_binding` herda a chave da sessão, a fila só esvazia com `session_id` novo).
 
 **Falha sem ela:** `test_rename_keeps_session_in_rust_without_python_client`,
 `test_kill_closes_in_rust_and_stops_cano`, `test_mode_switch_to_terminal_closes_rust_first`,
@@ -167,6 +173,18 @@ Codex (`registry.py:2611-2700`, `conversation_transfer.py:766`), a troca de cont
 `test_switch_to_headless_opens_in_rust`, `test_transfer_source_idle_reads_runtime_view` (hoje
 quebra com `AttributeError` em `.vivo`), `test_transfer_stops_source_without_python_client`,
 `test_shutdown_leaves_canos_alive_and_touches_no_session`, `test_state_stream_picks_source_once`.
+Regressão do PR #43, mantidos e passando pelo caminho novo (`close` → ação → `open` do terminal):
+`test_account_move_reborn_terminal_keeps_key_and_queue`,
+`test_account_move_waits_for_agent_of_reborn_terminal`, `test_pending_terminal_reborn_again_keeps_key`
+(`test_runtime_terminal.py`). Riscos anotados no PR #43, cada um com teste que falha hoje:
+`test_reborn_terminal_with_other_conversation_does_not_inherit_key` (o pane novo roda outra
+conversa — `session_id` diferente do que a troca prometeu: não herda a chave sem conferir; vira
+vínculo novo com a fila da conversa certa), `test_session_proof_survives_tmux_server_gone`
+(`_session_proof` com o servidor tmux morrendo entre o `display-message` e o
+`psutil.Process(...).create_time()`: `NoSuchProcess` vira "sem prova", nunca 500 no `change`),
+`test_respawn_pane_in_same_tmux_session_keeps_key` (a troca recria o agente com `respawn-pane`
+na mesma sessão tmux: a prova da sessão não muda, `reborn_binding` hoje devolve `None` e o
+`change` volta a recusar a chave; a vida tem que ser reconhecida pelo pane/agente novo).
 
 **Código morto que sai:** `Phase.PreparingRust`; `adopt` antigo; `LegacyBridge.quiesce` e o
 `quiesce` do terminal; `_WRITE_WAIT_S`; `finish_wire(settling=...)`; ramos `finishing`/`continuing`
@@ -185,7 +203,7 @@ para "nunca dois donos" no `open`/`close`; `test_runtime_routing.py:92` reescrit
 
 - [ ] **Step 19: Tabela de caminhos e testes acima, vistos falhar**
 - [ ] **Step 20: `change` = barreira → `close` → ação sem cliente → `ensure_open`; ações que precisam da CLI viram `control` do Rust**
-- [ ] **Step 21: Transferência, troca de conta/motor e troca para sem terminal pelo mesmo caminho; `_check_source_idle` pela vista do Rust**
+- [ ] **Step 21: Transferência, troca de conta/motor (sem e com terminal) e troca para sem terminal pelo mesmo caminho; `_check_source_idle` pela vista do Rust; renascimento do terminal herda a chave só com a mesma conversa, `_session_proof` sem exceção solta e `respawn-pane` reconhecido**
 - [ ] **Step 22: `shutdown` sem nada por sessão; `_rebind` pelo novo `change`**
 - [ ] **Step 23: Tirar `carry` dos dois lados com o contrato 15**
 - [ ] **Step 24: Remover todo o código morto listado e os testes de passagem; testes focados; revisar**
@@ -352,7 +370,7 @@ pelo log do Python (pedido do Rust aparece lá só como `/internal/*`).
 - [ ] **Step 52: Restart com fila — mensagem enfileirada antes do `systemctl restart` sai uma vez depois; o mesmo com o cano morto antes da subida (`kill` no cano com a unit parada); nenhum cliente Python aberto; parada sem SIGKILL (verificação manual)**
 - [ ] **Step 53: Queda do Rust — `kill -9` uma vez: a sessão continua no Rust novo, sem Python no meio, e uma mensagem mandada durante a queda sai uma vez; três vezes em 60 s: o Python assume tudo, cada sessão retomada uma vez, nenhuma entrega duplicada (verificação manual)**
 - [ ] **Step 54: Falha forçada de operação — trava de escrita no estado da fila da sessão (`chmod`): o envio volta erro com código na tela, a sessão segue no Rust; desfeita a trava, a próxima mensagem sai uma vez. Sessão com terminal com `terminal_delivery_unknown` forçado: faixa na tela e a próxima operação reabre no Rust. Git ocupado com 4 pushes lentos: 503 visível no painel, nada no Python (verificação manual)**
-- [ ] **Step 55: Troca de conta e transferência Claude → Codex numa sessão sem terminal: concluem sem cliente Python (verificação manual)**
+- [ ] **Step 55: Troca de conta numa sessão sem terminal e noutra com terminal (a chave e a fila ficam; a mensagem seguinte sai uma vez) e transferência Claude → Codex: concluem sem cliente Python (verificação manual)**
 - [ ] **Step 56: Registrar a tabela de casos em `docs/migracao-rust/dono-unico/prova-real.md` e na entrada de `plataforma.md`**
 
 ## Achados da revisão (`ecc:architect`, sobre `800e7c47`)
@@ -376,3 +394,12 @@ Todos conferidos no código; nenhum descartado.
 | Contrato 14/15 inconsistente | tabela única de números (desenho e restrições globais) |
 | Regra contraditada só corrigida no fim | cada Task corrige a sua |
 | Testes automatizados x `CLAUDE.md` | decisão do coordenador, registrada nas restrições globais |
+
+## PR #43 (`cb244ccc`, entrou depois da revisão)
+
+Troca de conta em sessão com terminal: `terminal_life` guarda a prova da vida antes da ação,
+`reborn_binding` herda a chave, a fila só esvazia por `session_id`. A Task 4 reescreve esse
+caminho; os três testes do PR ficam como regressão, e os três riscos anotados nele (herdar a
+chave sem conferir a conversa, `NoSuchProcess` em `_session_proof`, `respawn-pane` na mesma
+sessão tmux) ganham teste e conserto na mesma Task. A Task 11 (Step 55) prova a troca de conta
+também numa sessão com terminal.
