@@ -295,6 +295,8 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
     let mut published_state_version = 0u64;
     let state_gate = Arc::new(Mutex::new(0u64));
     let mut durable_view = json!({"alive":true,"initialized":false,"ready":false});
+    let mut last_state = String::new();
+    let mut confirming = false;
     let mut channels:BTreeMap<String,Value> = ["preview","thinking","tool"].into_iter().map(|channel|
         (channel.into(),json!({"session":target.name,"text":"","md":true,"full":true,"vivo":true}))).collect();
     let receipt = Arc::new(std::sync::Mutex::new(ReceiptIndex::new(&target.provider,engine.view()["conversation"].as_str().unwrap_or(""))));
@@ -772,6 +774,15 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                         match result {
                             Ok(()) if version > published_state_version => {
                                 published_state_version = version;
+                                // Confirmar em todo idle, como o adapter Python: sem isto nenhuma entrada vira
+                                // confirmed, a poda não as alcança e a fila enche.
+                                let state = view["public_state"]["state"].as_str().unwrap_or("").to_owned();
+                                if state == "idle" && last_state != "idle" && !confirming {
+                                    confirming = true;
+                                    let job = confirm_inputs(queue.clone(),receipt.clone(),target.transcript.clone(),target.generation,clock(start));
+                                    jobs.spawn(async move { Job::Confirmed { response:None,result:job.await } });
+                                }
+                                last_state = state;
                                 durable_view = view.clone();
                                 publish(&events,&target,&mut revision,"view",view.clone());
                                 publish(&events,&target,&mut revision,"state",view["public_state"].clone());
@@ -820,6 +831,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                         if let Err(failure) = result { enter_error(&mut error,&target,failure); }
                     }
                     Job::Confirmed { response,result } => {
+                        if response.is_none() { confirming = false; }
                         match result {
                             Ok(ids)=>{
                                 for id in &ids { effects.extend(engine.confirm_input(id)); }

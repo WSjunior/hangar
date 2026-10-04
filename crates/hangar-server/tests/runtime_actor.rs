@@ -338,3 +338,60 @@ async fn input_that_fails_before_any_write_goes_back_to_the_queue() {
     handle.stop().await.unwrap();
     assert_eq!(server.await.unwrap(),0);
 }
+
+#[tokio::test]
+async fn turn_end_confirms_the_delivered_input_without_being_asked() {
+    // O adapter Python confirmava a fila em todo fim de turno; o ator faz o mesmo sozinho.
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("chat.jsonl");
+    std::fs::write(&transcript,"").unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let written = transcript.clone();
+    let server = tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut header = String::new(); reader.read_line(&mut header).await.unwrap();
+        let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
+            "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+        reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+        loop {
+            let mut raw = String::new();
+            if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
+            let envelope:Value = serde_json::from_str(&raw).unwrap();
+            let frame:Value = serde_json::from_str(envelope["frame"].as_str().unwrap()).unwrap();
+            let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
+            reader.get_mut().write_all(format!("{ack}\n").as_bytes()).await.unwrap();
+            if frame["type"] == "user" {
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new().append(true).open(&written).unwrap();
+                writeln!(file,"{}",json!({"type":"user","uuid":"u-1","message":{"role":"user","content":"Olá"}})).unwrap();
+                let result = json!({"type":"cano_output","frame":json!({"type":"result","subtype":"success","is_error":false}).to_string()});
+                reader.get_mut().write_all(format!("{result}\n").as_bytes()).await.unwrap();
+            }
+        }
+    });
+    let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
+        metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
+        binding:CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 },
+        lease_path:dir.path().join("key.lock"),state_path:dir.path().join("key.queue-state.json"),projection_dir:dir.path().join("projection"),
+        transcript:transcript.clone(),created:0.0 };
+    let lease = acquire_lease(&target.lease_path).unwrap();
+    let store = Store::open(&target.state_path,&target.projection_dir,State::new("key",1,"session",vec![])).unwrap();
+    let queue = QueueActor::start(store,lease);
+    let connection = cano::connect(&target.binding).await.unwrap();
+    let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap();
+    let handle = RuntimeActor::spawn(target,queue,connection,engine);
+    let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"Olá","entry_id":"msg"}) };
+    assert!(handle.command(input).await.unwrap().disposition == Disposition::Accepted);
+    let path = dir.path().join("key.queue-state.json");
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        loop {
+            let state:State = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            if state.rows.iter().any(|row|row["id"] == "msg" && row["confirmed"] == true) { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.expect("fim de turno precisa confirmar a entrada entregue");
+    handle.stop().await.unwrap();
+    server.await.unwrap();
+}
