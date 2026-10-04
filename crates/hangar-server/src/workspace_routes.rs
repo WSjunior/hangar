@@ -722,7 +722,13 @@ async fn folder_operation(
     body: &Value,
     q: &HashMap<String, String>,
 ) -> hangar_workspace::Result<Value> {
-    execute(st, guard).await?;
+    // Como o api.py: recusa da pasta sai como erro_criacao_sessao; em /api/fs/branches, também a
+    // do git. O código de reserva continua no campo `code` e não é afetado.
+    let session_error = |e: hangar_workspace::WorkspaceError| hangar_workspace::WorkspaceError {
+        detail: json!({"code":"erro_criacao_sessao","params":{},"msg":e.detail}),
+        ..e
+    };
+    execute(st, guard).await.map_err(session_error)?;
     let root = if tail == "/api/fs/branches" || tail == "/api/fs/git" {
         q.get("root").map(String::as_str)
     } else {
@@ -737,7 +743,9 @@ async fn folder_operation(
         .to_string_lossy()
         .into_owned();
     if tail == "/api/fs/branches" {
-        return execute(st, Operation::ListBranches { cwd }).await;
+        return execute(st, Operation::ListBranches { cwd })
+            .await
+            .map_err(session_error);
     }
     let status = execute(st, Operation::FolderStatus { cwd: cwd.clone() }).await?;
     let affected = sessions(ctx, status["toplevel"].as_str());

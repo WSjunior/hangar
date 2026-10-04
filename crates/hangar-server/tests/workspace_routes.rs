@@ -357,3 +357,27 @@ async fn download_of_a_name_with_control_characters_is_encoded() {
         "attachment; filename*=utf-8''a%7Fb%20c.txt"
     );
 }
+
+#[tokio::test]
+async fn folder_git_refusal_keeps_the_python_error_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let (addr, _) = fixture(dir.path()).await;
+    for route in ["git", "branches"] {
+        let response = client()
+            .get(format!(
+                "http://{addr}/api/fs/{route}?root={}",
+                other.path().display()
+            ))
+            .bearer_auth(OWNER)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 403);
+        let body: Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
+        assert_eq!(
+            body["detail"],
+            json!({"code":"erro_criacao_sessao","params":{},"msg":"root not allowed"})
+        );
+    }
+}
