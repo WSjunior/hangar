@@ -50,7 +50,7 @@ use super::{
 
 use crate::linux::{
     DEFAULT_CURSOR_ICON_NAME, LinuxClient, capslock_from_xkb, cursor_style_to_icon_names,
-    get_xkb_compose_state, is_within_click_distance, keystroke_from_xkb,
+    compose_key, get_xkb_compose_state, is_within_click_distance, keystroke_from_xkb,
     keystroke_underlying_dead_key, log_cursor_icon_warning, modifiers_from_xkb, new_xkb_context,
     open_uri_internal,
     platform::{DOUBLE_CLICK_INTERVAL, SCROLL_LINES},
@@ -1091,8 +1091,7 @@ impl X11Client {
                     }
 
                     if let Some(mut compose_state) = state.compose_state.take() {
-                        compose_state.feed(keysym);
-                        match compose_state.status() {
+                        match compose_key(&mut compose_state, keysym, modifiers) {
                             xkbc::Status::Composed => {
                                 state.pre_edit_text.take();
                                 keystroke.key_char = compose_state.utf8();
@@ -1123,7 +1122,13 @@ impl X11Client {
                                 state = self.0.borrow_mut();
                                 compose_state.feed(keysym);
                             }
-                            _ => {}
+                            xkbc::Status::Nothing => {
+                                if state.pre_edit_text.take().is_some() {
+                                    drop(state);
+                                    window.handle_ime_unmark();
+                                    state = self.0.borrow_mut();
+                                }
+                            }
                         }
                         state.compose_state = Some(compose_state);
                     }

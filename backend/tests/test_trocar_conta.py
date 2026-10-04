@@ -227,6 +227,20 @@ def test_terminal_passa_por_sem_terminal_e_reabre_o_pane_na_conta_nova(contas, t
     assert visto == {"conta": b, "na_origem": False}
 
 
+@pytest.mark.parametrize("headless", [True, False])
+def test_account_move_trusts_folder_in_new_account_before_reopening(contas, tmp_path, monkeypatch, headless):
+    import app.api as api_mod
+    a, b = contas
+    cwd = str(tmp_path / "repo")
+    S.save("s1", cwd, SID, config_dir=a)
+    ordem = []
+    monkeypatch.setattr(api_mod.registry_mod, "_pretrust_cwd", lambda pasta, conta: ordem.append((pasta, conta)))
+    volta = MagicMock(side_effect=lambda n: ordem.append(("acordou", b)))
+    r = _post("s1", b, headless=headless, conta=a, hl=_hl(ordem), ida=MagicMock(), volta=volta)
+    assert r.status_code == 200
+    assert ordem[-2:] == [(cwd, b), ("acordou", b)]
+
+
 def test_conta_destino_com_a_mesma_conversa_reabre_na_origem(contas, tmp_path):
     a, b = contas
     cwd = str(tmp_path / "repo")

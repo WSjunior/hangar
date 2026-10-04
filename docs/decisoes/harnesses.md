@@ -20,6 +20,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   plugin reenvia a faixa quando a ponte aparece e quando o `/pull` responde `faixa: false` (backend
   reiniciado começa sem ela): sem isso, faixa que não muda não voltava ao app. Ver [painel e clique](#mods-painel-clique-e-o-que-acontece-no-aparelho-04102026).
 
+- **Aviso de mod (`$.ui.toast`) vai ao app por evento próprio (`plugin_toast`), com o prazo do
+  mod.** O terminal o desenha por alguns segundos e ele não entra no transcript nem muda o estado.
+  O backend guarda cada aviso até vencer e cada conexão do SSE recebe os ainda vivos com o tempo
+  que resta; o app descarta pelo id o que já mostrou, porque a reconexão os repõe. Texto e nome
+  longos são cortados, nunca recusados. Convidado (link compartilhado ou login próprio) não
+  recebe aviso de mod. Cada app mostra no máximo 4 por vez e corta o texto longo na tela. Ver [aviso de mod](#aviso-de-mod-medido-04102026).
+
 - **Botão de mod clicado no app é clique de mouse SGR no pane, achado pelo rótulo e confirmado
   pelo `ui.press`.** Nenhuma API do engine dispara o botão de outro plugin. Sem mouse ligado, com
   o pane em copy-mode, rótulo ausente ou repetido na região do site, o backend recusa em vez de
@@ -180,6 +187,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **O diálogo de confiança do Claude Code derruba três coisas**: a chave do pre-trust usa barra
   normal no Windows, `is_overlay` tem que ignorar as linhas em branco do fim do pane, e o Enter
   às cegas cai em "No, exit".
+- **A confiança na pasta é por conta: quem põe a sessão numa conta marca a pasta nela.** A criação
+  marca na conta em que a sessão nasce; a troca de conta marca na de destino antes de reabrir.
 - **Loop runner**: `LOOP_DONE` só fecha com confirmação humana; guardrails são max_iters,
   branch≠main e kill-switch. Loop ativo suprime o chain.
 - **Plugin e marketplace do Codex usam os comandos nativos do CLI.** Nome do plugin + origem
@@ -1543,6 +1552,24 @@ o `$` no ponto da chamada ou num closure, como nos timers. O `tsc` não pega iss
 `claude plugin validate` pega. Um painel que o mod abre sem pedido da pessoa só é desenhado a
 partir de 144 colunas (110 depois de pedido); abaixo disso não há árvore para espelhar.
 
+### Aviso de mod medido (04/10/2026)
+
+Claude Code 2.1.289 (Linux), plugin do Hangar e um mod de prova carregados por `--plugin-dir`; o
+mod chama `$.ui.toast(texto, { timeoutMs: 15000 })` a cada 20 s, sem turno nenhum em curso.
+
+| | o que foi medido |
+|---|---|
+| terminal | caixa no canto superior direito, o nome do mod na primeira linha e o texto cortado com reticências na largura da caixa |
+| `ui.toast` sem matcher, no plugin de fora | recebe o aviso de OUTRO plugin: `{ text, timeoutMs }`, e `next.origin.plugin` é o nome do mod que chamou. `next(e)` deixa o terminal desenhar como antes |
+| transcript e estado | nada: o aviso não gera linha no `.jsonl` nem transição de estado. Sem evento próprio ele nunca chegaria ao app |
+| reconexão | a conexão nova recebe o aviso ainda vivo com `timeoutMs` igual ao que resta; o mesmo id chegou a três conexões seguidas e a tela mostrou uma caixa só |
+| backend no Windows | aviso de 12 s: a conexão aberta recebeu `timeoutMs` 11999, a aberta 4 s depois recebeu o mesmo id com 7943; token errado no `POST /toast` dá 403; o evento sai sem `id:` de SSE |
+| nativo | o `autohide` da notificação do gpui-component é fixo em 5 s; com ele desligado e um temporizador próprio, o aviso de 15 s ficou na tela em +1, +5, +10 e +14 s e tinha saído em +16,5 s |
+| web | `--surface-raised` deixa o texto da conversa vazar pela caixa, e o degradê da navbar desce além de `--nav-h` e apaga o nome do mod: a caixa é opaca e fica acima da navbar |
+
+O aviso preso por um painel aberto com `holdToasts` espera no terminal e sai na hora no app: o
+`ui.toast` passa pelo hook quando o mod chama, não quando o terminal desenha.
+
 ## O `wire.jsonl` do Kimi não é um transcript bem-comportado
 
 — duas armadilhas medidas em
@@ -1670,6 +1697,15 @@ partir de 144 colunas (110 depois de pedido); abaixo disso não há árvore para
     erro pro cliente, o EventSource reconectava e caía no mesmo erro. O `TranscriptTailer.follow`
     espera a pasta em vez de estourar (o `mkdir` que o adapter do Codex já fazia era o mesmo
     problema, resolvido só naquele caminho).
+
+**A confiança é por conta, e a troca de conta não a levava** (medido em 04/10/2026, Windows com
+psmux, Claude Code 2.1.289, `main` em `d3043870`). Uma sessão criada numa conta e levada a outra
+por `POST /api/sessions/{name}/conta` reabria no diálogo, com "No, exit" sob o cursor, e a lista a
+mostrava como `awaiting_input`. Só acontece com pasta que a conta de destino nunca abriu e que não
+está debaixo de outra já confiável nela: a mesma troca com a pasta dentro do perfil do usuário
+abriu direto, e por isso o defeito passava despercebido. Com a marcação, a mesma troca numa pasta
+nova abriu sem o diálogo. Não medido: a sessão sem terminal sobe com `claude -p`, que pelo código
+não passa pelo diálogo, e ficaria com a pasta por marcar até virar terminal.
 
 ## Preferência da barra do Claude Code (07/09/2026)
 

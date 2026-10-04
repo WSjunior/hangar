@@ -295,12 +295,14 @@ def esquecer(name: str) -> None:
         _fechadas.pop(name, None)
         _sugestoes.pop(name, None)
         _bands.pop(name, None)
+        _toasts.pop(name, None)
         _confirmacoes.pop(name, None)
         _preenchido.pop(name, None)
         _pressed.pop(name, None)
         _cliques.pop(name, None)
     _eventos.pop(name, None)
     _band_wakers.pop(name, None)
+    _toast_wakers.pop(name, None)
     _press_wakers.pop(name, None)
     for chave in [c for c in list(_recusas) if c[0] == name]:
         _recusas.pop(chave, None)
@@ -494,6 +496,50 @@ async def esperar_faixa(name: str, vista: int, timeout: float) -> int:
     """Dorme até a faixa sair da versão `vista`, ou até `timeout`; devolve a versão atual."""
     await _esperar_ate(_band_wakers, name, lambda: band(name)[0] != vista, timeout)
     return band(name)[0]
+
+
+# Avisos (`$.ui.toast`) dos mods, por sessão: (número, quando vence, dado). O terminal os desenha por
+# alguns segundos e eles não entram no transcript; ficam aqui até vencer, para o app que abre ou
+# reconecta nesse intervalo ainda mostrar o que está na tela do terminal.
+_toasts: dict[str, list[tuple[int, float, dict]]] = {}
+_toast_seq = 0
+_toast_wakers: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Event]] = {}
+# O número recomeça com o backend: o prefixo impede o app de tomar um aviso novo por um já mostrado.
+_TOAST_BOOT = secrets.token_hex(4)
+TOAST_DEFAULT_MS = 4000
+TOAST_MAX_MS = 5 * 60 * 1000
+TOAST_MAX_CHARS = 2000
+TOASTS_KEPT = 20
+
+
+def _store_toast(name: str, text: str, timeout_ms: float | None, plugin: str | None) -> None:
+    global _toast_seq
+    ms = min(max(timeout_ms or TOAST_DEFAULT_MS, 1000), TOAST_MAX_MS)
+    now = time.monotonic()
+    with _lock:
+        _toast_seq += 1
+        toast = {"id": f"{_TOAST_BOOT}-{_toast_seq}", "text": text[:TOAST_MAX_CHARS], "plugin": (plugin or "")[:64]}
+        alive = [t for t in _toasts.get(name, []) if t[1] > now]
+        _toasts[name] = [*alive, (_toast_seq, now + ms / 1000, toast)][-TOASTS_KEPT:]
+    _acordar_todos(_toast_wakers, name)
+
+
+def toasts_after(name: str, seen: int) -> tuple[int, list[dict]]:
+    """Os avisos ainda não vencidos de número maior que `seen`, com o tempo que resta a cada um, e
+    o número do último aviso da sessão."""
+    now = time.monotonic()
+    with _lock:
+        stored = _toasts.get(name, [])
+        # O 0 seria "sem prazo" para o app: quem está no último milissegundo ainda leva 1.
+        fresh = [{**toast, "timeoutMs": max(1, int((expires - now) * 1000))}
+                 for seq, expires, toast in stored if seq > seen and expires > now]
+    return (stored[-1][0] if stored else seen), fresh
+
+
+async def wait_toasts(name: str, seen: int, timeout: float) -> tuple[int, list[dict]]:
+    """Dorme até a sessão ter aviso vivo de número maior que `seen`, ou até `timeout`."""
+    await _esperar_ate(_toast_wakers, name, lambda: toasts_after(name, seen)[1], timeout)
+    return toasts_after(name, seen)
 
 
 async def esperar_sem_painel(name: str, painel: str, timeout: float) -> bool:
@@ -974,6 +1020,25 @@ async def ui(body: BandBody, request: Request):
         raise HTTPException(413, detail="faixa grande demais")
     _confere(body.sessao, body.token)
     _guardar_faixa(body.sessao, body.above, body.columns, [p.model_dump() for p in body.panes])
+    return {"ok": True}
+
+
+class ToastBody(BaseModel):
+    sessao: str
+    token: str
+    text: str
+    timeoutMs: float | None = None
+    plugin: str | None = None
+
+
+@plugin_router.post("/toast")
+async def toast(body: ToastBody):
+    """Um mod mostrou um aviso (`$.ui.toast`) no terminal: vai ao app, que o mostra pelo mesmo tempo.
+
+    Texto e nome longos são cortados em vez de recusados: recusar faria o aviso sumir do app."""
+    _confere(body.sessao, body.token)
+    if body.text.strip():
+        _store_toast(body.sessao, body.text, body.timeoutMs, body.plugin)
     return {"ok": True}
 
 

@@ -464,7 +464,7 @@ impl Hangar {
 
     /// Ordem em que o Ctrl+↓/↑ anda: a das linhas à vista na barra, máquina por máquina (pula filtrada e recolhida), ou a
     /// das abas.
-    fn visible_order(&self, cx: &App) -> Vec<Target> {
+    pub(super) fn visible_order(&self, cx: &App) -> Vec<Target> {
         let active = self.active_key();
         if appearance::get().navigation == appearance::Navigation::Tabs {
             return self.sessions.iter().filter(|s| !self.sidebar.is_hidden(&active, &s.name)).map(|s| Target::new(&active, &s.name)).collect();
@@ -1642,8 +1642,9 @@ impl Hangar {
             .flex().flex_col().items_center().gap(px(2.)).rounded(px(8.)).cursor_pointer()
             .when(selected, |el| el.bg(theme::accent_dim()).child(div().absolute().left_0().top_0().bottom_0().w(px(3.)).bg(theme::accent())))
             .when(!selected, |el| el.hover(|el| el.bg(theme::hover())))
-            .role(Role::Button).aria_selected(selected).aria_label(tip)
+            .role(Role::Button).aria_selected(selected).aria_label(self.session_number_label(&target, tip))
             .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip_text.clone()).build(window, cx))
+            .children(self.session_number_badge(&target).map(|badge| div().absolute().top_0().right_0().child(badge)))
             .child(div().h(px(11.)).flex().items_center().justify_center().child(status))
             .child(div().flex().flex_col().items_center().font_family(theme::MONO).text_size(px(9.)).line_height(px(10.)).whitespace_nowrap()
                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(if awaiting { theme::warning() } else { theme::text() }).child(top))
