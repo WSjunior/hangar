@@ -317,3 +317,22 @@ fn terminal_answer_preserves_public_question_identity() {
     })).unwrap();
     assert_eq!(answer.question_id.as_deref(), Some("question-a"));
 }
+fn suggestion_screen(s: &str) -> String {
+ let rule = format!("\u{1b}[38;2;136;136;136m{}\u{1b}[39m", "─".repeat(30));
+ let typed = if s.is_empty() { "\u{1b}[2mTry \"refactor <filepath>\"\u{1b}[0m".to_string() } else { s.to_string() };
+ format!("history\n{rule}\n\u{1b}[39m❯ {typed}\n{rule}\n⏵⏵ bypass permissions\n\n")
+}
+#[test]
+fn terminal_input_unstyle_drops_only_dim_text() {
+ assert_eq!(unstyle("\u{1b}[38;2;1;2;3m──\u{1b}[39m a \u{1b}[2mghost\u{1b}[0m b\n\u{1b}[38;5;2mc\u{1b}[m", false), "── a  b\nc");
+ assert_eq!(unstyle("x \u{1b}[2mghost\u{1b}[22m y", true), "x ghost y");
+ assert!(ComposerSnapshot::parse(&unstyle(&suggestion_screen(""), false)).unwrap().is_empty());
+ assert!(!ComposerSnapshot::parse(&unstyle(&suggestion_screen("[Pasted text #1 +3 lines]"), false)).unwrap().is_empty());
+}
+#[tokio::test]
+async fn terminal_input_dim_suggestion_is_an_empty_composer_before_and_after_submit() {
+ let io=Arc::new(FakeIo::new(vec![suggestion_screen(""),suggestion_screen("ok"),suggestion_screen("")]));
+ let r=driver(io.clone(),Arc::new(Services::new())).prompt("ok","id").await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"submitted"));
+ let writes=io.writes(); assert_eq!(writes.len(),2); assert!(writes.iter().all(|w|w.args.last().unwrap()!="C-u"));
+}

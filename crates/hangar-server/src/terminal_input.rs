@@ -214,6 +214,38 @@ impl ComposerSnapshot {
         !self.placeholders.is_empty() && self.placeholders.is_disjoint(&before.placeholders) && residual.trim().is_empty()
     }
 }
+/// Tira as sequências SGR da captura `-e`. Sem `keep_dim`, some também o texto esmaecido: é a
+/// sugestão que o Claude desenha no composer vazio, e ninguém a digitou.
+pub fn unstyle(styled: &str, keep_dim: bool) -> String {
+    let mut out = String::with_capacity(styled.len());
+    let mut dim = false;
+    let mut chars = styled.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            if keep_dim || !dim || c == '\n' { out.push(c); }
+            continue;
+        }
+        if chars.next_if_eq(&'[').is_none() { continue; }
+        let mut params = String::new();
+        let mut last = None;
+        for n in chars.by_ref() {
+            if ('@'..='~').contains(&n) { last = Some(n); break; }
+            params.push(n);
+        }
+        if last != Some('m') { continue; }
+        let mut codes = params.split([';', ':']).map(|p| p.parse::<u32>().unwrap_or(0));
+        while let Some(code) = codes.next() {
+            match code {
+                0 | 22 => dim = false,
+                2 => dim = true,
+                // O `2` de `38;2;r;g;b` é truecolor, não esmaecido.
+                38 | 48 | 58 => match codes.next() { Some(5) => { codes.next(); } Some(2) => { codes.nth(2); } _ => {} },
+                _ => {}
+            }
+        }
+    }
+    out
+}
 fn valid_text(text: &str) -> bool { !text.chars().any(|c| c.is_control() && c != '\n' && c != '\t') }
 fn cursor(screen: &str) -> Option<usize> { CURSOR.captures_iter(screen).last()?.get(1)?.as_str().parse().ok() }
 fn live_picker(screen: &str) -> bool { cursor(screen).is_some() && crate::terminal_state::analyze(screen).overlay }
@@ -269,6 +301,18 @@ impl TerminalDriver {
         let output = self.raw(vec!["capture-pane".into(), "-p".into(), "-t".into(), self.binding.pane.clone(), "-S".into(), "-200".into()], vec![]).await?;
         if !output.success { return Err(IoFailure { code: "capture_failed", may_have_written: false }); }
         String::from_utf8(output.stdout).map_err(|_| IoFailure { code: "capture_utf8", may_have_written: false })
+    }
+    /// Uma captura para ler o composer: a tela inteira e só o que foi digitado.
+    async fn composer_capture(&self) -> Result<(String, String), IoFailure> {
+        self.verify().await?;
+        let mut args = vec!["capture-pane".into(), "-p".into()];
+        // psmux sem prova de que entende `-e`: no Windows a leitura continua sem estilo.
+        if !self.binding.windows { args.push("-e".into()); }
+        args.extend(["-t".into(), self.binding.pane.clone(), "-S".into(), "-200".into()]);
+        let output = self.raw(args, vec![]).await?;
+        if !output.success { return Err(IoFailure { code: "capture_failed", may_have_written: false }); }
+        let styled = String::from_utf8(output.stdout).map_err(|_| IoFailure { code: "capture_utf8", may_have_written: false })?;
+        Ok((unstyle(&styled, true), unstyle(&styled, false)))
     }
     pub async fn capture(&self) -> Result<String, IoFailure> { let _serial = self.serial.lock().await; self.capture_inner().await }
     async fn settle(&self) { tokio::time::sleep(self.limits.settle).await; }
@@ -334,9 +378,9 @@ impl TerminalDriver {
         Err(IoFailure { code: "clipboard_lock_busy", may_have_written: false })
     }
     async fn snapshot(&self) -> Result<ComposerSnapshot, IoFailure> {
-        let screen = self.capture_inner().await?;
+        let (screen, typed) = self.composer_capture().await?;
         if overlay(&screen) { return Err(IoFailure { code: "overlay", may_have_written: false }); }
-        ComposerSnapshot::parse(&screen).ok_or(IoFailure { code: "composer_unreadable", may_have_written: false })
+        ComposerSnapshot::parse(&typed).ok_or(IoFailure { code: "composer_unreadable", may_have_written: false })
     }
     async fn refresh_input_guard(&self) -> Result<ComposerSnapshot, IoFailure> {
         let facts = self.verify().await?;
@@ -398,17 +442,17 @@ impl TerminalDriver {
         let mut slash_selected = false;
         for _ in 0..self.limits.proof_attempts.max(1) {
             self.settle().await;
-            if let Ok(screen) = self.capture_inner().await {
-                if ComposerSnapshot::parse(&screen).is_some_and(|now| now.is_empty()) {
+            if let Ok((screen, typed)) = self.composer_capture().await {
+                if ComposerSnapshot::parse(&typed).is_some_and(|now| now.is_empty()) {
                     return DeliveryResult::new(Disposition::Accepted, DeliveryStage::SubmitProof, "submitted");
                 }
                 if text.trim_start().starts_with('/') {
-                    if overlay(&screen) && ComposerSnapshot::parse(&screen).is_none() {
+                    if overlay(&screen) && ComposerSnapshot::parse(&typed).is_none() {
                         return DeliveryResult::new(Disposition::Accepted, DeliveryStage::SubmitProof, "slash_overlay");
                     }
                     // Só o mesmo comando parado permite confirmar a sugestão do menu.
                     if !slash_selected && (screen.contains("to navigate") || screen.contains("Tab to accept"))
-                        && ComposerSnapshot::parse(&screen).is_some_and(|now| now.owned(text, before)) {
+                        && ComposerSnapshot::parse(&typed).is_some_and(|now| now.owned(text, before)) {
                         slash_selected = true;
                         if let Err(e) = self.key_inner("Enter").await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Submit, e.code); }
                     }
@@ -555,8 +599,8 @@ impl TerminalDriver {
     async fn prove_control_submission(&self, stage: DeliveryStage) -> DeliveryResult {
         for _ in 0..self.limits.proof_attempts.max(1) {
             self.settle().await;
-            if let Ok(screen) = self.capture_inner().await {
-                if !screen.trim().is_empty() && (ComposerSnapshot::parse(&screen).is_some_and(|s| s.is_empty())
+            if let Ok((screen, typed)) = self.composer_capture().await {
+                if !screen.trim().is_empty() && (ComposerSnapshot::parse(&typed).is_some_and(|s| s.is_empty())
                     || (!overlay(&screen) && !screen.contains("Submit answers"))) {
                     return DeliveryResult::new(Disposition::Accepted, stage, "control_submitted");
                 }
