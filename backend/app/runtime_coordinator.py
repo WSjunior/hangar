@@ -1043,6 +1043,8 @@ class RuntimeCoordinator:
                 if remove and self.legacy is not None:
                     # Fechar não escreve na conversa: basta esperar os escritores, mesmo com vínculo mudado.
                     await self.legacy.quiesce({**slot.binding.descriptor(), "removed":True})
+                from app.runtime_terminal import terminal_life, reborn_binding
+                life = None if remove else await asyncio.to_thread(terminal_life, slot.binding)
                 result = await action()
                 await self._wait_active(slot)
                 if remove:
@@ -1057,6 +1059,9 @@ class RuntimeCoordinator:
                     return result
                 target_name = new_name or name
                 binding = await asyncio.to_thread(self.legacy.binding, target_name, slot.binding.provider)
+                if life is not None and (binding is None or binding.key != slot.binding.key):
+                    # Vida de terminal nascida com a sessão congelada é obra da ação: herda a chave.
+                    binding = await asyncio.to_thread(reborn_binding, target_name, slot.binding, life) or binding
                 if binding is None:
                     from app.runtime_terminal import pending_binding
                     binding = (await asyncio.to_thread(pending_binding, target_name, slot.binding)
@@ -1072,7 +1077,8 @@ class RuntimeCoordinator:
                 with slot.guard:
                     if slot.store.state["name"] != target_name:
                         slot.store.exec(slot.binding.generation, "rename:" + uuid.uuid4().hex, _clock(), {"kind":"rename", "name":target_name})
-                    if slot.binding.meta.get("terminal") and binding.jsonl != slot.binding.jsonl:
+                    # Só conversa nova esvazia a fila: a conta nova muda o caminho do transcript, não a conversa.
+                    if slot.binding.meta.get("terminal") and binding.meta.get("session_id") != slot.binding.meta.get("session_id"):
                         slot.store.exec(slot.binding.generation, "clear:" + uuid.uuid4().hex, _clock(), {"kind":"clear"})
                     binding.generation = slot.binding.generation + int(advance)
                     if isinstance(binding.meta.get("terminal"), dict):

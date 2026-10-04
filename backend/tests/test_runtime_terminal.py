@@ -886,3 +886,71 @@ def test_headless_to_terminal_pending_binding_keeps_key_and_old_queue(monkeypatc
         assert slot.store.state['runtime_state']['_binding']['meta'].get('terminal')
         assert (await owner.op('session',{'kind':'drain'},'drain'))['sent']==1
     asyncio.run(flow())
+
+
+def _reborn_terminal(monkeypatch, tmp_path):
+    """Sessão com terminal cujo pane a ação mata e recria: o teste troca `life` para a vida nova."""
+    from app import runtime_terminal as terminal, pqueue
+    from app.runtime_adapter import LegacyBridge
+    from app.adapters.claude_headless import sessions
+    owner = RuntimeCoordinator()
+    slot = owner.register(terminal_binding(tmp_path))
+    slot.store.exec(1, 'append', {'monotonic_s': 1, 'epoch_s': .5},
+        {'kind': 'append', 'text': 'carry', 'delivered': False, 'ts': .5, 'pre_transcript': False, 'entry_id': 'carry'})
+    life = {'proof': 'old-life', 'facts': None}
+    born = dict(name='session', pane='%7', created=456, namespace='mux-life', pane_birth=456.5,
+        session_proof='new-life', jsonl=str(tmp_path / 'other-account' / 'sid.jsonl'), session_id='sid',
+        config_dir=str(tmp_path / 'other-account'), cwd=str(tmp_path), mux_argv=['tmux'], windows=False,
+        agent_pid=77, agent_birth=456.7)
+    monkeypatch.setattr(terminal, '_session_proof', lambda name: life['proof'])
+    monkeypatch.setattr(terminal, '_collect', lambda name: life['facts'])
+    monkeypatch.setattr(sessions, 'load', lambda name: None)
+    monkeypatch.setattr(pqueue, '_queue_dir', lambda: tmp_path)
+    owner.legacy = LegacyBridge(owner, {'claude': object()})
+    return owner, slot, life, born
+
+
+def test_account_move_reborn_terminal_keeps_key_and_queue(monkeypatch, tmp_path):
+    owner, slot, life, born = _reborn_terminal(monkeypatch, tmp_path)
+    async def flow():
+        async def move():
+            life.update(proof='new-life', facts=born)
+        await owner.change('session', move, reopen=False)
+        assert slot.binding.key == 'terminal_key' and slot.binding.generation == 2
+        assert slot.binding.jsonl == born['jsonl'] and slot.binding.meta['terminal']['pane'] == '%7'
+        assert not slot.binding.meta.get('pending_terminal')
+        assert [row['text'] for row in slot.store.state['rows']] == ['carry']
+    asyncio.run(flow())
+
+
+def test_account_move_waits_for_agent_of_reborn_terminal(monkeypatch, tmp_path):
+    from app import runtime_terminal as terminal
+    owner, slot, life, born = _reborn_terminal(monkeypatch, tmp_path)
+    async def flow():
+        async def move():
+            life['proof'] = 'new-life'
+        await owner.change('session', move, reopen=False)
+        assert slot.binding.key == 'terminal_key'
+        assert slot.binding.meta['pending_terminal'] == 'new-life' and 'terminal' not in slot.binding.meta
+        with pytest.raises(RuntimeError):
+            terminal.assert_writer('session')
+        life['facts'] = born
+        assert await owner.prepare_session('session', 'claude')
+        assert slot.binding.key == 'terminal_key' and slot.binding.jsonl == born['jsonl']
+        assert slot.binding.meta['terminal']['pane'] == '%7' and not slot.binding.meta.get('pending_terminal')
+        assert [row['text'] for row in slot.store.state['rows']] == ['carry']
+    asyncio.run(flow())
+
+
+def test_pending_terminal_reborn_again_keeps_key(monkeypatch, tmp_path):
+    owner, slot, life, born = _reborn_terminal(monkeypatch, tmp_path)
+    async def flow():
+        async def move():
+            life['proof'] = 'new-life'
+        await owner.change('session', move, reopen=False)
+        async def move_again():
+            life.update(proof='newer-life', facts={**born, 'session_proof': 'newer-life', 'pane': '%9'})
+        await owner.change('session', move_again, reopen=False)
+        assert slot.binding.key == 'terminal_key' and slot.binding.meta['terminal']['pane'] == '%9'
+        assert not slot.binding.meta.get('pending_terminal')
+    asyncio.run(flow())
