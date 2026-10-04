@@ -1321,9 +1321,6 @@ def push(cwd: str) -> dict:
 
 from app.workspace_bridge import delegate as _workspace_delegate
 
-# Recursos que o núcleo Rust ainda não tem: fora do padrão, rodam no Python.
-_PYTHON_ARGS = {"create_worktree": {"new_branch": False, "base": None}, "remove_worktree": {"force": False}}
-
 for _operation in (
     "head_info", "branch_of", "git_summary", "git_diffstat", "list_branches", "git_log",
     "git_log_since", "changed_files", "file_diff", "commit_files", "commit_file_diff",
@@ -1336,8 +1333,7 @@ for _operation in (
     "cherry_pick", "reset_to", "create_branch_at", "create_tag", "folder_fetch", "folder_pull",
     "folder_switch", "folder_create_branch", "commit", "push",
 ):
-    globals()[_operation] = _workspace_delegate(_operation, GitError, mutation=True,
-                                                python_args=_PYTHON_ARGS.get(_operation))(globals()[_operation])
+    globals()[_operation] = _workspace_delegate(_operation, GitError, mutation=True)(globals()[_operation])
 git_action = _workspace_delegate("git_action", GitError)(git_action)
 
 

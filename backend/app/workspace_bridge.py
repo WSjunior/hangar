@@ -16,6 +16,8 @@ _config: tuple[str, str] | None = None
 _fallback = contextvars.ContextVar("workspace_fallback", default=False)
 _slots = threading.BoundedSemaphore(8)
 _MAX_RESPONSE = 32 * 1024 * 1024
+# Teto do corpo que o Rust aceita na ponte (`MAX_BODY` em workspace_routes.rs).
+_MAX_REQUEST = 4 * 1024 * 1024
 # Rust não chegou a rodar a operação: o Python pode rodá-la sem repetir efeito.
 _UNAVAILABLE = {"workspace_unavailable", "workspace_busy"}
 _HANDOFF_CODES = {"indisponivel", "ocupado", "contexto", "sessao_no_python"}
@@ -76,6 +78,10 @@ def request(operation: str, arguments: dict, *, mutation: bool = False) -> dict 
     except (TypeError, ValueError):
         _failed(operation, False, "argumentos")
         return None
+    if len(data) > _MAX_REQUEST:
+        # O Rust recusaria antes de rodar; o pedido nem sai, então o Python roda sem repetir nada.
+        _log.info("workspace bridge request too large op=%s bytes=%d", operation, len(data))
+        return None
     if not _slots.acquire(blocking=False):
         return None
     try:
@@ -113,6 +119,13 @@ def _failed(operation: str, mutation: bool, reason: str) -> None:
     from app import diag
     _log.warning("workspace bridge unavailable op=%s mutation=%s reason=%s", operation, mutation, reason)
     diag.registrar("workspace.ponte", "aviso", operacao_rust=operation, escrita=mutation, motivo=reason)
+
+
+def text_rows(arguments: dict) -> dict:
+    """Linhas da conversa já em memória vão como texto: o JSON da ponte não leva bytes."""
+    if arguments.get("rows") is not None:
+        arguments["rows"] = [row.decode("utf-8", errors="replace") for row in arguments["rows"]]
+    return arguments
 
 
 def delegate(operation: str, exception, *, mutation=False, prepare=None, decode=None, python_args=None):
