@@ -323,6 +323,21 @@ pub(super) struct Worktrees {
 impl Worktrees {
     pub(super) fn status(&self, path: &str) -> Option<&WorktreeStatus> { self.cache.get(path) }
     fn busy(&self) -> bool { self.deleting || self.create.as_ref().is_some_and(|c| c.busy) }
+
+    /// Resposta velha não entra no cache: traria de volta uma worktree já apagada ou cobriria dado mais novo.
+    fn take_list(&mut self, seq: u64, result: Result<Vec<WorktreeRepo>, String>) -> bool {
+        if !self.repos.finish(seq, result) { return false; }
+        if let Some(Ok(repos)) = &self.repos.value {
+            for w in repos.iter().flat_map(|r| &r.worktrees) { self.cache.insert(w.path.clone(), w.clone()); }
+        }
+        true
+    }
+
+    fn take_detail(&mut self, seq: u64, result: Result<WorktreeStatus, String>) -> bool {
+        if !self.detail.finish(seq, result) { return false; }
+        if let Some(s) = self.detail.ok() { self.cache.insert(s.path.clone(), s.clone()); }
+        true
+    }
 }
 
 /// Corpo dos diálogos da página: desenhado pelo `Hangar` a cada quadro, como o painel de grupo.
@@ -382,12 +397,11 @@ impl Hangar {
             let parsed = result.and_then(|v| serde_json::from_value::<Vec<WorktreeRepo>>(v["repos"].clone())
                 .map_err(|_| Failure::local("invalid_response")));
             if let Ok(repos) = &parsed {
-                for w in repos.iter().flat_map(|r| &r.worktrees) { this.worktrees.cache.insert(w.path.clone(), w.clone()); }
                 if then_fetch { this.fetch_worktrees(repos.iter().map(|r| r.repo.clone()).collect(), cx); }
                 if repos.iter().flat_map(|r| &r.worktrees).any(|w| w.size_pending) { this.poll_sizes(cx); }
                 else { this.worktrees.size_tries = 0; }
             }
-            this.worktrees.repos.finish(seq, parsed.map_err(|e| Self::failure(&e)));
+            this.worktrees.take_list(seq, parsed.map_err(|e| Self::failure(&e)));
             cx.notify();
         });
         cx.notify();
@@ -439,8 +453,7 @@ impl Hangar {
         let seq = self.worktrees.detail.start();
         self.server_get(vec!["worktrees".into(), "detail".into()], vec![("path".into(), path)], 30, cx, move |this, result, cx| {
             let parsed = result.and_then(|v| serde_json::from_value::<WorktreeStatus>(v).map_err(|_| Failure::local("invalid_response")));
-            if let Ok(s) = &parsed { this.worktrees.cache.insert(s.path.clone(), s.clone()); }
-            this.worktrees.detail.finish(seq, parsed.map_err(|e| Self::failure(&e)));
+            this.worktrees.take_detail(seq, parsed.map_err(|e| Self::failure(&e)));
             cx.notify();
         });
         cx.notify();
@@ -1320,7 +1333,7 @@ const COL_SIZE: f32 = 76.;
 
 #[cfg(test)]
 mod tests {
-    use super::{lost_files, merged_batch, ready, slug, state_of, title, is_agent, WorktreeStatus, WtState};
+    use super::{lost_files, merged_batch, ready, slug, state_of, title, is_agent, WorktreeRepo, WorktreeStatus, Worktrees, WtState};
     use serde_json::json;
 
     fn st(v: serde_json::Value) -> WorktreeStatus { serde_json::from_value(v).unwrap() }
@@ -1367,6 +1380,24 @@ mod tests {
         assert_eq!(slug("Tela de Worktrees!"), "tela-de-worktrees");
         assert_eq!(slug("  Ação  rápida__já "), "acao-rapida-ja");
         assert_eq!(slug("???"), "");
+    }
+
+    #[test]
+    fn stale_responses_do_not_touch_the_cache() {
+        let mut wt = Worktrees::default();
+        let old = wt.repos.start();
+        let new = wt.repos.start();
+        let list = vec![WorktreeRepo { repo: "/r".into(), worktrees: vec![st(base("/r/a"))] }];
+        // A lista velha chega depois de apagar "/r/a": não pode trazê-la de volta.
+        assert!(!wt.take_list(old, Ok(list.clone())));
+        assert!(wt.cache.is_empty());
+        assert!(wt.take_list(new, Ok(list)));
+        assert!(wt.cache.contains_key("/r/a"));
+        wt.cache.clear();
+        let old = wt.detail.start();
+        wt.detail.start();
+        assert!(!wt.take_detail(old, Ok(st(base("/r/a")))));
+        assert!(wt.cache.is_empty());
     }
 
     #[test]
