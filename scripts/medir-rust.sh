@@ -67,6 +67,14 @@ while read -r nome tipo; do
   t=$(par primeira_mensagem_ms "$nome") && linha "$nome" "$tipo" "$t"
 done <<< "$sessoes"
 
+echo "— Git e arquivos do painel da sessão (PR #30), na sessão $(head -1 <<< "$sessoes" | cut -d' ' -f1)"
+nome=$(head -1 <<< "$sessoes" | cut -d' ' -f1)
+for rota in "branches" "git/files" "git/log?n=50" "files/list?so_modificados=false" \
+            "files/read?path=README.md" "files/search?q=import&mode=names"; do
+  t=$(par pedido_ms "/api/sessions/$nome/$rota") && linha "${rota%%\?*}" git "$t" || echo "${rota%%\?*}: não respondeu 200, pulado"
+done
+t=$(par pedido_ms /api/fs/roots) && linha "fs/roots" arquivos "$t"
+
 echo "— Telas de Custos e Uso (parte 3)"
 t=$(par pedido_ms /api/costs) && linha custos - "$t"
 t=$(par pedido_ms /api/uso) && linha uso - "$t"
@@ -74,3 +82,5 @@ t=$(par pedido_ms /api/uso) && linha uso - "$t"
 echo
 echo "Média de 5 medidas depois de 1 de aquecimento, Rust e Python alternados. Menos é melhor."
 echo "Ganho perto de 1x = o Rust ainda repassa essa parte ao Python."
+echo "Fora da medição: envio de mensagem, fila e controle das sessões (2B, 2C, 2D) e as ações de Git"
+echo "que escrevem — medir exigiria mandar mensagem ou mudar o repositório de verdade."
