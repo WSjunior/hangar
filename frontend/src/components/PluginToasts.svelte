@@ -56,5 +56,6 @@
     -webkit-tap-highlight-color: transparent;
   }
   .mod { font-size: var(--text-xs); color: var(--text-muted); }
-  .text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  /* Aviso de 2000 caracteres não vira uma parede: rola dentro da caixa, e o toque ainda dispensa. */
+  .text { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 8.5em; overflow-y: auto; }
 </style>

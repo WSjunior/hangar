@@ -45,7 +45,17 @@ pub fn toast(data: &Value) -> Option<Toast> {
     let id = data["id"].as_str().filter(|id| !id.is_empty())?;
     let text = data["text"].as_str().filter(|text| !text.trim().is_empty())?;
     let ms = data["timeoutMs"].as_u64().filter(|ms| *ms > 0)?;
-    Some(Toast { id: id.to_owned(), text: text.to_owned(), plugin: data["plugin"].as_str().unwrap_or("").to_owned(), timeout: Duration::from_millis(ms) })
+    Some(Toast { id: id.to_owned(), text: short(text), plugin: data["plugin"].as_str().unwrap_or("").to_owned(), timeout: Duration::from_millis(ms) })
+}
+
+/// A notificação cresce com o texto: aviso longo vira no máximo 4 linhas e 300 caracteres.
+fn short(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out: String = lines.iter().take(4).copied().collect::<Vec<_>>().join("\n");
+    let mut cut = lines.len() > 4;
+    if out.chars().count() > 300 { out = out.chars().take(300).collect(); cut = true; }
+    if cut { out.push('…'); }
+    out
 }
 
 fn frame() -> Div {
@@ -321,6 +331,9 @@ mod tests {
         assert_eq!(toast(&json!({"text": "oi", "timeoutMs": 4000})), None);
         assert_eq!(toast(&json!({"id": "ab-3", "text": "  ", "timeoutMs": 4000})), None);
         assert_eq!(toast(&json!({"id": "ab-4", "text": "oi"})), None);
+        let long = toast(&json!({"id": "ab-5", "text": "x".repeat(2000), "timeoutMs": 1})).unwrap().text;
+        assert_eq!((long.chars().count(), long.ends_with('…')), (301, true));
+        assert_eq!(toast(&json!({"id": "ab-6", "text": "1\n2\n3\n4\n5", "timeoutMs": 1})).unwrap().text, "1\n2\n3\n4…");
     }
 
     fn cells(words: &[u32]) -> String {

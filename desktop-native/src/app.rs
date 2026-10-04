@@ -465,8 +465,10 @@ pub struct Hangar {
     plugin_band: Value,
     /// Painéis que os mods abriram e o terminal desenhou, do mesmo SSE.
     plugin_panes: Vec<Value>,
-    /// Ids dos avisos de mod (SSE `plugin_toast`) que já foram mostrados.
-    plugin_toasts_seen: HashSet<String>,
+    /// Últimos ids de aviso de mod (SSE `plugin_toast`) já mostrados; só os recentes voltam na reconexão.
+    plugin_toasts_seen: std::collections::VecDeque<String>,
+    /// Avisos de mod na tela, do mais antigo ao mais novo.
+    plugin_toasts_shown: std::collections::VecDeque<SharedString>,
     recent: Option<Recent>,
     media: MediaCache<(SessionKey, Source)>,
     full_images: viewer::FullImages,
@@ -745,7 +747,7 @@ impl Hangar {
             attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
             suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
-            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_toasts_seen: HashSet::new(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
+            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
             settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
@@ -5504,14 +5506,24 @@ impl Hangar {
     fn show_plugin_toast(&mut self, data: &Value, window: &mut Window, cx: &mut Context<Self>) {
         let Some(toast) = crate::plugin_ui::toast(data) else { return };
         // A reconexão do SSE repõe os avisos ainda vivos: o id diz quais já passaram por aqui.
-        if !self.plugin_toasts_seen.insert(toast.id.clone()) { return; }
+        if self.plugin_toasts_seen.contains(&toast.id) { return; }
+        if self.plugin_toasts_seen.len() >= 200 { self.plugin_toasts_seen.pop_front(); }
+        self.plugin_toasts_seen.push_back(toast.id.clone());
         let key = SharedString::from(toast.id);
+        // No máximo 4 na tela: um mod insistente não cobre a conversa.
+        while self.plugin_toasts_shown.len() >= 4 {
+            if let Some(old) = self.plugin_toasts_shown.pop_front() { window.remove_notification1::<PluginToast>(old, cx); }
+        }
+        self.plugin_toasts_shown.push_back(key.clone());
         // Sem o autohide: ele é fixo em 5 s, e o prazo do aviso é o que o mod pediu.
         let note = Notification::info(toast.text).id1::<PluginToast>(key.clone()).autohide(false);
         window.push_notification(if toast.plugin.is_empty() { note } else { note.title(toast.plugin) }, cx);
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(toast.timeout).await;
-            let _ = this.update_in(cx, |_, window, cx| window.remove_notification1::<PluginToast>(key, cx));
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.plugin_toasts_shown.retain(|k| *k != key);
+                window.remove_notification1::<PluginToast>(key, cx);
+            });
         }).detach();
     }
 

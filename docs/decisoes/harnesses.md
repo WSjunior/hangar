@@ -24,7 +24,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   mod.** O terminal o desenha por alguns segundos e ele não entra no transcript nem muda o estado.
   O backend guarda cada aviso até vencer e cada conexão do SSE recebe os ainda vivos com o tempo
   que resta; o app descarta pelo id o que já mostrou, porque a reconexão os repõe. Texto e nome
-  longos são cortados, nunca recusados. Ver [aviso de mod](#aviso-de-mod-medido-04102026).
+  longos são cortados, nunca recusados. Convidado (link compartilhado ou login próprio) não
+  recebe aviso de mod. Cada app mostra no máximo 4 por vez e corta o texto longo na tela. Ver [aviso de mod](#aviso-de-mod-medido-04102026).
 
 - **Botão de mod clicado no app é clique de mouse SGR no pane, achado pelo rótulo e confirmado
   pelo `ui.press`.** Nenhuma API do engine dispara o botão de outro plugin. Sem mouse ligado, com

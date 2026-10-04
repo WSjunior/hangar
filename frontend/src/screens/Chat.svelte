@@ -477,6 +477,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   function showPluginToast(t: PluginToast) {
     if (pluginToastsSeen.has(t.id)) return;
     pluginToastsSeen.add(t.id);
+    // No máximo 4 na tela: um mod insistente não cobre a conversa.
+    while (pluginToasts.length >= 4) dismissPluginToast(pluginToasts[0].id);
     pluginToasts = [...pluginToasts, t];
     pluginToastTimers.set(t.id, setTimeout(() => dismissPluginToast(t.id), t.timeoutMs));
   }

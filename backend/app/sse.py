@@ -1028,8 +1028,10 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         asyncio.create_task(em_voo_pump("ferramenta", fonte_ferramenta(name))),
         asyncio.create_task(jsonl_watcher()),
         asyncio.create_task(band_pump()),
-        asyncio.create_task(toast_pump()),
     ]
+    # Aviso de mod pode trazer texto sensível do dono: convidado não recebe.
+    if count_app:
+        tasks.append(asyncio.create_task(toast_pump()))
     # NUCLEO (conexao): instrumentacao do CICLO DE VIDA do stream. O sintoma relatado é "a conversa
     # para e só volta fechando/abrindo o app", e o log de acesso do uvicorn só mostra a conexão
     # FECHANDO — sem duração, sem motivo, sem quanto foi entregue. Sem isso a causa (queda de rede

@@ -368,3 +368,22 @@ async def test_mod_toast_reaches_the_stream_with_the_session_idle(monkeypatch):
         assert "id" not in ev  # sem id de SSE: quem repõe na reconexão é a bomba
     finally:
         pb.esquecer("aviso1")
+
+
+@pytest.mark.asyncio
+async def test_guest_stream_never_gets_mod_toasts(monkeypatch):
+    from app import plugin_bridge as pb
+    _idle_session(monkeypatch, "aviso2")
+
+    async def _consumir():
+        async for ev in merged_events("aviso2", "/claude/a.jsonl", provider="claude",
+                                      count_app=False):
+            if ev["event"] == "plugin_toast":
+                return ev
+
+    pb._store_toast("aviso2", "token secreto", 9000, "demo")
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(_consumir(), timeout=1.5)
+    finally:
+        pb.esquecer("aviso2")
