@@ -184,12 +184,16 @@ def test_executor_death_ends_the_command_and_its_child(tmp_path):
             return True
         except OSError:
             return False
+    def wait_pid(path, deadline):
+        # A fixture cria o arquivo antes de escrever o número: existir não basta.
+        while time.monotonic() < deadline:
+            if path.exists() and (text := path.read_text().strip()):
+                return int(text)
+            time.sleep(.01)
+        raise AssertionError("A fixture não iniciou o descendente")
     try:
         deadline = time.monotonic() + 5
-        while not child_file.exists() and time.monotonic() < deadline:
-            time.sleep(.01)
-        assert child_file.exists(), "A fixture não iniciou o descendente"
-        pids = [int(root_file.read_text()), int(child_file.read_text())]
+        pids = [wait_pid(root_file, deadline), wait_pid(child_file, deadline)]
         worker.kill()
         worker.wait(timeout=5)
         deadline = time.monotonic() + 3
