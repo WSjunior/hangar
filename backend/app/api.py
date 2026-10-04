@@ -9674,17 +9674,23 @@ async def worktrees_create(body: WorktreeCreateBody):
     name = sanitize_session_name(body.name)
     if not name:
         raise HTTPException(400, detail="nome de pasta inválido")
-    try:
-        root = await asyncio.to_thread(_allowed_scan_root, body.repo)
+    def create() -> tuple[str, bool]:
+        root = _allowed_scan_root(body.repo)
         if body.fetch:
-            await asyncio.to_thread(worktrees.fetch, body.repo)
-        path, created = await asyncio.to_thread(create_worktree, body.repo, body.branch, name, root,
-                                                new_branch=body.new_branch, base=body.base)
+            worktrees.fetch(body.repo)
+        path, created = create_worktree(body.repo, body.branch, name, root,
+                                        new_branch=body.new_branch, base=body.base)
+        # Na mesma thread: cliente que desconecta cancela o await, não a criação já em curso.
+        if created:
+            _invalidate_lists()
+        return path, created
+
+    try:
+        path, created = await asyncio.to_thread(create)
     except (FsError, GitError) as exc:
         raise HTTPException(exc.status, detail=exc.detail) from None
     if not created:
         raise HTTPException(409, detail="essa branch já é a da pasta principal")
-    await asyncio.to_thread(_invalidate_lists)
     return {"path": path}
 
 

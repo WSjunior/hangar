@@ -688,3 +688,32 @@ def test_redirect_through_symlink(tmp_path):
     worktrees.record_removed(str(tmp_path / "repo-x"), main)
     assert worktrees.redirect(str(tmp_path / "link" / "repo-x" / "sub")) == main
     assert worktrees.redirect(str(tmp_path / "outra")) == str(tmp_path / "outra")
+
+
+def test_create_invalidates_lists_even_if_client_disconnects(tmp_path, monkeypatch):
+    """Cliente que desconecta durante o `git worktree add` não deixa a lista sem a pasta nova."""
+    import asyncio
+    import threading
+    from app import api
+    entered, release, invalidated = threading.Event(), threading.Event(), threading.Event()
+
+    def slow_create(*_a, **_k):
+        entered.set()
+        release.wait(5)
+        return str(tmp_path / "repo-x"), True
+
+    monkeypatch.setattr(api, "_allowed_scan_root", lambda _p: str(tmp_path))
+    monkeypatch.setattr(api, "create_worktree", slow_create)
+    monkeypatch.setattr(api, "_invalidate_lists", invalidated.set)
+
+    async def run():
+        body = api.WorktreeCreateBody(repo=str(tmp_path / "repo"), branch="x", name="x")
+        task = asyncio.create_task(api.worktrees_create(body))
+        await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert invalidated.wait(5)
