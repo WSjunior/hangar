@@ -395,3 +395,102 @@ async fn turn_end_confirms_the_delivered_input_without_being_asked() {
     handle.stop().await.unwrap();
     server.await.unwrap();
 }
+
+/// Serviço de política HTTP que responde `ok` a tudo e conta as chamadas.
+async fn policy_server() -> (std::net::SocketAddr,std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use tokio::io::AsyncReadExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = calls.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream,_)) = listener.accept().await else { return };
+            let counter = counter.clone();
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stream);
+                loop {
+                    let mut length = 0usize;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).await.unwrap_or(0) == 0 { return; }
+                        if line == "\r\n" { break; }
+                        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") { length = value.trim().parse().unwrap(); }
+                    }
+                    let mut body = vec![0;length]; reader.read_exact(&mut body).await.unwrap();
+                    counter.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+                    let kind = serde_json::from_slice::<Value>(&body).unwrap()["kind"].clone();
+                    let data = if kind == "prepare_prompt" { json!({"content":"Olá","notices":[],"native_candidate":false}) } else { json!({}) };
+                    let reply = json!({"ok":true,"data":data}).to_string();
+                    let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",reply.len());
+                    reader.get_mut().write_all(response.as_bytes()).await.unwrap();
+                }
+            });
+        }
+    });
+    (address,calls)
+}
+
+#[tokio::test]
+async fn status_formatting_and_state_changes_do_not_rewrite_the_journal() {
+    // Uma mensagem custava ~60 regravações do estado: cada format_status passava pelo diário e
+    // cada mudança de estado gravava a vista inteira, mesmo sem nada durável mudar.
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("chat.jsonl");
+    std::fs::write(&transcript,"").unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut header = String::new(); reader.read_line(&mut header).await.unwrap();
+        let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
+            "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+        reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+        loop {
+            let mut raw = String::new();
+            if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
+            let envelope:Value = serde_json::from_str(&raw).unwrap();
+            let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
+            reader.get_mut().write_all(format!("{ack}\n").as_bytes()).await.unwrap();
+            let events = [json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"m1"}}}),
+                json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}),
+                json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"oi"}}}),
+                json!({"type":"stream_event","event":{"type":"content_block_stop","index":0}}),
+                json!({"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"oi"}]}}),
+                json!({"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":1,"output_tokens":1}})];
+            for event in events {
+                let frame = json!({"type":"cano_output","frame":event.to_string()});
+                reader.get_mut().write_all(format!("{frame}\n").as_bytes()).await.unwrap();
+            }
+        }
+    });
+    let (policy,calls) = policy_server().await;
+    let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
+        metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
+        binding:CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 },
+        lease_path:dir.path().join("key.lock"),state_path:dir.path().join("key.queue-state.json"),projection_dir:dir.path().join("projection"),
+        transcript,created:0.0 };
+    let lease = acquire_lease(&target.lease_path).unwrap();
+    let store = Store::open(&target.state_path,&target.projection_dir,State::new("key",1,"session",vec![])).unwrap();
+    let queue = QueueActor::start(store,lease);
+    let connection = cano::connect(&target.binding).await.unwrap();
+    let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap()
+        .with_policy(PolicyClient::new(policy,"secret".into(),"instance".into()));
+    let handle = RuntimeActor::spawn(target,queue,connection,engine);
+    let mut events = handle.subscribe();
+    let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"Olá","entry_id":"msg"}) };
+    assert!(handle.command(input).await.unwrap().disposition == Disposition::Accepted);
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event.channel == "state" && event.data["state"] == "idle" && calls.load(std::sync::atomic::Ordering::SeqCst) > 2 { break; }
+        }
+    }).await.expect("o turno precisa terminar");
+    handle.stop().await.unwrap();
+    server.await.unwrap();
+    let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+    assert!(!state.operations.keys().any(|id|id.starts_with("policy:")),"serviço sem efeito não entra no diário");
+    let views = state.operations.values().filter(|op|op.payload["kind"] == "set_runtime_state").count();
+    assert!(views <= 3,"vista gravada {views} vezes num turno sem mudança durável relevante");
+}

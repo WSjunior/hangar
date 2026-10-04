@@ -293,7 +293,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
     let mut revision = Revision { value:engine.revision.load(Ordering::Acquire),counter:engine.revision.clone() };
     let mut state_version = 0u64;
     let mut published_state_version = 0u64;
-    let state_gate = Arc::new(Mutex::new(0u64));
+    let state_gate = Arc::new(Mutex::new(SavedView::default()));
     let mut durable_view = json!({"alive":true,"initialized":false,"ready":false});
     let mut last_state = String::new();
     let mut confirming = false;
@@ -392,7 +392,8 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                                 id:wire.clone(),payload:json!({"logical_id":logical_id,"frame":frame,"request_id":frame.get("id").or_else(||frame.get("request_id")),
                                     "generation":target.generation,"conversation":view["conversation"],
                                     "state_revision":view["state_revision"],"settings_revision":view["settings_revision"]}),entry_id }).await.map_err(io_failure)?;
-                            save_view(&queue,target.generation,sample,&state_gate,state_version,&view).await?;
+                            // Antes de cada escrita no fio a vista vai inteira: o contador dos IDs tem que estar salvo.
+                            save_view(&queue,target.generation,sample,&state_gate,state_version,&view,true).await?;
                             let cursor = capture_cursor(&target,&view).await?;
                             queue.exec(target.generation,&format!("cursor:{wire}"),sample,Action::BindDispatch { id:wire.clone(),cursor:cursor.clone() }).await.map_err(io_failure)?;
                             if authoritative.operations.get(&logical_id).is_none_or(|op|op.status == Status::Prepared) {
@@ -419,7 +420,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                     let queue = queue.clone(); let generation = target.generation; let sample = clock(start);
                     let gate = state_gate.clone();
                     jobs.spawn(async move {
-                        let result = save_view(&queue,generation,sample,&gate,version,&view).await;
+                        let result = save_view(&queue,generation,sample,&gate,version,&view,false).await;
                         Job::View { version,view,result }
                     });
                 }
@@ -450,23 +451,15 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                     }
                     sequence += 1;
                     let phase_id = format!("policy:{}:{sequence}",target.generation);
-                    let queue = queue.clone(); let target = target.clone(); let policy = engine.policy.clone(); let sample = clock(start);
-                    let view = engine.view(); let state_gate = state_gate.clone(); let version = state_version;
+                    let target = target.clone(); let policy = engine.policy.clone();
+                    // Estes serviços não escrevem na CLI (formatar status, carimbo, sidecar, log): repetir é
+                    // inofensivo, então não passam pelo diário. Quatro gravações por chamada, a cada mudança de
+                    // estado, eram a maior parte do disco gasto por mensagem.
                     jobs.spawn(async move {
-                        let result = async {
-                            queue.exec(target.generation,&format!("prepare:{phase_id}"),sample,Action::Prepare { id:phase_id.clone(),
-                                payload:json!({"kind":kind,"request_id":request_id,"payload":payload}),entry_id:None }).await.map_err(io_failure)?;
-                            save_view(&queue,target.generation,sample,&state_gate,version,&view).await?;
-                            queue.exec(target.generation,&format!("dispatch:{phase_id}"),sample,Action::BeginDispatch { id:phase_id.clone(),wire_id:phase_id.clone() }).await.map_err(io_failure)?;
-                            let result = policy.ok_or_else(||failure("policy_unavailable"))?.run(&target,&kind,&request_id,payload,&phase_id).await;
-                            let (status,stored) = match &result {
-                                Ok(payload)=>(Status::Accepted,payload.clone()),
-                                Err(error)=>(Status::Unknown,json!({"error_code":error.code})),
-                            };
-                            queue.exec(target.generation,&format!("finish:{phase_id}"),sample,
-                                Action::Finish { id:phase_id.clone(),status,result:stored }).await.map_err(io_failure)?;
-                            result
-                        }.await;
+                        let result = match policy {
+                            Some(policy) => policy.run(&target,&kind,&request_id,payload,&phase_id).await,
+                            None => Err(failure("policy_unavailable")),
+                        };
                         Job::Policy { request_id,kind,phase_id,result }
                     });
                 }
@@ -928,12 +921,30 @@ async fn capture_cursor(target:&RuntimeTarget,view:&Value) -> Result<Value,Runti
         .await.map_err(|_|failure("cursor_job"))?.map_err(io_failure).and_then(|cursor|serde_json::to_value(cursor).map_err(|_|failure("cursor_json")))
 }
 
-async fn save_view(queue:&QueueActor,generation:u64,sample:ClockSample,gate:&Mutex<u64>,version:u64,view:&Value) -> Result<(),RuntimeError> {
+#[derive(Default)]
+struct SavedView { version:u64, durable:Option<Value> }
+
+/// Campos que mudam a cada evento e que ninguém relê do disco: o motor parte de `in_progress:false`
+/// e o estado público é recalculado. O contador sai da comparação porque a escrita no fio salva a
+/// vista inteira (`force`) antes de usar um ID novo.
+const VOLATILE_VIEW:[&str;9] = ["public_state","alive","iniciando","in_progress","pending","question","deliverable","runtime_counter","turn_id"];
+
+fn durable_part(view:&Value) -> Value {
+    let mut durable = view.clone();
+    if let Some(fields) = durable.as_object_mut() { for key in VOLATILE_VIEW { fields.remove(key); } }
+    durable
+}
+
+async fn save_view(queue:&QueueActor,generation:u64,sample:ClockSample,gate:&Mutex<SavedView>,version:u64,view:&Value,force:bool) -> Result<(),RuntimeError> {
     let mut saved = gate.lock().await;
-    if version >= *saved {
-        queue.exec(generation,&format!("state:{}",unique()),sample,
-            Action::SetRuntimeState { state:json!({"view":view}) }).await.map_err(io_failure)?;
-        *saved = version;
+    if version >= saved.version {
+        let durable = durable_part(view);
+        if force || saved.durable.as_ref() != Some(&durable) {
+            queue.exec(generation,&format!("state:{}",unique()),sample,
+                Action::SetRuntimeState { state:json!({"view":view}) }).await.map_err(io_failure)?;
+            saved.durable = Some(durable);
+        }
+        saved.version = version;
     }
     Ok(())
 }
