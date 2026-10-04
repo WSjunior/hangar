@@ -579,7 +579,7 @@ def parse_obj(obj: dict) -> list[ChatEvent]:
         return []
 
     # A transferência pro Codex importa resposta em texto puro; o histórico precisa mostrá-la igual.
-    if etype == "assistant" and isinstance(content, str):
+    if etype == "assistant" and isinstance(content, str) and content.strip():
         content = [{"type": "text", "text": content}]
     if etype == "assistant" and isinstance(content, list):
         # Um evento POR BLOCO, na ordem do content (thinking etc. ignorados). Antes o 1o tool_use
