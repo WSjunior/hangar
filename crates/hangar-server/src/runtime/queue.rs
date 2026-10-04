@@ -374,7 +374,17 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             if id.starts_with(CALL_PREFIX) { return Err(invalid("identificador reservado")); }
             if let Some(old) = state.operations.get(&id) {
                 if old.payload != payload || old.entry_id != entry_id { return Err(invalid("intenção da operação mudou")); }
-            } else { state.operations.insert(id.clone(),Operation::new(&id,payload,entry_id)); }
+            } else {
+                // Linha já confirmada pela fila: a mesma intenção chegando depois da poda não reenvia.
+                let delivered = payload.get("logical_id").is_none() && entry_id.as_deref()
+                    .is_some_and(|entry| state.rows.iter().any(|r| row_id(r) == entry && r["confirmed"] == true));
+                let mut op = Operation::new(&id,payload,entry_id);
+                if delivered {
+                    op.status = Status::Accepted;
+                    op.result = json!({"operation_id":id,"disposition":"accepted","payload":{"already_confirmed":true}});
+                }
+                state.operations.insert(id.clone(),op);
+            }
             if state.operations[&id].status == Status::Deferred {
                 let old = state.operations.get_mut(&id).unwrap(); old.status = Status::Prepared; old.result = Value::Null;
             }

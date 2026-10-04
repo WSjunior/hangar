@@ -297,8 +297,14 @@ def apply_action(state, action, clock, call_id):
             if old["status"] == "deferred":
                 old.update(status="prepared", result=None)
             return old
-        operations[operation_id] = _operation(operation_id, action["payload"], action.get("entry_id"))
-        return operations[operation_id]
+        operation = operations[operation_id] = _operation(operation_id, action["payload"], action.get("entry_id"))
+        # Linha já confirmada pela fila: a mesma intenção chegando depois da poda não reenvia.
+        if (not (isinstance(action["payload"], dict) and "logical_id" in action["payload"])
+                and operation["entry_id"] is not None
+                and any(row.get("id") == operation["entry_id"] and row.get("confirmed") is True for row in rows)):
+            operation.update(status="accepted", result={"operation_id": operation_id, "disposition": "accepted",
+                                                         "payload": {"already_confirmed": True}})
+        return operation
     if kind in {"bind_dispatch", "begin_dispatch", "finish", "late_rpc_resolution"}:
         operation = operations.get(action["id"])
         if operation is None:

@@ -118,6 +118,24 @@ async fn confirmed_prompt_does_not_consume_next_echo() {
 }
 
 #[tokio::test]
+async fn resubmit_after_prune_of_confirmed_row_does_not_send_again() {
+    let input = ||RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"Olá","entry_id":"msg"}) };
+    let (handle,server,dir) = setup(true).await;
+    assert!(handle.command(input()).await.unwrap().disposition == Disposition::Accepted);
+    handle.queue("confirm".into(),Action::Confirm { entry_ids:vec!["msg".into()] }).await.unwrap();
+    for index in 0..300 { handle.queue(format!("fill:{index}"),Action::SetRuntimeState { state:json!({}) }).await.unwrap(); }
+    handle.stop().await.unwrap();
+    assert_eq!(server.await.unwrap(),1);
+    let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+    assert!(!state.operations.contains_key("msg"));
+    // Ator novo, sem a resposta guardada: a linha confirmada responde e nada vai ao fio.
+    let (handle,server,_dir) = setup_recovered(true,false,false,Some(dir),false).await;
+    assert!(handle.command(input()).await.unwrap().disposition == Disposition::Accepted);
+    handle.stop().await.unwrap();
+    assert_eq!(server.await.unwrap(),0);
+}
+
+#[tokio::test]
 async fn prepare_before_every_write_and_cli_reply_before_ack_is_final() {
     let (handle,server,dir) = setup(true).await;
     let result = handle.command(command()).await.unwrap();

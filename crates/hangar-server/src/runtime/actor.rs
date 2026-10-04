@@ -233,7 +233,7 @@ impl Pending {
 struct Attempt { logical_id:String,phase_id:String,frame:Value,order:u64 }
 
 enum Job {
-    Root { id:String,result:Result<(),RuntimeError> },
+    Root { id:String,result:Result<Option<RuntimeReply>,RuntimeError> },
     Write { wire:String,result:Result<(),RuntimeError> },
     Ack { logical_id:String,outcome:WriteOutcome,result:Result<(),RuntimeError> },
     Finished { reply:RuntimeReply,result:Result<(),RuntimeError> },
@@ -563,10 +563,10 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                                             delivered:false,ts:None,pre_transcript:command.payload["pre_transcript"] == true,entry_id:Some(entry_id.into()) }).await.map_err(io_failure)?;
                                     }
                                 }
-                                queue.exec(target.generation,&format!("prepare:{id}:{}",unique()),sample,Action::Prepare { id:id.clone(),payload:serde_json::to_value(&command).unwrap(),
+                                let prepared = queue.exec(target.generation,&format!("prepare:{id}:{}",unique()),sample,Action::Prepare { id:id.clone(),payload:serde_json::to_value(&command).unwrap(),
                                     entry_id:matches!(command.kind,OperationKind::Input | OperationKind::Steer)
                                         .then(||command.payload["entry_id"].as_str().unwrap_or(&id).into()) }).await.map_err(io_failure)?;
-                                Ok(())
+                                Ok(stored_reply(&id,&prepared))
                             }.await;
                             *preparation.0.lock().await += 1;
                             preparation.1.notify_waiters();
@@ -675,8 +675,15 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                 let job = result.ok_or_else(||failure("job_missing"))?.map_err(|_|failure("job_panic"))?;
                 match job {
                     Job::Root { id,result } => {
-                        if let Err(failure) = result { fail_root(&mut roots,&id,failure); continue; }
+                        let stored = match result { Ok(stored)=>stored,Err(failure)=>{ fail_root(&mut roots,&id,failure); continue; } };
                         let pending = roots.get_mut(&id).unwrap();
+                        // A fila já tem o desfecho (linha confirmada ou operação final): responde sem escrever no fio.
+                        if let Some(reply) = stored {
+                            pending.preparing = false;
+                            pending.result = Some(reply.clone());
+                            for response in pending.responses.drain(..) { let _ = response.send(Ok(reply.clone())); }
+                            continue;
+                        }
                         if pending.cancelled || pending.timed_out {
                             pending.preparing = false;
                             effects.push_back(Effect::Reply { operation_id:id,disposition:if pending.cancelled { Disposition::Rejected } else { Disposition::Unknown },
@@ -909,6 +916,16 @@ async fn save_view(queue:&QueueActor,generation:u64,sample:ClockSample,gate:&Mut
         *saved = version;
     }
     Ok(())
+}
+
+/// Operação que a fila devolve já final nunca volta a ser enviada; sem resposta guardada no
+/// formato de RuntimeReply, a disposição sai do status.
+fn stored_reply(id:&str,prepared:&Value) -> Option<RuntimeReply> {
+    let disposition = match prepared["status"].as_str()? {
+        "accepted" | "confirmed"=>Disposition::Accepted, "rejected"=>Disposition::Rejected, _=>return None,
+    };
+    serde_json::from_value(prepared["result"].clone()).ok()
+        .or_else(||Some(RuntimeReply { operation_id:id.into(),disposition,payload:Value::Null }))
 }
 
 fn status(disposition:Disposition) -> Status {

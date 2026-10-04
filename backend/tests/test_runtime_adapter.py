@@ -189,6 +189,38 @@ def test_codex_reserve_permission_uses_provider_signature(tmp_path, monkeypatch)
         coordinator.close_python_leases()
 
 
+def test_resubmit_after_prune_of_confirmed_row_does_not_send_again(tmp_path, monkeypatch):
+    from app import runtime_queue
+    from app.runtime_adapter import LegacyBridge
+    from app.runtime_coordinator import Binding, RuntimeCoordinator
+    monkeypatch.setattr(runtime_queue, "_RECENT_CALLS", 8)
+    coordinator = RuntimeCoordinator()
+    monkeypatch.setattr(runtime_coordinator, "_current", coordinator)
+    slot = coordinator.register(Binding("session", "key", "codex", True, {"key":"key", "thread_id":"thread"},
+        str(tmp_path / "chat.jsonl"), tmp_path / "projection", tmp_path / "state", tmp_path / "lease", 1))
+    sent = []
+    class Adapter:
+        async def send_prompt(self, name, text, pre_transcript=False):
+            sent.append(text)
+            return {"sent":True}
+    bridge = LegacyBridge(coordinator, {"codex":Adapter()})
+    sample = {"monotonic_s":1, "epoch_s":1800000000}
+    try:
+        submit = lambda: asyncio.run(bridge.op(slot.binding.descriptor(), {"kind":"submit", "text":"Olá"}, "msg"))
+        assert submit()["disposition"] == "accepted"
+        # O adaptador falso não passa pelo fio, que é quem marca a entrega.
+        slot.store.exec(1, "delivered", sample, {"kind":"set_delivered", "entry_id":"msg", "value":True, "steered":False})
+        slot.store.exec(1, "confirm", sample, {"kind":"confirm", "entry_ids":["msg"]})
+        for index in range(20):
+            slot.store.exec(1, f"fill:{index}", sample, {"kind":"set_runtime_state", "state":{}})
+        assert "msg" not in slot.store.state["operations"]
+        # A mesma operação chegando depois da poda: a linha confirmada responde, nada sai de novo.
+        assert submit()["disposition"] == "accepted"
+        assert sent == ["Olá"]
+    finally:
+        coordinator.close_python_leases()
+
+
 def test_quiesce_waits_for_cleanup_persistence(tmp_path, monkeypatch):
     from app.runtime_coordinator import Binding, RuntimeCoordinator, WriterLease
     class Legacy:
