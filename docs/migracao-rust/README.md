@@ -28,6 +28,14 @@ trabalho da máquina de origem; nesta pasta os arquivos equivalentes são os da 
   portado e repassa o resto ao Python, que escuta numa porta interna. O Python sobe e vigia o Rust
   e assume a porta sozinho se ele faltar ou cair. A cada parte, mais rotas passam para o Rust; no fim
   o Python sai e o instalador leva um binário só.
+- **O Rust é o único dono do que já migrou (decisão do dono, 04/10/2026).** Fica só a reserva do
+  processo inteiro: Rust ausente, incompatível ou caindo → o Python assume a porta e tudo. Com o
+  Rust de pé, falha numa operação migrada vira erro com código e motivo (diário e
+  `hangar-server.log`), nunca a passagem daquela sessão ou operação ao Python. O código Python das
+  partes migradas fica só de referência e sai na parte 7. Substitui a regra anterior ("3 tentativas
+  + 1 e só aquela sessão vai para o Python"): o código de passagem entre os dois donos foi a origem
+  da maioria dos defeitos de 04/10 (primeira mensagem sumindo, "sessão em transferência", entrega
+  marcada sem chegar, reserva circular de Git). Plano da mudança em `dono-unico/`.
 - **Contrato interno versionado à mão.** Mudou rota `/internal`, evento do `side-events` ou variável
   passada ao filho → subir `RUST_SERVER_PROTOCOL` (Python) e `INTERNAL_PROTOCOL` (Rust) juntos.
   O `versao` do snapshot do `hangar-cano` acompanha o `VERSAO` do `cano.py`.
