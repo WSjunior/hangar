@@ -241,6 +241,8 @@ pub(super) enum CreateReply {
     Git(u64, Result<Value, Failure>),
     /// Fetch, pull, troca ou criação de branch: a ação, a branch dela e o estado que voltou.
     GitDone(folder_git::GitAction, String, Result<Value, Failure>),
+    /// As worktrees do servidor, para a pílula de branch mostrar as do repositório da pasta.
+    Worktrees(u64, Result<Value, Failure>),
 }
 
 /// A regra do backend (`names.sanitize_session_name`): acento vira a letra sem ele, o que não for letra, número, `_` ou `-` vira `-`,
@@ -397,8 +399,16 @@ pub(in crate::app) struct NewSession {
     picked: Option<String>,
     checkout: Remote<Option<Checkout>>,
     branch: String,
-    /// Escolher branch cria worktree; desligado, troca a branch da própria pasta.
-    worktree: bool,
+    /// Worktrees do repositório da pasta, para abrir a sessão numa que já existe.
+    worktrees: Remote<Vec<super::worktrees::WorktreeStatus>>,
+    /// A worktree existente escolhida na pílula de branch: a sessão nasce nela.
+    existing: Option<String>,
+    /// O menu de branch mostrando a troca da branch da própria pasta.
+    switching: bool,
+    /// A lista de bases da worktree nova aberta no menu.
+    base_open: bool,
+    /// Pasta e worktree pedidas de fora (página de worktrees) antes de as raízes chegarem.
+    preset: Option<(String, Option<String>)>,
     /// A worktree nasce numa branch nova, criada a partir de `base`; o nome vazio vira o nome da sessão.
     new_branch: bool,
     base: String,
@@ -509,7 +519,11 @@ impl NewSession {
         let subscriptions = vec![
             cx.subscribe(&query, |this: &mut Self, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { this.refilter(cx); cx.notify() }),
             cx.subscribe(&name, |_, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { cx.notify() }),
-            cx.subscribe(&new_branch_name, |_, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { cx.notify() }),
+            // Digitar depois de escolher uma branch existente volta a ser branch nova com o nome digitado.
+            cx.subscribe(&new_branch_name, |this: &mut Self, input, event: &InputEvent, cx| if matches!(event, InputEvent::Change) {
+                if !this.branch.is_empty() && input.read(cx).value().trim() != this.branch { this.branch.clear(); this.new_branch = true; }
+                cx.notify()
+            }),
             cx.subscribe(&menu_query, |_, _, event: &InputEvent, cx| if matches!(event, InputEvent::Change) { cx.notify() }),
             cx.subscribe(&git_name, |this: &mut Self, _, event: &InputEvent, cx| match event {
                 InputEvent::Change => cx.notify(),
@@ -530,7 +544,8 @@ impl NewSession {
         Self {
             link, purpose: SessionDialogPurpose::Create, transfer_blocked: false, compact: false, menu: Default::default(), menu_query, servers: Remote::default(),
             roots: Remote::default(), root: None, dir: String::new(), scan: Remote::default(), folders: Vec::new(), query, picked: None,
-            checkout: Remote::default(), branch: String::new(), worktree: false, new_branch: false, base: String::new(), new_branch_name,
+            checkout: Remote::default(), branch: String::new(), worktrees: Remote::default(), existing: None, switching: false, base_open: false,
+            preset: None, new_branch: false, base: String::new(), new_branch_name,
             git: Default::default(), git_name,
             sessions: Remote::default(), same_folder: false, name, provider: "claude", providers: Remote::default(), configs: Remote::default(),
             config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true, headless_owner: None, headless_touched: false, headless_saving: false,
@@ -691,6 +706,8 @@ impl NewSession {
         self.folders.clear();
         self.branch.clear();
         (self.new_branch, self.base) = (false, String::new());
+        (self.existing, self.switching, self.preset) = (None, false, None);
+        self.worktrees.reset();
         self.new_branch_name.update(cx, |input, cx| input.set_value("", window, cx));
         self.roots.reset();
         self.scan.reset();
@@ -928,12 +945,63 @@ impl NewSession {
         let (Some(root), Some(path)) = (self.root.as_ref(), self.picked.clone()) else { return };
         let root = root.path.clone();
         let seq = self.checkout.start();
-        if fresh { (self.checkout.value, self.branch, self.new_branch, self.base) = (None, String::new(), false, String::new()); }
+        if fresh {
+            (self.checkout.value, self.branch, self.new_branch, self.base) = (None, String::new(), false, String::new());
+            (self.existing, self.switching, self.base_open) = (None, false, false);
+            self.load_folder_worktrees(cx);
+        }
         self.request(cx, move |api, send| Box::pin(async move {
             let result = api.server_read(&["fs", "branches"], &[("root", root.as_str()), ("path", path.as_str())], 30).await;
             send(CreateReply::Branches(seq, checkout_of(result))).await;
         }));
         self.load_git(cx);
+        cx.notify();
+    }
+
+    fn load_folder_worktrees(&mut self, cx: &mut Context<Self>) {
+        let Some(folder) = self.picked.clone() else { return };
+        let seq = self.worktrees.start();
+        // Só o repositório da pasta e sem medir o disco: o menu não mostra espaço.
+        self.request(cx, move |api, send| Box::pin(async move {
+            let result = api.server_read(&["worktrees"], &[("repo", folder.as_str()), ("sizes", "false")], 30).await;
+            send(CreateReply::Worktrees(seq, result)).await
+        }));
+    }
+
+    /// As worktrees do repositório da pasta escolhida (a pasta é o principal, uma subpasta dele ou uma das worktrees).
+    fn folder_worktrees(&self, result: Result<Value, Failure>) -> Result<Vec<super::worktrees::WorktreeStatus>, String> {
+        let repos = result.map_err(|e| Hangar::fetch_failure(&e))
+            .and_then(|v| serde_json::from_value::<Vec<super::worktrees::WorktreeRepo>>(v["repos"].clone()).map_err(|_| tr("invalid_response")))?;
+        let picked = self.picked.clone().unwrap_or_default();
+        let inside = |root: &str| super::worktrees::inside(&picked, root);
+        Ok(repos.into_iter().find(|r| inside(&r.repo) || r.worktrees.iter().any(|w| inside(&w.path)))
+            .map(|r| r.worktrees.into_iter().filter(|w| w.exists).collect()).unwrap_or_default())
+    }
+
+    /// Identidade da máquina desta tela: a página de worktrees só a usa se for a mesma.
+    pub(super) fn machine(&self) -> String { self.link.api.identity() }
+
+    /// Abre a tela já na pasta (e, com `existing`, com essa worktree escolhida na pílula de branch). Sem as raízes ainda,
+    /// fica guardado até elas chegarem.
+    pub(super) fn preset_folder(&mut self, folder: String, existing: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.creating { return; }
+        self.preset = Some((folder, existing));
+        self.apply_preset(window, cx);
+    }
+
+    fn apply_preset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(roots) = self.roots.ok() else { return };
+        let Some((folder, existing)) = self.preset.take() else { return };
+        let inside = |root: &str| super::worktrees::inside(&folder, root);
+        let Some(root) = roots.iter().filter(|r| inside(&r.path)).max_by_key(|r| r.path.len()).cloned() else {
+            self.error = Some(format!("{} {folder}", tr("create_roots_failed")));
+            cx.notify();
+            return;
+        };
+        self.root = Some(root.clone());
+        self.scan_dir(root.path, cx);
+        self.pick(folder, window, cx);
+        self.existing = existing;
         cx.notify();
     }
 
@@ -948,6 +1016,8 @@ impl NewSession {
     pub(super) fn create(&mut self, first: Option<(u64, String, Vec<FirstFile>)>, cx: &mut Context<Self>) {
         if !self.can_create(cx) || self.compact != first.is_some() { return; }
         let Some(cwd) = self.picked.clone() else { return };
+        // Worktree que já existe: a sessão nasce dentro dela, sem pedir worktree nova.
+        let cwd = self.existing.clone().filter(|_| self.compact && !self.new_branch).unwrap_or(cwd);
         let mut name = if self.compact { basename(&cwd).to_owned() } else { self.name.read(cx).value().trim().to_owned() };
         let provider = self.provider;
         let typed = self.new_branch_name.read(cx).value().trim().to_string();
@@ -1083,6 +1153,12 @@ impl NewSession {
                 if !self.roots.finish(seq, roots) { return None; }
                 let list = self.roots.ok().cloned().unwrap_or_default();
                 if let Some(root) = list.iter().find(|r| Some(&r.path) == last.as_ref()).or(list.first()).cloned() { self.select_root(root, window, cx); }
+                self.apply_preset(window, cx);
+            }
+            CreateReply::Worktrees(seq, result) => {
+                if seq != self.worktrees.seq { return None; }
+                let list = self.folder_worktrees(result);
+                self.worktrees.finish(seq, list);
             }
             CreateReply::Scan(seq, result) => { if self.scan.finish(seq, result) { self.refilter(cx); } }
             CreateReply::Branches(seq, result) => {
@@ -1179,7 +1255,8 @@ impl NewSession {
                 match result {
                     Ok(opened) => {
                         // A branch nova já existe: a próxima criação não pode repetir o nome.
-                        (self.new_branch, self.base) = (false, String::new());
+                        (self.new_branch, self.base, self.existing) = (false, String::new(), None);
+                        self.branch.clear();
                         self.new_branch_name.update(cx, |input, cx| input.set_value("", window, cx));
                         return Some(opened);
                     }
@@ -1661,6 +1738,7 @@ impl NewSession {
         if open && menu == Menu::Folder { self.query.update(cx, |input, cx| input.focus(window, cx)); }
         else if open { self.menu_query.update(cx, |input, cx| { input.set_value("", window, cx); input.focus(window, cx); }); }
         if open && menu == Menu::Git { self.git_opened(cx); }
+        if open && menu == Menu::Branch { (self.switching, self.base_open) = (false, false); }
         cx.notify();
     }
 
@@ -1725,11 +1803,12 @@ impl NewSession {
             (true, _) => Some(tr("create_checkout_loading")),
             (false, Some(Some(_))) if self.new_branch => {
                 let typed = self.new_branch_name.read(cx).value().trim().to_string();
-                Some(format!("{} · {}", if typed.is_empty() { tr_shared("worktree_nome_branch", &[]) } else { typed }, tr("create_checkout_worktree")))
+                Some(tr_shared("worktree_menu_pill_nova", &[("branch", if typed.is_empty() { "…" } else { &typed })]))
             }
-            (false, Some(Some(checkout))) => Some(if self.branch.is_empty() {
-                checkout.current.clone().unwrap_or_else(|| tr("create_checkout_current"))
-            } else { format!("{} · {}", self.branch, tr("create_checkout_worktree")) }),
+            (false, Some(Some(_))) if !self.branch.is_empty() => Some(tr_shared("worktree_menu_pill_nova", &[("branch", &self.branch)])),
+            (false, Some(Some(_))) if self.existing.is_some() =>
+                Some(tr_shared("worktree_menu_pill_existente", &[("nome", self.existing.as_deref().map(basename).unwrap_or_default())])),
+            (false, Some(Some(checkout))) => Some(checkout.current.clone().unwrap_or_else(|| tr("create_checkout_current"))),
             _ => None,
         };
         div().flex().items_center().gap(px(2.)).pt(px(2.)).pl(px(6.))
@@ -1764,7 +1843,9 @@ impl NewSession {
 
     /// O que impede ou explica o envio, abaixo das pílulas: a criação em voo, a falha dela, ou a leitura que faltou.
     /// O nome que a sessão da tela sem sessão vai ter (a pasta; o desempate do servidor pode somar um número) e o agente.
-    pub(super) fn opening_name(&self) -> String { self.picked.as_deref().map(basename).unwrap_or_default().to_owned() }
+    pub(super) fn opening_name(&self) -> String {
+        self.existing.as_deref().filter(|_| !self.new_branch).or(self.picked.as_deref()).map(basename).unwrap_or_default().to_owned()
+    }
     pub(super) fn provider(&self) -> &'static str { self.provider }
     /// O passo da criação em curso e os segundos desde o pedido.
     pub(super) fn progress(&self) -> (String, u64) { (self.step.clone(), self.started.map(|t| t.elapsed().as_secs()).unwrap_or(0)) }
@@ -1887,68 +1968,162 @@ impl NewSession {
                     }).collect();
                 Self::menu_list("new-chat-account-list", rows)
             }
-            Menu::Branch => {
-                let Some(Some(checkout)) = self.checkout.ok() else { return div().into_any_element() };
-                let current = checkout.current.as_ref().map(|branch| format!("{} · {branch}", tr("create_checkout_current")))
-                    .unwrap_or_else(|| tr("create_checkout_current"));
-                let worktree = self.worktree;
-                let hint = if worktree { tr("create_checkout_worktree") } else { String::new() };
-                let choices = std::iter::once((String::new(), current, String::new()))
-                    .chain(checkout.branches.iter().chain(&checkout.remotes).filter(|b| checkout.current.as_ref() != Some(*b))
-                        .map(|b| (b.clone(), b.clone(), hint.clone())));
-                let locked = !worktree && self.git_locked();
-                let mut rows: Vec<AnyElement> = choices.filter(|(_, label, hint)| wanted(&query, label, hint)).map(|(id, label, hint)| {
-                    let on = !self.new_branch && self.branch == id;
-                    menu_row(SharedString::from(format!("new-chat-branch-{id}")), on, label, hint).disabled(locked)
-                        .on_click(cx.listener(move |this, _, _, cx| {
+            Menu::Branch => self.render_branch_menu(&query, cx),
+        };
+        div().p(px(popup::INSET)).flex().flex_col().gap(px(2.)).child(self.menu_search()).child(body).into_any_element()
+    }
+
+    /// A pílula de branch: a pasta principal, uma worktree nova, as worktrees que já existem e, num submenu, a troca da
+    /// branch da própria pasta.
+    fn render_branch_menu(&self, query: &str, cx: &mut Context<Self>) -> AnyElement {
+        use super::worktrees::{age_days, stale_days, title};
+        let Some(Some(checkout)) = self.checkout.ok() else { return div().into_any_element() };
+        if self.switching { return self.render_switch_menu(checkout, query, cx); }
+        let current = checkout.current.clone().unwrap_or_else(|| tr("create_checkout_current"));
+        // Worktree nova: de uma branch nova (`new_branch`) ou de uma que já existe (`branch`).
+        let fresh = self.new_branch || !self.branch.is_empty();
+        let main = menu_row("new-chat-branch-main", !fresh && self.existing.is_none(), tr_shared("worktree_menu_pasta_principal", &[]), current)
+            .disabled(self.creating)
+            .on_click(cx.listener(|this, _, _, cx| {
+                if this.creating { return; }
+                (this.new_branch, this.existing) = (false, None);
+                this.branch.clear();
+                this.menu.set(None);
+                cx.notify();
+            }));
+        // O menu fica aberto: o nome e a base da branch nova aparecem logo abaixo.
+        let new = menu_row("new-chat-branch-new", fresh, tr_shared("worktree_menu_nova", &[]), tr_shared("worktree_menu_nova_dica", &[]))
+            .disabled(self.creating)
+            .on_click(cx.listener(|this, _, window, cx| {
+                if this.creating { return; }
+                if this.new_branch || !this.branch.is_empty() { return; }
+                (this.new_branch, this.existing) = (true, None);
+                this.new_branch_name.update(cx, |input, cx| input.focus(window, cx));
+                cx.notify();
+            }));
+        let new_fields = fresh.then(|| {
+            let bases: Vec<AnyElement> = if !self.base_open { Vec::new() } else {
+                checkout.current.iter().chain(checkout.branches.iter().filter(|b| checkout.current.as_ref() != Some(*b))).map(|b| {
+                    let base = b.clone();
+                    menu_row(SharedString::from(format!("new-chat-base-{b}")), self.base == *b, b.clone(), String::new())
+                        .on_click(cx.listener(move |this, _, _, cx| { this.base = base.clone(); this.base_open = false; cx.notify(); }))
+                        .into_any_element()
+                }).collect()
+            };
+            // Branches que já existem e casam com o digitado: escolher uma abre a worktree nela, sem criar branch. As abertas
+            // em alguma worktree ficam de fora (aparecem como a worktree delas logo abaixo).
+            let typed = self.new_branch_name.read(cx).value().trim().to_lowercase();
+            let open_in: HashSet<&str> = self.worktrees.ok().into_iter().flatten().filter_map(|w| w.branch.as_deref()).collect();
+            let remote: HashSet<&String> = checkout.remotes.iter().collect();
+            let matching: Vec<AnyElement> = checkout.branches.iter().chain(&checkout.remotes)
+                .filter(|b| checkout.current.as_ref() != Some(*b) && !open_in.contains(b.as_str()))
+                .filter(|b| typed.is_empty() || b.to_lowercase().contains(&typed)).map(|b| {
+                    let pick = b.clone();
+                    let hint = if remote.contains(b) { tr_shared("worktree_nova_so_remoto", &[]) } else { String::new() };
+                    menu_row(SharedString::from(format!("new-chat-existing-branch-{b}")), self.branch == *b, b.clone(), hint)
+                        .disabled(self.creating)
+                        .on_click(cx.listener(move |this, _, window, cx| {
                             if this.creating { return; }
-                            this.new_branch = false;
-                            // Sem worktree a troca é na pasta: o menu fica aberto para mostrar a recusa ou o resultado.
-                            if this.worktree || id.is_empty() { this.menu.set(None); this.branch = id.clone(); }
-                            else { this.git_switch(folder_git::GitAction::Switch, id.clone(), cx); }
+                            (this.new_branch, this.existing, this.branch) = (false, None, pick.clone());
+                            this.new_branch_name.update(cx, |input, cx| input.set_value(pick.clone(), window, cx));
+                            this.menu.set(None);
                             cx.notify();
                         }))
                         .into_any_element()
                 }).collect();
-                // O menu fica aberto: o nome e a base da branch nova aparecem logo abaixo.
-                rows.insert(0, menu_row("new-chat-branch-new", self.new_branch, tr_shared("worktree_nova_branch", &[("base", &self.base)]), String::new())
-                    .disabled(self.creating)
-                    .on_click(cx.listener(|this, _, _, cx| {
+            div().px(px(8.)).py(px(4.)).flex().flex_col().gap(px(4.))
+                .child(Input::new(&self.new_branch_name).small().aria_label(tr_shared("worktree_nome_branch", &[])))
+                .when(!matching.is_empty(), |el| el.child(div().id("new-chat-existing-branches").max_h(px(160.)).overflow_y_scroll()
+                    .flex().flex_col().children(matching)))
+                .when(self.new_branch, |el| el.child(div().flex().child(Button::new("new-chat-branch-base").ghost().xsmall()
+                    .label(format!("{} ⌄", tr_shared("worktree_menu_partir_de", &[("base", &self.base)])))
+                    .on_click(cx.listener(|this, _, _, cx| { this.base_open = !this.base_open; cx.notify(); })))))
+                .when(self.new_branch && self.base_open, |el| el.child(Self::menu_list("new-chat-base-list", bases)))
+                .child(div().text_xs().text_color(theme::muted()).whitespace_normal().child(tr_shared("worktree_modo_ajuda", &[])))
+                .when(checkout.dirty, |el| el.child(div().text_xs().text_color(theme::muted()).whitespace_normal().child(tr("create_checkout_dirty"))))
+        });
+        let now = super::side::now_seconds();
+        let existing = match (&self.worktrees.value, self.worktrees.ok()) {
+            _ if self.worktrees.loading => popup::skeleton("new-chat-worktrees", 2).into_any_element(),
+            (Some(Err(error)), _) => Self::menu_failure("new-chat-worktrees-error", error.clone(),
+                |this: &mut Self, _: &mut Window, cx: &mut Context<Self>| this.load_folder_worktrees(cx), cx),
+            (_, Some(list)) => {
+                let rows = list.iter().filter(|w| wanted(query, &title(w), w.branch.as_deref().unwrap_or(""))).map(|w| {
+                    let on = !self.new_branch && self.existing.as_deref() == Some(w.path.as_str());
+                    let stale = stale_days(w, now);
+                    let hint = match (w.sessions.first(), stale, age_days(w, now)) {
+                        (Some(name), _, _) => tr_shared("worktree_menu_em_uso", &[("nome", name)]),
+                        (None, Some(d), _) => tr_shared("worktree_parada_dias", &[("n", &d.to_string())]),
+                        (None, None, Some(d)) if d > 0 => tr_shared("worktree_dias_atras", &[("n", &d.to_string())]),
+                        _ => String::new(),
+                    };
+                    let color = if !w.sessions.is_empty() { theme::accent() } else if stale.is_some() { theme::warning_text() } else { theme::faint() };
+                    let (path, busy) = (w.path.clone(), !w.sessions.is_empty());
+                    popup::row(SharedString::from(format!("new-chat-worktree-{}", w.path)), on).accessibility_label(title(w)).disabled(self.creating)
+                        .child(div().w_full().flex().items_center().gap_2()
+                            .child(div().size(px(7.)).flex_shrink_0().rounded_full().bg(color))
+                            .child(div().flex_1().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(title(w)))
+                            .when(!hint.is_empty(), |el| el.child(div().flex_shrink_0().max_w(px(170.)).truncate().text_xs().text_color(theme::muted()).child(hint)))
+                            .when(on, |el| el.child(chrome::small_icon(IconName::Check, 16., theme::accent()))))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if this.creating { return; }
+                            (this.new_branch, this.existing) = (false, Some(path.clone()));
+                            this.branch.clear();
+                            // Ocupada, o menu fica aberto para o aviso de que outra sessão já trabalha nela.
+                            if !busy { this.menu.set(None); }
+                            cx.notify();
+                        }))
+                        .into_any_element()
+                }).collect();
+                Self::menu_list("new-chat-worktree-list", rows)
+            }
+            _ => div().into_any_element(),
+        };
+        let occupied = self.existing.as_ref().filter(|_| !self.new_branch)
+            .and_then(|p| self.worktrees.ok()?.iter().find(|w| &w.path == p)?.sessions.first().cloned());
+        let switch = popup::row("new-chat-branch-switch", false).accessibility_label(tr_shared("worktree_menu_trocar_branch", &[]))
+            .child(div().w_full().flex().items_center().gap_2()
+                .child(div().flex_1().min_w_0().truncate().text_sm().child(tr_shared("worktree_menu_trocar_branch", &[])))
+                .child(chrome::small_icon(IconName::ChevronRight, 14., theme::faint())))
+            .on_click(cx.listener(|this, _, _, cx| { this.switching = true; cx.notify(); }));
+        div().child(main).child(new).children(new_fields)
+            .child(popup::separator())
+            .child(popup::title(tr_shared("worktree_menu_existentes", &[]), None))
+            .child(existing)
+            .children(occupied.map(|name| div().px(px(8.)).py(px(4.)).text_xs().text_color(theme::warning_text()).whitespace_normal()
+                .child(tr_shared("worktree_menu_ocupada", &[("nome", &name)]))))
+            .child(popup::separator())
+            .child(switch)
+            .into_any_element()
+    }
+
+    /// O submenu da troca da branch da própria pasta, com a recusa ou o resultado dela.
+    fn render_switch_menu(&self, checkout: &Checkout, query: &str, cx: &mut Context<Self>) -> AnyElement {
+        let locked = self.git_locked();
+        let rows: Vec<AnyElement> = checkout.branches.iter().chain(&checkout.remotes)
+            .filter(|b| checkout.current.as_ref() != Some(*b) && wanted(query, b, "")).map(|b| {
+                let id = b.clone();
+                menu_row(SharedString::from(format!("new-chat-branch-{id}")), false, b.clone(), String::new()).disabled(locked)
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         if this.creating { return; }
-                        (this.new_branch, this.worktree) = (true, true);
+                        // A troca é na pasta: o menu fica aberto para mostrar a recusa ou o resultado.
+                        (this.new_branch, this.existing) = (false, None);
                         this.branch.clear();
+                        this.git_switch(folder_git::GitAction::Switch, id.clone(), cx);
                         cx.notify();
                     }))
-                    .into_any_element());
-                let bases: Vec<AnyElement> = if self.new_branch {
-                    checkout.current.iter().chain(checkout.branches.iter().filter(|b| checkout.current.as_ref() != Some(*b))).map(|b| {
-                        let base = b.clone();
-                        menu_row(SharedString::from(format!("new-chat-base-{b}")), self.base == *b, b.clone(), String::new())
-                            .on_click(cx.listener(move |this, _, _, cx| { this.base = base.clone(); cx.notify(); }))
-                            .into_any_element()
-                    }).collect()
-                } else { Vec::new() };
-                let help = if worktree { tr_shared("worktree_modo_ajuda", &[]) } else { tr("create_checkout_switch_help") };
-                div().child(Self::menu_list("new-chat-branch-list", rows))
-                    .when(self.new_branch, |el| el.child(popup::separator())
-                        .child(div().px(px(8.)).pt(px(4.)).child(Input::new(&self.new_branch_name).small().aria_label(tr_shared("worktree_nome_branch", &[]))))
-                        .child(Self::menu_list("new-chat-base-list", bases)))
-                    .child(popup::separator())
-                    .child(div().px(px(8.)).pt(px(4.)).child(Checkbox::new("new-chat-branch-worktree").label(tr("create_checkout_use_worktree"))
-                        .checked(worktree).disabled(self.creating)
-                        .on_change(cx.listener(|this, checked: &bool, _, cx| {
-                            this.worktree = *checked;
-                            if !*checked { this.branch.clear(); this.new_branch = false; }
-                            cx.notify();
-                        }))))
-                    .child(div().px(px(8.)).py(px(4.)).flex().flex_col().gap(px(2.)).text_xs().text_color(theme::muted()).whitespace_normal()
-                        .child(help)
-                        .when(worktree && checkout.dirty, |el| el.child(tr("create_checkout_dirty"))))
-                    .when(!worktree, |el| el.children(self.git_feedback(cx)))
                     .into_any_element()
-            }
-        };
-        div().p(px(popup::INSET)).flex().flex_col().gap(px(2.)).child(self.menu_search()).child(body).into_any_element()
+            }).collect();
+        let back = popup::row("new-chat-branch-back", false).accessibility_label(tr("costs_back"))
+            .child(div().w_full().flex().items_center().gap_2()
+                .child(chrome::small_icon(IconName::ChevronLeft, 14., theme::faint()))
+                .child(div().flex_1().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(tr_shared("worktree_menu_trocar_branch", &[]))))
+            .on_click(cx.listener(|this, _, _, cx| { this.switching = false; cx.notify(); }));
+        div().child(back)
+            .child(Self::menu_list("new-chat-branch-list", rows))
+            .child(div().px(px(8.)).py(px(4.)).text_xs().text_color(theme::muted()).whitespace_normal().child(tr("create_checkout_switch_help")))
+            .children(self.git_feedback(cx))
+            .into_any_element()
     }
 
     pub(super) fn render_compact_folders(&self, cx: &mut Context<Self>) -> Div {

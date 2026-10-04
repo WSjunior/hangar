@@ -1,17 +1,25 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { basename, deleteMergedWorktreesForServer, fetchWorktreesForServer, getWorktreesForServer,
-           mergedWorktreeBatch, type WorktreeRepo, type WorktreeStatus } from '@hangar/core';
+  import { basename, deleteMergedWorktreesForServer, fetchWorktreesForServer, fmtBytes, getWorktreesForServer,
+           mergedWorktreeBatch, relativeTime, worktreeAgeDays, worktreeIsAgent, worktreeReady, worktreeState,
+           worktreeTitle, WORKTREE_STALE_DAYS, type WorktreeRepo, type WorktreeState, type WorktreeStatus } from '@hangar/core';
   import BottomSheet from '../components/BottomSheet.svelte';
   import Spinner from '../components/Spinner.svelte';
   import WorktreeSheet from '../components/WorktreeSheet.svelte';
   import { listOwnServers, onServersChanged, type Server } from '../lib/auth';
+  import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { worktreeStatus } from '../lib/worktreeStatus.svelte';
+  import { goToSession, sessionStateLabel, worktreeStateColor, worktreeStateLabel } from '../lib/worktreeView';
   import * as m from '../paraglide/messages';
 
   let { onBack }: { onBack?: () => void } = $props();
   let servidores = $state<Server[]>(listOwnServers());
   $effect(() => onServersChanged(() => { servidores = listOwnServers(); }));
+  // Estado vivo das sessões nas fichas: o mesmo stream da lista, nunca um pedido por linha.
+  $effect(() => {
+    sessionsStore.retain();
+    return () => sessionsStore.release();
+  });
 
   type Bloco = { servidor: Server; repos: WorktreeRepo[]; erro: string };
   let blocos = $state<Bloco[]>([]);
@@ -37,11 +45,24 @@
 
   // Primeiro mostra o que o disco já sabe; o fetch dos remotos (lento) vem depois e relê.
   async function atualizar() {
+    releituras = 0;
     atualizando = true;
     await Promise.allSettled(blocos.flatMap((b) => b.repos.map((r) => fetchWorktreesForServer(b.servidor, r.repo))));
     atualizando = false;
     await carregar();
   }
+
+  // O backend mede o tamanho em segundo plano, uma pasta por vez: relê a cada 5 s enquanto houver
+  // medida pendente, com teto para não ficar lendo para sempre se a medição travar.
+  const medindo = $derived(blocos.some((b) => b.repos.some((r) => r.worktrees.some((w) => w.size_pending))));
+  const MAX_RELEITURAS = 12;
+  let releituras = 0;
+  $effect(() => {
+    blocos;   // cada leitura nova reagenda a próxima
+    if (!medindo || releituras >= MAX_RELEITURAS) return;
+    const t = setTimeout(() => { releituras++; void carregar(); }, 5000);
+    return () => clearTimeout(t);
+  });
 
   // Por `serverId::repo`: o lote em andamento (botão desligado) e o aviso dele, que não é de leitura.
   let loteAndando = $state<string | null>(null);
@@ -81,7 +102,102 @@
   $effect(() => { chaveServidores; untrack(() => { void carregar().then(atualizar); }); });
 
   const vazio = $derived(!carregando && blocos.every((b) => !b.erro && b.repos.length === 0));
+
+  // ── Filtros e contadores ──────────────────────────────────────────────────
+  type Filtro = 'todas' | 'uso' | 'dirty' | 'prontas' | 'paradas' | 'sem_branch';
+  let filtro = $state<Filtro>('todas');
+  const parada = (w: WorktreeStatus) => (worktreeAgeDays(w) ?? 0) > WORKTREE_STALE_DAYS;
+  const passa: Record<Filtro, (w: WorktreeStatus) => boolean> = {
+    todas: () => true,
+    uso: (w) => w.sessions.length > 0,
+    dirty: (w) => w.dirty > 0,
+    prontas: worktreeReady,
+    paradas: parada,
+    sem_branch: (w) => !w.branch,
+  };
+  type Item = { servidor: Server; w: WorktreeStatus; estado: WorktreeState };
+  const todas = $derived<Item[]>(blocos.flatMap((b) => b.repos.flatMap((r) =>
+    r.worktrees.map((w) => ({ servidor: b.servidor, w, estado: worktreeState(w) })))));
+  const conta = (f: Filtro) => todas.filter((i) => passa[f](i.w)).length;
+  const somaTamanho = (ws: WorktreeStatus[]) => ws.reduce((a, w) => a + (w.size ?? 0), 0);
+  const liberaProntas = $derived(somaTamanho(todas.filter((i) => worktreeReady(i.w)).map((i) => i.w)));
+  const nomesEmUso = $derived([...new Set(todas.flatMap((i) => i.w.sessions))].join(' · '));
+
+  const contadores = $derived<{ f: Filtro; rotulo: string; dica: string; cor: string }[]>([
+    { f: 'uso', rotulo: m.worktrees_contador_em_uso(), dica: nomesEmUso || m.worktrees_contador_em_uso_vazio(), cor: 'var(--accent)' },
+    { f: 'dirty', rotulo: m.worktrees_contador_nao_commitado(), dica: m.worktrees_contador_nao_commitado_dica(), cor: 'var(--warning)' },
+    { f: 'prontas', rotulo: m.worktrees_contador_prontas(), dica: m.worktrees_contador_prontas_dica({ tamanho: fmtBytes(liberaProntas) }), cor: 'var(--success)' },
+    { f: 'paradas', rotulo: m.worktrees_contador_paradas(), dica: m.worktrees_contador_paradas_dica(), cor: 'var(--text-muted)' },
+  ]);
+  const filtros = $derived<{ f: Filtro; rotulo: string }[]>([
+    { f: 'todas', rotulo: m.worktrees_filtro_todas() },
+    { f: 'uso', rotulo: m.worktrees_filtro_em_uso() },
+    { f: 'dirty', rotulo: m.worktrees_filtro_nao_commitado() },
+    { f: 'prontas', rotulo: m.worktrees_filtro_prontas() },
+    { f: 'paradas', rotulo: m.worktrees_filtro_paradas() },
+    { f: 'sem_branch', rotulo: m.worktrees_filtro_sem_branch() },
+  ]);
+
+  // ── Disco ─────────────────────────────────────────────────────────────────
+  const TOPO = 6;
+  const porTamanho = $derived(todas.filter((i) => (i.w.size ?? 0) > 0).sort((a, b) => (b.w.size ?? 0) - (a.w.size ?? 0)));
+  const discoTotal = $derived(somaTamanho(porTamanho.map((i) => i.w)));
+  const discoResto = $derived(porTamanho.slice(TOPO));
+  const legenda: { e: WorktreeState; rotulo: () => string }[] = [
+    { e: 'merged', rotulo: m.worktrees_filtro_prontas },
+    { e: 'dirty', rotulo: m.worktrees_filtro_nao_commitado },
+    { e: 'session', rotulo: m.worktrees_filtro_em_uso },
+    { e: 'active', rotulo: m.worktree_estado_andamento },
+    { e: 'detached', rotulo: m.worktrees_filtro_sem_branch },
+  ];
+
+  // Subagentes recolhidos por repositório; com filtro ligado, abertos (é o que a pessoa procura).
+  let subAbertos = $state<Record<string, boolean>>({});
+
+  const tamanhoDe = (w: WorktreeStatus) => (!w.exists ? '—' : w.size_pending ? m.worktrees_disco_calculando() : w.size != null ? fmtBytes(w.size) : '—');
+  function atividade(w: WorktreeStatus): string {
+    const d = worktreeAgeDays(w);
+    if (d === null) return '—';
+    return d >= 1 ? m.worktree_dias_atras({ n: d }) : relativeTime(w.last_commit?.at ?? w.created_at);
+  }
+  const estadoSessao = (s: Server, nome: string) => sessionsStore.rows.find((r) => r.serverId === s.id && r.name === nome)?.state;
 </script>
+
+{#snippet ficha(servidor: Server, w: WorktreeStatus)}
+  {@const e = worktreeState(w)}
+  {@const dias = worktreeAgeDays(w)}
+  <li class="ficha">
+    <div class="ficha-topo">
+      <button type="button" class="abrir" onclick={() => (aberta = { servidor, path: w.path })}>{worktreeTitle(w)}</button>
+      <span class="tam">{tamanhoDe(w)}</span>
+    </div>
+    <div class="chips">
+      <span class="chip" style:--cor={worktreeStateColor[e]}>{worktreeStateLabel[e]()}</span>
+      {#if parada(w) && dias !== null}<span class="chip" style:--cor="var(--warning)">{m.worktree_parada_dias({ n: dias })}</span>{/if}
+    </div>
+    {#if w.sessions.length}
+      <div class="sessoes">
+        {#each w.sessions as nome (nome)}
+          {@const est = estadoSessao(servidor, nome)}
+          <button type="button" class="sessao" aria-label={m.worktree_ir_sessao_nome({ nome })} onclick={() => goToSession(servidor.id, nome)}>
+            <span class="ponto" class:ponto--vivo={est === 'working'} class:ponto--espera={est === 'awaiting_input'} aria-hidden="true"></span>
+            <span class="sessao-nome">{nome}</span>
+            {#if est}<span class="muted">{sessionStateLabel(est)}</span>{/if}
+            <span aria-hidden="true">→</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
+    <div class="mono"><span>{w.branch ?? m.worktree_sem_branch_rotulo()}</span><span class="muted"> ← {w.base ?? '—'}</span></div>
+    {#if w.last_commit}<div class="assunto">{w.last_commit.subject}</div>{/if}
+    <div class="metricas">
+      <span class="mono">↑{w.ahead} ↓{w.behind ?? 0}</span>
+      <span class:aviso={w.dirty > 0} class:muted={!w.dirty}>{w.dirty ? m.worktree_n_nao_commitados({ n: w.dirty }) : m.worktree_limpa()}</span>
+      <span class="muted">{atividade(w)}</span>
+      {#if w.created_at}<span class="muted">{m.worktree_criada({ quando: relativeTime(w.created_at) })}</span>{/if}
+    </div>
+  </li>
+{/snippet}
 
 <div class="wt">
   <header class="topo">
@@ -96,43 +212,121 @@
   {:else}
     {#each blocos as b (b.servidor.id)}
       {#if b.erro}<p class="erro" role="alert">{b.servidor.label}: {m.worktrees_erro({ motivo: b.erro })}</p>{/if}
-      {#each b.repos as r (r.repo)}
-        {@const lote = mergedWorktreeBatch(r)}
-        <section class="repo">
-          <h2>{basename(r.repo)}{servidores.length > 1 ? ` · ${b.servidor.label}` : ''}</h2>
-          {#if lote.deletable.length}
-            <button type="button" class="lote" disabled={loteAndando === chaveLote(b, r.repo)} onclick={() => pedirLote(b, r)}>
-              {#if loteAndando === chaveLote(b, r.repo)}<Spinner />{/if}
-              {m.worktree_apagar_mescladas({ n: lote.deletable.length })}
-            </button>
-          {/if}
-          {#if erroLote[chaveLote(b, r.repo)]}<p class="erro" role="alert">{erroLote[chaveLote(b, r.repo)]}</p>{/if}
-          <ul>
-            {#each r.worktrees as w (w.path)}
+    {/each}
+
+    {#if todas.length}
+      <section class="contadores">
+        {#each contadores as c (c.f)}
+          <button type="button" class="contador" class:on={filtro === c.f} style:--cor={c.cor} aria-pressed={filtro === c.f}
+                  onclick={() => (filtro = filtro === c.f ? 'todas' : c.f)}>
+            <span class="contador-rotulo">{c.rotulo}</span>
+            <span class="contador-n">{conta(c.f)}</span>
+            <span class="contador-dica">{c.dica}</span>
+          </button>
+        {/each}
+      </section>
+
+      <section class="disco">
+        <h2>{m.worktrees_disco_titulo()}</h2>
+        {#if medindo}<p class="muted">{m.worktrees_disco_calculando()}</p>{/if}
+        {#if porTamanho.length}
+          <p class="muted">{m.worktrees_disco_resumo({ total: fmtBytes(discoTotal), n: porTamanho.length })}
+            {#if liberaProntas} · <span class="libera">{m.worktrees_disco_libera({ tamanho: fmtBytes(liberaProntas) })}</span>{/if}</p>
+          <div class="barra" aria-hidden="true">
+            {#each porTamanho as i (i.servidor.id + i.w.path)}<span style:flex-grow={String(i.w.size)} style:background={worktreeStateColor[i.estado]}></span>{/each}
+          </div>
+          <ul class="disco-linhas">
+            {#each porTamanho.slice(0, TOPO) as i (i.servidor.id + i.w.path)}
               <li>
-                <button type="button" class="linha" onclick={() => (aberta = { servidor: b.servidor, path: w.path })}>
-                  <span class="nome">{basename(w.path)}</span>
-                  <span class="muted">{w.branch} ← {w.base}</span>
-                  <span>{w.merged ? m.worktree_juntada() : m.worktree_nao_juntada({ n: w.ahead })}</span>
-                  {#if w.dirty}<span class="muted">{m.worktree_nao_commitados({ n: w.dirty })}</span>{/if}
-                  {#if w.ignored.length}<span class="muted">{m.worktree_ignorados_perdem({ n: w.ignored.length })}</span>{/if}
-                  {#if w.sessions.length}<span class="muted">{m.worktree_sessao_aberta({ nomes: w.sessions.join(', ') })}</span>{/if}
+                <button type="button" class="disco-linha" onclick={() => (aberta = { servidor: i.servidor, path: i.w.path })}>
+                  <span class="ponto" style:background={worktreeStateColor[i.estado]} aria-hidden="true"></span>
+                  <span class="disco-nome">{worktreeTitle(i.w)}</span>
+                  <span class="muted">{worktreeStateLabel[i.estado]()}</span>
+                  <span class="tam">{fmtBytes(i.w.size ?? 0)}</span>
                 </button>
               </li>
             {/each}
+            {#if discoResto.length}
+              <li class="disco-linha disco-linha--resto">
+                <span class="ponto" aria-hidden="true"></span>
+                <span class="disco-nome">{m.worktrees_disco_outras({ n: discoResto.length })}</span>
+                <span class="tam">{fmtBytes(somaTamanho(discoResto.map((i) => i.w)))}</span>
+              </li>
+            {/if}
           </ul>
-        </section>
+          <div class="legenda">
+            {#each legenda as l (l.e)}<span><span class="ponto" style:background={worktreeStateColor[l.e]} aria-hidden="true"></span>{l.rotulo()}</span>{/each}
+          </div>
+        {/if}
+      </section>
+
+      <div class="filtros" role="toolbar">
+        {#each filtros as f (f.f)}
+          <button type="button" class="filtro" class:on={filtro === f.f} aria-pressed={filtro === f.f} onclick={() => (filtro = f.f)}>
+            {f.rotulo}<span class="filtro-n">{conta(f.f)}</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
+
+    {@const algumVisivel = todas.some((i) => passa[filtro](i.w))}
+    {#if todas.length && !algumVisivel}<p class="vazio">{m.worktrees_filtro_vazio()}</p>{/if}
+
+    {#each blocos as b (b.servidor.id)}
+      {#each b.repos as r (r.repo)}
+        {@const visiveis = r.worktrees.filter(passa[filtro])}
+        {@const principais = visiveis.filter((w) => !worktreeIsAgent(w))}
+        {@const agentes = visiveis.filter(worktreeIsAgent)}
+        {@const lote = mergedWorktreeBatch(r)}
+        {@const k = chaveLote(b, r.repo)}
+        {@const subAberto = filtro !== 'todas' || !!subAbertos[k]}
+        {@const principal = r.worktrees.find((w) => w.main_branch)?.main_branch}
+        {#if visiveis.length || erroLote[k]}
+          <section class="repo">
+            <div class="repo-topo">
+              <h2>{basename(r.repo)}{servidores.length > 1 ? ` · ${b.servidor.label}` : ''}</h2>
+              {#if principal}<span class="muted">{m.worktree_repo_principal({ branch: principal })}</span>{/if}
+              <span class="muted">{m.worktree_repo_resumo({ n: r.worktrees.length, tamanho: fmtBytes(somaTamanho(r.worktrees)) })}</span>
+            </div>
+            {#if lote.deletable.length}
+              <button type="button" class="lote" disabled={loteAndando === k} onclick={() => pedirLote(b, r)}>
+                {#if loteAndando === k}<Spinner />{/if}
+                {m.worktree_limpar_mescladas({ n: lote.deletable.length, tamanho: fmtBytes(somaTamanho(lote.deletable)) })}
+              </button>
+            {/if}
+            {#if erroLote[k]}<p class="erro" role="alert">{erroLote[k]}</p>{/if}
+            <ul class="fichas">
+              {#each principais as w (w.path)}{@render ficha(b.servidor, w)}{/each}
+            </ul>
+            {#if agentes.length}
+              {@const recente = Math.max(...agentes.map((w) => w.last_commit?.at ?? w.created_at ?? 0))}
+              <button type="button" class="subagentes" aria-expanded={subAberto} onclick={() => (subAbertos[k] = !subAbertos[k])}>
+                <span class="seta" class:seta--aberta={subAberto} aria-hidden="true">›</span>
+                <span class="sub-titulo">{m.worktree_subagentes()} <span class="filtro-n">{agentes.length}</span></span>
+                {#if recente}<span class="muted">{m.worktree_subagentes_dica({ quando: relativeTime(recente) })}</span>{/if}
+              </button>
+              {#if subAberto}
+                <ul class="fichas">
+                  {#each agentes as w (w.path)}{@render ficha(b.servidor, w)}{/each}
+                </ul>
+              {/if}
+            {/if}
+          </section>
+        {/if}
       {/each}
     {/each}
+    {#if todas.length}<p class="muted legenda-commits">{m.worktrees_legenda_commits()}</p>{/if}
   {/if}
 </div>
 {#if aberta}
   <WorktreeSheet open={true} server={aberta.servidor} path={aberta.path} onClose={() => (aberta = null)} onDeleted={carregar} />
 {/if}
 {#if confirmando}
+  {@const libera = somaTamanho(confirmando.deletable)}
   <BottomSheet open={true} onClose={() => (confirmando = null)} ariaLabel={m.worktree_lote_titulo({ n: confirmando.deletable.length })}>
     <div class="sheet">
       <h2 class="title">{m.worktree_lote_titulo({ n: confirmando.deletable.length })}</h2>
+      {#if libera}<p class="libera">{m.worktree_libera({ tamanho: fmtBytes(libera) })}</p>{/if}
       <ul class="itens">
         {#each confirmando.deletable as w (w.path)}
           <li>
@@ -173,24 +367,85 @@
   .topo { display: flex; align-items: center; gap: 8px; }
   .topo h1 { font-size: 1.15rem; margin: 0; flex: 1; }
   .voltar { background: none; border: 0; font-size: 1.2rem; min-width: 40px; min-height: 40px; color: inherit; }
-  .repo h2 { font-size: 0.95rem; margin: 8px 0; }
-  .repo ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-  /* O botão global centraliza o conteúdo; a linha é uma ficha lida da esquerda. */
-  .linha { width: 100%; text-align: left; display: flex; flex-direction: column; align-items: stretch; gap: 2px;
-           padding: 10px 12px; border-radius: 10px; background: var(--surface-raised); border: 0; font: inherit; color: inherit; }
-  .nome { font-weight: 600; }
+  h2 { font-size: 0.95rem; margin: 0; }
   .muted { color: var(--text-muted); font-size: 0.85rem; }
-  .erro { color: var(--error); }
-  .vazio { color: var(--text-muted); text-align: center; padding: 32px 0; }
+  .mono { font-family: var(--font-mono); font-size: 0.82rem; overflow-wrap: anywhere; }
+  .aviso { color: var(--warning-text); font-size: 0.85rem; }
+  .libera { color: var(--success-text); }
+  .erro { color: var(--error); margin: 0; }
+  .vazio { color: var(--text-muted); text-align: center; padding: 32px 0; margin: 0; }
   .centro { display: flex; justify-content: center; padding: 32px; }
-  .lote { align-self: flex-start; gap: 8px; margin-bottom: 8px; padding: 0 16px; border-radius: 8px;
-          border: 1px solid var(--error); color: var(--error); font-weight: 600; }
+  .ponto { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text-muted); display: inline-block; }
+  .ponto--vivo { background: var(--success); }
+  .ponto--espera { background: var(--warning); }
+  .tam { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--text-secondary); font-size: 0.85rem; white-space: nowrap; }
+
+  /* Contadores: 2×2 no celular; cada um liga o filtro do mesmo nome. */
+  .contadores { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .contador { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 10px 12px;
+              border-radius: 12px; border: 1px solid var(--border-subtle); background: var(--surface-raised); font: inherit; color: inherit; }
+  .contador.on { border-color: var(--cor); }
+  .contador-rotulo { font-size: 0.78rem; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
+  .contador-rotulo::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--cor); }
+  .contador-n { font-size: 1.4rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .contador-dica { font-size: 0.75rem; color: var(--text-muted); overflow-wrap: anywhere; }
+
+  .disco { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 12px; background: var(--surface-raised); }
+  .disco p { margin: 0; }
+  .barra { display: flex; height: 10px; border-radius: 5px; overflow: hidden; gap: 1px; }
+  .barra span { min-width: 2px; }
+  .disco-linhas { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+  .disco-linha { width: 100%; display: flex; align-items: center; gap: 8px; text-align: left; padding: 6px 4px; min-height: 36px;
+                 border: 0; background: transparent; font: inherit; color: inherit; border-radius: 6px; }
+  .disco-linha--resto { color: var(--text-muted); }
+  .disco-nome { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 0 1 auto; }
+  .legenda { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 0.75rem; color: var(--text-muted); }
+  .legenda > span { display: inline-flex; align-items: center; gap: 4px; }
+
+  /* Chips do filtro rolam na horizontal: seis não cabem numa linha de celular. */
+  .filtros { display: flex; gap: 6px; overflow-x: auto; margin: 0 -16px; padding: 0 16px; scrollbar-width: none; }
+  .filtro { flex: none; display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 12px; border-radius: 999px;
+            border: 1px solid var(--border-subtle); background: transparent; font: inherit; font-size: 0.85rem; color: inherit; white-space: nowrap; }
+  .filtro.on { border-color: var(--border-strong); background: var(--surface-raised); }
+  .filtro-n { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+  .repo { display: flex; flex-direction: column; gap: 8px; }
+  .repo-topo { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
+  .lote { align-self: flex-start; gap: 8px; padding: 0 16px; border-radius: 8px;
+          border: 1px solid color-mix(in srgb, var(--success) 35%, transparent);
+          background: color-mix(in srgb, var(--success) 8%, transparent); color: var(--success-text); font-weight: 600; }
   .lote:disabled { opacity: 0.6; }
+  .fichas { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  /* A ficha inteira abre o detalhe pelo ::after do título; as sessões ficam por cima e levam à conversa. */
+  .ficha { position: relative; display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: 10px;
+           background: var(--surface-raised); }
+  .ficha-topo { display: flex; align-items: baseline; gap: 8px; }
+  .abrir { padding: 0; min-height: 0; border: 0; background: transparent; font: inherit; font-weight: 600; color: inherit;
+           text-align: left; overflow-wrap: anywhere; }
+  .abrir::after { content: ''; position: absolute; inset: 0; border-radius: 10px; }
+  .chips, .sessoes, .metricas { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; }
+  .chips { gap: 6px; }
+  .chip { font-size: 0.72rem; padding: 2px 8px; border-radius: 999px; color: var(--cor);
+          background: color-mix(in srgb, var(--cor) 14%, transparent); }
+  .sessao { position: relative; z-index: 1; display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 10px;
+            border-radius: 999px; border: 1px solid var(--border-default); background: var(--surface-inset); font: inherit; font-size: 0.82rem; color: inherit; }
+  .sessao-nome { font-weight: 600; }
+  .assunto { font-size: 0.85rem; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .metricas { font-size: 0.82rem; }
+  .subagentes { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; text-align: left; padding: 8px 4px; min-height: 40px;
+                border: 0; background: transparent; font: inherit; color: inherit; }
+  .sub-titulo { font-weight: 600; font-size: 0.9rem; }
+  .seta { display: inline-block; transition: rotate 0.15s; }
+  .seta--aberta { rotate: 90deg; }
+  .legenda-commits { margin: 4px 0 0; font-size: 0.75rem; }
+
   .sheet { padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .sheet .libera { margin: 0; font-size: 0.9rem; }
   .title { font-size: 1.05rem; margin: 0; }
+  .nome { font-weight: 600; }
   .itens { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
   .itens > li { display: flex; flex-direction: column; gap: 2px; }
-  .aviso { margin: 0; color: var(--warning-text); font-size: 0.85rem; }
+  .sheet .aviso { margin: 0; }
   .perde { margin: 0; padding-left: 18px; font-family: var(--font-mono); font-size: 0.8rem; overflow-wrap: anywhere; }
   .acoes { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
   .cancelar { padding: 0 16px; border-radius: 8px; border: 1px solid var(--border-default); }

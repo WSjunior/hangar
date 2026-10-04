@@ -6,6 +6,8 @@ import os
 import re
 import subprocess
 import threading
+import time
+import queue
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -311,8 +313,9 @@ def _inside(s, real: str) -> bool:
     return cwd == real or cwd.startswith(real.rstrip("/") + "/")
 
 
-def status(path: str, sessions=(), main: str | None = None) -> dict:
-    """`main`: o repo principal, quando quem chama já sabe (pasta sumida não diz de quem era)."""
+def status(path: str, sessions=(), main: str | None = None, measure: bool = True) -> dict:
+    """`main`: o repo principal, quando quem chama já sabe (pasta sumida não diz de quem era).
+    `measure=False`: não agenda medir o espaço (quem vai apagar ou só quer a branch)."""
     if main is None:
         root = repo_root_of(path) if os.path.isdir(path) else None
         main = main_repo_of(root) if root else _main_of_missing(path)
@@ -325,24 +328,163 @@ def status(path: str, sessions=(), main: str | None = None) -> dict:
     if branch and base:
         c = _git(cwd, "rev-list", "--count", f"{base}..{branch}", failed=failed)
         ahead = int(c.stdout.strip() or 0) if c.returncode == 0 else 0
-    dirty = 0
+    behind = 0
+    commits: list[dict] = []
+    if branch and base and branch != base:
+        c = _git(cwd, "rev-list", "--count", f"{branch}..{base}", failed=failed)
+        behind = int(c.stdout.strip() or 0) if c.returncode == 0 else 0
+        commits = _log_commits(cwd, f"{base}..{branch}", 3, failed)
+    last = _log_commits(cwd, branch or "HEAD", 1, failed) if exists or branch else []
+    dirty_files: list[dict] = []
     if exists:
         s = _git(path, "status", "--porcelain", failed=failed)
-        dirty = sum(1 for line in s.stdout.splitlines() if line.strip()) if s.returncode == 0 else 0
+        if s.returncode == 0:
+            dirty_files = [{"code": line[:2].strip() or "?", "path": line[3:]}
+                           for line in s.stdout.splitlines() if line.strip()]
     merged = bool(branch and base and branch != base and is_merged(cwd, branch, base, failed))
     ignored = _ignored_lost(path, main, failed) if exists else []
     real = os.path.realpath(path)
     inside = [s for s in sessions if _inside(s, real)]
+    size = disk_usage(path, schedule=measure) if exists else None
     return {
         # A conversa retomada abre na principal, que pode estar noutra branch que não a base.
         "path": path, "repo": main, "exists": exists, "branch": branch, "base": base,
         "main_branch": head_info(main)[0],
         # Leitura que falhou deixa dirty/ignored zerados: a situação nunca pode parecer segura.
         "merged": merged and not failed, "degraded": bool(failed),
-        "ahead": ahead, "dirty": dirty, "ignored": ignored,
+        "ahead": ahead, "behind": behind, "dirty": len(dirty_files),
+        "dirty_files": dirty_files[:_DIRTY_LIST], "ignored": ignored,
+        "last_commit": last[0] if last else None, "commits": commits,
+        "created_at": _created_at(main, path),
+        "size": size["bytes"] if size else None, "size_biggest": size["biggest"] if size else None,
+        "size_pending": exists and size is None,
         "sessions": sorted(s.name for s in inside),
         "closed": _closed_count(path, {os.path.realpath(s.jsonl) for s in inside if s.jsonl}),
     }
+
+
+_DIRTY_LIST = 50
+
+
+def _log_commits(cwd: str, rev: str, n: int, failed: list) -> list[dict]:
+    p = _git(cwd, "log", f"-{n}", "--format=%h%x00%s%x00%ct", rev, "--", failed=failed)
+    out = []
+    for line in p.stdout.splitlines() if p.returncode == 0 else []:
+        sha, _, rest = line.partition("\0")
+        subject, _, at = rest.rpartition("\0")
+        if sha and at.isdigit():
+            out.append({"sha": sha, "subject": subject, "at": int(at)})
+    return out
+
+
+def _admin_dir(main: str, path: str) -> Path | None:
+    """`.git/worktrees/<n>` desta worktree, achado pelo ponteiro `gitdir` (vale com a pasta sumida)."""
+    for e in Path(main, ".git", "worktrees").glob("*"):
+        try:
+            g = (e / "gitdir").read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if _same_path(os.path.dirname(os.path.normpath(os.path.join(e, g))), path):
+            return e
+    return None
+
+
+def _same_path(a: str, b: str) -> bool:
+    # No Windows o `gitdir` vem com `/` e o normpath devolve `\`; o git lista em estilo POSIX.
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def _created_at(main: str, path: str) -> int | None:
+    # `commondir` é escrito só no `worktree add`; `gitdir` e `HEAD` mudam depois.
+    admin = _admin_dir(main, path)
+    try:
+        return int((admin / "commondir").stat().st_mtime) if admin else None
+    except OSError:
+        return None
+
+
+_SIZE_TTL = 15 * 60
+_SIZE_RETRY = 60   # medição que falhou volta a ser tentada depois disso, não a cada leitura
+_sizes: dict[str, tuple[float, dict]] = {}
+_sizes_running: set[str] = set()
+_sizes_lock = threading.Lock()
+_size_queue: "queue.Queue[str]" = queue.Queue()
+_size_worker: threading.Thread | None = None
+
+
+def disk_usage(path: str, schedule: bool = True) -> dict | None:
+    """Espaço da pasta, do cache; vencido ou ausente agenda a medição e devolve o que houver.
+    Medir uma pasta de 14 GB leva segundos: a lista nunca espera por ela."""
+    global _size_worker
+    with _sizes_lock:
+        hit = _sizes.get(path)
+        stale = hit is None or time.time() - hit[0] > _SIZE_TTL
+        if schedule and stale and path not in _sizes_running:
+            _sizes_running.add(path)
+            _size_queue.put(path)
+            if _size_worker is None:
+                # Daemon: restart do backend não espera a medição de uma pasta enorme terminar.
+                # ponytail: uma medição por vez para não disputar disco com o resto da máquina.
+                _size_worker = threading.Thread(target=_size_loop, name="wt-size", daemon=True)
+                _size_worker.start()
+    return hit[1] if hit else None
+
+
+def _size_loop() -> None:
+    while True:
+        _measure(_size_queue.get())
+
+
+def _measure(path: str) -> None:
+    value: dict = {"bytes": None, "biggest": None}
+    at = time.time() - _SIZE_TTL + _SIZE_RETRY
+    try:
+        totals: dict[str, int] = {}
+        for entry in os.scandir(path):
+            totals[entry.name] = _tree_bytes(entry)
+        biggest = max(totals.items(), key=lambda kv: kv[1], default=None)
+        value = {"bytes": sum(totals.values()),
+                 "biggest": {"name": biggest[0], "bytes": biggest[1]} if biggest else None}
+        at = time.time()
+    except OSError as e:
+        _log.warning("worktrees: não medi o espaço de %s: %s", path, e)
+    finally:
+        with _sizes_lock:
+            _sizes_running.discard(path)
+            # Apagada durante a medição: não volta para o cache.
+            if os.path.isdir(path):
+                _sizes[path] = (at, value)
+            else:
+                _sizes.pop(path, None)
+
+
+def _entry_bytes(st: os.stat_result) -> int:
+    # Blocos ocupados, como o `du`; o Windows não os informa.
+    blocks = getattr(st, "st_blocks", None)
+    return blocks * 512 if blocks is not None else st.st_size
+
+
+def _tree_bytes(entry: os.DirEntry) -> int:
+    try:
+        if entry.is_symlink():
+            return 0
+        if not entry.is_dir(follow_symlinks=False):
+            return _entry_bytes(entry.stat(follow_symlinks=False))
+        total = 0
+        stack = [entry.path]
+        while stack:
+            try:
+                with os.scandir(stack.pop()) as it:
+                    for e in it:
+                        if e.is_dir(follow_symlinks=False):
+                            stack.append(e.path)
+                        elif not e.is_symlink():
+                            total += _entry_bytes(e.stat(follow_symlinks=False))
+            except OSError:
+                continue
+        return total
+    except OSError:
+        return 0
 
 
 def _main_of_missing(path: str) -> str:
@@ -361,9 +503,10 @@ def _main_of_missing(path: str) -> str:
     return path
 
 
-def list_all(cwds, sessions, roots=None) -> list[dict]:
+def list_all(cwds, sessions, roots=None, repo: str | None = None, measure: bool = True) -> list[dict]:
     """Worktrees de cada repo principal visto nas pastas. `roots`: só repos dentro delas (o
-    principal sai do ponteiro `.git` da worktree e pode estar fora da raiz que liberou a pasta)."""
+    principal sai do ponteiro `.git` da worktree e pode estar fora da raiz que liberou a pasta).
+    `repo`: só o desse repositório (qualquer pasta dele)."""
     # ponytail: várias chamadas git por worktree a cada pedido, sem cache; TTL curto se a tela
     # passar a consultar em intervalo.
     mains: set[str] = set()
@@ -372,13 +515,17 @@ def list_all(cwds, sessions, roots=None) -> list[dict]:
         if root:
             # realpath: o mesmo repo por um symlink (`~/hangar` -> `~/projetos/hangar`) apareceria duas vezes.
             mains.add(os.path.realpath(main_repo_of(root)))
+    if repo is not None:
+        root = repo_root_of(repo)
+        want = os.path.realpath(main_repo_of(root)) if root else None
+        mains = {m for m in mains if m == want}
     out = []
     for main in sorted(mains):
         if roots is not None and not any(Path(os.path.realpath(main)).is_relative_to(r) for r in roots):
             continue
         paths = worktree_paths(main)
         if paths:
-            out.append({"repo": main, "worktrees": [status(p, sessions, main) for p in paths]})
+            out.append({"repo": main, "worktrees": [status(p, sessions, main, measure) for p in paths]})
     return out
 
 
@@ -502,7 +649,7 @@ def delete(repo: str, path: str, sessions, *, confirm: bool = False,
     busy = sorted(s.name for s in sessions if _inside(s, real))
     if busy:
         raise GitError(409, "sessão aberta dentro: " + ", ".join(busy))
-    st = status(path, (), main)
+    st = status(path, (), main, measure=False)
     if st["degraded"]:
         # Leitura que falhou deixa dirty/ignored zerados: apagar assim perderia o que não se viu.
         raise GitError(409, "não consegui ler a worktree; tente de novo")
@@ -528,6 +675,8 @@ def delete(repo: str, path: str, sessions, *, confirm: bool = False,
         except OSError as w:
             _log.error("worktrees: não tirei %s do mapa de remoções: %s", path, w)
         raise GitError(409, e.detail + _stuck_note(stuck)) from None
+    with _sizes_lock:
+        _sizes.pop(path, None)
     branch_deleted = False
     if st["branch"] and (st["merged"] or delete_branch):
         try:
@@ -552,7 +701,7 @@ def delete_merged(repo: str, sessions, paths: list[str] | None = None, confirm: 
     for path in worktree_paths(main):
         if wanted is not None and os.path.realpath(path) not in wanted:
             continue
-        st = status(path, sessions, main)
+        st = status(path, sessions, main, measure=False)
         if not st["merged"] or st["degraded"] or st["sessions"]:
             continue
         loses = bool(st["dirty"] or st["ignored"])

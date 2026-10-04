@@ -1079,8 +1079,59 @@ export interface WorktreeStatus {
   main_branch: string | null;   // branch da pasta principal, onde as conversas retomam
   merged: boolean; ahead: number; dirty: number; ignored: string[]; sessions: string[]; closed: number;
   degraded?: boolean;   // leitura do git falhou: dirty/ignored podem estar zerados sem ser verdade
+  behind?: number;      // commits novos na base que a branch ainda não tem
+  dirty_files?: { code: string; path: string }[];
+  last_commit?: WorktreeCommit | null;
+  commits?: WorktreeCommit[];   // os últimos da branch que não estão na base
+  created_at?: number | null;   // epoch em segundos
+  size?: number | null;         // bytes ocupados; null enquanto o backend mede
+  size_biggest?: { name: string; bytes: number } | null;
+  size_pending?: boolean;
 }
+export interface WorktreeCommit { sha: string; subject: string; at: number }
 export interface WorktreeRepo { repo: string; worktrees: WorktreeStatus[] }
+
+export type WorktreeState = 'gone' | 'session' | 'dirty' | 'merged' | 'detached' | 'active';
+
+/** Um estado só por worktree, na ordem do que mais importa antes de apagar. */
+export function worktreeState(w: WorktreeStatus): WorktreeState {
+  if (!w.exists) return 'gone';
+  if (w.sessions.length) return 'session';
+  if (w.dirty) return 'dirty';
+  if (w.merged) return 'merged';
+  if (!w.branch) return 'detached';
+  return 'active';
+}
+
+export const WORKTREE_STALE_DAYS = 14;
+
+/** Dias desde o último commit; sem commit lido, desde a criação. */
+export function worktreeAgeDays(w: WorktreeStatus, now = Date.now() / 1000): number | null {
+  const at = w.last_commit?.at ?? w.created_at;
+  return at ? Math.max(0, Math.floor((now - at) / 86400)) : null;
+}
+
+export function worktreeReady(w: WorktreeStatus): boolean {
+  return w.merged && !w.dirty && !w.sessions.length && !w.degraded;
+}
+
+/** Worktree que o Claude cria para um subagente: nome gerado, agrupada à parte na lista. */
+export function worktreeIsAgent(w: WorktreeStatus): boolean {
+  return /[\\/]agent-[0-9a-f]{8,}$/.test(w.path.replace(/[\\/]+$/, ''));
+}
+
+/** Nome para mostrar: a branch quando a pasta tem nome gerado e a branch diz algo. */
+export function worktreeTitle(w: WorktreeStatus): string {
+  const base = w.path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || w.path;
+  if (worktreeIsAgent(w) && w.branch && !w.branch.startsWith('worktree-agent-')) return w.branch;
+  return base;
+}
+
+export function createWorktreeForServer(server: Server, body: {
+  repo: string; branch: string; name: string; new_branch?: boolean; base?: string | null; fetch?: boolean;
+}): Promise<{ path: string }> {
+  return apiFetchForServer(server, '/api/worktrees/create', { method: 'POST', body: JSON.stringify(body) }, FOLDER_ACTION_MS);
+}
 
 /** O lote de mescladas: o que entra na confirmação (com o que cada uma perde) e o que fica de fora
  *  porque tem sessão aberta ou não foi lida direito. */

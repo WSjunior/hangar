@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Pressable, Text, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { basename, deleteMergedWorktreesForServer, type Server, type WorktreeStatus } from '@hangar/core';
+import { basename, deleteMergedWorktreesForServer, fmtBytes, type Server, type WorktreeStatus } from '@hangar/core';
 import { Sheet } from '../../ui/Sheet';
 import * as m from '../../paraglide/messages';
 import { dropWorktreeStatus } from './worktreeStatus';
@@ -36,10 +36,12 @@ export function WorktreeBatchSheet({ server, batch: aberto, onClose, onDeleted }
   }
 
   const n = batch?.deletable.length ?? 0;
+  const libera = batch?.deletable.reduce((a, w) => a + (w.size ?? 0), 0) ?? 0;
   return (
     <Sheet open={!!aberto} sizes={['auto']} onDismiss={onClose}>
       <View style={styles.inner}>
         <Text style={styles.title}>{m.worktree_lote_titulo({ n })}</Text>
+        {libera ? <Text style={styles.ok}>{m.worktree_libera({ tamanho: fmtBytes(libera) })}</Text> : null}
         {batch?.deletable.map((w) => (
           <View key={w.path} style={styles.item}>
             <Text style={styles.nome}>{basename(w.path)}</Text>
@@ -89,6 +91,7 @@ const styles = StyleSheet.create((theme) => ({
   text: { color: theme.tokens.text.primary },
   muted: { color: theme.tokens.text.secondary },
   aviso: { color: theme.tokens.status.warning },
+  ok: { color: theme.tokens.status.success },
   arquivo: { color: theme.tokens.text.secondary, fontFamily: theme.base.fontMono, fontSize: theme.base.text.sm, paddingLeft: theme.base.space[3] },
   erro: { color: theme.tokens.status.error },
   acoes: { flexDirection: 'row', justifyContent: 'flex-end', gap: theme.base.space[2], marginTop: theme.base.space[2] },
