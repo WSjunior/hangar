@@ -268,14 +268,43 @@ def test_list_all_groups_by_main_repo(tmp_path):
 def test_routes_refuse_outside_root(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from app import api, fs
+    (tmp_path / "raiz").mkdir()
     main = _repo(tmp_path / "repo")
     wt = _wt(main, tmp_path / "repo-x", "x")
-    monkeypatch.setattr(fs, "resolve_scan_roots", lambda _s: [tmp_path / "repo"])
-    monkeypatch.setattr(api, "resolve_scan_roots", lambda _s: [tmp_path / "repo"])
+    monkeypatch.setattr(fs, "resolve_scan_roots", lambda _s: [tmp_path / "raiz"])
+    monkeypatch.setattr(api, "resolve_scan_roots", lambda _s: [tmp_path / "raiz"])
     monkeypatch.setattr(api.settings, "auth_token", "t")
     r = TestClient(api.app).get("/api/worktrees/detail", params={"path": wt},
                                 headers={"Authorization": "Bearer t"})
     assert r.status_code == 403
+
+
+def test_worktree_outside_root_counts_by_its_main_repo(tmp_path, monkeypatch):
+    """O Codex cria worktrees fora das raízes; a lista as mostra pelo repo principal, e abrir e
+    apagar seguem a mesma regra."""
+    from fastapi.testclient import TestClient
+    from app import api, fs
+    main = _repo(tmp_path / "repo")
+    wt = _merged_wt(main, tmp_path / "codex" / "repo-x", "x")
+    estranho = _repo(tmp_path / "codex" / "solto")
+    _claude_project(tmp_path, monkeypatch, wt)
+    monkeypatch.setattr(fs, "resolve_scan_roots", lambda _s: [tmp_path / "repo"])
+    monkeypatch.setattr(api, "resolve_scan_roots", lambda _s: [tmp_path / "repo"])
+    monkeypatch.setattr(api.settings, "auth_token", "t")
+    h = {"Authorization": "Bearer t"}
+    c = TestClient(api.app)
+    assert c.get("/api/worktrees/detail", params={"path": wt}, headers=h).status_code == 200
+    assert c.get("/api/worktrees/detail", params={"path": estranho}, headers=h).status_code == 403
+    r = c.post("/api/worktrees/delete", json={"repo": main, "path": wt}, headers=h)
+    assert r.status_code == 200 and not (tmp_path / "codex" / "repo-x").exists()
+
+
+def test_list_all_dedupes_main_repo_through_symlink(tmp_path):
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    (tmp_path / "atalho").symlink_to(tmp_path / "repo")
+    out = worktrees.list_all([str(tmp_path / "atalho"), main, wt], [])
+    assert [r["repo"] for r in out] == [main]
 
 
 def test_fresh_worktree_is_not_merged(tmp_path):
@@ -414,7 +443,7 @@ def _claude_project(tmp_path, monkeypatch, wt, sid="abc"):
 
 
 def _merged_wt(main, path, branch):
-    """Worktree com um commit já juntado na principal: a recém-criada não conta como mesclada."""
+    """Worktree com um commit já mesclado na principal: a recém-criada não conta como mesclada."""
     wt = _wt(main, path, branch)
     _commit(path, f"{branch}.txt")
     assert git_ops._run(main, "merge", "-q", "--no-ff", "-m", "m", branch).returncode == 0
@@ -510,6 +539,30 @@ def test_delete_merged_only_takes_clean(tmp_path, monkeypatch):
     (tmp_path / "repo-b" / "solto.txt").write_text("?")
     assert worktrees.delete_merged(main, []) == [a]
     assert (tmp_path / "repo-b").exists()
+
+
+def test_delete_merged_confirmed_takes_only_the_listed(tmp_path, monkeypatch):
+    main = _repo(tmp_path / "repo")
+    b = _merged_wt(main, tmp_path / "repo-b", "b")
+    _merged_wt(main, tmp_path / "repo-c", "c")
+    _claude_project(tmp_path, monkeypatch, b)
+    (tmp_path / "repo-b" / "solto.txt").write_text("?")
+    (tmp_path / "repo-c" / "solto.txt").write_text("?")
+    assert worktrees.delete_merged(main, [], paths=[b]) == []
+    assert worktrees.delete_merged(main, [], paths=[b], confirm=True) == [b]
+    assert not (tmp_path / "repo-b").exists() and (tmp_path / "repo-c").exists()
+
+
+def test_delete_merged_confirm_requires_paths(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import api, fs
+    main = _repo(tmp_path / "repo")
+    monkeypatch.setattr(fs, "resolve_scan_roots", lambda _s: [tmp_path])
+    monkeypatch.setattr(api, "resolve_scan_roots", lambda _s: [tmp_path])
+    monkeypatch.setattr(api.settings, "auth_token", "t")
+    r = TestClient(api.app).post("/api/worktrees/delete-merged", json={"repo": main, "confirm": True},
+                                 headers={"Authorization": "Bearer t"})
+    assert r.status_code == 422
 
 
 def test_delete_leaves_colliding_subfolder_conversations(tmp_path, monkeypatch):

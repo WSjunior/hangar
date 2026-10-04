@@ -1,7 +1,8 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { basename, deleteMergedWorktreesForServer, fetchWorktreesForServer, getWorktreesForServer,
-           type WorktreeRepo } from '@hangar/core';
+           mergedWorktreeBatch, type WorktreeRepo, type WorktreeStatus } from '@hangar/core';
+  import BottomSheet from '../components/BottomSheet.svelte';
   import Spinner from '../components/Spinner.svelte';
   import WorktreeSheet from '../components/WorktreeSheet.svelte';
   import { listOwnServers, onServersChanged, type Server } from '../lib/auth';
@@ -42,20 +43,34 @@
     await carregar();
   }
 
-  // Por `serverId::repo`: o lote em andamento (botão desligado) e o erro dele, que não é de leitura.
+  // Por `serverId::repo`: o lote em andamento (botão desligado) e o aviso dele, que não é de leitura.
   let loteAndando = $state<string | null>(null);
   let erroLote = $state<Record<string, string>>({});
   const chaveLote = (b: Bloco, repo: string) => `${b.servidor.id}::${repo}`;
 
-  async function apagarJuntadas(b: Bloco, repo: string) {
+  // A confirmação congela o que a pessoa viu: o lote apaga essas e só essas.
+  type Confirmacao = { bloco: Bloco; repo: string; deletable: WorktreeStatus[]; blocked: WorktreeStatus[] };
+  let confirmando = $state<Confirmacao | null>(null);
+
+  function pedirLote(b: Bloco, r: WorktreeRepo) {
+    confirmando = { bloco: b, repo: r.repo, ...mergedWorktreeBatch(r) };
+  }
+
+  async function apagarMescladas() {
+    if (!confirmando) return;
+    const { bloco: b, repo, deletable } = confirmando;
     const k = chaveLote(b, repo);
+    confirmando = null;
     loteAndando = k;
     delete erroLote[k];
     try {
-      await deleteMergedWorktreesForServer(b.servidor, repo);
+      const removidas = await deleteMergedWorktreesForServer(b.servidor, repo,
+        { paths: deletable.map((w) => w.path), confirm: true });
+      for (const p of removidas) worktreeStatus.drop(b.servidor.id, p);
+      const ficaram = deletable.filter((w) => !removidas.includes(w.path));
+      if (ficaram.length) erroLote[k] = m.worktree_lote_nao_apagou({ nomes: ficaram.map((w) => basename(w.path)).join(', ') });
     } catch (e) {
       erroLote[k] = e instanceof Error ? e.message : String(e);
-      return;
     } finally {
       loteAndando = null;
     }
@@ -66,7 +81,6 @@
   const chaveServidores = $derived(servidores.map((s) => `${s.id}|${s.baseUrl}|${s.token}`).join('\n'));
   $effect(() => { chaveServidores; untrack(() => { void carregar().then(atualizar); }); });
 
-  const limpas = (r: WorktreeRepo) => r.worktrees.filter((w) => w.merged && !w.dirty && !w.ignored.length && !w.sessions.length);
   const vazio = $derived(!carregando && blocos.every((b) => !b.erro && b.repos.length === 0));
 </script>
 
@@ -84,11 +98,13 @@
     {#each blocos as b (b.servidor.id)}
       {#if b.erro}<p class="erro" role="alert">{b.servidor.label}: {m.worktrees_erro({ motivo: b.erro })}</p>{/if}
       {#each b.repos as r (r.repo)}
+        {@const lote = mergedWorktreeBatch(r)}
         <section class="repo">
           <h2>{basename(r.repo)}{servidores.length > 1 ? ` · ${b.servidor.label}` : ''}</h2>
-          {#if limpas(r).length}
-            <button type="button" class="lote" disabled={loteAndando === chaveLote(b, r.repo)} onclick={() => apagarJuntadas(b, r.repo)}>
-              {m.worktree_apagar_juntadas({ n: limpas(r).length })}
+          {#if lote.deletable.length}
+            <button type="button" class="lote" disabled={loteAndando === chaveLote(b, r.repo)} onclick={() => pedirLote(b, r)}>
+              {#if loteAndando === chaveLote(b, r.repo)}<Spinner />{/if}
+              {m.worktree_apagar_mescladas({ n: lote.deletable.length })}
             </button>
           {/if}
           {#if erroLote[chaveLote(b, r.repo)]}<p class="erro" role="alert">{erroLote[chaveLote(b, r.repo)]}</p>{/if}
@@ -100,6 +116,7 @@
                   <span class="muted">{w.branch} ← {w.base}</span>
                   <span>{w.merged ? m.worktree_juntada() : m.worktree_nao_juntada({ n: w.ahead })}</span>
                   {#if w.dirty}<span class="muted">{m.worktree_nao_commitados({ n: w.dirty })}</span>{/if}
+                  {#if w.ignored.length}<span class="muted">{m.worktree_ignorados_perdem({ n: w.ignored.length })}</span>{/if}
                   {#if w.sessions.length}<span class="muted">{m.worktree_sessao_aberta({ nomes: w.sessions.join(', ') })}</span>{/if}
                 </button>
               </li>
@@ -113,6 +130,44 @@
 {#if aberta}
   <WorktreeSheet open={true} server={aberta.servidor} path={aberta.path} onClose={() => (aberta = null)} onDeleted={carregar} />
 {/if}
+{#if confirmando}
+  <BottomSheet open={true} onClose={() => (confirmando = null)} ariaLabel={m.worktree_lote_titulo({ n: confirmando.deletable.length })}>
+    <div class="sheet">
+      <h2 class="title">{m.worktree_lote_titulo({ n: confirmando.deletable.length })}</h2>
+      <ul class="itens">
+        {#each confirmando.deletable as w (w.path)}
+          <li>
+            <span class="nome">{basename(w.path)}</span>
+            {#if w.dirty || w.ignored.length}
+              <span class="aviso">{m.worktree_apagar_perde()}</span>
+              <ul class="perde">
+                {#if w.dirty}<li>{m.worktree_nao_commitados({ n: w.dirty })}</li>{/if}
+                {#each w.ignored as f (f)}<li>{f}</li>{/each}
+              </ul>
+            {:else}
+              <span class="muted">{m.worktree_lote_nada_perde()}</span>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+      {#if confirmando.blocked.length}
+        <p class="aviso">{m.worktree_lote_ficam()}</p>
+        <ul class="itens">
+          {#each confirmando.blocked as w (w.path)}
+            <li>
+              <span class="nome">{basename(w.path)}</span>
+              <span class="muted">{w.sessions.length ? m.worktree_sessao_aberta({ nomes: w.sessions.join(', ') }) : m.worktree_lote_leitura_falhou()}</span>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      <div class="acoes">
+        <button type="button" class="cancelar" onclick={() => (confirmando = null)}>{m.comum_cancelar()}</button>
+        <button type="button" class="apagar" onclick={apagarMescladas}>{m.worktree_lote_confirmar()}</button>
+      </div>
+    </div>
+  </BottomSheet>
+{/if}
 
 <style>
   .wt { display: flex; flex-direction: column; gap: 12px; height: 100%; overflow-y: auto; padding: 12px 16px 32px; }
@@ -121,12 +176,24 @@
   .voltar { background: none; border: 0; font-size: 1.2rem; min-width: 40px; min-height: 40px; color: inherit; }
   .repo h2 { font-size: 0.95rem; margin: 8px 0; }
   .repo ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-  .linha { width: 100%; text-align: left; display: flex; flex-direction: column; gap: 2px; padding: 10px 12px;
-           border-radius: 10px; background: var(--surface-raised); border: 0; font: inherit; color: inherit; }
+  /* O botão global centraliza o conteúdo; a linha é uma ficha lida da esquerda. */
+  .linha { width: 100%; text-align: left; display: flex; flex-direction: column; align-items: stretch; gap: 2px;
+           padding: 10px 12px; border-radius: 10px; background: var(--surface-raised); border: 0; font: inherit; color: inherit; }
   .nome { font-weight: 600; }
   .muted { color: var(--text-muted); font-size: 0.85rem; }
   .erro { color: var(--error); }
   .vazio { color: var(--text-muted); text-align: center; padding: 32px 0; }
   .centro { display: flex; justify-content: center; padding: 32px; }
-  .lote { align-self: flex-start; margin-bottom: 6px; }
+  .lote { align-self: flex-start; gap: 8px; margin-bottom: 8px; padding: 0 16px; border-radius: 8px;
+          border: 1px solid var(--error); color: var(--error); font-weight: 600; }
+  .lote:disabled { opacity: 0.6; }
+  .sheet { padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .title { font-size: 1.05rem; margin: 0; }
+  .itens { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  .itens > li { display: flex; flex-direction: column; gap: 2px; }
+  .aviso { margin: 0; color: var(--warning-text); font-size: 0.85rem; }
+  .perde { margin: 0; padding-left: 18px; font-family: var(--font-mono); font-size: 0.8rem; overflow-wrap: anywhere; }
+  .acoes { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+  .cancelar { padding: 0 16px; border-radius: 8px; border: 1px solid var(--border-default); }
+  .apagar { padding: 0 16px; border-radius: 8px; background: var(--error); color: #fff; font-weight: 600; }
 </style>
