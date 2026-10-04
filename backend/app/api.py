@@ -8419,8 +8419,8 @@ def _conversation_rows(info):
         raise HTTPException(409, detail=erro("session_transfer_history_invalid", "histórico da transferência indisponível")) from exc
 
 
-from app.workspace_bridge import delegate as _workspace_delegate
-_cited_elsewhere = _workspace_delegate("find_elsewhere", GitError, python_args={"rows": None})(_cited_elsewhere)
+from app.workspace_bridge import delegate as _workspace_delegate, text_rows as _text_rows
+_cited_elsewhere = _workspace_delegate("find_elsewhere", GitError, prepare=_text_rows)(_cited_elsewhere)
 
 
 def _resolver_citado(name: str, path: str, *, write: bool = False) -> str:

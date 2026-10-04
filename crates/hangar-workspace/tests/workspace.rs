@@ -94,7 +94,7 @@ fn citation_found_elsewhere_through_a_symlink_never_reaches_git_internals() {
     )
     .unwrap();
     for write in [false, true] {
-        let error = hangar_workspace::citations::resolve(&repo, &jsonl, "config", write).unwrap_err();
+        let error = hangar_workspace::citations::resolve(&repo, hangar_workspace::citations::Transcript::File(&jsonl), "config", write).unwrap_err();
         assert_eq!(error.status, 403);
     }
 }
@@ -111,7 +111,7 @@ fn tilde_of_another_user_stays_relative_and_cannot_climb_out_of_cwd() {
     let path = format!("~ninguem/{climb}{}", secret.display().to_string().trim_start_matches('/'));
     let jsonl = dir.path().join("t.jsonl");
     fs::write(&jsonl, json!({"cwd": cwd, "text": path}).to_string() + "\n").unwrap();
-    let error = hangar_workspace::citations::resolve(&cwd, &jsonl, &path, false).unwrap_err();
+    let error = hangar_workspace::citations::resolve(&cwd, hangar_workspace::citations::Transcript::File(&jsonl), &path, false).unwrap_err();
     assert_eq!(error.status, 403);
     let found = hangar_workspace::files::resolver(&cwd, std::slice::from_ref(&path), false).unwrap();
     assert!(found["ok"].as_object().unwrap().is_empty());

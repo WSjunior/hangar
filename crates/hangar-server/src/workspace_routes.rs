@@ -807,7 +807,7 @@ fn resolve_many(
     paths: &[String],
 ) -> hangar_workspace::Result<Value> {
     let cited = jsonl
-        .map(|p| hangar_workspace::citations::cwds(Path::new(p), paths))
+        .map(|p| hangar_workspace::citations::cwds(hangar_workspace::citations::Transcript::File(Path::new(p)), paths))
         .unwrap_or(json!({}));
     let mut found = serde_json::Map::new();
     let mut outside = 0;
@@ -847,7 +847,7 @@ fn resolve_many(
             outside += 1;
             if let Some(jsonl) = jsonl
                 && let Some(p) = hangar_workspace::citations::find_elsewhere(
-                    Path::new(jsonl),
+                    hangar_workspace::citations::Transcript::File(Path::new(jsonl)),
                     Path::new(cwd),
                     path,
                     &bases,
