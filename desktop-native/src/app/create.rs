@@ -1658,6 +1658,7 @@ impl NewSession {
                 .when(missing, |el| el.child(alert("create-provider-missing", tr("create_provider_missing").replace("{p}", self.provider))))
                 .into_any_element()),
             codex.map(IntoElement::into_any_element),
+            self.render_engine().map(IntoElement::into_any_element),
             claude.map(IntoElement::into_any_element),
         ];
         let run = [
