@@ -614,7 +614,13 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
             }
             event = io.events.recv(), if io_open => {
                 match event {
-                    Some(IoEvent::Line(line)) => effects.extend(engine.apply(EngineInput::Line(line),clock(start))?),
+                    // Erro de UMA mensagem segue (como o leitor Python); só o erro de leitura encerra.
+                    Some(IoEvent::Line(line)) => match engine.apply(EngineInput::Line(line),clock(start)) {
+                        Ok(next)=>effects.extend(next),
+                        Err(failure)=>if crate::warn_limit::allow(Some(&target.key),"cli_line") {
+                            tracing::warn!(key=%target.key,session=%target.name,reason=%failure.message,"mensagem da CLI ignorada");
+                        },
+                    },
                     Some(IoEvent::WriteAck { operation_id,outcome }) => {
                         if let Some(attempt) = attempts.get(&operation_id) {
                             let logical_id = attempt.logical_id.clone();
