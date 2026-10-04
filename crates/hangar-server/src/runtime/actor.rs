@@ -244,7 +244,7 @@ enum Job {
     View { version:u64,view:Value,result:Result<(),RuntimeError> },
     Drained(Result<Vec<RuntimeCommand>,RuntimeError>),
     DrainFinished(Result<RuntimeReply,RuntimeError>),
-    Confirmed { response:oneshot::Sender<Result<Value,RuntimeError>>,result:Result<Vec<String>,RuntimeError> },
+    Confirmed { response:Option<oneshot::Sender<Result<Value,RuntimeError>>>,result:Result<Vec<String>,RuntimeError> },
     Steered { id:String,result:Result<Vec<String>,RuntimeError> },
     NativeInput { id:String,result:Result<Value,RuntimeError> },
 }
@@ -596,35 +596,8 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                         }
                     }
                     Message::Confirm(response) => {
-                        let queue = queue.clone(); let receipt = receipt.clone(); let target = target.clone(); let sample = clock(start);
-                        jobs.spawn(async move {
-                          let result = async {
-                            let mut confirmed = Vec::new();
-                            let current = queue.snapshot().await.map_err(io_failure)?;
-                            for (id,operation) in &current.operations {
-                                if operation.status == Status::Confirmed { continue; }
-                                if !matches!(operation.payload["kind"].as_str(),Some("input" | "steer")) { continue; }
-                                let Some(entry) = operation.entry_id.as_deref() else { continue };
-                                let Ok(cursor) = serde_json::from_value(operation.dispatch_cursor.clone()) else { continue };
-                                let state = queue.snapshot().await.map_err(io_failure)?;
-                                if let Some(row) = state.rows.iter().find(|r|r["id"] == entry).cloned() {
-                                    if row["confirmed"] == true { continue; }
-                                    let receipt = receipt.clone(); let path = target.transcript.clone();
-                                    let proof = tokio::task::spawn_blocking(move || {
-                                        let mut receipt = receipt.lock().map_err(|_|failure("receipt_panic"))?;
-                                        receipt.scan(&path).map_err(io_failure)?;
-                                        Ok::<_,RuntimeError>(receipt.match_after(&cursor,&row,&state.used_occurrences))
-                                    }).await.map_err(|_|failure("receipt_job"))??;
-                                    if let Some(proof) = proof {
-                                        let accepted = queue.exec(target.generation,&format!("proof:{}",unique()),sample,Action::ConfirmOccurrence { id:id.clone(),proof }).await.map_err(io_failure)?;
-                                        if accepted == true { confirmed.push(id.clone()); }
-                                    }
-                                }
-                            }
-                            Ok(confirmed)
-                          }.await;
-                          Job::Confirmed { response,result }
-                        });
+                        let job = confirm_inputs(queue.clone(),receipt.clone(),target.transcript.clone(),target.generation,clock(start));
+                        jobs.spawn(async move { Job::Confirmed { response:Some(response),result:job.await } });
                     }
                     Message::Stop(response) => {
                         closed.store(true,Ordering::Release);
@@ -850,9 +823,14 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                         match result {
                             Ok(ids)=>{
                                 for id in &ids { effects.extend(engine.confirm_input(id)); }
-                                let _ = response.send(Ok(json!({"confirmed":ids.len()})));
+                                if let Some(response) = response { let _ = response.send(Ok(json!({"confirmed":ids.len()}))); }
                             }
-                            Err(error)=>{ let _ = response.send(Err(error)); }
+                            Err(error)=>{
+                                if crate::warn_limit::allow(Some(&target.key),&error.code) {
+                                    tracing::warn!(key=%target.key,session=%target.name,code=%error.code,"confirmação da fila falhou");
+                                }
+                                if let Some(response) = response { let _ = response.send(Err(error)); }
+                            }
                         }
                     }
                     Job::Steered { id,result } => {
@@ -899,6 +877,37 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
     jobs.abort_all(); while jobs.join_next().await.is_some() {}
     io.stop().await;
     Arc::try_unwrap(queue).map_err(|_|failure("queue_busy"))?.shutdown().await.map_err(io_failure)
+}
+
+/// Prova cada entrada despachada e ainda não confirmada contra o transcript, a partir do cursor do
+/// despacho. Uma leitura do transcript por rodada; o estado só é relido depois de uma confirmação.
+async fn confirm_inputs(queue:Arc<QueueActor>,receipt:Arc<std::sync::Mutex<ReceiptIndex>>,path:std::path::PathBuf,
+    generation:u64,sample:ClockSample) -> Result<Vec<String>,RuntimeError> {
+    let mut state = queue.snapshot().await.map_err(io_failure)?;
+    let confirmed_rows:std::collections::BTreeSet<&str> = state.rows.iter().filter(|r|r["confirmed"] == true).filter_map(|r|r["id"].as_str()).collect();
+    let candidates:Vec<(String,String,super::receipt::DispatchCursor)> = state.operations.iter()
+        .filter(|(_,op)|op.status != Status::Confirmed && matches!(op.payload["kind"].as_str(),Some("input" | "steer")))
+        .filter_map(|(id,op)|Some((id.clone(),op.entry_id.clone()?,serde_json::from_value(op.dispatch_cursor.clone()).ok()?)))
+        .filter(|(_,entry,_)|!confirmed_rows.contains(entry.as_str())).collect();
+    let mut confirmed = Vec::new();
+    if candidates.is_empty() { return Ok(confirmed); }
+    let scanner = receipt.clone(); let transcript = path.clone();
+    tokio::task::spawn_blocking(move || scanner.lock().map_err(|_|failure("receipt_panic"))?.scan(&transcript).map(|_|()).map_err(io_failure))
+        .await.map_err(|_|failure("receipt_job"))??;
+    for (id,entry,cursor) in candidates {
+        let Some(row) = state.rows.iter().find(|r|r["id"] == entry.as_str()).cloned() else { continue };
+        if row["confirmed"] == true { continue; }
+        let receipt = receipt.clone(); let used = state.used_occurrences.clone(); let transcript = path.clone();
+        let proof = tokio::task::spawn_blocking(move || {
+            let receipt = receipt.lock().map_err(|_|failure("receipt_panic"))?;
+            receipt.match_after(&transcript,&cursor,&row,&used).map_err(io_failure)
+        }).await.map_err(|_|failure("receipt_job"))??;
+        if let Some(proof) = proof {
+            let accepted = queue.exec(generation,&format!("proof:{}",unique()),sample,Action::ConfirmOccurrence { id:id.clone(),proof }).await.map_err(io_failure)?;
+            if accepted == true { confirmed.push(id); state = queue.snapshot().await.map_err(io_failure)?; }
+        }
+    }
+    Ok(confirmed)
 }
 
 async fn capture_cursor(target:&RuntimeTarget,view:&Value) -> Result<Value,RuntimeError> {

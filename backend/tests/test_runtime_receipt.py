@@ -101,3 +101,20 @@ def test_attachments_and_unicode(tmp_path):
     write_echo(path, "Olá 🌎\n[Image #1]\n📎 imagem: C:\\Fotos\\ação.png")
     index.scan(path)
     assert index.match_after(cursor, {"text": "Olá 🌎 — 📎 imagem: C:\\Fotos\\ação.png"}, {}) is not None
+
+
+def test_rewrite_before_the_read_tail_is_seen_in_the_file_not_in_a_memory_copy(tmp_path):
+    # O índice não guarda o transcript: a âncora do despacho é relida do arquivo.
+    path = tmp_path / "chat.jsonl"
+    first = '{"type":"user","message":{"content":"Anterior"}}\n'
+    path.write_text(first, encoding="utf-8")
+    index = ReceiptIndex("claude", "sid")
+    cursor = index.capture(path)
+    echo = '{"type":"user","message":{"content":"Olá"},"pad":"' + "x" * 400 + '"}\n'
+    path.write_text(first + echo, encoding="utf-8")
+    index.scan(path)
+    assert index.match_after(cursor, {"text": "Olá"}, {}) is not None
+    with path.open("r+b") as stream:
+        stream.write(first.replace("Anterior", "Trocado!").encode())
+    index.scan(path)
+    assert index.match_after(cursor, {"text": "Olá"}, {}) is None

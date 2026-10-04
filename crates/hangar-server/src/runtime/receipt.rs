@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, BufRead, Read, Seek, SeekFrom};
 use std::path::Path;
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -36,19 +36,28 @@ pub struct ReceiptProof {
     pub observed_anchor: String,
 }
 
+/// Só o necessário para continuar a leitura: identidade, até onde leu e os 256 bytes antes disso.
+/// Guardar o transcript inteiro custava o tamanho dele em memória e uma cópia a cada leitura.
 pub struct ReceiptIndex {
     provider: String,
     conversation: String,
     identity: Option<String>,
-    data: Vec<u8>,
+    tail: Vec<u8>,
     occurrences: Vec<Occurrence>,
-    scan_offset: usize,
+    scan_offset: u64,
 }
 
-fn anchor(data: &[u8], offset: u64) -> Option<String> {
-    let offset = usize::try_from(offset).ok()?;
-    if offset > data.len() { return None; }
-    Some(sha1_smol::Sha1::from(&data[offset.saturating_sub(256)..offset]).digest().to_string())
+fn anchor(data: &[u8]) -> String {
+    sha1_smol::Sha1::from(data).digest().to_string()
+}
+
+/// Os até 256 bytes que terminam em `offset`; None se o arquivo é menor que isso.
+fn bytes_before(file: &mut File, offset: u64) -> io::Result<Option<Vec<u8>>> {
+    if offset > file.metadata()?.len() { return Ok(None); }
+    let mut data = vec![0;offset.min(256) as usize];
+    file.seek(SeekFrom::Start(offset - data.len() as u64))?;
+    file.read_exact(&mut data)?;
+    Ok(Some(data))
 }
 
 fn identity(file: &File) -> io::Result<String> {
@@ -80,7 +89,7 @@ fn identity(file: &File) -> io::Result<String> {
 
 impl ReceiptIndex {
     pub fn new(provider: &str, conversation: &str) -> Self {
-        Self { provider:provider.into(),conversation:conversation.into(),identity:None,data:Vec::new(),occurrences:Vec::new(),scan_offset:0 }
+        Self { provider:provider.into(),conversation:conversation.into(),identity:None,tail:Vec::new(),occurrences:Vec::new(),scan_offset:0 }
     }
 
     pub fn capture(&self, path: &Path) -> io::Result<DispatchCursor> {
@@ -88,54 +97,41 @@ impl ReceiptIndex {
             Ok(mut file) => {
                 let id = identity(&file)?;
                 let offset = file.seek(SeekFrom::End(0))?;
-                let mut data = vec![0;offset.min(256) as usize];
-                file.seek(SeekFrom::Start(offset.saturating_sub(256)))?;
-                file.read_exact(&mut data)?;
+                let data = bytes_before(&mut file,offset)?.unwrap_or_default();
                 (Some(id),data,offset)
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => (None,Vec::new(),0),
             Err(error) => return Err(error),
         };
-        Ok(DispatchCursor { conversation:self.conversation.clone(),file_identity:identity,
-            offset,anchor:anchor(&data,data.len() as u64).unwrap() })
+        Ok(DispatchCursor { conversation:self.conversation.clone(),file_identity:identity,offset,anchor:anchor(&data) })
     }
 
-    pub fn scan(&mut self, path: &Path) -> io::Result<Vec<Occurrence>> {
+    /// Lê só o que foi acrescentado desde a última vez; troca de arquivo ou reescrita relê do início.
+    pub fn scan(&mut self, path: &Path) -> io::Result<&[Occurrence]> {
         let mut file = match File::open(path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                self.data.clear(); self.identity = None; self.occurrences.clear(); self.scan_offset = 0; return Ok(Vec::new());
+                self.tail.clear(); self.identity = None; self.occurrences.clear(); self.scan_offset = 0; return Ok(&self.occurrences);
             }
             Err(error) => return Err(error),
         };
         let id = identity(&file)?;
-        let mut unchanged = self.identity.as_deref() == Some(id.as_str()) && file.metadata()?.len() >= self.data.len() as u64;
-        if unchanged {
-            let mut tail = vec![0;self.data.len().min(256)];
-            file.seek(SeekFrom::Start(self.data.len().saturating_sub(256) as u64))?;
-            file.read_exact(&mut tail)?;
-            unchanged = tail == self.data[self.data.len().saturating_sub(256)..];
-        }
-        let mut data = if unchanged { self.data.clone() } else { Vec::new() };
-        let mut occurrences = if unchanged { self.occurrences.clone() } else { Vec::new() };
-        let start_offset = if unchanged { self.scan_offset } else { 0 };
-        file.seek(SeekFrom::Start(data.len() as u64))?;
-        file.read_to_end(&mut data)?;
-        let current = File::open(path)?;
-        if identity(&current)? != id || current.metadata()?.len() < data.len() as u64 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData,"transcript mudou durante a leitura"));
-        }
+        let unchanged = self.identity.as_deref() == Some(id.as_str())
+            && bytes_before(&mut file,self.scan_offset)?.is_some_and(|tail|tail == self.tail);
+        if !unchanged { self.occurrences.clear(); self.scan_offset = 0; }
+        file.seek(SeekFrom::Start(self.scan_offset))?;
+        let mut reader = io::BufReader::with_capacity(1 << 16,&mut file);
         let mut parser = crate::transcript::LineParser::new(crate::transcript::Provider::Codex);
-        let mut offset = start_offset as u64;
-        let mut complete_offset = start_offset;
-        for raw in data[start_offset..].split_inclusive(|byte| *byte == b'\n') {
+        let mut offset = self.scan_offset;
+        let mut raw = Vec::new();
+        loop {
+            raw.clear();
+            if reader.read_until(b'\n',&mut raw)? == 0 || raw.last() != Some(&b'\n') { break; }
             let start = offset; offset += raw.len() as u64;
-            if raw.last() != Some(&b'\n') { break; }
-            complete_offset = offset as usize;
-            let Some(obj) = crate::transcript::decode_line(raw) else { continue };
+            let Some(obj) = crate::transcript::decode_line(&raw) else { continue };
             if !obj.is_object() { continue; }
             let (text,kind) = if self.provider == "codex" {
-                (parser.feed(raw,start).into_iter().filter(|e|e.kind == hangar_api::chat::ChatKind::UserMsg)
+                (parser.feed(&raw,start).into_iter().filter(|e|e.kind == hangar_api::chat::ChatKind::UserMsg)
                     .filter_map(|e|e.text).collect::<Vec<_>>().join("\n"),"user")
             } else {
                 match obj["type"].as_str() {
@@ -149,27 +145,41 @@ impl ReceiptIndex {
             let provider_id = obj["uuid"].as_str().or_else(||obj["id"].as_str()).or_else(||obj["payload"]["id"].as_str());
             let record = provider_id.filter(|s|!s.is_empty()).map_or_else(||format!("offset:{start}"),|id|format!("id:{id}"));
             let timestamp = obj["timestamp"].as_str().and_then(crate::transcript::ts_of_iso);
-            occurrences.push(Occurrence { id:format!("{}|{id}|{record}",self.conversation),conversation:self.conversation.clone(),
+            self.occurrences.push(Occurrence { id:format!("{}|{id}|{record}",self.conversation),conversation:self.conversation.clone(),
                 file_identity:id.clone(),offset:start,end_offset:offset,text,kind:kind.into(),timestamp });
         }
-        self.data = data; self.identity = Some(id); self.occurrences = occurrences;
-        self.scan_offset = complete_offset;
-        Ok(self.occurrences.clone())
+        drop(reader);
+        let current = File::open(path)?;
+        if identity(&current)? != id || current.metadata()?.len() < offset {
+            self.identity = None;
+            return Err(io::Error::new(io::ErrorKind::InvalidData,"transcript mudou durante a leitura"));
+        }
+        self.tail = bytes_before(&mut file,offset)?.unwrap_or_default();
+        self.identity = Some(id); self.scan_offset = offset;
+        Ok(&self.occurrences)
     }
 
-    pub fn match_after(&self, cursor: &DispatchCursor, row: &Value, used: &BTreeMap<String,Value>) -> Option<ReceiptProof> {
-        if cursor.conversation != self.conversation || cursor.file_identity.is_none() || cursor.file_identity != self.identity { return None; }
-        let observed = anchor(&self.data,cursor.offset)?;
-        if observed != cursor.anchor { return None; }
+    /// A âncora do cursor é relida do arquivo: confere que os bytes antes do despacho não mudaram.
+    pub fn match_after(&self, path: &Path, cursor: &DispatchCursor, row: &Value, used: &BTreeMap<String,Value>) -> io::Result<Option<ReceiptProof>> {
+        if cursor.conversation != self.conversation || cursor.file_identity.is_none() || cursor.file_identity != self.identity { return Ok(None); }
+        let mut file = match File::open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if Some(identity(&file)?) != self.identity || cursor.offset > self.scan_offset { return Ok(None); }
+        let Some(before) = bytes_before(&mut file,cursor.offset)? else { return Ok(None) };
+        let observed = anchor(&before);
+        if observed != cursor.anchor { return Ok(None); }
+        let candidates = super::queue::entry_lines(row);
         for occurrence in &self.occurrences {
             if used.contains_key(&occurrence.id) || occurrence.offset < cursor.offset { continue; }
-            let candidates = super::queue::entry_lines(row);
             let committed = crate::transcript::history::chaves_de_commit(&occurrence.text);
-            if let Some(normalized_text) = candidates.into_iter().find(|c|committed.contains(c)) {
-                return Some(ReceiptProof { cursor:cursor.clone(),occurrence:occurrence.clone(),normalized_text,observed_anchor:observed });
+            if let Some(normalized_text) = candidates.iter().find(|c|committed.contains(*c)) {
+                return Ok(Some(ReceiptProof { cursor:cursor.clone(),occurrence:occurrence.clone(),normalized_text:normalized_text.clone(),observed_anchor:observed }));
             }
         }
-        None
+        Ok(None)
     }
 }
 
