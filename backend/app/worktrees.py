@@ -469,10 +469,15 @@ def _entry_bytes(st: os.stat_result) -> int:
     return blocks * 512 if blocks is not None else st.st_size
 
 
+def _is_link(entry: os.DirEntry) -> bool:
+    # Junction do Windows (node_modules do pnpm) não é symlink, mas `is_dir` sem seguir diz que sim.
+    return entry.is_symlink() or entry.is_junction()
+
+
 def _tree_bytes(entry: os.DirEntry, skipped: list[int]) -> int:
     """`skipped[0]` conta o que não deu para ler: o total sai parcial e a tela mostra "≥"."""
     try:
-        if entry.is_symlink():
+        if _is_link(entry):
             return 0
         if not entry.is_dir(follow_symlinks=False):
             return _entry_bytes(entry.stat(follow_symlinks=False))
@@ -482,9 +487,11 @@ def _tree_bytes(entry: os.DirEntry, skipped: list[int]) -> int:
             try:
                 with os.scandir(stack.pop()) as it:
                     for e in it:
+                        if _is_link(e):
+                            continue
                         if e.is_dir(follow_symlinks=False):
                             stack.append(e.path)
-                        elif not e.is_symlink():
+                        else:
                             total += _entry_bytes(e.stat(follow_symlinks=False))
             except OSError:
                 skipped[0] += 1
@@ -516,16 +523,13 @@ def list_all(cwds, sessions, roots=None, repo: str | None = None, measure: bool 
     `repo`: só o desse repositório (qualquer pasta dele)."""
     # ponytail: várias chamadas git por worktree a cada pedido, sem cache; TTL curto se a tela
     # passar a consultar em intervalo.
+    # `repo` não depende das pastas: repo sem sessão aberta também tem worktrees a listar.
     mains: set[str] = set()
-    for c in set(cwds):
+    for c in set(cwds) if repo is None else [repo]:
         root = repo_root_of(c) if c else None
         if root:
             # realpath: o mesmo repo por um symlink (`~/hangar` -> `~/projetos/hangar`) apareceria duas vezes.
             mains.add(os.path.realpath(main_repo_of(root)))
-    if repo is not None:
-        root = repo_root_of(repo)
-        want = os.path.realpath(main_repo_of(root)) if root else None
-        mains = {m for m in mains if m == want}
     out = []
     for main in sorted(mains):
         if roots is not None and not any(Path(os.path.realpath(main)).is_relative_to(r) for r in roots):

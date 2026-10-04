@@ -396,6 +396,44 @@ def test_list_all_skips_repo_outside_roots(tmp_path):
     assert [r["repo"] for r in worktrees.list_all([wt], [], roots=[tmp_path])] == [main]
 
 
+def test_list_all_repo_filter_without_sessions(tmp_path):
+    """Repo sem sessão nem pasta recente: o filtro `repo` basta (menu de branch, lista após criar)."""
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    out = worktrees.list_all([], [], roots=[tmp_path], repo=wt)
+    assert [r["repo"] for r in out] == [main]
+    assert worktrees.list_all([], [], roots=[tmp_path / "outra"], repo=main) == []
+
+
+def test_tree_bytes_skips_windows_junctions(monkeypatch):
+    """No Windows a junction (node_modules do pnpm) tem `is_symlink()` falso e `is_dir` verdadeiro."""
+    import os
+    from types import SimpleNamespace
+
+    def entry(path, *, is_dir=False, junction=False):
+        return SimpleNamespace(name=path.rsplit("/", 1)[-1], path=path,
+                               is_symlink=lambda: False, is_junction=lambda: junction,
+                               is_dir=lambda follow_symlinks=True: is_dir,
+                               stat=lambda follow_symlinks=True: SimpleNamespace(st_size=100))
+
+    tree = {"/w/pkg": [entry("/w/pkg/a.js"), entry("/w/pkg/link", is_dir=True, junction=True)],
+            "/w/link": [entry("/w/link/big.bin")],
+            "/w/pkg/link": [entry("/w/pkg/link/big.bin")]}
+
+    class _It(list):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(os, "scandir", lambda p: _It(tree[p]))
+    skipped = [0]
+    assert worktrees._tree_bytes(entry("/w/link", is_dir=True, junction=True), skipped) == 0
+    assert worktrees._tree_bytes(entry("/w/pkg", is_dir=True), skipped) == 100
+    assert skipped == [0]
+
+
 def test_detail_on_plain_folder_is_404(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from app import api, fs
@@ -650,3 +688,32 @@ def test_redirect_through_symlink(tmp_path):
     worktrees.record_removed(str(tmp_path / "repo-x"), main)
     assert worktrees.redirect(str(tmp_path / "link" / "repo-x" / "sub")) == main
     assert worktrees.redirect(str(tmp_path / "outra")) == str(tmp_path / "outra")
+
+
+def test_create_invalidates_lists_even_if_client_disconnects(tmp_path, monkeypatch):
+    """Cliente que desconecta durante o `git worktree add` não deixa a lista sem a pasta nova."""
+    import asyncio
+    import threading
+    from app import api
+    entered, release, invalidated = threading.Event(), threading.Event(), threading.Event()
+
+    def slow_create(*_a, **_k):
+        entered.set()
+        release.wait(5)
+        return str(tmp_path / "repo-x"), True
+
+    monkeypatch.setattr(api, "_allowed_scan_root", lambda _p: str(tmp_path))
+    monkeypatch.setattr(api, "create_worktree", slow_create)
+    monkeypatch.setattr(api, "_invalidate_lists", invalidated.set)
+
+    async def run():
+        body = api.WorktreeCreateBody(repo=str(tmp_path / "repo"), branch="x", name="x")
+        task = asyncio.create_task(api.worktrees_create(body))
+        await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert invalidated.wait(5)
