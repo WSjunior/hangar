@@ -157,7 +157,7 @@ v2, conservar as provas da 2D, usar protocolo 10 e repetir os checks afetados an
 Revisor novo confere `eae31286..HEAD`, spec/plano/provas, segurança e paridade; corrigir problemas
 relevantes com testes de regressão e repetir checks afetados.
 
-- [ ] **Step 3: Registrar prova e publicar branch**
+- [x] **Step 3: Registrar prova e publicar branch**
 
 Commit documentação; push somente `hangar-server-parte2d`; acompanhar `server.yml` com
 `gh run watch` e conferir jobs Linux/macOS/Windows. Esperado CI verde nas três plataformas.

@@ -299,6 +299,13 @@ devolvia a prova cedo demais; agora ela guarda os membros do Job antes de encerr
 um sair. No teste de restart, o `python` do venv no Windows é um lançador, e o dono gravado é o
 filho dele; o teste passou a matar o dono real (a recusa do produto estava certa).
 
+Resultado em `859c1480` (run 37200349081): verde nos três sistemas. Windows: Rust 36 blocos,
+317 passaram, zero falhou, três ignorados; pytest do `server.yml` 88 passaram, 2 pulados. Linux:
+Rust 348 passaram, três ignorados; pytest 89 passaram, 1 pulado; contrato do cano 23 passaram.
+macOS: Rust 347 passaram, três ignorados; pytest 89 passaram, 1 pulado. Na primeira tentativa o
+Windows falhou uma vez em `hangar-cano::cano_v2::peek_keeps_old_writer_tcp` (2B, leitura de
+socket com `10060`), crate sem mudança na 2D; a repetição passou.
+
 ## Ainda pendente
 
 - Reserva Python sem aparelho conectado não drena a fila sozinha; com o Rust de pé o timer cobre.
@@ -307,6 +314,7 @@ filho dele; o teste passou a matar o dono real (a recusa do produto estava certa
 - Registro durável de sessão fechada volta como "esperando identidade" a cada restart.
 - O backend não apaga o próprio socket em `cc-socks` ao sair.
 - No Windows, cada leitura de fatos custa ~0,1–0,3 s de diário durável; uma entrega faz várias.
-- `terminal_control::capture_waits_for_end_marker…` (2C) é instável no macOS com limite de 250 ms.
+- Testes instáveis fora da 2D: `terminal_control::capture_waits_for_end_marker…` (2C, macOS, 250 ms)
+  e `cano_v2::peek_keeps_old_writer_tcp` (2B, Windows, leitura de socket).
 - Uso real com o dono e Windows instalado; captura `-e` do composer fica só no POSIX (psmux sem prova).
 - Porte do envio/controle Codex com terminal: permanece Python/RPC nesta árvore; fora da 2D.
