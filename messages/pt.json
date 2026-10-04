@@ -954,6 +954,7 @@
   "problema_codex_prompt_bloqueado": "Um hook do Codex barrou a mensagem antes de chegar ao modelo — corrija o hook e reenvie",
   "problema_headless_turno_erro": "O último turno terminou com erro",
   "problema_headless_sem_login": "Esta conta não está logada no Claude — abra um terminal e rode `claude /login` uma vez (com a mesma conta); depois é só mandar o prompt de novo",
+  "problema_terminal_observacao_falhou": "Observação do terminal indisponível",
   "board_pareada_com_clicar": "pareada com {n} — clicar reúne o grupo aqui",
   "board_pareada_com": "pareada com {n}",
   "board_peer_grupo": "📣 grupo · {n}",

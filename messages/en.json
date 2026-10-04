@@ -954,6 +954,7 @@
   "problema_codex_prompt_bloqueado": "A Codex hook blocked the message before it reached the model — fix the hook and resend",
   "problema_headless_turno_erro": "The last turn ended with an error",
   "problema_headless_sem_login": "This account is not logged in to Claude — open a terminal and run `claude /login` once (same account); then just send the prompt again",
+  "problema_terminal_observacao_falhou": "Terminal observation unavailable",
   "board_pareada_com_clicar": "paired with {n} — clicking gathers the group here",
   "board_pareada_com": "paired with {n}",
   "board_peer_grupo": "📣 group · {n}",

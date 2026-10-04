@@ -1093,7 +1093,27 @@ Anotar valor e unidade, a sessão de cada `/history`, e o que não deu para medi
 | `/history` completo, Claude 300 MB / `limit=200` | |
 | Threads e inotify do Python com 4 chats abertos, contra 0 abertos | |
 
-## Observação terminal Rust com reserva Python
+## Observação terminal Rust: erro visível, sem captura Python
+
+(04/10/2026, dono único, decisão 3 do dono.) Com a ponte ligada, o Rust é o único dono da
+captura de quem tem lease: erro de transporte, resposta torta, quadro inválido, alvo do pane ou
+vínculo que não se lê sobem como `ObservationFailed(<código>)`, nunca como `None`. O monitor de
+estado repete o último evento com `problema="terminal_observacao_falhou"` e o código em
+`problema_detalhe` (faixa na web e no app), dorme a rodada e pergunta ao Rust de novo; a prévia
+mantém o texto que tinha. O erro ainda passa pelo `has-session`: sessão que sumiu vira `dead`, não
+um aviso eterno. Sem evento anterior, o estado sai do plugin ou do marcador do hook, nunca de um
+`idle` presumido. A pausa entre tentativas é só a do Rust (`terminal_control.rs`,
+`record_failure`, até 60 s); o disjuntor por sessão do Python (3 falhas, pausa de 1 s a 30 s e
+diários `fallback`/`paused`/`recovered`) saiu, porque com ele cada falha voltava a capturar pelo
+Python e o cartão mostrava uma leitura que o Rust não confirmou. O diário grava
+`terminal_observer.erro` no máximo uma vez por minuto por sessão e código (um Rust que alterna
+sucesso e falha não enche o diário); o log do Rust diz "observação terminal
+falhou". `None` (captura Python) fica só para dono fixo: ponte desligada, Windows, nome fora de
+`[A-Za-z0-9._-]{1,64}`, provider fora do Rust ou sessão ainda sem vínculo.
+
+O texto abaixo é o da Parte 2C, quando o erro caía na captura Python; a regra acima o substitui.
+
+### Parte 2C: observação terminal Rust com reserva Python
 
 (03/10/2026, Parte 2C, ensaios isolados.) O `hangar-server` abre uma segunda porta em
 `127.0.0.1:0`, no mesmo processo e sob a mesma parada do listener público. Isso cobre também
@@ -1135,7 +1155,7 @@ dedupe, drain e SSE continuam no Python.
 
 Ao anexar, o observador vira o cliente "atual" do tmux (comando sem `-c`, hooks) e manda foco ao
 pane; isso é do `tmux -C` e fica. Por isso a saída avulsa de hook fora de `%begin/%end` é
-ignorada pelo parser, a liberação fura a pausa por falhas e a vaga cheia (senão o cliente segue
+ignorada pelo parser, a liberação fura a vaga cheia (senão o cliente segue
 anexado até 90 s), e nome fora de `[A-Za-z0-9._-]{1,64}` não chama o Rust (04/10/2026, revisão
 com sessões reais em `docs/migracao-rust/parte2b/revisao-real.md`).
 

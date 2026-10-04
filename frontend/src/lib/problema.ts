@@ -15,6 +15,7 @@ export function textoProblema(codigo: string | null | undefined): string | null 
     case 'headless_processo_caiu': return m.problema_headless_processo_caiu();
     case 'headless_turno_erro': return m.problema_headless_turno_erro();
     case 'headless_sem_login': return m.problema_headless_sem_login();
+    case 'terminal_observacao_falhou': return m.problema_terminal_observacao_falhou();
     default: return null;
   }
 }

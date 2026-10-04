@@ -42,7 +42,7 @@ impl std::error::Error for TerminalError {}
 type Result<T> = std::result::Result<T, TerminalError>;
 
 fn io_failure(code: &'static str, error: std::io::Error) -> TerminalError {
-    tracing::warn!(code, io_kind = ?error.kind(), "observação terminal usa reserva Python");
+    tracing::warn!(code, io_kind = ?error.kind(), "observação terminal falhou");
     TerminalError(code)
 }
 

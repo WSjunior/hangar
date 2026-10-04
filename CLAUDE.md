@@ -421,10 +421,11 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   Lease pertence ao produtor Claude que consome a captura, não ao aparelho. Codex nativo não
   abre observador sem consumidor. Uma captura canônica por rodada, sem grade auxiliar; o estado
   temporal fica no Python, sem segundo HTTP. Captura/análise conservam provider,
-  vínculo, época e geração; `/clear` ou troca do filho descartam leituras antigas. Erro usa a
-  captura/reducer Python com a mesma memória e os mesmos fatos; Windows fica nesse caminho.
+  vínculo, época e geração; `/clear` ou troca do filho descartam leituras antigas. Erro vira
+  problema visível e a rodada seguinte pergunta ao Rust; Windows e ponte desligada usam a
+  captura Python.
   Codex conserva estado e prévia nativos; sidecar Claude vazio continua sendo uma resposta.
-  Evidência isolada em [plataforma.md](docs/decisoes/plataforma.md#observação-terminal-rust-com-reserva-python).
+  Evidência isolada em [plataforma.md](docs/decisoes/plataforma.md#observação-terminal-rust-erro-visível-sem-captura-python).
 
 ## tmux + Claude Code truecolor
 
