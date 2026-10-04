@@ -3144,7 +3144,8 @@ async def history(request: Request, response: Response, name: str, limit: int | 
         try:
             await coordinator.op(name, {"kind":"ensure_projection"}, uuid.uuid4().hex)
         except Exception as exc:
-            diag.registrar("runtime.history_failed", "erro", sessao=name, codigo=type(exc).__name__)
+            from app.runtime_coordinator import failure_reason
+            diag.registrar("runtime.history_failed", "erro", sessao=name, **failure_reason(exc))
             raise HTTPException(503, detail=erro("erro_envio_falhou", "projeção da fila indisponível; tente novamente")) from None
     # Entrar numa sessao e a leitura mais repetida do app, e quase sempre nada mudou desde a
     # ultima: medido em 06/09/2026 na `pr-junior` (transcript de 31,9 MB), a cauda custava 313 KB
@@ -4073,7 +4074,8 @@ async def _send_managed(name: str, text: str, provider: str, *, track_entry: boo
             **({"native":True} if (reply.get("payload") or {}).get("native") is True else {}),
             **({"entry_id":operation_id} if track_entry and command["kind"] == "submit" and not text.lstrip().startswith("/") else {})}
     except Exception as exc:
-        diag.registrar("runtime.send_failed", "erro", sessao=name, codigo=type(exc).__name__)
+        from app.runtime_coordinator import failure_reason
+        diag.registrar("runtime.send_failed", "erro", sessao=name, **failure_reason(exc))
         return {"ok":False, "error":erro("erro_envio_falhou", str(exc), erro=str(exc)),
             **({"entry_id":operation_id} if track_entry else {})}
 

@@ -971,7 +971,8 @@ def install_adapter(cls, provider):
                         await coordinator.op(name, {"kind":"drain"}, uuid.uuid4().hex)
                     except Exception as exc:
                         from app import diag
-                        diag.registrar("runtime.wake_failed", "erro", sessao=name, codigo=type(exc).__name__)
+                        from app.runtime_coordinator import failure_reason
+                        diag.registrar("runtime.wake_failed", "erro", sessao=name, **failure_reason(exc))
                 task = coordinator.loop.create_task(start())
                 self._tarefas.add(task)
                 task.add_done_callback(self._tarefas.discard)

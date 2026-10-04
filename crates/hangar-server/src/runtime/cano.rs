@@ -122,15 +122,14 @@ pub async fn peek(binding: &CanoBinding) -> Result<CanoSnapshot, RuntimeError> {
     let mut reader = open(binding, true).await?;
     let result = snapshot(&mut reader).await;
     let _ = reader.get_mut().shutdown().await;
-    result.and_then(|snapshot| {
-        if snapshot.pid != binding.pid { Err(RuntimeError::new("cano_binding","snapshot de outro cano")) } else { Ok(snapshot) }
-    })
+    result
 }
 
+// Sem comparar pid: o sidecar guarda o do cano e o snapshot traz o do agente filho. Quem prova que é
+// o cano certo é o token único por subida, já conferido em `open`.
 pub async fn connect(binding: &CanoBinding) -> Result<CanoConnection, RuntimeError> {
     let mut stream = open(binding, false).await?;
     let snapshot = snapshot(&mut stream).await?;
-    if snapshot.pid != binding.pid { return Err(RuntimeError::new("cano_binding","snapshot de outro cano")); }
     Ok(CanoConnection { snapshot, stream })
 }
 

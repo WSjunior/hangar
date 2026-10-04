@@ -139,7 +139,8 @@ async def session_info(name: str) -> dict:
         try:
             await coordinator.op(name, {"kind":"ensure_projection"}, uuid.uuid4().hex)
         except Exception as exc:
-            diag.registrar("runtime.history_failed", "erro", sessao=name, codigo=type(exc).__name__)
+            from app.runtime_coordinator import failure_reason
+            diag.registrar("runtime.history_failed", "erro", sessao=name, **failure_reason(exc))
             raise HTTPException(503) from None
     return info_payload(name, info.provider, info.jsonl)
 
