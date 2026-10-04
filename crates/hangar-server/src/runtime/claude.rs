@@ -607,6 +607,7 @@ impl ClaudeEngine {
                         "headless_sem_login" } else { "headless_turno_erro" }.into());
                     self.state.problema_detalhe = Some(format!("{subtype}: {}",event["result"].as_str().unwrap_or("").chars().take(300).collect::<String>()));
                 } else if subtype == "success" && event["local_command"] != true { self.state.problema = None; self.state.problema_detalhe = None; }
+                if event["local_command"] == true { effects.push(Effect::ConfirmLocalCommands); }
                 self.apply_usage(&event,effects);
                 self.clear_streams(effects); self.changed(effects,true);
                 if self.effort_intent.as_ref().is_some_and(|intent|intent["status"] == "prepared") { self.dispatch_effort(effects); }

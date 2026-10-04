@@ -477,6 +477,18 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                     });
                 }
                 Effect::WakeQueue => { drain_requested = true; },
+                Effect::ConfirmLocalCommands => {
+                    // Mesma regra do adapter Python: comando local não aparece no transcript, então o
+                    // reconcile nunca o confirmaria; a CLI já o consumiu. Só as entradas de barra.
+                    let queue = queue.clone(); let generation = target.generation; let sample = clock(start);
+                    jobs.spawn(async move { Job::Saved(async {
+                        let state = queue.snapshot().await.map_err(io_failure)?;
+                        let entry_ids:Vec<String> = state.rows.iter().filter(|row|row["delivered"] == true && row["confirmed"] != true
+                            && row["text"].as_str().is_some_and(|text|text.trim_start().starts_with('/'))).filter_map(|row|row["id"].as_str().map(str::to_owned)).collect();
+                        if entry_ids.is_empty() { return Ok(()); }
+                        queue.exec(generation,&format!("local-confirm:{}",unique()),sample,Action::Confirm { entry_ids }).await.map(|_|()).map_err(io_failure)
+                    }.await) });
+                },
                 Effect::Stop { .. } => { closed.store(true,Ordering::Release); },
             }
         }
