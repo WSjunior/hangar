@@ -1,5 +1,6 @@
 """A reserva de leitura não pode repetir uma alteração já enviada."""
 import json
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -19,7 +20,10 @@ def bridge_server():
             if payload["op"] == "push":
                 self.close_connection = True
                 return
-            body = json.dumps({"ok": False, "error": {"status": 409, "detail": "recusado"}}).encode()
+            error = {"status": 409, "detail": "recusado"}
+            if payload["op"] == "commit":
+                error = {"status": 503, "code": "workspace_unavailable", "detail": "vagas cheias"}
+            body = json.dumps({"ok": False, "error": error}).encode()
             self.send_response(200)
             self.send_header("content-length", str(len(body)))
             self.end_headers()
@@ -78,3 +82,48 @@ def test_disabled_bridge_uses_python_once():
 def test_only_literal_loopback_is_accepted(address):
     with pytest.raises(ValueError):
         workspace_bridge.configure(address, "segredo-sintético")
+
+
+def test_operation_rust_never_ran_goes_to_python_once(bridge_server):
+    calls = []
+    @workspace_bridge.delegate("commit", GitError, mutation=True)
+    def original(cwd):
+        calls.append(cwd)
+        return {"ok": True}
+    assert original("pasta") == {"ok": True}
+    assert calls == ["pasta"]
+    assert len(bridge_server) == 1
+
+
+def test_refused_connection_runs_mutation_in_python():
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    workspace_bridge.configure(f"127.0.0.1:{port}", "segredo-sintético")
+    calls = []
+    @workspace_bridge.delegate("push", GitError, mutation=True)
+    def original(cwd):
+        calls.append(cwd)
+        return {"ok": True}
+    try:
+        assert original("pasta") == {"ok": True}
+    finally:
+        workspace_bridge.configure(None, None)
+    assert calls == ["pasta"]
+
+
+def test_request_handed_off_by_rust_is_served_by_python_code(bridge_server, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import api
+    from app.config import settings
+    (tmp_path / "leia.txt").write_text("texto\n")
+    monkeypatch.setattr(api, "_session_cwd", lambda name: str(tmp_path))
+    monkeypatch.setattr(settings, "auth_token", "secret")
+    client = TestClient(api.app)
+    auth = {"Authorization": "Bearer secret"}
+    assert client.get("/api/sessions/s/files/read", params={"path": "leia.txt"}, headers=auth).status_code == 409
+    sent = len(bridge_server)
+    r = client.get("/api/sessions/s/files/read", params={"path": "leia.txt"},
+                   headers={**auth, "x-hangar-workspace-fallback": "indisponivel"})
+    assert r.status_code == 200 and r.json()["text"] == "texto\n"
+    assert len(bridge_server) == sent

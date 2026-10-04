@@ -7,12 +7,24 @@ use axum::{
 use fake::{OWNER, SECRET, client, config, spawn_server};
 use serde_json::{Value, json};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 
+type Handoffs = Arc<Mutex<Vec<String>>>;
+
 async fn fixture(root: &std::path::Path) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
+    let (addr, hits, _) = fixture_with(root, true).await;
+    (addr, hits)
+}
+
+/// O Python falso conta os repasses e guarda o motivo que o Rust mandou no cabeçalho.
+async fn fixture_with(
+    root: &std::path::Path,
+    context_ok: bool,
+) -> (std::net::SocketAddr, Arc<AtomicUsize>, Handoffs) {
     let hits = Arc::new(AtomicUsize::new(0));
+    let handoffs: Handoffs = Arc::default();
     let context = json!({"roots":[root],"sessions":[{"name":"fixture","cwd":root}],"session":{"name":"fixture","cwd":root,"jsonl":root.join("fixture.jsonl")}});
     let app = Router::new()
         .route(
@@ -23,7 +35,9 @@ async fn fixture(root: &std::path::Path) -> (std::net::SocketAddr, Arc<AtomicUsi
                     let context = context.clone();
                     async move {
                         assert_eq!(headers["x-hangar-internal"], SECRET);
+                        let status = if context_ok { 200 } else { 500 };
                         (
+                            axum::http::StatusCode::from_u16(status).unwrap(),
                             [(axum::http::header::CONTENT_TYPE, "application/json")],
                             context.to_string(),
                         )
@@ -31,17 +45,28 @@ async fn fixture(root: &std::path::Path) -> (std::net::SocketAddr, Arc<AtomicUsi
                 },
             ),
         )
-        .fallback(|State(hits): State<Arc<AtomicUsize>>| async move {
-            hits.fetch_add(1, Ordering::Relaxed);
-            "python-reserva"
-        })
-        .with_state(hits.clone());
+        .fallback(
+            |State((hits, handoffs)): State<(Arc<AtomicUsize>, Handoffs)>,
+             headers: axum::http::HeaderMap| async move {
+                hits.fetch_add(1, Ordering::Relaxed);
+                if let Some(code) = headers.get("x-hangar-workspace-fallback") {
+                    handoffs.lock().unwrap().push(code.to_str().unwrap().to_owned());
+                }
+                "python-reserva"
+            },
+        )
+        .with_state((hits.clone(), handoffs.clone()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream = listener.local_addr().unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    (spawn_server(config(upstream, "127.0.0.1")).await, hits)
+    (spawn_server(config(upstream, "127.0.0.1")).await, hits, handoffs)
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
 }
 
 #[tokio::test]
@@ -224,4 +249,62 @@ async fn every_public_mutation_rejects_private_context_fields_before_execution()
     assert_eq!(result.text().await.unwrap(), "python-reserva");
     assert_eq!(hits.load(Ordering::Relaxed), 1);
     assert_eq!(std::fs::read_to_string(dir.path().join("arquivo.txt")).unwrap(), "alteração preservada");
+}
+
+#[tokio::test]
+async fn broken_context_hands_the_request_to_python_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, _, handoffs) = fixture_with(dir.path(), false).await;
+    let body = client()
+        .get(format!("http://{addr}/api/sessions/fixture/files/list"))
+        .bearer_auth(OWNER)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(body, "python-reserva");
+    assert_eq!(*handoffs.lock().unwrap(), ["contexto"]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn full_write_slots_refuse_at_once_and_python_serves_without_rust_running_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = dir.path().join("remoto.git");
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git(dir.path(), &["init", "-q", "--bare", "remoto.git"]);
+    std::fs::write(remote.join("hooks/pre-receive"), "#!/bin/sh\nsleep 3\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(remote.join("hooks/pre-receive"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["-c", "user.name=T", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "c"]);
+    git(&repo, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git(&repo, &["config", "branch.main.remote", "origin"]);
+    git(&repo, &["config", "branch.main.merge", "refs/heads/main"]);
+    std::fs::write(repo.join("novo.txt"), "x").unwrap();
+    let (addr, _, handoffs) = fixture_with(&repo, true).await;
+    let c = client();
+    let post = |route: &str, body: Value| {
+        c.post(format!("http://{addr}/api/sessions/fixture/{route}"))
+            .bearer_auth(OWNER)
+            .header("content-type", "application/json")
+            .body(body.to_string())
+            .send()
+    };
+    let pushes = (0..4).map(|_| tokio::spawn(post("git/push", json!({})))).collect::<Vec<_>>();
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    let started = std::time::Instant::now();
+    let commit = post("git/commit", json!({"message":"m","paths":["novo.txt"]})).await.unwrap();
+    assert_eq!(commit.text().await.unwrap(), "python-reserva");
+    assert!(started.elapsed() < std::time::Duration::from_secs(1), "esperou a vaga");
+    assert_eq!(*handoffs.lock().unwrap(), ["ocupado"]);
+    let log = std::process::Command::new("git").arg("-C").arg(&repo).args(["log", "--oneline"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&log.stdout).lines().count(), 1, "o Rust não pode ter commitado");
+    for push in pushes {
+        assert_ne!(push.await.unwrap().unwrap().text().await.unwrap(), "python-reserva");
+    }
+    assert_eq!(*handoffs.lock().unwrap(), ["ocupado"]);
 }

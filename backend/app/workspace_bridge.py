@@ -1,6 +1,7 @@
 """Ponte privada de Git/arquivos. Falta de confirmação nunca repete uma escrita."""
 import contextvars
 import functools
+import http.client
 import inspect
 import ipaddress
 import json
@@ -15,6 +16,27 @@ _config: tuple[str, str] | None = None
 _fallback = contextvars.ContextVar("workspace_fallback", default=False)
 _slots = threading.BoundedSemaphore(8)
 _MAX_RESPONSE = 32 * 1024 * 1024
+# Rust não chegou a rodar a operação: o Python pode rodá-la sem repetir efeito.
+_UNAVAILABLE = {"workspace_unavailable", "workspace_busy"}
+_HANDOFF_CODES = {"indisponivel", "ocupado", "contexto", "sessao_no_python"}
+
+
+def take_over(code: str) -> contextvars.Token | None:
+    """Pedido que o Rust repassou ao falhar: o Python atende com o próprio código.
+
+    Sem isto a reserva era circular: a rota do Python delegava de volta ao mesmo Rust pela ponte.
+    """
+    if code not in _HANDOFF_CODES:
+        return None
+    if code not in ("sessao_no_python", "ocupado"):
+        from app import diag
+        diag.registrar("workspace.reserva_python", "aviso", codigo=code)
+    return _fallback.set(True)
+
+
+def release(token: contextvars.Token | None) -> None:
+    if token is not None:
+        _fallback.reset(token)
 
 
 def configure(address: str | None, secret: str | None) -> None:
@@ -41,11 +63,17 @@ for _handler in (urllib.request.ProxyHandler({}), urllib.request.HTTPHandler(),
 
 def request(operation: str, arguments: dict, *, mutation: bool = False) -> dict | None:
     config = _config
-    if config is None or _fallback.get() or not _slots.acquire(blocking=False):
+    if config is None or _fallback.get():
         return None
     try:
         data = json.dumps({"op": operation, "args": arguments}, ensure_ascii=False,
                           allow_nan=False, default=os.fspath).encode("utf-8")
+    except (TypeError, ValueError):
+        _failed(operation, False, "argumentos")
+        return None
+    if not _slots.acquire(blocking=False):
+        return None
+    try:
         req = urllib.request.Request(f"http://{config[0]}/__hangar_server/workspace", data=data,
             headers={"content-type": "application/json", "x-hangar-internal": config[1]}, method="POST")
         with _opener.open(req, timeout=160 if mutation else 50) as response:
@@ -60,15 +88,26 @@ def request(operation: str, arguments: dict, *, mutation: bool = False) -> dict 
         if not value["ok"] and (not isinstance(value.get("error"), dict)
                 or type(value["error"].get("status")) is not int or "detail" not in value["error"]):
             raise ValueError("invalid workspace error")
+        if not value["ok"] and value["error"].get("code") in _UNAVAILABLE:
+            _failed(operation, mutation, "rust_nao_rodou")
+            return None
         return value
-    except (OSError, ValueError, urllib.error.URLError):
-        _log.warning("workspace bridge unavailable op=%s mutation=%s", operation, mutation)
-        if mutation:
+    except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException) as e:
+        refused = isinstance(getattr(e, "reason", None), ConnectionRefusedError)
+        _failed(operation, mutation, "conexao_recusada" if refused else type(e).__name__)
+        # Conexão recusada: o pedido nem saiu, então rodar no Python não repete nada.
+        if mutation and not refused:
             return {"ok": False, "error": {"status": 503, "code": "workspace_action_uncertain",
                 "detail": "Não foi possível confirmar o resultado. Confira o estado antes de repetir."}}
         return None
     finally:
         _slots.release()
+
+
+def _failed(operation: str, mutation: bool, reason: str) -> None:
+    from app import diag
+    _log.warning("workspace bridge unavailable op=%s mutation=%s reason=%s", operation, mutation, reason)
+    diag.registrar("workspace.ponte", "aviso", operacao_rust=operation, escrita=mutation, motivo=reason)
 
 
 def delegate(operation: str, exception, *, mutation=False, prepare=None, decode=None):

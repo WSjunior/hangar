@@ -574,6 +574,8 @@ async def _correlaciona_diag(request: Request, call_next):
         if re.fullmatch(r"[A-Za-z0-9_-]{1,32}", candidate):
             req = candidate
     token = diag.req_atual.set(req)
+    from app import workspace_bridge
+    handoff = workspace_bridge.take_over(request.headers.get("x-hangar-workspace-fallback", ""))
     started = time.monotonic()
     response = None
     failure = ""
@@ -593,6 +595,7 @@ async def _correlaciona_diag(request: Request, call_next):
             diag.registrar("api.servidor", "erro" if status >= 500 else "aviso" if status >= 400 else "ok",
                            detalhe=f"{request.method} {route}", codigo=str(status), ms=elapsed,
                            etapa="cabecalhos", sessao=request.path_params.get("name"), erro_tipo=failure)
+        workspace_bridge.release(handoff)
         diag.req_atual.reset(token)
 
 

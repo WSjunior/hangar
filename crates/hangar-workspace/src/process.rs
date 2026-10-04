@@ -1,5 +1,5 @@
 //! Prazos incluem a drenagem dos pipes; um descendente não pode prender o pedido.
-use crate::{Result, error};
+use crate::{Result, error, unavailable};
 use std::{
     io::Read,
     path::Path,
@@ -32,7 +32,7 @@ pub fn run(cwd: &Path, args: &[&str], timeout: Duration) -> Result<Output> {
 
 pub fn run_program(command: &mut Command, timeout: Duration) -> Result<Output> {
     let guard = crate::process_lifetime::Guard::new()
-        .map_err(|_| error(500, "não foi possível proteger a árvore do comando"))?;
+        .map_err(|_| unavailable("não foi possível proteger a árvore do comando"))?;
     guard.configure(command);
     let mut child = command
         .env("LC_ALL", "C")
@@ -44,19 +44,16 @@ pub fn run_program(command: &mut Command, timeout: Duration) -> Result<Output> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| {
-            error(
-                500,
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    "git não encontrado".into()
-                } else {
-                    format!("git falhou: {e}")
-                },
-            )
+            unavailable(if e.kind() == std::io::ErrorKind::NotFound {
+                "git não encontrado".into()
+            } else {
+                format!("git não iniciou: {e}")
+            })
         })?;
     if guard.attach(&child).is_err() {
         guard.kill();
         kill_tree(&mut child);
-        return Err(error(500, "não foi possível proteger a árvore do comando"));
+        return Err(unavailable("não foi possível proteger a árvore do comando"));
     }
     let (tx, rx) = mpsc::channel();
     let drain = |mut pipe: Box<dyn Read + Send>, which: bool, tx: mpsc::Sender<_>| {

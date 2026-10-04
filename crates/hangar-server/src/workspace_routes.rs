@@ -66,30 +66,38 @@ fn private_ok(st: &AppState, peer: SocketAddr, headers: &HeaderMap) -> bool {
         && !st.cfg.internal_secret.is_empty()
         && bool::from(token.ct_eq(st.cfg.internal_secret.as_bytes()))
 }
+/// Vaga cheia recusa na hora: quem chamou entrega ao Python em vez de enfileirar atrás de um
+/// fetch lento. Escrita só volta como `unavailable` antes de rodar; depois, nunca se repete.
 async fn execute(st: &Arc<AppState>, op: Operation) -> hangar_workspace::Result<Value> {
+    let mutation = op.is_mutation();
     let slots = if matches!(op, Operation::HeadInfo { .. } | Operation::BranchOf { .. }) {
         &st.workspace_meta_slots
-    } else if op.is_mutation() {
+    } else if mutation {
         &st.workspace_slots
     } else {
         &st.workspace_read_slots
     };
     let permit = slots
         .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| hangar_workspace::error(503, "operação indisponível"))?;
-    tokio::task::spawn_blocking(move || {
+        .try_acquire_owned()
+        .map_err(|_| hangar_workspace::busy())?;
+    match tokio::task::spawn_blocking(move || {
         let _permit = permit;
         hangar_workspace::execute(op)
     })
     .await
-    .map_err(|_| {
-        hangar_workspace::error(
+    {
+        // Um comando anterior da mesma escrita pode já ter mudado o disco.
+        Ok(Err(e)) if mutation && hangar_workspace::is_unavailable(&e) => {
+            Err(hangar_workspace::error(500, e.detail.as_str().unwrap_or("git falhou")))
+        }
+        Ok(result) => result,
+        Err(_) if mutation => Err(hangar_workspace::error(
             503,
             "Não foi possível confirmar o resultado. Confira o estado antes de repetir.",
-        )
-    })?
+        )),
+        Err(_) => Err(hangar_workspace::unavailable("pânico na leitura")),
+    }
 }
 pub async fn private(
     State(st): State<Arc<AppState>>,
@@ -177,7 +185,8 @@ pub fn matches(method: &Method, path: &str) -> bool {
         _ => false,
     }
 }
-async fn context(st: &AppState, name: Option<&str>) -> Option<Value> {
+/// `Err(None)`: sessão inexistente, resposta normal do Python. `Err(Some(motivo))`: falha.
+async fn context(st: &AppState, name: Option<&str>) -> Result<Value, Option<&'static str>> {
     let query = name
         .map(|n| {
             format!(
@@ -192,28 +201,26 @@ async fn context(st: &AppState, name: Option<&str>) -> Option<Value> {
     ))
     .header("x-hangar-internal", &st.cfg.internal_secret)
     .body(Body::empty())
-    .ok()?;
+    .map_err(|_| Some("pedido"))?;
     let resp = tokio::time::timeout(Duration::from_secs(10), st.http.request(req))
         .await
-        .ok()?
-        .ok()?;
+        .map_err(|_| Some("prazo"))?
+        .map_err(|_| Some("conexao"))?;
+    if resp.status() == StatusCode::NOT_FOUND && name.is_some() {
+        return Err(None);
+    }
     if !resp.status().is_success() {
-        return None;
+        return Err(Some("status"));
     }
     let bytes = tokio::time::timeout(Duration::from_secs(10), resp.into_body().collect())
         .await
-        .ok()?
-        .ok()?
+        .map_err(|_| Some("prazo"))?
+        .map_err(|_| Some("conexao"))?
         .to_bytes();
     if bytes.len() > MAX_BODY {
-        return None;
+        return Err(Some("tamanho"));
     }
-    serde_json::from_slice(&bytes).ok()
-}
-fn query(req: &Request) -> HashMap<String, String> {
-    form_urlencoded::parse(req.uri().query().unwrap_or("").as_bytes())
-        .into_owned()
-        .collect()
+    serde_json::from_slice(&bytes).map_err(|_| Some("json"))
 }
 fn bool_param(value: Option<&String>, default: bool) -> Option<bool> {
     match value.map(|s| s.to_lowercase()).as_deref() {
@@ -243,10 +250,28 @@ fn sessions(ctx: &Value, top: Option<&str>) -> Vec<String> {
     names
 }
 
+/// Cabeçalho do repasse: o Python roda o próprio código em vez de devolver ao Rust pela ponte.
+const FALLBACK_HEADER: &str = "x-hangar-workspace-fallback";
+
+fn fallback_request(
+    method: Method,
+    uri: axum::http::Uri,
+    mut headers: HeaderMap,
+    bytes: Bytes,
+    code: Option<&'static str>,
+) -> Request {
+    if let Some(code) = code {
+        headers.insert(FALLBACK_HEADER, header::HeaderValue::from_static(code));
+    }
+    let mut req = Request::new(Body::from(bytes));
+    *req.method_mut() = method;
+    *req.uri_mut() = uri;
+    *req.headers_mut() = headers;
+    req
+}
+
 pub async fn public(st: Arc<AppState>, req: Request, forward: Forward) -> Response {
     let route = req.uri().path().to_owned();
-    let params = query(&req);
-    let method = req.method().clone();
     let name = route
         .strip_prefix("/api/sessions/")
         .and_then(|p| p.split_once('/').map(|(n, _)| n))
@@ -256,102 +281,159 @@ pub async fn public(st: Arc<AppState>, req: Request, forward: Forward) -> Respon
                 .ok()
                 .map(|s| s.into_owned())
         });
-    let Some(ctx) = context(&st, name.as_deref()).await else {
-        tracing::warn!(
-            code = "workspace_context_unavailable",
-            "metadados indisponíveis; reserva Python"
-        );
-        return pass(&st, req, &forward).await;
-    };
+    let tail = match &name {
+        Some(_) => route
+            .strip_prefix("/api/sessions/")
+            .and_then(|p| p.split_once('/'))
+            .map_or("", |(_, t)| t),
+        None => route.as_str(),
+    }
+    .to_owned();
+    // Pasta sem sessão (`/api/fs/*`) conta numa chave só.
+    let session = name.clone().unwrap_or_default();
     let (parts, body) = req.into_parts();
     let bytes = match to_bytes(body, MAX_BODY).await {
         Ok(b) => b,
         Err(_) => return response(json!({"detail":"request body too large"}), 413),
     };
+    let to_python = |code: Option<&'static str>| {
+        fallback_request(
+            parts.method.clone(),
+            parts.uri.clone(),
+            parts.headers.clone(),
+            bytes.clone(),
+            code,
+        )
+    };
+    if st.fallback.on_python(&session, "workspace") {
+        return pass(&st, to_python(Some("sessao_no_python")), &forward).await;
+    }
+    let ctx = match context(&st, name.as_deref()).await {
+        Ok(ctx) => ctx,
+        Err(None) => return pass(&st, to_python(None), &forward).await,
+        Err(Some(reason)) => {
+            let failures = st.fallback.failed(&session, "workspace", "workspace_context");
+            if crate::warn_limit::allow(Some(&session), "workspace_context") {
+                tracing::warn!(session = %session, route = %tail, failures, code = "workspace_context",
+                    reason, "metadados de Git/arquivos indisponíveis; repassa ao Python");
+            }
+            return pass(&st, to_python(Some("contexto")), &forward).await;
+        }
+    };
+    let python = to_python(Some("indisponivel"));
+    let busy = to_python(Some("ocupado"));
+    match run(&st, parts, bytes, &tail, ctx, &forward).await {
+        Ok(response) => {
+            st.fallback.succeeded(&session, "workspace");
+            response
+        }
+        Err(e) if e.code.as_deref() == Some(hangar_workspace::BUSY) => {
+            if crate::warn_limit::allow(None, hangar_workspace::BUSY) {
+                tracing::warn!(route = %tail, code = hangar_workspace::BUSY, "vagas de Git/arquivos cheias; repassa ao Python");
+            }
+            pass(&st, busy, &forward).await
+        }
+        Err(e) if hangar_workspace::is_unavailable(&e) => {
+            let failures = st.fallback.failed(&session, "workspace", hangar_workspace::UNAVAILABLE);
+            let reason = e.detail.as_str().unwrap_or("");
+            if crate::warn_limit::allow(Some(&session), reason) {
+                tracing::warn!(session = %session, route = %tail, failures, code = hangar_workspace::UNAVAILABLE,
+                    reason, "Git/arquivos no Rust não rodou; repassa ao Python");
+            }
+            pass(&st, python, &forward).await
+        }
+        Err(e) => {
+            if e.status >= 500 {
+                let failures = st.fallback.failed(&session, "workspace", "workspace_error");
+                if crate::warn_limit::allow(Some(&session), "workspace_error") {
+                    // Sem o detalhe: o stderr do git pode citar caminhos e nomes do usuário.
+                    tracing::warn!(session = %session, route = %tail, failures, status = e.status,
+                        code = "workspace_error", "Git/arquivos no Rust falhou");
+                }
+            } else {
+                st.fallback.succeeded(&session, "workspace");
+            }
+            failure(e, &tail)
+        }
+    }
+}
+
+async fn run(
+    st: &Arc<AppState>,
+    parts: axum::http::request::Parts,
+    bytes: Bytes,
+    tail: &str,
+    ctx: Value,
+    forward: &Forward,
+) -> hangar_workspace::Result<Response> {
+    let route = parts.uri.path().to_owned();
+    let params = form_urlencoded::parse(parts.uri.query().unwrap_or("").as_bytes())
+        .into_owned()
+        .collect::<HashMap<String, String>>();
+    let method = parts.method.clone();
     let payload = if bytes.is_empty() {
         json!({})
     } else {
         match serde_json::from_slice::<Value>(&bytes) {
             Ok(v) if v.is_object() => v,
-            _ => return pass(&st, Request::from_parts(parts, Body::from(bytes)), &forward).await,
+            _ => return Ok(pass(st, Request::from_parts(parts, Body::from(bytes)), forward).await),
         }
-    };
-    let tail = if name.is_some() {
-        route
-            .strip_prefix("/api/sessions/")
-            .unwrap()
-            .split_once('/')
-            .unwrap()
-            .1
-    } else {
-        route.as_str()
     };
     if method == Method::POST && !body_valid(tail, &payload) {
-        return pass(&st, Request::from_parts(parts, Body::from(bytes)), &forward).await;
+        return Ok(pass(st, Request::from_parts(parts, Body::from(bytes)), forward).await);
     }
     let Some(op) = map_operation(tail, &method, &params, &payload, &ctx) else {
-        return pass(&st, Request::from_parts(parts, Body::from(bytes)), &forward).await;
+        return Ok(pass(st, Request::from_parts(parts, Body::from(bytes)), forward).await);
     };
     if tail == "file" {
-        match execute(&st, op).await {
-            Ok(path) => {
-                return serve_file(
-                    Path::new(path.as_str().unwrap_or("")),
-                    &parts.headers,
-                    bool_param(params.get("download"), false).unwrap_or(false),
-                )
-                .await;
-            }
-            Err(e) => return failure(e, tail),
-        }
+        let path = execute(st, op).await?;
+        return Ok(serve_file(
+            Path::new(path.as_str().unwrap_or("")),
+            &parts.headers,
+            bool_param(params.get("download"), false).unwrap_or(false),
+        )
+        .await);
     }
-    let result = if tail == "files/resolver" {
+    let mut result = if tail == "files/resolver" {
         let cwd = ctx["session"]["cwd"].as_str().unwrap_or("").to_owned();
         let jsonl = ctx["session"]["jsonl"].as_str().map(str::to_owned);
         let paths = payload["caminhos"]
             .as_array()
-            .unwrap()
-            .iter()
+            .into_iter()
+            .flatten()
             .filter_map(Value::as_str)
             .map(str::to_owned)
             .collect::<Vec<_>>();
         let permit = st
             .workspace_read_slots
             .clone()
-            .acquire_owned()
-            .await
-            .unwrap();
+            .try_acquire_owned()
+            .map_err(|_| hangar_workspace::busy())?;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             resolve_many(&cwd, jsonl.as_deref(), &paths)
         })
         .await
-        .unwrap_or_else(|_| Err(hangar_workspace::error(503, "operação indisponível")))
+        .unwrap_or_else(|_| Err(hangar_workspace::unavailable("pânico na leitura")))?
     } else if tail == "file/text" {
-        match execute(&st, op).await {
-            Ok(path) => {
-                let path = path.as_str().unwrap_or("");
-                let args = if method == Method::POST {
-                    json!({"alvo":path,"path":payload["path"],"texto":payload["text"],"digest_lido":payload["digest"]})
-                } else {
-                    json!({"alvo":path,"path":params.get("path")})
-                };
-                if let Some(next) = operation(
-                    if method == Method::POST {
-                        "write_at"
-                    } else {
-                        "read_at"
-                    },
-                    args,
-                ) {
-                    execute(&st, next).await
-                } else {
-                    return pass(&st, Request::from_parts(parts, Body::from(bytes)), &forward)
-                        .await;
-                }
-            }
-            Err(e) => Err(e),
-        }
+        let path = execute(st, op).await?;
+        let path = path.as_str().unwrap_or("");
+        let args = if method == Method::POST {
+            json!({"alvo":path,"path":payload["path"],"texto":payload["text"],"digest_lido":payload["digest"]})
+        } else {
+            json!({"alvo":path,"path":params.get("path")})
+        };
+        let Some(next) = operation(
+            if method == Method::POST {
+                "write_at"
+            } else {
+                "read_at"
+            },
+            args,
+        ) else {
+            return Ok(pass(st, Request::from_parts(parts, Body::from(bytes)), forward).await);
+        };
+        execute(st, next).await?
     } else if route.starts_with("/api/fs/")
         && matches!(
             tail,
@@ -363,44 +445,33 @@ pub async fn public(st: Arc<AppState>, req: Request, forward: Forward) -> Respon
                 | "/api/fs/git/branch"
         )
     {
-        folder_operation(&st, op, tail, &ctx, &payload, &params).await
+        folder_operation(st, op, tail, &ctx, &payload, &params).await?
     } else {
-        execute(&st, op).await
+        execute(st, op).await?
     };
-    match result {
-        Err(e) => failure(e, tail),
-        Ok(mut result) => {
-            if tail == "git/files" {
-                let cwd = ctx["session"]["cwd"].as_str().unwrap_or("");
-                let sequencer = execute(&st, Operation::SequencerState { cwd: cwd.into() }).await;
-                match sequencer {
-                    Ok(s) => result = json!({"files":result,"sequencer":s}),
-                    Err(e) => return failure(e, tail),
-                }
-            }
-            if tail == "git/log" {
-                if params.get("q").is_none_or(|q| q.is_empty()) {
-                    result = hangar_workspace::git::lanes(
-                        result.as_array().cloned().unwrap_or_default(),
-                    );
-                }
-                let summary = execute(
-                    &st,
-                    Operation::GitSummary {
-                        cwd: ctx["session"]["cwd"].as_str().map(str::to_owned),
-                    },
-                )
-                .await
-                .unwrap_or(Value::Null);
-                result =
-                    json!({"commits":result,"ahead":summary["ahead"],"behind":summary["behind"]});
-            }
-            if tail.starts_with("git/commit/") && tail.ends_with("/files") {
-                result = json!({"files":result});
-            }
-            response(result, 200)
-        }
+    if tail == "git/files" {
+        let cwd = ctx["session"]["cwd"].as_str().unwrap_or("");
+        let sequencer = execute(st, Operation::SequencerState { cwd: cwd.into() }).await?;
+        result = json!({"files":result,"sequencer":sequencer});
     }
+    if tail == "git/log" {
+        if params.get("q").is_none_or(|q| q.is_empty()) {
+            result = hangar_workspace::git::lanes(result.as_array().cloned().unwrap_or_default());
+        }
+        let summary = execute(
+            st,
+            Operation::GitSummary {
+                cwd: ctx["session"]["cwd"].as_str().map(str::to_owned),
+            },
+        )
+        .await
+        .unwrap_or(Value::Null);
+        result = json!({"commits":result,"ahead":summary["ahead"],"behind":summary["behind"]});
+    }
+    if tail.starts_with("git/commit/") && tail.ends_with("/files") {
+        result = json!({"files":result});
+    }
+    Ok(response(result, 200))
 }
 
 fn body_valid(tail: &str, body: &Value) -> bool {

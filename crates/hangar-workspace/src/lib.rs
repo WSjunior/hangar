@@ -22,6 +22,19 @@ pub fn file_error(status: u16, code: &str, detail: impl Into<String>) -> Workspa
         ..error(status, detail)
     }
 }
+/// Código de quem não chegou a rodar a operação: pode ir ao Python sem risco de repetir efeito.
+pub const UNAVAILABLE: &str = "workspace_unavailable";
+pub fn unavailable(detail: impl Into<String>) -> WorkspaceError {
+    file_error(503, UNAVAILABLE, detail)
+}
+/// Vagas cheias: também não rodou, mas é carga, não defeito; não conta como falha do Rust.
+pub const BUSY: &str = "workspace_busy";
+pub fn busy() -> WorkspaceError {
+    file_error(503, BUSY, "vagas cheias")
+}
+pub fn is_unavailable(e: &WorkspaceError) -> bool {
+    matches!(e.code.as_deref(), Some(UNAVAILABLE | BUSY))
+}
 fn fifty() -> usize {
     50
 }
