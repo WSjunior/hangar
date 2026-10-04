@@ -34,6 +34,23 @@ claude() {
     fi
 
     local a
+    local print=0
+    for a in "$@"; do case "$a" in -p|--print) print=1 ;; esac; done
+
+    # Plugin do Hangar por `--plugin-dir`, igual às sessões que o backend abre: só assim ele fica por
+    # fora dos plugins do marketplace e espelha no app a faixa que os mods desenham. O caminho vem do
+    # arquivo que o backend grava (este wrapper não sabe onde o repositório mora); o backend só o
+    # grava quando o `claude` aceita a flag. Modo -p não tem faixa e segue como estava.
+    local -a plug
+    plug=()
+    local plugdir=
+    if [ "$print" = 0 ] && [ -r "$HOME/.hangar/plugin-dir" ]; then
+        IFS= read -r plugdir <"$HOME/.hangar/plugin-dir" || true
+        if [ -n "$plugdir" ] && [ -d "$plugdir" ]; then
+            plug=(--plugin-dir "$plugdir")
+        fi
+    fi
+
     # respect flags that manage their own session (injecting --session-id alongside them errors)
     for a in "$@"; do
         case "$a" in
@@ -42,9 +59,9 @@ claude() {
                 # binário direto (evita recursão na função); com motor, quem executa é o hangar-engine
                 # (processo à parte achado no PATH) — `command` não existiria pra ele executar.
                 if [ ${#pre[@]} -eq 0 ]; then
-                    command claude "$@"
+                    command claude "${plug[@]}" "$@"
                 else
-                    "${pre[@]}" claude "$@"
+                    "${pre[@]}" claude "${plug[@]}" "$@"
                 fi
                 return
                 ;;
@@ -55,8 +72,6 @@ claude() {
     id=$(uuidgen 2>/dev/null) || id=$(cat /proc/sys/kernel/random/uuid)
 
     # only inject the id (no tmux) when: already in tmux, print mode, or stdin not a tty
-    local print=0
-    for a in "$@"; do case "$a" in -p|--print) print=1 ;; esac; done
     # TMUX herdado pode estar MORTO (ex: kitty single-instance cujo mestre nasceu dentro de um pane
     # que já fechou). Valida o pane; stale -> limpa e segue pro caminho "fora do tmux" (cria sessão).
     if [ -n "${TMUX:-}" ]; then
@@ -72,9 +87,9 @@ claude() {
         # separado, achado no PATH) — o execvpe dele nunca vê função de shell, então "command" viraria
         # só uma string a mais no argv (e um alvo inexistente pro execvpe procurar).
         if [ ${#pre[@]} -eq 0 ]; then
-            COLORTERM=truecolor CLAUDE_CODE_TMUX_TRUECOLOR=1 command claude --session-id "$id" "$@"
+            COLORTERM=truecolor CLAUDE_CODE_TMUX_TRUECOLOR=1 command claude --session-id "$id" "${plug[@]}" "$@"
         else
-            COLORTERM=truecolor CLAUDE_CODE_TMUX_TRUECOLOR=1 "${pre[@]}" claude --session-id "$id" "$@"
+            COLORTERM=truecolor CLAUDE_CODE_TMUX_TRUECOLOR=1 "${pre[@]}" claude --session-id "$id" "${plug[@]}" "$@"
         fi
         return
     fi
@@ -134,11 +149,11 @@ claude() {
         systemd-run --user --scope --collect -q -- tmux new-session -s "$name" -c "$PWD" \
             -e COLORTERM=truecolor -e CLAUDE_CODE_TMUX_TRUECOLOR=1 \
             -e "CP_SESSION_NAME=$name" \
-            "${cfg[@]}" "${pre[@]}" claude --session-id "$id" "$@"
+            "${cfg[@]}" "${pre[@]}" claude --session-id "$id" "${plug[@]}" "$@"
     else
         tmux new-session -s "$name" -c "$PWD" \
             -e COLORTERM=truecolor -e CLAUDE_CODE_TMUX_TRUECOLOR=1 \
             -e "CP_SESSION_NAME=$name" \
-            "${cfg[@]}" "${pre[@]}" claude --session-id "$id" "$@"
+            "${cfg[@]}" "${pre[@]}" claude --session-id "$id" "${plug[@]}" "$@"
     fi
 }

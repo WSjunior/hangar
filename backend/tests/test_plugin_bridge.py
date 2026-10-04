@@ -224,6 +224,21 @@ def test_endereco_da_maquina_e_gravado_sem_o_bearer(tmp_path):
     assert not settings.auth_token or settings.auth_token not in texto
 
 
+def test_plugin_dir_is_published_for_the_shell_wrapper(tmp_path, monkeypatch):
+    monkeypatch.setattr(pb, "raizes_dos_plugins", lambda: ["/repo com espaço/plugins/hangar"])
+    pb._publish_plugin_dir(tmp_path)
+    # Uma linha só e sem BOM: o wrapper lê com `read` do shell.
+    assert pb.plugin_dir_file(tmp_path).read_bytes() == "/repo com espaço/plugins/hangar\n".encode()
+
+
+def test_plugin_dir_file_is_removed_when_mods_are_off(tmp_path, monkeypatch):
+    monkeypatch.setattr(pb, "raizes_dos_plugins", lambda: ["/repo/plugins/hangar"])
+    pb._publish_plugin_dir(tmp_path)
+    monkeypatch.setattr(pb, "raizes_dos_plugins", lambda: [])
+    pb._publish_plugin_dir(tmp_path)
+    assert not pb.plugin_dir_file(tmp_path).exists()
+
+
 @pytest.fixture
 def ligado(monkeypatch):
     monkeypatch.setattr(pb, "ligado", lambda: True)

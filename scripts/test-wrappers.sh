@@ -168,13 +168,76 @@ check_argv_sem_segredo() {
     fi
 }
 
+# Caminho do plugin que o backend publica em ~/.hangar/plugin-dir. Três HOMEs: com o arquivo
+# apontando para uma pasta que existe (com ESPAÇO no caminho, que é onde a divisão de palavras de
+# cada shell erra), com o arquivo apontando para uma pasta que sumiu, e sem o arquivo.
+PLUGIN_DIR="$TMP/plug in/hangar"
+mkdir -p "$PLUGIN_DIR"
+printf -v PLUGIN_DIR_Q '%q' "$PLUGIN_DIR"   # como o fake claude escreve o argumento no ARGV
+HOME_PLUGIN="$TMP/home-plugin"
+HOME_PLUGIN_GONE="$TMP/home-plugin-gone"
+HOME_BARE="$TMP/home-bare"
+mkdir -p "$HOME_PLUGIN/.hangar" "$HOME_PLUGIN_GONE/.hangar" "$HOME_BARE"
+printf '%s\n' "$PLUGIN_DIR" > "$HOME_PLUGIN/.hangar/plugin-dir"
+printf '%s\n' "$TMP/nao-existe" > "$HOME_PLUGIN_GONE/.hangar/plugin-dir"
+
+# $1=descrição  $2=arquivo de saída  $3=regex (ERE) que a linha ARGV inteira tem que casar
+check_argv() {
+    local desc="$1" out="$2" re="$3"
+    if ! [ -f "$out" ] || ! grep '^ARGV:' "$out" | grep -qE -- "$re"; then
+        echo "FAIL: $desc — ARGV não casa com '$re'"
+        [ -f "$out" ] && sed 's/^/    /' "$out"
+        fail=1
+    fi
+}
+
+check_argv_no_plugin() {
+    local desc="$1" out="$2"
+    if ! [ -f "$out" ] || grep '^ARGV:' "$out" | grep -qF -- '--plugin-dir'; then
+        echo "FAIL: $desc — ARGV não devia ter --plugin-dir"
+        [ -f "$out" ] && sed 's/^/    /' "$out"
+        fail=1
+    fi
+}
+
+# $1=rótulo do shell  resto=comando que roda um caso (posix_case <sh> / fish_case), sem os args
+plugin_dir_cases() {
+    local label="$1" out
+    shift
+    # O regex escapa o caminho citado: as contrabarras do %q são literais na linha ARGV.
+    local q_re
+    q_re=$(printf '%s' "$PLUGIN_DIR_Q" | sed 's#[][\.*^$+?(){}|]#\\&#g')
+
+    out=$(CASE_HOME="$HOME_PLUGIN" "$@" "")
+    check_argv "$label sessão nova leva --plugin-dir" "$out" \
+        "^ARGV: --session-id [0-9a-fA-F-]+ --plugin-dir $q_re\$"
+
+    out=$(CASE_HOME="$HOME_PLUGIN" "$@" "" --resume abc)
+    check_argv "$label --resume leva --plugin-dir" "$out" "^ARGV: --plugin-dir $q_re --resume abc\$"
+
+    out=$(CASE_HOME="$HOME_PLUGIN" "$@" probe -c)
+    check_argv "$label motor + -c leva --plugin-dir" "$out" "^ARGV: --plugin-dir $q_re -c\$"
+
+    out=$(CASE_HOME="$HOME_PLUGIN" "$@" "" --print)
+    check_argv_no_plugin "$label --print fica sem --plugin-dir" "$out"
+
+    out=$(CASE_HOME="$HOME_PLUGIN" "$@" "" -p oi)
+    check_argv_no_plugin "$label -p fica sem --plugin-dir" "$out"
+
+    out=$(CASE_HOME="$HOME_PLUGIN_GONE" "$@" "")
+    check_argv_no_plugin "$label pasta do plugin sumiu" "$out"
+
+    out=$(CASE_HOME="$HOME_BARE" "$@" "")
+    check_argv_no_plugin "$label sem o arquivo do backend" "$out"
+}
+
 # $1=binário do shell (bash/zsh)  $2=CP_ENGINE ("" p/ nenhum)  resto=args do `claude`
 # env -i: ambiente limpo de propósito — sem isto um ANTHROPIC_* que já esteja no ambiente de quem
 # roda este script (ex: a própria sessão Claude Code atual) mascararia um teste "sem motor" quebrado.
 posix_case() {
     local sh="$1" engine="$2" out="$TMP/out.$RANDOM.$RANDOM"
     shift 2
-    env -i PATH="$PATH_WITH_FAKES" HOME="$HOME" CP_TEST_OUT="$out" CP_ENGINE="$engine" \
+    env -i PATH="$PATH_WITH_FAKES" HOME="${CASE_HOME:-$HOME}" CP_TEST_OUT="$out" CP_ENGINE="$engine" \
         CP_ENGINES_FILE="$CP_ENGINES_FILE" \
         "$sh" -c '
             source "'"$REPO"'/scripts/shell/claude.posix.sh"
@@ -188,7 +251,7 @@ fish_case() {
     shift
     # `--` separa os args do próprio `claude` dos flags do binário fish — sem isto "fish -c '...' --print"
     # tenta interpretar --print como opção do fish (erro "unknown option").
-    env -i PATH="$PATH_WITH_FAKES" HOME="$HOME" CP_TEST_OUT="$out" CP_ENGINE="$engine" \
+    env -i PATH="$PATH_WITH_FAKES" HOME="${CASE_HOME:-$HOME}" CP_TEST_OUT="$out" CP_ENGINE="$engine" \
         CP_ENGINES_FILE="$CP_ENGINES_FILE" \
         fish --no-config -c '
             source "'"$REPO"'/scripts/shell/claude.fish"
@@ -262,6 +325,8 @@ for SH in bash zsh; do
     out=$(posix_case "$SH" probe --resume abc)
     check "$SH motor + --resume (regressão)" "$out" 'ENV_BASE_URL=https://a.b' 'ENV_MODEL=m1' 'ENV_CP_ENGINE=probe'
     check_argv_sem_segredo "$SH motor + --resume" "$out"
+
+    plugin_dir_cases "$SH" posix_case "$SH"
 
     out=$(posix_case_pi "$SH")
     check_pi_injected "$SH pi bare (injeta --session-id + CP_PI_SESSION)" "$out"
@@ -389,6 +454,8 @@ if command -v fish >/dev/null 2>&1; then
     out=$(fish_case probe --resume abc)
     check "fish motor + --resume (regressão)" "$out" 'ENV_BASE_URL=https://a.b' 'ENV_MODEL=m1' 'ENV_CP_ENGINE=probe'
     check_argv_sem_segredo "fish motor + --resume" "$out"
+
+    plugin_dir_cases fish fish_case
 
     out=$(fish_case_pi)
     check_pi_injected "fish pi bare (injeta --session-id + CP_PI_SESSION)" "$out"
