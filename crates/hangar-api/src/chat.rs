@@ -68,6 +68,15 @@ impl<'de> Deserialize<'de> for ChatKind {
     }
 }
 
+/// Um trecho do `structuredPatch` (`patch` do models.py): linhas com prefixo ` `, `-` ou `+`.
+/// Posições em `u32`: o Python recusa o que passa disso, para os dois parsers ficarem iguais.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchHunk {
+    pub old_start: u32,
+    pub new_start: u32,
+    pub lines: Vec<String>,
+}
+
 /// Campos na ordem de models.py: o JSON sai com as chaves na ordem do `model_dump_json`.
 /// Contagens sem sinal porque o Python nunca manda negativo, e são os tipos que o desktop já lia.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -80,6 +89,8 @@ pub struct ChatEvent {
     pub tool_use_id: Option<String>,
     pub result: Option<String>,
     pub is_error: Option<bool>,
+    /// Só em `tool_result` de Edit/Write do Claude: os trechos do `structuredPatch`, com a linha real do arquivo.
+    pub patch: Option<Vec<PatchHunk>>,
     pub ts: Option<f64>,
     pub cache_read: Option<u64>,
     pub cache_ttl_s: Option<u64>,
