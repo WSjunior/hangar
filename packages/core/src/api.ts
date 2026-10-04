@@ -447,8 +447,8 @@ export async function confirmarNavForServer(s: Server, name: string): Promise<vo
 // não paga este tempo: conexão recusada volta em milissegundos. Quem espera são os lentos de
 // verdade, e é exatamente por eles que este número existe.
 // `fresco` = botão "Atualizar dados": o servidor coleta agora em vez de servir a última leitura.
-// `summary` = tela inicial: só totals/by_day/by_model/sem_tarifa/applied/usd_brl (17 KB em vez de
-// ~1 MB). Servidor antigo ignora o parâmetro e manda o relatório inteiro, que tem os mesmos campos.
+// `summary` = tela inicial: só totals/by_day/by_model/sem_tarifa/applied/usd_brl, sem `combos`.
+// Servidor antigo ignora o parâmetro e manda o relatório inteiro, que tem os mesmos campos.
 export async function fetchCostsForServer(s: Server, period: string, fresco = false, summary = false): Promise<Partial<CostReport>> {
   const res = await apiFetchRes(`/api/costs?period=${encodeURIComponent(period)}${fresco ? '&fresco=1' : ''}${summary ? '&view=summary' : ''}`, {
     signal: AbortSignal.timeout(20000),
