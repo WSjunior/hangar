@@ -26,17 +26,13 @@
     }
     return out;
   }
-  const raster = $derived(
-    el?.type === 'Raster' && typeof p.cells === 'string'
-      ? decodeRaster(p.cells, Number(p.columns) || 0, Number(p.rows) || 0).map(runs)
-      : [],
-  );
+  const rasterRows = (props: Record<string, unknown>) =>
+    typeof props.cells === 'string'
+      ? decodeRaster(props.cells, Number(props.columns) || 0, Number(props.rows) || 0).map(runs)
+      : [];
   // O SVG vira imagem: dentro de <img> ele não roda script, só as animações de CSS dele.
-  const svgSrc = $derived(
-    el?.type === 'Svg' && typeof p.source === 'string'
-      ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(p.source)}`
-      : '',
-  );
+  const svgSrc = (props: Record<string, unknown>) =>
+    typeof props.source === 'string' ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(props.source)}` : '';
 </script>
 
 {#if typeof node === 'string' || typeof node === 'number'}{node}{:else if el}
@@ -47,11 +43,12 @@
   {:else if el.type === 'Text'}
     <span style={textStyle(p)}>{#each el.children ?? [] as child, i (i)}<PluginNode node={child} />{/each}</span>
   {:else if el.type === 'Raster'}
+    {@const raster = rasterRows(p)}
     <!-- O Raster vem com a largura do pane do terminal: em coluna mais estreita cada trecho encolhe na
          proporção das suas células, em vez de a faixa rolar de lado. -->
     <span class="raster" style:max-width="{Number(p.columns) || 0}ch">{#each raster as row, r (r)}<span class="raster-row">{#each row as run, i (i)}<span class="run" style:flex-grow={run.text.length} style:color={run.fg} style:background={run.bg}>{run.text}</span>{/each}</span>{/each}</span>
   {:else if el.type === 'Svg'}
-    <img class="svg" src={svgSrc} alt={str(p.alt)} width={Number(p.width) || undefined} height={Number(p.height) || undefined} />
+    <img class="svg" src={svgSrc(p)} alt={str(p.alt)} width={Number(p.width) || undefined} height={Number(p.height) || undefined} />
   {:else if el.type === 'Markdown'}
     <div class="md" class:dim={p.dimColor === true}>{@html renderMarkdown(str(p.text))}</div>
   {:else if el.type === 'Code'}
