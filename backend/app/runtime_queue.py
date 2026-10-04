@@ -338,7 +338,11 @@ def _needs_terminal_recovery(state):
 
 def terminal_write_blocked(state, conversation):
     barrier = state["runtime_state"].get("terminal_write_barrier")
-    return isinstance(barrier, dict) and (barrier.get("conversation") is None or barrier["conversation"] == conversation)
+    if isinstance(barrier, dict) and (barrier.get("conversation") is None or barrier["conversation"] == conversation):
+        return True
+    # A trava gravada é uma só: a incerta de outra conversa também segura a escrita na dela.
+    return any(not key.startswith(_CALL_PREFIX) and _holds_terminal_write(op, conversation)
+               for key, op in state["operations"].items())
 
 
 def _record_terminal_write_barrier(state, operation):

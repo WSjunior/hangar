@@ -374,3 +374,45 @@ def test_new_plugin_instance_drops_returned_publication_but_same_instance_keeps_
         pb._publications.pop(name, None)
         pb._waiters.pop(name, None)
         pb._donos.pop(name, None)
+
+
+@pytest.mark.parametrize('request_id,control,modes,expected', [
+    ('ask:t1', 'select', {'fill', 'receipt_v2'}, 'unavailable'),
+    ('ask:t1', 'answer_questions', {'fill'}, 'unavailable'),
+    ('perm:t1', 'select', {'fill'}, 'rejected'),
+    ('ask:old', 'select', {'fill', 'receipt_v2'}, 'rejected'),
+])
+def test_plugin_control_hands_ask_choices_to_the_tui_keyboard(monkeypatch, request_id, control, modes, expected):
+    from types import SimpleNamespace
+    from app import plugin_bridge as pb, runtime_terminal as terminal
+    current = SimpleNamespace(name='ask-fallback', generation=1, meta={'terminal': 'b', 'session_id': 'A'})
+    monkeypatch.setattr(terminal, 'validate_binding', lambda descriptor: current)
+    monkeypatch.setattr(terminal, '_plugin_current', lambda current: True)
+    pending_id = 'perm:t1' if request_id.startswith('perm:') else 'ask:t1'
+    monkeypatch.setattr(pb, 'pergunta_pendente', lambda name: {'id': pending_id, 'questions': [{'question': 'q'}]})
+    monkeypatch.setattr(pb, 'declared_modes', lambda name: modes)
+    monkeypatch.setattr(pb, 'responder_pergunta', lambda *a: pytest.fail('o plugin não pode responder aqui'))
+    body = {'request_id': request_id, 'option': 2, 'answers': []}
+    payload = {'binding': 'b', 'generation': 1, 'control': control, 'payload': body, 'publication_id': 'p'}
+    assert terminal.plugin_control(payload, {'validate': lambda: None, 'descriptor': {}}) == {'disposition': expected}
+
+
+def test_uncertain_input_of_a_second_conversation_blocks_writes_while_old_barrier_stays(tmp_path):
+    store, _ = _uncertain_terminal_inputs(tmp_path, ['A'])
+    cursor = ReceiptIndex('claude', 'new-sid').capture(tmp_path / 'new-sid.jsonl')
+    for kind, action in [
+        ('append', {'kind': 'append', 'text': 'C', 'entry_id': 'C'}),
+        ('prepare', {'kind': 'prepare', 'id': 'C', 'entry_id': 'C',
+                     'payload': {'kind': 'input', 'payload': {'text': 'C', '_terminal_generation': 2}}}),
+        ('cursor', {'kind': 'bind_dispatch', 'id': 'C', 'cursor': cursor}),
+        ('dispatch', {'kind': 'begin_dispatch', 'id': 'C', 'wire_id': 'terminal:2:C'}),
+        ('finish', {'kind': 'finish', 'id': 'C', 'status': 'unknown',
+                    'result': {'operation_id': 'C', 'disposition': 'unknown', 'payload': {'cleanup': 'uncertain'}}}),
+    ]:
+        store.exec(1, f'{kind}:C', CLOCK, action)
+    assert store.state['runtime_state']['terminal_write_barrier']['conversation'] == 'sid'
+    assert rq.terminal_write_blocked(store.state, 'new-sid')
+    store.exec(1, 'late:C', CLOCK, {'kind': 'finish', 'id': 'C', 'status': 'accepted',
+        'result': {'operation_id': 'C', 'disposition': 'accepted', 'payload': {}}})
+    assert not rq.terminal_write_blocked(store.state, 'new-sid')
+    assert rq.terminal_write_blocked(store.state, 'sid')

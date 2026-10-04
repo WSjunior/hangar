@@ -108,7 +108,10 @@ fn receipt_payload(mut action: Value) -> Value {
 impl State {
     pub fn terminal_write_blocked(&self,conversation:&str)->bool {
         let barrier=&self.runtime_state["terminal_write_barrier"];
-        barrier.is_object() && (barrier["conversation"].is_null() || barrier["conversation"]==conversation)
+        if barrier.is_object() && (barrier["conversation"].is_null() || barrier["conversation"]==conversation) {return true;}
+        // A trava gravada é uma só: a incerta de outra conversa também segura a escrita na dela.
+        let conversation=Value::from(conversation);
+        self.operations.iter().any(|(key,op)|!key.starts_with(CALL_PREFIX) && holds_terminal_write(op,&conversation))
     }
     pub fn new(key: &str, generation: u64, name: &str, rows: Vec<Value>) -> Self {
         Self { version:VERSION, owner_key:key.into(), generation, name:name.into(), rows,

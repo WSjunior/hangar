@@ -211,3 +211,24 @@ fn terminal_write_barrier_follows_remaining_uncertain_input_and_lifts_after_last
         assert!(!store.state().terminal_write_blocked("sid"));
     }
 }
+
+#[test]
+fn uncertain_input_of_a_second_conversation_blocks_writes_while_old_barrier_stays() {
+    use hangar_server::runtime::receipt::ReceiptIndex;
+    let dir=tempfile::tempdir().unwrap();let path=dir.path().join("state");
+    let mut store=Store::open(&path,dir.path(),State::new("key",1,"session",vec![])).unwrap();
+    for (text,conversation,generation) in [("A","sid",1),("C","new-sid",2)] {
+        let cursor=ReceiptIndex::new("claude",conversation).capture(&dir.path().join(format!("{conversation}.jsonl"))).unwrap();
+        store.exec(1,&format!("append:{text}"),clock(),Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(text.into())}).unwrap();
+        store.exec(1,&format!("prepare:{text}"),clock(),Action::Prepare {id:text.into(),payload:json!({"kind":"input","payload":{"text":text,"_terminal_generation":generation}}),entry_id:Some(text.into())}).unwrap();
+        store.exec(1,&format!("cursor:{text}"),clock(),Action::BindDispatch {id:text.into(),cursor:serde_json::to_value(&cursor).unwrap()}).unwrap();
+        store.exec(1,&format!("dispatch:{text}"),clock(),Action::BeginDispatch {id:text.into(),wire_id:format!("terminal:{generation}:{text}")}).unwrap();
+        store.exec(1,&format!("finish:{text}"),clock(),Action::Finish {id:text.into(),status:Status::Unknown,
+            result:json!({"operation_id":text,"disposition":"unknown","payload":{"cleanup":"uncertain"}})}).unwrap();
+    }
+    assert_eq!(store.state().runtime_state["terminal_write_barrier"]["conversation"],"sid");
+    assert!(store.state().terminal_write_blocked("new-sid"));
+    store.exec(1,"late:C",clock(),Action::Finish {id:"C".into(),status:Status::Accepted,result:json!({"operation_id":"C","disposition":"accepted","payload":{}})}).unwrap();
+    assert!(!store.state().terminal_write_blocked("new-sid"));
+    assert!(store.state().terminal_write_blocked("sid"));
+}
