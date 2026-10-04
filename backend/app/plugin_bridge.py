@@ -386,7 +386,22 @@ _bands: dict[str, tuple[int, dict]] = {}
 _band_seq = 0
 _VAZIA: dict = {"above": None, "columns": None, "panes": []}
 # Quem espera a faixa mudar: um Event por sessão, trocado a cada mudança, acorda todos os SSE de uma vez.
-_band_wakers: dict[str, asyncio.Event] = {}
+# Guardado com o loop que o criou: Event usado em outro loop levanta RuntimeError.
+_band_wakers: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Event]] = {}
+
+
+def _waker(tabela: dict, name: str) -> asyncio.Event:
+    loop = asyncio.get_running_loop()
+    guardado = tabela.get(name)
+    if guardado is None or guardado[0] is not loop:
+        guardado = tabela[name] = (loop, asyncio.Event())
+    return guardado[1]
+
+
+def _acordar_todos(tabela: dict, name: str) -> None:
+    guardado = tabela.pop(name, None)
+    if guardado is not None:
+        guardado[1].set()
 
 
 def _guardar_faixa(name: str, above: dict | None, columns: int | None, panes: list[dict]) -> None:
@@ -394,9 +409,7 @@ def _guardar_faixa(name: str, above: dict | None, columns: int | None, panes: li
     with _lock:
         _band_seq += 1
         _bands[name] = (_band_seq, {"above": above, "columns": columns, "panes": panes})
-    ev = _band_wakers.pop(name, None)
-    if ev is not None:
-        ev.set()
+    _acordar_todos(_band_wakers, name)
 
 
 def band(name: str) -> tuple[int, dict]:
@@ -424,7 +437,7 @@ async def esperar_faixa(name: str, vista: int, timeout: float) -> int:
     atual = band(name)[0]
     if atual != vista:
         return atual
-    ev = _band_wakers.setdefault(name, asyncio.Event())
+    ev = _waker(_band_wakers, name)
     try:
         await asyncio.wait_for(ev.wait(), timeout)
     except asyncio.TimeoutError:
@@ -435,13 +448,11 @@ async def esperar_faixa(name: str, vista: int, timeout: float) -> int:
 # Cliques e cópias que o plugin confirmou: o pedido de clique do app espera por eles.
 _pressed: dict[str, list[tuple[float, str, str]]] = {}
 _copied: dict[str, tuple[float, str]] = {}
-_press_wakers: dict[str, asyncio.Event] = {}
+_press_wakers: dict[str, tuple[asyncio.AbstractEventLoop, asyncio.Event]] = {}
 
 
 def _acordar_press(name: str) -> None:
-    ev = _press_wakers.pop(name, None)
-    if ev is not None:
-        ev.set()
+    _acordar_todos(_press_wakers, name)
 
 
 async def _esperar_ate(name: str, achou, timeout: float):
@@ -453,7 +464,7 @@ async def _esperar_ate(name: str, achou, timeout: float):
         resta = fim - time.monotonic()
         if resta <= 0:
             return None
-        ev = _press_wakers.setdefault(name, asyncio.Event())
+        ev = _waker(_press_wakers, name)
         try:
             await asyncio.wait_for(ev.wait(), resta)
         except asyncio.TimeoutError:
