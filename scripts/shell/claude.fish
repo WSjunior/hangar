@@ -32,6 +32,19 @@ function claude
         set pre hangar-engine --exec $CP_ENGINE --
     end
 
+    # Plugin do Hangar por `--plugin-dir`, igual às sessões que o backend abre: só assim ele fica por
+    # fora dos plugins do marketplace e espelha no app a faixa que os mods desenham. O caminho vem do
+    # arquivo que o backend grava (este wrapper não sabe onde o repositório mora); o backend só o
+    # grava quando o `claude` aceita a flag. Modo -p não tem faixa e segue como estava.
+    set -l plug
+    if not contains -- -p $argv; and not contains -- --print $argv; and test -r "$HOME/.hangar/plugin-dir"
+        set -l plugdir
+        read plugdir <"$HOME/.hangar/plugin-dir"
+        if test -n "$plugdir"; and test -d "$plugdir"
+            set plug --plugin-dir $plugdir
+        end
+    end
+
     for a in $argv
         switch $a
             case --session-id '--session-id=*' --resume '--resume=*' -c --continue
@@ -39,9 +52,9 @@ function claude
                 # binário direto (evita recursão na função); com motor, quem executa é o hangar-engine
                 # (processo à parte achado no PATH) — `command` não existiria pra ele executar.
                 if test (count $pre) -eq 0
-                    command claude $argv
+                    command claude $plug $argv
                 else
-                    $pre claude $argv
+                    $pre claude $plug $argv
                 end
                 return
         end
@@ -65,9 +78,9 @@ function claude
         # separado, achado no PATH) — o execvpe dele nunca vê função de shell, então "command" viraria
         # só uma string a mais no argv (e um alvo inexistente pro execvpe procurar).
         if test (count $pre) -eq 0
-            COLORTERM=truecolor CLAUDE_CODE_TMUX_TRUECOLOR=1 command claude --session-id $id $argv
+            COLORTERM=truecolor CLAUDE_CODE_TMUX_TRUECOLOR=1 command claude --session-id $id $plug $argv
         else
-            COLORTERM=truecolor CLAUDE_CODE_TMUX_TRUECOLOR=1 $pre claude --session-id $id $argv
+            COLORTERM=truecolor CLAUDE_CODE_TMUX_TRUECOLOR=1 $pre claude --session-id $id $plug $argv
         end
         return
     end
@@ -133,11 +146,11 @@ function claude
         systemd-run --user --scope --collect -q -- tmux new-session -s $name -c "$PWD" \
             -e COLORTERM=truecolor -e CLAUDE_CODE_TMUX_TRUECOLOR=1 \
             -e "CP_SESSION_NAME=$name" \
-            $cfg $pre claude --session-id $id $argv
+            $cfg $pre claude --session-id $id $plug $argv
     else
         tmux new-session -s $name -c "$PWD" \
             -e COLORTERM=truecolor -e CLAUDE_CODE_TMUX_TRUECOLOR=1 \
             -e "CP_SESSION_NAME=$name" \
-            $cfg $pre claude --session-id $id $argv
+            $cfg $pre claude --session-id $id $plug $argv
     end
 end

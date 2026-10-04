@@ -9,8 +9,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   de hooks, o primeiro plugin carregado fica por fora: `--plugin-dir` vem antes do marketplace,
   e a pasta de skills vem depois. A faixa dos mods (`plugins/hangar/hooks/ui.ts`) só recebe por
   `next(e)` o que os plugins de dentro desenham, e um mod que responde a faixa sem chamar
-  `next` esconde tudo dos que estão por dentro dele. Sessão aberta fora do Hangar carrega só
-  pela pasta de skills e não espelha a faixa dos mods do marketplace. Ver
+  `next` esconde tudo dos que estão por dentro dele. O wrapper do `claude` no shell passa o
+  mesmo `--plugin-dir`, lido de `~/.hangar/plugin-dir`, que o backend grava só quando o CLI
+  aceita a flag; `claude` cru (`command claude`) carrega só pela pasta de skills e não espelha a
+  faixa dos mods do marketplace. Ver
   [faixa dos mods](#faixa-dos-mods-ordem-na-cadeia-medida-03102026).
 
 - **Faixa e painéis dos mods saem no SSE por fonte própria, nunca na carona do `state`.** O
@@ -1487,6 +1489,22 @@ enquanto tem barra.
 A API não tem prioridade nem ordem configurável (`Tier`: `prepend`, `user`, `append`, `builtin`,
 `core`; dentro de `user`, a ordem de carga). Por isso a sessão do Hangar leva `--plugin-dir`
 sempre: o par com a pasta de skills já estava medido (B acima), carrega um só e sem carga dupla.
+
+**Sessão aberta pelo terminal (04/10/2026, Claude Code 2.1.289, Linux).** O wrapper do shell
+não passava `--plugin-dir`, e a sessão aberta digitando `claude` caía no caso da pasta de
+skills. Medido com duas sessões vivas na mesma máquina, as duas com a barra de progresso de um
+plugin do marketplace desenhada no pane: a criada pelo app (com `--plugin-dir`) tinha a árvore da barra no
+`plugin_ui` do SSE; a aberta pelo wrapper tinha `above: null`. Com o wrapper lendo
+`~/.hangar/plugin-dir`, uma sessão aberta por ele fora do tmux nasceu com a flag e o
+`plugin_ui` trouxe a barra. O wrapper não sabe onde o repositório mora e não sonda o CLI: quem
+grava o arquivo é o backend, na subida e quando o interruptor dos mods muda, e o apaga quando
+`raizes_dos_plugins()` volta vazia (flag desconhecida mata a sessão ao nascer). Modo `-p` fica
+sem a flag.
+
+**Pane baixo corta a faixa no próprio terminal.** Quem corta é o Claude Code, pela altura do
+pane. Medido na mesma sessão, com 150 colunas e a barra de três linhas: com 16 linhas sobra a
+primeira e `↓ 2 more`; com 12, nenhuma. O painel de terminal do app é um `tmux attach` na mesma
+sessão, então painel baixo cai nesse corte. Não tem relação com `--plugin-dir`.
 
 Sem terminal o caminho é outro e não depende de ordem: o backend entra como superfície remota
 (`control_request` `ui_attach`, depois `ui_render` do `AbovePrompt`) e o CLI avisa a mudança

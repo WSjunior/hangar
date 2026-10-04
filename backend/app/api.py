@@ -306,7 +306,8 @@ async def _lifespan(app: FastAPI):
     if uds_messaging.INBOX.ligar(_ao_recibo_nativo):
         _log.info("inbox nativo ligado em %s", uds_messaging.INBOX.path)
     try:
-        plugin_bridge.publish_address()
+        # Em thread: a publicação sonda o `claude` (versão e flags) e não pode segurar o laço.
+        await asyncio.to_thread(plugin_bridge.publish_address)
     except OSError:
         _log.warning("plugin: endereço da ponte não gravado; sessão de terminal fica no tmux",
                      exc_info=True)
@@ -6252,6 +6253,12 @@ async def patch_config(request: Request):
         await asyncio.to_thread(runtime_config.aplicar, mudancas, remover=remover)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    if "claude_function_hooks" in body:
+        # O wrapper do shell lê o caminho do plugin de um arquivo; ele acompanha o interruptor.
+        try:
+            await asyncio.to_thread(plugin_bridge.publish_address)
+        except OSError:
+            _log.warning("plugin: caminho do plugin não regravado", exc_info=True)
     return {"campos": runtime_config.estado(), "somente_leitura": _somente_leitura(request)}
 
 
