@@ -498,3 +498,93 @@ def test_v1_prompt_stays_unknown_until_transcript_proof(tmp_path, monkeypatch):
         asyncio.run(scenario())
     finally:
         coordinator.close_python_leases()
+
+
+@pytest.mark.parametrize("stage", ["before_write", "writing", "claiming"])
+def test_quiesce_returns_entry_claimed_by_cancelled_drain(tmp_path, monkeypatch, stage):
+    # Sessão sem terminal nascendo: o drain do Python reivindica a entrada e a passagem ao Rust o
+    # cancela antes da escrita. Sem devolver, a entrada fica entregue sem ter saído.
+    from app import runtime_queue
+    from app.adapters.claude_headless.adapter import ClaudeHeadlessAdapter
+    from app.pqueue import PromptQueue
+    from app.runtime_adapter import LegacyBridge, _legacy_operation
+    from app.runtime_coordinator import Binding, RuntimeCoordinator
+    coordinator = RuntimeCoordinator()
+    monkeypatch.setattr(runtime_coordinator, "_current", coordinator)
+    monkeypatch.setattr(runtime_queue, "_coordinator", coordinator)
+    slot = coordinator.register(Binding("session", "key", "claude", True, {"key":"key"},
+        str(tmp_path / "chat"), tmp_path / "projection", tmp_path / "state", tmp_path / "lease", 1))
+    adapter = ClaudeHeadlessAdapter()
+    coordinator.legacy = LegacyBridge(coordinator, {"claude": adapter})
+    async def discard():
+        return None
+    buffers = SimpleNamespace(discard=discard)
+    sess = SimpleNamespace(initialized=asyncio.Event(), model=None, effort=None, permission_mode=None,
+        modo_nao_plan=None, comandos=[], comandos_terminal=[], usage=None, context_window=None, cost=None,
+        desligando=False, live_active=None, drenador=None, proc=None, leitor=None,
+        preview_buffer=buffers, thinking_buffer=buffers, tool_buffer=buffers)
+    adapter._sessions["session"] = sess
+    claimed = asyncio.Event()
+    async def send_prompt(name, text):
+        if stage == "writing":
+            adapter.drain_claims[name]["writing"] = True
+        claimed.set()
+        await asyncio.Event().wait()
+    adapter.send_prompt = send_prompt
+    if stage == "claiming":
+        import threading
+        from app import pqueue
+        release = threading.Event()
+        original_claim = pqueue.PromptQueue.claim_undelivered
+        def slow_claim(self, *args, **kwargs):
+            loop.call_soon_threadsafe(claimed.set)
+            release.wait(5)
+            return original_claim(self, *args, **kwargs)
+        monkeypatch.setattr(pqueue.PromptQueue, "claim_undelivered", slow_claim)
+    def delivered():
+        return [row["delivered"] for row in slot.store.state["rows"]]
+    async def scenario():
+        nonlocal loop
+        loop = asyncio.get_running_loop()
+        await asyncio.to_thread(PromptQueue("session").append, "texto", delivered=False)
+        # O drain da reserva roda como operação do coordenador (`acordar` → op drain).
+        token = _legacy_operation.set({"operation_id":"drain-op"})
+        coordinator.legacy_active.add("drain-op")
+        sess.drenador = asyncio.create_task(adapter.drain("session", ""))
+        _legacy_operation.reset(token)
+        await asyncio.wait_for(claimed.wait(), 3)
+        if stage == "claiming":
+            sess.drenador.cancel()
+            release.set()
+        else:
+            assert delivered() == [True]
+        await coordinator.legacy.quiesce(slot.binding.descriptor())
+        assert sess.drenador.cancelled()
+    loop = None
+    asyncio.run(scenario())
+    # Escrita começada pode ter saído: devolver duplicaria.
+    assert delivered() == ([True] if stage == "writing" else [False])
+    assert adapter.drain_claims == {}
+
+
+def test_quiesce_leaves_live_drain_claim(tmp_path, monkeypatch):
+    # Drain fora das tarefas canceladas segue vivo e pode escrever: a entrada não volta à fila.
+    from app.adapters.claude_headless.adapter import ClaudeHeadlessAdapter
+    from app.runtime_adapter import LegacyBridge
+    from app.runtime_coordinator import Binding, RuntimeCoordinator
+    coordinator = RuntimeCoordinator()
+    monkeypatch.setattr(runtime_coordinator, "_current", coordinator)
+    slot = coordinator.register(Binding("session", "key", "claude", True, {"key":"key"},
+        str(tmp_path / "chat"), tmp_path / "projection", tmp_path / "state", tmp_path / "lease", 1))
+    adapter = ClaudeHeadlessAdapter()
+    coordinator.legacy = LegacyBridge(coordinator, {"claude": adapter})
+    calls = []
+    slot.store.exec = lambda *args: calls.append(args)
+    async def scenario():
+        live = asyncio.create_task(asyncio.Event().wait())
+        claim = adapter.drain_claims["session"] = {"id":"entry", "writing":False, "task":live}
+        await coordinator.legacy.quiesce(slot.binding.descriptor())
+        assert adapter.drain_claims == {"session": claim}
+        live.cancel()
+    asyncio.run(scenario())
+    assert calls == []

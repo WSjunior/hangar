@@ -308,6 +308,22 @@ class LegacyBridge:
         for result in results:
             if isinstance(result, Exception):
                 raise RuntimeError("cliente antigo não encerrou normalmente") from result
+        claim = adapter.drain_claims.get(name) if provider == "claude" else None
+        if claim is not None and claim["task"].done():
+            adapter.drain_claims.pop(name)
+            if not claim["writing"]:
+                # Drain cancelado entre reivindicar e escrever: sem devolver, o Rust adota a fila
+                # com a entrada marcada entregue e ela nunca sai.
+                try:
+                    with slot.guard:
+                        row = next((r for r in slot.store.state["rows"] if r.get("id") == claim["id"]), None)
+                        # Confirmada, desistida ou já devolvida: outro caminho tratou a entrada.
+                        if row is not None and row.get("delivered") is True and not row.get("confirmed") and not row.get("desistiu"):
+                            slot.store.exec(descriptor["generation"], "quiesce-unclaim:" + uuid.uuid4().hex,
+                                runtime_coordinator._clock(), {"kind":"set_delivered", "entry_id":claim["id"], "value":False})
+                except Exception as exc:
+                    from app import diag
+                    diag.registrar("runtime.unclaim_failed", "erro", sessao=name, **runtime_coordinator.failure_reason(exc))
         if provider == "claude" and sess is not None:
             await asyncio.gather(sess.preview_buffer.discard(), sess.thinking_buffer.discard(), sess.tool_buffer.discard())
         carry["runtime_counter"] = max(carry.get("runtime_counter") or 0,
