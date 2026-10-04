@@ -431,3 +431,34 @@ def test_killing_a_terminal_session_does_not_revalidate_the_dead_binding(tmp_pat
         await owner.change('session', kill, remove=True)
     asyncio.run(flow())
     assert killed and 'session' not in owner.names and slot.binding.key not in owner.slots
+
+
+@pytest.mark.parametrize('path', ['create', 'kill'])
+def test_waiting_record_of_a_dead_life_never_holds_the_name(tmp_path, monkeypatch, path):
+    from app import runtime_coordinator as rc, runtime_terminal as terminal, pqueue, registry
+    from app.adapters.claude_headless import sessions as claude_sessions
+    from app.adapters.codex import sessions as codex_sessions
+    owner, slot, collected = live_owner(monkeypatch, tmp_path)
+    owner.close_python_leases()
+    monkeypatch.setattr(pqueue, '_queue_dir', lambda: tmp_path)
+    monkeypatch.setattr(claude_sessions, 'list_all', lambda: [])
+    monkeypatch.setattr(codex_sessions, 'list_all', lambda: [])
+    monkeypatch.setattr(terminal, '_collect', lambda name: None)
+    restored = rc.RuntimeCoordinator()
+    monkeypatch.setattr(rc, '_current', restored)
+    async def flow():
+        restored.loop = asyncio.get_running_loop()
+        await restored.start_sessions({'claude': object(), 'codex': object()})
+        assert restored.slot('session').awaiting_identity
+        if path == 'create':
+            # O registry roda em thread: a vida nova do mesmo nome solta o registro antes da fila.
+            await asyncio.to_thread(registry._retire_waiting_runtime, 'session')
+            await asyncio.to_thread(pqueue.PromptQueue('session').clear)
+        else:
+            closed = []
+            async def kill():
+                closed.append(True)
+            await restored.change('session', kill, remove=True)
+            assert closed
+        assert not restored.managed_queue('session')
+    asyncio.run(flow())

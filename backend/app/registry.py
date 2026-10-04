@@ -851,6 +851,15 @@ class KillFailed(Exception):
         self.name = name
 
 
+def _retire_waiting_runtime(name: str) -> None:
+    """Vida antiga do mesmo nome, ainda esperando identidade no runtime, não segura o nome novo."""
+    from app import runtime_coordinator
+    from app.runtime_adapter import run_sync
+    owner = runtime_coordinator.current()
+    if owner is not None and owner.loop is not None and owner.managed_queue(name):
+        run_sync(lambda: owner.retire_waiting(name), owner.loop)
+
+
 class SessionRegistry:
     # Cache name -> ultimo jsonl resolvido por sinal CONFIAVEL (cmdline --session-id / fd). De classe
     # (compartilhado entre instancias: api.registry e sse._registry). Estabiliza a resolucao quando o
@@ -2067,6 +2076,7 @@ class SessionRegistry:
         # fim da sessao antiga), entao entradas remanescentes de uma sessao morta de mesmo nome
         # fantasmariam aqui via merged_history. Limpa ANTES do pane: depois dele o runtime ja adota
         # a sessao nova, e a limpeza esbarrava na posse em transferencia.
+        _retire_waiting_runtime(name)
         PromptQueue(name).clear()
         env_pane = _env_sessao(subagent_model, jev, provider, nome=name)
         if not tmux.new_session(name, cwd, cmd, config_dir, provider=provider, **env_pane):

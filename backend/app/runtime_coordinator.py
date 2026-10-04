@@ -963,11 +963,22 @@ class RuntimeCoordinator:
         if runtime_queue._coordinator is self:
             runtime_queue.configure(None)
 
+    async def retire_waiting(self, name):
+        """Nome reaproveitado por uma vida nova: o registro que esperava a identidade antiga sai."""
+        async with self.registration_locks.setdefault(name, asyncio.Lock()):
+            key = self.names.get(name)
+            if key is not None and self.slots[key].awaiting_identity:
+                self.names.pop(name, None)
+
     async def change(self, name, action, *, new_name=None, advance=True, remove=False, reopen=True):
         if not self.managed_queue(name):
             return await action()
         slot = self.slot(name)
         if self.in_lifecycle(slot):
+            return await action()
+        if remove and slot.awaiting_identity:
+            # Registro em espera nunca teve posse nem dono no Rust: fechar só solta o nome.
+            await self.retire_waiting(name)
             return await action()
 
         async def perform():
