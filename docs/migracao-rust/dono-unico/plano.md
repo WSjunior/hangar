@@ -75,13 +75,33 @@ segredo grava no diário; sem ele, 404 — mesmo vindo de 127.0.0.1) e a confer�
 **Código morto que sai:** `cano::peek` e `tests/runtime_cano.rs:36`; a espera de 180 s por
 `ready` dentro do `adopt`. O `carry` fica opcional até a Task 4.
 
-- [ ] **Step 1: Ler "Regras vigentes" de `docs/decisoes/windows.md` e de `docs/decisoes/harnesses.md`**
-- [ ] **Step 2: Medir com o Claude CLI real (Haiku, `CLAUDE_CONFIG_DIR=/home/jefferson/.claude-02-200`, cano isolado, sem backend) a resposta a um segundo `initialize` no mesmo processo; registrar em `docs/decisoes/harnesses.md` (verificação manual)**
-- [ ] **Step 3: Testes acima, vistos falhar**
-- [ ] **Step 4: `adopt` → `open` (`Recover` + `EnsureProjection` ao abrir, espera da trava até 3 s, resposta antes do `initialize`) e `detach` → `close`; `adopt_terminal` vira o `open` do terminal**
-- [ ] **Step 5: Segundo `initialize` tratado pelo que o Step 2 mediu (recusa "já inicializado" = sucesso, como no Codex)**
-- [ ] **Step 6: `POST /internal/diag` no `router` de `/internal` (atrás do `require_internal`) e cliente no Rust limitado por `warn_limit`**
-- [ ] **Step 7: `INTERNAL_PROTOCOL` e `RUST_SERVER_PROTOCOL` = 14; `RuntimeTransport` com os nomes novos; remover o código morto; testes focados; revisar**
+- [x] **Step 1: Ler "Regras vigentes" de `docs/decisoes/windows.md` e de `docs/decisoes/harnesses.md`**
+- [x] **Step 2: Medir com o Claude CLI real (Haiku, `CLAUDE_CONFIG_DIR=/home/jefferson/.claude-02-200`, cano isolado, sem backend) a resposta a um segundo `initialize` no mesmo processo; registrar em `docs/decisoes/harnesses.md` (verificação manual)**
+- [x] **Step 3: Testes acima, vistos falhar**
+- [x] **Step 4: `adopt` → `open` (`Recover` + `EnsureProjection` ao abrir, espera da trava até 3 s, resposta antes do `initialize`) e `detach` → `close`; `adopt_terminal` vira o `open` do terminal**
+- [x] **Step 5: Segundo `initialize` tratado pelo que o Step 2 mediu (recusa "já inicializado" = sucesso, como no Codex)**
+- [x] **Step 6: `POST /internal/diag` no `router` de `/internal` (atrás do `require_internal`) e cliente no Rust limitado por `warn_limit`**
+
+**Registro da execução (Task 1).** Step 2: o Claude 2.1.289 responde `success` ao segundo
+`initialize` no mesmo processo, logo depois do primeiro e depois de um turno (`harnesses.md`,
+"segundo `initialize`"); o Step 5 não precisou de código, e `reopen_of_initialized_cano_becomes_deliverable`
+fica como regressão (passa também na base, assim como `close_releases_lease`, que é o mesmo
+comportamento com o nome novo). Os outros três testes Rust falham com o `open` antigo (sem
+`Recover`, com uma tentativa só na trava, esperando o `initialize`). O `Recover` roda em
+`open_store`, antes do ator, para sem e com terminal (o ator do terminal ainda roda o dele; os
+dois são idempotentes). Resposta do `open`/`close` passa a `opened`/`closed`; os nomes dos
+métodos Python (`adopt`/`detach`) ficam até as Tasks 3 e 4. O cliente do diário é
+`crates/hangar-server/src/diag.rs` (`DiagClient::report`), com teste próprio; a rota Python grava
+`detalhe` (o `motivo` do fio), como os demais eventos `runtime.*`.
+Revisão (`ecc:rust-reviewer`, `ecc:python-reviewer`, `ecc:silent-failure-hunter`): sem achado
+crítico. Entraram: `wait_lease` só espera "trava ocupada" (outro erro de E/S responde na hora com o
+tipo), falha ao fechar a fila não troca o erro da conexão, `open` que acha o ator morto fecha a
+entrada antes de responder, o `motivo` do diário é `&'static str`, corpo inválido do `/internal/diag`
+responde 400 (inclusive `RecursionError`) e o cano falso dos testes ignora conexão sem o token
+(algum processo desta máquina sonda portas efêmeras e o derrubava). Ficaram para a Task 3, que
+torna a falha visível: o `open` responde antes do `initialize`, então `headless_nao_subiu` aparece
+depois, pelo evento `problem`, e não mais como recusa da adoção.
+- [x] **Step 7: `INTERNAL_PROTOCOL` e `RUST_SERVER_PROTOCOL` = 14; `RuntimeTransport` com os nomes novos; remover o código morto; testes focados; revisar**
 
 ### Task 2: Sessão sem terminal nasce direto no Rust
 

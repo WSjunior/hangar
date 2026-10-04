@@ -81,7 +81,7 @@ async fn read_into<R: AsyncBufRead + Unpin>(reader: &mut R, frame: &mut Vec<u8>,
     }
 }
 
-async fn open(binding: &CanoBinding, peeking: bool) -> Result<BufReader<Socket>, RuntimeError> {
+async fn open(binding: &CanoBinding) -> Result<BufReader<Socket>, RuntimeError> {
     if binding.versao != 2 || binding.token.is_empty() || binding.token.contains(['\r', '\n']) {
         return Err(RuntimeError::new("cano_version", "cano sem suporte ao runtime nativo"));
     }
@@ -102,7 +102,7 @@ async fn open(binding: &CanoBinding, peeking: bool) -> Result<BufReader<Socket>,
             { let _ = path; return Err(RuntimeError::new("cano_address", "socket Unix indisponível")); }
         } else { return Err(RuntimeError::new("cano_address", "endereço do cano inválido")); };
         let mut reader = BufReader::new(socket);
-        let header = format!("{}{}\n", if peeking { "peek " } else { "" }, binding.token);
+        let header = format!("{}\n", binding.token);
         reader.get_mut().write_all(header.as_bytes()).await
             .map_err(|_| RuntimeError::new("cano_auth", "não foi possível autenticar no cano"))?;
         reader.get_mut().flush().await
@@ -120,17 +120,10 @@ async fn snapshot(reader: &mut BufReader<Socket>) -> Result<CanoSnapshot, Runtim
     CanoSnapshot::parse(value)
 }
 
-pub async fn peek(binding: &CanoBinding) -> Result<CanoSnapshot, RuntimeError> {
-    let mut reader = open(binding, true).await?;
-    let result = snapshot(&mut reader).await;
-    let _ = reader.get_mut().shutdown().await;
-    result
-}
-
 // Sem comparar pid: o sidecar guarda o do cano e o snapshot traz o do agente filho. Quem prova que é
 // o cano certo é o token único por subida, já conferido em `open`.
 pub async fn connect(binding: &CanoBinding) -> Result<CanoConnection, RuntimeError> {
-    let mut stream = open(binding, false).await?;
+    let mut stream = open(binding).await?;
     let snapshot = snapshot(&mut stream).await?;
     Ok(CanoConnection { snapshot, stream })
 }

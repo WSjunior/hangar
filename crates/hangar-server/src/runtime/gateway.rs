@@ -33,14 +33,44 @@ pub struct RuntimeRegistry {
     revisions:Mutex<BTreeMap<String,Arc<AtomicU64>>>,
 }
 
-/// A trava fica com as tarefas de E/S do ator até elas saírem; espera até 3 s por isso.
-async fn lease_released(path:&std::path::Path) -> bool {
-    for _ in 0..60 {
+/// A trava pode demorar a soltar: as tarefas de E/S de um ator que saiu, ou o `LockFileEx` de um
+/// Rust que acabou de cair no Windows. Espera até 3 s por ela.
+/// Só "trava ocupada" espera; outro erro (pasta sem permissão, disco cheio) responde na hora.
+async fn wait_lease(path:&std::path::Path) -> Result<Arc<std::fs::File>,RuntimeError> {
+    for attempt in 0..60 {
+        if attempt > 0 { tokio::time::sleep(Duration::from_millis(50)).await; }
         let path = path.to_owned();
-        if tokio::task::spawn_blocking(move ||acquire_lease(&path).is_ok()).await.unwrap_or(false) { return true; }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        match tokio::task::spawn_blocking(move ||acquire_lease(&path)).await.map_err(|_|failure("queue_job"))? {
+            Ok(lease)=>return Ok(lease),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock=>{},
+            Err(error)=>return Err(RuntimeError::new("runtime_lease",&format!("trava inacessível: {:?}",error.kind()))),
+        }
     }
-    false
+    Err(RuntimeError::new("runtime_lease","trava da sessão presa por outro dono há 3 s"))
+}
+
+/// Abre a fila sob a trava e roda `Recover`: entrada que estava em despacho quando o dono anterior
+/// parou vira incerta antes de o ator olhar para ela.
+async fn open_store(state_path:&std::path::Path,projection_dir:&std::path::Path,key:&str,generation:u64,name:&str,
+    lease:Arc<std::fs::File>) -> Result<Store,RuntimeError> {
+    let (state_path,projection_dir) = (state_path.to_owned(),projection_dir.to_owned());
+    let initial = QueueState::new(key,generation,name,Vec::new());
+    static OPENS:AtomicU64 = AtomicU64::new(0);
+    let epoch_s = SystemTime::now().duration_since(UNIX_EPOCH).map(|d|d.as_secs_f64()).unwrap_or(0.0);
+    let call_id = format!("open-recover:{}:{}:{}",std::process::id(),epoch_s,OPENS.fetch_add(1,std::sync::atomic::Ordering::Relaxed));
+    tokio::task::spawn_blocking(move || {
+        let _lease = lease;
+        let mut store = Store::open(&state_path,&projection_dir,initial)?;
+        if store.state().generation != generation { return Ok(Err(failure("runtime_generation"))); }
+        store.exec(generation,&call_id,ClockSample { monotonic_s:0.0,epoch_s },Action::Recover)?;
+        store.ensure_projection()?;
+        Ok(Ok(store))
+    }).await
+        .map_err(|_|failure("queue_job"))?.map_err(|error:std::io::Error|{
+            // A frase da recusa da fila é fixa e diz por que a abertura falhou; o resto só pelo tipo.
+            let reason = super::queue::refusal(&error).map_or_else(||format!("{:?}",error.kind()),str::to_owned);
+            RuntimeError::new("queue_io",&format!("fila recusou: {reason}"))
+        })?
 }
 
 fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indisponível para esta chave ou geração") }
@@ -58,7 +88,9 @@ impl RuntimeRegistry {
         self.entries.lock().await.get(key).filter(|entry|entry.generation==generation)
             .map(|entry|entry.handle.clone()).ok_or_else(||failure("runtime_binding"))
     }
-    pub async fn adopt(&self,target:RuntimeTarget,carry:Value) -> Result<Value,RuntimeError> {
+    /// Abre a sessão no Rust: trava, fila com `Recover`, conexão ao cano e ator. Responde sem
+    /// esperar o `initialize`; o ator o faz e drena a fila quando a sessão fica entregável.
+    pub async fn open(&self,target:RuntimeTarget,carry:Value) -> Result<Value,RuntimeError> {
         let barrier = self.barrier(&target.key).await;
         let _guard = barrier.lock().await;
         let existing = self.entries.lock().await.get(&target.key).map(|entry|(entry.generation,entry.handle.clone()));
@@ -67,20 +99,8 @@ impl RuntimeRegistry {
             match handle {EntryHandle::Headless(handle)=>handle,_=>return Err(failure("runtime_provider"))}
         } else {
         if !["claude","codex"].contains(&target.provider.as_str()) || target.binding.versao != 2 { return Err(failure("runtime_provider")); }
-        let lease = acquire_lease(&target.lease_path).map_err(|_|failure("runtime_lease"))?;
-        let state_path = target.state_path.clone(); let projection_dir = target.projection_dir.clone();
-        let initial = QueueState::new(&target.key,target.generation,&target.name,Vec::new());
-        let opening_lease = lease.clone();
-        let store = tokio::task::spawn_blocking(move || {
-            let _lease = opening_lease;
-            Store::open(&state_path,&projection_dir,initial)
-        }).await
-            .map_err(|_|failure("queue_job"))?.map_err(|error|{
-                // A frase da recusa da fila é fixa e diz por que a adoção falhou; o resto só pelo tipo.
-                let reason = super::queue::refusal(&error).map_or_else(||format!("{:?}",error.kind()),str::to_owned);
-                RuntimeError::new("queue_io",&format!("fila recusou: {reason}"))
-            })?;
-        if store.state().generation != target.generation { return Err(failure("runtime_generation")); }
+        let lease = wait_lease(&target.lease_path).await?;
+        let store = open_store(&target.state_path,&target.projection_dir,&target.key,target.generation,&target.name,lease.clone()).await?;
         let mut metadata = target.metadata.clone();
         if let Some(fields) = store.state().runtime_state["view"].as_object() {
             if fields.get("conversation").is_some_and(|conversation|conversation == &metadata[if target.provider == "claude" { "session_id" } else { "thread_id" }]) {
@@ -91,7 +111,12 @@ impl RuntimeRegistry {
         let queue = QueueActor::start(store,lease);
         let connection = match cano::connect(&target.binding).await {
             Ok(connection)=>connection,
-            Err(error)=>{ queue.shutdown().await.map_err(|_|failure("queue_stop"))?; return Err(error); },
+            Err(error)=>{
+                if let Err(stop) = queue.shutdown().await {
+                    tracing::warn!(key=%target.key,code=%error.code,stop=?stop.kind(),"fila não fechou depois da falha ao conectar no cano");
+                }
+                return Err(error);
+            },
         };
         let epoch_s = SystemTime::now().duration_since(UNIX_EPOCH).map(|d|d.as_secs_f64()).unwrap_or(0.0);
         let revision = self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
@@ -101,22 +126,23 @@ impl RuntimeRegistry {
         self.entries.lock().await.insert(target.key.clone(),Entry { generation:target.generation,handle:EntryHandle::Headless(handle.clone()),lease_path:target.lease_path.clone() });
         handle
         };
-        let deadline = tokio::time::Instant::now()+Duration::from_secs(180);
-        loop {
-            let snapshot = handle.snapshot().await?;
-            let view = &snapshot["view"];
-            if !snapshot["error"].is_null() { return Err(failure("runtime_prepare")); }
-            if view["alive"] == false { return Err(failure("cano_exited")); }
-            let ready = if target.provider == "claude" { view["initialized"] == true } else { view["ready"] == true };
-            if ready {
-                handle.ensure_projection().await?;
-                return Ok(json!({"ready":true,"instance":self.instance,"key":target.key,"generation":target.generation,"state":snapshot}));
+        let snapshot = match handle.snapshot().await {
+            Ok(snapshot) if snapshot["error"].is_null() && snapshot["view"]["alive"] != false=>snapshot,
+            result=>{
+                // Ator morto ou cano já saído: fecha agora, senão a entrada presa responderia ao próximo `open`.
+                let error = match result {
+                    Err(error)=>error,
+                    Ok(snapshot)=>snapshot["error"].as_str().map_or_else(||failure("cano_exited"),|code|RuntimeError::new(code,"ator do runtime terminou ao abrir")),
+                };
+                if let Err(close) = self.close_locked(&target.key,target.generation).await {
+                    tracing::warn!(key=%target.key,code=%close.code,"sessão não fechou depois de abrir com erro");
+                }
+                return Err(error);
             }
-            if tokio::time::Instant::now() >= deadline { return Err(failure("runtime_initialize")); }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        };
+        Ok(json!({"opened":true,"instance":self.instance,"key":target.key,"generation":target.generation,"state":snapshot}))
     }
-    pub async fn adopt_terminal(&self,target:super::terminal::TerminalTarget)->Result<Value,RuntimeError> {
+    pub async fn open_terminal(&self,target:super::terminal::TerminalTarget)->Result<Value,RuntimeError> {
         let barrier=self.barrier(&target.key).await; let _guard=barrier.lock().await;
         let existing=self.entries.lock().await.get(&target.key).map(|e|(e.generation,e.handle.clone()));
         let handle=match existing {
@@ -124,40 +150,40 @@ impl RuntimeRegistry {
                 && old.transcript==target.transcript && old.state_path==target.state_path && old.projection_dir==target.projection_dir && old.lease_path==target.lease_path=>handle,
             Some(_)=>return Err(failure("runtime_generation")),
             None=>{
-                let lease=acquire_lease(&target.lease_path).map_err(|_|failure("runtime_lease"))?;
-                let (state_path,projection_dir,initial)=(target.state_path.clone(),target.projection_dir.clone(),QueueState::new(&target.key,target.generation,&target.name,Vec::new()));
-                let opening_lease=lease.clone();
-                let store=tokio::task::spawn_blocking(move ||{let _lease=opening_lease;Store::open(&state_path,&projection_dir,initial)}).await
-                    .map_err(|_|failure("queue_job"))?.map_err(|_|failure("queue_io"))?;
-                if store.state().generation!=target.generation{return Err(failure("runtime_generation"));}
+                let lease=wait_lease(&target.lease_path).await?;
+                let store=open_store(&target.state_path,&target.projection_dir,&target.key,target.generation,&target.name,lease.clone()).await?;
                 let revision=self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
                 let handle=super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),self.policy.clone(),super::terminal::TerminalOptions::default(),self.events.clone(),revision);
                 self.entries.lock().await.insert(target.key.clone(),Entry {generation:target.generation,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone()});handle
             }
         };
         let snapshot=handle.snapshot().await?;
-        Ok(json!({"ready":true,"instance":self.instance,"key":target.key,"generation":target.generation,"state":snapshot}))
+        Ok(json!({"opened":true,"instance":self.instance,"key":target.key,"generation":target.generation,"state":snapshot}))
     }
-    pub async fn detach(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
+    /// Fecha a sessão no Rust: o ator para e solta a trava; o cano segue vivo.
+    pub async fn close(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
         let barrier = self.barrier(key).await;
         let _guard = barrier.lock().await;
+        self.close_locked(key,generation).await
+    }
+    async fn close_locked(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
         let (handle,lease_path) = match self.entries.lock().await.get(key) {
-            None=>return Ok(json!({"detached":true})),
+            None=>return Ok(json!({"closed":true})),
             Some(entry) if entry.generation == generation=>(entry.handle.clone(),entry.lease_path.clone()),
             _=>return Err(failure("runtime_generation")),
         };
         if let Err(error) = handle.stop().await {
             // `stop` sempre junta a tarefa do ator: se ele saiu por erro, a posse acaba com ele. Sem
-            // isto a entrada morta ficava para sempre, a sessão não voltava ao Python e o retrato de
-            // eventos de todas as sessões caía. Só solta depois de a trava estar livre de fato.
-            if !lease_released(&lease_path).await {
+            // isto a entrada morta ficava para sempre, a sessão não reabria e o retrato de eventos
+            // de todas as sessões caía. Só solta depois de a trava estar livre de fato.
+            if wait_lease(&lease_path).await.is_err() {
                 tracing::warn!(key,code=%error.code,"ator terminou mas a trava não liberou em 3 s; sessão segue presa");
                 return Err(error);
             }
             tracing::warn!(key,code=%error.code,"ator do runtime já tinha terminado; sessão liberada");
         }
         self.entries.lock().await.remove(key);
-        Ok(json!({"detached":true}))
+        Ok(json!({"closed":true}))
     }
     async fn barrier(&self,key:&str) -> Arc<Mutex<()>> {
         self.lifecycle.lock().await.entry(key.into()).or_insert_with(||Arc::new(Mutex::new(()))).clone()
@@ -176,7 +202,7 @@ impl RuntimeRegistry {
     }
     pub async fn shutdown(&self) -> Result<(),RuntimeError> {
         let entries:Vec<_> = self.entries.lock().await.iter().map(|(key,entry)|(key.clone(),entry.generation)).collect();
-        for (key,generation) in entries { self.detach(&key,generation).await?; }
+        for (key,generation) in entries { self.close(&key,generation).await?; }
         Ok(())
     }
 }
@@ -250,29 +276,30 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
     let command = &envelope.command;
     let kind = command["kind"].as_str().ok_or_else(||failure("command_kind"))?;
     let fields:&[&str] = match kind {
-        "adopt"=>&["kind","descriptor","carry"],
+        // `carry` é opcional e sai no contrato 15.
+        "open"=>&["kind","descriptor","carry"],
         "submit"=>&["kind","text","steer","pre_transcript"],
         "control"=>&["kind","control","payload"],
         "queue"=>&["kind","action"],
-        "detach" | "snapshot" | "drain" | "confirm" | "ensure_projection"=>&["kind"],
+        "close" | "snapshot" | "drain" | "confirm" | "ensure_projection"=>&["kind"],
         _=>return Err(failure("command_kind")),
     };
     if !command.as_object().is_some_and(|object|object.keys().all(|key|fields.contains(&key.as_str()))) {
         return Err(failure("command_fields"));
     }
-    if kind == "adopt" {
+    if kind == "open" {
         return match descriptor(&command["descriptor"])? {
             Target::Headless(target)=>{
                 if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
-                registry.adopt(target,command["carry"].clone()).await
+                registry.open(target,command["carry"].clone()).await
             },
             Target::Terminal(target)=>{
                 if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
-                registry.adopt_terminal(target).await
+                registry.open_terminal(target).await
             }
         };
     }
-    if kind == "detach" { return registry.detach(&envelope.key,envelope.generation).await; }
+    if kind == "close" { return registry.close(&envelope.key,envelope.generation).await; }
     let handle = registry.entry(&envelope.key,envelope.generation).await?;
     match kind {
         "submit"=> {

@@ -237,7 +237,7 @@ def test_quiesce_waits_for_cleanup_persistence(tmp_path, monkeypatch):
         async def op(self, descriptor, command, operation_id, clock):
             assert slot.active == 0
             self.lease = WriterLease(descriptor["lock_path"])
-            return {"ready":True, "instance":"instance", "key":"key", "generation":1, "state":{}}
+            return {"opened":True, "instance":"instance", "key":"key", "generation":1, "state":{}}
     async def peek(descriptor):
         return {}
     gateway = Gateway()

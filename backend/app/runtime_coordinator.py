@@ -864,8 +864,8 @@ class RuntimeCoordinator:
                     slot.lease = None
                     released = True
                 try:
-                    ready = await self._rpc(descriptor, {"kind": "adopt", "descriptor": descriptor, "carry": slot.carry}, uuid.uuid4().hex)
-                    if not (ready.get("ready") is True and ready.get("instance") == self.instance
+                    ready = await self._rpc(descriptor, {"kind": "open", "descriptor": descriptor, "carry": slot.carry}, uuid.uuid4().hex)
+                    if not (ready.get("opened") is True and ready.get("instance") == self.instance
                             and ready.get("key") == descriptor["key"] and ready.get("generation") == descriptor["generation"]):
                         raise RuntimeError("readiness não corresponde à vida atual")
                 except Exception as exc:
@@ -884,13 +884,13 @@ class RuntimeCoordinator:
                 if released:
                     detach_error = None
                     try:
-                        detached = await self._rpc(descriptor, {"kind": "detach"}, uuid.uuid4().hex)
+                        detached = await self._rpc(descriptor, {"kind": "close"}, uuid.uuid4().hex)
                     except Exception as err:
                         detached, detach_error = {}, err
                         err._hangar_rust = True
                     # Sem confirmação, quem decide é o lock: se o Rust ainda segura a sessão, o
                     # _restore falha ao pegá-lo e o erro sobe; nunca dois donos.
-                    if detached.get("detached") is not True:
+                    if detached.get("closed") is not True:
                         from app import diag
                         diag.registrar("runtime.detach_unconfirmed", "erro", sessao=name,
                                        **(failure_reason(detach_error) if detach_error else {}))
@@ -951,8 +951,8 @@ class RuntimeCoordinator:
                 slot.phase = Phase.RecoveringPython
             await self._wait_active(slot)
             try:
-                reply = await self._rpc(slot.binding.descriptor(), {"kind": "detach"}, uuid.uuid4().hex)
-                if reply.get("detached") is not True:
+                reply = await self._rpc(slot.binding.descriptor(), {"kind": "close"}, uuid.uuid4().hex)
+                if reply.get("closed") is not True:
                     raise RuntimeError("Rust não confirmou a liberação da sessão")
             except BaseException:
                 # O Rust não soltou: ele continua dono, e a sessão não fica presa em transferência.

@@ -32,7 +32,7 @@ _log = logging.getLogger("hangar.rust_server")
 HEALTH_PATH = "/__hangar_server/health"
 # Versão do contrato interno (rotas /internal, side-events, ambiente). Tem de casar com o
 # `protocol` da saúde (hangar_server::INTERNAL_PROTOCOL); outro número = o Python atende sozinho.
-RUST_SERVER_PROTOCOL = 13
+RUST_SERVER_PROTOCOL = 14
 START_TIMEOUT = 10.0
 CRASH_WINDOW = 60.0
 MAX_CRASHES = 3
@@ -185,8 +185,6 @@ class RuntimeTransport:
                 "operation_id": operation_id, "clock": clock, "command": command}
         def send():
             connection = self._connection()
-            if command.get("kind") == "adopt":
-                connection.timeout = 185
             try:
                 connection.request("POST", "/runtime/op", body=json.dumps(body).encode(), headers=self._headers)
                 response = connection.getresponse()

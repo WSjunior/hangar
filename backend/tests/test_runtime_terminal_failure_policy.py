@@ -26,14 +26,14 @@ class Gateway:
 
     async def op(self, target, command, operation_id, clock):
         name, kind = target['name'], command['kind']
-        if kind == 'adopt':
+        if kind == 'open':
             self.leases[name] = WriterLease(target['lock_path'])
-            return {'ready': True, 'instance': self.instance, 'key': target['key'],
+            return {'opened': True, 'instance': self.instance, 'key': target['key'],
                     'generation': target['generation'], 'state': self.snapshot(target)}
-        if kind == 'detach':
-            self.events_log.append(('detach', name))
+        if kind == 'close':
+            self.events_log.append(('close', name))
             self.leases.pop(name).close()
-            return {'detached': True}
+            return {'closed': True}
         if kind == 'submit' and name == 'session':
             self.attempts.append(operation_id)
             self.events_log.append(('attempt', len(self.attempts)))

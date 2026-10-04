@@ -1,6 +1,7 @@
 //! Servidor do Hangar: lê as conversas do Claude e do Codex e repassa o resto ao backend Python.
 pub mod auth;
 pub mod config;
+pub mod diag;
 pub mod proxy;
 pub mod routes;
 pub mod runtime;
@@ -17,7 +18,7 @@ mod warn_limit;
 
 /// Versão do contrato com o Python (rotas `/internal`, eventos do side-events, ambiente). O
 /// Python (`RUST_SERVER_PROTOCOL`) recusa um binário de outra versão e atende sozinho.
-pub const INTERNAL_PROTOCOL: u32 = 13;
+pub const INTERNAL_PROTOCOL: u32 = 14;
 
 /// Todo socket TCP do servidor, aceito ou aberto. Sem isso o Nagle segura o último pedaço de uma
 /// resposta em pedaços até o ACK atrasado do outro lado; o asyncio do Python já liga sozinho.

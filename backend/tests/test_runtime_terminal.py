@@ -181,17 +181,17 @@ class TerminalGateway:
         self.fail_detach = False
     async def op(self,target,command,operation_id,clock):
         self.calls.append(command['kind'])
-        if command['kind'] == 'adopt':
+        if command['kind'] == 'open':
             self.lease = WriterLease(target['lock_path'])
-            return {'ready':True,'instance':self.instance,'key':target['key'],'generation':target['generation'],
+            return {'opened':True,'instance':self.instance,'key':target['key'],'generation':target['generation'],
                 'state':{'key':target['key'],'generation':target['generation'],'revision':0,
                     'view':{'terminal':True,'conversation':target['meta']['session_id']},'channels':{},'error':None}}
-        if command['kind'] == 'detach':
+        if command['kind'] == 'close':
             if self.fail_detach:
                 raise TimeoutError('silent Rust')
             self.lease.close()
             self.lease = None
-            return {'detached':True}
+            return {'closed':True}
         return {'operation_id':operation_id,'disposition':'accepted','payload':{}}
 
 
@@ -201,7 +201,7 @@ def test_terminal_prepare_adopt_without_cano(monkeypatch, tmp_path):
     async def flow():
         assert await owner.prepare_session('session','claude')
         assert slot.phase == Phase.Rust
-        assert gateway.calls == ['adopt']
+        assert gateway.calls == ['open']
         assert not slot.binding.headless and 'cano' not in slot.binding.meta
         assert ra.native_slot('session') is None
         await owner.detach('session')
@@ -391,7 +391,7 @@ def test_retire_old_rust_life_before_new_name_binding(monkeypatch,tmp_path):
         assert await owner.prepare_session('session','claude')
         assert owner.slot('session') is not slot
         assert slot.lease is None and slot.phase==Phase.RecoveringPython
-        assert gateway.calls==['adopt','detach','adopt']
+        assert gateway.calls==['open','close','open']
         await owner.detach('session')
     asyncio.run(flow())
 
@@ -775,7 +775,7 @@ def test_claude_terminal_controls_route_to_owner(monkeypatch,tmp_path,control):
         elif control in {'submeter_multipla','interrupt'}:await asyncio.to_thread(getattr(terminal,control),'session')
         elif control=='steer_now':await asyncio.to_thread(ti.steer_now,'session','claude')
         else:await asyncio.to_thread(ti.answer_questions,'session',[{'kind':'option','indices':[0],'labels':['A']}])
-        assert gateway.calls==['adopt','control']
+        assert gateway.calls==['open','control']
         await owner.detach('session')
     asyncio.run(flow())
 
@@ -809,7 +809,7 @@ def test_public_guest_routes_follow_owner_and_readonly_pair_zero_effect(monkeypa
         result=await asyncio.to_thread(client.post,'/api/sessions/session/input',
             json={'text':'text'},headers={'Authorization':'Bearer guest'})
         assert result.status_code==status
-        assert gateway.calls==(['adopt','submit'] if status==200 else ['adopt'])
+        assert gateway.calls==(['open','submit'] if status==200 else ['open'])
         await owner.detach('session')
     asyncio.run(flow())
 

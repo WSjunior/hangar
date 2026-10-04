@@ -39,14 +39,14 @@ class Gateway:
     async def op(self, target, command, operation_id, clock):
         if self.fail:
             raise TimeoutError("synthetic IPC")
-        if command["kind"] == "adopt":
+        if command["kind"] == "open":
             self.lease = WriterLease(target["lock_path"])
-            return {"ready": True, "instance": self.instance, "key": target["key"],
+            return {"opened": True, "instance": self.instance, "key": target["key"],
                     "generation": target["generation"], "state": {"alive": True}}
-        if command["kind"] == "detach":
+        if command["kind"] == "close":
             self.lease.close()
             self.lease = None
-            return {"detached": True}
+            return {"closed": True}
         return {"accepted": True}
 
 
@@ -130,7 +130,7 @@ def test_late_ready_rejected(tmp_path):
         original = gateway.op
         async def stale(target, command, operation_id, clock):
             result = await original(target, command, operation_id, clock)
-            if command["kind"] == "adopt":
+            if command["kind"] == "open":
                 result["generation"] = 0
             return result
         gateway.op = stale
@@ -150,7 +150,7 @@ def test_refused_adopt_goes_to_python_only_after_the_fourth_failure(tmp_path):
         original = gateway.op
         async def refuse(target, command, operation_id, clock):
             calls.append(command["kind"])
-            if command["kind"] == "adopt":
+            if command["kind"] == "open":
                 raise RuntimeError("IPC recusou a operação (503: cano_binding snapshot de outro cano)")
             return await original(target, command, operation_id, clock)
         gateway.op = refuse
@@ -163,7 +163,7 @@ def test_refused_adopt_goes_to_python_only_after_the_fourth_failure(tmp_path):
             assert coordinator.slot("session").rust_refused is None
         assert await coordinator.adopt("session") is False
         assert coordinator.slot("session").rust_refused == 1
-        assert calls.count("adopt") == 4
+        assert calls.count("open") == 4
         assert legacy.events == ["quiesce", "reconnect"] * 4
         coordinator.close_python_leases()
     asyncio.run(flow())
@@ -174,10 +174,10 @@ def test_unconfirmed_detach_never_makes_two_owners(tmp_path):
         legacy, gateway = Legacy(), Gateway()
         original = gateway.op
         async def dead_actor(target, command, operation_id, clock):
-            if command["kind"] == "adopt":
+            if command["kind"] == "open":
                 await original(target, command, operation_id, clock)
                 raise RuntimeError("IPC recusou a operação (503: runtime_initialize)")
-            if command["kind"] == "detach":
+            if command["kind"] == "close":
                 raise RuntimeError("IPC recusou a operação (503: runtime_closed)")
             return await original(target, command, operation_id, clock)
         gateway.op = dead_actor
@@ -201,7 +201,7 @@ def test_detach_and_lock_before_reserve(tmp_path):
         interloper = []
         async def detach_then_other_owner(target, command, operation_id, clock):
             result = await original(target, command, operation_id, clock)
-            if command["kind"] == "detach":
+            if command["kind"] == "close":
                 interloper.append(WriterLease(target["lock_path"]))
             return result
         gateway.op = detach_then_other_owner

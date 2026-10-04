@@ -2129,6 +2129,19 @@ escreve, com o input parcial) são fontes `PushPreviewSource` à parte, com even
 e `ferramenta`. O servidor limpa quando o bloco cai no `.jsonl`; o front espera o evento real do
 transcript pra tirar de cena, com 3s de carência, senão abria um buraco entre os dois.
 
+## Claude sem terminal: segundo `initialize` no mesmo processo (04/10/2026, CLI 2.1.289)
+
+O Rust que abre um cano já inicializado reenvia o `initialize`, porque o snapshot do cano não
+marca `initialized` (só reaplica o `system/init`). Medido com o CLI real (`claude -p` em
+stream-json com `--permission-prompt-tool stdio`, Haiku, conta `.claude-02-200`, sem cano nem
+backend): o segundo `initialize` responde `success` com o mesmo corpo do primeiro (244
+comandos), tanto logo depois do primeiro quanto depois de um turno completo, e o turno seguinte
+sai normal. Diferente do Codex, que recusa com `-32600 "Already initialized"`. Então a reabertura
+no Rust não precisa de tratamento especial: a resposta marca a sessão entregável como no
+primeiro. Se uma versão futura recusar, o sintoma é `headless_nao_subiu` com a frase do CLI na
+faixa (`claude.rs`, ramo `initialize` rejeitado). Teste de regressão:
+`reopen_of_initialized_cano_becomes_deliverable`.
+
 ## Codex sem terminal: o app-server é do cano (14/09/2026, codex-cli 0.154.0)
 
 `adapters/codex/sem_terminal.py` + o ramo `headless` de `adapter.py`. A regra "o app-server é do
