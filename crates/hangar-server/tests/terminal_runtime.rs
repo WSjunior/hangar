@@ -500,10 +500,11 @@ async fn terminal_runtime_interactive_text_keeps_whitespace_character() {
 }
 
 #[tokio::test]
-async fn terminal_runtime_clear_new_conversation_after_enter_is_unknown_and_old_life_stays_blocked() {
+async fn terminal_runtime_clear_new_conversation_after_enter_is_accepted_and_old_life_stays_blocked() {
     let f=Fixture::new().await; f.io.rotate_enter.store(true,std::sync::atomic::Ordering::Release); let h=f.start();
     let result=h.command(f.command("clear-changes-sid","/clear")).await.unwrap();
-    assert_eq!(result.disposition,hangar_server::runtime::protocol::Disposition::Unknown); assert_eq!(result.payload["code"],"submit_unproved");
+    // A troca de conversa é o efeito do próprio /clear: o composer vazio no mesmo pane prova a submissão.
+    assert_eq!(result.disposition,hangar_server::runtime::protocol::Disposition::Accepted,"{}",result.payload); assert_eq!(result.payload["code"],"submitted");
     assert_eq!(*f.io.conversation.lock().unwrap(),"new-sid"); let snapshot=h.snapshot().await.unwrap(); assert_eq!(snapshot["view"]["conversation"],"sid"); assert_eq!(snapshot["view"]["preserve_binding"],true);
     assert!(h.command(f.command("after-sid-change","Olá")).await.is_err()); h.stop().await.unwrap();
 }
