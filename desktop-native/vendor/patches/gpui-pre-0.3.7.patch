@@ -1519,7 +1519,13 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      next_hitbox_id: HitboxId,
      pub(crate) next_tooltip_id: TooltipId,
      pub(crate) tooltip_bounds: Option<TooltipBounds>,
-@@ -1224,6 +1260,11 @@
+@@ -1219,11 +1255,17 @@
+     #[cfg(feature = "profiler")]
+     window_profiler: profiler::WindowProfiler,
+     last_input_modality: InputModality,
++    current_key_down: Option<KeyDownEvent>,
+     touch_gestures: TouchGestureRecognizer,
+     touch_prediction_enabled: bool,
      long_press_timer: Option<Task<()>>,
      long_press_capture: Option<EntityId>,
      pub(crate) refreshing: bool,
@@ -1531,7 +1537,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      pub(crate) activation_observers: SubscriberSet<(), AnyObserver>,
      pub(crate) focus: Option<FocusId>,
      focus_enabled: bool,
-@@ -1790,10 +1831,11 @@
+@@ -1790,10 +1832,11 @@
  
                  // Keep presenting if input was recently arriving at a high rate (>= 60fps).
                  // Once high-rate input is detected, we sustain presentation for 1 second
@@ -1545,7 +1551,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  
                  if invalidator.is_dirty() || force_render {
                      measure("frame duration", || {
-@@ -1805,7 +1847,11 @@
+@@ -1805,7 +1848,11 @@
                                      window.refresh();
                                  }
                                  let arena_clear_needed = window.draw(cx);
@@ -1558,7 +1564,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
                                  arena_clear_needed.clear(cx);
                              })
                              .log_err();
-@@ -2045,6 +2091,7 @@
+@@ -2045,6 +2092,7 @@
              focused_text_input_active: false,
              rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
              next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
@@ -1566,7 +1572,15 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              next_frame_callbacks,
              next_hitbox_id: HitboxId(0),
              next_tooltip_id: TooltipId::default(),
-@@ -2081,6 +2128,8 @@
+@@ -2072,6 +2120,7 @@
+             #[cfg(feature = "profiler")]
+             window_profiler: profiler::WindowProfiler::new(handle.window_id())?,
+             last_input_modality: InputModality::Mouse,
++            current_key_down: None,
+             touch_gestures: TouchGestureRecognizer::new(
+                 cx.platform
+                     .gestures()
+@@ -2081,6 +2130,8 @@
              long_press_timer: None,
              long_press_capture: None,
              refreshing: false,
@@ -1575,7 +1589,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              activation_observers: SubscriberSet::new(),
              focus: None,
              focus_enabled: true,
-@@ -2598,6 +2647,13 @@
+@@ -2598,6 +2649,13 @@
          AsyncWindowContext::new_context(cx.to_async(), self.handle)
      }
  
@@ -1589,7 +1603,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      /// Schedule the given closure to be run directly after the current frame is rendered.
      pub fn on_next_frame(&self, callback: impl FnOnce(&mut Window, &mut App) + 'static) {
          RefCell::borrow_mut(&self.next_frame_callbacks).push(Box::new(callback));
-@@ -2808,6 +2864,11 @@
+@@ -2808,6 +2866,11 @@
          self.active.get()
      }
  
@@ -1601,7 +1615,19 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      /// Returns whether this window is considered to be the window
      /// that currently owns the mouse cursor.
      /// On mac, this is equivalent to `is_window_active`.
-@@ -3344,8 +3405,21 @@
+@@ -3236,6 +3299,11 @@
+         self.modifiers
+     }
+ 
++    /// Preserva os metadados da tecla para interceptação anterior aos atalhos.
++    pub fn current_key_down_event(&self) -> Option<&KeyDownEvent> {
++        self.current_key_down.as_ref()
++    }
++
+     /// Returns true if the last input event was keyboard-based (key press, tab navigation, etc.)
+     /// This is used for focus-visible styling to show focus indicators only for keyboard navigation.
+     pub fn last_input_was_keyboard(&self) -> bool {
+@@ -3344,8 +3412,21 @@
          self.invalidator.set_phase(DrawPhase::Focus);
          let previous_focus_path = self.rendered_frame.focus_path();
          let previous_window_active = self.rendered_frame.window_active;
@@ -1623,7 +1649,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          let current_focus_path = self.rendered_frame.focus_path();
          let current_window_active = self.rendered_frame.window_active;
          let mut focus_before_listeners = self.focus;
-@@ -3395,7 +3469,14 @@
+@@ -3395,7 +3476,14 @@
          if self.focus != focus_before_listeners {
              self.refresh();
          }
@@ -1639,7 +1665,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  
          #[cfg(feature = "profiler")]
          {
-@@ -3438,7 +3519,15 @@
+@@ -3438,7 +3526,15 @@
          let _foreground_turn = profiler::journal::foreground_turn();
          #[cfg(feature = "profiler")]
          let present_start = Instant::now();
@@ -1656,7 +1682,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          #[cfg(feature = "profiler")]
          self.window_profiler.record_present(
              present_start,
-@@ -3803,6 +3892,7 @@
+@@ -3803,6 +3899,7 @@
      pub(crate) fn prepaint_index(&self) -> PrepaintStateIndex {
          PrepaintStateIndex {
              hitboxes_index: self.next_frame.hitboxes.len(),
@@ -1664,7 +1690,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
              tooltips_index: self.next_frame.tooltip_requests.len(),
              deferred_draws_index: self.next_frame.deferred_draws.len(),
              dispatch_tree_index: self.next_frame.dispatch_tree.len(),
-@@ -3812,6 +3902,12 @@
+@@ -3812,6 +3909,12 @@
      }
  
      pub(crate) fn reuse_prepaint(&mut self, range: Range<PrepaintStateIndex>) {
@@ -1677,7 +1703,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
          self.next_frame.hitboxes.extend(
              self.rendered_frame.hitboxes[range.start.hitboxes_index..range.end.hitboxes_index]
                  .iter()
-@@ -4057,6 +4153,9 @@
+@@ -4057,6 +4160,9 @@
          if result.is_err() {
              self.next_frame.hitboxes.truncate(index.hitboxes_index);
              self.next_frame
@@ -1687,7 +1713,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
                  .tooltip_requests
                  .truncate(index.tooltips_index);
              self.next_frame
-@@ -4368,6 +4467,41 @@
+@@ -4368,6 +4474,41 @@
          result
      }
  
@@ -1729,7 +1755,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      /// Paint the drop (non-inset) shadows from `shadows` into the scene at the current
      /// z-index. Inset shadows are skipped; paint those with [`Self::paint_inset_shadows`]
      /// after the element's background so they layer on top of the fill.
-@@ -4985,6 +5119,29 @@
+@@ -4985,6 +5126,29 @@
          });
      }
  
@@ -1759,7 +1785,24 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      /// Removes an image from the sprite atlas.
      pub fn drop_image(&mut self, data: Arc<RenderImage>) -> Result<()> {
          for frame_index in 0..data.frame_count() {
-@@ -6424,6 +6581,11 @@
+@@ -5408,6 +5572,8 @@
+         #[cfg(feature = "profiler")]
+         self.window_profiler.begin_input(event.kind_name());
+         let update_count_before = self.invalidator.update_count();
++        let previous_key_down = self.current_key_down.take();
++        self.current_key_down = match &event { PlatformInput::KeyDown(key) => Some(key.clone()), _ => None };
+         // Track input modality for focus-visible styling and hover suppression.
+         // Hover is suppressed during keyboard modality so that keyboard navigation
+         // doesn't show hover highlights on the item under the mouse cursor.
+@@ -5567,6 +5733,7 @@
+         }
+         #[cfg(feature = "profiler")]
+         self.window_profiler.end_input(caused_invalidation);
++        self.current_key_down = previous_key_down;
+ 
+         DispatchEventResult {
+             propagate: cx.propagate_event,
+@@ -6424,6 +6591,11 @@
          self.platform_window.minimize();
      }
  
@@ -1771,3 +1814,46 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      /// Toggle full screen status on the current window at the platform level.
      pub fn toggle_fullscreen(&self) {
          self.platform_window.toggle_fullscreen();
+@@ -7724,6 +7896,42 @@
+     }
+ 
+     #[gpui::test]
++    fn keystroke_interceptors_receive_input_metadata_before_dispatch(cx: &mut TestAppContext) {
++        let window = cx.add_window(|window, cx| {
++            let focus = cx.focus_handle();
++            focus.focus(window, cx);
++            RepeatStateView(focus)
++        });
++        let seen = Rc::new(RefCell::new(Vec::new()));
++        let _subscription = window.update(cx, {
++            let seen = seen.clone();
++            move |_, _, cx| cx.intercept_keystrokes(move |_, window, cx| {
++                let event = window.current_key_down_event().unwrap();
++                seen.borrow_mut().push((event.is_held, event.prefer_character_input));
++                cx.stop_propagation();
++            })
++        }).unwrap();
++        window.update(cx, |_, window, cx| {
++            window.draw(cx).clear(cx);
++            for (is_held, prefer_character_input) in [(false, false), (true, false), (false, true)] {
++                window.dispatch_event(PlatformInput::KeyDown(KeyDownEvent {
++                    keystroke: Keystroke::parse("ctrl-alt-r").unwrap(), is_held, prefer_character_input,
++                }), cx);
++                assert!(window.current_key_down_event().is_none());
++            }
++        }).unwrap();
++        assert_eq!(*seen.borrow(), [(false, false), (true, false), (false, true)]);
++    }
++
++    struct RepeatStateView(FocusHandle);
++
++    impl Render for RepeatStateView {
++        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
++            div().track_focus(&self.0)
++        }
++    }
++
++    #[gpui::test]
+     fn test_fully_visible_bounds_preserve_layout_viewport(cx: &mut TestAppContext) {
+         let window = cx.add_window(|_, _| EmptyView);
+         let mut platform_window = cx.test_window(window.into());
