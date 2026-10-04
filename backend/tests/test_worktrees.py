@@ -405,6 +405,35 @@ def test_list_all_repo_filter_without_sessions(tmp_path):
     assert worktrees.list_all([], [], roots=[tmp_path / "outra"], repo=main) == []
 
 
+def test_tree_bytes_skips_windows_junctions(monkeypatch):
+    """No Windows a junction (node_modules do pnpm) tem `is_symlink()` falso e `is_dir` verdadeiro."""
+    import os
+    from types import SimpleNamespace
+
+    def entry(path, *, is_dir=False, junction=False):
+        return SimpleNamespace(name=path.rsplit("/", 1)[-1], path=path,
+                               is_symlink=lambda: False, is_junction=lambda: junction,
+                               is_dir=lambda follow_symlinks=True: is_dir,
+                               stat=lambda follow_symlinks=True: SimpleNamespace(st_size=100))
+
+    tree = {"/w/pkg": [entry("/w/pkg/a.js"), entry("/w/pkg/link", is_dir=True, junction=True)],
+            "/w/link": [entry("/w/link/big.bin")],
+            "/w/pkg/link": [entry("/w/pkg/link/big.bin")]}
+
+    class _It(list):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(os, "scandir", lambda p: _It(tree[p]))
+    skipped = [0]
+    assert worktrees._tree_bytes(entry("/w/link", is_dir=True, junction=True), skipped) == 0
+    assert worktrees._tree_bytes(entry("/w/pkg", is_dir=True), skipped) == 100
+    assert skipped == [0]
+
+
 def test_detail_on_plain_folder_is_404(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from app import api, fs
