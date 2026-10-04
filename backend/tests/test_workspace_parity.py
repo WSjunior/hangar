@@ -207,3 +207,115 @@ def test_executor_death_ends_the_command_and_its_child(tmp_path):
                         os.kill(pid, 9)
                     except OSError:
                         pass
+
+
+def _worktree_pair(repo):
+    # Dois repositórios iguais lado a lado: um para cada lado, efeitos comparados por nome relativo.
+    git_ops._run(str(repo), "add", ".")
+    git_ops._run(str(repo), "commit", "-m", "Base")
+    git_ops._run(str(repo), "branch", "outra")
+    (repo / ".gitignore").write_text(".env\n", encoding="utf-8")
+    git_ops._run(str(repo), "add", ".gitignore")
+    git_ops._run(str(repo), "commit", "-m", "Ignora")
+    (repo / ".env").write_text("SEGREDO=1\n", encoding="utf-8")
+    sides = {}
+    for side in ("py", "rs"):
+        root = repo.parent / f"{repo.name}-{side}"
+        root.mkdir()
+        shutil.copytree(repo, root / "repo")
+        sides[side] = root
+    return sides
+
+
+def _worktree_effects(root):
+    target = root / "repo-wt"
+    config = git_ops._run(str(root / "repo"), "config", "--get-regexp", r"^branch\.")
+    return {
+        "files": sorted(str(p.relative_to(target)) for p in target.rglob("*")
+                        if p.is_file() and ".git" not in p.relative_to(target).parts) if target.exists() else None,
+        "env": (target / ".env").read_text(encoding="utf-8") if (target / ".env").exists() else None,
+        "branches": git_ops._run(str(root / "repo"), "branch", "--format=%(refname:short) %(upstream)").stdout,
+        "config": config.stdout,
+    }
+
+
+def _both(sides, operation, **args):
+    try:
+        expected = {"ok": True, "result": json.loads(json.dumps(getattr(git_ops, operation)(
+            str(sides["py"] / "repo"), allowed_root=sides["py"], **args)))}
+    except git_ops.GitError as e:
+        expected = {"ok": False, "error": {"status": e.status, "detail": e.detail}}
+    actual = rust(operation, cwd=sides["rs"] / "repo", allowed_root=sides["rs"], **args)
+    if actual["ok"] and actual["result"][0].startswith(str(sides["rs"])):
+        actual["result"][0] = str(sides["py"]) + actual["result"][0][len(str(sides["rs"])):]
+    return expected, actual
+
+
+@pytest.mark.parametrize("args", [
+    {"branch": "nova", "name": "wt", "new_branch": True, "base": None},
+    {"branch": "nova", "name": "wt", "new_branch": True, "base": "outra"},
+    {"branch": "outra", "name": "wt", "new_branch": False, "base": None},
+    {"branch": "outra", "name": "wt", "new_branch": True, "base": None},
+    {"branch": "-x", "name": "wt", "new_branch": True, "base": None},
+    {"branch": "nova ", "name": "wt", "new_branch": True, "base": None},
+    {"branch": "nova", "name": "wt", "new_branch": True, "base": "ausente"},
+])
+def test_create_worktree_new_branch_and_base_contract(repo, args):
+    sides = _worktree_pair(repo)
+    expected, actual = _both(sides, "create_worktree", **args)
+    assert actual == expected
+    assert _worktree_effects(sides["rs"]) == _worktree_effects(sides["py"])
+
+
+def test_create_worktree_new_branch_from_remote_base(repo):
+    sides = _worktree_pair(repo)
+    for root in sides.values():
+        upstream = root / "upstream"
+        git_ops._run(str(root / "repo"), "clone", "--bare", "-q", str(root / "repo"), str(upstream))
+        git_ops._run(str(root / "repo"), "remote", "add", "origin", str(upstream))
+        git_ops._run(str(upstream), "branch", "so-remota", "main")
+        git_ops._run(str(root / "repo"), "fetch", "-q", "origin")
+    expected, actual = _both(sides, "create_worktree", branch="nova", name="wt", new_branch=True, base="so-remota")
+    assert expected["ok"] and actual == expected
+    assert _worktree_effects(sides["rs"]) == _worktree_effects(sides["py"])
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_remove_dirty_worktree_force_contract(repo, force):
+    sides = _worktree_pair(repo)
+    for root in sides.values():
+        git_ops._run(str(root / "repo"), "worktree", "add", "-q", str(root / "repo-wt"), "outra")
+        (root / "repo-wt" / "sujo.txt").write_text("não versionado\n", encoding="utf-8")
+    try:
+        expected = {"ok": True, "result": git_ops.remove_worktree(str(sides["py"] / "repo"), str(sides["py"] / "repo-wt"), force=force)}
+    except git_ops.GitError as e:
+        expected = {"ok": False, "error": {"status": e.status, "detail": e.detail.replace(str(sides["py"]), "<raiz>")}}
+    actual = rust("remove_worktree", cwd=sides["rs"] / "repo", path=sides["rs"] / "repo-wt", force=force)
+    if not actual["ok"]:
+        actual["error"]["detail"] = actual["error"]["detail"].replace(str(sides["rs"]), "<raiz>")
+    assert actual == expected
+    assert (sides["rs"] / "repo-wt").exists() == (sides["py"] / "repo-wt").exists() == (not force)
+
+
+def test_citations_read_rows_in_memory_instead_of_the_file(repo):
+    (repo / "docs").mkdir()
+    (repo / "docs/nota.md").write_text("nota\n", encoding="utf-8")
+    rows = [json.dumps(line, ensure_ascii=False).encode() + b"\n" for line in [
+        {"cwd": str(repo), "text": f"veja {repo}/docs/nota.md e docs/nota.md"},
+        {"cwd": str(repo / "docs"), "text": "nota.md citada"},
+    ]]
+    # O arquivo diz outra coisa: só as linhas em memória podem produzir o resultado.
+    log = repo / "fixture.jsonl"
+    log.write_text(json.dumps({"cwd": "/nada", "text": "vazio"}) + "\n", encoding="utf-8")
+    text = [row.decode() for row in rows]
+    assert rust("citation_cwds", jsonl=log, needles=["docs/nota.md", "nota.md"], rows=text) == {
+        "ok": True, "result": transcript.citation_cwds(log, ["docs/nota.md", "nota.md"], rows=rows)}
+    assert rust("cited_elsewhere", jsonl=log, path="nota.md", rows=text) == {
+        "ok": True, "result": json.loads(json.dumps(transcript.cited_elsewhere(log, "nota.md", rows=rows)))}
+    from app import api
+    other = repo.parent / "outra-pasta"
+    other.mkdir()
+    expected = api._cited_elsewhere(str(log), str(other), "nota.md", [str(repo)], siblings=False, rows=rows)
+    assert expected == str(repo / "docs/nota.md")
+    assert rust("find_elsewhere", jsonl=log, cwd=other, path="nota.md", worked=[str(repo)],
+                siblings=False, rows=text) == {"ok": True, "result": expected}

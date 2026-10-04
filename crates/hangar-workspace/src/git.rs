@@ -322,31 +322,66 @@ fn remote_ref(cwd: &Path, branch: &str) -> Result<String> {
     }
     Ok(refs[0].into())
 }
-pub fn create_worktree(cwd: &Path, branch: &str, name: &str, root: &Path) -> Result<Value> {
-    option_like(branch)?;
+fn branch_name_ok(cwd: &Path, name: &str) -> Result<bool> {
+    // Nome começando com "-" viraria flag do `worktree add -b`.
+    if name.is_empty() || name.starts_with('-') || name != name.trim() {
+        return Ok(false);
+    }
+    Ok(command(cwd, &["check-ref-format", "--branch", name])?.code == 0)
+}
+pub fn create_worktree(
+    cwd: &Path,
+    branch: &str,
+    name: &str,
+    root: &Path,
+    new_branch: bool,
+    base: Option<&str>,
+) -> Result<Value> {
+    if !new_branch {
+        option_like(branch)?;
+    }
     static LOCK: Mutex<()> = Mutex::new(());
     let _lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let repo = real(Path::new(
-        checked(cwd, &["rev-parse", "--show-toplevel"], 409)?
-            .stdout
-            .trim(),
-    ));
+    let top = command(cwd, &["rev-parse", "--show-toplevel"])?;
+    if top.code != 0 {
+        return Err(error(409, "pasta sem repositório Git"));
+    }
+    let repo = real(Path::new(top.stdout.trim()));
     let root = real(root);
     if !repo.starts_with(&root) {
         return Err(error(400, "repositório fora da raiz autorizada"));
     }
     let info = branches(cwd)?;
-    if info["current"] == branch {
-        return Ok(json!([cwd.to_string_lossy(), false]));
-    }
-    if !info["branches"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .chain(info["remotes"].as_array().unwrap())
-        .any(|b| b == branch)
-    {
-        return Err(error(400, "branch inexistente"));
+    let local = info["branches"].as_array().unwrap();
+    let known = |b: &str| {
+        local
+            .iter()
+            .chain(info["remotes"].as_array().unwrap())
+            .any(|x| x == b)
+    };
+    let mut start = String::new();
+    if new_branch {
+        if !branch_name_ok(cwd, branch)? {
+            return Err(error(400, "nome de branch inválido"));
+        }
+        if known(branch) {
+            return Err(error(409, "já existe uma branch com esse nome"));
+        }
+        start = base
+            .filter(|b| !b.is_empty())
+            .or(info["current"].as_str())
+            .unwrap_or_default()
+            .to_owned();
+        if start.is_empty() || !known(&start) {
+            return Err(error(400, "branch base inexistente"));
+        }
+    } else {
+        if !known(branch) {
+            return Err(error(400, "branch inexistente"));
+        }
+        if info["current"] == branch {
+            return Ok(json!([cwd.to_string_lossy(), false]));
+        }
     }
     if name.contains(['/', '\\', '\0']) || name == ".." {
         return Err(error(400, "nome inválido"));
@@ -361,23 +396,118 @@ pub fn create_worktree(cwd: &Path, branch: &str, name: &str, root: &Path) -> Res
     if target.symlink_metadata().is_ok() {
         return Err(error(409, "destino da worktree já existe"));
     }
-    let remote = remote_ref(cwd, branch);
     let text = target.to_string_lossy();
-    if info["branches"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|b| b == branch)
-    {
-        checked(cwd, &["worktree", "add", &text, branch], 409)?;
-    } else {
-        checked(
+    let created = if new_branch {
+        let from = if local.iter().any(|b| b == start.as_str()) {
+            start.clone()
+        } else {
+            remote_ref(cwd, &start)?
+        };
+        // Sem --no-track a branch nova herdaria o upstream da base: o pull puxaria a base.
+        command(
             cwd,
-            &["worktree", "add", "--track", "-b", branch, &text, &remote?],
+            &["worktree", "add", "--no-track", "-b", branch, &text, &from],
+        )?
+    } else if local.iter().any(|b| b == branch) {
+        command(cwd, &["worktree", "add", &text, branch])?
+    } else {
+        let remote = remote_ref(cwd, branch)?;
+        command(
+            cwd,
+            &["worktree", "add", "--track", "-b", branch, &text, &remote],
+        )?
+    };
+    if created.code != 0 {
+        return Err(error(
             409,
-        )?;
+            scrub(&created.reason("não consegui criar a worktree")),
+        ));
     }
+    if new_branch {
+        // A worktree já existe: falha em registrar a base só fica no log.
+        let key = format!("branch.{branch}.hangar-base");
+        if !command(&target, &["config", &key, &start]).is_ok_and(|o| o.code == 0) {
+            tracing::warn!("hangar-base da branch nova não gravada");
+        }
+    }
+    copy_ignored(&main_root(cwd, &repo, &root), &target);
     Ok(json!([text, true]))
+}
+/// Raiz do repositório principal: com `cwd` numa worktree ligada, a config mora no principal.
+fn main_root(cwd: &Path, repo: &Path, root: &Path) -> PathBuf {
+    match command(
+        cwd,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ) {
+        Ok(out) if out.code == 0 => {
+            let common = real(Path::new(out.stdout.trim()));
+            match common.parent() {
+                // Fora da raiz autorizada não é lido; fica a raiz de onde se partiu.
+                Some(main) if main.starts_with(root) => main.to_path_buf(),
+                _ => repo.to_path_buf(),
+            }
+        }
+        _ => repo.to_path_buf(),
+    }
+}
+const COPY_MAX: u64 = 1024 * 1024;
+/// A worktree nasce sem os arquivos ignorados (`.env`, `pserver.ini`) e o projeto não sobe;
+/// copia os da raiz. Falha aqui só registra: a worktree já existe e serve.
+pub fn copy_ignored(repo: &Path, target: &Path) -> Vec<String> {
+    let args = [
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "--directory",
+        "-z",
+    ];
+    let out = match command(repo, &args) {
+        Ok(out) if out.code == 0 => out,
+        _ => {
+            tracing::warn!("copy_ignored: ls-files falhou");
+            return Vec::new();
+        }
+    };
+    let mut copied = Vec::new();
+    // Pasta ignorada vem com "/" no fim; subpastas ficam de fora.
+    for rel in out
+        .stdout
+        .split('\0')
+        .filter(|r| !r.is_empty() && !r.contains('/'))
+    {
+        let (src, dst) = (repo.join(rel), target.join(rel));
+        let Ok(meta) = src.symlink_metadata() else {
+            continue;
+        };
+        if !meta.is_file() || meta.len() > COPY_MAX {
+            continue;
+        }
+        // Nunca sobrescreve o que a branch versiona nem segue link para fora da worktree.
+        if dst.symlink_metadata().is_ok() {
+            continue;
+        }
+        match std::fs::copy(&src, &dst) {
+            Ok(_) => copied.push(rel.to_owned()),
+            Err(e) => tracing::warn!(error = %e.kind(), "copy_ignored: arquivo não copiado"),
+        }
+    }
+    copied
+}
+pub fn remove_worktree(cwd: &Path, path: &str, force: bool) -> Result<Value> {
+    let mut args = vec!["worktree", "remove"];
+    if force {
+        args.push("--force");
+    }
+    args.push(path);
+    let out = command(cwd, &args)?;
+    if out.code != 0 {
+        return Err(error(
+            500,
+            scrub(&out.reason("não consegui remover a worktree")),
+        ));
+    }
+    Ok(Value::Null)
 }
 pub fn action(cwd: &Path, action: &str) -> Result<Value> {
     let args: &[&str] = match action {

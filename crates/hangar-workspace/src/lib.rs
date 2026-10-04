@@ -77,10 +77,16 @@ pub enum Operation {
         branch: String,
         name: String,
         allowed_root: String,
+        #[serde(default)]
+        new_branch: bool,
+        #[serde(default)]
+        base: Option<String>,
     },
     RemoveWorktree {
         cwd: String,
         path: String,
+        #[serde(default)]
+        force: bool,
     },
     GitAction {
         cwd: String,
@@ -270,10 +276,14 @@ pub enum Operation {
     CitationCwds {
         jsonl: String,
         needles: Vec<String>,
+        #[serde(default)]
+        rows: Option<Vec<String>>,
     },
     CitedElsewhere {
         jsonl: String,
         path: String,
+        #[serde(default)]
+        rows: Option<Vec<String>>,
     },
     FindElsewhere {
         jsonl: String,
@@ -281,6 +291,8 @@ pub enum Operation {
         path: String,
         worked: Vec<String>,
         siblings: bool,
+        #[serde(default)]
+        rows: Option<Vec<String>>,
     },
     ResolveCited {
         cwd: String,
@@ -331,11 +343,17 @@ pub fn execute(op: Operation) -> Result<Value> {
             branch,
             name,
             allowed_root,
-        } => git::create_worktree(Path::new(&cwd), &branch, &name, Path::new(&allowed_root)),
-        RemoveWorktree { cwd, path } => {
-            git::checked(Path::new(&cwd), &["worktree", "remove", &path], 500)?;
-            Ok(Value::Null)
-        }
+            new_branch,
+            base,
+        } => git::create_worktree(
+            Path::new(&cwd),
+            &branch,
+            &name,
+            Path::new(&allowed_root),
+            new_branch,
+            base.as_deref(),
+        ),
+        RemoveWorktree { cwd, path, force } => git::remove_worktree(Path::new(&cwd), &path, force),
         GitAction { cwd, action } => git::action(Path::new(&cwd), &action),
         GitLog { cwd, n, grep } => git::log(Path::new(&cwd), n, grep.as_deref()),
         GitLogSince { cwd, desde, n } => Ok(git::log_since(Path::new(&cwd), desde, n)),
@@ -475,16 +493,23 @@ pub fn execute(op: Operation) -> Result<Value> {
             roots,
         } => files::mkdir(&root, path.as_deref(), &name, &roots),
         ListRoots { roots } => files::roots(&roots),
-        CitationCwds { jsonl, needles } => Ok(citations::cwds(Path::new(&jsonl), &needles)),
-        CitedElsewhere { jsonl, path } => Ok(citations::elsewhere(Path::new(&jsonl), &path)),
+        CitationCwds {
+            jsonl,
+            needles,
+            rows,
+        } => Ok(citations::cwds(transcript(&jsonl, &rows), &needles)),
+        CitedElsewhere { jsonl, path, rows } => {
+            Ok(citations::elsewhere(transcript(&jsonl, &rows), &path))
+        }
         FindElsewhere {
             jsonl,
             cwd,
             path,
             worked,
             siblings,
+            rows,
         } => {
-            let jsonl = Path::new(&jsonl);
+            let jsonl = transcript(&jsonl, &rows);
             let result = if let Some(cwd) = cwd {
                 citations::find_elsewhere(jsonl, Path::new(&cwd), &path, &worked, siblings)
             } else {
@@ -502,8 +527,21 @@ pub fn execute(op: Operation) -> Result<Value> {
             path,
             write,
         } => Ok(json!(
-            citations::resolve(Path::new(&cwd), Path::new(&jsonl), &path, write)?.to_string_lossy()
+            citations::resolve(
+                Path::new(&cwd),
+                citations::Transcript::File(Path::new(&jsonl)),
+                &path,
+                write
+            )?
+            .to_string_lossy()
         )),
+    }
+}
+
+fn transcript<'a>(jsonl: &'a str, rows: &'a Option<Vec<String>>) -> citations::Transcript<'a> {
+    match rows {
+        Some(rows) => citations::Transcript::Rows(rows),
+        None => citations::Transcript::File(Path::new(jsonl)),
     }
 }
 

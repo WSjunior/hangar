@@ -7,7 +7,17 @@ use std::{
     path::{Path, PathBuf},
 };
 
-fn lines(path: &Path, mut callback: impl FnMut(&str)) {
+/// Linhas da conversa: o arquivo, ou as já em memória (histórico de uma transferência).
+#[derive(Clone, Copy)]
+pub enum Transcript<'a> {
+    File(&'a Path),
+    Rows(&'a [String]),
+}
+fn lines(source: Transcript<'_>, mut callback: impl FnMut(&str)) {
+    let path = match source {
+        Transcript::Rows(rows) => return rows.iter().for_each(|row| callback(row)),
+        Transcript::File(path) => path,
+    };
     if let Ok(file) = std::fs::File::open(path) {
         let mut reader = BufReader::new(file);
         let mut buffer = Vec::new();
@@ -20,7 +30,7 @@ fn lines(path: &Path, mut callback: impl FnMut(&str)) {
         }
     }
 }
-pub fn cwds(jsonl: &Path, needles: &[String]) -> Value {
+pub fn cwds(jsonl: Transcript<'_>, needles: &[String]) -> Value {
     let mut wanted = needles.iter().filter(|s| !s.is_empty()).collect::<Vec<_>>();
     wanted.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
     wanted.dedup();
@@ -73,7 +83,7 @@ fn beginning(prefix: &str) -> bool {
             .last()
             .is_some_and(|c| c.is_whitespace() || "\"`'([=:,".contains(c))
 }
-pub fn elsewhere(jsonl: &Path, path: &str) -> Value {
+pub fn elsewhere(jsonl: Transcript<'_>, path: &str) -> Value {
     let tail = path
         .replace('\\', "/")
         .trim_start_matches("./")
@@ -156,7 +166,7 @@ pub fn elsewhere(jsonl: &Path, path: &str) -> Value {
     json!([absolute, relative])
 }
 pub fn find_elsewhere(
-    jsonl: &Path,
+    jsonl: Transcript<'_>,
     cwd: &Path,
     path: &str,
     worked: &[String],
@@ -210,7 +220,7 @@ pub fn find_elsewhere(
     }
     None
 }
-pub fn resolve(cwd: &Path, jsonl: &Path, path: &str, write: bool) -> Result<PathBuf> {
+pub fn resolve(cwd: &Path, jsonl: Transcript<'_>, path: &str, write: bool) -> Result<PathBuf> {
     if path.is_empty() || path.contains('\0') {
         return Err(error(400, "invalid path"));
     }
