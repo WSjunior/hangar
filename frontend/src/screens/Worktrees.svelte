@@ -294,6 +294,9 @@
         {@const principais = visiveis.filter((w) => !worktreeIsAgent(w))}
         {@const agentes = visiveis.filter(worktreeIsAgent)}
         {@const lote = mergedWorktreeBatch(r)}
+        {@const prontasRepo = r.worktrees.filter(worktreeReady)}
+        <!-- O botão conta as prontas, igual ao contador; sem prontas, o lote (mescladas com arquivos) segue alcançável. -->
+        {@const limpar = prontasRepo.length ? prontasRepo : lote.deletable}
         {@const k = chaveLote(b, r.repo)}
         {@const subAberto = filtro !== 'todas' || !!subAbertos[k]}
         {@const principal = r.worktrees.find((w) => w.main_branch)?.main_branch}
@@ -307,7 +310,7 @@
             {#if lote.deletable.length}
               <button type="button" class="lote" disabled={loteAndando === k} onclick={() => pedirLote(b, r)}>
                 {#if loteAndando === k}<Spinner />{/if}
-                {m.worktree_limpar_mescladas({ n: lote.deletable.length, tamanho: worktreesSizeSum(lote.deletable) })}
+                {m.worktree_limpar_mescladas({ n: limpar.length, tamanho: worktreesSizeSum(limpar) })}
               </button>
             {/if}
             {#if erroLote[k]}<p class="erro" role="alert">{erroLote[k]}</p>{/if}

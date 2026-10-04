@@ -205,6 +205,9 @@ export default function Worktrees() {
           {!visiveis.length ? <InfoNotice text={m.worktrees_filtro_vazio()} /> : null}
           {visiveis.map(({ r, ws }) => {
             const b = mergedWorktreeBatch(r);
+            // Mesmo número do contador "Prontas pra apagar"; o lote só aparece sozinho quando não há prontas.
+            const prontas = r.worktrees.filter(worktreeReady);
+            const limpar = prontas.length ? prontas : b.deletable;
             const principais = ws.filter((w) => !worktreeIsAgent(w));
             const agentes = ws.filter(worktreeIsAgent);
             // Com filtro ligado o grupo abre sozinho: o que casou não pode ficar escondido.
@@ -222,7 +225,7 @@ export default function Worktrees() {
                 {b.deletable.length ? (
                   <View style={[styles.limpar, { borderTopColor: c.border }]}>
                     <Pill icon="Trash2" onPress={() => setLote({ repo: r.repo, ...b })}
-                      label={m.worktree_limpar_mescladas({ n: b.deletable.length, tamanho: fmtBytes(sumSize(b.deletable)) })} />
+                      label={m.worktree_limpar_mescladas({ n: limpar.length, tamanho: fmtBytes(sumSize(limpar)) })} />
                   </View>
                 ) : null}
                 {principais.map((w) => <Linha key={w.path} w={w} serverId={server.id} onPick={setAberta} />)}

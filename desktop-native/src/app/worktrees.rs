@@ -830,6 +830,10 @@ impl Hangar {
 
     fn render_worktree_repo(&self, repo: &WorktreeRepo, visible: Vec<&WorktreeStatus>, narrowed: bool, now: f64, cx: &mut Context<Self>) -> Div {
         let (deletable, _) = merged_batch(&repo.worktrees);
+        // O botão conta as prontas, como o contador; sem prontas, o lote (mescladas com arquivos) ainda abre por ele.
+        let ready_list: Vec<&WorktreeStatus> = repo.worktrees.iter().filter(|w| ready(w)).collect();
+        let (clean_n, clean_size) = if ready_list.is_empty() { (deletable.len(), sum_label(&deletable)) }
+            else { (ready_list.len(), sum_label(ready_list.iter().copied())) };
         let deleting = self.worktrees.deleting;
         let main = repo.worktrees.iter().find_map(|w| w.main_branch.clone());
         let path_line = match &main {
@@ -849,7 +853,7 @@ impl Hangar {
                 .label(tr_shared("worktree_nova", &[]))
                 .on_click(cx.listener(move |this, _, window, cx| this.open_create(repo_new.clone(), window, cx))))
             .when(!deletable.is_empty(), |el| el.child(Button::new(SharedString::from(format!("worktrees-clean-{}", repo.repo))).outline().small()
-                .label(tr_shared("worktree_limpar_mescladas", &[("n", &deletable.len().to_string()), ("tamanho", &sum_label(&deletable))]))
+                .label(tr_shared("worktree_limpar_mescladas", &[("n", &clean_n.to_string()), ("tamanho", &clean_size)]))
                 .loading(deleting).disabled(deleting)
                 .on_click(cx.listener(move |this, _, window, cx| this.open_batch(&repo_batch, window, cx)))));
         let (agents, mains): (Vec<&WorktreeStatus>, Vec<&WorktreeStatus>) = visible.into_iter().partition(|w| is_agent(w));
