@@ -6,7 +6,7 @@ import { mount, unmount } from 'svelte';
 import {
   configureApi, getSessionPlanPreview, getPermissionModes, getRunners, getSubagents, getOrqGrupo,
   sendInput, pressPluginButton, uploadUrl, relimparDitado, readFile,
-  definirProtegido, registrarFalha, _limparEsfriamentoParaTestes,
+  definirProtegido, definirSemPrazo, registrarFalha, _limparEsfriamentoParaTestes,
 } from '@hangar/core';
 import { getActiveId, getRouteBaseUrl, getToken, selectServer, type Server } from './auth';
 import { sessionServerFor } from './sessionServer';
@@ -25,6 +25,7 @@ beforeEach(() => {
   onUnauthorized.mockReset();
   _limparEsfriamentoParaTestes();
   definirProtegido(() => false);
+  definirSemPrazo(() => false);
   localStorage.setItem('cp_servers', JSON.stringify([PRINCIPAL, NOTEBOOK]));
   localStorage.setItem('cp_active', 'notebook');
   // O mesmo ambiente do main.ts: o caminho sem servidor lê o ativo NA HORA da chamada.
@@ -74,13 +75,16 @@ describe('servidor da sessão fixado no chat', () => {
   });
 
   // Erro aqui quebrava o chat: o servidor é lido em `$derived`, `$effect` e no reconectar do SSE.
-  it('dono que saiu da lista segue no último endereço dele, nunca no ativo', async () => {
+  it('dono que saiu da lista recusa a chamada sem ir ao ativo nem levar o token antigo', async () => {
     const sessao = sessionServerFor('notebook');
     localStorage.setItem('cp_servers', JSON.stringify([PRINCIPAL]));
     selectServer('principal');
-    expect(sessao()).toEqual(NOTEBOOK);
-    await getRunners('hangar', sessao());
-    expect(chamadas[0].url).toBe('http://n.local:8765/api/sessions/hangar/runners');
+    expect(() => sessao()).not.toThrow();
+    await expect(getRunners('hangar', sessao())).rejects.toMatchObject({ status: 410, code: 'servidor_nao_existe' });
+    expect(chamadas).toEqual([]);
+    // Já fora da lista quando o chat abriu: o mesmo, nunca o ativo.
+    await expect(sendInput('hangar', 'oi', sessionServerFor('sumido')())).rejects.toMatchObject({ status: 410 });
+    expect(chamadas).toEqual([]);
     expect(sessionServerFor('')()).toBeUndefined();
   });
 
@@ -98,9 +102,17 @@ describe('servidor da sessão fixado no chat', () => {
 
   it('prazo gravado antes de o chat abrir não barra a máquina do chat', async () => {
     registrarFalha('notebook');
-    definirProtegido((id) => id === 'notebook');
+    definirSemPrazo((id) => id === 'notebook');
     await getRunners('hangar', NOTEBOOK);
     expect(chamadas).toHaveLength(1);
+  });
+
+  // Página em segundo plano protege contra marcar falha, mas não libera máquina em espera.
+  it('protegida só por estar em segundo plano continua esperando o prazo', async () => {
+    registrarFalha('notebook');
+    definirProtegido(() => true);
+    await expect(getRunners('hangar', NOTEBOOK)).rejects.toThrow();
+    expect(chamadas).toEqual([]);
   });
 
   it('limpeza do ditado vai à máquina que transcreveu', async () => {

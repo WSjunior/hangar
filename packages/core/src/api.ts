@@ -8,7 +8,7 @@ import { basename } from './format';
 import { mensagemDeErro, formataErro, type EnvelopeErro } from './errosApi';
 // diag NÃO importa api (ele usa `fetch` direto) — é o que mantém esta dependência de mão única.
 import { registrar as registrarDiag, novoReq } from './diag';
-import { estaProtegido, retryAfterMs, registrarFalha, registrarSucesso } from './esfriamento';
+import { dispensaPrazo, retryAfterMs, registrarFalha, registrarSucesso } from './esfriamento';
 import {
   inviteAllows, SharePrerequisiteError, tailscaleEnableUrl, type ShareCreated, type ShareInfo, type SharePrereqs,
 } from './share';
@@ -268,6 +268,9 @@ async function apiFetchRes(path: string, init?: RequestInit, server?: Server, pr
   if (convite && !inviteAllows(path)) {
     throw Object.assign(new Error(m.erro_fora_do_convite()), { status: 403, code: 'erro_fora_do_convite' });
   }
+  if (server?.removed) {
+    throw Object.assign(new Error(m.servidor_nao_existe()), { status: 410, code: 'servidor_nao_existe' });
+  }
   const url = `${base}${path}`;
   const t0 = Date.now();
   // Id do pedido: vai no cabeçalho e na linha do diário dos DOIS lados, pra quem analisa seguir a
@@ -275,7 +278,7 @@ async function apiFetchRes(path: string, init?: RequestInit, server?: Server, pr
   const req = novoReq();
   // Durante a espera, só uma verificação explícita pode antecipar a nova tentativa. O ativo e a
   // máquina de um chat aberto não esperam: o prazo pode ter sido gravado antes de o chat abrir.
-  if (server && retryAfterMs(server.id) > 0 && !probe && !estaProtegido(server.id)) {
+  if (server && retryAfterMs(server.id) > 0 && !probe && !dispensaPrazo(server.id)) {
     throw new Error(m.esfriamento_servidor_desligado({ servidor: server.label },
                                                      { locale: localeAtual() }));
   }

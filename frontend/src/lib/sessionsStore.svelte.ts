@@ -15,7 +15,7 @@ import { getIdentificador } from './peers';
 import { ouvirFechamentoNav, podarNavMortos } from './navegadorPanel.svelte';
 import { aggregateSessions, epocasDeRecriacao, jsonlDaSessao, sweepHidden, type Slot, type Aggregate, type Epocas } from '@hangar/core';
 import { hasOpenChat } from './sessionServer';
-import { avisarSemArmazem, definirArmazem, definirProtegido, estaDesligado, esquecerServidor, onServerRecovered, registrarFalha, registrarSucesso, respondeuRecentemente, retentarAgora, retryAfterMs } from '@hangar/core';
+import { avisarSemArmazem, definirArmazem, definirProtegido, definirSemPrazo, estaDesligado, esquecerServidor, onServerRecovered, registrarFalha, registrarSucesso, respondeuRecentemente, retentarAgora, retryAfterMs } from '@hangar/core';
 
 function createSessionsStore() {
   let servers = $state<Server[]>([]);
@@ -68,6 +68,7 @@ function createSessionsStore() {
     }
   }
   definirProtegido((id) => leavingPage || emSegundoPlano || intocavel(id));
+  definirSemPrazo(intocavel);
   // O core não toca DOM: o `localStorage` (que faz a marca sobreviver ao recarregamento do PWA)
   // entra por aqui. Indisponível (modo privado), fica só em memória — o core avisa no diário.
   try {

@@ -10,15 +10,13 @@ const ID_KEY = Symbol('sessionServerId');
 export type SessionServer = () => Server | undefined;
 
 // Resolve na hora da chamada: token ou endereço atualizados valem já. Desligada inclusive, como o
-// ativo (`getActiveId` também a enxerga). Removida com o chat aberto, segue no último endereço
-// conhecido DAQUELA máquina: cair no ativo mandaria a chamada a outra máquina sem ninguém ver, e
-// um erro aqui quebrava o chat, que lê o servidor em `$derived`, `$effect` e no reconectar do SSE.
+// ativo (`getActiveId` também a enxerga). Fora da lista, um marcador sem endereço nem token que o
+// core recusa em toda chamada: cair no ativo mandaria a chamada a outra máquina sem ninguém ver, e
+// lançar aqui quebrava o chat, que lê o servidor em `$derived`, `$effect` e no reconectar do SSE.
 export function sessionServerFor(id: string): SessionServer {
-  let last = id ? listAllServers().find((x) => x.id === id) : undefined;
   return () => {
     if (!id) return undefined;
-    last = listAllServers().find((x) => x.id === id) ?? last;
-    return last;
+    return listAllServers().find((x) => x.id === id) ?? { id, label: id, baseUrl: '', token: '', removed: true };
   };
 }
 

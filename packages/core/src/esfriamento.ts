@@ -34,9 +34,16 @@ export function definirProtegido(fn: (id: string) => boolean): void {
   protegido = fn;
 }
 
-/** Protegido (o ativo, o de chat aberto, a página saindo) não espera prazo gravado antes. */
-export function estaProtegido(id: string): boolean {
-  return protegido(id);
+// O ativo e a máquina de um chat aberto: chamada a eles não espera prazo gravado antes. Mais
+// estreito que `protegido`, que também vale com a página saindo ou em segundo plano.
+let semPrazo: (id: string) => boolean = () => false;
+
+export function definirSemPrazo(fn: (id: string) => boolean): void {
+  semPrazo = fn;
+}
+
+export function dispensaPrazo(id: string): boolean {
+  return semPrazo(id);
 }
 
 /** O pedaço de `Storage` que este módulo usa. O core não toca DOM: quem tem `localStorage` (o web)

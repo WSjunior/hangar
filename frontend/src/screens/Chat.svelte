@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy, tick } from 'svelte';
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { ctxPanel, reclamparLargura } from '../lib/ctxPanel.svelte';
   import NavBar from '../components/NavBar.svelte';
   import Spinner from '../components/Spinner.svelte';
@@ -203,7 +203,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // de este Chat desmontar, e a cauda desta sessão seria gravada sob a chave da OUTRA máquina.
   // Mesmo padrão do `filesChave` abaixo, e pelo mesmo motivo.
   // Aninhado (sessão do par no modal), a máquina é a do chat de fora, não a do ativo do momento.
-  const servidorDaCauda = (nested ? parentSessionServerId() : undefined) ?? getActiveId() ?? '';
+  const servidorDaCauda = (untrack(() => nested) ? parentSessionServerId() : undefined) ?? getActiveId() ?? '';
   // Servidor DESTA sessão, fixado na entrada pelo mesmo motivo: os terminais No Hangar e as perguntas
   // são consultados por servidor, e o ativo pode mudar sob um Chat aberto por overlay.
   const chatServerId = servidorDaCauda;
@@ -2004,6 +2004,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     // Codex junto: sem thread o /events 404a igual, e o EventSource fecha em CLOSED — a faixa
     // "o servidor recusou" aparecia sobre uma sessao que so ainda nao comecou.
     if (kimiPreNascimento || codexPreThread) return;
+    // Servidor que saiu da lista não tem endereço: sem ele o stream iria à origem da página.
+    if (sessionServer()?.removed) { sseRecusado = true; return; }
     const destino = sessionServer()?.baseUrl ?? getBaseUrl();
     const inicio = Date.now();
     const req = diag.novoReq();
@@ -2403,7 +2405,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       recusa = !rows.some((s) => s.name === sessionName) || ++sseRecusasSeguidas >= SSE_RECUSAS_MAX;
     } catch (e) {
       const status = (e as Error & { status?: number }).status;
-      recusa = status === 401 || status === 403;
+      // 410: o servidor da sessão saiu da lista.
+      recusa = status === 401 || status === 403 || status === 410;
     }
     if (!alive || es || currentState === 'dead') return;
     if (recusa) sseRecusado = true;
