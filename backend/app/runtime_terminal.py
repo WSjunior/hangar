@@ -304,10 +304,15 @@ def plugin_control(payload, metadata):
     normalized_id = pending['id'] if str(pending['id']).startswith(('perm:', 'ask:')) else 'ask:' + pending['id']
     if normalized_id != request_id:
         return {'disposition':'rejected'}
+    # Pergunta `ask:` corre também no diálogo da TUI: sem resposta pelo plugin, escolhe o teclado.
+    # Permissão segurada pelo plugin não tem menu no terminal; lá a recusa é a resposta.
+    fallback = {'disposition':'rejected' if request_id.startswith('perm:') else 'unavailable'}
+    if payload['control'] == 'select' and not request_id.startswith('perm:'):
+        return fallback
     if 'receipt_v2' not in plugin_bridge.declared_modes(current.name):
-        return {'disposition':'rejected'}
+        return fallback
     if not _plugin_current(current):
-        return {'disposition':'rejected'}
+        return fallback
     if payload['control'] == 'select' and request_id.startswith('perm:'):
         if body.get('option') not in (1,2):
             raise ValueError('opção fora do pedido de permissão')
