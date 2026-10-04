@@ -619,12 +619,23 @@ impl Hangar {
             }
         }).detach();
         cx.defer_in(window, |this, _, cx| this.sync_tray(cx));
+        let tray_owner = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            let Some(this) = tray_owner.upgrade() else { return true };
+            if !this.read(cx).closes_to_tray() { return true; }
+            // Esconder depois do retorno: o Wayland chama este aviso com os callbacks da janela emprestados.
+            let handle = window.window_handle();
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, cx| this.update(cx, |this, cx| this.hide_to_tray(window, cx)));
+            });
+            false
+        });
         // Link `hangar://` desta ou de outra execução: abre o diálogo preenchido e traz a janela para a frente. Cada link entra
         // por um update novo, nunca de dentro de outro update do Hangar (reentrar dá pânico no GPUI).
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(link) = links.recv().await {
                 let alive = this.update_in(cx, |this, window, cx| {
-                    window.activate_window();
+                    this.show_from_tray(window, cx);
                     if !link.is_empty() { this.open_invite_dialog(Some(link), window, cx); }
                 });
                 if alive.is_err() { break; }

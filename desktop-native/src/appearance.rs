@@ -377,6 +377,12 @@ pub fn save_image_name(name: Option<&str>) -> std::io::Result<()> {
 }
 
 /// A raiz escolhida por último em Nova sessão, como o `cp:last-root` do web; falha de disco só faz esquecer. Bloqueantes.
+/// Aviso de "continua na bandeja": `true` só na primeira vez que a janela é escondida neste computador.
+pub fn take_tray_notice() -> bool {
+    let Some(file) = dir().map(|dir| dir.join("tray-notice")) else { return false };
+    !file.exists() && std::fs::write(file, "1").is_ok()
+}
+
 pub fn last_root() -> Option<String> { std::fs::read_to_string(dir()?.join("last-root")).ok().map(|s| s.trim().to_owned()) }
 
 pub fn remember_root(path: &str) {

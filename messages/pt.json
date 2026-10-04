@@ -5295,6 +5295,8 @@
   "native_settings_tray_failed": "O ícone da bandeja não pôde ser criado ({reason}). Fechar a janela encerra o Hangar.",
   "native_tray_open": "Abrir Hangar",
   "native_tray_quit": "Sair",
+  "native_tray_notice_title": "O Hangar continua aberto",
+  "native_tray_notice_body": "A janela foi para a bandeja. Clique no ícone para abrir de novo ou use Sair para encerrar.",
   "native_settings_general_group": "Idioma e moeda",
   "native_settings_style": "Estilo",
   "native_settings_style_hint": "Compacto aplica texto, coluna, ferramentas e barra lateral. Cada opção continua ajustável.",

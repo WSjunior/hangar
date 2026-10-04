@@ -5295,6 +5295,8 @@
   "native_settings_tray_failed": "The tray icon could not be created ({reason}). Closing the window quits Hangar.",
   "native_tray_open": "Open Hangar",
   "native_tray_quit": "Quit",
+  "native_tray_notice_title": "Hangar is still running",
+  "native_tray_notice_body": "The window went to the tray. Click the icon to open it again, or use Quit to close Hangar.",
   "native_settings_general_group": "Language and currency",
   "native_settings_style": "Style",
   "native_settings_style_hint": "Compact applies text, column, tool and sidebar settings. You can still adjust each option.",
