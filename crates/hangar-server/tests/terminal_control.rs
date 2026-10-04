@@ -553,3 +553,9 @@ fn stray_hook_output_outside_a_frame_is_ignored() {
     ]);
     assert!(ControlParser::default().push(b"%end 1 1 0\n").is_err());
 }
+
+#[test]
+fn stray_hook_output_in_another_encoding_is_ignored_too() {
+    let mut parser = ControlParser::default();
+    assert!(parser.push(b"sa\xeddo do hook em latin-1\n%begin 4 9 0\nok\n%end 4 9 0\n").unwrap().len() == 1);
+}
