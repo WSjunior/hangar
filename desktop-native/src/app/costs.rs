@@ -1615,7 +1615,7 @@ fn mini_kpi(label: String, value: String, color: Option<Hsla>) -> Div {
 }
 
 /// Barra de 100% com uma fatia por valor positivo.
-fn stack_bar(parts: Vec<(f64, Hsla)>) -> Div {
+pub(super) fn stack_bar(parts: Vec<(f64, Hsla)>) -> Div {
     let total: f64 = parts.iter().map(|p| p.0.max(0.)).sum();
     div().h(px(28.)).w_full().flex().gap(px(2.)).rounded(px(8.)).overflow_hidden()
         .children(parts.into_iter().filter(|p| p.0 > 0. && total > 0.).map(|(v, c)| div().h_full().bg(c).flex_basis(px(0.)).flex_grow(v as f32)))

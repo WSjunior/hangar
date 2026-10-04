@@ -9567,7 +9567,8 @@ def _registered_in_allowed_repo(path: str) -> bool:
 
 
 @app.get("/api/worktrees", dependencies=[Depends(require_auth)])
-async def worktrees_list():
+async def worktrees_list(repo: str | None = None, sizes: bool = True):
+    """`repo`: só as desse repositório; `sizes=false`: não agenda medir o espaço (menu de branch)."""
     _no_guest()
     sessions = await asyncio.to_thread(registry.list)
     corte = time.time() - 30 * 86400
@@ -9575,7 +9576,9 @@ async def worktrees_list():
     cwds = [s.cwd for s in sessions] + [f.cwd for f in folders if f.cwd and f.mtime >= corte]
     roots = allowed_roots()
     allowed = [c for c in cwds if c and any(Path(os.path.realpath(c)).is_relative_to(r) for r in roots)]
-    return {"repos": await asyncio.to_thread(worktrees.list_all, allowed, sessions, roots)}
+    if repo is not None:
+        repo = await asyncio.to_thread(_allowed_repo, repo)
+    return {"repos": await asyncio.to_thread(worktrees.list_all, allowed, sessions, roots, repo, sizes)}
 
 
 def _allowed_worktree(path: str) -> str:
@@ -9652,6 +9655,37 @@ async def worktrees_delete_merged(body: WorktreeDeleteMergedBody):
         raise HTTPException(exc.status, detail=exc.detail) from None
     finally:   # as que saíram antes do erro também mudam a lista
         await asyncio.to_thread(_invalidate_lists)
+
+
+class WorktreeCreateBody(_StrictBody):
+    repo: str = Field(min_length=1)
+    branch: str = Field(min_length=1)
+    # Sufixo da pasta: a worktree nasce em `<repo>-<name>`, como as das sessões.
+    name: str = Field(min_length=1)
+    new_branch: bool = Field(default=False, strict=True)
+    base: str | None = None
+    fetch: bool = Field(default=False, strict=True)
+
+
+@app.post("/api/worktrees/create", dependencies=[Depends(require_auth)])
+async def worktrees_create(body: WorktreeCreateBody):
+    """Só a worktree, sem sessão; com sessão, o caminho continua sendo o `POST /api/sessions`."""
+    _no_guest()
+    name = sanitize_session_name(body.name)
+    if not name:
+        raise HTTPException(400, detail="nome de pasta inválido")
+    try:
+        root = await asyncio.to_thread(_allowed_scan_root, body.repo)
+        if body.fetch:
+            await asyncio.to_thread(worktrees.fetch, body.repo)
+        path, created = await asyncio.to_thread(create_worktree, body.repo, body.branch, name, root,
+                                                new_branch=body.new_branch, base=body.base)
+    except (FsError, GitError) as exc:
+        raise HTTPException(exc.status, detail=exc.detail) from None
+    if not created:
+        raise HTTPException(409, detail="essa branch já é a da pasta principal")
+    await asyncio.to_thread(_invalidate_lists)
+    return {"path": path}
 
 
 # Git da pasta escolhida na tela de nova conversa: a mesma fronteira do seletor de pastas
