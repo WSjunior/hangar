@@ -2063,18 +2063,18 @@ class SessionRegistry:
             cmd = tmux.join_cmd([*protected_prefix, "/bin/sh", "-c", cmd])
         diag.registrar("sessao.criar_etapa", sessao=name, provider=provider, etapa="criar_terminal")
         self._forget(name)
+        # Sessao NOVA = sid novo = transcript fresco. A fila duravel e keyed pelo NOME (sobrevive ao
+        # fim da sessao antiga), entao entradas remanescentes de uma sessao morta de mesmo nome
+        # fantasmariam aqui via merged_history. Limpa ANTES do pane: depois dele o runtime ja adota
+        # a sessao nova, e a limpeza esbarrava na posse em transferencia.
+        PromptQueue(name).clear()
         env_pane = _env_sessao(subagent_model, jev, provider, nome=name)
         if not tmux.new_session(name, cwd, cmd, config_dir, provider=provider, **env_pane):
             diag.registrar("sessao.criar_recusada", "erro", sessao=name, provider=provider,
                            detalhe="terminal_nao_criado")
             raise ValueError("falha ao criar sessao no tmux")
         diag.registrar("sessao.criar_etapa", sessao=name, provider=provider, etapa="limpar_estado_anterior")
-        # Sessao NOVA = sid novo = transcript fresco. A fila duravel e keyed pelo NOME (sobrevive ao
-        # fim da sessao antiga), entao entradas remanescentes de uma sessao morta de mesmo nome
-        # fantasmariam aqui via merged_history. Limpa igual o /clear faz. Seguro: a sessao nova ainda
-        # nem aceitou input, nao ha fila legitima a preservar.
-        PromptQueue(name).clear()
-        # Mesmo motivo, pro vinculo 'then' (feature #12): nome reusado nao deve herdar um encadeamento
+        # Mesmo motivo da fila, pro vinculo 'then' (feature #12): nome reusado nao deve herdar um encadeamento
         # de uma sessao antiga e ja morta.
         ThenLink(name).clear()
         # E pro PAREAMENTO, pelo mesmo motivo: o kill() ja tira a sessao do grupo, mas quem morre
