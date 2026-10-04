@@ -536,11 +536,16 @@ class RuntimeCoordinator:
         error = (slot.view or {}).get("error")
         if slot.phase != Phase.Rust or slot.cache_valid or not error:
             return
+        from app import diag
         # O detach recupera a fila marcando o que estava em voo como incerto: nada é redigitado.
-        await self.detach(name)
+        try:
+            await self.detach(name)
+        except Exception as exc:
+            diag.registrar("runtime.rust_failed_fallback", "erro", sessao=name, codigo=str(error)[:60],
+                           etapa="detach", detalhe=type(exc).__name__)
+            raise
         with slot.guard:
             slot.rust_refused = slot.binding.generation
-        from app import diag
         diag.registrar("runtime.rust_failed_fallback", "erro", sessao=name, codigo=str(error)[:60])
 
     async def op(self, name, command, operation_id):
@@ -643,9 +648,15 @@ class RuntimeCoordinator:
             with slot.guard:
                 slot.phase = Phase.RecoveringPython
             await self._wait_active(slot)
-            reply = await self._rpc(slot.binding.descriptor(), {"kind": "detach"}, uuid.uuid4().hex)
-            if reply.get("detached") is not True:
-                raise RuntimeError("Rust não confirmou a liberação da sessão")
+            try:
+                reply = await self._rpc(slot.binding.descriptor(), {"kind": "detach"}, uuid.uuid4().hex)
+                if reply.get("detached") is not True:
+                    raise RuntimeError("Rust não confirmou a liberação da sessão")
+            except BaseException:
+                # O Rust não soltou: ele continua dono, e a sessão não fica presa em transferência.
+                with slot.guard:
+                    slot.phase = Phase.Rust
+                raise
             await self._restore(slot)
 
     async def recover(self, name, confirmed_dead: bool):
