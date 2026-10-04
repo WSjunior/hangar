@@ -338,6 +338,24 @@ impl Collector {
         Ok((usage, tokens))
     }
 
+    /// `read_usage` sem materializar o uso: `start` recebe os tokens antes da primeira linha, e
+    /// as linhas chegam na mesma ordem, com a conta. A tarifa fica travada até o fim.
+    pub fn fold_usage<B: Clone>(&self, since: Option<&str>, start: impl FnOnce(&[UsageRow], &Pricing) -> B,
+                                visit: &mut dyn FnMut(&mut B, &UsoLinha, &str, &Pricing)) -> Result<B, CollectError> {
+        let active = self.active_scopes()?; let index = self.index()?;
+        let pricing = self.pricing.lock().unwrap();
+        let mut tokens = Vec::new();
+        for scope in &active.claude { tokens.extend(self.claude_rows(scope, since, true, &pricing)?); }
+        let mut state = start(&tokens, &pricing);
+        drop(tokens);
+        let scopes = active.claude.iter().map(|s| (claude_key(s), &s.account))
+            .chain(active.codex.iter().map(|s| (s.account.clone(), &s.account)));
+        for (key, account) in scopes {
+            state = index.fold_usage(&key, since, state, &mut |b, row| visit(b, &row, account, &pricing))?;
+        }
+        Ok(state)
+    }
+
     pub fn index(&self) -> Result<&Index, CollectError> {
         if let Some(index) = self.index.get() { return Ok(index); }
         // Construir o estado das rotas não deve tocar o índice de produção nos testes.

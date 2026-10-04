@@ -2,6 +2,7 @@
 
 #[tokio::main]
 async fn main() {
+    hangar_server::tune_allocator();
     let cfg = match hangar_server::config::Config::from_env() {
         Ok(cfg) => cfg,
         Err(e) => {

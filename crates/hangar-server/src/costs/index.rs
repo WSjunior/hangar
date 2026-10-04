@@ -7,7 +7,7 @@ use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, pa
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
 use std::fs::{self, File, Metadata};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, atomic::{AtomicU64, AtomicUsize, Ordering}, mpsc};
@@ -17,7 +17,7 @@ pub const SCHEMA: u32 = 1;
 pub const FILE_NAME: &str = "custos-rust.sqlite3";
 const TAIL_BYTES: u64 = 64;
 const BATCH_TIME: Duration = Duration::from_secs(1);
-const READ_WINDOW: usize = 8;
+const READ_WINDOW: usize = 64;
 const BATCH_ROWS: usize = 2048;
 const COST_FIELDS: &str = "ts, source, provider, model, project, session_id, input, output, cache_write, cache_read, subagente, account_id, codex_long_context, cache_write_1h, fast, regravado, regravado_1h";
 const USAGE_FIELDS: &str = "dia, cwd, model, tipo, nome, plugin, detalhe, origem, chamadas, ctx_chars, tokens_est, input, output, cache_write, cache_read, cache_write_1h, fast, ocupados, respostas, ocupados_eq, fonte, subagente, session_id";
@@ -276,7 +276,7 @@ impl Index {
 
     pub fn sync<F: Fold>(
         &self, scope: &str, files: &[PathBuf], new_fold: &(dyn Fn(&Path) -> F + Sync),
-        version: &str, areas_sig: &str, redo_areas: &dyn Fn(&AreaEntries) -> Vec<UsoLinha>,
+        version: &str, areas_sig: &str, redo_areas: &(dyn Fn(&AreaEntries) -> Vec<UsoLinha> + Sync),
         progress: &Progress,
     ) -> Result<bool, IndexError> {
         progress.set(scope, 0, files.len());
@@ -291,7 +291,7 @@ impl Index {
 
     fn sync_inner<F: Fold>(
         &self, scope: &str, files: &[PathBuf], new_fold: &(dyn Fn(&Path) -> F + Sync),
-        version: &str, areas_sig: &str, redo_areas: &dyn Fn(&AreaEntries) -> Vec<UsoLinha>,
+        version: &str, areas_sig: &str, redo_areas: &(dyn Fn(&AreaEntries) -> Vec<UsoLinha> + Sync),
         progress: &Progress,
     ) -> Result<bool, IndexError> {
         let mut conn = self.connect()?;
@@ -358,7 +358,8 @@ impl Index {
                     let sender = sender.as_ref().unwrap().clone();
                     let version_ref = &version;
                     rayon_scope.spawn(move |_| {
-                        let read = read_new(&job.path, &job.fingerprint, job.record.as_ref(), new_fold, version_ref);
+                        let read = read_new(&job.path, &job.fingerprint, job.record.as_ref(), new_fold, version_ref)
+                            .map(|read| read.with_area_rows(redo_areas));
                         job.record = None;
                         let _ = sender.send((order, job, read));
                     });
@@ -387,13 +388,13 @@ impl Index {
                     next += 1;
                     // Resultados completos não devem acumular até o próximo segundo em arquivos densos.
                     if pending.len() >= READ_WINDOW || pending_rows >= BATCH_ROWS {
-                        write_batch(&mut conn, &mut pending, scope, &version, areas_sig, redo_areas, &self.generation)?;
+                        write_batch(&mut conn, &mut pending, scope, &version, areas_sig, &self.generation)?;
                         pending_rows = 0;
                         batch_started = Instant::now();
                     }
                 }
                 if batch_started.elapsed() >= BATCH_TIME {
-                    write_batch(&mut conn, &mut pending, scope, &version, areas_sig, redo_areas, &self.generation)?;
+                    write_batch(&mut conn, &mut pending, scope, &version, areas_sig, &self.generation)?;
                     pending_rows = 0;
                     batch_started = Instant::now();
                 }
@@ -401,7 +402,7 @@ impl Index {
             let batch_before = conn.total_changes();
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             for (job, read) in pending {
-                write_file(&tx, &job, scope, &version, read, false, areas_sig, redo_areas)?;
+                write_file(&tx, &job, scope, &version, read, false, areas_sig)?;
             }
             for record in known.values() { delete_file(&tx, record.id)?; }
             reader_panicked |= redo_saved_areas(&tx, scope, areas_sig, redo_areas)?;
@@ -435,10 +436,11 @@ impl Index {
                 return Ok(record.id);
             }
             let read = read_new(path, &fingerprint, record.as_ref(), new_fold, &version)
-                .map_err(|error| match error { ReadError::Fold => IndexError::ReaderPanic, _ => IndexError::NoDisk })?;
+                .map_err(|error| match error { ReadError::Fold => IndexError::ReaderPanic, _ => IndexError::NoDisk })?
+                .with_area_rows(redo_areas);
             let job = ReadJob { position: 0, path: path.to_owned(), fingerprint, record };
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let id = write_file(&tx, &job, scope, &version, read, true, areas_sig, redo_areas)?;
+            let id = write_file(&tx, &job, scope, &version, read, true, areas_sig)?;
             tx.commit()?;
             self.changed();
             Ok(id)
@@ -523,19 +525,42 @@ impl Index {
         output.reserve_exact(count);
         {
             let mut stmt = tx.prepare(&format!("SELECT {USAGE_FIELDS} FROM uso WHERE {filter} ORDER BY rowid"))?;
-            let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), |r| Ok(UsoLinha {
-                dia: r.get(0)?, cwd: r.get(1)?, model: r.get(2)?, tipo: r.get(3)?, nome: r.get(4)?,
-                plugin: r.get(5)?, detalhe: r.get(6)?, origem: r.get(7)?, chamadas: r.get(8)?,
-                ctx_chars: r.get(9)?, tokens_est: r.get(10)?, input: r.get(11)?, output: r.get(12)?,
-                cache_write: r.get(13)?, cache_read: r.get(14)?, cache_write_1h: r.get(15)?,
-                fast: r.get(16)?, ocupados: r.get(17)?, respostas: r.get(18)?, ocupados_eq: r.get(19)?,
-                fonte: r.get(20)?, subagente: r.get(21)?, session_id: r.get(22)?,
-            }))?;
+            let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), usage_row)?;
             for row in rows { output.push(decorate(row?)); }
         }
         tx.commit()?;
         Ok(())
     }
+
+    /// Entrega o uso na ordem de `read_usage` sem materializar as linhas. Cada tentativa parte de
+    /// uma cópia de `state`: a releitura após reconstruir o índice não soma linhas em dobro.
+    pub fn fold_usage<B: Clone>(&self, scope: &str, since: Option<&str>, state: B,
+                                visit: &mut dyn FnMut(&mut B, UsoLinha)) -> Result<B, IndexError> {
+        self.with_recovery(|| {
+            let mut attempt = state.clone();
+            self.each_usage(scope, since, &mut |row| visit(&mut attempt, row))?;
+            Ok(attempt)
+        })
+    }
+
+    fn each_usage(&self, scope: &str, since: Option<&str>, visit: &mut dyn FnMut(UsoLinha)) -> Result<(), IndexError> {
+        let conn = self.connect()?;
+        let (filter, values) = filters(Some(scope), since, None);
+        let mut stmt = conn.prepare(&format!("SELECT {USAGE_FIELDS} FROM uso WHERE {filter} ORDER BY rowid"))?;
+        for row in stmt.query_map(rusqlite::params_from_iter(values), usage_row)? { visit(row?); }
+        Ok(())
+    }
+}
+
+fn usage_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UsoLinha> {
+    Ok(UsoLinha {
+        dia: r.get(0)?, cwd: r.get(1)?, model: r.get(2)?, tipo: r.get(3)?, nome: r.get(4)?,
+        plugin: r.get(5)?, detalhe: r.get(6)?, origem: r.get(7)?, chamadas: r.get(8)?,
+        ctx_chars: r.get(9)?, tokens_est: r.get(10)?, input: r.get(11)?, output: r.get(12)?,
+        cache_write: r.get(13)?, cache_read: r.get(14)?, cache_write_1h: r.get(15)?,
+        fast: r.get(16)?, ocupados: r.get(17)?, respostas: r.get(18)?, ocupados_eq: r.get(19)?,
+        fonte: r.get(20)?, subagente: r.get(21)?, session_id: r.get(22)?,
+    })
 }
 
 fn in_pool_scope<'scope, R>(pool: Option<&rayon::ThreadPool>, run: impl FnOnce(&rayon::Scope<'scope>) -> R) -> R {
@@ -649,7 +674,17 @@ struct FileRead {
     state: Vec<u8>,
     output: FoldOutput,
     areas: Option<Vec<u8>>,
+    area_rows: Option<Result<Vec<UsoLinha>, ()>>,
     size: i64,
+}
+
+impl FileRead {
+    // As áreas saem nas threads de leitura; o pânico continua sendo erro do escritor.
+    fn with_area_rows(mut self, redo_areas: &dyn Fn(&AreaEntries) -> Vec<UsoLinha>) -> Self {
+        self.area_rows = self.output.areas.take()
+            .map(|areas| catch_unwind(AssertUnwindSafe(|| redo_areas(&areas))).map_err(|_| ()));
+        self
+    }
 }
 
 enum ReadError { Io, Codec, Fold }
@@ -659,13 +694,17 @@ impl From<std::io::Error> for ReadError {
 }
 
 fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, ReadError> {
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(1));
-    serde_json::to_writer(&mut encoder, value).map_err(|_| ReadError::Codec)?;
-    Ok(encoder.finish()?)
+    // Cada write no encoder zera o buffer de saída inteiro; o serde_json escreve token a token.
+    let mut writer = BufWriter::with_capacity(64 * 1024, ZlibEncoder::new(Vec::new(), Compression::new(1)));
+    serde_json::to_writer(&mut writer, value).map_err(|_| ReadError::Codec)?;
+    Ok(writer.into_inner().map_err(|_| ReadError::Codec)?.finish()?)
 }
 
 fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ReadError> {
-    serde_json::from_reader(ZlibDecoder::new(bytes)).map_err(|_| ReadError::Codec)
+    // from_reader lê byte a byte; descomprimir antes evita uma chamada ao zlib por byte.
+    let mut json = Vec::new();
+    ZlibDecoder::new(bytes).read_to_end(&mut json).map_err(|_| ReadError::Codec)?;
+    serde_json::from_slice(&json).map_err(|_| ReadError::Codec)
 }
 
 fn read_new<F: Fold>(path: &Path, fingerprint: &Fingerprint, record: Option<&FileRecord>, new_fold: &dyn Fn(&Path) -> F, version: &str) -> Result<FileRead, ReadError> {
@@ -727,20 +766,20 @@ fn read_file<F: Fold>(path: &Path, fingerprint: &Fingerprint, record: Option<&Fi
     if !fragment.is_empty() { fold.line(&fragment); }
     let output = fold.close();
     let areas = output.areas.as_ref().map(encode).transpose()?;
-    Ok(FileRead { offset, tail, state, output, areas, size: offset + fragment.len() as i64 })
+    Ok(FileRead { offset, tail, state, output, areas, area_rows: None, size: offset + fragment.len() as i64 })
 }
 
-fn write_batch(conn: &mut Connection, pending: &mut Vec<(ReadJob, FileRead)>, scope: &str, version: &str, areas_sig: &str, redo_areas: &dyn Fn(&AreaEntries) -> Vec<UsoLinha>, generation: &AtomicU64) -> Result<(), IndexError> {
+fn write_batch(conn: &mut Connection, pending: &mut Vec<(ReadJob, FileRead)>, scope: &str, version: &str, areas_sig: &str, generation: &AtomicU64) -> Result<(), IndexError> {
     if pending.is_empty() { return Ok(()); }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    for (job, read) in pending.drain(..) { write_file(&tx, &job, scope, version, read, false, areas_sig, redo_areas)?; }
+    for (job, read) in pending.drain(..) { write_file(&tx, &job, scope, version, read, false, areas_sig)?; }
     tx.commit()?;
     // O erro de um lote posterior não pode ocultar dados já confirmados deste lote.
     generation.fetch_add(1, Ordering::Release);
     Ok(())
 }
 
-fn write_file(conn: &Connection, job: &ReadJob, scope: &str, version: &str, read: FileRead, keep_scope: bool, areas_sig: &str, redo_areas: &dyn Fn(&AreaEntries) -> Vec<UsoLinha>) -> Result<i64, IndexError> {
+fn write_file(conn: &Connection, job: &ReadJob, scope: &str, version: &str, read: FileRead, keep_scope: bool, areas_sig: &str) -> Result<i64, IndexError> {
     let f = &job.fingerprint;
     let id = conn.query_row(
         "INSERT INTO files(scope, versao, dev, ino, size, mtime_ns, offset, cauda, estado, areas, areas_sig, path)
@@ -760,9 +799,8 @@ fn write_file(conn: &Connection, job: &ReadJob, scope: &str, version: &str, read
             row.account_id, row.codex_long_context, row.cache_write_1h, row.fast, row.regravado, row.regravado_1h])?;
     }
     write_usage(conn, id, read.output.usage)?;
-    if let Some(areas) = read.output.areas {
-        let rows = catch_unwind(AssertUnwindSafe(|| redo_areas(&areas))).map_err(|_| IndexError::ReaderPanic)?;
-        write_usage(conn, id, rows)?;
+    if let Some(rows) = read.area_rows {
+        write_usage(conn, id, rows.map_err(|_| IndexError::ReaderPanic)?)?;
     }
     Ok(id)
 }

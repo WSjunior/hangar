@@ -336,8 +336,70 @@ pub fn new_fold(path: &Path) -> CodexFold {
     CodexFold { responses: Responses::new(path.file_stem().unwrap_or_default().to_string_lossy().into()), usage: Usage::default() }
 }
 
+#[derive(Deserialize)]
+struct LinePeek<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Option<&'a str>,
+    #[serde(borrow)]
+    timestamp: Option<&'a str>,
+    #[serde(borrow)]
+    payload: Option<PayloadKind<'a>>,
+}
+
+/// O `type` do payload, exigindo objeto como o `as_object` dos leitores.
+struct PayloadKind<'a>(Option<&'a str>);
+
+impl<'de: 'a, 'a> Deserialize<'de> for PayloadKind<'a> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor<'a>(std::marker::PhantomData<&'a ()>);
+        impl<'de: 'a, 'a> serde::de::Visitor<'de> for Visitor<'a> {
+            type Value = PayloadKind<'a>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { f.write_str("objeto") }
+            fn visit_map<M: serde::de::MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                let mut kind = None;
+                let mut seen = false;
+                while let Some(key) = map.next_key::<&'de str>()? {
+                    if key == "type" {
+                        // Chave repetida: o Map do serde_json fica com a última, então o caminho completo decide.
+                        if seen { return Err(serde::de::Error::duplicate_field("type")); }
+                        seen = true;
+                        kind = map.next_value::<Option<&'de str>>()?;
+                    } else { map.next_value::<serde::de::IgnoredAny>()?; }
+                }
+                Ok(PayloadKind(kind))
+            }
+        }
+        deserializer.deserialize_map(Visitor(std::marker::PhantomData))
+    }
+}
+
+/// `Some` quando a linha não alimenta nenhum dos dois leitores; traz o dia que o uso ainda registra.
+/// `None` manda a linha para o caminho completo, inclusive em qualquer dúvida de formato.
+fn skippable(raw: &[u8]) -> Option<Option<LocalTs>> {
+    let is_space = |b: &u8| b.is_ascii_whitespace() || *b == b'\x0b';
+    let start = raw.iter().position(|b| !is_space(b))?;
+    let end = raw.iter().rposition(|b| !is_space(b)).map_or(start, |i| i + 1);
+    let text = std::str::from_utf8(&raw[start..end]).ok()?;
+    // O derive de struct também aceita arrays; só objeto vira linha.
+    if !text.starts_with('{') { return None; }
+    let peek = serde_json::from_str::<LinePeek>(text).ok()?;
+    let inner = peek.payload.as_ref().and_then(|p| p.0);
+    let consumed = match peek.kind {
+        Some("session_meta" | "turn_context" | "token_usage_record" | "compacted") => true,
+        Some("event_msg") => inner == Some("token_count"),
+        Some("response_item") => matches!(inner, Some("custom_tool_call" | "custom_tool_call_output" | "function_call")),
+        _ => false,
+    };
+    if consumed { return None; }
+    Some(peek.payload.and(peek.timestamp).and_then(LocalTs::from_iso))
+}
+
 impl Fold for CodexFold {
     fn line(&mut self, raw: &[u8]) {
+        if let Some(when) = skippable(raw) {
+            if let Some(ts) = when { self.usage.accumulator.day = ts.day(); }
+            return;
+        }
         if let Some(d) = parse_obj(raw) { self.responses.record(&d); self.usage.record(&d); }
     }
 

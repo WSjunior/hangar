@@ -194,29 +194,34 @@ pub async fn usage(State(state): State<Arc<AppState>>, ConnectInfo(peer): Connec
         let (origins_generation, origins_map) = origins.recent();
         let since = report_costs::PERIODS.iter().find(|(p, _)| *p == period)
             .map(|(_, n)| LocalTs(now.0 - (n - 1) * 86_400_000_000).day());
-        // A leitura usa Pricing: adquirir a tarifa antes dela travaria o próprio worker.
-        let (usage, tokens) = worker.costs.read_usage(since.as_deref()).map_err(|error| error_code(&error))?;
-        if worker.costs.repo().as_ref() != Some(&repo) { return Err("uso_escopos"); }
-        let pricing = worker.costs.pricing();
         let filter_key = serde_json::to_string(&serde_json::json!([
             ["conta", filters.conta], ["foco", filters.foco], ["modelo", filters.modelo],
             ["plugin", filters.plugin], ["projeto", filters.projeto],
         ])).map_err(|_| "uso_filtros")?;
-        let key = CacheKey {
-            data_version, pricing_generation: pricing.generation(), area_signature: worker.costs.areas().signature().into(), labels: labels.clone(),
-            route: vec!["uso".into(), period.clone(), now.day(),
-                serde_json::to_string(&repo).map_err(|_| "uso_repo")?, origins_generation.to_string(), filter_key],
+        let route = vec!["uso".into(), period.clone(), now.day(),
+            serde_json::to_string(&repo).map_err(|_| "uso_repo")?, origins_generation.to_string(), filter_key];
+        let key = |pricing_generation| CacheKey {
+            data_version, pricing_generation, area_signature: worker.costs.areas().signature().into(),
+            labels: labels.clone(), route: route.clone(),
         };
-        let report = match worker.reports.get::<report_uso::UsoReport>(&key) {
+        // A leitura trava Pricing: segurar a tarifa aqui travaria o próprio worker.
+        let generation = worker.costs.pricing().generation();
+        let report = match worker.reports.get::<report_uso::UsoReport>(&key(generation)) {
             Some(report) => report,
             None => {
-                let report = Arc::new(report_uso::build(&usage, &tokens, &period, now, &filters, Some(&origins_map), &pricing, &|key| {
+                // A chave usa a geração da mesma tarifa que montou o relatório.
+                let (generation, builder) = worker.costs.fold_usage(since.as_deref(),
+                    |tokens, pricing| (pricing.generation(), report_uso::UsoBuilder::new(tokens, &period, now, &filters, Some(&origins_map), pricing)),
+                    &mut |(_, builder): &mut (u64, report_uso::UsoBuilder), row, account, pricing| builder.push(row, account, pricing),
+                ).map_err(|error| error_code(&error))?;
+                if worker.costs.repo().as_ref() != Some(&repo) { return Err("uso_escopos"); }
+                let report = Arc::new(builder.finish(&|key| {
                     labels.iter().find(|(name, _)| name == key).map(|(_, label)| label.clone())
                 }));
-                worker.reports.insert(key, report.clone()); report
+                worker.reports.insert(key(generation), report.clone()); report
             }
         };
-        drop(pricing);
+        if worker.costs.repo().as_ref() != Some(&repo) { return Err("uso_escopos"); }
         let mut report = (*report).clone(); report.usd_brl = worker.fx.usd_brl();
         serde_json::to_vec(&report).map(Prepared::Body).map_err(|_| "uso_json")
     }).await;

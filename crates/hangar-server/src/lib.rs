@@ -72,6 +72,18 @@ fn panic_line(loc: Option<&std::panic::Location<'_>>, thread: Option<&str>) -> S
     format!("pânico em {at} (thread {})", thread.unwrap_or("?"))
 }
 
+/// Fixa o limite de devolução de memória do glibc. Sem isso, o limite cresce sozinho depois de
+/// cada bloco grande liberado e a memória das leituras paralelas do índice de custos fica retida.
+pub fn tune_allocator() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" { fn mallopt(param: i32, value: i32) -> i32; }
+        const M_TRIM_THRESHOLD: i32 = -1;
+        // SAFETY: mallopt só ajusta parâmetros do alocador e pode ser chamada a qualquer momento.
+        unsafe { mallopt(M_TRIM_THRESHOLD, 128 * 1024); }
+    }
+}
+
 /// Troca o hook padrão, que imprime a mensagem no stderr (o Python o herda) mesmo quando o
 /// pânico é capturado. Chamar depois de `init_log`, para a linha sair no mesmo destino.
 pub fn install_panic_hook() {

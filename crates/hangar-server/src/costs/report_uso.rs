@@ -65,6 +65,7 @@ pub struct UsoFilters {
     pub foco: Option<String>,
 }
 
+#[derive(Clone)]
 struct Bucket {
     output: UsoBucket,
     sessions: IndexSet<String>,
@@ -88,7 +89,7 @@ struct Share {
     split: [f64; 4],
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Agent {
     tokens: [i64; 4],
     cost: Share,
@@ -215,41 +216,77 @@ fn filter_values(values: &[String]) -> Vec<String> { values.iter().filter(|s| !s
 pub fn build(uso: &[(UsoLinha, String)], tokens: &[UsageRow], period: &str, now: LocalTs,
              f: &UsoFilters, origins: Option<&IndexMap<String, String>>, pricing: &Pricing,
              label: &dyn Fn(&str) -> Option<String>) -> UsoReport {
-    let accounts = filter_values(&f.conta); let projects = filter_values(&f.projeto);
-    let models = filter_values(&f.modelo); let filters = filter_values(&f.plugin);
-    let focus = f.foco.as_deref().filter(|s| !s.is_empty());
-    let cutoff = report_costs::PERIODS.iter().find(|(p, _)| *p == period)
-        .map(|(_, n)| LocalTs(now.0 - (n - 1) * 86_400_000_000).day());
-    let in_period = |r: &&UsageRow| cutoff.as_ref().is_none_or(|c| r.ts.day() >= *c);
-    let all_agents = agent_costs(tokens.iter().filter(in_period), pricing);
-    let filtered_agents = if accounts.is_empty() && projects.is_empty() { None } else {
-        Some(agent_costs(tokens.iter().filter(in_period).filter(|r|
-            (accounts.is_empty() || r.account_id.as_ref().is_some_and(|a| accounts.contains(a)))
-            && matches_filter(&projects, project(&r.project))), pricing))
-    };
-    let agents = filtered_agents.as_ref().unwrap_or(&all_agents);
-    let mut by_account = Groups::new(); let mut by_project = Groups::new(); let mut by_model = Groups::new();
-    let mut by_kind: IndexMap<String, Groups> = IndexMap::new(); let mut plugins = Groups::new();
-    let mut by_day = Groups::new(); let mut by_area_day = Groups::new(); let mut total = Bucket::default();
-    let mut series = Vec::new();
-    for (t, account) in uso {
-        if cutoff.as_ref().is_some_and(|c| t.dia.is_empty() || t.dia < *c) { continue; }
+    let mut builder = UsoBuilder::new(tokens, period, now, f, origins, pricing);
+    for (t, account) in uso { builder.push(t, account, pricing); }
+    builder.finish(label)
+}
+
+/// O relatório numa passada só: as linhas podem chegar do índice sem ficarem todas em memória.
+#[derive(Clone)]
+pub struct UsoBuilder<'a> {
+    accounts: Vec<String>,
+    projects: Vec<String>,
+    models: Vec<String>,
+    filters: Vec<String>,
+    focus: Option<String>,
+    cutoff: Option<String>,
+    period: String,
+    origins: Option<&'a IndexMap<String, String>>,
+    all_agents: Agents,
+    filtered_agents: Option<Agents>,
+    by_account: Groups,
+    by_project: Groups,
+    by_model: Groups,
+    by_kind: IndexMap<String, Groups>,
+    plugins: Groups,
+    by_day: Groups,
+    by_area_day: Groups,
+    total: Bucket,
+    series: Vec<(UsoLinha, f64, Share)>,
+}
+
+impl<'a> UsoBuilder<'a> {
+    pub fn new(tokens: &[UsageRow], period: &str, now: LocalTs, f: &UsoFilters,
+               origins: Option<&'a IndexMap<String, String>>, pricing: &Pricing) -> Self {
+        let accounts = filter_values(&f.conta); let projects = filter_values(&f.projeto);
+        let cutoff = report_costs::PERIODS.iter().find(|(p, _)| *p == period)
+            .map(|(_, n)| LocalTs(now.0 - (n - 1) * 86_400_000_000).day());
+        let in_period = |r: &&UsageRow| cutoff.as_ref().is_none_or(|c| r.ts.day() >= *c);
+        let all_agents = agent_costs(tokens.iter().filter(in_period), pricing);
+        let filtered_agents = if accounts.is_empty() && projects.is_empty() { None } else {
+            Some(agent_costs(tokens.iter().filter(in_period).filter(|r|
+                (accounts.is_empty() || r.account_id.as_ref().is_some_and(|a| accounts.contains(a)))
+                && matches_filter(&projects, project(&r.project))), pricing))
+        };
+        Self {
+            models: filter_values(&f.modelo), filters: filter_values(&f.plugin),
+            focus: f.foco.clone().filter(|s| !s.is_empty()), accounts, projects, cutoff, period: period.into(),
+            origins, all_agents, filtered_agents, by_account: Groups::new(), by_project: Groups::new(),
+            by_model: Groups::new(), by_kind: IndexMap::new(), plugins: Groups::new(), by_day: Groups::new(),
+            by_area_day: Groups::new(), total: Bucket::default(), series: Vec::new(),
+        }
+    }
+
+    pub fn push(&mut self, t: &UsoLinha, account: &str, pricing: &Pricing) {
+        if self.cutoff.as_ref().is_some_and(|c| t.dia.is_empty() || t.dia < *c) { return; }
         let plugin = if !t.plugin.is_empty() { t.plugin.as_str() }
-            else if t.tipo == "skill" && origins.is_some() { origins.unwrap().get(&t.nome).map_or("@embutida", String::as_str) }
+            else if t.tipo == "skill" && self.origins.is_some() { self.origins.unwrap().get(&t.nome).map_or("@embutida", String::as_str) }
             else if t.tipo == "agente" { prefix(&t.nome) } else { "" };
         let real = if matches!(t.tipo.as_str(), "skill" | "area") { real_cost(t, pricing) } else { Share::default() };
-        let all_share = row_share(t, real, &all_agents);
+        let all_agents = &self.all_agents;
+        let all_share = row_share(t, real, all_agents);
         let row_project = project(&t.cwd);
         let canonical = pricing.canonizar(&t.model); let model = if canonical.is_empty() { "?" } else { &canonical };
-        by_account.entry(account.clone()).or_default().summary(t, all_share, &all_agents, false);
-        by_project.entry(row_project.into()).or_default().summary(t, all_share, &all_agents, false);
-        by_model.entry(model.into()).or_default().summary(t, all_share, &all_agents, false);
-        if !matches_filter(&accounts, account) || !matches_filter(&projects, row_project)
-            || !matches_filter(&models, model) || !matches_filter(&filters, plugin) { continue; }
+        self.by_account.entry(account.into()).or_default().summary(t, all_share, all_agents, false);
+        self.by_project.entry(row_project.into()).or_default().summary(t, all_share, all_agents, false);
+        self.by_model.entry(model.into()).or_default().summary(t, all_share, all_agents, false);
+        if !matches_filter(&self.accounts, account) || !matches_filter(&self.projects, row_project)
+            || !matches_filter(&self.models, model) || !matches_filter(&self.filters, plugin) { return; }
+        let agents = self.filtered_agents.as_ref().unwrap_or(all_agents);
         let share = row_share(t, real, agents);
-        total.summary(t, share, agents, false);
-        if focus.is_none() && !t.dia.is_empty() { by_day.entry(t.dia.clone()).or_default().summary(t, share, agents, false); }
-        let b = by_kind.entry(t.tipo.clone()).or_default().entry(t.nome.clone()).or_default();
+        self.total.summary(t, share, agents, false);
+        if self.focus.is_none() && !t.dia.is_empty() { self.by_day.entry(t.dia.clone()).or_default().summary(t, share, agents, false); }
+        let b = self.by_kind.entry(t.tipo.clone()).or_default().entry(t.nome.clone()).or_default();
         if b.output.plugin.is_empty() { b.output.plugin = plugin.into(); }
         b.session(t); b.output.chamadas += t.chamadas; b.output.ctx_chars += t.ctx_chars; b.estimated += t.tokens_est;
         if matches!(t.origem.as_str(), "voce" | "pedido") { b.output.pedidas += t.chamadas; }
@@ -261,34 +298,40 @@ pub fn build(uso: &[(UsoLinha, String)], tokens: &[UsageRow], period: &str, now:
             if t.tipo == "skill" { b.add_cost(Share { total: 0.0, ..real }); }
         } else if t.tipo == "agente" { b.add_agent(t, agents); }
         if !plugin.is_empty() && matches!(t.tipo.as_str(), "skill" | "contexto" | "agente") {
-            let p = plugins.entry(plugin.into()).or_default(); p.output.plugin = plugin.into(); p.session(t);
+            let p = self.plugins.entry(plugin.into()).or_default(); p.output.plugin = plugin.into(); p.session(t);
             p.output.chamadas += t.chamadas; p.output.ctx_chars += t.ctx_chars;
             p.occupied += t.ocupados; p.equivalent += t.ocupados_eq; p.output.respostas += t.respostas;
             if t.tipo == "skill" { p.add_tokens(usage_tokens(t)); p.add_cost(real); }
             else if t.tipo == "agente" { p.add_agent(t, agents); }
         }
         if t.tipo == "area" && !t.dia.is_empty() {
-            by_area_day.entry(format!("{}|{}", t.dia, t.nome)).or_default().area(t, real.total);
+            self.by_area_day.entry(format!("{}|{}", t.dia, t.nome)).or_default().area(t, real.total);
         }
-        if focus == Some(t.nome.as_str()) { series.push((t, real.total, share)); }
+        if self.focus.as_deref() == Some(t.nome.as_str()) { self.series.push((t.clone(), real.total, share)); }
     }
-    let area_focus = focus.is_some_and(|f| by_kind.get("area").is_some_and(|areas| areas.contains_key(f)));
-    for (t, cost, share) in series {
-        if t.dia.is_empty() { continue; }
-        if area_focus {
-            if t.tipo == "area" { by_day.entry(t.dia.clone()).or_default().area(t, cost); }
-        } else { by_day.entry(t.dia.clone()).or_default().summary(t, share, agents, true); }
-    }
-    let mut area_days = daily(by_area_day);
-    for b in &mut area_days { b.label = b.key.split_once('|').map(|(_, area)| area.to_owned()); }
-    let mut kind = |name: &str| ranked(by_kind.shift_remove(name).unwrap_or_default());
-    UsoReport {
-        totals: total.finish("totals".into()), by_skill: kind("skill"), by_tool: kind("tool"),
-        by_bash: kind("bash"), by_mcp: kind("mcp"), by_agente: kind("agente"), by_contexto: kind("contexto"),
-        by_plugin: ranked(plugins), by_imagem: kind("imagem"), by_area: kind("area"), by_area_dia: area_days,
-        by_conta: dimension(by_account, Some(label)), by_projeto: dimension(by_project, None),
-        by_modelo: dimension(by_model, None), by_day: daily(by_day), conta: accounts, projeto: projects,
-        modelo: models, plugin: filters, foco: focus.map(str::to_owned),
-        applied: Some(Applied { period: period.into() }), usd_brl: None,
+
+    pub fn finish(self, label: &dyn Fn(&str) -> Option<String>) -> UsoReport {
+        let Self { accounts, projects, models, filters, focus, period, all_agents, filtered_agents, by_account,
+            by_project, by_model, mut by_kind, plugins, mut by_day, by_area_day, total, series, .. } = self;
+        let agents = filtered_agents.as_ref().unwrap_or(&all_agents);
+        let area_focus = focus.as_deref().is_some_and(|f| by_kind.get("area").is_some_and(|areas| areas.contains_key(f)));
+        for (t, cost, share) in &series {
+            if t.dia.is_empty() { continue; }
+            if area_focus {
+                if t.tipo == "area" { by_day.entry(t.dia.clone()).or_default().area(t, *cost); }
+            } else { by_day.entry(t.dia.clone()).or_default().summary(t, *share, agents, true); }
+        }
+        let mut area_days = daily(by_area_day);
+        for b in &mut area_days { b.label = b.key.split_once('|').map(|(_, area)| area.to_owned()); }
+        let mut kind = |name: &str| ranked(by_kind.shift_remove(name).unwrap_or_default());
+        UsoReport {
+            totals: total.finish("totals".into()), by_skill: kind("skill"), by_tool: kind("tool"),
+            by_bash: kind("bash"), by_mcp: kind("mcp"), by_agente: kind("agente"), by_contexto: kind("contexto"),
+            by_plugin: ranked(plugins), by_imagem: kind("imagem"), by_area: kind("area"), by_area_dia: area_days,
+            by_conta: dimension(by_account, Some(label)), by_projeto: dimension(by_project, None),
+            by_modelo: dimension(by_model, None), by_day: daily(by_day), conta: accounts, projeto: projects,
+            modelo: models, plugin: filters, foco: focus,
+            applied: Some(Applied { period }), usd_brl: None,
+        }
     }
 }

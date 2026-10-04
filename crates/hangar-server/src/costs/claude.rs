@@ -10,6 +10,7 @@ use indexmap::{IndexMap, IndexSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::Path;
+use std::sync::OnceLock;
 
 pub const VERSION: &str = "claude:12";
 
@@ -72,8 +73,10 @@ impl Fold for ClaudeFold {
     fn line(&mut self, raw: &[u8]) {
         let number = self.number;
         self.number += 1;
-        if ![b"\"usage\"".as_slice(), b"\"user\"", b"\"attachment\"", b"\"compact_boundary\""]
-            .iter().any(|needle| raw.windows(needle.len()).any(|window| window == *needle)) { return; }
+        // Uma só varredura vetorizada no lugar de uma comparação por posição para cada termo.
+        static RELEVANT: OnceLock<regex::bytes::Regex> = OnceLock::new();
+        let relevant = RELEVANT.get_or_init(|| regex::bytes::Regex::new(r#""(?:usage|user|attachment|compact_boundary)""#).unwrap());
+        if !relevant.is_match(raw) { return; }
         let Some(d) = decode(raw) else { return };
         let when = text(&d, "timestamp").and_then(LocalTs::from_iso);
         let msg = d.get("message").and_then(Value::as_object);
