@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Text } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { basename, deleteMergedWorktreesForServer, fetchWorktreesForServer, getWorktreesForServer, type WorktreeRepo } from '@hangar/core';
+import { basename, fetchWorktreesForServer, getWorktreesForServer, mergedWorktreeBatch,
+         type WorktreeRepo, type WorktreeStatus } from '@hangar/core';
 import { Pagina } from '../../src/features/config/Pagina';
 import { PageHeader, Pill } from '../../src/features/config/PageHeader';
 import { SectionCard } from '../../src/features/config/SectionCard';
 import { SettingsRow } from '../../src/features/config/SettingsRow';
 import { InfoNotice } from '../../src/features/config/InfoNotice';
 import { WorktreeSheet } from '../../src/features/worktrees/WorktreeSheet';
-import { dropWorktreeStatus, putWorktreeStatus } from '../../src/features/worktrees/worktreeStatus';
+import { WorktreeBatchSheet, type WorktreeBatch } from '../../src/features/worktrees/WorktreeBatchSheet';
+import { putWorktreeStatus } from '../../src/features/worktrees/worktreeStatus';
 import { toast } from '../../src/ui/Toast';
 import { useServers } from '../../src/stores/servers';
 import * as m from '../../src/paraglide/messages';
@@ -25,7 +27,8 @@ export default function Worktrees() {
   const [erro, setErro] = useState('');
   const [atualizando, setAtualizando] = useState(false);
   const [aberta, setAberta] = useState<string | null>(null);
-  const apagandoJuntadas = useRef(false);
+  // A confirmação congela o que a pessoa viu: o lote apaga essas e só essas.
+  const [lote, setLote] = useState<WorktreeBatch | null>(null);
 
   const carregar = useCallback(async (): Promise<WorktreeRepo[] | null> => {
     const alvo = serverRef.current;
@@ -46,7 +49,7 @@ export default function Worktrees() {
 
   useEffect(() => {
     const g = ++geracao.current;
-    setRepos(null); setErro(''); setAberta(null); setAtualizando(false);
+    setRepos(null); setErro(''); setAberta(null); setLote(null); setAtualizando(false);
     const alvo = serverRef.current;
     if (!alvo) return;
     void (async () => {
@@ -61,21 +64,19 @@ export default function Worktrees() {
     })();
   }, [serverId, carregar]);
 
-  const apagarJuntadas = async (repo: string) => {
-    const alvo = serverRef.current;
-    // Toque repetido enquanto a primeira chamada corre mandaria o mesmo pedido de novo.
-    if (!alvo || apagandoJuntadas.current) return;
-    apagandoJuntadas.current = true;
-    try {
-      const removidas = await deleteMergedWorktreesForServer(alvo, repo);
-      removidas.forEach((p) => dropWorktreeStatus(alvo.id, p));
-    } catch (e) {
-      toast.erro(e instanceof Error ? e.message : String(e));
-    } finally {
-      apagandoJuntadas.current = false;
-    }
-    await carregar();
+  const loteApagado = (ficaram: string[]) => {
+    if (ficaram.length) toast.erro(m.worktree_lote_nao_apagou({ nomes: ficaram.join(', ') }));
+    void carregar();
   };
+
+  // O que a linha conta além da branch: o que se perderia e quem está dentro.
+  const detalhe = (w: WorktreeStatus) => [
+    `${w.branch ?? ''} ← ${w.base ?? ''}`,
+    w.merged ? m.worktree_juntada() : m.worktree_nao_juntada({ n: w.ahead }),
+    ...(w.dirty ? [m.worktree_nao_commitados({ n: w.dirty })] : []),
+    ...(w.ignored.length ? [m.worktree_ignorados_perdem({ n: w.ignored.length })] : []),
+    ...(w.sessions.length ? [m.worktree_sessao_aberta({ nomes: w.sessions.join(', ') })] : []),
+  ].join(' · ');
 
   return (
     <Pagina>
@@ -85,14 +86,14 @@ export default function Worktrees() {
       {erro ? <Text accessibilityRole="alert" style={styles.erro}>{m.worktrees_erro({ motivo: erro })}</Text> : null}
       {repos && repos.length === 0 ? <InfoNotice text={m.worktrees_vazio()} /> : null}
       {repos?.map((r) => {
-        const limpas = r.worktrees.filter((w) => w.merged && !w.dirty && !w.ignored.length && !w.sessions.length);
+        const b = mergedWorktreeBatch(r);
         return (
           <SectionCard
             key={r.repo}
             icon="GitBranch"
             title={basename(r.repo)}
-            extra={limpas.length ? (
-              <Pill icon="Trash2" label={m.worktree_apagar_juntadas({ n: limpas.length })} onPress={() => void apagarJuntadas(r.repo)} />
+            extra={b.deletable.length ? (
+              <Pill icon="Trash2" label={m.worktree_apagar_mescladas({ n: b.deletable.length })} onPress={() => setLote({ repo: r.repo, ...b })} />
             ) : undefined}
           >
             {r.worktrees.map((w) => (
@@ -100,7 +101,7 @@ export default function Worktrees() {
                 key={w.path}
                 icon="GitBranch"
                 title={basename(w.path)}
-                description={`${w.branch ?? ''} ← ${w.base ?? ''} · ${w.merged ? m.worktree_juntada() : m.worktree_nao_juntada({ n: w.ahead })}`}
+                description={detalhe(w)}
                 onPress={() => setAberta(w.path)}
               />
             ))}
@@ -108,6 +109,7 @@ export default function Worktrees() {
         );
       })}
       <WorktreeSheet server={server} path={aberta} onClose={() => setAberta(null)} onDeleted={() => void carregar()} />
+      <WorktreeBatchSheet server={server} batch={lote} onClose={() => setLote(null)} onDeleted={loteApagado} />
     </Pagina>
   );
 }

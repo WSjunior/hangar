@@ -9534,8 +9534,29 @@ def _allowed_repo(path: str) -> str:
     try:
         _allowed_scan_root(probe)
     except FsError as exc:
-        raise HTTPException(exc.status, detail=exc.detail) from None
+        if not _registered_in_allowed_repo(path):
+            raise HTTPException(exc.status, detail=exc.detail) from None
     return os.path.realpath(path) if os.path.isdir(path) else path
+
+
+def _registered_in_allowed_repo(path: str) -> bool:
+    """Worktree fora das raízes (o Codex cria em `~/.codex/worktrees`) vale pelo repo principal que
+    a registra, se ele estiver numa raiz: a mesma regra da lista e do lote."""
+    if os.path.isdir(path):
+        root = worktrees.repo_root_of(path)
+        if not root or os.path.realpath(root) != os.path.realpath(path):
+            return False
+        main = worktrees.main_repo_of(root)
+    else:
+        main = worktrees._main_of_missing(path)
+    if os.path.realpath(main) == os.path.realpath(path):
+        return False
+    try:
+        _allowed_scan_root(main)
+    except FsError:
+        return False
+    real = os.path.realpath(path)
+    return any(p == path or os.path.realpath(p) == real for p in worktrees.worktree_paths(main))
 
 
 @app.get("/api/worktrees", dependencies=[Depends(require_auth)])
@@ -9601,13 +9622,23 @@ async def worktrees_delete(body: WorktreeDeleteBody):
         await asyncio.to_thread(_invalidate_lists)
 
 
+class WorktreeDeleteMergedBody(_StrictBody):
+    repo: str = Field(min_length=1)
+    # As worktrees que a tela mostrou na confirmação; sem a lista, só as que não perdem nada.
+    paths: list[str] | None = None
+    confirm: bool = Field(default=False, strict=True)
+
+
 @app.post("/api/worktrees/delete-merged", dependencies=[Depends(require_auth)])
-async def worktrees_delete_merged(body: WorktreeRepoBody):
+async def worktrees_delete_merged(body: WorktreeDeleteMergedBody):
     _no_guest()
+    if body.confirm and body.paths is None:
+        raise HTTPException(422, detail="confirmar exige a lista das worktrees mostradas")
     repo = await asyncio.to_thread(_allowed_repo, body.repo)
     sessions = await asyncio.to_thread(registry.list)
     try:
-        return {"removed": await asyncio.to_thread(worktrees.delete_merged, repo, sessions)}
+        return {"removed": await asyncio.to_thread(worktrees.delete_merged, repo, sessions,
+                                                   body.paths, body.confirm)}
     except GitError as exc:
         raise HTTPException(exc.status, detail=exc.detail) from None
     finally:   # as que saíram antes do erro também mudam a lista

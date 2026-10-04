@@ -1078,8 +1078,19 @@ export interface WorktreeStatus {
   path: string; repo: string; exists: boolean; branch: string | null; base: string | null;
   main_branch: string | null;   // branch da pasta principal, onde as conversas retomam
   merged: boolean; ahead: number; dirty: number; ignored: string[]; sessions: string[]; closed: number;
+  degraded?: boolean;   // leitura do git falhou: dirty/ignored podem estar zerados sem ser verdade
 }
 export interface WorktreeRepo { repo: string; worktrees: WorktreeStatus[] }
+
+/** O lote de mescladas: o que entra na confirmação (com o que cada uma perde) e o que fica de fora
+ *  porque tem sessão aberta ou não foi lida direito. */
+export function mergedWorktreeBatch(r: WorktreeRepo): { deletable: WorktreeStatus[]; blocked: WorktreeStatus[] } {
+  const merged = r.worktrees.filter((w) => w.merged);
+  return {
+    deletable: merged.filter((w) => !w.sessions.length && !w.degraded),
+    blocked: merged.filter((w) => w.sessions.length || w.degraded),
+  };
+}
 
 export async function getWorktreesForServer(server: Server, signal?: AbortSignal): Promise<WorktreeRepo[]> {
   const r = await apiFetchForServer<{ repos: WorktreeRepo[] }>(server, '/api/worktrees',
@@ -1097,9 +1108,12 @@ export function deleteWorktreeForServer(server: Server, body: { repo: string; pa
   Promise<{ removed: string; branch_deleted: boolean; moved: number }> {
   return apiFetchForServer(server, '/api/worktrees/delete', { method: 'POST', body: JSON.stringify(body) }, FOLDER_ACTION_MS);
 }
-export async function deleteMergedWorktreesForServer(server: Server, repo: string): Promise<string[]> {
+/** Sem `paths`, só as mescladas que não perdem nada. Com `paths` e `confirm`, as que a tela
+ *  mostrou na confirmação, mesmo com arquivos a perder. */
+export async function deleteMergedWorktreesForServer(server: Server, repo: string,
+  opts?: { paths: string[]; confirm: boolean }): Promise<string[]> {
   const r = await apiFetchForServer<{ removed: string[] }>(server, '/api/worktrees/delete-merged',
-    { method: 'POST', body: JSON.stringify({ repo }) }, FOLDER_ACTION_MS);
+    { method: 'POST', body: JSON.stringify({ repo, ...opts }) }, FOLDER_ACTION_MS);
   return r.removed;
 }
 /** Nome curto do chip: a pasta da worktree onde o agente está. */
