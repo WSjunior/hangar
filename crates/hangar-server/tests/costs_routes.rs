@@ -242,8 +242,21 @@ async fn scopes_recovery_really_scans_on_retry_and_succeeds_on_fourth() {
     let h = Harness::new(true, false).await;
     let saved = h.upstream.scopes.lock().unwrap().take().unwrap();
     h.request(reqwest::Method::GET, "/api/costs").send().await.unwrap();
-    let collector = h.collector.clone();
-    assert!(tokio::task::spawn_blocking(move || collector.prepare_blocking(true)).await.unwrap().is_err());
+    // A primeira coleta pode continuar em andamento depois da resposta 202.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let collector = h.collector.clone();
+        let initial = tokio::task::spawn_blocking(move || collector.prepare_blocking(false))
+            .await
+            .unwrap();
+        match initial {
+            Err(hangar_server::costs::collect::CollectError::NoScopes) => break,
+            Ok(hangar_server::costs::collect::Ready::Warming { .. }) => {}
+            other => panic!("resultado inicial inesperado: {other:?}"),
+        }
+        assert!(Instant::now() < deadline, "coleta inicial não concluiu");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     *h.upstream.recover_scopes.lock().unwrap() = Some(saved);
     let response = h.request(reqwest::Method::GET, "/api/costs").send().await.unwrap();
     assert!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap()["totals"].is_object());
