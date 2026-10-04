@@ -77,3 +77,24 @@ fn paths_and_binary_reads_are_refused_without_changing_disk() {
         assert_eq!(execute(request).unwrap_err().status, status);
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn citation_found_elsewhere_through_a_symlink_never_reaches_git_internals() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::write(repo.join(".git/config"), "segredo").unwrap();
+    std::os::unix::fs::symlink(".git", repo.join("gl")).unwrap();
+    let jsonl = dir.path().join("t.jsonl");
+    let cited = repo.join("gl/config");
+    fs::write(
+        &jsonl,
+        json!({"cwd": repo, "text": format!("veja {}", cited.display())}).to_string() + "\n",
+    )
+    .unwrap();
+    for write in [false, true] {
+        let error = hangar_workspace::citations::resolve(&repo, &jsonl, "config", write).unwrap_err();
+        assert_eq!(error.status, 403);
+    }
+}

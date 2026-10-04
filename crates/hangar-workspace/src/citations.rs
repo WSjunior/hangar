@@ -253,7 +253,8 @@ pub fn resolve(cwd: &Path, jsonl: &Path, path: &str, write: bool) -> Result<Path
                 let target = real(&base.join(&expanded));
                 (target != *base && target.starts_with(base) && target.is_file()).then_some(target)
             })
-            .or_else(|| find_elsewhere(jsonl, cwd, path, &worked, !write))
+            // Caminho real antes da trava do `.git`: um atalho citado não pode escapar dela.
+            .or_else(|| find_elsewhere(jsonl, cwd, path, &worked, !write).map(|p| real(&p)))
             .ok_or_else(not_found)?
     };
     if !target.is_file() {
