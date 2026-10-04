@@ -63,6 +63,8 @@ mod tests {
                         if let Some(value) = lower.strip_prefix("content-length:") { length = value.trim().parse().unwrap(); }
                         if let Some(value) = lower.strip_prefix("x-hangar-internal:") { secret = value.trim().into(); }
                     }
+                    // Processos desta máquina sondam portas efêmeras; sem o segredo não é o cliente.
+                    if secret.is_empty() { return; }
                     let mut body = vec![0;length]; reader.read_exact(&mut body).await.unwrap();
                     seen.lock().unwrap().push((secret,serde_json::from_slice(&body).unwrap()));
                     reader.get_mut().write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}").await.unwrap();

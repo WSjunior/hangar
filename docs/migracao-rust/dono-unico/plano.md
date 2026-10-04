@@ -456,11 +456,36 @@ reescritos; `workspace_routes.rs:386` apagado, `:255`, `:273` reescritos, `Hando
 **Regra corrigida:** `docs/migracao-rust/git-arquivos/spec.md:38-42` (vaga cheia ou
 indisponível → repasse ao Python, registrado no diário).
 
-- [ ] **Step 40: Testes acima, vistos falhar**
-- [ ] **Step 41: Rust responde 503 com código e motivo para ocupado, contexto e indisponível; envia ao diário**
-- [ ] **Step 42: Ponte Python: `None` só com a ponte desligada; os outros casos levantam o erro de domínio; pedido acima de 4 MiB vira erro com código; contrato 17**
+- [x] **Step 40: Testes acima, vistos falhar**
+- [x] **Step 41: Rust responde 503 com código e motivo para ocupado, contexto e indisponível; envia ao diário**
+- [x] **Step 42: Ponte Python: `None` só com a ponte desligada; os outros casos levantam o erro de domínio; pedido acima de 4 MiB vira erro com código; contrato 17**
 - [ ] **Step 43: Textos dos três códigos na web e no app; conferir no painel do repositório (verificação manual)**
-- [ ] **Step 44: Remover o código morto e corrigir a regra; testes focados Rust e Python; revisar**
+- [x] **Step 44: Remover o código morto e corrigir a regra; testes focados Rust e Python; revisar**
+
+**Registro da execução (Task 8).** O 503 sai em `refuse` (`workspace_routes.rs`) no formato combinado
+com a Task 7 (`{ok:false,error_code,message,detail:{code,msg}}`), com `detail.params.motivo` para o
+front montar a frase; `Retry-After: 2` só no ocupado. Diário: `rust.workspace_busy`,
+`rust.workspace_failed` (contexto, indisponível e também 5xx comum, que inclui a escrita cujo git não
+iniciou e por isso responde 500). `DiagClient` virou campo `diag` do `AppState`. O teste
+`unavailable_answers_503_with_reason` mora em binário próprio (`tests/workspace_unavailable.rs`)
+porque esvazia o `PATH` do processo. A ponte Python devolve `None` só com ela desligada **ou com a
+conexão recusada** (Rust fora do ar, inventário §5 `:106-113` "fica"); os demais casos viram erro:
+`workspace_busy` (sem vaga local ou no Rust), `workspace_unavailable` (leitura sem resposta),
+`workspace_request_too_large` (413), `workspace_invalid_request` (500). O `detail` do
+`GitError`/`FsError` continua texto (dicionário quebrava `bastao`, `worktrees` e `_erro_arq`); o
+código vai em `exc.code`, e um `exception_handler(GitError)` no `api.py` responde o status com o
+envelope quando o erro escapa da rota (citação, resolver), em vez de 500. `head_info`, `branch_of`,
+`git_summary`, `git_diffstat` e `git_log_since` prometem não levantar (a listagem depende disso):
+falha da ponte devolve o vazio delas (`quiet=`), com log e diário em `_failed`. O `Fallback` de
+`routes.rs` fica nesta base porque `history`/`events` ainda o usam; ele e o teste `routes.rs:567-602`
+saem na junção depois da Task 7 (combinado com `migracao-rust-2`). `scripts/medir-rust.sh` perdeu o
+`git_ms`: com o Rust de pé a medição do lado Python passa pela ponte. O teste do diário
+(`diag.rs`, Task 1) passou a ignorar conexão sem segredo: sonda de porta desta máquina o derrubava.
+Revisão (`ecc:rust-reviewer`, `ecc:python-reviewer`, `ecc:silent-failure-hunter`): nenhum caminho em
+que falha do Rust rode no Python; entraram os consertos acima, a chave do limite de log com o motivo
+e as traduções dos dois códigos novos da ponte. Step 43: textos na web e no app pelo mapa comum
+(`errosApi.ts`, teste `errosApi.test.ts`); a conferência no painel do repositório fica para a prova
+de uso real (Task 11).
 
 ### Task 9: Observação do terminal sem troca de fonte por erro
 

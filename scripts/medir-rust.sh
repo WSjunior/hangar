@@ -23,13 +23,6 @@ pedido_ms() {  # $1 = host:porta, $2 = caminho
     awk '$1 != 200 {print "erro HTTP " $1 > "/dev/stderr"; exit 1} {printf "%.0f", $2 * 1000}'
 }
 
-git_ms() {  # como pedido_ms, mas o Python roda o próprio código: sem o cabeçalho, a rota dele usa o núcleo Rust
-  local extra=()
-  [ "$1" = "$PY" ] && extra=(-H "x-hangar-workspace-fallback: sessao_no_python")
-  curl -s -o /dev/null -w '%{http_code} %{time_total}\n' -H "Authorization: Bearer $token" "${extra[@]}" "http://$1$2" |
-    awk '$1 != 200 {print "erro HTTP " $1 > "/dev/stderr"; exit 1} {printf "%.0f", $2 * 1000}'
-}
-
 primeira_mensagem_ms() {  # $1 = host:porta, $2 = sessão; o ping inicial não conta
   local start end
   start=$(date +%s%N)
@@ -74,13 +67,15 @@ while read -r nome tipo; do
   t=$(par primeira_mensagem_ms "$nome") && linha "$nome" "$tipo" "$t"
 done <<< "$sessoes"
 
+# Com o Rust de pé o Python não roda Git/arquivos: a rota dele chama o núcleo Rust pela ponte,
+# então a diferença aqui é o custo da ponte, não Python contra Rust.
 echo "— Git e arquivos do painel da sessão (PR #30), na sessão $(head -1 <<< "$sessoes" | cut -d' ' -f1)"
 nome=$(head -1 <<< "$sessoes" | cut -d' ' -f1)
 for rota in "branches" "git/files" "git/log?n=50" "files/list?so_modificados=false" \
             "files/read?path=README.md" "files/search?q=import&mode=names"; do
-  t=$(par git_ms "/api/sessions/$nome/$rota") && linha "${rota%%\?*}" git "$t" || echo "${rota%%\?*}: não respondeu 200, pulado"
+  t=$(par pedido_ms "/api/sessions/$nome/$rota") && linha "${rota%%\?*}" git "$t" || echo "${rota%%\?*}: não respondeu 200, pulado"
 done
-t=$(par git_ms /api/fs/roots) && linha "fs/roots" arquivos "$t"
+t=$(par pedido_ms /api/fs/roots) && linha "fs/roots" arquivos "$t"
 
 echo "— Telas de Custos e Uso (parte 3)"
 t=$(par pedido_ms /api/costs) && linha custos - "$t"
