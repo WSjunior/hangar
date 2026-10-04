@@ -1449,6 +1449,7 @@ def test_processo_herda_chave_e_nao_o_pane_do_operador(sidecar, monkeypatch, lan
     assert "TMUX" not in env and "TMUX_PANE" not in env
     assert env["CP_SESSION_NAME"] == "s1" and env["CP_SESSION_KEY"] == S.load("s1")["key"]
     assert env["HANGAR_CANO_KEY"] == S.load("s1")["key"]
+    assert env["HANGAR_CANO_OWNER"] == str(Path.home())
     assert env["CLAUDE_CODE_SUBAGENT_MODEL"] == "claude-opus-5"
     # O processo que nasce é o cano, com o comando do claude depois do `--`; o sidecar guarda
     # onde ele escuta, pra o próximo backend religar.
