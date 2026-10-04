@@ -39,7 +39,7 @@ impl Fixture {
         std::fs::write(&target.transcript,"").unwrap();
         let native=Arc::new(std::sync::atomic::AtomicBool::new(false)); let generation=Arc::new(AtomicU64::new(1)); let control=Arc::new(Mutex::new(json!({"disposition":"unavailable"})));
         let idle=Arc::new(std::sync::atomic::AtomicBool::new(true)); let ready=Arc::new(std::sync::atomic::AtomicBool::new(true)); let unknown=Arc::new(std::sync::atomic::AtomicBool::new(false)); let calls=Arc::new(Mutex::new(vec![]));
-        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let address=listener.local_addr().unwrap();
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let address=listener.local_addr().unwrap(); let t0=std::time::Instant::now();
         let state_path=target.state_path.clone();
         let (i,r,u,c,g,control_reply,n)=(idle.clone(),ready.clone(),unknown.clone(),calls.clone(),generation.clone(),control.clone(),native.clone());
         let router=axum::Router::new().route("/internal/runtime/policy",axum::routing::post(move |body:String| {let (i,r,u,c,mut b,path,g,control_reply,n,conversation,mux)=(i.clone(),r.clone(),u.clone(),c.clone(),binding.clone(),state_path.clone(),g.clone(),control_reply.clone(),n.clone(),conversation.clone(),server_mux.clone()); async move {
@@ -48,7 +48,7 @@ impl Fixture {
             let phase=&state["operations"][v["phase_id"].as_str().unwrap()];
             assert_eq!(phase["status"],"dispatching");
             assert_eq!(phase["payload"],json!({"kind":v["kind"],"request_id":v["request_id"],"payload":v["payload"]}));
-            c.lock().unwrap().push(v.clone());
+            let mut seen=v.clone(); seen["_ms"]=json!(t0.elapsed().as_millis() as u64); c.lock().unwrap().push(seen);
             b.generation=g.load(std::sync::atomic::Ordering::Acquire); b.conversation=conversation.lock().unwrap().clone();b.mux_argv=mux.lock().unwrap().clone();
             let data=match v["kind"].as_str().unwrap() {
                 "terminal_facts"=>json!({"binding":b,"ready":r.load(std::sync::atomic::Ordering::Acquire),"idle":i.load(std::sync::atomic::Ordering::Acquire),"open_question":false,"plugin_live":u.load(std::sync::atomic::Ordering::Acquire),"plugin_user":true,"native":if n.load(std::sync::atomic::Ordering::Acquire){Some(NativeMessage {socket:"fake".into(),origin:"peer".into(),sender:"peer".into(),mode:"message".into(),message_id:Some(format!("native:{}",v["payload"]["operation_id"].as_str().unwrap()))})}else{None}}),
@@ -70,6 +70,19 @@ impl Fixture {
     }
     fn command(&self,id:&str,text:&str)->RuntimeCommand { RuntimeCommand {operation_id:id.into(),kind:OperationKind::Input,payload:json!({"text":text,"pre_transcript":false})} }
     fn state(&self)->Value {serde_json::from_slice(&std::fs::read(&self.target.state_path).unwrap()).unwrap()}
+    /// Espera com prazo; no estouro mostra onde a operação parou (política, multiplexador e diário).
+    async fn wait_for(&self,what:&str,mut done:impl FnMut()->bool) {
+        let start=std::time::Instant::now();
+        while !done() {
+            if start.elapsed()>Duration::from_secs(2) {
+                let io:Vec<String>=self.io.calls.lock().unwrap().iter().map(|r|r.args[0].clone()).collect();
+                let policy:Vec<String>=self.calls.lock().unwrap().iter().map(|v|format!("{}@{}ms",v["kind"].as_str().unwrap_or("?"),v["_ms"])).collect();
+                let ops:Vec<String>=self.state()["operations"].as_object().map(|o|o.iter().map(|(k,v)|format!("{k}={}",v["status"])).collect()).unwrap_or_default();
+                panic!("{what}: prazo de 2 s estourou; política={policy:?} io={io:?} operações={ops:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
 }
 impl Drop for Fixture {fn drop(&mut self){self.server.abort();}}
 
@@ -96,7 +109,7 @@ elif mode=='send-keys' and '-l' in sys.argv:
 "#,json!(late.to_str().unwrap()));
     std::fs::write(&script,code).unwrap();
     let python=std::env::var("HANGAR_TEST_PYTHON").unwrap_or_else(|_|if cfg!(windows){"python".into()}else{"python3".into()});
-    let mut other=std::process::Command::new(&python).arg(&script).arg("--other").spawn().unwrap();
+    let mut other=std::process::Command::new(&python).arg(&script).arg("--other").spawn().unwrap();let other_born=std::time::Instant::now();
     f.target.binding.mux_argv=vec![python,"-X".into(),"utf8".into(),script.to_str().unwrap().into()];*f.mux.lock().unwrap()=f.target.binding.mux_argv.clone();
     let lease=queue::acquire_lease(&f.target.lease_path).unwrap();let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
     let options=TerminalOptions {io:Arc::new(ProcessIo {command_timeout:Duration::from_millis(1500),socket_timeout:Duration::from_millis(150)}),
@@ -108,7 +121,7 @@ elif mode=='send-keys' and '-l' in sys.argv:
     let grandchild_born=std::path::Path::new(&format!("{}--grand.pid",late.display())).exists();
     // O neto escreveria 2,5 s depois de nascer, e ele nasce antes do prazo de 1,5 s.
     tokio::time::sleep(Duration::from_secs(3)).await;
-    let old_writer=late.exists();let unrelated_alive=other.try_wait().unwrap().is_none();
+    let old_writer=late.exists();let other_exit=other.try_wait().unwrap();let other_age=other_born.elapsed();let unrelated_alive=other_exit.is_none();
     for suffix in if old_writer {vec!["--child.pid","--grand.pid"]}else{vec![]} {
         if let Ok(pid)=std::fs::read_to_string(format!("{}{suffix}",late.display())) {
             #[cfg(unix)] {let _=std::process::Command::new("kill").args(["-9",pid.trim()]).output();}
@@ -117,7 +130,8 @@ elif mode=='send-keys' and '-l' in sys.argv:
     }
     other.kill().unwrap();other.wait().unwrap();drop(python_lease);
     assert!(grandchild_born,"timeout fired before the grandchild existed; nothing was proved");
-    assert!(unrelated_alive);assert!(!old_writer,"auxiliary grandchild wrote after detach released the lease");
+    // Saída 0 é o `sleep` do processo alheio que acabou sozinho; outro código é morte por terceiro.
+    assert!(unrelated_alive,"processo alheio saiu: {other_exit:?} depois de {other_age:?}");assert!(!old_writer,"auxiliary grandchild wrote after detach released the lease");
 }
 
 #[cfg(target_os="linux")]
@@ -272,7 +286,7 @@ async fn terminal_runtime_idle_timer_drains_without_sse_and_claims_one() {
     h.command(f.command("queued1","Um")).await.unwrap(); h.command(f.command("queued2","Dois")).await.unwrap();
     assert!(f.io.calls.lock().unwrap().is_empty());
     f.idle.store(true,std::sync::atomic::Ordering::Release); f.ready.store(true,std::sync::atomic::Ordering::Release);
-    tokio::time::timeout(Duration::from_secs(2),async {loop {if f.state()["rows"].as_array().unwrap().iter().all(|r|r["delivered"]==true){break;} tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();
+    f.wait_for("espera 1",||f.state()["rows"].as_array().unwrap().iter().all(|r|r["delivered"]==true)).await;
     let state=f.state(); assert_eq!(state["rows"].as_array().unwrap().len(),2); h.stop().await.unwrap();
 }
 #[tokio::test]
@@ -289,7 +303,7 @@ async fn terminal_runtime_identical_text_uses_distinct_occurrences_and_enqueue_s
 async fn terminal_runtime_cancel_http_does_not_release_lease_and_stop_waits() {
     let f=Fixture::new().await; f.io.blocked.store(true,std::sync::atomic::Ordering::Release); let h=f.start(); let hc=h.clone(); let cmd=f.command("flight","Olá");
     let request=tokio::spawn(async move {hc.command(cmd).await});
-    tokio::time::timeout(Duration::from_secs(2),async {loop {if f.io.calls.lock().unwrap().iter().any(|r|r.args[0]=="send-keys"){break;}tokio::time::sleep(Duration::from_millis(5)).await;}}).await.unwrap();
+    f.wait_for("espera 2",||f.io.calls.lock().unwrap().iter().any(|r|r.args[0]=="send-keys")).await;
     request.abort(); let hc=h.clone(); let stopping=tokio::spawn(async move {hc.stop().await}); tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(!stopping.is_finished()); assert!(queue::acquire_lease(&f.target.lease_path).is_err());
     f.io.blocked.store(false,std::sync::atomic::Ordering::Release); f.io.gate.notify_waiters(); stopping.await.unwrap().unwrap(); assert!(queue::acquire_lease(&f.target.lease_path).is_ok());
@@ -342,7 +356,7 @@ async fn terminal_runtime_private_controls_validate_entire_payload_before_effect
 async fn terminal_runtime_cleanup_proved_uses_same_queue_budget_original_plus_two() {
     let f=Fixture::new().await; f.io.fail_write.store(true,std::sync::atomic::Ordering::Release); let h=f.start();
     let result=h.command(f.command("retry","Olá")).await.unwrap(); assert_eq!(result.payload["cleanup"],"proved");
-    tokio::time::timeout(Duration::from_secs(2),async {loop {if f.state()["rows"][0]["desistiu"]==true{break;}tokio::time::sleep(Duration::from_millis(10)).await;}}).await.unwrap();
+    f.wait_for("espera 3",||f.state()["rows"][0]["desistiu"]==true).await;
     assert_eq!(f.state()["rows"][0]["attempts"],2);
     assert_eq!(f.io.calls.lock().unwrap().iter().filter(|r|r.args[0]=="send-keys" && r.args.last().unwrap()=="Olá").count(),3);
     assert!(!f.io.calls.lock().unwrap().iter().any(|r|r.args.last().is_some_and(|s|s=="\r")));
@@ -387,7 +401,7 @@ async fn terminal_runtime_held_plugin_unavailable_permits_tui_and_accepted_answe
 async fn terminal_runtime_binding_changes_while_an_operation_waits_prevents_old_second_effect() {
     let f=Fixture::new().await; f.io.blocked.store(true,std::sync::atomic::Ordering::Release); let h=f.start();
     let hc=h.clone(); let cmd=f.command("flight","Primeiro"); let first=tokio::spawn(async move {hc.command(cmd).await});
-    tokio::time::timeout(Duration::from_secs(2),async {loop {if f.io.calls.lock().unwrap().iter().any(|r|r.args[0]=="send-keys"){break;}tokio::time::sleep(Duration::from_millis(5)).await;}}).await.unwrap();
+    f.wait_for("espera 4",||f.io.calls.lock().unwrap().iter().any(|r|r.args[0]=="send-keys")).await;
     let hc=h.clone(); let cmd=f.command("waiting","Segundo"); let second=tokio::spawn(async move {hc.command(cmd).await});
     f.generation.store(2,std::sync::atomic::Ordering::Release); f.io.blocked.store(false,std::sync::atomic::Ordering::Release); f.io.gate.notify_waiters();
     assert_eq!(first.await.unwrap().unwrap().disposition,hangar_server::runtime::protocol::Disposition::Unknown);
@@ -467,7 +481,7 @@ async fn terminal_runtime_claim_only_one_entry_while_driver_is_in_flight() {
     h.command(f.command("first-claim","Um")).await.unwrap(); h.command(f.command("second-claim","Dois")).await.unwrap();
     f.io.blocked.store(true,std::sync::atomic::Ordering::Release); f.ready.store(true,std::sync::atomic::Ordering::Release);
     let hc=h.clone(); let draining=tokio::spawn(async move {hc.drain().await});
-    tokio::time::timeout(Duration::from_secs(2),async {loop {if f.io.calls.lock().unwrap().iter().any(|r|r.args[0]=="send-keys"){break;}tokio::time::sleep(Duration::from_millis(5)).await;}}).await.unwrap();
+    f.wait_for("espera 5",||f.io.calls.lock().unwrap().iter().any(|r|r.args[0]=="send-keys")).await;
     let rows=f.state()["rows"].clone(); assert_eq!(rows[0]["delivered"],true); assert_eq!(rows[1]["delivered"],false);
     f.io.blocked.store(false,std::sync::atomic::Ordering::Release); f.io.gate.notify_waiters(); draining.await.unwrap().unwrap(); h.stop().await.unwrap();
 }
