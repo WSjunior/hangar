@@ -82,6 +82,9 @@ _LIMITE_LINHA = 16 << 20   # uma linha do stream-json (initialize responde >100 
 # Env do cano (e do claude, que herda): a chave do sidecar. É por ela que a varredura de órfãos
 # distingue "cano de sessão viva" de "cano cuja sessão foi encerrada com o backend fora".
 _MARCADOR_CANO = "HANGAR_CANO_KEY"
+# Dono do cano: o HOME do backend que o subiu. Um segundo backend no mesmo usuário (teste isolado)
+# não enxerga os sidecars do primeiro e mataria os canos vivos dele como órfãos.
+_CANO_OWNER = "HANGAR_CANO_OWNER"
 _CANO_PY = Path(__file__).with_name("cano.py")
 # Valores literais, não `subprocess.CREATE_*`: os atributos só existem no Windows (ver atualizar.py).
 _FLAGS_WINDOWS = 0x00000200 | 0x08000000   # CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
@@ -984,6 +987,7 @@ class ClaudeHeadlessAdapter:
         if meta.get("key"):
             env["CP_SESSION_KEY"] = meta["key"]
         env[_MARCADOR_CANO] = meta["key"]
+        env[_CANO_OWNER] = str(Path.home())
         if meta.get("config_dir"):
             env["CLAUDE_CONFIG_DIR"] = meta["config_dir"]
         if meta.get("subagent_model"):
@@ -2455,6 +2459,18 @@ def _cauda(log: Path, n: int = 5) -> str:
         return ""
 
 
+def _orphan_key(environ: bytes, live: set, owner: str) -> str | None:
+    """Chave do cano deste backend cuja sessão não existe mais; None para todo o resto."""
+    fields = dict(item.partition(b"=")[::2] for item in environ.split(b"\0") if b"=" in item)
+    key = fields.get(_MARCADOR_CANO.encode(), b"").decode(errors="replace")
+    if not key or key in live:
+        return None
+    # Cano subido antes do dono existir: o HOME herdado é a prova. O Codex troca o HOME pelo da
+    # conta, então esses ficam vivos — vazar um processo é melhor que matar sessão de outro.
+    recorded = fields.get(_CANO_OWNER.encode(), fields.get(b"HOME"))
+    return key if recorded is not None and recorded.decode(errors="replace") == owner else None
+
+
 def matar_orfaos() -> int:
     """Canos cuja sessão já não existe (encerrada com o backend fora, ou sidecar perdido). Os
     outros são de propósito: sobreviveram ao restart e o backend religa neles. Chamado na subida.
@@ -2468,7 +2484,7 @@ def matar_orfaos() -> int:
     vivas |= {m.get("key") for m in codex_sessions.list_all() if m.get("headless") and m.get("key")}
     meu_uid = os.getuid()
     sem_permissao = 0
-    marca = f"{_MARCADOR_CANO}=".encode()
+    owner = str(Path.home())
     for p in proc.iterdir():
         if not p.name.isdigit():
             continue
@@ -2481,16 +2497,12 @@ def matar_orfaos() -> int:
             continue
         except OSError:
             continue
-        for item in env.split(b"\0"):
-            if item.startswith(marca):
-                chave = item[len(marca):].decode(errors="replace")
-                if chave and chave not in vivas:
-                    try:
-                        os.kill(int(p.name), signal.SIGTERM)
-                        mortos += 1
-                    except OSError:
-                        _log.warning("claude headless: órfão pid=%s não morreu", p.name, exc_info=True)
-                break
+        if _orphan_key(env, vivas, owner):
+            try:
+                os.kill(int(p.name), signal.SIGTERM)
+                mortos += 1
+            except OSError:
+                _log.warning("claude headless: órfão pid=%s não morreu", p.name, exc_info=True)
     if sem_permissao:
         _log.info("claude headless: varredura de órfãos sem permissão em %d processo(s) meus", sem_permissao)
     return mortos
