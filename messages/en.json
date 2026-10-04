@@ -6796,7 +6796,7 @@
   "worktrees_filtro_paradas": "Idle 14+ days",
   "worktrees_filtro_sem_branch": "No branch",
   "worktrees_filtro_vazio": "No worktree matches this filter",
-  "worktrees_disco_titulo": "Where the disk goes",
+  "worktrees_disco_titulo": "Disk space",
   "worktrees_disco_resumo": "{total} across {n} worktrees",
   "worktrees_disco_libera": "{tamanho} freed by deleting the ready ones",
   "worktrees_disco_outras": "{n} others",

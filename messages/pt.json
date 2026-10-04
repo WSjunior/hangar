@@ -6796,7 +6796,7 @@
   "worktrees_filtro_paradas": "Paradas +14 dias",
   "worktrees_filtro_sem_branch": "Sem branch",
   "worktrees_filtro_vazio": "Nenhuma worktree neste filtro",
-  "worktrees_disco_titulo": "Onde está o disco",
+  "worktrees_disco_titulo": "Espaço em disco",
   "worktrees_disco_resumo": "{total} em {n} worktrees",
   "worktrees_disco_libera": "{tamanho} livres apagando as prontas",
   "worktrees_disco_outras": "outras {n}",
