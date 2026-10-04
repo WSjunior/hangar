@@ -1,7 +1,7 @@
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-0.3.7/MODIFICADO.md gpui-pre-0.3.7/MODIFICADO.md
 --- gpui-pre-0.3.7/MODIFICADO.md
 +++ gpui-pre-0.3.7/MODIFICADO.md
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,31 @@
 +# Cópia modificada do gpui-pre 0.3.7
 +
 +Origem: crate `gpui-pre` 0.3.7 do crates.io, licença Apache-2.0 (`LICENSE-APACHE`).
@@ -29,6 +29,10 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +e a comparação de cenas já trata toda superfície como dano nos dois quadros (`accumulate_surface_damage` em
 +`scene_damage.rs`), então um quadro com superfície nunca é pulado; o teste `identical_surface_frames_are_still_damaged`
 +trava isso.
++
++Bandeja: `PlatformWindow::set_hidden` (padrão sem efeito) e `Window::set_hidden(hidden)` escondem a janela sem
++destruí-la e a mostram de novo, para a opção "Manter na bandeja ao fechar". O upstream não tem como esconder uma janela;
++as implementações ficam nas cópias de gpui-pre-linux e gpui-pre-windows.
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-0.3.7/src/element.rs gpui-pre-0.3.7/src/element.rs
 --- gpui-pre-0.3.7/src/element.rs
 +++ gpui-pre-0.3.7/src/element.rs
@@ -94,7 +98,16 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
  mod app_menu;
  mod keyboard;
  mod keystroke;
-@@ -957,6 +958,11 @@
+@@ -935,6 +936,8 @@
+     fn set_title(&mut self, title: &str);
+     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance);
+     fn minimize(&self);
++    /// Hangar: tira a janela da tela sem destruí-la (`true`) e a mostra de novo (`false`).
++    fn set_hidden(&self, _hidden: bool) {}
+     fn zoom(&self);
+     fn toggle_fullscreen(&self);
+     fn is_fullscreen(&self) -> bool;
+@@ -957,6 +960,11 @@
      fn on_appearance_changed(&self, callback: Box<dyn FnMut()>);
      fn on_button_layout_changed(&self, _callback: Box<dyn FnMut()>) {}
      fn draw(&self, scene: &Scene);
@@ -1746,3 +1759,15 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
      /// Removes an image from the sprite atlas.
      pub fn drop_image(&mut self, data: Arc<RenderImage>) -> Result<()> {
          for frame_index in 0..data.frame_count() {
+@@ -6424,6 +6581,11 @@
+         self.platform_window.minimize();
+     }
+ 
++    /// Hangar: esconde a janela sem fechá-la, ou a mostra de novo. Sem efeito onde a plataforma não implementa.
++    pub fn set_hidden(&self, hidden: bool) {
++        self.platform_window.set_hidden(hidden);
++    }
++
+     /// Toggle full screen status on the current window at the platform level.
+     pub fn toggle_fullscreen(&self) {
+         self.platform_window.toggle_fullscreen();

@@ -46,3 +46,9 @@ Não compilados aqui: gpui-pre-windows e gpui-pre-apple/-macos (revisados só po
 | Dispositivo Vulkan com `VK_EXT_image_drm_format_modifier` e `WgpuContext::shared_device()` | gpui-pre-wgpu `wgpu_context.rs` | importar o DMA-BUF sem cópia exige o modificador DRM e o mesmo dispositivo que o GPUI usa para desenhar |
 | `PrimitiveBatch::Surfaces` desenhado como sprite policromático, alpha forçado a 1 | gpui-pre-wgpu `wgpu_renderer.rs`/`shaders.wgsl` | o renderer wgpu ignorava superfícies; em XRGB o byte X não é alpha |
 | `CreateTargetForHwnd(hwnd, false)` | gpui-pre-windows `directx_renderer.rs` | com topmost a composição cobre a janela filha do WebView2; o GPUI deixa de desenhar por cima dela |
+
+## Bandeja
+
+| Ajuste | Onde | Por quê |
+|---|---|---|
+| `PlatformWindow::set_hidden` e `Window::set_hidden` | gpui-pre `platform.rs`/`window.rs`, gpui-pre-linux `wayland/window.rs`/`x11/window.rs`, gpui-pre-windows `window.rs` | o upstream não esconde janela; fechar para a bandeja precisa da janela viva, porque a tela do app não sobrevive a fechar e reabrir |

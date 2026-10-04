@@ -941,6 +941,10 @@ impl PlatformWindow for WindowsWindow {
         unsafe { ShowWindowAsync(self.0.hwnd, SW_MINIMIZE).ok().log_err() };
     }
 
+    fn set_hidden(&self, hidden: bool) {
+        unsafe { ShowWindowAsync(self.0.hwnd, if hidden { SW_HIDE } else { SW_SHOW }).ok().log_err() };
+    }
+
     fn zoom(&self) {
         unsafe {
             if IsWindowVisible(self.0.hwnd).as_bool() {

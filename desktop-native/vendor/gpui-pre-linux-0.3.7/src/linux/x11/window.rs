@@ -1655,6 +1655,22 @@ impl PlatformWindow for X11Window {
         Ok(())
     }
 
+    fn set_hidden(&self, hidden: bool) {
+        let reply = if hidden {
+            check_reply(
+                || "X11 UnmapWindow failed.",
+                self.0.xcb.unmap_window(self.0.x_window),
+            )
+        } else {
+            check_reply(
+                || "X11 MapWindow failed.",
+                self.0.xcb.map_window(self.0.x_window),
+            )
+        };
+        reply.log_err();
+        xcb_flush(&self.0.xcb);
+    }
+
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         let mut state = self.0.state.borrow_mut();
         state.background_appearance = background_appearance;
