@@ -8,6 +8,7 @@
   import PluginBand, { type PluginNotice } from '../components/PluginBand.svelte';
   import PluginPane from '../components/PluginPane.svelte';
   import { copyText } from '../lib/clipboard';
+  import { openInNewTab } from '../lib/openTab';
   import { parsePluginUi, pressPluginButton, safeHref, type PluginNode as PluginTree, type PluginPane as PluginPaneData } from '@hangar/core';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
@@ -483,7 +484,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       }
       const url = safeHref(r.opened);
       // Depois do `await` o navegador pode não contar mais como gesto da pessoa e bloquear a janela.
-      if (url && !window.open(url, '_blank', 'noopener,noreferrer')) {
+      if (url && !openInNewTab(url)) {
         showPluginNotice(m.plugin_link_bloqueado(), false, { href: url });
       }
     } catch (err) {

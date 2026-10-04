@@ -51,7 +51,10 @@ export function decodeRaster(cells: string, columns: number, rows: number): Rast
   const bytes = base64Bytes(cells);
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const grid: RasterCell[][] = [];
-  for (let r = 0; r < rows; r++) {
+  // `rows` vem do mod: sem o teto pelos bytes que chegaram, um número enorme trava a aba.
+  const cells12 = Math.floor(bytes.length / 12);
+  const lastRow = columns >= 1 ? Math.min(rows, Math.ceil(cells12 / Math.floor(columns))) : 0;
+  for (let r = 0; r < lastRow; r++) {
     const row: RasterCell[] = [];
     for (let c = 0; c < columns; c++) {
       const at = (r * columns + c) * 12;

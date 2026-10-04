@@ -18,6 +18,11 @@ describe('decodeRaster', () => {
   it('para no fim dos dados em vez de inventar célula', () => {
     expect(decodeRaster(cells([0x41, 0, 0]), 3, 1)[0]).toHaveLength(1);
   });
+
+  it('não cria linha além dos dados que chegaram, mesmo com `rows` enorme', () => {
+    expect(decodeRaster(cells([0x41, 0, 0, 0x42, 0, 0, 0x43, 0, 0]), 2, 1_000)).toHaveLength(2);
+    expect(decodeRaster(cells([0x41, 0, 0]), 0, 1_000)).toEqual([]);
+  });
 });
 
 describe('isEmptyBand', () => {

@@ -218,17 +218,32 @@ fn plain_deep(kids: &[Value]) -> String {
 /// Vizinhas da mesma cor viram um trecho só. O Raster vem com a largura do pane do terminal: em
 /// coluna mais estreita cada trecho encolhe na proporção das suas células, sem rolar de lado.
 fn raster(p: &Value) -> AnyElement {
+    let columns = p["columns"].as_u64().unwrap_or(0) as usize;
+    let mut grid = div().flex().flex_col().flex_basis(px(0.)).flex_grow(1.).min_w_0().max_w(px(columns as f32 * CELL_W));
+    for runs in raster_runs(p) {
+        grid = grid.child(div().flex().flex_row().w_full().min_w_0().whitespace_nowrap().children(runs.into_iter().map(|(t, fg, bg)| {
+            div().flex_basis(px(0.)).flex_grow(t.chars().count() as f32).flex_shrink(1.).min_w_0().overflow_hidden()
+                .when_some(fg, |el, c| el.text_color(c)).when_some(bg, |el, c| el.bg(c)).child(t)
+        })));
+    }
+    grid.into_any_element()
+}
+
+type Run = (String, Option<Hsla>, Option<Hsla>);
+
+/// Trechos de cada linha do Raster. `rows` vem do mod: sem o teto pelos bytes que chegaram, um
+/// número enorme prende a thread de desenho criando linha vazia.
+fn raster_runs(p: &Value) -> Vec<Vec<Run>> {
     use base64::Engine as _;
     let columns = p["columns"].as_u64().unwrap_or(0) as usize;
-    let rows = p["rows"].as_u64().unwrap_or(0) as usize;
     let bytes = base64::engine::general_purpose::STANDARD.decode(p["cells"].as_str().unwrap_or("")).unwrap_or_default();
+    let cells = bytes.len() / 12;
+    let rows = if columns == 0 { 0 } else { (p["rows"].as_u64().unwrap_or(0) as usize).min(cells.div_ceil(columns)) };
     let word = |at: usize| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
-    let mut grid = div().flex().flex_col().flex_basis(px(0.)).flex_grow(1.).min_w_0().max_w(px(columns as f32 * CELL_W));
-    for r in 0..rows {
-        let mut runs: Vec<(String, Option<Hsla>, Option<Hsla>)> = Vec::new();
-        for c in 0..columns {
-            let at = (r * columns + c) * 12;
-            if at + 12 > bytes.len() { break; }
+    (0..rows).map(|r| {
+        let mut runs: Vec<Run> = Vec::new();
+        for i in (r * columns..).take(columns).take_while(|&i| i < cells) {
+            let at = i * 12;
             let ch = char::from_u32(word(at)).filter(|c| !c.is_control()).unwrap_or(' ');
             let (fg, bg) = (cell_color(word(at + 4)), cell_color(word(at + 8)));
             match runs.last_mut() {
@@ -236,12 +251,8 @@ fn raster(p: &Value) -> AnyElement {
                 _ => runs.push((ch.to_string(), fg, bg)),
             }
         }
-        grid = grid.child(div().flex().flex_row().w_full().min_w_0().whitespace_nowrap().children(runs.into_iter().map(|(t, fg, bg)| {
-            div().flex_basis(px(0.)).flex_grow(t.chars().count() as f32).flex_shrink(1.).min_w_0().overflow_hidden()
-                .when_some(fg, |el, c| el.text_color(c)).when_some(bg, |el, c| el.bg(c)).child(t)
-        })));
-    }
-    grid.into_any_element()
+        runs
+    }).collect()
 }
 
 /// Bit 24 sozinho é a cor padrão do terminal; o resto é 0x00RRGGBB.
@@ -285,8 +296,24 @@ fn unmark(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
-    use super::{button_key, cell_color, color, is_dock, is_empty, safe_href};
+    use super::{button_key, cell_color, color, is_dock, is_empty, raster_runs, safe_href};
     use serde_json::{json, Value};
+
+    fn cells(words: &[u32]) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(words.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>())
+    }
+
+    #[test]
+    fn raster_never_builds_rows_beyond_the_cells_that_arrived() {
+        let three = cells(&[0x41, 0x0100_0000, 0x0100_0000, 0x42, 0x0100_0000, 0x0100_0000, 0x43, 0x0100_0000, 0x0100_0000]);
+        let runs = raster_runs(&json!({"columns": 2, "rows": 4_000_000_000_000u64, "cells": three}));
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0][0].0, "AB");
+        assert_eq!(runs[1][0].0, "C");
+        assert!(raster_runs(&json!({"columns": 0, "rows": 1_000_000, "cells": three})).is_empty());
+        assert!(raster_runs(&json!({"columns": u64::MAX, "rows": u64::MAX, "cells": three}))[0].len() == 1);
+    }
 
     #[test]
     fn empty_band_is_the_engine_marker_or_nothing() {

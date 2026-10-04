@@ -5376,7 +5376,7 @@ impl Hangar {
             Ok(reply) => {
                 if let Some(text) = reply.get("copied").and_then(Value::as_str) {
                     cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
-                    window.push_notification(Notification::info(tr("plugin_copiado")), cx);
+                    window.push_notification(Notification::info(tr_shared("plugin_copiado", &[])), cx);
                 }
                 if let Some(url) = crate::plugin_ui::safe_href(&reply["opened"]) { cx.open_url(&url); }
             }

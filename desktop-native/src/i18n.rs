@@ -39,3 +39,34 @@ pub fn tr_shared(key: &str, params: &[(&str, &str)]) -> String {
     let params = params.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
     tr_web(key, &params).unwrap_or_else(|| key.to_owned())
 }
+
+#[cfg(test)]
+mod tests {
+    /// `tr` procura `native_<chave>`; chave sem tradução aparece crua na tela, sem erro nenhum.
+    #[test]
+    fn every_literal_tr_key_has_a_native_translation() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let dicts = [include_str!("../../messages/pt.json"), include_str!("../../messages/en.json")]
+            .map(|s| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(s).unwrap());
+        let mut stack = vec![src];
+        let mut missing = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() { stack.push(path); continue; }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") { continue; }
+                let text = std::fs::read_to_string(&path).unwrap();
+                for (at, _) in text.match_indices("tr(\"") {
+                    // Só a função `tr`: `tr_shared` e `tr_web` também terminam assim.
+                    if text[..at].ends_with(|c: char| c.is_alphanumeric() || c == '_') { continue; }
+                    let key: String = text[at + 4..].chars().take_while(|&c| c != '"').collect();
+                    let native = format!("native_{key}");
+                    if dicts.iter().any(|d| !d.contains_key(&native)) { missing.push(key); }
+                }
+            }
+        }
+        missing.sort();
+        missing.dedup();
+        assert!(missing.is_empty(), "tr() sem native_* em pt.json/en.json: {missing:?}");
+    }
+}
