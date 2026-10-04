@@ -69,6 +69,33 @@ def test_workspace_context_contains_only_registry_metadata(tmp_path):
                                "session":{"name":"s1","cwd":"/p","jsonl":"/p/abc-123.jsonl"}}
 
 
+def test_worktrees_context_has_folders_inside_roots_and_account_projects(tmp_path):
+    inside, outside = tmp_path / "repo", "/fora"
+    inputs = AsyncMock(return_value=([_info(cwd=str(inside), worktree_path=str(inside))], [str(inside)], [tmp_path]))
+    with patch("app.api._worktree_inputs", inputs), \
+            patch("app.archive._contas", return_value=[(None, "", tmp_path / "projects")]):
+        response = _client().get("/internal/worktrees/context", headers={"X-Hangar-Internal": SECRET})
+    assert response.status_code == 200
+    assert response.json() == {
+        "roots": [str(tmp_path)], "cwds": [str(inside)],
+        "sessions": [{"name": "s1", "cwd": str(inside), "worktree_path": str(inside), "jsonl": "/p/abc-123.jsonl"}],
+        "project_bases": [str(tmp_path / "projects")],
+    }
+    assert outside not in response.text
+
+
+def test_worktree_inputs_keep_only_folders_inside_the_roots(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+    (tmp_path / "repo").mkdir()
+    sessions = [_info(cwd=str(tmp_path / "repo")), _info(name="s2", cwd="/fora")]
+    old = SimpleNamespace(cwd=str(tmp_path), mtime=0)
+    with patch("app.api.registry.list", return_value=sessions), patch("app.api.list_folders", return_value=[old]), \
+            patch("app.api.allowed_roots", return_value=[tmp_path]):
+        _sessions, cwds, roots = asyncio.run(api_mod._worktree_inputs())
+    assert cwds == [str(tmp_path / "repo")] and roots == [tmp_path]
+
+
 def test_workspace_context_refuses_before_reading_the_registry():
     with patch("app.api._guardar_snap") as snapshot:
         response = _client("203.0.113.7").get("/internal/workspace/context", headers={"X-Hangar-Internal":SECRET})

@@ -169,6 +169,23 @@ async def workspace_context(name: str | None = None) -> dict:
     }
 
 
+@router.get("/worktrees/context")
+async def worktrees_context() -> dict:
+    """O que a lista de worktrees do hangar-server não acha sozinho: sessões, pastas e contas."""
+    from app import api
+    from app.archive import _contas
+
+    sessions, cwds, roots = await api._worktree_inputs()
+    bases = await asyncio.to_thread(lambda: [str(base) for _cfg, _rot, base in _contas()])
+    return {
+        "roots": [str(r) for r in roots],
+        "cwds": cwds,
+        "sessions": [{"name": s.name, "cwd": s.cwd, "worktree_path": s.worktree_path, "jsonl": s.jsonl}
+                     for s in sessions],
+        "project_bases": bases,
+    }
+
+
 @router.get("/sessions/{name}/info")
 async def session_info(name: str) -> dict:
     # Import tardio: api.py importa este módulo no topo.
