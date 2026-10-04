@@ -284,8 +284,9 @@ fn unmark(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use serde_json::json;
+    // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
+    use super::{button_key, cell_color, color, is_dock, is_empty, safe_href};
+    use serde_json::{json, Value};
 
     #[test]
     fn empty_band_is_the_engine_marker_or_nothing() {
