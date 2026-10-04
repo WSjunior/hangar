@@ -512,10 +512,41 @@ terminal; `test_runtime_terminal.py:286`, `:301` reescritos. Vindos da Task 4: o
 (o terminal é o último usuário depois da Task 5), `Phase.PreparingRust` e o ramo dele em
 `native_slot`, a adoção do vínculo pendente depois de `para_terminal`.
 
-- [ ] **Step 32: Testes acima, vistos falhar**
-- [ ] **Step 33: Registro do terminal direto no Rust**
-- [ ] **Step 34: Operação de teclado emprestado no Rust (pedir, prazo, devolver) e `run_admin` digitando só dentro dela; contrato 16**
-- [ ] **Step 35: Remover o código morto; `test_runtime_terminal*.py` tocados e testes Rust do terminal; revisar**
+- [x] **Step 32: Testes acima, vistos falhar**
+- [x] **Step 33: Registro do terminal direto no Rust**
+- [x] **Step 34: Operação de teclado emprestado no Rust (pedir, prazo, devolver) e `run_admin` digitando só dentro dela; contrato 16**
+- [x] **Step 35: Remover o código morto; `test_runtime_terminal*.py` tocados e testes Rust do terminal; revisar**
+
+**Registro da execução (Task 6).** Terminal com o Rust de pé nasce nele: `prepare_session` sem registro
+chama `_open_terminal` (vínculo conferido; `_prepare_queue_file` importa uma vez a fila antiga por nome,
+alinha a geração e grava o vínculo com a trava tomada e solta antes; depois o `open`); registro Python
+de terminal (vínculo pendente que provou a conversa, ou o registro do boot) vai ao Rust por
+`_open_slot_in_rust`, que agora confere o vínculo. Teclado emprestado (contrato 16): o ator do terminal
+aceita `keyboard_loan {seconds ≤ 120}` (um por vez, senão `keyboard_busy`) e `keyboard_return {loan_id}`
+(vencido ou de outro id: `keyboard_loan_expired`); durante o empréstimo toda entrada e controle voltam
+`deferred` com `keyboard_loan` (a linha fica na fila) e o drenador não digita; o prazo vencido é retomado
+sozinho. `run_admin` de sessão do Rust pede o teclado (`_LOAN_S = 60`), digita dentro de `borrowed(...)`
+— a autorização carrega o prazo menos 1 s de folga, e o `assert_writer` de cada escrita no tmux recusa
+fora dela ou depois dele (`KeyboardLoanExpired`) — e devolve sempre; devolução recusada também falha
+com o código. Segura a barreira da sessão (fechar/renomear espera; envios seguem para a fila do Rust).
+Resposta por texto de pergunta: o empréstimo só fecha a pergunta e o texto entra pela fila do Rust. O
+caminho Python do `run_admin` (modo `python`) segue com o diário da fila Python, sem `detach`/`adopt`.
+Saíram `adopt`, `Phase.PreparingRust` e os ramos dele (`internal_api`, eventos, `refresh_snapshot`).
+`LegacyBridge.quiesce` do terminal fica: o `change` do Python dono (modo `python`) ainda espera os
+escritores por ele. Testes: os da lista (os dois Python de empréstimo e o de nascimento falharam sem o
+código; os dois Rust também); `test_runtime_terminal.py` `:286`/`:301` reescritos para o empréstimo
+(recusa sem efeito; cancelamento espera a digitação e devolve o teclado); os que adotavam passam a abrir
+pelo `_open_slot_in_rust`.
+Revisão (`ecc:python-reviewer`, `ecc:rust-reviewer`, `ecc:silent-failure-hunter`): nenhum caminho digita
+no pane do Rust fora do empréstimo. Entraram: pedido de empréstimo repetido (mesmo `operation_id`)
+recebe o mesmo empréstimo; drenagem durante o empréstimo não limpa erro de manutenção; comando ou
+controle sem linha de fila durante o empréstimo volta `rejected` com `keyboard_loan` (antes sumia como
+adiado), e o `route` mostra a recusa com o código; prazo contado de antes do pedido; devolução que
+falha vai ao diário (`runtime.keyboard_return_failed`) sem esconder o erro da ação, e resposta
+malformada não deixa o teclado preso; fase reconferida dentro da barreira nos dois ramos do
+`run_admin`; `_open_terminal` fecha no Rust quando a resposta do `open` se perde e registra no diário
+as falhas de antes do `open`; resposta por texto aceita `deferred` (na fila do Rust). Ficou anotado:
+prazo vencido no meio de uma administração pode deixar o composer sujo até o Rust digitar de novo.
 
 ### Task 7: Rotas públicas do Rust (histórico e eventos) sem repasse por falha
 

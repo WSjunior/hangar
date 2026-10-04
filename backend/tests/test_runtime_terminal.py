@@ -12,6 +12,12 @@ from app import runtime_coordinator as rc, runtime_adapter as ra, plugin_bridge 
 from app.runtime_coordinator import Binding, RuntimeCoordinator, Phase, WriterLease
 
 
+async def _to_rust(owner, name):
+    """Registro Python do terminal aberto no Rust (o caminho do vínculo pendente que provou a conversa)."""
+    await owner._open_slot_in_rust(name, owner.slot(name), launch=False)
+    return True
+
+
 def terminal_binding(tmp_path):
     terminal = dict(name='session', pane='%1', conversation='sid', generation=1,
         created=123, mux_argv=['tmux'], windows=False,
@@ -283,44 +289,46 @@ def test_same_name_new_mux_does_not_import_old_queue(monkeypatch,tmp_path):
     asyncio.run(flow())
 
 
-def test_admin_detach_silent_has_zero_effect(monkeypatch,tmp_path):
+def test_admin_loan_refused_has_zero_effect(monkeypatch,tmp_path):
     from app.runtime_terminal import run_admin
-    gateway=TerminalGateway()
+    class Silent(LoanGateway):
+        async def op(self,target,command,operation_id,clock):
+            if command['kind'] == 'control' and command['control'] == 'keyboard_loan':
+                raise TimeoutError('silent Rust')
+            return await super().op(target,command,operation_id,clock)
+    gateway=Silent()
     owner,slot,_=live_owner(monkeypatch,tmp_path,gateway=gateway)
     calls=[]
     async def flow():
-        await owner.adopt('session')
-        gateway.fail_detach=True
+        await _to_rust(owner,'session')
         with pytest.raises(TimeoutError):
             await run_admin(owner,'session','permission',{},lambda:calls.append('BTab'))
-        assert calls==[] and slot.phase != Phase.Python
+        assert calls==[] and slot.phase == Phase.Rust
         gateway.lease.close()
     asyncio.run(flow())
 
 
-def test_admin_cancel_waits_thread_journal_and_readoption(monkeypatch,tmp_path):
+def test_admin_cancel_waits_thread_and_returns_keyboard(monkeypatch,tmp_path):
     from app.runtime_terminal import run_admin
-    gateway=TerminalGateway()
+    gateway=LoanGateway()
     owner,slot,_=live_owner(monkeypatch,tmp_path,gateway=gateway)
     entered,release=threading.Event(),threading.Event()
     def action():
         entered.set()
-        assert slot.frozen and slot.phase == Phase.Python
-        assert any(op['status'] == 'dispatching' and op['payload'].get('kind') == 'permission'
-            for op in slot.store.state['operations'].values())
+        assert slot.phase == Phase.Rust and slot.store is None
         release.wait(3)
         return 'mode'
     async def flow():
-        await owner.adopt('session')
+        await _to_rust(owner,'session')
         task=asyncio.create_task(run_admin(owner,'session','permission',{},action))
         while not entered.is_set(): await asyncio.sleep(.001)
         task.cancel()
         await asyncio.sleep(.01)
-        assert not task.done() and slot.frozen
-        with pytest.raises(RuntimeError): await owner.op('session',{'kind':'drain'},'drain')
+        assert not task.done(), 'o cancelamento espera a digitação em curso'
         release.set()
         with pytest.raises(asyncio.CancelledError): await task
-        assert slot.phase == Phase.Rust and not slot.frozen
+        assert [kind for kind,_ in gateway.controls] == ['keyboard_loan','keyboard_return']
+        assert slot.phase == Phase.Rust
         await owner.detach('session')
     asyncio.run(flow())
 
@@ -376,7 +384,7 @@ def test_rust_terminal_drain_shape_normalized_for_existing_callers(monkeypatch,t
         return await original(target,command,operation_id,clock)
     gateway.op=rpc
     async def flow():
-        await owner.adopt('session')
+        await _to_rust(owner,'session')
         assert (await owner.op('session',{'kind':'drain'},'drain'))['sent']==1
         await owner.detach('session')
     asyncio.run(flow())
@@ -386,7 +394,7 @@ def test_retire_old_rust_life_before_new_name_binding(monkeypatch,tmp_path):
     gateway=TerminalGateway()
     owner,slot,collected=live_owner(monkeypatch,tmp_path,gateway=gateway)
     async def flow():
-        await owner.adopt('session')
+        await _to_rust(owner,'session')
         collected['namespace']='socket:restarted:birth'
         assert await owner.prepare_session('session','claude')
         assert owner.slot('session') is not slot
@@ -695,7 +703,7 @@ def test_answer_model_dump_reaches_terminal_contract(monkeypatch,tmp_path,kind):
         return await original(target,command,operation,clock)
     gateway.op=op
     async def flow():
-        await owner.adopt('session')
+        await _to_rust(owner,'session')
         # Id explícito de pergunta TUI evita o caminho composto para chat sem pedido.
         result=await asyncio.to_thread(answer_sync,'session',[item.model_dump()],'tui-request',None)
         assert result['disposition']=='accepted'
@@ -714,7 +722,7 @@ def test_explicit_claude_steer_uses_owner_and_transcript_confirmation(monkeypatc
     monkeypatch.setattr(api,'_pane_info',lambda name:('claude','%1'))
     monkeypatch.setattr(api.PromptQueue,'confirm_delivered',lambda *args:pytest.fail('confirmação por ausência de prova'))
     async def flow():
-        await owner.adopt('session')
+        await _to_rust(owner,'session')
         result=await api.steer_session('session')
         assert result['promoted'] and result['confirmed']==0
         assert owner.transport.calls[-2:]==['control','confirm']
@@ -747,7 +755,7 @@ def test_claude_terminal_all_producers_route_to_owner(monkeypatch,tmp_path,sourc
     monkeypatch.setattr(api,'_recusa_orq',lambda name:None)
     monkeypatch.setattr(api,'_cached_info_sync',lambda name:SimpleNamespace(jsonl=slot.binding.jsonl,provider='claude'))
     async def flow():
-        await owner.adopt('session')
+        await _to_rust(owner,'session')
         if source=='input':await api.input_prompt('session',api.InputBody(text='text',steer=True))
         elif source=='shared_send':await api._enviar('session','[grupo: sender] message')
         elif source=='send_one':await asyncio.to_thread(api._send_one,'session','text')
@@ -767,7 +775,7 @@ def test_claude_terminal_controls_route_to_owner(monkeypatch,tmp_path,control):
     gateway=TerminalGateway()
     owner,slot,_=live_owner(monkeypatch,tmp_path,gateway=gateway)
     async def flow():
-        await owner.adopt('session')
+        await _to_rust(owner,'session')
         terminal=ti.TerminalInput()
         if control in {'send_key','send_term_key'}:await asyncio.to_thread(getattr(terminal,control),'session','Up')
         elif control=='send_text':await asyncio.to_thread(terminal.send_text,'session','text')
@@ -805,7 +813,7 @@ def test_public_guest_routes_follow_owner_and_readonly_pair_zero_effect(monkeypa
         share_gate._life_cache.clear()
         client=TestClient(api.app,base_url='http://127.0.0.1:8766',client=('203.0.113.9',1))
     async def flow():
-        await owner.adopt('session')
+        await _to_rust(owner,'session')
         result=await asyncio.to_thread(client.post,'/api/sessions/session/input',
             json={'text':'text'},headers={'Authorization':'Bearer guest'})
         assert result.status_code==status
@@ -1026,3 +1034,95 @@ def test_rust_account_move_reborn_terminal_reopens_with_key(monkeypatch, tmp_pat
     import json
     state = json.loads(slot.binding.state_path.read_bytes())
     assert [row['text'] for row in state['rows']] == ['carry']
+
+
+# --- Terminal nasce no Rust e o teclado emprestado (dono único, Task 6) ---
+
+class LoanGateway(TerminalGateway):
+    """Rust falso que empresta o teclado: guarda os pedidos de controle e o id do empréstimo."""
+    def __init__(self, seconds_seen=None):
+        super().__init__()
+        self.controls = []
+    async def op(self,target,command,operation_id,clock):
+        if command['kind'] == 'control' and command['control'] in {'keyboard_loan','keyboard_return'}:
+            self.calls.append(command['kind'])
+            self.controls.append((command['control'], dict(command['payload'])))
+            if command['control'] == 'keyboard_loan':
+                return {'operation_id':operation_id,'disposition':'accepted','payload':{'loan_id':'loan:1:7','seconds':command['payload']['seconds']}}
+            return {'operation_id':operation_id,'disposition':'accepted','payload':{'returned':True}}
+        return await super().op(target,command,operation_id,clock)
+
+
+def _born_terminal(monkeypatch, tmp_path, gateway):
+    from app import runtime_terminal as terminal, pqueue
+    from app.adapters.claude_headless import sessions
+    from app.runtime_adapter import LegacyBridge
+    collected = dict(name='session',pane='%1',created=1,namespace='socket:pid:birth',
+        jsonl=str(tmp_path / 'sid.jsonl'),session_id='sid',config_dir=str(tmp_path),cwd=str(tmp_path),
+        mux_argv=['tmux'],windows=False)
+    monkeypatch.setattr(terminal, '_collect', lambda name: {**collected, 'name': name})
+    monkeypatch.setattr(pqueue, '_queue_dir', lambda: tmp_path)
+    monkeypatch.setattr(sessions, 'load', lambda name: None)
+    owner = RuntimeCoordinator(gateway)
+    owner.legacy = LegacyBridge(owner, {'claude': object()})
+    rc._current = owner
+    return owner
+
+
+def test_terminal_session_registers_in_rust_without_python_phase(monkeypatch, tmp_path):
+    gateway = TerminalGateway()
+    owner = _born_terminal(monkeypatch, tmp_path, gateway)
+    monkeypatch.setattr(owner, 'register', lambda binding: pytest.fail('registro Python do terminal'))
+    async def flow():
+        owner.loop = asyncio.get_running_loop()
+        assert await owner.prepare_session('session', 'claude')
+        slot = owner.slot('session')
+        assert slot.phase == Phase.Rust and slot.lease is None and slot.store is None
+        assert gateway.calls == ['open']
+        await owner.change('session', lambda: asyncio.sleep(0), remove=True)
+    asyncio.run(flow())
+
+
+def test_admin_borrows_keyboard_without_moving_queue(monkeypatch, tmp_path):
+    from app import runtime_terminal as terminal
+    gateway = LoanGateway()
+    owner = _born_terminal(monkeypatch, tmp_path, gateway)
+    typed = []
+    def action():
+        terminal.assert_writer('session')       # é o que cada escrita no tmux confere
+        typed.append(owner.slot('session').phase)
+        return 'ok'
+    async def flow():
+        owner.loop = asyncio.get_running_loop()
+        assert await owner.prepare_session('session', 'claude')
+        assert await terminal.run_admin(owner, 'session', 'set_model', {'model':'haiku'}, action) == 'ok'
+        slot = owner.slot('session')
+        assert typed == [Phase.Rust], 'o Python digita com a sessão no Rust'
+        assert slot.phase == Phase.Rust and slot.lease is None and slot.store is None, 'fila e trava ficam no Rust'
+        assert [kind for kind, _ in gateway.controls] == ['keyboard_loan', 'keyboard_return']
+        assert gateway.controls[1][1] == {'loan_id': 'loan:1:7'}
+        assert 'close' not in gateway.calls and gateway.calls.count('open') == 1, 'sem fechar nem reabrir'
+        with pytest.raises(RuntimeError):
+            terminal.assert_writer('session')   # fora do empréstimo o Python não escreve
+        await owner.change('session', lambda: asyncio.sleep(0), remove=True)
+    asyncio.run(flow())
+
+
+def test_keyboard_loan_expires_and_fails_with_code(monkeypatch, tmp_path):
+    from app import runtime_terminal as terminal
+    gateway = LoanGateway()
+    owner = _born_terminal(monkeypatch, tmp_path, gateway)
+    monkeypatch.setattr(terminal, '_LOAN_S', 1)        # prazo menos a folga: já vencido ao digitar
+    def action():
+        terminal.assert_writer('session')
+    async def flow():
+        owner.loop = asyncio.get_running_loop()
+        assert await owner.prepare_session('session', 'claude')
+        with pytest.raises(RuntimeError) as caught:
+            await terminal.run_admin(owner, 'session', 'set_model', {'model':'haiku'}, action)
+        assert getattr(caught.value, 'code', '') == 'keyboard_loan_expired'
+        assert [kind for kind, _ in gateway.controls] == ['keyboard_loan', 'keyboard_return'], 'o teclado volta mesmo na falha'
+        with pytest.raises(RuntimeError):
+            terminal.assert_writer('session')
+        await owner.change('session', lambda: asyncio.sleep(0), remove=True)
+    asyncio.run(flow())
