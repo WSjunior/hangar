@@ -145,7 +145,7 @@ vi.mock('../ui/MultilineInput', () => ({ MultilineInput: ({ value, onChangeText,
 }));
 vi.mock('../features/pills/PillMenu', () => ({ PillMenu: () => null }));
 vi.mock('../features/ditado/EstiloPill', () => ({ DictationStyleMenu: () => null, useDictationStyleLabel: () => 'estilo' }));
-vi.mock('./SessionSettings', () => ({ SessionSettingsButton: ({ hidden }: { hidden?: boolean }) => (hidden ? null : createElement('button', { 'aria-label': 'composer_session_settings' })) }));
+vi.mock('./SessionSettings', () => ({ SessionSettingsButton: () => createElement('button', { 'aria-label': 'composer_session_settings' }) }));
 vi.mock('../features/ditado/useDitado', () => ({ useDitado: (callbacks: { onFim: typeof voiceInput.onFim }) => {
   voiceInput.onFim = callbacks.onFim;
   return { gravando: false, rms: 0, iniciar: () => {}, parar: () => {} };
@@ -448,12 +448,12 @@ describe('linha de botões do Composer', () => {
     act(() => root.unmount());
   });
 
-  it('trabalhando com texto sem terminal: Orientar na linha, microfone e chip saem', async () => {
+  it('trabalhando com texto sem terminal: a linha não muda — sem Orientar, com microfone e chip', async () => {
     composerChat.state = 'working';
     const { container, root } = await render(createElement(Composer, { serverId: 's1', name: 'sess', draft: 'texto', headless: true, onStop: () => {} }));
-    expect(container.querySelector('[aria-label="codex_orientar"]')).not.toBeNull();
-    expect(container.querySelector('[aria-label="composer_gravar_audio"]')).toBeNull();
-    expect(container.querySelector('[aria-label="composer_session_settings"]')).toBeNull();
+    expect(container.querySelector('[aria-label="codex_orientar"]')).toBeNull();
+    expect(container.querySelector('[aria-label="composer_gravar_audio"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="composer_session_settings"]')).not.toBeNull();
     expect(container.querySelector('[aria-label="composer_enviar_mensagem"]')).not.toBeNull();
     act(() => root.unmount());
   });

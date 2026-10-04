@@ -3,7 +3,7 @@ import * as Haptics from 'expo-haptics';
 import { AccessibilityInfo, ActivityIndicator, Alert, AppState, Platform, Pressable, Text, View, type NativeSyntheticEvent, type TextInput, type TextInputKeyPressEventData } from 'react-native';
 import type { NativeStackNavigationProp } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { broadcast, formataErro, uploadFileForServer, transcribeFileForServer, steerSession, podeEnviarSozinho, providerName, sendInputForServer, sideQuestionOf, slashMatches } from '@hangar/core';
+import { broadcast, formataErro, hexParaRgb, uploadFileForServer, transcribeFileForServer, steerSession, podeEnviarSozinho, providerName, sendInputForServer, sideQuestionOf, slashMatches } from '@hangar/core';
 import type { CommandInfo, MotivoFim, Provider, Server } from '@hangar/core';
 import { Glass } from '../ui/Glass';
 import { Icon } from '../ui/Icon';
@@ -28,6 +28,7 @@ import { comandoParcial } from './comandoParcial';
 import type { PickedAttachment } from '../ui/attachmentPicker';
 import { AttachSheet } from '../ui/AttachSheet';
 import { AttachmentPreview } from '../ui/AttachmentPreview';
+import type { PastedFile } from '@mattermost/react-native-paste-input';
 
 interface Props {
   serverId: string;
@@ -353,6 +354,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   const [failed, setFailed] = useState<{ file: File; motivo: MotivoFim; uri: string } | null>(null);
   const [autoN, setAutoN] = useState<number | null>(null);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+  const [focado, setFocado] = useState(false);
   const [styleMenuOpen, setStyleMenuOpen] = useState(false);
   const dictationStyle = useDictationStyleLabel();
   const [commandSheetOpen, setCommandSheetOpen] = useState(false);
@@ -895,7 +897,6 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
   // Com texto a linha é Orientar + Enviar, como no PWA; parar pede o campo vazio.
   const showStop = !!onStop && canInterrupt && !hasContent;
   const showSend = !showStop || hasContent || sending || uploading || filaCount > 0;
-  const showSteerText = (isCodex || headless) && state === 'working' && hasContent && !sendToPair;
 
   const confirmStop = useCallback(() => {
     Alert.alert(m.composer_interromper_claude(), m.composer_interromper_msg(), [
@@ -994,6 +995,14 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     void adoptPicked(picked);
   }, [adoptPicked]);
 
+  // Colar imagem ou arquivo no campo vira o anexo, como o paste do PWA. O composer leva um anexo só.
+  const handlePaste = useCallback((files: PastedFile[], erro: string | null) => {
+    if (erro) { setError(erro); return; }
+    const f = files[0];
+    if (!f) return;
+    handlePicked({ uri: f.uri, name: f.fileName, mime: f.type, kind: f.type.startsWith('image/') ? 'image' : 'file', size: f.fileSize });
+  }, [handlePicked]);
+
   // Só o que este app enviou deixa a marca do attachInsert no texto; basta para saber se há galeria.
   const hasSentAttachments = useMemo(
     () => events.some((e) => e.kind === 'user_msg' && !!e.text?.includes('📎')),
@@ -1014,8 +1023,12 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
     };
   }, []);
 
+  // Foco tinge a borda com o acento, como no PWA: o campo não tem cursor de contorno próprio.
+  const acento = hexParaRgb(theme.tokens.accent.base);
+  const bordaFoco = focado && acento ? { borderColor: `rgba(${acento.join(',')},0.45)` } : null;
+
   return (
-    <Glass variant="chrome" style={styles.glass}>
+    <Glass variant="chrome" style={[styles.glass, bordaFoco]}>
         {/* Fila esperando o turno: diz quantas e dá a saída de mandar agora (como o chip do PWA). */}
         {showSteer ? (
           <Pressable
@@ -1042,9 +1055,9 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
 
         {steerFeedback && state === 'working' ? <Text style={[styles.hint, { color: theme.tokens.text.secondary }]} accessibilityLiveRegion="polite">{steerFeedback}</Text> : null}
 
-        {/* Modelo, nível e permissão foram para o chip da linha de baixo; o par fica à vista
-            porque muda para quem a mensagem vai. */}
-        {pairPeers?.length ? (
+        {/* Mandar pro grupo liga e desliga no +; aqui só fica à vista enquanto está ligado, porque
+            muda para quem a mensagem vai. */}
+        {pairPeers?.length && sendToPair ? (
           <Pressable
             onPress={() => setSendToPair((current) => !current)}
             hitSlop={7}
@@ -1065,6 +1078,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           <AttachmentPreview attachment={pendingAttach} onRemove={handleRemoveAttach} disabled={sending} />
         ) : null}
 
+
         <SlashSuggest matches={suggestions} onPick={handleSuggestPick}
           error={slashQuery !== null ? commandsError : ''} onRetry={retryCommands} />
 
@@ -1076,16 +1090,29 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
             accessibilityLabel={m.composer_mensagem()}
             value={text}
             onChangeText={handleChangeText}
-            placeholder={provider ? m.composer_mensagem_para({ nome: providerName(provider as Provider) }) : m.composer_mensagem()}
+            placeholder={transcribing ? m.composer_transcrevendo_audio()
+              : provider ? m.composer_mensagem_para({ nome: providerName(provider as Provider) }) : m.composer_mensagem()}
             maxHeight={120}
             onKeyPress={handleKeyPress}
             selection={selection}
             onSelectionChange={() => setSelection(undefined)}
+            onFocus={() => setFocado(true)}
+            onBlur={() => setFocado(false)}
+            onPaste={handlePaste}
+            style={gravando ? styles.inputEscondido : undefined}
           />
+          {/* Gravando, a onda ocupa o lugar do campo (montado por baixo, com o texto intacto): a caixa
+              não cresce nem muda de forma por causa do ditado. */}
+          {gravando ? (
+            <View style={styles.ondaNoCampo}>
+              {/* Sem alvo, o fim da gravação não transcreve: é o Cancelar do PC, que joga o áudio fora. */}
+              <RecordingWave rms={rms} onCancel={() => { recordingTargetRef.current = null; void parar('botao'); }} />
+            </View>
+          ) : null}
         </View>
 
         {/* Linha do app de PC: + e microfone sem moldura à esquerda; o chip da sessão e o Enviar
-            fecham a linha. Com o Orientar na linha, microfone e chip saem para dar espaço. */}
+            fecham a linha. Com o Orientar, o chip encolhe o nome do modelo mas nada sai, como no PWA. */}
         <View style={styles.row}>
           <Pressable
             onPress={() => setAttachMenuOpen(true)}
@@ -1103,8 +1130,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
             )}
           </Pressable>
 
-          {showSteerText && !gravando ? null : (
-            <Pressable
+          <Pressable
               onPress={handleMicPress}
               disabled={transcribing || sending || (!!dictation && !gravando)}
               hitSlop={5}
@@ -1129,30 +1155,12 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
               {gravando
                 ? <Icon name="Square" size={16} color={theme.tokens.status.error} />
                 : <Icon name="Mic" size={20} color={theme.tokens.text.secondary} />}
-            </Pressable>
-          )}
+          </Pressable>
 
           <View style={styles.spacer} />
 
-          <SessionSettingsButton serverId={serverId} name={name} provider={provider} headless={headless} openRequest={selectorRequest}
-                                 hidden={showSteerText} />
+          <SessionSettingsButton serverId={serverId} name={name} provider={provider} headless={headless} openRequest={selectorRequest} />
 
-          {/* Orientar: o texto digitado entra no turno em curso em vez de esperar na fila. */}
-          {showSteerText ? (
-            <Pressable
-              onPress={() => { void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); void handleSend(true); }}
-              disabled={!canSend}
-              hitSlop={5}
-              style={({ pressed }) => [styles.steerPill, { borderColor: theme.tokens.border.strong }, (pressed || !canSend) && styles.iconBtnDisabled]}
-              accessibilityRole="button"
-              accessibilityLabel={m.codex_orientar()}
-              accessibilityHint={m.codex_orientar_ajuda()}
-              accessibilityState={{ disabled: !canSend }}
-            >
-              <Icon name="Undo2" size={15} color={theme.tokens.accent.base} />
-              <Text style={[styles.steerPillText, { color: theme.tokens.text.primary }]}>{m.codex_orientar()}</Text>
-            </Pressable>
-          ) : null}
 
           {/* Parar: só o quadrado vermelho, sem círculo em volta, como no PC. */}
           {showStop ? (
@@ -1201,19 +1209,6 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
             </Pressable>
           ) : null}
         </View>
-
-        {gravando ? (
-          <Text style={[styles.hint, { color: theme.tokens.text.muted }]}>{m.composer_dictation_style({ estilo: dictationStyle })}</Text>
-        ) : null}
-
-        {gravando ? (
-          // Sem alvo, o fim da gravação não transcreve: é o Cancelar do PC, que joga o áudio fora.
-          <RecordingWave rms={rms} onCancel={() => { recordingTargetRef.current = null; void parar('botao'); }} />
-        ) : null}
-
-        {transcribing ? (
-          <Text style={[styles.hint, { color: theme.tokens.text.muted }]}>{m.composer_transcrevendo_audio()}</Text>
-        ) : null}
 
         {dictation && !transcribing ? (
           <View style={styles.errorRow}>
@@ -1307,11 +1302,6 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
           </View>
         ) : null}
 
-        {/* hint sutil do estado working: com fila, o selo do Enviar já avisa; este texto só aparece em working sem fila */}
-        {state === 'working' && filaCount === 0 && !gravando && !transcribing ? (
-          <Text style={[styles.hint, { color: theme.tokens.text.muted }]}>{m.composer_sessao_trabalhando()}</Text>
-        ) : null}
-
         <CommandSheet
           open={commandSheetOpen}
           onClose={() => setCommandSheetOpen(false)}
@@ -1341,6 +1331,9 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
             : undefined}
           onCommands={() => setCommandSheetOpen(true)}
           dictationStyle={{ label: dictationStyle, onPress: () => setStyleMenuOpen(true) }}
+          sendToGroup={pairPeers?.length
+            ? { label: m.composer_mandar_tambem({ n: pairPeers.join(', ') }), on: sendToPair, onPress: () => setSendToPair((c) => !c) }
+            : undefined}
         />
     </Glass>
   );
@@ -1373,21 +1366,6 @@ const styles = StyleSheet.create((theme) => ({
   steerCount: {
     fontSize: theme.base.text.xs,
   },
-  // Botão de texto da altura do Enviar; a borda fina diz que é ação, não ajuste.
-  steerPill: {
-    height: 34,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    borderWidth: 1,
-    borderRadius: 17,
-    paddingHorizontal: 13,
-    marginRight: 4,
-  },
-  steerPillText: {
-    fontSize: theme.base.text.xs,
-    fontWeight: '600',
-  },
   pairChip: {
     alignSelf: 'flex-start',
     flexDirection: 'row',
@@ -1418,6 +1396,8 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: 'center',
     paddingHorizontal: theme.base.space[1],
   },
+  inputEscondido: { opacity: 0 },
+  ondaNoCampo: { ...StyleSheet.absoluteFillObject, justifyContent: 'center', paddingHorizontal: theme.base.space[1] },
   // 34 pt + hitSlop 5 = 44 pt de toque; o ícone fica sem fundo, como no PC.
   iconBtn: {
     width: 34,

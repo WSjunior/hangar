@@ -6,6 +6,7 @@ import * as Haptics from 'expo-haptics';
 import { cwdParts, isOrq, loopBadge, providerName, relativeTime, rotuloEstado, untrackedReason, worktreeLabel, type AggSession, type State } from '@hangar/core';
 import { Chip, type Tone } from '../../ui/Chip';
 import { HangarMark } from '../../ui/HangarMark';
+import { WorkingMark } from '../../ui/WorkingMark';
 import { Icon } from '../../ui/Icon';
 import { superficie } from '../../theme/superficie';
 import { useWorktreeStatus } from '../worktrees/worktreeStatus';
@@ -144,7 +145,9 @@ export const SessionRow = memo(function SessionRow({ session: s, mostrarServidor
         acao(nativeEvent.actionName);
       }}
     >
-      <View style={styles.lead}><HangarMark size={20} color={corEstado} /></View>
+      <View style={styles.lead}>
+        {s.state === 'working' ? <WorkingMark size={20} color={corEstado} /> : <HangarMark size={20} color={corEstado} />}
+      </View>
       <View style={styles.col}>
         <View style={styles.linha}>
           <Text style={[styles.nome, { color: theme.tokens.text.primary }]} numberOfLines={1}>{s.name}</Text>

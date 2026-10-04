@@ -24,11 +24,13 @@ type Props = {
   onCommands?: () => void;
   /** Estilo do ditado vigente e a ação de trocá-lo; ausente, o item não aparece. */
   dictationStyle?: { label: string; onPress: () => void };
+  /** Mandar também pro par/grupo; ausente (sessão sem par), o item não aparece. */
+  sendToGroup?: { label: string; on: boolean; onPress: () => void };
 };
 
 const TILE = 112;
 
-export function AttachSheet({ open, onClose, onPick, onError, onSessionAttachments, recentPhotos, onCommands, dictationStyle }: Props) {
+export function AttachSheet({ open, onClose, onPick, onError, onSessionAttachments, recentPhotos, onCommands, dictationStyle, sendToGroup }: Props) {
   const c = useSettingsColors();
   // A ação roda depois que a folha some: o iOS recusa abrir câmera/galeria por cima de uma folha
   // ainda em animação de saída.
@@ -58,6 +60,9 @@ export function AttachSheet({ open, onClose, onPick, onError, onSessionAttachmen
     ...(onCommands ? [{ icon: 'SquareSlash' as IconName, label: m.comandos_titulo(), onPress: () => choose(onCommands) }] : []),
     ...(dictationStyle
       ? [{ icon: 'AudioLines' as IconName, label: m.ditado_estilo_titulo(), value: dictationStyle.label, onPress: () => choose(dictationStyle.onPress) }]
+      : []),
+    ...(sendToGroup
+      ? [{ icon: 'ArrowLeftRight' as IconName, label: sendToGroup.label, value: sendToGroup.on ? '✓' : undefined, onPress: () => choose(sendToGroup.onPress) }]
       : []),
   ];
 

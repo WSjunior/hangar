@@ -31,6 +31,7 @@ export const Animated = {
 };
 export const Platform = { OS: 'android', select: (x: any) => x.android ?? x.default };
 export const TextInput = (props: any) => React.createElement('textarea', domProps(props));
+export const TurboModuleRegistry = { get: () => null };
 export const StyleSheet = { create: (x: any) => x, flatten: (x: any) => x };
 export const Modal = (props: any) => (props.visible === false ? null : React.createElement('div', null, props.children));
 export const Alert = { alert: (..._args: unknown[]) => {} };

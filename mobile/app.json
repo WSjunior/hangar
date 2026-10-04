@@ -74,7 +74,8 @@
           "savePhotosPermission": "Salva imagens da conversa nas suas fotos.",
           "isAccessMediaLocationEnabled": false
         }
-      ]
+      ],
+      "./plugins/withPasteInput"
     ],
     "extra": {
       "router": {},

@@ -4613,7 +4613,7 @@
   "native_terminal_suggestion": "{text}  ·  Tab para usar",
   "native_stop_confirm_direct": "Interromper a resposta atual?",
   "native_close": "Fechar",
-  "native_ago_now": "agora há pouco",
+  "native_fechar_teclado": "Fechar teclado",  "native_ago_now": "agora há pouco",
   "native_ago_min": "há {n} min",
   "native_ago_h": "há {n} h",
   "native_mention_hint": "Digite parte do caminho para buscar arquivos.",

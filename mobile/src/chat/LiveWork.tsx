@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { ActivityIndicator, Animated, Pressable, Text, View } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { formatElapsed, type AgentRun } from '@hangar/core';
-import { HangarMark } from '../ui/HangarMark';
+import { WorkingMark } from '../ui/WorkingMark';
 import { Icon } from '../ui/Icon';
 import { superficie } from '../theme/superficie';
 import * as m from '../paraglide/messages';
@@ -43,7 +43,7 @@ export function WorkingLine({ label, since }: { label?: string | null; since: nu
   const tempo = lido.elapsed ?? (since !== null ? formatElapsed(Math.max(0, agora - since) / 1000) : '');
   return (
     <View style={styles.linha} accessibilityRole="text" accessibilityLiveRegion="polite" accessibilityLabel={verbo}>
-      <Pulso><HangarMark size={16} color={theme.tokens.accent.base} /></Pulso>
+      <WorkingMark size={16} color={theme.tokens.accent.base} />
       <Text style={[styles.verbo, { color: theme.tokens.text.secondary }]} numberOfLines={1}>{verbo}</Text>
       {tempo ? <Text style={[styles.tempo, { color: theme.tokens.text.muted }]}>{tempo}</Text> : null}
     </View>

@@ -20,9 +20,6 @@ interface Props {
   headless: boolean;
   // `/model` e `/effort` abrem o painel: cada pedido novo leva um número maior.
   openRequest?: { which: 'model' | 'effort'; n: number } | null;
-  // Some da linha sem desmontar o painel: com o Orientar na linha não há espaço, e o `/model`
-  // digitado ainda precisa abri-lo.
-  hidden?: boolean;
 }
 
 // O ícone do chip diz o modo; só o Planejar ganha nome e cor, porque muda o que a sessão faz.
@@ -43,7 +40,7 @@ const effortLabel = (lv: string) => LEVEL[lv.toLowerCase()]?.() ?? lv.charAt(0).
 
 // Um chip só na linha do composer (modo no ícone, modelo e nível no texto) e um popover só com as
 // três escolhas, o mesmo cartão do app de PC (render_ctl_panel).
-export function SessionSettingsButton({ serverId, name, provider, headless, openRequest, hidden }: Props) {
+export function SessionSettingsButton({ serverId, name, provider, headless, openRequest }: Props) {
   const { theme } = useUnistyles();
   const chat = chatStore(serverId, name);
   const statusLine = chat.use((s) => s.statusLine);
@@ -112,8 +109,7 @@ export function SessionSettingsButton({ serverId, name, provider, headless, open
 
   return (
     <>
-      {hidden ? null : (
-        <Pressable
+      <Pressable
           ref={anchor}
           onPress={() => setOpen(true)}
           hitSlop={{ top: 7, bottom: 7 }}
@@ -135,12 +131,11 @@ export function SessionSettingsButton({ serverId, name, provider, headless, open
             {effortText ? <Text style={{ color: theme.tokens.text.secondary }}>{` ${effortText}`}</Text> : null}
           </Text>
           <Icon name="ChevronDown" size={13} color={tint} />
-        </Pressable>
-      )}
+      </Pressable>
 
       <AnchoredPanel
         open={open}
-        anchor={hidden ? null : anchor.current}
+        anchor={anchor.current}
         onClose={close}
         onDismissed={() => setQuery('')}
         label={m.composer_session_settings()}
