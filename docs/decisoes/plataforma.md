@@ -1214,6 +1214,35 @@ Reprodução, da raiz: `cd backend && uv run python ../scripts/comparar-custos.p
 executável previamente congelado, com conferência opcional por `--binary-sha256`. O modo de
 snapshot depende de `bwrap` no Linux e não altera serviços ou configuração da máquina.
 
+### Visão resumida da tela inicial (`?view=summary`)
+
+O card de uso da tela inicial (web, app e nativo) lê só `totals`, `by_day`, `by_model`,
+`sem_tarifa`, `applied` e `usd_brl`; o relatório inteiro tinha ~1 MB, quase todo `combos`.
+`GET /api/costs?view=summary` monta só esses seis campos pelas mesmas funções e na mesma ordem
+de soma (`build_summary`; teste compara campo a campo com o inteiro), com chave de cache própria.
+Sem o parâmetro, ou com outro valor, sai o relatório inteiro: cliente antigo e servidor antigo
+(Python incluído, que ignora o parâmetro) continuam iguais. A tela de Custos segue pedindo o
+inteiro.
+
+Medida em 04/10/2026, esta máquina (i5-13400F, carga 7–15 de outras sessões), `hangar-server`
+release isolado (porta livre, `XDG_CACHE_HOME` temporário, Python falso só com os escopos reais),
+mediana de 15 pedidos para "pronto" (relatório em cache) e o primeiro pedido para "remontando"
+(índice pronto, relatório fora do cache):
+
+| `/api/costs` | Inteiro | Resumido |
+|---|---:|---:|
+| `all`: pronto / remontando | 2,23 ms / 21,6 ms | 0,20 ms / 13,6 ms |
+| `all`: corpo / gzip | 1.020.394 B / 136.788 B | 15.798 B / 3.628 B |
+| `7d`: pronto / remontando | 0,92 ms / 14,6 ms | 0,32 ms / 14,6 ms |
+| `7d`: corpo / gzip | 368.571 B / 48.325 B | 5.521 B / 1.590 B |
+
+Python (medida do kick-off na mesma máquina): 2–8 ms pronto, 90–200 ms remontando, 1 MB.
+Reconstrução do índice do zero, mesmos escopos, rodadas seguidas na mesma hora: Python
+(`_sincronizar` com `_CACHE_DIR` temporário) 41,5 s e 40,6 s, pico 169 MiB; Rust
+(`examples/custos`, índice novo) 6,5 s e 6,3 s, pico 57–58 MiB (as três primeiras rodadas, com o
+cache de páginas ainda frio, deram 18,9 s, 10,8 s e 7,1 s). Pelo servidor, do primeiro pedido ao
+primeiro 200: 9,7 s.
+
 ### Uso real ainda pendente
 
 A prova foi por arquivos e processos avulsos. O dono ainda precisa conferir Custos e Uso no
