@@ -328,7 +328,8 @@ def test_confirmed_prompt_does_not_consume_next_echo(tmp_path, monkeypatch, relo
             if reload:
                 slot.store = QueueStore(slot.binding.state_path, slot.binding.projection_dir, initial_state("key", 1, "session", []))
         assert all(row["confirmed"] for row in slot.store.state["rows"])
-        assert len(slot.store.state["used_occurrences"]) == 2
+        # As duas confirmadas: não resta operação que possa casar os ecos, e o uso sai da poda.
+        assert slot.store.state["used_occurrences"] == {}
     try:
         asyncio.run(scenario())
     finally:

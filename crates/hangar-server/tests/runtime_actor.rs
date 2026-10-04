@@ -111,7 +111,8 @@ async fn confirmed_prompt_does_not_consume_next_echo() {
     }
     let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
     assert!(state.rows.iter().all(|row|row["confirmed"] == true));
-    assert_eq!(state.used_occurrences.len(),2);
+    // As duas confirmadas: não resta operação que possa casar os ecos, e o uso sai da poda.
+    assert!(state.used_occurrences.is_empty());
     handle.stop().await.unwrap();
     assert_eq!(server.await.unwrap(),0);
 }

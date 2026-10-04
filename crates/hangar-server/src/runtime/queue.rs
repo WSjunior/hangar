@@ -11,6 +11,10 @@ use tokio::sync::{mpsc, oneshot};
 
 const CALL_PREFIX: &str = "call::";
 const CAP: usize = 1000;
+const VERSION: u32 = 2;
+/// Janela de chamadas recentes que nunca sai: cobre a repetição da mesma chamada e o ACK atrasado
+/// de uma fase. Mesmo valor de `_RECENT_CALLS` em runtime_queue.py.
+const RECENT_CALLS: u64 = 256;
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,12 +30,33 @@ pub struct Operation {
     pub result: Value,
     pub dispatch_cursor: Value,
     pub wire_attempts: BTreeMap<String, Value>,
+    /// Última chamada que tocou a operação; ausente na v1 = antiga.
+    #[serde(default)]
+    pub seq: u64,
 }
 
 impl Operation {
     fn new(id: &str, payload: Value, entry_id: Option<String>) -> Self {
         Self { id:id.into(), payload, entry_id, status:Status::Prepared,
-            result:Value::Null, dispatch_cursor:Value::Null, wire_attempts:BTreeMap::new() }
+            result:Value::Null, dispatch_cursor:Value::Null, wire_attempts:BTreeMap::new(), seq:0 }
+    }
+    fn slim(&mut self) {
+        self.result = slim(&self.result);
+        for attempt in self.wire_attempts.values_mut() {
+            if attempt.get("result").is_some() { attempt["result"] = slim(&attempt["result"]); }
+        }
+    }
+    fn group<'a>(&'a self, key: &'a str) -> &'a str { self.payload["logical_id"].as_str().unwrap_or(key) }
+    /// A ocorrência ainda pode confirmar esta operação? Na dúvida, sim.
+    fn may_confirm(&self, record: &Value) -> bool {
+        if self.entry_id.is_none() || self.status == Status::Confirmed { return false; }
+        // Preparada ainda pode ligar cursor. Todo bind captura depois de a operação existir, então
+        // quem nasce depois da poda nasce com cursor depois da ocorrência.
+        if self.status == Status::Prepared { return true; }
+        let cursor = &self.dispatch_cursor;
+        if !cursor.is_object() { return false; }
+        let (Some(offset),Some(cursor_offset)) = (record["offset"].as_i64(),cursor["offset"].as_i64()) else { return true };
+        cursor["conversation"] == record["conversation"] && cursor["file_identity"] == record["file_identity"] && offset >= cursor_offset
     }
 }
 
@@ -46,12 +71,67 @@ pub struct State {
     pub operations: BTreeMap<String, Operation>,
     pub used_occurrences: BTreeMap<String, Value>,
     pub runtime_state: Value,
+    #[serde(default)]
+    pub next_seq: u64,
+}
+
+/// Resposta guardada só é relida pela disposição (e pelo formato de RuntimeReply); o conteúdo já
+/// foi entregue a quem pediu e era o que fazia o diário pesar megabytes. Igual ao `_slim` do Python.
+fn slim(result: &Value) -> Value {
+    let mut result = result.clone();
+    if let Some(payload) = result.as_object_mut().and_then(|object| object.get_mut("payload")) { *payload = Value::Null; }
+    result
+}
+
+/// O recibo guarda a ação sem o volume: basta para detectar reuso do mesmo identificador.
+fn receipt_payload(mut action: Value) -> Value {
+    if action["kind"] == "set_runtime_state" { action["state"] = Value::Null; }
+    else if action.get("result").is_some() { action["result"] = slim(&action["result"]); }
+    action
 }
 
 impl State {
     pub fn new(key: &str, generation: u64, name: &str, rows: Vec<Value>) -> Self {
-        Self { version:1, owner_key:key.into(), generation, name:name.into(), rows,
-            operations:BTreeMap::new(), used_occurrences:BTreeMap::new(), runtime_state:json!({}) }
+        Self { version:VERSION, owner_key:key.into(), generation, name:name.into(), rows,
+            operations:BTreeMap::new(), used_occurrences:BTreeMap::new(), runtime_state:json!({}), next_seq:1 }
+    }
+
+    /// Lê v1 ou v2 já podado; devolve se veio da v1. Sem ordem gravada, tudo o que veio da v1
+    /// conta como antigo: fora da janela já na leitura.
+    pub fn load(bytes: &[u8]) -> io::Result<(Self, bool)> {
+        let mut state: State = serde_json::from_slice(bytes).map_err(|_| invalid("estado da fila inválido"))?;
+        let migrated = state.version == 1;
+        if migrated { state.version = VERSION; state.next_seq = RECENT_CALLS + 1; }
+        if state.version != VERSION || state.next_seq == 0 || !state.rows.iter().all(Value::is_object)
+            || !state.runtime_state.is_object() { return Err(invalid("estado da fila incompatível")); }
+        state.compact();
+        Ok((state, migrated))
+    }
+
+    /// Poda o que nada mais lê; mesma regra do `compact` em runtime_queue.py.
+    /// Fica: as últimas RECENT_CALLS chamadas (recibo e operação tocada), operação não final,
+    /// operação de entrada ainda não confirmada e o grupo inteiro (raiz + fases por `logical_id`)
+    /// de quem ficou. Operação final que fica perde o conteúdo da resposta (`slim`). Ocorrência
+    /// usada só sai quando nenhuma operação restante pode casá-la.
+    pub fn compact(&mut self) {
+        let cutoff = self.next_seq.saturating_sub(RECENT_CALLS);
+        let open_rows: BTreeSet<&str> = self.rows.iter().filter(|r| r["confirmed"] != true).filter_map(|r| r["id"].as_str()).collect();
+        let held = |key: &str, op: &Operation| op.seq >= cutoff || !key.starts_with(CALL_PREFIX)
+            && (!matches!(op.status, Status::Accepted | Status::Rejected | Status::Confirmed)
+                || op.entry_id.as_deref().is_some_and(|id| open_rows.contains(id)));
+        let groups: BTreeSet<String> = self.operations.iter().filter(|(key, op)| !key.starts_with(CALL_PREFIX) && held(key, op))
+            .map(|(key, op)| op.group(key).to_owned()).collect();
+        let keep: BTreeSet<String> = self.operations.iter().filter(|(key, op)| held(key, op)
+            || !key.starts_with(CALL_PREFIX) && groups.contains(op.group(key))).map(|(key, _)| key.clone()).collect();
+        self.operations.retain(|key, _| keep.contains(key));
+        for (_, op) in self.operations.iter_mut().filter(|(key, op)| !key.starts_with(CALL_PREFIX)
+            && matches!(op.status, Status::Accepted | Status::Rejected | Status::Confirmed)) { op.slim(); }
+        // Linha confirmada não volta a confirmar (ConfirmOccurrence recusa), mesmo que a resposta
+        // tardia tenha devolvido a operação para `accepted`.
+        let confirmed_rows: BTreeSet<&str> = self.rows.iter().filter(|r| r["confirmed"] == true).filter_map(|r| r["id"].as_str()).collect();
+        let candidates: Vec<&Operation> = self.operations.iter().filter(|(key, op)| !key.starts_with(CALL_PREFIX)
+            && !op.entry_id.as_deref().is_some_and(|id| confirmed_rows.contains(id))).map(|(_, op)| op).collect();
+        self.used_occurrences.retain(|_, record| !record.is_object() || candidates.iter().any(|op| op.may_confirm(record)));
     }
 
     fn protected(&self, entry_id: &str) -> bool {
@@ -122,9 +202,9 @@ impl Store {
         std::fs::create_dir_all(projection_dir)?;
         let state = match std::fs::read(state_path) {
             Ok(bytes) => {
-                let state: State = serde_json::from_slice(&bytes).map_err(|_| invalid("estado da fila inválido"))?;
-                if state.version != 1 || state.owner_key != initial.owner_key || !state.rows.iter().all(Value::is_object)
-                    || !state.runtime_state.is_object() { return Err(invalid("estado da fila incompatível")); }
+                let (state, migrated) = State::load(&bytes)?;
+                if state.owner_key != initial.owner_key { return Err(invalid("estado da fila incompatível")); }
+                if migrated { atomic_write(state_path, &serde_json::to_vec(&state)?)?; }
                 state
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -157,15 +237,14 @@ impl Store {
     pub fn exec(&mut self, generation: u64, call_id: &str, clock: ClockSample, action: Action) -> io::Result<Value> {
         if self.fenced {
             if !matches!(&action, Action::EnsureProjection) { return Err(invalid("fila bloqueada após falha de persistência")); }
-            self.state = serde_json::from_slice(&std::fs::read(&self.state_path)?)
-                .map_err(|_| invalid("estado comprometido da fila inválido"))?;
+            self.state = State::load(&std::fs::read(&self.state_path)?)?.0;
             self.ensure_projection()?;
             self.fenced = false;
         }
         if generation != self.state.generation { return Err(invalid("geração da fila mudou")); }
         if call_id.is_empty() { return Err(invalid("operação da fila sem identificador")); }
         let receipt_id = format!("{CALL_PREFIX}{call_id}");
-        let payload = serde_json::to_value(&action)?;
+        let payload = receipt_payload(serde_json::to_value(&action)?);
         if let Some(previous) = self.state.operations.get(&receipt_id) {
             if previous.payload != payload { return Err(invalid("identificador reutilizado com outra operação")); }
             let result = previous.result.clone();
@@ -174,13 +253,29 @@ impl Store {
         }
         let readonly = matches!(&action, Action::Load | Action::EntryDelivered { .. } | Action::EnsureProjection);
         if readonly { self.ensure_projection()?; }
+        let target = match &action {
+            Action::Prepare { id, .. } | Action::BindDispatch { id, .. } | Action::BeginDispatch { id, .. }
+            | Action::Finish { id, .. } | Action::LateRpcResolution { id, .. } | Action::ConfirmOccurrence { id, .. } => Some(id.clone()),
+            _ => None,
+        };
+        let targeted = target.is_some();
         let mut state = self.state.clone();
         let result = apply(&mut state, action, clock, call_id)?;
         if !readonly {
+            let seq = state.next_seq;
+            state.next_seq += 1;
+            if let Some(op) = target.and_then(|id| state.operations.get_mut(&id)) { op.seq = seq; }
             let mut receipt = Operation::new(&receipt_id, payload, None);
             receipt.status = Status::Accepted;
             receipt.result = result.clone();
+            if targeted && receipt.result.is_object() {
+                let mut op: Operation = serde_json::from_value(receipt.result.clone())?;
+                op.slim();
+                receipt.result = serde_json::to_value(op)?;
+            }
+            receipt.seq = seq;
             state.operations.insert(receipt_id, receipt);
+            state.compact();
             self.fenced = true;
             atomic_write(&self.state_path, &serde_json::to_vec(&state)?)?;
             self.state = state;
@@ -338,7 +433,8 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             if !proof.validates(&cursor,row) { return Err(invalid("prova de entrega não corresponde ao despacho")); }
             row["delivered"] = json!(true); row["confirmed"] = json!(true);
             row.as_object_mut().unwrap().remove("desistiu");
-            state.used_occurrences.insert(proof.occurrence.id.clone(),json!({"operation_id":id,"generation":state.generation}));
+            state.used_occurrences.insert(proof.occurrence.id.clone(),json!({"operation_id":id,"generation":state.generation,
+                "conversation":proof.occurrence.conversation,"file_identity":proof.occurrence.file_identity,"offset":proof.occurrence.offset}));
             state.operations.get_mut(&id).unwrap().status = Status::Confirmed;
             json!(true)
         }
