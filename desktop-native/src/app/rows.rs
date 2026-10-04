@@ -306,8 +306,8 @@ impl Hangar {
         div().flex().flex_col().gap_1().child(header).when(open, |el| el.child(chip_table(rows))).into_any_element()
     }
 
-    /// Grupo da Árvore: título e as linhas no tronco. Aberto enquanto é a cauda do turno, como no Zeron, mesmo entre uma
-    /// chamada e a próxima; o clique inverte.
+    /// Grupo da Árvore: título e as linhas no tronco. Nasce fechado, também na cauda do turno, e só o clique abre: aberto
+    /// pelo estado do turno, ele reabria sozinho depois de fechado.
     pub(super) fn render_tree_group(&mut self, row: &str, parts: &[Tool], cx: &mut Context<Self>) -> AnyElement {
         let events = &self.chat.events;
         let calls = parts.iter().filter(|t| events[t.call].kind != "thinking");
@@ -315,7 +315,7 @@ impl Hangar {
         let running = calls.clone().any(|t| t.result.is_none() && self.running(t.call));
         // Texto fecha grupo no `build`: a primeira parte "roda" enquanto nenhuma mensagem veio depois e a sessão trabalha.
         let live = parts.first().is_some_and(|t| self.running(t.call));
-        let open = live != self.expanded.contains(row);
+        let open = self.expanded.contains(row);
         let toggle_key = row.to_owned();
         let mark = running.then(|| self.working_mark_slot(super::panes::Area::Conversation, format!("tree-{row}"), 12., theme::accent()));
         // Rodando, o título brilha fora da conversa guardada, como a marca.

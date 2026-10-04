@@ -1778,9 +1778,11 @@ mod tests {
         assert_eq!(names(&l.waiting), ["Beta"]);
         assert_eq!(names(&l.groups[0].sessions), ["ação", "alfa", "api", "zeta"], "ç ordena como c, como o localeCompare");
         let p = layout(&all, "", true, &HashSet::new());
-        assert_eq!(p.groups.len(), 2, "/p/a e /p/a/ são o mesmo projeto; Beta fica só em Aguardando; as sem pasta têm o grupo delas");
-        assert_eq!((p.groups[0].key.as_str(), p.groups[0].label.as_str()), ("/p/a", "a"));
-        assert_eq!((p.groups[1].key.as_str(), names(&p.groups[1].sessions)), (super::NO_CWD, vec!["ação".to_owned(), "api".to_owned()]));
+        // Sem pasta é o grupo "sem projeto", não some.
+        let groups: Vec<(&str, Vec<String>)> = p.groups.iter().map(|g| (g.key.as_str(), names(&g.sessions))).collect();
+        assert_eq!(groups, [("/p/a", vec!["alfa".to_owned(), "zeta".into()]), (super::NO_CWD, vec!["ação".into(), "api".into()])],
+            "/p/a e /p/a/ são o mesmo projeto; Beta fica só em Aguardando");
+        assert_eq!(p.groups[0].label, "a");
     }
 
     #[test]

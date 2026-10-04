@@ -156,7 +156,7 @@ enum Payload {
     Files(SessionKey, Vec<Result<Picked, String>>),
     // `None` marca o início do envio daquele anexo.
     UploadStep(SessionKey, u64, Option<Result<Uploaded, Failure>>),
-    UploadsDone(SessionKey, String, bool, HashSet<String>),
+    UploadsDone(SessionKey, String, bool, HashSet<String>, Option<Vec<String>>),
     Commands(String, Result<Vec<CommandInfo>, Failure>),
     Recent(SessionKey, Result<Vec<UploadFile>, Failure>),
     // Miniatura já decodificada fora da thread da janela; `None` = bytes que não são imagem legível.
@@ -413,6 +413,8 @@ pub struct Hangar {
     row_signatures: Vec<String>,
     items: Vec<Item>,
     expanded: HashSet<String>,
+    // O `expanded` das conversas que saíram da tela: o que foi aberto ou fechado volta com a conversa.
+    kept_expanded: HashMap<SessionKey, HashSet<String>>,
     // Sessão orq: ids dos eventos que abrem um dia novo, para o separador sair antes deles.
     orq_days: HashSet<String>,
     // Coluna que o gráfico de cada tabela mostra, pela chave "<linha>#t<n>".
@@ -730,7 +732,7 @@ impl Hangar {
             delivery: DeliveryTracker::default(), stopping: HashSet::new(), stop_feedback: HashMap::new(), drafts: HashMap::new(),
             flight: InFlight::default(), action_feedback: HashMap::new(), live_terms: Vec::new(), question_open: None, question_card: None,
             hangar_open: false, hangar_focus: cx.focus_handle(), hangar_error: None, live_clock: None, ask_form: AskForm::default(), plans_dismissed: HashSet::new(), answered_tools: HashSet::new(), answering: HashMap::new(), ask_scroll: Default::default(), plan_scroll: Default::default(), plan_view: None,
-            list_state, rail_hover: None, follow: Default::default(), row_ids: Vec::new(), row_signatures: Vec::new(), items: Vec::new(), expanded: HashSet::new(), orq_days: HashSet::new(),
+            list_state, rail_hover: None, follow: Default::default(), row_ids: Vec::new(), row_signatures: Vec::new(), items: Vec::new(), expanded: HashSet::new(), kept_expanded: HashMap::new(), orq_days: HashSet::new(),
             table_column: HashMap::new(), tables: HashMap::new(), paired: HashMap::new(), activity: Default::default(), pinned: HashSet::new(), last_message: None, live_clear_epoch: [0; 2], rich: HashMap::new(), prepared: HashMap::new(), cites: CiteCheck::default(), render_tick: 0,
             preview_drop_epoch: 0, preview_drop_scheduled: false,
             visible_preview: Preview::default(), preview_tick_epoch: 0, preview_tick_scheduled: false,
@@ -1085,6 +1087,7 @@ impl Hangar {
             self.close_terminal(false, window, cx);
         }
         if let Some(old) = self.selected_key() { self.drafts.insert(old, self.composer.read(cx).value().to_string()); }
+        self.keep_expanded();
         self.open_api = open_api;
         // Avisos, atalhos globais e contas passam a ser os da máquina desta conversa.
         if !same_server { self.load_notification_preferences(); }
@@ -1118,8 +1121,9 @@ impl Hangar {
         self.row_ids.clear();
         self.list_state.reset(0);
         self.follow_reset();
-        let draft = self.session_server().and_then(|server| SessionKey::new(&server, &session))
-            .and_then(|key| self.drafts.get(&key).cloned()).unwrap_or_default();
+        let key = self.session_server().and_then(|server| SessionKey::new(&server, &session));
+        let draft = key.as_ref().and_then(|key| self.drafts.get(key).cloned()).unwrap_or_default();
+        self.expanded = key.as_ref().and_then(|key| self.kept_expanded.get(key).cloned()).unwrap_or_default();
         self.composer.update(cx, |input, cx| input.set_value(draft, window, cx));
         self.confirm = None;
         self.terminal_suggestion.clear();
@@ -1174,6 +1178,7 @@ impl Hangar {
         if self.selected.is_none() { return; }
         self.close_terminal(false, window, cx);
         if let Some(old) = self.selected_key() { self.drafts.insert(old, self.composer.read(cx).value().to_string()); }
+        self.keep_expanded();
         self.selection += 1;
         if let Some(task) = self.session_task.take() { task.abort(); }
         if let Some(task) = self.history_task.take() { task.abort(); }
@@ -1237,9 +1242,14 @@ impl Hangar {
                 cx.notify();
                 return;
             }
-            Payload::Files(key, files) => { self.receive_files(key, files); cx.notify(); return; }
-            Payload::UploadStep(key, id, result) => { self.receive_upload(key, id, result); cx.notify(); return; }
-            Payload::UploadsDone(key, draft, steer, known) => { self.finish_uploads(key, draft, steer, known, cx); cx.notify(); return; }
+            Payload::Files(key, files) => { let key = self.delivery.current(key); self.receive_files(key, files); cx.notify(); return; }
+            Payload::UploadStep(key, id, result) => { let key = self.delivery.current(key); self.receive_upload(key, id, result); cx.notify(); return; }
+            Payload::UploadsDone(key, draft, steer, known, group) => {
+                let key = self.delivery.current(key);
+                self.finish_uploads(key, draft, steer, known, group, cx);
+                cx.notify();
+                return;
+            }
             Payload::Saved(key, open, result) => {
                 let note = match result {
                     Ok(path) if open => { cx.open_with_system(&path); None }
@@ -1544,21 +1554,26 @@ impl Hangar {
     }
 
     fn receive_sent(&mut self, key: SessionKey, text: String, draft: String, result: Result<Delivery, Failure>, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.delivery.current(key);
         let outcome = match &result {
             Ok(delivery) if delivery.delivered => SendOutcome::Delivered,
             Ok(_) => SendOutcome::Queued,
             Err(error) if error.uncertain => SendOutcome::Uncertain,
             Err(error) => SendOutcome::Rejected(Self::failure(error)),
         };
+        let typed = self.delivery.typed(&key, &text);
         if !self.delivery.complete(&key, &text, outcome) { return; }
         if result.is_ok() { self.bridge_sending(key.clone(), cx); }
         self.sync_working_row(cx);
         let current = self.selected_key().as_ref() == Some(&key);
         let confirmed = self.delivery.outcome(&key).is_none();
         if result.is_ok() || confirmed {
-            if self.drafts.get(&key).is_some_and(|saved| saved == &draft) { self.drafts.remove(&key); }
-            if current && !draft.is_empty() && self.composer.read(cx).value().as_ref() == draft {
-                self.composer.update(cx, |input, cx| input.set_value("", window, cx));
+            // O que saiu do campo no Enter já não está nele: o que estiver lá agora é texto novo, mesmo que igual.
+            if !typed {
+                if self.drafts.get(&key).is_some_and(|saved| saved == &draft) { self.drafts.remove(&key); }
+                if current && !draft.is_empty() && self.composer.read(cx).value().as_ref() == draft {
+                    self.composer.update(cx, |input, cx| input.set_value("", window, cx));
+                }
             }
             // Só os anexos que subiram nesta mensagem saem; um anexado depois continua no campo.
             if let Some(list) = self.attachments.get_mut(&key) {
@@ -1571,8 +1586,23 @@ impl Hangar {
                 if list.is_empty() { self.attachments.remove(&key); }
                 for image in gone { release_image(image, window, cx); }
             }
+            // Quem esperava este envio sai agora, na ordem em que foi mandado.
+            if let Some((next, steer, group)) = self.delivery.next_held(&key) {
+                let known = if current { self.known_user_ids() } else { HashSet::new() };
+                if self.post(key.clone(), next.clone(), next.clone(), steer, known, group, cx) {
+                    self.delivery.mark_typed(&key);
+                    self.sync_working_row(cx);
+                } else {
+                    let mut back = self.delivery.take_held(&key);
+                    back.insert(0, next);
+                    self.return_to_field(&key, back, current, window, cx);
+                }
+            }
         } else {
-            if !current && !draft.is_empty() { self.drafts.entry(key.clone()).or_insert(draft); }
+            let mut back = self.delivery.take_held(&key);
+            if typed { back.insert(0, text); }
+            if !back.is_empty() { self.return_to_field(&key, back, current, window, cx); }
+            if !typed && !current && !draft.is_empty() { self.drafts.entry(key.clone()).or_insert(draft); }
             if current && result.as_ref().err().is_some_and(|e| self.chat_auth_lost(e)) {
                 self.open_connection(window, cx);
             }
@@ -1617,6 +1647,21 @@ impl Hangar {
         self.sidebar_sessions_changed(window, cx);
     }
 
+    /// Transcript trocado na mesma sessão (`/clear`): envio em voo, espera, campo, anexos e "mandar pro grupo" seguem para a
+    /// chave nova. Devolve a antiga, que a abertura ainda preenche com o campo e deve sair depois.
+    fn follow_transcript(&mut self, old: &SessionInfo, new: &SessionInfo, cx: &mut Context<Self>) -> Option<SessionKey> {
+        if new.jsonl == old.jsonl || new.lifecycle_id != old.lifecycle_id { return None; }
+        let server = self.session_server()?;
+        let (from, to) = (SessionKey::new(&server, old)?, SessionKey::new(&server, new)?);
+        self.delivery.rekey(&from, &to);
+        if let Some(list) = self.attachments.remove(&from) { self.attachments.insert(to.clone(), list); }
+        if let Some(batch) = self.uploading.remove(&from) { self.uploading.insert(to.clone(), batch); }
+        if let Some((on, _)) = self.sidebar.grouping.send_to_group.as_mut().filter(|(on, _)| *on == from) { *on = to.clone(); }
+        self.drafts.remove(&from);
+        self.drafts.insert(to, self.composer.read(cx).value().to_string());
+        Some(from)
+    }
+
     /// A sessão aberta acompanha a lista da máquina dela: dados novos, transcript trocado ou sumiço.
     pub(super) fn follow_open(&mut self, list: &[SessionInfo], window: &mut Window, cx: &mut Context<Self>) {
         // Antes de soltar a conexão aberta: o renomear em voo é da máquina dela.
@@ -1633,7 +1678,11 @@ impl Hangar {
         }
         if let Some(old) = self.selected.clone() {
             match list.iter().find(|s| s.name == old.name).cloned() {
-                Some(new) if new.jsonl != old.jsonl || new.tracked != old.tracked => self.open_session(self.open_api.clone(), new, window, cx),
+                Some(new) if new.jsonl != old.jsonl || new.tracked != old.tracked => {
+                    let moved = self.follow_transcript(&old, &new, cx);
+                    self.open_session(self.open_api.clone(), new, window, cx);
+                    if let Some(from) = moved { self.drafts.remove(&from); }
+                }
                 Some(new) => self.selected = Some(new),
                 None => {
                     self.close_terminal(false, window, cx);
@@ -1819,6 +1868,13 @@ impl Hangar {
         }
     }
 
+    /// Guarda o que está aberto na conversa que sai da tela; a chave leva o transcript, e um `/clear` não herda nada.
+    fn keep_expanded(&mut self) {
+        let Some(key) = self.selected_key() else { return; };
+        if self.expanded.is_empty() { self.kept_expanded.remove(&key); }
+        else { self.kept_expanded.insert(key, self.expanded.clone()); }
+    }
+
     fn reset_details(&mut self) {
         self.expanded.clear();
         self.table_column.clear();
@@ -1998,7 +2054,9 @@ impl Hangar {
         let text = self.composer.read(cx).value().to_string();
         let attached = self.attachments.get(&key).is_some_and(|list| !list.is_empty());
         if text.trim().is_empty() && !attached { return; }
-        if self.delivery.pending(&key) || self.uploading.contains_key(&key) { return; }
+        let flying = self.delivery.pending(&key);
+        // Anexo sobe antes do envio e não entra na espera: aguarda o envio em voo, como o que já está subindo.
+        if self.uploading.contains_key(&key) || flying && attached { return; }
         // Com anexo a legenda vai na frente do prompt: o comando do campo continua sendo o da mensagem.
         let provider = self.provider().0.to_owned();
         if let Some(command) = composer::typed_command(self.command_list(), &text).cloned() {
@@ -2016,24 +2074,59 @@ impl Hangar {
         }
         self.confirm = None;
         self.action_feedback.remove(&key);
+        // O grupo é o da hora do Enter: o texto pode sair depois, com outra conversa aberta ou o grupo mudado.
+        let group = if steer { None } else { self.group_targets(&key, &text) };
+        // Enter com um envio em voo não se perde: o texto sai do campo e vai na vez dele.
+        if flying {
+            self.delivery.hold(key.clone(), text, steer, group);
+            self.clear_sent_field(&key, window, cx);
+            return;
+        }
         let known = self.known_user_ids();
-        if attached { self.start_uploads(key, text, steer, known, cx); }
-        else { self.deliver(key, text.clone(), text, steer, known, true, cx); }
-        let _ = window;
+        if attached { self.start_uploads(key, text, steer, known, group, cx); return; }
+        self.deliver(key.clone(), text.clone(), text, steer, known, group, cx);
+        // O campo esvazia no Enter, sem esperar o backend: o que for digitado depois é outra mensagem.
+        if self.delivery.pending(&key) {
+            self.delivery.mark_typed(&key);
+            self.clear_sent_field(&key, window, cx);
+        }
     }
 
-    /// `composed`: veio do campo, e com o "mandar pro grupo" ligado vai também aos membros.
-    fn deliver(&mut self, key: SessionKey, text: String, draft: String, steer: bool, known: HashSet<String>, composed: bool, cx: &mut Context<Self>) {
-        let Some(api) = self.api_for(&key.server) else {
-            self.action_feedback.insert(key, (tr("server_changed"), true));
-            cx.notify();
-            return;
-        };
-        let group = if composed && !steer { self.group_targets(&key, &text) } else { None };
-        if !self.delivery.begin(key.clone(), text.clone(), known) { cx.notify(); return; }
+    /// Texto que saiu do campo no Enter não fica nele nem no rascunho guardado da conversa.
+    fn clear_sent_field(&mut self, key: &SessionKey, window: &mut Window, cx: &mut Context<Self>) {
+        self.drafts.remove(key);
+        self.composer.update(cx, |input, cx| input.set_value("", window, cx));
+        cx.notify();
+    }
+
+    /// Envio que falhou devolve ao campo o que saiu dele, na ordem, antes do que foi digitado depois.
+    fn return_to_field(&mut self, key: &SessionKey, mut texts: Vec<String>, current: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let rest = if current { self.composer.read(cx).value().to_string() } else { self.drafts.get(key).cloned().unwrap_or_default() };
+        if !rest.trim().is_empty() { texts.push(rest); }
+        let merged = texts.join("\n");
+        if current { self.composer.update(cx, |input, cx| input.set_value(merged, window, cx)); }
+        else { self.drafts.insert(key.clone(), merged); }
+    }
+
+    /// `group`: com o "mandar pro grupo" ligado no Enter, os nomes que recebem (ela e os membros).
+    fn deliver(&mut self, key: SessionKey, text: String, draft: String, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) {
+        if !self.post(key.clone(), text, draft, steer, known, group, cx) { return; }
         self.sync_working_row(cx);
         self.error = None;
         self.stop_feedback.remove(&key);
+        self.follow_engage(cx);
+        // O envio muda o aviso, o botão e o erro da faixa de baixo, que é guardada entre quadros.
+        cx.notify();
+    }
+
+    /// O envio em si, sem mexer na conversa aberta: serve também ao texto que esperava a vez noutra sessão.
+    fn post(&mut self, key: SessionKey, text: String, draft: String, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) -> bool {
+        let Some(api) = self.api_for(&key.server) else {
+            self.action_feedback.insert(key, (tr("server_changed"), true));
+            cx.notify();
+            return false;
+        };
+        if !self.delivery.begin(key.clone(), text.clone(), known) { cx.notify(); return false; }
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
             let result = match group {
@@ -2043,13 +2136,11 @@ impl Hangar {
             };
             let _ = tx.send(Envelope { connection, selection: None, payload: Payload::Sent(key, text, draft, result) }).await;
         });
-        self.follow_engage(cx);
-        // O envio muda o aviso, o botão e o erro da faixa de baixo, que é guardada entre quadros.
-        cx.notify();
+        true
     }
 
     // Sobe um por vez; o que já subiu não sobe de novo numa nova tentativa, e falha para a fila sem repetir.
-    fn start_uploads(&mut self, key: SessionKey, draft: String, steer: bool, known: HashSet<String>, cx: &mut Context<Self>) {
+    fn start_uploads(&mut self, key: SessionKey, draft: String, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) {
         let Some(api) = self.api_for(&key.server) else { return; };
         let Some(list) = self.attachments.get_mut(&key) else { return; };
         let mut jobs = Vec::new();
@@ -2069,7 +2160,7 @@ impl Hangar {
                 if tx.send(Envelope { connection, selection: None, payload: Payload::UploadStep(key.clone(), id, Some(result)) }).await.is_err() { return; }
                 if failed { break; }
             }
-            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::UploadsDone(key, draft, steer, known) }).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::UploadsDone(key, draft, steer, known, group) }).await;
         });
         cx.notify();
     }
@@ -2085,7 +2176,7 @@ impl Hangar {
         };
     }
 
-    fn finish_uploads(&mut self, key: SessionKey, draft: String, steer: bool, known: HashSet<String>, cx: &mut Context<Self>) {
+    fn finish_uploads(&mut self, key: SessionKey, draft: String, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) {
         let Some(batch) = self.uploading.remove(&key) else { return; };
         let Some(list) = self.attachments.get(&key) else { return; };
         let mut uploads = Vec::new();
@@ -2099,7 +2190,7 @@ impl Hangar {
             }
         }
         let message = composer::compose_prompt(&draft, &uploads, |speech| tr("attach_video_speech").replace("{texto}", speech));
-        self.deliver(key, message, draft, steer, known, true, cx);
+        self.deliver(key, message, draft, steer, known, group, cx);
     }
 
     fn add_attachment(&mut self, key: &SessionKey, name: String, bytes: Vec<u8>) -> Result<(), String> {
@@ -2359,7 +2450,7 @@ impl Hangar {
         if !self.can_send() || self.delivery.pending(&key) || self.uploading.contains_key(&key) { return; }
         let draft = if from_panel { String::new() } else { self.composer.read(cx).value().to_string() };
         let known = self.known_user_ids();
-        self.deliver(key, format!("/{}", command.name), draft, false, known, false, cx);
+        self.deliver(key, format!("/{}", command.name), draft, false, known, None, cx);
     }
 
     fn visible_suggestions(&self, cx: &App) -> Vec<CommandInfo> {
@@ -3722,7 +3813,8 @@ impl Hangar {
         }
         let steer_text = readable && has_input && (provider == "codex" || headless) && self.chat.state.state == "working"
             && self.selected_key().is_none_or(|key| self.group_targets(&key, "").is_none());
-        let blocked = if reopen { resuming || self.reopen_blocked(cx) } else if new_chat { !can_create } else { sending || uploading.is_some() || !self.chat_online || !self.history_installed };
+        // Só o anexo espera o envio em voo; texto sai do campo e vai na vez dele.
+        let blocked = if reopen { resuming || self.reopen_blocked(cx) } else if new_chat { !can_create } else { sending && attached || uploading.is_some() || !self.chat_online || !self.history_installed };
         let can_stop = self.can_interrupt();
         let focused = self.composer.read(cx).focus_handle(cx).is_focused(window);
         let paste_target = cx.entity().downgrade();
@@ -3815,7 +3907,7 @@ impl Hangar {
                 .child(usage)
         });
 
-        let send_label = tr(if creating { "create_creating" } else if sending || uploading.is_some() || resuming { "sending" } else { "send" });
+        let send_label = tr(if creating { "create_creating" } else if sending && attached || uploading.is_some() || resuming { "sending" } else { "send" });
         let action = if can_stop && !has_input {
             Button::new("stop").custom(ButtonCustomVariant::new(cx).color(theme::elevated()).foreground(theme::danger()).hover(theme::raised()).active(theme::raised()))
                 .bg(theme::elevated()).child(div().size(px(10.)).rounded(px(2.)).bg(theme::danger())).size(px(30.)).rounded_full()
@@ -5413,6 +5505,9 @@ impl Hangar {
             })
         });
         let stop_note = selected_key.as_ref().and_then(|key| self.stop_feedback.get(key)).cloned();
+        // O que saiu do campo e o backend ainda não respondeu fica à vista, apagado, até virar mensagem da conversa.
+        let outgoing: Vec<SharedString> = selected_key.as_ref()
+            .map(|key| self.delivery.outgoing(key).into_iter().map(|text| SharedString::from(text.to_owned())).collect()).unwrap_or_default();
         let prethread_open = self.prethread_key().is_some();
         let mut content = div().w_full().flex().flex_col();
         let busy = selected_key.as_ref().is_some_and(|key| self.flight.busy(key));
@@ -5436,6 +5531,9 @@ impl Hangar {
         let pending = card.is_none() && !answered && !ask_pane && !prethread_open && (self.chat.state.state == "awaiting_input" || self.chat.state.login == Some(true));
         // Faixas e avisos entre a conversa e o compositor ficam na mesma coluna das mensagens.
         content = content
+            .children(outgoing.into_iter().map(|text| in_column(div().w_full().flex().flex_col().items_end().gap_1().py_1()
+                .child(user_bubble(conversation_text(div().whitespace_normal().line_clamp(6).text_ellipsis(), true).child(text)).opacity(0.6))
+                .child(div().text_xs().text_color(theme::muted()).child(tr("sending"))))))
             .when_some(card, |el, card| el.child(card))
             .when_some(plan_bar, |el, bar| el.child(in_column(bar)))
             .when(pending, |el| el.child(in_column(div().py_2().text_sm().text_color(theme::warning()).child(tr("pending_question")))))
