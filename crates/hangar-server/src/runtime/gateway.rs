@@ -193,7 +193,7 @@ pub async fn serve(listener:tokio::net::TcpListener,registry:Arc<RuntimeRegistry
     let state = Gateway { registry,secret,instance,protocol };
     let router = Router::new().route("/runtime/op",post(operation)).route("/runtime/events",get(events))
         .layer(middleware::from_fn_with_state(state.clone(),authorize)).with_state(state);
-    axum::serve(listener,router.into_make_service_with_connect_info::<SocketAddr>()).await
+    axum::serve(axum::serve::ListenerExt::tap_io(listener,crate::nodelay),router.into_make_service_with_connect_info::<SocketAddr>()).await
 }
 
 async fn authorize(State(state):State<Gateway>,request:Request,next:Next) -> Response {

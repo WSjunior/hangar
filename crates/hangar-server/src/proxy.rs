@@ -18,10 +18,13 @@ pub type HttpClient = Client<HttpConnector, Body>;
 pub const POOL_IDLE: Duration = Duration::from_secs(3);
 
 pub fn client() -> HttpClient {
+    let mut connector = HttpConnector::new();
+    // Upload em pedaços ao Python esbarra no mesmo Nagle das respostas (ver `crate::nodelay`).
+    connector.set_nodelay(true);
     Client::builder(TokioExecutor::new())
         .pool_idle_timeout(POOL_IDLE)
         .pool_timer(TokioTimer::new())
-        .build_http()
+        .build(connector)
 }
 
 /// Cliente já resolvido pelo `TrustedHosts`. Vai ao Python como valor único do X-Forwarded-For:
@@ -82,10 +85,11 @@ async fn forward_upgrade(upstream: SocketAddr, mut req: Request, path: &str) -> 
     };
     *req.uri_mut() = uri;
     let client_side = hyper::upgrade::on(&mut req);
-    let stream = match tokio::net::TcpStream::connect(upstream).await {
+    let mut stream = match tokio::net::TcpStream::connect(upstream).await {
         Ok(s) => s,
         Err(e) => return bad_gateway(&e),
     };
+    crate::nodelay(&mut stream);
     let (mut sender, conn) = match hyper::client::conn::http1::handshake(TokioIo::new(stream)).await {
         Ok(x) => x,
         Err(e) => return bad_gateway(&e),
