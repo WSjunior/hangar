@@ -183,10 +183,19 @@ async def _request(payload: dict) -> dict | None:
     name, consumer = _owner(payload)
     attempt = _attempt(name, consumer)
     started = time.monotonic()
-    if not _available(name) or not _belongs(attempt):
+    # A liberação passa por cima da pausa e de vaga cheia: sem ela o `tmux -C` segue anexado à sessão
+    # até o prazo do Rust. É idempotente, então repetir não custa nada.
+    release = payload.get("op") == "release"
+    if not (release and config is not None and sys.platform != "win32" or _available(name)) or not _belongs(attempt):
         return None
     try:
-        result = await _io(_http, config, payload)
+        try:
+            result = await _io(_http, config, payload)
+        except _IoBusy:
+            if not release:
+                raise
+            await asyncio.sleep(0.05)
+            result = await _io(_http, config, payload)
         if not _belongs(attempt):
             return None
         if result is None:

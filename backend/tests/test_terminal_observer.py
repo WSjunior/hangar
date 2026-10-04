@@ -1025,16 +1025,17 @@ def test_bridge_circuit_pauses_after_three_failures_grows_and_resets(monkeypatch
         return {}
     monkeypatch.setattr(t, "_http", response)
     async def run():
+        # Qualquer chamada além da liberação (que passa por cima da pausa) exercita o disjuntor.
         source = t.lease("circuit-recovery", "claude", lambda: "b")
         await source.start()
         for _ in range(3):
-            assert await t._request({"op": "release", "consumer": source.consumer}) is None
-        assert await t._request({"op": "release", "consumer": source.consumer}) is None
+            assert await t._request({"op": "probe", "consumer": source.consumer}) is None
+        assert await t._request({"op": "probe", "consumer": source.consumer}) is None
         assert len(calls) == 3
         now[0] = 101.0
-        assert await t._request({"op": "release", "consumer": source.consumer}) is None
+        assert await t._request({"op": "probe", "consumer": source.consumer}) is None
         now[0] = 102.0
-        assert await t._request({"op": "release", "consumer": source.consumer}) is None
+        assert await t._request({"op": "probe", "consumer": source.consumer}) is None
         assert len(calls) == 4
         now[0] = 103.0
         fail[0] = False
@@ -1042,7 +1043,7 @@ def test_bridge_circuit_pauses_after_three_failures_grows_and_resets(monkeypatch
             assert await t.capture("circuit-recovery", 103.0) is not None
         fail[0] = True
         for _ in range(3):
-            assert await t._request({"op": "release", "consumer": source.consumer}) is None
+            assert await t._request({"op": "probe", "consumer": source.consumer}) is None
         t.configure("127.0.0.1:23456", "another-test-only")
         fail[0] = False
         assert await t._request({"op": "release", "consumer": source.consumer}) == {}
@@ -1849,3 +1850,25 @@ def test_late_valid_capture_does_not_recover_reused_session(monkeypatch):
             if successor is not None:
                 await successor.close()
     asyncio.run(run())
+
+
+def test_release_reaches_rust_even_while_the_session_is_paused(monkeypatch):
+    # Pausa por falhas recentes não pode segurar a liberação: sem ela o `tmux -C` ficava anexado
+    # à sessão até o prazo de 90 s do Rust.
+    import time as _time
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    calls = []
+    def http(config, payload):
+        calls.append(payload["op"])
+        return {}
+    monkeypatch.setattr(t, "_http", http)
+    async def run():
+        lease = t.lease("paused-release", "claude", lambda: "a")
+        await lease.start()
+        assert "acquire" in calls
+        t._session("paused-release").retry_at = _time.monotonic() + 60
+        await lease.close()
+    asyncio.run(run())
+    assert calls[-1] == "release"
