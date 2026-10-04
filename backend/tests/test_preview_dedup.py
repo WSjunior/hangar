@@ -1094,8 +1094,8 @@ def test_faixa_de_mod_com_bullet_nao_vira_previa():
     # eleita a prosa em andamento. A âncora é o primeiro texto da árvore que o plugin mandou.
     from app import plugin_bridge as pb
 
-    pb._bands["faixa"] = (1, {"type": "Box", "children": [
-        {"type": "Text", "children": ["● "]}, {"type": "Text", "children": ["Migração do relatório"]}]})
+    pb._guardar_faixa("faixa", {"type": "Box", "children": [
+        {"type": "Text", "children": ["● "]}, {"type": "Text", "children": ["Migração do relatório"]}]}, None, [])
     try:
         pane = "\n".join([
             "❯ faça tal coisa",

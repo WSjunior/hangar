@@ -3,6 +3,7 @@ da resposta do app. O resto (envio por `fill`) depende de tmux e é conferido no
 import asyncio
 import json
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -507,3 +508,82 @@ def test_recusa_loga_uma_vez_por_instancia_mesmo_com_o_dono_puxando(monkeypatch,
         with pytest.raises(HTTPException):
             asyncio.run(pb.pull(_pull(instance="b", session_id="outra-conversa")))
     assert sum("pull recusado" in r.getMessage() for r in caplog.records) == 1
+
+
+# Faixa, painéis e confirmações de clique dos mods.
+
+def _ponte(sessao, **extra):
+    return {"sessao": sessao, "token": pb.mint(sessao), **extra}
+
+
+def _cliente():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    app = FastAPI()
+    app.include_router(pb.plugin_router)
+    return TestClient(app, client=("127.0.0.1", 5000))
+
+
+def test_faixa_guarda_paineis_e_largura():
+    c = _cliente()
+    try:
+        r = c.post("/api/plugin/ui", json=_ponte("pane-a", above={"type": "Box"}, columns=87, panes=[
+            {"id": "review-mr", "title": "Review !577", "placement": "dock", "columns": 72, "tree": {"type": "Box"}}]))
+        assert r.status_code == 200
+        versao, payload = pb.band("pane-a")
+        assert versao > 0
+        assert payload["above"] == {"type": "Box"}
+        assert [p["id"] for p in payload["panes"]] == ["review-mr"]
+        assert "columns" not in payload  # a largura é da prévia, não do app
+        assert pb.band_columns("pane-a") == 87
+        assert pb.transcript_columns("pane-a") == 87
+    finally:
+        pb.esquecer("pane-a")
+
+
+def test_sem_painel_ancorado_a_previa_nao_corta():
+    c = _cliente()
+    try:
+        c.post("/api/plugin/ui", json=_ponte("pane-b", above=None, columns=160, panes=[
+            {"id": "x", "title": "x", "placement": "inline", "columns": 150, "tree": None}]))
+        assert pb.transcript_columns("pane-b") is None
+    finally:
+        pb.esquecer("pane-b")
+
+
+def test_sem_faixa_devolve_payload_vazio():
+    assert pb.band("nunca-desenhou") == (0, {"above": None, "panes": []})
+
+
+@pytest.mark.asyncio
+async def test_esperar_faixa_acorda_quando_muda():
+    try:
+        vista = pb.band("pane-c")[0]
+        espera = asyncio.create_task(pb.esperar_faixa("pane-c", vista, 5))
+        await asyncio.sleep(0.05)
+        assert not espera.done()
+        # o mesmo caminho do POST /ui, chamado no loop do teste, onde o Event vive
+        pb._guardar_faixa("pane-c", {"type": "Box"}, 80, [])
+        assert await asyncio.wait_for(espera, 1) != vista
+    finally:
+        pb.esquecer("pane-c")
+
+
+@pytest.mark.asyncio
+async def test_confirmacao_de_clique_casa_site_e_chave_depois_do_clique():
+    try:
+        await pb.pressed(pb.PressedBody(**_ponte("pane-d", requestId="above-prompt", element="velho")))
+        desde = time.monotonic()
+        assert not await pb.esperar_press("pane-d", "above-prompt", "velho", desde, 0.05)
+        await pb.pressed(pb.PressedBody(**_ponte("pane-d", requestId="review-mr", element="cp-1")))
+        assert await pb.esperar_press("pane-d", "review-mr", "cp-1", desde, 0.5)
+        assert not await pb.esperar_press("pane-d", "above-prompt", "cp-1", desde, 0.05)
+        await pb.copied(pb.CopiedBody(**_ponte("pane-d", text="https://gitlab.exemplo/mr/1")))
+        assert await pb.esperar_copia("pane-d", desde, 0.5) == "https://gitlab.exemplo/mr/1"
+    finally:
+        pb.esquecer("pane-d")
+
+
+def test_confirmacao_com_token_errado_e_recusada():
+    r = _cliente().post("/api/plugin/pressed", json={"sessao": "pane-e", "token": "x", "requestId": "a", "element": "b"})
+    assert r.status_code == 403

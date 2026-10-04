@@ -266,7 +266,11 @@ def esquecer(name: str) -> None:
         _bands.pop(name, None)
         _confirmacoes.pop(name, None)
         _preenchido.pop(name, None)
+        _pressed.pop(name, None)
+        _copied.pop(name, None)
     _eventos.pop(name, None)
+    _band_wakers.pop(name, None)
+    _press_wakers.pop(name, None)
     for chave in [c for c in list(_recusas) if c[0] == name]:
         _recusas.pop(chave, None)
 
@@ -374,16 +378,101 @@ def sugestao(name: str) -> str:
         return _sugestoes.get(name, "")
 
 
-# Faixa acima do prompt que os mods desenham: (versão, árvore de elementos do Claude Code ou None).
-# A versão é de todas as sessões juntas: o SSE só compara se mudou desde o que já mandou.
-_bands: dict[str, tuple[int, dict | None]] = {}
+# Faixa e painéis que os mods desenham: (versão, {"above", "columns", "panes"}). A versão é de todas
+# as sessões juntas: o SSE só compara se mudou desde o que já mandou.
+_bands: dict[str, tuple[int, dict]] = {}
 _band_seq = 0
+_VAZIA: dict = {"above": None, "columns": None, "panes": []}
+# Quem espera a faixa mudar: um Event por sessão, trocado a cada mudança, acorda todos os SSE de uma vez.
+_band_wakers: dict[str, asyncio.Event] = {}
 
 
-def band(name: str) -> tuple[int, dict | None]:
-    """A faixa atual da sessão e a versão dela; (0, None) quando nada foi desenhado."""
+def _guardar_faixa(name: str, above: dict | None, columns: int | None, panes: list[dict]) -> None:
+    global _band_seq
     with _lock:
-        return _bands.get(name, (0, None))
+        _band_seq += 1
+        _bands[name] = (_band_seq, {"above": above, "columns": columns, "panes": panes})
+    ev = _band_wakers.pop(name, None)
+    if ev is not None:
+        ev.set()
+
+
+def band(name: str) -> tuple[int, dict]:
+    """A faixa e os painéis da sessão, como o app recebe, e a versão; versão 0 quando nada foi desenhado."""
+    with _lock:
+        versao, dados = _bands.get(name, (0, _VAZIA))
+    return versao, {"above": dados["above"], "panes": dados["panes"]}
+
+
+def band_columns(name: str) -> int | None:
+    """Largura da coluna da conversa no pane, em células, como o plugin mediu."""
+    with _lock:
+        return _bands.get(name, (0, _VAZIA))[1]["columns"]
+
+
+def transcript_columns(name: str) -> int | None:
+    """Onde cortar as linhas do pane para a prévia: só com painel ancorado ao lado da conversa."""
+    with _lock:
+        dados = _bands.get(name, (0, _VAZIA))[1]
+    return dados["columns"] if any(p.get("placement") == "dock" for p in dados["panes"]) else None
+
+
+async def esperar_faixa(name: str, vista: int, timeout: float) -> int:
+    """Dorme até a faixa sair da versão `vista`, ou até `timeout`; devolve a versão atual."""
+    atual = band(name)[0]
+    if atual != vista:
+        return atual
+    ev = _band_wakers.setdefault(name, asyncio.Event())
+    try:
+        await asyncio.wait_for(ev.wait(), timeout)
+    except asyncio.TimeoutError:
+        pass
+    return band(name)[0]
+
+
+# Cliques e cópias que o plugin confirmou: o pedido de clique do app espera por eles.
+_pressed: dict[str, list[tuple[float, str, str]]] = {}
+_copied: dict[str, tuple[float, str]] = {}
+_press_wakers: dict[str, asyncio.Event] = {}
+
+
+def _acordar_press(name: str) -> None:
+    ev = _press_wakers.pop(name, None)
+    if ev is not None:
+        ev.set()
+
+
+async def _esperar_ate(name: str, achou, timeout: float):
+    fim = time.monotonic() + timeout
+    while True:
+        valor = achou()
+        if valor:
+            return valor
+        resta = fim - time.monotonic()
+        if resta <= 0:
+            return None
+        ev = _press_wakers.setdefault(name, asyncio.Event())
+        try:
+            await asyncio.wait_for(ev.wait(), resta)
+        except asyncio.TimeoutError:
+            return achou() or None
+
+
+async def esperar_press(name: str, site: str, key: str, desde: float, timeout: float) -> bool:
+    """O plugin confirmou o press de `key` no site depois de `desde`?"""
+    def achou():
+        with _lock:
+            return any(t >= desde and r == site and k == key for t, r, k in _pressed.get(name, []))
+    return bool(await _esperar_ate(name, achou, timeout))
+
+
+async def esperar_copia(name: str, desde: float, timeout: float) -> str | None:
+    """O texto que um mod copiou depois de `desde`, se copiou."""
+    def achou():
+        with _lock:
+            t, texto = _copied.get(name, (0.0, ""))
+        return texto if t >= desde else None
+    return await _esperar_ate(name, achou, timeout)
 
 
 # Trecho da âncora: o terminal corta a linha da faixa com reticências quando o pane é estreito.
@@ -395,7 +484,7 @@ def band_anchor(name: str) -> str | None:
 
     É por ele que a prévia sabe onde a conversa acaba: a faixa fica entre a última resposta e a
     caixa de digitar, e um mod que começa a linha com ● seria lido como prosa em andamento."""
-    _, tree = band(name)
+    tree = band(name)[1]["above"]
     pilha: list = [tree]
     while pilha:
         no = pilha.pop()
@@ -761,26 +850,68 @@ async def suggest(body: SuggestBody):
 MAX_BAND_BYTES = 300 * 1024
 
 
+class BandPane(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+    title: str = ""
+    placement: str = "inline"
+    columns: int | None = None
+    tree: dict | None = None
+
+
 class BandBody(BaseModel):
     sessao: str
     token: str
     above: dict | None = None
+    columns: int | None = None
+    panes: list[BandPane] = Field(default_factory=list)
 
 
 @plugin_router.post("/ui")
 async def ui(body: BandBody, request: Request):
-    """A faixa acima do prompt, como o plugin a recebeu de todos os mods, só quando muda.
+    """A faixa acima do prompt e os painéis, como o plugin os recebeu de todos os mods, só quando mudam.
 
-    O Hangar não interpreta a árvore: ela vai como veio para o app, que desenha os elementos do
+    O Hangar não interpreta as árvores: elas vão como vieram para o app, que desenha os elementos do
     Claude Code sem saber de que mod vieram."""
     if int(request.headers.get("content-length") or 0) > MAX_BAND_BYTES:
         raise HTTPException(413, detail="faixa grande demais")
     _confere(body.sessao, body.token)
-    global _band_seq
-    with _lock:
-        _band_seq += 1
-        _bands[body.sessao] = (_band_seq, body.above)
+    _guardar_faixa(body.sessao, body.above, body.columns, [p.model_dump() for p in body.panes])
     _acordar(body.sessao)
+    return {"ok": True}
+
+
+class PressedBody(BaseModel):
+    sessao: str
+    token: str
+    requestId: str = Field(min_length=1, max_length=64)
+    element: str = Field(min_length=1, max_length=256)
+
+
+@plugin_router.post("/pressed")
+async def pressed(body: PressedBody):
+    """Um botão de mod foi pressionado no terminal: confirma o clique que o app pediu."""
+    _confere(body.sessao, body.token)
+    with _lock:
+        fila = _pressed.setdefault(body.sessao, [])
+        fila.append((time.monotonic(), body.requestId, body.element))
+        del fila[:-20]
+    _acordar_press(body.sessao)
+    return {"ok": True}
+
+
+class CopiedBody(BaseModel):
+    sessao: str
+    token: str
+    text: str = Field(max_length=8192)
+
+
+@plugin_router.post("/copied")
+async def copied(body: CopiedBody):
+    """Um mod copiou um texto num clique do app: vai ao app, que copia no aparelho de quem clicou."""
+    _confere(body.sessao, body.token)
+    with _lock:
+        _copied[body.sessao] = (time.monotonic(), body.text)
+    _acordar_press(body.sessao)
     return {"ok": True}
 
 
