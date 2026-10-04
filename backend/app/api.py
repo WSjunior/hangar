@@ -6424,7 +6424,9 @@ async def engine_modelos(body: EngineProbeBody):
     # Diz à tela que é o CLIProxyAPI desta máquina, que aceita os campos beta (ver MotorForm).
     try:
         local = await asyncio.to_thread(cliproxy.is_local_engine, {"base_url": base_url})
-    except ValueError:
+    except ValueError as e:
+        # Config do proxy quebrada não derruba o teste; a tela de CLIProxyAPI mostra o motivo.
+        _log.warning("CLIProxyAPI local ilegível ao testar motor: %s", e)
         local = False
     return {"modelos": modelos, "gateway": "cliproxyapi" if local else None}
 

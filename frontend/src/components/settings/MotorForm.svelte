@@ -143,8 +143,10 @@
   const ehMoonshot = $derived(/moonshot|kimi/i.test(`${form.base_url} ${form.model}`));
   // O CLIProxyAPI monta um pedido novo pro upstream, então os campos beta passam; e o /model do
   // Claude Code só lista ids com "claude", o que nenhum GPT dele tem.
-  let gateway = $state<string | null>(null);
-  const ehCliproxy = $derived(semChave || gateway === 'cliproxyapi');
+  // O veredito do teste só vale para o endereço testado.
+  let gateway = $state<{ nome: string | null; url: string } | null>(null);
+  const ehCliproxy = $derived(semChave
+    || (gateway?.nome === 'cliproxyapi' && gateway.url === form.base_url.trim()));
   const descobertaComprovada = $derived(modelos.length > 0);
   const modeloAtual = $derived(modelos.find((x) => x.id === form.model));
   // Motor com chave salva, campo de chave vazio e endereço editado: o Testar usaria a chave salva
@@ -169,12 +171,14 @@
       const corpo = chave ? { base_url: form.base_url.trim(), api_key: chave } : { nome: idAlvo };
       const r = apiTarget ? await engineModelosForServer(apiTarget, corpo) : await engineModelos(corpo);
       modelos = r.modelos;
-      gateway = r.gateway ?? null;
-      if (ehCliproxy && !betasTocado) form.experimental_betas = true;
+      gateway = { nome: r.gateway ?? null, url: form.base_url.trim() };
+      // Só na criação: num motor salvo, betas desligados podem ser escolha de quem o salvou.
+      if (ehCliproxy && criandoAgora && !betasTocado) form.experimental_betas = true;
       okBusca = m.config_motores_modelos_ok({ n: r.modelos.length });
       const atual = modelos.find((x) => x.id === form.model) ?? modelos[0];
       if (atual) escolherModelo(atual.id);
     } catch (e) {
+      gateway = null;
       erroBusca = e instanceof Error ? e.message : m.config_motores_erro_consultar();
     } finally {
       buscando = false;

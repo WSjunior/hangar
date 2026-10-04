@@ -540,19 +540,21 @@ impl Hangar {
             KeysReply::Tested(seq, result) => {
                 let Some(form) = self.accounts.form.as_mut().filter(|f| f.testing == Some(seq)) else { return };
                 form.testing = None;
-                if let Ok(v) = &result {
-                    form.gateway = v.get("gateway").and_then(|g| g.as_str()).map(str::to_owned);
-                    if form.gateway.as_deref() == Some("cliproxyapi") && !form.betas_touched { form.flags[BETAS] = true; }
-                }
+                let gateway = result.as_ref().ok().and_then(|v| v.get("gateway")).and_then(|g| g.as_str()).map(str::to_owned);
                 // Testar só lê: resposta de erro é a do provedor (o servidor devolve 502 com a mensagem dele), e só a
                 // falta de resposta vira "sem resposta".
                 let parsed = result.map_err(|e| match e.status { None => tr("network_error"), Some(401 | 403 | 429) => Self::failure(&e), Some(_) => tr(&e.detail) })
                     .and_then(|v| v.get("modelos").cloned().map(serde_json::from_value::<Vec<ProviderModel>>).and_then(Result::ok)
                         .ok_or_else(|| tr("invalid_response")));
                 match parsed {
-                    Ok(list) => self.tested(list, window, cx),
+                    Ok(list) => {
+                        // Só na criação: num modelo salvo, betas desligados podem ser escolha de quem o salvou.
+                        if gateway.as_deref() == Some("cliproxyapi") && form.saved.is_none() && !form.betas_touched { form.flags[BETAS] = true; }
+                        form.gateway = gateway;
+                        self.tested(list, window, cx)
+                    }
                     // A mensagem do provedor é o que diz o que corrigir (401, host errado): ela aparece crua.
-                    Err(error) => form.tested = Some(Err(error)),
+                    Err(error) => { form.gateway = None; form.tested = Some(Err(error)) }
                 }
             }
             KeysReply::Saved(seq, id, result) => {
