@@ -116,3 +116,18 @@ fn tilde_of_another_user_stays_relative_and_cannot_climb_out_of_cwd() {
     let found = hangar_workspace::files::resolver(&cwd, std::slice::from_ref(&path), false).unwrap();
     assert!(found["ok"].as_object().unwrap().is_empty());
 }
+
+#[test]
+fn remote_branch_named_like_an_option_is_not_passed_to_switch() {
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-b", "main"]);
+    git(dir.path(), &["-c", "user.name=T", "-c", "user.email=t@t", "commit", "--allow-empty", "-m", "c"]);
+    git(dir.path(), &["update-ref", "refs/remotes/origin/--detach", "HEAD"]);
+    let request = serde_json::from_value(
+        json!({"op":"switch_branch", "args":{"cwd":dir.path(),"branch":"--detach"}}),
+    )
+    .unwrap();
+    assert_eq!(execute(request).unwrap_err().status, 400);
+    let head = Command::new("git").arg("-C").arg(dir.path()).args(["symbolic-ref", "-q", "HEAD"]).output().unwrap();
+    assert!(head.status.success(), "HEAD ficou destacado");
+}

@@ -114,6 +114,17 @@ def test_switch_remote_dwim_creates_local(tmp_path):
     assert "only-remote" in git_ops.list_branches(d)["branches"]  # DWIM criou a local
 
 
+def test_remote_branch_named_like_an_option_is_not_passed_to_git(tmp_path):
+    d = _repo(tmp_path)
+    subprocess.run(["git", "-C", d, "update-ref", "refs/remotes/origin/--detach", "HEAD"], check=True)
+    with pytest.raises(GitError) as e:
+        git_ops.switch_branch(d, "--detach")
+    assert e.value.status == 400
+    assert git_ops.list_branches(d)["current"] != "HEAD"
+    with pytest.raises(GitError):
+        git_ops.create_worktree(d, "--detach", "x", tmp_path)
+
+
 def test_create_worktree_from_dirty_repo_and_remove(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

@@ -359,7 +359,8 @@ def switch_branch(cwd: str, branch: str) -> dict:
     suja, nome curto ambiguo entre remotes, etc) volta como 409 com o stderr do git."""
     info = list_branches(cwd)
     valid = set(info["branches"]) | set(info["remotes"])
-    if branch not in valid:
+    # `switch` não aceita `--` antes da branch, e um remoto pode anunciar `origin/--detach`.
+    if branch not in valid or branch.startswith("-"):
         raise GitError(400, "branch inexistente")
     p = _run(cwd, "switch", branch)
     if p.returncode != 0:
@@ -373,6 +374,8 @@ _worktree_lock = threading.Lock()
 
 def create_worktree(cwd: str, branch: str, name: str, allowed_root: Path) -> tuple[str, bool]:
     """Resolve a branch escolhida sem trocar a árvore de origem."""
+    if branch.startswith("-"):
+        raise GitError(400, "branch inexistente")
     with _worktree_lock:
         p = _run(cwd, "rev-parse", "--show-toplevel")
         if p.returncode != 0:

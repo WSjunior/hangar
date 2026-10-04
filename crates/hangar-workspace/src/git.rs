@@ -283,7 +283,15 @@ pub fn branches(cwd: &Path) -> Result<Value> {
         json!({"current":if cur.code==0 {Some(cur.stdout.trim())} else {None},"branches":local,"remotes":remote,"dirty":st.code==0&&!st.stdout.trim().is_empty()}),
     )
 }
+/// `switch` não aceita `--` antes da branch, e um remoto pode anunciar `origin/--detach`.
+fn option_like(branch: &str) -> Result<()> {
+    if branch.starts_with('-') {
+        return Err(error(400, "branch inexistente"));
+    }
+    Ok(())
+}
 pub fn switch(cwd: &Path, branch: &str) -> Result<Value> {
+    option_like(branch)?;
     let info = branches(cwd)?;
     if !info["branches"]
         .as_array()
@@ -315,6 +323,7 @@ fn remote_ref(cwd: &Path, branch: &str) -> Result<String> {
     Ok(refs[0].into())
 }
 pub fn create_worktree(cwd: &Path, branch: &str, name: &str, root: &Path) -> Result<Value> {
+    option_like(branch)?;
     static LOCK: Mutex<()> = Mutex::new(());
     let _lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let repo = real(Path::new(
