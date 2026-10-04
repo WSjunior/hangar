@@ -85,22 +85,29 @@ async fn open(binding: &CanoBinding) -> Result<BufReader<Socket>, RuntimeError> 
     if binding.versao != 2 || binding.token.is_empty() || binding.token.contains(['\r', '\n']) {
         return Err(RuntimeError::new("cano_version", "cano sem suporte ao runtime nativo"));
     }
+    let deadline = Instant::now() + LISTEN_WAIT;
     let connect = async {
-        let socket: Socket = if let Some(address) = binding.escuta.strip_prefix("tcp:") {
-            let address: std::net::SocketAddr = address.parse()
-                .map_err(|_| RuntimeError::new("cano_address", "endereço do cano inválido"))?;
-            if !address.ip().is_loopback() { return Err(RuntimeError::new("cano_address", "cano fora do loopback")); }
-            let mut tcp = tokio::net::TcpStream::connect(address).await
-                .map_err(|_| RuntimeError::new("cano_connect", "não foi possível conectar ao cano"))?;
-            crate::nodelay(&mut tcp);
-            Box::new(tcp)
-        } else if let Some(path) = binding.escuta.strip_prefix("unix:") {
-            #[cfg(unix)]
-            { Box::new(tokio::net::UnixStream::connect(path).await
-                .map_err(|_| RuntimeError::new("cano_connect", "não foi possível conectar ao cano"))?) }
-            #[cfg(not(unix))]
-            { let _ = path; return Err(RuntimeError::new("cano_address", "socket Unix indisponível")); }
-        } else { return Err(RuntimeError::new("cano_address", "endereço do cano inválido")); };
+        let socket: Socket = loop {
+            let attempt: std::io::Result<Socket> = if let Some(address) = binding.escuta.strip_prefix("tcp:") {
+                let address: std::net::SocketAddr = address.parse()
+                    .map_err(|_| RuntimeError::new("cano_address", "endereço do cano inválido"))?;
+                if !address.ip().is_loopback() { return Err(RuntimeError::new("cano_address", "cano fora do loopback")); }
+                tokio::net::TcpStream::connect(address).await.map(|mut tcp| { crate::nodelay(&mut tcp); Box::new(tcp) as Socket })
+            } else if let Some(path) = binding.escuta.strip_prefix("unix:") {
+                #[cfg(unix)]
+                { tokio::net::UnixStream::connect(path).await.map(|unix| Box::new(unix) as Socket) }
+                #[cfg(not(unix))]
+                { let _ = path; return Err(RuntimeError::new("cano_address", "socket Unix indisponível")); }
+            } else { return Err(RuntimeError::new("cano_address", "endereço do cano inválido")); };
+            match attempt {
+                Ok(socket) => break socket,
+                // O cano recém-lançado ainda não escuta (escopo do systemd + exec levam milissegundos):
+                // só "recusada" e "socket ausente" contam como subindo; outro erro responde na hora.
+                Err(error) if matches!(error.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound)
+                    && Instant::now() < deadline => tokio::time::sleep(Duration::from_millis(50)).await,
+                Err(_) => return Err(RuntimeError::new("cano_connect", "não foi possível conectar ao cano")),
+            }
+        };
         let mut reader = BufReader::new(socket);
         let header = format!("{}\n", binding.token);
         reader.get_mut().write_all(header.as_bytes()).await
@@ -109,9 +116,12 @@ async fn open(binding: &CanoBinding) -> Result<BufReader<Socket>, RuntimeError> 
             .map_err(|_| RuntimeError::new("cano_auth", "não foi possível autenticar no cano"))?;
         Ok(reader)
     };
-    tokio::time::timeout(Duration::from_secs(10), connect).await
+    tokio::time::timeout(LISTEN_WAIT + Duration::from_secs(5), connect).await
         .map_err(|_| RuntimeError::new("cano_timeout", "cano não respondeu"))?
 }
+
+/// Quanto o `open` espera o cano lançado começar a escutar, como o Python antigo antes de matá-lo.
+const LISTEN_WAIT: Duration = Duration::from_secs(10);
 
 async fn snapshot(reader: &mut BufReader<Socket>) -> Result<CanoSnapshot, RuntimeError> {
     let value = tokio::time::timeout(Duration::from_secs(10), read_bounded(reader, MAX_FRAME)).await

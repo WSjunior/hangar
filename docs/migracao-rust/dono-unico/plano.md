@@ -155,6 +155,11 @@ esgotado mantém o problema da queda que o esgotou; o `acordar` volta a zerar o 
 Task 4 a troca de conta (ainda faz `parar` → `change`) e com a 3 a reabertura de slot do Rust com
 cano morto. O teto zera quando o `open` responde, antes do `initialize`: a recusa do `initialize`
 vira problema visível pelo Rust, e cada nova rodada é ação do usuário.
+Conserto depois da Task 4 (achado no backend de teste da `migracao-rust-2`): o `open` conectava ~3 ms
+depois de o processo subir, antes de o cano criar o socket (escopo do systemd + exec), e a sessão sem
+terminal nunca abria. `cano::open` agora repete a conexão por até 10 s enquanto a resposta é "recusada"
+ou "socket ausente" (outro erro responde na hora), como o Python antigo esperava antes de matar o
+processo; teste `open_waits_for_launched_cano_to_listen` (cano falso que escuta 300 ms depois).
 
 ### Task 3: Falha vira erro visível, com reabertura única no Rust
 
