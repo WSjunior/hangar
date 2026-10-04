@@ -388,6 +388,30 @@ def test_normal_answer_from_rust_is_not_a_failure(tmp_path, no_pause):
     asyncio.run(flow())
 
 
+def test_slow_disk_write_does_not_block_the_event_loop(tmp_path, monkeypatch):
+    import time
+    from app import runtime_queue
+    from app.runtime_adapter import LegacyIO
+
+    async def flow():
+        coordinator = RuntimeCoordinator(Gateway(), Legacy(), peek)
+        slot = coordinator.register(binding(tmp_path))
+        original = runtime_queue.QueueStore._atomic
+        def slow(path, data):
+            time.sleep(0.5)
+            original(path, data)
+        monkeypatch.setattr(runtime_queue.QueueStore, "_atomic", staticmethod(slow))
+        write = asyncio.create_task(LegacyIO(coordinator)._exec("session", {"kind": "set_runtime_state", "state": {"a": 1}}))
+        await asyncio.sleep(0.1)          # a gravação está no disco, numa thread
+        started = time.monotonic()
+        with slot.guard:                  # é o que o leitor de eventos faz em cada evento
+            pass
+        assert time.monotonic() - started < 0.1
+        await write
+        coordinator.close_python_leases()
+    asyncio.run(flow())
+
+
 def test_python_side_handoff_failure_does_not_count_against_rust(tmp_path):
     async def flow():
         legacy, gateway = Legacy(), Gateway()

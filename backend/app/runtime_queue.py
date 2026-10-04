@@ -5,6 +5,7 @@ import copy
 import json
 import os
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -36,6 +37,9 @@ class QueueStore:
     def __init__(self, state_path: Path, projection_dir: Path, initial: dict):
         self.state_path, self.projection_dir = Path(state_path), Path(projection_dir)
         self.fenced = False
+        # Serializa a gravação aqui, e não na trava do slot: o laço de eventos confere a posse
+        # naquela trava e não pode esperar o disco.
+        self._lock = threading.RLock()
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self.projection_dir.mkdir(parents=True, exist_ok=True)
         if self.state_path.exists():
@@ -93,12 +97,23 @@ class QueueStore:
         from app.pqueue import _sanitize
         path = self.projection_dir / f"{_sanitize(self.state['name'])}.jsonl"
         data = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in self.state["rows"]).encode("utf-8")
-        self._atomic(path, data)
+        # As etapas de uma entrega não mudam as mensagens: regravar igual só custava fsync. Compara
+        # com o arquivo, não com memória, para continuar consertando o que mudou por fora.
+        try:
+            unchanged = path.read_bytes() == data
+        except OSError:
+            unchanged = False
+        if not unchanged:
+            self._atomic(path, data)
         previous = self.state["runtime_state"].get("_queue_previous_name")
         if previous and previous != self.state["name"]:
             (self.projection_dir / f"{_sanitize(previous)}.jsonl").unlink(missing_ok=True)
 
     def exec(self, generation: int, call_id: str, clock: dict, action: dict):
+        with self._lock:
+            return self._exec(generation, call_id, clock, action)
+
+    def _exec(self, generation: int, call_id: str, clock: dict, action: dict):
         if self.fenced:
             if action["kind"] != "ensure_projection":
                 raise OSError("fila bloqueada após falha de persistência; reparar antes de continuar")
