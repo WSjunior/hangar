@@ -100,6 +100,16 @@ def _regiao(tela: list[str], name: str, site: str, placement: str | None) -> tup
     return range(0, top if linha is None else linha), 0, None
 
 
+async def _click(name: str, linha: int, coluna: int) -> None:
+    """O clique pelo terminal; sem a posse da escrita (Rust mudo, vínculo em dúvida) é recusa, não 500."""
+    try:
+        chegou = await run_tmux(click, name, linha, coluna)
+    except (TimeoutError, RuntimeError) as e:
+        raise PressRefused("erro_mod_clique_sem_resposta", "O clique não chegou ao terminal.") from e
+    if not chegou:
+        raise PressRefused("erro_mod_clique_sem_resposta", "O clique não chegou ao terminal.")
+
+
 async def press(name: str, site: str, key: str) -> dict:
     async with _locks.setdefault(name, asyncio.Lock()):
         tree, placement = _site(name, site)
@@ -118,16 +128,14 @@ async def press(name: str, site: str, key: str) -> dict:
             raise PressRefused("erro_mod_botao_ambiguo", f"“{rotulo}” aparece mais de uma vez na tela.", rotulo=rotulo)
         linha, coluna = achados[0]
         if key == CLOSE_KEY:
-            if not await run_tmux(click, name, linha, coluna):
-                raise PressRefused("erro_mod_clique_sem_resposta", "O clique não chegou ao terminal.")
+            await _click(name, linha, coluna)
             if not await plugin_bridge.esperar_sem_painel(name, site, CONFIRM_S):
                 raise PressRefused("erro_mod_clique_sem_resposta", "O painel não fechou.")
             return {"ok": True}
         tentativa = plugin_bridge.esperar_clique_do_app(name, site, key, CONFIRM_S)
         try:
             desde = time.monotonic()
-            if not await run_tmux(click, name, linha, coluna):
-                raise PressRefused("erro_mod_clique_sem_resposta", "O clique não chegou ao terminal.")
+            await _click(name, linha, coluna)
             if not await plugin_bridge.esperar_press(name, site, key, desde, CONFIRM_S):
                 raise PressRefused("erro_mod_clique_sem_resposta", "O mod não confirmou o clique.")
             copiado, aberto = await plugin_bridge.esperar_efeito(name, tentativa, EFFECT_S)
@@ -140,3 +148,8 @@ async def press(name: str, site: str, key: str) -> dict:
         if aberto:
             resposta["opened"] = aberto
         return resposta
+
+
+# Na branch Rust só escreve no pane quem tem a posse da escrita: o clique é operação administrativa, como o /btw.
+from app.runtime_terminal import wrap_driver as _wrap_terminal_driver
+click = _wrap_terminal_driver(click, admin=True)
