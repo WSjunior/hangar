@@ -304,14 +304,12 @@ class _AdapterMudo(_AdapterPorProvider):
         return _empty_agen()
 
 
-@pytest.mark.asyncio
-async def test_faixa_muda_com_a_sessao_parada_e_sai_no_stream(monkeypatch):
-    # O monitor de estado não emite nada: na carona do `state`, a faixa nunca sairia.
-    from app import plugin_bridge as pb
+def _idle_session(monkeypatch, session):
+    """Uma sessão Claude na lista, sem transcript, estado nem prévia chegando."""
     monkeypatch.setattr("app.sse.get_adapter", lambda provider: _AdapterMudo(provider))
 
     class _Info:
-        name = "faixa1"
+        name = session
         jsonl = "/claude/a.jsonl"
         provider = "claude"
 
@@ -323,6 +321,13 @@ async def test_faixa_muda_com_a_sessao_parada_e_sai_no_stream(monkeypatch):
         "get": staticmethod(lambda *a, **k: type("_S", (), {
             "subscribe": lambda self: _empty_agen(), "reset": lambda self: None})()),
     }))
+
+
+@pytest.mark.asyncio
+async def test_faixa_muda_com_a_sessao_parada_e_sai_no_stream(monkeypatch):
+    # O monitor de estado não emite nada: na carona do `state`, a faixa nunca sairia.
+    from app import plugin_bridge as pb
+    _idle_session(monkeypatch, "faixa1")
 
     async def _muda():
         await asyncio.sleep(0.2)
@@ -340,3 +345,45 @@ async def test_faixa_muda_com_a_sessao_parada_e_sai_no_stream(monkeypatch):
     finally:
         mudanca.cancel()
         pb.esquecer("faixa1")
+
+
+@pytest.mark.asyncio
+async def test_mod_toast_reaches_the_stream_with_the_session_idle(monkeypatch):
+    # O aviso não entra no transcript nem muda o estado: sem fonte própria, nunca chegaria ao app.
+    from app import plugin_bridge as pb
+    _idle_session(monkeypatch, "aviso1")
+
+    async def _consumir():
+        async for ev in merged_events("aviso1", "/claude/a.jsonl", provider="claude"):
+            if ev["event"] == "plugin_toast":
+                return ev
+
+    # Emitido ANTES de o app conectar e ainda dentro do prazo: quem abre a conversa agora o vê.
+    pb._store_toast("aviso1", "Jenkins configurado.", 9000, "demo")
+    try:
+        ev = await asyncio.wait_for(_consumir(), timeout=5)
+        dado = json.loads(ev["data"])
+        assert (dado["text"], dado["plugin"]) == ("Jenkins configurado.", "demo")
+        assert dado["id"] and 0 < dado["timeoutMs"] <= 9000
+        assert "id" not in ev  # sem id de SSE: quem repõe na reconexão é a bomba
+    finally:
+        pb.esquecer("aviso1")
+
+
+@pytest.mark.asyncio
+async def test_guest_stream_never_gets_mod_toasts(monkeypatch):
+    from app import plugin_bridge as pb
+    _idle_session(monkeypatch, "aviso2")
+
+    async def _consumir():
+        async for ev in merged_events("aviso2", "/claude/a.jsonl", provider="claude",
+                                      count_app=False):
+            if ev["event"] == "plugin_toast":
+                return ev
+
+    pb._store_toast("aviso2", "token secreto", 9000, "demo")
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(_consumir(), timeout=1.5)
+    finally:
+        pb.esquecer("aviso2")
