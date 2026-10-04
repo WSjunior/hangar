@@ -58,6 +58,15 @@ subida): lançado pelo `.desktop` ou pela tarefa do Windows ele nasce com stdout
 descongelou morriam sem leitura — foi o que faltou ao investigar um "ficou branco" que não se
 reproduziu depois.
 
+Em 04/10/2026 o diário desta máquina de 03/10 bateu os 4 MiB às 23:39 e parou de gravar
+tudo, falhas inclusive: 94,8% dos bytes eram nível `ok`, e 60% do arquivo (8.259 linhas) era
+`api.servidor` de `POST /api/plugin/pull`, o long-poll do plugin, que fecha vazio a cada 25 s
+e caía como "pedido lento". O sucesso do long-poll saiu do diário (falha dele continua), e o
+teto passou a valer por nível: acima de `_TETO_DIA` (4 MiB) só entram `aviso`/`erro`, até o
+`_TETO_RIGIDO` (8 MiB), que existe só para um laço de falhas não encher o disco. Cada teto
+cruzado deixa uma linha `diag.teto` com `etapa` `sucesso` ou `tudo`. Os 4 MiB a mais só
+existem num dia de laço de falhas, que é justamente o dia que precisa ir para quem analisa.
+
 Os diários antigos são copiados por origem para `diario/legado`, sem juntar arquivos de
 mesmo nome nem apagar originais; o download atualiza a cópia se uma versão antiga ainda
 escreveu lá. Logs privados antigos conhecidos têm a cauda de até 4 MiB copiada na subida;

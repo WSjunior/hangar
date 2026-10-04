@@ -121,6 +121,31 @@ def test_teto_do_dia_para_de_gravar_e_diz_que_parou(monkeypatch):
     assert len(bruto) < 4000             # e parou de verdade, não só avisou
 
 
+def test_teto_de_sucesso_batido_ainda_grava_falha(monkeypatch):
+    monkeypatch.setattr(diag, "_TETO_DIA", 400)
+    monkeypatch.setattr(diag, "_TETO_RIGIDO", 4000, raising=False)
+    for i in range(40):
+        diag.anotar_da_tela([{"evento": f"ok{i}", "detalhe": "x" * 100}])
+    diag.registrar("api.servidor", "erro", codigo="500")
+    linhas = _linhas()
+    assert [l.get("etapa") for l in linhas if l["evento"] == "diag.teto"] == ["sucesso"]
+    assert linhas[-1]["evento"] == "api.servidor" and linhas[-1]["nivel"] == "erro"
+    assert not any(l["evento"] == "ok39" for l in linhas)
+    # Lote misto acima do teto de sucesso: só a falha entra, e a contagem diz isso.
+    assert diag.anotar_da_tela([{"evento": "m-ok"}, {"evento": "m-erro", "nivel": "erro"}]) == 1
+    assert [l["evento"] for l in _linhas()][-1:] == ["m-erro"]
+
+
+def test_teto_rigido_para_ate_a_falha(monkeypatch):
+    monkeypatch.setattr(diag, "_TETO_DIA", 200)
+    monkeypatch.setattr(diag, "_TETO_RIGIDO", 600, raising=False)
+    for i in range(40):
+        diag.anotar_da_tela([{"evento": f"e{i}", "nivel": "erro", "detalhe": "x" * 100}])
+    bruto = diag.caminho_do_dia().read_text(encoding="utf-8")
+    etapas = [l.get("etapa") for l in _linhas() if l["evento"] == "diag.teto"]
+    assert etapas == ["sucesso", "tudo"] and len(bruto) < 1500
+
+
 def test_lote_gigante_e_cortado():
     assert diag.anotar_da_tela([{"evento": "x"}] * 500) == diag._TETO_LOTE
 
