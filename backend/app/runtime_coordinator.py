@@ -254,11 +254,16 @@ class RuntimeCoordinator:
         after = 0
         if self.managed_queue(name):
             after = (self.slot(name).binding.meta.get("terminal") or {}).get("created") or 0
+        waited = False
         while await asyncio.to_thread(runtime_terminal.being_born, name, after):
+            waited = True
             await asyncio.sleep(_BIRTH_POLL_S)
             binding = await asyncio.to_thread(self.legacy.binding, name, provider)
             if binding is not None:
                 return binding
+        if waited:
+            from app import diag
+            diag.registrar("runtime.birth_wait_expired", "aviso", sessao=name)
         return None
 
     async def start_sessions(self, adapters):

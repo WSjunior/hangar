@@ -318,9 +318,15 @@ class LegacyBridge:
                     with slot.guard:
                         row = next((r for r in slot.store.state["rows"] if r.get("id") == claim["id"]), None)
                         # Confirmada, desistida ou já devolvida: outro caminho tratou a entrada.
-                        if row is not None and row.get("delivered") is True and not row.get("confirmed") and not row.get("desistiu"):
+                        returned = (row is not None and row.get("delivered") is True
+                            and not row.get("confirmed") and not row.get("desistiu"))
+                        if returned:
                             slot.store.exec(descriptor["generation"], "quiesce-unclaim:" + uuid.uuid4().hex,
                                 runtime_coordinator._clock(), {"kind":"set_delivered", "entry_id":claim["id"], "value":False})
+                    if not returned:
+                        from app import diag
+                        diag.registrar("runtime.unclaim_skipped", "aviso", sessao=name,
+                            codigo="sem_linha" if row is None else "ja_tratada")
                 except Exception as exc:
                     from app import diag
                     diag.registrar("runtime.unclaim_failed", "erro", sessao=name, **runtime_coordinator.failure_reason(exc))
