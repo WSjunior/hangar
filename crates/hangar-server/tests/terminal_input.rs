@@ -354,3 +354,11 @@ async fn terminal_input_clear_is_proved_after_its_own_conversation_change() {
  // Outro texto depois da troca continua exigindo o vínculo.
  assert_ne!(d.prompt("hello","id2").await.disposition,Disposition::Accepted);
 }
+#[tokio::test]
+async fn terminal_input_sent_text_left_dim_in_composer_is_not_proof_of_submit() {
+ let rule = format!("\u{1b}[38;2;136;136;136m{}\u{1b}[39m", "─".repeat(30));
+ let dim_ok = format!("history\n{rule}\n\u{1b}[39m❯ \u{1b}[2mok\u{1b}[0m\n{rule}\n⏵⏵ bypass permissions\n\n");
+ let io=Arc::new(FakeIo::new(vec![suggestion_screen(""),suggestion_screen("ok"),dim_ok]));
+ let r=driver(io.clone(),Arc::new(Services::new())).prompt("ok","id").await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Unknown,"submit_unproved"));
+}

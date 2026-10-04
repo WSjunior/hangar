@@ -130,7 +130,13 @@ impl TerminalIo for ProcessIo {
                 };
                 let (_, bytes) = tokio::try_join!(input, output)?;
                 // Líder recolhido antes do `finish` soltaria o número do grupo para reuso.
-                crate::terminal_process::leader_exited(&mut child).await?;
+                if let Err(error) = crate::terminal_process::leader_exited(&mut child).await {
+                    if crate::warn_limit::allow(None, "command_wait_proof_failed") {
+                        tracing::warn!(code="command_wait_proof_failed", io_kind=?error.kind(), os_error=?error.raw_os_error(),
+                            reason="fim do comando não comprovado", "comando do multiplexador");
+                    }
+                    return Err(error);
+                }
                 Ok::<_, std::io::Error>(bytes)
             };
             let result=timeout(self.command_timeout,work).await;
@@ -450,13 +456,17 @@ impl TerminalDriver {
         if let Err(error) = self.key_inner("Enter").await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Submit, error.code); }
         let mut slash_selected = false;
         let clear = text.split_whitespace().next() == Some("/clear");
+        let mut last_error = None;
         for _ in 0..self.limits.proof_attempts.max(1) {
             self.settle().await;
             let capture = if clear {
                 match self.verify_pane().await { Ok(()) => self.composer_capture_unverified().await, Err(e) => Err(e) }
             } else { self.composer_capture().await };
+            if let Err(error) = &capture { last_error = Some(error.code); }
             if let Ok((screen, typed)) = capture {
-                if ComposerSnapshot::parse(&typed).is_some_and(|now| now.is_empty()) {
+                // Só aceita se o texto também sumiu da tela com estilo: esmaecido nunca prova envio.
+                if ComposerSnapshot::parse(&typed).is_some_and(|now| now.is_empty())
+                    && !ComposerSnapshot::parse(&screen).is_some_and(|now| now.proves(text, before) == Proof::Present) {
                     return DeliveryResult::new(Disposition::Accepted, DeliveryStage::SubmitProof, "submitted");
                 }
                 if text.trim_start().starts_with('/') {
@@ -473,7 +483,9 @@ impl TerminalDriver {
             }
         }
         // Limpar depois do Enter nunca demonstra que a mensagem não foi consumida.
-        DeliveryResult::new(Disposition::Unknown, DeliveryStage::SubmitProof, "submit_unproved")
+        let mut result = DeliveryResult::new(Disposition::Unknown, DeliveryStage::SubmitProof, "submit_unproved");
+        if let Some(code) = last_error { result.code = format!("submit_unproved:{code}"); }
+        result
     }
     pub async fn prompt(&self, text: &str, id: &str) -> DeliveryResult {
         if !valid_text(text) || text.trim().is_empty() { return DeliveryResult::new(Disposition::Rejected, DeliveryStage::Validate, "invalid_text"); }

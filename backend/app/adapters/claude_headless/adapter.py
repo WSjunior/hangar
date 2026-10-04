@@ -2485,6 +2485,8 @@ def matar_orfaos() -> int:
     meu_uid = os.getuid()
     sem_permissao = 0
     owner = str(Path.home())
+    marca = f"{_MARCADOR_CANO}=".encode()
+    alheios = 0
     for p in proc.iterdir():
         if not p.name.isdigit():
             continue
@@ -2503,8 +2505,12 @@ def matar_orfaos() -> int:
                 mortos += 1
             except OSError:
                 _log.warning("claude headless: órfão pid=%s não morreu", p.name, exc_info=True)
+        elif marca in env and _orphan_key(env, set(), owner) is None:
+            alheios += 1
     if sem_permissao:
         _log.info("claude headless: varredura de órfãos sem permissão em %d processo(s) meus", sem_permissao)
+    if alheios:
+        _log.info("claude headless: %d processo(s) de cano sem prova de que são deste backend ficaram", alheios)
     return mortos
 
 

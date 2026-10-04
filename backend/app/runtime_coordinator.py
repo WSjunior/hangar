@@ -941,12 +941,14 @@ class RuntimeCoordinator:
                 # Rust morto e contido: o registro sai, e o próximo prepare_session refaz a sessão a
                 # partir do estado durável. Sem isto o nome ficava preso em recuperação até o restart.
                 with slot.guard:
-                    if slot.lease is not None:
-                        slot.lease.close()
+                    try:
+                        if slot.lease is not None:
+                            slot.lease.close()
+                    finally:
                         slot.lease = None
-                    if self.names.get(name) == slot.binding.key:
-                        self.names.pop(name, None)
-                    self.slots.pop(slot.binding.key, None)
+                        if self.names.get(name) == slot.binding.key:
+                            self.names.pop(name, None)
+                        self.slots.pop(slot.binding.key, None)
                 raise
 
     @asynccontextmanager

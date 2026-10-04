@@ -251,9 +251,15 @@ pane. O teste de runtime que fixava `/clear` como incerto passou a exigir aceito
 Esses fluxos foram repetidos no backend isolado depois do conserto: escolha "Dois" aceita,
 `/clear` aceito, queda do Rust sem `recover_failed` e entrega seguinte com 1, fechar com `ok`.
 
-Sobre `3ce0693b`, uma única execução, sem somar rodadas anteriores:
+Antes do push, o `silent-failure-hunter` pediu traceback no log quando uma sessão não volta,
+o último código de erro dentro de `submit_unproved:<código>`, aviso quando o fim do comando não é
+comprovado, contagem dos canos pulados por dono diferente e aceitar envio só se o texto também
+sumiu da tela com estilo (esmaecido nunca prova envio). Falha antes da prova de contenção continua
+bloqueando a sessão: soltá-la deixaria o Python escrever com descendente do Rust possivelmente vivo.
 
-- `cargo test --locked --workspace` em `crates/`: **347 passaram, zero falhou, três ignorados**
+Sobre o commit final da branch, uma única execução, sem somar rodadas anteriores:
+
+- `cargo test --locked --workspace` em `crates/`: **348 passaram, zero falhou, três ignorados**
   (soma dos 36 blocos `test result`).
 - `cargo check --locked --target x86_64-pc-windows-gnu -p hangar-server --tests`: passou.
 - pytest em **47 arquivos** ligados à 2D e aos consertos, uma invocação: **1506 passaram, zero
