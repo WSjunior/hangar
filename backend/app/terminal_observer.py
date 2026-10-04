@@ -11,6 +11,7 @@ import json
 from http.client import HTTPException
 import logging
 import math
+import re
 import sys
 import threading
 import time
@@ -108,8 +109,13 @@ def _success(name: str) -> None:
         session.fallback_since = None
 
 
+# Mesma regra de nome do Rust (`terminal_control.rs`, `validate`): fora dela cada captura voltava
+# 400, pausava e registrava no diário a cada rodada; a sessão fica direto na leitura Python.
+_RUST_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
 def _available(name: str = "") -> bool:
-    return (_config is not None and sys.platform != "win32"
+    return (_config is not None and sys.platform != "win32" and (not name or bool(_RUST_NAME.fullmatch(name)))
             and time.monotonic() >= _session(name).retry_at)
 
 

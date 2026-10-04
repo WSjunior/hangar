@@ -1872,3 +1872,20 @@ def test_release_reaches_rust_even_while_the_session_is_paused(monkeypatch):
         await lease.close()
     asyncio.run(run())
     assert calls[-1] == "release"
+
+
+def test_name_rust_refuses_stays_on_python_without_calling_rust(monkeypatch):
+    # O Rust recusa nome fora de [A-Za-z0-9._-]{1,64}; perguntar a ele só gerava 400 e diário.
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    calls = []
+    monkeypatch.setattr(t, "_http", lambda config, payload: calls.append(payload) or {})
+    async def run():
+        lease = t.lease("nome com espaço", "claude", lambda: "a")
+        await lease.start()
+        with t.use(lease):
+            assert await t.capture("nome com espaço", 1.0) is None
+        await lease.close()
+    asyncio.run(run())
+    assert calls == []
