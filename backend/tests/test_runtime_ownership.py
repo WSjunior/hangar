@@ -231,3 +231,53 @@ def test_recover_dispatch_as_unknown(tmp_path):
         assert coordinator.legacy_allowed("key", 1)
         coordinator.close_python_leases()
     asyncio.run(flow())
+
+
+def test_rust_stuck_in_error_hands_session_back_to_python(tmp_path):
+    async def flow():
+        legacy, gateway = Legacy(), Gateway()
+        sent = []
+        async def legacy_op(target, command, operation_id):
+            sent.append(command["kind"])
+            return {"accepted": True}
+        legacy.op = legacy_op
+        original = gateway.op
+        async def broken(target, command, operation_id, clock):
+            if command["kind"] == "snapshot":
+                return {"key": "key", "generation": 1, "revision": 5, "channels": {}, "error": "cano_closed",
+                        "view": {"public_state": {"session": "session", "state": "idle", "headless": True}}}
+            if command["kind"] == "submit":
+                raise AssertionError("o Rust em erro não pode receber o envio")
+            return await original(target, command, operation_id, clock)
+        gateway.op = broken
+        coordinator = RuntimeCoordinator(gateway, legacy, peek)
+        slot = coordinator.register(binding(tmp_path))
+        await coordinator.adopt("session")
+        slot.cache_valid = False
+        await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1")
+        assert sent == ["submit"]
+        assert legacy.events == ["quiesce", "reconnect"]
+        assert slot.rust_refused == 1
+        assert coordinator.legacy_allowed("key", 1)
+        coordinator.close_python_leases()
+    asyncio.run(flow())
+
+
+def test_rust_without_answer_keeps_the_error(tmp_path):
+    async def flow():
+        legacy, gateway = Legacy(), Gateway()
+        original = gateway.op
+        async def silent(target, command, operation_id, clock):
+            if command["kind"] == "snapshot":
+                raise TimeoutError("synthetic IPC")
+            return await original(target, command, operation_id, clock)
+        gateway.op = silent
+        coordinator = RuntimeCoordinator(gateway, legacy, peek)
+        slot = coordinator.register(binding(tmp_path))
+        await coordinator.adopt("session")
+        slot.cache_valid = False
+        with pytest.raises(RuntimeError, match="aguarde a reposição"):
+            await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1")
+        assert legacy.events == ["quiesce"]
+        gateway.lease.close()
+    asyncio.run(flow())

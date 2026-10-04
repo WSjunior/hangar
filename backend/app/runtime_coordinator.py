@@ -524,8 +524,29 @@ class RuntimeCoordinator:
             raise RuntimeError("IPC do runtime indisponível")
         return await self.transport.op(descriptor, command, operation_id, _clock())
 
+    async def _settle_rust(self, name):
+        """Rust parado em erro não volta sozinho: devolve a sessão ao Python, que segue atendendo."""
+        slot = self.slots.get(self.names.get(name, ""))
+        if slot is None or slot.phase != Phase.Rust or slot.cache_valid:
+            return
+        try:
+            await self.refresh_snapshot(name)
+        except Exception:
+            return          # sem resposta do Rust não dá para saber; o erro de sempre segue valendo
+        error = (slot.view or {}).get("error")
+        if slot.phase != Phase.Rust or slot.cache_valid or not error:
+            return
+        # O detach recupera a fila marcando o que estava em voo como incerto: nada é redigitado.
+        await self.detach(name)
+        with slot.guard:
+            slot.rust_refused = slot.binding.generation
+        from app import diag
+        diag.registrar("runtime.rust_failed_fallback", "erro", sessao=name, codigo=str(error)[:60])
+
     async def op(self, name, command, operation_id):
         self.loop = asyncio.get_running_loop()
+        if command.get("kind") not in {"snapshot", "ensure_projection"}:
+            await self._settle_rust(name)
         with self.queue_gate(name) as route:
             if route is None:
                 raise RuntimeError("sessão sem responsável gerenciado")
