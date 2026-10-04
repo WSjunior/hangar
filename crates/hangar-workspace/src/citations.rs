@@ -222,11 +222,7 @@ pub fn resolve(cwd: &Path, jsonl: &Path, path: &str, write: bool) -> Result<Path
             code: None,
         });
     };
-    let expanded = if path.starts_with('~') {
-        real(Path::new(path))
-    } else {
-        PathBuf::from(path)
-    };
+    let expanded = crate::expand_home(path);
     let target = if expanded.is_absolute() {
         real(&expanded)
     } else {

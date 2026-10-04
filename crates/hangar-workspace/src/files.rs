@@ -492,11 +492,7 @@ pub fn resolver(cwd: &Path, paths: &[String], suffix: bool) -> Result<Value> {
             missing.push(raw.clone());
             continue;
         }
-        let expanded = if raw.starts_with('~') {
-            real(Path::new(raw))
-        } else {
-            PathBuf::from(raw)
-        };
+        let expanded = crate::expand_home(raw);
         let mut found = None;
         let mut logical = None;
         if expanded.is_absolute() {

@@ -98,3 +98,21 @@ fn citation_found_elsewhere_through_a_symlink_never_reaches_git_internals() {
         assert_eq!(error.status, 403);
     }
 }
+
+#[test]
+fn tilde_of_another_user_stays_relative_and_cannot_climb_out_of_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("sessao");
+    fs::create_dir_all(&cwd).unwrap();
+    let secret = dir.path().join("segredo.txt");
+    fs::write(&secret, "x").unwrap();
+    let process_cwd = std::env::current_dir().unwrap();
+    let climb = "../".repeat(process_cwd.components().count() + 1);
+    let path = format!("~ninguem/{climb}{}", secret.display().to_string().trim_start_matches('/'));
+    let jsonl = dir.path().join("t.jsonl");
+    fs::write(&jsonl, json!({"cwd": cwd, "text": path}).to_string() + "\n").unwrap();
+    let error = hangar_workspace::citations::resolve(&cwd, &jsonl, &path, false).unwrap_err();
+    assert_eq!(error.status, 403);
+    let found = hangar_workspace::files::resolver(&cwd, std::slice::from_ref(&path), false).unwrap();
+    assert!(found["ok"].as_object().unwrap().is_empty());
+}

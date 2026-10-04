@@ -541,6 +541,17 @@ fn real_inner(path: &Path, depth: usize) -> PathBuf {
     }
     result
 }
+/// Como o `expanduser` do Python para o próprio usuário: `~outro/...` continua relativo e
+/// passa pela trava de `..`, em vez de virar absoluto a partir da pasta do servidor.
+pub fn expand_home(path: &str) -> PathBuf {
+    let own = |rest: &str| {
+        rest.is_empty() || rest.starts_with('/') || cfg!(windows) && rest.starts_with('\\')
+    };
+    match (path.strip_prefix('~'), home()) {
+        (Some(rest), Some(home)) if own(rest) => home.join(rest.trim_start_matches(['/', '\\'])),
+        _ => PathBuf::from(path),
+    }
+}
 pub fn home() -> Option<PathBuf> {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
 }
