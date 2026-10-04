@@ -8,7 +8,9 @@ Os escopos reais são lidos; as divergências nunca exibem seus valores.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
+import io
 import json
 import logging
 import math
@@ -20,9 +22,11 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCAL = timezone(timedelta(hours=-3))
@@ -78,6 +82,7 @@ def positive_seconds(value: str) -> int:
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--self-test", action="store_true")
+    result.add_argument("--self-test-snapshot", action="store_true", help="Confere o timeout do namespace com processos sintéticos.")
     result.add_argument("--diagnose", action="store_true", help="Compara offsets e linhas apenas dos índices temporários.")
     result.add_argument("--rust-only", action="store_true", help="Mede somente o Rust por etapa, sem comparação Python.")
     result.add_argument("--profile", action="store_true", help="Mostra tempo e memória por etapa do Rust.")
@@ -390,7 +395,8 @@ def snapshot_overlays(scopes: dict, tmp: Path) -> tuple[list[tuple[Path, Path]],
 
 
 def snapshot_command(tmp: Path, overlays: list[tuple[Path, Path]], command: list[str]) -> list[str]:
-    result = [shutil_which("bwrap"), "--die-with-parent", "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev",
+    # A morte do PID inicial encerra até netos que abriram outra sessão de processos.
+    result = [shutil_which("bwrap"), "--die-with-parent", "--unshare-pid", "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev",
               "--bind", str(tmp), str(tmp), "--setenv", "TMPDIR", str(tmp), "--setenv", "SQLITE_TMPDIR", str(tmp)]
     # Pais precedem filhos para que uma sobreposição aninhada não desapareça.
     for source, target in sorted(overlays, key=lambda pair: (len(pair[0].parts), str(pair[0]))):
@@ -523,13 +529,137 @@ def self_test() -> None:
     parsed = parser().parse_args(["--now", "2026-10-03T12:00:00", "--conta", "a", "--conta", "b"])
     if parsed.now.utcoffset() != timedelta(hours=-3) or parsed.conta != ["a", "b"]:
         raise ComparisonError("arguments_self_test_failed")
-    print("Autoverificação: 8 casos de comparação e argumentos aprovados; nenhum dado real lido.")
+    args = parser().parse_args(["--snapshot-worker", "synthetic"])
+    py = {"costs": {}, "uso": {}, "scan_s": 1.0}
+    expected_origins = {"first": "plugin-a", "second": "plugin-b"}
+    actual_origins = {"second": "plugin-b", "first": "plugin-a"}
+    rs = {"costs": {}, "uso": {}, "scan_s": 1.0, "peak_rss_mb": 20,
+          "origins_check": {"expected": len(expected_origins), "actual": len(actual_origins),
+                            "missing": len(expected_origins.keys() - actual_origins.keys()),
+                            "extra": len(actual_origins.keys() - expected_origins.keys()),
+                            "different": sum(actual_origins[key] != value for key, value in expected_origins.items()),
+                            "order_matches": list(expected_origins) == list(actual_origins)}}
+    output = io.StringIO()
+    with patch.dict(globals(), python_reports=lambda *a, **k: (py, None, None, None),
+                    rust_reports=lambda *a, **k: rs), contextlib.redirect_stdout(output):
+        status = compare_reports(args, Path("synthetic"), parse_now("2026-10-03T12:00:00"), "synthetic")
+    if status != 1 or "origins_order_mismatch" not in output.getvalue():
+        raise ComparisonError("origins_order_self_test_failed")
+    rs["origins_check"]["order_matches"] = True
+    with patch.dict(globals(), python_reports=lambda *a, **k: (py, None, None, None),
+                    rust_reports=lambda *a, **k: rs), contextlib.redirect_stdout(io.StringIO()):
+        if compare_reports(args, Path("synthetic"), parse_now("2026-10-03T12:00:00"), "synthetic") != 0:
+            raise ComparisonError("origins_matching_self_test_failed")
+    print("Autoverificação: 8 casos, argumentos e reprovação da ordem das origens aprovados; nenhum dado real lido.")
+
+
+def self_test_snapshot() -> None:
+    if sys.platform != "linux":
+        raise ComparisonError("snapshot_probe_requires_linux")
+
+    def host_processes(marker: bytes) -> dict[int, tuple[str, str, str]]:
+        found = {}
+        for command in Path("/proc").glob("[0-9]*/cmdline"):
+            try:
+                raw = command.read_bytes()
+                if marker not in raw:
+                    continue
+                pid = int(command.parent.name)
+                parts = (command.parent / "stat").read_text().rsplit(")", 1)[1].split()
+                argv = raw.rstrip(b"\0").split(b"\0")
+                role = argv[-1].decode("ascii") if argv[0] == os.fsencode(sys.executable) else ""
+                found[pid] = (parts[19], parts[0], role)
+            except (OSError, ValueError, IndexError):
+                continue
+        return found
+
+    def alive(pid: int, started: str) -> bool:
+        try:
+            parts = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+            return parts[19] == started and parts[0] != "Z"
+        except (OSError, IndexError):
+            return False
+
+    with tempfile.TemporaryDirectory(prefix="hangar-snapshot-timeout-synthetic-") as directory:
+        tmp = Path(directory).resolve()
+        marker = str(tmp).encode()
+        ready = tmp / "ready"
+        # O neto entra em outra sessão, como o executável Rust do comparador.
+        grandchild = f"from pathlib import Path; import time; Path({str(ready)!r}).touch(); time.sleep(60)"
+        child = ("import subprocess,sys,time; subprocess.Popen([sys.executable,'-B','-c',"
+                 f"{grandchild!r},'synthetic-grandchild'],start_new_session=True); time.sleep(60)")
+        worker = ("import subprocess,sys,time; subprocess.Popen([sys.executable,'-B','-c',"
+                  f"{child!r},'synthetic-child'],start_new_session=True); time.sleep(60)")
+        originals: dict[int, tuple[str, str, str]] = {}
+        stop = threading.Event()
+
+        def observe() -> None:
+            while not stop.wait(0.01):
+                if ready.exists():
+                    originals.update(host_processes(marker))
+                    return
+
+        def inputs(*args, **kwargs):
+            scopes = tmp / "scopes.json"
+            scopes.write_text("{}", encoding="utf-8")
+            return {"origins": {}}, scopes, tmp / "pricing", tmp / "areas.json"
+
+        original_command = snapshot_command
+
+        def command(root, overlays, argv):
+            if "--snapshot-worker" in argv:
+                argv = [sys.executable, "-B", "-c", worker, "synthetic-worker"]
+            return original_command(root, overlays, argv)
+
+        thread = threading.Thread(target=observe)
+        thread.start()
+        outcome = None
+        try:
+            args = parser().parse_args(["--timeout", "1"])
+            with patch.dict(globals(), python_reports=inputs, snapshot_overlays=lambda *a: ([], 0, 0),
+                            snapshot_command=command), contextlib.redirect_stdout(io.StringIO()):
+                try:
+                    snapshot_reports(args, tmp, parse_now("2026-10-03T12:00:00"), "synthetic")
+                except ComparisonError as error:
+                    outcome = str(error)
+                except subprocess.TimeoutExpired:
+                    outcome = "snapshot_drain_timeout"
+            stop.set()
+            thread.join(timeout=2)
+            roles = {info[2] for info in originals.values()}
+            if thread.is_alive() or not {"synthetic-worker", "synthetic-child", "synthetic-grandchild"} <= roles:
+                raise ComparisonError("snapshot_host_pid_capture_failed")
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and any(alive(pid, info[0]) for pid, info in originals.items()):
+                time.sleep(0.01)
+            if any(alive(pid, info[0]) for pid, info in originals.items()):
+                raise ComparisonError("snapshot_orphan_self_test_failed")
+            if outcome != "snapshot_worker_timeout":
+                raise ComparisonError("snapshot_timeout_code_self_test_failed")
+            print(f"Timeout sintético: {len(originals)} PIDs originais do host encerrados ou zombies; código snapshot_worker_timeout.")
+        finally:
+            stop.set()
+            thread.join(timeout=2)
+            # A regressão vermelha também limpa somente processos deste marcador privado.
+            current = host_processes(marker)
+            for pid, info in current.items():
+                if alive(pid, info[0]):
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+    if tmp.exists():
+        raise ComparisonError("snapshot_cleanup_self_test_failed")
+    print("Cleanup sintético aprovado; nenhum processo ou dado real utilizado.")
 
 
 def main() -> int:
     args = parser().parse_args()
     if args.self_test:
         self_test()
+        return 0
+    if args.self_test_snapshot:
+        self_test_snapshot()
         return 0
     if args.snapshot_worker is not None:
         frozen = json.loads(args.snapshot_worker.read_text(encoding="utf-8"))
@@ -568,7 +698,9 @@ def compare_reports(args: argparse.Namespace, tmp: Path, now: datetime, binary: 
             raise ComparisonError("rust_origins_check_missing")
         print(f"Origens reais: Python={check['expected']}; Rust={check['actual']}; ausentes={check['missing']}; "
               f"extras={check['extra']}; valores diferentes={check['different']}; ordem igual={check['order_matches']}.")
-        origin_errors = any(check[key] for key in ("missing", "extra", "different"))
+        origin_errors = any(check[key] for key in ("missing", "extra", "different")) or check["order_matches"] is not True
+        if check["order_matches"] is not True:
+            print("  origins: origins_order_mismatch")
     incremental_errors = False
     if args.incremental:
         check = rs.get("incremental")
