@@ -86,3 +86,19 @@ async fn a_failing_status_service_does_not_stop_the_session() {
     registry.detach("key",1).await.unwrap();
     cano.abort();
 }
+
+#[tokio::test]
+async fn an_actor_that_ended_with_an_error_is_released_and_leaves_the_others_alone() {
+    // Antes, a entrada morta ficava registrada: o detach falhava para sempre, a sessão não voltava
+    // ao Python e o retrato inicial de eventos (de todas as sessões) respondia erro.
+    let dir = tempfile::tempdir().unwrap();
+    let (registry,_,cano) = adopted(dir.path()).await;
+    // A parada falha ao reparar a projeção: o ator termina com erro.
+    std::fs::remove_dir_all(dir.path().join("projection")).unwrap();
+    std::fs::write(dir.path().join("projection"),"").unwrap();
+    let detached = registry.detach("key",1).await.unwrap();
+    assert_eq!(detached["detached"],true);
+    assert!(registry.snapshots().await.unwrap().is_empty());
+    let _lease = hangar_server::runtime::queue::acquire_lease(&dir.path().join("key.lock")).unwrap();
+    cano.abort();
+}
