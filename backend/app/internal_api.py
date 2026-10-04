@@ -87,7 +87,7 @@ async def runtime_policy(request: Request):
         with slot.guard:
             if (coordinator.instance != instance or slot.binding.key != body["key"]
                     or slot.binding.generation != body["generation"]
-                    or slot.phase not in {runtime_coordinator.Phase.Rust, runtime_coordinator.Phase.PreparingRust}
+                    or slot.phase != runtime_coordinator.Phase.Rust
                     or slot.lease is not None and not slot.lease.closed):
                 raise RuntimeError("serviço de outra posse ou geração")
         if body["kind"] != "native_message":

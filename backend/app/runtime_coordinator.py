@@ -56,7 +56,6 @@ def refuse_python_client(name):
 
 class Phase(Enum):
     Python = "python"
-    PreparingRust = "preparing_rust"
     Rust = "rust"
     RecoveringPython = "recovering_python"
 
@@ -395,6 +394,9 @@ class RuntimeCoordinator:
                     if slot is None or await self._release_python_slot(name, slot):
                         await self._open_headless(name, binding, engine_models=engine_models, launch=launch)
                     return True
+            if slot is None and self.transport is not None and binding.meta.get("terminal"):
+                await self._open_terminal(name, binding)    # nasce no Rust, sem fase Python
+                return True
             if slot is None:
                 slot = await asyncio.to_thread(self.register, binding)
             if slot is None or not self.managed_runtime(name):
@@ -427,8 +429,61 @@ class RuntimeCoordinator:
                     state["runtime_state"]["_binding"] = slot.binding.descriptor()
                     slot.store._persist(state)
                 if self.transport is not None and binding.meta.get("terminal"):
-                    await self.adopt(name)
+                    # Registro Python do terminal (vínculo pendente que provou a conversa): vai ao Rust.
+                    await self._open_slot_in_rust(name, slot, launch=False)
             return True
+
+    async def _open_terminal(self, name, binding):
+        from app.runtime_terminal import validate_binding
+        from app import diag
+        from app.rust_server import RustOpError
+        self.loop = asyncio.get_running_loop()
+        descriptor, sent = binding.descriptor(), False
+        try:
+            await asyncio.to_thread(validate_binding, descriptor)
+            await asyncio.to_thread(self._prepare_queue_file, binding)
+            sent = True
+            ready = await self._rpc(descriptor, {"kind":"open", "descriptor":descriptor}, uuid.uuid4().hex)
+            self._check_opened(ready, descriptor)
+        except Exception as exc:
+            diag.registrar("runtime.open_failed", "erro", sessao=name, **failure_reason(exc))
+            if sent and not isinstance(exc, RustOpError):
+                # Resposta perdida ou recusada aqui: o Rust pode ter aberto, e ninguém o fecharia.
+                try:
+                    await self._rpc(descriptor, {"kind":"close"}, uuid.uuid4().hex)
+                except Exception as close_error:
+                    diag.registrar("runtime.detach_unconfirmed", "erro", sessao=name, **failure_reason(close_error))
+            raise
+        slot = Slot(binding=copy.deepcopy(binding), phase=Phase.Rust, view=ready["state"], cache_valid=True)
+        runtime_queue.configure(self)
+        self.slots[binding.key], self.names[name] = slot, binding.key
+        self._signal(slot)
+        return slot
+
+    def _prepare_queue_file(self, binding):
+        """Fila do terminal pronta para o Rust: importação única da fila antiga por nome, geração
+        alinhada e vínculo gravado, com a trava tomada e solta antes do `open`."""
+        from app.runtime_process import reconcile_startup
+        reconcile_startup(allow_current=True)
+        lease = WriterLease(binding.lock_path)
+        try:
+            rows = []
+            projection = binding.projection_dir / f"{self._sanitize(binding.name)}.jsonl"
+            if not binding.state_path.exists() and projection.exists():
+                from app.runtime_terminal import import_legacy
+                rows = import_legacy(self, binding, projection)
+            store = runtime_queue.QueueStore(binding.state_path, binding.projection_dir,
+                runtime_queue.initial_state(binding.key, binding.generation, binding.name, rows))
+            state = copy.deepcopy(store.state)
+            if state["generation"] != binding.generation:
+                if binding.generation < state["generation"]:
+                    raise ValueError("a geração não pode voltar para uma vida antiga")
+                state["generation"] = binding.generation
+                state["runtime_state"] = {key:value for key,value in state["runtime_state"].items() if key == "terminal_write_barrier"}
+            state["runtime_state"]["_binding"] = binding.descriptor()
+            store._persist(state)
+        finally:
+            lease.close()
 
     def _born_in_rust(self, binding):
         # Codex sem terminal fica no Python (provedor não migrado); terminal tem caminho próprio.
@@ -700,7 +755,7 @@ class RuntimeCoordinator:
         descriptor, instance = slot.binding.descriptor(), self.instance
         data = await self._rpc(descriptor, {"kind":"snapshot"}, uuid.uuid4().hex)
         if (self.instance != instance or slot.binding.generation != descriptor["generation"]
-                or slot.phase not in {Phase.Rust, Phase.PreparingRust}):
+                or slot.phase != Phase.Rust):
             return False
         event = {"key":descriptor["key"], "generation":descriptor["generation"], "revision":data.get("revision"), "channel":"snapshot", "data":data}
         valid = apply_event(slot, event)
@@ -750,7 +805,7 @@ class RuntimeCoordinator:
                     if not isinstance(event, dict) or not isinstance(event.get("key"), str):
                         raise ValueError("evento privado inválido")
                     slot = self.slots.get(event["key"])
-                    if slot is None or slot.phase not in {Phase.Rust, Phase.PreparingRust}:
+                    if slot is None or slot.phase != Phase.Rust:
                         continue
                     if type(event.get("generation")) is int and event["generation"] != slot.binding.generation:
                         continue
@@ -1227,73 +1282,6 @@ class RuntimeCoordinator:
                         raise
             return await self.legacy.op(descriptor, command, operation_id)
 
-    async def adopt(self, name):
-        slot = self.slot(name)
-        async with self._barrier(slot):
-            if slot.phase == Phase.Rust:
-                return True
-            if slot.phase != Phase.Python or not self.managed_runtime(name):
-                raise RuntimeError("sessão não está disponível para transferência")
-            if slot.binding.meta.get("pending_terminal"):
-                raise RuntimeError("vínculo terminal ainda não confirmado; transferência suspensa")
-            descriptor = slot.binding.descriptor()
-            if not descriptor["meta"].get("terminal"):
-                raise RuntimeError("só o terminal ainda passa pela adoção")
-            from app.runtime_terminal import validate_binding
-            await asyncio.to_thread(validate_binding, descriptor)
-            with slot.guard:
-                slot.phase = Phase.PreparingRust
-            await self._wait_active(slot)
-            released = False
-            try:
-                if self.legacy is None:
-                    raise RuntimeError("serviço da reserva indisponível")
-                await self.legacy.quiesce(descriptor)
-                await self._wait_active(slot)
-                with slot.guard:
-                    slot.store.exec(descriptor["generation"], "quiesce:" + uuid.uuid4().hex, _clock(), {"kind": "recover"})
-                    slot.lease.close()
-                    slot.lease = None
-                    released = True
-                try:
-                    ready = await self._rpc(descriptor, {"kind": "open", "descriptor": descriptor}, uuid.uuid4().hex)
-                    if not (ready.get("opened") is True and ready.get("instance") == self.instance
-                            and ready.get("key") == descriptor["key"] and ready.get("generation") == descriptor["generation"]):
-                        raise RuntimeError("readiness não corresponde à vida atual")
-                except Exception as exc:
-                    exc._hangar_rust = True     # só falha do Rust conta para passar a sessão ao Python
-                    raise
-                with slot.guard:
-                    slot.view = ready["state"]
-                    slot.cache_valid = True
-                    slot.phase = Phase.Rust
-                self._signal(slot)
-                return True
-            except BaseException as exc:
-                with slot.guard:
-                    slot.phase = Phase.RecoveringPython
-                if released:
-                    detach_error = None
-                    try:
-                        detached = await self._rpc(descriptor, {"kind": "close"}, uuid.uuid4().hex)
-                    except Exception as err:
-                        detached, detach_error = {}, err
-                        err._hangar_rust = True
-                    # Sem confirmação, quem decide é o lock: se o Rust ainda segura a sessão, o
-                    # _restore falha ao pegá-lo e o erro sobe; nunca dois donos.
-                    if detached.get("closed") is not True:
-                        from app import diag
-                        diag.registrar("runtime.detach_unconfirmed", "erro", sessao=name,
-                                       **(failure_reason(detach_error) if detach_error else {}))
-                await self._restore(slot)
-                if not isinstance(exc, Exception):
-                    raise
-                # Adotar ainda não entregou nada do usuário: a próxima ação tenta o Rust de novo.
-                from app import diag
-                diag.registrar("runtime.adopt_refused" if getattr(exc, "_hangar_rust", False) else "runtime.adopt_failed_python",
-                               "erro", sessao=name, **failure_reason(exc))
-                return False
-
     async def _restore(self, slot, *, reconnect=True):
         if slot.lease is None or slot.lease.closed:
             slot.lease = WriterLease(slot.binding.lock_path)
@@ -1566,9 +1554,6 @@ class RuntimeCoordinator:
                 diag.registrar("runtime.reopen_skipped", "aviso", sessao=name, codigo="cano_parado")
                 return
         try:
-            if binding.meta.get("terminal"):
-                from app.runtime_terminal import validate_binding
-                await asyncio.to_thread(validate_binding, binding.descriptor())
             await self._open_slot_in_rust(name, slot, launch=launch, engine_models=engine_models)
         except Exception as exc:
             # A ação já aconteceu: ela não vira erro. A sessão fica no registro sem cliente, a
@@ -1598,7 +1583,11 @@ class RuntimeCoordinator:
     async def _open_slot_in_rust(self, name, slot, *, launch, engine_models=None):
         """Solta a trava do Python e abre o registro no Rust; falhando, a trava volta ao Python."""
         from app import diag
+        self.loop = asyncio.get_running_loop()
         headless = not slot.binding.meta.get("terminal")
+        if not headless:
+            from app.runtime_terminal import validate_binding
+            await asyncio.to_thread(validate_binding, slot.binding.descriptor())
         with slot.guard:
             if slot.active or slot.phase != Phase.Python:
                 raise RuntimeError("fila da sessão em uso no Python")

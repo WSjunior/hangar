@@ -98,7 +98,11 @@ impl TerminalServices for Services {
 struct Executor {
     target:TerminalTarget,queue:Arc<QueueActor>,policy:PolicyClient,options:TerminalOptions,
     events:broadcast::Sender<RuntimeEvent>,revision:Arc<AtomicU64>,sequence:Arc<AtomicU64>,receipt:ReceiptIndex,deliverable:bool,last_error:Option<String>,
+    /// Teclado emprestado ao Python (administração que digita no pane): id, prazo e o pedido que o abriu.
+    loan:Option<(String,tokio::time::Instant,String)>,
 }
+/// Teto do empréstimo: a administração mais longa (troca de modelo/motor) leva segundos.
+const MAX_LOAN_S:u64=120;
 pub struct TerminalActor;
 impl TerminalActor {
     pub fn spawn(target:TerminalTarget,queue:QueueActor,policy:PolicyClient,options:TerminalOptions,events:broadcast::Sender<RuntimeEvent>,revision:Arc<AtomicU64>)->TerminalHandle {
@@ -107,12 +111,44 @@ impl TerminalActor {
         let sequence=Arc::new(AtomicU64::new(queue.initial_state().next_seq.max(previous.max(queue.initial_state().operations.len() as u64).saturating_add(1))));
         let receipt=ReceiptIndex::new("claude",&target.binding.conversation);
         let (sender,receiver)=mpsc::channel(64); let closed=Arc::new(AtomicBool::new(false));
-        let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None};
+        let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None,loan:None};
         let task=tokio::spawn(executor.run(receiver,closed.clone()));
         TerminalHandle {sender,closed,task:Arc::new(Mutex::new(Some(task))),stopped:Arc::new(Mutex::new(None))}
     }
 }
 impl Executor {
+    /// Prazo vencido: o Rust retoma o teclado sem esperar devolução.
+    fn loaned(&mut self)->bool {
+        if self.loan.as_ref().is_some_and(|(_,deadline,_)|tokio::time::Instant::now()>=*deadline) {
+            tracing::warn!(key=%self.target.key,session=%self.target.name,code="keyboard_loan_expired","prazo do teclado emprestado venceu; o Rust retomou o pane");
+            self.loan=None;
+        }
+        self.loan.is_some()
+    }
+    /// O Python pede o teclado por uma operação; fila, trava e estado continuam aqui. O ator é serial:
+    /// quando o pedido chega não há digitação em curso.
+    fn loan_control(&mut self,id:&str,kind:&str,payload:&Value)->Result<RuntimeReply,RuntimeError> {
+        let active=self.loaned();
+        if kind=="keyboard_loan" {
+            let seconds=payload["seconds"].as_u64().filter(|s|(1..=MAX_LOAN_S).contains(s))
+                .filter(|_|payload.as_object().is_some_and(|p|p.len()==1)).ok_or_else(||error("terminal_payload"))?;
+            if let Some((loan_id,deadline,request))=self.loan.as_ref().filter(|_|active) {
+                // O mesmo pedido repetido (resposta perdida) recebe o mesmo empréstimo, não `keyboard_busy`.
+                if request==id {return Ok(reply(id,Disposition::Accepted,json!({"loan_id":loan_id,
+                    "seconds":deadline.saturating_duration_since(tokio::time::Instant::now()).as_secs()})))}
+                return Ok(reply(id,Disposition::Rejected,json!({"code":"keyboard_busy"})));
+            }
+            let loan_id=format!("loan:{}:{}",self.target.generation,self.sequence.fetch_add(1,Ordering::Relaxed));
+            self.loan=Some((loan_id.clone(),tokio::time::Instant::now()+Duration::from_secs(seconds),id.into()));
+            return Ok(reply(id,Disposition::Accepted,json!({"loan_id":loan_id,"seconds":seconds})));
+        }
+        let loan_id=payload["loan_id"].as_str().filter(|_|payload.as_object().is_some_and(|p|p.len()==1)).ok_or_else(||error("terminal_payload"))?;
+        if active && self.loan.as_ref().is_some_and(|(current,_,_)|current==loan_id) {
+            self.loan=None;
+            return Ok(reply(id,Disposition::Accepted,json!({"returned":true})));
+        }
+        Ok(reply(id,Disposition::Rejected,json!({"code":"keyboard_loan_expired"})))
+    }
     fn cleared(&self,state:&super::queue::State)->bool {
         state.runtime_state["clear_barrier"]["generation"]==self.target.generation
             && state.runtime_state["clear_barrier"]["conversation"]==self.target.binding.conversation
@@ -159,7 +195,10 @@ impl Executor {
         loop {
             tokio::select! {biased;
                 message=receiver.recv()=>match message {
-                    Some(Message::Command {id,kind,payload,response})=>{let result=self.execute(&id,&kind,payload,None).await; let _=response.send(result);},
+                    Some(Message::Command {id,kind,payload,response})=>{
+                        let result=if matches!(kind.as_str(),"keyboard_loan"|"keyboard_return") {self.loan_control(&id,&kind,&payload)}
+                            else {self.execute(&id,&kind,payload,None).await};
+                        let _=response.send(result);},
                     Some(Message::Queue {id,action,response})=>{
                         let result=match action {
                             Action::Finish {id,status,result}=>self.native_receipt(&id,status,result).await,
@@ -170,7 +209,9 @@ impl Executor {
                     },
                     Some(Message::Snapshot(response))=>{let _=response.send(self.snapshot().await);},
                     Some(Message::Drain(response))=>{let result=self.drain_once(None).await;
-                        if let Err(failure)=&result {self.enter_error(failure.clone()).await?;}else{self.clear_maintenance_error("terminal_facts").await?;}
+                        // Durante o empréstimo nada foi relido: o erro de manutenção continua valendo.
+                        if let Err(failure)=&result {self.enter_error(failure.clone()).await?;}
+                        else if result.as_ref().is_ok_and(|v|v["keyboard_loan"]!=true) {self.clear_maintenance_error("terminal_facts").await?;}
                         let _=response.send(result);},
                     Some(Message::Confirm(response))=>{let result=self.confirm_rows().await;
                         if let Err(failure)=&result {self.enter_error(failure.clone()).await?;}else{self.clear_maintenance_error("receipt_scan").await?;}
@@ -225,6 +266,14 @@ impl Executor {
         if prompt && !is_clear(text) && state.terminal_write_blocked(&self.target.binding.conversation) {
             let result=reply(id,Disposition::Deferred,json!({"code":"terminal_write_barrier","queued":row_id.is_some(),"cleanup":"not_needed"}));
             self.action(Action::Finish {id:id.into(),status:Status::Deferred,result:serde_json::to_value(&result).unwrap()}).await?;
+            return Ok(result);
+        }
+        if self.loaned() {
+            // O Python está digitando no pane: a entrada com linha na fila espera e sai depois da
+            // devolução; comando e controle, sem fila para esperar, são recusados com o código.
+            let (disposition,status)=if row_id.is_some() {(Disposition::Deferred,Status::Deferred)} else {(Disposition::Rejected,Status::Rejected)};
+            let result=reply(id,disposition,json!({"code":"keyboard_loan","queued":row_id.is_some(),"cleanup":"not_needed"}));
+            self.action(Action::Finish {id:id.into(),status,result:serde_json::to_value(&result).unwrap()}).await?;
             return Ok(result);
         }
         let root=row_id.as_deref().unwrap_or(id);
@@ -287,6 +336,7 @@ impl Executor {
         Ok(result)
     }
     async fn drain_once(&mut self,entry:Option<String>)->Result<Value,RuntimeError> {
+        if self.loaned() {return Ok(json!({"drained":0,"keyboard_loan":true}));}
         let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
         if state.terminal_write_blocked(&self.target.binding.conversation) {return Ok(json!({"drained":0}));}
         if self.cleared(&state){return Ok(json!({"drained":0,"preserve_binding":true}));}

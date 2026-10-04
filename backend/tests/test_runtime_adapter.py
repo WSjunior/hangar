@@ -615,7 +615,7 @@ def test_state_monitor_error_without_owner_change_still_surfaces(monkeypatch):
 def test_reads_during_hand_over_use_python_view(monkeypatch):
     # A lista de sessões lia o estado na passagem e dava 500 para todas as sessões.
     from app.runtime_coordinator import Phase, TransferInProgress
-    owner = _Owner(Phase.PreparingRust)
+    owner = _Owner(Phase.RecoveringPython)
     owner.legacy_active = set()
     monkeypatch.setattr(runtime_coordinator, "_current", owner)
 
