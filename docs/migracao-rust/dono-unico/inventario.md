@@ -184,7 +184,7 @@ passagem é só da **captura** do pane.
 | `runtime_terminal.py:28-187` | `outside_scope`, `resolve_binding`, `validate_binding` | **fica** |
 | `runtime_terminal.py:190-217` | `quiesce` / `reconnect` do terminal | `quiesce` **some**; `reconnect` **fica** para a reserva |
 | `runtime_terminal.py:220-253` | `assert_writer`: Python não escreve no pane com o Rust dono | **fica**, essencial |
-| `runtime_terminal.py:354-396` + `terminal_input.py:2605-2606`, `btw.py:380`, `permission_mode.py:325-326` | `run_admin`: `detach` → Python digita no pane → `adopt` | **muda** — pergunta 1 em `desenho.md` |
+| `runtime_terminal.py:354-396` + `terminal_input.py:2605-2606`, `btw.py:380`, `permission_mode.py:325-326` | `run_admin`: `detach` → Python digita no pane → `adopt` | **muda**: teclado emprestado pelo Rust (decisão 1 em `desenho.md`) |
 | `runtime_terminal.py:398-731` | entrega completa pelo Python (`reserve_op`) | **fica** só para a reserva |
 
 ## 8. Nascimento hoje

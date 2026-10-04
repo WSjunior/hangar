@@ -30,7 +30,7 @@ Consequências diretas:
 | Cliente legado inteiro (`LegacyIO`, `LegacyBridge.op/confirm/reconnect`, `reserve_call`, `reserve_op` do terminal, `QueueStore` Python) | `runtime_adapter.py`, `runtime_terminal.py:398-731`, `runtime_queue.py` | é o que atende quando o Python é dono da porta; sai na parte 7 |
 | Trava de arquivo por chave (`WriterLease` / `try_lock`) | `runtime_queue.py`, `runtime/queue.rs:217-225` | impede dois donos do arquivo da fila na troca de processo |
 | Windows: observação do terminal pelo Python | `terminal_observer.py:118`, `terminal_control.rs:173` | divisão fixa por plataforma, não passagem |
-| Pi, Kimi, omp, orq, Codex com terminal | adapters Python | não migraram |
+| Pi, Kimi, omp, orq, Codex com e sem terminal | adapters Python | não migraram (Codex sem terminal: decisão 2) |
 | Nome de sessão fora de `[A-Za-z0-9._-]{1,64}` observado pelo Python | `terminal_observer.py:117-119` | dono fixo pela sessão, decidido antes de qualquer pedido |
 | Citações com linhas em memória (Codex transferido) no Python | `api.py:8436-8452` | o Rust não tem essa capacidade; dono fixo pelo tipo de pedido |
 | Corpo inválido de Git/arquivos validado pelo Python (4xx) | `workspace_routes.rs:385-392` | o Python só recusa; nada roda nele |
@@ -84,7 +84,7 @@ No desenho novo não: as sessões ficam sem dono por segundos e o Rust novo as a
 → `prepare_session` → `_await_birth` (fica) → importação única da fila antiga, se houver (trava
 tomada e solta antes) → slot no Rust → `open {descriptor terminal}`. Sem fase Python.
 
-**Codex sem terminal:** depende da pergunta 2.
+**Codex sem terminal:** fica no Python, como provedor não migrado (decisão 2).
 
 **Sessão do Rust em erro** (cano caiu, E/S da fila, pânico do ator): o Rust publica o problema;
 a próxima operação que precisa de sessão viva faz **uma** reabertura no Rust (`close` + `ensure_open`,
@@ -103,7 +103,8 @@ um `control` do Rust; a Task 5 classifica cada uma das dez antes de mexer.
 as travas de arquivo, os canos seguem vivos no escopo deles.
 
 **Administração do terminal** (`/model`, `/effort`, motor, `/btw`, modo, resposta por chat —
-o Python digita no pane): depende da pergunta 1.
+o Python digita no pane): teclado emprestado pelo Rust (decisão 1); `run_admin` deixa de fazer
+`detach` → Python → `adopt`.
 
 ## Restart do backend com sessões sem terminal vivas
 
@@ -130,7 +131,7 @@ reenviada às cegas — igual à regra atual da fila.
 | SSE do chat não abre | o app reconecta como em qualquer queda; persistindo, o histórico mostra o erro acima | `rust.events_failed` |
 | Git/arquivos ocupado | aviso no painel "Git ocupado, tente em instantes" (503 `workspace_busy` com `Retry-After`) | `rust.workspace_busy` |
 | Git/arquivos sem contexto ou indisponível | aviso no painel com o motivo (503 `workspace_context`/`workspace_unavailable`) | `rust.workspace_failed` |
-| Observação do terminal falha (pergunta 3, opção A) | faixa "Observação do terminal indisponível — `<código>`"; o cartão fica no último estado | `terminal_observer.erro` |
+| Observação do terminal falha (decisão 3) | faixa "Observação do terminal indisponível — `<código>`"; o cartão fica no último estado | `terminal_observer.erro` |
 | Rust cai (1ª ou 2ª queda) | o app perde a conexão por segundos e reconecta | `hangar_server.partida` |
 | Rust desiste | nada muda na tela; tudo segue pelo Python | `hangar_server.reserva` (já existe) |
 
@@ -149,7 +150,7 @@ Sobe `RUST_SERVER_PROTOCOL` e `INTERNAL_PROTOCOL` juntos na Task 1:
   o Python grava no diário. Limitado por `warn_limit` do lado Rust.
 - Snapshot: `problema = "runtime_falhou"`, `problema_detalhe = "<código>: <frase>"`.
 
-Mudança de contrato em Task posterior (ex.: o teclado emprestado da pergunta 1) usa o próximo
+Mudança de contrato em Task posterior (ex.: o teclado emprestado da decisão 1) usa o próximo
 número livre naquele momento, nunca reaproveita o 14 — o Python do checkout e o binário da
 release podem vir de pushes diferentes, e só o número pega isso.
 
@@ -164,33 +165,20 @@ release podem vir de pushes diferentes, e só o número pega isso.
   a dar erro visível, e a reabertura relança o processo como v2 (`--resume` da mesma conversa).
   Turno em andamento num cano v1 é perdido nessa troca; o `cano.py` atual já é v2.
 - **Mais tráfego Rust → Python para o diário.** Limitado a 1 por minuto por (sessão, código).
-- **Codex sem terminal no Rust nunca rodou no uso real** — ver pergunta 2.
+- **Codex sem terminal no Rust nunca rodou no uso real** — por isso fica no Python (decisão 2).
 
-## Perguntas ao dono
+## Decisões do dono (04/10/2026)
 
-**1. Administração do terminal com o Rust de pé** (`/model`, `/effort`, motor, `/btw`, troca de
-modo, resposta por chat). Hoje o Python tira a sessão do Rust, digita e devolve.
+As três recomendações foram aceitas (recado da `migracao-rust-2`):
 
-- **A — Teclado emprestado.** O Rust pausa as próprias escritas e empresta o teclado do pane
-  ao Python por uma operação, com prazo; fila, trava e estado continuam no Rust. Contrato novo
-  (15). ➡️
-- **B — Portar para o Rust agora.** Cada comando vira operação do Rust; mais trabalho e mais
-  teste real nesta etapa.
-- **C — Recusar com erro enquanto o Rust estiver de pé.** Esses comandos param de funcionar no
-  terminal até serem portados.
-
-**2. Codex sem terminal.** Hoje ele nunca chega ao Rust (a versão do cano não é gravada no
-sidecar), então roda inteiro no Python, sem passagem.
-
-- **A — Fica no Python, declarado como provedor não migrado** (igual Pi), até uma Task própria
-  com prova real do Codex no Rust. ➡️
-- **B — Nasce no Rust nesta etapa.** Conserta a versão e entra na prova real; é código Rust que
-  nunca rodou com usuário.
-
-**3. Observação do terminal quando o Rust erra.** É só leitura (`capture-pane`), mas é troca de
-fonte com o Rust vivo.
-
-- **A — Erro visível, sem captura do Python.** Enquanto falhar, o estado do cartão fica parado e
-  a fila do terminal espera; o Rust tenta de novo com pausa até 60 s. ➡️
-- **B — A captura Python continua como exceção** por ser só leitura; sai só o disjuntor por
-  sessão do Python.
+1. **Administração do terminal com o Rust de pé** (`/model`, `/effort`, motor, `/btw`, troca de
+   modo, resposta por chat): **teclado emprestado.** O Rust pausa as próprias escritas e empresta
+   o teclado do pane ao Python por uma operação, com prazo; fila, trava e estado continuam no
+   Rust. Prazo vencido devolve o teclado e a operação falha com código. Contrato: o próximo
+   número livre na Task 6.
+2. **Codex sem terminal fica no Python, declarado como provedor não migrado** (igual Pi), até uma
+   Task própria com prova real do Codex no Rust. O dono é fixo pelo provedor, decidido antes de
+   qualquer pedido.
+3. **Observação do terminal quando o Rust erra: erro visível, sem captura do Python.** Enquanto
+   falhar, o estado do cartão fica parado e a fila do terminal espera; o Rust tenta de novo com
+   pausa até 60 s. Windows e ponte desligada continuam lendo pelo Python.

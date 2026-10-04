@@ -1,6 +1,8 @@
 # Dono único — plano de implementação
 
-> Execução só depois da aprovação do dono e das respostas às perguntas de `desenho.md`.
+> Execução só depois da aprovação do dono. Decisões das três perguntas registradas em
+> `desenho.md` (04/10/2026): teclado emprestado, Codex sem terminal no Python, observação com
+> erro visível.
 > Cada Task: teste escrito primeiro e visto falhar sem o código dela; o código que ficou morto
 > sai no mesmo passo; revisão independente por Task.
 
@@ -181,20 +183,23 @@ Testes apagados: `test_runtime_adapter.py` `:224`, `:371`, `:504`, `:586`, `:608
 
 **Arquivos:** `backend/app/runtime_coordinator.py` (`prepare_session` do terminal),
 `backend/app/runtime_terminal.py` (`run_admin`, `quiesce`), `terminal_input.py`, `btw.py`,
-`permission_mode.py`, e, conforme a pergunta 1, `crates/hangar-server/src/runtime/terminal.rs`.
+`permission_mode.py`, `crates/hangar-server/src/runtime/terminal.rs` e `runtime/gateway.rs`
+(teclado emprestado, decisão 1).
 
 **Falha sem ela:** `test_terminal_session_registers_in_rust_without_python_phase` (pane recém-criado:
-`_await_birth` → `open` terminal, nunca fase Python), e conforme a pergunta 1:
-A) `test_admin_borrows_keyboard_without_moving_queue` (o Rust pausa as escritas, o Python digita,
-a fila e a trava não mudam de dono; prazo vencido devolve o teclado e a operação falha com código);
-B) um teste por comando portado; C) `test_admin_refused_while_rust_owns_terminal`.
+`_await_birth` → `open` terminal, nunca fase Python),
+`test_admin_borrows_keyboard_without_moving_queue` (o Rust pausa as escritas, o Python digita,
+a fila e a trava não mudam de dono), `test_keyboard_loan_expires_and_fails_with_code` (prazo
+vencido: o Rust retoma o teclado, a operação do Python falha com código e o `assert_writer`
+volta a recusar), `test_rust_queue_waits_during_keyboard_loan` (entrada da fila não é digitada
+durante o empréstimo e sai uma vez depois).
 
 **Código morto que sai:** caminho `detach` → Python → `adopt` de `run_admin`; `quiesce` do
 terminal; `test_runtime_terminal.py:286`, `:301` reescritos.
 
-- [ ] **Step 29: Testes da opção escolhida, vistos falhar**
+- [ ] **Step 29: Testes acima, vistos falhar**
 - [ ] **Step 30: Registro do terminal direto no Rust**
-- [ ] **Step 31: Administração do terminal pela opção escolhida (contrato: próximo número livre, se mudar)**
+- [ ] **Step 31: Operação de teclado emprestado no Rust (pedir, prazo, devolver) e `run_admin` digitando só dentro dela; contrato: próximo número livre**
 - [ ] **Step 32: Remover o código morto; rodar `test_runtime_terminal*.py` tocados e os testes Rust do terminal; revisar**
 
 ### Task 7: Rotas públicas do Rust (histórico e eventos) sem repasse por falha
@@ -246,34 +251,34 @@ reescritos; `workspace_routes.rs:386` apagado, `:255`, `:273` reescritos, `Hando
 `crates/hangar-server/src/terminal_control.rs`, `terminal_routes.rs` (texto do log),
 `backend/tests/test_terminal_observer.py`, `crates/hangar-server/tests/terminal_diagnostics.rs`.
 
-**Falha sem ela (opção A da pergunta 3):** `test_rust_capture_error_is_reported_not_replaced`
+**Falha sem ela (decisão 3):** `test_rust_capture_error_is_reported_not_replaced`
 (captura com erro: nenhum `tmux.capture_pane` do Python, problema `terminal_observacao_falhou`
 publicado, estado anterior mantido; a rodada seguinte pergunta ao Rust de novo),
-`test_windows_and_bridge_off_still_capture_in_python`. Na opção B, só os testes do disjuntor saem.
+`test_windows_and_bridge_off_still_capture_in_python`.
 
 **Código morto que sai:** disjuntor por sessão (`MAX_FAILURES`, pausa, `fallback_since`,
-`_success`/`recovered`, diários `fallback`/`paused`); na opção A, o desvio de `state.py:735-738`
+`_success`/`recovered`, diários `fallback`/`paused`); o desvio de `state.py:735-738`
 e a prévia Python por falha em `preview.py`. Testes `test_terminal_observer.py` `:1012`, `:1058`,
 `:1297`, `:1353`, `:1634` apagados; `:80`, `:513`, `:527`, `:922` reescritos; os demais
 conferidos pelo corpo.
 
-- [ ] **Step 42: Testes da opção escolhida, vistos falhar**
+- [ ] **Step 42: Testes acima, vistos falhar**
 - [ ] **Step 43: Erro tipado do observador; problema visível; texto novo do log Rust**
 - [ ] **Step 44: Remover o código morto; testes focados; revisar**
 
 ### Task 10: Codex sem terminal
 
-Conforme a pergunta 2.
+Decisão 2: fica no Python como provedor não migrado.
 
-**Opção A (fica no Python):** `test_codex_headless_stays_python_while_rust_owns` (modo `rust`:
-cliente Python permitido para Codex sem terminal, nunca `open`; a guarda da Task 3 trata o Codex
-sem terminal como não migrado). Documentar na Task 11.
+**Falha sem ela:** `test_codex_headless_stays_python_while_rust_owns` (modo `rust`: cliente
+Python permitido para Codex sem terminal, nunca `open`, nunca `adopt`; a guarda da Task 3 trata o
+Codex sem terminal como não migrado).
 
-**Opção B (nasce no Rust):** gravar `cano.versao` no sidecar do Codex; `ensure_open` para o
-Codex; `test_codex_headless_born_in_rust` e o caso Codex na Task 12.
+**Código morto que sai:** o gatilho de adoção do Codex sem terminal em `prepare_session` (hoje
+inalcançável por falta de `cano.versao`, achado 4 do inventário). Documentar na Task 11.
 
-- [ ] **Step 45: Teste da opção escolhida, visto falhar**
-- [ ] **Step 46: Implementar a opção; rodar `test_codex_*` tocados; revisar**
+- [ ] **Step 45: Teste acima, visto falhar**
+- [ ] **Step 46: Codex sem terminal fora do conjunto migrado; rodar `test_codex_*` tocados; revisar**
 
 ### Task 11: Documentação
 
