@@ -826,6 +826,8 @@ class ClaudeHeadlessAdapter:
     async def _ligar(self, name: str, *, so_reconectar: bool = False, transfer_id: str | None = None,
                      engine_models: list[dict] | None = None) -> _Sessao | None:
         from app.runtime_adapter import assert_legacy
+        from app.runtime_coordinator import refuse_python_client
+        refuse_python_client(name)
         assert_legacy(name)
         # Um spawn por nome de cada vez: prompt e troca de modelo chegando juntos numa sessão
         # parada subiriam dois `claude` no mesmo .jsonl.
@@ -1415,7 +1417,7 @@ class ClaudeHeadlessAdapter:
     async def _on_event(self, sess: _Sessao, ev: dict) -> None:
         from app import runtime_coordinator
         from app.runtime_adapter import LegacyIO, assert_legacy
-        assert_legacy(sess.name, reading=True)
+        assert_legacy(sess.name)
         t = ev.get("type")
         coordinator = runtime_coordinator.current()
         if coordinator is not None and coordinator.managed_queue(sess.name):

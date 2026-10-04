@@ -433,13 +433,65 @@ passa pelo Python); `plataforma.md`: "Endereço ausente/torto desliga a ponte co
 "…é falha de partida: o Python assume a porta inteira", e a entrada do `hangar-server` ganha o
 modo do processo.
 
-- [ ] **Step 25: Ler "Regras vigentes" de `docs/decisoes/windows.md`; testes acima, vistos falhar**
-- [ ] **Step 26: Modo `pending`/`rust`/`python` com `PENDING_WAIT_S = 30`; esperas internas longas esperam o modo antes de contar o próprio prazo**
-- [ ] **Step 27: Supervisor: parada decidida antes de qualquer ação; queda 1–2 → `pending` sem `recover`; desistência (inclusive endereço privado inválido) → `python` + retomada única**
-- [ ] **Step 28: Lifespan registra só metadados com o Rust esperado; ao entrar em `rust`, `open` dos canos vivos, `ensure_open` dos mortos com fila pendente, depois a recuperação de transferência; ao entrar em `python`, o que o lifespan fazia**
-- [ ] **Step 29: Envio em `pending`: espera e repete o mesmo `operation_id` uma vez; senão incerto**
-- [ ] **Step 30: Guarda no cliente legado por tipo migrado (Codex sem terminal fora)**
-- [ ] **Step 31: Remover o código morto, corrigir as regras; testes focados; job Windows do CI conferido pelo log; revisar**
+- [x] **Step 25: Ler "Regras vigentes" de `docs/decisoes/windows.md`; testes acima, vistos falhar**
+- [x] **Step 26: Modo `pending`/`rust`/`python` com `PENDING_WAIT_S = 30`; esperas internas longas esperam o modo antes de contar o próprio prazo**
+- [x] **Step 27: Supervisor: parada decidida antes de qualquer ação; queda 1–2 → `pending` sem `recover`; desistência (inclusive endereço privado inválido) → `python` + retomada única**
+- [x] **Step 28: Lifespan registra só metadados com o Rust esperado; ao entrar em `rust`, `open` dos canos vivos, `ensure_open` dos mortos com fila pendente, depois a recuperação de transferência; ao entrar em `python`, o que o lifespan fazia**
+- [x] **Step 29: Envio em `pending`: espera e repete o mesmo `operation_id` uma vez; senão incerto**
+- [x] **Step 30: Guarda no cliente legado por tipo migrado (Codex sem terminal fora)**
+- [x] **Step 31: Remover o código morto, corrigir as regras; testes focados; job Windows do CI conferido pelo log; revisar**
+
+**Registro da execução (Task 5).** `RuntimeCoordinator.mode` nasce `pending` quando `rust_server.run`
+chama `expect_rust()` (volta a `python` no fim do `run`); `await_mode` espera até `PENDING_WAIT_S`
+e levanta `RuntimeStarting` (`runtime_starting`); `prepare_session` (Claude) e `op` (menos Codex)
+esperam o modo; `queue_rpc` e `run_sync` contam o prazo deles depois (35 s/185 s + 30 s).
+`configure_transport` põe `rust` em assentamento e roda `_enter_rust`: reabre os registros que eram
+do Rust (`_reopen_registered`: terminal pelo vínculo; sem terminal só com cano vivo ou entrada não
+entregue, senão sai do registro como sessão parada) e `register_claude_sessions` (boot: cano vivo
+abre, morto com entrada não entregue relança, terminal registra e segue pela adoção até a Task 6);
+só então o modo assenta e roda o gancho `rust` (recuperação de transferência, uma vez por processo).
+`enter_pending` (queda 1–2, pelo `deactivate_runtime`) fecha o canal e invalida as vistas, sem
+`recover`; `enter_python` (desistência, `hand_to_python` antes do `_take_over`) retoma cada sessão do
+Rust uma vez e roda o gancho `python` (registro Claude no Python, `reconectar_todas`, `apos_entrega`,
+transferências). Supervisor: a parada é decidida depois do respiro e antes de qualquer ação;
+endereço privado ausente/torto devolve `address` → `endereco_privado`. Lifespan: `_boot_sessions`
+(órfãos sempre; religar e conferências só com o Python dono) e `_start_transfer_recovery` (uma vez;
+a parada espera a tarefa). Envio com transporte perdido e Rust morto espera o Rust novo e repete o
+mesmo `operation_id` uma vez (`_repeat_after_crash`); Rust vivo, `python` ou nova perda = incerto.
+`refuse_python_client` no `_ligar` do Claude sem terminal recusa cliente em `pending`/`rust`.
+Saíram: adoção de sessão sem terminal (o `adopt` ficou só para o terminal), `_peek` e o parâmetro
+`peek`, o gatilho de adoção do Codex e do sem terminal no `prepare_session` (registro Python com cano
+vivo abre direto no Rust), os ramos `finishing`/`continuing` de `assert_legacy` e o `reading`,
+`finish_wire(settling=...)`, o ramo `PreparingRust` de `native_slot`, a espera por dono e
+`runtime.state_owner_stuck` de `owner_state_stream`, a readoção `adopt_registered`, o `recover` por
+queda no `deactivate_runtime` e o "liga com as pontes desligadas". Testes apagados:
+`test_quiesce_waits_for_cleanup_persistence`, `test_acked_write_settles_during_hand_over`,
+`test_state_monitor_waits_for_new_owner_instead_of_failing` (substituído por
+`test_state_stream_never_waits_for_owner`), `test_failed_peek_keeps_python`; reescritos os de adoção
+de `test_runtime_ownership.py` (abrem por `_open_slot_in_rust`; "nunca dois donos" no `open`/`close`),
+os de Supervisor de `test_runtime_lifecycle.py`/`test_runtime_final_fixes.py` e o de endereço torto
+de `test_terminal_observer.py`. `test_codex_headless_stays_python_while_rust_owns` e
+`test_dead_cano_without_pending_queue_stays_stopped_after_rust_up` passam também na base; os outros
+onze falharam sem o código.
+Desvios registrados (decisão desta execução): `LegacyBridge.quiesce`, `drain_claims` e
+`_WRITE_WAIT_S` ficam, porque são a administração do Python dono (modo `python`), não passagem;
+continuam também o desvio de leitura `_SYNC`, a leitura da projeção em `route_queue` e
+`TransferInProgress`, que cobrem o instante de fechamento dentro da administração (Task 4), e os
+testes deles (`test_quiesce_settles_entry_claimed_by_cancelled_drain`,
+`test_quiesce_stops_drain_outside_the_cancelled_tasks`, `test_reads_during_hand_over_use_python_view`,
+`test_queue_read_during_hand_over_uses_projection`). A fonte de estado do chat não é escolhida "uma
+vez": sessão parada (sem cano) não tem fonte no Rust, então o monitor segue a sessão aberta/parada,
+sem esperar dono.
+Revisão (`ecc:python-reviewer`, `ecc:silent-failure-hunter`): entraram falha por sessão isolada e
+registrada (diário e log) na entrada em `rust` e no registro Claude, fila ilegível tratada como
+pendente (o Rust mostra o `queue_io`), reaberturas em paralelo (a janela de assentamento não passa do
+teto com muitas sessões), cancelamento no meio da entrada sem publicar `rust`, `pending` gravado antes
+da limpeza da queda, retomada de toda fase não-Python na desistência, gancho `python` dentro do
+assentamento e com etapas independentes, `enter_python` sem esperar o próprio modo, Codex (registro
+ou sidecar) sem esperar o Rust, terminais do Codex registrados em qualquer modo, drenagem de fundo
+que não invalida a vista por `runtime_starting`, aviso a quem esperava no registro descartado, guarda
+no `hand_to_python` (a porta nunca fica sem dono) e erro de recuperação de transferência no log.
+Ficou anotado: `runtime_starting` chega ao chat pela frase do aviso de envio, sem rota própria de 503.
 
 ### Task 6: Terminal nasce no Rust e o teclado emprestado
 

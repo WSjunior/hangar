@@ -315,23 +315,7 @@ async def _lifespan(app: FastAPI):
     except OSError:
         _log.warning("plugin: endereço da ponte não gravado; sessão de terminal fica no tmux",
                      exc_info=True)
-    # Claude sem terminal: o processo vive num cano fora do backend e sobrevive ao restart. Só
-    # morre aqui o cano cuja sessão foi encerrada enquanto o backend estava fora; nos outros o
-    # backend religa e recupera o que estava em aberto (turno, permissão pendente).
-    try:
-        from app.adapters.claude_headless.adapter import matar_orfaos
-        mortos = await asyncio.to_thread(matar_orfaos)
-        if mortos:
-            _log.info("claude headless: %d cano(s) de sessão já encerrada finalizado(s)", mortos)
-        religadas = await get_adapter(CLAUDE_HEADLESS).reconectar_todas()
-        if religadas:
-            _log.info("claude headless: %d sessão(ões) religada(s) ao cano", religadas)
-        # A conferência de entrega é um Timer em memória: o restart apagou as agendadas, e a
-        # mensagem que morreu com o processo ficava "entregue" pra sempre.
-        for meta in await asyncio.to_thread(headless_sessions.list_all):
-            get_adapter(CLAUDE_HEADLESS).apos_entrega(meta["name"])
-    except Exception:
-        _log.warning("claude headless: varredura/religação de canos falhou", exc_info=True)
+    await _boot_sessions(runtime)
     _state_dirs =list({Path(c.path) for c in list_config_dirs()} | {_backend_config_base().resolve()})
     hook_state.on_awaiting = _on_awaiting  # transicao -> awaiting_input dispara web push
     hook_state.on_transition = _on_hook_transition  # drain server-side + confirmacao de entrega
@@ -446,14 +430,8 @@ async def _lifespan(app: FastAPI):
     # threads (Timer da confirmacao, gatilho de hook). Ver `_drenar`.
     global _loop_servidor
     _loop_servidor = asyncio.get_running_loop()
-    async def recover_pending_transfers():
-        from app.conversation_transfer import list_incomplete, recover_transfer, TransferError
-        for record in await asyncio.to_thread(list_incomplete):
-            try:
-                await _durante_troca(record.name, recover_transfer(registry, record), transfer=True)
-            except TransferError:
-                pass  # A fase durável mantém o erro e a ação Recarregar disponíveis.
-    transfer_recovery_task = asyncio.create_task(recover_pending_transfers())
+    if runtime.mode == "python":
+        _start_transfer_recovery()
     codex_warm_task = asyncio.create_task(get_adapter("codex").watch_sessions())
     from app.codex_integracao import SERVICO as integracao_codex
     codex_contas_login = CodexContasLogin(
@@ -490,7 +468,8 @@ async def _lifespan(app: FastAPI):
         await connect_mod.stop()
         costs_sources.cancelar_aquecimento()
         # Claude sem terminal fica vivo no cano: só fecha a conexão; o próximo backend religa.
-        await asyncio.shield(transfer_recovery_task)
+        if _transfer_recovery is not None:
+            await asyncio.shield(_transfer_recovery)
         get_adapter(CLAUDE_HEADLESS).desligar_todas()
         codex_warm_task.cancel()
         app.state.codex_auth_aquecer.cancel()
@@ -2682,6 +2661,71 @@ async def modo_execucao(name: str, body: ModoExecucaoBody):
     """Troca uma sessão entre terminal (pane tmux) e sem terminal, na mesma conversa.
     Só ociosa; o processo novo sobe já no clique, pra a primeira mensagem não pagar a largada."""
     return await _durante_troca(name, _trocar_modo(name, body))
+
+
+async def _python_owns_headless() -> None:
+    """O Python é o dono das sessões Claude sem terminal: religa os canos vivos e reagenda as
+    conferências de entrega (Timers em memória que o restart apagou)."""
+    try:
+        religadas = await get_adapter(CLAUDE_HEADLESS).reconectar_todas()
+        if religadas:
+            _log.info("claude headless: %d sessão(ões) religada(s) ao cano", religadas)
+        for meta in await asyncio.to_thread(headless_sessions.list_all):
+            get_adapter(CLAUDE_HEADLESS).apos_entrega(meta["name"])
+    except Exception:
+        _log.warning("claude headless: religação de canos falhou", exc_info=True)
+
+
+_transfer_recovery: asyncio.Task | None = None
+
+
+async def _recover_pending_transfers() -> None:
+    from app.conversation_transfer import list_incomplete, recover_transfer, TransferError
+    for record in await asyncio.to_thread(list_incomplete):
+        try:
+            await _durante_troca(record.name, recover_transfer(registry, record), transfer=True)
+        except TransferError:
+            pass  # A fase durável mantém o erro e a ação Recarregar disponíveis.
+        except Exception:
+            _log.exception("recuperação da transferência de %s falhou", record.name)
+
+
+def _start_transfer_recovery() -> None:
+    """Uma vez por processo, depois que alguém é dono das sessões (Python, ou Rust de pé)."""
+    global _transfer_recovery
+    if _transfer_recovery is None:
+        _transfer_recovery = asyncio.create_task(_recover_pending_transfers())
+
+
+async def _boot_sessions(runtime) -> None:
+    """Sessões Claude sem terminal na subida. O cano sobrevive ao restart; só morre aqui o de
+    sessão encerrada com o backend fora. Com o Rust esperado, nada mais roda antes do desfecho
+    dele: o modo `rust` abre as sessões nele, e o `python` (desistência) faz o que vinha aqui."""
+    try:
+        from app.adapters.claude_headless.adapter import matar_orfaos
+        mortos = await asyncio.to_thread(matar_orfaos)
+        if mortos:
+            _log.info("claude headless: %d cano(s) de sessão já encerrada finalizado(s)", mortos)
+    except Exception:
+        _log.warning("claude headless: varredura de canos órfãos falhou", exc_info=True)
+
+    async def after_rust():
+        _start_transfer_recovery()
+
+    async def after_python():
+        # Cada etapa independe das outras: uma falha não deixa canos sem religar nem transferência parada.
+        try:
+            await runtime.register_claude_sessions()
+        except Exception:
+            _log.exception("registro das sessões Claude no Python falhou")
+        await _python_owns_headless()
+        _start_transfer_recovery()
+
+    global _transfer_recovery
+    _transfer_recovery = None       # um lifespan novo no mesmo processo (testes) recupera de novo
+    runtime.mode_hooks.update(rust=after_rust, python=after_python)
+    if runtime.mode == "python":
+        await _python_owns_headless()
 
 
 async def _durante_troca(name: str, troca, *, transfer: bool = False):

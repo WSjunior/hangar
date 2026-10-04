@@ -1026,7 +1026,23 @@ filho do backend: sem isso, a porta "de outro processo" barrava todo reinício.
 
 A reserva é no mesmo processo, sem novo lifespan: dois lifespans rodariam watchers e hooks em
 dobro. O motivo vai ao diário como `hangar_server.reserva` (`sem_binario`, `sem_resposta`,
-`protocolo`, `quedas`, `erro`, `porta_ocupada`); cada queda, como `hangar_server.caiu`. A saúde
+`protocolo`, `endereco_privado`, `quedas`, `erro`, `porta_ocupada`); cada queda, como
+`hangar_server.caiu`.
+
+**Modo do processo (dono único, Task 5, 04/10/2026).** O coordenador tem um modo só para o processo:
+`pending` desde a subida com o binário esperado até o Supervisor decidir, e de novo entre uma queda 1
+ou 2 e a volta do Rust; `rust` quando a partida confirma; `python` sem binário, com
+`CP_RUST_SERVER=0`, `--reload`, ou quando o Supervisor desiste. Em `pending` as sessões Claude não
+passam ao Python: operações sobre elas esperam até `PENDING_WAIT_S = 30` s (uma partida leva até
+20 s) e depois falham com `runtime_starting`; as esperas longas (`run_sync`, fila síncrona) contam o
+próprio prazo depois disso. Com o Rust esperado, o lifespan não registra sessão Claude nem religa
+cano; ao entrar em `rust`, o Rust reabre as que eram dele e abre as do boot (cano vivo, ou morto
+com entrada não entregue, que é relançado), e só então roda a recuperação de transferência. Ao
+entrar em `python`, cada sessão do Rust é retomada uma vez e roda o que o lifespan fazia sem o Rust.
+A parada é decidida antes de qualquer ação (nem desativação nem retomada). Envio sem resposta
+porque o Rust morreu espera o Rust novo e repete o mesmo `operation_id` uma vez; senão fica
+incerto. Cliente Python no cano de sessão Claude em `pending`/`rust` é recusado
+(`refuse_python_client`); o Codex sem terminal segue no Python em qualquer modo. A saúde
 traz `protocol`, e o Python só aceita o mesmo `RUST_SERVER_PROTOCOL`: a `server-latest` é sempre a
 mais nova, e uma máquina atrasada pode baixar um binário que fala outro contrato interno. Com o
 Rust na frente, todo pedido chega ao uvicorn interno por `127.0.0.1`: o `forwarded_allow_ips`
@@ -1119,8 +1135,9 @@ O texto abaixo é o da Parte 2C, quando o erro caía na captura Python; a regra 
 `127.0.0.1:0`, no mesmo processo e sob a mesma parada do listener público. Isso cobre também
 um bind público em IP LAN específico, que não aceita conexões destinadas a `127.0.0.1`.
 A saúde anuncia `terminal_address`; o Supervisor só o usa depois de confirmar o protocolo e
-conferir IP literal de loopback e porta válida. Endereço ausente/torto desliga a ponte com
-aviso. A porta pública recusa o endpoint terminal e a privada só monta esse endpoint.
+conferir IP literal de loopback e porta válida. Endereço ausente/torto é falha de partida
+(`hangar_server.reserva` `endereco_privado`): o Python assume a porta inteira, em vez de ligar o
+Rust com as pontes desligadas (dono único, Task 5). A porta pública recusa o endpoint terminal e a privada só monta esse endpoint.
 
 `POST /__hangar_server/terminal` confere origem TCP de loopback e segredo interno em tempo
 constante antes de ler o corpo. Cabeçalho encaminhado externo, inclusive duplicado ou inválido,

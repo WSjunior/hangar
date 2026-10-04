@@ -466,29 +466,23 @@ def test_waiting_record_of_a_dead_life_never_holds_the_name(tmp_path, monkeypatc
 
 def test_one_session_failing_to_recover_does_not_stop_the_takeover(monkeypatch):
     from types import SimpleNamespace
-    from app import diag, rust_server, runtime_coordinator as rc
+    from app import diag, runtime_coordinator as rc
     recovered, logged = [], []
-    class Coordinator:
-        transport = instance = None
-        slots = {k: SimpleNamespace(binding=SimpleNamespace(name=k, key=k), phase=rc.Phase.Rust, awaiting_identity=False)
-                 for k in ('a', 'b')}
-        slots['c'] = SimpleNamespace(binding=SimpleNamespace(name='c', key='c'), phase=rc.Phase.RecoveringPython,
-                                     awaiting_identity=True)
-        names = {'a': 'a', 'b': 'b', 'c': 'c'}
-        async def close_events(self):
-            pass
-        def close_python_leases(self):
-            pass
-        async def recover(self, name, confirmed_dead, containment=None):
-            if name in ('a', 'c'):
-                raise RuntimeError('vida não volta')
-            recovered.append(name)
-    monkeypatch.setattr(rc, 'current', lambda: Coordinator())
+    coordinator = rc.RuntimeCoordinator()
+    coordinator.slots = {k: SimpleNamespace(binding=SimpleNamespace(name=k, key=k), phase=rc.Phase.Rust, awaiting_identity=False)
+                         for k in ('a', 'b')}
+    coordinator.slots['c'] = SimpleNamespace(binding=SimpleNamespace(name='c', key='c'), phase=rc.Phase.RecoveringPython,
+                                             awaiting_identity=True)
+    coordinator.names = {'a': 'a', 'b': 'b', 'c': 'c'}
+    async def recover(name, confirmed_dead, containment=None):
+        if name in ('a', 'c'):
+            raise RuntimeError('vida não volta')
+        recovered.append(name)
+    coordinator.recover = recover
     monkeypatch.setattr(diag, 'registrar', lambda evento, nivel, **kw: logged.append((evento, kw.get('sessao'))))
-    supervisor = rust_server.Supervisor("fake", "127.0.0.1", 1, 2, "token", "127.0.0.1", lambda: False)
-    asyncio.run(supervisor.deactivate_runtime(confirmed_dead=True))
+    asyncio.run(coordinator.enter_python())
     assert recovered == ['b'] and ('runtime.recover_failed', 'a') in logged
-    assert ('runtime.recover_failed', 'c') not in logged
+    assert ('runtime.recover_failed', 'c') not in logged and coordinator.mode == "python"
 
 
 def test_failed_recovery_retires_the_record_so_the_name_is_not_stuck(tmp_path, monkeypatch):

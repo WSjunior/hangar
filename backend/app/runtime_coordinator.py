@@ -24,6 +24,11 @@ _log = logging.getLogger("hangar.runtime")
 
 _current = None
 _lifecycle = contextvars.ContextVar("runtime_lifecycle", default=None)
+# Modo do processo: `pending` (Rust esperado, ainda sem desfecho), `rust` ou `python`.
+_initial_mode = "python"
+# Uma partida do Rust leva até 20 s (linha de pronto + saúde); passou disso, `runtime_starting`.
+PENDING_WAIT_S = 30.0
+_mode_bypass = contextvars.ContextVar("runtime_mode_bypass", default=False)
 
 
 def current():
@@ -35,6 +40,18 @@ def ensure():
     if _current is None:
         _current = RuntimeCoordinator()
     return _current
+
+
+def expect_rust(expected=True):
+    """O processo sobe com o hangar-server: as sessões migradas esperam o desfecho dele."""
+    global _initial_mode
+    _initial_mode = "pending" if expected else "python"
+
+
+def refuse_python_client(name):
+    """Com o Rust esperado ou dono, as sessões Claude são dele: cliente Python no cano é defeito."""
+    if _current is not None and _current.mode in {"pending", "rust"}:
+        raise RuntimeError(f"cliente Python bloqueado em {name}: o Rust é o dono das sessões Claude")
 
 
 class Phase(Enum):
@@ -170,10 +187,37 @@ class RustCacheInvalid(RuntimeError):
     """O Python perdeu a cópia do estado da sessão no Rust; nada foi enviado."""
 
 
+class RuntimeStarting(RuntimeError):
+    """O Rust caiu ou está subindo e não voltou dentro de `PENDING_WAIT_S`."""
+    code = "runtime_starting"
+    safe_detail = True
+
+
+def _has_pending(state_path):
+    try:
+        rows = json.loads(Path(state_path).read_bytes()).get("rows") or []
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True     # fila ilegível: abrir no Rust é o que mostra a recusa dela (`queue_io`)
+    return any(not row.get("delivered") for row in rows)
+
+
+def _codex_session(name):
+    from app.adapters.codex import sessions as codex_sessions
+    return codex_sessions.load(name) is not None
+
+
+def _registration_failed(event, name, exc):
+    from app import diag
+    reason = failure_reason(exc)
+    _log.error("%s: sessão %s (%s)", event, name, reason["codigo"])
+    diag.registrar(event, "erro", sessao=name, **reason)
+
+
 class RuntimeCoordinator:
-    def __init__(self, transport=None, legacy=None, peek=None):
+    def __init__(self, transport=None, legacy=None):
         self.transport, self.legacy = transport, legacy
-        self.peek = peek or self._peek
         self.instance = getattr(transport, "instance", None)
         self.slots: dict[str, Slot] = {}
         self.names: dict[str, str] = {}
@@ -186,11 +230,140 @@ class RuntimeCoordinator:
         self.adoption_task = None
         self.rebindings = {}
         self.drains = {}
+        self.mode = _initial_mode
+        self.mode_hooks = {}        # "rust"/"python" -> corrotina que o lifespan registra
+        self._hooks_ran = set()
+        self._settling = False      # entrando num modo: as sessões ainda abrindo ou voltando
+        self._mode_event = None
+
+    def _set_mode(self, mode, *, settling=False):
+        self.mode, self._settling = mode, settling
+        event, self._mode_event = self._mode_event, None
+        if event is not None:
+            event.set()
+
+    async def await_mode(self):
+        """Espera o desfecho do Rust (subida, queda 1–2) até `PENDING_WAIT_S`; devolve o modo."""
+        deadline = time.monotonic() + PENDING_WAIT_S
+        while (self.mode == "pending" or self._settling) and not _mode_bypass.get():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeStarting("runtime Rust ainda subindo; tente de novo em instantes")
+            if self._mode_event is None:
+                self._mode_event = asyncio.Event()
+            try:
+                await asyncio.wait_for(self._mode_event.wait(), remaining)
+            except TimeoutError:
+                pass
+        return self.mode
+
+    async def _run_hook(self, mode):
+        hook = self.mode_hooks.get(mode)
+        if hook is None or mode in self._hooks_ran:
+            return
+        self._hooks_ran.add(mode)
+        try:
+            await hook()
+        except Exception as exc:
+            from app import diag
+            diag.registrar("runtime.mode_hook_failed", "erro", etapa=mode, **failure_reason(exc))
+
+    async def enter_pending(self):
+        """O Rust caiu (queda 1 ou 2): as sessões ficam com ele, sem dono por segundos, até o
+        próximo subir e abri-las de novo. Nada volta ao Python aqui."""
+        self._set_mode("pending")       # antes da limpeza: ninguém usa o transporte que morreu
+        await self.close_events()
+        self.transport, self.instance = None, None
+        for slot in tuple(self.slots.values()):
+            if slot.phase == Phase.Rust:
+                slot.cache_valid = False
+                self._signal(slot)
+
+    async def enter_python(self, containment=None):
+        """O Rust desistiu: o Python é o dono até o backend reiniciar. Cada sessão do Rust é
+        retomada uma vez; depois roda o que o lifespan faria sem o Rust."""
+        self._set_mode("python", settling=True)
+        token = _mode_bypass.set(True)
+        try:
+            for slot in tuple(self.slots.values()):
+                if (self.names.get(slot.binding.name) != slot.binding.key or slot.phase == Phase.Python
+                        or slot.awaiting_identity):
+                    continue
+                try:
+                    await self.recover(slot.binding.name, confirmed_dead=True, containment=containment)
+                except Exception as exc:
+                    # Uma sessão que não volta fica suspensa sozinha; a porta e as outras seguem.
+                    _registration_failed("runtime.recover_failed", slot.binding.name, exc)
+            await self._run_hook("python")      # registra e religa antes de liberar quem espera
+        finally:
+            _mode_bypass.reset(token)
+            self._set_mode("python")
+
+    async def _enter_rust(self):
+        """Rust novo de pé: reabre nele as sessões que eram dele (queda) e abre as do boot (cano
+        vivo, ou morto com entrada não entregue); só então o modo vira `rust`."""
+        token = _mode_bypass.set(True)
+        cancelled = False
+        try:
+            async def reopen(slot):
+                try:
+                    await self._reopen_registered(slot)
+                except Exception as exc:
+                    _registration_failed("runtime.adoption_failed", slot.binding.name, exc)
+            # Em paralelo: com muitas sessões, em série a janela passaria do teto de espera.
+            await asyncio.gather(*(reopen(slot) for slot in tuple(self.slots.values())
+                if self.names.get(slot.binding.name) == slot.binding.key and slot.phase == Phase.Rust))
+            try:
+                await self.register_claude_sessions()
+            except Exception as exc:
+                # Falha que não é de uma sessão (pasta da fila, lista de sidecars): o modo assenta
+                # mesmo assim, e o próximo envio de cada sessão a abre no Rust.
+                _registration_failed("runtime.registration_failed", "*", exc)
+        except asyncio.CancelledError:
+            cancelled = True        # o Rust caiu no meio: quem decide o modo agora é a queda
+            raise
+        finally:
+            _mode_bypass.reset(token)
+            if not cancelled:
+                self._set_mode("rust")
+        await self._run_hook("rust")
+
+    async def _reopen_registered(self, slot):
+        name = slot.binding.name
+        if slot.binding.meta.get("terminal"):
+            from app.runtime_terminal import validate_binding
+            await asyncio.to_thread(validate_binding, slot.binding.descriptor())
+            binding = copy.deepcopy(slot.binding)
+            descriptor = binding.descriptor()
+            ready = await self._rpc(descriptor, {"kind":"open", "descriptor":descriptor}, uuid.uuid4().hex)
+            self._check_opened(ready, descriptor)
+        else:
+            pending = await asyncio.to_thread(_has_pending, slot.binding.state_path)
+            meta = await asyncio.to_thread(self.legacy.binding, name, "claude")
+            if not pending and not (meta is not None and await asyncio.to_thread(_cano_alive, meta.meta)):
+                # Parada, sem nada a entregar: sai do registro, e o próximo envio a sobe no Rust.
+                from app import diag
+                diag.registrar("runtime.reopen_skipped", "aviso", sessao=name,
+                               codigo="cano_parado" if meta is not None else "sem_sidecar")
+                self._signal(slot)          # quem esperava neste registro relê e acha o novo
+                self.slots.pop(slot.binding.key, None)
+                if self.names.get(name) == slot.binding.key:
+                    self.names.pop(name, None)
+                return
+            binding, ready = await self._launch_and_open(name, launch=pending)
+            if binding.key != slot.binding.key:
+                raise RuntimeError("sidecar mudou durante a reabertura da sessão")
+        with slot.guard:
+            slot.binding = copy.deepcopy(binding)
+            slot.view, slot.cache_valid = ready["state"], True
+        self._signal(slot)
 
     async def prepare_session(self, name, provider, *, launch=False, engine_models=None):
         """`launch`: quem chama pode subir o processo (envio, acordar); leitura e parada nunca sobem."""
         if self.legacy is None:
             return self.managed_runtime(name)
+        if provider == "claude":
+            await self.await_mode()
         async with self.registration_locks.setdefault(name, asyncio.Lock()):
             binding = await asyncio.to_thread(self.legacy.binding, name, provider)
             if binding is None and provider == "claude":
@@ -216,9 +389,9 @@ class RuntimeCoordinator:
             slot = self.slots.get(binding.key)
             if self._born_in_rust(binding) and (slot is None or slot.phase == Phase.Python):
                 alive = await asyncio.to_thread(_cano_alive, binding.meta)
-                # Registro Python sem cano vivo não tem cliente nenhum: a fila passa direto ao Rust.
-                # Com cano vivo ele tem (religado no boot) e segue pela adoção até a Task 5.
-                if slot is None and (launch or alive) or slot is not None and launch and not alive:
+                # Registro Python de sessão Claude sem terminal nunca tem cliente no cano com o Rust
+                # de pé (`refuse_python_client`): a fila passa direto ao Rust.
+                if launch or alive:
                     if slot is None or await self._release_python_slot(name, slot):
                         await self._open_headless(name, binding, engine_models=engine_models, launch=launch)
                     return True
@@ -253,8 +426,7 @@ class RuntimeCoordinator:
                     state = copy.deepcopy(slot.store.state)
                     state["runtime_state"]["_binding"] = slot.binding.descriptor()
                     slot.store._persist(state)
-                if self.transport is not None and ((binding.meta.get("cano") or {}).get("versao") == 2
-                        or binding.meta.get("terminal")):
+                if self.transport is not None and binding.meta.get("terminal"):
                     await self.adopt(name)
             return True
 
@@ -380,11 +552,64 @@ class RuntimeCoordinator:
         from app.runtime_adapter import LegacyBridge
         self.loop = asyncio.get_running_loop()
         self.legacy = LegacyBridge(self, adapters)
+        # Com o Rust esperado as sessões Claude esperam por ele: nada de trava, fila ou cliente
+        # Python antes do desfecho. O Codex sem terminal é sempre do Python (provedor não migrado).
+        if self.mode == "python":
+            await self.register_claude_sessions()
+        else:
+            await self._register_durable_terminals(claude=False)
+        from app.adapters.codex import sessions as codex_sessions
+        await self._prepare_listed("codex", await asyncio.to_thread(codex_sessions.list_all))
+
+    async def _prepare_listed(self, provider, metas):
+        for meta in metas:
+            if meta.get("headless"):
+                try:
+                    await self.prepare_session(meta["name"], provider)
+                except Exception as exc:
+                    _registration_failed("runtime.registration_failed", meta["name"], exc)
+
+    async def register_claude_sessions(self):
+        """Sessões Claude do estado durável. Python dono: registra todas nele. Rust de pé: abre nele
+        os canos vivos e os mortos com entrada não entregue (o resto fica parado até o próximo
+        envio); o terminal registra e segue pela adoção até a Task 6."""
         from app.pqueue import _queue_dir
+        terminals = await self._register_durable_terminals(claude=None if self.transport is None else True)
+        from app.adapters.claude_headless import sessions as claude_sessions
+        metas = await asyncio.to_thread(claude_sessions.list_all)
+        if self.transport is None:
+            await self._prepare_listed("claude", metas)
+            return
+        for binding in terminals:
+            try:
+                await self.prepare_session(binding.name, "claude")
+            except Exception as exc:
+                _registration_failed("runtime.adoption_failed", binding.name, exc)
+        async def open_listed(meta):
+            try:
+                pending = await asyncio.to_thread(_has_pending, _queue_dir() / "runtime" / f"{meta.get('key')}.json")
+                if pending or await asyncio.to_thread(_cano_alive, meta):
+                    await self.prepare_session(meta["name"], "claude", launch=pending)
+            except Exception as exc:
+                _registration_failed("runtime.registration_failed", meta["name"], exc)
+        await asyncio.gather(*(open_listed(meta) for meta in metas
+            if meta.get("headless") and not self.managed_queue(meta["name"])))
+
+    async def _register_durable_terminals(self, *, claude):
+        """Registros de terminal do estado durável da fila: `claude` True só os do Claude, False só
+        os do Codex (sempre do Python), None todos."""
+        from app.pqueue import _queue_dir
+        terminals = []
         for path in (_queue_dir() / "runtime").glob("*.json"):
-            state = await asyncio.to_thread(lambda: json.loads(path.read_bytes()))
+            try:
+                state = await asyncio.to_thread(lambda: json.loads(path.read_bytes()))
+            except (OSError, ValueError) as exc:
+                _registration_failed("runtime.registration_failed", path.stem, exc)
+                continue
             descriptor = state.get("runtime_state", {}).get("_binding")
-            if descriptor and not descriptor.get("headless"):
+            if (claude is not None and descriptor and (descriptor.get("provider") == "claude") != claude):
+                continue
+            if descriptor and not descriptor.get("headless") and descriptor.get("key") not in self.slots:
                 values = {**descriptor, "generation":state["generation"]}
                 for field in ("projection_dir", "state_path", "lock_path"):
                     values[field] = Path(values[field])
@@ -404,17 +629,14 @@ class RuntimeCoordinator:
                         fresh.generation += int(fresh.jsonl != binding.jsonl)
                         fresh.meta["terminal"]["generation"] = fresh.generation
                     binding = fresh
-                await asyncio.to_thread(self.register, binding)
-        from app.adapters.claude_headless import sessions as claude_sessions
-        from app.adapters.codex import sessions as codex_sessions
-        for provider, sessions in (("claude", claude_sessions), ("codex", codex_sessions)):
-            for meta in await asyncio.to_thread(sessions.list_all):
-                if meta.get("headless"):
-                    try:
-                        await self.prepare_session(meta["name"], provider)
-                    except Exception as exc:
-                        from app import diag
-                        diag.registrar("runtime.registration_failed", "erro", sessao=meta["name"], **failure_reason(exc))
+                try:
+                    await asyncio.to_thread(self.register, binding)
+                except Exception as exc:
+                    _registration_failed("runtime.registration_failed", binding.name, exc)
+                    continue
+                if binding.meta.get("terminal"):
+                    terminals.append(binding)
+        return terminals
 
     async def native_receipt(self, message_id, status):
         for slot in tuple(self.slots.values()):
@@ -450,15 +672,10 @@ class RuntimeCoordinator:
         self.loop = asyncio.get_running_loop()
         self.events_task = self.loop.create_task(self._events(transport, transport.instance))
         if self.legacy is not None:
-            async def adopt_registered():
-                for slot in tuple(self.slots.values()):
-                    if self.names.get(slot.binding.name) == slot.binding.key and self.managed_runtime(slot.binding.name):
-                        try:
-                            await self.prepare_session(slot.binding.name, slot.binding.provider)
-                        except Exception as exc:
-                            from app import diag
-                            diag.registrar("runtime.adoption_failed", "erro", sessao=slot.binding.name, **failure_reason(exc))
-            self.adoption_task = self.loop.create_task(adopt_registered())
+            self._set_mode("rust", settling=True)
+            self.adoption_task = self.loop.create_task(self._enter_rust())
+        else:
+            self._set_mode("rust")
 
     async def close_events(self):
         tasks = [task for task in [self.events_task, self.adoption_task, *self.refreshing.values(), *self.rebindings.values()] if task is not None]
@@ -513,6 +730,8 @@ class RuntimeCoordinator:
         async def drain():
             try:
                 await self.op(name, {"kind":kind}, uuid.uuid4().hex)
+            except RuntimeStarting:
+                return          # o Rust novo drena ao abrir a sessão; a vista não está errada
             except Exception as exc:
                 slot.cache_valid = False
                 self._signal(slot)
@@ -735,10 +954,13 @@ class RuntimeCoordinator:
             running = None
         if running is self.loop:
             raise RuntimeError("fila síncrona chamada no loop do servidor")
-        future = asyncio.run_coroutine_threadsafe(self._rpc(descriptor,
-            {"kind": "queue", "action": action}, call_id), self.loop)
+        async def after_mode():
+            await self.await_mode()
+            return await self._rpc(descriptor, {"kind": "queue", "action": action}, call_id)
+        future = asyncio.run_coroutine_threadsafe(after_mode(), self.loop)
         try:
-            return future.result(timeout=35)
+            # O prazo da fila só conta depois do desfecho do Rust (queda ou subida).
+            return future.result(timeout=35 + PENDING_WAIT_S)
         except BaseException:
             future.cancel()
             raise
@@ -898,6 +1120,10 @@ class RuntimeCoordinator:
         no Rust se a sessão estiver em erro. Envio sem resposta do Rust fica incerto, nunca falho:
         a entrada pode estar na fila durável."""
         self.loop = asyncio.get_running_loop()
+        owner = self.slots.get(self.names.get(name, ""))
+        if (self.mode == "pending" or self._settling) and (owner.binding.provider == "claude" if owner is not None
+                else not await asyncio.to_thread(_codex_session, name)):     # o Codex é sempre do Python
+            await self.await_mode()
         if self.legacy is not None and self.managed_queue(name):
             slot = self.slot(name)
             if (slot.binding.meta.get("terminal") or slot.binding.meta.get("pending_terminal")) and command["kind"] != "queue" and not self.in_lifecycle(slot):
@@ -923,6 +1149,7 @@ class RuntimeCoordinator:
             await self._reopen_if_failed(name)
         if command.get("kind") not in _BACKGROUND_KINDS | {"ensure_projection"}:
             await self._await_resync(name, command.get("kind"))
+        transport = self.transport
         try:
             return await self._op_once(name, command, operation_id)
         except Exception as exc:
@@ -936,8 +1163,37 @@ class RuntimeCoordinator:
                     slot.cache_valid = False        # a próxima operação relê o estado do Rust
                     self._signal(slot)
             if command.get("kind") == "submit" and getattr(exc, "_transport_lost", False):
+                repeated = await self._repeat_after_crash(name, command, operation_id, transport)
+                if repeated is not None:
+                    return repeated
                 diag.registrar("runtime.send_uncertain", "aviso", sessao=name, **failure_reason(exc))
                 return {"operation_id":operation_id, "disposition":"unknown", "payload":{"transport_lost":True}}
+            raise
+
+    async def _repeat_after_crash(self, name, command, operation_id, transport):
+        """Envio sem resposta porque o Rust morreu: a entrada pode já estar na fila dele. Espera o
+        Rust novo e repete o MESMO `operation_id` uma vez (ele não duplica); senão, incerto."""
+        alive = getattr(transport, "alive", True)
+        if (alive() if callable(alive) else alive) or transport is None:
+            return None
+        deadline = time.monotonic() + PENDING_WAIT_S
+        while self.mode != "python" and (self.transport is transport or self.mode == "pending" or self._settling):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            if self._mode_event is None:
+                self._mode_event = asyncio.Event()
+            try:
+                await asyncio.wait_for(self._mode_event.wait(), remaining)
+            except TimeoutError:
+                pass
+        if self.mode != "rust":
+            return None         # o Python assumiu a porta: a fila durável dele decide
+        try:
+            return await self._op_once(name, command, operation_id)
+        except Exception as again:
+            if getattr(again, "_transport_lost", False):
+                return None
             raise
 
     async def _op_once(self, name, command, operation_id):
@@ -981,11 +1237,10 @@ class RuntimeCoordinator:
             if slot.binding.meta.get("pending_terminal"):
                 raise RuntimeError("vínculo terminal ainda não confirmado; transferência suspensa")
             descriptor = slot.binding.descriptor()
-            if descriptor["meta"].get("terminal"):
-                from app.runtime_terminal import validate_binding
-                await asyncio.to_thread(validate_binding, descriptor)
-            else:
-                await self.peek(descriptor)
+            if not descriptor["meta"].get("terminal"):
+                raise RuntimeError("só o terminal ainda passa pela adoção")
+            from app.runtime_terminal import validate_binding
+            await asyncio.to_thread(validate_binding, descriptor)
             with slot.guard:
                 slot.phase = Phase.PreparingRust
             await self._wait_active(slot)
@@ -1412,42 +1667,3 @@ class RuntimeCoordinator:
         stopped = method in {"close_sync", "parar"}
         return await self.change(name, action, new_name=params.get("new") if method == "rename" else None,
             advance=method != "rename", remove=False, reopen=not stopped, stopped=stopped)
-
-    @staticmethod
-    async def _peek(descriptor):
-        cano = descriptor["meta"].get("cano") or {}
-        if cano.get("versao") != 2 or not cano.get("token"):
-            raise RuntimeError("cano v1 permanece na reserva até reabertura natural")
-        from app.adapters.claude_headless.cano import MAX_ENVELOPE, MAX_FRAME
-        address = cano.get("escuta", "")
-        if address.startswith("unix:"):
-            opening = asyncio.open_unix_connection(address[5:], limit=MAX_ENVELOPE)
-        elif address.startswith("tcp:"):
-            host, port = address[4:].rsplit(":", 1)
-            import ipaddress
-            if not ipaddress.ip_address(host).is_loopback:
-                raise ValueError("cano fora do loopback")
-            opening = asyncio.open_connection(host, int(port), limit=MAX_ENVELOPE)
-        else:
-            raise ValueError("endereço do cano inválido")
-        reader, writer = await asyncio.wait_for(opening, 10)
-        try:
-            writer.write(f"peek {cano['token']}\n".encode())
-            await writer.drain()
-            raw = await asyncio.wait_for(reader.readline(), 10)
-            if not raw.endswith(b"\n") or len(raw) > MAX_FRAME + 1:
-                raise ValueError("snapshot incompleto ou acima do teto")
-            snapshot = json.loads(raw)
-            if snapshot.get("type") != "cano_snapshot" or snapshot.get("versao") != 2:
-                raise ValueError("snapshot incompatível")
-            # O pid do snapshot é o do agente filho, não o do cano gravado no sidecar; quem prova
-            # que é o cano certo é o token único por subida.
-            if type(snapshot.get("pid")) is not int:
-                raise ValueError("snapshot sem pid")
-            for line in snapshot["pendentes"]:
-                if not isinstance(json.loads(line), dict):
-                    raise ValueError("pedido pendente inválido")
-            return snapshot
-        finally:
-            writer.close()
-            await writer.wait_closed()

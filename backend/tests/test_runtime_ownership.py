@@ -50,8 +50,16 @@ class Gateway:
         return {"accepted": True}
 
 
-async def peek(target):
-    return {"type": "cano_snapshot", "versao": 2, "pendentes": [], "inflight": {}}
+def _owner(tmp_path, gateway):
+    target = binding(tmp_path)
+    legacy = ReopenLegacy(target)
+    coordinator = RuntimeCoordinator(gateway, legacy)
+    slot = coordinator.register(target)
+    return coordinator, slot, legacy
+
+
+async def _open(coordinator):
+    await coordinator._open_slot_in_rust("session", coordinator.slot("session"), launch=False)
 
 
 def test_two_processes_one_lease(tmp_path):
@@ -65,48 +73,31 @@ def test_two_processes_one_lease(tmp_path):
         lease.close()
 
 
-def test_failed_peek_keeps_python(tmp_path):
-    async def fail(target):
-        raise OSError("snapshot")
-    legacy, gateway = Legacy(), Gateway()
-    coordinator = RuntimeCoordinator(gateway, legacy, fail)
-    coordinator.register(binding(tmp_path))
-    with pytest.raises(OSError):
-        asyncio.run(coordinator.adopt("session"))
-    assert coordinator.legacy_allowed("key", 1)
-    assert legacy.events == []
-    coordinator.close_python_leases()
-
-
-def test_quiesce_precedes_release_and_reserve_requires_detach(tmp_path):
+def test_open_releases_python_lease_and_close_returns_it(tmp_path):
     async def flow():
-        legacy, gateway = Legacy(), Gateway()
-        coordinator = RuntimeCoordinator(gateway, legacy, peek)
-        coordinator.register(binding(tmp_path))
-        assert await coordinator.adopt("session")
-        assert legacy.events == ["quiesce"]
-        assert not coordinator.legacy_allowed("key", 1)
-        await coordinator.detach("session")
-        assert coordinator.legacy_allowed("key", 1)
-        assert legacy.events == ["quiesce", "reconnect"]
+        gateway = Gateway()
+        coordinator, slot, legacy = _owner(tmp_path, gateway)
+        await _open(coordinator)
+        assert gateway.lease is not None and not coordinator.legacy_allowed("key", 1)
+        await coordinator.detach("session", restore=False)
+        assert gateway.lease is None and coordinator.legacy_allowed("key", 1)
+        assert legacy.events == [], "nem quiesce nem cliente religado"
         coordinator.close_python_leases()
     asyncio.run(flow())
 
 
 def test_timeout_is_not_fallback(tmp_path):
     async def flow():
-        legacy, gateway = Legacy(), Gateway()
-        coordinator = RuntimeCoordinator(gateway, legacy, peek)
-        coordinator.register(binding(tmp_path))
-        await coordinator.adopt("session")
+        gateway = Gateway()
+        coordinator, slot, legacy = _owner(tmp_path, gateway)
+        await _open(coordinator)
         gateway.fail = True
         # Sem resposta do Rust o envio fica incerto (pode estar na fila), nunca passa ao Python.
         result = await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1")
         assert result["disposition"] == "unknown"
         with pytest.raises(RuntimeError):
             await coordinator.recover("session", confirmed_dead=True)
-        assert legacy.events == ["quiesce"]
-        assert not coordinator.legacy_allowed("key", 1)
+        assert legacy.events == [] and not coordinator.legacy_allowed("key", 1)
         gateway.lease.close()
         coordinator.close_python_leases()
     asyncio.run(flow())
@@ -128,7 +119,7 @@ def test_managed_queue_survives_terminal_mode(tmp_path):
 
 def test_late_ready_rejected(tmp_path):
     async def flow():
-        legacy, gateway = Legacy(), Gateway()
+        gateway = Gateway()
         original = gateway.op
         async def stale(target, command, operation_id, clock):
             result = await original(target, command, operation_id, clock)
@@ -136,18 +127,18 @@ def test_late_ready_rejected(tmp_path):
                 result["generation"] = 0
             return result
         gateway.op = stale
-        coordinator = RuntimeCoordinator(gateway, legacy, peek)
-        coordinator.register(binding(tmp_path))
-        assert await coordinator.adopt("session") is False
-        assert gateway.lease is None
-        assert coordinator.legacy_allowed("key", 1)
+        coordinator, slot, _ = _owner(tmp_path, gateway)
+        with pytest.raises(RuntimeError, match="vida atual"):
+            await _open(coordinator)
+        assert gateway.lease is None, "a abertura de outra vida é fechada no Rust"
+        assert coordinator.legacy_allowed("key", 1) and slot.phase.name == "Python"
         coordinator.close_python_leases()
     asyncio.run(flow())
 
 
-def test_unconfirmed_detach_never_makes_two_owners(tmp_path):
+def test_unconfirmed_close_never_makes_two_owners(tmp_path):
     async def flow():
-        legacy, gateway = Legacy(), Gateway()
+        gateway = Gateway()
         original = gateway.op
         async def dead_actor(target, command, operation_id, clock):
             if command["kind"] == "open":
@@ -157,12 +148,12 @@ def test_unconfirmed_detach_never_makes_two_owners(tmp_path):
                 raise RuntimeError("IPC recusou a operação (503: runtime_closed)")
             return await original(target, command, operation_id, clock)
         gateway.op = dead_actor
-        coordinator = RuntimeCoordinator(gateway, legacy, peek)
-        coordinator.register(binding(tmp_path))
-        # O Rust ainda segura o lock: a reserva não pode assumir.
-        with pytest.raises(BlockingIOError):
-            await coordinator.adopt("session")
-        assert legacy.events == ["quiesce"]
+        coordinator, slot, legacy = _owner(tmp_path, gateway)
+        # O Rust ainda segura a trava: o Python não assume; a sessão fica com o Rust, vista inválida.
+        with pytest.raises(RuntimeError, match="runtime_initialize"):
+            await _open(coordinator)
+        assert not coordinator.legacy_allowed("key", 1) and slot.phase.name == "Rust" and not slot.cache_valid
+        assert legacy.events == []
         gateway.lease.close()
         coordinator.close_python_leases()
     asyncio.run(flow())
@@ -170,10 +161,9 @@ def test_unconfirmed_detach_never_makes_two_owners(tmp_path):
 
 def test_detach_and_lock_before_reserve(tmp_path):
     async def flow():
-        legacy, gateway = Legacy(), Gateway()
-        coordinator = RuntimeCoordinator(gateway, legacy, peek)
-        coordinator.register(binding(tmp_path))
-        await coordinator.adopt("session")
+        gateway = Gateway()
+        coordinator, slot, legacy = _owner(tmp_path, gateway)
+        await _open(coordinator)
         original = gateway.op
         interloper = []
         async def detach_then_other_owner(target, command, operation_id, clock):
@@ -186,7 +176,7 @@ def test_detach_and_lock_before_reserve(tmp_path):
             with pytest.raises(BlockingIOError):
                 await coordinator.detach("session")
             assert not coordinator.legacy_allowed("key", 1)
-            assert legacy.events == ["quiesce"]
+            assert legacy.events == []
         finally:
             for lease in interloper:
                 lease.close()
@@ -195,12 +185,11 @@ def test_detach_and_lock_before_reserve(tmp_path):
 
 def test_recover_dispatch_as_unknown(tmp_path):
     async def flow():
-        legacy, gateway = Legacy(), Gateway()
-        coordinator = RuntimeCoordinator(gateway, legacy, peek)
-        slot = coordinator.register(binding(tmp_path))
+        gateway = Gateway()
+        coordinator, slot, legacy = _owner(tmp_path, gateway)
         slot.store.exec(1, "prepare", {"monotonic_s": 1, "epoch_s": 1},
                         {"kind": "prepare", "id": "op", "payload": {}, "entry_id": None})
-        await coordinator.adopt("session")
+        await _open(coordinator)
         from app.runtime_queue import QueueStore, initial_state
         native_store = QueueStore(slot.binding.state_path, slot.binding.projection_dir,
                                   initial_state("key", 1, "session", []))
@@ -240,12 +229,11 @@ def _refusing(gateway, code, fail_times):
 def test_failure_after_possible_effect_is_never_repeated(tmp_path):
     async def flow():
         from app.rust_server import RustOpError
-        legacy, gateway = Legacy(), Gateway()
+        gateway = Gateway()
+        coordinator, slot, legacy = _owner(tmp_path, gateway)
         sent = _python_ops(legacy)
         attempts = _refusing(gateway, "queue_io", fail_times=99)
-        coordinator = RuntimeCoordinator(gateway, legacy, peek)
-        slot = coordinator.register(binding(tmp_path))
-        await coordinator.adopt("session")
+        await _open(coordinator)
         with pytest.raises(RustOpError):
             await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1")
         # Uma tentativa só, nada reenviado pelo Python; a sessão segue no Rust.
@@ -259,12 +247,11 @@ def test_failure_after_possible_effect_is_never_repeated(tmp_path):
 def test_normal_answer_from_rust_is_not_a_failure(tmp_path):
     async def flow():
         from app.rust_server import RustOpError
-        legacy, gateway = Legacy(), Gateway()
+        gateway = Gateway()
+        coordinator, slot, legacy = _owner(tmp_path, gateway)
         sent = _python_ops(legacy)
         attempts = _refusing(gateway, "claude_command", fail_times=99)
-        coordinator = RuntimeCoordinator(gateway, legacy, peek)
-        slot = coordinator.register(binding(tmp_path))
-        await coordinator.adopt("session")
+        await _open(coordinator)
         # Ex.: "nenhuma permissão pendente" de um botão velho: sobe como erro, a sessão fica no Rust.
         with pytest.raises(RustOpError):
             await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1")
@@ -281,7 +268,7 @@ def test_slow_disk_write_does_not_block_the_event_loop(tmp_path, monkeypatch):
     from app.runtime_adapter import LegacyIO
 
     async def flow():
-        coordinator = RuntimeCoordinator(Gateway(), Legacy(), peek)
+        coordinator = RuntimeCoordinator(Gateway(), Legacy())
         slot = coordinator.register(binding(tmp_path))
         original = runtime_queue.QueueStore._atomic
         def slow(path, data):
@@ -303,10 +290,9 @@ def test_dead_cano_after_rust_lets_go_parks_the_session_in_python(tmp_path):
     # O Rust soltou e a trava voltou: sem cano para religar, a sessão não pode ficar presa em
     # "recuperando" recusando tudo; ela fica no Python e sobe de novo no próximo envio.
     async def flow():
-        legacy, gateway = Legacy(), Gateway()
-        coordinator = RuntimeCoordinator(gateway, legacy, peek)
-        coordinator.register(binding(tmp_path))
-        await coordinator.adopt("session")
+        gateway = Gateway()
+        coordinator, slot, legacy = _owner(tmp_path, gateway)
+        await _open(coordinator)
         async def dead(target, carry):
             raise RuntimeError("reserva não reconectou ao cano existente")
         legacy.reconnect = dead
@@ -375,7 +361,7 @@ def _rust_session(tmp_path, gateway):
     target = binding(tmp_path)
     legacy = ReopenLegacy(target)
     sent = _python_ops(legacy)
-    coordinator = RuntimeCoordinator(gateway, legacy, peek)
+    coordinator = RuntimeCoordinator(gateway, legacy)
     slot = coordinator.register(target)
     return coordinator, slot, legacy, sent
 
@@ -385,7 +371,7 @@ def test_rust_failure_raises_with_code_and_session_stays_rust(tmp_path):
         from app.rust_server import RustOpError
         gateway = Gateway()
         coordinator, slot, _, sent = _rust_session(tmp_path, gateway)
-        await coordinator.adopt("session")
+        await _open(coordinator)
         attempts = _refusing(gateway, "cano_connect", fail_times=99)
         for n in range(4):
             with pytest.raises(RustOpError) as caught:
@@ -403,7 +389,8 @@ def test_headless_in_error_reopens_in_rust_once(tmp_path):
         from app.rust_server import RustOpError
         gateway = Reopenable()
         coordinator, slot, legacy, sent = _rust_session(tmp_path, gateway)
-        await coordinator.adopt("session")
+        await _open(coordinator)
+        legacy.launches.clear()
         gateway.broken, slot.cache_valid = "cano_closed", False
         assert (await coordinator.op("session", {"kind": "submit", "text": "Olá"}, "op-1"))["disposition"] == "accepted"
         assert gateway.kinds[-4:] == ["snapshot", "close", "open", "submit"]
@@ -424,7 +411,7 @@ def test_history_reopens_dead_session_once(tmp_path):
     async def flow():
         gateway = Reopenable()
         coordinator, slot, legacy, sent = _rust_session(tmp_path, gateway)
-        await coordinator.adopt("session")
+        await _open(coordinator)
         gateway.broken, slot.cache_valid = "gone", False
         await coordinator.op("session", {"kind": "ensure_projection"}, "projection")
         assert gateway.kinds[-4:] == ["snapshot", "close", "open", "ensure_projection"]
@@ -445,7 +432,7 @@ def test_invalid_cache_waits_for_resync(tmp_path):
     async def flow():
         gateway = Reopenable()
         coordinator, slot, _, sent = _rust_session(tmp_path, gateway)
-        await coordinator.adopt("session")
+        await _open(coordinator)
         original = gateway.op
         async def silent(target, command, operation_id, clock):
             if command["kind"] == "snapshot":
@@ -469,7 +456,7 @@ def test_transport_loss_on_send_is_uncertain_not_failed(tmp_path):
     async def flow():
         gateway = Gateway()
         coordinator, slot, _, sent = _rust_session(tmp_path, gateway)
-        await coordinator.adopt("session")
+        await _open(coordinator)
         original = gateway.op
         async def dropped(target, command, operation_id, clock):
             if command["kind"] == "submit":
@@ -496,7 +483,7 @@ def test_problem_event_reaches_session_problem(tmp_path):
         from app.runtime_adapter import RuntimeAdapter, apply_event
         gateway = Reopenable()
         coordinator, slot, _, _ = _rust_session(tmp_path, gateway)   # `register` o torna o atual
-        await coordinator.adopt("session")
+        await _open(coordinator)
         await coordinator.refresh_snapshot("session")
         assert apply_event(slot, {"key": "key", "generation": 1, "revision": slot.view["revision"] + 1, "channel": "problem",
                                   "data": {"error_code": "queue_io", "message": "fila recusou: disco cheio"}})
@@ -512,7 +499,7 @@ def test_background_drain_never_reopens(tmp_path):
     async def flow():
         gateway = Reopenable()
         coordinator, slot, _, sent = _rust_session(tmp_path, gateway)
-        await coordinator.adopt("session")
+        await _open(coordinator)
         gateway.broken, slot.cache_valid = "queue_io", False
         gateway.kinds.clear()
         try:

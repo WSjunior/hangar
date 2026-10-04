@@ -472,3 +472,48 @@ def test_protocol_is_the_same_number_on_both_sides():
     lib = (Path(__file__).resolve().parents[2] / "crates/hangar-server/src/lib.rs").read_text()
     rust = int(re.search(r"pub const INTERNAL_PROTOCOL: u32 = (\d+);", lib).group(1))
     assert rust == rust_server.RUST_SERVER_PROTOCOL == 17
+
+
+# --- Modo do processo (dono único, Task 5) ---
+
+def _supervisor(stopping):
+    return rust_server.Supervisor(Path("/bin/true"), "127.0.0.1", 1, 2, "token", "127.0.0.1", stopping)
+
+
+def test_stop_is_decided_before_any_action(monkeypatch):
+    from types import SimpleNamespace
+    supervisor = _supervisor(lambda: True)
+    async def start():
+        supervisor.proc = SimpleNamespace(poll=lambda: 0, returncode=0)
+        return "up"
+    calls = []
+    async def deactivate(confirmed_dead):
+        calls.append("deactivate_runtime")
+    monkeypatch.setattr(supervisor, "_start", start)
+    monkeypatch.setattr(supervisor, "deactivate_runtime", deactivate)
+    monkeypatch.setattr(rust_server, "_POLL", 0.01)
+    assert asyncio.run(supervisor.run()) == "parada"
+    assert calls == [], "parada não desativa nem recupera nada"
+
+
+def test_invalid_private_address_is_startup_failure(monkeypatch):
+    from types import SimpleNamespace
+    supervisor = _supervisor(lambda: False)
+    monkeypatch.setattr(rust_server, "_spawn", lambda binary, env: SimpleNamespace(poll=lambda: None, pid=1))
+    monkeypatch.setattr(rust_server, "_runtime_ready", lambda proc, instance: {"type":"runtime_ready",
+        "protocol":rust_server.RUST_SERVER_PROTOCOL, "instance":instance, "port":1})
+    monkeypatch.setattr(rust_server, "_health", lambda host, port: {"protocol":rust_server.RUST_SERVER_PROTOCOL})
+    configured = []
+    monkeypatch.setattr(supervisor, "configure_runtime", lambda *args: configured.append(args))
+    try:
+        assert asyncio.run(supervisor._start()) == "address"
+    finally:
+        internal_api.set_secret(None)
+    assert configured == [], "endereço privado inválido não liga o Rust com as pontes desligadas"
+    async def address():
+        return "address"
+    async def stop():
+        configured.append("stop")
+    monkeypatch.setattr(supervisor, "_start", address)
+    monkeypatch.setattr(supervisor, "stop", stop)
+    assert asyncio.run(supervisor.run()) == "endereco_privado" and configured == ["stop"]

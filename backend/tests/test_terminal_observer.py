@@ -339,7 +339,7 @@ def test_clear_with_identical_binding_and_text_still_discards_frame(monkeypatch)
 
 
 @pytest.mark.parametrize("address", [None, "198.51.100.1:8765", "localhost:8765", "127.0.0.1:0", "0.0.0.0:8765", "http://127.0.0.1:8765", 1])
-def test_supervisor_bad_health_address_keeps_bridge_disabled(monkeypatch, address):
+def test_supervisor_bad_health_address_is_startup_failure(monkeypatch, address):
     from app import rust_server
     t = bridge()
     class Process:
@@ -354,7 +354,8 @@ def test_supervisor_bad_health_address_keeps_bridge_disabled(monkeypatch, addres
     monkeypatch.setattr(rust_server, "server_log_path", lambda: "/tmp/unused-test-log")
     monkeypatch.setattr(rust_server, "_health", lambda *args: dict(ok=True, protocol=rust_server.RUST_SERVER_PROTOCOL, terminal_address=address))
     supervisor = rust_server.Supervisor(None, "0.0.0.0", 12345, 12346, "owner", "", lambda: False)
-    assert asyncio.run(supervisor._start()) == "up"
+    # Sem endereço privado válido o Rust não sobe pela metade: o Python assume a porta inteira.
+    assert asyncio.run(supervisor._start()) == "address"
     assert t._config is None
 
 
