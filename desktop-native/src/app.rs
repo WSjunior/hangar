@@ -199,6 +199,8 @@ enum Payload {
     // Diálogo Nova sessão: a resposta vai ao diálogo que a pediu, se ele ainda for o aberto.
     Create(EntityId, create::CreateReply),
     Transfer(EntityId, create::TransferReply),
+    // Clique num botão de mod: o que o mod copiou ou mandou abrir vem na resposta.
+    PluginPressed(Result<Value, Failure>),
     // Lista de outra máquina: a geração dos SSE de lista, a chave do servidor e o que chegou.
     Remote(u64, String, servers::RemoteUpdate),
     HeadlessPlan(SessionKey, controls::PlanOutcome),
@@ -454,6 +456,10 @@ pub struct Hangar {
     confirm: Option<Confirm>,
     confirm_no_ask: bool,
     terminal_suggestion: String,
+    /// Faixa acima do prompt que os mods do Claude Code desenham, como veio do SSE `plugin_ui`.
+    plugin_band: Value,
+    /// Painéis que os mods abriram e o terminal desenhou, do mesmo SSE.
+    plugin_panes: Vec<Value>,
     recent: Option<Recent>,
     media: MediaCache<(SessionKey, Source)>,
     full_images: viewer::FullImages,
@@ -732,7 +738,7 @@ impl Hangar {
             attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
             suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
-            terminal_suggestion: String::new(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
+            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
             settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
@@ -1117,6 +1123,8 @@ impl Hangar {
         self.composer.update(cx, |input, cx| input.set_value(draft, window, cx));
         self.confirm = None;
         self.terminal_suggestion.clear();
+        self.plugin_band = Value::Null;
+        self.plugin_panes.clear();
         self.recent = None;
         self.command_panel = false;
         // Os menus são da tela sem sessão: sem isto, o Esc seguinte seria gasto num deles, já fora da tela.
@@ -1505,6 +1513,7 @@ impl Hangar {
             Payload::Computer(reply) => { self.receive_computer(reply, window, cx); return; }
             Payload::Create(dialog, reply) => { self.receive_create(dialog, reply, window, cx); return; }
             Payload::Transfer(dialog, reply) => { self.receive_agent_transfer(dialog, reply, window, cx); return; }
+            Payload::PluginPressed(result) => { self.receive_plugin_press(result, window, cx); return; }
             Payload::Sidebar(reply) => {
                 // Só o silenciar da máquina da conversa aberta muda as preferências que os avisos desta janela leem.
                 if matches!(&reply, sidebar::SidebarReply::Wrote(t, sidebar::Write::Mute(_), _) if t.server == self.open_server()) { self.load_notification_preferences(); }
@@ -1657,6 +1666,13 @@ impl Hangar {
                 self.terminal_suggestion = data.get("text").and_then(Value::as_str).unwrap_or("").to_owned();
                 return (true, Changed::Screen);
             }
+            "plugin_ui" => {
+                // A árvore chega por valor: `take` move em vez de copiar centenas de KB por evento.
+                let mut data = data;
+                self.plugin_band = data["above"].take();
+                self.plugin_panes = match data["panes"].take() { Value::Array(panes) => panes, _ => Vec::new() };
+                return (true, Changed::Screen);
+            }
             "stats" => {
                 return match serde_json::from_value::<Option<Stats>>(data) {
                     // Só o rodapé do compositor lê as estatísticas.
@@ -1775,6 +1791,8 @@ impl Hangar {
                 }
                 self.revision += 1;
                 self.terminal_suggestion.clear();
+                self.plugin_band = Value::Null;
+                self.plugin_panes.clear();
                 if let Some(task) = self.history_task.take() { task.abort(); }
                 self.chat = Chat::default();
                 self.turn_seen = None;
@@ -4984,6 +5002,20 @@ fn save_connection(address: &str, token: &str, servers: &[servers::ServerEntry])
     std::fs::rename(&tmp, &path)
 }
 
+/// Conversa mínima que fica ao lado de um painel de mod ancorado.
+const MIN_CONVERSATION_BESIDE_PANE: f32 = 420.;
+
+/// Largura natural de um painel de mod: as colunas que o terminal deu a ele, mais a moldura.
+fn plugin_pane_width(pane: &Value) -> f32 {
+    pane["columns"].as_f64().map(|c| c as f32 * crate::plugin_ui::CELL_W).unwrap_or(420.) + 20.
+}
+
+/// Como o terminal, que só ancora o painel com largura de sobra: ao lado da conversa quando cabem os
+/// dois (`free` é a largura entre a lista e o painel lateral), senão acima do composer.
+fn plugin_pane_docks(pane: &Value, free: f32) -> bool {
+    crate::plugin_ui::is_dock(pane) && free - plugin_pane_width(pane) >= MIN_CONVERSATION_BESIDE_PANE
+}
+
 fn select_snapshot(state: &SessionState) -> String { json!([state.question, state.options]).to_string() }
 
 fn display_body(event: &ChatEvent) -> String {
@@ -5303,7 +5335,55 @@ impl Hangar {
                 }
             }
         } else { content = content.child(self.render_new_chat(window, cx)); }
-        content.into_any_element()
+        // Painel de mod ancorado: coluna à direita da conversa, como o terminal o põe.
+        let readable = self.selected.as_ref().is_some_and(|s| s.readable());
+        let free = self.plugin_pane_room(window);
+        let press = self.plugin_press(cx);
+        let dock: Vec<AnyElement> = self.plugin_panes.iter().filter(|p| readable && plugin_pane_docks(p, free))
+            .map(|p| div().h_full().flex_shrink_0().w(px(plugin_pane_width(p))).p_2().flex().flex_col()
+                .child(crate::plugin_ui::pane(p, press.clone())).into_any_element())
+            .collect();
+        if dock.is_empty() { return content.into_any_element(); }
+        div().size_full().flex().flex_row().child(content.flex_1().min_w_0()).children(dock).into_any_element()
+    }
+
+    /// Largura que sobra para a conversa e um painel de mod ancorado, entre a lista e o painel lateral.
+    fn plugin_pane_room(&self, window: &Window) -> f32 {
+        f32::from(window.viewport_size().width) - self.nav_width() - self.side_width(window).unwrap_or(0.)
+    }
+
+    /// Quem atende o clique num botão de mod; sessão só leitura deixa os botões como rótulo.
+    fn plugin_press(&self, cx: &mut Context<Self>) -> Option<crate::plugin_ui::Press> {
+        if self.selected.as_ref().is_some_and(|s| s.read_only()) { return None; }
+        let view = cx.entity().downgrade();
+        Some(std::rc::Rc::new(move |site: &str, key: &str, _: &mut Window, cx: &mut App| {
+            let (site, key) = (site.to_owned(), key.to_owned());
+            let _ = view.update(cx, |this, cx| this.press_plugin(site, key, cx));
+        }))
+    }
+
+    fn press_plugin(&mut self, site: String, key: String, cx: &mut Context<Self>) {
+        let (Some(api), Some(session)) = (self.session_api(), self.selected.clone()) else { return };
+        let (connection, selection, tx) = (self.connection, self.selection, self.tx.clone());
+        self.runtime.spawn(async move {
+            let result = api.act(&session.name, &["plugin", "press"], Some(json!({"site": site, "key": key})), false, 10).await;
+            let _ = tx.send(Envelope { connection, selection: Some(selection), payload: Payload::PluginPressed(result) }).await;
+        });
+        cx.notify();
+    }
+
+    // O que o mod copiou ou mandou abrir acontece aqui, na máquina de quem clicou, e não na do terminal.
+    fn receive_plugin_press(&mut self, result: Result<Value, Failure>, window: &mut Window, cx: &mut Context<Self>) {
+        match result {
+            Ok(reply) => {
+                if let Some(text) = reply.get("copied").and_then(Value::as_str) {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+                    window.push_notification(Notification::info(tr_shared("plugin_copiado", &[])), cx);
+                }
+                if let Some(url) = crate::plugin_ui::safe_href(&reply["opened"]) { cx.open_url(&url); }
+            }
+            Err(error) => window.push_notification(Notification::warning(Self::failure(&error)), cx),
+        }
     }
 
     /// Cartões, faixas e avisos entre a conversa e o compositor, e o compositor.
@@ -5359,6 +5439,12 @@ impl Hangar {
                 }))))))
             .when_some(delivery_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
             .when_some(stop_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
+            .children(readable.then(|| {
+                let (free, press) = (self.plugin_pane_room(window), self.plugin_press(cx));
+                let inline = self.plugin_panes.iter().filter(|p| !plugin_pane_docks(p, free))
+                    .map(|p| in_column(crate::plugin_ui::pane(p, press.clone()))).collect::<Vec<_>>();
+                inline.into_iter().chain(crate::plugin_ui::band(&self.plugin_band, press).map(in_column))
+            }).into_iter().flatten())
             .map(|el| match orq {
                 Some(orq) => el.child(in_column(self.render_orq_footer(&orq, cx))),
                 None if read_only => el.child(in_column(div().py_2().text_sm().text_color(theme::muted()).whitespace_normal().child(tr("par_so_leitura")))),

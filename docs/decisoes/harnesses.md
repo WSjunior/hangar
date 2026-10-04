@@ -5,6 +5,40 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 
 ## Regras vigentes
 
+- **O plugin do Hangar entra por `--plugin-dir` mesmo estando na pasta de skills.** Na cadeia
+  de hooks, o primeiro plugin carregado fica por fora: `--plugin-dir` vem antes do marketplace,
+  e a pasta de skills vem depois. A faixa dos mods (`plugins/hangar/hooks/ui.ts`) só recebe por
+  `next(e)` o que os plugins de dentro desenham, e um mod que responde a faixa sem chamar
+  `next` esconde tudo dos que estão por dentro dele. Sessão aberta fora do Hangar carrega só
+  pela pasta de skills e não espelha a faixa dos mods do marketplace. Ver
+  [faixa dos mods](#faixa-dos-mods-ordem-na-cadeia-medida-03102026).
+
+- **Faixa e painéis dos mods saem no SSE por fonte própria, nunca na carona do `state`.** O
+  `state` só sai quando a chave muda; o mod que relê com a sessão parada ficava velho no app. O
+  plugin reenvia a faixa quando a ponte aparece e quando o `/pull` responde `faixa: false` (backend
+  reiniciado começa sem ela): sem isso, faixa que não muda não voltava ao app. Ver [painel e clique](#mods-painel-clique-e-o-que-acontece-no-aparelho-04102026).
+
+- **Botão de mod clicado no app é clique de mouse SGR no pane, achado pelo rótulo e confirmado
+  pelo `ui.press`.** Nenhuma API do engine dispara o botão de outro plugin. Sem mouse ligado, com
+  o pane em copy-mode, rótulo ausente ou repetido na região do site, o backend recusa em vez de
+  clicar às cegas. O mouse é lido por `#{mouse_sgr_flag}` no tmux e por `#{alternate_on}` no
+  psmux, que não tem as flags de mouse. A âncora da faixa (primeiro texto) conta o `label` de
+  botão: sem isso, faixa que começa por botão deixava a linha dele fora da região.
+
+- **Sessão Claude com terminal nasce com `CLAUDE_CODE_NO_FLICKER=1`.** O Claude Code só liga o
+  mouse em tela cheia, e no Windows por SSH desliga a tela cheia sozinho ("fullscreen disabled:
+  Windows over SSH"); a variável força a tela cheia mesmo sem `"tui": "fullscreen"` nas
+  configurações. Sem ela, o clique dos botões de mod pelo app não tem onde chegar.
+
+- **Clique do app que copia ou abre URL acontece no aparelho de quem clicou.** O plugin responde
+  no lugar do `ui.copy` e do `process.run` de abridor de URL só quando a chamada vem do mod dono
+  do botão, até 1,5 s depois de um press que o backend confirmou como vindo do app. Cópia e
+  abertura levam o id da tentativa; chegando depois da resposta ao app, o backend recusa e o
+  plugin deixa acontecer no terminal, para não sumir nem cair no clique seguinte.
+
+- **A prévia corta cada linha na largura da conversa quando há painel ancorado.** A largura é o
+  `bodyColumns` da faixa + 5; sem o corte, a borda `│` do painel vira texto da prévia.
+
 - **tok/s "agora" é medido no stream da resposta, nunca no transcript.** Do `message_start`
   ao fim da resposta, com o `output_tokens` real: sem terminal pelo `stream_event`; com
   terminal pelo `turn.step` do plugin (`rate.ts` → `POST /api/plugin/rate`). Nunca a partir
@@ -1435,6 +1469,60 @@ com terminal criada por `hangar-send --new`, conta `~/.claude-200-01`, que já n
 Fora do mod: pelo `/input` do app, `!echo oi` chegou ao modelo como texto (`promptSource:"typed"`,
 o modelo rodou o Bash sozinho), não como modo bash; e `@README.md resuma…` enviado com o turno
 rodando foi absorvido nele (`queue-operation remove`, `reason: absorbed_mid_turn`).
+
+### Faixa dos mods: ordem na cadeia medida (03/10/2026)
+
+Claude Code 2.1.289 (Linux) e 2.1.288 (Windows), mod descartável que hooka `ui.render`
+`{ component: 'AbovePrompt' }`, grava o que `await next(e)` devolve e devolve igual; ao lado, o
+mod de progresso do pmedico, que responde a faixa com a própria árvore e NÃO chama `next`
+enquanto tem barra.
+
+| | o que foi medido |
+|---|---|
+| sonda por `--plugin-dir`, pmedico do marketplace | a sonda recebeu a árvore inteira da barra (`Box`/`Text`/`Raster`, `surface: "terminal"`, `bodyColumns` = largura do pane): ela fica por fora |
+| sonda pela pasta de skills, pmedico do marketplace | só `{"type":"engine"}` antes da barra; com a barra, o hook nem roda: a pasta de skills fica por dentro do marketplace |
+| plugin do Hangar pela pasta de skills, pmedico por `CLAUDE_CODE_PLUGIN_DIRS` | o backend recebeu só `above: null`: carga de sessão fica por fora da pasta de skills |
+| frequência | o hook roda a cada redesenho; com relógio na faixa, uma vez por segundo (36 vezes em ~30 s). O `ui.ts` junta os quadros em 500 ms e só envia quando a árvore muda |
+
+A API não tem prioridade nem ordem configurável (`Tier`: `prepend`, `user`, `append`, `builtin`,
+`core`; dentro de `user`, a ordem de carga). Por isso a sessão do Hangar leva `--plugin-dir`
+sempre: o par com a pasta de skills já estava medido (B acima), carrega um só e sem carga dupla.
+
+Sem terminal o caminho é outro e não depende de ordem: o backend entra como superfície remota
+(`control_request` `ui_attach`, depois `ui_render` do `AbovePrompt`) e o CLI avisa a mudança
+com `system`/`ui_invalidate`. Medido num `claude -p` stream-json: a resposta traz a árvore da
+superfície pedida (`desktop`/`mobile`: a barra vem como `Svg`, não `Raster`). Fica para depois da
+migração do runtime sem terminal para o Rust.
+
+### Mods: painel, clique e o que acontece no aparelho (04/10/2026)
+
+Claude Code 2.1.289 (Linux), sondas descartáveis carregadas por `--plugin-dir` ao lado do mod
+`review-mr` do pmedico (MR mergeado: lê o GitLab e encerra, sem efeito).
+
+| | o que foi medido |
+|---|---|
+| `ui.render` de `{ component: 'Pane' }` sem `requestId` | recebe o painel de OUTRO plugin com a árvore inteira e as props `title`, `placement` (`dock`/`inline`), `bodyColumns`, `scroll` |
+| `ui.press` sem matcher | vê o clique de outro plugin: `{plugin, element (key), component, requestId, surface}`; `requestId` é `above-prompt` na faixa e o id do painel no painel |
+| `ui.copy`, `ui.open`, `ui.close` | vistos com o texto copiado, o id/título/colunas do painel aberto e o `origin` de quem fechou |
+| chamadas do `$` (`OpEventOf`) | `process.run` de outro plugin é interceptável por nome; responder `{ value }` sem `next` impede o `xdg-open` de rodar na máquina do terminal. `origin.plugin` diz quem chamou |
+| disparar press de outro plugin | não existe método no `$`; só a superfície remota (`ui_client_press`, sessão por stream-json) ou o próprio terminal |
+| clique SGR por `send-keys -l` | `ESC[<0;x;yM` + `ESC[<0;x;ym` chega ao Claude Code em tela cheia (`#{mouse_sgr_flag}` = 1): abriu o painel, copiou o link e fechou o painel pelo `✕` do engine |
+| botão sem `plain` | o terminal desenha `[ rótulo ]` em volta do `label`; a busca pelo rótulo acha o texto dentro |
+| `onPress` do mod | dispara `$.ui.copy`/`$.process.run` sem `await`: a cópia pode chegar ao backend depois do `pressed`. Por isso a janela de 1,5 s no plugin e a espera de 0,3 s pelo efeito no backend |
+| prévia com painel ancorado | antes do corte, o SSE mandava `"text":"ok   …   │\n   …   │"` |
+
+**psmux (WinBoat, Windows 26200, psmux 3.3.8, Claude Code 2.1.289):** o psmux não tem
+`#{mouse_sgr_flag}`/`#{mouse_any_flag}`/`#{mouse_button_flag}` (vêm vazios); `#{alternate_on}` e
+`#{pane_in_mode}` existem. Aberto por SSH, o Claude Code registra "fullscreen disabled: Windows over
+SSH (ConPTY re-rendering) detected" e fica fora de tela cheia (`alternate_on` = 0): o clique SGR não
+pressiona nada, e os bytes também não aparecem no prompt. Com `CLAUDE_CODE_NO_FLICKER=1`, mesmo sem
+`"tui": "fullscreen"`, ele entra em tela cheia (`alternate_on` = 1) e o mesmo `send-keys -l` com o
+par SGR pressiona o botão (o `onPress` da sonda gravou o arquivo).
+
+O engine recusa carregar um módulo que guarda o próprio `$` numa variável (`engine = $`); só aceita
+o `$` no ponto da chamada ou num closure, como nos timers. O `tsc` não pega isso, o
+`claude plugin validate` pega. Um painel que o mod abre sem pedido da pessoa só é desenhado a
+partir de 144 colunas (110 depois de pedido); abaixo disso não há árvore para espelhar.
 
 ## O `wire.jsonl` do Kimi não é um transcript bem-comportado
 

@@ -19,6 +19,7 @@ mod effects;
 mod electron;
 mod mend;
 mod motion;
+mod plugin_ui;
 mod single_instance;
 mod term_view;
 mod status;

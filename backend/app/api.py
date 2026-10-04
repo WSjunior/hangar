@@ -5401,6 +5401,21 @@ def select_submit(name: str):
     return {"ok": True}
 
 
+class PluginPressBody(_StrictBody):
+    site: str = Field(min_length=1, max_length=64)
+    key: str = Field(min_length=1, max_length=256)
+
+
+@app.post("/api/sessions/{name}/plugin/press", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+async def plugin_press(name: str, body: PluginPressBody):
+    """Clique num botão que um mod desenhou na faixa ou num painel, pedido pelo app."""
+    from app import plugin_click
+    try:
+        return await plugin_click.press(name, body.site, body.key)
+    except plugin_click.PressRefused as e:
+        raise HTTPException(409, detail=e.detail)
+
+
 @app.post("/api/sessions/{name}/interrupt", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def interrupt(name: str, clear: bool = False):
     await asyncio.to_thread(_recusa_orq, name)

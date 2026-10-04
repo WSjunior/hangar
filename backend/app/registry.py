@@ -249,6 +249,9 @@ def _env_sessao(modelo: str | None, jev: bool, provider: str = "claude",
     # Nos outros providers ela não seria lida por ninguém.
     if provider == "claude":
         env.update(runtime_config.env_function_hooks())
+        # Tela cheia sempre: só nela o Claude Code liga o mouse, que é por onde o app aperta os
+        # botões dos mods. No Windows por SSH ele a desliga sozinho.
+        env["CLAUDE_CODE_NO_FLICKER"] = "1"
         # Endereço e token do caminho nativo de entrada. Só com nome: o pane precisa
         # saber por qual sessão ele responde, e é o nome que a fila usa.
         if nome:

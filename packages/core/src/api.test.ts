@@ -16,7 +16,7 @@ import { mensagemDeErro, formataErro } from './errosApi';
 import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from './api';
 import { probeServerResponse } from './api';
 import { scanDir, scanDirForServer, listClaudeConfigs, listClaudeConfigsForServer } from './api';
-import { answerQuestions, interrupt, openEventStreamForServer, sendInputForServer, skipQuestion } from './api';
+import { answerQuestions, interrupt, openEventStreamForServer, pressPluginButton, sendInputForServer, skipQuestion } from './api';
 import { discardFile, fileAuthHeader, fileUrlNative, getPairContract, getPlans, listFiles, pathDiff, readFile, searchFiles, setPlanPin, unpairSession, writeFile } from './api';
 import type { Server } from './servers';
 import { exportShortcuts } from './api';
@@ -347,6 +347,7 @@ describe('contratos de conversa com servidor explícito', () => {
   const mutations = [
     { path: '/interrupt', body: {}, run: (s?: Server) => interrupt('mesma/sessão', false, s) },
     { path: '/interrupt?clear=true', body: {}, run: (s?: Server) => interrupt('mesma/sessão', true, s) },
+    { path: '/plugin/press', body: { site: 'above-prompt', key: 'rv-1' }, run: (s?: Server) => pressPluginButton('mesma/sessão', 'above-prompt', 'rv-1', s) },
     { path: '/answer', body: { answers: [], request_id: 0 }, run: (s?: Server) => answerQuestions('mesma/sessão', [], 0, s) },
     { path: '/answer', body: { answers: [] }, run: (s?: Server) => answerQuestions('mesma/sessão', [], undefined, s) },
     { path: '/question/skip', body: { request_id: 'req-b' }, run: (s?: Server) => skipQuestion('mesma/sessão', 'req-b', s) },

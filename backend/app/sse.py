@@ -957,6 +957,21 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                            etapa=evento, erro_tipo=type(exc).__name__)
             await queue.put(("__error__", exc))
 
+    async def band_pump():
+        # Faixa e painéis dos mods: fonte própria. Na carona do `state` ela só saía quando o estado
+        # mudava, e o mod que relê com a sessão parada ficava velho na tela.
+        vista = 0
+        try:
+            while True:
+                atual = await plugin_bridge.esperar_faixa(name, vista, 30)
+                if atual != vista:
+                    vista = atual
+                    await queue.put(("plugin_ui", None))
+        except Exception as exc:  # surface, never swallow
+            diag.registrar("sse.pump_falhou", "erro", sessao=name, provider=current_provider,
+                           etapa="faixa", erro_tipo=type(exc).__name__)
+            await queue.put(("__error__", exc))
+
     sugestao_emitida = ""          # ultima sugestao que saiu; so a mudanca vira evento
     ask_q_emitted = False          # impede reemissao enquanto o mesmo prompt permanece na tela
     codex_question_emitted = ""
@@ -998,6 +1013,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         asyncio.create_task(em_voo_pump("pensamento", fonte_pensamento(name))),
         asyncio.create_task(em_voo_pump("ferramenta", fonte_ferramenta(name))),
         asyncio.create_task(jsonl_watcher()),
+        asyncio.create_task(band_pump()),
     ]
     # NUCLEO (conexao): instrumentacao do CICLO DE VIDA do stream. O sintoma relatado é "a conversa
     # para e só volta fechando/abrindo o app", e o log de acesso do uvicorn só mostra a conexão
@@ -1111,6 +1127,9 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 slot = em_voo_slots[event]
                 slot["pending"] = False
                 yield {"event": event, "data": json.dumps({"text": slot["text"]})}
+                continue
+            if event == "plugin_ui":
+                yield {"event": "plugin_ui", "data": plugin_bridge.band_json(name)}
                 continue
             if event == "state":
                 # Sugestão do terminal (a frase cinza que o Tab aceita lá): sem fonte própria, ela

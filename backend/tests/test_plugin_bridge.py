@@ -3,6 +3,7 @@ da resposta do app. O resto (envio por `fill`) depende de tmux e é conferido no
 import asyncio
 import json
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -76,7 +77,6 @@ def test_resposta_do_app_chega_ao_hook_e_so_vale_com_o_aviso_dele(monkeypatch):
 
 
 def test_portao_desligado_nao_poe_nada_na_sessao_e_ligado_poe_o_plugin(monkeypatch):
-    monkeypatch.setattr(pb, "plugin_in_skills_dir", lambda config_dir=None: False)
     # Desligado, a sessão nasce byte a byte como antes: sem flag, sem env. É a promessa do fallback.
     from app.adapters import get_adapter
     monkeypatch.setattr(pb, "ligado", lambda: False)
@@ -136,26 +136,12 @@ def test_versao_do_cli_diz_se_os_mods_vem_ligados(monkeypatch):
     pb.esquecer_capacidade()
 
 
-def test_plugin_na_pasta_de_skills_da_conta_dispensa_o_plugin_dir(monkeypatch, tmp_path):
+def test_plugin_entra_por_plugin_dir_mesmo_com_mods_por_padrao(monkeypatch):
+    # Pela pasta de skills ele ficaria abaixo dos plugins do marketplace e não veria a faixa deles.
     monkeypatch.setattr(pb, "ligado", lambda: True)
-    monkeypatch.setattr(pb, "mods_by_default", lambda: True)
-    assert pb.raizes_dos_plugins(tmp_path) == [str(pb.PLUGIN_SRC)]
-    manifesto = tmp_path / "skills" / "hangar" / ".claude-plugin" / "plugin.json"
-    manifesto.parent.mkdir(parents=True)
-    manifesto.write_text('{"name": "outro"}', encoding="utf-8")
-    assert pb.raizes_dos_plugins(tmp_path) == [str(pb.PLUGIN_SRC)]
-    manifesto.write_text('{"name": "hangar"}', encoding="utf-8")
-    assert pb.raizes_dos_plugins(tmp_path) == []
-
-
-def test_cli_sem_mods_por_padrao_mantem_o_plugin_dir_mesmo_com_o_plugin_nas_skills(monkeypatch, tmp_path):
-    # A pasta de skills só foi medida carregando o plugin no CLI com mods por padrão.
-    monkeypatch.setattr(pb, "ligado", lambda: True)
-    monkeypatch.setattr(pb, "mods_by_default", lambda: False)
-    manifesto = tmp_path / "skills" / "hangar" / ".claude-plugin" / "plugin.json"
-    manifesto.parent.mkdir(parents=True)
-    manifesto.write_text('{"name": "hangar"}', encoding="utf-8")
-    assert pb.raizes_dos_plugins(tmp_path) == [str(pb.PLUGIN_SRC)]
+    for mods in (True, False):
+        monkeypatch.setattr(pb, "mods_by_default", lambda mods=mods: mods)
+        assert pb.raizes_dos_plugins() == [str(pb.PLUGIN_SRC)]
 
 
 def test_interruptor_desligado_tira_o_plugin_mesmo_com_mods_por_padrao(monkeypatch):
@@ -379,7 +365,7 @@ def _entrega_user(monkeypatch, confirma: bool | None, no_transcript: set[str] | 
                                                        modos=["fill", "user"], session_id=UUID)))
         await asyncio.wait_for(_ate(lambda: pb.aguardando("s1")), 5)
         entrega = asyncio.create_task(asyncio.to_thread(pb._entregar, "s1", "oi", "user", "/x.jsonl"))
-        assert (await asyncio.wait_for(pull, 5)) == {"text": "oi", "modo": "user"}
+        assert (await asyncio.wait_for(pull, 5)) == {"text": "oi", "modo": "user", "faixa": False}
         if confirma is not None:
             await pb.submitted(pb.SubmittedBody(sessao="s1", token=pb.mint("s1"), ok=confirma))
         return await asyncio.wait_for(entrega, 5)
@@ -522,3 +508,159 @@ def test_recusa_loga_uma_vez_por_instancia_mesmo_com_o_dono_puxando(monkeypatch,
         with pytest.raises(HTTPException):
             asyncio.run(pb.pull(_pull(instance="b", session_id="outra-conversa")))
     assert sum("pull recusado" in r.getMessage() for r in caplog.records) == 1
+
+
+# Faixa, painéis e confirmações de clique dos mods.
+
+def _ponte(sessao, **extra):
+    return {"sessao": sessao, "token": pb.mint(sessao), **extra}
+
+
+def _cliente():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    app = FastAPI()
+    app.include_router(pb.plugin_router)
+    return TestClient(app, client=("127.0.0.1", 5000))
+
+
+def test_faixa_guarda_paineis_e_largura():
+    c = _cliente()
+    try:
+        r = c.post("/api/plugin/ui", json=_ponte("pane-a", above={"type": "Box"}, columns=87, panes=[
+            {"id": "review-mr", "title": "Review !577", "placement": "dock", "columns": 72, "tree": {"type": "Box"}}]))
+        assert r.status_code == 200
+        versao, payload = pb.band("pane-a")
+        assert versao > 0
+        assert payload["above"] == {"type": "Box"}
+        assert [p["id"] for p in payload["panes"]] == ["review-mr"]
+        assert "columns" not in payload  # a largura é da prévia, não do app
+        assert pb.band_columns("pane-a") == 87
+        assert pb.transcript_columns("pane-a") == 87
+    finally:
+        pb.esquecer("pane-a")
+
+
+def test_sem_painel_ancorado_a_previa_nao_corta():
+    c = _cliente()
+    try:
+        c.post("/api/plugin/ui", json=_ponte("pane-b", above=None, columns=160, panes=[
+            {"id": "x", "title": "x", "placement": "inline", "columns": 150, "tree": None}]))
+        assert pb.transcript_columns("pane-b") is None
+    finally:
+        pb.esquecer("pane-b")
+
+
+def test_sem_faixa_devolve_payload_vazio():
+    assert pb.band("nunca-desenhou") == (0, {"above": None, "panes": []})
+
+
+@pytest.mark.asyncio
+async def test_esperar_faixa_acorda_quando_muda():
+    try:
+        vista = pb.band("pane-c")[0]
+        espera = asyncio.create_task(pb.esperar_faixa("pane-c", vista, 5))
+        await asyncio.sleep(0.05)
+        assert not espera.done()
+        # o mesmo caminho do POST /ui, chamado no loop do teste, onde o Event vive
+        pb._guardar_faixa("pane-c", {"type": "Box"}, 80, [])
+        assert await asyncio.wait_for(espera, 1) != vista
+    finally:
+        pb.esquecer("pane-c")
+
+
+@pytest.mark.asyncio
+async def test_confirmacao_de_clique_casa_site_e_chave_depois_do_clique():
+    try:
+        await pb.pressed(pb.PressBody(**_ponte("pane-d", requestId="above-prompt", element="velho")))
+        desde = time.monotonic()
+        assert not await pb.esperar_press("pane-d", "above-prompt", "velho", desde, 0.05)
+        await pb.pressed(pb.PressBody(**_ponte("pane-d", requestId="review-mr", element="cp-1")))
+        assert await pb.esperar_press("pane-d", "review-mr", "cp-1", desde, 0.5)
+        assert not await pb.esperar_press("pane-d", "above-prompt", "cp-1", desde, 0.05)
+        tentativa = pb.esperar_clique_do_app("pane-d", "review-mr", "cp-1", 2)
+        await pb.copied(pb.CopiedBody(**_ponte("pane-d", attempt=tentativa, text="https://gitlab.exemplo/mr/1")))
+        assert await pb.esperar_efeito("pane-d", tentativa, 0.5) == ("https://gitlab.exemplo/mr/1", None)
+    finally:
+        pb.esquecer("pane-d")
+
+
+def test_confirmacao_com_token_errado_e_recusada():
+    r = _cliente().post("/api/plugin/pressed", json={"sessao": "pane-e", "token": "x", "requestId": "a", "element": "b"})
+    assert r.status_code == 403
+
+
+def test_press_start_responde_sim_uma_vez_para_o_clique_esperado():
+    c = _cliente()
+    try:
+        tentativa = pb.esperar_clique_do_app("pane-f", "above-prompt", "rv-1", 2)
+        corpo = _ponte("pane-f", requestId="above-prompt", element="rv-1")
+        assert c.post("/api/plugin/press-start", json=corpo).json() == {"fromApp": True, "attempt": tentativa}
+        assert c.post("/api/plugin/press-start", json=corpo).json() == {"fromApp": False, "attempt": None}
+        pb.esperar_clique_do_app("pane-f", "above-prompt", "rv-1", 2)
+        outro = _ponte("pane-f", requestId="above-prompt", element="outro")
+        assert c.post("/api/plugin/press-start", json=outro).json() == {"fromApp": False, "attempt": None}
+    finally:
+        pb.esquecer("pane-f")
+
+
+def test_opened_so_aceita_http():
+    c = _cliente()
+    try:
+        tentativa = pb.esperar_clique_do_app("pane-g", "above-prompt", "a", 2)
+        assert c.post("/api/plugin/opened", json=_ponte("pane-g", attempt=tentativa, url="file:///etc/passwd")).status_code == 400
+        assert c.post("/api/plugin/opened", json=_ponte("pane-g", attempt=tentativa, url="https://x.exemplo")).status_code == 200
+    finally:
+        pb.esquecer("pane-g")
+
+
+def test_ancora_da_faixa_considera_o_rotulo_do_botao():
+    # Faixa que começa por botão: o rótulo é a primeira linha desenhada, não o texto que vem depois.
+    try:
+        pb._guardar_faixa("ancora", {"type": "Box", "children": [
+            {"type": "Button", "props": {"key": "a", "label": "[ abrir sonda ]"}},
+            {"type": "Text", "children": [" Promedico"]}]}, 80, [])
+        assert pb.band_anchor("ancora") == "[ abrir sonda ]"
+    finally:
+        pb.esquecer("ancora")
+
+
+@pytest.mark.asyncio
+async def test_efeito_so_vale_para_a_tentativa_aberta():
+    # A cópia atrasada de um clique não pode cair no clique seguinte (outro aparelho, outro convidado).
+    try:
+        t1 = pb.esperar_clique_do_app("pane-h", "above-prompt", "a", 2)
+        assert (await pb.press_start(pb.PressBody(**_ponte("pane-h", requestId="above-prompt", element="a"))))["attempt"] == t1
+        pb.encerrar_clique_do_app("pane-h", t1)
+        t2 = pb.esperar_clique_do_app("pane-h", "above-prompt", "b", 2)
+        with pytest.raises(HTTPException) as e:
+            await pb.copied(pb.CopiedBody(**_ponte("pane-h", attempt=t1, text="do clique 1")))
+        assert e.value.status_code == 409
+        await pb.copied(pb.CopiedBody(**_ponte("pane-h", attempt=t2, text="do clique 2")))
+        assert await pb.esperar_efeito("pane-h", t2, 0.1) == ("do clique 2", None)
+        assert await pb.esperar_efeito("pane-h", t1, 0.05) == (None, None)
+    finally:
+        pb.esquecer("pane-h")
+
+
+@pytest.mark.asyncio
+async def test_efeito_depois_da_resposta_volta_para_o_terminal():
+    try:
+        t = pb.esperar_clique_do_app("pane-i", "above-prompt", "a", 2)
+        pb.encerrar_clique_do_app("pane-i", t)
+        with pytest.raises(HTTPException) as e:
+            await pb.opened(pb.OpenedBody(**_ponte("pane-i", attempt=t, url="https://x.exemplo")))
+        assert e.value.status_code == 409
+    finally:
+        pb.esquecer("pane-i")
+
+
+def test_pull_diz_se_o_backend_tem_a_faixa(monkeypatch):
+    # Backend reiniciado começa sem a faixa: o `/pull` avisa, e o plugin reenvia sem esperar redesenho.
+    monkeypatch.setattr(pb, "ESPERA_S", 0.01)
+    try:
+        assert asyncio.run(pb.pull(_pull(instance="a")))["faixa"] is False
+        pb._guardar_faixa("s1", None, 80, [])
+        assert asyncio.run(pb.pull(_pull(instance="a")))["faixa"] is True
+    finally:
+        pb.esquecer("s1")

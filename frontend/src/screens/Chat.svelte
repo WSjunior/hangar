@@ -5,6 +5,11 @@
   import Spinner from '../components/Spinner.svelte';
   import MessageList from '../components/MessageList.svelte';
   import Composer from '../components/Composer.svelte';
+  import PluginBand, { type PluginNotice } from '../components/PluginBand.svelte';
+  import PluginPane from '../components/PluginPane.svelte';
+  import { copyText } from '../lib/clipboard';
+  import { openInNewTab } from '../lib/openTab';
+  import { parsePluginUi, pressPluginButton, safeHref, type PluginNode as PluginTree, type PluginPane as PluginPaneData } from '@hangar/core';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
   import UsageSheet from '../components/UsageSheet.svelte';
@@ -452,6 +457,40 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // o timer só vence se ele nunca vier (interrupção).
   let pensamentoVivo = $state('');
   let sugestao = $state('');
+  // Faixa acima do prompt que os mods do Claude Code desenham (SSE 'plugin_ui').
+  let pluginBand = $state<PluginTree>(null);
+  let pluginPanes = $state<PluginPaneData[]>([]);
+  // Resultado do último clique num botão de mod; some sozinho.
+  let pluginNotice = $state<PluginNotice | null>(null);
+  let pluginNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+  function showPluginNotice(text: string, error: boolean, extra: { href?: string; action?: () => void } = {}) {
+    clearTimeout(pluginNoticeTimer);
+    pluginNotice = { text, error, ...extra };
+    pluginNoticeTimer = setTimeout(() => (pluginNotice = null), extra.href || extra.action ? 10000 : 4000);
+  }
+  // O clique vira clique de mouse no terminal da sessão; o que o mod copiar ou mandar abrir acontece
+  // aqui, no aparelho de quem clicou, e não na máquina do terminal.
+  async function pressPlugin(site: string, key: string) {
+    try {
+      const r = await pressPluginButton(sessionName, site, key);
+      const texto = r.copied;
+      if (texto) {
+        // Depois do `await` o iOS já não conta o toque como gesto: o aviso vira um botão que copia
+        // dentro do próximo toque.
+        if (await copyText(texto)) showPluginNotice(m.plugin_copiado(), false);
+        else showPluginNotice(m.plugin_toque_para_copiar(), false, {
+          action: () => void copyText(texto).then((ok) => ok && showPluginNotice(m.plugin_copiado(), false)),
+        });
+      }
+      const url = safeHref(r.opened);
+      // Depois do `await` o navegador pode não contar mais como gesto da pessoa e bloquear a janela.
+      if (url && !openInNewTab(url)) {
+        showPluginNotice(m.plugin_link_bloqueado(), false, { href: url });
+      }
+    } catch (err) {
+      showPluginNotice(err instanceof Error ? err.message : String(err), true);
+    }
+  }
   let pensamentoTimer: ReturnType<typeof setTimeout> | undefined;
   function limparPensamento() {
     clearTimeout(pensamentoTimer);
@@ -2247,6 +2286,18 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       }
     });
 
+    // Árvore crua dos mods: o Hangar não sabe de que mod veio, só desenha os elementos.
+    es.addEventListener('plugin_ui', (e) => {
+      noteAlive();
+      try {
+        const s = parsePluginUi(JSON.parse(e.data));
+        pluginBand = s.above;
+        pluginPanes = s.panes;
+      } catch {
+        quadroFalhou('plugin_ui');
+      }
+    });
+
     es.addEventListener('pensamento', (e) => {
       noteAlive();
       try {
@@ -2294,6 +2345,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       etagCauda = null;
       events = [];
       sugestao = '';        // era do contexto que o /clear acabou de apagar
+      pluginBand = null;    // idem: o mod redesenha para a conversa nova
+      pluginPanes = [];
       retiredQueuedIds.clear();
       idIndex.clear();
       reseedDerived();          // zera activity/asstCount junto (loadHistory re-semeia com o novo)
@@ -3348,6 +3401,10 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
                   onclick={() => (problemaDispensado = problemaChave)}>×</button>
         </div>
       {/if}
+      {#each pluginPanes as pane (pane.id)}
+        <PluginPane {pane} onPress={pressPlugin} />
+      {/each}
+      <PluginBand tree={pluginBand} onPress={pressPlugin} notice={pluginNotice} />
       <!-- Composer SEMPRE visivel (exceto sessao morta). Antes ele sumia em awaiting_input e,
            se as opcoes nao fossem parseadas, o usuario ficava sem input E sem botoes = preso.
            Os OptionButtons continuam aparecendo na lista; o composer fica como saida garantida. -->

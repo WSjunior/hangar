@@ -2304,6 +2304,17 @@ export async function interrupt(name: string, clear = false, server?: Server): P
                 : apiFetch<{ ok: boolean }>(path, init));
 }
 
+/** Clique num botão que um mod desenhou na faixa ou num painel. `copied` e `opened` são o que o mod
+ *  copiou ou mandou abrir, para quem clicou fazer no próprio aparelho. Recusa vem como erro `erro_mod_*`. */
+export async function pressPluginButton(
+  name: string, site: string, key: string, server?: Server,
+): Promise<{ ok: boolean; copied?: string; opened?: string }> {
+  const path = `/api/sessions/${encodeURIComponent(name)}/plugin/press`;
+  const init = { method: 'POST', body: JSON.stringify({ site, key }) };
+  return server ? apiFetchForServer<{ ok: boolean; copied?: string; opened?: string }>(server, path, init)
+                : apiFetch<{ ok: boolean; copied?: string; opened?: string }>(path, init);
+}
+
 // Pergunta lateral (/btw do Claude Code): o backend dirige o overlay da TUI e devolve a resposta.
 // Demora o que a resposta demorar (ate 120s no backend) — quem chama mostra espera.
 export interface PerguntaLateral {
