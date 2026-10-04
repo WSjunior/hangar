@@ -30,15 +30,23 @@ pub(super) enum Sub { Reply, Question, Working }
 
 type LastSubs = HashMap<Target, (Option<String>, (String, Sub))>;
 
-// Conversa trocada (`/clear`) não herda a linha da anterior. `kind` é o tipo de linha que o estado atual mostra: a
-// guardada só volta se for dele (pergunta já respondida não fica amarela numa sessão que voltou a trabalhar).
+// A guardada só cobre o vão dentro do MESMO estado: qualquer troca (trabalhando → parada → trabalhando) a descarta,
+// senão a pergunta já respondida, o rótulo do turno anterior ou a resposta velha voltariam como se fossem de agora.
+// Conversa trocada (`/clear`) não herda a linha; sem transcript não dá para saber se é a mesma, então nada fica.
 fn kept_sub(last: &mut LastSubs, target: &Target, jsonl: Option<&str>, kind: Option<Sub>, fresh: Option<(String, Sub)>) -> Option<(String, Sub)> {
+    if jsonl.is_none() || kind.is_none() {
+        last.remove(target);
+        return fresh;
+    }
+    if last.get(target).is_some_and(|(seen, (_, k))| seen.as_deref() != jsonl || Some(*k) != kind) {
+        last.remove(target);
+    }
     match fresh {
         Some(sub) => {
             last.insert(target.clone(), (jsonl.map(str::to_owned), sub.clone()));
             Some(sub)
         }
-        None => last.get(target).filter(|(seen, (_, k))| seen.as_deref() == jsonl && Some(*k) == kind).map(|(_, sub)| sub.clone()),
+        None => last.get(target).map(|(_, sub)| sub.clone()),
     }
 }
 
@@ -1686,6 +1694,25 @@ mod tests {
         // Nem numa sessão parada sem resposta nova, nem fora dos três estados.
         assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), Some(Sub::Reply), None), None);
         assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), None, None), None);
+    }
+
+    #[test]
+    fn kept_second_line_never_crosses_a_state_change() {
+        use super::{Sub, Target, kept_sub};
+        let (mut last, row) = (super::LastSubs::new(), Target::new("m", "s"));
+        let (q, w, r) = (Some(Sub::Question), Some(Sub::Working), Some(Sub::Reply));
+        // Pergunta respondida, volta a trabalhar e pede de novo ainda sem o texto novo: a antiga não volta.
+        kept_sub(&mut last, &row, Some("a.jsonl"), q, Some(("Qual branch?".to_owned(), Sub::Question)));
+        kept_sub(&mut last, &row, Some("a.jsonl"), w, None);
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), q, None), None);
+        // O rótulo de um turno não abre o turno seguinte.
+        kept_sub(&mut last, &row, Some("a.jsonl"), w, Some(("Puttering…".to_owned(), Sub::Working)));
+        kept_sub(&mut last, &row, Some("a.jsonl"), r, None);
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), w, None), None);
+        // Sem transcript não se guarda nada.
+        let reply = Some(("Pronto.".to_owned(), Sub::Reply));
+        assert_eq!(kept_sub(&mut last, &row, None, r, reply.clone()), reply);
+        assert_eq!(kept_sub(&mut last, &row, None, r, None), None);
     }
 
     #[test]

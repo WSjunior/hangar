@@ -78,6 +78,7 @@ def test_modelo_em_uso_sai_da_resposta_da_abertura_ou_da_conta(tmp_path):
     # O transcript não diz a variante: a data sai, e o [1m] volta quando o uso só cabe na de 1M ou
     # quando o modelo configurado é a variante de 1M da mesma família.
     assert cc.session_model("claude-haiku-4-5-20251001", None, tmp_path) == "claude-haiku-4-5"
+    assert cc.session_model(None, "claude-haiku-4-5-20251001", tmp_path) == "claude-haiku-4-5"
     assert cc.session_model("claude-opus-5-5", None, tmp_path, used=250_000) == "claude-opus-5-5[1m]"
     assert cc.session_model("claude-opus-5-5", "opus[1m]", tmp_path) == "claude-opus-5-5[1m]"
     assert cc.session_model("claude-fable-5-1", None, tmp_path) == "claude-fable-5-1[1m]"

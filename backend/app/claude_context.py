@@ -8,9 +8,12 @@ se é a versão de 1M), então sai do modelo configurado e do próprio uso.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
+
+_log = logging.getLogger("hangar.claude_context")
 
 # Fim do arquivo lido: a última resposta fica perto do fim, e um transcript longo pesa megabytes.
 _TAIL = 512 * 1024
@@ -76,7 +79,8 @@ def session_model(answered: str | None, opened: str | None, config_dir: str | Pa
     guarda o modelo da Anthropic."""
     configured = opened or (None if engine else _account_model(config_dir))
     if not answered:
-        return configured
+        # `--model claude-haiku-4-5-20251001` também vem datado; sem a data o rótulo da tela casa.
+        return _DATED.sub("", configured) if configured else None
     base = _DATED.sub("", answered)
     family = _family(base)
     if not family or base.lower().endswith("[1m]"):
@@ -107,7 +111,11 @@ def _account_model(config_dir: str | Path | None) -> str | None:
     base = Path(config_dir) if config_dir else Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
     try:
         model = json.loads((base / "settings.json").read_text(encoding="utf-8")).get("model")
-    except (OSError, ValueError, AttributeError):
+    except OSError:   # conta sem settings.json é normal
+        return None
+    except (ValueError, AttributeError) as e:
+        # settings.json quebrado deixaria a pílula do modelo em branco sem rastro.
+        _log.warning("settings.json ilegível em %s: %s", base, e)
         return None
     return model if isinstance(model, str) and model else None
 
