@@ -1783,7 +1783,8 @@ class SessionRegistry:
         # Hangar. Mesmo TTL da statusline: e leitura do fim de um arquivo, no threadpool.
         claudes = [i for i in infos
                    if getattr(i, "provider", "claude") == "claude" and i.jsonl
-                   and (now_m - self._context_cache.get(i.name, (0.0, None, None))[0] > _STATUS_TTL
+                   and (i.name not in self._context_cache
+                        or now_m - self._context_cache[i.name][0] > _STATUS_TTL
                         or self._context_cache[i.name][1] != i.jsonl)]
         if claudes:
             lidos = await asyncio.gather(*[
