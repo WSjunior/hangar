@@ -51,6 +51,25 @@ async fn unknown_command_fields_are_rejected() {
 }
 
 #[tokio::test]
+async fn open_refuses_carry() {
+    let dir=tempfile::tempdir().unwrap();
+    let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let address=listener.local_addr().unwrap();
+    let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"secret-test".into(),"instance-test".into()));
+    let server=tokio::spawn(gateway::serve(listener,registry,"secret-test".into(),"instance-test".into(),hangar_server::INTERNAL_PROTOCOL));
+    let binding=serde_json::json!({"name":"session","pane":"%1","conversation":"sid","generation":1,"created":1,"mux_argv":["fake"],"windows":false,"clipboard_lock_path":null});
+    let descriptor=serde_json::json!({"name":"session","key":"key","provider":"claude","headless":false,"meta":{"key":"key","terminal":binding},"jsonl":dir.path().join("chat.jsonl"),"projection_dir":dir.path().join("projection"),"state_path":dir.path().join("state"),"lock_path":dir.path().join("lease"),"generation":1});
+    // Trava presa por outro dono: se o `carry` passasse, a resposta seria `runtime_lease` depois de 3 s.
+    let _held=hangar_server::runtime::queue::acquire_lease(&dir.path().join("lease")).unwrap();
+    let response=reqwest::Client::new().post(format!("http://{address}/runtime/op")).header("x-hangar-internal","secret-test").header("x-hangar-runtime-instance","instance-test").header("content-type","application/json")
+        .body(serde_json::json!({"protocol":hangar_server::INTERNAL_PROTOCOL,"instance":"instance-test","key":"key","generation":1,"operation_id":"op","clock":{"monotonic_s":0.0,"epoch_s":0.0},
+            "command":{"kind":"open","descriptor":descriptor,"carry":{"runtime_state":{}}}}).to_string()).send().await.unwrap();
+    assert_eq!(response.status(),503);
+    let value:serde_json::Value=serde_json::from_str(&response.text().await.unwrap()).unwrap();
+    assert_eq!(value["error_code"],"command_fields","recusado antes de pegar a trava");
+    server.abort();
+}
+
+#[tokio::test]
 async fn terminal_runtime_gateway_opens_without_cano_and_fences_generation() {
     let dir=tempfile::tempdir().unwrap();
     let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let address=listener.local_addr().unwrap();
@@ -92,7 +111,7 @@ async fn opened(dir:&std::path::Path) -> (RuntimeRegistry,serde_json::Value,toki
         binding:CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 },
         lease_path:dir.join("key.lock"),state_path:dir.join("key.queue-state.json"),projection_dir:dir.join("projection"),
         transcript:dir.join("chat.jsonl"),created:0.0 };
-    let ready = registry.open(target,json!({})).await.unwrap();
+    let ready = registry.open(target).await.unwrap();
     (registry,ready,cano)
 }
 
@@ -147,7 +166,7 @@ async fn one_bad_message_from_the_cli_does_not_end_the_actor() {
         binding:CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 },
         lease_path:dir.path().join("key.lock"),state_path:dir.path().join("key.queue-state.json"),projection_dir:dir.path().join("projection"),
         transcript:dir.path().join("chat.jsonl"),created:0.0 };
-    registry.open(target,json!({})).await.unwrap();
+    registry.open(target).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert_eq!(registry.snapshots().await.unwrap().len(),1,"o ator segue vivo depois da mensagem ruim");
     registry.close("key",1).await.unwrap();
@@ -164,7 +183,7 @@ async fn opening_refused_by_the_queue_says_why() {
         binding:hangar_server::runtime::protocol::CanoBinding { pid:42,escuta:"tcp:127.0.0.1:9".into(),token:"secret-test".into(),versao:2 },
         lease_path:dir.path().join("key.lock"),state_path:dir.path().join("key.queue-state.json"),projection_dir:dir.path().join("projection"),
         transcript:dir.path().join("chat.jsonl"),created:0.0 };
-    let error = registry.open(target,serde_json::json!({})).await.unwrap_err();
+    let error = registry.open(target).await.unwrap_err();
     assert!(error.message.contains("estado da fila inválido"),"{}",error.message);
     assert!(hangar_server::runtime::queue::acquire_lease(&dir.path().join("key.lock")).is_ok(),"a trava sai junto com a recusa");
 }

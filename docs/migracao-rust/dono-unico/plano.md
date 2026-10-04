@@ -316,12 +316,70 @@ para "nunca dois donos" no `open`/`close`; `test_runtime_routing.py:92` reescrit
 **Regra corrigida:** a nota "desligou logo depois de religou é esperado" de
 `docs/migracao-rust/parada-e-posse.md` ganha a observação de que deixou de valer.
 
-- [ ] **Step 19: Tabela de caminhos e testes acima, vistos falhar**
-- [ ] **Step 20: `change` = barreira → `close` → ação sem cliente → `ensure_open`; ações que precisam da CLI viram `control` do Rust**
-- [ ] **Step 21: Transferência, troca de conta/motor (sem e com terminal) e troca para sem terminal pelo mesmo caminho; `_check_source_idle` pela vista do Rust; renascimento do terminal herda a chave só com a mesma conversa, `_session_proof` sem exceção solta e `respawn-pane` reconhecido**
-- [ ] **Step 22: `shutdown` sem nada por sessão; `_rebind` pelo novo `change`**
-- [ ] **Step 23: Tirar `carry` dos dois lados com o contrato 15**
-- [ ] **Step 24: Remover todo o código morto listado e os testes de passagem; testes focados; revisar**
+**Tabela de caminhos (conferida em `7b84fb63`).** Nenhuma ação precisa da CLI: o `control` do Rust
+não ganha nada nesta Task. As quatro de Codex são do provedor não migrado (decisão 2) e ficam no
+caminho Python do `change`.
+
+| Caminho | O que a ação faz | Classe | Caminho novo |
+|---|---|---|---|
+| `kill` (`registry.kill` → `close_sync`) | apaga o sidecar, mata o grupo do cano pelo `pid` do sidecar | processo/arquivo | `close` → ação → o registro sai |
+| `rename` (registry e `api.rename_session` do terminal) | sidecar/tmux renomeados, `PromptQueue.rename` | arquivo/pane | `close` → ação → `rename` na fila → `open` |
+| `para_terminal` | `close_sync` do cano, pane com `--resume` | processo/pane | `close` → ação → vínculo pendente fica no registro Python sem cliente até o agente provar a conversa (a Task 6 tira a adoção que vem depois) |
+| `para_headless` | pane morto, sidecar escrito | processo/arquivo | `close` do terminal → ação → `ensure_open` (troca de modo: sem esperar o `initialize`) |
+| `parar` | mata o cano | processo | `close` → ação (sem cliente: mata pelo `pid` do sidecar) → registro Python sem cliente, como sessão parada |
+| `recarregar` | `parar` + `acordar` | processo | `close` → `parar` → `acordar` dentro da barreira só pede a subida → `open` lançando o processo |
+| `close_sync` (`_SYNC`) | mata o grupo pelo sidecar | processo | como `parar` |
+| `restart`, `open_terminal`, `open_headless`, `set_permission_mode_sem_terminal` | só existem no adapter do Codex | — | caminho Python |
+| Transferência Claude → Codex (`stop_transfer_source`, `publish_transfer`, `restore_transfer_source`) | `parar`/`close_sync`, sidecar apagado ou restaurado, `ensure_running(transfer_id=…)` | processo/arquivo | dentro do `change`: ociosidade pela vista do Rust guardada no `close`; restauração relança o processo e reabre no Rust |
+| `_check_source_idle` | `ensure_running(so_reconectar=True)` + `sess.vivo` | — | lê `alive`/`iniciando`/`in_progress`/`pending`/`question` da vista do Rust |
+| Troca de conta/motor, sem terminal | `parar` → sidecar → `ensure_running(require_initialize, engine_models)` ou `acordar` | processo/arquivo | `ensure_running` dentro da barreira reabre no Rust na hora, com `engine_models` e a espera do `initialize`; a volta atrás fecha de novo antes do `parar` |
+| Troca de conta/motor, com terminal | `para_headless` → sidecar → `para_terminal` (+ `wait_for_claude`) | processo/pane | `close` do terminal → ação → terminal renascido herda a chave só com a mesma conversa → `open` do terminal |
+| Troca para sem terminal (`api.py:2770`) | `ensure_running(esperar_pronta=False)` | — | fora da barreira: o embrulho já é `ensure_open` (Task 2) |
+| Renascimento do terminal dentro de uma troca (PR #43) | `terminal_life` antes, `reborn_binding` depois | pane | vida = prova da sessão tmux + nascimento do pane; outra conversa vira vínculo novo; `NoSuchProcess` vira "sem prova" |
+| `prepare_session` com vínculo mudado, `_rebind` | `change` com ação vazia | — | `close` → `open` na geração nova |
+
+**Decisões desta Task.** Entre o `close` e o `open` a trava e o arquivo da fila ficam com o Python
+(`_restore(reconnect=False)`), sem cliente no cano: é a "ação sobre arquivo" do desenho, e é o que
+serializa o `rename` da fila e o avanço da geração. A adoção (`adopt` + `quiesce`) continua só onde
+outra Task a tira: readoção do boot com cliente religado (Task 5) e registro do terminal (Task 6);
+com ela ficam `PreparingRust`, o ramo `PreparingRust` de `native_slot`/`assert_legacy`, o desvio de
+leitura `_SYNC`, a espera por dono de `owner_state_stream`, `drain_claims` e os diários de
+devolução. O `carry` sai já (contrato 15).
+
+- [x] **Step 19: Tabela de caminhos e testes acima, vistos falhar**
+- [x] **Step 20: `change` = barreira → `close` → ação sem cliente → `ensure_open`; ações que precisam da CLI viram `control` do Rust**
+- [x] **Step 21: Transferência, troca de conta/motor (sem e com terminal) e troca para sem terminal pelo mesmo caminho; `_check_source_idle` pela vista do Rust; renascimento do terminal herda a chave só com a mesma conversa, `_session_proof` sem exceção solta e `respawn-pane` reconhecido**
+- [x] **Step 22: `shutdown` sem nada por sessão; `_rebind` pelo novo `change`**
+- [x] **Step 23: Tirar `carry` dos dois lados com o contrato 15**
+- [x] **Step 24: Remover todo o código morto listado e os testes de passagem; testes focados; revisar**
+
+**Registro da execução (Task 4).** `change` do Rust: barreira → snapshot relido → `close`
+(`detach(restore=False)`: trava e fila com o Python, nenhum cliente no cano) → ação → `_commit_change`
+(nome, conversa, geração e `_binding` na fila) → `_reopen_after_change`, que abre no Rust se há processo
+vivo, pedido de subida (`acordar` dentro da barreira só marca `relaunch`) ou terminal confirmado; senão
+fica o registro sem cliente, como sessão parada (`parar`/`close_sync` passam `stopped`). Falha da
+reabertura no fim não vira erro da ação (já feita): diário `runtime.reopen_failed`/`reopen_skipped` e,
+sem terminal, a faixa `headless_nao_subiu`. Ação ou commit que falham reabrem na vida de antes e
+sobem o erro. `ensure_running` dentro da barreira vira `reopen_in_change` (commit + abertura já, com
+`engine_models` e a espera do `initialize`; só dentro da barreira); a volta atrás da troca fecha de
+novo antes do `parar` (`change` aninhado com o registro no Rust). `parar` sem cliente mata pelo `pid` do
+sidecar e o esquece. Transferência: `_check_source_idle` lê `source_view` (vista relida antes do
+`close`; inválida = `session_transfer_source_state_unknown`) e a restauração reabre no Rust. Terminal:
+a vida é a prova da sessão tmux mais o nascimento do pane (`_pane_life`), o vínculo pendente só herda a
+chave com a mesma conversa (outra conversa aposenta o registro antigo e registra o novo com a fila
+própria), `_session_proof`/`_pane_life`/`_collect` não soltam `psutil.Error`. Abertura sem resposta ou
+recusada aqui manda `close` ao Rust antes de a trava voltar; trava que não volta deixa o registro no
+Rust com a vista inválida. `shutdown` só espera gravações da fila Python. Contrato 15: `carry` sai do
+`open` (Rust recusa com `command_fields` antes da trava); `Slot.carry` virou `reserve_state` (só a
+reserva usa). Saiu `test_codex_quiesce_preserves_async_questions`; o resto do código morto listado foi
+para as Tasks 5 e 6 (ver as listas delas). `test_switch_to_headless_opens_in_rust` e
+`test_rust_account_move_reborn_terminal_reopens_with_key` passam também na base (regressão); os outros
+onze falharam sem o código. Revisão (`ecc:python-reviewer`, `ecc:rust-reviewer`,
+`ecc:silent-failure-hunter`): entraram os itens acima de falha da ação/commit, `close` antes de devolver
+a trava, snapshot relido antes do `close`, registro trocado durante a barreira (recusa), causa da
+restauração no diário. Ficaram anotados: `parar` mata pelo `pid` do sidecar sem conferir a identidade do
+processo (mesmo padrão de `launch_process`); falha do `close` na volta atrás de uma troca de conta
+substitui o erro original.
 
 ### Task 5: Modo do processo, restart e a guarda do cliente legado
 
@@ -351,6 +409,19 @@ cliente Python permitido, nunca `open`, aquecimento roda em qualquer modo).
 recuperação de transferência incondicionais (passam para a entrada no modo `python`, ou para
 depois do `open` no modo `rust`); o "liga com as pontes desligadas" de `rust_server.py:338-341`;
 o gatilho de adoção do Codex sem terminal em `prepare_session` (inalcançável, achado 4).
+Vindos da Task 4 (a readoção do boot era o último usuário): `adopt` de sessão sem terminal,
+`_peek`, `LegacyBridge.quiesce` sem terminal, `_WRITE_WAIT_S`, `finish_wire(settling=...)`, ramos
+`finishing`/`continuing` de `assert_legacy`, desvio de leitura `_SYNC` na passagem, espera por dono de
+`owner_state_stream` e `runtime.state_owner_stuck` (com `test_state_stream_picks_source_once`: fonte
+escolhida uma vez, reaberta só na troca de dono do processo), `TransferInProgress` fora do
+`RecoveringPython`, leitura da projeção em `route_queue` na passagem, `drain_claims` e a devolução de
+reivindicação com os diários `runtime.unclaim_*`/`runtime.write_uncertain`. Testes:
+`test_runtime_adapter.py` (quiesce/reivindicação/passagem: `test_quiesce_waits_for_cleanup_persistence`,
+`test_quiesce_settles_entry_claimed_by_cancelled_drain`, `test_quiesce_stops_drain_outside_the_cancelled_tasks`,
+`test_acked_write_settles_during_hand_over`, `test_state_monitor_waits_for_new_owner_instead_of_failing`,
+`test_reads_during_hand_over_use_python_view`), `test_runtime_queue.py`
+(`test_queue_read_during_hand_over_uses_projection`) e os de adoção de `test_runtime_ownership.py`
+reescritos para "nunca dois donos" no `open`/`close`.
 
 **Regra corrigida:** marcador do `hangar-server` no `CLAUDE.md` (modo do processo; queda 1–2 não
 passa pelo Python); `plataforma.md`: "Endereço ausente/torto desliga a ponte com aviso" vira
@@ -380,7 +451,9 @@ operação do Python falha com código e o `assert_writer` volta a recusar),
 empréstimo e sai uma vez depois).
 
 **Código morto que sai:** caminho `detach` → Python → `adopt` de `run_admin`; `quiesce` do
-terminal; `test_runtime_terminal.py:286`, `:301` reescritos.
+terminal; `test_runtime_terminal.py:286`, `:301` reescritos. Vindos da Task 4: o próprio `adopt`
+(o terminal é o último usuário depois da Task 5), `Phase.PreparingRust` e o ramo dele em
+`native_slot`, a adoção do vínculo pendente depois de `para_terminal`.
 
 - [ ] **Step 32: Testes acima, vistos falhar**
 - [ ] **Step 33: Registro do terminal direto no Rust**

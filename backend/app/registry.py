@@ -2689,6 +2689,12 @@ class SessionRegistry:
             from app.conversation_transfer import _check_source_idle
             await _check_source_idle(self, record.name, meta)
             if meta["headless"]:
+                from app.conversation_transfer import _runtime_source_view
+                view = _runtime_source_view(record.name)
+                if view is not None:
+                    if not view.get("alive") or view.get("iniciando"):
+                        raise TransferError("session_transfer_source_not_stopped")
+                    return
                 sess = get_adapter(CLAUDE_HEADLESS)._sessions.get(record.name)
                 if not sess or not sess.vivo or sess.iniciando:
                     raise TransferError("session_transfer_source_not_stopped")
@@ -2711,9 +2717,25 @@ class SessionRegistry:
                 headless_sessions.restaurar(restored)
             hl = get_adapter(CLAUDE_HEADLESS)
             hl._subidas.pop(record.name, None)
-            sess = await hl.ensure_running(record.name, transfer_id=record.id)
-            if not sess or not sess.vivo or sess.iniciando or sess.sid != meta["session_id"]:
-                raise TransferError("session_transfer_restore_failed")
+            from app import runtime_coordinator
+            coordinator = runtime_coordinator.current()
+            if (coordinator is not None and getattr(coordinator, "transport", None) is not None
+                    and coordinator.managed_queue(record.name)):
+                # Com o Rust de pé a origem volta nele: o processo sobe sem cliente Python.
+                try:
+                    slot = await coordinator.reopen_in_change(record.name, wait_initialized=True)
+                except Exception as exc:
+                    from app import diag
+                    diag.registrar("runtime.transfer_restore_failed", "erro", sessao=record.name,
+                                   **runtime_coordinator.failure_reason(exc))
+                    raise TransferError("session_transfer_restore_failed") from exc
+                view = slot.view.get("view") or {}
+                if not view.get("alive") or view.get("conversation") != meta["session_id"]:
+                    raise TransferError("session_transfer_restore_failed")
+            else:
+                sess = await hl.ensure_running(record.name, transfer_id=record.id)
+                if not sess or not sess.vivo or sess.iniciando or sess.sid != meta["session_id"]:
+                    raise TransferError("session_transfer_restore_failed")
         else:
             from app.conversation_transfer import _processes, _process_identity, _runtime_path, _write_json
             command = self._comando_terminal(meta, resume=True)

@@ -266,8 +266,6 @@ class LegacyBridge:
         name, provider = descriptor["name"], descriptor["provider"]
         adapter = self.adapters[provider]
         slot = self.coordinator.slots[descriptor["key"]]
-        with slot.guard:
-            carry = copy.deepcopy(slot.store.state.get("runtime_state", {}).get("view") or {})
         sess = adapter._sessions.get(name)
         if provider == "codex" and sess is not None and sess["client"].tem_processo_proprio:
             raise RuntimeError("reserva headless encontrou processo próprio; transferência recusada")
@@ -284,9 +282,6 @@ class LegacyBridge:
                     write.cancel()
                     await asyncio.gather(write, return_exceptions=True)
         if provider == "claude" and sess is not None:
-            carry.update(initialized=sess.initialized.is_set(), model=sess.model, effort=sess.effort,
-                permission_mode=sess.permission_mode, previous_non_plan=sess.modo_nao_plan,
-                commands=sess.comandos, terminal_commands=list(sess.comandos_terminal), usage=sess.usage, context_window=sess.context_window, cost=sess.cost)
             sess.desligando = True
             sess.live_active = lambda: False
             if sess.drenador is not None:
@@ -302,15 +297,6 @@ class LegacyBridge:
             if sess.leitor is not None:
                 tasks.append(sess.leitor)
         elif provider == "codex" and sess is not None:
-            carry.update(initialized=True, ready=True, thread_id=sess["thread_id"],
-                model=sess.get("model") or sess.get("default_model"), effort=sess.get("effort") or sess.get("default_effort"),
-                in_progress=sess.get("in_progress", False), turn_id=sess.get("turn_id"))
-            questions = sess.get("async_questions")
-            if questions is not None:
-                carry.update(async_questions=list(copy.deepcopy(questions._pending).items()),
-                    async_seen=sorted(questions._seen), async_resolved=sorted(questions._resolved),
-                    skipped_async_questions=sorted(questions.skipped), async_local_answers=copy.deepcopy(questions._local_answers),
-                    async_echoes=dict(questions._echoes), async_during_load=copy.deepcopy(questions._during_load))
             for collection in (adapter._subscribers, adapter._tmux_watchers):
                 if task := collection.pop(name, None):
                     tasks.append(task)
@@ -359,10 +345,6 @@ class LegacyBridge:
                 diag.registrar("runtime.unclaim_failed", "erro", sessao=name, **runtime_coordinator.failure_reason(exc))
         if provider == "claude" and sess is not None:
             await asyncio.gather(sess.preview_buffer.discard(), sess.thinking_buffer.discard(), sess.tool_buffer.discard())
-        carry["runtime_counter"] = max(carry.get("runtime_counter") or 0,
-            slot.store.state.get("runtime_state", {}).get("view", {}).get("runtime_counter") or 0)
-        carry["headless"], carry["name"] = True, name
-        return {"runtime_state":carry}
 
     async def reconnect(self, descriptor, carry):
         if descriptor["meta"].get("terminal"):
@@ -1157,11 +1139,15 @@ def install_adapter(cls, provider):
                     return await _original(self, *args, **kwargs)
                 if (_method == "ensure_running" and _facade.provider == "claude" and coordinator is not None
                         and getattr(coordinator, "legacy", None) is not None and getattr(coordinator, "transport", None) is not None
-                        and not bound.arguments.get("so_reconectar") and bound.arguments.get("transfer_id") is None
-                        and not (coordinator.managed_queue(name) and coordinator.in_lifecycle(coordinator.slot(name)))):
-                    # Subir a sessão é abri-la no Rust, com a conta/motor pedidos e a espera do initialize.
-                    await coordinator.ensure_open(name, engine_models=bound.arguments.get("engine_models"),
-                        wait_initialized=bool(bound.arguments.get("esperar_pronta") or bound.arguments.get("require_initialize")))
+                        and not bound.arguments.get("so_reconectar") and bound.arguments.get("transfer_id") is None):
+                    # Subir a sessão é abri-la no Rust, com a conta/motor pedidos e a espera do initialize;
+                    # dentro da barreira (troca de conta) é reabrir já o que a administração fechou.
+                    options = {"engine_models":bound.arguments.get("engine_models"),
+                        "wait_initialized":bool(bound.arguments.get("esperar_pronta") or bound.arguments.get("require_initialize"))}
+                    if coordinator.managed_queue(name) and coordinator.in_lifecycle(coordinator.slot(name)):
+                        await coordinator.reopen_in_change(name, **options)
+                    else:
+                        await coordinator.ensure_open(name, **options)
                 elif (coordinator is not None and getattr(coordinator, "legacy", None) is not None
                         and not (coordinator.managed_queue(name) and coordinator.in_lifecycle(coordinator.slot(name)))):
                     await coordinator.prepare_session(name, _facade.provider)
@@ -1186,6 +1172,9 @@ def install_adapter(cls, provider):
                 if transfer_active(name):
                     return
                 self.reset_start_attempts(name)   # ação do usuário: nova rodada de tentativas
+                if coordinator.managed_queue(name) and (slot := coordinator.slot(name)).change is not None and coordinator.in_lifecycle(slot):
+                    slot.change["relaunch"] = True      # a administração reabre lançando o processo
+                    return
                 # Nasce direto no Rust: o processo sobe sem cliente Python e o ator drena a fila
                 # quando a sessão fica entregável.
                 async def open_in_rust():
