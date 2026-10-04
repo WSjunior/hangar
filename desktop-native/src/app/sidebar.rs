@@ -24,6 +24,23 @@ const NO_CWD: &str = "no-cwd";
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct Target { pub(super) server: String, pub(super) name: String }
 
+/// O que a segunda linha da sessão diz: a última resposta, a pergunta em aberto ou o que o agente está fazendo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Sub { Reply, Question, Working }
+
+type LastSubs = HashMap<Target, (Option<String>, (String, Sub))>;
+
+// Conversa trocada (`/clear`) não herda a linha da anterior.
+fn kept_sub(last: &mut LastSubs, target: &Target, jsonl: Option<&str>, fresh: Option<(String, Sub)>) -> Option<(String, Sub)> {
+    match fresh {
+        Some(sub) => {
+            last.insert(target.clone(), (jsonl.map(str::to_owned), sub.clone()));
+            Some(sub)
+        }
+        None => last.get(target).filter(|(seen, _)| seen.as_deref() == jsonl).map(|(_, sub)| sub.clone()),
+    }
+}
+
 impl Target {
     pub(super) fn new(server: &str, name: &str) -> Self { Self { server: server.to_owned(), name: name.to_owned() } }
     /// Id estável dos elementos da linha: o nome sozinho colidiria entre máquinas.
@@ -225,6 +242,8 @@ pub(super) struct Sidebar {
     pointer_y: f32,
     pub(super) preview: Option<(Target, Entity<TextViewState>, f32)>,
     cache: HashMap<Target, (String, Instant)>,
+    /// Última segunda linha mostrada de cada sessão, com o transcript dela: vale enquanto a nova vier vazia.
+    last_sub: std::cell::RefCell<LastSubs>,
     press_seq: u64,
     long_pressed: bool,
     /// A troca entre a lista e o trilho em andamento: quando começou e se vai para o trilho.
@@ -240,7 +259,7 @@ impl Sidebar {
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder(tr("sidebar_filter")).clean_on_escape());
         cx.subscribe(&filter, |_, _, _: &InputEvent, cx| cx.notify()).detach();
         Self { filter, collapsed: load_collapsed(), deleting: HashSet::new(), editing: None, renaming: HashSet::new(), follow: None, lost: None, moving: HashMap::new(),
-            menu: None, menu_seq: 0, rename_seq: 0, chain: None, chain_seq: 0, focus_tab: None, remote_focus: HashMap::new(), collapse_gen: 0, button_menu: None, hover: None, hover_seq: 0, pointer_y: 0., preview: None, cache: HashMap::new(), press_seq: 0,
+            menu: None, menu_seq: 0, rename_seq: 0, chain: None, chain_seq: 0, focus_tab: None, remote_focus: HashMap::new(), collapse_gen: 0, button_menu: None, hover: None, hover_seq: 0, pointer_y: 0., preview: None, cache: HashMap::new(), last_sub: Default::default(), press_seq: 0,
             long_pressed: false, rail_anim: None, resize: None, grouping: Default::default() }
     }
 
@@ -253,9 +272,16 @@ impl Sidebar {
         self.grouping.reset();
         self.chain_seq += 1;
         self.cache.clear();
+        self.last_sub.borrow_mut().clear();
         self.menu_seq += 1;
         self.hover_seq += 1;
         self.press_seq += 1;
+    }
+
+    /// A segunda linha da sessão. Vazia, fica a última mostrada da mesma conversa: o rótulo do que o agente faz some e
+    /// volta entre uma etapa e outra, e a linha indo junto muda a altura do card a cada vez.
+    pub(super) fn keep_sub(&self, target: &Target, jsonl: Option<&str>, fresh: Option<(String, Sub)>) -> Option<(String, Sub)> {
+        kept_sub(&mut self.last_sub.borrow_mut(), target, jsonl, fresh)
     }
 
     fn menu_for(&self, target: &Target) -> Option<Mute> {
@@ -1628,6 +1654,24 @@ impl Hangar {
 mod tests {
     // Sem glob: o `test` do gpui_kit, que o `super::*` traz, esconderia o `#[test]` da linguagem.
     use super::{BranchList, HashSet, SessionInfo, first_line, has_git, layout, rail_label, save_collapsed};
+
+    #[test]
+    fn empty_second_line_keeps_the_last_one_of_the_same_conversation() {
+        use super::{Sub, Target, kept_sub};
+        let (mut last, row) = (super::LastSubs::new(), Target::new("m", "s"));
+        let working = || Some(("Puttering…".to_owned(), Sub::Working));
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), None), None);
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), working()), working());
+        // O rótulo some entre uma etapa e outra: a linha fica.
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), None), working());
+        // A linha nova, quando vem, vale e passa a ser a guardada.
+        let reply = Some(("Pronto.".to_owned(), Sub::Reply));
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), reply.clone()), reply);
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), None), reply);
+        // `/clear` troca o transcript: a linha da conversa anterior não volta. A de outra sessão também não.
+        assert_eq!(kept_sub(&mut last, &row, Some("b.jsonl"), None), None);
+        assert_eq!(kept_sub(&mut last, &Target::new("m", "outra"), Some("a.jsonl"), None), None);
+    }
 
     #[test]
     fn failed_local_proxy_discovery_keeps_claude_return_and_its_error() {
