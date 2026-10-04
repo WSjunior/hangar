@@ -470,18 +470,22 @@ def test_one_session_failing_to_recover_does_not_stop_the_takeover(monkeypatch):
     recovered, logged = [], []
     class Coordinator:
         transport = instance = None
-        slots = {k: SimpleNamespace(binding=SimpleNamespace(name=k, key=k), phase=rc.Phase.Rust) for k in ('a', 'b')}
-        names = {'a': 'a', 'b': 'b'}
+        slots = {k: SimpleNamespace(binding=SimpleNamespace(name=k, key=k), phase=rc.Phase.Rust, awaiting_identity=False)
+                 for k in ('a', 'b')}
+        slots['c'] = SimpleNamespace(binding=SimpleNamespace(name='c', key='c'), phase=rc.Phase.RecoveringPython,
+                                     awaiting_identity=True)
+        names = {'a': 'a', 'b': 'b', 'c': 'c'}
         async def close_events(self):
             pass
         def close_python_leases(self):
             pass
         async def recover(self, name, confirmed_dead, containment=None):
-            if name == 'a':
-                raise RuntimeError('vida de a não volta')
+            if name in ('a', 'c'):
+                raise RuntimeError('vida não volta')
             recovered.append(name)
     monkeypatch.setattr(rc, 'current', lambda: Coordinator())
     monkeypatch.setattr(diag, 'registrar', lambda evento, nivel, **kw: logged.append((evento, kw.get('sessao'))))
     supervisor = rust_server.Supervisor("fake", "127.0.0.1", 1, 2, "token", "127.0.0.1", lambda: False)
     asyncio.run(supervisor.deactivate_runtime(confirmed_dead=True))
     assert recovered == ['b'] and ('runtime.recover_failed', 'a') in logged
+    assert ('runtime.recover_failed', 'c') not in logged

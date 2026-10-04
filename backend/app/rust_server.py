@@ -416,7 +416,8 @@ class Supervisor:
             for slot in tuple(coordinator.slots.values()):
                 if hasattr(coordinator, "names") and coordinator.names.get(slot.binding.name) != slot.binding.key:
                     continue
-                if slot.phase != runtime_coordinator.Phase.Python:
+                # Registro em espera de uma vida que não voltou nunca teve dono no Rust.
+                if slot.phase != runtime_coordinator.Phase.Python and not getattr(slot, "awaiting_identity", False):
                     try:
                         await coordinator.recover(slot.binding.name, confirmed_dead=True, containment=proof)
                     except Exception as exc:
