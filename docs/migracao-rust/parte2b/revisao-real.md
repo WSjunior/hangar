@@ -41,6 +41,8 @@ Cada linha tem um commit e um teste que falha sem a correção (conferido revert
 | 16 | 2C | Liberação do observador descartada durante a pausa por falhas ou com as 4 vagas de E/S ocupadas: `tmux -C` anexado até 90 s | `capture-pane` não deixava cliente anexado | `8d8927b5`: liberação fura a pausa e tenta de novo uma vez |
 | 17 | 2C | Nome de sessão fora de `[A-Za-z0-9._-]{1,64}` (espaço, acento): 400 a cada captura e diário a cada ≤30 s | — | `b0234061`: Python aplica a mesma regra e lê direto |
 | 18 | 2C | Saída avulsa de hook atribuída ao observador (ele vira o cliente "atual" do tmux ao anexar) derrubava o parser do modo controle | — | `c6d04981`: linha sem `%` fora de bloco é ignorada |
+| 19 | 2B | O `result` de comando local traz `local_command` com o **nome** do comando (`"cost"`), não `true`; o teste com cano falso usava `true` e passava, e no uso real `/cost` e `/clear` nunca confirmavam | Testava só se o campo existia | `50154c4d`: aceita o formato real; teste com ele |
+| 20 | 2B | Achados da revisão independente sobre estas correções: prazo de 30 s com recado nativo em curso podia devolvê-lo à fila (janela hoje fechada pelo limite de 15 s da política, mantido como proteção); falha de sidecar/catálogo de skills deixou de levar a sessão ao Python; gravação forçada da vista antes de uma escrita era pulada e o contador dos IDs ficava velho no disco; confirmação de comando local podia confirmar a próxima barra antes de ela ser escrita; adiada respondia erro ao drain; saída de hook em outra codificação ainda derrubava o observador | — | `81489702`, `c3e6402b` |
 
 Contrato interno: `f2357e0c` sobe `RUST_SERVER_PROTOCOL`/`INTERNAL_PROTOCOL` para **11**
 (combinado com `migracao-rust-2`; 9 e 10 são da parte 3 e da 2D).
@@ -68,6 +70,11 @@ Sessões com terminal (2C), sessão Haiku `rv-t` no tmux isolado, com o chat abe
 | Observador anexado | Um cliente de controle `control-mode,ignore-size,no-output`, sem `read-only` |
 | Digitação pelo Python com o observador ligado | Mensagem entregue 1 vez; estado `idle → working → idle`; 3 prévias durante a resposta |
 | `/clear` com uma segunda conexão que fechou antes | A conexão viva recebeu `reset` e depois 4 prévias (até 387 caracteres) com `working → idle`: a prévia não congelou (#15) |
+
+Incidente durante o teste: às 07:18:45 o backend **real** reiniciou e a varredura de órfãos dele
+(sem o `bb80cf31`) mandou SIGTERM aos canos das sessões de teste (`rv-a`, `rv-b`), cujo dono era o
+HOME de teste. O cano real `Migracao-Rust` só reconectou. Enquanto o `bb80cf31` não estiver no
+backend real, qualquer backend de teste no mesmo usuário perde os canos quando o real reinicia.
 
 ## Encontrado e não corrigido
 
