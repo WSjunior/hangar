@@ -308,3 +308,28 @@ async fn full_write_slots_refuse_at_once_and_python_serves_without_rust_running_
     }
     assert_eq!(*handoffs.lock().unwrap(), ["ocupado"]);
 }
+
+#[tokio::test]
+async fn served_text_declares_utf8_and_xhtml_wrapper_is_html() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("nota.txt"), "ação").unwrap();
+    std::fs::write(dir.path().join("pagina.xhtml"), "<html/>").unwrap();
+    std::fs::write(
+        dir.path().join("fixture.jsonl"),
+        json!({"cwd":dir.path(),"text":"nota.txt pagina.xhtml"}).to_string(),
+    )
+    .unwrap();
+    let (addr, _) = fixture(dir.path()).await;
+    for (file, expected) in [
+        ("nota.txt", "text/plain; charset=utf-8"),
+        ("pagina.xhtml", "text/html; charset=utf-8"),
+    ] {
+        let response = client()
+            .get(format!("http://{addr}/api/sessions/fixture/file?path={file}"))
+            .bearer_auth(OWNER)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.headers()["content-type"], expected);
+    }
+}

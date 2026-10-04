@@ -992,9 +992,18 @@ async fn serve_file(path: &Path, headers: &HeaderMap, download: bool) -> Respons
         .first_or_octet_stream()
         .to_string();
     let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let html = !download && ["text/html", "application/xhtml+xml"].contains(&media.as_str());
+    // Como o Starlette: texto declara utf-8, e o invólucro do HTML é sempre text/html.
+    let content_type = if html {
+        "text/html; charset=utf-8".to_owned()
+    } else if media.starts_with("text/") {
+        format!("{media}; charset=utf-8")
+    } else {
+        media.clone()
+    };
     let mut r = Response::new(Body::empty());
     let h = r.headers_mut();
-    h.insert(header::CONTENT_TYPE, media.parse().unwrap());
+    h.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
     h.insert(header::ETAG, etag.parse().unwrap());
     h.insert(header::CACHE_CONTROL, "max-age=60".parse().unwrap());
     h.insert("x-content-type-options", "nosniff".parse().unwrap());
@@ -1014,7 +1023,7 @@ async fn serve_file(path: &Path, headers: &HeaderMap, download: bool) -> Respons
         };
         h.insert(header::CONTENT_DISPOSITION, disposition.parse().unwrap());
     }
-    if !download && ["text/html", "application/xhtml+xml"].contains(&media.as_str()) {
+    if html {
         use base64::Engine;
         let title = html_escape(&name);
         let prefix = format!(
