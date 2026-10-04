@@ -22,6 +22,7 @@ use std::{
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 const MAX_BODY: usize = 4 * 1024 * 1024;
+const CONTEXT: &str = "workspace_context";
 
 fn response(value: Value, status: u16) -> Response {
     (
@@ -66,8 +67,8 @@ fn private_ok(st: &AppState, peer: SocketAddr, headers: &HeaderMap) -> bool {
         && !st.cfg.internal_secret.is_empty()
         && bool::from(token.ct_eq(st.cfg.internal_secret.as_bytes()))
 }
-/// Vaga cheia recusa na hora: quem chamou entrega ao Python em vez de enfileirar atrás de um
-/// fetch lento. Escrita só volta como `unavailable` antes de rodar; depois, nunca se repete.
+/// Vaga cheia recusa na hora em vez de enfileirar atrás de um fetch lento. Escrita só volta como
+/// `unavailable` antes de rodar; depois, nunca se repete.
 async fn execute(st: &Arc<AppState>, op: Operation) -> hangar_workspace::Result<Value> {
     let mutation = op.is_mutation();
     let slots = if matches!(op, Operation::HeadInfo { .. } | Operation::BranchOf { .. }) {
@@ -250,29 +251,47 @@ fn sessions(ctx: &Value, top: Option<&str>) -> Vec<String> {
     names
 }
 
-/// Cabeçalho do repasse: o Python roda o próprio código em vez de devolver ao Rust pela ponte.
-const FALLBACK_HEADER: &str = "x-hangar-workspace-fallback";
-
-/// Só o próprio servidor manda esse cabeçalho; o de um cliente sai antes de qualquer repasse.
-pub fn strip_client_fallback(req: &mut Request) {
-    req.headers_mut().remove(FALLBACK_HEADER);
-}
-
-fn fallback_request(
-    method: Method,
-    uri: axum::http::Uri,
-    mut headers: HeaderMap,
-    bytes: Bytes,
-    code: Option<&'static str>,
-) -> Request {
-    if let Some(code) = code {
-        headers.insert(FALLBACK_HEADER, header::HeaderValue::from_static(code));
+/// Git/arquivos que não rodou responde 503 com o código; o Python nunca atende no lugar.
+fn refuse(st: &AppState, session: &str, route: &str, code: &'static str, motivo: &str) -> Response {
+    let (event, msg, reason) = match code {
+        hangar_workspace::BUSY => (
+            "rust.workspace_busy",
+            "Git ocupado, tente em instantes.".to_owned(),
+            "vagas cheias",
+        ),
+        CONTEXT => (
+            "rust.workspace_failed",
+            format!("Git/arquivos indisponível: sem os dados da sessão ({motivo})."),
+            "contexto da sessão indisponível",
+        ),
+        _ => (
+            "rust.workspace_failed",
+            format!("Git/arquivos indisponível: {motivo}"),
+            // O diário só leva frase fixa; a categoria separa causas no limite por minuto.
+            if motivo.starts_with("git não") {
+                "git não iniciou"
+            } else if motivo.starts_with("pânico") {
+                "pânico na leitura"
+            } else {
+                "comando sem proteção da árvore"
+            },
+        ),
+    };
+    if crate::warn_limit::allow(Some(session), &format!("{code}:{motivo}")) {
+        // O motivo vem do próprio Rust (prazo, git ausente), nunca do stderr do git.
+        tracing::warn!(session = %session, route = %route, code, motivo = %motivo, "Git/arquivos recusado");
     }
-    let mut req = Request::new(Body::from(bytes));
-    *req.method_mut() = method;
-    *req.uri_mut() = uri;
-    *req.headers_mut() = headers;
-    req
+    st.diag.report(event, session, code, reason);
+    let mut resp = response(
+        json!({"ok":false,"error_code":code,"message":msg,
+            "detail":{"code":code,"params":{"motivo":motivo},"msg":msg}}),
+        503,
+    );
+    if code == hangar_workspace::BUSY {
+        resp.headers_mut()
+            .insert(header::RETRY_AFTER, header::HeaderValue::from_static("2"));
+    }
+    resp
 }
 
 pub async fn public(st: Arc<AppState>, req: Request, forward: Forward) -> Response {
@@ -294,70 +313,39 @@ pub async fn public(st: Arc<AppState>, req: Request, forward: Forward) -> Respon
         None => route.as_str(),
     }
     .to_owned();
-    // Pasta sem sessão (`/api/fs/*`) conta numa chave só.
+    // Pasta sem sessão (`/api/fs/*`) vai ao diário sem nome.
     let session = name.clone().unwrap_or_default();
     let (parts, body) = req.into_parts();
     let bytes = match to_bytes(body, MAX_BODY).await {
         Ok(b) => b,
         Err(_) => return response(json!({"detail":"request body too large"}), 413),
     };
-    let to_python = |code: Option<&'static str>| {
-        fallback_request(
-            parts.method.clone(),
-            parts.uri.clone(),
-            parts.headers.clone(),
-            bytes.clone(),
-            code,
-        )
-    };
-    if st.fallback.on_python(&session, "workspace") {
-        return pass(&st, to_python(Some("sessao_no_python")), &forward).await;
-    }
     let ctx = match context(&st, name.as_deref()).await {
         Ok(ctx) => ctx,
-        Err(None) => return pass(&st, to_python(None), &forward).await,
-        Err(Some(reason)) => {
-            let failures = st.fallback.failed(&session, "workspace", "workspace_context");
-            if crate::warn_limit::allow(Some(&session), "workspace_context") {
-                tracing::warn!(session = %session, route = %tail, failures, code = "workspace_context",
-                    reason, "metadados de Git/arquivos indisponíveis; repassa ao Python");
-            }
-            return pass(&st, to_python(Some("contexto")), &forward).await;
-        }
+        // Sessão inexistente: o 404 é do Python, nada roda.
+        Err(None) => return pass(&st, Request::from_parts(parts, Body::from(bytes)), &forward).await,
+        Err(Some(reason)) => return refuse(&st, &session, &tail, CONTEXT, reason),
     };
-    let python = to_python(Some("indisponivel"));
-    let busy = to_python(Some("ocupado"));
     match run(&st, parts, bytes, &tail, ctx, &forward).await {
-        Ok(response) => {
-            st.fallback.succeeded(&session, "workspace");
-            response
-        }
-        Err(e) if e.code.as_deref() == Some(hangar_workspace::BUSY) => {
-            if crate::warn_limit::allow(None, hangar_workspace::BUSY) {
-                tracing::warn!(route = %tail, code = hangar_workspace::BUSY, "vagas de Git/arquivos cheias; repassa ao Python");
-            }
-            pass(&st, busy, &forward).await
-        }
+        Ok(response) => response,
         Err(e) if hangar_workspace::is_unavailable(&e) => {
-            let failures = st.fallback.failed(&session, "workspace", hangar_workspace::UNAVAILABLE);
-            let reason = e.detail.as_str().unwrap_or("");
-            if crate::warn_limit::allow(Some(&session), reason) {
-                tracing::warn!(session = %session, route = %tail, failures, code = hangar_workspace::UNAVAILABLE,
-                    reason, "Git/arquivos no Rust não rodou; repassa ao Python");
-            }
-            pass(&st, python, &forward).await
+            let code = if e.code.as_deref() == Some(hangar_workspace::BUSY) {
+                hangar_workspace::BUSY
+            } else {
+                hangar_workspace::UNAVAILABLE
+            };
+            refuse(&st, &session, &tail, code, e.detail.as_str().unwrap_or(""))
         }
         Err(e) => {
             // Prazo do git (rede pendurada, repositório enorme) estoura igual no Python.
             if e.status >= 500 && e.status != 504 {
-                let failures = st.fallback.failed(&session, "workspace", "workspace_error");
                 if crate::warn_limit::allow(Some(&session), "workspace_error") {
                     // Sem o detalhe: o stderr do git pode citar caminhos e nomes do usuário.
-                    tracing::warn!(session = %session, route = %tail, failures, status = e.status,
+                    tracing::warn!(session = %session, route = %tail, status = e.status,
                         code = "workspace_error", "Git/arquivos no Rust falhou");
                 }
-            } else {
-                st.fallback.succeeded(&session, "workspace");
+                // Inclui a escrita cujo git não iniciou: vira 500 porque um comando anterior pode ter rodado.
+                st.diag.report("rust.workspace_failed", &session, "workspace_error", "Git/arquivos falhou");
             }
             failure(e, &tail)
         }

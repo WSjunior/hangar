@@ -45,6 +45,7 @@ pub struct AppState {
     pub workspace_read_slots: Arc<tokio::sync::Semaphore>,
     pub workspace_meta_slots: Arc<tokio::sync::Semaphore>,
     pub fallback: Fallback,
+    pub diag: crate::diag::DiagClient,
 }
 
 const FALLBACK_AFTER: u32 = 4;
@@ -101,7 +102,8 @@ impl AppState {
             hubs: Hubs::default(),
             infos: Default::default(),
         };
-        AppState { auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, fallback: Fallback::default(),
+        let diag = crate::diag::DiagClient::new(cfg.upstream, cfg.internal_secret.clone());
+        AppState { auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, fallback: Fallback::default(), diag,
             workspace_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             workspace_read_slots: Arc::new(tokio::sync::Semaphore::new(8)),
             workspace_meta_slots: Arc::new(tokio::sync::Semaphore::new(4)) }
@@ -250,9 +252,8 @@ pub(crate) async fn pass(st: &AppState, req: Request, fwd: &Forward) -> Response
 async fn pass_any(
     State(st): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    mut req: Request,
+    req: Request,
 ) -> Response {
-    crate::workspace_routes::strip_client_fallback(&mut req);
     if crate::workspace_routes::matches(req.method(), req.uri().path()) {
         let (forward, owner) = gate(&st, peer, &req);
         if owner {
@@ -288,9 +289,8 @@ async fn history(
     State(st): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     path: Result<Path<String>, PathRejection>,
-    mut req: Request,
+    req: Request,
 ) -> Response {
-    crate::workspace_routes::strip_client_fallback(&mut req);
     let (fwd, owner) = gate(&st, peer, &req);
     let name = match path {
         Ok(Path(n)) if owner && req.method() == Method::GET => n,
@@ -371,9 +371,8 @@ async fn events(
     State(st): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     path: Result<Path<String>, PathRejection>,
-    mut req: Request,
+    req: Request,
 ) -> Response {
-    crate::workspace_routes::strip_client_fallback(&mut req);
     let (fwd, owner) = gate(&st, peer, &req);
     let name = match path {
         Ok(Path(n)) if owner && req.method() == Method::GET => n,
