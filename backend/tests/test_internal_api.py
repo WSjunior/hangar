@@ -118,3 +118,43 @@ def test_left_out_of_the_api_schema():
     paths = api_mod.app.openapi()["paths"]
     assert "/api/sessions/{name}/history" in paths
     assert not any(p.startswith("/internal") for p in paths)
+
+
+def _rust_slot(tmp_path, monkeypatch):
+    from app import runtime_coordinator
+    from app.runtime_coordinator import Binding, Phase, RuntimeCoordinator
+    coordinator = RuntimeCoordinator()
+    coordinator.instance = "instance-1"
+    slot = coordinator.register(Binding(name="session", key="key", provider="claude", headless=True,
+        meta={"key": "key"}, jsonl=str(tmp_path / "chat.jsonl"), projection_dir=tmp_path / "projection",
+        state_path=tmp_path / "key.json", lock_path=tmp_path / "key.lock", generation=1))
+    slot.lease.close()
+    slot.phase = Phase.Rust
+    monkeypatch.setattr(runtime_coordinator, "_current", coordinator)
+    return coordinator
+
+
+def _policy(client, kind, phase_id, payload):
+    return client.post("/internal/runtime/policy", headers={"X-Hangar-Internal": SECRET,
+        "X-Hangar-Runtime-Instance": "instance-1"}, json={"key": "key", "generation": 1,
+        "request_id": "op-1", "phase_id": phase_id, "kind": kind, "payload": payload})
+
+
+def test_pure_policy_runs_without_a_journal_attempt(tmp_path, monkeypatch):
+    # A entrada adiada volta pelo drain e prepara o texto de novo: o cálculo não deixa tentativa no
+    # diário, e exigir uma recusava a segunda vez e perdia a mensagem.
+    coordinator = _rust_slot(tmp_path, monkeypatch)
+    client = _client()
+    for _ in range(2):
+        response = _policy(client, "prepare_prompt", "op-1:prepare_prompt", {"text": "Olá"})
+        assert response.status_code == 200 and response.json()["ok"] is True
+    assert internal_api._policy_calls == {}
+    coordinator.close_python_leases()
+
+
+def test_native_message_still_needs_its_journal_attempt(tmp_path, monkeypatch):
+    coordinator = _rust_slot(tmp_path, monkeypatch)
+    client = TestClient(api_mod.app, client=("127.0.0.1", 50000), raise_server_exceptions=False)
+    response = _policy(client, "native_message", "op-1:native_message:x", {"text": "[de: a] oi"})
+    assert response.status_code == 500
+    coordinator.close_python_leases()

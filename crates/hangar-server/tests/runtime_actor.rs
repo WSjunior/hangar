@@ -282,3 +282,59 @@ async fn late_wire_reply_resolves_parent() {
     handle.stop().await.unwrap();
     assert_eq!(server.await.unwrap(),0);
 }
+
+/// Cano Claude falso que só conta o que chega ao fio; a política aponta para uma porta fechada.
+async fn setup_claude_unreachable_policy() -> (RuntimeHandle,tokio::task::JoinHandle<usize>,tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut header = String::new(); reader.read_line(&mut header).await.unwrap();
+        let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
+            "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+        reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+        let mut sent = 0;
+        loop {
+            let mut raw = String::new();
+            if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
+            sent += 1;
+        }
+        sent
+    });
+    let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
+        metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
+        binding:CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 },
+        lease_path:dir.path().join("key.lock"),state_path:dir.path().join("key.queue-state.json"),projection_dir:dir.path().join("projection"),
+        transcript:dir.path().join("chat.jsonl"),created:0.0 };
+    let lease = acquire_lease(&target.lease_path).unwrap();
+    let store = Store::open(&target.state_path,&target.projection_dir,State::new("key",1,"session",vec![])).unwrap();
+    let queue = QueueActor::start(store,lease);
+    let connection = cano::connect(&target.binding).await.unwrap();
+    let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap()
+        .with_policy(PolicyClient::new(closed,"secret".into(),"instance".into()));
+    (RuntimeActor::spawn(target,queue,connection,engine),server,dir)
+}
+
+#[tokio::test]
+async fn input_that_fails_before_any_write_goes_back_to_the_queue() {
+    // Nada chegou à CLI: a entrada é adiada e volta a ser drenável, nunca "incerta" para sempre.
+    let (handle,server,dir) = setup_claude_unreachable_policy().await;
+    let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"Olá","entry_id":"msg"}) };
+    assert!(handle.command(input).await.is_err());
+    let path = dir.path().join("key.queue-state.json");
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        loop {
+            let state:State = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            if state.operations.get("msg").is_some_and(|op|op.status == Status::Deferred)
+                && state.rows.iter().any(|row|row["id"] == "msg" && row["delivered"] == false) { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.expect("entrada sem escrita precisa voltar para a fila como adiada");
+    let state:State = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(!state.operations.keys().any(|id|id.contains("prepare_prompt")),"cálculo puro não entra no diário");
+    handle.stop().await.unwrap();
+    assert_eq!(server.await.unwrap(),0);
+}

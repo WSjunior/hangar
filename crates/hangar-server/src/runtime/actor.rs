@@ -364,7 +364,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                 continue;
             }
             match engine.command(pending.command.clone(),clock(start)) {
-                Ok(next)=>effects.extend(next),Err(error)=>fail_root(&mut roots,&id,error),
+                Ok(next)=>effects.extend(next),Err(error)=>defer_unwritten(&mut roots,&attempts,&id,error,&mut effects),
             }
         }
         while let Some(effect) = effects.pop_front() {
@@ -684,25 +684,19 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             for response in pending.responses.drain(..) { let _ = response.send(Ok(reply.clone())); }
                             continue;
                         }
-                        if pending.cancelled || pending.timed_out {
+                        // Esgotada: o prazo já respondeu (adiada, sem escrita); uma segunda resposta a tornaria incerta.
+                        if pending.timed_out { pending.preparing = false; continue; }
+                        if pending.cancelled {
                             pending.preparing = false;
-                            effects.push_back(Effect::Reply { operation_id:id,disposition:if pending.cancelled { Disposition::Rejected } else { Disposition::Unknown },
-                                payload:json!({"error":if pending.cancelled { "input cancelado antes do envio" } else { "preparação sem resposta" }}) });
+                            effects.push_back(Effect::Reply { operation_id:id,disposition:Disposition::Rejected,
+                                payload:json!({"error":"input cancelado antes do envio"}) });
                             continue;
                         }
                         if matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer) && engine.policy.is_some() {
-                            let queue = queue.clone(); let policy = engine.policy.clone().unwrap(); let target = target.clone(); let command = pending.command.clone(); let sample = clock(start);
+                            let policy = engine.policy.clone().unwrap(); let target = target.clone(); let command = pending.command.clone();
                             jobs.spawn(async move {
-                                let result = async {
-                                    let phase = format!("{id}:prepare_prompt");
-                                    queue.exec(target.generation,&format!("prepare:{phase}"),sample,Action::Prepare { id:phase.clone(),payload:json!({"kind":"prepare_prompt",
-                                        "request_id":id,"payload":command.payload}),entry_id:None }).await.map_err(io_failure)?;
-                                    queue.exec(target.generation,&format!("dispatch:{phase}"),sample,Action::BeginDispatch { id:phase.clone(),wire_id:phase }).await.map_err(io_failure)?;
-                                    let payload = policy.run(&target,"prepare_prompt",&RequestId::String(id.clone()),command.payload,&format!("{id}:prepare_prompt")).await?;
-                                    queue.exec(target.generation,&format!("finish:{id}:prepare_prompt"),sample,Action::Finish {
-                                        id:format!("{id}:prepare_prompt"),status:Status::Accepted,result:payload.clone() }).await.map_err(io_failure)?;
-                                    Ok(payload)
-                                }.await;
+                                // Cálculo puro (texto → blocos): sem efeito, não entra no diário e pode repetir.
+                                let result = policy.run(&target,"prepare_prompt",&RequestId::String(id.clone()),command.payload,&format!("{id}:prepare_prompt")).await;
                                 Job::PreparedInput { id,result }
                             });
                         } else {
@@ -720,23 +714,24 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                                     let command = pending.command.clone(); let original = pending.original.clone(); let view = engine.view(); let sample = clock(start);
                                     jobs.spawn(async move {
                                         let result = async {
-                                            let phase = format!("{id}:native_message");
+                                            // Uma fase por tentativa: a adiada volta pelo drain e não pode reaproveitar os recibos da anterior.
+                                            let phase = format!("{id}:native_message:{}",unique());
                                             let payload = json!({"text":command.payload["text"]});
                                             queue.exec(target.generation,&format!("prepare:{phase}"),sample,Action::Prepare { id:phase.clone(),
                                                 payload:json!({"kind":"native_message","request_id":id,"payload":payload}),entry_id:None }).await.map_err(io_failure)?;
                                             let cursor = capture_cursor(&target,&view).await?;
-                                            queue.exec(target.generation,&format!("native-cursor:{id}"),sample,Action::BindDispatch { id:id.clone(),cursor }).await.map_err(io_failure)?;
-                                            queue.exec(target.generation,&format!("native-dispatch:{id}"),sample,Action::BeginDispatch { id:id.clone(),wire_id:phase.clone() }).await.map_err(io_failure)?;
+                                            queue.exec(target.generation,&format!("native-cursor:{phase}"),sample,Action::BindDispatch { id:id.clone(),cursor }).await.map_err(io_failure)?;
+                                            queue.exec(target.generation,&format!("native-dispatch:{phase}"),sample,Action::BeginDispatch { id:id.clone(),wire_id:phase.clone() }).await.map_err(io_failure)?;
                                             queue.exec(target.generation,&format!("dispatch:{phase}"),sample,Action::BeginDispatch { id:phase.clone(),wire_id:phase.clone() }).await.map_err(io_failure)?;
                                             let result = policy.run(&target,"native_message",&RequestId::String(id.clone()),payload,&phase).await?;
                                             let outcome = result["outcome"].as_str().ok_or_else(||failure("native_outcome"))?;
                                             let status = match outcome { "written"=>Status::Accepted,"not_written"=>Status::Rejected,"unknown"=>Status::Unknown,_=>return Err(failure("native_outcome")) };
-                                            queue.exec(target.generation,&format!("finish:{phase}"),sample,Action::Finish { id:phase,status,result:result.clone() }).await.map_err(io_failure)?;
+                                            queue.exec(target.generation,&format!("finish:{phase}"),sample,Action::Finish { id:phase.clone(),status,result:result.clone() }).await.map_err(io_failure)?;
                                             if outcome == "not_written" {
-                                                queue.exec(target.generation,&format!("native-defer:{id}"),sample,Action::Finish { id:id.clone(),status:Status::Deferred,result:json!({"not_written":true}) }).await.map_err(io_failure)?;
+                                                queue.exec(target.generation,&format!("native-defer:{phase}"),sample,Action::Finish { id:id.clone(),status:Status::Deferred,result:json!({"not_written":true}) }).await.map_err(io_failure)?;
                                                 let state = queue.snapshot().await.map_err(io_failure)?;
                                                 let entry_id = state.operations[&id].entry_id.clone();
-                                                queue.exec(target.generation,&format!("native-fallback:{id}"),sample,Action::Prepare { id:id.clone(),payload:original,entry_id }).await.map_err(io_failure)?;
+                                                queue.exec(target.generation,&format!("native-fallback:{phase}"),sample,Action::Prepare { id:id.clone(),payload:original,entry_id }).await.map_err(io_failure)?;
                                             }
                                             Ok(result)
                                         }.await;
@@ -744,7 +739,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                                     });
                                 } else { pending.ready_to_run = true; }
                             }
-                            Err(error)=>fail_root(&mut roots,&id,error),
+                            Err(error)=>defer_unwritten(&mut roots,&attempts,&id,error,&mut effects),
                         }
                     }
                     Job::Write { wire,result } => {
@@ -889,7 +884,11 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                 for (id,pending) in &mut roots {
                     if pending.result.is_none() && !pending.timed_out && sample.monotonic_s >= pending.deadline {
                         pending.timed_out = true;
-                        effects.push_back(Effect::Reply { operation_id:id.clone(),disposition:Disposition::Unknown,
+                        // Sem escrita começada a entrada não chegou à CLI: volta para a fila em vez de ficar incerta.
+                        let prefix = format!("{id}:");
+                        let written = attempts.values().any(|attempt|attempt.logical_id == *id || attempt.logical_id.starts_with(&prefix));
+                        let unsent = !written && matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer);
+                        effects.push_back(Effect::Reply { operation_id:id.clone(),disposition:if unsent { Disposition::Deferred } else { Disposition::Unknown },
                             payload:json!({"error":"operação sem resposta"}) });
                     }
                 }
@@ -938,6 +937,21 @@ fn recover_phase(state:&super::queue::State,phase:&super::queue::Operation) -> b
         && phase.payload["frame"].is_object() && (matches!(phase.status,Status::Unknown | Status::Dispatching)
         || phase.payload["logical_id"].as_str().and_then(|id|state.operations.get(id))
             .is_some_and(|root|matches!(root.status,Status::Unknown | Status::Dispatching)))
+}
+
+/// Falha antes de qualquer escrita no fio: nada chegou à CLI, então a entrada volta para a fila
+/// (adiada, como o `deferred` do Python) em vez de ficar incerta e presa para sempre.
+fn defer_unwritten(roots:&mut BTreeMap<String,Pending>,attempts:&BTreeMap<String,Attempt>,id:&str,error:RuntimeError,effects:&mut VecDeque<Effect>) {
+    let prefix = format!("{id}:");
+    let written = attempts.values().any(|attempt|attempt.logical_id == id || attempt.logical_id.starts_with(&prefix));
+    let input = roots.get(id).is_some_and(|pending|matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer));
+    if written || !input { return fail_root(roots,id,error); }
+    let Some(pending) = roots.get_mut(id) else { return };
+    pending.preparing = false;
+    for response in pending.responses.drain(..) { let _ = response.send(Err(error.clone())); }
+    let payload = json!({"error_code":error.code});
+    pending.result = Some(RuntimeReply { operation_id:id.into(),disposition:Disposition::Deferred,payload:payload.clone() });
+    effects.push_back(Effect::Reply { operation_id:id.into(),disposition:Disposition::Deferred,payload });
 }
 
 fn fail_root(roots:&mut BTreeMap<String,Pending>,id:&str,error:RuntimeError) {
