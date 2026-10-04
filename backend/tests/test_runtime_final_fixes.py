@@ -462,3 +462,26 @@ def test_waiting_record_of_a_dead_life_never_holds_the_name(tmp_path, monkeypatc
             assert closed
         assert not restored.managed_queue('session')
     asyncio.run(flow())
+
+
+def test_one_session_failing_to_recover_does_not_stop_the_takeover(monkeypatch):
+    from types import SimpleNamespace
+    from app import diag, rust_server, runtime_coordinator as rc
+    recovered, logged = [], []
+    class Coordinator:
+        transport = instance = None
+        slots = {k: SimpleNamespace(binding=SimpleNamespace(name=k, key=k), phase=rc.Phase.Rust) for k in ('a', 'b')}
+        names = {'a': 'a', 'b': 'b'}
+        async def close_events(self):
+            pass
+        def close_python_leases(self):
+            pass
+        async def recover(self, name, confirmed_dead, containment=None):
+            if name == 'a':
+                raise RuntimeError('vida de a não volta')
+            recovered.append(name)
+    monkeypatch.setattr(rc, 'current', lambda: Coordinator())
+    monkeypatch.setattr(diag, 'registrar', lambda evento, nivel, **kw: logged.append((evento, kw.get('sessao'))))
+    supervisor = rust_server.Supervisor("fake", "127.0.0.1", 1, 2, "token", "127.0.0.1", lambda: False)
+    asyncio.run(supervisor.deactivate_runtime(confirmed_dead=True))
+    assert recovered == ['b'] and ('runtime.recover_failed', 'a') in logged

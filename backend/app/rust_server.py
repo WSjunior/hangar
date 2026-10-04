@@ -417,7 +417,12 @@ class Supervisor:
                 if hasattr(coordinator, "names") and coordinator.names.get(slot.binding.name) != slot.binding.key:
                     continue
                 if slot.phase != runtime_coordinator.Phase.Python:
-                    await coordinator.recover(slot.binding.name, confirmed_dead=True, containment=proof)
+                    try:
+                        await coordinator.recover(slot.binding.name, confirmed_dead=True, containment=proof)
+                    except Exception as exc:
+                        # Uma sessão que não volta fica suspensa sozinha; a porta e as outras seguem.
+                        diag.registrar("runtime.recover_failed", "erro", sessao=slot.binding.name,
+                                       **runtime_coordinator.failure_reason(exc))
         self.runtime_ready = self.runtime_secret = self.runtime_instance = None
         self.runtime_transport = None
 

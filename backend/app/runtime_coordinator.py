@@ -133,7 +133,7 @@ def failure_reason(exc: BaseException) -> dict:
     """Tipo e motivo de uma falha do runtime para o diário. Só falhas do caminho Rust levam o
     detalhe: lá a mensagem é código e frase fixa. As do Python podem embutir texto da sessão."""
     from_rust = getattr(exc, "_hangar_rust", False) or type(exc).__name__ in {"RustOpError", "RustCacheInvalid"}
-    plain = from_rust or isinstance(exc, (TimeoutError, ConnectionError))
+    plain = from_rust or getattr(exc, "safe_detail", False) or isinstance(exc, (TimeoutError, ConnectionError))
     return {"codigo": type(exc).__name__, "detalhe": str(exc)[:200] if plain else ""}
 
 

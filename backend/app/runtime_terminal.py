@@ -153,18 +153,25 @@ def resolve_binding(name, previous=None):
         previous.lock_path if same else directory / 'runtime' / f'{key}.lock', generation)
 
 
+class BindingChanged(RuntimeError):
+    # A mensagem leva só nomes de campos: pode ir ao diário.
+    safe_detail = True
+
+
 def validate_binding(descriptor):
     values = copy.deepcopy(descriptor)
     for field in ('projection_dir', 'state_path', 'lock_path'):
         values[field] = Path(values[field])
     previous = Binding(**values)
     current = resolve_binding(previous.name, previous)
-    if (current is None or current.key != previous.key or current.jsonl != previous.jsonl
-            or current.meta.get('fingerprint') != previous.meta.get('fingerprint')
-            or current.meta.get('agent_pid') != previous.meta.get('agent_pid')
-            or current.meta.get('agent_birth') != previous.meta.get('agent_birth')
-            or current.meta['terminal'] != previous.meta['terminal']):
-        raise RuntimeError('vínculo terminal mudou; nenhuma escrita autorizada')
+    if current is None:
+        raise BindingChanged('vínculo terminal mudou (sem vida atual); nenhuma escrita autorizada')
+    differs = [field for field, now, before in (('key', current.key, previous.key), ('jsonl', current.jsonl, previous.jsonl),
+        *((field, current.meta.get(field), previous.meta.get(field)) for field in ('fingerprint', 'agent_pid', 'agent_birth')),
+        *(('terminal.' + field, current.meta['terminal'].get(field), previous.meta['terminal'].get(field))
+          for field in sorted(set(current.meta['terminal']) | set(previous.meta['terminal'])))) if now != before]
+    if differs:
+        raise BindingChanged(f"vínculo terminal mudou ({','.join(differs)}); nenhuma escrita autorizada")
     return current
 
 
