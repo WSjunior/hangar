@@ -554,7 +554,7 @@ async fn local_command_result_confirms_the_slash_entry() {
             reader.get_mut().write_all(format!("{ack}\n").as_bytes()).await.unwrap();
             if frame["type"] == "user" {
                 let _ = &written;
-                let result = json!({"type":"cano_output","frame":json!({"type":"result","subtype":"success","is_error":false,"local_command":true}).to_string()});
+                let result = json!({"type":"cano_output","frame":json!({"type":"result","subtype":"success","is_error":false,"local_command":"clear"}).to_string()});
                 reader.get_mut().write_all(format!("{result}\n").as_bytes()).await.unwrap();
             }
         }
