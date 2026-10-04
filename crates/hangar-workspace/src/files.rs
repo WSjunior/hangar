@@ -126,11 +126,11 @@ pub fn write(target: &Path, path: &str, text: &str, expected: Option<&str>) -> R
         ));
     }
     let check = || -> Result<()> {
-        let file = std::fs::File::open(target).map_err(|e| io_error(e, "erro_arq_sumiu"))?;
+        let file = std::fs::File::open(target).map_err(vanished)?;
         let mut bytes = Vec::new();
         file.take(MAX_BYTES as u64 + 1)
             .read_to_end(&mut bytes)
-            .map_err(|e| io_error(e, "erro_arq_sumiu"))?;
+            .map_err(vanished)?;
         if bytes.len() > MAX_BYTES || digest(&bytes) != expected {
             return Err(file_error(
                 409,
@@ -180,6 +180,14 @@ pub fn write(target: &Path, path: &str, text: &str, expected: Option<&str>) -> R
         }
     }
     Ok(json!({"path":path,"size":text.len(),"digest":digest(text.as_bytes())}))
+}
+/// Como o filetree.py: o arquivo lido sumiu entre a leitura e a gravação é sempre 409, inclusive
+/// quando foi apagado (o agente da sessão mexe nos mesmos arquivos).
+fn vanished(e: std::io::Error) -> WorkspaceError {
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        return io_error(e, "erro_arq_sumiu");
+    }
+    file_error(409, "erro_arq_sumiu", "o arquivo sumiu do disco")
 }
 fn io_error(e: std::io::Error, code: &str) -> WorkspaceError {
     match e.kind() {
@@ -646,4 +654,15 @@ pub fn mkdir(root: &str, path: Option<&str>, name: &str, roots: &[String]) -> Re
     Ok(
         json!({"name":name,"path":child.to_string_lossy(),"is_git":false,"has_claude_md":false,"mtime":mtime}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn file_gone_during_save_is_a_conflict_like_python() {
+        let gone = super::vanished(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert_eq!((gone.status, gone.code.as_deref()), (409, Some("erro_arq_sumiu")));
+        let denied = super::vanished(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert_eq!(denied.status, 403);
+    }
 }
