@@ -143,7 +143,7 @@
       {/if}
       {#if erro}<p class="erro" role="alert">{erro}</p>{/if}
       <div class="acoes">
-        <button type="button" class="cancelar" onclick={() => (confirmando = false)}>{m.comum_cancelar()}</button>
+        <button type="button" class="cancelar" onclick={() => { erro = ''; confirmando = false; }}>{m.comum_cancelar()}</button>
         <button type="button" class="apagar" disabled={apagando} onclick={apagar}>
           {#if apagando}<Spinner />{/if}
           {perdeArquivos ? m.worktree_apagar_perder({ n: perdeArquivos }) : m.worktree_apagar()}
@@ -160,6 +160,7 @@
       </div>
       {#if erroCopia}<p class="erro" role="alert">{m.toast_copiar_falhou()}</p>{/if}
       <p class="veredito">{veredito}</p>
+      {#if erro}<p class="erro" role="alert">{m.worktrees_erro({ motivo: erro })}</p>{/if}
       {#if st.degraded}<p class="aviso" role="note">{m.worktree_leitura_incompleta()}</p>{/if}
 
       {#if sessoes.length}
@@ -210,7 +211,7 @@
       {#if st.sessions.length}
         <p class="aviso">{m.worktree_bloqueada({ nomes: st.sessions.join(', ') })}</p>
       {:else}
-        <button type="button" class="apagar" onclick={() => (confirmando = true)}>{m.worktree_apagar_reticencias()}</button>
+        <button type="button" class="apagar" onclick={() => { erro = ''; confirmando = true; }}>{m.worktree_apagar_reticencias()}</button>
       {/if}
     {/if}
   </div>
