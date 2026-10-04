@@ -40,6 +40,20 @@ _POLL = 0.25
 
 # Literal, e não `subprocess.CREATE_NO_WINDOW`: o atributo só existe no Windows.
 _CREATE_NO_WINDOW = 0x08000000
+# Pedido ainda aberto quando a parada começa: o uvicorn espera sem prazo antes do lifespan, e o
+# systemd mata o processo no teto dele (10 s aqui), pulando a parada ordenada.
+GRACEFUL_SHUTDOWN_S = 5
+
+
+class Server(uvicorn.Server):
+    """Uvicorn que solta as esperas longas do plugin assim que o sinal de parada chega."""
+
+    def handle_exit(self, sig, frame) -> None:
+        try:
+            from app import plugin_bridge
+            plugin_bridge.stop_waits()
+        finally:
+            super().handle_exit(sig, frame)     # falha no gancho não pode impedir a parada
 
 
 def wanted_binary(enabled: bool) -> Path | None:
@@ -481,7 +495,7 @@ async def _take_over(server: uvicorn.Server, serving: asyncio.Task, reason: str,
         await serving
         return False
     # lifespan="off": ele já rodou no servidor interno, e rodar de novo duplicaria watchers e hooks.
-    public = uvicorn.Server(uvicorn.Config(server.config.app, **{**kw, "lifespan": "off"}))
+    public = Server(uvicorn.Config(server.config.app, **{**kw, "lifespan": "off"}))
     # O Config novo refaz o logging do uvicorn e tira dele os handlers do diário.
     diag_logging.instalar()
     public_task = asyncio.create_task(public.serve(sockets=[sock]))
@@ -497,7 +511,7 @@ def run(app: str, kw: dict, binary: Path, token: str, sockets: list[socket.socke
     """Bloqueia até o fim. Devolve o código de saída: 0, 1 (porta sem dono) ou 3 (não subiu)."""
     # Só o uvicorn interno confia no 127.0.0.1 (o hangar-server); a porta pública segue com o `kw`.
     config = uvicorn.Config(app, **{**kw, "forwarded_allow_ips": trust_loopback(kw["forwarded_allow_ips"])})
-    server = uvicorn.Server(config)
+    server = Server(config)
     public_ok = asyncio.run(serve(server, sockets, binary, kw, token, bind_public),
                             loop_factory=config.get_loop_factory())
     if not server.started:

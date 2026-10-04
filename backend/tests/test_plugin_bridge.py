@@ -717,3 +717,61 @@ def test_pull_diz_se_o_backend_tem_a_faixa(monkeypatch):
         assert asyncio.run(pb.pull(_pull(instance="a")))["faixa"] is True
     finally:
         pb.esquecer("s1")
+
+
+def test_parada_solta_as_esperas_longas_na_hora(monkeypatch):
+    # O uvicorn espera cada pedido aberto antes do lifespan: uma espera de 25 s passava do teto do
+    # systemd e o backend saía por SIGKILL.
+    monkeypatch.setattr(pb, "terminal_preso", lambda name: False)
+    monkeypatch.setattr(pb, "_stopping", False)
+    pb.app_entrou()
+
+    async def cena():
+        pull = asyncio.create_task(pb.pull(_pull(instance="a")))
+        ask = asyncio.create_task(pb.ask(_corpo("ask:q1")))
+        while "s1" not in pb._waiters or not pb._perguntas.get("s1", {}).get("fila"):
+            await asyncio.sleep(0)
+        inicio = time.monotonic()
+        pb.stop_waits()
+        assert (await pull)["text"] is None
+        assert await ask == {"answers": None}
+        assert time.monotonic() - inicio < 1
+        # Pedido que chega já na parada também não espera.
+        assert (await asyncio.wait_for(pb.pull(_pull(instance="a")), 1))["text"] is None
+
+    try:
+        asyncio.run(cena())
+    finally:
+        pb.esquecer("s1")
+
+
+def test_sinal_de_parada_avisa_as_esperas(monkeypatch):
+    import uvicorn
+    from app import rust_server
+    chamadas = []
+    monkeypatch.setattr(pb, "stop_waits", lambda: chamadas.append("stop"))
+    # A classe-mãe de verdade ligaria a parada global do sse-starlette para os testes seguintes.
+    monkeypatch.setattr(uvicorn.Server, "handle_exit", lambda self, sig, frame: chamadas.append("uvicorn"))
+    rust_server.Server(uvicorn.Config(lambda *a: None)).handle_exit(15, None)
+    assert chamadas == ["stop", "uvicorn"]
+
+
+def test_texto_que_chega_junto_com_a_parada_ainda_e_entregue(monkeypatch):
+    monkeypatch.setattr(pb, "_stopping", False)
+
+    async def cena():
+        pull = asyncio.create_task(pb.pull(_pull(instance="a")))
+        while "s1" not in pb._waiters:
+            await asyncio.sleep(0)
+        fila = pb._waiters["s1"]
+        fila.put_nowait(pb._STOP)
+        fila.put_nowait({"text": "chegou junto", "modo": "fill"})
+        assert (await pull)["text"] == "chegou junto"
+        pb.stop_waits()
+        # Depois do sinal a entrega não vai para uma espera que vai fechar: o chamador usa o pane.
+        assert pb._entregar("s1", "depois", "fill") is False
+
+    try:
+        asyncio.run(cena())
+    finally:
+        pb.esquecer("s1")

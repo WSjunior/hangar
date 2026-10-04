@@ -615,7 +615,7 @@ def native_slot(name):
             and context is not None and context.get("operation_id") in coordinator.legacy_active):
         return None
     if slot.phase != runtime_coordinator.Phase.Rust:
-        raise RuntimeError("sessão em transferência; aguarde a posse ser confirmada")
+        raise runtime_coordinator.TransferInProgress("sessão em transferência; aguarde a posse ser confirmada")
     return slot
 
 
@@ -963,6 +963,100 @@ def voice_current(name, target, adapter):
     return adapter._sessions.get(name) is target
 
 
+# ponytail: a posse é conferida por consulta a cada 0,25 s; a fase muda sem aviso único a quem espera.
+_OWNER_POLL_S = 0.25
+_OWNER_STUCK_S = 10.0
+
+
+def _hands_over(provider, name):
+    """Só sessão sem terminal troca de dono; as outras seguem o monitor direto, sem passo a mais."""
+    if provider == "claude":
+        return True         # o adapter embrulhado como "claude" é o do Claude sem terminal
+    from app.adapters.codex import sessions
+    return bool((sessions.load(name) or {}).get("headless"))
+
+
+def _state_owner(name):
+    """Quem responde pelo estado agora; None durante a passagem entre Python e Rust."""
+    coordinator = runtime_coordinator.current()
+    if coordinator is None or not coordinator.managed_runtime(name):
+        return ("python",)
+    slot = coordinator.slot(name)
+    if not slot.binding.headless or slot.phase == runtime_coordinator.Phase.Python:
+        return ("python",)
+    if slot.phase == runtime_coordinator.Phase.Rust:
+        return ("rust", coordinator.instance, slot.binding.key, slot.binding.generation)
+    return None
+
+
+async def owner_state_stream(legacy, native, name):
+    """Estado que segue a posse. A passagem não derruba o chat: ele espera o novo dono e reabre a
+    fonte dele, e o erro de uma fonte cuja posse acabou de sair não sobe."""
+    while True:
+        owner = _state_owner(name)
+        waited = time.monotonic()
+        while owner is None:
+            await asyncio.sleep(_OWNER_POLL_S)
+            owner = _state_owner(name)
+            if waited is not None and time.monotonic() - waited > _OWNER_STUCK_S:
+                # Os pings seguem e o front não reconecta: sem isto, o chat parado não deixa rastro.
+                from app import diag
+                diag.registrar("runtime.state_owner_stuck", "aviso", sessao=name)
+                waited = None
+        source = native() if owner[0] == "rust" else legacy()
+        # Uma tarefa só itera a fonte, e só avança quando o chat pede o próximo: como a iteração
+        # direta. O monitor do Codex guarda estado da própria tarefa entre yields.
+        wanted, items = asyncio.Queue(), asyncio.Queue()
+
+        async def pump(source=source, wanted=wanted, items=items):
+            try:
+                while True:
+                    await wanted.get()
+                    try:
+                        item = await anext(source)
+                    except StopAsyncIteration:
+                        items.put_nowait(("end", None))
+                        return
+                    items.put_nowait(("item", item))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                items.put_nowait(("error", exc))
+
+        task = asyncio.ensure_future(pump())
+        requested = False
+        try:
+            while True:
+                if not requested:
+                    wanted.put_nowait(None)
+                    requested = True
+                try:
+                    kind, value = await asyncio.wait_for(items.get(), _OWNER_POLL_S)
+                except TimeoutError:
+                    if _state_owner(name) != owner:
+                        break
+                    continue
+                requested = False
+                if kind == "item":
+                    yield value
+                    if _state_owner(name) != owner:
+                        break
+                    continue
+                if _state_owner(name) != owner:
+                    break
+                if kind == "end":
+                    return
+                if isinstance(value, runtime_coordinator.TransferInProgress):
+                    await asyncio.sleep(_OWNER_POLL_S)    # passagem curta que a consulta não viu
+                    break
+                raise value
+        finally:
+            try:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            finally:
+                await source.aclose()
+
 _ASYNC = {"ensure_running", "send_prompt", "deliverable", "drain", "steer", "steer_queue", "interrupt", "select",
     "answer_questions", "set_model", "set_permission_mode", "list_models", "read_settings", "read_rate_limits", "set_mode",
     "compact", "list_skills", "skip_question", "parar", "recarregar", "restart", "open_terminal", "open_headless", "set_permission_mode_sem_terminal"}
@@ -1005,16 +1099,25 @@ def install_adapter(cls, provider):
         if method == "state_monitor":
             @functools.wraps(original)
             def wrapper(self, name, sid_get, _original=original, _facade=facade):
-                if native_slot(name) is not None:
-                    return _facade.state_stream(name, sid_get)
-                return _original(self, name, sid_get)
+                if not _hands_over(_facade.provider, name):
+                    return _original(self, name, sid_get)
+                return owner_state_stream(lambda: _original(self, name, sid_get),
+                                          lambda: _facade.state_stream(name, sid_get), name)
         elif method in _SYNC:
             @functools.wraps(original)
             def wrapper(self, *args, _original=original, _signature=signature, _method=method, _facade=facade, **kwargs):
                 bound = _signature.bind(self, *args, **kwargs)
                 bound.apply_defaults()
                 name = bound.arguments.get("name", bound.arguments.get("old"))
-                if native_slot(name) is not None:
+                try:
+                    slot = native_slot(name)
+                except runtime_coordinator.TransferInProgress:
+                    if _method in {"rename", "close_sync"}:
+                        raise
+                    # Leitura na passagem (lista, monitor): vale a vista do Python, sem a sessão
+                    # viva nele, até o novo dono confirmar. Recusar dava 500 na lista inteira.
+                    slot = None
+                if slot is not None:
                     if _method in {"rename", "close_sync"}:
                         return _facade.sync_lifecycle(_method, name, bound.arguments)
                     rest = {key:value for key,value in bound.arguments.items() if key not in {"self", "name"}}

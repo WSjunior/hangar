@@ -158,6 +158,10 @@ _BIRTH_POLL_S = 0.25
 _RETRY_PAUSE_S = 2.0     # cobre a volta do canal de eventos, que recompõe o estado sozinho
 
 
+class TransferInProgress(RuntimeError):
+    """A posse está passando entre Python e Rust: nada pode gravar na fila agora."""
+
+
 class RustCacheInvalid(RuntimeError):
     """O Python perdeu a cópia do estado da sessão no Rust; nada foi enviado."""
 
@@ -594,7 +598,7 @@ class RuntimeCoordinator:
         slot = self.slot(name)
         with slot.guard:
             if (slot.frozen and not self.in_lifecycle(slot)) or slot.phase not in {Phase.Python, Phase.Rust}:
-                raise RuntimeError("sessão em transferência; aguarde a posse ser confirmada")
+                raise TransferInProgress("sessão em transferência; aguarde a posse ser confirmada")
             if slot.phase == Phase.Python and (slot.lease is None or slot.lease.closed):
                 raise RuntimeError("reserva sem posse da sessão")
             slot.active += 1

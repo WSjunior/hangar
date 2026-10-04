@@ -229,7 +229,8 @@ def main():
     # X-Forwarded-For/-Proto SO do proxy confiavel -> request.client.host vira o IP real do cliente
     # (rate limiter por-cliente, nao um balde global) e request.url.scheme vira https (cookie Secure).
     kw = dict(host=bind, port=settings.port, workers=1, proxy_headers=True,
-              forwarded_allow_ips=settings.forwarded_allow_ips)
+              forwarded_allow_ips=settings.forwarded_allow_ips,
+              timeout_graceful_shutdown=rust_server.GRACEFUL_SHUTDOWN_S)
     if settings.reload:
         # O reload recria o processo e só religa o endereço da config: no dev não há porta de convite.
         uvicorn.run("app.api:app", reload=True, **kw)
@@ -249,7 +250,7 @@ def main():
                                  lambda: _tcp_socket(bind, settings.port)))
     # Um Server com dois sockets: um lifespan só (dois Server rodariam watchers e hooks em dobro).
     config = uvicorn.Config("app.api:app", **kw)
-    server = uvicorn.Server(config)
+    server = rust_server.Server(config)
     server.run(sockets=[main_sock] + extras)
     if not server.started:
         sys.exit(3)                              # mesmo código do uvicorn.run: o systemd reinicia

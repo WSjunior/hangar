@@ -630,3 +630,92 @@ def test_acked_write_settles_during_hand_over(tmp_path, monkeypatch):
         ticket = await write
         assert slot.store.state["operations"][ticket.phase_id]["status"] == "accepted"
     asyncio.run(scenario())
+
+
+class _Owner:
+    def __init__(self, phase):
+        from app.runtime_coordinator import Phase
+        self.instance = "instance-test"
+        self.target = SimpleNamespace(phase=phase, lease=None,
+            binding=SimpleNamespace(key="key", generation=1, provider="claude", headless=True, meta={}))
+        self.Phase = Phase
+
+    def managed_runtime(self, name):
+        return True
+
+    def slot(self, name):
+        return self.target
+
+
+def test_state_monitor_waits_for_new_owner_instead_of_failing(monkeypatch):
+    # A adoção pelo Rust desliga o cliente Python no meio do monitor, e ele recusava com "sessão em
+    # transferência": o SSE do chat fechava. O monitor espera o novo dono e segue por ele.
+    from app import runtime_adapter
+    from app.runtime_coordinator import Phase
+    monkeypatch.setattr(runtime_adapter, "_OWNER_POLL_S", 0.01)
+    owner = _Owner(Phase.Python)
+    monkeypatch.setattr(runtime_coordinator, "_current", owner)
+
+    class Adapter:
+        async def state_monitor(self, name, sid_get):
+            yield "python"
+            owner.target.phase = Phase.PreparingRust
+            raise RuntimeError("sessão em transferência; aguarde a posse ser confirmada")
+
+    async def native(self, name, sid_get):
+        yield "rust"
+        await asyncio.Event().wait()
+    monkeypatch.setattr(RuntimeAdapter, "state_stream", native)
+    install_adapter(Adapter, "claude")
+
+    async def scenario():
+        stream = Adapter().state_monitor("session", lambda: None)
+        assert await anext(stream) == "python"
+        pending = asyncio.ensure_future(anext(stream))
+        await asyncio.sleep(0.05)
+        assert not pending.done()          # na passagem o chat espera, sem erro
+        owner.target.phase = Phase.Rust
+        assert await asyncio.wait_for(pending, 1) == "rust"
+        owner.target.phase = Phase.RecoveringPython
+        await asyncio.sleep(0.05)
+        owner.target.phase = Phase.Python
+        assert await asyncio.wait_for(anext(stream), 1) == "python"
+        await stream.aclose()
+    asyncio.run(scenario())
+
+
+def test_state_monitor_error_without_owner_change_still_surfaces(monkeypatch):
+    from app import runtime_adapter
+    from app.runtime_coordinator import Phase
+    monkeypatch.setattr(runtime_adapter, "_OWNER_POLL_S", 0.01)
+    monkeypatch.setattr(runtime_coordinator, "_current", _Owner(Phase.Python))
+
+    class Adapter:
+        async def state_monitor(self, name, sid_get):
+            raise ValueError("falha real")
+            yield
+    install_adapter(Adapter, "claude")
+
+    async def scenario():
+        with pytest.raises(ValueError):
+            await anext(Adapter().state_monitor("session", lambda: None))
+    asyncio.run(scenario())
+
+
+def test_reads_during_hand_over_use_python_view(monkeypatch):
+    # A lista de sessões lia o estado na passagem e dava 500 para todas as sessões.
+    from app.runtime_coordinator import Phase, TransferInProgress
+    owner = _Owner(Phase.PreparingRust)
+    owner.legacy_active = set()
+    monkeypatch.setattr(runtime_coordinator, "_current", owner)
+
+    class Adapter:
+        def snapshot(self, name):
+            return "vista python"
+
+        def rename(self, old, new):
+            raise AssertionError("rename sem barreira")
+    install_adapter(Adapter, "claude")
+    assert Adapter().snapshot("session") == "vista python"
+    with pytest.raises(TransferInProgress):
+        Adapter().rename("session", "new")
