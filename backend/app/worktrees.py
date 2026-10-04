@@ -516,16 +516,13 @@ def list_all(cwds, sessions, roots=None, repo: str | None = None, measure: bool 
     `repo`: só o desse repositório (qualquer pasta dele)."""
     # ponytail: várias chamadas git por worktree a cada pedido, sem cache; TTL curto se a tela
     # passar a consultar em intervalo.
+    # `repo` não depende das pastas: repo sem sessão aberta também tem worktrees a listar.
     mains: set[str] = set()
-    for c in set(cwds):
+    for c in set(cwds) if repo is None else [repo]:
         root = repo_root_of(c) if c else None
         if root:
             # realpath: o mesmo repo por um symlink (`~/hangar` -> `~/projetos/hangar`) apareceria duas vezes.
             mains.add(os.path.realpath(main_repo_of(root)))
-    if repo is not None:
-        root = repo_root_of(repo)
-        want = os.path.realpath(main_repo_of(root)) if root else None
-        mains = {m for m in mains if m == want}
     out = []
     for main in sorted(mains):
         if roots is not None and not any(Path(os.path.realpath(main)).is_relative_to(r) for r in roots):

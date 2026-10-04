@@ -396,6 +396,15 @@ def test_list_all_skips_repo_outside_roots(tmp_path):
     assert [r["repo"] for r in worktrees.list_all([wt], [], roots=[tmp_path])] == [main]
 
 
+def test_list_all_repo_filter_without_sessions(tmp_path):
+    """Repo sem sessão nem pasta recente: o filtro `repo` basta (menu de branch, lista após criar)."""
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    out = worktrees.list_all([], [], roots=[tmp_path], repo=wt)
+    assert [r["repo"] for r in out] == [main]
+    assert worktrees.list_all([], [], roots=[tmp_path / "outra"], repo=main) == []
+
+
 def test_detail_on_plain_folder_is_404(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
     from app import api, fs
