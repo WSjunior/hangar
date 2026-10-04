@@ -86,6 +86,7 @@ const perguntas = (el: HTMLElement) =>
   [...el.querySelectorAll<HTMLElement>('details.ajuda-q > summary')];
 const acoes = (el: HTMLElement) => el.querySelector<HTMLElement>('.acoes')!;
 const campo = (el: HTMLElement, name: string) => el.querySelector<HTMLInputElement>(`input[name="${name}"]`)!;
+const janelaSwitch = (el: HTMLElement) => el.querySelector<HTMLInputElement>('.linha-janela input')!;
 const botao = (el: HTMLElement, rotulo: string) =>
   [...el.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === rotulo)!;
 
@@ -97,7 +98,8 @@ describe('MotorForm', () => {
   it('nasce com o motor lido: modelo, janela, chave definida e campo de chave VAZIO', () => {
     const t = montar();
     expect(campo(t.el, 'model').value).toBe('kimi-k3');
-    expect(campo(t.el, 'context_window').value).toBe('256000');
+    expect(janelaSwitch(t.el).checked).toBe(false);
+    expect(t.el.textContent).toContain(m.config_motores_janela_gravada({ n: 256 }));
     expect(t.el.textContent).toContain(m.config_motores_chave_definida());
     expect(campo(t.el, 'api_key').value).toBe('');
     expect(campo(t.el, 'api_key').placeholder).toBe(m.config_motores_colar_nova());
@@ -302,17 +304,54 @@ describe('MotorForm', () => {
     unmount(t.comp);
   });
 
-  it('Testar traz os modelos do provedor e o modelo sem janela LIMPA o campo da janela', async () => {
-    apiMock.engineModelos.mockResolvedValueOnce({
+  it('Testar traz os modelos do provedor e o modelo sem janela LIMPA a janela', async () => {
+    apiMock.engineModelos.mockResolvedValue({
       modelos: [{ id: 'kimi-k3', context_length: null, vision: null }],
     });
     const t = montar();
+    await espera();
     botao(t.el, m.config_motores_testar()).click();
-    await tick(); await tick(); await tick();
+    await espera();
     expect(apiMock.engineModelos).toHaveBeenCalledWith({ nome: 'kimi' });
     // 256000 veio do motor; o modelo escolhido não declara janela, então o número antigo sai —
     // manter estouraria a janela real do modelo novo.
-    expect(campo(t.el, 'context_window').value).toBe('');
+    expect(t.el.textContent).toContain(m.config_motores_janela_200k());
+    botao(t.el, m.ctx_salvar()).click();
+    await espera();
+    expect(apiMock.putEngine.mock.calls[0][1]).toHaveProperty('context_window', '');
+    apiMock.engineModelos.mockResolvedValue({ modelos: [] });
+    unmount(t.comp);
+  });
+
+  // Abrir não pode mudar nada gravado: a lista que chega sozinha só vira seletor.
+  it('provedor salvo carrega a lista sozinho e não troca modelo nem janela gravados', async () => {
+    apiMock.engineModelos.mockResolvedValue({
+      modelos: [{ id: 'outro', context_length: 128000, vision: null },
+                { id: 'kimi-k3', context_length: 262144, vision: null }],
+    });
+    const t = montar();
+    await espera();
+    expect(apiMock.engineModelos).toHaveBeenCalledWith({ nome: 'kimi' });
+    expect(campo(t.el, 'model')).toBeNull();
+    botao(t.el, m.ctx_salvar()).click();
+    await espera();
+    const corpo = apiMock.putEngine.mock.calls[0][1];
+    expect(corpo).toHaveProperty('model', 'kimi-k3');
+    expect(corpo).toHaveProperty('context_window', 256000);
+    apiMock.engineModelos.mockResolvedValue({ modelos: [] });
+    unmount(t.comp);
+  });
+
+  it('o interruptor de contexto estendido grava 1M e, desligado, a janela do provedor', async () => {
+    const t = montar();
+    await espera();
+    janelaSwitch(t.el).click();
+    await espera();
+    expect(janelaSwitch(t.el).checked).toBe(true);
+    expect(t.el.textContent).toContain(m.config_motores_janela_ligada());
+    botao(t.el, m.ctx_salvar()).click();
+    await espera();
+    expect(apiMock.putEngine.mock.calls[0][1]).toHaveProperty('context_window', 1000000);
     unmount(t.comp);
   });
 
@@ -362,10 +401,10 @@ describe('MotorForm', () => {
     expect(sub.value).toBe('k2');
     sub.value = '';
     sub.dispatchEvent(new Event('input', { bubbles: true }));
-    const janela = campo(t.el, 'context_window');
-    expect(janela.value).toBe('256000');
-    janela.value = '';
-    janela.dispatchEvent(new Event('input', { bubbles: true }));
+    // Liga e desliga sem janela do provedor: o 256000 gravado sai e o campo vai vazio.
+    janelaSwitch(t.el).click();
+    await espera();
+    janelaSwitch(t.el).click();
     await espera();
 
     botao(t.el, m.ctx_salvar()).click();
