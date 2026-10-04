@@ -2,9 +2,8 @@
 
 > Execução só depois da aprovação do dono. Decisões das três perguntas registradas em
 > `desenho.md` (04/10/2026): teclado emprestado, Codex sem terminal no Python, observação com
-> erro visível.
-> Cada Task: teste escrito primeiro e visto falhar sem o código dela; o código que ficou morto
-> sai no mesmo passo; revisão independente por Task.
+> erro visível. Revisão adversarial (`ecc:architect`, sobre `800e7c47`) incorporada; ver
+> "Achados da revisão" no fim.
 
 **Objetivo:** com o Rust de pé, o que migrou é só dele do nascimento ao fim; falha vira erro com
 código e motivo; o Python atende o migrado só quando é dono da porta inteira.
@@ -13,199 +12,252 @@ código e motivo; o Python atende o migrado só quando é dono da porta inteira.
 
 ## Restrições globais
 
-- Contrato interno: 14 na Task 2; qualquer mudança posterior de `/runtime/op`, `/internal/*`,
-  `side-events` ou variável do filho toma o próximo número livre, Python e Rust no mesmo commit.
+- **Testes automatizados em cada Task** (decisão do coordenador `migracao-rust-2`, como nas
+  demais execuções da migração; o `CLAUDE.md` raiz pede autorização para rodá-los): escritos
+  primeiro, vistos falhar sem o código da Task, rodados só os dos arquivos tocados.
+- **Nada vai para `main` nem para o canal de testes (`CP_UPDATE_BRANCH`) antes da Task 11.**
+  Mesmo assim, cada Task deixa a branch coerente: os testes dos arquivos tocados passam e nenhum
+  caminho fica sem dono entre uma Task e a seguinte (a ordem abaixo foi escolhida para isso).
+- **Cada Task corrige, no mesmo commit, a regra de `CLAUDE.md` ou de `docs/` que ela torna
+  falsa** (listada na própria Task). A Task 10 só cuida do que sobra.
+- Contrato interno: 14 (Task 1), 15 (Task 4), 16 (Task 6), 17 (Task 8), Python e Rust no mesmo
+  commit. As Tasks juntam na branch em série, na ordem do plano; se a ordem mudar, cada uma toma
+  o próximo número livre na hora da junção, nunca reaproveita.
+- Supervisor, subprocesso, trava de arquivo ou teste que simula `os.name`: ler antes "Regras
+  vigentes" de `docs/decisoes/windows.md`; conferir o job Windows do CI pelo log, job por job.
 - Nenhuma sessão real, serviço ou instalador. tmux de teste com `-L` próprio; backend de prova
-  isolado (HOME temporário, portas próprias), nunca outro backend no usuário sem o lançador com
-  `matar_orfaos` desligado.
-- Identificador novo em inglês; texto de tela por `m.<chave>()` em `pt.json` e `en.json`.
-- Log e diário só com código, motivo curto e identidade; nunca texto de conversa.
-- `git add` por caminho; commits em inglês; `HANGAR_SEM_PASSO=1` só em commit de documento.
+  isolado, com o lançador desligando `matar_orfaos` (um segundo backend no mesmo usuário mata
+  canos reais).
+- Identificador novo em inglês; texto de tela por `m.<chave>()` em `messages/pt.json` e
+  `messages/en.json`. Log e diário só com código, motivo curto e identidade.
+- `git add` por caminho; commits em inglês.
 
 ## Lotes — o que corre em paralelo
 
-- **Serial (mesmo coordenador Python):** Task 1 → Task 2 → Task 3 → Task 4 → Task 5 → Task 6.
-- **Paralelo depois da Task 2:** Task 7 (rotas públicas do Rust) e Task 8 (Git/arquivos), cada
-  uma na sua worktree; não tocam `runtime_coordinator.py`.
-- **Paralelo depois da Task 3:** Task 9 (observação do terminal) e Task 10 (Codex sem terminal).
-- **Por último:** Task 11 (documentação) e Task 12 (prova de uso real).
+- **Serial (mesmo coordenador Python):** Task 1 → 2 → 3 → 4 → 5 → 6.
+- **Desenvolvimento em paralelo depois da Task 1:** Task 7 (rotas públicas do Rust), Task 8
+  (Git/arquivos) e Task 9 (observação do terminal), cada uma na sua worktree; não tocam
+  `runtime_coordinator.py`. Juntam na branch na ordem 7, 8, 9, depois da Task 6 (a 8 leva o
+  contrato 17).
+- **Por último:** Task 10 (documentação restante) e Task 11 (prova de uso real).
 
 ## Foco da revisão
 
 - Nenhum caminho com o modo `rust` ou `pending` abre cliente Python em cano de sessão migrada,
-  abre `QueueStore` com trava no Python ou roda drain legado.
+  abre `QueueStore` com trava no Python ou roda drain legado (Codex sem terminal é não migrado).
 - Falha do Rust nunca troca o dono da sessão nem reexecuta a operação no Python.
-- Efeito possível nunca é repetido; entrada em despacho na morte do Rust fica incerta.
+- Efeito possível nunca é repetido; repetir o mesmo `operation_id` só onde o Rust deduplica.
+- Nunca dois processos de cano no mesmo `.jsonl`: relançar só com o `pid` do sidecar morto.
 - Na tomada da porta, cada sessão é retomada uma vez, sem duplicar entrega.
 - Divisão por plataforma (Windows) e por provedor continua intacta.
 
-### Task 1: Falha de operação vira erro visível, sem passar a sessão
+### Task 1: Contrato 14 — `open`, `close`, diário vindo do Rust e o segundo `initialize`
 
-**Arquivos:** `backend/app/runtime_coordinator.py`, `backend/app/runtime_adapter.py`,
-`frontend/src/lib/problema.ts`, `mobile/src/chat/SessionProblem.tsx`, `messages/pt.json`,
-`messages/en.json` (o nativo já mostra `problema_detalhe` cru, `desktop-native/src/app.rs:5442`),
-`backend/tests/test_runtime_ownership.py`, `backend/tests/test_runtime_terminal_failure_policy.py`.
-
-**Falha sem ela:** `test_rust_failure_raises_with_code_and_session_stays_rust` (operação recusada
-quatro vezes: cada uma sobe `RustOpError` com o código, a fase continua `Rust`, nenhuma chamada a
-`legacy.op`), `test_rust_in_error_is_reported_not_handed_over` (`view.error` preenchido: a
-operação mutável sobe o erro, sem `detach`), `test_problem_event_reaches_session_problem` (evento
-`problem` vira `problema="runtime_falhou"` e `problema_detalhe="<código>: <frase>"` no snapshot),
-`test_terminal_unknown_delivery_keeps_session_in_rust`.
-
-**Código morto que sai:** `_hand_to_python`, laço de tentativas de `op`, `_RUST_TRIES`,
-`_RETRY_PAUSE_S`, `_PRE_EFFECT_CODES`, `_TERMINAL_PRE_EFFECT_ERRORS`, `_safe_to_repeat`,
-`Slot.rust_refused` e o desvio dele em `prepare_session`, a passagem de `_settle_rust`, a regra
-de entrega incerta em `op` (`:773-780`), diário `runtime.parte_para_python`. `adopt_failures` e o
-`rust_refused` da adoção saem também (a adoção falha vira erro com o motivo).
-
-- [ ] **Step 1: Escrever os quatro testes acima e ver falhar na base**
-- [ ] **Step 2: `op` com uma tentativa: erro do Rust sobe com `failure_reason`, diário `runtime.rust_op_failed {codigo, detalhe, kind}`; `_ANSWER_CODES` continua sem contar como defeito**
-- [ ] **Step 3: `_settle_rust` lê o snapshot e sobe o erro em vez de passar a sessão; `adopt` falho sobe o erro sem contar**
-- [ ] **Step 4: `apply_event` guarda a frase do `problem` e publica `runtime_falhou` em `problema`/`problema_detalhe`**
-- [ ] **Step 5: Texto do código `runtime_falhou` na web e no app; chaves em pt e en; conferir que o nativo mostra a frase**
-- [ ] **Step 6: Apagar o código morto listado e os testes de passagem (`test_runtime_ownership.py:146`, `:415`); reescrever `:241`, `:286`, `:321`, `:336`, `:355`, `:373` e `test_runtime_terminal_failure_policy.py:103`, `:220` para erro visível**
-- [ ] **Step 7: Rodar os testes dos arquivos tocados e revisar**
-
-### Task 2: Contrato 14 — `open`, `close` e diário vindo do Rust
-
-**Arquivos:** `crates/hangar-server/src/lib.rs`, `crates/hangar-server/src/runtime/gateway.rs`,
-`runtime/cano.rs`, `runtime/actor.rs`, `backend/app/rust_server.py`, `backend/app/internal_api.py`,
-`backend/app/runtime_coordinator.py` (nomes das chamadas), testes Rust de runtime e
-`backend/tests/test_internal_api.py` (ou o arquivo de testes da rota interna existente).
+**Arquivos:** `crates/hangar-server/src/lib.rs`, `runtime/gateway.rs`, `runtime/cano.rs`,
+`runtime/actor.rs`, `runtime/claude.rs`, `backend/app/rust_server.py`, `backend/app/internal_api.py`,
+`backend/app/runtime_coordinator.py` (nomes das chamadas), testes Rust de runtime,
+`backend/tests/test_internal_api.py` (ou o de rota interna existente), `docs/decisoes/harnesses.md`.
 
 **Falha sem ela:** Rust `open_runs_queue_recover` (entrada em `dispatching` vira incerta ao
 abrir), `open_answers_before_initialize` (cano falso que só responde o `initialize` depois de
-2 s: `open` volta antes; `submit` volta `deferred`; a entrada sai uma vez depois do
-`initialize`), `close_releases_lease`; Python `test_rust_diag_route_records_event` (segredo
-certo grava no diário; sem segredo, 404) e a conferência de protocolo 14 nos dois lados.
+2 s: `open` volta antes; `submit` volta `deferred`; a entrada sai uma vez depois),
+`open_waits_for_lease_then_refuses` (trava presa por 1 s: abre; por 4 s: `runtime_lease`),
+`close_releases_lease`, `reopen_of_initialized_cano_becomes_deliverable` (cano falso que responde
+ao segundo `initialize` como o Claude real respondeu na medição do Step 2: a sessão fica
+entregável e não grava `headless_nao_subiu`); Python `test_rust_diag_route_records_event` (com o
+segredo grava no diário; sem ele, 404 — mesmo vindo de 127.0.0.1) e a conferência do protocolo
+14 nos dois lados.
 
 **Código morto que sai:** `cano::peek` e `tests/runtime_cano.rs:36`; a espera de 180 s por
-`ready` dentro do `adopt`. O `carry` fica **opcional** até a Task 5, que tira o último remetente.
+`ready` dentro do `adopt`. O `carry` fica opcional até a Task 4.
 
-- [ ] **Step 8: Testes Rust e Python acima, vistos falhar**
-- [ ] **Step 9: `adopt` → `open` (`Recover` + `EnsureProjection` ao abrir, resposta antes do `initialize`) e `detach` → `close`; `adopt_terminal` vira o `open` do terminal**
-- [ ] **Step 10: `POST /internal/diag` no Python (portão do segredo interno, só loopback) e cliente no Rust limitado por `warn_limit`**
-- [ ] **Step 11: `INTERNAL_PROTOCOL` e `RUST_SERVER_PROTOCOL` = 14; `RuntimeTransport` com os nomes novos**
-- [ ] **Step 12: `cargo test -p hangar-server` focado e pytest dos arquivos tocados; revisar**
+- [ ] **Step 1: Ler "Regras vigentes" de `docs/decisoes/windows.md` e de `docs/decisoes/harnesses.md`**
+- [ ] **Step 2: Medir com o Claude CLI real (Haiku, `CLAUDE_CONFIG_DIR=/home/jefferson/.claude-02-200`, cano isolado, sem backend) a resposta a um segundo `initialize` no mesmo processo; registrar em `docs/decisoes/harnesses.md` (verificação manual)**
+- [ ] **Step 3: Testes acima, vistos falhar**
+- [ ] **Step 4: `adopt` → `open` (`Recover` + `EnsureProjection` ao abrir, espera da trava até 3 s, resposta antes do `initialize`) e `detach` → `close`; `adopt_terminal` vira o `open` do terminal**
+- [ ] **Step 5: Segundo `initialize` tratado pelo que o Step 2 mediu (recusa "já inicializado" = sucesso, como no Codex)**
+- [ ] **Step 6: `POST /internal/diag` no `router` de `/internal` (atrás do `require_internal`) e cliente no Rust limitado por `warn_limit`**
+- [ ] **Step 7: `INTERNAL_PROTOCOL` e `RUST_SERVER_PROTOCOL` = 14; `RuntimeTransport` com os nomes novos; remover o código morto; testes focados; revisar**
 
-### Task 3: Modo do processo e restart sem o Python religar os canos
+### Task 2: Sessão sem terminal nasce direto no Rust
 
-**Arquivos:** `backend/app/runtime_coordinator.py`, `backend/app/rust_server.py`,
-`backend/app/api.py` (lifespan), `backend/app/adapters/claude_headless/adapter.py`
-(`reconectar_todas`, vigia), `backend/app/runtime_adapter.py` (guarda do cliente legado),
-`backend/tests/test_runtime_lifecycle.py`, `backend/tests/test_rust_server.py` (ou o de Supervisor
-existente).
-
-**Falha sem ela:** `test_lifespan_with_rust_expected_opens_no_cano_client` (lifespan com binário
-esperado: nenhum `ensure_running`/`_conectar`; registro só de metadados),
-`test_rust_up_opens_live_canos_in_rust` (Supervisor confirma → `open` de cada sidecar com cano
-vivo, nenhum cliente Python), `test_crash_before_limit_keeps_sessions_out_of_python` (1ª queda:
-modo `pending`, nenhum `recover`; Rust novo → `open`), `test_third_crash_recovers_each_session_once`
-(3ª queda: modo `python`, `recover` + `reconnect` uma vez por sessão, `reconectar_todas` uma vez),
-`test_stop_does_not_recover_sessions` (parada: Rust morre e nada é religado),
-`test_invalid_private_address_is_startup_failure` (o Python assume a porta inteira),
-`test_legacy_client_refused_while_rust_owns` (guarda: abrir cliente Python em sessão migrada com
-modo `rust`/`pending` levanta erro).
-
-**Código morto que sai:** `adopt_registered` na forma de readoção; o `recover` por queda em
-`deactivate_runtime` fora da tomada; no lifespan, `reconectar_todas`/`apos_entrega` incondicionais
-(passam para a entrada no modo `python`); o "liga com as pontes desligadas" de `rust_server.py:338-341`.
-
-- [ ] **Step 13: Testes acima, vistos falhar**
-- [ ] **Step 14: Modo `pending`/`rust`/`python` no coordenador, com espera de desfecho para tarefas internas (`runtime_starting` no teto)**
-- [ ] **Step 15: Supervisor: queda 1–2 → `pending` sem `recover`; desistência (inclusive endereço privado inválido) → `python` + retomada única; parada → nada**
-- [ ] **Step 16: Lifespan registra só metadados com o Rust esperado; ao entrar em `rust`, `open` de cada sessão viva; ao entrar em `python`, o que o lifespan fazia**
-- [ ] **Step 17: Guarda no cliente legado (`LegacyBridge.reconnect`, `ensure_running`, drain) por tipo migrado**
-- [ ] **Step 18: Remover o código morto listado; rodar os testes tocados; revisar**
-
-### Task 4: Sessão sem terminal nasce e reabre direto no Rust
-
-**Arquivos:** `backend/app/runtime_adapter.py` (`wake`), `backend/app/runtime_coordinator.py`
-(`prepare_session`, `ensure_open`), `backend/app/adapters/claude_headless/adapter.py` (lançar
-processo sem conectar), `backend/app/api.py` (`_criar_sessao`), `backend/tests/test_runtime_routing.py`,
-`backend/tests/test_runtime_adapter.py`.
+**Arquivos:** `backend/app/runtime_coordinator.py` (`prepare_session`, `ensure_open`),
+`backend/app/runtime_adapter.py` (`wake`), `backend/app/adapters/claude_headless/adapter.py`
+(lançar processo sem conectar), `backend/app/api.py` (`_criar_sessao`, `_send_managed`,
+`_send_one_headless`), `backend/tests/test_runtime_routing.py`, `backend/tests/test_runtime_adapter.py`.
 
 **Falha sem ela:** `test_new_headless_session_never_opens_python_client` (criar + `acordar` com
-modo `rust`: o processo do cano sobe, o sidecar recebe `cano` com `versao`, nenhum `_conectar`,
-`open` chamado uma vez), `test_first_message_right_after_create_is_delivered_once` (cano falso
-lento no `initialize`: mensagem enviada 0,1 s depois de criar sai uma vez),
-`test_session_in_error_reopens_in_rust_once` (Rust em erro: a próxima operação faz `close` +
+transporte: o processo do cano sobe, o sidecar recebe `cano` com `versao`, nenhum `_conectar`,
+`open` uma vez), `test_first_message_right_after_create_is_delivered_once` (cano falso lento no
+`initialize`: mensagem enviada 0,1 s depois de criar sai uma vez),
+`test_open_connect_failure_kills_launched_cano` (o `open` falha em `cano_connect`: o grupo do
+processo lançado morre, `cano` sai do sidecar, o erro sobe com o código e conta no teto de
+subidas), `test_never_relaunch_while_sidecar_pid_alive`,
+`test_migrated_send_never_falls_to_legacy_path` (`prepare_session` de sessão migrada nunca devolve
+`False`: registra ou levanta com código; `_send_one_headless` não chega ao socket nativo direto).
+
+**Código morto que sai:** em `wake`, o caminho "sobe pelo Python e adota" para sessão nova; no
+`prepare_session`, o gatilho de adoção para sessão sem terminal recém-criada.
+
+- [ ] **Step 8: Testes acima, vistos falhar**
+- [ ] **Step 9: Lançar o processo do cano sem cliente (argv/env/`engine_models`, escopo, `setsid`), gravar o sidecar, teto de subidas e nunca com `pid` vivo**
+- [ ] **Step 10: `ensure_open`: slot direto no Rust (sem `WriterLease`/`QueueStore` no Python), `open`, serializado por nome; falha de conexão mata o processo lançado; opção de esperar o `initialized` com teto**
+- [ ] **Step 11: `wake`, `_send_managed` e `prepare_session` de sessão migrada por `ensure_open`; o caminho antigo só para não migrado**
+- [ ] **Step 12: Remover o código morto; testes focados; revisar**
+
+### Task 3: Falha vira erro visível, com reabertura única no Rust
+
+**Arquivos:** `backend/app/runtime_coordinator.py`, `backend/app/runtime_adapter.py`,
+`backend/app/internal_api.py`, `backend/app/api.py` (`_send_managed`), `frontend/src/lib/problema.ts`,
+`mobile/src/chat/SessionProblem.tsx`, `messages/pt.json`, `messages/en.json` (o nativo já mostra
+`problema_detalhe` cru, `desktop-native/src/app.rs:5442`), `backend/tests/test_runtime_ownership.py`,
+`backend/tests/test_runtime_terminal_failure_policy.py`, `docs/migracao-rust/parte2d/spec.md`.
+
+**Falha sem ela:** `test_rust_failure_raises_with_code_and_session_stays_rust` (operação recusada
+quatro vezes: cada uma sobe `RustOpError` com o código, a fase continua `Rust`, nenhuma chamada a
+`legacy.op`), `test_headless_in_error_reopens_in_rust_once` (próxima operação: `close` +
 `ensure_open` uma vez; se a reabertura falha, o erro sobe e o problema fica),
-`test_dead_cano_is_relaunched_on_reopen`.
+`test_terminal_unknown_delivery_reopens_in_rust` (sessão com terminal em
+`terminal_delivery_unknown`: a próxima operação reabre o terminal no Rust — vínculo relido, ator
+novo — sem passar ao Python), `test_history_reopens_dead_session_once` (`ensure_projection` de
+sessão cujo ator morreu reabre uma vez antes de responder 503), `test_invalid_cache_waits_for_resync`
+(cache invalidado pela oscilação do canal de eventos: a operação espera o snapshot até 5 s e
+segue), `test_transport_loss_on_send_is_uncertain_not_failed` (conexão caída no `submit`: resposta
+`uncertain`, nunca `erro_envio_falhou`), `test_problem_event_reaches_session_problem` (`problem`
+vira `problema="runtime_falhou"`, `problema_detalhe="<código>: <frase>"`).
 
-**Código morto que sai:** em `wake`, o caminho "sobe pelo Python e adota"; em `prepare_session`,
-o gatilho de `adopt` para sessão sem terminal; `drain_claims` e o registro de reivindicação do
-drain no adapter do Claude sem terminal (só existiam para a passagem); `_peek`.
+**Código morto que sai:** `_hand_to_python`, laço de tentativas de `op`, `_RUST_TRIES`,
+`_RETRY_PAUSE_S`, `_PRE_EFFECT_CODES`, `_TERMINAL_PRE_EFFECT_ERRORS`, `_safe_to_repeat`,
+`Slot.rust_refused`, `adopt_failures`, a passagem de `_settle_rust`, a regra de entrega incerta em
+`op` (`:773-780`), diário `runtime.parte_para_python`. Testes: `test_runtime_ownership.py:146`,
+`:415` apagados; `:241`, `:286`, `:321`, `:336`, `:355`, `:373` e
+`test_runtime_terminal_failure_policy.py:103`, `:220` reescritos.
 
-- [ ] **Step 19: Testes acima, vistos falhar**
-- [ ] **Step 20: Lançar o processo do cano sem cliente e gravar o sidecar (versão do lançador)**
-- [ ] **Step 21: `ensure_open`: slot direto no Rust, `open`, serializado por nome; `wake` e `_send_managed` passam por ele no modo `rust`**
-- [ ] **Step 22: Reabertura única de sessão em erro, relançando o cano morto; diário `runtime.reopened`/`runtime.reopen_failed`**
-- [ ] **Step 23: Remover o código morto listado e os testes que só cobriam a adoção do nascimento (`test_runtime_routing.py:92` reescrito para `open`); rodar e revisar**
+**Regra corrigida:** `docs/migracao-rust/parte2d/spec.md`, seção "Falhas do Rust" (o "três +
+uma" e "só a sessão passa ao Python") vira nota apontando para `dono-unico/desenho.md`.
 
-### Task 5: Administração da sessão sem terminal por `close`/`open`
+- [ ] **Step 13: Testes acima, vistos falhar**
+- [ ] **Step 14: `op` com uma tentativa; erro do Rust sobe com `failure_reason`; diário `runtime.rust_op_failed {codigo, detalhe, kind}`; `_ANSWER_CODES` não conta como defeito**
+- [ ] **Step 15: Reabertura única no Rust para sem terminal e com terminal, disparada por operação e por `ensure_projection`; diário `runtime.reopened`/`runtime.reopen_failed`**
+- [ ] **Step 16: Espera de reposição do cache (5 s) e envio com perda de transporte respondido como incerto (`runtime.send_uncertain`)**
+- [ ] **Step 17: `apply_event` publica `runtime_falhou`; texto na web e no app, chaves em pt e en; conferir que o nativo mostra a frase**
+- [ ] **Step 18: Remover o código morto e corrigir a regra da 2D; testes focados; revisar**
+
+### Task 4: Administração da sessão sem terminal por `close`/`open`
 
 **Arquivos:** `backend/app/runtime_coordinator.py` (`change`, `lifecycle_call`, `shutdown`,
 `_rebind`, `queue_gate`, `Phase`), `backend/app/runtime_adapter.py` (`quiesce`, `assert_legacy`,
-`native_slot`, `owner_state_stream`, `install_adapter`, `registry_method`),
-`backend/app/runtime_queue.py` (`route_queue`), `backend/app/internal_api.py`,
-`crates/hangar-server/src/runtime/gateway.rs` (`carry`), testes de runtime.
+`native_slot`, `owner_state_stream`, `install_adapter`, `registry_method`, fachada
+`ensure_running`), `backend/app/runtime_queue.py` (`route_queue`), `backend/app/internal_api.py`,
+`backend/app/registry.py` (transferência), `backend/app/conversation_transfer.py`,
+`backend/app/api.py` (troca de conta/motor, troca para sem terminal),
+`crates/hangar-server/src/runtime/gateway.rs` (`carry`), testes de runtime e de transferência.
 
-**Antes de codar:** classificar as dez ações (`kill`, `rename`, `para_terminal`, `para_headless`,
-`parar`, `recarregar`, `restart`, `open_terminal`, `open_headless`,
-`set_permission_mode_sem_terminal`) em "só arquivo/processo/pane" e "precisa da CLI"; a segunda
-vira `control` do Rust. Registrar a tabela no topo da Task antes do Step 25.
+**Antes de codar:** tabela no topo da Task com cada caminho e a classe dele ("só
+arquivo/processo/pane" ou "precisa da CLI" → `control` do Rust): as dez ações do `change`
+(`kill`, `rename`, `para_terminal`, `para_headless`, `parar`, `recarregar`, `restart`,
+`open_terminal`, `open_headless`, `set_permission_mode_sem_terminal`), a transferência Claude →
+Codex (`registry.py:2611-2700`, `conversation_transfer.py:766`), a troca de conta/motor
+(`api.py:2936-2964`) e a troca para sem terminal (`api.py:2770`).
 
 **Falha sem ela:** `test_rename_keeps_session_in_rust_without_python_client`,
 `test_kill_closes_in_rust_and_stops_cano`, `test_mode_switch_to_terminal_closes_rust_first`,
-`test_reload_reopens_in_rust`, `test_shutdown_leaves_canos_alive_and_touches_no_session`,
-`test_state_stream_picks_source_once` (o monitor não espera troca de dono com o Rust de pé).
+`test_reload_reopens_in_rust`, `test_account_switch_reopens_with_engine_models_and_waits_initialize`
+(`initialize` recusado: `headless_nao_subiu` com a frase),
+`test_switch_to_headless_opens_in_rust`, `test_transfer_source_idle_reads_runtime_view` (hoje
+quebra com `AttributeError` em `.vivo`), `test_transfer_stops_source_without_python_client`,
+`test_shutdown_leaves_canos_alive_and_touches_no_session`, `test_state_stream_picks_source_once`.
 
 **Código morto que sai:** `Phase.PreparingRust`; `adopt` antigo; `LegacyBridge.quiesce` e o
 `quiesce` do terminal; `_WRITE_WAIT_S`; `finish_wire(settling=...)`; ramos `finishing`/`continuing`
 de `assert_legacy`; ramo `PreparingRust` de `native_slot`; desvio de leitura `_SYNC` durante a
 passagem; espera por dono de `owner_state_stream` e `runtime.state_owner_stuck`;
 `TransferInProgress` fora do `RecoveringPython`; leitura da projeção em `route_queue` na
-passagem; `detach` + `quiesce` por sessão no `shutdown`; `carry` no Rust e no Python (contrato:
-próximo número livre); diários `runtime.unclaim_*` e `runtime.write_uncertain` da passagem.
-Testes apagados: `test_runtime_adapter.py` `:224`, `:371`, `:504`, `:586`, `:608`, `:650`, `:705`;
-`test_runtime_queue.py:597`; os de adoção/`detach` de `test_runtime_ownership.py` reescritos para
-"nunca dois donos" no `open`/`close`.
+passagem; `detach` + `quiesce` por sessão no `shutdown`; `carry` nos dois lados (contrato 15);
+`drain_claims` e a devolução de reivindicação do adapter; diários `runtime.unclaim_*` e
+`runtime.write_uncertain` da passagem; `_peek`. Testes apagados: `test_runtime_adapter.py`
+`:224`, `:371`, `:504`, `:586`, `:608`, `:650`, `:705`; `test_runtime_queue.py:597`; os de
+adoção/`detach` de `test_runtime_ownership.py` (`:68`, `:81`, `:127`, `:172`, `:194`) reescritos
+para "nunca dois donos" no `open`/`close`; `test_runtime_routing.py:92` reescrito para `open`.
 
-- [ ] **Step 24: Tabela das dez ações e testes acima, vistos falhar**
-- [ ] **Step 25: `change` = barreira → `close` → ação sem cliente → `ensure_open`; ações que precisam da CLI viram `control` do Rust**
-- [ ] **Step 26: `shutdown` sem nada por sessão; `_rebind` pelo novo `change`**
-- [ ] **Step 27: Tirar `carry` dos dois lados com o próximo número de contrato**
-- [ ] **Step 28: Remover todo o código morto listado e os testes de passagem; rodar os testes tocados; revisar**
+**Regra corrigida:** a nota "desligou logo depois de religou é esperado" de
+`docs/migracao-rust/parada-e-posse.md` ganha a observação de que deixou de valer.
 
-### Task 6: Terminal nasce no Rust e a administração dele sem passagem
+- [ ] **Step 19: Tabela de caminhos e testes acima, vistos falhar**
+- [ ] **Step 20: `change` = barreira → `close` → ação sem cliente → `ensure_open`; ações que precisam da CLI viram `control` do Rust**
+- [ ] **Step 21: Transferência, troca de conta/motor e troca para sem terminal pelo mesmo caminho; `_check_source_idle` pela vista do Rust**
+- [ ] **Step 22: `shutdown` sem nada por sessão; `_rebind` pelo novo `change`**
+- [ ] **Step 23: Tirar `carry` dos dois lados com o contrato 15**
+- [ ] **Step 24: Remover todo o código morto listado e os testes de passagem; testes focados; revisar**
+
+### Task 5: Modo do processo, restart e a guarda do cliente legado
+
+**Arquivos:** `backend/app/runtime_coordinator.py`, `backend/app/rust_server.py`,
+`backend/app/api.py` (lifespan, recuperação de transferência), `backend/app/adapters/claude_headless/adapter.py`
+(`reconectar_todas`, `apos_entrega`, vigia), `backend/app/runtime_adapter.py` (guarda),
+`backend/tests/test_runtime_lifecycle.py`, o arquivo de testes do Supervisor,
+`CLAUDE.md` (marcador do `hangar-server`), `docs/decisoes/plataforma.md` (entradas
+"hangar-server" e "Observação terminal Rust", parágrafo do endereço torto).
+
+**Falha sem ela:** `test_lifespan_with_rust_expected_opens_no_cano_client`,
+`test_rust_up_opens_live_canos_in_rust`, `test_dead_cano_with_pending_queue_is_relaunched_after_rust_up`
+(reboot: cano morto e entrada não entregue → `ensure_open` relança e entrega uma vez),
+`test_crash_before_limit_keeps_sessions_out_of_python` (1ª queda: `pending`, nenhum `recover`;
+Rust novo → `open`), `test_send_during_crash_waits_and_repeats_same_operation`
+(perda de transporte em `pending`: espera até `PENDING_WAIT_S = 30` s e repete o mesmo
+`operation_id` uma vez; o Rust novo não duplica), `test_pending_wait_has_ceiling`
+(`runtime_starting` depois de 30 s), `test_third_crash_recovers_each_session_once`,
+`test_stop_is_decided_before_any_action` (parada: nem `deactivate_runtime` nem `recover`),
+`test_invalid_private_address_is_startup_failure`, `test_transfer_recovery_waits_for_owner`,
+`test_legacy_client_refused_while_rust_owns` (abrir cliente Python em sessão migrada com modo
+`rust`/`pending` levanta erro), `test_codex_headless_stays_python_while_rust_owns` (decisão 2:
+cliente Python permitido, nunca `open`, aquecimento roda em qualquer modo).
+
+**Código morto que sai:** `adopt_registered` como readoção; `recover` por queda em
+`deactivate_runtime` fora da tomada; no lifespan, `reconectar_todas`/`apos_entrega` e a
+recuperação de transferência incondicionais (passam para a entrada no modo `python`, ou para
+depois do `open` no modo `rust`); o "liga com as pontes desligadas" de `rust_server.py:338-341`;
+o gatilho de adoção do Codex sem terminal em `prepare_session` (inalcançável, achado 4).
+
+**Regra corrigida:** marcador do `hangar-server` no `CLAUDE.md` (modo do processo; queda 1–2 não
+passa pelo Python); `plataforma.md`: "Endereço ausente/torto desliga a ponte com aviso" vira
+"…é falha de partida: o Python assume a porta inteira", e a entrada do `hangar-server` ganha o
+modo do processo.
+
+- [ ] **Step 25: Ler "Regras vigentes" de `docs/decisoes/windows.md`; testes acima, vistos falhar**
+- [ ] **Step 26: Modo `pending`/`rust`/`python` com `PENDING_WAIT_S = 30`; esperas internas longas esperam o modo antes de contar o próprio prazo**
+- [ ] **Step 27: Supervisor: parada decidida antes de qualquer ação; queda 1–2 → `pending` sem `recover`; desistência (inclusive endereço privado inválido) → `python` + retomada única**
+- [ ] **Step 28: Lifespan registra só metadados com o Rust esperado; ao entrar em `rust`, `open` dos canos vivos, `ensure_open` dos mortos com fila pendente, depois a recuperação de transferência; ao entrar em `python`, o que o lifespan fazia**
+- [ ] **Step 29: Envio em `pending`: espera e repete o mesmo `operation_id` uma vez; senão incerto**
+- [ ] **Step 30: Guarda no cliente legado por tipo migrado (Codex sem terminal fora)**
+- [ ] **Step 31: Remover o código morto, corrigir as regras; testes focados; job Windows do CI conferido pelo log; revisar**
+
+### Task 6: Terminal nasce no Rust e o teclado emprestado
 
 **Arquivos:** `backend/app/runtime_coordinator.py` (`prepare_session` do terminal),
 `backend/app/runtime_terminal.py` (`run_admin`, `quiesce`), `terminal_input.py`, `btw.py`,
-`permission_mode.py`, `crates/hangar-server/src/runtime/terminal.rs` e `runtime/gateway.rs`
-(teclado emprestado, decisão 1).
+`permission_mode.py`, `crates/hangar-server/src/runtime/terminal.rs`, `runtime/gateway.rs`.
 
 **Falha sem ela:** `test_terminal_session_registers_in_rust_without_python_phase` (pane recém-criado:
-`_await_birth` → `open` terminal, nunca fase Python),
-`test_admin_borrows_keyboard_without_moving_queue` (o Rust pausa as escritas, o Python digita,
-a fila e a trava não mudam de dono), `test_keyboard_loan_expires_and_fails_with_code` (prazo
-vencido: o Rust retoma o teclado, a operação do Python falha com código e o `assert_writer`
-volta a recusar), `test_rust_queue_waits_during_keyboard_loan` (entrada da fila não é digitada
-durante o empréstimo e sai uma vez depois).
+`_await_birth` → `open` terminal, nunca fase Python), `test_admin_borrows_keyboard_without_moving_queue`
+(o Rust pausa as escritas, o Python digita, fila e trava não mudam de dono),
+`test_keyboard_loan_expires_and_fails_with_code` (prazo vencido: o Rust retoma o teclado, a
+operação do Python falha com código e o `assert_writer` volta a recusar),
+`test_rust_queue_waits_during_keyboard_loan` (entrada da fila não é digitada durante o
+empréstimo e sai uma vez depois).
 
 **Código morto que sai:** caminho `detach` → Python → `adopt` de `run_admin`; `quiesce` do
 terminal; `test_runtime_terminal.py:286`, `:301` reescritos.
 
-- [ ] **Step 29: Testes acima, vistos falhar**
-- [ ] **Step 30: Registro do terminal direto no Rust**
-- [ ] **Step 31: Operação de teclado emprestado no Rust (pedir, prazo, devolver) e `run_admin` digitando só dentro dela; contrato: próximo número livre**
-- [ ] **Step 32: Remover o código morto; rodar `test_runtime_terminal*.py` tocados e os testes Rust do terminal; revisar**
+- [ ] **Step 32: Testes acima, vistos falhar**
+- [ ] **Step 33: Registro do terminal direto no Rust**
+- [ ] **Step 34: Operação de teclado emprestado no Rust (pedir, prazo, devolver) e `run_admin` digitando só dentro dela; contrato 16**
+- [ ] **Step 35: Remover o código morto; `test_runtime_terminal*.py` tocados e testes Rust do terminal; revisar**
 
 ### Task 7: Rotas públicas do Rust (histórico e eventos) sem repasse por falha
 
 **Arquivos:** `crates/hangar-server/src/routes.rs`, `crates/hangar-server/tests/runtime_diagnostics.rs`,
-cliente de diário da Task 2.
+cliente de diário da Task 1.
 
 **Falha sem ela:** `history_io_error_answers_503_with_code` (E/S quebrada: 503
 `{error_code:"history_io", message}`, o Python não recebe o pedido), `events_without_info_answers_503`,
@@ -215,17 +267,18 @@ cliente de diário da Task 2.
 **Código morto que sai:** `Fallback`, `FALLBACK_AFTER`, `MAX_FALLBACK`, `AppState.fallback`,
 `internal_refused`, o texto "Python atendeu" de `warn_if_internal_refused`, `routes.rs:567-602`.
 
-- [ ] **Step 33: Testes acima, vistos falhar**
-- [ ] **Step 34: Erros de `history`/`events` respondem 503 com código e vão ao diário; provedor fora do Rust e sessão inexistente seguem para o Python**
-- [ ] **Step 35: Conferir no chat web que o 503 aparece como erro de carregamento com a frase (verificação manual)**
-- [ ] **Step 36: Remover o código morto; `cargo test -p hangar-server` focado; revisar**
+- [ ] **Step 36: Testes acima, vistos falhar**
+- [ ] **Step 37: Erros de `history`/`events` respondem 503 com código e vão ao diário; provedor fora do Rust e sessão inexistente seguem para o Python**
+- [ ] **Step 38: Conferir no chat web que o 503 aparece como erro de carregamento com a frase (verificação manual)**
+- [ ] **Step 39: Remover o código morto; `cargo test -p hangar-server` focado; revisar**
 
 ### Task 8: Git e arquivos sem repasse por falha
 
 **Arquivos:** `crates/hangar-server/src/workspace_routes.rs`, `routes.rs` (chamadas de
 `strip_client_fallback`), `crates/hangar-server/tests/workspace_routes.rs`,
-`backend/app/workspace_bridge.py`, `backend/app/api.py` (middleware e `_resolver_citado`),
-`backend/tests/test_workspace_bridge.py`, textos dos códigos no front (`packages/core/src/errosApi.ts`).
+`backend/app/workspace_bridge.py`, `backend/app/api.py` (middleware), `backend/app/rust_server.py`
+e `lib.rs` (contrato 17), `backend/tests/test_workspace_bridge.py`, textos dos códigos no front
+(`packages/core/src/errosApi.ts`).
 
 **Falha sem ela:** Rust `full_write_slots_answer_busy_without_python` (4 pushes lentos + commit:
 o commit recebe 503 `workspace_busy` com `Retry-After` em menos de 1 s e o Git não roda),
@@ -239,17 +292,21 @@ exceção 503, o corpo Python não roda), `test_bridge_off_runs_python` (ponte d
 middleware. Testes: `test_workspace_bridge.py:115`, `:132`, `:145` apagados; `:87`, `:161`
 reescritos; `workspace_routes.rs:386` apagado, `:255`, `:273` reescritos, `Handoffs` da fixture.
 
-- [ ] **Step 37: Testes acima, vistos falhar**
-- [ ] **Step 38: Rust responde 503 com código e motivo para ocupado, contexto e indisponível; envia ao diário**
-- [ ] **Step 39: Ponte Python: `None` só com a ponte desligada; os outros casos levantam o erro de domínio; pedido acima de 4 MiB vira erro com código**
-- [ ] **Step 40: Textos dos três códigos na web e no app; conferir no painel do repositório (verificação manual)**
-- [ ] **Step 41: Remover o código morto; testes focados Rust e Python; revisar**
+**Regra corrigida:** `docs/migracao-rust/git-arquivos/spec.md:38-42` (vaga cheia ou
+indisponível → repasse ao Python, registrado no diário).
+
+- [ ] **Step 40: Testes acima, vistos falhar**
+- [ ] **Step 41: Rust responde 503 com código e motivo para ocupado, contexto e indisponível; envia ao diário**
+- [ ] **Step 42: Ponte Python: `None` só com a ponte desligada; os outros casos levantam o erro de domínio; pedido acima de 4 MiB vira erro com código; contrato 17**
+- [ ] **Step 43: Textos dos três códigos na web e no app; conferir no painel do repositório (verificação manual)**
+- [ ] **Step 44: Remover o código morto e corrigir a regra; testes focados Rust e Python; revisar**
 
 ### Task 9: Observação do terminal sem troca de fonte por erro
 
 **Arquivos:** `backend/app/state.py`, `backend/app/terminal_observer.py`, `backend/app/preview.py`,
 `crates/hangar-server/src/terminal_control.rs`, `terminal_routes.rs` (texto do log),
-`backend/tests/test_terminal_observer.py`, `crates/hangar-server/tests/terminal_diagnostics.rs`.
+`backend/tests/test_terminal_observer.py`, `crates/hangar-server/tests/terminal_diagnostics.rs`,
+`CLAUDE.md`, `docs/decisoes/plataforma.md`.
 
 **Falha sem ela (decisão 3):** `test_rust_capture_error_is_reported_not_replaced`
 (captura com erro: nenhum `tmux.capture_pane` do Python, problema `terminal_observacao_falhou`
@@ -257,40 +314,29 @@ publicado, estado anterior mantido; a rodada seguinte pergunta ao Rust de novo),
 `test_windows_and_bridge_off_still_capture_in_python`.
 
 **Código morto que sai:** disjuntor por sessão (`MAX_FAILURES`, pausa, `fallback_since`,
-`_success`/`recovered`, diários `fallback`/`paused`); o desvio de `state.py:735-738`
-e a prévia Python por falha em `preview.py`. Testes `test_terminal_observer.py` `:1012`, `:1058`,
-`:1297`, `:1353`, `:1634` apagados; `:80`, `:513`, `:527`, `:922` reescritos; os demais
-conferidos pelo corpo.
+`_success`/`recovered`, diários `fallback`/`paused`); o desvio de `state.py:735-738` e a prévia
+Python por falha em `preview.py`. Testes `test_terminal_observer.py` `:1012`, `:1058`, `:1297`,
+`:1353`, `:1634` apagados; `:80`, `:513`, `:527`, `:922` reescritos; os demais conferidos pelo
+corpo.
 
-- [ ] **Step 42: Testes acima, vistos falhar**
-- [ ] **Step 43: Erro tipado do observador; problema visível; texto novo do log Rust**
-- [ ] **Step 44: Remover o código morto; testes focados; revisar**
+**Regra corrigida:** no `CLAUDE.md`, "Erro usa a captura/reducer Python com a mesma memória e os
+mesmos fatos; Windows fica nesse caminho" vira "Erro vira problema visível e a rodada seguinte
+pergunta ao Rust; Windows e ponte desligada usam a captura Python"; em `plataforma.md`, o título
+"Observação terminal Rust com reserva Python" e o parágrafo da pausa por falhas.
 
-### Task 10: Codex sem terminal
+- [ ] **Step 45: Testes acima, vistos falhar**
+- [ ] **Step 46: Erro tipado do observador; problema visível; texto novo do log Rust**
+- [ ] **Step 47: Remover o código morto e corrigir as regras; testes focados; revisar**
 
-Decisão 2: fica no Python como provedor não migrado.
+### Task 10: Documentação restante
 
-**Falha sem ela:** `test_codex_headless_stays_python_while_rust_owns` (modo `rust`: cliente
-Python permitido para Codex sem terminal, nunca `open`, nunca `adopt`; a guarda da Task 3 trata o
-Codex sem terminal como não migrado).
+**Arquivos:** `docs/decisoes/superado.md` (passagem por sessão, 3 + 1, `Fallback`, cabeçalho de
+repasse, `quiesce`/`carry`, readoção a cada boot), `docs/migracao-rust/README.md` (estado das
+partes), `docs/decisoes/plataforma.md` (entrada nova com a medição da Task 11).
 
-**Código morto que sai:** o gatilho de adoção do Codex sem terminal em `prepare_session` (hoje
-inalcançável por falta de `cano.versao`, achado 4 do inventário). Documentar na Task 11.
+- [ ] **Step 48: Mover o que deixou de existir para `superado.md` e atualizar o README da migração**
 
-- [ ] **Step 45: Teste acima, visto falhar**
-- [ ] **Step 46: Codex sem terminal fora do conjunto migrado; rodar `test_codex_*` tocados; revisar**
-
-### Task 11: Documentação
-
-**Arquivos:** `CLAUDE.md` (regra do `hangar-server`), `docs/decisoes/plataforma.md` (entrada
-nova com a medição da Task 12), `docs/decisoes/superado.md` (passagem por sessão, 3 + 1,
-`Fallback`, cabeçalho de repasse), `docs/migracao-rust/README.md`, `docs/migracao-rust/parada-e-posse.md`
-e `parte2d/spec.md` (nota apontando para cá), linha "Erro usa a captura/reducer Python" do
-`CLAUDE.md` corrigida conforme a Task 9.
-
-- [ ] **Step 47: Atualizar a regra e as decisões; mover o que deixou de existir para `superado.md`**
-
-### Task 12: Prova de uso real
+### Task 11: Prova de uso real
 
 Backend desta branch isolado como unit transiente do systemd de usuário (`systemd-run --user`,
 `TimeoutStopSec=10`): `HOME` temporário, `hangar-server` e `hangar-cano` desta branch em porta
@@ -300,10 +346,33 @@ embrulho no `PATH`, `claude` embrulhado com `--model claude-haiku-4-5` e
 `matar_orfaos` desligado. Entregas contadas no transcript cru por marcador único; quem atendeu,
 pelo log do Python (pedido do Rust aparece lá só como `/internal/*`).
 
-- [ ] **Step 48: Criar sessão e mandar na hora — sem terminal 10 de 10 e com terminal 10 de 10 com uma entrega; nenhum "religou"/"desligou" no log; nenhum `runtime.*` de passagem no diário (verificação manual)**
-- [ ] **Step 49: Fila com o Claude ocupado — 3 mensagens durante um turno longo saem em ordem, uma vez cada (verificação manual)**
-- [ ] **Step 50: `/clear` com o chat aberto — o chat não cai, a sessão continua no Rust, a mensagem seguinte sai uma vez (verificação manual)**
-- [ ] **Step 51: Restart com fila — mensagem enfileirada antes do `systemctl restart` sai uma vez depois; nenhum cliente Python aberto; parada sem SIGKILL (verificação manual)**
-- [ ] **Step 52: Queda do Rust — `kill -9` uma vez: a sessão continua no Rust novo, sem Python no meio; três vezes em 60 s: o Python assume tudo, cada sessão retomada uma vez, nenhuma entrega duplicada (verificação manual)**
-- [ ] **Step 53: Falha forçada de operação — trava de escrita no estado da fila da sessão (`chmod`): o envio volta erro com código na tela, a sessão segue no Rust; desfeita a trava, a próxima mensagem sai uma vez. Git ocupado com 4 pushes lentos: 503 visível no painel, nada no Python (verificação manual)**
-- [ ] **Step 54: Registrar a tabela de casos (sem e com conserto) em `docs/migracao-rust/dono-unico/prova-real.md` e na entrada de `plataforma.md`**
+- [ ] **Step 49: Criar sessão e mandar na hora — sem terminal 10 de 10 e com terminal 10 de 10 com uma entrega; nenhum "religou"/"desligou" no log; nenhum `runtime.*` de passagem no diário (verificação manual)**
+- [ ] **Step 50: Fila com o Claude ocupado — 3 mensagens durante um turno longo saem em ordem, uma vez cada (verificação manual)**
+- [ ] **Step 51: `/clear` com o chat aberto — o chat não cai, a sessão continua no Rust, a mensagem seguinte sai uma vez (verificação manual)**
+- [ ] **Step 52: Restart com fila — mensagem enfileirada antes do `systemctl restart` sai uma vez depois; o mesmo com o cano morto antes da subida (`kill` no cano com a unit parada); nenhum cliente Python aberto; parada sem SIGKILL (verificação manual)**
+- [ ] **Step 53: Queda do Rust — `kill -9` uma vez: a sessão continua no Rust novo, sem Python no meio, e uma mensagem mandada durante a queda sai uma vez; três vezes em 60 s: o Python assume tudo, cada sessão retomada uma vez, nenhuma entrega duplicada (verificação manual)**
+- [ ] **Step 54: Falha forçada de operação — trava de escrita no estado da fila da sessão (`chmod`): o envio volta erro com código na tela, a sessão segue no Rust; desfeita a trava, a próxima mensagem sai uma vez. Sessão com terminal com `terminal_delivery_unknown` forçado: faixa na tela e a próxima operação reabre no Rust. Git ocupado com 4 pushes lentos: 503 visível no painel, nada no Python (verificação manual)**
+- [ ] **Step 55: Troca de conta e transferência Claude → Codex numa sessão sem terminal: concluem sem cliente Python (verificação manual)**
+- [ ] **Step 56: Registrar a tabela de casos em `docs/migracao-rust/dono-unico/prova-real.md` e na entrada de `plataforma.md`**
+
+## Achados da revisão (`ecc:architect`, sobre `800e7c47`)
+
+Todos conferidos no código; nenhum descartado.
+
+| Achado | Onde entrou |
+|---|---|
+| Passagens que faltavam: transferência, troca de conta/motor, troca para sem terminal, envio pelo caminho antigo, `_check_source_idle` já quebrado | inventário §9; desenho (Administração); Tasks 2 e 4 |
+| Task 1 tirava a recuperação antes do substituto; terminal sem reabertura | Task 3 traz a reabertura (sem e com terminal) junto com a remoção de `_hand_to_python`, depois do `ensure_open` da Task 2 |
+| Histórico dependente do ator vivo | `ensure_projection` também reabre (Task 3) |
+| O que o `carry` levava; segundo `initialize` do Claude nunca medido | desenho; medição e tratamento na Task 1, antes de tudo |
+| Ordem das Tasks quebrava a branch | ordem nova (contrato → nascimento → erro + reabertura → administração → modo e guarda); nada vai ao canal antes da prova |
+| Task 1 sozinha piorava o uso (oscilação do canal de eventos) | espera de reposição de 5 s (Task 3); `open` sem a espera de 180 s (Task 1) |
+| Lançar sem conectar perdia partes do `_subir_cano` | Task 2: mata o processo lançado quando o `open` não conecta, teto de subidas, nunca relança com `pid` vivo |
+| Restart com fila e cano morto; parada decidida depois do `deactivate_runtime` | Task 5 |
+| Envio duplicado na queda 1–2 | envio com perda de transporte é incerto (Task 3) e repete o mesmo `operation_id` depois de `pending` (Task 5) |
+| Teto do `pending` sem número | `PENDING_WAIT_S = 30` s, com a conta no desenho |
+| Windows/`LockFileEx` | espera da trava no `open` (Task 1); leitura de `windows.md` e job Windows pelo log nas Tasks 1 e 5 |
+| `/internal/diag` "só loopback" | atrás do `require_internal` (segredo) |
+| Contrato 14/15 inconsistente | tabela única de números (desenho e restrições globais) |
+| Regra contraditada só corrigida no fim | cada Task corrige a sua |
+| Testes automatizados x `CLAUDE.md` | decisão do coordenador, registrada nas restrições globais |

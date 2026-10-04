@@ -213,7 +213,26 @@ driver embrulhado → `prepare_session` → `_await_birth` → `register` em `Py
 parar o cano, estacionar sessão ociosa (só as que estão em `self._sessions` do Python —
 sessões do Rust não estacionam hoje).
 
-## 9. Testes atingidos
+## 9. Passagens que a primeira leitura não pegou (revisão `ecc:architect`)
+
+Conferidas no código depois da revisão adversarial do plano.
+
+| Linha | Mecanismo | O que faz hoje | Veredito |
+|---|---|---|---|
+| `registry.py:2611-2700` | transferência Claude → Codex: `stop_transfer_source`, `publish_transfer`, `restore_transfer_source` | `hl.parar`, `close_sync`, `_sessions.pop`, `ensure_running(transfer_id=…)` pelo cliente Python | **muda**: `close` no Rust → ação sem cliente |
+| `conversation_transfer.py:755-768` | `_check_source_idle` | `ensure_running(so_reconectar=True)` e lê `sess.vivo`; com o Rust dono a fachada devolve `RuntimeView` (`runtime_adapter.py:593-601`), sem `.vivo`: **já quebra hoje** | **muda**: lê a vista do Rust |
+| `api.py:449-456` | `recover_pending_transfers` no lifespan | roda antes de o Rust existir | **muda**: espera o modo sair de `pending` |
+| `api.py:2936-2964` | troca de conta/motor | `parar` → `reset_start_attempts` → `ensure_running(require_initialize=True, engine_models=…)` (o `engine_models` só chega ao `cliproxy.engine_env` por aí, `adapter.py:1034-1040`) | **muda**: `close` → ação sem cliente → `ensure_open` com `engine_models` e espera do `initialize` |
+| `api.py:2770` | troca para sem terminal | `ensure_running(esperar_pronta=False)` | **muda**: `ensure_open` |
+| `api.py:4376-4409` | envio pelo caminho antigo | `_send_managed` devolve `None` quando `prepare_session` devolve `False` (`:4420-4421`) → socket nativo direto, `PromptQueue`, `acordar` do Python | **muda**: sessão migrada nunca cai aqui; fica para não migrado e modo `python` |
+| `runtime_adapter.py:730-734`, `:807-808` | `RuntimeAdapter.ensure_running` | descarta todos os argumentos | **some** dos caminhos acima |
+| `runtime_coordinator.py:460-463` | oscilação do canal de eventos | invalida o cache de toda sessão; o envio falha até a reposição | **muda**: espera a reposição até 5 s |
+| `rust_server.py:372-377` | parada x queda | `deactivate_runtime` (com `recover`) roda antes de conferir `stopping()` | **muda**: parada decidida antes de qualquer ação |
+| `api.py:331-332` | `apos_entrega` de cada sidecar no lifespan | sessão com fila e cano morto (reboot) volta a entregar | **muda**: `ensure_open` dos canos mortos com fila pendente depois do Rust de pé |
+| `actor.rs:588-592` | envio com o Rust caindo no meio | a entrada pode já estar na fila; o Python mostra `erro_envio_falhou` e o usuário reenvia | **muda**: incerto + repetição do mesmo `operation_id` |
+| `claude.rs:272`, `actor.rs:319-323` | segundo `initialize` | o snapshot do cano não marca `initialized`; o Rust reenvia o `initialize` a um Claude já inicializado; nunca medido no Claude | **muda**: medir e tratar (Task 1) |
+
+## 10. Testes atingidos
 
 Apagar (só cobrem a passagem): `test_runtime_ownership.py` `:146`, `:415`;
 `test_runtime_adapter.py` `:224`, `:371`, `:504`, `:586`, `:608`, `:650`, `:705`;
