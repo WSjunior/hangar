@@ -500,10 +500,12 @@ def test_v1_prompt_stays_unknown_until_transcript_proof(tmp_path, monkeypatch):
         coordinator.close_python_leases()
 
 
-@pytest.mark.parametrize("stage", ["before_write", "writing", "claiming"])
-def test_quiesce_returns_entry_claimed_by_cancelled_drain(tmp_path, monkeypatch, stage):
-    # Sessão sem terminal nascendo: o drain do Python reivindica a entrada e a passagem ao Rust o
-    # cancela antes da escrita. Sem devolver, a entrada fica entregue sem ter saído.
+@pytest.mark.parametrize("stage", ["before_write", "claiming", "acked", "no_ack"])
+def test_quiesce_settles_entry_claimed_by_cancelled_drain(tmp_path, monkeypatch, stage):
+    # Sessão sem terminal nascendo: a passagem ao Rust cancela o drain da reserva Python no meio.
+    # Antes da escrita a entrada volta à fila; com a escrita em voo o quiesce espera o ack; sem ack
+    # ela fica desistida (visível), nunca "entregue" sem ter saído.
+    from app import runtime_adapter
     from app import runtime_queue
     from app.adapters.claude_headless.adapter import ClaudeHeadlessAdapter
     from app.pqueue import PromptQueue
@@ -519,15 +521,24 @@ def test_quiesce_returns_entry_claimed_by_cancelled_drain(tmp_path, monkeypatch,
     async def discard():
         return None
     buffers = SimpleNamespace(discard=discard)
-    sess = SimpleNamespace(initialized=asyncio.Event(), model=None, effort=None, permission_mode=None,
+    sess = SimpleNamespace(name="session", initialized=asyncio.Event(), model=None, effort=None, permission_mode=None,
         modo_nao_plan=None, comandos=[], comandos_terminal=[], usage=None, context_window=None, cost=None,
         desligando=False, live_active=None, drenador=None, proc=None, leitor=None,
         preview_buffer=buffers, thinking_buffer=buffers, tool_buffer=buffers)
     adapter._sessions["session"] = sess
     claimed = asyncio.Event()
+    written = []
+    async def write(sess, frame):
+        claimed.set()
+        if stage == "no_ack":
+            await asyncio.Event().wait()
+        await asyncio.sleep(0.2)              # o ack do cano chega depois de o quiesce começar
+        written.append(frame["message"]["content"])
+    adapter._write = write
+    monkeypatch.setattr(runtime_adapter, "_WRITE_WAIT_S", 0.5)
     async def send_prompt(name, text):
-        if stage == "writing":
-            adapter.drain_claims[name]["writing"] = True
+        if stage in {"acked", "no_ack"}:
+            await adapter._escrever_prompt(sess, text)
         claimed.set()
         await asyncio.Event().wait()
     adapter.send_prompt = send_prompt
@@ -562,13 +573,18 @@ def test_quiesce_returns_entry_claimed_by_cancelled_drain(tmp_path, monkeypatch,
         assert sess.drenador.cancelled()
     loop = None
     asyncio.run(scenario())
-    # Escrita começada pode ter saído: devolver duplicaria.
-    assert delivered() == ([True] if stage == "writing" else [False])
+    rows = slot.store.state["rows"]
+    if stage == "acked":
+        assert written and rows[0]["delivered"] is True and not rows[0].get("desistiu")
+    elif stage == "no_ack":
+        assert not written and rows[0]["delivered"] is True and rows[0]["desistiu"] is True
+    else:
+        assert delivered() == [False]
     assert adapter.drain_claims == {}
 
 
-def test_quiesce_leaves_live_drain_claim(tmp_path, monkeypatch):
-    # Drain fora das tarefas canceladas segue vivo e pode escrever: a entrada não volta à fila.
+def test_quiesce_stops_drain_outside_the_cancelled_tasks(tmp_path, monkeypatch):
+    # Drain dono de uma reivindicação, fora das tarefas da sessão, não sobrevive à passagem.
     from app.adapters.claude_headless.adapter import ClaudeHeadlessAdapter
     from app.runtime_adapter import LegacyBridge
     from app.runtime_coordinator import Binding, RuntimeCoordinator
@@ -582,9 +598,35 @@ def test_quiesce_leaves_live_drain_claim(tmp_path, monkeypatch):
     slot.store.exec = lambda *args: calls.append(args)
     async def scenario():
         live = asyncio.create_task(asyncio.Event().wait())
-        claim = adapter.drain_claims["session"] = {"id":"entry", "writing":False, "task":live}
+        claim = adapter.drain_claims["session"] = {"id":"entry", "task":live}
         await coordinator.legacy.quiesce(slot.binding.descriptor())
-        assert adapter.drain_claims == {"session": claim}
-        live.cancel()
+        assert live.cancelled() and adapter.drain_claims == {}
     asyncio.run(scenario())
-    assert calls == []
+    assert calls == []          # sem linha na fila: nada a devolver
+
+
+def test_acked_write_settles_during_hand_over(tmp_path, monkeypatch):
+    # O ack chega com a passagem ao Rust em curso: a escrita saiu e o desfecho precisa ser gravado,
+    # senão o drain a trata como falha e a entrada volta à fila já entregue.
+    from app.runtime_adapter import LegacyIO
+    from app.runtime_coordinator import Binding, Phase, RuntimeCoordinator
+    coordinator = RuntimeCoordinator()
+    monkeypatch.setattr(runtime_coordinator, "_current", coordinator)
+    slot = coordinator.register(Binding("session", "key", "claude", True, {"key":"key"},
+        str(tmp_path / "chat"), tmp_path / "projection", tmp_path / "state", tmp_path / "lease", 1))
+    class Writer:
+        def write(self, data):
+            pass
+        async def drain(self):
+            pass
+    endpoint = SimpleNamespace(runtime_acks={})
+    async def scenario():
+        write = asyncio.create_task(LegacyIO(coordinator).write("session", endpoint, Writer(),
+            {"type":"user", "message":{"role":"user", "content":"texto"}}, 2))
+        while not endpoint.runtime_acks:
+            await asyncio.sleep(0)
+        slot.phase = Phase.PreparingRust
+        next(iter(endpoint.runtime_acks.values())).set_result("written")
+        ticket = await write
+        assert slot.store.state["operations"][ticket.phase_id]["status"] == "accepted"
+    asyncio.run(scenario())

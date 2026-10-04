@@ -54,12 +54,28 @@ independente (devolver só com o drain terminado, registrar também a reivindica
 meio, janela de 15 s), uma rodada final: com terminal 3 de 3 com 1 entrega; sem terminal 2 de 3;
 nome inexistente 404.
 
-**Resto sem conserto (`fh1`):** a passagem ao Rust cancelou o drain depois de a escrita começar
-(fase de escrita aberta no diário) e cancelou junto o leitor do cano, que traria a confirmação. A
-escrita ficou incerta e, pela regra da 2D, entrada incerta não se repete: a mensagem ficou marcada
-entregue e o `claude` não a recebeu (transcript sem a linha, cano sem registro). Consertar pede
-decidir se o `quiesce` espera a escrita em voo terminar antes de cancelar o leitor; ficou para o
-coordenador.
+**Caso `fh1`, consertado depois:** a passagem ao Rust cancelou o drain depois de a escrita
+começar e cancelou junto o leitor do cano, que traria o ack. A escrita ficou incerta, a entrada
+ficou "entregue" e o `claude` não a recebeu. Agora a escrita do drain é uma tarefa que o
+cancelamento do drain não interrompe, registrada com a reivindicação; o `quiesce` cancela o drain
+(ele não pega a próxima nem reverte esta), espera a escrita até 10 s com o stdin e o leitor ainda
+vivos e, estourado o teto, cancela e aguarda a escrita. O desfecho de uma escrita já despachada é
+gravado também durante a passagem (`finish_wire(..., settling=True)`, a permissão `finishing` do
+`assert_legacy`): sem isso o ack chegava, a gravação era recusada em `PreparingRust` e a escrita
+que saiu parecia falha. Com ack, a entrada fica
+entregue; sem escrita, volta à fila; com falha ou teto estourado, fica desistida (a bolha mostra
+que não chegou, a reconciliação desfaz a marca se ela aparecer no transcript) e o diário registra
+`runtime.write_uncertain` com `teto` ou `falhou`. O drain dono de uma reivindicação entra sempre na
+lista do que o `quiesce` cancela, mesmo fora das tarefas da sessão. Depois da adoção, uma reversão
+feita pelo `PromptQueue` vai pela fila do Rust (`queue_gate` na fase Rust), então não se perde.
+
+Rodadas reais depois desse conserto, sem terminal, mensagem logo após criar: 10 de 10 com 1
+entrega antes da revisão e 10 de 10 com 1 entrega com o código final (20 respostas
+`claude-haiku-4-5-20251001`, nenhum `runtime.*` no diário). Na primeira rodada, nove passaram pela
+devolução antes da escrita e uma entregou pela escrita do Python antes da passagem. O instante
+exato "escrita em voo durante a passagem" não apareceu nas rodadas reais; ele está provado pelos
+testes `test_quiesce_settles_entry_claimed_by_cancelled_drain[acked|no_ack]` e
+`test_acked_write_settles_during_hand_over`, que falham sem o conserto.
 
 O "sessão em transferência" do SSE no log do notebook é a janela da adoção (fase `PreparingRust`);
 o cliente reconecta e não perde mensagem.

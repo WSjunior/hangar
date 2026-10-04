@@ -107,23 +107,24 @@ class LegacyIO:
         await self._exec(name, {"kind":"begin_dispatch", "id":operation_id, "wire_id":phase_id})
         return WireTicket(name, binding["key"], binding["generation"], operation_id, phase_id, copy.deepcopy(payload), bool(context))
 
-    async def finish_wire(self, ticket, outcome, result=None, *, definitive=False):
+    async def finish_wire(self, ticket, outcome, result=None, *, definitive=False, settling=False):
         slot = self.coordinator.slot(ticket.name)
         if slot.binding.key != ticket.key or slot.binding.generation != ticket.generation:
             raise RuntimeError("recibo de outra geração")
         status = {"written":"accepted", "not_written":"rejected", "unknown":"unknown"}[outcome]
         record = result if definitive else {"write_outcome":outcome}
-        await self._exec(ticket.name, {"kind":"finish", "id":ticket.phase_id, "status":status, "result":record}, reading=definitive)
+        reading = definitive or settling
+        await self._exec(ticket.name, {"kind":"finish", "id":ticket.phase_id, "status":status, "result":record}, reading=reading)
         is_request = ticket.frame.get("type") == "control_request" or ticket.frame.get("method") is not None and ticket.frame.get("id") is not None
         if ticket.aggregate and ticket.operation_id in getattr(self.coordinator, "legacy_active", set()):
             return
         if ticket.incomplete and outcome == "written":
             await self._exec(ticket.name, {"kind":"finish", "id":ticket.operation_id, "status":"unknown",
-                "result":{"operation_id":ticket.operation_id, "disposition":"unknown", "payload":{"remaining_phase":"effort"}}}, reading=definitive)
+                "result":{"operation_id":ticket.operation_id, "disposition":"unknown", "payload":{"remaining_phase":"effort"}}}, reading=reading)
             return
         parent_status = status if definitive or not is_request or outcome != "written" else "unknown"
         await self._exec(ticket.name, {"kind":"finish", "id":ticket.operation_id, "status":parent_status,
-            "result":{"operation_id":ticket.operation_id, "disposition":parent_status, "payload":record}}, reading=definitive)
+            "result":{"operation_id":ticket.operation_id, "disposition":parent_status, "payload":record}}, reading=reading)
 
     async def reply(self, name, endpoint, frame):
         request_id = frame.get("id") if frame.get("type") != "control_response" else (frame.get("response") or {}).get("request_id")
@@ -188,23 +189,28 @@ class LegacyIO:
             await writer.drain()
             outcome = await asyncio.wait_for(asyncio.shield(future), 30) if version == 2 else "unknown"
         except asyncio.CancelledError:
-            await self.finish_wire(ticket, "unknown")
+            await self.finish_wire(ticket, "unknown", settling=True)
             raise
         except Exception:
             with self.coordinator.slot(name).guard:
                 phase = copy.deepcopy(self.coordinator.slot(name).store.state["operations"].get(ticket.phase_id))
-            await self.finish_wire(ticket, "unknown")
+            await self.finish_wire(ticket, "unknown", settling=True)
             if not (phase and isinstance(phase.get("result"), dict) and phase["result"].get("disposition") in {"accepted", "rejected"}):
                 raise RuntimeError("escrita incerta; operação conservada sem reenvio") from None
             outcome = "written"
         finally:
             endpoint.runtime_acks.pop(ticket.phase_id, None)
-        await self.finish_wire(ticket, outcome)
+        # Já despachado: registrar o desfecho não é efeito novo e vale durante a passagem ao Rust.
+        await self.finish_wire(ticket, outcome, settling=True)
         if version != 2:
             return ticket
         if outcome != "written":
             raise RuntimeError("entrada não confirmada pelo cano; diário conservado")
         return ticket
+
+
+# Teto da espera pela escrita em voo do drain na passagem ao Rust; o ack chega em milissegundos.
+_WRITE_WAIT_S = 10.0
 
 
 class LegacyBridge:
@@ -267,6 +273,16 @@ class LegacyBridge:
             raise RuntimeError("reserva headless encontrou processo próprio; transferência recusada")
         adapter._sessions.pop(name, None)
         tasks = []
+        if provider == "claude" and (claim := adapter.drain_claims.get(name)) is not None:
+            # O drain para antes (a escrita dele é protegida): não pega a próxima nem reverte esta.
+            claim["task"].cancel()
+            await asyncio.gather(claim["task"], return_exceptions=True)
+            # Com o stdin e o leitor vivos, a escrita em voo recebe o ack do cano.
+            if (write := claim.get("write")) is not None and not write.done():
+                await asyncio.wait({write}, timeout=_WRITE_WAIT_S)
+                if not write.done():
+                    write.cancel()
+                    await asyncio.gather(write, return_exceptions=True)
         if provider == "claude" and sess is not None:
             carry.update(initialized=sess.initialized.is_set(), model=sess.model, effort=sess.effort,
                 permission_mode=sess.permission_mode, previous_non_plan=sess.modo_nao_plan,
@@ -311,25 +327,36 @@ class LegacyBridge:
         claim = adapter.drain_claims.get(name) if provider == "claude" else None
         if claim is not None and claim["task"].done():
             adapter.drain_claims.pop(name)
-            if not claim["writing"]:
+            write = claim.get("write")
+            if write is None:
                 # Drain cancelado entre reivindicar e escrever: sem devolver, o Rust adota a fila
                 # com a entrada marcada entregue e ela nunca sai.
-                try:
+                action, code = {"kind":"set_delivered", "entry_id":claim["id"], "value":False}, None
+            elif write.done() and not write.cancelled() and write.exception() is None:
+                action, code = None, None
+            else:
+                # Sem ack não se sabe se saiu: repetir pode duplicar, "entregue" pode ser perda.
+                # Desistida, a bolha mostra que não chegou e a reconciliação desfaz se ela aparecer.
+                action, code = {"kind":"abandon", "entry_id":claim["id"]}, "teto" if write.cancelled() else "falhou"
+            try:
+                if action is not None:
                     with slot.guard:
                         row = next((r for r in slot.store.state["rows"] if r.get("id") == claim["id"]), None)
                         # Confirmada, desistida ou já devolvida: outro caminho tratou a entrada.
-                        returned = (row is not None and row.get("delivered") is True
+                        pending = (row is not None and row.get("delivered") is True
                             and not row.get("confirmed") and not row.get("desistiu"))
-                        if returned:
-                            slot.store.exec(descriptor["generation"], "quiesce-unclaim:" + uuid.uuid4().hex,
-                                runtime_coordinator._clock(), {"kind":"set_delivered", "entry_id":claim["id"], "value":False})
-                    if not returned:
-                        from app import diag
+                        if pending:
+                            slot.store.exec(descriptor["generation"], "quiesce-claim:" + uuid.uuid4().hex,
+                                runtime_coordinator._clock(), action)
+                    from app import diag
+                    if not pending:
                         diag.registrar("runtime.unclaim_skipped", "aviso", sessao=name,
                             codigo="sem_linha" if row is None else "ja_tratada")
-                except Exception as exc:
-                    from app import diag
-                    diag.registrar("runtime.unclaim_failed", "erro", sessao=name, **runtime_coordinator.failure_reason(exc))
+                    elif code is not None:
+                        diag.registrar("runtime.write_uncertain", "erro", sessao=name, codigo=code)
+            except Exception as exc:
+                from app import diag
+                diag.registrar("runtime.unclaim_failed", "erro", sessao=name, **runtime_coordinator.failure_reason(exc))
         if provider == "claude" and sess is not None:
             await asyncio.gather(sess.preview_buffer.discard(), sess.thinking_buffer.discard(), sess.tool_buffer.discard())
         carry["runtime_counter"] = max(carry.get("runtime_counter") or 0,

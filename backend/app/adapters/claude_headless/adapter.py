@@ -364,8 +364,8 @@ class ClaudeHeadlessAdapter:
         self._problemas_lidos: set[str] = set()     # nomes cujo problema do sidecar já foi lido
         self._spawn_locks: dict[str, asyncio.Lock] = {}
         self._tarefas: set[asyncio.Task] = set()
-        # Entrada que o drain reivindicou, por nome, até o resultado. A passagem ao Rust cancela o
-        # drain: se a escrita não começou, ela devolve a entrada à fila (ver LegacyBridge.quiesce).
+        # Entrada que o drain reivindicou, por nome, até o resultado, com a escrita em voo (`write`).
+        # A passagem ao Rust cancela o drain e decide a entrada por ela (ver LegacyBridge.quiesce).
         self.drain_claims: dict[str, dict] = {}
         self._religadas: dict[str, float] = {}
         self._vigia: asyncio.Task | None = None
@@ -473,12 +473,15 @@ class ClaudeHeadlessAdapter:
         from app.conversation_transfer import require_available
         require_available(sess.name)
         blocos, avisos = await asyncio.to_thread(_blocos_do_prompt, text)
+        frame = {"type": "user", "session_id": "", "parent_tool_use_id": None,
+                 "message": {"role": "user", "content": blocos}}
         if (claim := self.drain_claims.get(sess.name)) is not None:
-            claim["writing"] = True
-        await self._write(sess, {
-            "type": "user", "session_id": "", "parent_tool_use_id": None,
-            "message": {"role": "user", "content": blocos},
-        })
+            # Cancelar o drain não interrompe a escrita: o quiesce espera o ack dela e decide.
+            claim["write"] = write = asyncio.ensure_future(self._write(sess, frame))
+            write.add_done_callback(lambda task: task.cancelled() or task.exception())
+            await asyncio.shield(write)
+        else:
+            await self._write(sess, frame)
         for aviso in avisos:
             await self._nota_local(sess, aviso)
 
@@ -500,12 +503,12 @@ class ClaudeHeadlessAdapter:
                 except asyncio.CancelledError:
                     # A thread termina a reivindicação mesmo com o drain cancelado.
                     if rows := await claiming:
-                        self.drain_claims[name] = {"id": rows[0]["id"], "writing": False, "task": asyncio.current_task()}
+                        self.drain_claims[name] = {"id": rows[0]["id"], "task": asyncio.current_task()}
                     raise
                 if not claimed:
                     return sent
                 entry = claimed[0]
-                self.drain_claims[name] = {"id": entry["id"], "writing": False, "task": asyncio.current_task()}
+                self.drain_claims[name] = {"id": entry["id"], "task": asyncio.current_task()}
                 try:
                     result = await self.send_prompt(name, entry["text"])
                 except _SubidaEsgotada:
