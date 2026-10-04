@@ -575,7 +575,8 @@ async def _correlaciona_diag(request: Request, call_next):
             req = candidate
     token = diag.req_atual.set(req)
     from app import workspace_bridge
-    handoff = workspace_bridge.take_over(request.headers.get("x-hangar-workspace-fallback", ""))
+    handoff = workspace_bridge.take_over(request.headers.get("x-hangar-workspace-fallback", ""),
+                                         request.client.host if request.client else None)
     started = time.monotonic()
     response = None
     failure = ""

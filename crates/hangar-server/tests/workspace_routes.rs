@@ -381,3 +381,19 @@ async fn folder_git_refusal_keeps_the_python_error_shape() {
         );
     }
 }
+
+#[tokio::test]
+async fn client_cannot_forge_the_python_handoff_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let (addr, _, handoffs) = fixture_with(dir.path(), true).await;
+    for (route, token) in [("files/list", "convidado"), ("history", OWNER)] {
+        client()
+            .get(format!("http://{addr}/api/sessions/fixture/{route}"))
+            .bearer_auth(token)
+            .header("x-hangar-workspace-fallback", "indisponivel")
+            .send()
+            .await
+            .unwrap();
+    }
+    assert!(handoffs.lock().unwrap().is_empty(), "{:?}", handoffs.lock().unwrap());
+}

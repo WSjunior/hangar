@@ -249,8 +249,9 @@ pub(crate) async fn pass(st: &AppState, req: Request, fwd: &Forward) -> Response
 async fn pass_any(
     State(st): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    req: Request,
+    mut req: Request,
 ) -> Response {
+    crate::workspace_routes::strip_client_fallback(&mut req);
     if crate::workspace_routes::matches(req.method(), req.uri().path()) {
         let (forward, owner) = gate(&st, peer, &req);
         if owner {
@@ -286,8 +287,9 @@ async fn history(
     State(st): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     path: Result<Path<String>, PathRejection>,
-    req: Request,
+    mut req: Request,
 ) -> Response {
+    crate::workspace_routes::strip_client_fallback(&mut req);
     let (fwd, owner) = gate(&st, peer, &req);
     let name = match path {
         Ok(Path(n)) if owner && req.method() == Method::GET => n,
@@ -368,8 +370,9 @@ async fn events(
     State(st): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     path: Result<Path<String>, PathRejection>,
-    req: Request,
+    mut req: Request,
 ) -> Response {
+    crate::workspace_routes::strip_client_fallback(&mut req);
     let (fwd, owner) = gate(&st, peer, &req);
     let name = match path {
         Ok(Path(n)) if owner && req.method() == Method::GET => n,

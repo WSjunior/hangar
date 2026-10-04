@@ -119,7 +119,7 @@ def test_request_handed_off_by_rust_is_served_by_python_code(bridge_server, tmp_
     (tmp_path / "leia.txt").write_text("texto\n")
     monkeypatch.setattr(api, "_session_cwd", lambda name: str(tmp_path))
     monkeypatch.setattr(settings, "auth_token", "secret")
-    client = TestClient(api.app)
+    client = TestClient(api.app, client=("127.0.0.1", 50000))
     auth = {"Authorization": "Bearer secret"}
     assert client.get("/api/sessions/s/files/read", params={"path": "leia.txt"}, headers=auth).status_code == 409
     sent = len(bridge_server)
@@ -127,3 +127,16 @@ def test_request_handed_off_by_rust_is_served_by_python_code(bridge_server, tmp_
                    headers={**auth, "x-hangar-workspace-fallback": "indisponivel"})
     assert r.status_code == 200 and r.json()["text"] == "texto\n"
     assert len(bridge_server) == sent
+
+
+def test_handoff_header_from_outside_loopback_is_ignored(bridge_server, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from app import api
+    from app.config import settings
+    (tmp_path / "leia.txt").write_text("texto\n")
+    monkeypatch.setattr(api, "_session_cwd", lambda name: str(tmp_path))
+    monkeypatch.setattr(settings, "auth_token", "secret")
+    client = TestClient(api.app, client=("192.0.2.7", 50000))
+    r = client.get("/api/sessions/s/files/read", params={"path": "leia.txt"},
+                   headers={"Authorization": "Bearer secret", "x-hangar-workspace-fallback": "indisponivel"})
+    assert r.status_code == 409

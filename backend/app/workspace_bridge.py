@@ -21,12 +21,17 @@ _UNAVAILABLE = {"workspace_unavailable", "workspace_busy"}
 _HANDOFF_CODES = {"indisponivel", "ocupado", "contexto", "sessao_no_python"}
 
 
-def take_over(code: str) -> contextvars.Token | None:
+def take_over(code: str, client: str | None) -> contextvars.Token | None:
     """Pedido que o Rust repassou ao falhar: o Python atende com o próprio código.
 
     Sem isto a reserva era circular: a rota do Python delegava de volta ao mesmo Rust pela ponte.
+    Só vale vindo do Rust (loopback; ele descarta o cabeçalho que um cliente mandar).
     """
-    if code not in _HANDOFF_CODES:
+    try:
+        loopback = client is not None and ipaddress.ip_address(client).is_loopback
+    except ValueError:
+        loopback = False
+    if code not in _HANDOFF_CODES or not loopback:
         return None
     if code not in ("sessao_no_python", "ocupado"):
         from app import diag

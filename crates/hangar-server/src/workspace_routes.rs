@@ -253,6 +253,11 @@ fn sessions(ctx: &Value, top: Option<&str>) -> Vec<String> {
 /// Cabeçalho do repasse: o Python roda o próprio código em vez de devolver ao Rust pela ponte.
 const FALLBACK_HEADER: &str = "x-hangar-workspace-fallback";
 
+/// Só o próprio servidor manda esse cabeçalho; o de um cliente sai antes de qualquer repasse.
+pub fn strip_client_fallback(req: &mut Request) {
+    req.headers_mut().remove(FALLBACK_HEADER);
+}
+
 fn fallback_request(
     method: Method,
     uri: axum::http::Uri,
@@ -343,7 +348,8 @@ pub async fn public(st: Arc<AppState>, req: Request, forward: Forward) -> Respon
             pass(&st, python, &forward).await
         }
         Err(e) => {
-            if e.status >= 500 {
+            // Prazo do git (rede pendurada, repositório enorme) estoura igual no Python.
+            if e.status >= 500 && e.status != 504 {
                 let failures = st.fallback.failed(&session, "workspace", "workspace_error");
                 if crate::warn_limit::allow(Some(&session), "workspace_error") {
                     // Sem o detalhe: o stderr do git pode citar caminhos e nomes do usuário.
