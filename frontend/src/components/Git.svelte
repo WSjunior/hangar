@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   // Dono do modal de git: a folha, o store da sessao e nada mais. O corpo inteiro (cabecalho, abas,
   // faixa) e do GitTabs — este arquivo substitui o GitSheet (celular) E o GitPanel (desktop), que
   // eram duas implementacoes da mesma tela.
@@ -20,14 +21,15 @@
     events?: ChatEvent[] | null; histGap?: string; cwd?: string | null;
   }
   let { open, sessionName, desktop, filesInContext, onClose, initialTab = 'changes', events = null, histGap = '', cwd = null }: Props = $props();
+  const sessionServer = useSessionServer();
 
   // Dono do store — era do GitSheet, COM o guard que evita recriar a cada render. Sem ele, trocar de
   // sessao com o modal aberto mostraria o git da anterior.
   // svelte-ignore state_referenced_locally
   // Ler `sessionName` aqui pega so o valor inicial de proposito: quem acompanha a troca e o efeito
   // logo abaixo, que recria o store — um $derived nao serve, o store guarda estado vivo.
-  let git = $state(createGitStore(sessionName));
-  $effect(() => { if (git.sessionName !== sessionName) git = createGitStore(sessionName); });
+  let git = $state(createGitStore(sessionName, sessionServer));
+  $effect(() => { if (git.sessionName !== sessionName) git = createGitStore(sessionName, sessionServer); });
   $effect(() => { if (open) git.load(); });
 </script>
 

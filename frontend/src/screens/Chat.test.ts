@@ -326,8 +326,8 @@ describe('Chat — visor de arquivo (Task 11, B5: foco e inert)', () => {
     t.el.querySelector('.chat-underlay')!.append(texto);
     texto.querySelector('button')!.click();
     await vi.waitFor(() => expect(t.el.querySelector('.arq-visor .visor')).not.toBeNull());
-    expect(api.resolverCitados).toHaveBeenCalledWith('sess', [path]);
-    expect(api.readFile).toHaveBeenCalledWith('sess', `a.${ext}`);
+    expect(api.resolverCitados).toHaveBeenCalledWith('sess', [path], expect.objectContaining({ id: 'srv-test' }));
+    expect(api.readFile).toHaveBeenCalledWith('sess', `a.${ext}`, expect.objectContaining({ id: 'srv-test' }));
     expect(api.createSession).not.toHaveBeenCalled();
     const store = filesStores.retain('srv-test::sess', 'sess');
     expect(store.linha).toBe(2);
@@ -372,7 +372,7 @@ describe('Chat — visor de arquivo (Task 11, B5: foco e inert)', () => {
       t.el.querySelector('.chat-underlay')!.append(texto);
       texto.querySelector('button')!.click();
       await vi.waitFor(() => expect(abrir).toHaveBeenCalledWith(path, 12));
-      expect(api.resolverCitados).toHaveBeenLastCalledWith('sess', [path]);
+      expect(api.resolverCitados).toHaveBeenLastCalledWith('sess', [path], expect.objectContaining({ id: 'srv-test' }));
     } finally {
       abrir.mockRestore();
       await unmount(t.comp);

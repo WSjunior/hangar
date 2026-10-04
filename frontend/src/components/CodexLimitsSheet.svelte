@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   // Task B: limites de uso da conta Codex (account/rateLimits/read via GET /limits) — so sessoes
   // Codex, aberto pelo badge "Codex" da NavBar. Fetch-on-open, mesmo padrao do RunSheet.
   import * as m from '../paraglide/messages';
@@ -14,6 +15,7 @@
     onClose: () => void;
   }
   let { open, sessionName, onClose }: Props = $props();
+  const sessionServer = useSessionServer();
 
   let limits = $state<SessionLimits | null>(null);
   let err = $state<string | null>(null);
@@ -21,7 +23,7 @@
   async function load() {
     err = null;
     try {
-      limits = await getLimits(sessionName);
+      limits = await getLimits(sessionName, sessionServer());
     } catch (e) {
       err = String(e);
     }

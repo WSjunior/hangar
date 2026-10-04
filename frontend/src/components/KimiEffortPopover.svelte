@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   // Nível de pensamento do Kimi, em pill própria ao lado da de modelo — a forma do PiEffortPopover.
   // Os níveis vêm do support_efforts do modelo ATUAL no config.toml (casa pelo display name da
   // statusline — modelo sem níveis, tipo kimi-for-coding, mostra a lista vazia em vez de oferecer
@@ -19,6 +20,7 @@
     onClose: () => void;
   }
   let { open, anchor, sessionName, currentName, currentEffort, onApplied, onClose }: Props = $props();
+  const sessionServer = useSessionServer();
 
   let levels = $state<string[]>([]);
   let loading = $state(false);
@@ -34,7 +36,7 @@
     err = null;
     loading = true;
     try {
-      const res = await getKimiModels(sessionName);
+      const res = await getKimiModels(sessionName, sessionServer());
       if (minha !== carga) return;
       const atual = (currentName ?? '').toLowerCase();
       const entry = res.models.find((md) => md.name.toLowerCase() === atual);
@@ -57,7 +59,7 @@
     aplicando = lv;
     err = null;
     try {
-      const res = await setKimiModel(sessionName, { effort: lv });
+      const res = await setKimiModel(sessionName, { effort: lv }, sessionServer());
       if (res.effort) onApplied(res.effort);
     } catch (e) {
       err = e instanceof Error ? e.message : m.comum_falha_aplicar();

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   import * as m from '../paraglide/messages';
   import { intlLocale } from '../lib/locale';
   import { renderMarkdown } from '../lib/markdown';
@@ -22,6 +23,7 @@
     onAbrirOrigem?: (() => void) | null;
   }
   let { recado, cru, ts = null, sessionName, onAbrirOrigem = null }: Props = $props();
+  const sessionServer = useSessionServer();
 
   const hora = $derived(
     ts ? new Date(ts * 1000).toLocaleTimeString(intlLocale(), { hour: '2-digit', minute: '2-digit' }) : '',
@@ -41,7 +43,7 @@
     carregando = true;
     erro = '';
     try {
-      dossie = await getBastaoDossie(sessionName);
+      dossie = await getBastaoDossie(sessionName, sessionServer());
     } catch (e) {
       // `ensureOk` já traduz o código do backend na mensagem do Error (`errorDetail`).
       erro = e instanceof Error ? e.message : String(e);

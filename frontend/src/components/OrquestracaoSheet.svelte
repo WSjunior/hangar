@@ -12,6 +12,7 @@
   import { untrack } from 'svelte';
   import { createQuery } from '@tanstack/svelte-query';
   import { comecarOrq, postOrqPapeis, removerPapel } from '@hangar/core';
+  import { useSessionServer } from '../lib/sessionServer';
   import { clienteQuery, motores, orqGrupo, orqPolitica } from '../lib/queries';
   import { quotaFeed } from '../lib/quotaFeed.svelte';
   import { segredos } from '../lib/segredos.svelte';
@@ -35,6 +36,7 @@
     abaInicial?: Aba;
   }
   let { open, onClose, sessionName, sessoes, abaInicial = 'papeis' }: Props = $props();
+  const sessionServer = useSessionServer();
 
   const PROVIDERS = SESSION_PROVIDERS;
 
@@ -50,8 +52,8 @@
   // As duas leituras vêm do cache compartilhado (lib/queries.ts): reabrir o painel entrega o dado
   // que já estava lá e revalida por baixo, em vez de esvaziar a tela e buscar do zero. `enabled`
   // porque o componente fica montado no Chat mesmo fechado — sem ele, buscaria sem ninguém olhando.
-  const qPolitica = createQuery(() => ({ ...orqPolitica(), enabled: open }), () => clienteQuery);
-  const qGrupo = createQuery(() => ({ ...orqGrupo(sessionName), enabled: open }), () => clienteQuery);
+  const qPolitica = createQuery(() => ({ ...orqPolitica(sessionServer()), enabled: open }), () => clienteQuery);
+  const qGrupo = createQuery(() => ({ ...orqGrupo(sessionName, sessionServer()), enabled: open }), () => clienteQuery);
   const grupo = $derived(qGrupo.data ?? null);
   const politica = $derived(qPolitica.data ?? null);
   const carregando = $derived(qPolitica.isPending || qGrupo.isPending);
@@ -165,7 +167,7 @@
   $effect(() => {
     if (!grupo) return;
     const context = JSON.stringify([
-      ...orqGrupo(sessionName).queryKey,
+      ...orqGrupo(sessionName, sessionServer()).queryKey,
       grupo.session_identity ?? grupo.session_prefix ?? sessionName,
     ]);
     untrack(() => {
@@ -284,8 +286,8 @@
     });
     salvando = true; erro = ''; aviso = '';
     try {
-      const r = await postOrqPapeis(sessionName, { papeis: itens, mtime: grupo.mtime });
-      clienteQuery.setQueryData(orqGrupo(sessionName).queryKey, { ...grupo, mtime: r.mtime, papeis: r.papeis.map((x) => ({ ...x, viva: null })) });
+      const r = await postOrqPapeis(sessionName, { papeis: itens, mtime: grupo.mtime }, sessionServer());
+      clienteQuery.setQueryData(orqGrupo(sessionName, sessionServer()).queryKey, { ...grupo, mtime: r.mtime, papeis: r.papeis.map((x) => ({ ...x, viva: null })) });
       limparRascunhosDe(itens[0].papel);
       sel = null;
     } catch (e) {
@@ -303,7 +305,7 @@
     if (comecando) return;
     comecando = true; erro = ''; aviso = ''; avisoRuim = false;
     try {
-      const r = await comecarOrq(sessionName);
+      const r = await comecarOrq(sessionName, sessionServer());
       aviso = r.entregue ? m.orqcfg_comecou() : m.orqcfg_comecou_fila();
       onClose();
     } catch (e) {
@@ -318,8 +320,8 @@
     if (!grupo || salvando) return;
     salvando = true; erro = ''; aviso = '';
     try {
-      const r = await removerPapel(sessionName, { papel: l.papel, vez: l.vez ?? '', mtime: grupo.mtime });
-      clienteQuery.setQueryData(orqGrupo(sessionName).queryKey, { ...grupo, mtime: r.mtime, papeis: r.papeis.map((x) => ({ ...x, viva: null })) });
+      const r = await removerPapel(sessionName, { papel: l.papel, vez: l.vez ?? '', mtime: grupo.mtime }, sessionServer());
+      clienteQuery.setQueryData(orqGrupo(sessionName, sessionServer()).queryKey, { ...grupo, mtime: r.mtime, papeis: r.papeis.map((x) => ({ ...x, viva: null })) });
       limparRascunhosDe(l.papel);
       sel = null;
     } catch (e) {
@@ -435,7 +437,7 @@
     if (!grupo || !itens.length) return -1;
     salvando = true; erro = ''; aviso = ''; conflito = false;
     try {
-      const r = await postOrqPapeis(sessionName, { papeis: itens, mtime: grupo.mtime });
+      const r = await postOrqPapeis(sessionName, { papeis: itens, mtime: grupo.mtime }, sessionServer());
       const lista = [...grupo.papeis];
       let ultimo = -1;
       for (const p of r.papeis) {
@@ -449,7 +451,7 @@
       // uma releitura do disco que já sabemos como terminaria.
       // `arbitro` fica o do cache: o backend não procura quem é ao salvar e devolve null, e escrever
       // esse null apagaria o árbitro que a tela já conhecia.
-      clienteQuery.setQueryData(orqGrupo(sessionName).queryKey, { ...grupo, mtime: r.mtime, papeis: lista });
+      clienteQuery.setQueryData(orqGrupo(sessionName, sessionServer()).queryKey, { ...grupo, mtime: r.mtime, papeis: lista });
       avisoRuim = false;
       aviso = m.orqcfg_aviso_proxima_sessao();
       return ultimo;
@@ -818,7 +820,7 @@
       <h2 class="sheet-title">{m.orqcfg_titulo()}</h2>
       {@render abas()}
       <div class="os-corpo">
-        <OrquestracaoContas desktop={isDesktop} {papeis} onSalvo={(p) => clienteQuery.setQueryData(orqPolitica().queryKey, p)} />
+        <OrquestracaoContas desktop={isDesktop} {papeis} onSalvo={(p) => clienteQuery.setQueryData(orqPolitica(sessionServer()).queryKey, p)} />
       </div>
     </div>
   {:else if isDesktop}

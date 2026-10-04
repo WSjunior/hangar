@@ -10,13 +10,14 @@ import {
 } from '@hangar/core';
 // `import type` some na compilacao: o Shiki continua entrando so pelo import() dinamico la embaixo.
 import type { DiffRow } from './highlight';
+import type { SessionServer } from './sessionServer';
 
 // Mensagem de erro legivel: tira o prefixo "409: "/"400: " do status HTTP. Export nomeado —
 // CommitMenu precisa do MESMO tratamento (getCommitBranches) sem duplicar a regex.
 export const cleanErr = (e: unknown) =>
   (e instanceof Error ? e.message : 'falhou').replace(/^\d+:\s*/, '');
 
-export function createGitStore(sessionName: string) {
+export function createGitStore(sessionName: string, server: SessionServer = () => undefined) {
   let branches = $state<string[]>([]);
   let remotes = $state<string[]>([]);
   let current = $state<string | null>(null);
@@ -42,7 +43,7 @@ export function createGitStore(sessionName: string) {
   let behind = $state<number | null>(null);
 
   async function refresh() {
-    const [b, f] = await Promise.all([getBranches(sessionName), getChangedFiles(sessionName)]);
+    const [b, f] = await Promise.all([getBranches(sessionName, server()), getChangedFiles(sessionName, server())]);
     branches = b.branches; current = b.current; remotes = b.remotes ?? [];
     dirty = b.dirty ?? false; files = f.files;
     // pendingAbort vem do DISCO (f.sequencer, lido de CHERRY_PICK_HEAD/REVERT_HEAD), nao so de
@@ -57,7 +58,7 @@ export function createGitStore(sessionName: string) {
   async function pick(b: string) {
     if (b === current || busy) return;
     busy = b; error = ''; output = '';
-    try { current = (await checkoutBranch(sessionName, b)).current; await refresh(); }
+    try { current = (await checkoutBranch(sessionName, b, server())).current; await refresh(); }
     catch (e) { error = cleanErr(e); } finally { busy = ''; }
   }
   // Faz o mesmo que runAction, mas DEVOLVE {ok, output} — runAction engole o ok (so grava em
@@ -67,7 +68,7 @@ export function createGitStore(sessionName: string) {
     if (busy) return null;
     busy = action; error = ''; output = '';
     try {
-      const r = await gitAction(sessionName, action);
+      const r = await gitAction(sessionName, action, server());
       output = r.output || (r.ok ? 'ok' : m.git_sem_saida());
       // git_action NAO levanta em returncode != 0 (git_ops.py) -- so `output` gravava a falha, e o
       // <pre> dela usa a MESMA cor cinza de um "ok" (ex. um `pull` com conflito/auth expirada/branch
@@ -84,7 +85,7 @@ export function createGitStore(sessionName: string) {
   async function openLog() {
     error = '';
     try {
-      const r = await getGitLog(sessionName, logQuery || undefined, limiteLog);
+      const r = await getGitLog(sessionName, logQuery || undefined, limiteLog, server());
       commits = r.commits;
       ahead = r.ahead; behind = r.behind;
       // Veio menos do que o pedido = fim do histórico; sem isso o "carregar mais" ficaria
@@ -134,7 +135,7 @@ export function createGitStore(sessionName: string) {
     }
   }
   async function revert(sha: string) {
-    const r = await _repoOp('revert', () => gitRevert(sessionName, sha));
+    const r = await _repoOp('revert', () => gitRevert(sessionName, sha, server()));
     // pendingAbort ja veio do DISCO via refresh() (dentro do _repoOp, `f.sequencer`). Um 409 tambem
     // acontece com a tree suja e o revert NEM COMECOU (sem REVERT_HEAD) -- so aqui sobrescreve se o
     // refresh nao tiver detectado sequenciador nenhum, senao criava um botao de abort que o git recusa.
@@ -142,18 +143,18 @@ export function createGitStore(sessionName: string) {
     return r === 'ok';
   }
   async function cherryPick(sha: string) {
-    const r = await _repoOp('cherry-pick', () => gitCherryPick(sessionName, sha));
+    const r = await _repoOp('cherry-pick', () => gitCherryPick(sessionName, sha, server()));
     if (r === 'conflito' && !pendingAbort) pendingAbort = 'cherry-pick-abort';
     return r === 'ok';
   }
   async function resetTo(sha: string, mode: GitResetMode) {
-    return (await _repoOp(`reset-${mode}`, () => gitReset(sessionName, sha, mode))) === 'ok';
+    return (await _repoOp(`reset-${mode}`, () => gitReset(sessionName, sha, mode, server()))) === 'ok';
   }
   async function createBranch(name: string, sha?: string) {
-    return (await _repoOp(name, () => gitCreateBranch(sessionName, { name, ...(sha ? { sha } : {}) }))) === 'ok';
+    return (await _repoOp(name, () => gitCreateBranch(sessionName, { name, ...(sha ? { sha } : {}) }, server()))) === 'ok';
   }
   async function createTag(name: string, sha?: string, message?: string) {
-    return (await _repoOp(name, () => gitCreateTag(sessionName, { name, ...(sha ? { sha } : {}), ...(message ? { message } : {}) }))) === 'ok';
+    return (await _repoOp(name, () => gitCreateTag(sessionName, { name, ...(sha ? { sha } : {}), ...(message ? { message } : {}) }, server()))) === 'ok';
   }
   // git_action NAO levanta em returncode != 0 — devolve {ok:false} (git_ops.py:201-206). Olhar so o
   // `error` faria um abort recusado ("no revert in progress") sumir o botao calado.
@@ -180,7 +181,7 @@ export function createGitStore(sessionName: string) {
     if (busy) return false;
     busy = 'commit'; error = ''; output = '';
     try {
-      const r = await commitFiles(sessionName, message, paths, opts);
+      const r = await commitFiles(sessionName, message, paths, opts, server());
       output = r.output || m.git_commit_ok();
       // refresh/openLog FORA do escopo de erro do commit: o commit ja foi gravado no disco quando
       // chegamos aqui -- uma falha na releitura nao pode virar 'erro' e levar o usuario a commitar
@@ -194,7 +195,7 @@ export function createGitStore(sessionName: string) {
   async function doPush() {
     if (busy) return false;
     busy = 'push'; error = ''; output = '';
-    try { const r = await gitPush(sessionName); output = r.output || m.git_push_ok(); return true; }
+    try { const r = await gitPush(sessionName, server()); output = r.output || m.git_push_ok(); return true; }
     catch (e) { error = cleanErr(e); return false; } finally { busy = ''; }
   }
   // ── Diff aberto ────────────────────────────────────────────────────────────
@@ -234,27 +235,28 @@ export function createGitStore(sessionName: string) {
   }
 
   const openFileDiff = (path: string) =>
-    _abrirDiff(path, '', path, () => getFileDiff(sessionName, path));
+    _abrirDiff(path, '', path, () => getFileDiff(sessionName, path, server()));
   // Diff de um arquivo DENTRO de um commit historico.
   const openCommitFileDiff = (sha: string, path: string) =>
-    _abrirDiff(path, sha, path, () => getCommitFileDiff(sessionName, sha, path));
+    _abrirDiff(path, sha, path, () => getCommitFileDiff(sessionName, sha, path, server()));
   // Commit INTEIRO. Titulo sintetico: o highlightDiff usa o path so pra detectar linguagem (sem
   // extensao = texto plano, que e o certo pra um diff multi-arquivo).
   const openCommitFullDiff = (c: GitCommit) =>
-    _abrirDiff(`commit ${c.short}`, c.hash, c.hash, () => getCommitDiff(sessionName, c.hash));
+    _abrirDiff(`commit ${c.short}`, c.hash, c.hash, () => getCommitDiff(sessionName, c.hash, server()));
   // Commit vs o disco agora. Titulo diferente pro usuario saber qual dos dois diffs esta vendo.
   const openCommitWorktreeDiff = (c: GitCommit) =>
-    _abrirDiff(`commit ${c.short} ↔ working tree`, c.hash, c.hash, () => getCommitDiffVsWorktree(sessionName, c.hash));
+    _abrirDiff(`commit ${c.short} ↔ working tree`, c.hash, c.hash, () => getCommitDiffVsWorktree(sessionName, c.hash, server()));
 
   async function discard(path: string) {
     if (busy) return false;
     busy = path; error = '';
-    try { await discardFile(sessionName, path); await refresh(); return true; }
+    try { await discardFile(sessionName, path, server()); await refresh(); return true; }
     catch (e) { error = cleanErr(e); return false; } finally { busy = ''; }
   }
 
   return {
     get sessionName() { return sessionName; },
+    server,
     get branches() { return branches; }, get remotes() { return remotes; },
     get current() { return current; }, get dirty() { return dirty; },
     get files() { return files; }, get commits() { return commits; },

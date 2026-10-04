@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   // Seletor de modelo do Pi ancorado na pill do composer. Substitui o PiModelSheet (painel de
   // altura cheia) pela forma que o usuario pediu, com o opencode como referencia: caixa compacta
   // sobre a pill, busca no topo, lista agrupada por provedor, tique no atual, e CLIQUE APLICA —
@@ -19,6 +20,7 @@
     onClose: () => void;
   }
   let { open, anchor, sessionName, provider = 'pi', onApplied, onClose }: Props = $props();
+  const sessionServer = useSessionServer();
 
   const MAX_ROWS = 40;   // teto de linhas desenhadas: 390 botoes travariam o celular
 
@@ -41,7 +43,7 @@
     try {
       // allSettled, NAO all: o sidecar e leitura de arquivo local e quase nao falha; o catalogo e
       // subprocess Node. Com Promise.all, a falha do catalogo derrubaria a lista inteira.
-      const [est, cat] = await Promise.allSettled([getPiModels(sessionName), modelOptions(provider)]);
+      const [est, cat] = await Promise.allSettled([getPiModels(sessionName, sessionServer()), modelOptions(provider)]);
       if (minha !== carga) return;
       if (est.status === 'rejected') throw est.reason;
       // O SIDECAR e o conjunto; o catalogo so enriquece. Quem valida o apply e o check_known contra
@@ -106,7 +108,7 @@
     aplicando = chave;
     err = null;
     try {
-      const res = await setPiModel(sessionName, { provider: md.provider, model: md.id });
+      const res = await setPiModel(sessionName, { provider: md.provider, model: md.id }, sessionServer());
       if (!res.current) {
         err = m.modelo_confirmar_erro();
         aplicando = null;

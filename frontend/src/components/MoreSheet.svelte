@@ -4,6 +4,7 @@
   import ShortcutTiles from './ShortcutTiles.svelte';
   import ShortcutTransfer from './ShortcutTransfer.svelte';
   import { desktop } from '../lib/desktop.svelte';
+import { useSessionServer } from '../lib/sessionServer';
   import { listAccountTargets, type AccountTarget, type LiveShortcutTerminal, type ShortcutSendText, type ShortcutShell } from '@hangar/core';
   import type { CustomScoped } from '../lib/shortcuts.svelte';
 
@@ -55,6 +56,7 @@
     onTrocarModo, modoDestinoTerminal = false, modoBloqueado = false,
     onRecarregar, recarregarBloqueado = false,
   }: Props = $props();
+  const sessionServer = useSessionServer();
 
   function pick(fn: () => void) {
     onClose();
@@ -76,7 +78,7 @@
     accounts = null;
     accountsError = '';
     try {
-      const list = await listAccountTargets(sessionName);
+      const list = await listAccountTargets(sessionName, sessionServer());
       if (seq === accountsSeq) accounts = list;
     } catch (e) {
       if (seq === accountsSeq) accountsError = e instanceof Error ? e.message : String(e);

@@ -3,6 +3,7 @@
   import { desktop } from '../lib/desktop.svelte';
   import { renderMarkdown } from '../lib/markdown';
   import { getSessions, pairSession, unpairSession, getHistory, getPairContract } from '@hangar/core';
+  import { useSessionServer } from '../lib/sessionServer';
   import { formataErro } from '@hangar/core';
   import { rotuloEstado, stateColors, parsePeerMessage, relativeTime, encodeCompareIds } from '@hangar/core';
   import { getActiveId } from '../lib/auth';
@@ -20,6 +21,7 @@
     onOpenPeerChat?: (peer: string) => void; // abre o chat do membro num MODAL (as duas views)
   }
   let { open, sessionName, pairPeers, onClose, onChanged, onOpenSplit, onOpenPeerChat }: Props = $props();
+  const sessionServer = useSessionServer();
 
   const peers = $derived(pairPeers ?? []);
   // Chave PRIMITIVA: a prop pairPeers é um array novo por referência a cada poll de 5s do pai —
@@ -61,7 +63,7 @@
       // Falha de fetch ≠ conversa vazia: sem distinguir, o histórico de um membro sumia do feed
       // calado ("nenhuma troca" com mensagens existindo).
       const results = await Promise.all(all.map((n) =>
-        getHistory(n).then((h) => ({ ok: true as const, h })).catch(() => ({ ok: false as const, h: [] }))));
+        getHistory(n, undefined, undefined, undefined, sessionServer()).then((h) => ({ ok: true as const, h })).catch(() => ({ ok: false as const, h: [] }))));
       if (my !== epoch) return;
       const failed = all.filter((_, i) => !results[i].ok);
       feedError = failed.length ? m.par_sem_historico({ nomes: failed.join(', ') }) : null;
@@ -101,7 +103,7 @@
     contractError = null;
     if (members.length) {
       loadFeed(members, my);
-      getPairContract(sessionName)
+      getPairContract(sessionName, sessionServer())
         .then((c) => { if (my === epoch) { contract = { path: c.path, content: c.content }; } })
         .catch((e) => {
           if (my !== epoch) return;
@@ -109,7 +111,7 @@
           contractError = e instanceof Error && e.message ? e.message : m.par_contrato_falhou();
         });
     }
-    getSessions()
+    getSessions(sessionServer())
       .then((all) => { if (my === epoch) sessions = all.filter((s) => s.name !== sessionName && s.state !== 'dead'); })
       .catch(() => { if (my === epoch) error = m.forward_nao_listou(); });
   });
@@ -123,7 +125,7 @@
     error = null;
     try {
       // Mesmo endpoint pra criar grupo e pra ADICIONAR membro (o backend une os grupos).
-      const res = await pairSession(sessionName, picked, task.trim());
+      const res = await pairSession(sessionName, picked, task.trim(), false, sessionServer());
       onChanged();
       if (res.warning) {
         // Falha PARCIAL de aviso (membro sem o prompt): mostra em vez de fechar mudo. O warning
@@ -148,7 +150,7 @@
     busy = true;
     error = null;
     try {
-      const res = await unpairSession(sessionName);
+      const res = await unpairSession(sessionName, sessionServer());
       onChanged();
       if (res.warning) {
         error = formataErro(res.warning) ?? String(res.warning);
@@ -171,7 +173,7 @@
   // cards ao vivo (transcript/preview/estado), 1 clique entra na sessão. Grupo é sempre do
   // servidor ativo (pareamento é por servidor).
   function openGrid() {
-    const sid = getActiveId();
+    const sid = sessionServer()?.id ?? getActiveId();
     if (!sid) return;
     const ids = [sessionName, ...peers].map((name) => ({ serverId: sid, name }));
     onClose();

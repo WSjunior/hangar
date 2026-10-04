@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getCodexModels, getPermissionModes, setCodexMode, setPermissionMode } from '@hangar/core';
 import { chatStore } from '../../stores/chat';
+import { useServers } from '../../stores/servers';
 import * as m from '../../paraglide/messages';
 
 // Ordem do segmentado, do mais cauteloso ao mais solto.
@@ -18,6 +19,8 @@ interface Args {
 // Normal/Planejar. O valor segue o SSE.
 export function usePermissionControl({ serverId, name, provider }: Args) {
   const chat = chatStore(serverId, name);
+  // Servidor da rota, não o ativo: o ativo pode ser outra máquina sem esta sessão.
+  const server = useServers((s) => s.servers.find((x) => x.id === serverId) ?? null);
   const isCodex = provider === 'codex';
   const isClaude = provider === 'claude';
   const sseClaude = chat.use((s) => s.stateEvent?.claude_permission_mode ?? null);
@@ -49,7 +52,7 @@ export function usePermissionControl({ serverId, name, provider }: Args) {
   useEffect(() => {
     if (!isClaude || refused.current) return;
     const my = ++seq.current;
-    getPermissionModes(name, false)
+    getPermissionModes(name, false, server)
       .then((res) => {
         if (my !== seq.current) return;
         setCurrent(res.current);
@@ -59,16 +62,16 @@ export function usePermissionControl({ serverId, name, provider }: Args) {
       .catch((e: unknown) => {
         if ((e as { code?: string })?.code === 'erro_permissao_so_claude') refused.current = true;
       });
-  }, [isClaude, name, sessionState]);
+  }, [isClaude, name, server, sessionState]);
 
   useEffect(() => {
     if (!isCodex) return;
     let alive = true;
-    getCodexModels(name)
+    getCodexModels(name, server)
       .then((res) => { if (alive && res.current.mode) setCurrent(res.current.mode); })
       .catch(() => { /* sem catálogo o chip fica sem o ícone do modo */ });
     return () => { alive = false; };
-  }, [isCodex, name]);
+  }, [isCodex, name, server]);
 
   // A sonda percorre o ciclo com Shift+Tab e volta; sem ela o servidor devolve [] até ter cache.
   const probe = useCallback(async () => {
@@ -77,7 +80,7 @@ export function usePermissionControl({ serverId, name, provider }: Args) {
     setProbing(true);
     setNotice(null);
     try {
-      const res = await getPermissionModes(name, true);
+      const res = await getPermissionModes(name, true, server);
       if (my !== seq.current) return;
       setCurrent(res.current);
       setModes(res.modes);
@@ -88,7 +91,7 @@ export function usePermissionControl({ serverId, name, provider }: Args) {
     } finally {
       setProbing(false);
     }
-  }, [isClaude, probeable, modes.length, name]);
+  }, [isClaude, probeable, modes.length, name, server]);
 
   // Diz se a troca pegou: o painel só fecha no sucesso, para o aviso de falha ficar à vista.
   const select = useCallback(async (mode: string): Promise<boolean> => {
@@ -98,10 +101,10 @@ export function usePermissionControl({ serverId, name, provider }: Args) {
     try {
       let ficou: string | null | undefined;
       if (isCodex) {
-        ficou = (await setCodexMode(name, mode as 'default' | 'plan')).mode;
+        ficou = (await setCodexMode(name, mode as 'default' | 'plan', server)).mode;
       } else {
         seq.current++;
-        const res = await setPermissionMode(name, mode);
+        const res = await setPermissionMode(name, mode, server);
         // O backend devolve o que FICOU, que pode não ser o pedido.
         ficou = res.mode ?? res.current;
       }
@@ -116,7 +119,7 @@ export function usePermissionControl({ serverId, name, provider }: Args) {
       setNotice(e instanceof Error ? e.message : String(e));
       if (!isCodex) {
         // Mostrar o modo antigo depois de uma troca que pode ter pegado afirma uma permissão falsa.
-        getPermissionModes(name).then((res) => {
+        getPermissionModes(name, false, server).then((res) => {
           setCurrent(res.current);
           if (res.modes.length) setModes(res.modes);
         }).catch(() => {});
@@ -125,7 +128,7 @@ export function usePermissionControl({ serverId, name, provider }: Args) {
     } finally {
       setApplying(false);
     }
-  }, [applying, current, isCodex, name]);
+  }, [applying, current, isCodex, name, server]);
 
   // Só o que o ciclo da sessão alcança; modo novo do CLI entra cru no fim. Sem ciclo lido ainda,
   // o atual fica à vista sozinho.

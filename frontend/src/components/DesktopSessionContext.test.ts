@@ -142,6 +142,7 @@ describe('DesktopSessionContext — toggle na barra (follow-up visual)', () => {
   });
 
   it('aba Arquivos monta o FilesPanel e lista a sessao', async () => {
+    localStorage.setItem('cp_servers', JSON.stringify([{ id: 'srv-test', label: 'T', baseUrl: 'http://x', token: 't' }]));
     const t = montar(false);
     await tick();
     const arq = [...document.querySelectorAll('.aba')][1] as HTMLButtonElement;
@@ -149,7 +150,7 @@ describe('DesktopSessionContext — toggle na barra (follow-up visual)', () => {
     await tick();
     await tick();   // o onMount do FilesPanel -> recarregar -> listFiles
     expect(document.querySelector('.files-panel')).not.toBeNull();
-    expect(listFiles).toHaveBeenCalledWith('sess-1', undefined, true);
+    expect(listFiles).toHaveBeenCalledWith('sess-1', undefined, true, expect.objectContaining({ id: 'srv-test' }));
     unmount(t.comp);
   });
 });

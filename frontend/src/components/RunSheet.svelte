@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   import BottomSheet from './BottomSheet.svelte';
   import { desktop } from '../lib/desktop.svelte';
   import { getRunners, startRun, stopRun, getRunPane, setCustomRunners } from '@hangar/core';
@@ -12,6 +13,7 @@
     onRunningChange?: (running: boolean) => void;
   }
   let { open, sessionName, onClose, onRunningChange }: Props = $props();
+  const sessionServer = useSessionServer();
 
   let detected = $state<Runner[]>([]);
   let custom = $state<Runner[]>([]);
@@ -24,7 +26,7 @@
   async function load() {
     err = null;
     try {
-      const r = await getRunners(sessionName);
+      const r = await getRunners(sessionName, sessionServer());
       detected = r.detected;
       custom = r.custom ?? [];
       running = r.running;
@@ -39,7 +41,7 @@
   async function run(command: string) {
     err = null;
     try {
-      running = await startRun(sessionName, command);
+      running = await startRun(sessionName, command, sessionServer());
       picking = false;
     } catch (e) {
       err = String(e);
@@ -48,7 +50,7 @@
   }
 
   async function stop() {
-    try { await stopRun(sessionName); } catch (e) { err = String(e); }
+    try { await stopRun(sessionName, sessionServer()); } catch (e) { err = String(e); }
     running = null;
     paneText = '';
     picking = true;
@@ -57,7 +59,7 @@
 
   async function poll() {
     if (!running) return;
-    try { paneText = (await getRunPane(sessionName)).pane; } catch { /* transitorio */ }
+    try { paneText = (await getRunPane(sessionName, sessionServer())).pane; } catch { /* transitorio */ }
   }
 
   $effect(() => {
@@ -90,7 +92,7 @@
     savingCustom = true;
     err = null;
     try {
-      custom = await setCustomRunners(sessionName, commands);
+      custom = await setCustomRunners(sessionName, commands, sessionServer());
       formOpen = false;
     } catch (e) {
       err = String(e);

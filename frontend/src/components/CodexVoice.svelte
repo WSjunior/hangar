@@ -6,13 +6,15 @@
   import BottomSheet from './BottomSheet.svelte';
   import { desktop } from '../lib/desktop.svelte';
   import { getActiveId, listServers } from '../lib/auth';
+  import { useSessionServer } from '../lib/sessionServer';
   import { CodexVoiceCall, type VoiceState, type VoiceFailure } from '../lib/codexVoice';
   import { getCodexVoicesForServer } from '@hangar/core';
 
   let { sessionName, disabled = false, onPrepare, onBusyChange }: {
     sessionName: string; disabled?: boolean; onPrepare: () => void; onBusyChange: (busy: boolean) => void;
   } = $props();
-  const server = listServers().find(s => s.id === getActiveId());
+  // Dentro do chat, a máquina da sessão; o ativo só fora dele.
+  const server = useSessionServer()() ?? listServers().find(s => s.id === getActiveId());
   let open = $state(false);
   let callState = $state<VoiceState>('idle');
   let error = $state('');

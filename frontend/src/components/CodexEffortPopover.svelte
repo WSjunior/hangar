@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   // Nível de raciocínio do Codex, em pill própria ao lado da de modelo — a forma do
   // KimiEffortPopover. Os níveis são DO MODELO ATUAL (medido em 30/08/2026: gpt-5.6-sol aceita
   // `ultra`, gpt-5.5 não aceita nem `max`), então a lista sai do `efforts` daquela linha do
@@ -20,6 +21,7 @@
     onClose: () => void;
   }
   let { open, anchor, sessionName, onApplied, onClose }: Props = $props();
+  const sessionServer = useSessionServer();
 
   let niveis = $state<{ value: string; description?: string | null }[]>([]);
   let modelo = $state<string | null>(null);
@@ -36,7 +38,7 @@
     err = null;
     loading = true;
     try {
-      const res = await getCodexModels(sessionName);
+      const res = await getCodexModels(sessionName, sessionServer());
       if (minha !== carga) return;
       // Sem escolha explícita, o `current` traz o default da thread — é o modelo que o próximo
       // turno vai usar, e portanto de quem os níveis têm que sair. Quando nem isso existe (sessão
@@ -64,7 +66,7 @@
     aplicando = lv;
     err = null;
     try {
-      await setCodexModel(sessionName, modelo, lv);
+      await setCodexModel(sessionName, modelo, lv, sessionServer());
     } catch (e) {
       err = e instanceof Error ? e.message : m.comum_falha_aplicar();
       aplicando = null;

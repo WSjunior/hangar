@@ -34,7 +34,7 @@
   async function toggleAmend() {
     amend = !amend;
     if (amend && !message.trim()) {
-      try { message = (await getLastCommitMessage(git.sessionName)).message; }
+      try { message = (await getLastCommitMessage(git.sessionName, git.server())).message; }
       catch { /* repo sem HEAD: o commit devolve o 409 do backend, falha aparece la */ }
     }
   }

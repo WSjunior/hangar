@@ -8,6 +8,7 @@
   //  * o toque curto vira clique só quando o dedo quase não andou — senão todo fim de rolagem
   //    clicava no link que estivesse embaixo.
   import { onDestroy } from 'svelte';
+  import { useSessionServer } from '../lib/sessionServer';
   import * as m from '../paraglide/messages';
   import { navUrl } from '../lib/navRemoto';
   import SegmentedPicker from './SegmentedPicker.svelte';
@@ -18,6 +19,7 @@
     ativo?: boolean;
   }
   let { sessionName, ativo = true }: Props = $props();
+  const sessionServer = useSessionServer();
 
   let ws: WebSocket | null = null;
   let quadro = $state('');              // data: URI do último quadro
@@ -35,7 +37,7 @@
     desligar();
     estado = 'ligando';
     erro = '';
-    const s = new WebSocket(navUrl(sessionName));
+    const s = new WebSocket(navUrl(sessionName, sessionServer()));
     ws = s;
     s.onopen = () => (estado = 'ligado');
     // O motivo do backend é o que separa "esta sessão não tem navegador aberto" de queda de rede —

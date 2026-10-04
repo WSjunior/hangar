@@ -14,6 +14,7 @@ import { forgetServer, setLiveTerminals } from './hangarTerminals.svelte';
 import { getIdentificador } from './peers';
 import { ouvirFechamentoNav, podarNavMortos } from './navegadorPanel.svelte';
 import { aggregateSessions, epocasDeRecriacao, jsonlDaSessao, sweepHidden, type Slot, type Aggregate, type Epocas } from '@hangar/core';
+import { hasOpenChat } from './sessionServer';
 import { avisarSemArmazem, definirArmazem, definirProtegido, estaDesligado, esquecerServidor, onServerRecovered, registrarFalha, registrarSucesso, respondeuRecentemente, retentarAgora, retryAfterMs } from '@hangar/core';
 
 function createSessionsStore() {
@@ -58,7 +59,7 @@ function createSessionsStore() {
   /** O ativo e o dono da URL desta página nunca esperam o prazo: é a máquina que a pessoa está
    *  usando, e um restart do backend não pode deixá-la offline depois que ele já voltou. */
   function intocavel(id: string): boolean {
-    if (id === getActiveId()) return true;
+    if (id === getActiveId() || hasOpenChat(id)) return true;
     const s = servers.find((x) => x.id === id);
     try {
       return !!s?.baseUrl && new URL(s.baseUrl).origin === globalThis.location?.origin;

@@ -3,6 +3,7 @@
   import { desktop } from '../lib/desktop.svelte';
 import * as m from '../paraglide/messages';
   import { getSessions, sendInput } from '@hangar/core';
+  import { useSessionServer } from '../lib/sessionServer';
   import { rotuloEstado, stateColors } from '@hangar/core';
   import type { SessionInfo } from '@hangar/core';
 
@@ -13,6 +14,7 @@ import * as m from '../paraglide/messages';
     onClose: () => void;
   }
   let { open, text, fromSession, onClose }: Props = $props();
+  const sessionServer = useSessionServer();
 
   let sessions = $state<SessionInfo[]>([]);
   // idle: escolhendo | nome da sessao: enviando/enviado (feedback por linha)
@@ -28,7 +30,7 @@ import * as m from '../paraglide/messages';
     const my = ++epoch;
     sentTo = null;
     error = null;
-    getSessions()
+    getSessions(sessionServer())
       .then((all) => { if (my === epoch) sessions = all.filter((s) => s.name !== fromSession && s.state !== 'dead'); })
       .catch(() => { if (my === epoch) error = m.forward_nao_listou(); });
   });
@@ -38,7 +40,7 @@ import * as m from '../paraglide/messages';
     sentTo = target;
     try {
       // Mesmo formato do hangar-send: destino mostra o chip "de: <sessao>" (bolha peer).
-      await sendInput(target, `[de: ${fromSession}] ${text}`);
+      await sendInput(target, `[de: ${fromSession}] ${text}`, sessionServer());
       setTimeout(onClose, 700); // deixa o ✓ visivel um instante
     } catch {
       sentTo = null;

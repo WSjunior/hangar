@@ -11,6 +11,7 @@
   // O TerminalMirror (capture-pane a cada 450ms, texto cru) CONTINUA existindo: e o caminho quando o
   // servidor nao tem `pty` (Windows), onde este aqui abriria morto.
   import ModalDialog from './ModalDialog.svelte';
+  import { useSessionServer } from '../lib/sessionServer';
   import { TermSocket, termUrlForServer, sessionExistsOnServer } from '../lib/term';
   import { novoTerminal, temaDe } from '../lib/xterm';
   import { listServers, getActiveId } from '../lib/auth';
@@ -31,13 +32,14 @@
     headless?: boolean;
   }
   let { open, sessionName, onClose, headless = false }: Props = $props();
+  const sessionServer = useSessionServer();
 
   // Alvo do cano: '' = a sessao; senao o id do terminal de atalho (um socket so, troca = reconecta).
   let alvoAtalho = $state('');
   // O alvo é um terminal No Hangar (sem sessão dona) e não um atalho da sessão.
   let hangarTarget = $state(false);
   let scErro = $state<string | null>(null);
-  const scKey = $derived(`${getActiveId() ?? ''}::${sessionName}`);
+  const scKey = $derived(`${sessionServer()?.id ?? getActiveId() ?? ''}::${sessionName}`);
   const scLista = $derived(shortcutTerminalsOf(scKey));
   const hgServerId = $derived(scKey.split('::')[0] ?? '');
   const hangarList = $derived(hangarOf(hgServerId));
@@ -159,10 +161,9 @@
     if (term) term.options.disableStdin = !ok;
   });
 
-  // Servidor da sessao. No celular a rota ja aponta o ATIVO pra sessao aberta (App.applyRouteServer)
-  // — o mesmo servidor que o resto do Chat usa nos fetches desta tela.
+  // Servidor da sessao, fixado pelo Chat na entrada; o ativo pode ter mudado depois.
   function servidorAtivo() {
-    const id = getActiveId();
+    const id = sessionServer()?.id ?? getActiveId();
     return listServers().find((s) => s.id === id) ?? null;
   }
 

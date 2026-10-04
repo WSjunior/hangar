@@ -14,6 +14,7 @@
   import CitadosView from './CitadosView.svelte';
   import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import { fileUrl, resolverCitados, searchFiles } from '@hangar/core';
+  import { sessionServerFor } from '../../lib/sessionServer';
   import { acumularCitados, estadoVazio, type Citado } from '@hangar/core';
   import type { ChatEvent } from '@hangar/core';
 
@@ -74,7 +75,7 @@
       pendentes.clear();
       lote.forEach((c) => emVoo.add(c));
       try {
-        const r = await resolverCitados(sessionName, lote);
+        const r = await resolverCitados(sessionName, lote, sessionServerFor(serverId)());
         if (!vivo) return;
         for (const [cru, v] of Object.entries(r.ok)) resolvidos.set(cru, v);
         for (const cru of r.faltam) ocultos.add(cru);
@@ -124,7 +125,7 @@
   async function abrirCitado(c: Citado) {
     if (c.relativo === null) {
       // Fora do cwd: texto abre no visor do app; mídia/pdf/html vão pro navegador.
-      if (MIDIA.test(c.cru)) { window.open(fileUrl(sessionName, c.cru), '_blank', 'noopener'); return; }
+      if (MIDIA.test(c.cru)) { window.open(fileUrl(sessionName, c.cru, false, sessionServerFor(serverId)()), '_blank', 'noopener'); return; }
       if (!(await store.abrirExterno(c.cru))) ocultos.add(c.cru);
       return;
     }
@@ -133,7 +134,7 @@
     // procura pelo nome e abre o que termina com o mesmo sufixo, antes de desistir. Homonimo em
     // duas pastas: o sufixo mais longo (o `relativo` inteiro) vence; so o nome puro e o plano B.
     try {
-      const r = await searchFiles(sessionName, c.nome, 'names');
+      const r = await searchFiles(sessionName, c.nome, 'names', sessionServerFor(serverId)());
       const hit = r.hits.find((h) => h.path === c.relativo || h.path.endsWith('/' + c.relativo))
         ?? r.hits.find((h) => h.path === c.nome || h.path.endsWith('/' + c.nome));
       if (hit && await store.abrir(hit.path)) return;

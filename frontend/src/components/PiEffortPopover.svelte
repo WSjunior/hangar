@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   // Nivel de raciocinio do Pi, em pill propria ao lado da de modelo — como no opencode, onde o
   // nivel tem seu proprio botao e sua propria lista curta. Antes isto era uma secao dentro da folha
   // de modelo; separar deixa a troca de nivel a um clique, sem passar pela lista de 390 modelos.
@@ -18,6 +19,7 @@
     onClose: () => void;
   }
   let { open, anchor, sessionName, onApplied, onClose }: Props = $props();
+  const sessionServer = useSessionServer();
 
   let levels = $state<string[]>([]);
   let atual = $state<string | null>(null);
@@ -34,7 +36,7 @@
     err = null;
     loading = true;
     try {
-      const res = await getPiModels(sessionName);
+      const res = await getPiModels(sessionName, sessionServer());
       if (minha !== carga) return;
       levels = res.levels ?? [];
       atual = res.thinking;
@@ -59,7 +61,7 @@
     aplicando = lv;
     err = null;
     try {
-      const res = await setPiModel(sessionName, { effort: lv });
+      const res = await setPiModel(sessionName, { effort: lv }, sessionServer());
       levels = res.levels;
       atual = res.thinking;
       onApplied(res.thinking);

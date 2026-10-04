@@ -15,6 +15,7 @@
 </script>
 
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   import { tick, onDestroy } from 'svelte';
   import * as m from '../paraglide/messages';
   import GroupGlyph from './icons/GroupGlyph.svelte';
@@ -141,6 +142,7 @@ import { cachePrazo } from '../lib/cachePrazo';
     estreito = false,
     voiceBeta = false,
   }: Props = $props();
+  const sessionServer = useSessionServer();
 
   // OU, não `??`: a janela estreita (celular) manda sozinha, e a coluna estreita no desktop soma.
   const compacto = $derived(estreito || !desktop.atual);
@@ -204,7 +206,7 @@ import { cachePrazo } from '../lib/cachePrazo';
     void aoAquecer(sn, aquecimento.signal).then((liberado) => {
       if (liberado === false || aquecimento.signal.aborted) return;
       if (sn !== sessionName) return;   // trocou de sessao na espera: esta busca nao serve mais
-      getCommands(sn)
+      getCommands(sn, sessionServer())
         .then((c) => {
           commandCache.set(key, c);
           if (sn === sessionName) commands = c;
@@ -255,7 +257,7 @@ import { cachePrazo } from '../lib/cachePrazo';
   $effect(() => {
     if (!plusOpen || !sessionName) return;
     let vivo = true;
-    void listUploads(sessionName)
+    void listUploads(sessionName, sessionServer())
       .then(({ files }) => {
         if (!vivo) return;
         recentes = files
@@ -282,7 +284,7 @@ import { cachePrazo } from '../lib/cachePrazo';
     try {
       // Teto: o mesmo do upload. Sem ele, rede caída deixa a promessa pendurada e a miniatura
       // presa em "baixando" pra sempre.
-      const res = await fetch(uploadUrl(sessionName, filename), {
+      const res = await fetch(uploadUrl(sessionName, filename, false, sessionServer()), {
         signal: AbortSignal.timeout(180_000),
       });
       if (!res.ok) throw new Error(String(res.status));
@@ -354,7 +356,7 @@ import { cachePrazo } from '../lib/cachePrazo';
       // sem um deles a barra restaurada seria um player quebrado ou botoes que nao respondem.
       if (!d?.arquivo || typeof d.raw !== 'string') return null;
       return {
-        url: uploadUrl(sessionName, d.arquivo),
+        url: uploadUrl(sessionName, d.arquivo, false, sessionServer()),
         arquivo: d.arquivo,
         before: typeof d.before === 'string' ? d.before + (d.after === undefined && d.before ? ' ' : '') : '',
         after: typeof d.after === 'string' ? d.after : '',
@@ -580,7 +582,7 @@ import { cachePrazo } from '../lib/cachePrazo';
       try {
         // Sonda (sondar=1), como a pílula: sem ela o servidor devolve [] enquanto não tem cache e
         // o atalho morria calado até a pílula ser aberta uma vez.
-        const res = await getPermissionModes(sn, true);
+        const res = await getPermissionModes(sn, true, sessionServer());
         if (seq !== permSeq || sn !== sessionName) return;
         permCurrent = res.current;
         permModes = res.modes;
@@ -700,7 +702,7 @@ import { cachePrazo } from '../lib/cachePrazo';
     sendError = '';
     const sn = sessionName;
     try {
-      const res = await setCodexMode(sn, alvo);
+      const res = await setCodexMode(sn, alvo, sessionServer());
       if (sn === sessionName) modoCodex = res.mode ?? modoCodex;
     } catch (e) {
       if (sn === sessionName) sendError = e instanceof Error ? e.message : m.comum_falha_aplicar();
@@ -716,7 +718,7 @@ import { cachePrazo } from '../lib/cachePrazo';
     const sn = sessionName;
     let active = true;
     codexModel = null; codexEffort = null; modoCodex = null;
-    getCodexModels(sn)
+    getCodexModels(sn, sessionServer())
       .then((res) => {
         if (!active) return;
         codexModel = res.current.model;
@@ -759,7 +761,7 @@ import { cachePrazo } from '../lib/cachePrazo';
     if (!isCodex || !headless) return;
     const sn = sessionName;
     let active = true;
-    getCodexPermissions(sn)
+    getCodexPermissions(sn, sessionServer())
       .then((res) => { if (active && seq === codexPermSeq && sn === sessionName) codexPerm = res.current; })
       .catch(() => {});
     return () => { active = false; };
@@ -802,7 +804,7 @@ import { cachePrazo } from '../lib/cachePrazo';
   $effect(() => {
     if (!isPi) return;
     const sn = sessionName;
-    getPiModels(sn)
+    getPiModels(sn, sessionServer())
       .then((res) => {
         piModel = res.current?.name ?? res.current?.id ?? null;
         piEffort = res.thinking;
@@ -864,9 +866,9 @@ import { cachePrazo } from '../lib/cachePrazo';
     void aoAquecer(sn, aquecimento.signal).then((liberado) => {
       if (liberado === false || aquecimento.signal.aborted) return;
       if (sn !== sessionName) return;
-      if (kimi) void getKimiModels(sn).catch(() => {});
-      else if (pi) void getPiModels(sn).catch(() => {});
-      else if (codex) void getCodexModels(sn).catch(() => {});
+      if (kimi) void getKimiModels(sn, sessionServer()).catch(() => {});
+      else if (pi) void getPiModels(sn, sessionServer()).catch(() => {});
+      else if (codex) void getCodexModels(sn, sessionServer()).catch(() => {});
     });
     return () => aquecimento.abort();
   });
@@ -892,7 +894,7 @@ import { cachePrazo } from '../lib/cachePrazo';
     void aoAquecer(sn, aquecimento.signal).then((liberado) => {
       if (liberado === false || aquecimento.signal.aborted) return;
       if (seq !== permSeq) return;
-      getPermissionModes(sn, false)
+      getPermissionModes(sn, false, sessionServer())
         .then((res) => {
           if (seq !== permSeq || sn !== sessionName) return;
           permCurrent = res.current;
@@ -916,7 +918,7 @@ import { cachePrazo } from '../lib/cachePrazo';
     const sn = sessionName;
     const seq = ++permSeq;
     try {
-      const res = await getPermissionModes(sn, true);
+      const res = await getPermissionModes(sn, true, sessionServer());
       if (seq !== permSeq || sn !== sessionName) return;
       permCurrent = res.current;
       permPreviousNonPlan = res.previous_non_plan ?? permPreviousNonPlan;
@@ -938,7 +940,7 @@ import { cachePrazo } from '../lib/cachePrazo';
   async function handlePermApply(modo: string): Promise<void> {
     permError = null;
     try {
-      const res = await setPermissionMode(sessionName, modo);
+      const res = await setPermissionMode(sessionName, modo, sessionServer());
       // backend devolve o que FICOU (pode ser diferente do pedido se houve clamp/teto)
       const ficou = res.mode ?? res.current ?? modo;
       permCurrent = ficou;
@@ -950,7 +952,7 @@ import { cachePrazo } from '../lib/cachePrazo';
       permError = msg;
       // tenta re-ler o atual para refletir o que ficou de verdade
       try {
-        const cur = await getPermissionModes(sessionName);
+        const cur = await getPermissionModes(sessionName, false, sessionServer());
         permCurrent = cur.current;
         permPreviousNonPlan = cur.previous_non_plan ?? permPreviousNonPlan;
         permModes = cur.modes;
@@ -990,7 +992,7 @@ import { cachePrazo } from '../lib/cachePrazo';
   // nao deixa o pill mostrando uma escolha que nao pegou). 'default' resolve pra um modelo
   // concreto -> deixa o statusline ditar o rotulo; os demais aparecem capitalizados.
   function handleApply(body: ModelEffortBody, label?: string): Promise<void> {
-    return setModelEffort(sessionName, body).then((res) => {
+    return setModelEffort(sessionName, body, sessionServer()).then((res) => {
       // `pending_confirm` = o Claude abriu "Change effort level?" no terminal e ESPERA o usuario.
       // Adiantar o pill aqui mostraria um nivel que so vale se ele tocar "Yes" — e se tocar "No",
       // o pill ficaria mentindo ate a proxima statusline. Deixa a conversa contar o desfecho.
@@ -1262,7 +1264,7 @@ import { cachePrazo } from '../lib/cachePrazo';
         // O estilo vai JUNTO, e nao e lido da config no servidor: e este rotulo que a pessoa leu na
         // pill antes de falar. Ver queryTranscribe em lib/api.ts.
         estilo: ditadoEstilo.pronto ? ditadoEstilo.valor : undefined,
-      });
+      }, sessionServer());
       const t = text.trim();
       if (!t) {
         recError = m.composer_transcricao_vazia();
@@ -1809,7 +1811,7 @@ import { cachePrazo } from '../lib/cachePrazo';
           // direto pra "pronto" e a fila não aparecia.
           a.pct = 0;
           const { path, frames, transcript } = await uploadFile(
-            sessionName, arquivo, (pct) => { a.pct = pct; });
+            sessionName, arquivo, (pct) => { a.pct = pct; }, sessionServer());
           a.pct = 100;
           parts.push((a.isImage ? `📎 ${m.board_imagem()}: ` : `📎 ${m.board_arquivo()}: `) + path);
           // Video: o backend extraiu quadros ao longo da duracao e transcreveu a fala. Os quadros
@@ -2625,7 +2627,7 @@ import { cachePrazo } from '../lib/cachePrazo';
                 class:baixando={reanexando === r.filename}
                 disabled={!!reanexando}
                 onclick={() => void reanexar(r.filename)}>
-          <img src={uploadUrl(sessionName, r.filename)} alt="" loading="lazy" />
+          <img src={uploadUrl(sessionName, r.filename, false, sessionServer())} alt="" loading="lazy" />
         </button>
       {/each}
     </div>

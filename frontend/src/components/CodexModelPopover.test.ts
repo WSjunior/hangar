@@ -73,7 +73,7 @@ describe('CodexModelPopover', () => {
     await flush();
     linhas()[0].click();
     await flush();
-    expect(apiMock.setCodexModel).toHaveBeenCalledWith('x', 'gpt-5.6-sol', 'low');
+    expect(apiMock.setCodexModel).toHaveBeenCalledWith('x', 'gpt-5.6-sol', 'low', undefined);
     expect(onApplied).toHaveBeenCalledWith('gpt-5.6-sol', 'low');
     unmount(comp);
   });
@@ -85,7 +85,7 @@ describe('CodexModelPopover', () => {
     await flush();
     linhas()[1].click();
     await flush();
-    expect(apiMock.setCodexModel).toHaveBeenCalledWith('x', 'gpt-5.5', 'xhigh');
+    expect(apiMock.setCodexModel).toHaveBeenCalledWith('x', 'gpt-5.5', 'xhigh', undefined);
     unmount(comp);
   });
 
@@ -116,7 +116,7 @@ describe('CodexEffortPopover', () => {
     await flush();
     linhas()[0].click();
     await flush();
-    expect(apiMock.setCodexModel).toHaveBeenCalledWith('x', 'gpt-5.5', 'low');
+    expect(apiMock.setCodexModel).toHaveBeenCalledWith('x', 'gpt-5.5', 'low', undefined);
     expect(onApplied).toHaveBeenCalledWith('low');
     unmount(comp);
   });

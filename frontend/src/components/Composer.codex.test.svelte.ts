@@ -43,11 +43,11 @@ it('Shift+Tab alterna Planejar e Normal sem mudar permissões', async () => {
   const textarea = document.querySelector('textarea')!;
   textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }));
   await flush();
-  expect(api.setCodexMode).toHaveBeenLastCalledWith('codex-test', 'plan');
+  expect(api.setCodexMode).toHaveBeenLastCalledWith('codex-test', 'plan', undefined);
   expect(button(m.codex_modo_plan()).getAttribute('aria-pressed')).toBe('true');
   button(m.codex_modo_plan()).click(); await flush();
   button(m.codex_modo_normal()).click(); await flush();
-  expect(api.setCodexMode).toHaveBeenLastCalledWith('codex-test', 'default');
+  expect(api.setCodexMode).toHaveBeenLastCalledWith('codex-test', 'default', undefined);
 });
 
 it('mudanças recebidas do terminal atualizam o esforço e o modo', async () => {
@@ -65,7 +65,7 @@ it('Codex headless mostra a permissão conhecida mesmo durante o turno', async (
   (props as unknown as { headless: boolean }).headless = true;
   (props as unknown as { estreito: boolean }).estreito = true;
   await flush();
-  expect(api.getCodexPermissions).toHaveBeenCalledWith('codex-test');
+  expect(api.getCodexPermissions).toHaveBeenCalledWith('codex-test', undefined);
   const permission = document.querySelector<HTMLButtonElement>('.pill-duo button[aria-label="Full Access"]');
   expect(permission).not.toBeNull();
   expect(permission?.closest('.status-tab')).toBeNull();
@@ -103,7 +103,7 @@ it('reconexão sem modo confirmado mostra Modo e Shift+Tab pede Planejar', async
     key: 'Tab', shiftKey: true, bubbles: true, cancelable: true,
   }));
   await flush();
-  expect(api.setCodexMode).toHaveBeenLastCalledWith('codex-test', 'plan');
+  expect(api.setCodexMode).toHaveBeenLastCalledWith('codex-test', 'plan', undefined);
 });
 
 it('lista skills com barra e preenche argumentos antes do envio', async () => {
