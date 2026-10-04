@@ -17,7 +17,8 @@
   import ConfigIcone from './ConfigIcone.svelte';
   import * as m from '../../paraglide/messages';
   import { engineModelos, engineModelosForServer, putEngine, putEngineForServer,
-           engineCliproxy, engineCliproxyForServer, criarConta, type ModeloProvedor } from '@hangar/core';
+           engineCliproxy, engineCliproxyForServer, criarConta, type ModeloProvedor,
+           putCliproxyManagementKey, putCliproxyManagementKeyForServer } from '@hangar/core';
   import { sincronizarNosAgentes, type ResultadoSync } from '../../lib/credenciais';
   import type { Server } from '../../lib/auth';
   import CodexContaLogin from './CodexContaLogin.svelte';
@@ -107,6 +108,12 @@
   let cpAviso = $state('');
   let cpErro = $state(false);
   let deteccao = 0;
+  // Contas ChatGPT do proxy sem nome: só a senha de gerenciamento deixa o proxy gravá-lo.
+  let cpFaltam = $state(0);
+  let cpSenha = $state('');
+  let cpNomeErro = $state('');
+  let cpSalvandoSenha = $state(false);
+  let cpNomeadas = $state(false);
   // Sem chave só enquanto a URL é a detectada: o servidor recusa preencher a chave pra outra.
   const semChave = $derived(cpEstado === 'achou' && url.trim() === cpBase);
 
@@ -123,6 +130,7 @@
     cpEstado = null;
     cpAviso = '';
     cpErro = false;
+    cpFaltam = 0; cpNomeErro = ''; cpSenha = ''; cpSalvandoSenha = false; cpNomeadas = false;
     const meu = ++deteccao;
     if (item.id === 'cliproxy') void detectarCliproxy(meu);
   }
@@ -139,6 +147,8 @@
         modelos = r.models;
         modeloEscolhido = r.models[0].id;
         cpAviso = m.cliproxy_found({ url: cpBase });
+        cpFaltam = r.unnamed_accounts ?? 0;
+        cpNomeErro = r.naming_error ?? '';
         cpEstado = 'achou';
         return;
       }
@@ -156,9 +166,30 @@
     }
   }
 
+  async function salvarSenhaCliproxy() {
+    const meu = deteccao;
+    cpSalvandoSenha = true; cpNomeErro = ''; cpNomeadas = false;
+    try {
+      const r = apiTarget ? await putCliproxyManagementKeyForServer(apiTarget, cpSenha.trim())
+        : await putCliproxyManagementKey(cpSenha.trim());
+      // Voltou ou trocou de provedor com o pedido em voo: a resposta é da abertura anterior.
+      if (meu !== deteccao) return;
+      cpSenha = '';
+      cpFaltam = r.unnamed_accounts ?? 0;
+      cpNomeErro = r.naming_error ?? '';
+      cpNomeadas = !cpNomeErro && cpFaltam === 0;
+    } catch (e) {
+      if (meu !== deteccao) return;
+      cpNomeErro = e instanceof Error && e.message ? e.message : String(e);
+    } finally {
+      cpSalvandoSenha = false;
+    }
+  }
+
   // Voltar fecha só a etapa local; a tentativa OAuth continua consultável no servidor.
   function voltar() {
     erro = '';
+    cpSenha = '';
     deteccao++;
     if (escolhido) { escolhido = null; return; }
     escolhido = null;
@@ -322,6 +353,22 @@
            a 200k. Salvar ali já faz PUT + sincronização; aqui só a lista de fora é recarregada. -->
       <p class="nc-leg">{escolhido.desc}</p>
       {#if cpAviso}{@render avisoCliproxy()}{/if}
+      {#if semChave && cpFaltam > 0}
+        <div class="nc-cp-senha">
+          <p class="nc-modelos-vazio">{m.cliproxy_sem_nome({ n: cpFaltam })}</p>
+          <div class="nc-cp-linha">
+            <input class="nc-input" type="password" autocomplete="off" bind:value={cpSenha}
+                   placeholder={m.cliproxy_senha_placeholder()} aria-label={m.cliproxy_senha_placeholder()} />
+            <button type="button" class="nc-btn" onclick={salvarSenhaCliproxy}
+                    disabled={!cpSenha.trim() || cpSalvandoSenha}>{m.cliproxy_senha_salvar()}</button>
+          </div>
+          {#if cpNomeErro}<p class="nc-erro" role="alert">{cpNomeErro}</p>{/if}
+        </div>
+      {:else if semChave && cpNomeErro}
+        <p class="nc-erro nc-cp" role="alert">{cpNomeErro}</p>
+      {:else if semChave && cpNomeadas}
+        <p class="nc-modelos-ok nc-cp" role="status">{m.cliproxy_nomeadas()}</p>
+      {/if}
       <!-- Só monta depois da detecção: o MotorForm tira o retrato do `motor` ao nascer. -->
       <MotorForm {apiTarget} criando nome="" {nomesExistentes}
         motor={{ base_url: url, model: semChave ? modeloEscolhido : '', api_key: '', api_key_definida: false,
@@ -468,7 +515,7 @@
   .nc-campo > span { font-size: 11.5px; color: var(--text-secondary); }
   /* Campo é superfície de ENTRADA: --surface-inset (não --bg-base cru), que acompanha o slider de
      transparência quando há papel de parede. */
-  .nc-campo input, .nc-select {
+  .nc-campo input, .nc-select, .nc-input {
     background: var(--surface-inset); border: 1px solid var(--border-subtle);
     border-radius: 8px; color: var(--text-primary); padding: 7px 9px;
     font: inherit; font-size: var(--text-sm); width: 100%;
@@ -484,6 +531,9 @@
   .nc-modelos-ok { color: var(--text-muted); font-size: 11px; margin: var(--space-1) 0 0; }
   .nc-erro { color: var(--error); font-size: var(--text-xs); margin: var(--space-1) 0 0; }
   .nc-cp { margin: 0 0 var(--space-3); }
+  .nc-cp-senha { display: flex; flex-direction: column; gap: var(--space-2); margin: 0 0 var(--space-3); }
+  .nc-cp-linha { display: flex; gap: var(--space-2); align-items: center; }
+  .nc-cp-linha .nc-input { flex: 1; min-width: 0; }
   .nc-sync-linha { margin: 3px 0 0; font-size: var(--text-xs); color: var(--text-secondary); }
   .nc-sync-linha b { color: var(--text-primary); font-weight: 600; margin-right: 6px; }
   /* "não instalado aqui" é esperado e fica apagado; falha de GRAVAÇÃO usa a cor de erro, igual ao

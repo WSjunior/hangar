@@ -1,6 +1,8 @@
 """CLIProxyAPI local: a chave sai do config dele direto para o engines.json, nunca para a tela."""
 import asyncio
 import json
+import urllib.error
+import urllib.request
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -164,6 +166,10 @@ CHAVE = "chave-de-teste-cliproxy"
 def _isola(tmp_path, monkeypatch):
     monkeypatch.setattr(eng, "caminho", lambda: tmp_path / "engines.json")
     monkeypatch.setattr(cliproxy, "config_path", lambda: tmp_path / "config.yaml")
+    # A detecção também nomeia contas: sem isto ela leria as credenciais e a senha de quem roda a suíte.
+    monkeypatch.setattr(cliproxy, "_mgmt_path", lambda: tmp_path / "mgmt.key")
+    monkeypatch.setattr(cliproxy, "_chave_recusada", None)
+    monkeypatch.setattr(cliproxy_accounts, "auth_dir", lambda: tmp_path / "sem-proxy")
     monkeypatch.setattr(settings, "auth_token", TOKEN)
 
 
@@ -327,7 +333,8 @@ def test_get_devolve_modelos_sem_imagem_e_sem_a_chave(cli, tmp_path, monkeypatch
     r = cli.get("/api/engines/cliproxy", headers=AUTH)
     assert r.status_code == 200
     assert r.json() == {"found": True, "base_url": "http://127.0.0.1:8317", "error": None,
-                        "models": [{"id": "gpt-5.5", "context_length": None, "vision": None}]}
+                        "models": [{"id": "gpt-5.5", "context_length": None, "vision": None}],
+                        "unnamed_accounts": 0, "management_key_set": False, "naming_error": None}
     assert vistos == [("http://127.0.0.1:8317", CHAVE)]
     assert CHAVE not in r.text
 
@@ -355,3 +362,87 @@ def test_put_com_use_cliproxy_key_para_outro_endereco_e_recusado(cli, tmp_path):
         "base_url": "https://outro.example.com", "model": "gpt-5.5", "use_cliproxy_key": True})
     assert r.status_code == 400
     assert "x" not in eng.listar()
+
+
+def test_prefixo_sai_do_email_e_ganha_o_dominio_se_ja_existe():
+    assert cliproxy.prefix_from_email("Conta-200-2@example.test", set()) == "conta-200-2"
+    assert cliproxy.prefix_from_email("ana@gmail.com", {"ana"}) == "ana-gmail"
+    assert cliproxy.prefix_from_email("ana@gmail.com", {"ana", "ana-gmail"}) is None
+    assert cliproxy.prefix_from_email("", set()) is None
+
+
+def _patches(monkeypatch, status=200, grava=None):
+    """Proxy falso: `grava` é o arquivo onde ele põe o prefixo pedido, como o de verdade faz."""
+    vistos = []
+
+    class _Resposta:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def _abrir(req, timeout=None):
+        vistos.append(req)
+        if status != 200:
+            raise urllib.error.HTTPError(req.full_url, status, "x", None, None)
+        if grava is not None:
+            grava.write_text(json.dumps({**json.loads(grava.read_text()), "prefix": json.loads(req.data)["prefix"]}))
+        return _Resposta()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _abrir)
+    return vistos
+
+
+def test_nomeia_pela_rota_do_proxy(tmp_path, monkeypatch):
+    _, _, credential = _proxy_accounts(tmp_path, monkeypatch)
+    _config(tmp_path, f"port: 8317\napi-keys:\n  - {CHAVE}\n")
+    data = json.loads(credential.read_text())
+    credential.write_text(json.dumps({**data, "prefix": "hangar-0cb84365d044590104eccd15"}))
+    vistos = _patches(monkeypatch, grava=credential)
+    assert cliproxy.name_accounts() == []
+    assert vistos == []
+    cliproxy.set_management_key("senha-mgmt")
+    assert (tmp_path / "mgmt.key").stat().st_mode & 0o777 == 0o600
+    assert cliproxy.name_accounts() == ["one"]
+    req = vistos[0]
+    assert (req.method, req.full_url) == ("PATCH", "http://127.0.0.1:8317/v0/management/auth-files/fields")
+    assert req.get_header("X-management-key") == "senha-mgmt"
+    assert json.loads(req.data) == {"name": "codex-one.json", "prefix": "one"}
+    assert cliproxy.unnamed_accounts() == []
+
+
+def test_proxy_que_aceita_e_nao_grava_vira_erro(tmp_path, monkeypatch):
+    _, _, credential = _proxy_accounts(tmp_path, monkeypatch)
+    _config(tmp_path, f"port: 8317\napi-keys:\n  - {CHAVE}\n")
+    data = json.loads(credential.read_text())
+    data.pop("prefix")
+    credential.write_text(json.dumps(data))
+    _patches(monkeypatch)
+    cliproxy.set_management_key("senha-mgmt")
+    with pytest.raises(ValueError, match="não o gravou"):
+        cliproxy.name_accounts()
+
+
+def test_nome_escolhido_a_mao_fica(tmp_path, monkeypatch):
+    _proxy_accounts(tmp_path, monkeypatch)
+    _config(tmp_path, f"port: 8317\napi-keys:\n  - {CHAVE}\n")
+    cliproxy.set_management_key("senha-mgmt")
+    vistos = _patches(monkeypatch)
+    assert cliproxy.unnamed_accounts() == []
+    assert cliproxy.name_accounts() == []
+    assert vistos == []
+
+
+def test_put_da_senha_nao_devolve_o_valor_e_mostra_a_recusa(cli, tmp_path, monkeypatch):
+    _, _, credential = _proxy_accounts(tmp_path, monkeypatch)
+    _config(tmp_path, f"port: 8317\napi-keys:\n  - {CHAVE}\n")
+    data = json.loads(credential.read_text())
+    data.pop("prefix")
+    credential.write_text(json.dumps(data))
+    _patches(monkeypatch, status=401)
+    r = cli.put("/api/engines/cliproxy/management-key", headers=AUTH, json={"management_key": "errada"})
+    assert r.status_code == 200
+    assert r.json() == {"unnamed_accounts": 1, "management_key_set": True,
+                        "naming_error": "CLIProxyAPI recusou a senha de gerenciamento"}
+    assert "errada" not in r.text

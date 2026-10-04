@@ -1910,6 +1910,20 @@ export interface CliproxyDeteccao {
   base_url: string | null;
   models: ModeloProvedor[];
   error: string | null;
+  // Contas ChatGPT ainda sem nome no proxy: a tela pede a senha de gerenciamento só quando > 0.
+  unnamed_accounts?: number | null;
+  management_key_set?: boolean;
+  naming_error?: string | null;
+}
+
+export type CliproxyNomeacao = Required<Pick<CliproxyDeteccao, 'unnamed_accounts' | 'management_key_set' | 'naming_error'>>;
+
+export function putCliproxyManagementKey(management_key: string): Promise<CliproxyNomeacao> {
+  return apiFetch('/api/engines/cliproxy/management-key', { method: 'PUT', body: JSON.stringify({ management_key }) });
+}
+
+export function putCliproxyManagementKeyForServer(s: Server, management_key: string): Promise<CliproxyNomeacao> {
+  return apiFetchForServer(s, '/api/engines/cliproxy/management-key', { method: 'PUT', body: JSON.stringify({ management_key }) });
 }
 
 export function engineCliproxy(): Promise<CliproxyDeteccao> {

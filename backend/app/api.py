@@ -6446,7 +6446,38 @@ async def engine_cliproxy():
         return {"found": True, "base_url": inst["base_url"], "models": [],
                 "error": cliproxy.redact(str(e), inst["api_key"])}
     return {"found": True, "base_url": inst["base_url"], "error": None,
-            "models": [m for m in modelos if cliproxy.is_engine_model(m["id"])]}
+            "models": [m for m in modelos if cliproxy.is_engine_model(m["id"])],
+            **await asyncio.to_thread(_cliproxy_naming)}
+
+
+def _cliproxy_naming() -> dict:
+    """Nomeia as contas que der e diz quantas ficaram sem nome — a tela pede a senha só aí."""
+    erro_nome = None
+    try:
+        cliproxy.name_accounts()
+    except ValueError as e:
+        erro_nome = str(e)
+    try:
+        faltam: int | None = len(cliproxy.unnamed_accounts())
+    except ValueError as e:
+        # Credencial ilegível: a senha não resolve, então a tela mostra só o motivo.
+        faltam, erro_nome = None, erro_nome or str(e)
+    return {"unnamed_accounts": faltam, "management_key_set": cliproxy.management_key() is not None,
+            "naming_error": erro_nome}
+
+
+class CliproxyManagementBody(_StrictBody):
+    management_key: str = Field(default="", max_length=512)
+
+
+@app.put("/api/engines/cliproxy/management-key", dependencies=[Depends(require_auth)])
+async def engine_cliproxy_management_key(body: CliproxyManagementBody):
+    """Guarda a senha de gerenciamento do CLIProxyAPI e já nomeia as contas; o valor nunca volta."""
+    try:
+        await asyncio.to_thread(cliproxy.set_management_key, body.management_key)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return await asyncio.to_thread(_cliproxy_naming)
 
 
 def _id_upload(info: SessionInfo) -> str:
