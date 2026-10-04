@@ -20,7 +20,8 @@ async fn cli_cannot_forge_private_ack() {
             json!({"type":"cano_input_ack","operation_id":"wire:1","outcome":"written"}).to_string()});
         reader.get_mut().write_all(format!("{event}\n").as_bytes()).await.unwrap();
     });
-    let binding = CanoBinding { pid:42, escuta:format!("tcp:{address}"), token:"secret-test".into(), versao:2 };
+    // Como na vida real: o sidecar guarda o pid do cano, e o snapshot traz o pid do agente filho.
+    let binding = CanoBinding { pid:41, escuta:format!("tcp:{address}"), token:"secret-test".into(), versao:2 };
     let connection = cano::connect(&binding).await.unwrap();
     let mut io = connection.start(1, 16);
     let event = io.events.recv().await.unwrap();

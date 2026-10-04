@@ -45,6 +45,46 @@ pub struct AppState {
     pub reports: Arc<crate::costs::ReportCache>,
     pub origins_home: std::path::PathBuf,
     pub origins: Mutex<indexmap::IndexMap<std::path::PathBuf, crate::costs::origins::Origins>>,
+    pub fallback: Fallback,
+}
+
+const FALLBACK_AFTER: u32 = 4;
+const MAX_FALLBACK: usize = 1024;
+
+/// Falhas seguidas do Rust por (sessão, rota). Na 4ª (3 + 1 nova tentativa) a rota daquela sessão
+/// fica com o Python até o processo reiniciar; as outras sessões seguem no Rust.
+#[derive(Default)]
+pub struct Fallback {
+    failures: Mutex<std::collections::HashMap<(String, &'static str), u32>>,
+}
+
+impl Fallback {
+    pub fn on_python(&self, name: &str, route: &'static str) -> bool {
+        self.failures.lock().unwrap().get(&(name.to_owned(), route)).is_some_and(|n| *n >= FALLBACK_AFTER)
+    }
+
+    /// Conta a falha e devolve quantas seguidas. Passou para o Python: uma linha só, nesta hora.
+    // ponytail: mapa cheio deixa sessão nova sem contagem (segue tentando o Rust); limpeza só se encher na prática.
+    pub fn failed(&self, name: &str, route: &'static str, code: &str) -> u32 {
+        let mut failures = self.failures.lock().unwrap();
+        let key = (name.to_owned(), route);
+        if !failures.contains_key(&key) && failures.len() >= MAX_FALLBACK {
+            if crate::warn_limit::allow(None, "fallback_map_full") {
+                tracing::warn!("contagem de falhas cheia: {route} {name} motivo={code} segue tentando o Rust");
+            }
+            return 0;
+        }
+        let n = failures.entry(key).or_insert(0);
+        *n = n.saturating_add(1);
+        if *n == FALLBACK_AFTER {
+            tracing::warn!("parte passou para o Python: {route} {name} motivo={code}");
+        }
+        *n
+    }
+
+    pub fn succeeded(&self, name: &str, route: &'static str) {
+        self.failures.lock().unwrap().remove(&(name.to_owned(), route));
+    }
 }
 
 impl AppState {
@@ -75,7 +115,7 @@ impl AppState {
         AppState { auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None,
             costs, fx, reports: Arc::new(crate::costs::ReportCache::default()),
             origins_home: std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default()),
-            origins: Mutex::new(indexmap::IndexMap::new()) }
+            origins: Mutex::new(indexmap::IndexMap::new()), fallback: Fallback::default() }
     }
 
     pub(crate) fn skill_origins(&self, repo: &std::path::Path) -> crate::costs::origins::Origins {
@@ -95,7 +135,9 @@ impl AppState {
             }
         }
         let v = fetch_info(&self.http, self.cfg.upstream, &self.cfg.internal_secret, name).await;
-        remember_info(&self.side.infos, name, v.clone());
+        // Falha não fica no cache: cada reconexão tenta de novo, e a contagem por sessão só soma
+        // falhas reais.
+        if v.is_some() { remember_info(&self.side.infos, name, v.clone()); }
         v
     }
 }
@@ -135,7 +177,7 @@ pub(crate) async fn fetch_info(http: &HttpClient, upstream: SocketAddr, secret: 
 /// O `/internal` responde 404 tanto à sessão inexistente quanto ao segredo recusado. Sem `info` e
 /// com a sessão atendida pelo repasse, o atalho está desligado sem ninguém saber: avisa, no máximo
 /// uma vez por minuto. true = avisou.
-fn warn_if_internal_refused(name: &str, info_missing: bool, status: StatusCode) -> bool {
+fn warn_if_internal_refused(name: &str, info_missing: bool, status: StatusCode, failures: u32) -> bool {
     static LAST: Mutex<Option<Instant>> = Mutex::new(None);
     if !info_missing || !status.is_success() {
         return false;
@@ -147,9 +189,15 @@ fn warn_if_internal_refused(name: &str, info_missing: bool, status: StatusCode) 
     *last = Some(Instant::now());
     tracing::warn!(
         session = %name,
+        falhas = failures,
         "sem info interna, mas o Python atendeu a sessão: /internal recusou (segredo interno?) ou falhou; atalho do Rust desligado"
     );
     true
+}
+
+/// Sem info, mas o Python atendeu: o atalho do Rust falhou para esta sessão e conta. 0 = não falhou.
+fn internal_refused(st: &AppState, name: &str, route: &'static str, info_missing: bool, status: StatusCode) -> u32 {
+    if info_missing && status.is_success() { st.fallback.failed(name, route, "internal_info") } else { 0 }
 }
 
 pub async fn serve(listener: TcpListener, cfg: Config) -> std::io::Result<()> {
@@ -261,6 +309,9 @@ async fn history(
         Ok(Path(n)) if owner && req.method() == Method::GET => n,
         _ => return pass(&st, req, &fwd).await,
     };
+    if st.fallback.on_python(&name, "history") {
+        return pass(&st, req, &fwd).await;
+    }
     let limit = match auth::query_param(req.uri().query(), "limit") {
         None => None,
         Some(v) => match v.parse::<i64>() {
@@ -278,7 +329,8 @@ async fn history(
     let info_missing = info.is_none();
     let Some(hreq) = info.and_then(|i| i.history_request(limit)) else {
         let resp = pass(&st, req, &fwd).await;
-        warn_if_internal_refused(&name, info_missing, resp.status());
+        let failures = internal_refused(&st, &name, "history", info_missing, resp.status());
+        warn_if_internal_refused(&name, info_missing, resp.status(), failures);
         return resp;
     };
     tracing::debug!(session = %name, req = %diag_req(&req), "history");
@@ -299,15 +351,18 @@ async fn history(
     let (etag, body) = match done {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
-            tracing::warn!(session = %name, "history no Rust falhou; repassa: {e}");
+            let falhas = st.fallback.failed(&name, "history", "history_io");
+            tracing::warn!(session = %name, falhas, "history no Rust falhou; repassa: {e}");
             return pass(&st, req, &fwd).await;
         }
         Err(e) => {
             // Sem `{e}`: a mensagem do pânico pode citar texto da conversa.
-            tracing::warn!(session = %name, panic = e.is_panic(), cancelled = e.is_cancelled(), "history no Rust caiu; repassa");
+            let falhas = st.fallback.failed(&name, "history", "history_panic");
+            tracing::warn!(session = %name, falhas, panic = e.is_panic(), cancelled = e.is_cancelled(), "history no Rust caiu; repassa");
             return pass(&st, req, &fwd).await;
         }
     };
+    st.fallback.succeeded(&name, "history");
     let mut resp = match body {
         None => StatusCode::NOT_MODIFIED.into_response(),
         Some(body) => {
@@ -336,12 +391,17 @@ async fn events(
         Ok(Path(n)) if owner && req.method() == Method::GET => n,
         _ => return pass(&st, req, &fwd).await,
     };
+    if st.fallback.on_python(&name, "events") {
+        return pass(&st, req, &fwd).await;
+    }
     let info = st.info(&name).await;
     let Some(binding) = info.as_ref().and_then(Binding::from_info) else {
         let resp = pass(&st, req, &fwd).await;
-        warn_if_internal_refused(&name, info.is_none(), resp.status());
+        let failures = internal_refused(&st, &name, "events", info.is_none(), resp.status());
+        warn_if_internal_refused(&name, info.is_none(), resp.status(), failures);
         return resp;
     };
+    st.fallback.succeeded(&name, "events");
     // A query vence: o app recria o EventSource a cada queda, e objeto novo não manda o cabeçalho.
     let resume = auth::query_param(req.uri().query(), "last_event_id")
         .filter(|v| !v.is_empty())
@@ -518,10 +578,39 @@ mod tests {
 
     #[test]
     fn missing_info_on_a_session_python_serves_warns_once_a_minute() {
-        assert!(!warn_if_internal_refused("s", true, StatusCode::NOT_FOUND), "sessão inexistente é normal");
-        assert!(!warn_if_internal_refused("s", false, StatusCode::OK), "provider fora do Rust é normal");
-        assert!(warn_if_internal_refused("s", true, StatusCode::OK));
-        assert!(!warn_if_internal_refused("s", true, StatusCode::OK), "no máximo uma vez por minuto");
+        assert!(!warn_if_internal_refused("s", true, StatusCode::NOT_FOUND, 1), "sessão inexistente é normal");
+        assert!(!warn_if_internal_refused("s", false, StatusCode::OK, 1), "provider fora do Rust é normal");
+        assert!(warn_if_internal_refused("s", true, StatusCode::OK, 1));
+        assert!(!warn_if_internal_refused("s", true, StatusCode::OK, 1), "no máximo uma vez por minuto");
+    }
+
+    #[test]
+    fn route_goes_to_python_after_four_failures_for_that_session_only() {
+        let fb = Fallback::default();
+        for n in 1..FALLBACK_AFTER {
+            assert_eq!(fb.failed("a", "history", "history_io"), n);
+            assert!(!fb.on_python("a", "history"), "falha {n} ainda tenta o Rust");
+        }
+        fb.succeeded("a", "history");
+        for _ in 1..FALLBACK_AFTER {
+            fb.failed("a", "history", "history_io");
+        }
+        assert!(!fb.on_python("a", "history"), "sucesso zera a contagem");
+        assert_eq!(fb.failed("a", "history", "history_io"), FALLBACK_AFTER);
+        assert!(fb.on_python("a", "history"));
+        assert!(!fb.on_python("a", "events"), "outra rota da mesma sessão segue no Rust");
+        assert!(!fb.on_python("b", "history"), "outra sessão segue no Rust");
+    }
+
+    #[test]
+    fn fallback_map_stays_bounded() {
+        let fb = Fallback::default();
+        for n in 0..MAX_FALLBACK {
+            fb.failed(&format!("s-{n}"), "events", "internal_info");
+        }
+        assert_eq!(fb.failed("excedente", "events", "internal_info"), 0);
+        assert_eq!(fb.failures.lock().unwrap().len(), MAX_FALLBACK);
+        assert_eq!(fb.failed("s-0", "events", "internal_info"), 2, "quem já conta segue contando");
     }
 
     #[test]

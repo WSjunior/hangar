@@ -151,17 +151,33 @@ struct Envelope {
 }
 
 async fn operation(State(state):State<Gateway>,request:Request) -> Response {
-    let body = match to_bytes(request.into_body(),MAX_ENVELOPE).await { Ok(body)=>body,Err(_)=>return StatusCode::PAYLOAD_TOO_LARGE.into_response() };
-    let envelope:Envelope = match serde_json::from_slice(&body) { Ok(envelope)=>envelope,Err(_)=>return StatusCode::BAD_REQUEST.into_response() };
+    let body = match to_bytes(request.into_body(),MAX_ENVELOPE).await { Ok(body)=>body,Err(_)=>return refuse(StatusCode::PAYLOAD_TOO_LARGE,None,"body") };
+    let envelope:Envelope = match serde_json::from_slice(&body) { Ok(envelope)=>envelope,Err(_)=>return refuse(StatusCode::BAD_REQUEST,None,"envelope") };
     let _ = envelope.clock;
-    if envelope.protocol != state.protocol || envelope.instance != state.instance || envelope.operation_id.is_empty() {
-        return StatusCode::CONFLICT.into_response();
-    }
+    let mismatch = if envelope.protocol != state.protocol { Some("protocol") } else if envelope.instance != state.instance { Some("instance") }
+        else if envelope.operation_id.is_empty() { Some("operation_id") } else { None };
+    if let Some(check) = mismatch { return refuse(StatusCode::CONFLICT,Some(&envelope.key),check); }
     let result = dispatch(&state.registry,&envelope).await;
     match result {
         Ok(result)=>json_response(StatusCode::OK,json!({"ok":true,"result":result})),
-        Err(error)=>json_response(StatusCode::SERVICE_UNAVAILABLE,json!({"ok":false,"error_code":error.code,"message":error.message})),
+        Err(error)=>{
+            if crate::warn_limit::allow(Some(&envelope.key),&error.code) {
+                // Só o nome vem do descritor: o resto dele é caminho e credencial do cano.
+                let name = envelope.command["descriptor"]["name"].as_str().unwrap_or("");
+                tracing::warn!(key=%envelope.key,session=%name,kind=%envelope.command["kind"].as_str().unwrap_or("?"),
+                    code=%error.code,reason=%error.message,"runtime recusou operação");
+            }
+            json_response(StatusCode::SERVICE_UNAVAILABLE,json!({"ok":false,"error_code":error.code,"message":error.message}))
+        }
     }
+}
+
+/// Recusa antes do despacho: diz qual conferência falhou, sem o corpo.
+fn refuse(status:StatusCode,key:Option<&str>,check:&'static str) -> Response {
+    if crate::warn_limit::allow(key,check) {
+        tracing::warn!(status=status.as_u16(),key=%key.unwrap_or(""),check=%check,"runtime recusou envelope");
+    }
+    status.into_response()
 }
 
 fn json_response(status:StatusCode,value:Value) -> Response {
@@ -232,7 +248,10 @@ fn descriptor(value:&Value) -> Result<RuntimeTarget,RuntimeError> {
 
 async fn events(State(state):State<Gateway>) -> Response {
     let receiver = state.registry.subscribe();
-    let initial = match state.registry.snapshots().await { Ok(events)=>std::collections::VecDeque::from(events),Err(_)=>return StatusCode::SERVICE_UNAVAILABLE.into_response() };
+    let initial = match state.registry.snapshots().await { Ok(events)=>std::collections::VecDeque::from(events),Err(error)=>{
+        tracing::warn!(code=%error.code,reason=%error.message,"runtime sem retrato inicial dos eventos");
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    } };
     let stream = futures_util::stream::unfold((receiver,initial),| (mut receiver,mut initial) | async move {
         let event = if let Some(event) = initial.pop_front() { event } else {
             match receiver.recv().await { Ok(event)=>event,Err(_)=>return None }
