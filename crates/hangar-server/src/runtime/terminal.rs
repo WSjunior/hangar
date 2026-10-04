@@ -311,7 +311,7 @@ impl Executor {
             let current=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
             let Some(row)=current.rows.iter().find(|r|r["id"].as_str()==operation.entry_id.as_deref() && r["confirmed"]!=true) else {continue;};
             let Ok(cursor)=serde_json::from_value::<DispatchCursor>(operation.dispatch_cursor.clone())else{continue;};
-            if let Some(proof)=self.receipt.match_after(&cursor,row,&current.used_occurrences) {
+            if let Some(proof)=self.receipt.match_after(&self.target.transcript,&cursor,row,&current.used_occurrences).map_err(|_|error("receipt_scan"))? {
                 if self.action(Action::ConfirmOccurrence {id:operation.id.clone(),proof}).await?==true {count+=1;}
             }
         }

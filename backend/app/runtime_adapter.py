@@ -209,6 +209,7 @@ class LegacyIO:
 class LegacyBridge:
     def __init__(self, coordinator, adapters):
         self.coordinator, self.adapters = coordinator, adapters
+        self.receipts = {}
 
     def binding(self, name, provider):
         from app.pqueue import _queue_dir
@@ -449,23 +450,35 @@ class LegacyBridge:
         from app.runtime_receipt import ReceiptIndex
         slot = self.coordinator.slot(descriptor["name"])
         conversation = descriptor["meta"].get("session_id" if descriptor["provider"] == "claude" else "thread_id") or ""
-        index = ReceiptIndex(descriptor["provider"], conversation)
-        io = LegacyIO(self.coordinator)
         if not descriptor["jsonl"]:
             return {"confirmed":0}
-        await asyncio.to_thread(index.scan, descriptor["jsonl"])
-        with slot.guard:
-            operations = copy.deepcopy(slot.store.state["operations"])
-        count = 0
-        for operation_id, operation in operations.items():
-            if (operation["status"] == "confirmed" or operation["payload"].get("kind") not in {"input", "steer"}
-                    or not operation.get("dispatch_cursor")):
-                continue
+        # Um índice por conversa: ele lê só o que o transcript ganhou desde a última confirmação.
+        key = (descriptor["key"], descriptor["provider"], conversation)
+        index = self.receipts.get(key)
+        if index is None:
+            self.receipts = {k: v for k, v in self.receipts.items() if k[0] != descriptor["key"]}
+            index = self.receipts[key] = ReceiptIndex(descriptor["provider"], conversation)
+        io = LegacyIO(self.coordinator)
+
+        def pending():
             with slot.guard:
-                state = copy.deepcopy(slot.store.state)
-            row = next((row for row in state["rows"] if row["id"] == operation.get("entry_id")), None)
-            if row is not None and not row.get("confirmed") and (proof := index.match_after(operation["dispatch_cursor"], row, state["used_occurrences"])):
-                count += await io._exec(descriptor["name"], {"kind":"confirm_occurrence", "id":operation_id, "proof":proof}) is True
+                state = slot.store.state
+                rows = {row["id"]: copy.deepcopy(row) for row in state["rows"] if not row.get("confirmed")}
+                candidates = [(operation_id, copy.deepcopy(operation["dispatch_cursor"]), rows[operation["entry_id"]])
+                    for operation_id, operation in state["operations"].items()
+                    if operation["status"] != "confirmed" and operation["payload"].get("kind") in {"input", "steer"}
+                    and operation.get("dispatch_cursor") and operation.get("entry_id") in rows]
+                return candidates, copy.deepcopy(state["used_occurrences"])
+        candidates, used = pending()
+        if not candidates:
+            return {"confirmed":0}
+        await asyncio.to_thread(index.scan, descriptor["jsonl"])
+        count = 0
+        for operation_id, cursor, row in candidates:
+            proof = await asyncio.to_thread(index.match_after, cursor, row, used)
+            if proof and await io._exec(descriptor["name"], {"kind":"confirm_occurrence", "id":operation_id, "proof":proof}) is True:
+                count += 1
+                used = pending()[1]
         return {"confirmed":count}
 
 def accept_ack(endpoint, event):

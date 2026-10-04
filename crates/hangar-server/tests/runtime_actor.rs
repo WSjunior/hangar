@@ -282,3 +282,417 @@ async fn late_wire_reply_resolves_parent() {
     handle.stop().await.unwrap();
     assert_eq!(server.await.unwrap(),0);
 }
+
+/// Cano Claude falso que só conta o que chega ao fio; a política aponta para uma porta fechada.
+async fn setup_claude_unreachable_policy() -> (RuntimeHandle,tokio::task::JoinHandle<usize>,tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut header = String::new(); reader.read_line(&mut header).await.unwrap();
+        let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
+            "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+        reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+        let mut sent = 0;
+        loop {
+            let mut raw = String::new();
+            if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
+            sent += 1;
+        }
+        sent
+    });
+    let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
+        metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
+        binding:CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 },
+        lease_path:dir.path().join("key.lock"),state_path:dir.path().join("key.queue-state.json"),projection_dir:dir.path().join("projection"),
+        transcript:dir.path().join("chat.jsonl"),created:0.0 };
+    let lease = acquire_lease(&target.lease_path).unwrap();
+    let store = Store::open(&target.state_path,&target.projection_dir,State::new("key",1,"session",vec![])).unwrap();
+    let queue = QueueActor::start(store,lease);
+    let connection = cano::connect(&target.binding).await.unwrap();
+    let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap()
+        .with_policy(PolicyClient::new(closed,"secret".into(),"instance".into()));
+    (RuntimeActor::spawn(target,queue,connection,engine),server,dir)
+}
+
+#[tokio::test]
+async fn input_that_fails_before_any_write_goes_back_to_the_queue() {
+    // Nada chegou à CLI: a entrada é adiada e volta a ser drenável, nunca "incerta" para sempre.
+    let (handle,server,dir) = setup_claude_unreachable_policy().await;
+    let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"Olá","entry_id":"msg"}) };
+    // Adiada, não erro: o drain que a pegou não põe a sessão inteira em erro por isso.
+    assert!(handle.command(input).await.unwrap().disposition == Disposition::Deferred);
+    let path = dir.path().join("key.queue-state.json");
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        loop {
+            let state:State = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            if state.operations.get("msg").is_some_and(|op|op.status == Status::Deferred)
+                && state.rows.iter().any(|row|row["id"] == "msg" && row["delivered"] == false) { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.expect("entrada sem escrita precisa voltar para a fila como adiada");
+    let state:State = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(!state.operations.keys().any(|id|id.contains("prepare_prompt")),"cálculo puro não entra no diário");
+    handle.stop().await.unwrap();
+    assert_eq!(server.await.unwrap(),0);
+}
+
+#[tokio::test]
+async fn turn_end_confirms_the_delivered_input_without_being_asked() {
+    // O adapter Python confirmava a fila em todo fim de turno; o ator faz o mesmo sozinho.
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("chat.jsonl");
+    std::fs::write(&transcript,"").unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let written = transcript.clone();
+    let server = tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut header = String::new(); reader.read_line(&mut header).await.unwrap();
+        let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
+            "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+        reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+        loop {
+            let mut raw = String::new();
+            if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
+            let envelope:Value = serde_json::from_str(&raw).unwrap();
+            let frame:Value = serde_json::from_str(envelope["frame"].as_str().unwrap()).unwrap();
+            let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
+            reader.get_mut().write_all(format!("{ack}\n").as_bytes()).await.unwrap();
+            if frame["type"] == "user" {
+                use std::io::Write;
+                let mut file = std::fs::OpenOptions::new().append(true).open(&written).unwrap();
+                writeln!(file,"{}",json!({"type":"user","uuid":"u-1","message":{"role":"user","content":"Olá"}})).unwrap();
+                let result = json!({"type":"cano_output","frame":json!({"type":"result","subtype":"success","is_error":false}).to_string()});
+                reader.get_mut().write_all(format!("{result}\n").as_bytes()).await.unwrap();
+            }
+        }
+    });
+    let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
+        metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
+        binding:CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 },
+        lease_path:dir.path().join("key.lock"),state_path:dir.path().join("key.queue-state.json"),projection_dir:dir.path().join("projection"),
+        transcript:transcript.clone(),created:0.0 };
+    let lease = acquire_lease(&target.lease_path).unwrap();
+    let store = Store::open(&target.state_path,&target.projection_dir,State::new("key",1,"session",vec![])).unwrap();
+    let queue = QueueActor::start(store,lease);
+    let connection = cano::connect(&target.binding).await.unwrap();
+    let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap();
+    let handle = RuntimeActor::spawn(target,queue,connection,engine);
+    let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"Olá","entry_id":"msg"}) };
+    assert!(handle.command(input).await.unwrap().disposition == Disposition::Accepted);
+    let path = dir.path().join("key.queue-state.json");
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        loop {
+            let state:State = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            if state.rows.iter().any(|row|row["id"] == "msg" && row["confirmed"] == true) { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.expect("fim de turno precisa confirmar a entrada entregue");
+    handle.stop().await.unwrap();
+    server.await.unwrap();
+}
+
+/// Serviço de política HTTP que responde `ok` a tudo e conta as chamadas.
+async fn policy_server() -> (std::net::SocketAddr,std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use tokio::io::AsyncReadExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = calls.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream,_)) = listener.accept().await else { return };
+            let counter = counter.clone();
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stream);
+                loop {
+                    let mut length = 0usize;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).await.unwrap_or(0) == 0 { return; }
+                        if line == "\r\n" { break; }
+                        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") { length = value.trim().parse().unwrap(); }
+                    }
+                    let mut body = vec![0;length]; reader.read_exact(&mut body).await.unwrap();
+                    counter.fetch_add(1,std::sync::atomic::Ordering::SeqCst);
+                    let kind = serde_json::from_slice::<Value>(&body).unwrap()["kind"].clone();
+                    let data = if kind == "prepare_prompt" { json!({"content":"Olá","notices":[],"native_candidate":false}) } else { json!({}) };
+                    let reply = json!({"ok":true,"data":data}).to_string();
+                    let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",reply.len());
+                    reader.get_mut().write_all(response.as_bytes()).await.unwrap();
+                }
+            });
+        }
+    });
+    (address,calls)
+}
+
+#[tokio::test]
+async fn status_formatting_and_state_changes_do_not_rewrite_the_journal() {
+    // Uma mensagem custava ~60 regravações do estado: cada format_status passava pelo diário e
+    // cada mudança de estado gravava a vista inteira, mesmo sem nada durável mudar.
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("chat.jsonl");
+    std::fs::write(&transcript,"").unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut header = String::new(); reader.read_line(&mut header).await.unwrap();
+        let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
+            "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+        reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+        loop {
+            let mut raw = String::new();
+            if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
+            let envelope:Value = serde_json::from_str(&raw).unwrap();
+            let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
+            reader.get_mut().write_all(format!("{ack}\n").as_bytes()).await.unwrap();
+            let events = [json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"m1"}}}),
+                json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}),
+                json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"oi"}}}),
+                json!({"type":"stream_event","event":{"type":"content_block_stop","index":0}}),
+                json!({"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"oi"}]}}),
+                json!({"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":1,"output_tokens":1}})];
+            for event in events {
+                let frame = json!({"type":"cano_output","frame":event.to_string()});
+                reader.get_mut().write_all(format!("{frame}\n").as_bytes()).await.unwrap();
+            }
+        }
+    });
+    let (policy,calls) = policy_server().await;
+    let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
+        metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
+        binding:CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 },
+        lease_path:dir.path().join("key.lock"),state_path:dir.path().join("key.queue-state.json"),projection_dir:dir.path().join("projection"),
+        transcript,created:0.0 };
+    let lease = acquire_lease(&target.lease_path).unwrap();
+    let store = Store::open(&target.state_path,&target.projection_dir,State::new("key",1,"session",vec![])).unwrap();
+    let queue = QueueActor::start(store,lease);
+    let connection = cano::connect(&target.binding).await.unwrap();
+    let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap()
+        .with_policy(PolicyClient::new(policy,"secret".into(),"instance".into()));
+    let handle = RuntimeActor::spawn(target,queue,connection,engine);
+    let mut events = handle.subscribe();
+    let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"Olá","entry_id":"msg"}) };
+    assert!(handle.command(input).await.unwrap().disposition == Disposition::Accepted);
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if event.channel == "state" && event.data["state"] == "idle" && calls.load(std::sync::atomic::Ordering::SeqCst) > 2 { break; }
+        }
+    }).await.expect("o turno precisa terminar");
+    handle.stop().await.unwrap();
+    server.await.unwrap();
+    let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+    assert!(!state.operations.keys().any(|id|id.starts_with("policy:")),"serviço sem efeito não entra no diário");
+    let views = state.operations.values().filter(|op|op.payload["kind"] == "set_runtime_state").count();
+    assert!(views <= 3,"vista gravada {views} vezes num turno sem mudança durável relevante");
+}
+
+#[tokio::test]
+async fn a_queue_refusal_carries_its_reason() {
+    // O diário do Python e o log do Rust mostravam só "queue_io"; a frase da fila é fixa e diz a causa.
+    let (handle,server,_dir) = setup(true).await;
+    let append = ||Action::Append { text:"Olá".into(),delivered:true,ts:None,pre_transcript:false,entry_id:Some("same".into()) };
+    handle.queue("first".into(),append()).await.unwrap();
+    let error = handle.queue("second".into(),append()).await.unwrap_err();
+    assert_eq!(error.code,"queue_io");
+    assert!(error.message.contains("entrada da fila já existe"),"{}",error.message);
+    handle.stop().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn steering_the_queue_without_a_turn_is_refused_and_keeps_the_entry() {
+    let (handle,server,dir) = setup_claude_unreachable_policy().await;
+    handle.queue("append".into(),Action::Append { text:"Depois".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("later".into()) }).await.unwrap();
+    let steer = RuntimeCommand { operation_id:"steer-1".into(),kind:OperationKind::SteerQueue,payload:json!({"entry_id":"later"}) };
+    let reply = handle.command(steer).await.unwrap();
+    assert!(reply.disposition == Disposition::Rejected);
+    assert_eq!(reply.payload["error"],"Não há turno em andamento para orientar");
+    // A entrada continua na fila (o drain comum pode tentá-la; sem política ela volta adiada).
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        loop {
+            let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+            if state.rows.iter().any(|row|row["id"] == "later" && row["delivered"] == false) { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.expect("a entrada precisa continuar na fila");
+    handle.stop().await.unwrap();
+    assert_eq!(server.await.unwrap(),0);
+}
+
+#[tokio::test]
+async fn local_command_result_confirms_the_slash_entry() {
+    // Comando local não vira linha `user`: o `result` com local_command é a prova, como no adapter Python.
+    let dir = tempfile::tempdir().unwrap();
+    let transcript = dir.path().join("chat.jsonl");
+    std::fs::write(&transcript,"").unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let written = transcript.clone();
+    let server = tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut header = String::new(); reader.read_line(&mut header).await.unwrap();
+        let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
+            "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+        reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+        loop {
+            let mut raw = String::new();
+            if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
+            let envelope:Value = serde_json::from_str(&raw).unwrap();
+            let frame:Value = serde_json::from_str(envelope["frame"].as_str().unwrap()).unwrap();
+            let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
+            reader.get_mut().write_all(format!("{ack}\n").as_bytes()).await.unwrap();
+            if frame["type"] == "user" {
+                let _ = &written;
+                let result = json!({"type":"cano_output","frame":json!({"type":"result","subtype":"success","is_error":false,"local_command":"clear"}).to_string()});
+                reader.get_mut().write_all(format!("{result}\n").as_bytes()).await.unwrap();
+            }
+        }
+    });
+    let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
+        metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
+        binding:CanoBinding { pid:42,escuta:format!("tcp:{address}"),token:"secret-test".into(),versao:2 },
+        lease_path:dir.path().join("key.lock"),state_path:dir.path().join("key.queue-state.json"),projection_dir:dir.path().join("projection"),
+        transcript:transcript.clone(),created:0.0 };
+    let lease = acquire_lease(&target.lease_path).unwrap();
+    let store = Store::open(&target.state_path,&target.projection_dir,State::new("key",1,"session",vec![])).unwrap();
+    let queue = QueueActor::start(store,lease);
+    let connection = cano::connect(&target.binding).await.unwrap();
+    let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap();
+    let handle = RuntimeActor::spawn(target,queue,connection,engine);
+    // Outra barra já reivindicada pelo drain e ainda não escrita: o result do /clear não pode confirmá-la.
+    handle.queue("claimed".into(),Action::Append { text:"/cost".into(),delivered:true,ts:None,pre_transcript:false,entry_id:Some("next".into()) }).await.unwrap();
+    let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"/clear","entry_id":"msg"}) };
+    assert!(handle.command(input).await.unwrap().disposition == Disposition::Accepted);
+    let path = dir.path().join("key.queue-state.json");
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        loop {
+            let state:State = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            if state.rows.iter().any(|row|row["id"] == "msg" && row["confirmed"] == true) { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.expect("comando local consumido precisa ficar confirmado");
+    let state:State = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(state.rows.iter().any(|row|row["id"] == "next" && row["confirmed"] != true),"barra ainda não escrita não é confirmada");
+    handle.stop().await.unwrap();
+    server.await.unwrap();
+}
+
+
+/// Cano Claude falso que, depois do retrato, manda as linhas dadas e aceita tudo o que chega.
+async fn claude_cano(lines:Vec<Value>) -> (std::net::SocketAddr,tokio::task::JoinHandle<usize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut header = String::new(); reader.read_line(&mut header).await.unwrap();
+        let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
+            "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+        reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+        for line in lines {
+            let frame = json!({"type":"cano_output","frame":line.to_string()});
+            reader.get_mut().write_all(format!("{frame}\n").as_bytes()).await.unwrap();
+        }
+        let mut sent = 0;
+        loop {
+            let mut raw = String::new();
+            if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
+            let envelope:Value = serde_json::from_str(&raw).unwrap();
+            let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
+            reader.get_mut().write_all(format!("{ack}\n").as_bytes()).await.unwrap();
+            sent += 1;
+        }
+        sent
+    });
+    (address,server)
+}
+
+async fn claude_actor(dir:&std::path::Path,cano:std::net::SocketAddr,policy:std::net::SocketAddr) -> RuntimeHandle {
+    let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
+        metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
+        binding:CanoBinding { pid:42,escuta:format!("tcp:{cano}"),token:"secret-test".into(),versao:2 },
+        lease_path:dir.join("key.lock"),state_path:dir.join("key.queue-state.json"),projection_dir:dir.join("projection"),
+        transcript:dir.join("chat.jsonl"),created:0.0 };
+    let lease = acquire_lease(&target.lease_path).unwrap();
+    let store = Store::open(&target.state_path,&target.projection_dir,State::new("key",1,"session",vec![])).unwrap();
+    let queue = QueueActor::start(store,lease);
+    let connection = cano::connect(&target.binding).await.unwrap();
+    let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap()
+        .with_policy(PolicyClient::new(policy,"secret".into(),"instance".into()));
+    RuntimeActor::spawn(target,queue,connection,engine)
+}
+
+#[tokio::test]
+async fn a_failed_sidecar_update_still_hands_the_session_over() {
+    // Só status/carimbo/uso/registro são perdoados; o sidecar segura a conversa atual (session_id
+    // depois do /clear), e perdê-lo calado deixaria o app lendo o transcript velho.
+    let dir = tempfile::tempdir().unwrap();
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();
+    let (cano,server) = claude_cano(vec![json!({"type":"system","subtype":"init","session_id":"sid-2"})]).await;
+    let handle = claude_actor(dir.path(),cano,closed).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        loop {
+            if handle.snapshot().await.unwrap()["error"] == "policy_transport" { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.expect("falha do sidecar precisa pôr a sessão em erro");
+    handle.stop().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn the_deadline_never_puts_back_a_native_message_that_may_have_been_sent() {
+    // O recado nativo sai pelo Python; se ele demora até o prazo de 30 s, a entrada pode já ter sido
+    // entregue e não pode voltar para a fila (seria enviada de novo).
+    use tokio::io::AsyncReadExt;
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let policy = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream,_)) = listener.accept().await else { return };
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stream);
+                loop {
+                    let mut length = 0usize;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).await.unwrap_or(0) == 0 { return; }
+                        if line == "\r\n" { break; }
+                        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") { length = value.trim().parse().unwrap(); }
+                    }
+                    let mut body = vec![0;length]; reader.read_exact(&mut body).await.unwrap();
+                    let kind = serde_json::from_slice::<Value>(&body).unwrap()["kind"].clone();
+                    let data = if kind == "prepare_prompt" { json!({"content":"[de: par] oi","notices":[],"native_candidate":true}) }
+                        else if kind == "native_message" { tokio::time::sleep(std::time::Duration::from_secs(33)).await; json!({"outcome":"written","msg_id":"m"}) }
+                        else { json!({}) };
+                    let reply = json!({"ok":true,"data":data}).to_string();
+                    let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",reply.len());
+                    if reader.get_mut().write_all(response.as_bytes()).await.is_err() { return; }
+                }
+            });
+        }
+    });
+    let (cano,server) = claude_cano(vec![]).await;
+    let handle = claude_actor(dir.path(),cano,policy).await;
+    let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"[de: par] oi","entry_id":"msg"}) };
+    let reply = handle.command(input).await.unwrap();
+    assert!(reply.disposition == Disposition::Unknown,"prazo com envio nativo em curso é incerto, nunca adiado");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+    assert!(state.rows.iter().any(|row|row["id"] == "msg" && row["delivered"] == true),"a entrada não volta para a fila");
+    assert!(state.operations.get("msg").is_some_and(|op|op.status != Status::Deferred));
+    handle.stop().await.unwrap();
+    assert_eq!(server.await.unwrap(),0,"nada foi escrito no cano: o recado foi pelo Python");
+}

@@ -236,8 +236,9 @@ def _may_confirm(operation, record) -> bool:
     if cursor.get("file_identity") is None and type(cursor.get("absent_since")) in {int, float}:
         # O recibo compacto não guarda o timestamp; um cursor anterior ao arquivo ainda pode casar.
         return cursor.get("conversation") == record.get("conversation") and offset >= cursor_offset
-    return (cursor.get("conversation") == record.get("conversation")
-            and cursor.get("file_identity") == record.get("file_identity") and offset >= cursor_offset)
+    same_file = (cursor.get("file_identity") == record.get("file_identity")
+                 or cursor.get("file_identity") is None and cursor_offset == 0)
+    return cursor.get("conversation") == record.get("conversation") and same_file and offset >= cursor_offset
 
 
 def compact(state):

@@ -180,6 +180,8 @@ impl ClaudeEngine {
     fn deliverable(&self) -> bool { self.alive && self.initialized && !self.initializing && !self.in_progress
         && self.pending.is_empty() && self.question.is_none() && self.active_input.is_none() }
 
+    pub fn forget_policy(&mut self,request_id:&RequestId) { self.policies.remove(request_id); }
+
     fn policy(&mut self, kind:&str,payload:Value,effects:&mut Vec<Effect>) {
         self.counter += 1;
         let request_id = RequestId::String(format!("policy:{}:{}",self.generation,self.counter));
@@ -600,11 +602,14 @@ impl ClaudeEngine {
                     effects.push(Effect::Reply { operation_id:id,disposition:Disposition::Accepted,payload:json!({"consumed":true}) });
                 }
                 let subtype = event["subtype"].as_str().unwrap_or("");
+                // A CLI manda o nome do comando ("cost", "clear"), não um booleano.
+                let local = !event["local_command"].is_null() && event["local_command"] != false;
                 if subtype != "error_during_execution" && (event["is_error"] == true || subtype.starts_with("error")) {
                     self.state.problema = Some(if event["result"].as_str().unwrap_or("").to_lowercase().contains("not logged in") {
                         "headless_sem_login" } else { "headless_turno_erro" }.into());
                     self.state.problema_detalhe = Some(format!("{subtype}: {}",event["result"].as_str().unwrap_or("").chars().take(300).collect::<String>()));
-                } else if subtype == "success" && event["local_command"] != true { self.state.problema = None; self.state.problema_detalhe = None; }
+                } else if subtype == "success" && !local { self.state.problema = None; self.state.problema_detalhe = None; }
+                if local { effects.push(Effect::ConfirmLocalCommands); }
                 self.apply_usage(&event,effects);
                 self.clear_streams(effects); self.changed(effects,true);
                 if self.effort_intent.as_ref().is_some_and(|intent|intent["status"] == "prepared") { self.dispatch_effort(effects); }

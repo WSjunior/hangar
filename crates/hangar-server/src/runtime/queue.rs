@@ -66,7 +66,8 @@ impl Operation {
         if cursor["file_identity"].is_null() && cursor["absent_since"].as_f64().is_some() {
             return cursor["conversation"]==record["conversation"] && offset>=cursor_offset;
         }
-        cursor["conversation"] == record["conversation"] && cursor["file_identity"] == record["file_identity"] && offset >= cursor_offset
+        let same_file = cursor["file_identity"] == record["file_identity"] || cursor["file_identity"].is_null() && cursor_offset == 0;
+        cursor["conversation"] == record["conversation"] && same_file && offset >= cursor_offset
     }
 }
 
@@ -200,7 +201,18 @@ pub struct Store {
     recover_before_compact: bool,
 }
 
-fn invalid(message: &str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message) }
+/// Recusa da própria fila: frase fixa, sem caminho nem texto da conversa, então pode ir ao log.
+#[derive(Debug)]
+pub struct QueueRefusal(pub &'static str);
+impl std::fmt::Display for QueueRefusal { fn fmt(&self, f:&mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.0) } }
+impl std::error::Error for QueueRefusal {}
+
+fn invalid(message: &'static str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, QueueRefusal(message)) }
+
+/// A frase da recusa, se o erro veio da fila; erros do sistema ou do serde ficam só com o tipo.
+pub fn refusal(error: &io::Error) -> Option<&'static str> {
+    error.get_ref().and_then(|inner|inner.downcast_ref::<QueueRefusal>()).map(|refusal|refusal.0)
+}
 
 pub fn acquire_lease(path: &Path) -> io::Result<Arc<File>> {
     if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
@@ -248,7 +260,11 @@ impl Store {
     pub fn ensure_projection(&mut self) -> io::Result<()> {
         let mut output = Vec::new();
         for row in &self.state.rows { serde_json::to_writer(&mut output, row)?; output.push(b'\n'); }
-        atomic_write(&self.projection_dir.join(format!("{}.jsonl", sanitize(&self.state.name))), &output)?;
+        let path = self.projection_dir.join(format!("{}.jsonl", sanitize(&self.state.name)));
+        // Mesma regra do Python: as etapas de uma entrega não mudam as mensagens, e regravar igual
+        // custava dois fsync por chamada, leituras incluídas. Compara com o arquivo para continuar
+        // consertando o que mudou por fora.
+        if std::fs::read(&path).ok().as_deref() != Some(output.as_slice()) { atomic_write(&path, &output)?; }
         if let Some(previous) = self.state.runtime_state["_queue_previous_name"].as_str()
             .filter(|p| *p != self.state.name) {
             match std::fs::remove_file(self.projection_dir.join(format!("{}.jsonl", sanitize(previous)))) {

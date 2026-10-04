@@ -135,3 +135,79 @@ def test_absent_cursor_does_not_accept_old_or_unidentified_conversation(tmp_path
         occurrence = index.occurrences[0]
         assert not validate_proof({"cursor": cursor, "occurrence": occurrence, "normalized_text": "Olá",
             "observed_anchor": cursor["anchor"]}, cursor, {"text": "Olá"})
+
+
+def test_rewrite_before_the_read_tail_is_seen_in_the_file_not_in_a_memory_copy(tmp_path):
+    # O índice não guarda o transcript: a âncora do despacho é relida do arquivo.
+    path = tmp_path / "chat.jsonl"
+    first = '{"type":"user","message":{"content":"Anterior"}}\n'
+    path.write_text(first, encoding="utf-8")
+    index = ReceiptIndex("claude", "sid")
+    cursor = index.capture(path)
+    echo = '{"type":"user","message":{"content":"Olá"},"pad":"' + "x" * 400 + '"}\n'
+    path.write_text(first + echo, encoding="utf-8")
+    index.scan(path)
+    assert index.match_after(cursor, {"text": "Olá"}, {}) is not None
+    with path.open("r+b") as stream:
+        stream.write(first.replace("Anterior", "Trocado!").encode())
+    index.scan(path)
+    assert index.match_after(cursor, {"text": "Olá"}, {}) is None
+
+
+def test_first_message_dispatched_before_the_transcript_exists_is_confirmed(tmp_path):
+    from datetime import datetime, timezone
+    from app.runtime_receipt import validate_proof
+    path = tmp_path / "chat.jsonl"
+    index = ReceiptIndex("claude", "sid")
+    cursor = index.capture(path)
+    assert cursor["file_identity"] is None
+    # Como o Claude grava: a conversa e o horário vêm em cada linha.
+    path.write_text(json.dumps({"type": "user", "sessionId": "sid", "timestamp": datetime.now(timezone.utc).isoformat(),
+                                "message": {"content": "um"}}) + "\n", encoding="utf-8")
+    index.scan(path)
+    row = {"text": "um"}
+    proof = index.match_after(cursor, row, {})
+    assert proof is not None and validate_proof(proof, cursor, row)
+
+
+def _codex_rollout(path, conversation, text="um"):
+    # O Codex grava a conversa só no `session_meta`, não nas linhas da fala.
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    lines = [] if conversation is None else [{"timestamp": now, "type": "session_meta", "payload": {"id": conversation}}]
+    lines.append({"timestamp": now, "type": "response_item", "payload": {
+        "type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}})
+    path.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+
+
+def test_codex_first_message_without_rollout_is_confirmed_once(tmp_path):
+    from app.runtime_receipt import validate_proof
+    path = tmp_path / "rollout.jsonl"
+    index = ReceiptIndex("codex", "thread-1")
+    cursor = index.capture(path)
+    _codex_rollout(path, "thread-1")
+    index.scan(path)
+    row = {"text": "um"}
+    proof = index.match_after(cursor, row, {})
+    assert proof is not None and validate_proof(proof, cursor, row)
+    assert proof["occurrence"]["recorded_conversation"] == "thread-1"
+    assert index.match_after(cursor, row, {proof["occurrence"]["id"]: {}}) is None
+
+
+def test_codex_rollout_of_another_conversation_does_not_confirm(tmp_path):
+    path = tmp_path / "rollout.jsonl"
+    index = ReceiptIndex("codex", "thread-1")
+    cursor = index.capture(path)
+    _codex_rollout(path, "thread-2")
+    index.scan(path)
+    assert index.match_after(cursor, {"text": "um"}, {}) is None
+
+
+def test_codex_rollout_without_session_meta_falls_back_to_the_cursor_without_file(tmp_path):
+    path = tmp_path / "rollout.jsonl"
+    index = ReceiptIndex("codex", "thread-1")
+    cursor = index.capture(path)
+    _codex_rollout(path, None)
+    index.scan(path)
+    proof = index.match_after(cursor, {"text": "um"}, {})
+    assert proof is not None and proof["occurrence"]["identity_unprovable"] is True

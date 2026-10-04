@@ -163,12 +163,12 @@ fn absent_transcript_one_echo_cannot_confirm_two_equal_inputs_after_compact_reop
     let millis=((cursor.absent_since.unwrap()+1.0)*1000.0) as i64;
     let timestamp=chrono::DateTime::from_timestamp_millis(millis).unwrap().to_rfc3339();
     std::fs::write(&transcript,format!("{}\n",json!({"type":"user","uuid":"one-echo","sessionId":"sid","timestamp":timestamp,"message":{"content":"same-input"}}))).unwrap();
-    index.scan(&transcript).unwrap();let proof=index.match_after(&cursor,&store.state().rows[0],&store.state().used_occurrences).unwrap();
+    index.scan(&transcript).unwrap();let proof=index.match_after(&transcript,&cursor,&store.state().rows[0],&store.state().used_occurrences).unwrap().unwrap();
     assert_eq!(store.exec(1,"confirm-first",clock(),Action::ConfirmOccurrence {id:"input-1".into(),proof:proof.clone()}).unwrap(),true);
     for n in 0..270 {store.exec(1,&format!("fill:{n}"),clock(),Action::SetRuntimeState {state:json!({})}).unwrap();}
     drop(store);let mut store=Store::open(&path,dir.path(),State::new("key",1,"session",vec![])).unwrap();
     assert_eq!(store.state().used_occurrences.len(),1);
-    assert!(index.match_after(&cursor,&store.state().rows[1],&store.state().used_occurrences).is_none());
+    assert!(index.match_after(&transcript,&cursor,&store.state().rows[1],&store.state().used_occurrences).unwrap().is_none());
     assert_eq!(store.exec(1,"confirm-second",clock(),Action::ConfirmOccurrence {id:"input-2".into(),proof}).unwrap(),false);
     assert_eq!(store.state().rows[0]["confirmed"],true);assert_ne!(store.state().rows[1]["confirmed"],true);
 }
@@ -194,7 +194,7 @@ fn terminal_write_barrier_follows_remaining_uncertain_input_and_lifts_after_last
         index.scan(&transcript).unwrap();
         let confirm=|store:&mut Store,index:&ReceiptIndex,text:&str| {
             let row=store.state().rows.iter().find(|row|row["id"]==text).unwrap().clone();
-            let proof=index.match_after(&cursor,&row,&store.state().used_occurrences).unwrap();
+            let proof=index.match_after(&transcript,&cursor,&row,&store.state().used_occurrences).unwrap().unwrap();
             store.exec(1,&format!("confirm:{text}"),clock(),Action::ConfirmOccurrence {id:text.into(),proof}).unwrap()
         };
         assert_eq!(store.state().runtime_state["terminal_write_barrier"]["operation_id"],"A");

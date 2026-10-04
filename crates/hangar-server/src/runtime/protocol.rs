@@ -61,6 +61,8 @@ pub enum Effect {
     Policy { kind: String, request_id: RequestId, payload: Value },
     Reply { operation_id: String, disposition: Disposition, payload: Value },
     WakeQueue,
+    /// A CLI consumiu um comando local (`/clear`, `/cost`…), que não vira linha `user` no transcript.
+    ConfirmLocalCommands,
     StateChanged,
     Stop { reason: String },
 }

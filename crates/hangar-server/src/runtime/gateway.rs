@@ -23,7 +23,7 @@ impl EntryHandle {
     async fn confirm(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.confirm().await,Self::Terminal {handle,..}=>handle.confirm().await}}
     async fn ensure_projection(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.ensure_projection().await,Self::Terminal {handle,..}=>handle.ensure_projection().await}}
 }
-struct Entry { generation:u64,handle:EntryHandle }
+struct Entry { generation:u64,handle:EntryHandle,lease_path:std::path::PathBuf }
 pub struct RuntimeRegistry {
     entries:Mutex<BTreeMap<String,Entry>>,
     events:broadcast::Sender<RuntimeEvent>,
@@ -31,6 +31,16 @@ pub struct RuntimeRegistry {
     instance:String,
     lifecycle:Mutex<BTreeMap<String,Arc<Mutex<()>>>>,
     revisions:Mutex<BTreeMap<String,Arc<AtomicU64>>>,
+}
+
+/// A trava fica com as tarefas de E/S do ator até elas saírem; espera até 3 s por isso.
+async fn lease_released(path:&std::path::Path) -> bool {
+    for _ in 0..60 {
+        let path = path.to_owned();
+        if tokio::task::spawn_blocking(move ||acquire_lease(&path).is_ok()).await.unwrap_or(false) { return true; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
 }
 
 fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indisponível para esta chave ou geração") }
@@ -65,7 +75,11 @@ impl RuntimeRegistry {
             let _lease = opening_lease;
             Store::open(&state_path,&projection_dir,initial)
         }).await
-            .map_err(|_|failure("queue_job"))?.map_err(|_|failure("queue_io"))?;
+            .map_err(|_|failure("queue_job"))?.map_err(|error|{
+                // A frase da recusa da fila é fixa e diz por que a adoção falhou; o resto só pelo tipo.
+                let reason = super::queue::refusal(&error).map_or_else(||format!("{:?}",error.kind()),str::to_owned);
+                RuntimeError::new("queue_io",&format!("fila recusou: {reason}"))
+            })?;
         if store.state().generation != target.generation { return Err(failure("runtime_generation")); }
         let mut metadata = target.metadata.clone();
         if let Some(fields) = store.state().runtime_state["view"].as_object() {
@@ -84,7 +98,7 @@ impl RuntimeRegistry {
         let engine = RuntimeEngine::new(&target.provider,metadata,target.generation,ClockSample { monotonic_s:0.0,epoch_s })?
             .with_policy(self.policy.clone()).with_publisher(self.events.clone()).with_revision(revision);
         let handle = RuntimeActor::spawn(target.clone(),queue,connection,engine);
-        self.entries.lock().await.insert(target.key.clone(),Entry { generation:target.generation,handle:EntryHandle::Headless(handle.clone()) });
+        self.entries.lock().await.insert(target.key.clone(),Entry { generation:target.generation,handle:EntryHandle::Headless(handle.clone()),lease_path:target.lease_path.clone() });
         handle
         };
         let deadline = tokio::time::Instant::now()+Duration::from_secs(180);
@@ -118,7 +132,7 @@ impl RuntimeRegistry {
                 if store.state().generation!=target.generation{return Err(failure("runtime_generation"));}
                 let revision=self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
                 let handle=super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),self.policy.clone(),super::terminal::TerminalOptions::default(),self.events.clone(),revision);
-                self.entries.lock().await.insert(target.key.clone(),Entry {generation:target.generation,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()}});handle
+                self.entries.lock().await.insert(target.key.clone(),Entry {generation:target.generation,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()},lease_path:target.lease_path.clone()});handle
             }
         };
         let snapshot=handle.snapshot().await?;
@@ -127,12 +141,21 @@ impl RuntimeRegistry {
     pub async fn detach(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
         let barrier = self.barrier(key).await;
         let _guard = barrier.lock().await;
-        let handle = match self.entries.lock().await.get(key) {
+        let (handle,lease_path) = match self.entries.lock().await.get(key) {
             None=>return Ok(json!({"detached":true})),
-            Some(entry) if entry.generation == generation=>entry.handle.clone(),
+            Some(entry) if entry.generation == generation=>(entry.handle.clone(),entry.lease_path.clone()),
             _=>return Err(failure("runtime_generation")),
         };
-        handle.stop().await?;
+        if let Err(error) = handle.stop().await {
+            // `stop` sempre junta a tarefa do ator: se ele saiu por erro, a posse acaba com ele. Sem
+            // isto a entrada morta ficava para sempre, a sessão não voltava ao Python e o retrato de
+            // eventos de todas as sessões caía. Só solta depois de a trava estar livre de fato.
+            if !lease_released(&lease_path).await {
+                tracing::warn!(key,code=%error.code,"ator terminou mas a trava não liberou em 3 s; sessão segue presa");
+                return Err(error);
+            }
+            tracing::warn!(key,code=%error.code,"ator do runtime já tinha terminado; sessão liberada");
+        }
         self.entries.lock().await.remove(key);
         Ok(json!({"detached":true}))
     }
@@ -143,8 +166,11 @@ impl RuntimeRegistry {
         let entries:Vec<_> = self.entries.lock().await.iter().map(|(key,entry)|(key.clone(),entry.generation,entry.handle.clone())).collect();
         let mut output = Vec::new();
         for (key,generation,handle) in entries {
-            let data = handle.snapshot().await?;
-            output.push(RuntimeEvent { key,generation,revision:data["revision"].as_u64().unwrap_or(0),channel:"snapshot".into(),data });
+            // Uma sessão sem ator não tira o retrato das outras: ela fica de fora até ser liberada.
+            match handle.snapshot().await {
+                Ok(data)=>output.push(RuntimeEvent { key,generation,revision:data["revision"].as_u64().unwrap_or(0),channel:"snapshot".into(),data }),
+                Err(error)=>if crate::warn_limit::allow(Some(&key),&error.code) { tracing::warn!(key,code=%error.code,"sessão fora do retrato inicial dos eventos") },
+            }
         }
         Ok(output)
     }

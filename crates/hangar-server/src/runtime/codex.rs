@@ -232,6 +232,8 @@ impl Engine {
             || rpc.continuation.as_ref().is_some_and(|next|next["kind"] == "skill_lookup"))) }
     fn idle(&self) -> bool { self.deliverable() && !self.rpc.values().any(|rpc|!voice_rpc(rpc)) && self.answering.is_empty() && self.async_questions.pending.is_empty() }
 
+    pub fn forget_policy(&mut self,request_id:&RequestId) { self.policies.remove(request_id); }
+
     fn policy(&mut self,kind:&str,payload:Value,effects:&mut Vec<Effect>) {
         self.counter += 1;
         let request_id = RequestId::String(format!("policy:{}:{}",self.generation,self.counter));
