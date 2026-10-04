@@ -180,6 +180,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **O diálogo de confiança do Claude Code derruba três coisas**: a chave do pre-trust usa barra
   normal no Windows, `is_overlay` tem que ignorar as linhas em branco do fim do pane, e o Enter
   às cegas cai em "No, exit".
+- **A confiança na pasta é por conta: quem põe a sessão numa conta marca a pasta nela.** A criação
+  marca na conta em que a sessão nasce; a troca de conta marca na de destino antes de reabrir.
 - **Loop runner**: `LOOP_DONE` só fecha com confirmação humana; guardrails são max_iters,
   branch≠main e kill-switch. Loop ativo suprime o chain.
 - **Plugin e marketplace do Codex usam os comandos nativos do CLI.** Nome do plugin + origem
@@ -1670,6 +1672,15 @@ partir de 144 colunas (110 depois de pedido); abaixo disso não há árvore para
     erro pro cliente, o EventSource reconectava e caía no mesmo erro. O `TranscriptTailer.follow`
     espera a pasta em vez de estourar (o `mkdir` que o adapter do Codex já fazia era o mesmo
     problema, resolvido só naquele caminho).
+
+**A confiança é por conta, e a troca de conta não a levava** (medido em 04/10/2026, Windows com
+psmux, Claude Code 2.1.289, `main` em `d3043870`). Uma sessão criada numa conta e levada a outra
+por `POST /api/sessions/{name}/conta` reabria no diálogo, com "No, exit" sob o cursor, e a lista a
+mostrava como `awaiting_input`. Só acontece com pasta que a conta de destino nunca abriu e que não
+está debaixo de outra já confiável nela: a mesma troca com a pasta dentro do perfil do usuário
+abriu direto, e por isso o defeito passava despercebido. Com a marcação, a mesma troca numa pasta
+nova abriu sem o diálogo. Não medido: a sessão sem terminal sobe com `claude -p`, que pelo código
+não passa pelo diálogo, e ficaria com a pasta por marcar até virar terminal.
 
 ## Preferência da barra do Claude Code (07/09/2026)
 
