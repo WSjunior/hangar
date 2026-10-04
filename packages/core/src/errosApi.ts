@@ -478,7 +478,6 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_mod_botao_ambiguo: (p) => m.erro_mod_botao_ambiguo({ rotulo: String(p.rotulo ?? '') }),
   erro_mod_clique_sem_resposta: () => m.erro_mod_clique_sem_resposta(),
   erro_mod_botao_inexistente: () => m.erro_mod_botao_inexistente(),
-  erro_mod_clique_windows: () => m.erro_mod_clique_windows(),
   erro_mod_terminal_em_modo: () => m.erro_mod_terminal_em_modo(),
 };
 

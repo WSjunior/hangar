@@ -156,9 +156,14 @@ def test_recusa_do_terminal_por_motivo(monkeypatch):
     assert pc.terminal_refusal("x") is None
 
 
-def test_windows_recusa_ate_o_psmux_ser_provado(monkeypatch):
+def test_windows_le_o_mouse_pela_tela_alternativa(monkeypatch):
+    # O psmux não tem as flags de mouse: a tela cheia do Claude Code (tela alternativa) é o sinal.
+    respostas = {"#{alternate_on} #{pane_in_mode}": "1 0"}
     monkeypatch.setattr(pc.os, "name", "nt")
-    assert pc.terminal_refusal("x") == "erro_mod_clique_windows"
+    monkeypatch.setattr(pc, "_tmux_format", lambda name, fmt: respostas[fmt])
+    assert pc.terminal_refusal("x") is None
+    respostas["#{alternate_on} #{pane_in_mode}"] = "0 0"
+    assert pc.terminal_refusal("x") == "erro_mod_mouse_desligado"
 
 
 @pytest.mark.asyncio
@@ -169,3 +174,10 @@ async def test_painel_inline_sem_ancora_acha_o_botao_logo_acima_do_prompt(sessao
     monkeypatch.setattr(pc, "screen", lambda name: tela)
     await pc.press("clk", "rv", "cp-1")
     assert sessao[0][0] == 3
+
+
+def test_sessao_claude_nasce_em_tela_cheia():
+    # É na tela cheia que o Claude Code liga o mouse; no Windows por SSH ele a desliga sozinho.
+    from app import registry
+    assert registry._env_sessao(None, False)["env"]["CLAUDE_CODE_NO_FLICKER"] == "1"
+    assert "CLAUDE_CODE_NO_FLICKER" not in registry._env_sessao(None, False, provider="codex")["env"]

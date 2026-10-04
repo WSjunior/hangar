@@ -21,9 +21,14 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Botão de mod clicado no app é clique de mouse SGR no pane, achado pelo rótulo e confirmado
   pelo `ui.press`.** Nenhuma API do engine dispara o botão de outro plugin. Sem mouse ligado, com
   o pane em copy-mode, rótulo ausente ou repetido na região do site, o backend recusa em vez de
-  clicar às cegas: os bytes do mouse virariam texto no prompt. No Windows recusa sempre, até o
-  `send-keys -l` com ESC no psmux ser provado. A âncora da faixa (primeiro texto) conta o `label`
-  de botão: sem isso, faixa que começa por botão deixava a linha dele fora da região.
+  clicar às cegas. O mouse é lido por `#{mouse_sgr_flag}` no tmux e por `#{alternate_on}` no
+  psmux, que não tem as flags de mouse. A âncora da faixa (primeiro texto) conta o `label` de
+  botão: sem isso, faixa que começa por botão deixava a linha dele fora da região.
+
+- **Sessão Claude com terminal nasce com `CLAUDE_CODE_NO_FLICKER=1`.** O Claude Code só liga o
+  mouse em tela cheia, e no Windows por SSH desliga a tela cheia sozinho ("fullscreen disabled:
+  Windows over SSH"); a variável força a tela cheia mesmo sem `"tui": "fullscreen"` nas
+  configurações. Sem ela, o clique dos botões de mod pelo app não tem onde chegar.
 
 - **Clique do app que copia ou abre URL acontece no aparelho de quem clicou.** O plugin responde
   no lugar do `ui.copy` e do `process.run` de abridor de URL só quando a chamada vem do mod dono
@@ -1473,6 +1478,14 @@ Claude Code 2.1.289 (Linux), sondas descartáveis carregadas por `--plugin-dir` 
 | botão sem `plain` | o terminal desenha `[ rótulo ]` em volta do `label`; a busca pelo rótulo acha o texto dentro |
 | `onPress` do mod | dispara `$.ui.copy`/`$.process.run` sem `await`: a cópia pode chegar ao backend depois do `pressed`. Por isso a janela de 1,5 s no plugin e a espera de 0,3 s pelo efeito no backend |
 | prévia com painel ancorado | antes do corte, o SSE mandava `"text":"ok   …   │\n   …   │"` |
+
+**psmux (WinBoat, Windows 26200, psmux 3.3.8, Claude Code 2.1.289):** o psmux não tem
+`#{mouse_sgr_flag}`/`#{mouse_any_flag}`/`#{mouse_button_flag}` (vêm vazios); `#{alternate_on}` e
+`#{pane_in_mode}` existem. Aberto por SSH, o Claude Code registra "fullscreen disabled: Windows over
+SSH (ConPTY re-rendering) detected" e fica fora de tela cheia (`alternate_on` = 0): o clique SGR não
+pressiona nada, e os bytes também não aparecem no prompt. Com `CLAUDE_CODE_NO_FLICKER=1`, mesmo sem
+`"tui": "fullscreen"`, ele entra em tela cheia (`alternate_on` = 1) e o mesmo `send-keys -l` com o
+par SGR pressiona o botão (o `onPress` da sonda gravou o arquivo).
 
 O engine recusa carregar um módulo que guarda o próprio `$` numa variável (`engine = $`); só aceita
 o `$` no ponto da chamada ou num closure, como nos timers. O `tsc` não pega isso, o

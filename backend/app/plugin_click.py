@@ -49,11 +49,10 @@ def _tmux_format(name: str, fmt: str) -> str:
 
 def terminal_refusal(name: str) -> str | None:
     """Por que o terminal não pode receber o clique agora; None quando pode."""
-    # O psmux não tem a flag de mouse, e o `send-keys -l` com ESC lá não foi provado: sem prova,
-    # bytes de mouse num terminal sem mouse cairiam como texto no prompt.
-    if os.name == "nt":
-        return "erro_mod_clique_windows"
-    mouse, em_modo = (_tmux_format(name, "#{mouse_sgr_flag} #{pane_in_mode}").split() + ["", ""])[:2]
+    # O psmux não tem as flags de mouse: lá o sinal é a tela alternativa, que o Claude Code só usa
+    # em tela cheia, e é só em tela cheia que ele liga o mouse.
+    flag = "#{alternate_on}" if os.name == "nt" else "#{mouse_sgr_flag}"
+    mouse, em_modo = (_tmux_format(name, f"{flag} #{{pane_in_mode}}").split() + ["", ""])[:2]
     # Em copy-mode o ESC do clique cancela o modo e o resto da sequência vira texto no prompt.
     if em_modo == "1":
         return "erro_mod_terminal_em_modo"
@@ -61,9 +60,8 @@ def terminal_refusal(name: str) -> str | None:
 
 
 _RECUSAS = {
-    "erro_mod_clique_windows": "No Windows o clique pelo app ainda não está disponível; clique pelo terminal.",
     "erro_mod_terminal_em_modo": "O terminal da sessão está em modo de rolagem; saia dele e tente de novo.",
-    "erro_mod_mouse_desligado": "O terminal da sessão não está com o mouse ligado.",
+    "erro_mod_mouse_desligado": "O Claude Code da sessão não está em tela cheia, e só nela ele liga o mouse.",
 }
 
 
