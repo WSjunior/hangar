@@ -134,3 +134,17 @@ async fn one_bad_message_from_the_cli_does_not_end_the_actor() {
     registry.detach("key",1).await.unwrap();
     cano.abort();
 }
+
+#[tokio::test]
+async fn adoption_refused_by_the_queue_says_why() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("key.queue-state.json"),"{}").unwrap();
+    let registry = RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"secret-test".into(),"instance-test".into());
+    let target = hangar_server::runtime::protocol::RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
+        metadata:serde_json::json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
+        binding:hangar_server::runtime::protocol::CanoBinding { pid:42,escuta:"tcp:127.0.0.1:9".into(),token:"secret-test".into(),versao:2 },
+        lease_path:dir.path().join("key.lock"),state_path:dir.path().join("key.queue-state.json"),projection_dir:dir.path().join("projection"),
+        transcript:dir.path().join("chat.jsonl"),created:0.0 };
+    let error = registry.adopt(target,serde_json::json!({})).await.unwrap_err();
+    assert!(error.message.contains("estado da fila inválido"),"{}",error.message);
+}

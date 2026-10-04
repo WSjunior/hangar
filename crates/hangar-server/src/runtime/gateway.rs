@@ -61,7 +61,11 @@ impl RuntimeRegistry {
             let _lease = opening_lease;
             Store::open(&state_path,&projection_dir,initial)
         }).await
-            .map_err(|_|failure("queue_job"))?.map_err(|_|failure("queue_io"))?;
+            .map_err(|_|failure("queue_job"))?.map_err(|error|{
+                // A frase da recusa da fila é fixa e diz por que a adoção falhou; o resto só pelo tipo.
+                let reason = super::queue::refusal(&error).map_or_else(||format!("{:?}",error.kind()),str::to_owned);
+                RuntimeError::new("queue_io",&format!("fila recusou: {reason}"))
+            })?;
         if store.state().generation != target.generation { return Err(failure("runtime_generation")); }
         let mut metadata = target.metadata.clone();
         if let Some(fields) = store.state().runtime_state["view"].as_object() {
