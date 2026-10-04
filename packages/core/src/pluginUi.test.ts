@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buttonKey, decodeRaster, inkColor, isEmptyBand, parsePluginUi, textOf } from './pluginUi';
+import { buttonKey, decodeRaster, inkColor, isEmptyBand, parsePluginToast, parsePluginUi, textOf } from './pluginUi';
 
 function cells(words: number[]): string {
   const bytes = new Uint8Array(new Uint32Array(words).buffer);
@@ -66,6 +66,21 @@ describe('parsePluginUi', () => {
 
   it('placement desconhecido vira inline', () => {
     expect(parsePluginUi({ panes: [{ id: 'a', placement: 'x' }] }).panes[0].placement).toBe('inline');
+  });
+});
+
+describe('parsePluginToast', () => {
+  it('lê o aviso e o mod que o emitiu', () => {
+    expect(parsePluginToast({ id: 'ab-1', text: 'Jenkins configurado.', plugin: 'pmedico', timeoutMs: 9000 }))
+      .toEqual({ id: 'ab-1', text: 'Jenkins configurado.', plugin: 'pmedico', timeoutMs: 9000 });
+  });
+
+  it('sem id, sem texto ou sem prazo não é aviso', () => {
+    expect(parsePluginToast({ text: 'oi', timeoutMs: 4000 })).toBeNull();
+    expect(parsePluginToast({ id: 'ab-3', text: '  ', timeoutMs: 4000 })).toBeNull();
+    expect(parsePluginToast({ id: 'ab-4', text: 'oi' })).toBeNull();
+    expect(parsePluginToast({ id: 'ab-5', text: 'oi', timeoutMs: 0 })).toBeNull();
+    expect(parsePluginToast(null)).toBeNull();
   });
 });
 

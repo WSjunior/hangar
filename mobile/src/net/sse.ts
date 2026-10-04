@@ -137,7 +137,7 @@ export function createEventSource(
       const isData =
         type === 'message' || type === 'state' || type === 'preview' || type === 'reset' ||
         type === 'ping' || type === 'ask_question' || type === 'stats' ||
-        type === 'pensamento' || type === 'ferramenta';
+        type === 'pensamento' || type === 'ferramenta' || type === 'plugin_toast';
       const w = isData ? wrapData(fn as never) : wrapRaw(fn as never, type);
       getMap(type as string).set(fn as Function, w as unknown as Function);
       es.addEventListener(type as never, w as never);

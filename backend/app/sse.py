@@ -972,6 +972,20 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                            etapa="faixa", erro_tipo=type(exc).__name__)
             await queue.put(("__error__", exc))
 
+    async def toast_pump():
+        # Avisos dos mods: cada conexão começa do zero e recebe os que ainda não venceram; o app
+        # descarta pelo id o que já mostrou. Sai sem id de SSE, que é o cursor do transcript.
+        seen = 0
+        try:
+            while True:
+                seen, fresh = await plugin_bridge.wait_toasts(name, seen, 30)
+                for toast in fresh:
+                    await queue.put(("plugin_toast", json.dumps(toast, ensure_ascii=False)))
+        except Exception as exc:  # surface, never swallow
+            diag.registrar("sse.pump_falhou", "erro", sessao=name, provider=current_provider,
+                           etapa="toast", erro_tipo=type(exc).__name__)
+            await queue.put(("__error__", exc))
+
     sugestao_emitida = ""          # ultima sugestao que saiu; so a mudanca vira evento
     ask_q_emitted = False          # impede reemissao enquanto o mesmo prompt permanece na tela
     codex_question_emitted = ""
@@ -1014,6 +1028,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         asyncio.create_task(em_voo_pump("ferramenta", fonte_ferramenta(name))),
         asyncio.create_task(jsonl_watcher()),
         asyncio.create_task(band_pump()),
+        asyncio.create_task(toast_pump()),
     ]
     # NUCLEO (conexao): instrumentacao do CICLO DE VIDA do stream. O sintoma relatado é "a conversa
     # para e só volta fechando/abrindo o app", e o log de acesso do uvicorn só mostra a conexão

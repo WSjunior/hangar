@@ -330,6 +330,9 @@ enum Prepared {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Changed { Nothing, Screen, Rows, Tail, Bottom }
 
+/// Tipo das notificações que espelham aviso de mod; a chave de cada uma é o id do aviso.
+struct PluginToast;
+
 // Formulário da pergunta atual; refeito quando a pergunta (identidade + conteúdo) muda.
 #[derive(Default)]
 struct AskForm { fingerprint: String, picks: Vec<Pick>, typing: Vec<bool>, inputs: Vec<Entity<InputState>>, _changes: Vec<Subscription>, tab: usize }
@@ -462,6 +465,8 @@ pub struct Hangar {
     plugin_band: Value,
     /// Painéis que os mods abriram e o terminal desenhou, do mesmo SSE.
     plugin_panes: Vec<Value>,
+    /// Ids dos avisos de mod (SSE `plugin_toast`) que já foram mostrados.
+    plugin_toasts_seen: HashSet<String>,
     recent: Option<Recent>,
     media: MediaCache<(SessionKey, Source)>,
     full_images: viewer::FullImages,
@@ -740,7 +745,7 @@ impl Hangar {
             attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
             suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
-            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
+            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_toasts_seen: HashSet::new(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
             settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
@@ -1724,6 +1729,10 @@ impl Hangar {
                 self.plugin_band = data["above"].take();
                 self.plugin_panes = match data["panes"].take() { Value::Array(panes) => panes, _ => Vec::new() };
                 return (true, Changed::Screen);
+            }
+            "plugin_toast" => {
+                self.show_plugin_toast(&data, window, cx);
+                return (true, Changed::Nothing);
             }
             "stats" => {
                 return match serde_json::from_value::<Option<Stats>>(data) {
@@ -5489,6 +5498,21 @@ impl Hangar {
             }
             Err(error) => window.push_notification(Notification::warning(Self::failure(&error)), cx),
         }
+    }
+
+    /// Aviso (`$.ui.toast`) de um mod: o terminal o desenha por alguns segundos e ele não entra na conversa.
+    fn show_plugin_toast(&mut self, data: &Value, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(toast) = crate::plugin_ui::toast(data) else { return };
+        // A reconexão do SSE repõe os avisos ainda vivos: o id diz quais já passaram por aqui.
+        if !self.plugin_toasts_seen.insert(toast.id.clone()) { return; }
+        let key = SharedString::from(toast.id);
+        // Sem o autohide: ele é fixo em 5 s, e o prazo do aviso é o que o mod pediu.
+        let note = Notification::info(toast.text).id1::<PluginToast>(key.clone()).autohide(false);
+        window.push_notification(if toast.plugin.is_empty() { note } else { note.title(toast.plugin) }, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(toast.timeout).await;
+            let _ = this.update_in(cx, |_, window, cx| window.remove_notification1::<PluginToast>(key, cx));
+        }).detach();
     }
 
     /// Cartões, faixas e avisos entre a conversa e o compositor, e o compositor.

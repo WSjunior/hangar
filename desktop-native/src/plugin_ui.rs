@@ -3,6 +3,7 @@
 //! que mod veio: mod novo aparece sem código novo.
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 use gpui_kit::*;
 use gpui_kit::prelude::FluentBuilder;
 use serde_json::Value;
@@ -34,6 +35,18 @@ pub fn safe_href(v: &Value) -> Option<String> {
 }
 
 pub fn is_dock(pane: &Value) -> bool { pane["placement"] == "dock" }
+
+/// Aviso (`$.ui.toast`) que um mod mostrou no terminal; `plugin` é o mod que o emitiu.
+#[derive(Debug, PartialEq)]
+pub struct Toast { pub id: String, pub text: String, pub plugin: String, pub timeout: Duration }
+
+/// O dado do SSE `plugin_toast`; sem id, sem texto ou sem prazo não é aviso.
+pub fn toast(data: &Value) -> Option<Toast> {
+    let id = data["id"].as_str().filter(|id| !id.is_empty())?;
+    let text = data["text"].as_str().filter(|text| !text.trim().is_empty())?;
+    let ms = data["timeoutMs"].as_u64().filter(|ms| *ms > 0)?;
+    Some(Toast { id: id.to_owned(), text: text.to_owned(), plugin: data["plugin"].as_str().unwrap_or("").to_owned(), timeout: Duration::from_millis(ms) })
+}
 
 fn frame() -> Div {
     div().px(px(10.)).py(px(6.)).rounded(px(8.)).bg(theme::inset())
@@ -296,8 +309,19 @@ fn unmark(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
-    use super::{button_key, cell_color, color, is_dock, is_empty, raster_runs, safe_href};
+    use super::{button_key, cell_color, color, is_dock, is_empty, raster_runs, safe_href, toast, Toast};
     use serde_json::{json, Value};
+    use std::time::Duration;
+
+    #[test]
+    fn toast_keeps_the_mod_and_its_timeout_and_refuses_what_is_not_a_toast() {
+        assert_eq!(toast(&json!({"id": "ab-1", "text": "Jenkins configurado.", "plugin": "pmedico", "timeoutMs": 9000})),
+            Some(Toast { id: "ab-1".into(), text: "Jenkins configurado.".into(), plugin: "pmedico".into(), timeout: Duration::from_millis(9000) }));
+        assert_eq!(toast(&json!({"id": "ab-2", "text": "oi", "timeoutMs": 1})).map(|t| t.plugin), Some(String::new()));
+        assert_eq!(toast(&json!({"text": "oi", "timeoutMs": 4000})), None);
+        assert_eq!(toast(&json!({"id": "ab-3", "text": "  ", "timeoutMs": 4000})), None);
+        assert_eq!(toast(&json!({"id": "ab-4", "text": "oi"})), None);
+    }
 
     fn cells(words: &[u32]) -> String {
         use base64::Engine as _;

@@ -7,9 +7,10 @@
   import Composer from '../components/Composer.svelte';
   import PluginBand, { type PluginNotice } from '../components/PluginBand.svelte';
   import PluginPane from '../components/PluginPane.svelte';
+  import PluginToasts from '../components/PluginToasts.svelte';
   import { copyText } from '../lib/clipboard';
   import { openInNewTab } from '../lib/openTab';
-  import { parsePluginUi, pressPluginButton, safeHref, type PluginNode as PluginTree, type PluginPane as PluginPaneData } from '@hangar/core';
+  import { parsePluginToast, parsePluginUi, pressPluginButton, safeHref, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
   import UsageSheet from '../components/UsageSheet.svelte';
@@ -463,6 +464,24 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // Faixa acima do prompt que os mods do Claude Code desenham (SSE 'plugin_ui').
   let pluginBand = $state<PluginTree>(null);
   let pluginPanes = $state<PluginPaneData[]>([]);
+  // Avisos (`$.ui.toast`) dos mods (SSE 'plugin_toast'). A reconexão repõe os que ainda não
+  // venceram: o id diz quais já passaram por aqui.
+  let pluginToasts = $state<PluginToast[]>([]);
+  const pluginToastsSeen = new Set<string>();
+  const pluginToastTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  function dismissPluginToast(id: string) {
+    clearTimeout(pluginToastTimers.get(id));
+    pluginToastTimers.delete(id);
+    pluginToasts = pluginToasts.filter((t) => t.id !== id);
+  }
+  function showPluginToast(t: PluginToast) {
+    if (pluginToastsSeen.has(t.id)) return;
+    pluginToastsSeen.add(t.id);
+    pluginToasts = [...pluginToasts, t];
+    pluginToastTimers.set(t.id, setTimeout(() => dismissPluginToast(t.id), t.timeoutMs));
+  }
+  // Aviso de prazo longo não segura a conversa fechada na memória até vencer.
+  onDestroy(() => pluginToastTimers.forEach((timer) => clearTimeout(timer)));
   // Resultado do último clique num botão de mod; some sozinho.
   let pluginNotice = $state<PluginNotice | null>(null);
   let pluginNoticeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -2305,6 +2324,16 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       }
     });
 
+    es.addEventListener('plugin_toast', (e) => {
+      noteAlive();
+      try {
+        const t = parsePluginToast(JSON.parse(e.data));
+        if (t) showPluginToast(t);
+      } catch {
+        quadroFalhou('plugin_toast');
+      }
+    });
+
     es.addEventListener('pensamento', (e) => {
       noteAlive();
       try {
@@ -3174,6 +3203,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       />
     </div>
   {/if}
+
+  <PluginToasts toasts={pluginToasts} onDismiss={dismissPluginToast} />
 
   <!-- Underlay da conversa (B5 do parecer): MessageList, pílulas e dock ficam INERTES com o
        visor aberto — Tab não alcança controles escondidos sob o arquivo. O painel de contexto

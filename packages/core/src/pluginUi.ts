@@ -146,6 +146,22 @@ export function parsePluginUi(data: unknown): PluginSurfaces {
   };
 }
 
+/** Aviso (`$.ui.toast`) que um mod mostrou no terminal; `plugin` é o mod que o emitiu. */
+export interface PluginToast {
+  id: string;
+  text: string;
+  plugin: string;
+  timeoutMs: number;
+}
+
+/** O dado do SSE `plugin_toast`; sem id, sem texto ou sem prazo não é aviso. */
+export function parsePluginToast(data: unknown): PluginToast | null {
+  const o = (data && typeof data === 'object' ? data : {}) as Record<string, unknown>;
+  if (typeof o.id !== 'string' || !o.id || typeof o.text !== 'string' || !o.text.trim()) return null;
+  if (typeof o.timeoutMs !== 'number' || !(o.timeoutMs > 0)) return null;
+  return { id: o.id, text: o.text, plugin: typeof o.plugin === 'string' ? o.plugin : '', timeoutMs: o.timeoutMs };
+}
+
 /** Endereço que pode virar link ou ser aberto: só http(s). `javascript:` executaria no clique. */
 export function safeHref(v: unknown): string | null {
   return typeof v === 'string' && /^https?:\/\//i.test(v) ? v : null;

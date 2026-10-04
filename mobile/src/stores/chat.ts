@@ -13,6 +13,7 @@ import {
   sendInputForServer,
   queuedMessages,
   registrarDiag,
+  parsePluginToast,
 } from '@hangar/core';
 import type { ChatEvent, StateEvent, PreviewEvent, AskQuestionPayload, StatsEvent, EventSourceLike, Server } from '@hangar/core';
 import * as m from '../paraglide/messages';
@@ -152,6 +153,7 @@ function criarChatStore(serverId: string, name: string): ChatApi {
   let previewDropTimer: ReturnType<typeof setTimeout> | undefined;
   let pensamentoTimer: ReturnType<typeof setTimeout> | undefined;
   let ferramentaTimer: ReturnType<typeof setTimeout> | undefined;
+  const pluginToastsSeen = new Set<string>();
 
   function limparPreview(): void {
     clearTimeout(previewDropTimer);
@@ -491,6 +493,19 @@ function criarChatStore(serverId: string, name: string): ChatApi {
         }
       } catch {
         quadroFalhou('ferramenta');
+      }
+    });
+
+    // Aviso (`$.ui.toast`) de um mod: o terminal o desenha por alguns segundos e ele não entra no
+    // transcript. A reconexão repõe os que ainda não venceram: o id diz quais já passaram por aqui.
+    es.addEventListener('plugin_toast', (e) => {
+      try {
+        const t = parsePluginToast(JSON.parse(e.data as string));
+        if (!t || pluginToastsSeen.has(t.id)) return;
+        pluginToastsSeen.add(t.id);
+        void import('../ui/Toast').then(({ toast }) => toast.mod(t.text, t.plugin, t.timeoutMs));
+      } catch {
+        quadroFalhou('plugin_toast');
       }
     });
 
