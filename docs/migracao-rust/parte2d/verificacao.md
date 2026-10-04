@@ -86,7 +86,11 @@ multiline da reserva era compartilhado. A primeira rodada corrigiu esses pontos,
 regressões novas verdes** e **634 passagens** na execução dos 12 arquivos afetados. O teste do
 hook executa o TypeScript real com Node 24, nos três modos, com conversa atual e após `/clear`.
 O teste tmux intercalou duas sessões e reproduziu A recebendo os bytes de B antes da correção;
-depois, cada pane recebeu seu próprio texto. A releitura independente está pendente.
+depois, cada pane recebeu seu próprio texto. A releitura aprovou quatro problemas; restam a
+classificação por provedor declarado antigo e a correspondência por cauda de um caractere.
+A segunda rodada corrigiu esses caminhos com processos frescos e correspondência mínima por
+trecho; conservou forks de Pi comprovados. A execução final selecionada passou em **44 casos**,
+com 68 fora da seleção. A segunda releitura independente está pendente.
 
 A política comum de falhas de `74177469` será integrada com a parte1 após a revisão desta Task.
 O caminho terminal já separa `_op_once`, evitando duplicar essa política.

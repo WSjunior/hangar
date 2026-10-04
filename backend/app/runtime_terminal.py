@@ -30,27 +30,28 @@ def outside_scope(name):
     panes = tmux.list_panes_all().get(name)
     if not panes:
         return False
-    if all(pane.get('hidden') for pane in panes):
-        return True
-    declared = {pane.get('provider') for pane in panes} - {None}
-    if 'claude' in declared:
-        return False
-    if declared:
-        return True
     children = procinfo._proc_children_map(max_age=0)
-    other = False
+    agents = {}
+    unresolved = False
     for pane in panes:
-        provider, pid = registry_mod.agente_do_pane(pane['pid'], children)
-        if pid is None:
-            continue
+        current = {}
+        if pane['pid']:
+            for pid in procinfo._descendant_pids(pane['pid'], children):
+                provider, agent = registry_mod.agente_do_pane(pid, {})
+                if agent is not None:
+                    current[agent] = provider
+        agents.update(current)
+        unresolved |= not current and not pane.get('hidden')
+    if unresolved:
+        return False
+    if not agents:
+        return all(pane.get('hidden') for pane in panes)
+    for pid, provider in agents.items():
         if provider == 'claude':
             arguments = procinfo._argv(pid)
-            if len(arguments) > 1 and arguments[1] in {'auth','login','setup-token'}:
-                other = True
-                continue
-            return False
-        other = True
-    return other
+            if len(arguments) < 2 or arguments[1] not in {'auth','login','setup-token'}:
+                return False
+    return True
 
 
 def _collect(name):
@@ -954,7 +955,7 @@ def _proves_input(snapshot, text, before):
     if len(expected) < 12:
         return actual == expected and bool(expected)
     parts = (text.strip()[:40], text.strip().split('\n')[-1][-40:])
-    return any(ti._sem_espaco(part) in actual for part in parts if ti._sem_espaco(part))
+    return any(len(candidate) >= 12 and candidate in actual for candidate in map(ti._sem_espaco, parts))
 
 
 def _proved_submission(name):
