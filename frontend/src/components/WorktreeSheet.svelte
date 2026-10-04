@@ -6,7 +6,7 @@
   import Spinner from './Spinner.svelte';
   import { worktreeStatus } from '../lib/worktreeStatus.svelte';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
-  import { goToSession, sessionStateLabel, worktreeStateColor, worktreeStateLabel } from '../lib/worktreeView';
+  import { goToSession, sessionStateLabel, worktreeSizeLabel, worktreeStateColor, worktreeStateLabel } from '../lib/worktreeView';
   import * as m from '../paraglide/messages';
 
   interface Props { open: boolean; server: Server; path: string; onClose: () => void; onDeleted?: () => void }
@@ -20,15 +20,25 @@
   let geracao = 0;
 
   // Só abrir e trocar de caminho releem: lista de servidores recarregada traz objeto novo do mesmo servidor.
+  // Com o tamanho ainda em medição no backend, relê a cada 5 s, com teto.
   $effect(() => {
     if (!open) return;
     const p = path;
     const meu = ++geracao;
     st = null; erro = ''; apagarBranch = false; confirmando = false;
+    apagando = false; copiado = false; erroCopia = false;
     const s = untrack(() => server);
-    getWorktreeForServer(s, p)
-      .then((r) => { if (meu !== geracao) return; st = r; worktreeStatus.put(s.id, r); })
+    let releituras = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ler = () => getWorktreeForServer(s, p)
+      .then((r) => {
+        if (meu !== geracao) return;
+        st = r; worktreeStatus.put(s.id, r);
+        if (r.size_pending && releituras++ < 12) timer = setTimeout(ler, 5000);
+      })
       .catch((e) => { if (meu === geracao) erro = e instanceof Error ? e.message : String(e); });
+    void ler();
+    return () => { geracao++; clearTimeout(timer); };
   });
 
   const estado = $derived(st ? worktreeState(st) : null);
@@ -48,17 +58,20 @@
     nome, estado: sessionsStore.rows.find((r) => r.serverId === server.id && r.name === nome)?.state,
   })) : []);
   const perdeArquivos = $derived(st ? st.dirty + st.ignored.length : 0);
-  const tamanho = $derived(st?.size != null ? fmtBytes(st.size) : '');
+  // "Libera X" só com medida lida; parcial sai como mínimo ("≥").
+  const tamanho = $derived(st && st.size != null && !st.size_pending && !st.size_error ? worktreeSizeLabel(st) : '');
 
   let copiado = $state(false);
   let erroCopia = $state(false);
+  let timerCopia: ReturnType<typeof setTimeout> | undefined;
   async function copiarCaminho() {
     if (!st) return;
     erroCopia = false;
     try {
       await navigator.clipboard.writeText(st.path);
       copiado = true;
-      setTimeout(() => (copiado = false), 1500);
+      clearTimeout(timerCopia);
+      timerCopia = setTimeout(() => (copiado = false), 1500);
     } catch {
       erroCopia = true;
     }
@@ -71,16 +84,19 @@
 
   async function apagar() {
     if (!st) return;
+    // Capturado antes do await: trocar de worktree no meio zera `st`.
+    const { repo, path: alvo } = st;
+    const meu = geracao;
     apagando = true; erro = '';
     try {
-      await deleteWorktreeForServer(server, { repo: st.repo, path: st.path, confirm: perdeArquivos > 0, delete_branch: apagarBranch });
-      worktreeStatus.drop(server.id, st.path);
+      await deleteWorktreeForServer(server, { repo, path: alvo, confirm: perdeArquivos > 0, delete_branch: apagarBranch });
+      worktreeStatus.drop(server.id, alvo);
       onDeleted?.();
       onClose();
     } catch (e) {
-      erro = e instanceof Error ? e.message : String(e);
+      if (meu === geracao) erro = e instanceof Error ? e.message : String(e);
     } finally {
-      apagando = false;
+      if (meu === geracao) apagando = false;
     }
   }
 </script>
@@ -144,6 +160,7 @@
       </div>
       {#if erroCopia}<p class="erro" role="alert">{m.toast_copiar_falhou()}</p>{/if}
       <p class="veredito">{veredito}</p>
+      {#if st.degraded}<p class="aviso" role="note">{m.worktree_leitura_incompleta()}</p>{/if}
 
       {#if sessoes.length}
         <p class="secao">{m.worktree_sessoes_aqui()}</p>
@@ -168,7 +185,7 @@
         <dt>{m.worktree_detalhe_criada()}</dt><dd>{st.created_at ? fmtWhen(st.created_at) : '—'}</dd>
         <dt>{m.worktree_detalhe_ultimo_commit()}</dt><dd>{st.last_commit ? fmtWhen(st.last_commit.at) : '—'}</dd>
         <dt>{m.worktree_detalhe_conversas()}</dt><dd>{st.closed}</dd>
-        <dt>{m.worktree_detalhe_espaco()}</dt><dd>{st.size_pending ? m.worktrees_disco_calculando() : tamanho || '—'}</dd>
+        <dt>{m.worktree_detalhe_espaco()}</dt><dd class:aviso={st.size_error}>{worktreeSizeLabel(st)}</dd>
         {#if st.size_biggest}<dt>{m.worktree_detalhe_maior()}</dt><dd>{st.size_biggest.name} · {fmtBytes(st.size_biggest.bytes)}</dd>{/if}
       </dl>
 

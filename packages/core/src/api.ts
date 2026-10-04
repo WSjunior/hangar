@@ -1087,6 +1087,8 @@ export interface WorktreeStatus {
   size?: number | null;         // bytes ocupados; null enquanto o backend mede
   size_biggest?: { name: string; bytes: number } | null;
   size_pending?: boolean;
+  size_error?: boolean;     // a medição falhou; tenta de novo sozinha depois
+  size_partial?: boolean;   // houve pasta ilegível: o tamanho é um mínimo ("≥")
 }
 export interface WorktreeCommit { sha: string; subject: string; at: number }
 export interface WorktreeRepo { repo: string; worktrees: WorktreeStatus[] }

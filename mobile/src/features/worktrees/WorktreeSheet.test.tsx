@@ -30,6 +30,7 @@ vi.mock('../../paraglide/messages', () => Object.fromEntries([
   'worktree_fica_guardado', 'worktree_fica_commits', 'worktree_fica_conversas', 'worktree_apagar_conversas',
   'worktree_apagar_branch_juntada', 'worktree_apagar_branch_tambem', 'worktree_apagar_perder', 'worktree_apagar',
   'worktree_apagar_branch_perde', 'worktree_copiar_caminho', 'toast_copiado',
+  'worktree_tamanho_falhou', 'worktree_tamanho_parcial', 'worktree_leitura_incompleta',
 ].map((k) => [k, (p?: Record<string, unknown>) => (p ? `${k}:${Object.values(p).join(',')}` : k)])));
 vi.mock('@hangar/core', async (original) => ({ ...await original<typeof import('@hangar/core')>(), ...api }));
 import { WorktreeSheet } from './WorktreeSheet';

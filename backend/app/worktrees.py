@@ -358,6 +358,7 @@ def status(path: str, sessions=(), main: str | None = None, measure: bool = True
         "created_at": _created_at(main, path),
         "size": size["bytes"] if size else None, "size_biggest": size["biggest"] if size else None,
         "size_pending": exists and size is None,
+        "size_error": bool(size and size.get("error")), "size_partial": bool(size and size.get("partial")),
         "sessions": sorted(s.name for s in inside),
         "closed": _closed_count(path, {os.path.realpath(s.jsonl) for s in inside if s.jsonl}),
     }
@@ -436,18 +437,22 @@ def _size_loop() -> None:
 
 
 def _measure(path: str) -> None:
-    value: dict = {"bytes": None, "biggest": None}
+    value: dict = {"bytes": None, "biggest": None, "error": True, "partial": False}
     at = time.time() - _SIZE_TTL + _SIZE_RETRY
     try:
         totals: dict[str, int] = {}
+        skipped = [0]
         for entry in os.scandir(path):
-            totals[entry.name] = _tree_bytes(entry)
+            totals[entry.name] = _tree_bytes(entry, skipped)
         biggest = max(totals.items(), key=lambda kv: kv[1], default=None)
+        if skipped[0]:
+            _log.warning("worktrees: %d pastas ilegíveis ao medir %s; o total é parcial", skipped[0], path)
         value = {"bytes": sum(totals.values()),
-                 "biggest": {"name": biggest[0], "bytes": biggest[1]} if biggest else None}
+                 "biggest": {"name": biggest[0], "bytes": biggest[1]} if biggest else None,
+                 "error": False, "partial": bool(skipped[0])}
         at = time.time()
-    except OSError as e:
-        _log.warning("worktrees: não medi o espaço de %s: %s", path, e)
+    except Exception:   # a thread é única: qualquer erro que escapasse daqui pararia todas as medições
+        _log.exception("worktrees: não medi o espaço de %s", path)
     finally:
         with _sizes_lock:
             _sizes_running.discard(path)
@@ -464,7 +469,8 @@ def _entry_bytes(st: os.stat_result) -> int:
     return blocks * 512 if blocks is not None else st.st_size
 
 
-def _tree_bytes(entry: os.DirEntry) -> int:
+def _tree_bytes(entry: os.DirEntry, skipped: list[int]) -> int:
+    """`skipped[0]` conta o que não deu para ler: o total sai parcial e a tela mostra "≥"."""
     try:
         if entry.is_symlink():
             return 0
@@ -481,9 +487,10 @@ def _tree_bytes(entry: os.DirEntry) -> int:
                         elif not e.is_symlink():
                             total += _entry_bytes(e.stat(follow_symlinks=False))
             except OSError:
-                continue
+                skipped[0] += 1
         return total
     except OSError:
+        skipped[0] += 1
         return 0
 
 

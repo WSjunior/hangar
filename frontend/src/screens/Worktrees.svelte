@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { basename, deleteMergedWorktreesForServer, fetchWorktreesForServer, fmtBytes, getWorktreesForServer,
+  import { basename, deleteMergedWorktreesForServer, fetchWorktreesForServer, getWorktreesForServer,
            mergedWorktreeBatch, relativeTime, worktreeAgeDays, worktreeIsAgent, worktreeReady, worktreeState,
            worktreeTitle, WORKTREE_STALE_DAYS, type WorktreeRepo, type WorktreeState, type WorktreeStatus } from '@hangar/core';
   import BottomSheet from '../components/BottomSheet.svelte';
@@ -9,7 +9,8 @@
   import { listOwnServers, onServersChanged, type Server } from '../lib/auth';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { worktreeStatus } from '../lib/worktreeStatus.svelte';
-  import { goToSession, sessionStateLabel, worktreeStateColor, worktreeStateLabel } from '../lib/worktreeView';
+  import { goToSession, sessionStateLabel, worktreeSizeLabel, worktreesSizeBytes as somaTamanho, worktreesSizeSum,
+           worktreeStateColor, worktreeStateLabel } from '../lib/worktreeView';
   import * as m from '../paraglide/messages';
 
   let { onBack }: { onBack?: () => void } = $props();
@@ -44,10 +45,16 @@
   }
 
   // Primeiro mostra o que o disco já sabe; o fetch dos remotos (lento) vem depois e relê.
+  // Por `serverId::repo`: o fetch do remoto que falhou deixa mesclada/atrasada velhas, e isso aparece.
+  let erroRemoto = $state<Record<string, true>>({});
   async function atualizar() {
     releituras = 0;
     atualizando = true;
-    await Promise.allSettled(blocos.flatMap((b) => b.repos.map((r) => fetchWorktreesForServer(b.servidor, r.repo))));
+    const alvos = blocos.flatMap((b) => b.repos.map((r) => ({ b, repo: r.repo })));
+    const res = await Promise.allSettled(alvos.map(({ b, repo }) => fetchWorktreesForServer(b.servidor, repo)));
+    const falhas: Record<string, true> = {};
+    res.forEach((x, i) => { if (x.status === 'rejected') falhas[chaveLote(alvos[i].b, alvos[i].repo)] = true; });
+    erroRemoto = falhas;
     atualizando = false;
     await carregar();
   }
@@ -56,13 +63,19 @@
   // medida pendente, com teto para não ficar lendo para sempre se a medição travar.
   const medindo = $derived(blocos.some((b) => b.repos.some((r) => r.worktrees.some((w) => w.size_pending))));
   const MAX_RELEITURAS = 12;
-  let releituras = 0;
+  let releituras = $state(0);
+  const demorando = $derived(medindo && releituras >= MAX_RELEITURAS);
   $effect(() => {
     blocos;   // cada leitura nova reagenda a próxima
-    if (!medindo || releituras >= MAX_RELEITURAS) return;
+    if (!medindo) { releituras = 0; return; }   // conta só releituras seguidas
+    if (untrack(() => releituras) >= MAX_RELEITURAS) return;
     const t = setTimeout(() => { releituras++; void carregar(); }, 5000);
     return () => clearTimeout(t);
   });
+  function tentarMedirDeNovo() {
+    releituras = 0;
+    void carregar();
+  }
 
   // Por `serverId::repo`: o lote em andamento (botão desligado) e o aviso dele, que não é de leitura.
   let loteAndando = $state<string | null>(null);
@@ -119,14 +132,14 @@
   const todas = $derived<Item[]>(blocos.flatMap((b) => b.repos.flatMap((r) =>
     r.worktrees.map((w) => ({ servidor: b.servidor, w, estado: worktreeState(w) })))));
   const conta = (f: Filtro) => todas.filter((i) => passa[f](i.w)).length;
-  const somaTamanho = (ws: WorktreeStatus[]) => ws.reduce((a, w) => a + (w.size ?? 0), 0);
-  const liberaProntas = $derived(somaTamanho(todas.filter((i) => worktreeReady(i.w)).map((i) => i.w)));
+  const prontas = $derived(todas.filter((i) => worktreeReady(i.w)).map((i) => i.w));
+  const liberaProntas = $derived(somaTamanho(prontas));
   const nomesEmUso = $derived([...new Set(todas.flatMap((i) => i.w.sessions))].join(' · '));
 
   const contadores = $derived<{ f: Filtro; rotulo: string; dica: string; cor: string }[]>([
     { f: 'uso', rotulo: m.worktrees_contador_em_uso(), dica: nomesEmUso || m.worktrees_contador_em_uso_vazio(), cor: 'var(--accent)' },
     { f: 'dirty', rotulo: m.worktrees_contador_nao_commitado(), dica: m.worktrees_contador_nao_commitado_dica(), cor: 'var(--warning)' },
-    { f: 'prontas', rotulo: m.worktrees_contador_prontas(), dica: m.worktrees_contador_prontas_dica({ tamanho: fmtBytes(liberaProntas) }), cor: 'var(--success)' },
+    { f: 'prontas', rotulo: m.worktrees_contador_prontas(), dica: m.worktrees_contador_prontas_dica({ tamanho: worktreesSizeSum(prontas) }), cor: 'var(--success)' },
     { f: 'paradas', rotulo: m.worktrees_contador_paradas(), dica: m.worktrees_contador_paradas_dica(), cor: 'var(--text-muted)' },
   ]);
   const filtros = $derived<{ f: Filtro; rotulo: string }[]>([
@@ -141,7 +154,7 @@
   // ── Disco ─────────────────────────────────────────────────────────────────
   const TOPO = 6;
   const porTamanho = $derived(todas.filter((i) => (i.w.size ?? 0) > 0).sort((a, b) => (b.w.size ?? 0) - (a.w.size ?? 0)));
-  const discoTotal = $derived(somaTamanho(porTamanho.map((i) => i.w)));
+  const discoTotal = $derived(worktreesSizeSum(todas.map((i) => i.w)));
   const discoResto = $derived(porTamanho.slice(TOPO));
   const legenda: { e: WorktreeState; rotulo: () => string }[] = [
     { e: 'merged', rotulo: m.worktrees_filtro_prontas },
@@ -154,7 +167,6 @@
   // Subagentes recolhidos por repositório; com filtro ligado, abertos (é o que a pessoa procura).
   let subAbertos = $state<Record<string, boolean>>({});
 
-  const tamanhoDe = (w: WorktreeStatus) => (!w.exists ? '—' : w.size_pending ? m.worktrees_disco_calculando() : w.size != null ? fmtBytes(w.size) : '—');
   function atividade(w: WorktreeStatus): string {
     const d = worktreeAgeDays(w);
     if (d === null) return '—';
@@ -169,7 +181,7 @@
   <li class="ficha">
     <div class="ficha-topo">
       <button type="button" class="abrir" onclick={() => (aberta = { servidor, path: w.path })}>{worktreeTitle(w)}</button>
-      <span class="tam">{tamanhoDe(w)}</span>
+      <span class="tam" class:aviso={w.size_error}>{worktreeSizeLabel(w)}</span>
     </div>
     <div class="chips">
       <span class="chip" style:--cor={worktreeStateColor[e]}>{worktreeStateLabel[e]()}</span>
@@ -189,6 +201,7 @@
       </div>
     {/if}
     <div class="mono"><span>{w.branch ?? m.worktree_sem_branch_rotulo()}</span><span class="muted"> ← {w.base ?? '—'}</span></div>
+    {#if w.degraded}<p class="aviso" role="note">{m.worktree_leitura_incompleta()}</p>{/if}
     {#if w.last_commit}<div class="assunto">{w.last_commit.subject}</div>{/if}
     <div class="metricas">
       <span class="mono">↑{w.ahead} ↓{w.behind ?? 0}</span>
@@ -228,10 +241,13 @@
 
       <section class="disco">
         <h2>{m.worktrees_disco_titulo()}</h2>
-        {#if medindo}<p class="muted">{m.worktrees_disco_calculando()}</p>{/if}
+        {#if demorando}
+          <p class="aviso">{m.worktrees_disco_demorando()}
+            <button type="button" class="tentar" onclick={tentarMedirDeNovo}>{m.busca_tentar_de_novo()}</button></p>
+        {:else if medindo}<p class="muted">{m.worktrees_disco_calculando()}</p>{/if}
         {#if porTamanho.length}
-          <p class="muted">{m.worktrees_disco_resumo({ total: fmtBytes(discoTotal), n: porTamanho.length })}
-            {#if liberaProntas} · <span class="libera">{m.worktrees_disco_libera({ tamanho: fmtBytes(liberaProntas) })}</span>{/if}</p>
+          <p class="muted">{m.worktrees_disco_resumo({ total: discoTotal, n: porTamanho.length })}
+            {#if liberaProntas} · <span class="libera">{m.worktrees_disco_libera({ tamanho: worktreesSizeSum(prontas) })}</span>{/if}</p>
           <div class="barra" aria-hidden="true">
             {#each porTamanho as i (i.servidor.id + i.w.path)}<span style:flex-grow={String(i.w.size)} style:background={worktreeStateColor[i.estado]}></span>{/each}
           </div>
@@ -242,7 +258,7 @@
                   <span class="ponto" style:background={worktreeStateColor[i.estado]} aria-hidden="true"></span>
                   <span class="disco-nome">{worktreeTitle(i.w)}</span>
                   <span class="muted">{worktreeStateLabel[i.estado]()}</span>
-                  <span class="tam">{fmtBytes(i.w.size ?? 0)}</span>
+                  <span class="tam">{worktreeSizeLabel(i.w)}</span>
                 </button>
               </li>
             {/each}
@@ -250,7 +266,7 @@
               <li class="disco-linha disco-linha--resto">
                 <span class="ponto" aria-hidden="true"></span>
                 <span class="disco-nome">{m.worktrees_disco_outras({ n: discoResto.length })}</span>
-                <span class="tam">{fmtBytes(somaTamanho(discoResto.map((i) => i.w)))}</span>
+                <span class="tam">{worktreesSizeSum(discoResto.map((i) => i.w))}</span>
               </li>
             {/if}
           </ul>
@@ -281,20 +297,21 @@
         {@const k = chaveLote(b, r.repo)}
         {@const subAberto = filtro !== 'todas' || !!subAbertos[k]}
         {@const principal = r.worktrees.find((w) => w.main_branch)?.main_branch}
-        {#if visiveis.length || erroLote[k]}
+        {#if visiveis.length || erroLote[k] || erroRemoto[k]}
           <section class="repo">
             <div class="repo-topo">
               <h2>{basename(r.repo)}{servidores.length > 1 ? ` · ${b.servidor.label}` : ''}</h2>
               {#if principal}<span class="muted">{m.worktree_repo_principal({ branch: principal })}</span>{/if}
-              <span class="muted">{m.worktree_repo_resumo({ n: r.worktrees.length, tamanho: fmtBytes(somaTamanho(r.worktrees)) })}</span>
+              <span class="muted">{m.worktree_repo_resumo({ n: r.worktrees.length, tamanho: worktreesSizeSum(r.worktrees) })}</span>
             </div>
             {#if lote.deletable.length}
               <button type="button" class="lote" disabled={loteAndando === k} onclick={() => pedirLote(b, r)}>
                 {#if loteAndando === k}<Spinner />{/if}
-                {m.worktree_limpar_mescladas({ n: lote.deletable.length, tamanho: fmtBytes(somaTamanho(lote.deletable)) })}
+                {m.worktree_limpar_mescladas({ n: lote.deletable.length, tamanho: worktreesSizeSum(lote.deletable) })}
               </button>
             {/if}
             {#if erroLote[k]}<p class="erro" role="alert">{erroLote[k]}</p>{/if}
+            {#if erroRemoto[k]}<p class="aviso" role="alert">{m.worktrees_busca_remoto_falhou({ repo: basename(r.repo) })}</p>{/if}
             <ul class="fichas">
               {#each principais as w (w.path)}{@render ficha(b.servidor, w)}{/each}
             </ul>
@@ -326,7 +343,7 @@
   <BottomSheet open={true} onClose={() => (confirmando = null)} ariaLabel={m.worktree_lote_titulo({ n: confirmando.deletable.length })}>
     <div class="sheet">
       <h2 class="title">{m.worktree_lote_titulo({ n: confirmando.deletable.length })}</h2>
-      {#if libera}<p class="libera">{m.worktree_libera({ tamanho: fmtBytes(libera) })}</p>{/if}
+      {#if libera}<p class="libera">{m.worktree_libera({ tamanho: worktreesSizeSum(confirmando.deletable) })}</p>{/if}
       <ul class="itens">
         {#each confirmando.deletable as w (w.path)}
           <li>
@@ -437,6 +454,8 @@
   .sub-titulo { font-weight: 600; font-size: 0.9rem; }
   .seta { display: inline-block; transition: rotate 0.15s; }
   .seta--aberta { rotate: 90deg; }
+  .tentar { min-height: 32px; margin-left: 6px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--border-default); font-size: 0.8rem; }
+  .ficha .aviso { margin: 0; position: relative; z-index: 1; }
   .legenda-commits { margin: 4px 0 0; font-size: 0.75rem; }
 
   .sheet { padding: 16px; display: flex; flex-direction: column; gap: 10px; }

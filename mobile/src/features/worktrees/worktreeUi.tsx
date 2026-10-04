@@ -44,8 +44,11 @@ export function displayTitle(w: WorktreeStatus): string {
 
 export function sizeLabel(w: WorktreeStatus): string {
   if (!w.exists) return '—';
-  if (w.size == null) return w.size_pending ? m.worktrees_disco_calculando() : '—';
-  return fmtBytes(w.size);
+  if (w.size == null) {
+    if (w.size_error) return m.worktree_tamanho_falhou();
+    return w.size_pending ? m.worktrees_disco_calculando() : '—';
+  }
+  return w.size_partial ? m.worktree_tamanho_parcial({ tamanho: fmtBytes(w.size) }) : fmtBytes(w.size);
 }
 
 export function sessionStateLabel(s: State | undefined): string {
@@ -60,7 +63,7 @@ export function useLiveSessionState(serverId: string, name: string): State | und
 }
 
 export function openSession(serverId: string, name: string) {
-  router.push(`/s/${serverId}/${name}` as never);
+  router.push(`/s/${encodeURIComponent(serverId)}/${encodeURIComponent(name)}` as never);
 }
 
 function SessionChip({ serverId, name, onBeforeOpen }: { serverId: string; name: string; onBeforeOpen?: () => void }) {
@@ -71,7 +74,7 @@ function SessionChip({ serverId, name, onBeforeOpen }: { serverId: string; name:
       onPress={() => { onBeforeOpen?.(); openSession(serverId, name); }}
       accessibilityRole="button"
       accessibilityLabel={m.worktree_ir_sessao_nome({ nome: name })}
-      hitSlop={4}
+      hitSlop={6}
       style={({ pressed }) => [styles.chip, { borderColor: theme.tokens.border.default }, pressed && { opacity: 0.6 }]}
     >
       <StateDot state={state ?? 'idle'} size={7} />
@@ -91,7 +94,7 @@ export function SessionChips({ serverId, names, onBeforeOpen }: { serverId: stri
 }
 
 const styles = StyleSheet.create((theme) => ({
-  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
   chip: {
     flexDirection: 'row', alignItems: 'center', gap: 6, minHeight: 32, maxWidth: '100%',
     paddingHorizontal: 10, borderRadius: theme.base.radius.full, borderWidth: 1,

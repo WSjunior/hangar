@@ -48,6 +48,12 @@ pub(super) struct WorktreeStatus {
     pub size_biggest: Option<BiggestDir>,
     #[serde(default)]
     pub size_pending: bool,
+    /// A medição falhou; o backend tenta de novo depois.
+    #[serde(default)]
+    pub size_error: bool,
+    /// Houve pasta ilegível: o tamanho é um mínimo.
+    #[serde(default)]
+    pub size_partial: bool,
     #[serde(default)]
     pub sessions: Vec<String>,
     pub closed: i64,
@@ -162,6 +168,16 @@ pub(super) fn fmt_size(bytes: u64) -> String {
 }
 
 fn sum_size<'a>(list: impl IntoIterator<Item = &'a WorktreeStatus>) -> u64 { list.into_iter().filter_map(|w| w.size).sum() }
+
+/// Soma para mostrar: com alguma medida falha ou parcial, vira um mínimo ("≥").
+fn sum_label<'a>(list: impl IntoIterator<Item = &'a WorktreeStatus>) -> String {
+    let (mut total, mut partial) = (0, false);
+    for w in list {
+        total += w.size.unwrap_or(0);
+        partial |= w.size_partial || w.size_error;
+    }
+    if partial { tr_shared("worktree_tamanho_parcial", &[("tamanho", &fmt_size(total))]) } else { fmt_size(total) }
+}
 
 /// Caminho com `/` e sem separador no fim: o backend no Windows devolve `\`.
 fn norm_path(path: &str) -> String { path.replace('\\', "/").trim_end_matches('/').to_owned() }
@@ -293,6 +309,8 @@ pub(super) struct Worktrees {
     /// Releitura marcada enquanto o backend mede o espaço de alguma.
     size_poll: bool,
     size_tries: u32,
+    /// Repositórios cujo fetch falhou na última atualização.
+    fetch_failed: Vec<String>,
 }
 
 impl Worktrees {
@@ -370,7 +388,7 @@ impl Hangar {
 
     /// O backend mede o espaço em segundo plano: relê a lista a cada 5 s enquanto faltar medida, até 12 vezes.
     fn poll_sizes(&mut self, cx: &mut Context<Self>) {
-        if self.worktrees.size_poll || self.worktrees.size_tries >= 12 { return; }
+        if self.worktrees.size_poll || self.worktrees.size_tries >= SIZE_TRIES { return; }
         self.worktrees.size_poll = true;
         self.worktrees.size_tries += 1;
         cx.spawn(async move |this, cx| {
@@ -385,13 +403,22 @@ impl Hangar {
     fn fetch_worktrees(&mut self, repos: Vec<String>, cx: &mut Context<Self>) {
         let Some(api) = self.api.clone() else { return };
         self.worktrees.refreshing = true;
+        self.worktrees.fetch_failed.clear();
         let task = self.runtime.spawn(async move {
-            // ponytail: fetch que falha (sem rede) só deixa a base como estava; a lista relida continua valendo.
-            for repo in repos { let _ = api.server_send(reqwest::Method::POST, &["worktrees", "fetch"], Some(json!({"repo": repo})), 150).await; }
+            // Fetch que falha deixa a base como estava: a lista relida vale, com o aviso de que pode estar desatualizada.
+            let mut failed = Vec::new();
+            for repo in repos {
+                if api.server_send(reqwest::Method::POST, &["worktrees", "fetch"], Some(json!({"repo": &repo})), 150).await.is_err() { failed.push(repo); }
+            }
+            failed
         });
         cx.spawn(async move |this, cx| {
-            let _ = task.await;
-            let _ = this.update(cx, |this, cx| { this.worktrees.refreshing = false; this.load_worktrees(false, cx); });
+            let failed = task.await.unwrap_or_default();
+            let _ = this.update(cx, |this, cx| {
+                this.worktrees.refreshing = false;
+                this.worktrees.fetch_failed = failed;
+                this.load_worktrees(false, cx);
+            });
         }).detach();
     }
 
@@ -685,7 +712,8 @@ impl Hangar {
 
     fn render_worktrees_body(&self, cx: &mut Context<Self>) -> Div {
         let page = div().flex().flex_col().gap(px(16.))
-            .when_some(self.worktrees.batch_error.clone(), |el, error| el.child(note_box(error, theme::danger())));
+            .when_some(self.worktrees.batch_error.clone(), |el, error| el.child(note_box(error, theme::danger())))
+            .children(self.worktrees.fetch_failed.iter().map(|repo| note_box(tr_shared("worktrees_busca_remoto_falhou", &[("repo", &base_name(repo))]), theme::warning())));
         let repos = match &self.worktrees.repos.value {
             None => return page.child(loading_state()),
             Some(Err(error)) => return page.child(error_state(tr_shared("worktrees_erro", &[("motivo", error.as_str())]),
@@ -722,7 +750,7 @@ impl Hangar {
     fn render_counters(&self, all: &[&WorktreeStatus], now: f64, cx: &mut Context<Self>) -> Div {
         let count = |f: Filter| all.iter().filter(|w| f.matches(w, now)).count();
         let in_use: Vec<&str> = all.iter().flat_map(|w| w.sessions.iter().map(String::as_str)).collect();
-        let freed = fmt_size(sum_size(all.iter().copied().filter(|w| ready(w))));
+        let freed = sum_label(all.iter().copied().filter(|w| ready(w)));
         let boxes = [
             (Filter::InUse, "worktrees_contador_em_uso", theme::accent(),
                 if in_use.is_empty() { tr_shared("worktrees_contador_em_uso_vazio", &[]) } else { in_use.join(" · ") }),
@@ -748,36 +776,42 @@ impl Hangar {
         let pending = all.iter().any(|w| w.size_pending);
         if sized.is_empty() && !pending { return None; }
         sized.sort_by_key(|w| std::cmp::Reverse(w.size.unwrap_or(0)));
-        let total = sum_size(sized.iter().copied());
+        let total = sum_label(sized.iter().copied());
         let freed = sum_size(all.iter().copied().filter(|w| ready(w)));
+        let freed_text = sum_label(all.iter().copied().filter(|w| ready(w)));
+        // Teto de releituras atingido com medida pendente: diz que demora e deixa tentar de novo.
+        let slow = pending && self.worktrees.size_tries >= SIZE_TRIES;
         let max = sized.first().and_then(|w| w.size).unwrap_or(1).max(1) as f32;
         let (top, rest) = sized.split_at(sized.len().min(6));
-        let line = |name: String, state: String, bytes: u64, color: Hsla| div().w_full().flex().items_center().gap(px(10.)).text_size(px(12.5))
+        let line = |name: String, state: String, bytes: u64, text: String, color: Hsla| div().w_full().flex().items_center().gap(px(10.)).text_size(px(12.5))
             .child(dot(color))
             .child(div().w(px(220.)).flex_shrink_0().min_w_0().truncate().child(name))
             .child(div().w(px(150.)).flex_shrink_0().min_w_0().truncate().text_color(theme::muted()).child(state))
             .child(div().flex_1().min_w_0().h(px(6.)).rounded(px(3.)).bg(theme::inset())
                 .child(div().h_full().rounded(px(3.)).bg(color).w(relative((bytes as f32 / max).clamp(0.01, 1.)))))
-            .child(div().w(px(72.)).flex_shrink_0().flex().justify_end().child(fmt_size(bytes)));
+            .child(div().w(px(72.)).flex_shrink_0().flex().justify_end().child(text));
         let rows: Vec<AnyElement> = top.iter().map(|w| {
             let path = w.path.clone();
             let st = state_of(w);
             div().id(SharedString::from(format!("worktrees-disk-{}", w.path))).px(px(6.)).py(px(4.)).rounded(px(6.)).cursor_pointer()
-                .hover(|el| el.bg(theme::hover())).child(line(title(w), st.label(), w.size.unwrap_or(0), st.color()))
+                .hover(|el| el.bg(theme::hover())).child(line(title(w), st.label(), w.size.unwrap_or(0), Self::size_text(w), st.color()))
                 .on_click(cx.listener(move |this, _, window, cx| this.open_worktree(path.clone(), window, cx))).into_any_element()
         }).chain((!rest.is_empty()).then(|| div().px(px(6.)).py(px(4.))
             .child(line(tr_shared("worktrees_disco_outras", &[("n", &rest.len().to_string())]), String::new(), sum_size(rest.iter().copied()),
-                theme::border_strong())).into_any_element())).collect();
+                sum_label(rest.iter().copied()), theme::border_strong())).into_any_element())).collect();
         let states = [WtState::Merged, WtState::Dirty, WtState::Session, WtState::Active, WtState::Detached];
         Some(card_plain().gap(px(10.))
             .child(div().flex().items_center().gap(px(10.)).flex_wrap()
                 .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(tr_shared("worktrees_disco_titulo", &[])))
                 .child(div().text_size(px(12.5)).text_color(theme::muted())
-                    .child(tr_shared("worktrees_disco_resumo", &[("total", &fmt_size(total)), ("n", &sized.len().to_string())])))
+                    .child(tr_shared("worktrees_disco_resumo", &[("total", &total), ("n", &sized.len().to_string())])))
                 .child(div().flex_1())
-                .when(pending, |el| el.child(div().text_size(px(12.5)).text_color(theme::muted()).child(tr_shared("worktrees_disco_calculando", &[]))))
+                .when(pending && !slow, |el| el.child(div().text_size(px(12.5)).text_color(theme::muted()).child(tr_shared("worktrees_disco_calculando", &[]))))
+                .when(slow, |el| el.child(div().text_size(px(12.5)).text_color(theme::warning_text()).child(tr_shared("worktrees_disco_demorando", &[])))
+                    .child(Button::new("worktrees-sizes-retry").outline().xsmall().label(tr_shared("busca_tentar_de_novo", &[]))
+                        .on_click(cx.listener(|this, _, _, cx| { this.worktrees.size_tries = 0; this.load_worktrees(false, cx); }))))
                 .when(freed > 0, |el| el.child(div().text_size(px(12.5)).text_color(theme::success_text())
-                    .child(tr_shared("worktrees_disco_libera", &[("tamanho", &fmt_size(freed))])))))
+                    .child(tr_shared("worktrees_disco_libera", &[("tamanho", &freed_text)])))))
             .child(stack_bar(sized.iter().map(|w| (w.size.unwrap_or(0) as f64, state_of(w).color())).collect()).h(px(14.)))
             .child(div().flex().flex_col().children(rows))
             .child(div().flex().flex_wrap().items_center().gap(px(12.)).text_size(px(12.)).text_color(theme::muted())
@@ -802,7 +836,7 @@ impl Hangar {
             Some(b) => format!("{} · {}", repo.repo, tr_shared("worktree_repo_principal", &[("branch", b)])),
             None => repo.repo.clone(),
         };
-        let total = fmt_size(sum_size(&repo.worktrees));
+        let total = sum_label(&repo.worktrees);
         let (repo_new, repo_batch) = (repo.repo.clone(), repo.clone());
         let head = div().flex().items_center().gap(px(10.))
             .child(chrome::small_icon(IconName::Folder, 16., theme::muted()))
@@ -815,7 +849,7 @@ impl Hangar {
                 .label(tr_shared("worktree_nova", &[]))
                 .on_click(cx.listener(move |this, _, window, cx| this.open_create(repo_new.clone(), window, cx))))
             .when(!deletable.is_empty(), |el| el.child(Button::new(SharedString::from(format!("worktrees-clean-{}", repo.repo))).outline().small()
-                .label(tr_shared("worktree_limpar_mescladas", &[("n", &deletable.len().to_string()), ("tamanho", &fmt_size(sum_size(&deletable)))]))
+                .label(tr_shared("worktree_limpar_mescladas", &[("n", &deletable.len().to_string()), ("tamanho", &sum_label(&deletable))]))
                 .loading(deleting).disabled(deleting)
                 .on_click(cx.listener(move |this, _, window, cx| this.open_batch(&repo_batch, window, cx)))));
         let (agents, mains): (Vec<&WorktreeStatus>, Vec<&WorktreeStatus>) = visible.into_iter().partition(|w| is_agent(w));
@@ -864,6 +898,8 @@ impl Hangar {
     fn size_text(w: &WorktreeStatus) -> String {
         match (w.exists, w.size) {
             (false, _) => "—".into(),
+            _ if w.size_error => tr_shared("worktree_tamanho_falhou", &[]),
+            (_, Some(b)) if w.size_partial => tr_shared("worktree_tamanho_parcial", &[("tamanho", &fmt_size(b))]),
             (_, Some(b)) => fmt_size(b),
             _ if w.size_pending => tr_shared("worktrees_disco_calculando", &[]),
             _ => "—".into(),
@@ -891,7 +927,9 @@ impl Hangar {
                 .when(you, |el| el.child(chip(tr_shared("worktree_esta_sessao", &[]), theme::accent()))))
             .child(div().flex().flex_wrap().gap(px(4.)).child(chip(st.label(), st.color()))
                 .children(stale_days(w, now).map(|d| chip(tr_shared("worktree_parada_dias", &[("n", &d.to_string())]), theme::warning_text()))))
-            .when(!sessions.is_empty(), |el| el.child(div().flex().flex_wrap().gap(px(2.)).children(sessions)));
+            .when(!sessions.is_empty(), |el| el.child(div().flex().flex_wrap().gap(px(2.)).children(sessions)))
+            .when(w.degraded, |el| el.child(div().text_size(px(11.5)).text_color(theme::warning_text()).whitespace_normal()
+                .child(tr_shared("worktree_leitura_incompleta", &[]))));
         let branch_cell = div().flex_basis(px(0.)).flex_grow(1.).min_w_0().flex().flex_col().gap(px(2.)).text_size(px(12.5))
             .child(div().flex().min_w_0()
                 .child(div().min_w_0().truncate().font_family(theme::MONO)
@@ -948,7 +986,8 @@ impl Hangar {
                 .child(Button::new("worktree-copy-path").ghost().xsmall().icon(IconName::Copy).tooltip(tr_shared("worktree_copiar_caminho", &[]))
                     .accessibility_label(tr_shared("worktree_copiar_caminho", &[]))
                     .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(copy.clone())))))
-            .child(div().p(px(10.)).rounded(px(8.)).bg(theme::inset()).text_color(state.color()).child(state.verdict(&st)));
+            .child(div().p(px(10.)).rounded(px(8.)).bg(theme::inset()).text_color(state.color()).child(state.verdict(&st)))
+            .when(st.degraded, |el| el.child(note_box(tr_shared("worktree_leitura_incompleta", &[]), theme::warning())));
         let me = self.current_session();
         let sessions = (!st.sessions.is_empty()).then(|| div().flex().flex_col().gap(px(8.))
             .child(section(tr_shared("worktree_sessoes_aqui", &[])))
@@ -1044,8 +1083,8 @@ impl Hangar {
             .child(div().flex().flex_col().gap(px(4.))
                 .child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).child(tr_shared("worktree_apagar_titulo", &[("nome", &title(&st))])))
                 .child(div().font_family(theme::MONO).text_size(px(12.)).text_color(theme::muted()).child(sub))
-                .children(st.size.filter(|b| *b > 0).map(|b| div().text_color(theme::success_text())
-                    .child(tr_shared("worktree_libera", &[("tamanho", &fmt_size(b))])))))
+                .when(st.size.is_some_and(|b| b > 0) && !st.size_error, |el| el.child(div().text_color(theme::success_text())
+                    .child(tr_shared("worktree_libera", &[("tamanho", &Self::size_text(&st))])))))
             .when(!st.sessions.is_empty(), |el| el.child(note_box(tr_shared("worktree_bloqueada", &[("nomes", &st.sessions.join(", "))]), theme::warning())))
             .when(lost, |el| el.child(div().flex().flex_col().gap(px(6.))
                 .child(section(tr_shared("worktree_apagar_perde", &[])).text_color(theme::warning_text()))
@@ -1248,6 +1287,7 @@ impl Hangar {
     }
 }
 
+const SIZE_TRIES: u32 = 12;
 const COL_COMMITS: f32 = 92.;
 const COL_DIRTY: f32 = 110.;
 const COL_ACTIVITY: f32 = 112.;

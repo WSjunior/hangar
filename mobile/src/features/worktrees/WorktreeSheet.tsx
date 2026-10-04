@@ -39,7 +39,9 @@ function veredito(k: WorktreeState, st: WorktreeStatus): string {
 }
 
 export function WorktreeSheet({ server, path, onClose, onDeleted }: Props) {
-  const [st, setSt] = useState<WorktreeStatus | null>(null);
+  const [lido, setSt] = useState<WorktreeStatus | null>(null);
+  // Reabrir em outra worktree nunca mostra os dados nem o botão de apagar da anterior.
+  const st = lido && lido.path === path ? lido : null;
   const [erro, setErro] = useState('');
   const [apagando, setApagando] = useState(false);
   const [apagarBranch, setApagarBranch] = useState(false);
@@ -49,7 +51,7 @@ export function WorktreeSheet({ server, path, onClose, onDeleted }: Props) {
   // Chave pelo id: a lista de servidores troca de objeto a cada atualização do store, e isso não
   // pode zerar a folha aberta.
   useEffect(() => {
-    if (!server || !path) return;
+    if (!server || !path) { setSt(null); return; }
     let vivo = true;
     setSt(null); setErro(''); setApagarBranch(false); setConfirmando(false);
     getWorktreeForServer(server, path)
@@ -96,6 +98,7 @@ export function WorktreeSheet({ server, path, onClose, onDeleted }: Props) {
               </Pressable>
             </View>
             <Text style={styles.text}>{veredito(k, st)}</Text>
+            {st.degraded ? <Text style={styles.aviso}>{m.worktree_leitura_incompleta()}</Text> : null}
 
             {st.sessions.length && server ? (
               <Secao titulo={m.worktree_sessoes_aqui()}>
@@ -147,7 +150,7 @@ export function WorktreeSheet({ server, path, onClose, onDeleted }: Props) {
           <>
             <Text style={styles.title} accessibilityRole="header">{m.worktree_apagar_titulo({ nome: displayTitle(st) })}</Text>
             <Text style={styles.mono}>{st.path}{st.branch ? ` · ${st.branch}` : ''}</Text>
-            {st.size ? <Text style={styles.ok}>{m.worktree_libera({ tamanho: fmtBytes(st.size) })}</Text> : null}
+            {st.size ? <Text style={styles.ok}>{m.worktree_libera({ tamanho: sizeLabel(st) })}</Text> : null}
 
             {nPerde ? (
               <View style={styles.perdaCaixa}>
