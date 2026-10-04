@@ -843,6 +843,20 @@ def _claude_config_dir(info) -> Optional[str]:
     return conta.split(":", 1)[1] if conta.startswith("claude:") else None
 
 
+def _claude_context(info, pid: Optional[int]) -> Optional[dict]:
+    """Contexto pelo transcript com o modelo e a janela da PRÓPRIA sessão quando se sabe: o
+    `/model` que a statusline recebeu, o `--model` do processo ou o sidecar da sem terminal."""
+    model, declared = _escolhas_status(Path(info.jsonl).stem)[0], None
+    if getattr(info, "headless", False):
+        meta = headless_sessions.load(info.name) or {}
+        model, declared = model or meta.get("model"), meta.get("context_window")
+    elif pid:
+        model = model or procinfo._model_of(pid)[0]
+        declared = procinfo._env_var_of(pid, "CLAUDE_CODE_MAX_CONTEXT_TOKENS")
+    window = int(declared) if declared and str(declared).isdigit() else None
+    return claude_context.from_transcript(info.jsonl, _claude_config_dir(info), model, window)
+
+
 _STATUS_TTL = 20.0
 _STATUS_BUDGET = 2
 
@@ -879,8 +893,11 @@ class SessionRegistry:
     # Statusline por sessao: name -> (monotonic da captura, linha crua ou None). De classe
     # (compartilhado entre api.registry e as instancias do sse) — uma captura serve todos.
     _status_cache: dict[str, tuple[float, Optional[str]]] = {}
-    # Contexto da sessao Claude lido do transcript: name -> (monotonic da leitura, {used, window}).
-    _context_cache: dict[str, tuple[float, Optional[dict]]] = {}
+    # Contexto da sessão Claude lido do transcript: name -> (monotonic da leitura, jsonl, {used, window}).
+    # O jsonl vai junto porque /clear troca o arquivo e o valor da conversa anterior não vale mais.
+    _context_cache: dict[str, tuple[float, Optional[str], Optional[dict]]] = {}
+    # Pid do agente Claude de cada pane, visto na varredura: de onde ler `--model` e a janela.
+    _agent_pid: dict[str, int] = {}
     # Texto do spinner ("Hyperspacing… (1m51s · ↓2.1k tokens)") extraido da MESMA captura do sweep:
     # o fast-path de marcador deixa label=None e o card nunca mostrava a barrinha de "trabalhando".
     _label_cache: dict[str, Optional[str]] = {}
@@ -1108,6 +1125,7 @@ class SessionRegistry:
         # por ate _STATUS_TTL (e o dict cresceria sem poda a cada create/kill).
         self._status_cache.pop(name, None)
         self._context_cache.pop(name, None)
+        self._agent_pid.pop(name, None)
         self._label_cache.pop(name, None)
         self._limit_cache.pop(name, None)
         self._reply_cache.pop(name, None)
@@ -1332,6 +1350,8 @@ class SessionRegistry:
             else:
                 cdir = (_config_dir_of(pid_env) if pid_env else None) or (Path.home() / ".claude")
                 info.conta = f"claude:{Path(cdir).resolve()}"
+                if pid_env:
+                    self._agent_pid[p["name"]] = pid_env
             out.append(info)
             sids[p["name"]] = self._repl_sid(p["pid"], children)
         # Guarda de colisao: 2+ sessoes no mesmo jsonl -> so a dona mantem (mata a duplicata/cross-wire).
@@ -1763,17 +1783,21 @@ class SessionRegistry:
         # Hangar. Mesmo TTL da statusline: e leitura do fim de um arquivo, no threadpool.
         claudes = [i for i in infos
                    if getattr(i, "provider", "claude") == "claude" and i.jsonl
-                   and now_m - self._context_cache.get(i.name, (0.0, None))[0] > _STATUS_TTL]
+                   and (now_m - self._context_cache.get(i.name, (0.0, None, None))[0] > _STATUS_TTL
+                        or self._context_cache[i.name][1] != i.jsonl)]
         if claudes:
             lidos = await asyncio.gather(*[
-                asyncio.to_thread(claude_context.from_transcript, i.jsonl, _claude_config_dir(i))
+                asyncio.to_thread(_claude_context, i, self._agent_pid.get(i.name))
                 for i in claudes])
             for info, ctx in zip(claudes, lidos):
-                anterior = self._context_cache.get(info.name, (0.0, None))[1]
-                self._context_cache[info.name] = (time.monotonic(), ctx or anterior)
+                _, jsonl_antes, anterior = self._context_cache.get(info.name, (0.0, None, None))
+                # Sem resposta lida, o valor anterior só vale para o MESMO transcript.
+                manter = anterior if jsonl_antes == info.jsonl else None
+                self._context_cache[info.name] = (time.monotonic(), info.jsonl, ctx or manter)
         for info in infos:
             if getattr(info, "provider", "claude") == "claude":
-                info.context = self._context_cache.get(info.name, (0.0, None))[1]
+                _, jsonl_lido, ctx = self._context_cache.get(info.name, (0.0, None, None))
+                info.context = ctx if jsonl_lido == info.jsonl else None
         # Travada (feature #7): "working" ha mais de CP_STALL_SECONDS sem o transcript avancar. So o
         # bool derivado pra UI/sig — o push (1x, com dedupe) e responsabilidade do stall_watch, nao daqui.
         now = time.time()

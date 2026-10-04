@@ -2096,10 +2096,14 @@ dado" o tempo todo, embora a informação existisse.
 
 - **Contexto:** o `usage` da última resposta do agente principal no transcript é o pedido inteiro
   (`input + cache_read + cache_creation`). Subagente (`isSidechain`) e resposta `<synthetic>`
-  ficam de fora. O id do modelo não diz se é a variante de 1M, então a janela é 1M quando o
-  `model` do `settings.json` da conta termina em `[1m]` ou quando o uso já passou de 200k (só
-  cabe na de 1M); senão 200k. Lido com o mesmo TTL da statusline e entra na assinatura da lista
-  em baldes de 5%.
+  ficam de fora. O id do modelo no transcript não diz se é a variante de 1M, então a janela sai
+  do modelo da PRÓPRIA sessão (o que a statusline recebeu, o `--model` do processo ou o sidecar
+  da sessão sem terminal) e só na falta dele do `model` do `settings.json` da conta: o Hangar abre
+  a sessão com `--model opus[1m]` sem mexer nesse arquivo. Termina em `[1m]` ou o uso já passou
+  de 200k (só cabe na de 1M) → 1M; senão 200k. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` do processo (ou
+  `context_window` do sidecar) vence os dois. Lido com o mesmo TTL da statusline e entra na
+  assinatura da lista em baldes de 5%. O cache guarda o `jsonl` lido: depois do `/clear` o anel
+  fica sem dado até a primeira resposta, em vez de mostrar o número da conversa anterior.
 - **Cota:** o anel da conta usa a da API de uso, a mesma da pílula do topo, quando a linha não
   traz a janela de 5 h ou a semanal.
 - **A linha do Hangar vence:** quando ela traz o contexto, o número dela é o exato

@@ -17,8 +17,12 @@ WINDOW_DEFAULT = 200_000
 WINDOW_1M = 1_000_000
 
 
-def from_transcript(jsonl: str | Path | None, config_dir: str | Path | None = None) -> dict | None:
-    """`{"used", "window"}` da última resposta do agente principal, ou None sem resposta com uso."""
+def from_transcript(jsonl: str | Path | None, config_dir: str | Path | None = None,
+                    model: str | None = None, window_tokens: int | None = None) -> dict | None:
+    """`{"used", "window"}` da última resposta do agente principal, ou None sem resposta com uso.
+
+    `model` é o modelo da própria sessão e vence o da conta; `window_tokens` é a janela declarada
+    (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`) e vence os dois."""
     if not jsonl:
         return None
     try:
@@ -45,14 +49,19 @@ def from_transcript(jsonl: str | Path | None, config_dir: str | Path | None = No
         used = sum(int(usage.get(k) or 0) for k in
                    ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
         if used > 0:
-            return {"used": used, "window": window(used, config_dir)}
+            return {"used": used, "window": window(used, config_dir, model, window_tokens)}
     return None
 
 
-def window(used: int, config_dir: str | Path | None = None) -> int:
-    """1M quando o modelo configurado é a variante `[1m]` ou quando o uso já passou da janela
-    padrão (só cabe na de 1M); senão a padrão."""
-    if used > WINDOW_DEFAULT or _model_1m(config_dir):
+def window(used: int, config_dir: str | Path | None = None, model: str | None = None,
+           window_tokens: int | None = None) -> int:
+    """1M quando o modelo é a variante `[1m]` ou quando o uso já passou da janela padrão (só cabe
+    na de 1M); senão a padrão. O modelo da sessão vence o da conta: o Hangar abre a sessão com
+    `--model opus[1m]` sem mexer no `settings.json`."""
+    if window_tokens:
+        return window_tokens
+    is_1m = model.lower().endswith("[1m]") if model else _model_1m(config_dir)
+    if used > WINDOW_DEFAULT or is_1m:
         return WINDOW_1M
     return WINDOW_DEFAULT
 
