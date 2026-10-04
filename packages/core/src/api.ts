@@ -1863,12 +1863,14 @@ export function deleteEngineForServer(s: Server, nome: string): Promise<{ ok: bo
 // `nome` OU `base_url`+`api_key` — nunca os dois (o servidor rejeita com 400, pra key salva nunca
 // viajar pra um endereço que o cliente digitou).
 type EngineModelosBody = { nome: string } | { base_url: string; api_key: string };
+// `gateway`: proxy conhecido que atende no endereço (hoje só "cliproxyapi"); null quando não sabe.
+export type EngineModelosResposta = { modelos: ModeloProvedor[]; gateway?: string | null };
 
-export function engineModelos(corpo: EngineModelosBody): Promise<{ modelos: ModeloProvedor[] }> {
+export function engineModelos(corpo: EngineModelosBody): Promise<EngineModelosResposta> {
   return apiFetch('/api/engines/modelos', { method: 'POST', body: JSON.stringify(corpo) });
 }
 
-export function engineModelosForServer(s: Server, corpo: EngineModelosBody): Promise<{ modelos: ModeloProvedor[] }> {
+export function engineModelosForServer(s: Server, corpo: EngineModelosBody): Promise<EngineModelosResposta> {
   return apiFetchForServer(s, '/api/engines/modelos', { method: 'POST', body: JSON.stringify(corpo) });
 }
 

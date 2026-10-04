@@ -6421,7 +6421,12 @@ async def engine_modelos(body: EngineProbeBody):
         # Request — sem isto o urllib levantaria com a key crua na mensagem, e a rota abaixo relança
         # RuntimeError pro uvicorn logar (traceback com a key no journal). 400 sem ecoar o valor.
         raise HTTPException(400, str(e))
-    return {"modelos": modelos}
+    # Diz à tela que é o CLIProxyAPI desta máquina, que aceita os campos beta (ver MotorForm).
+    try:
+        local = await asyncio.to_thread(cliproxy.is_local_engine, {"base_url": base_url})
+    except ValueError:
+        local = False
+    return {"modelos": modelos, "gateway": "cliproxyapi" if local else None}
 
 
 @app.get("/api/engines/cliproxy", dependencies=[Depends(require_auth)])

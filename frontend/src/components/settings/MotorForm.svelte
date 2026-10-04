@@ -80,7 +80,7 @@
     subagent_model: motor?.subagent_model ?? '',
     context_window: motor?.context_window ? String(motor.context_window) : '',
     bundled_skills: motor?.bundled_skills === true,
-    experimental_betas: motor?.experimental_betas === true,
+    experimental_betas: motor?.experimental_betas === true || (criando && !!cliproxy),
     prompt_caching: motor?.prompt_caching !== false,
     adaptive_thinking: motor?.adaptive_thinking !== false,
     tool_search: motor?.tool_search === true,
@@ -99,7 +99,12 @@
   // Em edição o id no disco não muda; em criação ele sai do nome curto pelo alfabeto do engines.json.
   const idAlvo = $derived(criandoAgora ? idDe(form.nome) : idNoDisco);
   const ligado = (k: ChaveLiga) => form[k];
-  const setLigado = (k: ChaveLiga, v: boolean) => { form[k] = v; };
+  // Mexer à mão nos betas desarma o ligar automático do CLIProxyAPI no próximo Testar.
+  let betasTocado = $state(false);
+  const setLigado = (k: ChaveLiga, v: boolean) => {
+    if (k === 'experimental_betas') betasTocado = true;
+    form[k] = v;
+  };
   const numero = (k: ChaveNum) => form[k];
   const setNumero = (k: ChaveNum, v: string) => { form[k] = v; };
 
@@ -136,6 +141,10 @@
   // Só o caso documentado da Moonshot, onde desligar o thinking rebaixa K3/K2.7 para K2.6 sem
   // avisar. Não inventar regra para provedor sem doc.
   const ehMoonshot = $derived(/moonshot|kimi/i.test(`${form.base_url} ${form.model}`));
+  // O CLIProxyAPI monta um pedido novo pro upstream, então os campos beta passam; e o /model do
+  // Claude Code só lista ids com "claude", o que nenhum GPT dele tem.
+  let gateway = $state<string | null>(null);
+  const ehCliproxy = $derived(semChave || gateway === 'cliproxyapi');
   const descobertaComprovada = $derived(modelos.length > 0);
   const modeloAtual = $derived(modelos.find((x) => x.id === form.model));
   // Motor com chave salva, campo de chave vazio e endereço editado: o Testar usaria a chave salva
@@ -160,6 +169,8 @@
       const corpo = chave ? { base_url: form.base_url.trim(), api_key: chave } : { nome: idAlvo };
       const r = apiTarget ? await engineModelosForServer(apiTarget, corpo) : await engineModelos(corpo);
       modelos = r.modelos;
+      gateway = r.gateway ?? null;
+      if (ehCliproxy && !betasTocado) form.experimental_betas = true;
       okBusca = m.config_motores_modelos_ok({ n: r.modelos.length });
       const atual = modelos.find((x) => x.id === form.model) ?? modelos[0];
       if (atual) escolherModelo(atual.id);
@@ -396,7 +407,11 @@
       {m.config_motores_motivo_skills_1()} <code>claude-api</code>{m.config_motores_motivo_skills_2()} <code>~/.claude/skills</code>{m.config_motores_motivo_skills_3()}
     {/snippet}
     {#snippet mBetas()}
-      {m.config_motores_motivo_betas_1()}<code>context_management</code>{m.config_motores_motivo_betas_2()} <code>400 Extra inputs are not permitted</code>{m.comum_ponto()}
+      {#if ehCliproxy}
+        {m.config_motores_motivo_betas_cliproxy()}
+      {:else}
+        {m.config_motores_motivo_betas_1()}<code>context_management</code>{m.config_motores_motivo_betas_2()} <code>400 Extra inputs are not permitted</code>{m.comum_ponto()}
+      {/if}
     {/snippet}
     {#snippet mCache()}
       {m.config_motores_motivo_cache()}
@@ -415,6 +430,7 @@
     {/snippet}
     {#snippet mDescoberta()}
       {m.config_motores_motivo_descoberta_1()} <code>/v1/models</code>{m.config_motores_motivo_descoberta_2()} <code>/model</code>{m.config_motores_motivo_descoberta_3()}
+      {#if ehCliproxy}{m.config_motores_motivo_descoberta_cliproxy()}{/if}
     {/snippet}
     {#snippet mStreaming()}
       {m.config_motores_motivo_streaming()}
@@ -431,7 +447,9 @@
 
     <div class="grade">
       {@render linha('bundled_skills', m.config_motores_skills(), m.config_motores_recomendado_desligado(), '', mSkills)}
-      {@render linha('experimental_betas', m.config_motores_betas(), m.config_motores_recomendado_desligado(), '', mBetas)}
+      {@render linha('experimental_betas', m.config_motores_betas(),
+        ehCliproxy ? m.config_motores_recomendado_ligado() : m.config_motores_recomendado_desligado(),
+        ehCliproxy ? 'sim' : '', mBetas)}
       {@render linha('prompt_caching', m.config_motores_cache(), m.config_motores_recomendado_ligado(), 'sim', mCache)}
       {@render linha('adaptive_thinking', m.config_motores_raciocinio(),
         ehMoonshot ? m.config_motores_obrigatorio() : m.config_motores_recomendado_ligado(),
@@ -440,8 +458,9 @@
         form.experimental_betas ? m.config_motores_recomendado_desligado() : m.config_motores_sem_efeito(),
         '', mToolSearch, !form.experimental_betas)}
       {@render linha('gateway_model_discovery', m.config_motores_descoberta(),
-        descobertaComprovada ? m.config_motores_ligado_n({ n: modelos.length }) : m.config_motores_teste_antes(),
-        descobertaComprovada ? 'sim' : '', mDescoberta)}
+        ehCliproxy ? m.config_motores_recomendado_desligado()
+          : descobertaComprovada ? m.config_motores_ligado_n({ n: modelos.length }) : m.config_motores_teste_antes(),
+        !ehCliproxy && descobertaComprovada ? 'sim' : '', mDescoberta)}
       {@render linha('fine_grained_tool_streaming', m.config_motores_streaming(), m.config_motores_recomendado_desligado(), '', mStreaming)}
       {@render linha('auth_via_api_key', m.config_motores_x_api_key(),
         m.config_motores_ligue_401(), '', mAuthHeader)}
