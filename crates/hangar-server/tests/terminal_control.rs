@@ -544,3 +544,12 @@ async fn control_observer_never_subscribes_to_pane_output_nor_blocks_typing() {
     server.run(&["send-keys", "-t", "fixture", "Enter"]);
     pool.release("state").await.unwrap();
 }
+
+#[test]
+fn stray_hook_output_outside_a_frame_is_ignored() {
+    let mut parser = ControlParser::default();
+    assert_eq!(parser.push(b"saida de um hook\n%begin 3 9 0\nlinha\n%end 3 9 0\n").unwrap(), vec![
+        ControlEvent::Frame { identity: FrameIdentity { timestamp: 3, command: 9, flags: 0 }, text: "linha\n".into(), error: false },
+    ]);
+    assert!(ControlParser::default().push(b"%end 1 1 0\n").is_err());
+}

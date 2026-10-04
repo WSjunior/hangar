@@ -95,7 +95,10 @@ impl ControlParser {
                 self.frame = Some((identity, Vec::new()));
             } else if std::str::from_utf8(&line).is_err() { return Err(TerminalError("invalid notification UTF-8")); }
             else if line.starts_with(b"%exit") { events.push(ControlEvent::Exit); }
-            else if !line.starts_with(b"%") || line.starts_with(b"%begin ") || line.starts_with(b"%end ") || line.starts_with(b"%error ") {
+            // Linha avulsa fora de bloco: saída de hook que o tmux atribuiu a este cliente (ele vira o
+            // cliente "atual" ao anexar). Não é quadro nosso; derrubar o observador por ela não serve.
+            else if !line.starts_with(b"%") {}
+            else if line.starts_with(b"%begin ") || line.starts_with(b"%end ") || line.starts_with(b"%error ") {
                 return Err(TerminalError("invalid control frame"));
             }
         }
