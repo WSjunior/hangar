@@ -7,7 +7,7 @@ mod claude;
 mod codex;
 pub(crate) mod history;
 mod peer;
-mod py;
+pub(crate) mod py;
 pub mod pyjson;
 
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -2,6 +2,8 @@
 //! Caminhos e comparação dos testes de contrato com o golden do Python.
 #![allow(dead_code)]
 
+pub mod costs;
+
 use std::path::PathBuf;
 
 use hangar_server::transcript::pyjson;

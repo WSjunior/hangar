@@ -190,6 +190,12 @@ async def session_info(name: str) -> dict:
     return info_payload(name, info.provider, info.jsonl)
 
 
+@router.get("/costs/scopes")
+async def costs_scopes() -> dict:
+    from app import costs_sources
+    return await asyncio.to_thread(costs_sources.scopes_for_rust)
+
+
 @router.get("/sessions/{name}/side-events")
 async def side_events(name: str, app: int = 0):
     """Uma conexão por sessão para o hangar-server, que reparte estado, prévia, perguntas e fila

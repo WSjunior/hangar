@@ -1109,6 +1109,118 @@ Anotar valor e unidade, a sessão de cada `/history`, e o que não deu para medi
 | `/history` completo, Claude 300 MB / `limit=200` | |
 | Threads e inotify do Python com 4 chats abertos, contra 0 abertos | |
 
+## Custos e uso no hangar-server
+
+(03/10/2026, Parte 3; contrato interno 18 na junção com o dono único.) O Rust
+atende `/api/costs`, `/api/uso`, `/api/cotacao` e `/api/sessions/{name}/cost` para sessões Codex.
+Claude, Codex, Pi, omp e Kimi alimentam o índice de custos; o relatório de Uso mantém as fontes
+que a referência Python já oferece. Escopos e rótulos chegam do Python pelo contrato interno,
+incluindo a identidade canônica da conta e o repositório. Preços e mapa de áreas continuam
+sendo metadados explícitos da coleta. Fuso fixo UTC-3, chaves, ordem dos arrays/dicionários e
+campos nulos seguem os modelos Python.
+
+### Índice próprio e reserva
+
+Com o Rust de pé, as quatro rotas são só dele (regra do dono único, 04/10/2026): uma tentativa
+por pedido; falha interna vira 503 com `error_code` e `detail.{code,params.motivo,msg}` (o
+envelope que o `lerErro` do app traduz), uma linha no `hangar-server.log` e o evento
+`rust.costs_failed` no diário pelo `POST /internal/diag`. Códigos fixos `costs_no_scopes`,
+`costs_no_disk`, `costs_reader_panic`, `costs_sqlite`, `costs_json`, `costs_worker_join`,
+`costs_io`, `costs_non_finite` e `internal_info`. Nada é repassado ao Python por falha. A
+coleta que falhou fica guardada até o próximo pedido, que já dispara outra atrás (sem esperar
+`fresco` nem os 30 s); por isso o pedido seguinte pode voltar 202 ou 200. Aquecimento 202,
+ausência legítima 404, relatório vazio e falta de tarifa/cotação não são falha. A versão
+anterior (contrato 8: quatro tentativas e passagem da parte ao Python, rota
+`/internal/rust-failure`) saiu na junção com o dono único, contrato 18.
+
+O índice Rust chama-se `custos-rust.sqlite3`. No Linux/macOS fica em
+`$XDG_CACHE_HOME/hangar/custos` quando a variável contém caminho absoluto, ou
+`~/.cache/hangar/custos`; no Windows, em `%LOCALAPPDATA%/hangar/custos`, com a reserva local do
+perfil quando essa variável falta. O banco Python é independente (`custos.sqlite3`). A mudança
+do destino padrão Python discutida no PR #27 não está integrada nesta branch; não pressupor
+que os dois índices já usam a mesma pasta. Nenhum índice vivo foi usado na prova.
+
+Índice ausente aquece em background e responde 202 com progresso; um pedido fresco tem espera
+limitada. Índice indisponível ou escopos inacessíveis viram 503 com código. Falta
+do binário, protocolo incompatível e `CP_RUST_SERVER=0` conservam a reserva geral da porta
+pública. A recuperação do índice corrompido fecha os recursos da tentativa antes de reconstruir
+e repetir, sem copiar o índice Python.
+
+A validação entre máquinas em 03/10/2026 revelou diferenças no último bit das somas quando
+a ordem dos arquivos variava. Python e Rust agora ordenam os caminhos na listagem e nas
+consultas do índice, preservando a sequência interna de cada arquivo. Ordenar a consulta
+também corrige índices existentes, cuja ordem de inserção muda após atualizar um arquivo.
+
+O CI de 03/10/2026 também expôs dois pontos de portabilidade: a raiz do repositório deve
+ser resolvida antes de classificar origens, e a seleção de regras de projeto deve aceitar
+ambos os separadores de caminho. Python e Rust usam essa seleção comum; o marcador
+`project-paths:1` nas assinaturas reconstrói somente as áreas salvas, preservando os custos.
+
+Cotas permanecem no Python: dependem das APIs dos provedores e compartilham cache/espera de
+429 com criação de sessão, loop e MCP. Duplicar isso no Rust criaria duas consultas e duas
+políticas de espera. `stats` continua no fluxo de chat Python; custo por papel da orquestração
+também continua usando seu índice Python. A porta pública em Rust não duplica esses produtores.
+
+### Medida e paridade
+
+A [análise anterior](../migracao-rust/parte3/analise.md) mediu **41,9 s** de coleta Python sem
+índice, **0,08–0,14 s** de atualização incremental e pico de **211 MB** após ler o uso inteiro.
+O corpus mudou desde essa análise; os números seguintes são uma nova comparação dos dois
+leitores sobre as mesmas entradas, não uma repetição daquele conjunto antigo.
+
+Prova final sobre `caf615db`, build release, processos avulsos no Linux/glibc. Snapshot de
+**5.547 arquivos**, **4.497.268.800 bytes**, preservando os caminhos e identidades originais.
+As dez sobreposições do namespace são somente leitura; os dois índices SQLite e o temporário
+do SQLite ficam numa pasta privada descartável. Escopos, rótulos, preços, áreas e `now` foram
+capturados uma vez; cotação nula nos dois relatórios. Cópia, metadados e compilação ficam fora
+do tempo de varredura. “Fria” significa **índice novo**: as páginas dos arquivos já estavam
+aquecidas pela cópia e pela leitura Python; não se limpou o cache de páginas do sistema.
+
+| Operação | Resultado |
+|---|---:|
+| Coleta Python com índice novo | 38,842 s |
+| Coleta Rust com índice novo | 3,270 s |
+| Coleta incremental Rust, mesmos bytes e mesmo índice | 0,038157 s |
+| Pico Rust após relatórios frios e serialização | 87 MiB |
+| Pico Rust do processo completo, incluindo incremental e novos relatórios | 93 MiB |
+| Divergências dos relatórios completos Python/Rust | 0 |
+| Divergências de linhas, offsets, tamanhos e caudas nos dois índices temporários | 0 |
+
+O pico é `VmHWM`, arredondado para cima, após leitura, agregação e serialização; inclui os
+relatórios incrementais, não apenas os workers da varredura. O uso percorreu **103.814 linhas**
+e **4.457 linhas de tokens**. A descoberta real das origens Rust e Python coincidiu em **198
+entradas**, incluindo valores e ordem; o builder Rust não recebeu o mapa Python como resultado.
+Após a segunda coleta, os relatórios Rust também permaneceram idênticos byte a byte aos frios.
+As metas de menos de 5 s e 100 MiB foram atingidas nessa prova.
+
+As primeiras comparações de arquivos vivos divergiram porque os transcripts cresceram entre
+leituras. O snapshot resolveu isso sem excluir fontes, alterar identidades ou ajustar golden.
+O script compara inteiros, tipos, chaves e ordem exatamente; frações seguem tolerância de
+`1e-9 * max(abs(a), abs(b), 1)`. Só contagens, posições de campos e códigos entram no diagnóstico;
+os bytes reais ficam fora de fixtures e logs e são removidos ao terminar.
+
+### O que reduziu tempo e memória
+
+`caf615db` preservou o contrato e corrigiu o custo da implementação: buffer antes do compressor
+do estado, janela limitada com mais trabalho disponível às quatro threads, cálculo das áreas
+nas leituras e pré-filtro das linhas Claude/Codex que nenhum acumulador consome. O Uso é
+agregado enquanto o índice entrega as linhas (`fold_usage`/`UsoBuilder`), sem materializar a
+coleção inteira. No Linux/glibc, `tune_allocator` fixa o limite de devolução de memória antes
+da coleta; o exemplo usa o mesmo ajuste do servidor. Não houve mudança de tarifa, corte de
+dados ou normalização de saída para atingir as metas.
+
+Reprodução, da raiz: `cd backend && uv run python ../scripts/comparar-custos.py --snapshot
+--profile --incremental --diagnose`. O build release precede a captura; `--binary` permite um
+executável previamente congelado, com conferência opcional por `--binary-sha256`. O modo de
+snapshot depende de `bwrap` no Linux e não altera serviços ou configuração da máquina.
+
+### Uso real ainda pendente
+
+A prova foi por arquivos e processos avulsos. O dono ainda precisa conferir Custos e Uso no
+web, o card no celular e no nativo; “Atualizar dados”; filtros e clique num item de Uso; custo
+de sessão Codex; aquecimento ao recriar o índice Rust; e reserva com `CP_RUST_SERVER=0`.
+Nenhuma tela, backend vivo, índice de produção ou serviço foi alterado nesta prova.
+
 ## Observação terminal Rust: erro visível, sem captura Python
 
 (04/10/2026, dono único, decisão 3 do dono.) Com a ponte ligada, o Rust é o único dono da

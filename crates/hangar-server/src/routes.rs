@@ -1,6 +1,6 @@
 // crates/hangar-server/src/routes.rs
-//! Rotas do hangar-server: saúde, histórico e chat ao vivo do Claude e do Codex para o dono;
-//! todo o resto é repasse ao Python. Falha do Rust nessas rotas é 503 com código, nunca repasse.
+//! Rotas do hangar-server: saúde, custos, histórico e chat ao vivo do Claude e do Codex para o
+//! dono; todo o resto é repasse ao Python. Falha do Rust nessas rotas é 503 com código, nunca repasse.
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
@@ -44,6 +44,11 @@ pub struct AppState {
     pub workspace_read_slots: Arc<tokio::sync::Semaphore>,
     pub workspace_meta_slots: Arc<tokio::sync::Semaphore>,
     pub diag: crate::diag::DiagClient,
+    pub costs: Arc<crate::costs::collect::Collector>,
+    pub fx: Arc<crate::costs::fx::Fx>,
+    pub reports: Arc<crate::costs::ReportCache>,
+    pub origins_home: std::path::PathBuf,
+    pub origins: std::sync::Mutex<indexmap::IndexMap<std::path::PathBuf, crate::costs::origins::Origins>>,
 }
 
 impl AppState {
@@ -52,6 +57,16 @@ impl AppState {
     }
 
     pub fn with_terminal_pool(cfg: Config, terminal: crate::terminal_control::TerminalPool) -> AppState {
+        let costs = Arc::new(crate::costs::collect::Collector::new(
+            crate::costs::index::default_dir(), crate::costs::pricing::default_dir(),
+            crate::costs::areas::default_map_file(),
+            Arc::new(crate::costs::collect::HttpScopes::new(cfg.upstream, cfg.internal_secret.clone())),
+        ));
+        Self::with_parts(cfg, terminal, costs, Arc::new(crate::costs::fx::Fx::new()))
+    }
+
+    pub fn with_parts(cfg: Config, terminal: crate::terminal_control::TerminalPool,
+                      costs: Arc<crate::costs::collect::Collector>, fx: Arc<crate::costs::fx::Fx>) -> AppState {
         let http = proxy::client();
         let side = SideCtx {
             upstream: cfg.upstream,
@@ -65,7 +80,18 @@ impl AppState {
         AppState { auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, diag,
             workspace_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             workspace_read_slots: Arc::new(tokio::sync::Semaphore::new(8)),
-            workspace_meta_slots: Arc::new(tokio::sync::Semaphore::new(4)) }
+            workspace_meta_slots: Arc::new(tokio::sync::Semaphore::new(4)),
+            costs, fx, reports: Arc::new(crate::costs::ReportCache::default()),
+            origins_home: std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default()),
+            origins: std::sync::Mutex::new(indexmap::IndexMap::new()) }
+    }
+
+    pub(crate) fn skill_origins(&self, repo: &std::path::Path) -> crate::costs::origins::Origins {
+        let mut origins = self.origins.lock().unwrap();
+        let cache = origins.shift_remove(repo).unwrap_or_else(|| crate::costs::origins::Origins::new(self.origins_home.clone(), repo.to_owned()));
+        origins.insert(repo.to_owned(), cache.clone());
+        while origins.len() > 8 { origins.shift_remove_index(0); }
+        cache
     }
 
     /// `info` da sessão com cache curto: várias telas abrindo juntas viram uma consulta só. Só o
@@ -84,11 +110,11 @@ impl AppState {
 }
 
 /// A rota interna não respondeu o `info` (fora do ar, erro, corpo inválido). 404 não é isto.
-struct InfoFailed;
+pub(crate) struct InfoFailed;
 
 /// `Ok(None)` = 404: sessão inexistente, que o Python responde. O segredo recusado também é 404, e
 /// o Python registra essa recusa no diário (`internal.recusado`).
-async fn fetch_info(http: &HttpClient, upstream: SocketAddr, secret: &str, name: &str) -> Result<Option<InternalInfo>, InfoFailed> {
+pub(crate) async fn fetch_info(http: &HttpClient, upstream: SocketAddr, secret: &str, name: &str) -> Result<Option<InternalInfo>, InfoFailed> {
     let url = format!("http://{upstream}/internal/sessions/{}/info", utf8_percent_encode(name, NON_ALPHANUMERIC));
     let req = axum::http::Request::get(url).header("x-hangar-internal", secret).body(Body::empty()).map_err(|_| InfoFailed)?;
     let resp = match tokio::time::timeout(INFO_TIMEOUT, http.request(req)).await {
@@ -128,7 +154,7 @@ async fn fetch_info(http: &HttpClient, upstream: SocketAddr, secret: &str, name:
 
 /// Falha do Rust numa rota que é dele: 503 com o código, que o app mostra, e uma linha no diário.
 /// `detail` é o envelope que o `lerErro` do app já traduz; `reason` é frase fixa, nunca conversa.
-fn route_failed(st: &AppState, req: &HeaderMap, event: &'static str, name: &str, code: &'static str, reason: &'static str) -> Response {
+pub(crate) fn route_failed(st: &AppState, req: &HeaderMap, event: &'static str, name: &str, code: &'static str, reason: &'static str) -> Response {
     st.diag.report(event, name, code, reason);
     let body = serde_json::json!({"ok": false, "error_code": code, "message": reason,
         "detail": {"code": code, "params": {"motivo": reason}, "msg": format!("{reason} — {code}")}}).to_string();
@@ -144,9 +170,12 @@ pub async fn serve(listener: TcpListener, cfg: Config) -> std::io::Result<()> {
 }
 
 pub async fn serve_with_terminal_pool(listener: TcpListener, cfg: Config, pool: crate::terminal_control::TerminalPool) -> std::io::Result<()> {
+    serve_with_state(listener, AppState::with_terminal_pool(cfg, pool)).await
+}
+
+pub async fn serve_with_state(listener: TcpListener, mut state: AppState) -> std::io::Result<()> {
     // Bind LAN específico não recebe tráfego de loopback: a observação tem uma porta própria.
     let private = TcpListener::bind("127.0.0.1:0").await?;
-    let mut state = AppState::with_terminal_pool(cfg, pool);
     state.terminal_address = Some(private.local_addr()?);
     let state = Arc::new(state);
     tokio::select! {
@@ -170,6 +199,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.
         .route("/api/sessions/{name}/history", get(history).fallback(pass_any))
         .route("/api/sessions/{name}/events", get(events).fallback(pass_any))
+        .route("/api/sessions/{name}/cost", get(crate::costs_routes::session_cost).fallback(pass_any))
+        .route("/api/costs", get(crate::costs_routes::costs).fallback(pass_any))
+        .route("/api/cotacao", get(crate::costs_routes::cotacao).fallback(pass_any))
+        .route("/api/uso", get(crate::costs_routes::usage).fallback(pass_any))
         .fallback(pass_any)
         .with_state(state)
 }
