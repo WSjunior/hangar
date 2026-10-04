@@ -49,9 +49,11 @@ class Server(uvicorn.Server):
     """Uvicorn que solta as esperas longas do plugin assim que o sinal de parada chega."""
 
     def handle_exit(self, sig, frame) -> None:
-        from app import plugin_bridge
-        plugin_bridge.stop_waits()
-        super().handle_exit(sig, frame)
+        try:
+            from app import plugin_bridge
+            plugin_bridge.stop_waits()
+        finally:
+            super().handle_exit(sig, frame)     # falha no gancho não pode impedir a parada
 
 
 def wanted_binary(enabled: bool) -> Path | None:

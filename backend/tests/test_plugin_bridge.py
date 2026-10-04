@@ -750,6 +750,28 @@ def test_sinal_de_parada_avisa_as_esperas(monkeypatch):
     from app import rust_server
     chamadas = []
     monkeypatch.setattr(pb, "stop_waits", lambda: chamadas.append("stop"))
-    server = rust_server.Server(uvicorn.Config(lambda *a: None))
-    server.handle_exit(15, None)
-    assert chamadas == ["stop"] and server.should_exit
+    # A classe-mãe de verdade ligaria a parada global do sse-starlette para os testes seguintes.
+    monkeypatch.setattr(uvicorn.Server, "handle_exit", lambda self, sig, frame: chamadas.append("uvicorn"))
+    rust_server.Server(uvicorn.Config(lambda *a: None)).handle_exit(15, None)
+    assert chamadas == ["stop", "uvicorn"]
+
+
+def test_texto_que_chega_junto_com_a_parada_ainda_e_entregue(monkeypatch):
+    monkeypatch.setattr(pb, "_stopping", False)
+
+    async def cena():
+        pull = asyncio.create_task(pb.pull(_pull(instance="a")))
+        while "s1" not in pb._waiters:
+            await asyncio.sleep(0)
+        fila = pb._waiters["s1"]
+        fila.put_nowait(pb._STOP)
+        fila.put_nowait({"text": "chegou junto", "modo": "fill"})
+        assert (await pull)["text"] == "chegou junto"
+        pb.stop_waits()
+        # Depois do sinal a entrega não vai para uma espera que vai fechar: o chamador usa o pane.
+        assert pb._entregar("s1", "depois", "fill") is False
+
+    try:
+        asyncio.run(cena())
+    finally:
+        pb.esquecer("s1")

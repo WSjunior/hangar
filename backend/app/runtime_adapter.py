@@ -965,6 +965,15 @@ def voice_current(name, target, adapter):
 
 # ponytail: a posse é conferida por consulta a cada 0,25 s; a fase muda sem aviso único a quem espera.
 _OWNER_POLL_S = 0.25
+_OWNER_STUCK_S = 10.0
+
+
+def _hands_over(provider, name):
+    """Só sessão sem terminal troca de dono; as outras seguem o monitor direto, sem passo a mais."""
+    if provider == "claude":
+        return True         # o adapter embrulhado como "claude" é o do Claude sem terminal
+    from app.adapters.codex import sessions
+    return bool((sessions.load(name) or {}).get("headless"))
 
 
 def _state_owner(name):
@@ -985,35 +994,68 @@ async def owner_state_stream(legacy, native, name):
     fonte dele, e o erro de uma fonte cuja posse acabou de sair não sobe."""
     while True:
         owner = _state_owner(name)
+        waited = time.monotonic()
         while owner is None:
             await asyncio.sleep(_OWNER_POLL_S)
             owner = _state_owner(name)
-        source, step = (native() if owner[0] == "rust" else legacy()), None
+            if waited is not None and time.monotonic() - waited > _OWNER_STUCK_S:
+                # Os pings seguem e o front não reconecta: sem isto, o chat parado não deixa rastro.
+                from app import diag
+                diag.registrar("runtime.state_owner_stuck", "aviso", sessao=name)
+                waited = None
+        source = native() if owner[0] == "rust" else legacy()
+        # Uma tarefa só itera a fonte, e só avança quando o chat pede o próximo: como a iteração
+        # direta. O monitor do Codex guarda estado da própria tarefa entre yields.
+        wanted, items = asyncio.Queue(), asyncio.Queue()
+
+        async def pump(source=source, wanted=wanted, items=items):
+            try:
+                while True:
+                    await wanted.get()
+                    try:
+                        item = await anext(source)
+                    except StopAsyncIteration:
+                        items.put_nowait(("end", None))
+                        return
+                    items.put_nowait(("item", item))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                items.put_nowait(("error", exc))
+
+        task = asyncio.ensure_future(pump())
+        requested = False
         try:
             while True:
-                step = asyncio.ensure_future(anext(source))
-                while not (await asyncio.wait({step}, timeout=_OWNER_POLL_S))[0]:
+                if not requested:
+                    wanted.put_nowait(None)
+                    requested = True
+                try:
+                    kind, value = await asyncio.wait_for(items.get(), _OWNER_POLL_S)
+                except TimeoutError:
                     if _state_owner(name) != owner:
                         break
-                if not step.done():
+                    continue
+                requested = False
+                if kind == "item":
+                    yield value
+                    if _state_owner(name) != owner:
+                        break
+                    continue
+                if _state_owner(name) != owner:
                     break
-                try:
-                    item = step.result()
-                except StopAsyncIteration:
-                    if _state_owner(name) == owner:
-                        return
+                if kind == "end":
+                    return
+                if isinstance(value, runtime_coordinator.TransferInProgress):
+                    await asyncio.sleep(_OWNER_POLL_S)    # passagem curta que a consulta não viu
                     break
-                except Exception:
-                    if _state_owner(name) == owner:
-                        raise
-                    break
-                yield item
+                raise value
         finally:
-            if step is not None and not step.done():
-                step.cancel()
-                await asyncio.gather(step, return_exceptions=True)
-            await source.aclose()
-
+            try:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            finally:
+                await source.aclose()
 
 _ASYNC = {"ensure_running", "send_prompt", "deliverable", "drain", "steer", "steer_queue", "interrupt", "select",
     "answer_questions", "set_model", "set_permission_mode", "list_models", "read_settings", "read_rate_limits", "set_mode",
@@ -1057,6 +1099,8 @@ def install_adapter(cls, provider):
         if method == "state_monitor":
             @functools.wraps(original)
             def wrapper(self, name, sid_get, _original=original, _facade=facade):
+                if not _hands_over(_facade.provider, name):
+                    return _original(self, name, sid_get)
                 return owner_state_stream(lambda: _original(self, name, sid_get),
                                           lambda: _facade.state_stream(name, sid_get), name)
         elif method in _SYNC:
