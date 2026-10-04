@@ -22,4 +22,18 @@ describe('openInNewTab', () => {
     vi.spyOn(window, 'open').mockReturnValue(null);
     expect(openInNewTab('https://exemplo.dev')).toBe(false);
   });
+
+  it('URL inválida não abre aba em branco', () => {
+    const open = vi.spyOn(window, 'open');
+    expect(openInNewTab('https://[x')).toBe(false);
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it('aba que não deixa ser preparada é fechada e vira falha', () => {
+    const close = vi.fn();
+    const alheia = { close, set opener(_v: unknown) {}, get document(): Document { throw new DOMException('x', 'SecurityError'); } };
+    vi.spyOn(window, 'open').mockReturnValue(alheia as unknown as Window);
+    expect(openInNewTab('https://exemplo.dev')).toBe(false);
+    expect(close).toHaveBeenCalledOnce();
+  });
 });
