@@ -80,7 +80,7 @@ describe('GitTabs — aba Arquivos no celular (Task 12)', () => {
     expect(salvar).not.toBeNull();
     clica(salvar);
     await tick(); await tick(); await tick();
-    expect(writeFile).toHaveBeenCalledWith('sess', 'a.txt', 'Alteração', 'abc');
+    expect(writeFile).toHaveBeenCalledWith('sess', 'a.txt', 'Alteração', 'abc', expect.objectContaining({ id: 'srv-test' }));
     expect(store.rascunhos.has('a.txt')).toBe(false);
     unmount(comp);
     filesStores.release('srv-test::sess');
