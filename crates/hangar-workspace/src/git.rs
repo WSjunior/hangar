@@ -1228,9 +1228,13 @@ pub fn commit(
     let mut fields = out.stdout.split('\0');
     let mut extra = Vec::new();
     while let Some(f) = fields.next() {
-        if f.len() >= 4 && f.starts_with('R') {
+        let (Some(code), Some(path)) = (f.get(..2), f.get(3..)) else {
+            continue;
+        };
+        // Cópia e renomeação trazem a origem no campo seguinte; só a renomeação entra no commit.
+        if code.contains(['R', 'C']) {
             let old = fields.next().unwrap_or("");
-            if paths.iter().any(|p| p == &f[3..]) {
+            if code.starts_with('R') && paths.iter().any(|p| p == path) {
                 extra.push(old.to_owned());
             }
         }

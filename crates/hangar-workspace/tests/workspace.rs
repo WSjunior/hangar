@@ -156,3 +156,21 @@ fn listed_symlink_shows_the_size_of_its_target() {
     let link = listed["entries"].as_array().unwrap().iter().find(|e| e["name"] == "atalho.txt").unwrap().clone();
     assert_eq!(link["size"], 1);
 }
+
+#[test]
+fn copy_entry_in_status_does_not_misread_its_source_as_an_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["config", "user.name", "T"]);
+    git(dir.path(), &["config", "user.email", "t@t"]);
+    git(dir.path(), &["config", "status.renames", "copies"]);
+    let lines = (1..=200).map(|n| n.to_string()).collect::<Vec<_>>().join("\n");
+    fs::write(dir.path().join("R日本.txt"), &lines).unwrap();
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-q", "-m", "a"]);
+    fs::write(dir.path().join("copia.txt"), &lines).unwrap();
+    fs::write(dir.path().join("R日本.txt"), format!("{lines}\nmod\n")).unwrap();
+    git(dir.path(), &["add", "."]);
+    let done = op(dir.path(), "commit", json!({"message":"copia", "paths":["copia.txt"]}));
+    assert_eq!(done["ok"], true);
+}
