@@ -813,3 +813,43 @@ celular: quadros, url, layout celular/desktop, toque e rolagem, troca de aparelh
 ("o navegador desta sessão fechou"). Fechar o último navegador e fechar o app encerram o
 Chromium. O script de remoção foi conferido sem nativo, com nativo antigo, sem Chromium, com o
 Electron aberto, fechado e numa segunda execução.
+
+## Bandeja do nativo: fechar esconde a janela (04/10/2026)
+
+A opção "Manter na bandeja ao fechar" (Configurações → Geral, desligada por padrão) põe um ícone
+na bandeja e faz o pedido de fechar esconder a janela em vez de encerrar o app.
+
+- **A janela é escondida, nunca destruída.** A tela (`app::Hangar`) guarda dezenas de assinaturas
+  presas à janela e não sobrevive a fechar e reabrir. O pedido de fechar é interceptado com
+  `on_window_should_close`; o app responde `false` e esconde depois do retorno (`cx.defer`),
+  porque o backend Wayland chama esse aviso com os callbacks da janela emprestados.
+- **`Window::set_hidden` é ajuste nosso no GPUI vendorizado** (`vendor/PATCHES.md`). Windows:
+  `SW_HIDE`/`SW_SHOW`. X11: `UnmapWindow`/`MapWindow`. Wayland: esconder destrói o toplevel e o
+  `xdg_surface`, tira o buffer da `wl_surface` e cria os dois de novo nela, sem commit; mostrar
+  reaplica título, `app_id`, tamanhos e decoração e faz o commit inicial. A superfície e o
+  renderer continuam os mesmos.
+- **Só desmapear com buffer nulo não serve.** Medido com `WAYLAND_DEBUG=1` no Hyprland 0.56.2: o
+  buffer nulo desmapeia a janela, mas o commit sem buffer que viria depois não recebe
+  `xdg_surface.configure`, e a janela não volta. Desenhar sem esperar o configure funcionaria
+  ali e seria erro de protocolo num compositor estrito; um `xdg_surface` novo recebe o configure
+  inicial em qualquer compositor.
+- **Fechar só esconde com o ícone de pé e uma bandeja presente** (`hides_on_close`). Sem
+  `StatusNotifierWatcher`, ou se o ícone não pôde ser criado, fechar encerra como antes, e a linha
+  da opção diz o motivo. Se a bandeja some com a janela escondida, a janela volta.
+- **Linux: `ksni` 0.3.6 sem a feature padrão `tokio`.** Ela ligaria `zbus/tokio` para todos os
+  usuários do `zbus` (`notify-rust`, `ashpd`, `accesskit`), e o `notify-rust` é chamado fora do
+  runtime. Entram as features `async-io` e `blocking`. O ícone vai como pixmap, que não depende
+  do tema de ícones instalado, e `assume_sni_available(true)` deixa o serviço esperando a barra
+  que sobe depois do app.
+- **Windows: `Shell_NotifyIconW` numa thread própria**, com janela oculta e laço de mensagens
+  dela. Não é janela "só de mensagens": essas não recebem o `TaskbarCreated`, usado para pôr o
+  ícone de volta quando o Explorer reinicia.
+
+Medição (04/10/2026, Hyprland 0.56.2 com a bandeja do Quickshell 0.2.1, build de
+desenvolvimento): três ciclos de esconder e mostrar no Wayland e três no X11 (XWayland), com a
+janela redesenhada a cada volta e o processo vivo; fechar pelo compositor esconde com o ícone de
+pé; clique no ícone mostra e esconde; segunda execução e link `hangar://` mostram a janela
+escondida, o link com o diálogo de convite preenchido; conversa em andamento aberta volta atual
+depois de escondida; troca de idioma muda os textos do menu; desligar a opção remove o ícone e
+fechar encerra; "Sair" encerra; numa sessão D-Bus sem bandeja a linha avisa e fechar encerra.
+Não conferido no uso real: a bandeja sumindo com a janela escondida.
