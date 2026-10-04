@@ -524,6 +524,9 @@ async fn cached_report_is_invalidated_by_single_session_index_write() {
     let before = h.ready().await;
     let version = h.collector.data_version();
     let rollout = hangar_server::costs::collect::list_files(&h.base.join("codex/sessions"), |name| name.starts_with("rollout-") && name.ends_with(".jsonl"))[0].clone();
+    // Caminho não canônico, como o /var → /private/var do macOS: tem de cair na mesma entrada.
+    let day = rollout.parent().unwrap();
+    let rollout = day.join("..").join(day.file_name().unwrap()).join(rollout.file_name().unwrap());
     let mut file = std::fs::OpenOptions::new().append(true).open(&rollout).unwrap();
     writeln!(file, "{}", json!({"type":"event_msg", "timestamp":"2026-10-03T12:00:00-03:00", "payload": {
         "type":"token_count", "info":{"total_token_usage":{"input_tokens":1_000_000, "cached_input_tokens":0, "output_tokens":3000}}

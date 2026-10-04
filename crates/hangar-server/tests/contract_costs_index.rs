@@ -71,6 +71,21 @@ fn single_rollout_cost_reads_only_growth_and_keeps_existing_scope() {
     assert!(codex::session_rows(&ix, &base.join("missing.jsonl"), &areas).is_none());
 }
 
+#[test]
+fn single_rollout_cost_with_non_canonical_path_shares_the_scan_entry() {
+    // `..` reproduz em qualquer sistema o que o symlink do /var (macOS) e o separador misto
+    // (Windows) fazem: um caminho que não é o canônico que a varredura grava.
+    let (_d, base) = fixtures_copy();
+    let areas = AreaMap::load(Path::new("/nao/existe.json"));
+    let ix = Index::open(&base.join("../idx")).unwrap();
+    let p = base.join("codex/sessions/2026/../2026/09/30/rollout-c1.jsonl");
+    let rows = codex::session_rows(&ix, &p, &areas).unwrap();
+    sync_codex(&ix, &base, &areas);
+    assert_eq!(ix.read_costs(Some("codex:avulso"), None, None).unwrap().len(), 0);
+    assert_eq!(rows, ix.read_costs(None, None, None).unwrap().into_iter()
+        .filter(|r| r.session_id == rows[0].session_id).collect::<Vec<_>>());
+}
+
 fn codex_record(kind: &str, second: u32, payload: Value) -> Vec<u8> {
     let mut raw = serde_json::to_vec(&json!({"type":kind, "timestamp":format!("2026-10-01T12:00:{second:02}Z"), "payload":payload})).unwrap();
     raw.push(b'\n');
