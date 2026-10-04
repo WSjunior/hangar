@@ -79,6 +79,15 @@ executado no CI; Linux tem também um teste da API Windows simulada para nomes �
 O fluxo com CLI falsa e tmux isolado comprovou primeiro transcript ausente, recibo e envio sem
 duplicação pela reserva. Nenhuma sessão real, serviço ou instalador foi operado.
 
+A revisão independente encontrou seis problemas importantes: primeira identidade inconclusiva
+permitia caminho antigo, publicação atrasada atravessava `/clear` no hook, reserva enviava Enter
+sem prova prévia, controle adiado era tratado como sucesso, confirmação retornava `None` e buffer
+multiline da reserva era compartilhado. A primeira rodada corrigiu esses pontos, com **16
+regressões novas verdes** e **634 passagens** na execução dos 12 arquivos afetados. O teste do
+hook executa o TypeScript real com Node 24, nos três modos, com conversa atual e após `/clear`.
+O teste tmux intercalou duas sessões e reproduziu A recebendo os bytes de B antes da correção;
+depois, cada pane recebeu seu próprio texto. A releitura independente está pendente.
+
 A política comum de falhas de `74177469` será integrada com a parte1 após a revisão desta Task.
 O caminho terminal já separa `_op_once`, evitando duplicar essa política.
 

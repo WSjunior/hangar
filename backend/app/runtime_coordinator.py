@@ -146,7 +146,8 @@ class RuntimeCoordinator:
         async with self.registration_locks.setdefault(name, asyncio.Lock()):
             binding = await asyncio.to_thread(self.legacy.binding, name, provider)
             if binding is None:
-                if self.managed_runtime(name):
+                from app.runtime_terminal import outside_scope
+                if self.managed_runtime(name) or provider == "claude" and not await asyncio.to_thread(outside_scope, name):
                     raise RuntimeError("vínculo gerenciado indisponível; escrita suspensa")
                 return False
             if self.managed_queue(name) and self.slot(name).binding.key != binding.key:

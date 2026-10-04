@@ -526,6 +526,14 @@ async def _lifespan(app: FastAPI):
 
 app = FastAPI(title="hangar", lifespan=_lifespan)
 
+from app.runtime_terminal import TerminalControlError
+
+
+@app.exception_handler(TerminalControlError)
+async def terminal_control_failed(request: Request, exc: TerminalControlError):
+    code = "erro_sem_resposta" if exc.control == "answer_questions" else "erro_opcao_nao_convergiu"
+    return JSONResponse(status_code=409, content={"detail":erro(code, str(exc))})
+
 
 @app.get("/api/omp/plugin-sync", dependencies=[Depends(require_auth)])
 async def omp_plugin_sync_status(request: Request):

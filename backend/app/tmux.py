@@ -4,6 +4,7 @@ import logging
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from app import diag
@@ -1134,7 +1135,7 @@ def paste_text(name: str, text: str) -> bool:
     assert_writer(name)
     if buffer_trunca_no_newline():
         return _paste_linha_a_linha(name, text)
-    buf = "cp-prompt"
+    buf = "cp-prompt-" + uuid.uuid4().hex
     # `load-buffer -` (texto pela STDIN), nao `set-buffer -- <texto>` (texto no argv): o teto de
     # 16344 bytes e do COMPRIMENTO DO COMANDO, e era o set-buffer que o pagava. Medido 08/08/2026:
     # load-buffer aceitou 1,088 MB e o paste-buffer entregou em 0,32s, byte a byte identico e com os

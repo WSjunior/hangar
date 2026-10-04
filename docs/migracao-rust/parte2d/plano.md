@@ -139,7 +139,8 @@ Stage explícito; mensagem `feat(runtime): route Claude terminal actions through
 ### Task 4: Verificação final e publicação
 
 **Arquivos:** documentação de prova na pasta 2D e `server.yml`: incluir somente o teste de
-contenção de processos Python nos três sistemas, para comprovar o Job Windows real no CI.
+contenção de processos Python e as regressões da revisão nos três sistemas, para comprovar o
+Job Windows real e executar o hook TypeScript com Node 24 no CI.
 O contrato do cano continua somente Linux; nenhuma suíte Python inteira é adicionada à matriz.
 **Interfaces:** entrega da branch própria à sessão `Migracao-Rust`.
 

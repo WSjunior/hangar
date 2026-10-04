@@ -8,6 +8,9 @@ Codex, demais provedores, interfaces, serviços e instaladores preservados.
 Usar `RuntimeCoordinator`, `QueueActor`, `Store` e `ReceiptIndex` existentes. Uma vida leva chave
 durável, geração, conversa, pane e nascimento do multiplexador. Registrar terminal sem cano;
 transferir sob barreira, aguardar operações antigas e liberar a trava Python antes de adotar.
+Claude terminal com identidade inconclusiva recusa a escrita explicitamente, inclusive antes do
+primeiro cadastro. Só provedores fora do escopo conservam a seleção do caminho antigo. Sem
+vínculo comprovado, não criar chave/fila substituta nem anunciar que a entrada foi aceita.
 Conferir identidade depois de esperar a trava e antes de cada efeito. `/clear`, rename, troca de
 modo e recriação passam pela barreira. Timeout depois de despachar nunca repete a operação;
 transferir a posse ao Python exige antes comprovar o fim dos escritores antigos.

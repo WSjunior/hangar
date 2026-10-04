@@ -18,6 +18,41 @@ from app.runtime_coordinator import Binding, Phase, WriterLease, _clock
 _writer = contextvars.ContextVar('runtime_terminal_writer', default=None)
 
 
+class TerminalControlError(RuntimeError):
+    def __init__(self, control, disposition, code):
+        self.control, self.disposition, self.code = control, disposition, code
+        super().__init__('O controle não foi executado; confira a sessão.' if disposition == 'deferred'
+            else 'Não foi possível confirmar o controle; confira a sessão antes de repetir.')
+
+
+def outside_scope(name):
+    from app import tmux, registry as registry_mod, procinfo
+    panes = tmux.list_panes_all().get(name)
+    if not panes:
+        return False
+    if all(pane.get('hidden') for pane in panes):
+        return True
+    declared = {pane.get('provider') for pane in panes} - {None}
+    if 'claude' in declared:
+        return False
+    if declared:
+        return True
+    children = procinfo._proc_children_map(max_age=0)
+    other = False
+    for pane in panes:
+        provider, pid = registry_mod.agente_do_pane(pane['pid'], children)
+        if pid is None:
+            continue
+        if provider == 'claude':
+            arguments = procinfo._argv(pid)
+            if len(arguments) > 1 and arguments[1] in {'auth','login','setup-token'}:
+                other = True
+                continue
+            return False
+        other = True
+    return other
+
+
 def _collect(name):
     from app import api, tmux, registry as registry_mod, procinfo
     import psutil
@@ -173,7 +208,11 @@ def writer(coordinator, descriptor):
 def assert_writer(name):
     from app import runtime_coordinator
     coordinator = runtime_coordinator.current()
-    if coordinator is None or not coordinator.managed_queue(name):
+    if coordinator is None:
+        return
+    if not coordinator.managed_queue(name):
+        if coordinator.legacy is not None and not outside_scope(name):
+            raise RuntimeError('Claude terminal sem vínculo comprovado; escrita suspensa')
         return
     slot = coordinator.slot(name)
     if slot.binding.meta.get('pending_terminal'):
@@ -538,7 +577,9 @@ def _reserve_execute(coordinator, descriptor, command, operation_id, *, entry_id
                         _queue(coordinator, descriptor, {'kind':'finish','id':operation_id,'status':'deferred','result':result})
                         return result
                     published = 'unavailable'
+                    before_publish = None
                     if current['plugin_live'] and not slash:
+                        before_publish = _composer_snapshot(descriptor['name'])
                         mode = 'user' if current['plugin_user'] and current['idle'] and not any(c in payload['text'] for c in '@!') else 'fill'
                         published = _service(coordinator, descriptor, operation_id, root, 'terminal_publish',
                             {'binding':binding,'operation_id':root,'publication':{'id':f"{descriptor['key']}:{descriptor['generation']}:{operation_id}",
@@ -546,7 +587,9 @@ def _reserve_execute(coordinator, descriptor, command, operation_id, *, entry_id
                     if published in {'accepted','unknown'}:
                         result = _reply(operation_id, published, cleanup='not_needed')
                     elif published == 'filled':
-                        if not tmux.send_keys(descriptor['name'], 'Enter') or not ti._submeteu(descriptor['name'], payload['text']):
+                        if (not _proves_input(_composer_snapshot(descriptor['name']), payload['text'], before_publish)
+                                or not tmux.send_keys(descriptor['name'], 'Enter')
+                                or not _proved_submission(descriptor['name'])):
                             result = _reply(operation_id, 'unknown', cleanup='unproved')
                         else:
                             result = _reply(operation_id, 'accepted', cleanup='not_needed')
@@ -617,8 +660,6 @@ async def reserve_op(coordinator, descriptor, command, operation_id):
                             action['kind'] == 'set_delivered' and action.get('value') is False):
                         raise RuntimeError('ação privada do ator terminal; confirmação exige transcript')
                     return _queue(coordinator, descriptor, command['action'])
-                if kind == 'confirm':
-                    return None
                 if kind == 'drain':
                     state = coordinator.slot(descriptor['name']).store.state
                     if state['runtime_state'].get('clear_barrier', {}).get('generation') == descriptor['generation']:
@@ -639,7 +680,9 @@ async def reserve_op(coordinator, descriptor, command, operation_id):
                 return _reserve_execute(coordinator, descriptor, command, operation_id)
         if command['kind'] in {'confirm','drain'}:
             # Confirmação continua por ocorrência no transcript, inclusive sem aparelho.
-            await LegacyBridge(coordinator, {}).confirm(descriptor)
+            confirmed = await LegacyBridge(coordinator, {}).confirm(descriptor)
+            if command['kind'] == 'confirm':
+                return confirmed
         return await asyncio.to_thread(run)
     task = asyncio.create_task(execute())
     try:
@@ -658,6 +701,8 @@ async def route(coordinator, name, command):
     if command['kind'] == 'control':
         _validate_control(command['control'], command.get('payload') or {})
     result = await coordinator.op(name, command, uuid.uuid4().hex)
+    if command['kind'] == 'control' and result.get('disposition') != 'accepted':
+        raise TerminalControlError(command['control'], result.get('disposition'), (result.get('payload') or {}).get('code'))
     if result.get('disposition') not in {None,'accepted','deferred'}:
         raise RuntimeError('resultado terminal incerto; não repetir por outro transporte')
     return result
@@ -887,3 +932,38 @@ def _plugin_current(current):
         return False
     cut = max(current.meta.get('legacy_import_after') or current.meta.get('created', 0), current.meta.get('agent_birth') or 0)
     return born >= cut
+
+
+def _composer_snapshot(name):
+    from app import terminal_input as ti
+    region = ti._composer_regiao(ti._capture(name), name)
+    if region is None:
+        return None
+    content = '\n'.join(line.strip().removeprefix('❯').strip() for line in region.splitlines()[1:-1])
+    return content, ti._paste_ids(region)
+
+
+def _proves_input(snapshot, text, before):
+    from app import terminal_input as ti
+    if snapshot is None or before is None:
+        return False
+    content, placeholders = snapshot
+    if placeholders - before[1]:
+        return True
+    actual, expected = ti._sem_espaco(content), ti._sem_espaco(text)
+    if len(expected) < 12:
+        return actual == expected and bool(expected)
+    parts = (text.strip()[:40], text.strip().split('\n')[-1][-40:])
+    return any(ti._sem_espaco(part) in actual for part in parts if ti._sem_espaco(part))
+
+
+def _proved_submission(name):
+    from app import terminal_input as ti
+    deadline = time.monotonic() + ti._SUBMIT_CHECK_PRAZO
+    while True:
+        snapshot = _composer_snapshot(name)
+        if snapshot is not None and not snapshot[0].strip():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(ti._SUBMIT_CHECK_INTERVALO)
