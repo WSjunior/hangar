@@ -411,7 +411,10 @@ async fn late_fragmented_unsolicited_frame_never_serves_the_next_request() {
 async fn capture_waits_for_end_marker_and_rejects_missing_or_wrong_end() {
     for mode in ["missing-end", "wrong-end", "late-end"] {
         let (dir, program, _, _) = fake_observer(mode);
-        let limits = Limits { command: Duration::from_millis(250), ..Limits::default() };
+        // Só os modos sem fim certo precisam ver o prazo vencer. No `late-end` o que se prova é a
+        // captura esperar o fim atrasado; prazo curto ali só mede a velocidade do runner.
+        let command = if mode == "late-end" { Duration::from_secs(5) } else { Duration::from_millis(250) };
+        let limits = Limits { command, ..Limits::default() };
         let pool = TerminalPool::with_program(program, None, limits);
         let result = pool.capture(request("state")).await;
         if mode == "late-end" {
