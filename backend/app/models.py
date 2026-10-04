@@ -86,6 +86,7 @@ class SessionInfo(BaseModel):
     # Motor de modelo desta sessao (nome no engines.json). None = conta Anthropic. Lido do
     # /proc/<pid>/environ (CP_ENGINE) — ver registry._engine_of.
     engine: Optional[str] = None
+    engine_account: Optional[str] = None
     # Raiz Codex resolvida para esta sessão. Só existe para o provider Codex; o cliente usa-a para
     # conservar a origem em operações posteriores, enquanto `conta` continua sendo o ID de cota.
     codex_home: Optional[str] = None

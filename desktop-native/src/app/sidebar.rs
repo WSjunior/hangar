@@ -32,7 +32,8 @@ impl Target {
 
 /// O servidor confere as guardas novamente; a tela só oferece uma origem identificável e parada.
 pub(super) fn transfer_source(session: &SessionInfo) -> Option<(&str, &str)> {
-    if session.provider != "claude" || session.read_only() || session.tracked == Some(false) || !matches!(session.state.as_str(), "idle" | "dead")
+    if session.provider != "claude" || session.engine.as_deref().is_some_and(|e| !e.is_empty()) || session.uses_engine_account()
+        || session.read_only() || session.tracked == Some(false) || !matches!(session.state.as_str(), "idle" | "dead")
         || !session.conta.as_deref().is_some_and(|c| c.starts_with("claude:"))
         || session.pending_questions != 0 || session.question.is_some() || session.options.as_ref().is_some_and(|o| !o.is_empty())
         || session.transfer_phase.as_deref().is_some_and(|p| !matches!(p, "rejected" | "rolled_back")) { return None; }
@@ -54,17 +55,24 @@ pub(super) struct BranchList { #[serde(default)] branches: Vec<String>, current:
 
 /// Contas Claude para onde a conversa pode ir, sem a da sessão, de `GET …/conta` ao abrir o menu.
 #[derive(Clone, Debug, PartialEq)]
-pub(super) enum Accounts { Loading, Known(Vec<AccountTarget>), Failed(String) }
+pub(super) enum Accounts { Loading, Known(Vec<AccountTarget>, Option<String>), Failed(String) }
 
 /// `pct` é a janela de cota mais cheia (None = sem leitura); `full` é conta perto demais do limite para continuar nela.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize)]
-pub(super) struct AccountTarget { path: String, label: String, pct: Option<f64>, #[serde(default)] low: bool, #[serde(default)] full: bool }
+pub(super) struct AccountTarget {
+    pub(super) path: String,
+    pub(super) label: String,
+    pub(super) pct: Option<f64>,
+    #[serde(default)] pub(super) low: bool,
+    #[serde(default)] pub(super) full: bool,
+    pub(super) engine_account: Option<String>,
+}
 
 struct MenuRead { target: Target, seq: u64, mute: Mute, branches: Option<Branches>, accounts: Option<Accounts> }
 
 #[derive(Clone, Debug)]
 /// O renomear leva o número do pedido: resposta de um diálogo cancelado não fecha a tentativa seguinte na mesma sessão.
-pub(super) enum Write { Rename(String, u64), Mute(bool), Editor, Delete, Mode(bool), Account { path: String, label: String } }
+pub(super) enum Write { Rename(String, u64), Mute(bool), Editor, Delete, Mode(bool), Account { path: String, label: String, engine_account: Option<String> } }
 
 /// Gravações de git e o remover vínculo: o resultado é a notificação da sessão, já em texto.
 enum GitWrite { Pull, Checkout(String), StashCheckout(String), Unlink }
@@ -73,7 +81,7 @@ pub(super) enum SidebarReply {
     Preview(u64, Target, Result<String, Failure>),
     MuteRead(u64, Result<Value, Failure>),
     BranchRead(u64, Result<Value, Failure>),
-    AccountsRead(u64, Result<Value, Failure>),
+    AccountsRead(u64, Result<(Vec<AccountTarget>, Option<String>), Failure>),
     Wrote(Target, Write, Result<Value, Failure>),
     /// Resultado de uma gravação de git: nível e texto da notificação daquela sessão.
     Note(Target, NotificationType, String),
@@ -95,6 +103,39 @@ pub(super) fn git_note(name: &str, kind: NotificationType, text: String) -> Noti
 
 /// Git no menu só com pasta num repositório: o backend manda `branch` nulo fora de um (como o web, SCM:162).
 pub(super) fn has_git(s: &SessionInfo) -> bool { s.cwd.as_deref().is_some_and(|c| !c.is_empty()) && s.branch.is_some() }
+
+fn account_body(path: &str, engine_account: Option<&str>) -> Value {
+    match engine_account { Some(account) => json!({"engine_account": account}), None => json!({"config_dir": path}) }
+}
+
+fn merge_account_targets(mut legacy: Vec<AccountTarget>, proxy: Result<Option<Vec<AccountTarget>>, String>, local_proxy: bool)
+    -> Result<(Vec<AccountTarget>, Option<String>), Failure> {
+    match proxy {
+        Ok(Some(mut targets)) => { legacy.append(&mut targets); Ok((legacy, None)) }
+        Ok(None) => Ok((Vec::new(), None)),
+        Err(error) if local_proxy => Ok((legacy, Some(error))),
+        Err(error) => Err(Failure::local(error)),
+    }
+}
+
+async fn read_account_targets(api: &Api, session: &SessionInfo) -> Result<(Vec<AccountTarget>, Option<String>), Failure> {
+    let legacy = api.read(&session.name, &["conta"], &[], 15).await?;
+    let targets: Vec<AccountTarget> = serde_json::from_value(legacy).map_err(|_| Failure::local(tr("invalid_response")))?;
+    if session.engine.as_deref().is_some_and(|engine| !engine.is_empty()) || session.uses_engine_account() {
+        let (credentials, engines) = tokio::join!(api.server_read(&["credenciais"], &[], 30), api.server_read(&["engines"], &[], 15));
+        let engines = match engines {
+            Ok(engines) => engines,
+            Err(error) if session.uses_engine_account() => return Ok((targets, Some(Hangar::fetch_failure(&error)))),
+            Err(error) => return Err(error),
+        };
+        let local_proxy = engines.get("motores").and_then(|m| m.get(session.engine.as_deref().unwrap_or("")))
+            .and_then(|m| m.get("cliproxy_accounts")).is_some_and(Value::is_array);
+        let proxy = credentials.map_err(|e| Hangar::fetch_failure(&e))
+            .and_then(|credentials| super::accounts::session_proxy_targets(session, credentials, engines));
+        return merge_account_targets(targets, proxy, local_proxy);
+    }
+    Ok((targets, None))
+}
 
 fn first_line(value: &Value) -> Option<String> {
     value.get("output").and_then(Value::as_str).and_then(|o| o.trim().lines().next()).filter(|l| !l.is_empty()).map(str::to_owned)
@@ -568,9 +609,10 @@ impl Hangar {
         let git = !read_only && self.target_session(&target).is_some_and(has_git);
         // Convite não tem Silenciar: as preferências de aviso são do servidor inteiro, fora do convite (web: `if (invite) return`).
         let mute = !read_only && !self.invite_target(&target);
-        // Só sessão Claude na conta Anthropic muda de conta (motor vem como "chave:<motor>").
-        let moves = mute && self.target_session(&target)
-            .is_some_and(|s| s.provider == "claude" && s.conta.as_deref().is_some_and(|c| c.starts_with("claude:")));
+        let session = self.target_session(&target).cloned();
+        let moves = mute && session.as_ref().is_some_and(|s| s.provider == "claude"
+            && (s.conta.as_deref().is_some_and(|c| c.starts_with("claude:")) || s.uses_engine_account()
+                || s.engine.as_deref().is_some_and(|engine| !engine.is_empty())));
         let Some(api) = self.machine_api(&target.server) else {
             let failed = self.machine_error(&target.server);
             self.sidebar.menu = Some(MenuRead { target, seq, mute: Mute::Failed(failed.clone()), branches: git.then_some(Branches::Failed(failed.clone())),
@@ -579,9 +621,9 @@ impl Hangar {
         };
         self.sidebar.menu = Some(MenuRead { target: target.clone(), seq, mute: Mute::Loading, branches: git.then_some(Branches::Loading),
             accounts: moves.then_some(Accounts::Loading) });
-        if moves {
-            let (api, tell, name) = (api.clone(), self.sidebar_tell(), target.name.clone());
-            self.runtime.spawn(async move { tell.send(SidebarReply::AccountsRead(seq, api.read(&name, &["conta"], &[], 15).await)).await; });
+        if moves && let Some(session) = session {
+            let (api, tell) = (api.clone(), self.sidebar_tell());
+            self.runtime.spawn(async move { tell.send(SidebarReply::AccountsRead(seq, read_account_targets(&api, &session).await)).await; });
         }
         if git {
             let (api, tell, name) = (api.clone(), self.sidebar_tell(), target.name.clone());
@@ -710,7 +752,7 @@ impl Hangar {
                 Write::Delete => api.act(name, &[], None, true, 30).await,
                 Write::Rename(new, _) => api.act(name, &["rename"], Some(json!({"new": new})), false, 30).await,
                 Write::Mode(terminal) => api.act(name, &["modo-execucao"], Some(json!({"terminal": terminal})), false, 60).await,
-                Write::Account { path, .. } => api.act(name, &["conta"], Some(json!({"config_dir": path})), false, 120).await,
+                Write::Account { path, engine_account, .. } => api.act(name, &["conta"], Some(account_body(path, engine_account.as_deref())), false, 120).await,
             };
             tell.send(SidebarReply::Wrote(target, what, result)).await;
         });
@@ -740,21 +782,39 @@ impl Hangar {
     /// A mesma conversa noutra conta: reinicia o processo da sessão, então pergunta antes, como o modo.
     /// `warn`: % da conta que está acabando; a confirmação diz isso antes de quem escolhe aceitar.
     pub(super) fn confirm_account(&mut self, target: Target, path: String, label: String, warn: Option<f64>, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_account_choice(target, path, None, label, warn, window, cx);
+    }
+
+    pub(super) fn confirm_engine_account(&mut self, target: Target, account: String, label: String, warn: Option<f64>, window: &mut Window, cx: &mut Context<Self>) {
+        self.confirm_account_choice(target, String::new(), Some(account), label, warn, window, cx);
+    }
+
+    fn confirm_account_choice(&mut self, target: Target, path: String, engine_account: Option<String>, label: String,
+        warn: Option<f64>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.target_session(&target).filter(|s| s.provider == "claude" && !s.read_only() && s.state == "idle") else { return; };
+        if self.sidebar.moving.contains_key(&target) { return; }
+        let returning = engine_account.is_none() && session.engine.as_deref().is_some_and(|e| !e.is_empty());
+        let life = session.lifecycle_id.clone();
+        let jsonl = session.jsonl.clone();
         self.focus_origin(&target, window, cx);
         let this = cx.entity().downgrade();
-        let title = tr("sidebar_same_title").replace("{n}", &label);
-        let message = tr("sidebar_same_msg").replace("{n}", &label);
+        let title = tr(if returning { "sidebar_return_claude_title" } else if engine_account.is_some() { "sidebar_proxy_title" } else { "sidebar_same_title" }).replace("{n}", &label);
+        let message = tr(if returning { "sidebar_return_claude_msg" } else if engine_account.is_some() { "sidebar_proxy_msg" } else { "sidebar_same_msg" }).replace("{n}", &label);
         let message = match warn {
             Some(pct) => format!("{}\n\n{message}", tr("sidebar_same_low").replace("{n}", &label).replace("{pct}", &format!("{pct:.0}"))),
             None => message,
         };
         chrome::confirm_alert(window, cx, title, message, tr("sidebar_same_ok"), ButtonVariant::Primary,
             move |window, cx| {
-                // A troca para e reabre a sessão: sem este aviso nada mudava na tela até a resposta.
-                window.push_notification(Notification::info(tr("sidebar_same_moving").replace("{n}", &label)), cx);
                 let _ = this.update(cx, |this, cx| {
+                    if !this.target_session(&target).is_some_and(|s| s.provider == "claude" && !s.read_only() && s.state == "idle"
+                        && s.lifecycle_id == life && s.jsonl == jsonl) || this.sidebar.moving.contains_key(&target) {
+                        window.push_notification(Notification::warning(tr("sidebar_account_changed")), cx);
+                        return;
+                    }
+                    window.push_notification(Notification::info(tr("sidebar_same_moving").replace("{n}", &label)), cx);
                     this.sidebar.moving.insert(target.clone(), (std::time::Instant::now(), None));
-                    this.write(target.clone(), Write::Account { path: path.clone(), label: label.clone() }, cx)
+                    this.write(target.clone(), Write::Account { path: path.clone(), label: label.clone(), engine_account: engine_account.clone() }, cx)
                 });
                 true
             });
@@ -931,8 +991,7 @@ impl Hangar {
             SidebarReply::AccountsRead(seq, result) => {
                 let Some(menu) = self.sidebar.menu.as_mut().filter(|m| m.seq == seq) else { return };
                 menu.accounts = Some(match result {
-                    Ok(value) => serde_json::from_value::<Vec<AccountTarget>>(value).map(Accounts::Known)
-                        .unwrap_or_else(|_| Accounts::Failed(tr("invalid_response"))),
+                    Ok((list, notice)) => Accounts::Known(list, notice),
                     Err(error) => Accounts::Failed(Self::fetch_failure(&error)),
                 });
                 cx.notify();
@@ -1299,32 +1358,42 @@ fn accounts_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, 
         if *seen.borrow() == now { return; }
         *seen.borrow_mut() = now.clone();
         let (weak, owner) = (weak.clone(), owner.clone());
-        menu.rebuild(window, cx, move |menu, _, _| fill_accounts(menu, &weak, &owner, idle, now));
+        menu.rebuild(window, cx, move |menu, _, cx| fill_accounts(menu, &weak, &owner, idle, now, cx));
     }).detach();
-    fill_accounts(menu, hangar, target, idle, now)
+    fill_accounts(menu, hangar, target, idle, now, cx)
 }
 
-fn fill_accounts(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, idle: bool, accounts: Option<Accounts>) -> PopupMenu {
+fn fill_accounts(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, idle: bool, accounts: Option<Accounts>, cx: &App) -> PopupMenu {
     let menu = menu_style(menu).min_w(px(200.)).label(tr("sidebar_same"));
     // Trocar reinicia o processo: com a sessão trabalhando ou perguntando, só o motivo.
     if !idle { return menu.item(PopupMenuItem::new(web("modo_so_ociosa")).disabled(true)); }
-    let list = match accounts {
-        Some(Accounts::Known(list)) => list,
+    let (list, notice) = match accounts {
+        Some(Accounts::Known(list, notice)) => (list, notice),
         Some(Accounts::Failed(reason)) => {
             let text = tr("sidebar_accounts_failed").replace("{n}", &reason);
             return menu.item(PopupMenuItem::element(move |_, _| div().text_color(theme::danger()).child(text.clone())).disabled(true));
         }
         Some(Accounts::Loading) | None => return menu.item(PopupMenuItem::new(tr("sidebar_loading")).disabled(true)),
     };
+    let menu = menu.when_some(notice, |menu, text| menu
+        .item(PopupMenuItem::element(move |_, _| div().text_color(theme::danger()).whitespace_normal().child(text.clone())).disabled(true))
+        .separator());
     if list.is_empty() { return menu.item(PopupMenuItem::new(tr("sidebar_no_accounts")).disabled(true)); }
-    list.into_iter().fold(menu.max_h(px(260.)).scrollable(true), |menu, AccountTarget { path, label, pct, low, full }| {
+    let returning = hangar.upgrade().is_some_and(|entity| entity.read(cx).target_session(target)
+        .is_some_and(|s| s.engine.as_deref().is_some_and(|e| !e.is_empty())));
+    list.into_iter().fold(menu.max_h(px(260.)).scrollable(true), |menu, AccountTarget { path, label, pct, low, full, engine_account }| {
         let (hangar, target) = (hangar.clone(), target.clone());
         // O % da janela mais cheia ao lado do nome; esgotada não aceita a conversa, acabando aceita com aviso na confirmação.
-        let text = match pct { Some(pct) => format!("{label} · {pct:.0}%"), None => label.clone() };
+        let name = if returning && engine_account.is_none() { tr("sidebar_return_claude_account").replace("{n}", &label) }
+            else if engine_account.is_some() { format!("ChatGPT · {label}") } else { label.clone() };
+        let text = match pct { Some(pct) => format!("{name} · {pct:.0}%"), None => name };
         let text = if full { format!("{text} · {}", tr("sidebar_account_full")) } else if low { format!("{text} · {}", tr("sidebar_account_low")) } else { text };
         let warn = pct.filter(|_| low);
         menu.item(PopupMenuItem::new(text).disabled(full).on_click(move |_, window, cx| {
-            let _ = hangar.update(cx, |this, cx| this.confirm_account(target.clone(), path.clone(), label.clone(), warn, window, cx));
+            let _ = hangar.update(cx, |this, cx| match &engine_account {
+                Some(account) => this.confirm_engine_account(target.clone(), account.clone(), label.clone(), warn, window, cx),
+                None => this.confirm_account(target.clone(), path.clone(), label.clone(), warn, window, cx),
+            });
         }))
     })
 }
@@ -1561,6 +1630,26 @@ mod tests {
     use super::{BranchList, HashSet, SessionInfo, first_line, has_git, layout, rail_label, save_collapsed};
 
     #[test]
+    fn failed_local_proxy_discovery_keeps_claude_return_and_its_error() {
+        let legacy: Vec<super::AccountTarget> = serde_json::from_value(serde_json::json!([
+            {"path":"/claude-storage", "label":"Claude storage"}])).unwrap();
+        let (targets, notice) = super::merge_account_targets(legacy.clone(), Err("duplicate proxy accounts".into()), true).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].path, "/claude-storage");
+        assert!(targets[0].engine_account.is_none());
+        assert_eq!(notice.as_deref(), Some("duplicate proxy accounts"));
+        let (generic, notice) = super::merge_account_targets(legacy.clone(), Ok(None), false).unwrap();
+        assert!(generic.is_empty() && notice.is_none());
+        assert!(super::merge_account_targets(legacy, Err("invalid engine response".into()), false).is_err());
+    }
+
+    #[test]
+    fn account_requests_distinguish_proxy_identity_from_claude_storage() {
+        assert_eq!(super::account_body("/claude-storage", Some("other")), serde_json::json!({"engine_account":"other"}));
+        assert_eq!(super::account_body("/claude-storage", None), serde_json::json!({"config_dir":"/claude-storage"}));
+    }
+
+    #[test]
     fn transfer_requires_captured_life_and_original_history_without_pending_actions() {
         let mut source = SessionInfo { provider: "claude".into(), name: "session".into(), state: "idle".into(),
             conta: Some("claude:/registered".into()), lifecycle_id: Some("k:original".into()), jsonl: Some("/original.jsonl".into()),
@@ -1597,6 +1686,12 @@ mod tests {
         source.conta = Some("engine:key".into());
         assert!(super::transfer_source(&source).is_none());
         source.conta = Some("claude:/registered".into());
+        source.engine = Some("proxy".into());
+        assert!(super::transfer_source(&source).is_none());
+        source.engine = None;
+        source.engine_account = Some("default".into());
+        assert!(super::transfer_source(&source).is_none());
+        source.engine_account = None;
         source.lifecycle_id = None;
         assert!(super::transfer_source(&source).is_none());
         source.lifecycle_id = Some("t:original".into());

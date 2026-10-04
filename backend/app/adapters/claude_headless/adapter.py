@@ -185,6 +185,7 @@ class _Sessao:
         # Plano aprovado esperando a CLI sair do plano: o modo que deve ser reaplicado depois.
         self.base_apos_plano: str | None = None
         self.context_window: int | None = meta.get("context_window")
+        self.engine_models: list[dict] | None = None
         self.usage: dict | None = None
         self.cost: float | None = None
         self.limited = False
@@ -199,6 +200,9 @@ class _Sessao:
         self.waiters: dict[str, asyncio.Future] = {}
         self.n_req = 0
         self.initialized = asyncio.Event()
+        self.initialize_done = asyncio.Event()
+        self.initialize_ok: bool | None = None
+        self.initialize_error: str | None = None
         # Código + detalhe do último problema (turno com erro, processo caiu, sem resposta):
         # vai pro StateEvent e pro card. Limpa quando um turno fecha bem.
         gravado = meta.get("problema") or (None, None)   # do sidecar: sobrevive ao restart
@@ -332,23 +336,27 @@ class ClaudeHeadlessAdapter:
             return False
         return not (sess.iniciando or sess.in_progress or sess.pending or sess.question)
 
-    def acordar(self, name: str) -> None:
+    def reset_start_attempts(self, name: str) -> None:
+        self._subidas.pop(name, None)
+
+    def acordar(self, name: str, *, engine_models: list[dict] | None = None) -> None:
         from app.conversation_transfer import transfer_active
         if transfer_active(name):
             return None
 
         """Sobe (ou religa) a sessão em segundo plano e entrega a fila quando ela estiver pronta."""
-        self._subidas.pop(name, None)   # ação do usuário: nova rodada de tentativas
+        self.reset_start_attempts(name)   # ação do usuário: nova rodada de tentativas
         sess = self._sessions.get(name)
         if sess is not None and sess.vivo:
             return
-        t = asyncio.get_running_loop().create_task(self._acordar(name))
+        t = asyncio.get_running_loop().create_task(self._acordar(name, engine_models=engine_models))
         self._tarefas.add(t)
         t.add_done_callback(self._tarefas.discard)
 
-    async def _acordar(self, name: str) -> None:
+    async def _acordar(self, name: str, *, engine_models: list[dict] | None = None) -> None:
         try:
-            sess = await self.ensure_running(name, esperar_pronta=False)
+            extra = {"engine_models": engine_models} if engine_models is not None else {}
+            sess = await self.ensure_running(name, esperar_pronta=False, **extra)
         except Exception:
             return   # ensure_running já registrou o problema que a tela mostra
         if sess is not None and not sess.iniciando:
@@ -693,14 +701,21 @@ class ClaudeHeadlessAdapter:
     # snapshot em cano.py e a decisão em docs/decisoes/harnesses.md.
 
     async def ensure_running(self, name: str, *, so_reconectar: bool = False,
-                             esperar_pronta: bool = True, transfer_id: str | None = None) -> _Sessao | None:
-        sess = await self._ligar(name, so_reconectar=so_reconectar, transfer_id=transfer_id)
-        if sess is not None and esperar_pronta and sess.iniciando:
-            # Controles (set_model, modo, lista de modelos) só valem depois do `initialize`.
-            await asyncio.wait_for(sess.initialized.wait(), _TETO_INIT_S + 5)
+                             esperar_pronta: bool = True, transfer_id: str | None = None,
+                             require_initialize: bool = False, engine_models: list[dict] | None = None) -> _Sessao | None:
+        extra = {"engine_models": engine_models} if engine_models is not None else {}
+        sess = await self._ligar(name, so_reconectar=so_reconectar, transfer_id=transfer_id, **extra)
+        if sess is not None and esperar_pronta:
+            await asyncio.wait_for(sess.initialize_done.wait(), _TETO_INIT_S + 5)
+            if sess.initialize_ok is False or (require_initialize and sess.initialize_ok is not True) or not sess.vivo:
+                raise RuntimeError(sess.initialize_error or "a sessão não concluiu a inicialização")
+            if require_initialize and (sess.proc is None or sess.proc.pid is None
+                                       or not await asyncio.to_thread(pid_vivo, sess.proc.pid)):
+                raise RuntimeError("o Claude saiu durante a inicialização")
         return sess
 
-    async def _ligar(self, name: str, *, so_reconectar: bool = False, transfer_id: str | None = None) -> _Sessao | None:
+    async def _ligar(self, name: str, *, so_reconectar: bool = False, transfer_id: str | None = None,
+                     engine_models: list[dict] | None = None) -> _Sessao | None:
         # Um spawn por nome de cada vez: prompt e troca de modelo chegando juntos numa sessão
         # parada subiriam dois `claude` no mesmo .jsonl.
         async with self._spawn_locks.setdefault(name, asyncio.Lock()):
@@ -718,6 +733,7 @@ class ClaudeHeadlessAdapter:
             if so_reconectar and not meta.get("cano"):
                 return None
             sess = _Sessao(name, meta)
+            sess.engine_models = engine_models
             sess.loop = asyncio.get_running_loop()
             self._sessions[name] = sess
             try:
@@ -904,15 +920,34 @@ class ClaudeHeadlessAdapter:
 
     async def _subir_cano(self, sess: _Sessao) -> None:
         meta = sess.meta
+        sess.initialize_done.clear()
+        sess.initialize_ok = False
+        sess.initialize_error = None
+        sess.initialized.clear()
         transcript = self.transcript_path_de(meta)
         resume = Path(transcript).exists()
         # Modo de permissão TAMBÉM no --resume: sem a flag a CLI volta ao defaultMode da conta
         # (medido: sessão "manual" reaberta após restart rodou Bash sem perguntar).
+        if meta.get("engine_account"):
+            from app import cliproxy
+            binding = await asyncio.to_thread(cliproxy.engine_env, meta["engine"], sess.model, sess.context_window,
+                                               meta["engine_account"],
+                                               home=(meta.get("engine_credential_id") or "").removeprefix("codex:"),
+                                               expected_base=meta.get("engine_account_base_url"),
+                                               models=sess.engine_models)
+            sess.engine_models = None
+            sess.model = binding["ANTHROPIC_MODEL"]
+            sess.context_window = int(binding["CLAUDE_CODE_MAX_CONTEXT_TOKENS"]) if binding.get("CLAUDE_CODE_MAX_CONTEXT_TOKENS") else None
+            meta = sess.meta = hl_sessions.update(sess.name, context_window=sess.context_window) or meta
         argv = self._argv(sess.sid, resume=resume, model=sess.model, effort=sess.effort,
                           permission_mode=sess.permission_mode,
                           permitir_bypass=sess.modo_nao_plan == "bypassPermissions")
         if meta.get("engine"):
             pre = ["hangar-engine", "--exec", meta["engine"]]
+            if meta.get("engine_account"):
+                pre += ["--account", meta["engine_account"], "--account-home",
+                        binding["CP_ENGINE_CREDENTIAL_ID"].removeprefix("codex:"),
+                        "--account-base-url", binding["CP_ENGINE_ACCOUNT_BASE_URL"]]
             if sess.model:
                 pre += ["--model", sess.model]
                 if sess.context_window:
@@ -923,6 +958,9 @@ class ClaudeHeadlessAdapter:
         # o hangar-send de dentro da sessão se identificaria como a sessão dele.
         env.pop("TMUX", None)
         env.pop("TMUX_PANE", None)
+        env.pop("CP_ENGINE_ACCOUNT", None)
+        env.pop("CP_ENGINE_CREDENTIAL_ID", None)
+        env.pop("CP_ENGINE_ACCOUNT_BASE_URL", None)
         env["CP_SESSION_NAME"] = sess.name
         if not meta.get("key"):
             meta = sess.meta = hl_sessions.update(sess.name, key=uuid.uuid4().hex) or meta
@@ -966,6 +1004,9 @@ class ClaudeHeadlessAdapter:
         t.add_done_callback(self._tarefas.discard)
 
     async def _esperar_initialize(self, sess: _Sessao) -> None:
+        sess.initialize_ok = False
+        sess.initialize_error = None
+        sess.initialize_done.clear()
         pedido = asyncio.ensure_future(self._ctrl(sess, "initialize"))
         try:
             feito, _ = await asyncio.wait({pedido}, timeout=_AVISO_INIT_S)
@@ -976,22 +1017,28 @@ class ClaudeHeadlessAdapter:
                 self._registrar_problema(sess, "headless_sem_resposta", "\n".join(sess.stderr_tail) or None)
                 await self._notify(sess)
             resposta = await pedido
+            if not isinstance(resposta, dict) or not sess.vivo:
+                raise RuntimeError("initialize não foi aceito por um processo vivo")
             validos = [c for c in (resposta or {}).get("commands") or [] if isinstance(c, dict) and isinstance(c.get("name"), str)]
             if validos:
                 sess.comandos = validos
             else:
                 _log.warning("claude headless: initialize sem lista de comandos name=%s; / usa a sonda ou a lista fixa", sess.name)
         except asyncio.TimeoutError:
+            sess.initialize_error = "tempo esgotado ao inicializar a sessão"
             _log.warning("claude headless: initialize desistiu em %.0fs name=%s", _TETO_INIT_S, sess.name)
         except RuntimeError as e:
+            sess.initialize_error = str(e)
             _log.warning("claude headless: initialize falhou name=%s: %s", sess.name, e)
             if sess.vivo:
                 # Vivo = a CLI recusou o initialize. Morto = o leitor já registrou a queda.
                 self._registrar_problema(sess, "headless_nao_subiu", str(e)[:300])
         except Exception:
+            sess.initialize_error = "falha interna ao iniciar a sessão"
             _log.exception("claude headless: initialize quebrou name=%s", sess.name)
             self._registrar_problema(sess, "headless_nao_subiu", "falha interna ao iniciar a sessão")
         else:
+            sess.initialize_ok = True
             self._subidas.pop(sess.name, None)
             if sess.problema == "headless_sem_resposta":
                 self._limpar_problema(sess)
@@ -1000,10 +1047,12 @@ class ClaudeHeadlessAdapter:
             if not sess.in_progress:
                 sess.turno_inicio = None
             sess.initialized.set()
+            sess.initialize_done.set()
         await self._notify(sess)
         self._agendar_cota(sess)
         # O que chegou enquanto subia está na fila: sai agora, na ordem.
-        await self._drenar_fim_de_turno(sess)
+        if sess.initialize_ok and sess.vivo:
+            await self._drenar_fim_de_turno(sess)
 
     async def _conectar(self, cano: dict, *, esperar: float = 0.0) -> tuple[_Ligacao, dict] | None:
         return await conectar_cano(cano, esperar=esperar)
@@ -1024,6 +1073,11 @@ class ClaudeHeadlessAdapter:
                 self._aplicar_uso(sess, ev)
             else:
                 await self._on_event(sess, ev)
+                if (chave == "init" and isinstance(ev, dict) and ev.get("type") == "system"
+                        and ev.get("subtype") == "init" and isinstance(ev.get("session_id"), str)
+                        and ev["session_id"] and snap.get("saiu") is None):
+                    sess.initialize_ok = True
+                    sess.initialize_done.set()
         if sess.usage is None:
             # O snapshot só guarda o `result`, que não diz o contexto: a última chamada está no .jsonl.
             try:
@@ -1034,6 +1088,8 @@ class ClaudeHeadlessAdapter:
                 uso = None
             _aplicar_uso_da_chamada(sess, uso)
         sess.initialized.set()
+        # Cano antigo sem system/init pode já ter aceitado controles; ausência não é recusa.
+        sess.initialize_done.set()
         if snap.get("aberto"):
             sess.in_progress = True
         for bruto in snap.get("pendentes") or []:
@@ -1347,7 +1403,8 @@ class ClaudeHeadlessAdapter:
                 # /clear (ou resume que trocou de id): o transcript agora é outro arquivo. O
                 # sidecar é a fonte da lista, e o jsonl_watcher do SSE faz o reset a partir dela.
                 sess.meta = hl_sessions.update(sess.name, session_id=sid) or {**sess.meta, "session_id": sid}
-            if ev.get("model"):
+            # O proxy pode devolver só o modelo base; a rota fixa é a escolha guardada da sessão.
+            if ev.get("model") and not sess.meta.get("engine_account"):
                 sess.model = ev["model"]
             if ev.get("permissionMode"):
                 self._definir_modo(sess, ev["permissionMode"])
@@ -1584,7 +1641,8 @@ class ClaudeHeadlessAdapter:
     def status_line(self, sess: _Sessao) -> str | None:
         parts: list[str] = []
         if sess.model:
-            seg = f"🤖 {_rotulo_modelo(sess.model)}"
+            model = sess.model.split("/", 1)[-1] if sess.meta.get("engine_account") else sess.model
+            seg = f"🤖 {_rotulo_modelo(model)}"
             esforco = sess.effort or _esforco_padrao(sess.meta.get("config_dir"))
             if esforco:
                 seg += f" ({esforco})"
@@ -2055,7 +2113,8 @@ def _linha_parada(meta: dict, transcript: str | None = None) -> str | None:
     partes = []
     if meta.get("model"):
         esforco = meta.get("effort") or _esforco_padrao(meta.get("config_dir"))
-        partes.append(f"🤖 {_rotulo_modelo(meta['model'])}" + (f" ({esforco})" if esforco else ""))
+        model = meta["model"].split("/", 1)[-1] if meta.get("engine_account") else meta["model"]
+        partes.append(f"🤖 {_rotulo_modelo(model)}" + (f" ({esforco})" if esforco else ""))
     janela = meta.get("context_window")
     u = _uso_da_ultima_chamada(transcript) if transcript and janela else None
     if u:

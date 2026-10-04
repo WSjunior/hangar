@@ -11,6 +11,8 @@ pub struct SessionInfo {
     pub transfer_id: Option<String>,
     pub transfer_phase: Option<String>,
     #[serde(default)] pub provider: String,
+    pub engine: Option<String>,
+    pub engine_account: Option<String>,
     #[serde(default)] pub headless: bool,
     #[serde(default)] pub state: String,
     pub tracked: Option<bool>,
@@ -67,10 +69,23 @@ pub struct SessionInfo {
     #[serde(default)] pub pair_external: Option<PairExternal>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[non_exhaustive]
+pub struct CliProxyAccount {
+    pub account: String,
+    pub credential_id: String,
+    pub email: String,
+    pub label: String,
+    pub prefix: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct PairExternal { pub alias: String, pub owner: String, pub session: String }
 
 impl SessionInfo {
+    pub fn uses_engine_account(&self) -> bool {
+        self.provider == "claude" && self.engine_account.as_deref().is_some_and(|a| !a.is_empty())
+    }
     pub fn readable(&self) -> bool { self.tracked != Some(false) && self.jsonl.is_some() }
     pub fn display_state(&self) -> &str {
         if self.provider == "codex" && !self.readable() && !matches!(self.state.as_str(), "awaiting_input" | "dead") { "loading" }

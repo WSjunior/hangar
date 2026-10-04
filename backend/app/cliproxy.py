@@ -61,6 +61,52 @@ def local() -> dict[str, str] | None:
     return {"base_url": f"{esquema}://{host}:{porta}", "api_key": chaves[0]}
 
 
+def is_local_engine(cfg: dict) -> bool:
+    inst = local()
+    return bool(inst and normalize_base(str(cfg.get("base_url") or "")) == inst["base_url"])
+
+
+def account_for_engine(cfg: dict, account: str, home: str | None = None) -> dict:
+    from app.cliproxy_accounts import resolve
+    inst = local()
+    if not inst or normalize_base(str(cfg.get("base_url") or "")) != inst["base_url"]:
+        raise ValueError("a conta ChatGPT só pode ser fixada no CLIProxyAPI local")
+    entry = resolve(account, home=home)
+    return {**entry, "home": entry["credential_id"].removeprefix("codex:"),
+            "base_url": inst["base_url"]}
+
+
+def validate_models(cfg: dict, model: str, account: dict, models: list[dict] | None = None) -> list[dict]:
+    from app import engine_probe
+    from app.cliproxy_accounts import base_model, models_for
+    if models is None:
+        try:
+            models = engine_probe.listar_modelos(cfg["base_url"], cfg["api_key"])
+        except (RuntimeError, ValueError) as exc:
+            raise ValueError("CLIProxyAPI: catálogo indisponível: " + redact(str(exc), cfg["api_key"])) from None
+    catalog = models_for(models, account["prefix"])
+    available = {item["id"] for item in catalog}
+    for label, selected in (("principal", model), ("dos subagentes", cfg.get("subagent_model") or model)):
+        if base_model(selected, account["prefix"]) not in available:
+            raise ValueError(f"CLIProxyAPI: modelo {label} indisponível nesta conta")
+    return catalog
+
+
+def engine_env(name: str, model: str | None, context_window: int | None, account_id: str, *,
+               home: str | None = None, models: list[dict] | None = None,
+               expected_base: str | None = None) -> dict[str, str]:
+    from app import engines
+    cfg = engines.listar().get(name)
+    if not cfg:
+        raise ValueError("CLIProxyAPI: motor indisponível")
+    account = account_for_engine(cfg, account_id, home=home)
+    if expected_base is not None and normalize_base(expected_base) != account["base_url"]:
+        raise ValueError("CLIProxyAPI: endereço da conta fixa mudou")
+    validate_models(cfg, model or cfg["model"], account, models)
+    return engines.env_de(name, model, context_window, engine_account=account_id,
+                          engine_account_home=account["home"], engine_account_base_url=account["base_url"])
+
+
 def is_engine_model(model_id: object) -> bool:
     # gpt-image-* gera imagem e não responde /v1/messages: não serve de motor.
     return isinstance(model_id, str) and not model_id.startswith("gpt-image-")

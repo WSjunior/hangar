@@ -24,6 +24,8 @@ def contas(tmp_path, monkeypatch):
     for c in (a, b):
         (c / "projects").mkdir(parents=True)
     lista = [ConfigDirInfo(path=str(a), label="a", active=True), ConfigDirInfo(path=str(b), label="b", active=False)]
+    monkeypatch.setattr(api_mod.engines, "caminho", lambda: tmp_path / "engines.json")
+    api_mod.engines.salvar("proxy", {"base_url": "http://127.0.0.1:8317", "api_key": "test", "model": "gpt-5.5"})
     monkeypatch.setattr(api_mod, "list_config_dirs", lambda ordered=True: lista)
     monkeypatch.setattr(archive_mod, "list_config_dirs", lambda ordered=True: lista)
     monkeypatch.setattr("app.cotas.cotas_claude", lambda: [])
@@ -60,7 +62,143 @@ def _hl(ordem):
     hl = ClaudeHeadlessAdapter()
     hl.parar = AsyncMock(side_effect=lambda n: ordem.append("parou"))
     hl.acordar = MagicMock(side_effect=lambda n: ordem.append(("acordou", S.load(n)["config_dir"])))
+    hl.ensure_running = AsyncMock(return_value=MagicMock())
     return hl
+
+
+def test_fixed_proxy_can_return_to_claude_in_same_config_dir(contas, tmp_path):
+    import app.api as api_mod
+    a, _ = contas
+    cwd = str(tmp_path / "repo")
+    S.save("hl", cwd, SID, config_dir=a, engine="proxy", model="fixed/gpt-5.5",
+           engine_account="default", engine_credential_id="codex:/tmp/codex", context_window=400000)
+    source = _conversa(a, cwd)
+    info = SessionInfo(name="hl", provider="claude", headless=True, engine="proxy",
+                       engine_account="default", conta="codex:/tmp/codex")
+    hl = _hl([])
+    with patch("app.api._cached_info", AsyncMock(return_value=info)), \
+         patch("app.api._headless", return_value=True), \
+         patch("app.api._motivo_ocupada", AsyncMock(return_value=None)), \
+         patch("app.api.get_adapter", return_value=hl), \
+         patch("app.api.cliproxy.is_local_engine", return_value=True), \
+         patch.object(api_mod.registry, "_forget"):
+        r = TestClient(api_mod.app).post("/api/sessions/hl/conta", headers=_H, json={"config_dir": a})
+    assert r.status_code == 200, r.text
+    assert source.exists()
+    assert all(S.load("hl").get(key) is None for key in (
+        "engine", "engine_account", "engine_credential_id", "model", "context_window"))
+    hl.parar.assert_awaited_once()
+
+
+def test_proxy_account_move_preserves_storage_permission_and_conversation(contas, tmp_path):
+    import app.api as api_mod
+    a, _ = contas
+    cwd = str(tmp_path / "repo")
+    S.save("hl", cwd, SID, config_dir=a, engine="proxy", model="old/gpt-5.5",
+           engine_account="default", permission_mode="acceptEdits")
+    source = _conversa(a, cwd)
+    info = SessionInfo(name="hl", provider="claude", headless=True, engine="proxy",
+                       engine_account="default", conta="codex:/tmp/codex")
+    hl = _hl([])
+    with patch("app.api._cached_info", AsyncMock(return_value=info)), \
+         patch("app.api._headless", return_value=True), \
+         patch("app.api._motivo_ocupada", AsyncMock(return_value=None)), \
+         patch("app.api.get_adapter", return_value=hl), \
+         patch("app.api._fixed_engine_account", return_value={"account": "second", "prefix": "new",
+                                                           "credential_id": "codex:/tmp/second", "home": "/tmp/second",
+                                                           "base_url": "http://127.0.0.1:8317"}), \
+         patch("app.api._engine_models", AsyncMock(return_value=[{"id": "new/gpt-5.5"}])), \
+         patch("app.api.engines.env_de", return_value={}), \
+         patch.object(api_mod.registry, "_forget"):
+        r = TestClient(api_mod.app).post("/api/sessions/hl/conta", headers=_H,
+                                       json={"engine_account": "second"})
+    assert r.status_code == 200, r.text
+    meta = S.load("hl")
+    assert meta["model"] == "new/gpt-5.5" and meta["engine_account"] == "second"
+    assert meta["config_dir"] == a and meta["permission_mode"] == "acceptEdits"
+    assert source.exists() and meta["session_id"] == SID
+
+
+def test_fixed_model_reopens_same_account_and_preserves_permission(contas, tmp_path):
+    import app.api as api_mod
+    a, _ = contas
+    S.save("hl", str(tmp_path), SID, config_dir=a, engine="proxy", model="fixed/gpt-old",
+           engine_account="default", engine_credential_id="codex:/tmp/codex",
+           permission_mode="acceptEdits")
+    source = _conversa(a, str(tmp_path))
+    hl = _hl([])
+    info = SessionInfo(name="hl", jsonl=str(source), provider="claude", headless=True,
+                       engine="proxy", engine_account="default", conta="codex:/tmp/codex")
+    with patch("app.api._cached_info", AsyncMock(return_value=info)), \
+         patch("app.api._headless", return_value=True), \
+         patch("app.api._motivo_ocupada", AsyncMock(return_value=None)), \
+         patch("app.api._recusa_se_painel_aberto"), \
+         patch("app.api.get_adapter", return_value=hl), \
+         patch("app.api._fixed_engine_account", return_value={"account": "default", "prefix": "fixed",
+                                                           "credential_id": "codex:/tmp/codex", "home": "/tmp/codex",
+                                                           "base_url": "http://127.0.0.1:8317"}), \
+         patch("app.api._fixed_engine_models", AsyncMock(return_value=[{"id": "gpt-new", "context_length": 400000}])), \
+         patch("app.api._engine_models", AsyncMock(return_value=[{"id": "fixed/gpt-new", "context_length": 400000}])), \
+         patch("app.api.engines.env_de", return_value={}), \
+         patch.object(api_mod.registry, "_forget"):
+        r = TestClient(api_mod.app).post("/api/sessions/hl/engine/model", headers=_H,
+                                       json={"model": "gpt-new", "effort": "high"})
+    assert r.status_code == 200 and r.json() == {"ok": True, "model": "gpt-new"}, r.text
+    meta = S.load("hl")
+    assert meta["model"] == "fixed/gpt-new" and meta["engine_account"] == "default"
+    assert meta["context_window"] == 400000 and meta["effort"] == "high"
+    assert meta["permission_mode"] == "acceptEdits" and meta["session_id"] == SID
+    assert source.exists()
+    hl.parar.assert_awaited_once()
+    hl.ensure_running.assert_awaited_once()
+
+
+def test_proxy_reopen_failure_restores_selection(contas, tmp_path):
+    import app.api as api_mod
+    a, _ = contas
+    S.save("hl", str(tmp_path), SID, config_dir=a, engine="proxy", model="old/gpt-5.5",
+           engine_account="default", permission_mode="acceptEdits")
+    _conversa(a, str(tmp_path))
+    hl = _hl([])
+    hl._subidas["hl"] = 3
+    hl.ensure_running.side_effect = [RuntimeError("failed spawn"), MagicMock()]
+    info = SessionInfo(name="hl", provider="claude", headless=True, engine="proxy",
+                       engine_account="default")
+    with patch("app.api._cached_info", AsyncMock(return_value=info)), \
+         patch("app.api._headless", return_value=True), \
+         patch("app.api._motivo_ocupada", AsyncMock(return_value=None)), \
+         patch("app.api.get_adapter", return_value=hl), \
+         patch("app.api._fixed_engine_account", return_value={"account": "second", "prefix": "new",
+                                                           "credential_id": "codex:/tmp/second", "home": "/tmp/second",
+                                                           "base_url": "http://127.0.0.1:8317"}), \
+         patch("app.api._engine_models", AsyncMock(return_value=[{"id": "new/gpt-5.5"}])), \
+         patch("app.api.engines.env_de", return_value={}), \
+         patch.object(api_mod.registry, "_forget"):
+        r = TestClient(api_mod.app).post("/api/sessions/hl/conta", headers=_H,
+                                       json={"engine_account": "second"})
+    assert r.status_code == 409, r.text
+    assert S.load("hl")["engine_account"] == "default"
+    assert S.load("hl")["model"] == "old/gpt-5.5"
+    assert hl.ensure_running.await_count == 2
+    assert "hl" not in hl._subidas
+    assert all(call.kwargs["require_initialize"] for call in hl.ensure_running.await_args_list)
+
+
+def test_stale_engine_identity_cannot_overwrite_current_claude(contas, tmp_path):
+    import app.api as api_mod
+    a, _ = contas
+    S.save("hl", str(tmp_path), SID, config_dir=a, model="sonnet")
+    hl = _hl([])
+    stale_info = SessionInfo(name="hl", provider="claude", headless=True, engine="proxy",
+                             engine_account="default")
+    with patch("app.api._cached_info", AsyncMock(return_value=stale_info)), \
+         patch("app.api._headless", return_value=True), \
+         patch("app.api.get_adapter", return_value=hl):
+        r = TestClient(api_mod.app).post("/api/sessions/hl/conta", headers=_H,
+                                       json={"engine_account": "second"})
+    assert r.status_code == 400, r.text
+    assert S.load("hl")["engine"] is None and S.load("hl")["model"] == "sonnet"
+    hl.parar.assert_not_awaited()
 
 
 def test_sem_terminal_para_move_e_religa_na_conta_nova(contas, tmp_path):

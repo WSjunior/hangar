@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 from sse_starlette.sse import EventSourceResponse
 from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, diag, harness_api,
                  loop_monitor, pensamento_pt, permission_mode, plugin_bridge, procinfo, quem_chama, tmux,
@@ -1619,6 +1619,7 @@ class _StrictBody(BaseModel):
 
 
 class CreateBody(_StrictBody):
+    _engine_catalog: list[dict] | None = PrivateAttr(default=None)
     name: str = Field(min_length=1)
     cwd: str = Field(min_length=1)
     branch: str | None = Field(default=None, min_length=1)
@@ -1636,6 +1637,7 @@ class CreateBody(_StrictBody):
     initial_prompt: str | None = None
     # Motor de modelo (nome no engines.json). None = conta Anthropic, comportamento de hoje.
     engine: str | None = None
+    engine_account: str | None = None
     # Escolhidos na tela de abertura. None = padrão do binário (comportamento de hoje). Validado
     # aqui, nunca no front: o valor entra num comando de shell.
     model: str | None = None
@@ -2215,6 +2217,20 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
     if not await asyncio.to_thread(os.path.isdir, os.path.expanduser(body.cwd)):
         raise HTTPException(400, detail=erro("erro_cwd_inexistente", f"a pasta {body.cwd} não existe",
                                              cwd=body.cwd))
+    account_models = None
+    if body.engine_account is not None:
+        if body.provider != "claude" or not body.engine:
+            raise HTTPException(400, detail=erro("erro_cliproxy_conta", "conta ChatGPT exige Claude com motor CLIProxyAPI local"))
+        account = await asyncio.to_thread(_fixed_engine_account, body.engine, body.engine_account)
+        cfg = engines.listar()[body.engine]
+        from app.cliproxy_accounts import base_model
+        account_models = body._engine_catalog if body._engine_catalog is not None else await _engine_models(body.engine, fresco=True)
+        try:
+            base = base_model(body.model or cfg["model"], account["prefix"])
+            catalog = cliproxy.validate_models(cfg, base, account, account_models)
+        except ValueError as exc:
+            raise HTTPException(400, detail=erro("erro_cliproxy_conta", str(exc))) from None
+        body = body.model_copy(update={"model": base})
     if body.read_only:
         from app.orq_readonly import prepare
         try:
@@ -2325,7 +2341,8 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
     janela = None
     if body.engine and body.model:
         try:
-            for m in await _engine_models(body.engine):
+            for m in await (_fixed_engine_models(body.engine, body.engine_account)
+                            if body.engine_account else _engine_models(body.engine)):
                 if m["id"] == body.model:
                     janela = m.get("context_length")
                     break
@@ -2352,6 +2369,9 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
         """A criação é bloqueante; se o request morrer, o worker ainda precisa terminar."""
         nonlocal codex_lease
         def create():
+            if body.engine_account is not None:
+                kwargs["engine_account"] = body.engine_account
+                kwargs["engine_models"] = account_models
             info = registry.create(body.name, body.cwd, body.config_dir, **kwargs)
             worktree["session_created"] = True
             # O mesmo nome pode estar no snapshot com o transcript da sessão encerrada.
@@ -2436,7 +2456,8 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
                         info = await _create_registry(_kw)
                         if body.headless:
                             # Hooks de SessionStart rodam enquanto a pessoa digita, não no 1º envio.
-                            get_adapter(CLAUDE_HEADLESS).acordar(info.name)
+                            wake = {"engine_models": account_models} if body.engine_account else {}
+                            get_adapter(CLAUDE_HEADLESS).acordar(info.name, **wake)
                         return info.model_copy(update={"avisos": list(avisos)})
                     except ValueError as e:
                         code = "erro_nome_em_uso" if "ja existe uma sessao" in str(e) else "erro_criacao_sessao"
@@ -2472,7 +2493,8 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
             # Aquece já: o app-server sobe e abre a thread agora, não no primeiro prompt.
             _tarefas_soltas.add(asyncio.create_task(_aquecer_codex_sem_terminal(info.name)))
         elif body.headless:
-            get_adapter(CLAUDE_HEADLESS).acordar(info.name)
+            wake = {"engine_models": account_models} if body.engine_account else {}
+            get_adapter(CLAUDE_HEADLESS).acordar(info.name, **wake)
         return info
     except ValueError as e:
         code = "erro_nome_em_uso" if "ja existe uma sessao" in str(e) else "erro_criacao_sessao"
@@ -2706,6 +2728,7 @@ async def _trocar_modo(name: str, body: ModoExecucaoBody):
 class AccountMoveBody(_StrictBody):
     config_dir: str | None = None
     credential_id: str | None = None
+    engine_account: str | None = None
     source_life: str | None = None
     source_jsonl: str | None = None
     model: str | None = None
@@ -2713,8 +2736,12 @@ class AccountMoveBody(_StrictBody):
 
     @model_validator(mode="after")
     def validate_target(self):
-        if (self.config_dir is None) == (self.credential_id is None):
-            raise ValueError("informe config_dir ou credential_id")
+        if sum(v is not None for v in (self.config_dir, self.credential_id, self.engine_account)) != 1:
+            raise ValueError("informe só config_dir, credential_id ou engine_account")
+        if self.engine_account is not None:
+            if self.model_fields_set != {"engine_account"}:
+                raise ValueError("engine_account é o corpo completo da troca de conta ChatGPT")
+            return self
         if self.config_dir is not None:
             if self.model_fields_set != {"config_dir"}:
                 raise ValueError("config_dir é o corpo legado completo")
@@ -2755,8 +2782,10 @@ async def contas_destino(name: str):
     info = await _cached_info(name)
     if not info:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
-    atual = (info.conta or "").removeprefix("claude:") or None
-    return await asyncio.to_thread(_account_targets, atual)
+    atual = ((headless_sessions.load(name) or {}).get("config_dir") if info.headless else
+             str(_session_config_dir(name) or Path.home() / ".claude"))
+    # No motor, mesmo o diretório atual é um destino: ele volta para a conta Claude sem mover nada.
+    return await asyncio.to_thread(_account_targets, None if info.engine else atual)
 
 
 @app.post("/api/sessions/{name}/conta", dependencies=[Depends(require_auth)])
@@ -2777,6 +2806,8 @@ async def trocar_conta(name: str, body: AccountMoveBody):
                 raise
         except TransferError as exc:
             raise HTTPException(exc.status, detail=public_error(exc)) from None
+    if body.engine_account is not None:
+        return await _durante_troca(name, _trocar_conta(name, None, engine_account=body.engine_account))
     alvo = next((d for d in await asyncio.to_thread(_account_targets, None) if d["path"] == body.config_dir), None)
     if alvo is None:
         raise HTTPException(400, detail=erro("erro_config_dir_invalido", "config_dir invalido"))
@@ -2786,22 +2817,67 @@ async def trocar_conta(name: str, body: AccountMoveBody):
     return await _durante_troca(name, _trocar_conta(name, body.config_dir))
 
 
-async def _trocar_conta(name: str, destino: str):
-    info = await _cached_info(name)
-    if not info:
-        raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
-    if info.provider != "claude" or info.engine:
-        raise HTTPException(409, detail=erro("erro_conta_so_claude", "só sessão Claude na conta Anthropic troca de conta"))
-    atual = (info.conta or "").removeprefix("claude:")
-    if atual and Path(atual).resolve() == Path(destino).resolve():
-        return {"ok": True, "config_dir": destino}
+async def _trocar_conta(name: str, destino: str | None, *, engine_account: str | None = None,
+                       model: str | None = None, effort: str | None = None,
+                       context_window: int | None = None, engine_models: list[dict] | None = None):
     hl = get_adapter(CLAUDE_HEADLESS)
     async with hl.delivery_lock(name):
-        # Lido dentro da trava: uma troca de modo que terminou enquanto este pedido esperava já mudou a resposta.
+        # A troca anterior pode ter mudado motor, conta e transporte enquanto este pedido esperava.
+        await asyncio.to_thread(_invalidate_lists)
+        info = await _cached_info(name)
+        if not info:
+            raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessão não encontrada"))
+        if info.provider != "claude":
+            raise HTTPException(409, detail=erro("erro_conta_so_claude", "só sessão Claude troca de conta por esta rota"))
         headless = _headless(name)
+        current_meta = headless_sessions.load(name) if headless else None
+        if current_meta is not None:
+            info = info.model_copy(update={"engine": current_meta.get("engine"),
+                                           "engine_account": current_meta.get("engine_account"),
+                                           "headless": True})
+        if engine_account is not None:
+            if not info.engine:
+                raise HTTPException(400, detail=erro("erro_cliproxy_conta", "esta sessão não usa o CLIProxyAPI local"))
+            if (model is not None or effort is not None) and info.engine_account != engine_account:
+                raise HTTPException(409, detail=erro("erro_cliproxy_conta", "a conta da sessão mudou; atualize a lista de modelos"))
+            account = await asyncio.to_thread(_fixed_engine_account, info.engine, engine_account)
+        elif info.engine:
+            try:
+                local_engine = cliproxy.is_local_engine(engines.listar().get(info.engine, {}))
+            except ValueError as exc:
+                raise HTTPException(400, detail=erro("erro_cliproxy_conta", str(exc))) from None
+            if not local_engine:
+                raise HTTPException(409, detail=erro("erro_conta_so_claude", "só conta Claude ou motor CLIProxyAPI local troca de conta"))
+        atual = ((current_meta or {}).get("config_dir") if headless else
+                 str(_session_config_dir(name) or Path.home() / ".claude"))
+        if engine_account is None and not info.engine and atual and Path(atual).resolve() == Path(destino).resolve():
+            return {"ok": True, "config_dir": destino}
         motivo = await _motivo_ocupada(name, headless)
         if motivo:
             raise HTTPException(409, detail=erro(motivo, _OCUPADA[motivo]))
+        chosen_model = None
+        if engine_account is not None:
+            if headless:
+                source_model = (headless_sessions.load(name) or {}).get("model")
+            else:
+                pane = await asyncio.to_thread(registry._pane_of, name)
+                agent = registry_mod._pid_do_agente((pane or {}).get("pid"))
+                source_model = procinfo._model_of(agent)[0] if agent else None
+            source_model = model or source_model or engines.listar()[info.engine]["model"]
+            base = source_model.split("/", 1)[-1]
+            from app.cliproxy_accounts import prefix_model
+            try:
+                chosen_model = prefix_model(base, account["prefix"])
+            except ValueError as exc:
+                raise HTTPException(400, detail=erro("erro_cliproxy_conta", str(exc))) from None
+            account_models = engine_models if engine_models is not None else await _engine_models(info.engine, fresco=True)
+            try:
+                cliproxy.validate_models(engines.listar()[info.engine], chosen_model, account, account_models)
+                model_args.validar("claude", chosen_model, effort)
+            except (ValueError, KeyError) as exc:
+                raise HTTPException(400, detail=erro("erro_cliproxy_conta", str(exc))) from None
+            if info.engine_account == engine_account and model is None and effort is None:
+                return {"ok": True, "engine_account": engine_account}
         # Terminal passa por sem terminal parada: o sidecar guarda as escolhas e a conta, e nenhum
         # processo sobe até a conversa estar no lugar.
         if headless:
@@ -2813,7 +2889,8 @@ async def _trocar_conta(name: str, destino: str):
             pids = await asyncio.to_thread(_arvore_de, (pane or {}).get("pid"))
             modo = await asyncio.to_thread(perm_mode.ler_modo, name)
             try:
-                await asyncio.to_thread(registry.para_headless, name, modo)
+                extra = {"for_account_move": True} if info.engine else {}
+                await asyncio.to_thread(registry.para_headless, name, modo, **extra)
             except KillFailed as e:
                 raise HTTPException(500, str(e))
             except (ValueError, OSError) as e:
@@ -2822,14 +2899,41 @@ async def _trocar_conta(name: str, destino: str):
         async def reabrir() -> str | None:
             """Reabre como estava; devolve o motivo quando o terminal não voltou (a sessão segue sem terminal)."""
             if headless:
-                hl.acordar(name)
+                if engine_account is not None or info.engine:
+                    try:
+                        hl.reset_start_attempts(name)
+                        if await hl.ensure_running(name, require_initialize=True,
+                                                   engine_models=account_models if engine_account is not None else None) is None:
+                            raise RuntimeError("a sessão não reabriu")
+                    except Exception as exc:
+                        return str(exc)
+                else:
+                    hl.acordar(name)
                 return None
+            expected_meta = headless_sessions.load(name)
+            started = False
             try:
-                await asyncio.to_thread(registry.para_terminal, name)
+                kwargs = {"engine_models": account_models} if engine_account is not None else {}
+                await asyncio.to_thread(registry.para_terminal, name, **kwargs)
+                started = True
+                if engine_account is not None or info.engine:
+                    if expected_meta is None:
+                        raise RuntimeError("não consegui conferir a identidade da sessão retomada")
+                    await asyncio.to_thread(registry.wait_for_claude, name, expected_meta)
                 return None
             except Exception as e:
                 _log.exception("troca de conta: terminal de %s não voltou", name)
-                hl.acordar(name)   # sidecar restaurado: a conversa segue sem terminal
+                if started and expected_meta is not None:
+                    pane = await asyncio.to_thread(registry._pane_of, name)
+                    new_pids = await asyncio.to_thread(_arvore_de, (pane or {}).get("pid"))
+                    if (await asyncio.to_thread(registry_mod.tmux.has_session, name)
+                            and not await asyncio.to_thread(registry_mod.tmux.kill_session, name)):
+                        raise HTTPException(409, detail=erro("erro_troca_conta", "a reabertura falhou e o terminal não encerrou para restaurar a sessão")) from e
+                    if not await asyncio.to_thread(_saiu, new_pids):
+                        raise HTTPException(409, detail=erro("erro_troca_conta", "o Claude novo não saiu; restauração recusada para não duplicar a conversa")) from e
+                    headless_sessions.restaurar(expected_meta)
+                if engine_account is None and not info.engine:
+                    hl.acordar(name)   # sidecar restaurado: a conversa segue sem terminal
                 return str(e)
 
         # O claude grava as últimas linhas pelo caminho ao sair: mover antes disso recria o arquivo na conta de
@@ -2839,16 +2943,33 @@ async def _trocar_conta(name: str, destino: str):
             raise HTTPException(409, detail=erro("erro_troca_conta", "não troquei de conta: o processo antigo não saiu; a sessão segue na conta de antes",
                                                  erro="processo vivo"))
         falha = None
+        original_meta = None
         movida: tuple[str, str, str | None] | None = None
         try:
             meta = headless_sessions.load(name)
             if meta is None:
                 raise RuntimeError("sessão sem o arquivo de estado")
+            original_meta = dict(meta)
             jsonl = Path(hl.transcript_path_de(meta))
-            if jsonl.exists() and await asyncio.to_thread(move_conversation, jsonl.parent.name, meta["session_id"], destino):
-                movida = (jsonl.parent.name, meta["session_id"], meta.get("config_dir"))
+            if engine_account is not None:
+                changes = {"engine_account": engine_account, "engine_credential_id": account["credential_id"],
+                           "engine_account_base_url": account["base_url"],
+                           "model": chosen_model, "problema": None}
+                if model is not None:
+                    changes["context_window"] = context_window
+                if effort is not None:
+                    changes["effort"] = effort
+            else:
+                if (jsonl.exists() and Path(meta.get("config_dir") or Path.home() / ".claude").resolve()
+                        != Path(destino).resolve()
+                        and await asyncio.to_thread(move_conversation, jsonl.parent.name, meta["session_id"], destino)):
+                    movida = (jsonl.parent.name, meta["session_id"], meta.get("config_dir"))
+                changes = {"config_dir": destino, "problema": None}
+                if info.engine:
+                    changes.update(engine=None, engine_account=None, engine_credential_id=None,
+                                   engine_account_base_url=None, model=None, context_window=None)
             # O aviso da conta anterior (limite batido, sem login) não vale na nova.
-            if headless_sessions.update(name, config_dir=destino, problema=None) is None:
+            if headless_sessions.update(name, **changes) is None:
                 raise RuntimeError("não gravei a conta nova no arquivo de estado da sessão")
             hl.esquecer_problema(name)
         except FileExistsError:
@@ -2863,15 +2984,39 @@ async def _trocar_conta(name: str, destino: str):
                 except Exception:
                     _log.exception("troca de conta: a conversa de %s ficou em %s", name, destino)
                     onde = f"em {destino}, mas a sessão aponta para a conta de antes"
+            if original_meta is not None:
+                try:
+                    headless_sessions.restaurar(original_meta)
+                except OSError:
+                    _log.exception("troca de conta: não consegui restaurar as escolhas de %s", name)
+                    onde = "com o arquivo de estado da sessão indisponível"
             falha = HTTPException(500, detail=erro("erro_mover_conversa", f"nao consegui mover a conversa de conta ({e}); ela ficou {onde}", erro=str(e)))
         motivo_terminal = await reabrir()
+        if motivo_terminal and falha is None and original_meta is not None and (engine_account is not None or info.engine):
+            rollback_error = None
+            try:
+                await hl.parar(name)
+                if movida:
+                    await asyncio.to_thread(move_conversation, *movida)
+                headless_sessions.restaurar(original_meta)
+                rollback_error = await reabrir()
+                if rollback_error and not headless:
+                    hl.acordar(name)
+            except Exception as exc:
+                rollback_error = str(exc)
+                _log.exception("troca de conta: restauração da sessão %s falhou", name)
+            message = "a troca falhou; as escolhas anteriores foram restauradas"
+            if rollback_error:
+                message = "a troca falhou e a sessão anterior não reabriu"
+            falha = HTTPException(409, detail=erro("erro_troca_conta", message,
+                                                  erro=motivo_terminal, rollback_error=rollback_error))
         registry._forget(name)
     if falha:
         raise falha
     if motivo_terminal:
         raise HTTPException(409, detail=erro("erro_troca_conta", f"a conversa foi para a conta nova, mas o terminal não voltou ({motivo_terminal}); ela segue sem terminal",
                                              erro=motivo_terminal))
-    return {"ok": True, "config_dir": destino}
+    return {"ok": True, "engine_account": engine_account} if engine_account is not None else {"ok": True, "config_dir": destino}
 
 
 def _arvore_de(pid: object) -> list[int]:
@@ -3400,6 +3545,7 @@ class BastaoBody(_StrictBody):
     config_dir: str | None = None
     provider: str = "claude"
     engine: str | None = None
+    engine_account: str | None = None
     model: str | None = None
     effort: str | None = None
     permission_mode: str | None = None
@@ -3549,6 +3695,17 @@ async def _passar_bastao(name: str, body: BastaoBody):
         raise HTTPException(400, detail=erro("erro_bastao_cwd_inexistente",
                                              f"a pasta {cwd} não existe mais; se ela foi renomeada "
                                              f"ou movida, escolha a pasta nova", cwd=cwd))
+    account_models = None
+    if body.engine_account is not None:
+        if body.provider != "claude" or not body.engine:
+            raise HTTPException(400, detail=erro("erro_cliproxy_conta", "conta ChatGPT exige Claude com motor CLIProxyAPI local"))
+        account = await asyncio.to_thread(_fixed_engine_account, body.engine, body.engine_account)
+        cfg = engines.listar()[body.engine]
+        account_models = await _engine_models(body.engine, fresco=True)
+        try:
+            cliproxy.validate_models(cfg, body.model or cfg["model"], account, account_models)
+        except ValueError as exc:
+            raise HTTPException(400, detail=erro("erro_cliproxy_conta", str(exc))) from None
     try:
         texto, alvo, kick, aviso_resumo = await asyncio.to_thread(
             _bastao_preparar, info, name, destino, body.resumo_por_modelo)
@@ -3564,14 +3721,16 @@ async def _passar_bastao(name: str, body: BastaoBody):
     # conta, Codex): duplicar aquilo aqui seria uma segunda porta de criação pra manter em dia.
     # HTTPException dele sobe tal e qual — o dossiê já gravado vira sidecar órfão, que o `prune`
     # recolhe pelo nome (ver bastao_mod.caminho).
-    novo = await create_session(CreateBody(
+    creation = CreateBody(
         name=destino, cwd=cwd, config_dir=body.config_dir, provider=body.provider,
-        engine=body.engine, model=body.model, effort=body.effort,
+        engine=body.engine, engine_account=body.engine_account, model=body.model, effort=body.effort,
         permission_mode=body.permission_mode, omp_profile=body.omp_profile,
         codex_account=sucessora_codex_account,
         # `CreateBody.headless` é estrito: None (cliente antigo, que não manda o campo) tem de
         # virar False, e não chegar como None num campo que só aceita bool.
-        headless=bool(body.headless)))
+        headless=bool(body.headless))
+    creation._engine_catalog = account_models
+    novo = await create_session(creation)
     _passo(destino, "recado")
     try:
         await asyncio.to_thread(lambda: PromptQueue(novo.name).append(
@@ -6090,6 +6249,15 @@ def _motores_para_cliente() -> dict[str, dict]:
         chave = visivel.pop("api_key", "")
         visivel["api_key"] = runtime_config.mascarar(chave)
         visivel["api_key_definida"] = bool(chave)
+        try:
+            if cliproxy.is_local_engine(e):
+                from app.cliproxy_accounts import list_accounts
+                visivel["cliproxy_accounts"] = []
+                visivel["cliproxy_accounts"] = list_accounts()
+                if not visivel["cliproxy_accounts"]:
+                    visivel["cliproxy_error"] = "nenhuma conta ChatGPT do proxy corresponde às contas cadastradas no Hangar"
+        except ValueError as exc:
+            visivel["cliproxy_error"] = str(exc)
         out[nome] = visivel
     return out
 
@@ -7652,6 +7820,8 @@ class ResumeArchivedBody(_StrictBody):
     # /proc pra descobrir o motor de entao (ver registry._engine_of); quem retoma escolhe de novo.
     # Sem escolha, volta na conta Anthropic (comportamento de hoje).
     engine: str | None = None
+    engine_account: str | None = None
+    model: str | None = None
     # A CONTA em que a conversa continua. Omitida, e a dona do transcript (descoberta no disco). Outra
     # conta: o transcript MUDA de conta antes do `--resume`, porque rodado na conta errada ele morre
     # na hora com "No conversation found with session ID".
@@ -7763,6 +7933,28 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
                                              sessao=viva))
     if body.engine is not None and body.engine not in engines.listar():
         raise HTTPException(400, detail=erro("erro_motor_invalido", "motor invalido"))
+    fixed_model = body.model
+    if body.engine_account is not None:
+        if body.provider != "claude" or not body.engine:
+            raise HTTPException(400, detail=erro("erro_cliproxy_conta", "conta ChatGPT exige Claude com motor CLIProxyAPI local"))
+        account = _fixed_engine_account(body.engine, body.engine_account)
+        cfg_engine = engines.listar()[body.engine]
+        from app.cliproxy_accounts import base_model
+        try:
+            fixed_model = base_model(body.model or cfg_engine["model"], account["prefix"])
+            account_models = engine_probe.listar_modelos(cfg_engine["base_url"], cfg_engine["api_key"])
+            models = cliproxy.validate_models(cfg_engine, fixed_model, account, account_models)
+        except ValueError as exc:
+            raise HTTPException(400, detail=erro("erro_cliproxy_conta", str(exc))) from None
+        except RuntimeError:
+            raise HTTPException(502, detail=erro("erro_cliproxy_conta", "catálogo do CLIProxyAPI indisponível")) from None
+        if not any(m["id"] == fixed_model for m in models):
+            raise HTTPException(422, detail=erro("erro_modelo_fora_catalogo", "modelo indisponível nesta conta ChatGPT"))
+    elif body.model is not None:
+        try:
+            model_args.validar(body.provider, body.model, None)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
     base = sanitize_session_name(Path(cwd).name) or "sessao"
     name, i = base, 2
     # As MESMAS fontes que a criacao normal consulta (registry.create). Olhando so o tmux, um nome
@@ -7785,6 +7977,11 @@ def resume_archived(project: str, session_id: str, body: ResumeArchivedBody = Re
     try:
         extras = {"codex_account": origem_codex_account} \
             if body.provider == "codex" and origem_codex_account is not None else {}
+        if body.engine_account is not None:
+            extras["engine_account"] = body.engine_account
+            extras["engine_models"] = account_models
+        if fixed_model is not None:
+            extras["model"] = fixed_model
         if body.provider == "codex" and transfer:
             extras.update(transfer_id=transfer.id, transfer_rollout_path=str(origem_path),
                           tool_output_token_limit=transfer.destination_meta["tool_output_token_limit"])
@@ -8430,28 +8627,33 @@ def answer(name: str, body: AnswerBody):
 
 
 @app.post("/api/sessions/{name}/model-effort", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
-def model_effort(name: str, body: ModelEffortBody):
-    # Dirige o picker interativo do /model pra aplicar modelo/esforco SO na sessao (scope
-    # 'session') ou como default ('default'). PickerError -> 409/422; entrada invalida -> 422.
+async def model_effort(name: str, body: ModelEffortBody):
+    info = await _cached_info(name)
+    if info and info.engine_account:
+        if body.scope != "session":
+            raise HTTPException(409, detail=erro("erro_cliproxy_modelo_rota",
+                                                 "a conta ChatGPT fixa não altera o padrão global de modelo ou esforço"))
+        if body.model is not None:
+            await engine_model_set(name, EngineModelBody(model=body.model, effort=body.effort))
+        elif body.effort is not None:
+            await _durante_troca(name, _trocar_conta(name, None, engine_account=info.engine_account,
+                                                   effort=body.effort))
+        return {"ok": True, "scope": "session", "result": None}
     if _headless(name):
-        # Sem terminal: `set_model` no stdin; esforço reabre o processo com `--resume`. Sempre
-        # escopo de sessão — o processo não grava default global (e é isso que se quer).
         if _loop_servidor is None or not _loop_servidor.is_running():
             raise HTTPException(503, detail=erro("erro_modelo_indisponivel", "servidor sem loop pra aplicar"))
         try:
             model_args.validar("claude", body.model, body.effort, None)
         except ValueError as e:
             raise HTTPException(422, str(e))
-        fut = asyncio.run_coroutine_threadsafe(
-            get_adapter(CLAUDE_HEADLESS).set_model(name, body.model, body.effort), _loop_servidor)
         try:
-            fut.result(timeout=40)
+            await asyncio.wait_for(get_adapter(CLAUDE_HEADLESS).set_model(name, body.model, body.effort), 40)
         except Exception as e:
             raise HTTPException(409, detail=erro("erro_modelo_indisponivel", f"não consegui trocar: {e}"))
         return {"ok": True, "scope": "session", "result": None}
     _recusa_se_painel_aberto(name)
     try:
-        return terminal.set_model_effort(name, body.model, body.effort, body.scope)
+        return await asyncio.to_thread(terminal.set_model_effort, name, body.model, body.effort, body.scope)
     except PickerError as e:
         raise HTTPException(e.status, e.detail)
     except ValueError as e:
@@ -8734,6 +8936,22 @@ def _chave_config(p) -> str:
     return str(Path(s).expanduser().resolve())
 
 
+def _fixed_engine_account(engine: str, account: str) -> dict:
+    cfg = engines.listar().get(engine)
+    if not cfg:
+        raise HTTPException(400, detail=erro("erro_motor_invalido", "motor inválido"))
+    try:
+        return cliproxy.account_for_engine(cfg, account)
+    except ValueError as exc:
+        raise HTTPException(400, detail=erro("erro_cliproxy_conta", str(exc))) from None
+
+
+async def _fixed_engine_models(engine: str, account: str, *, fresco: bool = False) -> list[dict]:
+    from app.cliproxy_accounts import models_for
+    selected = await asyncio.to_thread(_fixed_engine_account, engine, account)
+    return models_for(await _engine_models(engine, fresco=fresco), selected["prefix"])
+
+
 async def _engine_models(nome: str, fresco: bool = False) -> list[dict]:
     """Catalogo do provedor. `fresco=True` ignora o cache.
 
@@ -8751,8 +8969,9 @@ async def _engine_models(nome: str, fresco: bool = False) -> list[dict]:
     try:
         modelos = await asyncio.to_thread(engine_probe.listar_modelos, cfg["base_url"], cfg["api_key"])
     except RuntimeError as e:
-        # A mensagem do provedor E a informacao util (key invalida, host fora do ar).
-        raise HTTPException(502, detail=erro("erro_provedor_offline", f"o provedor do motor {nome!r} nao respondeu: {e}", nome=nome, erro=str(e)))
+        # O proxy pode repetir a chave no erro; ela não vai para o cliente.
+        message = cliproxy.redact(str(e), cfg["api_key"])
+        raise HTTPException(502, detail=erro("erro_provedor_offline", f"o provedor do motor {nome!r} nao respondeu: {message}", nome=nome, erro=message))
     _engine_models_cache[nome] = (time.monotonic(), modelos)
     return modelos
 
@@ -8768,7 +8987,8 @@ async def model_options(name: str):
     if info.engine:
         # Motor: catalogo vem do /v1/models do provedor (HTTP), nao do pane -- nao conta linha,
         # nao depende do tamanho da janela. A guarda so vale pro ramo abaixo (le o picker).
-        modelos = await _engine_models(info.engine)
+        modelos = await (_fixed_engine_models(info.engine, info.engine_account)
+                         if info.engine_account else _engine_models(info.engine))
         return {"kind": "engine", "engine": info.engine,
                 "models": [{"id": m["id"], "context_length": m.get("context_length"),
                             "vision": m.get("vision")} for m in modelos]}
@@ -8807,7 +9027,8 @@ async def model_options(name: str):
 
 @app.get("/api/model-options", dependencies=[Depends(require_auth)])
 async def model_options_sem_sessao(provider: str = "claude", engine: str = "",
-                                   config_dir: str = "", codex_account: str = ""):
+                                   config_dir: str = "", codex_account: str = "",
+                                   engine_account: str | None = None):
     """Modelos oferecidos na tela de ABERTURA, onde ainda não existe sessão.
 
     Irmã de /api/sessions/{name}/model/options, que não serve aqui: no ramo da conta Anthropic
@@ -8816,6 +9037,8 @@ async def model_options_sem_sessao(provider: str = "claude", engine: str = "",
     reduzidos em vez de fingirem ser a lista completa (ver o comentário acima sobre a lista
     chumbada que não soube do Fable).
     """
+    if engine_account is not None and (provider != "claude" or not engine):
+        raise HTTPException(400, detail=erro("erro_cliproxy_conta", "conta ChatGPT exige Claude com motor CLIProxyAPI local"))
     if provider in ("pi", "omp"):
         try:
             return {"kind": provider, "reduced": False,
@@ -8867,7 +9090,8 @@ async def model_options_sem_sessao(provider: str = "claude", engine: str = "",
     if provider != "claude":
         raise HTTPException(400, detail=erro("erro_provider_invalido", "provider deve ser 'claude', 'pi', 'omp', 'kimi' ou 'codex'"))
     if engine:
-        modelos = await _engine_models(engine)
+        modelos = await (_fixed_engine_models(engine, engine_account)
+                         if engine_account is not None else _engine_models(engine))
         return {"kind": "engine", "reduced": False,
                 "models": [{"id": m["id"], "context_length": m.get("context_length"),
                             "vision": m.get("vision")} for m in modelos]}
@@ -8909,12 +9133,23 @@ async def engine_model_set(name: str, body: EngineModelBody):
         raise HTTPException(400, detail=erro("erro_rota_so_motor", "esta rota so existe pra sessoes que rodam num motor"))
     # fresco=True: a validacao promete "recusa aqui em vez de deixar a falha aparecer so no proximo
     # turno", e essa promessa nao sobrevive ao cache de 5 min (ver _engine_models).
-    modelos = await _engine_models(info.engine, fresco=True)
+    account_models = await _engine_models(info.engine, fresco=True)
+    modelos = account_models
+    if info.engine_account:
+        from app.cliproxy_accounts import models_for
+        account = await asyncio.to_thread(_fixed_engine_account, info.engine, info.engine_account)
+        modelos = models_for(account_models, account["prefix"])
     if not any(m["id"] == body.model for m in modelos):
         # Recusar aqui em vez de digitar: o CC aceitaria o id, a sessao passaria a mandar request
         # pra um modelo que o provedor nao tem, e a falha apareceria so no proximo turno.
         raise HTTPException(422, detail=erro("erro_modelo_fora_catalogo", f"modelo fora do catalogo do motor {info.engine!r}: {body.model}", motor=info.engine, modelo=body.model))
 
+    if info.engine_account:
+        selected = next(m for m in modelos if m["id"] == body.model)
+        await _durante_troca(name, _trocar_conta(name, None, engine_account=info.engine_account,
+                                               model=body.model, effort=body.effort,
+                                               context_window=selected.get("context_length"), engine_models=account_models))
+        return {"ok": True, "model": body.model}
     if _headless(name):
         # Sem pane: `set_model` por control_request, que (medido) NÃO grava o default global —
         # nada a repor no settings.json. O esforço vai como `/effort <x>` pelo stdin.
