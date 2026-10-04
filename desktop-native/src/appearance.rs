@@ -124,11 +124,11 @@ pub enum SurfaceMaterial { Glass, Opaque }
 #[serde(rename_all = "snake_case")]
 pub enum Reading { Auto, None, Text, Sheet }
 
-/// Como a chamada de ferramenta aparece na conversa: linha com nome e resumo, verbo e chip, ou árvore com o
-/// raciocínio dentro do grupo.
+/// Como a chamada de ferramenta aparece na conversa: linha com nome e resumo, verbo e chip, árvore com o
+/// raciocínio dentro do grupo, ou o desenho do terminal do Claude Code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ToolLook { Classic, Chips, Tree }
+pub enum ToolLook { Classic, Chips, Tree, Terminal }
 
 /// Que chamadas feitas no meio do raciocínio ficam dentro do bloco do pensamento.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -624,6 +624,8 @@ mod tests {
         assert_eq!((reset.tool_look, reset.task_list, reset.thinking_tools, reset.table_chart), (ToolLook::Chips, true, ThinkingTools::All, true));
         let parsed: Appearance = serde_json::from_str(r#"{"tool_look":"chips","thinking_tools":"none"}"#).unwrap();
         assert_eq!((parsed.tool_look, parsed.thinking_tools), (ToolLook::Chips, ThinkingTools::None));
+        let terminal: Appearance = serde_json::from_str(r#"{"tool_look":"terminal"}"#).unwrap();
+        assert_eq!(terminal.tool_look, ToolLook::Terminal);
     }
 
     #[test]

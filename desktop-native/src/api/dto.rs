@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 // Os formatos da conversa vêm do crate que o hangar-server também usa; os nomes antigos ficam para o
 // resto do app não mudar.
-pub use hangar_api::chat::ChatEvent;
+pub use hangar_api::chat::{ChatEvent, PatchHunk};
 pub use hangar_api::preview::PreviewEvent as Preview;
 pub use hangar_api::state::{ShellVivo as ShellAlive, StateEvent as SessionState};
 
