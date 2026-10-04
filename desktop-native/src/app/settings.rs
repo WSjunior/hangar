@@ -88,7 +88,8 @@ const PAGE_ROWS: &[(Page, &[(&str, Option<&str>)])] = &[
     (Page::Accounts, &[("accounts_subscriptions", Some("accounts_menu_note")), ("accounts_models", None),
         ("accounts_others", Some("accounts_others_empty")), ("accounts_density", None), ("accounts_refresh", None)]),
     (Page::Orchestration, &[("orchestration_intro", None), ("orchestration_unrestricted", None)]),
-    (Page::Shortcuts, &[("shortcuts_add", Some("shortcuts_lead")), ("shortcuts_restore", Some("shortcuts_restore_help"))]),
+    (Page::Shortcuts, &[("shortcuts_add", Some("shortcuts_lead")), ("shortcuts_restore", Some("shortcuts_restore_help")),
+        ("keyboard_title", Some("keyboard_lead")), ("keyboard_hold_title", Some("keyboard_hold_help"))]),
     (Page::Harnesses, &[("harness_legend", None)]),
     (Page::Voice, &[("voice_transcribe", Some("voice_transcribe_help")), ("voice_groq", Some("voice_groq_help")),
         ("voice_transcription_endpoint", Some("voice_transcription_endpoint_help")), ("voice_transcription_model", Some("voice_transcription_model_help")),
@@ -441,6 +442,8 @@ fn swatch_ring(selected: bool) -> Hsla { if selected { theme::text() } else { tr
 
 impl Hangar {
     pub(super) fn open_settings(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_session_numbers(cx);
+        self.keyboard.cancel_edit();
         self.costs.view = None;
         (self.worktrees.view, self.worktrees.open) = (None, None);
         self.settings = Some(page);
@@ -468,6 +471,7 @@ impl Hangar {
 
     pub(super) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings.take().is_some() {
+            self.keyboard.cancel_edit();
             self.accounts_page_left();
             self.sync_page_left();
             self.connect_page_left();

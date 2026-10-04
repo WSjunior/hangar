@@ -82,7 +82,7 @@ use super::{
 
 use crate::linux::{
     DOUBLE_CLICK_INTERVAL, LinuxClient, LinuxCommon, LinuxKeyboardLayout, PIPE_READ_TIMEOUT,
-    SCROLL_LINES, capslock_from_xkb, cursor_style_to_icon_names, get_xkb_compose_state,
+    SCROLL_LINES, capslock_from_xkb, compose_key, cursor_style_to_icon_names, get_xkb_compose_state,
     is_within_click_distance, keystroke_from_xkb, keystroke_underlying_dead_key,
     modifiers_from_xkb, new_xkb_context, open_uri_internal, read_fd_with_timeout,
     reveal_path_internal,
@@ -1964,8 +1964,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                         let mut keystroke =
                             keystroke_from_xkb(keymap_state, state.modifiers, keycode);
                         if let Some(mut compose) = state.compose_state.take() {
-                            compose.feed(keysym);
-                            match compose.status() {
+                            match compose_key(&mut compose, keysym, state.modifiers) {
                                 xkb::Status::Composing => {
                                     keystroke.key_char = None;
                                     state.pre_edit_text =
@@ -1999,7 +1998,13 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientStatePtr {
                                     compose.feed(keysym);
                                     state = client.borrow_mut();
                                 }
-                                _ => {}
+                                xkb::Status::Nothing => {
+                                    if state.pre_edit_text.take().is_some() {
+                                        drop(state);
+                                        focused_window.handle_ime(ImeInput::UnmarkText);
+                                        state = client.borrow_mut();
+                                    }
+                                }
                             }
                             state.compose_state = Some(compose);
                         }
