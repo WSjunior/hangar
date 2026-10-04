@@ -305,10 +305,38 @@ cliente de diário da Task 1.
 **Código morto que sai:** `Fallback`, `FALLBACK_AFTER`, `MAX_FALLBACK`, `AppState.fallback`,
 `internal_refused`, o texto "Python atendeu" de `warn_if_internal_refused`, `routes.rs:567-602`.
 
-- [ ] **Step 36: Testes acima, vistos falhar**
-- [ ] **Step 37: Erros de `history`/`events` respondem 503 com código e vão ao diário; provedor fora do Rust e sessão inexistente seguem para o Python**
-- [ ] **Step 38: Conferir no chat web que o 503 aparece como erro de carregamento com a frase (verificação manual)**
-- [ ] **Step 39: Remover o código morto; `cargo test -p hangar-server` focado; revisar**
+- [x] **Step 36: Testes acima, vistos falhar**
+- [x] **Step 37: Erros de `history`/`events` respondem 503 com código e vão ao diário; provedor fora do Rust e sessão inexistente seguem para o Python**
+- [x] **Step 38: Conferir no chat web que o 503 aparece como erro de carregamento com a frase (verificação manual)**
+- [x] **Step 39: Remover o código morto; `cargo test -p hangar-server` focado; revisar**
+
+**Registro da execução (Task 7).** Os testes ficaram em `tests/conversations.rs` (a casa do
+histórico e do chat ao vivo com o Python falso; `runtime_diagnostics.rs` é de um teste só por causa
+do assinante de log global). `history_io_error_answers_503_with_code`, `events_without_info_answers_503`
+e `route_failure_is_sent_to_diary` falharam antes do código (200 do repasse);
+`missing_session_still_reaches_python_404` já passava e fica como regressão;
+`other_provider_history_still_goes_to_python` já existia como
+`history_without_owner_or_supported_provider_goes_to_python` (e, no `/events`,
+`provider_outside_rust_resets_and_next_connection_goes_to_python`). O `fetch_info` passou a separar
+404 (sessão inexistente ou segredo recusado, que o Python já registra como `internal.recusado`) de
+falha (sem resposta, outro status, corpo inválido): só a falha vira 503 `internal_info`. Corpo do
+503: `{ok:false,error_code,message}` mais `detail:{code,msg}`, que o `lerErro` do app já mostra sem
+mudar o front. Diário: `rust.history_failed` e `rust.events_failed`. **Desvio aprovado pela
+`migracao-rust-2`:** o `Fallback` (struct, `FALLBACK_AFTER`, `MAX_FALLBACK`, `AppState.fallback`) fica
+só para o Git/arquivos, que ainda o usa em `workspace_routes.rs:313-360`; a Task 8 apaga o struct
+junto com os contadores de workspace (sem mexer nas mesmas linhas aqui, a junção não conflita).
+Step 38 em backend isolado (HOME temporário, porta 19765, `tmux` próprio, `matar_orfaos`, reconciliação
+de conta e portas do convite/Connect neutralizadas, sessão sem terminal sem conta): fila virada pasta →
+503 `internal_info` no histórico e nos eventos; transcript virado pasta → 503 `history_io`; o chat
+mostrou "Não deu pra carregar o histórico." com "503: a leitura do histórico falhou — history_io", e
+o diário recebeu as três linhas `rust.*`.
+Revisão (`ecc:rust-reviewer`, `ecc:silent-failure-hunter`): sem achado crítico. Entraram: o
+`/history` só guarda no cache do `info` a sessão encontrada (o 404 guardado fazia o `/events`
+seguinte repassar sem perguntar) e os testes do 503 conferem CORS, `content-type` e a linha do
+diário do `history_io`. Ficaram de fora: `reset`/`Close`/atraso do canal ao vivo não são falha do
+Rust (troca de provedor, aparelho lento ou cliente que saiu); o 503 do `/events` invisível ao
+`EventSource` é o combinado do desenho (o histórico mostra o erro); o diário que não chega quando o
+Python está fora fica inteiro no `hangar-server.log` (`diag.rs`, da Task 1).
 
 ### Task 8: Git e arquivos sem repasse por falha
 
