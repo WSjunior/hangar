@@ -2969,6 +2969,8 @@ async def _trocar_conta(name: str, destino: str | None, *, engine_account: str |
                 if info.engine:
                     changes.update(engine=None, engine_account=None, engine_credential_id=None,
                                    engine_account_base_url=None, model=None, context_window=None)
+                # Confiança na pasta é por conta: sem isto o terminal (agora ou na troca de modo) abre no aviso, em "No, exit".
+                await asyncio.to_thread(registry_mod._pretrust_cwd, meta["cwd"], destino)
             # O aviso da conta anterior (limite batido, sem login) não vale na nova.
             if headless_sessions.update(name, **changes) is None:
                 raise RuntimeError("não gravei a conta nova no arquivo de estado da sessão")
