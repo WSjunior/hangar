@@ -131,3 +131,14 @@ fn remote_branch_named_like_an_option_is_not_passed_to_switch() {
     let head = Command::new("git").arg("-C").arg(dir.path()).args(["symbolic-ref", "-q", "HEAD"]).output().unwrap();
     assert!(head.status.success(), "HEAD ficou destacado");
 }
+
+#[test]
+fn empty_folder_path_means_the_root_like_python() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("projeto")).unwrap();
+    let request = serde_json::from_value(json!({"op":"scan_dir", "args":{
+        "root": dir.path(), "path": "", "roots": [dir.path()]}}))
+    .unwrap();
+    let listed = execute(request).unwrap();
+    assert!(listed.to_string().contains("projeto"), "{listed}");
+}

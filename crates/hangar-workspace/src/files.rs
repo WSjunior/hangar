@@ -569,7 +569,11 @@ fn folder(root: &str, path: Option<&str>, roots: &[String]) -> Result<PathBuf> {
     if !roots.iter().any(|r| real(Path::new(r)) == root) {
         return Err(error(403, "root not allowed"));
     }
-    let target = path.map(|p| real(Path::new(p))).unwrap_or(root.clone());
+    // Vazio é a própria raiz, como o `if not path` do Python.
+    let target = path
+        .filter(|p| !p.is_empty())
+        .map(|p| real(Path::new(p)))
+        .unwrap_or(root.clone());
     if !target.starts_with(&root) {
         return Err(error(400, "path escapes its root"));
     }
