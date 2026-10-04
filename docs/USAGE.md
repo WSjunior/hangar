@@ -300,8 +300,9 @@ no Hangar:
   ancora e há espaço para os dois; senão, e sempre no celular, bloco acima do composer, com o ✕
   que fecha o painel no terminal também.
 - **Botões dos mods clicam pelo app** quando o terminal da sessão está com o mouse ligado (Claude
-  Code em tela cheia). Se o botão não estiver na tela ou aparecer duas vezes, o app avisa e não
-  clica.
+  Code em tela cheia). Se o botão não estiver na tela, aparecer duas vezes ou o terminal estiver
+  em modo de rolagem, o app avisa e não clica. No Windows o clique pelo app ainda não está
+  disponível.
 - **Copiar e abrir link** num botão clicado pelo app acontecem no aparelho de quem clicou, não na
   máquina do terminal: o texto vai para a área de transferência dele e o link abre no navegador
   dele. Clique feito no próprio terminal segue como sempre.

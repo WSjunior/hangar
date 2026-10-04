@@ -7,6 +7,7 @@
   import Composer from '../components/Composer.svelte';
   import PluginBand from '../components/PluginBand.svelte';
   import PluginPane from '../components/PluginPane.svelte';
+  import { copyText } from '../lib/clipboard';
   import { parsePluginUi, pressPluginButton, type PluginNode as PluginTree, type PluginPane as PluginPaneData } from '@hangar/core';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
@@ -459,12 +460,12 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   let pluginBand = $state<PluginTree>(null);
   let pluginPanes = $state<PluginPaneData[]>([]);
   // Resultado do último clique num botão de mod; some sozinho.
-  let pluginNotice = $state<{ text: string; error: boolean; href?: string } | null>(null);
+  let pluginNotice = $state<{ text: string; error: boolean; href?: string; action?: () => void } | null>(null);
   let pluginNoticeTimer: ReturnType<typeof setTimeout> | undefined;
-  function showPluginNotice(text: string, error: boolean, href?: string) {
+  function showPluginNotice(text: string, error: boolean, extra: { href?: string; action?: () => void } = {}) {
     clearTimeout(pluginNoticeTimer);
-    pluginNotice = { text, error, href };
-    pluginNoticeTimer = setTimeout(() => (pluginNotice = null), href ? 10000 : 4000);
+    pluginNotice = { text, error, ...extra };
+    pluginNoticeTimer = setTimeout(() => (pluginNotice = null), extra.href || extra.action ? 10000 : 4000);
   }
   // O clique vira clique de mouse no terminal da sessão; o que o mod copiar ou mandar abrir acontece
   // aqui, no aparelho de quem clicou, e não na máquina do terminal.
@@ -472,13 +473,22 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     try {
       const r = await pressPluginButton(sessionName, site, key);
       if (r.copied) {
-        await navigator.clipboard.writeText(r.copied);
-        showPluginNotice(m.plugin_copiado(), false);
+        const texto = r.copied;
+        try {
+          await navigator.clipboard.writeText(texto);
+          showPluginNotice(m.plugin_copiado(), false);
+        } catch {
+          // Depois do `await` o iOS já não conta o toque como gesto, e na LAN por http nem há
+          // Clipboard API: o aviso vira um botão que copia dentro do próximo toque.
+          showPluginNotice(m.plugin_toque_para_copiar(), false, {
+            action: () => void copyText(texto).then(() => showPluginNotice(m.plugin_copiado(), false)),
+          });
+        }
       }
       if (r.opened && /^https?:\/\//i.test(r.opened)) {
         const janela = window.open(r.opened, '_blank', 'noopener,noreferrer');
         // Depois do `await` o navegador pode não contar mais como gesto da pessoa e bloquear a janela.
-        if (!janela) showPluginNotice(m.plugin_link_bloqueado(), false, r.opened);
+        if (!janela) showPluginNotice(m.plugin_link_bloqueado(), false, { href: r.opened });
       }
     } catch (err) {
       showPluginNotice(String((err as Error)?.message ?? err).replace(/^\d+: /, ''), true);

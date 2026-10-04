@@ -39,7 +39,7 @@ async function flush($: EngineInterface) {
       body: `{"sessao":${JSON.stringify(p.sessao)},"token":${JSON.stringify(p.token)},${body}}`,
     });
     if (r.status !== 200) sent = null;
-    else $.clock.after(RESEND_MS, () => { if (sent === body) sent = null; });
+    else $.clock.after(RESEND_MS, () => { if (sent === body) { sent = null; schedule($); } });
   } catch {
     // Backend fora do ar: o próximo redesenho tenta de novo.
     sent = null;
@@ -55,43 +55,55 @@ function schedule($: EngineInterface) {
 }
 
 // Janela do clique que o app pediu: abrir URL e copiar vão para o aparelho de quem clicou. Não acaba
-// no fim do `next`: o `onPress` do mod costuma disparar a cópia sem `await`. Clique feito no próprio
-// terminal fecha a janela na hora.
+// no fim do `next`: o `onPress` do mod costuma disparar a cópia sem `await`. Só vale para chamadas do
+// mod dono do botão, e clique feito no próprio terminal fecha a janela na hora.
 const APP_PRESS_MS = 1500;
-let appUntil = 0;
+let appPress: { until: number; plugin: string; attempt: string } | null = null;
 
-async function inAppPress($: EngineInterface): Promise<boolean> {
-  return appUntil > 0 && (await $.clock.now()) < appUntil;
+// A tentativa do clique do app a que esta chamada pertence, ou null para seguir no terminal.
+async function appAttempt($: EngineInterface, origin: string | undefined): Promise<string | null> {
+  if (!appPress || origin !== appPress.plugin) return null;
+  return (await $.clock.now()) < appPress.until ? appPress.attempt : null;
+}
+
+// Quem fez a chamada do `$` que está passando por este hook.
+function originOf(next: unknown): string | undefined {
+  return (next as { origin?: { plugin?: string } }).origin?.plugin;
 }
 
 // Clique, cópia e abertura confirmam ao backend o clique que o app pediu; sem ponte, ninguém pediu.
-async function tell($: EngineInterface, path: "pressed" | "copied" | "opened", fields: Record<string, unknown>) {
+// Devolve se o backend aceitou: recusado, a cópia ou a abertura acontece no terminal.
+async function tell($: EngineInterface, path: "pressed" | "copied" | "opened", fields: Record<string, unknown>): Promise<boolean> {
   const p = bridge();
-  if (!p) return;
+  if (!p) return false;
   try {
-    await $.http.fetch(`${p.url}/${path}`, {
+    const r = await $.http.fetch(`${p.url}/${path}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ sessao: p.sessao, token: p.token, ...fields }),
     });
+    return r.status === 200;
   } catch {
-    // O backend responde ao app por tempo esgotado.
+    return false;
   }
 }
 
-// O press que começou no terminal é o clique que o app pediu? O backend responde sim uma vez só.
-async function fromApp($: EngineInterface, requestId: string, element: string): Promise<boolean> {
+// O press que começou no terminal é o clique que o app pediu? O backend responde com a tentativa,
+// uma vez só.
+async function fromApp($: EngineInterface, requestId: string, element: string): Promise<string | null> {
   const p = bridge();
-  if (!p) return false;
+  if (!p) return null;
   try {
     const r = await $.http.fetch(`${p.url}/press-start`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ sessao: p.sessao, token: p.token, requestId, element }),
     });
-    return r.status === 200 && (JSON.parse(r.text) as { fromApp?: boolean }).fromApp === true;
+    if (r.status !== 200) return null;
+    const { attempt } = JSON.parse(r.text) as { attempt?: string | null };
+    return typeof attempt === "string" && attempt ? attempt : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -132,8 +144,8 @@ export function registerUi(on: On) {
 
   on("ui.press", async ($, e, next) => {
     if (e.surface === "terminal") {
-      const app = await fromApp($, e.requestId, e.element);
-      appUntil = app ? (await $.clock.now()) + APP_PRESS_MS : 0;
+      const attempt = await fromApp($, e.requestId, e.element);
+      appPress = attempt ? { until: (await $.clock.now()) + APP_PRESS_MS, plugin: e.plugin, attempt } : null;
     }
     try {
       return await next(e);
@@ -143,15 +155,15 @@ export function registerUi(on: On) {
   });
 
   on("ui.copy", async ($, e, next) => {
-    if (!(await inAppPress($))) return next(e);
-    await tell($, "copied", { text: e.text });
+    const attempt = await appAttempt($, originOf(next));
+    if (!attempt || !(await tell($, "copied", { attempt, text: e.text }))) return next(e);
     return { value: { isCopied: true } };
   });
 
   on("process.run", async ($, e, next) => {
-    const url = (await inAppPress($)) ? openerUrl(e.argv) : null;
-    if (!url) return next(e);
-    await tell($, "opened", { url });
+    const url = openerUrl(e.argv);
+    const attempt = url ? await appAttempt($, originOf(next)) : null;
+    if (!url || !attempt || !(await tell($, "opened", { attempt, url }))) return next(e);
     return { value: { exitCode: 0, stdout: "", stderr: "", isStdoutTruncated: false, isStderrTruncated: false } };
   });
 }

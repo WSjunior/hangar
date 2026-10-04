@@ -9,7 +9,7 @@
     /** Clique num botão de mod; sem ele, os botões são só rótulo. */
     onPress?: (site: string, key: string) => void;
     /** Resultado do último clique ("Copiado", o erro, ou o link que o navegador bloqueou); some sozinho. */
-    notice?: { text: string; error: boolean; href?: string } | null;
+    notice?: { text: string; error: boolean; href?: string; action?: () => void } | null;
   }
   let { tree, onPress, notice = null }: Props = $props();
 </script>
@@ -24,6 +24,8 @@
       <p class="notice" class:error={notice.error} role="status">
         {#if notice.href}
           <a href={notice.href} target="_blank" rel="noopener noreferrer">{notice.text}</a>
+        {:else if notice.action}
+          <button type="button" class="notice-action" onclick={notice.action}>{notice.text}</button>
         {:else}
           {notice.text}
         {/if}
@@ -49,4 +51,5 @@
   .notice { margin: var(--space-1) 0 0; font-family: var(--font-sans); color: var(--text-muted); }
   .notice.error { color: var(--error); }
   .notice a { color: var(--accent); }
+  .notice-action { font: inherit; color: var(--accent); background: transparent; border: 0; padding: 0; cursor: pointer; text-decoration: underline; }
 </style>

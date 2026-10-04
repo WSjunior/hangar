@@ -19,14 +19,17 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   backend reiniciado não ficar sem ela. Ver [painel e clique](#mods-painel-clique-e-o-que-acontece-no-aparelho-04102026).
 
 - **Botão de mod clicado no app é clique de mouse SGR no pane, achado pelo rótulo e confirmado
-  pelo `ui.press`.** Nenhuma API do engine dispara o botão de outro plugin. Sem mouse ligado,
-  rótulo ausente ou repetido na região do site, o backend recusa em vez de clicar às cegas. A
-  âncora da faixa (primeiro texto) conta o `label` de botão: sem isso, faixa que começa por botão
-  deixava a linha dele fora da região.
+  pelo `ui.press`.** Nenhuma API do engine dispara o botão de outro plugin. Sem mouse ligado, com
+  o pane em copy-mode, rótulo ausente ou repetido na região do site, o backend recusa em vez de
+  clicar às cegas: os bytes do mouse virariam texto no prompt. No Windows recusa sempre, até o
+  `send-keys -l` com ESC no psmux ser provado. A âncora da faixa (primeiro texto) conta o `label`
+  de botão: sem isso, faixa que começa por botão deixava a linha dele fora da região.
 
 - **Clique do app que copia ou abre URL acontece no aparelho de quem clicou.** O plugin responde
-  no lugar do `ui.copy` e do `process.run` de abridor de URL durante 1,5 s depois de um press que
-  o backend confirmou como vindo do app; clique feito no terminal fecha a janela na hora.
+  no lugar do `ui.copy` e do `process.run` de abridor de URL só quando a chamada vem do mod dono
+  do botão, até 1,5 s depois de um press que o backend confirmou como vindo do app. Cópia e
+  abertura levam o id da tentativa; chegando depois da resposta ao app, o backend recusa e o
+  plugin deixa acontecer no terminal, para não sumir nem cair no clique seguinte.
 
 - **A prévia corta cada linha na largura da conversa quando há painel ancorado.** A largura é o
   `bodyColumns` da faixa + 5; sem o corte, a borda `│` do painel vira texto da prévia.
