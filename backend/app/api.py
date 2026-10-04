@@ -2831,6 +2831,14 @@ class RenameBody(_StrictBody):
 @app.post("/api/sessions/{name}/rename", dependencies=[Depends(require_auth)])
 async def rename_session(name: str, body: RenameBody):
     # Claim, envio e compensação precisam terminar antes de mover a fila e cancelar a bomba.
+    from app import runtime_coordinator
+    coordinator = runtime_coordinator.current()
+    if coordinator is not None and coordinator.legacy is not None:
+        await coordinator.prepare_session(name, _provider_of(name))
+        if coordinator.managed_queue(name) and coordinator.slot(name).binding.meta.get("terminal"):
+            async def action():
+                return await asyncio.to_thread(_rename_session, name, body)
+            return await coordinator.change(name, action, new_name=sanitize_session_name(body.new), advance=False)
     async with AsyncExitStack() as stack:
         adapter = get_adapter("codex")
         for key in sorted({name, sanitize_session_name(body.new)}):
@@ -3752,6 +3760,10 @@ def _send_one(name: str, text: str, track_entry: bool = False) -> dict:
             track_entry=track_entry), coordinator.loop)
     t0 = time.time()
     provider, pane_id = _pane_info(name)
+    if coordinator is not None and provider == "claude" and coordinator.legacy is not None:
+        managed = run_sync(lambda: _send_managed(name, text, provider, track_entry=track_entry), coordinator.loop)
+        if managed is not None:
+            return managed
     stripped = text.lstrip()
     # Pi COM LINHA: cria a entrada da fila ANTES do 1o envio, pra ter um id ESTAVEL pra oferecer
     # como msg_id (achado ALTA da revisao 02/08/2026 — "Porta A"). A extensao chama sendUserMessage
@@ -4050,7 +4062,8 @@ async def _send_managed(name: str, text: str, provider: str, *, track_entry: boo
         if disposition not in {"accepted", "deferred"}:
             raise RuntimeError("resultado incerto; entrada conservada sem reenvio" if disposition == "unknown" else "entrada recusada pelo runtime")
         return {"ok":True, "error":None, "delivered":disposition == "accepted",
-            **({"entry_id":operation_id} if track_entry and command["kind"] == "submit" else {})}
+            **({"native":True} if (reply.get("payload") or {}).get("native") is True else {}),
+            **({"entry_id":operation_id} if track_entry and command["kind"] == "submit" and not text.lstrip().startswith("/") else {})}
     except Exception as exc:
         diag.registrar("runtime.send_failed", "erro", sessao=name, codigo=type(exc).__name__)
         return {"ok":False, "error":erro("erro_envio_falhou", str(exc), erro=str(exc)),
@@ -4252,6 +4265,16 @@ async def steer_session(name: str, body: InputBody | None = None):
     provider, _ = await _send_thread(_pane_info, name)
     if provider not in ("kimi", "claude"):
         raise HTTPException(409, "só sessão Kimi ou Claude tem steer pela fila do terminal")
+    if provider == "claude":
+        from app import runtime_coordinator
+        from app.runtime_terminal import route
+        owner = runtime_coordinator.current()
+        if owner is not None and getattr(owner, "legacy", None) is not None:
+            result = await route(owner, name, {"kind":"control", "control":"steer", "payload":{}})
+            if result is not None:
+                confirmed = await owner.op(name, {"kind":"confirm"}, uuid.uuid4().hex)
+                return {"ok":True, "promoted":result["disposition"] == "accepted" and
+                    (result.get("payload") or {}).get("promoted", True), "confirmed":confirmed.get("confirmed", 0)}
     # `is False` e nao `not ...`: o unico produtor de False e o tmux recusando a tecla; um dublê de
     # teste que devolve None nao pode virar erro. Sem esta checagem a rota afirmava entrega de um
     # ctrl-s que nunca saiu (pane morto) — o chip sumia da tela e a msg ficava parada na fila.
@@ -5227,6 +5250,17 @@ def _recusa_se_painel_aberto(name: str) -> None:
 
 @app.post("/api/sessions/{name}/select", dependencies=[Depends(require_auth)])
 def select(name: str, body: SelectBody):
+    from app.runtime_terminal import route_sync
+    pending = plugin_bridge.pergunta_pendente(name)
+    payload = {"option":body.option}
+    if pending is not None:
+        payload["request_id"] = pending["id"]
+        if str(pending["id"]).startswith("perm:") and body.option not in (1, 2):
+            raise HTTPException(409, detail=erro("erro_opcao_nao_convergiu", "opção fora do pedido de permissão"))
+    else:
+        _recusa_se_painel_aberto(name)
+    if route_sync(name, {"kind":"control", "control":"select", "payload":payload}) is not None:
+        return {"ok": True}
     # Mesma guarda do /input — e aqui ela é a ÚNICA: a cadeia abaixo não sabe falhar. terminal.select
     # devolve None, send_keys descarta o returncode e tmux._run converte tmux morto/travado
     # (TimeoutExpired/OSError) num CompletedProcess(returncode=1) que ninguém lê. Sem isto, responder
@@ -8061,6 +8095,20 @@ def answer(name: str, body: AnswerBody):
     from app import terminal_input
     answers = [a.model_dump() for a in body.answers]
     info = _cached_info_sync(name)
+    if getattr(info, "provider", "claude") == "claude" and not _headless(name):
+        from app.runtime_terminal import answer_sync
+        pending = plugin_bridge.pergunta_pendente(name)
+        if pending is None:
+            _recusa_se_painel_aberto(name)
+        try:
+            result = answer_sync(name, answers, body.request_id or (pending or {}).get("id"),
+                getattr(info, "jsonl", None))
+        except ValueError as exc:
+            raise HTTPException(409, detail=erro("erro_sem_resposta", str(exc))) from exc
+        if result is not None:
+            if getattr(info, "jsonl", None):
+                clear_pending_askq(info.jsonl)
+            return {"ok": True, "fallback":False}
     if getattr(info, "provider", "claude") == "codex":
         if _loop_servidor is None or not _loop_servidor.is_running():
             raise HTTPException(503, detail=erro("erro_codex_resposta_envio", "Não foi possível confirmar o envio da resposta ao Codex."))

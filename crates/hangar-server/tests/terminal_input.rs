@@ -94,7 +94,7 @@ async fn terminal_input_select_closed_loop() {
  let io=Arc::new(FakeIo::new(vec![p(1),p(2),screen("")]));
  assert_eq!(driver(io.clone(),Arc::new(Services::new())).select(2,true).await.disposition,Disposition::Accepted);assert_eq!(io.writes()[0].args.last().unwrap(),"Down");assert_eq!(io.writes()[1].args.last().unwrap(),"\r");
 }
-fn option_answer(index: usize, label: &str) -> QuestionAnswer { QuestionAnswer {kind:AnswerKind::Option,indices:vec![index],labels:vec![label.into()],multi:false,value:None,type_index:None,chat_index:None} }
+fn option_answer(index: usize, label: &str) -> QuestionAnswer { QuestionAnswer {kind:AnswerKind::Option,question_id:None,indices:vec![index],labels:vec![label.into()],multi:false,value:None,type_index:None,chat_index:None} }
 fn picker() -> String {"Question\n❯ 1. first\n  2. second\nEsc to cancel · to navigate".into()}
 #[tokio::test]
 async fn terminal_input_plugin_fill_proves_then_enters() {
@@ -307,4 +307,13 @@ async fn terminal_input_answer_arrow_accepted_then_capture_failed_is_unknown() {
  }
  let io=Arc::new(CaptureFailure(FakeIo::new(vec![picker()])));let d=TerminalDriver::new(binding(),Arc::new(Services::new()),io.clone(),instant_limits());let r=d.answer(&[option_answer(1,"second")]).await;
  assert_eq!(r.disposition,Disposition::Unknown);assert_eq!(io.0.writes().len(),1);assert_eq!(io.0.writes()[0].args.last().unwrap(),"Down");
+}
+
+#[test]
+fn terminal_answer_preserves_public_question_identity() {
+    let answer: QuestionAnswer = serde_json::from_value(serde_json::json!({
+        "kind":"text", "indices":[], "labels":[], "question_id":"question-a",
+        "value":"texto", "type_index":1, "chat_index":null, "multi":false
+    })).unwrap();
+    assert_eq!(answer.question_id.as_deref(), Some("question-a"));
 }

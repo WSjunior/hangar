@@ -657,6 +657,7 @@ pub enum AnswerKind { Option, Text, Chat }
 #[serde(deny_unknown_fields)]
 pub struct QuestionAnswer {
     pub kind: AnswerKind,
+    pub question_id: Option<String>,
     #[serde(default)] pub indices: Vec<usize>,
     #[serde(default)] pub labels: Vec<String>,
     #[serde(default)] pub multi: bool,

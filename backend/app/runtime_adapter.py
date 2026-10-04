@@ -216,12 +216,22 @@ class LegacyBridge:
             return None
         meta = sessions.load(name)
         if not meta or not meta.get("key"):
+            if provider == "claude":
+                from app.runtime_terminal import resolve_binding
+                previous = (self.coordinator.slot(name).binding if self.coordinator.managed_queue(name) else
+                    next((slot.binding for slot in self.coordinator.slots.values()
+                        if self.coordinator.in_lifecycle(slot) and slot.binding.provider == provider), None))
+                return resolve_binding(name, previous)
             if self.coordinator.managed_queue(name) and not self.coordinator.slot(name).binding.headless:
                 return copy.deepcopy(self.coordinator.slot(name).binding)
             return None
         directory = _queue_dir()
         state_path = directory / "runtime" / (meta["key"] + ".json")
         headless = bool(meta.get("headless"))
+        if provider == "claude" and not headless:
+            from app.runtime_terminal import resolve_binding
+            previous = self.coordinator.slots.get(meta["key"])
+            return resolve_binding(name, previous.binding if previous else None)
         if not headless and not state_path.exists():
             return None
         path = self.adapters[provider].transcript_path_de(meta) if provider == "claude" else meta.get("rollout_path") or ""
@@ -238,6 +248,9 @@ class LegacyBridge:
             directory, state_path, directory / "runtime" / (meta["key"] + ".lock"), generation)
 
     async def quiesce(self, descriptor):
+        if descriptor["meta"].get("terminal") or descriptor["meta"].get("pending_terminal"):
+            from app.runtime_terminal import quiesce
+            return await quiesce(self.coordinator, descriptor)
         name, provider = descriptor["name"], descriptor["provider"]
         adapter = self.adapters[provider]
         slot = self.coordinator.slots[descriptor["key"]]
@@ -297,6 +310,9 @@ class LegacyBridge:
         return {"runtime_state":carry}
 
     async def reconnect(self, descriptor, carry):
+        if descriptor["meta"].get("terminal"):
+            from app.runtime_terminal import reconnect
+            return await reconnect(self.coordinator, descriptor, carry)
         name, provider = descriptor["name"], descriptor["provider"]
         adapter = self.adapters[provider]
         existing = adapter._sessions.get(name)
@@ -346,6 +362,9 @@ class LegacyBridge:
         return {"hydrated":True}
 
     async def op(self, descriptor, command, operation_id):
+        if descriptor["meta"].get("terminal"):
+            from app.runtime_terminal import reserve_op
+            return await reserve_op(self.coordinator, descriptor, command, operation_id)
         name, provider = descriptor["name"], descriptor["provider"]
         adapter, io = self.adapters[provider], LegacyIO(self.coordinator)
         kind = command["kind"]
@@ -518,6 +537,8 @@ def native_slot(name):
     if coordinator is None or not coordinator.managed_runtime(name):
         return None
     slot = coordinator.slot(name)
+    if not slot.binding.headless:
+        return None
     if slot.phase == runtime_coordinator.Phase.Python:
         return None
     context = _legacy_operation.get()

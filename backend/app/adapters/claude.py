@@ -28,9 +28,23 @@ class ClaudeAdapter:
     async def drain(self, name: str, path: str) -> int:
         # ti.drain e sincrono (digita no tty via subprocess tmux) -> thread, como sse.py ja fazia
         # direto antes desta casca existir.
+        from app import runtime_coordinator
+        from app.runtime_terminal import route
+        owner = runtime_coordinator.current()
+        if owner is not None and owner.legacy is not None:
+            result = await route(owner, name, {"kind":"drain"})
+            if result is not None:
+                return result.get("sent", 0)
         return await asyncio.to_thread(ti.drain, name, path)
 
     async def send_prompt(self, name: str, text: str) -> str:
+        from app import runtime_coordinator
+        from app.runtime_terminal import route
+        owner = runtime_coordinator.current()
+        if owner is not None and owner.legacy is not None:
+            result = await route(owner, name, {"kind":"submit", "text":text})
+            if result is not None:
+                return "sent" if result["disposition"] == "accepted" else "deferred"
         return await asyncio.to_thread(ti.TerminalInput().send_prompt, name, text)
 
     async def deliverable(self, name: str) -> bool:

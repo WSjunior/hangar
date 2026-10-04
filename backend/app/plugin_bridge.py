@@ -49,6 +49,61 @@ _loop: asyncio.AbstractEventLoop | None = None
 # Dono do long-poll por sessão: (instância, modos declarados, última batida). Um segundo `claude` com
 # o mesmo nome ou pane não pode tomar a fila do primeiro.
 _donos: dict[str, tuple[str, set[str], float]] = {}
+_publications: dict[str, dict] = {}
+
+
+def publish_terminal(name, conversation, generation, publication, validate):
+    """Publica uma vez; aviso perdido conserva a possibilidade de escrita."""
+    if publication.get("mode") not in {"fill", "user"} or not isinstance(publication.get("text"), str):
+        raise ValueError("publicação inválida")
+    validate()
+    if tracked_session_id(name) != conversation:
+        return "not_written"
+    with _lock:
+        queue, loop = _waiters.get(name), _loop
+        modes = (_donos.get(name) or (None, set(), 0))[1]
+        if queue is not None and "receipt_v2" not in modes:
+            return "not_written"
+        if queue is None or loop is None:
+            return "unavailable"
+        if name in _publications:
+            raise RuntimeError("publicação anterior ainda em curso")
+        pending = {"id":publication["id"], "conversation":conversation, "generation":generation,
+            "mode":publication["mode"], "event":threading.Event(), "result":"unknown"}
+        _publications[name] = pending
+    def enqueue():
+        try:
+            validate()
+            if tracked_session_id(name) != conversation:
+                raise RuntimeError("conversa mudou antes da publicação")
+            queue.put_nowait({"text":publication["text"], "modo":publication["mode"],
+                "publication_id":publication["id"], "generation":generation, "session_id":conversation})
+        except Exception:
+            pending["result"] = "not_written"
+            pending["event"].set()
+    try:
+        try:
+            loop.call_soon_threadsafe(enqueue)
+        except RuntimeError:
+            return "not_written"
+        pending["event"].wait(CONFIRMA_S)
+        return pending["result"]
+    finally:
+        with _lock:
+            if _publications.get(name) is pending:
+                del _publications[name]
+
+
+def _terminal_ack(body, mode):
+    with _lock:
+        pending = _publications.get(body.sessao)
+        if pending is None:
+            return body.publication_id is not None
+        if (body.publication_id == pending["id"] and body.generation == pending["generation"]
+                and body.session_id == pending["conversation"] and mode == pending["mode"]):
+            pending["result"] = ("filled" if mode == "fill" else "accepted") if body.ok else "unknown"
+            pending["event"].set()
+        return True
 
 
 def declared_modes(name: str) -> set[str]:
@@ -495,6 +550,8 @@ def entregar(name: str, texto: str, modo: str = MODO_PADRAO, jsonl: str | None =
     juntas roubariam o aviso uma da outra.
     """
     from app import terminal_input
+    from app.runtime_terminal import assert_writer
+    assert_writer(name)
     with terminal_input._send_lock(name):
         return _entregar(name, texto, modo, jsonl)
 
@@ -762,7 +819,7 @@ def pergunta_pendente(name: str) -> dict | None:
 _fechadas: dict[str, tuple[str, str]] = {}
 
 
-def responder_pergunta(name: str, corpo: dict, id: str | None = None) -> bool:
+def responder_pergunta(name: str, corpo: dict, id: str | None = None, receipt: dict | None = None) -> bool:
     """Entrega a resposta do app ao hook. False = ele não pegou; quem chama cai na tecla.
 
     `id` é a pergunta que quem chama leu em `pergunta_pendente`: outra pergunta no lugar não recebe
@@ -771,7 +828,12 @@ def responder_pergunta(name: str, corpo: dict, id: str | None = None) -> bool:
         p = _perguntas.get(name)
         loop = _loop
         if p is None or loop is None or (id is not None and p["id"] != id):
-            return id is not None and _fechadas.get(name) == (id, "app")
+            return receipt is None and id is not None and _fechadas.get(name) == (id, "app")
+        if receipt is not None:
+            if p.get("publication") is not None and p["publication"] != receipt:
+                return False
+            p["publication"] = dict(receipt)
+            corpo = {**corpo, **receipt}
         aviso = p.get("aviso")
         primeiro = aviso is None
         fila = None
@@ -857,6 +919,9 @@ class AskFimBody(BaseModel):
     token: str
     id: str
     vencedor: str
+    publication_id: str | None = None
+    generation: int | None = None
+    session_id: str | None = None
 
 
 @plugin_router.post("/ask-fim")
@@ -866,6 +931,9 @@ async def ask_fim(body: AskFimBody):
     with _lock:
         p = _perguntas.get(body.sessao)
         if p is None or p["id"] != body.id:
+            return {"ok": True}
+        if p.get("publication") is not None and p["publication"] != {
+                "publication_id":body.publication_id, "generation":body.generation, "session_id":body.session_id}:
             return {"ok": True}
         del _perguntas[body.sessao]
         _fechadas[body.sessao] = (body.id, body.vencedor)
@@ -883,6 +951,9 @@ class FilledBody(BaseModel):
     sessao: str
     token: str
     ok: bool
+    publication_id: str | None = None
+    generation: int | None = None
+    session_id: str | None = None
 
 
 @plugin_router.post("/filled")
@@ -891,6 +962,8 @@ async def filled(body: FilledBody):
 
     É o que libera o Enter: sem esse aviso o Hangar não aperta tecla nenhuma."""
     _confere(body.sessao, body.token)
+    if _terminal_ack(body, "fill"):
+        return {"ok": True}
     with _lock:
         aviso = _confirmacoes.get(body.sessao)
         _preenchido[body.sessao] = body.ok
@@ -903,12 +976,17 @@ class SubmittedBody(BaseModel):
     sessao: str
     token: str
     ok: bool
+    publication_id: str | None = None
+    generation: int | None = None
+    session_id: str | None = None
 
 
 @plugin_router.post("/submitted", dependencies=[Depends(require_loopback)])
 async def submitted(body: SubmittedBody):
     """O plugin avisa se o `$.prompt.submit` do modo `user` foi aceito."""
     _confere(body.sessao, body.token)
+    if _terminal_ack(body, "user"):
+        return {"ok": True}
     with _lock:
         aviso = _confirmacoes.get(body.sessao)
         _preenchido[body.sessao] = body.ok

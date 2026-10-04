@@ -7,6 +7,7 @@ import copy
 import errno
 import json
 import os
+import sys
 import re
 import threading
 import time
@@ -42,12 +43,12 @@ class Phase(Enum):
 
 class WriterLease:
     def __init__(self, path):
-        path = Path(path)
+        path = path if isinstance(path, Path) else Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
         self.file = os.fdopen(fd, "r+b", buffering=0)
         try:
-            if os.name == "nt":
+            if sys.platform == "win32":
                 import ctypes
                 import msvcrt
 
@@ -116,6 +117,7 @@ class Slot:
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     cache_valid: bool = False
     lifecycle_token: object | None = None
+    terminal_serial: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 def _clock():
@@ -144,27 +146,47 @@ class RuntimeCoordinator:
         async with self.registration_locks.setdefault(name, asyncio.Lock()):
             binding = await asyncio.to_thread(self.legacy.binding, name, provider)
             if binding is None:
+                if self.managed_runtime(name):
+                    raise RuntimeError("vínculo gerenciado indisponível; escrita suspensa")
                 return False
+            if self.managed_queue(name) and self.slot(name).binding.key != binding.key:
+                previous = self.slot(name)
+                async with self.freeze(name):
+                    if previous.phase != Phase.Python:
+                        await self.detach(name, restore=False)
+                    previous.lease.close()
+                    previous.lease = None
+                    previous.phase = Phase.RecoveringPython
+                    self.names.pop(name, None)
             slot = self.slots.get(binding.key)
             if slot is None:
                 slot = await asyncio.to_thread(self.register, binding)
-            if slot is None or not slot.binding.headless:
+            if slot is None or not self.managed_runtime(name):
                 return False
             if slot.frozen or slot.phase not in {Phase.Python, Phase.Rust}:
                 raise RuntimeError("sessão em transferência; aguarde a confirmação")
-            if slot.phase == Phase.Rust and binding.jsonl != slot.binding.jsonl:
+            agent_changed = binding.meta.get("terminal") and any(binding.meta.get(field) != slot.binding.meta.get(field)
+                for field in ("agent_pid", "agent_birth"))
+            if binding.jsonl != slot.binding.jsonl or agent_changed:
                 async def changed():
                     return None
                 field = "session_id" if binding.provider == "claude" else "thread_id"
-                await self.change(name, changed, advance=binding.meta.get(field) != slot.binding.meta.get(field), reopen=False)
+                await self.change(name, changed, advance=bool(agent_changed) or binding.meta.get(field) != slot.binding.meta.get(field), reopen=False)
+                binding = slot.binding
             if slot.phase == Phase.Python:
                 with slot.guard:
                     slot.binding.meta = binding.meta
-                if self.transport is not None and (binding.meta.get("cano") or {}).get("versao") == 2:
+                    state = copy.deepcopy(slot.store.state)
+                    state["runtime_state"]["_binding"] = slot.binding.descriptor()
+                    slot.store._persist(state)
+                if self.transport is not None and ((binding.meta.get("cano") or {}).get("versao") == 2
+                        or binding.meta.get("terminal")):
                     await self.adopt(name)
             return True
 
     async def start_sessions(self, adapters):
+        from app.runtime_process import reconcile_startup
+        await asyncio.to_thread(reconcile_startup)
         from app.runtime_adapter import LegacyBridge
         self.loop = asyncio.get_running_loop()
         self.legacy = LegacyBridge(self, adapters)
@@ -176,7 +198,22 @@ class RuntimeCoordinator:
                 values = {**descriptor, "generation":state["generation"]}
                 for field in ("projection_dir", "state_path", "lock_path"):
                     values[field] = Path(values[field])
-                await asyncio.to_thread(self.register, Binding(**values))
+                binding = Binding(**values)
+                if binding.meta.get("terminal"):
+                    from app.runtime_terminal import resolve_binding
+                    fresh = await asyncio.to_thread(resolve_binding, binding.name, binding)
+                    if fresh is None or fresh.key != binding.key:
+                        self.slots[binding.key] = Slot(binding=binding)
+                        if fresh is None:
+                            self.names.setdefault(binding.name, binding.key)
+                            from app import diag
+                            diag.registrar("runtime.registration_failed", "erro", sessao=binding.name, codigo="terminal_binding")
+                            continue
+                    else:
+                        fresh.generation += int(fresh.jsonl != binding.jsonl)
+                        fresh.meta["terminal"]["generation"] = fresh.generation
+                    binding = fresh
+                await asyncio.to_thread(self.register, binding)
         from app.adapters.claude_headless import sessions as claude_sessions
         from app.adapters.codex import sessions as codex_sessions
         for provider, sessions in (("claude", claude_sessions), ("codex", codex_sessions)):
@@ -190,16 +227,25 @@ class RuntimeCoordinator:
 
     async def native_receipt(self, message_id, status):
         for slot in tuple(self.slots.values()):
+            if self.names.get(slot.binding.name) != slot.binding.key:
+                continue
             state = await asyncio.to_thread(lambda: json.loads(slot.binding.state_path.read_bytes()))
             for operation_id, operation in state["operations"].items():
                 if operation["payload"].get("kind") not in {"input", "steer"}:
                     continue
-                expected = str(uuid.uuid5(uuid.NAMESPACE_URL, "hangar:" + slot.binding.key + ":" + operation_id))
+                root_id = operation.get("entry_id") or operation_id
+                if slot.binding.meta.get("terminal"):
+                    result = operation.get("result") or {}
+                    delivery = result.get("payload") or {}
+                    if (delivery.get("native") is not True or delivery.get("message_id") != message_id
+                            or operation["payload"].get("payload", {}).get("_terminal_generation") != slot.binding.generation):
+                        continue
+                expected = str(uuid.uuid5(uuid.NAMESPACE_URL, "hangar:" + slot.binding.key + ":" + root_id))
                 if message_id != expected:
                     continue
                 disposition = "accepted" if status in {"delivered", "released", ""} else "rejected" if status in {"rejected", "refused"} else "unknown"
-                await self.op(slot.binding.name, {"kind":"queue", "action":{"kind":"finish", "id":operation_id,
-                    "status":disposition, "result":{"operation_id":operation_id, "disposition":disposition,
+                await self.op(slot.binding.name, {"kind":"queue", "action":{"kind":"finish", "id":root_id,
+                    "status":disposition, "result":{"operation_id":root_id, "disposition":disposition,
                         "payload":{"native_status":status}}}}, "native-receipt:" + message_id + ":" + status)
                 if disposition == "accepted":
                     await self.op(slot.binding.name, {"kind":"confirm"}, uuid.uuid4().hex)
@@ -215,7 +261,7 @@ class RuntimeCoordinator:
         if self.legacy is not None:
             async def adopt_registered():
                 for slot in tuple(self.slots.values()):
-                    if slot.binding.headless:
+                    if self.names.get(slot.binding.name) == slot.binding.key and self.managed_runtime(slot.binding.name):
                         try:
                             await self.prepare_session(slot.binding.name, slot.binding.provider)
                         except Exception as exc:
@@ -341,6 +387,8 @@ class RuntimeCoordinator:
 
     def register(self, binding: Binding):
         global _current
+        from app.runtime_process import reconcile_startup
+        reconcile_startup(allow_current=True)
         if binding.provider not in {"claude", "codex"} or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", binding.key):
             raise ValueError("binding inválido para o runtime")
         if old := self.slots.get(binding.key):
@@ -364,7 +412,8 @@ class RuntimeCoordinator:
                 old.binding = copy.deepcopy(binding)
                 self.names[binding.name] = binding.key
             return old
-        if not binding.headless and not binding.state_path.exists():
+        terminal = binding.provider == "claude" and isinstance(binding.meta.get("terminal"), dict)
+        if not binding.headless and not terminal and not binding.state_path.exists():
             return None
         lease = WriterLease(binding.lock_path)
         slot = Slot(binding=copy.deepcopy(binding), lease=lease)
@@ -374,7 +423,13 @@ class RuntimeCoordinator:
         try:
             projection = binding.projection_dir / f"{self._sanitize(binding.name)}.jsonl"
             rows = []
-            if not binding.state_path.exists() and projection.exists():
+            if terminal:
+                from app.runtime_terminal import validate_binding, import_legacy
+                if self.legacy is not None:
+                    validate_binding(binding.descriptor())
+                if not binding.state_path.exists() and projection.exists():
+                    rows = import_legacy(self, binding, projection)
+            if not binding.state_path.exists() and projection.exists() and not terminal:
                 for raw in projection.read_text(encoding="utf-8").splitlines():
                     row = json.loads(raw)
                     if not isinstance(row, dict):
@@ -387,8 +442,13 @@ class RuntimeCoordinator:
                     raise ValueError("a geração não pode voltar para uma vida antiga")
                 state = copy.deepcopy(slot.store.state)
                 state["generation"] = binding.generation
+                if terminal:
+                    state["runtime_state"] = {}
                 slot.store._persist(state)
             slot.store.exec(binding.generation, "recover:" + uuid.uuid4().hex, _clock(), {"kind": "recover"})
+            state = copy.deepcopy(slot.store.state)
+            state["runtime_state"]["_binding"] = binding.descriptor()
+            slot.store._persist(state)
             slot.phase = Phase.Python
             return slot
         except BaseException:
@@ -409,7 +469,9 @@ class RuntimeCoordinator:
 
     def managed_runtime(self, name):
         key = self.names.get(name)
-        return bool(key and self.slots[key].binding.headless)
+        return bool(key and (self.slots[key].binding.headless or
+            self.slots[key].binding.provider == "claude" and (isinstance(self.slots[key].binding.meta.get("terminal"), dict)
+                or self.slots[key].binding.meta.get("pending_terminal"))))
 
     def managed_queue(self, name):
         return name in self.names
@@ -453,6 +515,11 @@ class RuntimeCoordinator:
     def queue_rpc(self, route, call_id, clock, action):
         slot, phase, descriptor = route
         if phase == Phase.Python:
+            if descriptor["meta"].get("terminal") and not self.in_lifecycle(slot):
+                from app.runtime_terminal import _writer
+                if _writer.get() is None:
+                    from app.runtime_adapter import run_sync
+                    return run_sync(lambda:self.op(descriptor["name"], {"kind":"queue", "action":action}, call_id), self.loop)
             with slot.guard:
                 return slot.store.exec(descriptor["generation"], call_id, _clock(), action)
         if self.loop is None or not self.loop.is_running():
@@ -483,6 +550,8 @@ class RuntimeCoordinator:
 
     async def shutdown(self):
         for slot in tuple(self.slots.values()):
+            if self.names.get(slot.binding.name) != slot.binding.key:
+                continue
             async with self._barrier(slot):
                 with slot.guard:
                     slot.frozen = True
@@ -519,10 +588,35 @@ class RuntimeCoordinator:
     async def _rpc(self, descriptor, command, operation_id):
         if self.transport is None or not self.instance:
             raise RuntimeError("IPC do runtime indisponível")
-        return await self.transport.op(descriptor, command, operation_id, _clock())
+        result = await self.transport.op(descriptor, command, operation_id, _clock())
+        if descriptor["meta"].get("terminal") and command["kind"] == "drain":
+            result = {**result, "sent":int((result.get("reply") or {}).get("disposition") == "accepted")}
+        return result
 
     async def op(self, name, command, operation_id):
         self.loop = asyncio.get_running_loop()
+        if self.legacy is not None and self.managed_queue(name):
+            slot = self.slot(name)
+            if (slot.binding.meta.get("terminal") or slot.binding.meta.get("pending_terminal")) and command["kind"] != "queue" and not self.in_lifecycle(slot):
+                await self.prepare_session(name, "claude")
+        if (command["kind"] == "submit" and command["text"].split()[0:1] == ["/clear"]
+                and self.managed_queue(name) and self.slot(name).binding.meta.get("terminal")
+                and not self.in_lifecycle(self.slot(name))):
+            async def clear():
+                async with self.freeze(name):
+                    result = await self.op(name, command, operation_id)
+                    if result.get("disposition") in {"accepted", "unknown"}:
+                        await self.op(name, {"kind":"queue", "action":{"kind":"clear"}}, uuid.uuid4().hex)
+                    return result
+            task = asyncio.create_task(clear())
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await task
+                raise
+        return await self._op_once(name, command, operation_id)
+
+    async def _op_once(self, name, command, operation_id):
         with self.queue_gate(name) as route:
             if route is None:
                 raise RuntimeError("sessão sem responsável gerenciado")
@@ -533,6 +627,18 @@ class RuntimeCoordinator:
                 return await self._rpc(descriptor, command, operation_id)
             if self.legacy is None:
                 raise RuntimeError("serviço da reserva indisponível")
+            if descriptor["meta"].get("terminal"):
+                from app import runtime_terminal
+                async with slot.terminal_serial:
+                    if slot.binding.descriptor() != descriptor:
+                        raise RuntimeError("binding mudou durante a espera")
+                    await asyncio.to_thread(runtime_terminal.validate_binding, descriptor)
+                    task = asyncio.create_task(self.legacy.op(descriptor, command, operation_id))
+                    try:
+                        return await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        await task
+                        raise
             return await self.legacy.op(descriptor, command, operation_id)
 
     async def adopt(self, name):
@@ -540,10 +646,16 @@ class RuntimeCoordinator:
         async with self._barrier(slot):
             if slot.phase == Phase.Rust:
                 return True
-            if slot.phase != Phase.Python or not slot.binding.headless:
+            if slot.phase != Phase.Python or not self.managed_runtime(name):
                 raise RuntimeError("sessão não está disponível para transferência")
+            if slot.binding.meta.get("pending_terminal"):
+                raise RuntimeError("vínculo terminal ainda não confirmado; transferência suspensa")
             descriptor = slot.binding.descriptor()
-            await self.peek(descriptor)
+            if descriptor["meta"].get("terminal"):
+                from app.runtime_terminal import validate_binding
+                await asyncio.to_thread(validate_binding, descriptor)
+            else:
+                await self.peek(descriptor)
             with slot.guard:
                 slot.phase = Phase.PreparingRust
             await self._wait_active(slot)
@@ -579,7 +691,7 @@ class RuntimeCoordinator:
                 await self._restore(slot)
                 raise
 
-    async def _restore(self, slot):
+    async def _restore(self, slot, *, reconnect=True):
         if slot.lease is None or slot.lease.closed:
             slot.lease = WriterLease(slot.binding.lock_path)
         slot.store = runtime_queue.QueueStore(slot.binding.state_path, slot.binding.projection_dir,
@@ -589,13 +701,13 @@ class RuntimeCoordinator:
         slot.carry = {"runtime_state":copy.deepcopy(recovered_view)} if recovered_view else slot.carry
         if self.legacy is None:
             raise RuntimeError("serviço da reserva indisponível")
-        ready = await self.legacy.reconnect(slot.binding.descriptor(), slot.carry)
+        ready = await self.legacy.reconnect(slot.binding.descriptor(), slot.carry) if reconnect else {"hydrated":True}
         if ready.get("hydrated") is not True:
             raise RuntimeError("reserva não restaurou o snapshot")
         with slot.guard:
             slot.phase = Phase.Python
 
-    async def detach(self, name):
+    async def detach(self, name, *, restore=True):
         slot = self.slot(name)
         async with self._barrier(slot):
             if slot.phase == Phase.Python:
@@ -606,15 +718,19 @@ class RuntimeCoordinator:
             reply = await self._rpc(slot.binding.descriptor(), {"kind": "detach"}, uuid.uuid4().hex)
             if reply.get("detached") is not True:
                 raise RuntimeError("Rust não confirmou a liberação da sessão")
-            await self._restore(slot)
+            await self._restore(slot, reconnect=restore)
 
-    async def recover(self, name, confirmed_dead: bool):
+    async def recover(self, name, confirmed_dead: bool, containment=None):
         slot = self.slot(name)
         async with self._barrier(slot):
             alive = getattr(self.transport, "alive", False)
             alive = alive() if callable(alive) else alive
             if not confirmed_dead or alive:
                 raise RuntimeError("morte do Rust não foi confirmada; a reserva permanece bloqueada")
+            if slot.binding.meta.get("terminal"):
+                proof = getattr(containment or self.transport, "containment_clean", None)
+                if proof is None or proof() is not True:
+                    raise RuntimeError("fim dos descendentes Rust não comprovado; escrita suspensa")
             with slot.guard:
                 slot.phase = Phase.RecoveringPython
             await self._wait_active(slot)
@@ -673,9 +789,13 @@ class RuntimeCoordinator:
                 target_name = new_name or name
                 binding = await asyncio.to_thread(self.legacy.binding, target_name, slot.binding.provider)
                 if binding is None:
-                    binding = copy.deepcopy(slot.binding)
-                    binding.name, binding.headless = target_name, False
-                    binding.meta = {**binding.meta, "headless":False, "cano":None}
+                    from app.runtime_terminal import pending_binding
+                    binding = (await asyncio.to_thread(pending_binding, target_name, slot.binding)
+                        if slot.binding.provider == "claude" and slot.binding.headless else None)
+                    if binding is None:
+                        binding = copy.deepcopy(slot.binding)
+                        binding.name, binding.headless = target_name, False
+                        binding.meta = {**binding.meta, "headless":False, "cano":None}
                 if binding.key != slot.binding.key:
                     raise RuntimeError("mudança de modo não pode trocar a chave durável")
                 if self.legacy is not None:
@@ -683,7 +803,11 @@ class RuntimeCoordinator:
                 with slot.guard:
                     if slot.store.state["name"] != target_name:
                         slot.store.exec(slot.binding.generation, "rename:" + uuid.uuid4().hex, _clock(), {"kind":"rename", "name":target_name})
+                    if slot.binding.meta.get("terminal") and binding.jsonl != slot.binding.jsonl:
+                        slot.store.exec(slot.binding.generation, "clear:" + uuid.uuid4().hex, _clock(), {"kind":"clear"})
                     binding.generation = slot.binding.generation + int(advance)
+                    if isinstance(binding.meta.get("terminal"), dict):
+                        binding.meta["terminal"]["generation"] = binding.generation
                     state = copy.deepcopy(slot.store.state)
                     if advance:
                         state["runtime_state"] = {}
@@ -700,7 +824,7 @@ class RuntimeCoordinator:
         except asyncio.CancelledError:
             await task
             raise
-        if reopen and not remove and slot.binding.headless:
+        if reopen and not remove and self.managed_runtime(slot.binding.name):
             await self.prepare_session(slot.binding.name, slot.binding.provider)
         return result
 

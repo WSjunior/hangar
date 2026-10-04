@@ -1,0 +1,114 @@
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import psutil
+import pytest
+
+
+def test_child_cleanup_after_abrupt_parent_death(tmp_path):
+    from app.runtime_process import spawn_contained, cleanup
+    pid_path = tmp_path / 'child.pid'
+    script = "import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); open(sys.argv[1],'w').write(str(p.pid)); time.sleep(60)"
+    proc = spawn_contained([sys.executable, '-c', script, str(pid_path)], env=dict(os.environ))
+    try:
+        deadline = time.monotonic()+5
+        while not pid_path.exists() and time.monotonic()<deadline: time.sleep(.01)
+        child = psutil.Process(int(pid_path.read_text()))
+        assert child.is_running()
+        proc.kill()
+        proc.wait(5)
+        assert cleanup(proc, timeout=3) is True
+        assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
+        assert proc.runtime_containment.cleaned
+    finally:
+        cleanup(proc, timeout=3)
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows Job real no CI')
+def test_windows_job_contains_grandchild_before_resume(tmp_path):
+    test_child_cleanup_after_abrupt_parent_death(tmp_path)
+
+
+def test_restart_after_fake_backend_and_rust_death_cleans_old_writer(tmp_path):
+    import json
+    from app import runtime_process
+    record=tmp_path/'containment.json'
+    child_file=tmp_path/'child.pid'
+    ready=tmp_path/'ready.json'
+    fake_backend=tmp_path/'backend.py'
+    fake_backend.write_text('''import json,os,sys,time
+from pathlib import Path
+from app.runtime_process import spawn_contained, refresh_members
+script="import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); open(sys.argv[1],'w').write(str(p.pid)); time.sleep(60)"
+p=spawn_contained([sys.executable,'-c',script,sys.argv[2]],env=dict(os.environ),record_path=Path(sys.argv[1]))
+while not Path(sys.argv[2]).exists() or not Path(sys.argv[2]).read_text():time.sleep(.01)
+refresh_members(p)
+Path(sys.argv[3]).write_text(json.dumps({'rust':p.pid,'child':int(Path(sys.argv[2]).read_text())}))
+time.sleep(60)
+''')
+    backend=subprocess.Popen([sys.executable,str(fake_backend),str(record),str(child_file),str(ready)],
+        env={**os.environ,'PYTHONPATH':str(Path(__file__).resolve().parents[1])})
+    info=None
+    try:
+        deadline=time.monotonic()+6
+        while not ready.exists() and backend.poll() is None and time.monotonic()<deadline:time.sleep(.01)
+        assert ready.exists()
+        info=json.loads(ready.read_text())
+        backend.kill()
+        backend.wait(5)
+        try:psutil.Process(info['rust']).kill()
+        except psutil.NoSuchProcess:pass
+        assert runtime_process.reconcile_startup(record) is True
+        child=psutil.Process(info['child']) if psutil.pid_exists(info['child']) else None
+        assert child is None or not child.is_running() or child.status()==psutil.STATUS_ZOMBIE
+        assert not record.exists()
+    finally:
+        if backend.poll() is None:
+            backend.kill()
+            backend.wait(5)
+        if record.exists():runtime_process.reconcile_startup(record)
+
+
+def test_recycled_group_leader_birth_blocks_cleanup_without_killing(tmp_path):
+    import json
+    from app import runtime_process
+    proc=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=sys.platform!='win32')
+    record=tmp_path/'containment.json'
+    try:
+        birth=psutil.Process(proc.pid).create_time()
+        record.write_text(json.dumps({'version':1,'life':'test','platform':sys.platform,'owner_pid':999999999,
+            'owner_birth':1,'pid':proc.pid,'birth':birth-1,'pgid':proc.pid,'members':{str(proc.pid):birth-1},
+            'boot':runtime_process.boot_identity(),'job_name':None}))
+        with pytest.raises(RuntimeError):runtime_process.reconcile_startup(record)
+        assert proc.poll() is None and record.exists()
+    finally:
+        proc.kill()
+        proc.wait(5)
+
+
+def test_windows_jobs_keep_unique_and_explicit_names_with_fake_api(monkeypatch):
+    import ctypes
+    from app.runtime_process import WindowsJob
+    calls=[]
+    class Function:
+        def __init__(self,name):self.name=name
+        def __call__(self,*args):
+            calls.append((self.name,args))
+            return 100 if self.name in {'CreateJobObjectW','OpenJobObjectW'} else 1
+    class Api:
+        def __init__(self):self.functions={}
+        def __getattr__(self,name):return self.functions.setdefault(name,Function(name))
+    monkeypatch.setattr(ctypes,'WinDLL',lambda *args,**kwargs:Api(),raising=False)
+    monkeypatch.setattr(ctypes,'get_last_error',lambda:0,raising=False)
+    first,second=WindowsJob(),WindowsJob()
+    supplied='Global\\Hangar-runtime-'+('a'*32)
+    existing=WindowsJob(supplied,existing=True)
+    try:
+        assert first.name.startswith('Global\\Hangar-runtime-') and first.name!=second.name
+        assert existing.name==supplied
+        assert [args[2] for name,args in calls if name=='OpenJobObjectW']==[supplied]
+    finally:
+        first.close();second.close();existing.close()

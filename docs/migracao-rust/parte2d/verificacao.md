@@ -22,10 +22,69 @@ por arquivo até comprovar a colagem. O driver não tem orçamento de retry pró
 
 O aviso preexistente de campo `kind` não lido em `runtime/actor.rs` continua aparecendo.
 
+## Task 2 — executor, fila e protocolo
+
+Commits `a3e02d6a`, `80d1c279` e `042eb9b0`; revisão independente aprovada após duas rodadas.
+Contrato interno **9** aplicado no mesmo commit em Python e Rust.
+
+Comando final Rust focado: `cargo test --locked -p hangar-server --test runtime_queue
+--test terminal_runtime --test terminal_runtime_tmux --test runtime_actor --test runtime_receipt
+--test runtime_recovery --test runtime_gateway --test runtime_contract`, em `crates/`.
+Resultado: **77 passaram, dois ignorados** por exigirem Python configurado. As provas afetadas
+de lease e de Store foram executadas separadamente com `HANGAR_TEST_PYTHON` e passaram.
+
+Comando Python: `uv run pytest tests/test_runtime_queue.py tests/test_runtime_receipt.py
+tests/test_runtime_failure_matrix.py tests/test_runtime_ownership.py
+tests/test_runtime_lifecycle.py -q`, em `backend/`. **102 passaram**.
+As contagens são da última execução de cada comando, sem somar repetições.
+
+A revisão reproduziu Prepare sem Append, Finish separado de contador/fila e recibo nativo de
+Append sem root. As correções espelham a recuperação e a finalização atômica nos dois Stores.
+A primeira releitura encontrou reconstrução de entrada já removida; a prova durável de criação
+agora preserva a remoção. Os testes reabrem o estado e exigem zero nova tecla, publicação ou
+socket. A interoperabilidade Rust → Python → Rust confirma as flags privadas e os contadores.
+
+O runtime e o driver também passaram num fluxo real com tmux isolado e CLI falsa: primeiro
+transcript inexistente, Unicode/emoji/contrabarras, recibo e repetição do mesmo id sem reenvio.
+Nenhuma sessão real ou serviço foi operado.
+
+Obrigação transferida à Task 3: conter e comprovar término dos filhos mux/PowerShell após morte abrupta do
+Rust antes de ativar a reserva ou readotar. A proteção de uma entrada incerta não resolve, por
+si só, a disputa com um descendente antigo ainda escrevendo.
+
+## Task 3 — integração Python e contenção
+
+Implementados vínculo terminal durável, encaminhamento dos produtores e controles, reserva no
+mesmo diário, correlação de avisos do plugin e barreira dos controles administrativos. O estado
+e a prévia terminal continuam com a observação 2C. Protocolo permanece 9.
+
+Os testes iniciais falharam pelos caminhos ausentes; as regressões também reproduziram aviso
+antigo, mudança de vínculo, prova parcial em thread reutilizada e troca de modo ainda sem CLI
+pronto. A última execução terminal focada passou em **68 casos**.
+
+A matriz Python pertinente passou em **1182 casos**, com **três falhas e um caso Windows
+ignorado**. As três falhas eram isolamento dos testes de supervisor: o lançamento direto do
+processo falso deixava registro de posse entre testes. Após limpeza explícita e registro
+temporário por teste, **os 23 casos de `test_rust_server.py` passaram**. A regressão de colisão
+do nome de Job reproduziu o problema antes da correção; depois passou isoladamente. As contagens
+são por execução, sem somar testes repetidos.
+
+Rust focado: `cargo test --locked -p hangar-server --test terminal_input --test terminal_runtime
+--test runtime_gateway`, em `crates/`: **73 passaram**. O teste de pergunta conserva a identidade
+do contrato público; o Python normaliza `indices:null` antes do controle.
+
+Grupo POSIX e Job Windows contêm só os filhos do Rust. Processos falsos comprovaram limpeza
+após morte do pai/backend e recusa diante de PID reutilizado. O teste real do Job Windows será
+executado no CI; Linux tem também um teste da API Windows simulada para nomes únicos e explícitos.
+O fluxo com CLI falsa e tmux isolado comprovou primeiro transcript ausente, recibo e envio sem
+duplicação pela reserva. Nenhuma sessão real, serviço ou instalador foi operado.
+
+A política comum de falhas de `74177469` será integrada com a parte1 após a revisão desta Task.
+O caminho terminal já separa `_op_once`, evitando duplicar essa política.
+
 ## Ainda pendente
 
-- Task 2: posse/fila/diário/recuperação/gateway e protocolo 9.
-- Task 3: encaminhamento Python completo, correlação do plugin e trava de clipboard comum.
+- Task 3: revisão independente do diff; depois integrar a parte1 e conferir a política de falhas.
 - Task 4: workspace Rust inteiro, compilação cruzada Windows, pytest dos arquivos tocados,
   revisão final, push e CI nas três plataformas.
 - Uso real do Claude e Windows instalado: somente com o dono, conforme o pedido.

@@ -80,7 +80,7 @@ async function pull($: EngineInterface, ponte: Bridge) {
       // A conversa vai a cada poll: o `/clear` troca o id sem `session.start`, e o backend só
       // entrega à conversa que ele acompanha (um segundo `claude` no mesmo pane recebe 409).
       body: JSON.stringify({
-        sessao: ponte.sessao, token: ponte.token, instance: instance(), modos: ["fill", "user"], estado: lastState(),
+        sessao: ponte.sessao, token: ponte.token, instance: instance(), modos: ["fill", "user", "receipt_v2"], estado: lastState(),
         session_id: await $.session.id(),
       }),
     });
@@ -89,7 +89,10 @@ async function pull($: EngineInterface, ponte: Bridge) {
     if (r.status === 409) clearBridge();
     else if (r.status === 200) setBridge(ponte);
     if (r.status === 200) {
-      const { text, modo } = JSON.parse(r.text) as { text?: string | null; modo?: string };
+      const { text, modo, publication_id, generation, session_id } = JSON.parse(r.text) as {
+        text?: string | null; modo?: string; publication_id?: string; generation?: number; session_id?: string;
+      };
+      const receipt = { publication_id, generation, session_id };
       if (text && modo === "fill") {
         let isFilled = false;
         try {
@@ -102,7 +105,7 @@ async function pull($: EngineInterface, ponte: Bridge) {
         await $.http.fetch(`${ponte.url}/filled`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, ok: isFilled }),
+          body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, ok: isFilled, ...receipt }),
         });
       } else if (text && modo === "user") {
         let ok = false;
@@ -115,7 +118,7 @@ async function pull($: EngineInterface, ponte: Bridge) {
         await $.http.fetch(`${ponte.url}/submitted`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, ok }),
+          body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, ok, ...receipt }),
         });
       } else if (text) {
         await $.prompt.submit({ text });

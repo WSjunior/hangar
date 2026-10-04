@@ -85,7 +85,7 @@ Serializar o driver da Task 1, gravar intento/cursor/dispatch antes de efeitos e
 usar confirmação incremental com identificação da conversa; timer não redigita incerto.
 Não publicar segunda fonte de estado/prévia; controles seguem allowlists e posse.
 
-- [ ] **Step 4: Conferir testes focados e revisão independente**
+- [x] **Step 4: Conferir testes focados e revisão independente**
 
 Rodar testes de runtime terminal, fila, recibos e gateway; esperado verde.
 
@@ -97,14 +97,14 @@ Stage explícito; mensagem `feat(server): own Claude terminal delivery and queue
 
 **Arquivos:** `backend/app/runtime_coordinator.py`, `runtime_adapter.py`, `runtime_policy.py`,
 `internal_api.py`, `terminal_input.py`, `api.py`, `plugin_bridge.py`,
-`plugins/hangar/hooks/input.ts`, adapter Claude terminal e testes tocados;
+`plugins/hangar/hooks/input.ts`, `ask.ts` e `perm.ts`, adapter Claude terminal e testes tocados;
 Versão 9 já aplicada junto do contrato privado na Task 2.
 `backend/app/runtime_process.py` e `rust_server.py` contêm e encerram os descendentes do Rust,
 para provar fim dos escritores antes de liberar a reserva ou readotar a vida após morte abrupta.
 **Interfaces:** Binding terminal resolve pane/conversa registrados; serviço de fatos lê estado;
 serviço plugin publica/aguarda aviso sem dirigir terminal; fachada encaminha todas as ações.
 
-- [ ] **Step 1: Escrever testes dos caminhos públicos/reserva**
+- [x] **Step 1: Escrever testes dos caminhos públicos/reserva**
 
 Novo terminal gerenciado sem cano; preparar/adotar; envio comum/drain/confirm/teclas seguem Rust;
 plugin primitivo nunca tecla; geração antiga não toca plugin; queda confirmada restaura lease;
@@ -114,28 +114,33 @@ segue mesmo dono; share/par somente leitura recusa escrita com zero efeito. Filh
 bloqueado e pai Rust morto: nenhum novo escritor antes de provar término dos descendentes próprios
 (grupo POSIX/Job Windows); canos e sessões reais preservados.
 
-- [ ] **Step 2: Conferir falha antes do código**
+- [x] **Step 2: Conferir falha antes do código**
 
 Rodar pytest dos arquivos novos/tocados num comando; esperado falha pelos caminhos ausentes.
 
-- [ ] **Step 3: Integrar transferência e reserva completa**
+- [x] **Step 3: Integrar transferência e reserva completa**
 
 Remover seleção exclusiva headless somente para Claude terminal. Registrar identidade durável,
 conferir após locks, encaminhar envio e todos os controles, bloquear escritores antigos. Reserva
 opera mesmo diário e preserva incerto. Conservar os dois números de protocolo em 9.
+Aplicar a regra de falha recebida em `74177469`: quatro tentativas apenas antes de efeito,
+pausa antes da última, diário com código/motivo e reserva somente da sessão afetada; incerteza
+nunca repete. Integrar a parte1 após concluir esta Task, incluindo a correção de PID `fac8d377`.
 
 - [ ] **Step 4: Conferir testes focados e revisão independente**
 
 Rodar pytest dos arquivos tocados, testes Rust do contrato e exercício isolado de gateway/CLI.
 Esperado verde; uso real explicitamente adiado conforme pedido.
 
-- [ ] **Step 5: Marcar progresso e commitar Task 3**
+- [x] **Step 5: Marcar progresso e commitar Task 3**
 
 Stage explícito; mensagem `feat(runtime): route Claude terminal actions through Rust`.
 
 ### Task 4: Verificação final e publicação
 
-**Arquivos:** documentação de prova na pasta 2D; workflow existente sem mudança de escopo.
+**Arquivos:** documentação de prova na pasta 2D e `server.yml`: incluir somente o teste de
+contenção de processos Python nos três sistemas, para comprovar o Job Windows real no CI.
+O contrato do cano continua somente Linux; nenhuma suíte Python inteira é adicionada à matriz.
 **Interfaces:** entrega da branch própria à sessão `Migracao-Rust`.
 
 - [ ] **Step 1: Rodar verificações finais autorizadas**
