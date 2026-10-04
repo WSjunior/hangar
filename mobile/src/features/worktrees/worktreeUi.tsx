@@ -1,7 +1,7 @@
 import { Pressable, Text, View } from 'react-native';
 import { router } from 'expo-router';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { fmtBytes, worktreeIsAgent, worktreeTitle, type State, type WorktreeState, type WorktreeStatus } from '@hangar/core';
+import { fmtBytes, worktreeIsAgent, worktreesSizeTotal, worktreeTitle, type State, type WorktreeState, type WorktreeStatus } from '@hangar/core';
 import type { Tone } from '../../ui/Chip';
 import { StateDot } from '../../ui/StateDot';
 import { useSessions } from '../../stores/sessions';
@@ -49,6 +49,12 @@ export function sizeLabel(w: WorktreeStatus): string {
     return w.size_pending ? m.worktrees_disco_calculando() : '—';
   }
   return w.size_partial ? m.worktree_tamanho_parcial({ tamanho: fmtBytes(w.size) }) : fmtBytes(w.size);
+}
+
+/** Soma de várias: com alguma medida pendente ou incompleta, o total aparece como mínimo ("≥"). */
+export function sizeSumLabel(ws: WorktreeStatus[]): string {
+  const { bytes, partial } = worktreesSizeTotal(ws);
+  return partial ? m.worktree_tamanho_parcial({ tamanho: fmtBytes(bytes) }) : fmtBytes(bytes);
 }
 
 export function sessionStateLabel(s: State | undefined): string {
