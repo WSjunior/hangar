@@ -37,9 +37,13 @@ struct SendRecord {
 #[derive(Default)]
 pub struct DeliveryTracker {
     records: HashMap<SessionKey, SendRecord>,
-    /// Texto mandado com outro envio em voo, na ordem; o `bool` é o `steer`.
-    held: HashMap<SessionKey, VecDeque<(String, bool)>>,
+    /// Texto mandado com outro envio em voo, na ordem; o `bool` é o `steer`, e o grupo é o decidido no Enter.
+    held: HashMap<SessionKey, VecDeque<Held>>,
+    /// Transcript trocado na mesma sessão (`/clear`): a resposta do envio em voo chega com a chave antiga.
+    moved: HashMap<SessionKey, SessionKey>,
 }
+
+pub type Held = (String, bool, Option<Vec<String>>);
 
 impl DeliveryTracker {
     pub fn begin(&mut self, key: SessionKey, text: String, known: HashSet<String>) -> bool {
@@ -58,11 +62,11 @@ impl DeliveryTracker {
     }
 
     /// Enter com outro envio em voo: o texto espera a vez em vez de se perder.
-    pub fn hold(&mut self, key: SessionKey, text: String, steer: bool) {
-        self.held.entry(key).or_default().push_back((text, steer));
+    pub fn hold(&mut self, key: SessionKey, text: String, steer: bool, group: Option<Vec<String>>) {
+        self.held.entry(key).or_default().push_back((text, steer, group));
     }
 
-    pub fn next_held(&mut self, key: &SessionKey) -> Option<(String, bool)> {
+    pub fn next_held(&mut self, key: &SessionKey) -> Option<Held> {
         let queue = self.held.get_mut(key)?;
         let next = queue.pop_front();
         if queue.is_empty() { self.held.remove(key); }
@@ -71,13 +75,28 @@ impl DeliveryTracker {
 
     /// O envio falhou: o que esperava atrás dele sai da espera e volta para o campo.
     pub fn take_held(&mut self, key: &SessionKey) -> Vec<String> {
-        self.held.remove(key).map(|queue| queue.into_iter().map(|(text, _)| text).collect()).unwrap_or_default()
+        self.held.remove(key).map(|queue| queue.into_iter().map(|(text, ..)| text).collect()).unwrap_or_default()
     }
 
     /// O que saiu do campo e o backend ainda não respondeu, na ordem do envio.
     pub fn outgoing(&self, key: &SessionKey) -> Vec<&str> {
-        let flying = self.records.get(key).filter(|record| record.pending && record.typed).map(|record| record.text.as_str());
-        flying.into_iter().chain(self.held.get(key).into_iter().flatten().map(|(text, _)| text.as_str())).collect()
+        // Já confirmado pela conversa: a mensagem real está à vista e a bolha seria a segunda.
+        let flying = self.records.get(key).filter(|record| record.pending && record.typed && !record.confirmed).map(|record| record.text.as_str());
+        flying.into_iter().chain(self.held.get(key).into_iter().flatten().map(|(text, ..)| text.as_str())).collect()
+    }
+
+    /// O transcript da sessão trocou sem ela deixar de existir: envio em voo e espera seguem com ela.
+    pub fn rekey(&mut self, from: &SessionKey, to: &SessionKey) {
+        if from == to { return; }
+        if let Some(record) = self.records.remove(from) { self.records.insert(to.clone(), record); }
+        if let Some(queue) = self.held.remove(from) { self.held.entry(to.clone()).or_default().extend(queue); }
+        for target in self.moved.values_mut().filter(|target| *target == from) { *target = to.clone(); }
+        self.moved.insert(from.clone(), to.clone());
+    }
+
+    /// A chave de hoje de quem respondeu com a de antes da troca de transcript.
+    pub fn current(&self, key: SessionKey) -> SessionKey {
+        self.moved.get(&key).cloned().unwrap_or(key)
     }
 
     pub fn pending(&self, key: &SessionKey) -> bool {
@@ -227,16 +246,16 @@ mod tests {
         let mut tracker = DeliveryTracker::default();
         tracker.begin(key("one"), "first".into(), HashSet::new());
         tracker.mark_typed(&key("one"));
-        tracker.hold(key("one"), "second".into(), false);
-        tracker.hold(key("one"), "third".into(), true);
+        tracker.hold(key("one"), "second".into(), false, None);
+        tracker.hold(key("one"), "third".into(), true, None);
         assert_eq!(tracker.outgoing(&key("one")), vec!["first", "second", "third"]);
         assert!(tracker.outgoing(&key("other")).is_empty());
         assert!(tracker.typed(&key("one"), "first"));
         tracker.complete(&key("one"), "first", SendOutcome::Queued);
         assert!(!tracker.typed(&key("one"), "first"));
-        assert_eq!(tracker.next_held(&key("one")), Some(("second".into(), false)));
+        assert_eq!(tracker.next_held(&key("one")), Some(("second".into(), false, None)));
         assert_eq!(tracker.outgoing(&key("one")), vec!["third"]);
-        assert_eq!(tracker.next_held(&key("one")), Some(("third".into(), true)));
+        assert_eq!(tracker.next_held(&key("one")), Some(("third".into(), true, None)));
         assert_eq!(tracker.next_held(&key("one")), None);
     }
 
@@ -244,13 +263,50 @@ mod tests {
     fn failed_send_gives_back_everything_that_waited_behind_it() {
         let mut tracker = DeliveryTracker::default();
         tracker.begin(key("one"), "first".into(), HashSet::new());
-        tracker.hold(key("one"), "second".into(), false);
-        tracker.hold(key("one"), "third".into(), false);
+        tracker.hold(key("one"), "second".into(), false, None);
+        tracker.hold(key("one"), "third".into(), false, None);
         // Envio que não saiu do campo (anexo, comando do painel) não aparece como bolha de espera.
         assert_eq!(tracker.outgoing(&key("one")), vec!["second", "third"]);
         tracker.complete(&key("one"), "first", SendOutcome::Rejected("HTTP 400".into()));
         assert_eq!(tracker.take_held(&key("one")), vec!["second".to_owned(), "third".to_owned()]);
         assert!(tracker.take_held(&key("one")).is_empty());
+        assert!(tracker.outgoing(&key("one")).is_empty());
+    }
+
+    #[test]
+    fn cleared_transcript_keeps_the_pending_send_and_its_queue() {
+        let mut tracker = DeliveryTracker::default();
+        tracker.begin(key("before-clear"), "first".into(), HashSet::new());
+        tracker.mark_typed(&key("before-clear"));
+        tracker.hold(key("before-clear"), "second".into(), false, None);
+        tracker.rekey(&key("before-clear"), &key("after-clear"));
+        // Ainda "Enviando…" na chave nova: outro Enter espera em vez de sair em paralelo.
+        assert_eq!(tracker.outgoing(&key("after-clear")), vec!["first", "second"]);
+        assert!(!tracker.begin(key("after-clear"), "third".into(), HashSet::new()));
+        tracker.rekey(&key("after-clear"), &key("second-clear"));
+        // A resposta do POST chega com a chave de quando saiu.
+        let answered = tracker.current(key("before-clear"));
+        assert_eq!(answered, key("second-clear"));
+        assert!(tracker.complete(&answered, "first", SendOutcome::Rejected("HTTP 500".into())));
+        assert_eq!(tracker.take_held(&answered), vec!["second".to_owned()]);
+    }
+
+    #[test]
+    fn held_text_keeps_the_group_chosen_on_enter() {
+        let mut tracker = DeliveryTracker::default();
+        tracker.begin(key("one"), "first".into(), HashSet::new());
+        tracker.hold(key("one"), "to all".into(), false, Some(vec!["same-name".into(), "peer".into()]));
+        tracker.complete(&key("one"), "first", SendOutcome::Delivered);
+        assert_eq!(tracker.next_held(&key("one")), Some(("to all".into(), false, Some(vec!["same-name".into(), "peer".into()]))));
+    }
+
+    #[test]
+    fn send_confirmed_by_the_conversation_before_the_post_answers_is_not_shown_twice() {
+        let mut tracker = DeliveryTracker::default();
+        tracker.begin(key("one"), "hello".into(), HashSet::new());
+        tracker.mark_typed(&key("one"));
+        tracker.confirm_real(&key("one"), "new-id", "hello");
+        assert!(tracker.pending(&key("one")));
         assert!(tracker.outgoing(&key("one")).is_empty());
     }
 

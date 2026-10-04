@@ -156,7 +156,7 @@ enum Payload {
     Files(SessionKey, Vec<Result<Picked, String>>),
     // `None` marca o início do envio daquele anexo.
     UploadStep(SessionKey, u64, Option<Result<Uploaded, Failure>>),
-    UploadsDone(SessionKey, String, bool, HashSet<String>),
+    UploadsDone(SessionKey, String, bool, HashSet<String>, Option<Vec<String>>),
     Commands(String, Result<Vec<CommandInfo>, Failure>),
     Recent(SessionKey, Result<Vec<UploadFile>, Failure>),
     // Miniatura já decodificada fora da thread da janela; `None` = bytes que não são imagem legível.
@@ -1244,7 +1244,7 @@ impl Hangar {
             }
             Payload::Files(key, files) => { self.receive_files(key, files); cx.notify(); return; }
             Payload::UploadStep(key, id, result) => { self.receive_upload(key, id, result); cx.notify(); return; }
-            Payload::UploadsDone(key, draft, steer, known) => { self.finish_uploads(key, draft, steer, known, cx); cx.notify(); return; }
+            Payload::UploadsDone(key, draft, steer, known, group) => { self.finish_uploads(key, draft, steer, known, group, cx); cx.notify(); return; }
             Payload::Saved(key, open, result) => {
                 let note = match result {
                     Ok(path) if open => { cx.open_with_system(&path); None }
@@ -1549,6 +1549,7 @@ impl Hangar {
     }
 
     fn receive_sent(&mut self, key: SessionKey, text: String, draft: String, result: Result<Delivery, Failure>, window: &mut Window, cx: &mut Context<Self>) {
+        let key = self.delivery.current(key);
         let outcome = match &result {
             Ok(delivery) if delivery.delivered => SendOutcome::Delivered,
             Ok(_) => SendOutcome::Queued,
@@ -1581,9 +1582,9 @@ impl Hangar {
                 for image in gone { release_image(image, window, cx); }
             }
             // Quem esperava este envio sai agora, na ordem em que foi mandado.
-            if let Some((next, steer)) = self.delivery.next_held(&key) {
+            if let Some((next, steer, group)) = self.delivery.next_held(&key) {
                 let known = if current { self.known_user_ids() } else { HashSet::new() };
-                if self.post(key.clone(), next.clone(), next.clone(), steer, known, true, cx) {
+                if self.post(key.clone(), next.clone(), next.clone(), steer, known, group, cx) {
                     self.delivery.mark_typed(&key);
                     self.sync_working_row(cx);
                 } else {
@@ -1641,6 +1642,19 @@ impl Hangar {
         self.sidebar_sessions_changed(window, cx);
     }
 
+    /// Transcript trocado na mesma sessão (`/clear`): envio em voo, espera, campo e "mandar pro grupo" seguem para a chave
+    /// nova. Devolve a antiga, que a abertura ainda preenche com o campo e deve sair depois.
+    fn follow_transcript(&mut self, old: &SessionInfo, new: &SessionInfo, cx: &mut Context<Self>) -> Option<SessionKey> {
+        if new.jsonl == old.jsonl || new.lifecycle_id != old.lifecycle_id { return None; }
+        let server = self.session_server()?;
+        let (from, to) = (SessionKey::new(&server, old)?, SessionKey::new(&server, new)?);
+        self.delivery.rekey(&from, &to);
+        if let Some((on, _)) = self.sidebar.grouping.send_to_group.as_mut().filter(|(on, _)| *on == from) { *on = to.clone(); }
+        self.drafts.remove(&from);
+        self.drafts.insert(to, self.composer.read(cx).value().to_string());
+        Some(from)
+    }
+
     /// A sessão aberta acompanha a lista da máquina dela: dados novos, transcript trocado ou sumiço.
     pub(super) fn follow_open(&mut self, list: &[SessionInfo], window: &mut Window, cx: &mut Context<Self>) {
         // Antes de soltar a conexão aberta: o renomear em voo é da máquina dela.
@@ -1657,7 +1671,11 @@ impl Hangar {
         }
         if let Some(old) = self.selected.clone() {
             match list.iter().find(|s| s.name == old.name).cloned() {
-                Some(new) if new.jsonl != old.jsonl || new.tracked != old.tracked => self.open_session(self.open_api.clone(), new, window, cx),
+                Some(new) if new.jsonl != old.jsonl || new.tracked != old.tracked => {
+                    let moved = self.follow_transcript(&old, &new, cx);
+                    self.open_session(self.open_api.clone(), new, window, cx);
+                    if let Some(from) = moved { self.drafts.remove(&from); }
+                }
                 Some(new) => self.selected = Some(new),
                 None => {
                     self.close_terminal(false, window, cx);
@@ -2049,15 +2067,17 @@ impl Hangar {
         }
         self.confirm = None;
         self.action_feedback.remove(&key);
+        // O grupo é o da hora do Enter: o texto pode sair depois, com outra conversa aberta ou o grupo mudado.
+        let group = if steer { None } else { self.group_targets(&key, &text) };
         // Enter com um envio em voo não se perde: o texto sai do campo e vai na vez dele.
         if flying {
-            self.delivery.hold(key.clone(), text, steer);
+            self.delivery.hold(key.clone(), text, steer, group);
             self.clear_sent_field(&key, window, cx);
             return;
         }
         let known = self.known_user_ids();
-        if attached { self.start_uploads(key, text, steer, known, cx); return; }
-        self.deliver(key.clone(), text.clone(), text, steer, known, true, cx);
+        if attached { self.start_uploads(key, text, steer, known, group, cx); return; }
+        self.deliver(key.clone(), text.clone(), text, steer, known, group, cx);
         // O campo esvazia no Enter, sem esperar o backend: o que for digitado depois é outra mensagem.
         if self.delivery.pending(&key) {
             self.delivery.mark_typed(&key);
@@ -2081,9 +2101,9 @@ impl Hangar {
         else { self.drafts.insert(key.clone(), merged); }
     }
 
-    /// `composed`: veio do campo, e com o "mandar pro grupo" ligado vai também aos membros.
-    fn deliver(&mut self, key: SessionKey, text: String, draft: String, steer: bool, known: HashSet<String>, composed: bool, cx: &mut Context<Self>) {
-        if !self.post(key.clone(), text, draft, steer, known, composed, cx) { return; }
+    /// `group`: com o "mandar pro grupo" ligado no Enter, os nomes que recebem (ela e os membros).
+    fn deliver(&mut self, key: SessionKey, text: String, draft: String, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) {
+        if !self.post(key.clone(), text, draft, steer, known, group, cx) { return; }
         self.sync_working_row(cx);
         self.error = None;
         self.stop_feedback.remove(&key);
@@ -2093,13 +2113,12 @@ impl Hangar {
     }
 
     /// O envio em si, sem mexer na conversa aberta: serve também ao texto que esperava a vez noutra sessão.
-    fn post(&mut self, key: SessionKey, text: String, draft: String, steer: bool, known: HashSet<String>, composed: bool, cx: &mut Context<Self>) -> bool {
+    fn post(&mut self, key: SessionKey, text: String, draft: String, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) -> bool {
         let Some(api) = self.api_for(&key.server) else {
             self.action_feedback.insert(key, (tr("server_changed"), true));
             cx.notify();
             return false;
         };
-        let group = if composed && !steer { self.group_targets(&key, &text) } else { None };
         if !self.delivery.begin(key.clone(), text.clone(), known) { cx.notify(); return false; }
         let (connection, tx) = (self.connection, self.tx.clone());
         self.runtime.spawn(async move {
@@ -2114,7 +2133,7 @@ impl Hangar {
     }
 
     // Sobe um por vez; o que já subiu não sobe de novo numa nova tentativa, e falha para a fila sem repetir.
-    fn start_uploads(&mut self, key: SessionKey, draft: String, steer: bool, known: HashSet<String>, cx: &mut Context<Self>) {
+    fn start_uploads(&mut self, key: SessionKey, draft: String, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) {
         let Some(api) = self.api_for(&key.server) else { return; };
         let Some(list) = self.attachments.get_mut(&key) else { return; };
         let mut jobs = Vec::new();
@@ -2134,7 +2153,7 @@ impl Hangar {
                 if tx.send(Envelope { connection, selection: None, payload: Payload::UploadStep(key.clone(), id, Some(result)) }).await.is_err() { return; }
                 if failed { break; }
             }
-            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::UploadsDone(key, draft, steer, known) }).await;
+            let _ = tx.send(Envelope { connection, selection: None, payload: Payload::UploadsDone(key, draft, steer, known, group) }).await;
         });
         cx.notify();
     }
@@ -2150,7 +2169,7 @@ impl Hangar {
         };
     }
 
-    fn finish_uploads(&mut self, key: SessionKey, draft: String, steer: bool, known: HashSet<String>, cx: &mut Context<Self>) {
+    fn finish_uploads(&mut self, key: SessionKey, draft: String, steer: bool, known: HashSet<String>, group: Option<Vec<String>>, cx: &mut Context<Self>) {
         let Some(batch) = self.uploading.remove(&key) else { return; };
         let Some(list) = self.attachments.get(&key) else { return; };
         let mut uploads = Vec::new();
@@ -2164,7 +2183,7 @@ impl Hangar {
             }
         }
         let message = composer::compose_prompt(&draft, &uploads, |speech| tr("attach_video_speech").replace("{texto}", speech));
-        self.deliver(key, message, draft, steer, known, true, cx);
+        self.deliver(key, message, draft, steer, known, group, cx);
     }
 
     fn add_attachment(&mut self, key: &SessionKey, name: String, bytes: Vec<u8>) -> Result<(), String> {
@@ -2424,7 +2443,7 @@ impl Hangar {
         if !self.can_send() || self.delivery.pending(&key) || self.uploading.contains_key(&key) { return; }
         let draft = if from_panel { String::new() } else { self.composer.read(cx).value().to_string() };
         let known = self.known_user_ids();
-        self.deliver(key, format!("/{}", command.name), draft, false, known, false, cx);
+        self.deliver(key, format!("/{}", command.name), draft, false, known, None, cx);
     }
 
     fn visible_suggestions(&self, cx: &App) -> Vec<CommandInfo> {
