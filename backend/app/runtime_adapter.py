@@ -18,20 +18,15 @@ from app.models import StateEvent
 _legacy_operation = contextvars.ContextVar("runtime_legacy_operation", default=None)
 
 
-def assert_legacy(name, *, reading=False):
+def assert_legacy(name):
     coordinator = runtime_coordinator.current()
     if coordinator is None or not coordinator.managed_queue(name):
         return
     slot = coordinator.slot(name)
     with slot.guard:
         restoring = coordinator.in_lifecycle(slot) and slot.phase == runtime_coordinator.Phase.RecoveringPython
-        finishing = reading and slot.phase == runtime_coordinator.Phase.PreparingRust
-        context = _legacy_operation.get()
-        continuing = (context is not None and context.get("key") == slot.binding.key
-            and context.get("generation") == slot.binding.generation and context.get("operation_id") in getattr(coordinator, "legacy_active", set()))
         normal = slot.phase == runtime_coordinator.Phase.Python and (not slot.frozen or coordinator.in_lifecycle(slot))
-        if (slot.lease is None or slot.lease.closed or not (normal
-                or restoring or finishing or continuing and slot.phase == runtime_coordinator.Phase.PreparingRust)):
+        if slot.lease is None or slot.lease.closed or not (normal or restoring):
             raise RuntimeError("Python não possui a sessão; cliente Legacy bloqueado")
 
 
@@ -51,10 +46,10 @@ class LegacyIO:
     def __init__(self, coordinator):
         self.coordinator = coordinator
 
-    async def _exec(self, name, action, call_id=None, *, reading=False):
+    async def _exec(self, name, action, call_id=None):
         coordinator = self.coordinator
         slot = coordinator.slot(name)
-        assert_legacy(name, reading=reading)
+        assert_legacy(name)
         generation = slot.binding.generation
         with slot.guard:
             slot.active += 1
@@ -107,24 +102,23 @@ class LegacyIO:
         await self._exec(name, {"kind":"begin_dispatch", "id":operation_id, "wire_id":phase_id})
         return WireTicket(name, binding["key"], binding["generation"], operation_id, phase_id, copy.deepcopy(payload), bool(context))
 
-    async def finish_wire(self, ticket, outcome, result=None, *, definitive=False, settling=False):
+    async def finish_wire(self, ticket, outcome, result=None, *, definitive=False):
         slot = self.coordinator.slot(ticket.name)
         if slot.binding.key != ticket.key or slot.binding.generation != ticket.generation:
             raise RuntimeError("recibo de outra geração")
         status = {"written":"accepted", "not_written":"rejected", "unknown":"unknown"}[outcome]
         record = result if definitive else {"write_outcome":outcome}
-        reading = definitive or settling
-        await self._exec(ticket.name, {"kind":"finish", "id":ticket.phase_id, "status":status, "result":record}, reading=reading)
+        await self._exec(ticket.name, {"kind":"finish", "id":ticket.phase_id, "status":status, "result":record})
         is_request = ticket.frame.get("type") == "control_request" or ticket.frame.get("method") is not None and ticket.frame.get("id") is not None
         if ticket.aggregate and ticket.operation_id in getattr(self.coordinator, "legacy_active", set()):
             return
         if ticket.incomplete and outcome == "written":
             await self._exec(ticket.name, {"kind":"finish", "id":ticket.operation_id, "status":"unknown",
-                "result":{"operation_id":ticket.operation_id, "disposition":"unknown", "payload":{"remaining_phase":"effort"}}}, reading=reading)
+                "result":{"operation_id":ticket.operation_id, "disposition":"unknown", "payload":{"remaining_phase":"effort"}}})
             return
         parent_status = status if definitive or not is_request or outcome != "written" else "unknown"
         await self._exec(ticket.name, {"kind":"finish", "id":ticket.operation_id, "status":parent_status,
-            "result":{"operation_id":ticket.operation_id, "disposition":parent_status, "payload":record}}, reading=reading)
+            "result":{"operation_id":ticket.operation_id, "disposition":parent_status, "payload":record}})
 
     async def reply(self, name, endpoint, frame):
         request_id = frame.get("id") if frame.get("type") != "control_response" else (frame.get("response") or {}).get("request_id")
@@ -189,19 +183,18 @@ class LegacyIO:
             await writer.drain()
             outcome = await asyncio.wait_for(asyncio.shield(future), 30) if version == 2 else "unknown"
         except asyncio.CancelledError:
-            await self.finish_wire(ticket, "unknown", settling=True)
+            await self.finish_wire(ticket, "unknown")
             raise
         except Exception:
             with self.coordinator.slot(name).guard:
                 phase = copy.deepcopy(self.coordinator.slot(name).store.state["operations"].get(ticket.phase_id))
-            await self.finish_wire(ticket, "unknown", settling=True)
+            await self.finish_wire(ticket, "unknown")
             if not (phase and isinstance(phase.get("result"), dict) and phase["result"].get("disposition") in {"accepted", "rejected"}):
                 raise RuntimeError("escrita incerta; operação conservada sem reenvio") from None
             outcome = "written"
         finally:
             endpoint.runtime_acks.pop(ticket.phase_id, None)
-        # Já despachado: registrar o desfecho não é efeito novo e vale durante a passagem ao Rust.
-        await self.finish_wire(ticket, outcome, settling=True)
+        await self.finish_wire(ticket, outcome)
         if version != 2:
             return ticket
         if outcome != "written":
@@ -565,7 +558,8 @@ def run_sync(factory, loop):
         raise RuntimeError("operação síncrona exige o pool e o loop do servidor")
     future = asyncio.run_coroutine_threadsafe(factory(), loop)
     try:
-        return future.result(timeout=185)
+        # As operações esperam o desfecho do Rust (até `PENDING_WAIT_S`) antes do próprio prazo.
+        return future.result(timeout=185 + runtime_coordinator.PENDING_WAIT_S)
     except BaseException:
         future.cancel()
         raise
@@ -591,10 +585,6 @@ def native_slot(name):
     if not slot.binding.headless:
         return None
     if slot.phase == runtime_coordinator.Phase.Python:
-        return None
-    context = _legacy_operation.get()
-    if (slot.phase == runtime_coordinator.Phase.PreparingRust and slot.lease is not None and not slot.lease.closed
-            and context is not None and context.get("operation_id") in coordinator.legacy_active):
         return None
     if slot.phase != runtime_coordinator.Phase.Rust:
         raise runtime_coordinator.TransferInProgress("sessão em transferência; aguarde a posse ser confirmada")
@@ -969,7 +959,6 @@ def voice_current(name, target, adapter):
 
 # ponytail: a posse é conferida por consulta a cada 0,25 s; a fase muda sem aviso único a quem espera.
 _OWNER_POLL_S = 0.25
-_OWNER_STUCK_S = 10.0
 
 
 def _hands_over(provider, name):
@@ -981,32 +970,22 @@ def _hands_over(provider, name):
 
 
 def _state_owner(name):
-    """Quem responde pelo estado agora; None durante a passagem entre Python e Rust."""
+    """Quem responde pelo estado agora: a sessão aberta no Rust, ou a vista do Python (parada,
+    Codex, Python dono da porta)."""
     coordinator = runtime_coordinator.current()
     if coordinator is None or not coordinator.managed_runtime(name):
         return ("python",)
     slot = coordinator.slot(name)
-    if not slot.binding.headless or slot.phase == runtime_coordinator.Phase.Python:
-        return ("python",)
-    if slot.phase == runtime_coordinator.Phase.Rust:
+    if slot.binding.headless and slot.phase == runtime_coordinator.Phase.Rust:
         return ("rust", coordinator.instance, slot.binding.key, slot.binding.generation)
-    return None
+    return ("python",)
 
 
 async def owner_state_stream(legacy, native, name):
-    """Estado que segue a posse. A passagem não derruba o chat: ele espera o novo dono e reabre a
-    fonte dele, e o erro de uma fonte cuja posse acabou de sair não sobe."""
+    """Estado que segue a sessão: aberta no Rust ou não. A troca de fonte não derruba o chat, e o
+    erro de uma fonte cuja sessão acabou de mudar não sobe."""
     while True:
         owner = _state_owner(name)
-        waited = time.monotonic()
-        while owner is None:
-            await asyncio.sleep(_OWNER_POLL_S)
-            owner = _state_owner(name)
-            if waited is not None and time.monotonic() - waited > _OWNER_STUCK_S:
-                # Os pings seguem e o front não reconecta: sem isto, o chat parado não deixa rastro.
-                from app import diag
-                diag.registrar("runtime.state_owner_stuck", "aviso", sessao=name)
-                waited = None
         source = native() if owner[0] == "rust" else legacy()
         # Uma tarefa só itera a fonte, e só avança quando o chat pede o próximo: como a iteração
         # direta. O monitor do Codex guarda estado da própria tarefa entre yields.

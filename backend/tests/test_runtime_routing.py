@@ -166,6 +166,8 @@ def birth(tmp_path, monkeypatch):
     from app.runtime_adapter import LegacyBridge
     monkeypatch.setattr(pqueue.settings, "projects_dir", tmp_path / "projects")
     monkeypatch.setattr(S, "_dir", lambda: tmp_path / "hl")
+    from app.adapters.codex import sessions as codex_sessions
+    monkeypatch.setattr(codex_sessions, "_dir", lambda: tmp_path / "codex-sessions")
     monkeypatch.setattr(A.log_paths, "base", lambda: tmp_path / "logs")
     monkeypatch.setattr(A, "_dir_marcadores", lambda meta: tmp_path / "state")
     monkeypatch.setattr(A, "_esforco_padrao", lambda config_dir: None)
@@ -472,7 +474,7 @@ def test_account_switch_reopens_with_engine_models_and_waits_initialize(birth, m
 
 
 def test_switch_to_headless_opens_in_rust(birth, monkeypatch):
-    # Regressão: terminal no Rust → sidecar sem terminal → abre sem terminal no Rust, sem adoção.
+    # Regressão: terminal no Rust → sidecar sem terminal → abre sem terminal no Rust (a adoção de cano não existe mais).
     from app import runtime_terminal
     from app.runtime_coordinator import Binding
     owner = birth.build(LockingTransport())
@@ -490,7 +492,6 @@ def test_switch_to_headless_opens_in_rust(birth, monkeypatch):
     pane = {"binding":terminal}
     monkeypatch.setattr(runtime_terminal, "resolve_binding", lambda name, previous=None: pane["binding"])
     monkeypatch.setattr(runtime_terminal, "validate_binding", lambda descriptor: pane["binding"])
-    monkeypatch.setattr(owner, "peek", lambda descriptor: pytest.fail("adoção de cano"))
     async def scenario():
         owner.loop = asyncio.get_running_loop()
         assert await owner.prepare_session("t1", "claude")
@@ -554,3 +555,219 @@ def test_shutdown_leaves_canos_alive_and_touches_no_session(birth, monkeypatch):
     asyncio.run(scenario())
     assert transport.kinds() == ["open"] and birth.kills == []
     transport.lease.close()
+
+
+# --- Modo do processo, restart e a guarda do cliente legado (dono único, Task 5) ---
+
+def _queue_with_pending(birth, delivered=False):
+    from app import pqueue, runtime_queue
+    from app.runtime_coordinator import WriterLease
+    key = birth.sessions.load("s1")["key"]
+    directory = pqueue._queue_dir()
+    lease = WriterLease(directory / "runtime" / f"{key}.lock")
+    try:
+        runtime_queue.QueueStore(directory / "runtime" / f"{key}.json", directory, runtime_queue.initial_state(
+            key, 1, "s1", [{"id":"e1", "text":"oi", "delivered":delivered, "ts":1.0}]))
+    finally:
+        lease.close()
+
+
+def _pending_owner(birth, transport=None):
+    owner = birth.build(None)
+    owner.mode = "pending"
+    return owner
+
+
+async def _enter(owner, transport):
+    owner.loop = asyncio.get_running_loop()
+    owner.configure_transport(transport)
+    await owner.adoption_task
+    return owner
+
+
+def test_lifespan_with_rust_expected_opens_no_cano_client(birth, monkeypatch):
+    _alive_cano(birth)
+    owner = _pending_owner(birth)
+    calls = []
+    from app.adapters.claude_headless import adapter as A
+    monkeypatch.setattr(A, "matar_orfaos", lambda: 0)     # a varredura real olha os processos da máquina
+    monkeypatch.setattr(birth.adapter, "reconectar_todas", lambda: calls.append("reconectar"))
+    monkeypatch.setattr(api, "_recover_pending_transfers", lambda: calls.append("transferencias"))
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.start_sessions({"claude":birth.adapter, "codex":SimpleNamespace(_sessions={})})
+        await api._boot_sessions(owner)
+    asyncio.run(scenario())
+    assert not owner.managed_queue("s1"), "nada da sessão Claude sem terminal registrado antes do Rust"
+    assert calls == [] and set(owner.mode_hooks) == {"rust", "python"}
+
+
+def test_rust_up_opens_live_canos_in_rust(birth):
+    _alive_cano(birth)
+    owner = _pending_owner(birth)
+    transport = LockingTransport()
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.start_sessions({"claude":birth.adapter, "codex":SimpleNamespace(_sessions={})})
+        await _enter(owner, transport)
+    asyncio.run(scenario())
+    assert transport.kinds() == ["open"] and owner.mode == "rust"
+    slot = owner.slot("s1")
+    assert slot.phase == runtime_coordinator.Phase.Rust and slot.lease is None
+    assert birth.launches == []
+    transport.lease.close()
+
+
+def test_dead_cano_with_pending_queue_is_relaunched_after_rust_up(birth):
+    _queue_with_pending(birth)
+    owner = _pending_owner(birth)
+    transport = LockingTransport()
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.start_sessions({"claude":birth.adapter, "codex":SimpleNamespace(_sessions={})})
+        await _enter(owner, transport)
+    asyncio.run(scenario())
+    assert transport.kinds() == ["open"] and len(birth.launches) == 1, "relança uma vez para entregar"
+    transport.lease.close()
+
+
+def test_dead_cano_without_pending_queue_stays_stopped_after_rust_up(birth):
+    _queue_with_pending(birth, delivered=True)
+    owner = _pending_owner(birth)
+    transport = LockingTransport()
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.start_sessions({"claude":birth.adapter, "codex":SimpleNamespace(_sessions={})})
+        await _enter(owner, transport)
+    asyncio.run(scenario())
+    assert transport.kinds() == [] and birth.launches == []
+
+
+def test_crash_before_limit_keeps_sessions_out_of_python(birth, monkeypatch):
+    from app.runtime_adapter import LegacyBridge
+    owner, first, _ = _opened(birth)
+    monkeypatch.setattr(LegacyBridge, "reconnect", lambda *args: pytest.fail("Python religou a sessão"))
+    second = LockingTransport()
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("s1")
+        first.lease.close()             # o Rust caiu: o sistema soltou a trava dele
+        await owner.enter_pending()
+        slot = owner.slot("s1")
+        assert owner.mode == "pending" and slot.phase == runtime_coordinator.Phase.Rust and slot.lease is None
+        await _enter(owner, second)
+    asyncio.run(scenario())
+    assert second.kinds() == ["open"] and owner.mode == "rust"
+    assert owner.slot("s1").phase == runtime_coordinator.Phase.Rust and owner.slot("s1").cache_valid
+    second.lease.close()
+
+
+def test_send_during_crash_waits_and_repeats_same_operation(birth):
+    owner, first, _ = _opened(birth)
+    second = LockingTransport()
+    first.alive = False
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("s1")
+        owner.mode = "rust"
+        original = first.op
+        async def dropped(descriptor, command, operation_id, clock):
+            if command["kind"] == "submit":
+                first.lease.close()
+                raise ConnectionResetError("Rust caiu no meio do envio")
+            return await original(descriptor, command, operation_id, clock)
+        first.op = dropped
+        async def supervisor():
+            await asyncio.sleep(0.1)
+            await owner.enter_pending()
+            await asyncio.sleep(0.1)
+            await _enter(owner, second)
+        task = asyncio.create_task(supervisor())
+        result = await owner.op("s1", {"kind":"submit", "text":"Olá"}, "op-crash")
+        await task
+        return result
+    result = asyncio.run(scenario())
+    assert result["disposition"] == "deferred"
+    assert [(kind, d) for kind, d in second.ops if kind == "submit"] and second.kinds() == ["open", "submit"]
+    second.lease.close()
+
+
+def test_pending_wait_has_ceiling(birth, monkeypatch):
+    monkeypatch.setattr(runtime_coordinator, "PENDING_WAIT_S", 0.2)
+    owner = _pending_owner(birth)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.prepare_session("s1", "claude", launch=True)
+    with pytest.raises(RuntimeError) as caught:
+        asyncio.run(scenario())
+    assert getattr(caught.value, "code", "") == "runtime_starting"
+
+
+def test_third_crash_recovers_each_session_once(birth, monkeypatch):
+    from app.runtime_adapter import LegacyBridge
+    owner, transport, _ = _opened(birth)
+    reconnected, hooks = [], []
+    async def reconnect(self, descriptor, carry):
+        reconnected.append(descriptor["name"])
+        return {"hydrated":True}
+    monkeypatch.setattr(LegacyBridge, "reconnect", reconnect)
+    async def python_hook():
+        hooks.append("python")
+    owner.mode_hooks["python"] = python_hook
+    transport.alive = False
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("s1")
+        transport.lease.close()
+        await owner.enter_pending()
+        await owner.enter_python(SimpleNamespace(containment_clean=lambda: True))
+    asyncio.run(scenario())
+    assert reconnected == ["s1"] and hooks == ["python"] and owner.mode == "python"
+    assert owner.slot("s1").phase == runtime_coordinator.Phase.Python
+
+
+def test_transfer_recovery_waits_for_owner(birth):
+    owner = _pending_owner(birth)
+    ran = []
+    async def recovery():
+        ran.append(owner.mode)
+    owner.mode_hooks["rust"] = recovery
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.start_sessions({"claude":birth.adapter, "codex":SimpleNamespace(_sessions={})})
+        assert ran == []
+        await _enter(owner, LockingTransport())
+        await owner.enter_pending()
+        await _enter(owner, LockingTransport())
+    asyncio.run(scenario())
+    assert ran == ["rust"], "uma vez, depois do Rust de pé"
+
+
+def test_legacy_client_refused_while_rust_owns(birth):
+    import inspect
+    _alive_cano(birth)
+    owner = birth.build(LockingTransport())
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        for mode in ("pending", "rust"):
+            owner.mode = mode
+            with pytest.raises(RuntimeError, match="cliente Python"):
+                await inspect.unwrap(birth.adapter.ensure_running)(birth.adapter, "s1", so_reconectar=True)
+    asyncio.run(scenario())
+
+
+def test_codex_headless_stays_python_while_rust_owns(birth, monkeypatch):
+    from app.adapters.codex import sessions as codex_sessions
+    from app.runtime_adapter import LegacyBridge, assert_legacy
+    meta = {"name":"c1", "key":"codexkey", "headless":True, "thread_id":"thread", "rollout_path":"/tmp/rollout.jsonl"}
+    monkeypatch.setattr(codex_sessions, "load", lambda name: meta if name == "c1" else None)
+    transport = LockingTransport()
+    owner = birth.build(transport)
+    owner.legacy = LegacyBridge(owner, {"claude":birth.adapter, "codex":SimpleNamespace(_sessions={})})
+    owner.mode = "rust"
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        assert await owner.prepare_session("c1", "codex", launch=True)
+    asyncio.run(scenario())
+    assert transport.kinds() == [] and owner.slot("c1").phase == runtime_coordinator.Phase.Python
+    assert_legacy("c1")         # o cliente Python do Codex segue permitido

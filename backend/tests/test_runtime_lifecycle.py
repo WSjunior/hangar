@@ -149,7 +149,8 @@ def test_mode_keeps_original_key_when_returning_to_headless(tmp_path, monkeypatc
     assert sessions.load("session")["key"] == "same-key"
 
 
-def test_combined_supervisor_deactivates_b_and_c(monkeypatch):
+def test_combined_supervisor_stop_deactivates_without_recover(monkeypatch):
+    # A parada desliga as pontes e deixa as sessões sem dono; nada volta ao Python aqui.
     from app import rust_server
     events = []
     class Proc:
@@ -160,17 +161,16 @@ def test_combined_supervisor_deactivates_b_and_c(monkeypatch):
     class Coordinator:
         transport = None
         slots = {"key":SimpleNamespace(binding=SimpleNamespace(name="session"), phase=Phase.Rust)}
-        async def close_events(self):
-            events.append("events")
+        async def enter_pending(self):
+            events.append("pending")
         async def recover(self, name, confirmed_dead, containment=None):
-            assert confirmed_dead
             events.append("recover")
     monkeypatch.setattr(runtime_coordinator, "_current", Coordinator())
     monkeypatch.setattr(rust_server.terminal_observer, "configure", lambda *args: events.append("terminal"))
     supervisor = rust_server.Supervisor("fake", "127.0.0.1", 1, 2, "token", "127.0.0.1", lambda: False)
     supervisor.proc = Proc()
     asyncio.run(supervisor.stop())
-    assert events == ["terminal", "events", "recover"]
+    assert events == ["terminal", "pending"]
 
 
 def test_stop_error_is_raised_before_cano_cleanup(monkeypatch):
@@ -198,7 +198,8 @@ def test_dead_runtime_does_not_re_adopt(tmp_path, monkeypatch):
     supervisor.runtime_transport = transport
     async def scenario():
         await supervisor.deactivate_runtime(confirmed_dead=True)
-        assert coordinator.transport is None and coordinator.instance is None
+        assert coordinator.transport is None and coordinator.instance is None and coordinator.mode == "pending"
+        await supervisor.hand_to_python()
         assert await coordinator.prepare_session("session", "claude")
         assert slot.phase == Phase.Python and not slot.lease.closed
     try:
