@@ -29,6 +29,10 @@ impl TerminalIo for Io {
     }) }
     fn socket<'a>(&'a self,_:&'a NativeMessage,envelope:Vec<u8>)->IoFuture<'a,WriteOutcome> { Box::pin(async move {self.socket_calls.lock().unwrap().push(envelope);Ok(WriteOutcome::Unknown)}) }
 }
+const WAIT:Duration=Duration::from_secs(10);
+/// Processo do teste que morre junto com ele, inclusive quando uma asserção falha antes do fim.
+struct KillOnDrop(std::process::Child);
+impl Drop for KillOnDrop {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
 struct Fixture { _dir:tempfile::TempDir,target:TerminalTarget,policy:PolicyClient,io:Arc<Io>, mux:Arc<Mutex<Vec<String>>>, idle:Arc<std::sync::atomic::AtomicBool>, ready:Arc<std::sync::atomic::AtomicBool>, generation:Arc<AtomicU64>, native:Arc<std::sync::atomic::AtomicBool>, control:Arc<Mutex<Value>>, unknown:Arc<std::sync::atomic::AtomicBool>, calls:Arc<Mutex<Vec<Value>>>,server:tokio::task::JoinHandle<()> }
 impl Fixture {
     async fn new()->Self {
@@ -71,14 +75,15 @@ impl Fixture {
     fn command(&self,id:&str,text:&str)->RuntimeCommand { RuntimeCommand {operation_id:id.into(),kind:OperationKind::Input,payload:json!({"text":text,"pre_transcript":false})} }
     fn state(&self)->Value {serde_json::from_slice(&std::fs::read(&self.target.state_path).unwrap()).unwrap()}
     /// Espera com prazo; no estouro mostra onde a operação parou (política, multiplexador e diário).
+    /// O teto cobre o runner Windows, onde cada leitura de fatos grava o diário durável em ~0,1–0,3 s.
     async fn wait_for(&self,what:&str,mut done:impl FnMut()->bool) {
         let start=std::time::Instant::now();
         while !done() {
-            if start.elapsed()>Duration::from_secs(2) {
+            if start.elapsed()>WAIT {
                 let io:Vec<String>=self.io.calls.lock().unwrap().iter().map(|r|r.args[0].clone()).collect();
                 let policy:Vec<String>=self.calls.lock().unwrap().iter().map(|v|format!("{}@{}ms",v["kind"].as_str().unwrap_or("?"),v["_ms"])).collect();
                 let ops:Vec<String>=self.state()["operations"].as_object().map(|o|o.iter().map(|(k,v)|format!("{k}={}",v["status"])).collect()).unwrap_or_default();
-                panic!("{what}: prazo de 2 s estourou; política={policy:?} io={io:?} operações={ops:?}");
+                panic!("{what}: prazo de {WAIT:?} estourou; política={policy:?} io={io:?} operações={ops:?}");
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
@@ -97,7 +102,7 @@ if mode in ('--child','--grand'):
  if mode=='--child':subprocess.Popen([sys.executable,__file__,'--grand'])
  else:time.sleep(2.5);open(path,'w').write('late')
  time.sleep(10)
-elif mode=='--other':time.sleep(10)
+elif mode=='--other':time.sleep(60)
 elif mode=='display-message':print('session\t%1\t1')
 elif mode=='capture-pane':print('─'*32+'\n❯ \n'+'─'*32)
 elif mode=='send-keys' and '-l' in sys.argv:
@@ -109,7 +114,7 @@ elif mode=='send-keys' and '-l' in sys.argv:
 "#,json!(late.to_str().unwrap()));
     std::fs::write(&script,code).unwrap();
     let python=std::env::var("HANGAR_TEST_PYTHON").unwrap_or_else(|_|if cfg!(windows){"python".into()}else{"python3".into()});
-    let mut other=std::process::Command::new(&python).arg(&script).arg("--other").spawn().unwrap();let other_born=std::time::Instant::now();
+    let mut other=KillOnDrop(std::process::Command::new(&python).arg(&script).arg("--other").spawn().unwrap());let other_born=std::time::Instant::now();
     f.target.binding.mux_argv=vec![python,"-X".into(),"utf8".into(),script.to_str().unwrap().into()];*f.mux.lock().unwrap()=f.target.binding.mux_argv.clone();
     let lease=queue::acquire_lease(&f.target.lease_path).unwrap();let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
     let options=TerminalOptions {io:Arc::new(ProcessIo {command_timeout:Duration::from_millis(1500),socket_timeout:Duration::from_millis(150)}),
@@ -121,14 +126,14 @@ elif mode=='send-keys' and '-l' in sys.argv:
     let grandchild_born=std::path::Path::new(&format!("{}--grand.pid",late.display())).exists();
     // O neto escreveria 2,5 s depois de nascer, e ele nasce antes do prazo de 1,5 s.
     tokio::time::sleep(Duration::from_secs(3)).await;
-    let old_writer=late.exists();let other_exit=other.try_wait().unwrap();let other_age=other_born.elapsed();let unrelated_alive=other_exit.is_none();
+    let old_writer=late.exists();let other_exit=other.0.try_wait().unwrap();let other_age=other_born.elapsed();let unrelated_alive=other_exit.is_none();
     for suffix in if old_writer {vec!["--child.pid","--grand.pid"]}else{vec![]} {
         if let Ok(pid)=std::fs::read_to_string(format!("{}{suffix}",late.display())) {
             #[cfg(unix)] {let _=std::process::Command::new("kill").args(["-9",pid.trim()]).output();}
             #[cfg(windows)] {let _=std::process::Command::new("taskkill.exe").args(["/PID",pid.trim(),"/T","/F"]).output();}
         }
     }
-    other.kill().unwrap();other.wait().unwrap();drop(python_lease);
+    drop(other);drop(python_lease);
     assert!(grandchild_born,"timeout fired before the grandchild existed; nothing was proved");
     // Saída 0 é o `sleep` do processo alheio que acabou sozinho; outro código é morte por terceiro.
     assert!(unrelated_alive,"processo alheio saiu: {other_exit:?} depois de {other_age:?}");assert!(!old_writer,"auxiliary grandchild wrote after detach released the lease");
@@ -232,7 +237,7 @@ async fn terminal_runtime_maintenance_failure_publishes_problem_and_stops_uncoor
     h.command(f.command("accepted","Olá")).await.unwrap();
     std::fs::remove_file(&f.target.transcript).unwrap();
     std::fs::create_dir(&f.target.transcript).unwrap();
-    let problem=tokio::time::timeout(Duration::from_secs(2),async {
+    let problem=tokio::time::timeout(WAIT,async {
         loop {let event=receiver.recv().await.unwrap();if event.channel=="problem"{break event;}}
     }).await.unwrap();
     assert_eq!(problem.data["error_code"],"receipt_scan");
@@ -253,7 +258,7 @@ async fn terminal_runtime_unknown_delivery_is_signaled_without_retyping() {
     let (events,mut receiver)=broadcast::channel(128); let h=f.start_with_events(events);
     let command=f.command("unknown","Olá");
     assert_eq!(h.command(command.clone()).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Unknown);
-    let problem=tokio::time::timeout(Duration::from_secs(2),async {
+    let problem=tokio::time::timeout(WAIT,async {
         loop {let event=receiver.recv().await.unwrap();if event.channel=="problem"{break event;}}
     }).await.unwrap();
     assert_eq!(problem.data["error_code"],"terminal_delivery_unknown");

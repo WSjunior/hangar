@@ -276,6 +276,18 @@ Nenhuma sessão real, serviço ou instalador foi operado depois dos dois inciden
 Observação fora da 2D: o backend não apaga `cc-socks/<pid>.sock` ao sair; os 15 do teste foram
 removidos à mão, conferindo que nenhum PID estava vivo.
 
+## CI do `server.yml`
+
+Primeira execução da branch (`d22ff6c5`, run 37196525368): Linux verde. macOS falhou uma vez em
+`terminal_control::capture_waits_for_end_marker_and_rejects_missing_or_wrong_end` (teste da 2C,
+limite de 250 ms) e passou na repetição. Windows falhou nas duas tentativas em cinco testes de
+`terminal_runtime` da Task 2, que nunca tinham rodado no Windows. Um commit só de diagnóstico
+(`f2065619`) mediu no runner: cada leitura de fatos leva ~0,1–0,3 s, porque grava `prepare`,
+`dispatch` e `finish` duráveis (`fsync` e `rename`). As operações avançavam e terminavam
+`accepted`, sem travar; a drenagem de duas entradas passava de 2 s. O processo alheio sobreviveu:
+o Job não alcança processo fora da árvore do comando. A 2D liga no Windows em produção, então as
+esperas por condição ganharam teto de 10 s, e o processo alheio dorme 60 s; condições iguais.
+
 ## Ainda pendente
 
 - Reserva Python sem aparelho conectado não drena a fila sozinha; com o Rust de pé o timer cobre.
@@ -283,5 +295,7 @@ removidos à mão, conferindo que nenhum PID estava vivo.
 - Entrada nova enviada com a sessão pronta passa na frente de entrada antiga parada na fila.
 - Registro durável de sessão fechada volta como "esperando identidade" a cada restart.
 - O backend não apaga o próprio socket em `cc-socks` ao sair.
+- No Windows, cada leitura de fatos custa ~0,1–0,3 s de diário durável; uma entrega faz várias.
+- `terminal_control::capture_waits_for_end_marker…` (2C) é instável no macOS com limite de 250 ms.
 - Uso real com o dono e Windows instalado; captura `-e` do composer fica só no POSIX (psmux sem prova).
 - Porte do envio/controle Codex com terminal: permanece Python/RPC nesta árvore; fora da 2D.
