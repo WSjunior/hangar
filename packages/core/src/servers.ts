@@ -8,6 +8,8 @@ export interface Server {
   id: string; label: string; baseUrl: string; token: string;
   disabled?: boolean; invite?: boolean; inviteEnded?: boolean;
   lan?: LanInfo;
+  // Saiu da lista com um chat dele aberto: toda chamada é recusada, nunca vai ao ativo.
+  removed?: boolean;
 }
 export const SERVER_COLORS = ['#7c6af7', '#3ba55d', '#e0a23b', '#e0563b', '#3b9fe0', '#c43be0'];
 export function serverColor(id: string): string {

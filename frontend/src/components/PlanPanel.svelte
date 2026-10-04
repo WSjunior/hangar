@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   // Detalhe do plano: barra + Tasks. Só a Task atual abre os steps — "próximo passo" não é campo, é o
   // primeiro ○ da lista. O markdown cru vem do próprio /plan (o /file não serve este arquivo).
   import PlanBar from './PlanBar.svelte';
@@ -18,6 +19,7 @@
     error?: boolean;
   }
   let { session, detail, loading = false, error = false }: Props = $props();
+  const sessionServer = useSessionServer();
   let showMd = $state(false);
 
   // Mesmo sentinela do backend (planprog.PIN_NONE): "nenhum" e gravado como pin.
@@ -62,7 +64,7 @@
       try {
         await aoAquecer(nome);        // lista do seletor não é pra agora: espera a conversa pintar
         if (minha !== vez) return;
-        const r = await getPlans(nome);
+        const r = await getPlans(nome, sessionServer());
         if (minha !== vez) return;   // chegou tarde: já tem requisição mais nova no ar, descarta
         plans = r.plans;
         pinned = r.pinned;
@@ -75,7 +77,7 @@
     pickerErr = '';
     const minha = ++vez;
     try {
-      const r = await setPlanPin(session.name, alvo);
+      const r = await setPlanPin(session.name, alvo, sessionServer());
       if (minha === vez) pinned = r.pinned;
     } catch (e) { if (minha === vez) pickerErr = erro(e); }
   }
@@ -99,7 +101,7 @@
     escrevendo = s.idx;
     acaoErr = '';
     try {
-      const r = await setPlanStep(nome, meu.stem, s.idx, alvo);
+      const r = await setPlanStep(nome, meu.stem, s.idx, alvo, sessionServer());
       if (detail !== meu) return;   // trocou de sessão/plano com o POST em voo: não mexe no alheio
       // Aplica na hora em vez de esperar o poll de 5s da lista (é ele que muda `plan_done` e
       // refaz o detalhe no Chat.svelte). `detail` vem de um `$state` do Chat, então a mutação
@@ -130,7 +132,7 @@
     arquivando = true;
     acaoErr = '';
     try {
-      await archivePlan(nome, stem);
+      await archivePlan(nome, stem, sessionServer());
       confirmando = false;
     } catch (e) {
       acaoErr = erro(e);
@@ -142,7 +144,7 @@
     // "não deu pra arquivar" sobre um arquivamento que deu certo — o contrário do que aconteceu.
     const minha = ++vez;
     try {
-      const r = await getPlans(nome);
+      const r = await getPlans(nome, sessionServer());
       if (minha !== vez) return;   // resposta atrasada: já tem requisição mais nova no ar
       plans = r.plans;
       pinned = r.pinned;

@@ -12,7 +12,12 @@ const PRAZO_PRINCIPAL_MS = 4000;
 const rotas = new Map<string, string>();
 const emCurso = new Map<string, Promise<void>>();
 
+// Servidor que saiu da lista: endereço que nunca resolve (RFC 2606). Vazio iria à origem da
+// página, que leva o cookie de login dela; a rota local guardada iria à máquina antiga.
+export const REMOVED_BASE = 'http://servidor-removido.invalid';
+
 export function baseOf(s: Server): string {
+  if (s.removed) return REMOVED_BASE;
   return rotas.get(s.id) ?? s.baseUrl;
 }
 

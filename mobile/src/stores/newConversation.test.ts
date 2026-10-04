@@ -214,6 +214,25 @@ describe('newConversation', () => {
     expect(calls.create).toHaveBeenCalledOnce();
   });
 
+  it('branch nova sem nome segue o nome final da sessão; com nome digitado, fica o digitado', async () => {
+    calls.create.mockImplementation(async (_s, body) => ({ name: body.name, state: 'idle' }));
+    const worktree = { new_branch: true, base: 'main' };
+    await beginAttempt('server-a', { ...input, body: { ...input.body, ...worktree, branch: '' } });
+    const sent = calls.create.mock.calls[0][1];
+    expect(sent.name).toMatch(/^mobile-[a-z0-9]{4}$/);
+    expect(sent).toMatchObject({ branch: sent.name, new_branch: true, base: 'main' });
+
+    _resetNewConversationForTests(); memory.clear();
+    await beginAttempt('server-a', { ...input, body: { ...input.body, ...worktree, branch: 'feat-x', name: 'meu-nome' } });
+    expect(calls.create.mock.calls[1][1]).toMatchObject({ name: 'meu-nome', branch: 'feat-x', new_branch: true });
+  });
+
+  it('branch nova sem nome segue o nome digitado da sessão já limpo', async () => {
+    calls.create.mockImplementation(async (_s, body) => ({ name: body.name, state: 'idle' }));
+    await beginAttempt('server-a', { ...input, body: { ...input.body, new_branch: true, branch: '', name: 'Minha Sessão' } });
+    expect(calls.create.mock.calls[0][1]).toMatchObject({ name: 'Minha Sessão', branch: 'Minha-Sessao', new_branch: true });
+  });
+
   it('recusa definitiva (cwd inválido) volta ao rascunho editável com o motivo do servidor', async () => {
     calls.create.mockRejectedValueOnce(httpError(400, '400: diretório não existe'));
     await beginAttempt('server-a', input);

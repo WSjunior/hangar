@@ -25,6 +25,11 @@ CLIENT_INFO = {"name": "hangar", "title": None, "version": "0.1.0"}
 # `--dangerously-bypass-approvals-and-sandbox` so existe no CLI, e deixaria as duas divergentes).
 SANDBOX = "danger-full-access"
 APPROVAL = "never"
+PERMISSION_POLICIES = {
+    "Ask for approval": ("on-request", "read-only"),
+    "Approve for me": ("on-request", "workspace-write"),
+    "Full Access": ("never", "danger-full-access"),
+}
 # Nome do lancador no PATH (symlink do install-claude-wrapper.sh).
 EXECUTAVEL = "hangar-codex-tui"
 
@@ -34,7 +39,9 @@ def comando_do_lancador(cwd: str, initial_prompt: str | None = None,
                         effort: str | None = None,
                         codex_home: str | None = None,
                         codex_account: str | None = None,
-                        approval: str | None = None, sandbox: str | None = None) -> list[str]:
+                        approval: str | None = None, sandbox: str | None = None,
+                        tool_output_token_limit: int | None = None,
+                        transfer_id: str | None = None) -> list[str]:
     """O comando do pane de uma sessao Codex: o lancador unico, o MESMO nos tres chamadores.
 
     O nome da sessao nao entra aqui — `tmux new-session` carimba CP_SESSION_NAME no pane e o
@@ -62,6 +69,20 @@ def comando_do_lancador(cwd: str, initial_prompt: str | None = None,
         argv += ["--approval-policy", approval]
     if sandbox:
         argv += ["--sandbox", sandbox]
+    if tool_output_token_limit is not None:
+        argv += tool_output_override(tool_output_token_limit, launcher=True)
+    if transfer_id is not None:
+        import uuid
+        argv += ["--transfer-id", str(uuid.UUID(transfer_id))]
     if initial_prompt:
         argv += ["--prompt", initial_prompt]
     return argv
+
+
+def tool_output_override(limit: int | None, *, launcher: bool = False) -> list[str]:
+    if limit is None:
+        return []
+    if type(limit) is not int or limit <= 0:
+        raise ValueError("limite de resultado de ferramenta inválido")
+    return (["--tool-output-token-limit", str(limit)] if launcher else
+            ["-c", f"tool_output_token_limit={limit}"])

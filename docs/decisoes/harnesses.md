@@ -18,6 +18,48 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   tamanho; não reconstruir ou parsear por delta. Medição:
   [coalescimento dos deltas](#deltas-claudecodex-acumular-antes-de-publicar).
 
+- **O plugin do Hangar entra por `--plugin-dir` mesmo estando na pasta de skills.** Na cadeia
+  de hooks, o primeiro plugin carregado fica por fora: `--plugin-dir` vem antes do marketplace,
+  e a pasta de skills vem depois. A faixa dos mods (`plugins/hangar/hooks/ui.ts`) só recebe por
+  `next(e)` o que os plugins de dentro desenham, e um mod que responde a faixa sem chamar
+  `next` esconde tudo dos que estão por dentro dele. Sessão aberta fora do Hangar carrega só
+  pela pasta de skills e não espelha a faixa dos mods do marketplace. Ver
+  [faixa dos mods](#faixa-dos-mods-ordem-na-cadeia-medida-03102026).
+
+- **Faixa e painéis dos mods saem no SSE por fonte própria, nunca na carona do `state`.** O
+  `state` só sai quando a chave muda; o mod que relê com a sessão parada ficava velho no app. O
+  plugin reenvia a faixa quando a ponte aparece e quando o `/pull` responde `faixa: false` (backend
+  reiniciado começa sem ela): sem isso, faixa que não muda não voltava ao app. Ver [painel e clique](#mods-painel-clique-e-o-que-acontece-no-aparelho-04102026).
+
+- **Botão de mod clicado no app é clique de mouse SGR no pane, achado pelo rótulo e confirmado
+  pelo `ui.press`.** Nenhuma API do engine dispara o botão de outro plugin. Sem mouse ligado, com
+  o pane em copy-mode, rótulo ausente ou repetido na região do site, o backend recusa em vez de
+  clicar às cegas. O mouse é lido por `#{mouse_sgr_flag}` no tmux e por `#{alternate_on}` no
+  psmux, que não tem as flags de mouse. A âncora da faixa (primeiro texto) conta o `label` de
+  botão: sem isso, faixa que começa por botão deixava a linha dele fora da região.
+
+- **Sessão Claude com terminal nasce com `CLAUDE_CODE_NO_FLICKER=1`.** O Claude Code só liga o
+  mouse em tela cheia, e no Windows por SSH desliga a tela cheia sozinho ("fullscreen disabled:
+  Windows over SSH"); a variável força a tela cheia mesmo sem `"tui": "fullscreen"` nas
+  configurações. Sem ela, o clique dos botões de mod pelo app não tem onde chegar.
+
+- **Clique do app que copia ou abre URL acontece no aparelho de quem clicou.** O plugin responde
+  no lugar do `ui.copy` e do `process.run` de abridor de URL só quando a chamada vem do mod dono
+  do botão, até 1,5 s depois de um press que o backend confirmou como vindo do app. Cópia e
+  abertura levam o id da tentativa; chegando depois da resposta ao app, o backend recusa e o
+  plugin deixa acontecer no terminal, para não sumir nem cair no clique seguinte.
+
+- **A prévia corta cada linha na largura da conversa quando há painel ancorado.** A largura é o
+  `bodyColumns` da faixa + 5; sem o corte, a borda `│` do painel vira texto da prévia.
+
+- **tok/s "agora" é medido no stream da resposta, nunca no transcript.** Do `message_start`
+  ao fim da resposta, com o `output_tokens` real: sem terminal pelo `stream_event`; com
+  terminal pelo `turn.step` do plugin (`rate.ts` → `POST /api/plugin/rate`). Nunca a partir
+  do primeiro texto: o pensamento resumido chega segundos depois de gerado. Só o loop
+  principal entra. Medida de outro transcript ou mais velha que a última resposta do
+  transcript não vale; aí a reserva sai do jsonl e leva "~", porque inclui a espera pelo
+  primeiro token. Ver [velocidade de geração](#velocidade-de-geração-tok-s).
+
 - **Modo de abertura omitido herda a preferência do servidor.** `headless_default` nasce
   ligado para Claude/Codex; a escolha humana do dono na criação passa a ser o padrão.
   `headless=false`/`--terminal` e `headless=true`/`--headless` explícitos prevalecem.
@@ -105,6 +147,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   é por AUSÊNCIA de long-poll vivo; entrega só vale com prova (rascunho confirmado, Enter aceito,
   composer vazio). `classic.*` não chega a plugin de `--plugin-dir`, `$` não atravessa `import`, e
   é um módulo por plugin. Meça no SSE, não em linha de log.
+- **Observador tmux somente de leitura não pode bloquear o envio ao pane.** Após a recusa exata
+  `client is read-only`, antes de qualquer tecla, `send-keys` tenta uma vez com cliente vazio,
+  mantendo o pane de destino. Cliente explícito, outras falhas e psmux não entram nessa recuperação.
+  Ver [cliente somente de leitura](#cliente-tmux-somente-de-leitura-não-bloqueia-envios-ao-pane).
 - **Pedido de permissão só fica com o plugin com alguém no app E ninguém no terminal**: `tool.check`
   roda antes do diálogo, e segurar esconde o pedido de quem olha o terminal. Na dúvida (tmux mudo,
   Windows), não segura.
@@ -179,6 +225,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   (`<skill name="…" location="…">`) e ainda não é tratado.
 - **A preferência da barra do Claude Code não autoriza sobrescrever `statusLine`**: desligada,
   o instalador preserva o que está lá.
+- **Contexto e cota da sessão Claude não dependem da statusline.** Quem mantém a barra própria
+  tem o contexto lido do transcript (`claude_context.py`, campo `context` da lista) e a cota da
+  API de uso; a barra do Hangar, quando traz o número, continua valendo.
 - **Hook nosso nunca bloqueia prompt, e a falha dele não some calada.** Em `SessionStart` e
   `UserPromptSubmit` o sufixo é `|| echo "<aviso>"` (texto puro, ASCII): sai com 0 e o aviso
   entra no contexto do modelo. Nos demais eventos o stdout não chega a ninguém e fica
@@ -229,6 +278,116 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   sem saída, recusa e religa na origem. A lista e a recusa saem de `_account_targets`
   (`ACCOUNT_LOW_PCT`, `ACCOUNT_FULL_PCT`). Ver
   [Continuar a mesma conversa noutra conta](#continuar-a-mesma-conversa-noutra-conta).
+
+- **Transferência Claude → Codex não está aceita só porque a importação persistiu.** A prova
+  precisa conferir os itens enviados pelo CLI após retomada, incluindo resultados completos.
+  Na captura stdio 0.159.3, manter `tool_output_token_limit` da sessão conservou 144.000
+  caracteres após reinício. Essa captura simulada não comprova interface, modelo real ou
+  restauração física. Ver [transferência em validação](#transferência-claude--codex-captura-nativa-em-validação).
+
+## Cliente tmux somente de leitura não bloqueia envios ao pane
+
+Medido em 04/10/2026, Linux com tmux 3.7c. Envios ao Claude pelo celular falharam repetidamente
+com `client is read-only`; a rota os apresentou como envio incompleto, e as teclas de limpeza
+do composer também foram recusadas. Havia um observador de controle anexado com as flags
+`read-only,ignore-size,no-output`.
+
+O `-t` escolhe o pane, mas `send-keys` também infere um cliente. Quando o cliente escolhido é o
+observador, o tmux recusa o comando antes de enviar qualquer tecla, como confirma o
+[código do tmux 3.7c](https://github.com/tmux/tmux/blob/3.7c/cmd-send-keys.c#L159).
+Essa recusa não significa que o texto foi digitado pela metade.
+
+A recuperação em `tmux._run` se limita ao código 1 e à mensagem exata dessa recusa. Repete o
+comando uma vez com `-c ""`, conservando alvo e teclas. O cliente vazio não resolve para um
+cliente anexado, conforme a [resolução de clientes do tmux](https://github.com/tmux/tmux/blob/3.7c/cmd-find.c),
+e a proteção do observador permanece. A recusa fica registrada como `mux.readonly_client` no
+diário, sem texto enviado. Não há repetição para outras falhas, cliente explícito ou Windows.
+O caminho de sucesso continua com uma chamada e não exige uma sondagem de versão.
+
+Reprodução em servidor tmux isolado: com apenas o observador somente de leitura anexado, o
+comando original voltou com a mesma recusa. Após a correção, texto e Enter chegaram a um
+processo `cat`, que devolveu a linha submetida. O observador continuou somente de leitura,
+e o servidor de teste foi encerrado. Os testes também cobrem retorno de erro após a única
+tentativa de recuperação, envio literal de `-c`, cliente explícito e isolamento do psmux.
+
+## Transferência Claude → Codex: captura nativa em validação
+
+Medido em 03/10/2026 com o binário ELF bruto `codex-cli 0.159.3` no Linux, pelo roteiro
+`scripts/probe-claude-to-codex.py`. O código está integrado na árvore isolada de implementação;
+não foi ativado no serviço nem recebeu aceitação completa. Esta é a única versão conferida
+para esta captura.
+
+Método: fonte Claude artificial → `convert_snapshot` → `prepare_import` → app-server stdio
+nativo → pedido Responses HTTP com resposta SSE simulada em `127.0.0.1`. `HOME`, `CODEX_HOME`,
+workspace, fontes e captura ficam em diretórios privados descartáveis. Não há autenticação,
+inferência real ou desvio de sessões existentes para o simulador. `gpt-5.6-luna` identifica o
+modelo do catálogo usado na captura, não um padrão fixado pelo recurso.
+
+| Conferência | Resultado da segunda execução |
+| --- | --- |
+| Fonte artificial | 159.496 bytes; ramo selecionado sem o fork rejeitado nem resumo substituto. |
+| Itens importados nas duas capturas | 11 itens na mesma ordem, projeção de 158.374 bytes e SHA-256 `82b21b55e1325dcf7e17842e326ac07e1020e0e5ed774baf1089b88ecc8a9120`. |
+| Resultado longo / argumentos | 144.000 caracteres completos e mesmos hashes após importação e após reinício do app-server. |
+| Conteúdo anterior à compactação, instruções, arquivo e chamada sem resultado | Comparados com originais independentes; zero diferença de bytes em ambas as capturas. |
+| Imagem PNG artificial | 69 bytes e SHA-256 idêntico; confere transporte, não compreensão da imagem. |
+| Ferramentas ativas | `exec`, `functions`, `request_user_input`, `wait`; `Read`, `Edit`, `Bash` ficam no histórico. |
+| Pedidos ao simulador | Zero antes do turno; dois turnos simulados concluídos, um em cada captura; zero pedidos de compactação. |
+| Fonte maior | 559.496 bytes recusados com `session_transfer_context_budget_exceeded`, sem pedido HTTP; não havia Claude físico a restaurar. |
+
+A projeção compara os campos históricos originais, omitindo IDs gerados pelo Codex e campos
+adicionais do protocolo. O pedido HTTP inteiro não tem hash igual entre capturas: inclui
+conteúdo nativo além da projeção. A fonte é maior que a projeção porque contém envelopes e
+registros operacionais que não são itens de contexto. Os hashes dos textos anteriores à
+compactação, instruções, arquivo, chamada sem resultado, argumentos, resultado longo e imagem
+são conferidos separadamente; a referência não vem apenas da saída do conversor.
+
+A primeira execução falhou ao confirmar a saída dos filhos do processo de preparação: o
+fechamento normal foi consultado cedo demais. A correção incorporada em `cb23906e` espera
+até 5 s por `wait_import_exit`, conferindo o dono do processo e preservando a causa original
+quando o fechamento também falha. A segunda execução passou a captura; isso não prova
+restauração da origem, comportamento de queda dura ou ausência de filhos em toda plataforma.
+
+Os limites desta prova vêm do [catálogo oficial na revisão fixa
+`01fc69f4026735edfdf6789820549727a4867b11`](https://raw.githubusercontent.com/openai/codex/01fc69f4026735edfdf6789820549727a4867b11/codex-rs/models-manager/models.json)
+e do [padrão do protocolo da mesma revisão](https://github.com/openai/codex/blob/01fc69f4026735edfdf6789820549727a4867b11/codex-rs/protocol/src/openai_models.rs#L389):
+janela configurada de 272.000, parcela utilizável de 258.400 (95%) e limiar de compactação
+de 244.800 (90%). Esses valores não comprovam acesso ou capacidade atual de um servidor real;
+o máximo anunciado pelo catálogo não foi usado como janela desta captura.
+
+O orçamento soma bytes UTF-8 dos itens serializados, 10.000 por imagem, instruções/ferramentas
+conhecidas e reserva de continuação; compara o total com o menor limite utilizável/de
+compactação. É uma estimativa conservadora, não uma contagem de tokens pelo tokenizer, e pode
+recusar conteúdo que caberia. Capacidade desconhecida ou mídia não suportada têm erros
+próprios; não levam a resumo, compactação ou descarte para fazer caber. O limite de resultado
+é por sessão e acompanha a importação/retomada, sem alterar a configuração global da conta.
+Os zeros de uso da resposta simulada não medem tokens ou custo do primeiro turno.
+
+Para repetir a captura, com autorização de execução e o ambiente Python já instalado, a
+partir da raiz do checkout que contém a implementação:
+
+```bash
+uv run --project backend --no-sync python scripts/probe-claude-to-codex.py \
+  --binary "<caminho-absoluto-do-binário-ELF-bruto-Codex-0.159.3>" \
+  --output-dir /tmp/claude-to-codex/native-proof-nova
+```
+
+O diretório de saída precisa ser novo, diretamente sob `/tmp/claude-to-codex`; o roteiro não
+reutiliza nem apaga uma captura. `results.json`, fonte e pedidos brutos permanecem privados,
+fora do versionamento. O comando não instala dependências nem substitui a aceitação do produto.
+
+Permanecem pendentes: conversa real integral e inferência com modelo/conta reais; interface e
+foco; guardas com origem/processos reais; modo Plano e permissões efetivas; WebSocket/TUI
+desta implementação; história/citações/mídia, fila e Arquivo no fluxo completo; recarga e
+falhas físicas; Windows e tokens/custo reais. Pesquisa anterior de TUI/WebSocket não aceita
+esta implementação. Testes automatizados, lint e typecheck não foram executados nesta etapa.
+
+Limite de recuperação: a trava do backend não controla digitação direta na TUI da origem;
+o estado é revalidado logo antes de pará-la. Queda dura sem dono ou captura final da árvore
+de processos mantém `restore_failed`: a ausência do processo raiz não prova que todos os
+filhos saíram, e não se mata um processo por semelhança. O erro e o histórico da origem
+continuam disponíveis; `POST /api/sessions/{name}/recarregar` tenta recuperar, sem promessa de
+recuperação automática em toda falha. Texto disponível de pensamento é histórico identificado;
+assinatura não vira raciocínio Codex, e conteúdo redigido/criptografado não é recuperável.
 
 ## Continuar a mesma conversa noutra conta
 
@@ -1326,6 +1485,60 @@ Fora do mod: pelo `/input` do app, `!echo oi` chegou ao modelo como texto (`prom
 o modelo rodou o Bash sozinho), não como modo bash; e `@README.md resuma…` enviado com o turno
 rodando foi absorvido nele (`queue-operation remove`, `reason: absorbed_mid_turn`).
 
+### Faixa dos mods: ordem na cadeia medida (03/10/2026)
+
+Claude Code 2.1.289 (Linux) e 2.1.288 (Windows), mod descartável que hooka `ui.render`
+`{ component: 'AbovePrompt' }`, grava o que `await next(e)` devolve e devolve igual; ao lado, o
+mod de progresso do pmedico, que responde a faixa com a própria árvore e NÃO chama `next`
+enquanto tem barra.
+
+| | o que foi medido |
+|---|---|
+| sonda por `--plugin-dir`, pmedico do marketplace | a sonda recebeu a árvore inteira da barra (`Box`/`Text`/`Raster`, `surface: "terminal"`, `bodyColumns` = largura do pane): ela fica por fora |
+| sonda pela pasta de skills, pmedico do marketplace | só `{"type":"engine"}` antes da barra; com a barra, o hook nem roda: a pasta de skills fica por dentro do marketplace |
+| plugin do Hangar pela pasta de skills, pmedico por `CLAUDE_CODE_PLUGIN_DIRS` | o backend recebeu só `above: null`: carga de sessão fica por fora da pasta de skills |
+| frequência | o hook roda a cada redesenho; com relógio na faixa, uma vez por segundo (36 vezes em ~30 s). O `ui.ts` junta os quadros em 500 ms e só envia quando a árvore muda |
+
+A API não tem prioridade nem ordem configurável (`Tier`: `prepend`, `user`, `append`, `builtin`,
+`core`; dentro de `user`, a ordem de carga). Por isso a sessão do Hangar leva `--plugin-dir`
+sempre: o par com a pasta de skills já estava medido (B acima), carrega um só e sem carga dupla.
+
+Sem terminal o caminho é outro e não depende de ordem: o backend entra como superfície remota
+(`control_request` `ui_attach`, depois `ui_render` do `AbovePrompt`) e o CLI avisa a mudança
+com `system`/`ui_invalidate`. Medido num `claude -p` stream-json: a resposta traz a árvore da
+superfície pedida (`desktop`/`mobile`: a barra vem como `Svg`, não `Raster`). Fica para depois da
+migração do runtime sem terminal para o Rust.
+
+### Mods: painel, clique e o que acontece no aparelho (04/10/2026)
+
+Claude Code 2.1.289 (Linux), sondas descartáveis carregadas por `--plugin-dir` ao lado do mod
+`review-mr` do pmedico (MR mergeado: lê o GitLab e encerra, sem efeito).
+
+| | o que foi medido |
+|---|---|
+| `ui.render` de `{ component: 'Pane' }` sem `requestId` | recebe o painel de OUTRO plugin com a árvore inteira e as props `title`, `placement` (`dock`/`inline`), `bodyColumns`, `scroll` |
+| `ui.press` sem matcher | vê o clique de outro plugin: `{plugin, element (key), component, requestId, surface}`; `requestId` é `above-prompt` na faixa e o id do painel no painel |
+| `ui.copy`, `ui.open`, `ui.close` | vistos com o texto copiado, o id/título/colunas do painel aberto e o `origin` de quem fechou |
+| chamadas do `$` (`OpEventOf`) | `process.run` de outro plugin é interceptável por nome; responder `{ value }` sem `next` impede o `xdg-open` de rodar na máquina do terminal. `origin.plugin` diz quem chamou |
+| disparar press de outro plugin | não existe método no `$`; só a superfície remota (`ui_client_press`, sessão por stream-json) ou o próprio terminal |
+| clique SGR por `send-keys -l` | `ESC[<0;x;yM` + `ESC[<0;x;ym` chega ao Claude Code em tela cheia (`#{mouse_sgr_flag}` = 1): abriu o painel, copiou o link e fechou o painel pelo `✕` do engine |
+| botão sem `plain` | o terminal desenha `[ rótulo ]` em volta do `label`; a busca pelo rótulo acha o texto dentro |
+| `onPress` do mod | dispara `$.ui.copy`/`$.process.run` sem `await`: a cópia pode chegar ao backend depois do `pressed`. Por isso a janela de 1,5 s no plugin e a espera de 0,3 s pelo efeito no backend |
+| prévia com painel ancorado | antes do corte, o SSE mandava `"text":"ok   …   │\n   …   │"` |
+
+**psmux (WinBoat, Windows 26200, psmux 3.3.8, Claude Code 2.1.289):** o psmux não tem
+`#{mouse_sgr_flag}`/`#{mouse_any_flag}`/`#{mouse_button_flag}` (vêm vazios); `#{alternate_on}` e
+`#{pane_in_mode}` existem. Aberto por SSH, o Claude Code registra "fullscreen disabled: Windows over
+SSH (ConPTY re-rendering) detected" e fica fora de tela cheia (`alternate_on` = 0): o clique SGR não
+pressiona nada, e os bytes também não aparecem no prompt. Com `CLAUDE_CODE_NO_FLICKER=1`, mesmo sem
+`"tui": "fullscreen"`, ele entra em tela cheia (`alternate_on` = 1) e o mesmo `send-keys -l` com o
+par SGR pressiona o botão (o `onPress` da sonda gravou o arquivo).
+
+O engine recusa carregar um módulo que guarda o próprio `$` numa variável (`engine = $`); só aceita
+o `$` no ponto da chamada ou num closure, como nos timers. O `tsc` não pega isso, o
+`claude plugin validate` pega. Um painel que o mod abre sem pedido da pessoa só é desenhado a
+partir de 144 colunas (110 depois de pedido); abaixo disso não há árvore para espelhar.
+
 ## O `wire.jsonl` do Kimi não é um transcript bem-comportado
 
 — duas armadilhas medidas em
@@ -2207,3 +2420,53 @@ Agregados por lote e fontes de reprodução ficam em
 o relatório não contém conversa real. O cálculo puro Rust segue conferido pelas fixtures
 Python. Remover a operação privada `reduce` sobe ambos os protocolos para 3; a coordenação
 com `rust-parte2` reservou 4 ao contrato posterior da 2B.
+
+## Velocidade de geração (tok/s)
+
+O `tok_s` da faixa (média da sessão) somava os `output_tokens` e dividia pelo intervalo entre a
+linha anterior do jsonl e a linha da resposta. O Claude Code só grava a resposta quando ela
+termina, então esse intervalo inclui fila, leitura do contexto e o caminho entre o resultado da
+ferramenta e o próximo pedido. Medido em 03/10/2026 nas sessões do hangar: espera média até a
+primeira resposta de ~4,8 s, e o número ficava entre 60 e 80 tok/s na sessão inteira, sem mexer
+(283 chamadas na `0c62a065`). Resposta curta, a maioria das chamadas de ferramenta, puxava o
+número para baixo. Os tokens de subagente entravam na soma sem o tempo deles, puxando para cima.
+
+Correção: subagente saiu do `tok_s`, e a velocidade "agora" e "últimas 10" passou a vir do
+stream. O `output_tokens` do jsonl estava certo (igual em todas as linhas da mesma mensagem);
+o problema era só o relógio.
+
+Sem estimativa durante a geração: a primeira versão mostrava caracteres ÷ 4 enquanto a resposta
+escrevia, e o número medido foi ~67 tok/s em voo contra ~122 exatos quando a mesma resposta
+fechava. O pensamento chega resumido (`--thinking-display summarized`), então os caracteres
+não acompanham os tokens. O "agora" é a última resposta fechada.
+
+O relógio parte do `message_start`, não do primeiro pedaço de conteúdo. Medido no mesmo dia
+com `claude -p --include-partial-messages --thinking-display summarized` (Opus 5.5):
+`message_start` em 5,04 s, primeiro `thinking_delta` em 7,31 s, fim em 11,00 s com 431 tokens.
+Partindo do primeiro pedaço daria 117 tok/s; partindo do `message_start`, 72. Os tokens do
+pensamento foram gerados antes de o resumo dele chegar.
+
+## Contexto e cota sem a statusline do Hangar (03/10/2026)
+
+03/10/2026. Com a preferência da barra desligada, o `statusLine` é o da pessoa, num formato que o
+app não lê, e os anéis de Contexto e da conta no rodapé do composer do nativo mostravam "sem
+dado" o tempo todo, embora a informação existisse.
+
+- **Contexto:** o `usage` da última resposta do agente principal no transcript é o pedido inteiro
+  (`input + cache_read + cache_creation`). Subagente (`isSidechain`) e resposta `<synthetic>`
+  ficam de fora. O id do modelo no transcript não diz se é a variante de 1M, então a janela sai
+  do modelo da PRÓPRIA sessão (o que a statusline recebeu, o `--model` do processo ou o sidecar
+  da sessão sem terminal) e só na falta dele do `model` do `settings.json` da conta: o Hangar abre
+  a sessão com `--model opus[1m]` sem mexer nesse arquivo. Termina em `[1m]` ou o uso já passou
+  de 200k (só cabe na de 1M) → 1M; senão 200k. `CLAUDE_CODE_MAX_CONTEXT_TOKENS` do processo (ou
+  `context_window` do sidecar) vence os dois. Lido com o mesmo TTL da statusline e entra na
+  assinatura da lista em baldes de 5%. O cache guarda o `jsonl` lido: depois do `/clear` o anel
+  fica sem dado até a primeira resposta, em vez de mostrar o número da conversa anterior.
+- **Cota:** o anel da conta usa a da API de uso, a mesma da pílula do topo, quando a linha não
+  traz a janela de 5 h ou a semanal.
+- **A linha do Hangar vence:** quando ela traz o contexto, o número dela é o exato
+  (`context_window_size` do Claude Code) e continua sendo o usado.
+
+Medição (03/10/2026, sessão Claude com barra própria, Opus em `[1m]`): o transcript deu 539.351
+tokens contra 489k a 510k da barra minutos antes (a conversa crescendo entre uma e outra); no
+nativo os anéis passaram de "sem dado" para Contexto 54% e a conta 100% (semanal).

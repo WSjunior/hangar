@@ -1285,7 +1285,17 @@ def test_send_prompt_tui_recem_aberta_lenta_entrega_sem_falso_partial(monkeypatc
 # de 600 linhas e devolve "sent"; o clipboard entrega 600 de 600.
 
 
-def test_windows_clipboard_com_prova_manda_enter_e_nao_digita(monkeypatch):
+@pytest.fixture
+def no_transfer(monkeypatch):
+    # As travas de transferencia montam `Path.home()`, que quebra com `os.name` dublado
+    # (docs/decisoes/windows.md); aqui elas nao sao o assunto.
+    from app import conversation_transfer
+    from app.adapters.codex import sessions as codex_sessions
+    monkeypatch.setattr(conversation_transfer, "transfer_active", lambda _name: False)
+    monkeypatch.setattr(codex_sessions, "exists", lambda _name: False)
+
+
+def test_windows_clipboard_com_prova_manda_enter_e_nao_digita(monkeypatch, no_transfer):
     # O caminho novo NAO pode digitar nada: se o paste_text for chamado, o texto vai duas vezes.
     monkeypatch.setattr(terminal_input.os, "name", "nt")
     with patch("app.terminal_input.tmux.has_session", return_value=True), \
@@ -1302,7 +1312,7 @@ def test_windows_clipboard_com_prova_manda_enter_e_nao_digita(monkeypatch):
     assert call("cc", "Enter") in sk.call_args_list
 
 
-def test_windows_sem_prova_vira_partial_e_nao_digita(monkeypatch):
+def test_windows_sem_prova_vira_partial_e_nao_digita(monkeypatch, no_transfer):
     # Sem prova NAO cai no caminho antigo: ele perde 291 de 600 linhas e devolve True. Vira partial,
     # que limpa o composer e deixa o drain reenfileirar.
     monkeypatch.setattr(terminal_input.os, "name", "nt")
@@ -1318,7 +1328,7 @@ def test_windows_sem_prova_vira_partial_e_nao_digita(monkeypatch):
     assert call("cc", "Enter") not in sk.call_args_list
 
 
-def test_windows_clipboard_nao_escrito_nao_manda_enter(monkeypatch):
+def test_windows_clipboard_nao_escrito_nao_manda_enter(monkeypatch, no_transfer):
     # Quando a escrita do clipboard falha, o clipboard fica com o conteudo ANTERIOR (medido). Seguir
     # daqui submeteria a mensagem PASSADA inteira como se fosse esta.
     monkeypatch.setattr(terminal_input.os, "name", "nt")
@@ -1357,7 +1367,7 @@ def test_posix_nunca_usa_clipboard(monkeypatch):
     assert not pvc.called
 
 
-def test_windows_composer_ilegivel_nao_cola(monkeypatch):
+def test_windows_composer_ilegivel_nao_cola(monkeypatch, no_transfer):
     # Sem enxergar o composer, a foto dos placeholders sai VAZIA — e vazio nao e "nao havia nenhum",
     # e "nao consegui olhar". Um placeholder que ja estivesse la contaria como nosso e liberaria o
     # Enter. Neste caminho a prova e o unico gate, entao para antes de escrever o clipboard.

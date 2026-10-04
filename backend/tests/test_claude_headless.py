@@ -44,6 +44,8 @@ def adapter(sidecar):
     ad = ClaudeHeadlessAdapter()
     sess = _Sessao("s1", sidecar)
     sess.proc = _Proc()
+    sess.initialize_ok = True
+    sess.initialize_done.set()
     ad._sessions["s1"] = sess
     escritos: list[dict] = []
 
@@ -56,6 +58,85 @@ def adapter(sidecar):
 
 def _run(coro):
     return asyncio.run(coro)
+
+
+def test_initialize_event_is_not_positive_control_proof(adapter, monkeypatch):
+    from unittest.mock import AsyncMock
+    sess = adapter._sessions["s1"]
+    monkeypatch.setattr(adapter, "_ligar", AsyncMock(return_value=sess))
+
+    async def run():
+        sess.initialize_done.clear()
+        sess.initialize_ok = None
+        await adapter._on_system(sess, {"subtype": "init", "model": "haiku"})
+        assert sess.initialized.is_set() and not sess.initialize_done.is_set()
+        sess.initialize_error = "initialize refused"
+        sess.initialize_ok = False
+        sess.initialize_done.set()
+        with pytest.raises(RuntimeError, match="refused"):
+            await adapter.ensure_running("s1", require_initialize=True)
+
+    _run(run())
+
+
+def test_initialize_control_refusal_is_recorded_not_ready(adapter, monkeypatch):
+    from unittest.mock import AsyncMock
+    sess = adapter._sessions["s1"]
+    monkeypatch.setattr(adapter, "_ctrl", AsyncMock(side_effect=RuntimeError("initialize refused")))
+    monkeypatch.setattr(adapter, "_notify", AsyncMock())
+    monkeypatch.setattr(adapter, "_agendar_cota", lambda *a: None)
+    drain = AsyncMock()
+    monkeypatch.setattr(adapter, "_drenar_fim_de_turno", drain)
+    _run(adapter._esperar_initialize(sess))
+    assert sess.initialize_done.is_set() and sess.initialize_ok is not True
+    assert sess.initialize_error == "initialize refused"
+    drain.assert_not_awaited()
+
+
+def test_valid_initialize_control_proves_ready_and_dead_process_does_not(adapter, monkeypatch):
+    from unittest.mock import AsyncMock
+    sess = adapter._sessions["s1"]
+    monkeypatch.setattr(A, "pid_vivo", lambda pid: True)
+    monkeypatch.setattr(adapter, "_ctrl", AsyncMock(return_value={"commands": []}))
+    monkeypatch.setattr(adapter, "_notify", AsyncMock())
+    monkeypatch.setattr(adapter, "_agendar_cota", lambda *a: None)
+    monkeypatch.setattr(adapter, "_drenar_fim_de_turno", AsyncMock())
+    monkeypatch.setattr(adapter, "_ligar", AsyncMock(return_value=sess))
+
+    async def run():
+        await adapter._esperar_initialize(sess)
+        assert await adapter.ensure_running("s1", require_initialize=True) is sess
+        sess.proc.returncode = 1
+        with pytest.raises(RuntimeError):
+            await adapter.ensure_running("s1", require_initialize=True)
+
+    _run(run())
+
+
+def test_old_snapshot_without_init_reconnects_without_positive_new_launch_proof(adapter, monkeypatch):
+    from unittest.mock import AsyncMock
+    sess = adapter._sessions["s1"]
+    monkeypatch.setattr(adapter, "_notify", AsyncMock())
+    monkeypatch.setattr(A, "_uso_da_ultima_chamada", lambda *a: None)
+    monkeypatch.setattr(adapter, "_ligar", AsyncMock(return_value=sess))
+
+    async def run():
+        sess.initialize_ok = None
+        await adapter._aplicar_snapshot(sess, {})
+        assert await adapter.ensure_running("s1") is sess
+        with pytest.raises(RuntimeError):
+            await adapter.ensure_running("s1", require_initialize=True)
+
+    _run(run())
+
+
+def test_fixed_model_status_never_displays_routing_prefix(adapter):
+    sess = adapter._sessions["s1"]
+    sess.meta["engine_account"] = "default"
+    sess.model = "hangar-fixed/gpt-5.5"
+    assert "hangar-fixed/" not in adapter.status_line(sess)
+    assert "gpt-5.5" in adapter.status_line(sess)
+    assert "hangar-fixed/" not in A._linha_parada({**sess.meta, "model": sess.model, "effort": "low"})
 
 
 def test_reload_keeps_session_when_termination_fails_off_loop(adapter, monkeypatch):
@@ -366,6 +447,8 @@ def test_prompt_waits_for_idle_shutdown_and_uses_new_process(adapter, monkeypatc
 
     async def spawn(sess, **kwargs):
         sess.proc = _Proc()
+        sess.initialize_ok = True
+        sess.initialize_done.set()
         return True
 
     async def write(sess, obj):
@@ -1144,6 +1227,8 @@ def test_ensure_running_nao_sobe_dois_processos(sidecar, monkeypatch):
         subidas.append(sess.sid)
         await asyncio.sleep(0.05)
         sess.proc = _Proc()
+        sess.initialize_ok = True
+        sess.initialize_done.set()
         return True
     monkeypatch.setattr(ad, "_spawn", spawn_falso)
 

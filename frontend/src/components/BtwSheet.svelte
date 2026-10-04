@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   import { tick, untrack } from 'svelte';
   import BottomSheet from './BottomSheet.svelte';
   import Spinner from './Spinner.svelte';
@@ -16,6 +17,7 @@
     onClose: () => void;
   }
   let { open, sessionName, pergunta = '', onClose }: Props = $props();
+  const sessionServer = useSessionServer();
 
   let itens = $state<PerguntaLateral[]>([]);
   let emVoo = $state<string | null>(null);
@@ -38,7 +40,7 @@
       // Pergunta da abertura anterior ainda em voo: o "respondendo…" dela não é desta abertura, e
       // deixá-lo aceso travava a pergunta nova ("já tem uma em andamento") até a antiga voltar.
       emVoo = null;
-      historicoLateral(sessionName)
+      historicoLateral(sessionName, sessionServer())
         .then((h) => { if (my === epoch) { itens = h; void rolarFim(); } })
         .catch((e) => { if (my === epoch) erro = m.btw_historico_falhou({ erro: formataErro(e) ?? String(e) }); });
       if (q.trim()) void perguntar(q);
@@ -70,7 +72,7 @@
     texto = '';
     void rolarFim();
     try {
-      const r = await perguntaLateral(sessionName, q);
+      const r = await perguntaLateral(sessionName, q, sessionServer());
       if (my !== epoch) return;
       itens = [...itens, r];
     } catch (e) {

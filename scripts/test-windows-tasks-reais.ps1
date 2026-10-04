@@ -32,11 +32,11 @@ foreach ($fn in @('Suspender-Recuperacao', 'Restaurar-Recuperacao')) {
 
 # Mesma forma das tarefas reais (install.ps1:1835-1840): logon interativo, sem parar na bateria,
 # sem limite de tempo, IgnoreNew e recuperacao 3x de minuto em minuto.
-$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+$principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
 $cfg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
             -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew `
             -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-$gatilho = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$gatilho = New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
 $acao = New-ScheduledTaskAction -Execute 'cmd.exe' `
             -Argument "/c ping -n 120 127.0.0.1 > `"$marcador`"" -WorkingDirectory $env:TEMP
 

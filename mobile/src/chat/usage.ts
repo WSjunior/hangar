@@ -1,4 +1,4 @@
-import { abbrevNum, basename, type SessionInfo, type StatsEvent, type StatusFields } from '@hangar/core';
+import { abbrevNum, basename, rateLabel, type SessionInfo, type StatsEvent, type StatusFields } from '@hangar/core';
 import * as m from '../paraglide/messages';
 
 const fmtDur = (ms: number) =>
@@ -15,6 +15,8 @@ export function linhaStats(s: StatsEvent): string[] {
     if (s.tool_ms) p.push(m.stats_tools({ t: fmtDur(s.tool_ms) }));
   }
   if (s.tok_s) p.push(m.stats_toks({ n: Math.round(s.tok_s) }));
+  if (s.tok_s_now) p.push(m.stats_toks_now({ n: rateLabel(s.tok_s_now, s.tok_s_exact) }));
+  if (s.tok_s_recent) p.push(m.stats_toks_recent({ n: rateLabel(s.tok_s_recent, s.tok_s_exact) }));
   if (s.ttft_ms) p.push(m.stats_ttft({ t: fmtDur(s.ttft_ms) }));
   if (s.cache_pct != null) p.push(m.stats_cache({ n: s.cache_pct }));
   p.push(m.stats_io({ i: abbrevNum(s.in_tok), o: abbrevNum(s.out_tok) }));

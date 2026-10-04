@@ -25,6 +25,8 @@ def _isola(tmp_path, monkeypatch):
     # Convenção da casa (ver tests/test_runner_api.py): token real + header Bearer. Deixar o token
     # vazio NÃO libera o require_auth — verificado, continua 401.
     monkeypatch.setattr(settings, "auth_token", TOKEN)
+    # Sem isto o teste leria o ~/.cli-proxy-api de quem roda a suíte.
+    monkeypatch.setattr("app.cliproxy.is_local_engine", lambda cfg: False)
     yield
 
 
@@ -135,6 +137,15 @@ def test_modelos_usa_a_key_gravada_quando_o_cliente_manda_so_o_nome(cli, monkeyp
     assert r.json()["modelos"][0]["id"] == "k3"
     assert vistos["api_key"] == "sk-kimi-abcdefgh1234"
     assert vistos["base_url"] == "https://api.kimi.com/coding"
+
+
+def test_modelos_diz_qual_gateway_atende(cli, monkeypatch):
+    monkeypatch.setattr("app.engine_probe.listar_modelos", lambda b, k: [{"id": "gpt-6.1-sol"}])
+    monkeypatch.setattr("app.cliproxy.is_local_engine", lambda cfg: cfg["base_url"] == "http://127.0.0.1:8317")
+    r = cli.post("/api/engines/modelos",
+                 json={"base_url": "http://127.0.0.1:8317", "api_key": "k"}, headers=AUTH)
+    assert r.status_code == 200
+    assert r.json()["gateway"] == "cliproxyapi"
 
 
 def test_modelos_com_falha_do_provedor_volta_502_com_a_mensagem(cli, monkeypatch):

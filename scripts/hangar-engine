@@ -12,6 +12,7 @@ ambiente é aplicado DENTRO do processo e, depois do exec, o cmdline é o do com
   hangar-engine --list                       -> nome<TAB>label<TAB>modelo
   hangar-engine --env <motor>                -> CHAVE=VALOR por linha (diagnóstico)
   hangar-engine --exec <motor> [--model <id>] [--context <n>] -- <cmd> ...
+  Conta fixa: --account <id> --account-home <home> --account-base-url <url>, resolvidos no backend.
                                          -> executa cmd com o env do motor (substitui este processo)
 
 `--model`/`--context` são a escolha da tela de abertura: o env do motor tem que saber qual modelo
@@ -28,9 +29,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
 from app import engines  # noqa: E402
 
 
-def _env_ou_morre(nome: str, modelo: str | None = None, context: int | None = None) -> dict[str, str]:
+def _env_ou_morre(nome: str, modelo: str | None = None, context: int | None = None,
+                  account: str | None = None, account_home: str | None = None,
+                  account_base: str | None = None) -> dict[str, str]:
     try:
-        return engines.env_de(nome, modelo, context)
+        return engines.env_de(nome, modelo, context, engine_account=account,
+                              engine_account_home=account_home, engine_account_base_url=account_base)
     except (KeyError, ValueError) as e:
         # KeyError: motor não existe no registro. ValueError: existe, mas engines.json foi
         # hand-editado com um valor que viola o contrato de shell (\n/\r/\0 — ver env_de). Os dois
@@ -63,14 +67,21 @@ def main(argv: list[str]) -> int:
         nome = argv[2]
         modelo = None
         context = None
+        account = account_home = account_base = None
         i = 3
         while i < corte:
-            if argv[i] in ("--model", "--context"):
+            if argv[i] in ("--model", "--context", "--account", "--account-home", "--account-base-url"):
                 if i + 1 >= corte:
                     print(f"hangar-engine: {argv[i]} precisa de um valor", file=sys.stderr)
                     return 2
                 if argv[i] == "--model":
                     modelo = argv[i + 1]
+                elif argv[i] == "--account":
+                    account = argv[i + 1]
+                elif argv[i] == "--account-home":
+                    account_home = argv[i + 1]
+                elif argv[i] == "--account-base-url":
+                    account_base = argv[i + 1]
                 else:
                     try:
                         context = int(argv[i + 1])
@@ -81,7 +92,17 @@ def main(argv: list[str]) -> int:
             else:
                 print(f"hangar-engine: opção desconhecida {argv[i]!r}", file=sys.stderr)
                 return 2
-        env = _env_ou_morre(nome, modelo, context)
+        if account is None and (account_home is not None or account_base is not None):
+            print("hangar-engine: vínculo de conta sem --account", file=sys.stderr)
+            return 2
+        env = _env_ou_morre(nome, modelo, context, account, account_home, account_base)
+        if account is not None and "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in env:
+            os.environ.pop("CLAUDE_CODE_MAX_CONTEXT_TOKENS", None)
+        if account is None:
+            # Não herde a escolha de outra sessão que lançou este processo.
+            os.environ.pop("CP_ENGINE_ACCOUNT", None)
+            os.environ.pop("CP_ENGINE_CREDENTIAL_ID", None)
+            os.environ.pop("CP_ENGINE_ACCOUNT_BASE_URL", None)
         cmd = argv[corte + 1:]
         if not cmd:
             # A guarda antiga (`argv[3] == "--"` com len>=5) garantia comando depois do `--`; a nova

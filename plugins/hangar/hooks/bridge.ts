@@ -8,8 +8,22 @@ let atual: Bridge | null = null;
 let ultimoEstado: string | null = null;
 const id =`${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
+// Quem guarda algo só na memória do backend (a faixa dos mods) e reenvia quando a ponte aparece
+// ou quando o backend diz que não tem (reiniciado, ele começa vazio).
+const resendListeners = new Set<() => void>();
+
 export function setBridge(b: Bridge): void {
+  const novo = !atual;
   atual = b;
+  if (novo) askResend();
+}
+
+export function askResend(): void {
+  for (const cb of resendListeners) cb();
+}
+
+export function onResend(cb: () => void): void {
+  resendListeners.add(cb);
 }
 
 export function clearBridge(): void {

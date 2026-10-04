@@ -35,7 +35,7 @@ describe('Composer — pílula de permissão reage a sessionState', () => {
     await new Promise((r) => setTimeout(r, 0));
     await tick();
     expect(vi.mocked(api.getPermissionModes)).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(api.getPermissionModes)).toHaveBeenCalledWith('perm-test', false);
+    expect(vi.mocked(api.getPermissionModes)).toHaveBeenCalledWith('perm-test', false, undefined);
 
     // muda working -> idle: deve disparar segunda leitura
     (harness as unknown as { setState: (v: string) => void }).setState('idle');
@@ -45,7 +45,7 @@ describe('Composer — pílula de permissão reage a sessionState', () => {
 
     expect(vi.mocked(api.getPermissionModes)).toHaveBeenCalledTimes(2);
     // segunda chamada também sem sondar
-    expect(vi.mocked(api.getPermissionModes).mock.calls[1]).toEqual(['perm-test', false]);
+    expect(vi.mocked(api.getPermissionModes).mock.calls[1]).toEqual(['perm-test', false, undefined]);
 
     unmount(harness as never);
     document.body.innerHTML = '';
@@ -114,7 +114,7 @@ describe('Composer — pílula de permissão reage a sessionState', () => {
     document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyP', key: 'P', altKey: true, shiftKey: true, bubbles: true }));
     await tick(); await new Promise((r) => setTimeout(r, 0)); await tick();
     // acceptEdits é o último da lista de 2 -> volta pro primeiro
-    expect(vi.mocked(api.setPermissionMode)).toHaveBeenCalledWith('perm-test', 'plan');
+    expect(vi.mocked(api.setPermissionMode)).toHaveBeenCalledWith('perm-test', 'plan', undefined);
 
     // sem Shift não é o atalho
     document.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyP', key: 'p', altKey: true, bubbles: true }));
@@ -144,8 +144,8 @@ describe('Composer — pílula de permissão reage a sessionState', () => {
     }
     await tick(); await new Promise((r) => setTimeout(r, 0)); await tick();
     await new Promise((r) => setTimeout(r, 0)); await tick();
-    expect(vi.mocked(api.getPermissionModes).mock.calls.at(-1)).toEqual(['perm-test', true]);
-    expect(vi.mocked(api.setPermissionMode)).toHaveBeenCalledWith('perm-test', 'auto');
+    expect(vi.mocked(api.getPermissionModes).mock.calls.at(-1)).toEqual(['perm-test', true, undefined]);
+    expect(vi.mocked(api.setPermissionMode)).toHaveBeenCalledWith('perm-test', 'auto', undefined);
 
     unmount(harness as never);
     document.body.innerHTML = '';
@@ -176,7 +176,7 @@ describe('Composer — pílula de permissão reage a sessionState', () => {
       ta.dispatchEvent(ev);
       expect(ev.defaultPrevented).toBe(true);
       await tick(); await new Promise((r) => setTimeout(r, 0)); await tick();
-      expect(api.setPermissionMode).toHaveBeenLastCalledWith('perm-test', mode);
+      expect(api.setPermissionMode).toHaveBeenLastCalledWith('perm-test', mode, undefined);
       expect(el.querySelector('[data-mode-trigger]')?.getAttribute('aria-pressed')).toBe(String(mode === 'plan'));
     }
     expect(vi.mocked(api.setPermissionMode).mock.calls.map(([, mode]) => mode)).toEqual([...modes, modes[0]]);

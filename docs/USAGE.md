@@ -291,6 +291,22 @@ válido (Let's Encrypt) → escaneie o QR / preencha o token → **Adicionar à 
   abre o painel: tarefas + workflows → fases/agentes → prompt+resultado de cada agente (3 níveis).
 - **Interromper:** botão **⏹ stop** (manda `Esc`).
 
+### Mods do Claude Code (faixa e painéis)
+Sessões com terminal espelham o que os mods do Claude Code desenham, sem código de mod nenhum
+no Hangar:
+- **Faixa acima do prompt** (barra de progresso, acompanhamento de review…): aparece acima do
+  composer e se atualiza na hora, mesmo com a sessão parada.
+- **Painel que um mod abre:** no app de desktop, coluna à direita da conversa quando o terminal o
+  ancora e há espaço para os dois; senão, e sempre no celular, bloco acima do composer, com o ✕
+  que fecha o painel no terminal também.
+- **Botões dos mods clicam pelo app:** o clique vira clique de mouse no terminal da sessão, e o
+  Hangar abre as sessões Claude em tela cheia, o modo em que o Claude Code liga o mouse. Se o botão
+  não estiver na tela, aparecer duas vezes ou o terminal estiver em modo de rolagem, o app avisa e
+  não clica.
+- **Copiar e abrir link** num botão clicado pelo app acontecem no aparelho de quem clicou, não na
+  máquina do terminal: o texto vai para a área de transferência dele e o link abre no navegador
+  dele. Clique feito no próprio terminal segue como sempre.
+
 ### Multi-PC
 Cada PC roda backend+vite+`tailscale serve` com o **mesmo** `CP_AUTH_TOKEN`. O app guarda **N
 servidores** e troca entre eles (switcher) — útil pra dirigir o Claude de máquinas diferentes do
@@ -386,6 +402,49 @@ e que a data do reset semanal mudará.
 No **Arquivo**, a retomada usa a conta registrada nos metadados da conversa e não troca de conta
 por cota ou por conveniência. Se a origem ficar ambígua, a retomada é recusada até haver uma única
 conta identificada. Esse fluxo não apaga, rotaciona nem migra credenciais ou conversas entre contas.
+
+### Continuar uma sessão Claude no Codex (em validação)
+
+Este recurso está implementado em uma árvore isolada e ainda não foi ativado no serviço nem
+aceito no uso completo. A seleção foi implementada no desktop nativo; estes passos descrevem
+esse fluxo, sem acrescentar um seletor ao PWA ou ao app móvel.
+
+1. Abra o **anel de contas** da sessão Claude e escolha uma conta **Codex**.
+2. Confira **conta, modelo e esforço**, nos mesmos controles da Nova sessão. **Padrão** deixa o
+   Codex resolver a configuração da conta. Mudar de conta recarrega seu catálogo; escolhas
+   incompatíveis deixam de valer. Carregamento, falta de login, catálogo vazio e erro impedem a
+   confirmação.
+3. Confirme a transferência. Fechar ou cancelar o diálogo antes de confirmar mantém o Claude.
+   A transferência exige a sessão parada, sem ferramenta, pergunta, permissão ou entrega
+   pendente. Não inicia um turno nem pede ao Claude que resuma a conversa.
+
+A troca conserva nome, cartão, chave, pasta, modo com/sem terminal, pareamento, grupo e ação
+encadeada. O contexto disponível do ramo Claude entra na thread Codex pela API nativa, sem
+resumo substituto nem cortes para caber. No Hangar, a conversa anterior vem da origem
+preservada e os turnos seguintes vêm do Codex. A TUI Codex mostra somente os turnos novos.
+As próximas ferramentas são as do Codex; `Read`, `Edit` e `Bash` antigos continuam como
+histórico e não são executados novamente. Só Claude → Codex está incluído.
+
+Capacidade desconhecida, contexto acima da estimativa permitida, mídia incompatível ou
+conteúdo necessário que não possa ser preservado causam recusa explícita. A estimativa usa
+bytes UTF-8 e reservas para instruções, ferramentas, imagens e continuação; não é uma
+contagem pelo tokenizer e pode recusar uma conversa que caberia. Texto de pensamento
+disponível é guardado como histórico identificado, sem importar a assinatura como raciocínio
+Codex. Conteúdo redigido, criptografado ou já cortado na origem não pode ser recuperado.
+
+Se a preparação falhar depois de parar o Claude, o backend tenta restaurá-lo pelo transcript
+original. Se não puder confirmar a restauração ou a saída dos processos preparados, mantém o
+erro e o histórico da origem, com **Recarregar** para tentar a recuperação. Uma queda dura
+sem registro suficiente dos processos pode continuar nesse estado; a recuperação automática
+não é garantida. O terminal direto não obedece à trava de entrada do backend: nesta
+implementação, o estado é conferido novamente logo antes de parar a origem.
+
+A prova disponível usou Codex CLI 0.159.3 em stdio com fonte artificial e resposta simulada em
+loopback: conferiu bytes importados após reinício e recusa de contexto maior, sem inferência
+ou custo real. Modelo real, fonte real, interface/foco, guardas com processos reais, modo Plano,
+permissões, WebSocket/TUI, Arquivo/recarga completos e Windows permanecem pendentes. Testes
+automatizados não rodaram. A [medição](decisoes/harnesses.md#transferência-claude--codex-captura-nativa-em-validação)
+detalha o alcance dessa prova.
 
 ### Desktop (≥820px)
 Abrindo a mesma URL num monitor largo, vira **shell de duas colunas**: sidebar de sessões +

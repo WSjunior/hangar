@@ -60,7 +60,7 @@ import { intlLocale } from '../../lib/locale';
   // do detalhe; sem isso, dependeria de o detalhe ja ter sido carregado.
   async function copyDetails() {
     let files: string[] | null = null;
-    try { files = (await getCommitFiles(git.sessionName, commit.hash)).files.map((f) => f.path); }
+    try { files = (await getCommitFiles(git.sessionName, commit.hash, git.server())).files.map((f) => f.path); }
     catch { files = null; }   // falha nao impede copiar o resto — mas o texto DIZ que faltou
     await copy([
       m.git_clip_commit({ hash: commit.hash }),
@@ -80,7 +80,7 @@ import { intlLocale } from '../../lib/locale';
     contains = null;
     containsFailed = false;
     // cleanErr tira o "409: " da frente; String(e) mostraria o prefixo cru.
-    try { contains = await getCommitBranches(git.sessionName, commit.hash); }
+    try { contains = await getCommitBranches(git.sessionName, commit.hash, git.server()); }
     catch (e) { git.error = cleanErr(e); containsFailed = true; }
   }
 </script>

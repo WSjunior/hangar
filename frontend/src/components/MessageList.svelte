@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   import { agruparConversa, type ItemConversa } from '@hangar/core';
   import { tick } from 'svelte';
   import type { Snippet } from 'svelte';
@@ -116,6 +117,7 @@
     imageUrl, swapIds, codex = false, plan = null, footer,
     onForward, onRunCommand, onOpenSession, onOpenOrq, onDescartarFila, ancora = 0, focoId = null
   }: Props = $props();
+  const sessionServer = useSessionServer();
 
   type PlanComponentProps = {
     sessionName: string;
@@ -572,8 +574,8 @@
                 ? img.filenames.slice(0, Math.max(0, img.filenames.length - ev.image_count))
                 : img.filenames)
             : []}
-          {@const srcs = [...enviadas.map((f) => uploadUrl(sessionName, f)),
-                          ...Array.from({ length: ev.image_count }, (_, i) => imageUrl ? imageUrl(ev.id, i) : transcriptImageUrl(sessionName, ev.id, i))]}
+          {@const srcs = [...enviadas.map((f) => uploadUrl(sessionName, f, false, sessionServer())),
+                          ...Array.from({ length: ev.image_count }, (_, i) => imageUrl ? imageUrl(ev.id, i) : transcriptImageUrl(sessionName, ev.id, i, sessionServer()))]}
           {#if peer}
             <!-- Recado de sessao-irma COM captura: continua sendo recado (chip "de: X", markdown),
                  so que com as miniaturas em cima. Sem este ramo a foto vencia e o recado saia
@@ -593,7 +595,7 @@
                que mandou — falha tem que aparecer, nao sumir. -->
           <div class="queued-row" class:dim={working && !ev.desistiu}>
             {#if imgFotos}
-              <ImageBubble caption={imgFotos.caption} srcs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f))} />
+              <ImageBubble caption={imgFotos.caption} srcs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))} />
             {:else if bastao}
               <!-- O kick-off da passagem chega SEMPRE por aqui: quem o entrega é a fila durável, e
                    não o terminal. Sem este ramo o cartão só existiria no caso que nunca acontece. -->
@@ -624,7 +626,7 @@
         {:else if sub}
           <SubagenteCard {sub} cru={ev.text ?? ''} ts={ev.ts} />
         {:else if imgFotos}
-          <ImageBubble caption={imgFotos.caption} srcs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f))} />
+          <ImageBubble caption={imgFotos.caption} srcs={imgFotos.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))} />
         {:else if bastao}
           <!-- Passagem de bastão: cartão com os dois passos e os dois avisos do kick-off. O recado
                inteiro continua no bloco fechado do cartão. -->
@@ -718,7 +720,7 @@
       {@const pimg = pimg0 && pimg0.filenames.length ? pimg0 : null}
       <div class="pending-bubble" class:solid={p.solid}>
         {#if pimg}
-          <ImageBubble caption={pimg.caption} srcs={pimg.filenames.map((f) => uploadUrl(sessionName, f))} />
+          <ImageBubble caption={pimg.caption} srcs={pimg.filenames.map((f) => uploadUrl(sessionName, f, false, sessionServer()))} />
         {:else}
           <UserBubble text={p.text} ts={undefined} />
         {/if}

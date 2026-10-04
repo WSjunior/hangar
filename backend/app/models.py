@@ -72,6 +72,9 @@ def session_key(jsonl_path: str) -> str:
 
 class SessionInfo(BaseModel):
     name: str
+    lifecycle_id: Optional[str] = None
+    transfer_id: Optional[str] = None
+    transfer_phase: Optional[str] = None
     cwd: Optional[str] = None
     jsonl: Optional[str] = None
     # Qual Adapter dirige esta sessao (app.adapters.get_adapter). "claude" cobre TODA sessao de hoje
@@ -83,6 +86,7 @@ class SessionInfo(BaseModel):
     # Motor de modelo desta sessao (nome no engines.json). None = conta Anthropic. Lido do
     # /proc/<pid>/environ (CP_ENGINE) — ver registry._engine_of.
     engine: Optional[str] = None
+    engine_account: Optional[str] = None
     # Raiz Codex resolvida para esta sessão. Só existe para o provider Codex; o cliente usa-a para
     # conservar a origem em operações posteriores, enquanto `conta` continua sendo o ID de cota.
     codex_home: Optional[str] = None
@@ -104,6 +108,10 @@ class SessionInfo(BaseModel):
     # True quando o cwd e uma worktree ligada (`.git` arquivo apontando pro repo principal) — a mesma
     # branch em worktrees diferentes tem arquivos diferentes, entao a lista marca qual e qual.
     worktree: bool = False
+    # Raiz da worktree onde o agente está AGORA (transcript do Claude / comandos do Codex); None
+    # fora de worktree. `worktree_gone`: ele estava numa worktree que não existe mais.
+    worktree_path: Optional[str] = None
+    worktree_gone: bool = False
     # Estado de git do cwd, decorado em list_with_state (git_summary, cacheado). dirty = arquivos
     # não-commitados; ahead = commits não-pushados (None sem upstream real); behind idem. Non-repo
     # -> tudo None (sem badge no painel).
@@ -153,6 +161,9 @@ class SessionInfo(BaseModel):
     # contexto/rate sem SSE por sessao. Vem de um cache com TTL em list_with_state (cadencia ~20s,
     # max 2 capturas de pane por chamada) — pode atrasar; o Chat continua com a versao ao vivo.
     status_line: Optional[str] = None
+    # Contexto da sessão Claude lido do transcript ({"used", "window"}, em tokens): a statusline só
+    # traz o contexto quando é a do Hangar, e o app usa este quando ela não traz.
+    context: Optional[dict] = None
     # Pareamento ativo (feature "trabalhando juntas"): os OUTROS membros do grupo, ou None.
     # Grupo de 2 = lista de 1 (o antigo 1:1 é caso particular). Badge/chip na UI.
     pair_peers: Optional[list[str]] = None

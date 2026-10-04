@@ -3,6 +3,24 @@
 Decisões medidas, com data e número. O `CLAUDE.md` carrega a regra;
 a medição que a sustenta mora aqui. Conteúdo movido sem alteração.
 
+## Voltar fecha a imagem ampliada antes de navegar
+
+(04/10/2026.) O visor compartilhado (`frontend/src/lib/visor.ts`) tratava Escape e arrasto,
+mas não registrava sua abertura no histórico. No PWA, o Voltar do Android navegava para a
+tela anterior enquanto a imagem continuava aberta.
+
+`viewerHistory.ts` cria uma entrada temporária com a mesma URL, preservando os campos do estado
+anterior. O primeiro `popstate` fecha o visor; como o fragmento da URL não mudou, o roteador
+continua na conversa. Fechar pelo botão, Escape ou arrasto consome essa entrada uma única vez.
+Trocar a mídia aberta não empilha outra entrada. Reabrir ou executar uma ação espera a retirada
+pendente, para um Voltar atrasado não fechar a nova tela. Os listeners saem ao fechar.
+
+Conferido no navegador Chromium em viewport de celular, com o visor de produção e uma página
+de teste de navegação: imagem → Voltar fecha o visor e mantém a conversa → próximo Voltar
+navega à lista. Escape e botão de fechar também mantiveram a conversa, e o Voltar seguinte
+navegou à lista sem uma parada extra. A verificação simulou o Voltar pelo histórico do navegador;
+não foi executada em um aparelho Android físico.
+
 ## Planejamento no chat (07/09/2026)
 
 `SessionModeControl` é o controle compartilhado de

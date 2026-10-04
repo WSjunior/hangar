@@ -44,6 +44,19 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **Tarefa do backend/front nasce com `-Priority 4` (normal).** O padrão do Agendador é 7
   (abaixo do normal) e passa para os filhos: backend e sessões perdiam a CPU para qualquer
   programa, passavam dos 3 s da vigia e eram derrubados.
+- **Conta da tarefa é `MAQUINA\usuario` (`WindowsIdentity.GetCurrent().Name`), nunca
+  `$env:USERNAME`.** Com o PC chamado igual ao usuário, o nome curto resolve para a conta da
+  máquina e o `Register-ScheduledTask` recusa com `0x80070057 (7,27):UserId:<nome>` — reproduzido
+  na DELPHI-02 com `-User $env:COMPUTERNAME`; o nome qualificado registra.
+- **Abaixo do build 22523 o psmux roda com console próprio (`PSMUX_CONPTY_DIR`).** O conhost do
+  sistema segura a resposta XTVERSION, o Claude Code não liga o mouse e a roda não rola, com ou sem
+  Windows Terminal (psmux/psmux#597; a Microsoft não levou o conserto ao Windows 10). O
+  `psmux.yml` compila um commit fixo do master do psmux com o `conpty.dll` + `OpenConsole.exe` do
+  NuGet `Microsoft.Windows.Console.ConPTY` 1.24.260710001 (a versão provada no 19045) na release
+  `psmux-latest`; `install-psmux-conpty.ps1` instala em `~\.hangar\psmux`, na frente do PATH do
+  usuário. O psmux lê a variável uma vez, no servidor: só o instalador interativo aplica, porque
+  reiniciar o servidor fecha as sessões e pede confirmação. Quando o psmux lançar versão com a
+  variável, o build próprio sai e fica o winget.
 - **`ln -sf` do Git Bash COPIA e devolve 0**; confira com `test -L` depois. Script sem extensão é
   invisível para o PowerShell, e a falha é muda.
 - **O navegador embutido precisa da sessão gráfica ATIVA**: com a janela ocluída o teclado entrega

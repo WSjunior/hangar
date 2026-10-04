@@ -108,7 +108,7 @@ describe('ActivitySheet — subagentes do disco', () => {
     expect(linhas).toHaveLength(2);
     linhas[1].click();
     await tick(); await tick();
-    expect(api.getSubagent).toHaveBeenCalledWith('jefferson-2', 'segundo', 200);
+    expect(api.getSubagent).toHaveBeenCalledWith('jefferson-2', 'segundo', 200, undefined);
     unmount(t.comp);
   });
 });

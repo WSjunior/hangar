@@ -1,4 +1,5 @@
 import { getChangedFiles } from '@hangar/core';
+import type { SessionServer } from './sessionServer';
 
 export interface ArquivoMudado {
   path: string;
@@ -11,7 +12,7 @@ export interface ArquivoMudado {
 // Mora aqui, e não dentro do componente, por dois motivos. O DesktopSessionContext tem uma prop
 // `state`, e o rune `$state` colide com ela. E o valor precisa SOBREVIVER ao recarregamento: com
 // a promessa direto num `{#await}` a lista sumia e voltava a cada poll do git, piscando na tela.
-export function criarArquivosMudados(quantos = 3) {
+export function criarArquivosMudados(quantos = 3, server: SessionServer = () => undefined) {
   let itens = $state<ArquivoMudado[]>([]);
   let ultima = '';
   let ultimaSessao = '';
@@ -59,7 +60,7 @@ export function criarArquivosMudados(quantos = 3) {
         const chave = ultima;
         const minha = ++geracao;
         try {
-          const r = await getChangedFiles(ultimaSessao);
+          const r = await getChangedFiles(ultimaSessao, server());
           if (minha !== geracao) continue;   // trocou de sessão no meio: descarta
           itens = r.files
             .map((f) => ({ path: f.path, added: f.added ?? 0, total: (f.added ?? 0) + (f.removed ?? 0) }))

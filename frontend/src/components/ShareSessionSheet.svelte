@@ -4,7 +4,7 @@
   import * as m from '../paraglide/messages';
   import BottomSheet from './BottomSheet.svelte';
   import { desktop } from '../lib/desktop.svelte';
-  import { withServer } from '../lib/auth';
+  import { sessionServerFor } from '../lib/sessionServer';
   import { copyText } from '../lib/clipboard';
   import {
     createShare, listShares, revokeShare, revokeAllShares, relativeTime, resetsIn, sharePrereqs,
@@ -13,6 +13,8 @@
 
   interface Props { open: boolean; name: string; serverId: string; onClose: () => void }
   let { open, name, serverId, onClose }: Props = $props();
+  // Pelo servidor recebido, sem trocar o ativo do app enquanto a folha espera a resposta.
+  const server = () => sessionServerFor(serverId)();
 
   const CONFERIR_MS = 3000;
   const CONFERIR_ATE_MS = 5 * 60_000;
@@ -34,7 +36,7 @@
     erroLista = '';
     shares = null;
     try {
-      shares = (await withServer(serverId, () => listShares(name))).shares;
+      shares = (await listShares(name, server())).shares;
     } catch (e) {
       erroLista = msg(e);
     }
@@ -66,7 +68,7 @@
       if (Date.now() > fim) { pararConferencia(); return; }
       let r: SharePrereqs;
       try {
-        r = await withServer(serverId, () => sharePrereqs());
+        r = await sharePrereqs(server());
       } catch {
         return;
       }
@@ -85,7 +87,7 @@
     copiado = false;
     comandoCopiado = false;
     try {
-      criado = await withServer(serverId, () => createShare(name, local));
+      criado = await createShare(name, local, server());
       void carregar();
     } catch (e) {
       if (e instanceof SharePrerequisiteError) preRequisito = { missing: e.missing, fix: e.fix, enable_url: e.enableUrl };
@@ -109,7 +111,7 @@
 
   async function revogar(id: string) {
     try {
-      await withServer(serverId, () => revokeShare(name, id));
+      await revokeShare(name, id, server());
       await carregar();
     } catch (e) {
       erroLista = msg(e);
@@ -118,7 +120,7 @@
 
   async function encerrarTodos() {
     try {
-      await withServer(serverId, () => revokeAllShares(name));
+      await revokeAllShares(name, server());
       criado = null;
       await carregar();
     } catch (e) {

@@ -44,11 +44,11 @@ def _pegar(cliente, arquivo, **kw):
 # vazio ali e o que faz a prova valer de verdade. Lista de cwds vazia = so o cwd da sessao serve de
 # base, que e o que estes testes querem.
 def _citado(monkeypatch):
-    monkeypatch.setattr(transcript, "citation_cwds", lambda jsonl, needles: {n: [] for n in needles})
+    monkeypatch.setattr(transcript, "citation_cwds", lambda jsonl, needles, rows=None: {n: [] for n in needles})
 
 
 def _nao_citado(monkeypatch):
-    monkeypatch.setattr(transcript, "citation_cwds", lambda jsonl, needles: {})
+    monkeypatch.setattr(transcript, "citation_cwds", lambda jsonl, needles, rows=None: {})
 
 
 def test_anexo_volta_com_cache_e_etag(cliente, sessao, monkeypatch):

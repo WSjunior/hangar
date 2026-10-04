@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import functools
+import annotationlib
 import inspect
 import uuid
 import contextvars
@@ -505,7 +506,9 @@ def runtime_data(name):
 
 
 def registry_method(original):
-    signature = inspect.signature(original)
+    # Só para casar argumentos: avaliar as anotações dentro da classe resolve `list` como o método
+    # `SessionRegistry.list`, e `list[dict]` numa assinatura derrubava a importação do registry.
+    signature = inspect.signature(original, annotation_format=annotationlib.Format.FORWARDREF)
     @functools.wraps(original)
     def wrapper(self, *args, **kwargs):
         arguments = signature.bind(self, *args, **kwargs).arguments

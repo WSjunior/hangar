@@ -65,8 +65,9 @@ pub fn remember_info(cache: &InfoCache, name: &str, info: Option<InternalInfo>) 
 
 /// Eventos cujo último valor vale para quem chega depois: o Python só os manda na mudança.
 /// `nav` fica de fora: repetir um pedido já atendido reabriria o navegador; quem chega depois o
-/// recebe pela lista de sessões.
-const LATEST: [&str; 7] = ["state", "suggest", "ask_question", "stats", "preview", "pensamento", "ferramenta"];
+/// recebe pela lista de sessões. `plugin_ui` (faixa dos mods) sai quando muda: sem o cache, quem
+/// abre o chat depois ficava sem a faixa até o mod redesenhar.
+const LATEST: [&str; 8] = ["state", "suggest", "ask_question", "stats", "preview", "pensamento", "ferramenta", "plugin_ui"];
 const ASK_QUESTION: usize = 2;
 const CHANNEL: usize = 1024;
 const SIDE_CONNECT: Duration = Duration::from_secs(10);
@@ -85,7 +86,7 @@ pub struct SideCtx {
 
 #[derive(Default)]
 struct SideCache {
-    latest: [Option<Bytes>; 7],
+    latest: [Option<Bytes>; 8],
     queue: Vec<(String, Bytes)>,
 }
 
@@ -468,10 +469,13 @@ mod tests {
         rec(&mut c, "message", "{\"id\":\"queued-1\"}");
         rec(&mut c, "queue_confirmed", "{\"id\":\"queued-1\",\"queued_confirmed\":true}");
         rec(&mut c, "nav", "{\"url\":\"http://x\"}");
+        rec(&mut c, "plugin_ui", "{\"band\":null}");
+        rec(&mut c, "plugin_ui", "{\"band\":{\"type\":\"Box\"}}");
         let r: Vec<String> = c.replay().iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect();
-        assert_eq!(r.len(), 2);
+        assert_eq!(r.len(), 3);
         assert!(r[0].starts_with("event: state") && r[0].contains("idle"));
-        assert!(r[1].starts_with("event: queue_confirmed"));
+        assert!(r[1].starts_with("event: plugin_ui") && r[1].contains("Box"));
+        assert!(r[2].starts_with("event: queue_confirmed"));
     }
 
     fn has_question(c: &SideCache) -> bool {

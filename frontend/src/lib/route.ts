@@ -22,6 +22,7 @@ export type Route =
   // Orquestração (#/orq): histórico das execuções da skill + a faixa da execução viva. Sem campos
   // de overlay — quem abre sessão aqui é o chat normal, não um card.
   | { name: 'orq' }
+  | { name: 'worktrees' }
   | { name: 'compare'; ids: CompareId[] };
 
 export function parseHash(hash: string): Route {
@@ -76,6 +77,7 @@ export function parseHash(hash: string): Route {
   }
   if (path === '/archive') return { name: 'archive' };
   if (path === '/orq') return { name: 'orq' };
+  if (path === '/worktrees') return { name: 'worktrees' };
   // Quadro kanban (visualização irmã da lista+chat) — só existe no desktop; no mobile o render
   // trata board como a lista normal. ANTES do regex de 2 segmentos: só pra deixar explícito que o
   // quadro puro é a forma base (os dois padrões não se sobrepõem — o regex exige serverId+nome).

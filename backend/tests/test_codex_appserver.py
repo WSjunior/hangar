@@ -246,7 +246,10 @@ async def test_close_clean_after_limit_overrun_line():
     await asyncio.wait_for(client.close(), timeout=1)  # sem hang
 
 
-async def test_shared_websocket_transport_returns_endpoint_and_handles_request(tmp_path):
+async def test_shared_websocket_transport_returns_endpoint_and_handles_request(tmp_path, monkeypatch):
+    for key, value in {"CP_SESSION_NAME": "operator", "CP_SESSION_KEY": "operator-key",
+                       "TMUX": "operator-tmux", "TMUX_PANE": "%operator", "HANGAR_CANO_KEY": "operator-cano"}.items():
+        monkeypatch.setenv(key, value)
     class _FakeWebSocket:
         def __init__(self):
             self.sent = []
@@ -278,10 +281,16 @@ async def test_shared_websocket_transport_returns_endpoint_and_handles_request(t
         client = AppServerClient()
         # Caminho absoluto do próprio sistema: `/tmp/x` vira `C:\tmp\x` no Windows.
         home = tmp_path / "codex-work"
-        endpoint = await client.start_shared("ws://127.0.0.1:45123", codex_home=str(home))
+        endpoint = await client.start_shared("ws://127.0.0.1:45123", codex_home=str(home),
+                                             tool_output_token_limit=144000,
+                                             session_name="resumed", session_key="durable-key")
         assert endpoint == "ws://127.0.0.1:45123"
         spawn.assert_awaited_once()
         assert spawn.call_args.kwargs["env"]["CODEX_HOME"] == str(home)
+        assert "tool_output_token_limit=144000" in spawn.call_args.args
+        environment = spawn.call_args.kwargs["env"]
+        assert environment["CP_SESSION_NAME"] == "resumed" and environment["CP_SESSION_KEY"] == "durable-key"
+        assert not {"TMUX", "TMUX_PANE", "HANGAR_CANO_KEY"} & environment.keys()
 
         task = asyncio.create_task(client.request("thread/list", {"limit": 1}))
         await asyncio.sleep(0)
@@ -307,3 +316,36 @@ async def test_real_codex_initialize_smoke():
         assert result
     finally:
         await client.close()
+
+
+async def test_stdio_preparation_scopes_account_budget_and_cwd(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from app.adapters.codex import appserver
+    process = SimpleNamespace(stdout=object(), stdin=object())
+    spawn = AsyncMock(return_value=process)
+    monkeypatch.setattr(appserver.asyncio, "create_subprocess_exec", spawn)
+    client = AppServerClient()
+    monkeypatch.setattr(client, "_attach", lambda reader, writer: None)
+    monkeypatch.setenv("OPENAI_API_KEY", "inherited-key")
+    monkeypatch.setenv("TMUX_PANE", "%operator")
+    account_home = tmp_path / "secondary"
+    await client.start(codex_home=account_home, cwd=str(tmp_path), tool_output_token_limit=144000,
+                       session_name="original", session_key="durable-key")
+    assert spawn.call_args.args[:3] == ("codex", "app-server", "--stdio")
+    assert "tool_output_token_limit=144000" in spawn.call_args.args
+    assert spawn.call_args.kwargs["env"]["CODEX_HOME"] == str(account_home)
+    assert "OPENAI_API_KEY" not in spawn.call_args.kwargs["env"]
+    assert spawn.call_args.kwargs["cwd"] == str(tmp_path)
+    assert spawn.call_args.kwargs["env"]["CP_SESSION_KEY"] == "durable-key"
+    assert spawn.call_args.kwargs["env"]["CP_SESSION_NAME"] == "original"
+    assert "TMUX_PANE" not in spawn.call_args.kwargs["env"]
+
+
+def test_environment_without_identity_override_preserves_legacy_defaults(monkeypatch):
+    monkeypatch.setenv("CP_SESSION_NAME", "legacy")
+    monkeypatch.setenv("CP_SESSION_KEY", "legacy-key")
+    monkeypatch.setenv("TMUX_PANE", "%legacy")
+    environment = AppServerClient._environment(None)
+    assert environment["CP_SESSION_NAME"] == "legacy"
+    assert environment["CP_SESSION_KEY"] == "legacy-key"
+    assert environment["TMUX_PANE"] == "%legacy"

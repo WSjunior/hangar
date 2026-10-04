@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
 import BottomSheet from './BottomSheet.svelte';
 import NavRemoto from './NavRemoto.svelte';
 import { desktop } from '../lib/desktop.svelte';
@@ -12,6 +13,7 @@ import * as m from '../paraglide/messages';
     onClose: () => void;
   }
   let { open, sessionName = '', onClose }: Props = $props();
+  const sessionServer = useSessionServer();
 
   // Navegador embutido da sessão (app desktop): só entra no atalho quando aponta pra uma porta
   // local — o túnel só alcança esta máquina; URL externa (google.com) não tem como passar por ele.
@@ -25,7 +27,7 @@ import * as m from '../paraglide/messages';
     navUrl = ''; navPorta = null; navPath = '/'; temNav = false;
     if (!sessionName) return;
     try {
-      const u = (await getNavegadorDaSessao(sessionName)).url;
+      const u = (await getNavegadorDaSessao(sessionName, sessionServer())).url;
       if (!u) return;
       temNav = true;
       const p = new URL(u);
@@ -66,7 +68,7 @@ import * as m from '../paraglide/messages';
   async function refresh() {
     loading = true;
     try {
-      const s = await getPreview();
+      const s = await getPreview(sessionServer());
       url = s.url ?? '';
       if (s.port) port = String(s.port);
     } catch (e) {
@@ -82,7 +84,7 @@ import * as m from '../paraglide/messages';
     busy = true;
     error = '';
     try {
-      url = (await startPreview(p)).url;
+      url = (await startPreview(p, sessionServer())).url;
     } catch (e) {
       error = cleanErr(e);
     } finally {
@@ -94,7 +96,7 @@ import * as m from '../paraglide/messages';
     busy = true;
     error = '';
     try {
-      await stopPreview();
+      await stopPreview(sessionServer());
       url = '';
       expanded = false;   // sem túnel não há o que expandir
     } catch (e) {

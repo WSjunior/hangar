@@ -6,6 +6,7 @@ import { cwdParts, rotuloEstado, type State, type ThemeTokens } from '@hangar/co
 import * as m from '../paraglide/messages';
 import { Icon } from '../ui/Icon';
 import { HangarMark } from '../ui/HangarMark';
+import { WorkingMark } from '../ui/WorkingMark';
 import { superficie } from '../theme/superficie';
 import { useSessions } from '../stores/sessions';
 import { useServers } from '../stores/servers';
@@ -67,7 +68,7 @@ export function ChatHeader({
           accessibilityLabel={[name, state ? rotuloEstado(state) : '', serverLabel, row?.cwd].filter(Boolean).join(', ')}
           accessibilityHint={m.sessao_trocar_de()}
         >
-          <HangarMark size={18} color={corEstado} />
+          {state === 'working' ? <WorkingMark size={18} color={corEstado} /> : <HangarMark size={18} color={corEstado} />}
           <View style={styles.textos}>
             <Text style={[styles.name, { color: theme.tokens.text.primary }]} numberOfLines={1}>
               {name}

@@ -22,10 +22,13 @@ pytestmark = pytest.mark.skipif(os.name == "nt", reason="socket unix")
 # aprovação de comando, thread/read.
 _CODEX_FALSO = r'''#!/usr/bin/env python3
 import json, sys
+with open("server-starts.jsonl", "a") as recorded:
+    recorded.write(json.dumps(sys.argv[1:]) + "\n")
 def out(o):
     sys.stdout.write(json.dumps(o) + "\n"); sys.stdout.flush()
 iniciado = False
 status = "idle"
+effort = None
 for linha in sys.stdin:
     ev = json.loads(linha)
     m = ev.get("method")
@@ -40,8 +43,13 @@ for linha in sys.stdin:
     elif m == "thread/resume":
         with open("resume.txt", "w") as f:
             f.write(json.dumps(ev["params"]))
+        with open("resume-history.jsonl", "a") as f:
+            f.write(json.dumps(ev["params"]) + "\n")
         out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": ev["params"]["threadId"]}, "model": "gpt-falso"}})
     elif m == "thread/settings/update":
+        # O modo colaborativo também carrega o esforço; ajuste sem o campo não o apaga.
+        mode = (ev["params"].get("collaborationMode") or {}).get("settings") or {}
+        effort = ev["params"].get("effort", mode.get("reasoning_effort", effort))
         with open("settings.txt", "w") as f:
             f.write(json.dumps(ev["params"]))
         if ev["params"].get("effort") == "recusado":
@@ -49,7 +57,7 @@ for linha in sys.stdin:
         else:
             out({"jsonrpc": "2.0", "id": ev["id"], "result": {}})
     elif m == "thread/read":
-        out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": "th-1", "status": {"type": status}, "turns": []}}})
+        out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": "th-1", "model": "gpt-falso", "reasoningEffort": effort, "status": {"type": status}, "turns": []}}})
     elif m == "turn/start":
         status = "active"
         with open("turno.txt", "w") as f:
@@ -373,3 +381,61 @@ def test_politica_por_modo():
     assert 'approval_policy="never"' in sem_terminal.argv({"permission_mode": "Full Access"})
 
 
+
+def test_transferred_stdio_budget_survives_restart_and_resume(ambiente, monkeypatch):
+    import hashlib
+    import uuid
+    from app import conversation_transfer as transfers
+    monkeypatch.setattr(transfers, "_base", lambda: ambiente / "transfers")
+    transfer_id = str(uuid.uuid4())
+    thread_id = str(uuid.uuid4())
+    key = sem_terminal.nova_chave()
+    (ambiente / "bin" / "codex").write_text(_CODEX_FALSO.replace('"th-1"', json.dumps(thread_id)))
+    home = ambiente / "account"
+    from app import codex_contas
+    account = codex_contas.Account("test-transfer", home, False)
+    monkeypatch.setattr(codex_contas, "resolve_account", lambda name: account)
+    rollout = home / "sessions" / f"rollout-test-{thread_id}.jsonl"
+    rollout.parent.mkdir(parents=True)
+    prefix = (json.dumps({"type": "session_meta", "payload": {"id": thread_id}}) + "\n").encode()
+    rollout.write_bytes(prefix)
+    source = ambiente / "source.jsonl"
+    source.write_text(json.dumps({"type": "user", "uuid": "u", "parentUuid": None,
+                                  "message": {"role": "user", "content": "histórico"}}) + "\n")
+    record = transfers.TransferRecord(transfer_id, "imported", f"k:{key}", transfers.TransferPhase.COMPLETE,
+        transfers.ConversationSource(str(source), "claude", hashlib.sha256(source.read_bytes()).hexdigest(), ("u",)),
+        {"name": "imported", "key": key, "cwd": str(ambiente)},
+        {"codex_home": str(home), "codex_account": account.id, "thread_id": thread_id, "rollout_path": str(rollout),
+         "tool_output_token_limit": 144000},
+        transfers.ImportBoundary(thread_id, str(rollout), len(prefix), (), hashlib.sha256(prefix).hexdigest()), None)
+    transfers.save_transfer(record)
+    async def body():
+        adapter = CodexAdapter()
+        _sidecar("imported", ambiente, model="gpt-falso", effort="high",
+                 transfer_id=transfer_id, codex_home=str(home), codex_account=account.id, tool_output_token_limit=144000)
+        codex_sessions.update("imported", thread_id=thread_id, rollout_path=str(rollout), key=key)
+        try:
+            assert await adapter.ensure_running("imported") is not None
+            await adapter.restart("imported")
+            starts = [json.loads(line) for line in (ambiente / "server-starts.jsonl").read_text().splitlines()]
+            resumes = [json.loads(line) for line in (ambiente / "resume-history.jsonl").read_text().splitlines()]
+            assert len(starts) == len(resumes) == 2
+            assert all("tool_output_token_limit=144000" in args for args in starts)
+            assert all(params["threadId"] == thread_id for params in resumes)
+            meta = codex_sessions.load("imported")
+            assert meta["tool_output_token_limit"] == 144000 and meta["transfer_id"] == transfer_id
+            assert transfers.transfer_for_session("imported").id == transfer_id
+            assert transfers.load_transfer(transfer_id).phase == transfers.TransferPhase.COMPLETE
+            assert not (ambiente / "turno.txt").exists()
+        finally:
+            adapter.close_sync("imported")
+    asyncio.run(body())
+
+
+def test_stdio_budget_is_optional_and_validated():
+    argv = sem_terminal.argv({"permission_mode": "Full Access", "tool_output_token_limit": 144000})
+    assert argv[:3] == ["codex", "app-server", "--stdio"]
+    assert "tool_output_token_limit=144000" in argv
+    assert not any("tool_output_token_limit" in arg for arg in sem_terminal.argv({}))
+    with pytest.raises(ValueError):
+        sem_terminal.argv({"tool_output_token_limit": True})

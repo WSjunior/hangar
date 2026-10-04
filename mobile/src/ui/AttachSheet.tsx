@@ -24,11 +24,13 @@ type Props = {
   onCommands?: () => void;
   /** Estilo do ditado vigente e a ação de trocá-lo; ausente, o item não aparece. */
   dictationStyle?: { label: string; onPress: () => void };
+  /** Mandar também pro par/grupo; ausente (sessão sem par), o item não aparece. */
+  sendToGroup?: { label: string; on: boolean; onPress: () => void };
 };
 
 const TILE = 112;
 
-export function AttachSheet({ open, onClose, onPick, onError, onSessionAttachments, recentPhotos, onCommands, dictationStyle }: Props) {
+export function AttachSheet({ open, onClose, onPick, onError, onSessionAttachments, recentPhotos, onCommands, dictationStyle, sendToGroup }: Props) {
   const c = useSettingsColors();
   // A ação roda depois que a folha some: o iOS recusa abrir câmera/galeria por cima de uma folha
   // ainda em animação de saída.
@@ -50,7 +52,8 @@ export function AttachSheet({ open, onClose, onPick, onError, onSessionAttachmen
   const hasRecent = !!recentPhotos?.length;
 
   // Comandos e estilo do ditado também abrem outra folha: só depois que esta sumir.
-  const rows: { icon: IconName; label: string; value?: string; onPress: () => void }[] = [
+  // `checked` presente = item liga/desliga: o leitor de tela anuncia o estado, e o ✓ é só visual.
+  const rows: { icon: IconName; label: string; value?: string; checked?: boolean; onPress: () => void }[] = [
     { icon: 'File', label: m.composer_adicionar_arquivos(), onPress: run(pickFile) },
     ...(onSessionAttachments
       ? [{ icon: 'Paperclip' as IconName, label: m.ctx_anexos_da_sessao(), onPress: () => choose(onSessionAttachments) }]
@@ -58,6 +61,9 @@ export function AttachSheet({ open, onClose, onPick, onError, onSessionAttachmen
     ...(onCommands ? [{ icon: 'SquareSlash' as IconName, label: m.comandos_titulo(), onPress: () => choose(onCommands) }] : []),
     ...(dictationStyle
       ? [{ icon: 'AudioLines' as IconName, label: m.ditado_estilo_titulo(), value: dictationStyle.label, onPress: () => choose(dictationStyle.onPress) }]
+      : []),
+    ...(sendToGroup
+      ? [{ icon: 'ArrowLeftRight' as IconName, label: sendToGroup.label, value: sendToGroup.on ? '✓' : undefined, checked: sendToGroup.on, onPress: () => choose(sendToGroup.onPress) }]
       : []),
   ];
 
@@ -134,9 +140,10 @@ export function AttachSheet({ open, onClose, onPick, onError, onSessionAttachmen
             <Pressable
               key={row.label}
               onPress={row.onPress}
-              accessibilityRole="button"
+              accessibilityRole={row.checked === undefined ? 'button' : 'switch'}
+              accessibilityState={row.checked === undefined ? undefined : { checked: row.checked }}
               accessibilityLabel={row.label}
-              accessibilityValue={row.value ? { text: row.value } : undefined}
+              accessibilityValue={row.value && row.checked === undefined ? { text: row.value } : undefined}
               style={({ pressed }) => [styles.row, i > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: c.borderStrong }, pressed && { backgroundColor: c.hover }]}
             >
               <Icon name={row.icon} size={20} color={c.text} />

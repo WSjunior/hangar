@@ -6,13 +6,17 @@
   import BottomSheet from './BottomSheet.svelte';
   import { desktop } from '../lib/desktop.svelte';
   import { getActiveId, listServers } from '../lib/auth';
+  import { useSessionServer } from '../lib/sessionServer';
   import { CodexVoiceCall, type VoiceState, type VoiceFailure } from '../lib/codexVoice';
   import { getCodexVoicesForServer } from '@hangar/core';
 
   let { sessionName, disabled = false, onPrepare, onBusyChange }: {
     sessionName: string; disabled?: boolean; onPrepare: () => void; onBusyChange: (busy: boolean) => void;
   } = $props();
-  const server = listServers().find(s => s.id === getActiveId());
+  // Dentro do chat, a máquina da sessão; o ativo só fora dele.
+  // Resolvido a cada uso: token ou endereço trocados depois de abrir valem já.
+  const sessionServer = useSessionServer();
+  const currentServer = () => sessionServer() ?? listServers().find(s => s.id === getActiveId());
   let open = $state(false);
   let callState = $state<VoiceState>('idle');
   let error = $state('');
@@ -40,6 +44,7 @@
   }
 
   function start() {
+    const server = currentServer();
     if (!server) { error = m.codex_voice_unavailable(); return; }
     onPrepare();
     error = ''; detail = ''; muted = false;
@@ -65,6 +70,7 @@
   function toggleMute() { muted = !muted; call?.setMuted(muted); }
   $effect(() => { sessionName; return () => call?.stop(); });
   $effect(() => {
+    const server = currentServer();
     if (!open || !server) return;
     let cancelled = false;
     getCodexVoicesForServer(server, sessionName).then(values => {

@@ -68,12 +68,13 @@ mod shared_config;
 mod tree;
 mod find;
 mod costs;
+mod worktrees;
 mod stats;
 mod search;
 mod topbar;
 
 actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, FindProjectFile, FindProjectText, NextSession, PreviousSession, ToggleDictation, NewChat, OpenCosts, OpenSearch,
-    ToggleSidebar, CyclePermission]);
+    ToggleSidebar, CyclePermission, OpenWorktrees]);
 
 const LIVE_THINKING: &str = "__thinking__";
 const LIVE_TOOL: &str = "__tool__";
@@ -197,6 +198,9 @@ enum Payload {
     Computer(computer::ComputerReply),
     // Diálogo Nova sessão: a resposta vai ao diálogo que a pediu, se ele ainda for o aberto.
     Create(EntityId, create::CreateReply),
+    Transfer(EntityId, create::TransferReply),
+    // Clique num botão de mod: o que o mod copiou ou mandou abrir vem na resposta.
+    PluginPressed(Result<Value, Failure>),
     // Lista de outra máquina: a geração dos SSE de lista, a chave do servidor e o que chegou.
     Remote(u64, String, servers::RemoteUpdate),
     HeadlessPlan(SessionKey, controls::PlanOutcome),
@@ -452,6 +456,10 @@ pub struct Hangar {
     confirm: Option<Confirm>,
     confirm_no_ask: bool,
     terminal_suggestion: String,
+    /// Faixa acima do prompt que os mods do Claude Code desenham, como veio do SSE `plugin_ui`.
+    plugin_band: Value,
+    /// Painéis que os mods abriram e o terminal desenhou, do mesmo SSE.
+    plugin_panes: Vec<Value>,
     recent: Option<Recent>,
     media: MediaCache<(SessionKey, Source)>,
     full_images: viewer::FullImages,
@@ -496,6 +504,7 @@ pub struct Hangar {
     machines: machines::Machines,
     // Custos e Estatísticas de uso: página própria por cima da janela, fora das Configurações.
     costs: costs::Costs,
+    worktrees: worktrees::Worktrees,
     usage_stats: stats::UsageStats,
     // Paleta "Buscar conversas" (Ctrl+K).
     search: search::Search,
@@ -650,7 +659,8 @@ impl Hangar {
             // Ctrl+Shift+C já copia a última resposta: Custos fica no Ctrl+Alt+C.
             KeyBinding::new("secondary-alt-c", OpenCosts, Some("!Terminal")), KeyBinding::new("secondary-k", OpenSearch, Some("!Terminal")),
             KeyBinding::new("secondary-p", FindProjectFile, Some("!Terminal")), KeyBinding::new("secondary-shift-f", FindProjectText, Some("!Terminal")),
-            KeyBinding::new("secondary-b", ToggleSidebar, Some("!Terminal")), KeyBinding::new("alt-shift-p", CyclePermission, Some("!Terminal"))]);
+            KeyBinding::new("secondary-b", ToggleSidebar, Some("!Terminal")), KeyBinding::new("alt-shift-p", CyclePermission, Some("!Terminal")),
+            KeyBinding::new("secondary-alt-w", OpenWorktrees, Some("!Terminal"))]);
         cx.bind_keys([KeyBinding::new("ctrl-shift-c", terminal::CopyTerminal, Some("Terminal")),
             KeyBinding::new("ctrl-shift-v", terminal::PasteTerminal, Some("Terminal")),
             KeyBinding::new("tab", NoAction, Some("Terminal")),
@@ -728,7 +738,7 @@ impl Hangar {
             attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
             suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
-            terminal_suggestion: String::new(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
+            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
             settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
@@ -736,7 +746,7 @@ impl Hangar {
             palette_seq: 0, backdrop_seq: 0, backdrop_pending: false, backdrop: None, backdrop_note: None, backdrop_busy: None, grain: crate::media::grain(),
             device: device::Device::new(window, cx), accounts: accounts::Accounts::default(), orchestration: orchestration::Orchestration::default(), orq_history: None, orq_history_serial: 0, home_usage: Default::default(), recents: Default::default(), reopen: None, shortcuts: shortcuts::Shortcuts::default(),
             server_config: server_config::ServerConfig::default(), harness: harness::Harnesses::default(), sync: sync::Sync::default(), connect: connect::Connect::default(), shared: shared_config::SharedConfig::default(), machines: machines::Machines::default(),
-            costs: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
+            costs: Default::default(), worktrees: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
             terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), tree: tree::Tree::new(window, cx), find: find::Find::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
@@ -945,6 +955,7 @@ impl Hangar {
         // Convite só enxerga a própria sessão: custos, contas, busca, configuração e avisos do servidor responderiam 403.
         if !self.active_invite() {
             self.costs_reconnected(cx);
+            self.worktrees_reconnected(cx);
             self.search_reconnected(cx);
             self.refresh_default_account(cx);
             self.schedule_account_refresh(cx);
@@ -1076,7 +1087,7 @@ impl Hangar {
         if let Some(old) = self.selected_key() { self.drafts.insert(old, self.composer.read(cx).value().to_string()); }
         self.open_api = open_api;
         // Avisos, atalhos globais e contas passam a ser os da máquina desta conversa.
-        if !same_server { self.load_notification_preferences(); self.load_session_accounts(cx); }
+        if !same_server { self.load_notification_preferences(); }
         // Com as abas no topo (só a lista ativa), a aba da sessão aberta entra na vista da faixa.
         if self.open_api.is_none() && let Some(ix) = self.sessions.iter().position(|s| s.name == session.name) { self.tabs_scroll.scroll_to_item(ix); }
         self.selection += 1;
@@ -1112,6 +1123,8 @@ impl Hangar {
         self.composer.update(cx, |input, cx| input.set_value(draft, window, cx));
         self.confirm = None;
         self.terminal_suggestion.clear();
+        self.plugin_band = Value::Null;
+        self.plugin_panes.clear();
         self.recent = None;
         self.command_panel = false;
         // Os menus são da tela sem sessão: sem isto, o Esc seguinte seria gasto num deles, já fora da tela.
@@ -1122,6 +1135,9 @@ impl Hangar {
         self.controls.on_select();
         self.reset_subagent_count();
         self.selected = Some(session.clone());
+        if !same_server || session.engine.as_deref().is_some_and(|e| !e.is_empty()) || session.uses_engine_account() {
+            self.load_session_accounts(cx);
+        }
         self.refresh_shortcut_terms(&session.name);
         if session.readable() {
             if let Some(api) = self.session_api() {
@@ -1499,6 +1515,8 @@ impl Hangar {
             Payload::Machines(reply) => { self.receive_machines(reply, window, cx); return; }
             Payload::Computer(reply) => { self.receive_computer(reply, window, cx); return; }
             Payload::Create(dialog, reply) => { self.receive_create(dialog, reply, window, cx); return; }
+            Payload::Transfer(dialog, reply) => { self.receive_agent_transfer(dialog, reply, window, cx); return; }
+            Payload::PluginPressed(result) => { self.receive_plugin_press(result, window, cx); return; }
             Payload::Sidebar(reply) => {
                 // Só o silenciar da máquina da conversa aberta muda as preferências que os avisos desta janela leem.
                 if matches!(&reply, sidebar::SidebarReply::Wrote(t, sidebar::Write::Mute(_), _) if t.server == self.open_server()) { self.load_notification_preferences(); }
@@ -1603,6 +1621,7 @@ impl Hangar {
     pub(super) fn follow_open(&mut self, list: &[SessionInfo], window: &mut Window, cx: &mut Context<Self>) {
         // Antes de soltar a conexão aberta: o renomear em voo é da máquina dela.
         let target = self.selected_target();
+        if self.new_session.as_ref().is_some_and(|d| d.read(cx).transfer_busy_for(target.as_ref())) { return; }
         // Trocando de conta, a sessão some e volta noutro transcript: a conversa fica na tela até a resposta e até a lista
         // trazê-la de volta; sumida por mais que o prazo depois da resposta, vale o "sessão encerrada" de sempre.
         // Resposta perdida (conexão trocada no meio) não segura a tela além do prazo do próprio pedido.
@@ -1648,6 +1667,13 @@ impl Hangar {
             "reset" => Ok(ChatUpdate::Reset),
             "suggest" => {
                 self.terminal_suggestion = data.get("text").and_then(Value::as_str).unwrap_or("").to_owned();
+                return (true, Changed::Screen);
+            }
+            "plugin_ui" => {
+                // A árvore chega por valor: `take` move em vez de copiar centenas de KB por evento.
+                let mut data = data;
+                self.plugin_band = data["above"].take();
+                self.plugin_panes = match data["panes"].take() { Value::Array(panes) => panes, _ => Vec::new() };
                 return (true, Changed::Screen);
             }
             "stats" => {
@@ -1768,6 +1794,8 @@ impl Hangar {
                 }
                 self.revision += 1;
                 self.terminal_suggestion.clear();
+                self.plugin_band = Value::Null;
+                self.plugin_panes.clear();
                 if let Some(task) = self.history_task.take() { task.abort(); }
                 self.chat = Chat::default();
                 self.turn_seen = None;
@@ -3739,7 +3767,13 @@ impl Hangar {
             // Anéis de contexto e de uso da conta; sem dado dizem isso, nunca 0%.
             let percent = |pct: Option<f64>| pct.map(|p| format!("{}%", p.round())).unwrap_or_else(|| tr("no_data"));
             // O anel mostra a janela de 5 h; conta que só publica a semanal (Codex, alguns planos) mostra a semanal.
-            let account = status.as_ref().filter(|_| readable).and_then(|s| s.five_hour_pct.or(s.weekly_pct).or(s.monthly_pct));
+            let account = if self.has_proxy_session() {
+                self.focused_proxy_pct()
+            } else {
+                // Sem cota na linha, vale a leitura da mesma conta pela API.
+                status.as_ref().filter(|_| readable).and_then(|s| s.five_hour_pct.or(s.weekly_pct).or(s.monthly_pct))
+                    .or_else(|| self.focused_account().filter(|_| readable).and_then(|(_, _, window)| window.map(|(_, pct)| pct)))
+            };
             // Anel, nome curto e número com a mesma geometria nos dois; o detalhe de cada um abre num cartão, não numa dica.
             let ring = |id: &'static str, name: String, pct: Option<f64>, open: bool| Button::new(id)
                 .custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::faint()).hover(theme::hover()).active(theme::hover()))
@@ -4621,6 +4655,12 @@ impl Hangar {
         let status_label = tr(&format!("sidebar_state_{state}"));
         let label = match folder_name(&session) { Some(folder) => format!("{name} · {folder} · {status_label}"), None => format!("{name} · {status_label}") };
         let branch = shown_branch(&session).filter(|_| !compact);
+        // Como a branch, o chip e o aviso de worktree apagada ficam fora do modo compacto.
+        let worktree = worktree_label(&session).filter(|_| !compact && !session.worktree_gone);
+        let worktree_gone = !compact && session.worktree_gone;
+        let second_line = branch.is_some() || worktree.is_some() || worktree_gone;
+        let worktree_target = session.worktree_path.clone().or_else(|| session.cwd.clone()).unwrap_or_default();
+        let merged = self.worktrees.status(&worktree_target).is_some_and(|s| s.merged);
         let time = div().flex_shrink_0().text_size(px(11.)).line_height(px(14.)).text_color(theme::muted())
             .children(session.last_activity.map(side::since));
         // Id da marca com a máquina: a de mesmo nome em outra máquina não divide a animação.
@@ -4659,7 +4699,7 @@ impl Hangar {
         let hover_target = target.clone();
         let row_id = format!("conversation-row-{row_key}");
         div().id(SharedString::from(row_id)).relative().flex_shrink_0()
-            .h(px(if branch.is_some() { 45. } else { 29. }))
+            .h(px(if second_line { 45. } else { 29. }))
             .px(px(8.)).py(px(6.)).flex().flex_col().gap(px(2.)).rounded(px(8.)).text_color(theme::text())
             .when_some(focus, |el, focus| el.track_focus(focus))
             .when(focus.is_some_and(|f| f.is_focused(window)), |el| el.focus_ring_style(window, cx))
@@ -4674,10 +4714,19 @@ impl Hangar {
             .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx))
             .child(title)
             // Recuo do estado mais o vão: a branch começa embaixo do glifo.
-            .when_some(branch, |el, branch| el.child(div().w_full().min_w_0().h(px(14.)).pl(px(17.)).flex().items_center().gap(px(4.))
+            .when(second_line, |el| el.child(div().w_full().min_w_0().h(px(14.)).pl(px(17.)).flex().items_center().gap(px(4.))
                 .text_size(px(11.)).line_height(px(14.)).text_color(theme::muted())
-                .child(chrome::small_icon(IconName::GitBranch, 12., theme::muted()))
-                .child(div().flex_1().min_w_0().truncate().child(branch))))
+                .when_some(branch, |el, branch| el
+                    .child(chrome::small_icon(IconName::GitBranch, 12., theme::muted()))
+                    .child(div().flex_1().min_w_0().truncate().child(branch)))
+                .when_some(worktree, |el, label| {
+                    el.child(div().id(SharedString::from(format!("wt-chip-{row_key}"))).cursor_pointer()
+                        .flex().items_center().gap(px(3.)).text_color(theme::accent())
+                        .child(chrome::small_icon(IconName::GitBranch, 11., theme::accent()))
+                        .child(if merged { format!("{label} ✓") } else { label })
+                        .on_click(cx.listener(move |this, _, window, cx| { cx.stop_propagation(); this.open_worktree(worktree_target.clone(), window, cx); })))
+                })
+                .when(worktree_gone, |el| el.child(div().text_color(theme::muted()).child(tr_shared("worktree_apagada", &[]))))))
             .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                 if !matches!(event.keystroke.key.as_str(), "enter" | "space") || !this.row_focus(&open).is_some_and(|f| f.is_focused(window)) { return; }
                 this.select_target(&open, window, cx);
@@ -4866,6 +4915,13 @@ fn shown_branch(session: &SessionInfo) -> Option<String> {
     session.branch.clone().filter(|b| !b.is_empty() && b != "main" && b != "master")
 }
 
+/// Nome curto do chip: a pasta da worktree onde o agente está.
+fn worktree_label(session: &SessionInfo) -> Option<String> {
+    let path = session.worktree_path.clone()
+        .or_else(|| session.worktree.unwrap_or(false).then(|| session.cwd.clone()).flatten())?;
+    std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned())
+}
+
 /// Selo da conta do `chipDaConta` do web (lib/conta.ts): o nome é o sufixo da pasta, a pasta sem sufixo é a padrão,
 /// e a cor sai do nome da pasta, com as mesmas seis tintas. Motor (`chave:`) não tem selo.
 fn account_chip(conta: Option<&str>) -> Option<(String, Hsla)> {
@@ -4951,6 +5007,20 @@ fn save_connection(address: &str, token: &str, servers: &[servers::ServerEntry])
     }
     std::io::Write::write_all(&mut options.open(&tmp)?, json!({"address": address, "token": token, "servers": servers}).to_string().as_bytes())?;
     std::fs::rename(&tmp, &path)
+}
+
+/// Conversa mínima que fica ao lado de um painel de mod ancorado.
+const MIN_CONVERSATION_BESIDE_PANE: f32 = 420.;
+
+/// Largura natural de um painel de mod: as colunas que o terminal deu a ele, mais a moldura.
+fn plugin_pane_width(pane: &Value) -> f32 {
+    pane["columns"].as_f64().map(|c| c as f32 * crate::plugin_ui::CELL_W).unwrap_or(420.) + 20.
+}
+
+/// Como o terminal, que só ancora o painel com largura de sobra: ao lado da conversa quando cabem os
+/// dois (`free` é a largura entre a lista e o painel lateral), senão acima do composer.
+fn plugin_pane_docks(pane: &Value, free: f32) -> bool {
+    crate::plugin_ui::is_dock(pane) && free - plugin_pane_width(pane) >= MIN_CONVERSATION_BESIDE_PANE
 }
 
 fn select_snapshot(state: &SessionState) -> String { json!([state.question, state.options]).to_string() }
@@ -5272,7 +5342,55 @@ impl Hangar {
                 }
             }
         } else { content = content.child(self.render_new_chat(window, cx)); }
-        content.into_any_element()
+        // Painel de mod ancorado: coluna à direita da conversa, como o terminal o põe.
+        let readable = self.selected.as_ref().is_some_and(|s| s.readable());
+        let free = self.plugin_pane_room(window);
+        let press = self.plugin_press(cx);
+        let dock: Vec<AnyElement> = self.plugin_panes.iter().filter(|p| readable && plugin_pane_docks(p, free))
+            .map(|p| div().h_full().flex_shrink_0().w(px(plugin_pane_width(p))).p_2().flex().flex_col()
+                .child(crate::plugin_ui::pane(p, press.clone())).into_any_element())
+            .collect();
+        if dock.is_empty() { return content.into_any_element(); }
+        div().size_full().flex().flex_row().child(content.flex_1().min_w_0()).children(dock).into_any_element()
+    }
+
+    /// Largura que sobra para a conversa e um painel de mod ancorado, entre a lista e o painel lateral.
+    fn plugin_pane_room(&self, window: &Window) -> f32 {
+        f32::from(window.viewport_size().width) - self.nav_width() - self.side_width(window).unwrap_or(0.)
+    }
+
+    /// Quem atende o clique num botão de mod; sessão só leitura deixa os botões como rótulo.
+    fn plugin_press(&self, cx: &mut Context<Self>) -> Option<crate::plugin_ui::Press> {
+        if self.selected.as_ref().is_some_and(|s| s.read_only()) { return None; }
+        let view = cx.entity().downgrade();
+        Some(std::rc::Rc::new(move |site: &str, key: &str, _: &mut Window, cx: &mut App| {
+            let (site, key) = (site.to_owned(), key.to_owned());
+            let _ = view.update(cx, |this, cx| this.press_plugin(site, key, cx));
+        }))
+    }
+
+    fn press_plugin(&mut self, site: String, key: String, cx: &mut Context<Self>) {
+        let (Some(api), Some(session)) = (self.session_api(), self.selected.clone()) else { return };
+        let (connection, selection, tx) = (self.connection, self.selection, self.tx.clone());
+        self.runtime.spawn(async move {
+            let result = api.act(&session.name, &["plugin", "press"], Some(json!({"site": site, "key": key})), false, 10).await;
+            let _ = tx.send(Envelope { connection, selection: Some(selection), payload: Payload::PluginPressed(result) }).await;
+        });
+        cx.notify();
+    }
+
+    // O que o mod copiou ou mandou abrir acontece aqui, na máquina de quem clicou, e não na do terminal.
+    fn receive_plugin_press(&mut self, result: Result<Value, Failure>, window: &mut Window, cx: &mut Context<Self>) {
+        match result {
+            Ok(reply) => {
+                if let Some(text) = reply.get("copied").and_then(Value::as_str) {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.to_owned()));
+                    window.push_notification(Notification::info(tr_shared("plugin_copiado", &[])), cx);
+                }
+                if let Some(url) = crate::plugin_ui::safe_href(&reply["opened"]) { cx.open_url(&url); }
+            }
+            Err(error) => window.push_notification(Notification::warning(Self::failure(&error)), cx),
+        }
     }
 
     /// Cartões, faixas e avisos entre a conversa e o compositor, e o compositor.
@@ -5328,6 +5446,12 @@ impl Hangar {
                 }))))))
             .when_some(delivery_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
             .when_some(stop_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
+            .children(readable.then(|| {
+                let (free, press) = (self.plugin_pane_room(window), self.plugin_press(cx));
+                let inline = self.plugin_panes.iter().filter(|p| !plugin_pane_docks(p, free))
+                    .map(|p| in_column(crate::plugin_ui::pane(p, press.clone()))).collect::<Vec<_>>();
+                inline.into_iter().chain(crate::plugin_ui::band(&self.plugin_band, press).map(in_column))
+            }).into_iter().flatten())
             .map(|el| match orq {
                 Some(orq) => el.child(in_column(self.render_orq_footer(&orq, cx))),
                 None if read_only => el.child(in_column(div().py_2().text_sm().text_color(theme::muted()).whitespace_normal().child(tr("par_so_leitura")))),
@@ -5367,12 +5491,13 @@ impl Render for Hangar {
         // Página de Configurações ocupa a janela; a caixa ao vivo deixa a janela da conversa por baixo.
         let page = self.settings.filter(|_| !self.settings_ui.live);
         let costs_page = self.costs.view.is_some();
+        let worktrees_page = self.worktrees.view.is_some();
         let tabs = appearance::get().navigation == appearance::Navigation::Tabs;
-        let cutout = chat_background && page.is_none() && !costs_page && (desktop_window || floating);
+        let cutout = chat_background && page.is_none() && !costs_page && !worktrees_page && (desktop_window || floating);
         let chat_bounds = std::rc::Rc::new(std::cell::Cell::new(Bounds::<Pixels>::default()));
         // Colados com barra lateral, ela sobe até o topo e a barra do app começa na borda dela, como no Zeron. O fundo
         // do chat passa a ser da coluna que junta a barra e o chat, para a barra ter a cor dele.
-        let beside_sidebar = !floating && !tabs && page.is_none() && !costs_page;
+        let beside_sidebar = !floating && !tabs && page.is_none() && !costs_page && !worktrees_page;
         let chat_fill = |el: Div, this: &Self, window: &Window| el
             .when(chat_background, |el| el.bg(theme::window_fill()))
             .when(cutout, |el| {
@@ -5426,7 +5551,7 @@ impl Render for Hangar {
             .children(self.render_file_view(cx));
         // Visor de arquivos expandido: sem a lista de sessões e sem o painel direito.
         let files_expanded = self.files_expanded();
-        let nav = if page.is_some() || costs_page || files_expanded { None }
+        let nav = if page.is_some() || costs_page || worktrees_page || files_expanded { None }
             else if tabs { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w_full().h(px(44.)).flex_shrink_0()
                 .bg(if chat_background { theme::background().alpha(1.) } else { transparent_black() }))) }
             else { Some(self.pane_element(panes::Area::Nav, StyleRefinement::default().w(px(self.nav_width())).h_full().flex_shrink_0()
@@ -5530,7 +5655,7 @@ impl Render for Hangar {
             .when(!chat_background, |el| el.children(self.render_backdrop(window)))
             .font_family(theme::SANS)
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
-                let page_open = this.settings.is_some() && !this.settings_live() || this.costs.view.is_some();
+                let page_open = this.settings.is_some() && !this.settings_live() || this.costs.view.is_some() || this.worktrees.view.is_some();
                 if !this.connection_dialog && !page_open && (this.selected.as_ref().is_some_and(SessionInfo::takes_messages)
                     || this.selected.is_none() && this.api.is_some()) {
                     this.composer.update(cx, |input, cx| input.focus(window, cx));
@@ -5540,6 +5665,7 @@ impl Render for Hangar {
                 if !this.connection_dialog { this.open_settings(settings::Page::Appearance, window, cx); }
             }))
             .on_action(cx.listener(|this, _: &OpenCosts, window, cx| this.toggle_costs(window, cx)))
+            .on_action(cx.listener(|this, _: &OpenWorktrees, window, cx| this.toggle_worktrees(window, cx)))
             .on_action(cx.listener(|this, _: &OpenSearch, window, cx| this.toggle_search(window, cx)))
             .on_action(cx.listener(|this, _: &FocusSettingsSearch, window, cx| this.focus_search(window, cx)))
             .on_action(cx.listener(|this, _: &FindProjectFile, window, cx| this.find_project_files(false, window, cx)))
@@ -5593,6 +5719,7 @@ impl Render for Hangar {
                 if this.search.open { this.close_search(window, cx); cx.stop_propagation(); return; }
                 if this.shortcuts_escape(window, cx) { cx.stop_propagation(); return; }
                 if this.costs_escape(window, cx) { cx.stop_propagation(); return; }
+                if this.worktrees.view.is_some() { this.close_worktrees(window, cx); cx.stop_propagation(); return; }
                 // O painel preso a um botão é a camada de cima: fecha antes de arquivos e terminal, e o foco volta ao campo.
                 // Com a página de configurações aberta nenhum painel está na tela; a flag das pastas fica para quando ela fechar.
                 if (this.settings.is_none() || this.settings_live()) && this.close_popups() {
@@ -5653,8 +5780,9 @@ impl Render for Hangar {
             // A barra do app fica acima de tudo, inclusive das páginas, de ponta a ponta; soltos, a margem é só dos painéis.
             .flex_col()
             .children(topbar)
-            .child(div().w_full().flex_1().min_h_0().flex().when(floating && page.is_none() && !costs_page, |el| el.p(px(10.)).gap(px(10.)))
+            .child(div().w_full().flex_1().min_h_0().flex().when(floating && page.is_none() && !costs_page && !worktrees_page, |el| el.p(px(10.)).gap(px(10.)))
                 .map(|el| match (page, nav) {
+                _ if worktrees_page => el.child(self.render_worktrees(window, cx)),
                 _ if costs_page => el.child(self.render_costs(window, cx)),
                 (Some(page), _) => el.child(self.render_settings(page, window, cx)),
                 // Abas no topo: a faixa em cima, a conversa e o painel embaixo, sem barra lateral.
@@ -5698,6 +5826,15 @@ mod tests {
     use super::{message_card, preview_step, safe_markdown, stream_motion, working_tokens, working_verb};
     use crate::{api::dto::ChatEvent, cards::Card, i18n::tr};
     use std::{collections::HashSet, time::Duration};
+
+    #[test]
+    fn worktree_label_prefers_real_location() {
+        use super::SessionInfo;
+        let s = SessionInfo { name: "a".into(), cwd: Some("/r/hangar".into()), worktree: Some(true),
+                              worktree_path: Some("/r/hangar-x".into()), ..Default::default() };
+        assert_eq!(super::worktree_label(&s).as_deref(), Some("hangar-x"));
+        assert_eq!(super::worktree_label(&SessionInfo { name: "a".into(), ..Default::default() }), None);
+    }
 
     #[test]
     fn conversation_corner_preserves_delivery_truth_and_session_warnings() {

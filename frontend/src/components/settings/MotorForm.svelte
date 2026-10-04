@@ -37,8 +37,12 @@
     nomesExistentes?: string[];
     onSalvo: (motores: Record<string, Motor>, alvo: Server | null) => void;
     onFechar: () => void;
+    // CLIProxyAPI detectado no servidor: modelos já lidos e a chave fica lá (o PUT pede
+    // `use_cliproxy_key`), então o campo de chave e o Testar somem.
+    cliproxy?: { base_url: string; modelos: ModeloProvedor[] } | null;
   }
-  let { apiTarget, nome, motor, criando = false, nomesExistentes = [], onSalvo, onFechar }: Props = $props();
+  let { apiTarget, nome, motor, criando = false, nomesExistentes = [], onSalvo, onFechar,
+        cliproxy = null }: Props = $props();
 
   // Atalhos de endereço: dois provedores que a pessoa desta casa usa e cujo endereço não se
   // adivinha (nem um nem outro é o domínio do produto).
@@ -76,7 +80,7 @@
     subagent_model: motor?.subagent_model ?? '',
     context_window: motor?.context_window ? String(motor.context_window) : '',
     bundled_skills: motor?.bundled_skills === true,
-    experimental_betas: motor?.experimental_betas === true,
+    experimental_betas: motor?.experimental_betas === true || (criando && !!cliproxy),
     prompt_caching: motor?.prompt_caching !== false,
     adaptive_thinking: motor?.adaptive_thinking !== false,
     tool_search: motor?.tool_search === true,
@@ -95,11 +99,18 @@
   // Em edição o id no disco não muda; em criação ele sai do nome curto pelo alfabeto do engines.json.
   const idAlvo = $derived(criandoAgora ? idDe(form.nome) : idNoDisco);
   const ligado = (k: ChaveLiga) => form[k];
-  const setLigado = (k: ChaveLiga, v: boolean) => { form[k] = v; };
+  // Mexer à mão nos betas desarma o ligar automático do CLIProxyAPI no próximo Testar.
+  let betasTocado = $state(false);
+  const setLigado = (k: ChaveLiga, v: boolean) => {
+    if (k === 'experimental_betas') betasTocado = true;
+    form[k] = v;
+  };
   const numero = (k: ChaveNum) => form[k];
   const setNumero = (k: ChaveNum, v: string) => { form[k] = v; };
 
-  let modelos = $state<ModeloProvedor[]>([]);
+  let modelos = $state<ModeloProvedor[]>(untrack(() => cliproxy?.modelos ?? []));
+  // O servidor só preenche a chave pro endereço que ele detectou; editou a URL, volta o manual.
+  const semChave = $derived(!!cliproxy && form.base_url.trim() === cliproxy.base_url);
   let buscando = $state(false);
   let erroBusca = $state('');
   let okBusca = $state('');
@@ -130,6 +141,12 @@
   // Só o caso documentado da Moonshot, onde desligar o thinking rebaixa K3/K2.7 para K2.6 sem
   // avisar. Não inventar regra para provedor sem doc.
   const ehMoonshot = $derived(/moonshot|kimi/i.test(`${form.base_url} ${form.model}`));
+  // O CLIProxyAPI monta um pedido novo pro upstream, então os campos beta passam; e o /model do
+  // Claude Code só lista ids com "claude", o que nenhum GPT dele tem.
+  // O veredito do teste só vale para o endereço testado.
+  let gateway = $state<{ nome: string | null; url: string } | null>(null);
+  const ehCliproxy = $derived(semChave
+    || (gateway?.nome === 'cliproxyapi' && gateway.url === form.base_url.trim()));
   const descobertaComprovada = $derived(modelos.length > 0);
   const modeloAtual = $derived(modelos.find((x) => x.id === form.model));
   // Motor com chave salva, campo de chave vazio e endereço editado: o Testar usaria a chave salva
@@ -154,10 +171,14 @@
       const corpo = chave ? { base_url: form.base_url.trim(), api_key: chave } : { nome: idAlvo };
       const r = apiTarget ? await engineModelosForServer(apiTarget, corpo) : await engineModelos(corpo);
       modelos = r.modelos;
+      gateway = { nome: r.gateway ?? null, url: form.base_url.trim() };
+      // Só na criação: num motor salvo, betas desligados podem ser escolha de quem o salvou.
+      if (ehCliproxy && criandoAgora && !betasTocado) form.experimental_betas = true;
       okBusca = m.config_motores_modelos_ok({ n: r.modelos.length });
       const atual = modelos.find((x) => x.id === form.model) ?? modelos[0];
       if (atual) escolherModelo(atual.id);
     } catch (e) {
+      gateway = null;
       erroBusca = e instanceof Error ? e.message : m.config_motores_erro_consultar();
     } finally {
       buscando = false;
@@ -193,7 +214,8 @@
         base_url: form.base_url.trim(),
         model: form.model.trim(),
       };
-      if (form.api_key.trim()) corpo.api_key = form.api_key.trim();
+      if (semChave) corpo.use_cliproxy_key = true;
+      else if (form.api_key.trim()) corpo.api_key = form.api_key.trim();
       // Campo ausente do corpo do PUT herda o valor do disco, e `null` conta como ausente. Quem
       // LIMPA é o campo presente e vazio: `''` sai do registro. Por isso os opcionais vão SEMPRE —
       // omiti-los quando vazios fazia a limpeza voltar HTTP 200 com o valor antigo, calado.
@@ -281,34 +303,40 @@
 
   <label class="campo">
     <span class="rot">{m.config_motores_endereco()}</span>
+    <!-- Com o CLIProxyAPI detectado o endereço trava: a chave e os modelos só valem para ele. -->
     <input type="text" name="base_url" autocapitalize="off" spellcheck={false} placeholder="https://…"
+           readonly={!!cliproxy} class:travado={!!cliproxy}
            value={form.base_url} oninput={(e) => (form.base_url = e.currentTarget.value)} />
     {@render ajudaLonga(m.config_motores_endereco(), aEndereco)}
     <!-- Dois endereços que não se adivinham; digitá-los à mão é onde nasce o 404 do provedor. -->
-    <span class="dicas">
-      {#each DICAS as d (d.base_url)}
-        <button type="button" class="dica" onclick={() => (form.base_url = d.base_url)}>{d.label}</button>
-      {/each}
-    </span>
+    {#if !cliproxy}
+      <span class="dicas">
+        {#each DICAS as d (d.base_url)}
+          <button type="button" class="dica" onclick={() => (form.base_url = d.base_url)}>{d.label}</button>
+        {/each}
+      </span>
+    {/if}
   </label>
 
-  <label class="campo">
-    <span class="rot">{m.config_motores_chave()}</span>
-    {#if form.api_key_definida}<span class="def">{m.config_motores_chave_definida()}</span>{/if}
-    <input type="text" name="api_key" autocomplete="off" autocapitalize="off" spellcheck={false}
-           placeholder={form.api_key_definida ? m.config_motores_colar_nova() : m.config_motores_colar()}
-           value={form.api_key} oninput={(e) => (form.api_key = e.currentTarget.value)} />
-  </label>
+  {#if !semChave}
+    <label class="campo">
+      <span class="rot">{m.config_motores_chave()}</span>
+      {#if form.api_key_definida}<span class="def">{m.config_motores_chave_definida()}</span>{/if}
+      <input type="text" name="api_key" autocomplete="off" autocapitalize="off" spellcheck={false}
+             placeholder={form.api_key_definida ? m.config_motores_colar_nova() : m.config_motores_colar()}
+             value={form.api_key} oninput={(e) => (form.api_key = e.currentTarget.value)} />
+    </label>
 
-  <div class="campo">
-    <button type="button" class="btn" onclick={buscarModelos}
-            disabled={buscando || !form.base_url.trim() || (!form.api_key.trim() && !form.api_key_definida)}>
-      {buscando ? m.config_motores_consultando() : m.config_motores_testar()}
-    </button>
-    {#if okBusca}<span class="ok">{okBusca}</span>{/if}
-    {#if enderecoMudouSemChave}<span class="ajuda erro">{m.config_motores_endereco_mudou()}</span>{/if}
-    {#if erroBusca}<span class="ajuda erro">{erroBusca}</span>{/if}
-  </div>
+    <div class="campo">
+      <button type="button" class="btn" onclick={buscarModelos}
+              disabled={buscando || !form.base_url.trim() || (!form.api_key.trim() && !form.api_key_definida)}>
+        {buscando ? m.config_motores_consultando() : m.config_motores_testar()}
+      </button>
+      {#if okBusca}<span class="ok">{okBusca}</span>{/if}
+      {#if enderecoMudouSemChave}<span class="ajuda erro">{m.config_motores_endereco_mudou()}</span>{/if}
+      {#if erroBusca}<span class="ajuda erro">{erroBusca}</span>{/if}
+    </div>
+  {/if}
 
   <label class="campo">
     <span class="rot">{m.composer_modelo()}</span>
@@ -383,7 +411,11 @@
       {m.config_motores_motivo_skills_1()} <code>claude-api</code>{m.config_motores_motivo_skills_2()} <code>~/.claude/skills</code>{m.config_motores_motivo_skills_3()}
     {/snippet}
     {#snippet mBetas()}
-      {m.config_motores_motivo_betas_1()}<code>context_management</code>{m.config_motores_motivo_betas_2()} <code>400 Extra inputs are not permitted</code>{m.comum_ponto()}
+      {#if ehCliproxy}
+        {m.config_motores_motivo_betas_cliproxy()}
+      {:else}
+        {m.config_motores_motivo_betas_1()}<code>context_management</code>{m.config_motores_motivo_betas_2()} <code>400 Extra inputs are not permitted</code>{m.comum_ponto()}
+      {/if}
     {/snippet}
     {#snippet mCache()}
       {m.config_motores_motivo_cache()}
@@ -402,6 +434,7 @@
     {/snippet}
     {#snippet mDescoberta()}
       {m.config_motores_motivo_descoberta_1()} <code>/v1/models</code>{m.config_motores_motivo_descoberta_2()} <code>/model</code>{m.config_motores_motivo_descoberta_3()}
+      {#if ehCliproxy}{m.config_motores_motivo_descoberta_cliproxy()}{/if}
     {/snippet}
     {#snippet mStreaming()}
       {m.config_motores_motivo_streaming()}
@@ -418,7 +451,9 @@
 
     <div class="grade">
       {@render linha('bundled_skills', m.config_motores_skills(), m.config_motores_recomendado_desligado(), '', mSkills)}
-      {@render linha('experimental_betas', m.config_motores_betas(), m.config_motores_recomendado_desligado(), '', mBetas)}
+      {@render linha('experimental_betas', m.config_motores_betas(),
+        ehCliproxy ? m.config_motores_recomendado_ligado() : m.config_motores_recomendado_desligado(),
+        ehCliproxy ? 'sim' : '', mBetas)}
       {@render linha('prompt_caching', m.config_motores_cache(), m.config_motores_recomendado_ligado(), 'sim', mCache)}
       {@render linha('adaptive_thinking', m.config_motores_raciocinio(),
         ehMoonshot ? m.config_motores_obrigatorio() : m.config_motores_recomendado_ligado(),
@@ -427,8 +462,9 @@
         form.experimental_betas ? m.config_motores_recomendado_desligado() : m.config_motores_sem_efeito(),
         '', mToolSearch, !form.experimental_betas)}
       {@render linha('gateway_model_discovery', m.config_motores_descoberta(),
-        descobertaComprovada ? m.config_motores_ligado_n({ n: modelos.length }) : m.config_motores_teste_antes(),
-        descobertaComprovada ? 'sim' : '', mDescoberta)}
+        ehCliproxy ? m.config_motores_recomendado_desligado()
+          : descobertaComprovada ? m.config_motores_ligado_n({ n: modelos.length }) : m.config_motores_teste_antes(),
+        !ehCliproxy && descobertaComprovada ? 'sim' : '', mDescoberta)}
       {@render linha('fine_grained_tool_streaming', m.config_motores_streaming(), m.config_motores_recomendado_desligado(), '', mStreaming)}
       {@render linha('auth_via_api_key', m.config_motores_x_api_key(),
         m.config_motores_ligue_401(), '', mAuthHeader)}

@@ -9,11 +9,22 @@ pub use hangar_api::preview::PreviewEvent as Preview;
 pub use hangar_api::state::{ShellVivo as ShellAlive, StateEvent as SessionState};
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct ContextUse {
+    pub used: f64,
+    pub window: f64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct SessionInfo {
     pub name: String,
     pub cwd: Option<String>,
     pub jsonl: Option<String>,
+    pub lifecycle_id: Option<String>,
+    pub transfer_id: Option<String>,
+    pub transfer_phase: Option<String>,
     #[serde(default)] pub provider: String,
+    pub engine: Option<String>,
+    pub engine_account: Option<String>,
     #[serde(default)] pub headless: bool,
     #[serde(default)] pub state: String,
     pub tracked: Option<bool>,
@@ -33,6 +44,8 @@ pub struct SessionInfo {
     pub git_ahead: Option<i64>,
     pub git_behind: Option<i64>,
     pub status_line: Option<String>,
+    /// Contexto da sessão Claude lido do transcript pelo backend; vale quando a linha não o traz.
+    #[serde(default)] pub context: Option<ContextUse>,
     pub loop_status: Option<String>,
     pub loop_iter: Option<u32>,
     pub loop_max: Option<u32>,
@@ -45,6 +58,10 @@ pub struct SessionInfo {
     pub last_reply: Option<String>,
     pub last_reply_at: Option<f64>,
     pub worktree: Option<bool>,
+    /// Raiz da worktree onde o agente está agora; `None` fora de worktree.
+    pub worktree_path: Option<String>,
+    #[serde(default)]
+    pub worktree_gone: bool,
     /// Membros do grupo de trabalho além dela; `srv::nome` é par de outro servidor.
     pub pair_peers: Option<Vec<String>>,
     /// Id estável do grupo: a lista junta num bloco quem tem o mesmo.
@@ -66,10 +83,23 @@ pub struct SessionInfo {
     #[serde(default)] pub pair_external: Option<PairExternal>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[non_exhaustive]
+pub struct CliProxyAccount {
+    pub account: String,
+    pub credential_id: String,
+    pub email: String,
+    pub label: String,
+    pub prefix: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct PairExternal { pub alias: String, pub owner: String, pub session: String }
 
 impl SessionInfo {
+    pub fn uses_engine_account(&self) -> bool {
+        self.provider == "claude" && self.engine_account.as_deref().is_some_and(|a| !a.is_empty())
+    }
     pub fn readable(&self) -> bool { self.tracked != Some(false) && self.jsonl.is_some() }
     pub fn display_state(&self) -> &str {
         if self.provider == "codex" && !self.readable() && !matches!(self.state.as_str(), "awaiting_input" | "dead") { "loading" }
@@ -427,6 +457,9 @@ pub struct Stats {
     pub tok_s: Option<f64>,
     pub cache_pct: Option<f64>,
     pub ttft_ms: Option<f64>,
+    pub tok_s_now: Option<f64>,
+    pub tok_s_recent: Option<f64>,
+    #[serde(default)] pub tok_s_exact: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -512,6 +545,15 @@ pub struct Steered {
 mod tests {
     use super::{ChatEvent, ChatEventExt, OrqEntry, OrqLine, OrqPanel, SessionInfo, SessionState, plan_pending};
     use serde_json::json;
+
+    #[test]
+    fn session_reads_worktree_location() {
+        let s: SessionInfo = serde_json::from_value(json!({"name": "a", "worktree": true,
+            "worktree_path": "/r/hangar-x", "worktree_gone": false})).unwrap();
+        assert_eq!(s.worktree_path.as_deref(), Some("/r/hangar-x"));
+        let old: SessionInfo = serde_json::from_value(json!({"name": "a"})).unwrap();
+        assert!(!old.worktree_gone && old.worktree_path.is_none());
+    }
 
     #[test]
     fn orq_entry_reads_a_real_decision() {

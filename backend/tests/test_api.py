@@ -247,8 +247,7 @@ def test_input_pi_deferred_mantem_a_entrada_pendente_com_o_mesmo_id(api_client, 
     monkeypatch.setattr(pqueue.settings, "projects_dir", tmp_path / "projects")
     monkeypatch.setattr("app.api._pane_info", lambda name: ("pi", "%1"))
     monkeypatch.setattr("app.api.INBOX.tem_linha", lambda pane: True)
-    with patch("app.api.terminal.send_prompt", return_value="deferred") as sp, \
-         patch("app.api.threading.Thread"):   # nao dispara o drain de verdade neste teste
+    with patch("app.api.terminal.send_prompt", return_value="deferred") as sp:
         r = api_client.post("/api/sessions/pisess/input", json={"text": "oi"}, headers=_h())
     assert r.status_code == 200
     assert r.json()["delivered"] is False
@@ -1726,6 +1725,7 @@ def test_resume_archived_codex_desvia_de_nome_de_sessao_codex_viva(api_client):
     with patch("app.api.archive_cwd", return_value="/home/u/my-proj"), \
          patch("app.api.archive_jsonl", return_value=Path("/tmp/codex/sessions/rollout.jsonl")), \
          patch("app.api.codex_accounts.account_for_rollout", return_value=origem), \
+         patch("app.api.registry.list", return_value=[]), \
          patch.object(tmux, "has_session", return_value=False), \
          patch("app.api.codex_sessions.exists", side_effect=lambda name: name == "my-proj"), \
          patch("app.api.registry.create",

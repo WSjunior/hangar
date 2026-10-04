@@ -3,6 +3,7 @@
 // `FileAttachment`, que esta no caminho critico do chat.
 import type BiggerPictureCtor from 'bigger-picture/vanilla';
 import * as m from '../paraglide/messages';
+import { closeViewerHistory, openViewerHistory, waitForViewerHistory } from './viewerHistory';
 
 // Visor de midia do app inteiro: chat, anexo de arquivo e folha de Anexos abrem POR AQUI.
 //
@@ -196,6 +197,7 @@ async function montarVisor(midias: MidiaVisor[], inicio: number, acao?: AcaoViso
     midias.map(async (x) => medir(x.element) ?? (await medirCarregando(x.url))),
   );
   const bp = await obterInstancia();
+  await waitForViewerHistory();
   let faixa: HTMLElement | null = null;
   let atual = inicio;
   let soltarArrasto: (() => void) | null = null;
@@ -222,7 +224,7 @@ async function montarVisor(midias: MidiaVisor[], inicio: number, acao?: AcaoViso
   // que carrega o `idx` de propria lavra pra este caminho de volta.
   const indiceDe = (item: { idx?: number }) => (typeof item?.idx === 'number' ? item.idx : -1);
 
-  bp.open({
+  const options: Parameters<typeof bp.open>[0] = {
     items: midias.map((x, i) => paraItem(x, tamanhos[i], i)),
     position: inicio,
     onOpen(container) {
@@ -251,9 +253,10 @@ async function montarVisor(midias: MidiaVisor[], inicio: number, acao?: AcaoViso
         const botao = document.createElement('button');
         botao.className = 'visor-btn visor-acao';
         botao.textContent = acao.rotulo;
-        botao.addEventListener('click', () => {
+        botao.addEventListener('click', async () => {
           const escolhida = midias[atual];
           bp.close();
+          await waitForViewerHistory();
           if (escolhida) acao.acao(escolhida);
         });
         acoes.append(botao);
@@ -277,6 +280,9 @@ async function montarVisor(midias: MidiaVisor[], inicio: number, acao?: AcaoViso
       const meta = faixa?.querySelector('.visor-meta');
       if (meta) meta.textContent = m.visor_nao_carregou();
     },
+    onClose() {
+      closeViewerHistory();
+    },
     onClosed() {
       // Só solta se ainda for o NOSSO: uma abertura mais nova já trocou o listener, e removê-lo
       // aqui deixaria o visor vivo sem Escape.
@@ -287,5 +293,12 @@ async function montarVisor(midias: MidiaVisor[], inicio: number, acao?: AcaoViso
       soltarArrasto = null;
       faixa = null;
     },
-  });
+  };
+  openViewerHistory(() => bp.close());
+  try {
+    bp.open(options);
+  } catch (error) {
+    closeViewerHistory();
+    throw error;
+  }
 }

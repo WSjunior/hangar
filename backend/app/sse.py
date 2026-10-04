@@ -16,6 +16,7 @@ from app.difusor import Difusor
 from app.pqueue import PromptQueue, _transcript_start_ts, committed_user_lines
 from app.preview import PreviewBroker, _norm
 from app.models import PreviewEvent, session_key
+from app.live_rate import live_snapshot
 from app.stats import Accumulator as StatsAccumulator
 from app.registry import SessionRegistry
 from app.share_guest_api import guest_safe
@@ -332,6 +333,13 @@ def _status_sig(s):
     )
 
 
+def _context_sig(ctx) -> int | None:
+    """Contexto em baldes de 5%, como o da statusline: cada resposta muda o uso em alguns tokens."""
+    if not isinstance(ctx, dict) or not ctx.get("window"):
+        return None
+    return int(ctx.get("used", 0) * 20 // ctx["window"])
+
+
 def _list_sig(infos) -> str:
     # Dedup IGNORA last_activity: e o mtime do jsonl (float sub-segundo) que muda a CADA escrita de uma
     # sessao ativa -> sem isto a lista inteira re-emitia a cada poll sem nada visivel mudar = flicker.
@@ -352,9 +360,12 @@ def _list_sig(infos) -> str:
     return json.dumps(
         [(i.name, i.cwd, getattr(i, "branch", None), getattr(i, "git_dirty", None),
           i.state, i.tracked, getattr(i, "headless", False), i.jsonl, i.question, i.stalled, i.limited,
+          getattr(i, "lifecycle_id", None), getattr(i, "transfer_id", None),
+          getattr(i, "transfer_phase", None),
           getattr(i, "last_reply", None), getattr(i, "last_reply_at", None),
           getattr(i, "pending_questions", 0),
           i.limit_reset, i.then_target, _status_sig(getattr(i, "status_line", None)),
+          _context_sig(getattr(i, "context", None)),
           (getattr(i, "label", None) if getattr(i, "provider", None) == "codex" and not i.tracked
            else bool(getattr(i, "label", None))),
           getattr(i, "startup_steps", []),
@@ -669,7 +680,9 @@ def _confirm_codex_queue(name: str, jsonl: str) -> None:
     queue = PromptQueue(name)
     if not any(r.get("delivered") and not r.get("confirmed") for r in queue.load()):
         return
-    committed = committed_user_lines(jsonl, "codex")
+    from app.conversation_history import confirmation_options
+    confirmation = confirmation_options(name, jsonl, "codex")
+    committed = committed_user_lines(jsonl, "codex", **confirmation)
     start = _transcript_start_ts(jsonl)
     if committed is not None and start is not None:
         # RPC aceito não prova escrita no rollout; ausência nunca autoriza reenvio.
@@ -807,7 +820,16 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         # que e exatamente o que o preview mostra, LIMPA o preview na hora (sem esperar o broker mudar).
         # Recebe o path (em vez de fechar sobre um tailer fixo) pra poder ser recriado no rebind do /clear.
         try:
+            from app.conversation_history import session_transfer, verify_boundary, live_event
+            record = await asyncio.to_thread(session_transfer, name, path, current_provider)
+            if record:
+                offset = await asyncio.to_thread(verify_boundary, record, path)
+                start_offset = max(offset, start_offset or 0)
             async for ev in get_adapter(current_provider).transcript_stream(path, start_offset):
+                if record:
+                    ev = await asyncio.to_thread(live_event, record, path, ev)
+                    if ev is None:
+                        continue
                 if current_provider == "codex" and ev.kind == "user_msg":
                     await asyncio.to_thread(_confirm_codex_queue, name, path)
                 if ev.kind == "assistant_msg" and ev.text:
@@ -846,10 +868,13 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
             last = None
             while True:
                 snap = await asyncio.to_thread(acc.collect)
+                if snap:
+                    # Medida do stream (adapter sem terminal ou plugin) vence a reserva do transcript.
+                    snap.update(live_snapshot(name, Path(path).stem, acc.last_call_ts()))
                 if snap and snap != last:
                     last = snap
                     await queue.put(("stats", json.dumps(snap)))
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(1.0)   # 1 s: o tok/s "agora" é ao vivo
         except asyncio.CancelledError:
             raise                            # rebind do /clear cancela de propósito
         except Exception:
@@ -952,6 +977,21 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                            etapa=evento, erro_tipo=type(exc).__name__)
             await queue.put(("__error__", exc))
 
+    async def band_pump():
+        # Faixa e painéis dos mods: fonte própria. Na carona do `state` ela só saía quando o estado
+        # mudava, e o mod que relê com a sessão parada ficava velho na tela.
+        vista = 0
+        try:
+            while True:
+                atual = await plugin_bridge.esperar_faixa(name, vista, 30)
+                if atual != vista:
+                    vista = atual
+                    await queue.put(("plugin_ui", None))
+        except Exception as exc:  # surface, never swallow
+            diag.registrar("sse.pump_falhou", "erro", sessao=name, provider=current_provider,
+                           etapa="faixa", erro_tipo=type(exc).__name__)
+            await queue.put(("__error__", exc))
+
     sugestao_emitida = ""          # ultima sugestao que saiu; so a mudanca vira evento
     ask_q_emitted = False          # impede reemissao enquanto o mesmo prompt permanece na tela
     codex_question_emitted = ""
@@ -995,6 +1035,7 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
         asyncio.create_task(em_voo_pump("pensamento", fonte_pensamento(name))),
         asyncio.create_task(em_voo_pump("ferramenta", fonte_ferramenta(name))),
         asyncio.create_task(jsonl_watcher()),
+        asyncio.create_task(band_pump()),
     ]
     # NUCLEO (conexao): instrumentacao do CICLO DE VIDA do stream. O sintoma relatado é "a conversa
     # para e só volta fechando/abrindo o app", e o log de acesso do uvicorn só mostra a conexão
@@ -1117,6 +1158,9 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 slot = em_voo_slots[event]
                 slot["pending"] = False
                 yield {"event": event, "data": json.dumps({"text": slot["text"]})}
+                continue
+            if event == "plugin_ui":
+                yield {"event": "plugin_ui", "data": plugin_bridge.band_json(name)}
                 continue
             if event == "state":
                 # Sugestão do terminal (a frase cinza que o Tab aceita lá): sem fonte própria, ela

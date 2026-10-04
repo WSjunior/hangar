@@ -211,6 +211,10 @@ def _codex_conversas(codex_account: str | None = None) -> list[Conversa]:
                 raise
             if owner is None or owner.id != account.id:
                 continue
+            from app.conversation_transfer import transfer_for_thread, TransferPhase
+            transfer = transfer_for_thread(str(owner.home), sid)
+            if transfer and transfer.phase != TransferPhase.COMPLETE:
+                continue
             out.append(Conversa("codex", _cwd_do_cabecalho(f, _codex_cwd), sid, f, _mtime(f),
                                 str(owner.home.resolve(strict=False))))
     return out
@@ -283,6 +287,14 @@ def jsonl_de(provider: str, session_id: str, codex_account: str | None = None) -
     if p is None:
         raise FileNotFoundError(session_id)
     return p
+
+
+def transferred_history(path: str | Path, limit: int | None = None) -> list[ChatEvent] | None:
+    from app.conversation_history import archive_transfer, composed_history
+    record = archive_transfer(path)
+    if record is None:
+        return None
+    return composed_history("__archive__", str(path), "codex", record, limit, include_queue=False)
 
 
 def parse_obj(provider: str, obj: dict) -> list[ChatEvent]:

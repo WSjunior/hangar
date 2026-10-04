@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   import { tick } from 'svelte';
   import BottomSheet from './BottomSheet.svelte';
   import { desktop } from '../lib/desktop.svelte';
@@ -20,6 +21,7 @@
     onUsarNoDitado?: (f: UploadFile) => void;
   }
   let { open, sessionName, onClose, onUsarNoDitado }: Props = $props();
+  const sessionServer = useSessionServer();
 
   let files = $state<UploadFile[]>([]);
   let loading = $state(false);
@@ -86,14 +88,14 @@
     let vivo = true;
     loading = true;
     erro = null;
-    listUploads(sess)
+    listUploads(sess, sessionServer())
       .then((r) => { if (vivo) files = r.files; })
       .catch((e) => { if (vivo) erro = e instanceof Error ? e.message : String(e); })
       .finally(() => { if (vivo) loading = false; });
     return () => { vivo = false; };
   });
 
-  const url = (f: UploadFile, download = false) => uploadUrl(sessionName, f.filename, download);
+  const url = (f: UploadFile, download = false) => uploadUrl(sessionName, f.filename, download, sessionServer());
 
   function icone(f: UploadFile): string {
     const k = fileKind(f.filename);

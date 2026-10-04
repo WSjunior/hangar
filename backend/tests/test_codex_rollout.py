@@ -1,10 +1,52 @@
 """Testes do parser do rollout JSONL do Codex CLI -> ChatEvent (mesmo shape do Claude)."""
+import base64
 import json
 from pathlib import Path
 
 import pytest
 
 from app.adapters.codex.rollout import parse_rollout_line, parse_rollout_obj
+
+
+@pytest.mark.parametrize("name", [
+    f"{prefix}{name}"
+    for prefix in ("", "collaboration.", "functions.", "functions.collaboration.")
+    for name in ("spawn_agent", "send_message", "followup_task")
+])
+def test_encrypted_agent_message_is_replaced_only_for_display(name):
+    ciphertext = base64.urlsafe_b64encode(b"\x80" + bytes(72)).decode()
+    arguments = {"message": ciphertext, "target": "/root/reviewer", "task_name": "review",
+                 "fork_turns": "none", "model": "model-test"}
+    obj = {"type": "response_item", "payload": {
+        "type": "function_call", "name": name, "call_id": "call-agent",
+        "arguments": json.dumps(arguments)}}
+    original = json.dumps(obj)
+    [event] = parse_rollout_obj(obj)
+    assert event.tool_input == {**arguments, "message": "Mensagem cifrada pelo Codex; conteúdo indisponível."}
+    assert event.tool_name == name and event.tool_use_id == "call-agent"
+    assert ciphertext not in json.dumps(event.tool_input)
+    assert json.dumps(obj) == original
+    assert parse_rollout_obj(obj)[0].id == event.id
+
+
+@pytest.mark.parametrize("message", [
+    "Revise o código e envie o relatório.", "gAAAA", "gAAAA não é um envelope cifrado",
+    base64.urlsafe_b64encode(b"\x80" + bytes(71)).decode(),
+    base64.urlsafe_b64encode(b"\x80" + bytes(72)).decode().rstrip("="),
+    None, {"text": "Mensagem legível"},
+])
+def test_plain_or_invalid_agent_messages_are_preserved(message):
+    arguments = {"target": "/root/reviewer", "message": message}
+    obj = {"type": "response_item", "payload": {
+        "type": "function_call", "name": "send_message", "arguments": json.dumps(arguments)}}
+    assert parse_rollout_obj(obj)[0].tool_input == arguments
+
+
+def test_ciphertext_in_unrelated_tool_is_preserved():
+    arguments = {"message": base64.urlsafe_b64encode(b"\x80" + bytes(72)).decode()}
+    obj = {"type": "response_item", "payload": {
+        "type": "function_call", "name": "another_tool", "arguments": json.dumps(arguments)}}
+    assert parse_rollout_obj(obj)[0].tool_input == arguments
 
 
 def test_session_meta_ignored():

@@ -93,19 +93,31 @@ impl Hangar {
             .selected(self.costs.view.is_some()).disabled(!online)
             .accessibility_label(web("nav_custos")).tooltip_with_action(web("nav_custos"), &OpenCosts, None)
             .on_click(cx.listener(|this, _, window, cx| this.toggle_costs(window, cx)));
+        let worktrees = Button::new("topbar-worktrees").custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::muted())
+                .hover(theme::hover()).active(theme::hover()))
+            .icon(chrome::small_icon(IconName::GitBranch, 16., theme::muted())).size(px(28.)).rounded(px(6.))
+            .selected(self.worktrees.view.is_some()).disabled(!online)
+            .accessibility_label(tr_shared("worktrees_titulo", &[])).tooltip_with_action(tr_shared("worktrees_titulo", &[]), &OpenWorktrees, None)
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_worktrees(window, cx)));
         // A conta da sessão em foco, como a pílula de cota do web: glifo, anel e "44% 5h · nome"; clique abre o cartão de contas.
-        let account = self.focused_account().map(|(kind, name, window)| {
-            let label = match &window {
+        let proxy = self.has_proxy_session();
+        let account = self.focused_account().or_else(|| proxy.then(|| ("codex".into(), tr("create_proxy_choose_account"), None)))
+            .map(|(kind, name, window)| {
+            let quota = self.focused_proxy_quota();
+            let quota = if quota.is_empty() { tr("no_data") } else { quota };
+            let label = if proxy { format!("{name} · {quota}") } else { match &window {
                 Some((label, pct)) => format!("{}% {label} · {name}", pct.round()),
                 None => format!("{} · {name}", tr("no_data")),
-            };
+            } };
             Button::new("topbar-account").ghost().small().selected(self.accounts.card && self.accounts.card_top).disabled(!online)
                 .h(px(26.)).px(px(8.)).rounded_full().max_w(px(280.)).min_w_0()
                 .child(div().min_w_0().flex().items_center().gap(px(6.)).text_size(px(12.5))
                     .child(chrome::provider_glyph(&kind, 14.))
                     .child(chrome::ring(window.as_ref().map(|w| w.1)))
-                    .child(div().min_w_0().truncate().text_color(theme::muted()).child(label)))
-                .accessibility_label(tr("ring_account"))
+                    .when(proxy, |el| el.child(div().min_w_0().truncate().text_color(theme::muted()).child(name))
+                        .child(div().flex_shrink_0().text_color(theme::muted()).child(quota)))
+                    .when(!proxy, |el| el.child(div().min_w_0().truncate().text_color(theme::muted()).child(label.clone()))))
+                .accessibility_label(format!("{}: {label}", tr("ring_account")))
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_top_usage_card(cx)))
         });
         let gear = Button::new("topbar-settings").custom(ButtonCustomVariant::new(cx).color(transparent_black()).foreground(theme::muted())
@@ -128,7 +140,7 @@ impl Hangar {
                 .on_click(cx.listener(|this, _, window, cx| this.open_settings(settings::Page::Servers, window, cx)))
         });
         // Colada, a barra continua a lateral que está embaixo dela: a de conversas tem superfície própria.
-        let page_open = settings_open || self.costs.view.is_some();
+        let page_open = settings_open || self.costs.view.is_some() || self.worktrees.view.is_some();
         let wall = if !page_open && appearance::get().navigation == appearance::Navigation::Conversations { theme::conversation_sidebar().0 }
             else { theme::chrome() };
         let bar = div().id("topbar").w_full().flex_shrink_0().flex().items_center().gap(px(8.))
@@ -162,6 +174,7 @@ impl Hangar {
                     .child(control(Button::new("topbar-orq-history").ghost().icon(IconName::Clock).size(px(28.)).disabled(!online)
                         .tooltip(tr_shared("orq_history_title", &[])).accessibility_label(tr_shared("orq_history_title", &[]))
                         .on_click(cx.listener(|this, _, window, cx| this.open_orq_history(window, cx)))))
+                    .child(control(worktrees))
                     .child(control(pill))
                     .children(outdated.map(control))
                     .children(updater.map(control))

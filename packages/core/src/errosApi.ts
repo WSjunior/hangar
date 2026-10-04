@@ -472,6 +472,13 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_convidados_ilegivel: () => m.erro_convidados_ilegivel(),
   erro_so_dono: () => m.erro_so_dono(),
   erro_usuario_em_uso: () => m.erro_usuario_em_uso(),
+  // Botões dos mods do Claude Code (/api/sessions/{name}/plugin/press).
+  erro_mod_mouse_desligado: () => m.erro_mod_mouse_desligado(),
+  erro_mod_botao_nao_achado: (p) => m.erro_mod_botao_nao_achado({ rotulo: String(p.rotulo ?? '') }),
+  erro_mod_botao_ambiguo: (p) => m.erro_mod_botao_ambiguo({ rotulo: String(p.rotulo ?? '') }),
+  erro_mod_clique_sem_resposta: () => m.erro_mod_clique_sem_resposta(),
+  erro_mod_botao_inexistente: () => m.erro_mod_botao_inexistente(),
+  erro_mod_terminal_em_modo: () => m.erro_mod_terminal_em_modo(),
 };
 
 export function mensagemDeErro(code: string, params: Parametros = {}): string | undefined {

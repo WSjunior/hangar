@@ -494,6 +494,8 @@ describe('FilesStore', () => {
 
   // Parecer Task 11, B2: resposta atrasada do servidor A nao pinta no store do B.
   it('resposta atrasada de uma sessao nao vaza pra homonima de outro servidor', async () => {
+    // O servidor da store sai da chave: os dois precisam estar na lista, como no app.
+    localStorage.setItem('cp_servers', JSON.stringify(['srv-a', 'srv-b'].map((id) => ({ id, label: id, baseUrl: `http://${id}`, token: id }))));
     let libera: (v: unknown) => void = () => {};
     vi.mocked(readFile).mockImplementationOnce(() => new Promise((r) => (libera = r)) as never);
     vi.mocked(pathDiff).mockResolvedValue({ path: 'a.ts', diff: '', truncated: false } as never);

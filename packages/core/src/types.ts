@@ -51,6 +51,10 @@ export interface SessionInfo {
   branch?: string | null;   // branch git atual do cwd (mostrada na lista de sessões)
   /** cwd é uma worktree ligada (`.git` arquivo) — marcador ⧉ ao lado da branch nas duas listas. */
   worktree?: boolean;
+  /** Raiz da worktree onde o agente está agora (transcript/comandos), não onde a sessão abriu. */
+  worktree_path?: string | null;
+  /** Estava numa worktree que já foi apagada. */
+  worktree_gone?: boolean;
   // Linhas adicionadas/removidas no working tree vs HEAD (git diff --numstat, staged+unstaged;
   // untracked não conta). null = cwd sem repo ou repo sem commit nenhum -> sem badge.
   git_added?: number | null;
@@ -248,6 +252,11 @@ export interface StatsEvent {
   tok_s?: number;
   cache_pct?: number;
   ttft_ms?: number;
+  // Velocidade da resposta em voo (ou da última) e das últimas 10 chamadas. `tok_s_exact`: medida
+  // no stream, sem a espera pelo primeiro token; ausente, é a reserva do transcript ("~").
+  tok_s_now?: number;
+  tok_s_recent?: number;
+  tok_s_exact?: boolean;
 }
 
 export interface CommandInfo {

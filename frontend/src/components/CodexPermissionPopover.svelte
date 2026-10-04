@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   // Pílula de permissão de uma sessão Codex — irmã de ClaudePermissionPopover e de
   // CodexEffortPopover. Não reusa a do Claude porque o dado é de outra natureza: lá os modos são
   // um conjunto fechado com rótulo e descrição traduzidos aqui; aqui rótulo e descrição vêm do
@@ -17,6 +18,7 @@
     onClose: () => void;
   }
   let { open, anchor, sessionName, headless = false, onApplied, onClose }: Props = $props();
+  const sessionServer = useSessionServer();
 
   let modos = $state<CodexPermissionMode[]>([]);
   let atual = $state<string | null>(null);
@@ -32,7 +34,7 @@
     err = null;
     aplicando = null;
     carregando = true;
-    getCodexPermissions(sn)
+    getCodexPermissions(sn, sessionServer())
       .then((res) => {
         if (sn !== sessionName) return;
         modos = res.modes;
@@ -57,7 +59,7 @@
     err = null;
     try {
       // O backend devolve o que FICOU (relê o `(current)` do picker), não o que foi pedido.
-      const res = await setCodexPermission(sessionName, modo);
+      const res = await setCodexPermission(sessionName, modo, sessionServer());
       atual = res.current;
       onApplied(res.current);
     } catch (e) {
@@ -67,7 +69,7 @@
       // backend recusa quando o modo lido não é o pedido), e aí a tela mostrando o modo antigo é
       // pior que o erro: ela afirma uma permissão que não é a que está valendo. Se a releitura
       // também falhar, fica só o erro — ele já está na tela.
-      getCodexPermissions(sessionName)
+      getCodexPermissions(sessionName, sessionServer())
         .then((res) => {
           if (sn !== sessionName) return;
           atual = res.current;

@@ -9,6 +9,7 @@
 import * as m from '../paraglide/messages';
 import { listFiles, readFile, readCitedFile, searchFiles, pathDiff, writeFile, writeCitedFile } from '@hangar/core';
 import { cleanErr } from './gitStore.svelte';
+import { sessionServerFor, type SessionServer } from './sessionServer';
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import type { FileContent, PathDiff, FileSearchHit, TreeEntry } from '@hangar/core';
 
@@ -107,9 +108,12 @@ export class FilesStore {
   // Chave de persistencia (serverId::sessao): as pastas abertas sobrevivem ao recarregar a
   // pagina (a selecao nao — ver _restaurar). Vazia = nao persiste (testes/instancia solta).
   private readonly chaveLS: string;
+  // Servidor da sessão, tirado da chave: as chamadas vão a ele, não ao ativo do momento.
+  private readonly server: SessionServer;
 
   constructor(sessao: string, chave = '') {
     this.sessao = sessao;
+    this.server = sessionServerFor(chave.includes('::') ? chave.slice(0, chave.indexOf('::')) : '');
     this.chaveLS = chave ? `cp_files_${chave}` : '';
     this._restaurar();
   }
@@ -187,7 +191,7 @@ export class FilesStore {
       // voo fazia a decisao de reler o diff usar a flag do arquivo errado.
       const eraExterno = this.externo;
       const gravar = eraExterno ? writeCitedFile : writeFile;
-      const r = await gravar(this.sessao, path, texto, atual.digest);
+      const r = await gravar(this.sessao, path, texto, atual.digest, this.server());
       // So atualiza se ainda for o mesmo arquivo na tela (o usuario pode ter trocado no meio).
       if (this.conteudo?.path === path) {
         this.conteudo = { ...this.conteudo, text: texto, size: r.size, digest: r.digest };
@@ -222,7 +226,7 @@ export class FilesStore {
 
   async recarregarDiff(path: string) {
     try {
-      const d = await pathDiff(this.sessao, path, this.escopo);
+      const d = await pathDiff(this.sessao, path, this.escopo, this.server());
       if (this.selecionado === path) this.diff = d;
       const emCache = this.cache.get(path);
       if (emCache) this.cache.set(path, { ...emCache, diff: d });
@@ -251,7 +255,7 @@ export class FilesStore {
     this.ultimaAberturaDe.set(cru, g);
     const ge = ++this.gErro;
     try {
-      const c = await readCitedFile(this.sessao, cru);
+      const c = await readCitedFile(this.sessao, cru, this.server());
       if (g !== this.gArquivo) return true;
       this.conteudo = c;
       this.diff = null;
@@ -295,8 +299,8 @@ export class FilesStore {
     // allSettled, nao all: o conteudo MANDA. Fora de repositorio git o path_diff sempre responde
     // 409 (git_ops.py) e a arvore tem que continuar lendo arquivo (regra do usuario, 15/08).
     const [c, d] = await Promise.allSettled([
-      readFile(this.sessao, path),
-      pathDiff(this.sessao, path, this.escopo),
+      readFile(this.sessao, path, this.server()),
+      pathDiff(this.sessao, path, this.escopo, this.server()),
     ]);
     // Uma abertura mais nova ja tomou o lugar: esta nao pinta nada — nao e falha DESTA. Mas se
     // ELA falhou, a aba que o clique registrou nunca carregou, e sem a poda abaixo ficaria na
@@ -476,7 +480,7 @@ export class FilesStore {
     const g = ++this.gBusca;
     const ge = ++this.gErro;   // esta busca e a dona do erro
     try {
-      const r = await searchFiles(this.sessao, q, mode);
+      const r = await searchFiles(this.sessao, q, mode, this.server());
       if (g !== this.gBusca) return;
       this.resultados = r.hits;
       this.gResultados = g;
@@ -531,7 +535,7 @@ export class FilesStore {
     // pela resposta velha de uma listagem abandonada.
     if (path === '' && ge === this.gErro) this.erro = null;
     try {
-      const r = await listFiles(this.sessao, path || undefined, this.soModificados);
+      const r = await listFiles(this.sessao, path || undefined, this.soModificados, this.server());
       if (g !== this.gLista.get(path)) return;
       this.porPasta.set(path, r.entries);
       this.cortePorPasta.set(path, r.truncated);

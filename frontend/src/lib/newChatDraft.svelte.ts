@@ -6,6 +6,7 @@ import {
   getFolderBranchesForServer, getRootsForServer, listClaudeConfigs, getClaudeAccountSuggestion, getProviders,
   uniqueSessionName, basename, effortLevels,
   type CodexAccount, type ConfigDirInfo, type FolderBranches, type FsRoot, type ModelOption, type Provider,
+  type WorktreeChoice,
 } from '@hangar/core';
 import { listOwnServers, selectServer, getActiveId, type Server } from './auth';
 import { carregarModelos } from './modelosPorConta';
@@ -19,6 +20,11 @@ export function isNotRepo(e: unknown): boolean {
   const status = (e as { status?: number } | null)?.status;
   return status === 404 || (status === 409 && errText(e, '').includes('not a git repository'));
 }
+export function worktreeChoiceOf(d: { branch: string; newBranch: boolean; base: string; branchName: string }): WorktreeChoice | null {
+  if (d.newBranch && d.branchName.trim()) return { branch: d.branchName.trim(), new_branch: true, base: d.base || null };
+  return d.branch ? { branch: d.branch } : null;
+}
+
 const cwdKey =(server: string) => `cp_newchat_cwd:${server}`;
 
 function readStorage(key: string): string | null {
@@ -41,6 +47,9 @@ export class NewChatDraft {
   model = $state('');
   effort = $state('');
   branch = $state('');
+  newBranch = $state(false);
+  base = $state('');
+  branchName = $state('');
 
   providers = $state<ProviderProbe>({});
   providersError = $state('');
@@ -78,7 +87,8 @@ export class NewChatDraft {
 
   get serverObj(): Server | null { return this.servers.find((s) => s.id === this.server) ?? null; }
   get #choices(): string {
-    return JSON.stringify([this.server, this.cwd, this.provider, this.configDir, this.codexAccount, this.model, this.effort, this.branch]);
+    return JSON.stringify([this.server, this.cwd, this.provider, this.configDir, this.codexAccount, this.model, this.effort, this.branch,
+      this.newBranch, this.base, this.branchName]);
   }
   /** Contas ou modelos ainda chegando: enviar agora mandaria conta/modelo vazios e cairia no padrão do servidor calado. */
   get loading(): boolean { return this.configsLoading || this.codexLoading || this.modelsLoading; }
@@ -96,7 +106,7 @@ export class NewChatDraft {
     this.server = id;
     selectServer(id);
     this.cwd = readStorage(cwdKey(id));
-    this.branch = '';
+    this.branch = ''; this.newBranch = false; this.base = ''; this.branchName = '';
     void this.loadProviders();
     void this.loadRoots();
     this.loadAccounts();
@@ -105,7 +115,7 @@ export class NewChatDraft {
 
   setCwd(path: string) {
     this.cwd = path;
-    this.branch = '';
+    this.branch = ''; this.newBranch = false; this.base = ''; this.branchName = '';
     writeStorage(cwdKey(this.server), path);
     void this.loadBranches();
   }
@@ -316,16 +326,19 @@ export class NewChatDraft {
         const key = this.memoryKey();
         writeStorage(key, this.model);
         writeStorage(`${key}:effort`, this.effort);
+        const sessionName = uniqueSessionName(basename(cwd), taken);
+        if (this.newBranch && !this.branchName.trim()) this.branchName = sessionName;
         const info = await createSessionForServer(server, {
-          name: uniqueSessionName(basename(cwd), taken), cwd, provider: this.provider,
+          name: sessionName, cwd, provider: this.provider,
           config_dir: this.provider === 'claude' ? this.configDir : null,
           codex_account: this.provider === 'codex' ? this.codexAccount : undefined,
           model: this.model || null, effort: this.effort || null,
-          ...(this.branch ? { branch: this.branch } : {}),
+          ...(worktreeChoiceOf(this) ?? {}),
         });
         // O nome que vale é o devolvido pelo backend: ele pode desempatar de novo.
         name = info.name;
-        this.#created = { choices, name };
+        // Releitura das escolhas: o nome da branch nova pode ter sido preenchido acima.
+        this.#created = { choices: this.#choices, name };
       }
       await sendInputForServer(server, name, text);
       this.#created = null;

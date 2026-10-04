@@ -5,6 +5,7 @@ aparece em /proc/<pid>/cmdline (legível por qualquer usuário) e o tmux.py não
 E o motor tem que sobreviver aos DOIS resumes — senão uma sessão Kimi ressuscita na conta Anthropic
 continuando um transcript de Kimi, calado.
 """
+import asyncio
 import os
 
 import pytest
@@ -60,6 +61,106 @@ def _reg(tmp_path, monkeypatch, visto):
     monkeypatch.setattr(reg.tmux, "has_session", lambda n: False)
     monkeypatch.setattr(reg, "_pretrust_cwd", lambda cwd, cfg: None)
     return reg.SessionRegistry(projects_dir=tmp_path)
+
+
+def _fixed_proxy(monkeypatch):
+    from app import cliproxy, cliproxy_accounts
+    account = {"account": "default", "prefix": "fixed", "credential_id": "codex:/tmp/codex",
+               "home": "/tmp/codex", "base_url": "http://127.0.0.1:8317"}
+    monkeypatch.setattr(cliproxy, "account_for_engine", lambda cfg, name, home=None: account)
+    monkeypatch.setattr(cliproxy_accounts, "resolve", lambda name, home=None: account)
+    monkeypatch.setattr("app.engine_probe.listar_modelos", lambda *a: [{"id": "fixed/gpt-5.5"}])
+    eng.salvar("proxy", {"base_url": "http://127.0.0.1:8317", "api_key": "test", "model": "gpt-5.5"})
+
+
+def test_fixed_account_is_in_terminal_command_and_headless_sidecar(tmp_path, monkeypatch):
+    from app.adapters.claude_headless import sessions
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path / "hl")
+    _fixed_proxy(monkeypatch)
+    seen = {}
+    registry = _reg(tmp_path, monkeypatch, seen)
+    info = registry.create("terminal-fixed", str(tmp_path), engine="proxy", engine_account="default",
+                           model="gpt-5.5", context_window=400000)
+    assert "--account default --account-home /tmp/codex --account-base-url http://127.0.0.1:8317 --model fixed/gpt-5.5 --context 400000 -- claude" in seen["command"]
+    assert "--model fixed/gpt-5.5" in seen["command"]
+    assert info.engine_account == "default" and info.conta == "codex:/tmp/codex"
+    info = registry.create("headless-fixed", str(tmp_path), engine="proxy", engine_account="default",
+                           model="gpt-5.5", headless=True)
+    meta = sessions.load(info.name)
+    assert meta["engine_account"] == "default" and meta["model"] == "fixed/gpt-5.5"
+    assert meta["engine_credential_id"] == "codex:/tmp/codex"
+    assert "--account default --account-home /tmp/codex --account-base-url http://127.0.0.1:8317 --model fixed/gpt-5.5" in registry._comando_terminal(meta, resume=True)
+
+
+def test_terminal_proof_requires_ready_claude_identity(tmp_path, monkeypatch):
+    from app import terminal_input
+    sid = "11111111-1111-1111-1111-111111111111"
+    registry = reg.SessionRegistry(tmp_path)
+    monkeypatch.setattr(registry, "_pane_of", lambda name: {"pid": 42})
+    monkeypatch.setattr(reg, "_pid_do_agente", lambda pid: 43)
+    monkeypatch.setattr(reg, "_cmdline", lambda pid: f"claude --resume {sid}")
+    monkeypatch.setattr(reg, "_config_dir_of", lambda pid: tmp_path)
+    monkeypatch.setattr(reg, "_engine_of", lambda pid: "proxy")
+    monkeypatch.setattr(procinfo, "pid_vivo", lambda pid: True)
+    monkeypatch.setattr(procinfo, "_env_var_of", lambda pid, name: {
+        "CP_ENGINE_ACCOUNT": "default", "CP_ENGINE_CREDENTIAL_ID": "codex:/tmp/codex"}.get(name))
+    monkeypatch.setattr(terminal_input, "_wait_input_ready", lambda *a, **k: True)
+    meta = {"session_id": sid, "config_dir": str(tmp_path), "engine": "proxy", "engine_account": "default",
+            "engine_credential_id": "codex:/tmp/codex"}
+    registry.wait_for_claude("fixed", meta)
+    monkeypatch.setattr(terminal_input, "_wait_input_ready", lambda *a, **k: False)
+    with pytest.raises(ValueError, match="terminal não ficou pronto"):
+        registry.wait_for_claude("fixed", meta)
+    monkeypatch.setattr(reg, "_engine_of", lambda pid: None)
+    with pytest.raises(ValueError, match="identidade"):
+        registry.wait_for_claude("fixed", meta)
+
+
+def test_automatic_headless_resume_rejects_subagent_missing_from_catalog(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+    from app.adapters.claude_headless import adapter as A, sessions
+    _fixed_proxy(monkeypatch)
+    eng.salvar("proxy", {**eng.listar()["proxy"], "subagent_model": "gpt-image-2"})
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path / "hl")
+    meta = sessions.save("fixed", str(tmp_path), "11111111-1111-1111-1111-111111111111",
+                         engine="proxy", engine_account="default", model="fixed/gpt-5.5",
+                         engine_credential_id="codex:/tmp/codex", engine_account_base_url="http://127.0.0.1:8317")
+    spawn = MagicMock()
+    monkeypatch.setattr(A, "subir_cano_processo", spawn)
+    with pytest.raises(ValueError, match="subagentes"):
+        asyncio.run(A.ClaudeHeadlessAdapter()._subir_cano(A._Sessao("fixed", meta)))
+    spawn.assert_not_called()
+
+
+def test_proxy_init_response_does_not_replace_fixed_route(tmp_path, monkeypatch):
+    from app.adapters.claude_headless.adapter import ClaudeHeadlessAdapter, _Sessao
+    from app.adapters.claude_headless import sessions
+    monkeypatch.setattr(sessions, "_dir", lambda: tmp_path / "hl")
+    meta = sessions.save("fixed", str(tmp_path), "11111111-1111-1111-1111-111111111111",
+                         engine="proxy", engine_account="default", model="fixed/gpt-5.5")
+    session = _Sessao("fixed", meta)
+    asyncio.run(ClaudeHeadlessAdapter()._on_system(session, {"subtype": "init", "model": "gpt-5.5"}))
+    assert session.model == "fixed/gpt-5.5"
+    assert sessions.load("fixed")["engine_account"] == "default"
+
+
+def test_resume_fixed_account_never_drops_its_route(tmp_path, monkeypatch):
+    _fixed_proxy(monkeypatch)
+    seen = {}
+    registry, sid = _prep_resume(tmp_path, monkeypatch, seen, "proxy")
+    monkeypatch.setattr(reg, "agente_do_pane", lambda pid, children=None: ("claude", 4243))
+    monkeypatch.setattr(procinfo, "_model_of", lambda pid: ("fixed/gpt-5.5", "high"))
+    monkeypatch.setattr(procinfo, "_env_var_of", lambda pid, name: {
+        "CP_ENGINE_ACCOUNT": "default", "CP_ENGINE_CREDENTIAL_ID": "codex:/tmp/codex",
+        "CP_ENGINE_ACCOUNT_BASE_URL": "http://127.0.0.1:8317"}.get(name))
+    info = registry.resume("s", sid)
+    assert "--account default --account-home /tmp/codex --account-base-url http://127.0.0.1:8317 --model fixed/gpt-5.5" in seen["command"]
+    assert info.engine_account == "default" and info.conta == "codex:/tmp/codex"
+    eng.remover("proxy")
+    seen.clear()
+    with pytest.raises(ValueError, match="indisponível"):
+        registry.resume("s", sid)
+    assert not seen
 
 
 def test_create_com_motor_prefixa_o_comando(tmp_path, monkeypatch):
@@ -224,7 +325,7 @@ def test_resume_preserva_modelo_e_janela_do_pane(tmp_path, monkeypatch):
     janela voltariam pro modelo do motor) — e nada na tela acusa."""
     _motor()
     monkeypatch.setattr(procinfo, "_model_of", lambda pid: ("k3-256k", "high"))
-    monkeypatch.setattr(procinfo, "_env_var_of", lambda pid, nome: "262144")
+    monkeypatch.setattr(procinfo, "_env_var_of", lambda pid, nome: "262144" if nome == "CLAUDE_CODE_MAX_CONTEXT_TOKENS" else None)
     visto = {}
     r, sid = _prep_resume(tmp_path, monkeypatch, visto, "kimi")
     info = r.resume("s", sid)
@@ -277,7 +378,7 @@ def test_resume_sem_modelo_no_pane_nao_poe_flags_nem_context(tmp_path, monkeypat
     # Sessão que subiu sem escolha: o resume tem que continuar byte por byte o de hoje.
     _motor()
     monkeypatch.setattr(procinfo, "_model_of", lambda pid: (None, None))
-    monkeypatch.setattr(procinfo, "_env_var_of", lambda pid, nome: "262144")
+    monkeypatch.setattr(procinfo, "_env_var_of", lambda pid, nome: "262144" if nome == "CLAUDE_CODE_MAX_CONTEXT_TOKENS" else None)
     visto = {}
     r, sid = _prep_resume(tmp_path, monkeypatch, visto, "kimi")
     r.resume("s", sid)
@@ -294,7 +395,9 @@ def test_resume_le_a_janela_antes_de_matar_o_pane(tmp_path, monkeypatch):
     morto = {"sim": False}
 
     def _env(pid, nome):
-        return None if morto["sim"] else "262144"
+        if morto["sim"] or nome != "CLAUDE_CODE_MAX_CONTEXT_TOKENS":
+            return None
+        return "262144"
 
     def _kill(nome):
         morto["sim"] = True
@@ -316,7 +419,7 @@ def test_resume_de_motor_removido_descarta_a_escolha_no_fallback(tmp_path, monke
     é sessão inviável (id que ela não conhece). No fallback, descartar modelo, esforço e janela:
     resume pelado, como antes desta branch."""
     monkeypatch.setattr(procinfo, "_model_of", lambda pid: ("k3-256k", "high"))
-    monkeypatch.setattr(procinfo, "_env_var_of", lambda pid, nome: "262144")
+    monkeypatch.setattr(procinfo, "_env_var_of", lambda pid, nome: "262144" if nome == "CLAUDE_CODE_MAX_CONTEXT_TOKENS" else None)
     visto = {}
     r, sid = _prep_resume(tmp_path, monkeypatch, visto, "sumiu")
     info = r.resume("s", sid)

@@ -333,3 +333,58 @@ async def test_clear_reinstalls_the_live_preview_getter_after_another_chat_close
     await asyncio.wait_for(consumer, timeout=15)
     await live.aclose()
     assert getters[-1]() == session_key("/c/b.jsonl")
+
+
+
+def test_list_sig_reemits_when_conversation_life_or_transfer_changes():
+    from app.models import SessionInfo
+    from app.sse import _list_sig
+    original = SessionInfo(name="s", lifecycle_id="k:old")
+    for fields in ({"lifecycle_id": "k:new"}, {"transfer_id": "operation"},
+                   {"transfer_phase": "source_stopped"}, {"transfer_phase": "restore_failed"}):
+        assert _list_sig([original]) != _list_sig([original.model_copy(update=fields)])
+
+
+class _AdapterMudo(_AdapterPorProvider):
+    """Sessão parada: nem transcript nem transição de estado."""
+
+    def transcript_stream(self, path, start_offset=None):
+        return _empty_agen()
+
+
+@pytest.mark.asyncio
+async def test_faixa_muda_com_a_sessao_parada_e_sai_no_stream(monkeypatch):
+    # O monitor de estado não emite nada: na carona do `state`, a faixa nunca sairia.
+    from app import plugin_bridge as pb
+    monkeypatch.setattr("app.sse.get_adapter", lambda provider: _AdapterMudo(provider))
+
+    class _Info:
+        name = "faixa1"
+        jsonl = "/claude/a.jsonl"
+        provider = "claude"
+
+    async def _lista():
+        return [_Info()]
+
+    monkeypatch.setattr("app.sse._cached_list", _lista)
+    monkeypatch.setattr("app.sse.PreviewBroker", type("_B", (), {
+        "get": staticmethod(lambda *a, **k: type("_S", (), {
+            "subscribe": lambda self: _empty_agen(), "reset": lambda self: None})()),
+    }))
+
+    async def _muda():
+        await asyncio.sleep(0.2)
+        pb._guardar_faixa("faixa1", {"type": "Text", "children": ["review"]}, 80, [])
+
+    async def _consumir():
+        async for ev in merged_events("faixa1", "/claude/a.jsonl", provider="claude"):
+            if ev["event"] == "plugin_ui":
+                return json.loads(ev["data"])
+
+    mudanca = asyncio.create_task(_muda())
+    try:
+        dado = await asyncio.wait_for(_consumir(), timeout=5)
+        assert dado == {"above": {"type": "Text", "children": ["review"]}, "panes": []}
+    finally:
+        mudanca.cancel()
+        pb.esquecer("faixa1")

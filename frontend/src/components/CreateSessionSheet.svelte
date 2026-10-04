@@ -15,6 +15,7 @@
   import { carregarModelos as carregarModelosDaConta, temEscolhaDeModelo } from '../lib/modelosPorConta';
   import { basename, providerName, relativeTime, cotaDaConta, resumoCota, janelaEsgotada, effortLevels, SESSION_PROVIDERS } from '@hangar/core';
   import SessionOpeningFields from './SessionOpeningFields.svelte';
+  import BranchChoice from './BranchChoice.svelte';
   import { renderMarkdown } from '../lib/markdown';
   import { quotaFeed } from '../lib/quotaFeed.svelte';
   import { segredos } from '../lib/segredos.svelte';
@@ -23,7 +24,7 @@
   import type { ChatEvent } from '@hangar/core';
   import { selectServer, getActiveId, listOwnServers, serverColor, serverIdentidade } from '../lib/auth';
   import type { Server } from '../lib/auth';
-  import type { SessionInfo, ConfigDirInfo, Provider } from '@hangar/core';
+  import type { SessionInfo, ConfigDirInfo, Provider, WorktreeChoice } from '@hangar/core';
   import { criarSeletorNativo } from '../lib/pastaNativa.svelte';
   import * as m from '../paraglide/messages';
 
@@ -34,7 +35,8 @@
     onCreate: (name: string, cwd?: string, configDir?: string | null, provider?: Provider,
                engine?: string | null, model?: string | null, effort?: string | null,
                permissionMode?: string | null, ompProfile?: string | null,
-               headless?: boolean, subagentModel?: string | null, jev?: boolean) => Promise<void>;
+               headless?: boolean, subagentModel?: string | null, jev?: boolean,
+               worktree?: WorktreeChoice | null) => Promise<void>;
     onOpenSession: (name: string) => void;
     /** Passagem de bastão: a MESMA folha, aberta pra criar a sessão que CONTINUA `bastao.name`.
      *  Não-nulo = modo bastão — servidor travado no da origem, cwd/nome pré-preenchidos, e o
@@ -129,6 +131,7 @@
   // derivado do basename. Varias sessoes na mesma pasta sao permitidas (cada uma tem nome+jsonl
   // proprio); reabrir uma existente = clicar no card da lista.
   let picked = $state<string | null>(null);
+  let worktreeChoice = $state<WorktreeChoice | null>(null);
   let name = $state('');
   let checking = $state(false);
   let takenNames = $state<Set<string>>(new Set());
@@ -706,6 +709,7 @@
   // hasSameFolder so informa que ja existe sessao no cwd; NAO bloqueia criar outra.
   async function handlePick(p: string) {
     picked = p;
+    worktreeChoice = null;
     error = '';
     checking = true;
     try {
@@ -927,6 +931,7 @@
       // O Codex é criado por este corpo e retorna antes do `onCreate` lá embaixo: sem o `jev`
       // aqui, a caixa marcada nunca chegava ao backend e a sessão nascia no padrão do servidor.
       ...(temJev ? { jev } : {}),
+      ...(worktreeChoice ?? {}),
       ...(provider === 'codex' && requestedHeadless !== undefined ? { headless: requestedHeadless,
         ...(requestedHeadless ? { permission_mode: permissao || null } : {}) } : {}) };
     try {
@@ -984,10 +989,10 @@
       if (provider === 'claude' && semTerminal) {
         // Os dois argumentos do fim só existem aqui: perfil (só omp) vazio e a flag sem terminal.
         await onCreate(name.trim(), picked, selectedConfig, provider, engine || null, modelo || null,
-                       esforco || null, permissao || null, null, requestedHeadless, (!engine && subagente) || null, jev);
+                       esforco || null, permissao || null, null, requestedHeadless, (!engine && subagente) || null, jev, worktreeChoice);
       } else if (provider === 'claude' && !engine && subagente) {
         await onCreate(name.trim(), picked, selectedConfig, provider, null, modelo || null,
-                       esforco || null, permissao || null, null, requestedHeadless, subagente, jev);
+                       esforco || null, permissao || null, null, requestedHeadless, subagente, jev, worktreeChoice);
       } else {
         await onCreate(name.trim(), picked, provider === 'claude' ? selectedConfig : null, provider,
                        provider === 'claude' ? (engine || null) : null, modelo || null, esforco || null,
@@ -996,7 +1001,7 @@
                        // encurtá-la aqui faria o valor cair no argumento errado. `null`/`false` são
                        // os mesmos valores que os defaults davam.
                        provider === 'omp' ? (perfilOmp.trim() || null) : null,
-                       provider === 'claude' ? requestedHeadless : false, null, jev);
+                       provider === 'claude' ? requestedHeadless : false, null, jev, worktreeChoice);
       }
       onClose();
     } catch (err) {
@@ -1170,6 +1175,11 @@
           required
         />
       </div>
+      <!-- Bastão vai por rota própria, que não cria worktree: o seletor nem aparece ali. -->
+      {#if codexServer && picked && !bastao}
+        <BranchChoice server={codexServer} cwd={picked} value={worktreeChoice} sessionName={name.trim()}
+          onChange={(v) => (worktreeChoice = v)} />
+      {/if}
       {/if}
 
       <div class="field">

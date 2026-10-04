@@ -38,8 +38,42 @@ impl ModelOption {
 
 pub(super) struct Catalog { models: Vec<ModelOption>, reduced: bool }
 
+fn remembered_choice(catalog: &[ModelOption], provider: &str, remembered: (String, String)) -> (String, String) {
+    let (model, effort) = remembered;
+    let model = catalog.iter().find(|m| m.value() == model);
+    let value = model.map(ModelOption::value).unwrap_or_default();
+    let levels = match provider {
+        "codex" => model.map(|m| m.efforts.clone()).unwrap_or_default(),
+        "claude" => CLAUDE_EFFORTS.map(String::from).to_vec(),
+        "pi" | "omp" => PI_EFFORTS.map(String::from).to_vec(),
+        _ => Vec::new(),
+    };
+    let effort = if levels.contains(&effort) { effort } else { String::new() };
+    (value, effort)
+}
+
+fn selected_model_valid(catalog: &[ModelOption], model: &str) -> bool {
+    !model.is_empty() && catalog.iter().any(|m| m.value() == model)
+}
+
+fn model_memory_key(server: &str, provider: &str, account: &str, engine: &str, engine_account: &str) -> String {
+    let who = if provider == "codex" { account } else if engine.is_empty() { "-" } else { engine };
+    let key = format!("cp_last_model:{server}:{provider}:{who}");
+    if provider == "claude" && !engine_account.is_empty() { format!("{key}:account:{engine_account}") } else { key }
+}
+
 #[derive(Clone, Debug, Deserialize)]
-pub(super) struct Motor { label: Option<String>, #[serde(default)] model: String }
+pub(super) struct Motor {
+    label: Option<String>,
+    #[serde(default)] model: String,
+    cliproxy_accounts: Option<Vec<crate::api::dto::CliProxyAccount>>,
+    cliproxy_error: Option<String>,
+}
+
+fn engine_account_ready(motor: &Motor, account: &str) -> bool {
+    motor.cliproxy_error.is_none() && motor.cliproxy_accounts.as_ref().is_none_or(|list|
+        list.iter().any(|a| !account.is_empty() && a.account == account && a.credential_id.starts_with("codex:")))
+}
 
 /// O Jev só existe com a chave guardada no servidor; o padrão é o `jev_padrao` lido de lá.
 pub(super) struct Jev { key: bool, default: bool }
@@ -162,8 +196,66 @@ impl NewSession {
 
     /// A chave da memória do último modelo: servidor, provider e a conta do Codex ou o motor (`chaveMemoria` do web).
     pub(super) fn memory_key(&self) -> String {
-        let who = if self.provider == "codex" { self.codex_account.clone() } else { Some(self.engine.clone()).filter(|e| !e.is_empty()).unwrap_or("-".into()) };
-        format!("cp_last_model:{}:{}:{who}", self.link.api.identity(), self.provider)
+        model_memory_key(&self.link.api.identity(), self.provider, &self.codex_account, &self.engine, &self.engine_account)
+    }
+
+    fn selected_engine(&self) -> Option<&Motor> {
+        (self.provider == "claude").then(|| self.engines.ok()?.iter().find(|(name, _)| *name == self.engine).map(|(_, motor)| motor)).flatten()
+    }
+
+    pub(super) fn proxy_accounts(&self) -> Option<&[crate::api::dto::CliProxyAccount]> {
+        self.selected_engine()?.cliproxy_accounts.as_deref()
+    }
+
+    pub(super) fn proxy_account(&self) -> Option<&crate::api::dto::CliProxyAccount> {
+        self.proxy_accounts()?.iter().find(|a| a.account == self.engine_account)
+    }
+
+    pub(super) fn engine_ready(&self) -> bool {
+        if self.provider != "claude" || self.engine.is_empty() { return true; }
+        !self.engines.loading && self.selected_engine().is_some_and(|m| engine_account_ready(m, &self.engine_account))
+            && (self.proxy_accounts().is_none() || (!self.models.loading && self.models.ok().is_some_and(|c| !c.models.is_empty())
+                && self.config.as_ref().is_some_and(|path| self.configs.ok().is_some_and(|list| list.iter().any(|c| &c.path == path)))))
+    }
+
+    pub(super) fn resume_ready(&self) -> bool {
+        self.engine_ready() && (self.proxy_accounts().is_none() || selected_model_valid(self.catalog(), &self.model))
+    }
+
+    pub(super) fn proxy_note(&self) -> Option<String> {
+        if self.provider != "claude" || self.engine.is_empty() { return None; }
+        if self.engines.loading { return Some(tr("loading")); }
+        if let Some(Err(error)) = &self.engines.value { return Some(error.clone()); }
+        let Some(motor) = self.selected_engine() else { return Some(tr("create_engine_missing").replace("{name}", &self.engine)); };
+        if let Some(error) = &motor.cliproxy_error { return Some(tr("create_proxy_error").replace("{reason}", error)); }
+        let accounts = motor.cliproxy_accounts.as_ref()?;
+        if accounts.is_empty() { return Some(tr("create_proxy_no_accounts")); }
+        if self.proxy_account().is_none() { return Some(tr("create_proxy_choose_account")); }
+        if self.configs.loading { return Some(tr("loading")); }
+        if let Some(Err(error)) = &self.configs.value { return Some(error.clone()); }
+        if self.config.is_none() { return Some(tr("new_chat_no_accounts")); }
+        if !self.models.loading && self.models.ok().is_some_and(|c| c.models.is_empty()) { return Some(tr("create_proxy_no_models")); }
+        None
+    }
+
+    pub(super) fn build_engine_account_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(accounts) = self.proxy_accounts() else {
+            self.engine_account.clear();
+            self.engine_account_pick = None;
+            return;
+        };
+        if !accounts.iter().any(|a| a.account == self.engine_account) { self.engine_account.clear(); }
+        let choices: Vec<ModelChoice> = self.proxy_accounts().unwrap_or_default().iter().map(|a| ModelChoice {
+            id: a.account.clone(), label: if a.label.is_empty() { a.email.clone() } else { a.label.clone() },
+            hint: [Some(a.email.clone()), self.quota_of(&a.credential_id).map(QuotaLine::summary)]
+                .into_iter().flatten().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · "),
+        }).collect();
+        let at = choices.iter().position(|a| a.id == self.engine_account);
+        self.engine_account_pick = Some(picker(choices, at, |this, account, window, cx| {
+            if this.creating || this.engine_account == account { return; }
+            this.engine_account = account;
+            this.load_models(window, cx);
+        }, window, cx));
     }
 
     /// O catálogo da conta escolhida. Pedir de novo zera modelo, esforço e subagente: o que valia para outra conta não vale aqui.
@@ -171,12 +263,17 @@ impl NewSession {
         let seq = self.models.start();
         (self.model, self.effort, self.subagent) = (String::new(), String::new(), String::new());
         self.build_model_picks(window, cx);
-        if self.provider == "codex" && self.codex_account.is_empty() {
+        if (self.provider == "codex" && self.codex_account.is_empty())
+            || (self.provider == "claude" && !self.engine.is_empty()
+                && !self.selected_engine().is_some_and(|m| engine_account_ready(m, &self.engine_account))) {
             self.models.finish(seq, Ok(Catalog { models: Vec::new(), reduced: false }));
             return;
         }
         let mut query = vec![("provider".to_owned(), self.provider.to_owned())];
-        if self.provider == "claude" && !self.engine.is_empty() { query.push(("engine".into(), self.engine.clone())); }
+        if self.provider == "claude" && !self.engine.is_empty() {
+            query.push(("engine".into(), self.engine.clone()));
+            if self.proxy_accounts().is_some() { query.push(("engine_account".into(), self.engine_account.clone())); }
+        }
         if let Some(config) = self.config.clone() { query.push(("config_dir".into(), config)); }
         if self.provider == "codex" { query.push(("codex_account".into(), self.codex_account.clone())); }
         let (key, default_key) = (self.memory_key(), self.default_key());
@@ -191,19 +288,22 @@ impl NewSession {
         }));
     }
 
-    /// O padrão do harness não leva a conta: vale para todas. O motor entra porque o catálogo dele é outro.
+    /// A conta do proxy também separa o padrão: seu catálogo pode ser diferente.
     fn default_key(&self) -> String {
-        format!("{}:{}:{}", self.link.api.identity(), self.provider, if self.provider == "claude" { self.engine.as_str() } else { "" })
+        let key = format!("{}:{}:{}", self.link.api.identity(), self.provider, if self.provider == "claude" { self.engine.as_str() } else { "" });
+        if self.proxy_accounts().is_some() { format!("{key}:account:{}", self.engine_account) } else { key }
     }
 
     fn current_choice(&self) -> (String, String, String) {
-        let permission = if self.permissions().is_some() { self.permission.clone() } else { String::new() };
+        let permission = if self.is_transfer() { self.saved_default.as_ref().map(|s| s.2.clone()).unwrap_or_default() }
+            else if self.permissions().is_some() { self.permission.clone() } else { String::new() };
         (self.model.clone(), self.effort.clone(), permission)
     }
 
     /// Marcar grava modelo, esforço e permissão de agora como padrão do harness; desmarcar apaga. Marcado = a escolha de agora é o padrão.
     pub(super) fn render_default_check(&self, cx: &mut Context<Self>) -> Option<Div> {
         self.models.ok()?;
+        if self.proxy_accounts().is_some() && !self.engine_ready() { return None; }
         let checked = self.saved_default.as_ref() == Some(&self.current_choice());
         let label = tr("create_default_for_harness").replace("{harness}", provider_name(self.provider));
         Some(div().px(px(4.)).child(Checkbox::new("create-default-harness").label(label).checked(checked).disabled(self.creating)
@@ -236,16 +336,25 @@ impl NewSession {
             self.build_permission_pick(window, cx);
         }
         self.saved_default = saved;
-        let (model, effort) = remembered;
         // O lembrado só volta com a lista lida, se ainda estiver nela, e o esforço só se couber no modelo que ficou.
         if self.models.ok().is_some() {
-            if self.catalog().iter().any(|m| m.value() == model) { self.model = model; }
-            if self.levels().contains(&effort) { self.effort = effort; }
+            (self.model, self.effort) = remembered_choice(self.catalog(), self.provider, remembered);
         }
         self.build_model_picks(window, cx);
     }
 
     fn catalog(&self) -> &[ModelOption] { self.models.ok().map(|c| c.models.as_slice()).unwrap_or_default() }
+
+    pub(super) fn has_transfer_models(&self) -> bool { self.models.ok().is_some_and(|c| !c.models.is_empty()) }
+
+    pub(super) fn transfer_quota_pct(&self) -> Option<f64> {
+        let credential = self.codex.ok()?.iter().find(|a| a.id == self.codex_account)?.credential_id.as_deref()?;
+        let quota = self.quota_of(credential)?;
+        if quota.state != "lida" { return None; }
+        let now = chrono::Local::now().timestamp() as f64;
+        quota.windows().filter(|(w, _)| matches!(w.label.as_str(), "5h" | "7d") && w.reset_ts.is_none_or(|r| r > now))
+            .map(|(_, pct)| pct).reduce(f64::max)
+    }
 
     /// Os níveis do modelo escolhido: fechados por provider, e os do próprio modelo no Codex.
     pub(super) fn levels(&self) -> Vec<String> {
@@ -259,6 +368,7 @@ impl NewSession {
 
     /// A permissão existe para o Claude e para o Codex sem terminal, cada um com a própria lista.
     pub(super) fn permissions(&self) -> Option<&'static [&'static str]> {
+        if self.is_transfer() { return None; }
         match (self.provider, self.headless && !self.headless_inherited()) { ("claude", _) => Some(&PERMISSIONS), ("codex", true) => Some(&CODEX_PERMISSIONS), _ => None }
     }
 
@@ -320,6 +430,26 @@ impl NewSession {
             .on_click(cx.listener(|this, _, window, cx| this.toggle_menu(Menu::Model, window, cx))))
     }
 
+    pub(super) fn render_transfer_model(&self, cx: &mut Context<Self>) -> Div {
+        use gpui_kit::component::popover::Popover;
+        let title = self.catalog().iter().find(|m| m.value() == self.model).map(ModelOption::label).unwrap_or_else(|| tr("create_default"));
+        let view = cx.entity().downgrade();
+        let opening = view.clone();
+        div().flex().flex_col().gap_2().child(label(tr("create_model")))
+            .child(Popover::new("transfer-model-menu").open(self.menu.get() == Some(Menu::Model))
+                .trigger(Button::new("transfer-model-trigger").outline().label(title).icon(IconName::ChevronDown)
+                    .disabled(self.creating || self.models.loading || !self.has_transfer_models()).accessibility_label(tr("create_model")))
+                .content(move |_, window, cx| view.update(cx, |view, cx| view.render_model_menu(cx)
+                    .w((window.rem_size() * 24.).min(window.viewport_size().width - window.rem_size() * 2.))
+                    .into_any_element()).unwrap_or_else(|_| div().into_any_element()))
+                .on_open_change(move |open, window, cx| { let _ = opening.update(cx, |view, cx| {
+                    view.menu.set(open.then_some(Menu::Model));
+                    if *open { view.menu_query.update(cx, |input, cx| { input.set_value("", window, cx); input.focus(window, cx); }); }
+                    cx.notify();
+                }); }))
+            .when(!self.effort.is_empty(), |el| el.child(muted(format!("{}: {}", tr("create_effort"), self.effort))))
+    }
+
     /// O menu da pílula de modelo, no desenho do Zeron: o provider em abas, a busca, a lista e o esforço no rodapé.
     pub(super) fn render_model_menu(&self, cx: &mut Context<Self>) -> Div {
         let query = self.menu_filter(cx);
@@ -342,6 +472,7 @@ impl NewSession {
                     .map(|(id, label, hint)| {
                         let on = self.model == id;
                         menu_row(SharedString::from(format!("new-chat-model-{id}")), on, label, hint)
+                            .disabled(self.creating || (self.proxy_accounts().is_some() && !self.engine_ready()))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 // O menu fica aberto: o esforço, logo abaixo, costuma ser a escolha seguinte.
                                 this.model_choice_touched = true;
@@ -366,11 +497,23 @@ impl NewSession {
                 .gap(px(2.)).children(std::iter::once(String::new()).chain(levels).map(|level| {
                     let label = if level.is_empty() { tr("create_default") } else { level.clone() };
                     Button::new(SharedString::from(format!("new-chat-effort-{level}"))).ghost().xsmall().when(!many, |b| b.flex_1().min_w_0())
-                        .selected(self.effort == level).label(label)
+                        .selected(self.effort == level).label(label).disabled(self.creating)
                         .on_click(cx.listener(move |this, _, window, cx| { this.model_choice_touched = true; this.effort = level.clone(); this.build_effort_pick(window, cx); cx.notify(); }))
                 }))));
         let default = self.render_default_check(cx).map(|check| div().flex().flex_col().gap(px(4.)).child(popup::separator()).child(check.py(px(4.))));
-        div().p(px(popup::INSET)).flex().flex_col().gap(px(2.)).child(tabs).child(self.menu_search()).child(list).children(effort).children(default)
+        let engine = (self.compact && self.provider == "claude").then(|| {
+            let body = if self.engines.loading { popup::skeleton("new-chat-engines", 1).into_any_element() }
+                else if let Some(Err(error)) = &self.engines.value {
+                    Self::menu_failure("new-chat-engines-error", error.clone(), |this, _, cx| this.load_extras(cx), cx)
+                } else { div().when_some(self.engine_pick.as_ref(), |el, (pick, _)| el
+                    .child(label(tr("create_engine")))
+                    .child(Select::new(pick).id("new-chat-engine").disabled(self.creating).accessibility_label(tr("create_engine"))))
+                    .into_any_element() };
+            div().px_1().py_1().flex().flex_col().gap_2().child(body)
+                .when(self.proxy_accounts().is_some(), |el| el.child(self.render_engine_account()))
+        });
+        div().p(px(popup::INSET)).flex().flex_col().gap(px(2.)).when(!self.is_transfer(), |el| el.child(tabs))
+            .children(engine).child(self.menu_search()).child(list).children(effort).children(default)
     }
 
     pub(super) fn build_config_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -393,13 +536,19 @@ impl NewSession {
     }
 
     pub(super) fn build_engine_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(list) = self.engines.ok().filter(|l| !l.is_empty()) else { self.engine_pick = None; return };
+        let list = self.engines.ok().map(Vec::as_slice).unwrap_or_default();
+        if list.is_empty() && self.engine.is_empty() { self.engine_pick = None; return; }
         let choices: Vec<ModelChoice> = std::iter::once(ModelChoice { id: String::new(), label: tr("create_own_account"), hint: String::new() })
             .chain(list.iter().map(|(name, m)| ModelChoice { id: name.clone(), label: m.label.clone().unwrap_or_else(|| name.clone()), hint: m.model.clone() }))
             .collect();
-        let at = Self::pick_at(&choices, &self.engine);
+        let at = choices.iter().position(|c| c.id == self.engine);
         self.engine_pick = Some(picker(choices, at, |this, name, window, cx| {
+            if this.creating || this.engine == name { return; }
             this.engine = name;
+            this.engine_account.clear();
+            this.asking = false;
+            this.confirming = false;
+            this.build_engine_account_pick(window, cx);
             this.load_models(window, cx);
         }, window, cx));
     }
@@ -427,7 +576,11 @@ impl NewSession {
                     list.sort_by(|a, b| a.0.cmp(&b.0));
                     Ok(list)
                 });
-                if self.engines.finish(seq, list) { self.build_engine_pick(window, cx); }
+                if self.engines.finish(seq, list) {
+                    self.build_engine_pick(window, cx);
+                    self.build_engine_account_pick(window, cx);
+                    if self.provider == "claude" && !self.engine.is_empty() { self.load_models(window, cx); }
+                }
             }
             CreateReply::Config(seq, (owner, result)) => {
                 if seq != self.jev.seq { return; }
@@ -447,11 +600,13 @@ impl NewSession {
             CreateReply::Quotas(seq, result) => {
                 let list = result.map_err(|e| Hangar::fetch_failure(&e)).and_then(|v| serde_json::from_value(v).map_err(|_| tr("invalid_response")));
                 if !self.quotas.finish(seq, list) { return; }
+                if self.is_transfer() { return; }
                 // A escolhida antes da cota chegar pode ser uma pasta que não é conta.
                 let stale = self.config.as_ref().is_some_and(|path| !self.accounts().any(|c| &c.path == path));
                 if stale { self.config = self.fallback_config(); }
                 if self.leave_exhausted_account() || stale { self.load_models(window, cx); }
                 self.build_config_pick(window, cx);
+                self.build_engine_account_pick(window, cx);
             }
             CreateReply::Models(seq, result, remembered, saved) => self.receive_models(seq, result, remembered, saved, window, cx),
             CreateReply::Context(seq, result) => {
@@ -651,7 +806,23 @@ impl NewSession {
         Some(self.render_quota("create-codex-quota".into(), quota))
     }
 
+    fn render_engine_account(&self) -> Div {
+        let invalid = self.selected_engine().is_some_and(|m| m.cliproxy_error.is_some());
+        let pick = self.engine_account_pick.as_ref().map(|(pick, _)| Select::new(pick).id("create-engine-account")
+            .placeholder(tr("create_proxy_choose_account")).accessibility_label(tr("create_chatgpt_account"))
+            .disabled(self.creating || self.engines.loading || invalid || self.proxy_accounts().is_none_or(|a| a.is_empty())));
+        let quota = self.proxy_account().and_then(|a| self.quota_of(&a.credential_id));
+        div().flex().flex_col().gap_2()
+            .child(label(tr("create_chatgpt_account")))
+            .children(pick)
+            .when_some(quota, |el, q| el.child(self.render_quota("create-engine-quota".into(), q)))
+            .when(quota.is_none() && self.proxy_account().is_some(), |el| el.child(muted(tr(if self.quotas.loading { "loading" } else { "create_quota_none" }))))
+            .when_some(self.quotas.value.as_ref().and_then(|q| q.as_ref().err()), |el, error| el.child(muted(tr("accounts_failed").replace("{reason}", error))))
+            .when_some(self.proxy_note(), |el, note| el.child(if invalid { alert("create-engine-account-error", note).into_any_element() } else { muted(note).into_any_element() }))
+    }
+
     pub(super) fn render_claude_account(&self, cx: &mut Context<Self>) -> Div {
+        if self.proxy_accounts().is_some() { return self.render_engine_account(); }
         let busy = self.creating || self.account_busy;
         let deletable = self.deletable().filter(|_| !self.asking && !self.confirming);
         let small = |id: &'static str, text: String| Button::new(id).outline().flex_shrink_0().label(text);
@@ -701,17 +872,18 @@ impl NewSession {
     }
 
     /// Modelo, esforço e permissão lado a lado; cada um some quando não se aplica.
-    pub(super) fn render_trio(&self) -> Option<Div> {
-        let busy = self.creating;
+    pub(super) fn render_trio(&self, model_only: bool) -> Option<Div> {
+        let busy = self.creating || (self.proxy_accounts().is_some() && !self.engine_ready());
         let field = |id: &'static str, title: String, pick: &Option<Picker>| pick.as_ref().map(|(p, _)| div().flex_1().min_w(px(150.)).flex().flex_col().gap(px(6.))
             .child(label(title.clone())).child(Select::new(p).id(id).disabled(busy).accessibility_label(title)));
         let model = field("create-pick-model", tr("create_model"), &self.model_pick).map(|el| el
             .when(self.models.ok().is_some_and(|c| c.reduced), |el| el.child(div().id("create-models-reduced").role(Role::Status).child(muted(tr("create_models_reduced")))))
             .when_some(self.models.value.as_ref().and_then(|v| v.as_ref().err()), |el, error| el.child(alert("create-models-error",
-                tr("create_models_default").replace("{erro}", &format!("{}: {error}", tr("create_models_failed")))))));
+                if self.proxy_accounts().is_some() { format!("{}: {error}", tr("create_models_failed")) }
+                else { tr("create_models_default").replace("{erro}", &format!("{}: {error}", tr("create_models_failed"))) }))));
         let effort_title = tr(if matches!(self.provider, "pi" | "omp") { "create_reasoning" } else { "create_effort" });
-        let effort = (!self.levels().is_empty()).then(|| field("create-pick-effort", effort_title, &self.effort_pick)).flatten();
-        let permission = self.permissions().and(field("create-pick-permission", tr("create_permission"), &self.permission_pick));
+        let effort = (!model_only && !self.levels().is_empty()).then(|| field("create-pick-effort", effort_title, &self.effort_pick)).flatten();
+        let permission = (!model_only).then(|| self.permissions().and(field("create-pick-permission", tr("create_permission"), &self.permission_pick))).flatten();
         let fields: Vec<Div> = [model, effort, permission].into_iter().flatten().collect();
         (!fields.is_empty()).then(|| div().flex().flex_wrap().items_start().gap(px(12.)).children(fields))
     }
@@ -738,14 +910,17 @@ impl NewSession {
             .then_some(self.subagent_pick.as_ref()).flatten();
         // O retomar não leva o Jev: com uma conversa escolhida, o interruptor seria um controle sem efeito.
         let jev = self.jev_choice().is_some() && self.target().is_none() && self.baton.is_none();
-        if engine.is_none() && subagent.is_none() && !jev { return None; }
+        let loading = self.provider == "claude" && self.engines.loading;
+        let problem = (self.provider == "claude").then(|| self.engines.value.as_ref().and_then(|v| v.as_ref().err()).cloned()
+            .or_else(|| self.selected_engine().and_then(|m| m.cliproxy_error.as_ref()).map(|e| tr("create_proxy_error").replace("{reason}", e)))).flatten();
+        if engine.is_none() && subagent.is_none() && !jev && !loading && problem.is_none() { return None; }
         let engine_label = self.engines.ok().and_then(|l| l.iter().find(|(n, _)| *n == self.engine))
             .map(|(n, m)| m.label.clone().unwrap_or_else(|| n.clone())).unwrap_or_else(|| tr("create_own_account"));
         let subagent_label = self.catalog().iter().find(|m| m.value() == self.subagent).map(ModelOption::label)
             .unwrap_or_else(|| if self.subagent.is_empty() { tr("create_subagent_default") } else { self.subagent.clone() });
         let pill = |text: String| div().px(px(8.)).py(px(1.)).rounded_full().border_1().border_color(theme::border()).text_size(px(11.5)).text_color(theme::muted()).child(text);
         let this = cx.entity().downgrade();
-        let busy = self.creating;
+        let busy = self.creating || self.engines.loading;
         Some(div().flex().flex_col().gap(px(12.)).px(px(12.)).py(px(10.)).rounded(px(10.)).border_1().border_color(theme::border())
             .child(div().flex().items_center().gap(px(8.)).flex_wrap()
                 .child(Disclosure::new("create-more", self.more, tr("create_more"), false)
@@ -754,6 +929,8 @@ impl NewSession {
                     .when(engine.is_some(), |el| el.child(pill(format!("{} {engine_label}", tr("create_engine")))))
                     .when(subagent.is_some(), |el| el.child(pill(format!("{} {subagent_label}", tr("create_more_subagents")))))
                     .when(jev && self.jev_on, |el| el.child(pill(tr("create_jev"))))))
+            .when(loading, |el| el.child(muted(tr("loading"))))
+            .when_some(problem, |el, problem| el.child(alert("create-engine-error", problem)))
             .when(self.more, |el| el
                 .when_some(engine, |el, (p, _)| el.child(div().flex().flex_col().gap(px(4.)).child(label(tr("create_engine")))
                     .child(Select::new(p).disabled(busy).accessibility_label(tr("create_engine")))))
@@ -774,6 +951,59 @@ impl NewSession {
 #[cfg(test)]
 mod tests {
     use super::{ModelOption, QuotaLine, exhausted, quota_switch, until};
+
+    #[test]
+    fn proxy_choices_require_an_exact_account_and_memory_is_scoped_to_it() {
+        let motor: super::Motor = serde_json::from_value(serde_json::json!({"model":"gpt-6.1", "cliproxy_accounts":[
+            {"account":"default", "credential_id":"codex:/home/.codex", "email":"one@example.com", "label":"One"},
+            {"account":"other", "credential_id":"codex:/home/.codex-other", "email":"two@example.com", "label":"Two", "prefix":"other"}
+        ]})).unwrap();
+        assert!(!super::engine_account_ready(&motor, ""));
+        assert!(!super::engine_account_ready(&motor, "missing"));
+        assert!(super::engine_account_ready(&motor, "default"));
+        assert!(super::engine_account_ready(&motor, "other"));
+        let empty: super::Motor = serde_json::from_value(serde_json::json!({"cliproxy_accounts":[]})).unwrap();
+        assert!(!super::engine_account_ready(&empty, "default"));
+        let invalid: super::Motor = serde_json::from_value(serde_json::json!({"cliproxy_accounts":[
+            {"account":"other", "credential_id":"codex:/home/.codex-other", "email":"two@example.com", "label":"Two"}],
+            "cliproxy_error":"duplicate account"})).unwrap();
+        assert!(!super::engine_account_ready(&invalid, "other"));
+        let ordinary: super::Motor = serde_json::from_value(serde_json::json!({"model":"k3"})).unwrap();
+        assert!(ordinary.cliproxy_accounts.is_none());
+        assert!(super::engine_account_ready(&ordinary, ""));
+        let key = super::model_memory_key("server", "claude", "", "proxy", "default");
+        assert_ne!(key, super::model_memory_key("server", "claude", "", "proxy", "other"));
+        assert_ne!(key, super::model_memory_key("another", "claude", "", "proxy", "default"));
+        assert_ne!(key, super::model_memory_key("server", "claude", "", "proxy", ""));
+        let catalog: Vec<ModelOption> = serde_json::from_value(serde_json::json!([{"id":"gpt-base"}])).unwrap();
+        assert!(super::selected_model_valid(&catalog, "gpt-base"));
+        assert!(!super::selected_model_valid(&catalog, ""));
+        assert!(!super::selected_model_valid(&catalog, "other-prefix/gpt-base"));
+        assert!(!super::selected_model_valid(&catalog, "removed-model"));
+    }
+
+    #[test]
+    fn remembered_codex_choices_are_scoped_and_never_invent_a_model_or_effort() {
+        let models: Vec<ModelOption> = serde_json::from_value(serde_json::json!([
+            {"id":"model-a", "efforts":["low","high"]}, {"id":"model-b", "efforts":["medium"]}
+        ])).unwrap();
+        let remembered = |model: &str, effort: &str| super::remembered_choice(&models, "codex", (model.into(), effort.into()));
+        assert_eq!(remembered("model-a", "high"), ("model-a".into(), "high".into()));
+        assert_eq!(remembered("model-b", "high"), ("model-b".into(), String::new()));
+        assert_eq!(remembered("claude-model", "high"), (String::new(), String::new()));
+        assert_eq!(remembered("", "high"), (String::new(), String::new()));
+        assert_eq!(remembered("model-b", "medium"), ("model-b".into(), "medium".into()));
+        let key = super::model_memory_key("server-a", "codex", "account-a", "", "");
+        assert_ne!(key, super::model_memory_key("server-b", "codex", "account-a", "", ""));
+        assert_ne!(key, super::model_memory_key("server-a", "claude", "account-a", "", ""));
+        assert_ne!(key, super::model_memory_key("server-a", "codex", "account-b", "", ""));
+        let mut remote = super::Remote::<super::Catalog>::default();
+        let old = remote.start();
+        let current = remote.start();
+        assert!(remote.finish(current, Ok(super::Catalog { models, reduced: false })));
+        assert!(!remote.finish(old, Ok(super::Catalog { models: Vec::new(), reduced: false })));
+        assert_eq!(remote.ok().unwrap().models.len(), 2);
+    }
 
     #[tokio::test]
     async fn config_is_only_requested_for_owner_or_legacy_backend() {

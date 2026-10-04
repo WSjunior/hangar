@@ -163,6 +163,17 @@ def _run(args: list[str], input: bytes | None = None) -> subprocess.CompletedPro
         else:
             cp = RUN(args, capture_output=True, text=True, encoding="utf-8", errors="replace",
                      timeout=5)
+        if (os.name != "nt" and input is None and args[:2] == ["tmux", "send-keys"]
+                and cp.returncode == 1 and isinstance(cp.stderr, str)
+                and cp.stderr.strip() == "client is read-only"):
+            options = args[2:args.index("--")] if "--" in args else args[2:]
+            if "-c" not in options:
+                # A recusa acontece antes de qualquer tecla. Cliente vazio evita herdar o
+                # observador somente de leitura; o pane e a proteção do observador permanecem.
+                diag.registrar("mux.readonly_client", "aviso", comando="send-keys", retorno=1)
+                retry_args = [*args[:2], "-c", "", *args[2:]]
+                cp = RUN(retry_args, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                         timeout=5)
         return cp
     except (subprocess.TimeoutExpired, OSError) as exc:
         failure = exc
@@ -399,7 +410,7 @@ def list_panes_all() -> dict[str, list[dict]]:
     # o formato de 6 campos.
     cp = _run(["tmux", "list-panes", "-a", "-F",
                "#{session_name}\t#{pane_active}\t#{pane_pid}\t#{pane_current_path}\t#{pane_id}"
-               "\t#{@cp_hidden}\t#{CP_PROVIDER}"])
+               "\t#{@cp_hidden}\t#{CP_PROVIDER}\t#{session_created}"])
     _exige_resposta(cp)
     if cp.returncode != 0:
         return {}
@@ -411,10 +422,12 @@ def list_panes_all() -> dict[str, list[dict]]:
         name, active, pid, cwd, pane_id = parts[:5]
         hidden = parts[5] if len(parts) > 5 else ""
         provider = parts[6] if len(parts) > 6 else ""
+        birth = parts[7] if len(parts) > 7 else ""
         out.setdefault(name, []).append({
             "name": name, "pid": int(pid) if pid.isdigit() else None, "cwd": cwd,
             "pane_id": pane_id, "active": active == "1", "hidden": hidden == "1",
             "provider": provider if provider in {"claude", "codex", "pi", "omp", "kimi"} else None,
+            "session_created": int(birth) if birth.isdigit() and int(birth) > 0 else None,
         })
     return out
 

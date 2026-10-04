@@ -1636,6 +1636,10 @@ async def test_native_codex_monitor_never_acquires_unused_terminal_observer(monk
     monkeypatch.setattr(codex_adapter.tmux, "_run", deny)
     monkeypatch.setattr(codex_adapter.tmux, "RUN", deny)
     monkeypatch.setattr(codex_adapter.tmux, "_pane_target", lambda name: "%8")
+    # Sessão anexada sem sidecar: a checagem de transferência cairia na época do tmux, que não é o
+    # assunto deste teste (em produção o sidecar tem `key` e ela nem chega ao tmux).
+    from app import conversation_transfer
+    monkeypatch.setattr(conversation_transfer, "transfer_active", lambda name: False)
     terminal_observer.configure("127.0.0.1:12345", "secret")
     calls = []
     async def request(payload):

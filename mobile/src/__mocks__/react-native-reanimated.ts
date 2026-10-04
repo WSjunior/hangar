@@ -7,6 +7,7 @@ export const useDerivedValue = (fn: () => any) => ({ value: fn() });
 export const useAnimatedStyle = (fn: () => any) => fn();
 export const useAnimatedProps = (fn: () => any) => fn();
 export const useReducedMotion = () => true;
+export const useFrameCallback = () => ({ setActive: () => {} });
 export const withTiming = passa;
 export const withSpring = passa;
 export const withDelay = (_ms: number, v: any) => v;

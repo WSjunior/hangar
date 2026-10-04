@@ -7,6 +7,7 @@
     "@hangar/core": "file:../packages/core",
     "@legendapp/list": "^3.3.8",
     "@lodev09/react-native-true-sheet": "^3.11.12",
+    "@mattermost/react-native-paste-input": "2.0.1",
     "@react-native-community/slider": "5.2.0",
     "@react-native-menu/menu": "^2.0.0",
     "expo": "~57.0.20",
@@ -56,9 +57,9 @@
   "devDependencies": {
     "@inlang/paraglide-js": "^2.24.1",
     "@types/react": "~19.2.2",
+    "react-dom": "19.2.3",
     "typescript": "~6.0.3",
-    "vitest": "^4.1.11",
-    "react-dom": "19.2.3"
+    "vitest": "^4.1.11"
   },
   "_comentario_react_dom": "react-dom só serve aos testes de componente e exige a MESMA versão do react, que aqui é fixada pelo Expo. Antes vinha hoisteado da raiz; sem workspace, tem que ser pinado à mão junto com o react.",
   "scripts": {

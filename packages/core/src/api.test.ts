@@ -11,12 +11,12 @@ function overwriteGetLocale(fn: () => 'en' | 'pt') {
 import { configureApi } from './apiEnv';
 // `getHistoryDesde` veio da main junto com o histórico condicional (304 + ETag).
 import { getConfig, getConfigForServer, patchConfig, patchConfigForServer, createSession, getHistory, getHistoryDesde, isAbortError, transcribeFile, transcribeFileForServer, getModelOptions, setEngineModel, rotaGenerica, pairSession } from './api';
-import { createSessionForServer, getFolderGitForServer, folderGitActionForServer } from './api';
+import { createSessionForServer, getFolderGitForServer, folderGitActionForServer, defaultBase } from './api';
 import { mensagemDeErro, formataErro } from './errosApi';
 import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from './api';
 import { probeServerResponse } from './api';
 import { scanDir, scanDirForServer, listClaudeConfigs, listClaudeConfigsForServer } from './api';
-import { answerQuestions, interrupt, openEventStreamForServer, sendInputForServer, skipQuestion } from './api';
+import { answerQuestions, interrupt, openEventStreamForServer, pressPluginButton, sendInputForServer, skipQuestion } from './api';
 import { discardFile, fileAuthHeader, fileUrlNative, getPairContract, getPlans, listFiles, pathDiff, readFile, searchFiles, setPlanPin, unpairSession, writeFile } from './api';
 import type { Server } from './servers';
 import { exportShortcuts } from './api';
@@ -347,6 +347,7 @@ describe('contratos de conversa com servidor explícito', () => {
   const mutations = [
     { path: '/interrupt', body: {}, run: (s?: Server) => interrupt('mesma/sessão', false, s) },
     { path: '/interrupt?clear=true', body: {}, run: (s?: Server) => interrupt('mesma/sessão', true, s) },
+    { path: '/plugin/press', body: { site: 'above-prompt', key: 'rv-1' }, run: (s?: Server) => pressPluginButton('mesma/sessão', 'above-prompt', 'rv-1', s) },
     { path: '/answer', body: { answers: [], request_id: 0 }, run: (s?: Server) => answerQuestions('mesma/sessão', [], 0, s) },
     { path: '/answer', body: { answers: [] }, run: (s?: Server) => answerQuestions('mesma/sessão', [], undefined, s) },
     { path: '/question/skip', body: { request_id: 'req-b' }, run: (s?: Server) => skipQuestion('mesma/sessão', 'req-b', s) },
@@ -921,7 +922,7 @@ describe('arquivos, planos e contrato do par com servidor explícito', () => {
     expect(fetchMock.mock.calls[1][1]?.signal).toBeUndefined();
   });
 
-  it('busca, gravação e par em B usam teto de 30s; leituras, o padrão de 8s', async () => {
+  it('busca, gravação e par em B usam teto de 30s; leitura de arquivo da sessão, 60s', async () => {
     const timeout = vi.spyOn(AbortSignal, 'timeout');
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{}'));
     await searchFiles(s, 'foo', 'names', target);
@@ -929,7 +930,7 @@ describe('arquivos, planos e contrato do par com servidor explícito', () => {
     await readFile(s, 'a.md', target);
     await pairSession(s, ['outra'], 't', false, target);
     await unpairSession(s, target);
-    expect(timeout.mock.calls.map(([ms]) => ms)).toEqual([30_000, 30_000, 8000, 30_000, 30_000]);
+    expect(timeout.mock.calls.map(([ms]) => ms)).toEqual([30_000, 30_000, 60_000, 30_000, 30_000]);
   });
 
   it('conflito de digest em B chega com status, sem repetir o POST nem tocar a credencial ativa', async () => {
@@ -977,5 +978,13 @@ describe('prazos e raiz explícita (sessão e git de pasta)', () => {
     expect(new URL(urls[0]).searchParams.get('root')).toBe('/home/a');
     expect(timeout).toHaveBeenCalledWith(30_000);
     expect(timeout).toHaveBeenCalledWith(150_000);
+  });
+});
+
+describe('defaultBase', () => {
+  it('usa a branch atual e, com HEAD solto, a primeira local', () => {
+    expect(defaultBase({ current: 'main', branches: ['dev', 'main'], remotes: [], dirty: false })).toBe('main');
+    expect(defaultBase({ current: null, branches: ['dev', 'main'], remotes: ['r'], dirty: false })).toBe('dev');
+    expect(defaultBase({ current: null, branches: [], remotes: ['r'], dirty: false })).toBe('');
   });
 });

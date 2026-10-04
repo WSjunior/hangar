@@ -494,6 +494,7 @@ impl Hangar {
     pub(super) fn open_costs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.connection_dialog { return; }
         self.close_settings(window, cx);
+        self.close_worktrees(window, cx);
         self.close_popups();
         self.command_panel = false;
         self.show_costs_view(View::Costs, window, cx);

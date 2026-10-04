@@ -43,7 +43,9 @@ def save(name: str, cwd: str, session_id: str, *, config_dir: str | None = None,
          engine: str | None = None, model: str | None = None, effort: str | None = None,
          context_window: int | None = None, permission_mode: str | None = None,
          previous_non_plan: str | None = None, subagent_model: str | None = None,
-         jev: bool = False, key: str | None = None) -> dict:
+         jev: bool = False, key: str | None = None, transfer_id: str | None = None,
+         engine_account: str | None = None, engine_credential_id: str | None = None,
+         engine_account_base_url: str | None = None) -> dict:
     meta = {
         "name": name, "provider": "claude", "headless": True,
         # Identidade estável do processo pros scripts de dentro da sessão (hangar-send, hooks):
@@ -59,6 +61,11 @@ def save(name: str, cwd: str, session_id: str, *, config_dir: str | None = None,
         # troca para terminal o repassa pro `-e` do pane.
         "jev": jev,
     }
+    if engine_account is not None:
+        meta.update(engine_account=engine_account, engine_credential_id=engine_credential_id,
+                    engine_account_base_url=engine_account_base_url)
+    if transfer_id is not None:
+        meta["transfer_id"] = transfer_id
     _write(name, meta)
     return meta
 
@@ -79,7 +86,8 @@ def marcar_troca(name: str) -> None:
 
 
 def em_troca(name: str) -> bool:
-    return _trocando.get(name, 0.0) > time.monotonic()
+    from app.conversation_transfer import transfer_active
+    return _trocando.get(name, 0.0) > time.monotonic() or transfer_active(name)
 
 
 def update(name: str, **campos) -> dict | None:

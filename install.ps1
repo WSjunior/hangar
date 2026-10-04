@@ -50,6 +50,32 @@ if ($script:temLog) {
 function Pausa-Log  { if ($script:temLog) { try { Stop-Transcript | Out-Null } catch { } } }
 function Retoma-Log { if ($script:temLog) { try { Start-Transcript -Path $logInstall -Append | Out-Null } catch { } } }
 
+# Idempotente: roda antes da pausa final e de novo no finally.
+function Liberar-Instalacao {
+    try {
+        foreach ($taskName in @($script:pausedRecovery.Keys)) {
+            # Tarefa que nao existe mais nao tem o que repor (e um erro aqui, no finally de tudo,
+            # mascararia a falha que trouxe a instalacao ate aqui).
+            if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+                Restaurar-Recuperacao $taskName $script:pausedRecovery[$taskName]
+            }
+        }
+        $script:pausedRecovery.Clear()
+    } finally {
+        if ($script:installLocked) { $script:installMutex.ReleaseMutex(); $script:installLocked = $false }
+        if ($script:installMutex) { $script:installMutex.Dispose(); $script:installMutex = $null }
+    }
+}
+
+# A janela esperando Enter nao segura a trava: atualizador e vigia ficariam barrados ate alguem
+# fecha-la. Pausa so com console interativo: com stdin de pipe o Read-Host volta na hora, e no
+# -Update travaria um `git pull` esperando tecla.
+function Pausa-Fim {
+    # Falha aqui nao pode fechar a janela antes de alguem ler; o finally tenta de novo e a mostra.
+    try { Liberar-Instalacao } catch { Erro "nao consegui liberar a instalacao: $_" }
+    if ($script:Interativo -and -not $Update) { Read-Host '  Enter pra fechar' | Out-Null }
+}
+
 function Titulo($m) {
     # Título numerado ("3/8 ...", "5d/8 ...") ganha a barra de progresso; os demais seguem sem.
     if ($m -match '^(\d+)[a-z]?/8\s') {
@@ -85,7 +111,7 @@ function Pare($mensagem, $dicas) {
     Nota 'instalacao interrompida neste passo. Re-rodar continua de onde parou.'
     # Sem a pausa, a janela aberta por duplo clique FECHA e ninguém lê o motivo — o mesmo
     # cuidado do Read-Host do fim.
-    if ($script:Interativo -and -not $Update) { Read-Host '  Enter pra fechar' | Out-Null }
+    Pausa-Fim
     Pausa-Log
     exit 1
 }
@@ -570,9 +596,50 @@ if (-not $SoChecar) {
         Nota 'Se o Hangar ja estiver aberto, feche e reabra pelo atalho ao terminar para aplicar a elevacao.'
     }
 }
+# Abaixo do build 22523 o conhost do sistema impede o Claude de ligar o mouse no psmux e a roda nao
+# rola (psmux/psmux#597); scripts\install-psmux-conpty.ps1 instala o psmux com console proprio.
+$script:psmuxDir = Join-Path $HOME '.hangar\psmux'
+# Processo do psmux fora da nossa pasta. Path nulo (acesso negado) conta como antigo; tmux.exe so
+# conta com psmux.exe ao lado, para nao pegar o tmux de MSYS2/Cygwin.
+function Psmux-Antigos {
+    @(Get-Process -Name psmux, tmux, pmux -ErrorAction SilentlyContinue | Where-Object {
+        if (-not $_.Path) { return $true }
+        if ($_.Path.StartsWith("$script:psmuxDir\", [StringComparison]::OrdinalIgnoreCase)) { return $false }
+        $_.Name -ne 'tmux' -or (Test-Path (Join-Path (Split-Path -Parent $_.Path) 'psmux.exe'))
+    })
+}
+# $true quando nao sobrou processo antigo.
+function Psmux-Encerrar-Antigos {
+    $comPath = Psmux-Antigos | Where-Object { $_.Path } | Select-Object -First 1
+    if ($comPath) { Nativo $comPath.Path kill-server | Out-Null }
+    $limite = (Get-Date).AddSeconds(10)
+    while ((Psmux-Antigos) -and (Get-Date) -lt $limite) { Start-Sleep -Milliseconds 300 }
+    Psmux-Antigos | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+    return -not (Psmux-Antigos)
+}
+function Psmux-Precisa {
+    $build = [int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').CurrentBuildNumber
+    if ($build -ge 22523 -or "$env:PROCESSOR_ARCHITEW6432$env:PROCESSOR_ARCHITECTURE" -notmatch 'AMD64') { return 'nao-precisa' }
+    $antigos = Psmux-Antigos
+    if (-not $antigos) { return 'fazer' }
+    $comPath = $antigos | Where-Object { $_.Path } | Select-Object -First 1
+    $script:psmuxSessoes = '?'
+    if ($comPath) {
+        $anterior = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { $linhas = @(& $comPath.Path ls 2>$null | Where-Object { $_ }); $rc = $LASTEXITCODE }
+        finally { $ErrorActionPreference = $anterior }
+        # rc != 0 e "sem servidor" ou falha: na duvida pergunta, nunca fecha sessao calado.
+        if ($rc -eq 0 -and $linhas.Count -eq 0) { return 'fazer' }
+        if ($rc -eq 0) { $script:psmuxSessoes = $linhas.Count }
+    }
+    return 'perguntar'
+}
+
 if (-not $SoChecar -and -not $Update) {
 Titulo '0/8 Antes de comecar'
-Write-Host '  No maximo duas perguntas agora, e depois o instalador segue sozinho ate o fim.'
+Write-Host '  No maximo duas perguntas agora (tres no Windows 10 com sessoes abertas), e depois o instalador segue sozinho ate o fim.'
 Write-Host '  (Se voce disser que usa fora de casa, logo em seguida o Tailscale abre o navegador'
 Write-Host '   uma vez, para voce entrar na conta dele. Fora isso, nada mais e perguntado.)'
 Write-Host '  Se pedir permissao de administrador (UAC) e so pra uma coisa pontual, e o instalador continua.'
@@ -629,6 +696,13 @@ else {
     Write-Host '  Voce vai usar o Hangar fora de casa (celular fora do Wi-Fi do PC)?'
     Nota 'Sim = instala o Tailscale, uma rede privada entre PC e celular, sem abrir nada pra internet.'
     $script:querTailscale = Pergunte-Mesmo '  Usar fora de casa (instalar Tailscale)?'
+}
+
+$script:psmuxConsole = Psmux-Precisa
+if ($script:psmuxConsole -eq 'perguntar') {
+    Write-Host '  Neste Windows a roda do mouse nao rola dentro do Claude. O conserto reinicia o psmux.'
+    Nota "Fecha as sessoes de terminal abertas (agora: $script:psmuxSessoes); a conversa de cada uma continua no app (claude --resume)."
+    $script:psmuxConsole = if (Pergunte-Mesmo '  Consertar a roda do mouse agora?') { 'fazer' } else { 'pular' }
 }
 }
 # Fora da guarda: no -Update nao ha pergunta, mas quem ja tem Tailscale continua publicando nele.
@@ -717,6 +791,40 @@ if ($script:querTailscale -and -not (Tem 'tailscale')) {
     }
 }
 
+# Roda do mouse no Claude em Windows de console antigo: decidido no passo 0.
+if ($script:psmuxConsole -eq 'pular') {
+    Falta 'roda do mouse no Claude segue sem funcionar neste Windows (o psmux nao foi reiniciado)'
+    Nota 'rode o instalador de novo quando puder fechar as sessoes de terminal'
+} elseif ($script:psmuxConsole -eq 'fazer') {
+    # Instala antes de derrubar: falha de download nao pode custar as sessoes.
+    & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -File "$raiz\scripts\install-psmux-conpty.ps1"
+    $rcConsole = $LASTEXITCODE
+    $dirConsole = [Environment]::GetEnvironmentVariable('PSMUX_CONPTY_DIR', 'User')
+    # Ordem de um terminal novo: PATH da maquina antes do do usuario.
+    $ordem = ([Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
+              [Environment]::GetEnvironmentVariable('Path', 'User')) -split ';' |
+             Where-Object { $_ } | ForEach-Object { [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') }
+    $primeiroTmux = $ordem | Where-Object { Test-Path (Join-Path $_ 'tmux.exe') } | Select-Object -First 1
+    if ($rcConsole -ne 0 -or -not $dirConsole) {
+        Falta 'roda do mouse: o psmux com console proprio nao instalou (veja a linha acima)'
+        $script:faltaRodaPsmux = $true
+    } elseif ($primeiroTmux -ne $dirConsole.TrimEnd('\')) {
+        Falta "roda do mouse: no PATH, o tmux.exe de $primeiroTmux vem antes do de $dirConsole"
+        $script:faltaRodaPsmux = $true
+    } else {
+        $env:PSMUX_CONPTY_DIR = $dirConsole
+        $env:Path = "$dirConsole;$env:Path"
+        # O psmux le PSMUX_CONPTY_DIR uma vez, no servidor: o antigo precisa sair.
+        if (Psmux-Encerrar-Antigos) {
+            Ok 'roda do mouse: psmux com console proprio'
+            Nota 'vale nos terminais NOVOS - feche os abertos antes de rodar o claude de novo.'
+        } else {
+            Falta 'roda do mouse: o servidor antigo do psmux nao encerrou; reinicie o Windows para valer'
+            $script:faltaRodaPsmux = $true
+        }
+    }
+}
+
 if ($SoChecar) {
     $pyVenvCheck = Join-Path $raiz 'backend\.venv\Scripts\python.exe'
     if (Test-Path $pyVenvCheck) {
@@ -731,6 +839,7 @@ if ($SoChecar) {
 }
 if ($pendencias.Count -gt 0) { Erro "faltam: $($pendencias -join ', ')"; Pausa-Log; exit 1 }
 if ($script:faltaDevMode) { $pendencias += 'modo desenvolvedor' }
+if ($script:faltaRodaPsmux) { $pendencias += 'roda do mouse (psmux)' }
 
 # -- 2/8 Backend -------------------------------------------------------------
 Titulo '2/8 Backend'
@@ -1680,9 +1789,12 @@ $registrou = $jaAgendado -or (Pergunte '  Registrar backend e frontend pra subir
 # ORFAO que ficou de pe, e reportar "ok" ali seria pior que a pendencia falsa.
 $subiu = $false
 $iniciou = $false
+# MAQUINA\usuario, nunca o nome curto: com o PC chamado igual ao usuario, o nome curto resolve
+# para a conta da maquina e o Agendador recusa com "Parametro incorreto. (7,27):UserId".
+$contaTarefa = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 if ($registrou) {
     try {
-        $taskPrincipal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel $script:installRunLevel
+        $taskPrincipal = New-ScheduledTaskPrincipal -UserId $contaTarefa -LogonType Interactive -RunLevel $script:installRunLevel
         foreach ($t in $tarefas) {
             # -Exe pelo caminho completo: a tarefa nasce com o PATH do sistema, nao com o do
             # seu shell - `uv` instalado em ~\.local\bin nao seria encontrado.
@@ -1710,7 +1822,7 @@ if ($registrou) {
             Escrever-Lancador $vbs ($linhaVbs + "`r`n") 'vbs' | Out-Null
             $acao = New-ScheduledTaskAction -Execute 'wscript.exe' `
                 -Argument "`"$vbs`"" -WorkingDirectory $t.Dir
-            $gatilho = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+            $gatilho = New-ScheduledTaskTrigger -AtLogOn -User $contaTarefa
             # -Priority 4 = normal. Sem ele o Agendador usa 7 (abaixo do normal), herdado pelos
             # filhos: com a CPU cheia o backend demora mais que o limite da vigia e ela o derruba.
             $cfg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
@@ -1898,7 +2010,7 @@ WScript.Quit CreateObject("WScript.Shell").Run("powershell -NoProfile -Execution
     # interativo de verdade (login de manha, por exemplo), enquanto o -Once repetido acima e
     # quem cobre reboot e retomada de suspensao, os dois casos que nao passam por logon e que
     # sao justamente o motivo da vigia existir.
-    $vigiaLogon = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+    $vigiaLogon = New-ScheduledTaskTrigger -AtLogOn -User $contaTarefa
     # -Settings com bateria: o default e DisallowStartIfOnBatteries=$true, e a maquina que suspende
     # e justamente o notebook - a vigia ficaria morta exatamente quando e necessaria, e o teste na
     # tomada passaria. As tarefas existentes ja passam estes dois (acima).
@@ -2275,6 +2387,14 @@ if ($Update) {
     }
 }
 
+# O backend antigo pode ter subido um servidor do psmux sem a correcao antes de reiniciar no 7/8.
+if ($script:psmuxConsole -eq 'fazer' -and -not $script:faltaRodaPsmux -and (Psmux-Antigos)) {
+    if (-not (Psmux-Encerrar-Antigos)) {
+        Falta 'roda do mouse: um servidor antigo do psmux voltou e nao encerrou; reinicie o Windows para valer'
+        $pendencias += 'roda do mouse (psmux)'
+    }
+}
+
 # -- 8/8 Checagem de fumaca --------------------------------------------------
 # Ate aqui foi tudo instalacao. Este passo separa "instalou" de "funciona": ate pouco tempo o
 # backend nem IMPORTAVA no Windows (um `import fcntl` no topo do projects.py) e um instalador
@@ -2409,7 +2529,7 @@ if ($pendencias.Count -gt 0) {
 "@
     # A mesma pausa do fim feliz: sem ela, a janela aberta por duplo clique fecha no exit e
     # ninguem le o que faltou.
-    if ($script:Interativo -and -not $Update) { Read-Host '  Enter pra fechar' | Out-Null }
+    Pausa-Fim
     Pausa-Log
     exit 1
 }
@@ -2494,21 +2614,8 @@ Write-Host ""
 # Pausa SO com console interativo: com o stdin vindo de um pipe (irm|iex chamado por outro
 # processo, SSH, tarefa agendada) o Read-Host voltaria na hora e a pausa nao seguraria nada; e no
 # -Update ela travaria um `git pull` esperando por uma tecla que ninguem vai apertar.
-if ($script:Interativo -and -not $Update) {
-    Read-Host '  Enter pra fechar' | Out-Null
-}
+Pausa-Fim
 Pausa-Log
 } finally {
-    try {
-        foreach ($taskName in $pausedRecovery.Keys) {
-            # Tarefa que nao existe mais nao tem o que repor (e um erro aqui, no finally de tudo,
-            # mascararia a falha que trouxe a instalacao ate aqui).
-            if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
-                Restaurar-Recuperacao $taskName $pausedRecovery[$taskName]
-            }
-        }
-    } finally {
-        if ($installLocked) { $installMutex.ReleaseMutex() }
-        if ($installMutex) { $installMutex.Dispose() }
-    }
+    Liberar-Instalacao
 }

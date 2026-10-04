@@ -7,6 +7,7 @@ import pytest
 from app import archive
 from app import archive_providers
 from app import codex_contas
+from app import worktrees
 
 
 SID = "11111111-1111-1111-1111-111111111111"
@@ -21,6 +22,12 @@ def _tmp_projects(tmp_path, monkeypatch):
     monkeypatch.setattr(archive, "_conversas_de_outros_providers", lambda: [])
     monkeypatch.setattr(archive.settings, "projects_dir", tmp_path)
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _isolated_removed(tmp_path, monkeypatch):
+    # `archive_cwd` consulta o mapa de worktrees removidas; nunca o ~/.hangar real.
+    monkeypatch.setattr(worktrees, "REMOVED_FILE", tmp_path / "removidas.json")
 
 
 def _write_transcript(projdir, sid=SID, text="oi arquivo", cwd="/home/u/proj"):

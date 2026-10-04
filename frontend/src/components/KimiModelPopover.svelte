@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   // Seletor de modelo do Kimi ancorado na pill do composer. Irmão do PiModelPopover (caixa
   // compacta, busca no topo, clique aplica), mas com duas diferenças do mecanismo dele:
   //   * fonte única: o catálogo é o config.toml (GET /kimi/models) — não há sidecar de extensão
@@ -21,6 +22,7 @@
     onClose: () => void;
   }
   let { open, anchor, sessionName, currentName, onApplied, onClose }: Props = $props();
+  const sessionServer = useSessionServer();
 
   const MAX_ROWS = 40;   // teto de linhas desenhadas, igual ao do Pi
 
@@ -39,7 +41,7 @@
     err = null;
     loading = true;
     try {
-      const res = await getKimiModels(sessionName);
+      const res = await getKimiModels(sessionName, sessionServer());
       if (minha !== carga) return;
       models = res.models;
     } catch (e) {
@@ -89,7 +91,7 @@
     aplicando = md.alias;
     err = null;
     try {
-      const res = await setKimiModel(sessionName, { model: md.alias });
+      const res = await setKimiModel(sessionName, { model: md.alias }, sessionServer());
       if (res.current) onApplied(res.current.name);
     } catch (e) {
       err = e instanceof Error ? e.message : m.comum_falha_aplicar();

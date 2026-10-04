@@ -17,7 +17,7 @@
   import ConfigIcone from './ConfigIcone.svelte';
   import * as m from '../../paraglide/messages';
   import { engineModelos, engineModelosForServer, putEngine, putEngineForServer,
-           criarConta, type ModeloProvedor } from '@hangar/core';
+           engineCliproxy, engineCliproxyForServer, criarConta, type ModeloProvedor } from '@hangar/core';
   import { sincronizarNosAgentes, type ResultadoSync } from '../../lib/credenciais';
   import type { Server } from '../../lib/auth';
   import CodexContaLogin from './CodexContaLogin.svelte';
@@ -64,6 +64,7 @@
     { id: 'openrouter', nome: 'OpenRouter', desc: m.novacred_openrouter_desc(), url: 'https://openrouter.ai/api', caminhos: ['modelo', 'chave'] },
     { id: 'groq', nome: 'Groq', desc: m.novacred_groq_desc(), url: 'https://api.groq.com/openai', caminhos: ['modelo', 'chave'] },
     { id: 'deepseek', nome: 'DeepSeek', desc: m.novacred_deepseek_desc(), url: 'https://api.deepseek.com', caminhos: ['modelo', 'chave'] },
+    { id: 'cliproxy', nome: 'CLIProxyAPI', desc: m.cliproxy_desc(), url: 'http://127.0.0.1:8317', caminhos: ['modelo', 'chave'] },
     { id: 'custom', nome: m.novacred_custom_nome(), desc: m.novacred_custom_desc(), url: '', caminhos: ['modelo', 'chave'] },
   ];
 
@@ -99,6 +100,16 @@
   let erroModelos = $state('');
   let modeloEscolhido = $state('');
 
+  // CLIProxyAPI: o servidor acha o proxy da própria máquina e guarda a chave; o navegador (que pode
+  // ser o celular) nunca a vê. `cpAviso` explica por que caiu no formulário manual.
+  let cpEstado = $state<'buscando' | 'achou' | 'falhou' | null>(null);
+  let cpBase = $state('');
+  let cpAviso = $state('');
+  let cpErro = $state(false);
+  let deteccao = 0;
+  // Sem chave só enquanto a URL é a detectada: o servidor recusa preencher a chave pra outra.
+  const semChave = $derived(cpEstado === 'achou' && url.trim() === cpBase);
+
   function abrir(item: Item) {
     escolhido = item;
     nome = item.login ? '' : item.nome;
@@ -109,11 +120,46 @@
     erro = '';
     erroModelos = '';
     sync = null;
+    cpEstado = null;
+    cpAviso = '';
+    cpErro = false;
+    const meu = ++deteccao;
+    if (item.id === 'cliproxy') void detectarCliproxy(meu);
+  }
+
+  async function detectarCliproxy(meu: number) {
+    cpEstado = 'buscando';
+    try {
+      const r = apiTarget ? await engineCliproxyForServer(apiTarget) : await engineCliproxy();
+      // Resposta de uma abertura anterior (voltou ou trocou de provedor): descarta.
+      if (meu !== deteccao) return;
+      if (r.base_url) url = r.base_url;
+      if (r.found && !r.error && r.models.length) {
+        cpBase = r.base_url ?? '';
+        modelos = r.models;
+        modeloEscolhido = r.models[0].id;
+        cpAviso = m.cliproxy_found({ url: cpBase });
+        cpEstado = 'achou';
+        return;
+      }
+      cpErro = !!r.error;
+      cpAviso = r.found && r.error ? m.cliproxy_error({ url: r.base_url ?? '', erro: r.error })
+        : r.error ? r.error
+        : r.found ? m.novacred_modelos_nenhum()
+        : m.cliproxy_missing();
+      cpEstado = 'falhou';
+    } catch (e) {
+      if (meu !== deteccao) return;
+      cpErro = true;
+      cpAviso = e instanceof Error && e.message ? e.message : String(e);
+      cpEstado = 'falhou';
+    }
   }
 
   // Voltar fecha só a etapa local; a tentativa OAuth continua consultável no servidor.
   function voltar() {
     erro = '';
+    deteccao++;
     if (escolhido) { escolhido = null; return; }
     escolhido = null;
     caminho = null;
@@ -158,12 +204,13 @@
       if (escolhido.login) {
         await criarConta(apiTarget, idDe(nome));
       } else {
-        const dados = {
+        const dados: Record<string, unknown> = {
           label: nome.trim() || escolhido.nome,
           base_url: url.trim(),
-          api_key: chave.trim(),
           model: modeloEscolhido,
         };
+        if (semChave) dados.use_cliproxy_key = true;
+        else dados.api_key = chave.trim();
         const id = idDe(nome.trim() || escolhido.nome);
         if (apiTarget) await putEngineForServer(apiTarget, id, dados);
         else await putEngine(id, dados);
@@ -197,7 +244,7 @@
 
   const podeSalvar = $derived(
     !!escolhido && !salvando &&
-    (escolhido.login ? !!nome.trim() : !!nome.trim() && !!url.trim() && !!chave.trim()),
+    (escolhido.login ? !!nome.trim() : !!nome.trim() && !!url.trim() && (semChave || !!chave.trim())),
   );
 
   let isDesktop = $state(false);
@@ -208,6 +255,11 @@
     return () => mq.removeEventListener('change', on);
   });
 </script>
+
+{#snippet avisoCliproxy()}
+  {#if cpErro}<p class="nc-erro nc-cp" role="alert">{cpAviso}</p>
+  {:else}<p class="nc-modelos-vazio nc-cp" role="status">{cpAviso}</p>{/if}
+{/snippet}
 
 <BottomSheet open={true} onClose={onFechar} ariaLabel={m.contas_nova()}
              wide={isDesktop} centered={isDesktop}>
@@ -261,13 +313,20 @@
           </div>
         {/each}
       </div>
+    {:else if cpEstado === 'buscando'}
+      <p class="nc-leg">{escolhido.desc}</p>
+      <p class="nc-modelos-vazio" role="status">{m.cliproxy_detecting()}</p>
     {:else if caminho === 'modelo'}
       <!-- Modelo pro Claude Code é o formulário COMPLETO do motor, não o resumido da chave: sem
            modelo, janela de contexto e o Avançado, o motor nasce pela metade e a sessão compacta
            a 200k. Salvar ali já faz PUT + sincronização; aqui só a lista de fora é recarregada. -->
       <p class="nc-leg">{escolhido.desc}</p>
+      {#if cpAviso}{@render avisoCliproxy()}{/if}
+      <!-- Só monta depois da detecção: o MotorForm tira o retrato do `motor` ao nascer. -->
       <MotorForm {apiTarget} criando nome="" {nomesExistentes}
-        motor={{ base_url: escolhido.url, model: '', api_key: '', api_key_definida: false }}
+        motor={{ base_url: url, model: semChave ? modeloEscolhido : '', api_key: '', api_key_definida: false,
+                 context_window: semChave ? modelos?.[0]?.context_length ?? undefined : undefined }}
+        cliproxy={semChave ? { base_url: cpBase, modelos: modelos ?? [] } : null}
         onSalvo={() => onCriada()} {onFechar} />
     {:else if escolhido.login === 'codex'}
       {#if codexServer}
@@ -291,21 +350,27 @@
       </label>
 
       {#if !escolhido.login}
+        {#if cpAviso}{@render avisoCliproxy()}{/if}
         <label class="nc-campo">
           <span>{m.contas_chave_url()}</span>
-          <input type="url" bind:value={url} disabled={salvando}
+          <!-- Com o CLIProxyAPI detectado o endereço trava: a chave e os modelos só valem para ele. -->
+          <input type="url" bind:value={url} disabled={salvando} readonly={semChave}
             placeholder="https://api.exemplo.com" />
         </label>
-        <label class="nc-campo">
-          <span>{m.contas_chave_segredo()}</span>
-          <input type="password" autocomplete="off" bind:value={chave} disabled={salvando} />
-        </label>
+        {#if !semChave}
+          <label class="nc-campo">
+            <span>{m.contas_chave_segredo()}</span>
+            <input type="password" autocomplete="off" bind:value={chave} disabled={salvando} />
+          </label>
+        {/if}
 
         <div class="nc-modelos">
           <div class="nc-modelos-topo">
             <span class="nc-modelos-tit">{m.novacred_modelos()}</span>
-            <button type="button" class="nc-btn" onclick={buscarModelos} disabled={!podeBuscar}
-              >{buscando ? '…' : m.novacred_buscar_modelos()}</button>
+            {#if !semChave}
+              <button type="button" class="nc-btn" onclick={buscarModelos} disabled={!podeBuscar}
+                >{buscando ? '…' : m.novacred_buscar_modelos()}</button>
+            {/if}
           </div>
           {#if erroModelos}
             <!-- A mensagem CRUA do provedor: é ela que diz "401", "host desconhecido" ou "chave de
@@ -418,6 +483,7 @@
   .nc-modelos-vazio { color: var(--text-muted); font-size: var(--text-xs); margin: 0; }
   .nc-modelos-ok { color: var(--text-muted); font-size: 11px; margin: var(--space-1) 0 0; }
   .nc-erro { color: var(--error); font-size: var(--text-xs); margin: var(--space-1) 0 0; }
+  .nc-cp { margin: 0 0 var(--space-3); }
   .nc-sync-linha { margin: 3px 0 0; font-size: var(--text-xs); color: var(--text-secondary); }
   .nc-sync-linha b { color: var(--text-primary); font-weight: 600; margin-right: 6px; }
   /* "não instalado aqui" é esperado e fica apagado; falha de GRAVAÇÃO usa a cor de erro, igual ao

@@ -7,7 +7,7 @@ import {
   type ProjectShortcut, type ProjectShortcuts, type ScopedShortcut, type Shortcut,
   type ShortcutSendText, type ShortcutShell,
 } from '@hangar/core';
-import { getActiveId, listServers } from './auth';
+import { getActiveId, listServers, type Server } from './auth';
 import * as m from '../paraglide/messages';
 
 const lists = $state<Record<string, Shortcut[]>>({});
@@ -61,34 +61,34 @@ export function reloadShortcuts(serverId?: string | null): Promise<void> {
   return loadShortcuts(serverId);
 }
 
-// ── Atalhos do projeto da sessão, por servidor+sessão. As rotas de sessão falam com o servidor
-// ATIVO, então a chave usa ele. Carregar e falhar nunca mexem na lista global. ──────────────────
+// ── Atalhos do projeto da sessão, por servidor+sessão. Sem `server`, as rotas falam com o
+// servidor ATIVO e a chave usa ele. Carregar e falhar nunca mexem na lista global. ─────────────
 const projects = $state<Record<string, ProjectShortcuts>>({});
 const projectErrors = $state<Record<string, string>>({});
 const projectInFlight = new Map<string, Promise<void>>();
 
-function projectKey(session: string): string {
-  return `${getActiveId() ?? ''}::${session}`;
+function projectKey(session: string, server?: Server | null): string {
+  return `${server?.id ?? getActiveId() ?? ''}::${session}`;
 }
 
-export function projectShortcutsFor(session: string): ProjectShortcuts | null {
-  return projects[projectKey(session)] ?? null;
+export function projectShortcutsFor(session: string, server?: Server | null): ProjectShortcuts | null {
+  return projects[projectKey(session, server)] ?? null;
 }
 
 /** Mensagem (já traduzida pelo `code`) da última leitura que falhou; vazio = sem erro. */
-export function projectShortcutsError(session: string): string {
-  return projectErrors[projectKey(session)] ?? '';
+export function projectShortcutsError(session: string, server?: Server | null): string {
+  return projectErrors[projectKey(session, server)] ?? '';
 }
 
 /** Sempre relê: o arquivo é do projeto, e outra sessão/cliente pode ter gravado nele. A lista
  * anterior fica na tela até a nova chegar. Falha rejeita e fica guardada pra fileira mostrar. */
-export function loadProjectShortcuts(session: string): Promise<void> {
-  const k = projectKey(session);
+export function loadProjectShortcuts(session: string, server?: Server | null): Promise<void> {
+  const k = projectKey(session, server);
   const pending = projectInFlight.get(k);
   if (pending) return pending;
   const load = (async () => {
     try {
-      projects[k] = await getProjectShortcuts(session);
+      projects[k] = await getProjectShortcuts(session, server);
       delete projectErrors[k];
     } catch (err) {
       // Sem `status` o pedido nem chegou ao servidor, e a mensagem é a do navegador, em inglês.
@@ -101,9 +101,9 @@ export function loadProjectShortcuts(session: string): Promise<void> {
 }
 
 /** Grava a lista inteira do projeto e guarda como o servidor devolveu. */
-export async function saveProjectShortcuts(session: string, items: ProjectShortcut[]): Promise<ProjectShortcuts> {
-  const k = projectKey(session);
-  const saved = await putProjectShortcuts(session, items);
+export async function saveProjectShortcuts(session: string, items: ProjectShortcut[], server?: Server | null): Promise<ProjectShortcuts> {
+  const k = projectKey(session, server);
+  const saved = await putProjectShortcuts(session, items, server);
   projects[k] = saved;
   delete projectErrors[k];
   return saved;

@@ -151,6 +151,12 @@ def _cortar(texto: str, limite: int = 120) -> str:
 def _tail_info(jsonl: Path, provider: str = "claude") -> str:
     """Ultima msg (de quem for) da conversa. Duas passadas de tamanho crescente porque UMA entrada
     pode passar de 64KB sozinha (imagem colada, saida grande de ferramenta)."""
+    if provider == "codex":
+        from app import archive_providers
+        composed = archive_providers.transferred_history(jsonl)
+        if composed is not None:
+            return next((_cortar(_texto_simples(event.text)) for event in reversed(composed)
+                         if event.kind in ("user_msg", "assistant_msg") and event.text), "")
     for span in (_TAIL_BYTES, _TAIL_BYTES * 16):
         linhas, do_inicio = _linhas_do_fim(jsonl, span)
         for linha in reversed(linhas):
@@ -427,6 +433,11 @@ def tail_events(project: str, session_id: str, n: int = 30, config_dir: Optional
     15MB tinham 300 linhas e apenas SEIS mensagens de texto -- o resto era `attachment`, tool_use e
     metadado. Com um span fixo a previa vinha quase vazia justo nas conversas longas."""
     p = archive_jsonl(project, session_id, config_dir, provider, codex_account)
+    if provider == "codex":
+        from app import archive_providers
+        composed = archive_providers.transferred_history(p)
+        if composed is not None:
+            return [event for event in composed if event.kind in ("user_msg", "assistant_msg") and event.text][-n:]
     out: list[ChatEvent] = []
     span = _TAIL_BYTES * 4
     while True:
@@ -493,13 +504,15 @@ def archive_cwd(project: str, session_id: str, config_dir: Optional[str] = None,
     validacao de archive_jsonl (propaga ValueError/FileNotFoundError); None = cwd nao ficou gravado
     nas primeiras linhas do transcript (conversa nao pode ser retomada)."""
     p = archive_jsonl(project, session_id, config_dir, provider, codex_account)
+    # Worktree apagada pelo Hangar: retomar abre na pasta principal.
+    from app.worktrees import redirect
     if provider == "claude":
         _, cwd = _head_info(p)
-        return cwd
+        return redirect(cwd)
     # Pi e Codex gravam o cwd num cabecalho de formato proprio; o Kimi nem grava (vem do indice).
     from app import archive_providers
     alvo = os.path.realpath(str(p))
     for c in archive_providers.conversas():
         if c.provider == provider and os.path.realpath(str(c.path)) == alvo:
-            return c.cwd
+            return redirect(c.cwd)
     return None

@@ -10,6 +10,7 @@ import * as m from '../paraglide/messages';
   import HangarMark from '../components/icons/HangarMark.svelte';
   import HangarRunning from '../components/HangarRunning.svelte';
   import GroupGlyph from '../components/icons/GroupGlyph.svelte';
+  import IconWorktree from '../components/icons/IconWorktree.svelte';
   import SessionCard from '../components/SessionCard.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
   import BottomSheet from '../components/BottomSheet.svelte';
@@ -20,7 +21,7 @@ import * as m from '../paraglide/messages';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import { createSession, canPair, type DropResult } from '@hangar/core';
   import { listAllServers, getActiveId, selectServer, removeServer, renameServer, updateServer, onServersChanged, snapshotRemocao, removalStillMatches } from '../lib/auth';
-  import type { AggSession, Provider } from '@hangar/core';
+  import type { AggSession, Provider, WorktreeChoice } from '@hangar/core';
   import type { RemovalSnapshot } from '../lib/auth';
   import { sessionsStore } from '../lib/sessionsStore.svelte';
   import { createSessionListModel, groupItems, pairCodigo, pairResto } from '../lib/sessionListModel.svelte';
@@ -202,8 +203,10 @@ import * as m from '../paraglide/messages';
   async function handleCreate(name: string, cwd?: string, configDir?: string | null, provider?: Provider,
                               engine?: string | null, model?: string | null, effort?: string | null,
                               permissionMode?: string | null, ompProfile?: string | null,
-                              headless?: boolean, subagentModel?: string | null, jev?: boolean) {
-    await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile, null, headless, subagentModel, jev);
+                              headless?: boolean, subagentModel?: string | null, jev?: boolean,
+                              worktree?: WorktreeChoice | null) {
+    await createSession(name, cwd, configDir, provider, engine, model, effort, permissionMode, ompProfile, null, headless, subagentModel, jev,
+                              worktree ?? undefined);
   }
 
   // Abrir/apagar precisam mirar o servidor DA sessão: selectServer(serverId) antes, pois api.ts lê
@@ -745,6 +748,10 @@ import * as m from '../paraglide/messages';
       <button class="drawer-nav-item" onclick={() => { drawerOpen = false; window.location.hash = '#/orq'; }}>
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v4"/><circle cx="12" cy="9" r="2"/><path d="M6 21v-4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v4"/><path d="M6 13V9"/><path d="M18 13V9"/></svg>
         {m.shell_orq()}
+      </button>
+      <button class="drawer-nav-item" onclick={() => { drawerOpen = false; window.location.hash = '#/worktrees'; }}>
+        <IconWorktree size={20} />
+        {m.worktrees_titulo()}
       </button>
       <button class="drawer-nav-item" onclick={() => { drawerOpen = false; window.location.hash = '#/costs'; }}>
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><path d="M7 14l4-4 3 3 5-6"/></svg>

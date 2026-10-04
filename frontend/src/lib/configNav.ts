@@ -3,8 +3,8 @@ import { comConfig, type TelaConfig } from './configRoute';
 
 // Navegar para o painel SEMPRE por aqui — menu da conta, lista lateral, drill-down do celular.
 //
-// `window.location.hash =` (nao pushState): ele empilha a entrada E dispara `hashchange`, o unico
-// evento que o roteador escuta (App.svelte; nao ha um `popstate` no frontend inteiro).
+// `window.location.hash =` (não pushState): empilha a entrada e dispara `hashchange`,
+// que é o evento usado pelo roteador em App.svelte.
 //
 // O replaceState logo depois NAO navega: so carimba a profundidade NA ENTRADA que acabou de nascer,
 // pra ela viajar junto em back, forward e reload. DOIS argumentos: um terceiro `''` resolveria pra

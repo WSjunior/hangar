@@ -338,6 +338,39 @@ def test_list_maps_sessions_to_jsonl(tmp_path):
     assert out[0].name == "cc" and out[0].jsonl == "/x/s.jsonl"
 
 
+def test_engine_context_uses_the_window_from_its_recorded_agent_pid(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    name = "test-pinned-context"
+    transcript = tmp_path / f"{_UUID}.jsonl"
+    transcript.write_text(json.dumps({"type": "assistant", "message": {
+        "model": "gpt-test", "usage": {"input_tokens": 250_000}}}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(SessionRegistry, "_agent_pid", {})
+    reg = SessionRegistry(projects_dir=tmp_path / "projects")
+    monkeypatch.setattr(registry.tmux, "list_panes_all", lambda: {name: [{
+        "name": name, "pid": 4242, "cwd": str(tmp_path), "pane_id": "%1", "active": True}]})
+    monkeypatch.setattr(registry, "_proc_children_map", lambda *a, **k: {})
+    monkeypatch.setattr(registry, "agente_do_pane", lambda pid, children=None: ("claude", 4243))
+    monkeypatch.setattr(registry, "_engine_of", lambda pid: "proxy")
+    monkeypatch.setattr(registry.procinfo, "_env_var_of", lambda pid, key: {
+        "CP_ENGINE_ACCOUNT": "default", "CP_ENGINE_CREDENTIAL_ID": f"codex:{tmp_path / 'codex'}",
+        "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "400000"}.get(key))
+    monkeypatch.setattr(registry.procinfo, "_model_of", lambda pid: ("fixed/gpt-test", None))
+    monkeypatch.setattr(registry, "_escolhas_status", lambda sid: (None, None))
+    monkeypatch.setattr(registry.codex_sessions, "list_all", lambda **kwargs: [])
+    monkeypatch.setattr(registry.headless_sessions, "list_all", lambda: [])
+    monkeypatch.setattr(registry.orq_runs, "active", lambda: [])
+    monkeypatch.setattr(registry.worktrees, "locate", lambda *args: SimpleNamespace(
+        branch=None, worktree=False, worktree_path=None, worktree_gone=False))
+    monkeypatch.setattr(reg, "resolve_tracked", lambda *args: (str(transcript), True))
+    monkeypatch.setattr(reg, "_repl_sid", lambda *args: _UUID)
+
+    info = next(session for session in reg.list() if session.name == name)
+    assert info.conta is not None and info.conta.startswith("codex:")
+    assert registry._claude_context(info, reg._agent_pid.get(name)) == {"used": 250_000, "window": 400_000}
+
+
 async def test_list_with_state_classifies(tmp_path, monkeypatch):
     # list_with_state anexa o estado vivo: idle (sem spinner/menu), awaiting_input (menu ❯ N.) e
     # working (spinner que ANIMA entre os 2 frames). Reusa list() pra resolucao (mockada aqui).
@@ -642,7 +675,7 @@ from app import hook_state as hs_mod
 
 def test_list_with_state_prefers_marker(monkeypatch):
     reg = SessionRegistry()
-    info = type("I", (), {"name": "cc", "cwd": "/p", "jsonl": "/x/sid123.jsonl", "state": "idle", "last_activity": None})()
+    info = type("I", (), {"name": "cc", "cwd": "/p", "jsonl": "/x/sid123.jsonl", "state": "idle", "last_activity": None, "transfer_phase": None})()
     monkeypatch.setattr(reg, "list", lambda: [info])
     monkeypatch.setattr(hs_mod.hook_state, "get_state", lambda sid: ("working", 1.0) if sid == "sid123" else None)
     called = {"pane": 0}
@@ -665,7 +698,7 @@ def test_list_with_state_statusline_sweep_respeita_budget(monkeypatch):
     import app.registry as reg_mod
     reg = SessionRegistry()
     infos = [type("I", (), {"name": f"s{i}", "cwd": "/p", "jsonl": f"/x/sid{i}.jsonl",
-                            "state": "idle", "last_activity": None})() for i in range(5)]
+                            "state": "idle", "last_activity": None, "transfer_phase": None})() for i in range(5)]
     monkeypatch.setattr(reg, "list", lambda: infos)
     monkeypatch.setattr(hs_mod.hook_state, "get_state", lambda sid: ("idle", 1.0))
     called = {"pane": 0}
@@ -679,7 +712,7 @@ def test_list_with_state_statusline_sweep_respeita_budget(monkeypatch):
 
 def test_list_with_state_falls_back_to_pane(monkeypatch):
     reg = SessionRegistry()
-    info = type("I", (), {"name": "cc", "cwd": "/p", "jsonl": "/x/none.jsonl", "state": "idle", "last_activity": None})()
+    info = type("I", (), {"name": "cc", "cwd": "/p", "jsonl": "/x/none.jsonl", "state": "idle", "last_activity": None, "transfer_phase": None})()
     monkeypatch.setattr(reg, "list", lambda: [info])
     monkeypatch.setattr(hs_mod.hook_state, "get_state", lambda sid: None)   # sem marcador
     monkeypatch.setattr("app.registry.tmux.capture_pane", lambda name: "")  # pane vazio -> idle
@@ -697,7 +730,7 @@ def test_list_with_state_marks_stalled_past_threshold(tmp_path, monkeypatch):
     jsonl.write_text("{}\n")
     old = time.time() - 999
     os.utime(jsonl, (old, old))  # transcript parado ha muito mais que o threshold
-    info = type("I", (), {"name": "cc", "cwd": "/p", "jsonl": str(jsonl), "state": "idle", "last_activity": None})()
+    info = type("I", (), {"name": "cc", "cwd": "/p", "jsonl": str(jsonl), "state": "idle", "last_activity": None, "transfer_phase": None})()
     monkeypatch.setattr(reg, "list", lambda: [info])
     monkeypatch.setattr(hs_mod.hook_state, "get_state", lambda sid: ("working", old) if sid == "sid123" else None)
     monkeypatch.setattr(registry.settings, "stall_seconds", 300)
@@ -711,7 +744,7 @@ def test_list_with_state_not_stalled_when_recent(tmp_path, monkeypatch):
     reg = SessionRegistry(projects_dir=tmp_path)
     jsonl = tmp_path / "sid456.jsonl"
     jsonl.write_text("{}\n")  # mtime = agora
-    info = type("I", (), {"name": "cc", "cwd": "/p", "jsonl": str(jsonl), "state": "idle", "last_activity": None})()
+    info = type("I", (), {"name": "cc", "cwd": "/p", "jsonl": str(jsonl), "state": "idle", "last_activity": None, "transfer_phase": None})()
     monkeypatch.setattr(reg, "list", lambda: [info])
     monkeypatch.setattr(hs_mod.hook_state, "get_state", lambda sid: ("working", time.time()) if sid == "sid456" else None)
     monkeypatch.setattr(registry.settings, "stall_seconds", 300)
@@ -727,7 +760,7 @@ def test_list_with_state_not_stalled_when_not_working(tmp_path, monkeypatch):
     jsonl.write_text("{}\n")
     old = time.time() - 999
     os.utime(jsonl, (old, old))
-    info = type("I", (), {"name": "cc", "cwd": "/p", "jsonl": str(jsonl), "state": "idle", "last_activity": None})()
+    info = type("I", (), {"name": "cc", "cwd": "/p", "jsonl": str(jsonl), "state": "idle", "last_activity": None, "transfer_phase": None})()
     monkeypatch.setattr(reg, "list", lambda: [info])
     monkeypatch.setattr(hs_mod.hook_state, "get_state", lambda sid: ("idle", old) if sid == "sid789" else None)
     monkeypatch.setattr(registry.settings, "stall_seconds", 300)
@@ -909,8 +942,8 @@ def test_label_cache_preenche_working_e_nunca_idle(monkeypatch):
     reg = SessionRegistry()
     mk = {"sidw": ("working", 1.0), "sidi": ("idle", 1.0)}
     infos = [
-        type("I", (), {"name": "w", "cwd": "/p", "jsonl": "/x/sidw.jsonl", "state": "idle", "last_activity": None})(),
-        type("I", (), {"name": "i", "cwd": "/p", "jsonl": "/x/sidi.jsonl", "state": "idle", "last_activity": None})(),
+        type("I", (), {"name": "w", "cwd": "/p", "jsonl": "/x/sidw.jsonl", "state": "idle", "last_activity": None, "transfer_phase": None})(),
+        type("I", (), {"name": "i", "cwd": "/p", "jsonl": "/x/sidi.jsonl", "state": "idle", "last_activity": None, "transfer_phase": None})(),
     ]
     monkeypatch.setattr(reg, "list", lambda: infos)
     monkeypatch.setattr(hs_mod.hook_state, "get_state", lambda sid: mk.get(sid))
@@ -1258,7 +1291,7 @@ def test_list_with_state_radar_de_limite_so_nas_travadas(tmp_path, monkeypatch):
     parada.write_text("{}\n"); fresca.write_text("{}\n")
     old = time.time() - 999
     os.utime(parada, (old, old))
-    mk = lambda n, j: type("I", (), {"name": n, "cwd": "/p", "jsonl": str(j), "state": "idle", "last_activity": None})()
+    mk = lambda n, j: type("I", (), {"name": n, "cwd": "/p", "jsonl": str(j), "state": "idle", "last_activity": None, "transfer_phase": None})()
     monkeypatch.setattr(reg, "list", lambda: [mk("lim", parada), mk("viva", fresca)])
     monkeypatch.setattr(hs_mod.hook_state, "get_state", lambda sid: ("working", old))
     monkeypatch.setattr(registry.settings, "stall_seconds", 300)

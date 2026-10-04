@@ -106,7 +106,7 @@ vi.mock('../paraglide/messages', () => Object.fromEntries(
     .concat(' native_action_uncertain native_ask_fallback native_close native_dictation_active native_dictation_cancel native_dictation_level native_loading native_new_chat_folder native_tasks_all_done native_tasks_completed native_tasks_expand native_tasks_in_progress native_tasks_left native_tasks_left_1 native_tasks_minimize native_tasks_pending native_tasks_untitled native_thinking native_tools_failed native_tools_failed_1 native_tree_thoughts')
     .concat(' new_conversation_no_received_messages new_conversation_received_messages notice_compacted notice_hook_prompt notice_interrupted notice_skill_loaded nova_conversa_abrir nova_conversa_adotar nova_conversa_conferir nova_conversa_descartar nova_conversa_guardada nova_conversa_reenviar')
     .concat(' native_working_line pensamento_vivo tool_executando_ha estado_em_execucao atividade_subagente tool_abrir_agente tool_fase_escrevendo')
-    .concat(' stats_cache stats_chamadas stats_chamadas_1 stats_io stats_llm stats_toks stats_tools stats_ttft stats_turnos stats_turnos_1 sync_retry uso_janela_30d uso_janela_5h uso_janela_7d').split(' ').map((k) => [k, () => k]),
+    .concat(' stats_cache stats_chamadas stats_chamadas_1 stats_io stats_llm stats_toks stats_toks_now stats_toks_recent stats_tools stats_ttft stats_turnos stats_turnos_1 sync_retry uso_janela_30d uso_janela_5h uso_janela_7d').split(' ').map((k) => [k, () => k]),
 ));
 
 // Rascunho em memória no lugar do MMKV; cada teste começa sem nada guardado.
@@ -145,7 +145,7 @@ vi.mock('../ui/MultilineInput', () => ({ MultilineInput: ({ value, onChangeText,
 }));
 vi.mock('../features/pills/PillMenu', () => ({ PillMenu: () => null }));
 vi.mock('../features/ditado/EstiloPill', () => ({ DictationStyleMenu: () => null, useDictationStyleLabel: () => 'estilo' }));
-vi.mock('./SessionSettings', () => ({ SessionSettingsButton: ({ hidden }: { hidden?: boolean }) => (hidden ? null : createElement('button', { 'aria-label': 'composer_session_settings' })) }));
+vi.mock('./SessionSettings', () => ({ SessionSettingsButton: () => createElement('button', { 'aria-label': 'composer_session_settings' }) }));
 vi.mock('../features/ditado/useDitado', () => ({ useDitado: (callbacks: { onFim: typeof voiceInput.onFim }) => {
   voiceInput.onFim = callbacks.onFim;
   return { gravando: false, rms: 0, iniciar: () => {}, parar: () => {} };
@@ -448,12 +448,12 @@ describe('linha de botões do Composer', () => {
     act(() => root.unmount());
   });
 
-  it('trabalhando com texto sem terminal: Orientar na linha, microfone e chip saem', async () => {
+  it('trabalhando com texto sem terminal: a linha não muda — sem Orientar, com microfone e chip', async () => {
     composerChat.state = 'working';
     const { container, root } = await render(createElement(Composer, { serverId: 's1', name: 'sess', draft: 'texto', headless: true, onStop: () => {} }));
-    expect(container.querySelector('[aria-label="codex_orientar"]')).not.toBeNull();
-    expect(container.querySelector('[aria-label="composer_gravar_audio"]')).toBeNull();
-    expect(container.querySelector('[aria-label="composer_session_settings"]')).toBeNull();
+    expect(container.querySelector('[aria-label="codex_orientar"]')).toBeNull();
+    expect(container.querySelector('[aria-label="composer_gravar_audio"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="composer_session_settings"]')).not.toBeNull();
     expect(container.querySelector('[aria-label="composer_enviar_mensagem"]')).not.toBeNull();
     act(() => root.unmount());
   });
