@@ -903,6 +903,7 @@ def _reborn_terminal(monkeypatch, tmp_path):
         config_dir=str(tmp_path / 'other-account'), cwd=str(tmp_path), mux_argv=['tmux'], windows=False,
         agent_pid=77, agent_birth=456.7)
     monkeypatch.setattr(terminal, '_session_proof', lambda name: life['proof'])
+    monkeypatch.setattr(terminal, '_pane_life', lambda name: life.get('pane'), raising=False)
     monkeypatch.setattr(terminal, '_collect', lambda name: life['facts'])
     monkeypatch.setattr(sessions, 'load', lambda name: None)
     monkeypatch.setattr(pqueue, '_queue_dir', lambda: tmp_path)
@@ -954,3 +955,74 @@ def test_pending_terminal_reborn_again_keeps_key(monkeypatch, tmp_path):
         assert slot.binding.key == 'terminal_key' and slot.binding.meta['terminal']['pane'] == '%9'
         assert not slot.binding.meta.get('pending_terminal')
     asyncio.run(flow())
+
+
+# --- Riscos anotados no PR #43 e a troca pelo caminho Rust (dono único, Task 4) ---
+
+def test_reborn_terminal_with_other_conversation_does_not_inherit_key(monkeypatch, tmp_path):
+    owner, slot, life, born = _reborn_terminal(monkeypatch, tmp_path)
+    async def flow():
+        async def move():
+            life.update(proof='new-life', facts={**born, 'session_id': 'outra',
+                'jsonl': str(tmp_path / 'other-account' / 'outra.jsonl')})
+        await owner.change('session', move, reopen=False)
+        current = owner.slot('session')
+        assert current.binding.key != 'terminal_key' and current.binding.meta['session_id'] == 'outra'
+        assert current.store.state['rows'] == [], 'a fila da conversa antiga não vai para a nova'
+        assert 'terminal_key' not in owner.slots
+    asyncio.run(flow())
+
+
+def test_session_proof_survives_tmux_server_gone(monkeypatch):
+    from types import SimpleNamespace
+    from app import runtime_terminal as terminal, tmux
+    # O servidor tmux morreu entre o display-message e a leitura do processo dele.
+    monkeypatch.setattr(tmux, '_run', lambda args: SimpleNamespace(returncode=0,
+        stdout='/tmp/sock\t999999999\t5\tsession\t$1\t999999998\n'))
+    assert terminal._session_proof('session') is None
+    assert terminal._pane_life('session') is None
+    assert terminal.terminal_life(terminal_binding(Path('/tmp'))) is None
+
+
+def test_respawn_pane_in_same_tmux_session_keeps_key(monkeypatch, tmp_path):
+    owner, slot, life, born = _reborn_terminal(monkeypatch, tmp_path)
+    life['pane'] = 'pane-antigo'
+    async def flow():
+        async def respawn():
+            # `respawn-pane` na mesma sessão tmux: a prova da sessão fica, o pane é outro.
+            life.update(pane='pane-novo', facts={**born, 'session_proof': 'old-life'})
+        await owner.change('session', respawn, reopen=False)
+        assert slot.binding.key == 'terminal_key' and slot.binding.meta['terminal']['pane'] == '%7'
+        assert [row['text'] for row in slot.store.state['rows']] == ['carry']
+    asyncio.run(flow())
+
+
+def test_rust_account_move_reborn_terminal_reopens_with_key(monkeypatch, tmp_path):
+    from app import runtime_terminal as terminal
+    gateway = TerminalGateway()
+    owner, slot, collected = live_owner(monkeypatch, tmp_path, gateway=gateway)
+    facts = {'now': {**collected, 'session_proof': 'p1'}}
+    proof = {'now': 'p1'}
+    monkeypatch.setattr(terminal, '_collect', lambda name: {**facts['now'], 'name': name})
+    monkeypatch.setattr(terminal, '_session_proof', lambda name: proof['now'])
+    monkeypatch.setattr(terminal, '_pane_life', lambda name: None, raising=False)
+    slot.store.exec(1, 'append', {'monotonic_s': 1, 'epoch_s': .5},
+        {'kind': 'append', 'text': 'carry', 'delivered': False, 'ts': .5, 'pre_transcript': False, 'entry_id': 'carry'})
+    async def flow():
+        assert await owner.prepare_session('session', 'claude')
+        assert slot.phase == Phase.Rust
+        key = slot.binding.key
+        async def move():
+            assert gateway.calls[-1] == 'close' and gateway.lease is None
+            proof['now'] = 'p2'
+            facts['now'] = {**collected, 'pane': '%7', 'created': 456, 'namespace': 'mux-novo', 'session_proof': 'p2',
+                'jsonl': str(tmp_path / 'outra-conta' / 'sid.jsonl'), 'config_dir': str(tmp_path / 'outra-conta')}
+        await owner.change('session', move)
+        assert gateway.calls == ['open', 'snapshot', 'close', 'open']
+        assert slot.phase == Phase.Rust and slot.lease is None
+        assert slot.binding.key == key and slot.binding.generation == 2 and slot.binding.meta['terminal']['pane'] == '%7'
+        await owner.change('session', lambda: asyncio.sleep(0), remove=True)
+    asyncio.run(flow())
+    import json
+    state = json.loads(slot.binding.state_path.read_bytes())
+    assert [row['text'] for row in state['rows']] == ['carry']

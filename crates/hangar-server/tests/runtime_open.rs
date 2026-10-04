@@ -107,7 +107,7 @@ async fn open_runs_queue_recover() {
     }
     let (escuta,_,server) = cano(Duration::ZERO,None).await;
     let registry = registry().await;
-    registry.open(RuntimeTarget { binding:CanoBinding { escuta,..target.binding.clone() },..target.clone() },json!(null)).await.unwrap();
+    registry.open(RuntimeTarget { binding:CanoBinding { escuta,..target.binding.clone() },..target.clone() }).await.unwrap();
     let state:Value = serde_json::from_slice(&std::fs::read(&target.state_path).unwrap()).unwrap();
     assert_eq!(state["operations"]["op"]["status"],"unknown","entrada em despacho vira incerta ao abrir, antes de o ator olhar");
     registry.close("key",1).await.unwrap();
@@ -120,7 +120,7 @@ async fn open_answers_before_initialize() {
     let (escuta,users,server) = cano(Duration::from_secs(2),None).await;
     let registry = registry().await;
     let started = Instant::now();
-    let opened = registry.open(target(dir.path(),escuta,false),json!(null)).await.unwrap();
+    let opened = registry.open(target(dir.path(),escuta,false)).await.unwrap();
     assert!(started.elapsed() < Duration::from_millis(1500),"open esperou o initialize: {:?}",started.elapsed());
     assert_eq!(opened["opened"],true);
     let handle = registry.handle("key",1).await.unwrap();
@@ -146,7 +146,7 @@ async fn open_waits_for_lease_then_refuses() {
         let lease = acquire_lease(&target.lease_path).unwrap();
         let holder = tokio::spawn(async move { tokio::time::sleep(held).await; drop(lease); });
         let registry = registry().await;
-        match registry.open(target,json!(null)).await {
+        match registry.open(target).await {
             Ok(_)=>{ assert!(opens,"abriu com a trava presa por {held:?}"); registry.close("key",1).await.unwrap(); }
             Err(error)=>{ assert!(!opens,"recusou com a trava presa por {held:?}: {} {}",error.code,error.message); assert_eq!(error.code,"runtime_lease"); }
         }
@@ -161,7 +161,7 @@ async fn close_releases_lease() {
     let (escuta,_,server) = cano(Duration::ZERO,None).await;
     let target = target(dir.path(),escuta,true);
     let registry = registry().await;
-    registry.open(target.clone(),json!(null)).await.unwrap();
+    registry.open(target.clone()).await.unwrap();
     assert!(acquire_lease(&target.lease_path).is_err());
     assert_eq!(registry.close("key",1).await.unwrap()["closed"],true);
     assert!(acquire_lease(&target.lease_path).is_ok());
@@ -177,7 +177,7 @@ async fn reopen_of_initialized_cano_becomes_deliverable() {
     let init = json!({"type":"system","subtype":"init","session_id":"sid-1","model":"claude-haiku-4-5"}).to_string();
     let (escuta,users,server) = cano(Duration::ZERO,Some(&init)).await;
     let registry = registry().await;
-    registry.open(target(dir.path(),escuta,false),json!(null)).await.unwrap();
+    registry.open(target(dir.path(),escuta,false)).await.unwrap();
     let handle = registry.handle("key",1).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5),async {
         loop {
@@ -206,7 +206,7 @@ async fn failed_open_leaves_no_entry_and_frees_the_lease() {
     drop(closed);
     let target = target(dir.path(),escuta,true);
     let registry = registry().await;
-    assert_eq!(registry.open(target.clone(),json!(null)).await.unwrap_err().code,"cano_connect");
+    assert_eq!(registry.open(target.clone()).await.unwrap_err().code,"cano_connect");
     assert!(registry.handle("key",1).await.is_err());
     assert!(acquire_lease(&target.lease_path).is_ok(),"a trava sai junto com a falha");
 }

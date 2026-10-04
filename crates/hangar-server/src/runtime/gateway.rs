@@ -90,7 +90,7 @@ impl RuntimeRegistry {
     }
     /// Abre a sessão no Rust: trava, fila com `Recover`, conexão ao cano e ator. Responde sem
     /// esperar o `initialize`; o ator o faz e drena a fila quando a sessão fica entregável.
-    pub async fn open(&self,target:RuntimeTarget,carry:Value) -> Result<Value,RuntimeError> {
+    pub async fn open(&self,target:RuntimeTarget) -> Result<Value,RuntimeError> {
         let barrier = self.barrier(&target.key).await;
         let _guard = barrier.lock().await;
         let existing = self.entries.lock().await.get(&target.key).map(|entry|(entry.generation,entry.handle.clone()));
@@ -107,7 +107,6 @@ impl RuntimeRegistry {
                 for (key,value) in fields { if key != "public_state" { metadata[key] = value.clone(); } }
             }
         }
-        if let Some(fields) = carry["runtime_state"].as_object() { for (key,value) in fields { metadata[key] = value.clone(); } }
         let queue = QueueActor::start(store,lease);
         let connection = match cano::connect(&target.binding).await {
             Ok(connection)=>connection,
@@ -276,8 +275,7 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
     let command = &envelope.command;
     let kind = command["kind"].as_str().ok_or_else(||failure("command_kind"))?;
     let fields:&[&str] = match kind {
-        // `carry` é opcional e sai no contrato 15.
-        "open"=>&["kind","descriptor","carry"],
+        "open"=>&["kind","descriptor"],
         "submit"=>&["kind","text","steer","pre_transcript"],
         "control"=>&["kind","control","payload"],
         "queue"=>&["kind","action"],
@@ -291,7 +289,7 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
         return match descriptor(&command["descriptor"])? {
             Target::Headless(target)=>{
                 if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
-                registry.open(target,command["carry"].clone()).await
+                registry.open(target).await
             },
             Target::Terminal(target)=>{
                 if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}

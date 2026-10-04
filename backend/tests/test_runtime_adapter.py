@@ -368,31 +368,6 @@ def test_confirmed_prompt_does_not_consume_next_echo(tmp_path, monkeypatch, relo
         coordinator.close_python_leases()
 
 
-def test_codex_quiesce_preserves_async_questions(tmp_path, monkeypatch):
-    from app.runtime_adapter import LegacyBridge
-    from app.runtime_coordinator import Binding, RuntimeCoordinator
-    from app.adapters.codex.async_questions import AsyncQuestions
-    coordinator = RuntimeCoordinator()
-    monkeypatch.setattr(runtime_coordinator, "_current", coordinator)
-    slot = coordinator.register(Binding("session", "key", "codex", True, {"key":"key", "thread_id":"thread"},
-        str(tmp_path / "chat"), tmp_path / "projection", tmp_path / "state", tmp_path / "lease", 1))
-    questions = AsyncQuestions("thread")
-    questions.observe({"id":"question", "type":"agentMessage", "delivery":"async",
-        "questions":[{"title":"Qual opção?", "options":["A","B"]}]})
-    class Client:
-        tem_processo_proprio = False
-        async def close(self, **kwargs):
-            pass
-    adapter = SimpleNamespace(_sessions={"session":{"client":Client(), "thread_id":"thread", "async_questions":questions}},
-        _subscribers={}, _tmux_watchers={})
-    try:
-        carry = asyncio.run(LegacyBridge(coordinator, {"codex":adapter}).quiesce(slot.binding.descriptor()))
-        assert carry["runtime_state"]["async_questions"] == list(questions._pending.items())
-        assert carry["runtime_state"]["async_seen"] == sorted(questions._seen)
-    finally:
-        coordinator.close_python_leases()
-
-
 def test_later_rollout_path_rebinds_same_conversation(tmp_path, monkeypatch):
     from app.runtime_coordinator import Binding, RuntimeCoordinator, Phase
     target = Binding("session", "key", "codex", True, {"key":"key", "thread_id":"thread"}, "",

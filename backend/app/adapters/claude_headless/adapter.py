@@ -779,6 +779,13 @@ class ClaudeHeadlessAdapter:
             pid = ((sess.meta or {}).get("cano") or {}).get("pid")
             await self._encerrar(sess)
             _esquecer_cano(name, pid)
+        elif sess is None:
+            # Sem cliente aqui (o Rust fechou a sessão antes da ação): o processo sai pelo sidecar.
+            pid = ((hl_sessions.load(name) or {}).get("cano") or {}).get("pid")
+            if pid is not None:
+                if await asyncio.to_thread(pid_vivo, int(pid)):
+                    await asyncio.to_thread(_matar_grupo, int(pid), name)
+                _esquecer_cano(name, pid)
 
     async def _encerrar(self, sess: _Sessao) -> None:
         from app.runtime_adapter import assert_legacy

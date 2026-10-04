@@ -141,13 +141,18 @@ def _collect(name):
 
 def resolve_binding(name, previous=None):
     from app.pqueue import _queue_dir
-    facts = _collect(name)
+    import psutil
+    try:
+        facts = _collect(name)
+    except psutil.Error:
+        return None     # pane, agente ou servidor tmux saiu no meio da leitura: não há vida a provar
     if facts is None:
         return None
     fingerprint = hashlib.sha256(json.dumps([facts['namespace'], facts['pane'].split(':')[-1],
         facts['created'], facts.get('pane_birth')], ensure_ascii=False).encode()).hexdigest()
     same = previous is not None and (previous.meta.get('fingerprint') == fingerprint
         or previous.meta.get('pending_terminal') and previous.meta['pending_terminal'] == facts.get('session_proof')
+            and previous.meta.get('session_id') in (None, facts['session_id'])
         or previous.headless and previous.meta.get('session_id') == facts['session_id'])
     key = previous.key if same else 'terminal_' + fingerprint
     directory = _queue_dir()
@@ -920,8 +925,25 @@ def _session_proof(name):
     if cp.returncode or len(fields) != 5 or not fields[0] or not fields[1].isdigit() or not fields[2].isdigit() or fields[3] != name:
         return None
     import psutil
-    namespace = f'{fields[0]}:{int(fields[1])}:{psutil.Process(int(fields[1])).create_time()}'
+    try:
+        namespace = f'{fields[0]}:{int(fields[1])}:{psutil.Process(int(fields[1])).create_time()}'
+    except psutil.Error:
+        return None     # o servidor tmux saiu entre a pergunta e a leitura do processo dele
     return _session_hash(namespace, fields[4], int(fields[2]))
+
+
+def _pane_life(name):
+    """Nascimento do processo do pane ativo: `respawn-pane` troca o pane sem trocar a sessão tmux."""
+    from app import tmux
+    cp = tmux._run(['tmux','display-message','-p','-t',f'={name}:','#{pane_pid}'])
+    pid = cp.stdout.strip()
+    if cp.returncode or not pid.isdigit():
+        return None
+    import psutil
+    try:
+        return f'{pid}:{psutil.Process(int(pid)).create_time()}'
+    except psutil.Error:
+        return None
 
 
 def pending_binding(name, previous):
@@ -939,13 +961,15 @@ def terminal_life(binding):
     """Prova da vida do terminal de um vínculo Claude com pane, confirmado ou pendente."""
     if binding.provider != 'claude' or not (binding.meta.get('terminal') or binding.meta.get('pending_terminal')):
         return None
-    return _session_proof(binding.name)
+    proof = _session_proof(binding.name)
+    return None if proof is None else (proof, _pane_life(binding.name))
 
 
 def reborn_binding(name, previous, life_before):
-    """Terminal recriado dentro de uma troca: a vida muda, a sessão não, e a chave é da sessão."""
+    """Terminal recriado dentro de uma troca: a vida muda, a sessão não, e a chave é da sessão
+    quando o pane novo roda a mesma conversa (`resolve_binding` confere)."""
     pending = pending_binding(name, previous)
-    if pending is None or pending.meta['pending_terminal'] == life_before:
+    if pending is None or (pending.meta['pending_terminal'], _pane_life(name)) == life_before:
         return None
     # O pane antigo morreu com a vida antiga: nenhuma escrita pode mirar nele.
     pending.meta.pop('terminal', None)

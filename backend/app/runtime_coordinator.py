@@ -112,7 +112,7 @@ class Slot:
     lease: WriterLease | None = None
     store: runtime_queue.QueueStore | None = None
     view: dict = field(default_factory=dict)
-    carry: dict = field(default_factory=dict)
+    reserve_state: dict = field(default_factory=dict)   # vista salva que hidrata o cliente da reserva
     active: int = 0
     frozen: bool = False
     guard: threading.Lock = field(default_factory=threading.Lock)
@@ -122,6 +122,8 @@ class Slot:
     lifecycle_token: object | None = None
     terminal_serial: asyncio.Lock = field(default_factory=asyncio.Lock)
     awaiting_identity: bool = False
+    change: dict | None = None          # administração em curso: alvo, avanço, vida, pedido de subida
+    change_from_rust: bool = False      # fechada no Rust pela administração, ainda sem reabrir
 
 
 def _clock():
@@ -217,9 +219,8 @@ class RuntimeCoordinator:
                 # Registro Python sem cano vivo não tem cliente nenhum: a fila passa direto ao Rust.
                 # Com cano vivo ele tem (religado no boot) e segue pela adoção até a Task 5.
                 if slot is None and (launch or alive) or slot is not None and launch and not alive:
-                    if slot is not None:
-                        await self._release_python_slot(name, slot)
-                    await self._open_headless(name, binding, engine_models=engine_models, launch=launch)
+                    if slot is None or await self._release_python_slot(name, slot):
+                        await self._open_headless(name, binding, engine_models=engine_models, launch=launch)
                     return True
             if slot is None:
                 slot = await asyncio.to_thread(self.register, binding)
@@ -244,6 +245,7 @@ class RuntimeCoordinator:
                     return None
                 field = "session_id" if binding.provider == "claude" else "thread_id"
                 await self.change(name, changed, advance=bool(agent_changed) or binding.meta.get(field) != slot.binding.meta.get(field), reopen=False)
+                slot = self.slot(name)      # o pane renascido com outra conversa troca o registro
                 binding = slot.binding
             if slot.phase == Phase.Python:
                 with slot.guard:
@@ -279,6 +281,8 @@ class RuntimeCoordinator:
             raise RuntimeError("cliente Python ainda subindo nesta sessão; tente de novo")
         async with self.freeze(name):
             with slot.guard:
+                if slot.phase == Phase.Rust:
+                    return False        # uma administração que esperava a barreira já reabriu
                 if slot.active or slot.phase != Phase.Python:
                     raise RuntimeError("fila da sessão em uso no Python")
                 if slot.lease is not None:
@@ -286,24 +290,39 @@ class RuntimeCoordinator:
                 slot.lease, slot.store = None, None
         self.slots.pop(slot.binding.key, None)
         self.names.pop(name, None)
+        return True
 
     async def _open_headless(self, name, binding, *, engine_models=None, launch=True):
+        binding, ready = await self._launch_and_open(name, engine_models=engine_models, launch=launch)
+        slot = Slot(binding=copy.deepcopy(binding), phase=Phase.Rust, view=ready["state"], cache_valid=True)
+        runtime_queue.configure(self)
+        self.slots[binding.key], self.names[name] = slot, binding.key
+        self._signal(slot)
+        return slot
+
+    async def _launch_and_open(self, name, *, engine_models=None, launch=True):
+        """Sobe o processo do cano se preciso (nunca com o `pid` do sidecar vivo) e abre no Rust."""
         from app import diag
         from app.adapters.claude_headless.adapter import _SubidaEsgotada
+        from app.rust_server import RustOpError
         adapter = self.legacy.adapters["claude"]
-        launched = False
+        launched = sent = False
         try:
             cano, launched = await adapter.launch_process(name, engine_models=engine_models, launch=launch)
             binding = await asyncio.to_thread(self.legacy.binding, name, "claude")
             if binding is None or (binding.meta.get("cano") or {}).get("pid") != cano["pid"]:
                 raise RuntimeError("sidecar mudou durante a abertura da sessão")
-            descriptor = binding.descriptor()
+            descriptor, sent = binding.descriptor(), True
             ready = await self._rpc(descriptor, {"kind":"open", "descriptor":descriptor}, uuid.uuid4().hex)
-            if not (ready.get("opened") is True and isinstance(ready.get("state"), dict) and ready.get("instance") == self.instance
-                    and ready.get("key") == descriptor["key"] and ready.get("generation") == descriptor["generation"]):
-                raise RuntimeError("abertura não corresponde à vida atual")
+            self._check_opened(ready, descriptor)
         except Exception as exc:
             diag.registrar("runtime.open_failed", "erro", sessao=name, **failure_reason(exc))
+            if sent and not isinstance(exc, RustOpError):
+                # Resposta perdida ou recusada aqui: o Rust pode ter aberto, e ninguém o fecharia.
+                try:
+                    await self._rpc(descriptor, {"kind":"close"}, uuid.uuid4().hex)
+                except Exception as close_error:
+                    diag.registrar("runtime.detach_unconfirmed", "erro", sessao=name, **failure_reason(close_error))
             # Só o cano lançado agora e que o Rust não alcançou morre: um vivo de antes pode estar
             # no meio de um turno, e outro processo no mesmo .jsonl seria pior.
             if launched and getattr(exc, "code", "") in _CONNECT_CODES:
@@ -316,11 +335,7 @@ class RuntimeCoordinator:
                 adapter.open_failed(name, f"{code}: {exc}")
             raise
         adapter.open_succeeded(name)
-        slot = Slot(binding=copy.deepcopy(binding), phase=Phase.Rust, view=ready["state"], cache_valid=True)
-        runtime_queue.configure(self)
-        self.slots[binding.key], self.names[name] = slot, binding.key
-        self._signal(slot)
-        return slot
+        return binding, ready
 
     async def _await_initialized(self, slot, timeout=_INITIALIZE_WAIT_S):
         deadline = time.monotonic() + timeout
@@ -739,17 +754,15 @@ class RuntimeCoordinator:
             slot.store.ensure_projection()
 
     async def shutdown(self):
+        # O Rust sai com o backend e o sistema solta as travas dele; os canos seguem vivos. Do
+        # Python só se esperam as gravações da fila em curso antes de soltar as travas.
         for slot in tuple(self.slots.values()):
-            if self.names.get(slot.binding.name) != slot.binding.key:
+            if self.names.get(slot.binding.name) != slot.binding.key or slot.phase != Phase.Python:
                 continue
             async with self._barrier(slot):
                 with slot.guard:
                     slot.frozen = True
                 await self._wait_active(slot)
-                if slot.phase == Phase.Rust:
-                    await self.detach(slot.binding.name)
-                if self.legacy is not None:
-                    await self.legacy.quiesce(slot.binding.descriptor())
         self.close_python_leases()
 
     async def _wait_active(self, slot):
@@ -980,16 +993,15 @@ class RuntimeCoordinator:
             try:
                 if self.legacy is None:
                     raise RuntimeError("serviço da reserva indisponível")
-                slot.carry = await self.legacy.quiesce(descriptor)
+                await self.legacy.quiesce(descriptor)
                 await self._wait_active(slot)
-                json.dumps(slot.carry)
                 with slot.guard:
                     slot.store.exec(descriptor["generation"], "quiesce:" + uuid.uuid4().hex, _clock(), {"kind": "recover"})
                     slot.lease.close()
                     slot.lease = None
                     released = True
                 try:
-                    ready = await self._rpc(descriptor, {"kind": "open", "descriptor": descriptor, "carry": slot.carry}, uuid.uuid4().hex)
+                    ready = await self._rpc(descriptor, {"kind": "open", "descriptor": descriptor}, uuid.uuid4().hex)
                     if not (ready.get("opened") is True and ready.get("instance") == self.instance
                             and ready.get("key") == descriptor["key"] and ready.get("generation") == descriptor["generation"]):
                         raise RuntimeError("readiness não corresponde à vida atual")
@@ -1034,11 +1046,11 @@ class RuntimeCoordinator:
             runtime_queue.initial_state(slot.binding.key, slot.binding.generation, slot.binding.name, []))
         slot.store.exec(slot.binding.generation, "recover:" + uuid.uuid4().hex, _clock(), {"kind": "recover"})
         recovered_view = slot.store.state.get("runtime_state", {}).get("view") or {}
-        slot.carry = {"runtime_state":copy.deepcopy(recovered_view)} if recovered_view else slot.carry
+        slot.reserve_state = {"runtime_state":copy.deepcopy(recovered_view)} if recovered_view else slot.reserve_state
         if self.legacy is None:
             raise RuntimeError("serviço da reserva indisponível")
         try:
-            ready = await self.legacy.reconnect(slot.binding.descriptor(), slot.carry) if reconnect else {"hydrated":True}
+            ready = await self.legacy.reconnect(slot.binding.descriptor(), slot.reserve_state) if reconnect else {"hydrated":True}
             if ready.get("hydrated") is not True:
                 raise RuntimeError("reserva não restaurou o snapshot")
         except Exception as exc:
@@ -1121,7 +1133,7 @@ class RuntimeCoordinator:
         global _current
         for slot in self.slots.values():
             with slot.guard:
-                if slot.active:
+                if slot.active and slot.lease is not None:
                     raise RuntimeError("persistência ainda em curso; posse conservada")
                 if slot.lease is not None:
                     slot.lease.close()
@@ -1137,11 +1149,17 @@ class RuntimeCoordinator:
             if key is not None and self.slots[key].awaiting_identity:
                 self.names.pop(name, None)
 
-    async def change(self, name, action, *, new_name=None, advance=True, remove=False, reopen=True):
+    async def change(self, name, action, *, new_name=None, advance=True, remove=False, reopen=True, stopped=False):
+        """Administração da sessão. Do Rust: barreira → `close` (a trava e a fila voltam ao Python,
+        sem cliente no cano) → ação → nova vida gravada na fila → `open` no Rust, salvo `stopped`
+        ou sem processo para abrir. `reopen` só vale para o caminho Python."""
         if not self.managed_queue(name):
             return await action()
         slot = self.slot(name)
         if self.in_lifecycle(slot):
+            if slot.phase == Phase.Rust and slot.change is not None:
+                # Ação aninhada depois de reaberta (a volta atrás de uma troca de conta): fecha antes.
+                await self._close_for_change(name, slot)
             return await action()
         if remove and slot.awaiting_identity:
             # Registro em espera nunca teve posse nem dono no Rust: fechar só solta o nome.
@@ -1150,70 +1168,235 @@ class RuntimeCoordinator:
 
         async def perform():
             async with self.freeze(name):
-                if slot.phase != Phase.Python:
-                    await self.detach(name)
-                if remove and self.legacy is not None:
+                if self.slots.get(self.names.get(name, "")) is not slot:
+                    # Outro caminho trocou o registro enquanto esta esperava a barreira.
+                    raise RuntimeError("registro da sessão mudou durante a espera; tente de novo")
+                from_rust = slot.phase == Phase.Rust
+                if from_rust:
+                    await self._close_for_change(name, slot)
+                elif remove and self.legacy is not None:
                     # Fechar não escreve na conversa: basta esperar os escritores, mesmo com vínculo mudado.
                     await self.legacy.quiesce({**slot.binding.descriptor(), "removed":True})
-                from app.runtime_terminal import terminal_life, reborn_binding
-                life = None if remove else await asyncio.to_thread(terminal_life, slot.binding)
-                result = await action()
-                await self._wait_active(slot)
-                if remove:
-                    if self.legacy is not None:
-                        # Removida, a sessão não tem mais vínculo a conferir: só se esperam os escritores.
-                        await self.legacy.quiesce({**slot.binding.descriptor(), "removed":True})
-                    with slot.guard:
-                        slot.lease.close()
-                        slot.lease = None
-                        self.names.pop(slot.binding.name, None)
-                        self.slots.pop(slot.binding.key, None)
-                    return result
-                target_name = new_name or name
-                binding = await asyncio.to_thread(self.legacy.binding, target_name, slot.binding.provider)
-                if life is not None and (binding is None or binding.key != slot.binding.key):
-                    # Vida de terminal nascida com a sessão congelada é obra da ação: herda a chave.
-                    binding = await asyncio.to_thread(reborn_binding, target_name, slot.binding, life) or binding
-                if binding is None:
-                    from app.runtime_terminal import pending_binding
-                    binding = (await asyncio.to_thread(pending_binding, target_name, slot.binding)
-                        if slot.binding.provider == "claude" and slot.binding.headless else None)
-                    if binding is None:
-                        binding = copy.deepcopy(slot.binding)
-                        binding.name, binding.headless = target_name, False
-                        binding.meta = {**binding.meta, "headless":False, "cano":None}
-                if binding.key != slot.binding.key:
-                    raise RuntimeError("mudança de modo não pode trocar a chave durável")
-                if self.legacy is not None:
-                    await self.legacy.quiesce(binding.descriptor())
-                with slot.guard:
-                    if slot.store.state["name"] != target_name:
-                        slot.store.exec(slot.binding.generation, "rename:" + uuid.uuid4().hex, _clock(), {"kind":"rename", "name":target_name})
-                    # Só conversa nova esvazia a fila: a conta nova muda o caminho do transcript, não a conversa.
-                    if slot.binding.meta.get("terminal") and binding.meta.get("session_id") != slot.binding.meta.get("session_id"):
-                        slot.store.exec(slot.binding.generation, "clear:" + uuid.uuid4().hex, _clock(), {"kind":"clear"})
-                    binding.generation = slot.binding.generation + int(advance)
-                    if isinstance(binding.meta.get("terminal"), dict):
-                        binding.meta["terminal"]["generation"] = binding.generation
-                    state = copy.deepcopy(slot.store.state)
-                    if advance:
-                        state["runtime_state"] = {key:value for key,value in state["runtime_state"].items() if key == "terminal_write_barrier"}
-                    state["runtime_state"]["_binding"] = binding.descriptor()
-                    slot.store._persist(state)
-                self.register(binding)
-                slot.view, slot.cache_valid = {}, False
-                self._signal(slot)
-                return result
+                try:
+                    try:
+                        from app.runtime_terminal import terminal_life
+                        life = None if remove else await asyncio.to_thread(terminal_life, slot.binding)
+                        slot.change = {"target":new_name or name, "advance":advance, "life":life, "from_rust":from_rust, "relaunch":False}
+                        result = await action()
+                    except Exception:
+                        if slot.change_from_rust and slot.phase == Phase.Python and not remove:
+                            # A ação falhou com a sessão fechada no Rust: volta a ela na vida de antes.
+                            await self._reopen_after_change(name, slot, launch=False)
+                        raise
+                    await self._wait_active(slot)
+                    if remove:
+                        if self.legacy is not None and not from_rust:
+                            # Removida, a sessão não tem mais vínculo a conferir: só se esperam os escritores.
+                            await self.legacy.quiesce({**slot.binding.descriptor(), "removed":True})
+                        with slot.guard:
+                            slot.lease.close()
+                            slot.lease = None
+                            self.names.pop(slot.binding.name, None)
+                            self.slots.pop(slot.binding.key, None)
+                        return result, None
+                    if slot.phase == Phase.Rust:
+                        return result, None         # a ação já reabriu no Rust (troca de conta)
+                    relaunch = slot.change["relaunch"]
+                    try:
+                        current = await self._commit_change(name, slot)
+                    except Exception:
+                        if slot.change_from_rust and slot.phase == Phase.Python and self.slots.get(slot.binding.key) is slot:
+                            await self._reopen_after_change(name, slot, launch=False)
+                        raise
+                    if not current.change_from_rust:
+                        return result, current
+                    try:
+                        if not stopped:
+                            await self._reopen_after_change(current.binding.name, current, launch=relaunch)
+                    finally:
+                        current.change_from_rust = False
+                    return result, None
+                finally:
+                    slot.change, slot.change_from_rust = None, False
 
         task = asyncio.create_task(perform())
         try:
-            result = await asyncio.shield(task)
+            result, current = await asyncio.shield(task)
         except asyncio.CancelledError:
             await task
             raise
-        if reopen and not remove and self.managed_runtime(slot.binding.name):
-            await self.prepare_session(slot.binding.name, slot.binding.provider)
+        if reopen and not remove and current is not None and self.managed_runtime(current.binding.name):
+            await self.prepare_session(current.binding.name, current.binding.provider)
         return result
+
+    async def _close_for_change(self, name, slot):
+        """Fecha no Rust e devolve a trava e a fila ao Python sem cliente no cano. A vista do Rust,
+        relida agora, fica guardada: é ela que diz se a sessão estava ociosa (transferência)."""
+        try:
+            if not await self.refresh_snapshot(name):
+                slot.cache_valid = False
+        except Exception as exc:
+            slot.cache_valid = False        # quem lê a ociosidade recusa por estado desconhecido
+            from app import diag
+            diag.registrar("runtime.refresh_failed", "aviso", sessao=name, **failure_reason(exc))
+        await self.detach(name, restore=False)
+        slot.change_from_rust = True
+
+    async def _commit_change(self, name, slot):
+        """Grava a nova vida na fila (nome, conversa, geração) sob a trava do Python. Devolve o
+        registro que segue: o mesmo, ou um novo quando o pane renascido roda outra conversa."""
+        from app.runtime_terminal import reborn_binding, pending_binding
+        change = slot.change
+        target_name, advance, life = change["target"], change["advance"], change["life"]
+        binding = await asyncio.to_thread(self.legacy.binding, target_name, slot.binding.provider)
+        if life is not None and (binding is None or binding.key != slot.binding.key):
+            # Vida de terminal nascida com a sessão congelada é obra da ação: herda a chave.
+            binding = await asyncio.to_thread(reborn_binding, target_name, slot.binding, life) or binding
+        if binding is None:
+            binding = (await asyncio.to_thread(pending_binding, target_name, slot.binding)
+                if slot.binding.provider == "claude" and slot.binding.headless else None)
+            if binding is None:
+                binding = copy.deepcopy(slot.binding)
+                binding.name, binding.headless = target_name, False
+                binding.meta = {**binding.meta, "headless":False, "cano":None}
+        if binding.key != slot.binding.key:
+            if not (binding.meta.get("terminal") and binding.meta.get("session_id") != slot.binding.meta.get("session_id")):
+                raise RuntimeError("mudança de modo não pode trocar a chave durável")
+            # O pane novo roda outra conversa: a fila da antiga fica com ela, e o vínculo novo
+            # nasce com a fila da própria conversa.
+            with slot.guard:
+                slot.lease.close()
+                slot.lease, slot.store = None, None
+                if self.names.get(slot.binding.name) == slot.binding.key:
+                    self.names.pop(slot.binding.name, None)
+                self.slots.pop(slot.binding.key, None)
+            fresh = await asyncio.to_thread(self.register, binding)
+            fresh.change_from_rust = slot.change_from_rust
+            return fresh
+        if self.legacy is not None and not change["from_rust"]:
+            await self.legacy.quiesce(binding.descriptor())
+        with slot.guard:
+            if slot.store.state["name"] != target_name:
+                slot.store.exec(slot.binding.generation, "rename:" + uuid.uuid4().hex, _clock(), {"kind":"rename", "name":target_name})
+            # Só conversa nova esvazia a fila: a conta nova muda o caminho do transcript, não a conversa.
+            if slot.binding.meta.get("terminal") and binding.meta.get("session_id") != slot.binding.meta.get("session_id"):
+                slot.store.exec(slot.binding.generation, "clear:" + uuid.uuid4().hex, _clock(), {"kind":"clear"})
+            binding.generation = slot.binding.generation + int(advance)
+            if isinstance(binding.meta.get("terminal"), dict):
+                binding.meta["terminal"]["generation"] = binding.generation
+            state = copy.deepcopy(slot.store.state)
+            if advance:
+                state["runtime_state"] = {key:value for key,value in state["runtime_state"].items() if key == "terminal_write_barrier"}
+            state["runtime_state"]["_binding"] = binding.descriptor()
+            slot.store._persist(state)
+        self.register(binding)
+        slot.view, slot.cache_valid = {}, False
+        self._signal(slot)
+        return slot
+
+    async def _reopen_after_change(self, name, slot, *, launch, engine_models=None):
+        """Abre no Rust o que a administração deixou com o Python. Sem processo vivo e sem pedido
+        de subida, ou com o terminal ainda sem prova da conversa, fica o registro sem cliente."""
+        from app import diag
+        binding = slot.binding
+        if not binding.meta.get("terminal"):
+            if not self._born_in_rust(binding):
+                return
+            if name in self.legacy.adapters["claude"]._sessions:
+                # Cliente religado no boot: segue pela adoção até a Task 5.
+                diag.registrar("runtime.reopen_skipped", "aviso", sessao=name, codigo="python_client")
+                return
+            if not launch and not await asyncio.to_thread(_cano_alive, binding.meta):
+                # Processo parado: fica como sessão parada, e o próximo envio a sobe no Rust.
+                diag.registrar("runtime.reopen_skipped", "aviso", sessao=name, codigo="cano_parado")
+                return
+        try:
+            if binding.meta.get("terminal"):
+                from app.runtime_terminal import validate_binding
+                await asyncio.to_thread(validate_binding, binding.descriptor())
+            await self._open_slot_in_rust(name, slot, launch=launch, engine_models=engine_models)
+        except Exception as exc:
+            # A ação já aconteceu: ela não vira erro. A sessão fica no registro sem cliente, a
+            # falha na faixa (sem terminal) e no diário, e o próximo envio tenta abrir de novo
+            # (com terminal, a próxima operação recusa com o motivo).
+            diag.registrar("runtime.reopen_failed", "erro", sessao=name, etapa="change", **failure_reason(exc))
+
+    async def reopen_in_change(self, name, *, engine_models=None, wait_initialized=False):
+        """`ensure_running` dentro da barreira (troca de conta, restauração da transferência):
+        grava a vida nova e abre no Rust já, com a conta pedida e, se pedido, a espera do
+        `initialize`; a falha sobe para quem desfaz a troca."""
+        slot = self.slot(name)
+        if not self.in_lifecycle(slot):
+            raise RuntimeError("reabertura fora da barreira da sessão")
+        if slot.phase != Phase.Rust:
+            if slot.phase != Phase.Python or slot.lease is None:
+                raise RuntimeError("sessão sem registro para reabrir")
+            if name in self.legacy.adapters["claude"]._sessions:
+                raise RuntimeError("cliente Python ainda ligado nesta sessão")
+            if slot.change is not None:
+                slot = await self._commit_change(name, slot)
+            await self._open_slot_in_rust(slot.binding.name, slot, launch=True, engine_models=engine_models)
+        if wait_initialized:
+            await self._await_initialized(slot)
+        return slot
+
+    async def _open_slot_in_rust(self, name, slot, *, launch, engine_models=None):
+        """Solta a trava do Python e abre o registro no Rust; falhando, a trava volta ao Python."""
+        from app import diag
+        headless = not slot.binding.meta.get("terminal")
+        with slot.guard:
+            if slot.active or slot.phase != Phase.Python:
+                raise RuntimeError("fila da sessão em uso no Python")
+            lease, slot.lease, slot.store = slot.lease, None, None
+        if lease is not None:
+            lease.close()
+        try:
+            if headless:
+                binding, ready = await self._launch_and_open(name, engine_models=engine_models, launch=launch)
+                if binding.key != slot.binding.key:
+                    raise RuntimeError("sidecar mudou durante a abertura da sessão")
+            else:
+                binding = copy.deepcopy(slot.binding)
+                descriptor = binding.descriptor()
+                ready = await self._rpc(descriptor, {"kind":"open", "descriptor":descriptor}, uuid.uuid4().hex)
+                self._check_opened(ready, descriptor)
+        except Exception as exc:
+            if not headless:
+                diag.registrar("runtime.open_failed", "erro", sessao=name, **failure_reason(exc))
+            # O `open` pode ter chegado ao Rust (resposta perdida ou recusada aqui): fecha lá antes
+            # de a trava voltar ao Python, como a adoção; sem confirmação, quem decide é a trava.
+            try:
+                await self._rpc(slot.binding.descriptor(), {"kind":"close"}, uuid.uuid4().hex)
+            except Exception as close_error:
+                diag.registrar("runtime.detach_unconfirmed", "erro", sessao=name, **failure_reason(close_error))
+            try:
+                await self._restore(slot, reconnect=False)
+            except Exception as restore_error:
+                # A trava não voltou: o Rust ficou com a sessão. Ela fica com ele, de vista
+                # inválida, e a próxima operação relê o estado (ou reabre) lá.
+                diag.registrar("runtime.restore_failed", "erro", sessao=name, **failure_reason(restore_error))
+                with slot.guard:
+                    slot.phase, slot.cache_valid = Phase.Rust, False
+            raise
+        with slot.guard:
+            slot.binding = copy.deepcopy(binding)
+            slot.view, slot.cache_valid, slot.phase = ready["state"], True, Phase.Rust
+            slot.change_from_rust = False
+        self._signal(slot)
+
+    def _check_opened(self, ready, descriptor):
+        if not (ready.get("opened") is True and isinstance(ready.get("state"), dict) and ready.get("instance") == self.instance
+                and ready.get("key") == descriptor["key"] and ready.get("generation") == descriptor["generation"]):
+            raise RuntimeError("abertura não corresponde à vida atual")
+
+    def source_view(self, name):
+        """Vista do Rust da sessão aberta nele, ou guardada no `close` da administração em curso."""
+        slot = self.slots.get(self.names.get(name, ""))
+        if slot is None or not (slot.phase == Phase.Rust or slot.change_from_rust):
+            return None
+        if not slot.cache_valid or not isinstance((slot.view or {}).get("view"), dict):
+            raise RuntimeError("estado do runtime indisponível")
+        return copy.deepcopy(slot.view["view"])
 
     async def lifecycle_call(self, name, method, arguments):
         if self.legacy is None:
@@ -1226,8 +1409,9 @@ class RuntimeCoordinator:
             if inspect.iscoroutinefunction(original):
                 return await original(adapter, name, **params)
             return await asyncio.to_thread(original, adapter, name, **params)
+        stopped = method in {"close_sync", "parar"}
         return await self.change(name, action, new_name=params.get("new") if method == "rename" else None,
-            advance=method != "rename", remove=False, reopen=method not in {"close_sync", "parar"})
+            advance=method != "rename", remove=False, reopen=not stopped, stopped=stopped)
 
     @staticmethod
     async def _peek(descriptor):
