@@ -38,6 +38,6 @@
   }
   header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
   .title { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .close { font: inherit; color: var(--text-muted); background: transparent; border: 0; cursor: pointer; padding: 0 0.5ch; }
+  .close { font: inherit; color: var(--text-muted); background: transparent; border: 0; cursor: pointer; padding: 0 0.5ch; min-height: 0; min-width: 0; }
   .body { position: relative; max-height: 40vh; overflow-y: auto; overflow-x: hidden; }
 </style>

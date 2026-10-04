@@ -610,3 +610,14 @@ def test_opened_so_aceita_http():
         assert c.post("/api/plugin/opened", json=_ponte("pane-g", url="https://x.exemplo")).status_code == 200
     finally:
         pb.esquecer("pane-g")
+
+
+def test_ancora_da_faixa_considera_o_rotulo_do_botao():
+    # Faixa que começa por botão: o rótulo é a primeira linha desenhada, não o texto que vem depois.
+    try:
+        pb._guardar_faixa("ancora", {"type": "Box", "children": [
+            {"type": "Button", "props": {"key": "a", "label": "[ abrir sonda ]"}},
+            {"type": "Text", "children": [" Promedico"]}]}, 80, [])
+        assert pb.band_anchor("ancora") == "[ abrir sonda ]"
+    finally:
+        pb.esquecer("ancora")

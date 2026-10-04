@@ -519,6 +519,11 @@ def band_anchor(name: str) -> str | None:
                 return texto[:_ANCHOR_CHARS]
         elif isinstance(no, dict):
             pilha.extend(reversed(no.get("children") or []))
+            # Botão e link desenham o `label` antes dos filhos: uma faixa que começa por botão
+            # começa por ele.
+            rotulo = (no.get("props") or {}).get("label")
+            if isinstance(rotulo, str):
+                pilha.append(rotulo)
     return None
 
 # Depois disso a leitura do pane volta a mandar sozinha. O plugin não repete estado — ele avisa

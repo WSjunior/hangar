@@ -7,6 +7,11 @@ import { bandBody, type PaneEntry } from "./uiPayload";
 const SEND_DELAY_MS = 500;
 // Um Raster cheio passa de 1 MB; acima disto saem os painéis e depois a faixa.
 const MAX_BODY_CHARS = 256 * 1024;
+// O backend guarda a faixa só na memória: reiniciado, ele só a recebe de novo num redesenho. Sem
+// isto, a faixa que não muda ficava fora do app até mudar.
+const RESEND_MS = 30_000;
+// Sem ponte (sessão recém-aberta, ou o backend recusou a instância), a faixa espera por ela.
+const BRIDGE_RETRY_MS = 2_000;
 
 let above: unknown = null;
 let columns: number | null = null;
@@ -17,10 +22,15 @@ let scheduled = false;
 
 // Mesmo motivo do state.ts: `$` não atravessa import, então o envio é local.
 async function flush($: EngineInterface) {
+  const p = bridge();
+  if (!p) {
+    // Desistir aqui perdia a faixa de vez: com a sessão parada, nada a redesenha depois.
+    $.clock.after(BRIDGE_RETRY_MS, () => void flush($));
+    return;
+  }
   scheduled = false;
   const body = latest;
-  const p = bridge();
-  if (body === null || body === sent || !p) return;
+  if (body === null || body === sent) return;
   sent = body;
   try {
     const r = await $.http.fetch(`${p.url}/ui`, {
@@ -29,6 +39,7 @@ async function flush($: EngineInterface) {
       body: `{"sessao":${JSON.stringify(p.sessao)},"token":${JSON.stringify(p.token)},${body}}`,
     });
     if (r.status !== 200) sent = null;
+    else $.clock.after(RESEND_MS, () => { if (sent === body) sent = null; });
   } catch {
     // Backend fora do ar: o próximo redesenho tenta de novo.
     sent = null;

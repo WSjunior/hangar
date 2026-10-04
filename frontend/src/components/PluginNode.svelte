@@ -89,7 +89,9 @@
   .md.dim { opacity: 0.6; }
   .code { margin: 0; white-space: pre-wrap; }
   .button { font: inherit; color: inherit; border: 0; padding: 0 1ch; border-radius: var(--radius-sm); background: var(--surface-inset); }
-  button.button { cursor: pointer; }
+  /* O botão do app tem 44 px de área de toque e centraliza o texto; aqui ele é uma célula do
+     terminal, na mesma linha dos textos ao lado. */
+  button.button { cursor: pointer; min-height: 0; min-width: 0; display: inline-block; line-height: inherit; text-align: inherit; }
   button.button:hover { background: var(--surface-raised); }
   /* `plain` sai como no terminal: texto, sem pílula. */
   .button.plain { padding: 0; background: transparent; }
