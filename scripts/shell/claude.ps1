@@ -20,12 +20,29 @@ function claude {
     $pre = @()
     if ($env:CP_ENGINE) { $pre = @('hangar-engine', '--exec', $env:CP_ENGINE, '--') }
 
+    $modoPrint = $false
+    foreach ($a in $args) { if ($a -eq '-p' -or $a -eq '--print') { $modoPrint = $true } }
+
+    # Plugin do Hangar por --plugin-dir, igual as sessoes que o backend abre: so assim ele fica por
+    # fora dos plugins do marketplace e espelha no app a faixa que os mods desenham. O caminho vem
+    # do arquivo que o backend grava (este wrapper nao sabe onde o repositorio mora); o backend so
+    # o grava quando o claude aceita a flag. Modo -p nao tem faixa e segue como estava.
+    $plug = @()
+    $plugFile = Join-Path $HOME '.hangar\plugin-dir'
+    if (-not $modoPrint -and (Test-Path -LiteralPath $plugFile -PathType Leaf)) {
+        $plugDir = [string](Get-Content -LiteralPath $plugFile -TotalCount 1 -Encoding UTF8)
+        $plugDir = $plugDir.Trim()
+        if ($plugDir -and (Test-Path -LiteralPath $plugDir -PathType Container)) {
+            $plug = @('--plugin-dir', $plugDir)
+        }
+    }
+
     # Ja veio com id/retomada explicita? Nao inventa outro - repassa como esta. Injetar um
     # --session-id por cima de um --resume abriria uma conversa NOVA no lugar da pedida.
     foreach ($a in $args) {
         if ($a -match '^(--session-id|--resume)(=|$)' -or $a -eq '-c' -or $a -eq '--continue') {
-            if ($pre.Count -eq 0) { & $claudeExe @args }
-            else { $r = @($pre[1..($pre.Count - 1)]) + @('claude') + $args; & $pre[0] @r }
+            if ($pre.Count -eq 0) { & $claudeExe @plug @args }
+            else { $r = @($pre[1..($pre.Count - 1)]) + @('claude') + $plug + $args; & $pre[0] @r }
             return
         }
     }
@@ -34,8 +51,6 @@ function claude {
 
     # So injeta o id (sem criar sessao) quando: ja estamos dentro do multiplexador, modo -p, ou
     # a entrada nao e um terminal (pipe/redirecionamento) - nesses casos criar sessao atrapalha.
-    $modoPrint = $false
-    foreach ($a in $args) { if ($a -eq '-p' -or $a -eq '--print') { $modoPrint = $true } }
 
     if ($env:TMUX -and $env:TMUX_PANE) {
         # TMUX herdado pode estar MORTO (terminal reaproveitado de um pane que ja fechou).
@@ -46,8 +61,8 @@ function claude {
 
     if ($env:TMUX -or $modoPrint -or [Console]::IsInputRedirected) {
         $env:COLORTERM = 'truecolor'; $env:CLAUDE_CODE_TMUX_TRUECOLOR = '1'
-        if ($pre.Count -eq 0) { & $claudeExe --session-id $id @args }
-        else { $r = @($pre[1..($pre.Count - 1)]) + @('claude', '--session-id', $id) + $args
+        if ($pre.Count -eq 0) { & $claudeExe --session-id $id @plug @args }
+        else { $r = @($pre[1..($pre.Count - 1)]) + @('claude', '--session-id', $id) + $plug + $args
                & $pre[0] @r }
         return
     }
@@ -98,7 +113,7 @@ function claude {
     $cmd = @('tmux', 'new-session', '-s', $nome, '-c', (Get-Location).Path,
              '-e', 'COLORTERM=truecolor', '-e', 'CLAUDE_CODE_TMUX_TRUECOLOR=1',
              '-e', "CP_SESSION_NAME=$nome") +
-           $cfg + $pre + @('claude', '--session-id', $id) + $args
+           $cfg + $pre + @('claude', '--session-id', $id) + $plug + $args
     $r = @($cmd[1..($cmd.Count - 1)])
     & $cmd[0] @r
 }
