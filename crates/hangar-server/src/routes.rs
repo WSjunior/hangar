@@ -131,7 +131,7 @@ async fn fetch_info(http: &HttpClient, upstream: SocketAddr, secret: &str, name:
 fn route_failed(st: &AppState, req: &HeaderMap, event: &'static str, name: &str, code: &'static str, reason: &'static str) -> Response {
     st.diag.report(event, name, code, reason);
     let body = serde_json::json!({"ok": false, "error_code": code, "message": reason,
-        "detail": {"code": code, "msg": format!("{reason} — {code}")}}).to_string();
+        "detail": {"code": code, "params": {"motivo": reason}, "msg": format!("{reason} — {code}")}}).to_string();
     let mut resp = (StatusCode::SERVICE_UNAVAILABLE, [(header::CONTENT_TYPE, "application/json")], body).into_response();
     cors(req, resp.headers_mut());
     resp

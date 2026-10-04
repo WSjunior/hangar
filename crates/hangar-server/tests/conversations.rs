@@ -368,6 +368,7 @@ async fn assert_503(r: reqwest::Response, code: &str) {
     assert_eq!(body["detail"]["code"], code);
     let message = body["message"].as_str().unwrap();
     assert!(!message.is_empty());
+    assert_eq!(body["detail"]["params"]["motivo"], message, "mesmo envelope do Git/arquivos");
     assert!(body["detail"]["msg"].as_str().unwrap().contains(code), "a tela mostra o código: {body}");
 }
 

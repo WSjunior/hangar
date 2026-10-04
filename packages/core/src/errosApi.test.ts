@@ -12,3 +12,13 @@ describe('Git/arquivos recusado pelo Rust', () => {
     }
   });
 });
+
+describe('histórico recusado pelo Rust', () => {
+  it('traduz os três códigos e mantém o código na frase', () => {
+    for (const code of ['internal_info', 'history_io', 'history_panic']) {
+      const texto = formataErro({ code, params: { motivo: 'frase em português' }, msg: 'x' });
+      expect(texto).toContain(code);
+      expect(texto).not.toBe('x');
+    }
+  });
+});
