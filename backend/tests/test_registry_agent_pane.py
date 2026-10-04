@@ -43,9 +43,10 @@ def _segunda_janela(nome, cwd):
     # pane cada, as DUAS saem active=1 (o tmux nunca desmarca a janela 0) e o `list-panes -a` lista a
     # janela 0 primeiro, entao o pane do agente ganhava por acidente de ordenacao mesmo SEM a
     # correcao desta task (achado C1 da revisao: o teste passava com o codigo antigo). split-window
-    # cria um 2o PANE na MESMA janela (:0) e so ai o tmux desmarca active no pane original -- o
-    # cenario que reproduz o bug de verdade.
-    subprocess.run(["tmux", "split-window", "-t", f"={nome}:0", "-c", cwd, "sleep 600"], check=True)
+    # cria um 2o PANE na MESMA janela e so ai o tmux desmarca active no pane original -- o
+    # cenario que reproduz o bug de verdade. O alvo é a sessão (`=nome:`), não a janela 0: com
+    # `base-index 1` no tmux.conf de quem roda, a janela 0 não existe.
+    subprocess.run(["tmux", "split-window", "-t", f"={nome}:", "-c", cwd, "sleep 600"], check=True)
 
 
 def test_list_resolve_pelo_pane_do_agente_com_janela_extra(sessao, tmp_path, monkeypatch):
@@ -117,7 +118,7 @@ def test_list_nao_faz_fork_por_sessao(tmp_path, monkeypatch):
     try:
         subprocess.run(["tmux", "-L", sock, "new-session", "-d", "-s", a, "-c", str(cwd_a),
                         "-x", "200", "-y", "50", "sleep 600"], check=True)
-        subprocess.run(["tmux", "-L", sock, "split-window", "-t", f"={a}:0", "-c", str(cwd_a),
+        subprocess.run(["tmux", "-L", sock, "split-window", "-t", f"={a}:", "-c", str(cwd_a),
                         "sleep 600"], check=True)
         subprocess.run(["tmux", "-L", sock, "new-session", "-d", "-s", b, "-c", str(cwd_b),
                         "-x", "200", "-y", "50", "sleep 600"], check=True)
