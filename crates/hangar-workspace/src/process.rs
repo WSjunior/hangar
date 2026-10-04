@@ -110,6 +110,7 @@ pub fn run_program(command: &mut Command, timeout: Duration) -> Result<Output> {
         }
         std::thread::sleep(Duration::from_millis(1));
     };
+    guard.disarm();
     Ok(Output {
         code: status.code().unwrap_or(-1),
         stdout: stdout.unwrap(),
@@ -182,5 +183,18 @@ mod tests {
         );
         assert_eq!(result.err().unwrap().status, 504);
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn background_job_left_by_a_finished_command_keeps_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let mark = dir.path().join("hook-done");
+        let script = format!(
+            "(sleep 0.3; touch '{}') </dev/null >/dev/null 2>&1 &",
+            mark.display()
+        );
+        run_program(Command::new("sh").args(["-c", &script]), Duration::from_secs(5)).unwrap();
+        std::thread::sleep(Duration::from_millis(900));
+        assert!(mark.exists());
     }
 }

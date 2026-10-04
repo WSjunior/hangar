@@ -4,6 +4,7 @@ use std::process::{Child, Command};
 #[cfg(unix)]
 pub struct Guard {
     monitor: Child,
+    armed: bool,
 }
 
 #[cfg(unix)]
@@ -19,7 +20,10 @@ impl Guard {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()?;
-        Ok(Self { monitor })
+        Ok(Self {
+            monitor,
+            armed: true,
+        })
     }
     pub fn configure(&self, command: &mut Command) {
         use std::os::unix::process::CommandExt;
@@ -33,11 +37,21 @@ impl Guard {
             libc::kill(-(self.monitor.id() as i32), libc::SIGKILL);
         }
     }
+    /// Comando terminou: o que ele deixou em segundo plano (hook) segue vivo, como no Python.
+    pub fn disarm(mut self) {
+        use std::io::Write;
+        if let Some(mut stdin) = self.monitor.stdin.take() {
+            self.armed = stdin.write_all(b"\n").is_err();
+        }
+    }
 }
 #[cfg(unix)]
 impl Drop for Guard {
     fn drop(&mut self) {
-        self.kill();
+        if self.armed {
+            self.kill();
+        }
+        drop(self.monitor.stdin.take());
         let _ = self.monitor.wait();
     }
 }
@@ -45,6 +59,7 @@ impl Drop for Guard {
 #[cfg(windows)]
 pub struct Guard {
     job: windows_sys::Win32::Foundation::HANDLE,
+    armed: bool,
 }
 
 #[cfg(windows)]
@@ -69,7 +84,7 @@ impl Guard {
                 CloseHandle(job);
                 return Err(error);
             }
-            Ok(Self { job })
+            Ok(Self { job, armed: true })
         }
     }
     pub fn configure(&self, command: &mut Command) {
@@ -121,11 +136,26 @@ impl Guard {
             windows_sys::Win32::System::JobObjects::TerminateJobObject(self.job, 1);
         }
     }
+    /// Comando terminou: o que ele deixou em segundo plano (hook) segue vivo, como no Python.
+    pub fn disarm(mut self) {
+        use windows_sys::Win32::System::JobObjects::*;
+        unsafe {
+            let info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            self.armed = SetInformationJobObject(
+                self.job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const std::ffi::c_void,
+                std::mem::size_of_val(&info) as u32,
+            ) == 0;
+        }
+    }
 }
 #[cfg(windows)]
 impl Drop for Guard {
     fn drop(&mut self) {
-        self.kill();
+        if self.armed {
+            self.kill();
+        }
         unsafe {
             windows_sys::Win32::Foundation::CloseHandle(self.job);
         }
