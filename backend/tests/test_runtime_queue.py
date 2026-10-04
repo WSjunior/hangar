@@ -592,3 +592,36 @@ if __name__ == "__main__":
         FIXTURE.parent.mkdir(parents=True, exist_ok=True)
         FIXTURE.write_text(json.dumps({"steps": _parity_steps(), "fill": PARITY_FILL, "results": results,
                                        "final": store.state}, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+
+
+def test_queue_read_during_hand_over_uses_projection(tmp_path, monkeypatch):
+    # Na adoção pelo Rust o `follow` do chat relia a fila e recebia "sessão em transferência": o
+    # SSE fechava. Leitura usa a projeção; escrita continua recusada.
+    from contextlib import contextmanager
+    from app import runtime_queue
+    from app.pqueue import PromptQueue
+    from app.runtime_coordinator import TransferInProgress
+    store = open_store(tmp_path)
+    monkeypatch.setattr("app.pqueue._queue_dir", lambda: store.projection_dir)
+    moving = {"on": False}
+
+    class Coordinator:
+        @contextmanager
+        def queue_gate(self, name):
+            if moving["on"]:
+                raise TransferInProgress("sessão em transferência; aguarde a posse ser confirmada")
+            yield store
+
+        def queue_rpc(self, route, call_id, clock, action):
+            return route.exec(1, call_id, clock, action)
+
+    runtime_queue.configure(Coordinator())
+    try:
+        queue = PromptQueue("session")
+        row = queue.append("Antes da passagem")
+        moving["on"] = True
+        assert queue.load() == [row]
+        with pytest.raises(TransferInProgress):
+            queue.append("Durante a passagem")
+    finally:
+        runtime_queue.configure(None)

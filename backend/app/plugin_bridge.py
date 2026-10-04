@@ -46,6 +46,29 @@ ESPERA_S = 25.0
 _lock = threading.Lock()
 _waiters: dict[str, asyncio.Queue] = {}
 _loop: asyncio.AbstractEventLoop | None = None
+# Backend parando: o uvicorn espera cada pedido aberto antes do lifespan, e uma espera de 25 s
+# passava do teto do systemd (SIGKILL). As esperas respondem vazio, como na janela que fecha.
+_stopping = False
+_STOP = object()
+
+
+def stop_waits() -> None:
+    """Chamado do tratador de sinal: só agenda, porque o sinal pode chegar com `_lock` tomado."""
+    loop = _loop
+    if loop is not None:
+        try:
+            loop.call_soon_threadsafe(_release_waits)
+        except RuntimeError:
+            pass        # loop já fechado: não há espera viva
+
+
+def _release_waits() -> None:
+    global _stopping
+    with _lock:
+        _stopping = True
+        queues = [*_waiters.values(), *(p["fila"] for p in _perguntas.values() if p.get("fila"))]
+    for queue in queues:
+        queue.put_nowait(_STOP)
 
 # Dono do long-poll por sessão: (instância, modos declarados, última batida). Um segundo `claude` com
 # o mesmo nome ou pane não pode tomar a fila do primeiro.
@@ -990,9 +1013,9 @@ async def pull(body: PullBody):
         _batidas[body.sessao] = time.monotonic()
     # `faixa`: o backend tem a faixa dos mods desta sessão? Reiniciado, não tem, e o plugin reenvia.
     try:
-        entrega = await asyncio.wait_for(fila.get(), timeout=ESPERA_S)
+        entrega = _STOP if _stopping else await asyncio.wait_for(fila.get(), timeout=ESPERA_S)
     except asyncio.TimeoutError:
-        return {"text": None, "faixa": body.sessao in _bands}
+        entrega = _STOP
     finally:
         with _lock:
             # Só renova o próprio dono: um `esquecer` ou outra instância no meio não é desfeito.
@@ -1002,6 +1025,8 @@ async def pull(body: PullBody):
             _batidas[body.sessao] = time.monotonic()
             if _waiters.get(body.sessao) is fila:
                 del _waiters[body.sessao]
+    if entrega is _STOP:
+        return {"text": None, "faixa": body.sessao in _bands}
     return {**entrega, "faixa": body.sessao in _bands}
 
 
@@ -1224,7 +1249,8 @@ async def ask(body: AskBody):
         return guardada
     espera = min(ESPERA_S, body.janela_ms / 1000) if body.janela_ms else ESPERA_S
     try:
-        return await asyncio.wait_for(fila.get(), timeout=espera)
+        resposta = _STOP if _stopping else await asyncio.wait_for(fila.get(), timeout=espera)
+        return {"answers": None} if resposta is _STOP else resposta
     except asyncio.TimeoutError:
         return {"answers": None}
     finally:

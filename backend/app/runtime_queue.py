@@ -668,26 +668,34 @@ def apply_action(state, action, clock, call_id):
 def route_queue(queue, method: str, args: dict):
     if _coordinator is None or getattr(queue, "routing_disabled", False):
         return False, None
-    with _coordinator.queue_gate(queue.name) as route:
-        if route is None:
-            return False, None
-        kind = {"append_saida_local": "append_local", "claim_undelivered": "claim", "desistir": "abandon",
-                "prune_before": "prune", "reconcile_delivered": "reconcile", "confirm_delivered": "confirm",
-                "rename": "rename", "_write_atomic": "replace_rows"}.get(method, method)
-        payload = dict(args)
-        if kind in {"append", "append_local"}:
-            payload["entry_id"] = uuid.uuid4().hex
-        if kind == "confirm":
-            rows = _coordinator.queue_rpc(route, uuid.uuid4().hex, _clock(), {"kind": "load"})
-            predicate = payload.pop("apenas", None)
-            payload["entry_ids"] = [r["id"] for r in rows if predicate is None or predicate(r)]
-        if kind == "rename":
-            payload["name"] = payload.pop("new_name")
-        for key in ("committed", "na_fila_tui"):
-            if key in payload:
-                payload[key] = sorted(payload[key])
-        result = _coordinator.queue_rpc(route, uuid.uuid4().hex, _clock(), {"kind": kind, **payload})
-        return True, result
+    from app.runtime_coordinator import TransferInProgress
+    try:
+        with _coordinator.queue_gate(queue.name) as route:
+            if route is None:
+                return False, None
+            kind = {"append_saida_local": "append_local", "claim_undelivered": "claim", "desistir": "abandon",
+                    "prune_before": "prune", "reconcile_delivered": "reconcile", "confirm_delivered": "confirm",
+                    "rename": "rename", "_write_atomic": "replace_rows"}.get(method, method)
+            payload = dict(args)
+            if kind in {"append", "append_local"}:
+                payload["entry_id"] = uuid.uuid4().hex
+            if kind == "confirm":
+                rows = _coordinator.queue_rpc(route, uuid.uuid4().hex, _clock(), {"kind": "load"})
+                predicate = payload.pop("apenas", None)
+                payload["entry_ids"] = [r["id"] for r in rows if predicate is None or predicate(r)]
+            if kind == "rename":
+                payload["name"] = payload.pop("new_name")
+            for key in ("committed", "na_fila_tui"):
+                if key in payload:
+                    payload[key] = sorted(payload[key])
+            result = _coordinator.queue_rpc(route, uuid.uuid4().hex, _clock(), {"kind": kind, **payload})
+            return True, result
+    except TransferInProgress:
+        if method != "load":
+            raise
+        # Na passagem ninguém grava, e a projeção em disco é a última gravação dos dois donos:
+        # ler dela evita que o chat aberto (follow da fila) caia por causa da troca interna.
+        return False, None
 
 
 def _clock():
