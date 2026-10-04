@@ -144,7 +144,7 @@ Job Windows real e executar o hook TypeScript com Node 24 no CI.
 O contrato do cano continua somente Linux; nenhuma suíte Python inteira é adicionada à matriz.
 **Interfaces:** entrega da branch própria à sessão `Migracao-Rust`.
 
-- [ ] **Step 1: Rodar verificações finais autorizadas**
+- [x] **Step 1: Rodar verificações finais autorizadas**
 
 Em `crates/`: `cargo test --locked --workspace` e
 `cargo check --locked --target x86_64-pc-windows-gnu -p hangar-server --tests`.

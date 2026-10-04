@@ -59,15 +59,57 @@ impl Fixture {
         Self {_dir:dir,target,policy:PolicyClient::new(address,"test".into(),"instance".into()),io,idle,ready,generation,native,control,unknown,calls,server}
     }
     fn start(&self)->hangar_server::runtime::terminal::TerminalHandle {
+        self.start_with_events(broadcast::channel(128).0)
+    }
+    fn start_with_events(&self,events:broadcast::Sender<hangar_server::runtime::protocol::RuntimeEvent>)->hangar_server::runtime::terminal::TerminalHandle {
         let lease=queue::acquire_lease(&self.target.lease_path).unwrap();
         let store=Store::open(&self.target.state_path,&self.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
         let options=TerminalOptions {io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15)};
-        TerminalActor::spawn(self.target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)))
+        TerminalActor::spawn(self.target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,events,Arc::new(AtomicU64::new(0)))
     }
     fn command(&self,id:&str,text:&str)->RuntimeCommand { RuntimeCommand {operation_id:id.into(),kind:OperationKind::Input,payload:json!({"text":text,"pre_transcript":false})} }
     fn state(&self)->Value {serde_json::from_slice(&std::fs::read(&self.target.state_path).unwrap()).unwrap()}
 }
 impl Drop for Fixture {fn drop(&mut self){self.server.abort();}}
+
+#[tokio::test]
+async fn terminal_runtime_maintenance_failure_publishes_problem_and_stops_uncoordinated_retry() {
+    let f=Fixture::new().await;
+    let (events,mut receiver)=broadcast::channel(128); let h=f.start_with_events(events);
+    h.command(f.command("accepted","Olá")).await.unwrap();
+    std::fs::remove_file(&f.target.transcript).unwrap();
+    std::fs::create_dir(&f.target.transcript).unwrap();
+    let problem=tokio::time::timeout(Duration::from_secs(2),async {
+        loop {let event=receiver.recv().await.unwrap();if event.channel=="problem"{break event;}}
+    }).await.unwrap();
+    assert_eq!(problem.data["error_code"],"receipt_scan");
+    assert_eq!(h.snapshot().await.unwrap()["error"],"receipt_scan");
+    let count=f.state()["operations"].as_object().unwrap().len();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert_eq!(f.state()["operations"].as_object().unwrap().len(),count);
+    std::fs::remove_dir(&f.target.transcript).unwrap();
+    std::fs::write(&f.target.transcript,"").unwrap();
+    h.confirm().await.unwrap();
+    assert!(h.snapshot().await.unwrap()["error"].is_null());
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_runtime_unknown_delivery_is_signaled_without_retyping() {
+    let f=Fixture::new().await; f.unknown.store(true,std::sync::atomic::Ordering::Release);
+    let (events,mut receiver)=broadcast::channel(128); let h=f.start_with_events(events);
+    let command=f.command("unknown","Olá");
+    assert_eq!(h.command(command.clone()).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Unknown);
+    let problem=tokio::time::timeout(Duration::from_secs(2),async {
+        loop {let event=receiver.recv().await.unwrap();if event.channel=="problem"{break event;}}
+    }).await.unwrap();
+    assert_eq!(problem.data["error_code"],"terminal_delivery_unknown");
+    assert_eq!(h.snapshot().await.unwrap()["error"],"terminal_delivery_unknown");
+    let calls=f.io.calls.lock().unwrap().len();
+    h.command(command).await.unwrap(); tokio::time::sleep(Duration::from_millis(60)).await;
+    assert_eq!(f.io.calls.lock().unwrap().len(),calls);
+    h.stop().await.unwrap();
+}
 
 #[tokio::test]
 async fn terminal_runtime_repeat_id_does_not_write_twice_and_conflicting_payload_fails() {

@@ -559,21 +559,38 @@ def apply_event(slot, event):
     cached = slot.view
     previous = cached.get("revision", -1)
     channel, data, revision = event["channel"], event["data"], event["revision"]
+    terminal = slot.binding.meta.get("terminal")
     if channel == "snapshot":
         if (not isinstance(data, dict) or data.get("key") != slot.binding.key
                 or data.get("generation") != slot.binding.generation or data.get("revision") != revision
                 or not isinstance(data.get("view"), dict) or not isinstance(data.get("channels"), dict)):
             return False
-        try:
-            StateEvent.model_validate(data["view"]["public_state"])
-        except (KeyError, ValueError):
-            return False
+        if terminal:
+            view = data["view"]
+            if (view.get("terminal") is not True or view.get("conversation") != terminal["conversation"]
+                    or type(view.get("deliverable")) is not bool or "public_state" in view
+                    or data["channels"] or data.get("error") is not None and not isinstance(data["error"], str)):
+                return False
+        else:
+            try:
+                StateEvent.model_validate(data["view"]["public_state"])
+            except (KeyError, ValueError):
+                return False
         if revision < previous:
             return True
         slot.view = copy.deepcopy(data)
         slot.cache_valid = data.get("error") is None
         return True
     if revision <= previous:
+        return True
+    if terminal:
+        if channel != "problem" or not isinstance(data, dict) or not isinstance(data.get("error_code"), str):
+            return False
+        if revision != previous + 1:
+            slot.cache_valid = False
+            return False
+        slot.view = {**copy.deepcopy(cached), "revision": revision, "error": data["error_code"]}
+        slot.cache_valid = False
         return True
     if not getattr(slot, "cache_valid", False) or revision != previous + 1:
         slot.cache_valid = False

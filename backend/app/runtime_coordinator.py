@@ -142,7 +142,8 @@ _PRE_EFFECT_CODES = frozenset({
     "command_kind", "command_fields", "descriptor_shape", "descriptor_binding", "cano_pid",
     "cano_token", "cano_address", "cano_version", "cano_connect", "cano_auth", "runtime_binding",
     "runtime_provider", "runtime_lease", "runtime_generation", "runtime_stopping", "control_kind",
-    "queue_action"})
+    "queue_action", "terminal_facts", "receipt_scan"})
+_TERMINAL_PRE_EFFECT_ERRORS = frozenset({"terminal_facts", "receipt_scan"})
 # Respostas normais do Rust ao pedido (botão velho, sessão ocupada, entrada inválida): não são
 # defeito, então não contam nem trocam de dono; só sobem como erro.
 _ANSWER_CODES = frozenset({
@@ -178,6 +179,7 @@ class RuntimeCoordinator:
         self.registration_locks = {}
         self.adoption_task = None
         self.rebindings = {}
+        self.drains = {}
 
     async def prepare_session(self, name, provider):
         if self.legacy is None:
@@ -355,14 +357,19 @@ class RuntimeCoordinator:
                 diag.registrar("runtime.refresh_failed", "erro", sessao=slot.binding.name, **failure_reason(exc))
         self.refreshing[key] = asyncio.create_task(refresh())
 
-    def request_drain(self, name):
+    def request_drain(self, name, kind="drain"):
+        slot = self.slots.get(self.names.get(name, ""))
+        if slot is None or slot.binding.key in self.drains and not self.drains[slot.binding.key].done():
+            return
         async def drain():
             try:
-                await self.op(name, {"kind":"drain"}, uuid.uuid4().hex)
-            except Exception:
-                self.slot(name).cache_valid = False
-                self._signal(self.slot(name))
-        self.loop.create_task(drain())
+                await self.op(name, {"kind":kind}, uuid.uuid4().hex)
+            except Exception as exc:
+                slot.cache_valid = False
+                self._signal(slot)
+                from app import diag
+                diag.registrar("runtime.drain_failed", "erro", sessao=name, **failure_reason(exc))
+        self.drains[slot.binding.key] = self.loop.create_task(drain())
 
     async def _events(self, transport, instance):
         from app.runtime_adapter import apply_event
@@ -396,6 +403,8 @@ class RuntimeCoordinator:
                         field = "session_id" if slot.binding.provider == "claude" else "thread_id"
                         if conversation and conversation != slot.binding.meta.get(field):
                             self._rebind(slot)
+                    if slot.binding.meta.get("terminal") and slot.view.get("error"):
+                        self.request_drain(slot.binding.name, "confirm" if slot.view["error"] == "receipt_scan" else "drain")
                     delay = 0.25
                 raise RuntimeError("stream privado encerrado sem aviso")
             except asyncio.CancelledError:
@@ -669,6 +678,8 @@ class RuntimeCoordinator:
         error = (slot.view or {}).get("error")
         if slot.phase != Phase.Rust or slot.cache_valid or not error:
             return
+        if slot.binding.meta.get("terminal") and error in _TERMINAL_PRE_EFFECT_ERRORS:
+            return
         await self._hand_to_python(name, "rust_em_erro:" + str(error)[:60])
 
     async def op(self, name, command, operation_id):
@@ -701,7 +712,19 @@ class RuntimeCoordinator:
             if not read_only:
                 await self._settle_rust(name)
             try:
-                return await self._op_once(name, command, operation_id)
+                source = self.slots.get(self.names.get(name, ""))
+                identity = (source.binding.key, source.binding.generation) if source and source.phase == Phase.Rust and source.binding.meta.get("terminal") else None
+                result = await self._op_once(name, command, operation_id)
+                outcome = result.get("reply", result) if isinstance(result, dict) else None
+                if identity and isinstance(outcome, dict) and outcome.get("disposition") == "unknown":
+                    from app import diag
+                    from app.rust_server import RustOpError
+                    failure = RustOpError("terminal_delivery_unknown: entrega não comprovada; não repetir", 503, "terminal_delivery_unknown")
+                    diag.registrar("runtime.rust_delivery_failed", "erro", sessao=name, **failure_reason(failure))
+                    current = self.slots.get(self.names.get(name, ""))
+                    if current and (current.binding.key, current.binding.generation) == identity:
+                        await self._hand_to_python(name, "entrega_incerta", failure)
+                return result
             except Exception as exc:
                 if not getattr(exc, "_hangar_rust", False) or getattr(exc, "code", "") in _ANSWER_CODES:
                     raise
@@ -729,7 +752,9 @@ class RuntimeCoordinator:
             slot, phase, descriptor = route
             if phase == Phase.Rust:
                 try:
-                    if command["kind"] not in {"snapshot", "ensure_projection"} and not slot.cache_valid:
+                    maintenance = (slot.binding.meta.get("terminal") and command["kind"] in {"confirm", "drain"}
+                        and slot.view.get("error") in _TERMINAL_PRE_EFFECT_ERRORS)
+                    if command["kind"] not in {"snapshot", "ensure_projection"} and not slot.cache_valid and not maintenance:
                         raise RustCacheInvalid("estado do runtime indisponível; aguarde a reposição")
                     return await self._rpc(descriptor, command, operation_id)
                 except Exception as exc:

@@ -337,19 +337,21 @@ def test_child_dies_when_python_is_killed(fake_bin, tmp_path, monkeypatch):
             "runtime_process.record_path = lambda: Path(sys.argv[3])\n"
             "env = dict(os.environ, **json.loads(sys.argv[2]))\n"
             "p = rust_server._spawn(Path(sys.argv[1]), env)\n"
-            "print(p.pid, flush=True)\n"
+            "print(json.dumps({'pid':p.pid,'birth':p.runtime_containment.birth}), flush=True)\n"
             "os.kill(os.getpid(), 9)\n")
     t0 = time.monotonic()
     out = subprocess.run([sys.executable, "-c", code, str(fake_bin), json.dumps(_CHILD_ENV),
                           str(tmp_path / "runtime-process.json")],
                          cwd=Path(rust_server.__file__).resolve().parents[1],
                          capture_output=True, text=True, timeout=60)
-    pid = int(out.stdout.split()[0])
+    identity = json.loads(out.stdout.splitlines()[0])
+    pid, birth = identity['pid'], identity['birth']
+    from app.runtime_process import _same_process
     deadline = time.monotonic() + 5
-    while not _dead(pid) and time.monotonic() < deadline:
+    while _same_process(pid, birth) and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert _dead(pid), (f"run={deadline - 5 - t0:.2f}s stderr={out.stderr[-300:]!r}\n"
-                        + _proc_info(pid, tmp_path))
+    assert not _same_process(pid, birth), (f"run={deadline - 5 - t0:.2f}s stderr={out.stderr[-300:]!r}\n"
+                                         + _proc_info(pid, tmp_path))
 
 
 @pytest.mark.parametrize("answer,got", [("1", 1), ("sem", None)])

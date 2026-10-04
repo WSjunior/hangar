@@ -130,6 +130,21 @@ impl Executor {
         let data=self.snapshot().await?;
         let _=self.events.send(RuntimeEvent {key:self.target.key.clone(),generation:self.target.generation,revision:self.revision.load(Ordering::Acquire),channel:"snapshot".into(),data}); Ok(())
     }
+    async fn enter_error(&mut self,failure:RuntimeError)->Result<(),RuntimeError> {
+        if self.last_error.as_deref()==Some(failure.code.as_str()){return Ok(());}
+        tracing::warn!(key=%self.target.key,session=%self.target.name,code=%failure.code,reason=%failure.message,"entrada terminal entrou em erro");
+        self.last_error=Some(failure.code.clone()); self.deliverable=false;
+        self.publish().await?;
+        let revision=self.revision.fetch_add(1,Ordering::AcqRel)+1;
+        let _=self.events.send(RuntimeEvent {key:self.target.key.clone(),generation:self.target.generation,revision,channel:"problem".into(),
+            data:json!({"error_code":failure.code,"message":failure.message})}); Ok(())
+    }
+    async fn clear_maintenance_error(&mut self,code:&str)->Result<(),RuntimeError> {
+        if self.last_error.as_deref()==Some(code) {
+            self.last_error=None; self.publish().await?;
+        }
+        Ok(())
+    }
     async fn run(mut self,mut receiver:mpsc::Receiver<Message>,closed:Arc<AtomicBool>)->Result<(),RuntimeError> {
         self.action(Action::Recover).await?; self.action(Action::EnsureProjection).await?;
         let recovered=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
@@ -154,8 +169,12 @@ impl Executor {
                         if result.is_ok(){self.publish().await?;} let _=response.send(result);
                     },
                     Some(Message::Snapshot(response))=>{let _=response.send(self.snapshot().await);},
-                    Some(Message::Drain(response))=>{let result=self.drain_once(None).await; let _=response.send(result);},
-                    Some(Message::Confirm(response))=>{let result=self.confirm_rows().await; let _=response.send(result);},
+                    Some(Message::Drain(response))=>{let result=self.drain_once(None).await;
+                        if let Err(failure)=&result {self.enter_error(failure.clone()).await?;}else{self.clear_maintenance_error("terminal_facts").await?;}
+                        let _=response.send(result);},
+                    Some(Message::Confirm(response))=>{let result=self.confirm_rows().await;
+                        if let Err(failure)=&result {self.enter_error(failure.clone()).await?;}else{self.clear_maintenance_error("receipt_scan").await?;}
+                        let _=response.send(result);},
                     Some(Message::Stop(response))=>{
                         closed.store(true,Ordering::Release);
                         let queue=Arc::try_unwrap(self.queue).map_err(|_|error("terminal_lease_inflight"))?;
@@ -163,9 +182,9 @@ impl Executor {
                     },
                     None=>{let queue=Arc::try_unwrap(self.queue).map_err(|_|error("terminal_lease_inflight"))?;return queue.shutdown().await.map_err(|_|error("queue_stop"));}
                 },
-                _=timer.tick(),if !closed.load(Ordering::Acquire)=>{
+                _=timer.tick(),if !closed.load(Ordering::Acquire) && self.last_error.is_none()=>{
                     let result=async {self.confirm_rows().await?;self.drain_once(None).await?;Ok::<_,RuntimeError>(())}.await;
-                    if let Err(e)=result {tracing::warn!(code=%e.code,key=%self.target.key,generation=self.target.generation,"terminal maintenance failed");}
+                    if let Err(failure)=result {self.enter_error(failure).await?;}
                 }
             }
         }
@@ -246,7 +265,16 @@ impl Executor {
             result.payload["preserve_binding"]=json!(true);
         }
         self.action(Action::Finish {id:id.into(),status:status(result.disposition),result:serde_json::to_value(&result).unwrap()}).await?;
-        self.last_error=None; self.publish().await?;Ok(result)
+        if matches!(result.disposition,Disposition::Deferred|Disposition::Rejected) {
+            tracing::info!(key=%self.target.key,session=%self.target.name,code=%result.payload["code"].as_str().unwrap_or("terminal_not_executed"),
+                reason="operação adiada ou recusada; resultado conservado no diário",stage=%result.payload["stage"].as_str().unwrap_or("plugin"),"resultado da entrada terminal");
+        }
+        if result.disposition==Disposition::Unknown {
+            tracing::warn!(key=%self.target.key,session=%self.target.name,code=%result.payload["code"].as_str().unwrap_or("plugin_control_uncertain"),
+                reason="a entrega não foi comprovada",stage=%result.payload["stage"].as_str().unwrap_or("plugin"),"entrega terminal incerta");
+            self.enter_error(error("terminal_delivery_unknown")).await?;
+        }else{self.last_error=None; self.publish().await?;}
+        Ok(result)
     }
     async fn drain_once(&mut self,entry:Option<String>)->Result<Value,RuntimeError> {
         let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;

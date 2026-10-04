@@ -96,10 +96,49 @@ fechando os seis problemas. Commits da Task 3: `bead8a45`, `58c75289` e `a767feb
 A política comum de falhas de `74177469` será integrada com a parte1 após a revisão desta Task.
 O caminho terminal já separa `_op_once`, evitando duplicar essa política.
 
+## Task 4 — integração e verificações finais
+
+Merge da parte1 em `958486f6`, incluindo `fac8d377` e `74177469`. A resolução conserva a
+serialização, o vínculo durável, o congelamento de `/clear` e o parâmetro de restauração do
+terminal, junto da política compartilhada. Python/Rust continuam no protocolo **9**. A
+compilação revelou uma referência a `target` adicionada pelo merge dentro de `run_for`; o
+diagnóstico agora usa os argumentos reais `key` e `generation`, sem conteúdo do pedido.
+
+A conferência pós-merge reproduziu três lacunas: rejeição do snapshot privado saudável por
+ausência de `public_state`, entrega incerta sem transferência e falha automática sem aviso ao
+coordenador. O consumidor terminal valida vínculo/geração/conversa e conserva somente canais
+privados. O Rust registra código/motivo, publica `problem` e conserva erro no snapshot; o timer
+para até a recuperação coordenada. Fatos e leitura do transcript anteriores a qualquer envio
+usam as mesmas quatro tentativas do `RuntimeCoordinator.op`, com pausa antes da última e
+transferência somente da sessão afetada. A resposta `unknown` mantém seu contrato e o diário
+protegido, registra o motivo e transfere a posse sem repetir o efeito. Resultados normais de
+adiamento/recusa continuam fora da contagem de defeito.
+
+As sete provas Python da política passaram, incluindo pausa, mesmo id, outra sessão no Rust,
+resposta incerta, aviso automático sem aparelho e diagnóstico sem texto. Os dois casos Rust
+novos reproduziram a ausência do aviso antes da correção; depois o arquivo de runtime passou
+em **33 casos**, incluindo interrupção do timer e recuperação posterior da leitura.
+
+`cargo test --locked --workspace`, em `crates/`: **324 passaram, zero falhou, dois ignorados**.
+Método: soma das contagens `test result` dos 35 blocos da execução, sem somar rodadas anteriores.
+Os ignorados exigem Python configurado; suas provas de lease e Store já passaram na Task 2.
+`cargo check --locked --target x86_64-pc-windows-gnu -p hangar-server --tests` passou. Há avisos
+preexistentes de campos/imports não usados; nenhum foi ocultado.
+
+Pytest pertinente, em uma invocação com **44 arquivos**: **1420 passaram, três falharam e um
+caso Windows foi ignorado**. Duas falhas eram o dublê headless sem `meta`, corrigido mantendo
+suas assertivas. O terceiro teste observou leituras contraditórias de `/proc` por PID; o processo
+já estava ausente no diagnóstico. A repetição dos três casos passou; o teste do filho foi
+fortalecido para conferir PID e nascimento e passou novamente. Repetições não são somadas às
+1420 passagens iniciais. Nenhum caso permanece falhando na conferência focada.
+
+O `server.yml` passa a executar somente as provas de contenção/política e as regressões da
+revisão Python nos três sistemas, com Node 24 para executar o hook real. O contrato do cano
+continua Linux; não foi adicionada suíte Python inteira à matriz. CI e revisão final ainda
+pendentes. `git diff --check` passou.
+
 ## Ainda pendente
 
-- Integração da parte1: conferir a política de falhas e a correção de identidade do cano.
-- Task 4: workspace Rust inteiro, compilação cruzada Windows, pytest dos arquivos tocados,
-  revisão final, push e CI nas três plataformas.
+- Task 4: revisão final, push e CI nas três plataformas.
 - Uso real do Claude e Windows instalado: somente com o dono, conforme o pedido.
 - Porte do envio/controle Codex com terminal: permanece Python/RPC nesta árvore; fora da 2D.

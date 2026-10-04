@@ -46,8 +46,8 @@ impl PolicyClient {
             Ok(value["data"].clone())
         }).await.unwrap_or_else(|_|Err((failure("policy_timeout"),String::new())));
         result.map_err(|(error,detail)|{
-            if crate::warn_limit::allow(Some(&target.key),&error.code) {
-                tracing::warn!(key=%target.key,session=%target.name,policy=%kind,code=%error.code,detail=%detail,"política do Python falhou");
+            if crate::warn_limit::allow(Some(key),&error.code) {
+                tracing::warn!(key=%key,generation,policy=%kind,code=%error.code,detail=%detail,"política do Python falhou");
             }
             error
         })
