@@ -288,6 +288,13 @@ limite de 250 ms) e passou na repetição. Windows falhou nas duas tentativas em
 o Job não alcança processo fora da árvore do comando. A 2D liga no Windows em produção, então as
 esperas por condição ganharam teto de 10 s, e o processo alheio dorme 60 s; condições iguais.
 
+Com o Rust verde no Windows, a etapa Python mostrou três falhas de `test_runtime_process.py`
+(contenção pelo Job, nunca executada antes). No Windows, o processo encerrado segue listado com o
+mesmo nascimento enquanto alguém segura um handle dele, e `_same_process` o tratava como vivo:
+`reconcile_startup` recusava com "outro ciclo do backend ainda possui escritores Rust" por um
+backend já morto. Agora, no Windows, processo sem threads conta como encerrado; o teste da
+limpeza usa o mesmo critério em vez do status de zumbi, que lá não existe.
+
 ## Ainda pendente
 
 - Reserva Python sem aparelho conectado não drena a fila sozinha; com o Rust de pé o timer cobre.

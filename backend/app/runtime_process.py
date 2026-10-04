@@ -205,7 +205,11 @@ def boot_identity():
 def _same_process(pid, birth):
     try:
         proc = psutil.Process(pid)
-        return proc.create_time() == birth and proc.status() != psutil.STATUS_ZOMBIE
+        if proc.create_time() != birth or proc.status() == psutil.STATUS_ZOMBIE:
+            return False
+        # No Windows o processo encerrado segue listado enquanto alguém segura um handle dele, com o
+        # mesmo nascimento; sem threads ele já saiu e não escreve mais.
+        return sys.platform != 'win32' or proc.num_threads() > 0
     except psutil.NoSuchProcess:
         return False
 

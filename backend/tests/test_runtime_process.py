@@ -8,6 +8,28 @@ import psutil
 import pytest
 
 
+def _ended(proc):
+    # Zumbi no POSIX; no Windows o encerrado segue listado sem threads até o último handle fechar.
+    try:
+        return not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE or proc.num_threads() == 0
+    except psutil.NoSuchProcess:
+        return True
+
+
+def test_exited_windows_process_held_by_a_handle_is_not_the_same_process(monkeypatch):
+    from app import runtime_process
+    class Exited:
+        def __init__(self, pid): pass
+        def create_time(self): return 7.0
+        def status(self): return psutil.STATUS_RUNNING
+        def num_threads(self): return 0
+    monkeypatch.setattr(runtime_process.psutil, 'Process', Exited)
+    monkeypatch.setattr(runtime_process.sys, 'platform', 'win32')
+    assert runtime_process._same_process(1, 7.0) is False
+    monkeypatch.setattr(runtime_process.sys, 'platform', 'linux')
+    assert runtime_process._same_process(1, 7.0) is True
+
+
 def test_child_cleanup_after_abrupt_parent_death(tmp_path):
     from app.runtime_process import spawn_contained, cleanup
     pid_path = tmp_path / 'child.pid'
@@ -21,7 +43,7 @@ def test_child_cleanup_after_abrupt_parent_death(tmp_path):
         proc.kill()
         proc.wait(5)
         assert cleanup(proc, timeout=3) is True
-        assert not child.is_running() or child.status() == psutil.STATUS_ZOMBIE
+        assert _ended(child)
         assert proc.runtime_containment.cleaned
     finally:
         cleanup(proc, timeout=3)
