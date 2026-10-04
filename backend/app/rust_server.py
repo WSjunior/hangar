@@ -32,7 +32,7 @@ _log = logging.getLogger("hangar.rust_server")
 HEALTH_PATH = "/__hangar_server/health"
 # Versão do contrato interno (rotas /internal, side-events, ambiente). Tem de casar com o
 # `protocol` da saúde (hangar_server::INTERNAL_PROTOCOL); outro número = o Python atende sozinho.
-RUST_SERVER_PROTOCOL = 11
+RUST_SERVER_PROTOCOL = 12
 START_TIMEOUT = 10.0
 CRASH_WINDOW = 60.0
 MAX_CRASHES = 3
@@ -286,6 +286,8 @@ class Supervisor:
 
     async def _start(self) -> str:
         """`up`, `died` (morreu subindo), `silent` (vivo e calado até o prazo) ou `protocol`."""
+        from app import workspace_bridge
+        workspace_bridge.configure(None, None)
         terminal_observer.configure(None, None)
         if self.proc is not None:
             from app.runtime_process import cleanup
@@ -319,6 +321,7 @@ class Supervisor:
                     if address is None:
                         raise ValueError("missing terminal address")
                     terminal_observer.configure(address, env["HANGAR_INTERNAL_SECRET"])
+                    workspace_bridge.configure(address, env["HANGAR_INTERNAL_SECRET"])
                 except ValueError:
                     _log.warning("terminal observer address unavailable; using Python")
                     diag.registrar("terminal_observer.reserva", "aviso", codigo="endereco_invalido")
@@ -349,6 +352,8 @@ class Supervisor:
                     await asyncio.sleep(_POLL)
                     from app.runtime_process import refresh_members
                     await asyncio.to_thread(refresh_members, self.proc)
+                from app import workspace_bridge
+                workspace_bridge.configure(None, None)
                 terminal_observer.configure(None, None)
                 await self.deactivate_runtime(confirmed_dead=self.proc.poll() is not None)
                 # Parada normal (systemctl, Ctrl+C) leva o filho junto, no mesmo instante em que o uvicorn
@@ -372,6 +377,8 @@ class Supervisor:
             return "erro"
 
     async def stop(self) -> None:
+        from app import workspace_bridge
+        workspace_bridge.configure(None, None)
         terminal_observer.configure(None, None)
         proc = self.proc
         if proc is None:

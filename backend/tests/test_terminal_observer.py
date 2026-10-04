@@ -1,5 +1,7 @@
 """Ponte terminal em memória; todos os pedidos usam transporte sintético."""
 import asyncio
+import io
+import json
 import sys
 from unittest.mock import patch
 
@@ -190,6 +192,7 @@ def test_supervisor_enables_only_after_health_and_clears_even_without_proc(monke
     monkeypatch.setattr(t, "configure", configure)
     class Process:
         stdin = None
+        stdout = None
         def poll(self):
             return None
     monkeypatch.setattr(rust_server, "_spawn", lambda *args: Process())
@@ -339,6 +342,7 @@ def test_supervisor_bad_health_address_keeps_bridge_disabled(monkeypatch, addres
     t = bridge()
     class Process:
         stdin = None
+        stdout = None
         def poll(self): return None
     monkeypatch.setattr(rust_server, "_spawn", lambda *args: Process())
     # A partida do runtime (2B) não é o assunto aqui: resposta válida e sem transporte real.
