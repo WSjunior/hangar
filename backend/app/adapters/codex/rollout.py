@@ -1,11 +1,38 @@
 """Parser do rollout JSONL do Codex CLI -> ChatEvent (o mesmo shape neutro que o Claude produz).
 Traduz o envelope `{type, payload}` do Codex; regras confirmadas contra codex-cli 0.141.0
 (fixture em tests/fixtures/codex/rollout_sample.jsonl)."""
+import base64
+import binascii
 import hashlib
 import json
 import re
 
 from app.transcript import ChatEvent
+
+
+_AGENT_MESSAGE_TOOLS = {
+    f"{prefix}{name}"
+    for prefix in ("", "collaboration.", "functions.", "functions.collaboration.")
+    for name in ("spawn_agent", "send_message", "followup_task")
+}
+_ENCRYPTED_AGENT_MESSAGE = "Mensagem cifrada pelo Codex; conteúdo indisponível."
+
+
+def _display_agent_message(name: str | None, tool_input: dict) -> dict:
+    """Substitui somente o envelope cifrado de uma mensagem entre agentes."""
+    message = tool_input.get("message")
+    if not isinstance(name, str) or name not in _AGENT_MESSAGE_TOOLS or not isinstance(message, str):
+        return tool_input
+    if not re.fullmatch(r"g[A-Za-z0-9_-]+={0,2}", message):
+        return tool_input
+    try:
+        envelope = base64.b64decode(message, altchars=b"-_", validate=True)
+    except (binascii.Error, ValueError):
+        return tool_input
+    # A API entrega um envelope Fernet, não texto que o Hangar possa decifrar.
+    if len(envelope) < 73 or envelope[0] != 0x80 or (len(envelope) - 57) % 16:
+        return tool_input
+    return {**tool_input, "message": _ENCRYPTED_AGENT_MESSAGE}
 
 # message.role que sao system prompt/instrucoes internas do Codex, nao chat do usuario.
 _NON_CHAT_ROLES = {"developer", "system"}
@@ -267,7 +294,8 @@ def parse_rollout_obj(obj: dict) -> list[ChatEvent]:
         return [ChatEvent(
             kind="tool_use", id=_event_id(obj),
             tool_name=payload.get("name"), tool_use_id=payload.get("call_id"),
-            tool_input=tool_input if isinstance(tool_input, dict) else {},
+            tool_input=_display_agent_message(payload.get("name"), tool_input)
+            if isinstance(tool_input, dict) else {},
         )]
 
     if ptype == "custom_tool_call":
