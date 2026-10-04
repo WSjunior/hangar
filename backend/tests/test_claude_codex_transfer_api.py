@@ -954,3 +954,31 @@ async def test_archive_current_path_cannot_change_transfer_account(scenario, mon
     assert not cs.exists("archive")
     with pytest.raises(ValidationError):
         api.ResumeArchivedBody(provider="codex", transfer_rollout_path=str(path))
+
+
+def test_guarded_request_can_upgrade_to_its_own_operation_but_not_past_others():
+    from app.conversation_transfer import TransferError, session_ingress, session_operation
+    with session_ingress("upgrade"):
+        with session_operation("upgrade"):
+            pass
+        with session_ingress("upgrade"):
+            pass
+    import threading
+    entered, release = threading.Event(), threading.Event()
+
+    def other_request():
+        with session_ingress("upgrade"):
+            entered.set()
+            release.wait(5)
+
+    t = threading.Thread(target=other_request)
+    t.start()
+    entered.wait(5)
+    try:
+        with session_ingress("upgrade"):
+            with pytest.raises(TransferError):
+                with session_operation("upgrade"):
+                    pass
+    finally:
+        release.set()
+        t.join(5)

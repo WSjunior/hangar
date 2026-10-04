@@ -12,6 +12,7 @@ import tempfile
 import threading
 import uuid
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
 from pathlib import Path
@@ -438,13 +439,17 @@ def rename_transfer(old: str, new: str) -> None:
 
 _operation_locks: dict[str, threading.Lock] = {}
 _ingress_counts: dict[str, int] = {}
+# Ingressos que a requisição atual já segura: uma rota guardada que sobe para a troca exclusiva
+# (modelo da conta ChatGPT fixa) não pode ser recusada pela própria entrada.
+_held_ingress: ContextVar[frozenset[str]] = ContextVar("held_ingress", default=frozenset())
 
 
 @contextmanager
 def session_operation(name: str):
     with _lock:
         operation = _operation_locks.setdefault(name, threading.Lock())
-        if _ingress_counts.get(name, 0) or not operation.acquire(blocking=False):
+        own = 1 if name in _held_ingress.get() else 0
+        if _ingress_counts.get(name, 0) - own or not operation.acquire(blocking=False):
             raise TransferError("session_transfer_busy")
     try:
         yield
@@ -460,9 +465,12 @@ def session_ingress(name: str):
         if operation is not None and operation.locked():
             raise TransferError("session_transfer_busy")
         _ingress_counts[name] = _ingress_counts.get(name, 0) + 1
+    held = _held_ingress.get()
+    _held_ingress.set(held | {name})
     try:
         yield
     finally:
+        _held_ingress.set(held)
         with _lock:
             remaining = _ingress_counts[name] - 1
             if remaining:
