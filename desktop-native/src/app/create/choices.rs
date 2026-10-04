@@ -902,20 +902,30 @@ impl NewSession {
                     .on_click(cx.listener(|this, _, _, cx| { this.load_context(cx); cx.notify(); })))))
     }
 
-    /// "Mais opções": motor, modelo dos subagentes e Jev, recolhidos, com o valor de cada um no resumo.
+    /// Motor logo abaixo do provedor, como no seletor da conversa: a conta e a lista de modelos dependem dele.
+    pub(super) fn render_engine(&self) -> Option<Div> {
+        if self.provider != "claude" { return None; }
+        let loading = self.engines.loading;
+        let problem = self.engines.value.as_ref().and_then(|v| v.as_ref().err()).cloned()
+            .or_else(|| self.selected_engine().and_then(|m| m.cliproxy_error.as_ref()).map(|e| tr("create_proxy_error").replace("{reason}", e)));
+        let pick = self.engine_pick.as_ref();
+        if pick.is_none() && !loading && problem.is_none() { return None; }
+        Some(div().flex().flex_col().gap(px(6.))
+            .child(label(tr("create_engine")))
+            .when_some(pick, |el, (p, _)| el.child(Select::new(p).id("create-pick-engine").disabled(self.creating || loading)
+                .accessibility_label(tr("create_engine"))))
+            .when(loading && pick.is_none(), |el| el.child(muted(tr("loading"))))
+            .when_some(problem, |el, problem| el.child(alert("create-engine-error", problem))))
+    }
+
+    /// "Mais opções": modelo dos subagentes e Jev, recolhidos, com o valor de cada um no resumo.
     pub(super) fn render_more(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let engine = (self.provider == "claude").then_some(self.engine_pick.as_ref()).flatten();
         // O bastão não leva subagente nem Jev: a rota dele não recebe os dois.
         let subagent = (self.target().is_none() && self.baton.is_none() && self.provider == "claude" && self.engine.is_empty() && !self.catalog().is_empty())
             .then_some(self.subagent_pick.as_ref()).flatten();
         // O retomar não leva o Jev: com uma conversa escolhida, o interruptor seria um controle sem efeito.
         let jev = self.jev_choice().is_some() && self.target().is_none() && self.baton.is_none();
-        let loading = self.provider == "claude" && self.engines.loading;
-        let problem = (self.provider == "claude").then(|| self.engines.value.as_ref().and_then(|v| v.as_ref().err()).cloned()
-            .or_else(|| self.selected_engine().and_then(|m| m.cliproxy_error.as_ref()).map(|e| tr("create_proxy_error").replace("{reason}", e)))).flatten();
-        if engine.is_none() && subagent.is_none() && !jev && !loading && problem.is_none() { return None; }
-        let engine_label = self.engines.ok().and_then(|l| l.iter().find(|(n, _)| *n == self.engine))
-            .map(|(n, m)| m.label.clone().unwrap_or_else(|| n.clone())).unwrap_or_else(|| tr("create_own_account"));
+        if subagent.is_none() && !jev { return None; }
         let subagent_label = self.catalog().iter().find(|m| m.value() == self.subagent).map(ModelOption::label)
             .unwrap_or_else(|| if self.subagent.is_empty() { tr("create_subagent_default") } else { self.subagent.clone() });
         let pill = |text: String| div().px(px(8.)).py(px(1.)).rounded_full().border_1().border_color(theme::border()).text_size(px(11.5)).text_color(theme::muted()).child(text);
@@ -926,14 +936,9 @@ impl NewSession {
                 .child(Disclosure::new("create-more", self.more, tr("create_more"), false)
                     .on_change(move |open, cx| { let _ = this.update(cx, |this, cx| { this.more = open; cx.notify(); }); }))
                 .when(!self.more, |el| el
-                    .when(engine.is_some(), |el| el.child(pill(format!("{} {engine_label}", tr("create_engine")))))
                     .when(subagent.is_some(), |el| el.child(pill(format!("{} {subagent_label}", tr("create_more_subagents")))))
                     .when(jev && self.jev_on, |el| el.child(pill(tr("create_jev"))))))
-            .when(loading, |el| el.child(muted(tr("loading"))))
-            .when_some(problem, |el, problem| el.child(alert("create-engine-error", problem)))
             .when(self.more, |el| el
-                .when_some(engine, |el, (p, _)| el.child(div().flex().flex_col().gap(px(4.)).child(label(tr("create_engine")))
-                    .child(Select::new(p).disabled(busy).accessibility_label(tr("create_engine")))))
                 .when_some(subagent, |el, (p, _)| el.child(div().flex().flex_col().gap(px(4.)).child(label(tr("create_subagent")))
                     .child(Select::new(p).disabled(busy).accessibility_label(tr("create_subagent"))).child(muted(tr("create_subagent_help")))))
                 .when(jev, |el| el.child(div().flex().flex_col().gap(px(4.))
