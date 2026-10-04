@@ -74,12 +74,19 @@ fn panic_line(loc: Option<&std::panic::Location<'_>>, thread: Option<&str>) -> S
 
 /// Fixa o limite de devolução de memória do glibc. Sem isso, o limite cresce sozinho depois de
 /// cada bloco grande liberado e a memória das leituras paralelas do índice de custos fica retida.
-pub fn tune_allocator() {
+/// Em plataformas sem glibc, não faz nada.
+///
+/// # Segurança
+///
+/// No Linux GNU, deve ser chamada durante a inicialização do processo, antes de criar qualquer
+/// outra thread, inclusive as do runtime Tokio. O glibc altera parâmetros do alocador sem
+/// sincronização com as threads que podem lê-los durante alocações.
+pub unsafe fn tune_allocator() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         unsafe extern "C" { fn mallopt(param: i32, value: i32) -> i32; }
         const M_TRIM_THRESHOLD: i32 = -1;
-        // SAFETY: mallopt só ajusta parâmetros do alocador e pode ser chamada a qualquer momento.
+        // A pré-condição do chamador impede alocações concorrentes durante a configuração do glibc.
         unsafe { mallopt(M_TRIM_THRESHOLD, 128 * 1024); }
     }
 }

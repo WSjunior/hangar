@@ -1279,7 +1279,7 @@ pub fn rollout_owners(codex: &[CodexScope]) -> IndexMap<String, (CodexScope, Vec
 pub enum CollectError { NoScopes, Index(IndexError) }  // qualquer um = repassar ao Python
 ```
 
-- [ ] **Step 1: Testes que falham**
+- [x] **Step 1: Testes que falham**
 
 `crates/hangar-server/tests/costs_collect.rs`:
 
@@ -1386,9 +1386,9 @@ fn rollout_reachable_by_two_accounts_belongs_to_one_or_none() {
 }
 ```
 
-- [ ] **Step 2: Rodar e ver falhar.**
+- [x] **Step 2: Rodar e ver falhar.**
 
-- [ ] **Step 3: Implementar**
+- [x] **Step 3: Implementar**
 
 Porte de `costs_sources.py:574-742` e `:801-889`, com estas regras:
 - `rollout_owners`: porte de `_rollouts_codex_por_conta` + `codex_contas.account_for_rollout`: enumera `sessions` e `archived_sessions` de cada conta (sem seguir link de pasta na listagem — `list_files`), canoniza (`std::fs::canonicalize`), dono = a única conta cujo `home` canônico contém o arquivo; zero ou mais de uma → fora. Escopo só para contas com arquivo.
@@ -1400,14 +1400,84 @@ Porte de `costs_sources.py:574-742` e `:801-889`, com estas regras:
 - Pricing: `reload_if_changed()` a cada `prepare`.
 - Aquecimento de boot: `schedule_warmup(Duration::from_secs(30))` chamado ao subir o servidor (Task 10).
 
-- [ ] **Step 4: Rodar** — `cargo test ... --test costs_collect` → PASS.
+- [x] **Step 4: Rodar** — `cargo test ... --test costs_collect` → PASS.
 
-- [ ] **Step 5: Revisão e commit**
+- [x] **Step 5: Revisão e commit**
 
 ```bash
 git add crates/Cargo.toml crates/Cargo.lock crates/hangar-server/Cargo.toml crates/hangar-server/src/costs \
   crates/hangar-server/tests/costs_collect.rs
 git commit -m "feat(server): cost collector with Python scopes, rollout ownership and warmup"
+```
+
+---
+
+### Task 14: Task 9a — Diretório local e recuperação de corrupção durante o uso
+
+Adição solicitada pelo usuário após a leitura do [PR 27](https://github.com/jeffer1312/hangar/pull/27),
+commit `0b9a5e40350d052689500cf6608b6ef46d2dada5`. O número 14 mantém o formato do leitor de
+progresso; o nome desta tarefa no trabalho é **Task 9a**. Executar antes da medição da Task 13.
+
+**Files:**
+- Modify: `crates/hangar-server/src/costs/index.rs`
+- Test: `crates/hangar-server/tests/costs_index.rs`, `crates/hangar-server/tests/costs_generation.rs`
+- Modify: `docs/migracao-rust/parte3/spec.md` (somente o contrato do índice)
+
+**Interfaces:**
+- Consumes: `Index::open`, `sync`, `sync_file`, `forget_outside`, `read_costs`, `read_usage`,
+  `generation` e o mecanismo atual de recriação de esquema/arquivo.
+- Produces: mesmas APIs, caminho padrão local e repetição única da operação diante dos códigos
+  SQLite `DatabaseCorrupt` ou `NotADatabase`, com geração compartilhada invalidada.
+- Não incorporar as alterações Python do PR nesta tarefa; o port Rust acompanha o contrato
+  novo e permanece com arquivo próprio `custos-rust.sqlite3`.
+
+- [x] **Step 1: Testes que falham**
+
+Acrescentar casos completos, com índices descartáveis e sem alterar o ambiente global dos testes:
+1. Linux/macOS: HOME sintético sem XDG → `<home>/.cache/hangar/custos`; XDG absoluto →
+   `<xdg>/hangar/custos`; XDG vazio ou relativo → padrão. Windows mantém LOCALAPPDATA e
+   fallback `<home>/AppData/Local/hangar/custos`.
+2. SQLite abre, mas a operação detecta corrupção: repetir uma vez em banco recriado. Cobrir
+   sincronização de lista, sincronização avulsa e leitura; não trocar a lista por um iterador
+   já consumido. Confirmar custo correto após reconstrução e geração nova vista por clone.
+3. `DatabaseBusy`/`DatabaseLocked`, falta de disco e violação de integridade não apagam banco,
+   WAL ou SHM. A segunda falha de corrupção sobe; não há repetição ilimitada.
+4. Corrupção após commit parcial invalida o relatório anterior; recuperação não devolve a
+   geração anterior. Conexões da operação falha fecham antes de remover o arquivo.
+
+- [x] **Step 2: Rodar e ver falhar**
+
+Run: `cargo test --manifest-path crates/Cargo.toml -p hangar-server --test costs_index --test costs_generation`.
+Registrar o RED que demonstra cada comportamento novo, sem testar um banco real.
+
+- [x] **Step 3: Implementar o ajuste focado**
+
+`default_dir()` usa XDG_CACHE_HOME somente se absoluto no Linux/macOS; do contrário usa
+`<home>/.cache/hangar/custos`. Preservar a regra Windows. A seleção testável recebe ambiente
+e home sintéticos, evitando `set_var` concorrente. A recuperação considera somente os códigos
+SQLite acima, fecha os recursos da tentativa anterior, remove apenas o arquivo Rust e seus
+`-wal`/`-shm`, recria o índice e repete a operação uma vez. Compartilhar a lógica existente de
+recriação, preservar a geração dos clones e a coerência entre operações concorrentes. Erros
+de lock/disco/integridade seguem a reserva existente. Logs levam apenas códigos estáticos.
+
+Atualizar o contrato do índice na spec com diretório local e recuperação durante a operação.
+Não remover arquivo antigo real, executar migração de perfil ou operar backend; limpeza do
+Python permanece no PR. Nenhuma dependência, protocolo ou módulo de envio muda.
+
+- [x] **Step 4: Rodar a verificação focada**
+
+Run: `cargo test --manifest-path crates/Cargo.toml -p hangar-server --test costs_index --test costs_generation --test costs_collect --test costs_routes`.
+Expected: PASS, inclusive aquecimento, geração e reserva das Tasks 9/10.
+
+- [x] **Step 5: Revisão independente e commit**
+
+Commit de caminhos explícitos somente, após autorização serial do controlador. Revisão com
+Sol 6.1 do diff desta tarefa; marcar os Steps após os dois veredictos aprovados.
+
+```bash
+git add crates/hangar-server/src/costs/index.rs crates/hangar-server/tests/costs_index.rs \
+  crates/hangar-server/tests/costs_generation.rs docs/migracao-rust/parte3/spec.md
+git commit -m "fix(server): keep costs index local and recover mid-operation corruption"
 ```
 
 ---
@@ -1426,7 +1496,7 @@ git commit -m "feat(server): cost collector with Python scopes, rollout ownershi
   - `costs_routes::{costs, cotacao}` handlers e `pub(crate) fn warming(read, total) -> Response` (202 `{"aquecendo": true, "lidos": r, "total": t}`).
   - Cache de relatórios prontos: `costs::ReportCache` (até 8, chave = versão dos dados + geração do preço + assinatura das áreas + chave da rota), porte de `costs_cache.relatorio`.
 
-- [ ] **Step 1: Testes que falham**
+- [x] **Step 1: Testes que falham**
 
 `crates/hangar-server/tests/contract_costs_reports.rs`:
 
@@ -1492,9 +1562,9 @@ O gerador da Task 2 grava os relatórios com o caminho da cópia trocado por `__
 
 Escreva os sete como funções completas seguindo `tests/proxy.rs` (servidor em `127.0.0.1:0`, `reqwest` com `Authorization: Bearer <token>`), afirmando status, corpo e, nos de repasse, que o upstream recebeu o pedido.
 
-- [ ] **Step 2: Rodar e ver falhar.**
+- [x] **Step 2: Rodar e ver falhar.**
 
-- [ ] **Step 3: Implementar**
+- [x] **Step 3: Implementar**
 
 - `report_costs.rs`: porte de `costs.py:27-256`. Regras: janela anterior calculada antes do corte e `None` com menos de 1/3 dos dias; `custos` indexado depois do corte; identidade da sessão = `pyjson::dumps(["source", account_id || provider, session_id, subagente], false)` (separadores do Python); `by_*` ordenados por `(-cost, key)` estável e `by_day` por chave decrescente; `combos` ordenados por `(dia, -cost)` e `session_ids` ordenados; `sem_tarifa` sem `IGNORADOS`; `rates` por modelo; top 100 sessões com subagente somado no pai (`split("/subagents/")`) e modelo de maior custo (`max` com empate = primeiro inserido, como o `max` do Python sobre dict); `equivalente_cobrado` truncado com `as i64` (o `int()` do Python).
 - `fx.rs`: o `proxy::client()` só fala HTTP e a cotação é HTTPS. Promova o `reqwest` do workspace (`=0.13.4`, hoje só em `[dev-dependencies]`) a dependência normal do `hangar-server`, acrescentando a feature de TLS com rustls que a documentação da 0.13.4 nomeia (confira em docs.rs antes; não troque a versão). Chamada bloqueante numa thread própria (`reqwest::blocking` exige a feature `blocking`; alternativa: `tokio::spawn` com o cliente async). URL `https://economia.awesomeapi.com.br/json/last/USD-BRL`, prazo 3 s, `USDBRL.bid` como float; erro vira `tracing::warn!(code = "cotacao")`.
@@ -1502,9 +1572,9 @@ Escreva os sete como funções completas seguindo `tests/proxy.rs` (servidor em 
 - `routes.rs::router`: `.route("/api/costs", get(costs_routes::costs).fallback(pass_any))`, idem `/api/cotacao`. `AppState::with_terminal_pool` recebe o `Collector` e o `Fx` (crie `AppState::with_parts` se mudar a assinatura quebrar muitos testes; mantenha `new` montando os padrões: `index::default_dir()`, `pricing::default_dir()`, `areas::default_map_file()`, `HttpScopes`).
 - `main.rs`: depois de montar o estado, `state.costs.schedule_warmup(Duration::from_secs(30))`.
 
-- [ ] **Step 4: Rodar** — `cargo test ... --test contract_costs_reports --test costs_routes --test proxy` → PASS.
+- [x] **Step 4: Rodar** — `cargo test ... --test contract_costs_reports --test costs_routes --test proxy` → PASS.
 
-- [ ] **Step 5: Revisão e commit**
+- [x] **Step 5: Revisão e commit**
 
 ```bash
 git add crates/hangar-server/src crates/hangar-server/Cargo.toml crates/Cargo.toml crates/Cargo.lock \
@@ -1526,7 +1596,7 @@ git commit -m "feat(server): serve /api/costs and /api/cotacao from Rust with Py
 - Consumes: `Collector::read_usage`, `report_costs::row_cost`, `Pricing`.
 - Produces: `report_uso::UsoReport`/`UsoBucket` (ordem de `models.py:482-545`); `pub struct UsoFilters { pub conta: Vec<String>, pub projeto: Vec<String>, pub modelo: Vec<String>, pub plugin: Vec<String>, pub foco: Option<String> }`; `pub fn build(uso: &[(UsoLinha, String)], tokens: &[UsageRow], period: &str, now: LocalTs, f: &UsoFilters, origins: Option<&IndexMap<String, String>>, pricing: &Pricing, label: &dyn Fn(&str) -> Option<String>) -> UsoReport`; `origins::Origins` com `pub fn recent(&self) -> (u64, IndexMap<String, String>)` (porte de `_origens_recentes`: primeira chamada varre e espera; depois confere mtimes a cada 30 s numa thread e só varre se mudou; o `u64` é o instante da última mudança, que entra na chave do cache) e `pub fn scan(home: &Path, repo: &Path) -> IndexMap<String, String>` (`origens_de_skill`).
 
-- [ ] **Step 1: Testes que falham** — em `contract_costs_reports.rs`:
+- [x] **Step 1: Testes que falham** — em `contract_costs_reports.rs`:
 
 ```rust
 use hangar_server::costs::report_uso::{self, UsoFilters};
@@ -1555,18 +1625,18 @@ fn usage_reports_match_python() {
 
 Em `costs_routes.rs`, acrescentar: `/api/uso?conta=a&conta=&projeto=/repo/a` (vazio descartado, filtros ecoados em `conta`/`projeto`), `foco` vazio vira `null`, 202 com índice frio, repasse sem token.
 
-- [ ] **Step 2: Rodar e ver falhar.**
+- [x] **Step 2: Rodar e ver falhar.**
 
-- [ ] **Step 3: Implementar** — porte de `uso_report.py:33-544`. Regras:
+- [x] **Step 3: Implementar** — porte de `uso_report.py:33-544`. Regras:
 - Corte por `dia >= corte` (texto) nas linhas de uso e por data local nos tokens; custo de agente do transcript filho (`/subagents/agent-`), refeito com filtro de conta/projeto quando há; seletores (`by_conta`, `by_projeto`, `by_modelo`) somam antes dos filtros de dimensão.
 - `_custos_reais` monta a linha com provedor `openai` para `codex` e `anthropic` para o resto e passa por `row_cost`.
 - `_conta_no_total`, `_TIPOS_CONTADOS`, réguas 4 e 2,5 (`int(x / regua)` = truncar), ordenações de `_ordenar`, `_dimension`, `_por_dia` (estáveis), rótulo de `by_area_dia` = parte depois de `|`.
 - `foco`: série diária do item; `foco` que é uma área usa `_somar_area`.
 - Rota: chave do cache = `("uso", period, dia de hoje, geração do preço, rótulos, instante das origens, filtros ordenados por nome)`; filtros vazios removidos; `period` inválido → `all`.
 
-- [ ] **Step 4: Rodar** — PASS.
+- [x] **Step 4: Rodar** — PASS.
 
-- [ ] **Step 5: Revisão e commit**
+- [x] **Step 5: Revisão e commit**
 
 ```bash
 git add crates/hangar-server/src crates/hangar-server/tests/contract_costs_reports.rs crates/hangar-server/tests/costs_routes.rs
@@ -1585,7 +1655,7 @@ git commit -m "feat(server): serve /api/uso from Rust with skill origins and Pyt
 - Consumes: `fetch_info` (`routes.rs`, já existe; devolve `provider` e `jsonl`), `codex::session_rows`, `row_cost`.
 - Produces: handler `session_cost`; resposta `{"cost_usd": f64 | null, "missing_models": [..], "has_usage": bool}` (porte de `session_cost.py`).
 
-- [ ] **Step 1: Testes que falham** — em `costs_routes.rs`, com o upstream falso respondendo `/internal/sessions/{name}/info`:
+- [x] **Step 1: Testes que falham** — em `costs_routes.rs`, com o upstream falso respondendo `/internal/sessions/{name}/info`:
 
 ```rust
 // 1. info {"provider": "codex", "jsonl": <rollout-c1 da cópia>} → 200 com cost_usd > 0, missing_models [] e has_usage true;
@@ -1600,10 +1670,10 @@ git commit -m "feat(server): serve /api/uso from Rust with skill origins and Pyt
 
 Mesmas regras de escrita da Task 10 (funções completas, afirmando status e corpo).
 
-- [ ] **Step 2: Rodar e ver falhar.**
-- [ ] **Step 3: Implementar** — `info` sem cache (como `history`, sessão recriada não pode ver a morta); provider ≠ `codex` ou sem `jsonl` → 404 com o `detail` do Python; `canonicalize` falhou → 404 do rollout; linhas vazias de tokens puladas; agrupamento `(model, codex_long_context)` em ordem de inserção; `cost_usd = None` sem linhas ou com modelo sem tarifa; `missing_models` ordenado; `session_rows` roda em `spawn_blocking`.
-- [ ] **Step 4: Rodar** — PASS.
-- [ ] **Step 5: Revisão e commit**
+- [x] **Step 2: Rodar e ver falhar.**
+- [x] **Step 3: Implementar** — `info` sem cache (como `history`, sessão recriada não pode ver a morta); provider ≠ `codex` ou sem `jsonl` → 404 com o `detail` do Python; `canonicalize` falhou → 404 do rollout; linhas vazias de tokens puladas; agrupamento `(model, codex_long_context)` em ordem de inserção; `cost_usd = None` sem linhas ou com modelo sem tarifa; `missing_models` ordenado; `session_rows` roda em `spawn_blocking`.
+- [x] **Step 4: Rodar** — PASS.
+- [x] **Step 5: Revisão e commit**
 
 ```bash
 git add crates/hangar-server/src crates/hangar-server/tests/costs_routes.rs

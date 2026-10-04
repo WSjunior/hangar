@@ -936,6 +936,66 @@ mod recovery_tests {
         assert!(index.read_usage("scope", None).is_err());
     }
 
+    #[test]
+    fn usage_fold_preserves_prefix_row_order_and_conversion_failure_atomicity() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::open(dir.path()).unwrap();
+        let expected = usage_fixture(&index);
+        let prefix = UsoLinha { nome: "prefixo".into(), ..UsoLinha::default() };
+        let seed = vec![prefix.clone()];
+        let output = index.fold_usage("scope", Some("2026-10-01"), seed.clone(),
+            &mut |rows, row| rows.push(row)).unwrap();
+        assert_eq!(output, std::iter::once(prefix).chain(expected).collect::<Vec<_>>());
+        assert_eq!(index.fold_usage("scope", Some("2026-10-02"), seed.clone(),
+            &mut |rows, row| rows.push(row)).unwrap(), seed);
+        index.connect().unwrap().execute("UPDATE uso SET ctx_chars=x'ff' WHERE chamadas=2", []).unwrap();
+        let before = index.generation();
+        let mut visits = 0;
+        let error = index.fold_usage("scope", None, seed.clone(), &mut |rows, row| {
+            visits += 1;
+            rows.push(row);
+        }).unwrap_err();
+        assert!(matches!(error, IndexError::Sqlite(rusqlite::Error::InvalidColumnType(9, _, _))));
+        assert_eq!(visits, 1);
+        assert_eq!(seed.len(), 1);
+        assert_eq!(index.generation(), before);
+        assert!(index.read_usage("scope", None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn usage_fold_retries_from_a_fresh_clone_after_real_sqlite_corruption() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::open(dir.path()).unwrap();
+        usage_fixture(&index);
+        let conn = index.connect().unwrap();
+        let page: i64 = conn.query_row("SELECT rootpage FROM sqlite_master WHERE name='custo'", [], |r| r.get(0)).unwrap();
+        let size: i64 = conn.pragma_query_value(None, "page_size", |r| r.get(0)).unwrap();
+        drop(conn);
+        let before = index.generation();
+        let seed = vec![UsoLinha { nome: "prefixo".into(), ..UsoLinha::default() }];
+        let mut visits = 0;
+        let output = index.fold_usage("scope", None, seed.clone(), &mut |rows, row| {
+            visits += 1;
+            if visits == 1 {
+                let mut file = fs::OpenOptions::new().write(true).open(&index.path).unwrap();
+                file.seek(SeekFrom::Start(((page - 1) * size) as u64)).unwrap();
+                file.write_all(&[0xff]).unwrap();
+                file.sync_all().unwrap();
+                let error = index.read_costs(None, None, None).unwrap_err();
+                assert!(matches!(error, IndexError::Sqlite(ref error) if error.sqlite_error_code() == Some(ErrorCode::DatabaseCorrupt)));
+                assert!(index.operations.lock().unwrap().pending);
+            }
+            rows.push(row);
+        }).unwrap();
+        assert_eq!(visits, 3, "a tentativa condenada precisa realmente consumir as três linhas");
+        assert_eq!(output, seed, "a releitura não publica as linhas da tentativa condenada");
+        assert!(index.generation() > before);
+        assert!(index.read_usage("scope", None).unwrap().is_empty());
+        assert!(!index.operations.lock().unwrap().pending);
+    }
+
     #[cfg(unix)]
     #[test]
     fn usage_append_discards_rows_from_the_condemned_attempt_before_recovery() {

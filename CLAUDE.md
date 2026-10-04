@@ -406,8 +406,10 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   `__Host-cp_token`: máquinas do Connect dividem o mesmo site. Evidência em
   [plataforma.md](docs/decisoes/plataforma.md#connect-a-porta-dele-nunca-é-local).
 - **A porta 8765 é do `hangar-server` (Rust); o Python escuta atrás, numa porta de loopback.**
-  Ele atende sozinho só `/history` e `/events` de Claude/Codex com o token do dono; o resto,
-  convidado incluído, é repassado com `X-Forwarded-For`. 8766 e 8768 ficam no Python. Sem binário
+  Ele atende `/history` e `/events` de Claude/Codex, `/api/costs`, `/api/uso`, `/api/cotacao` e o
+  custo de sessão Codex com o token do dono. Custos e uso têm índice próprio
+  (`custos-rust.sqlite3`) no cache local; cotas e stats ficam no Python. O resto, convidado
+  incluído, é repassado com `X-Forwarded-For`. 8766 e 8768 ficam no Python. Sem binário
   (`CP_RUST_SERVER_BIN`, `crates/target/release`, `~/.hangar/bin`), com `CP_RUST_SERVER=0`, com
   `protocol` da saúde diferente de `RUST_SERVER_PROTOCOL` ou com 3 quedas em 60 s, um segundo
   `uvicorn.Server` com `lifespan="off"` assume a porta: nunca um segundo lifespan. O segredo
@@ -416,6 +418,7 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   `side-events`, variáveis do filho): suba `RUST_SERVER_PROTOCOL` (Python) e `INTERNAL_PROTOCOL`
   (Rust) juntos. O `versao` do snapshot do `hangar-cano` acompanha o `VERSAO` do `cano.py`.
   Medidas e motivo em [plataforma.md](docs/decisoes/plataforma.md#hangar-server-a-porta-pública-em-rust-o-python-atrás).
+  Índice, paridade e medidas de custos em [plataforma.md](docs/decisoes/plataforma.md#custos-e-uso-no-hangar-server).
 - **Observação terminal Rust usa porta privada de loopback no mesmo filho**, anunciada na saúde
   somente como endereço; o segredo vem do Supervisor em memória após conferir o protocolo.
   Lease pertence ao produtor Claude que consome a captura, não ao aparelho. Codex nativo não

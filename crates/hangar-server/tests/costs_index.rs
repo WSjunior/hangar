@@ -797,7 +797,7 @@ fn persistent_fold_panic_preserves_rows_and_other_files_finish() {
 }
 
 #[test]
-fn selected_pool_reads_in_parallel_but_writes_on_the_caller_in_file_order() {
+fn selected_pool_reads_and_calculates_areas_in_parallel_then_commits_in_file_order() {
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Duration;
     let d = tempfile::tempdir().unwrap();
@@ -812,6 +812,7 @@ fn selected_pool_reads_in_parallel_but_writes_on_the_caller_in_file_order() {
     let active = AtomicUsize::new(0);
     let peak = AtomicUsize::new(0);
     let caller = std::thread::current().id();
+    let area_calls = AtomicUsize::new(0);
     let new = |path: &Path| {
         assert!(std::thread::current().name().unwrap().starts_with("costs-index-test-"));
         let count = active.fetch_add(1, Ordering::SeqCst) + 1;
@@ -826,13 +827,18 @@ fn selected_pool_reads_in_parallel_but_writes_on_the_caller_in_file_order() {
         WithAreas::default()
     };
     let redo = |areas: &AreaEntries| {
-        assert_eq!(std::thread::current().id(), caller, "um único escritor no chamador");
+        assert_ne!(std::thread::current().id(), caller, "o cálculo puro acompanha a leitura no pool");
+        assert!(std::thread::current().name().unwrap().starts_with("costs-index-test-"));
+        area_calls.fetch_add(1, Ordering::SeqCst);
         area_rows(areas)
     };
     assert!(ix.sync("t", &[a.clone(), b], &new, "v1", "sig", &redo, &Progress::default()).unwrap());
     assert_eq!(peak.load(Ordering::SeqCst), 2);
+    assert_eq!(area_calls.load(Ordering::SeqCst), 2);
     let rows = ix.read_costs(Some("t"), None, None).unwrap();
     assert_eq!(rows.iter().map(|r| r.input).collect::<Vec<_>>(), vec![1, 2]);
+    assert_eq!(ix.read_usage("t", None).unwrap().iter().filter(|row| row.tipo == "area")
+        .map(|row| row.input).collect::<Vec<_>>(), vec![1, 2]);
 }
 
 #[test]
@@ -915,10 +921,10 @@ fn slow_first_file_keeps_later_reads_bounded_and_preserves_order() {
         }
         let started = first_started.load(Ordering::SeqCst);
         let start = Instant::now();
-        while entered.load(Ordering::SeqCst) <= 8 && start.elapsed() < Duration::from_millis(150) {
+        while entered.load(Ordering::SeqCst) <= 64 && start.elapsed() < Duration::from_millis(150) {
             std::thread::yield_now();
         }
-        let bounded = started && entered.load(Ordering::SeqCst) <= 8;
+        let bounded = started && entered.load(Ordering::SeqCst) == 64;
         let empty = ix.read_costs(Some("t"), None, None).unwrap().is_empty();
         let unchanged = ix.generation() == before;
         *gate.0.lock().unwrap() = true;
@@ -927,7 +933,7 @@ fn slow_first_file_keeps_later_reads_bounded_and_preserves_order() {
         assert!(empty && unchanged, "a ordem impede publicar arquivos posteriores antes do primeiro");
         bounded
     });
-    assert!(bounded, "uma leitura lenta não pode acumular o resultado de todos os arquivos posteriores");
+    assert!(bounded, "a janela deve preencher 64 leituras sem acumular todos os arquivos posteriores");
     assert_eq!(progress.total(), (128, 128));
     assert_eq!(ix.read_costs(Some("t"), None, None).unwrap().iter().map(|r| r.input).collect::<Vec<_>>(),
         (1..=128).collect::<Vec<_>>());
@@ -938,7 +944,7 @@ fn dense_results_commit_before_more_files_are_read_and_allow_reentrant_reads() {
     use std::sync::Arc;
     let d = tempfile::tempdir().unwrap();
     let dir = d.path().join("idx");
-    let files = (0..64).map(|n| {
+    let files = (0..128).map(|n| {
         let path = d.path().join(format!("{n}.jsonl"));
         std::fs::write(&path, "1\n").unwrap();
         path
@@ -957,7 +963,7 @@ fn dense_results_commit_before_more_files_are_read_and_allow_reentrant_reads() {
     ix.sync("t", &files, &new, "v1", "sig", &no_areas, &Progress::default()).unwrap();
     assert!(read_before_finish.load(Ordering::SeqCst),
         "um lote denso deve liberar seus resultados e publicar a geração antes de ler todos os arquivos");
-    assert_eq!(ix.read_costs(Some("t"), None, None).unwrap().len(), 64 * 1024);
+    assert_eq!(ix.read_costs(Some("t"), None, None).unwrap().len(), 128 * 1024);
 }
 
 #[derive(Serialize, Deserialize)]
@@ -990,6 +996,38 @@ fn area_callback_panic_rolls_back_single_file_write_and_preserves_rows() {
     assert_eq!(ix.read_usage("t", None).unwrap()[1].input, 2);
     ix.sync_file(&f, &new_areas, "v1", "t", "sig", &area_rows).unwrap();
     assert_eq!(sum(&ix), (5, 2));
+}
+
+#[test]
+fn area_panic_in_the_read_pool_remains_reader_panic_and_preserves_committed_rows() {
+    use std::sync::Arc;
+    hangar_server::install_panic_hook();
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("a.jsonl");
+    std::fs::write(&f, "2\n").unwrap();
+    let ix = Index::open(&d.path().join("idx")).unwrap().with_pool(Arc::new(
+        rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap()));
+    let progress = Progress::default();
+    ix.sync("t", &[f.clone()], &new_areas, "v1", "sig", &area_rows, &progress).unwrap();
+    let before = ix.generation();
+    let usage = ix.read_usage("t", None).unwrap();
+    append(&f, b"3\n");
+    let caller = std::thread::current().id();
+    let calls = AtomicUsize::new(0);
+    let fail = |_: &AreaEntries| -> Vec<UsoLinha> {
+        assert_ne!(std::thread::current().id(), caller);
+        calls.fetch_add(1, Ordering::SeqCst);
+        panic!("falha sintética nas áreas")
+    };
+    let result = ix.sync("t", &[f.clone()], &new_areas, "v1", "sig", &fail, &progress);
+    assert!(matches!(result, Err(IndexError::ReaderPanic)));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(ix.generation(), before);
+    assert_eq!(sum(&ix), (2, 1));
+    assert_eq!(ix.read_usage("t", None).unwrap(), usage);
+    ix.sync("t", &[f], &new_areas, "v1", "sig", &area_rows, &progress).unwrap();
+    assert_eq!(sum(&ix), (5, 2));
+    assert_eq!(ix.read_usage("t", None).unwrap()[1].input, 5);
 }
 
 #[test]

@@ -149,7 +149,42 @@ fn usage_direct_append_preserves_scope_order_accounts_and_every_row_field() {
     let (usage, tokens) = c.read_usage(Some("2026-10-01")).unwrap();
     assert_eq!(usage, expected);
     assert!(tokens.is_empty());
+    let prefix = (UsoLinha { nome: "prefixo".into(), ..UsoLinha::default() }, "prévia".to_owned());
+    let streamed = c.fold_usage(Some("2026-10-01"), |tokens, _| {
+        assert!(tokens.is_empty());
+        vec![prefix.clone()]
+    }, &mut |rows: &mut Vec<(UsoLinha, String)>, row, account, _| rows.push((row.clone(), account.to_owned()))).unwrap();
+    assert_eq!(streamed, std::iter::once(prefix).chain(expected).collect::<Vec<_>>());
+    let empty = c.fold_usage(Some("2026-10-02"), |_, _| Vec::new(),
+        &mut |rows: &mut Vec<(UsoLinha, String)>, row, account, _| rows.push((row.clone(), account.to_owned()))).unwrap();
+    assert!(empty.is_empty());
     assert!(c.read_usage(Some("2026-10-02")).unwrap().0.is_empty());
+}
+
+#[test]
+fn streamed_usage_report_matches_materialized_rows_with_exact_order_floats_and_filters() {
+    use hangar_server::costs::{py::LocalTs, report_uso::{build, UsoBuilder, UsoFilters}};
+    let (_d, base) = fixtures_copy();
+    let c = collector(&base, Fixed::new(Ok(scopes(&base))));
+    c.prepare(false).unwrap();
+    wait_ready(&c);
+    let now = LocalTs::from_iso("2026-10-03T02:59:59Z").unwrap();
+    let origins = indexmap::IndexMap::from([("brainstorming".to_owned(), "superpowers".to_owned())]);
+    for filters in [UsoFilters::default(),
+        UsoFilters { conta: vec!["anthropic:u-fixture".into()], ..Default::default() },
+        UsoFilters { foco: Some("conversa".into()), ..Default::default() },
+        UsoFilters { plugin: vec!["superpowers".into()], ..Default::default() }] {
+        for (period, since) in [("all", None), ("1d", Some("2026-10-02"))] {
+            let (rows, tokens) = c.read_usage(since).unwrap();
+            let expected = build(&rows, &tokens, period, now,
+                &filters, Some(&origins), &c.pricing(), &|account| c.label(account));
+            let builder = c.fold_usage(since,
+                |tokens, pricing| UsoBuilder::new(tokens, period, now, &filters, Some(&origins), pricing),
+                &mut |builder: &mut UsoBuilder<'_>, row, account, pricing| builder.push(row, account, pricing)).unwrap();
+            let got = builder.finish(&|account| c.label(account));
+            assert_eq!(serde_json::to_string(&got).unwrap(), serde_json::to_string(&expected).unwrap(), "{period}");
+        }
+    }
 }
 
 #[test]

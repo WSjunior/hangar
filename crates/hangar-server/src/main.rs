@@ -1,8 +1,13 @@
 //! hangar-server: sobe como filho do Python (app/main.py), na porta pública.
 
+fn main() {
+    // O glibc exige a configuração antes de o runtime criar threads.
+    unsafe { hangar_server::tune_allocator(); }
+    run();
+}
+
 #[tokio::main]
-async fn main() {
-    hangar_server::tune_allocator();
+async fn run() {
     let cfg = match hangar_server::config::Config::from_env() {
         Ok(cfg) => cfg,
         Err(e) => {
