@@ -494,3 +494,16 @@ async fn status_formatting_and_state_changes_do_not_rewrite_the_journal() {
     let views = state.operations.values().filter(|op|op.payload["kind"] == "set_runtime_state").count();
     assert!(views <= 3,"vista gravada {views} vezes num turno sem mudança durável relevante");
 }
+
+#[tokio::test]
+async fn a_queue_refusal_carries_its_reason() {
+    // O diário do Python e o log do Rust mostravam só "queue_io"; a frase da fila é fixa e diz a causa.
+    let (handle,server,_dir) = setup(true).await;
+    let append = ||Action::Append { text:"Olá".into(),delivered:true,ts:None,pre_transcript:false,entry_id:Some("same".into()) };
+    handle.queue("first".into(),append()).await.unwrap();
+    let error = handle.queue("second".into(),append()).await.unwrap_err();
+    assert_eq!(error.code,"queue_io");
+    assert!(error.message.contains("entrada da fila já existe"),"{}",error.message);
+    handle.stop().await.unwrap();
+    server.await.unwrap();
+}

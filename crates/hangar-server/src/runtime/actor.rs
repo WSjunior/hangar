@@ -119,10 +119,11 @@ impl RuntimeEngine {
 
 fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indisponível; operação conservada no diário") }
 fn io_failure(error:std::io::Error) -> RuntimeError {
-    // Só o tipo: a mensagem do io::Error pode trazer o caminho.
-    let kind = format!("{:?}",error.kind());
-    if crate::warn_limit::allow(None,&format!("queue_io:{kind}")) { tracing::warn!(io_kind=%kind,"runtime falhou em E/S (diário ou transcript)"); }
-    failure("queue_io")
+    // Recusa da fila tem frase fixa e vai inteira (log e diário do Python); de resto só o tipo, porque
+    // a mensagem do io::Error ou do serde pode trazer caminho ou texto.
+    let reason = super::queue::refusal(&error).map_or_else(||format!("{:?}",error.kind()),str::to_owned);
+    if crate::warn_limit::allow(None,&format!("queue_io:{reason}")) { tracing::warn!(reason=%reason,"runtime falhou em E/S (diário ou transcript)"); }
+    RuntimeError::new("queue_io",&format!("fila recusou: {reason}"))
 }
 
 /// Loga só na entrada em erro ou na troca de código: o mesmo erro repetido não enche o log.

@@ -177,7 +177,18 @@ pub struct Store {
     fenced: bool,
 }
 
-fn invalid(message: &str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message) }
+/// Recusa da própria fila: frase fixa, sem caminho nem texto da conversa, então pode ir ao log.
+#[derive(Debug)]
+pub struct QueueRefusal(pub &'static str);
+impl std::fmt::Display for QueueRefusal { fn fmt(&self, f:&mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.0) } }
+impl std::error::Error for QueueRefusal {}
+
+fn invalid(message: &'static str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, QueueRefusal(message)) }
+
+/// A frase da recusa, se o erro veio da fila; erros do sistema ou do serde ficam só com o tipo.
+pub fn refusal(error: &io::Error) -> Option<&'static str> {
+    error.get_ref().and_then(|inner|inner.downcast_ref::<QueueRefusal>()).map(|refusal|refusal.0)
+}
 
 pub fn acquire_lease(path: &Path) -> io::Result<Arc<File>> {
     if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
