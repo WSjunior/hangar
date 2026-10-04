@@ -446,10 +446,10 @@ impl Hangar {
         cx.spawn_in(window, async move |this, cx| {
             let chosen = prompt.await;
             let _ = this.update(cx, |this, cx| match chosen {
-                Ok(Ok(Some(paths))) => if let Some(path) = paths.into_iter().next() { this.tree_set_root(Some(path), cx); },
                 Ok(Ok(None)) => {}
+                Ok(Ok(Some(paths))) if !paths.is_empty() => this.tree_set_root(paths.into_iter().next(), cx),
                 Ok(Err(error)) => { this.tree.root_error = Some(error.to_string()); this.redraw(Area::Side, cx); }
-                Err(_) => { this.tree.root_error = Some(tr("picker_failed")); this.redraw(Area::Side, cx); }
+                _ => { this.tree.root_error = Some(tr("picker_failed")); this.redraw(Area::Side, cx); }
             });
         }).detach();
     }
