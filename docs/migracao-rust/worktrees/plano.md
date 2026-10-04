@@ -30,28 +30,41 @@ Frente B do pedido `pedidos/2026-10-04-custos-e-worktrees-rust-kickoff.md`. Bran
 
 ### Task 1: Núcleo da lista e da situação no hangar-workspace
 
-- [ ] **Step 1: Teste de paridade** em `backend/tests/test_worktrees_parity.py`: repositório com
+- [x] **Step 1: Teste de paridade** em `backend/tests/test_worktrees_parity.py`: repositório com
   worktrees mesclada, suja, com ignorado, à frente/atrás, upstream sumido, pasta apagada e
   sessão dentro; compara `worktrees.list_all`/`status` com a ponte `workspace_contract`.
-- [ ] **Step 2: `worktrees.rs`** com `list_all`/`status` paralelos e as operações no `Operation`.
-- [ ] **Step 3: Testes Rust** do que a paridade não cobre (paralelo preserva ordem, falha de git
+- [x] **Step 2: `worktrees.rs`** com `list_all`/`status` paralelos e as operações no `Operation`.
+- [x] **Step 3: Testes Rust** do que a paridade não cobre (paralelo preserva ordem, falha de git
   marca `degraded`, chave de tamanho).
 
 ### Task 2: Tamanho em disco por trás
 
-- [ ] **Step 1: Medição em fila única** com cache, falha com nova tentativa e total parcial.
-- [ ] **Step 2: Teste** de pasta medida, pendente e recriada.
+- [x] **Step 1: Medição em fila única** com cache, falha com nova tentativa e total parcial.
+- [x] **Step 2: Teste** de pasta medida, pendente e recriada.
 
 ### Task 3: Contexto no Python e rotas no Rust
 
-- [ ] **Step 1: `/internal/worktrees/context`** no `internal_api.py` + teste; protocolo 19.
-- [ ] **Step 2: Rotas no hangar-server** (validação de repositório e de worktree iguais às do
+- [x] **Step 1: `/internal/worktrees/context`** no `internal_api.py` + teste; protocolo 19.
+- [x] **Step 2: Rotas no hangar-server** (validação de repositório e de worktree iguais às do
   `api.py`, 503 com código quando o contexto falha) + testes com o Python falso.
 
 ### Task 4: Prova
 
-- [ ] **Step 1: Medição antes/depois** no backend de teste isolado (38 worktrees; meta ≤ 200 ms).
-- [ ] **Step 2: Revisão por subagente** (`ecc:rust-reviewer`, `ecc:silent-failure-hunter`,
+- [x] **Step 1: Medição antes/depois** no backend de teste isolado (38 worktrees; meta ≤ 200 ms).
+- [x] **Step 2: Revisão por subagente** (`ecc:rust-reviewer`, `ecc:silent-failure-hunter`,
   `ecc:python-reviewer`) e correções.
 - [ ] **Step 3: Testes** (`cargo test --locked --workspace`, pytest dos arquivos tocados,
   `npm run check` na raiz) e CI do `server.yml` job por job.
+
+## Resultado (04/10/2026, esta máquina)
+
+- **Medição** (2 repos, 40 worktrees; mediana de 7 pedidos; `hangar-server` release contra um
+  Python falso que só serve `/internal/worktrees/context`, sem subir backend — um segundo backend
+  no mesmo usuário mata os canos das sessões reais): rota Rust **136 ms** sem tamanho, **165 ms**
+  com tamanho (medido por trás; 40 de 40 prontos em 20 s). Python `list_all` na mesma hora:
+  **~1.000 ms** (2,6 s com a máquina mais carregada). Script: `medir_rota.py` no scratchpad.
+- **Paridade:** saída idêntica ao Python nos repositórios reais (`list_worktrees`) e no cenário
+  sintético de `backend/tests/test_worktrees_parity.py`.
+- **Divergências aceitas** (Rust mais correto): `head_info` resolve ponteiro `gitdir` relativo;
+  linha de `log` com U+2028 no assunto; config de worktree (`extensions.worktreeConfig`) não é lida.
+- **Fica no Python:** `delete`, `delete-merged`, `create`, `fetch` (movem conversas entre contas).
