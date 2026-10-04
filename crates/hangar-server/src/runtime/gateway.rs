@@ -114,7 +114,10 @@ impl RuntimeRegistry {
             // `stop` sempre junta a tarefa do ator: se ele saiu por erro, a posse acaba com ele. Sem
             // isto a entrada morta ficava para sempre, a sessão não voltava ao Python e o retrato de
             // eventos de todas as sessões caía. Só solta depois de a trava estar livre de fato.
-            if !lease_released(&lease_path).await { return Err(error); }
+            if !lease_released(&lease_path).await {
+                tracing::warn!(key,code=%error.code,"ator terminou mas a trava não liberou em 3 s; sessão segue presa");
+                return Err(error);
+            }
             tracing::warn!(key,code=%error.code,"ator do runtime já tinha terminado; sessão liberada");
         }
         self.entries.lock().await.remove(key);
@@ -130,7 +133,7 @@ impl RuntimeRegistry {
             // Uma sessão sem ator não tira o retrato das outras: ela fica de fora até ser liberada.
             match handle.snapshot().await {
                 Ok(data)=>output.push(RuntimeEvent { key,generation,revision:data["revision"].as_u64().unwrap_or(0),channel:"snapshot".into(),data }),
-                Err(error)=>tracing::warn!(key,code=%error.code,"sessão fora do retrato inicial dos eventos"),
+                Err(error)=>if crate::warn_limit::allow(Some(&key),&error.code) { tracing::warn!(key,code=%error.code,"sessão fora do retrato inicial dos eventos") },
             }
         }
         Ok(output)

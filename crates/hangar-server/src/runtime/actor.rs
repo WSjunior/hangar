@@ -800,6 +800,9 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             // segue no Rust (o motivo já foi para o log pelo cliente da política). Sidecar e catálogo
                             // de skills seguram estado da sessão: a falha deles continua levando-a ao Python.
                             Err(failure) if COSMETIC_POLICIES.contains(&kind.as_str()) => {
+                                if crate::warn_limit::allow(Some(&target.key),&format!("policy:{kind}")) {
+                                    tracing::warn!(key=%target.key,session=%target.name,policy=%kind,code=%failure.code,"serviço cosmético falhou; a sessão segue no Rust");
+                                }
                                 engine.forget_policy(&request_id);
                                 publish(&events,&target,&mut revision,"problem",json!({"error_code":failure.code,"message":failure.message}));
                             },
@@ -918,6 +921,9 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                         let prefix = format!("{id}:");
                         let written = native.contains(id) || attempts.values().any(|attempt|attempt.logical_id == *id || attempt.logical_id.starts_with(&prefix));
                         let unsent = !written && matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer);
+                        if crate::warn_limit::allow(Some(&target.key),"deadline") {
+                            tracing::warn!(key=%target.key,session=%target.name,operation=%id,unsent,"operação sem resposta em 30 s");
+                        }
                         effects.push_back(Effect::Reply { operation_id:id.clone(),disposition:if unsent { Disposition::Deferred } else { Disposition::Unknown },
                             payload:json!({"error":"operação sem resposta"}) });
                     }
@@ -1030,6 +1036,9 @@ fn defer_unwritten(roots:&mut BTreeMap<String,Pending>,attempts:&BTreeMap<String
     let input = roots.get(id).is_some_and(|pending|matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer));
     if written || !input { return fail_root(roots,id,error); }
     let Some(pending) = roots.get_mut(id) else { return };
+    if crate::warn_limit::allow(Some(id),&error.code) {
+        tracing::warn!(operation=%id,code=%error.code,reason=%error.message,"entrada adiada antes de qualquer escrita");
+    }
     pending.preparing = false;
     // Adiada não é erro: quem espera (API ou drain) vê a entrada de volta na fila, e o drain não põe
     // a sessão inteira em erro por isso.
