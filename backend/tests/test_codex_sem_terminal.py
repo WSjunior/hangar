@@ -47,7 +47,9 @@ for linha in sys.stdin:
             f.write(json.dumps(ev["params"]) + "\n")
         out({"jsonrpc": "2.0", "id": ev["id"], "result": {"thread": {"id": ev["params"]["threadId"]}, "model": "gpt-falso"}})
     elif m == "thread/settings/update":
-        effort = ev["params"].get("effort")
+        # O modo colaborativo também carrega o esforço; ajuste sem o campo não o apaga.
+        mode = (ev["params"].get("collaborationMode") or {}).get("settings") or {}
+        effort = ev["params"].get("effort", mode.get("reasoning_effort", effort))
         with open("settings.txt", "w") as f:
             f.write(json.dumps(ev["params"]))
         if ev["params"].get("effort") == "recusado":

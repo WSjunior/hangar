@@ -669,7 +669,7 @@ async def test_cancelled_common_send_keeps_participation_until_receipt(terminal_
 @pytest.mark.parametrize("slow_route", ["transcribe", "git/diff"])
 async def test_slow_query_does_not_exclude_input_or_interrupt(terminal_ingress, monkeypatch, slow_route):
     import threading
-    from httpx import ASGITransport, AsyncClient
+    from httpx2 import ASGITransport, AsyncClient
     entered, release = threading.Event(), threading.Event()
 
     def slow(*args, **kwargs):
@@ -703,7 +703,7 @@ async def test_slow_query_does_not_exclude_input_or_interrupt(terminal_ingress, 
 
 async def test_two_normal_http_inputs_share_the_ingress_gate(terminal_ingress, monkeypatch):
     import threading
-    from httpx import ASGITransport, AsyncClient
+    from httpx2 import ASGITransport, AsyncClient
     first, both, release = threading.Event(), threading.Event(), threading.Event()
     arrivals, lock = [], threading.Lock()
     append = pqueue.PromptQueue.append
@@ -736,7 +736,7 @@ async def test_two_normal_http_inputs_share_the_ingress_gate(terminal_ingress, m
 
 
 async def test_transfer_still_refuses_queries_input_and_interrupt(terminal_ingress, monkeypatch):
-    from httpx import ASGITransport, AsyncClient
+    from httpx2 import ASGITransport, AsyncClient
     scenario = terminal_ingress
     record = store.TransferRecord(str(uuid.uuid4()), "s", "k:source-key", store.TransferPhase.PREPARING,
                                   None, {**scenario.meta, "jsonl": str(scenario.source)}, None, None, None)

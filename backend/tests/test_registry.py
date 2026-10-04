@@ -642,7 +642,7 @@ from app import hook_state as hs_mod
 
 def test_list_with_state_prefers_marker(monkeypatch):
     reg = SessionRegistry()
-    info = type("I", (), {"name": "cc", "cwd": "/p", "jsonl": "/x/sid123.jsonl", "state": "idle", "last_activity": None})()
+    info = type("I", (), {"name": "cc", "cwd": "/p", "jsonl": "/x/sid123.jsonl", "state": "idle", "last_activity": None, "transfer_phase": None})()
     monkeypatch.setattr(reg, "list", lambda: [info])
     monkeypatch.setattr(hs_mod.hook_state, "get_state", lambda sid: ("working", 1.0) if sid == "sid123" else None)
     called = {"pane": 0}
@@ -665,7 +665,7 @@ def test_list_with_state_statusline_sweep_respeita_budget(monkeypatch):
     import app.registry as reg_mod
     reg = SessionRegistry()
     infos = [type("I", (), {"name": f"s{i}", "cwd": "/p", "jsonl": f"/x/sid{i}.jsonl",
-                            "state": "idle", "last_activity": None})() for i in range(5)]
+                            "state": "idle", "last_activity": None, "transfer_phase": None})() for i in range(5)]
     monkeypatch.setattr(reg, "list", lambda: infos)
     monkeypatch.setattr(hs_mod.hook_state, "get_state", lambda sid: ("idle", 1.0))
     called = {"pane": 0}
@@ -679,7 +679,7 @@ def test_list_with_state_statusline_sweep_respeita_budget(monkeypatch):
 
 def test_list_with_state_falls_back_to_pane(monkeypatch):
     reg = SessionRegistry()
-    info = type("I", (), {"name": "cc", "cwd": "/p", "jsonl": "/x/none.jsonl", "state": "idle", "last_activity": None})()
+    info = type("I", (), {"name": "cc", "cwd": "/p", "jsonl": "/x/none.jsonl", "state": "idle", "last_activity": None, "transfer_phase": None})()
     monkeypatch.setattr(reg, "list", lambda: [info])
     monkeypatch.setattr(hs_mod.hook_state, "get_state", lambda sid: None)   # sem marcador
     monkeypatch.setattr("app.registry.tmux.capture_pane", lambda name: "")  # pane vazio -> idle
@@ -697,7 +697,7 @@ def test_list_with_state_marks_stalled_past_threshold(tmp_path, monkeypatch):
     jsonl.write_text("{}\n")
     old = time.time() - 999
     os.utime(jsonl, (old, old))  # transcript parado ha muito mais que o threshold
-    info = type("I", (), {"name": "cc", "cwd": "/p", "jsonl": str(jsonl), "state": "idle", "last_activity": None})()
+    info = type("I", (), {"name": "cc", "cwd": "/p", "jsonl": str(jsonl), "state": "idle", "last_activity": None, "transfer_phase": None})()
     monkeypatch.setattr(reg, "list", lambda: [info])
     monkeypatch.setattr(hs_mod.hook_state, "get_state", lambda sid: ("working", old) if sid == "sid123" else None)
     monkeypatch.setattr(registry.settings, "stall_seconds", 300)
@@ -711,7 +711,7 @@ def test_list_with_state_not_stalled_when_recent(tmp_path, monkeypatch):
     reg = SessionRegistry(projects_dir=tmp_path)
     jsonl = tmp_path / "sid456.jsonl"
     jsonl.write_text("{}\n")  # mtime = agora
-    info = type("I", (), {"name": "cc", "cwd": "/p", "jsonl": str(jsonl), "state": "idle", "last_activity": None})()
+    info = type("I", (), {"name": "cc", "cwd": "/p", "jsonl": str(jsonl), "state": "idle", "last_activity": None, "transfer_phase": None})()
     monkeypatch.setattr(reg, "list", lambda: [info])
     monkeypatch.setattr(hs_mod.hook_state, "get_state", lambda sid: ("working", time.time()) if sid == "sid456" else None)
     monkeypatch.setattr(registry.settings, "stall_seconds", 300)
@@ -727,7 +727,7 @@ def test_list_with_state_not_stalled_when_not_working(tmp_path, monkeypatch):
     jsonl.write_text("{}\n")
     old = time.time() - 999
     os.utime(jsonl, (old, old))
-    info = type("I", (), {"name": "cc", "cwd": "/p", "jsonl": str(jsonl), "state": "idle", "last_activity": None})()
+    info = type("I", (), {"name": "cc", "cwd": "/p", "jsonl": str(jsonl), "state": "idle", "last_activity": None, "transfer_phase": None})()
     monkeypatch.setattr(reg, "list", lambda: [info])
     monkeypatch.setattr(hs_mod.hook_state, "get_state", lambda sid: ("idle", old) if sid == "sid789" else None)
     monkeypatch.setattr(registry.settings, "stall_seconds", 300)
@@ -909,8 +909,8 @@ def test_label_cache_preenche_working_e_nunca_idle(monkeypatch):
     reg = SessionRegistry()
     mk = {"sidw": ("working", 1.0), "sidi": ("idle", 1.0)}
     infos = [
-        type("I", (), {"name": "w", "cwd": "/p", "jsonl": "/x/sidw.jsonl", "state": "idle", "last_activity": None})(),
-        type("I", (), {"name": "i", "cwd": "/p", "jsonl": "/x/sidi.jsonl", "state": "idle", "last_activity": None})(),
+        type("I", (), {"name": "w", "cwd": "/p", "jsonl": "/x/sidw.jsonl", "state": "idle", "last_activity": None, "transfer_phase": None})(),
+        type("I", (), {"name": "i", "cwd": "/p", "jsonl": "/x/sidi.jsonl", "state": "idle", "last_activity": None, "transfer_phase": None})(),
     ]
     monkeypatch.setattr(reg, "list", lambda: infos)
     monkeypatch.setattr(hs_mod.hook_state, "get_state", lambda sid: mk.get(sid))
@@ -1258,7 +1258,7 @@ def test_list_with_state_radar_de_limite_so_nas_travadas(tmp_path, monkeypatch):
     parada.write_text("{}\n"); fresca.write_text("{}\n")
     old = time.time() - 999
     os.utime(parada, (old, old))
-    mk = lambda n, j: type("I", (), {"name": n, "cwd": "/p", "jsonl": str(j), "state": "idle", "last_activity": None})()
+    mk = lambda n, j: type("I", (), {"name": n, "cwd": "/p", "jsonl": str(j), "state": "idle", "last_activity": None, "transfer_phase": None})()
     monkeypatch.setattr(reg, "list", lambda: [mk("lim", parada), mk("viva", fresca)])
     monkeypatch.setattr(hs_mod.hook_state, "get_state", lambda sid: ("working", old))
     monkeypatch.setattr(registry.settings, "stall_seconds", 300)

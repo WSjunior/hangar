@@ -247,8 +247,7 @@ def test_input_pi_deferred_mantem_a_entrada_pendente_com_o_mesmo_id(api_client, 
     monkeypatch.setattr(pqueue.settings, "projects_dir", tmp_path / "projects")
     monkeypatch.setattr("app.api._pane_info", lambda name: ("pi", "%1"))
     monkeypatch.setattr("app.api.INBOX.tem_linha", lambda pane: True)
-    with patch("app.api.terminal.send_prompt", return_value="deferred") as sp, \
-         patch("app.api.threading.Thread"):   # nao dispara o drain de verdade neste teste
+    with patch("app.api.terminal.send_prompt", return_value="deferred") as sp:
         r = api_client.post("/api/sessions/pisess/input", json={"text": "oi"}, headers=_h())
     assert r.status_code == 200
     assert r.json()["delivered"] is False
