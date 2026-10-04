@@ -1124,6 +1124,12 @@ coleta antecipada de fatos que esse estado não usa. O cálculo puro Rust perman
 referência testada contra as fixtures Python, sem operação privada. Permissão, loop, shells,
 dedupe, drain e SSE continuam no Python.
 
+Ao anexar, o observador vira o cliente "atual" do tmux (comando sem `-c`, hooks) e manda foco ao
+pane; isso é do `tmux -C` e fica. Por isso a saída avulsa de hook fora de `%begin/%end` é
+ignorada pelo parser, a liberação fura a pausa por falhas e a vaga cheia (senão o cliente segue
+anexado até 90 s), e nome fora de `[A-Za-z0-9._-]{1,64}` não chama o Rust (04/10/2026, revisão
+com sessões reais em `docs/migracao-rust/parte2b/revisao-real.md`).
+
 Codex terminal não abre observador tmux sem consumidor de captura. Estado, pergunta, prévia
 por push e app-server continuam nativos. Kimi/Pi/omp seguem o caminho anterior.
 Windows usa captura/reducer Python, sem tentar controle tmux/psmux.

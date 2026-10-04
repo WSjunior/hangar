@@ -59,9 +59,15 @@ Sessões Haiku no backend isolado, com os binários desta branch.
 | Reinício só do backend com mensagem adiada na fila | — | Entregue 1 vez depois de voltar, confirmada |
 | `kill -9` no `hangar-server` logo após um envio | — | Supervisor subiu outro em ~4 s; mensagem do meio entregue 1 vez; a seguinte também |
 | Falha forçada antes de efeito (campo que o Rust recusa no estado da `rv-a`) | — | 4 recusas de adoção contadas no diário, depois `runtime.parte_para_python` só da `rv-a` (`adocao_recusada`); as 3 mensagens entregues 1 vez cada e confirmadas pela reserva Python; `rv-b` seguiu no Rust |
-| 200 mensagens seguidas | — | Em andamento ao parar: POST mediana 9 ms, p95 48 ms (200 em 2,5 s); entrega ~1/s, cada uma confirmada; estado estável em ~350 KB (quase todo da janela de 256 recibos); RSS do Rust 25 → 62 MB nas primeiras 70 |
+| 200 mensagens seguidas | — | POST: mediana 9 ms, p95 48 ms (as 200 em 2,5 s). Entrega: 223 s para as 200 (~1,1 s cada, o turno do Haiku); **cada uma no transcript exatamente 1 vez, todas confirmadas, nenhuma desistida**. Estado da fila: 274 → 367 KB no pico (200 linhas pendentes) → 294 KB no fim; memória do `hangar-server` 25 → 62 MB no meio, 52 MB no fim |
 
-Sessões com terminal (2C): **ainda não executado** (estado/prévia com o Claude trabalhando, digitação pelo Python com o observador ligado, `/clear` com duas conexões).
+Sessões com terminal (2C), sessão Haiku `rv-t` no tmux isolado, com o chat aberto por SSE:
+
+| Caso | Resultado |
+|---|---|
+| Observador anexado | Um cliente de controle `control-mode,ignore-size,no-output`, sem `read-only` |
+| Digitação pelo Python com o observador ligado | Mensagem entregue 1 vez; estado `idle → working → idle`; 3 prévias durante a resposta |
+| `/clear` com uma segunda conexão que fechou antes | A conexão viva recebeu `reset` e depois 4 prévias (até 387 caracteres) com `working → idle`: a prévia não congelou (#15) |
 
 ## Encontrado e não corrigido
 
