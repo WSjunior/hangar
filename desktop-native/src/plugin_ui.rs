@@ -201,7 +201,85 @@ fn boxed(p: &Value, kids: &[Value], c: &Ctx) -> AnyElement {
         el = el.border_1().rounded(px(4.)).border_color(color(&p["borderColor"]).unwrap_or_else(theme::border));
     }
     if p["overflow"] == "hidden" { el = el.overflow_hidden(); }
-    el.children(kids.iter().map(|k| node(k, c))).into_any_element()
+    // Linha de texto logo abaixo de um Raster (os rótulos sob os traços da barra de progresso)
+    // segue a escala dele; sem isso o Raster cabe na coluna estreita e os rótulos saem do lugar.
+    el.children(kids.iter().enumerate().map(|(i, k)| {
+        match i.checked_sub(1).filter(|_| text_row(k)).and_then(|j| raster_row(&kids[j])) {
+            Some(frame) => aligned_row(k, frame, c),
+            None => node(k, c),
+        }
+    })).into_any_element()
+}
+
+/// `Box` em linha sem largura nem distribuição: cada filho ocupa as suas células, como no terminal.
+fn plain_row(v: &Value) -> bool {
+    let p = &v["props"];
+    v["type"] == "Box" && matches!(p["flexDirection"].as_str(), None | Some("row"))
+        && p["justifyContent"].is_null() && p["width"].is_null() && p["display"] != "none"
+        && !children(v).is_empty()
+}
+
+/// Texto de um `Text` sem corte e sem texto aninhado, o único que se mede em células.
+fn flat_text(v: &Value) -> Option<String> {
+    let flat = v["type"] == "Text" && !v["props"]["wrap"].is_string()
+        && children(v).iter().all(|k| k.is_string() || k.is_number());
+    flat.then(|| plain(v))
+}
+
+fn text_cells(v: &Value) -> Option<usize> { flat_text(v).map(|t| t.chars().count()) }
+
+fn text_row(v: &Value) -> bool { plain_row(v) && children(v).iter().all(|k| flat_text(k).is_some()) }
+
+/// Molde de uma linha com Raster: células de texto antes, colunas do Raster e o texto depois.
+struct RasterFrame<'a> { before: usize, columns: usize, after: &'a [Value] }
+
+fn raster_row(v: &Value) -> Option<RasterFrame<'_>> {
+    if !plain_row(v) { return None; }
+    let kids = children(v);
+    let at = kids.iter().position(|k| k["type"] == "Raster")?;
+    let (before, after) = (&kids[..at], &kids[at + 1..]);
+    if after.iter().any(|k| flat_text(k).is_none()) { return None; }
+    let columns = kids[at]["props"]["columns"].as_u64().filter(|&n| n > 0)? as usize;
+    Some(RasterFrame { before: before.iter().map(text_cells).sum::<Option<usize>>()?, columns, after })
+}
+
+/// Trilho do Raster: ocupa o que sobra da linha até a largura natural das colunas. O Raster e a
+/// linha alinhada a ele usam o mesmo, para encolherem juntos.
+fn raster_track(columns: usize) -> Div {
+    div().flex().flex_basis(px(0.)).flex_grow(1.).min_w_0().max_w(px(columns as f32 * CELL_W))
+}
+
+/// Monta a linha de texto no molde do Raster de cima: o começo com a largura natural, o trecho
+/// sob o Raster na mesma escala dele e, no fim, o texto de depois invisível, só para ocupar o
+/// mesmo espaço. No trecho escalado cada palavra corta onde começa a próxima, não antes.
+fn aligned_row(row: &Value, frame: RasterFrame, c: &Ctx) -> AnyElement {
+    let piece = |k: &Value, t: &[char]| text(&k["props"], &[Value::from(t.iter().collect::<String>())], c);
+    let (mut head, mut words): (Vec<AnyElement>, Vec<(Vec<AnyElement>, usize)>) = (Vec::new(), Vec::new());
+    let mut seen = 0;
+    for k in children(row) {
+        let chars: Vec<char> = plain(k).chars().collect();
+        let cut = frame.before.saturating_sub(seen).min(chars.len());
+        seen += chars.len();
+        if cut > 0 { head.push(piece(k, &chars[..cut])); }
+        let rest = &chars[cut..];
+        if rest.is_empty() { continue; }
+        match words.last_mut() {
+            Some((els, cells)) if rest.iter().all(|ch| ch.is_whitespace()) => { els.push(piece(k, rest)); *cells += rest.len(); }
+            _ => words.push((vec![piece(k, rest)], rest.len())),
+        }
+    }
+    let last = words.len().saturating_sub(1);
+    let scaled = raster_track(frame.columns).flex_row()
+        .children(words.into_iter().enumerate().map(|(i, (els, cells))| {
+            div().flex().flex_row().flex_shrink_0().whitespace_nowrap().w(relative(cells as f32 / frame.columns as f32))
+                .when(i < last, |el| el.overflow_hidden())
+                .children(els)
+        }));
+    div().flex().flex_row().min_w_0()
+        .children(head)
+        .child(scaled)
+        .child(div().flex().flex_row().flex_shrink_0().opacity(0.).children(frame.after.iter().map(|n| node(n, c))))
+        .into_any_element()
 }
 
 /// `Text` do Ink: cor, ênfase e corte. `dimColor` é opacidade, como no terminal.
@@ -242,7 +320,7 @@ fn plain_deep(kids: &[Value]) -> String {
 /// coluna mais estreita cada trecho encolhe na proporção das suas células, sem rolar de lado.
 fn raster(p: &Value) -> AnyElement {
     let columns = p["columns"].as_u64().unwrap_or(0) as usize;
-    let mut grid = div().flex().flex_col().flex_basis(px(0.)).flex_grow(1.).min_w_0().max_w(px(columns as f32 * CELL_W));
+    let mut grid = raster_track(columns).flex_col();
     for runs in raster_runs(p) {
         grid = grid.child(div().flex().flex_row().w_full().min_w_0().whitespace_nowrap().children(runs.into_iter().map(|(t, fg, bg)| {
             div().flex_basis(px(0.)).flex_grow(t.chars().count() as f32).flex_shrink(1.).min_w_0().overflow_hidden()
@@ -319,7 +397,7 @@ fn unmark(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
-    use super::{button_key, cell_color, color, is_dock, is_empty, raster_runs, safe_href, toast, Toast};
+    use super::{button_key, cell_color, color, is_dock, is_empty, raster_row, raster_runs, safe_href, text_row, toast, Toast};
     use serde_json::{json, Value};
     use std::time::Duration;
 
@@ -350,6 +428,24 @@ mod tests {
         assert_eq!(runs[1][0].0, "C");
         assert!(raster_runs(&json!({"columns": 0, "rows": 1_000_000, "cells": three})).is_empty());
         assert!(raster_runs(&json!({"columns": u64::MAX, "rows": u64::MAX, "cells": three}))[0].len() == 1);
+    }
+
+    #[test]
+    fn label_row_follows_the_raster_frame_and_only_plain_text_counts() {
+        let text = |s: &str| json!({"type": "Text", "children": [s]});
+        let bar = json!({"type": "Box", "props": {"flexDirection": "row"}, "children": [
+            text("  "), {"type": "Raster", "props": {"columns": 20, "rows": 1, "cells": ""}}, text("  29%")]});
+        let frame = raster_row(&bar).unwrap();
+        assert_eq!((frame.before, frame.columns, frame.after.len()), (2, 20, 1));
+        let labels = json!({"type": "Box", "children": [text("  "), {"type": "Text", "props": {"bold": true}, "children": ["Correção"]}, text("   Entrega")]});
+        assert!(text_row(&labels) && raster_row(&labels).is_none());
+        // Largura, distribuição, corte e texto aninhado não são células: seguem o desenho comum.
+        assert!(!text_row(&json!({"type": "Box", "props": {"width": 30}, "children": [text("a")]})));
+        assert!(!text_row(&json!({"type": "Box", "props": {"justifyContent": "space-between"}, "children": [text("a")]})));
+        assert!(!text_row(&json!({"type": "Box", "children": [{"type": "Text", "props": {"wrap": "truncate-end"}, "children": ["a"]}]})));
+        assert!(!text_row(&json!({"type": "Box", "children": [{"type": "Text", "children": [text("a")]}]})));
+        assert!(!text_row(&json!({"type": "Box", "children": []})));
+        assert!(raster_row(&json!({"type": "Box", "children": [{"type": "Raster", "props": {"columns": 0}}]})).is_none());
     }
 
     #[test]
