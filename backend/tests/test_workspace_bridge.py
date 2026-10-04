@@ -158,6 +158,21 @@ def test_argument_rust_does_not_know_stays_out_of_the_request_or_runs_in_python(
     assert len(bridge_server) == 1
 
 
+def test_rows_in_memory_go_as_text_and_too_large_runs_in_python_without_sending(bridge_server):
+    calls = []
+    @workspace_bridge.delegate("citation_cwds", GitError, prepare=workspace_bridge.text_rows)
+    def original(jsonl, needles, *, rows=None):
+        calls.append(len(rows))
+        return {}
+    with pytest.raises(GitError):
+        original("conversa.jsonl", ["a.txt"], rows=[b'{"cwd":"/x","t":"a\xc3\xa7\xc3\xa3o.txt"}\n'])
+    assert bridge_server[0]["args"]["rows"] == ['{"cwd":"/x","t":"ação.txt"}\n']
+    huge = [b"x" * 1024 * 1024] * 5
+    assert original("conversa.jsonl", ["a.txt"], rows=huge) == {}
+    assert calls == [5]
+    assert len(bridge_server) == 1
+
+
 def test_delegated_operations_send_only_arguments_the_rust_core_accepts():
     # Assinatura do Python que ganhou argumento sem o Rust acompanhar quebra a operação calada.
     import inspect, re
@@ -175,8 +190,7 @@ def test_delegated_operations_send_only_arguments_the_rust_core_accepts():
         "list_branches", "git_log", "changed_files", "file_diff", "path_diff")}
     checks.update(citation_cwds=transcript.citation_cwds, cited_elsewhere=transcript.cited_elsewhere,
                   find_elsewhere=api._cited_elsewhere)
-    python_only = {"create_worktree": {"new_branch", "base"}, "remove_worktree": {"force"},
-                   "citation_cwds": {"rows"}, "cited_elsewhere": {"rows"}, "find_elsewhere": {"rows"}}
+    python_only: dict[str, set[str]] = {}
     for op, fn in checks.items():
         params = set(inspect.signature(inspect.unwrap(fn)).parameters) - python_only.get(op, set())
         assert params == fields[op], (op, params ^ fields[op])

@@ -1001,8 +1001,7 @@ class TranscriptTailer:
 
 
 from app.git_ops import GitError as _WorkspaceError
-from app.workspace_bridge import delegate as _workspace_delegate
+from app.workspace_bridge import delegate as _workspace_delegate, text_rows as _text_rows
 
-# `rows` (linhas já em memória, da transferência de conversa) o Rust não recebe: com elas, Python.
-citation_cwds = _workspace_delegate("citation_cwds", _WorkspaceError, python_args={"rows": None})(citation_cwds)
-cited_elsewhere = _workspace_delegate("cited_elsewhere", _WorkspaceError, python_args={"rows": None})(cited_elsewhere)
+citation_cwds = _workspace_delegate("citation_cwds", _WorkspaceError, prepare=_text_rows)(citation_cwds)
+cited_elsewhere = _workspace_delegate("cited_elsewhere", _WorkspaceError, prepare=_text_rows)(cited_elsewhere)
