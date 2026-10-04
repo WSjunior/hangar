@@ -233,6 +233,9 @@ def _may_confirm(operation, record) -> bool:
     offset, cursor_offset = record.get("offset"), cursor.get("offset")
     if type(offset) is not int or type(cursor_offset) is not int:
         return True
+    if cursor.get("file_identity") is None and type(cursor.get("absent_since")) in {int, float}:
+        # O recibo compacto não guarda o timestamp; um cursor anterior ao arquivo ainda pode casar.
+        return cursor.get("conversation") == record.get("conversation") and offset >= cursor_offset
     return (cursor.get("conversation") == record.get("conversation")
             and cursor.get("file_identity") == record.get("file_identity") and offset >= cursor_offset)
 
@@ -333,6 +336,21 @@ def _needs_terminal_recovery(state):
     return False
 
 
+def terminal_write_blocked(state, conversation):
+    barrier = state["runtime_state"].get("terminal_write_barrier")
+    return isinstance(barrier, dict) and (barrier.get("conversation") is None or barrier["conversation"] == conversation)
+
+
+def _record_terminal_write_barrier(state, operation):
+    if (operation["status"] != "unknown" or not _terminal_input(state, operation)
+            or ((operation.get("result") or {}).get("payload") or {}).get("native") is True):
+        return
+    if state["runtime_state"].get("terminal_write_barrier") is None:
+        state["runtime_state"]["terminal_write_barrier"] = {
+            "operation_id": operation["id"], "generation": state["generation"],
+            "conversation": (operation.get("dispatch_cursor") or {}).get("conversation")}
+
+
 def _finalize_terminal(state, operation_id, clock):
     operation = state["operations"][operation_id]
     if (not _terminal_input(state, operation) or operation.get("terminal_finalized")
@@ -370,6 +388,7 @@ def _recover_terminal(state, clock):
     for operation in state["operations"].values():
         if _terminal_input(state, operation):
             operation["payload"]["payload"].setdefault("_terminal_generation", state["generation"])
+            _record_terminal_write_barrier(state, operation)
     materialized = {op["entry_id"] for op in state["operations"].values() if _terminal_input(state, op)
                     and _entry_was_materialized(state, op["entry_id"])}
     for entry_id in materialized:
@@ -490,6 +509,7 @@ def apply_action(state, action, clock, call_id):
                 raise ValueError("resultado incerto não permite reenvio")
             finalized = operation.get("terminal_finalized") and operation["status"] == status
             operation.update(status=status, result=action.get("result"))
+            _record_terminal_write_barrier(state, operation)
             if terminal:
                 if finalized:
                     operation["terminal_finalized"] = True
@@ -544,7 +564,10 @@ def apply_action(state, action, clock, call_id):
     if kind == "set_runtime_state":
         if not isinstance(action["state"], dict):
             raise ValueError("estado privado inválido")
+        barrier = state["runtime_state"].get("terminal_write_barrier")
         state["runtime_state"] = action["state"]
+        if barrier is not None:
+            state["runtime_state"]["terminal_write_barrier"] = barrier
         return None
     if kind == "rename":
         if not action["name"]:

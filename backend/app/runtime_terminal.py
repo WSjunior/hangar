@@ -551,6 +551,11 @@ def _reserve_execute(coordinator, descriptor, command, operation_id, *, entry_id
             'ts':None,'pre_transcript':payload['pre_transcript'],'entry_id':entry_id})
     root = entry_id or operation_id
     binding = descriptor['meta']['terminal']
+    from app.runtime_queue import terminal_write_blocked
+    if control == 'input' and payload['text'].strip() != '/clear' and terminal_write_blocked(slot.store.state, binding['conversation']):
+        result = _reply(operation_id, 'deferred', code='terminal_write_barrier', queued=bool(entry_id), cleanup='not_needed')
+        _queue(coordinator, descriptor, {'kind':'finish','id':operation_id,'status':'deferred','result':result})
+        return result
     dispatched = False
     def begin():
         nonlocal dispatched
@@ -667,6 +672,9 @@ async def reserve_op(coordinator, descriptor, command, operation_id):
                     return _queue(coordinator, descriptor, command['action'])
                 if kind == 'drain':
                     state = coordinator.slot(descriptor['name']).store.state
+                    from app.runtime_queue import terminal_write_blocked
+                    if terminal_write_blocked(state, descriptor['meta']['terminal']['conversation']):
+                        return {'sent':0}
                     if state['runtime_state'].get('clear_barrier', {}).get('generation') == descriptor['generation']:
                         return {'sent':0}
                     binding = descriptor['meta']['terminal']

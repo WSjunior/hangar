@@ -27,6 +27,30 @@ def test_child_cleanup_after_abrupt_parent_death(tmp_path):
         cleanup(proc, timeout=3)
 
 
+@pytest.mark.skipif(sys.platform == 'win32', reason='POSIX: grupo auxiliar dentro da sessão contida')
+def test_cleanup_contains_separate_auxiliary_group_in_same_rust_session(tmp_path):
+    from app.runtime_process import spawn_contained, cleanup, refresh_members
+    pid_path = tmp_path / 'auxiliary.pid'
+    script = "import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'],process_group=0);open(sys.argv[1],'w').write(str(p.pid));time.sleep(60)"
+    proc = spawn_contained([sys.executable, '-c', script, str(pid_path)], env=dict(os.environ), record_path=tmp_path / 'containment.json')
+    other = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(60)'])
+    try:
+        deadline = time.monotonic() + 5
+        while not pid_path.exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        auxiliary = psutil.Process(int(pid_path.read_text()))
+        assert os.getpgid(auxiliary.pid) != proc.pid and os.getsid(auxiliary.pid) == proc.pid
+        refresh_members(proc)
+        assert str(auxiliary.pid) in proc.runtime_containment.members
+        proc.kill(); proc.wait(5)
+        assert cleanup(proc, timeout=3) is True
+        assert not auxiliary.is_running() or auxiliary.status() == psutil.STATUS_ZOMBIE
+        assert other.poll() is None
+    finally:
+        cleanup(proc, timeout=3)
+        other.kill(); other.wait(5)
+
+
 @pytest.mark.skipif(sys.platform != 'win32', reason='Windows Job real no CI')
 def test_windows_job_contains_grandchild_before_resume(tmp_path):
     test_child_cleanup_after_abrupt_parent_death(tmp_path)

@@ -62,6 +62,10 @@ impl Operation {
         let cursor = &self.dispatch_cursor;
         if !cursor.is_object() { return false; }
         let (Some(offset),Some(cursor_offset)) = (record["offset"].as_i64(),cursor["offset"].as_i64()) else { return true };
+        // O recibo compacto não guarda o timestamp; um cursor anterior ao arquivo ainda pode casar.
+        if cursor["file_identity"].is_null() && cursor["absent_since"].as_f64().is_some() {
+            return cursor["conversation"]==record["conversation"] && offset>=cursor_offset;
+        }
         cursor["conversation"] == record["conversation"] && cursor["file_identity"] == record["file_identity"] && offset >= cursor_offset
     }
 }
@@ -102,6 +106,10 @@ fn receipt_payload(mut action: Value) -> Value {
 }
 
 impl State {
+    pub fn terminal_write_blocked(&self,conversation:&str)->bool {
+        let barrier=&self.runtime_state["terminal_write_barrier"];
+        barrier.is_object() && (barrier["conversation"].is_null() || barrier["conversation"]==conversation)
+    }
     pub fn new(key: &str, generation: u64, name: &str, rows: Vec<Value>) -> Self {
         Self { version:VERSION, owner_key:key.into(), generation, name:name.into(), rows,
             operations:BTreeMap::new(), used_occurrences:BTreeMap::new(), runtime_state:json!({}), next_seq:1 }
@@ -364,6 +372,14 @@ fn needs_terminal_recovery(state:&State)->bool {
     })
 }
 
+fn record_terminal_write_barrier(state:&mut State,id:&str) {
+    let op=&state.operations[id];
+    if op.status!=Status::Unknown || !terminal_input(state,op) || op.result["payload"]["native"]==true {return;}
+    if state.runtime_state["terminal_write_barrier"].is_null() {
+        state.runtime_state["terminal_write_barrier"]=json!({"operation_id":id,"generation":state.generation,"conversation":op.dispatch_cursor["conversation"]});
+    }
+}
+
 fn finalize_terminal(state:&mut State,id:&str,clock:ClockSample)->io::Result<()> {
     let op=state.operations.get(id).ok_or_else(||invalid("operação terminal ausente"))?.clone();
     if !terminal_input(state,&op) || op.terminal_finalized || !matches!(op.status,Status::Deferred|Status::Rejected) {return Ok(());}
@@ -396,6 +412,8 @@ fn recover_terminal(state:&mut State,clock:ClockSample)->io::Result<()> {
     let legacy:Vec<_>=state.operations.values().filter(|op|terminal_input(state,op)
         && op.payload["payload"].get("_terminal_generation").is_none()).map(|op|op.id.clone()).collect();
     for id in legacy {state.operations.get_mut(&id).unwrap().payload["payload"]["_terminal_generation"]=json!(state.generation);}
+    let unknown:Vec<_>=state.operations.values().filter(|op|op.status==Status::Unknown).map(|op|op.id.clone()).collect();
+    for id in unknown {record_terminal_write_barrier(state,&id);}
     let materialized:Vec<_>=state.operations.values().filter(|op|terminal_input(state,op)
         && entry_was_materialized(state,op.entry_id.as_deref().unwrap())).filter_map(|op|op.entry_id.clone()).collect();
     for entry in materialized {mark_materialized(state,&entry);}
@@ -543,6 +561,7 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             }
             let finalized=op.terminal_finalized && op.status==status;
             op.status = status; op.result = result;op.terminal_finalized=finalized;
+            record_terminal_write_barrier(state,&id);
             if terminal {finalize_terminal(state,&id,clock)?;}
             serde_json::to_value(&state.operations[&id])?
         }
@@ -600,7 +619,9 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
         }
         Action::SetRuntimeState { state: runtime_state } => {
             if !runtime_state.is_object() { return Err(invalid("estado privado inválido")); }
+            let barrier=state.runtime_state["terminal_write_barrier"].clone();
             state.runtime_state = runtime_state;
+            if !barrier.is_null() {state.runtime_state["terminal_write_barrier"]=barrier;}
             Value::Null
         }
         Action::ReplaceRows { rows } => {

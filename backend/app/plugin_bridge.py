@@ -67,7 +67,9 @@ def publish_terminal(name, conversation, generation, publication, validate):
         if queue is None or loop is None:
             return "unavailable"
         if name in _publications:
-            raise RuntimeError("publicação anterior ainda em curso")
+            if _publications[name]['conversation'] == conversation:
+                return "unknown"
+            del _publications[name]
         pending = {"id":publication["id"], "conversation":conversation, "generation":generation,
             "mode":publication["mode"], "event":threading.Event(), "result":"unknown"}
         _publications[name] = pending
@@ -90,7 +92,7 @@ def publish_terminal(name, conversation, generation, publication, validate):
         return pending["result"]
     finally:
         with _lock:
-            if _publications.get(name) is pending:
+            if _publications.get(name) is pending and pending["result"] != "unknown":
                 del _publications[name]
 
 

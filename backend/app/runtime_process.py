@@ -139,7 +139,7 @@ def _group_members(containment):
     members = []
     for proc in psutil.process_iter(['pid','status','create_time']):
         try:
-            if os.getpgid(proc.pid) == containment.pid and proc.status() != psutil.STATUS_ZOMBIE:
+            if os.getsid(proc.pid) == containment.pid and proc.status() != psutil.STATUS_ZOMBIE:
                 if proc.pid == containment.pid and proc.create_time() != containment.birth:
                     raise RuntimeError('identidade do grupo Rust mudou')
                 members.append(proc.pid)
@@ -164,10 +164,17 @@ def cleanup(proc, timeout=5):
         containment.job.close()
     else:
         while members := _group_members(containment):
-            try:
-                os.killpg(containment.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            groups = set()
+            for pid in members:
+                try:
+                    groups.add(os.getpgid(pid))
+                except ProcessLookupError:
+                    continue
+            for group in groups:
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    continue
             if time.monotonic() >= deadline:
                 raise RuntimeError('descendentes Rust ainda ativos no grupo')
             time.sleep(.02)

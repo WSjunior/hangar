@@ -222,6 +222,11 @@ impl Executor {
                 self.action(Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:payload["pre_transcript"]==true,entry_id:Some(row.clone())}).await?;
             }
         }
+        if prompt && !is_clear(text) && state.terminal_write_blocked(&self.target.binding.conversation) {
+            let result=reply(id,Disposition::Deferred,json!({"code":"terminal_write_barrier","queued":row_id.is_some(),"cleanup":"not_needed"}));
+            self.action(Action::Finish {id:id.into(),status:Status::Deferred,result:serde_json::to_value(&result).unwrap()}).await?;
+            return Ok(result);
+        }
         let root=row_id.as_deref().unwrap_or(id);
         let services=self.services(root,id,text);
         let driver=TerminalDriver::new(self.target.binding.clone(),services.clone(),self.options.io.clone(),self.options.limits.clone());
@@ -283,6 +288,7 @@ impl Executor {
     }
     async fn drain_once(&mut self,entry:Option<String>)->Result<Value,RuntimeError> {
         let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
+        if state.terminal_write_blocked(&self.target.binding.conversation) {return Ok(json!({"drained":0}));}
         if self.cleared(&state){return Ok(json!({"drained":0,"preserve_binding":true}));}
         if !state.rows.iter().any(|r|r["delivered"]==false && entry.as_ref().is_none_or(|id|r["id"]==*id)) {return Ok(json!({"drained":0}));}
         let services=self.services("maintenance","maintenance","");

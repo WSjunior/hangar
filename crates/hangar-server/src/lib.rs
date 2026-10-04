@@ -9,6 +9,7 @@ pub mod tail;
 pub mod terminal_state;
 pub mod terminal_control;
 pub mod terminal_input;
+mod terminal_process;
 pub mod terminal_routes;
 pub mod transcript;
 mod warn_limit;

@@ -103,9 +103,17 @@ impl TerminalIo for ProcessIo {
     fn command<'a>(&'a self, request: CommandRequest) -> IoFuture<'a, CommandOutput> {
         Box::pin(async move {
             use std::process::Stdio;
-            let mut child = child_command(request.program).args(request.args).stdin(Stdio::piped())
-                .stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true).spawn()
+            let mut command=child_command(request.program);
+            command.args(request.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+            let mut tree=crate::terminal_process::CommandTree::configure(&mut command)
+                .map_err(|_|IoFailure {code:"command_containment",may_have_written:false})?;
+            let mut child = command.spawn()
                 .map_err(|_| IoFailure { code: "spawn_failed", may_have_written: false })?;
+            if tree.attach(&child).is_err() {
+                crate::terminal_process::finish(&mut tree).await;
+                child.wait().await.map_err(|_|IoFailure {code:"command_wait_failed",may_have_written:true})?;
+                return Err(IoFailure {code:"command_containment",may_have_written:true});
+            }
             let mut stdin = child.stdin.take().unwrap();
             let mut stdout = child.stdout.take().unwrap();
             let work = async {
@@ -124,19 +132,10 @@ impl TerminalIo for ProcessIo {
                 let status = child.wait().await?;
                 Ok::<_, std::io::Error>(CommandOutput { success: status.success(), stdout: bytes })
             };
-            match timeout(self.command_timeout, work).await {
-                Ok(Ok(output)) => Ok(output),
-                _ => {
-                    #[cfg(windows)]
-                    if let Some(pid) = child.id() {
-                        let mut killer = child_command("taskkill.exe").args(["/PID", &pid.to_string(), "/T", "/F"])
-                            .stdout(Stdio::null()).stderr(Stdio::null()).kill_on_drop(true).spawn().ok();
-                        if let Some(killer) = &mut killer { let _ = timeout(Duration::from_secs(3), killer.wait()).await; }
-                    }
-                    let _ = timeout(Duration::from_secs(3), child.kill()).await;
-                    let _ = timeout(Duration::from_secs(3), child.wait()).await;
-                    Err(IoFailure { code: "command_uncertain", may_have_written: true }) }
-            }
+            let result=timeout(self.command_timeout,work).await;
+            crate::terminal_process::finish(&mut tree).await;
+            child.wait().await.map_err(|_|IoFailure {code:"command_wait_failed",may_have_written:true})?;
+            match result {Ok(Ok(output))=>Ok(output),_=>Err(IoFailure {code:"command_uncertain",may_have_written:true})}
         })
     }
     fn socket<'a>(&'a self, descriptor: &'a NativeMessage, envelope: Vec<u8>) -> IoFuture<'a, WriteOutcome> {

@@ -112,9 +112,12 @@ def test_plugin_receipt_correlates_publication_generation_conversation(monkeypat
         if ack == 'wrong_conversation': extra['session_id'] = 'old-sid'
         await pb.filled(pb.FilledBody(sessao='session', token=pb.mint('session'), ok=True, **extra))
         assert await task == ('filled' if ack == 'matching' else 'unknown')
+        if ack != 'matching':
+            assert pb._publications['session']['id'] == 'new'
     try:
         asyncio.run(flow())
     finally:
+        pb._publications.clear()
         pb._waiters.clear()
         pb._donos.clear()
 

@@ -146,3 +146,29 @@ finally:lease.close()
     assert_eq!(store.state().operations["native"].result["payload"]["message_id"],"native-id");
     assert!(store.state().next_seq>270);
 }
+
+#[test]
+fn absent_transcript_one_echo_cannot_confirm_two_equal_inputs_after_compact_reopen() {
+    use hangar_server::runtime::receipt::ReceiptIndex;
+    let dir=tempfile::tempdir().unwrap();let path=dir.path().join("state");let transcript=dir.path().join("absent.jsonl");
+    let mut index=ReceiptIndex::new("claude","sid");let cursor=index.capture(&transcript).unwrap();assert!(cursor.file_identity.is_none());
+    let mut store=Store::open(&path,dir.path(),State::new("key",1,"session",vec![])).unwrap();
+    for number in [1,2] {
+        let id=format!("input-{number}");
+        store.exec(1,&format!("append:{number}"),clock(),Action::Append {text:"same-input".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(id.clone())}).unwrap();
+        store.exec(1,&format!("prepare:{number}"),clock(),Action::Prepare {id:id.clone(),payload:json!({"kind":"input"}),entry_id:Some(id.clone())}).unwrap();
+        store.exec(1,&format!("cursor:{number}"),clock(),Action::BindDispatch {id:id.clone(),cursor:serde_json::to_value(&cursor).unwrap()}).unwrap();
+        store.exec(1,&format!("dispatch:{number}"),clock(),Action::BeginDispatch {id:id.clone(),wire_id:id}).unwrap();
+    }
+    let millis=((cursor.absent_since.unwrap()+1.0)*1000.0) as i64;
+    let timestamp=chrono::DateTime::from_timestamp_millis(millis).unwrap().to_rfc3339();
+    std::fs::write(&transcript,format!("{}\n",json!({"type":"user","uuid":"one-echo","sessionId":"sid","timestamp":timestamp,"message":{"content":"same-input"}}))).unwrap();
+    index.scan(&transcript).unwrap();let proof=index.match_after(&cursor,&store.state().rows[0],&store.state().used_occurrences).unwrap();
+    assert_eq!(store.exec(1,"confirm-first",clock(),Action::ConfirmOccurrence {id:"input-1".into(),proof:proof.clone()}).unwrap(),true);
+    for n in 0..270 {store.exec(1,&format!("fill:{n}"),clock(),Action::SetRuntimeState {state:json!({})}).unwrap();}
+    drop(store);let mut store=Store::open(&path,dir.path(),State::new("key",1,"session",vec![])).unwrap();
+    assert_eq!(store.state().used_occurrences.len(),1);
+    assert!(index.match_after(&cursor,&store.state().rows[1],&store.state().used_occurrences).is_none());
+    assert_eq!(store.exec(1,"confirm-second",clock(),Action::ConfirmOccurrence {id:"input-2".into(),proof}).unwrap(),false);
+    assert_eq!(store.state().rows[0]["confirmed"],true);assert_ne!(store.state().rows[1]["confirmed"],true);
+}

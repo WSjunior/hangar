@@ -122,6 +122,7 @@ class Slot:
     # quando chega a versão com a correção.
     rust_refused: int | None = None
     adopt_failures: int = 0
+    awaiting_identity: bool = False
 
 
 def _clock():
@@ -205,6 +206,16 @@ class RuntimeCoordinator:
                 slot = await asyncio.to_thread(self.register, binding)
             if slot is None or not self.managed_runtime(name):
                 return False
+            if slot.awaiting_identity:
+                async with self.freeze(name):
+                    from app.runtime_process import reconcile_startup
+                    from app.runtime_terminal import validate_binding
+                    await asyncio.to_thread(reconcile_startup, allow_current=True)
+                    await asyncio.to_thread(validate_binding, binding.descriptor())
+                    if slot.store is not None or slot.lease is not None or slot.phase != Phase.RecoveringPython:
+                        raise RuntimeError("registro aguardando identidade já possui responsável")
+                    await self._restore(slot, reconnect=False)
+                    slot.awaiting_identity = False
             if slot.frozen or slot.phase not in {Phase.Python, Phase.Rust}:
                 raise RuntimeError("sessão em transferência; aguarde a confirmação")
             agent_changed = binding.meta.get("terminal") and any(binding.meta.get(field) != slot.binding.meta.get(field)
@@ -247,6 +258,7 @@ class RuntimeCoordinator:
                     if fresh is None or fresh.key != binding.key:
                         self.slots[binding.key] = Slot(binding=binding)
                         if fresh is None:
+                            self.slots[binding.key].awaiting_identity = True
                             self.names.setdefault(binding.name, binding.key)
                             from app import diag
                             diag.registrar("runtime.registration_failed", "erro", sessao=binding.name, codigo="terminal_binding")
@@ -496,7 +508,7 @@ class RuntimeCoordinator:
                 state = copy.deepcopy(slot.store.state)
                 state["generation"] = binding.generation
                 if terminal:
-                    state["runtime_state"] = {}
+                    state["runtime_state"] = {key:value for key,value in state["runtime_state"].items() if key == "terminal_write_barrier"}
                 slot.store._persist(state)
             slot.store.exec(binding.generation, "recover:" + uuid.uuid4().hex, _clock(), {"kind": "recover"})
             state = copy.deepcopy(slot.store.state)
@@ -995,7 +1007,7 @@ class RuntimeCoordinator:
                         binding.meta["terminal"]["generation"] = binding.generation
                     state = copy.deepcopy(slot.store.state)
                     if advance:
-                        state["runtime_state"] = {}
+                        state["runtime_state"] = {key:value for key,value in state["runtime_state"].items() if key == "terminal_write_barrier"}
                     state["runtime_state"]["_binding"] = binding.descriptor()
                     slot.store._persist(state)
                 self.register(binding)

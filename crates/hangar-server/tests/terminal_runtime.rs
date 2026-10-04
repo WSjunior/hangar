@@ -29,11 +29,12 @@ impl TerminalIo for Io {
     }) }
     fn socket<'a>(&'a self,_:&'a NativeMessage,envelope:Vec<u8>)->IoFuture<'a,WriteOutcome> { Box::pin(async move {self.socket_calls.lock().unwrap().push(envelope);Ok(WriteOutcome::Unknown)}) }
 }
-struct Fixture { _dir:tempfile::TempDir,target:TerminalTarget,policy:PolicyClient,io:Arc<Io>, idle:Arc<std::sync::atomic::AtomicBool>, ready:Arc<std::sync::atomic::AtomicBool>, generation:Arc<AtomicU64>, native:Arc<std::sync::atomic::AtomicBool>, control:Arc<Mutex<Value>>, unknown:Arc<std::sync::atomic::AtomicBool>, calls:Arc<Mutex<Vec<Value>>>,server:tokio::task::JoinHandle<()> }
+struct Fixture { _dir:tempfile::TempDir,target:TerminalTarget,policy:PolicyClient,io:Arc<Io>, mux:Arc<Mutex<Vec<String>>>, idle:Arc<std::sync::atomic::AtomicBool>, ready:Arc<std::sync::atomic::AtomicBool>, generation:Arc<AtomicU64>, native:Arc<std::sync::atomic::AtomicBool>, control:Arc<Mutex<Value>>, unknown:Arc<std::sync::atomic::AtomicBool>, calls:Arc<Mutex<Vec<Value>>>,server:tokio::task::JoinHandle<()> }
 impl Fixture {
     async fn new()->Self {
         let dir=tempfile::tempdir().unwrap(); let io=Arc::new(Io::new()); let conversation=io.conversation.clone();
         let binding=TerminalBinding {name:"session".into(),pane:"%1".into(),conversation:"sid".into(),generation:1,created:1,mux_argv:vec!["fake".into()],windows:false,clipboard_lock_path:None};
+        let mux=Arc::new(Mutex::new(binding.mux_argv.clone()));let server_mux=mux.clone();
         let target=TerminalTarget {key:"key".into(),generation:1,name:"session".into(),binding:binding.clone(),lease_path:dir.path().join("lease"),state_path:dir.path().join("state"),projection_dir:dir.path().join("projection"),transcript:dir.path().join("chat.jsonl"),created:1.0};
         std::fs::write(&target.transcript,"").unwrap();
         let native=Arc::new(std::sync::atomic::AtomicBool::new(false)); let generation=Arc::new(AtomicU64::new(1)); let control=Arc::new(Mutex::new(json!({"disposition":"unavailable"})));
@@ -41,14 +42,14 @@ impl Fixture {
         let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let address=listener.local_addr().unwrap();
         let state_path=target.state_path.clone();
         let (i,r,u,c,g,control_reply,n)=(idle.clone(),ready.clone(),unknown.clone(),calls.clone(),generation.clone(),control.clone(),native.clone());
-        let router=axum::Router::new().route("/internal/runtime/policy",axum::routing::post(move |body:String| {let (i,r,u,c,mut b,path,g,control_reply,n,conversation)=(i.clone(),r.clone(),u.clone(),c.clone(),binding.clone(),state_path.clone(),g.clone(),control_reply.clone(),n.clone(),conversation.clone()); async move {
+        let router=axum::Router::new().route("/internal/runtime/policy",axum::routing::post(move |body:String| {let (i,r,u,c,mut b,path,g,control_reply,n,conversation,mux)=(i.clone(),r.clone(),u.clone(),c.clone(),binding.clone(),state_path.clone(),g.clone(),control_reply.clone(),n.clone(),conversation.clone(),server_mux.clone()); async move {
             let v:Value=serde_json::from_str(&body).unwrap();
             let state:Value=serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
             let phase=&state["operations"][v["phase_id"].as_str().unwrap()];
             assert_eq!(phase["status"],"dispatching");
             assert_eq!(phase["payload"],json!({"kind":v["kind"],"request_id":v["request_id"],"payload":v["payload"]}));
             c.lock().unwrap().push(v.clone());
-            b.generation=g.load(std::sync::atomic::Ordering::Acquire); b.conversation=conversation.lock().unwrap().clone();
+            b.generation=g.load(std::sync::atomic::Ordering::Acquire); b.conversation=conversation.lock().unwrap().clone();b.mux_argv=mux.lock().unwrap().clone();
             let data=match v["kind"].as_str().unwrap() {
                 "terminal_facts"=>json!({"binding":b,"ready":r.load(std::sync::atomic::Ordering::Acquire),"idle":i.load(std::sync::atomic::Ordering::Acquire),"open_question":false,"plugin_live":u.load(std::sync::atomic::Ordering::Acquire),"plugin_user":true,"native":if n.load(std::sync::atomic::Ordering::Acquire){Some(NativeMessage {socket:"fake".into(),origin:"peer".into(),sender:"peer".into(),mode:"message".into(),message_id:Some(format!("native:{}",v["payload"]["operation_id"].as_str().unwrap()))})}else{None}}),
                 "terminal_publish"=>json!("unknown"),
@@ -56,7 +57,7 @@ impl Fixture {
             ([("content-type","application/json")],json!({"ok":true,"data":data}).to_string())
         }}));
         let server=tokio::spawn(async move {axum::serve(listener,router).await.unwrap()});
-        Self {_dir:dir,target,policy:PolicyClient::new(address,"test".into(),"instance".into()),io,idle,ready,generation,native,control,unknown,calls,server}
+        Self {_dir:dir,target,policy:PolicyClient::new(address,"test".into(),"instance".into()),io,mux,idle,ready,generation,native,control,unknown,calls,server}
     }
     fn start(&self)->hangar_server::runtime::terminal::TerminalHandle {
         self.start_with_events(broadcast::channel(128).0)
@@ -71,6 +72,47 @@ impl Fixture {
     fn state(&self)->Value {serde_json::from_slice(&std::fs::read(&self.target.state_path).unwrap()).unwrap()}
 }
 impl Drop for Fixture {fn drop(&mut self){self.server.abort();}}
+
+#[tokio::test]
+async fn real_process_timeout_ends_grandchild_before_detach_and_new_lease() {
+    let mut f=Fixture::new().await;let script=f._dir.path().join("fake_mux.py");let late=f._dir.path().join("late-write");
+    let code=format!(r#"import os,sys,time,subprocess
+path={}
+mode=sys.argv[1]
+if mode in ('--child','--grand'):
+ open(path+mode+'.pid','w').write(str(os.getpid()))
+ if mode=='--child':subprocess.Popen([sys.executable,__file__,'--grand'])
+ else:time.sleep(.5);open(path,'w').write('late')
+ time.sleep(10)
+elif mode=='--other':time.sleep(10)
+elif mode=='display-message':print('session\t%1\t1')
+elif mode=='capture-pane':print('─'*32+'\n❯ \n'+'─'*32)
+elif mode=='send-keys' and '-l' in sys.argv:
+ subprocess.Popen([sys.executable,__file__,'--child'])
+ time.sleep(10)
+"#,json!(late.to_str().unwrap()));
+    std::fs::write(&script,code).unwrap();
+    let python=std::env::var("HANGAR_TEST_PYTHON").unwrap_or_else(|_|if cfg!(windows){"python".into()}else{"python3".into()});
+    let mut other=std::process::Command::new(&python).arg(&script).arg("--other").spawn().unwrap();
+    f.target.binding.mux_argv=vec![python,"-X".into(),"utf8".into(),script.to_str().unwrap().into()];*f.mux.lock().unwrap()=f.target.binding.mux_argv.clone();
+    let lease=queue::acquire_lease(&f.target.lease_path).unwrap();let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
+    let options=TerminalOptions {io:Arc::new(ProcessIo {command_timeout:Duration::from_millis(150),socket_timeout:Duration::from_millis(150)}),
+        limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1,..InputLimits::default()},tick:Duration::from_secs(10)};
+    let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
+    let result=tokio::time::timeout(Duration::from_secs(4),h.command(f.command("timeout","A"))).await.unwrap().unwrap();
+    assert_eq!(result.disposition,hangar_server::runtime::protocol::Disposition::Unknown);
+    h.stop().await.unwrap();let python_lease=queue::acquire_lease(&f.target.lease_path).unwrap();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let old_writer=late.exists();let unrelated_alive=other.try_wait().unwrap().is_none();
+    for suffix in if old_writer {vec!["--child.pid","--grand.pid"]}else{vec![]} {
+        if let Ok(pid)=std::fs::read_to_string(format!("{}{suffix}",late.display())) {
+            #[cfg(unix)] {let _=std::process::Command::new("kill").args(["-9",pid.trim()]).output();}
+            #[cfg(windows)] {let _=std::process::Command::new("taskkill.exe").args(["/PID",pid.trim(),"/T","/F"]).output();}
+        }
+    }
+    other.kill().unwrap();other.wait().unwrap();drop(python_lease);
+    assert!(unrelated_alive);assert!(!old_writer,"auxiliary grandchild wrote after detach released the lease");
+}
 
 #[tokio::test]
 async fn terminal_v2_prepare_confirmed_has_zero_policy_or_key() {
@@ -93,6 +135,28 @@ async fn terminal_v2_sequence_uses_durable_watermark() {
     assert!(state["operations"].as_object().unwrap().keys().filter(|id|id.starts_with("call::terminal:")||id.starts_with("terminal-policy:"))
         .all(|id|id.rsplit(':').next().unwrap().parse::<u64>().unwrap()>=50_000));
     h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn unknown_fill_blocks_second_input_after_detach_restart_and_same_sid_generation() {
+    let mut f=Fixture::new().await;f.unknown.store(true,std::sync::atomic::Ordering::Release);
+    let h=f.start();assert_eq!(h.command(f.command("A","A")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Unknown);
+    *f.io.text.lock().unwrap()="A".into();
+    h.queue("append-B".into(),Action::Append {text:"B".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("B".into())}).await.unwrap();
+    h.stop().await.unwrap();
+    let mut state=f.state();state["generation"]=json!(2);
+    std::fs::write(&f.target.state_path,serde_json::to_vec(&state).unwrap()).unwrap();
+    f.target.generation=2;f.target.binding.generation=2;f.generation.store(2,std::sync::atomic::Ordering::Release);
+    let effects=f.io.calls.lock().unwrap().len();let publications=f.calls.lock().unwrap().len();
+    f.unknown.store(false,std::sync::atomic::Ordering::Release);
+    let lease=queue::acquire_lease(&f.target.lease_path).unwrap();
+    let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",2,"session",vec![])).unwrap();
+    let options=TerminalOptions {io:f.io.clone(),limits:InputLimits::default(),tick:Duration::from_millis(15)};
+    let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
+    assert_eq!(h.drain().await.unwrap()["drained"],0);
+    assert_eq!(h.command(f.command("C","C")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+    assert_eq!(f.io.calls.lock().unwrap().len(),effects);assert_eq!(f.calls.lock().unwrap().len(),publications);
+    assert_eq!(*f.io.text.lock().unwrap(),"A");h.stop().await.unwrap();
 }
 
 #[tokio::test]

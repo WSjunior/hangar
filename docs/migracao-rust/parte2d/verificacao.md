@@ -169,6 +169,13 @@ um caso Windows ignorado**. Esse caso é executado no runner Windows pelo `serve
 das provas v2 e do hook TypeScript real com Node 24. Os avisos preexistentes permanecem nos logs.
 `git diff --check` passou. A revisão final e o CI ainda estão pendentes.
 
+A revisão final de `eae31286..6a94ca12` reprovou quatro problemas importantes: ocorrência
+reutilizada quando o primeiro arquivo estava ausente, preenchimento incerto apagado pela próxima
+entrada, descendente sobrevivendo ao timeout antes do detach e cadastro sem identidade inicial
+que não se recupera quando o vínculo volta. As regressões combinadas estão em implementação.
+Os checks verdes acima não cobriam essas quatro combinações; publicação bloqueada até corrigi-las
+e aprovar a releitura independente.
+
 ## Ainda pendente
 
 - Task 4: revisão final, push e CI nas três plataformas sobre v2/protocolo 10.
