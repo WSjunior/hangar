@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import Animated, { Easing, useAnimatedProps, useFrameCallback, useReducedMotion, useSharedValue, type SharedValue } from 'react-native-reanimated';
 import Svg, { Path } from 'react-native-svg';
 
@@ -65,9 +66,14 @@ function Arco({ k, t }: { k: number; t: SharedValue<number> }) {
 export function WorkingMark({ size = 16, color }: { size?: number; color: string }) {
   const reduced = useReducedMotion();
   const t = useSharedValue(reduced ? -1 : 0);
-  useFrameCallback((f) => {
+  const frame = useFrameCallback((f) => {
     t.value = f.timeSinceFirstFrame / 1000;
   }, !reduced);
+  // O autostart só vale na montagem: ligar "Reduzir movimento" com a marca na tela também a para.
+  useEffect(() => {
+    frame.setActive(!reduced);
+    if (reduced) t.value = -1;
+  }, [reduced, frame, t]);
   return (
     <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeLinecap="round" pointerEvents="none">
       {ARCS.map((_, k) => <Arco key={k} k={k} t={t} />)}

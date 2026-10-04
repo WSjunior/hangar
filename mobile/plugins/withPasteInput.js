@@ -12,9 +12,11 @@ module.exports = function withPasteInput(config) {
     if (language !== 'swift') throw new Error('withPasteInput: AppDelegate em Swift esperado, veio ' + language);
     if (contents.includes('PasteInputModule.setup')) return cfg;
     if (!ANCHOR.test(contents)) throw new Error('withPasteInput: factory.startReactNative não encontrado no AppDelegate');
-    cfg.modResults.contents = contents
-      .replace('import React\n', `import React\n${IMPORT}\n`)
+    const out = contents
+      .replace(/^import React\s*$/m, `import React\n${IMPORT}`)
       .replace(ANCHOR, '$1\n    PasteInputModule.setup(factory.rootViewFactory)');
+    if (!out.includes(IMPORT)) throw new Error('withPasteInput: "import React" não encontrado no AppDelegate');
+    cfg.modResults.contents = out;
     return cfg;
   });
 };

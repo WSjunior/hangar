@@ -484,8 +484,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       ? m.composer_falha_envio() : m.nova_conversa_envio_incerto()));
   }, [serverId, name, firstInputId, draft, chat, persistText]);
 
-  // `steer`: Codex ou Claude sem terminal trabalhando — o texto entra no turno em curso, não na fila.
-  const handleSend = useCallback(async (steer = false) => {
+  const handleSend = useCallback(async () => {
     const trimmed = text.trim();
     const hasAttach = pendingAttach !== null;
     if (!trimmed && !hasAttach) return;
@@ -553,14 +552,7 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
       const snapshot = firstInputId ? readFirstInput(serverId, name) : null;
       const firstDraft = !!snapshot && snapshot.id === firstInputId && firstInputMessage(snapshot).trim() === finalText.trim();
       const sendToPairNow = !firstDraft && sendToPair && !!pairPeers?.length && !finalText.trimStart().startsWith('/');
-      if (steer && !firstDraft) {
-        await submitConversationDraft(serverId, name, finalText, async () => {
-          groupPendingId = `pending-steer-${Date.now()}`;
-          chat.use.setState((current) => ({ pending: [...current.pending, { id: groupPendingId!, text: finalText }] }));
-          await steerSession(name, finalText);
-        }, sentRevision);
-        setSteerFeedback('');
-      } else if (sendToPairNow && pairPeers?.length) {
+      if (sendToPairNow && pairPeers?.length) {
         const recipients = [name, ...pairPeers];
         await submitConversationDraft(serverId, name, finalText, async () => {
           groupPendingId = `pending-group-${Date.now()}`;
@@ -997,10 +989,12 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
 
   // Colar imagem ou arquivo no campo vira o anexo, como o paste do PWA. O composer leva um anexo só.
   const handlePaste = useCallback((files: PastedFile[], erro: string | null) => {
-    if (erro) { setError(erro); return; }
+    if (erro) { setError(formataErro(erro) ?? erro); return; }
     const f = files[0];
     if (!f) return;
-    handlePicked({ uri: f.uri, name: f.fileName, mime: f.type, kind: f.type.startsWith('image/') ? 'image' : 'file', size: f.fileSize });
+    const mime = f.type || 'application/octet-stream';
+    handlePicked({ uri: f.uri, name: f.fileName, mime, kind: mime.startsWith('image/') ? 'image' : 'file', size: f.fileSize });
+    if (files.length > 1) setError(m.composer_colou_so_um());
   }, [handlePicked]);
 
   // Só o que este app enviou deixa a marca do attachInsert no texto; basta para saber se há galeria.
@@ -1100,6 +1094,9 @@ export function Composer({ serverId, name, draft, returned, onReturnedAdopted, f
             onBlur={() => setFocado(false)}
             onPaste={handlePaste}
             style={gravando ? styles.inputEscondido : undefined}
+            editable={!gravando}
+            accessibilityElementsHidden={gravando}
+            importantForAccessibility={gravando ? 'no-hide-descendants' : 'auto'}
           />
           {/* Gravando, a onda ocupa o lugar do campo (montado por baixo, com o texto intacto): a caixa
               não cresce nem muda de forma por causa do ditado. */}
