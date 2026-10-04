@@ -1401,7 +1401,7 @@ import { cachePrazo } from '../lib/cachePrazo';
     relimpando = v;
     recError = '';
     try {
-      const { text, aviso, estilo_aplicado } = await relimparDitado(alvo.raw, v);
+      const { text, aviso, estilo_aplicado } = await relimparDitado(alvo.raw, v, sessionServer());
       // Um ditado novo comecou enquanto esta troca estava no ar: a resposta e de uma gravacao que
       // ja saiu da tela. Nao aplica e nao avisa — o resultado nao interessa mais a ninguem, e um
       // erro aqui falaria de um ditado que a pessoa nem esta mais vendo.

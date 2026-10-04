@@ -118,6 +118,7 @@ vi.mock('@hangar/core', async (importOriginal) => ({
 }));
 vi.mock('../lib/auth', () => ({
   listServers: vi.fn(() => [{ id: 'srv-test', label: 'T', baseUrl: 'http://x', token: 't' }]),
+  listAllServers: vi.fn(() => [{ id: 'srv-test', label: 'T', baseUrl: 'http://x', token: 't' }]),
   listOwnServers: vi.fn(() => [{ id: 'srv-test', label: 'T', baseUrl: 'http://x', token: 't' }]),
   getActiveId: vi.fn(() => 'srv-test'),
   getBaseUrl: vi.fn(() => 'http://x'),

@@ -19,7 +19,8 @@ interface Args {
 // Normal/Planejar. O valor segue o SSE.
 export function usePermissionControl({ serverId, name, provider }: Args) {
   const chat = chatStore(serverId, name);
-  // Servidor da rota, não o ativo: o ativo pode ser outra máquina sem esta sessão.
+  // Servidor da rota, não o ativo: o ativo pode ser outra máquina sem esta sessão. Sem ele (lista
+  // ainda carregando ou máquina removida) nada é pedido: `null` no core cairia no ativo.
   const server = useServers((s) => s.servers.find((x) => x.id === serverId) ?? null);
   const isCodex = provider === 'codex';
   const isClaude = provider === 'claude';
@@ -50,7 +51,7 @@ export function usePermissionControl({ serverId, name, provider }: Args) {
 
   // Claude: lê o modo atual sem teclas a cada mudança de estado; o ciclo só quando pedido.
   useEffect(() => {
-    if (!isClaude || refused.current) return;
+    if (!isClaude || refused.current || !server) return;
     const my = ++seq.current;
     getPermissionModes(name, false, server)
       .then((res) => {
@@ -65,7 +66,7 @@ export function usePermissionControl({ serverId, name, provider }: Args) {
   }, [isClaude, name, server, sessionState]);
 
   useEffect(() => {
-    if (!isCodex) return;
+    if (!isCodex || !server) return;
     let alive = true;
     getCodexModels(name, server)
       .then((res) => { if (alive && res.current.mode) setCurrent(res.current.mode); })
@@ -75,7 +76,7 @@ export function usePermissionControl({ serverId, name, provider }: Args) {
 
   // A sonda percorre o ciclo com Shift+Tab e volta; sem ela o servidor devolve [] até ter cache.
   const probe = useCallback(async () => {
-    if (!isClaude || !probeable || modes.length > 0) return;
+    if (!isClaude || !probeable || modes.length > 0 || !server) return;
     const my = ++seq.current;
     setProbing(true);
     setNotice(null);
@@ -96,6 +97,7 @@ export function usePermissionControl({ serverId, name, provider }: Args) {
   // Diz se a troca pegou: o painel só fecha no sucesso, para o aviso de falha ficar à vista.
   const select = useCallback(async (mode: string): Promise<boolean> => {
     if (applying || mode === current) return false;
+    if (!server) { setNotice(m.servidor_nao_existe()); return false; }
     setApplying(true);
     setNotice(null);
     try {

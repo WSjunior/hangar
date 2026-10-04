@@ -7,7 +7,7 @@
   import { untrack } from 'svelte';
   import * as m from '../paraglide/messages';
   import Popover from './Popover.svelte';
-  import { getPiModels, setPiModel, modelOptions } from '@hangar/core';
+  import { getPiModels, setPiModel, modelOptions, modelOptionsForServer } from '@hangar/core';
   import type { PiModel } from '@hangar/core';
 
   interface Props {
@@ -43,7 +43,8 @@
     try {
       // allSettled, NAO all: o sidecar e leitura de arquivo local e quase nao falha; o catalogo e
       // subprocess Node. Com Promise.all, a falha do catalogo derrubaria a lista inteira.
-      const [est, cat] = await Promise.allSettled([getPiModels(sessionName, sessionServer()), modelOptions(provider)]);
+      const srv = sessionServer();
+      const [est, cat] = await Promise.allSettled([getPiModels(sessionName, srv), srv ? modelOptionsForServer(srv, provider) : modelOptions(provider)]);
       if (minha !== carga) return;
       if (est.status === 'rejected') throw est.reason;
       // O SIDECAR e o conjunto; o catalogo so enriquece. Quem valida o apply e o check_known contra

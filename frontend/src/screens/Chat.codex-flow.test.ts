@@ -34,6 +34,7 @@ vi.mock('../lib/aquecimento', () => ({
 vi.mock('../lib/ttsPlayer.svelte', () => ({ ttsPlayer: { active: false, loading: false } }));
 vi.mock('../lib/auth', () => ({
   listServers: () => [{ id: 'codex-flow', label: 'Teste', baseUrl: 'http://teste', token: 'teste' }],
+  listAllServers: () => [{ id: 'codex-flow', label: 'Teste', baseUrl: 'http://teste', token: 'teste' }],
   listOwnServers: () => [{ id: 'codex-flow', label: 'Teste', baseUrl: 'http://teste', token: 'teste' }],
   getActiveId: () => 'codex-flow',
   getBaseUrl: () => 'http://teste',

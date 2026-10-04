@@ -8,7 +8,7 @@ import { basename } from './format';
 import { mensagemDeErro, formataErro, type EnvelopeErro } from './errosApi';
 // diag NÃO importa api (ele usa `fetch` direto) — é o que mantém esta dependência de mão única.
 import { registrar as registrarDiag, novoReq } from './diag';
-import { retryAfterMs, registrarFalha, registrarSucesso } from './esfriamento';
+import { estaProtegido, retryAfterMs, registrarFalha, registrarSucesso } from './esfriamento';
 import {
   inviteAllows, SharePrerequisiteError, tailscaleEnableUrl, type ShareCreated, type ShareInfo, type SharePrereqs,
 } from './share';
@@ -273,8 +273,9 @@ async function apiFetchRes(path: string, init?: RequestInit, server?: Server, pr
   // Id do pedido: vai no cabeçalho e na linha do diário dos DOIS lados, pra quem analisa seguir a
   // cadeia (o toque na tela -> o que o servidor fez) sem depender de comparar horário.
   const req = novoReq();
-  // Durante a espera, só uma verificação explícita pode antecipar a nova tentativa.
-  if (server && retryAfterMs(server.id) > 0 && !probe) {
+  // Durante a espera, só uma verificação explícita pode antecipar a nova tentativa. O ativo e a
+  // máquina de um chat aberto não esperam: o prazo pode ter sido gravado antes de o chat abrir.
+  if (server && retryAfterMs(server.id) > 0 && !probe && !estaProtegido(server.id)) {
     throw new Error(m.esfriamento_servidor_desligado({ servidor: server.label },
                                                      { locale: localeAtual() }));
   }
@@ -370,6 +371,10 @@ export function probeServerResponse(server: Server, path: string, init?: Request
 // Configurações abertas a partir da visão agregada precisam continuar no servidor capturado, sem
 // trocar o servidor global. Um 401 aqui é erro local da sheet: nunca remove a credencial ativa,
 // que pode pertencer a outra máquina.
+// Arquivos, diff e planos da sessão: o chat sempre passa o servidor, e 8 s cortava diff e leitura
+// de repositório grande. Teto ainda existe para máquina fora do ar atrás de VPN não prender a tela.
+const SESSION_FILE_TIMEOUT_MS = 60_000;
+
 async function apiFetchForServer<T>(s: Server, path: string, init?: RequestInit, prazoMs = 8000): Promise<T> {
   let res: Response;
   // Prazo por PADRAO. Esta funcao fala com OUTRO servidor, e servidor offline atras de VPN nao
@@ -1774,14 +1779,14 @@ export interface PlanListItem {
 
 export function getPlans(name: string, server?: Server): Promise<{ plans: PlanListItem[]; pinned: string | null }> {
   const path = `/api/sessions/${encodeURIComponent(name)}/plans`;
-  return server ? apiFetchForServer(server, path) : apiFetch(path);
+  return server ? apiFetchForServer(server, path, undefined, SESSION_FILE_TIMEOUT_MS) : apiFetch(path);
 }
 
 // stem = null solta o pin e devolve o painel pra eleição automática.
 export function setPlanPin(name: string, stem: string | null, server?: Server): Promise<{ pinned: string | null }> {
   const path = `/api/sessions/${encodeURIComponent(name)}/plan-pin`;
   const init = { method: 'POST', body: JSON.stringify({ stem }) };
-  return server ? apiFetchForServer(server, path, init) : apiFetch(path, init);
+  return server ? apiFetchForServer(server, path, init, SESSION_FILE_TIMEOUT_MS) : apiFetch(path, init);
 }
 
 // Marca/desmarca um step no .md do plano. Quem marca no fluxo normal é o agente — isto é pro caso
@@ -2039,8 +2044,10 @@ export async function transcribeFile(
 export async function relimparDitado(
   texto: string,
   estilo: string,
+  server?: Server | null,
 ): Promise<{ text: string; aviso?: string | null; estilo_aplicado?: string }> {
-  return apiFetch<{ text: string; aviso?: string | null; estilo_aplicado?: string }>('/api/ditado/relimpar', {
+  // Na máquina que transcreveu: a limpeza usa a chave e o estilo configurados nela.
+  return sessionFetch<{ text: string; aviso?: string | null; estilo_aplicado?: string }>(server, '/api/ditado/relimpar', {
     method: 'POST',
     body: JSON.stringify({ texto, estilo }),
     // Mesmo motivo do teto do transcribeFile, sem a parcela da Whisper: o briefing pode gastar 120s
@@ -2121,13 +2128,13 @@ export function listFiles(name: string, path?: string, soModificados = true, ser
   const q = new URLSearchParams({ so_modificados: String(soModificados) });
   if (path) q.set('path', path);
   const rota = `/api/sessions/${encodeURIComponent(name)}/files/list?${q}`;
-  return server ? apiFetchForServer(server, rota) : apiFetch(rota);
+  return server ? apiFetchForServer(server, rota, undefined, SESSION_FILE_TIMEOUT_MS) : apiFetch(rota);
 }
 
 export function readFile(name: string, path: string, server?: Server): Promise<FileContent> {
   const q = new URLSearchParams({ path });
   const rota = `/api/sessions/${encodeURIComponent(name)}/files/read?${q}`;
-  return server ? apiFetchForServer(server, rota) : apiFetch(rota);
+  return server ? apiFetchForServer(server, rota, undefined, SESSION_FILE_TIMEOUT_MS) : apiFetch(rota);
 }
 
 // Arquivo CITADO na conversa (fora da raiz da sessao), como texto editavel: mesma resposta do
@@ -2165,7 +2172,7 @@ export function searchFiles(name: string, q: string, mode: 'names' | 'contents',
 export function pathDiff(name: string, path: string, escopo: 'branch' | 'nao_commitado', server?: Server): Promise<PathDiff> {
   const rota = `/api/sessions/${encodeURIComponent(name)}/git/path-diff`;
   const init = { method: 'POST', body: JSON.stringify({ path, escopo }) };
-  return server ? apiFetchForServer(server, rota, init) : apiFetch(rota, init);
+  return server ? apiFetchForServer(server, rota, init, SESSION_FILE_TIMEOUT_MS) : apiFetch(rota, init);
 }
 
 export function getCommitFiles(name: string, sha: string, server?: Server | null): Promise<{ files: ChangedFile[] }> {
@@ -2261,7 +2268,7 @@ export function getGitLog(name: string, q?: string, n?: number, server?: Server 
 export function discardFile(name: string, path: string, server?: Server): Promise<{ ok: boolean; path: string }> {
   const rota = `/api/sessions/${encodeURIComponent(name)}/git/discard`;
   const init = { method: 'POST', body: JSON.stringify({ path }) };
-  return server ? apiFetchForServer(server, rota, init) : apiFetch(rota, init);
+  return server ? apiFetchForServer(server, rota, init, SESSION_FILE_TIMEOUT_MS) : apiFetch(rota, init);
 }
 
 export function commitFiles(name: string, message: string, paths: string[],

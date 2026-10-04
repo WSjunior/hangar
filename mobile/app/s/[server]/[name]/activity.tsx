@@ -59,6 +59,8 @@ export default function ActivitySheet() {
   const genAgent = useRef(0);
 
   const fetchAll = useCallback(async () => {
+    // Sem o servidor da rota (lista ainda carregando ou máquina removida) não pergunta ao ativo.
+    if (!server) return;
     setWfLoading(true);
     try {
       const w = await getWorkflows(name, server);

@@ -10,6 +10,7 @@ const fake = vi.hoisted(() => ({
 }));
 vi.mock('../lib/auth', () => ({
   getActiveId: () => 'local', listServers: () => [{ id: 'local', baseUrl: '', token: 'test' }],
+  listAllServers: () => [{ id: 'local', baseUrl: '', token: 'test' }],
 }));
 vi.mock('@hangar/core', async original => ({
   ...await original<object>(), getCodexVoicesForServer: () => fake.loadVoices(),

@@ -45,6 +45,7 @@ vi.mock('../lib/auth', () => ({
   serverColor: () => '#fff',
   withServer: vi.fn(async (_id: string, fn: () => Promise<unknown>) => fn()),
   listServers: vi.fn(() => []),
+  listAllServers: vi.fn(() => []),
   removeServer: vi.fn(),
   addServerWithRollback: vi.fn(),
   renameServer: vi.fn(),

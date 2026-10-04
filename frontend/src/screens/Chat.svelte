@@ -97,7 +97,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   } from '../lib/shortcuts.svelte';
   import { abrirConfig } from '../lib/configNav';
   import { listServers, listOwnServers, getActiveId, getBaseUrl, selectServer, isActiveInvite } from '../lib/auth';
-  import { provideSessionServer } from '../lib/sessionServer';
+  import { parentSessionServerId, provideSessionServer } from '../lib/sessionServer';
   import { getIdentificador } from '../lib/peers';
   import { destinoDoRemetente } from '../lib/remetente';
   import { createActivityFolder } from '@hangar/core';
@@ -202,7 +202,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // ativo?": navegando pra um chat de outra máquina, o `applyRouteServer` já trocou o ativo antes
   // de este Chat desmontar, e a cauda desta sessão seria gravada sob a chave da OUTRA máquina.
   // Mesmo padrão do `filesChave` abaixo, e pelo mesmo motivo.
-  const servidorDaCauda = getActiveId() ?? '';
+  // Aninhado (sessão do par no modal), a máquina é a do chat de fora, não a do ativo do momento.
+  const servidorDaCauda = (nested ? parentSessionServerId() : undefined) ?? getActiveId() ?? '';
   // Servidor DESTA sessão, fixado na entrada pelo mesmo motivo: os terminais No Hangar e as perguntas
   // são consultados por servidor, e o ativo pode mudar sob um Chat aberto por overlay.
   const chatServerId = servidorDaCauda;

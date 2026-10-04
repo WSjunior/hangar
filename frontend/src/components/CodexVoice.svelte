@@ -14,7 +14,9 @@
     sessionName: string; disabled?: boolean; onPrepare: () => void; onBusyChange: (busy: boolean) => void;
   } = $props();
   // Dentro do chat, a máquina da sessão; o ativo só fora dele.
-  const server = useSessionServer()() ?? listServers().find(s => s.id === getActiveId());
+  // Resolvido a cada uso: token ou endereço trocados depois de abrir valem já.
+  const sessionServer = useSessionServer();
+  const currentServer = () => sessionServer() ?? listServers().find(s => s.id === getActiveId());
   let open = $state(false);
   let callState = $state<VoiceState>('idle');
   let error = $state('');
@@ -42,6 +44,7 @@
   }
 
   function start() {
+    const server = currentServer();
     if (!server) { error = m.codex_voice_unavailable(); return; }
     onPrepare();
     error = ''; detail = ''; muted = false;
@@ -67,6 +70,7 @@
   function toggleMute() { muted = !muted; call?.setMuted(muted); }
   $effect(() => { sessionName; return () => call?.stop(); });
   $effect(() => {
+    const server = currentServer();
     if (!open || !server) return;
     let cancelled = false;
     getCodexVoicesForServer(server, sessionName).then(values => {

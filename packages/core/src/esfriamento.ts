@@ -34,6 +34,11 @@ export function definirProtegido(fn: (id: string) => boolean): void {
   protegido = fn;
 }
 
+/** Protegido (o ativo, o de chat aberto, a página saindo) não espera prazo gravado antes. */
+export function estaProtegido(id: string): boolean {
+  return protegido(id);
+}
+
 /** O pedaço de `Storage` que este módulo usa. O core não toca DOM: quem tem `localStorage` (o web)
  *  entrega por `definirArmazem`; no app nativo e nos testes o estado é só de memória. */
 export interface ArmazemEsfriamento {

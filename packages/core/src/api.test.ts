@@ -922,7 +922,7 @@ describe('arquivos, planos e contrato do par com servidor explícito', () => {
     expect(fetchMock.mock.calls[1][1]?.signal).toBeUndefined();
   });
 
-  it('busca, gravação e par em B usam teto de 30s; leituras, o padrão de 8s', async () => {
+  it('busca, gravação e par em B usam teto de 30s; leitura de arquivo da sessão, 60s', async () => {
     const timeout = vi.spyOn(AbortSignal, 'timeout');
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{}'));
     await searchFiles(s, 'foo', 'names', target);
@@ -930,7 +930,7 @@ describe('arquivos, planos e contrato do par com servidor explícito', () => {
     await readFile(s, 'a.md', target);
     await pairSession(s, ['outra'], 't', false, target);
     await unpairSession(s, target);
-    expect(timeout.mock.calls.map(([ms]) => ms)).toEqual([30_000, 30_000, 8000, 30_000, 30_000]);
+    expect(timeout.mock.calls.map(([ms]) => ms)).toEqual([30_000, 30_000, 60_000, 30_000, 30_000]);
   });
 
   it('conflito de digest em B chega com status, sem repetir o POST nem tocar a credencial ativa', async () => {

@@ -6,7 +6,10 @@ import * as m from '../paraglide/messages';
 const core = vi.hoisted(() => ({
   listShares: vi.fn(), createShare: vi.fn(), revokeShare: vi.fn(), revokeAllShares: vi.fn(), sharePrereqs: vi.fn(),
 }));
-vi.mock('../lib/auth', () => ({ listServers: () => [{ id: 'srv-a', label: 'A', baseUrl: 'http://a', token: 't' }] }));
+vi.mock('../lib/auth', () => ({
+  listServers: () => [{ id: 'srv-a', label: 'A', baseUrl: 'http://a', token: 't' }],
+  listAllServers: () => [{ id: 'srv-a', label: 'A', baseUrl: 'http://a', token: 't' }],
+}));
 vi.mock('../lib/clipboard', () => ({ copyText: vi.fn(async () => {}) }));
 vi.mock('@hangar/core', async (original) => ({
   ...await original<typeof import('@hangar/core')>(),
