@@ -38,7 +38,7 @@ export function useStateColor() {
 /** Pasta de subagente sem branch que diga algo: "Subagente ab1a". */
 export function displayTitle(w: WorktreeStatus): string {
   const t = worktreeTitle(w);
-  const pasta = w.path.replace(/\/+$/, '').split('/').pop() ?? '';
+  const pasta = w.path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? '';
   return worktreeIsAgent(w) && t === pasta ? m.worktree_subagente_nome({ id: pasta.slice(6, 10) }) : t;
 }
 
