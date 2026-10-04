@@ -22,6 +22,7 @@ const problemLabels: Record<string, () => string> = {
   headless_turno_erro: m.problema_headless_turno_erro,
   headless_sem_login: m.problema_headless_sem_login,
   runtime_falhou: m.problema_runtime_falhou,
+  terminal_observacao_falhou: m.problema_terminal_observacao_falhou,
 };
 
 export function SessionProblem({ problem, detail }: Props) {

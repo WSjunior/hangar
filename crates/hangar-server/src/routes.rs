@@ -4,7 +4,7 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
@@ -43,48 +43,7 @@ pub struct AppState {
     pub workspace_slots: Arc<tokio::sync::Semaphore>,
     pub workspace_read_slots: Arc<tokio::sync::Semaphore>,
     pub workspace_meta_slots: Arc<tokio::sync::Semaphore>,
-    pub fallback: Fallback,
     pub diag: crate::diag::DiagClient,
-}
-
-const FALLBACK_AFTER: u32 = 4;
-const MAX_FALLBACK: usize = 1024;
-
-/// Falhas seguidas do Rust por (sessão, rota). Na 4ª (3 + 1 nova tentativa) a rota daquela sessão
-/// fica com o Python até o processo reiniciar; as outras sessões seguem no Rust. Só o Git/arquivos
-/// ainda usa.
-#[derive(Default)]
-pub struct Fallback {
-    failures: Mutex<std::collections::HashMap<(String, &'static str), u32>>,
-}
-
-impl Fallback {
-    pub fn on_python(&self, name: &str, route: &'static str) -> bool {
-        self.failures.lock().unwrap().get(&(name.to_owned(), route)).is_some_and(|n| *n >= FALLBACK_AFTER)
-    }
-
-    /// Conta a falha e devolve quantas seguidas. Passou para o Python: uma linha só, nesta hora.
-    // ponytail: mapa cheio deixa sessão nova sem contagem (segue tentando o Rust); limpeza só se encher na prática.
-    pub fn failed(&self, name: &str, route: &'static str, code: &str) -> u32 {
-        let mut failures = self.failures.lock().unwrap();
-        let key = (name.to_owned(), route);
-        if !failures.contains_key(&key) && failures.len() >= MAX_FALLBACK {
-            if crate::warn_limit::allow(None, "fallback_map_full") {
-                tracing::warn!("contagem de falhas cheia: {route} {name} motivo={code} segue tentando o Rust");
-            }
-            return 0;
-        }
-        let n = failures.entry(key).or_insert(0);
-        *n = n.saturating_add(1);
-        if *n == FALLBACK_AFTER {
-            tracing::warn!("parte passou para o Python: {route} {name} motivo={code}");
-        }
-        *n
-    }
-
-    pub fn succeeded(&self, name: &str, route: &'static str) {
-        self.failures.lock().unwrap().remove(&(name.to_owned(), route));
-    }
 }
 
 impl AppState {
@@ -103,7 +62,7 @@ impl AppState {
             infos: Default::default(),
         };
         let diag = crate::diag::DiagClient::new(cfg.upstream, cfg.internal_secret.clone());
-        AppState { auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, fallback: Fallback::default(), diag,
+        AppState { auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, diag,
             workspace_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             workspace_read_slots: Arc::new(tokio::sync::Semaphore::new(8)),
             workspace_meta_slots: Arc::new(tokio::sync::Semaphore::new(4)) }
@@ -547,35 +506,6 @@ mod tests {
         let r = pass(&st, request("/limited", "127.0.0.1", false, "x"), &fwd("127.0.0.1")).await;
         assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
         assert!(is_owner(&st, "127.0.0.1"));
-    }
-
-    #[test]
-    fn route_goes_to_python_after_four_failures_for_that_session_only() {
-        let fb = Fallback::default();
-        for n in 1..FALLBACK_AFTER {
-            assert_eq!(fb.failed("a", "history", "history_io"), n);
-            assert!(!fb.on_python("a", "history"), "falha {n} ainda tenta o Rust");
-        }
-        fb.succeeded("a", "history");
-        for _ in 1..FALLBACK_AFTER {
-            fb.failed("a", "history", "history_io");
-        }
-        assert!(!fb.on_python("a", "history"), "sucesso zera a contagem");
-        assert_eq!(fb.failed("a", "history", "history_io"), FALLBACK_AFTER);
-        assert!(fb.on_python("a", "history"));
-        assert!(!fb.on_python("a", "events"), "outra rota da mesma sessão segue no Rust");
-        assert!(!fb.on_python("b", "history"), "outra sessão segue no Rust");
-    }
-
-    #[test]
-    fn fallback_map_stays_bounded() {
-        let fb = Fallback::default();
-        for n in 0..MAX_FALLBACK {
-            fb.failed(&format!("s-{n}"), "events", "internal_info");
-        }
-        assert_eq!(fb.failed("excedente", "events", "internal_info"), 0);
-        assert_eq!(fb.failures.lock().unwrap().len(), MAX_FALLBACK);
-        assert_eq!(fb.failed("s-0", "events", "internal_info"), 2, "quem já conta segue contando");
     }
 
     #[test]

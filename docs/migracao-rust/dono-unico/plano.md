@@ -510,9 +510,25 @@ mesmos fatos; Windows fica nesse caminho" vira "Erro vira problema visível e a 
 pergunta ao Rust; Windows e ponte desligada usam a captura Python"; em `plataforma.md`, o título
 "Observação terminal Rust com reserva Python" e o parágrafo da pausa por falhas.
 
-- [ ] **Step 45: Testes acima, vistos falhar**
-- [ ] **Step 46: Erro tipado do observador; problema visível; texto novo do log Rust**
-- [ ] **Step 47: Remover o código morto e corrigir as regras; testes focados; revisar**
+- [x] **Step 45: Testes acima, vistos falhar**
+- [x] **Step 46: Erro tipado do observador; problema visível; texto novo do log Rust**
+- [x] **Step 47: Remover o código morto e corrigir as regras; testes focados; revisar**
+
+**Registro da execução (Task 9).** `test_rust_capture_error_is_reported_not_replaced` falhou na
+base (o Python capturava e o estado virava `idle`); `test_windows_and_bridge_off_still_capture_in_python`
+passa também na base e fica como regressão. A falha sobe como `terminal_observer.ObservationFailed`
+(código seguro); `capture()` devolve `None` só para dono fixo (ponte desligada, Windows, nome fora
+da regra, provider fora do Rust, sem vínculo). O monitor repete o último evento com
+`problema="terminal_observacao_falhou"` e o código em `problema_detalhe`; a prévia segura o texto.
+Texto na web (`problema.ts`) e no app (`SessionProblem.tsx`) com chave em pt/en, fora da lista de
+arquivos da Task (o desenho pede a faixa; a Task 3 mexe nas mesmas linhas). Testes do disjuntor
+apagados (`:1012`, `:1058`, `:1297`, `:1353`, `:1634`); os de `_request`/lease reescritos para o erro
+tipado. Revisão (`ecc:python-reviewer`, `ecc:silent-failure-hunter`; no Rust só mudou o texto do
+log): entraram a checagem de sessão morta no erro (sem ela, tmux fechado ficava "observação
+falhou" para sempre), o primeiro evento com erro tirando o estado do plugin/hook em vez de `idle`,
+e o diário limitado a um registro por minuto por (sessão, código). Ficou de fora, sem regressão:
+a prévia do Codex com terminal continua na captura Python (lease com `provider=None` em
+`preview.py`), e exceção fora da lista do `_request` segue subindo crua, como antes.
 
 ### Task 10: Documentação restante
 
