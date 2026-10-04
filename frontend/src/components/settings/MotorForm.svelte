@@ -163,25 +163,34 @@
     rac: form.adaptive_thinking ? m.comum_ligado() : m.comum_desligado(),
   }));
 
-  async function buscarModelos() {
+  // A automática (ao abrir) só traz a lista: escolher de novo trocaria o modelo e a janela já
+  // gravados sem a pessoa ter mexido. O número do pedido descarta a resposta de um Testar anterior.
+  let pedidoBusca = 0;
+  async function buscarModelos(automatica = false) {
+    const meu = ++pedidoBusca;
     buscando = true; erroBusca = ''; okBusca = '';
     try {
       // `nome` e `base_url`/`api_key` são mutuamente exclusivos no servidor (400 juntos).
       const chave = form.api_key.trim();
       const corpo = chave ? { base_url: form.base_url.trim(), api_key: chave } : { nome: idAlvo };
       const r = apiTarget ? await engineModelosForServer(apiTarget, corpo) : await engineModelos(corpo);
+      if (meu !== pedidoBusca) return;
       modelos = r.modelos;
       gateway = { nome: r.gateway ?? null, url: form.base_url.trim() };
       // Só na criação: num motor salvo, betas desligados podem ser escolha de quem o salvou.
       if (ehCliproxy && criandoAgora && !betasTocado) form.experimental_betas = true;
       okBusca = m.config_motores_modelos_ok({ n: r.modelos.length });
+      if (automatica) return;
       const atual = modelos.find((x) => x.id === form.model) ?? modelos[0];
       if (atual) escolherModelo(atual.id);
     } catch (e) {
+      // Na automática a falha não vira erro vermelho: a pessoa só abriu o formulário, e os campos
+      // seguem em texto livre; o Testar mostra o motivo quando ela pedir.
+      if (meu !== pedidoBusca || automatica) return;
       gateway = null;
       erroBusca = e instanceof Error ? e.message : m.config_motores_erro_consultar();
     } finally {
-      buscando = false;
+      if (meu === pedidoBusca) buscando = false;
     }
   }
 
@@ -189,9 +198,31 @@
     form.model = id;
     const md = modelos.find((x) => x.id === id);
     // A janela vem do provedor: em branco o Claude Code assume 200k e compacta cedo. Modelo sem
-    // context_length limpa o campo — o número do modelo ANTERIOR passaria da janela real do novo.
-    form.context_window = md?.context_length ? String(md.context_length) : '';
+    // context_length limpa o número do modelo ANTERIOR (passaria da janela real do novo), mas
+    // mantém o contexto estendido que a pessoa ligou — esse é escolha, não leitura do provedor.
+    form.context_window = md?.context_length ? String(md.context_length) : (estendida ? form.context_window : '');
   }
+
+  // Interruptor no lugar do número, como o "Contexto estendido" do Codex: ligado é 1M; desligado é
+  // o que o provedor informa (ou os 200k do Claude Code). Modelo que o provedor diz ir a menos que
+  // isso trava o interruptor — 1M ali estouraria a sessão no meio.
+  const JANELA_ESTENDIDA = 1_000_000;
+  const janelaProvedor = $derived(modeloAtual?.context_length ?? null);
+  const estendida = $derived(Number(form.context_window) >= JANELA_ESTENDIDA);
+  const estendidaImpossivel = $derived(janelaProvedor !== null && janelaProvedor < JANELA_ESTENDIDA);
+  function setEstendida(on: boolean) {
+    // Desligar com o provedor informando 1M ou mais grava vazio: o número dele continuaria "ligado".
+    form.context_window = on ? String(JANELA_ESTENDIDA)
+      : janelaProvedor && janelaProvedor < JANELA_ESTENDIDA ? String(janelaProvedor) : '';
+  }
+
+  // Provedor salvo abre já com a lista: sem ela os dois campos de modelo são texto livre.
+  let autoTestado = false;
+  $effect(() => {
+    if (autoTestado || criando || semChave || !form.api_key_definida || !form.base_url.trim()) return;
+    autoTestado = true;
+    void buscarModelos(true);
+  });
 
   async function salvar() {
     // Homônimo é recusado ANTES de gravar: o PUT substitui, e o servidor aceitaria calado.
@@ -328,7 +359,7 @@
     </label>
 
     <div class="campo">
-      <button type="button" class="btn" onclick={buscarModelos}
+      <button type="button" class="btn" onclick={() => buscarModelos()}
               disabled={buscando || !form.base_url.trim() || (!form.api_key.trim() && !form.api_key_definida)}>
         {buscando ? m.config_motores_consultando() : m.config_motores_testar()}
       </button>
@@ -339,9 +370,9 @@
   {/if}
 
   <label class="campo">
-    <span class="rot">{m.composer_modelo()}</span>
+    <span class="rot">{m.config_motores_modelo_padrao()}</span>
     {#if modelos.length}
-      <Select ariaLabel={m.composer_modelo()} value={form.model}
+      <Select ariaLabel={m.config_motores_modelo_padrao()} value={form.model}
         opcoes={modelos.map((x) => ({ value: x.id, label: x.id, hint: x.context_length ? `${Math.round(x.context_length / 1000)}k` : undefined }))}
         onchange={escolherModelo} />
     {:else}
@@ -349,6 +380,7 @@
              value={form.model} oninput={(e) => (form.model = e.currentTarget.value)} />
       <span class="ajuda">{m.config_motores_testar_ids()}</span>
     {/if}
+    <span class="ajuda">{m.config_motores_modelo_padrao_ajuda()}</span>
     {#if modeloAtual?.vision === false}<span class="ajuda erro">{m.config_motores_sem_visao()}</span>{/if}
   </label>
 
@@ -365,12 +397,21 @@
     {@render ajudaLonga(m.config_motores_subagentes(), aSubagentes)}
   </label>
 
-  <label class="campo">
-    <span class="rot">{m.config_motores_janela()}</span>
-    <input type="number" name="context_window" inputmode="numeric" min="1" placeholder={m.ctx_tokens()}
-           value={form.context_window} oninput={(e) => (form.context_window = e.currentTarget.value)} />
+  <div class="campo">
+    <label class="linha-janela">
+      <input class="switch" type="checkbox" checked={estendida} disabled={estendidaImpossivel && !estendida}
+             onchange={(e) => setEstendida(e.currentTarget.checked)} />
+      <span class="rot">{m.config_motores_janela_estendida()}</span>
+    </label>
+    <span class="ajuda">
+      {#if estendidaImpossivel && !estendida}{m.config_motores_janela_limite({ n: Math.round((janelaProvedor ?? 0) / 1000) })}
+      {:else if estendida}{m.config_motores_janela_ligada()}
+      {:else if form.context_window && Number(form.context_window) !== janelaProvedor}{m.config_motores_janela_gravada({ n: Math.round(Number(form.context_window) / 1000) })}
+      {:else if janelaProvedor}{m.config_motores_janela_provedor({ n: Math.round(janelaProvedor / 1000) })}
+      {:else}{m.config_motores_janela_200k()}{/if}
+    </span>
     {@render ajudaLonga(m.config_motores_janela(), aJanela)}
-  </label>
+  </div>
 
   <details class="avancado" open={!celular}>
     <summary>{m.config_motores_avancado()}{#if celular}<span class="resumo">{resumoAvancado}</span>{/if}</summary>
@@ -519,6 +560,7 @@
         background: var(--surface-inset); }
   .campo { display: flex; flex-direction: column; gap: var(--space-2); }
   .rot { font-size: var(--text-sm); font-weight: 600; color: var(--text-primary); }
+  .linha-janela { display: flex; align-items: center; gap: var(--space-2); cursor: pointer; }
   .ajuda { font-size: var(--text-xs); color: var(--text-muted); line-height: 1.45; margin: 0; }
   .ajuda.erro { color: var(--error); }
   /* O "?" é o alvo de toque da ajuda no painel estreito: bolinha com superfície própria (que

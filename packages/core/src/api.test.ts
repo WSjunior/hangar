@@ -621,7 +621,7 @@ describe('mensagemDeErro (parecer task 10)', () => {
   });
 
   it('erro_motor_invalido vem com acento em pt', () => {
-    expect(mensagemDeErro('erro_motor_invalido')).toBe('motor inválido');
+    expect(mensagemDeErro('erro_motor_invalido')).toBe('provedor inválido');
   });
 
   it('erro_tts_sem_cache vem com acento em pt', () => {
