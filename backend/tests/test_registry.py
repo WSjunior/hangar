@@ -362,7 +362,7 @@ def test_engine_context_uses_the_window_from_its_recorded_agent_pid(tmp_path, mo
     monkeypatch.setattr(registry.headless_sessions, "list_all", lambda: [])
     monkeypatch.setattr(registry.orq_runs, "active", lambda: [])
     monkeypatch.setattr(registry.worktrees, "locate", lambda *args: SimpleNamespace(
-        branch=None, worktree=False, worktree_path=None, worktree_gone=False))
+        branch=None, worktree=False, worktree_path=None, worktree_gone=False, git_cwd=None))
     monkeypatch.setattr(reg, "resolve_tracked", lambda *args: (str(transcript), True))
     monkeypatch.setattr(reg, "_repl_sid", lambda *args: _UUID)
 

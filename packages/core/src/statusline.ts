@@ -58,9 +58,11 @@ function clampPct(n: number): number {
 }
 
 export function parseStatusLine(raw: string | null | undefined, session?: SessionInfo | null): StatusFields | null {
-  // Codex e Claude sem terminal não publicam Git na statusline; a lista já consulta o repositório.
-  const git = (session?.provider === 'codex' || session?.headless === true) && session.cwd && session.branch
-    ? { repo: basename(session.cwd), branch: session.branch,
+  // Codex e Claude sem terminal não publicam Git na statusline, e com o agente numa worktree ela fala
+  // da pasta de abertura: nos dois casos vale a lista.
+  const dir = session?.git_cwd || session?.cwd;
+  const git = (session?.provider === 'codex' || session?.headless === true || !!session?.git_cwd) && dir && session.branch
+    ? { repo: basename(dir), branch: session.branch,
         dirty: session.git_dirty == null ? undefined : session.git_dirty > 0 }
     : null;
   const listed = session?.model?.trim() || null;

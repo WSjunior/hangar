@@ -55,6 +55,8 @@ export interface SessionInfo {
   worktree_path?: string | null;
   /** Estava numa worktree que já foi apagada. */
   worktree_gone?: boolean;
+  /** Raiz do repositório onde o agente trabalha quando saiu do da pasta de abertura; o git da sessão é lido ali. */
+  git_cwd?: string | null;
   // Linhas adicionadas/removidas no working tree vs HEAD (git diff --numstat, staged+unstaged;
   // untracked não conta). null = cwd sem repo ou repo sem commit nenhum -> sem badge.
   git_added?: number | null;

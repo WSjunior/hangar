@@ -25,7 +25,7 @@ async fn fixture_with(
 ) -> (std::net::SocketAddr, Arc<AtomicUsize>, Handoffs) {
     let hits = Arc::new(AtomicUsize::new(0));
     let handoffs: Handoffs = Arc::default();
-    let context = json!({"roots":[root],"sessions":[{"name":"fixture","cwd":root}],"session":{"name":"fixture","cwd":root,"jsonl":root.join("fixture.jsonl")}});
+    let context = json!({"roots":[root],"sessions":[{"name":"fixture","cwd":root}],"session":{"name":"fixture","cwd":root,"jsonl":root.join("fixture.jsonl"),"git_cwd":root}});
     let app = Router::new()
         .route(
             "/internal/workspace/context",

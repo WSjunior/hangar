@@ -375,6 +375,10 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   bearer é conferido ANTES do sub-app (mount passa por fora do `Depends`) e nunca entra no
   ambiente do pane: Claude via `headersHelper`, Codex via `http_headers`. Tool mapeia 1:1 num
   endpoint que já existe; o CLI continua como fallback e resolve identidade sozinho.
+- **O git da sessão é o da worktree onde o agente trabalha (`git_cwd`), não o da pasta de
+  abertura.** O Claude Code não grava a worktree irmã no `cwd` do transcript: o sinal são as
+  chamadas recentes (`cd`, `git -C`, arquivo editado). Arquivos e execução seguem no `cwd`.
+  Evidência em [plataforma.md](docs/decisoes/plataforma.md#git-da-sessão-segue-a-worktree-onde-o-agente-trabalha).
 - **Arquivo citado na conversa é LEGÍVEL e EDITÁVEL; a citação é o consentimento.** Fora da raiz
   da sessão a política de caminho é `_resolver_citado()` (aparece no transcript), não a raiz — e
   é a mesma para o `GET` e para o `POST` de `/file/text`. A mecânica de ler e gravar é a do

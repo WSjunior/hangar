@@ -66,7 +66,7 @@ def test_workspace_context_contains_only_registry_metadata(tmp_path):
         response = _client().get("/internal/workspace/context?name=s1", headers={"X-Hangar-Internal": SECRET})
     assert response.status_code == 200
     assert response.json() == {"roots":[str(tmp_path)], "sessions":[{"name":"s1","cwd":"/p"}],
-                               "session":{"name":"s1","cwd":"/p","jsonl":"/p/abc-123.jsonl"}}
+                               "session":{"name":"s1","cwd":"/p","jsonl":"/p/abc-123.jsonl","git_cwd":"/p"}}
 
 
 def test_workspace_context_refuses_before_reading_the_registry():

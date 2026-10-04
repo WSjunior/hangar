@@ -1157,3 +1157,38 @@ Não houve reinício/instalação nem validação no app ou backend vivo. Window
 Uma rodada vermelha tentou leitura real `tmux capture-pane -p -t %8 -S -200` em alvo fictício e
 recebeu `can't find pane: %8`; nenhuma conversa foi lida. A guarda dos novos testes passou a
 bloquear `_run`/`RUN` antes de I/O e conferir no teardown se alguma chamada bloqueada foi engolida.
+
+## Git da sessão segue a worktree onde o agente trabalha
+
+**Regra:** a lista de sessões leva `git_cwd`, a raiz do repositório onde o agente trabalha quando
+ele saiu do da pasta de abertura. Rotas `/git*`, `/branches` e `/checkout`, o resumo de git da
+lista, o painel de git local do nativo e o rodapé do chat usam essa pasta; arquivos, uploads,
+citações e execução continuam no `cwd`. No Claude, a pasta sai do `cwd` do transcript e das
+chamadas recentes: `cd X`/`git -C X` levam a sessão para X (inclusive de volta à principal),
+Edit/Write num arquivo de worktree levam para ela, e editar arquivo da principal não tira da
+worktree. Chamadas anteriores à última troca de `cwd` não contam.
+
+**Por quê (04/10/2026, Claude Code 2.1.289):** numa worktree irmã (`../<repo>-<x>`) o Claude Code
+devolve o shell à pasta de abertura a cada comando ("Shell cwd was reset"), e o `cwd` e o
+`gitBranch` gravados no transcript nunca saem dela. Medido em oito transcripts reais: as sessões
+que trabalhavam em worktrees irmãs gravavam a pasta de abertura e `main` em todas as linhas, e o
+app mostrava `main` e o painel de git vazio.
+Só o `EnterWorktree` muda o `cwd` gravado. O t3code não detecta a troca: a pasta da conversa é um
+campo (`worktreePath`) que só muda quando o app cria a worktree ou o agente chama a ferramenta MCP
+dele de passagem de worktree.
+
+**Leitura do transcript:** de trás para frente, em blocos de 256 KB, até 20 caminhos ou 8 MB.
+Imagem lida pela sessão entra em base64 e encheu sozinha os últimos 256 KB numa sessão real: sem
+ler mais fundo, a sessão voltava a parecer na principal. Medido: 2 a 9 ms por transcript de 4 a
+23 MB, sem cache.
+
+**Limites conhecidos:** caminho em variável (`W=/x; cat > $W/a`) não é reconhecido; `cd` numa
+worktree só para inspecionar leva a sessão para lá até o próximo sinal (o mesmo do Codex). O
+Codex ainda lê só os últimos 256 KB.
+
+**Contrato interno 14:** `/internal/workspace/context` passou a levar `session.git_cwd`, e o
+`workspace_routes.rs` usa essa pasta só nas operações de git. Contexto sem o campo cai no `cwd`.
+
+**Prova:** janela de teste do nativo atrás de um repassador que acrescentava o campo à lista do
+backend instalado; rodapé, título, card e painel de git das três sessões em worktree passaram a
+mostrar a worktree e a branch dela.

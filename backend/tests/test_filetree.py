@@ -273,6 +273,7 @@ def test_rota_binario_devolve_envelope(monkeypatch, tmp_path, cliente):
     d = _repo(tmp_path)
     (tmp_path / "i.png").write_bytes(b"\x89PNG\x00bin")
     monkeypatch.setattr(api, "_session_cwd", lambda name: d)
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: d)
     r = cliente.get("/api/sessions/s/files/read", params={"path": "i.png"},
                     headers={"Authorization": "Bearer secret"})
     assert r.status_code == 415
@@ -283,6 +284,7 @@ def test_rota_busca_vazia_devolve_envelope(monkeypatch, tmp_path, cliente):
     from app import api
     d = _repo(tmp_path)
     monkeypatch.setattr(api, "_session_cwd", lambda name: d)
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: d)
     r = cliente.get("/api/sessions/s/files/search", params={"q": "   "},
                     headers={"Authorization": "Bearer secret"})
     assert r.status_code == 400
@@ -292,6 +294,7 @@ def test_rota_busca_vazia_devolve_envelope(monkeypatch, tmp_path, cliente):
 def test_rota_path_diff_fora_de_repo_devolve_envelope(monkeypatch, tmp_path, cliente):
     from app import api
     monkeypatch.setattr(api, "_session_cwd", lambda name: str(tmp_path))
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: str(tmp_path))
     r = cliente.post("/api/sessions/s/git/path-diff", json={"path": "x.txt"},
                      headers={"Authorization": "Bearer secret"})
     assert r.status_code == 409
@@ -310,6 +313,7 @@ def test_rota_path_diff_nao_atravessa_cwd(monkeypatch, tmp_path, cliente):
     _escrever(tmp_path / "segredo.txt", "SENHA\n")
     sub = str(tmp_path / "sub")
     monkeypatch.setattr(api, "_session_cwd", lambda name: sub)
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: sub)
     r = cliente.post("/api/sessions/s/git/path-diff",
                      json={"path": "../segredo.txt", "escopo": "nao_commitado"},
                      headers={"Authorization": "Bearer secret"})
@@ -321,6 +325,7 @@ def test_rota_recusa_caminho_absoluto(monkeypatch, tmp_path, cliente):
     from app import api
     d = _repo(tmp_path)
     monkeypatch.setattr(api, "_session_cwd", lambda name: d)
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: d)
     h = {"Authorization": "Bearer secret"}
     absoluto = str(tmp_path / "base.txt")
     r = cliente.get("/api/sessions/s/files/list", params={"path": absoluto}, headers=h)
@@ -340,6 +345,7 @@ def test_rota_symlink_que_atravessa_cwd_recusado(monkeypatch, tmp_path, cliente)
     os.symlink("../segredo.txt", tmp_path / "sub" / "elo")
     sub = str(tmp_path / "sub")
     monkeypatch.setattr(api, "_session_cwd", lambda name: sub)
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: sub)
     h = {"Authorization": "Bearer secret"}
     r = cliente.get("/api/sessions/s/files/read", params={"path": "elo"}, headers=h)
     assert r.status_code == 400 and r.json()["detail"]["code"] == "erro_arq_fora_da_raiz"
@@ -367,6 +373,7 @@ def test_rota_path_diff_trata_asterisco_como_literal(monkeypatch, tmp_path, clie
     _escrever(tmp_path / "a.txt", "um\nAAA\n")
     _escrever(tmp_path / "b.txt", "dois\nBBB\n")
     monkeypatch.setattr(api, "_session_cwd", lambda name: d)
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: d)
     r = cliente.post("/api/sessions/s/git/path-diff",
                      json={"path": "*", "escopo": "nao_commitado"},
                      headers={"Authorization": "Bearer secret"})
@@ -386,6 +393,7 @@ def test_rota_pasta_comum_lista_e_le(monkeypatch, tmp_path, cliente):
     (tmp_path / "sub").mkdir()
     _escrever(tmp_path / "sub" / "x.txt", "x\n")
     monkeypatch.setattr(api, "_session_cwd", lambda name: str(tmp_path))
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: str(tmp_path))
     h = {"Authorization": "Bearer secret"}
     r = cliente.get("/api/sessions/s/files/list", params={"so_modificados": "false"}, headers=h)
     assert r.status_code == 200
@@ -411,6 +419,7 @@ def test_rota_pasta_comum_plausivel_3_marcadores(monkeypatch, tmp_path, cliente)
     (tmp_path / "refs").mkdir()
     _escrever(tmp_path / "README.txt", "comum\n")
     monkeypatch.setattr(api, "_session_cwd", lambda name: str(tmp_path))
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: str(tmp_path))
     h = {"Authorization": "Bearer secret"}
     r = cliente.get("/api/sessions/s/files/read", params={"path": "README.txt"}, headers=h)
     assert r.status_code == 200
@@ -436,6 +445,7 @@ def test_rota_path_diff_trata_colchete_como_literal(monkeypatch, tmp_path, clien
     _escrever(tmp_path / "a[b].txt", "colchete\nCOLCHETE\n")
     _escrever(tmp_path / "ab.txt", "irmao\nIRMAO\n")
     monkeypatch.setattr(api, "_session_cwd", lambda name: d)
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: d)
     r = cliente.post("/api/sessions/s/git/path-diff",
                      json={"path": "a[b].txt", "escopo": "nao_commitado"},
                      headers={"Authorization": "Bearer secret"})
@@ -451,6 +461,7 @@ def test_rota_busca_fora_de_repo_continua_409(monkeypatch, tmp_path, cliente):
     from app import api
     _escrever(tmp_path / "x.txt", "agulha\n")
     monkeypatch.setattr(api, "_session_cwd", lambda name: str(tmp_path))
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: str(tmp_path))
     r = cliente.get("/api/sessions/s/files/search", params={"q": "agulha"},
                     headers={"Authorization": "Bearer secret"})
     assert r.status_code == 409
@@ -461,6 +472,7 @@ def test_rota_list_falha_do_git_vira_envelope(monkeypatch, tmp_path, cliente):
     from app import api, git_ops
     d = _repo(tmp_path)
     monkeypatch.setattr(api, "_session_cwd", lambda name: d)
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: d)
 
     def quebra(cwd):
         raise git_ops.GitError(500, "git quebrou")
@@ -480,6 +492,7 @@ def test_rota_list_pasta_sem_permissao_vira_envelope(monkeypatch, tmp_path, clie
     (tmp_path / "privada").chmod(0o000)
     try:
         monkeypatch.setattr(api, "_session_cwd", lambda name: d)
+        monkeypatch.setattr(api, "_session_git_cwd", lambda name: d)
         r = cliente.get("/api/sessions/s/files/list",
                         params={"path": "privada", "so_modificados": "false"},
                         headers={"Authorization": "Bearer secret"})
@@ -493,6 +506,7 @@ def test_rota_nul_recusado_em_todas_as_rotas(monkeypatch, tmp_path, cliente):
     from app import api
     d = _repo(tmp_path)
     monkeypatch.setattr(api, "_session_cwd", lambda name: d)
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: d)
     h = {"Authorization": "Bearer secret"}
     r = cliente.get("/api/sessions/s/files/list", params={"path": "\x00"}, headers=h)
     assert r.status_code == 400 and r.json()["detail"]["code"] == "erro_arq_caminho_invalido"
@@ -509,6 +523,7 @@ def test_rota_modo_invalido_devolve_envelope(monkeypatch, tmp_path, cliente):
     from app import api
     d = _repo(tmp_path)
     monkeypatch.setattr(api, "_session_cwd", lambda name: d)
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: d)
     r = cliente.get("/api/sessions/s/files/search", params={"q": "x", "mode": "evil"},
                     headers={"Authorization": "Bearer secret"})
     assert r.status_code == 400
@@ -519,6 +534,7 @@ def test_rota_escopo_invalido_devolve_envelope(monkeypatch, tmp_path, cliente):
     from app import api
     d = _repo(tmp_path)
     monkeypatch.setattr(api, "_session_cwd", lambda name: d)
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: d)
     r = cliente.post("/api/sessions/s/git/path-diff",
                      json={"path": "base.txt", "escopo": "evil"},
                      headers={"Authorization": "Bearer secret"})
@@ -533,6 +549,7 @@ def test_rota_nao_vaza_detalhe_interno_da_busca(monkeypatch, tmp_path, cliente):
     from app.filesearch import SearchError
     d = _repo(tmp_path)
     monkeypatch.setattr(api, "_session_cwd", lambda name: d)
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: d)
 
     def quebra(cwd, q, mode):
         raise SearchError(409, "erro_arq_busca_falhou", "/home/privado/arquivo.txt: valor-secreto")
@@ -551,6 +568,7 @@ def test_rota_nao_vaza_detalhe_interno_do_diff(monkeypatch, tmp_path, cliente):
     from app.git_ops import GitError
     d = _repo(tmp_path)
     monkeypatch.setattr(api, "_session_cwd", lambda name: d)
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: d)
 
     def quebra(cwd, path, escopo):
         raise GitError(409, "/home/privado/arquivo.txt: valor-secreto")
@@ -572,6 +590,7 @@ def test_rota_repo_sob_pasta_ancestral_git_lista_e_le(monkeypatch, tmp_path, cli
     (tmp_path / ".git" / "projeto").mkdir(parents=True)
     d = _repo(tmp_path / ".git" / "projeto")
     monkeypatch.setattr(api, "_session_cwd", lambda name: d)
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: d)
     h = {"Authorization": "Bearer secret"}
     r = cliente.get("/api/sessions/s/files/list", params={"so_modificados": "false"}, headers=h)
     assert r.status_code == 200
@@ -586,6 +605,7 @@ def test_rota_numstat_falha_vira_envelope(monkeypatch, tmp_path, cliente):
     d = _repo(tmp_path)
     _escrever(tmp_path / "base.txt", "base\nmexido\n")
     monkeypatch.setattr(api, "_session_cwd", lambda name: d)
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: d)
     orig = git_ops._run
 
     def quebra_numstat(cwd, *args, **kw):
@@ -605,6 +625,7 @@ def test_rota_probe_git_falhou_vira_envelope(monkeypatch, tmp_path, cliente):
     from app import api, git_ops
     d = _repo(tmp_path)
     monkeypatch.setattr(api, "_session_cwd", lambda name: d)
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: d)
 
     def quebra(cwd, *args, **kw):
         raise git_ops.GitError(500, "git nao encontrado")
@@ -620,6 +641,7 @@ def test_rota_changed_files_504_preserva_status(monkeypatch, tmp_path, cliente):
     from app import api, git_ops
     d = _repo(tmp_path)
     monkeypatch.setattr(api, "_session_cwd", lambda name: d)
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: d)
 
     def quebra(cwd):
         raise git_ops.GitError(504, "timeout")
@@ -639,6 +661,7 @@ def test_rota_head_probe_timeout_vira_envelope(monkeypatch, tmp_path, cliente):
     from app import api, git_ops
     d = _repo(tmp_path)
     monkeypatch.setattr(api, "_session_cwd", lambda name: d)
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: d)
     orig = git_ops._run
 
     def quebra(cwd, *args, **kw):
@@ -659,6 +682,7 @@ def test_rota_head_quebrado_nao_vira_lista_vazia(monkeypatch, tmp_path, cliente)
     from app import api, git_ops
     d = _repo(tmp_path)
     monkeypatch.setattr(api, "_session_cwd", lambda name: d)
+    monkeypatch.setattr(api, "_session_git_cwd", lambda name: d)
     orig = git_ops._run
 
     def quebra(cwd, *args, **kw):

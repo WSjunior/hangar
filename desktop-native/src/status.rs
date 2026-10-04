@@ -137,9 +137,10 @@ pub fn model_label(id: &str) -> String {
 }
 
 pub fn parse(raw: Option<&str>, session: Option<&SessionInfo>) -> Option<StatusFields> {
-    // Codex e Claude sem terminal não publicam Git na linha; a lista já consulta o repositório.
-    let git = session.filter(|s| s.provider == "codex" || s.headless).and_then(|s| {
-        Some((basename(s.cwd.as_deref()?).to_owned(), s.branch.clone()?, s.git_dirty.map(|n| n > 0)))
+    // Codex e Claude sem terminal não publicam Git na linha, e com o agente numa worktree a linha fala
+    // da pasta de abertura: nos dois casos vale a lista.
+    let git = session.filter(|s| s.provider == "codex" || s.headless || s.git_cwd.is_some()).and_then(|s| {
+        Some((basename(s.git_dir()?).to_owned(), s.branch.clone()?, s.git_dirty.map(|n| n > 0)))
     });
     let raw = raw.unwrap_or("");
     let context = session.and_then(|s| s.context.as_ref()).filter(|c| c.window > 0.0);
@@ -270,6 +271,17 @@ mod tests {
         // A linha do Hangar, quando traz o nome, vence.
         let f = parse(Some("🤖 Opus5.5·1M (high) │ 💬 1k/2k"), Some(&session)).unwrap();
         assert_eq!(f.model.as_deref(), Some("Opus5.5·1M"));
+    }
+
+    #[test]
+    fn agent_in_a_worktree_shows_the_list_git_over_the_line() {
+        let session = SessionInfo { provider: "claude".into(), cwd: Some("/p/repo".into()),
+            git_cwd: Some("/p/repo-tray".into()), branch: Some("tray".into()), git_dirty: Some(0), ..Default::default() };
+        let f = parse(Some("🤖 Opus5 │ 📁 repo [main*]"), Some(&session)).unwrap();
+        assert_eq!((f.repo.as_deref(), f.branch.as_deref(), f.dirty), (Some("repo-tray"), Some("tray"), Some(false)));
+        // Sem worktree, a linha da sessão com terminal continua valendo.
+        let f = parse(Some("🤖 Opus5 │ 📁 repo [main*]"), Some(&SessionInfo { git_cwd: None, ..session })).unwrap();
+        assert_eq!((f.repo.as_deref(), f.branch.as_deref()), (Some("repo"), Some("main")));
     }
 
     #[test]
