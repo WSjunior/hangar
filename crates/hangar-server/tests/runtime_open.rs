@@ -210,3 +210,40 @@ async fn failed_open_leaves_no_entry_and_frees_the_lease() {
     assert!(registry.handle("key",1).await.is_err());
     assert!(acquire_lease(&target.lease_path).is_ok(),"a trava sai junto com a falha");
 }
+
+/// Cano recém-lançado que só cria o socket depois de um tempo (escopo do systemd + exec).
+#[cfg(unix)]
+#[tokio::test]
+async fn open_waits_for_launched_cano_to_listen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("cano.sock");
+    let socket = path.clone();
+    let server = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (stream,_) = listener.accept().await.unwrap();
+        let (read,mut write) = tokio::io::split(stream);
+        let mut reader = BufReader::new(read);
+        let mut header = String::new();
+        reader.read_line(&mut header).await.unwrap();
+        assert_eq!(header,"secret-test\n");
+        let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
+            "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+        write.write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+        loop {
+            let mut raw = String::new();
+            if reader.read_line(&mut raw).await.unwrap_or(0) == 0 { break; }
+            let envelope:Value = serde_json::from_str(&raw).unwrap();
+            let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
+            write.write_all(format!("{ack}\n").as_bytes()).await.unwrap();
+        }
+    });
+    let target = target(dir.path(),format!("unix:{}",path.display()),true);
+    let registry = registry().await;
+    let started = Instant::now();
+    let opened = registry.open(target).await.expect("o open espera o cano começar a escutar");
+    assert_eq!(opened["opened"],true);
+    assert!(started.elapsed() >= Duration::from_millis(250));
+    registry.close("key",1).await.unwrap();
+    server.abort();
+}
