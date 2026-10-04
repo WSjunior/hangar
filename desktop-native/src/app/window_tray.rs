@@ -81,7 +81,8 @@ impl Hangar {
             self.window_tray.last_toggle = Some(now);
         }
         match event {
-            TrayEvent::Toggle if !self.window_tray.hidden && self.closes_to_tray() => self.hide_to_tray(window, cx),
+            // Minimizada conta como fora da tela: o clique a traz de volta em vez de escondê-la.
+            TrayEvent::Toggle if !self.window_tray.hidden && window.is_visible() && self.closes_to_tray() => self.hide_to_tray(window, cx),
             TrayEvent::Toggle | TrayEvent::Show => self.show_from_tray(window, cx),
             // O ícone sai antes: encerrar com ele de pé deixa um ícone morto na bandeja do Windows.
             TrayEvent::Quit => { self.window_tray.icon = None; cx.quit(); }

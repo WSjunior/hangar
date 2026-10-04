@@ -1,30 +1,38 @@
 //! Bandeja do Windows: uma janela oculta numa thread própria, com o laço de mensagens dela. Não é janela "só de
 //! mensagens": essas não recebem o `TaskbarCreated`, que pede o ícone de volta quando o Explorer reinicia.
 use super::TrayEvent;
-use std::sync::{OnceLock, atomic::{AtomicU32, Ordering}};
+use std::sync::{OnceLock, atomic::{AtomicBool, AtomicU32, Ordering}};
 use windows::{core::{w, HSTRING, PCWSTR}, Win32::{
     Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM},
     System::LibraryLoader::GetModuleHandleW,
-    UI::{Shell::{Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW},
+    UI::{Shell::{Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW},
         WindowsAndMessaging::{AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW,
-            GetCursorPos, GetMessageW, LoadIconW, PostMessageW, PostQuitMessage, RegisterClassW, RegisterWindowMessageW, SendMessageW,
-            SetForegroundWindow, TrackPopupMenu, TranslateMessage, MF_SEPARATOR, MF_STRING, MSG, TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD,
-            TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WNDCLASSW}}}};
+            GetCursorPos, GetMessageW, GetSystemMetrics, KillTimer, LoadImageW, PostMessageW, PostQuitMessage, RegisterClassW,
+            RegisterWindowMessageW, SendMessageW, SetForegroundWindow, SetTimer, TrackPopupMenu, TranslateMessage, HICON, IMAGE_ICON,
+            LR_SHARED, MF_SEPARATOR, MF_STRING, MSG, SM_CXSMICON, SM_CYSMICON, TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD,
+            TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_TIMER,
+            WNDCLASSW}}}};
 
 const CALLBACK: u32 = WM_APP + 1;
 const ICON_ID: u32 = 1;
 const OPEN: usize = 1;
 const QUIT: usize = 2;
+const RETRY_TIMER: usize = 1;
+const RETRY_MS: u32 = 2000;
 
 static EVENTS: OnceLock<async_channel::Sender<TrayEvent>> = OnceLock::new();
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+/// O ícone está na bandeja. Sem ele fechar não pode esconder a janela: não haveria por onde voltar.
+static ONLINE: AtomicBool = AtomicBool::new(false);
 
 fn send(event: TrayEvent) { if let Some(events) = EVENTS.get() { let _ = events.try_send(event); } }
+
+fn set_online(online: bool) { if ONLINE.swap(online, Ordering::Relaxed) != online { send(TrayEvent::Host(online)); } }
 
 pub struct Handle { hwnd: isize }
 
 impl Handle {
-    pub fn online(&self) -> bool { true }
+    pub fn online(&self) -> bool { ONLINE.load(Ordering::Relaxed) }
     pub fn refresh(&self) {}
 }
 
@@ -53,10 +61,11 @@ fn create() -> Result<HWND, String> {
         TASKBAR_CREATED.store(RegisterWindowMessageW(w!("TaskbarCreated")), Ordering::Relaxed);
         let hwnd = CreateWindowExW(WINDOW_EX_STYLE(0), class, w!("Hangar"), WINDOW_STYLE(0), 0, 0, 0, 0, None, None, Some(module.into()), None)
             .map_err(|e| e.to_string())?;
-        if !add_icon(hwnd) {
+        if !put_icon(hwnd) {
             let _ = DestroyWindow(hwnd);
             return Err("Shell_NotifyIcon".into());
         }
+        ONLINE.store(true, Ordering::Relaxed);
         Ok(hwnd)
     }
 }
@@ -64,17 +73,24 @@ fn create() -> Result<HWND, String> {
 fn icon_data(hwnd: HWND) -> NOTIFYICONDATAW {
     let mut data = NOTIFYICONDATAW { cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32, hWnd: hwnd, uID: ICON_ID,
         uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP, uCallbackMessage: CALLBACK, ..Default::default() };
-    // Recurso 1 do executável (`assets/brand/icon.rc`).
+    // Recurso 1 do executável (`assets/brand/icon.rc`), no tamanho de ícone pequeno do sistema: o de 32 px reduzido
+    // pela bandeja fica borrado. `LR_SHARED`: o sistema guarda e libera o ícone.
     unsafe {
         if let Ok(module) = GetModuleHandleW(PCWSTR::null()) {
-            if let Ok(icon) = LoadIconW(Some(module.into()), PCWSTR(1 as _)) { data.hIcon = icon; }
+            let (width, height) = (GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
+            if let Ok(icon) = LoadImageW(Some(module.into()), PCWSTR(1 as _), IMAGE_ICON, width, height, LR_SHARED) { data.hIcon = HICON(icon.0); }
         }
     }
     for (slot, unit) in data.szTip.iter_mut().zip("Hangar".encode_utf16()) { *slot = unit; }
     data
 }
 
-fn add_icon(hwnd: HWND) -> bool { unsafe { Shell_NotifyIconW(NIM_ADD, &icon_data(hwnd)).as_bool() } }
+/// Acrescenta o ícone. O `TaskbarCreated` também chega com o ícone ainda lá (mudança de escala): aí acrescentar
+/// falha e atualizar confirma que ele existe.
+fn put_icon(hwnd: HWND) -> bool {
+    let data = icon_data(hwnd);
+    unsafe { Shell_NotifyIconW(NIM_ADD, &data).as_bool() || Shell_NotifyIconW(NIM_MODIFY, &data).as_bool() }
+}
 
 fn pump() {
     let mut message = MSG::default();
@@ -121,16 +137,30 @@ unsafe extern "system" fn proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam:
             }
             LRESULT(0)
         }
+        // O Explorer voltou e ainda não aceita ícone: tenta de novo até entrar.
+        WM_TIMER if wparam.0 == RETRY_TIMER => {
+            if put_icon(hwnd) {
+                let _ = unsafe { KillTimer(Some(hwnd), RETRY_TIMER) };
+                set_online(true);
+            }
+            LRESULT(0)
+        }
         // O `WM_CLOSE` que o `Drop` manda cai no padrão do sistema, que destrói a janela e chega aqui.
         WM_DESTROY => {
             unsafe {
                 let _ = Shell_NotifyIconW(NIM_DELETE, &icon_data(hwnd));
                 PostQuitMessage(0);
             }
+            set_online(false);
             LRESULT(0)
         }
         // O Explorer reiniciou: a bandeja nova não conhece o ícone.
-        other if other != 0 && other == TASKBAR_CREATED.load(Ordering::Relaxed) => { add_icon(hwnd); LRESULT(0) }
+        other if other != 0 && other == TASKBAR_CREATED.load(Ordering::Relaxed) => {
+            let online = put_icon(hwnd);
+            set_online(online);
+            if !online { unsafe { SetTimer(Some(hwnd), RETRY_TIMER, RETRY_MS, None); } }
+            LRESULT(0)
+        }
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
     }
 }
