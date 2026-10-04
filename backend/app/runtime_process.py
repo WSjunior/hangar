@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import json
+import logging
 import signal
 import subprocess
 import sys
@@ -74,6 +75,15 @@ class WindowsJob:
 
     def terminate(self):
         self.check(self.api.TerminateJobObject(self.handle, 1))
+
+    def members(self):
+        """PIDs do Job neste instante (JobObjectBasicProcessIdList)."""
+        from ctypes import wintypes as w
+        class Ids(self.c.Structure):
+            _fields_ = [('assigned', w.DWORD), ('listed', w.DWORD), ('ids', self.c.c_size_t * 1024)]
+        data = Ids()
+        self.check(self.api.QueryInformationJobObject(self.handle, 3, self.c.byref(data), self.c.sizeof(data), None))
+        return [int(data.ids[n]) for n in range(data.listed)]
 
     def active(self):
         data = self.Accounting()
@@ -156,8 +166,21 @@ def cleanup(proc, timeout=5):
         return True
     deadline = time.monotonic() + timeout
     if containment.job:
+        # A contagem do Job zera antes de o processo terminar de sair: a prova espera cada membro.
+        tracked = []
+        try:
+            pids = containment.job.members()
+        except OSError:
+            # Lista parcial não pode impedir o encerramento; a contagem do Job cobre o resto.
+            logging.getLogger('hangar.runtime').warning('membros do Job não listados; prova só pela contagem', exc_info=True)
+            pids = []
+        for pid in pids:
+            try:
+                tracked.append((pid, psutil.Process(pid).create_time()))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
         containment.job.terminate()
-        while containment.job.active():
+        while containment.job.active() or any(_still_there(pid, birth) for pid, birth in tracked):
             if time.monotonic() >= deadline:
                 raise RuntimeError('descendentes Rust ainda ativos no Job')
             time.sleep(.02)
@@ -212,6 +235,14 @@ def _same_process(pid, birth):
         return sys.platform != 'win32' or proc.num_threads() > 0
     except psutil.NoSuchProcess:
         return False
+
+
+def _still_there(pid, birth):
+    # Sem permissão para olhar, o processo conta como presente: a prova só fecha com a saída vista.
+    try:
+        return _same_process(pid, birth)
+    except psutil.AccessDenied:
+        return True
 
 
 def refresh_members(proc):

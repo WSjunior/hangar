@@ -30,6 +30,25 @@ def test_exited_windows_process_held_by_a_handle_is_not_the_same_process(monkeyp
     assert runtime_process._same_process(1, 7.0) is True
 
 
+def test_job_cleanup_waits_for_every_member_to_leave_after_the_count_drops(monkeypatch):
+    from app import runtime_process
+    from app.runtime_process import Containment, cleanup
+    events, alive = [], iter([True, True, False])
+    class Job:
+        def members(self): return [123]
+        def terminate(self): events.append('terminate')
+        def active(self): return 0
+        def close(self): events.append('close')
+    class Process:
+        def __init__(self, pid): pass
+        def create_time(self): return 5.0
+    monkeypatch.setattr(runtime_process.psutil, 'Process', Process)
+    monkeypatch.setattr(runtime_process, '_same_process', lambda pid, birth: next(alive))
+    holder = type('Contained', (), {'runtime_containment': Containment(1, 1.0, Job()), 'poll': lambda self: None})()
+    assert cleanup(holder, timeout=3) is True
+    assert events == ['terminate', 'close'] and next(alive, 'gasto') == 'gasto'
+
+
 def test_child_cleanup_after_abrupt_parent_death(tmp_path):
     from app.runtime_process import spawn_contained, cleanup
     pid_path = tmp_path / 'child.pid'
@@ -103,8 +122,12 @@ time.sleep(60)
         while not ready.exists() and backend.poll() is None and time.monotonic()<deadline:time.sleep(.01)
         assert ready.exists()
         info=json.loads(ready.read_text())
+        # No Windows o python do venv é um lançador: o dono gravado é o processo filho dele.
+        owner=json.loads(record.read_text())['owner_pid']
         backend.kill()
         backend.wait(5)
+        try:psutil.Process(owner).kill();psutil.Process(owner).wait(5)
+        except psutil.NoSuchProcess:pass
         try:psutil.Process(info['rust']).kill()
         except psutil.NoSuchProcess:pass
         assert runtime_process.reconcile_startup(record) is True
@@ -158,3 +181,16 @@ def test_windows_jobs_keep_unique_and_explicit_names_with_fake_api(monkeypatch):
         assert [args[2] for name,args in calls if name=='OpenJobObjectW']==[supplied]
     finally:
         first.close();second.close();existing.close()
+
+
+def test_job_cleanup_terminates_even_when_members_cannot_be_listed(monkeypatch):
+    from app.runtime_process import Containment, cleanup
+    events = []
+    class Job:
+        def members(self): raise OSError('ERROR_MORE_DATA')
+        def terminate(self): events.append('terminate')
+        def active(self): return 0
+        def close(self): events.append('close')
+    holder = type('Contained', (), {'runtime_containment': Containment(1, 1.0, Job()), 'poll': lambda self: None})()
+    assert cleanup(holder, timeout=3) is True
+    assert events == ['terminate', 'close']

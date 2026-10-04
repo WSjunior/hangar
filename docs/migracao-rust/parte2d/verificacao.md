@@ -293,7 +293,11 @@ Com o Rust verde no Windows, a etapa Python mostrou três falhas de `test_runtim
 mesmo nascimento enquanto alguém segura um handle dele, e `_same_process` o tratava como vivo:
 `reconcile_startup` recusava com "outro ciclo do backend ainda possui escritores Rust" por um
 backend já morto. Agora, no Windows, processo sem threads conta como encerrado; o teste da
-limpeza usa o mesmo critério em vez do status de zumbi, que lá não existe.
+limpeza usa o mesmo critério em vez do status de zumbi, que lá não existe. A rodada seguinte mostrou mais
+dois pontos: a contagem de ativos do Job zerava antes de o neto terminar de sair, e a limpeza
+devolvia a prova cedo demais; agora ela guarda os membros do Job antes de encerrar e espera cada
+um sair. No teste de restart, o `python` do venv no Windows é um lançador, e o dono gravado é o
+filho dele; o teste passou a matar o dono real (a recusa do produto estava certa).
 
 ## Ainda pendente
 
