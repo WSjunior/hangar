@@ -2505,7 +2505,8 @@ def matar_orfaos() -> int:
                 mortos += 1
             except OSError:
                 _log.warning("claude headless: órfão pid=%s não morreu", p.name, exc_info=True)
-        elif marca in env and _orphan_key(env, set(), owner) is None:
+        elif (marca in env and _orphan_key(env, set(), owner) is None
+              and not any(marca + key.encode() in env for key in vivas if key)):
             alheios += 1
     if sem_permissao:
         _log.info("claude headless: varredura de órfãos sem permissão em %d processo(s) meus", sem_permissao)

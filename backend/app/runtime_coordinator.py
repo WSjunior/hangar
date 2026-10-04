@@ -6,6 +6,7 @@ import contextvars
 import copy
 import errno
 import json
+import logging
 import os
 import sys
 import re
@@ -18,6 +19,8 @@ from enum import Enum
 from pathlib import Path
 
 from app import runtime_queue
+
+_log = logging.getLogger("hangar.runtime")
 
 _current = None
 _lifecycle = contextvars.ContextVar("runtime_lifecycle", default=None)
@@ -944,11 +947,12 @@ class RuntimeCoordinator:
                     try:
                         if slot.lease is not None:
                             slot.lease.close()
-                    finally:
-                        slot.lease = None
-                        if self.names.get(name) == slot.binding.key:
-                            self.names.pop(name, None)
-                        self.slots.pop(slot.binding.key, None)
+                    except Exception:
+                        _log.warning("trava de escrita não fechou ao aposentar a sessão", exc_info=True)
+                    slot.lease = None
+                    if self.names.get(name) == slot.binding.key:
+                        self.names.pop(name, None)
+                    self.slots.pop(slot.binding.key, None)
                 raise
 
     @asynccontextmanager

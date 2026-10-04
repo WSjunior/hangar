@@ -462,7 +462,7 @@ impl TerminalDriver {
             let capture = if clear {
                 match self.verify_pane().await { Ok(()) => self.composer_capture_unverified().await, Err(e) => Err(e) }
             } else { self.composer_capture().await };
-            if let Err(error) = &capture { last_error = Some(error.code); }
+            last_error = capture.as_ref().err().map(|error| error.code);
             if let Ok((screen, typed)) = capture {
                 // Só aceita se o texto também sumiu da tela com estilo: esmaecido nunca prova envio.
                 if ComposerSnapshot::parse(&typed).is_some_and(|now| now.is_empty())

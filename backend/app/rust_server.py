@@ -422,9 +422,11 @@ class Supervisor:
                         await coordinator.recover(slot.binding.name, confirmed_dead=True, containment=proof)
                     except Exception as exc:
                         # Uma sessão que não volta fica suspensa sozinha; a porta e as outras seguem.
-                        _log.exception("recuperação da sessão falhou depois da morte do Rust")
-                        diag.registrar("runtime.recover_failed", "erro", sessao=slot.binding.name,
-                                       **runtime_coordinator.failure_reason(exc))
+                        reason = runtime_coordinator.failure_reason(exc)
+                        # Traceback só quando a mensagem é segura: a do Python pode carregar texto da sessão.
+                        _log.error("recuperação da sessão %s falhou depois da morte do Rust: %s",
+                                   slot.binding.name, reason["codigo"], exc_info=bool(reason["detalhe"]))
+                        diag.registrar("runtime.recover_failed", "erro", sessao=slot.binding.name, **reason)
         self.runtime_ready = self.runtime_secret = self.runtime_instance = None
         self.runtime_transport = None
 
