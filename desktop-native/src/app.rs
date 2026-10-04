@@ -5322,8 +5322,8 @@ impl Hangar {
         let dock: Vec<AnyElement> = self.plugin_panes.iter()
             .filter(|p| crate::plugin_ui::is_dock(p) && self.selected.as_ref().is_some_and(|s| s.readable()))
             .map(|p| {
-                let width = p["columns"].as_f64().map(|c| c as f32 * crate::plugin_ui::CELL_W).unwrap_or(420.).max(260.);
-                div().h_full().flex_shrink_0().w(px(width)).max_w(relative(0.4)).p_2().flex().flex_col()
+                let width = p["columns"].as_f64().map(|c| c as f32 * crate::plugin_ui::CELL_W).unwrap_or(420.);
+                div().h_full().flex_shrink_0().w(px(width)).max_w(relative(0.45)).min_w(px(260.)).p_2().flex().flex_col()
                     .child(crate::plugin_ui::pane(p, self.plugin_press(cx))).into_any_element()
             }).collect();
         if dock.is_empty() { return content.into_any_element(); }

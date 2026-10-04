@@ -59,7 +59,8 @@ pub fn pane(pane: &Value, press: Option<Press>) -> AnyElement {
                 .on_click(move |_, window, cx| press(&site, PANE_CLOSE_KEY, window, cx)))
         });
     let c = Ctx { site: &id, press: &press };
-    frame().flex().flex_col().gap_1().min_h_0()
+    // Recorta o que passa da largura: no gpui, filho maior que a coluna desenha por cima do vizinho.
+    frame().flex().flex_col().gap_1().min_h_0().w_full().overflow_hidden()
         .child(header)
         .child(div().id(SharedString::from(format!("plg-body-{id}"))).flex_1().min_h_0().overflow_y_scroll()
             .child(node(&pane["tree"], &c)))
