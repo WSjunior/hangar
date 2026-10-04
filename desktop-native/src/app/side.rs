@@ -450,7 +450,7 @@ impl Hangar {
                     self.action_feedback.insert(key, (tr("shortcut_busy"), true));
                 } else {
                     let known = self.known_user_ids();
-                    self.deliver(key, text, String::new(), false, known, false, cx);
+                    self.deliver(key, text, String::new(), false, known, None, cx);
                 }
             }
             // Sempre pelo backend, também com a sessão nesta máquina: é ele quem cria o terminal escondido que vira

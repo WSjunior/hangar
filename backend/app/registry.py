@@ -894,6 +894,11 @@ def _claude_config_dir(info) -> Optional[str]:
 def _claude_context(info, pid: Optional[int]) -> Optional[dict]:
     """Contexto pelo transcript com o modelo e a janela da PRÓPRIA sessão quando se sabe: o
     `/model` que a statusline recebeu, o `--model` do processo ou o sidecar da sem terminal."""
+    return _claude_reading(info, pid)[0]
+
+
+def _claude_reading(info, pid: Optional[int]) -> tuple[Optional[dict], Optional[str]]:
+    """Contexto e modelo em uso da sessão Claude, numa leitura só do transcript."""
     model, declared = _escolhas_status(Path(info.jsonl).stem)[0], None
     if getattr(info, "headless", False):
         meta = headless_sessions.load(info.name) or {}
@@ -902,7 +907,10 @@ def _claude_context(info, pid: Optional[int]) -> Optional[dict]:
         model = model or procinfo._model_of(pid)[0]
         declared = procinfo._env_var_of(pid, "CLAUDE_CODE_MAX_CONTEXT_TOKENS")
     window = int(declared) if declared and str(declared).isdigit() else None
-    return claude_context.from_transcript(info.jsonl, _claude_config_dir(info), model, window)
+    config_dir = _claude_config_dir(info)
+    ctx, answered = claude_context.read(info.jsonl, config_dir, model, window)
+    return ctx, claude_context.session_model(
+        answered, model, config_dir, (ctx or {}).get("used", 0), bool(getattr(info, "engine", None)))
 
 
 _STATUS_TTL = 20.0
@@ -950,9 +958,10 @@ class SessionRegistry:
     # Statusline por sessao: name -> (monotonic da captura, linha crua ou None). De classe
     # (compartilhado entre api.registry e as instancias do sse) — uma captura serve todos.
     _status_cache: dict[str, tuple[float, Optional[str]]] = {}
-    # Contexto da sessão Claude lido do transcript: name -> (monotonic da leitura, jsonl, {used, window}).
+    # Contexto e modelo da sessão Claude lidos do transcript:
+    # name -> (monotonic da leitura, jsonl, {used, window}, id do modelo).
     # O jsonl vai junto porque /clear troca o arquivo e o valor da conversa anterior não vale mais.
-    _context_cache: dict[str, tuple[float, Optional[str], Optional[dict]]] = {}
+    _context_cache: dict[str, tuple[float, Optional[str], Optional[dict], Optional[str]]] = {}
     # Pid do agente Claude de cada pane, visto na varredura: de onde ler `--model` e a janela.
     _agent_pid: dict[str, int] = {}
     # Texto do spinner ("Hyperspacing… (1m51s · ↓2.1k tokens)") extraido da MESMA captura do sweep:
@@ -1872,17 +1881,22 @@ class SessionRegistry:
                         or self._context_cache[i.name][1] != i.jsonl)]
         if claudes:
             lidos = await asyncio.gather(*[
-                asyncio.to_thread(_claude_context, i, self._agent_pid.get(i.name))
+                asyncio.to_thread(_claude_reading, i, self._agent_pid.get(i.name))
                 for i in claudes])
-            for info, ctx in zip(claudes, lidos):
-                _, jsonl_antes, anterior = self._context_cache.get(info.name, (0.0, None, None))
-                # Sem resposta lida, o valor anterior só vale para o MESMO transcript.
-                manter = anterior if jsonl_antes == info.jsonl else None
-                self._context_cache[info.name] = (time.monotonic(), info.jsonl, ctx or manter)
+            for info, (ctx, model) in zip(claudes, lidos):
+                _, jsonl_antes, anterior, modelo_antes = self._context_cache.get(info.name, (0.0, None, None, None))
+                # Sem resposta lida, o valor anterior só vale para o MESMO transcript; o modelo também,
+                # senão a pílula cai no da conta quando a resposta sai do trecho lido.
+                mesmo = jsonl_antes == info.jsonl
+                manter = anterior if mesmo else None
+                if ctx is None and mesmo and modelo_antes:
+                    model = modelo_antes
+                self._context_cache[info.name] = (time.monotonic(), info.jsonl, ctx or manter, model)
         for info in infos:
             if getattr(info, "provider", "claude") == "claude":
-                _, jsonl_lido, ctx = self._context_cache.get(info.name, (0.0, None, None))
+                _, jsonl_lido, ctx, model = self._context_cache.get(info.name, (0.0, None, None, None))
                 info.context = ctx if jsonl_lido == info.jsonl else None
+                info.model = model if jsonl_lido == info.jsonl else None
         # Travada (feature #7): "working" ha mais de CP_STALL_SECONDS sem o transcript avancar. So o
         # bool derivado pra UI/sig — o push (1x, com dedupe) e responsabilidade do stall_watch, nao daqui.
         now = time.time()

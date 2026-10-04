@@ -24,6 +24,32 @@ const NO_CWD: &str = "no-cwd";
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct Target { pub(super) server: String, pub(super) name: String }
 
+/// O que a segunda linha da sessão diz: a última resposta, a pergunta em aberto ou o que o agente está fazendo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Sub { Reply, Question, Working }
+
+type LastSubs = HashMap<Target, (Option<String>, (String, Sub))>;
+
+// A guardada só cobre o vão dentro do MESMO estado: qualquer troca (trabalhando → parada → trabalhando) a descarta,
+// senão a pergunta já respondida, o rótulo do turno anterior ou a resposta velha voltariam como se fossem de agora.
+// Conversa trocada (`/clear`) não herda a linha; sem transcript não dá para saber se é a mesma, então nada fica.
+fn kept_sub(last: &mut LastSubs, target: &Target, jsonl: Option<&str>, kind: Option<Sub>, fresh: Option<(String, Sub)>) -> Option<(String, Sub)> {
+    if jsonl.is_none() || kind.is_none() {
+        last.remove(target);
+        return fresh;
+    }
+    if last.get(target).is_some_and(|(seen, (_, k))| seen.as_deref() != jsonl || Some(*k) != kind) {
+        last.remove(target);
+    }
+    match fresh {
+        Some(sub) => {
+            last.insert(target.clone(), (jsonl.map(str::to_owned), sub.clone()));
+            Some(sub)
+        }
+        None => last.get(target).map(|(_, sub)| sub.clone()),
+    }
+}
+
 impl Target {
     pub(super) fn new(server: &str, name: &str) -> Self { Self { server: server.to_owned(), name: name.to_owned() } }
     /// Id estável dos elementos da linha: o nome sozinho colidiria entre máquinas.
@@ -225,6 +251,8 @@ pub(super) struct Sidebar {
     pointer_y: f32,
     pub(super) preview: Option<(Target, Entity<TextViewState>, f32)>,
     cache: HashMap<Target, (String, Instant)>,
+    /// Última segunda linha mostrada de cada sessão, com o transcript dela: vale enquanto a nova vier vazia.
+    last_sub: std::cell::RefCell<LastSubs>,
     press_seq: u64,
     long_pressed: bool,
     /// A troca entre a lista e o trilho em andamento: quando começou e se vai para o trilho.
@@ -240,7 +268,7 @@ impl Sidebar {
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder(tr("sidebar_filter")).clean_on_escape());
         cx.subscribe(&filter, |_, _, _: &InputEvent, cx| cx.notify()).detach();
         Self { filter, collapsed: load_collapsed(), deleting: HashSet::new(), editing: None, renaming: HashSet::new(), follow: None, lost: None, moving: HashMap::new(),
-            menu: None, menu_seq: 0, rename_seq: 0, chain: None, chain_seq: 0, focus_tab: None, remote_focus: HashMap::new(), collapse_gen: 0, button_menu: None, hover: None, hover_seq: 0, pointer_y: 0., preview: None, cache: HashMap::new(), press_seq: 0,
+            menu: None, menu_seq: 0, rename_seq: 0, chain: None, chain_seq: 0, focus_tab: None, remote_focus: HashMap::new(), collapse_gen: 0, button_menu: None, hover: None, hover_seq: 0, pointer_y: 0., preview: None, cache: HashMap::new(), last_sub: Default::default(), press_seq: 0,
             long_pressed: false, rail_anim: None, resize: None, grouping: Default::default() }
     }
 
@@ -253,9 +281,16 @@ impl Sidebar {
         self.grouping.reset();
         self.chain_seq += 1;
         self.cache.clear();
+        self.last_sub.borrow_mut().clear();
         self.menu_seq += 1;
         self.hover_seq += 1;
         self.press_seq += 1;
+    }
+
+    /// A segunda linha da sessão. Vazia, fica a última mostrada da mesma conversa: o rótulo do que o agente faz some e
+    /// volta entre uma etapa e outra, e a linha indo junto muda a altura do card a cada vez.
+    pub(super) fn keep_sub(&self, target: &Target, jsonl: Option<&str>, kind: Option<Sub>, fresh: Option<(String, Sub)>) -> Option<(String, Sub)> {
+        kept_sub(&mut self.last_sub.borrow_mut(), target, jsonl, kind, fresh)
     }
 
     fn menu_for(&self, target: &Target) -> Option<Mute> {
@@ -1630,6 +1665,57 @@ mod tests {
     use super::{BranchList, HashSet, SessionInfo, first_line, has_git, layout, rail_label, save_collapsed};
 
     #[test]
+    fn empty_second_line_keeps_the_last_one_of_the_same_conversation() {
+        use super::{Sub, Target, kept_sub};
+        let (mut last, row) = (super::LastSubs::new(), Target::new("m", "s"));
+        let working = || Some(("Puttering…".to_owned(), Sub::Working));
+        let w = Some(Sub::Working);
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), w, None), None);
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), w, working()), working());
+        // O rótulo some entre uma etapa e outra: a linha fica.
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), w, None), working());
+        // A linha nova, quando vem, vale e passa a ser a guardada.
+        let reply = Some(("Pronto.".to_owned(), Sub::Reply));
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), Some(Sub::Reply), reply.clone()), reply);
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), Some(Sub::Reply), None), reply);
+        // `/clear` troca o transcript: a linha da conversa anterior não volta. A de outra sessão também não.
+        assert_eq!(kept_sub(&mut last, &row, Some("b.jsonl"), Some(Sub::Reply), None), None);
+        assert_eq!(kept_sub(&mut last, &Target::new("m", "outra"), Some("a.jsonl"), Some(Sub::Reply), None), None);
+    }
+
+    #[test]
+    fn kept_second_line_only_returns_in_the_state_that_shows_it() {
+        use super::{Sub, Target, kept_sub};
+        let (mut last, row) = (super::LastSubs::new(), Target::new("m", "s"));
+        let question = Some(("Qual branch?".to_owned(), Sub::Question));
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), Some(Sub::Question), question.clone()), question);
+        // Respondida, a sessão volta a trabalhar ainda sem rótulo: a pergunta não fica no card.
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), Some(Sub::Working), None), None);
+        // Nem numa sessão parada sem resposta nova, nem fora dos três estados.
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), Some(Sub::Reply), None), None);
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), None, None), None);
+    }
+
+    #[test]
+    fn kept_second_line_never_crosses_a_state_change() {
+        use super::{Sub, Target, kept_sub};
+        let (mut last, row) = (super::LastSubs::new(), Target::new("m", "s"));
+        let (q, w, r) = (Some(Sub::Question), Some(Sub::Working), Some(Sub::Reply));
+        // Pergunta respondida, volta a trabalhar e pede de novo ainda sem o texto novo: a antiga não volta.
+        kept_sub(&mut last, &row, Some("a.jsonl"), q, Some(("Qual branch?".to_owned(), Sub::Question)));
+        kept_sub(&mut last, &row, Some("a.jsonl"), w, None);
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), q, None), None);
+        // O rótulo de um turno não abre o turno seguinte.
+        kept_sub(&mut last, &row, Some("a.jsonl"), w, Some(("Puttering…".to_owned(), Sub::Working)));
+        kept_sub(&mut last, &row, Some("a.jsonl"), r, None);
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), w, None), None);
+        // Sem transcript não se guarda nada.
+        let reply = Some(("Pronto.".to_owned(), Sub::Reply));
+        assert_eq!(kept_sub(&mut last, &row, None, r, reply.clone()), reply);
+        assert_eq!(kept_sub(&mut last, &row, None, r, None), None);
+    }
+
+    #[test]
     fn failed_local_proxy_discovery_keeps_claude_return_and_its_error() {
         let legacy: Vec<super::AccountTarget> = serde_json::from_value(serde_json::json!([
             {"path":"/claude-storage", "label":"Claude storage"}])).unwrap();
@@ -1734,8 +1820,11 @@ mod tests {
         assert_eq!(names(&l.waiting), ["Beta"]);
         assert_eq!(names(&l.groups[0].sessions), ["ação", "alfa", "api", "zeta"], "ç ordena como c, como o localeCompare");
         let p = layout(&all, "", true, &HashSet::new());
-        assert_eq!(p.groups.len(), 1, "/p/a e /p/a/ são o mesmo projeto; Beta fica só em Aguardando");
-        assert_eq!((p.groups[0].key.as_str(), p.groups[0].label.as_str()), ("/p/a", "a"));
+        // Sem pasta é o grupo "sem projeto", não some.
+        let groups: Vec<(&str, Vec<String>)> = p.groups.iter().map(|g| (g.key.as_str(), names(&g.sessions))).collect();
+        assert_eq!(groups, [("/p/a", vec!["alfa".to_owned(), "zeta".into()]), (super::NO_CWD, vec!["ação".into(), "api".into()])],
+            "/p/a e /p/a/ são o mesmo projeto; Beta fica só em Aguardando");
+        assert_eq!(p.groups[0].label, "a");
     }
 
     #[test]

@@ -227,9 +227,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   (`<skill name="…" location="…">`) e ainda não é tratado.
 - **A preferência da barra do Claude Code não autoriza sobrescrever `statusLine`**: desligada,
   o instalador preserva o que está lá.
-- **Contexto e cota da sessão Claude não dependem da statusline.** Quem mantém a barra própria
-  tem o contexto lido do transcript (`claude_context.py`, campo `context` da lista) e a cota da
-  API de uso; a barra do Hangar, quando traz o número, continua valendo.
+- **Contexto, cota e nome do modelo da sessão Claude não dependem da statusline.** Quem mantém a
+  barra própria tem o contexto e o modelo lidos do transcript (`claude_context.py`, campos
+  `context` e `model` da lista) e a cota da API de uso; a barra do Hangar, quando traz o número
+  ou o nome, continua valendo.
 - **Hook nosso nunca bloqueia prompt, e a falha dele não some calada.** Em `SessionStart` e
   `UserPromptSubmit` o sufixo é `|| echo "<aviso>"` (texto puro, ASCII): sai com 0 e o aviso
   entra no contexto do modelo. Nos demais eventos o stdout não chega a ninguém e fica
@@ -2484,6 +2485,16 @@ dado" o tempo todo, embora a informação existisse.
   traz a janela de 5 h ou a semanal.
 - **A linha do Hangar vence:** quando ela traz o contexto, o número dela é o exato
   (`context_window_size` do Claude Code) e continua sendo o usado.
+- **Nome do modelo (04/10/2026):** com a barra própria, a pílula de modelo do composer mostrava
+  só "Modelo" até a pessoa trocar pelo app, e voltava a isso a cada sessão nova. A lista passou a
+  trazer `model`, o id em uso: o da última resposta do agente principal no transcript (sem a data
+  do snapshot, e com `[1m]` quando o uso só cabe na janela de 1M ou o modelo configurado é a
+  variante de 1M da mesma família), senão o da abertura da sessão
+  (`--model` do processo ou o sidecar da sem terminal) e por fim o `model` do `settings.json` da
+  conta. A resposta vem primeiro porque um `/model` digitado no terminal deixa o `--model` do
+  processo velho. Sessão de motor não cai no `settings.json`, que guarda o modelo da Anthropic.
+  Os parsers da linha (`parseStatusLine` do core e `status::parse` do nativo) usam o campo só
+  quando a linha não traz o nome.
 
 Medição (03/10/2026, sessão Claude com barra própria, Opus em `[1m]`): o transcript deu 539.351
 tokens contra 489k a 510k da barra minutos antes (a conversa crescendo entre uma e outra); no

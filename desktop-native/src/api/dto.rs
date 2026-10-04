@@ -46,6 +46,8 @@ pub struct SessionInfo {
     pub status_line: Option<String>,
     /// Contexto da sessão Claude lido do transcript pelo backend; vale quando a linha não o traz.
     #[serde(default)] pub context: Option<ContextUse>,
+    /// Id do modelo em uso na sessão Claude, resolvido pelo backend; vale quando a linha não traz o nome.
+    pub model: Option<String>,
     pub loop_status: Option<String>,
     pub loop_iter: Option<u32>,
     pub loop_max: Option<u32>,

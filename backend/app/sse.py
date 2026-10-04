@@ -365,7 +365,7 @@ def _list_sig(infos) -> str:
           getattr(i, "last_reply", None), getattr(i, "last_reply_at", None),
           getattr(i, "pending_questions", 0),
           i.limit_reset, i.then_target, _status_sig(getattr(i, "status_line", None)),
-          _context_sig(getattr(i, "context", None)),
+          _context_sig(getattr(i, "context", None)), getattr(i, "model", None),
           (getattr(i, "label", None) if getattr(i, "provider", None) == "codex" and not i.tracked
            else bool(getattr(i, "label", None))),
           getattr(i, "startup_steps", []),

@@ -66,6 +66,78 @@ def test_registry_le_o_modelo_do_processo_e_do_sidecar(tmp_path, monkeypatch):
     assert registry._claude_context(sem_terminal, None)["window"] == 400_000
 
 
+def test_modelo_em_uso_sai_da_resposta_da_abertura_ou_da_conta(tmp_path):
+    (tmp_path / "settings.json").write_text(json.dumps({"model": "claude-fable-5-1[1m]"}), encoding="utf-8")
+    # Sem resposta ainda (sessão nova ou depois do /clear): vale o da abertura, senão o da conta.
+    assert cc.session_model(None, "opus[1m]", tmp_path) == "opus[1m]"
+    assert cc.session_model(None, None, tmp_path) == "claude-fable-5-1[1m]"
+    # Sessão de motor não cai na conta, que guarda o modelo da Anthropic.
+    assert cc.session_model(None, None, tmp_path, engine=True) is None
+    # A resposta vence os dois: é o que está respondendo, mesmo depois de um /model no terminal.
+    assert cc.session_model("claude-sonnet-5-5", "opus[1m]", tmp_path) == "claude-sonnet-5-5"
+    # O transcript não diz a variante: a data sai, e o [1m] volta quando o uso só cabe na de 1M ou
+    # quando o modelo configurado é a variante de 1M da mesma família.
+    assert cc.session_model("claude-haiku-4-5-20251001", None, tmp_path) == "claude-haiku-4-5"
+    assert cc.session_model(None, "claude-haiku-4-5-20251001", tmp_path) == "claude-haiku-4-5"
+    assert cc.session_model("claude-opus-5-5", None, tmp_path, used=250_000) == "claude-opus-5-5[1m]"
+    assert cc.session_model("claude-opus-5-5", "opus[1m]", tmp_path) == "claude-opus-5-5[1m]"
+    assert cc.session_model("claude-fable-5-1", None, tmp_path) == "claude-fable-5-1[1m]"
+    assert cc.session_model("kimi-for-coding", None, tmp_path, used=250_000, engine=True) == "kimi-for-coding"
+
+
+def test_leitura_devolve_contexto_e_modelo_juntos(tmp_path):
+    p = _transcript(tmp_path, _resposta(model="claude-sonnet-5-5", lido=90_000), _resposta(model="<synthetic>", entrada=0))
+    assert cc.read(p, tmp_path) == ({"used": 90_002, "window": 200_000}, "claude-sonnet-5-5")
+    assert cc.read(tmp_path / "nao-existe.jsonl", tmp_path) == (None, None)
+
+
+async def test_lista_traz_o_modelo_da_conta_logo_depois_do_clear(tmp_path, monkeypatch):
+    import time
+    from app import registry
+    from app.models import SessionInfo
+    from app.registry import SessionRegistry
+    (tmp_path / "settings.json").write_text(json.dumps({"model": "claude-fable-5-1[1m]"}), encoding="utf-8")
+    antes = _transcript(tmp_path, _resposta(model="claude-sonnet-5-5", lido=90_000))
+    depois = tmp_path / "novo.jsonl"
+    depois.write_text(json.dumps({"type": "user", "message": {"content": "oi"}}) + "\n", encoding="utf-8")
+    reg = SessionRegistry(projects_dir=tmp_path)
+    monkeypatch.setattr(SessionRegistry, "_context_cache", {})
+    monkeypatch.setattr(SessionRegistry, "_status_cache", {"s": (time.monotonic(), None)})
+    monkeypatch.setattr(registry, "_escolhas_status", lambda _sid: (None, None))
+    monkeypatch.setattr(registry.hook_state, "get_state", lambda _sid: ("idle", 1.0))
+    monkeypatch.setattr(registry, "pergunta_aberta", lambda _sid: None)
+    info = SessionInfo(name="s", jsonl=str(antes), tracked=True, conta=f"claude:{tmp_path}")
+    monkeypatch.setattr(reg, "list", lambda: [info])
+    assert (await reg.list_with_state())[0].model == "claude-sonnet-5-5"
+    info.jsonl, info.model = str(depois), None
+    assert (await reg.list_with_state())[0].model == "claude-fable-5-1[1m]"
+
+
+async def test_fim_sem_resposta_no_mesmo_transcript_mantem_o_modelo(tmp_path, monkeypatch):
+    import time
+    from app import registry
+    from app.models import SessionInfo
+    from app.registry import SessionRegistry
+    (tmp_path / "settings.json").write_text(json.dumps({"model": "claude-fable-5-1[1m]"}), encoding="utf-8")
+    p = _transcript(tmp_path, _resposta(model="claude-sonnet-5-5", lido=90_000))
+    reg = SessionRegistry(projects_dir=tmp_path)
+    monkeypatch.setattr(SessionRegistry, "_context_cache", {})
+    monkeypatch.setattr(SessionRegistry, "_status_cache", {"s": (time.monotonic(), None)})
+    monkeypatch.setattr(registry, "_escolhas_status", lambda _sid: (None, None))
+    monkeypatch.setattr(registry.hook_state, "get_state", lambda _sid: ("idle", 1.0))
+    monkeypatch.setattr(registry, "pergunta_aberta", lambda _sid: None)
+    info = SessionInfo(name="s", jsonl=str(p), tracked=True, conta=f"claude:{tmp_path}")
+    monkeypatch.setattr(reg, "list", lambda: [info])
+    assert (await reg.list_with_state())[0].model == "claude-sonnet-5-5"
+    # Um resultado de ferramenta enorme empurra a última resposta para fora do trecho lido: a pílula
+    # não pode trocar para o modelo da conta enquanto o transcript é o mesmo.
+    p.write_text(json.dumps({"type": "user", "message": {"content": "x" * 100}}) + "\n", encoding="utf-8")
+    t, jsonl, ctx, model = SessionRegistry._context_cache["s"]
+    SessionRegistry._context_cache["s"] = (0.0, jsonl, ctx, model)
+    info.model = None
+    assert (await reg.list_with_state())[0].model == "claude-sonnet-5-5"
+
+
 async def test_clear_zera_o_contexto_ate_a_primeira_resposta(tmp_path, monkeypatch):
     import time
     from app import registry
