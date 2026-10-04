@@ -336,3 +336,21 @@ async fn terminal_input_dim_suggestion_is_an_empty_composer_before_and_after_sub
  assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"submitted"));
  let writes=io.writes(); assert_eq!(writes.len(),2); assert!(writes.iter().all(|w|w.args.last().unwrap()!="C-u"));
 }
+struct ClearIo { inner: FakeIo, services: Arc<Services> }
+impl TerminalIo for ClearIo {
+ fn command<'a>(&'a self, r: CommandRequest) -> IoFuture<'a, CommandOutput> { Box::pin(async move {
+  // O Enter do `/clear` troca a conversa: a partir daí os fatos não batem mais com o vínculo.
+  if r.args.last().is_some_and(|a| a == "\r") { self.services.facts.lock().unwrap().binding.conversation = "after-clear".into(); }
+  self.inner.command(r).await }) }
+ fn socket<'a>(&'a self, n: &'a NativeMessage, e: Vec<u8>) -> IoFuture<'a, WriteOutcome> { self.inner.socket(n, e) }
+}
+#[tokio::test]
+async fn terminal_input_clear_is_proved_after_its_own_conversation_change() {
+ let s=Arc::new(Services::new());
+ let io=Arc::new(ClearIo { inner: FakeIo::new(vec![screen(""),screen("/clear"),screen("")]), services: s.clone() });
+ let d=TerminalDriver::new(binding(),s.clone(),io.clone(),InputLimits {literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,settle:Duration::ZERO,proof_attempts:2,ready_attempts:2,cleanup_attempts:2});
+ let r=d.prompt("/clear","id").await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"submitted"));
+ // Outro texto depois da troca continua exigindo o vínculo.
+ assert_ne!(d.prompt("hello","id2").await.disposition,Disposition::Accepted);
+}

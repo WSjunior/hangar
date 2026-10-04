@@ -305,6 +305,10 @@ impl TerminalDriver {
     /// Uma captura para ler o composer: a tela inteira e só o que foi digitado.
     async fn composer_capture(&self) -> Result<(String, String), IoFailure> {
         self.verify().await?;
+        self.composer_capture_unverified().await
+    }
+    /// Leitura sem conferir o vínculo: só para provar o próprio `/clear`, que troca a conversa.
+    async fn composer_capture_unverified(&self) -> Result<(String, String), IoFailure> {
         let mut args = vec!["capture-pane".into(), "-p".into()];
         // psmux sem prova de que entende `-e`: no Windows a leitura continua sem estilo.
         if !self.binding.windows { args.push("-e".into()); }
@@ -440,9 +444,11 @@ impl TerminalDriver {
         }
         if let Err(error) = self.key_inner("Enter").await { return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Submit, error.code); }
         let mut slash_selected = false;
+        let clear = text.split_whitespace().next() == Some("/clear");
         for _ in 0..self.limits.proof_attempts.max(1) {
             self.settle().await;
-            if let Ok((screen, typed)) = self.composer_capture().await {
+            let capture = if clear { self.composer_capture_unverified().await } else { self.composer_capture().await };
+            if let Ok((screen, typed)) = capture {
                 if ComposerSnapshot::parse(&typed).is_some_and(|now| now.is_empty()) {
                     return DeliveryResult::new(Disposition::Accepted, DeliveryStage::SubmitProof, "submitted");
                 }
