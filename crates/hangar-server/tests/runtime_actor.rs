@@ -323,7 +323,8 @@ async fn input_that_fails_before_any_write_goes_back_to_the_queue() {
     // Nada chegou à CLI: a entrada é adiada e volta a ser drenável, nunca "incerta" para sempre.
     let (handle,server,dir) = setup_claude_unreachable_policy().await;
     let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"Olá","entry_id":"msg"}) };
-    assert!(handle.command(input).await.is_err());
+    // Adiada, não erro: o drain que a pegou não põe a sessão inteira em erro por isso.
+    assert!(handle.command(input).await.unwrap().disposition == Disposition::Deferred);
     let path = dir.path().join("key.queue-state.json");
     tokio::time::timeout(std::time::Duration::from_secs(5),async {
         loop {
@@ -569,6 +570,8 @@ async fn local_command_result_confirms_the_slash_entry() {
     let connection = cano::connect(&target.binding).await.unwrap();
     let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap();
     let handle = RuntimeActor::spawn(target,queue,connection,engine);
+    // Outra barra já reivindicada pelo drain e ainda não escrita: o result do /clear não pode confirmá-la.
+    handle.queue("claimed".into(),Action::Append { text:"/cost".into(),delivered:true,ts:None,pre_transcript:false,entry_id:Some("next".into()) }).await.unwrap();
     let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"/clear","entry_id":"msg"}) };
     assert!(handle.command(input).await.unwrap().disposition == Disposition::Accepted);
     let path = dir.path().join("key.queue-state.json");
@@ -579,7 +582,117 @@ async fn local_command_result_confirms_the_slash_entry() {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }).await.expect("comando local consumido precisa ficar confirmado");
+    let state:State = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(state.rows.iter().any(|row|row["id"] == "next" && row["confirmed"] != true),"barra ainda não escrita não é confirmada");
     handle.stop().await.unwrap();
     server.await.unwrap();
 }
 
+
+/// Cano Claude falso que, depois do retrato, manda as linhas dadas e aceita tudo o que chega.
+async fn claude_cano(lines:Vec<Value>) -> (std::net::SocketAddr,tokio::task::JoinHandle<usize>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream,_) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut header = String::new(); reader.read_line(&mut header).await.unwrap();
+        let snapshot = json!({"type":"cano_snapshot","versao":2,"pid":42,"init":null,"aberto":false,
+            "pendentes":[],"ultimo_result":null,"rate_limit":null,"stderr_tail":[],"saiu":null,"inflight":{}});
+        reader.get_mut().write_all(format!("{snapshot}\n").as_bytes()).await.unwrap();
+        for line in lines {
+            let frame = json!({"type":"cano_output","frame":line.to_string()});
+            reader.get_mut().write_all(format!("{frame}\n").as_bytes()).await.unwrap();
+        }
+        let mut sent = 0;
+        loop {
+            let mut raw = String::new();
+            if reader.read_line(&mut raw).await.unwrap() == 0 { break; }
+            let envelope:Value = serde_json::from_str(&raw).unwrap();
+            let ack = json!({"type":"cano_input_ack","operation_id":envelope["operation_id"],"outcome":"written"});
+            reader.get_mut().write_all(format!("{ack}\n").as_bytes()).await.unwrap();
+            sent += 1;
+        }
+        sent
+    });
+    (address,server)
+}
+
+async fn claude_actor(dir:&std::path::Path,cano:std::net::SocketAddr,policy:std::net::SocketAddr) -> RuntimeHandle {
+    let target = RuntimeTarget { key:"key".into(),generation:1,name:"session".into(),provider:"claude".into(),
+        metadata:json!({"name":"session","headless":true,"session_id":"sid-1","initialized":true}),
+        binding:CanoBinding { pid:42,escuta:format!("tcp:{cano}"),token:"secret-test".into(),versao:2 },
+        lease_path:dir.join("key.lock"),state_path:dir.join("key.queue-state.json"),projection_dir:dir.join("projection"),
+        transcript:dir.join("chat.jsonl"),created:0.0 };
+    let lease = acquire_lease(&target.lease_path).unwrap();
+    let store = Store::open(&target.state_path,&target.projection_dir,State::new("key",1,"session",vec![])).unwrap();
+    let queue = QueueActor::start(store,lease);
+    let connection = cano::connect(&target.binding).await.unwrap();
+    let engine = RuntimeEngine::new("claude",target.metadata.clone(),1,ClockSample { monotonic_s:0.0,epoch_s:1_800_000_000.0 }).unwrap()
+        .with_policy(PolicyClient::new(policy,"secret".into(),"instance".into()));
+    RuntimeActor::spawn(target,queue,connection,engine)
+}
+
+#[tokio::test]
+async fn a_failed_sidecar_update_still_hands_the_session_over() {
+    // Só status/carimbo/uso/registro são perdoados; o sidecar segura a conversa atual (session_id
+    // depois do /clear), e perdê-lo calado deixaria o app lendo o transcript velho.
+    let dir = tempfile::tempdir().unwrap();
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();
+    let (cano,server) = claude_cano(vec![json!({"type":"system","subtype":"init","session_id":"sid-2"})]).await;
+    let handle = claude_actor(dir.path(),cano,closed).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        loop {
+            if handle.snapshot().await.unwrap()["error"] == "policy_transport" { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.expect("falha do sidecar precisa pôr a sessão em erro");
+    handle.stop().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn the_deadline_never_puts_back_a_native_message_that_may_have_been_sent() {
+    // O recado nativo sai pelo Python; se ele demora até o prazo de 30 s, a entrada pode já ter sido
+    // entregue e não pode voltar para a fila (seria enviada de novo).
+    use tokio::io::AsyncReadExt;
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let policy = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream,_)) = listener.accept().await else { return };
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stream);
+                loop {
+                    let mut length = 0usize;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).await.unwrap_or(0) == 0 { return; }
+                        if line == "\r\n" { break; }
+                        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") { length = value.trim().parse().unwrap(); }
+                    }
+                    let mut body = vec![0;length]; reader.read_exact(&mut body).await.unwrap();
+                    let kind = serde_json::from_slice::<Value>(&body).unwrap()["kind"].clone();
+                    let data = if kind == "prepare_prompt" { json!({"content":"[de: par] oi","notices":[],"native_candidate":true}) }
+                        else if kind == "native_message" { tokio::time::sleep(std::time::Duration::from_secs(33)).await; json!({"outcome":"written","msg_id":"m"}) }
+                        else { json!({}) };
+                    let reply = json!({"ok":true,"data":data}).to_string();
+                    let response = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{reply}",reply.len());
+                    if reader.get_mut().write_all(response.as_bytes()).await.is_err() { return; }
+                }
+            });
+        }
+    });
+    let (cano,server) = claude_cano(vec![]).await;
+    let handle = claude_actor(dir.path(),cano,policy).await;
+    let input = RuntimeCommand { operation_id:"msg".into(),kind:OperationKind::Input,payload:json!({"text":"[de: par] oi","entry_id":"msg"}) };
+    let reply = handle.command(input).await.unwrap();
+    assert!(reply.disposition == Disposition::Unknown,"prazo com envio nativo em curso é incerto, nunca adiado");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+    assert!(state.rows.iter().any(|row|row["id"] == "msg" && row["delivered"] == true),"a entrada não volta para a fila");
+    assert!(state.operations.get("msg").is_some_and(|op|op.status != Status::Deferred));
+    handle.stop().await.unwrap();
+    assert_eq!(server.await.unwrap(),0,"nada foi escrito no cano: o recado foi pelo Python");
+}

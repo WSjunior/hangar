@@ -1,7 +1,7 @@
 use super::{cano::{CanoConnection,IoEvent,WireFrame},claude::ClaudeEngine,codex::Engine as CodexEngine,
     protocol::*,queue::{Action,QueueActor,Status},receipt::ReceiptIndex};
 use serde_json::{Value,json};
-use std::collections::{BTreeMap,VecDeque};
+use std::collections::{BTreeMap,BTreeSet,VecDeque};
 use std::sync::{Arc,atomic::{AtomicBool,AtomicU64,Ordering}};
 use std::time::{Duration,Instant,SystemTime,UNIX_EPOCH};
 use tokio::sync::{broadcast,mpsc,oneshot,Mutex,Notify};
@@ -305,6 +305,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
     let mut sequence = initial.operations.keys().filter_map(|id|id.rsplit(':').next()?.parse::<u64>().ok()).max().unwrap_or(0);
     let mut write_order = 0u64;
     let mut next_write = 1u64;
+    let mut native:BTreeSet<String> = BTreeSet::new();
     let mut prepared_writes:BTreeMap<u64,(String,Result<(),RuntimeError>)> = BTreeMap::new();
     let mut error:Option<RuntimeError> = None;
     let mut io_open = true;
@@ -379,7 +380,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                 continue;
             }
             match engine.command(pending.command.clone(),clock(start)) {
-                Ok(next)=>effects.extend(next),Err(error)=>defer_unwritten(&mut roots,&attempts,&id,error,&mut effects),
+                Ok(next)=>effects.extend(next),Err(error)=>defer_unwritten(&mut roots,&attempts,&native,&id,error,&mut effects),
             }
         }
         while let Some(effect) = effects.pop_front() {
@@ -483,8 +484,12 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                     let queue = queue.clone(); let generation = target.generation; let sample = clock(start);
                     jobs.spawn(async move { Job::Saved(async {
                         let state = queue.snapshot().await.map_err(io_failure)?;
+                        // Só a que já foi ao fio: a próxima barra, reivindicada pelo drain ao mesmo tempo e ainda
+                        // não escrita, confirmada aqui nunca seria enviada.
                         let entry_ids:Vec<String> = state.rows.iter().filter(|row|row["delivered"] == true && row["confirmed"] != true
-                            && row["text"].as_str().is_some_and(|text|text.trim_start().starts_with('/'))).filter_map(|row|row["id"].as_str().map(str::to_owned)).collect();
+                            && row["text"].as_str().is_some_and(|text|text.trim_start().starts_with('/'))
+                            && row["id"].as_str().and_then(|id|state.operations.get(id)).is_some_and(|op|matches!(op.status,Status::Dispatching | Status::Accepted)))
+                            .filter_map(|row|row["id"].as_str().map(str::to_owned)).collect();
                         if entry_ids.is_empty() { return Ok(()); }
                         queue.exec(generation,&format!("local-confirm:{}",unique()),sample,Action::Confirm { entry_ids }).await.map(|_|()).map_err(io_failure)
                     }.await) });
@@ -709,6 +714,9 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             Ok(payload) => {
                                 for (key,value) in payload.as_object().cloned().unwrap_or_default() { pending.command.payload[key] = value; }
                                 if target.provider == "claude" && pending.command.payload["native_candidate"] == true {
+                                    // O recado nativo sai pelo Python, fora de `attempts`: a partir daqui ele pode ter
+                                    // sido escrito, e nem o prazo nem uma falha podem devolvê-lo à fila.
+                                    native.insert(id.clone());
                                     let queue = queue.clone(); let target = target.clone(); let policy = engine.policy.clone().unwrap();
                                     let command = pending.command.clone(); let original = pending.original.clone(); let view = engine.view(); let sample = clock(start);
                                     jobs.spawn(async move {
@@ -738,7 +746,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                                     });
                                 } else { pending.ready_to_run = true; }
                             }
-                            Err(error)=>defer_unwritten(&mut roots,&attempts,&id,error,&mut effects),
+                            Err(error)=>defer_unwritten(&mut roots,&attempts,&native,&id,error,&mut effects),
                         }
                     }
                     Job::Write { wire,result } => {
@@ -782,17 +790,22 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             Err(failure)=>enter_error(&mut error,&target,failure),
                         }
                     }
-                    Job::Policy { request_id,kind:_,phase_id,result } => {
+                    Job::Policy { request_id,kind,phase_id,result } => {
                         let _ = phase_id;
                         match result {
                             Ok(payload) => {
                                 effects.extend(engine.apply(EngineInput::PolicyResult { request_id,payload },clock(start))?);
                             }
-                            // Linha de status, carimbo ou sidecar que falhou só perde aquela parte: a sessão
-                            // segue no Rust. O motivo já foi para o log pelo cliente da política.
-                            Err(failure)=>{
+                            // Linha de status, carimbo, uso e registro que falham só perdem aquela parte: a sessão
+                            // segue no Rust (o motivo já foi para o log pelo cliente da política). Sidecar e catálogo
+                            // de skills seguram estado da sessão: a falha deles continua levando-a ao Python.
+                            Err(failure) if COSMETIC_POLICIES.contains(&kind.as_str()) => {
                                 engine.forget_policy(&request_id);
                                 publish(&events,&target,&mut revision,"problem",json!({"error_code":failure.code,"message":failure.message}));
+                            },
+                            Err(failure)=>{
+                                publish(&events,&target,&mut revision,"problem",json!({"error_code":failure.code,"message":failure.message}));
+                                enter_error(&mut error,&target,failure);
                             },
                         }
                     }
@@ -881,6 +894,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                     Job::NativeInput { id,result } => {
                         match result {
                             Ok(result) if result["outcome"] == "not_written" => {
+                                native.remove(&id);
                                 if let Some(root) = roots.get_mut(&id) {
                                     if !root.cancelled && !root.timed_out { root.ready_to_run = true; }
                                 }
@@ -902,7 +916,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                         pending.timed_out = true;
                         // Sem escrita começada a entrada não chegou à CLI: volta para a fila em vez de ficar incerta.
                         let prefix = format!("{id}:");
-                        let written = attempts.values().any(|attempt|attempt.logical_id == *id || attempt.logical_id.starts_with(&prefix));
+                        let written = native.contains(id) || attempts.values().any(|attempt|attempt.logical_id == *id || attempt.logical_id.starts_with(&prefix));
                         let unsent = !written && matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer);
                         effects.push_back(Effect::Reply { operation_id:id.clone(),disposition:if unsent { Disposition::Deferred } else { Disposition::Unknown },
                             payload:json!({"error":"operação sem resposta"}) });
@@ -954,8 +968,10 @@ async fn capture_cursor(target:&RuntimeTarget,view:&Value) -> Result<Value,Runti
         .await.map_err(|_|failure("cursor_job"))?.map_err(io_failure).and_then(|cursor|serde_json::to_value(cursor).map_err(|_|failure("cursor_json")))
 }
 
+const COSMETIC_POLICIES:[&str;5] = ["format_status","reload_stamp","last_usage","quota","unknown_private"];
+
 #[derive(Default)]
-struct SavedView { version:u64, durable:Option<Value> }
+struct SavedView { version:u64, durable:Option<Value>, latest:Value }
 
 /// Campos que mudam a cada evento e que ninguém relê do disco: o motor parte de `in_progress:false`
 /// e o estado público é recalculado. O contador sai da comparação porque a escrita no fio salva a
@@ -970,14 +986,16 @@ fn durable_part(view:&Value) -> Value {
 
 async fn save_view(queue:&QueueActor,generation:u64,sample:ClockSample,gate:&Mutex<SavedView>,version:u64,view:&Value,force:bool) -> Result<(),RuntimeError> {
     let mut saved = gate.lock().await;
-    if version >= saved.version {
-        let durable = durable_part(view);
-        if force || saved.durable.as_ref() != Some(&durable) {
-            queue.exec(generation,&format!("state:{}",unique()),sample,
-                Action::SetRuntimeState { state:json!({"view":view}) }).await.map_err(io_failure)?;
-            saved.durable = Some(durable);
-        }
-        saved.version = version;
+    if version >= saved.version { saved.version = version; saved.latest = view.clone(); }
+    else if !force { return Ok(()); }
+    // A forçada pode chegar depois de uma mudança de estado mais nova que pulou o disco: grava a vista
+    // mais nova conhecida, cujo contador é o maior.
+    let latest = saved.latest.clone();
+    let durable = durable_part(&latest);
+    if force || saved.durable.as_ref() != Some(&durable) {
+        queue.exec(generation,&format!("state:{}",unique()),sample,
+            Action::SetRuntimeState { state:json!({"view":latest}) }).await.map_err(io_failure)?;
+        saved.durable = Some(durable);
     }
     Ok(())
 }
@@ -1006,16 +1024,19 @@ fn recover_phase(state:&super::queue::State,phase:&super::queue::Operation) -> b
 
 /// Falha antes de qualquer escrita no fio: nada chegou à CLI, então a entrada volta para a fila
 /// (adiada, como o `deferred` do Python) em vez de ficar incerta e presa para sempre.
-fn defer_unwritten(roots:&mut BTreeMap<String,Pending>,attempts:&BTreeMap<String,Attempt>,id:&str,error:RuntimeError,effects:&mut VecDeque<Effect>) {
+fn defer_unwritten(roots:&mut BTreeMap<String,Pending>,attempts:&BTreeMap<String,Attempt>,native:&BTreeSet<String>,id:&str,error:RuntimeError,effects:&mut VecDeque<Effect>) {
     let prefix = format!("{id}:");
-    let written = attempts.values().any(|attempt|attempt.logical_id == id || attempt.logical_id.starts_with(&prefix));
+    let written = native.contains(id) || attempts.values().any(|attempt|attempt.logical_id == id || attempt.logical_id.starts_with(&prefix));
     let input = roots.get(id).is_some_and(|pending|matches!(pending.command.kind,OperationKind::Input | OperationKind::Steer));
     if written || !input { return fail_root(roots,id,error); }
     let Some(pending) = roots.get_mut(id) else { return };
     pending.preparing = false;
-    for response in pending.responses.drain(..) { let _ = response.send(Err(error.clone())); }
+    // Adiada não é erro: quem espera (API ou drain) vê a entrada de volta na fila, e o drain não põe
+    // a sessão inteira em erro por isso.
     let payload = json!({"error_code":error.code});
-    pending.result = Some(RuntimeReply { operation_id:id.into(),disposition:Disposition::Deferred,payload:payload.clone() });
+    let reply = RuntimeReply { operation_id:id.into(),disposition:Disposition::Deferred,payload:payload.clone() };
+    for response in pending.responses.drain(..) { let _ = response.send(Ok(reply.clone())); }
+    pending.result = Some(reply);
     effects.push_back(Effect::Reply { operation_id:id.into(),disposition:Disposition::Deferred,payload });
 }
 
@@ -1032,4 +1053,29 @@ fn publish(events:&broadcast::Sender<RuntimeEvent>,target:&RuntimeTarget,revisio
     revision.value += 1;
     revision.counter.store(revision.value,Ordering::Release);
     let _ = events.send(RuntimeEvent { key:target.key.clone(),generation:target.generation,revision:revision.value,channel:channel.into(),data });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_forced_save_after_a_skipped_newer_change_still_saves_the_counter() {
+        // Mudança de estado mais nova que pulou o disco não pode fazer a gravação forçada (antes de
+        // uma escrita no fio) ser descartada: o contador dos IDs precisa estar salvo.
+        let dir = tempfile::tempdir().unwrap();
+        let lease = super::super::queue::acquire_lease(&dir.path().join("key.lock")).unwrap();
+        let store = super::super::queue::Store::open(&dir.path().join("state.json"),&dir.path().join("projection"),
+            super::super::queue::State::new("key",1,"session",vec![])).unwrap();
+        let queue = QueueActor::start(store,lease);
+        let gate = Mutex::new(SavedView::default());
+        let sample = ClockSample { monotonic_s:0.0,epoch_s:0.0 };
+        let view = |counter:u64,working:bool| json!({"model":"m","runtime_counter":counter,"in_progress":working});
+        save_view(&queue,1,sample,&gate,1,&view(1,false),false).await.unwrap();
+        save_view(&queue,1,sample,&gate,3,&view(3,true),false).await.unwrap();
+        save_view(&queue,1,sample,&gate,2,&view(2,true),true).await.unwrap();
+        let state = queue.snapshot().await.unwrap();
+        assert_eq!(state.runtime_state["view"]["runtime_counter"],3);
+        queue.shutdown().await.unwrap();
+    }
 }
