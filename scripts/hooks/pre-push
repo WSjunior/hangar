@@ -50,12 +50,10 @@ mudados=""
 while read -r _localref localsha _remoteref remotesha; do
     [[ "$localsha" == "$ZERO" ]] && continue          # delete de branch: nada sai
     if [[ "$remotesha" == "$ZERO" ]]; then
-        # ponytail: --not --remotes exclui contra TODOS os remotos; com múltiplos remotes, commit
-        # já buscado de outro remote escapa da varredura mesmo sendo novo pro alvo. Teto aceito.
-        intervalo="$localsha --not --remotes"          # branch nova: só o que o remoto ainda não tem
+        intervalo="$localsha --not --remotes=$1"       # branch nova: só o que o remoto ainda não tem
     else
-        # Merge da main traz commits que já estão publicados em outra branch: não são deste push.
-        intervalo="$remotesha..$localsha --not --remotes"
+        # Merge da main traz commits que já estão publicados no destino: não são deste push.
+        intervalo="$remotesha..$localsha --not --remotes=$1"
     fi
     # Só linhas ADICIONADAS pelos commits que vão sair; a própria trava fica de fora (precisa
     # conter os padrões pra procurá-los — mesmo motivo do pre-commit).
