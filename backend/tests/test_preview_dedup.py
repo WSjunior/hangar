@@ -1111,3 +1111,15 @@ def test_faixa_de_mod_com_bullet_nao_vira_previa():
         assert extract_assistant_text(pane, "claude", pb.band_anchor("faixa")) == "Resposta em andamento"
     finally:
         pb.esquecer("faixa")
+
+
+def test_painel_ancorado_nao_entra_na_previa():
+    from app import plugin_bridge as pb
+    from app.preview import crop_to_transcript
+
+    pb._guardar_faixa("doca", None, 20, [{"id": "p", "title": "p", "placement": "dock", "columns": 30, "tree": None}])
+    try:
+        pane = "\n".join(["ok" + " " * 18 + "│ Review !577", " " * 20 + "│"])
+        assert crop_to_transcript("doca", pane) == "ok\n"
+    finally:
+        pb.esquecer("doca")

@@ -12,8 +12,17 @@ from app.state import _RULE_RE, _is_boundary, _live_spinner, run_tmux, shared_ca
 # sessao, a cada poll). Reusado em vez de copiado — sao os mesmos diretorios e a mesma chave (o stem
 # do .jsonl); duas copias so dariam a chance de uma envelhecer.
 from app.statusline import dirs_de_config as _config_dirs
+from app.plugin_screen import crop_cells
 
 _log = logging.getLogger("hangar.preview")
+
+
+def crop_to_transcript(name: str, pane: str) -> str:
+    """Sem a coluna do painel ancorado: a borda │ dele virava texto da prévia."""
+    largura = plugin_bridge.transcript_columns(name)
+    if not largura:
+        return pane
+    return "\n".join(crop_cells(linha, largura) for linha in pane.split("\n"))
 
 # Preview AO VIVO do bloco de assistente em andamento, lido do pane do tmux (capture-pane -p, texto
 # já composto: sem ANSI, sem cursor-move). É a ÚNICA fonte do texto em voo sem perder o REPL
@@ -639,6 +648,8 @@ class PreviewBroker:
                     pane = ""
                 if kimi:
                     pane = sem_pensamento_kimi(pane)
+                if self.provider == "claude":
+                    pane = crop_to_transcript(self.name, pane)
                 working = _live_spinner(pane) is not None
                 text = (extract_assistant_text(pane, self.provider, plugin_bridge.band_anchor(self.name))
                         if self.provider == "claude" else extract_assistant_text(pane, self.provider))
