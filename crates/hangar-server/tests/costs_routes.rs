@@ -852,3 +852,29 @@ async fn usage_failed_quote_is_null_and_panicking_worker_fails_with_code() {
     let h = Harness::with_fx(true, false, Arc::new(Fx::with_fetch(|| panic!("falha sintética de uso")))).await;
     assert_eq!(h.failure("/api/uso").await, "costs_worker_join");
 }
+
+#[tokio::test]
+async fn summary_view_serves_only_home_fields_equal_to_the_full_report() {
+    let h = Harness::new(true, false).await;
+    h.ready().await;
+    let hr = &h;
+    for period in ["all", "7d"] {
+        let get = |path: String| async move {
+            let response = hr.request(reqwest::Method::GET, &path).send().await.unwrap();
+            assert_eq!(response.status(), 200, "{path}");
+            response.bytes().await.unwrap()
+        };
+        let full_raw = get(format!("/api/costs?period={period}")).await;
+        let summary_raw = get(format!("/api/costs?period={period}&view=summary")).await;
+        let (full, summary): (Value, Value) = (serde_json::from_slice(&full_raw).unwrap(), serde_json::from_slice(&summary_raw).unwrap());
+        let keys = ["totals", "by_day", "by_model", "sem_tarifa", "applied", "usd_brl"];
+        assert_eq!(summary.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(), keys);
+        for key in keys { assert_eq!(summary[key], full[key], "{period} {key}"); }
+        assert!(full["combos"].as_array().is_some_and(|c| !c.is_empty()), "sem o parâmetro continua inteiro");
+        assert!(summary_raw.len() < full_raw.len());
+        // Valor desconhecido é o relatório inteiro, como o Python, que ignora o parâmetro.
+        let other: Value = serde_json::from_slice(&get(format!("/api/costs?period={period}&view=outro")).await).unwrap();
+        assert_eq!(other, full);
+    }
+    assert!(!h.forwarded("GET", "/api/costs?period=all&view=summary"));
+}

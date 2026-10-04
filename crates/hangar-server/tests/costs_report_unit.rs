@@ -224,3 +224,19 @@ fn each_row_uses_python_compensated_sum_but_rows_keep_insertion_order() {
     let r = build(rows, "all", ts("2026-10-03"), &p, &|_| None);
     assert_eq!(r.totals.cost, 10_000_000_000_000_000.0);
 }
+
+#[test]
+fn summary_is_the_same_fields_of_the_full_report() {
+    let (_dir, p) = pricing();
+    let now = ts("2026-10-03");
+    let rows = vec![row("2026-10-03", "alpha", "a"), row("2026-10-02", "beta", "b"), row("2026-09-01", "alpha", "c"),
+        row("2026-10-01", "sem-preco", "d"), row("2026-10-03", "beta", "a")];
+    for period in ["all", "7d", "30d"] {
+        let full = serde_json::to_value(build(rows.clone(), period, now, &p, &|_| None)).unwrap();
+        let summary = serde_json::to_value(report_costs::build_summary(rows.clone(), period, now, &p)).unwrap();
+        let keys = ["totals", "by_day", "by_model", "sem_tarifa", "applied", "usd_brl"];
+        assert_eq!(summary.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>(), keys);
+        for key in keys { assert_eq!(summary[key], full[key], "{period} {key}"); }
+        assert_eq!(summary["sem_tarifa"], json!(["sem-preco"]), "{period}");
+    }
+}

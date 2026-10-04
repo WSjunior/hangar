@@ -384,3 +384,43 @@ pub fn build(mut rows: Vec<UsageRow>, period: &str, now: LocalTs, pricing: &Pric
         combos, sessoes: top_sessions(&rows, &costs, pricing),
     }
 }
+
+/// Visão da tela inicial (`?view=summary`): só o que os três clientes leem ali, com os mesmos
+/// valores do relatório inteiro (mesmas funções, mesma ordem de soma). Sem `combos`, que
+/// sozinho era quase todo o megabyte da resposta.
+#[derive(Clone, Debug, Serialize)]
+pub struct SummaryReport {
+    pub totals: DimBucket,
+    pub by_day: Vec<DimBucket>,
+    pub by_model: Vec<DimBucket>,
+    pub sem_tarifa: Vec<String>,
+    pub applied: Option<Applied>,
+    pub usd_brl: Option<f64>,
+}
+
+pub fn build_summary(mut rows: Vec<UsageRow>, period: &str, now: LocalTs, pricing: &Pricing) -> SummaryReport {
+    if let Some(n) = days(period) {
+        let cutoff = earlier_day(now, n - 1);
+        rows.retain(|row| row.ts.day() >= cutoff);
+    }
+    let costs: Vec<_> = rows.iter().map(|row| row_cost(row, pricing)).collect();
+    let mut total = Bucket::default();
+    let mut missing_rates = IndexSet::new();
+    for (row, cost) in rows.iter().zip(&costs) {
+        total.add(row, *cost, pricing);
+        if pricing.rate_for(&row.model).is_none() {
+            let canonical = pricing.canonizar(&row.model);
+            if !pricing::IGNORADOS.contains(&canonical.as_str()) { missing_rates.insert(canonical); }
+        }
+    }
+    total.dim.key = "totals".into();
+    let mut by_day = group(&rows, &costs, pricing, |row| row.ts.day(), None);
+    by_day.sort_by(|a, b| b.key.cmp(&a.key));
+    let mut missing_rates: Vec<_> = missing_rates.into_iter().collect();
+    missing_rates.sort();
+    SummaryReport {
+        totals: total.dim, by_day,
+        by_model: group(&rows, &costs, pricing, |row| pricing.canonizar(&row.model), None),
+        sem_tarifa: missing_rates, applied: Some(Applied { period: period.into() }), usd_brl: None,
+    }
+}

@@ -85,7 +85,7 @@
     warming = null;
     for (let tries = 0; ; tries++) {
       try {
-        const r = await fetchCostsForServer(srv, per);
+        const r = await fetchCostsForServer(srv, per, false, true);
         if (mine !== seq) return;
         loadedAt = Date.now();
         if (r.applied?.period !== per) error = m.home_usage_period_unsupported();

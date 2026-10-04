@@ -151,7 +151,7 @@ export function HomeUsageCard({ server, intro = null }: { server: Server; intro?
     (async () => {
       for (let tries = 0; ; tries++) {
         try {
-          const r = await fetchCostsForServer(serverRef.current, period);
+          const r = await fetchCostsForServer(serverRef.current, period, false, true);
           if (mine !== seq.current) return;
           if (r.applied?.period !== period) setError(m.home_usage_period_unsupported());
           else if (!r.totals) setError(m.home_usage_load_failed());

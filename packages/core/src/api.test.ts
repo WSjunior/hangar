@@ -988,3 +988,16 @@ describe('defaultBase', () => {
     expect(defaultBase({ current: null, branches: [], remotes: ['r'], dirty: false })).toBe('');
   });
 });
+
+it('custos da tela inicial pedem a visão resumida; a tela de Custos continua com o relatório inteiro', async () => {
+  const { fetchCostsForServer } = await import('./api');
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{"applied":{"period":"7d"}}'));
+  await fetchCostsForServer(server, '7d', false, true);
+  await fetchCostsForServer(server, '7d', true);
+  const [summary, full] = fetchMock.mock.calls.map(([url]) => new URL(String(url)));
+  expect(summary.pathname).toBe('/api/costs');
+  expect(summary.searchParams.get('view')).toBe('summary');
+  expect(summary.searchParams.get('period')).toBe('7d');
+  expect(full.searchParams.has('view')).toBe(false);
+  expect(full.searchParams.get('fresco')).toBe('1');
+});

@@ -86,6 +86,12 @@ fn costs_finite(report: &report_costs::CostReport) -> bool {
         && report.usd_brl.is_none_or(f64::is_finite)
 }
 
+fn summary_finite(report: &report_costs::SummaryReport) -> bool {
+    dimension_finite(&report.totals)
+        && [&report.by_day, &report.by_model].iter().all(|buckets| buckets.iter().all(dimension_finite))
+        && report.usd_brl.is_none_or(f64::is_finite)
+}
+
 fn usage_finite(report: &report_uso::UsoReport) -> bool {
     let valid = |bucket: &report_uso::UsoBucket| {
         [
@@ -193,6 +199,8 @@ pub async fn costs(
     let period = crate::auth::query_param(request.uri().query(), "period")
         .filter(|p| p == "all" || report_costs::PERIODS.iter().any(|(key, _)| p == key))
         .unwrap_or_else(|| "all".into());
+    // Outro valor (ou nenhum) é o relatório inteiro: cliente antigo e servidor antigo seguem iguais.
+    let summary = crate::auth::query_param(request.uri().query(), "view").as_deref() == Some("summary");
     let worker = state.clone();
     let result = blocking(move || {
         match worker.costs.prepare_blocking(fresh).map_err(|error| error_reason(&error))? {
@@ -206,8 +214,28 @@ pub async fn costs(
             pricing_generation: worker.costs.pricing().generation(),
             area_signature: worker.costs.areas().signature().into(),
             labels: labels.clone(),
-            route: vec!["costs".into(), period.clone(), now.day()],
+            route: vec![if summary { "costs-summary" } else { "costs" }.into(), period.clone(), now.day()],
         };
+        if summary {
+            let report = match worker.reports.get::<report_costs::SummaryReport>(&key) {
+                Some(report) => report,
+                None => {
+                    let rows = worker
+                        .costs
+                        .read_costs(report_costs::since(&period, now).as_deref())
+                        .map_err(|error| error_reason(&error))?;
+                    let report = Arc::new(report_costs::build_summary(rows, &period, now, &worker.costs.pricing()));
+                    worker.reports.insert(key, report.clone());
+                    report
+                }
+            };
+            let mut report = (*report).clone();
+            report.usd_brl = worker.fx.usd_brl();
+            if !summary_finite(&report) {
+                return Err(FailureReason::NonFinite);
+            }
+            return serde_json::to_vec(&report).map(Prepared::Body).map_err(|_| FailureReason::Json);
+        }
         let report = match worker.reports.get::<report_costs::CostReport>(&key) {
             Some(report) => report,
             None => {
