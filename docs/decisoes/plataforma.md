@@ -1100,7 +1100,9 @@ operações tipadas `acquire`, `capture`, `release`, sem comando livre. Corpo in
 responde frase fixa com 400; falha do controle responde 503, nunca pane vazio com sucesso.
 O pool mantém os limites da Parte 2C/Task 2 e a captura exata do alvo que `tmux._pane_target`
 resolveu. `acquire` inicial confere o alvo; renovações não recapturam. O cliente anexa com
-`read-only,ignore-size,no-output` e `-E`, sem grade auxiliar. Cada rodada confere a sessão/pane
+`ignore-size,no-output` e `-E`, sem grade auxiliar. Nunca `read-only`: no tmux 3.7b o `send-keys`
+de fora é atribuído a esse cliente e recusado ("client is read-only"), e a digitação do Python
+falhou no notebook do dono (04/10/2026, `envio.parcial` com 54 `send-keys` de retorno 1). Cada rodada confere a sessão/pane
 e lê um único `capture-pane`; duas molduras identificam cada comando. Mudança de alvo continua
 invalidando a leitura, e panes maiores não pagam um limite de células de outra grade.
 

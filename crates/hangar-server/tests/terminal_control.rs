@@ -532,11 +532,15 @@ fn terminal_capture_does_not_compile_a_second_terminal_grid() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn read_only_control_observer_never_subscribes_to_pane_output() {
+async fn control_observer_never_subscribes_to_pane_output_nor_blocks_typing() {
     let server = IsolatedTmux::new();
     let pool = server.pool();
     pool.acquire(request("state")).await.unwrap();
     let flags = server.run(&["list-clients", "-t", "=fixture", "-F", "#{client_flags}"]);
-    assert!(flags.contains("read-only") && flags.contains("ignore-size") && flags.contains("no-output"), "{flags}");
+    assert!(flags.contains("ignore-size") && flags.contains("no-output"), "{flags}");
+    // Cliente read-only faz o tmux recusar o send-keys de quem digita na sessão ("client is read-only").
+    assert!(!flags.contains("read-only"), "{flags}");
+    server.run(&["send-keys", "-t", "fixture", "-l", "--", "typed"]);
+    server.run(&["send-keys", "-t", "fixture", "Enter"]);
     pool.release("state").await.unwrap();
 }

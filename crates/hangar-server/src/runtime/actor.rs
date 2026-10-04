@@ -27,16 +27,27 @@ impl PolicyClient {
             .header("x-hangar-internal",&self.secret).header("x-hangar-runtime-instance",&self.instance)
             .header("content-type","application/json").body(axum::body::Body::from(body.to_string()))
             .map_err(|_|failure("policy_request"))?;
+        // Detalhe só de forma: status, tipo de erro, posição ou nome da exceção; nunca o corpo.
         let result = tokio::time::timeout(Duration::from_secs(15),async {
-            let response = self.http.request(request).await.map_err(|_|failure("policy_transport"))?;
-            if !response.status().is_success() { return Err(failure("policy_refused")); }
+            let response = self.http.request(request).await
+                .map_err(|error|(failure("policy_transport"),format!("connect={}",error.is_connect())))?;
+            if !response.status().is_success() { return Err((failure("policy_refused"),format!("status={}",response.status().as_u16()))); }
             let bytes = axum::body::to_bytes(axum::body::Body::new(response.into_body()),MAX_ENVELOPE)
-                .await.map_err(|_|failure("policy_limit"))?;
-            let value:Value = serde_json::from_slice(&bytes).map_err(|_|failure("policy_json"))?;
-            if value["ok"] != true { return Err(failure("policy_failed")); }
+                .await.map_err(|_|(failure("policy_limit"),String::new()))?;
+            let value:Value = serde_json::from_slice(&bytes)
+                .map_err(|error|(failure("policy_json"),format!("line={} column={}",error.line(),error.column())))?;
+            if value["ok"] != true {
+                let kind = value["error_type"].as_str().filter(|kind|kind.len() <= 64 && kind.bytes().all(|b|b.is_ascii_alphanumeric() || b == b'_'));
+                return Err((failure("policy_failed"),format!("error_type={}",kind.unwrap_or("?"))));
+            }
             Ok(value["data"].clone())
-        }).await.map_err(|_|failure("policy_timeout"))?;
-        result
+        }).await.unwrap_or_else(|_|Err((failure("policy_timeout"),String::new())));
+        result.map_err(|(error,detail)|{
+            if crate::warn_limit::allow(Some(&target.key),&error.code) {
+                tracing::warn!(key=%target.key,session=%target.name,policy=%kind,code=%error.code,detail=%detail,"política do Python falhou");
+            }
+            error
+        })
     }
 }
 
@@ -106,7 +117,20 @@ impl RuntimeEngine {
 }
 
 fn failure(code:&str) -> RuntimeError { RuntimeError::new(code,"runtime indisponível; operação conservada no diário") }
-fn io_failure(_:std::io::Error) -> RuntimeError { failure("queue_io") }
+fn io_failure(error:std::io::Error) -> RuntimeError {
+    // Só o tipo: a mensagem do io::Error pode trazer o caminho.
+    let kind = format!("{:?}",error.kind());
+    if crate::warn_limit::allow(None,&format!("queue_io:{kind}")) { tracing::warn!(io_kind=%kind,"runtime falhou em E/S (diário ou transcript)"); }
+    failure("queue_io")
+}
+
+/// Loga só na entrada em erro ou na troca de código: o mesmo erro repetido não enche o log.
+fn enter_error(error:&mut Option<RuntimeError>,target:&RuntimeTarget,failure:RuntimeError) {
+    if error.as_ref().is_none_or(|current|current.code != failure.code) {
+        tracing::warn!(key=%target.key,session=%target.name,code=%failure.code,reason=%failure.message,"runtime entrou em erro");
+    }
+    *error = Some(failure);
+}
 fn clock(start:Instant) -> ClockSample {
     let epoch_s = match SystemTime::now().duration_since(UNIX_EPOCH) { Ok(time)=>time.as_secs_f64(),Err(error)=>-error.duration().as_secs_f64() };
     ClockSample { monotonic_s:start.elapsed().as_secs_f64(),epoch_s }
@@ -129,35 +153,41 @@ pub struct RuntimeHandle {
     closed:Arc<AtomicBool>,
     events:broadcast::Sender<RuntimeEvent>,
     stopped:Arc<Mutex<Option<Result<(),RuntimeError>>>>,
+    key:String,
 }
 
 impl RuntimeHandle {
     pub async fn command(&self,command:RuntimeCommand) -> Result<RuntimeReply,RuntimeError> {
         if self.closed.load(Ordering::Acquire) { return Err(failure("runtime_stopping")); }
         let (response,receive) = oneshot::channel();
-        self.sender.send(Message::Command { command,response,from_queue:false }).await.map_err(|_|failure("runtime_closed"))?;
-        receive.await.map_err(|_|failure("runtime_closed"))?
+        self.sender.send(Message::Command { command,response,from_queue:false }).await.map_err(|_|self.gone("runtime_closed"))?;
+        receive.await.map_err(|_|self.gone("runtime_closed"))?
     }
     pub async fn queue(&self,call_id:String,action:Action) -> Result<Value,RuntimeError> {
         let (response,receive) = oneshot::channel();
-        self.sender.send(Message::Queue { call_id,action,response }).await.map_err(|_|failure("runtime_closed"))?;
-        receive.await.map_err(|_|failure("runtime_closed"))?
+        self.sender.send(Message::Queue { call_id,action,response }).await.map_err(|_|self.gone("runtime_closed"))?;
+        receive.await.map_err(|_|self.gone("runtime_closed"))?
     }
     pub async fn snapshot(&self) -> Result<Value,RuntimeError> {
         let (send,receive) = oneshot::channel();
-        self.sender.send(Message::Snapshot(send)).await.map_err(|_|failure("runtime_closed"))?;
-        receive.await.map_err(|_|failure("runtime_closed"))?
+        self.sender.send(Message::Snapshot(send)).await.map_err(|_|self.gone("runtime_closed"))?;
+        receive.await.map_err(|_|self.gone("runtime_closed"))?
     }
     pub async fn drain(&self) -> Result<Value,RuntimeError> {
-        let (send,receive) = oneshot::channel(); self.sender.send(Message::Drain(send)).await.map_err(|_|failure("runtime_closed"))?;
-        receive.await.map_err(|_|failure("runtime_closed"))?
+        let (send,receive) = oneshot::channel(); self.sender.send(Message::Drain(send)).await.map_err(|_|self.gone("runtime_closed"))?;
+        receive.await.map_err(|_|self.gone("runtime_closed"))?
     }
     pub async fn confirm(&self) -> Result<Value,RuntimeError> {
-        let (send,receive) = oneshot::channel(); self.sender.send(Message::Confirm(send)).await.map_err(|_|failure("runtime_closed"))?;
-        receive.await.map_err(|_|failure("runtime_closed"))?
+        let (send,receive) = oneshot::channel(); self.sender.send(Message::Confirm(send)).await.map_err(|_|self.gone("runtime_closed"))?;
+        receive.await.map_err(|_|self.gone("runtime_closed"))?
     }
     pub async fn ensure_projection(&self) -> Result<Value,RuntimeError> {
         self.queue(format!("projection:{}",unique()),Action::EnsureProjection).await
+    }
+    /// O motivo real já saiu na linha de saída do ator; aqui fica qual chave o perdeu.
+    fn gone(&self,code:&str) -> RuntimeError {
+        if crate::warn_limit::allow(Some(&self.key),code) { tracing::warn!(key=%self.key,code,"runtime sem ator"); }
+        failure(code)
     }
     pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> { self.events.subscribe() }
     pub async fn stop(&self) -> Result<(),RuntimeError> {
@@ -166,11 +196,11 @@ impl RuntimeHandle {
         self.closed.store(true,Ordering::Release);
         let (send,receive) = oneshot::channel();
         let mut result = match self.sender.send(Message::Stop(send)).await {
-            Ok(())=>receive.await.map_err(|_|failure("runtime_closed")).and_then(|result|result),
-            Err(_)=>Err(failure("runtime_closed")),
+            Ok(())=>receive.await.map_err(|_|self.gone("runtime_closed")).and_then(|result|result),
+            Err(_)=>Err(self.gone("runtime_closed")),
         };
         if let Some(task) = self.task.lock().await.take() {
-            let joined = task.await.map_err(|_|failure("runtime_panic")).and_then(|result|result);
+            let joined = task.await.map_err(|_|self.gone("runtime_panic")).and_then(|result|result);
             if joined.is_err() { result = joined; }
         }
         *stopped = Some(result.clone());
@@ -203,7 +233,7 @@ impl Pending {
 struct Attempt { logical_id:String,phase_id:String,frame:Value,order:u64 }
 
 enum Job {
-    Root { id:String,result:Result<(),RuntimeError> },
+    Root { id:String,result:Result<Option<RuntimeReply>,RuntimeError> },
     Write { wire:String,result:Result<(),RuntimeError> },
     Ack { logical_id:String,outcome:WriteOutcome,result:Result<(),RuntimeError> },
     Finished { reply:RuntimeReply,result:Result<(),RuntimeError> },
@@ -231,8 +261,16 @@ impl RuntimeActor {
         let (sender,receiver) = mpsc::channel(64);
         let events = engine.publisher.clone().unwrap_or_else(||broadcast::channel(256).0);
         let closed = Arc::new(AtomicBool::new(false));
-        let task = tokio::spawn(run(target,queue,connection,engine,receiver,sender.clone(),closed.clone(),events.clone()));
-        RuntimeHandle { sender,task:Arc::new(Mutex::new(Some(task))),closed,events,stopped:Arc::new(Mutex::new(None)) }
+        let (key,name) = (target.key.clone(),target.name.clone());
+        let run = run(target,queue,connection,engine,receiver,sender.clone(),closed.clone(),events.clone());
+        let log_key = key.clone();
+        let task = tokio::spawn(async move {
+            let result = run.await;
+            // Saída por `?` deixava o ator mudo: só sobrava o runtime_closed de quem chamasse depois.
+            if let Err(error) = &result { tracing::warn!(key=%log_key,session=%name,code=%error.code,reason=%error.message,"ator do runtime terminou com erro"); }
+            result
+        });
+        RuntimeHandle { sender,task:Arc::new(Mutex::new(Some(task))),closed,events,stopped:Arc::new(Mutex::new(None)),key }
     }
 }
 
@@ -441,7 +479,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                 && (root.cancelled || root.timed_out));
             if result.is_err() || ended || !engine.write_is_current(&attempt.logical_id) {
                 effects.extend(engine.apply(EngineInput::WriteAck { operation_id:attempt.logical_id.clone(),outcome:WriteOutcome::NotWritten },clock(start))?);
-                if let Err(failure) = result { error = Some(failure); }
+                if let Err(failure) = result { enter_error(&mut error,&target,failure); }
             } else if io.writer.try_send(WireFrame { operation_id:wire,frame:attempt.frame.clone() }).is_err() {
                 effects.extend(engine.apply(EngineInput::WriteAck { operation_id:attempt.logical_id.clone(),outcome:WriteOutcome::NotWritten },clock(start))?);
             }
@@ -525,10 +563,10 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                                             delivered:false,ts:None,pre_transcript:command.payload["pre_transcript"] == true,entry_id:Some(entry_id.into()) }).await.map_err(io_failure)?;
                                     }
                                 }
-                                queue.exec(target.generation,&format!("prepare:{id}:{}",unique()),sample,Action::Prepare { id:id.clone(),payload:serde_json::to_value(&command).unwrap(),
+                                let prepared = queue.exec(target.generation,&format!("prepare:{id}:{}",unique()),sample,Action::Prepare { id:id.clone(),payload:serde_json::to_value(&command).unwrap(),
                                     entry_id:matches!(command.kind,OperationKind::Input | OperationKind::Steer)
                                         .then(||command.payload["entry_id"].as_str().unwrap_or(&id).into()) }).await.map_err(io_failure)?;
-                                Ok(())
+                                Ok(stored_reply(&id,&prepared))
                             }.await;
                             *preparation.0.lock().await += 1;
                             preparation.1.notify_waiters();
@@ -628,7 +666,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                     Some(IoEvent::Stderr(_)) => {},
                     Some(IoEvent::End { code }) => effects.extend(engine.apply(EngineInput::Line(json!({"type":"cano_saiu","rc":code})),clock(start))?),
                     None => {
-                        io_open = false; error = Some(failure("cano_closed"));
+                        io_open = false; enter_error(&mut error,&target,failure("cano_closed"));
                         effects.extend(engine.apply(EngineInput::Line(json!({"type":"cano_saiu","rc":null})),clock(start))?);
                     },
                 }
@@ -637,8 +675,15 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                 let job = result.ok_or_else(||failure("job_missing"))?.map_err(|_|failure("job_panic"))?;
                 match job {
                     Job::Root { id,result } => {
-                        if let Err(failure) = result { fail_root(&mut roots,&id,failure); continue; }
+                        let stored = match result { Ok(stored)=>stored,Err(failure)=>{ fail_root(&mut roots,&id,failure); continue; } };
                         let pending = roots.get_mut(&id).unwrap();
+                        // A fila já tem o desfecho (linha confirmada ou operação final): responde sem escrever no fio.
+                        if let Some(reply) = stored {
+                            pending.preparing = false;
+                            pending.result = Some(reply.clone());
+                            for response in pending.responses.drain(..) { let _ = response.send(Ok(reply.clone())); }
+                            continue;
+                        }
                         if pending.cancelled || pending.timed_out {
                             pending.preparing = false;
                             effects.push_back(Effect::Reply { operation_id:id,disposition:if pending.cancelled { Disposition::Rejected } else { Disposition::Unknown },
@@ -712,12 +757,12 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             Err(failure)=>{
                                 fail_root(&mut roots,&logical_id,failure.clone());
                                 publish(&events,&target,&mut revision,"problem",json!({"error_code":failure.code,"message":failure.message}));
-                                error = Some(failure);
+                                enter_error(&mut error,&target,failure);
                             }
                         }
                     }
                     Job::Finished { reply,result } => {
-                        if let Err(failure) = result { fail_root(&mut roots,&reply.operation_id,failure.clone()); error = Some(failure); }
+                        if let Err(failure) = result { fail_root(&mut roots,&reply.operation_id,failure.clone()); enter_error(&mut error,&target,failure); }
                         else {
                           if !roots.contains_key(&reply.operation_id) {
                               if let Some(command) = initial.operations.get(&reply.operation_id).and_then(|operation|serde_json::from_value::<RuntimeCommand>(operation.payload.clone()).ok()) {
@@ -740,7 +785,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                         match result {
                             Ok(()) if wake=>drain_requested = true,
                             Ok(())=>{},
-                            Err(failure)=>error = Some(failure),
+                            Err(failure)=>enter_error(&mut error,&target,failure),
                         }
                     }
                     Job::Policy { request_id,kind:_,phase_id,result } => {
@@ -751,7 +796,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             }
                             Err(failure)=>{
                                 publish(&events,&target,&mut revision,"problem",json!({"error_code":failure.code,"message":failure.message}));
-                                error = Some(failure);
+                                enter_error(&mut error,&target,failure);
                             },
                         }
                     }
@@ -766,13 +811,13 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             Ok(()) => {},
                             Err(failure) => {
                                 publish(&events,&target,&mut revision,"problem",json!({"error_code":failure.code,"message":failure.message}));
-                                error = Some(failure);
+                                enter_error(&mut error,&target,failure);
                             }
                         }
                     }
                     Job::Saved(result) => { if let Err(failure) = result {
                         publish(&events,&target,&mut revision,"problem",json!({"error_code":failure.code,"message":failure.message}));
-                        error = Some(failure);
+                        enter_error(&mut error,&target,failure);
                     } },
                     Job::Drained(result) => {
                         match result {
@@ -794,7 +839,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             Err(failure)=>{
                                 drain_active = false;
                                 for waiter in drain_waiters.drain(..) { let _ = waiter.send(Err(failure.clone())); }
-                                error = Some(failure);
+                                enter_error(&mut error,&target,failure);
                             },
                         }
                     }
@@ -804,7 +849,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                         for waiter in drain_waiters.drain(..) {
                             let _ = waiter.send(count.clone().map(|sent|json!({"sent":sent})).map_err(Clone::clone));
                         }
-                        if let Err(failure) = result { error = Some(failure); }
+                        if let Err(failure) = result { enter_error(&mut error,&target,failure); }
                     }
                     Job::Confirmed { response,result } => {
                         match result {
@@ -871,6 +916,16 @@ async fn save_view(queue:&QueueActor,generation:u64,sample:ClockSample,gate:&Mut
         *saved = version;
     }
     Ok(())
+}
+
+/// Operação que a fila devolve já final nunca volta a ser enviada; sem resposta guardada no
+/// formato de RuntimeReply, a disposição sai do status.
+fn stored_reply(id:&str,prepared:&Value) -> Option<RuntimeReply> {
+    let disposition = match prepared["status"].as_str()? {
+        "accepted" | "confirmed"=>Disposition::Accepted, "rejected"=>Disposition::Rejected, _=>return None,
+    };
+    serde_json::from_value(prepared["result"].clone()).ok()
+        .or_else(||Some(RuntimeReply { operation_id:id.into(),disposition,payload:Value::Null }))
 }
 
 fn status(disposition:Disposition) -> Status {

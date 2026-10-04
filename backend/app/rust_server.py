@@ -32,7 +32,7 @@ _log = logging.getLogger("hangar.rust_server")
 HEALTH_PATH = "/__hangar_server/health"
 # Versão do contrato interno (rotas /internal, side-events, ambiente). Tem de casar com o
 # `protocol` da saúde (hangar_server::INTERNAL_PROTOCOL); outro número = o Python atende sozinho.
-RUST_SERVER_PROTOCOL = 10
+RUST_SERVER_PROTOCOL = 12
 START_TIMEOUT = 10.0
 CRASH_WINDOW = 60.0
 MAX_CRASHES = 3
@@ -123,6 +123,14 @@ def _runtime_ready(proc, instance: str) -> dict:
     return ready
 
 
+class RustOpError(RuntimeError):
+    """Recusa do Rust com status HTTP e código da falha, para quem decide repetir ou trocar de dono."""
+
+    def __init__(self, text: str, status: int, code: str = ""):
+        super().__init__(text)
+        self.status, self.code = status, code
+
+
 class RuntimeTransport:
     """Um transporte privado por filho, sem retry de operação mutável."""
 
@@ -171,7 +179,19 @@ class RuntimeTransport:
                 connection.request("POST", "/runtime/op", body=json.dumps(body).encode(), headers=self._headers)
                 response = connection.getresponse()
                 if response.status != 200:
-                    raise RuntimeError("IPC recusou a operação; não houve troca para outro transporte")
+                    # O motivo do Rust (código e frase fixa, sem conversa) é o que diz onde falhou.
+                    motivo, code = "", ""
+                    try:
+                        erro = json.loads(response.read(4096) or b"{}")
+                        if isinstance(erro, dict):
+                            code = str(erro.get("error_code") or "")
+                            motivo = f": {code} {erro.get('message', '')}".rstrip()
+                    except (ValueError, OSError, http.client.HTTPException):
+                        pass
+                    if response.status == 409:
+                        motivo = ": protocolo ou instância do Rust diferente"
+                    raise RustOpError(f"IPC recusou a operação ({response.status}{motivo}); "
+                                      "não houve troca para outro transporte", response.status, code)
                 raw = response.read((32 << 20) + 1025)
                 if len(raw) > (32 << 20) + 1024:
                     raise ValueError("resposta privada acima do teto")

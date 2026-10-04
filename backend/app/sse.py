@@ -964,8 +964,10 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
     def drain_done(task):
         drain_tasks.discard(task)
         if not task.cancelled() and (exc := task.exception()) is not None:
+            from app.runtime_coordinator import failure_reason
+            reason = failure_reason(exc)
             diag.registrar("sse.fila_falhou", "erro", sessao=name, provider=current_provider,
-                           erro_tipo=type(exc).__name__)
+                           erro_tipo=reason["codigo"], detalhe=reason["detalhe"])
 
     # start_offset so vale pro tail INICIAL (veio do Last-Event-ID desta conexao). O rebind do
     # /clear abaixo recria sem ele: o transcript e outro arquivo, o offset antigo nao significa nada.

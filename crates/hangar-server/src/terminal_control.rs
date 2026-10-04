@@ -290,7 +290,9 @@ impl Observer {
     async fn spawn(program: PathBuf, socket: Option<PathBuf>, key: &Key, limits: Limits) -> Result<Self> {
         let mut command = Command::new(program);
         if let Some(socket) = socket { command.arg("-S").arg(socket); }
-        command.args(["-u", "-C", "-N", "attach-session", "-E", "-f", "read-only,ignore-size,no-output", "-t"]).arg(format!("={}", key.name))
+        // Sem read-only: o tmux atribui o send-keys de fora a este cliente e recusa a digitação do
+        // Python ("client is read-only"). Quem garante que o Rust não digita é o próprio código.
+        command.args(["-u", "-C", "-N", "attach-session", "-E", "-f", "ignore-size,no-output", "-t"]).arg(format!("={}", key.name))
             .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).kill_on_drop(true);
         let mut child = command.spawn().map_err(|e| io_failure("cannot start terminal observer", e))?;
         let stdin = child.stdin.take().unwrap();

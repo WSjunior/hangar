@@ -195,12 +195,10 @@ def test_supervisor_enables_only_after_health_and_clears_even_without_proc(monke
         stdout = None
         def poll(self):
             return None
-    def spawn(binary, env):
-        process = Process()
-        process.stdout = io.BytesIO((json.dumps({"type": "runtime_ready", "protocol": rust_server.RUST_SERVER_PROTOCOL,
-            "instance": env["HANGAR_RUNTIME_INSTANCE"], "port": 12348}) + "\n").encode())
-        return process
-    monkeypatch.setattr(rust_server, "_spawn", spawn)
+    monkeypatch.setattr(rust_server, "_spawn", lambda *args: Process())
+    # A partida do runtime (2B) não é o assunto aqui: resposta válida e sem transporte real.
+    monkeypatch.setattr(rust_server, "_runtime_ready", lambda proc, instance: {
+        "type": "runtime_ready", "protocol": rust_server.RUST_SERVER_PROTOCOL, "instance": instance, "port": 12348})
     monkeypatch.setattr(rust_server.Supervisor, "configure_runtime", lambda *args: None)
     def health(*args):
         assert t._config is None
@@ -346,12 +344,10 @@ def test_supervisor_bad_health_address_keeps_bridge_disabled(monkeypatch, addres
         stdin = None
         stdout = None
         def poll(self): return None
-    def spawn(binary, env):
-        process = Process()
-        process.stdout = io.BytesIO((json.dumps({"type": "runtime_ready", "protocol": rust_server.RUST_SERVER_PROTOCOL,
-            "instance": env["HANGAR_RUNTIME_INSTANCE"], "port": 12348}) + "\n").encode())
-        return process
-    monkeypatch.setattr(rust_server, "_spawn", spawn)
+    monkeypatch.setattr(rust_server, "_spawn", lambda *args: Process())
+    # A partida do runtime (2B) não é o assunto aqui: resposta válida e sem transporte real.
+    monkeypatch.setattr(rust_server, "_runtime_ready", lambda proc, instance: {
+        "type": "runtime_ready", "protocol": rust_server.RUST_SERVER_PROTOCOL, "instance": instance, "port": 12348})
     monkeypatch.setattr(rust_server.Supervisor, "configure_runtime", lambda *args: None)
     monkeypatch.setattr(rust_server, "server_log_path", lambda: "/tmp/unused-test-log")
     monkeypatch.setattr(rust_server, "_health", lambda *args: dict(ok=True, protocol=rust_server.RUST_SERVER_PROTOCOL, terminal_address=address))

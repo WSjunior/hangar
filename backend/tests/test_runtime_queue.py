@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -194,3 +195,210 @@ def test_distinct_occurrence_is_committed_with_confirmation(tmp_path):
     store = open_store(tmp_path)
     assert sum(bool(row.get("confirmed")) for row in store.state["rows"]) == 1
     assert len(store.state["used_occurrences"]) == 1
+
+
+# --- Poda do diário: tamanho limitado sem reenvio nem confirmação dupla ---
+
+FIXTURE = Path(__file__).parent / "fixtures" / "runtime_queue" / "compaction.json"
+PARITY_FILL = 270
+
+
+def fill(store, count, prefix="fill"):
+    for index in range(count):
+        store.exec(1, f"{prefix}:{index}", CLOCK, {"kind": "set_runtime_state", "state": {}})
+
+
+def cursor_at(offset):
+    return {"conversation": "c", "file_identity": "1:2", "offset": offset, "anchor": "a"}
+
+
+def proof_at(cursor, offset, text="Olá mundo"):
+    return {"cursor": cursor, "occurrence": {"id": "c|1:2|id:echo", "conversation": "c", "file_identity": "1:2",
+            "offset": offset, "end_offset": offset + 10, "text": text, "kind": "user", "timestamp": None},
+            "normalized_text": text, "observed_anchor": cursor["anchor"]}
+
+
+def dispatch(operation_id, entry_id, cursor, *, text="Olá mundo", finish="accepted", reply=None):
+    """Uma mensagem como o ator manda: raiz, fase de fio, cursor, envio e resposta."""
+    wire = f"wire:{operation_id}:1"
+    calls = []
+    if entry_id is not None:
+        calls.append({"kind": "append", "text": text, "delivered": False, "ts": None, "pre_transcript": False, "entry_id": entry_id})
+    calls += [
+        {"kind": "prepare", "id": operation_id, "payload": {"operation_id": operation_id, "kind": "input",
+            "payload": {"text": text}}, "entry_id": entry_id},
+        {"kind": "prepare", "id": wire, "payload": {"logical_id": operation_id, "frame": {"text": text}}, "entry_id": entry_id},
+        {"kind": "bind_dispatch", "id": wire, "cursor": cursor},
+        {"kind": "bind_dispatch", "id": operation_id, "cursor": cursor},
+        {"kind": "begin_dispatch", "id": wire, "wire_id": wire},
+        {"kind": "begin_dispatch", "id": operation_id, "wire_id": wire},
+    ]
+    if finish:
+        calls += [{"kind": "finish", "id": wire, "status": finish, "result": {"write_outcome": "written"}},
+                  {"kind": "finish", "id": operation_id, "status": finish, "result": {"operation_id": operation_id,
+                      "disposition": finish, "payload": {"answer": "resposta"} if reply is None else reply}}]
+    return [[f"{operation_id}:{index}", action] for index, action in enumerate(calls)]
+
+
+def run(store, steps):
+    return [store.exec(1, call_id, CLOCK, action) for call_id, action in steps]
+
+
+def test_state_stays_bounded_over_2000_messages_with_100kb_replies(tmp_path, monkeypatch):
+    from app import runtime_queue
+    monkeypatch.setattr(runtime_queue, "_RECENT_CALLS", 32)
+    monkeypatch.setattr(runtime_queue.os, "fsync", lambda fd: None)
+    store = open_store(tmp_path)
+    big = {"tool_result": "x" * 100_000}
+    for index in range(1, 2001):
+        run(store, dispatch(f"op-{index}", None, cursor_at(index), reply=big))
+    receipts = [key for key in store.state["operations"] if key.startswith("call::")]
+    assert len(receipts) == 32 and len(store.state["operations"]) - len(receipts) <= 32
+    assert store.state_path.stat().st_size < 1_000_000
+    assert "x" * 1000 not in store.state_path.read_text()
+
+
+def test_kept_reply_keeps_its_disposition(tmp_path):
+    store = open_store(tmp_path)
+    run(store, dispatch("op", "entry", cursor_at(0), reply={"tool_result": "x" * 1000}))
+    kept = store.state["operations"]["op"]
+    # O formato de RuntimeReply continua: quem repete a operação recebe a resposta guardada.
+    assert kept["status"] == "accepted"
+    assert kept["result"] == {"operation_id": "op", "disposition": "accepted", "payload": None}
+    assert store.state["operations"]["call::op:8"]["payload"]["result"]["payload"] is None
+    with pytest.raises(ValueError):
+        store.exec(1, "op:8", CLOCK, {"kind": "finish", "id": "op", "status": "rejected", "result": {}})
+
+
+def test_final_operation_of_open_row_survives_and_is_not_redispatched(tmp_path, monkeypatch):
+    from app import runtime_queue
+    monkeypatch.setattr(runtime_queue, "_RECENT_CALLS", 8)
+    store = open_store(tmp_path)
+    run(store, dispatch("op", "entry", cursor_at(0)))
+    fill(store, 20)
+    # Entrada ainda sem recibo: raiz e fase ficam, e preparar de novo devolve o aceito.
+    assert {"op", "wire:op:1"} <= set(store.state["operations"])
+    again = store.exec(1, "retry", CLOCK, {"kind": "prepare", "id": "op", "payload": {"operation_id": "op",
+        "kind": "input", "payload": {"text": "Olá mundo"}}, "entry_id": "entry"})
+    assert again["status"] == "accepted"
+    # Confirmada, sai do diário; a linha confirmada não volta a ser reclamada para envio.
+    store.exec(1, "confirm", CLOCK, {"kind": "confirm", "entry_ids": ["entry"]})
+    fill(store, 20, "after")
+    assert not {"op", "wire:op:1"} & set(store.state["operations"])
+    assert store.exec(1, "claim", CLOCK, {"kind": "claim", "min_ts": 0, "limit": None, "entry_id": None}) == []
+
+
+def test_uncertain_operation_and_its_phases_are_never_pruned(tmp_path, monkeypatch):
+    from app import runtime_queue
+    monkeypatch.setattr(runtime_queue, "_RECENT_CALLS", 8)
+    store = open_store(tmp_path)
+    run(store, dispatch("ctl", None, None, finish=None)
+        + [["phase-done", {"kind": "finish", "id": "wire:ctl:1", "status": "accepted", "result": {}}]])
+    run(store, dispatch("sent", "entry", cursor_at(0), finish=None))
+    store.exec(1, "recover", CLOCK, {"kind": "recover"})
+    fill(store, 40)
+    operations = store.state["operations"]
+    assert operations["ctl"]["status"] == "unknown" and operations["wire:ctl:1"]["status"] == "accepted"
+    assert operations["sent"]["status"] == "unknown"
+    with pytest.raises(ValueError):
+        store.exec(1, "unclaim", CLOCK, {"kind": "set_delivered", "entry_id": "entry", "value": False, "steered": False})
+
+
+def test_recent_receipt_replays_and_old_one_is_pruned(tmp_path, monkeypatch):
+    from app import runtime_queue
+    monkeypatch.setattr(runtime_queue, "_RECENT_CALLS", 8)
+    store = open_store(tmp_path)
+    first = store.exec(1, "same", CLOCK, append())
+    fill(store, 7)
+    assert store.exec(1, "same", CLOCK, append()) == first
+    assert len(store.state["rows"]) == 1
+    fill(store, 8, "more")
+    assert "call::same" not in store.state["operations"]
+
+
+def test_pruned_operation_never_frees_its_occurrence_for_another(tmp_path, monkeypatch):
+    from app import runtime_queue
+    from app.runtime_receipt import ReceiptIndex
+    monkeypatch.setattr(runtime_queue, "_RECENT_CALLS", 8)
+    store = open_store(tmp_path)
+    transcript = tmp_path / "chat.jsonl"
+    transcript.touch()
+    index = ReceiptIndex("claude", "sid")
+    cursor = index.capture(transcript)
+    run(store, dispatch("first", "entry-1", cursor, text="Olá"))
+    run(store, dispatch("second", "entry-2", cursor, text="Olá"))
+    transcript.write_text('{"type":"user","uuid":"echo-1","message":{"content":"Olá"}}\n')
+    index.scan(transcript)
+    proof = index.match_after(cursor, store.state["rows"][0], store.state["used_occurrences"])
+    assert store.exec(1, "proof-1", CLOCK, {"kind": "confirm_occurrence", "id": "first", "proof": proof}) is True
+    fill(store, 20)
+    assert "first" not in store.state["operations"]
+    # A segunda, sem recibo e com cursor antes do eco, ainda poderia casá-lo: o uso fica.
+    assert list(store.state["used_occurrences"]) == [proof["occurrence"]["id"]]
+    assert index.match_after(cursor, store.state["rows"][1], store.state["used_occurrences"]) is None
+    assert store.exec(1, "proof-2", CLOCK, {"kind": "confirm_occurrence", "id": "second", "proof": proof}) is False
+    assert not store.state["rows"][1].get("confirmed")
+    # Sem ninguém que possa casá-lo, o uso sai; cursor novo já nasce depois do eco.
+    store.exec(1, "confirm", CLOCK, {"kind": "confirm", "entry_ids": ["entry-2"]})
+    fill(store, 20, "after")
+    assert store.state["used_occurrences"] == {}
+    assert index.match_after(index.capture(transcript), {"id": "x", "text": "Olá"}, {}) is None
+
+
+def test_v1_state_shrinks_on_first_open(tmp_path, monkeypatch):
+    from app import runtime_queue
+    monkeypatch.setattr(runtime_queue, "_RECENT_CALLS", 8)
+    old = {"id": "old", "payload": {}, "entry_id": None, "status": "accepted", "result": None,
+           "dispatch_cursor": None, "wire_attempts": {}}
+    v1 = {"version": 1, "owner_key": "key", "generation": 1, "name": "session", "rows": [],
+          "operations": {"old": old, "stuck": {**old, "id": "stuck", "status": "unknown"},
+                         "call::old": {**old, "id": "call::old"}},
+          "used_occurrences": {"legacy": {"operation_id": "old", "generation": 1}}, "runtime_state": {}}
+    (tmp_path / "key.queue-state.json").write_text(json.dumps(v1))
+    store = open_store(tmp_path)
+    # Encolhe já na abertura, antes de qualquer gravação nova.
+    saved = json.loads(store.state_path.read_text())
+    assert saved["version"] == 2 and saved["next_seq"] == 9
+    assert set(saved["operations"]) == {"stuck"} and saved["used_occurrences"] == {}
+    assert store.state == saved
+
+
+def _parity_steps():
+    # As duas despachadas antes do eco (offset 20): a segunda ainda poderia casá-lo.
+    steps = dispatch("first", "entry-1", cursor_at(10))
+    steps += dispatch("second", "entry-2", cursor_at(15))
+    steps.append(["proof-first", {"kind": "confirm_occurrence", "id": "first", "proof": proof_at(cursor_at(10), 20)}])
+    steps += dispatch("system:1:5", None, None)
+    steps += dispatch("ctl", None, None, finish=None)
+    steps.append(["ctl-phase", {"kind": "finish", "id": "wire:ctl:1", "status": "accepted", "result": {}}])
+    return steps
+
+
+def _parity_run(store):
+    results = run(store, _parity_steps())
+    fill(store, PARITY_FILL)
+    return results
+
+
+def test_compaction_matches_rust_fixture(tmp_path):
+    """O mesmo roteiro roda em crates/hangar-server/tests/runtime_queue.rs contra este arquivo."""
+    store = open_store(tmp_path)
+    results = _parity_run(store)
+    expected = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    assert expected["steps"] == _parity_steps() and expected["fill"] == PARITY_FILL
+    assert json.loads(json.dumps(results)) == expected["results"]
+    assert json.loads(json.dumps(store.state)) == expected["final"]
+    assert {"second", "wire:second:1", "ctl", "wire:ctl:1"} <= set(store.state["operations"])
+    assert not {"first", "wire:first:1", "system:1:5"} & set(store.state["operations"])
+    assert len(store.state["used_occurrences"]) == 1
+
+
+if __name__ == "__main__":
+    # Regera o oráculo a partir de backend/: `PYTHONPATH=. uv run python tests/test_runtime_queue.py`.
+    import tempfile
+    with tempfile.TemporaryDirectory() as directory:
+        store = open_store(Path(directory))
+        results = _parity_run(store)
+        FIXTURE.parent.mkdir(parents=True, exist_ok=True)
+        FIXTURE.write_text(json.dumps({"steps": _parity_steps(), "fill": PARITY_FILL, "results": results,
+                                       "final": store.state}, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")

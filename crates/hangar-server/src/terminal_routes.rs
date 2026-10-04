@@ -1,5 +1,5 @@
 //! Contrato terminal privado: autentica antes de consumir o corpo.
-use std::{collections::HashMap, net::SocketAddr, sync::{Arc, LazyLock, Mutex}, time::{Duration, Instant}};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use axum::{body::to_bytes, extract::{ConnectInfo, Request, State}, http::StatusCode, response::{IntoResponse, Response}};
 use serde::Deserialize;
 use serde_json::Value;
@@ -7,26 +7,9 @@ use subtle::ConstantTimeEq;
 use crate::{routes::AppState, terminal_control::CaptureRequest};
 
 pub const MAX_BODY: usize = 16 * 1024 * 1024;
-const WARN_INTERVAL: Duration = Duration::from_secs(60);
-const MAX_WARNINGS: usize = 256;
-
-#[derive(Default)]
-struct WarningLimiter {
-    recent: HashMap<(Option<String>, &'static str), Instant>,
-}
-impl WarningLimiter {
-    fn allow(&mut self, session: Option<&str>, code: &'static str, now: Instant) -> bool {
-        self.recent.retain(|_, last| now.duration_since(*last) < WARN_INTERVAL);
-        let key = (session.map(String::from), code);
-        if self.recent.contains_key(&key) || self.recent.len() >= MAX_WARNINGS { return false; }
-        self.recent.insert(key, now);
-        true
-    }
-}
 
 fn warn_terminal(session: Option<&str>, code: &'static str) {
-    static WARNINGS: LazyLock<Mutex<WarningLimiter>> = LazyLock::new(|| Mutex::new(WarningLimiter::default()));
-    if !WARNINGS.lock().unwrap().allow(session, code, Instant::now()) { return; }
+    if !crate::warn_limit::allow(session, code) { return; }
     if code == "invalid terminal request" {
         tracing::warn!(code, "observação terminal recusada");
     } else if let Some(session) = session {
@@ -98,24 +81,3 @@ pub async fn terminal(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connec
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn warnings_expire_and_remain_bounded_by_session_and_code() {
-        let mut limiter = WarningLimiter::default();
-        let now = Instant::now();
-        assert!(limiter.allow(Some("a"), "invalid terminal target", now));
-        assert!(!limiter.allow(Some("a"), "invalid terminal target", now));
-        assert!(limiter.allow(Some("b"), "invalid terminal target", now));
-        assert!(limiter.allow(Some("a"), "invalid capture request", now));
-        assert!(limiter.allow(None, "invalid terminal request", now));
-        assert!(!limiter.allow(None, "invalid terminal request", now));
-        for n in 0..MAX_WARNINGS { limiter.allow(Some(&format!("s-{n}")), "terminal observer EOF", now); }
-        assert_eq!(limiter.recent.len(), MAX_WARNINGS);
-        assert!(!limiter.allow(Some("overflow"), "terminal observer EOF", now));
-        assert!(limiter.allow(Some("a"), "invalid terminal target", now + WARN_INTERVAL));
-        assert_eq!(limiter.recent.len(), 1);
-    }
-}

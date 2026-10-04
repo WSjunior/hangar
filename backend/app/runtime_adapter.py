@@ -58,11 +58,15 @@ class LegacyIO:
         with slot.guard:
             slot.active += 1
         def execute():
+            # A trava do slot só cobre a conferência de posse: o laço de eventos também a usa e não
+            # pode esperar o disco. A posse não muda no meio: quem a solta (adopt) espera
+            # `slot.active` zerar, e a gravação em si é serializada dentro do QueueStore.
             with slot.guard:
                 if slot.lease is None or slot.lease.closed or slot.binding.generation != generation:
                     raise RuntimeError("reserva perdeu a posse antes da gravação")
-                return slot.store.exec(generation, call_id or uuid.uuid4().hex,
-                    {"monotonic_s":time.monotonic(), "epoch_s":time.time()}, action)
+                store = slot.store
+            return store.exec(generation, call_id or uuid.uuid4().hex,
+                {"monotonic_s":time.monotonic(), "epoch_s":time.time()}, action)
         task = asyncio.create_task(asyncio.to_thread(execute))
         def finished(done):
             with slot.guard:
@@ -950,7 +954,8 @@ def install_adapter(cls, provider):
                         await coordinator.op(name, {"kind":"drain"}, uuid.uuid4().hex)
                     except Exception as exc:
                         from app import diag
-                        diag.registrar("runtime.wake_failed", "erro", sessao=name, codigo=type(exc).__name__)
+                        from app.runtime_coordinator import failure_reason
+                        diag.registrar("runtime.wake_failed", "erro", sessao=name, **failure_reason(exc))
                 task = coordinator.loop.create_task(start())
                 self._tarefas.add(task)
                 task.add_done_callback(self._tarefas.discard)
