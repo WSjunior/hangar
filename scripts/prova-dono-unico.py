@@ -6,13 +6,17 @@ casos dos Steps 49–55, confere sozinho o que dá e imprime a tabela. No fim pa
 HOME temporário. Respostas sempre do Haiku, na conta 02-200 (e na `--conta-b` só na troca de conta).
 
     scripts/prova-dono-unico.py [--casos 49,50,51,52,53,54,55] [--n 10]
-                                [--conta-b ~/.claude-outra] [--codex-credencial ID]
+                                [--conta-b ~/.claude-outra]
                                 [--relatorio arquivo.md] [--manter]
 
 Isolamento: HOME, portas, token e servidor tmux (`-L`) próprios; `matar_orfaos` desligado (ele
 varre o /proc do usuário e mataria canos reais); o `claude` é um embrulho que fixa o modelo e a
 conta. As transcrições ficam na conta real (link `HOME/.claude/projects`), numa pasta só da prova,
 apagada no fim. O relatório traz só marcadores, contagens e códigos: nenhum texto de conversa.
+
+Ficam para a prova manual no app real: a transferência Claude → Codex (o backend isolado não vê a
+conta Codex real sem gravar hooks e skills nela) e, quando sair inconclusiva, a entrega incerta
+no terminal (congelar o agente faz o Rust adiar a entrada, não perder a prova do envio).
 """
 import argparse
 import http.client
@@ -834,24 +838,10 @@ class Prova:
                                f"chave nova: {'sim' if novas else 'não'}; "
                                f"mensagem seguinte {st2}, {n} entrega(s); {resumo}")
                 self.fechar([nome])
-        if not self.args.codex_credencial:
-            self.registrar("55", "transferência Claude → Codex", None,
-                           "pulado: falta --codex-credencial (conta Codex visível no HOME da prova)")
-            return
-        nome = "c55x"
-        erro = self.aquecer(nome, True)
-        if erro:
-            self.registrar("55", "transferência Claude → Codex", False, erro)
-            return
-        info = self.sessao(nome) or {}
-        j = Janela(self)
-        st, corpo, dur, _ = self.api("POST", f"/api/sessions/{nome}/conta",
-                                     {"credential_id": self.args.codex_credencial, "source_life": info.get("lifecycle_id"),
-                                      "source_jsonl": info.get("jsonl")}, timeout=300)
-        rel, desl, passagem, resumo = j.resumo()
-        self.registrar("55", "transferência Claude → Codex", st == 200 and rel == desl == passagem == 0,
-                       f"transferência {st} {codigo(corpo)} em {dur} s; {resumo}")
-        self.fechar([nome])
+        # Isolado, o backend só vê a conta Codex do HOME temporário; ver a real exige CODEX_HOME nela,
+        # e a subida grava hooks e skills ali. A transferência é provada à mão no app real.
+        self.registrar("55", "transferência Claude → Codex", None,
+                       "manual no app real: o backend isolado não enxerga a conta Codex real sem gravar nela")
 
     def tabela(self):
         linhas = ["| Step | Caso | Resultado | Evidência |", "|---|---|---|---|"]
@@ -869,7 +859,6 @@ def main():
     ap.add_argument("--casos", default=",".join(ORDEM), help="steps a rodar, ex.: 49,52")
     ap.add_argument("--n", type=int, default=10, help="sessões por modo no step 49")
     ap.add_argument("--conta-b", help="segunda conta Claude com login, destino da troca de conta")
-    ap.add_argument("--codex-credencial", help="credencial Codex para a transferência")
     ap.add_argument("--relatorio", help="grava a tabela neste arquivo")
     ap.add_argument("--manter", action="store_true", help="não apaga a pasta da prova (logs, HOME)")
     args = ap.parse_args()
