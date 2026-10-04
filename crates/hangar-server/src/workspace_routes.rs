@@ -1013,10 +1013,16 @@ async fn serve_file(path: &Path, headers: &HeaderMap, download: bool) -> Respons
             "content-security-policy",
             "sandbox; script-src 'none'".parse().unwrap(),
         );
-        let encoded =
-            percent_encoding::utf8_percent_encode(&name, percent_encoding::NON_ALPHANUMERIC)
-                .to_string();
-        let disposition = if name.is_ascii() && !name.contains(['"', '\r', '\n']) {
+        // O `quote` do Python, como o Starlette: qualquer byte fora dele vai em `filename*`, e
+        // caractere de controle nunca chega cru ao cabeçalho.
+        const QUOTE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+            .remove(b'_')
+            .remove(b'.')
+            .remove(b'-')
+            .remove(b'~')
+            .remove(b'/');
+        let encoded = percent_encoding::utf8_percent_encode(&name, QUOTE).to_string();
+        let disposition = if encoded == name {
             format!("attachment; filename=\"{name}\"")
         } else {
             format!("attachment; filename*=utf-8''{encoded}")

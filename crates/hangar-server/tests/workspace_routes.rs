@@ -333,3 +333,27 @@ async fn served_text_declares_utf8_and_xhtml_wrapper_is_html() {
         assert_eq!(response.headers()["content-type"], expected);
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn download_of_a_name_with_control_characters_is_encoded() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a\u{7f}b c.txt"), "x").unwrap();
+    std::fs::write(
+        dir.path().join("fixture.jsonl"),
+        json!({"cwd":dir.path(),"text":"a\u{7f}b c.txt"}).to_string(),
+    )
+    .unwrap();
+    let (addr, _) = fixture(dir.path()).await;
+    let response = client()
+        .get(format!("http://{addr}/api/sessions/fixture/file?path=a%7Fb%20c.txt&download=1"))
+        .bearer_auth(OWNER)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.headers()["content-disposition"],
+        "attachment; filename*=utf-8''a%7Fb%20c.txt"
+    );
+}
