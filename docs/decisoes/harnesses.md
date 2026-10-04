@@ -15,8 +15,8 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 
 - **Faixa e painéis dos mods saem no SSE por fonte própria, nunca na carona do `state`.** O
   `state` só sai quando a chave muda; o mod que relê com a sessão parada ficava velho no app. O
-  plugin também segura a faixa até a ponte existir e a reenvia 30 s depois de cada envio, para um
-  backend reiniciado não ficar sem ela. Ver [painel e clique](#mods-painel-clique-e-o-que-acontece-no-aparelho-04102026).
+  plugin reenvia a faixa quando a ponte aparece e quando o `/pull` responde `faixa: false` (backend
+  reiniciado começa sem ela): sem isso, faixa que não muda não voltava ao app. Ver [painel e clique](#mods-painel-clique-e-o-que-acontece-no-aparelho-04102026).
 
 - **Botão de mod clicado no app é clique de mouse SGR no pane, achado pelo rótulo e confirmado
   pelo `ui.press`.** Nenhuma API do engine dispara o botão de outro plugin. Sem mouse ligado, com
@@ -1474,8 +1474,9 @@ Claude Code 2.1.289 (Linux), sondas descartáveis carregadas por `--plugin-dir` 
 | `onPress` do mod | dispara `$.ui.copy`/`$.process.run` sem `await`: a cópia pode chegar ao backend depois do `pressed`. Por isso a janela de 1,5 s no plugin e a espera de 0,3 s pelo efeito no backend |
 | prévia com painel ancorado | antes do corte, o SSE mandava `"text":"ok   …   │\n   …   │"` |
 
-O `$.clock.now()` não entra no hook de render: o reenvio periódico da faixa é um `$.clock.after`
-armado no envio bem-sucedido. Um painel que o mod abre sem pedido da pessoa só é desenhado a
+O engine recusa carregar um módulo que guarda o próprio `$` numa variável (`engine = $`); só aceita
+o `$` no ponto da chamada ou num closure, como nos timers. O `tsc` não pega isso, o
+`claude plugin validate` pega. Um painel que o mod abre sem pedido da pessoa só é desenhado a
 partir de 144 colunas (110 depois de pedido); abaixo disso não há árvore para espelhar.
 
 ## O `wire.jsonl` do Kimi não é um transcript bem-comportado

@@ -365,7 +365,7 @@ def _entrega_user(monkeypatch, confirma: bool | None, no_transcript: set[str] | 
                                                        modos=["fill", "user"], session_id=UUID)))
         await asyncio.wait_for(_ate(lambda: pb.aguardando("s1")), 5)
         entrega = asyncio.create_task(asyncio.to_thread(pb._entregar, "s1", "oi", "user", "/x.jsonl"))
-        assert (await asyncio.wait_for(pull, 5)) == {"text": "oi", "modo": "user"}
+        assert (await asyncio.wait_for(pull, 5)) == {"text": "oi", "modo": "user", "faixa": False}
         if confirma is not None:
             await pb.submitted(pb.SubmittedBody(sessao="s1", token=pb.mint("s1"), ok=confirma))
         return await asyncio.wait_for(entrega, 5)
@@ -653,3 +653,14 @@ async def test_efeito_depois_da_resposta_volta_para_o_terminal():
         assert e.value.status_code == 409
     finally:
         pb.esquecer("pane-i")
+
+
+def test_pull_diz_se_o_backend_tem_a_faixa(monkeypatch):
+    # Backend reiniciado começa sem a faixa: o `/pull` avisa, e o plugin reenvia sem esperar redesenho.
+    monkeypatch.setattr(pb, "ESPERA_S", 0.01)
+    try:
+        assert asyncio.run(pb.pull(_pull(instance="a")))["faixa"] is False
+        pb._guardar_faixa("s1", None, 80, [])
+        assert asyncio.run(pb.pull(_pull(instance="a")))["faixa"] is True
+    finally:
+        pb.esquecer("s1")

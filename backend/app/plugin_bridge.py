@@ -875,10 +875,11 @@ async def pull(body: PullBody):
         _loop = asyncio.get_running_loop()
         _waiters[body.sessao] = fila
         _batidas[body.sessao] = time.monotonic()
+    # `faixa`: o backend tem a faixa dos mods desta sessão? Reiniciado, não tem, e o plugin reenvia.
     try:
         entrega = await asyncio.wait_for(fila.get(), timeout=ESPERA_S)
     except asyncio.TimeoutError:
-        return {"text": None}
+        return {"text": None, "faixa": body.sessao in _bands}
     finally:
         with _lock:
             # Só renova o próprio dono: um `esquecer` ou outra instância no meio não é desfeito.
@@ -888,7 +889,7 @@ async def pull(body: PullBody):
             _batidas[body.sessao] = time.monotonic()
             if _waiters.get(body.sessao) is fila:
                 del _waiters[body.sessao]
-    return entrega
+    return {**entrega, "faixa": body.sessao in _bands}
 
 
 class SuggestBody(BaseModel):

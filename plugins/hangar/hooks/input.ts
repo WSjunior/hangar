@@ -1,5 +1,5 @@
 import type { EngineInterface, On } from "claude-code";
-import { type Bridge, clearBridge, instance, lastState, markUnreachable, setBridge } from "./bridge";
+import { type Bridge, askResend, clearBridge, instance, lastState, setBridge } from "./bridge";
 
 // A largada divide o `session.start` com o state.ts por MATCHER — dois hooks no
 // mesmo evento sem matcher o engine recusa. O filtro não é enfeite: sem prompt
@@ -89,7 +89,8 @@ async function pull($: EngineInterface, ponte: Bridge) {
     if (r.status === 409) clearBridge();
     else if (r.status === 200) setBridge(ponte);
     if (r.status === 200) {
-      const { text, modo } = JSON.parse(r.text) as { text?: string | null; modo?: string };
+      const { text, modo, faixa } = JSON.parse(r.text) as { text?: string | null; modo?: string; faixa?: boolean };
+      if (faixa === false) askResend();
       if (text && modo === "fill") {
         let isFilled = false;
         try {
@@ -127,7 +128,6 @@ async function pull($: EngineInterface, ponte: Bridge) {
     }
   } catch {
     espera = BACKOFF_MS;
-    markUnreachable();
   }
   $.clock.after(espera, () => void pull($, ponte));
 }

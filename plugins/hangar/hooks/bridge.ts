@@ -8,25 +8,22 @@ let atual: Bridge | null = null;
 let ultimoEstado: string | null = null;
 const id =`${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
-// Quem guarda algo só na memória do backend (a faixa dos mods) e precisa reenviar quando a ponte
-// aparece ou volta depois de o backend não responder (reiniciado, ele começa vazio).
-const readyListeners = new Set<() => void>();
-let reachable = false;
+// Quem guarda algo só na memória do backend (a faixa dos mods) e reenvia quando a ponte aparece
+// ou quando o backend diz que não tem (reiniciado, ele começa vazio).
+const resendListeners = new Set<() => void>();
 
 export function setBridge(b: Bridge): void {
-  const back = !atual || !reachable;
+  const novo = !atual;
   atual = b;
-  reachable = true;
-  if (back) for (const cb of readyListeners) cb();
+  if (novo) askResend();
 }
 
-/** O backend não respondeu: a próxima ponte aceita pode ser de um backend que perdeu o que guardava. */
-export function markUnreachable(): void {
-  reachable = false;
+export function askResend(): void {
+  for (const cb of resendListeners) cb();
 }
 
-export function onBridgeReady(cb: () => void): void {
-  readyListeners.add(cb);
+export function onResend(cb: () => void): void {
+  resendListeners.add(cb);
 }
 
 export function clearBridge(): void {

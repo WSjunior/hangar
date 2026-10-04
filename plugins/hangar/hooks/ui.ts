@@ -1,5 +1,5 @@
 import type { EngineInterface, On } from "claude-code";
-import { bridge, onBridgeReady } from "./bridge";
+import { bridge, onResend } from "./bridge";
 import { openerUrl } from "./uiIntercept";
 import { bandBody, type PaneEntry } from "./uiPayload";
 
@@ -13,8 +13,9 @@ let columns: number | null = null;
 const panes = new Map<string, PaneEntry>();
 let sent: string | null = null;
 let scheduled = false;
-// O `$` do último hook: a ponte que volta reenvia a faixa fora de qualquer hook.
-let engine: EngineInterface | null = null;
+// Reenvio pedido quando a ponte volta, fora de qualquer hook: o engine não deixa guardar o `$`
+// numa variável, só usá-lo num closure, como nos timers.
+let resend: (() => void) | null = null;
 
 // JSON de objeto sem as chaves de fora, para juntar à ponte no corpo do POST.
 const fields = (o: Record<string, unknown>) => JSON.stringify(o).slice(1, -1);
@@ -35,7 +36,7 @@ async function post($: EngineInterface, path: string, extra: string): Promise<{ 
 }
 
 // Serializa só aqui, no máximo a cada SEND_DELAY_MS: o hook de render só marca que mudou. Sem
-// ponte ou com recusa, a faixa sai de novo quando a ponte voltar (`onBridgeReady`).
+// ponte ou com recusa, a faixa sai de novo quando a ponte aparece ou o backend diz que não a tem.
 async function flush($: EngineInterface) {
   scheduled = false;
   const body = bandBody(above, columns, [...panes.values()], MAX_BODY_CHARS);
@@ -45,17 +46,17 @@ async function flush($: EngineInterface) {
 }
 
 function schedule($: EngineInterface) {
-  engine = $;
+  resend = () => {
+    sent = null;
+    schedule($);
+  };
   if (!scheduled) {
     scheduled = true;
     $.clock.after(SEND_DELAY_MS, () => void flush($));
   }
 }
 
-onBridgeReady(() => {
-  sent = null;
-  if (engine) schedule(engine);
-});
+onResend(() => resend?.());
 
 // Janela do clique que o app pediu: abrir URL e copiar vão para o aparelho de quem clicou. Não acaba
 // no fim do `next`: o `onPress` do mod costuma disparar a cópia sem `await`. Só vale para chamadas do
