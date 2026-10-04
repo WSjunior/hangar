@@ -14,6 +14,7 @@ use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::serve::ListenerExt;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -191,8 +192,8 @@ pub async fn serve_with_terminal_pool(listener: TcpListener, cfg: Config, pool: 
     state.terminal_address = Some(private.local_addr()?);
     let state = Arc::new(state);
     tokio::select! {
-        result = axum::serve(listener, router(state.clone()).into_make_service_with_connect_info::<SocketAddr>()) => result,
-        result = axum::serve(private, terminal_router(state).into_make_service_with_connect_info::<SocketAddr>()) => result,
+        result = axum::serve(listener.tap_io(crate::nodelay), router(state.clone()).into_make_service_with_connect_info::<SocketAddr>()) => result,
+        result = axum::serve(private.tap_io(crate::nodelay), terminal_router(state).into_make_service_with_connect_info::<SocketAddr>()) => result,
     }
 }
 

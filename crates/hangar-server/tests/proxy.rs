@@ -278,3 +278,82 @@ async fn pooled_connection_is_dropped_before_uvicorn_closes_it() {
     get().await;
     assert_eq!(accepted.load(Ordering::SeqCst), before + 1, "ociosa além do prazo, abre outra");
 }
+
+/// Upstream que escreve o corpo em muitos pedaços pequenos, como o uvicorn faz com resposta
+/// grande ou em streaming (o asyncio liga TCP_NODELAY, então cada pedaço sai na hora).
+async fn spawn_chunked_upstream(pieces: usize, size: usize) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let up = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (mut s, _) = listener.accept().await.unwrap();
+            s.set_nodelay(true).unwrap();
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let Ok(n) = s.read(&mut chunk).await else { return };
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    while let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        buf.drain(..i + 4);
+                        let head = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n";
+                        if s.write_all(head).await.is_err() {
+                            return;
+                        }
+                        let mut piece = format!("{size:x}\r\n").into_bytes();
+                        piece.extend(std::iter::repeat_n(b'x', size));
+                        piece.extend_from_slice(b"\r\n");
+                        for _ in 0..pieces {
+                            if s.write_all(&piece).await.is_err() {
+                                return;
+                            }
+                            tokio::task::yield_now().await;
+                        }
+                        if s.write_all(b"0\r\n\r\n").await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            });
+        }
+    });
+    up
+}
+
+/// Mediana de 5 pedidos, cada um numa conexão nova lida como o curl lê (buffer grande até o
+/// fim do chunked), em ms.
+async fn median_ms(addr: std::net::SocketAddr) -> f64 {
+    let mut times = Vec::new();
+    for _ in 0..5 {
+        let t = std::time::Instant::now();
+        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+        s.set_nodelay(true).unwrap();
+        s.write_all(format!("GET /x HTTP/1.1\r\nHost: h\r\nAuthorization: Bearer {OWNER}\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut got = Vec::new();
+        let mut buf = vec![0u8; 102_400];
+        while !got.ends_with(b"0\r\n\r\n") {
+            let n = tokio::time::timeout(Duration::from_secs(5), s.read(&mut buf)).await.unwrap().unwrap();
+            assert!(n > 0, "conexão fechou antes do fim");
+            got.extend_from_slice(&buf[..n]);
+        }
+        times.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    times.sort_by(f64::total_cmp);
+    times[2]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn large_chunked_body_is_not_held_by_nagle() {
+    // Sem TCP_NODELAY o pedaço pequeno do fim espera o ACK atrasado do cliente a cada resposta.
+    let (pieces, size) = (300, 1000);
+    let up = spawn_chunked_upstream(pieces, size).await;
+    let srv = spawn_server(config(up, "127.0.0.1")).await;
+    let direct = median_ms(up).await;
+    let proxied = median_ms(srv).await;
+    assert!(proxied < direct + 20.0, "repasse {proxied:.1} ms contra {direct:.1} ms direto");
+}

@@ -90,8 +90,10 @@ async fn open(binding: &CanoBinding, peeking: bool) -> Result<BufReader<Socket>,
             let address: std::net::SocketAddr = address.parse()
                 .map_err(|_| RuntimeError::new("cano_address", "endereço do cano inválido"))?;
             if !address.ip().is_loopback() { return Err(RuntimeError::new("cano_address", "cano fora do loopback")); }
-            Box::new(tokio::net::TcpStream::connect(address).await
-                .map_err(|_| RuntimeError::new("cano_connect", "não foi possível conectar ao cano"))?)
+            let mut tcp = tokio::net::TcpStream::connect(address).await
+                .map_err(|_| RuntimeError::new("cano_connect", "não foi possível conectar ao cano"))?;
+            crate::nodelay(&mut tcp);
+            Box::new(tcp)
         } else if let Some(path) = binding.escuta.strip_prefix("unix:") {
             #[cfg(unix)]
             { Box::new(tokio::net::UnixStream::connect(path).await

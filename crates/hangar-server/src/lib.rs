@@ -19,6 +19,14 @@ mod warn_limit;
 /// Python (`RUST_SERVER_PROTOCOL`) recusa um binário de outra versão e atende sozinho.
 pub const INTERNAL_PROTOCOL: u32 = 12;
 
+/// Todo socket TCP do servidor, aceito ou aberto. Sem isso o Nagle segura o último pedaço de uma
+/// resposta em pedaços até o ACK atrasado do outro lado; o asyncio do Python já liga sozinho.
+pub(crate) fn nodelay(tcp: &mut tokio::net::TcpStream) {
+    if let Err(e) = tcp.set_nodelay(true) {
+        tracing::warn!("TCP_NODELAY não ligou: {e}");
+    }
+}
+
 /// Lê o cano até o fim ou erro. O Python segura a outra ponta; fechou = pai morreu.
 pub async fn parent_gone<R: tokio::io::AsyncRead + Unpin>(mut pipe: R) {
     use tokio::io::AsyncReadExt;
