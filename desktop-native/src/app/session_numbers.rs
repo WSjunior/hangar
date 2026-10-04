@@ -1,0 +1,222 @@
+use std::time::{Duration, Instant};
+use super::sidebar::Target;
+
+const INPUT_WAIT: Duration = Duration::from_secs(1);
+
+pub(super) fn digit_for_key(key: &str, layout: &str) -> Option<char> {
+    if key.len() == 1 && key.as_bytes()[0].is_ascii_digit() { return key.chars().next(); }
+    let brazilian = matches!(layout, "Portuguese (Brazil)" | "com.apple.keylayout.Brazilian-ABNT2");
+    if !brazilian && !matches!(layout, "English (US)" | "com.apple.keylayout.US" | "com.apple.keylayout.ABC") { return None; }
+    if brazilian && matches!(key, "dead_diaeresis" | "¨") { return Some('6'); }
+    // O mesmo símbolo corresponde a números diferentes em outros layouts.
+    match key {
+        "!" => Some('1'), "@" => Some('2'), "#" => Some('3'), "$" => Some('4'), "%" => Some('5'),
+        "^" => Some('6'), "&" => Some('7'), "*" => Some('8'), "(" => Some('9'), ")" => Some('0'), _ => None,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Entry {
+    pub(super) target: Target,
+    pub(super) incarnation: Option<String>,
+}
+
+#[derive(Default)]
+pub(super) struct Selection {
+    entries: Option<Vec<Entry>>,
+    input: String,
+    deadline: Option<Instant>,
+    revision: u64,
+}
+
+impl Selection {
+    pub(super) fn begin(&mut self, entries: Vec<Entry>) {
+        self.entries = Some(entries);
+        self.input.clear();
+        self.deadline = None;
+        self.revision += 1;
+    }
+
+    pub(super) fn cancel(&mut self) {
+        self.entries = None;
+        self.input.clear();
+        self.deadline = None;
+        self.revision += 1;
+    }
+
+    pub(super) fn active(&self) -> bool { self.entries.is_some() }
+
+    pub(super) fn number(&self, target: &Target) -> Option<usize> {
+        self.entries.as_ref()?.iter().position(|entry| entry.target == *target).map(|ix| ix + 1)
+    }
+
+    pub(super) fn input(&self) -> &str { &self.input }
+    pub(super) fn deadline(&self) -> Option<Instant> { self.deadline }
+    pub(super) fn revision(&self) -> u64 { self.revision }
+
+    pub(super) fn push_digit(&mut self, digit: char, now: Instant) -> bool {
+        if !self.active() || !digit.is_ascii_digit() { return false; }
+        self.input.push(digit);
+        self.deadline = Some(now + INPUT_WAIT);
+        self.revision += 1;
+        true
+    }
+
+    pub(super) fn backspace(&mut self, now: Instant) {
+        if !self.active() || self.input.pop().is_none() { return; }
+        self.deadline = (!self.input.is_empty()).then_some(now + INPUT_WAIT);
+        self.revision += 1;
+    }
+
+    pub(super) fn finish_if_ready(&mut self, now: Instant) -> Option<Entry> {
+        if !self.deadline.is_some_and(|deadline| now >= deadline) { return None; }
+        self.confirm()
+    }
+
+    pub(super) fn confirm(&mut self) -> Option<Entry> {
+        if !self.active() || self.input.is_empty() { return None; }
+        let number = std::mem::take(&mut self.input).parse::<usize>().ok();
+        self.deadline = None;
+        self.revision += 1;
+        self.entries.as_ref()?.get(number?.checked_sub(1)?).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entries(count: usize) -> Vec<Entry> {
+        (1..=count).map(|number| Entry {
+            target: Target::new("server", &format!("session-{number}")),
+            incarnation: Some(format!("life-{number}")),
+        }).collect()
+    }
+
+    #[test]
+    fn shifted_digits_follow_known_layouts_without_guessing_other_layouts() {
+        for (key, number) in [("!", '1'), ("@", '2'), ("#", '3'), ("$", '4'), ("%", '5'), ("^", '6'), ("&", '7'), ("*", '8'), ("(", '9'), (")", '0')] {
+            assert_eq!(super::digit_for_key(key, "English (US)"), Some(number));
+        }
+        assert_eq!(super::digit_for_key("dead_diaeresis", "Portuguese (Brazil)"), Some('6'));
+        assert_eq!(super::digit_for_key("¨", "com.apple.keylayout.Brazilian-ABNT2"), Some('6'));
+        assert_eq!(super::digit_for_key("&", "German"), None);
+        assert_eq!(super::digit_for_key("6", "German"), Some('6'));
+        assert_eq!(super::digit_for_key("f6", "English (US)"), None);
+    }
+
+    #[test]
+    fn each_digit_restarts_wait_and_selects_the_whole_number() {
+        let now = Instant::now();
+        let mut selection = Selection::default();
+        selection.begin(entries(12));
+        assert!(selection.push_digit('1', now));
+        let first_revision = selection.revision();
+        assert!(selection.push_digit('2', now + Duration::from_millis(600)));
+        assert_ne!(selection.revision(), first_revision);
+        assert_eq!(selection.input(), "12");
+        assert_eq!(selection.deadline(), Some(now + Duration::from_millis(1600)));
+        assert_eq!(selection.finish_if_ready(now + Duration::from_millis(1000)), None);
+        let selected = selection.finish_if_ready(now + Duration::from_millis(1600)).unwrap();
+        assert_eq!(selected.target, Target::new("server", "session-12"));
+        assert_eq!(selected.incarnation.as_deref(), Some("life-12"));
+        assert!(selection.active());
+        assert_eq!(selection.number(&selected.target), Some(12));
+        assert_eq!(selection.input(), "");
+        assert_eq!(selection.deadline(), None);
+        assert_eq!(selection.finish_if_ready(now + Duration::from_secs(3)), None);
+    }
+
+    #[test]
+    fn cancelling_clears_snapshot_input_and_pending_selection() {
+        let now = Instant::now();
+        let mut selection = Selection::default();
+        selection.begin(entries(2));
+        selection.push_digit('2', now);
+        let pending_revision = selection.revision();
+        selection.cancel();
+        assert_ne!(selection.revision(), pending_revision);
+        assert!(!selection.active());
+        assert_eq!(selection.number(&Target::new("server", "session-2")), None);
+        assert_eq!(selection.input(), "");
+        assert_eq!(selection.deadline(), None);
+        assert_eq!(selection.finish_if_ready(now + Duration::from_secs(2)), None);
+        assert_eq!(selection.confirm(), None);
+        assert!(!selection.push_digit('1', now));
+        selection.begin(entries(1));
+        selection.push_digit('1', now);
+        assert_eq!(selection.confirm().unwrap().target, Target::new("server", "session-1"));
+    }
+
+    #[test]
+    fn snapshot_keeps_order_machine_and_incarnation_until_released() {
+        let mut live = vec![
+            Entry { target: Target::new("server-a", "same-name"), incarnation: Some("first-a".into()) },
+            Entry { target: Target::new("server-b", "same-name"), incarnation: Some("first-b".into()) },
+        ];
+        let mut selection = Selection::default();
+        selection.begin(live.clone());
+        live.swap(0, 1);
+        live[0].incarnation = Some("replacement-b".into());
+        assert_eq!(selection.number(&Target::new("server-a", "same-name")), Some(1));
+        assert_eq!(selection.number(&Target::new("server-b", "same-name")), Some(2));
+        selection.push_digit('2', Instant::now());
+        let selected = selection.confirm().unwrap();
+        assert_eq!(selected.target, Target::new("server-b", "same-name"));
+        assert_eq!(selected.incarnation.as_deref(), Some("first-b"));
+        assert!(selection.active());
+    }
+
+    #[test]
+    fn invalid_input_never_falls_back_to_another_session() {
+        let now = Instant::now();
+        let mut selection = Selection::default();
+        assert!(!selection.push_digit('1', now));
+        selection.begin(entries(2));
+        let revision = selection.revision();
+        assert!(!selection.push_digit('x', now));
+        assert_eq!(selection.revision(), revision);
+        assert_eq!(selection.deadline(), None);
+        for input in ["0", "3", "999999999999999999999999999999999999999999999999"] {
+            for digit in input.chars() { assert!(selection.push_digit(digit, now)); }
+            assert_eq!(selection.confirm(), None);
+            assert_eq!(selection.input(), "");
+            assert_eq!(selection.deadline(), None);
+            assert!(selection.active());
+        }
+    }
+
+    #[test]
+    fn backspace_edits_number_and_restarts_or_cancels_wait() {
+        let now = Instant::now();
+        let mut selection = Selection::default();
+        selection.begin(entries(12));
+        selection.push_digit('1', now);
+        selection.push_digit('2', now);
+        let revision = selection.revision();
+        selection.backspace(now + Duration::from_millis(600));
+        assert_ne!(selection.revision(), revision);
+        assert_eq!(selection.input(), "1");
+        assert_eq!(selection.deadline(), Some(now + Duration::from_millis(1600)));
+        assert_eq!(selection.finish_if_ready(now + Duration::from_millis(1000)), None);
+        selection.backspace(now + Duration::from_millis(900));
+        assert_eq!(selection.input(), "");
+        assert_eq!(selection.deadline(), None);
+        assert_eq!(selection.finish_if_ready(now + Duration::from_secs(3)), None);
+    }
+
+    #[test]
+    fn confirming_before_deadline_keeps_numbers_and_starts_next_input_fresh() {
+        let now = Instant::now();
+        let mut selection = Selection::default();
+        selection.begin(entries(12));
+        selection.push_digit('1', now);
+        selection.push_digit('2', now);
+        assert_eq!(selection.confirm().unwrap().target, Target::new("server", "session-12"));
+        assert!(selection.active());
+        assert_eq!(selection.deadline(), None);
+        selection.push_digit('1', now);
+        assert_eq!(selection.input(), "1");
+        assert_eq!(selection.confirm().unwrap().target, Target::new("server", "session-1"));
+    }
+}

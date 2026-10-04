@@ -57,7 +57,7 @@ impl Shortcut {
     }
 
     /// O que o painel roda de um atalho da config. `project` é a chave do repositório quando o atalho é do projeto.
-    fn from_item(item: &shortcuts::Item, project: Option<&str>) -> Option<Self> {
+    pub(super) fn from_item(item: &shortcuts::Item, project: Option<&str>) -> Option<Self> {
         let (label, icon, confirm) = (item.label().to_owned(), item.icon().map(str::to_owned), item.confirm());
         match item.kind() {
             "send_text" => Some(Shortcut::Send { label, text: item.content().to_owned(), direct: item.sends_direct(), confirm, icon }),

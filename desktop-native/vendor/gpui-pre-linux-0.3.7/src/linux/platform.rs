@@ -940,6 +940,17 @@ pub(super) fn get_xkb_compose_state(cx: &xkb::Context) -> Option<xkb::compose::S
 }
 
 #[cfg(any(feature = "wayland", feature = "x11"))]
+pub(super) fn compose_key(compose: &mut xkb::compose::State, keysym: Keysym, modifiers: gpui::Modifiers) -> xkb::compose::Status {
+    // Atalhos não iniciam nem carregam uma composição de acento para a próxima letra.
+    if modifiers.control || modifiers.alt || modifiers.platform {
+        compose.reset();
+    } else {
+        compose.feed(keysym);
+    }
+    compose.status()
+}
+
+#[cfg(any(feature = "wayland", feature = "x11"))]
 pub(super) const PIPE_READ_TIMEOUT: Duration = Duration::from_secs(4);
 
 #[cfg(any(feature = "wayland", feature = "x11"))]
@@ -1378,6 +1389,30 @@ async fn await_idle_sleep_prevention(
 mod tests {
     use super::*;
     use gpui::{Point, px};
+
+    #[cfg(any(feature = "wayland", feature = "x11"))]
+    #[test]
+    fn shortcuts_never_start_or_carry_dead_key_composition() {
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let table = xkb::compose::Table::new_from_buffer(&context,
+            "<dead_diaeresis> <e> : \"ë\" ediaeresis\n", "C", xkb::compose::FORMAT_TEXT_V1,
+            xkb::compose::COMPILE_NO_FLAGS).unwrap();
+        let mut compose = xkb::compose::State::new(&table, xkb::compose::STATE_NO_FLAGS);
+        for modifier in [gpui::Modifiers { control: true, shift: true, ..Default::default() },
+            gpui::Modifiers { alt: true, shift: true, ..Default::default() },
+            gpui::Modifiers { platform: true, shift: true, ..Default::default() }] {
+            assert_eq!(compose_key(&mut compose, Keysym::dead_diaeresis, modifier), xkb::compose::Status::Nothing);
+            assert_eq!(compose_key(&mut compose, Keysym::e, gpui::Modifiers::none()), xkb::compose::Status::Nothing);
+        }
+        let shift = gpui::Modifiers { shift: true, ..Default::default() };
+        assert_eq!(compose_key(&mut compose, Keysym::dead_diaeresis, shift), xkb::compose::Status::Composing);
+        assert_eq!(compose_key(&mut compose, Keysym::e, gpui::Modifiers::none()), xkb::compose::Status::Composed);
+        assert_eq!(compose.utf8().as_deref(), Some("ë"));
+        compose.reset();
+        assert_eq!(compose_key(&mut compose, Keysym::dead_diaeresis, shift), xkb::compose::Status::Composing);
+        assert_eq!(compose_key(&mut compose, Keysym::c, gpui::Modifiers { control: true, ..Default::default() }), xkb::compose::Status::Nothing);
+        assert_eq!(compose_key(&mut compose, Keysym::e, gpui::Modifiers::none()), xkb::compose::Status::Nothing);
+    }
 
     #[cfg(any(feature = "wayland", feature = "x11"))]
     #[test]

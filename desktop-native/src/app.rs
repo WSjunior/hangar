@@ -56,6 +56,9 @@ mod servers;
 pub(crate) use servers::{ServerEntry, new_id as new_server_id};
 mod shortcuts;
 mod shortcut_transfer;
+mod keyboard;
+mod session_numbers;
+mod session_picker;
 mod side;
 mod terminal;
 mod sidebar;
@@ -365,6 +368,7 @@ pub struct Hangar {
     composer: Entity<TextareaState>,
     composer_placeholder: String,
     _input_subscription: Subscription,
+    _keyboard_subscription: Subscription,
     connection_dialog: bool,
     list_online: bool,
     chat_online: bool,
@@ -496,6 +500,8 @@ pub struct Hangar {
     recents: recent::Recents,
     reopen: Option<recent::ArchiveEntry>,
     shortcuts: shortcuts::Shortcuts,
+    keyboard: keyboard::Keyboard,
+    session_picker: session_picker::SessionPicker,
     harness: harness::Harnesses,
     server_config: server_config::ServerConfig,
     sync: sync::Sync,
@@ -650,29 +656,12 @@ impl Hangar {
             }
         });
         cx.observe(&composer, |this, _, cx| this.refresh_mention(cx)).detach();
-        // Ctrl+L leva ao campo de mensagem; a raiz da janela trata a ação e segura o foco quando nada mais o tem.
-        // `secondary` é Ctrl no Linux e no Windows e Cmd no Mac. Ctrl+Espaço fica: no Mac, Cmd+Espaço é o Spotlight.
-        cx.bind_keys([KeyBinding::new("secondary-l", FocusComposer, Some("!Terminal")), KeyBinding::new("secondary-,", OpenSettings, Some("!Terminal")),
-            KeyBinding::new("secondary-shift-c", CopyLastReply, Some("!Terminal")), KeyBinding::new("secondary-f", FocusSettingsSearch, Some("!Terminal")),
-            KeyBinding::new("secondary-down", NextSession, Some("!Terminal")), KeyBinding::new("ctrl-space", ToggleDictation, Some("!Terminal")),
-            KeyBinding::new("secondary-up", PreviousSession, Some("!Terminal")), KeyBinding::new("secondary-n", NewChat, Some("!Terminal")),
-            // Ctrl+Shift+C já copia a última resposta: Custos fica no Ctrl+Alt+C.
-            KeyBinding::new("secondary-alt-c", OpenCosts, Some("!Terminal")), KeyBinding::new("secondary-k", OpenSearch, Some("!Terminal")),
-            KeyBinding::new("secondary-p", FindProjectFile, Some("!Terminal")), KeyBinding::new("secondary-shift-f", FindProjectText, Some("!Terminal")),
-            KeyBinding::new("secondary-b", ToggleSidebar, Some("!Terminal")), KeyBinding::new("alt-shift-p", CyclePermission, Some("!Terminal")),
-            KeyBinding::new("secondary-alt-w", OpenWorktrees, Some("!Terminal"))]);
-        cx.bind_keys([KeyBinding::new("ctrl-shift-c", terminal::CopyTerminal, Some("Terminal")),
-            KeyBinding::new("ctrl-shift-v", terminal::PasteTerminal, Some("Terminal")),
-            KeyBinding::new("tab", NoAction, Some("Terminal")),
+        cx.bind_keys([KeyBinding::new("tab", NoAction, Some("Terminal")),
             KeyBinding::new("shift-tab", NoAction, Some("Terminal")),
             KeyBinding::new("ctrl-c", NoAction, Some("Terminal")),
             // Tab dentro da página navega os campos dela, não o foco do app.
             KeyBinding::new("tab", NoAction, Some("BrowserPage")),
             KeyBinding::new("shift-tab", NoAction, Some("BrowserPage"))]);
-        // No Mac Ctrl+C vai para o programa do terminal; copiar e colar são Cmd+C e Cmd+V.
-        #[cfg(target_os = "macos")]
-        cx.bind_keys([KeyBinding::new("cmd-c", terminal::CopyTerminal, Some("Terminal")),
-            KeyBinding::new("cmd-v", terminal::PasteTerminal, Some("Terminal"))]);
         let settings_ui = settings::SettingsUi::new(window, cx);
         let root_focus = cx.focus_handle();
         cx.on_focus_lost(window, |this: &mut Self, window, cx| this.machines_focus_lost(window, cx)).detach();
@@ -720,10 +709,23 @@ impl Hangar {
         Self::watch_user_scroll(&list_state, cx);
         let sidebar = sidebar::Sidebar::new(window, cx);
         let panes = panes::Panes::new(cx);
+        let owner = window.window_handle();
+        let weak = cx.weak_entity();
+        let keyboard_subscription = cx.intercept_keystrokes(move |stroke, window, cx| {
+            if window.window_handle().window_id() != owner.window_id() { return; }
+            let Some(event) = window.current_key_down_event().cloned() else { return; };
+            if event.keystroke != stroke.keystroke { return; }
+            let _ = weak.update(cx, |this, cx| {
+                if (event.keystroke.key == "escape" && this.keyboard_escape(window, cx))
+                    || this.keyboard_key_down(&event, window, cx) || this.session_number_key(&event, window, cx) {
+                    cx.stop_propagation();
+                }
+            });
+        });
         Self {
             runtime, tx, api: None, server: None, connection: 0, selection: 0, revision: 0, sessions: Vec::new(), local_dirs: HashMap::new(), selected: None, open_api: None,
             chat: Chat::default(), list_task: None, session_task: None, history_task: None,
-            address, token, unsaved_connection: None, connection_focus, root_focus, composer, composer_placeholder: String::new(), _input_subscription: input_subscription,
+            address, token, unsaved_connection: None, connection_focus, root_focus, composer, composer_placeholder: String::new(), _input_subscription: input_subscription, _keyboard_subscription: keyboard_subscription,
             connection_dialog: true, list_online: false, chat_online: false, loading: false, history_started: false,
             history_installed: false, pending_chat: Vec::new(),
             history_limit: 400, has_older: false, etag: None, error: None, list_error: None,
@@ -749,7 +751,8 @@ impl Hangar {
             costs: Default::default(), worktrees: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
             terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
-            act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), tree: tree::Tree::new(window, cx), find: find::Find::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
+            act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), keyboard: keyboard::Keyboard::new(window, cx), session_picker: Default::default(),
+            tree: tree::Tree::new(window, cx), find: find::Find::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
             new_chat: None, new_chat_focus: cx.focus_handle().tab_stop(true),
             new_chat_folders: Default::default(), landing: None, opening: None, side_seen: None, side_slide: None, arrived: HashMap::new(), tree_parts: HashSet::new(), part_arrived: HashMap::new(), tree_folds: HashMap::new(), tree_motion: false, active_token: String::new(), ready_sessions: None,
             servers: known_servers, remote: HashMap::new(), remote_tasks: Vec::new(), remote_gen: 0, servers_rev: 0, invite_ended: HashSet::new(), pending_open: None, pending_remote: None,
@@ -775,7 +778,13 @@ impl Hangar {
         chrome::set_window_active(window.is_window_active());
         cx.observe_window_activation(window, |this, window, cx| {
             chrome::set_window_active(window.is_window_active());
-            if !window.is_window_active() { return; }
+            if !window.is_window_active() {
+                this.cancel_session_numbers(cx);
+                let editing = this.keyboard.is_editing();
+                this.keyboard.cancel_edit();
+                if editing { cx.notify(); }
+                return;
+            }
             this.refresh_desktop_palette(cx);
             // O papel de parede muda fora da janela; a volta do foco é quando repintar importa.
             let a = appearance::get();
@@ -4571,6 +4580,8 @@ impl Hangar {
             let pick = session.clone();
             let open = session.clone();
             let menu_target = sidebar::Target::new(&active, &session.name);
+            let label = self.session_number_label(&menu_target, label);
+            let number = self.session_number_badge(&menu_target);
             Some(div().id(SharedString::from(format!("tab-{}", session.name))).track_focus(&focus).flex_shrink_0().max_w(px(200.)).h(px(32.)).px(px(8.))
                 .flex().items_center().gap(px(6.)).rounded(px(6.)).border_1().cursor_pointer()
                 .map(|el| if on { el.bg(theme::accent_dim()).border_color(theme::accent()).text_color(theme::text()).font_weight(FontWeight::SEMIBOLD) }
@@ -4579,6 +4590,7 @@ impl Hangar {
                 .role(Role::Tab).aria_selected(on).aria_label(label.clone())
                 .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx))
                 .child(mark)
+                .children(number)
                 .child(chrome::provider_glyph(&session.provider, 14.))
                 .child(div().min_w_0().truncate().text_size(px(13.)).child(session.name.clone()))
                 .when(session.pending_questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning())
@@ -4653,7 +4665,8 @@ impl Hangar {
         let state = conversation_row_state(&session, outcome, queued);
         let color = theme::conversation_status(state);
         let status_label = tr(&format!("sidebar_state_{state}"));
-        let label = match folder_name(&session) { Some(folder) => format!("{name} · {folder} · {status_label}"), None => format!("{name} · {status_label}") };
+        let label = self.session_number_label(&target,
+            match folder_name(&session) { Some(folder) => format!("{name} · {folder} · {status_label}"), None => format!("{name} · {status_label}") });
         let branch = shown_branch(&session).filter(|_| !compact);
         // Como a branch, o chip e o aviso de worktree apagada ficam fora do modo compacto.
         let worktree = worktree_label(&session).filter(|_| !compact && !session.worktree_gone);
@@ -4686,6 +4699,7 @@ impl Hangar {
         };
         let title = div().w_full().min_w_0().h(px(17.)).flex().items_center().gap(px(4.))
             .child(status)
+            .children(self.session_number_badge(&target))
             .when(!session.orq(), |el| el.child(badge(agent_name(&session.provider).to_owned(), theme::muted())))
             .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).line_height(px(17.)).child(name.clone()))
             .when(session.pending_questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning())
@@ -4847,10 +4861,11 @@ impl Hangar {
                 cx.stop_propagation();
             }))
             .role(Role::Button).aria_selected(selected)
-            .aria_label(spoken.join(" · "))
+            .aria_label(self.session_number_label(&target, spoken.join(" · ")))
             // O ⋯ fica por cima do fim da linha do nome: ela cede o espaço dele.
             .child(div().flex().items_center().gap(px(8.)).when(show_menu, |el| el.pr(px(22.)))
                 .child(avatar)
+                .children(self.session_number_badge(&target))
                 .child(div().flex_1().min_w_0().flex().items_center().gap(px(6.)).when(untracked, |el| el.opacity(0.45)).child(name_el))
                 .when_some(account, |el, (label, color)| el.child(div().flex_shrink_1().min_w_0().max_w(px(96.)).h(px(16.)).px(px(6.))
                     .flex().items_center().gap(px(4.)).rounded_full().bg(theme::hover())
@@ -5654,6 +5669,14 @@ impl Render for Hangar {
             }).absolute().inset_0()))
             .when(!chat_background, |el| el.children(self.render_backdrop(window)))
             .font_family(theme::SANS)
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, window, cx| {
+                this.keyboard_modifiers_changed(event, window, cx);
+                this.session_number_modifiers(event.modifiers, window, cx);
+            }))
+            .capture_key_up(cx.listener(|this, _: &KeyUpEvent, window, cx| {
+                this.session_number_modifiers(window.modifiers(), window, cx);
+            }))
+            .on_action(cx.listener(|this, action: &keyboard::RunShortcut, window, cx| this.run_keyboard_shortcut(action, window, cx)))
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
                 let page_open = this.settings.is_some() && !this.settings_live() || this.costs.view.is_some() || this.worktrees.view.is_some();
                 if !this.connection_dialog && !page_open && (this.selected.as_ref().is_some_and(SessionInfo::takes_messages)

@@ -282,6 +282,8 @@ pub(in crate::app) struct Shortcuts {
 }
 
 impl Shortcuts {
+    pub(super) fn keyboard_items(&self) -> &[Item] { &self.items }
+
     /// Uma gravação da lista ou a aplicação de uma importação em curso: nenhuma outra escrita entra no meio.
     pub(super) fn busy(&self) -> bool {
         self.saving || self.import_loading || self.import.as_ref().is_some_and(|draft| draft.applying)
@@ -573,7 +575,9 @@ impl Hangar {
     }
 
     pub(super) fn render_shortcuts_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let page = div().flex().flex_col().child(self.page_top("settings_page_shortcuts", tr("shortcuts_lead")));
+        let keyboard = self.render_keyboard_settings(cx);
+        let page = div().flex().flex_col().child(self.page_top("settings_page_shortcuts", tr("keyboard_page_lead")))
+            .child(keyboard);
         let note = |text: String, color: Hsla| div().px_4().py(px(18.)).text_size(px(13.)).text_color(color).whitespace_normal().child(text);
         if self.api.is_none() { return page.child(settings_box().mt(px(24.)).child(note(tr("settings_offline"), theme::muted()))).into_any_element(); }
         let s = &self.shortcuts;
@@ -591,7 +595,7 @@ impl Hangar {
         }
         let saving = s.busy();
         let count = s.items.len();
-        let mut list = settings_box();
+        let mut list = settings_box().child(section_head(IconName::Zap, tr("keyboard_buttons_title"), Some(tr("shortcuts_lead")), None, px(16.)));
         if count == 0 { list = list.child(note(tr("shortcuts_empty"), theme::muted())); }
         for (n, item) in s.items.iter().enumerate() {
             list = list.child(self.render_shortcut_row(item, n, count, saving, false, cx));
