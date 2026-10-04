@@ -4999,6 +4999,14 @@ fn save_connection(address: &str, token: &str, servers: &[servers::ServerEntry])
     std::fs::rename(&tmp, &path)
 }
 
+/// Conversa mínima que fica ao lado de um painel de mod ancorado.
+const MIN_CONVERSATION_BESIDE_PANE: f32 = 420.;
+
+/// Largura natural de um painel de mod: as colunas que o terminal deu a ele, mais a moldura.
+fn plugin_pane_width(pane: &Value) -> f32 {
+    pane["columns"].as_f64().map(|c| c as f32 * crate::plugin_ui::CELL_W).unwrap_or(420.) + 20.
+}
+
 fn select_snapshot(state: &SessionState) -> String { json!([state.question, state.options]).to_string() }
 
 fn display_body(event: &ChatEvent) -> String {
@@ -5320,14 +5328,21 @@ impl Hangar {
         } else { content = content.child(self.render_new_chat(window, cx)); }
         // Painel de mod ancorado: coluna à direita da conversa, como o terminal o põe.
         let dock: Vec<AnyElement> = self.plugin_panes.iter()
-            .filter(|p| crate::plugin_ui::is_dock(p) && self.selected.as_ref().is_some_and(|s| s.readable()))
+            .filter(|p| self.plugin_pane_docks(p, window) && self.selected.as_ref().is_some_and(|s| s.readable()))
             .map(|p| {
-                let width = p["columns"].as_f64().map(|c| c as f32 * crate::plugin_ui::CELL_W).unwrap_or(420.);
-                div().h_full().flex_shrink_0().w(px(width)).max_w(relative(0.45)).min_w(px(260.)).p_2().flex().flex_col()
+                div().h_full().flex_shrink_0().w(px(plugin_pane_width(p))).p_2().flex().flex_col()
                     .child(crate::plugin_ui::pane(p, self.plugin_press(cx))).into_any_element()
             }).collect();
         if dock.is_empty() { return content.into_any_element(); }
         div().size_full().flex().flex_row().child(content.flex_1().min_w_0()).children(dock).into_any_element()
+    }
+
+    /// Como o terminal, que só ancora o painel com largura de sobra: ao lado da conversa quando cabem os
+    /// dois, senão acima do composer.
+    fn plugin_pane_docks(&self, pane: &Value, window: &Window) -> bool {
+        if !crate::plugin_ui::is_dock(pane) { return false; }
+        let free = f32::from(window.viewport_size().width) - self.nav_width() - self.side_width(window).unwrap_or(0.);
+        free - plugin_pane_width(pane) >= MIN_CONVERSATION_BESIDE_PANE
     }
 
     /// Quem atende o clique num botão de mod; sessão só leitura deixa os botões como rótulo.
@@ -5420,7 +5435,7 @@ impl Hangar {
                 }))))))
             .when_some(delivery_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
             .when_some(stop_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
-            .children(self.plugin_panes.iter().filter(|p| readable && !crate::plugin_ui::is_dock(p))
+            .children(self.plugin_panes.iter().filter(|p| readable && !self.plugin_pane_docks(p, window))
                 .map(|p| in_column(crate::plugin_ui::pane(p, self.plugin_press(cx)))).collect::<Vec<_>>())
             .when_some(crate::plugin_ui::band(&self.plugin_band, self.plugin_press(cx)).filter(|_| readable), |el, band| el.child(in_column(band)))
             .map(|el| match orq {
