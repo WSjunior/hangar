@@ -635,7 +635,10 @@ async def _correlaciona_diag(request: Request, call_next):
         status = response.status_code if response is not None else 500
         # O template da rota não contém query, caminho de arquivo nem corpo do pedido.
         route = getattr(request.scope.get("route"), "path", "(rota desconhecida)")
-        if (response is not None or failure) and not request.url.path.startswith("/api/diag") and (
+        # O long-poll do plugin espera de propósito: sucesso dele seria uma linha "lenta" a cada
+        # janela, e enchia o teto do dia.
+        long_poll_ok = route == "/api/plugin/pull" and status < 400 and not failure
+        if (response is not None or failure) and not long_poll_ok and not request.url.path.startswith("/api/diag") and (
                 failure or status >= 400 or elapsed >= 1000 or request.method in ("POST", "PUT", "PATCH", "DELETE")):
             diag.registrar("api.servidor", "erro" if status >= 500 else "aviso" if status >= 400 else "ok",
                            detalhe=f"{request.method} {route}", codigo=str(status), ms=elapsed,
