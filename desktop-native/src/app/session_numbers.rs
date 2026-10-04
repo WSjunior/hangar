@@ -3,10 +3,17 @@ use super::sidebar::Target;
 
 const INPUT_WAIT: Duration = Duration::from_secs(1);
 
+fn brazilian_layout(layout: &str) -> bool { matches!(layout, "Portuguese (Brazil)" | "com.apple.keylayout.Brazilian-ABNT2") }
+
+/// Layouts cujos símbolos com Shift na fileira de números sabemos traduzir de volta para dígitos.
+pub(super) fn known_layout(layout: &str) -> bool {
+    brazilian_layout(layout) || matches!(layout, "English (US)" | "com.apple.keylayout.US" | "com.apple.keylayout.ABC")
+}
+
 pub(super) fn digit_for_key(key: &str, layout: &str) -> Option<char> {
     if key.len() == 1 && key.as_bytes()[0].is_ascii_digit() { return key.chars().next(); }
-    let brazilian = matches!(layout, "Portuguese (Brazil)" | "com.apple.keylayout.Brazilian-ABNT2");
-    if !brazilian && !matches!(layout, "English (US)" | "com.apple.keylayout.US" | "com.apple.keylayout.ABC") { return None; }
+    if !known_layout(layout) { return None; }
+    let brazilian = brazilian_layout(layout);
     if brazilian && matches!(key, "dead_diaeresis" | "¨") { return Some('6'); }
     // O mesmo símbolo corresponde a números diferentes em outros layouts.
     match key {
@@ -49,6 +56,10 @@ impl Selection {
     pub(super) fn number(&self, target: &Target) -> Option<usize> {
         self.entries.as_ref()?.iter().position(|entry| entry.target == *target).map(|ix| ix + 1)
     }
+
+    /// Enter, Backspace e Esc só pertencem à seleção enquanto há um número sendo digitado;
+    /// fora disso seguem para o campo de texto (Ctrl+Shift+Backspace apaga palavra, etc.).
+    pub(super) fn claims_edit_keys(&self) -> bool { self.active() && !self.input.is_empty() }
 
     pub(super) fn input(&self) -> &str { &self.input }
     pub(super) fn deadline(&self) -> Option<Instant> { self.deadline }
@@ -103,6 +114,30 @@ mod tests {
         assert_eq!(super::digit_for_key("&", "German"), None);
         assert_eq!(super::digit_for_key("6", "German"), Some('6'));
         assert_eq!(super::digit_for_key("f6", "English (US)"), None);
+    }
+
+    #[test]
+    fn edit_keys_belong_to_selection_only_while_a_number_is_typed() {
+        let now = Instant::now();
+        let mut selection = Selection::default();
+        assert!(!selection.claims_edit_keys());
+        selection.begin(entries(3));
+        assert!(!selection.claims_edit_keys());
+        selection.push_digit('2', now);
+        assert!(selection.claims_edit_keys());
+        selection.backspace(now);
+        assert!(!selection.claims_edit_keys());
+        selection.push_digit('1', now);
+        selection.confirm();
+        assert!(!selection.claims_edit_keys());
+    }
+
+    #[test]
+    fn only_table_layouts_are_known() {
+        assert!(super::known_layout("English (US)"));
+        assert!(super::known_layout("com.apple.keylayout.Brazilian-ABNT2"));
+        assert!(!super::known_layout("French"));
+        assert!(!super::known_layout("German"));
     }
 
     #[test]

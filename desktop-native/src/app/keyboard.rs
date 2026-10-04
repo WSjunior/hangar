@@ -342,6 +342,25 @@ fn load_config() -> Result<Config, String> {
     Ok(config)
 }
 
+/// Tira do caminho um keyboard.json que não valida, guardando-o ao lado para o usuário conferir.
+fn set_aside_config(path: &std::path::Path, stamp: u64) -> Result<Option<PathBuf>, String> {
+    let aside = path.with_file_name(format!("keyboard.json.bad-{stamp}"));
+    match std::fs::rename(path, &aside) {
+        Ok(()) => Ok(Some(aside)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
+}
+
+/// No Windows o mapeador devolve a tecla física sem Shift; nos demais só a tabela de layouts sabe.
+fn number_layout_supported(cx: &App) -> bool {
+    let layout = cx.keyboard_layout();
+    if super::session_numbers::known_layout(layout.id()) || super::session_numbers::known_layout(layout.name()) { return true; }
+    cfg!(target_os = "windows") && ('0'..='9').all(|digit| Keystroke::parse(&digit.to_string()).is_ok_and(|key| {
+        KeybindingKeystroke::new_with_mapper(key, false, cx.keyboard_mapper().as_ref()).key() == digit.to_string()
+    }))
+}
+
 fn save_config(config: &Config) -> Result<(), String> {
     config.validate()?;
     let path = config_path()?;
@@ -466,6 +485,36 @@ impl Hangar {
                 }
                 if let Some(error) = &this.keyboard.save_error {
                     window.push_notification(Notification::warning(error.clone()), cx);
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    fn reset_keyboard_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.keyboard.loading || self.keyboard.saving { return; }
+        self.keyboard.saving = true;
+        self.keyboard.save_error = None;
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs());
+        let job = cx.background_executor().spawn(async move { set_aside_config(&config_path()?, stamp) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = job.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.keyboard.saving = false;
+                match result {
+                    Ok(aside) => {
+                        if let Some(aside) = aside {
+                            window.push_notification(Notification::success(tr("keyboard_reset_done").replace("{path}", &aside.display().to_string())), cx);
+                        }
+                        this.keyboard.loading = true;
+                        begin_load(window, cx);
+                    }
+                    Err(error) => {
+                        let error = tr("keyboard_reset_failed").replace("{error}", &error);
+                        window.push_notification(Notification::warning(error.clone()), cx);
+                        this.keyboard.save_error = Some(error);
+                    }
                 }
                 cx.notify();
             });
@@ -672,10 +721,20 @@ impl Hangar {
         if let Some(error) = &self.keyboard.load_error {
             return section.child(settings_box().child(div().p_4().flex().flex_col().gap_3()
                 .child(div().id("keyboard-load-error").role(Role::Alert).text_sm().text_color(theme::danger()).whitespace_normal().child(tr("keyboard_load_failed").replace("{error}", error)))
-                .child(Button::new("keyboard-reload").outline().small().label(tr("keyboard_reload"))
-                    .on_click(cx.listener(|this, _, window, cx| { this.keyboard.loading = true; begin_load(window, cx); cx.notify(); }))))).into_any_element();
+                .children(self.keyboard.save_error.clone().map(|error| div().id("keyboard-reset-error").role(Role::Alert).text_sm().text_color(theme::danger()).whitespace_normal().child(error)))
+                .child(div().flex().items_center().gap_2()
+                    .child(Button::new("keyboard-reload").outline().small().label(tr("keyboard_reload")).disabled(self.keyboard.saving)
+                        .on_click(cx.listener(|this, _, window, cx| { this.keyboard.loading = true; begin_load(window, cx); cx.notify(); })))
+                    .child(Button::new("keyboard-reset").outline().small().label(tr("keyboard_reset_defaults")).loading(self.keyboard.saving)
+                        .on_click(cx.listener(|this, _, window, cx| this.reset_keyboard_config(window, cx))))))).into_any_element();
         }
-        section = section.child(settings_box().child(self.keyboard_row(Target::Hold, tr("keyboard_hold_title"), Some(tr("keyboard_hold_help")), cx)));
+        let mut hold = settings_box().child(self.keyboard_row(Target::Hold, tr("keyboard_hold_title"), Some(tr("keyboard_hold_help")), cx));
+        if !number_layout_supported(cx) {
+            hold = hold.child(div().id("keyboard-layout-unsupported").px_4().py_3().border_t_1().border_color(theme::border())
+                .text_sm().text_color(theme::warning_text()).whitespace_normal()
+                .child(tr("keyboard_number_layout_unsupported").replace("{layout}", cx.keyboard_layout().name())));
+        }
+        section = section.child(hold);
         for (context, title) in [("!Terminal", "keyboard_global"), ("FileViewer", "keyboard_files"), ("Terminal", "keyboard_terminal")] {
             let mut list = settings_box().child(div().px_4().py_3().font_weight(FontWeight::SEMIBOLD).text_sm().child(tr(title)));
             for command in Command::ALL.into_iter().filter(|command| command.context() == context) {
@@ -853,6 +912,21 @@ mod tests {
         assert!(captured_stroke(&event, &DummyKeyboardMapper).is_err());
         event.prefer_character_input = false;
         assert!(captured_stroke(&event, &DummyKeyboardMapper).is_ok());
+    }
+
+    #[test]
+    fn broken_config_is_set_aside_so_defaults_load() {
+        let dir = std::env::temp_dir().join(format!("hangar-keyboard-reset-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("keyboard.json");
+        std::fs::write(&path, br#"{"hold":{"control":true}}"#).unwrap();
+        let aside = set_aside_config(&path, 42).unwrap().unwrap();
+        assert_eq!(aside, dir.join("keyboard.json.bad-42"));
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(&aside).unwrap(), br#"{"hold":{"control":true}}"#);
+        assert_eq!(set_aside_config(&path, 43).unwrap(), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(set_aside_config(&dir.join("missing-dir/keyboard.json"), 44).unwrap().is_none());
     }
 
     #[test]

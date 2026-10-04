@@ -55,6 +55,7 @@ impl Hangar {
         self.session_number_modifiers(window.modifiers(), window, cx);
         if !self.session_picker.selection.active() { return false; }
         let key = event.keystroke.key.as_str();
+        if matches!(key, "escape" | "enter" | "backspace") && !self.session_picker.selection.claims_edit_keys() { return false; }
         if key == "escape" {
             self.cancel_session_numbers(cx);
             self.session_picker.cancelled = true;
