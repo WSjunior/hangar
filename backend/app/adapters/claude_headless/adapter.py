@@ -1022,11 +1022,78 @@ class ClaudeHeadlessAdapter:
         return True
 
     async def _subir_cano(self, sess: _Sessao) -> None:
-        meta = sess.meta
         sess.initialize_done.clear()
         sess.initialize_ok = False
         sess.initialize_error = None
         sess.initialized.clear()
+        resume = Path(self.transcript_path_de(sess.meta)).exists()
+        cano, proc, log = await self._lancar_cano(sess)
+        ligado = await self._conectar(cano, esperar=_TETO_CANO_S)
+        if ligado is None:
+            cauda = _cauda(log)
+            await asyncio.to_thread(_matar_grupo, proc.pid, sess.name)
+            hl_sessions.update(sess.name, cano=None)
+            raise RuntimeError(f"cano não escutou em {_TETO_CANO_S:.0f}s: {cauda}")
+        sess.proc, snap = ligado
+        cano["versao"] = snap.get("versao", 1)
+        sess.meta = hl_sessions.update(sess.name, cano=cano) or sess.meta
+        sess.leitor = asyncio.create_task(self._ler(sess))
+        for linha in snap.get("stderr_tail") or []:
+            sess.stderr_tail.append(linha)
+        _log.info("claude headless: subiu name=%s cano=%s claude=%s resume=%s", sess.name, proc.pid, sess.proc.pid, resume)
+        sess.iniciando = True
+        sess.iniciar_turno()      # relógio do "Iniciando sessão… (Ns)"
+        t = asyncio.create_task(self._esperar_initialize(sess))
+        self._tarefas.add(t)
+        t.add_done_callback(self._tarefas.discard)
+
+    async def launch_process(self, name: str, *, engine_models: list[dict] | None = None,
+                             launch: bool = True) -> tuple[dict, bool]:
+        """Com o Rust dono: sobe só o processo do cano e grava o sidecar, sem conectar; quem conecta
+        é o Rust. Devolve o `cano` e se ele foi lançado agora. Nunca relança com o `pid` do sidecar
+        vivo: seriam dois `claude` no mesmo .jsonl."""
+        async with self._spawn_locks.setdefault(name, asyncio.Lock()):
+            meta = hl_sessions.load(name)
+            if meta is None:
+                raise RuntimeError("sessão sem sidecar")
+            cano = meta.get("cano")
+            if cano and cano.get("pid") is not None and await asyncio.to_thread(pid_vivo, int(cano["pid"])):
+                return cano, False
+            if not launch:
+                raise RuntimeError("o processo da sessão parou")
+            if cano:
+                _esquecer_cano(name, cano.get("pid"))
+                meta = hl_sessions.load(name) or {**meta, "cano": None}
+            falhas = self._subidas.get(name, 0)
+            if falhas >= _TETO_SUBIDAS:
+                raise _SubidaEsgotada(f"desistiu de subir após {falhas} tentativas seguidas")
+            if falhas:
+                await asyncio.sleep(_ESPERA_SUBIDA_S * 2 ** (falhas - 1))
+            self._subidas[name] = self._subidas.get(name, 0) + 1
+            sess = _Sessao(name, meta)
+            sess.engine_models = engine_models
+            cano, proc, _log_path = await self._lancar_cano(sess)
+            _log.info("claude headless: lançou name=%s cano=%s (Rust conecta)", name, proc.pid)
+            return cano, True
+
+    def open_failed(self, name: str, detail: str) -> None:
+        """A abertura no Rust falhou: o problema fica na faixa e no sidecar, como no caminho antigo."""
+        self._registrar_problema(_Sessao(name, hl_sessions.load(name) or {"name": name}), "headless_nao_subiu", detail[:300])
+
+    def open_succeeded(self, name: str) -> None:
+        self.reset_start_attempts(name)
+        self.esquecer_problema(name)
+        if (hl_sessions.load(name) or {}).get("problema"):
+            hl_sessions.update(name, problema=None)
+
+    async def discard_launch(self, name: str, cano: dict) -> None:
+        """O Rust não conectou no cano recém-lançado: mata o grupo e tira o `cano` do sidecar."""
+        await asyncio.to_thread(_matar_grupo, int(cano["pid"]), name)
+        await asyncio.to_thread(_esquecer_cano, name, cano["pid"])
+
+    async def _lancar_cano(self, sess: _Sessao) -> tuple[dict, asyncio.subprocess.Process, Path]:
+        """argv, ambiente, conta e motor do `claude`, processo do cano em escopo próprio e o sidecar."""
+        meta = sess.meta
         transcript = self.transcript_path_de(meta)
         resume = Path(transcript).exists()
         # Modo de permissão TAMBÉM no --resume: sem a flag a CLI volta ao defaultMode da conta
@@ -1084,30 +1151,15 @@ class ClaudeHeadlessAdapter:
         log = hl_sessions._dir() / f"cano-{meta['key'][:16]}.log"
         cano, proc = await subir_cano_processo(argv, cwd=meta["cwd"], env=env, key=meta["key"], log=log,
                                                tarefas=self._tarefas)
+        # A do lançador (hangar-cano e cano.py falam a mesma); quem conecta confere a real no snapshot.
+        cano["versao"] = cano_mod.VERSAO
         try:
             cano["config_marca"] = await asyncio.to_thread(_marca_config, meta.get("config_dir"))
         except (OSError, ValueError):
             # Sem marca não há motivo de recarga; a sessão sobe do mesmo jeito.
             _log.warning("claude headless: config da conta ilegível, sem marca de recarga name=%s", sess.name, exc_info=True)
         sess.meta = hl_sessions.update(sess.name, cano=cano) or {**meta, "cano": cano}
-        ligado = await self._conectar(cano, esperar=_TETO_CANO_S)
-        if ligado is None:
-            cauda = _cauda(log)
-            await asyncio.to_thread(_matar_grupo, proc.pid, sess.name)
-            hl_sessions.update(sess.name, cano=None)
-            raise RuntimeError(f"cano não escutou em {_TETO_CANO_S:.0f}s: {cauda}")
-        sess.proc, snap = ligado
-        cano["versao"] = snap.get("versao", 1)
-        sess.meta = hl_sessions.update(sess.name, cano=cano) or sess.meta
-        sess.leitor = asyncio.create_task(self._ler(sess))
-        for linha in snap.get("stderr_tail") or []:
-            sess.stderr_tail.append(linha)
-        _log.info("claude headless: subiu name=%s cano=%s claude=%s resume=%s", sess.name, proc.pid, sess.proc.pid, resume)
-        sess.iniciando = True
-        sess.iniciar_turno()      # relógio do "Iniciando sessão… (Ns)"
-        t = asyncio.create_task(self._esperar_initialize(sess))
-        self._tarefas.add(t)
-        t.add_done_callback(self._tarefas.discard)
+        return cano, proc, log
 
     async def _esperar_initialize(self, sess: _Sessao) -> None:
         sess.initialize_ok = False

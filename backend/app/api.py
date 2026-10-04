@@ -4417,7 +4417,7 @@ async def _send_managed(name: str, text: str, provider: str, *, track_entry: boo
         return None
     operation_id = uuid.uuid4().hex
     try:
-        if not await coordinator.prepare_session(name, provider):
+        if not await coordinator.prepare_session(name, provider, launch=True):
             return None
         if provider == "codex" and text.strip().split(maxsplit=1)[0:1] == ["/compact"]:
             if text.strip() != "/compact":

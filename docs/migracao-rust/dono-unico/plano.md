@@ -123,11 +123,38 @@ subidas), `test_never_relaunch_while_sidecar_pid_alive`,
 **Código morto que sai:** em `wake`, o caminho "sobe pelo Python e adota" para sessão nova; no
 `prepare_session`, o gatilho de adoção para sessão sem terminal recém-criada.
 
-- [ ] **Step 8: Testes acima, vistos falhar**
-- [ ] **Step 9: Lançar o processo do cano sem cliente (argv/env/`engine_models`, escopo, `setsid`), gravar o sidecar, teto de subidas e nunca com `pid` vivo**
-- [ ] **Step 10: `ensure_open`: slot direto no Rust (sem `WriterLease`/`QueueStore` no Python), `open`, serializado por nome; falha de conexão mata o processo lançado; opção de esperar o `initialized` com teto**
-- [ ] **Step 11: `wake`, `_send_managed` e `prepare_session` de sessão migrada por `ensure_open`; o caminho antigo só para não migrado**
-- [ ] **Step 12: Remover o código morto; testes focados; revisar**
+- [x] **Step 8: Testes acima, vistos falhar**
+- [x] **Step 9: Lançar o processo do cano sem cliente (argv/env/`engine_models`, escopo, `setsid`), gravar o sidecar, teto de subidas e nunca com `pid` vivo**
+- [x] **Step 10: `ensure_open`: slot direto no Rust (sem `WriterLease`/`QueueStore` no Python), `open`, serializado por nome; falha de conexão mata o processo lançado; opção de esperar o `initialized` com teto**
+- [x] **Step 11: `wake`, `_send_managed` e `prepare_session` de sessão migrada por `ensure_open`; o caminho antigo só para não migrado**
+- [x] **Step 12: Remover o código morto; testes focados; revisar**
+
+**Registro da execução (Task 2).** `ClaudeHeadlessAdapter.launch_process` sobe o processo do cano
+(o mesmo `_lancar_cano` que o `_subir_cano` passou a usar: argv, ambiente, conta/motor, escopo) e
+grava `cano` com `versao` do lançador, sem conectar; respeita o teto de subidas e devolve o cano
+existente quando o `pid` do sidecar vive. `RuntimeCoordinator.ensure_open` (serializado pelo
+`registration_locks`, como o `prepare_session`) registra o slot já em `Rust`, sem `WriterLease`
+nem `QueueStore`, só depois de o `open` responder; falha `cano_connect`/`cano_auth`/`cano_timeout`
+num cano recém-lançado mata o grupo (`discard_launch`) e limpa o sidecar; sucesso zera o teto.
+`wait_initialized` espera a vista com teto de 185 s e devolve a frase de `headless_nao_subiu`.
+O `wake` embrulhado passou a aceitar `engine_models` (antes, criar sessão sem terminal com conta de
+motor levantava `TypeError` no embrulho) e, com o Rust de pé, chama `ensure_open` para o Claude.
+O caminho antigo do `wake` (sobe pelo Python e adota) ficou só para o Codex e para o Python dono;
+o gatilho de adoção do `prepare_session` ficou só para sessão já registrada no Python no boot, que
+a Task 5 tira. `test_registered_v2_is_adopted_without_opening_python_reader` saiu: o cenário dele
+virou `test_new_headless_session_never_opens_python_client`. O código do erro do Rust ainda não vai
+ao diário como `codigo` (é o tipo da exceção): a Task 3 muda o `failure_reason`.
+Revisão: só quem pode subir processo abre no Rust (`prepare_session(launch=True)`: envio,
+`acordar`, `ensure_open`); leitura e parada pelo embrulho (`deliverable`, `parar`, `list_models`…)
+nunca lançam, e sem cano vivo seguem o registro Python sem processo de antes. Registro Python sem
+cano vivo é solto sob `freeze` e reaberto no Rust no primeiro envio. O `ensure_running` embrulhado
+(Claude, Rust de pé, sem `so_reconectar`/`transfer_id`) vira `ensure_open` com `engine_models` e a
+espera do `initialize` (`esperar_pronta`/`require_initialize`). Falha da abertura grava o problema
+`headless_nao_subiu` com `<código>: <frase>` no sidecar e na faixa (como o caminho antigo); o teto
+esgotado mantém o problema da queda que o esgotou; o `acordar` volta a zerar o teto. Ficam com a
+Task 4 a troca de conta (ainda faz `parar` → `change`) e com a 3 a reabertura de slot do Rust com
+cano morto. O teto zera quando o `open` responde, antes do `initialize`: a recusa do `initialize`
+vira problema visível pelo Rust, e cada nova rodada é ação do usuário.
 
 ### Task 3: Falha vira erro visível, com reabertura única no Rust
 

@@ -1133,7 +1133,14 @@ def install_adapter(cls, provider):
                 context = _legacy_operation.get()
                 if context is not None and coordinator is not None and context.get("operation_id") in coordinator.legacy_active:
                     return await _original(self, *args, **kwargs)
-                if (coordinator is not None and getattr(coordinator, "legacy", None) is not None
+                if (_method == "ensure_running" and _facade.provider == "claude" and coordinator is not None
+                        and getattr(coordinator, "legacy", None) is not None and getattr(coordinator, "transport", None) is not None
+                        and not bound.arguments.get("so_reconectar") and bound.arguments.get("transfer_id") is None
+                        and not (coordinator.managed_queue(name) and coordinator.in_lifecycle(coordinator.slot(name)))):
+                    # Subir a sessão é abri-la no Rust, com a conta/motor pedidos e a espera do initialize.
+                    await coordinator.ensure_open(name, engine_models=bound.arguments.get("engine_models"),
+                        wait_initialized=bool(bound.arguments.get("esperar_pronta") or bound.arguments.get("require_initialize")))
+                elif (coordinator is not None and getattr(coordinator, "legacy", None) is not None
                         and not (coordinator.managed_queue(name) and coordinator.in_lifecycle(coordinator.slot(name)))):
                     await coordinator.prepare_session(name, _facade.provider)
                 if native_slot(name) is not None:
@@ -1147,11 +1154,32 @@ def install_adapter(cls, provider):
     original = getattr(cls, "acordar", None)
     if original is not None and not getattr(original, "runtime_wrapped", False):
         @functools.wraps(original)
-        def wake(self, name, _original=original):
+        def wake(self, name, *, engine_models=None, _original=original):
             if native_slot(name) is not None:
                 runtime_coordinator.current().request_drain(name)
                 return
             coordinator = runtime_coordinator.current()
+            if provider == "claude" and coordinator is not None and coordinator.legacy is not None and coordinator.transport is not None:
+                from app.conversation_transfer import transfer_active
+                if transfer_active(name):
+                    return
+                self.reset_start_attempts(name)   # ação do usuário: nova rodada de tentativas
+                # Nasce direto no Rust: o processo sobe sem cliente Python e o ator drena a fila
+                # quando a sessão fica entregável.
+                async def open_in_rust():
+                    try:
+                        slot = await coordinator.ensure_open(name, engine_models=engine_models)
+                        if slot.phase != runtime_coordinator.Phase.Rust:
+                            await self.ensure_running(name)
+                            await coordinator.op(name, {"kind":"drain"}, uuid.uuid4().hex)
+                    except Exception as exc:
+                        from app import diag
+                        from app.runtime_coordinator import failure_reason
+                        diag.registrar("runtime.wake_failed", "erro", sessao=name, **failure_reason(exc))
+                task = coordinator.loop.create_task(open_in_rust())
+                self._tarefas.add(task)
+                task.add_done_callback(self._tarefas.discard)
+                return
             if coordinator is not None and coordinator.legacy is not None:
                 async def start():
                     try:
@@ -1166,6 +1194,6 @@ def install_adapter(cls, provider):
                 self._tarefas.add(task)
                 task.add_done_callback(self._tarefas.discard)
                 return
-            _original(self, name)
+            _original(self, name, **({"engine_models":engine_models} if engine_models is not None else {}))
         wake.runtime_wrapped = True
         cls.acordar = wake

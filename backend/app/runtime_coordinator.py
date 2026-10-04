@@ -132,6 +132,12 @@ def _clock():
     return {"monotonic_s": time.monotonic(), "epoch_s": time.time()}
 
 
+def _cano_alive(meta) -> bool:
+    from app.procinfo import pid_vivo
+    pid = (meta.get("cano") or {}).get("pid")
+    return pid is not None and pid_vivo(int(pid))
+
+
 def failure_reason(exc: BaseException) -> dict:
     """Tipo e motivo de uma falha do runtime para o diário. Só falhas do caminho Rust levam o
     detalhe: lá a mensagem é código e frase fixa. As do Python podem embutir texto da sessão."""
@@ -155,6 +161,9 @@ _ANSWER_CODES = frozenset({
     "queue_busy", "queue_entry", "steer_unknown", "policy_refused"})
 _RUST_TRIES = 4          # 3 tentativas, uma pausa e a última; depois a parte vai para o Python
 _BIRTH_POLL_S = 0.25
+_INITIALIZE_WAIT_S = 185.0   # teto do `initialize` no Rust (180 s) com folga
+# O Rust não chegou ao cano recém-lançado: o processo é morto e a falha conta no teto de subidas.
+_CONNECT_CODES = frozenset({"cano_connect", "cano_auth", "cano_timeout"})
 _RETRY_PAUSE_S = 2.0     # cobre a volta do canal de eventos, que recompõe o estado sozinho
 
 
@@ -190,7 +199,8 @@ class RuntimeCoordinator:
         self.rebindings = {}
         self.drains = {}
 
-    async def prepare_session(self, name, provider):
+    async def prepare_session(self, name, provider, *, launch=False, engine_models=None):
+        """`launch`: quem chama pode subir o processo (envio, acordar); leitura e parada nunca sobem."""
         if self.legacy is None:
             return self.managed_runtime(name)
         async with self.registration_locks.setdefault(name, asyncio.Lock()):
@@ -216,6 +226,15 @@ class RuntimeCoordinator:
                         previous.phase = Phase.RecoveringPython
                         self.names.pop(name, None)
             slot = self.slots.get(binding.key)
+            if self._born_in_rust(binding) and (slot is None or slot.phase == Phase.Python):
+                alive = await asyncio.to_thread(_cano_alive, binding.meta)
+                # Registro Python sem cano vivo não tem cliente nenhum: a fila passa direto ao Rust.
+                # Com cano vivo ele tem (religado no boot) e segue pela adoção até a Task 5.
+                if slot is None and (launch or alive) or slot is not None and launch and not alive and slot.rust_refused is None:
+                    if slot is not None:
+                        await self._release_python_slot(name, slot)
+                    await self._open_headless(name, binding, engine_models=engine_models, launch=launch)
+                    return True
             if slot is None:
                 slot = await asyncio.to_thread(self.register, binding)
             if slot is None or not self.managed_runtime(name):
@@ -250,6 +269,91 @@ class RuntimeCoordinator:
                         or binding.meta.get("terminal")) and slot.rust_refused is None:
                     await self.adopt(name)
             return True
+
+    def _born_in_rust(self, binding):
+        # Codex sem terminal fica no Python (provedor não migrado); terminal tem caminho próprio.
+        return self.transport is not None and binding.provider == "claude" and binding.headless
+
+    async def ensure_open(self, name, *, engine_models=None, wait_initialized=False):
+        """Sessão Claude sem terminal aberta no Rust: o Python só lança o processo do cano e grava
+        o sidecar; o Rust é o único cliente dele. Serializado por nome com o `prepare_session`."""
+        if self.legacy is None or self.transport is None:
+            raise RuntimeError("runtime Rust indisponível")
+        if not await self.prepare_session(name, "claude", launch=True, engine_models=engine_models):
+            raise RuntimeError("sessão sem terminal sem sidecar")
+        slot = self.slot(name)
+        if slot.phase != Phase.Rust:
+            # Recusada pelo Rust nesta vida (`rust_refused`): segue no Python até a Task 3 tirar a passagem.
+            return slot
+        if wait_initialized:
+            await self._await_initialized(slot)
+        return slot
+
+    async def _release_python_slot(self, name, slot):
+        if name in self.legacy.adapters["claude"]._sessions:
+            raise RuntimeError("cliente Python ainda subindo nesta sessão; tente de novo")
+        async with self.freeze(name):
+            with slot.guard:
+                if slot.active or slot.phase != Phase.Python:
+                    raise RuntimeError("fila da sessão em uso no Python")
+                if slot.lease is not None:
+                    slot.lease.close()
+                slot.lease, slot.store = None, None
+        self.slots.pop(slot.binding.key, None)
+        self.names.pop(name, None)
+
+    async def _open_headless(self, name, binding, *, engine_models=None, launch=True):
+        from app import diag
+        from app.adapters.claude_headless.adapter import _SubidaEsgotada
+        adapter = self.legacy.adapters["claude"]
+        launched = False
+        try:
+            cano, launched = await adapter.launch_process(name, engine_models=engine_models, launch=launch)
+            binding = await asyncio.to_thread(self.legacy.binding, name, "claude")
+            if binding is None or (binding.meta.get("cano") or {}).get("pid") != cano["pid"]:
+                raise RuntimeError("sidecar mudou durante a abertura da sessão")
+            descriptor = binding.descriptor()
+            ready = await self._rpc(descriptor, {"kind":"open", "descriptor":descriptor}, uuid.uuid4().hex)
+            if not (ready.get("opened") is True and isinstance(ready.get("state"), dict) and ready.get("instance") == self.instance
+                    and ready.get("key") == descriptor["key"] and ready.get("generation") == descriptor["generation"]):
+                raise RuntimeError("abertura não corresponde à vida atual")
+        except Exception as exc:
+            diag.registrar("runtime.open_failed", "erro", sessao=name, **failure_reason(exc))
+            # Só o cano lançado agora e que o Rust não alcançou morre: um vivo de antes pode estar
+            # no meio de um turno, e outro processo no mesmo .jsonl seria pior.
+            if launched and getattr(exc, "code", "") in _CONNECT_CODES:
+                try:
+                    await adapter.discard_launch(name, cano)
+                except Exception as stop:
+                    diag.registrar("runtime.open_discard_failed", "erro", sessao=name, **failure_reason(stop))
+            if not isinstance(exc, _SubidaEsgotada):   # o teto mantém na tela a queda que o esgotou
+                code = getattr(exc, "code", "") or type(exc).__name__
+                adapter.open_failed(name, f"{code}: {exc}")
+            raise
+        adapter.open_succeeded(name)
+        slot = Slot(binding=copy.deepcopy(binding), phase=Phase.Rust, view=ready["state"], cache_valid=True)
+        runtime_queue.configure(self)
+        self.slots[binding.key], self.names[name] = slot, binding.key
+        self._signal(slot)
+        return slot
+
+    async def _await_initialized(self, slot, timeout=_INITIALIZE_WAIT_S):
+        deadline = time.monotonic() + timeout
+        while True:
+            slot.changed.clear()
+            view = (slot.view or {}).get("view") or {}
+            state = view.get("public_state") or {}
+            if view.get("initialized") is True:
+                return
+            if state.get("problema") == "headless_nao_subiu" or view.get("alive") is False:
+                raise RuntimeError(state.get("problema_detalhe") or "a sessão não concluiu a inicialização")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("a sessão não concluiu a inicialização a tempo")
+            try:
+                await asyncio.wait_for(slot.changed.wait(), min(remaining, 1.0))
+            except TimeoutError:
+                pass
 
     async def _await_birth(self, name, provider):
         # Sessão com terminal recém-criada não é vínculo perdido: o envio espera o agente provar a
