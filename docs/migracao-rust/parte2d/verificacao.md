@@ -90,14 +90,15 @@ depois, cada pane recebeu seu próprio texto. A releitura aprovou quatro problem
 classificação por provedor declarado antigo e a correspondência por cauda de um caractere.
 A segunda rodada corrigiu esses caminhos com processos frescos e correspondência mínima por
 trecho; conservou forks de Pi comprovados. A execução final selecionada passou em **44 casos**,
-com 68 fora da seleção. A segunda releitura independente está pendente.
+com 68 fora da seleção. A segunda releitura independente aprovou conformidade e qualidade,
+fechando os seis problemas. Commits da Task 3: `bead8a45`, `58c75289` e `a767febd`.
 
 A política comum de falhas de `74177469` será integrada com a parte1 após a revisão desta Task.
 O caminho terminal já separa `_op_once`, evitando duplicar essa política.
 
 ## Ainda pendente
 
-- Task 3: revisão independente do diff; depois integrar a parte1 e conferir a política de falhas.
+- Integração da parte1: conferir a política de falhas e a correção de identidade do cano.
 - Task 4: workspace Rust inteiro, compilação cruzada Windows, pytest dos arquivos tocados,
   revisão final, push e CI nas três plataformas.
 - Uso real do Claude e Windows instalado: somente com o dono, conforme o pedido.

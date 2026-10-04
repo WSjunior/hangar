@@ -127,7 +127,7 @@ Aplicar a regra de falha recebida em `74177469`: quatro tentativas apenas antes 
 pausa antes da última, diário com código/motivo e reserva somente da sessão afetada; incerteza
 nunca repete. Integrar a parte1 após concluir esta Task, incluindo a correção de PID `fac8d377`.
 
-- [ ] **Step 4: Conferir testes focados e revisão independente**
+- [x] **Step 4: Conferir testes focados e revisão independente**
 
 Rodar pytest dos arquivos tocados, testes Rust do contrato e exercício isolado de gateway/CLI.
 Esperado verde; uso real explicitamente adiado conforme pedido.
