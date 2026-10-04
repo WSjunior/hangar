@@ -30,14 +30,15 @@ pub(super) enum Sub { Reply, Question, Working }
 
 type LastSubs = HashMap<Target, (Option<String>, (String, Sub))>;
 
-// Conversa trocada (`/clear`) não herda a linha da anterior.
-fn kept_sub(last: &mut LastSubs, target: &Target, jsonl: Option<&str>, fresh: Option<(String, Sub)>) -> Option<(String, Sub)> {
+// Conversa trocada (`/clear`) não herda a linha da anterior. `kind` é o tipo de linha que o estado atual mostra: a
+// guardada só volta se for dele (pergunta já respondida não fica amarela numa sessão que voltou a trabalhar).
+fn kept_sub(last: &mut LastSubs, target: &Target, jsonl: Option<&str>, kind: Option<Sub>, fresh: Option<(String, Sub)>) -> Option<(String, Sub)> {
     match fresh {
         Some(sub) => {
             last.insert(target.clone(), (jsonl.map(str::to_owned), sub.clone()));
             Some(sub)
         }
-        None => last.get(target).filter(|(seen, _)| seen.as_deref() == jsonl).map(|(_, sub)| sub.clone()),
+        None => last.get(target).filter(|(seen, (_, k))| seen.as_deref() == jsonl && Some(*k) == kind).map(|(_, sub)| sub.clone()),
     }
 }
 
@@ -280,8 +281,8 @@ impl Sidebar {
 
     /// A segunda linha da sessão. Vazia, fica a última mostrada da mesma conversa: o rótulo do que o agente faz some e
     /// volta entre uma etapa e outra, e a linha indo junto muda a altura do card a cada vez.
-    pub(super) fn keep_sub(&self, target: &Target, jsonl: Option<&str>, fresh: Option<(String, Sub)>) -> Option<(String, Sub)> {
-        kept_sub(&mut self.last_sub.borrow_mut(), target, jsonl, fresh)
+    pub(super) fn keep_sub(&self, target: &Target, jsonl: Option<&str>, kind: Option<Sub>, fresh: Option<(String, Sub)>) -> Option<(String, Sub)> {
+        kept_sub(&mut self.last_sub.borrow_mut(), target, jsonl, kind, fresh)
     }
 
     fn menu_for(&self, target: &Target) -> Option<Mute> {
@@ -1660,17 +1661,31 @@ mod tests {
         use super::{Sub, Target, kept_sub};
         let (mut last, row) = (super::LastSubs::new(), Target::new("m", "s"));
         let working = || Some(("Puttering…".to_owned(), Sub::Working));
-        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), None), None);
-        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), working()), working());
+        let w = Some(Sub::Working);
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), w, None), None);
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), w, working()), working());
         // O rótulo some entre uma etapa e outra: a linha fica.
-        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), None), working());
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), w, None), working());
         // A linha nova, quando vem, vale e passa a ser a guardada.
         let reply = Some(("Pronto.".to_owned(), Sub::Reply));
-        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), reply.clone()), reply);
-        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), None), reply);
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), Some(Sub::Reply), reply.clone()), reply);
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), Some(Sub::Reply), None), reply);
         // `/clear` troca o transcript: a linha da conversa anterior não volta. A de outra sessão também não.
-        assert_eq!(kept_sub(&mut last, &row, Some("b.jsonl"), None), None);
-        assert_eq!(kept_sub(&mut last, &Target::new("m", "outra"), Some("a.jsonl"), None), None);
+        assert_eq!(kept_sub(&mut last, &row, Some("b.jsonl"), Some(Sub::Reply), None), None);
+        assert_eq!(kept_sub(&mut last, &Target::new("m", "outra"), Some("a.jsonl"), Some(Sub::Reply), None), None);
+    }
+
+    #[test]
+    fn kept_second_line_only_returns_in_the_state_that_shows_it() {
+        use super::{Sub, Target, kept_sub};
+        let (mut last, row) = (super::LastSubs::new(), Target::new("m", "s"));
+        let question = Some(("Qual branch?".to_owned(), Sub::Question));
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), Some(Sub::Question), question.clone()), question);
+        // Respondida, a sessão volta a trabalhar ainda sem rótulo: a pergunta não fica no card.
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), Some(Sub::Working), None), None);
+        // Nem numa sessão parada sem resposta nova, nem fora dos três estados.
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), Some(Sub::Reply), None), None);
+        assert_eq!(kept_sub(&mut last, &row, Some("a.jsonl"), None, None), None);
     }
 
     #[test]

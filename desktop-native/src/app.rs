@@ -4870,7 +4870,11 @@ impl Hangar {
                 .map(|l| (conversation::one_line(l.split(" (").next().unwrap_or(&l), 80), sidebar::Sub::Working)),
             None => None,
         };
-        let sub = self.sidebar.keep_sub(&target, session.jsonl.as_deref(), fresh);
+        // O tipo de linha que este estado mostra, na mesma ordem do `fresh`.
+        let kind = if state == "idle" && session.pending_questions == 0 { Some(sidebar::Sub::Reply) }
+            else if state == "awaiting_input" || session.pending_questions > 0 { Some(sidebar::Sub::Question) }
+            else if state == "working" { Some(sidebar::Sub::Working) } else { None };
+        let sub = self.sidebar.keep_sub(&target, session.jsonl.as_deref(), kind, fresh);
         let sub_color = if matches!(sub, Some((_, sidebar::Sub::Question))) { theme::warning() } else { theme::muted() };
         let when = session.last_reply_at.filter(|_| state == "idle").map(side::since);
         let account = account_chip(session.conta.as_deref());
