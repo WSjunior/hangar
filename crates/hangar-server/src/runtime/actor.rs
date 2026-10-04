@@ -329,6 +329,17 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
             pending.preparing = false;
             if pending.cancelled || pending.timed_out { continue; }
             if pending.command.kind == OperationKind::SteerQueue {
+                // Mesmas recusas do adapter Python: sem turno não há o que orientar, e o Claude parado numa
+                // permissão ou pergunta não lê o stdin; a fila sumiria da tela até alguém responder.
+                let view = engine.view();
+                let refusal = if view["alive"] != true || view["in_progress"] != true { Some("Não há turno em andamento para orientar") }
+                    else if target.provider == "claude" && (view["pending"].as_array().is_some_and(|p|!p.is_empty()) || !view["question"].is_null()) {
+                        Some("Responda a permissão ou pergunta pendente antes de orientar") }
+                    else { None };
+                if let Some(text) = refusal {
+                    effects.push_back(Effect::Reply { operation_id:id,disposition:Disposition::Rejected,payload:json!({"error":text}) });
+                    continue;
+                }
                 let queue = queue.clone(); let target = target.clone(); let sender = internal.clone(); let sample = clock(start);
                 let entry_id = pending.command.payload["entry_id"].as_str().map(str::to_owned);
                 jobs.spawn(async move {

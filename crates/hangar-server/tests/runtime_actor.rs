@@ -507,3 +507,23 @@ async fn a_queue_refusal_carries_its_reason() {
     handle.stop().await.unwrap();
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn steering_the_queue_without_a_turn_is_refused_and_keeps_the_entry() {
+    let (handle,server,dir) = setup_claude_unreachable_policy().await;
+    handle.queue("append".into(),Action::Append { text:"Depois".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("later".into()) }).await.unwrap();
+    let steer = RuntimeCommand { operation_id:"steer-1".into(),kind:OperationKind::SteerQueue,payload:json!({"entry_id":"later"}) };
+    let reply = handle.command(steer).await.unwrap();
+    assert!(reply.disposition == Disposition::Rejected);
+    assert_eq!(reply.payload["error"],"Não há turno em andamento para orientar");
+    // A entrada continua na fila (o drain comum pode tentá-la; sem política ela volta adiada).
+    tokio::time::timeout(std::time::Duration::from_secs(5),async {
+        loop {
+            let state:State = serde_json::from_slice(&std::fs::read(dir.path().join("key.queue-state.json")).unwrap()).unwrap();
+            if state.rows.iter().any(|row|row["id"] == "later" && row["delivered"] == false) { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }).await.expect("a entrada precisa continuar na fila");
+    handle.stop().await.unwrap();
+    assert_eq!(server.await.unwrap(),0);
+}
