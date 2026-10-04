@@ -62,13 +62,13 @@ it('busca conteúdo para o título na montagem e revalida ao abrir', async () =>
     .mockResolvedValueOnce({ name: 'meu-plano', path: '/planos/meu-plano.md', markdown: '# Título\n\n**Forte**' });
   await montar();
 
-  expect(getPreview).toHaveBeenNthCalledWith(1, 'sessao');
+  expect(getPreview).toHaveBeenNthCalledWith(1, 'sessao', true, undefined);
   expect(getPreview).toHaveBeenCalledTimes(1);
   expect(document.querySelector('.plan-name')?.textContent).toBe('Título inicial');
   botao(m.chat_plan_ver())!.click();
   await estabilizar();
 
-  expect(getPreview).toHaveBeenNthCalledWith(2, 'sessao');
+  expect(getPreview).toHaveBeenNthCalledWith(2, 'sessao', true, undefined);
   expect(document.querySelector('.prose h1')?.textContent).toBe('Título');
   expect(document.querySelector('.prose strong')?.textContent).toBe('Forte');
 });

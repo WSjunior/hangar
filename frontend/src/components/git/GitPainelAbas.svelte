@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../../lib/sessionServer';
   // Painel de git do lado direito: uma aba por item aberto na coluna (arquivo da árvore de
   // trabalho ou commit). Commit mostra a lista de arquivos dele, e o diff do arquivo clicado abre
   // logo ABAIXO da linha — ler um commit é descer uma vez, não pular entre painel e lista.
@@ -11,6 +12,7 @@
 
   interface Props { sessionName: string; }
   let { sessionName }: Props = $props();
+  const sessionServer = useSessionServer();
 
   const git = $derived(gitStoreDaSessao(sessionName));
   const aba = $derived(gitPainel.abas.find((a) => a.id === gitPainel.ativa) ?? null);
@@ -28,7 +30,7 @@
     const minha = ++vez;
     arquivos = [];
     falhou = false;
-    getCommitFiles(sessionName, a.commit.hash)
+    getCommitFiles(sessionName, a.commit.hash, sessionServer())
       .then((r) => { if (minha === vez) arquivos = r.files; })
       .catch(() => { if (minha === vez) falhou = true; });
   });

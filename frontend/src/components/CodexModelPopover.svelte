@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   // Seletor de modelo do Codex ancorado na pill do composer — irmão do KimiModelPopover. Era a
   // última das quatro pills que ainda abria FOLHA; a escolha é a mesma, o que muda é o formato.
   //
@@ -23,6 +24,7 @@
     onClose: () => void;
   }
   let { open, anchor, sessionName, onApplied, onClose }: Props = $props();
+  const sessionServer = useSessionServer();
 
   let models = $state<CodexModel[]>([]);
   let atual = $state<string | null>(null);
@@ -40,7 +42,7 @@
     err = null;
     loading = true;
     try {
-      const res = await getCodexModels(sessionName);
+      const res = await getCodexModels(sessionName, sessionServer());
       if (minha !== carga) return;
       models = res.models;
       atual = res.current.model;
@@ -67,7 +69,7 @@
       ? (esforcoAtual ?? md.defaultEffort ?? null)
       : (md.defaultEffort ?? md.efforts[0]?.value ?? null);
     try {
-      await setCodexModel(sessionName, md.model, esforco);
+      await setCodexModel(sessionName, md.model, esforco, sessionServer());
     } catch (e) {
       err = e instanceof Error ? e.message : m.comum_falha_aplicar();
       aplicando = null;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   import * as m from '../paraglide/messages';
   import ModalDialog from './ModalDialog.svelte';
   import { fileUrl } from '@hangar/core';
@@ -10,6 +11,7 @@
     refs: FileRef[];
   }
   let { sessionName, refs }: Props = $props();
+  const sessionServer = useSessionServer();
 
   // Documento aberto em tela cheia (html/pdf). Imagem e video vao pro visor compartilhado
   // (lib/visor.ts) — iframe com sandbox nao e midia e continua aqui, no ModalDialog.
@@ -19,7 +21,7 @@
 
   function url(r: FileRef, download = false): string {
     // url absoluta (midia remota) usa direto; senao monta a do backend pelo path local.
-    return r.url ?? fileUrl(sessionName, r.path, download);
+    return r.url ?? fileUrl(sessionName, r.path, download, sessionServer());
   }
   function fail(r: FileRef) {
     failed = new Set(failed).add(r.path);

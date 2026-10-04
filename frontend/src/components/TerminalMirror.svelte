@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   import { untrack } from 'svelte';
   import { getPane, sendKey, sendTermInput, type NavKey } from '@hangar/core';
   import ModalDialog from './ModalDialog.svelte';
@@ -10,6 +11,7 @@
     onClose: () => void;
   }
   let { open, sessionName, onClose }: Props = $props();
+  const sessionServer = useSessionServer();
 
   let text = $state('');
   let busy = $state(false);
@@ -72,7 +74,7 @@
         // recriava o efeito, disparando um tick extra. Como nessa hora atBottom é falso, ele caía no
         // branch de congelado e acendia "⏸ há saída nova" sem ter saída nova. Só `open`/`sessionName`
         // devem reiniciar o poll.
-        const p = await getPane(sessionName, untrack(() => paneLines));
+        const p = await getPane(sessionName, untrack(() => paneLines), sessionServer());
         if (!alive) return;
         err = null;
         scrollback = p.scrollback;
@@ -102,7 +104,7 @@
     try {
       // Só avança DEPOIS do sucesso: incrementar antes deixava o rótulo do botão dizendo "600
       // linhas" com 200 na tela, e o clique seguinte pulava o patamar que tinha falhado.
-      const p = await getPane(sessionName, next);
+      const p = await getPane(sessionName, next, sessionServer());
       paneLines = next;
       text = p.text;
       // Ancora no conteúdo que o usuário já estava lendo: sem isto, as linhas antigas entram por
@@ -121,10 +123,10 @@
     if (busy) return;
     busy = true;
     try {
-      await sendKey(sessionName, key);
+      await sendKey(sessionName, key, sessionServer());
       // Refresh imediato pra feedback instantaneo (nao espera o proximo tick do poll). Apertar
       // tecla e acao deliberada -> volta pro fim, que e onde o efeito dela aparece.
-      text = (await getPane(sessionName, paneLines)).text;
+      text = (await getPane(sessionName, paneLines, sessionServer())).text;
       requestAnimationFrame(toBottom);
     } catch (e) {
       err = e instanceof Error ? e.message : m.term_erro();
@@ -150,8 +152,8 @@
   // `await sendInput(...)` resolver sempre, e o chamador limpava o campo de texto como se tivesse
   // dado certo — o usuário perdia o que digitou, no celular, sem aviso.
   async function sendInput(payload: { text?: string; key?: string }) {
-    await sendTermInput(sessionName, payload);
-    text = (await getPane(sessionName, paneLines)).text;   // refresh imediato
+    await sendTermInput(sessionName, payload, sessionServer());
+    text = (await getPane(sessionName, paneLines, sessionServer())).text;   // refresh imediato
     requestAnimationFrame(toBottom);
   }
 

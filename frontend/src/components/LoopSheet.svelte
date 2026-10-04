@@ -4,6 +4,7 @@
   import ConfirmDialog from './ConfirmDialog.svelte';
   import { getLoopForServer, createLoopForServer, stopLoopForServer, resolveLoopForServer, refineLoopForServer } from '@hangar/core';
   import { listServers, getActiveId } from '../lib/auth';
+  import { useSessionServer } from '../lib/sessionServer';
   import type { Server } from '../lib/auth';
   import { loopBadge, LOOP_TONE_COLOR, type LoopState } from '@hangar/core';
   import { LOOP_GUIDE } from '../lib/loopGuide';
@@ -15,11 +16,11 @@
     onClose: () => void;
   }
   let { open, sessionName, onClose }: Props = $props();
+  const sessionServer = useSessionServer();
 
-  // Sem prop serverId (mesmo padrao do modal de git): o chamador ja fez selectServer(serverId) antes de
-  // montar e restaura o ativo no fechar -> aqui mira SEMPRE o servidor ATIVO.
+  // Dentro do chat, o servidor da sessão; fora dele, o ativo.
   function activeServer(): Server | null {
-    return listServers().find((s) => s.id === getActiveId()) ?? null;
+    return sessionServer() ?? listServers().find((s) => s.id === getActiveId()) ?? null;
   }
 
   const FINAL = new Set(['done', 'stopped', 'exhausted', 'failed']);

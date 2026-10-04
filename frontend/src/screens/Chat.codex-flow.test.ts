@@ -34,6 +34,7 @@ vi.mock('../lib/aquecimento', () => ({
 vi.mock('../lib/ttsPlayer.svelte', () => ({ ttsPlayer: { active: false, loading: false } }));
 vi.mock('../lib/auth', () => ({
   listServers: () => [{ id: 'codex-flow', label: 'Teste', baseUrl: 'http://teste', token: 'teste' }],
+  listAllServers: () => [{ id: 'codex-flow', label: 'Teste', baseUrl: 'http://teste', token: 'teste' }],
   listOwnServers: () => [{ id: 'codex-flow', label: 'Teste', baseUrl: 'http://teste', token: 'teste' }],
   getActiveId: () => 'codex-flow',
   getBaseUrl: () => 'http://teste',
@@ -114,7 +115,7 @@ async function enfileirar(text: string) {
   await flush();
   document.querySelector<HTMLButtonElement>('button.send-btn')!.click();
   await flush();
-  expect(api.sendInput).toHaveBeenLastCalledWith('codex-flow', text);
+  expect(api.sendInput).toHaveBeenLastCalledWith('codex-flow', text, expect.objectContaining({ id: 'codex-flow' }));
   expect(textarea.value).toBe('');
   expect(bolhas(text)).toHaveLength(1);
   await emit('message', { id: 'queued-fila', kind: 'user_msg', text, ts: '2026-09-07T12:00:00Z' });
@@ -144,7 +145,7 @@ it('digita, enfileira, orienta e reconcilia a mensagem definitiva sem duplicaç�
   await montar();
   await enfileirar('Preserve a configuração atual');
   orientar()!.click(); await flush();
-  expect(api.steerSession).toHaveBeenLastCalledWith('codex-flow');
+  expect(api.steerSession).toHaveBeenLastCalledWith('codex-flow', undefined, expect.objectContaining({ id: 'codex-flow' }));
   await emit('message', { id: 'mensagem-real', kind: 'user_msg', text: 'Preserve a configuração atual', ts: '2026-09-07T12:00:01Z' });
   expect(bolhas('Preserve a configuração atual')).toHaveLength(1);
   expect(orientar()).toBeNull();
@@ -250,7 +251,7 @@ it('envia respostas de várias perguntas pelo request_id e conserva o formulári
   expect(api.answerQuestions).toHaveBeenLastCalledWith('codex-flow', [
     expect.objectContaining({ question_id: 'destino', kind: 'option', indices: [0] }),
     expect.objectContaining({ question_id: 'nome', kind: 'text', value: 'João' }),
-  ], 0);
+  ], 0, expect.objectContaining({ id: 'codex-flow' }));
   expect(document.body.textContent).toContain('Conexão interrompida');
   expect(document.body.textContent).toContain('João');
   document.querySelector<HTMLButtonElement>('.ask-card .primary-btn')!.click(); await flush();
@@ -283,7 +284,7 @@ it('aprovar o plano envia uma única vez à sessão atual mesmo com mandar pros 
   expect(implement.disabled).toBe(false);
   // Dois cliques no mesmo quadro precisam compartilhar o envio ainda em curso.
   implement.click(); implement.click(); await flush();
-  expect(api.implementCodexPlan).toHaveBeenCalledExactlyOnceWith('codex-flow');
+  expect(api.implementCodexPlan).toHaveBeenCalledExactlyOnceWith('codex-flow', expect.objectContaining({ id: 'codex-flow' }));
   expect(api.sendInput).not.toHaveBeenCalled();
   plan.resolve();
   await flush();
@@ -449,7 +450,7 @@ it('Claude não mostra cartão sem âncora ou fora da janela da conversa', async
   await montarClaude();
 
   expect(document.querySelectorAll('.plan-preview')).toHaveLength(0);
-  expect(api.getSessionPlanPreview).toHaveBeenCalledWith('codex-flow', false);
+  expect(api.getSessionPlanPreview).toHaveBeenCalledWith('codex-flow', false, expect.objectContaining({ id: 'codex-flow' }));
 
   vi.mocked(api.getSessionPlanPreview).mockResolvedValueOnce({
     name: 'plano', path: '/p/plano.md', anchor_id: null,

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy, tick } from 'svelte';
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { ctxPanel, reclamparLargura } from '../lib/ctxPanel.svelte';
   import NavBar from '../components/NavBar.svelte';
   import Spinner from '../components/Spinner.svelte';
@@ -76,7 +76,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     isTimeoutError,
     getPlan,
     getSessionPlanPreview,
-    getConfig,
+    getConfig, getConfigForServer,
     uploadUrl,
     descartarDaFila,
   } from '@hangar/core';
@@ -97,6 +97,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   } from '../lib/shortcuts.svelte';
   import { abrirConfig } from '../lib/configNav';
   import { listServers, listOwnServers, getActiveId, getBaseUrl, selectServer, isActiveInvite } from '../lib/auth';
+  import { parentSessionServerId, provideSessionServer } from '../lib/sessionServer';
   import { getIdentificador } from '../lib/peers';
   import { destinoDoRemetente } from '../lib/remetente';
   import { createActivityFolder } from '@hangar/core';
@@ -201,10 +202,12 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // ativo?": navegando pra um chat de outra máquina, o `applyRouteServer` já trocou o ativo antes
   // de este Chat desmontar, e a cauda desta sessão seria gravada sob a chave da OUTRA máquina.
   // Mesmo padrão do `filesChave` abaixo, e pelo mesmo motivo.
-  const servidorDaCauda = getActiveId() ?? '';
+  // Aninhado (sessão do par no modal), a máquina é a do chat de fora, não a do ativo do momento.
+  const servidorDaCauda = (untrack(() => nested) ? parentSessionServerId() : undefined) ?? getActiveId() ?? '';
   // Servidor DESTA sessão, fixado na entrada pelo mesmo motivo: os terminais No Hangar e as perguntas
   // são consultados por servidor, e o ativo pode mudar sob um Chat aberto por overlay.
   const chatServerId = servidorDaCauda;
+  const sessionServer = provideSessionServer(chatServerId);
 
   // Store da aba Arquivos — MESMA instância do FilesPanel (registry por identidade
   // serverId::sessionName). Quem desenha o arquivo aberto no DESKTOP é este Chat (mock 2: o
@@ -472,7 +475,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // aqui, no aparelho de quem clicou, e não na máquina do terminal.
   async function pressPlugin(site: string, key: string) {
     try {
-      const r = await pressPluginButton(sessionName, site, key);
+      const r = await pressPluginButton(sessionName, site, key, sessionServer());
       const texto = r.copied;
       if (texto) {
         // Depois do `await` o iOS já não conta o toque como gesto: o aviso vira um botão que copia
@@ -554,7 +557,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     const pedido = ++aberturaCitada;
     const geracao = histGen;
     try {
-      let resposta = await resolverCitados(sessionName, [path]);
+      let resposta = await resolverCitados(sessionName, [path], sessionServer());
       if (pedido !== aberturaCitada || geracao !== histGen) return;
       let resolvido = resposta.ok[path];
       if (!resolvido && !path.includes('/')) {
@@ -570,7 +573,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
           candidatos = caminhosCitadosPorNome(events, path);
         }
         if (candidatos.length) {
-          resposta = await resolverCitados(sessionName, candidatos);
+          resposta = await resolverCitados(sessionName, candidatos, sessionServer());
           if (pedido !== aberturaCitada || geracao !== histGen) return;
           const distintos = new Map(Object.entries(resposta.ok).map(([cru, alvo]) => [alvo.real, { cru, alvo }]));
           const encontrado = distintos.values().next().value;
@@ -601,7 +604,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   onMount(() => {
     void aoAquecer(sessionName, aquecimento.signal).then((liberado) =>
       liberado !== false && !aquecimento.signal.aborted
-        && getRunners(sessionName).then((r) => (runRunning = !!r.running)).catch(() => {}));
+        && getRunners(sessionName, sessionServer()).then((r) => (runRunning = !!r.running)).catch(() => {}));
   });
   let previewOpen = $state(false);
   let activityOpen = $state(false);
@@ -629,7 +632,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
 
   async function implementCodexPlan(plan: string) {
     if (currentState !== 'idle' || plan !== codexPlan) throw new Error(m.chat_plan_indisponivel());
-    await requestCodexPlanImplementation(sessionName);
+    await requestCodexPlanImplementation(sessionName, sessionServer());
   }
   // Pergunta nativa sintetizada do transcript (Pi: tool `question`; Kimi: `AskUserQuestion`): qual
   // tool_use_id abriu o sheet e qual o usuario ja DISPENSOU sem responder (fechou o sheet -> nao
@@ -721,7 +724,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     // Painel docado no desktop: este GET (105 KB de markdown) saía junto do histórico. Espera a
     // conversa pintar, como os outros aquecimentos.
     aoAquecer(sessionName, aquecimento.signal).then((liberado) =>
-      liberado !== false && !aquecimento.signal.aborted ? getPlan(sessionName) : null)
+      liberado !== false && !aquecimento.signal.aborted ? getPlan(sessionName, sessionServer()) : null)
       .then((d) => {
         if (aquecimento.signal.aborted || planKey !== key) return;
         planDetail = d;
@@ -754,7 +757,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   $effect(() => {
     const sn = sessionName;
     void aoAquecer(sn, aquecimento.signal).then((liberado) => {
-      if (liberado !== false && !aquecimento.signal.aborted) prefetchOrq(sn);
+      if (liberado !== false && !aquecimento.signal.aborted) prefetchOrq(sn, sessionServer());
     });
   });
   // Membro do grupo aberto no modal (null = fechado). É string, não lista, de propósito: um modal
@@ -790,7 +793,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // criar, aberta pra CONTINUAR esta conversa; o cwd sai da linha da sessão na lista agregada.
   let bastaoAlvo = $state<{ name: string; cwd: string; serverId: string } | null>(null);
   function passarBastaoDaqui() {
-    bastaoAlvo = { name: sessionName, cwd: planSession?.cwd ?? '', serverId: getActiveId() ?? '' };
+    bastaoAlvo = { name: sessionName, cwd: planSession?.cwd ?? '', serverId: chatServerId };
     createOpen = true;
   }
 
@@ -812,7 +815,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // sheet nao conhece o Composer, e o Composer so sabe lidar com File.
   async function usarAnexoNoDitado(f: UploadFile) {
     try {
-      const res = await fetch(uploadUrl(sessionName, f.filename));
+      const res = await fetch(uploadUrl(sessionName, f.filename, false, sessionServer()));
       if (!res.ok) throw new Error(`${res.status}`);
       const blob = await res.blob();
       composerRef?.ditarArquivo(new File([blob], f.filename, { type: blob.type }));
@@ -827,7 +830,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   async function loadSessionsForNav() {
     if (desktop || navInFlight) return;
     navInFlight = true;
-    try { polledSessions = await getSessions(); } catch { /* sem lista -> setas/pilula viram no-op */ }
+    try { polledSessions = await getSessions(sessionServer()); } catch { /* sem lista -> setas/pilula viram no-op */ }
     finally { navInFlight = false; }
   }
   onMount(() => {
@@ -980,7 +983,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // Orquestrador sem LLM: não recebe texto nem interrupção. O rodapé leva ao árbitro atual.
   const orqSession = $derived(isOrq({ provider: sessionProvider }));
   const orqArbiter = $derived(allSessions.find((s) => s.name === sessionName)?.orq_arbiter ?? null);
-  const orqServer = $derived(listServers().find((s) => s.id === getActiveId()));
+  const orqServer = $derived(listServers().find((s) => s.id === chatServerId));
   // Claude sem terminal: não há pane, então nada de painel de terminal, espelho ou shell.
   // O stream da sessão diz primeiro: no celular a lista é a do servidor ativo e chega por poll.
   // Com stream, só ele: depois de trocar de modo a lista ainda diz o modo antigo por um poll.
@@ -999,7 +1002,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     if (trocandoModo || currentState !== 'idle') return;
     trocandoModo = true;
     try {
-      await setModoExecucao(sessionName, sessionHeadless);
+      await setModoExecucao(sessionName, sessionHeadless, sessionServer());
       await loadSessionsForNav();
     } catch (err) {
       mostrarAviso(err);
@@ -1050,7 +1053,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     if (recarregando) return;
     recarregando = true;
     try {
-      await recarregarSessao(sessionName);
+      await recarregarSessao(sessionName, sessionServer());
     } catch (err) {
       mostrarAviso(err);
     } finally {
@@ -1061,7 +1064,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     if (recarregando || currentState !== 'idle') return;
     recarregando = true;
     try {
-      await recarregarSessao(sessionName);
+      await recarregarSessao(sessionName, sessionServer());
       esquecerDispensaRecarga();   // recarregou: não há mais o que dispensar
     } catch (err) {
       mostrarAviso(err);
@@ -1120,7 +1123,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     if (!alvo || trocandoConta || currentState !== 'idle') return;
     trocandoConta = true;
     try {
-      await setSessionAccount(sessionName, alvo.path);
+      await setSessionAccount(sessionName, alvo.path, sessionServer());
       await loadSessionsForNav();
     } catch (err) {
       mostrarAviso(err);
@@ -1138,7 +1141,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   let claudePlanGeneration = 0;
   $effect(() => {
     const provider = sessionProvider;
-    const identity = `${getActiveId() ?? ''}\0${sessionName}`;
+    const identity = `${chatServerId}\0${sessionName}`;
     const state = currentState;
     const retry = claudePlanDiscoveryRetry;
     if (provider !== 'claude') {
@@ -1177,7 +1180,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     const request = ++claudePlanGeneration;
     claudePlanDiscoveryLoading = true;
     claudePlanDiscoveryError = '';
-    getSessionPlanPreview(sessionName, false)
+    getSessionPlanPreview(sessionName, false, sessionServer())
       .then((value) => {
         if (request !== claudePlanGeneration) return;
         claudePlanDiscovery = value as ClaudePlanDiscovery | null;
@@ -1228,12 +1231,12 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
 
   async function implementHeadlessPlan(plan: string) {
     if (currentState !== 'idle' || plan !== headlessPlan) throw new Error(m.chat_plan_indisponivel());
-    await setPermissionMode(sessionName, stateEvent?.claude_previous_non_plan || 'acceptEdits');
+    await setPermissionMode(sessionName, stateEvent?.claude_previous_non_plan || 'acceptEdits', sessionServer());
     try {
       await handleSend(m.chat_plan_pedido(), false, true);
     } catch (err) {
       // Pedido não saiu: a sessão não pode ficar fora do modo plan sem ter implementado nada.
-      await setPermissionMode(sessionName, 'plan').catch(() => {});
+      await setPermissionMode(sessionName, 'plan', sessionServer()).catch(() => {});
       throw err;
     }
   }
@@ -1252,7 +1255,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   });
   const planControls = $derived((sessionProvider === 'claude' || planAnchorId) ? {
     eventId: planAnchorId,
-    serverId: getActiveId() ?? '',
+    serverId: chatServerId,
     provider: sessionProvider ?? 'claude',
     revision: currentState,
     desktop,
@@ -1352,7 +1355,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   let terminalCapazMobile = $state(true);
   $effect(() => {
     let vivo = true;
-    getConfig()
+    const srv = sessionServer();
+    (srv ? getConfigForServer(srv) : getConfig())
       .then((c) => {
         if (!vivo) return;
         terminalCapazMobile = c.somente_leitura.terminal_panel !== false;
@@ -1368,10 +1372,11 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     let vivo = true;
     const configMudou = (event: Event) => {
       const detail = (event as CustomEvent<{ serverId: string | null; enabled: boolean }>).detail;
-      if (detail && (detail.serverId === null || detail.serverId === getActiveId())) codexVoiceBeta = detail.enabled === true;
+      if (detail && (detail.serverId === null || detail.serverId === chatServerId)) codexVoiceBeta = detail.enabled === true;
     };
     window.addEventListener('hangar:codex-voice-config', configMudou);
-    getConfig()
+    const srvVoz = sessionServer();
+    (srvVoz ? getConfigForServer(srvVoz) : getConfig())
       .then((c) => { if (vivo) codexVoiceBeta = c.campos.codex_voice_beta?.valor === true; })
       .catch(() => {});
     return () => { vivo = false; window.removeEventListener('hangar:codex-voice-config', configMudou); };
@@ -1467,7 +1472,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     const id = askPayload?.request_id;
     if (!askPayload?.is_async || typeof id !== 'string') { closeAsk(); return; }
     closeAsk();
-    skipQuestion(sessionName, id)
+    skipQuestion(sessionName, id, sessionServer())
       .then(() => { if (askPayload?.request_id === id) askPayload = null; })
       .catch((err) => {
         if (askPayload?.request_id !== id) return;
@@ -1519,7 +1524,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
 
   // Header: breadcrumb desktop (servidor › sessao › branch) e subtítulo mobile (nome do servidor
   // sob o título — com N servidores, sessões homônimas ficavam indistinguíveis no celular).
-  const serverLabel = $derived(listServers().find((s) => s.id === getActiveId())?.label ?? '');
+  const serverLabel = $derived(listServers().find((s) => s.id === chatServerId)?.label ?? '');
   const contaChip = $derived(chipDaConta(allSessions.find((s) => s.name === sessionName)?.conta));
 
   // Chip de loop no header: dentro do chat não havia NENHUM sinal de loop ativo (só a lista tinha
@@ -1529,7 +1534,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // serverId::nome) porque o App remonta este Chat por key a cada troca de sessão — com $state
   // local, voltar pra uma sessão que tinha navegador aberto o perderia. O view nativo fica VIVO
   // escondido enquanto isso (o agente segue dirigindo via CDP).
-  const navKey = $derived(workspaceSessionKey({ serverId: getActiveId() ?? '', name: sessionName }));
+  const navKey = $derived(workspaceSessionKey({ serverId: chatServerId, name: sessionName }));
   // O navegador é uma ABA do painel de contexto (DesktopSessionContext) — "abrir" é ir pra aba
   // (abrindo o painel se recolhido); voltar pra Contexto esconde o view sem fechar, e quem fecha
   // de verdade é o × do painel. A sidebar colapsa com a aba ativa (efeito no ctxPanel).
@@ -1691,7 +1696,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     let vivo = true;
     async function contar() {
       try {
-        const lista = await (subagentesEmVoo ??= getSubagents(sessionName)
+        const lista = await (subagentesEmVoo ??= getSubagents(sessionName, sessionServer())
           .finally(() => { subagentesEmVoo = null; }));
         if (vivo) subagentesNoDisco = lista.length;
       } catch { /* offline / sessão sem transcript -> mantém o que tinha */ }
@@ -1723,7 +1728,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     let alive = true;
     async function poll() {
       try {
-        const ws = await (workflowsEmVoo ??= getWorkflows(sessionName)
+        const ws = await (workflowsEmVoo ??= getWorkflows(sessionName, sessionServer())
           .finally(() => { workflowsEmVoo = null; }));
         if (alive) workflowRunning = ws.some((w) => w.running);
       } catch { /* offline / sem run -> ignora */ }
@@ -1799,14 +1804,14 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // os `finally` calham de rodar — que hoje funciona e nao e garantia de nada.
   async function tailComRetentativa(signal: AbortSignal, g: number, etag: string | null) {
     try {
-      return await getHistoryDesde(sessionName, TAIL_FIRST, etag, signal, TAIL_TIMEOUT_1);
+      return await getHistoryDesde(sessionName, TAIL_FIRST, etag, signal, TAIL_TIMEOUT_1, sessionServer());
     } catch (err) {
       // So o TETO justifica repetir. Cancelamento (troca de sessao, /clear) e erro do servidor
       // (404/500) sobem: repetir os dois seria pedir de novo o que ja falhou de verdade.
       if (!isTimeoutError(err)) throw err;
       if (g === histGen) histRetentando = true;
       try {
-        return await getHistoryDesde(sessionName, TAIL_FIRST, etag, signal, TAIL_TIMEOUT_2);
+        return await getHistoryDesde(sessionName, TAIL_FIRST, etag, signal, TAIL_TIMEOUT_2, sessionServer());
       } finally {
         if (g === histGen) histRetentando = false;
       }
@@ -1943,7 +1948,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     // (que não desabilita durante a busca) disparavam dois downloads do arquivo inteiro.
     if (buscandoAntigos) return cargaAntigos;
     buscandoAntigos = true;
-    cargaAntigos = getHistory(sessionName, undefined, histAbort?.signal)
+    cargaAntigos = getHistory(sessionName, undefined, histAbort?.signal, undefined, sessionServer())
       .then((full) => {
         if (g !== histGen || !alive) return;   // resposta velha/pós-destroy: NÃO aplica
         if (!hasSeam(full, events)) {
@@ -1999,7 +2004,9 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     // Codex junto: sem thread o /events 404a igual, e o EventSource fecha em CLOSED — a faixa
     // "o servidor recusou" aparecia sobre uma sessao que so ainda nao comecou.
     if (kimiPreNascimento || codexPreThread) return;
-    const destino = getBaseUrl();
+    // Servidor que saiu da lista: não há para onde abrir o stream.
+    if (sessionServer()?.removed) { sseRecusado = true; return; }
+    const destino = sessionServer()?.baseUrl ?? getBaseUrl();
     const inicio = Date.now();
     const req = diag.novoReq();
     let primeiroQuadro = true;
@@ -2046,7 +2053,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     if (es) { es.close(); es = null; }
     sseRecusado = false;
 
-    es = openEventStream(sessionName, lastEventId, req);
+    es = openEventStream(sessionName, lastEventId, req, sessionServer());
     // Ciclo de vida da conexão no diário de uso. É o que faltava nos relatos de "a conversa parou"
     // e "as sessões sumiram": sem isto não dá pra distinguir queda de rede, reconexão em laço e
     // conexão viva com a lista congelada, e a análise vira chute.
@@ -2394,11 +2401,12 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   async function avaliarRecusa() {
     let recusa: boolean;
     try {
-      const rows = await getSessions();
+      const rows = await getSessions(sessionServer());
       recusa = !rows.some((s) => s.name === sessionName) || ++sseRecusasSeguidas >= SSE_RECUSAS_MAX;
     } catch (e) {
       const status = (e as Error & { status?: number }).status;
-      recusa = status === 401 || status === 403;
+      // 410: o servidor da sessão saiu da lista.
+      recusa = status === 401 || status === 403 || status === 410;
     }
     if (!alive || es || currentState === 'dead') return;
     if (recusa) sseRecusado = true;
@@ -2432,7 +2440,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     try {
       // So a CAUDA: o buraco do background e no FIM da conversa, e o historico antigo ja esta em
       // memoria — re-baixar o jsonl inteiro a cada volta pro foreground era o custo que sobrava.
-      const fresh = await getHistory(sessionName, TAIL_FIRST, signal);
+      const fresh = await getHistory(sessionName, TAIL_FIRST, signal, undefined, sessionServer());
       if (g !== histGen || !alive) return;   // resposta velha/pos-destroy: NAO sobrescreve nem conecta
       const gap = !hasSeam(fresh, events);
       events = mergeHistoryWithLive(fresh, events, {
@@ -2565,7 +2573,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // user_msg real só é gravado no wire no FIM do turno (medido: ~34s depois do ctrl-s) e até lá
   // nada mais derrubaria o chip: ele ficava aceso e clicável o turno inteiro sobre um no-op.
   async function steerAgora(): Promise<boolean> {
-    const r = await steerSession(sessionName);
+    const r = await steerSession(sessionName, undefined, sessionServer());
     if (r.queued_ids?.length) {
       const sent = new Set(r.queued_ids);
       events = events.map(e => sent.has(e.id) ? { ...e, queued_delivered: true } : e);
@@ -2591,7 +2599,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   async function handleSend(text: string, steer = false, onlyThisSession = false) {
     if (abrirBtwSe(text)) return;
     if (isCodex && /^\/compact(?:\s|$)/.test(text.trim())) {
-      await sendInput(sessionName, text);
+      await sendInput(sessionName, text, sessionServer());
       return;
     }
     // Eco imediato SEMPRE (não só em 'working'): o transcript só grava a msg quando o TURNO dela
@@ -2602,12 +2610,12 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     pending = [...pending, { id: pendingId, text }];
     try {
       if (steer && (sessionProvider === 'codex' || sessionHeadless)) {
-        await steerSession(sessionName, text);
+        await steerSession(sessionName, text, sessionServer());
       } else if (!onlyThisSession && sendToPair && pairPeers?.length && !text.trimStart().startsWith('/')) {
         // Slash-command nunca em broadcast (o backend rejeita; mesmo racional do /api/broadcast).
         // /broadcast responde 200 com resultado POR sessão — falha individual (pane de membro
         // morto) não rejeita a promise; sem conferir, o envio pro grupo falhava calado.
-        const results = await broadcast([sessionName, ...pairPeers], text);
+        const results = await broadcast([sessionName, ...pairPeers], text, sessionServer());
         const failed = Object.entries(results).filter(([, r]) => !r.ok);
         if (failed.length) {
           const ok = Object.keys(results).filter((n) => results[n].ok);
@@ -2617,7 +2625,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
           );
         }
       } else {
-        await sendInput(sessionName, text);
+        await sendInput(sessionName, text, sessionServer());
       }
     } catch (err) {
       console.error('sendInput error:', err);
@@ -2734,7 +2742,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   async function handleCommand(cmd: string) {
     if (abrirBtwSe(cmd)) return;
     try {
-      await sendInput(sessionName, cmd);
+      await sendInput(sessionName, cmd, sessionServer());
     } catch (err) {
       console.error('sendInput (command) error:', err);
     }
@@ -2774,8 +2782,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
 
   // ── Atalhos configuráveis da fileira (lib/shortcuts.svelte.ts) ─────────────
   // Globais e depois os do projeto da sessão (carregando ou com erro, ficam só os globais).
-  const projectShortcuts = $derived(projectShortcutsFor(sessionName));
-  const projectShortcutsErr = $derived(projectShortcutsError(sessionName));
+  const projectShortcuts = $derived(projectShortcutsFor(sessionName, sessionServer()));
+  const projectShortcutsErr = $derived(projectShortcutsError(sessionName, sessionServer()));
   const shortcuts = $derived(mergeProjectShortcuts(shortcutsFor(), projectShortcuts?.items));
   // Só os customizados: no celular os internos já têm os botões/entradas de sempre — duplicar
   // Terminal/Anexos dentro do "⋯" seria a mesma ação com dois nomes.
@@ -2787,7 +2795,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   $effect(() => {
     // O erro fica no store e aparece numa linha onde moram os blocos. Convite não tem a rota.
     if (isActiveInvite()) return;
-    loadProjectShortcuts(sessionName).catch((err) => console.error('project shortcuts load error:', err));
+    loadProjectShortcuts(sessionName, sessionServer()).catch((err) => console.error('project shortcuts load error:', err));
   });
   // Atalho com a flag "confirmar antes": segura aqui e o ConfirmSheet decide.
   let pendingShortcut = $state<ShortcutSendText | ShortcutShell | null>(null);
@@ -2816,7 +2824,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     if (asking?.alive && asking.question) { openQuestion(chatServerId, sessionName, asking.id); return; }
     const key = atalhoKey;
     try {
-      const r = await runShortcutShell(sessionName, s.command, s.label, s.pasta, { key: shortcutKey, ask: answersInApp(s) });
+      const r = await runShortcutShell(sessionName, s.command, s.label, s.pasta, { key: shortcutKey, ask: answersInApp(s) }, sessionServer());
       if (r.terminal) focusShortcutTerminal(key, r.terminal.id);
     } finally {
       const lista = await refreshShortcutTerminals(key).catch(() => null);
@@ -2871,7 +2879,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     let r;
     try {
       r = await runShortcutShell(sessionName, s.command, s.label, s.pasta,
-        { key: shortcutKey, hangar: true, home: hangarHome(s), ask: answersInApp(s) });
+        { key: shortcutKey, hangar: true, home: hangarHome(s), ask: answersInApp(s) }, sessionServer());
     } catch (err) {
       if (err instanceof OutdatedServerError) throw new Error(m.hangar_servidor_desatualizado());
       throw err;
@@ -2905,7 +2913,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     // Servidor fora do ar segura a resposta até o timeout: se a pessoa já saiu desta tela, o clique
     // velho não pode trocar o servidor ativo nem navegar por cima do que ela abriu depois.
     const hashDoClique = window.location.hash;
-    const destino = await destinoDoRemetente(from, listOwnServers(), getActiveId(),
+    const destino = await destinoDoRemetente(from, listOwnServers(), chatServerId,
       async (s) => cache.get(s.id) ?? (await getIdentificador(s)).identificador);
     if (window.location.hash !== hashDoClique) return;
     if (!destino) { mostrarAviso(m.user_remetente_fora_do_aparelho({ n: from })); return; }
@@ -2926,7 +2934,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     clearTimeout(avisoErrTimer);
     avisoErr = '';
     try {
-      await selectOption(sessionName, option);
+      await selectOption(sessionName, option, sessionServer());
     } catch (err) {
       console.error('selectOption error:', err);
       mostrarAviso(err);
@@ -2943,7 +2951,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     clearTimeout(avisoErrTimer);
     avisoErr = '';
     try {
-      await submitSelected(sessionName);
+      await submitSelected(sessionName, sessionServer());
     } catch (err) {
       console.error('submitSelected error:', err);
       mostrarAviso(err);
@@ -2957,7 +2965,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // próximo reload, que é o "fantasma" que ela existe pra evitar.
   async function descartarFila(entryId: string) {
     try {
-      await descartarDaFila(sessionName, entryId);
+      await descartarDaFila(sessionName, entryId, sessionServer());
     } catch (err) {
       mostrarAviso(formataErro(err));
       return;
@@ -2976,7 +2984,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       pending = pending.filter((p) => p.id !== last.id);
     }
     try {
-      await interrupt(sessionName, !!last);
+      await interrupt(sessionName, !!last, sessionServer());
     } catch (err) {
       console.error('interrupt error:', err);
     }
@@ -2987,7 +2995,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     const requestId = askPayload?.request_id;
     const native = askPayload?.provider === 'codex';
     try {
-      const r = await answerQuestions(sessionName, answers, requestId);
+      const r = await answerQuestions(sessionName, answers, requestId, sessionServer());
       if (native && askPayload?.request_id !== requestId) return;
       // Pergunta do Pi respondida com sucesso: o tool_result ainda demora ~1s pra aterrissar no
       // transcript — sem marcar a dispensa aqui, o sheet REABRIA nessa janela (pergunta ainda
@@ -3074,7 +3082,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       {pairPeers}
       {serverLabel}
       provider={sessionProvider}
-      serverId={getActiveId() ?? ''}
+      serverId={chatServerId}
       {sessionName}
       {events} {histGap} cwd={planSession?.cwd ?? null}
       onOpenTerminal={botaoTerminal ? abrirTerminalReal : undefined}
@@ -3536,7 +3544,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
              onRecarregar={recarregavel ? recarregar : undefined}
              recarregarBloqueado={currentState !== 'idle' || recarregando}
              {activityRunning} {activityBadge} />
-  <ShareSessionSheet open={shareOpen} name={sessionName} serverId={getActiveId() ?? ''} onClose={() => (shareOpen = false)} />
+  <ShareSessionSheet open={shareOpen} name={sessionName} serverId={chatServerId} onClose={() => (shareOpen = false)} />
   <ConfirmSheet open={confirmaModo}
                 title={sessionHeadless ? m.modo_abrir_no_terminal() : m.modo_continuar_sem_terminal()}
                 message={sessionHeadless ? m.modo_confirmar_terminal_msg() : m.modo_confirmar_sem_terminal_msg()}

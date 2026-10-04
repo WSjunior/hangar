@@ -8,6 +8,7 @@
   import EscopoChip from './settings/EscopoChip.svelte';
   import { providerName } from '@hangar/core';
   import { getOrqPolitica, putOrqConta } from '@hangar/core';
+  import { useSessionServer } from '../lib/sessionServer';
   import { iniciais, politicaDe, type ContaInventario, type ModeloInventario, type OrqPolitica, type Papel, type Provider } from '@hangar/core';
 
   interface Props {
@@ -18,6 +19,8 @@
     onSalvo?: (p: OrqPolitica) => void;
   }
   let { desktop, papeis = [], onSalvo = undefined }: Props = $props();
+  // Dentro do chat, a máquina da sessão; nas Configurações, o ativo.
+  const sessionServer = useSessionServer();
 
   const PROVIDERS: Provider[] = ['claude', 'codex', 'pi', 'kimi', 'omp'];
 
@@ -56,7 +59,7 @@
   export async function recarregar() {
     carregando = true; erro = ''; conflito = false;
     try {
-      dados = await getOrqPolitica();
+      dados = await getOrqPolitica(sessionServer());
       if (sel) carregarForm();
     } catch (e) {
       erro = (e as Error).message;
@@ -102,7 +105,7 @@
     if (!dados) return;
     salvando = true; erro = ''; aviso = ''; conflito = false;
     try {
-      const r = await putOrqConta(i.conta, { provider: i.provider, apelido: i.apelido, mtime: dados.mtime, ...v });
+      const r = await putOrqConta(i.conta, { provider: i.provider, apelido: i.apelido, mtime: dados.mtime, ...v }, sessionServer());
       const pol2 = dados.politica.filter((c) => !(c.provider === i.provider && c.conta === i.conta));
       if (v.ligada) pol2.push({ conta: i.conta, provider: i.provider, apelido: i.apelido, modelos: v.modelos, trocar: v.trocar });
       dados = { ...dados, mtime: r.mtime, politica: pol2 };

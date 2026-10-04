@@ -59,9 +59,11 @@ export default function ActivitySheet() {
   const genAgent = useRef(0);
 
   const fetchAll = useCallback(async () => {
+    // Sem o servidor da rota (lista ainda carregando ou máquina removida) não pergunta ao ativo.
+    if (!server) return;
     setWfLoading(true);
     try {
-      const w = await getWorkflows(name);
+      const w = await getWorkflows(name, server);
       setWorkflows(w);
     } catch {
       // workflow sem erro visível separado; segue vazio
@@ -69,13 +71,13 @@ export default function ActivitySheet() {
       setWfLoading(false);
     }
     try {
-      const s = await getSubagents(name);
+      const s = await getSubagents(name, server);
       setSubs(s);
       setSubError('');
     } catch {
       setSubError(m.atividade_erro_subagentes());
     }
-  }, [name]);
+  }, [name, server]);
 
   useEffect(() => {
     setLevel('list');
@@ -128,7 +130,7 @@ export default function ActivitySheet() {
     setWfLoading(true);
     setWfError('');
     try {
-      const d = await getWorkflow(name, rid);
+      const d = await getWorkflow(name, rid, server);
       if (g !== genWf.current) return;
       setDetail(d);
     } catch {
@@ -149,7 +151,7 @@ export default function ActivitySheet() {
     setAgentLoading(true);
     setAgentError('');
     try {
-      const d = await getWorkflowAgent(name, runId, agentId);
+      const d = await getWorkflowAgent(name, runId, agentId, server);
       if (g !== genAgent.current) return;
       setAgentDetail(d);
     } catch {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   import * as m from '../paraglide/messages';
   import { getSessionPlanPreview, planTitle, type SessionPlanPreview } from '@hangar/core';
   import { renderMarkdown } from '../lib/markdown';
@@ -29,6 +30,7 @@
     discovery = undefined, discoveryLoading = false, discoveryError = '', onRetryDiscovery,
     aprovacaoPendente = false, caminho = null,
   }: Props = $props();
+  const sessionServer = useSessionServer();
   let metadata = $state<ClaudePlanPreview | null>(null);
   let modalMetadata = $state<ClaudePlanPreview | null>(null);
   let open = $state(false);
@@ -88,7 +90,7 @@
     discoveryErrorInterno = '';
     discoveryLoadingInterno = true;
     const request = ++generation;
-    getSessionPlanPreview(name).then((value) => {
+    getSessionPlanPreview(name, true, sessionServer()).then((value) => {
       if (request !== generation) return;
       metadata = value as ClaudePlanPreview | null;
       discoveryLoadingInterno = false;
@@ -112,7 +114,7 @@
       // arquivo): nada a buscar no servidor.
       if (codexPlan !== null && !metadataAtual) markdown = codexPlan;
       else {
-        const result = await getSessionPlanPreview(sessionName) as ClaudePlanPreview | null;
+        const result = await getSessionPlanPreview(sessionName, true, sessionServer()) as ClaudePlanPreview | null;
         if (request !== generation) return;
         modalMetadata = result;
         if (!result) error = m.chat_plan_ausente();

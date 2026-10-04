@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   import { getWorkflows, getWorkflow, getWorkflowAgent, getSubagents, getSubagent } from '@hangar/core';
   import * as m from '../paraglide/messages';
   import ModalDialog from './ModalDialog.svelte';
@@ -38,6 +39,7 @@
     abrirAgente?: { prompt?: string; titulo: string } | null;
   }
   let { open, activity, sessionName, onClose, showPlan = false, session = null, planDetail = null, planLoading = false, planError = false, processos = [], docado = false, abrirAgente = null }: Props = $props();
+  const sessionServer = useSessionServer();
 
   // Pedido de fora ("abre neste agente"): dispara UMA vez por pedido. Sem a marca, voltar pra lista
   // com o `‹` seria desfeito no próximo ciclo do efeito e o painel ficaria preso no agente.
@@ -69,9 +71,9 @@
       subDetail = null;
       return;
     }
-    getWorkflows(sessionName).then((w) => (workflows = w)).catch(() => {});
+    getWorkflows(sessionName, sessionServer()).then((w) => (workflows = w)).catch(() => {});
     subError = '';
-    getSubagents(sessionName)
+    getSubagents(sessionName, sessionServer())
       .then((s) => (subs = s))
       .catch(() => (subError = m.atividade_erro_subagentes()));
   });
@@ -83,7 +85,7 @@
     detail = null;
     loading = true;
     try {
-      detail = await getWorkflow(sessionName, rid);
+      detail = await getWorkflow(sessionName, rid, sessionServer());
     } catch {
       detail = null;
     } finally {
@@ -98,7 +100,7 @@
     agentDetail = null;
     loading = true;
     try {
-      agentDetail = await getWorkflowAgent(sessionName, runId, agentId);
+      agentDetail = await getWorkflowAgent(sessionName, runId, agentId, sessionServer());
     } catch {
       agentDetail = null;
     } finally {
@@ -222,7 +224,7 @@
   async function openSubagent(prompt: string | undefined, title: string) {
     if (subs.length === 0) {
       try {
-        subs = await getSubagents(sessionName);
+        subs = await getSubagents(sessionName, sessionServer());
         subError = '';
       } catch {
         subError = m.atividade_erro_subagentes();
@@ -262,7 +264,7 @@
     const g = ++geracaoSub;
     const tick = async () => {
       try {
-        const d = await getSubagent(sessionName, alvo.agentId, 200);
+        const d = await getSubagent(sessionName, alvo.agentId, 200, sessionServer());
         if (g !== geracaoSub) return;
         subDetail = d;
         subFails = 0;

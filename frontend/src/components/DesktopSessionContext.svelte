@@ -10,6 +10,7 @@
 </script>
 
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   import { ctxPanel, alternarCtxPanel, alternarColunaGit, arrastarLargura, salvarLargura } from '../lib/ctxPanel.svelte';
   import { navegadorPanel, arrastarNav, salvarNav } from '../lib/navegadorPanel.svelte';
   import { workspaceSessionKey } from '../lib/workspaceCommands';
@@ -166,6 +167,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
     session = null, planDetail = null, planLoading = false, planError = false,
     toggleExterno = false,
   }: Props = $props();
+  const sessionServer = useSessionServer();
 
   // Só o que dá pra renderizar: interno cujo handler o Chat não passou (headless sem terminal,
   // por exemplo) sai da lista — a config diz a ordem, o gate diz a existência.
@@ -359,7 +361,7 @@ import GroupGlyph from './icons/GroupGlyph.svelte';
   // QUAIS arquivos mudaram, nao so quantos: as tres maiores mudancas, direto no Contexto. A lista
   // inteira continua a um clique (o painel de git). A chave carrega os contadores do git que a
   // listagem ja traz — mexeu no repo, muda a chave, recarrega; parado, nenhuma chamada.
-  const arqMudados = criarArquivosMudados();
+  const arqMudados = criarArquivosMudados(3, sessionServer);
   $effect(() => {
     const chave = sessionName && status?.repo && session?.git_dirty
       ? `${sessionName}:${session.git_dirty}:${session.git_added ?? 0}:${session.git_removed ?? 0}`

@@ -38,15 +38,15 @@ export const clienteQuery = new QueryClient({
 // o `serverIdentidade` de ContasSettings e a época do `_catCache` já evitam nos seus caminhos.
 const idAtivo = () => getActiveId() ?? '-';
 
-export const orqPolitica = () => queryOptions({
-  queryKey: ['orq', 'politica', idAtivo()],
-  queryFn: (): Promise<OrqPolitica> => getOrqPolitica(),
+export const orqPolitica = (server?: Server) => queryOptions({
+  queryKey: ['orq', 'politica', server?.id ?? idAtivo()],
+  queryFn: (): Promise<OrqPolitica> => getOrqPolitica(server),
   staleTime: 60_000,
 });
 
-export const orqGrupo = (name: string) => queryOptions({
-  queryKey: ['orq', 'grupo', idAtivo(), name],
-  queryFn: (): Promise<OrqGrupo> => getOrqGrupo(name),
+export const orqGrupo = (name: string, server?: Server) => queryOptions({
+  queryKey: ['orq', 'grupo', server?.id ?? idAtivo(), name],
+  queryFn: (): Promise<OrqGrupo> => getOrqGrupo(name, server),
   staleTime: 30_000,
 });
 
@@ -120,9 +120,9 @@ export const arquivo = () => queryOptions({
  * botão já achar o dado pronto (mesmo papel do prefetch de `getModelOptions` no Composer).
  * `prefetchQuery` respeita o staleTime e engole o erro: aquecer é otimização, nunca falha visível.
  */
-export function prefetchOrq(name: string): void {
-  void clienteQuery.prefetchQuery(orqPolitica());
-  void clienteQuery.prefetchQuery(orqGrupo(name));
+export function prefetchOrq(name: string, server?: Server): void {
+  void clienteQuery.prefetchQuery(orqPolitica(server));
+  void clienteQuery.prefetchQuery(orqGrupo(name, server));
 }
 
 /**

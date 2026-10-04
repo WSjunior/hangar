@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   // Seletor de modelo do Claude ancorado na pill do composer — irmao do PiModelPopover, mesma
   // referencia (opencode): caixa compacta sobre a pill, busca quando a lista e longa, tique no
   // atual. O esforco saiu daqui: virou pill propria (ClaudeEffortPopover).
@@ -42,6 +43,7 @@
     onApply, onApplied, onFail, onClose,
     permCurrent = null, onOpenPermission,
   }: Props = $props();
+  const sessionServer = useSessionServer();
 
   const MAX_ROWS = 40;   // teto de linhas desenhadas: 269 botoes travariam o celular
 
@@ -92,7 +94,7 @@
     err = null;
     loading = true;
     try {
-      const res = await getModelOptions(sessionName);
+      const res = await getModelOptions(sessionName, sessionServer());
       if (minha !== carga) return;
       kind = res.kind;
       models = res.models;
@@ -156,7 +158,7 @@
     err = null;
     try {
       if (kind === 'engine') {
-        const res = await setEngineModel(sessionName, { model: alvo.id, effort: currentEffort ?? undefined });
+        const res = await setEngineModel(sessionName, { model: alvo.id, effort: currentEffort ?? undefined }, sessionServer());
         if (res.effort_error) {
           // O modelo pegou e o esforco nao: dizer "tudo certo" seria reportar sucesso sobre algo
           // que ficou pela metade.

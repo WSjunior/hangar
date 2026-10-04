@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../lib/sessionServer';
   import { computeEditDiff, extractEdits, extractFilePath, pseudoCaminhoPorConteudo, type ChatEvent } from '@hangar/core';
   import * as m from '../paraglide/messages';
   import { parseFilePaths, summarizeToolInput, summarizeToolResult, toolPhase, toolVerbo } from '@hangar/core';
@@ -37,6 +38,7 @@
   }
   let { event, result = null, sessionName, animate = true, soDetalhe = false, emGrupo = false, ultimo = false,
         escrevendo = false, onAbrirAgente = undefined }: Props = $props();
+  const sessionServer = useSessionServer();
 
   // Cartão de subagente COM destino: o clique abre a conversa dele. Sem `onAbrirAgente` (celular,
   // ou qualquer outra ferramenta) nada muda — o cartão expande como sempre.
@@ -199,7 +201,7 @@
     const cmd = comandoInteiro;
     if (!cmd || !expanded || phase !== 'pending') return;
     let vivo = true;
-    const parar = pollSequential(() => getBashOutput(sessionName, cmd).then((t) => { if (vivo) saidaViva = t; }), 2000);
+    const parar = pollSequential(() => getBashOutput(sessionName, cmd, sessionServer()).then((t) => { if (vivo) saidaViva = t; }), 2000);
     return () => { vivo = false; parar(); };
   });
   $effect(() => {
@@ -231,7 +233,7 @@
     const id = event.tool_use_id;
     if (!ehMcp || !expanded || !id) return;
     let vivo = true;
-    const ler = () => getToolProgress(sessionName, id).then((e) => { if (vivo) etapas = e; });
+    const ler = () => getToolProgress(sessionName, id, sessionServer()).then((e) => { if (vivo) etapas = e; });
     if (phase !== 'pending') {
       void ler().catch(() => {});
       return () => { vivo = false; };

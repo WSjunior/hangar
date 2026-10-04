@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { useSessionServer } from '../../lib/sessionServer';
   import * as m from '../../paraglide/messages';
   // Metade de baixo do que era o CommitDetail: os arquivos do commit. SEM max-height proprio —
   // quem limita altura e o empilhado da aba.
@@ -11,6 +12,7 @@
     onMenu?: (c: GitCommit) => void;   // opcional: reusos sem menu omitem (idem CommitList)
   }
   let { commit, sessionName, onOpenFile, onMenu }: Props = $props();
+  const sessionServer = useSessionServer();
 
   let files = $state<ChangedFile[]>([]);
   let falhou = $state(false);
@@ -24,7 +26,7 @@
     const minha = ++vez;
     files = [];
     falhou = false;
-    getCommitFiles(sessionName, h)
+    getCommitFiles(sessionName, h, sessionServer())
       .then((r) => { if (minha === vez) files = r.files; })
       .catch(() => { if (minha === vez) falhou = true; });
   });

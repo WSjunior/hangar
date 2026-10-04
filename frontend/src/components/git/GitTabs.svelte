@@ -46,7 +46,7 @@
   let filesStore = $state<FilesStore | null>(null);
   $effect(() => {
     if (filesInContext) return;
-    const chave = `${getActiveId() ?? ''}::${git.sessionName}`;
+    const chave = `${git.server?.()?.id ?? getActiveId() ?? ''}::${git.sessionName}`;
     const s = filesStores.retain(chave, git.sessionName);
     filesStore = s;
     return () => filesStores.release(chave);
@@ -223,7 +223,7 @@
         {:else}
           <FilesPanel
             sessionName={git.sessionName}
-            serverId={getActiveId() ?? ''}
+            serverId={git.server?.()?.id ?? getActiveId() ?? ''}
             desktop={false}
             {events} {histGap} {cwd}
           />
