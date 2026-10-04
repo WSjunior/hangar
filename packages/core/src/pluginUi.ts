@@ -103,3 +103,48 @@ export function inkColor(value: unknown): string | null {
 export function textOf(children: PluginNode[] | undefined): string {
   return (children ?? []).map((c) => (typeof c === 'string' || typeof c === 'number' ? String(c) : '')).join('');
 }
+
+/** Site da faixa acima do prompt, como o engine chama (`requestId` do `AbovePrompt`). */
+export const BAND_SITE = 'above-prompt';
+/** Pedido de fechar um painel: clica no ✕ que o engine desenha no quadro dele. */
+export const PANE_CLOSE_KEY = '__close__';
+
+/** Painel que um mod abriu e o terminal desenhou; `placement` é onde o terminal o pôs. */
+export interface PluginPane {
+  id: string;
+  title: string;
+  placement: 'dock' | 'inline';
+  columns: number | null;
+  tree: PluginNode;
+}
+
+export interface PluginSurfaces {
+  above: PluginNode;
+  panes: PluginPane[];
+}
+
+/** O dado do SSE `plugin_ui`, tolerante: o que não for painel com id fica de fora. */
+export function parsePluginUi(data: unknown): PluginSurfaces {
+  const d = (data && typeof data === 'object' ? data : {}) as { above?: PluginNode; panes?: unknown };
+  const panes = Array.isArray(d.panes) ? d.panes : [];
+  return {
+    above: d.above ?? null,
+    panes: panes.flatMap((p): PluginPane[] => {
+      const o = (p && typeof p === 'object' ? p : {}) as Record<string, unknown>;
+      if (typeof o.id !== 'string' || !o.id) return [];
+      return [{
+        id: o.id,
+        title: typeof o.title === 'string' && o.title ? o.title : o.id,
+        placement: o.placement === 'dock' ? 'dock' : 'inline',
+        columns: typeof o.columns === 'number' ? o.columns : null,
+        tree: (o.tree ?? null) as PluginNode,
+      }];
+    }),
+  };
+}
+
+/** A chave de um botão de mod, que é o que o clique manda ao backend. */
+export function buttonKey(el: PluginElement): string | null {
+  const key = el.props?.key;
+  return el.type === 'Button' && typeof key === 'string' && key ? key : null;
+}

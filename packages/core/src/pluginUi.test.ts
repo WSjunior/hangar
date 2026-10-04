@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { decodeRaster, inkColor, isEmptyBand, textOf } from './pluginUi';
+import { buttonKey, decodeRaster, inkColor, isEmptyBand, parsePluginUi, textOf } from './pluginUi';
 
 function cells(words: number[]): string {
   const bytes = new Uint8Array(new Uint32Array(words).buffer);
@@ -42,4 +42,30 @@ it('inkColor recusa texto que injetaria CSS', () => {
 
 it('textOf junta só texto e número', () => {
   expect(textOf(['a', 1, { type: 'Text' }, null])).toBe('a1');
+});
+
+describe('parsePluginUi', () => {
+  it('lê faixa e painéis e descarta painel sem id', () => {
+    const s = parsePluginUi({ above: { type: 'Box' }, panes: [
+      { id: 'review-mr', title: 'Review !577', placement: 'dock', columns: 72, tree: { type: 'Box' } },
+      { title: 'sem id' },
+    ] });
+    expect(s.above).toEqual({ type: 'Box' });
+    expect(s.panes.map((p) => p.id)).toEqual(['review-mr']);
+    expect(s.panes[0].placement).toBe('dock');
+  });
+
+  it('aceita o formato antigo, só com a faixa', () => {
+    expect(parsePluginUi({ above: null })).toEqual({ above: null, panes: [] });
+  });
+
+  it('placement desconhecido vira inline', () => {
+    expect(parsePluginUi({ panes: [{ id: 'a', placement: 'x' }] }).panes[0].placement).toBe('inline');
+  });
+});
+
+it('buttonKey só para Button com key em texto', () => {
+  expect(buttonKey({ type: 'Button', props: { key: 'cp-1' } })).toBe('cp-1');
+  expect(buttonKey({ type: 'Button', props: {} })).toBeNull();
+  expect(buttonKey({ type: 'Text', props: { key: 'x' } })).toBeNull();
 });
