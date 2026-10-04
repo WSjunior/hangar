@@ -110,6 +110,23 @@ def test_locate_claude_cd_to_main_to_look_keeps_the_worktree(tmp_path):
     assert (loc.branch, loc.worktree_path, loc.git_cwd) == ("x", wt, wt)
 
 
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+def test_locate_session_born_in_worktree_stays_there(tmp_path, provider):
+    # A criação com "Nova worktree" abre a sessão já dentro dela: os sinais do transcript não a tiram.
+    main = _repo(tmp_path / "repo")
+    wt = _wt(main, tmp_path / "repo-x", "x")
+    wy = _wt(main, tmp_path / "repo-y", "y")
+    f = tmp_path / "s.jsonl"
+    if provider == "claude":
+        f.write_text(_claude_line(wt, ("Bash", {"command": f"cd {wy} && ls"})) + "\n")
+    else:
+        call = {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command",
+                "arguments": json.dumps({"cmd": f"cd {main} && ls"})}}
+        f.write_text(json.dumps(call) + "\n")
+    loc = worktrees.locate(provider, wt, str(f))
+    assert (loc.branch, loc.worktree_path, loc.git_cwd) == ("x", wt, None)
+
+
 def test_locate_claude_cd_into_another_worktree_moves(tmp_path):
     main = _repo(tmp_path / "repo")
     _wt(main, tmp_path / "repo-x", "x")

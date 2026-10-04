@@ -300,8 +300,13 @@ def removed() -> dict[str, str]:
 
 def locate(provider: str, cwd: str | None, jsonl: str | None) -> Location:
     real = None
+    # Sessão que nasceu numa worktree (opção "Nova worktree" da criação, ou o agente aberto nela)
+    # fica nela: os sinais do transcript só valem para worktree criada no meio da conversa.
+    born_in_worktree = head_info(repo_root_of(cwd))[1]
     try:
-        if jsonl and provider == "claude":
+        if born_in_worktree:
+            pass
+        elif jsonl and provider == "claude":
             real = claude_worktree(cwd, jsonl)
         elif jsonl and provider == "codex" and cwd:
             real = codex_cwd(cwd, jsonl)

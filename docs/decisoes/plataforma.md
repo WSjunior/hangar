@@ -1169,6 +1169,11 @@ principal (`cd` ou edição) tira a sessão da worktree; ela volta à principal 
 quando a worktree é apagada ou quando os sinais saem da janela lida. Chamadas anteriores à última
 troca de `cwd` não contam.
 
+**Sessão que nasceu na worktree fica nela:** quando o `cwd` de abertura já é uma worktree ligada
+(opção "Nova worktree" da criação, que abre a sessão dentro dela, ou o agente aberto nela pelo
+terminal), o `locate` não lê sinal nenhum do transcript, para Claude e Codex. A heurística só
+existe para a worktree criada no meio da conversa.
+
 **Por que a principal não conta (04/10/2026):** o agente numa worktree consulta a principal o
 tempo todo (`cd <principal> && rg …`, anotações locais). Refazendo a regra comando a comando em
 cinco transcripts reais, contar o `cd` para a principal trocava o rótulo de 7 a 13 vezes por
