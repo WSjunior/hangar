@@ -825,10 +825,13 @@ class Prova:
                 m, st2, _ = self.enviar(nome)
                 n = self.esperar_entregas([m])[m][0]
                 novas = {f.name for f in (self.home / ".claude/.hangar-queue/runtime").glob("*.json")} - chaves
+                pasta_b = self.conta_b / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(self.work))
+                na_b = any(m in f.read_text(errors="replace") for f in pasta_b.glob("*.jsonl"))
                 rel, desl, passagem, resumo = j.resumo()
-                ok = st == 200 and n == 1 and not novas and rel == desl == passagem == 0
+                ok = st == 200 and n == 1 and na_b and not novas and rel == desl == passagem == 0
                 self.registrar("55", f"troca de conta, {modo}", ok,
-                               f"troca {st} {codigo(corpo)} em {dur} s; chave nova: {'sim' if novas else 'não'}; "
+                               f"troca {st} {codigo(corpo)} em {dur} s; mensagem seguinte na conta B: {'sim' if na_b else 'não'}; "
+                               f"chave nova: {'sim' if novas else 'não'}; "
                                f"mensagem seguinte {st2}, {n} entrega(s); {resumo}")
                 self.fechar([nome])
         if not self.args.codex_credencial:
@@ -840,9 +843,11 @@ class Prova:
         if erro:
             self.registrar("55", "transferência Claude → Codex", False, erro)
             return
+        info = self.sessao(nome) or {}
         j = Janela(self)
         st, corpo, dur, _ = self.api("POST", f"/api/sessions/{nome}/conta",
-                                     {"credential_id": self.args.codex_credencial}, timeout=300)
+                                     {"credential_id": self.args.codex_credencial, "source_life": info.get("lifecycle_id"),
+                                      "source_jsonl": info.get("jsonl")}, timeout=300)
         rel, desl, passagem, resumo = j.resumo()
         self.registrar("55", "transferência Claude → Codex", st == 200 and rel == desl == passagem == 0,
                        f"transferência {st} {codigo(corpo)} em {dur} s; {resumo}")
