@@ -11,7 +11,7 @@ somente leitura. Python fornece identidade/estado/política e publicação primi
 
 ## Restrições globais
 
-- Contrato interno 9, Python e Rust juntos; não tocar custos/uso.
+- Contrato interno 10 na junção da fila v2, Python e Rust juntos; não tocar custos/uso.
 - Identificadores novos em inglês; textos/comentários em português; sem conteúdo em logs.
 - Nenhuma sessão real/serviço/instalador; tmux de teste obrigatoriamente `-L` próprio.
 - Testes focados por Task, suíte inteira Rust somente ao final; caminhos explícitos no stage.
@@ -93,7 +93,7 @@ Rodar testes de runtime terminal, fila, recibos e gateway; esperado verde.
 
 Stage explícito; mensagem `feat(server): own Claude terminal delivery and queue`.
 
-### Task 3: Transferência Python, todos os gatilhos e contrato 9
+### Task 3: Transferência Python, todos os gatilhos e contrato terminal
 
 **Arquivos:** `backend/app/runtime_coordinator.py`, `runtime_adapter.py`, `runtime_policy.py`,
 `internal_api.py`, `terminal_input.py`, `api.py`, `plugin_bridge.py`,
@@ -144,11 +144,13 @@ Job Windows real e executar o hook TypeScript com Node 24 no CI.
 O contrato do cano continua somente Linux; nenhuma suíte Python inteira é adicionada à matriz.
 **Interfaces:** entrega da branch própria à sessão `Migracao-Rust`.
 
-- [x] **Step 1: Rodar verificações finais autorizadas**
+- [ ] **Step 1: Rodar verificações finais autorizadas**
 
 Em `crates/`: `cargo test --locked --workspace` e
 `cargo check --locked --target x86_64-pc-windows-gnu -p hangar-server --tests`.
 Em `backend/`: pytest de todos os arquivos tocados num comando. Esperado tudo verde.
+As verificações anteriores passaram no contrato 9. A instrução `c195a6a4` exige juntar a fila
+v2, conservar as provas da 2D, usar protocolo 10 e repetir os checks afetados antes da publicação.
 
 - [ ] **Step 2: Revisão independente final da branch**
 

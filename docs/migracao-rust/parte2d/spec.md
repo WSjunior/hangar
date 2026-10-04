@@ -15,7 +15,11 @@ Conferir identidade depois de esperar a trava e antes de cada efeito. `/clear`, 
 modo e recriação passam pela barreira. Timeout depois de despachar nunca repete a operação;
 transferir a posse ao Python exige antes comprovar o fim dos escritores antigos.
 
-Contrato interno **9** em `RUST_SERVER_PROTOCOL` e `INTERNAL_PROTOCOL`, juntos. Porta pública,
+Contrato interno **10** na junção da fila v2 em `RUST_SERVER_PROTOCOL` e `INTERNAL_PROTOCOL`, juntos.
+A limpeza da 2B ocupou 8; a parte 3 usa 9, conforme `c195a6a4`. A fila v2 conserva `seq/next_seq`
+com as provas terminal: metadados pequenos do recibo, criação/finalização duráveis e recuperação
+antes da poda da versão antiga. Prepare já finalizado encerra a operação com zero novo efeito.
+Porta pública,
 porteiro, autenticação de convidados, portas 8766/8768 e segredo em memória ficam iguais.
 
 ## Entrega

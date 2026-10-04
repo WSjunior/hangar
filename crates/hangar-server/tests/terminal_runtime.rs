@@ -73,6 +73,29 @@ impl Fixture {
 impl Drop for Fixture {fn drop(&mut self){self.server.abort();}}
 
 #[tokio::test]
+async fn terminal_v2_prepare_confirmed_has_zero_policy_or_key() {
+    let f=Fixture::new().await;
+    let initial=queue::State::new("key",1,"session",vec![json!({"id":"root","text":"fixture-input","ts":1.0,"delivered":true,"confirmed":true})]);
+    std::fs::write(&f.target.state_path,serde_json::to_vec(&initial).unwrap()).unwrap();
+    let h=f.start();let result=h.command(f.command("root","fixture-input")).await;
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
+    assert!(f.calls.lock().unwrap().is_empty());assert!(f.io.calls.lock().unwrap().is_empty());
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn terminal_v2_sequence_uses_durable_watermark() {
+    let f=Fixture::new().await;let mut initial=queue::State::new("key",1,"session",vec![]);initial.next_seq=50_000;
+    std::fs::write(&f.target.state_path,serde_json::to_vec(&initial).unwrap()).unwrap();
+    let h=f.start();h.command(f.command("root","fixture-input")).await.unwrap();
+    let state=f.state();
+    assert!(state["operations"].as_object().unwrap().keys().filter(|id|id.starts_with("call::terminal:")||id.starts_with("terminal-policy:"))
+        .all(|id|id.rsplit(':').next().unwrap().parse::<u64>().unwrap()>=50_000));
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn terminal_runtime_maintenance_failure_publishes_problem_and_stops_uncoordinated_retry() {
     let f=Fixture::new().await;
     let (events,mut receiver)=broadcast::channel(128); let h=f.start_with_events(events);

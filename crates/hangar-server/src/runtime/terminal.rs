@@ -104,7 +104,7 @@ impl TerminalActor {
     pub fn spawn(target:TerminalTarget,queue:QueueActor,policy:PolicyClient,options:TerminalOptions,events:broadcast::Sender<RuntimeEvent>,revision:Arc<AtomicU64>)->TerminalHandle {
         let previous=queue.initial_state().operations.keys().filter(|id|id.starts_with("call::terminal:") || id.starts_with("terminal-policy:") || id.starts_with("queue:"))
             .filter_map(|id|id.rsplit(':').next()?.parse::<u64>().ok()).max().unwrap_or(0);
-        let sequence=Arc::new(AtomicU64::new(previous.max(queue.initial_state().operations.len() as u64).saturating_add(1)));
+        let sequence=Arc::new(AtomicU64::new(queue.initial_state().next_seq.max(previous.max(queue.initial_state().operations.len() as u64).saturating_add(1))));
         let receipt=ReceiptIndex::new("claude",&target.binding.conversation);
         let (sender,receiver)=mpsc::channel(64); let closed=Arc::new(AtomicBool::new(false));
         let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None};
@@ -211,7 +211,12 @@ impl Executor {
         let text=payload["text"].as_str().unwrap_or("");
         let prompt=kind=="input"; let slash=prompt && text.trim_start().starts_with('/');
         let row_id=if prompt && !slash {Some(entry.unwrap_or_else(||id.into()))}else{None};
-        self.action(Action::Prepare {id:id.into(),payload:original,entry_id:row_id.clone()}).await?;
+        let prepared=self.action(Action::Prepare {id:id.into(),payload:original,entry_id:row_id.clone()}).await?;
+        if let Some(disposition)=match prepared["status"].as_str() {
+            Some("accepted"|"confirmed")=>Some(Disposition::Accepted),Some("rejected")=>Some(Disposition::Rejected),_=>None,
+        } {
+            return Ok(serde_json::from_value(prepared["result"].clone()).unwrap_or_else(|_|reply(id,disposition,Value::Null)));
+        }
         if let Some(row)=&row_id {
             if !state.rows.iter().any(|r|r["id"]==*row) {
                 self.action(Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:payload["pre_transcript"]==true,entry_id:Some(row.clone())}).await?;

@@ -371,12 +371,14 @@ async def run_admin(coordinator, name, operation, payload, action):
 
 def _queue(coordinator, descriptor, action):
     slot = coordinator.slots[descriptor['key']]
-    with slot.guard:
-        if slot.binding.generation != descriptor['generation'] or slot.lease is None or slot.lease.closed:
-            raise RuntimeError('reserva perdeu a posse do diário')
-        sequence = max((int(key.rsplit(':',1)[1]) for key in slot.store.state['operations']
-            if key.startswith('call::terminal:queue:') and key.rsplit(':',1)[1].isdigit()), default=0)+1
-        return slot.store.exec(descriptor['generation'], f'terminal:queue:{sequence}', _clock(), action)
+    store = slot.store
+    with store._lock:
+        with slot.guard:
+            if slot.store is not store or slot.binding.generation != descriptor['generation'] or slot.lease is None or slot.lease.closed:
+                raise RuntimeError('reserva perdeu a posse do diário')
+        sequence = max(store.state['next_seq'], max((int(key.rsplit(':',1)[1]) for key in store.state['operations']
+            if key.startswith('call::terminal:queue:') and key.rsplit(':',1)[1].isdigit()), default=0)+1)
+        return store.exec(descriptor['generation'], f'terminal:queue:{sequence}', _clock(), action)
 
 
 def _service(coordinator, descriptor, operation_id, request_id, kind, payload):
@@ -541,7 +543,9 @@ def _reserve_execute(coordinator, descriptor, command, operation_id, *, entry_id
     barrier = slot.store.state['runtime_state'].get('clear_barrier')
     if barrier and barrier['generation'] == descriptor['generation']:
         raise RuntimeError('clear exige geração nova antes de escrever')
-    _queue(coordinator, descriptor, {'kind':'prepare','id':operation_id,'payload':intent,'entry_id':entry_id})
+    prepared = _queue(coordinator, descriptor, {'kind':'prepare','id':operation_id,'payload':intent,'entry_id':entry_id})
+    if prepared['status'] in {'accepted','confirmed','rejected'}:
+        return prepared.get('result') or _reply(operation_id, 'rejected' if prepared['status'] == 'rejected' else 'accepted')
     if entry_id and not any(row['id'] == entry_id for row in slot.store.state['rows']):
         _queue(coordinator, descriptor, {'kind':'append','text':payload['text'],'delivered':False,
             'ts':None,'pre_transcript':payload['pre_transcript'],'entry_id':entry_id})

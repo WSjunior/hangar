@@ -96,7 +96,7 @@ fechando os seis problemas. Commits da Task 3: `bead8a45`, `58c75289` e `a767feb
 A política comum de falhas de `74177469` foi integrada na Task 4 após a aprovação desta Task.
 O caminho terminal separa `_op_once`, evitando duplicar essa política.
 
-## Task 4 — integração e verificações finais
+## Task 4 — verificações anteriores à fila v2
 
 Merge da parte1 em `958486f6`, incluindo `fac8d377` e `74177469`. A resolução conserva a
 serialização, o vínculo durável, o congelamento de `/clear` e o parâmetro de restauração do
@@ -141,8 +141,19 @@ revisão Python nos três sistemas, com Node 24 para executar o hook real. O con
 continua Linux; não foi adicionada suíte Python inteira à matriz. CI e revisão final ainda
 pendentes. `git diff --check` passou.
 
+## Junção da fila v2 — contrato atual 10
+
+Instrução posterior de `Migracao-Rust`: `c195a6a4` integra a limpeza 2B com protocolo 8 e estado
+da fila v2 (`seq/next_seq`); a parte 3 passa a 9, e a 2D usa **10** nesta junção. Os checks acima
+pertencem ao estado anterior e serão repetidos para a nova integração.
+
+A comparação identificou cinco adaptações: conservar metadados pequenos de recibo ao reduzir
+respostas, respeitar Prepare já finalizado, reconhecer a prova de Finish reduzida, recuperar
+as flags terminal antes da poda v1 e continuar a sequência por `next_seq`. A integração está
+em andamento; o merge permanece sem commit até as regressões e a interoperabilidade passarem.
+
 ## Ainda pendente
 
-- Task 4: revisão final, push e CI nas três plataformas.
+- Task 4: fechar fila v2/protocolo 10, repetir checks afetados, revisão final, push e CI nas três plataformas.
 - Uso real do Claude e Windows instalado: somente com o dono, conforme o pedido.
 - Porte do envio/controle Codex com terminal: permanece Python/RPC nesta árvore; fora da 2D.

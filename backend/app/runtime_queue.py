@@ -5,6 +5,7 @@ import copy
 import json
 import os
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -13,6 +14,14 @@ from app import atomico
 
 _coordinator = None
 _CALL_PREFIX = "call::"
+_VERSION = 2
+# Janela de chamadas recentes que nunca sai: cobre a repetição da mesma chamada (3 tentativas,
+# pausa e a última pelo Python) e o ACK atrasado de uma fase. O resto é podado pelo estado.
+_RECENT_CALLS = 256
+_FINAL = {"accepted", "rejected", "confirmed"}
+_TARGETED = {"prepare", "bind_dispatch", "begin_dispatch", "finish", "late_rpc_resolution", "confirm_occurrence"}
+_RECEIPT_METADATA = {"native", "message_id", "native_status", "cleanup", "code", "stage",
+                     "preserve_binding", "queued", "already_confirmed", "disposition"}
 
 
 def configure(coordinator):
@@ -21,13 +30,13 @@ def configure(coordinator):
 
 
 def initial_state(key: str, generation: int, name: str, rows: list[dict]) -> dict:
-    return {"version": 1, "owner_key": key, "generation": generation, "name": name,
-            "rows": copy.deepcopy(rows), "operations": {}, "used_occurrences": {}, "runtime_state": {}}
+    return {"version": _VERSION, "owner_key": key, "generation": generation, "name": name,
+            "rows": copy.deepcopy(rows), "operations": {}, "used_occurrences": {}, "runtime_state": {}, "next_seq": 1}
 
 
 def _operation(operation_id, payload, entry_id=None):
     return {"id": operation_id, "payload": copy.deepcopy(payload), "entry_id": entry_id,
-            "status": "prepared", "result": None, "dispatch_cursor": None, "wire_attempts": {}}
+            "status": "prepared", "result": None, "dispatch_cursor": None, "wire_attempts": {}, "seq": 0}
 
 
 class QueueStore:
@@ -36,12 +45,18 @@ class QueueStore:
     def __init__(self, state_path: Path, projection_dir: Path, initial: dict):
         self.state_path, self.projection_dir = Path(state_path), Path(projection_dir)
         self.fenced = False
+        self._recover_before_compact = False
+        # Serializa a gravação aqui, e não na trava do slot: o laço de eventos confere a posse
+        # naquela trava e não pode esperar o disco.
+        self._lock = threading.RLock()
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self.projection_dir.mkdir(parents=True, exist_ok=True)
         if self.state_path.exists():
             self.state = self._read_state()
             if self.state["owner_key"] != initial["owner_key"]:
                 raise ValueError("estado da fila pertence a outra chave")
+            if self._migrated and not self._recover_before_compact:
+                self._persist(self.state)
         else:
             self.state = copy.deepcopy(initial)
             self._persist(self.state)
@@ -49,14 +64,29 @@ class QueueStore:
 
     def _read_state(self):
         state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self._migrated = isinstance(state, dict) and state.get("version") == 1
         required = {"version", "owner_key", "generation", "name", "rows", "operations", "used_occurrences", "runtime_state"}
-        if not isinstance(state, dict) or set(state) != required or state["version"] != 1:
+        if not isinstance(state, dict) or state.get("version") not in {1, _VERSION}:
+            raise ValueError("estado da fila inválido")
+        if state["version"] == 1 and set(state) == required:
+            # Sem ordem gravada, tudo o que veio da v1 conta como antigo: fora da janela já na leitura.
+            state.update(version=_VERSION, next_seq=_RECENT_CALLS + 1)
+            for operation in state["operations"].values() if isinstance(state["operations"], dict) else ():
+                if isinstance(operation, dict):
+                    operation.setdefault("seq", 0)
+        if (set(state) != required | {"next_seq"} or state["version"] != _VERSION
+                or type(state["next_seq"]) is not int or state["next_seq"] < 1):
             raise ValueError("estado da fila inválido")
         if not isinstance(state["rows"], list) or not all(isinstance(r, dict) for r in state["rows"]):
             raise ValueError("entradas da fila inválidas")
         for key in ("operations", "used_occurrences", "runtime_state"):
             if not isinstance(state[key], dict):
                 raise ValueError("diário da fila inválido")
+        if not all(isinstance(op, dict) and type(op.get("seq")) is int for op in state["operations"].values()):
+            raise ValueError("diário da fila inválido")
+        self._recover_before_compact = _needs_terminal_recovery(state)
+        if not self._recover_before_compact:
+            compact(state)
         return state
 
     @staticmethod
@@ -93,12 +123,23 @@ class QueueStore:
         from app.pqueue import _sanitize
         path = self.projection_dir / f"{_sanitize(self.state['name'])}.jsonl"
         data = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in self.state["rows"]).encode("utf-8")
-        self._atomic(path, data)
+        # As etapas de uma entrega não mudam as mensagens: regravar igual só custava fsync. Compara
+        # com o arquivo, não com memória, para continuar consertando o que mudou por fora.
+        try:
+            unchanged = path.read_bytes() == data
+        except OSError:
+            unchanged = False
+        if not unchanged:
+            self._atomic(path, data)
         previous = self.state["runtime_state"].get("_queue_previous_name")
         if previous and previous != self.state["name"]:
             (self.projection_dir / f"{_sanitize(previous)}.jsonl").unlink(missing_ok=True)
 
     def exec(self, generation: int, call_id: str, clock: dict, action: dict):
+        with self._lock:
+            return self._exec(generation, call_id, clock, action)
+
+    def _exec(self, generation: int, call_id: str, clock: dict, action: dict):
         if self.fenced:
             if action["kind"] != "ensure_projection":
                 raise OSError("fila bloqueada após falha de persistência; reparar antes de continuar")
@@ -110,26 +151,123 @@ class QueueStore:
         receipt_id = _CALL_PREFIX + call_id
         previous = self.state["operations"].get(receipt_id)
         if previous is not None:
-            if previous["payload"] != action:
+            if _receipt_payload(previous["payload"]) != _receipt_payload(action):
                 raise ValueError("identificador reutilizado com outra operação")
             self.ensure_projection()
             return copy.deepcopy(previous["result"])
         if action["kind"] in {"load", "entry_delivered", "ensure_projection"}:
             self.ensure_projection()
         state = copy.deepcopy(self.state)
-        result = apply_action(state, action, clock, call_id)
+        if self._recover_before_compact and action["kind"] not in {"recover", "load", "entry_delivered", "ensure_projection"}:
+            apply_action(state, {"kind": "recover"}, clock, call_id)
+        # Cópia antes do carimbo: o resultado guarda a operação como o Rust a serializa no apply.
+        result = copy.deepcopy(apply_action(state, action, clock, call_id))
         if action["kind"] not in {"load", "entry_delivered", "ensure_projection"}:
-            receipt = _operation(receipt_id, action)
-            receipt.update(status="accepted", result=copy.deepcopy(result))
+            seq = state["next_seq"]
+            state["next_seq"] = seq + 1
+            if action["kind"] in _TARGETED and action["id"] in state["operations"]:
+                state["operations"][action["id"]]["seq"] = seq
+            receipt = _operation(receipt_id, _receipt_payload(action))
+            receipt_result = copy.deepcopy(result)
+            if action["kind"] in _TARGETED and isinstance(receipt_result, dict):
+                _slim_operation(receipt_result)
+            receipt.update(status="accepted", result=receipt_result, seq=seq)
             state["operations"][receipt_id] = receipt
+            compact(state)
             self._persist(state)
+            self._recover_before_compact = False
             self.ensure_projection()
         return copy.deepcopy(result)
 
 
-def _protected(state, entry_id):
-    return any(op["entry_id"] == entry_id and op["status"] in {"dispatching", "unknown"}
-               for operation_id, op in state["operations"].items() if not operation_id.startswith(_CALL_PREFIX))
+def _protected_ids(state):
+    # Um conjunto por ação, como o `protected` do apply em Rust: conferir linha a linha contra o
+    # diário inteiro custava linhas × operações a cada gravação.
+    return {op["entry_id"] for operation_id, op in state["operations"].items()
+            if not operation_id.startswith(_CALL_PREFIX) and op["status"] in {"dispatching", "unknown"}}
+
+
+def _slim(result):
+    # Os recibos terminal ainda conferem transporte, geração e limpeza; o conteúdo da resposta sai.
+    if isinstance(result, dict) and "payload" in result:
+        payload = result["payload"]
+        small = {key: value for key, value in payload.items() if key in _RECEIPT_METADATA
+                 and (type(value) is bool or isinstance(value, str) and len(value) <= 200)} if isinstance(payload, dict) else {}
+        return {**result, "payload": small or None}
+    return result
+
+
+def _slim_operation(operation):
+    operation["result"] = _slim(operation.get("result"))
+    for attempt in operation.get("wire_attempts", {}).values():
+        if isinstance(attempt, dict) and "result" in attempt:
+            attempt["result"] = _slim(attempt["result"])
+
+
+def _receipt_payload(action):
+    """O recibo guarda a ação sem o volume: basta para detectar reuso do mesmo identificador."""
+    if action.get("kind") == "set_runtime_state":
+        return {**action, "state": None}
+    if "result" in action:
+        return {**action, "result": _slim(action["result"])}
+    return action
+
+
+def _group(key, operation):
+    payload = operation["payload"]
+    logical = payload.get("logical_id") if isinstance(payload, dict) else None
+    return logical if isinstance(logical, str) else key
+
+
+def _may_confirm(operation, record) -> bool:
+    """A ocorrência ainda pode confirmar esta operação? Na dúvida, sim."""
+    if operation["entry_id"] is None or operation["status"] == "confirmed":
+        return False
+    # Preparada ainda pode ligar cursor. Todo bind captura depois de a operação existir, então
+    # quem nasce depois da poda nasce com cursor depois da ocorrência.
+    if operation["status"] == "prepared":
+        return True
+    cursor = operation["dispatch_cursor"]
+    if not isinstance(cursor, dict):
+        return False
+    offset, cursor_offset = record.get("offset"), cursor.get("offset")
+    if type(offset) is not int or type(cursor_offset) is not int:
+        return True
+    return (cursor.get("conversation") == record.get("conversation")
+            and cursor.get("file_identity") == record.get("file_identity") and offset >= cursor_offset)
+
+
+def compact(state):
+    """Poda o que nada mais lê; mesma regra do `compact` em queue.rs.
+
+    Fica: as últimas `_RECENT_CALLS` chamadas (recibo e operação tocada), operação não final,
+    operação de entrada ainda não confirmada e o grupo inteiro (raiz + fases por `logical_id`)
+    de quem ficou. Operação final que fica perde o conteúdo da resposta (`_slim`). Ocorrência
+    usada só sai quando nenhuma operação restante pode casá-la.
+    """
+    operations = state["operations"]
+    cutoff = state["next_seq"] - _RECENT_CALLS
+    open_rows = {row.get("id") for row in state["rows"] if row.get("confirmed") is not True}
+
+    def held(key, operation):
+        if operation["seq"] >= cutoff:
+            return True
+        return not key.startswith(_CALL_PREFIX) and (operation["status"] not in _FINAL
+            or operation["entry_id"] is not None and operation["entry_id"] in open_rows)
+
+    groups = {_group(key, op) for key, op in operations.items() if not key.startswith(_CALL_PREFIX) and held(key, op)}
+    state["operations"] = {key: op for key, op in operations.items() if held(key, op)
+        or not key.startswith(_CALL_PREFIX) and _group(key, op) in groups}
+    for key, op in state["operations"].items():
+        if not key.startswith(_CALL_PREFIX) and op["status"] in _FINAL:
+            _slim_operation(op)
+    # Linha confirmada não volta a confirmar (confirm_occurrence recusa), mesmo que a resposta
+    # tardia tenha devolvido a operação para `accepted`.
+    confirmed_rows = {row.get("id") for row in state["rows"] if row.get("confirmed") is True}
+    candidates = [op for key, op in state["operations"].items()
+                  if not key.startswith(_CALL_PREFIX) and op["entry_id"] not in confirmed_rows]
+    state["used_occurrences"] = {occurrence: record for occurrence, record in state["used_occurrences"].items()
+        if not isinstance(record, dict) or any(_may_confirm(op, record) for op in candidates)}
 
 
 def _terminal_input(state, operation):
@@ -177,7 +315,22 @@ def _terminal_finish_sequence(state, operation_id, result):
     return max((int(call.rsplit(":", 1)[1]) for call, receipt in state["operations"].items()
         if call.startswith("call::terminal:queue:") and call.rsplit(":", 1)[1].isascii() and call.rsplit(":", 1)[1].isdecimal()
         and receipt["payload"].get("kind") == "finish" and receipt["payload"].get("id") == operation_id
-        and receipt["payload"].get("result") == result), default=None)
+        and _slim(receipt["payload"].get("result")) == _slim(result)), default=None)
+
+
+def _needs_terminal_recovery(state):
+    for key, operation in state["operations"].items():
+        if not key.startswith(_CALL_PREFIX) and _terminal_input(state, operation):
+            if (not operation.get("entry_materialized") or operation["status"] in {"deferred", "rejected"}
+                    and not operation.get("terminal_finalized")):
+                return True
+        if key.startswith("call::terminal:queue:") and operation["payload"].get("kind") == "claim":
+            claimed = {row.get("id") for row in operation["result"]}
+            if any(row.get("id") in claimed and row.get("delivered") is True
+                   and not row.get("confirmed") and not row.get("desistiu")
+                   and not _terminal_protected(state, row.get("id"), "") for row in state["rows"]):
+                return True
+    return False
 
 
 def _finalize_terminal(state, operation_id, clock):
@@ -214,6 +367,9 @@ def _finalize_terminal(state, operation_id, clock):
 
 
 def _recover_terminal(state, clock):
+    for operation in state["operations"].values():
+        if _terminal_input(state, operation):
+            operation["payload"]["payload"].setdefault("_terminal_generation", state["generation"])
     materialized = {op["entry_id"] for op in state["operations"].values() if _terminal_input(state, op)
                     and _entry_was_materialized(state, op["entry_id"])}
     for entry_id in materialized:
@@ -257,7 +413,8 @@ def apply_action(state, action, clock, call_id):
         elif action.get("pre_transcript"):
             row["pre_transcript"] = True
         overflow = len(rows) + 1 - 1000
-        candidates = [r for r in rows if (r.get("confirmed") or r.get("papel") == "assistant") and not _protected(state, r.get("id"))]
+        protected = _protected_ids(state)
+        candidates = [r for r in rows if (r.get("confirmed") or r.get("papel") == "assistant") and r.get("id") not in protected]
         if overflow > len(candidates):
             raise ValueError("fila cheia de entradas pendentes")
         for candidate in candidates[:max(0, overflow)]:
@@ -278,10 +435,16 @@ def apply_action(state, action, clock, call_id):
             if old["entry_id"] is not None and _entry_was_materialized(state, old["entry_id"]):
                 _mark_materialized(state, old["entry_id"])
             return old
-        operations[operation_id] = _operation(operation_id, action["payload"], action.get("entry_id"))
+        operation = operations[operation_id] = _operation(operation_id, action["payload"], action.get("entry_id"))
         if action.get("entry_id") is not None and _entry_was_materialized(state, action["entry_id"]):
             _mark_materialized(state, action["entry_id"])
-        return operations[operation_id]
+        # Linha já confirmada pela fila: a mesma intenção chegando depois da poda não reenvia.
+        if (not (isinstance(action["payload"], dict) and "logical_id" in action["payload"])
+                and operation["entry_id"] is not None
+                and any(row.get("id") == operation["entry_id"] and row.get("confirmed") is True for row in rows)):
+            operation.update(status="accepted", result={"operation_id": operation_id, "disposition": "accepted",
+                                                         "payload": {"already_confirmed": True}})
+        return operation
     if kind in {"bind_dispatch", "begin_dispatch", "finish", "late_rpc_resolution"}:
         operation = operations.get(action["id"])
         if operation is None:
@@ -372,7 +535,10 @@ def apply_action(state, action, clock, call_id):
             raise ValueError("prova de entrega não corresponde ao despacho")
         row.update(delivered=True, confirmed=True)
         row.pop("desistiu", None)
-        state["used_occurrences"][occurrence_id] = {"operation_id": action["id"], "generation": state["generation"]}
+        occurrence = proof["occurrence"]
+        state["used_occurrences"][occurrence_id] = {"operation_id": action["id"], "generation": state["generation"],
+            "conversation": occurrence["conversation"], "file_identity": occurrence["file_identity"],
+            "offset": occurrence["offset"]}
         operation["status"] = "confirmed"
         return True
     if kind == "set_runtime_state":
@@ -391,12 +557,13 @@ def apply_action(state, action, clock, call_id):
         return None
     if kind == "replace_rows":
         replacement = action["rows"]
+        protected = _protected_ids(state)
         for row in rows:
-            if _protected(state, row.get("id")) and row not in replacement:
+            if row.get("id") in protected and row not in replacement:
                 raise ValueError("substituição removeria uma entrada incerta")
         state["rows"] = replacement
         return None
-    if kind == "set_delivered" and not action["value"] and _protected(state, action["entry_id"]):
+    if kind == "set_delivered" and not action["value"] and action["entry_id"] in _protected_ids(state):
         raise ValueError("entrega incerta não pode voltar para a fila")
     if kind == "abandon":
         for row in rows:
@@ -411,10 +578,12 @@ def apply_action(state, action, clock, call_id):
             self.routing_disabled = True
 
         def load(self):
-            return copy.deepcopy([r for r in state["rows"] if not _protected(state, r.get("id"))])
+            protected = _protected_ids(state)
+            return copy.deepcopy([r for r in state["rows"] if r.get("id") not in protected])
 
         def _write_atomic(self, new_rows):
-            protected = [(i, r) for i, r in enumerate(state["rows"]) if _protected(state, r.get("id"))]
+            ids = _protected_ids(state)
+            protected = [(i, r) for i, r in enumerate(state["rows"]) if r.get("id") in ids]
             for index, row in protected:
                 new_rows.insert(min(index, len(new_rows)), copy.deepcopy(row))
             state["rows"] = new_rows

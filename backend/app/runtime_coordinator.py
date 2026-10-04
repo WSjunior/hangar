@@ -573,8 +573,9 @@ class RuntimeCoordinator:
                 if _writer.get() is None:
                     from app.runtime_adapter import run_sync
                     return run_sync(lambda:self.op(descriptor["name"], {"kind":"queue", "action":action}, call_id), self.loop)
-            with slot.guard:
-                return slot.store.exec(descriptor["generation"], call_id, _clock(), action)
+            # A rota já conta em `slot.active` (queue_gate): a posse não muda até ela sair, e a
+            # gravação é serializada dentro do QueueStore, fora da trava que o laço de eventos usa.
+            return slot.store.exec(descriptor["generation"], call_id, _clock(), action)
         if self.loop is None or not self.loop.is_running():
             raise RuntimeError("loop do runtime indisponível")
         try:
@@ -595,9 +596,9 @@ class RuntimeCoordinator:
         slot, phase, descriptor = route
         if phase != Phase.Python:
             raise RuntimeError("a fila pertence ao Rust")
-        with slot.guard:
-            if state["owner_key"] != descriptor["key"] or state["generation"] != descriptor["generation"]:
-                raise ValueError("estado não pertence à vida atual")
+        if state["owner_key"] != descriptor["key"] or state["generation"] != descriptor["generation"]:
+            raise ValueError("estado não pertence à vida atual")
+        with slot.store._lock:
             slot.store._persist(copy.deepcopy(state))
             slot.store.ensure_projection()
 
