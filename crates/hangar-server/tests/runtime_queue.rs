@@ -185,3 +185,22 @@ fn late_reply_matches_generation_and_type() {
     }
     assert!(store.state().operations["op"].status == Status::Dispatching);
 }
+
+#[cfg(unix)]
+#[test]
+fn unchanged_projection_is_not_rewritten() {
+    // Ler a fila ou gravar o estado privado não muda as mensagens: o arquivo do nome fica intacto.
+    use std::os::unix::fs::MetadataExt;
+    let dir = tempfile::tempdir().unwrap();
+    let projection = dir.path().join("projection");
+    let mut store = Store::open(&dir.path().join("key.queue-state.json"), &projection, State::new("key",1,"session",vec![])).unwrap();
+    store.exec(1, "append", clock(), append()).unwrap();
+    let inode = || std::fs::metadata(projection.join("session.jsonl")).unwrap().ino();
+    let before = inode();
+    store.exec(1, "load", clock(), Action::Load).unwrap();
+    fill(&mut store, 3, "view");
+    assert_eq!(inode(), before);
+    std::fs::write(projection.join("session.jsonl"), "").unwrap();
+    store.exec(1, "repair", clock(), Action::EnsureProjection).unwrap();
+    assert_eq!(std::fs::read_to_string(projection.join("session.jsonl")).unwrap().lines().count(), 1);
+}

@@ -223,7 +223,11 @@ impl Store {
     pub fn ensure_projection(&mut self) -> io::Result<()> {
         let mut output = Vec::new();
         for row in &self.state.rows { serde_json::to_writer(&mut output, row)?; output.push(b'\n'); }
-        atomic_write(&self.projection_dir.join(format!("{}.jsonl", sanitize(&self.state.name))), &output)?;
+        let path = self.projection_dir.join(format!("{}.jsonl", sanitize(&self.state.name)));
+        // Mesma regra do Python: as etapas de uma entrega não mudam as mensagens, e regravar igual
+        // custava dois fsync por chamada, leituras incluídas. Compara com o arquivo para continuar
+        // consertando o que mudou por fora.
+        if std::fs::read(&path).ok().as_deref() != Some(output.as_slice()) { atomic_write(&path, &output)?; }
         if let Some(previous) = self.state.runtime_state["_queue_previous_name"].as_str()
             .filter(|p| *p != self.state.name) {
             match std::fs::remove_file(self.projection_dir.join(format!("{}.jsonl", sanitize(previous)))) {
