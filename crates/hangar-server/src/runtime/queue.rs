@@ -15,6 +15,8 @@ const VERSION: u32 = 2;
 /// Janela de chamadas recentes que nunca sai: cobre a repetição da mesma chamada e o ACK atrasado
 /// de uma fase. Mesmo valor de `_RECENT_CALLS` em runtime_queue.py.
 const RECENT_CALLS: u64 = 256;
+const RECEIPT_METADATA: &[&str] = &["native", "message_id", "native_status", "cleanup", "code", "stage",
+    "preserve_binding", "queued", "already_confirmed", "disposition"];
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -30,6 +32,10 @@ pub struct Operation {
     pub result: Value,
     pub dispatch_cursor: Value,
     pub wire_attempts: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub terminal_finalized: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub entry_materialized: bool,
     /// Última chamada que tocou a operação; ausente na v1 = antiga.
     #[serde(default)]
     pub seq: u64,
@@ -38,7 +44,7 @@ pub struct Operation {
 impl Operation {
     fn new(id: &str, payload: Value, entry_id: Option<String>) -> Self {
         Self { id:id.into(), payload, entry_id, status:Status::Prepared,
-            result:Value::Null, dispatch_cursor:Value::Null, wire_attempts:BTreeMap::new(), seq:0 }
+            result:Value::Null, dispatch_cursor:Value::Null, wire_attempts:BTreeMap::new(), seq:0, terminal_finalized:false, entry_materialized:false }
     }
     fn slim(&mut self) {
         self.result = slim(&self.result);
@@ -56,6 +62,10 @@ impl Operation {
         let cursor = &self.dispatch_cursor;
         if !cursor.is_object() { return false; }
         let (Some(offset),Some(cursor_offset)) = (record["offset"].as_i64(),cursor["offset"].as_i64()) else { return true };
+        // O recibo compacto não guarda o timestamp; um cursor anterior ao arquivo ainda pode casar.
+        if cursor["file_identity"].is_null() && cursor["absent_since"].as_f64().is_some() {
+            return cursor["conversation"]==record["conversation"] && offset>=cursor_offset;
+        }
         cursor["conversation"] == record["conversation"] && cursor["file_identity"] == record["file_identity"] && offset >= cursor_offset
     }
 }
@@ -75,11 +85,16 @@ pub struct State {
     pub next_seq: u64,
 }
 
-/// Resposta guardada só é relida pela disposição (e pelo formato de RuntimeReply); o conteúdo já
-/// foi entregue a quem pediu e era o que fazia o diário pesar megabytes. Igual ao `_slim` do Python.
+/// Os recibos terminal ainda conferem transporte e limpeza; o conteúdo da resposta sai.
 fn slim(result: &Value) -> Value {
     let mut result = result.clone();
-    if let Some(payload) = result.as_object_mut().and_then(|object| object.get_mut("payload")) { *payload = Value::Null; }
+    if let Some(payload) = result.as_object_mut().and_then(|object| object.get_mut("payload")) {
+        let small:serde_json::Map<String,Value> = payload.as_object().into_iter().flat_map(|body|body.iter())
+            .filter(|(key,value)|RECEIPT_METADATA.contains(&key.as_str()) && (value.is_boolean()
+                || value.as_str().is_some_and(|text|text.chars().count()<=200)))
+            .map(|(key,value)|(key.clone(),value.clone())).collect();
+        *payload=if small.is_empty(){Value::Null}else{Value::Object(small)};
+    }
     result
 }
 
@@ -91,6 +106,13 @@ fn receipt_payload(mut action: Value) -> Value {
 }
 
 impl State {
+    pub fn terminal_write_blocked(&self,conversation:&str)->bool {
+        let barrier=&self.runtime_state["terminal_write_barrier"];
+        if barrier.is_object() && (barrier["conversation"].is_null() || barrier["conversation"]==conversation) {return true;}
+        // A trava gravada é uma só: a incerta de outra conversa também segura a escrita na dela.
+        let conversation=Value::from(conversation);
+        self.operations.iter().any(|(key,op)|!key.starts_with(CALL_PREFIX) && holds_terminal_write(op,&conversation))
+    }
     pub fn new(key: &str, generation: u64, name: &str, rows: Vec<Value>) -> Self {
         Self { version:VERSION, owner_key:key.into(), generation, name:name.into(), rows,
             operations:BTreeMap::new(), used_occurrences:BTreeMap::new(), runtime_state:json!({}), next_seq:1 }
@@ -104,7 +126,7 @@ impl State {
         if migrated { state.version = VERSION; state.next_seq = RECENT_CALLS + 1; }
         if state.version != VERSION || state.next_seq == 0 || !state.rows.iter().all(Value::is_object)
             || !state.runtime_state.is_object() { return Err(invalid("estado da fila incompatível")); }
-        state.compact();
+        if !needs_terminal_recovery(&state) {state.compact();}
         Ok((state, migrated))
     }
 
@@ -175,6 +197,7 @@ pub struct Store {
     projection_dir: PathBuf,
     state: State,
     fenced: bool,
+    recover_before_compact: bool,
 }
 
 fn invalid(message: &str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message) }
@@ -189,6 +212,7 @@ pub fn acquire_lease(path: &Path) -> io::Result<Arc<File>> {
     Ok(Arc::new(file))
 }
 fn row_id(row: &Value) -> &str { row["id"].as_str().unwrap_or("") }
+fn is_false(value:&bool)->bool {!*value}
 fn current(row: &Value, min_ts: f64) -> bool {
     row["ts"].as_f64().unwrap_or(0.0) >= min_ts - if row["pre_transcript"] == true { 900.0 } else { 0.0 }
 }
@@ -204,7 +228,7 @@ impl Store {
             Ok(bytes) => {
                 let (state, migrated) = State::load(&bytes)?;
                 if state.owner_key != initial.owner_key { return Err(invalid("estado da fila incompatível")); }
-                if migrated { atomic_write(state_path, &serde_json::to_vec(&state)?)?; }
+                if migrated && !needs_terminal_recovery(&state) { atomic_write(state_path, &serde_json::to_vec(&state)?)?; }
                 state
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -213,7 +237,8 @@ impl Store {
             }
             Err(error) => return Err(error),
         };
-        let mut store = Self { state_path:state_path.into(), projection_dir:projection_dir.into(), state, fenced:false };
+        let recover_before_compact=needs_terminal_recovery(&state);
+        let mut store = Self { state_path:state_path.into(), projection_dir:projection_dir.into(), state, fenced:false, recover_before_compact };
         store.ensure_projection()?;
         Ok(store)
     }
@@ -238,6 +263,7 @@ impl Store {
         if self.fenced {
             if !matches!(&action, Action::EnsureProjection) { return Err(invalid("fila bloqueada após falha de persistência")); }
             self.state = State::load(&std::fs::read(&self.state_path)?)?.0;
+            self.recover_before_compact=needs_terminal_recovery(&self.state);
             self.ensure_projection()?;
             self.fenced = false;
         }
@@ -246,7 +272,7 @@ impl Store {
         let receipt_id = format!("{CALL_PREFIX}{call_id}");
         let payload = receipt_payload(serde_json::to_value(&action)?);
         if let Some(previous) = self.state.operations.get(&receipt_id) {
-            if previous.payload != payload { return Err(invalid("identificador reutilizado com outra operação")); }
+            if receipt_payload(previous.payload.clone()) != payload { return Err(invalid("identificador reutilizado com outra operação")); }
             let result = previous.result.clone();
             self.ensure_projection()?;
             return Ok(result);
@@ -260,6 +286,9 @@ impl Store {
         };
         let targeted = target.is_some();
         let mut state = self.state.clone();
+        if self.recover_before_compact && !readonly && !matches!(&action,Action::Recover) {
+            apply(&mut state,Action::Recover,clock,call_id)?;
+        }
         let result = apply(&mut state, action, clock, call_id)?;
         if !readonly {
             let seq = state.next_seq;
@@ -280,6 +309,7 @@ impl Store {
             atomic_write(&self.state_path, &serde_json::to_vec(&state)?)?;
             self.state = state;
             self.fenced = false;
+            self.recover_before_compact=false;
             self.ensure_projection()?;
         }
         Ok(result)
@@ -294,7 +324,139 @@ fn append_row(state: &mut State, row: Value) -> io::Result<Value> {
     if candidates.len() < overflow { return Err(invalid("fila cheia de entradas pendentes")); }
     state.rows.retain(|r| !candidates.iter().any(|id| id == row_id(r)));
     state.rows.push(row.clone());
+    mark_materialized(state,row_id(&row));
     Ok(row)
+}
+
+fn terminal_input(state:&State,op:&Operation)->bool {
+    if op.entry_id.is_none() || op.payload["kind"]!="input" || !op.payload["payload"]["text"].is_string() {return false;}
+    if let Some(generation)=op.payload["payload"].get("_terminal_generation") {return generation.as_u64()==Some(state.generation);}
+    op.wire_attempts.keys().any(|wire|wire.starts_with(&format!("terminal:{}:",state.generation)))
+        || state.operations.iter().any(|(call,receipt)|call.starts_with("call::terminal:queue:") && receipt.payload["kind"]=="prepare"
+            && receipt.payload["id"]==op.id && receipt.payload["payload"]==op.payload
+            && receipt.payload["entry_id"].as_str()==op.entry_id.as_deref())
+}
+
+fn entry_was_materialized(state:&State,entry:&str)->bool {
+    state.rows.iter().any(|row|row_id(row)==entry)
+        || state.operations.values().any(|op|op.entry_id.as_deref()==Some(entry)
+            && (op.entry_materialized || terminal_input(state,op) && !op.wire_attempts.is_empty()))
+        || state.operations.iter().any(|(call,receipt)|call.starts_with(CALL_PREFIX) && (matches!(receipt.payload["kind"].as_str(),Some("append"|"append_local"))
+            && receipt.result["id"]==entry || receipt.payload["kind"]=="claim"
+            && receipt.result.as_array().is_some_and(|rows|rows.iter().any(|row|row["id"]==entry))
+            || receipt.payload["kind"]=="remove" && receipt.payload["entry_id"]==entry && receipt.result==true))
+}
+
+fn mark_materialized(state:&mut State,entry:&str) {
+    let ids:Vec<_>=state.operations.values().filter(|op|op.entry_id.as_deref()==Some(entry) && terminal_input(state,op))
+        .map(|op|op.id.clone()).collect();
+    for id in ids {state.operations.get_mut(&id).unwrap().entry_materialized=true;}
+}
+
+fn terminal_protected(state:&State,entry:&str,except:&str)->bool {
+    let protected_status=|status|matches!(status,Status::Accepted|Status::Unknown|Status::Dispatching|Status::Confirmed);
+    state.operations.values().any(|op|op.entry_id.as_deref()==Some(entry) && ((op.id!=except && protected_status(op.status))
+        || state.operations.values().any(|phase|phase.payload["logical_id"]==op.id && protected_status(phase.status))))
+}
+
+fn terminal_finish_sequence(state:&State,id:&str,result:&Value)->Option<u64> {
+    state.operations.iter().filter(|(call,receipt)|call.starts_with("call::terminal:queue:") && receipt.payload["kind"]=="finish"
+        && receipt.payload["id"]==id && slim(&receipt.payload["result"])==slim(result))
+        .filter_map(|(call,_)|call.rsplit(':').next()?.parse().ok()).max()
+}
+
+fn needs_terminal_recovery(state:&State)->bool {
+    state.operations.iter().any(|(key,op)| {
+        if !key.starts_with(CALL_PREFIX) && terminal_input(state,op)
+            && (!op.entry_materialized || matches!(op.status,Status::Deferred|Status::Rejected) && !op.terminal_finalized) {return true;}
+        key.starts_with("call::terminal:queue:") && op.payload["kind"]=="claim"
+            && op.result.as_array().is_some_and(|claimed|state.rows.iter().any(|row|claimed.iter().any(|item|row_id(item)==row_id(row))
+                && row["delivered"]==true && row["confirmed"]!=true && row["desistiu"]!=true && !terminal_protected(state,row_id(row),"")))
+    })
+}
+
+fn record_terminal_write_barrier(state:&mut State,id:&str) {
+    let op=&state.operations[id];
+    if op.status!=Status::Unknown || !terminal_input(state,op) || op.result["payload"]["native"]==true {return;}
+    if state.runtime_state["terminal_write_barrier"].is_null() {
+        state.runtime_state["terminal_write_barrier"]=json!({"operation_id":id,"generation":state.generation,"conversation":op.dispatch_cursor["conversation"]});
+    }
+}
+
+// Sem exigir a geração atual: a trava atravessa a troca de geração da mesma conversa.
+fn holds_terminal_write(op:&Operation,conversation:&Value)->bool {
+    op.status==Status::Unknown && op.entry_id.is_some() && op.payload["kind"]=="input" && op.payload["payload"]["text"].is_string()
+        && (op.payload["payload"].get("_terminal_generation").is_some() || op.wire_attempts.keys().any(|wire|wire.starts_with("terminal:")))
+        && op.result["payload"]["native"]!=true && (conversation.is_null() || op.dispatch_cursor["conversation"]==*conversation)
+}
+
+/// A trava só sai quando a dona deixou de ser incerta e nenhuma outra da conversa resta.
+fn release_terminal_write_barrier(state:&mut State) {
+    let barrier=&state.runtime_state["terminal_write_barrier"];
+    if !barrier.is_object() {return;}
+    if barrier["operation_id"].as_str().and_then(|id|state.operations.get(id)).is_some_and(|op|op.status==Status::Unknown) {return;}
+    let conversation=barrier["conversation"].clone();
+    let heir=state.operations.iter().find(|(key,op)|!key.starts_with(CALL_PREFIX) && holds_terminal_write(op,&conversation)).map(|(key,_)|key.clone());
+    match heir {
+        Some(id)=>state.runtime_state["terminal_write_barrier"]=json!({"operation_id":id,"generation":state.generation,"conversation":conversation}),
+        None=>{state.runtime_state.as_object_mut().unwrap().remove("terminal_write_barrier");}
+    }
+}
+
+fn finalize_terminal(state:&mut State,id:&str,clock:ClockSample)->io::Result<()> {
+    let op=state.operations.get(id).ok_or_else(||invalid("operação terminal ausente"))?.clone();
+    if !terminal_input(state,&op) || op.terminal_finalized || !matches!(op.status,Status::Deferred|Status::Rejected) {return Ok(());}
+    let entry=op.entry_id.as_deref().unwrap();
+    let protected=terminal_protected(state,entry,id);
+    let attempts=state.rows.iter().find(|row|row_id(row)==entry).and_then(|row|row["attempts"].as_u64()).unwrap_or(0);
+    // O diário antigo pode já ter gravado o contador antes da queda.
+    let counted=terminal_finish_sequence(state,id,&op.result).is_some_and(|finish|state.operations.iter().any(|(call,receipt)|call.starts_with("call::terminal:queue:")
+        && call.rsplit(':').next().and_then(|suffix|suffix.parse::<u64>().ok()).is_some_and(|sequence|sequence>finish)
+        && receipt.payload["kind"]=="bump_attempts" && receipt.payload["entry_id"]==entry && receipt.result.as_u64()==Some(attempts)));
+    let row=state.rows.iter_mut().find(|row|row_id(row)==entry).ok_or_else(||invalid("entrada terminal ausente na finalização"))?;
+    if row["confirmed"]!=true && row["desistiu"]!=true && (op.status==Status::Rejected || row["delivered"]!=false) {
+        if op.status==Status::Rejected {
+            row["delivered"]=json!(true);row["desistiu"]=json!(true);row["desistiu_ts"]=json!(clock.epoch_s);
+        }else if !protected {
+            let cleanup=op.result["payload"]["cleanup"].as_str().ok_or_else(||invalid("resultado terminal sem prova de limpeza"))?;
+            if !matches!(cleanup,"proved"|"not_needed") {return Err(invalid("limpeza incerta não permite reentrega"));}
+            if cleanup=="proved" && !counted && attempts>=2 {
+                row["delivered"]=json!(true);row["desistiu"]=json!(true);row["desistiu_ts"]=json!(clock.epoch_s);
+            }else {
+                if cleanup=="proved" && !counted {row["attempts"]=json!(attempts+1);}
+                row["delivered"]=json!(false);row.as_object_mut().unwrap().remove("steered");
+            }
+        }
+    }
+    state.operations.get_mut(id).unwrap().terminal_finalized=true;Ok(())
+}
+
+fn recover_terminal(state:&mut State,clock:ClockSample)->io::Result<()> {
+    let legacy:Vec<_>=state.operations.values().filter(|op|terminal_input(state,op)
+        && op.payload["payload"].get("_terminal_generation").is_none()).map(|op|op.id.clone()).collect();
+    for id in legacy {state.operations.get_mut(&id).unwrap().payload["payload"]["_terminal_generation"]=json!(state.generation);}
+    release_terminal_write_barrier(state);
+    let unknown:Vec<_>=state.operations.values().filter(|op|op.status==Status::Unknown).map(|op|op.id.clone()).collect();
+    for id in unknown {record_terminal_write_barrier(state,&id);}
+    let materialized:Vec<_>=state.operations.values().filter(|op|terminal_input(state,op)
+        && entry_was_materialized(state,op.entry_id.as_deref().unwrap())).filter_map(|op|op.entry_id.clone()).collect();
+    for entry in materialized {mark_materialized(state,&entry);}
+    let prepared:Vec<_>=state.operations.values().filter(|op|op.status==Status::Prepared && !op.entry_materialized && op.wire_attempts.is_empty() && terminal_input(state,op)
+        && !terminal_protected(state,op.entry_id.as_deref().unwrap(),&op.id)).cloned().collect();
+    for op in prepared {
+        let entry=op.entry_id.as_deref().unwrap();
+        if state.rows.iter().any(|row|row_id(row)==entry) {continue;}
+        let text=op.payload["payload"]["text"].as_str().unwrap();
+        if text.trim().is_empty() || text.trim_start().starts_with('/') || text.chars().any(|c|c.is_control() && !matches!(c,'\n'|'\t')) {return Err(invalid("intenção terminal inválida"));}
+        let mut row=json!({"id":entry,"text":text,"ts":clock.epoch_s,"delivered":false});
+        if op.payload["payload"]["pre_transcript"]==true {row["pre_transcript"]=json!(true);}
+        append_row(state,row)?;
+    }
+    let mut finished:Vec<_>=state.operations.values().filter(|op|terminal_input(state,op) && matches!(op.status,Status::Deferred|Status::Rejected))
+        .map(|op|(terminal_finish_sequence(state,&op.id,&op.result).unwrap_or(0),op.id.clone())).collect();
+    finished.sort_by(|left,right|right.0.cmp(&left.0));
+    for (_,id) in finished {finalize_terminal(state,&id,clock)?;}
+    Ok(())
 }
 
 fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -> io::Result<Value> {
@@ -386,8 +548,9 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
                 state.operations.insert(id.clone(),op);
             }
             if state.operations[&id].status == Status::Deferred {
-                let old = state.operations.get_mut(&id).unwrap(); old.status = Status::Prepared; old.result = Value::Null;
+                let old = state.operations.get_mut(&id).unwrap(); old.status = Status::Prepared; old.result = Value::Null;old.terminal_finalized=false;
             }
+            if let Some(entry)=state.operations[&id].entry_id.clone().filter(|entry|entry_was_materialized(state,entry)) {mark_materialized(state,&entry);}
             serde_json::to_value(&state.operations[&id])?
         }
         Action::BindDispatch { id, cursor } => {
@@ -405,7 +568,11 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             serde_json::to_value(op)?
         }
         Action::Finish { id, status, result } => {
+            let terminal=state.operations.get(&id).is_some_and(|op|terminal_input(state,op));
             let op = state.operations.get_mut(&id).ok_or_else(||invalid("operação não preparada"))?;
+            if terminal && status==Status::Deferred && matches!(op.status,Status::Accepted|Status::Unknown|Status::Confirmed|Status::Rejected) {
+                return Err(invalid("resultado terminal protegido não permite reentrega"));
+            }
             if matches!(op.status,Status::Accepted | Status::Confirmed | Status::Rejected)
                 && op.result.get("disposition").is_some() && result.get("write_outcome").is_some() {
                 return Ok(serde_json::to_value(op)?);
@@ -416,8 +583,12 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             if op.status == Status::Unknown && matches!(status,Status::Prepared | Status::Dispatching | Status::Deferred) {
                 return Err(invalid("resultado incerto não permite reenvio"));
             }
-            op.status = status; op.result = result;
-            serde_json::to_value(op)?
+            let finalized=op.terminal_finalized && op.status==status;
+            op.status = status; op.result = result;op.terminal_finalized=finalized;
+            record_terminal_write_barrier(state,&id);
+            release_terminal_write_barrier(state);
+            if terminal {finalize_terminal(state,&id,clock)?;}
+            serde_json::to_value(&state.operations[&id])?
         }
         Action::LateRpcResolution { id, wire_id, request_id, generation, result } => {
             if generation != state.generation { return Err(invalid("resposta de outra geração")); }
@@ -428,8 +599,9 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             attempt["status"] = json!("accepted"); attempt["result"] = result.clone();
             if op.wire_attempts.values().all(|a|a["status"] == "accepted") && op.status != Status::Confirmed {
                 op.status = Status::Accepted; op.result = result;
+                release_terminal_write_barrier(state);
             }
-            serde_json::to_value(op)?
+            serde_json::to_value(&state.operations[&id])?
         }
         Action::ConfirmOccurrence { id, proof } => {
             if state.used_occurrences.contains_key(&proof.occurrence.id) { return Ok(json!(false)); }
@@ -446,6 +618,7 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             state.used_occurrences.insert(proof.occurrence.id.clone(),json!({"operation_id":id,"generation":state.generation,
                 "conversation":proof.occurrence.conversation,"file_identity":proof.occurrence.file_identity,"offset":proof.occurrence.offset}));
             state.operations.get_mut(&id).unwrap().status = Status::Confirmed;
+            release_terminal_write_barrier(state);
             json!(true)
         }
         Action::Recover => {
@@ -455,11 +628,27 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
                     if attempt["status"] == "dispatching" { attempt["status"] = json!("unknown"); }
                 }
             }
+            recover_terminal(state,clock)?;
+            let phases:BTreeSet<_> = state.operations.values().filter(|op|matches!(op.status,Status::Accepted|Status::Unknown|Status::Dispatching|Status::Confirmed))
+                .filter_map(|op|op.payload["logical_id"].as_str()).collect();
+            let protected:BTreeSet<_> = state.operations.values().filter(|op|matches!(op.status,Status::Accepted|Status::Unknown|Status::Dispatching|Status::Confirmed|Status::Rejected)
+                || phases.contains(op.id.as_str())).filter_map(|op|op.entry_id.as_deref()).collect();
+            let claimed:BTreeSet<_> = state.operations.iter().filter(|(call,op)|call.starts_with("call::terminal:queue:") && op.payload["kind"]=="claim")
+                .flat_map(|(_,op)|op.result.as_array().into_iter().flatten()).filter_map(|row|row["id"].as_str()).collect();
+            // Só o claim do executor terminal, sem despacho, prova ausência de efeito na TUI.
+            for row in &mut state.rows {
+                let id=row_id(row);
+                if row["delivered"]==true && row["confirmed"]!=true && row["desistiu"]!=true && claimed.contains(id) && !protected.contains(id) {
+                    row["delivered"]=json!(false);
+                }
+            }
             Value::Null
         }
         Action::SetRuntimeState { state: runtime_state } => {
             if !runtime_state.is_object() { return Err(invalid("estado privado inválido")); }
+            let barrier=state.runtime_state["terminal_write_barrier"].clone();
             state.runtime_state = runtime_state;
+            if !barrier.is_null() {state.runtime_state["terminal_write_barrier"]=barrier;}
             Value::Null
         }
         Action::ReplaceRows { rows } => {

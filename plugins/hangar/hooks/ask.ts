@@ -1,7 +1,8 @@
 import type { EngineInterface, On } from "claude-code";
 import { type Bridge as Ponte, bridge } from "./bridge";
 
-type DoApp = { answers?: Record<string, string> | null; deny?: string | null };
+type DoApp = { answers?: Record<string, string> | null; deny?: string | null;
+  publication_id?: string; generation?: number; session_id?: string };
 
 /** Pergunta de múltipla escolha respondida pelo app SEM tecla no terminal.
  *
@@ -13,7 +14,7 @@ export function registerAsk(on: On) {
   on("tool.call", { tool: "AskUserQuestion" }, async ($, e, next) => {
     const ponte = bridge();
     if (!ponte) return next(e);
-    const id = e.tool_use_id ?? "";
+    const id = `ask:${e.tool_use_id ?? ""}`;
     const questions = e.questions;
 
     let acabou = false;
@@ -23,15 +24,17 @@ export function registerAsk(on: On) {
     terminal.catch(() => {});
     const app = doApp($, ponte, id, questions, () => acabou).then((r) => ({ de: "app" as const, r }));
     let vencedor: "terminal" | "app" | "erro" = "erro";
+    let receipt: DoApp = {};
     try {
       const v = await Promise.race([terminal, app]);
       vencedor = v.de;
       if (v.de === "terminal") return v.r;
+      receipt = v.r;
       if (v.r.deny) return { deny: v.r.deny };
       return { result: { questions, answers: v.r.answers } };
     } finally {
       acabou = true;
-      await fim($, ponte, id, vencedor);
+      await fim($, ponte, id, vencedor, receipt);
     }
   });
 }
@@ -81,12 +84,13 @@ async function doApp(
   return new Promise<DoApp>(() => {});
 }
 
-async function fim($: EngineInterface, ponte: Ponte, id: string, vencedor: string) {
+async function fim($: EngineInterface, ponte: Ponte, id: string, vencedor: string, receipt: DoApp) {
   try {
     await $.http.fetch(`${ponte.url}/ask-fim`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, id, vencedor }),
+      body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, id, vencedor,
+        publication_id: receipt.publication_id, generation: receipt.generation, session_id: receipt.session_id }),
     });
   } catch {
     // A ponte fora do ar não pode derrubar a resposta que já existe.

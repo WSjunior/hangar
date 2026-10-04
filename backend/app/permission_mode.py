@@ -314,3 +314,7 @@ def listar_modos(name: str) -> tuple[str, list[str]]:
                     break
         # bloqueador 3: devolver o que FICOU, não o de antes
         return cur, vistos
+
+from app.runtime_terminal import wrap_driver as _wrap_terminal_driver
+trocar_modo = _wrap_terminal_driver(trocar_modo, admin=True)
+listar_modos = _wrap_terminal_driver(listar_modos, admin=True)

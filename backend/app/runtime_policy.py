@@ -107,6 +107,12 @@ def run(kind: str, payload: dict, metadata: dict) -> dict:
     provider = metadata.get("provider")
     if provider not in _PATCH:
         raise ValueError("provedor fora do runtime")
+    if kind in {"terminal_facts", "terminal_publish", "terminal_plugin_control"}:
+        if provider != "claude" or not metadata.get("terminal"):
+            raise ValueError("serviço terminal fora do vínculo Claude")
+        from app import runtime_terminal
+        return {"terminal_facts":runtime_terminal.facts, "terminal_publish":runtime_terminal.publish,
+            "terminal_plugin_control":runtime_terminal.plugin_control}[kind](payload, metadata)
     if kind == "prepare_prompt":
         text = payload.get("text")
         if not isinstance(text, str):

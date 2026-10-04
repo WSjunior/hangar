@@ -12,7 +12,18 @@ use std::time::{Duration,SystemTime,UNIX_EPOCH};
 use subtle::ConstantTimeEq;
 use tokio::sync::{broadcast,Mutex};
 
-struct Entry { generation:u64,handle:RuntimeHandle }
+#[derive(Clone)]
+enum EntryHandle { Headless(RuntimeHandle), Terminal {target:super::terminal::TerminalTarget,handle:super::terminal::TerminalHandle} }
+impl EntryHandle {
+    async fn snapshot(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.snapshot().await,Self::Terminal {handle,..}=>handle.snapshot().await}}
+    async fn stop(&self)->Result<(),RuntimeError> {match self {Self::Headless(h)=>h.stop().await,Self::Terminal {handle,..}=>handle.stop().await}}
+    async fn command(&self,command:RuntimeCommand)->Result<RuntimeReply,RuntimeError> {match self {Self::Headless(h)=>h.command(command).await,Self::Terminal {handle,..}=>handle.command(command).await}}
+    async fn queue(&self,id:String,action:Action)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.queue(id,action).await,Self::Terminal {handle,..}=>handle.queue(id,action).await}}
+    async fn drain(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.drain().await,Self::Terminal {handle,..}=>handle.drain().await}}
+    async fn confirm(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.confirm().await,Self::Terminal {handle,..}=>handle.confirm().await}}
+    async fn ensure_projection(&self)->Result<Value,RuntimeError> {match self {Self::Headless(h)=>h.ensure_projection().await,Self::Terminal {handle,..}=>handle.ensure_projection().await}}
+}
+struct Entry { generation:u64,handle:EntryHandle }
 pub struct RuntimeRegistry {
     entries:Mutex<BTreeMap<String,Entry>>,
     events:broadcast::Sender<RuntimeEvent>,
@@ -31,7 +42,10 @@ impl RuntimeRegistry {
     }
     pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> { self.events.subscribe() }
     pub async fn handle(&self,key:&str,generation:u64) -> Result<RuntimeHandle,RuntimeError> {
-        self.entries.lock().await.get(key).filter(|entry|entry.generation == generation)
+        match self.entry(key,generation).await? {EntryHandle::Headless(handle)=>Ok(handle),_=>Err(failure("runtime_provider"))}
+    }
+    async fn entry(&self,key:&str,generation:u64)->Result<EntryHandle,RuntimeError> {
+        self.entries.lock().await.get(key).filter(|entry|entry.generation==generation)
             .map(|entry|entry.handle.clone()).ok_or_else(||failure("runtime_binding"))
     }
     pub async fn adopt(&self,target:RuntimeTarget,carry:Value) -> Result<Value,RuntimeError> {
@@ -40,7 +54,7 @@ impl RuntimeRegistry {
         let existing = self.entries.lock().await.get(&target.key).map(|entry|(entry.generation,entry.handle.clone()));
         let handle = if let Some((generation,handle)) = existing {
             if generation != target.generation { return Err(failure("runtime_generation")); }
-            handle
+            match handle {EntryHandle::Headless(handle)=>handle,_=>return Err(failure("runtime_provider"))}
         } else {
         if !["claude","codex"].contains(&target.provider.as_str()) || target.binding.versao != 2 { return Err(failure("runtime_provider")); }
         let lease = acquire_lease(&target.lease_path).map_err(|_|failure("runtime_lease"))?;
@@ -70,7 +84,7 @@ impl RuntimeRegistry {
         let engine = RuntimeEngine::new(&target.provider,metadata,target.generation,ClockSample { monotonic_s:0.0,epoch_s })?
             .with_policy(self.policy.clone()).with_publisher(self.events.clone()).with_revision(revision);
         let handle = RuntimeActor::spawn(target.clone(),queue,connection,engine);
-        self.entries.lock().await.insert(target.key.clone(),Entry { generation:target.generation,handle:handle.clone() });
+        self.entries.lock().await.insert(target.key.clone(),Entry { generation:target.generation,handle:EntryHandle::Headless(handle.clone()) });
         handle
         };
         let deadline = tokio::time::Instant::now()+Duration::from_secs(180);
@@ -87,6 +101,28 @@ impl RuntimeRegistry {
             if tokio::time::Instant::now() >= deadline { return Err(failure("runtime_initialize")); }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+    pub async fn adopt_terminal(&self,target:super::terminal::TerminalTarget)->Result<Value,RuntimeError> {
+        let barrier=self.barrier(&target.key).await; let _guard=barrier.lock().await;
+        let existing=self.entries.lock().await.get(&target.key).map(|e|(e.generation,e.handle.clone()));
+        let handle=match existing {
+            Some((generation,EntryHandle::Terminal {target:old,handle})) if generation==target.generation && old.binding==target.binding
+                && old.transcript==target.transcript && old.state_path==target.state_path && old.projection_dir==target.projection_dir && old.lease_path==target.lease_path=>handle,
+            Some(_)=>return Err(failure("runtime_generation")),
+            None=>{
+                let lease=acquire_lease(&target.lease_path).map_err(|_|failure("runtime_lease"))?;
+                let (state_path,projection_dir,initial)=(target.state_path.clone(),target.projection_dir.clone(),QueueState::new(&target.key,target.generation,&target.name,Vec::new()));
+                let opening_lease=lease.clone();
+                let store=tokio::task::spawn_blocking(move ||{let _lease=opening_lease;Store::open(&state_path,&projection_dir,initial)}).await
+                    .map_err(|_|failure("queue_job"))?.map_err(|_|failure("queue_io"))?;
+                if store.state().generation!=target.generation{return Err(failure("runtime_generation"));}
+                let revision=self.revisions.lock().await.entry(target.key.clone()).or_insert_with(||Arc::new(AtomicU64::new(0))).clone();
+                let handle=super::terminal::TerminalActor::spawn(target.clone(),QueueActor::start(store,lease),self.policy.clone(),super::terminal::TerminalOptions::default(),self.events.clone(),revision);
+                self.entries.lock().await.insert(target.key.clone(),Entry {generation:target.generation,handle:EntryHandle::Terminal {target:target.clone(),handle:handle.clone()}});handle
+            }
+        };
+        let snapshot=handle.snapshot().await?;
+        Ok(json!({"ready":true,"instance":self.instance,"key":target.key,"generation":target.generation,"state":snapshot}))
     }
     pub async fn detach(&self,key:&str,generation:u64) -> Result<Value,RuntimeError> {
         let barrier = self.barrier(key).await;
@@ -199,20 +235,34 @@ async fn dispatch(registry:&RuntimeRegistry,envelope:&Envelope) -> Result<Value,
         return Err(failure("command_fields"));
     }
     if kind == "adopt" {
-        let target = descriptor(&command["descriptor"])?;
-        if target.key != envelope.key || target.generation != envelope.generation { return Err(failure("runtime_binding")); }
-        return registry.adopt(target,command["carry"].clone()).await;
+        return match descriptor(&command["descriptor"])? {
+            Target::Headless(target)=>{
+                if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
+                registry.adopt(target,command["carry"].clone()).await
+            },
+            Target::Terminal(target)=>{
+                if target.key!=envelope.key || target.generation!=envelope.generation{return Err(failure("runtime_binding"));}
+                registry.adopt_terminal(target).await
+            }
+        };
     }
     if kind == "detach" { return registry.detach(&envelope.key,envelope.generation).await; }
-    let handle = registry.handle(&envelope.key,envelope.generation).await?;
+    let handle = registry.entry(&envelope.key,envelope.generation).await?;
     match kind {
         "submit"=> {
-            let kind = if command["steer"] == true { OperationKind::Steer } else { OperationKind::Input };
+            if matches!(&handle,EntryHandle::Terminal {..}) && (command.get("steer").is_some_and(|value|!value.is_boolean())
+                || command.get("pre_transcript").is_some_and(|value|!value.is_boolean())) {return Err(failure("terminal_payload"));}
+            let kind = if command["steer"] == true && matches!(&handle,EntryHandle::Headless(_)) { OperationKind::Steer } else { OperationKind::Input };
             let reply = handle.command(RuntimeCommand { operation_id:envelope.operation_id.clone(),kind,
                 payload:json!({"text":command["text"],"pre_transcript":command["pre_transcript"].as_bool().unwrap_or(false)}) }).await?;
             serde_json::to_value(reply).map_err(|_|failure("reply_json"))
         }
         "control"=> {
+            if let EntryHandle::Terminal {handle,..}=&handle {
+                let control=command["control"].as_str().ok_or_else(||failure("control_kind"))?;
+                let reply=handle.control(envelope.operation_id.clone(),control.into(),command["payload"].clone()).await?;
+                return serde_json::to_value(reply).map_err(|_|failure("reply_json"));
+            }
             let control:OperationKind = serde_json::from_value(command["control"].clone()).map_err(|_|failure("control_kind"))?;
             let reply = handle.command(RuntimeCommand { operation_id:envelope.operation_id.clone(),kind:control,payload:command["payload"].clone() }).await?;
             serde_json::to_value(reply).map_err(|_|failure("reply_json"))
@@ -233,17 +283,30 @@ struct Descriptor {
     projection_dir:std::path::PathBuf,state_path:std::path::PathBuf,lock_path:std::path::PathBuf,generation:u64,
 }
 
-fn descriptor(value:&Value) -> Result<RuntimeTarget,RuntimeError> {
+enum Target {Headless(RuntimeTarget),Terminal(super::terminal::TerminalTarget)}
+fn descriptor(value:&Value) -> Result<Target,RuntimeError> {
     let descriptor:Descriptor = serde_json::from_value(value.clone()).map_err(|_|failure("descriptor_shape"))?;
-    if !descriptor.headless || descriptor.meta["key"] != descriptor.key { return Err(failure("descriptor_binding")); }
+    if descriptor.meta["key"] != descriptor.key || descriptor.key.is_empty() { return Err(failure("descriptor_binding")); }
+    if !descriptor.headless {
+        if descriptor.provider!="claude" || descriptor.meta.get("cano").is_some(){return Err(failure("descriptor_provider"));}
+        let binding:crate::terminal_input::TerminalBinding=serde_json::from_value(descriptor.meta["terminal"].clone()).map_err(|_|failure("terminal_binding"))?;
+        if binding.generation!=descriptor.generation || binding.name!=descriptor.name || binding.conversation.is_empty() || binding.mux_argv.is_empty()
+            || binding.mux_argv.iter().any(|v|v.contains('\0')) || descriptor.jsonl.is_empty()
+            || (!binding.windows && (!binding.pane.starts_with('%') || binding.pane[1..].parse::<u64>().is_err()))
+            || (binding.windows && !binding.pane.starts_with(&format!("={}:",binding.name))) {return Err(failure("terminal_binding"));}
+        return Ok(Target::Terminal(super::terminal::TerminalTarget {key:descriptor.key,generation:descriptor.generation,name:descriptor.name,
+            created:descriptor.meta["created"].as_f64().unwrap_or(binding.created as f64),binding,
+            lease_path:descriptor.lock_path,state_path:descriptor.state_path,projection_dir:descriptor.projection_dir,transcript:descriptor.jsonl.into()}));
+    }
+    if descriptor.meta.get("terminal").is_some(){return Err(failure("descriptor_provider"));}
     let cano = &descriptor.meta["cano"];
     let binding = CanoBinding { pid:cano["pid"].as_u64().and_then(|pid|u32::try_from(pid).ok()).ok_or_else(||failure("cano_pid"))?,
         escuta:cano["escuta"].as_str().ok_or_else(||failure("cano_address"))?.into(),
         token:cano["token"].as_str().ok_or_else(||failure("cano_token"))?.into(),
         versao:cano["versao"].as_u64().and_then(|version|u32::try_from(version).ok()).ok_or_else(||failure("cano_version"))? };
-    Ok(RuntimeTarget { key:descriptor.key,generation:descriptor.generation,name:descriptor.name,provider:descriptor.provider,
+    Ok(Target::Headless(RuntimeTarget { key:descriptor.key,generation:descriptor.generation,name:descriptor.name,provider:descriptor.provider,
         created:descriptor.meta["created"].as_f64().unwrap_or(0.0),metadata:descriptor.meta,binding,
-        lease_path:descriptor.lock_path,state_path:descriptor.state_path,projection_dir:descriptor.projection_dir,transcript:descriptor.jsonl.into() })
+        lease_path:descriptor.lock_path,state_path:descriptor.state_path,projection_dir:descriptor.projection_dir,transcript:descriptor.jsonl.into() }))
 }
 
 async fn events(State(state):State<Gateway>) -> Response {

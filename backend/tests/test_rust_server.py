@@ -82,10 +82,11 @@ server.serve_forever()
 
 
 @pytest.fixture(autouse=True)
-def isolated_runtime(monkeypatch):
-    from app import runtime_coordinator, runtime_queue
+def isolated_runtime(monkeypatch, tmp_path):
+    from app import runtime_coordinator, runtime_queue, runtime_process
     monkeypatch.setattr(runtime_coordinator, "_current", None)
     monkeypatch.setattr(runtime_queue, "_coordinator", None)
+    monkeypatch.setattr(runtime_process, "record_path", lambda: tmp_path / "runtime-process.json")
 
 
 def test_runtime_startup_checks_nonce_protocol_and_limit():
@@ -318,9 +319,13 @@ def test_closing_stdin_makes_the_child_exit(fake_bin, monkeypatch):
     # `mudo` dormiria 60 s: sair em 5 s com código 0 só pode ser o fim do cano.
     monkeypatch.setenv("FAKE_MODE", "mudo")
     proc = rust_server._spawn(fake_bin, {**os.environ, **_CHILD_ENV})
-    assert proc.poll() is None
-    proc.stdin.close()
-    assert proc.wait(timeout=5) == 0
+    try:
+        assert proc.poll() is None
+        proc.stdin.close()
+        assert proc.wait(timeout=5) == 0
+    finally:
+        from app.runtime_process import cleanup
+        cleanup(proc)
 
 
 def test_child_dies_when_python_is_killed(fake_bin, tmp_path, monkeypatch):
@@ -328,21 +333,25 @@ def test_child_dies_when_python_is_killed(fake_bin, tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_MODE", "mudo")
     code = ("import json, os, sys\n"
             "from pathlib import Path\n"
-            "from app import rust_server\n"
+            "from app import rust_server, runtime_process\n"
+            "runtime_process.record_path = lambda: Path(sys.argv[3])\n"
             "env = dict(os.environ, **json.loads(sys.argv[2]))\n"
             "p = rust_server._spawn(Path(sys.argv[1]), env)\n"
-            "print(p.pid, flush=True)\n"
+            "print(json.dumps({'pid':p.pid,'birth':p.runtime_containment.birth}), flush=True)\n"
             "os.kill(os.getpid(), 9)\n")
     t0 = time.monotonic()
-    out = subprocess.run([sys.executable, "-c", code, str(fake_bin), json.dumps(_CHILD_ENV)],
+    out = subprocess.run([sys.executable, "-c", code, str(fake_bin), json.dumps(_CHILD_ENV),
+                          str(tmp_path / "runtime-process.json")],
                          cwd=Path(rust_server.__file__).resolve().parents[1],
                          capture_output=True, text=True, timeout=60)
-    pid = int(out.stdout.split()[0])
+    identity = json.loads(out.stdout.splitlines()[0])
+    pid, birth = identity['pid'], identity['birth']
+    from app.runtime_process import _same_process
     deadline = time.monotonic() + 5
-    while not _dead(pid) and time.monotonic() < deadline:
+    while _same_process(pid, birth) and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert _dead(pid), (f"run={deadline - 5 - t0:.2f}s stderr={out.stderr[-300:]!r}\n"
-                        + _proc_info(pid, tmp_path))
+    assert not _same_process(pid, birth), (f"run={deadline - 5 - t0:.2f}s stderr={out.stderr[-300:]!r}\n"
+                                         + _proc_info(pid, tmp_path))
 
 
 @pytest.mark.parametrize("answer,got", [("1", 1), ("sem", None)])

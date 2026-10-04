@@ -154,6 +154,7 @@ def test_combined_supervisor_deactivates_b_and_c(monkeypatch):
     events = []
     class Proc:
         stdin = None
+        runtime_containment = SimpleNamespace(cleaned=True)
         def poll(self):
             return 0
     class Coordinator:
@@ -161,7 +162,7 @@ def test_combined_supervisor_deactivates_b_and_c(monkeypatch):
         slots = {"key":SimpleNamespace(binding=SimpleNamespace(name="session"), phase=Phase.Rust)}
         async def close_events(self):
             events.append("events")
-        async def recover(self, name, confirmed_dead):
+        async def recover(self, name, confirmed_dead, containment=None):
             assert confirmed_dead
             events.append("recover")
     monkeypatch.setattr(runtime_coordinator, "_current", Coordinator())

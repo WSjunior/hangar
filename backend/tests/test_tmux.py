@@ -945,7 +945,8 @@ def test_paste_text_usa_load_buffer_pela_stdin():
     with patch("app.tmux._run", side_effect=fake_run), \
          patch("app.tmux.buffer_trunca_no_newline", return_value=False):
         assert tmux.paste_text("cc", grande) is True
-    assert chamadas[0][0][:4] == ["tmux", "load-buffer", "-b", "cp-prompt"]
+    assert chamadas[0][0][:3] == ["tmux", "load-buffer", "-b"]
+    assert chamadas[0][0][3].startswith("cp-prompt-")
     assert chamadas[0][0][4] == "-"
     assert chamadas[0][1] == grande.encode()
     assert "set-buffer" not in " ".join(chamadas[0][0])

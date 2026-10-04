@@ -9,6 +9,16 @@ from app.pqueue import PromptQueue
 from app.terminal_input import TerminalInput
 
 
+@pytest.fixture(autouse=True)
+def clipboard_file_on_host(tmp_path, monkeypatch):
+    from app import runtime_terminal
+    monkeypatch.setattr(runtime_terminal, '_clipboard_lock_path', lambda:tmp_path / 'clipboard.lock')
+    yield
+    for field in ('limpou', 'stage'):
+        if hasattr(terminal_input._ULTIMA_LIMPEZA, field):
+            delattr(terminal_input._ULTIMA_LIMPEZA, field)
+
+
 @pytest.fixture
 def tmp_queue(tmp_path, monkeypatch):
     monkeypatch.setattr(pqueue.settings, "projects_dir", tmp_path / "projects")

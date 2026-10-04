@@ -14,6 +14,16 @@ on:
       # A suíte de contrato do cano roda aqui contra o binário: mudar o cano.py ou ela também testa o Rust.
       - "backend/app/adapters/claude_headless/cano.py"
       - "backend/tests/test_claude_headless_cano.py"
+      - "backend/app/runtime_process.py"
+      - "backend/app/runtime_terminal.py"
+      - "backend/app/runtime_coordinator.py"
+      - "backend/app/rust_server.py"
+      - "backend/tests/test_runtime_process.py"
+      - "backend/tests/test_runtime_queue_terminal_v2.py"
+      - "backend/tests/test_runtime_terminal_fix*.py"
+      - "backend/tests/test_runtime_terminal_failure_policy.py"
+      - "backend/tests/test_runtime_final_fixes.py"
+      - "plugins/hangar/hooks/**"
       - ".github/workflows/server.yml"
   workflow_dispatch:
 
@@ -63,6 +73,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
       - name: Preparar terminal no macOS
         if: runner.os == 'macOS'
         run: |
@@ -111,13 +124,14 @@ jobs:
           done
       # A suíte de contrato do cano contra o binário que vai ser publicado. Só no Linux: é o único
       # lugar em que ela roda contra o hangar-cano (o ci.yml não compila Rust). Setup igual ao do ci.yml.
-      - if: matrix.platform == 'linux-x86_64'
-        uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.14"
-      - if: matrix.platform == 'linux-x86_64'
-        working-directory: backend
+      - working-directory: backend
         run: uv sync
+      - name: Contenção e regressões da entrega terminal
+        working-directory: backend
+        run: uv run pytest tests/test_runtime_process.py tests/test_runtime_queue_terminal_v2.py tests/test_runtime_terminal_fix.py tests/test_runtime_terminal_fix2.py tests/test_runtime_terminal_failure_policy.py tests/test_runtime_final_fixes.py -q
       - name: Contrato do cano contra o hangar-cano
         if: matrix.platform == 'linux-x86_64'
         working-directory: backend

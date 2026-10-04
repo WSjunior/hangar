@@ -1,7 +1,8 @@
 import type { EngineInterface, On } from "claude-code";
 import { type Bridge as Ponte, bridge } from "./bridge";
 
-type DoApp = { permitir?: boolean | null; soltar?: boolean };
+type DoApp = { permitir?: boolean | null; soltar?: boolean;
+  publication_id?: string; generation?: number; session_id?: string };
 
 // `tool.check` roda ANTES do diálogo de permissão: enquanto este hook segura o
 // `ask`, o terminal não mostra nada. Por isso quem decide se segura é o backend
@@ -23,7 +24,7 @@ export function registerPerm(on: On) {
     const id = `perm:${e.tool_use_id}`;
 
     const r = await doApp($, ponte, id, e.tool, resumo(e.input));
-    await fim($, ponte, id, r ? "app" : "terminal");
+    await fim($, ponte, id, r ? "app" : "terminal", r);
     if (r === null) return base;
     if (r.permitir) return { decision: "allow" as const, reason: "Aprovado no app Hangar." };
     return { decision: "deny" as const, reason: "Negado pelo usuário no app Hangar." };
@@ -64,12 +65,13 @@ async function doApp(
   }
 }
 
-async function fim($: EngineInterface, ponte: Ponte, id: string, vencedor: string) {
+async function fim($: EngineInterface, ponte: Ponte, id: string, vencedor: string, receipt: DoApp | null) {
   try {
     await $.http.fetch(`${ponte.url}/ask-fim`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, id, vencedor }),
+      body: JSON.stringify({ sessao: ponte.sessao, token: ponte.token, id, vencedor,
+        publication_id: receipt?.publication_id, generation: receipt?.generation, session_id: receipt?.session_id }),
     });
   } catch {
     // A ponte fora do ar não pode derrubar o veredito que já existe.

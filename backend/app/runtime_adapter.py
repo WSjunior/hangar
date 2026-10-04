@@ -220,12 +220,22 @@ class LegacyBridge:
             return None
         meta = sessions.load(name)
         if not meta or not meta.get("key"):
+            if provider == "claude":
+                from app.runtime_terminal import resolve_binding
+                previous = (self.coordinator.slot(name).binding if self.coordinator.managed_queue(name) else
+                    next((slot.binding for slot in self.coordinator.slots.values()
+                        if self.coordinator.in_lifecycle(slot) and slot.binding.provider == provider), None))
+                return resolve_binding(name, previous)
             if self.coordinator.managed_queue(name) and not self.coordinator.slot(name).binding.headless:
                 return copy.deepcopy(self.coordinator.slot(name).binding)
             return None
         directory = _queue_dir()
         state_path = directory / "runtime" / (meta["key"] + ".json")
         headless = bool(meta.get("headless"))
+        if provider == "claude" and not headless:
+            from app.runtime_terminal import resolve_binding
+            previous = self.coordinator.slots.get(meta["key"])
+            return resolve_binding(name, previous.binding if previous else None)
         if not headless and not state_path.exists():
             return None
         path = self.adapters[provider].transcript_path_de(meta) if provider == "claude" else meta.get("rollout_path") or ""
@@ -242,6 +252,9 @@ class LegacyBridge:
             directory, state_path, directory / "runtime" / (meta["key"] + ".lock"), generation)
 
     async def quiesce(self, descriptor):
+        if descriptor["meta"].get("terminal") or descriptor["meta"].get("pending_terminal"):
+            from app.runtime_terminal import quiesce
+            return await quiesce(self.coordinator, descriptor)
         name, provider = descriptor["name"], descriptor["provider"]
         adapter = self.adapters[provider]
         slot = self.coordinator.slots[descriptor["key"]]
@@ -301,6 +314,9 @@ class LegacyBridge:
         return {"runtime_state":carry}
 
     async def reconnect(self, descriptor, carry):
+        if descriptor["meta"].get("terminal"):
+            from app.runtime_terminal import reconnect
+            return await reconnect(self.coordinator, descriptor, carry)
         name, provider = descriptor["name"], descriptor["provider"]
         adapter = self.adapters[provider]
         existing = adapter._sessions.get(name)
@@ -350,6 +366,9 @@ class LegacyBridge:
         return {"hydrated":True}
 
     async def op(self, descriptor, command, operation_id):
+        if descriptor["meta"].get("terminal"):
+            from app.runtime_terminal import reserve_op
+            return await reserve_op(self.coordinator, descriptor, command, operation_id)
         name, provider = descriptor["name"], descriptor["provider"]
         adapter, io = self.adapters[provider], LegacyIO(self.coordinator)
         kind = command["kind"]
@@ -522,6 +541,8 @@ def native_slot(name):
     if coordinator is None or not coordinator.managed_runtime(name):
         return None
     slot = coordinator.slot(name)
+    if not slot.binding.headless:
+        return None
     if slot.phase == runtime_coordinator.Phase.Python:
         return None
     context = _legacy_operation.get()
@@ -542,21 +563,38 @@ def apply_event(slot, event):
     cached = slot.view
     previous = cached.get("revision", -1)
     channel, data, revision = event["channel"], event["data"], event["revision"]
+    terminal = slot.binding.meta.get("terminal")
     if channel == "snapshot":
         if (not isinstance(data, dict) or data.get("key") != slot.binding.key
                 or data.get("generation") != slot.binding.generation or data.get("revision") != revision
                 or not isinstance(data.get("view"), dict) or not isinstance(data.get("channels"), dict)):
             return False
-        try:
-            StateEvent.model_validate(data["view"]["public_state"])
-        except (KeyError, ValueError):
-            return False
+        if terminal:
+            view = data["view"]
+            if (view.get("terminal") is not True or view.get("conversation") != terminal["conversation"]
+                    or type(view.get("deliverable")) is not bool or "public_state" in view
+                    or data["channels"] or data.get("error") is not None and not isinstance(data["error"], str)):
+                return False
+        else:
+            try:
+                StateEvent.model_validate(data["view"]["public_state"])
+            except (KeyError, ValueError):
+                return False
         if revision < previous:
             return True
         slot.view = copy.deepcopy(data)
         slot.cache_valid = data.get("error") is None
         return True
     if revision <= previous:
+        return True
+    if terminal:
+        if channel != "problem" or not isinstance(data, dict) or not isinstance(data.get("error_code"), str):
+            return False
+        if revision != previous + 1:
+            slot.cache_valid = False
+            return False
+        slot.view = {**copy.deepcopy(cached), "revision": revision, "error": data["error_code"]}
+        slot.cache_valid = False
         return True
     if not getattr(slot, "cache_valid", False) or revision != previous + 1:
         slot.cache_valid = False

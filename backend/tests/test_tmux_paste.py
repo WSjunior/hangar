@@ -1,8 +1,15 @@
 """paste_text: caminho normal (tmux) e o plano B de quem nao tem paste-buffer (psmux/Windows)."""
 import subprocess
 import time
+import pytest
 
 from app import tmux
+
+
+@pytest.fixture(autouse=True)
+def clipboard_file_on_host(tmp_path, monkeypatch):
+    from app import runtime_terminal
+    monkeypatch.setattr(runtime_terminal, '_clipboard_lock_path', lambda:tmp_path / 'clipboard.lock')
 
 
 def _grava(monkeypatch, falha_paste: bool, trunca: bool = False):

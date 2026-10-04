@@ -140,6 +140,7 @@ def test_ambiente_identifica_a_sessao_headless_para_os_scripts(ambiente, monkeyp
     assert env["CP_SESSION_NAME"] == "cx-identidade"
     assert env["CP_SESSION_KEY"] == meta["key"]
     assert env["HANGAR_CANO_KEY"] == meta["key"]
+    assert env["HANGAR_CANO_OWNER"] == str(Path.home())
     assert "TMUX" not in env and "TMUX_PANE" not in env
 
 

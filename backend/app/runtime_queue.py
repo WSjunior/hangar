@@ -20,6 +20,8 @@ _VERSION = 2
 _RECENT_CALLS = 256
 _FINAL = {"accepted", "rejected", "confirmed"}
 _TARGETED = {"prepare", "bind_dispatch", "begin_dispatch", "finish", "late_rpc_resolution", "confirm_occurrence"}
+_RECEIPT_METADATA = {"native", "message_id", "native_status", "cleanup", "code", "stage",
+                     "preserve_binding", "queued", "already_confirmed", "disposition"}
 
 
 def configure(coordinator):
@@ -43,6 +45,7 @@ class QueueStore:
     def __init__(self, state_path: Path, projection_dir: Path, initial: dict):
         self.state_path, self.projection_dir = Path(state_path), Path(projection_dir)
         self.fenced = False
+        self._recover_before_compact = False
         # Serializa a gravação aqui, e não na trava do slot: o laço de eventos confere a posse
         # naquela trava e não pode esperar o disco.
         self._lock = threading.RLock()
@@ -52,7 +55,7 @@ class QueueStore:
             self.state = self._read_state()
             if self.state["owner_key"] != initial["owner_key"]:
                 raise ValueError("estado da fila pertence a outra chave")
-            if self._migrated:
+            if self._migrated and not self._recover_before_compact:
                 self._persist(self.state)
         else:
             self.state = copy.deepcopy(initial)
@@ -81,7 +84,9 @@ class QueueStore:
                 raise ValueError("diário da fila inválido")
         if not all(isinstance(op, dict) and type(op.get("seq")) is int for op in state["operations"].values()):
             raise ValueError("diário da fila inválido")
-        compact(state)
+        self._recover_before_compact = _needs_terminal_recovery(state)
+        if not self._recover_before_compact:
+            compact(state)
         return state
 
     @staticmethod
@@ -146,13 +151,15 @@ class QueueStore:
         receipt_id = _CALL_PREFIX + call_id
         previous = self.state["operations"].get(receipt_id)
         if previous is not None:
-            if previous["payload"] != _receipt_payload(action):
+            if _receipt_payload(previous["payload"]) != _receipt_payload(action):
                 raise ValueError("identificador reutilizado com outra operação")
             self.ensure_projection()
             return copy.deepcopy(previous["result"])
         if action["kind"] in {"load", "entry_delivered", "ensure_projection"}:
             self.ensure_projection()
         state = copy.deepcopy(self.state)
+        if self._recover_before_compact and action["kind"] not in {"recover", "load", "entry_delivered", "ensure_projection"}:
+            apply_action(state, {"kind": "recover"}, clock, call_id)
         # Cópia antes do carimbo: o resultado guarda a operação como o Rust a serializa no apply.
         result = copy.deepcopy(apply_action(state, action, clock, call_id))
         if action["kind"] not in {"load", "entry_delivered", "ensure_projection"}:
@@ -168,6 +175,7 @@ class QueueStore:
             state["operations"][receipt_id] = receipt
             compact(state)
             self._persist(state)
+            self._recover_before_compact = False
             self.ensure_projection()
         return copy.deepcopy(result)
 
@@ -180,10 +188,12 @@ def _protected_ids(state):
 
 
 def _slim(result):
-    # Resposta guardada só é relida pela disposição (e pelo formato de RuntimeReply); o conteúdo
-    # já foi entregue a quem pediu e era o que fazia o diário pesar megabytes.
+    # Os recibos terminal ainda conferem transporte, geração e limpeza; o conteúdo da resposta sai.
     if isinstance(result, dict) and "payload" in result:
-        return {**result, "payload": None}
+        payload = result["payload"]
+        small = {key: value for key, value in payload.items() if key in _RECEIPT_METADATA
+                 and (type(value) is bool or isinstance(value, str) and len(value) <= 200)} if isinstance(payload, dict) else {}
+        return {**result, "payload": small or None}
     return result
 
 
@@ -223,6 +233,9 @@ def _may_confirm(operation, record) -> bool:
     offset, cursor_offset = record.get("offset"), cursor.get("offset")
     if type(offset) is not int or type(cursor_offset) is not int:
         return True
+    if cursor.get("file_identity") is None and type(cursor.get("absent_since")) in {int, float}:
+        # O recibo compacto não guarda o timestamp; um cursor anterior ao arquivo ainda pode casar.
+        return cursor.get("conversation") == record.get("conversation") and offset >= cursor_offset
     return (cursor.get("conversation") == record.get("conversation")
             and cursor.get("file_identity") == record.get("file_identity") and offset >= cursor_offset)
 
@@ -260,6 +273,179 @@ def compact(state):
         if not isinstance(record, dict) or any(_may_confirm(op, record) for op in candidates)}
 
 
+def _terminal_input(state, operation):
+    payload = operation["payload"]
+    if not isinstance(payload, dict):
+        return False
+    body = payload.get("payload")
+    if (operation["entry_id"] is None or payload.get("kind") != "input" or not isinstance(body, dict)
+            or not isinstance(body.get("text"), str)):
+        return False
+    if "_terminal_generation" in body:
+        return type(body["_terminal_generation"]) is int and body["_terminal_generation"] == state["generation"]
+    return (any(wire.startswith(f"terminal:{state['generation']}:") for wire in operation["wire_attempts"])
+        or any(call.startswith("call::terminal:queue:") and receipt["payload"].get("kind") == "prepare"
+            and receipt["payload"].get("id") == operation["id"] and receipt["payload"].get("payload") == payload
+            and receipt["payload"].get("entry_id") == operation["entry_id"] for call, receipt in state["operations"].items()))
+
+
+def _entry_was_materialized(state, entry_id):
+    return (any(row.get("id") == entry_id for row in state["rows"])
+        or any(op["entry_id"] == entry_id and (op.get("entry_materialized") is True
+               or _terminal_input(state, op) and op["wire_attempts"]) for op in state["operations"].values())
+        or any(call.startswith(_CALL_PREFIX) and (receipt["payload"].get("kind") in {"append", "append_local"}
+               and isinstance(receipt["result"], dict) and receipt["result"].get("id") == entry_id
+               or receipt["payload"].get("kind") == "claim" and any(row.get("id") == entry_id for row in receipt["result"])
+               or receipt["payload"].get("kind") == "remove" and receipt["payload"].get("entry_id") == entry_id and receipt["result"] is True)
+               for call, receipt in state["operations"].items()))
+
+
+def _mark_materialized(state, entry_id):
+    for operation in state["operations"].values():
+        if operation["entry_id"] == entry_id and _terminal_input(state, operation):
+            operation["entry_materialized"] = True
+
+
+def _terminal_protected(state, entry_id, except_id):
+    statuses = {"accepted", "unknown", "dispatching", "confirmed"}
+    return any(op["entry_id"] == entry_id and (op["id"] != except_id and op["status"] in statuses
+        or any(isinstance(phase["payload"], dict) and phase["payload"].get("logical_id") == op["id"]
+               and phase["status"] in statuses for phase in state["operations"].values()))
+        for op in state["operations"].values())
+
+
+def _terminal_finish_sequence(state, operation_id, result):
+    return max((int(call.rsplit(":", 1)[1]) for call, receipt in state["operations"].items()
+        if call.startswith("call::terminal:queue:") and call.rsplit(":", 1)[1].isascii() and call.rsplit(":", 1)[1].isdecimal()
+        and receipt["payload"].get("kind") == "finish" and receipt["payload"].get("id") == operation_id
+        and _slim(receipt["payload"].get("result")) == _slim(result)), default=None)
+
+
+def _needs_terminal_recovery(state):
+    for key, operation in state["operations"].items():
+        if not key.startswith(_CALL_PREFIX) and _terminal_input(state, operation):
+            if (not operation.get("entry_materialized") or operation["status"] in {"deferred", "rejected"}
+                    and not operation.get("terminal_finalized")):
+                return True
+        if key.startswith("call::terminal:queue:") and operation["payload"].get("kind") == "claim":
+            claimed = {row.get("id") for row in operation["result"]}
+            if any(row.get("id") in claimed and row.get("delivered") is True
+                   and not row.get("confirmed") and not row.get("desistiu")
+                   and not _terminal_protected(state, row.get("id"), "") for row in state["rows"]):
+                return True
+    return False
+
+
+def terminal_write_blocked(state, conversation):
+    barrier = state["runtime_state"].get("terminal_write_barrier")
+    if isinstance(barrier, dict) and (barrier.get("conversation") is None or barrier["conversation"] == conversation):
+        return True
+    # A trava gravada é uma só: a incerta de outra conversa também segura a escrita na dela.
+    return any(not key.startswith(_CALL_PREFIX) and _holds_terminal_write(op, conversation)
+               for key, op in state["operations"].items())
+
+
+def _record_terminal_write_barrier(state, operation):
+    if (operation["status"] != "unknown" or not _terminal_input(state, operation)
+            or ((operation.get("result") or {}).get("payload") or {}).get("native") is True):
+        return
+    if state["runtime_state"].get("terminal_write_barrier") is None:
+        state["runtime_state"]["terminal_write_barrier"] = {
+            "operation_id": operation["id"], "generation": state["generation"],
+            "conversation": (operation.get("dispatch_cursor") or {}).get("conversation")}
+
+
+def _holds_terminal_write(operation, conversation):
+    # Sem exigir a geração atual: a trava atravessa a troca de geração da mesma conversa.
+    payload = operation["payload"]
+    body = payload.get("payload") if isinstance(payload, dict) else None
+    return (operation["status"] == "unknown" and operation["entry_id"] is not None and isinstance(body, dict)
+        and payload.get("kind") == "input" and isinstance(body.get("text"), str)
+        and ("_terminal_generation" in body or any(wire.startswith("terminal:") for wire in operation["wire_attempts"]))
+        and ((operation.get("result") or {}).get("payload") or {}).get("native") is not True
+        and (conversation is None or (operation.get("dispatch_cursor") or {}).get("conversation") == conversation))
+
+
+def _release_terminal_write_barrier(state):
+    """A trava só sai quando a dona deixou de ser incerta e nenhuma outra da conversa resta."""
+    barrier = state["runtime_state"].get("terminal_write_barrier")
+    if not isinstance(barrier, dict):
+        return
+    owner = state["operations"].get(barrier.get("operation_id"))
+    if owner is not None and owner["status"] == "unknown":
+        return
+    heir = min((key for key, op in state["operations"].items() if not key.startswith(_CALL_PREFIX)
+                and _holds_terminal_write(op, barrier.get("conversation"))), default=None)
+    if heir is None:
+        del state["runtime_state"]["terminal_write_barrier"]
+    else:
+        state["runtime_state"]["terminal_write_barrier"] = {
+            "operation_id": heir, "generation": state["generation"], "conversation": barrier.get("conversation")}
+
+
+def _finalize_terminal(state, operation_id, clock):
+    operation = state["operations"][operation_id]
+    if (not _terminal_input(state, operation) or operation.get("terminal_finalized")
+            or operation["status"] not in {"deferred", "rejected"}):
+        return
+    row = next((row for row in state["rows"] if row.get("id") == operation["entry_id"]), None)
+    if row is None:
+        raise ValueError("entrada terminal ausente na finalização")
+    sequence = _terminal_finish_sequence(state, operation_id, operation["result"])
+    # O diário antigo pode já ter gravado o contador antes da queda.
+    counted = sequence is not None and any(call.startswith("call::terminal:queue:")
+        and call.rsplit(":", 1)[1].isascii() and call.rsplit(":", 1)[1].isdecimal() and int(call.rsplit(":", 1)[1]) > sequence
+        and receipt["payload"].get("kind") == "bump_attempts" and receipt["payload"].get("entry_id") == operation["entry_id"]
+        and receipt["result"] == row.get("attempts", 0) for call, receipt in state["operations"].items())
+    if (not row.get("confirmed") and not row.get("desistiu")
+            and (operation["status"] == "rejected" or row.get("delivered") is not False)):
+        if operation["status"] == "rejected":
+            row.update(delivered=True, desistiu=True, desistiu_ts=clock["epoch_s"])
+        elif not _terminal_protected(state, operation["entry_id"], operation_id):
+            cleanup = (operation["result"].get("payload") or {}).get("cleanup")
+            if cleanup not in {"proved", "not_needed"}:
+                raise ValueError("limpeza incerta não permite reentrega")
+            attempts = row.get("attempts", 0)
+            if cleanup == "proved" and not counted and attempts >= 2:
+                row.update(delivered=True, desistiu=True, desistiu_ts=clock["epoch_s"])
+            else:
+                if cleanup == "proved" and not counted:
+                    row["attempts"] = attempts + 1
+                row["delivered"] = False
+                row.pop("steered", None)
+    operation["terminal_finalized"] = True
+
+
+def _recover_terminal(state, clock):
+    _release_terminal_write_barrier(state)
+    for operation in state["operations"].values():
+        if _terminal_input(state, operation):
+            operation["payload"]["payload"].setdefault("_terminal_generation", state["generation"])
+            _record_terminal_write_barrier(state, operation)
+    materialized = {op["entry_id"] for op in state["operations"].values() if _terminal_input(state, op)
+                    and _entry_was_materialized(state, op["entry_id"])}
+    for entry_id in materialized:
+        _mark_materialized(state, entry_id)
+    for operation in tuple(state["operations"].values()):
+        if (operation["status"] != "prepared" or operation.get("entry_materialized") or operation["wire_attempts"] or not _terminal_input(state, operation)
+                or _terminal_protected(state, operation["entry_id"], operation["id"])):
+            continue
+        if any(row.get("id") == operation["entry_id"] for row in state["rows"]):
+            continue
+        body = operation["payload"]["payload"]
+        text = body["text"]
+        if (not text.strip() or text.lstrip().startswith("/")
+                or any((ord(c) < 32 or 127 <= ord(c) < 160) and c not in "\n\t" for c in text)):
+            raise ValueError("intenção terminal inválida")
+        apply_action(state, {"kind": "append", "text": text, "entry_id": operation["entry_id"], "delivered": False,
+            "ts": clock["epoch_s"], "pre_transcript": body.get("pre_transcript") is True}, clock, operation["id"])
+    finished = sorted(((_terminal_finish_sequence(state, operation_id, operation["result"]) or 0, operation_id)
+        for operation_id, operation in state["operations"].items() if _terminal_input(state, operation)
+        and operation["status"] in {"deferred", "rejected"}), reverse=True)
+    for _, operation_id in finished:
+        _finalize_terminal(state, operation_id, clock)
+
+
 def apply_action(state, action, clock, call_id):
     from app.models import scrub_surrogates
     from app.pqueue import PromptQueue
@@ -286,6 +472,7 @@ def apply_action(state, action, clock, call_id):
         for candidate in candidates[:max(0, overflow)]:
             rows.remove(candidate)
         rows.append(row)
+        _mark_materialized(state, entry_id)
         return row
     if kind == "prepare":
         operation_id = action["id"]
@@ -296,8 +483,13 @@ def apply_action(state, action, clock, call_id):
                 raise ValueError("intenção da operação mudou")
             if old["status"] == "deferred":
                 old.update(status="prepared", result=None)
+                old.pop("terminal_finalized", None)
+            if old["entry_id"] is not None and _entry_was_materialized(state, old["entry_id"]):
+                _mark_materialized(state, old["entry_id"])
             return old
         operation = operations[operation_id] = _operation(operation_id, action["payload"], action.get("entry_id"))
+        if action.get("entry_id") is not None and _entry_was_materialized(state, action["entry_id"]):
+            _mark_materialized(state, action["entry_id"])
         # Linha já confirmada pela fila: a mesma intenção chegando depois da poda não reenvia.
         if (not (isinstance(action["payload"], dict) and "logical_id" in action["payload"])
                 and operation["entry_id"] is not None
@@ -335,8 +527,12 @@ def apply_action(state, action, clock, call_id):
             attempt.update(status="accepted", result=action["result"])
             if all(wire["status"] == "accepted" for wire in operation["wire_attempts"].values()) and operation["status"] != "confirmed":
                 operation.update(status="accepted", result=action["result"])
+                _release_terminal_write_barrier(state)
         else:
             status = action.get("status", "accepted")
+            terminal = _terminal_input(state, operation)
+            if terminal and status == "deferred" and operation["status"] in {"accepted", "unknown", "confirmed", "rejected"}:
+                raise ValueError("resultado terminal protegido não permite reentrega")
             if (operation["status"] in {"accepted", "confirmed", "rejected"}
                     and isinstance(operation["result"], dict) and "disposition" in operation["result"]
                     and isinstance(action.get("result"), dict) and "write_outcome" in action["result"]):
@@ -345,7 +541,16 @@ def apply_action(state, action, clock, call_id):
                 return operation
             if operation["status"] == "unknown" and status in {"prepared", "dispatching", "deferred"}:
                 raise ValueError("resultado incerto não permite reenvio")
+            finalized = operation.get("terminal_finalized") and operation["status"] == status
             operation.update(status=status, result=action.get("result"))
+            _record_terminal_write_barrier(state, operation)
+            _release_terminal_write_barrier(state)
+            if terminal:
+                if finalized:
+                    operation["terminal_finalized"] = True
+                else:
+                    operation.pop("terminal_finalized", None)
+                _finalize_terminal(state, action["id"], clock)
         return operation
     if kind == "recover":
         for operation in operations.values():
@@ -354,6 +559,20 @@ def apply_action(state, action, clock, call_id):
                 for attempt in operation["wire_attempts"].values():
                     if attempt["status"] == "dispatching":
                         attempt["status"] = "unknown"
+        _recover_terminal(state, clock)
+        protected_status = {"accepted", "unknown", "dispatching", "confirmed", "rejected"}
+        phases = {op["payload"].get("logical_id") for op in operations.values()
+                  if op["status"] in protected_status}
+        protected = {op["entry_id"] for op in operations.values()
+                     if op["status"] in protected_status or op["id"] in phases}
+        claimed = {row.get("id") for call, op in operations.items()
+                   if call.startswith("call::terminal:queue:") and op["payload"].get("kind") == "claim"
+                   for row in op["result"]}
+        # Só o claim do executor terminal, sem despacho, prova ausência de efeito na TUI.
+        for row in rows:
+            if (row.get("delivered") is True and not row.get("confirmed") and not row.get("desistiu")
+                    and row.get("id") in claimed and row.get("id") not in protected):
+                row["delivered"] = False
         return None
     if kind == "confirm_occurrence":
         from app.runtime_receipt import validate_proof
@@ -376,11 +595,15 @@ def apply_action(state, action, clock, call_id):
             "conversation": occurrence["conversation"], "file_identity": occurrence["file_identity"],
             "offset": occurrence["offset"]}
         operation["status"] = "confirmed"
+        _release_terminal_write_barrier(state)
         return True
     if kind == "set_runtime_state":
         if not isinstance(action["state"], dict):
             raise ValueError("estado privado inválido")
+        barrier = state["runtime_state"].get("terminal_write_barrier")
         state["runtime_state"] = action["state"]
+        if barrier is not None:
+            state["runtime_state"]["terminal_write_barrier"] = barrier
         return None
     if kind == "rename":
         if not action["name"]:

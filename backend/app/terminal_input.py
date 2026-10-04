@@ -1552,6 +1552,7 @@ def _partial(name: str, motivo: str, texto: str, pastes_antes: set[str] | None =
     Uma funcao so para os seis sites porque o conserto e o mesmo em todos — limpar em cada caller
     daria seis chances de esquecer um, e foi assim que o residuo sobreviveu ate agora.
     """
+    _ULTIMA_LIMPEZA.stage = etapa
     pane = _capture(name)
     _log.error("envio PARCIAL name=%s: %s — %s", name, motivo,
                _diag_composer(pane, texto, name, pastes_antes))
@@ -2580,3 +2581,14 @@ class TerminalInput:
 
     def _abort(self, name: str) -> None:
         send_keys(name, "Escape")
+
+# A posse cobre o driver inteiro; a guarda do tmux confere cada efeito da reserva.
+from app.runtime_terminal import wrap_driver as _wrap_terminal_driver
+drain = _wrap_terminal_driver(drain, control='drain')
+answer_questions = _wrap_terminal_driver(answer_questions, control='answer_questions')
+steer_now = _wrap_terminal_driver(steer_now, control='steer')
+for _method, _control in {'send_prompt':'submit', 'send_key':'navigation_key', 'send_term_key':'interactive_key',
+        'send_text':'terminal_input', 'select':'select', 'submeter_multipla':'submit_selected', 'interrupt':'interrupt'}.items():
+    setattr(TerminalInput, _method, _wrap_terminal_driver(getattr(TerminalInput, _method), control=_control))
+for _method in ('set_model_effort', 'list_model_options', 'set_engine_model'):
+    setattr(TerminalInput, _method, _wrap_terminal_driver(getattr(TerminalInput, _method), admin=True))

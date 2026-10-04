@@ -80,4 +80,3 @@ pub async fn terminal(State(st): State<Arc<AppState>>, ConnectInfo(peer): Connec
         }
     }
 }
-

@@ -49,3 +49,22 @@ async fn unknown_command_fields_are_rejected() {
     assert!(!response.status().is_success());
     server.abort();
 }
+
+#[tokio::test]
+async fn terminal_runtime_gateway_adopts_without_cano_and_fences_generation() {
+    let dir=tempfile::tempdir().unwrap();
+    let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let address=listener.local_addr().unwrap();
+    let registry=Arc::new(RuntimeRegistry::new("127.0.0.1:9".parse().unwrap(),"secret-test".into(),"instance-test".into()));
+    let server=tokio::spawn(gateway::serve(listener,registry.clone(),"secret-test".into(),"instance-test".into(),hangar_server::INTERNAL_PROTOCOL));
+    let binding=serde_json::json!({"name":"session","pane":"%1","conversation":"sid","generation":1,"created":1,"mux_argv":["fake"],"windows":false,"clipboard_lock_path":null});
+    let descriptor=serde_json::json!({"name":"session","key":"key","provider":"claude","headless":false,"meta":{"key":"key","terminal":binding},"jsonl":dir.path().join("chat.jsonl"),"projection_dir":dir.path().join("projection"),"state_path":dir.path().join("state"),"lock_path":dir.path().join("lease"),"generation":1});
+    let client=reqwest::Client::new();
+    let send=|generation,command|client.post(format!("http://{address}/runtime/op")).header("x-hangar-internal","secret-test").header("x-hangar-runtime-instance","instance-test").header("content-type","application/json").body(serde_json::json!({"protocol":hangar_server::INTERNAL_PROTOCOL,"instance":"instance-test","key":"key","generation":generation,"operation_id":"gateway","clock":{"monotonic_s":0.0,"epoch_s":0.0},"command":command}).to_string());
+    let response=send(1,serde_json::json!({"kind":"adopt","descriptor":descriptor,"carry":{}})).send().await.unwrap(); assert!(response.status().is_success());
+    let value:serde_json::Value=serde_json::from_str(&response.text().await.unwrap()).unwrap(); assert_eq!(value["result"]["state"]["view"]["terminal"],true); assert!(value["result"]["state"]["view"].get("public_state").is_none());
+    assert!(registry.handle("key",1).await.is_err());
+    assert_eq!(send(2,serde_json::json!({"kind":"snapshot"})).send().await.unwrap().status(),503);
+    assert!(hangar_server::runtime::queue::acquire_lease(&dir.path().join("lease")).is_err());
+    assert!(send(1,serde_json::json!({"kind":"detach"})).send().await.unwrap().status().is_success());
+    assert!(hangar_server::runtime::queue::acquire_lease(&dir.path().join("lease")).is_ok()); server.abort();
+}

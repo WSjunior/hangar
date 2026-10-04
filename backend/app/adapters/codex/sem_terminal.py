@@ -106,6 +106,7 @@ def _ambiente(meta: dict) -> dict:
     env["CP_SESSION_NAME"] = meta["name"]
     env["CP_SESSION_KEY"] = meta["key"]
     env[hl_adapter._MARCADOR_CANO] = meta["key"]
+    env[hl_adapter._CANO_OWNER] = str(Path.home())
     # Escolha da abertura, como no Claude sem terminal: marcador sempre, chave só com o recurso
     # ligado. Herdar do backend daria o Jev a toda sessão.
     env.update(runtime_config.env_jev(bool(meta.get("jev"))))

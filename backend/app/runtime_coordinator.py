@@ -6,7 +6,9 @@ import contextvars
 import copy
 import errno
 import json
+import logging
 import os
+import sys
 import re
 import threading
 import time
@@ -17,6 +19,8 @@ from enum import Enum
 from pathlib import Path
 
 from app import runtime_queue
+
+_log = logging.getLogger("hangar.runtime")
 
 _current = None
 _lifecycle = contextvars.ContextVar("runtime_lifecycle", default=None)
@@ -42,12 +46,12 @@ class Phase(Enum):
 
 class WriterLease:
     def __init__(self, path):
-        path = Path(path)
+        path = path if isinstance(path, Path) else Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
         self.file = os.fdopen(fd, "r+b", buffering=0)
         try:
-            if os.name == "nt":
+            if sys.platform == "win32":
                 import ctypes
                 import msvcrt
 
@@ -116,10 +120,12 @@ class Slot:
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     cache_valid: bool = False
     lifecycle_token: object | None = None
+    terminal_serial: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Geração em que o Rust falhou com a sessão: ela fica no Python até o backend reiniciar, que é
     # quando chega a versão com a correção.
     rust_refused: int | None = None
     adopt_failures: int = 0
+    awaiting_identity: bool = False
 
 
 def _clock():
@@ -130,7 +136,7 @@ def failure_reason(exc: BaseException) -> dict:
     """Tipo e motivo de uma falha do runtime para o diário. Só falhas do caminho Rust levam o
     detalhe: lá a mensagem é código e frase fixa. As do Python podem embutir texto da sessão."""
     from_rust = getattr(exc, "_hangar_rust", False) or type(exc).__name__ in {"RustOpError", "RustCacheInvalid"}
-    plain = from_rust or isinstance(exc, (TimeoutError, ConnectionError))
+    plain = from_rust or getattr(exc, "safe_detail", False) or isinstance(exc, (TimeoutError, ConnectionError))
     return {"codigo": type(exc).__name__, "detalhe": str(exc)[:200] if plain else ""}
 
 
@@ -140,7 +146,8 @@ _PRE_EFFECT_CODES = frozenset({
     "command_kind", "command_fields", "descriptor_shape", "descriptor_binding", "cano_pid",
     "cano_token", "cano_address", "cano_version", "cano_connect", "cano_auth", "runtime_binding",
     "runtime_provider", "runtime_lease", "runtime_generation", "runtime_stopping", "control_kind",
-    "queue_action"})
+    "queue_action", "terminal_facts", "receipt_scan"})
+_TERMINAL_PRE_EFFECT_ERRORS = frozenset({"terminal_facts", "receipt_scan"})
 # Respostas normais do Rust ao pedido (botão velho, sessão ocupada, entrada inválida): não são
 # defeito, então não contam nem trocam de dono; só sobem como erro.
 _ANSWER_CODES = frozenset({
@@ -176,6 +183,7 @@ class RuntimeCoordinator:
         self.registration_locks = {}
         self.adoption_task = None
         self.rebindings = {}
+        self.drains = {}
 
     async def prepare_session(self, name, provider):
         if self.legacy is None:
@@ -183,28 +191,62 @@ class RuntimeCoordinator:
         async with self.registration_locks.setdefault(name, asyncio.Lock()):
             binding = await asyncio.to_thread(self.legacy.binding, name, provider)
             if binding is None:
+                from app.runtime_terminal import outside_scope
+                if self.managed_runtime(name) or provider == "claude" and not await asyncio.to_thread(outside_scope, name):
+                    raise RuntimeError("vínculo gerenciado indisponível; escrita suspensa")
                 return False
+            if self.managed_queue(name) and self.slot(name).binding.key != binding.key:
+                previous = self.slot(name)
+                if previous.awaiting_identity:
+                    # Registro em espera nunca teve posse, fila nem dono no Rust: não há o que soltar.
+                    self.names.pop(name, None)
+                else:
+                    async with self.freeze(name):
+                        if previous.phase != Phase.Python:
+                            await self.detach(name, restore=False)
+                        previous.lease.close()
+                        previous.lease = None
+                        previous.phase = Phase.RecoveringPython
+                        self.names.pop(name, None)
             slot = self.slots.get(binding.key)
             if slot is None:
                 slot = await asyncio.to_thread(self.register, binding)
-            if slot is None or not slot.binding.headless:
+            if slot is None or not self.managed_runtime(name):
                 return False
+            if slot.awaiting_identity:
+                async with self.freeze(name):
+                    from app.runtime_process import reconcile_startup
+                    from app.runtime_terminal import validate_binding
+                    await asyncio.to_thread(reconcile_startup, allow_current=True)
+                    await asyncio.to_thread(validate_binding, binding.descriptor())
+                    if slot.store is not None or slot.lease is not None or slot.phase != Phase.RecoveringPython:
+                        raise RuntimeError("registro aguardando identidade já possui responsável")
+                    await self._restore(slot, reconnect=False)
+                    slot.awaiting_identity = False
             if slot.frozen or slot.phase not in {Phase.Python, Phase.Rust}:
                 raise RuntimeError("sessão em transferência; aguarde a confirmação")
-            if slot.phase == Phase.Rust and binding.jsonl != slot.binding.jsonl:
+            agent_changed = binding.meta.get("terminal") and any(binding.meta.get(field) != slot.binding.meta.get(field)
+                for field in ("agent_pid", "agent_birth"))
+            if binding.jsonl != slot.binding.jsonl or agent_changed:
                 async def changed():
                     return None
                 field = "session_id" if binding.provider == "claude" else "thread_id"
-                await self.change(name, changed, advance=binding.meta.get(field) != slot.binding.meta.get(field), reopen=False)
+                await self.change(name, changed, advance=bool(agent_changed) or binding.meta.get(field) != slot.binding.meta.get(field), reopen=False)
+                binding = slot.binding
             if slot.phase == Phase.Python:
                 with slot.guard:
                     slot.binding.meta = binding.meta
-                if (self.transport is not None and (binding.meta.get("cano") or {}).get("versao") == 2
-                        and slot.rust_refused is None):
+                    state = copy.deepcopy(slot.store.state)
+                    state["runtime_state"]["_binding"] = slot.binding.descriptor()
+                    slot.store._persist(state)
+                if self.transport is not None and ((binding.meta.get("cano") or {}).get("versao") == 2
+                        or binding.meta.get("terminal")) and slot.rust_refused is None:
                     await self.adopt(name)
             return True
 
     async def start_sessions(self, adapters):
+        from app.runtime_process import reconcile_startup
+        await asyncio.to_thread(reconcile_startup)
         from app.runtime_adapter import LegacyBridge
         self.loop = asyncio.get_running_loop()
         self.legacy = LegacyBridge(self, adapters)
@@ -216,7 +258,23 @@ class RuntimeCoordinator:
                 values = {**descriptor, "generation":state["generation"]}
                 for field in ("projection_dir", "state_path", "lock_path"):
                     values[field] = Path(values[field])
-                await asyncio.to_thread(self.register, Binding(**values))
+                binding = Binding(**values)
+                if binding.meta.get("terminal"):
+                    from app.runtime_terminal import resolve_binding
+                    fresh = await asyncio.to_thread(resolve_binding, binding.name, binding)
+                    if fresh is None or fresh.key != binding.key:
+                        self.slots[binding.key] = Slot(binding=binding)
+                        if fresh is None:
+                            self.slots[binding.key].awaiting_identity = True
+                            self.names.setdefault(binding.name, binding.key)
+                            from app import diag
+                            diag.registrar("runtime.registration_failed", "erro", sessao=binding.name, codigo="terminal_binding")
+                            continue
+                    else:
+                        fresh.generation += int(fresh.jsonl != binding.jsonl)
+                        fresh.meta["terminal"]["generation"] = fresh.generation
+                    binding = fresh
+                await asyncio.to_thread(self.register, binding)
         from app.adapters.claude_headless import sessions as claude_sessions
         from app.adapters.codex import sessions as codex_sessions
         for provider, sessions in (("claude", claude_sessions), ("codex", codex_sessions)):
@@ -230,16 +288,25 @@ class RuntimeCoordinator:
 
     async def native_receipt(self, message_id, status):
         for slot in tuple(self.slots.values()):
+            if self.names.get(slot.binding.name) != slot.binding.key:
+                continue
             state = await asyncio.to_thread(lambda: json.loads(slot.binding.state_path.read_bytes()))
             for operation_id, operation in state["operations"].items():
                 if operation["payload"].get("kind") not in {"input", "steer"}:
                     continue
-                expected = str(uuid.uuid5(uuid.NAMESPACE_URL, "hangar:" + slot.binding.key + ":" + operation_id))
+                root_id = operation.get("entry_id") or operation_id
+                if slot.binding.meta.get("terminal"):
+                    result = operation.get("result") or {}
+                    delivery = result.get("payload") or {}
+                    if (delivery.get("native") is not True or delivery.get("message_id") != message_id
+                            or operation["payload"].get("payload", {}).get("_terminal_generation") != slot.binding.generation):
+                        continue
+                expected = str(uuid.uuid5(uuid.NAMESPACE_URL, "hangar:" + slot.binding.key + ":" + root_id))
                 if message_id != expected:
                     continue
                 disposition = "accepted" if status in {"delivered", "released", ""} else "rejected" if status in {"rejected", "refused"} else "unknown"
-                await self.op(slot.binding.name, {"kind":"queue", "action":{"kind":"finish", "id":operation_id,
-                    "status":disposition, "result":{"operation_id":operation_id, "disposition":disposition,
+                await self.op(slot.binding.name, {"kind":"queue", "action":{"kind":"finish", "id":root_id,
+                    "status":disposition, "result":{"operation_id":root_id, "disposition":disposition,
                         "payload":{"native_status":status}}}}, "native-receipt:" + message_id + ":" + status)
                 if disposition == "accepted":
                     await self.op(slot.binding.name, {"kind":"confirm"}, uuid.uuid4().hex)
@@ -255,7 +322,7 @@ class RuntimeCoordinator:
         if self.legacy is not None:
             async def adopt_registered():
                 for slot in tuple(self.slots.values()):
-                    if slot.binding.headless:
+                    if self.names.get(slot.binding.name) == slot.binding.key and self.managed_runtime(slot.binding.name):
                         try:
                             await self.prepare_session(slot.binding.name, slot.binding.provider)
                         except Exception as exc:
@@ -309,14 +376,19 @@ class RuntimeCoordinator:
                 diag.registrar("runtime.refresh_failed", "erro", sessao=slot.binding.name, **failure_reason(exc))
         self.refreshing[key] = asyncio.create_task(refresh())
 
-    def request_drain(self, name):
+    def request_drain(self, name, kind="drain"):
+        slot = self.slots.get(self.names.get(name, ""))
+        if slot is None or slot.binding.key in self.drains and not self.drains[slot.binding.key].done():
+            return
         async def drain():
             try:
-                await self.op(name, {"kind":"drain"}, uuid.uuid4().hex)
-            except Exception:
-                self.slot(name).cache_valid = False
-                self._signal(self.slot(name))
-        self.loop.create_task(drain())
+                await self.op(name, {"kind":kind}, uuid.uuid4().hex)
+            except Exception as exc:
+                slot.cache_valid = False
+                self._signal(slot)
+                from app import diag
+                diag.registrar("runtime.drain_failed", "erro", sessao=name, **failure_reason(exc))
+        self.drains[slot.binding.key] = self.loop.create_task(drain())
 
     async def _events(self, transport, instance):
         from app.runtime_adapter import apply_event
@@ -350,6 +422,8 @@ class RuntimeCoordinator:
                         field = "session_id" if slot.binding.provider == "claude" else "thread_id"
                         if conversation and conversation != slot.binding.meta.get(field):
                             self._rebind(slot)
+                    if slot.binding.meta.get("terminal") and slot.view.get("error"):
+                        self.request_drain(slot.binding.name, "confirm" if slot.view["error"] == "receipt_scan" else "drain")
                     delay = 0.25
                 raise RuntimeError("stream privado encerrado sem aviso")
             except asyncio.CancelledError:
@@ -385,6 +459,8 @@ class RuntimeCoordinator:
 
     def register(self, binding: Binding):
         global _current
+        from app.runtime_process import reconcile_startup
+        reconcile_startup(allow_current=True)
         if binding.provider not in {"claude", "codex"} or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", binding.key):
             raise ValueError("binding inválido para o runtime")
         if old := self.slots.get(binding.key):
@@ -408,7 +484,8 @@ class RuntimeCoordinator:
                 old.binding = copy.deepcopy(binding)
                 self.names[binding.name] = binding.key
             return old
-        if not binding.headless and not binding.state_path.exists():
+        terminal = binding.provider == "claude" and isinstance(binding.meta.get("terminal"), dict)
+        if not binding.headless and not terminal and not binding.state_path.exists():
             return None
         lease = WriterLease(binding.lock_path)
         slot = Slot(binding=copy.deepcopy(binding), lease=lease)
@@ -418,7 +495,13 @@ class RuntimeCoordinator:
         try:
             projection = binding.projection_dir / f"{self._sanitize(binding.name)}.jsonl"
             rows = []
-            if not binding.state_path.exists() and projection.exists():
+            if terminal:
+                from app.runtime_terminal import validate_binding, import_legacy
+                if self.legacy is not None:
+                    validate_binding(binding.descriptor())
+                if not binding.state_path.exists() and projection.exists():
+                    rows = import_legacy(self, binding, projection)
+            if not binding.state_path.exists() and projection.exists() and not terminal:
                 for raw in projection.read_text(encoding="utf-8").splitlines():
                     row = json.loads(raw)
                     if not isinstance(row, dict):
@@ -431,8 +514,13 @@ class RuntimeCoordinator:
                     raise ValueError("a geração não pode voltar para uma vida antiga")
                 state = copy.deepcopy(slot.store.state)
                 state["generation"] = binding.generation
+                if terminal:
+                    state["runtime_state"] = {key:value for key,value in state["runtime_state"].items() if key == "terminal_write_barrier"}
                 slot.store._persist(state)
             slot.store.exec(binding.generation, "recover:" + uuid.uuid4().hex, _clock(), {"kind": "recover"})
+            state = copy.deepcopy(slot.store.state)
+            state["runtime_state"]["_binding"] = binding.descriptor()
+            slot.store._persist(state)
             slot.phase = Phase.Python
             return slot
         except BaseException:
@@ -453,7 +541,9 @@ class RuntimeCoordinator:
 
     def managed_runtime(self, name):
         key = self.names.get(name)
-        return bool(key and self.slots[key].binding.headless)
+        return bool(key and (self.slots[key].binding.headless or
+            self.slots[key].binding.provider == "claude" and (isinstance(self.slots[key].binding.meta.get("terminal"), dict)
+                or self.slots[key].binding.meta.get("pending_terminal"))))
 
     def managed_queue(self, name):
         return name in self.names
@@ -497,6 +587,11 @@ class RuntimeCoordinator:
     def queue_rpc(self, route, call_id, clock, action):
         slot, phase, descriptor = route
         if phase == Phase.Python:
+            if descriptor["meta"].get("terminal") and not self.in_lifecycle(slot):
+                from app.runtime_terminal import _writer
+                if _writer.get() is None:
+                    from app.runtime_adapter import run_sync
+                    return run_sync(lambda:self.op(descriptor["name"], {"kind":"queue", "action":action}, call_id), self.loop)
             # A rota já conta em `slot.active` (queue_gate): a posse não muda até ela sair, e a
             # gravação é serializada dentro do QueueStore, fora da trava que o laço de eventos usa.
             return slot.store.exec(descriptor["generation"], call_id, _clock(), action)
@@ -528,6 +623,8 @@ class RuntimeCoordinator:
 
     async def shutdown(self):
         for slot in tuple(self.slots.values()):
+            if self.names.get(slot.binding.name) != slot.binding.key:
+                continue
             async with self._barrier(slot):
                 with slot.guard:
                     slot.frozen = True
@@ -564,7 +661,10 @@ class RuntimeCoordinator:
     async def _rpc(self, descriptor, command, operation_id):
         if self.transport is None or not self.instance:
             raise RuntimeError("IPC do runtime indisponível")
-        return await self.transport.op(descriptor, command, operation_id, _clock())
+        result = await self.transport.op(descriptor, command, operation_id, _clock())
+        if descriptor["meta"].get("terminal") and command["kind"] == "drain":
+            result = {**result, "sent":int((result.get("reply") or {}).get("disposition") == "accepted")}
+        return result
 
     async def _hand_to_python(self, name, reason: str, exc: BaseException | None = None):
         """Passa só esta sessão para o Python até o backend reiniciar; o resto segue no Rust.
@@ -598,6 +698,8 @@ class RuntimeCoordinator:
         error = (slot.view or {}).get("error")
         if slot.phase != Phase.Rust or slot.cache_valid or not error:
             return
+        if slot.binding.meta.get("terminal") and error in _TERMINAL_PRE_EFFECT_ERRORS:
+            return
         await self._hand_to_python(name, "rust_em_erro:" + str(error)[:60])
 
     async def op(self, name, command, operation_id):
@@ -605,13 +707,52 @@ class RuntimeCoordinator:
         sessão vai para o Python e a mesma operação sai por ele. Falha que pode ter tido efeito não
         se repete (duplicaria a mensagem): a sessão vai para o Python e o erro sobe."""
         self.loop = asyncio.get_running_loop()
+        if self.legacy is not None and self.managed_queue(name):
+            slot = self.slot(name)
+            if (slot.binding.meta.get("terminal") or slot.binding.meta.get("pending_terminal")) and command["kind"] != "queue" and not self.in_lifecycle(slot):
+                await self.prepare_session(name, "claude")
+        if (command["kind"] == "submit" and command["text"].split()[0:1] == ["/clear"]
+                and self.managed_queue(name) and self.slot(name).binding.meta.get("terminal")
+                and not self.in_lifecycle(self.slot(name))):
+            async def clear():
+                async with self.freeze(name):
+                    result = await self.op(name, command, operation_id)
+                    if result.get("disposition") in {"accepted", "unknown"}:
+                        await self.op(name, {"kind":"queue", "action":{"kind":"clear"}}, uuid.uuid4().hex)
+                    return result
+            task = asyncio.create_task(clear())
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                await task
+                raise
         read_only = command.get("kind") in {"snapshot", "ensure_projection"}
+        initial = self.slots.get(self.names.get(name, ""))
+        terminal_identity = (initial.binding.key, initial.binding.generation) if initial and initial.binding.meta.get("terminal") else None
         failures = 0
         while True:
+            current = self.slots.get(self.names.get(name, ""))
+            if terminal_identity and (current is None or (current.binding.key, current.binding.generation) != terminal_identity):
+                raise RuntimeError("vida terminal mudou durante a tentativa; entrada não repetida")
             if not read_only:
                 await self._settle_rust(name)
+            current = self.slots.get(self.names.get(name, ""))
+            if terminal_identity and (current is None or (current.binding.key, current.binding.generation) != terminal_identity):
+                raise RuntimeError("vida terminal mudou durante a tentativa; entrada não repetida")
             try:
-                return await self._op_once(name, command, operation_id)
+                source = self.slots.get(self.names.get(name, ""))
+                identity = (source.binding.key, source.binding.generation) if source and source.phase == Phase.Rust and source.binding.meta.get("terminal") else None
+                result = await self._op_once(name, command, operation_id)
+                outcome = result.get("reply", result) if isinstance(result, dict) else None
+                if identity and isinstance(outcome, dict) and outcome.get("disposition") == "unknown":
+                    from app import diag
+                    from app.rust_server import RustOpError
+                    failure = RustOpError("terminal_delivery_unknown: entrega não comprovada; não repetir", 503, "terminal_delivery_unknown")
+                    diag.registrar("runtime.rust_delivery_failed", "erro", sessao=name, **failure_reason(failure))
+                    current = self.slots.get(self.names.get(name, ""))
+                    if current and (current.binding.key, current.binding.generation) == identity:
+                        await self._hand_to_python(name, "entrega_incerta", failure)
+                return result
             except Exception as exc:
                 if not getattr(exc, "_hangar_rust", False) or getattr(exc, "code", "") in _ANSWER_CODES:
                     raise
@@ -630,6 +771,9 @@ class RuntimeCoordinator:
                         await asyncio.sleep(_RETRY_PAUSE_S)
                     continue
                 await self._hand_to_python(name, "falhas_seguidas", exc)
+                current = self.slots.get(self.names.get(name, ""))
+                if terminal_identity and (current is None or (current.binding.key, current.binding.generation) != terminal_identity):
+                    raise RuntimeError("vida terminal mudou durante a tentativa; entrada não repetida")
                 return await self._op_once(name, command, operation_id)
 
     async def _op_once(self, name, command, operation_id):
@@ -639,7 +783,9 @@ class RuntimeCoordinator:
             slot, phase, descriptor = route
             if phase == Phase.Rust:
                 try:
-                    if command["kind"] not in {"snapshot", "ensure_projection"} and not slot.cache_valid:
+                    maintenance = (slot.binding.meta.get("terminal") and command["kind"] in {"confirm", "drain"}
+                        and slot.view.get("error") in _TERMINAL_PRE_EFFECT_ERRORS)
+                    if command["kind"] not in {"snapshot", "ensure_projection"} and not slot.cache_valid and not maintenance:
                         raise RustCacheInvalid("estado do runtime indisponível; aguarde a reposição")
                     return await self._rpc(descriptor, command, operation_id)
                 except Exception as exc:
@@ -647,6 +793,18 @@ class RuntimeCoordinator:
                     raise
             if self.legacy is None:
                 raise RuntimeError("serviço da reserva indisponível")
+            if descriptor["meta"].get("terminal"):
+                from app import runtime_terminal
+                async with slot.terminal_serial:
+                    if slot.binding.descriptor() != descriptor:
+                        raise RuntimeError("binding mudou durante a espera")
+                    await asyncio.to_thread(runtime_terminal.validate_binding, descriptor)
+                    task = asyncio.create_task(self.legacy.op(descriptor, command, operation_id))
+                    try:
+                        return await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        await task
+                        raise
             return await self.legacy.op(descriptor, command, operation_id)
 
     async def adopt(self, name):
@@ -654,10 +812,16 @@ class RuntimeCoordinator:
         async with self._barrier(slot):
             if slot.phase == Phase.Rust:
                 return True
-            if slot.phase != Phase.Python or not slot.binding.headless:
+            if slot.phase != Phase.Python or not self.managed_runtime(name):
                 raise RuntimeError("sessão não está disponível para transferência")
+            if slot.binding.meta.get("pending_terminal"):
+                raise RuntimeError("vínculo terminal ainda não confirmado; transferência suspensa")
             descriptor = slot.binding.descriptor()
-            await self.peek(descriptor)
+            if descriptor["meta"].get("terminal"):
+                from app.runtime_terminal import validate_binding
+                await asyncio.to_thread(validate_binding, descriptor)
+            else:
+                await self.peek(descriptor)
             with slot.guard:
                 slot.phase = Phase.PreparingRust
             await self._wait_active(slot)
@@ -725,7 +889,7 @@ class RuntimeCoordinator:
                                    **failure_reason(exc))
                 return False
 
-    async def _restore(self, slot):
+    async def _restore(self, slot, *, reconnect=True):
         if slot.lease is None or slot.lease.closed:
             slot.lease = WriterLease(slot.binding.lock_path)
         slot.store = runtime_queue.QueueStore(slot.binding.state_path, slot.binding.projection_dir,
@@ -735,13 +899,13 @@ class RuntimeCoordinator:
         slot.carry = {"runtime_state":copy.deepcopy(recovered_view)} if recovered_view else slot.carry
         if self.legacy is None:
             raise RuntimeError("serviço da reserva indisponível")
-        ready = await self.legacy.reconnect(slot.binding.descriptor(), slot.carry)
+        ready = await self.legacy.reconnect(slot.binding.descriptor(), slot.carry) if reconnect else {"hydrated":True}
         if ready.get("hydrated") is not True:
             raise RuntimeError("reserva não restaurou o snapshot")
         with slot.guard:
             slot.phase = Phase.Python
 
-    async def detach(self, name):
+    async def detach(self, name, *, restore=True):
         slot = self.slot(name)
         async with self._barrier(slot):
             if slot.phase == Phase.Python:
@@ -758,19 +922,38 @@ class RuntimeCoordinator:
                 with slot.guard:
                     slot.phase = Phase.Rust
                 raise
-            await self._restore(slot)
+            await self._restore(slot, reconnect=restore)
 
-    async def recover(self, name, confirmed_dead: bool):
+    async def recover(self, name, confirmed_dead: bool, containment=None):
         slot = self.slot(name)
         async with self._barrier(slot):
             alive = getattr(self.transport, "alive", False)
             alive = alive() if callable(alive) else alive
             if not confirmed_dead or alive:
                 raise RuntimeError("morte do Rust não foi confirmada; a reserva permanece bloqueada")
+            if slot.binding.meta.get("terminal"):
+                proof = getattr(containment or self.transport, "containment_clean", None)
+                if proof is None or proof() is not True:
+                    raise RuntimeError("fim dos descendentes Rust não comprovado; escrita suspensa")
             with slot.guard:
                 slot.phase = Phase.RecoveringPython
             await self._wait_active(slot)
-            await self._restore(slot)
+            try:
+                await self._restore(slot)
+            except BaseException:
+                # Rust morto e contido: o registro sai, e o próximo prepare_session refaz a sessão a
+                # partir do estado durável. Sem isto o nome ficava preso em recuperação até o restart.
+                with slot.guard:
+                    try:
+                        if slot.lease is not None:
+                            slot.lease.close()
+                    except Exception:
+                        _log.warning("trava de escrita não fechou ao aposentar a sessão", exc_info=True)
+                    slot.lease = None
+                    if self.names.get(name) == slot.binding.key:
+                        self.names.pop(name, None)
+                    self.slots.pop(slot.binding.key, None)
+                raise
 
     @asynccontextmanager
     async def freeze(self, name):
@@ -798,11 +981,22 @@ class RuntimeCoordinator:
         if runtime_queue._coordinator is self:
             runtime_queue.configure(None)
 
+    async def retire_waiting(self, name):
+        """Nome reaproveitado por uma vida nova: o registro que esperava a identidade antiga sai."""
+        async with self.registration_locks.setdefault(name, asyncio.Lock()):
+            key = self.names.get(name)
+            if key is not None and self.slots[key].awaiting_identity:
+                self.names.pop(name, None)
+
     async def change(self, name, action, *, new_name=None, advance=True, remove=False, reopen=True):
         if not self.managed_queue(name):
             return await action()
         slot = self.slot(name)
         if self.in_lifecycle(slot):
+            return await action()
+        if remove and slot.awaiting_identity:
+            # Registro em espera nunca teve posse nem dono no Rust: fechar só solta o nome.
+            await self.retire_waiting(name)
             return await action()
 
         async def perform():
@@ -810,12 +1004,14 @@ class RuntimeCoordinator:
                 if slot.phase != Phase.Python:
                     await self.detach(name)
                 if remove and self.legacy is not None:
-                    await self.legacy.quiesce(slot.binding.descriptor())
+                    # Fechar não escreve na conversa: basta esperar os escritores, mesmo com vínculo mudado.
+                    await self.legacy.quiesce({**slot.binding.descriptor(), "removed":True})
                 result = await action()
                 await self._wait_active(slot)
                 if remove:
                     if self.legacy is not None:
-                        await self.legacy.quiesce(slot.binding.descriptor())
+                        # Removida, a sessão não tem mais vínculo a conferir: só se esperam os escritores.
+                        await self.legacy.quiesce({**slot.binding.descriptor(), "removed":True})
                     with slot.guard:
                         slot.lease.close()
                         slot.lease = None
@@ -825,9 +1021,13 @@ class RuntimeCoordinator:
                 target_name = new_name or name
                 binding = await asyncio.to_thread(self.legacy.binding, target_name, slot.binding.provider)
                 if binding is None:
-                    binding = copy.deepcopy(slot.binding)
-                    binding.name, binding.headless = target_name, False
-                    binding.meta = {**binding.meta, "headless":False, "cano":None}
+                    from app.runtime_terminal import pending_binding
+                    binding = (await asyncio.to_thread(pending_binding, target_name, slot.binding)
+                        if slot.binding.provider == "claude" and slot.binding.headless else None)
+                    if binding is None:
+                        binding = copy.deepcopy(slot.binding)
+                        binding.name, binding.headless = target_name, False
+                        binding.meta = {**binding.meta, "headless":False, "cano":None}
                 if binding.key != slot.binding.key:
                     raise RuntimeError("mudança de modo não pode trocar a chave durável")
                 if self.legacy is not None:
@@ -835,10 +1035,14 @@ class RuntimeCoordinator:
                 with slot.guard:
                     if slot.store.state["name"] != target_name:
                         slot.store.exec(slot.binding.generation, "rename:" + uuid.uuid4().hex, _clock(), {"kind":"rename", "name":target_name})
+                    if slot.binding.meta.get("terminal") and binding.jsonl != slot.binding.jsonl:
+                        slot.store.exec(slot.binding.generation, "clear:" + uuid.uuid4().hex, _clock(), {"kind":"clear"})
                     binding.generation = slot.binding.generation + int(advance)
+                    if isinstance(binding.meta.get("terminal"), dict):
+                        binding.meta["terminal"]["generation"] = binding.generation
                     state = copy.deepcopy(slot.store.state)
                     if advance:
-                        state["runtime_state"] = {}
+                        state["runtime_state"] = {key:value for key,value in state["runtime_state"].items() if key == "terminal_write_barrier"}
                     state["runtime_state"]["_binding"] = binding.descriptor()
                     slot.store._persist(state)
                 self.register(binding)
@@ -852,7 +1056,7 @@ class RuntimeCoordinator:
         except asyncio.CancelledError:
             await task
             raise
-        if reopen and not remove and slot.binding.headless:
+        if reopen and not remove and self.managed_runtime(slot.binding.name):
             await self.prepare_session(slot.binding.name, slot.binding.provider)
         return result
 

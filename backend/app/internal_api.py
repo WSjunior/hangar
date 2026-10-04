@@ -107,6 +107,7 @@ async def runtime_policy(request: Request):
         metadata = copy.deepcopy(slot.binding.meta)
         metadata.update(provider=slot.binding.provider, name=slot.binding.name, key=slot.binding.key,
                         generation=slot.binding.generation, jsonl=slot.binding.jsonl,
+                        descriptor=slot.binding.descriptor(),
                         state_path=str(slot.binding.state_path),
                         operation_id=body["request_id"] if isinstance(body["request_id"], str) else body["phase_id"], validate=validate)
         async def perform():

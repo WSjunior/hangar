@@ -32,7 +32,7 @@ _log = logging.getLogger("hangar.rust_server")
 HEALTH_PATH = "/__hangar_server/health"
 # Versão do contrato interno (rotas /internal, side-events, ambiente). Tem de casar com o
 # `protocol` da saúde (hangar_server::INTERNAL_PROTOCOL); outro número = o Python atende sozinho.
-RUST_SERVER_PROTOCOL = 8
+RUST_SERVER_PROTOCOL = 10
 START_TIMEOUT = 10.0
 CRASH_WINDOW = 60.0
 MAX_CRASHES = 3
@@ -98,11 +98,8 @@ def _health(host: str, port: int) -> dict | None:
 
 
 def _spawn(binary: Path, env: dict[str, str]) -> subprocess.Popen:
-    # stdin=PIPE: o Popen guardado segura a ponta de escrita enquanto o filho vive. Quando o
-    # Python morre, de qualquer jeito e em qualquer sistema, ela fecha e o binário sai.
-    kw: dict = {"creationflags": _CREATE_NO_WINDOW} if sys.platform == "win32" else {}
-    return subprocess.Popen([str(binary)], env=env, stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE, **kw)
+    from app.runtime_process import spawn_contained, record_path
+    return spawn_contained([str(binary)], env=env, record_path=record_path())
 
 
 def _runtime_ready(proc, instance: str) -> dict:
@@ -134,8 +131,9 @@ class RustOpError(RuntimeError):
 class RuntimeTransport:
     """Um transporte privado por filho, sem retry de operação mutável."""
 
-    def __init__(self, port: int, secret: str, instance: str, alive):
+    def __init__(self, port: int, secret: str, instance: str, alive, containment_clean=None):
         self.instance, self.alive = instance, alive
+        self.containment_clean = containment_clean or (lambda: False)
         self._port = port
         self._headers = {"x-hangar-internal": secret, "x-hangar-runtime-instance": instance,
                          "content-type": "application/json"}
@@ -290,7 +288,9 @@ class Supervisor:
         """`up`, `died` (morreu subindo), `silent` (vivo e calado até o prazo) ou `protocol`."""
         terminal_observer.configure(None, None)
         if self.proc is not None:
-            _close_stdin(self.proc)                     # o anterior já saiu
+            from app.runtime_process import cleanup
+            await asyncio.to_thread(cleanup, self.proc)
+            _close_stdin(self.proc)
         env = self._env()
         self.proc = _spawn(self.binary, env)
         try:
@@ -347,6 +347,8 @@ class Supervisor:
                     diag.registrar("hangar_server.de_pe")
                 while state == "up" and self.proc.poll() is None:
                     await asyncio.sleep(_POLL)
+                    from app.runtime_process import refresh_members
+                    await asyncio.to_thread(refresh_members, self.proc)
                 terminal_observer.configure(None, None)
                 await self.deactivate_runtime(confirmed_dead=self.proc.poll() is not None)
                 # Parada normal (systemctl, Ctrl+C) leva o filho junto, no mesmo instante em que o uvicorn
@@ -390,7 +392,9 @@ class Supervisor:
         self.runtime_ready = dict(ready)
         self.runtime_secret, self.runtime_instance = secret, instance
         self.runtime_transport = RuntimeTransport(ready["port"], secret, instance,
-            lambda: self.proc is not None and self.proc.poll() is None)
+            lambda: self.proc is not None and self.proc.poll() is None,
+            lambda: bool(self.proc is not None and getattr(self.proc, "runtime_containment", None)
+                and self.proc.runtime_containment.cleaned))
         coordinator = runtime_coordinator.ensure()
         coordinator.configure_transport(self.runtime_transport)
 
@@ -398,6 +402,10 @@ class Supervisor:
         if not confirmed_dead:
             raise RuntimeError("morte do Rust não confirmada; reserva bloqueada")
         from app import runtime_coordinator
+        from app.runtime_process import cleanup
+        if self.proc is not None:
+            await asyncio.to_thread(cleanup, self.proc)
+        proof = self.runtime_transport
         if self.runtime_transport is not None:
             await self.runtime_transport.close()
         coordinator = runtime_coordinator.current()
@@ -406,8 +414,19 @@ class Supervisor:
             if coordinator.transport is self.runtime_transport:
                 coordinator.transport, coordinator.instance = None, None
             for slot in tuple(coordinator.slots.values()):
-                if slot.phase != runtime_coordinator.Phase.Python:
-                    await coordinator.recover(slot.binding.name, confirmed_dead=True)
+                if hasattr(coordinator, "names") and coordinator.names.get(slot.binding.name) != slot.binding.key:
+                    continue
+                # Registro em espera de uma vida que não voltou nunca teve dono no Rust.
+                if slot.phase != runtime_coordinator.Phase.Python and not getattr(slot, "awaiting_identity", False):
+                    try:
+                        await coordinator.recover(slot.binding.name, confirmed_dead=True, containment=proof)
+                    except Exception as exc:
+                        # Uma sessão que não volta fica suspensa sozinha; a porta e as outras seguem.
+                        reason = runtime_coordinator.failure_reason(exc)
+                        # Traceback só quando a mensagem é segura: a do Python pode carregar texto da sessão.
+                        _log.error("recuperação da sessão %s falhou depois da morte do Rust: %s",
+                                   slot.binding.name, reason["codigo"], exc_info=bool(reason["detalhe"]))
+                        diag.registrar("runtime.recover_failed", "erro", sessao=slot.binding.name, **reason)
         self.runtime_ready = self.runtime_secret = self.runtime_instance = None
         self.runtime_transport = None
 
