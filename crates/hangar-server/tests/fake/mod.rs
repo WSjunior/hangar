@@ -39,6 +39,8 @@ pub struct Fake {
     side_apps: Mutex<Vec<String>>,
     info_calls: AtomicUsize,
     hits: Mutex<Vec<(String, HeaderMap)>>,
+    info_status: Mutex<Option<StatusCode>>,
+    diag: Mutex<Vec<Value>>,
     pub release: Notify,
 }
 
@@ -50,6 +52,14 @@ impl Fake {
     }
     pub fn push_side(&self, event: &str, data: &str) {
         let _ = self.side_tx.send(format!("event: {event}\r\ndata: {data}\r\n\r\n"));
+    }
+    /// `info` responde só este status, como o Python quando a projeção falha (503).
+    pub fn fail_info(&self, s: StatusCode) {
+        *self.info_status.lock().unwrap() = Some(s);
+    }
+    /// Corpos recebidos em `/internal/diag`.
+    pub fn diag(&self) -> Vec<Value> {
+        self.diag.lock().unwrap().clone()
     }
     pub fn side_conns(&self) -> usize {
         self.side_conns.load(SeqCst)
@@ -77,11 +87,14 @@ pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
         side_apps: Mutex::default(),
         info_calls: AtomicUsize::new(0),
         hits: Mutex::default(),
+        info_status: Mutex::default(),
+        diag: Mutex::default(),
         release: Notify::new(),
     });
     let app = Router::new()
         .route("/internal/sessions/{name}/info", get(fake_info))
         .route("/internal/sessions/{name}/side-events", get(fake_side))
+        .route("/internal/diag", axum::routing::post(fake_diag))
         .fallback(fake_python)
         .with_state(fake.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -100,6 +113,9 @@ fn status(s: StatusCode) -> Response {
 
 async fn fake_info(State(f): State<Arc<Fake>>, headers: HeaderMap) -> Response {
     f.info_calls.fetch_add(1, SeqCst);
+    if let Some(s) = *f.info_status.lock().unwrap() {
+        return status(s);
+    }
     let info = f.info.lock().unwrap().clone();
     if !internal_ok(&headers) || info.is_null() {
         return status(StatusCode::NOT_FOUND);
@@ -108,6 +124,14 @@ async fn fake_info(State(f): State<Arc<Fake>>, headers: HeaderMap) -> Response {
         .header("content-type", "application/json")
         .body(Body::from(info.to_string()))
         .unwrap()
+}
+
+async fn fake_diag(State(f): State<Arc<Fake>>, headers: HeaderMap, body: Bytes) -> Response {
+    if !internal_ok(&headers) {
+        return status(StatusCode::NOT_FOUND);
+    }
+    f.diag.lock().unwrap().push(serde_json::from_slice(&body).unwrap());
+    status(StatusCode::OK)
 }
 
 async fn fake_side(
