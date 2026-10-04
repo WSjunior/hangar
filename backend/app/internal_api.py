@@ -12,6 +12,7 @@ from app import diag
 from app.mensagens import erro
 from app.models import session_key
 from app.sse import merged_events
+from app.rust_failure import record_rust_failure
 
 _LOOPBACK = {"127.0.0.1", "::1"}
 
@@ -56,6 +57,7 @@ def info_payload(name: str, provider: str, jsonl: str | None) -> dict:
 
 
 router = APIRouter(prefix="/internal", dependencies=[Depends(require_internal)], include_in_schema=False)
+router.add_api_route("/rust-failure", record_rust_failure, methods=["POST"])
 _policy_calls = {}
 
 

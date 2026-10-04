@@ -46,6 +46,7 @@ pub struct AppState {
     pub origins_home: std::path::PathBuf,
     pub origins: Mutex<indexmap::IndexMap<std::path::PathBuf, crate::costs::origins::Origins>>,
     pub fallback: Fallback,
+    pub part_failures: crate::costs_failure::PartFailures,
 }
 
 const FALLBACK_AFTER: u32 = 4;
@@ -115,7 +116,8 @@ impl AppState {
         AppState { auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None,
             costs, fx, reports: Arc::new(crate::costs::ReportCache::default()),
             origins_home: std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default()),
-            origins: Mutex::new(indexmap::IndexMap::new()), fallback: Fallback::default() }
+            origins: Mutex::new(indexmap::IndexMap::new()), fallback: Fallback::default(),
+            part_failures: crate::costs_failure::PartFailures::default() }
     }
 
     pub(crate) fn skill_origins(&self, repo: &std::path::Path) -> crate::costs::origins::Origins {
@@ -143,17 +145,24 @@ impl AppState {
 }
 
 pub(crate) async fn fetch_info(http: &HttpClient, upstream: SocketAddr, secret: &str, name: &str) -> Option<InternalInfo> {
+    fetch_info_result(http, upstream, secret, name).await.ok().flatten()
+}
+
+pub(crate) async fn fetch_info_result(http: &HttpClient, upstream: SocketAddr, secret: &str, name: &str)
+    -> Result<Option<InternalInfo>, crate::costs_failure::FailureReason> {
+    use crate::costs_failure::FailureReason;
     let url = format!("http://{upstream}/internal/sessions/{}/info", utf8_percent_encode(name, NON_ALPHANUMERIC));
-    let req = axum::http::Request::get(url).header("x-hangar-internal", secret).body(Body::empty()).ok()?;
+    let req = axum::http::Request::get(url).header("x-hangar-internal", secret).body(Body::empty())
+        .map_err(|_| FailureReason::InfoUnavailable)?;
     let resp = match tokio::time::timeout(INFO_TIMEOUT, http.request(req)).await {
         Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            tracing::warn!(session = %name, "info interna falhou: {e}");
-            return None;
+        Ok(Err(_)) => {
+            tracing::warn!(session = %name, "info interna falhou");
+            return Err(FailureReason::InfoUnavailable);
         }
         Err(_) => {
             tracing::warn!(session = %name, "info interna sem resposta");
-            return None;
+            return Err(FailureReason::InfoUnavailable);
         }
     };
     if !resp.status().is_success() {
@@ -161,15 +170,16 @@ pub(crate) async fn fetch_info(http: &HttpClient, upstream: SocketAddr, secret: 
         if resp.status() != StatusCode::NOT_FOUND {
             tracing::warn!(session = %name, status = %resp.status(), "info interna recusada");
         }
-        return None;
+        return if resp.status() == StatusCode::NOT_FOUND { Ok(None) } else { Err(FailureReason::InfoUnavailable) };
     }
-    let body = tokio::time::timeout(INFO_TIMEOUT, resp.into_body().collect()).await.ok()?.ok()?.to_bytes();
+    let body = tokio::time::timeout(INFO_TIMEOUT, resp.into_body().collect()).await
+        .map_err(|_| FailureReason::InfoUnavailable)?.map_err(|_| FailureReason::InfoUnavailable)?.to_bytes();
     match serde_json::from_slice(&body) {
-        Ok(v) => Some(v),
+        Ok(v) => Ok(Some(v)),
         Err(e) => {
             // Só a posição: a mensagem do serde pode citar o valor.
             tracing::warn!(session = %name, line = e.line(), column = e.column(), "info interna inválida");
-            None
+            Err(FailureReason::InfoUnavailable)
         }
     }
 }

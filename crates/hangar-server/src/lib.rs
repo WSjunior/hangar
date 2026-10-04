@@ -3,6 +3,7 @@ pub mod auth;
 pub mod config;
 pub mod costs;
 pub mod costs_routes;
+pub mod costs_failure;
 pub mod proxy;
 pub mod routes;
 pub mod runtime;

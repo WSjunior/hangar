@@ -1692,7 +1692,7 @@ git commit -m "feat(server): Codex session cost from the Rust index"
 - Consumes: tudo acima.
 - Produces: `cargo run --release --example custos -- --scopes <json> --index <pasta> --now <iso> [--period all]` imprime `{"costs": CostReport, "uso": UsoReport, "scan_s": f64, "peak_rss_mb": u64}`; `scripts/comparar-custos.py` gera os escopos com `costs_sources.scopes_for_rust()`, roda o Python avulso com índice descartável (o mesmo isolamento de `analise.md`: `costs_cache._CACHE_DIR` trocado antes de qualquer leitura) e o exemplo Rust com outro índice descartável, e compara inteiros e chaves exatos e frações com erro relativo de 1e-9.
 
-- [ ] **Step 1: Escrever o exemplo e o script**
+- [x] **Step 1: Escrever o exemplo e o script**
 
 `scripts/comparar-custos.py`:
 
@@ -1763,18 +1763,18 @@ sys.exit(1 if erros else 0)
 
 `crates/hangar-server/examples/custos.rs`: lê os argumentos, monta `Collector` com uma `ScopeSource` que devolve o JSON lido, mede o tempo de `prepare(true)` até `Ready::Go`, monta os dois relatórios (origens por `origins::scan(home, repo)`) e imprime o JSON; pico de memória por `/proc/self/status` (`VmHWM`) no Linux, `0` nos outros.
 
-- [ ] **Step 2: Rodar contra esta máquina**
+- [x] **Step 2: Rodar contra esta máquina**
 
 Run: `cd backend && uv run python ../scripts/comparar-custos.py`
 Expected: `diferenças: 0`, varredura abaixo de 5 s, pico abaixo de 100 MB. Diferença encontrada → é bug de port: volte à Task do leitor ou relatório, acrescente ao golden um transcript sintético que reproduza o caso (nunca conversa real) e corrija.
 
-- [ ] **Step 3: Documentar**
+- [x] **Step 3: Documentar**
 
 - `docs/migracao-rust/README.md`: linha da parte 3 → "Feita na branch `hangar-server-parte3`, contrato versão 8 (2B versão 7 integrada); falta uso real".
 - `docs/decisoes/plataforma.md`: entrada "Custos e uso no hangar-server" com as medidas antes (de `analise.md`) e depois (Step 2), o porquê de cotas/stats ficarem no Python e o índice próprio.
 - `CLAUDE.md`, regra da porta 8765: acrescentar "e `/api/costs`, `/api/uso`, `/api/cotacao` e o custo de sessão Codex, com índice próprio (`custos-rust.sqlite3`); cotas ficam no Python".
 
-- [ ] **Step 4: Revisão e commit**
+- [x] **Step 4: Revisão e commit**
 
 ```bash
 git add crates/hangar-server/examples/custos.rs scripts/comparar-custos.py docs/migracao-rust/README.md \
@@ -1785,3 +1785,82 @@ git commit -m "docs(migracao-rust): part 3 measured against real data and docume
 - [ ] **Step 5: Uso real com o dono (verificação manual)**
 
 Roteiro da spec ("Uso real com o dono, no fim"), feito pelo dono no canal de testes depois do push autorizado: Custos e Uso no web, card no celular e no nativo; "Atualizar dados"; filtro e clique num item do Uso; custo de sessão Codex; apagar `custos-rust.sqlite3` e ver o "aquecendo" durar segundos; `CP_RUST_SERVER=0`.
+
+---
+
+### Task 15: Falhas por parte, diário e reserva Python
+
+Adição aprovada pelo usuário para acompanhar `origin/hangar-server-parte1` em `74177469`.
+Executar depois da integração autorizada, preservando contrato interno 8 e cano 2.
+
+**Files:**
+- Create: `crates/hangar-server/src/costs_failure.rs`
+- Modify: `crates/hangar-server/src/costs_routes.rs`, `src/routes.rs`, `src/lib.rs`
+- Modify: `backend/app/internal_api.py`
+- Test: `crates/hangar-server/tests/costs_failure.rs`, `tests/costs_routes.rs`,
+  `backend/tests/test_internal_api.py` (ou teste dedicado do endpoint interno)
+- Modify: `docs/migracao-rust/parte3/spec.md`, `docs/decisoes/plataforma.md` (contrato de falha)
+
+**Interfaces:**
+- Partes: `Costs`, `Usage`, `ExchangeRate`, `SessionCost(name)`. Filtros/período não criam partes.
+- Estado compartilhado em `AppState`, monotônico Rust → Python durante a vida do processo;
+  um sucesso concorrente nunca reativa uma parte já transferida.
+- `FailureReason`: código e frase fixa, sem erro bruto do serde/SQLite/E/S, query ou transcript.
+- Novo `POST /internal/rust-failure`, sob `require_internal`, corpo pequeno com enum de parte,
+  código, tentativa `1..=4`, transferência e sessão opcional. Backend deriva motivo por tabela
+  fechada e grava diário, com correlação do pedido. Segredo nunca entra no log.
+
+- [x] **Step 1: Testes que falham**
+
+Cobrir HTTP real com upstream falso e índices temporários: três falhas seguras e sucesso na
+quarta mantêm Rust; quatro falhas seguras fazem exatamente quatro execuções Rust e um repasse;
+novo pedido da mesma parte segue Python sem tentar Rust; outra parte continua Rust. Pausa de
+2 segundos somente antes da quarta tentativa, com relógio/espera injetáveis no teste. Falha
+classificada como efeito possível não é repetida. Dois pedidos concorrentes não reativam latch.
+
+Diário: autenticação loopback/segredo obrigatória, partes/códigos inválidos recusados, corpo
+limitado; mensagem livre não pode virar detalhe. Registrar cada falha com código/motivo e um
+evento único de transferência. Falha de envio do diário não abandona a reserva nem se repete
+recursivamente. Não incluir credenciais ou valores reais nos testes.
+
+Respostas normais: aquecimento 202, vazio, ausência de tarifa, 404 legítimo, falta de dono,
+método diferente e filtro booleano inválido não contam como defeito Rust. Separar indisponibilidade
+de `info` e E/S da ausência legítima. Testar recuperação real após `NoScopes`/`NoDisk`: nova
+tentativa de custos/uso força coleta nova, não relê apenas a falha guardada.
+
+- [x] **Step 2: Rodar e ver falhar**
+
+Run: `cargo test --manifest-path crates/Cargo.toml -p hangar-server --test costs_failure --test costs_routes`.
+Run Python focado somente no arquivo de teste do endpoint interno novo.
+Registrar REDs funcionais e não repetir targets já aprovados sem mudança.
+
+- [x] **Step 3: Implementar**
+
+Quatro tentativas totais: 1, 2, 3, pausa de 2 s, 4. Usar helper tipado comum às rotas; preservar
+`Request` fora dos workers e chamar `pass` apenas uma vez depois da decisão. Aguardar o worker
+terminar: não abandonar `spawn_blocking` e começar outra tentativa paralela. Não guardar mutex
+síncrono ou guard de Pricing através de `await`. Trava de recuperação por parte, latch monotônico
+e emissão única de transferência; partes já transferidas não podem ser expulsas e reativadas.
+
+Os GETs de relatório/cotação/custo de sessão só alteram caches derivados e não digitam mensagem
+nem modificam transcripts: são operações de leitura repetíveis, como `read_only` do upstream.
+Não aplicar essa exceção às operações de envio/fila/controle. Defeito com efeito de usuário
+possível não pode ser repetido. O estado encerra no reinício do processo Rust, sem configuração
+persistente adicional.
+
+Registrar falha no log Rust e enviar uma vez ao diário por endpoint interno autenticado, prazo
+curto e conteúdo estático. Recusa/timeout do diário gera aviso estático e continua para Python.
+Nenhum defeito interno Rust pode ser devolvido como custo nulo ou erro novo ao usuário.
+Preservar gzip/CORS, gate, cache, ordem, tarifas e paridade do caminho saudável.
+
+- [x] **Step 4: Verificar**
+
+Rodar testes focados novos, `costs_routes`, `proxy` e endpoint interno. Cobrir sticky/concurrência,
+retentativa real/fallback, motivos sanitizados e respostas normais. Se módulos de custos mudarem,
+incluir os respectivos contratos focados; não rodar suíte inteira sem pedido.
+
+- [x] **Step 5: Revisão independente e commit**
+
+Relatório completo, diff congelado e revisão Sol 6.1. Commit de paths explícitos após Git serial
+liberado; marcar Steps somente após os dois veredictos aprovados. Não operar backend/instalador
+ou índice real. Publicação continua limitada à branch `hangar-server-parte3` autorizada.

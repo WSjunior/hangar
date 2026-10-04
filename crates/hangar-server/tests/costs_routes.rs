@@ -29,15 +29,39 @@ struct Upstream {
     scopes: Mutex<Option<Scopes>>,
     infos: Mutex<indexmap::IndexMap<String, Value>>,
     hits: Mutex<Vec<(String, String)>>,
+    info_failures: Mutex<std::collections::VecDeque<StatusCode>>,
+    journal: Mutex<Vec<Value>>,
+    recover_scopes: Mutex<Option<Scopes>>,
+    recover_disk: Mutex<Option<PathBuf>>,
 }
 
 async fn session_info(State(up): State<Arc<Upstream>>, Path(name): Path<String>, request: Request) -> Response {
     up.hits.lock().unwrap().push((request.method().to_string(), request.uri().to_string()));
     assert_eq!(request.headers()["x-hangar-internal"], SECRET);
+    if let Some(status) = up.info_failures.lock().unwrap().pop_front() { return status.into_response(); }
     match up.infos.lock().unwrap().get(&name) {
         Some(info) => ([("content-type", "application/json")], info.to_string()).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+async fn journal(State(up): State<Arc<Upstream>>, request: Request) -> Response {
+    assert_eq!(request.headers()["x-hangar-internal"], SECRET);
+    assert!(request.headers().get("authorization").is_none());
+    let correlation = request.headers().get("x-hangar-req").cloned();
+    let body = axum::body::to_bytes(request.into_body(), 1024).await.unwrap();
+    let event: Value = serde_json::from_slice(&body).unwrap();
+    if event["session"] == "broken" { assert_eq!(correlation.unwrap(), "request_15"); }
+    if event["part"] == "costs" && event["attempt"] == 3
+        && let Some(scopes) = up.recover_scopes.lock().unwrap().take() {
+        *up.scopes.lock().unwrap() = Some(scopes);
+    }
+    if event["code"] == "no_disk" && event["attempt"] == 1
+        && let Some(path) = up.recover_disk.lock().unwrap().take() {
+        std::fs::remove_file(path).unwrap();
+    }
+    up.journal.lock().unwrap().push(event);
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn scopes(State(up): State<Arc<Upstream>>, request: Request) -> Response {
@@ -88,10 +112,12 @@ impl Harness {
             kimi: Some(KimiScope { root: base.join("kimi/sessions"), index: base.join("kimi/session_index.jsonl") }),
             repo: base.clone(),
         };
-        let upstream = Arc::new(Upstream { scopes: Mutex::new(has_scopes.then_some(scopes)), infos: Mutex::new(indexmap::IndexMap::new()), hits: Mutex::new(Vec::new()) });
+        let upstream = Arc::new(Upstream { scopes: Mutex::new(has_scopes.then_some(scopes)), infos: Mutex::new(indexmap::IndexMap::new()), hits: Mutex::new(Vec::new()),
+            info_failures: Mutex::new(Default::default()), journal: Mutex::new(Vec::new()), recover_scopes: Mutex::new(None), recover_disk: Mutex::new(None) });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let up_address = listener.local_addr().unwrap();
         let app = Router::new().route("/internal/costs/scopes", get(self::scopes))
+            .route("/internal/rust-failure", axum::routing::post(journal))
             .route("/internal/sessions/{name}/info", get(session_info)).fallback(python).with_state(upstream.clone());
         let up_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let index = if bad_disk {
@@ -172,6 +198,97 @@ async fn cold_index_returns_warming_then_owner_report_with_fx() {
     assert_eq!(report["usd_brl"], 5.25);
     assert_eq!(report["totals"]["sessions"], 11);
     assert!(!h.forwarded("GET", "/api/costs"));
+}
+
+#[tokio::test]
+async fn session_info_failure_retries_four_times_then_only_that_session_stays_python() {
+    let h = Harness::new(false, false).await;
+    let rollout = h.base.join("codex/sessions/2026/09/30/rollout-c1.jsonl");
+    for name in ["broken", "healthy"] {
+        h.upstream.infos.lock().unwrap().insert(name.into(), json!({"provider":"codex", "jsonl":rollout}));
+    }
+    h.upstream.info_failures.lock().unwrap().extend([StatusCode::SERVICE_UNAVAILABLE; 4]);
+    let route = "/api/sessions/broken/cost";
+    for _ in 0..2 {
+        let response = h.request(reqwest::Method::GET, route).header("x-hangar-req", "request_15").send().await.unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(), json!({"from_python":true}));
+    }
+    let hits = h.upstream.hits.lock().unwrap().clone();
+    assert_eq!(hits.iter().filter(|(_, uri)| uri == "/internal/sessions/broken/info").count(), 4);
+    assert_eq!(hits.iter().filter(|(_, uri)| uri == route).count(), 2);
+    let events = h.upstream.journal.lock().unwrap().clone();
+    assert_eq!(events.len(), 5);
+    assert_eq!(events.iter().filter(|event| event["transferred"] == true).count(), 1);
+    assert_eq!(events.iter().filter(|event| event["transferred"] == false).map(|event| event["attempt"].as_u64().unwrap()).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+    assert!(events.iter().all(|event| event["part"] == "session_cost" && event["code"] == "info_unavailable" && event["session"] == "broken"));
+    let response = h.request(reqwest::Method::GET, "/api/sessions/healthy/cost").send().await.unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap()["has_usage"], true);
+    assert!(!h.forwarded("GET", "/api/sessions/healthy/cost"));
+}
+
+#[tokio::test]
+async fn three_info_failures_then_success_do_not_transfer() {
+    let h = Harness::new(false, false).await;
+    h.upstream.infos.lock().unwrap().insert("session".into(), json!({"provider":"codex", "jsonl":h.base.join("codex/sessions/2026/09/30/rollout-c1.jsonl")}));
+    h.upstream.info_failures.lock().unwrap().extend([StatusCode::SERVICE_UNAVAILABLE; 3]);
+    let response = h.request(reqwest::Method::GET, "/api/sessions/session/cost").send().await.unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap()["has_usage"], true);
+    assert_eq!(h.upstream.journal.lock().unwrap().len(), 3);
+    assert!(!h.forwarded("GET", "/api/sessions/session/cost"));
+}
+
+#[tokio::test]
+async fn scopes_recovery_really_scans_on_retry_and_succeeds_on_fourth() {
+    let h = Harness::new(true, false).await;
+    let saved = h.upstream.scopes.lock().unwrap().take().unwrap();
+    h.request(reqwest::Method::GET, "/api/costs").send().await.unwrap();
+    let collector = h.collector.clone();
+    assert!(tokio::task::spawn_blocking(move || collector.prepare_blocking(true)).await.unwrap().is_err());
+    *h.upstream.recover_scopes.lock().unwrap() = Some(saved);
+    let response = h.request(reqwest::Method::GET, "/api/costs").send().await.unwrap();
+    assert!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap()["totals"].is_object());
+    let events = h.upstream.journal.lock().unwrap();
+    assert_eq!(events.len(), 3);
+    assert!(events.iter().all(|event| event["code"] == "no_scopes" && event["transferred"] == false));
+    assert!(!h.forwarded("GET", "/api/costs"));
+    assert!(h.upstream.hits.lock().unwrap().iter().filter(|(_, uri)| uri == "/internal/costs/scopes").count() >= 4);
+}
+
+#[tokio::test]
+async fn disk_recovery_really_reopens_index_on_second_attempt() {
+    let h = Harness::new(true, false).await;
+    let index_path = h._dir.path().join("idx");
+    std::fs::write(&index_path, "bloqueio sintético").unwrap();
+    h.request(reqwest::Method::GET, "/api/costs").send().await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let collector = h.collector.clone();
+        if tokio::task::spawn_blocking(move || collector.prepare_blocking(false)).await.unwrap().is_err() { break; }
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    *h.upstream.recover_disk.lock().unwrap() = Some(index_path.clone());
+    let response = h.request(reqwest::Method::GET, "/api/costs").send().await.unwrap();
+    assert!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap()["totals"].is_object());
+    assert!(index_path.is_dir());
+    assert_eq!(h.upstream.journal.lock().unwrap().as_slice(), &[json!({"part":"costs", "code":"no_disk", "attempt":1, "transferred":false})]);
+    assert!(!h.forwarded("GET", "/api/costs"));
+}
+
+#[tokio::test]
+async fn non_finite_quote_and_reports_fall_back_instead_of_serializing_null() {
+    let h = Harness::with_fx(true, false, Arc::new(Fx::with_fetch(|| Some(f64::INFINITY)))).await;
+    for route in ["/api/cotacao", "/api/costs", "/api/uso"] {
+        let response = loop {
+            let response = h.request(reqwest::Method::GET, route).send().await.unwrap();
+            if response.status() != StatusCode::ACCEPTED { break response; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(), json!({"from_python":true}));
+    }
+    let events = h.upstream.journal.lock().unwrap();
+    assert_eq!(events.len(), 15);
+    assert!(events.iter().all(|event| event["code"] == "non_finite"));
 }
 
 #[tokio::test]
@@ -487,7 +604,7 @@ async fn partial_commit_reader_panic_cannot_reuse_a_cached_success() {
     use common::costs::append;
     use hangar_server::costs::{CacheKey, collect::{CollectError, Ready}, index::IndexError, report_costs::CostReport};
     let h = Harness::new(true, false).await;
-    let before = h.ready().await;
+    h.ready().await;
     h.usage("/api/uso").await;
     let key = CacheKey { data_version: h.collector.data_version(), pricing_generation: h.collector.pricing().generation(),
         area_signature: h.collector.areas().signature().into(), labels: h.collector.labels_key(),
@@ -512,8 +629,9 @@ async fn partial_commit_reader_panic_cannot_reuse_a_cached_success() {
     let collector = h.collector.clone();
     assert!(matches!(tokio::task::spawn_blocking(move || collector.prepare_blocking(true)).await.unwrap().unwrap(), Ready::Go));
     let recovered = h.ready().await;
-    common::costs::assert_close(&recovered["totals"], &before["totals"], "totals");
-    assert!(h.state.reports.get::<CostReport>(&key).is_none());
+    assert_eq!(recovered, json!({"from_python":true}));
+    let mut current = key; current.data_version = h.collector.data_version();
+    assert!(h.state.reports.get::<CostReport>(&current).is_none());
 }
 
 #[tokio::test]
@@ -652,6 +770,9 @@ async fn session_cost_reader_panic_and_read_error_fall_back_to_python() {
     session_rollout(&path, "gpt-5.5", 1_000_000);
     let response = h.request(reqwest::Method::GET, "/api/sessions/session/cost").send().await.unwrap();
     assert_eq!(response.status(), 200);
+    assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(), json!({"from_python":true}));
+    h.upstream.infos.lock().unwrap().insert("healthy".into(), json!({"provider":"codex", "jsonl":path}));
+    let response = h.request(reqwest::Method::GET, "/api/sessions/healthy/cost").send().await.unwrap();
     assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap()["cost_usd"], 2.0);
     let conn = rusqlite::Connection::open(h._dir.path().join("idx").join(hangar_server::costs::index::FILE_NAME)).unwrap();
     conn.execute("UPDATE custo SET ts='invalid'", []).unwrap();
@@ -763,8 +884,11 @@ async fn session_cost_finite_tariff_overflow_falls_back_but_zero_remains_numeric
     }}).to_string()).unwrap();
     let response = h.request(reqwest::Method::GET, "/api/sessions/session/cost").send().await.unwrap();
     assert_eq!(response.status(), 200);
+    assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(), json!({"from_python":true}));
+    assert!(h.forwarded("GET", "/api/sessions/session/cost"));
+    h.upstream.infos.lock().unwrap().insert("healthy".into(), json!({"provider":"codex", "jsonl":path}));
+    let response = h.request(reqwest::Method::GET, "/api/sessions/healthy/cost").send().await.unwrap();
     assert_eq!(serde_json::from_slice::<Value>(&response.bytes().await.unwrap()).unwrap(), json!({"cost_usd":0.0, "missing_models":[], "has_usage":true}));
-    assert!(!h.forwarded("GET", "/api/sessions/session/cost"));
 }
 
 #[tokio::test]

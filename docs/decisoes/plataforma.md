@@ -1096,6 +1096,16 @@ campos nulos seguem os modelos Python.
 
 ### Índice próprio e reserva
 
+A política por parte, incorporada em 03/10/2026 na versão interna 8, faz quatro tentativas
+totais dos GETs de custos, uso, cotação e custo avulso, com pausa de 2 s antes da quarta.
+Retentativas de relatório forçam nova coleta para não repetir a falha guardada. A transferência
+ao Python é monotônica até reiniciar o processo Rust, isolada por rota e, no custo avulso,
+por nome de sessão; sucesso tardio não a desfaz. O pedido original é repassado uma vez.
+Códigos e motivos fixos chegam ao log Rust e ao diário pelo `POST /internal/rust-failure`
+autenticado, com prazo de 500 ms. Aquecimento 202, ausência legítima 404, relatório vazio e
+falta de tarifa/cotação não contam como falha; erros internos e valores não finitos contam.
+Operações com possível efeito de usuário não recebem essa autorização de repetição.
+
 O índice Rust chama-se `custos-rust.sqlite3`. No Linux/macOS fica em
 `$XDG_CACHE_HOME/hangar/custos` quando a variável contém caminho absoluto, ou
 `~/.cache/hangar/custos`; no Windows, em `%LOCALAPPDATA%/hangar/custos`, com a reserva local do

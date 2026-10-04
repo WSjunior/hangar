@@ -66,7 +66,17 @@ impl Fx {
     }
 
     fn refresh(&self) {
-        let result = (self.fetch)();
+        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.fetch)())) {
+            Ok(result) => result,
+            Err(payload) => {
+                // Uma falha do worker precisa continuar visível nas novas tentativas.
+                let mut state = self.state.lock().unwrap();
+                state.refreshing = false;
+                state.attempted_at = None;
+                drop(state);
+                std::panic::resume_unwind(payload);
+            }
+        };
         let mut state = self.state.lock().unwrap();
         if let Some(rate) = result { state.rate = Some(rate); }
         else { tracing::warn!(code = "cotacao"); }

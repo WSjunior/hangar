@@ -139,6 +139,16 @@ A posse de cada rollout do Codex é calculada no Rust com a regra de
 
 ### 6. O Python com o Rust de pé
 
+- Falhas nos GETs de custos, uso, cotação e custo avulso têm quatro tentativas totais,
+  com pausa de 2 s somente antes da quarta; retentativas de relatório forçam coleta nova.
+  Depois da quarta falha, apenas a parte afetada fica no Python até o processo Rust reiniciar
+  (custo avulso é isolado por nome de sessão). Sucesso concorrente não desfaz essa transferência.
+  Código e motivo são fixos no log Rust e no diário via `POST /internal/rust-failure`, com
+  segredo interno e prazo de 500 ms; o repasse usa o pedido original uma única vez.
+  Aquecimento 202, 404 legítimo, vazio e ausência de tarifa/cotação são respostas normais;
+  indisponibilidade interna, falha de leitura e número não finito são defeitos. Esse contrato
+  integra a versão interna 8 e não autoriza repetir operações com possível efeito de usuário.
+
 - O `rust_server` marca "custos no Rust" quando a saúde responde versão 8. Com a marca, o
   aquecimento de boot do Python (`agendar_aquecimento(30)`) não varre nada.
 - `_take_over` (o Python assume a porta) limpa a marca e agenda o aquecimento na hora. O índice do

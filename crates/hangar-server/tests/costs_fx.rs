@@ -98,3 +98,18 @@ fn injected_fetch_does_not_need_an_async_runtime_or_network() {
     assert_eq!(fx.usd_brl(), Some(5.25));
     let _default = Fx::default();
 }
+
+#[test]
+fn panic_does_not_turn_the_next_attempt_into_a_null_success() {
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let calls = std::sync::Arc::new(calls);
+    let count = calls.clone();
+    let fx = Fx::with_fetch(move || {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        panic!("falha sintética");
+    });
+    for _ in 0..4 {
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fx.usd_brl())).is_err());
+    }
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+}
