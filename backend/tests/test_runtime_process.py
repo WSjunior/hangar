@@ -8,6 +8,16 @@ import psutil
 import pytest
 
 
+def _wait_pid(path, seconds=5):
+    # O filho abre o arquivo antes de escrever: existir não basta, e no Windows lento lia ''.
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if path.exists() and (text := path.read_text().strip()):
+            return int(text)
+        time.sleep(.01)
+    raise AssertionError(f"pid não gravado em {seconds}s")
+
+
 def _ended(proc):
     # Zumbi no POSIX; no Windows o encerrado segue listado sem threads até o último handle fechar.
     try:
@@ -55,9 +65,7 @@ def test_child_cleanup_after_abrupt_parent_death(tmp_path):
     script = "import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)']); open(sys.argv[1],'w').write(str(p.pid)); time.sleep(60)"
     proc = spawn_contained([sys.executable, '-c', script, str(pid_path)], env=dict(os.environ))
     try:
-        deadline = time.monotonic()+5
-        while not pid_path.exists() and time.monotonic()<deadline: time.sleep(.01)
-        child = psutil.Process(int(pid_path.read_text()))
+        child = psutil.Process(_wait_pid(pid_path))
         assert child.is_running()
         proc.kill()
         proc.wait(5)
@@ -76,10 +84,7 @@ def test_cleanup_contains_separate_auxiliary_group_in_same_rust_session(tmp_path
     proc = spawn_contained([sys.executable, '-c', script, str(pid_path)], env=dict(os.environ), record_path=tmp_path / 'containment.json')
     other = subprocess.Popen([sys.executable, '-c', 'import time;time.sleep(60)'])
     try:
-        deadline = time.monotonic() + 5
-        while not pid_path.exists() and time.monotonic() < deadline:
-            time.sleep(.01)
-        auxiliary = psutil.Process(int(pid_path.read_text()))
+        auxiliary = psutil.Process(_wait_pid(pid_path))
         assert os.getpgid(auxiliary.pid) != proc.pid and os.getsid(auxiliary.pid) == proc.pid
         refresh_members(proc)
         assert str(auxiliary.pid) in proc.runtime_containment.members
