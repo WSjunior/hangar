@@ -4682,6 +4682,8 @@
   "native_tree_local": "Reading this machine's disk, live.",
   "native_tree_remote": "Reading through the server. Use Reload to see changes.",
   "native_tree_watch_failed": "Could not follow the disk. Use Reload to see changes.",
+  "native_tree_other_folder": "View another folder",
+  "native_tree_session_folder": "Session folder",
   "native_side_diff_loading": "Reading diff…",
   "native_side_diff_empty": "Empty diff.",
   "native_side_diff_truncated": "Diff cut; the file changed more than fits here.",

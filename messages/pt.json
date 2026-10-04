@@ -4682,6 +4682,8 @@
   "native_tree_local": "Lendo do disco desta máquina, ao vivo.",
   "native_tree_remote": "Lendo pelo servidor. Use Recarregar para ver mudanças.",
   "native_tree_watch_failed": "Não deu para acompanhar o disco. Use Recarregar para ver mudanças.",
+  "native_tree_other_folder": "Ver outra pasta",
+  "native_tree_session_folder": "Pasta da sessão",
   "native_side_diff_loading": "Lendo diff…",
   "native_side_diff_empty": "Diff vazio.",
   "native_side_diff_truncated": "Diff cortado; o arquivo mudou mais do que cabe aqui.",

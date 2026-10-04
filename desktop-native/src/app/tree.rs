@@ -34,6 +34,9 @@ pub(super) struct Tree {
     owner: Option<SessionOwner>,
     generation: u64,
     source: Option<FileSource>,
+    /// Outra pasta desta máquina escolhida no painel; vale só para a sessão em que foi escolhida.
+    custom_root: Option<(Option<SessionOwner>, PathBuf)>,
+    root_error: Option<String>,
     picking: Option<Failure>,
     dirs: HashMap<String, Dir>,
     expanded: HashSet<String>,
@@ -67,7 +70,7 @@ impl Tree {
             InputEvent::Change => this.tree_search_changed(cx),
             _ => {}
         }).detach();
-        Self { open: false, owner: None, generation: 0, source: None, picking: None, dirs: HashMap::new(), expanded: HashSet::new(),
+        Self { open: false, owner: None, generation: 0, source: None, custom_root: None, root_error: None, picking: None, dirs: HashMap::new(), expanded: HashSet::new(),
             selected: None, reveal: None, rows: Vec::new(), scroll: UniformListScrollHandle::new(), focus: cx.focus_handle(), search,
             query: String::new(), search_mode: SearchMode::Names, search_generation: 0, results: None, active: 0, search_task: None, reloading: false, reload_again: false,
             watcher: None, watched: HashSet::new(), watch_error: false, _watch_task: None, cited: Default::default() }
@@ -112,6 +115,16 @@ impl Tree {
 
     pub fn local_root(&self, owner: &Option<SessionOwner>) -> Option<PathBuf> {
         self.source.as_ref().filter(|_| &self.owner == owner).and_then(FileSource::root).map(Path::to_path_buf)
+    }
+
+    fn custom_root(&self, owner: &Option<SessionOwner>) -> Option<&Path> {
+        self.custom_root.as_ref().filter(|(of, _)| of == owner).map(|(_, root)| root.as_path())
+    }
+
+    /// Fora da pasta da sessão o visor recebe o caminho inteiro: assim a gravação vai pela rota de arquivo de fora, que
+    /// recusa o que não foi citado, e nunca por cima do arquivo de mesmo nome na pasta da sessão.
+    fn file_path(&self, path: String) -> String {
+        match self.custom_root(&self.owner) { Some(root) => root.join(&path).to_string_lossy().into_owned(), None => path }
     }
 }
 
@@ -164,7 +177,11 @@ impl Hangar {
         self.tree.owner = owner;
         let (Some(api), Some(session)) = (self.session_api(), self.selected.as_ref()) else { return };
         let (name, cwd, generation) = (session.name.clone(), session.cwd.clone(), self.tree.generation);
-        let pick = self.runtime.spawn(FileSource::pick(api, name, cwd));
+        let custom = self.tree.custom_root(&self.tree.owner).map(Path::to_path_buf);
+        let pick = self.runtime.spawn(async move { match custom {
+            Some(root) => FileSource::Local { root },
+            None => FileSource::pick(api, name, cwd).await,
+        } });
         cx.spawn(async move |this, cx| {
             let Ok(source) = pick.await else { return };
             let _ = this.update(cx, |this, cx| {
@@ -267,7 +284,7 @@ impl Hangar {
         self.tree.selected = Some(path.clone());
         match self.tree.entry(&path) {
             Some((true, _)) => self.tree_toggle_dir(path, cx),
-            Some((false, _)) => self.open_file(path, None, window, cx),
+            Some((false, _)) => self.open_file(self.tree.file_path(path), None, window, cx),
             None => {}
         }
         self.redraw(Area::Side, cx);
@@ -420,7 +437,34 @@ impl Hangar {
     fn tree_open_result(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(hit) = self.tree.results.as_ref().and_then(|r| r.as_ref().ok()).and_then(|(hits, _)| hits.get(ix)).cloned() else { return };
         self.tree.active = ix;
-        self.open_file(hit.path, hit.line, window, cx);
+        self.open_file(self.tree.file_path(hit.path), hit.line, window, cx);
+    }
+
+    /// Mostra outra pasta desta máquina no painel; a sessão e o agente continuam na pasta deles.
+    fn tree_choose_root(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let prompt = cx.prompt_for_paths(PathPromptOptions { files: false, directories: true, multiple: false, prompt: None });
+        cx.spawn_in(window, async move |this, cx| {
+            let chosen = prompt.await;
+            let _ = this.update(cx, |this, cx| match chosen {
+                Ok(Ok(None)) => {}
+                Ok(Ok(Some(paths))) if !paths.is_empty() => this.tree_set_root(paths.into_iter().next(), cx),
+                Ok(Err(error)) => { this.tree.root_error = Some(error.to_string()); this.redraw(Area::Side, cx); }
+                _ => { this.tree.root_error = Some(tr("picker_failed")); this.redraw(Area::Side, cx); }
+            });
+        }).detach();
+    }
+
+    fn tree_set_root(&mut self, root: Option<PathBuf>, cx: &mut Context<Self>) {
+        self.tree.root_error = None;
+        let owner = self.session_owner();
+        self.tree.custom_root = match root.map(|root| std::fs::canonicalize(&root).map_err(|error| format!("{}: {error}", root.display()))) {
+            Some(Ok(root)) => Some((owner, root)),
+            Some(Err(error)) => { self.tree.root_error = Some(error); return self.redraw(Area::Side, cx); }
+            None => None,
+        };
+        // Sem dono, o próximo desenho escolhe de novo de onde ler.
+        self.tree_stop();
+        self.redraw(Area::Side, cx);
     }
 
     fn tree_row(&self, ix: usize, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -498,7 +542,19 @@ impl Hangar {
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.tree_search_mode(SearchMode::Names, window, cx);
                     this.cited_toggle(true, cx);
-                })));
+                })))
+            .child(div().flex_1())
+            .when(self.session_api().is_some_and(|api| api.is_loopback()) && !cited_on, |el| el
+                .child(chrome::icon_button("tree-other-folder", IconName::FolderOpen, tr("tree_other_folder"), cx)
+                    .on_click(cx.listener(|this, _, window, cx| this.tree_choose_root(window, cx)))));
+        let custom = self.tree.custom_root(&self.session_owner()).map(|root| root.display().to_string());
+        let root_bar = (!cited_on && (custom.is_some() || self.tree.root_error.is_some())).then(|| div().flex().flex_col().gap_1().px_3().pb_2()
+            .when_some(custom, |el, root| el.child(div().flex().items_center().gap_2()
+                .child(chrome::small_icon(IconName::Folder, 14., theme::accent()))
+                .child(div().flex_1().min_w_0().truncate().text_xs().text_color(theme::muted()).child(root))
+                .child(Button::new("tree-session-folder").ghost().small().icon(IconName::ArrowLeft).label(tr("tree_session_folder"))
+                    .on_click(cx.listener(|this, _, _, cx| this.tree_set_root(None, cx))))))
+            .when_some(self.tree.root_error.clone(), |el, error| el.child(div().text_xs().text_color(theme::warning()).child(error))));
         let modes = div().flex().items_center().gap_1().px_3().pb_2()
             .child(div().flex_1().min_w_0().text_xs().text_color(theme::faint()).child(tr("tree_search_scope")))
             .child(Button::new("tree-search-names").ghost().small().selected(self.tree.search_mode == SearchMode::Names)
@@ -562,6 +618,7 @@ impl Hangar {
         };
         div().size_full().flex().flex_col().pt_1()
             .child(views)
+            .children(root_bar)
             .when(!cited_on, |el| el.child(modes))
             .child(search)
             .child(body)
