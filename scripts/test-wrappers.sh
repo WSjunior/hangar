@@ -78,6 +78,11 @@ cat >"$CP_ENGINES_FILE" <<'JSON'
 JSON
 
 PATH_WITH_FAKES="$REPO/scripts:$TMP/bin:$PATH"
+# O zsh lê o ~/.zshenv mesmo com `-c` e sob `env -i`. Um que mexa no PATH põe os binários de verdade
+# na frente dos fakes, e o teste passa a rodar o `claude` e o `omp` reais. Com o ZDOTDIR numa pasta
+# vazia ele não acha arquivo de inicialização nenhum; bash e fish ignoram a variável.
+EMPTY_ZDOTDIR="$TMP/zdotdir"
+mkdir -p "$EMPTY_ZDOTDIR"
 
 fail=0
 
@@ -237,7 +242,7 @@ plugin_dir_cases() {
 posix_case() {
     local sh="$1" engine="$2" out="$TMP/out.$RANDOM.$RANDOM"
     shift 2
-    env -i PATH="$PATH_WITH_FAKES" HOME="${CASE_HOME:-$HOME}" CP_TEST_OUT="$out" CP_ENGINE="$engine" \
+    env -i PATH="$PATH_WITH_FAKES" ZDOTDIR="$EMPTY_ZDOTDIR" HOME="${CASE_HOME:-$HOME}" CP_TEST_OUT="$out" CP_ENGINE="$engine" \
         CP_ENGINES_FILE="$CP_ENGINES_FILE" \
         "$sh" -c '
             source "'"$REPO"'/scripts/shell/claude.posix.sh"
@@ -251,7 +256,7 @@ fish_case() {
     shift
     # `--` separa os args do próprio `claude` dos flags do binário fish — sem isto "fish -c '...' --print"
     # tenta interpretar --print como opção do fish (erro "unknown option").
-    env -i PATH="$PATH_WITH_FAKES" HOME="${CASE_HOME:-$HOME}" CP_TEST_OUT="$out" CP_ENGINE="$engine" \
+    env -i PATH="$PATH_WITH_FAKES" ZDOTDIR="$EMPTY_ZDOTDIR" HOME="${CASE_HOME:-$HOME}" CP_TEST_OUT="$out" CP_ENGINE="$engine" \
         CP_ENGINES_FILE="$CP_ENGINES_FILE" \
         fish --no-config -c '
             source "'"$REPO"'/scripts/shell/claude.fish"
@@ -265,7 +270,7 @@ fish_case() {
 posix_case_pi() {
     local sh="$1" out="$TMP/out.$RANDOM.$RANDOM"
     shift
-    env -i PATH="$PATH_WITH_FAKES" HOME="$HOME" CP_TEST_OUT="$out" \
+    env -i PATH="$PATH_WITH_FAKES" ZDOTDIR="$EMPTY_ZDOTDIR" HOME="$HOME" CP_TEST_OUT="$out" \
         "$sh" -c '
             source "'"$REPO"'/scripts/shell/pi.posix.sh"
             pi "$@"
@@ -275,7 +280,7 @@ posix_case_pi() {
 
 fish_case_pi() {
     local out="$TMP/out.$RANDOM.$RANDOM"
-    env -i PATH="$PATH_WITH_FAKES" HOME="$HOME" CP_TEST_OUT="$out" \
+    env -i PATH="$PATH_WITH_FAKES" ZDOTDIR="$EMPTY_ZDOTDIR" HOME="$HOME" CP_TEST_OUT="$out" \
         fish --no-config -c '
             source "'"$REPO"'/scripts/shell/pi.fish"
             pi $argv
@@ -288,7 +293,7 @@ fish_case_pi() {
 posix_case_omp() {
     local sh="$1" out="$TMP/out.$RANDOM.$RANDOM"
     shift
-    (cd "$OMP_CWD" && env -i PATH="$PATH_WITH_FAKES" HOME="$HOME" CP_TEST_OUT="$out" \
+    (cd "$OMP_CWD" && env -i PATH="$PATH_WITH_FAKES" ZDOTDIR="$EMPTY_ZDOTDIR" HOME="$HOME" CP_TEST_OUT="$out" \
         PI_CODING_AGENT_DIR="$OMP_DIR" \
         "$sh" -c '
             source "'"$REPO"'/scripts/shell/omp.posix.sh"
@@ -299,7 +304,7 @@ posix_case_omp() {
 
 fish_case_omp() {
     local out="$TMP/out.$RANDOM.$RANDOM"
-    (cd "$OMP_CWD" && env -i PATH="$PATH_WITH_FAKES" HOME="$HOME" CP_TEST_OUT="$out" \
+    (cd "$OMP_CWD" && env -i PATH="$PATH_WITH_FAKES" ZDOTDIR="$EMPTY_ZDOTDIR" HOME="$HOME" CP_TEST_OUT="$out" \
         PI_CODING_AGENT_DIR="$OMP_DIR" \
         fish --no-config -c '
             source "'"$REPO"'/scripts/shell/omp.fish"
@@ -383,7 +388,7 @@ for SH in bash zsh; do
     check_pi_injected "$SH pi \"remove the dead code\" (prompt, não subcomando)" "$out"
 
     out="$TMP/out.$RANDOM.$RANDOM"
-    env -i PATH="$PATH_WITH_FAKES" HOME="$HOME" CP_TEST_OUT="$out" \
+    env -i PATH="$PATH_WITH_FAKES" ZDOTDIR="$EMPTY_ZDOTDIR" HOME="$HOME" CP_TEST_OUT="$out" \
         "$SH" -c '
             source "'"$REPO"'/scripts/shell/pi.posix.sh"
             command pi --raw
@@ -429,7 +434,7 @@ for SH in bash zsh; do
     check_omp_injected "$SH omp \"models are slow today\" (prompt, não subcomando)" "$out"
 
     out="$TMP/out.$RANDOM.$RANDOM"
-    env -i PATH="$PATH_WITH_FAKES" HOME="$HOME" CP_TEST_OUT="$out" \
+    env -i PATH="$PATH_WITH_FAKES" ZDOTDIR="$EMPTY_ZDOTDIR" HOME="$HOME" CP_TEST_OUT="$out" \
         "$SH" -c '
             source "'"$REPO"'/scripts/shell/omp.posix.sh"
             command omp --raw
@@ -525,7 +530,7 @@ if command -v fish >/dev/null 2>&1; then
     fi
 
     out="$TMP/out.$RANDOM.$RANDOM"
-    env -i PATH="$PATH_WITH_FAKES" HOME="$HOME" CP_TEST_OUT="$out" \
+    env -i PATH="$PATH_WITH_FAKES" ZDOTDIR="$EMPTY_ZDOTDIR" HOME="$HOME" CP_TEST_OUT="$out" \
         fish --no-config -c '
             source "'"$REPO"'/scripts/shell/pi.fish"
             command pi --raw
@@ -565,7 +570,7 @@ if command -v fish >/dev/null 2>&1; then
     check_omp_injected "fish omp \"models are slow today\" (prompt, não subcomando)" "$out"
 
     out="$TMP/out.$RANDOM.$RANDOM"
-    env -i PATH="$PATH_WITH_FAKES" HOME="$HOME" CP_TEST_OUT="$out" \
+    env -i PATH="$PATH_WITH_FAKES" ZDOTDIR="$EMPTY_ZDOTDIR" HOME="$HOME" CP_TEST_OUT="$out" \
         fish --no-config -c '
             source "'"$REPO"'/scripts/shell/omp.fish"
             command omp --raw
