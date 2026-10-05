@@ -2583,8 +2583,8 @@ class SessionRegistry:
                                           jev=jev,
                                           **({"key": transfer_meta["key"], "transfer_id": transfer_meta["transfer_id"]}
                                              if transfer_meta else {}),
-                                          previous_non_plan=(modo_permissao.ultimo_nao_plan(
-                                              name, modo_permissao.modo_da_conta(str(cdir) if cdir else None))
+                                          previous_non_plan=((modo_permissao.session_non_plan_mode(jsonl)
+                                              or modo_permissao.modo_da_conta(str(cdir) if cdir else None))
                                               if permission_mode == "plan" else None))
         except OSError:
             meta = {"name": name, "cwd": cwd, "session_id": sid, "config_dir": str(cdir) if cdir else None,
@@ -2625,7 +2625,7 @@ class SessionRegistry:
             meta = {"name": info.name, "cwd": info.cwd, "session_id": Path(info.jsonl).stem,
                     "config_dir": cdir or str(Path.home() / ".claude"), "provider": "claude", "headless": False,
                     "model": model, "effort": _esforco_de_abertura(effort), "permission_mode": mode,
-                    "previous_non_plan": modo_permissao.known_non_plan(info.name)
+                    "previous_non_plan": modo_permissao.session_non_plan_mode(info.jsonl)
                                          if mode == "plan" else None,
                     "pane_pid": root, "pane_id": pane.get("pane_id"),
                     "subagent_model": procinfo._env_var_of(agent, "CLAUDE_CODE_SUBAGENT_MODEL") if agent else None,

@@ -324,7 +324,7 @@ def facts(payload, metadata):
     endpoint = _native_socket(current) if sender and os.name == 'posix' else None
     if endpoint:
         native = dict(socket=endpoint, origin=f'uds:{uds_messaging.INBOX.path}' if uds_messaging.INBOX.path else f'uds:hangar-{os.getpid()}',
-            sender=sender, mode=api._classe_modo(sender, current.name, current.meta['config_dir']),
+            sender=sender, mode=api._classe_modo(sender, current.name, current.meta['config_dir'], current.jsonl),
             message_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"hangar:{current.key}:{payload['operation_id']}")))
     clipboard = False
     if binding['windows']:

@@ -316,6 +316,20 @@ texto, mas o backend a enviaria para o endpoint padrão do LLM.
     `cc-socks/<pid>.sock` próprio pra receber `peer_message_status` (retido/recusado) e avisa a
     remetente com `[painel: entrega de recado]`. O recado vai com o prefixo `[de: X]` no corpo e o
     parser não o dobra (`_PEER_PREFIXO_RE`), pra `[grupo:]` sobreviver ao envelope.
+  - **O `from-mode` do envelope sai do modo real da sessão, nunca do padrão da conta**
+    (`_classe_modo`, 05/10/2026). Com `crossSessionInbound` sem valor, o Claude Code 2.1.289 só
+    entrega direto quando a classe declarada (`bypass`/`prompting`) é igual à do receptor; se for
+    diferente, abre o diálogo "Held message from another session" (`holdCause: mode-mismatch`).
+    A memória do pane é GRAVADA pelo session-id (stem do jsonl: `state.py` e as rotas de
+    permissão) e era LIDA pelo nome da sessão, então quase nunca era achada; o código caía em
+    `modo_da_conta`, e um `settings.json` com `"defaultMode": "default"` declarava `prompting`
+    para sessões lançadas com `--permission-mode bypassPermissions`. Todo recado entre sessões em
+    bypass parava no diálogo. Os três leitores (`_classe_modo`, `para_headless` e a origem da
+    transferência) agora passam por `permission_mode.session_non_plan_mode(jsonl)`: memória pelo
+    session-id e, sem ela (sessão sem monitor ou backend reiniciado), o `permissionMode` que o CLI
+    grava em cada fala do transcript. `plan` é pulado porque o receptor conta plan vindo de bypass
+    como bypass. Pôr `crossSessionInbound: "accept"` também resolveria, mas desligaria a proteção
+    do receptor contra uma sessão que pede aprovação mandar outra rodar sem pedir.
   - **Aviso do app sai como `[painel: <rótulo com espaço>]`, nunca `[de: …]`** (`pair_texto.PREFIXO`,
     24/09/2026). Os avisos de grupo saíam `[de: hangar]` e terminavam em "Confirme em uma linha": o
     uma sessão solta num grupo pelo arrasto confirmou com `hangar-send hangar …` e o
