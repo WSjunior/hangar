@@ -117,6 +117,38 @@ onde o GIL serializa o Python.
 - **Execução:** o código de port vindo pronto no plano (compilado antes numa cópia) fez as Tasks
   passarem de primeira; as revisões acharam o que importava em segurança, concorrência e paridade.
 
+## Desempenho: erros que já custaram (pedido do dono, 05/10/2026)
+
+Toda parte nova é escrita pensando em desempenho e conferida contra esta lista antes de juntar.
+Cada item foi um defeito real, achado depois de ir para a máquina do dono.
+
+- **Nada de laço apertado.** Varrer ou ler de novo só quando a entrada muda, com teto de
+  frequência. O Supervisor varria ~560 processos 4×/s e regravava o registro com fsync (4,33% de um
+  núcleo parado; desce a árvore do Rust desde `55d26bec3`: 0,73%); o git esperava girando a cada
+  1 ms (`905fc74e2`).
+- **Chamada ao Python é cara: só quando a entrada muda ou com prazo.** A linha de status era
+  pedida ao Python a cada mudança de estado, ~7 chamadas/s com uma sessão sem terminal
+  transmitindo; agora só quando as entradas mudam ou a cada 30 s (`2a0d07d89`).
+- **Não republicar o que não mudou.** Saíam 451 eventos de estado por minuto por aparelho, só 100
+  diferentes (`2a0d07d89`).
+- **fsync fora de trava e fora do laço de eventos; leitura nunca grava.** `terminal_facts` fazia 3
+  gravações com fsync por leitura (`905fc74e2`); fsync sob trava congelou o notebook por 6 s na 2B.
+- **Processo filho custa, sobretudo no Windows (~25 ms cada).** Não abrir `git` para o que pode
+  ser pulado (`2148edf56`).
+- **Estado em disco pequeno e podado.** O estado da 2B chegou a 88 MB.
+- **Medir antes e depois, em release**, com backend isolado e sem cliente; debug infla a análise
+  ~30×. Medir pico de memória (RSS) junto com CPU; heaptrack ou dhat quando o pico subir.
+- **Memória e recursos no Rust (pedido do dono, 05/10).** O objetivo é velocidade; memória se
+  economiza só quando não custa tempo (cache que acelera vale a memória, com teto). Dado compartilhado por `Arc`/referência,
+  sem clone por tique; buffers reaproveitados e `with_capacity`; todo cache e toda fila com teto e
+  invalidação por mudança; arquivo em fluxo ou só a cauda, serde emprestado onde o dado não
+  sobrevive à leitura; I/O bloqueante em `spawn_blocking` e paralelismo com teto (`Semaphore`);
+  canais com limite, nunca `unbounded`; dado grande solto assim que termina o uso.
+- **Compilação na máquina:** no máximo 2 `cargo` ao mesmo tempo, `CARGO_BUILD_JOBS=4`, `target/`
+  por worktree e apagado no fim; plugin `rust-analyzer-lsp` desligado nas worktrees de Task (um
+  por sessão, ~3 GB cada, levou a máquina a carga 62 e 25 GB de swap). Task testa o Linux na
+  máquina e não sobe a própria branch; Windows e macOS saem do CI no push do lote.
+
 ## Pendências da parte 1
 
 - **Uso real** (roteiro em `docs/decisoes/plataforma.md`, entrada "hangar-server"): abrir chats do

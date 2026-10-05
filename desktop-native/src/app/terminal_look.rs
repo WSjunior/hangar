@@ -155,11 +155,52 @@ const SHELL_READ: [&str; 15] = ["cat", "head", "tail", "less", "more", "wc", "st
 const SHELL_LIST: [&str; 3] = ["ls", "tree", "du"];
 const SHELL_NEUTRAL: [&str; 5] = ["echo", "printf", "true", "false", ":"];
 
+/// Se a parte grava ou roda outra coisa por baixo, ela não é leitura e a dobra não pode escondê-la: redirecionamento de
+/// saída (fora `/dev/null` e a cópia de descritor `2>&1`), substituição de comando, ou as opções de `find`/`sort` que
+/// apagam, executam ou gravam. Espelho do `parteGrava` do core.
+fn part_writes(part: &str) -> bool {
+    let b = part.as_bytes();
+    let (mut i, mut quote) = (0, None::<u8>);
+    while i < b.len() {
+        let c = b[i];
+        if c == b'\\' && quote != Some(b'\'') { i += 2; continue; }
+        if quote == Some(b'\'') { if c == b'\'' { quote = None; } i += 1; continue; }
+        if c == b'`' || (c == b'$' && b.get(i + 1) == Some(&b'(')) { return true; }
+        if quote == Some(b'"') { if c == b'"' { quote = None; } i += 1; continue; }
+        match c {
+            b'\'' | b'"' => quote = Some(c),
+            b'<' if b.get(i + 1) == Some(&b'(') => return true,
+            b'>' => {
+                let mut j = i + 1;
+                if matches!(b.get(j), Some(b'>' | b'|')) { j += 1; }
+                let dup = b.get(j) == Some(&b'&');
+                if dup { j += 1; }
+                while matches!(b.get(j), Some(b' ' | b'\t')) { j += 1; }
+                let end = b[j..].iter().position(|c| c.is_ascii_whitespace() || b";&|<>()".contains(c)).map_or(b.len(), |n| j + n);
+                let target = &part[j..end];
+                let fd = target == "-" || (!target.is_empty() && target.bytes().all(|c| c.is_ascii_digit()));
+                if target != "/dev/null" && !(dup && fd) { return true; }
+                i = end;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let mut words = part.split_whitespace();
+    match words.next() {
+        Some("find") => words.any(|w| matches!(w, "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-fls") || w.starts_with("-fprint")),
+        Some("sort") => words.any(|w| w.starts_with("--o") || (w.starts_with('-') && !w.starts_with("--") && w.contains('o'))),
+        _ => false,
+    }
+}
+
 /// Classifica o comando parte a parte, separando em `|`, `&`, `;` e quebra de linha fora de aspas e parênteses, como o
 /// `separarComando` do core. Para no primeiro comando que não é de leitura: roda a cada quadro e não aloca.
 fn shell_fold_kind(cmd: &str) -> FoldKind {
     let (mut search, mut read, mut list) = (false, false, false);
     let mut classify = |part: &str| {
+        if part_writes(part) { return false; }
         let word = part.split_whitespace().next().unwrap_or_default();
         if word.is_empty() || SHELL_NEUTRAL.contains(&word) { return true; }
         if SHELL_SEARCH.contains(&word) { search = true; }
@@ -169,7 +210,8 @@ fn shell_fold_kind(cmd: &str) -> FoldKind {
         true
     };
     let (mut start, mut depth, mut quote, mut escaped) = (0, 0usize, None::<u8>, false);
-    for (i, &c) in cmd.as_bytes().iter().enumerate() {
+    let bytes = cmd.as_bytes();
+    for (i, &c) in bytes.iter().enumerate() {
         if escaped { escaped = false; continue; }
         if let Some(q) = quote {
             if c == b'\\' && q == b'"' { escaped = true; } else if c == q { quote = None; }
@@ -180,6 +222,8 @@ fn shell_fold_kind(cmd: &str) -> FoldKind {
             b'\'' | b'"' | b'`' => quote = Some(c),
             b'(' | b'{' => depth += 1,
             b')' | b'}' => depth = depth.saturating_sub(1),
+            // O `&` de `2>&1`, `<&3` e `&>` é redirecionamento, não separa comando.
+            b'&' if i > 0 && matches!(bytes[i - 1], b'>' | b'<') || bytes.get(i + 1) == Some(&b'>') => {}
             b'|' | b'&' | b';' | b'\n' if depth == 0 => {
                 if !classify(&cmd[start..i]) { return FoldKind::Shell; }
                 start = i + 1;
@@ -228,17 +272,18 @@ fn fold_kind(name: Option<&str>, input: Option<&serde_json::Map<String, serde_js
 /// shell"; enquanto alguma roda, "Lendo 2 arquivos…". `kinds` é o tipo de cada chamada, já calculado pelo grupo.
 fn fold_title(events: &[ChatEvent], tools: &[Tool], kinds: &[FoldKind], running: bool) -> String {
     let (mut counts, mut files, mut servers) = ([0usize; 5], std::collections::HashSet::new(), Vec::<&str>::new());
+    let mut pathless_reads = 0;
     for (tool, &kind) in tools.iter().zip(kinds) {
         counts[kind as usize] += 1;
         let call = &events[tool.call];
         match kind {
-            FoldKind::Read => { let path = editdiff::input_path(call.tool_input.as_ref()); if !path.is_empty() { files.insert(path); } }
+            FoldKind::Read => match editdiff::input_path(call.tool_input.as_ref()) { "" => pathless_reads += 1, path => { files.insert(path); } },
             FoldKind::Mcp => if let Some(server) = call.tool_name.as_deref().and_then(mcp_server) { if !servers.contains(&server) { servers.push(server); } },
             _ => {}
         }
     }
-    // Como no Claude Code: arquivos distintos quando há caminho, senão quantas leituras.
-    if !files.is_empty() { counts[FoldKind::Read as usize] = files.len(); }
+    // Arquivos distintos, mais as leituras sem caminho (um `cat` no shell não diz qual arquivo leu).
+    counts[FoldKind::Read as usize] = files.len() + pathless_reads;
     let names = servers.join(", ");
     // Na ordem de `FoldKind`: a chave da frase concluída e a da que está em andamento.
     const KEYS: [(&str, &str); 5] = [("term_dobra_buscou", "term_dobra_buscando"), ("term_dobra_leu", "term_dobra_lendo"),
@@ -376,7 +421,7 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::{Between, EDIT_SHOWN, FoldKind, between, fold_kind, header_arg, mcp_server, shell_fold_kind, split_budget, visible_edits};
+    use super::{Between, ChatEvent, EDIT_SHOWN, FoldKind, Tool, between, count_with, fold_kind, fold_title, header_arg, mcp_server, shell_fold_kind, split_budget, visible_edits};
     use serde_json::json;
 
     #[test]
@@ -445,6 +490,43 @@ mod tests {
         assert_eq!(shell_fold_kind("npm run build"), FoldKind::Shell);
         assert_eq!(shell_fold_kind("(cd src && ls)"), FoldKind::Shell);
         assert_eq!(shell_fold_kind("rg x | grep y"), FoldKind::Search);
+    }
+
+    #[test]
+    fn a_read_that_writes_deletes_or_runs_something_else_does_not_fold() {
+        for cmd in [
+            "sort a > b", "cat x > y", "cat x >> y", "awk '{print $1}' f > out", "echo oi > f", "cat x &> log", "cat x >&log",
+            "cat x >| y", "cat x | tee y", "sort -o out in", "sort -uo out in", "sort --output=out in",
+            "find . -delete", "find . -exec rm {} +", "find . -execdir rm {} \\;", "find . -ok rm {} \\;", "find . -okdir rm {} \\;",
+            "find . -fprint f", "find . -fprintf f %p", "find . -fls f",
+            "cat $(rm -rf x)", "cat `rm -rf x`", "grep \"$(rm x)\" f", "diff <(ls a) b", "cat x | grep y > z",
+        ] {
+            assert_eq!(shell_fold_kind(cmd), FoldKind::Shell, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn discarding_output_or_merging_stderr_is_not_a_write_and_its_ampersand_does_not_split() {
+        assert_eq!(shell_fold_kind("grep foo f 2>&1 | head"), FoldKind::Search);
+        assert_eq!(shell_fold_kind("cat x 2>/dev/null"), FoldKind::Read);
+        assert_eq!(shell_fold_kind("cat x > /dev/null 2>&1"), FoldKind::Read);
+        assert_eq!(shell_fold_kind("rg x &>/dev/null"), FoldKind::Search);
+        assert_eq!(shell_fold_kind("cat x >&2"), FoldKind::Read);
+        assert_eq!(shell_fold_kind("awk '$1 > 5' f"), FoldKind::Read);
+        assert_eq!(shell_fold_kind("grep '$(x)' f"), FoldKind::Search);
+        assert_eq!(shell_fold_kind("grep -o foo f | sort"), FoldKind::Search);
+        assert_eq!(shell_fold_kind("sort -n f"), FoldKind::Read);
+    }
+
+    #[test]
+    fn pathless_reads_add_to_the_distinct_files() {
+        let call = |name: &str, input: serde_json::Value| ChatEvent { kind: "tool_use".into(), tool_name: Some(name.into()),
+            tool_input: input.as_object().cloned(), ..Default::default() };
+        let events = [call("Read", json!({"file_path": "/a"})), call("Read", json!({"file_path": "/a"})),
+            call("Bash", json!({"command": "cat b"})), call("Bash", json!({"command": "cat c"}))];
+        let tools: Vec<Tool> = (0..events.len()).map(|call| Tool { call, result: None }).collect();
+        let expected = crate::app::controls::capitalized(&count_with("term_dobra_leu_1", "term_dobra_leu", 3, &[("nome", "")]));
+        assert_eq!(fold_title(&events, &tools, &[FoldKind::Read; 4], false), expected);
     }
 
     #[test]

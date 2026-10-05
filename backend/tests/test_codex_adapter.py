@@ -877,8 +877,11 @@ async def test_resume_le_o_esforco_da_thread_em_reasoning_effort(service_tier):
 
     client = _ResumeClient([])
     with patch("app.adapters.codex.adapter.AppServerClient", lambda *a, **k: client), \
-         patch.object(codex_adapter.tmux, "has_session", return_value=False):
+         patch.object(codex_adapter.tmux, "has_session", return_value=False), \
+         patch.object(codex_adapter, "ensure_tmux_tui") as tui:
         await adapter.ensure_running("sess")
+    # null do Codex vira -c service_tier="default" na TUI, nunca a config global.
+    assert tui.call_args.kwargs["service_tier"] == effective_tier
     assert adapter.current_model("sess") == {"model": "gpt-5.6-luna", "effort": "max", "service_tier": effective_tier}
     assert codex_sessions.load("sess")["service_tier"] == effective_tier
     assert next(params for method, params in client.requests if method == "thread/resume")["serviceTier"] == effective_tier
@@ -1529,6 +1532,39 @@ async def test_service_tier_null_means_default_in_notification_and_resume():
     try:
         assert await adapter.set_service_tier("sess", "default") == "default"
         assert adapter.current_model("sess")["service_tier"] == "default"
+    finally:
+        await client._q.put(None)
+        await adapter._sessions["sess"]["bomba"]
+
+
+@pytest.mark.parametrize("tier", ["priority", "default"])
+async def test_service_tier_already_active_returns_without_waiting(tier):
+    adapter = CodexAdapter()
+    client = _LiveQueueClient()
+    codex_sessions.save("sess", "t", "/rollout.jsonl", "/tmp/proj", service_tier=tier)
+    adapter.attach("sess", client, "t", service_tier=tier, subscribed=True)
+    try:
+        assert await asyncio.wait_for(adapter.set_service_tier("sess", tier), 1) == tier
+        assert client.requests == []
+    finally:
+        await client._q.put(None)
+        await adapter._sessions["sess"]["bomba"]
+
+
+async def test_settings_notification_keeps_model_when_sidecar_thread_changed():
+    adapter = CodexAdapter()
+    client = _LiveQueueClient()
+    codex_sessions.save("sess", "other-thread", "/rollout.jsonl", "/tmp/proj", service_tier="default")
+    adapter.attach("sess", client, "t", model="old", service_tier="default", subscribed=True)
+    listener = asyncio.Queue()
+    adapter._sessions["sess"]["ouvintes"].append(listener)
+    try:
+        await client._q.put({"method": "thread/settings/updated", "params": {
+            "threadId": "t", "threadSettings": {"serviceTier": "priority", "model": "new"}}})
+        await asyncio.wait_for(listener.get(), 1)
+        sess = adapter._sessions["sess"]
+        assert (sess["model"], sess["service_tier"], sess["settings_revision"]) == ("new", "default", 1)
+        assert codex_sessions.load("sess")["service_tier"] == "default"
     finally:
         await client._q.put(None)
         await adapter._sessions["sess"]["bomba"]

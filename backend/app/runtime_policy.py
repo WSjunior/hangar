@@ -13,7 +13,7 @@ from app import diag, log_paths
 
 _PATCH = {
     "claude": {"session_id", "cwd", "model", "effort", "permission_mode", "previous_non_plan", "context_window", "problema"},
-    "codex": {"thread_id", "rollout_path", "cwd", "model", "effort", "mode", "skipped_async_questions", "problema"},
+    "codex": {"thread_id", "rollout_path", "cwd", "model", "effort", "mode", "service_tier", "skipped_async_questions", "problema"},
 }
 _unknown_guard = threading.Lock()
 _unknown_counts = {}
@@ -183,12 +183,11 @@ def run(kind: str, payload: dict, metadata: dict) -> dict:
         with lock:
             validate()
             state_path = metadata.get("state_path")
-            if state_path:
-                view = json.loads(Path(state_path).read_bytes())["runtime_state"].get("view") or {}
-                for key, value in payload.items():
-                    source = "conversation" if key == "session_id" else key
-                    if source in view and view[source] != value:
-                        return {"updated": False, "stale": True}
+            view = (json.loads(Path(state_path).read_bytes())["runtime_state"].get("view") or {}) if state_path else {}
+            for key, value in payload.items():
+                source = "conversation" if key == "session_id" else key
+                if source in view and view[source] != value:
+                    return {"updated": False, "stale": True}
             if provider == "claude":
                 from app.adapters.claude_headless import sessions
             else:
@@ -196,6 +195,10 @@ def run(kind: str, payload: dict, metadata: dict) -> dict:
             current = sessions.load(metadata["name"])
             if not current or current.get("key") != metadata["key"]:
                 raise RuntimeError("sidecar de outra vida")
+            # Fast é da conversa: o sidecar já em outra thread não herda a escolha da anterior.
+            if ("service_tier" in payload and "thread_id" not in payload and view.get("thread_id")
+                    and current.get("thread_id") != view["thread_id"]):
+                return {"updated": False, "stale": True}
             updated = sessions.update(metadata["name"], **payload)
             if updated is None:
                 raise RuntimeError("sidecar desapareceu durante a alteração")
