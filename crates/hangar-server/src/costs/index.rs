@@ -61,8 +61,24 @@ impl std::fmt::Display for IndexError {
 
 impl std::error::Error for IndexError {}
 
+/// Causa do erro SQLite para o log: código e código estendido, ou só o nome da variante. Nunca a
+/// mensagem nem o Debug inteiro, que podem ecoar o valor lido de uma coluna.
+pub(crate) fn sqlite_cause(error: &rusqlite::Error) -> String {
+    match error {
+        rusqlite::Error::SqliteFailure(failure, _) => format!("{:?}/{}", failure.code, failure.extended_code),
+        other => format!("{other:?}").split(['(', ' ', '{']).next().unwrap_or_default().to_owned(),
+    }
+}
+
+/// Falha de disco com a causa no log; o chamador só vê `NoDisk`, que vira o código da rota.
+pub(crate) fn disk_error(step: &'static str, error: &std::io::Error) -> IndexError {
+    tracing::warn!(code = "custos_disco", step, kind = ?error.kind(), os = ?error.raw_os_error());
+    IndexError::NoDisk
+}
+
 impl From<rusqlite::Error> for IndexError {
     fn from(error: rusqlite::Error) -> Self {
+        tracing::warn!(code = "custos_sqlite", causa = %sqlite_cause(&error));
         match error.sqlite_error_code() {
             Some(ErrorCode::DiskFull | ErrorCode::ReadOnly | ErrorCode::CannotOpen | ErrorCode::SystemIoFailure) => Self::NoDisk,
             _ => Self::Sqlite(error),
@@ -206,7 +222,7 @@ impl Index {
     fn changed(&self) { self.generation.fetch_add(1, Ordering::Release); }
 
     fn connect(&self) -> Result<Connection, IndexError> {
-        fs::create_dir_all(self.path.parent().unwrap()).map_err(|_| IndexError::NoDisk)?;
+        fs::create_dir_all(self.path.parent().unwrap()).map_err(|e| disk_error("criar_pasta", &e))?;
         open_connection(&self.path, &self.generation).map_err(Into::into)
     }
 
@@ -222,7 +238,7 @@ impl Index {
             match fs::remove_file(PathBuf::from(path)) {
                 Ok(()) => {},
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-                Err(_) => return Err(IndexError::NoDisk),
+                Err(error) => return Err(disk_error("apagar_indice", &error)),
             }
         }
         drop(open_connection(&self.path, &self.generation)?);
@@ -279,18 +295,30 @@ impl Index {
         version: &str, areas_sig: &str, redo_areas: &(dyn Fn(&AreaEntries) -> Vec<UsoLinha> + Sync),
         progress: &Progress,
     ) -> Result<bool, IndexError> {
+        self.sync_keeping(scope, files, &[], new_fold, version, areas_sig, redo_areas, progress)
+    }
+
+    /// `keep`: pastas que a listagem não conseguiu ler. Arquivo conhecido debaixo delas não está
+    /// na lista por erro, não por ter sumido: a linha dele fica como estava.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sync_keeping<F: Fold>(
+        &self, scope: &str, files: &[PathBuf], keep: &[PathBuf], new_fold: &(dyn Fn(&Path) -> F + Sync),
+        version: &str, areas_sig: &str, redo_areas: &(dyn Fn(&AreaEntries) -> Vec<UsoLinha> + Sync),
+        progress: &Progress,
+    ) -> Result<bool, IndexError> {
         progress.set(scope, 0, files.len());
         let result = self.with_recovery(|| {
             progress.set(scope, 0, files.len());
-            self.sync_inner(scope, files, new_fold, version, areas_sig, redo_areas, progress)
+            self.sync_inner(scope, files, keep, new_fold, version, areas_sig, redo_areas, progress)
         });
         // Fontes concluídas continuam na soma exibida durante o aquecimento.
         progress.set(scope, files.len(), files.len());
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn sync_inner<F: Fold>(
-        &self, scope: &str, files: &[PathBuf], new_fold: &(dyn Fn(&Path) -> F + Sync),
+        &self, scope: &str, files: &[PathBuf], keep: &[PathBuf], new_fold: &(dyn Fn(&Path) -> F + Sync),
         version: &str, areas_sig: &str, redo_areas: &(dyn Fn(&AreaEntries) -> Vec<UsoLinha> + Sync),
         progress: &Progress,
     ) -> Result<bool, IndexError> {
@@ -315,7 +343,8 @@ impl Index {
                     if let Some(record) = light { known.insert(key, record); }
                     continue;
                 },
-                Err(_) => continue,
+                // O registro já saiu de `known`: a linha antiga fica, e a causa vai ao log.
+                Err(error) => { tracing::warn!(code = "leitura_custos", step = "metadados", kind = ?error.kind()); continue },
             };
             let fingerprint = Fingerprint::from_metadata(&metadata);
             if light.as_ref().is_some_and(|r| r.current(&fingerprint, &version)) { continue; }
@@ -383,7 +412,8 @@ impl Index {
                             reader_panicked = true;
                             tracing::warn!(code = "panico_leitura_custos");
                         },
-                        Err(_) => tracing::warn!(code = "leitura_custos"),
+                        Err(ReadError::Io(kind)) => tracing::warn!(code = "leitura_custos", kind = ?kind),
+                        Err(_) => tracing::warn!(code = "leitura_custos", step = "estado_salvo"),
                     }
                     next += 1;
                     // Resultados completos não devem acumular até o próximo segundo em arquivos densos.
@@ -404,7 +434,10 @@ impl Index {
             for (job, read) in pending {
                 write_file(&tx, &job, scope, &version, read, false, areas_sig)?;
             }
-            for record in known.values() { delete_file(&tx, record.id)?; }
+            for (path, record) in &known {
+                if keep.iter().any(|dir| Path::new(path).starts_with(dir)) { continue; }
+                delete_file(&tx, record.id)?;
+            }
             reader_panicked |= redo_saved_areas(&tx, scope, areas_sig, redo_areas)?;
             tx.commit()?;
             if conn.total_changes() != batch_before { self.changed(); }
@@ -429,14 +462,18 @@ impl Index {
     ) -> Result<i64, IndexError> {
         self.with_recovery(|| {
             let mut conn = self.connect()?;
-            let fingerprint = Fingerprint::from_metadata(&fs::metadata(path).map_err(|_| IndexError::NoDisk)?);
+            let fingerprint = Fingerprint::from_metadata(&fs::metadata(path).map_err(|e| disk_error("metadados", &e))?);
             let version = format!("{SCHEMA}:{version}");
             let record = load_record(&conn, &path.to_string_lossy())?;
             if let Some(record) = record.as_ref().filter(|r| r.current(&fingerprint, &version)) {
                 return Ok(record.id);
             }
             let read = read_new(path, &fingerprint, record.as_ref(), new_fold, &version)
-                .map_err(|error| match error { ReadError::Fold => IndexError::ReaderPanic, _ => IndexError::NoDisk })?
+                .map_err(|error| match error {
+                    ReadError::Fold => IndexError::ReaderPanic,
+                    ReadError::Io(kind) => { tracing::warn!(code = "custos_disco", step = "ler_arquivo", kind = ?kind); IndexError::NoDisk },
+                    ReadError::Codec => { tracing::warn!(code = "custos_disco", step = "estado_salvo"); IndexError::NoDisk },
+                })?
                 .with_area_rows(redo_areas);
             let job = ReadJob { position: 0, path: path.to_owned(), fingerprint, record };
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -458,7 +495,9 @@ impl Index {
             let mut stmt = conn.prepare("SELECT id, scope, path FROM files ORDER BY rowid")?;
             for row in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))? {
                 let (id, scope, path) = row?;
-                if !active.contains(&scope) && !Path::new(&path).exists() { removed.push(id); }
+                // `exists()` também é falso com permissão negada: só some quem o sistema diz que sumiu.
+                let gone = matches!(fs::symlink_metadata(&path), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+                if !active.contains(&scope) && gone { removed.push(id); }
             }
         }
         if removed.is_empty() { return Ok(false); }
@@ -687,10 +726,10 @@ impl FileRead {
     }
 }
 
-enum ReadError { Io, Codec, Fold }
+enum ReadError { Io(std::io::ErrorKind), Codec, Fold }
 
 impl From<std::io::Error> for ReadError {
-    fn from(_: std::io::Error) -> Self { Self::Io }
+    fn from(error: std::io::Error) -> Self { Self::Io(error.kind()) }
 }
 
 fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, ReadError> {
@@ -1095,5 +1134,18 @@ mod recovery_tests {
         let conn = index.connect().unwrap();
         assert_eq!(conn.query_row("SELECT v FROM meta WHERE k='preserved'", [], |r| r.get::<_, String>(0)).unwrap(), "new");
         assert!(!index.operations.lock().unwrap().pending);
+    }
+}
+
+#[cfg(test)]
+mod cause_tests {
+    use super::*;
+
+    #[test]
+    fn sqlite_cause_has_codes_and_never_the_column_value() {
+        let corrupt = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(11), Some("texto qualquer".into()));
+        assert_eq!(sqlite_cause(&corrupt), "DatabaseCorrupt/11");
+        let typed = rusqlite::Error::InvalidColumnType(9, "valor-de-conversa".into(), rusqlite::types::Type::Text);
+        assert_eq!(sqlite_cause(&typed), "InvalidColumnType");
     }
 }

@@ -117,14 +117,20 @@ pub struct Collector {
     pricing: Mutex<Pricing>, areas: AreaMap,
     source: Arc<dyn ScopeSource>, progress: Progress, metadata: Mutex<Metadata>,
     scanner: Mutex<Scanner>, completed_scans: AtomicU64,
+    /// Causa da primeira pasta ilegível da última varredura (`costs_dir_<tipo>`), para o diário.
+    unread_issue: Mutex<Option<String>>,
 }
 impl Collector {
     pub fn new(index_dir: PathBuf, pricing_dir: PathBuf, area_file: PathBuf, scopes: Arc<dyn ScopeSource>) -> Self {
         Self { index: OnceLock::new(), index_dir, index_init: Mutex::new(()), pool: OnceLock::new(),
             pricing: Mutex::new(Pricing::load(&pricing_dir)), areas: AreaMap::load(&area_file),
             source: scopes, progress: Progress::default(), metadata: Mutex::new(Metadata::default()),
-            scanner: Mutex::new(Scanner::default()), completed_scans: AtomicU64::new(0) }
+            scanner: Mutex::new(Scanner::default()), completed_scans: AtomicU64::new(0),
+            unread_issue: Mutex::new(None) }
     }
+
+    /// Pasta que a última varredura não leu: as linhas dela ficaram como estavam.
+    pub fn unread_issue(&self) -> Option<String> { self.unread_issue.lock().unwrap().clone() }
 
     pub fn schedule_warmup(self: &Arc<Self>, delay: Duration) {
         let weak = Arc::downgrade(self);
@@ -239,7 +245,8 @@ impl Collector {
             },
         };
         let index = self.index()?;
-        let owners = rollout_owners(&scopes.codex);
+        let mut unread_kinds = Vec::new();
+        let (owners, codex_unread) = rollout_listing(&scopes.codex, &mut unread_kinds);
         let mut active = scopes.clone();
         active.codex = owners.values().map(|(scope, _)| scope.clone()).collect();
         let pi_root = scopes.pi.iter().find(|s| s.source == "pi").map(|s| &s.root);
@@ -247,37 +254,38 @@ impl Collector {
         active.kimi = scopes.kimi.filter(|scope| scope.root.is_dir());
         let mut claude_files = Vec::new(); let mut pi_files = Vec::new();
         for scope in &active.claude {
-            let files = list_files(&scope.root, |n| n.ends_with(".jsonl"));
-            self.progress.set(&claude_key(scope), 0, files.len()); claude_files.push(files);
+            let listing = list_dir(&scope.root, |n| n.ends_with(".jsonl"), &mut unread_kinds);
+            self.progress.set(&claude_key(scope), 0, listing.files.len()); claude_files.push(listing);
         }
         for (scope, files) in owners.values() { self.progress.set(&scope.account, 0, files.len()); }
         for scope in &active.pi {
-            let files = list_files(&scope.root, |n| n.ends_with(".jsonl"));
-            self.progress.set(&pi_key(scope), 0, files.len()); pi_files.push(files);
+            let listing = list_dir(&scope.root, |n| n.ends_with(".jsonl"), &mut unread_kinds);
+            self.progress.set(&pi_key(scope), 0, listing.files.len()); pi_files.push(listing);
         }
         let kimi_files = active.kimi.as_ref().map(|scope| {
-            let files = list_files(&scope.root, |n| n == "wire.jsonl");
-            self.progress.set(&kimi_key(scope), 0, files.len()); files
+            let listing = list_dir(&scope.root, |n| n == "wire.jsonl", &mut unread_kinds);
+            self.progress.set(&kimi_key(scope), 0, listing.files.len()); listing
         });
+        *self.unread_issue.lock().unwrap() = unread_kinds.first().map(|kind| format!("costs_dir_{}", kind_slug(*kind)));
         let redo = |entries: &_| self.areas.area_lines(entries);
         let signature = self.areas.signature(); let mut keys = Vec::new();
-        for (scope, files) in active.claude.iter().zip(claude_files) {
+        for (scope, listing) in active.claude.iter().zip(claude_files) {
             let key = claude_key(scope);
-            index.sync(&key, &files, &claude::new_fold(&scope.root), claude::VERSION, signature, &redo, &self.progress)?;
+            index.sync_keeping(&key, &listing.files, &listing.unread, &claude::new_fold(&scope.root), claude::VERSION, signature, &redo, &self.progress)?;
             keys.push(key);
         }
         for (scope, files) in owners.values() {
-            index.sync(&scope.account, files, &codex::new_fold, codex::VERSION, signature, &redo, &self.progress)?;
+            index.sync_keeping(&scope.account, files, &codex_unread, &codex::new_fold, codex::VERSION, signature, &redo, &self.progress)?;
             keys.push(scope.account.clone());
         }
-        for (scope, files) in active.pi.iter().zip(pi_files) {
+        for (scope, listing) in active.pi.iter().zip(pi_files) {
             let key = pi_key(scope);
-            index.sync(&key, &files, &simple::new_pi_fold(&scope.root, &scope.source), simple::PI_VERSION, signature, &redo, &self.progress)?;
+            index.sync_keeping(&key, &listing.files, &listing.unread, &simple::new_pi_fold(&scope.root, &scope.source), simple::PI_VERSION, signature, &redo, &self.progress)?;
             keys.push(key);
         }
-        if let (Some(scope), Some(files)) = (&active.kimi, kimi_files) {
+        if let (Some(scope), Some(listing)) = (&active.kimi, kimi_files) {
             let key = kimi_key(scope);
-            index.sync(&key, &files, &simple::new_kimi_fold, simple::KIMI_VERSION, signature, &redo, &self.progress)?;
+            index.sync_keeping(&key, &listing.files, &listing.unread, &simple::new_kimi_fold, simple::KIMI_VERSION, signature, &redo, &self.progress)?;
             keys.push(key);
         }
         index.forget_outside(&keys)?;
@@ -405,12 +413,23 @@ fn claude_key(scope: &ClaudeScope) -> String { format!("claude:{}", scope.root.d
 fn pi_key(scope: &PiScope) -> String { format!("{}:{}", scope.source, scope.root.display()) }
 fn kimi_key(scope: &KimiScope) -> String { format!("kimi:{}", scope.root.display()) }
 
+/// Só para quem não apaga nada a partir da lista; a varredura usa `rollout_listing`.
 pub fn rollout_owners(codex: &[CodexScope]) -> IndexMap<String, (CodexScope, Vec<PathBuf>)> {
+    rollout_listing(codex, &mut Vec::new()).0
+}
+
+/// Donos dos rollouts e as pastas que não deu para ler, que nenhum dono pode apagar.
+fn rollout_listing(codex: &[CodexScope], kinds: &mut Vec<std::io::ErrorKind>)
+    -> (IndexMap<String, (CodexScope, Vec<PathBuf>)>, Vec<PathBuf>) {
+    let mut unread = Vec::new();
     let homes: Vec<_> = codex.iter().map(|scope| std::fs::canonicalize(&scope.home).ok()).collect();
     let mut owners: IndexMap<String, (CodexScope, Vec<PathBuf>)> = IndexMap::new();
     for scope in codex {
         for root in [scope.home.join("sessions"), scope.home.join("archived_sessions")] {
-            for path in list_files(&root, |n| n.starts_with("rollout-") && n.ends_with(".jsonl")) {
+            let listing = list_dir(&root, |n| n.starts_with("rollout-") && n.ends_with(".jsonl"), kinds);
+            // A chave do índice é canônica; a pasta mantida também, para casar no `starts_with`.
+            unread.extend(listing.unread.iter().map(|dir| std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone())));
+            for path in listing.files {
                 let Ok(path) = std::fs::canonicalize(path) else { continue };
                 let mut matches = codex.iter().zip(&homes).filter(|(_, home)| home.as_ref().is_some_and(|home| {
                     path.starts_with(home.join("sessions")) || path.starts_with(home.join("archived_sessions"))
@@ -422,22 +441,66 @@ pub fn rollout_owners(codex: &[CodexScope]) -> IndexMap<String, (CodexScope, Vec
             }
         }
     }
+    // Conta com pasta ilegível segue ativa mesmo sem arquivo listado: senão as linhas mantidas
+    // dela sairiam do relatório como se a conta tivesse acabado.
+    for (scope, home) in codex.iter().zip(&homes) {
+        if home.as_ref().is_some_and(|home| unread.iter().any(|dir| dir.starts_with(home))) {
+            owners.entry(scope.account.clone()).or_insert_with(|| (scope.clone(), Vec::new()));
+        }
+    }
     for (_, files) in owners.values_mut() { files.sort(); }
-    owners
+    (owners, unread)
 }
 
+/// Arquivos achados e as pastas que não deu para ler. Pasta ilegível não é pasta vazia: quem
+/// sincroniza mantém as linhas que já tinha debaixo dela.
+pub struct Listing { pub files: Vec<PathBuf>, pub unread: Vec<PathBuf> }
+
+/// Só para quem não apaga nada a partir da lista (contagens, testes); a varredura usa `list_dir`.
 pub fn list_files(root: &Path, matches: impl Fn(&str) -> bool) -> Vec<PathBuf> {
-    let mut output = Vec::new();
+    list_dir(root, matches, &mut Vec::new()).files
+}
+
+/// `kinds` recebe a causa de cada pasta ilegível. Pasta que sumiu (`NotFound`) é pasta sem
+/// arquivos: o que estava nela foi apagado mesmo.
+pub fn list_dir(root: &Path, matches: impl Fn(&str) -> bool, kinds: &mut Vec<std::io::ErrorKind>) -> Listing {
+    let (mut files, mut unread) = (Vec::new(), Vec::new());
+    let mut failed = |path: PathBuf, error: std::io::Error, unread: &mut Vec<PathBuf>| {
+        tracing::warn!(code = "custos_pasta_ilegivel", kind = ?error.kind(), os = ?error.raw_os_error());
+        kinds.push(error.kind());
+        unread.push(path);
+    };
     let mut stack = vec![root.to_path_buf()];
     while let Some(path) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(path) else { continue };
-        for entry in entries.flatten() {
-            let Ok(kind) = entry.file_type() else { continue };
-            if kind.is_dir() { stack.push(entry.path()); }
-            else if matches(&entry.file_name().to_string_lossy()) { output.push(entry.path()); }
+        let entries = match std::fs::read_dir(&path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => { failed(path, error, &mut unread); continue },
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                // A listagem parou no meio: o resto da pasta é desconhecido.
+                Err(error) => { failed(path.clone(), error, &mut unread); break },
+            };
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => stack.push(entry.path()),
+                Ok(_) => if matches(&entry.file_name().to_string_lossy()) { files.push(entry.path()) },
+                Err(error) => failed(entry.path(), error, &mut unread),
+            }
         }
     }
     // O caminho textual acompanha a ordem usada na leitura do índice.
-    output.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
-    output
+    files.sort_by(|a, b| a.to_string_lossy().cmp(&b.to_string_lossy()));
+    Listing { files, unread }
+}
+
+/// `PermissionDenied` → `permission_denied`, para caber no código do diário (`[a-z0-9_]`).
+fn kind_slug(kind: std::io::ErrorKind) -> String {
+    let mut slug = String::new();
+    for (i, c) in format!("{kind:?}").chars().enumerate() {
+        if c.is_ascii_uppercase() && i > 0 { slug.push('_'); }
+        if c.is_ascii_alphanumeric() { slug.push(c.to_ascii_lowercase()); }
+    }
+    slug
 }

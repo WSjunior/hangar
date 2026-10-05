@@ -425,7 +425,7 @@ pub fn session_rows(ix: &Index, rollout: &Path, areas: &AreaMap) -> Option<Vec<U
 pub fn try_session_rows(ix: &Index, rollout: &Path, areas: &AreaMap) -> Result<Vec<UsageRow>, IndexError> {
     // A varredura grava o caminho canônico (`rollout_owners`): outro texto viraria uma segunda
     // entrada avulsa do mesmo arquivo, que a varredura nunca absorve.
-    let rollout = &std::fs::canonicalize(rollout).map_err(|_| IndexError::NoDisk)?;
+    let rollout = &std::fs::canonicalize(rollout).map_err(|e| crate::costs::index::disk_error("canonicalizar", &e))?;
     let id = ix.try_sync_file(rollout,&new_fold, VERSION, "codex:avulso", areas.signature(), &|entries| areas.area_lines(entries))?;
     ix.read_costs(None, None, Some(id))
 }

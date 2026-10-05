@@ -584,3 +584,42 @@ fn persistent_failure_does_not_start_a_scan_per_request() {
     }
     assert_eq!(source.calls.load(Ordering::SeqCst), after_first);
 }
+
+/// Pasta sem permissão de leitura; `None` quando o processo roda como root (o chmod não vale).
+#[cfg(unix)]
+struct Restore(std::path::PathBuf);
+#[cfg(unix)]
+impl Drop for Restore {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+#[cfg(unix)]
+fn lock_dir(dir: &Path) -> Option<Restore> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let restore = Restore(dir.to_path_buf());
+    std::fs::read_dir(dir).is_err().then_some(restore)
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_folder_keeps_its_rows_and_reports_the_cause() {
+    let (_d, base) = fixtures_copy();
+    let c = collector(&base, Fixed::new(Ok(scopes(&base))));
+    c.schedule_warmup(Duration::ZERO);
+    wait_ready(&c);
+    let before = c.read_costs(None).unwrap();
+    assert!(c.unread_issue().is_none());
+    // Uma pasta de projeto do Claude e a pasta de dias do Codex: nas duas, ler falha, nada sumiu.
+    let Some(claude) = lock_dir(&base.join("claude/projects/-repo-a")) else { return };
+    let Some(codex) = lock_dir(&base.join("codex/sessions/2026")) else { return };
+    assert!(matches!(c.prepare(true).unwrap(), Ready::Go));
+    assert_eq!(c.read_costs(None).unwrap(), before);
+    assert_eq!(c.unread_issue().as_deref(), Some("costs_dir_permission_denied"));
+    drop((claude, codex));
+    assert!(matches!(c.prepare(true).unwrap(), Ready::Go));
+    assert_eq!(c.read_costs(None).unwrap(), before);
+    assert!(c.unread_issue().is_none());
+}

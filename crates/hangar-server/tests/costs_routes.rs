@@ -888,3 +888,25 @@ async fn summary_view_serves_only_home_fields_equal_to_the_full_report() {
     }
     assert!(!h.forwarded("GET", "/api/costs?period=all&view=summary"));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unreadable_folder_is_served_and_reported_to_the_journal_with_its_cause() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = Harness::new(true, false).await;
+    let before = h.ready().await;
+    let dir = h.base.join("claude/projects/-repo-b");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&dir).is_ok() { std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap(); return; }
+    let response = h.request(reqwest::Method::GET, "/api/costs?fresco=1").send().await.unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(response.status(), 200);
+    let after: Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert_eq!(after["totals"], before["totals"], "linhas da pasta ilegível mantidas");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !h.upstream.journal.lock().unwrap().iter().any(|e| e["evento"] == "rust.costs_dir_unread"
+        && e["codigo"] == "costs_dir_permission_denied" && e["sessao"] == "costs") {
+        assert!(Instant::now() < deadline, "diário: {:?}", h.upstream.journal.lock().unwrap());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}

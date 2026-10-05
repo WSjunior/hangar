@@ -175,6 +175,14 @@ async fn finish(
     }
 }
 
+/// A última varredura pulou uma pasta que não leu (linhas dela mantidas): a resposta sai, e o
+/// diário fica sabendo, com a causa no código.
+fn report_unread(state: &AppState, route: &str) {
+    if let Some(code) = state.costs.unread_issue() {
+        state.diag.report("rust.costs_dir_unread", route, &code, "pasta ilegível na leitura de custos; linhas anteriores mantidas");
+    }
+}
+
 async fn blocking<F>(work: F) -> Result<Prepared, FailureReason>
 where
     F: FnOnce() -> Result<Prepared, FailureReason> + Send + 'static,
@@ -260,6 +268,7 @@ pub async fn costs(
         serde_json::to_vec(&report).map(Prepared::Body).map_err(|_| FailureReason::Json)
     })
     .await;
+    report_unread(&state, "costs");
     finish(&state, request, "costs", result).await
 }
 
@@ -419,5 +428,6 @@ pub async fn usage(
         serde_json::to_vec(&report).map(Prepared::Body).map_err(|_| FailureReason::Json)
     })
     .await;
+    report_unread(&state, "uso");
     finish(&state, request, "uso", result).await
 }
