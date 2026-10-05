@@ -149,8 +149,8 @@ limite; segunda captura do spinner; contexto 200k e 1M; plano com e sem pino; ú
 
 **Falha sem ela:** `test_list_golden_is_current` (regenera em memória e compara).
 
-- [ ] **Step 11: Fakes que registram, casos acima; teste visto falhar sem o arquivo**
-- [ ] **Step 12: Gerar; testes focados; revisar (nenhum texto real)**
+- [x] **Step 11: Fakes que registram, casos acima; teste visto falhar sem o arquivo**
+- [x] **Step 12: Gerar; testes focados; revisar (nenhum texto real)**
 
 ### Task 6: Descoberta e resolução das sessões Claude
 
