@@ -554,7 +554,17 @@ def apply_action(state, action, clock, call_id):
                 _finalize_terminal(state, action["id"], clock)
         return operation
     if kind == "recover":
-        for operation in operations.values():
+        for operation_id, operation in operations.items():
+            attempts = operation["wire_attempts"].values()
+            # Nenhuma tentativa chegou a escrever: nada pode ter alcançado o terminal (o par do Rust).
+            if operation["status"] == "dispatching" and attempts and all(a["status"] == "staged" for a in attempts):
+                for attempt in attempts:
+                    attempt["status"] = "not_written"
+                operation.update(status="deferred", result={"operation_id": operation_id, "disposition": "deferred",
+                    "payload": {"code": "interrupted_before_write", "queued": operation["entry_id"] is not None,
+                                "cleanup": "not_needed"}})
+                operation.pop("terminal_finalized", None)
+                continue
             if operation["status"] == "dispatching":
                 operation["status"] = "unknown"
                 for attempt in operation["wire_attempts"].values():

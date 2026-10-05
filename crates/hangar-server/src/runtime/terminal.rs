@@ -79,7 +79,7 @@ impl Services {
     async fn call(&self,kind:&str,request_id:RequestId,payload:Value)->Result<Value,RuntimeError> {
         let phase=format!("terminal-policy:{}:{}:{}",self.target.generation,self.attempt,self.sequence.fetch_add(1,Ordering::Relaxed));
         self.action("policy-prepare",Action::Prepare {id:phase.clone(),payload:json!({"kind":kind,"request_id":request_id,"payload":payload}),entry_id:None}).await?;
-        self.action("policy-dispatch",Action::BeginDispatch {id:phase.clone(),wire_id:phase.clone()}).await?;
+        self.action("policy-dispatch",Action::BeginDispatch {id:phase.clone(),wire_id:phase.clone(),staged:false}).await?;
         let result=self.policy.run_for(&self.target.key,self.target.generation,kind,&request_id,payload,&phase).await;
         self.action("policy-finish",Action::Finish {id:phase,status:if result.is_ok(){Status::Accepted}else{Status::Unknown},result:result.clone().unwrap_or_else(|e|json!({"error_code":e.code}))}).await?;
         result
@@ -92,6 +92,13 @@ impl TerminalServices for Services {
         let value=self.policy.run_for(&self.target.key,self.target.generation,"terminal_facts",&RequestId::String(self.root.clone()),
             json!({"binding":binding,"operation_id":self.root,"text":self.text}),&phase).await.map_err(|_|ServiceError("terminal_facts"))?;
         serde_json::from_value(value).map_err(|_|ServiceError("terminal_facts_shape"))
+    })}
+    fn writing<'a>(&'a self)->ServiceFuture<'a,()> {Box::pin(async move {
+        self.action("writing",Action::MarkWriting {id:self.attempt.clone(),wire_id:format!("terminal:{}:{}",self.target.generation,self.attempt)}).await
+            .map(|_|()).map_err(|failure|{
+                tracing::warn!(key=%self.target.key,session=%self.target.name,code=%failure.code,"diário não gravou o início da escrita; a entrada espera");
+                ServiceError("write_journal")
+            })
     })}
     fn publish<'a>(&'a self,binding:&'a TerminalBinding,request:PluginRequest)->ServiceFuture<'a,PluginReply> {Box::pin(async move {
         let value=self.call("terminal_publish",RequestId::String(self.root.clone()),json!({"binding":binding,"operation_id":self.root,"publication":request,"generation":self.target.generation})).await.map_err(|_|ServiceError("terminal_publish"))?;
@@ -113,10 +120,11 @@ struct Executor {
 }
 struct Stall {code:String,since:tokio::time::Instant,wait:Duration,next:tokio::time::Instant,surfaced:bool}
 /// Esperas normais (o Claude ocupado, uma pergunta na tela) não contam como entrega parada, nem a
-/// escrita desfeita (`input_unproved`), que já tem o teto de tentativas da fila.
+/// escrita desfeita (`input_unproved`), que já tem o teto de tentativas da fila, nem falha do
+/// diário (`write_journal`), que tem aviso próprio.
 fn stalled_code(result:&RuntimeReply)->Option<&str> {
     if result.disposition!=Disposition::Deferred || result.payload["stage"].is_null() {return None;}
-    result.payload["code"].as_str().filter(|code|!matches!(*code,"question_open"|"not_ready"|"overlay"|"input_unavailable"|"input_unproved"))
+    result.payload["code"].as_str().filter(|code|!matches!(*code,"question_open"|"not_ready"|"overlay"|"input_unavailable"|"input_unproved"|"write_journal"))
 }
 /// Teto do empréstimo: a administração mais longa (troca de modelo/motor) leva segundos.
 const MAX_LOAN_S:u64=120;
@@ -220,7 +228,7 @@ impl Executor {
                     Some(Message::Queue {id,action,response})=>{
                         let result=match action {
                             Action::Finish {id,status,result}=>self.native_receipt(&id,status,result).await,
-                            Action::Claim {..}|Action::SetDelivered {value:false,..}|Action::BumpAttempts {..}|Action::Reconcile {..}|Action::ReplaceRows {..}|Action::Prepare {..}|Action::BeginDispatch {..}|Action::BindDispatch {..}|Action::Recover|Action::Confirm {..}|Action::ConfirmOccurrence {..}|Action::SetRuntimeState {..}|Action::LateRpcResolution {..}=>Err(error("terminal_queue_action")),
+                            Action::Claim {..}|Action::SetDelivered {value:false,..}|Action::BumpAttempts {..}|Action::Reconcile {..}|Action::ReplaceRows {..}|Action::Prepare {..}|Action::BeginDispatch {..}|Action::MarkWriting {..}|Action::BindDispatch {..}|Action::Recover|Action::Confirm {..}|Action::ConfirmOccurrence {..}|Action::SetRuntimeState {..}|Action::LateRpcResolution {..}=>Err(error("terminal_queue_action")),
                             action=>self.queue.exec(self.target.generation,&id,sample(),action).await.map_err(|_|error("queue_io")),
                         };
                         if result.is_ok(){self.publish().await?;} let _=response.send(result);
@@ -308,7 +316,8 @@ impl Executor {
                     let cursor=self.receipt.capture(&self.target.transcript).map_err(|_|error("receipt_cursor"))?;
                     self.action(Action::BindDispatch {id:id.into(),cursor:serde_json::to_value(cursor).unwrap()}).await?;
                 }
-                self.action(Action::BeginDispatch {id:id.into(),wire_id:format!("terminal:{}:{id}",self.target.generation)}).await?;
+                // A entrada só escreve depois do `writing` do escritor; antes disso, cair não a deixa incerta.
+                self.action(Action::BeginDispatch {id:id.into(),wire_id:format!("terminal:{}:{id}",self.target.generation),staged:kind=="input"}).await?;
                 let publication=format!("{}:{}:{id}",self.target.key,self.target.generation);
                 let held=payload["request_id"].as_str().filter(|s|s.starts_with("perm:")||s.starts_with("ask:"));
                 let plugin=if matches!(kind,"select"|"answer_questions") {

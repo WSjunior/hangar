@@ -102,7 +102,7 @@ async fn open_runs_queue_recover() {
         let lease = acquire_lease(&target.lease_path).unwrap();
         let mut store = Store::open(&target.state_path,&target.projection_dir,State::new("key",1,"session",vec![])).unwrap();
         store.exec(1,"prepare",clock(),Action::Prepare { id:"op".into(),payload:json!({"kind":"input"}),entry_id:None }).unwrap();
-        store.exec(1,"begin",clock(),Action::BeginDispatch { id:"op".into(),wire_id:"wire".into() }).unwrap();
+        store.exec(1,"begin",clock(),Action::BeginDispatch { id:"op".into(),wire_id:"wire".into(),staged:false }).unwrap();
         drop(lease);
     }
     let (escuta,_,server) = cano(Duration::ZERO,None).await;

@@ -19,7 +19,7 @@ fn recovery_matrix_preserves_input_without_resending_unknown() {
             store.exec(1,"prepare",clock(),Action::Prepare { id:"entry".into(),entry_id:Some("entry".into()),payload:json!({"kind":"input"}) }).unwrap();
         }
         let dispatched = ["partial_write","after_write","before_reply","after_detach"].contains(&point);
-        if dispatched { store.exec(1,"dispatch",clock(),Action::BeginDispatch { id:"entry".into(),wire_id:"wire".into() }).unwrap(); }
+        if dispatched { store.exec(1,"dispatch",clock(),Action::BeginDispatch { id:"entry".into(),wire_id:"wire".into(),staged:false }).unwrap(); }
         drop(store); drop(lease);
         let _reserve = acquire_lease(&lease_path).unwrap();
         assert!(acquire_lease(&lease_path).is_err());
@@ -29,7 +29,7 @@ fn recovery_matrix_preserves_input_without_resending_unknown() {
         assert_eq!(store.state().rows[0]["text"],"Olá\r\nação 🚀");
         if dispatched {
             assert!(matches!(store.state().operations["entry"].status,Status::Unknown),"{point}");
-            assert!(store.exec(1,"retry",clock(),Action::BeginDispatch { id:"entry".into(),wire_id:"retry".into() }).is_err());
+            assert!(store.exec(1,"retry",clock(),Action::BeginDispatch { id:"entry".into(),wire_id:"retry".into(),staged:false }).is_err());
         }
     }
 }

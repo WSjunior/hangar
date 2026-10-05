@@ -44,7 +44,7 @@ fn state_stays_bounded_with_100kb_replies() {
             ("root",Action::Prepare { id:op.clone(),payload:json!({"operation_id":op,"kind":"input"}),entry_id:None }),
             ("wire",Action::Prepare { id:wire.clone(),payload:json!({"logical_id":op,"frame":{"text":"Olá"}}),entry_id:None }),
             ("cursor",Action::BindDispatch { id:wire.clone(),cursor }),
-            ("dispatch",Action::BeginDispatch { id:wire.clone(),wire_id:wire.clone() }),
+            ("dispatch",Action::BeginDispatch { id:wire.clone(),wire_id:wire.clone(),staged:false }),
             ("ack",Action::Finish { id:wire.clone(),status:Status::Accepted,result:json!({"write_outcome":"written"}) }),
             ("reply",Action::Finish { id:op.clone(),status:Status::Accepted,
                 result:json!({"operation_id":op,"disposition":"accepted","payload":{"tool_result":big}}) }),
@@ -63,7 +63,7 @@ fn kept_reply_still_replays_instead_of_resending() {
     let mut store = Store::open(&dir.path().join("state"),dir.path(),State::new("key",1,"session",vec![])).unwrap();
     store.exec(1,"append",clock(),append()).unwrap();
     store.exec(1,"prepare",clock(),Action::Prepare { id:"op".into(),payload:json!({"kind":"input"}),entry_id:Some("entry-1".into()) }).unwrap();
-    store.exec(1,"begin",clock(),Action::BeginDispatch { id:"op".into(),wire_id:"wire:op:1".into() }).unwrap();
+    store.exec(1,"begin",clock(),Action::BeginDispatch { id:"op".into(),wire_id:"wire:op:1".into(),staged:false }).unwrap();
     store.exec(1,"reply",clock(),Action::Finish { id:"op".into(),status:Status::Accepted,
         result:json!({"operation_id":"op","disposition":"accepted","payload":{"tool_result":"x".repeat(1000)}}) }).unwrap();
     fill(&mut store,300,"fill");
@@ -132,7 +132,7 @@ fn unknown_never_unclaims() {
     let mut store = Store::open(&dir.path().join("state"), dir.path(), State::new("key",1,"session",vec![])).unwrap();
     store.exec(1,"append",clock(),append()).unwrap();
     store.exec(1,"prepare",clock(),Action::Prepare { id:"op".into(),payload:json!({}),entry_id:Some("entry-1".into()) }).unwrap();
-    store.exec(1,"dispatch",clock(),Action::BeginDispatch { id:"op".into(),wire_id:"wire:op:1".into() }).unwrap();
+    store.exec(1,"dispatch",clock(),Action::BeginDispatch { id:"op".into(),wire_id:"wire:op:1".into(),staged:false }).unwrap();
     store.exec(1,"unknown",clock(),Action::Finish { id:"op".into(),status:Status::Unknown,result:json!(null) }).unwrap();
     assert!(store.exec(1,"unclaim",clock(),Action::SetDelivered { entry_id:"entry-1".into(),value:false,steered:false }).is_err());
     assert_eq!(store.state().rows[0]["delivered"],true);
@@ -178,7 +178,7 @@ fn late_reply_matches_generation_and_type() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open(&dir.path().join("state"),dir.path(),State::new("key",1,"session",vec![])).unwrap();
     store.exec(1,"prepare",clock(),Action::Prepare { id:"op".into(),payload:json!({"request_id":1}),entry_id:None }).unwrap();
-    store.exec(1,"begin",clock(),Action::BeginDispatch { id:"op".into(),wire_id:"wire:1".into() }).unwrap();
+    store.exec(1,"begin",clock(),Action::BeginDispatch { id:"op".into(),wire_id:"wire:1".into(),staged:false }).unwrap();
     for (generation,request_id) in [(2,RequestId::Integer(1)),(1,RequestId::String("1".into()))] {
         assert!(store.exec(1,"late",clock(),Action::LateRpcResolution { id:"op".into(),wire_id:"wire:1".into(),
             request_id,generation,result:json!({"ok":true}) }).is_err());
@@ -206,12 +206,12 @@ fn terminal_runtime_store_recovery_only_unclaims_proved_unsent_terminal_claim() 
         store.exec(1,if terminal_claim{"terminal:queue:999"}else{"legacy-claim"},clock,Action::Claim {min_ts:1.0,limit:Some(1),entry_id:None}).unwrap();
         if let Some(status)=root_status {
             store.exec(1,"root",clock,Action::Prepare {id:"root".into(),entry_id:Some("entry".into()),payload:json!({"kind":"input"})}).unwrap();
-            if status==Status::Dispatching {store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"root".into(),wire_id:"wire".into()}).unwrap();}
+            if status==Status::Dispatching {store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"root".into(),wire_id:"wire".into(),staged:false}).unwrap();}
             else if status!=Status::Prepared {store.exec(1,"finish",clock,Action::Finish {id:"root".into(),status,result:json!({})}).unwrap();}
         }
         if side_effect {
             store.exec(1,"phase",clock,Action::Prepare {id:"phase".into(),entry_id:None,payload:json!({"logical_id":"root"})}).unwrap();
-            store.exec(1,"phase-dispatch",clock,Action::BeginDispatch {id:"phase".into(),wire_id:"rpc".into()}).unwrap();
+            store.exec(1,"phase-dispatch",clock,Action::BeginDispatch {id:"phase".into(),wire_id:"rpc".into(),staged:false}).unwrap();
         }
         drop(store); let mut store=Store::open(&path,&projection,State::new("key",1,"session",vec![])).unwrap();
         store.exec(1,"recover",clock,Action::Recover).unwrap(); assert_eq!(store.state().rows[0]["delivered"],expected,"{case}");
@@ -227,7 +227,7 @@ fn terminal_runtime_finish_is_atomic_and_recover_does_not_repeat_retry_accountin
         for n in 0..attempts {store.exec(1,&format!("bump:{n}"),clock,Action::BumpAttempts {entry_id:"entry".into()}).unwrap();}
         if claimed {store.exec(1,"terminal:queue:999",clock,Action::Claim {min_ts:1.0,limit:Some(1),entry_id:None}).unwrap();}
         store.exec(1,"terminal:queue:1000",clock,Action::Prepare {id:"attempt".into(),entry_id:Some("entry".into()),payload:json!({"operation_id":"attempt","kind":"input","payload":{"text":"Olá","pre_transcript":true,"_terminal_generation":1}})}).unwrap();
-        store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"attempt".into(),wire_id:"terminal:1:attempt".into()}).unwrap();
+        store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"attempt".into(),wire_id:"terminal:1:attempt".into(),staged:false}).unwrap();
         let status=if rejected{Status::Rejected}else{Status::Deferred}; let result=json!({"operation_id":"attempt","disposition":if rejected{"rejected"}else{"deferred"},"payload":{"cleanup":"proved"}});
         store.exec(1,"finish",clock,Action::Finish {id:"attempt".into(),status,result:result.clone()}).unwrap();
         let expected_abandoned=rejected||attempts==2; assert_eq!(store.state().rows[0]["delivered"],expected_abandoned,"claimed={claimed} attempts={attempts} rejected={rejected}");
@@ -246,7 +246,7 @@ fn terminal_runtime_recover_finishes_legacy_partial_row_transition_once() {
         store.exec(1,"append",clock,Action::Append {text:"Olá".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("entry".into())}).unwrap();
         if claimed {store.exec(1,"terminal:queue:1000",clock,Action::Claim {min_ts:1.0,limit:Some(1),entry_id:None}).unwrap();}
         store.exec(1,"terminal:queue:1001",clock,Action::Prepare {id:"attempt".into(),entry_id:Some("entry".into()),payload:json!({"operation_id":"attempt","kind":"input","payload":{"text":"Olá","pre_transcript":false}})}).unwrap();
-        store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"attempt".into(),wire_id:"terminal:1:attempt".into()}).unwrap();
+        store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"attempt".into(),wire_id:"terminal:1:attempt".into(),staged:false}).unwrap();
         let mut frozen=serde_json::to_value(store.state()).unwrap(); drop(store);
         frozen["rows"][0]["attempts"]=json!(attempts);
         frozen["operations"]["attempt"]["status"]=json!(if rejected{"rejected"}else{"deferred"});
@@ -267,11 +267,11 @@ fn terminal_runtime_missing_row_recovery_preserves_uncertain_final_and_headless_
             let mut payload=json!({"operation_id":"root","kind":"input","payload":{"text":"Olá","pre_transcript":true}});
             if marker {payload["payload"]["_terminal_generation"]=json!(1);}
             store.exec(1,"headless-prepare",clock,Action::Prepare {id:"root".into(),entry_id:Some("entry".into()),payload}).unwrap();
-            if status==Status::Dispatching {store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"root".into(),wire_id:"wire".into()}).unwrap();}
+            if status==Status::Dispatching {store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"root".into(),wire_id:"wire".into(),staged:false}).unwrap();}
             else if status!=Status::Prepared {store.exec(1,"finish",clock,Action::Finish {id:"root".into(),status,result:json!({})}).unwrap();}
             if status==Status::Prepared {
                 store.exec(1,"phase",clock,Action::Prepare {id:"phase".into(),entry_id:None,payload:json!({"logical_id":"root"})}).unwrap();
-                store.exec(1,"phase-dispatch",clock,Action::BeginDispatch {id:"phase".into(),wire_id:"wire".into()}).unwrap();
+                store.exec(1,"phase-dispatch",clock,Action::BeginDispatch {id:"phase".into(),wire_id:"wire".into(),staged:false}).unwrap();
             }
             store.exec(1,"recover",clock,Action::Recover).unwrap();assert!(store.state().rows.is_empty());
         }
@@ -285,7 +285,7 @@ fn terminal_runtime_legacy_completed_finalize_steps_are_not_repeated() {
         let mut store=Store::open(&path,&projection,State::new("key",1,"session",vec![])).unwrap();let clock=ClockSample {monotonic_s:0.0,epoch_s:1800000000.0};
         store.exec(1,"append",clock,Action::Append {text:"Olá".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("entry".into())}).unwrap();
         store.exec(1,"terminal:queue:1",clock,Action::Prepare {id:"attempt".into(),entry_id:Some("entry".into()),payload:json!({"operation_id":"attempt","kind":"input","payload":{"text":"Olá","pre_transcript":false}})}).unwrap();
-        store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"attempt".into(),wire_id:"terminal:1:attempt".into()}).unwrap();
+        store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"attempt".into(),wire_id:"terminal:1:attempt".into(),staged:false}).unwrap();
         let mut frozen=serde_json::to_value(store.state()).unwrap();drop(store);
         let status=if transition=="after_abandon"{"rejected"}else{"deferred"};
         let result=json!({"operation_id":"attempt","disposition":status,"payload":{"cleanup":"proved"}});
@@ -324,7 +324,7 @@ fn terminal_runtime_store_python_rust_interop_preserves_finalization_marker() {
     store.exec(1,"append",clock,Action::Append {text:"Olá 🌎".into(),delivered:false,ts:None,pre_transcript:true,entry_id:Some("entry".into())}).unwrap();
     let payload=json!({"operation_id":"attempt","kind":"input","payload":{"text":"Olá 🌎","pre_transcript":true,"_terminal_generation":1}});
     store.exec(1,"prepare",clock,Action::Prepare {id:"attempt".into(),entry_id:Some("entry".into()),payload:payload.clone()}).unwrap();
-    store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"attempt".into(),wire_id:"terminal:1:attempt".into()}).unwrap();
+    store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"attempt".into(),wire_id:"terminal:1:attempt".into(),staged:false}).unwrap();
     let result=json!({"operation_id":"attempt","disposition":"deferred","payload":{"cleanup":"proved"}});
     store.exec(1,"finish",clock,Action::Finish {id:"attempt".into(),status:Status::Deferred,result:result.clone()}).unwrap();drop(store);
     let script=r#"import sys
@@ -365,7 +365,7 @@ fn terminal_runtime_recovered_entry_removed_after_failure_is_not_materialized_ag
         store.exec(1,"recover-first-creation",clock,Action::Recover).unwrap();assert_eq!(store.state().rows.len(),1);
         if exhausted {for n in 0..2 {store.exec(1,&format!("bump:{n}"),clock,Action::BumpAttempts {entry_id:"entry".into()}).unwrap();}}
         store.exec(1,"prepare-attempt",clock,Action::Prepare {id:"attempt".into(),entry_id:Some("entry".into()),payload:json!({"operation_id":"attempt","kind":"input","payload":{"text":"Olá 🌎","_terminal_generation":1}})}).unwrap();
-        store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"attempt".into(),wire_id:"terminal:1:attempt".into()}).unwrap();
+        store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"attempt".into(),wire_id:"terminal:1:attempt".into(),staged:false}).unwrap();
         store.exec(1,"finish",clock,Action::Finish {id:"attempt".into(),status:if exhausted {Status::Deferred}else{Status::Rejected},result:json!({"operation_id":"attempt","disposition":if exhausted{"deferred"}else{"rejected"},"payload":{"cleanup":"proved"}})}).unwrap();
         assert_eq!(store.state().rows[0]["desistiu"],true);assert_eq!(store.exec(1,"remove",clock,Action::Remove {entry_id:"entry".into()}).unwrap(),true);drop(store);
         let mut store=Store::open(&path,&projection,State::new("key",1,"session",vec![])).unwrap();
