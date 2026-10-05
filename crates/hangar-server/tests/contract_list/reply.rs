@@ -15,7 +15,8 @@ fn sanitize(path: &str) -> String {
 
 /// Troca os marcadores das convenções do golden pela pasta do caso.
 fn placed(v: &Value, root: &Path) -> Value {
-    let root = root.to_str().expect("pasta temporária em UTF-8");
+    // Barra normal: a raiz entra em texto JSON, e a barra invertida do Windows viraria escape.
+    let root = &root.to_str().expect("pasta temporária em UTF-8").replace('\\', "/");
     let text = serde_json::to_string(v).unwrap();
     let text = text.replace("⟦ROOT_SAN⟧", &sanitize(root)).replace("⟦ROOT⟧", root);
     serde_json::from_str(&text).unwrap()
