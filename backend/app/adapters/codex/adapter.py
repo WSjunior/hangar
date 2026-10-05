@@ -855,13 +855,18 @@ class CodexAdapter:
                     self._restore_turn(sess, thread, include_turns=False)
                     # `thread/resume` só com a thread parada: religar num cano vivo não mexe em turno em
                     # andamento. Fora disso o modo rápido fica o do sidecar.
-                    if meta.get("thread_id") and (thread.get("status") or {}).get("type") == "idle":
+                    if meta.get("thread_id") and (thread.get("status") or {}).get("type") != "idle":
+                        _log.info("codex sem terminal: religado sem resume (thread %s), Fast do sidecar name=%s",
+                                  (thread.get("status") or {}).get("type"), name)
+                    elif meta.get("thread_id"):
                         revision = sess.get("settings_revision", 0)
                         try:
                             result = await client.request("thread/resume", {"threadId": meta["thread_id"]})
                         except BaseException as exc:
                             # Antes do primeiro turno não há rollout; a escolha continua no sidecar.
-                            if not isinstance(exc, RuntimeError) or "no rollout found" not in str(exc):
+                            if isinstance(exc, RuntimeError) and "no rollout found" in str(exc):
+                                _log.info("codex sem terminal: thread sem rollout, Fast do sidecar name=%s", name)
+                            else:
                                 sess["bomba"].cancel()
                                 if self._sessions.get(name) is sess:
                                     self._sessions.pop(name, None)
@@ -2377,6 +2382,8 @@ class CodexAdapter:
                             if "no rollout found" not in str(exc):
                                 raise
                             # Thread sem turno ainda não tem rollout: vale o aviso da própria thread.
+                            _log.info("codex Fast confirmado pelo aviso da thread (sem rollout) name=%s tier=%s",
+                                      name, applied)
                             snapshot = {"thread": {"id": thread_id}, "serviceTier": applied}
                         if not still_current() or (snapshot.get("thread") or {}).get("id") != thread_id:
                             raise RuntimeError("A sessão mudou antes de confirmar Fast")
