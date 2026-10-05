@@ -59,3 +59,57 @@ Caminhos relativos a `crates/hangar-server/src/list/` ou `backend/app/`.
 
 - `facts_files.rs:169-178`: `warn!` sem teto em `entries()` repete a cada 1,5 s.
 - `discover_other.rs:317`: UTF-8 inválido no índice do Kimi → `None` sem log.
+
+## Rust: desempenho e correção (rust-reviewer)
+
+Sem crítico; sem `unwrap` em dado externo, I/O bloqueante em `spawn_blocking`, capturas com teto 4,
+nenhuma trava atravessando `.await`. O que sobra é custo por tique que cresce com o disco.
+
+### ALTO — custo por tique proporcional a histórico que só cresce
+
+1. `discover.rs:362-376,141-144` `newest_after_clear`: a cada tique, `read_dir` + `stat` de todo
+   `*.jsonl` do projeto, por sessão Claude sem irmã no cwd (1000+ transcripts = 1000+ stats).
+   Memorizar pelo mtime da pasta (o `/clear` cria arquivo e muda o mtime).
+2. `discover_other.rs:185-188,258-267` (omp): caminho normal `sessions/-/<nome>` não existe →
+   `find_in_root` varre a raiz a cada tique por sessão omp. Cache nome→caminho em `Capped`.
+3. `discover_other.rs:316-327` (Kimi): sessão fora do `session_index.jsonl` relê e analisa o
+   índice inteiro a cada tique; só acerto é guardado. Guardar o negativo por alguns segundos ou ler
+   só a cauda nova pela chave do arquivo.
+4. `discover_other.rs:480-481` `headless_transcript`: caminho esperado ausente → `read_dir` de
+   `projects/` + `exists()` por pasta a cada tique; `sidecars()` (`:380-396`) relê todo JSON de
+   `codex-sessions/` e `claude-headless/` a cada tique (conferir poda).
+5. `facts_files.rs:225-240` `HookStates::refresh`: `stat` de todo marcador do `.hangar-state` por
+   conta a cada tique; contas com symlink para a mesma pasta leem N vezes. Deduplicar pelo
+   `canonicalize` como já faz com `sessions/`.
+6. `discover.rs:249-279` `marker_by_pids`: `read_dir` + `stat` de todo `.hangar-active/*.json`
+   (centenas) por sessão sem `--session-id`, por tique.
+
+### MÉDIO
+
+7. `bridge.rs:227-239,249-258`: `mem::take(&mut c.hooks)` deixa `Default` para `produce`
+   simultâneo (sombra, `Snapshot`, hub) → leitura fria de todos os marcadores. Pôr `HookStates`
+   sob a trava do `classifier`.
+8. `bridge.rs:183-184,238-258`: trava `caches` segurada durante toda a I/O de descoberta e
+   decoração (caudas até 8 MB, `/proc`, contexto, plano); `bridge.rs:236` segura `classifier`
+   durante capturas tmux (até 5 s). `seed`/`forget`/`rename` do hub (criar/fechar sessão)
+   esperam essas travas — centenas de ms, segundos a frio.
+9. `procs.rs:228` (macOS/Windows): a cada 3 s atualiza cmd+environ de TODOS os processos para
+   ~40 pids; no Windows é `ReadProcessMemory` por processo. Atualizar tudo no modo mínimo e
+   cmd/environ só dos pids de agente.
+10. `procs.rs:208` (macOS/Windows): pid ausente com retrato fresco ainda chama
+    `refresh_processes_specifics(Some(pid))` (retrato inteiro no Windows); pids mortos batem nisso
+    a cada tique. Retrato fresco + pid ausente → `None`.
+11. `links.rs:589,605,611,650-652` (Windows): `owner()`, `of_this_repo`, `expand_user` e regex do
+    Codex assumem `/`; com `\`/letra de unidade a worktree cai no `cwd` calada (branch errada).
+12. `links.rs:553`, `context.rs:237`: `contains` por `windows(n).any(==)`, duas vezes por linha
+    em até 8 MB; 40 sessões a frio ≈ 1 s. Usar `memchr::memmem::Finder` (já vem pelo `regex`).
+13. `bridge.rs:503` `Operation::Snapshot` com `ProduceFacts::default()`: `owner_clients=0` entra
+    no hash do pedido (`facts.rs:128`) e alterna a chave com o hub (ida ao Python a cada vez);
+    Claude sem terminal classificado só pelo marcador. Resolver na Task 16/17.
+14. `links.rs:656-666` `tail_lines`: `to_vec` de toda linha, a maioria descartada; rollout do
+    Codex ativo muda a chave a cada tique → 256 KB lidos+copiados por tique por sessão.
+15. `facts_files.rs:49,159`: `UNKNOWN_STATUSES` `HashSet<String>` sem teto com texto do disco.
+
+### BAIXO
+
+- `procs.rs` `env_var` relê `/proc/<pid>/environ` 5–8 vezes por sessão por tique; memo por tique.
