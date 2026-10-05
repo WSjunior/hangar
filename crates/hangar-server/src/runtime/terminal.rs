@@ -344,6 +344,12 @@ impl Executor {
                     })
                 }
             };
+        // Só o desfecho: o texto do rascunho nunca sai do terminal; antes de
+        // qualquer `?`, para a falha do diário não calar o aviso.
+        if let Some(draft)=result.payload["draft"].as_str().filter(|draft|*draft!="returned") {
+            tracing::warn!(key=%self.target.key,session=%self.target.name,draft,code=%result.payload["code"].as_str().unwrap_or(""),
+                reason="o rascunho do dono não voltou igual ao composer; se o terminal marca › stashed, ele volta com Ctrl+S","rascunho do terminal");
+        }
         if slash && is_clear(text) && matches!(result.disposition,Disposition::Accepted|Disposition::Unknown) {
             let mut state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?.runtime_state;
             state["preserve_binding"]=json!(true);

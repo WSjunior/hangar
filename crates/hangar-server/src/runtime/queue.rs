@@ -16,7 +16,7 @@ const VERSION: u32 = 2;
 /// de uma fase. Mesmo valor de `_RECENT_CALLS` em runtime_queue.py.
 const RECENT_CALLS: u64 = 256;
 const RECEIPT_METADATA: &[&str] = &["native", "message_id", "native_status", "cleanup", "code", "stage",
-    "preserve_binding", "queued", "already_confirmed", "disposition"];
+    "preserve_binding", "queued", "already_confirmed", "disposition", "draft"];
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -663,6 +663,8 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
                     continue;
                 }
                 if op.status == Status::Dispatching { op.status = Status::Unknown; }
+                // Confirmada pelo transcript, a tentativa chegou: não há o que marcar como incerto.
+                if op.status == Status::Confirmed { continue; }
                 for attempt in op.wire_attempts.values_mut() {
                     if attempt["status"] == "dispatching" { attempt["status"] = json!("unknown"); }
                 }

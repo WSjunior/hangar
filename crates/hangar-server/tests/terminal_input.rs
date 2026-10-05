@@ -387,3 +387,52 @@ async fn terminal_input_windows_dim_suggestion_is_an_empty_composer() {
  assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"submitted"));
  let writes=io.0.writes(); assert!(writes.iter().all(|w|w.args.last().unwrap()!="C-u"));
 }
+fn stashed(s: &str) -> String { screen(s).replacen("history\n","history\n  ctrl+g to edit · › stashed\n",1) }
+fn keys(io:&FakeIo)->Vec<String> { io.writes().iter().map(|w|w.args.last().unwrap().clone()).collect() }
+#[tokio::test]
+async fn terminal_input_owner_stash_in_use_is_never_overwritten() {
+ let io=Arc::new(FakeIo::new(vec![stashed("rascunho novo")]));
+ let r=driver(io.clone(),Arc::new(Services::new())).prompt("mensagem","id").await;
+ assert_eq!(r.disposition,Disposition::Deferred);assert_eq!(r.code,"composer_busy");assert!(io.writes().is_empty());assert_eq!(r.draft,None);
+}
+#[tokio::test]
+async fn terminal_input_draft_given_back_when_nothing_was_sent() {
+ let io=Arc::new(FakeIo::new(vec![screen("rascunho"),stashed(""),stashed("mensagem"),stashed(""),stashed(""),screen("rascunho")]));*io.fail.lock().unwrap()=Some("mensagem".into());
+ let r=driver(io.clone(),Arc::new(Services::new())).prompt("mensagem","id").await;
+ assert_eq!(r.disposition,Disposition::Deferred);assert_eq!(r.cleanup,Cleanup::Proved);assert_eq!(r.draft,Some(DraftOutcome::Returned));
+ assert_eq!(keys(&io),["C-s","mensagem","C-u","C-s"]);
+}
+#[tokio::test]
+async fn terminal_input_uncertain_submit_never_unstashes_blindly() {
+ let io=Arc::new(FakeIo::new(vec![screen("rascunho"),stashed(""),stashed("long original message")]));*io.fail.lock().unwrap()=Some("\r".into());
+ let r=driver(io.clone(),Arc::new(Services::new())).prompt("long original message","id").await;
+ assert_eq!(r.disposition,Disposition::Unknown);assert_eq!(r.draft,Some(DraftOutcome::Stashed));
+ assert_eq!(keys(&io),["C-s","long original message","\r"]);
+}
+#[tokio::test]
+async fn terminal_input_submit_proved_by_the_stash_coming_back() {
+ let io=Arc::new(FakeIo::new(vec![screen("rascunho [Pasted text #1 +3 lines]"),stashed(""),stashed("long original message"),screen("rascunho [Pasted text #1 +3 lines]")]));
+ let r=driver(io.clone(),Arc::new(Services::new())).prompt("long original message","id").await;
+ assert_eq!(r.disposition,Disposition::Accepted,"{}",r.code);assert_eq!(r.draft,Some(DraftOutcome::Returned));
+ assert_eq!(keys(&io),["C-s","long original message","\r"]);
+}
+#[tokio::test]
+async fn terminal_input_new_owner_text_is_never_stashed_over_the_draft() {
+ let io=Arc::new(FakeIo::new(vec![screen("rascunho"),stashed(""),stashed("novo do dono")]));let s=Arc::new(Services::new());s.facts.lock().unwrap().plugin_live=true;
+ let r=driver(io.clone(),s).prompt("mensagem","id").await;
+ assert_eq!(r.disposition,Disposition::Deferred);assert_eq!(r.code,"composer_busy");assert_eq!(r.draft,Some(DraftOutcome::Stashed));
+ assert_eq!(keys(&io),["C-s"]);
+}
+#[tokio::test]
+async fn terminal_input_cli_without_stash_keeps_the_draft_and_waits() {
+ let io=Arc::new(FakeIo::new(vec![screen("rascunho")]));
+ let r=driver(io.clone(),Arc::new(Services::new())).prompt("mensagem","id").await;
+ assert_eq!(r.disposition,Disposition::Deferred);assert_eq!(r.code,"composer_busy");assert_eq!(r.draft,Some(DraftOutcome::Returned));
+ assert_eq!(keys(&io),["C-s"]);
+}
+#[tokio::test]
+async fn terminal_input_stash_hint_gone_with_our_paste_left_is_not_a_submit() {
+ let io=Arc::new(FakeIo::new(vec![screen("rascunho"),stashed(""),stashed("[Pasted text #1 +2 lines]"),screen("[Pasted text #1 +2 lines]")]));
+ let r=driver(io.clone(),Arc::new(Services::new())).prompt("first\nsecond","id").await;
+ assert_eq!(r.disposition,Disposition::Unknown);assert_eq!(r.draft,Some(DraftOutcome::Unverified));
+}

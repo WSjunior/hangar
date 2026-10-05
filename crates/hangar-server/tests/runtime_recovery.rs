@@ -64,3 +64,24 @@ fn python_and_rust_share_the_lease() {
     assert!(result.status.success());
     drop(lease);
 }
+
+#[test]
+fn recover_leaves_the_attempt_of_a_confirmed_operation_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let (path, projection) = (dir.path().join("key.json"), dir.path().join("projection"));
+    let mut store = Store::open(&path,&projection,State::new("key",1,"session",vec![])).unwrap();
+    store.exec(1,"append",clock(),Action::Append { text:"Olá".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("entry".into()) }).unwrap();
+    store.exec(1,"prepare",clock(),Action::Prepare { id:"entry".into(),entry_id:Some("entry".into()),payload:json!({"kind":"input"}) }).unwrap();
+    store.exec(1,"dispatch",clock(),Action::BeginDispatch { id:"entry".into(),wire_id:"wire".into(),staged:false }).unwrap();
+    drop(store);
+    // O transcript confirmou a entrada antes da resposta do escritor, e o processo caiu.
+    let mut state: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    state["operations"]["entry"]["status"] = json!("confirmed");
+    state["rows"][0]["delivered"] = json!(true); state["rows"][0]["confirmed"] = json!(true);
+    std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+    let mut store = Store::open(&path,&projection,State::new("key",1,"session",vec![])).unwrap();
+    store.exec(1,"recover",clock(),Action::Recover).unwrap();
+    let op = &store.state().operations["entry"];
+    assert!(matches!(op.status,Status::Confirmed));
+    assert_eq!(op.wire_attempts["wire"]["status"],"dispatching");
+}

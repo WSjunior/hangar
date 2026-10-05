@@ -15,7 +15,7 @@ impl TerminalIo for Io {
             "display-message"=>b"session\t%1\t1\n".to_vec(),
             "capture-pane" if self.hold_capture.load(std::sync::atomic::Ordering::Acquire)=>std::future::pending().await,
             "capture-pane"=>{let text=self.text.lock().unwrap().clone();let ghost=self.ghost.lock().unwrap().clone();
-                // O fantasma é rascunho que o `C-u` não apaga: o composer fica ocupado.
+                // O fantasma é rascunho que o Ctrl+S não guarda: o composer fica ocupado.
                 format!("────────────────────────────────\n❯ {}\n────────────────────────────────\n",if text.is_empty(){ghost}else{text}).into_bytes()},
             "send-keys"=>{
                 if self.blocked.load(std::sync::atomic::Ordering::Acquire) { self.gate.notified().await; }
@@ -664,7 +664,7 @@ async fn terminal_runtime_deferred_without_write_backs_off_and_surfaces_the_reas
     let start=std::time::Instant::now();
     while h.snapshot().await.unwrap()["view"]["input_stalled"]!="composer_busy" {assert!(start.elapsed()<WAIT,"o motivo não chegou à vista"); tokio::time::sleep(Duration::from_millis(5)).await;}
     // Parada visível, as tentativas seguem espaçadas: o tique de 15 ms daria ~30 em 500 ms.
-    let clears=||f.io.calls.lock().unwrap().iter().filter(|r|r.args.last().is_some_and(|a|a=="C-u")).count();
+    let clears=||f.io.calls.lock().unwrap().iter().filter(|r|r.args.last().is_some_and(|a|a=="C-s")).count();
     let before=clears(); tokio::time::sleep(Duration::from_millis(500)).await;
     assert!(clears()-before<=6,"tentativas sem espera crescente: {}",clears()-before);
     assert!(h.snapshot().await.unwrap()["error"].is_null(),"a fila não pode parar como erro");
