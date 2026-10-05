@@ -202,6 +202,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
     setConfigs([]);
     setSelectedConfig(null);
     accountTouched.current = false;
+    providerTouched.current = false;
     setSwitchedFrom('');
     setMotores({});
     setEngine('');
@@ -234,7 +235,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
         }
       })
       .catch((cause: unknown) => {
-        if (alive) setProvidersError(cause instanceof Error ? cause.message : m.criar_providers_erro());
+        if (alive && !providerTouched.current) setProvidersError(cause instanceof Error ? cause.message : m.criar_providers_erro());
       })
       .finally(() => { if (alive) setProvidersLoading(false); });
     void probeServerResponse(active, '/api/cotas')

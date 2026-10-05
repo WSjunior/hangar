@@ -73,3 +73,20 @@ def test_preference_write_failure_does_not_hide_created_session(creation, monkey
         name="default-provider", cwd="/repo", provider="codex", remember_provider=True)))
     assert result.name == "default-provider"
     assert "disk full" in result.avisos[0]
+
+
+def test_codex_account_error_counts_as_unavailable(monkeypatch, tmp_path):
+    from app import codex_contas
+
+    broken = codex_contas.Account("broken", tmp_path / ".codex-broken", False)
+    work = codex_contas.Account("work", tmp_path / ".codex-work", False)
+
+    class Service:
+        async def read_auth_rapido(self, account):
+            if account is broken:
+                raise codex_contas.AccountError(409, "codex_account_prepare_required", {})
+            return {"status": "connected"}
+
+    monkeypatch.setattr(api, "_codex_service", lambda: Service())
+    monkeypatch.setattr(codex_contas, "list_visible_accounts", lambda: [broken, work])
+    assert asyncio.run(api._connected_codex_accounts()) == [work]

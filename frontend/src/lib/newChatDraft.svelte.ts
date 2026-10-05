@@ -178,8 +178,9 @@ export class NewChatDraft {
       const res = await getProviders();
       if (seq !== this.#provSeq) return;
       this.providers = res;
-      const preferred = SESSION_PROVIDERS.find((provider) => res[provider]?.default && res[provider]?.disponivel);
-      if (!this.#providerPicked && !this.#modelTouched && !this.sending && preferred && preferred !== this.provider) {
+      // Sem padrão marcado, volta ao Claude: o provedor do servidor anterior não vale aqui.
+      const preferred = SESSION_PROVIDERS.find((provider) => res[provider]?.default && res[provider]?.disponivel) ?? 'claude';
+      if (!this.#providerPicked && !this.#modelTouched && !this.sending && preferred !== this.provider) {
         this.provider = preferred;
         this.loadAccounts();
       }
@@ -344,7 +345,9 @@ export class NewChatDraft {
         const sessionName = uniqueSessionName(basename(cwd), taken);
         if (this.newBranch && !this.branchName.trim()) this.branchName = sessionName;
         const info = await createSessionForServer(server, {
-          name: sessionName, cwd, provider: this.provider, remember_provider: true,
+          name: sessionName, cwd, provider: this.provider,
+          // Sonda falhada deixa o Claude por omissão, e isso não é escolha a lembrar.
+          remember_provider: this.#providerPicked || Object.keys(this.providers).length > 0,
           config_dir: this.provider === 'claude' ? this.configDir : null,
           codex_account: this.provider === 'codex' ? this.codexAccount : undefined,
           model: this.model || null, effort: this.effort || null,

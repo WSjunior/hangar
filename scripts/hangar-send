@@ -490,15 +490,16 @@ if [[ "$1" == "--new" ]]; then
         API_PEER=""; API_CONNECT_TIMEOUT=8
     fi
     if [[ -z "$provider" ]]; then
-        # --conta sem --provider sempre foi conta Claude; o padrão lembrado não a reinterpreta.
-        if [[ -n "$engine" || -n "$conta" ]]; then
+        # --conta e --subagente sem --provider sempre foram Claude; o padrão lembrado não os reinterpreta.
+        if [[ -n "$engine" || -n "$conta" || -n "$subagente" ]]; then
             provider="claude"
         elif [[ -n "$perfil" ]]; then
             provider="omp"
         else
             providers=$(api GET /api/providers) || exit 1
             provider=$(python3 -c 'import json,sys
-print(next((p for p, probe in json.load(sys.stdin).items() if probe.get("default")), "claude"))' <<<"$providers")
+print(next((p for p, probe in json.load(sys.stdin).items() if probe.get("default")), "claude"))' <<<"$providers") \
+                || { echo "erro: resposta ilegível de /api/providers" >&2; exit 1; }
         fi
     fi
     if [[ "$provider" == "codex" && -n "$conta" ]]; then

@@ -2135,8 +2135,16 @@ async def _kill_unclaimed(name: str) -> None:
 @app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=SessionInfo)
 async def create_session(body: CreateBody):
     if "provider" not in body.model_fields_set:
-        provider = await _default_session_provider(body.config_dir, body.engine, body.codex_account, body.omp_profile)
+        provider = await _default_session_provider(body.config_dir, body.engine, body.codex_account,
+                                                   body.omp_profile, body.subagent_model)
         body = body.model_copy(update={"provider": provider})
+    avisos_extra: list[str] = []
+    # Convidado fica na conta Codex padrão: as outras contas são do dono.
+    if body.provider == "codex" and body.codex_account is None and guest_users.current.get() is None:
+        connected = await _connected_codex_accounts()
+        if connected and not any(account.is_default for account in connected):
+            body = body.model_copy(update={"codex_account": connected[0].id})
+            avisos_extra.append(f"A conta Codex padrão não está conectada; a sessão usa a conta {connected[0].id}.")
     if body.config_dir is None and body.provider == "claude" and not body.engine:
         # Sem conta pedida, a padrão só vale se tiver cota; senão nasce na de mais folga.
         from app import cotas
@@ -2164,10 +2172,13 @@ async def create_session(body: CreateBody):
                     await _kill_unclaimed(info.name)
                     raise
                 info = info.model_copy(update={"owner": guest.name})
-            if guest is None and body.remember_provider:
+            if avisos_extra:
+                info = info.model_copy(update={"avisos": [*info.avisos, *avisos_extra]})
+            if (guest is None and body.remember_provider
+                    and runtime_config.get("last_session_provider") != info.provider):
                 try:
                     await asyncio.to_thread(runtime_config.aplicar, {"last_session_provider": info.provider})
-                except (OSError, ValueError) as exc:
+                except Exception as exc:  # noqa: BLE001 — a sessão já existe; falhar aqui faria o cliente recriá-la
                     _log.warning("não consegui lembrar o provedor da sessão %s: %s", info.name, exc)
                     info = info.model_copy(update={"avisos": [*info.avisos,
                         f"A sessão foi criada, mas não consegui lembrar o provedor: {exc}"]})
@@ -2255,12 +2266,6 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
     codex_account_obj = None
     codex_service = _codex_service() if body.provider == "codex" else None
     if body.provider == "codex":
-        if body.codex_account is None and codex_service is not None:
-            accounts = codex_accounts.list_visible_accounts()
-            auth = await asyncio.gather(*(codex_service.read_auth_rapido(account) for account in accounts))
-            connected = [account for account, login in zip(accounts, auth) if login.get("status") == "connected"]
-            if connected and not any(account.is_default for account in connected):
-                body = body.model_copy(update={"codex_account": connected[0].id})
         codex_account_obj = _resolve_codex_account(body.codex_account)
         if body.read_only:
             try:
@@ -6322,15 +6327,17 @@ async def _session_provider_catalog() -> dict[str, dict]:
     disconnected: set[str] = set()
     if probes.get("claude", {}).get("disponivel"):
         configs = await asyncio.to_thread(list_config_dirs, False)
-        logins = await asyncio.to_thread(conta_estado.logins, configs)
+        try:
+            logins = await asyncio.to_thread(conta_estado.logins, configs)
+        except Exception:  # noqa: BLE001 — sem o login a escolha só deixa de preferir quem está conectado
+            _log.warning("catálogo de provedores: login Claude ilegível", exc_info=True)
+            logins = []
         if any(login.loggedIn is True for login in logins) or engines.listar():
             connected.add("claude")
         elif logins and all(login.loggedIn is False for login in logins):
             disconnected.add("claude")
-    service = _codex_service()
-    if probes.get("codex", {}).get("disponivel") and service is not None:
-        auth = await asyncio.gather(*(service.read_auth_rapido(account)
-                                    for account in codex_accounts.list_visible_accounts()))
+    if probes.get("codex", {}).get("disponivel"):
+        auth = [login for _account, login in await _codex_auth_states()]
         if any(item.get("status") == "connected" for item in auth):
             connected.add("codex")
         elif auth and all(item.get("status") == "disconnected" for item in auth):
@@ -6340,9 +6347,30 @@ async def _session_provider_catalog() -> dict[str, dict]:
     return {provider: {**probe, "default": provider == default} for provider, probe in probes.items()}
 
 
-async def _default_session_provider(config_dir=None, engine=None, codex_account=None, omp_profile=None) -> str:
+async def _codex_auth_states() -> list[tuple]:
+    service = _codex_service()
+    if service is None:
+        return []
+    accounts = await asyncio.to_thread(codex_accounts.list_visible_accounts)
+    results = await asyncio.gather(*(service.read_auth_rapido(account) for account in accounts),
+                                   return_exceptions=True)
+    states = []
+    for account, result in zip(accounts, results):
+        if isinstance(result, BaseException):
+            _log.warning("login Codex de %s ilegível: %s", account.id, result)
+            result = {"status": "unavailable"}
+        states.append((account, result))
+    return states
+
+
+async def _connected_codex_accounts() -> list:
+    return [account for account, login in await _codex_auth_states() if login.get("status") == "connected"]
+
+
+async def _default_session_provider(config_dir=None, engine=None, codex_account=None, omp_profile=None,
+                                    subagent_model=None) -> str:
     # Opções exclusivas de um provedor continuam identificando o destino dos clientes antigos.
-    if config_dir is not None or engine:
+    if config_dir is not None or engine or subagent_model is not None:
         return "claude"
     if codex_account is not None:
         return "codex"

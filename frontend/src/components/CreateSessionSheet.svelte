@@ -297,9 +297,10 @@
       const res = await getProviders();
       if (seq !== provSeq || !aberta || targetServer !== srv || !open) return;
       providers = res;
-      const preferred = PROVIDERS.find((p) => res[p]?.default && res[p]?.disponivel);
+      // Sem padrão marcado, volta ao Claude: o provedor do servidor anterior não vale aqui.
+      const preferred = PROVIDERS.find((p) => res[p]?.default && res[p]?.disponivel) ?? 'claude';
       if (!providerTouched && !modelChoiceTouched && !contaEscolhidaAMao && !querRetomar && !conversaAlvo
-          && !retomando && !loading && preferred && preferred !== provider) {
+          && !retomando && !loading && preferred !== provider) {
         provider = preferred;
         permissao = preferred === 'codex' ? 'Full Access' : '';
         carregarModelos();
@@ -933,7 +934,9 @@
     const baton = bastao;
     const requestedHeadless = headlessInherited ? undefined : semTerminal;
     const pararAcompanhamento = acompanharCriacao(name.trim(), provider === 'codex' ? server : null);
-    const body = { name: name.trim(), cwd: picked, provider, codex_account: account, remember_provider: true,
+    // Sonda falhada deixa o Claude por omissão, e isso não é escolha a lembrar.
+    const rememberProvider = providerTouched || Object.keys(providers).length > 0;
+    const body = { name: name.trim(), cwd: picked, provider, codex_account: account, remember_provider: rememberProvider,
       model: modelo || null, effort: esforco || null,
       // O Codex é criado por este corpo e retorna antes do `onCreate` lá embaixo: sem o `jev`
       // aqui, a caixa marcada nunca chegava ao backend e a sessão nascia no padrão do servidor.
@@ -972,7 +975,7 @@
           cwd: body.cwd,
           config_dir: body.provider === 'claude' ? selectedConfig : null,
           provider: body.provider,
-          remember_provider: true,
+          remember_provider: rememberProvider,
           ...(body.provider === 'codex' ? { codex_account: account } : {}),
           engine: body.provider === 'claude' ? (engine || null) : null,
           model: body.model,

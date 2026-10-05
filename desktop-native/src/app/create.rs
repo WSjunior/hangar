@@ -1074,7 +1074,10 @@ impl NewSession {
             if claude && self.proxy_accounts().is_some() { body["engine_account"] = json!(self.engine_account); }
             if self.headless_inherited() { body.as_object_mut().unwrap().remove("headless"); }
         }
-        body["remember_provider"] = json!(true);
+        // Sonda falhada deixa o Claude por omissão, e isso não é escolha a lembrar.
+        if self.provider_touched || self.providers.ok().is_some() {
+            body["remember_provider"] = json!(true);
+        }
         // A memória vai antes do POST: a escolha não se perde se a criação falhar.
         let (key, model, effort) = (self.memory_key(), self.model.clone(), self.effort.clone());
         self.link.runtime.spawn_blocking(move || crate::appearance::remember_model(&key, &model, &effort));
@@ -1196,10 +1199,13 @@ impl NewSession {
                 let probes = result.map_err(|e| Hangar::fetch_failure(&e))
                     .and_then(|v| serde_json::from_value(v).map_err(|_| tr("invalid_response")));
                 if !self.providers.finish(seq, probes) { return None; }
-                if !self.provider_touched && !self.model_choice_touched && !self.creating && !self.is_transfer() {
-                    let default = self.providers.ok().and_then(|probes| PROVIDERS.into_iter()
-                        .find(|provider| probes.get(*provider).is_some_and(|probe| probe.default && probe.disponivel)));
-                    if let Some(provider) = default {
+                if !self.provider_touched && !self.model_choice_touched && !self.creating && !self.is_transfer()
+                    && self.providers.ok().is_some() {
+                    // Sem padrão marcado, volta ao Claude: o provedor do servidor anterior não vale aqui.
+                    let provider = self.providers.ok().and_then(|probes| PROVIDERS.into_iter()
+                        .find(|provider| probes.get(*provider).is_some_and(|probe| probe.default && probe.disponivel)))
+                        .unwrap_or("claude");
+                    if provider != self.provider {
                         self.set_provider(provider, window, cx);
                         self.provider_touched = false;
                     }
