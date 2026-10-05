@@ -4,6 +4,10 @@ export interface PluginElement {
   type: string;
   props?: Record<string, unknown>;
   children?: PluginNode[];
+  /** Estilos que valem com o ponteiro sobre o escopo (Box com `key`); o engine manda fora de `props`. */
+  hover?: Record<string, unknown>;
+  /** Endereço do clique no engine (superfície remota); o app manda só a `key` ao servidor. */
+  press?: { plugin?: string; handle?: number };
 }
 
 export type PluginNode = PluginElement | string | number | boolean | null | undefined;
@@ -121,14 +125,26 @@ export interface PluginPane {
   tree: PluginNode;
 }
 
+/** De onde vem a interface dos mods: superfície remota (sessão sem terminal) ou o plugin no terminal. */
+export type PluginSource = 'surface' | 'terminal';
+
 export interface PluginSurfaces {
   above: PluginNode;
   panes: PluginPane[];
+  /** Painel na frente segundo o servidor; `null` sem painel; `undefined` quando o servidor não manda (antigo). */
+  shownId: string | null | undefined;
+  /** Largura, em colunas, para a qual a faixa foi desenhada; `null` quando o servidor não manda. */
+  columns: number | null;
+  /** `null` quando o servidor não manda: vale como terminal, sem digitação pelo app. */
+  source: PluginSource | null;
 }
 
-/** O dado do SSE `plugin_ui`, tolerante: o que não for painel com id fica de fora. */
+/** O dado do SSE `plugin_ui`, tolerante: o que não for painel com id fica de fora, e campo novo ausente ou
+ *  estranho vale como "o servidor não mandou". */
 export function parsePluginUi(data: unknown): PluginSurfaces {
-  const d = (data && typeof data === 'object' ? data : {}) as { above?: PluginNode; panes?: unknown };
+  const d = (data && typeof data === 'object' ? data : {}) as {
+    above?: PluginNode; panes?: unknown; shown_id?: unknown; columns?: unknown; source?: unknown;
+  };
   const panes = Array.isArray(d.panes) ? d.panes : [];
   return {
     above: d.above ?? null,
@@ -143,6 +159,9 @@ export function parsePluginUi(data: unknown): PluginSurfaces {
         tree: (o.tree ?? null) as PluginNode,
       }];
     }),
+    shownId: typeof d.shown_id === 'string' && d.shown_id ? d.shown_id : d.shown_id === null ? null : undefined,
+    columns: typeof d.columns === 'number' && Number.isFinite(d.columns) && d.columns > 0 ? d.columns : null,
+    source: d.source === 'surface' || d.source === 'terminal' ? d.source : null,
   };
 }
 
