@@ -290,12 +290,14 @@ texto, mas o backend a enviaria para o endpoint padrão do LLM.
   - **Saída não avisa os locais que ficaram** (26/09/2026, mesma medição acima): recado pra quem
     saiu volta "sessão não encontrada". Ficou o risco de uma sessão nova com o nome reusado receber
     recado dirigido à antiga. Remoto continua por `/unpair-remote` no unpair e no kill, senão o
-    sidecar de lá fica órfão; na varredura só loga (rede dentro do `list()` não).
-  - **Varredura de morto fora do app roda no fim de `list()`, e três coisas a seguram:** contador
-    DE CLASSE (há 4 instâncias de `SessionRegistry` — api, sse×2, prune — e todas chamam `list()`);
-    ausência confirmada por **tempo** (`_PAIR_AUSENCIA_MIN_S`), não por número de polls, porque
-    `kill()` e `rename()` chamam `list()` numa janela em que o nome está ausente de propósito; e lista
-    vazia = tmux fora = não varre, senão dissolvia todo grupo da máquina. O dict de classe (`_pair_ausencias`) é
+    sidecar de lá fica órfão; na varredura só loga (sem rede no laço da varredura).
+  - **Varredura de morto fora do app roda num laço próprio de 2 s (`api._pair_sweep_loop` →
+    `registry.sweep_pairs`), fora da descoberta, e três coisas a seguram:** contador DE CLASSE
+    (`_pair_ausencias`); ausência confirmada por **tempo** (`_PAIR_AUSENCIA_MIN_S`), não por número
+    de polls, porque `kill()` e `rename()` deixam o nome ausente de propósito por um instante; e
+    lista que falha levanta antes de varrer (lista vazia = tmux fora = não varre), senão dissolvia
+    todo grupo da máquina. Saiu de dentro do `list()` em 05/10/2026 (lista-estado, Task 16): com o
+    Rust dono da descoberta, o `list()` do Python não roda. O dict de classe (`_pair_ausencias`) é
     limpo com `pop(n, None)`, nunca `del` — as 4 instâncias varrem concorrentemente e outra thread
     pode já ter tirado a mesma chave.
   - **`--group` recusa `[grupo:`/`[de:` reencaminhado e limita 5/min por gid** (429). Todo membro

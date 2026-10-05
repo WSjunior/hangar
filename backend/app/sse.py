@@ -9,7 +9,8 @@ import time
 import traceback
 import uuid
 from pathlib import Path
-from app import atomico, diag, guest_users, plugin_bridge, share_store
+from app import atomico, diag, guest_users, list_bridge, plugin_bridge, share_store
+from app import registry as registry_mod
 from app.adapters import CLAUDE_HEADLESS, chave_de, get_adapter
 from app.adapters.preview_push import PushPreviewSource, fonte_ferramenta, fonte_pensamento
 from app.difusor import Difusor
@@ -480,13 +481,22 @@ class _ListRefresher:
         self._sc_failing = False
         return value
 
+    async def _produce(self) -> tuple[list, bool]:
+        """A lista decorada e se foi o Python que a produziu. Com o Rust dono o retrato é dele
+        (`list.snapshot`) e a descoberta Python não roda; o modo é relido a cada tique, porque a
+        desistência do Rust passa tudo ao Python."""
+        if await registry_mod.rust_owns_list_async():
+            return await asyncio.to_thread(list_bridge.snapshot), False
+        registry_mod.PYTHON_DISCOVERY["refresher"] += 1
+        snap = [i.model_copy() for i in await _cached_list()]
+        return await _list_registry.list_with_state(snap), True
+
     async def _run(self):
         while True:
             self._launch_shortcuts()
             try:
                 started = time.monotonic()
-                snap = [i.model_copy() for i in await _cached_list()]
-                infos = await _list_registry.list_with_state(snap)
+                infos, ours = await self._produce()
                 sig = _list_sig(infos)
                 # Serializar a lista inteira só quando vai ser publicada (a sig decide, como antes).
                 data = (json.dumps([i.model_dump(mode="json") for i in infos], ensure_ascii=False)
@@ -511,7 +521,8 @@ class _ListRefresher:
                     quadro = traceback.extract_tb(_tb)[-1] if _tb else None
                     onde = f" @ {Path(quadro.filename).name}:{quadro.lineno}" if quadro else ""
                     diag.registrar("lista.refresher_falhou", "erro",
-                                   detalhe=f"{type(_exc).__name__}{onde}")
+                                   detalhe=f"{type(_exc).__name__}{onde}",
+                                   codigo=getattr(_exc, "code", None))
                     async with self._cond:
                         self.errored = True
                         self.version += 1
@@ -521,7 +532,9 @@ class _ListRefresher:
             # A cada tique, mesmo sem mudança na sig: o /api/sessions serve daqui campos que a sig
             # ignora (last_activity, statusline inteira). Lista já decorada não é mais escrita.
             # Idade conta do início do tique: lista iniciada antes de uma invalidação não vale.
-            self.latest = (started, infos)
+            # Só a do Python: a sombra compara o Rust com ela, e o `/api/sessions` pede o retrato
+            # do Rust direto a ele.
+            self.latest = (started, infos) if ours else None
             shortcuts = self._harvest_shortcuts()
             # sucesso: emite se a sig mudou OU se estava em erro (pra o front LIMPAR o list_error).
             # `data`/`sig` só andam quando a assinatura da lista muda: gravar `data` numa mudança que

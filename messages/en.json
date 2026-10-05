@@ -2856,6 +2856,7 @@
   "erro_sessao_opcao_nao_enviada": "session not found — option NOT sent",
   "erro_opcao_nao_convergiu": "couldn't move to that option in the terminal ({detalhe}) — try again",
   "erro_opcao_fora_da_lista": "that option no longer exists in this request — reload and pick again",
+  "erro_lista_indisponivel": "the session list is unavailable ({detalhe}), not empty",
   "erro_mux_indisponivel": "tmux did not answer ({detalhe}) — the session list is unavailable, not empty",
   "erro_sessao_tmux_em_uso": "a tmux session named '{nome}' already exists without the panel mark — it could be one of your sessions with the same name, or this panel's shell that lost its mark. Close or rename it before opening the shell",
   "erro_shell_criacao_falhou": "tmux refused to create the shell",

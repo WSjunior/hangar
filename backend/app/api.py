@@ -27,7 +27,7 @@ from sse_starlette.sse import EventSourceResponse
 from app import (agentes_sync, atomico, atualizacoes, atualizar, btw, diag, harness_api,
                  loop_monitor, pensamento_pt, permission_mode, plugin_bridge, procinfo, quem_chama, tmux,
                  uds_messaging)
-from app import external_pair_api, external_pairs, internal_api, update_channel
+from app import external_pair_api, external_pairs, internal_api, list_bridge, update_channel
 from app.auth import require_auth, require_loopback
 from app.send_executor import send_thread as _send_thread
 from app import bastao as bastao_mod   # `bastao` sem sufixo é a ROTA GET, mais abaixo neste arquivo
@@ -389,6 +389,7 @@ async def _lifespan(app: FastAPI):
 
     # Primeira varredura na subida já religa o túnel se há convite ativo.
     share_task = asyncio.create_task(share_api.sweep_loop(), name="share-sweep")
+    pair_sweep_task = asyncio.create_task(_pair_sweep_loop(), name="pair-sweep")
 
     # Boot-resume dos loops: flags em memoria (tick em voo) morrem no restart; o sidecar e a verdade.
     # Loop ACTIVE cuja sessao existe e esta idle -> reagenda o tick; sessao sumida -> failed.
@@ -408,10 +409,15 @@ async def _lifespan(app: FastAPI):
                 m = hook_state.get_state(session_key(info.jsonl)) if info.jsonl else None
                 if m and m[0] == "idle":
                     loop_mod.schedule_tick(info.name, lambda n=info.name: _loop_ctx(n))
-        except Exception:
+        except Exception as e:
+            # Com o Rust ainda subindo a lista levanta; os loops ativos ficam sem reagendar.
             _log.warning("boot-resume de loops falhou", exc_info=True)
+            diag.registrar("loop.boot_resume_falhou", "erro",
+                           codigo=getattr(e, "code", None) or type(e).__name__)
 
-    await asyncio.to_thread(_boot_resume_loops)
+    # Em segundo plano: com o Rust esperado, a lista espera o desfecho dele (até 30 s), e a subida
+    # do servidor não pode ficar presa nisso.
+    app.state.boot_resume_task = asyncio.create_task(asyncio.to_thread(_boot_resume_loops))
     pricing.atualizar_em_background()  # NUNCA num request: o cliente aborta em 4s
     # Mesmo motivo, outra rede: usd_brl() tem cache de 1h e timeout de 3s, e é chamado DENTRO do
     # montar(). Sem aquecer aqui, o primeiro /api/costs depois de todo restart paga a coleta fria
@@ -490,6 +496,7 @@ async def _lifespan(app: FastAPI):
         loop_monitor_task.cancel()
         prune_task.cancel()
         share_task.cancel()
+        pair_sweep_task.cancel()
         renova_task.cancel()
         await omp_sync.close()
         try:
@@ -589,6 +596,15 @@ async def _mux_indisponivel(request: Request, exc: tmux.MuxIndisponivel):
         content={"detail": erro("erro_mux_indisponivel",
                                 "o tmux não respondeu — a lista de sessões está indisponível",
                                 detalhe=str(exc))})
+
+
+@app.exception_handler(list_bridge.ListBridgeError)
+async def _lista_indisponivel(request: Request, exc: list_bridge.ListBridgeError):
+    """Com o Rust dono, a lista vem dele; ponte fora ou Rust ainda subindo é 503 com o código, nunca
+    a lista vazia nem a do Python (`_mux_indisponivel`, pelo mesmo motivo)."""
+    diag.registrar("lista.indisponivel", "erro", codigo=exc.code, detalhe=f"{request.method} {request.url.path}")
+    return JSONResponse(status_code=503, content={"detail": erro(
+        "erro_lista_indisponivel", "a lista de sessões está indisponível", detalhe=exc.code)})
 
 
 @app.middleware("http")
@@ -1012,7 +1028,7 @@ _list_lock = threading.Lock()
 
 
 def _guardar_snap(forcar: bool = False) -> list[SessionInfo]:
-    inicio = time.monotonic()
+    inicio, inicio_epoca = time.monotonic(), time.time()
     with _list_lock:
         # Re-checa DENTRO do lock: quem ficou na fila enquanto a primeira varria ja tem snapshot
         # fresco esperando e nao precisa varrer de novo. `forcar` e o miss por nome (sessao criada
@@ -1026,9 +1042,37 @@ def _guardar_snap(forcar: bool = False) -> list[SessionInfo]:
             # Sessao criada ha <1s: o mapa de processos cacheado ainda nao a enxerga, e a varredura
             # nova e justamente o que se quer aqui.
             procinfo._invalidar_children_map()
-        infos = registry.list()
+        infos = registry.list(newer_than=inicio_epoca) if forcar else registry.list()
         _list_snap["snap"] = (time.monotonic(), infos)
         return infos
+
+
+_PAIR_SWEEP_S = 2.0
+
+
+def _pair_sweep_list() -> list[SessionInfo]:
+    """No Rust, o retrato: a descoberta dele não traz as linhas de transferência nem as `orq`
+    (vêm dos fatos), e um nome fora dela seria dado como morto."""
+    return list_bridge.snapshot() if registry_mod.rust_owns_list() else _guardar_snap()
+
+
+async def _pair_sweep_loop() -> None:
+    """Pares mortos fora do app, fora da descoberta (`registry.sweep_pairs`). Lista que falha não
+    vira "ninguém vivo": a rodada não varre, e a falha vai ao diário uma vez por sequência."""
+    failing = None
+    while True:
+        try:
+            await asyncio.to_thread(registry.sweep_pairs, _pair_sweep_list)
+            if failing is not None:
+                diag.registrar("pares.varredura_voltou", codigo=failing)
+            failing = None
+        except Exception as e:
+            code = getattr(e, "code", None) or type(e).__name__
+            if code != failing:
+                _log.warning("varredura de pares: lista indisponível (%s); os grupos ficam", code)
+                diag.registrar("pares.varredura_falhou", "aviso", codigo=code)
+            failing = code
+        await asyncio.sleep(_PAIR_SWEEP_S)
 
 
 def _invalidate_lists() -> None:
@@ -1037,6 +1081,13 @@ def _invalidate_lists() -> None:
     with _list_lock:
         _list_snap["snap"] = None
     invalidate_recent_list()
+    if registry_mod._rust_caches():
+        # A mudança já aconteceu: a falha fica no diário (`lista.ponte`), o retrato do Rust vence
+        # em 2 s e quem procura a sessão nova pede descoberta mais nova (`newer_than`).
+        try:
+            list_bridge.invalidate()
+        except (list_bridge.ListBridgeError, tmux.MuxIndisponivel):
+            pass
 
 
 def _cached_info_sync(name: str) -> SessionInfo | None:
@@ -1538,8 +1589,11 @@ def _on_hook_transition(session_id: str, state: str) -> None:
                         d = link.get()
                         if d and d["status"] == "running":
                             link.update(status="paused_awaiting")
-            except Exception:
-                pass
+            except Exception as e:
+                # Sem a lista o loop segue rodando com a sessão parada na pergunta: a falha aparece.
+                _log.warning("loop: pausa no awaiting de %s falhou: %s", session_id[:8], type(e).__name__)
+                diag.registrar("loop.pausa_falhou", "aviso", sessao=session_id[:8],
+                               codigo=getattr(e, "code", None) or type(e).__name__)
         threading.Thread(target=_pause_loop, daemon=True).start()
         return
     # Inicio do turno lido AQUI, antes de qualquer subprocess: o `drain` la embaixo pode largar um
@@ -1845,11 +1899,13 @@ async def list_sessions(request: Request):
     # decoracao, e o estado decorado ainda vazaria pro snapshot que `/history` e `/workflows` leem
     # esperando a lista crua. `model_copy` rasa basta: a decoracao ATRIBUI campos, nunca muta em
     # lugar o que ja esta neles.
-    # Com a lista SSE aberta, o refresher já decorou isto há menos de um tique: serve dele.
+    # Com a lista SSE aberta, o refresher já decorou isto há menos de um tique: serve dele. Com o
+    # Rust dono, o retrato é dele (até 2 s, produzido na hora se mais velho).
     from app.sse import recent_list
     guest = guest_of(request)
     viewer = guest_users.current.get()
-    decorated = recent_list(2.0)
+    decorated = (await asyncio.to_thread(list_bridge.snapshot) if await registry_mod.rust_owns_list_async()
+                 else recent_list(2.0))
     if decorated is not None:
         if guest is not None:
             decorated = [i for i in decorated if guest.sees(i.name)]
@@ -2798,7 +2854,8 @@ async def _trocar_modo(name: str, body: ModoExecucaoBody):
                 raise
             except Exception as exc:
                 raise HTTPException(409, detail=erro("erro_troca_modo", f"não troquei de modo: {exc}", erro=str(exc))) from exc
-        registry._forget(name)
+        # Fora do laço: com o Rust dono, esquecer é uma chamada à ponte.
+        await asyncio.to_thread(registry._forget, name)
         return {"ok": True, "terminal": body.terminal}
     if info.provider != "claude":
         raise HTTPException(409, detail=erro("erro_modo_so_claude", "a troca de modo só vale para sessões Claude"))
@@ -3125,7 +3182,7 @@ async def _trocar_conta(name: str, destino: str | None, *, engine_account: str |
                 message = "a troca falhou e a sessão anterior não reabriu"
             falha = HTTPException(409, detail=erro("erro_troca_conta", message,
                                                   erro=motivo_terminal, rollback_error=rollback_error))
-        registry._forget(name)
+        await asyncio.to_thread(registry._forget, name)
     if falha:
         raise falha
     if motivo_terminal:
