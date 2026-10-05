@@ -296,6 +296,17 @@ def _pi_bloco_de_tool(lines: list[str], i: int, corpo: str) -> bool:
     return False
 
 
+# Chamada em voo do Claude Code: a 1ª linha é a DESCRIÇÃO que o modelo escreveu ("● Aguardar 4 segundos
+# · 2s"), não "Bash(", então nenhuma regra de vocabulário a reconhece. E o ● dela PISCA: num quadro a
+# linha é eleita prosa, no seguinte (sem ●) vira continuação da prosa anterior, e a prévia cresce e
+# encolhe a cada piscada. O que a separa da prosa é a forma: o parágrafo dela termina colado no `⎿`.
+def _cabecalho_de_ferramenta(lines: list[str], i: int) -> bool:
+    for ln in lines[i + 1:]:
+        if not ln.strip() or _is_boundary(ln):
+            return ln.lstrip().startswith("⎿")
+    return False
+
+
 def extract_assistant_text(pane: str, provider: str = "claude", band_anchor: str | None = None) -> str:
     """Texto do ÚLTIMO bloco de PROSA do assistente (●) do pane, VERBATIM (sem reflow — núcleo seguro).
 
@@ -360,6 +371,7 @@ def extract_assistant_text(pane: str, provider: str = "claude", band_anchor: str
                 and not _AGENT_FINISHED_RE.match(corpo)
                 and not _TODO_PANEL_RE.match(ln)
                 and not _painel_de_subagente(lines, i, corpo)
+                and not _cabecalho_de_ferramenta(lines, i)
                 and not (provider == "kimi" and _KIMI_USED_RE.match(corpo))
                 and not (provider == "kimi" and _kimi_linha_de_todo(lines, i))
                 and not (provider in ("pi", "omp") and _pi_bloco_de_tool(lines, i, corpo))):
@@ -370,7 +382,7 @@ def extract_assistant_text(pane: str, provider: str = "claude", band_anchor: str
     first = lines[start].lstrip()
     first = first[1:].lstrip() if first[:1] == _ASSISTANT_GLYPH else first
     out = [first.rstrip()]
-    for ln in lines[start + 1:]:
+    for j, ln in enumerate(lines[start + 1:], start + 1):
         # Chrome = limite inferior do bloco. _is_boundary pega ●/⎿/spinner (lstrip já tira indent
         # das linhas de continuação da prosa, então elas NÃO disparam aqui). _TOOL_BLOCK_RE corta
         # tb a linha de status de tool ("Running/Ran N shell command") que renderiza 1 frame SEM o
@@ -380,7 +392,8 @@ def extract_assistant_text(pane: str, provider: str = "claude", band_anchor: str
                 or _TOOL_BLOCK_RE.match(s) or _MCP_CALL_RE.match(s)
                 or _TODO_PANEL_RE.match(ln) or _ASCII_SPINNER_RE.match(s)
                 or (provider == "kimi" and _KIMI_USED_RE.match(s))
-                or _ACTIVITY_SUMMARY_RE.search(s)):
+                or _ACTIVITY_SUMMARY_RE.search(s)
+                or (s and _cabecalho_de_ferramenta(lines, j - 1))):
             break
         if any(r.match(ln) for r in stops):
             break

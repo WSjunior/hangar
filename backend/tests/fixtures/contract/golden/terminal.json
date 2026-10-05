@@ -152,6 +152,40 @@
     }
   },
   {
+    "name": "pane_ferramenta_em_voo_acesa.txt",
+    "pane": "\n ▐▛███▛█   Claude Code v2.1.289\n▝▜██████▀  Haiku 4.5 · Claude Max\n ▝▝   ▝▝   ~/projeto · /rc\n\n\n❯ Rode em sequência, cada um numa chamada Bash separada, com description: 1) sleep 4; echo um  2) sleep 4; echo dois  3) cat /etc/hostname. Entre o 1 e o 2\n  escreva uma frase curta. No fim diga pronto.\n\n  Ran 1 shell command\n\n● Primeiro comando concluído.\n\n  Aguardando o segundo...\n\n● Aguardar 4 segundos e imprimir \"dois\" · 2s\n  ⎿  $ sleep 4; echo dois (3s)\n     (ctrl+b ctrl+b (twice) to run in background)\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n✢ Photosynthesizing… (13s · ↓ 442 tokens)\n\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n  ~/projeto | Haiku 4.5 | 54k/200k | 7d:38%\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
+    "expected": {
+      "state": "working",
+      "label": "Photosynthesizing… (13s · ↓ 442 tokens)",
+      "question": null,
+      "options": null,
+      "spinner": "✢ Photosynthesizing… (13s · ↓ 442 tokens)",
+      "status_line": "  ~/projeto | Haiku 4.5 | 54k/200k | 7d:38%\n  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+      "overlay": false,
+      "login": false,
+      "limit_reset": null,
+      "preview": "Primeiro comando concluído.\n\n  Aguardando o segundo...",
+      "codex_menu": null
+    }
+  },
+  {
+    "name": "pane_ferramenta_em_voo_apagada.txt",
+    "pane": "\n ▐▛███▛█   Claude Code v2.1.289\n▝▜██████▀  Haiku 4.5 · Claude Max\n ▝▝   ▝▝   ~/projeto · /rc\n\n\n❯ Rode em sequência, cada um numa chamada Bash separada, com description: 1) sleep 4; echo um  2) sleep 4; echo dois  3) cat /etc/hostname. Entre o 1 e o 2\n  escreva uma frase curta. No fim diga pronto.\n\n  Ran 1 shell command\n\n● Primeiro comando concluído.\n\n  Aguardando o segundo...\n\n  Aguardar 4 segundos e imprimir \"dois\" · 2s\n  ⎿  $ sleep 4; echo dois (3s)\n     (ctrl+b ctrl+b (twice) to run in background)\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n· Photosynthesizing… (12s · ↓ 442 tokens)\n\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n  ~/projeto | Haiku 4.5 | 54k/200k | 7d:38%\n  ⏵⏵ bypass permissions on (shift+tab to cycle)\n",
+    "expected": {
+      "state": "working",
+      "label": "Photosynthesizing… (12s · ↓ 442 tokens)",
+      "question": null,
+      "options": null,
+      "spinner": "· Photosynthesizing… (12s · ↓ 442 tokens)",
+      "status_line": "  ~/projeto | Haiku 4.5 | 54k/200k | 7d:38%\n  ⏵⏵ bypass permissions on (shift+tab to cycle)",
+      "overlay": false,
+      "login": false,
+      "limit_reset": null,
+      "preview": "Primeiro comando concluído.\n\n  Aguardando o segundo...",
+      "codex_menu": null
+    }
+  },
+  {
     "name": "pane_idle.txt",
     "pane": "\n╭─── Claude Code v2.1.191 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮\n│                                                    │ Tips for getting started                                                                                           │\n│                    Welcome back!                   │ Run /init to create a CLAUDE.md file with instructions for Claude                                                  │\n│                                                    │ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │\n│                       ▐▛███▜▌                      │ What's new                                                                                                         │\n│                      ▝▜█████▛▘                     │ Added `/rewind` support for resuming a conversation from before `/clear` was run                                   │\n│                        ▘▘ ▝▝                       │ Fixed scroll position jumping to the bottom while reading earlier output during a streaming response               │\n│   Opus 4.8 (1M context) with hi… · Claude Max ·    │ Fixed background agents resurrecting after being stopped — stopping an agent from the tasks panel is now permanent │\n│   dev@example.com's Organization                   │ /release-notes for more                                                                                            │\n│              ~/Projetos/claude-pocket              │                                                                                                                    │\n╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n❯ \n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n  Opus 4.8 (1M context) ~high 📁 claude-pocket master ⊙6m ↑0↓0 │  🧠4.9G\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents\n",
     "expected": {
@@ -198,7 +232,7 @@
       "overlay": false,
       "login": false,
       "limit_reset": "9:10pm",
-      "preview": "Background command \"Ver se esse Chrome tem o bundle antigo (animação no path)\" was stopped because the\nsystem is running low on memory",
+      "preview": "",
       "codex_menu": null
     }
   },
