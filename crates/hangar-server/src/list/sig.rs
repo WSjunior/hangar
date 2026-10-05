@@ -81,7 +81,7 @@ pub fn list_sig(rows: &[SessionRow]) -> String {
                 i.last_reply, i.last_reply_at, i.pending_questions,
                 i.limit_reset, i.then_target, status_sig(i.status_line.as_deref()),
                 context_sig(i.context.as_ref()), i.model, label, i.startup_steps,
-                i.loop_status, i.loop_iter, i.engine, i.conta,
+                i.loop_status, i.loop_iter, i.engine, i.conta, i.codex_service_tier,
                 i.plan_name, i.plan_done, i.plan_total, i.plan_task, i.plan_task_total, i.plan_complete,
                 i.plan_tasks.as_deref().unwrap_or_default(),
                 i.plan_hidden, i.problema, i.provider, i.shared, i.owner, i.orq_arbiter,

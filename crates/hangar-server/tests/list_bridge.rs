@@ -144,6 +144,59 @@ async fn seed_then_resolve_then_forget() {
     assert_eq!(body["result"], json!({"jsonl": null, "tracked": false}));
 }
 
+/// Ponte com `n` sessões Claude paradas num `tmux` de mentira (pane pronto) e fatos de um Python de
+/// mentira; `marker` é o estado e a idade (s) do marcador de cada uma.
+async fn bridge_with_sessions(root: &Path, n: usize, marker: (&str, f64)) -> (ListBridge, Arc<fake::Fake>) {
+    let home = root.join("home");
+    let mut panes = String::new();
+    for i in 0..n {
+        let cwd = root.join(format!("w{i}"));
+        let sid = format!("00000000-0000-0000-0000-{i:012}");
+        let proj = home.join(".claude/projects").join(hangar_workspace::worktrees::sanitize_cwd(cwd.to_str().unwrap()));
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let mut lines = String::new();
+        for n in 0..200 { lines.push_str(&fake::claude_line(n)); lines.push('\n'); }
+        std::fs::write(proj.join(format!("{sid}.jsonl")), lines).unwrap();
+        std::fs::create_dir_all(home.join(".claude/.hangar-state")).unwrap();
+        std::fs::write(home.join(format!(".claude/.hangar-state/{sid}.json")),
+            format!(r#"{{"state":"{}","ts":{}}}"#, marker.0, now() - marker.1)).unwrap();
+        panes.push_str(&format!("s{i}\\t1\\t\\t{}\\t%%{i}\\t\\t\\t\\t0\\t0\\n", cwd.display()));
+    }
+    let script = root.join("tmux");
+    std::fs::write(&script, format!("#!/bin/sh\n[ \"$1\" = list-panes ] || {{ printf '● pronto\\n❯\\n'; exit 0; }}\nprintf '{panes}'\n")).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let dirs = parse_dirs(&json!({"home": home, "claude": home.join(".claude"), "codex_home": home.join(".codex"),
+        "pi_sessions": home.join(".pi/agent/sessions"), "omp_config": home.join(".omp"),
+        "omp_agent": home.join(".omp/agent"), "kimi_home": home.join(".kimi-code")}).to_string());
+    let (python, upstream) = fake::spawn_fake().await;
+    let bridge = ListBridge::new(ListEnv { mux: Mux::with_program(&script, Duration::from_secs(5)),
+        capture_program: script.clone().into_os_string(), procs: Arc::new(hangar_server::list::procs::SystemProcs::default()), dirs },
+        FactsClient::new(upstream, SECRET.into()));
+    (bridge, python)
+}
+
+/// A sombra produz sem entregar nada: o pane pronto contradiz o `awaiting` velho, e só a produção de
+/// verdade pede ao Python para rebaixá-lo.
+#[tokio::test(flavor = "multi_thread")]
+async fn shadow_never_demotes_and_tells_python() {
+    let dir = tempfile::tempdir().unwrap();
+    let (bridge, python) = bridge_with_sessions(dir.path(), 1, ("awaiting_input", 60.0)).await;
+    let shadow = hangar_server::list::bridge::ProduceFacts { shadow: true, ..Default::default() };
+    let p = bridge.produce(&shadow).await.unwrap();
+    assert_eq!(p.rows.len(), 1);
+    assert!(p.facts_ok);
+    assert_eq!(python.list_facts_last.lock().unwrap()["shadow"], true);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(python.hits_to("/internal/list/demote"), 0);
+    bridge.invalidate();
+    bridge.produce(&Default::default()).await.unwrap();
+    assert_eq!(python.list_facts_last.lock().unwrap()["shadow"], false);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while python.hits_to("/internal/list/demote") == 0 { tokio::time::sleep(Duration::from_millis(20)).await; }
+    }).await.expect("sem a sombra, o rebaixamento sai");
+}
+
 fn peak_rss_kb() -> u64 {
     std::fs::read_to_string("/proc/self/status").unwrap().lines()
         .find_map(|l| l.strip_prefix("VmHWM:")).and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok()).unwrap_or(0)
@@ -155,33 +208,8 @@ fn peak_rss_kb() -> u64 {
 #[ignore]
 async fn measure_tick_20_sessions() {
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    let home = root.join("home");
-    let mut panes = String::new();
-    for i in 0..20 {
-        let cwd = root.join(format!("w{i}"));
-        let sid = format!("00000000-0000-0000-0000-{i:012}");
-        let proj = home.join(".claude/projects").join(hangar_workspace::worktrees::sanitize_cwd(cwd.to_str().unwrap()));
-        std::fs::create_dir_all(&proj).unwrap();
-        std::fs::create_dir_all(&cwd).unwrap();
-        let mut lines = String::new();
-        for n in 0..200 { lines.push_str(&fake::claude_line(n)); lines.push('\n'); }
-        std::fs::write(proj.join(format!("{sid}.jsonl")), lines).unwrap();
-        std::fs::create_dir_all(home.join(".claude/.hangar-state")).unwrap();
-        std::fs::write(home.join(format!(".claude/.hangar-state/{sid}.json")), format!(r#"{{"state":"idle","ts":{}}}"#, now() + 60.0)).unwrap();
-        panes.push_str(&format!("s{i}\\t1\\t\\t{}\\t%%{i}\\t\\t\\t\\t0\\t0\\n", cwd.display()));
-    }
-    let script = root.join("tmux");
-    std::fs::write(&script, format!("#!/bin/sh\n[ \"$1\" = list-panes ] || {{ printf '● pronto\\n❯\\n'; exit 0; }}\nprintf '{panes}'\n")).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let dirs = parse_dirs(&json!({"home": home, "claude": home.join(".claude"), "codex_home": home.join(".codex"),
-        "pi_sessions": home.join(".pi/agent/sessions"), "omp_config": home.join(".omp"),
-        "omp_agent": home.join(".omp/agent"), "kimi_home": home.join(".kimi-code")}).to_string());
     // Os fatos vêm de um Python de mentira, para o tique pagar a ida e volta real.
-    let (_python, upstream) = fake::spawn_fake().await;
-    let bridge = ListBridge::new(ListEnv { mux: Mux::with_program(&script, Duration::from_secs(5)),
-        capture_program: script.clone().into_os_string(), procs: Arc::new(hangar_server::list::procs::SystemProcs::default()), dirs },
-        FactsClient::new(upstream, SECRET.into()));
+    let (bridge, python) = bridge_with_sessions(dir.path(), 20, ("idle", -60.0)).await;
     let first = bridge.produce(&Default::default()).await.unwrap();
     assert!(first.rows.iter().all(|r| r.problema.is_none()), "fatos do Python de mentira responderam");
     assert_eq!(first.rows.len(), 20);
@@ -202,4 +230,36 @@ async fn measure_tick_20_sessions() {
     let cpu_tick = (cpu(&std::fs::read_to_string("/proc/self/stat").unwrap()) - cpu0) / n as f64;
     println!("tique (20 sessões): parede {:.2} ms, CPU (com filhos) {:.2} ms, pico RSS {} → {} kB",
         wall * 1e3, cpu_tick * 1e3, rss0, peak_rss_kb());
+    // Tique da sombra: a mesma produção, sem rebaixar, mais a comparação com a assinatura do Python.
+    let sigs: serde_json::Map<String, Value> = first.rows.iter().map(|r| {
+        let raw = serde_json::to_value(r).unwrap();
+        let sig: serde_json::Map<String, Value> = SIG_FIELDS.iter().map(|f| ((*f).to_owned(), raw.get(*f).cloned().unwrap_or(Value::Null))).collect();
+        (r.name.clone(), Value::Object(sig))
+    }).collect();
+    let mut reply = python.list_facts.lock().unwrap().0.clone();
+    reply["shadow"] = Value::Object(sigs);
+    python.list_facts.lock().unwrap().0 = reply;
+    let mut reporter = hangar_server::list::shadow::Reporter::default();
+    let (cpu0, t0) = (cpu(&std::fs::read_to_string("/proc/self/stat").unwrap()), std::time::Instant::now());
+    let mut cmp = Duration::ZERO;
+    for i in 0..n {
+        bridge.invalidate();
+        let input = hangar_server::list::bridge::ProduceFacts { owner_clients: i % 2, shadow: true, ..Default::default() };
+        let p = bridge.produce(&input).await.unwrap();
+        let py = p.facts.shadow.as_ref().expect("assinatura do Python");
+        let c = std::time::Instant::now();
+        reporter.update(hangar_server::list::shadow::compare(&p.rows, py));
+        cmp += c.elapsed();
+    }
+    println!("tique da sombra (20 sessões): parede {:.2} ms, CPU (com filhos) {:.2} ms, comparação {:.0} µs, pico RSS {} kB",
+        t0.elapsed().as_secs_f64() / n as f64 * 1e3,
+        (cpu(&std::fs::read_to_string("/proc/self/stat").unwrap()) - cpu0) / n as f64 * 1e3,
+        cmp.as_secs_f64() / n as f64 * 1e6, peak_rss_kb());
 }
+
+/// `list_facts.SIG_FIELDS` do Python.
+const SIG_FIELDS: [&str; 44] = ["name", "cwd", "branch", "git_cwd", "worktree_gone", "git_dirty", "state", "tracked", "headless",
+    "jsonl", "question", "stalled", "limited", "lifecycle_id", "transfer_id", "transfer_phase", "last_reply", "last_reply_at",
+    "pending_questions", "limit_reset", "then_target", "status_line", "context", "model", "label", "startup_steps",
+    "loop_status", "loop_iter", "engine", "conta", "codex_service_tier", "plan_name", "plan_done", "plan_total", "plan_task",
+    "plan_task_total", "plan_complete", "plan_tasks", "plan_hidden", "problema", "provider", "shared", "owner", "orq_arbiter"];

@@ -238,3 +238,20 @@ def test_rust_diag_refuses_malformed_body(raw):
         response = _client().post("/internal/diag", content=raw, headers={"X-Hangar-Internal": SECRET})
     assert response.status_code == 400
     assert not [c for c in registrar.call_args_list if c.args[0].startswith("rust.")]
+
+
+def test_list_facts_route_carries_the_shadow_flag():
+    """Contrato 26: o pedido do Rust diz se é da sombra; sem a chave é contrato velho."""
+    seen = []
+
+    async def compute(rows, owner_clients, pane_pids, shadow):
+        seen.append(shadow)
+        return {"shadow": None}
+
+    body = {"rows": [], "owner_clients": 0, "pane_pids": {}}
+    with patch("app.list_facts.compute", compute):
+        old = _client().post("/internal/list/facts", json=body, headers={"X-Hangar-Internal": SECRET})
+        wrong = _client().post("/internal/list/facts", json={**body, "shadow": 1}, headers={"X-Hangar-Internal": SECRET})
+        ok = _client().post("/internal/list/facts", json={**body, "shadow": True}, headers={"X-Hangar-Internal": SECRET})
+    assert (old.status_code, wrong.status_code, ok.status_code) == (400, 400, 200)
+    assert seen == [True]

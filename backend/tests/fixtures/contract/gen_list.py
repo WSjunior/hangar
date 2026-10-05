@@ -324,7 +324,7 @@ def discovery_cases():
         tick(0, fs=[MK(X), W(rollout, "{}\n", T0 - 20), MK(f"{HOME}/.codex"),
                     J(f"{HOME}/.hangar/codex-sessions/cx.json",
                       {"name": "cx", "cwd": X, "rollout_path": rollout, "thread_id": "t1",
-                       "codex_home": f"{HOME}/.codex", "key": "k-cx"})],
+                       "codex_home": f"{HOME}/.codex", "key": "k-cx", "service_tier": "priority"})],
              procs=[P(1000, 1, ["hangar-codex-tui"], X), P(1010, 1, ["codex"], X)],
              panes=[PANE("cx", 1000, X, "%10"), PANE("semthread", 1010, X, "%11", provider="codex")]),
     ]

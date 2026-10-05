@@ -14,14 +14,26 @@ _log = logging.getLogger("hangar.list")
 
 _OTHERS = frozenset({"codex", "pi", "omp", "kimi"})
 _STATE_FIELDS = ("state", "label", "question", "options", "problema", "status_line", "pending_questions",
-                 "startup_steps", "last_activity", "limited", "limit_reset", "stalled")
+                 "startup_steps", "last_activity", "limited", "limit_reset", "stalled", "codex_service_tier")
 # A lista não espera terminal de atalho: o leitor do refresher, com a última leitura boa.
 _shortcuts = sse._ListRefresher()
+# Campos do `sse._list_sig`, pelo nome: a sombra do Rust compara campo a campo e grava só o nome.
+SIG_FIELDS = ("name", "cwd", "branch", "git_cwd", "worktree_gone", "git_dirty", "state", "tracked", "headless",
+              "jsonl", "question", "stalled", "limited", "lifecycle_id", "transfer_id", "transfer_phase",
+              "last_reply", "last_reply_at", "pending_questions", "limit_reset", "then_target", "status_line",
+              "context", "model", "label", "startup_steps", "loop_status", "loop_iter", "engine", "conta",
+              "codex_service_tier", "plan_name", "plan_done", "plan_total", "plan_task", "plan_task_total",
+              "plan_complete", "plan_tasks", "plan_hidden", "problema", "provider", "shared", "owner",
+              "orq_arbiter")
+# Lista servida mais velha que isto não se compara com a produção de agora.
+_SHADOW_MAX_AGE = 3.0
 
 
-async def compute(rows: list[dict], owner_clients: int, pane_pids: dict[str, int]) -> dict:
-    plugin_bridge.app_remoto(owner_clients)
+async def compute(rows: list[dict], owner_clients: int, pane_pids: dict[str, int], shadow: bool = False) -> dict:
     infos = [SessionInfo.model_validate(r) for r in rows]
+    if shadow:
+        return await _shadow(infos, pane_pids)
+    plugin_bridge.app_remoto(owner_clients)
     others = [i for i in infos if i.provider in _OTHERS]
     if others:
         # O código de hoje, só sobre as linhas que o Rust não classifica.
@@ -37,7 +49,34 @@ async def compute(rows: list[dict], owner_clients: int, pane_pids: dict[str, int
     _shortcuts.shortcuts_data = _shortcuts._harvest_shortcuts()
     _shortcuts._launch_shortcuts()
     out["shortcuts"] = _shortcuts.shortcuts_data
+    out["shadow"] = None
     return out
+
+
+async def _shadow(infos: list[SessionInfo], pane_pids: dict[str, int]) -> dict:
+    """Rodada em sombra: o Python segue dono da lista. O estado das linhas não migradas sai da lista
+    que ele serviu (reclassificar mexeria nos caches dele e capturaria panes de novo), a presença do
+    app não é tocada e nem o navegador nem o atalho são lidos. Junto vai a assinatura de cada linha servida."""
+    served = sse.recent_list(_SHADOW_MAX_AGE)
+    by_name = {i.name: i for i in served or ()}
+    others = [by_name[i.name] for i in infos if i.provider in _OTHERS and i.name in by_name]
+    out = await asyncio.to_thread(_files, infos, [], pane_pids)
+    out["states"] = {i.name: {f: getattr(i, f) for f in (*_STATE_FIELDS, "conta")} for i in others}
+    # `nav_vivos` grava ao vencer marcador; a sombra não serve navegador.
+    out["nav"] = {}
+    out["shortcuts"] = None
+    out["shadow"] = None if served is None else {i.name: _row_sig(i) for i in served}
+    return out
+
+
+def _row_sig(i: SessionInfo) -> dict:
+    """A tupla do `sse._list_sig`, com nome por campo."""
+    d = i.model_dump(mode="json", include=set(SIG_FIELDS))
+    d["status_line"] = sse._status_sig(i.status_line)
+    d["context"] = sse._context_sig(i.context)
+    d["label"] = i.label if i.provider == "codex" and not i.tracked else bool(i.label)
+    d["plan_tasks"] = d.get("plan_tasks") or []
+    return d
 
 
 def _files(infos: list[SessionInfo], others: list[SessionInfo], pane_pids: dict[str, int]) -> dict:

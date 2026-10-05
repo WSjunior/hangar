@@ -35,6 +35,9 @@ pub struct SessionRow {
     pub engine_account: Option<String>,
     #[serde(default)]
     pub codex_home: Option<String>,
+    /// Nível de serviço do Codex (`default`/`priority`): do sidecar, e o snapshot ao vivo vence.
+    #[serde(default)]
+    pub codex_service_tier: Option<String>,
     #[serde(default)]
     pub conta: Option<String>,
     #[serde(default = "default_state")]

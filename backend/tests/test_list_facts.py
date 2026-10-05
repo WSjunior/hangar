@@ -29,15 +29,20 @@ def test_facts_compute_only_non_migrated_rows(monkeypatch):
         seen.append(([i.name for i in infos], state_only))
         for i in infos:
             i.state, i.label = "working", f"rótulo {i.name}"
+            if i.provider == "codex":
+                # O snapshot ao vivo do Codex vence o sidecar (`registry.list_with_state`).
+                i.codex_service_tier = "priority"
         return infos
 
     monkeypatch.setattr(sse._list_registry, "list_with_state", fake_state)
-    out = _compute([_row("cc"), _row("cx", "codex"), _row("pp", "pi"), _row("hl", headless=True)])
+    out = _compute([_row("cc"), _row("cx", "codex", codex_service_tier="default"), _row("pp", "pi"),
+                    _row("hl", headless=True)])
     # As Claude (com e sem terminal) são do Rust: nem chegam ao classificador do Python.
     assert seen == [(["cx", "pp"], True)]
     assert set(out["states"]) == {"cx", "pp"}
     assert out["states"]["cx"]["state"] == "working"
     assert out["states"]["cx"]["label"] == "rótulo cx"
+    assert out["states"]["cx"]["codex_service_tier"] == "priority"
 
 
 def test_facts_account_for_kimi_pi_omp_rows(monkeypatch):
@@ -128,3 +133,60 @@ def test_demote_service_updates_map_and_file(tmp_path, monkeypatch):
     runtime_policy.demote_awaiting(["sid1", "ausente"])
     assert hs.get_state("sid1") == ("idle", 5.0)
     assert json.loads(sidecar.read_text()) == {"state": "idle", "ts": 5.0}
+
+
+def test_facts_shadow_attaches_python_signatures(monkeypatch):
+    """Sombra (`CP_LIST_SHADOW=1` no Rust): a lista é do Python, que manda a assinatura de cada
+    linha que serviu. Nada de estado recalculado nem presença do app mexida."""
+    async def never(infos, state_only=False):
+        raise AssertionError("a sombra não reclassifica: o estado vem da lista que o Python serviu")
+
+    monkeypatch.setattr(sse._list_registry, "list_with_state", never)
+    monkeypatch.setattr(plugin_bridge, "app_remoto", lambda n: (_ for _ in ()).throw(AssertionError("presença")))
+    served = [registry.SessionInfo(name="cx", provider="codex", state="working", label="lendo", tracked=False,
+                                   conta="codex:/h", status_line="🤖 GPT │ 💬 1k/2k 50k/200k"),
+              registry.SessionInfo(name="cc", provider="claude", state="idle", label="",
+                                   context={"used": 100_000, "window": 200_000})]
+    monkeypatch.setattr(sse, "recent_list", lambda max_age: served)
+    out = asyncio.run(list_facts.compute([_row("cx", "codex"), _row("cc")], 0, {}, shadow=True))
+    assert out["states"]["cx"]["state"] == "working" and out["states"]["cx"]["conta"] == "codex:/h"
+    sig = out["shadow"]
+    assert set(sig) == {"cx", "cc"}
+    assert set(sig["cc"]) == set(list_facts.SIG_FIELDS)
+    # A mesma redução do `_list_sig`: rótulo do Codex solto é o texto, o resto só presença.
+    assert sig["cx"]["label"] == "lendo" and sig["cc"]["label"] is False
+    assert sig["cx"]["status_line"] == ("GPT", 5, None, None, None)
+    assert sig["cc"]["context"] == 10
+    assert "last_activity" not in sig["cc"]
+    json.dumps(out)
+
+
+def test_facts_shadow_without_fresh_python_list(monkeypatch):
+    monkeypatch.setattr(sse, "recent_list", lambda max_age: None)
+    out = asyncio.run(list_facts.compute([_row("cc")], 0, {}, shadow=True))
+    # Sem cliente o refresher para: nada a comparar, e o Rust espera mais antes de tentar de novo.
+    assert out["shadow"] is None
+
+
+def test_facts_without_shadow_sends_null(monkeypatch):
+    async def keep(infos, state_only=False):
+        return infos
+
+    monkeypatch.setattr(sse._list_registry, "list_with_state", keep)
+    assert _compute([_row("cc")])["shadow"] is None
+
+
+def test_shadow_signature_has_every_list_sig_field():
+    # Campo novo no `_list_sig` sem par aqui deixaria a sombra cega para ele.
+    info = registry.SessionInfo(name="x")
+    assert len(json.loads(sse._list_sig([info]))[0]) == len(list_facts.SIG_FIELDS)
+    assert set(list_facts.SIG_FIELDS) <= set(registry.SessionInfo.model_fields)
+
+
+def test_facts_codex_without_snapshot_keeps_sidecar_tier(monkeypatch):
+    async def keep(infos, state_only=False):
+        return infos
+
+    monkeypatch.setattr(sse._list_registry, "list_with_state", keep)
+    out = _compute([_row("cx", "codex", codex_service_tier="priority")])
+    assert out["states"]["cx"]["codex_service_tier"] == "priority"

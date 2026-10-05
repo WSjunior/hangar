@@ -45,6 +45,9 @@ pub struct RowState {
     /// Só Kimi, Pi e omp: a descoberta não sabe a credencial.
     #[serde(default)]
     pub conta: Option<String>,
+    /// Só Codex: o snapshot ao vivo vence o sidecar.
+    #[serde(default)]
+    pub codex_service_tier: Option<String>,
 }
 
 /// Todos os campos são obrigatórios na resposta: chave que falta é contrato quebrado, nunca vazio.
@@ -66,6 +69,9 @@ pub struct ListFacts {
     pub nav: Value,
     /// JSON dos terminais de atalho, a última leitura boa; `None` antes da primeira.
     pub shortcuts: Option<String>,
+    /// Só no pedido da sombra: a assinatura de cada linha da lista que o Python serviu, por nome.
+    /// `None` sem lista recente dele (ninguém com ela aberta) ou fora da sombra.
+    pub shadow: Option<super::shadow::PySigs>,
     /// Nenhuma resposta boa ainda: acesso, escondidas, transferências e orquestrações são
     /// desconhecidos, não vazios. Todas as linhas levam o problema, e o hub não serve a lista ao dono.
     #[serde(skip)]
@@ -76,12 +82,12 @@ impl Default for ListFacts {
     fn default() -> Self {
         Self { states: HashMap::new(), overrides: Vec::new(), frozen: HashSet::new(), orq: Vec::new(),
             shared: HashSet::new(), owners: HashMap::new(), hidden: HashSet::new(), problems: BTreeMap::new(),
-            stall_seconds: 300.0, nav: Value::Null, shortcuts: None, unknown: true }
+            stall_seconds: 300.0, nav: Value::Null, shortcuts: None, shadow: None, unknown: true }
     }
 }
 
 #[derive(Serialize)]
-struct Request<'a> { rows: &'a [SessionRow], owner_clients: u32, pane_pids: &'a BTreeMap<String, u32> }
+struct Request<'a> { rows: &'a [SessionRow], owner_clients: u32, pane_pids: &'a BTreeMap<String, u32>, shadow: bool }
 
 pub struct Fetched {
     pub facts: Arc<ListFacts>,
@@ -105,9 +111,17 @@ impl FactsClient {
         Self { upstream, secret, http: crate::proxy::client(), last: tokio::sync::Mutex::new(None) }
     }
 
-    pub async fn fetch(&self, rows: &[SessionRow], owner_clients: u32, pane_pids: &BTreeMap<String, u32>) -> Fetched {
+    /// Outro cliente para o mesmo Python, com fila e último valor próprios: a sombra não espera a
+    /// produção de verdade nem lhe empresta uma falha.
+    pub fn sibling(&self) -> Self {
+        Self { upstream: self.upstream, secret: self.secret.clone(), http: self.http.clone(), last: tokio::sync::Mutex::new(None) }
+    }
+
+    /// `shadow`: pedido da rodada em sombra; o Python não mexe na presença do app e manda a
+    /// assinatura da lista dele.
+    pub async fn fetch(&self, rows: &[SessionRow], owner_clients: u32, pane_pids: &BTreeMap<String, u32>, shadow: bool) -> Fetched {
         let mut last = self.last.lock().await;
-        let body = match serde_json::to_vec(&Request { rows, owner_clients, pane_pids }) {
+        let body = match serde_json::to_vec(&Request { rows, owner_clients, pane_pids, shadow }) {
             Ok(b) => b,
             Err(_) => return self.failed(&mut last, "list_facts_request"),
         };
@@ -198,7 +212,11 @@ pub fn apply(rows: Vec<SessionRow>, facts: &ListFacts, ok: bool) -> (Vec<Session
             row.limited = s.limited;
             row.limit_reset.clone_from(&s.limit_reset);
             row.stalled = s.stalled;
-            if row.provider != "codex" { row.conta.clone_from(&s.conta); }
+            if row.provider == "codex" {
+                row.codex_service_tier.clone_from(&s.codex_service_tier);
+            } else {
+                row.conta.clone_from(&s.conta);
+            }
         }
         if !ok { row.problema = Some(UNAVAILABLE.into()); }
     }
