@@ -25,6 +25,9 @@ Quem coordena e junta é a sessão `lista-org`.
   (Windows ~25 ms cada); estado em disco pequeno e podado; cache em memória com poda. Diga no
   relatório o custo de um tique da sua parte com 20 sessões; código que roda a cada tique (Tasks
   12–18) leva medida antes/depois em release no isolado.
+- **Prioridade (dono): velocidade primeiro.** Memória se economiza só quando não custa velocidade;
+  cache que acelera vale a memória que ocupa (com teto); na dúvida, a medida de tempo por tique
+  decide.
 - **Memória e recursos (pedido do dono).** Dado compartilhado por `Arc` ou referência, nada de
   clone por tique; `Vec`/buffer reaproveitado, `with_capacity` quando o tamanho é conhecido; todo
   cache e fila com teto (LRU ou limite de itens) e invalidação por mtime ou geração, nunca crescendo
