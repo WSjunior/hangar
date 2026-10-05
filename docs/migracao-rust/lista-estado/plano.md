@@ -277,9 +277,12 @@ por nome e linhas sintéticas de transferência (`:165-206`); linhas `orq` (`:14
 `list_facts::timeout_keeps_last_and_marks_problem`, `list_facts::transfer_rows_not_classified`;
 contrato 23 nos dois lados.
 
-- [ ] **Step 29: Testes, vistos falhar**
-- [ ] **Step 30: Rota de fatos, serviço de rebaixamento, cliente Rust; contrato 23 nos dois lados**
-- [ ] **Step 31: Testes focados; revisar**
+- [x] **Step 29: Testes, vistos falhar**
+- [x] **Step 30: Rota de fatos, serviço de rebaixamento, cliente Rust; contrato 23 nos dois lados**
+- [x] **Step 31: Testes focados; revisar**
+
+Na junção o número livre era 25 (a `hangar-server-parte1` já usa 24). O rebaixamento entra por
+`POST /internal/list/demote`, ao lado da rota de fatos.
 
 ### Task 15: Rodada em sombra
 

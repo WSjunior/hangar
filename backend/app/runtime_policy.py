@@ -101,6 +101,14 @@ def native_message(payload, metadata):
     return {"outcome": "written", "msg_id": mid}
 
 
+def demote_awaiting(sids: list[str]) -> None:
+    """`hooks.demote_awaiting`: o mapa de marcadores e o registro nativo em memória são do Python
+    (a prévia e as transições leem deles), então o Rust pede aqui em vez de regravar o sidecar."""
+    from app import hook_state
+    for sid in sids:
+        hook_state.hook_state.demote_awaiting(sid)
+
+
 def run(kind: str, payload: dict, metadata: dict) -> dict:
     if not isinstance(payload, dict) or not isinstance(metadata, dict):
         raise ValueError("serviço com dados inválidos")

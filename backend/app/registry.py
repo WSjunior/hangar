@@ -1521,10 +1521,12 @@ class SessionRegistry:
             i.limit_reset = self._limit_cache.get(i.name, (0.0, None))[1]
             i.limited = i.limit_reset is not None
 
-    async def list_with_state(self, infos: Optional[list[SessionInfo]] = None) -> list[SessionInfo]:
+    async def list_with_state(self, infos: Optional[list[SessionInfo]] = None,
+                              state_only: bool = False) -> list[SessionInfo]:
         # Listagem COM estado vivo por sessao (pro /api/sessions). Faz a resolucao otimizada (sync, num
         # thread) e por cima classifica o pane de cada sessao concorrentemente. `infos` opcional: um
         # snapshot ja resolvido (ex: cache compartilhado dos pollers do SSE) pula a re-resolucao.
+        # `state_only`: só o estado (fatos da lista, `list_facts`); a decoração é do Rust.
         if infos is None:
             infos = await asyncio.to_thread(self.list)
         # Orquestrador: sem pane, hook, statusline nem git próprio. O estado sai só da atividade da
@@ -1916,6 +1918,8 @@ class SessionRegistry:
                 and (now - info.last_activity) > runtime_config.get("stall_seconds")
             )
         await self._radar_de_limite(infos, raspadas={i.name for i in pending})
+        if state_only:
+            return infos
         # Última resposta para a linha parada da lista. Usa o mesmo tail-read provider-aware do
         # /history e roda fora do event loop; working/awaiting continuam mostrando o sinal vivo.
         def _decorate_replies() -> None:

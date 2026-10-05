@@ -5,6 +5,7 @@ mod fake;
 
 use fake::{SECRET, client, config};
 use hangar_server::list::bridge::{ListBridge, ListEnv, parse_dirs};
+use hangar_server::list::facts::FactsClient;
 use hangar_server::list::mux::Mux;
 use hangar_server::routes::{AppState, terminal_router};
 use serde_json::{Value, json};
@@ -43,7 +44,7 @@ async fn spawn(dir: &Path, exit: i32) -> SocketAddr {
         capture_program: script.into_os_string(),
         procs: Arc::new(hangar_server::list::procs::SystemProcs::default()),
         dirs,
-    }));
+    }, FactsClient::new("127.0.0.1:9".parse().unwrap(), String::new())));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let app = terminal_router(Arc::new(state)).into_make_service_with_connect_info::<SocketAddr>();
@@ -176,10 +177,13 @@ async fn measure_tick_20_sessions() {
     let dirs = parse_dirs(&json!({"home": home, "claude": home.join(".claude"), "codex_home": home.join(".codex"),
         "pi_sessions": home.join(".pi/agent/sessions"), "omp_config": home.join(".omp"),
         "omp_agent": home.join(".omp/agent"), "kimi_home": home.join(".kimi-code")}).to_string());
+    // Os fatos vêm de um Python de mentira, para o tique pagar a ida e volta real.
+    let (_python, upstream) = fake::spawn_fake().await;
     let bridge = ListBridge::new(ListEnv { mux: Mux::with_program(&script, Duration::from_secs(5)),
-        capture_program: script.clone().into_os_string(), procs: Arc::new(hangar_server::list::procs::SystemProcs::default()), dirs });
-    let facts = hangar_server::list::bridge::ProduceFacts::default();
-    let first = bridge.produce(&facts).await.unwrap();
+        capture_program: script.clone().into_os_string(), procs: Arc::new(hangar_server::list::procs::SystemProcs::default()), dirs },
+        FactsClient::new(upstream, SECRET.into()));
+    let first = bridge.produce(&Default::default()).await.unwrap();
+    assert!(first.rows.iter().all(|r| r.problema.is_none()), "fatos do Python de mentira responderam");
     assert_eq!(first.rows.len(), 20);
     let rss0 = peak_rss_kb();
     let cpu = |s: &str| -> f64 { let f: Vec<&str> = s.rsplit(')').next().unwrap().split_whitespace().collect();
@@ -187,9 +191,11 @@ async fn measure_tick_20_sessions() {
     let cpu0 = cpu(&std::fs::read_to_string("/proc/self/stat").unwrap());
     let t0 = std::time::Instant::now();
     let n = 300;
-    for _ in 0..n {
+    for i in 0..n {
         bridge.invalidate();
-        let p = bridge.produce(&facts).await.unwrap();
+        // Entrada nova a cada tique: paga a pergunta ao Python, como o hub (tique de 1,5 s > prazo de 1 s).
+        let input = hangar_server::list::bridge::ProduceFacts { owner_clients: i % 2, ..Default::default() };
+        let p = bridge.produce(&input).await.unwrap();
         assert_eq!(p.rows.len(), 20);
     }
     let wall = t0.elapsed().as_secs_f64() / n as f64;

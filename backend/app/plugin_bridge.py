@@ -751,6 +751,10 @@ VALIDADE_ESTADO_S = 90.0
 # Quantos SSE do app (lista ou conversa) estão abertos agora. Pedido de permissão só é segurado
 # pelo plugin com alguém no app para responder.
 _apps_abertos = 0
+# Listas do dono abertas no Rust, pela contagem do pedido de fatos (`list_facts`). Vence sozinha:
+# Rust que parou de perguntar não pode deixar a permissão presa num app que ninguém vê.
+_apps_remotos = (0, 0.0)
+_APP_REMOTO_TTL_S = 10.0
 
 
 def app_entrou() -> None:
@@ -765,9 +769,16 @@ def app_saiu() -> None:
         _apps_abertos = max(0, _apps_abertos - 1)
 
 
+def app_remoto(count: int) -> None:
+    global _apps_remotos
+    with _lock:
+        _apps_remotos = (count, time.monotonic())
+
+
 def app_presente() -> bool:
     with _lock:
-        return _apps_abertos > 0
+        count, at = _apps_remotos
+        return _apps_abertos > 0 or (count > 0 and time.monotonic() - at <= _APP_REMOTO_TTL_S)
 
 
 def terminal_preso(name: str) -> bool:
