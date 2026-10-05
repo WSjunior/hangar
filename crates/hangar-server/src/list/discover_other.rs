@@ -447,6 +447,8 @@ pub fn codex_rows(dirs: &Dirs, births: &HashMap<String, u64>, procs: &dyn Proces
         row.provider = "codex".to_owned();
         row.conta = Some(format!("codex:{codex_home}"));
         row.codex_home = Some(codex_home);
+        // Cru, como o `meta.get` do Python: vazio continua vazio.
+        row.codex_service_tier = meta.get("service_tier").and_then(Value::as_str).map(str::to_owned);
         row.headless = meta.get("headless").is_some_and(truthy);
         links::fill_location(&mut row, "codex", dirs);
         links::fill_links(&mut row, dirs);

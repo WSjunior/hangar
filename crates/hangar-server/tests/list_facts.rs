@@ -87,6 +87,20 @@ fn transfer_rows_not_classified() {
     assert!(work[0].shared && work[0].owner.as_deref() == Some("ana"));
 }
 
+#[test]
+fn codex_service_tier_comes_from_the_live_state() {
+    let mut cx = row("cx", "codex");
+    cx.codex_service_tier = Some("default".into());
+    let mut st = state("working");
+    st["codex_service_tier"] = json!("priority");
+    let mut pp = state("idle");
+    pp["codex_service_tier"] = json!("priority");
+    let facts: ListFacts = serde_json::from_value(full(json!({"states": {"cx": st, "pp": pp}}))).unwrap();
+    let (work, _) = facts::apply(vec![cx, row("pp", "pi")], &facts, true);
+    assert_eq!(work[0].codex_service_tier.as_deref(), Some("priority"), "o snapshot do Codex vence o sidecar");
+    assert_eq!(work[1].codex_service_tier, None, "só linha Codex tem nível de serviço");
+}
+
 #[tokio::test]
 async fn no_answer_yet_marks_every_row_and_partial_answer_is_refused() {
     let (fake, addr) = spawn_fake().await;

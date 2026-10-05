@@ -45,6 +45,9 @@ pub struct RowState {
     /// Só Kimi, Pi e omp: a descoberta não sabe a credencial.
     #[serde(default)]
     pub conta: Option<String>,
+    /// Só Codex: o snapshot ao vivo vence o sidecar.
+    #[serde(default)]
+    pub codex_service_tier: Option<String>,
 }
 
 /// Todos os campos são obrigatórios na resposta: chave que falta é contrato quebrado, nunca vazio.
@@ -209,7 +212,11 @@ pub fn apply(rows: Vec<SessionRow>, facts: &ListFacts, ok: bool) -> (Vec<Session
             row.limited = s.limited;
             row.limit_reset.clone_from(&s.limit_reset);
             row.stalled = s.stalled;
-            if row.provider != "codex" { row.conta.clone_from(&s.conta); }
+            if row.provider == "codex" {
+                row.codex_service_tier.clone_from(&s.codex_service_tier);
+            } else {
+                row.conta.clone_from(&s.conta);
+            }
         }
         if !ok { row.problema = Some(UNAVAILABLE.into()); }
     }

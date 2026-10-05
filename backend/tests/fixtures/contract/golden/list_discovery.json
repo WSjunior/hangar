@@ -25,6 +25,7 @@
   "engine": null,
   "engine_account": null,
   "codex_home": null,
+  "codex_service_tier": null,
   "conta": null,
   "state": "idle",
   "last_activity": null,
@@ -2241,7 +2242,7 @@
       {
        "op": "write",
        "path": "⟦ROOT⟧/home/.hangar/codex-sessions/cx.json",
-       "text": "{\"name\": \"cx\", \"cwd\": \"⟦ROOT⟧/work/x\", \"rollout_path\": \"⟦ROOT⟧/home/.codex/sessions/2027/01/15/rollout-2027-01-15T08-00-00-0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000.jsonl\", \"thread_id\": \"t1\", \"codex_home\": \"⟦ROOT⟧/home/.codex\", \"key\": \"k-cx\"}",
+       "text": "{\"name\": \"cx\", \"cwd\": \"⟦ROOT⟧/work/x\", \"rollout_path\": \"⟦ROOT⟧/home/.codex/sessions/2027/01/15/rollout-2027-01-15T08-00-00-0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000.jsonl\", \"thread_id\": \"t1\", \"codex_home\": \"⟦ROOT⟧/home/.codex\", \"key\": \"k-cx\", \"service_tier\": \"priority\"}",
        "mtime": null
       }
      ],
@@ -2309,6 +2310,7 @@
         "jsonl": "⟦ROOT⟧/home/.codex/sessions/2027/01/15/rollout-2027-01-15T08-00-00-0199aaaa-bbbb-7ccc-8ddd-eeeeffff0000.jsonl",
         "provider": "codex",
         "codex_home": "⟦ROOT⟧/home/.codex",
+        "codex_service_tier": "priority",
         "conta": "codex:⟦ROOT⟧/home/.codex"
        }
       ],

@@ -73,6 +73,7 @@ def _models() -> dict:
             name="s1", lifecycle_id="lc-1", transfer_id="tr-1", transfer_phase="copying",
             cwd="/home/u/repo", jsonl="/home/u/.claude/projects/x/u.jsonl", provider="codex",
             headless=True, engine="kimi", engine_account="kimi-coding", codex_home="/home/u/.codex",
+            codex_service_tier="priority",
             conta="claude:/home/u/.claude", state="awaiting_input", last_activity=1727712000.5,
             last_reply="acentuação e emoji 🚀", last_reply_at=1727712001.25, tracked=False,
             branch="feat/x", worktree=True, worktree_path="/home/u/repo-wt", worktree_gone=True,
