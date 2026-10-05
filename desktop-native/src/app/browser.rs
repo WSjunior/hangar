@@ -310,10 +310,9 @@ impl BrowserPanel {
                     let k = &event.keystroke;
                     // O Chromium sem janela tem área de transferência própria: colar lê a do sistema e digita o texto.
                     let paste = (k.modifiers.control && !k.modifiers.alt && k.key == "v") || (k.modifiers.shift && k.key == "insert");
-                    if !paste {
-                        engine.key(true, k);
-                    } else if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        engine.insert_text(&text);
+                    match paste.then(|| cx.read_from_clipboard().and_then(|item| item.text())).flatten() {
+                        Some(text) => engine.insert_text(&text),
+                        None => engine.key(true, k),
                     }
                 }
                 cx.stop_propagation();
