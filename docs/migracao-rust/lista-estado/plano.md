@@ -183,8 +183,8 @@ regra de pid vivo de `hook_state.py:56-129`, `.hangar-askq`, `.hangar-status` co
 
 **Falha sem ela:** `contract_list::decorate_markers_cases`, `contract_list::list_sig_cases`.
 
-- [ ] **Step 17: Testes, vistos falhar**
-- [ ] **Step 18: Leitores e assinatura; testes focados; revisar**
+- [x] **Step 17: Testes, vistos falhar**
+- [x] **Step 18: Leitores e assinatura; testes focados; revisar**
 
 ### Task 9: Contexto e modelo da sessão Claude
 
