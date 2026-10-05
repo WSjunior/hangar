@@ -129,19 +129,28 @@ impl PlanTracker {
             if !path.file_name().is_some_and(|n| n.to_string_lossy().ends_with(".md")) {
                 continue;
             }
-            // Segue link como o `is_file()` do Python; erro aqui é "não é arquivo".
-            let Ok(meta) = fs::metadata(&path) else { continue };
+            // Segue link como o `is_file()` do Python; sumido ou link quebrado é "não é arquivo".
+            let meta = match fs::metadata(&path) {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "plano ilegivel");
+                    continue;
+                }
+            };
             if !meta.is_file() {
                 continue;
             }
-            let m = meta.modified()?;
-            if wall - secs(m) > MAX_AGE_S {
-                continue;
-            }
-            match self.load(&path, m, true) {
-                Ok(Some(p)) => cands.push((m, path, p.complete)),
+            // Um arquivo ilegível não pode apagar o plano do repo inteiro.
+            let loaded = meta.modified().and_then(|m| {
+                if wall - secs(m) > MAX_AGE_S {
+                    return Ok(None);
+                }
+                Ok(self.load(&path, m, true)?.map(|p| (m, p)))
+            });
+            match loaded {
+                Ok(Some((m, p))) => cands.push((m, path, p.complete)),
                 Ok(None) => {}
-                // Um arquivo ilegível não pode apagar o plano do repo inteiro.
                 Err(e) => tracing::warn!(path = %path.display(), error = %e, "plano ilegivel"),
             }
         }
