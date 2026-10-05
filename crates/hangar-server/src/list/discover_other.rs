@@ -72,14 +72,25 @@ pub fn ticket_key(pane_id: &str, pid: Option<i64>, procs: &dyn ProcessView) -> S
     pane_id.trim_start_matches('%').to_owned()
 }
 
+/// As linhas da rodada e o pid do agente de cada linha com terminal que tem agente reconhecido.
+#[derive(Debug, Default)]
+pub struct Discovered {
+    pub rows: Vec<SessionRow>,
+    pub agent_pids: HashMap<String, u32>,
+}
+
 /// `registry.list()` sem as linhas `orq` e de transferência (vêm dos fatos): sessões do
 /// multiplexador, guarda de colisão e as linhas dos sidecars Codex e Claude sem terminal.
-pub fn discover_rows(panes: &[Pane], procs: &dyn ProcessView, children: &ChildrenMap, resolver: &mut Resolver, dirs: &Dirs) -> Vec<SessionRow> {
+pub fn discover_rows(panes: &[Pane], procs: &dyn ProcessView, children: &ChildrenMap, resolver: &mut Resolver, dirs: &Dirs) -> Discovered {
     let projects = dirs.claude.join("projects");
     let skip = |name: &str| has_codex_sidecar(name, dirs);
     let mut rows = Vec::new();
     let mut sids = HashMap::new();
+    let mut agent_pids = HashMap::new();
     for s in discover_panes(panes, procs, children, &projects, resolver, &skip) {
+        if let Some(pid) = s.agent_pid.and_then(|p| u32::try_from(p).ok()) {
+            agent_pids.insert(s.name.clone(), pid);
+        }
         let mut row = links::blank_row(&s.name);
         row.cwd = Some(s.cwd.clone());
         let (jsonl, tracked) = match (s.provider, s.transcript) {
@@ -108,7 +119,7 @@ pub fn discover_rows(panes: &[Pane], procs: &dyn ProcessView, children: &Childre
     }
     rows.extend(codex_rows(dirs, &births, procs));
     rows.extend(headless_rows(dirs, procs));
-    rows
+    Discovered { rows, agent_pids }
 }
 
 /// Transcript de um pane Pi, omp ou Kimi pelo bilhete (e, no Pi, pelo `CP_PI_SESSION`). `None` =
@@ -297,19 +308,31 @@ fn kimi_wire(session_dir: &Path) -> String {
 /// `kimi_sessions.transcript_path`: o índice primeiro; a pasta calculada cobre o índice atrasado.
 /// `None`: índice com byte inválido, que no Python levanta e deixa a sessão sem transcript.
 fn kimi_transcript_of_id(cwd: &str, sid: &str, dirs: &Dirs) -> Option<String> {
-    if let Ok(raw) = std::fs::read(dirs.kimi_home.join("session_index.jsonl")) {
+    let index = dirs.kimi_home.join("session_index.jsonl");
+    let key = (index, sid.to_owned());
+    if let Some(wire) = KIMI_WIRES.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return Some(wire.clone());
+    }
+    if let Ok(raw) = std::fs::read(&key.0) {
         for line in std::str::from_utf8(&raw).ok()?.lines() {
             let Ok(Value::Object(o)) = serde_json::from_str::<Value>(line) else { continue };
             if o.get("sessionId").and_then(Value::as_str) == Some(sid)
                 && let Some(dir) = o.get("sessionDir").and_then(Value::as_str).filter(|d| !d.is_empty())
             {
-                return Some(kimi_wire(Path::new(dir)));
+                let wire = kimi_wire(Path::new(dir));
+                KIMI_WIRES.lock().unwrap_or_else(|e| e.into_inner()).insert(key, wire.clone());
+                return Some(wire);
             }
         }
     }
     let dir = dirs.kimi_home.join("sessions").join(kimi_workdir_key(cwd)).join(sid);
     dir.is_dir().then(|| kimi_wire(&dir))
 }
+
+/// Achado no índice, o `sessionDir` de uma sessão Kimi não muda: o índice inteiro não é relido
+/// a cada tique. Só o positivo fica; a pasta calculada segue conferida.
+// ponytail: sem poda, como os caches do `links.rs`; a poda por sessão é da Task 17.
+static KIMI_WIRES: LazyLock<std::sync::Mutex<HashMap<(PathBuf, String), String>>> = LazyLock::new(Default::default);
 
 static KIMI_SLUG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^a-z0-9._-]+").unwrap());
 
@@ -492,4 +515,117 @@ pub fn headless_rows(dirs: &Dirs, procs: &dyn ProcessView) -> Vec<SessionRow> {
         out.push(row);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::list::facts_files::{self, HookStates};
+    use std::io::Write;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// Árvore pane → `claude --session-id`, contando as leituras por pid (no `sysinfo` cada uma
+    /// era um retrato de todos os processos).
+    struct Tree { sids: Vec<String>, config: String, reads: AtomicUsize }
+
+    impl ProcessView for Tree {
+        fn children(&self, _: Duration) -> std::io::Result<Arc<ChildrenMap>> { unreachable!() }
+        fn argv(&self, pid: i64) -> Vec<String> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            match pid {
+                2000.. => vec!["claude".into(), "--session-id".into(), self.sids[(pid - 2000) as usize].clone()],
+                _ => vec!["fish".into()],
+            }
+        }
+        fn cwd(&self, _: i64) -> Option<PathBuf> { None }
+        fn env_var(&self, _: i64, name: &str) -> std::io::Result<Option<OsString>> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            Ok((name == "CLAUDE_CONFIG_DIR").then(|| OsString::from(&self.config)))
+        }
+        fn start_time(&self, _: i64) -> Option<f64> { self.reads.fetch_add(1, Ordering::Relaxed); Some(1.0) }
+        fn fds(&self, _: i64) -> Vec<PathBuf> { Vec::new() }
+    }
+
+    fn write(path: &Path, text: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    /// Custo de um tique da descoberta + decoração com 20 sessões Claude num repositório com 5
+    /// worktrees, transcripts de 2 MB (5 crescem por tique), 220 marcadores, pergunta e statusline.
+    /// `cargo test --release -p hangar-server --lib list::discover_other::tests::tick_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn tick_cost() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().canonicalize().unwrap();
+        let claude = home.join(".claude");
+        let dirs = Dirs { home: home.clone(), claude: claude.clone(), codex_home: home.join(".codex"),
+            pi_sessions: home.join(".pi"), omp_config: home.join(".omp"), omp_agent: home.join(".omp/agent"),
+            kimi_home: home.join(".kimi-code") };
+        let repo = home.join("repo");
+        write(&repo.join(".git/HEAD"), "ref: refs/heads/main\n");
+        for k in 0..5 {
+            let wt = home.join(format!("repo-wt{k}"));
+            write(&repo.join(format!(".git/worktrees/wt{k}/gitdir")), &format!("{}/.git\n", wt.display()));
+            write(&wt.join(".git"), &format!("gitdir: {}/.git/worktrees/wt{k}\n", repo.display()));
+        }
+        let projects = claude.join("projects").join(hangar_workspace::worktrees::sanitize_cwd(repo.to_str().unwrap()));
+        let sids: Vec<String> = (0..20).map(|i| format!("00000000-0000-0000-0000-0000000000{i:02}")).collect();
+        let filler = format!(r#"{{"type":"assistant","cwd":"{}","message":{{"content":[{{"type":"text","text":"{}"}}]}}}}"#,
+            repo.display(), "x".repeat(1000));
+        let tool = |k: usize| format!(r#"{{"type":"assistant","cwd":"{}","message":{{"content":[{{"type":"tool_use","name":"Bash","input":{{"command":"cd {}/repo-wt{} && ls"}}}}]}}}}"#,
+            repo.display(), home.display(), k % 5);
+        for (i, sid) in sids.iter().enumerate() {
+            let jsonl = projects.join(format!("{sid}.jsonl"));
+            let body: String = (0..2000).map(|n| if n % 100 == 99 { tool(n) } else { filler.clone() } + "\n").collect();
+            write(&jsonl, &body);
+            write(&claude.join(format!(".hangar-state/{sid}.json")), r#"{"state":"working","ts":1.0}"#);
+            write(&claude.join(format!("sessions/{}.json", 2000 + i)),
+                  &format!(r#"{{"sessionId":"{sid}","pid":{},"status":"busy","updatedAt":1000}}"#, 2000 + i));
+            write(&claude.join(format!(".hangar-askq/{sid}.json")), &format!(
+                r#"{{"tool_input":{{"questions":[{{"question":"Q?","header":"h","options":[{{"label":"A"}}]}}]}},"transcript_path":{:?}}}"#,
+                jsonl.to_str().unwrap()));
+            write(&claude.join(format!(".hangar-status/{sid}.json")), r#"{"line":"🤖 Haiku","ts":1e12}"#);
+            write(&claude.join(format!(".hangar-pair/s{i}.json")), r#"{"peers":["peer::x"],"gid":"g"}"#);
+        }
+        for i in 0..200 {
+            write(&claude.join(format!(".hangar-state/old{i}.json")), r#"{"state":"idle","ts":1.0}"#);
+        }
+        let ext: Vec<Value> = (0..20).map(|i| serde_json::json!({"share_id": "a", "local_session": format!("s{i}"),
+            "alias": "peer", "peer_owner": "o", "peer_session": "x", "peer_address": "h", "peer_token": "t", "created_at": 1})).collect();
+        write(&claude.join(".hangar-pair/external_pairs.json"), &Value::Array(ext).to_string());
+        let panes: Vec<Pane> = (0..20).map(|i| Pane { session: format!("s{i}"), active: true, pid: Some(1000 + i),
+            cwd: repo.to_string_lossy().into_owned(), pane_id: format!("%{i}"), ..Pane::default() }).collect();
+        let children: ChildrenMap = (0..20).map(|i| (1000 + i, vec![2000 + i])).collect();
+        let procs = Tree { sids: sids.clone(), config: claude.to_string_lossy().into_owned(), reads: AtomicUsize::new(0) };
+        let config_dirs = vec![claude.clone()];
+        let mut resolver = Resolver::default();
+        let mut hooks = HookStates::default();
+        let n = 50;
+        let t = std::time::Instant::now();
+        for tick in 0..n {
+            for k in 0..5 {
+                let jsonl = projects.join(format!("{}.jsonl", sids[(tick * 5 + k) % 20]));
+                let mut f = std::fs::OpenOptions::new().append(true).open(jsonl).unwrap();
+                writeln!(f, "{filler}").unwrap();
+            }
+            let found = discover_rows(&panes, &procs, &children, &mut resolver, &dirs);
+            let rows = found.rows;
+            assert_eq!(found.agent_pids.len(), 20);
+            hooks.refresh(&config_dirs);
+            for row in &rows {
+                let sid = row.jsonl.as_deref().and_then(|j| Path::new(j).file_stem()).map(|s| s.to_string_lossy().into_owned());
+                std::hint::black_box((hooks.get_state(sid.as_deref(), |_| true),
+                    facts_files::open_question(sid.as_deref(), &config_dirs),
+                    facts_files::published_status(sid.as_deref(), &config_dirs, 1e12)));
+            }
+            assert_eq!(rows.len(), 20);
+            assert!(rows.iter().all(|r| r.worktree), "a worktree vem do transcript");
+        }
+        println!("descoberta+decoração: {:.0} µs/tique, {:.0} leituras de processo/tique",
+            t.elapsed().as_micros() as f64 / n as f64, procs.reads.load(Ordering::Relaxed) as f64 / n as f64);
+    }
 }

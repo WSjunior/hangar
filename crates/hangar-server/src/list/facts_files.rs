@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{ErrorKind, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -47,11 +47,26 @@ fn native_state(status: &str) -> Option<&'static str> {
 /// Um aviso por status desconhecido, não por arquivo lido.
 static UNKNOWN_STATUSES: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
 
-/// Marcadores e registro nativo lidos do disco, por session id.
+/// Versão de um arquivo: muda a cada escrita.
+type FileKey = (SystemTime, u64);
+
+fn file_key(meta: &std::fs::Metadata) -> Option<FileKey> { Some((meta.modified().ok()?, meta.len())) }
+
+#[derive(Clone)]
+enum Parsed {
+    Marker(Option<Marker>),
+    Native(Option<(String, Native)>),
+}
+
+/// Marcadores e registro nativo lidos do disco, por session id. Atravessa os tiques: `refresh`
+/// relê só o arquivo cuja versão mudou.
 #[derive(Default)]
 pub struct HookStates {
     markers: HashMap<String, Marker>,
     native: HashMap<String, Native>,
+    files: HashMap<PathBuf, (FileKey, Parsed)>,
+    #[cfg(test)]
+    reads: usize,
 }
 
 /// `float()` do Python sobre número ou texto numérico.
@@ -97,19 +112,34 @@ fn lax_bool(v: &Value) -> bool {
     }
 }
 
-fn read_json(path: &Path) -> Option<Value> {
-    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+/// Ausente é normal (sessão sem o arquivo, ou apagado no meio da varredura); outro erro avisa:
+/// calado, a sessão perderia o estado sem ninguém saber por quê.
+fn read_file(path: &Path, what: &'static str) -> Option<Vec<u8>> {
+    match std::fs::read(path) {
+        Ok(raw) => Some(raw),
+        Err(e) if e.kind() == ErrorKind::NotFound => None,
+        Err(e) => {
+            if crate::warn_limit::allow(None, "list_state_file_unreadable") {
+                tracing::warn!(code = "list_state_file_unreadable", what, kind = ?e.kind(), "arquivo de estado ilegível");
+            }
+            None
+        }
+    }
+}
+
+fn read_json(path: &Path, what: &'static str) -> Option<Value> {
+    serde_json::from_slice(&read_file(path, what)?).ok()
 }
 
 fn read_marker(path: &Path) -> Option<Marker> {
-    let o = read_json(path)?;
+    let o = read_json(path, MARKER_DIR)?;
     // ponytail: o Python aceita `state` de qualquer tipo; só texto é estado que a lista conhece.
     Some(Marker { state: o.get("state")?.as_str()?.to_owned(), ts: py_float(o.get("ts")?)? })
 }
 
 /// (session id, entrada), ou o campo que impediu a leitura. Status desconhecido avisa uma vez.
 fn read_native(path: &Path) -> Result<(String, Native), &'static str> {
-    let o = read_json(path).ok_or("json")?;
+    let o = read_json(path, NATIVE_DIR).ok_or("json")?;
     let sid = py_str(o.get("sessionId").ok_or("sessionId")?);
     let pid = match o.get("pid").ok_or("pid")? {
         Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f.trunc() as i64)),
@@ -147,18 +177,47 @@ fn is_native_name(name: &str) -> bool {
 }
 
 impl HookStates {
-    /// Marcadores de cada `<config>/.hangar-state` e o registro nativo de cada `<config>/sessions`
-    /// (resolvido: as contas são symlink para o principal, e um só basta). Arquivo ilegível fica de fora.
+    /// Primeira leitura; nos tiques seguintes, `refresh`.
     pub fn load(dirs: &[PathBuf]) -> Self {
         let mut me = Self::default();
+        me.refresh(dirs);
+        me
+    }
+
+    /// Marcadores de cada `<config>/.hangar-state` e o registro nativo de cada `<config>/sessions`
+    /// (resolvido: as contas são symlink para o principal, e um só basta). Arquivo ilegível fica de
+    /// fora; arquivo sumido sai.
+    pub fn refresh(&mut self, dirs: &[PathBuf]) {
+        let mut previous = std::mem::take(&mut self.files);
+        let (mut markers, mut native) = (HashMap::new(), HashMap::new());
+        let mut visit = |path: PathBuf, parse: &dyn Fn(&Path) -> Parsed, files: &mut HashMap<PathBuf, (FileKey, Parsed)>| {
+            // Segue o symlink; sem versão não há como saber se mudou, e o arquivo fica de fora.
+            let Some(key) = std::fs::metadata(&path).ok().as_ref().and_then(file_key) else { return };
+            let parsed = match previous.remove(&path) {
+                Some((k, parsed)) if k == key => parsed,
+                _ => {
+                    #[cfg(test)]
+                    { self.reads += 1; }
+                    parse(&path)
+                }
+            };
+            match &parsed {
+                Parsed::Marker(Some(m)) => {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        markers.insert(stem.to_owned(), m.clone());
+                    }
+                }
+                Parsed::Native(Some((sid, n))) => { native.insert(sid.clone(), n.clone()); }
+                _ => {}
+            }
+            files.insert(path, (key, parsed));
+        };
+        let mut files = HashMap::new();
         for base in dirs {
             for e in entries(&base.join(MARKER_DIR), MARKER_DIR) {
                 let path = e.path();
-                if path.extension().is_none_or(|x| x != "json") {
-                    continue;
-                }
-                if let (Some(m), Some(stem)) = (read_marker(&path), path.file_stem().and_then(|s| s.to_str())) {
-                    me.markers.insert(stem.to_owned(), m);
+                if path.extension().is_some_and(|x| x == "json") {
+                    visit(path, &|p| Parsed::Marker(read_marker(p)), &mut files);
                 }
             }
         }
@@ -174,17 +233,20 @@ impl HookStates {
             for e in entries(&d, NATIVE_DIR) {
                 let name = e.file_name();
                 let Some(name) = name.to_str().filter(|n| is_native_name(n)) else { continue };
-                match read_native(&e.path()) {
-                    Ok((sid, n)) => {
-                        me.native.insert(sid, n);
-                    }
-                    Err("status") => {}
+                visit(e.path(), &|p| Parsed::Native(match read_native(p) {
+                    Ok(v) => Some(v),
+                    Err("status") => None,
                     // O arquivo pode estar no meio da escrita; formato novo do Claude aparece aqui.
-                    Err(field) => tracing::debug!(file = name, field, "registro nativo ilegível; usando marcador ou pane"),
-                }
+                    Err(field) => {
+                        tracing::debug!(file = name, field, "registro nativo ilegível; usando marcador ou pane");
+                        None
+                    }
+                }), &mut files);
             }
         }
-        me
+        self.files = files;
+        self.markers = markers;
+        self.native = native;
     }
 
     /// Registro nativo enquanto o pid dele vive (é o estado que a TUI tem); senão o marcador.
@@ -194,6 +256,13 @@ impl HookStates {
             return Some(Marker { state: n.state.to_owned(), ts: n.ts });
         }
         self.markers.get(sid).cloned()
+    }
+}
+
+/// A lista roda a cada 1,5 s: um aviso por minuto por sessão e código.
+fn warn_file(session: &str, code: &'static str, field: &str) {
+    if crate::warn_limit::allow(Some(session), code) {
+        tracing::warn!(code, session, field, "list: arquivo da sessão recusado");
     }
 }
 
@@ -237,6 +306,8 @@ fn first_question(data: &Value) -> Result<OpenQuestion, &'static str> {
 /// A pergunta já foi respondida depois de `since` (mtime do sidecar)? Sem como provar que não,
 /// responde sim: ficar do outro lado prenderia a sessão em `awaiting_input` para sempre.
 fn answered_after(session: &str, jsonl: &str, since: f64) -> bool {
+    #[cfg(test)]
+    ANSWER_READS.with(|n| n.set(n.get() + 1));
     let read = || -> std::io::Result<(u64, Vec<u8>)> {
         let mut fh = std::fs::File::open(jsonl)?;
         let size = fh.seek(SeekFrom::End(0))?;
@@ -249,7 +320,10 @@ fn answered_after(session: &str, jsonl: &str, since: f64) -> bool {
     let (start, buf) = match read() {
         Ok(v) => v,
         Err(e) => {
-            tracing::debug!(session, kind = ?e.kind(), "askq: transcript ilegível; trata como respondida");
+            // Transcript apagado é o fim normal da sessão; outra falha some com a pergunta calada.
+            if e.kind() != ErrorKind::NotFound {
+                warn_file(session, "list_askq_transcript_unreadable", "transcript_path");
+            }
             return true;
         }
     };
@@ -291,6 +365,30 @@ fn answered_after(session: &str, jsonl: &str, since: f64) -> bool {
     out_of_reach
 }
 
+#[cfg(test)]
+thread_local! {
+    static ANSWER_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Resposta por transcript: (versão do transcript, mtime do sidecar) → respondida. O rabo de
+/// 256 KB só é relido quando um dos dois muda.
+// ponytail: sem poda, como os caches do `links.rs`; a poda por sessão é da Task 17.
+static ANSWERED: LazyLock<Mutex<HashMap<String, ((FileKey, f64), bool)>>> = LazyLock::new(Default::default);
+
+fn answered_cached(session: &str, jsonl: &str, since: f64) -> bool {
+    let Some(key) = std::fs::metadata(jsonl).ok().as_ref().and_then(file_key).map(|k| (k, since)) else {
+        return answered_after(session, jsonl, since);
+    };
+    if let Some((k, answered)) = ANSWERED.lock().unwrap_or_else(|e| e.into_inner()).get(jsonl)
+        && *k == key
+    {
+        return *answered;
+    }
+    let answered = answered_after(session, jsonl, since);
+    ANSWERED.lock().unwrap_or_else(|e| e.into_inner()).insert(jsonl.to_owned(), (key, answered));
+    answered
+}
+
 /// Pergunta pendente da sessão `stem` pelo sidecar do hook PreToolUse, se o transcript não a
 /// respondeu depois dele. O primeiro diretório que tem sidecar válido decide.
 pub fn open_question(stem: Option<&str>, dirs: &[PathBuf]) -> Option<OpenQuestion> {
@@ -301,24 +399,27 @@ pub fn open_question(stem: Option<&str>, dirs: &[PathBuf]) -> Option<OpenQuestio
         let (raw, mtime) = match read {
             Ok(v) => v,
             Err(e) if e.kind() == ErrorKind::NotFound => continue,
-            Err(e) => {
+            Err(_) => {
                 // Calar faria toda sessão da conta dizer "sem pergunta" para sempre.
-                tracing::warn!(session = stem, kind = ?e.kind(), "askq: sidecar ilegível");
+                warn_file(stem, "list_askq_sidecar_unreadable", "file");
                 continue;
             }
         };
         let Ok(data) = serde_json::from_slice::<Value>(&raw) else {
-            tracing::debug!(session = stem, "askq: sidecar não é JSON");
+            warn_file(stem, "list_askq_sidecar_invalid", "json");
             continue;
         };
-        let Some(tp) = data.get("transcript_path").and_then(Value::as_str) else { continue };
+        let Some(tp) = data.get("transcript_path").and_then(Value::as_str) else {
+            warn_file(stem, "list_askq_sidecar_invalid", "transcript_path");
+            continue;
+        };
         let since = mtime.duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
-        if answered_after(stem, tp, since) {
+        if answered_cached(stem, tp, since) {
             continue;
         }
         match first_question(&data) {
             Ok(q) => return Some(q),
-            Err(field) => tracing::warn!(session = stem, field, "askq: sidecar malformado"),
+            Err(field) => warn_file(stem, "list_askq_sidecar_invalid", field),
         }
     }
     None
@@ -338,15 +439,22 @@ pub fn published_status(stem: Option<&str>, dirs: &[PathBuf], now: f64) -> Optio
     let text = |o: &Value, k| o.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
     for base in dirs {
         let f = base.join(STATUS_DIR).join(format!("{stem}.json"));
-        // Ausente é o caso normal: sessão sem a statusline do Hangar.
-        let Ok(raw) = std::fs::read(&f) else { continue };
+        let raw = match std::fs::read(&f) {
+            Ok(raw) => raw,
+            // Ausente é o caso normal: sessão sem a statusline do Hangar.
+            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+            Err(_) => {
+                warn_file(stem, "list_status_sidecar_unreadable", "file");
+                continue;
+            }
+        };
+        // Quem publica grava por tmp+rename: JSON torto é bug de escrita, não sessão sem sidecar.
         let Ok(o) = serde_json::from_slice::<Value>(&raw) else {
-            // Quem publica grava por tmp+rename: JSON torto é bug de escrita, não sessão sem sidecar.
-            tracing::debug!(session = stem, "statusline: sidecar ilegível");
+            warn_file(stem, "list_status_sidecar_invalid", "json");
             continue;
         };
         if !o.is_object() {
-            tracing::debug!(session = stem, "statusline: sidecar não é objeto");
+            warn_file(stem, "list_status_sidecar_invalid", "object");
             continue;
         }
         let Some(line) = o.get("line").and_then(Value::as_str).filter(|l| !l.trim().is_empty()) else { continue };
@@ -361,6 +469,7 @@ pub fn published_status(stem: Option<&str>, dirs: &[PathBuf], now: f64) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     fn write(path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -382,6 +491,31 @@ mod tests {
         assert_eq!(hs.get_state(Some("s2"), |_| true), None, "status desconhecido não vale");
         assert_eq!(hs.get_state(Some("s3"), |_| true), None, "nome fora de <pid>.json não é registro");
         assert_eq!(hs.get_state(None, |_| true), None);
+    }
+
+    #[test]
+    fn refresh_rereads_only_changed_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join(".claude");
+        for i in 0..5 {
+            write(&cfg.join(format!(".hangar-state/s{i}.json")), r#"{"state": "working", "ts": 1}"#);
+        }
+        write(&cfg.join("sessions/7.json"), r#"{"sessionId": "s0", "pid": 7, "status": "busy", "updatedAt": 2000}"#);
+        let dirs = [cfg.clone()];
+        let mut hs = HookStates::load(&dirs);
+        assert_eq!(hs.reads, 6);
+        hs.refresh(&dirs);
+        assert_eq!(hs.reads, 6, "nada mudou, nada relido");
+        let f = cfg.join(".hangar-state/s1.json");
+        write(&f, r#"{"state": "idle", "ts": 22}"#);
+        std::fs::File::options().write(true).open(&f).unwrap()
+            .set_modified(SystemTime::now() + std::time::Duration::from_secs(5)).unwrap();
+        std::fs::remove_file(cfg.join(".hangar-state/s2.json")).unwrap();
+        hs.refresh(&dirs);
+        assert_eq!(hs.reads, 7);
+        assert_eq!(hs.get_state(Some("s1"), |_| false), Some(Marker { state: "idle".into(), ts: 22.0 }));
+        assert_eq!(hs.get_state(Some("s2"), |_| false), None, "arquivo sumido sai do mapa");
+        assert_eq!(hs.get_state(Some("s0"), |p| p == 7), Some(Marker { state: "working".into(), ts: 2.0 }));
     }
 
     #[test]
@@ -417,8 +551,16 @@ mod tests {
         assert_eq!(open_question(Some("s"), &dirs), None);
         write(&cfg.join(".hangar-askq/s.json"), &sidecar.replace(r#""header": "h", "#, ""));
         assert_eq!(open_question(Some("s"), &dirs), None);
-        // Transcript sumido: não há como provar que segue aberta.
         write(&cfg.join(".hangar-askq/s.json"), &sidecar);
+        assert!(open_question(Some("s"), &dirs).is_some());
+        // Mesma versão do transcript e do sidecar: o rabo não é relido.
+        let reads = ANSWER_READS.with(|n| n.get());
+        assert!(open_question(Some("s"), &dirs).is_some());
+        assert_eq!(ANSWER_READS.with(|n| n.get()), reads, "nada mudou, o rabo do transcript não é relido");
+        std::fs::OpenOptions::new().append(true).open(&jsonl).unwrap().write_all(b"{}\n").unwrap();
+        assert!(open_question(Some("s"), &dirs).is_some());
+        assert_eq!(ANSWER_READS.with(|n| n.get()), reads + 1, "transcript cresceu, relido");
+        // Transcript sumido: não há como provar que segue aberta.
         std::fs::remove_file(&jsonl).unwrap();
         assert_eq!(open_question(Some("s"), &dirs), None);
     }

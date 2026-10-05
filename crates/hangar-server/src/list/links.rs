@@ -95,21 +95,36 @@ fn external_unreadable(field: &str) {
     }
 }
 
+type ExternalRecords = Result<Vec<Map<String, Value>>, &'static str>;
+static EXTERNAL_PAIRS: TailCache<ExternalRecords> = LazyLock::new(Default::default);
+
+/// Registros de `external_pairs.json`, lidos uma vez por versão do arquivo; `Err` = o campo que
+/// fez o Python recusar o arquivo inteiro.
+fn external_records(path: &Path) -> Option<ExternalRecords> {
+    cached(&EXTERNAL_PAIRS, path, || {
+        let raw = match std::fs::read(path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(_) => return Some(Err("file")),
+        };
+        let Ok(Value::Array(records)) = serde_json::from_slice::<Value>(&raw) else { return Some(Err("json")) };
+        Some(records.into_iter()
+            .map(|r| match r {
+                Value::Object(r) if EXTERNAL_FIELDS.iter().all(|f| r.contains_key(*f)) => Ok(r),
+                _ => Err("record"),
+            })
+            .collect())
+    })
+}
+
 /// `_pair_external`: o par de fora entre os peers da sessão. Arquivo torto vale como vazio, como
 /// no Python; quem o põe de lado é o Python, aqui só se avisa.
 fn pair_external(name: &str, peers: &[String], dirs: &Dirs) -> Option<Map<String, Value>> {
-    let path = dirs.claude.join(".hangar-pair").join("external_pairs.json");
-    let raw = match std::fs::read(&path) {
-        Ok(raw) => raw,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(_) => { external_unreadable("file"); return None }
+    let records = match external_records(&dirs.claude.join(".hangar-pair").join("external_pairs.json"))? {
+        Ok(records) => records,
+        Err(field) => { external_unreadable(field); return None }
     };
-    let Ok(Value::Array(records)) = serde_json::from_slice::<Value>(&raw) else { external_unreadable("json"); return None };
-    let records: Option<Vec<&Map<String, Value>>> = records.iter()
-        .map(|r| r.as_object().filter(|r| EXTERNAL_FIELDS.iter().all(|f| r.contains_key(*f))))
-        .collect();
-    let Some(records) = records else { external_unreadable("record"); return None };
-    records.into_iter().find_map(|r| {
+    records.iter().find_map(|r| {
         let field = |k: &str| r.get(k).and_then(Value::as_str);
         if field("local_session")? != name {
             return None;
@@ -291,8 +306,12 @@ pub fn locate(provider: &str, cwd: Option<&str>, jsonl: Option<&str>, dirs: &Dir
     }
 }
 
+static REMOVED: TailCache<HashMap<String, String>> = LazyLock::new(Default::default);
+
+/// `worktrees-removidas.json`, relido só quando o arquivo muda; ausente é mapa vazio.
 fn removed(dirs: &Dirs) -> HashMap<String, String> {
-    removed_at(&dirs.home.join(".hangar").join("worktrees-removidas.json"))
+    let file = dirs.home.join(".hangar").join("worktrees-removidas.json");
+    cached(&REMOVED, &file, || Some(removed_at(&file))).unwrap_or_default()
 }
 
 /// Uma leitura por versão do arquivo: a lista roda a cada segundo e o transcript pode ter megas.
@@ -372,51 +391,164 @@ fn tool_paths(block: &Map<String, Value>) -> Vec<(String, bool)> {
 }
 
 type ClaudeTail = (Option<String>, Vec<(String, bool, Option<String>)>);
-static CLAUDE_TAILS: TailCache<ClaudeTail> = LazyLock::new(Default::default);
+type Hit = (String, bool, Option<String>);
+
+/// Chamadas que bastam para decidir a pasta: a leitura para na linha que alcança esse número.
+const HITS_ENOUGH: usize = 20;
+/// Teto de frequência: a sessão ativa escreve no transcript a cada poucos segundos.
+const TAIL_RECHECK: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Uma leitura do transcript: os achados por linha (da mais recente para a mais antiga) e até
+/// onde o arquivo foi lido, para a próxima ler só o que cresceu.
+#[derive(Clone)]
+struct TailScan {
+    checked: std::time::Instant,
+    key: (i128, u64),
+    /// Fim lido quando o arquivo terminava em `\n`; sem isso, a próxima relê do fim para trás.
+    consumed: Option<u64>,
+    last: Option<String>,
+    lines: Vec<Vec<Hit>>,
+}
+
+impl TailScan {
+    fn value(&self) -> ClaudeTail { (self.last.clone(), self.lines.iter().flatten().cloned().collect()) }
+}
+
+static CLAUDE_TAILS: LazyLock<Mutex<HashMap<PathBuf, TailScan>>> = LazyLock::new(Default::default);
+
+/// Uma linha do transcript na leitura de trás para a frente: guarda o último `cwd` e as pastas das
+/// chamadas; `Break` quando já há chamadas bastantes.
+fn scan_line(raw: &[u8], last: &mut Option<String>, lines: &mut Vec<Vec<Hit>>, count: &mut usize) -> ControlFlow<()> {
+    let has_tool = contains(raw, b"\"tool_use\"");
+    // Achado o último `cwd`, só interessa linha com chamada: o resto pode ser imagem de megas.
+    if !has_tool && (last.is_some() || !contains(raw, b"\"cwd\"")) {
+        return ControlFlow::Continue(());
+    }
+    let Ok(Value::Object(line)) = serde_json::from_slice::<Value>(raw) else { return ControlFlow::Continue(()) };
+    let cwd = line.get("cwd").and_then(Value::as_str).filter(|c| !c.is_empty()).map(str::to_owned);
+    if last.is_none() {
+        *last = cwd.clone();
+    }
+    if has_tool && let Some(Value::Array(content)) = line.get("message").and_then(|m| m.get("content")) {
+        let mut hits = Vec::new();
+        for block in content.iter().rev().filter_map(Value::as_object) {
+            if block.get("type").and_then(Value::as_str) == Some("tool_use") {
+                hits.extend(tool_paths(block).into_iter().map(|(p, cd)| (p, cd, cwd.clone())));
+            }
+        }
+        if !hits.is_empty() {
+            *count += hits.len();
+            lines.push(hits);
+        }
+    }
+    if *count >= HITS_ENOUGH { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+}
+
+/// Fim de arquivo terminado em `\n` (o Claude grava linha inteira): dali a próxima leitura segue.
+fn ends_line(fh: &mut std::fs::File, end: u64) -> std::io::Result<Option<u64>> {
+    if end == 0 {
+        return Ok(Some(0));
+    }
+    fh.seek(SeekFrom::Start(end - 1))?;
+    let mut b = [0u8; 1];
+    fh.read_exact(&mut b)?;
+    Ok((b[0] == b'\n').then_some(end))
+}
+
+/// Do zero: de trás para a frente até `DEEP_TAIL`.
+fn scan_full(jsonl: &Path, key: (i128, u64), now: std::time::Instant) -> std::io::Result<TailScan> {
+    let (mut last, mut lines, mut count) = (None, Vec::new(), 0);
+    reversed_lines(jsonl, |raw| scan_line(raw, &mut last, &mut lines, &mut count))?;
+    let mut fh = std::fs::File::open(jsonl)?;
+    let consumed = ends_line(&mut fh, key.1)?;
+    Ok(TailScan { checked: now, key, consumed, last, lines })
+}
+
+/// Só o que cresceu desde `from`; os achados antigos completam os novos, na mesma regra de parada.
+// ponytail: um achado antigo pode estar além dos 8 MB do fim novo, onde a leitura do zero não
+// chegaria; continua sendo um sinal da mesma conversa.
+fn scan_growth(jsonl: &Path, old: &TailScan, from: u64, key: (i128, u64), now: std::time::Instant) -> std::io::Result<TailScan> {
+    let mut fh = std::fs::File::open(jsonl)?;
+    fh.seek(SeekFrom::Start(from))?;
+    let mut buf = Vec::new();
+    (&mut fh).take(key.1 - from).read_to_end(&mut buf)?;
+    let (mut last, mut lines, mut count) = (None, Vec::new(), 0);
+    for raw in buf.rsplit(|b| *b == b'\n') {
+        if scan_line(raw, &mut last, &mut lines, &mut count).is_break() {
+            break;
+        }
+    }
+    for group in &old.lines {
+        if count >= HITS_ENOUGH {
+            break;
+        }
+        count += group.len();
+        lines.push(group.clone());
+    }
+    let consumed = ends_line(&mut fh, key.1)?;
+    Ok(TailScan { checked: now, key, consumed, last: last.or_else(|| old.last.clone()), lines })
+}
 
 /// (último `cwd`, caminhos citados pelas ferramentas com o `cwd` da linha), do mais recente para o
-/// mais antigo, numa leitura só.
-fn claude_tail(jsonl: &Path) -> Option<ClaudeTail> {
-    cached(&CLAUDE_TAILS, jsonl, || {
-        let mut last: Option<String> = None;
-        let mut hits = Vec::new();
-        let read = reversed_lines(jsonl, |raw| {
-            let has_tool = contains(raw, b"\"tool_use\"");
-            // Achado o último `cwd`, só interessa linha com chamada: o resto pode ser imagem de megas.
-            if !has_tool && (last.is_some() || !contains(raw, b"\"cwd\"")) {
-                return ControlFlow::Continue(());
-            }
-            let Ok(Value::Object(line)) = serde_json::from_slice::<Value>(raw) else { return ControlFlow::Continue(()) };
-            let cwd = line.get("cwd").and_then(Value::as_str).filter(|c| !c.is_empty()).map(str::to_owned);
-            if last.is_none() {
-                last = cwd.clone();
-            }
-            if has_tool && let Some(Value::Array(content)) = line.get("message").and_then(|m| m.get("content")) {
-                for block in content.iter().rev().filter_map(Value::as_object) {
-                    if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                        hits.extend(tool_paths(block).into_iter().map(|(p, cd)| (p, cd, cwd.clone())));
-                    }
-                }
-            }
-            if hits.len() >= 20 { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
-        });
-        if let Err(error) = read {
+/// mais antigo.
+fn claude_tail(jsonl: &Path) -> Option<ClaudeTail> { claude_tail_at(jsonl, std::time::Instant::now()) }
+
+fn claude_tail_at(jsonl: &Path, now: std::time::Instant) -> Option<ClaudeTail> {
+    let old = CLAUDE_TAILS.lock().unwrap_or_else(|e| e.into_inner()).get(jsonl).cloned();
+    if let Some(old) = &old
+        && now.saturating_duration_since(old.checked) < TAIL_RECHECK
+    {
+        return Some(old.value());
+    }
+    let key = file_key(jsonl)?;
+    let scan = match &old {
+        Some(old) if old.key == key => Ok(TailScan { checked: now, ..old.clone() }),
+        Some(old) if old.consumed.is_some_and(|c| c <= key.1 && key.1 - c <= DEEP_TAIL) =>
+            scan_growth(jsonl, old, old.consumed.unwrap_or_default(), key, now),
+        _ => scan_full(jsonl, key, now),
+    };
+    let scan = match scan {
+        Ok(scan) => scan,
+        Err(error) => {
             // Transcript ilegível nunca derruba a lista: a sessão fica no cwd, como no `locate`.
             tracing::debug!(io_kind = ?error.kind(), "list: transcript sem leitura para a worktree");
             return None;
         }
-        Some((last, hits))
-    })
+    };
+    let value = scan.value();
+    CLAUDE_TAILS.lock().unwrap_or_else(|e| e.into_inner()).insert(jsonl.to_path_buf(), scan);
+    Some(value)
 }
 
 fn contains(hay: &[u8], needle: &[u8]) -> bool { hay.windows(needle.len()).any(|w| w == needle) }
+
+/// Criar ou remover worktree muda o mtime de `.git/worktrees`; o `git worktree move` só reescreve o
+/// `gitdir` lá dentro, e o teto cobre esse caso.
+const WORKTREES_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+
+type WorktreeList = (Option<std::time::SystemTime>, std::time::Instant, Vec<String>);
+static WORKTREES: LazyLock<Mutex<HashMap<String, WorktreeList>>> = LazyLock::new(Default::default);
+
+/// `worktree_paths` do repositório principal, relido só quando a pasta de administração muda.
+fn worktrees_of(main: &str) -> Vec<String> {
+    let stamp = std::fs::metadata(Path::new(main).join(".git").join("worktrees")).and_then(|m| m.modified()).ok();
+    if let Some((s, at, paths)) = WORKTREES.lock().unwrap_or_else(|e| e.into_inner()).get(main)
+        && *s == stamp
+        && at.elapsed() < WORKTREES_MAX_AGE
+    {
+        return paths.clone();
+    }
+    let paths = worktree_paths(main);
+    WORKTREES.lock().unwrap_or_else(|e| e.into_inner()).insert(main.to_owned(), (stamp, std::time::Instant::now(), paths.clone()));
+    paths
+}
 
 /// (principal, worktrees removidas, todas as pastas) do repositório que contém `path`.
 fn repo_candidates(path: &str, dirs: &Dirs) -> Option<(String, Vec<String>, Vec<String>)> {
     let main = main_repo_of(&repo_root_of(path)?);
     let gone: Vec<String> = removed(dirs).into_iter().filter(|(_, v)| *v == main).map(|(k, _)| k).collect();
     let mut all = vec![main.clone()];
-    all.extend(worktree_paths(&main));
+    all.extend(worktrees_of(&main));
     all.extend(gone.iter().cloned());
     Some((main, gone, all))
 }
@@ -588,6 +720,55 @@ mod tests {
         let mut n = 0;
         reversed_lines(&path, |_| { n += 1; if n == 3 { ControlFlow::Break(()) } else { ControlFlow::Continue(()) } }).unwrap();
         assert_eq!(n, 3);
+    }
+
+    fn set_mtime(path: &Path, at: std::time::SystemTime) {
+        std::fs::File::open(path).unwrap().set_modified(at).unwrap();
+    }
+
+    #[test]
+    fn claude_tail_waits_then_reads_only_growth() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let line = |cwd: &str, to: &str| format!(
+            r#"{{"cwd":"{cwd}","message":{{"content":[{{"type":"tool_use","name":"Bash","input":{{"command":"cd {to}"}}}}]}}}}"#) + "\n";
+        let first = line("/a", "/x1");
+        std::fs::write(&path, &first).unwrap();
+        let t0 = std::time::Instant::now();
+        let paths = |v: ClaudeTail| (v.0, v.1.into_iter().map(|h| h.0).collect::<Vec<_>>());
+        assert_eq!(paths(claude_tail_at(&path, t0).unwrap()), (Some("/a".into()), vec!["/x1".into()]));
+        // O começo muda sem mudar de tamanho (prova de que não é relido) e uma linha nova chega.
+        std::fs::write(&path, first.replace("/x1", "/y1") + &line("/b", "/x2")).unwrap();
+        let soon = t0 + std::time::Duration::from_secs(1);
+        assert_eq!(paths(claude_tail_at(&path, soon).unwrap()), (Some("/a".into()), vec!["/x1".into()]), "dentro do teto reusa");
+        let later = t0 + TAIL_RECHECK + std::time::Duration::from_secs(1);
+        assert_eq!(paths(claude_tail_at(&path, later).unwrap()), (Some("/b".into()), vec!["/x2".into(), "/x1".into()]),
+            "só o que cresceu é lido");
+        // Encolheu: lido do zero.
+        std::fs::write(&path, line("/c", "/x3")).unwrap();
+        let again = later + TAIL_RECHECK + std::time::Duration::from_secs(1);
+        assert_eq!(paths(claude_tail_at(&path, again).unwrap()), (Some("/c".into()), vec!["/x3".into()]));
+    }
+
+    #[test]
+    fn worktree_list_follows_admin_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("r");
+        let admin = main.join(".git/worktrees");
+        let add = |name: &str| {
+            std::fs::create_dir_all(admin.join(name)).unwrap();
+            std::fs::write(admin.join(name).join("gitdir"), format!("{}/{name}/.git\n", dir.path().display())).unwrap();
+        };
+        add("a");
+        let main_s = main.to_str().unwrap();
+        let wt = |n: &str| dir.path().join(n).to_string_lossy().into_owned();
+        assert_eq!(worktrees_of(main_s), [wt("a")]);
+        // `gitdir` reescrito sem a pasta de administração mudar: a lista guardada vale.
+        std::fs::write(admin.join("a/gitdir"), format!("{}/z/.git\n", dir.path().display())).unwrap();
+        assert_eq!(worktrees_of(main_s), [wt("a")], "pasta de administração igual, nada relido");
+        add("b");
+        set_mtime(&admin, std::time::SystemTime::now() + std::time::Duration::from_secs(5));
+        assert_eq!(worktrees_of(main_s), [wt("z"), wt("b")]);
     }
 
     #[test]

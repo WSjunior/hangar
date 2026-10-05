@@ -45,3 +45,7 @@ sysinfo = { version = "=0.39.6", default-features = false, features = ["system"]
 
 [dev-dependencies]
 tempfile.workspace = true
+
+# O leitor `sysinfo` (`list/procs.rs`) também é testado no Linux.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
