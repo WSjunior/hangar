@@ -18,10 +18,21 @@ fn sync_simple(ix: &Index, base: &Path) {
         simple::KIMI_VERSION, "", &|_| vec![], &progress()).unwrap();
 }
 
+/// Id de sessão do Pi é caminho relativo: `str(Path)` no Python, `MAIN_SEPARATOR` no Rust; o golden
+/// foi gravado com `/`.
+fn native_separators(value: &Value) -> Value {
+    match value {
+        Value::String(text) if text.starts_with("--repo--/") => Value::String(text.replace('/', std::path::MAIN_SEPARATOR_STR)),
+        Value::Array(values) => Value::Array(values.iter().map(native_separators).collect()),
+        Value::Object(values) => Value::Object(values.iter().map(|(k, v)| (k.clone(), native_separators(v))).collect()),
+        other => other.clone(),
+    }
+}
+
 fn assert_golden(ix: &Index, base: &Path, golden: &Value) {
     for prefix in ["pi/", "kimi/"] {
         let want = golden.as_object().unwrap().iter().filter(|(key, _)| key.starts_with(prefix))
-            .map(|(key, value)| (key.clone(), value.clone())).collect::<Map<_, _>>();
+            .map(|(key, value)| (key.clone(), native_separators(value))).collect::<Map<_, _>>();
         assert_close(&dump(ix, base, prefix), &Value::Object(want), prefix);
     }
 }

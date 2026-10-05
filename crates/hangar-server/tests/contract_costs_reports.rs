@@ -41,6 +41,10 @@ pub fn rebase(value: &Value, marker: &str, base: &Path) -> Value {
             if text == &format!("codex:{marker}/codex") {
                 return Value::String(format!("codex:{}", base.join("codex").display()));
             }
+            // Id de sessão do Pi é caminho relativo: `str(Path)` no Python, `MAIN_SEPARATOR` no Rust.
+            if text.starts_with("--repo--/") {
+                return Value::String(text.replace('/', std::path::MAIN_SEPARATOR_STR));
+            }
             if let Ok(decoded @ (Value::Array(_) | Value::Object(_))) = serde_json::from_str::<Value>(text) {
                 let normalized = rebase(&decoded, marker, base);
                 if normalized != decoded {
@@ -105,6 +109,10 @@ fn rebase_preserves_nested_json_identity_and_windows_backslashes() {
     assert_eq!(nested, json!(["codex", expected, "s", false]));
     assert_eq!(got["ids"][0], pyjson::dumps(&nested, false));
     assert_eq!(got["untouched"], "__BASE__/literal");
+    let pi = rebase(&json!(["--repo--/2026-09-30_s/t1", r#"["pi", "x", "--repo--/2026-09-30_s", false]"#]), "__BASE__", base);
+    let sep = std::path::MAIN_SEPARATOR;
+    assert_eq!(pi[0], format!("--repo--{sep}2026-09-30_s{sep}t1"));
+    assert_eq!(serde_json::from_str::<Value>(pi[1].as_str().unwrap()).unwrap()[2], format!("--repo--{sep}2026-09-30_s"));
 }
 
 fn cache_key(version: u64, route: &str) -> CacheKey {
