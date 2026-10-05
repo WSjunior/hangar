@@ -2338,6 +2338,9 @@ class SessionRegistry:
         diag.registrar("sessao.criar_etapa", sessao=name, provider="claude", etapa="confiar_pasta")
         _pretrust_cwd(cwd, config_dir)
         self._forget(name)
+        # Antes do sidecar: depois dele o runtime pode adotar a sessão nova no meio da limpeza.
+        _retire_waiting_runtime(name)
+        PromptQueue(name).clear()
         # Nascer JÁ no plano deixaria a sessão sem modo de base: é ele que diz pra onde
         # "Implementar o plano" volta e se o plano precisa perguntar por ferramenta.
         anterior = modo_permissao.modo_da_conta(config_dir) if permission_mode == "plan" else None
@@ -2348,7 +2351,6 @@ class SessionRegistry:
                                       engine_account=engine_account,
                                       engine_credential_id=engine_credential_id,
                                       engine_account_base_url=engine_account_base_url)
-        PromptQueue(name).clear()
         ThenLink(name).clear()
         # Nome reusado não herda o par externo da sessão antiga.
         _encerrar_pares_externos(name)
@@ -2391,13 +2393,15 @@ class SessionRegistry:
             from app.conversation_transfer import load_transfer
             target = load_transfer(transfer_id).destination_meta
         rollout = transfer_rollout_path or target.get("rollout_path") or (sem_terminal.rollout_de(resume_thread_id, codex_home) if resume_thread_id else "")
+        # Antes do sidecar: depois dele o runtime pode adotar a sessão nova no meio da limpeza.
+        _retire_waiting_runtime(name)
+        PromptQueue(name).clear()
         codex_sessions.save(name, resume_thread_id, rollout, cwd, model=model, effort=effort,
                             codex_home=codex_home, codex_account=codex_account,
                             headless=True, key=sem_terminal.nova_chave(), permission_mode=permission_mode,
                             jev=jev, transfer_id=transfer_id,
                             tool_output_token_limit=tool_output_token_limit,
                             previous_non_plan=target.get("previous_non_plan"))
-        PromptQueue(name).clear()
         ThenLink(name).clear()
         # Nome reusado não herda o par externo da sessão antiga.
         _encerrar_pares_externos(name)

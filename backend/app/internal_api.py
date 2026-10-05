@@ -202,6 +202,9 @@ async def session_info(name: str) -> dict:
         import uuid
         try:
             await coordinator.op(name, {"kind":"ensure_projection"}, uuid.uuid4().hex)
+        except runtime_coordinator.TransferInProgress:
+            # Na passagem ninguém grava: a projeção em disco é a última dos dois donos.
+            pass
         except Exception as exc:
             from app.runtime_coordinator import failure_reason
             diag.registrar("runtime.history_failed", "erro", sessao=name, **failure_reason(exc))
