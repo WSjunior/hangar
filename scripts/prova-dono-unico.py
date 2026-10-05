@@ -41,10 +41,10 @@ CONTA = Path.home() / ".claude-02-200"
 MODELO = "claude-haiku-4-5"
 PORTAS_REAIS = {8765, 8766, 8768}
 ENTREGA_S = 150
-# Diário que só existe quando a sessão troca de dono no meio da vida.
-PASSAGEM = {"runtime.parte_para_python", "runtime.unclaim_failed", "runtime.unclaim_skipped",
-            "runtime.write_uncertain", "runtime.state_owner_stuck", "runtime.adopt_refused",
-            "runtime.adoption_failed", "runtime.detach_unconfirmed", "runtime.recover_failed"}
+# Diário de sessão que troca de dono ou cuja abertura/fechamento no Rust falhou. Fica de fora
+# `runtime.reopen_interrupted`: é a queda do Rust no meio da reabertura, e o resumo já a mostra.
+PASSAGEM = {"runtime.unclaim_failed", "runtime.unclaim_skipped", "runtime.write_uncertain",
+            "runtime.recover_failed", "runtime.reopen_failed", "runtime.close_unconfirmed"}
 LONGO = "Escreva os números de 1 a 400 por extenso, um por linha, sem mais nada."
 
 
