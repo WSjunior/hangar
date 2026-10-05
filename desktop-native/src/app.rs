@@ -555,6 +555,9 @@ pub struct Hangar {
     dossier: Option<Entity<baton::Dossier>>,
     /// Quando vimos o turno começar ao vivo; a sessão aberta já trabalhando conta do último envio.
     turn_seen: Option<Instant>,
+    /// Turno visto terminar nesta conversa: a linha de trabalhando fica no lugar com a duração e a hora, como o
+    /// "Worked for 16s" do Claude Code, em vez de sair e puxar o chat inteiro para baixo.
+    turn_done: Option<(Option<Duration>, chrono::DateTime<chrono::Local>)>,
     /// Envio entregue que o turno ainda não pegou: "Enviando…" segue até o estado virar trabalhando ou o prazo passar.
     sent_until: Option<(SessionKey, Instant)>,
     new_chat: Option<Entity<create::NewSession>>,
@@ -750,7 +753,8 @@ impl Hangar {
                 Err(e) => eprintln!("[nav] servidor do hangar-preview nao subiu: {e}"),
             }
         }
-        let list_state = ListState::new(0, ListAlignment::Bottom, px(300.));
+        // O fim que encolhe vira folga embaixo: o histórico à vista não sobe e desce a cada linha que entra e sai no fim.
+        let list_state = ListState::new(0, ListAlignment::Bottom, px(300.)).hold_tail();
         Self::watch_user_scroll(&list_state, cx);
         let sidebar = sidebar::Sidebar::new(window, cx);
         let panes = panes::Panes::new(cx);
@@ -798,7 +802,7 @@ impl Hangar {
             system_notifications: SystemNotifications::default(),
             window_tray: window_tray::WindowTray::new(tray_tx),
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), keyboard: keyboard::Keyboard::new(window, cx), session_picker: Default::default(),
-            tree: tree::Tree::new(window, cx), find: find::Find::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
+            tree: tree::Tree::new(window, cx), find: find::Find::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, turn_done: None, sent_until: None,
             new_chat: None, new_chat_focus: cx.focus_handle().tab_stop(true),
             new_chat_folders: Default::default(), landing: None, opening: None, side_seen: None, side_slide: None, arrived: HashMap::new(), tree_parts: HashSet::new(), part_arrived: HashMap::new(), tree_folds: HashMap::new(), tree_motion: false, active_token: String::new(), ready_sessions: None,
             servers: known_servers, remote: HashMap::new(), remote_tasks: Vec::new(), remote_gen: 0, servers_rev: 0, invite_ended: HashSet::new(), pending_open: None, pending_remote: None,
@@ -1071,7 +1075,7 @@ impl Hangar {
         (self.recents, self.reopen) = (Default::default(), None);
         self.sessions.clear();
         self.chat = Chat::default();
-        self.turn_seen = None;
+        (self.turn_seen, self.turn_done) = (None, None);
         self.stats = None;
         self.reset_details();
         self.cancel_preview_drop();
@@ -1158,7 +1162,7 @@ impl Hangar {
         if let Some(t) = self.history_task.take() { t.abort(); }
         self.chat = Chat::default();
         self.system_notifications.reset_stream();
-        self.turn_seen = None;
+        (self.turn_seen, self.turn_done) = (None, None);
         self.stats = None;
         self.reset_details();
         self.cancel_preview_drop();
@@ -1246,7 +1250,7 @@ impl Hangar {
         if remote { self.load_notification_preferences(); }
         self.opening = None;
         self.chat = Chat::default();
-        self.turn_seen = None;
+        (self.turn_seen, self.turn_done) = (None, None);
         self.reset_details();
         self.cancel_preview_drop();
         self.clear_visible_preview();
@@ -1752,7 +1756,7 @@ impl Hangar {
                     (self.selected, self.open_api) = (None, None);
                     if remote { self.load_notification_preferences(); }
                     self.chat = Chat::default();
-                    self.turn_seen = None;
+                    (self.turn_seen, self.turn_done) = (None, None);
                     self.reset_details();
                     self.cancel_preview_drop();
                     self.clear_visible_preview();
@@ -1869,6 +1873,9 @@ impl Hangar {
                 let resumed = self.chat.state.state == "awaiting_input" && state.state == "working";
                 let turned = (self.chat.state.state == "working") != (state.state == "working");
                 // Estado vazio é a conversa recém-aberta: o turno já corria, e quem conta é o último envio.
+                // A duração sai do começo antes de ele ser zerado: é ela que a linha final mostra.
+                if finished { self.turn_done = Some((self.turn_start().map(|start| start.elapsed()), chrono::Local::now())); }
+                if state.state == "working" { self.turn_done = None; }
                 if turned { self.turn_seen = (state.state == "working" && !self.chat.state.state.is_empty()).then(Instant::now); }
                 if state.state == "working" { self.sent_until = None; }
                 self.chat.update_state(state);
@@ -1911,7 +1918,7 @@ impl Hangar {
                 self.plugin_panes.clear();
                 if let Some(task) = self.history_task.take() { task.abort(); }
                 self.chat = Chat::default();
-                self.turn_seen = None;
+                (self.turn_seen, self.turn_done) = (None, None);
                 self.stats = None;
                 self.controls.clear_plan_preview();
                 self.reset_details();
@@ -3007,7 +3014,7 @@ impl Hangar {
 
     /// A linha de trabalhando fica sob a última linha durante todo o turno, com pensamento, ferramenta ou texto chegando,
     /// e já no envio.
-    fn working_row_shown(&self) -> bool { self.chat.state.state == "working" || self.sending_shown() }
+    fn working_row_shown(&self) -> bool { self.chat.state.state == "working" || self.sending_shown() || self.turn_done.is_some() }
 
     /// Envio pendente, ou entregue há pouco e ainda sem o turno: sem esta ponte a linha sairia e voltaria no meio.
     fn sending_shown(&self) -> bool {
@@ -3060,6 +3067,19 @@ impl Hangar {
     /// animam fora da conversa guardada (`working_mark_float`); aqui ficam só os lugares deles.
     fn render_working(&self, cx: &mut Context<Self>) -> AnyElement {
         let sending = self.sending_shown();
+        // Turno acabado: a mesma linha, parada, com quanto durou e quando terminou ("✻ Worked for 16s · done 13:15").
+        if let Some((took, at)) = self.turn_done.filter(|_| !sending && self.chat.state.state != "working") {
+            let clock = at.format("%H:%M").to_string();
+            // Conversa aberta no meio do turno não sabe quando ele começou: fica só a hora.
+            let text = match took {
+                Some(took) => tr("turn_done").replace("{time}", &chrome::format_elapsed(took)).replace("{clock}", &clock),
+                None => tr("turn_done_clock").replace("{clock}", &clock),
+            };
+            return div().h(px(38.)).flex().items_center().gap(px(8.))
+                .child(div().w(px(14.)).flex_none().flex().justify_center().text_size(px(13.)).text_color(theme::faint()).child("✻"))
+                .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme::faint()).child(text))
+                .into_any_element();
+        }
         let verb = if sending { tr("sending") } else { working_verb(self.chat.state.label.as_deref()) };
         let since = if sending { None } else { self.turn_start() };
         let tokens = if sending { None } else { working_tokens(self.chat.state.label.as_deref()).map(SharedString::from) };
@@ -4960,12 +4980,10 @@ impl Hangar {
                 .map(|l| (conversation::one_line(l.split(" (").next().unwrap_or(&l), 80), sidebar::Sub::Working)),
             None => None,
         };
-        // O tipo de linha que este estado mostra, na mesma ordem do `fresh`.
-        let kind = if state == "idle" && session.pending_questions == 0 { Some(sidebar::Sub::Reply) }
-            else if state == "awaiting_input" || session.pending_questions > 0 { Some(sidebar::Sub::Question) }
-            else if state == "working" { Some(sidebar::Sub::Working) } else { None };
-        let sub = self.sidebar.keep_sub(&target, session.jsonl.as_deref(), kind, fresh);
-        let sub_color = if matches!(sub, Some((_, sidebar::Sub::Question))) { theme::warning() } else { theme::muted() };
+        let sub = self.sidebar.keep_sub(&target, session.jsonl.as_deref(), fresh);
+        // Âmbar só com a pergunta aberta agora: a guardada de antes, já respondida, fica na cor de sempre.
+        let asking = state == "awaiting_input" || session.pending_questions > 0;
+        let sub_color = if asking && matches!(sub, Some((_, sidebar::Sub::Question))) { theme::warning() } else { theme::muted() };
         let when = session.last_reply_at.filter(|_| state == "idle").map(side::since);
         let account = account_chip(session.conta.as_deref());
         // Como o web: a pasta só com a lista por servidor (por projeto o cabeçalho já a diz), e sempre na worktree.

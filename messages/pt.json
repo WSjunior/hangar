@@ -4562,6 +4562,8 @@
   "native_tools_count": "{n} ferramentas",
   "native_tools_errors": "{n} com erro",
   "native_thinking_live": "Pensando",
+  "native_turn_done": "Trabalhou por {time} · {clock}",
+  "native_turn_done_clock": "Concluído às {clock}",
   "native_thinking_search": "1 busca",
   "native_thinking_searches": "{n} buscas",
   "native_clipped": "Mostrando {shown} de {total} caracteres. Copiar leva o texto completo.",
