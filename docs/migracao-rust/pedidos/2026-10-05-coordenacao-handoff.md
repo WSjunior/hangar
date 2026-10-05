@@ -69,9 +69,11 @@ Supervisor que sobe o Rust (sai na parte 7).
 14. Compilação na máquina: no máximo 2 `cargo` ao mesmo tempo, `CARGO_BUILD_JOBS=4`, cada uma no
     `target/` da própria worktree (target compartilhado entre checkouts roda binário velho), e
     apagar o `target/` ao terminar: cinco ao mesmo tempo levaram a carga a 134 e encheram o disco.
-15. Em andamento: sessão `envio-carga`, branch `fix/plugin-send-under-load` (envio pelo plugin que
-    sai "incerto" sob carga; CPU do `hangar-server`). Falta medir CPU antes/depois e o CI; entra
-    na `hangar-server-parte1` por merge.
+15. `fix/plugin-send-under-load` entrou em `ba416224a` (envio pelo plugin no modo user espera 30 s
+    pelos hooks do `UserPromptSubmit`; CPU do Rust em git/terminal). Ficou: o ~1 núcleo da produção
+    não foi reproduzido; 2 de 6 rodadas isoladas não entregaram nada (tudo `deferred` em 0,1 s, nas
+    duas versões, causa não achada); `_commit_change` segura `slot.guard` durante o fsync; valor
+    velho do git summary sem marca de idade.
 
 ## Regras e decisões que valem
 
