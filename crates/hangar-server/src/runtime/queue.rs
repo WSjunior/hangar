@@ -663,6 +663,8 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
                     continue;
                 }
                 if op.status == Status::Dispatching { op.status = Status::Unknown; }
+                // Confirmada pelo transcript, a tentativa chegou: não há o que marcar como incerto.
+                if op.status == Status::Confirmed { continue; }
                 for attempt in op.wire_attempts.values_mut() {
                     if attempt["status"] == "dispatching" { attempt["status"] = json!("unknown"); }
                 }
