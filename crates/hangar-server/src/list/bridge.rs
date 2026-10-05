@@ -23,6 +23,7 @@ use super::classify::{CaptureSource, Classifier, Effect, Facts, MuxCapture};
 use super::context::{self, ContextCache, ReadingInputs};
 use super::discover::{self, Resolver};
 use super::discover_other::{self, Dirs};
+use super::facts::{self as list_facts, FactsClient, ListFacts};
 use super::facts_files::{self, HookStates};
 use super::mux::{Mux, Pane};
 use super::plan::PlanTracker;
@@ -77,22 +78,19 @@ pub fn parse_dirs(raw: &str) -> Option<Dirs> {
         omp_config: p("omp_config")?, omp_agent: p("omp_agent")?, kimi_home: p("kimi_home")? })
 }
 
-/// Fatos que o Python fornece (Task 14) e o hub completa com o runtime (Task 17). Vazios, as linhas
-/// sem terminal ficam no marcador e nenhuma recebe `problema` do runtime.
+/// O que quem produz sabe e o Python não: o runtime das sessões sem terminal (o hub completa,
+/// Task 17; vazio, elas ficam no marcador) e quantas listas do dono estão abertas no Rust.
+#[derive(Default)]
 pub struct ProduceFacts {
     /// Retrato do runtime das sessões sem terminal, por nome (`RuntimeRegistry::snapshots`).
     pub headless: BTreeMap<String, Value>,
-    pub problems: BTreeMap<String, String>,
-    pub stall_seconds: f64,
+    pub owner_clients: u32,
 }
 
-impl Default for ProduceFacts {
-    fn default() -> Self { Self { headless: BTreeMap::new(), problems: BTreeMap::new(), stall_seconds: 300.0 } }
-}
-
-/// Lista decorada e o que a rodada pede ao dono do registro de hooks (rebaixar `awaiting`).
+/// Lista decorada e os fatos do Python da mesma rodada (navegador, terminais de atalho, escondidas
+/// do dono), que o hub entrega junto.
 #[derive(Clone)]
-pub struct Produced { pub rows: Arc<Vec<SessionRow>>, pub effects: Vec<Effect> }
+pub struct Produced { pub rows: Arc<Vec<SessionRow>>, pub facts: Arc<ListFacts> }
 
 struct Discovery { at: Instant, wall: f64, epoch: u64,
     /// Mapa de processos relido nesta descoberta, não o do cache de 3 s.
@@ -118,6 +116,7 @@ struct Caches {
 
 pub struct ListBridge {
     env: Arc<ListEnv>,
+    facts: FactsClient,
     caches: Arc<Mutex<Caches>>,
     /// À parte dos outros caches: a classificação segura a dela durante as capturas.
     classifier: Arc<Mutex<Classifier>>,
@@ -140,8 +139,8 @@ fn wall_now() -> f64 { SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> { m.lock().unwrap_or_else(|e| e.into_inner()) }
 
 impl ListBridge {
-    pub fn new(env: ListEnv) -> Self {
-        Self { env: Arc::new(env), caches: Arc::default(), classifier: Arc::default(), discovery: tokio::sync::Mutex::new(None),
+    pub fn new(env: ListEnv, facts: FactsClient) -> Self {
+        Self { env: Arc::new(env), facts, caches: Arc::default(), classifier: Arc::default(), discovery: tokio::sync::Mutex::new(None),
             snapshot: tokio::sync::Mutex::new(None), git_running: Arc::default(),
             git_slots: Arc::new(tokio::sync::Semaphore::new(GIT_SLOTS)), epoch: AtomicU64::new(0) }
     }
@@ -195,26 +194,25 @@ impl ListBridge {
         }
         let at = Instant::now();
         let produced = self.produce(facts).await?;
-        // Os efeitos vão só a quem produziu: o retrato reaproveitado não pede o rebaixamento de novo.
-        *slot = Some(Snapshot { at, epoch, produced: Produced { rows: produced.rows.clone(), effects: Vec::new() } });
+        *slot = Some(Snapshot { at, epoch, produced: produced.clone() });
         Ok(produced)
     }
 
-    /// A produção da lista: descoberta + classificação + contexto, resposta, plano, loop e Git.
-    /// É A função que o hub (Task 17) chama a cada tique; quem quer retrato pede `snapshot`, que
-    /// segura a produção em um por vez.
+    /// A produção da lista: descoberta + fatos do Python + classificação + contexto, resposta,
+    /// plano, loop e Git. É A função que o hub (Task 17) chama a cada tique; quem quer retrato pede
+    /// `snapshot`, que segura a produção em um por vez.
     ///
-    /// Linhas Codex, Pi, omp e Kimi, `orq` e de transferência saem como a descoberta as deixa: o
-    /// estado delas é fato do Python (Task 14). Até lá esta lista não pode ser servida a ninguém.
-    pub async fn produce(&self, facts: &ProduceFacts) -> Result<Produced, ListError> {
+    /// Linhas Codex, Pi, omp e Kimi levam o estado dos fatos; as de transferência em curso e as
+    /// `orq` saem como o Python as deu, sem classificação nem decoração, no fim da lista.
+    pub async fn produce(&self, input: &ProduceFacts) -> Result<Produced, ListError> {
         let dirs = self.dirs()?;
         let (rows, agent_pids, panes, children) = self.discovery(None).await?;
-        let mut rows = (*rows).clone();
+        let fetched = self.facts.fetch(&rows, input.owner_clients, &pi_pane_pids(&rows, &panes)).await;
+        let (mut rows, aside) = list_facts::apply((*rows).clone(), &fetched.facts, fetched.ok);
         let targets = pane_targets(&panes, &agent_pids, &children);
         let (env, caches, classifier) = (self.env.clone(), self.caches.clone(), self.classifier.clone());
-        let headless = facts.headless.clone();
-        let problems = facts.problems.clone();
-        let stall_seconds = facts.stall_seconds;
+        let headless = input.headless.clone();
+        let py = fetched.facts.clone();
         let handle = tokio::runtime::Handle::current();
         // Classificação e decoração leem arquivo (marcador, transcript, plano) e esperam captura:
         // fora da thread do runtime, que atende todas as conexões.
@@ -227,7 +225,7 @@ impl ListBridge {
             hooks.refresh(&config_dirs);
             let alive = |pid: i64| pid_alive(&*env.procs, pid);
             let facts = Facts { hooks: &hooks, alive: &alive, config_dirs: &config_dirs, headless: &headless,
-                problems: &problems, stall_seconds };
+                problems: &py.problems, stall_seconds: py.stall_seconds };
             let io = MuxCapture::new(env.capture_program.clone(), CAPTURE_TIMEOUT, targets);
             let effects = handle.block_on(lock(&classifier).classify(&mut rows, &facts, &io));
             let (wall, mono) = (io.wall(), io.mono());
@@ -254,7 +252,13 @@ impl ListBridge {
             (rows, effects, git_dirs)
         }).await.map_err(|e| joined(e, "produção interrompida"))?;
         self.refresh_git(git_dirs);
-        Ok(Produced { rows: Arc::new(rows), effects })
+        let demote: Vec<String> = effects.into_iter().map(|Effect::DemoteAwaiting { sid }| sid).collect();
+        if !demote.is_empty() {
+            self.facts.demote(demote);
+        }
+        let mut rows = rows;
+        rows.extend(aside);
+        Ok(Produced { rows: Arc::new(rows), facts: fetched.facts })
     }
 
     /// Git em segundo plano, um por pasta: um repositório lento não atrasa o card de ninguém. Não
@@ -379,6 +383,15 @@ fn run_discovery(panes: &[Pane], procs: &dyn ProcessView, children: &ChildrenMap
     -> (Vec<SessionRow>, HashMap<String, u32>) {
     let found = discover_other::discover_rows(panes, procs, children, resolver, dirs);
     (found.rows, found.agent_pids)
+}
+
+/// Pid do pane das linhas Pi e omp: o sidecar do catálogo, de onde sai a conta, mora no
+/// `CLAUDE_CONFIG_DIR` dele.
+fn pi_pane_pids(rows: &[SessionRow], panes: &[Pane]) -> BTreeMap<String, u32> {
+    rows.iter().filter(|r| r.provider == "pi" || r.provider == "omp").filter_map(|r| {
+        let pane = panes.iter().filter(|p| p.session == r.name).max_by_key(|p| p.active)?;
+        Some((r.name.clone(), pane.pid?))
+    }).collect()
 }
 
 /// Alvo da captura de cada sessão: o pane do agente; sem como saber, `=<sessão>:` (o ativo).

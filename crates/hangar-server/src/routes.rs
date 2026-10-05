@@ -78,6 +78,7 @@ impl AppState {
             infos: Default::default(),
         };
         let diag = crate::diag::DiagClient::new(cfg.upstream, cfg.internal_secret.clone());
+        let facts = crate::list::facts::FactsClient::new(cfg.upstream, cfg.internal_secret.clone());
         AppState { auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, diag,
             workspace_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             workspace_read_slots: Arc::new(tokio::sync::Semaphore::new(8)),
@@ -85,7 +86,7 @@ impl AppState {
             costs, fx, reports: Arc::new(crate::costs::ReportCache::default()),
             origins_home: std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default()),
             origins: std::sync::Mutex::new(indexmap::IndexMap::new()),
-            list: Arc::new(crate::list::bridge::ListBridge::new(crate::list::bridge::ListEnv::from_env())) }
+            list: Arc::new(crate::list::bridge::ListBridge::new(crate::list::bridge::ListEnv::from_env(), facts)) }
     }
 
     pub(crate) fn skill_origins(&self, repo: &std::path::Path) -> crate::costs::origins::Origins {

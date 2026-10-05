@@ -6,6 +6,7 @@ pub mod classify;
 pub mod context;
 pub mod discover;
 pub mod discover_other;
+pub mod facts;
 pub mod facts_files;
 pub mod links;
 pub mod mux;

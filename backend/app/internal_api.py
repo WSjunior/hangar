@@ -5,6 +5,7 @@ import secrets
 import json
 import copy
 import re
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
@@ -129,6 +130,8 @@ async def runtime_policy(request: Request):
     return await asyncio.shield(_policy_calls[key])
 
 
+_LIST_FACTS_MAX = 8 << 20
+_list_facts_invalid_at = 0.0
 _DIAG_EVENT = re.compile(r"rust\.[a-z_]{1,48}")
 _DIAG_CODE = re.compile(r"[a-z0-9_]{1,64}")
 
@@ -147,6 +150,53 @@ async def rust_diag(request: Request) -> dict:
     except (ValueError, RecursionError):
         raise HTTPException(400) from None
     diag.registrar(body["evento"], "erro", sessao=body["sessao"], codigo=body["codigo"], detalhe=body["motivo"])
+    return {"ok": True}
+
+
+@router.post("/list/facts")
+async def list_facts(request: Request) -> dict:
+    """Fatos da lista para o Rust (`list/facts.rs`): ele manda as linhas que descobriu, a contagem
+    de listas do dono abertas nele e o pid do pane das linhas Pi/omp."""
+    global _list_facts_invalid_at
+    import pydantic
+    from app import list_facts as service
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if len(raw) <= _LIST_FACTS_MAX else None
+        if (not isinstance(body, dict) or set(body) != {"rows", "owner_clients", "pane_pids"}
+                or not isinstance(body["rows"], list) or not all(isinstance(r, dict) for r in body["rows"])
+                or type(body["owner_clients"]) is not int or body["owner_clients"] < 0
+                or not isinstance(body["pane_pids"], dict)
+                or not all(isinstance(k, str) and type(v) is int for k, v in body["pane_pids"].items())):
+            raise ValueError("fatos inválidos")
+    except (ValueError, RecursionError):
+        raise HTTPException(400) from None
+    try:
+        return await service.compute(body["rows"], body["owner_clients"], body["pane_pids"])
+    except (pydantic.ValidationError, TypeError) as e:
+        # Só o campo: a mensagem do pydantic repete a linha, e ela carrega a última resposta.
+        loc = e.errors()[0]["loc"] if isinstance(e, pydantic.ValidationError) else ()
+        # A mesma entrada falha a cada tique do Rust: no diário uma vez por minuto.
+        if time.monotonic() - _list_facts_invalid_at > 60:
+            _list_facts_invalid_at = time.monotonic()
+            diag.registrar("lista.fatos_invalidos", "erro", campo=".".join(map(str, loc[-1:])))
+        raise HTTPException(400) from None
+
+
+@router.post("/list/demote")
+async def list_demote(request: Request) -> dict:
+    """`hooks.demote_awaiting`: o pane que a lista do Rust capturou contradisse o marcador."""
+    from app import runtime_policy
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if len(raw) <= 64 * 1024 else None
+        if (not isinstance(body, dict) or set(body) != {"sids"} or not isinstance(body["sids"], list)
+                or not all(isinstance(s, str) and 0 < len(s) <= 256 for s in body["sids"])):
+            raise ValueError("rebaixamento inválido")
+    except (ValueError, RecursionError):
+        raise HTTPException(400) from None
+    # No laço, como o rebaixamento de hoje: o mapa e o registro são mexidos sem trava pelo vigia.
+    runtime_policy.demote_awaiting(body["sids"])
     return {"ok": True}
 
 
