@@ -11,6 +11,11 @@ pub fn fixtures_copy() -> (tempfile::TempDir, PathBuf) {
     let d = tempfile::tempdir().unwrap();
     let base = d.path().join("costs");
     copy_dir(&contract().join("costs"), &base);
+    // A varredura grava rollouts pelo caminho canônico e o Python manda as raízes resolvidas: no
+    // macOS a pasta temporária é /var → /private/var. No Windows o canônico é `\\?\`, em que `/`
+    // não separa pastas, e os testes juntam caminhos com `/`.
+    #[cfg(not(windows))]
+    let base = std::fs::canonicalize(&base).unwrap();
     (d, base)
 }
 
