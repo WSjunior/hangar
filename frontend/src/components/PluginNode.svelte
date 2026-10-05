@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { buttonKey, decodeRaster, safeHref, textOf, type PluginElement, type PluginNode as Node, type RasterCell } from '@hangar/core';
-  import { boxStyle, textStyle } from '../lib/pluginUiStyle';
+  import { buttonKey, decodeRaster, hoverProps, isHoverScope, safeHref, textOf, type PluginElement, type PluginNode as Node, type RasterCell } from '@hangar/core';
+  import { boxStyle, buttonStyle, textStyle } from '../lib/pluginUiStyle';
   import { renderMarkdown } from '../lib/markdown';
   import PluginNode from './PluginNode.svelte';
 
@@ -10,11 +10,17 @@
     onPress?: (key: string) => void;
     /** Largura do lugar em colunas (faixa ou painel): `width` que a alcança vira 100%. */
     place?: number | null;
+    /** O escopo de hover mais próximo (Box com `key`) está com o ponteiro em cima. */
+    hoverOn?: boolean;
   }
-  let { node, onPress, place = null }: Props = $props();
+  let { node, onPress, place = null, hoverOn = false }: Props = $props();
 
   const el = $derived(node && typeof node === 'object' ? (node as PluginElement) : null);
-  const p = $derived((el?.props ?? {}) as Record<string, unknown>);
+  // Box com `key` é escopo: acende com o ponteiro nele, e os filhos herdam. Os outros nós seguem o escopo de cima.
+  let over = $state(false);
+  const scope = $derived(el ? isHoverScope(el) : false);
+  const lit = $derived(scope ? over : hoverOn);
+  const p = $derived(el ? hoverProps(el, lit) : {});
   const str = (v: unknown) => (typeof v === 'string' ? v : '');
 
   // Células vizinhas da mesma cor viram um trecho só: uma barra de 100 colunas não vira 100 spans.
@@ -38,12 +44,15 @@
 </script>
 
 {#snippet kids(list: Node[] | undefined)}
-  {#each list ?? [] as child, i (i)}<PluginNode node={child} {onPress} {place} />{/each}
+  {#each list ?? [] as child, i (i)}<PluginNode node={child} {onPress} {place} hoverOn={lit} />{/each}
 {/snippet}
 
 {#if typeof node === 'string' || typeof node === 'number'}{node}{:else if el}
   {#if el.type === 'Box'}
-    <div class="box" style={boxStyle(p, place)}>
+    <!-- svelte-ignore a11y_no_static_element_interactions (o hover só muda o desenho, não age) -->
+    <div class="box" style={boxStyle(p, place)}
+         onpointerenter={scope ? () => (over = true) : undefined}
+         onpointerleave={scope ? () => (over = false) : undefined}>
       {@render kids(el.children)}
     </div>
   {:else if el.type === 'Text'}
@@ -71,10 +80,10 @@
     {@const label = str(p.label) || textOf(el.children)}
     {#if onPress && key}
       <button type="button" class="button" class:plain={p.plain === true} class:primary={p.variant === 'primary'}
-              class:dim={p.dimColor === true} onclick={() => onPress(key)}>{label}</button>
+              class:dim={p.dimColor === true} style={buttonStyle(p)} onclick={() => onPress(key)}>{label}</button>
     {:else}
       <span class="button" class:plain={p.plain === true} class:primary={p.variant === 'primary'}
-            class:dim={p.dimColor === true}>{label}</span>
+            class:dim={p.dimColor === true} style={buttonStyle(p)}>{label}</span>
     {/if}
   {:else if el.type === 'Image'}
     <span class="alt">{str(p.alt)}</span>

@@ -90,3 +90,17 @@ export function textStyle(p: Props): string {
     'min-width': truncate ? '0' : null,
   });
 }
+
+/** Rótulo de `Button` sob o hover do escopo: o conjunto de estilo de texto da API (cor, fundo, esmaecido,
+ *  negrito, itálico, sublinhado, riscado); a pílula continua a mesma. */
+export function buttonStyle(p: Props): string {
+  const deco = [p.underline === true && 'underline', p.strikethrough === true && 'line-through'].filter(Boolean);
+  return css({
+    color: inkColor(p.color),
+    background: inkColor(p.backgroundColor),
+    'font-weight': p.bold === true ? 700 : null,
+    'font-style': p.italic === true ? 'italic' : null,
+    'text-decoration': deco.length ? deco.join(' ') : null,
+    opacity: p.dimColor === true ? 0.6 : null,
+  });
+}

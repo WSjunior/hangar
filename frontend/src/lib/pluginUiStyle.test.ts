@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { boxStyle, fillsPlace } from './pluginUiStyle';
+import { boxStyle, buttonStyle, fillsPlace } from './pluginUiStyle';
 
 describe('largura em colunas', () => {
   it('width que alcança a largura do lugar ocupa o lugar inteiro', () => {
@@ -35,5 +35,21 @@ describe('posição absoluta', () => {
   it('deslocamento negativo passa; sem position, top e left são ignorados', () => {
     expect(boxStyle({ position: 'absolute', top: -1, right: 0 })).toContain('top:-1lh');
     expect(boxStyle({ top: 1, left: 2 })).not.toMatch(/(^|;)(top|left|position):/);
+  });
+});
+
+describe('buttonStyle', () => {
+  it('leva cor e negrito do rótulo e nada mais quando só isso vem', () => {
+    expect(buttonStyle({ color: '#e8a33d', bold: true })).toBe('color:#e8a33d;font-weight:700');
+    expect(buttonStyle({ label: 'x' })).toBe('');
+  });
+
+  it('aplica o conjunto inteiro de estilo de texto: fundo, itálico, sublinhado, riscado e esmaecido', () => {
+    const s = buttonStyle({ color: '#e8a33d', backgroundColor: '#112233', italic: true, underline: true, strikethrough: true, dimColor: true });
+    expect(s).toContain('color:#e8a33d');
+    expect(s).toContain('background:#112233');
+    expect(s).toContain('font-style:italic');
+    expect(s).toContain('text-decoration:underline line-through');
+    expect(s).toContain('opacity:0.6');
   });
 });

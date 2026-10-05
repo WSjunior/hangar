@@ -224,3 +224,18 @@ export function buttonKey(el: PluginElement): string | null {
   const key = el.props?.key;
   return el.type === 'Button' && typeof key === 'string' && key ? key : null;
 }
+
+/** Box com `key` é escopo de hover: o `hover` dele e o dos filhos valem com o ponteiro sobre ele. */
+export function isHoverScope(el: PluginElement): boolean {
+  const key = el.props?.key;
+  return el.type === 'Box' && typeof key === 'string' && key !== '';
+}
+
+/** As props do nó com o `hover` aplicado quando o escopo dele está aceso. `hover` com `scope` (grupo entre
+ *  lugares) fica para depois: o nó segue sem hover. */
+export function hoverProps(el: PluginElement, lit: boolean): Record<string, unknown> {
+  const base = el.props ?? {};
+  const hover = el.hover;
+  if (!lit || !hover || typeof hover !== 'object' || 'scope' in hover) return base;
+  return { ...base, ...hover };
+}
