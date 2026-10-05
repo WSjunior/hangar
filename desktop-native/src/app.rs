@@ -1835,7 +1835,8 @@ impl Hangar {
     fn apply_chat_update(&mut self, update: ChatUpdate, window: &mut Window, cx: &mut Context<Self>) {
         match update {
             ChatUpdate::Message(event) => {
-                if event.kind == "user_msg" && !event.queued() {
+                // A bolha da fila já mostra o envio: a de saída seria a segunda cópia até a resposta do POST.
+                if event.kind == "user_msg" {
                     if let (Some(key), Some(text)) = (self.selected_key(), event.text.as_deref()) {
                         self.delivery.confirm_real(&key, &event.id, text);
                     }
@@ -1886,7 +1887,11 @@ impl Hangar {
             }
             ChatUpdate::Question(ask) => if self.chat.update_ask(ask) { self.ask_form = AskForm::default(); },
             ChatUpdate::Thinking(text) => {
-                if text.is_empty() { self.defer_live_clear(Live::Thinking, cx); }
+                // Vazio é o bloco fechado: o registro chega pelo transcript; esperar deixava o primeiro pedaço preso na tela.
+                if text.is_empty() {
+                    self.chat.live_thinking.clear();
+                    self.live_clear_epoch[Live::Thinking as usize] += 1;
+                }
                 else if self.chat.update_live_thinking(text) { self.live_clear_epoch[Live::Thinking as usize] += 1; }
             }
             ChatUpdate::LiveTool(tool) => match tool {
@@ -2062,7 +2067,8 @@ impl Hangar {
     }
 
     fn known_user_ids(&self) -> HashSet<String> {
-        self.chat.events.iter().filter(|event| event.kind == "user_msg" && !event.queued()).map(|event| event.id.clone()).collect()
+        // Bolha da fila que já existia antes do envio não confirma o envio novo, mesmo com o mesmo texto.
+        self.chat.events.iter().filter(|event| event.kind == "user_msg").map(|event| event.id.clone()).collect()
     }
 
     fn commands_key(&self) -> Option<String> {
