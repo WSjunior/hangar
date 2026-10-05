@@ -1109,6 +1109,21 @@ Anotar valor e unidade, a sessão de cada `/history`, e o que não deu para medi
 | `/history` completo, Claude 300 MB / `limit=200` | |
 | Threads e inotify do Python com 4 chats abertos, contra 0 abertos | |
 
+### Prova de uso real do dono único (04/10/2026)
+
+Backend da branch `feat/rust-single-owner` (`d6dbdc36`) isolado pelo `scripts/prova-dono-unico.py`
+(unit transiente, HOME, portas e `tmux -L` próprios, Haiku). Criar e mandar na hora: 10/10 sem
+terminal e 10/10 com terminal, cada mensagem uma vez, nenhum "religou"/"desligou" e nenhum
+`runtime.*` no diário. Fila com o Claude ocupado (3 em ordem, uma vez cada), `/clear` com o chat
+aberto (não cai), restart com fila e com cano morto (uma entrega, parada em 0,2 s sem SIGKILL),
+uma queda do Rust (sessão segue no Rust novo, envio durante a queda sai uma vez), três quedas em
+60 s (o Python assume, nada duplicado), trava de escrita na fila (400 com código, sessão segue no
+Rust), Git ocupado (503 `workspace_busy` em 0,01 s, nada no Python) e troca de conta com e sem
+terminal (0,6–0,7 s, mesma chave, uma entrega na conta nova). Ficam manuais no app real a entrega
+incerta forçada no terminal e a transferência Claude → Codex. Tabela e achados (um
+`reopen_failed` intermitente no restart, e o 500 com pilha da política com geração antiga) em
+[`prova-real.md`](../migracao-rust/dono-unico/prova-real.md).
+
 ## Observação terminal Rust: erro visível, sem captura Python
 
 (04/10/2026, dono único, decisão 3 do dono.) Com a ponte ligada, o Rust é o único dono da
