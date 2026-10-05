@@ -33,7 +33,7 @@ async fn cli_cannot_forge_private_ack() {
 #[tokio::test]
 async fn v1_is_ineligible_without_connecting() {
     let binding = CanoBinding { pid:42, escuta:"tcp:127.0.0.1:1".into(), token:"secret-test".into(), versao:1 };
-    assert!(cano::peek(&binding).await.is_err());
+    assert!(cano::connect(&binding).await.is_err_and(|error|error.code == "cano_version"));
 }
 
 #[tokio::test]

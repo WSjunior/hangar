@@ -26,9 +26,10 @@ from app.adapters.pi import sessions as pi_sessions
 from app.config import list_config_dirs
 
 LOCAL = timezone(timedelta(hours=-3))
+_REPO = Path(__file__).resolve().parents[2]
 PROJETO_DESCONHECIDO = "desconhecido"
 # Suba ao mudar o que `uso_codex` grava por rollout.
-_USO_CODEX_VERSAO = 2
+_USO_CODEX_VERSAO = 3
 _log = logging.getLogger("hangar.costs")
 # Raízes já avisadas: `coletar()` roda a cada abertura da tela de custos, e o aviso é um só.
 _AVISOU_RAIZ_UNICA: set[str] = set()
@@ -288,7 +289,8 @@ class RespostasCodex:
             return (r.model, *(getattr(r, campo) for campo in campos))
 
         por_turno: dict[str, list[UsageRow]] = {}
-        for key in legado.keys() | respostas.keys():
+        # Legado seguido de moderno conserva a inserção de cada dicionário.
+        for key in dict.fromkeys((*legado, *respostas)):
             modernos = respostas.get(key, [])
             linhas = por_turno.setdefault(key, [])
             linhas.extend(modernos)
@@ -603,6 +605,7 @@ _aquecido = threading.Event()
 _aquecedor: threading.Thread | None = None
 _agendado: threading.Timer | None = None
 _aquecer_lock = threading.Lock()
+_served_by_rust = False
 
 # O pedido lê o índice como está, na hora. Passado `_FRESCOR_S` desde a última varredura, uma
 # nova roda atrás; "Atualizar dados" pede `fresco=True` e varre antes de ler.
@@ -660,12 +663,24 @@ def _fresco(t: float | None) -> bool:
     return t is not None and time.monotonic() - t < _FRESCOR_S
 
 
+def set_served_by_rust(on: bool) -> None:
+    """Com o hangar-server de pé, o boot não varre: as telas falam com o índice dele."""
+    global _served_by_rust
+    _served_by_rust = on
+
+
+def _boot_warmup() -> None:
+    # Só o boot pula; um pedido repassado ao Python continua aquecendo por `_pronto`.
+    if not _served_by_rust:
+        aquecer_em_background()
+
+
 def agendar_aquecimento(atraso_s: float) -> None:
     """Boot: espera o backend estabilizar (registry, app-server do Codex e hooks disputam o
     disco nos primeiros segundos) antes de varrer."""
     global _agendado
     cancelar_aquecimento()
-    _agendado = threading.Timer(atraso_s, aquecer_em_background)
+    _agendado = threading.Timer(atraso_s, _boot_warmup)
     _agendado.daemon = True
     _agendado.name = "custos-warm-timer"
     _agendado.start()
@@ -847,6 +862,39 @@ def _dobra_codex(arq: Path) -> DobraCodex:
     return DobraCodex(arq)
 
 
+def _pi_roots() -> list[tuple[Path, str]]:
+    out = []
+    for source, root in (("pi", raiz_pi()), ("omp", raiz_omp())):
+        if source == "omp" and root == raiz_pi():
+            # Contar a raiz compartilhada como omp também dobraria o gasto.
+            if not _AVISOU_RAIZ_UNICA:
+                _AVISOU_RAIZ_UNICA.add(str(root))
+                _log.warning("custos: omp e pi na mesma raiz (%s) — gasto do omp somado como pi", root)
+            continue
+        if root.is_dir():
+            out.append((root, source))
+    return out
+
+
+def scopes_for_rust() -> dict:
+    """Escopos e rótulos decididos antes da leitura, no formato do contrato versão 8."""
+    claude = [{"root": str(costs_claude_transcript.raiz_projetos(Path(path))), "account": account,
+               "label": _ROTULOS.get(account) or account}
+              for path, account in _config_dirs()]
+    codex = []
+    for account in _contas_codex():
+        home = account.home.expanduser().absolute().resolve(strict=False)
+        identity = f"codex:{home}"
+        _ROTULOS[identity] = f"Codex · {account.id}"
+        codex.append({"home": str(home), "account": identity, "label": _ROTULOS[identity]})
+    kimi = raiz_kimi()
+    return {"claude": claude, "codex": codex,
+            "pi": [{"root": str(root), "source": source} for root, source in _pi_roots()],
+            "kimi": ({"root": str(kimi), "index": str(kimi_sessions.kimi_home() / "session_index.jsonl")}
+                     if kimi.is_dir() else None),
+            "repo": str(_REPO)}
+
+
 def _sincronizar() -> None:
     global _escopos
     escopos: dict = {"claude": [], "codex": [], "pi": [], "kimi": None}
@@ -864,18 +912,9 @@ def _sincronizar() -> None:
                                 f"codex:{CACHE_VERSAO}:{_USO_CODEX_VERSAO}")
         escopos["codex"].append(identidade)
 
-    for nome, raiz in (("pi", raiz_pi()), ("omp", raiz_omp())):
-        if nome == "omp" and raiz == raiz_pi():
-            # PI_CODING_AGENT_DIR aponta pra árvore do pi-coding-agent: os dois caem na
-            # MESMA pasta, e contar de novo como "omp" dobraria o gasto. Avisa uma vez:
-            # "omp sem gasto" no relatório precisa ter causa no log, não parecer zero real.
-            if not _AVISOU_RAIZ_UNICA:
-                _AVISOU_RAIZ_UNICA.add(str(raiz))
-                _log.warning("custos: omp e pi na mesma raiz (%s) — gasto do omp somado como pi", raiz)
-            continue
-        if raiz.is_dir():
-            _sincronizar_pi(raiz, nome)
-            escopos["pi"].append((raiz, nome))
+    for raiz, nome in _pi_roots():
+        _sincronizar_pi(raiz, nome)
+        escopos["pi"].append((raiz, nome))
     kimi = raiz_kimi()
     if kimi.is_dir():
         _sincronizar_kimi(kimi)

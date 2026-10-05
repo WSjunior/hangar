@@ -26,14 +26,14 @@ class Gateway:
 
     async def op(self, target, command, operation_id, clock):
         name, kind = target['name'], command['kind']
-        if kind == 'adopt':
+        if kind == 'open':
             self.leases[name] = WriterLease(target['lock_path'])
-            return {'ready': True, 'instance': self.instance, 'key': target['key'],
+            return {'opened': True, 'instance': self.instance, 'key': target['key'],
                     'generation': target['generation'], 'state': self.snapshot(target)}
-        if kind == 'detach':
-            self.events_log.append(('detach', name))
+        if kind == 'close':
+            self.events_log.append(('close', name))
             self.leases.pop(name).close()
-            return {'detached': True}
+            return {'closed': True}
         if kind == 'submit' and name == 'session':
             self.attempts.append(operation_id)
             self.events_log.append(('attempt', len(self.attempts)))
@@ -70,6 +70,12 @@ class Gateway:
         self.leases.clear()
 
 
+async def _to_rust(owner, name):
+    """Registro Python do terminal aberto no Rust (o caminho do vínculo pendente que provou a conversa)."""
+    await owner._open_slot_in_rust(name, owner.slot(name), launch=False)
+    return True
+
+
 @pytest.fixture(autouse=True)
 def isolated_owner(monkeypatch):
     monkeypatch.setattr(rc, '_current', None)
@@ -99,35 +105,23 @@ def setup(monkeypatch, tmp_path, gateway):
     return owner, slot, effects, records
 
 
-@pytest.mark.parametrize('failures,fallback', [(3, False), (99, True)])
-def test_terminal_pre_effect_retry_budget_pause_and_session_isolation(monkeypatch, tmp_path, failures, fallback):
-    gateway = Gateway('runtime_lease', failures)
+def test_terminal_rust_refusal_raises_once_and_session_stays_rust(monkeypatch, tmp_path):
+    gateway = Gateway('runtime_lease', 99)
     owner, slot, effects, records = setup(monkeypatch, tmp_path, gateway)
 
     async def flow():
         other = owner.register(terminal.resolve_binding('other'))
-        assert await owner.adopt('session') and await owner.adopt('other')
-        result = await owner.op('session', {'kind': 'submit', 'text': 'private-test-message'}, 'root')
-        assert result['disposition'] == 'accepted'
-        assert gateway.attempts == ['root'] * 4
-        assert gateway.events_log[:5] == [('attempt', 1), ('attempt', 2), ('attempt', 3),
-                                      ('pause', rc._RETRY_PAUSE_S), ('attempt', 4)]
-        assert effects == ([('session', 'private-test-message')] if fallback else [])
-        assert slot.phase == (Phase.Python if fallback else Phase.Rust)
-        assert slot.rust_refused == (1 if fallback else None)
-        assert other.phase == Phase.Rust and other.rust_refused is None
+        assert await _to_rust(owner,'session') and await _to_rust(owner,'other')
+        with pytest.raises(RustOpError) as caught:
+            await owner.op('session', {'kind': 'submit', 'text': 'private-test-message'}, 'root')
+        assert caught.value.code == 'runtime_lease'
+        assert gateway.attempts == ['root'] and effects == []
+        assert slot.phase == Phase.Rust and other.phase == Phase.Rust
         failures_logged = [fields for event, _, fields in records if event == 'runtime.rust_op_failed']
-        assert len(failures_logged) == min(failures, 4)
-        assert all(fields['codigo'] == 'RustOpError' and 'runtime_lease' in fields['detalhe']
-                   for fields in failures_logged)
+        assert len(failures_logged) == 1 and failures_logged[0]['codigo'] == 'runtime_lease'
         assert 'private-test-message' not in json.dumps(records)
-        if fallback:
-            assert await owner.prepare_session('session', 'claude')
-            await owner.op('session', {'kind': 'submit', 'text': 'next-input'}, 'next')
-            assert gateway.attempts == ['root'] * 4
-            assert effects[-1] == ('session', 'next-input')
         assert (await owner.op('other', {'kind': 'submit', 'text': 'other-input'}, 'other'))['disposition'] == 'accepted'
-        assert all(name != 'other' for name, _ in effects)
+        assert effects == []
 
     try:
         asyncio.run(flow())
@@ -141,15 +135,14 @@ def test_terminal_possible_effect_is_not_repeated_and_row_stays_protected(monkey
     owner, slot, effects, records = setup(monkeypatch, tmp_path, gateway)
 
     async def flow():
-        assert await owner.adopt('session')
+        assert await _to_rust(owner,'session')
         with pytest.raises(RustOpError):
             await owner.op('session', {'kind': 'submit', 'text': 'private-test-message'}, 'root')
         assert gateway.attempts == ['root'] and effects == []
-        assert slot.phase == Phase.Python and slot.rust_refused == 1
-        assert slot.store.state['operations']['root']['status'] == 'unknown'
-        assert slot.store.state['rows'][0]['delivered'] is True
-        assert (await owner.op('session', {'kind': 'drain'}, 'drain'))['sent'] == 0
-        assert effects == [] and not any(kind == 'pause' for kind, _ in gateway.events_log)
+        assert slot.phase == Phase.Rust
+        state = json.loads(slot.binding.state_path.read_bytes())
+        assert state['operations']['root']['status'] == 'dispatching'
+        assert state['rows'][0]['delivered'] is True
         assert 'private-test-message' not in json.dumps(records)
 
     try:
@@ -164,32 +157,12 @@ def test_terminal_normal_refusal_does_not_retry_or_change_owner(monkeypatch, tmp
     owner, slot, effects, records = setup(monkeypatch, tmp_path, gateway)
 
     async def flow():
-        assert await owner.adopt('session')
+        assert await _to_rust(owner,'session')
         with pytest.raises(RustOpError):
             await owner.op('session', {'kind': 'submit', 'text': 'stale-control'}, 'root')
         assert gateway.attempts == ['root'] and effects == []
-        assert slot.phase == Phase.Rust and slot.rust_refused is None
+        assert slot.phase == Phase.Rust
         assert not any(event == 'runtime.rust_op_failed' for event, _, _ in records)
-    try:
-        asyncio.run(flow())
-    finally:
-        gateway.close()
-        owner.close_python_leases()
-
-
-def test_terminal_retry_never_moves_original_input_to_new_generation(monkeypatch, tmp_path):
-    gateway = Gateway('runtime_lease', 3)
-    owner, slot, effects, _ = setup(monkeypatch, tmp_path, gateway)
-    async def rotate(delay):
-        slot.binding.generation += 1
-        slot.binding.meta['terminal']['generation'] = slot.binding.generation
-        slot.binding.meta['terminal']['conversation'] = 'new-sid'
-    monkeypatch.setattr(rc.asyncio, 'sleep', rotate)
-    async def flow():
-        assert await owner.adopt('session')
-        with pytest.raises(RuntimeError, match='vida'):
-            await owner.op('session', {'kind': 'submit', 'text': 'old-generation-input'}, 'root')
-        assert gateway.attempts == ['root'] * 3 and effects == []
     try:
         asyncio.run(flow())
     finally:
@@ -201,7 +174,7 @@ def test_terminal_private_snapshot_is_accepted_without_public_state(monkeypatch,
     gateway = Gateway('runtime_lease', 0)
     owner, slot, _, _ = setup(monkeypatch, tmp_path, gateway)
     async def flow():
-        assert await owner.adopt('session')
+        assert await _to_rust(owner,'session')
         data = gateway.snapshot(slot.binding.descriptor(), 1)
         event = {'key': slot.binding.key, 'generation': 1, 'revision': 1, 'channel': 'snapshot', 'data': data}
         assert ra.apply_event(slot, event)
@@ -217,20 +190,46 @@ def test_terminal_private_snapshot_is_accepted_without_public_state(monkeypatch,
         owner.close_python_leases()
 
 
-def test_terminal_unknown_reply_is_logged_and_handed_over_without_replay(monkeypatch, tmp_path):
-    gateway = Gateway('body_unknown', 99)
+class UnknownDelivery(Gateway):
+    """A entrega fica incerta: o ator entra em `terminal_delivery_unknown` até reabrir."""
+
+    def __init__(self):
+        super().__init__('body_unknown', 1)
+        self.kinds, self.revision, self.error = [], 1, None
+
+    async def op(self, target, command, operation_id, clock):
+        self.kinds.append(command['kind'])
+        if command['kind'] == 'snapshot':
+            self.revision += 1
+            return self.snapshot(target, self.revision, self.error)
+        if command['kind'] == 'open':
+            self.error = None
+        result = await super().op(target, command, operation_id, clock)
+        if command['kind'] == 'submit' and result.get('disposition') == 'unknown':
+            self.error = 'terminal_delivery_unknown'
+        return result
+
+
+def test_terminal_unknown_delivery_reopens_in_rust(monkeypatch, tmp_path):
+    gateway = UnknownDelivery()
     owner, slot, effects, records = setup(monkeypatch, tmp_path, gateway)
     async def flow():
-        assert await owner.adopt('session')
+        assert await _to_rust(owner,'session')
         result = await owner.op('session', {'kind': 'submit', 'text': 'private-test-message'}, 'root')
         assert result['disposition'] == 'unknown'
-        assert gateway.attempts == ['root'] and effects == []
-        assert slot.phase == Phase.Python and slot.rust_refused == 1
-        assert slot.store.state['operations']['root']['status'] == 'unknown'
-        assert (await owner.op('session', {'kind': 'drain'}, 'drain'))['sent'] == 0
-        assert effects == [] and 'private-test-message' not in json.dumps(records)
-        assert any(event == 'runtime.rust_delivery_failed' and 'terminal_delivery_unknown' in fields['detalhe']
-                   for event, _, fields in records)
+        assert slot.phase == Phase.Rust, 'entrega incerta não passa a sessão ao Python'
+        # O Rust publica o problema; a próxima operação reabre a sessão no Rust, com ator novo.
+        assert ra.apply_event(slot, {'key': slot.binding.key, 'generation': 1, 'revision': slot.view['revision'] + 1,
+                                     'channel': 'problem', 'data': {'error_code': 'terminal_delivery_unknown'}})
+        assert ra.runtime_problem('session') == ('runtime_falhou', 'terminal_delivery_unknown')
+        gateway.kinds.clear()
+        result = await owner.op('session', {'kind': 'submit', 'text': 'next-input'}, 'next')
+        assert result['disposition'] == 'accepted'
+        assert gateway.kinds == ['snapshot', 'close', 'open', 'submit']
+        assert slot.phase == Phase.Rust and effects == []
+        assert ra.runtime_problem('session') is None
+        assert any(event == 'runtime.reopened' for event, _, _ in records)
+        assert 'private-test-message' not in json.dumps(records)
     try:
         asyncio.run(flow())
     finally:
@@ -238,7 +237,7 @@ def test_terminal_unknown_reply_is_logged_and_handed_over_without_replay(monkeyp
         owner.close_python_leases()
 
 
-def test_terminal_error_snapshot_triggers_shared_maintenance_retries_without_device(monkeypatch, tmp_path):
+def test_terminal_error_snapshot_triggers_shared_maintenance_without_device(monkeypatch, tmp_path):
     original_sleep = asyncio.sleep
     gateway = Gateway('terminal_facts', 99)
     owner, slot, effects, records = setup(monkeypatch, tmp_path, gateway)
@@ -252,18 +251,18 @@ def test_terminal_error_snapshot_triggers_shared_maintenance_retries_without_dev
         nonlocal finished
         finished = asyncio.Event()
         owner.loop = asyncio.get_running_loop()
-        assert await owner.adopt('session')
+        assert await _to_rust(owner,'session')
         task = asyncio.create_task(owner._events(gateway, gateway.instance))
         try:
             for _ in range(100):
-                if slot.phase == Phase.Python:
+                if gateway.drain_attempts:
                     break
                 await original_sleep(.01)
-            assert slot.phase == Phase.Python and slot.rust_refused == 1
-            assert len(gateway.drain_attempts) == 4 and len(set(gateway.drain_attempts)) == 1
-            assert [event for event in gateway.events_log if event[0] == 'pause'] == [('pause', rc._RETRY_PAUSE_S)]
-            assert effects == []
-            assert sum(event == 'runtime.rust_op_failed' for event, _, _ in records) == 4
+            await original_sleep(.05)
+            # A manutenção do erro de fatos é do Rust: falha sobe ao diário, a sessão fica nele.
+            assert gateway.drain_attempts and slot.phase == Phase.Rust
+            assert effects == [] and 'close' not in [kind for kind, _ in gateway.events_log]
+            assert any(event == 'runtime.drain_failed' for event, _, _ in records)
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

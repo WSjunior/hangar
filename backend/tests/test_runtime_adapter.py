@@ -221,36 +221,6 @@ def test_resubmit_after_prune_of_confirmed_row_does_not_send_again(tmp_path, mon
         coordinator.close_python_leases()
 
 
-def test_quiesce_waits_for_cleanup_persistence(tmp_path, monkeypatch):
-    from app.runtime_coordinator import Binding, RuntimeCoordinator, WriterLease
-    class Legacy:
-        async def quiesce(self, descriptor):
-            slot.active += 1
-            async def finish():
-                await asyncio.sleep(0)
-                slot.active -= 1
-                coordinator._signal(slot)
-            asyncio.create_task(finish())
-            return {"runtime_state":{}}
-    class Gateway:
-        instance = "instance"
-        async def op(self, descriptor, command, operation_id, clock):
-            assert slot.active == 0
-            self.lease = WriterLease(descriptor["lock_path"])
-            return {"ready":True, "instance":"instance", "key":"key", "generation":1, "state":{}}
-    async def peek(descriptor):
-        return {}
-    gateway = Gateway()
-    coordinator = RuntimeCoordinator(gateway, Legacy(), peek)
-    monkeypatch.setattr(runtime_coordinator, "_current", coordinator)
-    slot = coordinator.register(Binding("session", "key", "claude", True, {"key":"key"}, str(tmp_path / "chat"),
-        tmp_path / "projection", tmp_path / "state", tmp_path / "lease", 1))
-    try:
-        asyncio.run(coordinator.adopt("session"))
-    finally:
-        gateway.lease.close()
-
-
 def test_reserve_composite_waits_for_both_replies(tmp_path, monkeypatch):
     from app.runtime_adapter import LegacyIO, _legacy_operation
     from app.runtime_coordinator import Binding, RuntimeCoordinator
@@ -364,31 +334,6 @@ def test_confirmed_prompt_does_not_consume_next_echo(tmp_path, monkeypatch, relo
         assert slot.store.state["used_occurrences"] == {}
     try:
         asyncio.run(scenario())
-    finally:
-        coordinator.close_python_leases()
-
-
-def test_codex_quiesce_preserves_async_questions(tmp_path, monkeypatch):
-    from app.runtime_adapter import LegacyBridge
-    from app.runtime_coordinator import Binding, RuntimeCoordinator
-    from app.adapters.codex.async_questions import AsyncQuestions
-    coordinator = RuntimeCoordinator()
-    monkeypatch.setattr(runtime_coordinator, "_current", coordinator)
-    slot = coordinator.register(Binding("session", "key", "codex", True, {"key":"key", "thread_id":"thread"},
-        str(tmp_path / "chat"), tmp_path / "projection", tmp_path / "state", tmp_path / "lease", 1))
-    questions = AsyncQuestions("thread")
-    questions.observe({"id":"question", "type":"agentMessage", "delivery":"async",
-        "questions":[{"title":"Qual opção?", "options":["A","B"]}]})
-    class Client:
-        tem_processo_proprio = False
-        async def close(self, **kwargs):
-            pass
-    adapter = SimpleNamespace(_sessions={"session":{"client":Client(), "thread_id":"thread", "async_questions":questions}},
-        _subscribers={}, _tmux_watchers={})
-    try:
-        carry = asyncio.run(LegacyBridge(coordinator, {"codex":adapter}).quiesce(slot.binding.descriptor()))
-        assert carry["runtime_state"]["async_questions"] == list(questions._pending.items())
-        assert carry["runtime_state"]["async_seen"] == sorted(questions._seen)
     finally:
         coordinator.close_python_leases()
 
@@ -605,33 +550,6 @@ def test_quiesce_stops_drain_outside_the_cancelled_tasks(tmp_path, monkeypatch):
     assert calls == []          # sem linha na fila: nada a devolver
 
 
-def test_acked_write_settles_during_hand_over(tmp_path, monkeypatch):
-    # O ack chega com a passagem ao Rust em curso: a escrita saiu e o desfecho precisa ser gravado,
-    # senão o drain a trata como falha e a entrada volta à fila já entregue.
-    from app.runtime_adapter import LegacyIO
-    from app.runtime_coordinator import Binding, Phase, RuntimeCoordinator
-    coordinator = RuntimeCoordinator()
-    monkeypatch.setattr(runtime_coordinator, "_current", coordinator)
-    slot = coordinator.register(Binding("session", "key", "claude", True, {"key":"key"},
-        str(tmp_path / "chat"), tmp_path / "projection", tmp_path / "state", tmp_path / "lease", 1))
-    class Writer:
-        def write(self, data):
-            pass
-        async def drain(self):
-            pass
-    endpoint = SimpleNamespace(runtime_acks={})
-    async def scenario():
-        write = asyncio.create_task(LegacyIO(coordinator).write("session", endpoint, Writer(),
-            {"type":"user", "message":{"role":"user", "content":"texto"}}, 2))
-        while not endpoint.runtime_acks:
-            await asyncio.sleep(0)
-        slot.phase = Phase.PreparingRust
-        next(iter(endpoint.runtime_acks.values())).set_result("written")
-        ticket = await write
-        assert slot.store.state["operations"][ticket.phase_id]["status"] == "accepted"
-    asyncio.run(scenario())
-
-
 class _Owner:
     def __init__(self, phase):
         from app.runtime_coordinator import Phase
@@ -647,20 +565,19 @@ class _Owner:
         return self.target
 
 
-def test_state_monitor_waits_for_new_owner_instead_of_failing(monkeypatch):
-    # A adoção pelo Rust desliga o cliente Python no meio do monitor, e ele recusava com "sessão em
-    # transferência": o SSE do chat fechava. O monitor espera o novo dono e segue por ele.
+def test_state_stream_never_waits_for_owner(monkeypatch):
+    # Sem passagem de dono: a sessão no meio de um fechamento da administração segue pela vista do
+    # Python, sem espera nem diário de dono preso, e volta à do Rust quando reabre.
     from app import runtime_adapter
     from app.runtime_coordinator import Phase
     monkeypatch.setattr(runtime_adapter, "_OWNER_POLL_S", 0.01)
-    owner = _Owner(Phase.Python)
+    owner = _Owner(Phase.RecoveringPython)
     monkeypatch.setattr(runtime_coordinator, "_current", owner)
 
     class Adapter:
         async def state_monitor(self, name, sid_get):
             yield "python"
-            owner.target.phase = Phase.PreparingRust
-            raise RuntimeError("sessão em transferência; aguarde a posse ser confirmada")
+            await asyncio.Event().wait()
 
     async def native(self, name, sid_get):
         yield "rust"
@@ -670,16 +587,9 @@ def test_state_monitor_waits_for_new_owner_instead_of_failing(monkeypatch):
 
     async def scenario():
         stream = Adapter().state_monitor("session", lambda: None)
-        assert await anext(stream) == "python"
-        pending = asyncio.ensure_future(anext(stream))
-        await asyncio.sleep(0.05)
-        assert not pending.done()          # na passagem o chat espera, sem erro
+        assert await asyncio.wait_for(anext(stream), 0.5) == "python"
         owner.target.phase = Phase.Rust
-        assert await asyncio.wait_for(pending, 1) == "rust"
-        owner.target.phase = Phase.RecoveringPython
-        await asyncio.sleep(0.05)
-        owner.target.phase = Phase.Python
-        assert await asyncio.wait_for(anext(stream), 1) == "python"
+        assert await asyncio.wait_for(anext(stream), 1) == "rust"
         await stream.aclose()
     asyncio.run(scenario())
 
@@ -705,7 +615,7 @@ def test_state_monitor_error_without_owner_change_still_surfaces(monkeypatch):
 def test_reads_during_hand_over_use_python_view(monkeypatch):
     # A lista de sessões lia o estado na passagem e dava 500 para todas as sessões.
     from app.runtime_coordinator import Phase, TransferInProgress
-    owner = _Owner(Phase.PreparingRust)
+    owner = _Owner(Phase.RecoveringPython)
     owner.legacy_active = set()
     monkeypatch.setattr(runtime_coordinator, "_current", owner)
 

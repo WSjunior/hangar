@@ -752,6 +752,18 @@ def _source_info(registry, name: str, source_life: str, source_jsonl: str):
     return info
 
 
+def _runtime_source_view(name: str) -> dict | None:
+    """Vista do Rust da origem (aberta nele ou guardada no fechamento da troca); None fora dele."""
+    from app import runtime_coordinator
+    coordinator = runtime_coordinator.current()
+    if coordinator is None or getattr(coordinator, "transport", None) is None:
+        return None
+    try:
+        return coordinator.source_view(name)
+    except RuntimeError:
+        raise TransferError("session_transfer_source_state_unknown") from None
+
+
 async def _check_source_idle(registry, name: str, meta: dict) -> None:
     import asyncio
     from app import procinfo, tmux
@@ -762,10 +774,15 @@ async def _check_source_idle(registry, name: str, meta: dict) -> None:
     if any(not row.get("delivered") or not row.get("confirmed") for row in queue):
         raise TransferError("session_transfer_queue_pending")
     if meta["headless"]:
-        hl = get_adapter(CLAUDE_HEADLESS)
-        sess = await hl.ensure_running(name, so_reconectar=True)
-        if sess and sess.vivo and (sess.iniciando or sess.in_progress or sess.pending or sess.question):
-            raise TransferError("session_transfer_source_busy")
+        view = _runtime_source_view(name)
+        if view is not None:
+            if view.get("alive") and (view.get("iniciando") or view.get("in_progress") or view.get("pending") or view.get("question")):
+                raise TransferError("session_transfer_source_busy")
+        else:
+            hl = get_adapter(CLAUDE_HEADLESS)
+            sess = await hl.ensure_running(name, so_reconectar=True)
+            if sess and sess.vivo and (sess.iniciando or sess.in_progress or sess.pending or sess.question):
+                raise TransferError("session_transfer_source_busy")
     else:
         pane = await asyncio.to_thread(registry._pane_of, name)
         if pane is None or pane.get("pid") != meta.get("pane_pid"):

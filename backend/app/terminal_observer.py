@@ -1,4 +1,4 @@
-"""Observação terminal interna, com vínculo explícito e reserva no chamador."""
+"""Observação terminal interna, com vínculo explícito; erro do Rust sobe, nunca vira captura Python."""
 from __future__ import annotations
 
 import asyncio
@@ -22,8 +22,6 @@ from app import diag, tmux
 
 _log = logging.getLogger("hangar.terminal_observer")
 TIMEOUT = 0.25
-MAX_FAILURES = 3
-MAX_BACKOFF = 30.0
 _io_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="hangar-terminal")
 _io_slots = threading.BoundedSemaphore(4)
 MAX_BODY = 16 * 1024 * 1024
@@ -38,10 +36,8 @@ _analysis: dict[str, tuple[tuple, float, str, dict]] = {}
 @dataclass
 class _SessionState:
     consumers: set[str] = field(default_factory=set)
-    failures: int = 0
-    retry_at: float = 0.0
-    backoff: float = 1.0
-    fallback_since: float | None = None
+    error: str | None = None
+    reported: dict[str, float] = field(default_factory=dict)
 
 
 _sessions: dict[str, _SessionState] = {}
@@ -80,43 +76,44 @@ def _session(name: str) -> _SessionState:
     return _sessions.get(name, _unowned)
 
 
-def _failure(name: str, code: str, started: float | None = None) -> None:
+class ObservationFailed(Exception):
+    """O Rust é o dono da observação e não respondeu; `code` é seguro para log e tela."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+REPORT_EVERY = 60.0
+
+
+def _failure(name: str, code: str) -> None:
+    # Um registro por sessão e causa a cada minuto: a rodada seguinte repete o erro a cada 0,75 s,
+    # e um Rust que alterna sucesso e falha não pode encher o diário.
     session = _session(name)
+    session.error = code
     now = time.monotonic()
-    pause_ms = 0
-    if now >= session.retry_at:
-        session.failures += 1
-        if session.failures >= MAX_FAILURES:
-            pause_ms = int(session.backoff * 1000)
-            session.retry_at = now + session.backoff
-            session.backoff = min(session.backoff * 2, MAX_BACKOFF)
-    if session.fallback_since is None:
-        session.fallback_since = now
-        diag.registrar("terminal_observer.fallback", "aviso", sessao=name, codigo=code,
-                       ms=max(0, int((now - started) * 1000)) if started is not None else 0)
-        _log.warning("observação terminal de %s usa reserva Python: %s", name, code)
-    if pause_ms:
-        diag.registrar("terminal_observer.paused", "aviso", sessao=name, codigo=code,
-                       limite_ms=pause_ms)
+    if now - session.reported.get(code, -REPORT_EVERY) >= REPORT_EVERY:
+        session.reported[code] = now
+        diag.registrar("terminal_observer.erro", "aviso", sessao=name, codigo=code)
+        _log.warning("observação terminal de %s falhou: %s", name, code)
 
 
 def _success(name: str) -> None:
-    session = _session(name)
-    session.failures, session.retry_at, session.backoff = 0, 0.0, 1.0
-    if session.fallback_since is not None:
-        diag.registrar("terminal_observer.recovered", "ok", sessao=name, codigo="rust_available",
-                       ms=max(0, int((time.monotonic() - session.fallback_since) * 1000)))
-        session.fallback_since = None
+    _session(name).error = None
 
 
-# Mesma regra de nome do Rust (`terminal_control.rs`, `validate`): fora dela cada captura voltava
-# 400, pausava e registrava no diário a cada rodada; a sessão fica direto na leitura Python.
+def _code(exc: Exception, prefix: str) -> str:
+    return exc.code if isinstance(exc, ObservationFailed) else f"{prefix}_{type(exc).__name__}"
+
+
+# Mesma regra de nome do Rust (`terminal_control.rs`, `validate`): fora dela o Rust recusa sempre,
+# então a sessão fica direto na leitura Python (dono fixo pela sessão).
 _RUST_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 
 def _available(name: str = "") -> bool:
-    return (_config is not None and sys.platform != "win32" and (not name or bool(_RUST_NAME.fullmatch(name)))
-            and time.monotonic() >= _session(name).retry_at)
+    return _config is not None and sys.platform != "win32" and (not name or bool(_RUST_NAME.fullmatch(name)))
 
 
 def _owner(payload: dict) -> tuple[str, str | None]:
@@ -185,12 +182,12 @@ def _http(config: tuple[str, str], payload: dict) -> dict | None:
 
 
 async def _request(payload: dict) -> dict | None:
+    """`None` só quando o Rust não é o dono ou a tentativa ficou velha; falha sobe como erro."""
     config = _config
     name, consumer = _owner(payload)
     attempt = _attempt(name, consumer)
-    started = time.monotonic()
-    # A liberação passa por cima da pausa e de vaga cheia: sem ela o `tmux -C` segue anexado à sessão
-    # até o prazo do Rust. É idempotente, então repetir não custa nada.
+    # A liberação passa por cima de vaga cheia: sem ela o `tmux -C` segue anexado à sessão até o
+    # prazo do Rust. É idempotente, então repetir não custa nada.
     release = payload.get("op") == "release"
     if not (release and config is not None and sys.platform != "win32" or _available(name)) or not _belongs(attempt):
         return None
@@ -202,33 +199,30 @@ async def _request(payload: dict) -> dict | None:
                 raise
             await asyncio.sleep(0.05)
             result = await _io(_http, config, payload)
-        if not _belongs(attempt):
-            return None
-        if result is None:
-            _failure(name, "invalid_http_response", started)
-        elif payload.get("op") in ("acquire", "release"):
-            if result != {}:
-                _failure(name, "invalid_http_response", started)
-                return None
-        return result
+        code = None
+        if result is None or (payload.get("op") in ("acquire", "release") and result != {}):
+            code = "invalid_http_response"
     except (OSError, ValueError, TimeoutError, HTTPException, _IoBusy) as exc:
         # Nem pane, segredo, URL ou mensagem de exceção entram no diário.
-        if _belongs(attempt):
-            if isinstance(exc, urllib.error.HTTPError):
-                code = f"http_{exc.code}"
-            elif isinstance(exc, TimeoutError) or (isinstance(exc, urllib.error.URLError)
-                                                  and isinstance(exc.reason, TimeoutError)):
-                code = "http_timeout"
-            elif isinstance(exc, HTTPException):
-                code = "http_protocol"
-            elif isinstance(exc, _IoBusy):
-                code = "io_busy"
-            elif isinstance(exc, ValueError):
-                code = "invalid_http_response"
-            else:
-                code = "http_connection"
-            _failure(name, code, started)
+        if isinstance(exc, urllib.error.HTTPError):
+            code = f"http_{exc.code}"
+        elif isinstance(exc, TimeoutError) or (isinstance(exc, urllib.error.URLError)
+                                              and isinstance(exc.reason, TimeoutError)):
+            code = "http_timeout"
+        elif isinstance(exc, HTTPException):
+            code = "http_protocol"
+        elif isinstance(exc, _IoBusy):
+            code = "io_busy"
+        elif isinstance(exc, ValueError):
+            code = "invalid_http_response"
+        else:
+            code = "http_connection"
+    if not _belongs(attempt):
         return None
+    if code is not None:
+        _failure(name, code)
+        raise ObservationFailed(code)
+    return result
 
 
 def _strings(value) -> bool:
@@ -260,6 +254,7 @@ class Lease:
         self.open = False
         self._closed = False
         self.remote_generation = None
+        self.binding_error = None
 
     def identity(self):
         if not self.open or self.provider not in ("claude", "codex"):
@@ -269,8 +264,10 @@ class Lease:
             binding = self.binding_get()
         except Exception as exc:
             if _belongs(attempt):
-                _failure(self.name, f"terminal_binding_{type(exc).__name__}")
+                self.binding_error = f"terminal_binding_{type(exc).__name__}"
+                _failure(self.name, self.binding_error)
             return None
+        self.binding_error = None
         if not _belongs(attempt):
             return None
         if not isinstance(binding, str) or not binding:
@@ -310,13 +307,13 @@ class Lease:
         except Exception as exc:
             if not self.open or not _belongs(attempt):
                 return
-            _failure(self.name, f"lease_start_{type(exc).__name__}")
+            _failure(self.name, _code(exc, "lease_start"))
             try:
                 # Libere só a referência remota parcial: o produtor tentará de novo.
                 await self._release_remote()
             except Exception as close_exc:
                 if self.open and _belongs(attempt):
-                    _failure(self.name, f"lease_release_{type(close_exc).__name__}")
+                    _failure(self.name, _code(close_exc, "lease_release"))
 
     async def __aexit__(self, *exc):
         _current.reset(self.token)
@@ -335,7 +332,7 @@ class Lease:
             await self._release_remote()
         except Exception as exc:
             if _belongs(attempt):
-                _failure(self.name, f"lease_close_{type(exc).__name__}")
+                _failure(self.name, _code(exc, "lease_close"))
         finally:
             session = _sessions.get(self.name)
             if (session is not None and _consumers.get(self.consumer) == self.name
@@ -350,15 +347,20 @@ class Lease:
 
     async def payload(self, op, started):
         identity = self.identity()
-        if identity is None or not _available(self.name):
+        if not _available(self.name):
+            return None
+        if identity is None:
+            if self.binding_error is not None:
+                raise ObservationFailed(self.binding_error)
             return None
         attempt = _attempt(self.name, self.consumer)
-        attempt_started = time.monotonic()
         try:
             target = await _io(tmux._pane_target, self.name)
         except Exception as exc:
             if self.open and _belongs(attempt):
-                _failure(self.name, f"terminal_target_{type(exc).__name__}", attempt_started)
+                code = _code(exc, "terminal_target")
+                _failure(self.name, code)
+                raise ObservationFailed(code) from None
             return None
         if not self.open or not _belongs(attempt) or identity != self.identity():
             return None
@@ -379,7 +381,7 @@ class Lease:
             except Exception as exc:
                 # A falha não pode encerrar a renovação nem registrar conteúdo privado.
                 if self.open and _belongs(attempt):
-                    _failure(self.name, f"lease_watch_{type(exc).__name__}")
+                    _failure(self.name, _code(exc, "lease_watch"))
             await asyncio.sleep(HEARTBEAT)
 
 
@@ -420,19 +422,16 @@ async def capture(name: str, started: float) -> dict | None:
     payload = await source.payload("capture", started)
     if payload is None:
         return None
-    attempt_started = time.monotonic()
     result = await _request(payload)
     if not source.open or not _belongs(attempt) or before != stamp(name):
         return None
     if result is None:
         return None
-    if not isinstance(result, dict) or set(result) != {"binding", "started", "text", "analysis"}:
-        _failure(name, "invalid_frame", attempt_started)
-        return None
-    if (result["binding"] != payload["binding"] or type(result["started"]) not in (int, float)
+    if (set(result) != {"binding", "started", "text", "analysis"}
+            or result["binding"] != payload["binding"] or type(result["started"]) not in (int, float)
             or result["started"] != started or not isinstance(result["text"], str) or not valid_analysis(result["analysis"])):
-        _failure(name, "invalid_frame", attempt_started)
-        return None
+        _failure(name, "invalid_frame")
+        raise ObservationFailed("invalid_frame")
     _analysis[name] = (before, started, result["text"], result["analysis"])
     _success(name)
     return result

@@ -67,7 +67,7 @@ async fn terminal_error_statuses_preserve_static_cause_without_private_data() {
     assert!(!log.contains("private-"), "private request data reached diagnostics");
     assert_eq!(log.lines().filter(|line| line.contains("observação terminal recusada")).count(), 1, "corpo inválido não deve gerar aviso a cada chamada: {log}");
     for code in ["invalid terminal target", observer_error] {
-        assert_eq!(log.lines().filter(|line| line.contains("observação terminal usa reserva Python") && line.contains("fixture") && line.contains(code) && !line.contains("io_kind")).count(), 1, "falha repetida deve gerar um aviso por sessão e causa: {log}");
+        assert_eq!(log.lines().filter(|line| line.contains("observação terminal falhou") && line.contains("fixture") && line.contains(code) && !line.contains("io_kind")).count(), 1, "falha repetida deve gerar um aviso por sessão e causa: {log}");
     }
     assert_eq!(log.lines().filter(|line| line.contains("another") && line.contains("invalid terminal target")).count(), 1, "outra sessão deve ter seu próprio aviso: {log}");
     assert_eq!(log.lines().filter(|line| line.contains("fixture") && line.contains("invalid capture request")).count(), 1, "outra causa na mesma sessão deve gerar aviso: {log}");

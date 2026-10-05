@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 # float_roundtrip: o float lido sai com o mesmo valor que o float() do Python, e o repr bate.
 serde_json = { workspace = true, features = ["float_roundtrip"] }
+indexmap.workspace = true
 hangar-api.workspace = true
 hangar-workspace = { path = "../hangar-workspace" }
 regex.workspace = true
@@ -32,7 +33,9 @@ notify = { workspace = true }
 percent-encoding = { workspace = true }
 mime_guess = "=2.0.5"
 base64 = "=0.23.1"
+rusqlite.workspace = true
+rayon.workspace = true
+reqwest = { workspace = true, features = ["rustls"] }
 
 [dev-dependencies]
 tempfile.workspace = true
-reqwest = { workspace = true }

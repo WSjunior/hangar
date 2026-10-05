@@ -1,11 +1,11 @@
 // crates/hangar-server/src/routes.rs
-//! Rotas do hangar-server: saúde, histórico e chat ao vivo do Claude e do Codex para o dono;
-//! todo o resto é repasse ao Python.
+//! Rotas do hangar-server: saúde, custos, histórico e chat ao vivo do Claude e do Codex para o
+//! dono; todo o resto é repasse ao Python. Falha do Rust nessas rotas é 503 com código, nunca repasse.
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
@@ -32,7 +32,6 @@ const INFO_TIMEOUT: Duration = Duration::from_secs(10);
 const PING_EVERY: Duration = Duration::from_secs(10);
 const COMMENT_EVERY: Duration = Duration::from_secs(15);
 const SEND_TIMEOUT: Duration = Duration::from_secs(30);
-const REFUSED_WARN_EVERY: Duration = Duration::from_secs(60);
 
 pub struct AppState {
     pub cfg: Config,
@@ -44,46 +43,12 @@ pub struct AppState {
     pub workspace_slots: Arc<tokio::sync::Semaphore>,
     pub workspace_read_slots: Arc<tokio::sync::Semaphore>,
     pub workspace_meta_slots: Arc<tokio::sync::Semaphore>,
-    pub fallback: Fallback,
-}
-
-const FALLBACK_AFTER: u32 = 4;
-const MAX_FALLBACK: usize = 1024;
-
-/// Falhas seguidas do Rust por (sessão, rota). Na 4ª (3 + 1 nova tentativa) a rota daquela sessão
-/// fica com o Python até o processo reiniciar; as outras sessões seguem no Rust.
-#[derive(Default)]
-pub struct Fallback {
-    failures: Mutex<std::collections::HashMap<(String, &'static str), u32>>,
-}
-
-impl Fallback {
-    pub fn on_python(&self, name: &str, route: &'static str) -> bool {
-        self.failures.lock().unwrap().get(&(name.to_owned(), route)).is_some_and(|n| *n >= FALLBACK_AFTER)
-    }
-
-    /// Conta a falha e devolve quantas seguidas. Passou para o Python: uma linha só, nesta hora.
-    // ponytail: mapa cheio deixa sessão nova sem contagem (segue tentando o Rust); limpeza só se encher na prática.
-    pub fn failed(&self, name: &str, route: &'static str, code: &str) -> u32 {
-        let mut failures = self.failures.lock().unwrap();
-        let key = (name.to_owned(), route);
-        if !failures.contains_key(&key) && failures.len() >= MAX_FALLBACK {
-            if crate::warn_limit::allow(None, "fallback_map_full") {
-                tracing::warn!("contagem de falhas cheia: {route} {name} motivo={code} segue tentando o Rust");
-            }
-            return 0;
-        }
-        let n = failures.entry(key).or_insert(0);
-        *n = n.saturating_add(1);
-        if *n == FALLBACK_AFTER {
-            tracing::warn!("parte passou para o Python: {route} {name} motivo={code}");
-        }
-        *n
-    }
-
-    pub fn succeeded(&self, name: &str, route: &'static str) {
-        self.failures.lock().unwrap().remove(&(name.to_owned(), route));
-    }
+    pub diag: crate::diag::DiagClient,
+    pub costs: Arc<crate::costs::collect::Collector>,
+    pub fx: Arc<crate::costs::fx::Fx>,
+    pub reports: Arc<crate::costs::ReportCache>,
+    pub origins_home: std::path::PathBuf,
+    pub origins: std::sync::Mutex<indexmap::IndexMap<std::path::PathBuf, crate::costs::origins::Origins>>,
 }
 
 impl AppState {
@@ -92,6 +57,16 @@ impl AppState {
     }
 
     pub fn with_terminal_pool(cfg: Config, terminal: crate::terminal_control::TerminalPool) -> AppState {
+        let costs = Arc::new(crate::costs::collect::Collector::new(
+            crate::costs::index::default_dir(), crate::costs::pricing::default_dir(),
+            crate::costs::areas::default_map_file(),
+            Arc::new(crate::costs::collect::HttpScopes::new(cfg.upstream, cfg.internal_secret.clone())),
+        ));
+        Self::with_parts(cfg, terminal, costs, Arc::new(crate::costs::fx::Fx::new()))
+    }
+
+    pub fn with_parts(cfg: Config, terminal: crate::terminal_control::TerminalPool,
+                      costs: Arc<crate::costs::collect::Collector>, fx: Arc<crate::costs::fx::Fx>) -> AppState {
         let http = proxy::client();
         let side = SideCtx {
             upstream: cfg.upstream,
@@ -101,94 +76,106 @@ impl AppState {
             hubs: Hubs::default(),
             infos: Default::default(),
         };
-        AppState { auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, fallback: Fallback::default(),
+        let diag = crate::diag::DiagClient::new(cfg.upstream, cfg.internal_secret.clone());
+        AppState { auth: Auth::new(&cfg.auth_token), http, side, cfg, terminal, terminal_address: None, diag,
             workspace_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             workspace_read_slots: Arc::new(tokio::sync::Semaphore::new(8)),
-            workspace_meta_slots: Arc::new(tokio::sync::Semaphore::new(4)) }
+            workspace_meta_slots: Arc::new(tokio::sync::Semaphore::new(4)),
+            costs, fx, reports: Arc::new(crate::costs::ReportCache::default()),
+            origins_home: std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default()),
+            origins: std::sync::Mutex::new(indexmap::IndexMap::new()) }
+    }
+
+    pub(crate) fn skill_origins(&self, repo: &std::path::Path) -> crate::costs::origins::Origins {
+        let mut origins = self.origins.lock().unwrap();
+        let cache = origins.shift_remove(repo).unwrap_or_else(|| crate::costs::origins::Origins::new(self.origins_home.clone(), repo.to_owned()));
+        origins.insert(repo.to_owned(), cache.clone());
+        while origins.len() > 8 { origins.shift_remove_index(0); }
+        cache
     }
 
     /// `info` da sessão com cache curto: várias telas abrindo juntas viram uma consulta só. Só o
     /// `/events` usa, porque o primeiro `info` da conexão interna corrige um valor velho com `reset`.
-    async fn info(&self, name: &str) -> Option<InternalInfo> {
+    async fn info(&self, name: &str) -> Result<Option<InternalInfo>, InfoFailed> {
         if let Some((at, v)) = self.side.infos.lock().unwrap().get(name) {
             if at.elapsed() < INFO_TTL {
-                return v.clone();
+                return Ok(v.clone());
             }
         }
-        let v = fetch_info(&self.http, self.cfg.upstream, &self.cfg.internal_secret, name).await;
-        // Falha não fica no cache: cada reconexão tenta de novo, e a contagem por sessão só soma
-        // falhas reais.
+        let v = fetch_info(&self.http, self.cfg.upstream, &self.cfg.internal_secret, name).await?;
+        // Só a sessão encontrada fica no cache: cada reconexão volta a perguntar pela inexistente.
         if v.is_some() { remember_info(&self.side.infos, name, v.clone()); }
-        v
+        Ok(v)
     }
 }
 
-async fn fetch_info(http: &HttpClient, upstream: SocketAddr, secret: &str, name: &str) -> Option<InternalInfo> {
+/// A rota interna não respondeu o `info` (fora do ar, erro, corpo inválido). 404 não é isto.
+pub(crate) struct InfoFailed;
+
+/// `Ok(None)` = 404: sessão inexistente, que o Python responde. O segredo recusado também é 404, e
+/// o Python registra essa recusa no diário (`internal.recusado`).
+pub(crate) async fn fetch_info(http: &HttpClient, upstream: SocketAddr, secret: &str, name: &str) -> Result<Option<InternalInfo>, InfoFailed> {
     let url = format!("http://{upstream}/internal/sessions/{}/info", utf8_percent_encode(name, NON_ALPHANUMERIC));
-    let req = axum::http::Request::get(url).header("x-hangar-internal", secret).body(Body::empty()).ok()?;
+    let req = axum::http::Request::get(url).header("x-hangar-internal", secret).body(Body::empty()).map_err(|_| InfoFailed)?;
     let resp = match tokio::time::timeout(INFO_TIMEOUT, http.request(req)).await {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => {
             tracing::warn!(session = %name, "info interna falhou: {e}");
-            return None;
+            return Err(InfoFailed);
         }
         Err(_) => {
             tracing::warn!(session = %name, "info interna sem resposta");
-            return None;
+            return Err(InfoFailed);
         }
     };
-    if !resp.status().is_success() {
-        // 404 é sessão inexistente (normal) ou segredo recusado: `warn_if_internal_refused` separa.
-        if resp.status() != StatusCode::NOT_FOUND {
-            tracing::warn!(session = %name, status = %resp.status(), "info interna recusada");
-        }
-        return None;
+    if resp.status() == StatusCode::NOT_FOUND {
+        return Ok(None);
     }
-    let body = tokio::time::timeout(INFO_TIMEOUT, resp.into_body().collect()).await.ok()?.ok()?.to_bytes();
+    if !resp.status().is_success() {
+        tracing::warn!(session = %name, status = %resp.status(), "info interna recusada");
+        return Err(InfoFailed);
+    }
+    let body = match tokio::time::timeout(INFO_TIMEOUT, resp.into_body().collect()).await {
+        Ok(Ok(b)) => b.to_bytes(),
+        _ => {
+            tracing::warn!(session = %name, "corpo da info interna não chegou");
+            return Err(InfoFailed);
+        }
+    };
     match serde_json::from_slice(&body) {
-        Ok(v) => Some(v),
+        Ok(v) => Ok(Some(v)),
         Err(e) => {
             // Só a posição: a mensagem do serde pode citar o valor.
             tracing::warn!(session = %name, line = e.line(), column = e.column(), "info interna inválida");
-            None
+            Err(InfoFailed)
         }
     }
 }
 
-/// O `/internal` responde 404 tanto à sessão inexistente quanto ao segredo recusado. Sem `info` e
-/// com a sessão atendida pelo repasse, o atalho está desligado sem ninguém saber: avisa, no máximo
-/// uma vez por minuto. true = avisou.
-fn warn_if_internal_refused(name: &str, info_missing: bool, status: StatusCode, failures: u32) -> bool {
-    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
-    if !info_missing || !status.is_success() {
-        return false;
-    }
-    let mut last = LAST.lock().unwrap();
-    if last.is_some_and(|t| t.elapsed() < REFUSED_WARN_EVERY) {
-        return false;
-    }
-    *last = Some(Instant::now());
-    tracing::warn!(
-        session = %name,
-        falhas = failures,
-        "sem info interna, mas o Python atendeu a sessão: /internal recusou (segredo interno?) ou falhou; atalho do Rust desligado"
-    );
-    true
+/// Falha do Rust numa rota que é dele: 503 com o código, que o app mostra, e uma linha no diário.
+/// `detail` é o envelope que o `lerErro` do app já traduz; `reason` é frase fixa, nunca conversa.
+pub(crate) fn route_failed(st: &AppState, req: &HeaderMap, event: &'static str, name: &str, code: &'static str, reason: &'static str) -> Response {
+    st.diag.report(event, name, code, reason);
+    let body = serde_json::json!({"ok": false, "error_code": code, "message": reason,
+        "detail": {"code": code, "params": {"motivo": reason}, "msg": format!("{reason} — {code}")}}).to_string();
+    let mut resp = (StatusCode::SERVICE_UNAVAILABLE, [(header::CONTENT_TYPE, "application/json")], body).into_response();
+    cors(req, resp.headers_mut());
+    resp
 }
 
-/// Sem info, mas o Python atendeu: o atalho do Rust falhou para esta sessão e conta. 0 = não falhou.
-fn internal_refused(st: &AppState, name: &str, route: &'static str, info_missing: bool, status: StatusCode) -> u32 {
-    if info_missing && status.is_success() { st.fallback.failed(name, route, "internal_info") } else { 0 }
-}
+const INFO_REASON: &str = "o backend não devolveu os dados da sessão";
 
 pub async fn serve(listener: TcpListener, cfg: Config) -> std::io::Result<()> {
     serve_with_terminal_pool(listener, cfg, crate::terminal_control::TerminalPool::new()).await
 }
 
 pub async fn serve_with_terminal_pool(listener: TcpListener, cfg: Config, pool: crate::terminal_control::TerminalPool) -> std::io::Result<()> {
+    serve_with_state(listener, AppState::with_terminal_pool(cfg, pool)).await
+}
+
+pub async fn serve_with_state(listener: TcpListener, mut state: AppState) -> std::io::Result<()> {
     // Bind LAN específico não recebe tráfego de loopback: a observação tem uma porta própria.
     let private = TcpListener::bind("127.0.0.1:0").await?;
-    let mut state = AppState::with_terminal_pool(cfg, pool);
     state.terminal_address = Some(private.local_addr()?);
     let state = Arc::new(state);
     tokio::select! {
@@ -212,6 +199,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.
         .route("/api/sessions/{name}/history", get(history).fallback(pass_any))
         .route("/api/sessions/{name}/events", get(events).fallback(pass_any))
+        .route("/api/sessions/{name}/cost", get(crate::costs_routes::session_cost).fallback(pass_any))
+        .route("/api/costs", get(crate::costs_routes::costs).fallback(pass_any))
+        .route("/api/cotacao", get(crate::costs_routes::cotacao).fallback(pass_any))
+        .route("/api/uso", get(crate::costs_routes::usage).fallback(pass_any))
         .fallback(pass_any)
         .with_state(state)
 }
@@ -250,9 +241,18 @@ pub(crate) async fn pass(st: &AppState, req: Request, fwd: &Forward) -> Response
 async fn pass_any(
     State(st): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    mut req: Request,
+    req: Request,
 ) -> Response {
-    crate::workspace_routes::strip_client_fallback(&mut req);
+    if crate::worktree_routes::matches(req.method(), req.uri().path()) {
+        let (forward, owner) = gate(&st, peer, &req);
+        // Convidado segue ao Python, que o recusa como antes.
+        if owner {
+            let headers = req.headers().clone();
+            let mut response = crate::worktree_routes::public(st, req, forward).await;
+            cors(&headers, response.headers_mut());
+            return response;
+        }
+    }
     if crate::workspace_routes::matches(req.method(), req.uri().path()) {
         let (forward, owner) = gate(&st, peer, &req);
         if owner {
@@ -288,17 +288,13 @@ async fn history(
     State(st): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     path: Result<Path<String>, PathRejection>,
-    mut req: Request,
+    req: Request,
 ) -> Response {
-    crate::workspace_routes::strip_client_fallback(&mut req);
     let (fwd, owner) = gate(&st, peer, &req);
     let name = match path {
         Ok(Path(n)) if owner && req.method() == Method::GET => n,
         _ => return pass(&st, req, &fwd).await,
     };
-    if st.fallback.on_python(&name, "history") {
-        return pass(&st, req, &fwd).await;
-    }
     let limit = match auth::query_param(req.uri().query(), "limit") {
         None => None,
         Some(v) => match v.parse::<i64>() {
@@ -311,14 +307,13 @@ async fn history(
     };
     // Sem o cache: sessão recriada com o mesmo nome dentro do TTL devolveria a conversa morta, e
     // nada a corrigiria depois (o `/events` só a corrige com `reset` por estar ligado ao hub).
-    let info = fetch_info(&st.http, st.cfg.upstream, &st.cfg.internal_secret, &name).await;
-    remember_info(&st.side.infos, &name, info.clone());
-    let info_missing = info.is_none();
+    let Ok(info) = fetch_info(&st.http, st.cfg.upstream, &st.cfg.internal_secret, &name).await else {
+        return route_failed(&st, req.headers(), "rust.history_failed", &name, "internal_info", INFO_REASON);
+    };
+    if info.is_some() { remember_info(&st.side.infos, &name, info.clone()); }
+    // Sessão inexistente ou provedor fora do Rust: o Python é o dono.
     let Some(hreq) = info.and_then(|i| i.history_request(limit)) else {
-        let resp = pass(&st, req, &fwd).await;
-        let failures = internal_refused(&st, &name, "history", info_missing, resp.status());
-        warn_if_internal_refused(&name, info_missing, resp.status(), failures);
-        return resp;
+        return pass(&st, req, &fwd).await;
     };
     tracing::debug!(session = %name, req = %diag_req(&req), "history");
     let inm = req.headers().get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()).map(str::to_owned);
@@ -338,18 +333,15 @@ async fn history(
     let (etag, body) = match done {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
-            let falhas = st.fallback.failed(&name, "history", "history_io");
-            tracing::warn!(session = %name, falhas, "history no Rust falhou; repassa: {e}");
-            return pass(&st, req, &fwd).await;
+            tracing::warn!(session = %name, kind = ?e.kind(), "history no Rust falhou");
+            return route_failed(&st, req.headers(), "rust.history_failed", &name, "history_io", "a leitura do histórico falhou");
         }
         Err(e) => {
             // Sem `{e}`: a mensagem do pânico pode citar texto da conversa.
-            let falhas = st.fallback.failed(&name, "history", "history_panic");
-            tracing::warn!(session = %name, falhas, panic = e.is_panic(), cancelled = e.is_cancelled(), "history no Rust caiu; repassa");
-            return pass(&st, req, &fwd).await;
+            tracing::warn!(session = %name, panic = e.is_panic(), cancelled = e.is_cancelled(), "history no Rust caiu");
+            return route_failed(&st, req.headers(), "rust.history_failed", &name, "history_panic", "a leitura do histórico caiu no servidor");
         }
     };
-    st.fallback.succeeded(&name, "history");
     let mut resp = match body {
         None => StatusCode::NOT_MODIFIED.into_response(),
         Some(body) => {
@@ -371,25 +363,20 @@ async fn events(
     State(st): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     path: Result<Path<String>, PathRejection>,
-    mut req: Request,
+    req: Request,
 ) -> Response {
-    crate::workspace_routes::strip_client_fallback(&mut req);
     let (fwd, owner) = gate(&st, peer, &req);
     let name = match path {
         Ok(Path(n)) if owner && req.method() == Method::GET => n,
         _ => return pass(&st, req, &fwd).await,
     };
-    if st.fallback.on_python(&name, "events") {
-        return pass(&st, req, &fwd).await;
-    }
-    let info = st.info(&name).await;
-    let Some(binding) = info.as_ref().and_then(Binding::from_info) else {
-        let resp = pass(&st, req, &fwd).await;
-        let failures = internal_refused(&st, &name, "events", info.is_none(), resp.status());
-        warn_if_internal_refused(&name, info.is_none(), resp.status(), failures);
-        return resp;
+    let Ok(info) = st.info(&name).await else {
+        return route_failed(&st, req.headers(), "rust.events_failed", &name, "internal_info", INFO_REASON);
     };
-    st.fallback.succeeded(&name, "events");
+    // Sessão inexistente ou provedor fora do Rust: o Python é o dono.
+    let Some(binding) = info.as_ref().and_then(Binding::from_info) else {
+        return pass(&st, req, &fwd).await;
+    };
     // A query vence: o app recria o EventSource a cada queda, e objeto novo não manda o cabeçalho.
     let resume = auth::query_param(req.uri().query(), "last_event_id")
         .filter(|v| !v.is_empty())
@@ -562,43 +549,6 @@ mod tests {
         let r = pass(&st, request("/limited", "127.0.0.1", false, "x"), &fwd("127.0.0.1")).await;
         assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
         assert!(is_owner(&st, "127.0.0.1"));
-    }
-
-    #[test]
-    fn missing_info_on_a_session_python_serves_warns_once_a_minute() {
-        assert!(!warn_if_internal_refused("s", true, StatusCode::NOT_FOUND, 1), "sessão inexistente é normal");
-        assert!(!warn_if_internal_refused("s", false, StatusCode::OK, 1), "provider fora do Rust é normal");
-        assert!(warn_if_internal_refused("s", true, StatusCode::OK, 1));
-        assert!(!warn_if_internal_refused("s", true, StatusCode::OK, 1), "no máximo uma vez por minuto");
-    }
-
-    #[test]
-    fn route_goes_to_python_after_four_failures_for_that_session_only() {
-        let fb = Fallback::default();
-        for n in 1..FALLBACK_AFTER {
-            assert_eq!(fb.failed("a", "history", "history_io"), n);
-            assert!(!fb.on_python("a", "history"), "falha {n} ainda tenta o Rust");
-        }
-        fb.succeeded("a", "history");
-        for _ in 1..FALLBACK_AFTER {
-            fb.failed("a", "history", "history_io");
-        }
-        assert!(!fb.on_python("a", "history"), "sucesso zera a contagem");
-        assert_eq!(fb.failed("a", "history", "history_io"), FALLBACK_AFTER);
-        assert!(fb.on_python("a", "history"));
-        assert!(!fb.on_python("a", "events"), "outra rota da mesma sessão segue no Rust");
-        assert!(!fb.on_python("b", "history"), "outra sessão segue no Rust");
-    }
-
-    #[test]
-    fn fallback_map_stays_bounded() {
-        let fb = Fallback::default();
-        for n in 0..MAX_FALLBACK {
-            fb.failed(&format!("s-{n}"), "events", "internal_info");
-        }
-        assert_eq!(fb.failed("excedente", "events", "internal_info"), 0);
-        assert_eq!(fb.failures.lock().unwrap().len(), MAX_FALLBACK);
-        assert_eq!(fb.failed("s-0", "events", "internal_info"), 2, "quem já conta segue contando");
     }
 
     #[test]

@@ -775,3 +775,61 @@ def test_texto_que_chega_junto_com_a_parada_ainda_e_entregue(monkeypatch):
         asyncio.run(cena())
     finally:
         pb.esquecer("s1")
+
+
+def test_pull_drops_its_wait_when_the_proxy_connection_dies(monkeypatch):
+    # O Rust que repassava a espera morreu: sem soltar, o Rust novo publicava nela e a confirmação
+    # nunca vinha (entrega incerta no terminal depois de uma queda).
+    monkeypatch.setattr(pb, "ESPERA_S", 30)
+
+    class Proxy:
+        def __init__(self):
+            self.gone = asyncio.Event()
+
+        async def receive(self):
+            await self.gone.wait()
+            return {"type": "http.disconnect"}
+
+    async def cena():
+        proxy = Proxy()
+        espera = asyncio.create_task(pb.pull(_pull(), proxy))
+        await asyncio.wait_for(_ate(lambda: pb.aguardando("s1")), 5)
+        proxy.gone.set()
+        resposta = await asyncio.wait_for(espera, 2)
+        assert resposta["text"] is None
+        assert not pb.aguardando("s1"), "a espera morta não pode receber publicação"
+
+    asyncio.run(cena())
+
+
+def test_publication_racing_the_proxy_drop_is_not_written(monkeypatch):
+    # Publicação que chegou junto com a queda: o plugin nunca a recebeu, então volta `not_written`
+    # (o Rust digita pelo teclado), nunca `unknown` (que travaria a fila como entrega incerta).
+    monkeypatch.setattr(pb, "ESPERA_S", 30)
+    monkeypatch.setattr(pb, "CONFIRMA_S", 5)
+    monkeypatch.setattr(pb, "tracked_session_id", lambda name: UUID)
+
+    class Proxy:
+        def __init__(self):
+            self.gone = asyncio.Event()
+
+        async def receive(self):
+            await self.gone.wait()
+            return {"type": "http.disconnect"}
+
+    async def cena():
+        proxy = Proxy()
+        espera = asyncio.create_task(pb.pull(_pull(modos=("fill", "receipt_v2")), proxy))
+        await asyncio.wait_for(_ate(lambda: pb.aguardando("s1")), 5)
+        fila = pb._waiters["s1"]
+        original = fila.put_nowait
+        def put_and_drop(item):
+            original(item)
+            proxy.gone.set()        # a conexão cai no mesmo instante da publicação
+        fila.put_nowait = put_and_drop
+        resultado = await asyncio.to_thread(pb.publish_terminal, "s1", UUID, 1,
+            {"id":"pub-1", "mode":"fill", "text":"oi"}, lambda: None)
+        await asyncio.wait_for(espera, 2)
+        return resultado
+
+    assert asyncio.run(cena()) == "not_written"

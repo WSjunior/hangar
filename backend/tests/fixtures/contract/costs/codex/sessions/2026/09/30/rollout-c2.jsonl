@@ -1,0 +1,10 @@
+{"type":"session_meta","timestamp":"2026-09-30T15:00:00Z","payload":{"id":"c2","cwd":"/repo/fork","model_provider":"openai"}}
+{"type":"session_meta","timestamp":"2026-09-24T12:00:00Z","payload":{"id":"parent","cwd":"/repo/parent","model_provider":"anthropic"}}
+{"type":"turn_context","timestamp":"2026-09-24T12:00:01Z","payload":{"turn_id":"parent-turn","model":"gpt-5.5","cwd":"/repo/parent"}}
+{"type":"event_msg","timestamp":"2026-09-24T12:00:02Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5000,"cached_input_tokens":2000,"output_tokens":500},"last_token_usage":{"input_tokens":5000,"output_tokens":500}}}}
+{"type":"token_usage_record","timestamp":"2026-09-24T12:00:03Z","payload":{"thread_id":"parent","turn_id":"parent-turn","response_id":"parent-r","usage":{"input_tokens":5000,"output_tokens":500}}}
+{"type":"response_item","timestamp":"2026-09-24T12:00:04Z","payload":{"type":"function_call","name":"InheritedTool","arguments":"{}"}}
+{"type":"turn_context","timestamp":"2026-09-30T15:00:01Z","payload":{"turn_id":"fork-turn","model":"gpt-5.5","cwd":"/repo/fork"}}
+{"type":"response_item","timestamp":"2026-09-30T15:00:02Z","payload":{"type":"custom_tool_call","name":"exec","call_id":"fork-exec","input":"await tools.exec_command({cmd: 'cat backend/app/fork.py', workdir: '/repo/fork'});"}}
+{"type":"event_msg","timestamp":"2026-09-30T15:00:03Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5150,"cached_input_tokens":2030,"output_tokens":515},"last_token_usage":{"input_tokens":150,"cached_input_tokens":30,"output_tokens":15}}}}
+{"type":"token_usage_record","timestamp":"2026-09-30T15:00:04Z","payload":{"thread_id":"c2","turn_id":"fork-turn","response_id":"fork-r","usage":{"input_tokens":150,"cached_input_tokens":30,"output_tokens":15}}}

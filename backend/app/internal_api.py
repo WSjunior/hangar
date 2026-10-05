@@ -4,6 +4,7 @@ import asyncio
 import secrets
 import json
 import copy
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
@@ -86,7 +87,7 @@ async def runtime_policy(request: Request):
         with slot.guard:
             if (coordinator.instance != instance or slot.binding.key != body["key"]
                     or slot.binding.generation != body["generation"]
-                    or slot.phase not in {runtime_coordinator.Phase.Rust, runtime_coordinator.Phase.PreparingRust}
+                    or slot.phase != runtime_coordinator.Phase.Rust
                     or slot.lease is not None and not slot.lease.closed):
                 raise RuntimeError("serviço de outra posse ou geração")
         if body["kind"] != "native_message":
@@ -128,6 +129,27 @@ async def runtime_policy(request: Request):
     return await asyncio.shield(_policy_calls[key])
 
 
+_DIAG_EVENT = re.compile(r"rust\.[a-z_]{1,48}")
+_DIAG_CODE = re.compile(r"[a-z0-9_]{1,64}")
+
+
+@router.post("/diag")
+async def rust_diag(request: Request) -> dict:
+    """Falha que o Rust atendeu sozinho (histórico, eventos, Git): o log dele não entra no diário."""
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if len(raw) <= 8192 else None
+        if (not isinstance(body, dict) or set(body) != {"evento", "sessao", "codigo", "motivo"}
+                or not all(isinstance(v, str) for v in body.values())
+                or not _DIAG_EVENT.fullmatch(body["evento"]) or not _DIAG_CODE.fullmatch(body["codigo"])
+                or len(body["sessao"]) > 128 or len(body["motivo"]) > 300):
+            raise ValueError("diário inválido")
+    except (ValueError, RecursionError):
+        raise HTTPException(400) from None
+    diag.registrar(body["evento"], "erro", sessao=body["sessao"], codigo=body["codigo"], detalhe=body["motivo"])
+    return {"ok": True}
+
+
 @router.get("/workspace/context")
 async def workspace_context(name: str | None = None) -> dict:
     """Só metadados; o consumidor privado não consulta novamente este registro."""
@@ -144,6 +166,23 @@ async def workspace_context(name: str | None = None) -> dict:
         "roots": [str(root) for root in allowed_roots()],
         "sessions": [{"name": s.name, "cwd": s.cwd} for s in infos if s.cwd],
         "session": {"name": info.name, "cwd": info.cwd, "jsonl": info.jsonl} if info else None,
+    }
+
+
+@router.get("/worktrees/context")
+async def worktrees_context() -> dict:
+    """O que a lista de worktrees do hangar-server não acha sozinho: sessões, pastas e contas."""
+    from app import api
+    from app.archive import _contas
+
+    sessions, cwds, roots = await api._worktree_inputs()
+    bases = await asyncio.to_thread(lambda: [str(base) for _cfg, _rot, base in _contas()])
+    return {
+        "roots": [str(r) for r in roots],
+        "cwds": cwds,
+        "sessions": [{"name": s.name, "cwd": s.cwd, "worktree_path": s.worktree_path, "jsonl": s.jsonl}
+                     for s in sessions],
+        "project_bases": bases,
     }
 
 
@@ -166,6 +205,12 @@ async def session_info(name: str) -> dict:
             diag.registrar("runtime.history_failed", "erro", sessao=name, **failure_reason(exc))
             raise HTTPException(503) from None
     return info_payload(name, info.provider, info.jsonl)
+
+
+@router.get("/costs/scopes")
+async def costs_scopes() -> dict:
+    from app import costs_sources
+    return await asyncio.to_thread(costs_sources.scopes_for_rust)
 
 
 @router.get("/sessions/{name}/side-events")

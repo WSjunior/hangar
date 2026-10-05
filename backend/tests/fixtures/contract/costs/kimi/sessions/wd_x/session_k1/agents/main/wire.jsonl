@@ -1,0 +1,2 @@
+{"type":"usage.record","time":1790769600123,"model":"apikey/k3","usage":{"inputOther":30,"output":11,"inputCacheRead":60,"inputCacheCreation":10}}
+{"type":"usage.record","time":1790769601123,"model":"apikey/k3","usage":{"inputOther":10,"output":4,"inputCacheRead":20,"inputCacheCreation":5}}
