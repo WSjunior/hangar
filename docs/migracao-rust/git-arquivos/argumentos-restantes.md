@@ -13,9 +13,12 @@ mandaria `create_worktree` com `new_branch` a um Rust que responderia "resultado
 | `remove_worktree(force)` | fora do padrão, Python | Rust: `worktree remove --force`, 500 com a mensagem do git |
 | `rows` de `citation_cwds`, `cited_elsewhere`, `find_elsewhere` | com linhas em memória, Python | as linhas vão como texto (`text_rows`) e o Rust lê delas em vez do arquivo (`citations::Transcript::Rows`) |
 
-Pedido à ponte acima de 4 MiB (o `MAX_BODY` do Rust) não é enviado: roda no Python sem ter saído,
-então não repete efeito. Antes ele recebia 400 e, numa escrita, virava "resultado incerto".
-`python_args` continua no `delegate` para o próximo argumento que a `main` acrescentar.
+Pedido à ponte acima de 4 MiB (o `MAX_BODY` do Rust) não é enviado. Antes ele recebia 400 e,
+numa escrita, virava "resultado incerto".
+
+> Deixou de valer com o contrato 17 (`dono-unico/plano.md`, Task 8): o pedido grande demais vira
+> erro 413 `workspace_request_too_large` em vez de rodar no Python, e `python_args` saiu do
+> `delegate` — argumento novo da `main` entra no núcleo Rust junto.
 
 ## Testes
 

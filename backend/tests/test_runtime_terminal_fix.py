@@ -5,6 +5,12 @@ from app.runtime_adapter import LegacyBridge
 from test_runtime_terminal import isolated_owner, live_owner
 
 
+
+async def _to_rust(owner, name):
+    """Registro Python do terminal aberto no Rust (o caminho do vínculo pendente que provou a conversa)."""
+    await owner._open_slot_in_rust(name, owner.slot(name), launch=False)
+    return True
+
 def test_python_reserve_confirm_returns_count_and_steer_once(monkeypatch, tmp_path):
     owner, slot, _ = live_owner(monkeypatch, tmp_path)
     monkeypatch.setattr(api, '_provider_of', lambda name: 'claude')
@@ -153,7 +159,7 @@ def test_deferred_answer_http_preserves_question_and_is_not_success(monkeypatch,
     monkeypatch.setattr(api, 'clear_pending_askq', lambda *args: cleared.append(args))
     client = TestClient(api.app)
     async def scenario():
-        await owner.adopt('session')
+        await _to_rust(owner,'session')
         result = await asyncio.to_thread(client.post, '/api/sessions/session/answer', headers={'Authorization':'Bearer test'},
             json={'answers':[{'kind':'option','indices':[0],'labels':['A']}]})
         assert result.status_code == 409

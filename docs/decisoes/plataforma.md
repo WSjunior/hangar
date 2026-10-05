@@ -1026,7 +1026,23 @@ filho do backend: sem isso, a porta "de outro processo" barrava todo reinício.
 
 A reserva é no mesmo processo, sem novo lifespan: dois lifespans rodariam watchers e hooks em
 dobro. O motivo vai ao diário como `hangar_server.reserva` (`sem_binario`, `sem_resposta`,
-`protocolo`, `quedas`, `erro`, `porta_ocupada`); cada queda, como `hangar_server.caiu`. A saúde
+`protocolo`, `endereco_privado`, `quedas`, `erro`, `porta_ocupada`); cada queda, como
+`hangar_server.caiu`.
+
+**Modo do processo (dono único, Task 5, 04/10/2026).** O coordenador tem um modo só para o processo:
+`pending` desde a subida com o binário esperado até o Supervisor decidir, e de novo entre uma queda 1
+ou 2 e a volta do Rust; `rust` quando a partida confirma; `python` sem binário, com
+`CP_RUST_SERVER=0`, `--reload`, ou quando o Supervisor desiste. Em `pending` as sessões Claude não
+passam ao Python: operações sobre elas esperam até `PENDING_WAIT_S = 30` s (uma partida leva até
+20 s) e depois falham com `runtime_starting`; as esperas longas (`run_sync`, fila síncrona) contam o
+próprio prazo depois disso. Com o Rust esperado, o lifespan não registra sessão Claude nem religa
+cano; ao entrar em `rust`, o Rust reabre as que eram dele e abre as do boot (cano vivo, ou morto
+com entrada não entregue, que é relançado), e só então roda a recuperação de transferência. Ao
+entrar em `python`, cada sessão do Rust é retomada uma vez e roda o que o lifespan fazia sem o Rust.
+A parada é decidida antes de qualquer ação (nem desativação nem retomada). Envio sem resposta
+porque o Rust morreu espera o Rust novo e repete o mesmo `operation_id` uma vez; senão fica
+incerto. Cliente Python no cano de sessão Claude em `pending`/`rust` é recusado
+(`refuse_python_client`); o Codex sem terminal segue no Python em qualquer modo. A saúde
 traz `protocol`, e o Python só aceita o mesmo `RUST_SERVER_PROTOCOL`: a `server-latest` é sempre a
 mais nova, e uma máquina atrasada pode baixar um binário que fala outro contrato interno. Com o
 Rust na frente, todo pedido chega ao uvicorn interno por `127.0.0.1`: o `forwarded_allow_ips`
@@ -1093,14 +1109,209 @@ Anotar valor e unidade, a sessão de cada `/history`, e o que não deu para medi
 | `/history` completo, Claude 300 MB / `limit=200` | |
 | Threads e inotify do Python com 4 chats abertos, contra 0 abertos | |
 
-## Observação terminal Rust com reserva Python
+## Custos e uso no hangar-server
+
+(03/10/2026, Parte 3; contrato interno 20 na junção com o dono único e a lista de worktrees.) O Rust
+atende `/api/costs`, `/api/uso`, `/api/cotacao` e `/api/sessions/{name}/cost` para sessões Codex.
+Claude, Codex, Pi, omp e Kimi alimentam o índice de custos; o relatório de Uso mantém as fontes
+que a referência Python já oferece. Escopos e rótulos chegam do Python pelo contrato interno,
+incluindo a identidade canônica da conta e o repositório. Preços e mapa de áreas continuam
+sendo metadados explícitos da coleta. Fuso fixo UTC-3, chaves, ordem dos arrays/dicionários e
+campos nulos seguem os modelos Python.
+
+### Índice próprio e reserva
+
+Com o Rust de pé, as quatro rotas são só dele (regra do dono único, 04/10/2026): uma tentativa
+por pedido; falha interna vira 503 com `error_code` e `detail.{code,params.motivo,msg}` (o
+envelope que o `lerErro` do app traduz), uma linha no `hangar-server.log` e o evento
+`rust.costs_failed` no diário pelo `POST /internal/diag`. Códigos fixos `costs_no_scopes`,
+`costs_no_disk`, `costs_reader_panic`, `costs_sqlite`, `costs_json`, `costs_worker_join`,
+`costs_io`, `costs_non_finite` e `internal_info`; o campo `sessao` do diário leva o nome da
+sessão no custo avulso e a rota (`costs`, `uso`, `cotacao`) nas outras, para uma não esconder a
+outra no limite de uma linha por minuto. Nada é repassado ao Python por falha. A coleta que
+falhou fica guardada, e um pedido 5 s depois dela já dispara outra atrás (sem esperar `fresco`
+nem os 30 s; antes disso só a falha guardada, para disco ou escopos fora do ar não virarem uma
+varredura por pedido); por isso um pedido seguinte pode voltar 202 ou 200.
+
+**Pasta que não deu para ler nunca apaga linhas** (04/10/2026). A listagem separa pasta que
+sumiu (`NotFound`, as linhas dela saem) de pasta que não abriu, parou no meio ou cujo arquivo
+não se resolve (permissão, E/S): essas entram em `unread`, e `Index::sync_keeping` não apaga
+nenhuma linha conhecida debaixo delas. Conta Codex com pasta ilegível, ou cuja `home` nem se
+resolve, segue ativa no relatório com as linhas como estavam. `forget_outside` só apaga com
+`NotFound` (o `exists()` é falso também com permissão negada). A causa vai ao log
+(`custos_pasta_ilegivel`, tipo de erro, uma linha por tipo e minuto) e ao diário
+(`rust.costs_dir_unread`, código `costs_dir_<tipo>`, sessão = rota) no pedido seguinte; a
+resposta continua 200. Erro SQLite registra código e código estendido onde nasce (nunca a
+mensagem, que pode ecoar valor de coluna), e erro de disco registra a etapa e o tipo. Os cards
+da tela inicial mostram a frase traduzida do 503 com o código entre parênteses. Aquecimento 202,
+ausência legítima 404, relatório vazio e falta de tarifa/cotação não são falha. A versão
+anterior (contrato 8: quatro tentativas e passagem da parte ao Python, rota
+`/internal/rust-failure`) saiu na junção com o dono único (contrato 18, hoje 20).
+
+O índice Rust chama-se `custos-rust.sqlite3`. No Linux/macOS fica em
+`$XDG_CACHE_HOME/hangar/custos` quando a variável contém caminho absoluto, ou
+`~/.cache/hangar/custos`; no Windows, em `%LOCALAPPDATA%/hangar/custos`, com a reserva local do
+perfil quando essa variável falta. O banco Python é independente (`custos.sqlite3`). A mudança
+do destino padrão Python discutida no PR #27 não está integrada nesta branch; não pressupor
+que os dois índices já usam a mesma pasta. Nenhum índice vivo foi usado na prova.
+
+Índice ausente aquece em background e responde 202 com progresso; um pedido fresco tem espera
+limitada. Índice indisponível ou escopos inacessíveis viram 503 com código. Falta
+do binário, protocolo incompatível e `CP_RUST_SERVER=0` conservam a reserva geral da porta
+pública. A recuperação do índice corrompido fecha os recursos da tentativa antes de reconstruir
+e repetir, sem copiar o índice Python.
+
+A validação entre máquinas em 03/10/2026 revelou diferenças no último bit das somas quando
+a ordem dos arquivos variava. Python e Rust agora ordenam os caminhos na listagem e nas
+consultas do índice, preservando a sequência interna de cada arquivo. Ordenar a consulta
+também corrige índices existentes, cuja ordem de inserção muda após atualizar um arquivo.
+
+O CI de 03/10/2026 também expôs dois pontos de portabilidade: a raiz do repositório deve
+ser resolvida antes de classificar origens, e a seleção de regras de projeto deve aceitar
+ambos os separadores de caminho. Python e Rust usam essa seleção comum; o marcador
+`project-paths:1` nas assinaturas reconstrói somente as áreas salvas, preservando os custos.
+
+Cotas permanecem no Python: dependem das APIs dos provedores e compartilham cache/espera de
+429 com criação de sessão, loop e MCP. Duplicar isso no Rust criaria duas consultas e duas
+políticas de espera. `stats` continua no fluxo de chat Python; custo por papel da orquestração
+também continua usando seu índice Python. A porta pública em Rust não duplica esses produtores.
+
+### Medida e paridade
+
+A [análise anterior](../migracao-rust/parte3/analise.md) mediu **41,9 s** de coleta Python sem
+índice, **0,08–0,14 s** de atualização incremental e pico de **211 MB** após ler o uso inteiro.
+O corpus mudou desde essa análise; os números seguintes são uma nova comparação dos dois
+leitores sobre as mesmas entradas, não uma repetição daquele conjunto antigo.
+
+Prova final sobre `caf615db`, build release, processos avulsos no Linux/glibc. Snapshot de
+**5.547 arquivos**, **4.497.268.800 bytes**, preservando os caminhos e identidades originais.
+As dez sobreposições do namespace são somente leitura; os dois índices SQLite e o temporário
+do SQLite ficam numa pasta privada descartável. Escopos, rótulos, preços, áreas e `now` foram
+capturados uma vez; cotação nula nos dois relatórios. Cópia, metadados e compilação ficam fora
+do tempo de varredura. “Fria” significa **índice novo**: as páginas dos arquivos já estavam
+aquecidas pela cópia e pela leitura Python; não se limpou o cache de páginas do sistema.
+
+| Operação | Resultado |
+|---|---:|
+| Coleta Python com índice novo | 38,842 s |
+| Coleta Rust com índice novo | 3,270 s |
+| Coleta incremental Rust, mesmos bytes e mesmo índice | 0,038157 s |
+| Pico Rust após relatórios frios e serialização | 87 MiB |
+| Pico Rust do processo completo, incluindo incremental e novos relatórios | 93 MiB |
+| Divergências dos relatórios completos Python/Rust | 0 |
+| Divergências de linhas, offsets, tamanhos e caudas nos dois índices temporários | 0 |
+
+O pico é `VmHWM`, arredondado para cima, após leitura, agregação e serialização; inclui os
+relatórios incrementais, não apenas os workers da varredura. O uso percorreu **103.814 linhas**
+e **4.457 linhas de tokens**. A descoberta real das origens Rust e Python coincidiu em **198
+entradas**, incluindo valores e ordem; o builder Rust não recebeu o mapa Python como resultado.
+Após a segunda coleta, os relatórios Rust também permaneceram idênticos byte a byte aos frios.
+As metas de menos de 5 s e 100 MiB foram atingidas nessa prova.
+
+As primeiras comparações de arquivos vivos divergiram porque os transcripts cresceram entre
+leituras. O snapshot resolveu isso sem excluir fontes, alterar identidades ou ajustar golden.
+O script compara inteiros, tipos, chaves e ordem exatamente; frações seguem tolerância de
+`1e-9 * max(abs(a), abs(b), 1)`. Só contagens, posições de campos e códigos entram no diagnóstico;
+os bytes reais ficam fora de fixtures e logs e são removidos ao terminar.
+
+### O que reduziu tempo e memória
+
+`caf615db` preservou o contrato e corrigiu o custo da implementação: buffer antes do compressor
+do estado, janela limitada com mais trabalho disponível às quatro threads, cálculo das áreas
+nas leituras e pré-filtro das linhas Claude/Codex que nenhum acumulador consome. O Uso é
+agregado enquanto o índice entrega as linhas (`fold_usage`/`UsoBuilder`), sem materializar a
+coleção inteira. No Linux/glibc, `tune_allocator` fixa o limite de devolução de memória antes
+da coleta; o exemplo usa o mesmo ajuste do servidor. Não houve mudança de tarifa, corte de
+dados ou normalização de saída para atingir as metas.
+
+Reprodução, da raiz: `cd backend && uv run python ../scripts/comparar-custos.py --snapshot
+--profile --incremental --diagnose`. O build release precede a captura; `--binary` permite um
+executável previamente congelado, com conferência opcional por `--binary-sha256`. O modo de
+snapshot depende de `bwrap` no Linux e não altera serviços ou configuração da máquina.
+
+### Visão resumida da tela inicial (`?view=summary`)
+
+O card de uso da tela inicial (web, app e nativo) lê só `totals`, `by_day`, `by_model`,
+`sem_tarifa`, `applied` e `usd_brl`; o relatório inteiro tinha ~1 MB, quase todo `combos`.
+`GET /api/costs?view=summary` monta só esses seis campos pelas mesmas funções e na mesma ordem
+de soma (`build_summary`; teste compara campo a campo com o inteiro), com chave de cache própria.
+Sem o parâmetro, ou com outro valor, sai o relatório inteiro: cliente antigo e servidor antigo
+(Python incluído, que ignora o parâmetro) continuam iguais. A tela de Custos segue pedindo o
+inteiro.
+
+Medida em 04/10/2026, esta máquina (i5-13400F, carga 7–15 de outras sessões), `hangar-server`
+release isolado (porta livre, `XDG_CACHE_HOME` temporário, Python falso só com os escopos reais),
+mediana de 15 pedidos para "pronto" (relatório em cache) e o primeiro pedido para "remontando"
+(índice pronto, relatório fora do cache):
+
+| `/api/costs` | Inteiro | Resumido |
+|---|---:|---:|
+| `all`: pronto / remontando | 2,23 ms / 21,6 ms | 0,20 ms / 13,6 ms |
+| `all`: corpo / gzip | 1.020.394 B / 136.788 B | 15.798 B / 3.628 B |
+| `7d`: pronto / remontando | 0,92 ms / 14,6 ms | 0,32 ms / 14,6 ms |
+| `7d`: corpo / gzip | 368.571 B / 48.325 B | 5.521 B / 1.590 B |
+
+Python (medida do kick-off na mesma máquina): 2–8 ms pronto, 90–200 ms remontando, 1 MB.
+Reconstrução do índice do zero, mesmos escopos, rodadas seguidas na mesma hora: Python
+(`_sincronizar` com `_CACHE_DIR` temporário) 41,5 s e 40,6 s, pico 169 MiB; Rust
+(`examples/custos`, índice novo) 6,5 s e 6,3 s, pico 57–58 MiB (as três primeiras rodadas, com o
+cache de páginas ainda frio, deram 18,9 s, 10,8 s e 7,1 s). Pelo servidor, do primeiro pedido ao
+primeiro 200: 9,7 s.
+
+### Uso real ainda pendente
+
+A prova foi por arquivos e processos avulsos. O dono ainda precisa conferir Custos e Uso no
+web, o card no celular e no nativo; “Atualizar dados”; filtros e clique num item de Uso; custo
+de sessão Codex; aquecimento ao recriar o índice Rust; e reserva com `CP_RUST_SERVER=0`.
+Nenhuma tela, backend vivo, índice de produção ou serviço foi alterado nesta prova.
+
+### Prova de uso real do dono único (04/10/2026)
+
+Backend da branch `feat/rust-single-owner` (`d6dbdc36`) isolado pelo `scripts/prova-dono-unico.py`
+(unit transiente, HOME, portas e `tmux -L` próprios, Haiku). Criar e mandar na hora: 10/10 sem
+terminal e 10/10 com terminal, cada mensagem uma vez, nenhum "religou"/"desligou" e nenhum
+`runtime.*` no diário. Fila com o Claude ocupado (3 em ordem, uma vez cada), `/clear` com o chat
+aberto (não cai), restart com fila e com cano morto (uma entrega, parada em 0,2 s sem SIGKILL),
+uma queda do Rust (sessão segue no Rust novo, envio durante a queda sai uma vez), três quedas em
+60 s (o Python assume, nada duplicado), trava de escrita na fila (400 com código, sessão segue no
+Rust), Git ocupado (503 `workspace_busy` em 0,01 s, nada no Python) e troca de conta com e sem
+terminal (0,6–0,7 s, mesma chave, uma entrega na conta nova). Ficam manuais no app real a entrega
+incerta forçada no terminal e a transferência Claude → Codex. Tabela e achados (um
+`reopen_failed` intermitente no restart, e o 500 com pilha da política com geração antiga) em
+[`prova-real.md`](../migracao-rust/dono-unico/prova-real.md).
+
+## Observação terminal Rust: erro visível, sem captura Python
+
+(04/10/2026, dono único, decisão 3 do dono.) Com a ponte ligada, o Rust é o único dono da
+captura de quem tem lease: erro de transporte, resposta torta, quadro inválido, alvo do pane ou
+vínculo que não se lê sobem como `ObservationFailed(<código>)`, nunca como `None`. O monitor de
+estado repete o último evento com `problema="terminal_observacao_falhou"` e o código em
+`problema_detalhe` (faixa na web e no app), dorme a rodada e pergunta ao Rust de novo; a prévia
+mantém o texto que tinha. O erro ainda passa pelo `has-session`: sessão que sumiu vira `dead`, não
+um aviso eterno. Sem evento anterior, o estado sai do plugin ou do marcador do hook, nunca de um
+`idle` presumido. A pausa entre tentativas é só a do Rust (`terminal_control.rs`,
+`record_failure`, até 60 s); o disjuntor por sessão do Python (3 falhas, pausa de 1 s a 30 s e
+diários `fallback`/`paused`/`recovered`) saiu, porque com ele cada falha voltava a capturar pelo
+Python e o cartão mostrava uma leitura que o Rust não confirmou. O diário grava
+`terminal_observer.erro` no máximo uma vez por minuto por sessão e código (um Rust que alterna
+sucesso e falha não enche o diário); o log do Rust diz "observação terminal
+falhou". `None` (captura Python) fica só para dono fixo ou Rust ausente (modo `pending`/`python`):
+ponte desligada, Windows, nome fora de `[A-Za-z0-9._-]{1,64}`, provider fora do Rust ou sessão ainda
+sem vínculo. No `pending` (subida do Rust, ou os segundos entre uma queda e a volta dele) a ponte está
+desligada e o Python atende Git/arquivos e a captura do painel: o Rust não está lá para atender, e
+nenhuma posse de sessão passa por isso.
+
+O texto abaixo é o da Parte 2C, quando o erro caía na captura Python; a regra acima o substitui.
+
+### Parte 2C: observação terminal Rust com reserva Python
 
 (03/10/2026, Parte 2C, ensaios isolados.) O `hangar-server` abre uma segunda porta em
 `127.0.0.1:0`, no mesmo processo e sob a mesma parada do listener público. Isso cobre também
 um bind público em IP LAN específico, que não aceita conexões destinadas a `127.0.0.1`.
 A saúde anuncia `terminal_address`; o Supervisor só o usa depois de confirmar o protocolo e
-conferir IP literal de loopback e porta válida. Endereço ausente/torto desliga a ponte com
-aviso. A porta pública recusa o endpoint terminal e a privada só monta esse endpoint.
+conferir IP literal de loopback e porta válida. Endereço ausente/torto é falha de partida
+(`hangar_server.reserva` `endereco_privado`): o Python assume a porta inteira, em vez de ligar o
+Rust com as pontes desligadas (dono único, Task 5). A porta pública recusa o endpoint terminal e a privada só monta esse endpoint.
 
 `POST /__hangar_server/terminal` confere origem TCP de loopback e segredo interno em tempo
 constante antes de ler o corpo. Cabeçalho encaminhado externo, inclusive duplicado ou inválido,
@@ -1135,7 +1346,7 @@ dedupe, drain e SSE continuam no Python.
 
 Ao anexar, o observador vira o cliente "atual" do tmux (comando sem `-c`, hooks) e manda foco ao
 pane; isso é do `tmux -C` e fica. Por isso a saída avulsa de hook fora de `%begin/%end` é
-ignorada pelo parser, a liberação fura a pausa por falhas e a vaga cheia (senão o cliente segue
+ignorada pelo parser, a liberação fura a vaga cheia (senão o cliente segue
 anexado até 90 s), e nome fora de `[A-Za-z0-9._-]{1,64}` não chama o Rust (04/10/2026, revisão
 com sessões reais em `docs/migracao-rust/parte2b/revisao-real.md`).
 

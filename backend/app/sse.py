@@ -1175,6 +1175,12 @@ async def merged_events(name: str, jsonl: str, provider: str = "claude",
                 # Quando awaiting_input + overlay (rodape de abas = AskUserQuestion estruturado),
                 # emite ask_question UMA VEZ por prompt; reseta ao sair do estado.
                 parsed_state = json.loads(data)
+                if current_provider == "claude" and not parsed_state.get("problema"):
+                    # Sessão com terminal no Rust: o monitor do pane não sabe que o runtime falhou.
+                    from app.runtime_adapter import runtime_problem
+                    if problem := runtime_problem(name):
+                        parsed_state.update(problema=problem[0], problema_detalhe=problem[1])
+                        data = json.dumps(parsed_state, ensure_ascii=False)
                 ultimo_estado = parsed_state.get("state")
                 # Diagnostico do "medição indisponível": loga o statusline CRU quando o segmento 💬
                 # nao tem os 2 pares. Uma vez por statusline DISTINTO (nao a cada tick) pra nao virar

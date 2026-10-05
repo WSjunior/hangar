@@ -582,3 +582,45 @@ async fn terminal_runtime_removed_recovered_root_has_no_further_delivery_or_publ
         assert!(f.state()["rows"].as_array().unwrap().is_empty());assert!(f.calls.lock().unwrap().is_empty());assert!(f.io.socket_calls.lock().unwrap().is_empty());assert!(f.io.calls.lock().unwrap().is_empty());h.stop().await.unwrap();
     }
 }
+
+/// Teclado emprestado ao Python: nada é digitado enquanto vale, a entrada fica na fila e sai uma vez depois.
+#[tokio::test]
+async fn rust_queue_waits_during_keyboard_loan() {
+    let f=Fixture::new().await; let h=f.start();
+    let loan=h.control("loan-1".into(),"keyboard_loan".into(),json!({"seconds":30})).await.unwrap();
+    assert_eq!(serde_json::to_value(loan.disposition).unwrap(),"accepted");
+    let loan_id=loan.payload["loan_id"].as_str().unwrap().to_string();
+    let busy=h.control("loan-2".into(),"keyboard_loan".into(),json!({"seconds":30})).await.unwrap();
+    assert_eq!(busy.payload["code"],"keyboard_busy","um empréstimo por vez");
+    let again=h.control("loan-1".into(),"keyboard_loan".into(),json!({"seconds":30})).await.unwrap();
+    assert_eq!(again.payload["loan_id"],loan_id.as_str(),"o mesmo pedido repetido recebe o mesmo empréstimo");
+    let wrong=h.control("return-0".into(),"keyboard_return".into(),json!({"loan_id":"loan:1:999"})).await.unwrap();
+    assert_eq!(wrong.payload["code"],"keyboard_loan_expired","devolução de outro empréstimo não solta o teclado");
+    let reply=h.command(f.command("during","Durante o empréstimo")).await.unwrap();
+    assert_eq!(reply.payload["code"],"keyboard_loan");
+    tokio::time::sleep(Duration::from_millis(100)).await;     // vários ciclos do drenador
+    assert!(f.io.calls.lock().unwrap().iter().all(|r|r.args[0]!="send-keys"),"nada digitado durante o empréstimo");
+    let back=h.control("return-1".into(),"keyboard_return".into(),json!({"loan_id":loan_id})).await.unwrap();
+    assert_eq!(serde_json::to_value(back.disposition).unwrap(),"accepted");
+    let typed=||f.io.calls.lock().unwrap().iter().filter(|r|r.args.iter().any(|a|a.contains("Durante o empréstimo"))).count();
+    f.wait_for("digitação depois do empréstimo",||typed()>=1).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(typed(),1,"a entrada sai uma vez");
+    h.stop().await.unwrap();
+}
+
+/// Prazo vencido: o Rust retoma o teclado sozinho e a devolução tardia é recusada com código.
+#[tokio::test]
+async fn keyboard_loan_expires_and_rust_takes_it_back() {
+    let f=Fixture::new().await; let h=f.start();
+    let loan=h.control("loan-1".into(),"keyboard_loan".into(),json!({"seconds":1})).await.unwrap();
+    let loan_id=loan.payload["loan_id"].as_str().unwrap().to_string();
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let reply=h.command(f.command("after","Depois do prazo")).await.unwrap();
+    assert_ne!(reply.payload["code"],"keyboard_loan");
+    f.wait_for("entrega depois do prazo",||f.state()["rows"].as_array().unwrap().iter().all(|r|r["delivered"]==true)).await;
+    let late=h.control("return-1".into(),"keyboard_return".into(),json!({"loan_id":loan_id})).await.unwrap();
+    assert_eq!(serde_json::to_value(late.disposition).unwrap(),"rejected");
+    assert_eq!(late.payload["code"],"keyboard_loan_expired");
+    h.stop().await.unwrap();
+}

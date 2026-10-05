@@ -94,7 +94,7 @@ def test_shared_capture_prefers_bridge_and_keeps_python_reserve(monkeypatch, fai
 
 @pytest.mark.parametrize("field,value", [("binding", "old"), ("started", 2.0),
     ("started", True), ("text", 3), ("analysis", {}), ("analysis", None)])
-def test_invalid_capture_returns_absence(monkeypatch, field, value):
+def test_invalid_capture_is_an_error(monkeypatch, field, value):
     t = bridge()
     t.configure("127.0.0.1:12345", "secret")
     monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
@@ -107,7 +107,8 @@ def test_invalid_capture_returns_absence(monkeypatch, field, value):
     monkeypatch.setattr(t, "_request", request)
     async def run():
         async with t.lease("s", "claude", lambda: "thread"):
-            assert await t.capture("s", 1.0) is None
+            with pytest.raises(t.ObservationFailed, match="invalid_frame"):
+                await t.capture("s", 1.0)
     asyncio.run(run())
 
 
@@ -252,7 +253,8 @@ def test_http_rejects_utf8_json_and_bounded_body(monkeypatch, body):
             return Response()
     monkeypatch.setattr(t, "_opener", Opener())
     t.configure("127.0.0.1:12345", "secret")
-    assert asyncio.run(t._request({"op":"release", "consumer":"c"})) is None
+    with pytest.raises(t.ObservationFailed, match="invalid_http_response"):
+        asyncio.run(t._request({"op":"release", "consumer":"c"}))
     assert len(requested) == 1
 
 
@@ -337,7 +339,7 @@ def test_clear_with_identical_binding_and_text_still_discards_frame(monkeypatch)
 
 
 @pytest.mark.parametrize("address", [None, "198.51.100.1:8765", "localhost:8765", "127.0.0.1:0", "0.0.0.0:8765", "http://127.0.0.1:8765", 1])
-def test_supervisor_bad_health_address_keeps_bridge_disabled(monkeypatch, address):
+def test_supervisor_bad_health_address_is_startup_failure(monkeypatch, address):
     from app import rust_server
     t = bridge()
     class Process:
@@ -352,7 +354,8 @@ def test_supervisor_bad_health_address_keeps_bridge_disabled(monkeypatch, addres
     monkeypatch.setattr(rust_server, "server_log_path", lambda: "/tmp/unused-test-log")
     monkeypatch.setattr(rust_server, "_health", lambda *args: dict(ok=True, protocol=rust_server.RUST_SERVER_PROTOCOL, terminal_address=address))
     supervisor = rust_server.Supervisor(None, "0.0.0.0", 12345, 12346, "owner", "", lambda: False)
-    assert asyncio.run(supervisor._start()) == "up"
+    # Sem endereço privado válido o Rust não sobe pela metade: o Python assume a porta inteira.
+    assert asyncio.run(supervisor._start()) == "address"
     assert t._config is None
 
 
@@ -425,7 +428,8 @@ def test_bridge_error_is_visible_without_raw_response_or_secret(monkeypatch, cap
     def failure(*args):
         raise ValueError("private pane and secret")
     monkeypatch.setattr(t, "_http", failure)
-    assert asyncio.run(t._request({"op":"release", "consumer":"c"})) is None
+    with pytest.raises(t.ObservationFailed, match="invalid_http_response"):
+        asyncio.run(t._request({"op":"release", "consumer":"c"}))
     assert any(r.levelname == "WARNING" for r in caplog.records)
     assert "private pane" not in caplog.text and "secret" not in caplog.text
 
@@ -510,7 +514,7 @@ def test_invalid_plugin_label_keeps_python_behavior_and_facts_are_read_once(monk
 
 
 @pytest.mark.parametrize("kind", ["bad-status", "incomplete-read"])
-def test_http_protocol_errors_use_reserve_without_raw_diagnostics(monkeypatch, caplog, kind):
+def test_http_protocol_errors_are_coded_without_raw_diagnostics(monkeypatch, caplog, kind):
     import http.client
     t = bridge()
     t.configure("127.0.0.1:12345", "test-only")
@@ -518,35 +522,46 @@ def test_http_protocol_errors_use_reserve_without_raw_diagnostics(monkeypatch, c
         if kind == "bad-status": raise http.client.BadStatusLine("dummy-private")
         raise http.client.IncompleteRead(b"dummy-private", 100)
     monkeypatch.setattr(t, "_http", failure)
-    assert asyncio.run(t._request({"op":"release", "consumer":"c"})) is None
+    with pytest.raises(t.ObservationFailed, match="http_protocol"):
+        asyncio.run(t._request({"op":"release", "consumer":"c"}))
     assert "http_protocol" in caplog.text
     assert "dummy-private" not in caplog.text and "test-only" not in caplog.text
 
 
 @pytest.mark.parametrize("kind", ["bad-status", "incomplete-read"])
-def test_http_protocol_failure_preserves_capture_and_preview_python_reserve(monkeypatch, kind):
+def test_http_protocol_failure_never_switches_capture_or_preview_to_python(monkeypatch, kind):
     import http.client
     from app import preview
     t = bridge()
     t.configure("127.0.0.1:12345", "test-only")
     monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
-    monkeypatch.setattr(state.tmux, "capture_pane", lambda name: "● Python reserve\n")
+    python_captures = []
+    monkeypatch.setattr(state.tmux, "capture_pane", lambda *args: python_captures.append(args) or "● Python\n")
     monkeypatch.setattr(preview, "read_sidecar", lambda stem: None)
+    captures = []
     def http_response(config, payload):
         if payload["op"] == "capture":
-            if kind == "bad-status": raise http.client.BadStatusLine("dummy-private")
-            raise http.client.IncompleteRead(b"dummy-private", 100)
+            captures.append(payload)
+            if len(captures) > 2:
+                if kind == "bad-status": raise http.client.BadStatusLine("dummy-private")
+                raise http.client.IncompleteRead(b"dummy-private", 100)
+            return dict(binding=payload["binding"], started=payload["started"], text="● Rust\n",
+                        analysis=analysis() | {"preview": "Rust"})
         return {}
     monkeypatch.setattr(t, "_http", http_response)
     async def run():
         async with t.lease("s", "claude", lambda: "b"):
-            assert await state.shared_capture("s", 0) == "● Python reserve\n"
-        state.forget_frame("s")
+            assert await state.shared_capture("s", 0) == "● Rust\n"
+            state.forget_frame("s")
         broker = preview.PreviewBroker("s", "claude", lambda: "b")
         source = broker.subscribe()
         try:
             assert await anext(source) == ("", False, False)
-            assert await asyncio.wait_for(anext(source), 1) == ("Python reserve", False, False)
+            assert await asyncio.wait_for(anext(source), 1) == ("Rust", False, False)
+            # Erros seguintes não publicam nada: a bolha fica com o texto do Rust.
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(anext(source), 1.2)
+            assert len(captures) > 2
         finally:
             task = broker._task
             await source.aclose()
@@ -582,7 +597,8 @@ def test_terminal_bridge_refuses_every_redirect_before_second_request(monkeypatc
     for handler in (Transport(), urllib.request.HTTPDefaultErrorHandler(), urllib.request.HTTPErrorProcessor(), t._NoRedirect()):
         opener.add_handler(handler)
     monkeypatch.setattr(t, "_opener", opener)
-    assert asyncio.run(t._request({"op":"release", "consumer":"c"})) is None
+    with pytest.raises(t.ObservationFailed, match=f"http_{status}"):
+        asyncio.run(t._request({"op":"release", "consumer":"c"}))
     assert calls == [("http://127.0.0.1:12345/__hangar_server/terminal", "test-only")]
 
 
@@ -853,8 +869,10 @@ def test_lease_start_failure_preserves_python_consumer(monkeypatch, caplog, fail
     from app import preview
     t = bridge()
     t.configure("127.0.0.1:12345", "test-only")
+    targets = [0]
     def target(name):
-        if failure_site == "target":
+        targets[0] += 1
+        if failure_site == "target" and targets[0] == 1:
             raise RuntimeError("private-pane-and-secret")
         return "%8"
     monkeypatch.setattr(state.tmux, "_pane_target", target)
@@ -919,7 +937,7 @@ def test_lease_start_failure_preserves_python_consumer(monkeypatch, caplog, fail
     assert not any(p["op"] == "reduce" for p in calls)
 
 
-def test_failed_lease_target_stays_retryable_and_allows_python_capture(monkeypatch):
+def test_failed_lease_target_stays_retryable_and_never_captures_in_python(monkeypatch):
     t = bridge()
     t.configure("127.0.0.1:12345", "test-only")
     def failed_target(name):
@@ -930,7 +948,9 @@ def test_failed_lease_target_stays_retryable_and_allows_python_capture(monkeypat
             assert source.open
             assert source.identity() is not None
             assert not t.retired("closed-start-failure")
-            assert await state.shared_capture("closed-start-failure", 0) == "Python"
+            for _ in range(2):
+                with pytest.raises(t.ObservationFailed, match="terminal_target_RuntimeError"):
+                    await state.shared_capture("closed-start-failure", 0)
     asyncio.run(run())
 
 
@@ -960,8 +980,9 @@ def test_stalled_bridge_many_chats_keep_default_executor_free_and_bound_jobs(mon
         started = loop.time()
         try:
             results = await asyncio.wait_for(asyncio.gather(*(
-                t._request({"op": "release", "consumer": f"chat-{i}"}) for i in range(20))), 1)
-            assert results == [None] * 20
+                t._request({"op": "release", "consumer": f"chat-{i}"}) for i in range(20)),
+                return_exceptions=True), 1)
+            assert {r.code for r in results} <= {"http_timeout", "io_busy"}
             assert loop.time() - started < 0.3
             assert await asyncio.wait_for(asyncio.to_thread(lambda: "free"), 0.1) == "free"
             assert 1 <= peak[0] <= 4
@@ -995,7 +1016,8 @@ def test_request_cancellation_keeps_running_io_capacity_until_job_finishes(monke
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
-            assert await asyncio.wait_for(t._request({"op": "release", "consumer": "second"}), 0.1) is None
+            with pytest.raises(t.ObservationFailed, match="io_busy"):
+                await asyncio.wait_for(t._request({"op": "release", "consumer": "second"}), 0.1)
             assert len(calls) == 1
         finally:
             release.set()
@@ -1007,69 +1029,6 @@ def test_request_cancellation_keeps_running_io_capacity_until_job_finishes(monke
     finally:
         release.set()
         pool.shutdown(wait=True)
-
-
-def test_bridge_circuit_pauses_after_three_failures_grows_and_resets(monkeypatch):
-    from types import SimpleNamespace
-    t = bridge()
-    now = [100.0]
-    monkeypatch.setattr(t, "time", SimpleNamespace(monotonic=lambda: now[0]))
-    t.configure("127.0.0.1:12345", "test-only")
-    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
-    calls = []
-    fail = [True]
-    def response(config, payload):
-        if payload["op"] == "acquire":
-            return {}
-        calls.append(payload)
-        if fail[0]:
-            raise TimeoutError("private-pane-and-secret")
-        if payload["op"] == "capture":
-            return dict(binding=payload["binding"], started=payload["started"], text="", analysis=analysis())
-        return {}
-    monkeypatch.setattr(t, "_http", response)
-    async def run():
-        # Qualquer chamada além da liberação (que passa por cima da pausa) exercita o disjuntor.
-        source = t.lease("circuit-recovery", "claude", lambda: "b")
-        await source.start()
-        for _ in range(3):
-            assert await t._request({"op": "probe", "consumer": source.consumer}) is None
-        assert await t._request({"op": "probe", "consumer": source.consumer}) is None
-        assert len(calls) == 3
-        now[0] = 101.0
-        assert await t._request({"op": "probe", "consumer": source.consumer}) is None
-        now[0] = 102.0
-        assert await t._request({"op": "probe", "consumer": source.consumer}) is None
-        assert len(calls) == 4
-        now[0] = 103.0
-        fail[0] = False
-        with t.use(source):
-            assert await t.capture("circuit-recovery", 103.0) is not None
-        fail[0] = True
-        for _ in range(3):
-            assert await t._request({"op": "probe", "consumer": source.consumer}) is None
-        t.configure("127.0.0.1:23456", "another-test-only")
-        fail[0] = False
-        assert await t._request({"op": "release", "consumer": source.consumer}) == {}
-        await source.close()
-    asyncio.run(run())
-
-
-def test_malformed_capture_counts_as_failure_and_stops_io_until_retry(monkeypatch):
-    t = bridge()
-    t.configure("127.0.0.1:12345", "test-only")
-    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
-    calls = []
-    def response(config, payload):
-        calls.append(payload)
-        return {}  # Corpo válido, quadro incompleto.
-    monkeypatch.setattr(t, "_http", response)
-    async def run():
-        async with t.lease("malformed-circuit", "claude", lambda: "b"):
-            for i in range(4):
-                assert await t.capture("malformed-circuit", float(i)) is None
-    asyncio.run(run())
-    assert len([p for p in calls if p["op"] == "capture"]) == 3
 
 
 def test_old_generation_io_failure_cannot_close_reconfigured_bridge(monkeypatch):
@@ -1096,7 +1055,8 @@ def test_old_generation_io_failure_cannot_close_reconfigured_bridge(monkeypatch)
             await asyncio.wait_for(entered.wait(), 1)
             t.configure("127.0.0.1:23456", "new-test-only")
             for _ in range(2):
-                assert await t._request({"op": "release", "consumer": "new"}) is None
+                with pytest.raises(t.ObservationFailed, match="http_timeout"):
+                    await t._request({"op": "release", "consumer": "new"})
             release.set()
             assert await old is None
             assert await t._request({"op": "release", "consumer": "new"}) == {}
@@ -1158,11 +1118,14 @@ def test_http_does_not_initialize_tls_for_loopback(monkeypatch):
 @pytest.mark.parametrize("failure,code", [(400, "http_400"), (503, "http_503"),
     ("timeout", "http_timeout"), ("connection", "http_connection"), ("protocol", "http_protocol"),
     ("url-timeout", "http_timeout")])
-def test_bridge_diagnostics_preserve_safe_failure_reason_and_recovery(monkeypatch, caplog, failure, code):
+def test_bridge_diagnostics_record_safe_reason_once_per_minute(monkeypatch, caplog, failure, code):
     import http.client
     import urllib.error
+    from types import SimpleNamespace
     from app import diag
     t = bridge()
+    now = [100.0]
+    monkeypatch.setattr(t, "time", SimpleNamespace(monotonic=lambda: now[0]))
     t.configure("127.0.0.1:12345", "private-secret")
     monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
     entries = []
@@ -1189,30 +1152,26 @@ def test_bridge_diagnostics_preserve_safe_failure_reason_and_recovery(monkeypatc
         source = t.lease("reason-recovery", "claude", lambda: "b")
         await source.start()
         for _ in range(2):
-            assert await t._request({"op": "release", "consumer": source.consumer}) is None
-        assert len(entries) == 1
-        assert entries[0][0] == ("terminal_observer.fallback", "aviso")
-        assert entries[0][1]["codigo"] == code
-        assert entries[0][1]["sessao"] == "reason-recovery"
-        assert isinstance(entries[0][1]["ms"], int)
+            with pytest.raises(t.ObservationFailed, match=code):
+                await t._request({"op": "release", "consumer": source.consumer})
+        assert entries == [(("terminal_observer.erro", "aviso"), {"sessao": "reason-recovery", "codigo": code})]
         failing[0] = False
         assert await t._request({"op": "acquire", "consumer": source.consumer}) == {}
-        assert len(entries) == 1
-        assert entries[0][0] == ("terminal_observer.fallback", "aviso")
-        assert entries[0][1]["codigo"] == code
-        assert entries[0][1]["sessao"] == "reason-recovery"
-        assert isinstance(entries[0][1]["ms"], int)
+        assert len(entries) == 1 and t._session(source.name).error == code
         with t.use(source):
             assert await t.capture("reason-recovery", 1.0) is not None
-        assert entries[-1][0] == ("terminal_observer.recovered", "ok")
-        assert entries[-1][1]["codigo"] == "rust_available"
-        assert entries[-1][1]["sessao"] == "reason-recovery"
-        assert isinstance(entries[-1][1]["ms"], int)
+        assert len(entries) == 1 and t._session(source.name).error is None
+        # Sucesso e falha alternados dentro do minuto não repetem o registro.
         failing[0] = True
-        assert await t._request({"op": "release", "consumer": source.consumer}) is None
-        assert entries[-1][0] == ("terminal_observer.fallback", "aviso")
-        assert entries[-1][1]["codigo"] == code
-        assert entries[-1][1]["sessao"] == "reason-recovery"
+        now[0] = 159.0
+        with pytest.raises(t.ObservationFailed, match=code):
+            await t._request({"op": "release", "consumer": source.consumer})
+        assert len(entries) == 1 and t._session(source.name).error == code
+        now[0] = 160.0
+        with pytest.raises(t.ObservationFailed, match=code):
+            await t._request({"op": "release", "consumer": source.consumer})
+        assert entries[-1] == (("terminal_observer.erro", "aviso"), {"sessao": "reason-recovery", "codigo": code})
+        assert len(entries) == 2
         await source.close()
     asyncio.run(run())
     assert caplog.text.count(code) == 2
@@ -1220,7 +1179,7 @@ def test_bridge_diagnostics_preserve_safe_failure_reason_and_recovery(monkeypatc
     assert "private-" not in repr(entries)
 
 
-def test_malformed_frame_cannot_report_recovery_before_validated_capture(monkeypatch):
+def test_malformed_frame_stays_failed_until_validated_capture(monkeypatch):
     from app import diag
     t = bridge()
     t.configure("127.0.0.1:12345", "test-only")
@@ -1237,19 +1196,16 @@ def test_malformed_frame_cannot_report_recovery_before_validated_capture(monkeyp
     monkeypatch.setattr(t, "_http", response)
     async def run():
         async with t.lease("diagnostic-validation", "claude", lambda: "b"):
-            assert await t.capture("diagnostic-validation", 1.0) is None
-            assert await t.capture("diagnostic-validation", 2.0) is None
+            for started in (1.0, 2.0):
+                with pytest.raises(t.ObservationFailed, match="invalid_frame"):
+                    await t.capture("diagnostic-validation", started)
             assert await t._request({"op": "acquire"}) == {}
-            assert len(entries) == 1
-            assert entries[0][0] == ("terminal_observer.fallback", "aviso")
-            assert entries[0][1]["codigo"] == "invalid_frame"
-            assert entries[0][1]["sessao"] == "diagnostic-validation"
-            assert isinstance(entries[0][1]["ms"], int)
+            assert entries == [(("terminal_observer.erro", "aviso"),
+                                {"sessao": "diagnostic-validation", "codigo": "invalid_frame"})]
+            assert t._session("diagnostic-validation").error == "invalid_frame"
             valid[0] = True
             assert await t.capture("diagnostic-validation", 3.0) is not None
-            assert entries[-1][0] == ("terminal_observer.recovered", "ok")
-            assert entries[-1][1]["codigo"] == "rust_available"
-            assert entries[-1][1]["sessao"] == "diagnostic-validation"
+            assert t._session("diagnostic-validation").error is None
     asyncio.run(run())
 
 
@@ -1288,107 +1244,9 @@ def test_old_resolver_error_does_not_charge_new_generation(monkeypatch, operatio
             await asyncio.gather(job, return_exceptions=True)
         else:
             await asyncio.gather(job, return_exceptions=True)
-        assert t._session("").failures == 2
+        assert t._session("").error == "new-failure-two"
         assert t._available()
         await source.close()
-    asyncio.run(run())
-
-
-def test_failing_session_reaches_circuit_while_healthy_captures_continue(monkeypatch, caplog):
-    import urllib.error
-    from types import SimpleNamespace
-    from app import diag
-    t = bridge()
-    now = [100.0]
-    monkeypatch.setattr(t, "time", SimpleNamespace(monotonic=lambda: now[0]))
-    t.configure("127.0.0.1:12345", "test-only")
-    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
-    entries, calls = [], []
-    monkeypatch.setattr(diag, "registrar", lambda *args, **fields: entries.append((args, fields)))
-    failing = {"bad"}
-    def response(config, payload):
-        calls.append(payload.copy())
-        if payload["op"] == "capture":
-            if payload["name"] in failing:
-                raise urllib.error.HTTPError("http://private-url", 503, "private-pane", None, None)
-            return dict(binding=payload["binding"], started=payload["started"], text="Rust", analysis=analysis())
-        return {}
-    monkeypatch.setattr(t, "_http", response)
-    async def run():
-        bad, good = t.lease("bad", "claude", lambda: "b"), t.lease("good", "claude", lambda: "g")
-        await bad.start()
-        await good.start()
-        try:
-            for i in range(10):
-                now[0] = 100 + i * 0.05
-                with t.use(bad):
-                    assert await state.shared_capture("bad", 0) == "Python"
-                with t.use(good):
-                    assert await state.shared_capture("good", 0) == "Rust"
-            assert len([p for p in calls if p["op"] == "capture" and p["name"] == "bad"]) == 3
-            assert len([p for p in calls if p["op"] == "capture" and p["name"] == "good"]) == 10
-            assert len(entries) == 2
-            assert entries[0][0] == ("terminal_observer.fallback", "aviso")
-            assert entries[0][1]["sessao"] == "bad"
-            assert entries[0][1]["codigo"] == "http_503"
-            assert isinstance(entries[0][1]["ms"], int)
-            assert entries[1][0] == ("terminal_observer.paused", "aviso")
-            assert entries[1][1] == {"sessao": "bad", "codigo": "http_503", "limite_ms": 1000}
-            failing.clear()
-            now[0] = 102.0
-            with t.use(bad):
-                assert await t.capture("bad", 102.0) is not None
-            assert [entry[0][0] for entry in entries] == [
-                "terminal_observer.fallback", "terminal_observer.paused", "terminal_observer.recovered"]
-            assert entries[-1][1]["sessao"] == "bad"
-            assert entries[-1][1]["ms"] == 2000
-        finally:
-            await bad.close()
-            await good.close()
-    asyncio.run(run())
-    assert caplog.text.count("http_503") == 1
-    assert "private-" not in caplog.text + repr(entries)
-
-
-def test_session_cooldown_and_cleanup_follow_last_consumer(monkeypatch):
-    from types import SimpleNamespace
-    t = bridge()
-    now = [100.0]
-    monkeypatch.setattr(t, "time", SimpleNamespace(monotonic=lambda: now[0]))
-    t.configure("127.0.0.1:12345", "test-only")
-    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
-    calls = []
-    def response(config, payload):
-        calls.append(payload.copy())
-        if payload["op"] == "capture":
-            raise TimeoutError("private")
-        return {}
-    monkeypatch.setattr(t, "_http", response)
-    async def run():
-        first = t.lease("shared-failure", "claude", lambda: "b")
-        second = t.lease("shared-failure", "claude", lambda: "b")
-        await first.start()
-        await second.start()
-        with t.use(first):
-            for i in range(3):
-                assert await t.capture(first.name, float(i)) is None
-        await first.close()
-        with t.use(second):
-            assert await t.capture(second.name, 4.0) is None
-        assert len([p for p in calls if p["op"] == "capture"]) == 3
-        now[0] = 101.0
-        await second.acquire()
-        with t.use(second):
-            assert await t.capture(second.name, 5.0) is None
-            assert await t.capture(second.name, 6.0) is None
-        assert len([p for p in calls if p["op"] == "capture"]) == 4
-        assert second.name in t._sessions
-        await second.close()
-        assert second.name not in t._sessions
-        assert second.name not in t._bindings
-        assert second.name not in t._epochs
-        assert second.name not in t._analysis
-        assert not any(name == second.name for name in t._consumers.values())
     asyncio.run(run())
 
 
@@ -1422,19 +1280,18 @@ def test_recovery_is_independent_and_late_error_cannot_charge_replacement(monkey
         await second.start()
         old = replacement = None
         try:
-            with t.use(first):
-                assert await t.capture("first", 1.0) is None
-            with t.use(second):
-                assert await t.capture("second", 1.0) is None
+            for source in (first, second):
+                with t.use(source), pytest.raises(t.ObservationFailed, match="http_timeout"):
+                    await t.capture(source.name, 1.0)
             failing.remove("first")
             with t.use(first):
                 assert await t.capture("first", 2.0) is not None
             assert [(e[0][0], e[1]["sessao"]) for e in entries] == [
-                ("terminal_observer.fallback", "first"), ("terminal_observer.fallback", "second"),
-                ("terminal_observer.recovered", "first")]
-            with t.use(second):
-                assert await t.capture("second", 2.0) is None
-            assert len(entries) == 3
+                ("terminal_observer.erro", "first"), ("terminal_observer.erro", "second")]
+            assert (t._session("first").error, t._session("second").error) == (None, "http_timeout")
+            with t.use(second), pytest.raises(t.ObservationFailed):
+                await t.capture("second", 2.0)
+            assert len(entries) == 2
             pending[0] = True
             with t.use(first):
                 old = asyncio.create_task(t.capture("first", 3.0))
@@ -1447,7 +1304,7 @@ def test_recovery_is_independent_and_late_error_cannot_charge_replacement(monkey
             pending[0] = False
             with t.use(replacement):
                 assert await t.capture("first", 4.0) is not None
-            assert len(entries) == 3
+            assert len(entries) == 2
         finally:
             release.set()
             if old is not None:
@@ -1462,6 +1319,8 @@ def test_recovery_is_independent_and_late_error_cannot_charge_replacement(monkey
             await source.close()
         assert not any(name.startswith("finished-") for name in t._sessions)
         assert not any(name.startswith("finished-") for name in t._consumers.values())
+        for table in (t._bindings, t._epochs, t._analysis):
+            assert not any(name.startswith("finished-") for name in table)
     asyncio.run(run())
 
 
@@ -1631,69 +1490,6 @@ def test_cancelled_start_releases_partial_remote_ref_and_propagates(monkeypatch)
     assert [p["op"] for p in calls] == ["acquire", "release"]
 
 
-def test_pause_diagnostic_records_session_backoff_only_when_scheduled(monkeypatch):
-    from types import SimpleNamespace
-    from app import diag
-    t = bridge()
-    now = [100.0]
-    monkeypatch.setattr(t, "time", SimpleNamespace(monotonic=lambda: now[0]))
-    t.configure("127.0.0.1:12345", "test-only")
-    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
-    entries = []
-    monkeypatch.setattr(diag, "registrar", lambda *args, **fields: entries.append((args, fields)))
-    fail = [True]
-    def response(config, payload):
-        if payload["op"] == "capture":
-            if payload["name"] == "paused-bad" and fail[0]:
-                raise TimeoutError("private-timeout")
-            return dict(binding=payload["binding"], started=payload["started"], text="Rust", analysis=analysis())
-        return {}
-    monkeypatch.setattr(t, "_http", response)
-    async def run():
-        bad = t.lease("paused-bad", "claude", lambda: "b")
-        good = t.lease("unpaused-good", "claude", lambda: "g")
-        await bad.start()
-        await good.start()
-        try:
-            with t.use(bad):
-                for i in range(10):
-                    assert await t.capture(bad.name, float(i)) is None
-            assert [(e[0][0], e[1].get("limite_ms")) for e in entries] == [
-                ("terminal_observer.fallback", None), ("terminal_observer.paused", 1000)]
-            now[0] = 100.9
-            with t.use(good):
-                assert await t.capture(good.name, 1.0) is not None
-            with t.use(bad):
-                assert await t.capture(bad.name, 20.0) is None
-            assert len(entries) == 2
-            now[0] = 101.0
-            await bad.acquire()  # Um ack não abre o circuito nem anuncia recuperação.
-            assert len(entries) == 2
-            with t.use(bad):
-                assert await t.capture(bad.name, 21.0) is None
-                assert await t.capture(bad.name, 22.0) is None
-            assert len(entries) == 3
-            assert entries[-1][0] == ("terminal_observer.paused", "aviso")
-            assert entries[-1][1]["limite_ms"] == 2000
-            assert {e[1]["sessao"] for e in entries} == {bad.name}
-            assert entries[-1][1]["codigo"] == "http_timeout"
-            fail[0] = False
-            now[0] = 102.9
-            with t.use(bad):
-                assert await t.capture(bad.name, 23.0) is None
-            assert len(entries) == 3
-            now[0] = 103.0
-            with t.use(bad):
-                assert await t.capture(bad.name, 24.0) is not None
-            assert entries[-1][0] == ("terminal_observer.recovered", "ok")
-            assert len(entries) == 4
-        finally:
-            await bad.close()
-            await good.close()
-    asyncio.run(run())
-    assert "private-" not in repr(entries)
-
-
 @pytest.mark.parametrize("operation", ["payload", "start", "watch", "close", "start-cleanup"])
 @pytest.mark.parametrize("error", [TimeoutError, RuntimeError])
 def test_late_lease_errors_do_not_charge_reused_session(monkeypatch, operation, error):
@@ -1752,7 +1548,7 @@ def test_late_lease_errors_do_not_charge_reused_session(monkeypatch, operation, 
             assert not old.open and t._generation == generation
             t._failure(name, "own_failure_one")
             t._failure(name, "own_failure_two")
-            before = (successor.failures, successor.retry_at, successor.backoff, successor.fallback_since)
+            before = successor.error
             records = list(entries)
             release.set()
             if operation == "watch":
@@ -1762,7 +1558,7 @@ def test_late_lease_errors_do_not_charge_reused_session(monkeypatch, operation, 
             else:
                 await asyncio.wait_for(job, 1)
             assert t._sessions[name] is successor
-            assert (successor.failures, successor.retry_at, successor.backoff, successor.fallback_since) == before
+            assert successor.error == before == "own_failure_two"
             assert entries == records
             assert replacement.identity() is not None
         finally:
@@ -1805,7 +1601,7 @@ def test_late_http_error_from_removed_consumer_does_not_charge_shared_session(mo
             t._failure(remaining.name, "own_failure_two")
             release.set()
             assert await asyncio.wait_for(job, 1) is None
-            assert session.failures == 2 and session.retry_at == 0
+            assert session.error == "own_failure_two"
         finally:
             release.set()
             await asyncio.gather(job, return_exceptions=True)
@@ -1844,7 +1640,7 @@ def test_late_valid_capture_does_not_recover_reused_session(monkeypatch):
             records = list(entries)
             release.set()
             assert await asyncio.wait_for(job, 1) is None
-            assert t._sessions[successor.name].failures == 1
+            assert t._sessions[successor.name].error == "own_failure"
             assert entries == records
             assert successor.name not in t._analysis
         finally:
@@ -1856,10 +1652,9 @@ def test_late_valid_capture_does_not_recover_reused_session(monkeypatch):
     asyncio.run(run())
 
 
-def test_release_reaches_rust_even_while_the_session_is_paused(monkeypatch):
-    # Pausa por falhas recentes não pode segurar a liberação: sem ela o `tmux -C` ficava anexado
-    # à sessão até o prazo de 90 s do Rust.
-    import time as _time
+def test_release_reaches_rust_even_while_the_session_is_failing(monkeypatch):
+    # Falha recente não pode segurar a liberação: sem ela o `tmux -C` ficava anexado à sessão até o
+    # prazo de 90 s do Rust.
     t = bridge()
     t.configure("127.0.0.1:12345", "test-only")
     monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
@@ -1872,7 +1667,7 @@ def test_release_reaches_rust_even_while_the_session_is_paused(monkeypatch):
         lease = t.lease("paused-release", "claude", lambda: "a")
         await lease.start()
         assert "acquire" in calls
-        t._session("paused-release").retry_at = _time.monotonic() + 60
+        t._failure("paused-release", "http_503")
         await lease.close()
     asyncio.run(run())
     assert calls[-1] == "release"
@@ -1893,3 +1688,101 @@ def test_name_rust_refuses_stays_on_python_without_calling_rust(monkeypatch):
         await lease.close()
     asyncio.run(run())
     assert calls == []
+
+
+def test_rust_capture_error_is_reported_not_replaced(monkeypatch):
+    # Decisão 3 do dono único: com a ponte ligada, erro do Rust vira problema visível; o Python
+    # não captura no lugar e o estado anterior fica, até a rodada seguinte perguntar ao Rust.
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    python_captures = []
+    monkeypatch.setattr(state.tmux, "capture_pane", lambda *args: python_captures.append(args) or "Python")
+    captures = []
+    def http(config, payload):
+        if payload["op"] != "capture":
+            return {}
+        captures.append(payload)
+        if len(captures) == 2:
+            raise ConnectionRefusedError("private detail")
+        return dict(binding=payload["binding"], started=payload["started"], text="✻ Thinking…\n❯ ",
+                    analysis=analysis())
+    monkeypatch.setattr(t, "_http", http)
+    entries = []
+    from app import diag
+    monkeypatch.setattr(diag, "registrar", lambda *args, **kwargs: entries.append((args, kwargs)))
+    monkeypatch.setattr(state, "pergunta_aberta", lambda sid: None)
+    monkeypatch.setattr(state, "_sidecar_status", lambda sid: None)
+    monkeypatch.setattr(state.plugin_bridge, "pergunta_pendente", lambda name: None)
+    monkeypatch.setattr(state.plugin_bridge, "estado_recente", lambda name: None)
+    monkeypatch.setattr(state.plugin_bridge, "vivo", lambda name: False)
+    monkeypatch.setattr(state.hook_state, "get_state", lambda sid: None)
+    monkeypatch.setattr(state.hook_state, "shells", lambda sid: [])
+    from app.loop import LoopLink
+    monkeypatch.setattr(LoopLink, "get", lambda self: None)
+    async def run():
+        stream = state.StateMonitor("s", poll=0, sid_get=lambda: "b", provider="claude").stream()
+        try:
+            events = [await asyncio.wait_for(anext(stream), 1)]
+            while events[-1].problema is None:
+                events.append(await asyncio.wait_for(anext(stream), 1))
+            failed, before = events[-1], events[-2]
+            assert (failed.problema, failed.problema_detalhe) == ("terminal_observacao_falhou", "http_connection")
+            assert failed.model_copy(update={"problema": None, "problema_detalhe": None}) == before
+            back = await asyncio.wait_for(anext(stream), 1)
+            assert back.problema is None
+        finally:
+            await stream.aclose()
+    asyncio.run(run())
+    assert python_captures == []
+    assert len(captures) >= 3
+    errors = [e for e in entries if e[0][0] == "terminal_observer.erro"]
+    assert len(errors) == 1 and errors[0][1]["codigo"] == "http_connection"
+    assert "private detail" not in repr(entries)
+
+
+@pytest.mark.parametrize("off", ["bridge", "windows"])
+def test_windows_and_bridge_off_still_capture_in_python(monkeypatch, off):
+    t = bridge()
+    if off == "windows":
+        t.configure("127.0.0.1:12345", "test-only")
+        monkeypatch.setattr(sys, "platform", "win32")
+    calls = []
+    monkeypatch.setattr(t, "_http", lambda config, payload: calls.append(payload) or {})
+    monkeypatch.setattr(state.tmux, "_pane_target", lambda name: "%8")
+    async def run():
+        async with t.lease("s", "claude", lambda: "thread"):
+            assert await state.shared_capture("s", 0) == "Python"
+    asyncio.run(run())
+    assert calls == []
+
+
+@pytest.mark.parametrize("case", ["dead", "first-working"])
+def test_rust_error_still_sees_death_and_never_invents_first_state(monkeypatch, case):
+    t = bridge()
+    t.configure("127.0.0.1:12345", "test-only")
+    def target(name):
+        raise RuntimeError("private-pane")
+    monkeypatch.setattr(state.tmux, "_pane_target", target)
+    monkeypatch.setattr(state.tmux, "sessao_existe", lambda name: case != "dead")
+    python_captures = []
+    monkeypatch.setattr(state.tmux, "capture_pane", lambda *args: python_captures.append(args) or "Python")
+    monkeypatch.setattr(t, "_http", lambda config, payload: {})
+    monkeypatch.setattr(state.plugin_bridge, "estado_recente", lambda name: None)
+    monkeypatch.setattr(state.plugin_bridge, "esquecer", lambda name: None)
+    from app.adapters.claude_headless import sessions
+    monkeypatch.setattr(sessions, "em_troca", lambda name: False)
+    monkeypatch.setattr(state.hook_state, "get_state", lambda sid: ("working", 1.0))
+    async def run():
+        stream = state.StateMonitor("s", poll=0, sid_get=lambda: "b", provider="claude").stream()
+        try:
+            event = await asyncio.wait_for(anext(stream), 1)
+        finally:
+            await stream.aclose()
+        if case == "dead":
+            assert event.state == "dead"
+        else:
+            assert (event.state, event.problema, event.problema_detalhe) == (
+                "working", "terminal_observacao_falhou", "terminal_target_RuntimeError")
+    asyncio.run(run())
+    assert python_captures == []

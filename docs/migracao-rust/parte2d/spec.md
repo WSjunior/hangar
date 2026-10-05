@@ -57,14 +57,10 @@ não portados precisam de barreira de posse antes da reserva; nenhum escritor pa
 
 ## Falhas do Rust
 
-A regra recebida de `Migracao-Rust` em `74177469` também vale no terminal. Reaproveitar
-`RuntimeCoordinator.op`, `_hand_to_python` e `failure_reason`: registrar código e motivo de
-cada falha; recusa comprovadamente anterior a qualquer efeito tenta três vezes, espera e tenta
-uma última vez. Esgotadas as quatro, somente a sessão afetada passa ao Python até reiniciar o
-backend. A mesma operação pode então executar pela reserva, sob a mesma posse e diário.
-Efeito possível impede toda repetição; o erro aparece e a entrada permanece protegida. Uma
-resposta normal, como sessão ocupada ou botão antigo, não é defeito do Rust. Esse orçamento de
-falha de operação não cria um segundo contador de reentrega de mensagem na fila.
+> Substituída pelo dono único (04/10/2026): o "três + uma" e a passagem da sessão ao Python
+> saíram. Falha do Rust sobe uma vez com código e motivo, a sessão continua no Rust e, se ela
+> estiver em erro (inclusive `terminal_delivery_unknown`), a próxima operação faz uma reabertura
+> no Rust. Regra e motivo em [`../dono-unico/desenho.md`](../dono-unico/desenho.md).
 
 ## Prova
 

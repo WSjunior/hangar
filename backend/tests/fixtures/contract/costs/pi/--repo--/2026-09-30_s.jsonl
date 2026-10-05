@@ -1,0 +1,4 @@
+{"type":"session","timestamp":"2026-09-30T12:00:00Z","cwd":"/repo/pi"}
+{"type":"model_change","provider":"kimi-coding","modelId":"k3"}
+{"type":"message","message":{"usage":{"input":21,"output":7,"cacheRead":40,"cacheWrite":13,"cost":{"total":999}}}}
+{"type":"message","message":{"usage":{"input":9,"output":3,"cacheRead":10,"cacheWrite":2}}}

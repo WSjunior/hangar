@@ -2,8 +2,14 @@
 
 **Data:** 2026-10-03
 **Status:** aguardando aprovação do dono
-**Base:** `hangar-server-parte1` em `2c66a347`; contrato interno da parte 2B = versão 4, esta = **5**
+**Base:** `hangar-server-parte1` em `ce5cefd5`, com a 2B integrada em `eae31286`; contrato interno da parte 2B = versão 7, esta = **8**
 **Medições:** [`analise.md`](analise.md)
+
+> **Substituído em parte (04/10/2026, dono único, contrato 18, hoje 20):** "Falha do lado Rust vira
+> repasse" (seção 1) e as quatro tentativas com passagem da parte ao Python (seção 6) saíram.
+> Com o Rust de pé, falha é 503 com código e evento `rust.costs_failed` no diário; o Python só
+> atende quando o processo Rust inteiro não está de pé. Regra vigente em
+> [`plataforma.md`](../../decisoes/plataforma.md#custos-e-uso-no-hangar-server).
 
 ## O que muda para quem usa
 
@@ -44,7 +50,7 @@ pânico, escopos que não chegam do Python: o pedido é repassado ao Python e o 
 do motivo (sem caminho de conversa nem texto). O Python atende como hoje: a primeira chamada a ele
 dispara a varredura dele e responde 202 enquanto ela alcança.
 
-### 2. De onde vêm as contas: `GET /internal/costs/scopes` (contrato versão 5)
+### 2. De onde vêm as contas: `GET /internal/costs/scopes` (contrato versão 8)
 
 Rota nova no Python, só loopback com o segredo interno, fora do catálogo, como a `info` da parte
 1. Devolve o que o `_sincronizar()` hoje calcula antes de ler arquivo:
@@ -65,8 +71,8 @@ Rota nova no Python, só loopback com o segredo interno, fora do catálogo, como
 - `repo` é a raiz do checkout: a origem de skill `@repo` depende dela.
 - O Rust pede os escopos a cada varredura (como o Python relê hoje) e guarda a última resposta
   boa; sem resposta e sem nenhuma guardada, os pedidos são repassados.
-- **Versão:** `RUST_SERVER_PROTOCOL = 5` (Python) e `INTERNAL_PROTOCOL = 5` (Rust), no mesmo
-  commit. **Depende da 2B (versão 4) entrar antes**; se a 2B mudar de número, esta vira o seguinte.
+- **Versão:** `RUST_SERVER_PROTOCOL = 8` (Python) e `INTERNAL_PROTOCOL = 8` (Rust), no mesmo
+  commit. **A 2B (versão 7) foi integrada antes da Task 6**; esta junção usa o número seguinte.
 
 A posse de cada rollout do Codex é calculada no Rust com a regra de
 `codex_contas.account_for_rollout`: caminho canônico dentro de `<home>/sessions` ou
@@ -75,15 +81,28 @@ A posse de cada rollout do Codex é calculada no Rust com a regra de
 ### 3. Índice próprio do Rust
 
 - Arquivo `custos-rust.sqlite3` na mesma pasta do índice do Python
-  (`~/.claude/.hangar-custos/`; no Windows `%LOCALAPPDATA%\hangar\custos\`, fora do OneDrive).
+  (`<XDG_CACHE_HOME>/hangar/custos` quando XDG é absoluto, senão `~/.cache/hangar/custos`;
+  no Windows `%LOCALAPPDATA%\hangar\custos\`, com reserva em `~/AppData/Local/hangar/custos`).
   Um não escreve no do outro. O do Python continua servindo a orquestração e a reserva.
 - Mesmo desenho do `costs_cache`: tabela `files` (caminho, escopo, versão, dev/ino, tamanho,
   mtime, offset, últimos 64 bytes, estado da leitura) e tabelas `custo` e `uso` com as mesmas
   colunas. Diferença: o estado da leitura é `serde_json` comprimido com `flate2`, não pickle.
+- Listagem e leitura do índice seguem caminho de arquivo ordenado em Python e Rust, com a
+  sequência interna de cada arquivo preservada. A consulta aplica essa ordem também a índices
+  existentes, sem depender da ordem de inserção ou atualização das linhas no SQLite.
 - Mesmas regras de retomada: lê só o que cresceu; tamanho menor, outro inode, versão diferente
   ou os 64 bytes antes do offset mudados → relê do zero; linha sem `\n` no fim entra no
   resultado mas não no estado salvo; arquivo que sumiu sai; falha de leitura de um arquivo vira
   log e mantém as linhas anteriores; esquema diferente apaga e refaz.
+- Corrupção SQLite (`DatabaseCorrupt` ou `NotADatabase`) durante abertura ou operação invalida
+  a geração compartilhada, fecha os recursos, remove somente o arquivo Rust e seus WAL/SHM e
+  repete a operação uma vez. Lista de arquivos permanece completa na repetição. Erros de
+  lock, disco e integridade são propagados sem remoção; a segunda corrupção também é propagada.
+  Com outra operação ativa, inclusive callback reentrante, a falha retorna erro para a reserva:
+  a última operação fecha sua conexão, refaz e repete a própria operação. Nenhuma operação nova
+  entra no arquivo condenado enquanto falta drenar conexões. Um erro de época anterior nunca
+  apaga o banco reconstruído. `ReaderPanic` permanece erro mesmo havendo recuperação pendente.
+  `try_sync_file` expõe o erro tipado para a reserva; `sync_file` conserva o wrapper opcional.
 - `rusqlite` com SQLite embutido (`bundled`), WAL, `synchronous=NORMAL`, gravação em lotes de 1 s.
   Dependência nova; o build compila o SQLite em C nas três plataformas (o `zigbuild` já tem C).
 
@@ -104,6 +123,13 @@ A posse de cada rollout do Codex é calculada no Rust com a regra de
   deu. Uma varredura por vez.
 - Mapa de áreas (`~/.hangar/uso-areas.json`) lido uma vez por processo, como hoje. Mudou o mapa →
   refaz só as linhas de área a partir dos alvos guardados, sem reler transcript.
+- Áreas distintas de cada ferramenta são percorridas por nome nos dois leitores; a ordem de
+  ferramentas fica intacta. Turnos Codex usam legado seguido de moderno, preservando a
+  inserção de cada dicionário; um turno comum aparece na posição do legado. Não é a primeira
+  ocorrência global entre os dois streams. Leitor `codex:1:3` refaz somente o índice Codex
+  afetado pela ordem, incluindo o timestamp retido no agrupamento. Divisão/assinatura versão 3
+  refaz áreas salvas. Ordem de
+  linhas e de JSON permanece igual entre Python e Rust, inclusive com múltiplas áreas numa tool.
 
 ### 5. Relatórios e preço
 
@@ -122,7 +148,17 @@ A posse de cada rollout do Codex é calculada no Rust com a regra de
 
 ### 6. O Python com o Rust de pé
 
-- O `rust_server` marca "custos no Rust" quando a saúde responde versão 5. Com a marca, o
+- Falhas nos GETs de custos, uso, cotação e custo avulso têm quatro tentativas totais,
+  com pausa de 2 s somente antes da quarta; retentativas de relatório forçam coleta nova.
+  Depois da quarta falha, apenas a parte afetada fica no Python até o processo Rust reiniciar
+  (custo avulso é isolado por nome de sessão). Sucesso concorrente não desfaz essa transferência.
+  Código e motivo são fixos no log Rust e no diário via `POST /internal/rust-failure`, com
+  segredo interno e prazo de 500 ms; o repasse usa o pedido original uma única vez.
+  Aquecimento 202, 404 legítimo, vazio e ausência de tarifa/cotação são respostas normais;
+  indisponibilidade interna, falha de leitura e número não finito são defeitos. Esse contrato
+  integra a versão interna 8 e não autoriza repetir operações com possível efeito de usuário.
+
+- O `rust_server` marca "custos no Rust" quando a saúde responde versão 8. Com a marca, o
   aquecimento de boot do Python (`agendar_aquecimento(30)`) não varre nada.
 - `_take_over` (o Python assume a porta) limpa a marca e agenda o aquecimento na hora. O índice do
   Python retoma de onde parou: só o que cresceu desde a última varredura dele.
@@ -145,7 +181,7 @@ A posse de cada rollout do Codex é calculada no Rust com a regra de
 - **Dados reais, só leitura:** um exemplo do crate (`cargo run --example custos`) varre esta
   máquina num índice descartável e imprime os relatórios; um script compara com o Python avulso
   (o mesmo processo de `analise.md`). Diferença aceita: zero em inteiros e chaves.
-- **Reserva:** teste do `rust_server` em que a saúde v5 desliga o aquecimento e o `_take_over`
+- **Reserva:** teste do `rust_server` em que a saúde v8 desliga o aquecimento e o `_take_over`
   religa; teste de rota em que índice ilegível e escopos ausentes viram repasse.
 - **Uso real com o dono, no fim:** abrir Custos e Uso no web, no celular (card) e no nativo;
   "Atualizar dados"; filtro e clique num item do Uso; custo de sessão Codex no painel; apagar o

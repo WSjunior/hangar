@@ -507,12 +507,13 @@ def esquecer_fora(ativos: set[str]) -> None:
 
 def ler_custos(scope: str | None = None, desde: str | None = None, file_id: int | None = None) -> list[tuple]:
     """Linhas de custo (colunas `CAMPOS_CUSTO`, `ts` em ISO) de um escopo ou de um arquivo, na
-    ordem em que cada arquivo as produziu. `desde` = primeiro dia (YYYY-MM-DD) incluído."""
+    ordem do caminho e, dentro dele, como o arquivo as produziu. `desde` = primeiro dia
+    (YYYY-MM-DD) incluído."""
     sql = f"SELECT {', '.join('c.' + c for c in CAMPOS_CUSTO)} FROM custo c"
     where, args = _filtro(scope, desde, file_id, "c")
     conn = _abrir()
     try:
-        return conn.execute(f"{sql} WHERE {where} ORDER BY c.rowid", args).fetchall()
+        return conn.execute(f"{sql} WHERE {where} ORDER BY (SELECT path FROM files WHERE id=c.file_id), c.rowid", args).fetchall()
     finally:
         conn.close()
 
@@ -533,7 +534,7 @@ def iter_usage_rows(scope: str, conta: str, desde: str | None = None) -> Iterabl
     where, args = _filtro(scope, desde, None, "u")
     conn = _abrir()
     try:
-        return conn.execute(f"{_SELECT_USAGE} FROM uso u WHERE {where} ORDER BY u.rowid", (conta, *args)).fetchall()
+        return conn.execute(f"{_SELECT_USAGE} FROM uso u WHERE {where} ORDER BY (SELECT path FROM files WHERE id=u.file_id), u.rowid", (conta, *args)).fetchall()
     finally:
         conn.close()
 
@@ -572,4 +573,5 @@ def listar(raiz: Path, casa: Callable[[str], bool]) -> list[Path]:
                         out.append(Path(e.path))
                 except OSError:
                     continue
-    return out
+    # A ordem do filesystem não pode alterar o arredondamento das somas.
+    return sorted(out, key=str)

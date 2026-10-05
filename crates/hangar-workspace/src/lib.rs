@@ -3,6 +3,7 @@ pub mod citations;
 pub mod files;
 pub mod git;
 pub mod process;
+pub mod worktrees;
 mod process_lifetime;
 pub use hangar_api::workspace::WorkspaceError;
 use serde::Deserialize;
@@ -301,6 +302,26 @@ pub enum Operation {
         #[serde(default)]
         write: bool,
     },
+    ListWorktrees {
+        cwds: Vec<String>,
+        sessions: Vec<worktrees::Session>,
+        #[serde(default)]
+        roots: Option<Vec<String>>,
+        #[serde(default)]
+        repo: Option<String>,
+        #[serde(default = "yes")]
+        measure: bool,
+        #[serde(default)]
+        project_bases: Vec<String>,
+    },
+    WorktreeStatus {
+        path: String,
+        sessions: Vec<worktrees::Session>,
+        #[serde(default = "yes")]
+        measure: bool,
+        #[serde(default)]
+        project_bases: Vec<String>,
+    },
 }
 
 impl Operation {
@@ -332,6 +353,27 @@ impl Operation {
 pub fn execute(op: Operation) -> Result<Value> {
     use Operation::*;
     match op {
+        ListWorktrees {
+            cwds,
+            sessions,
+            roots,
+            repo,
+            measure,
+            project_bases,
+        } => Ok(worktrees::list_all(
+            &cwds,
+            &sessions,
+            roots.as_deref(),
+            repo.as_deref(),
+            measure,
+            &project_bases,
+        )),
+        WorktreeStatus {
+            path,
+            sessions,
+            measure,
+            project_bases,
+        } => Ok(worktrees::status_of(&path, &sessions, measure, &project_bases)),
         HeadInfo { cwd } => Ok(json!(git::head_info(cwd.as_deref()))),
         BranchOf { cwd } => Ok(json!(git::head_info(cwd.as_deref()).0)),
         GitSummary { cwd } => Ok(git::summary(cwd.as_deref(), false)),
