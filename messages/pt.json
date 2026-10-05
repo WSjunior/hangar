@@ -4417,6 +4417,7 @@
   "native_file_expand": "Expandir",
   "native_file_restore": "Restaurar painéis",
   "native_file_reveal": "Mostrar no painel Arquivos",
+  "native_file_zoom": "Ampliar (clique na imagem ou Ctrl + roda)",
   "native_file_reveal_system": "Abrir no gerenciador de arquivos",
   "native_file_not_on_disk": "O arquivo não está neste computador.",
   "native_file_video_external": "Vídeo abre no player do sistema.",

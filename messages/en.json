@@ -4417,6 +4417,7 @@
   "native_file_expand": "Expand",
   "native_file_restore": "Restore panels",
   "native_file_reveal": "Show in Files panel",
+  "native_file_zoom": "Zoom in (click the image or Ctrl + wheel)",
   "native_file_reveal_system": "Open in file manager",
   "native_file_not_on_disk": "The file isn't on this computer.",
   "native_file_video_external": "Videos open in the system player.",
