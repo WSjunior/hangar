@@ -37,5 +37,9 @@ rusqlite.workspace = true
 rayon.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 
+# Processos fora do Linux; no Linux o leitor é o /proc (`list/procs.rs`).
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+sysinfo = { version = "=0.39.6", default-features = false, features = ["system"] }
+
 [dev-dependencies]
 tempfile.workspace = true
