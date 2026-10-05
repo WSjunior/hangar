@@ -199,3 +199,24 @@ def test_job_cleanup_terminates_even_when_members_cannot_be_listed(monkeypatch):
     holder = type('Contained', (), {'runtime_containment': Containment(1, 1.0, Job()), 'poll': lambda self: None})()
     assert cleanup(holder, timeout=3) is True
     assert events == ['terminate', 'close']
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='grupo de processo POSIX')
+def test_full_disk_while_refreshing_the_record_leaves_no_temporary(tmp_path, monkeypatch):
+    # O vigia repete a gravação a cada volta: cada ENOSPC que deixasse um temporário enchia mais o disco.
+    from app import runtime_process
+    from app.runtime_process import spawn_contained, cleanup, refresh_members
+    record = tmp_path / 'containment.json'
+    proc = spawn_contained([sys.executable, '-c', 'import time;time.sleep(60)'], env=dict(os.environ), record_path=record)
+    try:
+        def full(fd):
+            raise OSError(28, 'No space left on device')
+        monkeypatch.setattr(runtime_process.os, 'fsync', full)
+        for _ in range(3):
+            with pytest.raises(OSError):
+                refresh_members(proc)
+        assert sorted(p.name for p in tmp_path.iterdir()) == ['containment.json', 'containment.lock']
+    finally:
+        monkeypatch.undo()
+        proc.kill(); proc.wait(5)
+        cleanup(proc, timeout=3)

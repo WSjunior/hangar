@@ -4484,6 +4484,9 @@ async def _send_managed(name: str, text: str, provider: str, *, track_entry: boo
         if disposition == "unknown" and (proved_later or (reply.get("payload") or {}).get("transport_lost") is True):
             # Entrega sem prova (aviso do plugin atrasado, ou o Rust caiu no meio): a mensagem está na
             # fila durável, que só a confirma pelo transcript e nunca a reenvia; a bolha espera.
+            diag.registrar("runtime.send_uncertain", "aviso", sessao=name,
+                           codigo=str((reply.get("payload") or {}).get("code")
+                                      or ("terminal_delivery_unknown" if proved_later else "transport_lost")))
             return {"ok":True, "error":None, "delivered":False, "uncertain":True,
                 **({"entry_id":operation_id} if track_entry and queued else {})}
         if disposition not in {"accepted", "deferred"}:

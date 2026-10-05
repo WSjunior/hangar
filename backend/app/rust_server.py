@@ -380,6 +380,9 @@ class Supervisor:
                     from app.runtime_process import refresh_members
                     try:
                         await asyncio.to_thread(refresh_members, self.proc)
+                        if record_failed:
+                            _log.info("registro de contenção do hangar-server voltou a gravar")
+                            diag.registrar("hangar_server.registro_voltou")
                         record_failed = False
                     except OSError as e:
                         # Disco cheio é transitório e o filho segue vivo: desistir do Rust por isso

@@ -381,8 +381,19 @@ impl Executor {
     /// Só lê o transcript: a entrega incerta que aparece lá é confirmada uma vez e o erro sai; sem
     /// prova, o erro fica e nada é digitado.
     async fn reconcile_uncertain(&mut self)->Result<(),RuntimeError> {
-        if self.confirm_rows().await.is_err() {return Ok(());}
-        let Ok(state)=self.queue.snapshot().await else {return Ok(());};
+        let state=match self.confirm_rows().await {
+            Ok(_)=>self.queue.snapshot().await.map_err(|_|error("queue_io")),
+            Err(failure)=>Err(failure),
+        };
+        let state=match state {
+            Ok(state)=>state,
+            Err(failure)=>{
+                if crate::warn_limit::allow(Some(self.target.key.as_str()),"terminal_reconcile_failed") {
+                    tracing::warn!(key=%self.target.key,session=%self.target.name,code=%failure.code,"conferência da entrega incerta falhou; o erro continua");
+                }
+                return Ok(());
+            }
+        };
         if !self.uncertain.iter().all(|id|state.operations.get(id).is_some_and(|op|op.status==Status::Confirmed)) {return Ok(());}
         tracing::info!(key=%self.target.key,session=%self.target.name,code="terminal_delivery_proved","entrega incerta comprovada pelo transcript");
         self.uncertain.clear();
