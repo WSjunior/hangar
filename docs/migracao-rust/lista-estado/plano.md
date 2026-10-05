@@ -119,8 +119,8 @@ como `procinfo.py:60` e leitura fresca sob pedido), `list/mux.rs` (`list-panes -
 sessão criada há menos de 1 s), `mux::parses_list_panes_fields` (inclusive `@cp_hidden`,
 `CP_PROVIDER`, nome com ponto), `mux::timeout_is_unavailable` (→ `MuxUnavailable`, nunca vazio).
 
-- [ ] **Step 7: Testes, vistos falhar**
-- [ ] **Step 8: Leitores; testes focados; revisar**
+- [x] **Step 7: Testes, vistos falhar**
+- [x] **Step 8: Leitores; testes focados; revisar**
 
 ### Task 4: Leitores de processos e panes no Windows e no macOS
 

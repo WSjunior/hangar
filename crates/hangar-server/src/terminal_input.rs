@@ -101,7 +101,7 @@ pub trait TerminalIo: Send + Sync {
 #[derive(Clone)]
 pub struct ProcessIo { pub command_timeout: Duration, pub socket_timeout: Duration }
 impl Default for ProcessIo { fn default() -> Self { Self { command_timeout: Duration::from_secs(3), socket_timeout: Duration::from_secs(3) } } }
-fn child_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+pub(crate) fn child_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     let mut command = Command::new(program);
     // O multiplexador e o clipboard não recebem a autoridade privada do servidor.
     for name in ["HANGAR_INTERNAL_SECRET", "HANGAR_RUNTIME_INSTANCE", "CP_AUTH_TOKEN"] { command.env_remove(name); }

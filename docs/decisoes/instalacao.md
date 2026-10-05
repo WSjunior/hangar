@@ -34,13 +34,6 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   build da plataforma, mantém o app e avisa na página Sobre, nunca cai na main calada. Trocar de
   canal aceita versão de contagem menor porque o CI embute a branch (`HANGAR_NATIVE_CHANNEL`); build
   local não tem canal e só troca por versão mais nova. Os `install-native.*` seguem na `native-latest`.
-- **CI do Rust: conferir em toda branch, compilar release e publicar só na main e no canal de testes.**
-  `native.yml` e `server.yml` testam em debug em todo push e PR de fork; `build --release` e
-  `publish` só rodam na main (Linux, Windows, macOS) e no canal (`hangar-server-parte1`, Linux e
-  Windows). Trocar o canal é trocar esse nome nos dois arquivos. O `publish` do server só leva o
-  sistema cujo `test` passou na mesma rodada, e o do nativo espera o `check`. Cache só é gravado
-  pela main e pelo canal; as outras branches leem o da main.
-  [Medição](#ci-do-rust-conferir-em-toda-branch-publicar-só-na-main-e-no-canal).
 - **O botão Atualizar NÃO roda o instalador.** Sozinho ele faz dist do CI, `uv sync`, `npm ci` por
   hash do lock, restart e prova de vida por **pid** (HTTP o processo velho também responde).
   Wrapper/tarefa/statusline só chegam por passo em `docs/atualizacoes/` — o pre-commit e o CI
@@ -430,45 +423,3 @@ Agora o registrador remove o bloco marcado, confere pelo `tomllib` se o app já 
 com a mesma URL e o mesmo token (nada a fazer) e, senão, tira toda seção `[mcp_servers.hangar…]`
 antes de anexar o bloco marcado — idempotente contra a reescrita do app e autocorretivo num
 arquivo já duplicado. Teste em `scripts/test_registrar_mcp.py`.
-
-## CI do Rust: conferir em toda branch, publicar só na main e no canal
-
-Medido em 05/10/2026, duração de cada job no GitHub (`gh run view --json jobs`), duas rodadas verdes
-de cada lado. Antes, todo push em qualquer branch compilava release com LTO fat nos três sistemas e
-publicava `native-<branch>`/`server-<branch>`:
-
-| Job | Antes (2 rodadas) | Depois, branch comum | Depois, main/canal |
-|---|---|---|---|
-| Native Linux | 858 s · 751 s (release) | `check` 868 s frio · 277 s com cache | release 1113 s + `check` em paralelo |
-| Native Windows | 1077 s · 1357 s | não roda | 1387 s (release) |
-| Native macOS | 1197 s · 1410 s | não roda | só na main |
-| Server Linux | 490 s · 561 s (teste + release) | `test` 262 s · 212 s | `test` 219 s ∥ `build` 314 s |
-| Server Windows | 857 s · 1029 s | `test` 504 s · 486 s | `test` 479 s ∥ `build` 532 s |
-| Server macOS | 872 s · 422 s | não roda | só na main |
-
-A coluna main/canal veio de `workflow_dispatch` nesta branch, que compila sem publicar.
-
-- **O cache acertava a chave, e o que custava era outra coisa.** Os logs davam `Cache restored from
-  key` no nativo, mas o build do Linux ficava 2 min compilando e 11,5 min no LTO fat do binário final,
-  que nenhum cache evita. No server havia `Cache not found` de verdade: cada branch gravava a própria
-  cópia (o `server-Linux` misturava debug e release e chegava a 2,94 GiB), o repositório passou de
-  10 GB (11,47 GB em 14 caches) e o GitHub despejava as entradas mais antigas. Agora só main e canal
-  gravam, e debug e release têm chaves separadas: `server-test-Linux` ficou com 449 MiB e
-  `native-check-Linux` com 788 MiB.
-- **Teste e build do server não são reaproveitados de um perfil para o outro.** Rodar a suíte no
-  perfil publicado passaria cada binário de teste pelo LTO fat. Os dois correm em jobs paralelos, e o
-  custo do paralelismo é que um teste vermelho no Windows não impede mais o build do Windows. Por
-  isso o `publish` exige a marca `tested-<sistema>` da mesma rodada e tira da release o sistema sem
-  ela. Isso foi exercitado: na segunda rodada o `costs_origins.rs:86` (prazo de 5 s) falhou no
-  Windows, e numa branch que publica o binário dele teria ficado de fora.
-- **O `check` do nativo usa `cargo build`, não `cargo check`.** O perfil dev otimiza as dependências
-  (`opt-level = 3`). O `check` as refazia só em metadados, 373 s a frio, além do `test`. O `build`
-  confere o mesmo binário e deixa pronto o que o `test` usa: o `test` caiu de 525 s para 28 s.
-- **O cargo-zigbuild vem pronto**, conferido pelo sha256 da release do projeto. O `cargo install`
-  levava de 26 a 34 s por rodada.
-- **Não entraram sccache nem rust-cache.** O rust-cache não está na lista de actions liberadas. O
-  sccache usa o mesmo limite de 10 GB e não alcança o LTO do binário final, que é a maior parte do
-  build de release.
-- **Releases de branch antigas continuam publicadas.** Uma branch que parou de publicar e já tinha
-  `native-<branch>`/`server-<branch>` segue servindo a última versão a quem estiver nela, porque o
-  `rust_release.py` só recua para a main quando recebe 404.
