@@ -18,6 +18,7 @@ um pull nela traz a documentação em qualquer máquina.
 | `git-arquivos/` | Núcleo compartilhado de Git/arquivos, ponte privada, integração e evidências de validação |
 | `dono-unico/` | Inventário das passagens Python↔Rust com o Rust vivo, desenho do dono único, plano e o registro de cada Task — executado na `feat/rust-single-owner` (Tasks 1–10; falta a prova de uso real, Task 11) |
 | `parte2-descartada-lista-pi-kimi/` | Primeiro escopo da parte 2 (lista + Pi/Kimi/omp/orq), trocado pelo dono |
+| `lista-estado/` | Medição da lista + estado (05/10: ganho pequeno; o repouso é o Supervisor), inventário e o plano do conserto do Supervisor |
 | `pedidos/` | Pedidos enviados às sessões Codex e os achados de revisão da 2C |
 
 Os caminhos absolutos dentro de `pedidos/` e dos documentos das sessões apontam para as pastas de
