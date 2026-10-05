@@ -3,6 +3,7 @@
 //! que mod veio: mod novo aparece sem código novo.
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 use gpui_kit::*;
 use gpui_kit::prelude::FluentBuilder;
 use serde_json::Value;
@@ -34,6 +35,28 @@ pub fn safe_href(v: &Value) -> Option<String> {
 }
 
 pub fn is_dock(pane: &Value) -> bool { pane["placement"] == "dock" }
+
+/// Aviso (`$.ui.toast`) que um mod mostrou no terminal; `plugin` é o mod que o emitiu.
+#[derive(Debug, PartialEq)]
+pub struct Toast { pub id: String, pub text: String, pub plugin: String, pub timeout: Duration }
+
+/// O dado do SSE `plugin_toast`; sem id, sem texto ou sem prazo não é aviso.
+pub fn toast(data: &Value) -> Option<Toast> {
+    let id = data["id"].as_str().filter(|id| !id.is_empty())?;
+    let text = data["text"].as_str().filter(|text| !text.trim().is_empty())?;
+    let ms = data["timeoutMs"].as_u64().filter(|ms| *ms > 0)?;
+    Some(Toast { id: id.to_owned(), text: short(text), plugin: data["plugin"].as_str().unwrap_or("").to_owned(), timeout: Duration::from_millis(ms) })
+}
+
+/// A notificação cresce com o texto: aviso longo vira no máximo 4 linhas e 300 caracteres.
+fn short(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out: String = lines.iter().take(4).copied().collect::<Vec<_>>().join("\n");
+    let mut cut = lines.len() > 4;
+    if out.chars().count() > 300 { out = out.chars().take(300).collect(); cut = true; }
+    if cut { out.push('…'); }
+    out
+}
 
 fn frame() -> Div {
     div().px(px(10.)).py(px(6.)).rounded(px(8.)).bg(theme::inset())
@@ -296,8 +319,22 @@ fn unmark(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
-    use super::{button_key, cell_color, color, is_dock, is_empty, raster_runs, safe_href};
+    use super::{button_key, cell_color, color, is_dock, is_empty, raster_runs, safe_href, toast, Toast};
     use serde_json::{json, Value};
+    use std::time::Duration;
+
+    #[test]
+    fn toast_keeps_the_mod_and_its_timeout_and_refuses_what_is_not_a_toast() {
+        assert_eq!(toast(&json!({"id": "ab-1", "text": "Jenkins configurado.", "plugin": "demo", "timeoutMs": 9000})),
+            Some(Toast { id: "ab-1".into(), text: "Jenkins configurado.".into(), plugin: "demo".into(), timeout: Duration::from_millis(9000) }));
+        assert_eq!(toast(&json!({"id": "ab-2", "text": "oi", "timeoutMs": 1})).map(|t| t.plugin), Some(String::new()));
+        assert_eq!(toast(&json!({"text": "oi", "timeoutMs": 4000})), None);
+        assert_eq!(toast(&json!({"id": "ab-3", "text": "  ", "timeoutMs": 4000})), None);
+        assert_eq!(toast(&json!({"id": "ab-4", "text": "oi"})), None);
+        let long = toast(&json!({"id": "ab-5", "text": "x".repeat(2000), "timeoutMs": 1})).unwrap().text;
+        assert_eq!((long.chars().count(), long.ends_with('…')), (301, true));
+        assert_eq!(toast(&json!({"id": "ab-6", "text": "1\n2\n3\n4\n5", "timeoutMs": 1})).unwrap().text, "1\n2\n3\n4…");
+    }
 
     fn cells(words: &[u32]) -> String {
         use base64::Engine as _;

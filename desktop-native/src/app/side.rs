@@ -57,7 +57,7 @@ impl Shortcut {
     }
 
     /// O que o painel roda de um atalho da config. `project` é a chave do repositório quando o atalho é do projeto.
-    fn from_item(item: &shortcuts::Item, project: Option<&str>) -> Option<Self> {
+    pub(super) fn from_item(item: &shortcuts::Item, project: Option<&str>) -> Option<Self> {
         let (label, icon, confirm) = (item.label().to_owned(), item.icon().map(str::to_owned), item.confirm());
         match item.kind() {
             "send_text" => Some(Shortcut::Send { label, text: item.content().to_owned(), direct: item.sends_direct(), confirm, icon }),
@@ -938,7 +938,7 @@ impl Hangar {
     fn side_menu_terminal(&self) -> bool { self.selected.as_ref().is_some_and(|s| !s.headless) || self.has_shortcut_terms() }
 
     // A janela abre nesta máquina: só serve à sessão com terminal do servidor local.
-    fn external_terminal_available(&self) -> bool {
+    pub(super) fn external_terminal_available(&self) -> bool {
         cfg!(any(target_os = "linux", windows)) && self.selected.as_ref().is_some_and(|s| !s.headless)
             && self.session_api().is_some_and(|api| api.is_loopback())
     }
