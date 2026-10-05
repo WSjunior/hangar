@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 use super::sidebar::Target;
 
-const INPUT_WAIT: Duration = Duration::from_secs(1);
+const INPUT_WAIT: Duration = Duration::from_millis(500);
 
 fn brazilian_layout(layout: &str) -> bool { matches!(layout, "Portuguese (Brazil)" | "com.apple.keylayout.Brazilian-ABNT2") }
 
@@ -68,15 +68,22 @@ impl Selection {
     pub(super) fn push_digit(&mut self, digit: char, now: Instant) -> bool {
         if !self.active() || !digit.is_ascii_digit() { return false; }
         self.input.push(digit);
-        self.deadline = Some(now + INPUT_WAIT);
+        self.deadline = Some(now + self.wait());
         self.revision += 1;
         true
     }
 
     pub(super) fn backspace(&mut self, now: Instant) {
         if !self.active() || self.input.pop().is_none() { return; }
-        self.deadline = (!self.input.is_empty()).then_some(now + INPUT_WAIT);
+        self.deadline = (!self.input.is_empty()).then(|| now + self.wait());
         self.revision += 1;
+    }
+
+    /// Só espera o próximo dígito quando ele ainda pode formar um número que existe: com 12 sessões, só o "1".
+    fn wait(&self) -> Duration {
+        let count = self.entries.as_ref().map_or(0, Vec::len);
+        let grows = self.input.parse::<usize>().ok().and_then(|n| n.checked_mul(10)).is_some_and(|n| n > 0 && n <= count);
+        if grows { INPUT_WAIT } else { Duration::ZERO }
     }
 
     pub(super) fn finish_if_ready(&mut self, now: Instant) -> Option<Entry> {
@@ -147,12 +154,13 @@ mod tests {
         selection.begin(entries(12));
         assert!(selection.push_digit('1', now));
         let first_revision = selection.revision();
-        assert!(selection.push_digit('2', now + Duration::from_millis(600)));
+        assert_eq!(selection.deadline(), Some(now + INPUT_WAIT));
+        assert!(selection.push_digit('2', now + Duration::from_millis(300)));
         assert_ne!(selection.revision(), first_revision);
         assert_eq!(selection.input(), "12");
-        assert_eq!(selection.deadline(), Some(now + Duration::from_millis(1600)));
-        assert_eq!(selection.finish_if_ready(now + Duration::from_millis(1000)), None);
-        let selected = selection.finish_if_ready(now + Duration::from_millis(1600)).unwrap();
+        assert_eq!(selection.deadline(), Some(now + Duration::from_millis(300)));
+        assert_eq!(selection.finish_if_ready(now + Duration::from_millis(200)), None);
+        let selected = selection.finish_if_ready(now + Duration::from_millis(300)).unwrap();
         assert_eq!(selected.target, Target::new("server", "session-12"));
         assert_eq!(selected.incarnation.as_deref(), Some("life-12"));
         assert!(selection.active());
@@ -160,6 +168,21 @@ mod tests {
         assert_eq!(selection.input(), "");
         assert_eq!(selection.deadline(), None);
         assert_eq!(selection.finish_if_ready(now + Duration::from_secs(3)), None);
+    }
+
+    #[test]
+    fn digit_that_cannot_grow_into_a_session_number_selects_at_once() {
+        let now = Instant::now();
+        let mut selection = Selection::default();
+        selection.begin(entries(12));
+        selection.push_digit('3', now);
+        assert_eq!(selection.finish_if_ready(now).unwrap().target, Target::new("server", "session-3"));
+        selection.begin(entries(9));
+        selection.push_digit('1', now);
+        assert_eq!(selection.deadline(), Some(now));
+        selection.begin(entries(12));
+        selection.push_digit('0', now);
+        assert_eq!(selection.deadline(), Some(now));
     }
 
     #[test]
@@ -232,7 +255,7 @@ mod tests {
         selection.backspace(now + Duration::from_millis(600));
         assert_ne!(selection.revision(), revision);
         assert_eq!(selection.input(), "1");
-        assert_eq!(selection.deadline(), Some(now + Duration::from_millis(1600)));
+        assert_eq!(selection.deadline(), Some(now + Duration::from_millis(600) + INPUT_WAIT));
         assert_eq!(selection.finish_if_ready(now + Duration::from_millis(1000)), None);
         selection.backspace(now + Duration::from_millis(900));
         assert_eq!(selection.input(), "");
