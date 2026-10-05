@@ -144,7 +144,7 @@ def test_kimi_usage_llm_e_tool(tmp_path):
     snap = Accumulator("kimi", str(p)).collect()
     assert snap == {"turns": 1, "steps": 1, "in_tok": 400, "out_tok": 50,
                     "llm_ms": 8000, "tok_s": 6.2, "tool_ms": 4000,
-                    "cache_pct": 75, "ttft_ms": 2000}
+                    "cache_pct": 75, "cache_read_tok": 300, "ttft_ms": 2000}
 
 
 # -- Codex --------------------------------------------------------------------

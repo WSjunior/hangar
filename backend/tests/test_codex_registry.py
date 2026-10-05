@@ -107,6 +107,54 @@ def test_create_codex_usa_o_lancador_e_nao_pre_semeia_transcript(tmp_path):
     pretrust.assert_called_once()
 
 
+@pytest.mark.parametrize("tier", [None, "priority", "default"])
+def test_create_codex_tier_reaches_launcher_without_prelaunch_sidecar(tmp_path, tier):
+    import shlex
+    reg = SessionRegistry(projects_dir=tmp_path)
+    with patch.object(registry.tmux, "has_session", return_value=False), \
+         patch.object(registry.shutil, "which", return_value="/usr/bin/hangar-codex-tui"), \
+         patch.object(codex_sessions, "pretrust_cwd"), \
+         patch.object(registry.tmux, "new_session", return_value=True) as spawn:
+        reg.create("cx", "/tmp/proj", provider="codex", service_tier=tier, initial_prompt="primeiro prompt")
+    argv = shlex.split(spawn.call_args.args[2])
+    if tier is None:
+        assert "--service-tier" not in argv
+    else:
+        assert argv[argv.index("--service-tier") + 1] == tier
+        assert argv.index("--service-tier") < argv.index("--prompt")
+    assert codex_sessions.load("cx") is None
+
+
+@pytest.mark.parametrize("tier", [None, "priority", "default"])
+def test_create_codex_headless_saves_tier_before_process_start(tmp_path, tier):
+    from app.adapters.codex import sem_terminal
+    reg = SessionRegistry(projects_dir=tmp_path)
+    with patch.object(registry.tmux, "has_session", return_value=False), \
+         patch.object(codex_sessions, "pretrust_cwd"), \
+         patch.object(registry.tmux, "new_session") as spawn:
+        info = reg.create("cx", "/tmp/proj", provider="codex", headless=True, service_tier=tier)
+    meta = codex_sessions.load("cx")
+    assert meta.get("service_tier") == tier
+    assert meta["thread_id"] is None and meta["headless"] is True
+    assert info.headless is True
+    argv = sem_terminal.argv(meta)
+    assert (f'service_tier="{tier}"' in argv) if tier else not any("service_tier=" in arg for arg in argv)
+    spawn.assert_not_called()
+
+
+@pytest.mark.parametrize("provider,tier", [("codex", "fast"), ("claude", "default"), ("pi", "priority")])
+def test_registry_rejects_invalid_tier_before_effects(tmp_path, provider, tier):
+    reg = SessionRegistry(projects_dir=tmp_path)
+    with patch.object(registry.tmux, "new_session") as spawn, \
+         patch.object(registry, "_pretrust_cwd") as trust, \
+         patch.object(codex_sessions, "save") as save:
+        with pytest.raises(ValueError, match="service_tier"):
+            reg.create("cx", "/tmp/proj", provider=provider, service_tier=tier)
+    spawn.assert_not_called()
+    trust.assert_not_called()
+    save.assert_not_called()
+
+
 def test_create_codex_transporta_a_conta_secundaria_ao_lancador(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     monkeypatch.setattr(codex_accounts, "_DEFAULT_HOME", tmp_path / ".codex")
@@ -748,6 +796,39 @@ def test_sidecar_save_keeps_transfer_budget_and_key_on_same_thread(tmp_path, hea
     assert meta["codex_home"] == str(tmp_path / "account")
     codex_sessions.rename("s", "renamed")
     assert codex_sessions.load("renamed")["transfer_id"] == "transfer-1"
+
+
+@pytest.mark.parametrize("tier", ["priority", "default"])
+@pytest.mark.parametrize("headless", [False, True])
+def test_service_tier_survives_same_thread_save_and_rename(tier, headless):
+    codex_sessions.save("s", "t", "/rollout", "/project", service_tier=tier, headless=headless)
+    codex_sessions.update_model("s", "model", "high")
+    codex_sessions.save("s", "t", "/rollout", "/project", headless=headless)
+    assert codex_sessions.load("s")["service_tier"] == tier
+    codex_sessions.rename("s", "renamed")
+    assert codex_sessions.load("renamed")["service_tier"] == tier
+    codex_sessions.save("renamed", "new", "/new-rollout", "/project")
+    assert codex_sessions.load("renamed").get("service_tier") is None
+
+
+def test_service_tier_old_thread_cannot_update_new_sidecar():
+    codex_sessions.save("s", "old", "/rollout", "/project", service_tier="priority")
+    codex_sessions.update("s", thread_id="new")
+    assert codex_sessions.load("s").get("service_tier") is None
+    assert not codex_sessions.update_service_tier("s", "old", "priority")
+    assert codex_sessions.load("s").get("service_tier") is None
+    assert codex_sessions.update_service_tier("s", "new", "default")
+    assert codex_sessions.load("s")["service_tier"] == "default"
+
+
+def test_list_signature_changes_when_fast_changes():
+    from app.models import SessionInfo, StateEvent
+    from app.sse import _list_sig
+    info = SessionInfo(name="s", provider="codex", codex_service_tier="default")
+    before = _list_sig([info])
+    info.codex_service_tier = "priority"
+    assert _list_sig([info]) != before
+    assert StateEvent(session="s", state="idle", codex_service_tier="priority").model_dump()["codex_service_tier"] == "priority"
 
 
 @pytest.mark.parametrize("mutation", ["save", "update", "switch_thread"])

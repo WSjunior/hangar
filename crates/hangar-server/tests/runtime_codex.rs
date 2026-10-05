@@ -208,3 +208,187 @@ fn organizer_request_before_thread_reply_is_preserved_once() {
     let duplicate = line(&mut engine,request,12.1);
     assert!(!duplicate.iter().any(|effect|matches!(effect,Effect::Publish { channel,.. } if channel == "voice")));
 }
+
+fn tier_notification(engine:&mut Engine,thread:&str,tier:Value,time:f64) -> Vec<Effect> {
+    line(engine,json!({"method":"thread/settings/updated","params":{"threadId":thread,"threadSettings":{"serviceTier":tier}}}),time)
+}
+fn tier_accepted(effects:&[Effect]) -> bool {
+    effects.iter().any(|effect|matches!(effect,Effect::Reply { operation_id,disposition:Disposition::Accepted,payload }
+        if operation_id == "op-1" && payload["service_tier"].is_string()))
+}
+fn tier_update(engine:&mut Engine,tier:&str) -> Value {
+    let effects = engine.command(command(OperationKind::SetServiceTier,json!({"service_tier":tier})),clock(10.0)).unwrap();
+    let mut request = frames(&effects)[0].clone();
+    if tier == "priority" {
+        assert_eq!(request["method"],"model/list");
+        request = frames(&line(engine,json!({"id":request["id"],"result":{"data":[{"model":"gpt-6","serviceTiers":[{"id":"priority"}]}]}}),10.1))[0].clone();
+    }
+    assert_eq!(request["method"],"thread/settings/update");
+    assert_eq!(request["params"],json!({"threadId":"thread-1","serviceTier":tier}));
+    request
+}
+
+#[test]
+fn expired_service_tier_writes_cannot_reach_the_transport() {
+    for tier in ["default","priority"] {
+        let mut engine = engine();
+        let effects = engine.command(command(OperationKind::SetServiceTier,json!({"service_tier":tier})),clock(10.0)).unwrap();
+        let writes:Vec<_> = effects.iter().filter_map(|effect|match effect {
+            Effect::Write { operation_id:Some(id),.. }=>Some(id.clone()),_=>None,
+        }).collect();
+        assert!(!writes.is_empty());
+        assert!(writes.iter().all(|id|engine.write_is_current(id)));
+        engine.apply(EngineInput::Tick,clock(20.1)).unwrap();
+        assert!(writes.iter().all(|id|!engine.write_is_current(id)));
+    }
+}
+
+#[test]
+fn service_tier_control_is_strict_and_catalog_keeps_tiers() {
+    assert_eq!(serde_json::to_value(OperationKind::SetServiceTier).unwrap(),"set_service_tier");
+    let mut engine = engine();
+    for payload in [json!({"service_tier":"fast"}),json!({"service_tier":null}),json!({"service_tier":"default","model":"other"})] {
+        assert!(engine.command(command(OperationKind::SetServiceTier,payload),clock(10.0)).is_err());
+    }
+    let request = frames(&engine.command(command(OperationKind::ListModels,json!({})),clock(10.0)).unwrap())[0].clone();
+    let effects = line(&mut engine,json!({"id":request["id"],"result":{"data":[{"model":"gpt-6","serviceTiers":[{"id":"priority"}],"defaultServiceTier":"default"}]}}),10.1);
+    let catalog = effects.iter().find_map(|effect|match effect { Effect::Reply { payload,.. }=>Some(payload),_=>None }).unwrap();
+    assert_eq!(catalog[0]["serviceTiers"],json!([{"id":"priority"}]));
+    assert_eq!(catalog[0]["defaultServiceTier"],"default");
+}
+
+#[test]
+fn priority_requires_visible_live_support_and_unchanged_model() {
+    for model in [json!({"model":"gpt-6","serviceTiers":[]}),json!({"model":"gpt-6","hidden":true,"serviceTiers":[{"id":"priority"}]}),
+        json!({"model":"gpt-6","serviceTiers":[{"id":"priority","hidden":true}]})] {
+        let mut engine = engine();
+        let request = frames(&engine.command(command(OperationKind::SetServiceTier,json!({"service_tier":"priority"})),clock(10.0)).unwrap())[0].clone();
+        let effects = line(&mut engine,json!({"id":request["id"],"result":{"data":[model]}}),10.1);
+        assert!(frames(&effects).is_empty());
+        assert!(effects.iter().any(|effect|matches!(effect,Effect::Reply { operation_id,disposition:Disposition::Rejected,.. } if operation_id == "op-1")));
+    }
+    let mut engine = engine();
+    let request = frames(&engine.command(command(OperationKind::SetServiceTier,json!({"service_tier":"priority"})),clock(10.0)).unwrap())[0].clone();
+    line(&mut engine,json!({"method":"thread/settings/updated","params":{"threadId":"thread-1","threadSettings":{"model":"other"}}}),10.1);
+    let effects = line(&mut engine,json!({"id":request["id"],"result":{"data":[{"model":"gpt-6","serviceTiers":[{"id":"priority"}]}]}}),10.2);
+    assert!(frames(&effects).is_empty());
+    assert!(!tier_accepted(&effects));
+}
+
+#[test]
+fn service_tier_needs_ack_notification_and_authoritative_snapshot_in_either_order() {
+    for tier in ["priority","default"] { for before_ack in [false,true] {
+        let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"ready":true,
+            "model":"gpt-6","effort":"high","mode":"plan"}),1,clock(10.0));
+        let update = tier_update(&mut engine,tier);
+        assert!(engine.command(RuntimeCommand { operation_id:"second".into(),kind:OperationKind::SetServiceTier,payload:json!({"service_tier":"default"}) },clock(10.2)).is_err());
+        assert!(tier_notification(&mut engine,"other",json!(tier),10.3).is_empty());
+        let effects = if before_ack {
+            assert!(frames(&tier_notification(&mut engine,"thread-1",json!(tier),10.4)).is_empty());
+            line(&mut engine,json!({"id":update["id"],"result":{}}),10.5)
+        } else {
+            let ack = line(&mut engine,json!({"id":update["id"],"result":{}}),10.4);
+            assert!(!tier_accepted(&ack)); assert!(frames(&ack).is_empty());
+            tier_notification(&mut engine,"thread-1",json!(tier),10.5)
+        };
+        assert!(!tier_accepted(&effects));
+        let read = frames(&effects)[0].clone();
+        assert_eq!(read["method"],"thread/resume"); assert_eq!(read["params"],json!({"threadId":"thread-1"}));
+        let confirmed = line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"thread-1"},"serviceTier":tier}}),10.6);
+        assert!(tier_accepted(&confirmed));
+        assert_eq!(engine.view()["codex_service_tier"],tier);
+        assert_eq!(engine.control_view()["service_tier"],tier);
+        assert_eq!(engine.control_view()["model"],"gpt-6"); assert_eq!(engine.control_view()["effort"],"high"); assert_eq!(engine.control_view()["mode"],"plan");
+    } }
+}
+
+#[test]
+fn old_candidate_waits_for_new_event_and_does_not_poll() {
+    let mut engine = engine(); let update = tier_update(&mut engine,"priority");
+    line(&mut engine,json!({"id":update["id"],"result":{}}),10.2);
+    assert!(frames(&tier_notification(&mut engine,"thread-1",json!("default"),10.3)).is_empty());
+    let read = frames(&tier_notification(&mut engine,"thread-1",json!("priority"),10.4))[0].clone();
+    let stale = line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"thread-1"},"serviceTier":"default"}}),10.5);
+    assert!(!tier_accepted(&stale)); assert!(frames(&stale).is_empty());
+    let read = frames(&tier_notification(&mut engine,"thread-1",json!("priority"),10.6))[0].clone();
+    tier_notification(&mut engine,"thread-1",json!("priority"),10.7);
+    let during = line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"thread-1"},"serviceTier":"default"}}),10.8);
+    assert!(!tier_accepted(&during));
+    let read = frames(&during)[0].clone();
+    let confirmed = line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"thread-1"},"serviceTier":"priority"}}),10.9);
+    assert!(tier_accepted(&confirmed));
+}
+
+#[test]
+fn service_tier_errors_expiry_disconnect_and_recovery_never_accept() {
+    for failure in ["rpc","timeout","eof","foreign_snapshot","write"] {
+        let mut engine = engine(); let update = tier_update(&mut engine,"default");
+        let effects = match failure {
+            "rpc"=>line(&mut engine,json!({"id":update["id"],"error":{"message":"refused"}}),11.0),
+            "timeout"=>engine.apply(EngineInput::Tick,clock(20.1)).unwrap(),
+            "eof"=>line(&mut engine,json!({"type":"cano_saiu"}),11.0),
+            "write"=>engine.apply(EngineInput::WriteAck { operation_id:"op-1".into(),outcome:WriteOutcome::Unknown },clock(11.0)).unwrap(),
+            _=>{
+                line(&mut engine,json!({"id":update["id"],"result":{}}),10.2);
+                let read = frames(&tier_notification(&mut engine,"thread-1",json!("default"),10.3))[0].clone();
+                line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"other"},"serviceTier":"default"}}),11.0)
+            },
+        };
+        assert!(effects.iter().any(|effect|matches!(effect,Effect::Reply { operation_id,disposition:Disposition::Rejected | Disposition::Unknown,.. } if operation_id == "op-1")));
+        assert!(!tier_accepted(&effects));
+        assert!(!tier_accepted(&line(&mut engine,json!({"id":update["id"],"result":{}}),21.0)));
+    }
+    let mut engine = engine();
+    let frame = json!({"id":"hangar:1:50","method":"thread/settings/update","params":{"threadId":"thread-1","serviceTier":"priority"}});
+    engine.restore_rpc("op-1".into(),&frame,0,0);
+    let recovered = line(&mut engine,json!({"id":frame["id"],"result":{}}),11.0);
+    assert!(!recovered.iter().any(|effect|matches!(effect,Effect::Reply { disposition:Disposition::Accepted,.. })));
+    assert!(frames(&recovered).is_empty());
+    assert!(engine.control_view()["service_tier"].is_null());
+}
+
+#[test]
+fn read_preserves_tier_and_resume_cannot_overwrite_newer_settings() {
+    let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"ready":true,
+        "service_tier":"priority","model":"gpt-6","effort":"high"}),1,clock(10.0));
+    let read = frames(&engine.command(command(OperationKind::ReadSettings,json!({})),clock(10.0)).unwrap())[0].clone();
+    line(&mut engine,json!({"id":read["id"],"result":{"thread":{"id":"thread-1"}}}),10.1);
+    assert_eq!(engine.control_view()["service_tier"],"priority");
+    let resume = json!({"id":"hangar:1:50","method":"thread/resume","params":{"threadId":"thread-1"}});
+    engine.restore_rpc("resume".into(),&resume,0,0);
+    tier_notification(&mut engine,"thread-1",json!("priority"),10.2);
+    line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"thread-1"},"serviceTier":null,"model":"old","reasoningEffort":"low"}}),10.3);
+    assert_eq!(engine.control_view()["service_tier"],"priority"); assert_eq!(engine.control_view()["model"],"gpt-6");
+    let read = frames(&engine.command(command(OperationKind::SetServiceTier,json!({"service_tier":"default"})),clock(11.0)).unwrap())[0].clone();
+    line(&mut engine,json!({"id":read["id"],"result":{}}),11.1);
+    let resume = frames(&tier_notification(&mut engine,"thread-1",Value::Null,11.2))[0].clone();
+    assert!(tier_accepted(&line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"thread-1"},"serviceTier":null}}),11.3)));
+}
+
+#[test]
+fn resume_uses_external_tier_and_thread_change_cancels_pending_choice() {
+    for (wire_tier,effective) in [(json!("priority"),"priority"),(Value::Null,"default")] {
+        let mut engine = engine();
+        let resume = json!({"id":"hangar:1:50","method":"thread/resume","params":{"threadId":"thread-1"}});
+        engine.restore_rpc("resume".into(),&resume,0,0);
+        line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"thread-1","serviceTier":"wrong"},"serviceTier":wire_tier}}),10.1);
+        assert_eq!(engine.control_view()["service_tier"],effective);
+    }
+    let mut engine = engine(); let update = tier_update(&mut engine,"default");
+    let resume = json!({"id":"hangar:1:50","method":"thread/resume","params":{"threadId":"thread-1"}});
+    engine.restore_rpc("resume".into(),&resume,0,0);
+    let effects = line(&mut engine,json!({"id":resume["id"],"result":{"thread":{"id":"other"},"serviceTier":"priority"}}),10.2);
+    assert!(effects.iter().any(|effect|matches!(effect,Effect::Reply { operation_id,disposition:Disposition::Unknown,.. } if operation_id == "op-1")));
+    assert!(!tier_accepted(&line(&mut engine,json!({"id":update["id"],"result":{}}),10.3)));
+}
+
+#[test]
+fn bootstrap_new_process_preserves_tier_but_live_resume_does_not_override() {
+    for reconnect in [false,true] {
+        let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"service_tier":"priority"}),1,clock(10.0));
+        let init = frames(&engine.bootstrap(reconnect,"boot".into()).unwrap())[0].clone();
+        let requests = frames(&line(&mut engine,json!({"id":init["id"],"result":{}}),10.1));
+        if reconnect { assert!(requests[1]["params"].get("serviceTier").is_none()); }
+        else { assert_eq!(requests[1]["params"]["serviceTier"],"priority"); }
+    }
+}

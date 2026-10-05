@@ -23,9 +23,14 @@ pub(super) struct ModelOption {
     vision: Option<bool>,
     images: Option<bool>,
     #[serde(default)] efforts: Vec<String>,
+    #[serde(default)] service_tiers: Vec<Value>,
 }
 
 impl ModelOption {
+    fn supports_fast(&self) -> bool {
+        self.service_tiers.iter().any(|tier| tier.get("id").and_then(Value::as_str) == Some("priority")
+            && tier.get("hidden").and_then(Value::as_bool) != Some(true))
+    }
     /// `provider/id` quando há provider: o catálogo do Pi repete ids entre providers (`valorModelo` do web).
     fn value(&self) -> String { self.provider.as_ref().map(|p| format!("{p}/{}", self.id)).unwrap_or_else(|| self.id.clone()) }
     fn label(&self) -> String { self.name.clone().unwrap_or_else(|| self.id.clone()) }
@@ -366,6 +371,28 @@ impl NewSession {
         }
     }
 
+    pub(super) fn fast_available(&self) -> bool {
+        self.provider == "codex" && self.catalog().iter().find(|m| m.id == self.model).is_some_and(ModelOption::supports_fast)
+    }
+
+    pub(super) fn render_fast_choice(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.provider != "codex" || self.is_transfer() || self.baton.is_some() || self.want_resume { return None; }
+        let available = self.fast_available();
+        let on = self.service_tier.as_deref() == Some("priority");
+        let hint = if !available { "ctl_fast_unavailable" }
+            else if self.service_tier.is_none() { "create_fast_default_hint" } else { "ctl_fast_hint" };
+        Some(div().flex().items_center().gap_2().px_2().py_1()
+            .child(div().flex_1().min_w_0().flex().flex_col().gap_1()
+                .child(div().text_sm().child(tr("ctl_fast")))
+                .child(div().text_xs().text_color(theme::muted()).whitespace_normal().child(tr(hint))))
+            .child(Switch::new("new-chat-fast").small().checked(on).accessibility_label(tr("ctl_fast"))
+                .disabled(self.creating || (!available && !on))
+                .on_change(cx.listener(|this, on: &bool, _, cx| {
+                    this.service_tier = Some(if *on { "priority" } else { "default" }.into());
+                    cx.notify();
+                }))))
+    }
+
     /// A permissão existe para o Claude e para o Codex sem terminal, cada um com a própria lista.
     pub(super) fn permissions(&self) -> Option<&'static [&'static str]> {
         if self.is_transfer() { return None; }
@@ -427,6 +454,8 @@ impl NewSession {
             .child(chrome::provider_glyph(self.provider, 16.))
             .child(div().max_w(px(160.)).truncate().text_xs().font_weight(FontWeight::SEMIBOLD).child(model))
             .when(!self.effort.is_empty(), |el| el.child(div().text_xs().text_color(theme::muted()).child(self.effort.clone())))
+            .when(self.provider == "codex" && self.service_tier.as_deref() == Some("priority"), |el|
+                el.child(div().id("new-chat-fast-active").text_xs().text_color(theme::muted()).child(tr("ctl_fast"))))
             .on_click(cx.listener(|this, _, window, cx| this.toggle_menu(Menu::Model, window, cx))))
     }
 
@@ -513,7 +542,7 @@ impl NewSession {
                 .when(self.proxy_accounts().is_some(), |el| el.child(self.render_engine_account()))
         });
         div().p(px(popup::INSET)).flex().flex_col().gap(px(2.)).when(!self.is_transfer(), |el| el.child(tabs))
-            .children(engine).child(self.menu_search()).child(list).children(effort).children(default)
+            .children(engine).child(self.menu_search()).child(list).children(effort).children(self.render_fast_choice(cx)).children(default)
     }
 
     pub(super) fn build_config_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -956,6 +985,17 @@ impl NewSession {
 #[cfg(test)]
 mod tests {
     use super::{ModelOption, QuotaLine, exhausted, quota_switch, until};
+
+    #[test]
+    fn fast_creation_requires_an_advertised_priority_tier() {
+        let models: Vec<ModelOption> = serde_json::from_value(serde_json::json!([
+            {"id":"supported", "service_tiers":[{"id":"priority"}]},
+            {"id":"legacy", "additional_speed_tiers":["fast"]},
+            {"id":"hidden-tier", "service_tiers":[{"id":"priority", "hidden":true}]},
+            {"id":"standard"}
+        ])).unwrap();
+        assert_eq!(models.iter().map(ModelOption::supports_fast).collect::<Vec<_>>(), [true,false,false,false]);
+    }
 
     #[test]
     fn proxy_choices_require_an_exact_account_and_memory_is_scoped_to_it() {

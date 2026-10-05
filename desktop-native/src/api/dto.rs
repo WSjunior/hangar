@@ -48,6 +48,7 @@ pub struct SessionInfo {
     #[serde(default)] pub context: Option<ContextUse>,
     /// Id do modelo em uso na sessão Claude, resolvido pelo backend; vale quando a linha não traz o nome.
     pub model: Option<String>,
+    pub codex_service_tier: Option<String>,
     pub loop_status: Option<String>,
     pub loop_iter: Option<u32>,
     pub loop_max: Option<u32>,

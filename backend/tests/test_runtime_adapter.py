@@ -61,6 +61,55 @@ def test_getter_uses_same_generation(owner):
         facade.current_model("session")
 
 
+@pytest.mark.parametrize("tier", ["priority", "default"])
+def test_service_tier_uses_owner_without_legacy_session(owner, tier):
+    class Adapter:
+        async def set_service_tier(self, name, service_tier):
+            raise AssertionError("RPC Legacy")
+
+    async def op(name, command, operation_id):
+        owner.calls.append(command)
+        return {"disposition": "accepted", "payload": {"service_tier": tier}}
+
+    owner.op = op
+    owner.target.view["view"]["service_tier"] = tier
+    install_adapter(Adapter, "codex")
+    assert asyncio.run(Adapter().set_service_tier("session", tier)) == tier
+    assert owner.calls == [{"kind": "control", "control": "set_service_tier", "payload": {"service_tier": tier}}]
+    assert RuntimeAdapter("codex").current_model("session")["service_tier"] == tier
+    assert "service_tier" not in RuntimeAdapter("claude").current_model("session")
+
+
+def test_service_tier_owner_must_return_confirmed_value(owner):
+    async def op(name, command, operation_id):
+        return {"disposition": "accepted", "payload": {}}
+    owner.op = op
+    with pytest.raises(RuntimeError):
+        asyncio.run(RuntimeAdapter("codex").dispatch("set_service_tier", "session", {"service_tier": "priority"}))
+
+
+def test_service_tier_legacy_bridge_preserves_confirmed_result(tmp_path, monkeypatch):
+    from app.runtime_adapter import LegacyBridge
+    from app.runtime_coordinator import Binding, RuntimeCoordinator
+    coordinator = RuntimeCoordinator()
+    monkeypatch.setattr(runtime_coordinator, "_current", coordinator)
+    slot = coordinator.register(Binding("session", "key", "codex", True, {"key": "key", "thread_id": "thread"},
+        str(tmp_path / "chat.jsonl"), tmp_path / "projection", tmp_path / "state", tmp_path / "lease", 1))
+    calls = []
+    class Adapter:
+        async def set_service_tier(self, name, service_tier):
+            calls.append((name, service_tier))
+            return service_tier
+    bridge = LegacyBridge(coordinator, {"codex": Adapter()})
+    try:
+        result = asyncio.run(bridge.op(slot.binding.descriptor(), {"kind": "control", "control": "set_service_tier",
+            "payload": {"service_tier": "default"}}, "tier-op"))
+        assert result["disposition"] == "accepted" and result["payload"] == {"service_tier": "default"}
+        assert calls == [("session", "default")]
+    finally:
+        coordinator.close_python_leases()
+
+
 def test_invalid_event_or_gap_requests_snapshot(owner):
     from app.runtime_adapter import apply_event
     before = dict(owner.target.view)

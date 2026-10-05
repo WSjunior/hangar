@@ -27,7 +27,7 @@ from app.adapters.codex import sessions as codex_sessions
 from app.adapters.codex.appserver import AppServerClient
 from app.adapters.codex.async_questions import AsyncQuestions
 from app.adapters.codex.lancador import (APPROVAL, CLIENT_INFO, SANDBOX,
-                                          comando_do_lancador)
+                                          comando_do_lancador, service_tier_override)
 from app.hook_state import hook_state
 from app.models import session_key
 from app.procinfo import pid_vivo
@@ -80,7 +80,8 @@ def ensure_tmux_tui(name: str, cwd: str, thread_id: str | None, endpoint: str,
                     *, replace: bool = False, initial_prompt: str | None = None,
                     model: str | None = None, effort: str | None = None,
                     codex_home: str | None = None,
-                    codex_account: str | None = None) -> None:
+                    codex_account: str | None = None,
+                    service_tier: str | None = None) -> None:
     """Garante uma TUI Codex anexavel no tmux, ligada ao app-server do backend.
 
     ``replace`` e usado no resume lazy apos restart do backend: uma pane antiga aponta para o
@@ -96,6 +97,7 @@ def ensure_tmux_tui(name: str, cwd: str, thread_id: str | None, endpoint: str,
             argv += ["--model", model]
         if effort:
             argv += ["--config", f'model_reasoning_effort="{effort}"']
+        argv += service_tier_override(service_tier)
         argv.append(thread_id)
     else:
         # Na criacao, a TUI precisa ser a dona do thread/start: um thread aberto pelo cliente JSON-
@@ -521,6 +523,7 @@ class CodexAdapter:
             if sess.get("subscribed"):
                 return
             revision = sess.get("state_revision", 0)
+            settings_revision = sess.get("settings_revision", 0)
             try:
                 # Assinar eventos não pode sobrescrever as permissões escolhidas na sessão.
                 meta = codex_sessions.load(name) or {}
@@ -549,14 +552,18 @@ class CodexAdapter:
                 await asyncio.sleep(delay)
                 delay = min(delay * 1.5, self.SUBSCRIBE_RETRY_MAX)
                 continue
+            if self._sessions.get(name) is not sess:
+                return
             sess["subscribed"] = True
             sess["async_questions"].hydrate(result.get("thread") or {})
             sess.pop("subscribe_error", None)
             # O resume tambem devolve o default da THREAD -> alimenta o display (pill/statusline).
             # `or` e nao setdefault: o attach() ja criou as chaves com None, entao setdefault nunca
             # sobrescreveria e o 🤖 sumia da statusline (visto na verificacao ao vivo).
-            sess["default_model"] = sess.get("default_model") or result.get("model")
-            sess["default_effort"] = _effort_da_thread(result)
+            if settings_revision == sess.get("settings_revision", 0):
+                sess["default_model"] = sess.get("default_model") or result.get("model")
+                sess["default_effort"] = _effort_da_thread(result)
+                self._restore_service_tier(name, sess, result, settings_revision)
             if revision == sess.get("state_revision", 0):
                 self._restore_turn(sess, result.get("thread") or {})
             for fila in sess.get("ouvintes", []):
@@ -582,7 +589,8 @@ class CodexAdapter:
     def attach(self, name: str, client: AppServerClient, thread_id: str,
                model: Optional[str] = None, effort: Optional[str] = None,
                default_model: Optional[str] = None, default_effort: Optional[str] = None,
-               *, watch_tmux: bool = False, subscribed: bool = False) -> None:
+               *, watch_tmux: bool = False, subscribed: bool = False,
+               service_tier: str | None = None) -> None:
         """Liga uma sessao (por nome) a um AppServerClient + threadId ja vivos. Chamado pelo
         registry.create_codex (spawn novo, sem model/effort ainda -- sessao nova) e por
         ensure_running (resume pos-restart, passando model/effort lidos do sidecar -- Task C:
@@ -606,7 +614,7 @@ class CodexAdapter:
             anterior["bomba"].cancel()
         sess = {"client": client, "thread_id": thread_id,
                 "state": "idle", "in_progress": False,
-                "model": model, "effort": effort,
+                "model": model, "effort": effort, "service_tier": service_tier,
                 "default_model": default_model, "default_effort": default_effort,
                 "subscribed": subscribed, "ouvintes": [],
                 "async_questions": AsyncQuestions(
@@ -657,7 +665,7 @@ class CodexAdapter:
             _log.warning("codex: não foi possível recuperar o turno de %s", name, exc_info=True)
         # Publicar a sessão antes da leitura liberaria envios concorrentes como se estivesse ociosa.
         self.attach(name, client, meta["thread_id"], model=meta.get("model"),
-                    effort=meta.get("effort"), watch_tmux=True)
+                    effort=meta.get("effort"), service_tier=meta.get("service_tier"), watch_tmux=True)
         self._sessions[name].update(endpoint=meta["endpoint"], app_pid=meta["app_pid"])
         self._restore_turn(self._sessions[name], thread, include_turns=False)
         self.start_subscription(name, meta.get("cwd") or ".")
@@ -752,7 +760,11 @@ class CodexAdapter:
                     "cwd": meta.get("cwd"),
                     "sandbox": sandbox,
                     "approvalPolicy": approval,
+                    **({"serviceTier": meta["service_tier"]} if meta.get("service_tier") is not None else {}),
                 })
+                if (meta.get("service_tier") is not None and "serviceTier" in result
+                        and ("default" if result["serviceTier"] is None else result["serviceTier"]) != meta["service_tier"]):
+                    raise RuntimeError("O Codex não preservou a escolha Fast ao retomar")
                 if meta.get("transfer_id"):
                     await client.request("thread/settings/update", {
                         "threadId": meta["thread_id"], "model": meta.get("model"),
@@ -774,6 +786,7 @@ class CodexAdapter:
                 ensure_tmux_tui(
                     name, meta.get("cwd") or ".", thread_id, endpoint, replace=True,
                     model=meta.get("model"), effort=meta.get("effort"),
+                    service_tier=result.get("serviceTier", meta.get("service_tier")),
                     **home_kw,
                 )
             except Exception:
@@ -788,7 +801,9 @@ class CodexAdapter:
             # existe, entao ele cola de primeira) -> nao precisa da task de retry.
             self.attach(name, client, thread_id, model=meta.get("model"), effort=meta.get("effort"),
                         default_model=result.get("model"), default_effort=_effort_da_thread(result),
-                        watch_tmux=True, subscribed=True)
+                        watch_tmux=True, subscribed=True,
+                        service_tier=result.get("serviceTier", meta.get("service_tier")))
+            self._restore_service_tier(name, self._sessions[name], result, 0)
             self._sessions[name]["async_questions"].hydrate(result.get("thread") or {})
             self._restore_turn(self._sessions[name], result.get("thread") or {})
             _log.info("codex ensure_running: resumed thread=%s name=%s", thread_id, name)
@@ -834,9 +849,31 @@ class CodexAdapter:
                         _log.warning("codex sem terminal: religação no cano falhou name=%s", name, exc_info=True)
                         return await self._subir_sem_terminal(name, meta)
                     self.attach(name, client, meta.get("thread_id") or "", model=meta.get("model"),
-                                effort=meta.get("effort"), subscribed=True)
-                    self._sessions[name].update(headless=True, cano=cano)
-                    self._restore_turn(self._sessions[name], thread, include_turns=False)
+                                effort=meta.get("effort"), service_tier=meta.get("service_tier"), subscribed=True)
+                    sess = self._sessions[name]
+                    sess.update(headless=True, cano=cano)
+                    self._restore_turn(sess, thread, include_turns=False)
+                    # `thread/resume` só com a thread parada: religar num cano vivo não mexe em turno em
+                    # andamento. Fora disso o modo rápido fica o do sidecar.
+                    if meta.get("thread_id") and (thread.get("status") or {}).get("type") != "idle":
+                        _log.info("codex sem terminal: religado sem resume (thread %s), Fast do sidecar name=%s",
+                                  (thread.get("status") or {}).get("type"), name)
+                    elif meta.get("thread_id"):
+                        revision = sess.get("settings_revision", 0)
+                        try:
+                            result = await client.request("thread/resume", {"threadId": meta["thread_id"]})
+                        except BaseException as exc:
+                            # Antes do primeiro turno não há rollout; a escolha continua no sidecar.
+                            if isinstance(exc, RuntimeError) and "no rollout found" in str(exc):
+                                _log.info("codex sem terminal: thread sem rollout, Fast do sidecar name=%s", name)
+                            else:
+                                sess["bomba"].cancel()
+                                if self._sessions.get(name) is sess:
+                                    self._sessions.pop(name, None)
+                                await client.close()
+                                raise
+                        else:
+                            self._restore_service_tier(name, sess, result, revision)
                     _log.info("codex sem terminal: religado name=%s cano=%s", name, cano.get("pid"))
                     return client
                 await client.close()
@@ -869,7 +906,8 @@ class CodexAdapter:
                 result = None
                 if meta.get("thread_id"):
                     retomada = {"threadId": meta["thread_id"], "cwd": meta.get("cwd"),
-                                "approvalPolicy": approval, "sandbox": sandbox}
+                                "approvalPolicy": approval, "sandbox": sandbox,
+                                **({"serviceTier": meta["service_tier"]} if meta.get("service_tier") is not None else {})}
                     try:
                         try:
                             result = await client.request("thread/resume", retomada)
@@ -889,10 +927,14 @@ class CodexAdapter:
                         _log.info("codex sem terminal: thread %s sem rollout — abrindo outra name=%s",
                                   meta["thread_id"], name)
                 if result is None:
-                    params: dict = {"cwd": meta.get("cwd"), "approvalPolicy": approval, "sandbox": sandbox}
+                    params: dict = {"cwd": meta.get("cwd"), "approvalPolicy": approval, "sandbox": sandbox,
+                                    **({"serviceTier": meta["service_tier"]} if meta.get("service_tier") is not None else {})}
                     if meta.get("model"):
                         params["model"] = meta["model"]
                     result = await client.request("thread/start", params)
+                if (meta.get("service_tier") is not None and "serviceTier" in result
+                        and ("default" if result["serviceTier"] is None else result["serviceTier"]) != meta["service_tier"]):
+                    raise RuntimeError("O Codex não preservou a escolha Fast ao retomar")
                 if meta.get("effort") or meta.get("transfer_id"):
                     # `thread/start` aceita `model`, mas não tem campo de esforço: sem este update
                     # o nível escolhido na tela cai calado no `model_reasoning_effort` do
@@ -955,7 +997,8 @@ class CodexAdapter:
         meta = codex_sessions.update(name, thread_id=thread_id, rollout_path=rollout) or meta
         self.attach(name, client, thread_id, model=meta.get("model"), effort=meta.get("effort"),
                     default_model=result.get("model"), default_effort=_effort_da_thread(result),
-                    subscribed=True)
+                    service_tier=result.get("serviceTier", meta.get("service_tier")), subscribed=True)
+        self._restore_service_tier(name, self._sessions[name], result, 0)
         self._sessions[name].update(headless=True, cano=meta.get("cano"))
         if meta.get("transfer_id"):
             self._sessions[name]["mode"] = "plan" if meta.get("previous_non_plan") else "default"
@@ -1210,7 +1253,8 @@ class CodexAdapter:
                 raise ValueError("A conta Codex mudou; a conversa não foi transferida.")
             if await asyncio.to_thread(tmux.has_session, name):
                 raise ValueError("Já existe um terminal com este nome.")
-            meta = {**meta, "model": current["model"], "effort": current["effort"]}
+            meta = {**meta, "model": current["model"], "effort": current["effort"],
+                    "service_tier": sess.get("service_tier", current.get("service_tier"))}
             approval, sandbox = sem_terminal.politica(meta.get("permission_mode"))
             command = tmux.join_cmd(comando_do_lancador(
                 meta["cwd"], thread_id=meta["thread_id"], model=meta["model"], effort=meta["effort"],
@@ -1233,7 +1277,8 @@ class CodexAdapter:
             launcher_pid = None
             try:
                 codex_sessions.update(name, headless=False, cano=None, endpoint=None, app_pid=None,
-                                      tui_pid=None, model=meta["model"], effort=meta["effort"])
+                                      tui_pid=None, model=meta["model"], effort=meta["effort"],
+                                      service_tier=meta.get("service_tier"))
                 created = await asyncio.to_thread(tmux.new_session, name, meta["cwd"], command,
                                                   provider="codex", env=env)
                 if not created:
@@ -1319,7 +1364,9 @@ class CodexAdapter:
             if str(account.home.expanduser().absolute()) != meta.get("codex_home"):
                 raise ValueError("A conta Codex mudou; a conversa não foi transferida.")
             # O sidecar guarda a abertura, não uma mudança posterior pelo /permissions da TUI.
+            revision = sess.get("settings_revision", 0)
             snapshot = await sess["client"].request("thread/resume", {"threadId": meta["thread_id"]})
+            self._restore_service_tier(name, sess, snapshot, revision)
             sandbox = {"readOnly": "read-only", "workspaceWrite": "workspace-write",
                        "dangerFullAccess": "danger-full-access"}.get((snapshot.get("sandbox") or {}).get("type"))
             approval = snapshot.get("approvalPolicy")
@@ -1334,6 +1381,7 @@ class CodexAdapter:
             pane_pid = await asyncio.to_thread(tmux.pane_pid, name)
             meta = {**meta, "model": snapshot.get("model") or current["model"],
                     "effort": _effort_da_thread(snapshot) or current["effort"],
+                    "service_tier": sess.get("service_tier", current.get("service_tier")),
                     "permission_mode": permission, "key": meta.get("key") or sem_terminal.nova_chave(),
                     "jev": await asyncio.to_thread(_jev_do_processo, meta.get("app_pid") or pane_pid)
                            if meta.get("app_pid") or pane_pid else bool(meta.get("jev"))}
@@ -1596,6 +1644,7 @@ class CodexAdapter:
                           problema=problema[0], problema_detalhe=problema[1],
                           status_line=self._status_line(sess), codex_mode=sess.get("mode"),
                           codex_buffering=sess.get("codex_buffering", False),
+                          codex_service_tier=sess.get("service_tier"),
                           codex_question=question, headless=bool(sess.get("headless")),
                           question=sem_terminal.texto_da_aprovacao(aprovacao) if aprovacao else None,
                           options=list(sem_terminal.OPCOES_APROVACAO) if aprovacao else None)
@@ -1822,6 +1871,9 @@ class CodexAdapter:
             _log.exception("codex bomba quebrou name=%s", name)
             espalhar(exc)
         finally:
+            waiter = sess.get("service_tier_waiter")
+            if waiter is not None and not waiter.done():
+                waiter.set_result(None)
             espalhar(None)
 
     async def _consumir(self, name: str, client: AppServerClient, sess: dict, espalhar) -> None:
@@ -1901,10 +1953,22 @@ class CodexAdapter:
                     if params.get("threadId") != sess["thread_id"]:
                         continue
                     settings = params.get("threadSettings") or {}
-                    sess["model"] = settings.get("model")
-                    sess["effort"] = sess["default_effort"] = settings.get("effort")
-                    sess["mode"] = (settings.get("collaborationMode") or {}).get("mode", "default")
+                    if "serviceTier" in settings:
+                        tier = "default" if settings["serviceTier"] is None else settings["serviceTier"]
+                        if not codex_sessions.update_service_tier(name, sess["thread_id"], tier):
+                            continue
+                        sess["service_tier"] = tier
+                    if "model" in settings:
+                        sess["model"] = settings["model"]
+                    if "effort" in settings:
+                        sess["effort"] = sess["default_effort"] = settings["effort"]
+                    if "collaborationMode" in settings:
+                        sess["mode"] = (settings["collaborationMode"] or {}).get("mode", "default")
                     sess["settings_revision"] = sess.get("settings_revision", 0) + 1
+                    waiter = sess.get("service_tier_waiter")
+                    if ("serviceTier" in settings and tier == sess.get("service_tier_requested")
+                            and waiter is not None and not waiter.done()):
+                        waiter.set_result(tier)
                     if "collaborationMode" in settings and sess["mode"] in {"plan", "default"}:
                         meta = codex_sessions.load(name) or {}
                         if meta.get("transfer_id") and meta.get("thread_id") == sess["thread_id"]:
@@ -2226,6 +2290,8 @@ class CodexAdapter:
                     for e in (m.get("supportedReasoningEfforts") or [])
                 ],
                 "defaultEffort": m.get("defaultReasoningEffort"),
+                "serviceTiers": m.get("serviceTiers") or [],
+                "defaultServiceTier": m.get("defaultServiceTier"),
             }
             for m in (result.get("data") or [])
             if not m.get("hidden")
@@ -2243,6 +2309,110 @@ class CodexAdapter:
         sess["model"], sess["effort"] = model, effort
         sess["default_effort"] = effort
         codex_sessions.update_model(name, model, effort)
+
+    SERVICE_TIER_TIMEOUT = 10.0
+
+    async def set_service_tier(self, name: str, service_tier: str) -> str:
+        if service_tier not in {"default", "priority"}:
+            raise ValueError("Escolha Fast inválida")
+        try:
+            async with asyncio.timeout(self.SERVICE_TIER_TIMEOUT):
+                return await self._apply_service_tier(name, service_tier)
+        except TimeoutError:
+            raise RuntimeError("O Codex não confirmou a escolha Fast no prazo") from None
+
+    async def _apply_service_tier(self, name: str, service_tier: str) -> str:
+        client = await self.ensure_running(name)
+        if client is None:
+            raise RuntimeError("Sessão Codex indisponível")
+        sess = self._sessions[name]
+        thread_id = sess["thread_id"]
+        waiter = None
+
+        def still_current() -> bool:
+            meta = codex_sessions.load(name)
+            return (self._sessions.get(name) is sess and sess["thread_id"] == thread_id
+                    and sess.get("client") is client and not getattr(client, "closed", False)
+                    and (meta is None or meta.get("thread_id") == thread_id))
+
+        async with self._locks.setdefault(name, asyncio.Lock()):
+            if not still_current():
+                raise RuntimeError("A sessão mudou antes de alterar Fast")
+            try:
+                async with asyncio.timeout(self.SERVICE_TIER_TIMEOUT):
+                    subscriber = self._subscribers.get(name)
+                    if subscriber is not None and not subscriber.done():
+                        try:
+                            await asyncio.shield(subscriber)
+                        except asyncio.CancelledError:
+                            if asyncio.current_task().cancelling():
+                                raise
+                            raise RuntimeError("A sessão mudou antes de alterar Fast") from None
+                    if not still_current():
+                        raise RuntimeError("A sessão mudou antes de alterar Fast")
+                    if service_tier == "priority":
+                        await self.read_settings(name)
+                        if not still_current():
+                            raise RuntimeError("A sessão mudou antes de alterar Fast")
+                        current_model = self.current_model(name)["model"]
+                        catalog = await self.list_models(name)
+                        model = next((model for model in catalog if model["model"] == current_model), {})
+                        if (not still_current() or self.current_model(name)["model"] != current_model
+                                or not any(tier.get("id") == "priority" and not tier.get("hidden")
+                                           for tier in model.get("serviceTiers", []))):
+                            raise RuntimeError("Fast não está disponível para o modelo atual")
+                    if not still_current():
+                        raise RuntimeError("A sessão mudou antes de alterar Fast")
+                    # Só a bomba consome eventos; {} do RPC não prova que a escolha foi aplicada.
+                    waiter = asyncio.get_running_loop().create_future()
+                    sess["service_tier_waiter"] = waiter
+                    sess["service_tier_requested"] = service_tier
+                    await client.request("thread/settings/update", {"threadId": thread_id, "serviceTier": service_tier})
+                    while True:
+                        applied = await waiter
+                        if not still_current() or applied != service_tier:
+                            raise RuntimeError("O Codex não confirmou a escolha Fast")
+                        # Capture a próxima candidata antes da consulta, sem outro consumidor da fila.
+                        waiter = asyncio.get_running_loop().create_future()
+                        sess["service_tier_waiter"] = waiter
+                        revision = sess.get("settings_revision", 0)
+                        try:
+                            snapshot = await client.request("thread/resume", {"threadId": thread_id})
+                        except RuntimeError as exc:
+                            if "no rollout found" not in str(exc):
+                                raise
+                            # Thread sem turno ainda não tem rollout: vale o aviso da própria thread.
+                            _log.info("codex Fast confirmado pelo aviso da thread (sem rollout) name=%s tier=%s",
+                                      name, applied)
+                            snapshot = {"thread": {"id": thread_id}, "serviceTier": applied}
+                        if not still_current() or (snapshot.get("thread") or {}).get("id") != thread_id:
+                            raise RuntimeError("A sessão mudou antes de confirmar Fast")
+                        previous_tier = sess.get("service_tier")
+                        self._restore_service_tier(name, sess, snapshot, revision)
+                        if sess.get("service_tier") != previous_tier:
+                            for listener in sess.get("ouvintes", []):
+                                listener.put_nowait(self._question_state(name, sess))
+                        if ("serviceTier" in snapshot and revision == sess.get("settings_revision", 0)
+                                and ("default" if snapshot["serviceTier"] is None else snapshot["serviceTier"]) == service_tier
+                                and sess.get("service_tier") == service_tier):
+                            return service_tier
+            except TimeoutError:
+                raise RuntimeError("O Codex não confirmou a escolha Fast no prazo") from None
+            finally:
+                if waiter is not None:
+                    if not waiter.done():
+                        waiter.cancel()
+                    if sess.get("service_tier_waiter") is waiter:
+                        sess.pop("service_tier_waiter", None)
+                        sess.pop("service_tier_requested", None)
+
+    def _restore_service_tier(self, name: str, sess: dict, result: dict, revision: int) -> None:
+        if (self._sessions.get(name) is not sess or revision != sess.get("settings_revision", 0)
+                or "serviceTier" not in result):
+            return
+        tier = "default" if result["serviceTier"] is None else result["serviceTier"]
+        if codex_sessions.update_service_tier(name, sess["thread_id"], tier):
+            sess["service_tier"] = tier
 
     @staticmethod
     def _restore_turn(sess: dict, thread: dict, *, include_turns: bool = True) -> None:
@@ -2392,21 +2562,23 @@ class CodexAdapter:
         prioridade; sem escolha, cai pro default da thread (dict quente, populado no attach) --
         so entao {model: None, effort: None} pra sessao nunca vista."""
         sess = self._sessions.get(name)
-        if sess is not None and (sess.get("model") or sess.get("effort")
+        if sess is not None and (sess.get("model") or sess.get("effort") or sess.get("service_tier")
                                   or sess.get("default_model") or sess.get("default_effort")):
             return {"model": sess.get("model") or sess.get("default_model"),
-                    "effort": sess.get("effort") or sess.get("default_effort")}
+                    "effort": sess.get("effort") or sess.get("default_effort"),
+                    "service_tier": sess.get("service_tier")}
         meta = codex_sessions.load(name)
         if meta is not None:
-            return {"model": meta.get("model"), "effort": meta.get("effort")}
-        return {"model": None, "effort": None}
+            return {"model": meta.get("model"), "effort": meta.get("effort"), "service_tier": meta.get("service_tier")}
+        return {"model": None, "effort": None, "service_tier": None}
 
     def spawn_command(self, cwd: str, session_id: str,
                       model: str | None = None, effort: str | None = None,
                       permission_mode: str | None = None,
                       initial_prompt: str | None = None,
                       codex_home: str | None = None,
-                      codex_account: str | None = None) -> list[str]:
+                      codex_account: str | None = None,
+                      service_tier: str | None = None) -> list[str]:
         # Sessao Codex nasce como as outras: um comando no pane. O comando e o lancador, que sobe o
         # app-server e a TUI juntos (ver comando_do_lancador).
         # session_id nao entra: a identidade da conversa e o threadId, que so existe depois que a
@@ -2418,7 +2590,8 @@ class CodexAdapter:
         from app import model_args
         model, effort = model_args.validar("codex", model, effort)
         return comando_do_lancador(cwd, initial_prompt, model=model, effort=effort,
-                                   codex_home=codex_home, codex_account=codex_account)
+                                   codex_home=codex_home, codex_account=codex_account,
+                                   service_tier=service_tier)
 
     def transcript_path(self, cwd: str, session_id: str) -> str:
         # O rollout path vem do thread/start (result.thread.path), gravado no sidecar -- nao ha como

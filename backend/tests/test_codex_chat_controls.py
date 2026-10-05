@@ -41,7 +41,7 @@ def chat(tmp_path, monkeypatch):
 async def test_leitura_viva_vence_esforco_antigo(chat):
     adapter, _ = chat
     assert await adapter.read_settings("sess") == {
-        "model": "gpt-6-astra", "effort": "high", "mode": None,
+        "model": "gpt-6-astra", "effort": "high", "mode": None, "service_tier": None,
     }
 
 
@@ -255,7 +255,27 @@ async def test_notificacao_terminal_atualiza_modo_e_esforco(chat):
     await adapter._consumir("sess", client, adapter._sessions["sess"], events.append)
     assert events[-1].codex_mode == "plan"
     assert "xhigh" in events[-1].status_line
-    assert adapter.current_model("sess") == {"model": "gpt-5.6-sol", "effort": "xhigh"}
+    assert adapter.current_model("sess") == {"model": "gpt-5.6-sol", "effort": "xhigh", "service_tier": None}
+
+
+@pytest.mark.parametrize("tier", ["priority", "default"])
+async def test_terminal_service_tier_notification_preserves_model_effort_and_sidecar(chat, tier):
+    adapter, client = chat
+    sessions.save("sess", "thread-1", "/rollout.jsonl", "/p", model="antigo", effort="medium")
+
+    async def notifications():
+        yield {"method": "thread/settings/updated", "params": {
+            "threadId": "other", "threadSettings": {"serviceTier": "priority"}}}
+        yield {"method": "thread/settings/updated", "params": {
+            "threadId": "thread-1", "threadSettings": {"serviceTier": tier}}}
+
+    client.notifications = notifications
+    events = []
+    await adapter._consumir("sess", client, adapter._sessions["sess"], events.append)
+    assert len(events) == 1 and events[0].codex_service_tier == tier
+    assert adapter.current_model("sess") == {"model": "antigo", "effort": "medium", "service_tier": tier}
+    assert sessions.load("sess")["service_tier"] == tier
+    assert (sessions.load("sess")["model"], sessions.load("sess")["effort"]) == ("antigo", "medium")
 
 
 async def test_eventos_de_outra_thread_nao_alteram_sessao_principal(chat, monkeypatch):
@@ -444,7 +464,10 @@ async def test_controles_no_codex_real_sem_inferencia(tmp_path, monkeypatch):
                 yield notification
 
         client.notifications = observar_notifications
-        adapter.attach("native", client, result["thread"]["id"], subscribed=True)
+        adapter.attach("native", client, result["thread"]["id"], subscribed=True,
+                       service_tier=result.get("serviceTier"))
+        assert await adapter.set_service_tier("native", "default") == "default"
+        assert (await adapter.read_settings("native"))["service_tier"] == "default"
         await adapter.set_model("native", "gpt-6-astra", "high")
         assert (await adapter.read_settings("native"))["effort"] == "high"
         await adapter.set_mode("native", "plan")

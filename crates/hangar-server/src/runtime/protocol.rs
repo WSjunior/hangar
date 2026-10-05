@@ -55,7 +55,7 @@ pub enum WriteOutcome { Written, NotWritten, Unknown }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
-    Input, Steer, SteerQueue, Interrupt, AnswerQuestions, Select, SetModel, SetEffort,
+    Input, Steer, SteerQueue, Interrupt, AnswerQuestions, Select, SetModel, SetEffort, SetServiceTier,
     SetPermissionMode, Compact, ListModels, ListSkills, ReadRateLimits, ReadSettings,
     SetMode, SkipQuestion, Restart, OpenTerminal, Reload, Commands, Cwd, Detach,
     VoiceOpen, VoiceRpc, VoiceRespond, VoiceClose,

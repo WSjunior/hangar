@@ -449,6 +449,7 @@ pub(in crate::app) struct NewSession {
     /// A conta escolhida à mão no menu da tela sem sessão: a troca por cota esgotada não passa por cima dela.
     account_touched: bool,
     effort: String,
+    service_tier: Option<String>,
     permission: String,
     /// O padrão marcado do harness, como foi lido na última leitura do catálogo.
     saved_default: Option<(String, String, String)>,
@@ -550,7 +551,7 @@ impl NewSession {
             sessions: Remote::default(), same_folder: false, name, provider: "claude", providers: Remote::default(), configs: Remote::default(),
             config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true, headless_owner: None, headless_touched: false, headless_saving: false,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
-            step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), model_choice_touched: false, account_touched: false, effort: String::new(),
+            step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), model_choice_touched: false, account_touched: false, effort: String::new(), service_tier: None,
             permission: "bypassPermissions".into(), saved_default: None, permission_touched: false, subagent: String::new(), engine: String::new(), engine_account: String::new(), engine_account_pick: None, model_pick: None, effort_pick: None,
             permission_pick: None, subagent_pick: None, engine_pick: None, engines: Remote::default(), jev: Remote::default(), jev_on: false,
             more: false, omp, quotas: Remote::default(), reopen_config: None, reopen_default: false, asking: false, confirming: false, account_busy: false, account_seq: 0, account_name,
@@ -1008,6 +1009,7 @@ impl NewSession {
     pub(super) fn can_create(&self, cx: &App) -> bool {
         !self.is_transfer() && !self.creating && !self.headless_saving && !self.jev.loading && self.picked.is_some() && !self.sessions.loading && (self.compact || !self.name.read(cx).value().trim().is_empty())
             && self.provider_ready() == Some(true) && self.codex_ready() && self.engine_ready() && !(self.provider == "codex" && self.context_busy)
+            && (self.provider != "codex" || self.service_tier.as_deref() != Some("priority") || self.fast_available())
             && (!self.compact || ((self.provider != "claude" || (!self.configs.loading && self.configs.ok().is_some_and(|list| !list.is_empty())))
                 && !self.models.loading && self.models.ok().is_some()
                 && !self.checkout.loading))
@@ -1042,7 +1044,10 @@ impl NewSession {
                 // O motor exporta o próprio modelo de subagente: com ele, o campo nem aparece.
                 if self.engine.is_empty() && !self.subagent.is_empty() { body["subagent_model"] = json!(self.subagent); }
             }
-            "codex" => body["codex_account"] = json!(self.codex_account),
+            "codex" => {
+                body["codex_account"] = json!(self.codex_account);
+                if let Some(tier) = &self.service_tier { body["service_tier"] = json!(tier); }
+            },
             "omp" => { let profile = self.omp.read(cx).value().trim().to_owned(); if !profile.is_empty() { body["omp_profile"] = json!(profile); } }
             _ => {}
         }
@@ -1669,6 +1674,7 @@ impl NewSession {
         ];
         let agent = [
             (fresh || self.proxy_accounts().is_some()).then(|| self.render_trio(!fresh)).flatten().map(IntoElement::into_any_element),
+            fresh.then(|| self.render_fast_choice(cx)).flatten().map(IntoElement::into_any_element),
             fresh.then(|| self.render_default_check(cx)).flatten().map(IntoElement::into_any_element),
             (fresh && self.provider == "codex").then(|| self.render_context(cx).into_any_element()),
             self.render_more(cx).map(IntoElement::into_any_element),

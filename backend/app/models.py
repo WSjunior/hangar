@@ -90,6 +90,7 @@ class SessionInfo(BaseModel):
     # Raiz Codex resolvida para esta sessão. Só existe para o provider Codex; o cliente usa-a para
     # conservar a origem em operações posteriores, enquanto `conta` continua sendo o ID de cota.
     codex_home: Optional[str] = None
+    codex_service_tier: str | None = None
     # Conta da sessão como ID do /api/cotas ("claude:<config_dir>", "chave:<motor>",
     # "kimi:<provider do default_model>") — a pílula de cota do topo mostra o uso da conta da
     # sessão ATIVA a partir daqui. None quando não dá pra saber (pi, ou kimi sem provider com
@@ -282,6 +283,7 @@ class StateEvent(BaseModel):
     codex_mode: Optional[Literal["default", "plan"]] = None
     codex_question: dict | None = None
     codex_buffering: bool = False
+    codex_service_tier: str | None = None
     claude_permission_mode: Optional[str] = None
     claude_previous_non_plan: Optional[str] = None
     # Claude sem terminal com `ExitPlanMode` aguardando aprovação: {plan, path, tool_use_id}.

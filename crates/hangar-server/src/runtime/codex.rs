@@ -14,6 +14,17 @@ struct Rpc {
     settings_revision:u64,
 }
 
+struct ServiceTierChange {
+    operation_id:String,
+    thread_id:String,
+    model:Option<String>,
+    tier:String,
+    deadline:f64,
+    acknowledged:bool,
+    candidate:bool,
+    verifying:bool,
+}
+
 struct Wire {
     request_id:Option<RequestId>,
     server_request:Option<RequestId>,
@@ -119,6 +130,8 @@ pub struct Engine {
     model:Option<String>,
     effort:Option<String>,
     mode:Option<String>,
+    service_tier:Option<String>,
+    service_tier_pending:Option<ServiceTierChange>,
     permission_mode:String,
     token_usage:Value,
     rate_limits:Value,
@@ -143,6 +156,10 @@ pub struct Engine {
 
 fn error(message:&str) -> RuntimeError { RuntimeError::new("codex_command",message) }
 fn string(value:&Value) -> Option<String> { value.as_str().map(str::to_owned) }
+fn service_tier(value:&Value) -> Option<String> {
+    if value.is_null() { Some("default".into()) }
+    else { value.as_str().filter(|tier|["priority","default"].contains(tier)).map(str::to_owned) }
+}
 fn approval(mode:&str) -> &str { if mode == "Full Access" { "never" } else { "on-request" } }
 fn sandbox(mode:&str) -> &str { match mode { "Ask for approval"=>"read-only","Approve for me"=>"workspace-write",_=>"danger-full-access" } }
 
@@ -179,6 +196,7 @@ impl Engine {
             state:StateEvent { session:metadata["name"].as_str().unwrap_or("").into(),state:"idle".into(),headless:true,
                 status_line:string(&metadata["status_line"]),..StateEvent::default() },state_revision:metadata["state_revision"].as_u64().unwrap_or(0),settings_revision:metadata["settings_revision"].as_u64().unwrap_or(0),
             model:string(&metadata["model"]),effort:string(&metadata["effort"]),mode:string(&metadata["mode"]),
+            service_tier:metadata.get("service_tier").and_then(service_tier),service_tier_pending:None,
             permission_mode:metadata["permission_mode"].as_str().unwrap_or("Full Access").into(),token_usage:Value::Null,rate_limits:Value::Null,
             preview:LiveBuffer::default(),response_started:false,compacting:false,rpc:BTreeMap::new(),server_requests:Vec::new(),
             request_epochs:BTreeMap::new(),answering:BTreeSet::new(),wires:BTreeMap::new(),policies:BTreeMap::new(),last_format_request:None,format_gate:FormatGate::default(),async_questions,voices,voice_wires:BTreeMap::new(),skill_preparations:BTreeMap::new(),early_voice:BTreeMap::new(),early_voice_bytes:0,metadata }
@@ -192,6 +210,7 @@ impl Engine {
             || question.is_some() && !self.in_progress { "awaiting_input" } else if self.in_progress { "working" } else { "idle" }.into();
         state.codex_question = question.and_then(|q|q.as_object().cloned());
         state.codex_mode = self.mode.clone();
+        state.codex_service_tier = self.service_tier.clone();
         state.label = self.compacting.then(||"Compactando…".into());
         state.question = None; state.options = None;
         if let Some((_,request)) = pending_approval {
@@ -207,7 +226,7 @@ impl Engine {
 
     pub fn control_view(&self) -> Value {
         json!({"alive":self.alive,"initialized":self.initialized,"ready":self.ready,"in_progress":self.in_progress,
-            "thread_id":self.thread_id,"turn_id":self.turn_id,"model":self.model,"effort":self.effort,"mode":self.mode,
+            "thread_id":self.thread_id,"turn_id":self.turn_id,"model":self.model,"effort":self.effort,"mode":self.mode,"service_tier":self.service_tier,
             "permission_mode":self.permission_mode,"token_usage":self.token_usage,"rate_limits":self.rate_limits,
             "runtime_counter":self.counter,"state_revision":self.state_revision,"settings_revision":self.settings_revision,"deliverable":self.deliverable(),"pending":self.server_requests.iter()
                 .map(|(id,request)|json!({"request_id":id,"request":request})).collect::<Vec<_>>(),
@@ -263,6 +282,104 @@ impl Engine {
         effects.push(Effect::Write { operation_id:Some(operation_id),frame:json!({"jsonrpc":"2.0","id":request_id,"method":method,"params":params}) });
     }
 
+    fn finish_service_tier(&mut self,disposition:Disposition,payload:Value,effects:&mut Vec<Effect>) {
+        let Some(pending) = self.service_tier_pending.take() else { return };
+        let wires = &mut self.wires;
+        self.rpc.retain(|_,rpc| {
+            let related = rpc.continuation.as_ref().is_some_and(|next|next["parent"] == pending.operation_id
+                && next["kind"].as_str().is_some_and(|kind|kind.starts_with("service_tier")));
+            if related { if let Some(wire) = wires.get_mut(&rpc.operation_id) { wire.final_result = true; } }
+            if related && rpc.operation_id != pending.operation_id {
+                effects.push(Effect::Reply { operation_id:rpc.operation_id.clone(),disposition:Disposition::Unknown,payload:payload.clone() });
+            }
+            !related
+        });
+        if let Some(wire) = self.wires.get_mut(&pending.operation_id) { wire.final_result = true; }
+        effects.push(Effect::Reply { operation_id:pending.operation_id,disposition,payload });
+    }
+
+    fn expire_service_tier(&mut self,effects:&mut Vec<Effect>) {
+        if self.service_tier_pending.as_ref().is_some_and(|pending|self.clock.monotonic_s >= pending.deadline) {
+            self.finish_service_tier(Disposition::Unknown,json!({"error":"O Codex não confirmou a escolha Fast no prazo"}),effects);
+        }
+    }
+
+    fn verify_service_tier(&mut self,effects:&mut Vec<Effect>) {
+        let Some(pending) = self.service_tier_pending.as_mut() else { return };
+        if !pending.acknowledged || !pending.candidate || pending.verifying { return; }
+        pending.candidate = false; pending.verifying = true;
+        let parent = pending.operation_id.clone(); let thread = pending.thread_id.clone();
+        self.rpc(format!("{parent}:verify:{}",self.counter+1),"thread/resume",json!({"threadId":thread}),
+            Some(json!({"kind":"service_tier_confirm","parent":parent})),effects);
+    }
+
+    fn send_service_tier(&mut self,effects:&mut Vec<Effect>) {
+        let Some(pending) = self.service_tier_pending.as_ref() else { return };
+        self.rpc(pending.operation_id.clone(),"thread/settings/update",json!({"threadId":pending.thread_id,"serviceTier":pending.tier}),
+            Some(json!({"kind":"service_tier_update","parent":pending.operation_id})),effects);
+    }
+
+    fn restore_service_tier(&mut self,result:&Value,revision:u64,effects:&mut Vec<Effect>) {
+        if revision != self.settings_revision { return; }
+        if let Some(tier) = result.get("serviceTier").and_then(service_tier) {
+            self.service_tier = Some(tier);
+            self.policy("session.patch_meta",json!({"service_tier":self.service_tier}),effects);
+        }
+    }
+
+    fn service_tier_reply(&mut self,rpc:&Rpc,line:&Value,effects:&mut Vec<Effect>) {
+        let next = rpc.continuation.as_ref().unwrap();
+        if next["kind"] == "service_tier_recovered" {
+            // A resposta vazia de uma escrita antiga não prova a configuração atual.
+            effects.push(Effect::Reply { operation_id:rpc.operation_id.clone(),disposition:Disposition::Unknown,
+                payload:json!({"error":"Escolha Fast anterior sem confirmação"}) });
+            return;
+        }
+        if !self.service_tier_pending.as_ref().is_some_and(|pending|next["parent"] == pending.operation_id) { return; }
+        if rpc.operation_id != next["parent"].as_str().unwrap_or("") {
+            effects.push(Effect::Reply { operation_id:rpc.operation_id.clone(),
+                disposition:if line["error"].is_null() { Disposition::Accepted } else { Disposition::Rejected },
+                payload:if line["error"].is_null() { line["result"].clone() } else { json!({"error":line["error"]}) } });
+        }
+        if !line["error"].is_null() {
+            self.finish_service_tier(Disposition::Rejected,json!({"error":line["error"]}),effects); return;
+        }
+        if !self.alive || self.service_tier_pending.as_ref().is_some_and(|pending|pending.thread_id != self.thread_id) {
+            self.finish_service_tier(Disposition::Unknown,json!({"error":"A sessão mudou antes de confirmar Fast"}),effects); return;
+        }
+        let result = &line["result"];
+        match next["kind"].as_str() {
+            Some("service_tier_catalog") => {
+                let pending = self.service_tier_pending.as_ref().unwrap();
+                let supported = pending.model == self.model && self.model.is_some() && result["data"].as_array().is_some_and(|models|
+                    models.iter().any(|model|model["model"].as_str() == self.model.as_deref() && model["hidden"] != true
+                        && model["serviceTiers"].as_array().is_some_and(|tiers|tiers.iter().any(|tier|tier["id"] == "priority" && tier["hidden"] != true))));
+                if !supported { self.finish_service_tier(Disposition::Rejected,json!({"error":"Fast não está disponível para o modelo atual"}),effects); }
+                else { self.send_service_tier(effects); }
+            }
+            Some("service_tier_update") => {
+                self.service_tier_pending.as_mut().unwrap().acknowledged = true;
+                self.verify_service_tier(effects);
+            }
+            Some("service_tier_confirm") => {
+                if result["thread"]["id"] != self.thread_id {
+                    self.finish_service_tier(Disposition::Unknown,json!({"error":"O Codex confirmou outra conversa"}),effects); return;
+                }
+                self.restore_service_tier(result,rpc.settings_revision,effects);
+                let pending = self.service_tier_pending.as_mut().unwrap();
+                pending.verifying = false;
+                let confirmed = rpc.settings_revision == self.settings_revision
+                    && result.get("serviceTier").and_then(service_tier).as_deref() == Some(pending.tier.as_str())
+                    && self.service_tier.as_deref() == Some(pending.tier.as_str());
+                if confirmed {
+                    let tier = pending.tier.clone();
+                    self.finish_service_tier(Disposition::Accepted,json!({"service_tier":tier}),effects);
+                } else { self.verify_service_tier(effects); }
+            }
+            _ => {},
+        }
+    }
+
     pub fn restore_rpc(&mut self,operation_id:String,frame:&Value,state_revision:u64,settings_revision:u64) {
         let Ok(request_id) = serde_json::from_value::<RequestId>(frame["id"].clone()) else { return };
         let Some(method) = frame["method"].as_str() else {
@@ -274,8 +391,11 @@ impl Engine {
         if self.rpc.contains_key(&request_id) { return; }
         let voice_call = self.voices.iter().find(|(_,voice)|voice.thread_id.as_deref().is_some_and(|thread|frame["params"]["threadId"] == thread))
             .map(|(call_id,_)|call_id.clone()).or_else(||(method == "thread/start" && frame["params"]["ephemeral"] == true).then(||"orphan".into()));
+        let continuation = if method == "thread/settings/update" && frame["params"].get("serviceTier").is_some() {
+            Some(json!({"kind":"service_tier_recovered"}))
+        } else { voice_call.map(|call_id|json!({"kind":"voice","call_id":call_id})) };
         self.rpc.insert(request_id.clone(),Rpc { operation_id:operation_id.clone(),method:method.into(),params:frame["params"].clone(),
-            deadline:self.clock.monotonic_s,timed_out:true,continuation:voice_call.map(|call_id|json!({"kind":"voice","call_id":call_id})),state_revision,settings_revision });
+            deadline:self.clock.monotonic_s,timed_out:true,continuation,state_revision,settings_revision });
         self.wires.insert(operation_id,Wire { request_id:Some(request_id),server_request:None,server_epoch:None,final_result:false });
     }
 
@@ -299,6 +419,7 @@ impl Engine {
     pub fn hydrate(&mut self,snapshot:CanoSnapshot) -> Result<Vec<Effect>,RuntimeError> {
         let mut effects = Vec::new();
         self.alive = snapshot.saiu.is_none();
+        if !self.alive { self.finish_service_tier(Disposition::Unknown,json!({"error":"O Codex desconectou antes de confirmar Fast"}),&mut effects); }
         for raw in snapshot.pendentes {
             effects.extend(self.apply(EngineInput::Line(serde_json::from_str(&raw).map_err(|_|error("pedido do snapshot inválido"))?),self.clock)?);
         }
@@ -379,6 +500,18 @@ impl Engine {
                 "includeTurns":payload["include_turns"].as_bool().unwrap_or(false)}),None,&mut effects),
             OperationKind::SetModel | OperationKind::SetEffort => self.rpc(id,"thread/settings/update",json!({"threadId":self.thread_id,
                 "model":payload.get("model").cloned().unwrap_or_else(||json!(self.model)),"effort":payload.get("effort").cloned().unwrap_or_else(||json!(self.effort))}),None,&mut effects),
+            OperationKind::SetServiceTier => {
+                let tier = payload["service_tier"].as_str().filter(|tier|["priority","default"].contains(tier))
+                    .ok_or_else(||error("Escolha Fast inválida"))?;
+                if !payload.as_object().is_some_and(|fields|fields.len() == 1) { return Err(error("Escolha Fast inválida")); }
+                if !self.ready || self.thread_id.is_empty() { return Err(error("Sessão Codex indisponível")); }
+                if self.service_tier_pending.is_some() { return Err(error("Uma escolha Fast ainda está aguardando confirmação")); }
+                self.service_tier_pending = Some(ServiceTierChange { operation_id:id.clone(),thread_id:self.thread_id.clone(),model:self.model.clone(),
+                    tier:tier.into(),deadline:clock.monotonic_s+10.0,acknowledged:false,candidate:false,verifying:false });
+                if tier == "priority" {
+                    self.rpc(format!("{id}:catalog"),"model/list",json!({}),Some(json!({"kind":"service_tier_catalog","parent":id})),&mut effects);
+                } else { self.send_service_tier(&mut effects); }
+            }
             OperationKind::SetMode => {
                 let mode = payload["mode"].as_str().filter(|mode|["default","plan"].contains(mode)).ok_or_else(||error("modo Codex inválido"))?;
                 self.rpc(format!("{id}:settings"),"thread/read",json!({"threadId":self.thread_id,"includeTurns":false}),
@@ -443,16 +576,24 @@ impl Engine {
     pub fn apply(&mut self,input:EngineInput,clock:ClockSample) -> Result<Vec<Effect>,RuntimeError> {
         self.clock = clock;
         let mut effects = Vec::new();
+        self.expire_service_tier(&mut effects);
         match input {
             EngineInput::Line(line) => {
                 if line.get("method").is_some() { self.notification(line,&mut effects)?; }
                 else if line.get("id").is_some() { self.reply(line,&mut effects)?; }
                 else if line["type"] == "cano_saiu" {
                     self.alive = false; self.in_progress = false; self.ready = false; self.clear_preview(&mut effects);
+                    self.finish_service_tier(Disposition::Unknown,json!({"error":"O Codex desconectou antes de confirmar Fast"}),&mut effects);
                     self.state.problema = Some("headless_caiu".into()); self.changed(&mut effects,true);
                 }
             }
             EngineInput::WriteAck { operation_id,outcome } => {
+                if outcome != WriteOutcome::Written && self.service_tier_pending.as_ref().is_some_and(|pending|
+                    pending.operation_id == operation_id || self.rpc.values().any(|rpc|rpc.operation_id == operation_id
+                        && rpc.continuation.as_ref().is_some_and(|next|next["parent"] == pending.operation_id))) {
+                    self.finish_service_tier(if outcome == WriteOutcome::NotWritten { Disposition::Rejected } else { Disposition::Unknown },
+                        json!({"write_outcome":outcome}),&mut effects);
+                }
                 if let Some((call_id,id,epoch)) = self.voice_wires.get(&operation_id).cloned() {
                     if let Some(voice) = self.voices.get_mut(&call_id) {
                         if outcome == WriteOutcome::Written && voice.requests.get(&id).is_some_and(|(_,current)|*current == epoch) {
@@ -520,6 +661,11 @@ impl Engine {
         let already_initialized = rpc.method == "initialize" && line["error"]["message"].as_str()
             .is_some_and(|message|message.to_lowercase().contains("already initialized"));
         if let Some(wire) = self.wires.get_mut(&rpc.operation_id) { wire.final_result = true; }
+        if rpc.continuation.as_ref().is_some_and(|next|next["kind"].as_str().is_some_and(|kind|kind.starts_with("service_tier"))) {
+            self.service_tier_reply(&rpc,&line,effects);
+            self.changed(effects,false);
+            return Ok(());
+        }
         if !line["error"].is_null() && !already_initialized {
             if voice_rpc(&rpc) && rpc.method == "thread/start" {
                 if let Some(voice) = rpc.continuation.as_ref().and_then(|next|next["call_id"].as_str()).and_then(|call|self.voices.get_mut(call)) {
@@ -557,10 +703,16 @@ impl Engine {
             "thread/resume" | "thread/start" => {
                 let thread = &result["thread"];
                 if let Some(id) = thread["id"].as_str() {
-                    if id != self.thread_id { self.clear_preview(effects); self.thread_id = id.into(); }
+                    if id != self.thread_id {
+                        self.finish_service_tier(Disposition::Unknown,json!({"error":"A conversa mudou antes de confirmar Fast"}),effects);
+                        self.clear_preview(effects); self.thread_id = id.into();
+                    }
                 }
-                self.model = string(&result["model"]).or(self.model.clone());
-                self.effort = string(&result["reasoningEffort"]).or(self.effort.clone());
+                if rpc.settings_revision == self.settings_revision {
+                    self.model = string(&result["model"]).or(self.model.clone());
+                    self.effort = string(&result["reasoningEffort"]).or(self.effort.clone());
+                    self.restore_service_tier(&result,rpc.settings_revision,effects);
+                }
                 self.restore_thread(thread,&rpc);
                 self.async_questions.hydrate(&self.thread_id,thread);
                 self.policy("session.patch_meta",json!({"thread_id":self.thread_id,"rollout_path":thread["path"]}),effects);
@@ -602,8 +754,12 @@ impl Engine {
                     effects.push(Effect::Write { operation_id:Some(notification),
                         frame:json!({"jsonrpc":"2.0","method":"initialized","params":{}}) });
                     let (method,params) = if self.reconnect && !self.thread_id.is_empty() { ("thread/resume",json!({"threadId":self.thread_id})) }
-                        else { ("thread/start",json!({"cwd":self.metadata["cwd"],"model":self.model,
-                            "approvalPolicy":approval(&self.permission_mode),"sandbox":sandbox(&self.permission_mode)})) };
+                        else {
+                            let mut params = json!({"cwd":self.metadata["cwd"],"model":self.model,
+                                "approvalPolicy":approval(&self.permission_mode),"sandbox":sandbox(&self.permission_mode)});
+                            if let Some(tier) = &self.service_tier { params["serviceTier"] = json!(tier); }
+                            ("thread/start",params)
+                        };
                     self.rpc(format!("{parent}:thread"),method,params,
                         Some(json!({"kind":"bootstrap_thread","parent":parent})),effects);
                 }
@@ -647,7 +803,8 @@ impl Engine {
         let payload = if rpc.method == "model/list" { json!(result["data"].as_array().map(|models|models.iter().filter(|m|m["hidden"] != true).map(|model|json!({
             "model":model["model"],"displayName":model["displayName"],"description":model["description"],
             "efforts":model["supportedReasoningEfforts"].as_array().map(|efforts|efforts.iter().map(|e|json!({"value":e["reasoningEffort"],"description":e["description"]})).collect::<Vec<_>>()).unwrap_or_default(),
-            "defaultEffort":model["defaultReasoningEffort"]})).collect::<Vec<_>>()).unwrap_or_default()) }
+            "defaultEffort":model["defaultReasoningEffort"],"serviceTiers":model.get("serviceTiers").cloned().unwrap_or_else(||json!([])),
+            "defaultServiceTier":model["defaultServiceTier"]})).collect::<Vec<_>>()).unwrap_or_default()) }
             else { result };
         effects.push(Effect::Reply { operation_id:rpc.operation_id,disposition:Disposition::Accepted,payload });
         self.changed(effects,true);
@@ -844,8 +1001,18 @@ impl Engine {
             "thread/settings/updated" => {
                 if params["threadId"] != self.thread_id { return Ok(()); }
                 let settings = &params["threadSettings"];
-                self.model = string(&settings["model"]); self.effort = string(&settings["effort"]);
-                self.mode = Some(settings["collaborationMode"]["mode"].as_str().unwrap_or("default").into()); self.settings_revision += 1;
+                if settings.get("model").is_some() { self.model = string(&settings["model"]); }
+                if settings.get("effort").is_some() { self.effort = string(&settings["effort"]); }
+                if settings.get("collaborationMode").is_some() { self.mode = Some(settings["collaborationMode"]["mode"].as_str().unwrap_or("default").into()); }
+                self.settings_revision += 1;
+                if let Some(tier) = settings.get("serviceTier").and_then(service_tier) {
+                    self.service_tier = Some(tier.clone());
+                    self.policy("session.patch_meta",json!({"service_tier":tier}),effects);
+                    if let Some(pending) = self.service_tier_pending.as_mut() {
+                        if pending.tier == tier { pending.candidate = true; }
+                    }
+                    self.verify_service_tier(effects);
+                }
             }
             "item/agentMessage/delta" => {
                 if params["turnId"].as_str().is_some_and(|id|self.turn_id.as_deref().is_some_and(|current|current != id)) { return Ok(()); }
@@ -896,7 +1063,8 @@ impl Engine {
     }
 
     pub fn next_deadline(&self) -> Option<f64> {
-        self.preview.deadline().into_iter().chain(self.rpc.values().filter(|rpc|!rpc.timed_out).map(|rpc|rpc.deadline)).min_by(f64::total_cmp)
+        self.preview.deadline().into_iter().chain(self.rpc.values().filter(|rpc|!rpc.timed_out).map(|rpc|rpc.deadline))
+            .chain(self.service_tier_pending.as_ref().map(|pending|pending.deadline)).min_by(f64::total_cmp)
     }
 
     pub fn confirm_input(&mut self,operation_id:&str) -> Vec<Effect> {
@@ -908,8 +1076,8 @@ impl Engine {
     }
 
     pub fn write_is_current(&self,operation_id:&str) -> bool {
-        self.wires.get(operation_id).is_none_or(|wire|wire.server_request.as_ref().is_none_or(|id|
-            self.request_epochs.get(id).copied() == wire.server_epoch))
+        self.wires.get(operation_id).is_none_or(|wire|(wire.request_id.is_none() || !wire.final_result)
+            && wire.server_request.as_ref().is_none_or(|id|self.request_epochs.get(id).copied() == wire.server_epoch))
     }
 }
 

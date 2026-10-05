@@ -1445,6 +1445,7 @@ class SessionRegistry:
                 lifecycle_id=session_life(meta["name"], meta=meta, birth=terminal_births.get(meta["name"])),
                 provider="codex", tracked=True, conta=f"codex:{codex_home}",
                 codex_home=codex_home, headless=bool(meta.get("headless")),
+                codex_service_tier=meta.get("service_tier"),
                 branch=loc.branch, worktree=loc.worktree,
                 worktree_path=loc.worktree_path, worktree_gone=loc.worktree_gone, git_cwd=loc.git_cwd,
                 then_target=(ThenLink(meta["name"]).get() or {}).get("target"),
@@ -1633,6 +1634,7 @@ class SessionRegistry:
                 marker = hook_state.get_state(_sid(info.jsonl))
                 if snapshot is not None:
                     info.state, info.label = snapshot.state, snapshot.label
+                    info.codex_service_tier = snapshot.codex_service_tier
                 elif marker and marker[0] != "awaiting_input":
                     # awaiting_input nao existe no Codex (o evento equivalente nao existe la); se
                     # aparecer, e marcador de outra coisa e nao vale mais que o default.
@@ -1993,7 +1995,13 @@ class SessionRegistry:
                jev: bool = False, transfer_id: str | None = None,
                tool_output_token_limit: int | None = None,
                transfer_rollout_path: str | None = None,
-               engine_account: str | None = None, engine_models: list[dict] | None = None) -> SessionInfo:
+               engine_account: str | None = None, engine_models: list[dict] | None = None,
+               service_tier: str | None = None) -> SessionInfo:
+        if service_tier is not None:
+            if service_tier not in ("default", "priority"):
+                raise ValueError("service_tier: use default ou priority")
+            if provider != "codex":
+                raise ValueError("service_tier só vale para provider codex")
         # Nome tmux nao aceita "."/":"/espaco -> sanitiza igual ao rename. Varias sessoes na MESMA
         # pasta sao permitidas: cada uma tem nome unico + --session-id proprio -> jsonl proprio.
         name = sanitize_session_name(name)
@@ -2049,7 +2057,8 @@ class SessionRegistry:
                     raise ValueError("motor so vale para provider claude")
                 return self._create_codex_headless(name, cwd, resume_session_id, model, effort,
                                                    permission_mode, codex_account, jev,
-                                                   transfer_id, tool_output_token_limit, transfer_rollout_path)
+                                                   transfer_id, tool_output_token_limit, transfer_rollout_path,
+                                                   service_tier=service_tier)
             return self._create_headless(name, cwd, config_dir, resume_session_id, engine, model,
                                          effort, context_window, permission_mode, subagent_model,
                                          jev, engine_account,
@@ -2158,7 +2167,8 @@ class SessionRegistry:
                                                        codex_home=codex_home,
                                                        codex_account=account.id,
                                                        model=model, effort=effort,
-                                                       tool_output_token_limit=tool_output_token_limit))
+                                                       tool_output_token_limit=tool_output_token_limit,
+                                                       **({"service_tier": service_tier} if service_tier is not None else {})))
             elif provider == "omp":
                 # Retoma por CAMINHO: o id interno do omp nao e o do nome do arquivo, e spawn e
                 # resume sao verbos diferentes — reusar o spawn abriria conversa nova.
@@ -2203,6 +2213,8 @@ class SessionRegistry:
             if provider == "codex":
                 extra["codex_home"] = codex_home
                 extra["codex_account"] = account.id
+                if service_tier is not None:
+                    extra["service_tier"] = service_tier
             if provider == "omp" and omp_profile:
                 extra["perfil"] = omp_profile
             cmd = tmux.join_cmd(get_adapter(provider).spawn_command(
@@ -2367,7 +2379,8 @@ class SessionRegistry:
                                codex_account: str | None, jev: bool = False,
                                transfer_id: str | None = None,
                                tool_output_token_limit: int | None = None,
-                               transfer_rollout_path: str | None = None) -> SessionInfo:
+                               transfer_rollout_path: str | None = None,
+                               service_tier: str | None = None) -> SessionInfo:
         """Sessão Codex SEM terminal: grava o sidecar; o app-server sobe no cano logo em seguida
         pelo `watch_sessions` do adapter (aquece na criação, não no primeiro prompt)."""
         from app.adapters.codex import sem_terminal
@@ -2401,7 +2414,7 @@ class SessionRegistry:
                             headless=True, key=sem_terminal.nova_chave(), permission_mode=permission_mode,
                             jev=jev, transfer_id=transfer_id,
                             tool_output_token_limit=tool_output_token_limit,
-                            previous_non_plan=target.get("previous_non_plan"))
+                            previous_non_plan=target.get("previous_non_plan"), service_tier=service_tier)
         ThenLink(name).clear()
         # Nome reusado não herda o par externo da sessão antiga.
         _encerrar_pares_externos(name)
