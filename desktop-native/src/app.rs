@@ -493,6 +493,8 @@ pub struct Hangar {
     plugin_source: Option<crate::plugin_ui::UiSource>,
     /// Escolha local da aba: começa no último painel aberto e sobrevive aos redesenhos.
     plugin_local_tab: Option<String>,
+    /// Trechos dos mods (escopo de hover ou cartão absoluto) com o ponteiro em cima: lugar e caminho na árvore.
+    plugin_hovered: HashSet<String>,
     /// Últimos ids de aviso de mod (SSE `plugin_toast`) já mostrados; só os recentes voltam na reconexão.
     plugin_toasts_seen: std::collections::VecDeque<String>,
     /// Avisos de mod na tela, do mais antigo ao mais novo.
@@ -804,7 +806,7 @@ impl Hangar {
             attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
             suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
-            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_local_tab: None, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
+            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_local_tab: None, plugin_hovered: HashSet::new(), plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
             settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
@@ -1216,6 +1218,7 @@ impl Hangar {
         self.plugin_columns = None;
         self.plugin_source = None;
         self.plugin_local_tab = None;
+        self.plugin_hovered.clear();
         self.recent = None;
         self.command_panel = false;
         // Os menus são da tela sem sessão: sem isto, o Esc seguinte seria gasto num deles, já fora da tela.
@@ -1824,6 +1827,7 @@ impl Hangar {
                 self.plugin_shown = s.shown_id;
                 self.plugin_columns = s.columns;
                 self.plugin_source = s.source;
+                self.keep_plugin_hovered();
                 return (true, Changed::Screen);
             }
             "plugin_toast" => {
@@ -1958,6 +1962,7 @@ impl Hangar {
                 self.plugin_columns = None;
                 self.plugin_source = None;
                 self.plugin_local_tab = None;
+        self.plugin_hovered.clear();
                 if let Some(task) = self.history_task.take() { task.abort(); }
                 self.chat = Chat::default();
                 self.turn_seen = None;
@@ -5608,18 +5613,48 @@ impl Hangar {
     }
 
     fn press_plugin(&mut self, site: String, key: String, cx: &mut Context<Self>) {
+        // O `✕` tira o painel da tela: o hover dele sai junto, sem esperar o evento que confirma o fechamento.
+        if key == crate::plugin_ui::PANE_CLOSE_KEY { self.keep_plugin_hovered_without(Some(&site)); }
         self.spawn_plugin("press", json!({"site": site, "key": key}), Payload::PluginPressed);
         cx.notify();
     }
 
+    /// Hover dos mods depois de um evento novo ou de uma troca de aba: fica só o trecho ainda desenhado na faixa ou no
+    /// painel da frente.
+    fn keep_plugin_hovered(&mut self) { self.keep_plugin_hovered_without(None); }
+
+    /// Como `keep_plugin_hovered`, tirando o painel `gone` (fechado pelo `✕`) dos lugares à vista.
+    fn keep_plugin_hovered_without(&mut self, gone: Option<&str>) {
+        if self.plugin_hovered.is_empty() { return; }
+        let ids = crate::plugin_ui::pane_ids(&self.plugin_panes);
+        let active = crate::plugin_ui::active_pane(&ids, &self.plugin_shown, self.plugin_local_tab.as_deref()).filter(|id| Some(id.as_str()) != gone);
+        let pane = active.as_deref()
+            .and_then(|id| self.plugin_panes.iter().find(|p| p["id"].as_str() == Some(id)).map(|p| (id, &p["tree"])));
+        let places: Vec<(&str, &Value)> = std::iter::once((crate::plugin_ui::BAND_SITE, &self.plugin_band)).chain(pane).collect();
+        crate::plugin_ui::keep_hovered(&mut self.plugin_hovered, &places);
+    }
+
+    /// Hover dos mods: o app guarda os trechos com o ponteiro e redesenha só a área de baixo quando muda.
+    fn plugin_hover(&self, cx: &mut Context<Self>) -> crate::plugin_ui::Hover {
+        let view = cx.entity().downgrade();
+        std::rc::Rc::new(move |id: &str, on: bool, _: &mut Window, cx: &mut App| {
+            let id = id.to_owned();
+            let _ = view.update(cx, |this, cx| {
+                let changed = if on { this.plugin_hovered.insert(id) } else { this.plugin_hovered.remove(&id) };
+                if changed { this.redraw(panes::Area::Bottom, cx); }
+            });
+        })
+    }
+
     /// O que a faixa e os painéis dos mods precisam do app.
-    fn plugin_view(&self, cx: &mut Context<Self>) -> crate::plugin_ui::View {
+    fn plugin_view(&self, cx: &mut Context<Self>) -> crate::plugin_ui::View<'_> {
         let view = cx.entity().downgrade();
         let show: crate::plugin_ui::Show = std::rc::Rc::new(move |site: &str, _: &mut Window, cx: &mut App| {
             let site = site.to_owned();
             let _ = view.update(cx, |this, cx| this.show_plugin(site, cx));
         });
-        crate::plugin_ui::View { press: self.plugin_press(cx), show: Some(show), columns: self.plugin_columns }
+        crate::plugin_ui::View { press: self.plugin_press(cx), show: Some(show), columns: self.plugin_columns,
+            hover: Some(self.plugin_hover(cx)), hovered: &self.plugin_hovered }
     }
 
     /// Troca de aba: seguindo o `shown_id`, a aba só muda quando o novo chega; sem ele (servidor antigo), a troca é
@@ -5627,6 +5662,7 @@ impl Hangar {
     fn show_plugin(&mut self, site: String, cx: &mut Context<Self>) {
         if !crate::plugin_ui::follows_server(&crate::plugin_ui::pane_ids(&self.plugin_panes), &self.plugin_shown) {
             self.plugin_local_tab = Some(site.clone());
+            self.keep_plugin_hovered();
             cx.notify();
             self.redraw(panes::Area::Bottom, cx);
         }

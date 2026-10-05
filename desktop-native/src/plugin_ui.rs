@@ -1,7 +1,7 @@
 //! Faixa acima do prompt e painéis que os mods do Claude Code desenham (SSE `plugin_ui`). A árvore
 //! chega como o engine a monta (`Box`, `Text`, `Raster`, `Svg`...) e é traduzida aqui sem saber de
 //! que mod veio: mod novo aparece sem código novo.
-use std::rc::Rc;
+use std::{borrow::Cow, collections::HashSet, rc::Rc};
 use std::sync::Arc;
 use std::time::Duration;
 use gpui_kit::*;
@@ -25,13 +25,121 @@ pub const PANE_CLOSE_KEY: &str = "__close__";
 /// Troca de aba pedida no app: o id do painel.
 pub type Show = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 
-/// O que o app passa para desenhar a faixa e os painéis: quem atende o clique e a troca de aba. Sem `press`, botão é só
+/// O ponteiro entrou (`true`) ou saiu de um escopo de hover ou de um cartão absoluto; o id é o lugar e o caminho.
+pub type Hover = Rc<dyn Fn(&str, bool, &mut Window, &mut App)>;
+
+/// O que o app passa para desenhar a faixa e os painéis: quem atende o clique e a troca de aba, a largura da faixa
+/// (`columns`) e o hover: quem avisa o app do ponteiro e os trechos com o ponteiro em cima. Sem `press`, botão é só
 /// rótulo e não há `✕`. `columns` é a largura, em colunas, para a qual a faixa foi desenhada.
-pub struct View { pub press: Option<Press>, pub show: Option<Show>, pub columns: Option<f64> }
+pub struct View<'a> {
+    pub press: Option<Press>,
+    pub show: Option<Show>,
+    pub columns: Option<f64>,
+    pub hover: Option<Hover>,
+    pub hovered: &'a HashSet<String>,
+}
 
 /// Onde a árvore está desenhada e o que o app oferece. `links` numera os links na ordem da árvore: o mesmo endereço
 /// duas vezes não repete o id do elemento.
-struct Ctx<'a> { site: &'a str, view: &'a View, place: Option<f64>, links: std::cell::Cell<usize> }
+struct Ctx<'a> { site: &'a str, view: &'a View<'a>, place: Option<f64>, links: std::cell::Cell<usize> }
+
+impl Ctx<'_> {
+    /// Id de um trecho: o lugar e o caminho dele na árvore.
+    fn spot(&self, at: &Spot) -> String { format!("{}{}", self.site, at.path) }
+}
+
+/// Onde o nó está: o caminho na árvore, que vira o id do escopo de hover, e se o escopo mais próximo está aceso.
+struct Spot { path: String, lit: bool }
+
+impl Spot {
+    fn root() -> Spot { Spot { path: String::new(), lit: false } }
+    fn child(&self, i: usize, lit: bool) -> Spot { Spot { path: format!("{}/{i}", self.path), lit } }
+}
+
+/// Box com `key` é escopo de hover.
+fn is_scope(v: &Value) -> bool { v["type"] == "Box" && v["props"]["key"].as_str().is_some_and(|k| !k.is_empty()) }
+
+/// A subárvore tem algum `hover`: só então o escopo precisa avisar o app do ponteiro.
+pub fn wants_hover(v: &Value) -> bool { v["hover"].is_object() || children(v).iter().any(wants_hover) }
+
+/// Um escopo está aceso com o ponteiro nele ou num trecho dentro dele (o cartão absoluto, que pode sair da área do
+/// escopo). A comparação é por segmento do caminho.
+pub fn scope_active(hovered: &HashSet<String>, scope: &str) -> bool {
+    hovered.iter().any(|h| h == scope || h.strip_prefix(scope).is_some_and(|rest| rest.starts_with('/')))
+}
+
+/// O `hover` que vale para o nó: `hover` com `scope` (grupo entre lugares) fica para depois, e o nó segue sem hover.
+fn own_hover(v: &Value) -> Option<&serde_json::Map<String, Value>> {
+    v["hover"].as_object().filter(|h| !h.contains_key("scope"))
+}
+
+/// As props do nó com o `hover` aplicado quando o escopo está aceso. Sem hover aplicado, as props são as do nó, sem
+/// cópia: um Raster carrega as células inteiras nelas.
+pub fn hover_props(v: &Value, lit: bool) -> Cow<'_, Value> {
+    let Some(hover) = own_hover(v).filter(|_| lit) else { return Cow::Borrowed(&v["props"]) };
+    let mut p = if v["props"].is_object() { v["props"].clone() } else { Value::Object(Default::default()) };
+    for (k, value) in hover { p[k] = value.clone(); }
+    Cow::Owned(p)
+}
+
+/// O Box avisa o app do ponteiro: escopo com algum `hover` dentro, ou cartão absoluto (com ou sem o hover aplicado).
+fn tracks_hover(v: &Value) -> bool {
+    v["type"] == "Box" && ((is_scope(v) && wants_hover(v)) || hover_props(v, false)["position"] == "absolute"
+        || hover_props(v, true)["position"] == "absolute")
+}
+
+/// Ids de trecho que a árvore desenhada no lugar pode ter no conjunto de hover.
+fn tracked(site: &str, path: &mut String, v: &Value, out: &mut HashSet<String>) {
+    if tracks_hover(v) { out.insert(format!("{site}{path}")); }
+    for (i, k) in children(v).iter().enumerate() {
+        let len = path.len();
+        path.push_str(&format!("/{i}"));
+        tracked(site, path, k, out);
+        path.truncate(len);
+    }
+}
+
+/// Depois de um evento novo, de uma troca de aba ou de fechar um painel, fica no conjunto só o trecho que ainda está
+/// desenhado num dos lugares à vista (`(lugar, árvore)`): o gpui não avisa a saída do ponteiro de um trecho que sumiu
+/// debaixo dele, e o hover ficaria preso.
+pub fn keep_hovered(hovered: &mut HashSet<String>, places: &[(&str, &Value)]) {
+    if hovered.is_empty() { return; }
+    let mut drawn = HashSet::new();
+    for (site, tree) in places { tracked(site, &mut String::new(), tree, &mut drawn); }
+    hovered.retain(|h| drawn.contains(h));
+}
+
+/// Pinta o filho depois do resto da árvore, recortado onde ele está: é o `position: absolute` dos mods, que no terminal
+/// fica por cima dos vizinhos sem sair do lugar. O gpui não tem z-index, e o `deferred` dele pinta sem recorte.
+struct OnTop(Option<AnyElement>);
+
+impl IntoElement for OnTop {
+    type Element = Self;
+    fn into_element(self) -> Self { self }
+}
+
+impl Element for OnTop {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> { None }
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> { None }
+
+    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App)
+        -> (LayoutId, ()) {
+        (self.0.as_mut().expect("filho antes do prepaint").request_layout(window, cx), ())
+    }
+
+    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (),
+        window: &mut Window, _: &mut App) {
+        let child = self.0.take().expect("prepaint uma vez só");
+        let (offset, mask) = (window.element_offset(), window.content_mask());
+        window.defer_draw(child, offset, 1, Some(mask));
+    }
+
+    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), _: &mut (),
+        _: &mut Window, _: &mut App) {}
+}
 
 pub fn button_key(v: &Value) -> Option<String> {
     (v["type"] == "Button").then(|| v["props"]["key"].as_str().filter(|k| !k.is_empty()).map(str::to_owned)).flatten()
@@ -125,7 +233,7 @@ fn frame() -> Div {
 pub fn band(tree: &Value, view: &View) -> Option<AnyElement> {
     if is_empty(tree) { return None; }
     let c = Ctx { site: BAND_SITE, view, place: view.columns, links: Default::default() };
-    Some(frame().w_full().mb(px(4.)).overflow_hidden().child(node(tree, &c)).into_any_element())
+    Some(frame().w_full().mb(px(4.)).overflow_hidden().child(node(tree, &c, &Spot::root())).into_any_element())
 }
 
 /// O `✕` do lugar: fecha o painel da frente, como a marca do engine no terminal.
@@ -172,15 +280,15 @@ pub fn panes(panes: &[Value], active: Option<&str>, view: &View, max_h: f32) -> 
     Some(frame().flex().flex_col().gap_1().min_h_0().max_h(px(max_h)).w_full().overflow_hidden()
         .child(header)
         .child(div().id(SharedString::from(format!("plg-body-{id}"))).flex_1().min_h_0().overflow_y_scroll()
-            .child(node(&pane["tree"], &c)))
+            .child(node(&pane["tree"], &c, &Spot::root())))
         .into_any_element())
 }
 
-fn node(v: &Value, c: &Ctx) -> AnyElement {
+fn node(v: &Value, c: &Ctx, at: &Spot) -> AnyElement {
     match v {
         Value::String(s) => div().flex_shrink_0().child(s.clone()).into_any_element(),
         Value::Number(n) => div().flex_shrink_0().child(n.to_string()).into_any_element(),
-        Value::Object(_) => element(v, c),
+        Value::Object(_) => element(v, c, at),
         _ => div().into_any_element(),
     }
 }
@@ -194,11 +302,14 @@ fn plain(v: &Value) -> String {
     children(v).iter().map(|c| match c { Value::String(s) => s.clone(), Value::Number(n) => n.to_string(), _ => String::new() }).collect()
 }
 
-fn element(v: &Value, c: &Ctx) -> AnyElement {
-    let p = &v["props"];
+fn element(v: &Value, c: &Ctx, at: &Spot) -> AnyElement {
+    // Box com `key` é escopo: o hover dele e o dos filhos valem com o ponteiro nele; os outros seguem o de cima.
+    let lit = if is_scope(v) { scope_active(c.view.hovered, &c.spot(at)) } else { at.lit };
+    let props = hover_props(v, lit);
+    let p: &Value = &props;
     match v["type"].as_str().unwrap_or("") {
-        "Box" => boxed(p, children(v), c),
-        "Text" => text(p, children(v), c),
+        "Box" => boxed(v, p, c, at, lit),
+        "Text" => text(p, children(v), c, at),
         "Raster" => raster(p),
         "Svg" => svg(p),
         "Markdown" => div().whitespace_normal().when(p["dimColor"] == true, |el| el.opacity(0.6))
@@ -224,7 +335,14 @@ fn element(v: &Value, c: &Ctx) -> AnyElement {
             let base = div().flex_shrink_0()
                 .when(p["plain"] != true, |el| el.px(px(CELL_W)).rounded(px(4.)).bg(theme::raised()))
                 .when(p["dimColor"] == true, |el| el.opacity(0.6))
-                .when(p["variant"] == "primary", |el| el.text_color(theme::accent()));
+                .when(p["variant"] == "primary", |el| el.text_color(theme::accent()))
+                // Estilo do rótulo como no web, das props ou do `hover` do escopo; o fundo vence o da pílula.
+                .when_some(color(&p["color"]), |el, fg| el.text_color(fg))
+                .when_some(color(&p["backgroundColor"]), |el, bg| el.bg(bg))
+                .when(p["bold"] == true, |el| el.font_weight(FontWeight::BOLD))
+                .when(p["italic"] == true, |el| el.italic())
+                .when(p["underline"] == true, |el| el.underline())
+                .when(p["strikethrough"] == true, |el| el.line_through());
             match (button_key(v), c.view.press.clone()) {
                 (Some(key), Some(press)) => {
                     let site = c.site.to_owned();
@@ -237,7 +355,7 @@ fn element(v: &Value, c: &Ctx) -> AnyElement {
             }
         }
         "Image" => div().text_color(theme::muted()).child(text_of(&p["alt"])).into_any_element(),
-        _ => div().flex().children(children(v).iter().map(|k| node(k, c))).into_any_element(),
+        _ => div().flex().children(children(v).iter().enumerate().map(|(i, k)| node(k, c, &at.child(i, lit)))).into_any_element(),
     }
 }
 
@@ -254,8 +372,9 @@ fn lines(v: &Value) -> Option<f32> { v.as_f64().map(|n| n as f32 * CELL_H) }
 fn first(p: &Value, keys: &[&str]) -> Value { keys.iter().map(|k| p[*k].clone()).find(Value::is_number).unwrap_or(Value::Null) }
 
 /// `Box` do Ink em flexbox do gpui. O padrão do Ink é linha, não coluna.
-fn boxed(p: &Value, kids: &[Value], c: &Ctx) -> AnyElement {
+fn boxed(v: &Value, p: &Value, c: &Ctx, at: &Spot, lit: bool) -> AnyElement {
     if p["display"] == "none" { return div().into_any_element(); }
+    let kids = children(v);
     let mut el = div().flex().min_w_0();
     el = match p["flexDirection"].as_str() {
         Some("column") => el.flex_col(),
@@ -300,14 +419,33 @@ fn boxed(p: &Value, kids: &[Value], c: &Ctx) -> AnyElement {
         el = el.border_1().rounded(px(4.)).border_color(color(&p["borderColor"]).unwrap_or_else(theme::border));
     }
     if p["overflow"] == "hidden" { el = el.overflow_hidden(); }
+    // `absolute` sai do fluxo; deslocamento em células, negativo permitido.
+    let absolute = p["position"] == "absolute";
+    if absolute {
+        el = el.absolute();
+        if let Some(n) = lines(&p["top"]) { el = el.top(px(n)); }
+        if let Some(n) = lines(&p["bottom"]) { el = el.bottom(px(n)); }
+        if let Some(n) = cols(&p["left"]) { el = el.left(px(n)); }
+        if let Some(n) = cols(&p["right"]) { el = el.right(px(n)); }
+    }
     // Linha de texto logo abaixo de um Raster (os rótulos sob os traços da barra de progresso)
     // segue a escala dele; sem isso o Raster cabe na coluna estreita e os rótulos saem do lugar.
-    el.children(kids.iter().enumerate().map(|(i, k)| {
-        match i.checked_sub(1).filter(|_| text_row(k)).and_then(|j| raster_row(&kids[j])) {
-            Some(frame) => aligned_row(k, frame, c),
-            None => node(k, c),
+    // Linha com hover fica no desenho comum, o único que aplica o hover.
+    let el = el.children(kids.iter().enumerate().map(|(i, k)| {
+        let at = at.child(i, lit);
+        match i.checked_sub(1).filter(|_| text_row(k) && !wants_hover(k)).and_then(|j| raster_row(&kids[j])) {
+            Some(frame) => aligned_row(k, frame, c, &at),
+            None => node(k, c, &at),
         }
-    })).into_any_element()
+    }));
+    // Escopo e cartão absoluto avisam o app do ponteiro: o cartão conta como parte do escopo que o contém.
+    let id = c.spot(at);
+    let el = match c.view.hover.clone().filter(|_| absolute || (is_scope(v) && wants_hover(v))) {
+        Some(hover) => el.id(SharedString::from(format!("plg-hv-{id}")))
+            .on_hover(move |on, window, cx| hover(&id, *on, window, cx)).into_any_element(),
+        None => el.into_any_element(),
+    };
+    if absolute { OnTop(Some(el)).into_any_element() } else { el }
 }
 
 /// Props do `Box` que o `boxed` desenha e o molde do Raster não reproduz: com qualquer uma, a
@@ -316,7 +454,7 @@ const BOX_LAYOUT: &[&str] = &[
     "justifyContent", "alignItems", "flexGrow", "flexWrap", "width", "minWidth", "gap", "columnGap", "rowGap",
     "padding", "paddingX", "paddingY", "paddingTop", "paddingBottom", "paddingLeft", "paddingRight",
     "margin", "marginX", "marginY", "marginTop", "marginBottom", "marginLeft", "marginRight",
-    "backgroundColor", "borderStyle", "overflow",
+    "backgroundColor", "borderStyle", "overflow", "position",
 ];
 
 /// `Box` em linha sem nada além dos filhos: cada filho ocupa as suas células, como no terminal.
@@ -360,8 +498,8 @@ fn raster_track(columns: usize) -> Div {
 /// Monta a linha de texto no molde do Raster de cima: o começo com a largura natural, o trecho
 /// sob o Raster na mesma escala dele e, no fim, o texto de depois invisível, só para ocupar o
 /// mesmo espaço. No trecho escalado cada palavra corta onde começa a próxima, não antes.
-fn aligned_row(row: &Value, frame: RasterFrame, c: &Ctx) -> AnyElement {
-    let piece = |k: &Value, t: &[char]| text(&k["props"], &[Value::from(t.iter().collect::<String>())], c);
+fn aligned_row(row: &Value, frame: RasterFrame, c: &Ctx, at: &Spot) -> AnyElement {
+    let piece = |k: &Value, t: &[char]| text(&k["props"], &[Value::from(t.iter().collect::<String>())], c, at);
     let (mut head, mut words): (Vec<AnyElement>, Vec<(Vec<AnyElement>, usize)>) = (Vec::new(), Vec::new());
     let mut seen = 0;
     for k in children(row) {
@@ -386,12 +524,12 @@ fn aligned_row(row: &Value, frame: RasterFrame, c: &Ctx) -> AnyElement {
     div().flex().flex_row().min_w_0()
         .children(head)
         .child(scaled)
-        .child(div().flex().flex_row().flex_shrink_0().opacity(0.).children(frame.after.iter().map(|n| node(n, c))))
+        .child(div().flex().flex_row().flex_shrink_0().opacity(0.).children(frame.after.iter().enumerate().map(|(i, n)| node(n, c, &at.child(i, at.lit)))))
         .into_any_element()
 }
 
 /// `Text` do Ink: cor, ênfase e corte. `dimColor` é opacidade, como no terminal.
-fn text(p: &Value, kids: &[Value], c: &Ctx) -> AnyElement {
+fn text(p: &Value, kids: &[Value], c: &Ctx, at: &Spot) -> AnyElement {
     let fg = color(&p["color"]);
     let bg = color(&p["backgroundColor"]);
     let (fg, bg) = if p["inverse"] == true { (bg.or(Some(theme::background())), fg.or(Some(theme::text()))) } else { (fg, bg) };
@@ -411,7 +549,7 @@ fn text(p: &Value, kids: &[Value], c: &Ctx) -> AnyElement {
     if let Some(text) = truncate.then(|| plain_deep(kids)).flatten() {
         return el.child(div().truncate().child(text)).into_any_element();
     }
-    el.children(kids.iter().map(|k| node(k, c))).into_any_element()
+    el.children(kids.iter().enumerate().map(|(i, k)| node(k, c, &at.child(i, at.lit)))).into_any_element()
 }
 
 /// Texto de uma subárvore inteira, para o corte com reticências que o gpui só faz num texto só; `None` quando ela tem
@@ -508,9 +646,12 @@ fn unmark(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
-    use super::{active_pane, button_key, cell_color, color, fills_place, follow_local, follows_server, is_empty, pane_ids, plain_deep,
-        raster_row, raster_runs, safe_href, surfaces, text_row, toast, Surfaces, Toast, UiSource};
+    use super::{active_pane, button_key, cell_color, color, fills_place, follow_local, follows_server, hover_props, is_empty,
+        keep_hovered, pane_ids, plain_deep, raster_row, raster_runs, safe_href, scope_active, surfaces, text_row, toast, wants_hover,
+        Surfaces, Toast, UiSource};
     use serde_json::{json, Value};
+    use std::borrow::Cow;
+    use std::collections::HashSet;
     use std::time::Duration;
 
     #[test]
@@ -654,5 +795,59 @@ mod tests {
         assert_eq!(follow_local(&v(&["a", "b", "c"]), &v(&["a", "c"]), Some("b")).as_deref(), Some("a"));
         assert_eq!(follow_local(&v(&["a", "b"]), &v(&["b"]), Some("a")).as_deref(), Some("b"));
         assert_eq!(follow_local(&v(&["a"]), &[], Some("a")), None);
+    }
+
+    #[test]
+    fn hover_scope_is_lit_by_itself_or_by_an_absolute_box_inside_it() {
+        let card: HashSet<String> = ["above-prompt/1/2".to_owned()].into();
+        assert!(scope_active(&card, "above-prompt/1"));
+        assert!(scope_active(&card, "above-prompt/1/2"));
+        assert!(!scope_active(&card, "above-prompt/1/2/0"));
+        // O caminho é por segmento: "/12" não acende "/1".
+        let other: HashSet<String> = ["above-prompt/12".to_owned()].into();
+        assert!(!scope_active(&other, "above-prompt/1"));
+    }
+
+    #[test]
+    fn hover_props_apply_only_when_lit_and_skip_cross_place_scopes() {
+        let card = amostras()["hoverV29"]["children"][1].clone();
+        assert_eq!(hover_props(&card, false)["display"], "none");
+        assert_eq!(hover_props(&card, true)["display"], "flex");
+        assert_eq!(hover_props(&card, true)["position"], "absolute");
+        let v30 = json!({"type": "Text", "hover": {"scope": "vitrine-V30", "color": "#e8a33d"}});
+        assert!(hover_props(&v30, true)["color"].is_null());
+        assert!(wants_hover(&amostras()["hoverV29"]) && wants_hover(&amostras()["hoverV28"]));
+        assert!(!wants_hover(&json!({"type": "Box", "props": {"key": "k"}, "children": [{"type": "Text", "children": ["a"]}]})));
+    }
+
+    #[test]
+    fn hover_props_copy_the_props_only_when_a_hover_applies() {
+        let card = amostras()["hoverV29"]["children"][1].clone();
+        assert!(matches!(hover_props(&card, false), Cow::Borrowed(_)));
+        assert!(matches!(hover_props(&card, true), Cow::Owned(_)));
+        let v30 = json!({"type": "Text", "props": {"bold": true}, "hover": {"scope": "vitrine-V30", "color": "#e8a33d"}});
+        assert!(matches!(hover_props(&v30, true), Cow::Borrowed(_)));
+        // Hover aplicado sobre nó sem props: as props nascem só com o hover.
+        assert_eq!(*hover_props(&json!({"type": "Text", "hover": {"bold": true}}), true), json!({"bold": true}));
+    }
+
+    #[test]
+    fn hovered_pieces_survive_a_redraw_only_while_they_are_still_drawn_in_a_shown_place() {
+        let v29 = amostras()["hoverV29"].clone();
+        let (scope, card) = ("above-prompt".to_owned(), "above-prompt/1".to_owned());
+        let lit = || -> HashSet<String> { [scope.clone(), card.clone(), "painel/0".to_owned()].into() };
+        // Mesma árvore na faixa, painel fora da tela (outra aba): fica só o que a faixa desenha.
+        let mut hovered = lit();
+        keep_hovered(&mut hovered, &[("above-prompt", &v29)]);
+        assert_eq!(hovered, [scope.clone(), card.clone()].into());
+        // O cartão saiu da árvore debaixo do ponteiro: o id dele sai junto e o escopo segue aceso.
+        let without_card = json!({"type": "Box", "props": {"key": "V29-escopo"}, "hover": {"borderColor": "#5aa6ff"}, "children": []});
+        let mut hovered = lit();
+        keep_hovered(&mut hovered, &[("above-prompt", &without_card)]);
+        assert_eq!(hovered, [scope.clone()].into());
+        // Escopo sem nenhum hover não avisa o app do ponteiro: não pode ficar no conjunto.
+        let mut hovered = lit();
+        keep_hovered(&mut hovered, &[("above-prompt", &json!({"type": "Box", "props": {"key": "k"}, "children": []}))]);
+        assert!(hovered.is_empty());
     }
 }
