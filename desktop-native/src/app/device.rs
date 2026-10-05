@@ -98,7 +98,7 @@ struct DiaryLine { when: String, event: String, context: String, level: Level }
 /// `missing`: servidor anterior à rota do diário; não é falha, só não há o que mostrar.
 pub(super) struct Diary { days: u64, bytes: u64, keep: u64, lines: Vec<DiaryLine>, missing: bool }
 
-pub(super) struct ServerVersion { version: String, local: bool, ts: Option<String> }
+pub(super) struct ServerVersion { version: String, local: bool, ts: Option<String>, channel: String }
 
 /// Onde está a atualização que este app mandou (ou achou rodando).
 #[derive(Clone, PartialEq)]
@@ -219,7 +219,7 @@ fn parse_version(value: &Value) -> ServerVersion {
     let raw = value.pointer("/versao_legivel/backend").and_then(Value::as_str)
         .or_else(|| value.pointer("/versoes/backend").and_then(Value::as_str)).unwrap_or("?");
     let (version, local) = legible(raw);
-    ServerVersion { version, local, ts: value.pointer("/estado/ts").and_then(Value::as_str).map(str::to_owned) }
+    ServerVersion { version, local, ts: value.pointer("/estado/ts").and_then(Value::as_str).map(str::to_owned), channel: crate::update::alvo(value) }
 }
 
 /// Mudanças à espera: commits novos, ou o servidor rodando código diferente do que está no disco.
@@ -695,7 +695,10 @@ impl Hangar {
         let mono = |text: String| div().font_family(theme::MONO).text_size(px(12.5)).child(text);
         let with_local = |text: String, local: bool| div().flex().flex_col().gap(px(2.)).child(mono(text))
             .when(local, |el| el.child(div().child(tr("settings_about_local"))));
+        let channel = |text: String| div().flex().items_center().gap(px(6.)).text_color(theme::warning())
+            .child(chrome::small_icon(IconName::GitBranch, 13., theme::warning())).child(text);
         let updater = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone());
+        let app_channel = updater.as_ref().map(|u| u.read(cx).channel_lines()).unwrap_or_default();
         let (check, updating) = updater.as_ref().map(|u| (u.read(cx).app_check(), u.read(cx).is_busy())).unwrap_or((crate::update::AppCheck::Never, false));
         let (check_text, check_color) = match &check {
             crate::update::AppCheck::Never => (None, theme::muted()),
@@ -716,13 +719,14 @@ impl Hangar {
         }.into_any_element()).unwrap_or_else(|| div().into_any_element());
         let app_row = self.row_with(IconName::Monitor, "settings_about_app",
             with_local(format!("{} ({app_version}) · {}", env!("HANGAR_NATIVE_RELEASE"), tr("settings_about_built").replace("{date}", env!("HANGAR_NATIVE_BUILD_DATE"))), app_local)
+                .children(app_channel.into_iter().map(channel))
                 .when_some(check_text, |el, text| el.child(div().text_color(check_color).whitespace_normal().child(text))),
             true, app_control);
 
         let about = &self.device.about;
         let server_desc = match (&self.api, &about.value, about.loading) {
             (None, ..) => div().child(tr("settings_offline")),
-            (_, Some(Ok(v)), _) => with_local(v.version.clone(), v.local),
+            (_, Some(Ok(v)), _) => with_local(v.version.clone(), v.local).children(crate::update::test_channel(&v.channel).map(channel)),
             (_, _, true) => div().child(tr("settings_about_reading")),
             (_, Some(Err(error)), _) => div().child(div().text_color(theme::danger()).child(tr("settings_about_failed").replace("{reason}", error))),
             (_, None, false) => div(),
