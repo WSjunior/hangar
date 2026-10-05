@@ -69,6 +69,8 @@ pub fn remember_info(cache: &InfoCache, name: &str, info: Option<InternalInfo>) 
 /// abre o chat depois ficava sem a faixa até o mod redesenhar.
 const LATEST: [&str; 8] = ["state", "suggest", "ask_question", "stats", "preview", "pensamento", "ferramenta", "plugin_ui"];
 const ASK_QUESTION: usize = 2;
+/// Mesmo teto do Python (`plugin_bridge.TOASTS_KEPT`).
+const TOASTS_KEPT: usize = 20;
 const CHANNEL: usize = 1024;
 const SIDE_CONNECT: Duration = Duration::from_secs(10);
 /// O Python manda `ping` a cada 10 s; três calados = conexão morta.
@@ -88,6 +90,10 @@ pub struct SideCtx {
 struct SideCache {
     latest: [Option<Bytes>; 8],
     queue: Vec<(String, Bytes)>,
+    /// Avisos de mod (`plugin_toast`) ainda vivos: (id, quando vence, dado). A conexão interna é
+    /// uma só por sessão, então quem abre o chat depois não os receberia do Python; o retrato os
+    /// repõe com o tempo que resta, e o app descarta pelo id o que já mostrou.
+    toasts: Vec<(String, Instant, serde_json::Map<String, serde_json::Value>)>,
 }
 
 impl SideCache {
@@ -96,6 +102,10 @@ impl SideCache {
     /// depois abriria uma pergunta já respondida. Codex e Claude sem terminal mandam o próprio
     /// `ask_question` vazio ao fechar.
     fn record(&mut self, event: &str, data: &str, frame: &Bytes, pane_question: bool) {
+        if event == "plugin_toast" {
+            self.record_toast(data, Instant::now());
+            return;
+        }
         if let Some(i) = LATEST.iter().position(|e| *e == event) {
             self.latest[i] = Some(frame.clone());
             if event == "state" && pane_question {
@@ -121,8 +131,30 @@ impl SideCache {
         }
     }
 
+    fn record_toast(&mut self, data: &str, now: Instant) {
+        let Ok(serde_json::Value::Object(toast)) = serde_json::from_str(data) else { return };
+        let Some(id) = toast.get("id").and_then(|v| v.as_str()).map(str::to_owned) else { return };
+        let Some(ms) = toast.get("timeoutMs").and_then(|v| v.as_f64()).filter(|ms| *ms > 0.0) else { return };
+        let expires = now + Duration::from_millis(ms as u64);
+        self.toasts.retain(|(k, at, _)| *k != id && *at > now);
+        self.toasts.push((id, expires, toast));
+        if self.toasts.len() > TOASTS_KEPT {
+            self.toasts.drain(..self.toasts.len() - TOASTS_KEPT);
+        }
+    }
+
     fn replay(&self) -> Vec<Bytes> {
-        self.latest.iter().flatten().cloned().chain(self.queue.iter().map(|(_, f)| f.clone())).collect()
+        self.replay_at(Instant::now())
+    }
+
+    fn replay_at(&self, now: Instant) -> Vec<Bytes> {
+        // O 0 seria "sem prazo" para o app: quem está no último milissegundo ainda leva 1.
+        let toasts = self.toasts.iter().filter(|(_, at, _)| *at > now).map(|(_, at, toast)| {
+            let mut toast = toast.clone();
+            toast.insert("timeoutMs".into(), ((*at - now).as_millis() as u64).max(1).into());
+            sse_frame("plugin_toast", &serde_json::Value::Object(toast).to_string(), None)
+        });
+        self.latest.iter().flatten().cloned().chain(self.queue.iter().map(|(_, f)| f.clone())).chain(toasts).collect()
     }
 }
 
@@ -226,7 +258,10 @@ impl Hub {
             close_on_tail_death(Arc::downgrade(self), generation),
         );
         *bound = Some(Bound { binding, generation, tail });
-        self.cache.lock().unwrap().latest = Default::default();
+        let mut cache = self.cache.lock().unwrap();
+        cache.latest = Default::default();
+        cache.toasts.clear();
+        drop(cache);
         let _ = self.tx.send(Out::Rebind);
     }
 
@@ -476,6 +511,35 @@ mod tests {
         assert!(r[0].starts_with("event: state") && r[0].contains("idle"));
         assert!(r[1].starts_with("event: plugin_ui") && r[1].contains("Box"));
         assert!(r[2].starts_with("event: queue_confirmed"));
+    }
+
+    #[test]
+    fn mod_toast_replays_with_the_time_left_until_it_expires() {
+        // Paridade com `plugin_bridge.toasts_after`: quem chega depois recebe o aviso vivo com o
+        // tempo que resta; vencido, sai. O mesmo id reenviado (religação interna) não duplica.
+        let mut c = SideCache::default();
+        let t0 = Instant::now();
+        let toast = |id: &str, ms: u64| format!("{{\"id\":\"{id}\",\"text\":\"Jenkins configurado.\",\"plugin\":\"demo\",\"timeoutMs\":{ms}}}");
+        c.record_toast(&toast("b-1", 9000), t0);
+        c.record_toast(&toast("b-1", 9000), t0);
+        c.record_toast("{\"id\":\"b-2\",\"text\":\"x\"}", t0);
+        let at = |c: &SideCache, s: u64| -> Vec<serde_json::Value> {
+            c.replay_at(t0 + Duration::from_secs(s))
+                .iter()
+                .map(|b| String::from_utf8_lossy(b).into_owned())
+                .filter(|f| f.starts_with("event: plugin_toast"))
+                .map(|f| serde_json::from_str(f.lines().nth(1).unwrap().strip_prefix("data: ").unwrap()).unwrap())
+                .collect()
+        };
+        let live = at(&c, 2);
+        assert_eq!(live.len(), 1, "sem prazo não é aviso; o mesmo id fica um só");
+        assert_eq!((live[0]["text"].as_str(), live[0]["plugin"].as_str(), live[0]["timeoutMs"].as_u64()),
+                   (Some("Jenkins configurado."), Some("demo"), Some(7000)));
+        assert!(at(&c, 10).is_empty(), "vencido não chega a quem abre depois");
+        for i in 0..25 {
+            c.record_toast(&toast(&format!("n-{i}"), 9000), t0);
+        }
+        assert_eq!(at(&c, 1).len(), TOASTS_KEPT);
     }
 
     fn has_question(c: &SideCache) -> bool {
