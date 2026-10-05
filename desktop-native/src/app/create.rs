@@ -341,9 +341,10 @@ type Picker<T = ModelChoice> = (Entity<SelectState<SearchableVec<T>>>, Subscript
 
 type Chosen = fn(&mut NewSession, String, &mut Window, &mut Context<NewSession>);
 
-fn picker<T: SearchableListItem<Value = String> + 'static>(choices: Vec<T>, at: Option<usize>, chosen: Chosen, window: &mut Window,
-    cx: &mut Context<NewSession>) -> Picker<T> {
-    let state = cx.new(|cx| SelectState::new(SearchableVec::new(choices), at.map(IndexPath::new), window, cx));
+/// `searchable`: lista longa (catálogo de modelos) ganha busca por digitação no topo do menu.
+fn picker<T: SearchableListItem<Value = String> + 'static>(choices: Vec<T>, at: Option<usize>, searchable: bool, chosen: Chosen,
+    window: &mut Window, cx: &mut Context<NewSession>) -> Picker<T> {
+    let state = cx.new(|cx| SelectState::new(SearchableVec::new(choices), at.map(IndexPath::new), window, cx).searchable(searchable));
     let subscription = cx.subscribe_in(&state, window, move |this, _, event: &SelectEvent<SearchableVec<T>>, window, cx| {
         if let SelectEvent::Confirm(Some(id)) = event { chosen(this, id.clone(), window, cx); cx.notify(); }
     });
@@ -1225,7 +1226,7 @@ impl NewSession {
                 let at = choose_codex_account(&list, self.is_transfer().then_some(self.codex_account.as_str()));
                 if !self.is_transfer() { self.codex_account = at.map(|n| list[n].id.clone()).unwrap_or_default(); }
                 let choices = list.iter().map(|a| ModelChoice { id: a.id.clone(), label: a.name.clone(), hint: a.hint() }).collect();
-                self.codex_pick = Some(picker(choices, at, |this, id, window, cx| {
+                self.codex_pick = Some(picker(choices, at, false, |this, id, window, cx| {
                     if this.creating { return; }
                     this.codex_account = id;
                     this.error = None;
