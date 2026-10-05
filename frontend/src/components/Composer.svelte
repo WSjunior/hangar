@@ -569,11 +569,14 @@ import { cachePrazo } from '../lib/cachePrazo';
   }
 
   // Some sozinho: o aviso não pede ação e, preso, parecia que a sessão continuava travada.
+  let semCicloTimer: ReturnType<typeof setTimeout> | undefined;
   function avisarSemCiclo() {
     const texto = m.permissao_sem_ciclo();
     permError = texto;
-    setTimeout(() => { if (permError === texto) permError = null; }, 5000);
+    clearTimeout(semCicloTimer);
+    semCicloTimer = setTimeout(() => { if (permError === texto) permError = null; }, 5000);
   }
+  onDestroy(() => clearTimeout(semCicloTimer));
 
   async function ciclarPermissao() {
     if (permCarregando) return;
