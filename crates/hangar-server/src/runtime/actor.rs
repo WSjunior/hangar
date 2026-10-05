@@ -834,9 +834,12 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                                     jobs.spawn(async move { Job::Confirmed { response:None,result:job.await } });
                                 }
                                 last_state = state;
-                                durable_view = view.clone();
-                                publish(&events,&target,&mut revision,"view",view.clone());
-                                publish(&events,&target,&mut revision,"state",view["public_state"].clone());
+                                // Vista igual à publicada não sai: cada aparelho redesenharia a tela à toa.
+                                if view != durable_view {
+                                    durable_view = view.clone();
+                                    publish(&events,&target,&mut revision,"view",view.clone());
+                                    publish(&events,&target,&mut revision,"state",view["public_state"].clone());
+                                }
                             }
                             Ok(()) => {},
                             Err(failure) => {

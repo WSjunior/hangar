@@ -12,6 +12,31 @@ pub struct ClockSample {
     pub epoch_s: f64,
 }
 
+/// Barra o pedido de linha de status repetido: o mesmo dado só volta ao Python depois de
+/// `FORMAT_REFRESH_S`, porque a cota que entra na linha muda sem mudar o dado.
+#[derive(Default)]
+pub struct FormatGate {
+    last: Value,
+    at: f64,
+}
+
+pub const FORMAT_REFRESH_S: f64 = 30.0;
+
+impl FormatGate {
+    pub fn due(&mut self, payload: &Value, now: f64) -> bool {
+        if *payload == self.last && now - self.at < FORMAT_REFRESH_S {
+            return false;
+        }
+        self.last = payload.clone();
+        self.at = now;
+        true
+    }
+
+    pub fn reset(&mut self) {
+        self.last = Value::Null;
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RequestId {

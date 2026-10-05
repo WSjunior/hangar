@@ -430,8 +430,16 @@ async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
                 // Retrato antes do envio: quem assina entre os dois recebe repetido, nunca nada.
                 let pane_question =
                     hub.bound.lock().unwrap().as_ref().is_some_and(|b| b.binding.provider == Provider::Claude);
-                hub.cache.lock().unwrap().record(event, &ev.data, &frame, pane_question);
-                let _ = hub.tx.send(Out::Side(frame));
+                let repeated = {
+                    let mut cache = hub.cache.lock().unwrap();
+                    // Igual ao último do mesmo tipo: o aparelho já o tem, reenviar só o faz redesenhar.
+                    let repeated = LATEST.iter().position(|e| *e == event).is_some_and(|i| cache.latest[i].as_ref() == Some(&frame));
+                    cache.record(event, &ev.data, &frame, pane_question);
+                    repeated
+                };
+                if !repeated {
+                    let _ = hub.tx.send(Out::Side(frame));
+                }
             }
         }
     }

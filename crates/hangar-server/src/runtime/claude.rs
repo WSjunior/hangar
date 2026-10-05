@@ -40,6 +40,7 @@ pub struct ClaudeEngine {
     retired_writes: BTreeSet<String>,
     policies: BTreeMap<RequestId,String>,
     last_format_request: Option<RequestId>,
+    format_gate: FormatGate,
     reload_deadline: f64,
     rate_limit_info: Value,
     commands: Option<Value>,
@@ -87,7 +88,7 @@ impl ClaudeEngine {
             initialized:metadata["initialized"] == true,initializing:metadata["initialized"] != true,
             init_warning:None,in_progress:false,state,model:string(&metadata["model"]),effort:string(&metadata["effort"]),
             permission_mode,previous_non_plan,restore_plan:None,pending:Vec::new(),question:None,
-            waiters:BTreeMap::new(),wires:BTreeMap::new(),retired_writes:BTreeSet::new(),policies:BTreeMap::new(),last_format_request:None,reload_deadline:clock.monotonic_s+10.0,
+            waiters:BTreeMap::new(),wires:BTreeMap::new(),retired_writes:BTreeSet::new(),policies:BTreeMap::new(),last_format_request:None,format_gate:FormatGate::default(),reload_deadline:clock.monotonic_s+10.0,
             rate_limit_info:Value::Null,commands:metadata.get("commands").filter(|commands|!commands.is_null()).cloned(),terminal_commands:metadata.get("terminal_commands").cloned().unwrap_or_else(||json!([])),
             preview:LiveBuffer::default(),thinking:LiveBuffer::default(),tool_input:LiveBuffer::default(),tool_name:None,tool_visible:false,
             label:None,compacting:false,turn_start:None,label_deadline:None,tokens_closed:0,tokens_message:None,
@@ -116,7 +117,7 @@ impl ClaudeEngine {
                 wire.final_result = true;
             }
         }
-        self.waiters.clear(); self.policies.clear(); self.last_format_request = None;
+        self.waiters.clear(); self.policies.clear(); self.last_format_request = None; self.format_gate.reset();
         self.pending.clear(); self.question = None; self.effort_intent = None;
         self.effort_deadline = None; self.active_input = None; self.restore_plan = None;
         self.in_progress = false; self.turn_start = None; self.label_deadline = None;
@@ -192,8 +193,10 @@ impl ClaudeEngine {
 
     fn changed(&mut self,effects:&mut Vec<Effect>,format:bool) {
         effects.push(Effect::StateChanged);
-        if format { self.policy("format_status",json!({"model":self.model,"effort":self.effort,"usage":self.usage,
-            "context_window":self.context_window,"cost":self.cost,"rate_limit_info":self.rate_limit_info}),effects); }
+        if !format { return; }
+        let payload = json!({"model":self.model,"effort":self.effort,"usage":self.usage,
+            "context_window":self.context_window,"cost":self.cost,"rate_limit_info":self.rate_limit_info});
+        if self.format_gate.due(&payload,self.clock.monotonic_s) { self.policy("format_status",payload,effects); }
     }
 
     fn publish(&self,channel:&str,text:String,effects:&mut Vec<Effect>) {
