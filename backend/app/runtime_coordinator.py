@@ -207,15 +207,12 @@ def _codex_session(name):
     return codex_sessions.load(name) is not None
 
 
-def _rust_gone(exc):
-    """O Rust não respondeu (morreu no meio, ou nem escuta): não é recusa dele."""
-    return getattr(exc, "_transport_lost", False) or isinstance(exc, ConnectionError)
-
-
-def _registration_failed(event, name, exc):
+def _registration_failed(event, name, exc, *, opening=False):
+    """`opening`: a falha veio de uma abertura no Rust, e só conexão caída ou recusada é queda dele;
+    prazo estourado ou resposta inválida é Rust vivo falhando."""
     from app import diag
     reason = failure_reason(exc)
-    if _rust_gone(exc):
+    if opening and isinstance(exc, ConnectionError):
         # Queda do Rust durante a abertura: o próximo Rust ou a retomada pelo Python decide.
         _log.warning("abertura de %s interrompida pela queda do Rust (%s)", name, reason["codigo"])
         diag.registrar("runtime.reopen_interrupted", "aviso", sessao=name, etapa=event, **reason)
@@ -318,7 +315,7 @@ class RuntimeCoordinator:
                 try:
                     await self._reopen_registered(slot)
                 except Exception as exc:
-                    _registration_failed("runtime.reopen_failed", slot.binding.name, exc)
+                    _registration_failed("runtime.reopen_failed", slot.binding.name, exc, opening=True)
             # Em paralelo: com muitas sessões, em série a janela passaria do teto de espera.
             await asyncio.gather(*(reopen(slot) for slot in tuple(self.slots.values())
                 if self.names.get(slot.binding.name) == slot.binding.key and slot.phase == Phase.Rust))
@@ -643,14 +640,14 @@ class RuntimeCoordinator:
             try:
                 await self.prepare_session(binding.name, "claude")
             except Exception as exc:
-                _registration_failed("runtime.reopen_failed", binding.name, exc)
+                _registration_failed("runtime.reopen_failed", binding.name, exc, opening=True)
         async def open_listed(meta):
             try:
                 pending = await asyncio.to_thread(_has_pending, _queue_dir() / "runtime" / f"{meta.get('key')}.json")
                 if pending or await asyncio.to_thread(_cano_alive, meta):
                     await self.prepare_session(meta["name"], "claude", launch=pending)
             except Exception as exc:
-                _registration_failed("runtime.registration_failed", meta["name"], exc)
+                _registration_failed("runtime.registration_failed", meta["name"], exc, opening=True)
         await asyncio.gather(*(open_listed(meta) for meta in metas
             if meta.get("headless") and not self.managed_queue(meta["name"])))
 
@@ -682,9 +679,9 @@ class RuntimeCoordinator:
                             self.slots[binding.key].awaiting_identity = True
                             self.names.setdefault(binding.name, binding.key)
                             from app import diag, tmux
-                            # Sem pane com o nome é sessão fechada (o estado da fila fica no disco):
-                            # só é falha quando há pane e o vínculo não se prova.
-                            if await asyncio.to_thread(lambda: bool(tmux.list_panes_all().get(binding.name))):
+                            # Sem sessão tmux com o nome é sessão fechada (o estado da fila fica no
+                            # disco); falha é haver sessão sem vínculo provado, ou o tmux não responder.
+                            if await asyncio.to_thread(tmux.sessao_existe, binding.name) is not False:
                                 diag.registrar("runtime.registration_failed", "erro", sessao=binding.name, codigo="terminal_binding")
                             continue
                     else:
@@ -1338,9 +1335,7 @@ class RuntimeCoordinator:
     async def recover(self, name, confirmed_dead: bool, containment=None):
         slot = self.slot(name)
         async with self._barrier(slot):
-            alive = getattr(self.transport, "alive", False)
-            alive = alive() if callable(alive) else alive
-            if not confirmed_dead or alive:
+            if not confirmed_dead or self._rust_alive():
                 raise RuntimeError("morte do Rust não foi confirmada; a reserva permanece bloqueada")
             if slot.binding.meta.get("terminal"):
                 proof = getattr(containment or self.transport, "containment_clean", None)
@@ -1634,15 +1629,19 @@ class RuntimeCoordinator:
 
     async def _close_unconfirmed(self, name, descriptor):
         """Depois de um `open` sem resposta ou recusado aqui: fecha no Rust, que pode ter aberto. Rust
-        que nem escuta não segura nada (a trava morre com o processo); sem confirmação de um Rust vivo,
-        quem decide é a trava."""
+        morto que nem escuta não segura nada (a trava morre com o processo); fora isso, sem
+        confirmação, quem decide é a trava, e o diário registra."""
         try:
             await self._rpc(descriptor, {"kind":"close"}, uuid.uuid4().hex)
         except Exception as exc:
-            if isinstance(exc, ConnectionRefusedError):
+            if isinstance(exc, ConnectionRefusedError) and not self._rust_alive():
                 return
             from app import diag
             diag.registrar("runtime.close_unconfirmed", "erro", sessao=name, **failure_reason(exc))
+
+    def _rust_alive(self):
+        alive = getattr(self.transport, "alive", False)
+        return alive() if callable(alive) else alive
 
     def _check_opened(self, ready, descriptor):
         if not (ready.get("opened") is True and isinstance(ready.get("state"), dict) and ready.get("instance") == self.instance
