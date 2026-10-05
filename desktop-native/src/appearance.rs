@@ -256,6 +256,9 @@ pub struct Appearance {
     pub code_size: u16,
     /// Geral: fechar a janela esconde o app na bandeja em vez de encerrar.
     pub keep_in_tray: bool,
+    /// Geral: o navegador embutido preenche sozinho as senhas salvas no Chrome. Nasce desligado: é senha indo para
+    /// página sem a pessoa pedir.
+    pub chrome_autofill: bool,
 }
 
 const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeMode::Dark, palette: Palette::Classic,
@@ -266,7 +269,7 @@ const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeM
     side_width: 300., side_browser_width: None, terminal_height: 260.,
     tool_look: ToolLook::Classic, task_list: false, thinking_tools: ThinkingTools::Search, table_chart: false, ask_highlight: AskHighlight::Accent,
     language: Language::System, currency: Currency::Usd, hands_free: false, skip_chat_confirmations: false, accounts_compact: false, sidebar_group: SidebarGroup::None, side_tab: SideTab::Context,
-    terminal_font: CodeFont::JetBrainsMono, terminal_size: 12, code_font: CodeFont::JetBrainsMono, code_size: 25, keep_in_tray: false };
+    terminal_font: CodeFont::JetBrainsMono, terminal_size: 12, code_font: CodeFont::JetBrainsMono, code_size: 25, keep_in_tray: false, chrome_autofill: false };
 
 impl Default for Appearance {
     fn default() -> Self { DEFAULT }
@@ -288,7 +291,7 @@ impl Appearance {
             thinking_tools: self.thinking_tools, table_chart: self.table_chart, navigation: self.navigation, sidebar_width: self.sidebar_width, sidebar_compact: self.sidebar_compact, live_corner: self.live_corner,
             side_width: self.side_width, side_browser_width: self.side_browser_width, terminal_height: self.terminal_height,
             language: self.language, currency: self.currency, hands_free: self.hands_free, skip_chat_confirmations: self.skip_chat_confirmations, accounts_compact: self.accounts_compact, sidebar_group: self.sidebar_group, side_tab: self.side_tab,
-            code_font: self.code_font, terminal_font: self.terminal_font, keep_in_tray: self.keep_in_tray,
+            code_font: self.code_font, terminal_font: self.terminal_font, keep_in_tray: self.keep_in_tray, chrome_autofill: self.chrome_autofill,
             ..Self::default() }
     }
 
@@ -472,6 +475,13 @@ mod tests {
         assert!(on.keep_in_tray);
         // É de Geral: o "Voltar ao padrão" da Aparência não desliga.
         assert!(on.reset_keeping_choices().keep_in_tray);
+    }
+
+    #[test]
+    fn chrome_autofill_starts_off_and_survives_the_appearance_reset() {
+        assert!(!serde_json::from_str::<Appearance>("{}").unwrap().chrome_autofill);
+        let on: Appearance = serde_json::from_str(r#"{"chrome_autofill": true}"#).unwrap();
+        assert!(on.reset_keeping_choices().chrome_autofill);
     }
 
     #[test]

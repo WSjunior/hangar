@@ -344,84 +344,111 @@ fn on_path(bin: &str) -> bool {
 #[cfg(target_os = "linux")]
 mod passwords {
     use std::num::NonZeroU32;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::SystemTime;
 
     use cbc::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
     use ring::rand::{SecureRandom, SystemRandom};
 
     type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
 
-    /// (host sem www) -> [(usuário, senha)], mais usada primeiro. Uma cópia por banco porque o Chrome trava o arquivo.
-    pub fn credentials_for(host: &str) -> Vec<(String, String)> {
-        let target = host.trim_start_matches("www.").to_lowercase();
-        if target.is_empty() {
-            return vec![];
-        }
-        let keys = key_candidates();
-        // Diretório só do usuário (`XDG_RUNTIME_DIR`, 0700) em vez de `/tmp`: fecha o symlink pré-plantado em `/tmp`
-        // apontando a cópia do blob cifrado para outro arquivo.
-        let tmp_base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|| {
-            eprintln!("[senha] XDG_RUNTIME_DIR ausente; cópia temporária vai para /tmp");
-            std::env::temp_dir()
-        });
+    /// Linha do banco de senhas ainda cifrada: é o que fica em memória entre uma página e outra.
+    struct Saved { origin: url::Url, user: String, blob: Vec<u8> }
+
+    /// Linhas cifradas de cada banco, válidas enquanto o arquivo não muda: copiar o banco e rodar o `sqlite3` a cada URL
+    /// custava um processo por página, mesmo em site sem senha salva.
+    static ROWS: Mutex<Vec<(PathBuf, SystemTime, Arc<Vec<Saved>>)>> = Mutex::new(Vec::new());
+
+    /// URL da página -> [(usuário, senha)] salvos para a MESMA origem, mais usada primeiro. Só decifra o que casou.
+    pub fn credentials_for(page: &str) -> Vec<(String, String)> {
+        let Ok(page) = url::Url::parse(page) else { return vec![] };
         let mut out = Vec::new();
         for db in login_data_dbs() {
-            let tmp = tmp_base.join(format!("hangar-ld-{}-{}.db", std::process::id(), rand_suffix()));
-            if let Err(e) = std::fs::copy(&db, &tmp) {
-                eprintln!("[senha] copia de {} falhou: {e}", db.display());
-                continue;
-            }
-            // Mais usada/mais recente primeiro: é a que o Chrome sugere, e a 1ª é a que preenche.
-            let dump = Command::new("sqlite3").args([
-                "-newline", "\x1e", "-separator", "\x1f", tmp.to_str().unwrap_or_default(),
-                "select origin_url, username_value, hex(password_value) from logins \
-                 where blacklisted_by_user=0 and length(password_value)>0 order by date_last_used desc, times_used desc",
-            ]).output();
-            std::fs::remove_file(&tmp).ok();
-            // `sqlite3` ausente ou banco travado não é "sem senha salva": deixa rastro em vez de sumir calado.
-            let dump = match dump {
-                Ok(dump) => dump,
-                Err(e) => { eprintln!("[senha] sqlite3 nao rodou (instalado?): {e}"); continue; }
-            };
-            if !dump.status.success() {
-                eprintln!("[senha] sqlite3 saiu com {}", dump.status);
-                continue;
-            }
-            let text = String::from_utf8_lossy(&dump.stdout);
-            for row in text.split('\x1e') {
-                let mut cols = row.split('\x1f');
-                let (Some(url), Some(user), Some(hex)) = (cols.next(), cols.next(), cols.next()) else { continue };
-                if url.is_empty() {
-                    continue;
-                }
-                let Ok(parsed) = url::Url::parse(url) else { continue };
-                let Some(h) = parsed.host_str() else { continue };
-                let h = h.trim_start_matches("www.").to_lowercase();
-                // Mesma host ou subdomínio nos dois sentidos (auth.exemplo.com <-> exemplo.com).
-                if h != target && !target.ends_with(&format!(".{h}")) && !h.ends_with(&format!(".{target}")) {
-                    continue;
-                }
-                let Some(buf) = decode_hex(hex.trim()) else { continue };
-                for key in &keys {
-                    if let Some(pass) = decrypt(&buf, key) {
-                        out.push((user.to_owned(), pass));
-                        break;
-                    }
+            for saved in rows_of(&db).iter().filter(|s| same_origin(&s.origin, &page)) {
+                if let Some(pass) = keys().iter().find_map(|key| decrypt(&saved.blob, key)) {
+                    out.push((saved.user.clone(), pass));
                 }
             }
         }
         out
     }
 
+    /// Só https, mesma porta e mesmo host (o `www.` sai dos dois lados): subdomínio não herda a senha do domínio pai,
+    /// nem o contrário — `evil.x.com` não recebe a de `x.com`.
+    fn same_origin(saved: &url::Url, page: &url::Url) -> bool {
+        let host = |u: &url::Url| u.host_str().map(|h| h.strip_prefix("www.").unwrap_or(h).to_owned());
+        saved.scheme() == "https" && page.scheme() == "https"
+            && saved.port_or_known_default() == page.port_or_known_default()
+            && host(saved).is_some() && host(saved) == host(page)
+    }
+
+    fn rows_of(db: &Path) -> Arc<Vec<Saved>> {
+        let mtime = std::fs::metadata(db).and_then(|m| m.modified()).ok();
+        // A trava fica durante a leitura: duas páginas ao mesmo tempo não copiam o banco duas vezes.
+        let mut cache = ROWS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(mtime) = mtime && let Some((.., rows)) = cache.iter().find(|(p, t, _)| p == db && *t == mtime) {
+            return rows.clone();
+        }
+        // ponytail: falha de leitura também fica guardada até o arquivo mudar, para não repetir cópia e log a cada página.
+        let rows = Arc::new(read_rows(db));
+        cache.retain(|(p, ..)| p != db);
+        if let Some(mtime) = mtime {
+            cache.push((db.to_owned(), mtime, rows.clone()));
+        }
+        rows
+    }
+
+    /// Uma cópia por leitura porque o Chrome trava o arquivo. Mais usada/mais recente primeiro: é a que o Chrome
+    /// sugere, e a 1ª é a que preenche.
+    fn read_rows(db: &Path) -> Vec<Saved> {
+        let dir = match private_dir() {
+            Ok(dir) => dir,
+            Err(e) => { eprintln!("[senha] pasta temporaria nao foi criada: {e}"); return vec![]; }
+        };
+        let tmp = dir.join("login.db");
+        let dump = std::fs::copy(db, &tmp).map_err(|e| format!("copia de {} falhou: {e}", db.display())).and_then(|_| {
+            Command::new("sqlite3").args([
+                "-newline", "\x1e", "-separator", "\x1f", tmp.to_str().unwrap_or_default(),
+                "select origin_url, username_value, hex(password_value) from logins \
+                 where blacklisted_by_user=0 and length(password_value)>0 order by date_last_used desc, times_used desc",
+            ]).output().map_err(|e| format!("sqlite3 nao rodou (instalado?): {e}"))
+        });
+        std::fs::remove_dir_all(&dir).ok();
+        // `sqlite3` ausente ou banco ilegível não é "sem senha salva": deixa rastro em vez de sumir calado.
+        let dump = match dump {
+            Ok(dump) if dump.status.success() => dump,
+            Ok(dump) => { eprintln!("[senha] sqlite3 saiu com {}", dump.status); return vec![]; }
+            Err(e) => { eprintln!("[senha] {e}"); return vec![]; }
+        };
+        String::from_utf8_lossy(&dump.stdout).split('\x1e').filter_map(|row| {
+            let mut cols = row.split('\x1f');
+            let (url, user, hex) = (cols.next()?, cols.next()?, cols.next()?);
+            Some(Saved { origin: url::Url::parse(url).ok()?, user: user.to_owned(), blob: decode_hex(hex.trim())? })
+        }).collect()
+    }
+
+    /// Pasta 0700 de nome aleatório criada aqui (falha se já existir): sem `XDG_RUNTIME_DIR` a base é o `/tmp`, e um
+    /// symlink pré-plantado com nome previsível desviaria a cópia do banco cifrado.
+    fn private_dir() -> std::io::Result<PathBuf> {
+        use std::os::unix::fs::DirBuilderExt;
+        let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let dir = base.join(format!("hangar-ld-{}-{}", std::process::id(), rand_suffix()));
+        std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+        Ok(dir)
+    }
+
     /// JS que preenche o primeiro campo de senha VISÍVEL e o texto/email antes dele. Valor como literal JSON (nunca
     /// concatenado na string do script): senha com aspas, barra ou template não vira código. Devolve `true` se achou.
-    pub fn inject_login_js(user: &str, pass: &str) -> String {
-        let arg = serde_json::json!({"usuario": user, "senha": pass}).to_string();
-        let mut js = String::from("(() => { const {usuario, senha} = ");
+    /// Antes de tudo confere a origem: entre a leitura e a injeção a aba pode ter ido para outro site.
+    pub fn inject_login_js(origin: &str, user: &str, pass: &str) -> String {
+        let arg = serde_json::json!({"origem": origin, "usuario": user, "senha": pass}).to_string();
+        let mut js = String::from("(() => { const {origem, usuario, senha} = ");
         js.push_str(&arg);
         js.push_str(
             r#";
+    if (location.protocol !== 'https:' || location.origin !== origem) return false;
     const vis = (el) => el && el.offsetParent !== null && !el.disabled && !el.readOnly;
     const inputs = [];
     const walk = (root) => { for (const el of root.querySelectorAll('*')) { if (el.tagName === 'INPUT') inputs.push(el); if (el.shadowRoot) walk(el.shadowRoot); } };
@@ -443,6 +470,12 @@ mod passwords {
             .unwrap_or_else(|| super::dirs_home().join(".config"))
             .join("google-chrome").join("Default");
         ["Login Data", "Login Data For Account"].iter().map(|n| base.join(n)).filter(|p| p.exists()).collect()
+    }
+
+    /// Uma consulta ao chaveiro por processo: travado, cada `secret-tool` pede a senha dele na tela.
+    fn keys() -> &'static [Vec<u8>] {
+        static KEYS: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+        KEYS.get_or_init(key_candidates)
     }
 
     /// Chaves candidatas: o literal "peanuts" (armazenamento básico) e a do chaveiro ("Chrome Safe Storage"); perfis
@@ -487,7 +520,7 @@ mod passwords {
     }
 
     fn rand_suffix() -> String {
-        let mut b = [0u8; 4];
+        let mut b = [0u8; 8];
         SystemRandom::new().fill(&mut b).ok();
         b.iter().map(|x| format!("{x:02x}")).collect()
     }
@@ -524,10 +557,36 @@ mod passwords {
 
         #[test]
         fn inject_js_embeds_values_as_json_literal() {
-            let js = inject_login_js("me@x.com", "a\"b\\c");
+            let js = inject_login_js("https://x.com", "me@x.com", "a\"b\\c");
+            assert!(js.contains(r#""origem":"https://x.com""#));
+            assert!(js.contains("location.origin !== origem) return false"));
             assert!(js.contains(r#""usuario":"me@x.com""#));
             assert!(js.contains(r#""senha":"a\"b\\c""#));
             assert!(js.trim_end().ends_with("})()"));
+        }
+
+        #[test]
+        fn saved_login_only_matches_the_same_https_origin() {
+            let m = |saved: &str, page: &str| same_origin(&url::Url::parse(saved).unwrap(), &url::Url::parse(page).unwrap());
+            assert!(m("https://x.com/login", "https://x.com/app"));
+            assert!(m("https://www.x.com/", "https://x.com/"), "www. sai dos dois lados");
+            assert!(m("https://x.com/", "https://www.x.com/"));
+            assert!(!m("https://x.com/", "https://evil.x.com/"), "subdomínio não herda a senha do pai");
+            assert!(!m("https://auth.x.com/", "https://x.com/"), "nem o pai a do subdomínio");
+            assert!(!m("https://x.com/", "https://evilx.com/"));
+            assert!(!m("http://x.com/", "https://x.com/"), "senha salva em http");
+            assert!(!m("https://x.com/", "http://x.com/"), "página em http");
+            assert!(!m("https://x.com/", "https://x.com:8443/"), "outra porta");
+            assert!(m("https://x.com:443/", "https://x.com/"), "443 é a porta padrão");
+            assert!(!m("android://hash@com.x/", "https://x.com/"));
+        }
+
+        #[test]
+        fn temp_dir_for_the_db_copy_is_private() {
+            use std::os::unix::fs::PermissionsExt;
+            let dir = private_dir().unwrap();
+            assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+            std::fs::remove_dir_all(&dir).unwrap();
         }
     }
 }
