@@ -1157,3 +1157,27 @@ def test_lost_loan_reply_is_returned_by_repeating_the_same_id(monkeypatch, tmp_p
         assert [kind for kind, _ in gateway.controls] == ['keyboard_loan', 'keyboard_loan', 'keyboard_return']
         await owner.change('session', lambda: asyncio.sleep(0), remove=True)
     asyncio.run(flow())
+
+
+def test_closed_terminal_state_is_not_a_registration_error_at_boot(monkeypatch, tmp_path):
+    # Sessão com terminal fechada deixa o estado da fila no disco: no boot ela não tem pane, e isso
+    # não é falha de registro (a prova via 14 erros por restart, um por terminal fechado).
+    from app import runtime_terminal as terminal, tmux, diag
+    events = []
+    monkeypatch.setattr(diag, 'registrar', lambda evento, nivel='ok', **campos: events.append((evento, campos.get('codigo'))))
+    owner, slot, _ = live_owner(monkeypatch, tmp_path)
+    owner.close_python_leases()
+    rc._current = None
+    monkeypatch.setattr(terminal, '_collect', lambda name: None)
+    panes = {}
+    monkeypatch.setattr(tmux, 'list_panes_all', lambda: panes)
+    fresh = RuntimeCoordinator()
+    async def flow():
+        await fresh._register_durable_terminals(claude=None)
+    asyncio.run(flow())
+    assert ('runtime.registration_failed', 'terminal_binding') not in events
+    assert fresh.slot('session').awaiting_identity, 'o registro em espera continua'
+    panes['session'] = [{'pid': 1}]      # há pane com o nome e o vínculo não se prova: aí é erro
+    other = RuntimeCoordinator()
+    asyncio.run(other._register_durable_terminals(claude=None))
+    assert ('runtime.registration_failed', 'terminal_binding') in events

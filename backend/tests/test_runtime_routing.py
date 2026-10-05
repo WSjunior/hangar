@@ -771,3 +771,31 @@ def test_codex_headless_stays_python_while_rust_owns(birth, monkeypatch):
     asyncio.run(scenario())
     assert transport.kinds() == [] and owner.slot("c1").phase == runtime_coordinator.Phase.Python
     assert_legacy("c1")         # o cliente Python do Codex segue permitido
+
+
+def test_rust_dying_during_reopen_is_an_interruption_not_a_passage(birth, monkeypatch):
+    # Três quedas seguidas: o Rust novo morre no meio da reabertura. Isso é interrupção (o próximo
+    # Rust ou a retomada pelo Python decide), não adoção recusada nem fechamento sem confirmação.
+    import http.client
+    from app import diag
+    events = []
+    monkeypatch.setattr(diag, "registrar", lambda evento, nivel="ok", **campos: events.append((evento, nivel)))
+    owner, first, _ = _opened(birth)
+
+    class Dying(LockingTransport):
+        async def op(self, descriptor, command, operation_id, clock):
+            self.ops.append((command["kind"], descriptor))
+            if command["kind"] == "open":
+                raise http.client.RemoteDisconnected("Remote end closed connection without response")
+            raise ConnectionRefusedError("Rust fora do ar")
+
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("s1")
+        first.lease.close()
+        await owner.enter_pending()
+        await _enter(owner, Dying())
+    asyncio.run(scenario())
+    names = {evento for evento, _ in events}
+    assert "runtime.adoption_failed" not in names and "runtime.detach_unconfirmed" not in names
+    assert ("runtime.reopen_interrupted", "aviso") in events

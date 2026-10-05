@@ -580,6 +580,32 @@ resposta perdida do pedido é repetida com o mesmo id direto no canal para devol
 (`test_lost_loan_reply_is_returned_by_repeating_the_same_id`); `plataforma.md` diz que a captura e
 Git/arquivos pelo Python valem também com o Rust ausente (`pending`/`python`).
 
+Pontos que a prova completa (`--n 10` sobre `26f5ca8f`, roteiro `b9d4a6de`) marcou, explicados e
+consertados depois do merge do roteiro (`0920965f`):
+
+- **`runtime.registration_failed[terminal_binding]` 14–15 vezes a cada restart:** ruído. Fechar uma
+  sessão com terminal deixa o estado da fila no disco; no boot cada um vira registro em espera sem
+  pane e gravava erro (14 = os terminais fechados nos casos 49, 50, 51, 54 e 55). O registro em
+  espera fica; o erro só sai quando há pane com o nome e o vínculo não se prova. Teste
+  `test_closed_terminal_state_is_not_a_registration_error_at_boot`.
+- **`adoption_failed`/`open_failed[RemoteDisconnected]` e `detach_unconfirmed[ConnectionRefusedError]`
+  nas três quedas:** esperados (o Rust novo morre no meio da reabertura e o `close` compensatório bate
+  num Rust que não escuta), mas com nomes herdados da passagem antiga. Queda do Rust durante a
+  abertura agora é aviso `runtime.reopen_interrupted`; falha real é `runtime.reopen_failed`; `close`
+  recusado por Rust ausente não registra nada (a trava morre com ele) e o resto vira
+  `runtime.close_unconfirmed`. Teste `test_rust_dying_during_reopen_is_an_interruption_not_a_passage`.
+
+## Ponto de parada (sessão `dono-unico-exec`, 05/10/2026)
+
+Feito na branch: Tasks 1–10, a junção 7–9 (`e0d13084`), os consertos da prova (`26f5ca8f`), o roteiro
+(`0920965f`) e os dois pontos acima. Contrato interno 17. Falta só a **Task 11** (Steps 49–56):
+gravar `docs/migracao-rust/dono-unico/prova-real.md` com a tabela da rodada completa (a da
+`migracao-rust-2`: todos os casos automáticos ok; 54b "entrega incerta forçada no terminal" e a
+transferência Claude → Codex ficam como manuais pendentes do dono), marcar os Steps 49–56 e escrever a
+entrada de `plataforma.md` com a medição. Vale rodar o roteiro de novo sobre esta ponta para a tabela
+não sair dos nomes antigos do diário (o roteiro ainda conta `adoption_failed`/`detach_unconfirmed`
+como passagem; eles não são mais emitidos).
+
 ### Task 7: Rotas públicas do Rust (histórico e eventos) sem repasse por falha
 
 **Arquivos:** `crates/hangar-server/src/routes.rs`, `crates/hangar-server/tests/runtime_diagnostics.rs`,
