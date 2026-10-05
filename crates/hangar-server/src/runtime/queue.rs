@@ -275,14 +275,20 @@ impl Store {
         Ok(())
     }
 
-    pub fn exec(&mut self, generation: u64, call_id: &str, clock: ClockSample, action: Action) -> io::Result<Value> {
+    /// Depois de uma gravação que falhou, o disco é a verdade: relê o estado dele. Com o disco ainda
+    /// recusando, a próxima gravação falha de novo e bloqueia outra vez.
+    pub fn unfence(&mut self) -> io::Result<()> {
         if self.fenced {
-            if !matches!(&action, Action::EnsureProjection) { return Err(invalid("fila bloqueada após falha de persistência")); }
             self.state = State::load(&std::fs::read(&self.state_path)?)?.0;
             self.recover_before_compact=needs_terminal_recovery(&self.state);
             self.ensure_projection()?;
             self.fenced = false;
         }
+        Ok(())
+    }
+
+    pub fn exec(&mut self, generation: u64, call_id: &str, clock: ClockSample, action: Action) -> io::Result<Value> {
+        self.unfence()?;
         if generation != self.state.generation { return Err(invalid("geração da fila mudou")); }
         if call_id.is_empty() { return Err(invalid("operação da fila sem identificador")); }
         let receipt_id = format!("{CALL_PREFIX}{call_id}");
@@ -818,8 +824,14 @@ impl QueueActor {
                 match message {
                     QueueMessage::Stop => break,
                     QueueMessage::Snapshot(reply) => {
-                        let result = if store.fenced { Err(invalid("estado bloqueado após falha de persistência")) } else { Ok(store.state.clone()) };
-                        let _ = reply.send(result);
+                        if store.fenced {
+                            let job = tokio::task::spawn_blocking(move || { let result = store.unfence(); (store,result) }).await;
+                            match job {
+                                Ok((next,result)) => { store = next; if let Err(error) = result { let _ = reply.send(Err(error)); continue; } }
+                                Err(_) => { let _ = reply.send(Err(invalid("persistência da fila interrompida"))); break; }
+                            }
+                        }
+                        let _ = reply.send(Ok(store.state.clone()));
                     }
                     QueueMessage::Exec { generation,call_id,clock,action,reply } => {
                         let lease = lease.clone();

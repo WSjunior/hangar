@@ -548,6 +548,38 @@ malformada não deixa o teclado preso; fase reconferida dentro da barreira nos d
 as falhas de antes do `open`; resposta por texto aceita `deferred` (na fila do Rust). Ficou anotado:
 prazo vencido no meio de uma administração pode deixar o composer sujo até o Rust digitar de novo.
 
+## Consertos achados pela prova (sobre a junção `e0d13084`, antes da Task 10)
+
+O roteiro `scripts/prova-dono-unico.py` (`4826cb5a`) rodado sobre `620c27c1` achou quatro defeitos;
+os consertos vieram pela causa, cada um com teste que falha sem ele, e os casos afetados rodaram de novo.
+
+- **Queda única do Rust, sessão com terminal (caso 53): envio voltava 400 e não saía.** A espera
+  longa do plugin (`/api/plugin/pull`) chega pelo `hangar-server`; quando ele morria, o Python não
+  percebia a conexão caída e mantinha a espera em `_waiters`. O Rust novo via o plugin "esperando",
+  publicava nela e a confirmação nunca vinha (`plugin_uncertain` → `terminal_delivery_unknown` →
+  "resultado incerto"). Agora a espera observa a desconexão do cliente e sai; publicação que corre
+  junto com a queda (ou com a espera que acabou de sair) volta `not_written`. Testes
+  `test_pull_drops_its_wait_when_the_proxy_connection_dies` e `test_publication_racing_the_proxy_drop_is_not_written`.
+- **Três quedas, a mensagem seguinte do terminal não saía.** Mesma causa: a entrada incerta da queda
+  anterior travava as seguintes. Com o conserto acima a rodada deu `[1, 1]`. O caso ainda acusou "61 s"
+  porque a queda da primeira fase conta na janela de 60 s do Supervisor (o Python assumiu depois de
+  duas mortes da segunda fase) e o roteiro esperou 30 s por um terceiro Rust: medição do roteiro.
+- **Fila travada por `chmod` (caso 54): destravada, o envio seguia com `queue_io`.** Depois de uma
+  gravação que falhou, o `Store` do Rust ficava bloqueado até um `EnsureProjection` que ninguém manda.
+  Agora qualquer operação seguinte (e o `Snapshot` do ator) relê o estado do disco e segue; com o
+  disco ainda recusando, a gravação falha e bloqueia de novo. Teste
+  `write_failure_heals_on_next_operation_once_disk_is_writable`. Caso 54 rodou: travado 400 com código,
+  destravado 200 e 1 entrega.
+- **Parada de ~5,2 s.** A espera do plugin órfã (o plugin refaz a espera pelo Rust novo e a velha sai
+  de `_waiters`, então o `stop_waits` da parada não a alcança) segurava o uvicorn até o
+  `timeout_graceful_shutdown`. Prova: o caso 52 sem o conserto teve uma parada de 5,21 s com "Cancel 1
+  running task"; com ele, todas entre 0,14 e 0,21 s.
+
+Ressalvas da junção tratadas junto: o pedido de teclado emprestado é idempotente pelo id no Rust, e
+resposta perdida do pedido é repetida com o mesmo id direto no canal para devolver a concessão na hora
+(`test_lost_loan_reply_is_returned_by_repeating_the_same_id`); `plataforma.md` diz que a captura e
+Git/arquivos pelo Python valem também com o Rust ausente (`pending`/`python`).
+
 ### Task 7: Rotas públicas do Rust (histórico e eventos) sem repasse por falha
 
 **Arquivos:** `crates/hangar-server/src/routes.rs`, `crates/hangar-server/tests/runtime_diagnostics.rs`,

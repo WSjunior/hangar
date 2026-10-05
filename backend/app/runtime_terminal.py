@@ -388,6 +388,27 @@ def plugin_control(payload, metadata):
     return {'disposition':'unknown'}
 
 
+async def _return_lost_loan(coordinator, name, descriptor, request, request_id):
+    """A concessão pode ter saído e a resposta se perdido: o mesmo pedido repetido traz a mesma
+    concessão (o Rust deduplica pelo id), que volta na hora em vez de prender o teclado até o prazo.
+    Vai direto ao canal, sem a espera da vista que a perda de transporte acabou de invalidar."""
+    from app import diag
+    from app.runtime_coordinator import failure_reason
+    try:
+        again = await coordinator._rpc(descriptor, request, request_id)
+    except Exception as exc:
+        # Sem a concessão em mãos o teclado pode ficar com o Python até o prazo (`_LOAN_S`).
+        diag.registrar('runtime.keyboard_loan_unconfirmed', 'erro', sessao=name, **failure_reason(exc))
+        return
+    if again.get('disposition') != 'accepted':
+        return          # nada concedido a este pedido: não há o que devolver
+    try:
+        await coordinator._rpc(descriptor, {'kind':'control', 'control':'keyboard_return',
+            'payload':{'loan_id':again['payload']['loan_id']}}, 'admin:' + uuid.uuid4().hex)
+    except Exception as exc:
+        diag.registrar('runtime.keyboard_return_failed', 'erro', sessao=name, **failure_reason(exc))
+
+
 async def _borrow_keyboard(coordinator, name, action):
     """Administração que digita no pane de uma sessão do Rust: ele pausa as próprias escritas e
     empresta o teclado por uma operação, com prazo; fila, trava e estado continuam com ele."""
@@ -400,8 +421,14 @@ async def _borrow_keyboard(coordinator, name, action):
         descriptor = slot.binding.descriptor()
         await asyncio.to_thread(validate_binding, descriptor)
         asked = time.monotonic()        # o prazo do Rust começa antes de a resposta chegar aqui
-        loan = await coordinator.op(name, {'kind':'control', 'control':'keyboard_loan',
-            'payload':{'seconds':_LOAN_S}}, 'admin:' + uuid.uuid4().hex)
+        request = {'kind':'control', 'control':'keyboard_loan', 'payload':{'seconds':_LOAN_S}}
+        request_id = 'admin:' + uuid.uuid4().hex
+        try:
+            loan = await coordinator.op(name, request, request_id)
+        except Exception as exc:
+            if getattr(exc, '_transport_lost', False):
+                await _return_lost_loan(coordinator, name, descriptor, request, request_id)
+            raise
         if loan.get('disposition') != 'accepted':
             raise TerminalControlError('keyboard_loan', loan.get('disposition'), (loan.get('payload') or {}).get('code'))
         failure = None

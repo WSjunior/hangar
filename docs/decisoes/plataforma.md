@@ -1124,8 +1124,11 @@ diários `fallback`/`paused`/`recovered`) saiu, porque com ele cada falha voltav
 Python e o cartão mostrava uma leitura que o Rust não confirmou. O diário grava
 `terminal_observer.erro` no máximo uma vez por minuto por sessão e código (um Rust que alterna
 sucesso e falha não enche o diário); o log do Rust diz "observação terminal
-falhou". `None` (captura Python) fica só para dono fixo: ponte desligada, Windows, nome fora de
-`[A-Za-z0-9._-]{1,64}`, provider fora do Rust ou sessão ainda sem vínculo.
+falhou". `None` (captura Python) fica só para dono fixo ou Rust ausente (modo `pending`/`python`):
+ponte desligada, Windows, nome fora de `[A-Za-z0-9._-]{1,64}`, provider fora do Rust ou sessão ainda
+sem vínculo. No `pending` (subida do Rust, ou os segundos entre uma queda e a volta dele) a ponte está
+desligada e o Python atende Git/arquivos e a captura do painel: o Rust não está lá para atender, e
+nenhuma posse de sessão passa por isso.
 
 O texto abaixo é o da Parte 2C, quando o erro caía na captura Python; a regra acima o substitui.
 

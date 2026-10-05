@@ -1126,3 +1126,34 @@ def test_keyboard_loan_expires_and_fails_with_code(monkeypatch, tmp_path):
             terminal.assert_writer('session')
         await owner.change('session', lambda: asyncio.sleep(0), remove=True)
     asyncio.run(flow())
+
+
+def test_lost_loan_reply_is_returned_by_repeating_the_same_id(monkeypatch, tmp_path):
+    # O Rust concedeu e a resposta se perdeu: o mesmo pedido repetido traz a mesma concessão, que
+    # volta na hora em vez de deixar o teclado preso até o prazo.
+    from app import runtime_terminal as terminal
+
+    class Lossy(LoanGateway):
+        def __init__(self):
+            super().__init__()
+            self.loan_ids = []
+        async def op(self, target, command, operation_id, clock):
+            if command['kind'] == 'control' and command['control'] == 'keyboard_loan':
+                self.loan_ids.append(operation_id)
+                reply = await super().op(target, command, operation_id, clock)
+                if len(self.loan_ids) == 1:
+                    raise ConnectionResetError('resposta perdida')
+                return reply
+            return await super().op(target, command, operation_id, clock)
+
+    gateway = Lossy()
+    owner = _born_terminal(monkeypatch, tmp_path, gateway)
+    async def flow():
+        owner.loop = asyncio.get_running_loop()
+        assert await owner.prepare_session('session', 'claude')
+        with pytest.raises(ConnectionResetError):
+            await terminal.run_admin(owner, 'session', 'set_model', {'model':'haiku'}, lambda: pytest.fail('digitou sem teclado'))
+        assert len(gateway.loan_ids) == 2 and gateway.loan_ids[0] == gateway.loan_ids[1], 'o mesmo id repetido'
+        assert [kind for kind, _ in gateway.controls] == ['keyboard_loan', 'keyboard_loan', 'keyboard_return']
+        await owner.change('session', lambda: asyncio.sleep(0), remove=True)
+    asyncio.run(flow())

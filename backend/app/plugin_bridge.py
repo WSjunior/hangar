@@ -111,6 +111,10 @@ def publish_terminal(name, conversation, generation, publication, validate):
             validate()
             if tracked_session_id(name) != conversation:
                 raise RuntimeError("conversa mudou antes da publicação")
+            with _lock:
+                if _waiters.get(name) is not queue:
+                    # A espera saiu (queda de quem a repassava, ou o prazo) entre a escolha e agora.
+                    raise RuntimeError("espera do plugin encerrada antes da publicação")
             queue.put_nowait({"text":publication["text"], "modo":publication["mode"],
                 "publication_id":publication["id"], "generation":generation, "session_id":conversation})
         except Exception:
@@ -980,8 +984,27 @@ async def _whoami(body: WhoamiBody) -> tuple[str | None, str]:
         return None, "nome"
 
 
+async def _disconnected(request) -> None:
+    """Termina quando o cliente da espera cai: o corpo já foi lido, o que vier é a desconexão."""
+    while (await request.receive())["type"] != "http.disconnect":
+        pass
+
+
+def _undelivered(name: str, item) -> None:
+    """Publicação que chegou junto com a queda do cliente: o plugin nunca a recebeu."""
+    if not isinstance(item, dict) or item.get("publication_id") is None:
+        if item is not _STOP:
+            _log.warning("plugin: entrega perdida com a queda da espera sessao=%s", name)
+        return
+    with _lock:
+        pending = _publications.get(name)
+        if pending is not None and pending["id"] == item["publication_id"]:
+            pending["result"] = "not_written"
+            pending["event"].set()
+
+
 @plugin_router.post("/pull")
-async def pull(body: PullBody):
+async def pull(body: PullBody, request: Request = None):
     """Long-poll do plugin. Sempre 200: com o texto, ou `{"text": null}` quando a janela fecha vazia.
 
     Sem `Depends(require_auth)`: quem chama é o pane, que não tem o bearer do
@@ -1021,12 +1044,31 @@ async def pull(body: PullBody):
         _waiters[body.sessao] = fila
         _batidas[body.sessao] = time.monotonic()
     # `faixa`: o backend tem a faixa dos mods desta sessão? Reiniciado, não tem, e o plugin reenvia.
+    gone = False
     try:
-        entrega = _STOP if _stopping else await asyncio.wait_for(fila.get(), timeout=ESPERA_S)
+        if _stopping:
+            entrega = _STOP
+        else:
+            # A espera chega pelo hangar-server: se ele morre, a conexão cai e a espera tem que sair,
+            # senão o próximo publica nela e a confirmação nunca vem.
+            proximo = asyncio.ensure_future(fila.get())
+            queda = asyncio.ensure_future(_disconnected(request)) if request is not None else None
+            try:
+                feitos, _ = await asyncio.wait({proximo, *([queda] if queda else [])}, timeout=ESPERA_S,
+                                               return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for tarefa in (proximo, queda):
+                    if tarefa is not None and not tarefa.done():
+                        tarefa.cancel()
+            gone = queda is not None and queda in feitos
+            entrega = proximo.result() if proximo in feitos else _STOP
         if entrega is _STOP:
             entrega = _after_stop(fila)
-    except asyncio.TimeoutError:
-        entrega = _STOP
+        if gone:
+            _undelivered(body.sessao, entrega)
+            while not fila.empty():
+                _undelivered(body.sessao, fila.get_nowait())
+            entrega = _STOP
     finally:
         with _lock:
             # Só renova o próprio dono: um `esquecer` ou outra instância no meio não é desfeito.
