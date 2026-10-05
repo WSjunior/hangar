@@ -391,3 +391,24 @@ fn unchanged_projection_is_not_rewritten() {
     store.exec(1, "repair", clock(), Action::EnsureProjection).unwrap();
     assert_eq!(std::fs::read_to_string(projection.join("session.jsonl")).unwrap().lines().count(), 1);
 }
+
+#[cfg(unix)]
+#[test]
+fn write_failure_heals_on_next_operation_once_disk_is_writable() {
+    // A pasta da fila travada (chmod) recusa a gravação; destravada, o envio seguinte volta a valer
+    // sem precisar de uma ação de reparo que ninguém manda.
+    use std::os::unix::fs::PermissionsExt;
+    if std::fs::metadata("/proc/self").map(|m|std::os::unix::fs::MetadataExt::uid(&m)==0).unwrap_or(false) {
+        return;     // como root o chmod não recusa nada
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let state_dir = dir.path().join("runtime");
+    std::fs::create_dir(&state_dir).unwrap();
+    let mut store = Store::open(&state_dir.join("key.json"), &dir.path().join("projection"), State::new("key",1,"session",vec![])).unwrap();
+    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let failed = store.exec(1, "blocked", clock(), append());
+    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(failed.is_err());
+    store.exec(1, "after", clock(), append()).expect("disco destravado: a fila volta sem ação de reparo");
+    assert_eq!(store.state().rows.len(), 1, "a entrada que falhou não ficou");
+}

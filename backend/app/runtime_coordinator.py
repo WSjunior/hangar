@@ -207,9 +207,16 @@ def _codex_session(name):
     return codex_sessions.load(name) is not None
 
 
-def _registration_failed(event, name, exc):
+def _registration_failed(event, name, exc, *, rust_dead=False):
+    """`rust_dead`: abertura no Rust com o processo dele já morto; só aí conexão caída ou recusada
+    é queda. Com ele vivo, conexão caída, prazo ou resposta inválida são falha dele."""
     from app import diag
     reason = failure_reason(exc)
+    if rust_dead and isinstance(exc, ConnectionError):
+        # Queda do Rust durante a abertura: o próximo Rust ou a retomada pelo Python decide.
+        _log.warning("abertura de %s interrompida pela queda do Rust (%s)", name, reason["codigo"])
+        diag.registrar("runtime.reopen_interrupted", "aviso", sessao=name, etapa=event, **reason)
+        return
     _log.error("%s: sessão %s (%s)", event, name, reason["codigo"])
     diag.registrar(event, "erro", sessao=name, **reason)
 
@@ -308,7 +315,7 @@ class RuntimeCoordinator:
                 try:
                     await self._reopen_registered(slot)
                 except Exception as exc:
-                    _registration_failed("runtime.adoption_failed", slot.binding.name, exc)
+                    _registration_failed("runtime.reopen_failed", slot.binding.name, exc, rust_dead=not self._rust_alive())
             # Em paralelo: com muitas sessões, em série a janela passaria do teto de espera.
             await asyncio.gather(*(reopen(slot) for slot in tuple(self.slots.values())
                 if self.names.get(slot.binding.name) == slot.binding.key and slot.phase == Phase.Rust))
@@ -449,10 +456,7 @@ class RuntimeCoordinator:
             diag.registrar("runtime.open_failed", "erro", sessao=name, **failure_reason(exc))
             if sent and not isinstance(exc, RustOpError):
                 # Resposta perdida ou recusada aqui: o Rust pode ter aberto, e ninguém o fecharia.
-                try:
-                    await self._rpc(descriptor, {"kind":"close"}, uuid.uuid4().hex)
-                except Exception as close_error:
-                    diag.registrar("runtime.detach_unconfirmed", "erro", sessao=name, **failure_reason(close_error))
+                await self._close_unconfirmed(name, descriptor)
             raise
         slot = Slot(binding=copy.deepcopy(binding), phase=Phase.Rust, view=ready["state"], cache_valid=True)
         runtime_queue.configure(self)
@@ -546,10 +550,7 @@ class RuntimeCoordinator:
             diag.registrar("runtime.open_failed", "erro", sessao=name, **failure_reason(exc))
             if sent and not isinstance(exc, RustOpError):
                 # Resposta perdida ou recusada aqui: o Rust pode ter aberto, e ninguém o fecharia.
-                try:
-                    await self._rpc(descriptor, {"kind":"close"}, uuid.uuid4().hex)
-                except Exception as close_error:
-                    diag.registrar("runtime.detach_unconfirmed", "erro", sessao=name, **failure_reason(close_error))
+                await self._close_unconfirmed(name, descriptor)
             # Só o cano lançado agora e que o Rust não alcançou morre: um vivo de antes pode estar
             # no meio de um turno, e outro processo no mesmo .jsonl seria pior.
             if launched and getattr(exc, "code", "") in _CONNECT_CODES:
@@ -639,14 +640,14 @@ class RuntimeCoordinator:
             try:
                 await self.prepare_session(binding.name, "claude")
             except Exception as exc:
-                _registration_failed("runtime.adoption_failed", binding.name, exc)
+                _registration_failed("runtime.reopen_failed", binding.name, exc, rust_dead=not self._rust_alive())
         async def open_listed(meta):
             try:
                 pending = await asyncio.to_thread(_has_pending, _queue_dir() / "runtime" / f"{meta.get('key')}.json")
                 if pending or await asyncio.to_thread(_cano_alive, meta):
                     await self.prepare_session(meta["name"], "claude", launch=pending)
             except Exception as exc:
-                _registration_failed("runtime.registration_failed", meta["name"], exc)
+                _registration_failed("runtime.registration_failed", meta["name"], exc, rust_dead=not self._rust_alive())
         await asyncio.gather(*(open_listed(meta) for meta in metas
             if meta.get("headless") and not self.managed_queue(meta["name"])))
 
@@ -677,8 +678,11 @@ class RuntimeCoordinator:
                         if fresh is None:
                             self.slots[binding.key].awaiting_identity = True
                             self.names.setdefault(binding.name, binding.key)
-                            from app import diag
-                            diag.registrar("runtime.registration_failed", "erro", sessao=binding.name, codigo="terminal_binding")
+                            from app import diag, tmux
+                            # Sem sessão tmux com o nome é sessão fechada (o estado da fila fica no
+                            # disco); falha é haver sessão sem vínculo provado, ou o tmux não responder.
+                            if await asyncio.to_thread(tmux.sessao_existe, binding.name) is not False:
+                                diag.registrar("runtime.registration_failed", "erro", sessao=binding.name, codigo="terminal_binding")
                             continue
                     else:
                         fresh.generation += int(fresh.jsonl != binding.jsonl)
@@ -1331,9 +1335,7 @@ class RuntimeCoordinator:
     async def recover(self, name, confirmed_dead: bool, containment=None):
         slot = self.slot(name)
         async with self._barrier(slot):
-            alive = getattr(self.transport, "alive", False)
-            alive = alive() if callable(alive) else alive
-            if not confirmed_dead or alive:
+            if not confirmed_dead or self._rust_alive():
                 raise RuntimeError("morte do Rust não foi confirmada; a reserva permanece bloqueada")
             if slot.binding.meta.get("terminal"):
                 proof = getattr(containment or self.transport, "containment_clean", None)
@@ -1609,10 +1611,7 @@ class RuntimeCoordinator:
                 diag.registrar("runtime.open_failed", "erro", sessao=name, **failure_reason(exc))
             # O `open` pode ter chegado ao Rust (resposta perdida ou recusada aqui): fecha lá antes
             # de a trava voltar ao Python, como a adoção; sem confirmação, quem decide é a trava.
-            try:
-                await self._rpc(slot.binding.descriptor(), {"kind":"close"}, uuid.uuid4().hex)
-            except Exception as close_error:
-                diag.registrar("runtime.detach_unconfirmed", "erro", sessao=name, **failure_reason(close_error))
+            await self._close_unconfirmed(name, slot.binding.descriptor())
             try:
                 await self._restore(slot, reconnect=False)
             except Exception as restore_error:
@@ -1627,6 +1626,22 @@ class RuntimeCoordinator:
             slot.view, slot.cache_valid, slot.phase = ready["state"], True, Phase.Rust
             slot.change_from_rust = False
         self._signal(slot)
+
+    async def _close_unconfirmed(self, name, descriptor):
+        """Depois de um `open` sem resposta ou recusado aqui: fecha no Rust, que pode ter aberto. Rust
+        morto que nem escuta não segura nada (a trava morre com o processo); fora isso, sem
+        confirmação, quem decide é a trava, e o diário registra."""
+        try:
+            await self._rpc(descriptor, {"kind":"close"}, uuid.uuid4().hex)
+        except Exception as exc:
+            if isinstance(exc, ConnectionRefusedError) and not self._rust_alive():
+                return
+            from app import diag
+            diag.registrar("runtime.close_unconfirmed", "erro", sessao=name, **failure_reason(exc))
+
+    def _rust_alive(self):
+        alive = getattr(self.transport, "alive", False)
+        return alive() if callable(alive) else alive
 
     def _check_opened(self, ready, descriptor):
         if not (ready.get("opened") is True and isinstance(ready.get("state"), dict) and ready.get("instance") == self.instance

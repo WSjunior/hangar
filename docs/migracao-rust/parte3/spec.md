@@ -5,7 +5,7 @@
 **Base:** `hangar-server-parte1` em `ce5cefd5`, com a 2B integrada em `eae31286`; contrato interno da parte 2B = versão 7, esta = **8**
 **Medições:** [`analise.md`](analise.md)
 
-> **Substituído em parte (04/10/2026, dono único, contrato 18):** "Falha do lado Rust vira
+> **Substituído em parte (04/10/2026, dono único, contrato 18, hoje 20):** "Falha do lado Rust vira
 > repasse" (seção 1) e as quatro tentativas com passagem da parte ao Python (seção 6) saíram.
 > Com o Rust de pé, falha é 503 com código e evento `rust.costs_failed` no diário; o Python só
 > atende quando o processo Rust inteiro não está de pé. Regra vigente em

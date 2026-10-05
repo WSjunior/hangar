@@ -1111,7 +1111,7 @@ Anotar valor e unidade, a sessão de cada `/history`, e o que não deu para medi
 
 ## Custos e uso no hangar-server
 
-(03/10/2026, Parte 3; contrato interno 18 na junção com o dono único.) O Rust
+(03/10/2026, Parte 3; contrato interno 20 na junção com o dono único e a lista de worktrees.) O Rust
 atende `/api/costs`, `/api/uso`, `/api/cotacao` e `/api/sessions/{name}/cost` para sessões Codex.
 Claude, Codex, Pi, omp e Kimi alimentam o índice de custos; o relatório de Uso mantém as fontes
 que a referência Python já oferece. Escopos e rótulos chegam do Python pelo contrato interno,
@@ -1146,7 +1146,7 @@ mensagem, que pode ecoar valor de coluna), e erro de disco registra a etapa e o 
 da tela inicial mostram a frase traduzida do 503 com o código entre parênteses. Aquecimento 202,
 ausência legítima 404, relatório vazio e falta de tarifa/cotação não são falha. A versão
 anterior (contrato 8: quatro tentativas e passagem da parte ao Python, rota
-`/internal/rust-failure`) saiu na junção com o dono único, contrato 18.
+`/internal/rust-failure`) saiu na junção com o dono único (contrato 18, hoje 20).
 
 O índice Rust chama-se `custos-rust.sqlite3`. No Linux/macOS fica em
 `$XDG_CACHE_HOME/hangar/custos` quando a variável contém caminho absoluto, ou
@@ -1265,6 +1265,21 @@ web, o card no celular e no nativo; “Atualizar dados”; filtros e clique num 
 de sessão Codex; aquecimento ao recriar o índice Rust; e reserva com `CP_RUST_SERVER=0`.
 Nenhuma tela, backend vivo, índice de produção ou serviço foi alterado nesta prova.
 
+### Prova de uso real do dono único (04/10/2026)
+
+Backend da branch `feat/rust-single-owner` (`d6dbdc36`) isolado pelo `scripts/prova-dono-unico.py`
+(unit transiente, HOME, portas e `tmux -L` próprios, Haiku). Criar e mandar na hora: 10/10 sem
+terminal e 10/10 com terminal, cada mensagem uma vez, nenhum "religou"/"desligou" e nenhum
+`runtime.*` no diário. Fila com o Claude ocupado (3 em ordem, uma vez cada), `/clear` com o chat
+aberto (não cai), restart com fila e com cano morto (uma entrega, parada em 0,2 s sem SIGKILL),
+uma queda do Rust (sessão segue no Rust novo, envio durante a queda sai uma vez), três quedas em
+60 s (o Python assume, nada duplicado), trava de escrita na fila (400 com código, sessão segue no
+Rust), Git ocupado (503 `workspace_busy` em 0,01 s, nada no Python) e troca de conta com e sem
+terminal (0,6–0,7 s, mesma chave, uma entrega na conta nova). Ficam manuais no app real a entrega
+incerta forçada no terminal e a transferência Claude → Codex. Tabela e achados (um
+`reopen_failed` intermitente no restart, e o 500 com pilha da política com geração antiga) em
+[`prova-real.md`](../migracao-rust/dono-unico/prova-real.md).
+
 ## Observação terminal Rust: erro visível, sem captura Python
 
 (04/10/2026, dono único, decisão 3 do dono.) Com a ponte ligada, o Rust é o único dono da
@@ -1280,8 +1295,11 @@ diários `fallback`/`paused`/`recovered`) saiu, porque com ele cada falha voltav
 Python e o cartão mostrava uma leitura que o Rust não confirmou. O diário grava
 `terminal_observer.erro` no máximo uma vez por minuto por sessão e código (um Rust que alterna
 sucesso e falha não enche o diário); o log do Rust diz "observação terminal
-falhou". `None` (captura Python) fica só para dono fixo: ponte desligada, Windows, nome fora de
-`[A-Za-z0-9._-]{1,64}`, provider fora do Rust ou sessão ainda sem vínculo.
+falhou". `None` (captura Python) fica só para dono fixo ou Rust ausente (modo `pending`/`python`):
+ponte desligada, Windows, nome fora de `[A-Za-z0-9._-]{1,64}`, provider fora do Rust ou sessão ainda
+sem vínculo. No `pending` (subida do Rust, ou os segundos entre uma queda e a volta dele) a ponte está
+desligada e o Python atende Git/arquivos e a captura do painel: o Rust não está lá para atender, e
+nenhuma posse de sessão passa por isso.
 
 O texto abaixo é o da Parte 2C, quando o erro caía na captura Python; a regra acima o substitui.
 

@@ -548,6 +548,64 @@ malformada não deixa o teclado preso; fase reconferida dentro da barreira nos d
 as falhas de antes do `open`; resposta por texto aceita `deferred` (na fila do Rust). Ficou anotado:
 prazo vencido no meio de uma administração pode deixar o composer sujo até o Rust digitar de novo.
 
+## Consertos achados pela prova (sobre a junção `e0d13084`, antes da Task 10)
+
+O roteiro `scripts/prova-dono-unico.py` (`4826cb5a`) rodado sobre `620c27c1` achou quatro defeitos;
+os consertos vieram pela causa, cada um com teste que falha sem ele, e os casos afetados rodaram de novo.
+
+- **Queda única do Rust, sessão com terminal (caso 53): envio voltava 400 e não saía.** A espera
+  longa do plugin (`/api/plugin/pull`) chega pelo `hangar-server`; quando ele morria, o Python não
+  percebia a conexão caída e mantinha a espera em `_waiters`. O Rust novo via o plugin "esperando",
+  publicava nela e a confirmação nunca vinha (`plugin_uncertain` → `terminal_delivery_unknown` →
+  "resultado incerto"). Agora a espera observa a desconexão do cliente e sai; publicação que corre
+  junto com a queda (ou com a espera que acabou de sair) volta `not_written`. Testes
+  `test_pull_drops_its_wait_when_the_proxy_connection_dies` e `test_publication_racing_the_proxy_drop_is_not_written`.
+- **Três quedas, a mensagem seguinte do terminal não saía.** Mesma causa: a entrada incerta da queda
+  anterior travava as seguintes. Com o conserto acima a rodada deu `[1, 1]`. O caso ainda acusou "61 s"
+  porque a queda da primeira fase conta na janela de 60 s do Supervisor (o Python assumiu depois de
+  duas mortes da segunda fase) e o roteiro esperou 30 s por um terceiro Rust: medição do roteiro.
+- **Fila travada por `chmod` (caso 54): destravada, o envio seguia com `queue_io`.** Depois de uma
+  gravação que falhou, o `Store` do Rust ficava bloqueado até um `EnsureProjection` que ninguém manda.
+  Agora qualquer operação seguinte (e o `Snapshot` do ator) relê o estado do disco e segue; com o
+  disco ainda recusando, a gravação falha e bloqueia de novo. Teste
+  `write_failure_heals_on_next_operation_once_disk_is_writable`. Caso 54 rodou: travado 400 com código,
+  destravado 200 e 1 entrega.
+- **Parada de ~5,2 s.** A espera do plugin órfã (o plugin refaz a espera pelo Rust novo e a velha sai
+  de `_waiters`, então o `stop_waits` da parada não a alcança) segurava o uvicorn até o
+  `timeout_graceful_shutdown`. Prova: o caso 52 sem o conserto teve uma parada de 5,21 s com "Cancel 1
+  running task"; com ele, todas entre 0,14 e 0,21 s.
+
+Ressalvas da junção tratadas junto: o pedido de teclado emprestado é idempotente pelo id no Rust, e
+resposta perdida do pedido é repetida com o mesmo id direto no canal para devolver a concessão na hora
+(`test_lost_loan_reply_is_returned_by_repeating_the_same_id`); `plataforma.md` diz que a captura e
+Git/arquivos pelo Python valem também com o Rust ausente (`pending`/`python`).
+
+Pontos que a prova completa (`--n 10` sobre `26f5ca8f`, roteiro `b9d4a6de`) marcou, explicados e
+consertados depois do merge do roteiro (`0920965f`):
+
+- **`runtime.registration_failed[terminal_binding]` 14–15 vezes a cada restart:** ruído. Fechar uma
+  sessão com terminal deixa o estado da fila no disco; no boot cada um vira registro em espera sem
+  pane e gravava erro (14 = os terminais fechados nos casos 49, 50, 51, 54 e 55). O registro em
+  espera fica; o erro só sai quando há pane com o nome e o vínculo não se prova. Teste
+  `test_closed_terminal_state_is_not_a_registration_error_at_boot`.
+- **`adoption_failed`/`open_failed[RemoteDisconnected]` e `detach_unconfirmed[ConnectionRefusedError]`
+  nas três quedas:** esperados (o Rust novo morre no meio da reabertura e o `close` compensatório bate
+  num Rust que não escuta), mas com nomes herdados da passagem antiga. Queda do Rust durante a
+  abertura agora é aviso `runtime.reopen_interrupted`; falha real é `runtime.reopen_failed`; `close`
+  recusado por Rust ausente não registra nada (a trava morre com ele) e o resto vira
+  `runtime.close_unconfirmed`. Teste `test_rust_dying_during_reopen_is_an_interruption_not_a_passage`.
+
+## Ponto de parada (sessão `dono-unico-exec`, 05/10/2026)
+
+Feito na branch: Tasks 1–10, a junção 7–9 (`e0d13084`), os consertos da prova (`26f5ca8f`), o roteiro
+(`0920965f`) e os dois pontos acima. Contrato interno 17. Falta só a **Task 11** (Steps 49–56):
+gravar `docs/migracao-rust/dono-unico/prova-real.md` com a tabela da rodada completa (a da
+`migracao-rust-2`: todos os casos automáticos ok; 54b "entrega incerta forçada no terminal" e a
+transferência Claude → Codex ficam como manuais pendentes do dono), marcar os Steps 49–56 e escrever a
+entrada de `plataforma.md` com a medição. Vale rodar o roteiro de novo sobre esta ponta para a tabela
+não sair dos nomes antigos do diário (o roteiro ainda conta `adoption_failed`/`detach_unconfirmed`
+como passagem; eles não são mais emitidos).
+
 ### Task 7: Rotas públicas do Rust (histórico e eventos) sem repasse por falha
 
 **Arquivos:** `crates/hangar-server/src/routes.rs`, `crates/hangar-server/tests/runtime_diagnostics.rs`,
@@ -697,7 +755,16 @@ a prévia do Codex com terminal continua na captura Python (lease com `provider=
 repasse, `quiesce`/`carry`, readoção a cada boot), `docs/migracao-rust/README.md` (estado das
 partes), `docs/decisoes/plataforma.md` (entrada nova com a medição da Task 11).
 
-- [ ] **Step 48: Mover o que deixou de existir para `superado.md` e atualizar o README da migração**
+- [x] **Step 48: Mover o que deixou de existir para `superado.md` e atualizar o README da migração**
+
+**Registro da execução (Task 10).** `superado.md` ganhou a entrada "Passagem de sessão e de pedido
+entre Python e Rust com o Rust vivo" (readoção a cada boot, adoção com `quiesce`/`carry`, administração
+por `detach` → Python → `adopt`, "três tentativas + uma", repasse das rotas públicas e do Git por falha,
+observação com reserva Python por erro), apontando a regra nova. O README da migração ganhou o estado
+do dono único (modo do processo, contrato 17, o que fica no Python) e a linha de `dono-unico/` deixou de
+dizer "aguardando aprovação". `harnesses.md` (órfão do cano) ganhou a ressalva de que, com o Rust de pé,
+quem abre os canos vivos é ele. A entrada nova de `plataforma.md` com a medição fica para a Task 11,
+que a produz. As regras que cada Task tornou falsas já tinham sido corrigidas no commit dela.
 
 ### Task 11: Prova de uso real
 
@@ -709,14 +776,27 @@ embrulho no `PATH`, `claude` embrulhado com `--model claude-haiku-4-5` e
 `matar_orfaos` desligado. Entregas contadas no transcript cru por marcador único; quem atendeu,
 pelo log do Python (pedido do Rust aparece lá só como `/internal/*`).
 
-- [ ] **Step 49: Criar sessão e mandar na hora — sem terminal 10 de 10 e com terminal 10 de 10 com uma entrega; nenhum "religou"/"desligou" no log; nenhum `runtime.*` de passagem no diário (verificação manual)**
-- [ ] **Step 50: Fila com o Claude ocupado — 3 mensagens durante um turno longo saem em ordem, uma vez cada (verificação manual)**
-- [ ] **Step 51: `/clear` com o chat aberto — o chat não cai, a sessão continua no Rust, a mensagem seguinte sai uma vez (verificação manual)**
-- [ ] **Step 52: Restart com fila — mensagem enfileirada antes do `systemctl restart` sai uma vez depois; o mesmo com o cano morto antes da subida (`kill` no cano com a unit parada); nenhum cliente Python aberto; parada sem SIGKILL (verificação manual)**
-- [ ] **Step 53: Queda do Rust — `kill -9` uma vez: a sessão continua no Rust novo, sem Python no meio, e uma mensagem mandada durante a queda sai uma vez; três vezes em 60 s: o Python assume tudo, cada sessão retomada uma vez, nenhuma entrega duplicada (verificação manual)**
-- [ ] **Step 54: Falha forçada de operação — trava de escrita no estado da fila da sessão (`chmod`): o envio volta erro com código na tela, a sessão segue no Rust; desfeita a trava, a próxima mensagem sai uma vez. Sessão com terminal com `terminal_delivery_unknown` forçado: faixa na tela e a próxima operação reabre no Rust. Git ocupado com 4 pushes lentos: 503 visível no painel, nada no Python (verificação manual)**
-- [ ] **Step 55: Troca de conta numa sessão sem terminal e noutra com terminal (a chave e a fila ficam; a mensagem seguinte sai uma vez) e transferência Claude → Codex: concluem sem cliente Python (verificação manual)**
-- [ ] **Step 56: Registrar a tabela de casos em `docs/migracao-rust/dono-unico/prova-real.md` e na entrada de `plataforma.md`**
+- [x] **Step 49: Criar sessão e mandar na hora — sem terminal 10 de 10 e com terminal 10 de 10 com uma entrega; nenhum "religou"/"desligou" no log; nenhum `runtime.*` de passagem no diário (verificação manual)**
+- [x] **Step 50: Fila com o Claude ocupado — 3 mensagens durante um turno longo saem em ordem, uma vez cada (verificação manual)**
+- [x] **Step 51: `/clear` com o chat aberto — o chat não cai, a sessão continua no Rust, a mensagem seguinte sai uma vez (verificação manual)**
+- [x] **Step 52: Restart com fila — mensagem enfileirada antes do `systemctl restart` sai uma vez depois; o mesmo com o cano morto antes da subida (`kill` no cano com a unit parada); nenhum cliente Python aberto; parada sem SIGKILL (verificação manual)**
+- [x] **Step 53: Queda do Rust — `kill -9` uma vez: a sessão continua no Rust novo, sem Python no meio, e uma mensagem mandada durante a queda sai uma vez; três vezes em 60 s: o Python assume tudo, cada sessão retomada uma vez, nenhuma entrega duplicada (verificação manual)**
+- [x] **Step 54: Falha forçada de operação — trava de escrita no estado da fila da sessão (`chmod`): o envio volta erro com código na tela, a sessão segue no Rust; desfeita a trava, a próxima mensagem sai uma vez. Sessão com terminal com `terminal_delivery_unknown` forçado: faixa na tela e a próxima operação reabre no Rust. Git ocupado com 4 pushes lentos: 503 visível no painel, nada no Python (verificação manual)**
+- [x] **Step 55: Troca de conta numa sessão sem terminal e noutra com terminal (a chave e a fila ficam; a mensagem seguinte sai uma vez) e transferência Claude → Codex: concluem sem cliente Python (verificação manual)**
+- [x] **Step 56: Registrar a tabela de casos em `docs/migracao-rust/dono-unico/prova-real.md` e na entrada de `plataforma.md`**
+
+**Registro da execução (Task 11).** Roteiro `scripts/prova-dono-unico.py --n 10 --conta-b
+~/.claude-jefferson` sobre `d6dbdc36`, duas rodadas completas; tabela e achados em `prova-real.md`.
+Todos os casos automáticos passaram na segunda rodada (49 10/10 nos dois modos, cada mensagem uma
+vez; 53 com três quedas: Python assumiu, nada duplicado). Ficam **manuais pendentes do dono** a
+parte do Step 54 com `terminal_delivery_unknown` forçado (congelar o agente faz o Rust adiar, não
+perder a prova do envio) e, no Step 55, a transferência Claude → Codex (o backend isolado não vê a
+conta Codex real). Antes da rodada: revisão de `891900a4` (`ecc:python-reviewer`,
+`ecc:silent-failure-hunter`) e conserto em `82b27772` e no commit seguinte (só a abertura rebaixa
+queda do Rust para aviso, e só por `ConnectionError` com o processo dele já morto; `close` recusado só cala com o Rust morto; boot pergunta
+`sessao_existe` ao tmux); o roteiro deixou de contar os nomes de diário que saíram (`d6dbdc36`).
+A primeira rodada teve um `reopen_failed[RuntimeError]` intermitente no Step 52, não reproduzido
+em seis repetições; descrição e candidatas em `prova-real.md`.
 
 ## Achados da revisão (`ecc:architect`, sobre `800e7c47`)
 

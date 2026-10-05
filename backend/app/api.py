@@ -9800,16 +9800,24 @@ def _registered_in_allowed_repo(path: str) -> bool:
     return any(p == path or os.path.realpath(p) == real for p in worktrees.worktree_paths(main))
 
 
-@app.get("/api/worktrees", dependencies=[Depends(require_auth)])
-async def worktrees_list(repo: str | None = None, sizes: bool = True):
-    """`repo`: só as desse repositório; `sizes=false`: não agenda medir o espaço (menu de branch)."""
-    _no_guest()
+async def _worktree_inputs():
+    """Sessões, pastas dentro das raízes (vivas + com conversa nos últimos 30 dias) e raízes: o que
+    a lista de worktrees lê aqui e o hangar-server recebe por `/internal/worktrees/context`."""
     sessions = await asyncio.to_thread(registry.list)
     corte = time.time() - 30 * 86400
     folders = await asyncio.to_thread(list_folders)
     cwds = [s.cwd for s in sessions] + [f.cwd for f in folders if f.cwd and f.mtime >= corte]
     roots = allowed_roots()
-    allowed = [c for c in cwds if c and any(Path(os.path.realpath(c)).is_relative_to(r) for r in roots)]
+    allowed = await asyncio.to_thread(
+        lambda: [c for c in cwds if c and any(Path(os.path.realpath(c)).is_relative_to(r) for r in roots)])
+    return sessions, allowed, roots
+
+
+@app.get("/api/worktrees", dependencies=[Depends(require_auth)])
+async def worktrees_list(repo: str | None = None, sizes: bool = True):
+    """`repo`: só as desse repositório; `sizes=false`: não agenda medir o espaço (menu de branch)."""
+    _no_guest()
+    sessions, allowed, roots = await _worktree_inputs()
     if repo is not None:
         repo = await asyncio.to_thread(_allowed_repo, repo)
     return {"repos": await asyncio.to_thread(worktrees.list_all, allowed, sessions, roots, repo, sizes)}

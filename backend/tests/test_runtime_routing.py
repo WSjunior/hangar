@@ -771,3 +771,70 @@ def test_codex_headless_stays_python_while_rust_owns(birth, monkeypatch):
     asyncio.run(scenario())
     assert transport.kinds() == [] and owner.slot("c1").phase == runtime_coordinator.Phase.Python
     assert_legacy("c1")         # o cliente Python do Codex segue permitido
+
+
+def test_rust_dying_during_reopen_is_an_interruption_not_a_passage(birth, monkeypatch):
+    # Três quedas seguidas: o Rust novo morre no meio da reabertura. Isso é interrupção (o próximo
+    # Rust ou a retomada pelo Python decide), não adoção recusada nem fechamento sem confirmação.
+    import http.client
+    from app import diag
+    events = []
+    monkeypatch.setattr(diag, "registrar", lambda evento, nivel="ok", **campos: events.append((evento, nivel)))
+    owner, first, _ = _opened(birth)
+
+    class Dying(LockingTransport):
+        async def op(self, descriptor, command, operation_id, clock):
+            self.ops.append((command["kind"], descriptor))
+            if command["kind"] == "open":
+                raise http.client.RemoteDisconnected("Remote end closed connection without response")
+            raise ConnectionRefusedError("Rust fora do ar")
+
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("s1")
+        first.lease.close()
+        await owner.enter_pending()
+        await _enter(owner, Dying())
+    asyncio.run(scenario())
+    names = {evento for evento, _ in events}
+    assert "runtime.adoption_failed" not in names and "runtime.detach_unconfirmed" not in names
+    assert ("runtime.reopen_interrupted", "aviso") in events
+    assert "runtime.close_unconfirmed" not in names     # Rust morto que nem escuta não segura a trava
+
+
+@pytest.mark.parametrize("failure", [TimeoutError("timed out"), ConnectionResetError("handler caiu")])
+def test_live_rust_failing_reopen_stays_an_error(birth, monkeypatch, failure):
+    # Prazo estourado ou conexão derrubada com o Rust de pé não é queda: nenhum Rust novo vai
+    # reabrir a sessão. E o `close` recusado com o processo vivo também fica no diário.
+    from app import diag
+    events = []
+    monkeypatch.setattr(diag, "registrar", lambda evento, nivel="ok", **campos: events.append((evento, nivel)))
+    owner, first, _ = _opened(birth)
+
+    class Stuck(LockingTransport):
+        alive = True
+
+        async def op(self, descriptor, command, operation_id, clock):
+            self.ops.append((command["kind"], descriptor))
+            if command["kind"] == "open":
+                raise failure
+            raise ConnectionRefusedError("listener fechado")
+
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("s1")
+        first.lease.close()
+        await owner.enter_pending()
+        await _enter(owner, Stuck())
+    asyncio.run(scenario())
+    assert ("runtime.reopen_failed", "erro") in events
+    assert ("runtime.reopen_interrupted", "aviso") not in events
+    assert ("runtime.close_unconfirmed", "erro") in events
+
+
+def test_connection_error_outside_an_opening_is_not_a_rust_crash(monkeypatch):
+    from app import diag
+    events = []
+    monkeypatch.setattr(diag, "registrar", lambda evento, nivel="ok", **campos: events.append((evento, nivel)))
+    runtime_coordinator._registration_failed("runtime.recover_failed", "s1", ConnectionResetError("cano"))
+    assert events == [("runtime.recover_failed", "erro")]

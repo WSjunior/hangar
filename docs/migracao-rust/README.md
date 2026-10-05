@@ -1,6 +1,6 @@
 # Migração do backend para Rust — roteiro e estado
 
-Atualizado em 2026-10-03. Ponto de partida para cada parte nova: ler este arquivo, a análise
+Atualizado em 2026-10-04. Ponto de partida para cada parte nova: ler este arquivo, a análise
 inicial e a spec da parte 1. Tudo desta pasta vive na branch do PR #24 (`hangar-server-parte1`):
 um pull nela traz a documentação em qualquer máquina.
 
@@ -16,7 +16,7 @@ um pull nela traz a documentação em qualquer máquina.
 | `parte2c/` | Análise, desenho, planos, revisões e provas da 2C (com terminal no Rust) |
 | `parte3/` | Análise, spec e plano da parte 3 (custos e uso no Rust) |
 | `git-arquivos/` | Núcleo compartilhado de Git/arquivos, ponte privada, integração e evidências de validação |
-| `dono-unico/` | Inventário das passagens Python↔Rust com o Rust vivo, desenho do dono único e plano — aguardando aprovação |
+| `dono-unico/` | Inventário das passagens Python↔Rust com o Rust vivo, desenho do dono único, plano e o registro de cada Task — executado na `feat/rust-single-owner` (Tasks 1–10; falta a prova de uso real, Task 11) |
 | `parte2-descartada-lista-pi-kimi/` | Primeiro escopo da parte 2 (lista + Pi/Kimi/omp/orq), trocado pelo dono |
 | `pedidos/` | Pedidos enviados às sessões Codex e os achados de revisão da 2C |
 
@@ -36,7 +36,15 @@ trabalho da máquina de origem; nesta pasta os arquivos equivalentes são os da 
   partes migradas fica só de referência e sai na parte 7. Substitui a regra anterior ("3 tentativas
   + 1 e só aquela sessão vai para o Python"): o código de passagem entre os dois donos foi a origem
   da maioria dos defeitos de 04/10 (primeira mensagem sumindo, "sessão em transferência", entrega
-  marcada sem chegar, reserva circular de Git). Plano da mudança em `dono-unico/`.
+  marcada sem chegar, reserva circular de Git). Plano da mudança em `dono-unico/`; o que saiu está
+  em `docs/decisoes/superado.md`.
+- **Estado do dono único (04/10/2026, branch `feat/rust-single-owner`, contrato interno 17).** O
+  processo tem um modo só: `pending` (Rust esperado ou voltando de uma queda 1–2; operações esperam
+  até 30 s), `rust` ou `python` (sem binário, `CP_RUST_SERVER=0`, `--reload` ou desistência do
+  Supervisor). Sessão Claude sem terminal e com terminal nasce no Rust; a administração fecha e
+  reabre nele; o terminal empresta o teclado ao Python por uma operação; histórico, eventos,
+  Git/arquivos e a observação do terminal respondem erro com código em vez de repassar. Codex sem
+  terminal, Pi, Kimi, omp e orq seguem no Python (provedores não migrados).
 - **Contrato interno versionado à mão.** Mudou rota `/internal`, evento do `side-events` ou variável
   passada ao filho → subir `RUST_SERVER_PROTOCOL` (Python) e `INTERNAL_PROTOCOL` (Rust) juntos.
   O `versao` do snapshot do `hangar-cano` acompanha o `VERSAO` do `cano.py`.
@@ -49,7 +57,7 @@ trabalho da máquina de origem; nesta pasta os arquivos equivalentes são os da 
 |---|---|---|
 | 1 | Conversas do Claude e do Codex (`/history` e `/events`) + `hangar-cano` + tipos compartilhados (`crates/hangar-api`) | **Feita, no PR #24.** Rodando na máquina do dono pelo canal de testes. Falta teste no uso real e VM Windows |
 | 2 | Sessões do Claude e do Codex, com e sem terminal — Pi, Kimi, omp, orq, lista, quadro e canvas ficam para depois (dono não usa agora) | Dividida em 2A, 2B, 2C e 2D. **2A** (fim da travada da prévia, no Python): feita, no PR. **2C** (com terminal: tmux `-C` no Rust, contrato versão 3): feita, no PR; testes verdes em Linux, Windows e macOS desde `16f45cad` (no Windows a 2C fica desligada de propósito e o Python atende). **2B** (sem terminal no Rust: cano, fila e controle; contrato interno versão 7, cano versão 2): feita, no PR (`75f4b003`); CI verde em Linux, Windows e macOS. Falta uso real com o dono, teste opcional do Codex, medições e interoperação Python/Rust no Windows. Plano em `parte2b/`. Fila sem terminal no formato v2 (contrato 8, `fix-queue-compaction`): o arquivo v1 é podado e regravado no lugar na primeira abertura, sem cópia; voltar o app para uma versão de contrato 7 não é suportado para a fila das sessões sem terminal. **2D** (envio ao Claude com terminal; contrato versão 10 na junção): em planejamento e execução na sessão Codex `rust-parte2d`, branch `hangar-server-parte2d`, documentos em `parte2d/` |
-| 3 | Custos e uso: `/api/costs`, `/api/uso`, `/api/cotacao` e custo de sessão Codex no Rust com índice SQLite próprio; cotas e stats ficam no Python | Feita na branch `hangar-server-parte3` (contrato 8) e juntada ao dono único em `feat/parte3-custos-rust`, contrato **18**: falha vira 503 com código, sem passagem ao Python. Paridade Python/Rust comprovada; coleta fria 3,270 s, incremental 0,038 s e pico completo 93 MiB. Falta uso real com o dono. [Medidas e isolamento](../decisoes/plataforma.md#custos-e-uso-no-hangar-server) |
+| 3 | Custos e uso: `/api/costs`, `/api/uso`, `/api/cotacao` e custo de sessão Codex no Rust com índice SQLite próprio; cotas e stats ficam no Python | Feita na branch `hangar-server-parte3` (contrato 8) e juntada ao dono único em `feat/parte3-custos-rust`, contrato **20** (dono único + worktrees no Rust, 19, entraram antes): falha vira 503 com código, sem passagem ao Python. Paridade Python/Rust comprovada; coleta fria 3,270 s, incremental 0,038 s e pico completo 93 MiB. Falta uso real com o dono. [Medidas e isolamento](../decisoes/plataforma.md#custos-e-uso-no-hangar-server) |
 | 4 | Estado e prévia (tmux em modo controle, cópia da tela por sessão) + terminal real (`portable-pty`) | — |
 | 5 | Adaptadores dos provedores e envio de mensagens (mais mudam com as CLIs; tipos gerados do schema do app-server do Codex) | — |
 | 6 | Resto da API: contas, convidados/8766, pareamento, MCP (`rmcp`), push (`web-push`), atualização | — |

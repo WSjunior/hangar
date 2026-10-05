@@ -44,6 +44,7 @@ pub async fn fixture(root: &std::path::Path, context_ok: bool) -> Fixture {
     let hits = Arc::new(AtomicUsize::new(0));
     let diags: Diags = Arc::default();
     let context = json!({"roots":[root],"sessions":[{"name":"fixture","cwd":root}],"session":{"name":"fixture","cwd":root,"jsonl":root.join("fixture.jsonl")}});
+    let worktrees = json!({"roots":[root],"cwds":[root.join("repo")],"sessions":[{"name":"fixture","cwd":root.join("repo-wt")}],"project_bases":[]});
     let app = Router::new()
         .route(
             "/internal/workspace/context",
@@ -62,6 +63,20 @@ pub async fn fixture(root: &std::path::Path, context_ok: bool) -> Fixture {
                     }
                 },
             ),
+        )
+        .route(
+            "/internal/worktrees/context",
+            get(move || {
+                let worktrees = worktrees.clone();
+                async move {
+                    let status = if context_ok { 200 } else { 500 };
+                    (
+                        axum::http::StatusCode::from_u16(status).unwrap(),
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        worktrees.to_string(),
+                    )
+                }
+            }),
         )
         .route(
             "/internal/diag",
