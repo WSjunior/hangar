@@ -220,6 +220,8 @@ enum Payload {
     PluginPressed(Result<Value, Failure>),
     // Troca de aba de mod: só a falha interessa; a aba nova chega pelo `shown_id`.
     PluginShown(Result<Value, Failure>),
+    // Digitação num campo de mod: só a falha interessa.
+    PluginInput(Result<Value, Failure>),
     // Lista de outra máquina: a geração dos SSE de lista, a chave do servidor e o que chegou.
     Remote(u64, String, servers::RemoteUpdate),
     HeadlessPlan(SessionKey, controls::PlanOutcome),
@@ -495,6 +497,8 @@ pub struct Hangar {
     plugin_local_tab: Option<String>,
     /// Trechos dos mods (escopo de hover ou cartão absoluto) com o ponteiro em cima: lugar e caminho na árvore.
     plugin_hovered: HashSet<String>,
+    /// Campos (`Input`) dos mods, por `plugin_ui::field_id`: nascem quando a árvore os traz e saem com ela.
+    plugin_fields: HashMap<String, crate::plugin_ui::Field>,
     /// Últimos ids de aviso de mod (SSE `plugin_toast`) já mostrados; só os recentes voltam na reconexão.
     plugin_toasts_seen: std::collections::VecDeque<String>,
     /// Avisos de mod na tela, do mais antigo ao mais novo.
@@ -806,7 +810,7 @@ impl Hangar {
             attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
             suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
-            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_local_tab: None, plugin_hovered: HashSet::new(), plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
+            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_local_tab: None, plugin_hovered: HashSet::new(), plugin_fields: HashMap::new(), plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
             settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
@@ -1219,6 +1223,7 @@ impl Hangar {
         self.plugin_source = None;
         self.plugin_local_tab = None;
         self.plugin_hovered.clear();
+        self.plugin_fields.clear();
         self.recent = None;
         self.command_panel = false;
         // Os menus são da tela sem sessão: sem isto, o Esc seguinte seria gasto num deles, já fora da tela.
@@ -1623,6 +1628,10 @@ impl Hangar {
                 }
                 return;
             }
+            Payload::PluginInput(result) => {
+                if let Err(error) = result { window.push_notification(Notification::warning(Self::press_failure(&error)), cx); }
+                return;
+            }
             Payload::Sidebar(reply) => {
                 // Só o silenciar da máquina da conversa aberta muda as preferências que os avisos desta janela leem.
                 if matches!(&reply, sidebar::SidebarReply::Wrote(t, sidebar::Write::Mute(_), _) if t.server == self.open_server()) { self.load_notification_preferences(); }
@@ -1960,6 +1969,7 @@ impl Hangar {
                 self.plugin_source = None;
                 self.plugin_local_tab = None;
                 self.plugin_hovered.clear();
+                self.plugin_fields.clear();
                 if let Some(task) = self.history_task.take() { task.abort(); }
                 self.chat = Chat::default();
                 self.turn_seen = None;
@@ -5643,15 +5653,69 @@ impl Hangar {
         })
     }
 
-    /// O que a faixa e os painéis dos mods precisam do app.
+    /// Os campos dos mods acompanham a árvore. O valor desenhado só entra com o campo fora de foco, para um redesenho
+    /// atrasado não apagar o que se digita.
+    fn sync_plugin_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let wanted: Vec<(String, String, crate::plugin_ui::FieldSpec)> =
+            std::iter::once((crate::plugin_ui::BAND_SITE.to_owned(), &self.plugin_band))
+                .chain(self.plugin_panes.iter().map(|p| (p["id"].as_str().unwrap_or("").to_owned(), &p["tree"])))
+                .flat_map(|(site, tree)| crate::plugin_ui::fields(tree).into_iter()
+                    .map(move |f| (crate::plugin_ui::field_id(&site, &f.key), site.clone(), f)))
+                .collect();
+        self.plugin_fields.retain(|id, _| wanted.iter().any(|(w, _, _)| w == id));
+        for (id, site, spec) in wanted {
+            if let Some(field) = self.plugin_fields.get_mut(&id) {
+                if field.drawn != spec.value && !field.state.read(cx).focus_handle(cx).is_focused(window) {
+                    let value = spec.value.clone();
+                    field.state.update(cx, |input, cx| input.set_value(value, window, cx));
+                }
+                field.drawn = spec.value;
+                continue;
+            }
+            let state = cx.new(|cx| InputState::new(window, cx).placeholder(spec.placeholder.clone()).default_value(spec.value.clone()));
+            let key = spec.key.clone();
+            let changes = cx.subscribe_in(&state, window, move |this, input, event: &InputEvent, _, cx| {
+                let Some(kind) = crate::plugin_ui::input_kind(event) else { return };
+                let value = input.read(cx).value().to_string();
+                this.input_plugin(&site, &key, kind, value);
+            });
+            self.plugin_fields.insert(id, crate::plugin_ui::Field { state, drawn: spec.value, _changes: changes });
+        }
+    }
+
+    /// Digitação num `Input` de mod, só na sessão sem terminal e fora do só leitura. Todo `change` vai: o `set_value`
+    /// que repõe o valor desenhado não emite `Change`, então o que chega aqui é a pessoa digitando. Sem `notify`: nada do
+    /// app muda, e cada tecla redesenharia a janela inteira; o campo se redesenha sozinho e o mod responde por evento.
+    fn input_plugin(&mut self, site: &str, key: &str, kind: &'static str, value: String) {
+        let read_only = self.selected.as_ref().is_some_and(|s| s.read_only());
+        let Some(body) = crate::plugin_ui::input_request(self.plugin_source, read_only, site, key, kind, &value) else { return };
+        self.spawn_plugin("input", body, Payload::PluginInput);
+    }
+
+    /// O rótulo de envio do `Input`: manda o que está no campo.
+    fn submit_plugin_field(&mut self, site: &str, key: &str, cx: &mut Context<Self>) {
+        let Some(value) = self.plugin_fields.get(&crate::plugin_ui::field_id(site, key)).map(|f| f.state.read(cx).value().to_string()) else { return };
+        self.input_plugin(site, key, "submit", value);
+    }
+
+    /// O que a faixa e os painéis dos mods precisam do app. A digitação só existe na sessão sem terminal e fora do só
+    /// leitura; nas outras o campo aparece desabilitado.
     fn plugin_view(&self, cx: &mut Context<Self>) -> crate::plugin_ui::View<'_> {
-        let view = cx.entity().downgrade();
+        let entity = cx.entity().downgrade();
+        let shown = entity.clone();
         let show: crate::plugin_ui::Show = std::rc::Rc::new(move |site: &str, _: &mut Window, cx: &mut App| {
             let site = site.to_owned();
-            let _ = view.update(cx, |this, cx| this.show_plugin(site, cx));
+            let _ = shown.update(cx, |this, cx| this.show_plugin(site, cx));
+        });
+        let typing = crate::plugin_ui::accepts_typing(self.plugin_source, self.selected.as_ref().is_some_and(|s| s.read_only()));
+        let submit = typing.then(|| -> crate::plugin_ui::Submit {
+            std::rc::Rc::new(move |site: &str, key: &str, _: &mut Window, cx: &mut App| {
+                let (site, key) = (site.to_owned(), key.to_owned());
+                let _ = entity.update(cx, |this, cx| this.submit_plugin_field(&site, &key, cx));
+            })
         });
         crate::plugin_ui::View { press: self.plugin_press(cx), show: Some(show), columns: self.plugin_columns,
-            hover: Some(self.plugin_hover(cx)), hovered: &self.plugin_hovered }
+            hover: Some(self.plugin_hover(cx)), hovered: &self.plugin_hovered, fields: &self.plugin_fields, submit }
     }
 
     /// Troca de aba: seguindo o `shown_id`, a aba só muda quando o novo chega; sem ele (servidor antigo), a troca é
@@ -5710,6 +5774,7 @@ impl Hangar {
     fn render_bottom_area(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if self.new_chat_screen() && self.reopen.is_some() { return self.render_reopen(window, cx); }
         if self.new_chat_screen() { return self.render_new_chat(window, cx); }
+        self.sync_plugin_fields(window, cx);
         let selected_key = self.selected_key();
         let sending = selected_key.as_ref().is_some_and(|key| self.delivery.pending(key));
         let stopping = selected_key.as_ref().is_some_and(|key| self.stopping.contains(key));
