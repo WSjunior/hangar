@@ -78,7 +78,7 @@ mod stats;
 mod search;
 mod topbar;
 
-actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, FindProjectFile, FindProjectText, NextSession, PreviousSession, ToggleDictation, NewChat, OpenCosts, OpenSearch,
+actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, FindProjectFile, FindProjectText, NextSession, PreviousSession, ToggleDictation, NewChat, CloseSession, OpenCosts, OpenSearch,
     ToggleSidebar, CyclePermission, OpenWorktrees]);
 
 const LIVE_THINKING: &str = "__thinking__";
@@ -5857,6 +5857,7 @@ impl Render for Hangar {
             .on_action(cx.listener(|this, _: &NextSession, window, cx| this.step_session(1, window, cx)))
             .on_action(cx.listener(|this, _: &PreviousSession, window, cx| this.step_session(-1, window, cx)))
             .on_action(cx.listener(|this, _: &NewChat, window, cx| this.go_home(window, cx)))
+            .on_action(cx.listener(|this, _: &CloseSession, window, cx| this.close_selected(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| if !this.connection_dialog { this.toggle_rail(cx) }))
             .on_action(cx.listener(|this, _: &ToggleDictation, window, cx| this.toggle_dictation(window, cx)))
             .on_action(cx.listener(|this, _: &CopyLastReply, _, cx| {

@@ -490,10 +490,15 @@ impl Hangar {
         order
     }
 
+    /// Atalhos que agem na sessão aberta ficam parados com diálogo, Configurações ou nome em edição. Com o nome em edição a
+    /// tecla é do campo: trocar ou fechar a sessão deixaria o campo aberto numa linha que não é a aberta.
+    fn session_keys_blocked(&self, window: &mut Window, cx: &mut App) -> bool {
+        window.has_active_dialog(cx) || self.connection_dialog || (self.settings.is_some() && !self.settings_live())
+            || self.sidebar.editing.is_some()
+    }
+
     pub(super) fn step_session(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
-        // Com o nome em edição a seta é do campo: trocar de sessão deixaria o campo aberto numa linha que não é a aberta.
-        if window.has_active_dialog(cx) || self.connection_dialog || (self.settings.is_some() && !self.settings_live())
-            || self.sidebar.editing.is_some() { return; }
+        if self.session_keys_blocked(window, cx) { return; }
         let order = self.visible_order(cx);
         if order.is_empty() { return; }
         let current = self.selected_target().and_then(|t| order.iter().position(|o| *o == t));
@@ -503,6 +508,20 @@ impl Hangar {
             None => order.len() - 1,
         };
         self.select_target(&order[next], window, cx);
+    }
+
+    /// O "Fechar" do menu da linha: no convite, parar de acompanhar (nunca o servidor ativo); senão, a confirmação.
+    fn close_target(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
+        if self.invite_target(&target) { self.stop_following(&target.server, window, cx) } else { self.confirm_delete(target, window, cx) }
+    }
+
+    /// Ctrl+W: o "Fechar" do menu para a sessão aberta.
+    pub(super) fn close_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session_keys_blocked(window, cx) { return; }
+        let Some(target) = self.selected_target() else { return };
+        // Orquestrador e sessão do par não têm "Fechar" no menu.
+        if self.target_session(&target).is_none_or(|s| s.orq() || s.read_only()) { return; }
+        self.close_target(target, window, cx);
     }
 
     pub(super) fn set_group(&mut self, project: bool, cx: &mut Context<Self>) {
@@ -1275,14 +1294,11 @@ fn fill_menu(menu: PopupMenu, hangar: &WeakEntity<Hangar>, target: &Target, sess
     }
     // No convite o item de fechar vira "Parar de acompanhar": sai só deste aparelho, nunca fecha a sessão do dono. Com o convite
     // como servidor ativo ele não sai daqui (a troca de ativo é das configurações).
-    let close = if invite {
-        let (hangar, key) = (hangar.clone(), target.server.clone());
-        PopupMenuItem::element(|_, _| div().text_color(theme::danger()).child(tr_shared("convite_parar", &[]))).disabled(access.active)
-            .on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| this.stop_following(&key, window, cx)); })
-    } else {
+    let label = if invite { tr_shared("convite_parar", &[]) } else { tr("sidebar_close") };
+    let close = {
         let (hangar, target) = (hangar.clone(), target.clone());
-        PopupMenuItem::element(|_, _| div().text_color(theme::danger()).child(tr("sidebar_close")))
-            .on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| this.confirm_delete(target.clone(), window, cx)); })
+        PopupMenuItem::element(move |_, _| div().text_color(theme::danger()).child(label.clone())).disabled(invite && access.active)
+            .on_click(move |_, window, cx| { let _ = hangar.update(cx, |this, cx| this.close_target(target.clone(), window, cx)); })
     };
     let git = has_git(session);
     let chain_label = match &session.then_target {

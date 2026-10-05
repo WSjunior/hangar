@@ -32,6 +32,12 @@ pub(super) struct BrowserPanel {
     page: model::PageState,
     /// Endereço recusado, mostrado embaixo da barra.
     invalid: Option<String>,
+    /// Status da importação do login do Chrome, mostrado embaixo da barra.
+    #[cfg(not(target_os = "macos"))]
+    cookies_status: Option<String>,
+    /// URL cujo login já foi preenchido com as senhas salvas do Chrome, para não repetir a cada evento da mesma página.
+    #[cfg(target_os = "linux")]
+    last_fill: Option<String>,
     focus: FocusHandle,
     /// Origem da página no último desenho: o ponteiro chega ao motor relativo a ela.
     origin: Rc<Cell<Point<Pixels>>>,
@@ -61,7 +67,7 @@ impl BrowserPanel {
             cx.on_blur(&focus, window, |this, _, _| if let Some(engine) = this.engine() { engine.focus(false) }),
         ];
         Self { key, #[cfg(not(target_os = "macos"))] controller: None, #[cfg(not(target_os = "macos"))] cdp: None,
-            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, focus,
+            #[cfg(not(target_os = "macos"))] relay: Default::default(), #[cfg(not(target_os = "macos"))] viewer: Rc::default(), engine: None, starting: None, _start: None, events, address, page: model::PageState::default(), invalid: None, #[cfg(not(target_os = "macos"))] cookies_status: None, #[cfg(target_os = "linux")] last_fill: None, focus,
             origin: Rc::default(), shown: false, _drain: drain, _subscriptions: subscriptions }
     }
 
@@ -77,8 +83,56 @@ impl BrowserPanel {
             self.page = page;
             #[cfg(not(target_os = "macos"))]
             crate::browser::server::write_sidecar(&self.key, self.page.url.as_deref().unwrap_or(""), &self.page.title);
+            #[cfg(target_os = "linux")]
+            self.maybe_autofill(cx);
         }
         cx.notify();
+    }
+
+    /// Ao terminar de carregar uma página cujo domínio tem senha salva no Chrome, preenche o login. Uma vez por URL (o
+    /// evento de estado repete em SPA). A leitura e a decifração rodam em thread de fundo; a senha em claro só vive aqui
+    /// e no campo da página.
+    #[cfg(target_os = "linux")]
+    fn maybe_autofill(&mut self, cx: &mut Context<Self>) {
+        if self.page.loading {
+            return;
+        }
+        let Some(url) = self.page.url.clone() else { return };
+        if self.last_fill.as_deref() == Some(url.as_str()) {
+            return;
+        }
+        let Ok(parsed) = url::Url::parse(&url) else { return };
+        let Some(host) = parsed.host_str().map(str::to_owned) else { return };
+        let Some(cdp) = self.cdp.clone() else { return };
+        self.last_fill = Some(url);
+        let fetch = cx.background_executor().spawn(async move { crate::browser::chrome_import::credentials_for(&host) });
+        cx.spawn(async move |_, cx| {
+            let Some((user, pass)) = fetch.await.into_iter().next() else { return };
+            let js = crate::browser::chrome_import::inject_login_js(&user, &pass);
+            let params = serde_json::json!({"expression": js, "returnByValue": true});
+            // SPA desenha o formulário depois do carregamento: tenta algumas vezes, para na que achou o campo de senha.
+            for wait in [0u64, 1500, 4000] {
+                if wait > 0 {
+                    cx.background_executor().timer(std::time::Duration::from_millis(wait)).await;
+                }
+                match cdp.call("Runtime.evaluate", params.clone()).await {
+                    Ok(v) => {
+                        // Exceção no script (ou página morta) não é "sem campo de senha": loga e para de tentar.
+                        if let Some(detail) = v.get("exceptionDetails") {
+                            eprintln!("[nav] autofill: exceção no script da página: {detail}");
+                            break;
+                        }
+                        if v["result"]["value"].as_bool() == Some(true) {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[nav] autofill: Runtime.evaluate falhou: {e}");
+                        break;
+                    }
+                }
+            }
+        }).detach();
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -240,6 +294,91 @@ impl BrowserPanel {
         cx.notify();
     }
 
+    /// Traz o login do Chrome real do usuário (CDP) para o navegador embutido, SÓ no clique e TUDO de uma vez: cada
+    /// conexão ao CDP faz o Chrome perguntar "Permitir a depuração remota?" na tela da pessoa.
+    #[cfg(not(target_os = "macos"))]
+    fn import_chrome_login(&mut self, cx: &mut Context<Self>) {
+        use crate::browser::chrome_import;
+        let Some(cdp) = self.cdp.clone() else {
+            self.cookies_status = Some(tr("browser_cookies_starting"));
+            cx.notify();
+            return;
+        };
+        self.cookies_status = Some(tr("browser_cookies_fetching"));
+        cx.notify();
+        // Plano B pra Chromium/Brave antigos: porta fixa por variável de ambiente.
+        let port = std::env::var("HANGAR_CHROME_CDP_PORT").ok().and_then(|v| v.trim().parse().ok());
+        let fetch = cx.background_executor().spawn(async move { chrome_import::fetch_cookies(port) });
+        cx.spawn(async move |this, cx| {
+            let result = fetch.await;
+            let _ = this.update(cx, |this, cx| this.apply_cookies(result, cdp, cx));
+        }).detach();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn apply_cookies(&mut self, result: Result<Vec<serde_json::Value>, crate::browser::chrome_import::ImportError>,
+        cdp: Rc<crate::browser::cdp::Cdp>, cx: &mut Context<Self>) {
+        use crate::browser::chrome_import::ImportError;
+        let cookies = match result {
+            Ok(cookies) => cookies,
+            Err(e @ ImportError::ChromeClosed) => {
+                // Sem depuração ligada, o clique já abre a página do toggle no Chrome — um passo, não dois.
+                self.cookies_status = Some(tr(e.status_key()));
+                self.activate_chrome(cx);
+                cx.notify();
+                return;
+            }
+            Err(e) => {
+                self.cookies_status = Some(tr(e.status_key()).replace("{e}", e.detail()));
+                cx.notify();
+                return;
+            }
+        };
+        // 0 cookies não é sucesso: a pessoa vê "nenhum cookie", não "0 trazidos" parecendo que deu certo.
+        if cookies.is_empty() {
+            self.cookies_status = Some(tr("browser_cookies_none"));
+            cx.notify();
+            return;
+        }
+        let count = cookies.len();
+        let set = cdp.call("Storage.setCookies", serde_json::json!({"cookies": cookies}));
+        cx.spawn(async move |this, cx| {
+            let reply = set.await;
+            let _ = this.update(cx, |this, cx| {
+                match reply {
+                    Ok(_) => {
+                        let done = tr("browser_cookies_ok").replace("{n}", &count.to_string());
+                        this.cookies_status = Some(done.clone());
+                        if let Some(engine) = this.engine() { engine.reload(); }
+                        // Sucesso é aviso, não estado: some sozinho. Erro fica até a próxima tentativa.
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(std::time::Duration::from_secs(6)).await;
+                            let _ = this.update(cx, |this, cx| {
+                                if this.cookies_status.as_deref() == Some(done.as_str()) { this.cookies_status = None; cx.notify(); }
+                            });
+                        }).detach();
+                    }
+                    Err(e) => this.cookies_status = Some(tr("browser_cookies_error").replace("{e}", &e)),
+                }
+                cx.notify();
+            });
+        }).detach();
+    }
+
+    /// Abre `chrome://inspect/#remote-debugging` no Chrome do usuário e copia o endereço: o Chrome em execução recusa
+    /// `chrome://` vindo da linha de comando, então a instrução manda colar na barra.
+    #[cfg(not(target_os = "macos"))]
+    fn activate_chrome(&mut self, cx: &mut Context<Self>) {
+        use crate::browser::chrome_import;
+        cx.write_to_clipboard(ClipboardItem::new_string(chrome_import::ACTIVATE_PAGE.to_owned()));
+        self.cookies_status = Some(tr(if chrome_import::open_remote_debug_page() {
+            "browser_cookies_activate"
+        } else {
+            "browser_cookies_no_chrome"
+        }));
+        cx.notify();
+    }
+
     /// Clique na GPUI com a página nativa segurando o foco do sistema: sem isto o teclado (Esc, atalhos) seguiria
     /// indo para a página.
     pub(super) fn release_focus(&self) {
@@ -341,16 +480,31 @@ impl Render for BrowserPanel {
             .capture_action(cx.listener(|this, _: &Escape, window, cx| { cx.stop_propagation(); this.restore_address(window, cx); }))
             .child(Input::new(&self.address).id("browser-address").small().aria_label(tr("browser_address"))
                 .when(self.page.loading, |el| el.suffix(chrome::Spinner::new("browser-loading", IconName::LoaderCircle, px(12.), theme::muted()))));
-        let toolbar = div().id("browser-toolbar").flex_shrink_0().flex().items_center().gap_1().px_2().py(px(6.))
+        #[allow(unused_mut)]
+        let mut toolbar = div().id("browser-toolbar").flex_shrink_0().flex().items_center().gap_1().px_2().py(px(6.))
             .border_b_1().border_color(theme::border())
             .child(back).child(forward).child(reload).child(address);
+        // Botão que traz o login do Chrome real do usuário (só onde o motor fala CDP).
+        #[cfg(not(target_os = "macos"))]
+        {
+            toolbar = toolbar.child(chrome::icon_button("browser-cookies", IconName::Key, tr("browser_cookies_bring"), cx)
+                .disabled(!ready)
+                .on_click(cx.listener(|this, _, _, cx| this.import_chrome_login(cx))));
+        }
         // Com a página na tela, a falha dela fica numa linha; sem página, `render_page` a mostra no lugar dela.
         let notice = self.invalid.clone().or_else(|| self.page.error.clone().filter(|_| ready && self.page.url.is_some()));
-        div().size_full().flex().flex_col()
+        #[allow(unused_mut)]
+        let mut root = div().size_full().flex().flex_col()
             .child(toolbar)
             .when_some(notice, |el, text| el.child(div().id("browser-notice").flex_shrink_0().px_3().py(px(6.)).role(Role::Alert)
-                .text_size(px(11.)).text_color(theme::danger()).whitespace_normal().child(text)))
-            .child(self.render_page(cx))
+                .text_size(px(11.)).text_color(theme::danger()).whitespace_normal().child(text)));
+        #[cfg(not(target_os = "macos"))]
+        {
+            root = root.when_some(self.cookies_status.clone(), |el, text| el.child(div().id("browser-cookies-status")
+                .flex_shrink_0().px_3().py(px(6.)).role(Role::Status)
+                .text_size(px(11.)).text_color(theme::muted()).whitespace_normal().child(text)));
+        }
+        root.child(self.render_page(cx))
     }
 }
 

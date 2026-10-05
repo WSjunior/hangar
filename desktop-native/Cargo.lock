@@ -3533,9 +3533,11 @@ dependencies = [
 name = "hangar-native"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "alacritty_terminal",
  "async-channel",
  "base64 0.22.1",
+ "cbc",
  "chrono",
  "cpal",
  "embed-resource",
