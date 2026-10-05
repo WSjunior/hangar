@@ -1,8 +1,39 @@
-# Estado da migração para Rust (05/10/2026, ~05:00) — para retomar
+# Estado da migração para Rust (05/10/2026) — para retomar
 
 Leia este arquivo e `docs/migracao-rust/README.md`. Responda ao dono (Jefferson) em pt-BR, curto,
 uma pergunta por vez, opções letradas. Branch da migração: `hangar-server-parte1` (PR #24),
 pasta de coordenação `/home/jefferson/pessoal/hangar/.claude/worktrees/hangar-server-parte1`.
+
+## Atualização da tarde (05/10, ~18:30) — leia primeiro
+
+`hangar-server-parte1` em `cd1e36ca2`, em dia com a `main` (até o PR #59/#60). Entraram desde a manhã:
+- **Windows:** o escritor Rust lê o composer com `capture-pane -e` também no psmux (a sugestão
+  esmaecida não conta como rascunho); entrada parada mostra o motivo depois de 30 s
+  (`terminal_input_*`); a passagem do boot espera o leitor da fila; despacho interrompido antes de
+  escrever volta à fila no restart (`staged`/`MarkWriting`). Prova na VM `delphi-02` ok.
+- **Rascunho do terminal (decisão do dono: guardar e devolver):** o escritor usa o Ctrl+S nativo do
+  Claude Code para guardar o rascunho e o envio o devolve. Não provado na VM (psmux + Ctrl+S); o
+  Python de reserva ainda apaga com C-u.
+- **App nativo segue o canal de testes:** `native.yml` publica `native-<branch>`; o `update.rs` lê o
+  canal do backend local; o Sobre mostra "Canal de testes: <branch>". Bootstrap único numa máquina
+  antiga: `HANGAR_NATIVE_UPDATE_URL=.../native-hangar-server-parte1 scripts/install-native.sh --forcar`
+  (Windows: `install-native.ps1 -Forcar`).
+- **PR #54 adaptado** (reabrir em bypass pelo close/open do Rust); #55–#60 juntados.
+- **CI:** a "aceleração" (`f6db33ea6`) foi **revertida inteira** (`cd1e36ca2`) a pedido do dono: ela
+  tirava o Windows da release quando o teste do Windows falhava. Regra: em CI/instalação só o pedido
+  literal; mudar o que é publicado exige pergunta. Hoje o GitHub cancelou jobs por falta de runner
+  ("not acquired by Runner") — repetir, não é erro nosso.
+- **Rafael (Windows, `C:\Users\Rafael\hangar`):** sem Rust porque a release do canal ficou sem
+  Windows; a release já voltou a ter linux+windows (`2c2ecc20c`). Falta ele usar o Atualizar e
+  conferir `Invoke-RestMethod http://127.0.0.1:8765/__hangar_server/health`. O backend dele não roda
+  como a tarefa agendada (o `Restart-HangarTask` diz porta ocupada).
+
+**Em andamento:** sessão `lista-org` coordena as **Fases 0–B (Tasks 1–18) da lista de sessões +
+estado no Rust** (plano aprovado, opção A; Fase C junto da parte 4) na branch
+`feat/session-list-state`, com sessões filhas por lote. Task 1 = conserto do Supervisor
+(`refresh_members` varre ~560 processos 4×/s com fsync: ~4% de CPU à toa). A Task 15 (sombra no canal
+por 2 dias) é a única que vai à `hangar-server-parte1` antes da troca; 16–18 só depois, com o dono
+avisado. Plano: `docs/migracao-rust/lista-estado/`.
 
 ## Onde está (`hangar-server-parte1` em `5cc4d2af6`)
 
