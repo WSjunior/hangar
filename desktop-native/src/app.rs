@@ -5107,18 +5107,13 @@ fn save_connection(address: &str, token: &str, servers: &[servers::ServerEntry])
     std::fs::rename(&tmp, &path)
 }
 
-/// Conversa mínima que fica ao lado de um painel de mod ancorado.
-const MIN_CONVERSATION_BESIDE_PANE: f32 = 420.;
+/// Fração da altura da janela que um painel de mod acima da faixa pode ocupar.
+const PLUGIN_PANE_MAX_SHARE: f32 = 0.45;
 
-/// Largura natural de um painel de mod: as colunas que o terminal deu a ele, mais a moldura.
-fn plugin_pane_width(pane: &Value) -> f32 {
-    pane["columns"].as_f64().map(|c| c as f32 * crate::plugin_ui::CELL_W).unwrap_or(420.) + 20.
-}
-
-/// Como o terminal, que só ancora o painel com largura de sobra: ao lado da conversa quando cabem os
-/// dois (`free` é a largura entre a lista e o painel lateral), senão acima do composer.
-fn plugin_pane_docks(pane: &Value, free: f32) -> bool {
-    crate::plugin_ui::is_dock(pane) && free - plugin_pane_width(pane) >= MIN_CONVERSATION_BESIDE_PANE
+/// Falha do clique num botão de mod: a recusa do backend (409) diz o motivo dela; sem resposta ou 5xx não é entrega de
+/// mensagem, e a frase de reenviar enganaria.
+fn plugin_press_failure(error: &Failure) -> Option<String> {
+    error.status.is_none_or(|status| status >= 500).then(|| tr("plugin_press_failed"))
 }
 
 fn select_snapshot(state: &SessionState) -> String { json!([state.question, state.options]).to_string() }
@@ -5440,21 +5435,7 @@ impl Hangar {
                 }
             }
         } else { content = content.child(self.render_new_chat(window, cx)); }
-        // Painel de mod ancorado: coluna à direita da conversa, como o terminal o põe.
-        let readable = self.selected.as_ref().is_some_and(|s| s.readable());
-        let free = self.plugin_pane_room(window);
-        let press = self.plugin_press(cx);
-        let dock: Vec<AnyElement> = self.plugin_panes.iter().filter(|p| readable && plugin_pane_docks(p, free))
-            .map(|p| div().h_full().flex_shrink_0().w(px(plugin_pane_width(p))).p_2().flex().flex_col()
-                .child(crate::plugin_ui::pane(p, press.clone())).into_any_element())
-            .collect();
-        if dock.is_empty() { return content.into_any_element(); }
-        div().size_full().flex().flex_row().child(content.flex_1().min_w_0()).children(dock).into_any_element()
-    }
-
-    /// Largura que sobra para a conversa e um painel de mod ancorado, entre a lista e o painel lateral.
-    fn plugin_pane_room(&self, window: &Window) -> f32 {
-        f32::from(window.viewport_size().width) - self.nav_width() - self.side_width(window).unwrap_or(0.)
+        content.into_any_element()
     }
 
     /// Quem atende o clique num botão de mod; sessão só leitura deixa os botões como rótulo.
@@ -5487,7 +5468,7 @@ impl Hangar {
                 }
                 if let Some(url) = crate::plugin_ui::safe_href(&reply["opened"]) { cx.open_url(&url); }
             }
-            Err(error) => window.push_notification(Notification::warning(Self::failure(&error)), cx),
+            Err(error) => window.push_notification(Notification::warning(plugin_press_failure(&error).unwrap_or_else(|| Self::failure(&error))), cx),
         }
     }
 
@@ -5551,9 +5532,12 @@ impl Hangar {
             .when_some(delivery_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
             .when_some(stop_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
             .children(readable.then(|| {
-                let (free, press) = (self.plugin_pane_room(window), self.plugin_press(cx));
-                let inline = self.plugin_panes.iter().filter(|p| !plugin_pane_docks(p, free))
-                    .map(|p| in_column(crate::plugin_ui::pane(p, press.clone()))).collect::<Vec<_>>();
+                let press = self.plugin_press(cx);
+                // Painel de mod fica acima da faixa, como o terminal o abre, em qualquer largura; a altura tem teto para o
+                // painel comprido rolar por dentro em vez de empurrar a conversa para fora.
+                let tallest = f32::from(window.viewport_size().height) * PLUGIN_PANE_MAX_SHARE;
+                let inline = self.plugin_panes.iter()
+                    .map(|p| in_column(crate::plugin_ui::pane(p, press.clone(), tallest))).collect::<Vec<_>>();
                 inline.into_iter().chain(crate::plugin_ui::band(&self.plugin_band, press).map(in_column))
             }).into_iter().flatten())
             .map(|el| match orq {
@@ -5930,6 +5914,15 @@ mod tests {
     use super::{message_card, preview_step, safe_markdown, stream_motion, working_tokens, working_verb};
     use crate::{api::dto::ChatEvent, cards::Card, i18n::tr};
     use std::{collections::HashSet, time::Duration};
+
+    #[test]
+    fn mod_click_failure_is_not_a_message_delivery() {
+        use super::{plugin_press_failure, Failure};
+        let failure = |status| Failure { status, detail: "x".into(), retry_after: None, uncertain: true };
+        assert_eq!(plugin_press_failure(&failure(Some(500))), Some(tr("plugin_press_failed")));
+        assert_eq!(plugin_press_failure(&failure(None)), Some(tr("plugin_press_failed")));
+        assert_eq!(plugin_press_failure(&failure(Some(409))), None);
+    }
 
     #[test]
     fn worktree_label_prefers_real_location() {

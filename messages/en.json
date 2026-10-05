@@ -4465,6 +4465,7 @@
   "native_browser_address_credentials": "Use an address without an embedded username or password.",
   "native_browser_blocked": "Blocked address: {url}",
   "native_browser_close": "Close browser",
+  "native_plugin_press_failed": "Couldn't complete the click on the mod.",
   "native_side_tools": "Tools",
   "native_auth_error": "Token rejected. Open Connection and check your credentials.",
   "native_connection_not_saved": "Connected, but the connection was not saved for next launch: {error}",

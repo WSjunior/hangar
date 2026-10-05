@@ -21,8 +21,9 @@ pub type Press = Rc<dyn Fn(&str, &str, &mut Window, &mut App)>;
 pub const BAND_SITE: &str = "above-prompt";
 pub const PANE_CLOSE_KEY: &str = "__close__";
 
-/// Onde a árvore está desenhada e quem atende o clique; sem `press`, botão é só rótulo.
-struct Ctx<'a> { site: &'a str, press: &'a Option<Press> }
+/// Onde a árvore está desenhada e quem atende o clique; sem `press`, botão é só rótulo. `links` numera os links na ordem
+/// da árvore: o mesmo endereço duas vezes não repete o id do elemento.
+struct Ctx<'a> { site: &'a str, press: &'a Option<Press>, links: std::cell::Cell<usize> }
 
 pub fn button_key(v: &Value) -> Option<String> {
     (v["type"] == "Button").then(|| v["props"]["key"].as_str().filter(|k| !k.is_empty()).map(str::to_owned)).flatten()
@@ -33,8 +34,6 @@ pub fn safe_href(v: &Value) -> Option<String> {
     v.as_str().filter(|h| h.starts_with("https://") || h.starts_with("http://")).map(str::to_owned)
 }
 
-pub fn is_dock(pane: &Value) -> bool { pane["placement"] == "dock" }
-
 fn frame() -> Div {
     div().px(px(10.)).py(px(6.)).rounded(px(8.)).bg(theme::inset())
         .font_family(theme::MONO).text_size(px(TEXT_PX)).line_height(px(CELL_H)).text_color(theme::text())
@@ -42,12 +41,13 @@ fn frame() -> Div {
 
 pub fn band(tree: &Value, press: Option<Press>) -> Option<AnyElement> {
     if is_empty(tree) { return None; }
-    let c = Ctx { site: BAND_SITE, press: &press };
+    let c = Ctx { site: BAND_SITE, press: &press, links: Default::default() };
     Some(frame().w_full().mb(px(4.)).overflow_hidden().child(node(tree, &c)).into_any_element())
 }
 
-/// Um painel que um mod abriu: título, fechar (o ✕ do engine) e o corpo rolável.
-pub fn pane(pane: &Value, press: Option<Press>) -> AnyElement {
+/// Um painel que um mod abriu, acima da faixa como o terminal o desenha: título, fechar (o ✕ do engine) e o corpo, que
+/// rola dentro de `max_h`.
+pub fn pane(pane: &Value, press: Option<Press>, max_h: f32) -> AnyElement {
     let id = pane["id"].as_str().unwrap_or("").to_owned();
     let title = pane["title"].as_str().filter(|t| !t.is_empty()).unwrap_or(&id).to_owned();
     let header = div().flex().items_center().justify_between().gap_2()
@@ -58,9 +58,9 @@ pub fn pane(pane: &Value, press: Option<Press>) -> AnyElement {
                 .text_color(theme::muted()).child("✕")
                 .on_click(move |_, window, cx| press(&site, PANE_CLOSE_KEY, window, cx)))
         });
-    let c = Ctx { site: &id, press: &press };
+    let c = Ctx { site: &id, press: &press, links: Default::default() };
     // Recorta o que passa da largura: no gpui, filho maior que a coluna desenha por cima do vizinho.
-    frame().flex().flex_col().gap_1().min_h_0().w_full().overflow_hidden()
+    frame().flex().flex_col().gap_1().min_h_0().max_h(px(max_h)).w_full().overflow_hidden()
         .child(header)
         .child(div().id(SharedString::from(format!("plg-body-{id}"))).flex_1().min_h_0().overflow_y_scroll()
             .child(node(&pane["tree"], &c)))
@@ -100,8 +100,12 @@ fn element(v: &Value, c: &Ctx) -> AnyElement {
             let shown = if label.is_empty() { text_of(&p["href"]) } else { label };
             let base = div().text_color(theme::accent()).underline();
             match safe_href(&p["href"]) {
-                Some(href) => base.id(SharedString::from(format!("lnk-{href}"))).cursor_pointer()
-                    .on_click(move |_, _, cx| cx.open_url(&href)).child(shown).into_any_element(),
+                Some(href) => {
+                    let n = c.links.get();
+                    c.links.set(n + 1);
+                    base.id(SharedString::from(format!("lnk-{}-{n}", c.site))).cursor_pointer()
+                        .on_click(move |_, _, cx| cx.open_url(&href)).child(shown).into_any_element()
+                }
                 None => base.child(shown).into_any_element(),
             }
         }
@@ -199,9 +203,16 @@ fn text(p: &Value, kids: &[Value], c: &Ctx) -> AnyElement {
         .when(p["dimColor"] == true, |el| el.opacity(0.6));
     if truncate {
         el = el.overflow_hidden().whitespace_nowrap();
+        // Juntar em texto puro tiraria o clique de link e botão: com eles, a linha só recorta, sem reticências.
+        if has_interactive(kids) { return el.children(kids.iter().map(|k| node(k, c))).into_any_element(); }
         return el.child(div().truncate().child(plain_deep(kids))).into_any_element();
     }
     el.children(kids.iter().map(|k| node(k, c))).into_any_element()
+}
+
+/// A subárvore tem algo que se clica.
+fn has_interactive(kids: &[Value]) -> bool {
+    kids.iter().any(|k| matches!(k["type"].as_str(), Some("Link" | "Button")) || has_interactive(children(k)))
 }
 
 /// Texto de uma subárvore inteira, para o corte com reticências que o gpui só faz num texto só.
@@ -296,7 +307,7 @@ fn unmark(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
-    use super::{button_key, cell_color, color, is_dock, is_empty, raster_runs, safe_href};
+    use super::{button_key, cell_color, color, has_interactive, is_empty, raster_runs, safe_href};
     use serde_json::{json, Value};
 
     fn cells(words: &[u32]) -> String {
@@ -343,10 +354,11 @@ mod tests {
     }
 
     #[test]
-    fn dock_is_the_terminal_placement() {
-        assert!(is_dock(&json!({"placement": "dock"})));
-        assert!(!is_dock(&json!({"placement": "inline"})));
-        assert!(!is_dock(&json!({})));
+    fn link_or_button_anywhere_in_the_text_is_interactive() {
+        let link = json!({"type": "Link", "props": {"href": "https://gitlab.exemplo/pm/PM-1"}, "children": ["PM-1"]});
+        assert!(has_interactive(&[json!({"type": "Text", "children": ["PM ", link]})]));
+        assert!(has_interactive(&[json!({"type": "Button", "props": {"key": "k"}})]));
+        assert!(!has_interactive(&[json!("texto"), json!({"type": "Text", "children": ["só texto"]})]));
     }
 
     #[test]
