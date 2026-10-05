@@ -1001,3 +1001,19 @@ it('custos da tela inicial pedem a visão resumida; a tela de Custos continua co
   expect(full.searchParams.has('view')).toBe(false);
   expect(full.searchParams.get('fresco')).toBe('1');
 });
+
+it('503 de custos vira a frase traduzida com o código; sem envelope fica o status', async () => {
+  const { fetchCostsForServer, fetchUsoForServer, motivoDoServidor } = await import('./index');
+  const envelope = { ok: false, error_code: 'costs_no_disk', message: 'índice de custos indisponível',
+    detail: { code: 'costs_no_disk', params: { motivo: 'índice de custos indisponível' }, msg: 'índice de custos indisponível — costs_no_disk' } };
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(JSON.stringify(envelope), { status: 503 }));
+  for (const chamada of [() => fetchCostsForServer(server, 'all', false, true), () => fetchUsoForServer(server, 'all')]) {
+    const erro = await chamada().catch((e: unknown) => e);
+    expect(erro).toMatchObject({ status: 503, code: 'costs_no_disk' });
+    expect(motivoDoServidor(erro)).toContain('(costs_no_disk)');
+  }
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('', { status: 502 }));
+  const semEnvelope = await fetchCostsForServer(server, 'all').catch((e: unknown) => e);
+  expect(motivoDoServidor(semEnvelope)).toBeNull();
+  expect((semEnvelope as Error).message).toBe('502');
+});

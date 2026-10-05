@@ -454,7 +454,7 @@ export async function fetchCostsForServer(s: Server, period: string, fresco = fa
     signal: AbortSignal.timeout(20000),
   }, s);
   if (res.status === 202) throw await Aquecendo.de(res);
-  if (!res.ok) throw new Error(`${res.status}`);
+  if (!res.ok) throw await falhaDeCustos(res);
   return res.json() as Promise<Partial<CostReport>>;
 }
 
@@ -498,8 +498,15 @@ export async function fetchUsoForServer(s: Server, period: string, filtros: UsoF
     signal: AbortSignal.timeout(20000),
   }, s);
   if (res.status === 202) throw await Aquecendo.de(res);
-  if (!res.ok) throw new Error(`${res.status}`);
+  if (!res.ok) throw await falhaDeCustos(res);
   return res.json() as Promise<Partial<UsoReport>>;
+}
+
+// 503 do servidor de custos traz código e motivo: a frase traduzida vai no `message` e o código
+// no erro, como no resto do dono único. Sem envelope, `message` continua sendo o status.
+async function falhaDeCustos(res: Response): Promise<Error> {
+  const { msg, code } = await lerErro(res);
+  return Object.assign(new Error(code ? msg : `${res.status}`), { status: res.status, code });
 }
 
 // 202 do /api/costs e /api/uso: a primeira leitura do histórico daquela máquina ainda está rodando no

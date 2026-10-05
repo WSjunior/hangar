@@ -388,6 +388,14 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   workspace_context: (p) => m.workspace_context({ motivo: String(p.motivo ?? '') }),
   workspace_unavailable: (p) => m.workspace_unavailable({ motivo: String(p.motivo ?? '') }),
   internal_info: () => m.history_internal_info(),
+  costs_no_scopes: () => m.costs_no_scopes(),
+  costs_no_disk: () => m.costs_no_disk(),
+  costs_reader_panic: () => m.costs_reader_panic(),
+  costs_sqlite: () => m.costs_sqlite(),
+  costs_json: () => m.costs_json(),
+  costs_worker_join: () => m.costs_worker_join(),
+  costs_io: () => m.costs_io(),
+  costs_non_finite: () => m.costs_non_finite(),
   history_io: () => m.history_io(),
   history_panic: () => m.history_panic(),
   workspace_request_too_large: () => m.workspace_request_too_large(),
@@ -489,6 +497,12 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_mod_botao_inexistente: () => m.erro_mod_botao_inexistente(),
   erro_mod_terminal_em_modo: () => m.erro_mod_terminal_em_modo(),
 };
+
+// Falha com código do servidor (503 do dono único): a frase traduzida já está no `message`.
+// Erro sem código (rede, HTTP sem envelope) fica com a frase genérica de quem chama.
+export function motivoDoServidor(e: unknown): string | null {
+  return e instanceof Error && typeof (e as { code?: unknown }).code === 'string' && e.message ? e.message : null;
+}
 
 export function mensagemDeErro(code: string, params: Parametros = {}): string | undefined {
   // Propriedade PROPRIA, nunca a leitura crua: nome herdado do prototipo (toString, constructor,
