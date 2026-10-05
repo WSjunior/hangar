@@ -13,7 +13,7 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-windows-0.3.7/MODIFICADO.md gpui-pre-windows-0.3.7/MODIFICADO.md
 --- gpui-pre-windows-0.3.7/MODIFICADO.md
 +++ gpui-pre-windows-0.3.7/MODIFICADO.md
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,24 @@
 +# Cópia do gpui-pre-windows 0.3.7
 +
 +Origem: crate `gpui-pre-windows` 0.3.7 do crates.io, checksum `f05592a6f9e3e6bb7a9f2a0d4779271cf747a948db1c07b02448de777ffff8f3`, licença Apache-2.0.
@@ -36,6 +36,8 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +Não conferido em Windows.
 +
 +Em 0.3.7 `DirectXAtlas::get_texture_view` passou a devolver `Option`; o desfoque não usa o atlas, então nada mudou aqui.
++
++Bandeja: `PlatformWindow::set_hidden` em `src/window.rs`, com `ShowWindowAsync` (`SW_HIDE`/`SW_SHOW`).
 diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-windows-0.3.7/NOTICE gpui-pre-windows-0.3.7/NOTICE
 --- gpui-pre-windows-0.3.7/NOTICE
 +++ gpui-pre-windows-0.3.7/NOTICE
@@ -695,3 +697,17 @@ diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig 
 +    // The entire sampled RGBA is premultiplied; do not multiply alpha again.
 +    return t_sprite.SampleLevel(s_sprite, uv, 0.);
 +}
+diff -ruN -x .cargo_vcs_info.json -x .cargo-ok -x Cargo.lock -x Cargo.toml.orig gpui-pre-windows-0.3.7/src/window.rs gpui-pre-windows-0.3.7/src/window.rs
+--- gpui-pre-windows-0.3.7/src/window.rs
++++ gpui-pre-windows-0.3.7/src/window.rs
+@@ -941,6 +941,10 @@
+         unsafe { ShowWindowAsync(self.0.hwnd, SW_MINIMIZE).ok().log_err() };
+     }
+ 
++    fn set_hidden(&self, hidden: bool) {
++        unsafe { ShowWindowAsync(self.0.hwnd, if hidden { SW_HIDE } else { SW_SHOW }).ok().log_err() };
++    }
++
+     fn zoom(&self) {
+         unsafe {
+             if IsWindowVisible(self.0.hwnd).as_bool() {

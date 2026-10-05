@@ -80,7 +80,8 @@ const PAGE_ROWS: &[(Page, &[(&str, Option<&str>)])] = &[
         ("sync_config_desativar", Some("sync_config_desativar_aviso")), ("sync_config_copiar", None)]),
     (Page::Connect, &[("connect_code", Some("connect_code_help"))]),
     (Page::Appearance, &APPEARANCE_ROWS),
-    (Page::General, &[("settings_language", Some("settings_language_desc")), ("settings_currency", Some("settings_currency_search"))]),
+    (Page::General, &[("settings_language", Some("settings_language_desc")), ("settings_currency", Some("settings_currency_search")),
+        ("settings_tray", Some("settings_tray_desc"))]),
     (Page::Diary, &[("settings_diary_rules", Some("settings_diary_rule_private")), ("settings_diary_download", Some("settings_diary_rule_local")),
         ("settings_diary_recent", None)]),
     (Page::About, &[("settings_about_app", None), ("settings_about_server", None), ("settings_about_update", Some("settings_about_update_desc")),
@@ -144,6 +145,8 @@ fn matching(query: &str, texts: &[(String, String)]) -> Vec<usize> {
 
 fn find(query: &str) -> Vec<Found> {
     let rows = PAGE_ROWS.iter().flat_map(|&(page, rows)| rows.iter()
+        // Sem bandeja no sistema a linha não é desenhada.
+        .filter(|(title, _)| crate::tray::SUPPORTED || *title != "settings_tray")
         .map(move |&(title, desc)| (Found { page, row: Some(title) }, tr(title), desc.map(tr).unwrap_or_default())));
     // Páginas que ainda não têm linhas continuam achadas pelo nome e abrem no aviso delas.
     let pages = Page::DEVICE.into_iter().chain(Page::SERVER).map(|page| (Found { page, row: None }, page.title(), String::new()));
@@ -565,6 +568,7 @@ impl Hangar {
             self.list_state.remeasure();
             self.restyle_subagent(cx);
         }
+        if before.keep_in_tray != next.keep_in_tray { self.sync_tray(cx); }
         if save {
             let (connection, tx) = (self.connection, self.tx.clone());
             self.runtime.spawn(async move {
@@ -1048,6 +1052,12 @@ mod tests {
         assert_eq!(matching("hyprland", &texts), vec![1]);
         assert!(matching("  ", &texts).is_empty());
         assert!(matching("nada disso", &texts).is_empty());
+    }
+
+    #[test]
+    fn general_search_finds_the_tray_option() {
+        let (_, rows) = super::PAGE_ROWS.iter().find(|(page, _)| *page == super::Page::General).expect("Geral na busca");
+        assert!(rows.iter().any(|(row, _)| *row == "settings_tray"), "settings_tray fora da busca");
     }
 
     #[test]

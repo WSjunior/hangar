@@ -58,15 +58,16 @@ fn push(list: &mut VecDeque<String>, line: String) {
 }
 
 impl<P: Page> Controller<P> {
-    pub fn new(page: P) -> Self {
-        Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(false), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
+    pub fn new(page: P, hidden: bool) -> Self {
+        Self { page, turn: Mutex::new(()), wanted_hidden: Cell::new(hidden), state: RefCell::new(State { refs: HashMap::new(), console: VecDeque::new(),
             network: VecDeque::new(), inflight: 0, last_network: Instant::now(), theme: "sistema", layout: Layout::Desktop,
             hidden: false, navigated: false, enabled: HashSet::new() }) }
     }
 
-    pub async fn start(&self, hidden: bool) {
+    /// Aplica o pedido mais novo, não o do nascimento: o painel pode aparecer enquanto os domínios ligam.
+    pub async fn start(&self) {
         self.enable_base().await;
-        self.set_hidden(hidden).await;
+        self.set_hidden(self.wanted_hidden.get()).await;
     }
 
     /// Sem Runtime/Log/Page o console e as refs morrem calados; `run` tenta de novo a cada verbo (já ligado não chama o CDP).
@@ -437,7 +438,7 @@ mod tests {
         fn sleep(&self, _: u64) -> impl Future<Output = ()> { std::future::ready(()) }
     }
     fn ctl(answer: impl Fn(&str, &Value) -> Result<Value, String> + 'static) -> Controller<Fake> {
-        Controller::new(Fake { calls: RefCell::default(), answer: Box::new(answer), stuck: "" })
+        Controller::new(Fake { calls: RefCell::default(), answer: Box::new(answer), stuck: "" }, false)
     }
     fn text(r: Reply) -> String { match r { Reply::Text(t) => t, Reply::Png(_) => "png".into() } }
     fn methods(c: &Controller<Fake>) -> Vec<String> { c.page.calls.borrow().iter().map(|(m, _)| m.clone()).collect() }
@@ -599,7 +600,7 @@ mod tests {
 
     #[test]
     fn wait_gives_up_when_the_page_never_answers() {
-        let c = Controller::new(Fake { calls: RefCell::default(), answer: Box::new(|_, _| Ok(json!({}))), stuck: "Runtime.evaluate" });
+        let c = Controller::new(Fake { calls: RefCell::default(), answer: Box::new(|_, _| Ok(json!({}))), stuck: "Runtime.evaluate" }, false);
         assert_eq!(text(block_on(c.run("wait", &s(&["--text", "x"])))), "erro: wait --text x nao aconteceu em 15000ms");
     }
 
@@ -625,6 +626,16 @@ mod tests {
         // O pedido antigo pega o `turn` por último e ainda assim aplica o mais novo (visível).
         block_on(show);
         block_on(hide);
+        assert!(!c.state.borrow().hidden);
+        assert_eq!(methods(&c).last().map(String::as_str), Some("Emulation.clearDeviceMetricsOverride"));
+    }
+
+    #[test]
+    fn start_applies_the_panel_shown_while_it_was_starting() {
+        let c = Controller::new(Fake { calls: RefCell::default(), answer: Box::new(|_, _| Ok(json!({}))), stuck: "" }, true);
+        let start = c.start();
+        block_on(c.set_hidden(false));
+        block_on(start);
         assert!(!c.state.borrow().hidden);
         assert_eq!(methods(&c).last().map(String::as_str), Some("Emulation.clearDeviceMetricsOverride"));
     }
