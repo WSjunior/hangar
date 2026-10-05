@@ -4862,6 +4862,7 @@
   "native_keyboard_next_session": "Próxima sessão",
   "native_keyboard_previous_session": "Sessão anterior",
   "native_keyboard_new_chat": "Abrir nova conversa",
+  "native_keyboard_close_session": "Fechar sessão",
   "native_keyboard_costs": "Abrir ou fechar Custos",
   "native_keyboard_search": "Buscar conversas",
   "native_keyboard_project_file": "Buscar arquivo pelo nome",
