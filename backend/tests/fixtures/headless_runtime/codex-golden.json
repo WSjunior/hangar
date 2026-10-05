@@ -4,6 +4,7 @@
     "provider": "codex",
     "base": "93ce2f657f028b0ed5e696e4bd23bff2aa9054c6",
     "initial_state": {
+      "codex_service_tier": null,
       "session": "oracle",
       "state": "idle",
       "codex_mode": null,
@@ -33,6 +34,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "idle",
           "codex_mode": null,
@@ -69,6 +71,7 @@
     "provider": "codex",
     "base": "93ce2f657f028b0ed5e696e4bd23bff2aa9054c6",
     "initial_state": {
+      "codex_service_tier": null,
       "session": "oracle",
       "state": "idle",
       "codex_mode": null,
@@ -98,6 +101,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "awaiting_input",
           "codex_mode": null,
@@ -131,6 +135,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "awaiting_input",
           "codex_mode": null,
@@ -164,6 +169,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "awaiting_input",
           "codex_mode": null,
@@ -204,6 +210,7 @@
     "provider": "codex",
     "base": "93ce2f657f028b0ed5e696e4bd23bff2aa9054c6",
     "initial_state": {
+      "codex_service_tier": null,
       "session": "oracle",
       "state": "idle",
       "codex_mode": null,
@@ -233,6 +240,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "working",
           "codex_mode": null,
@@ -266,6 +274,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "idle",
           "codex_mode": null,
@@ -295,6 +304,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "idle",
           "codex_mode": null,
@@ -331,6 +341,7 @@
     "provider": "codex",
     "base": "93ce2f657f028b0ed5e696e4bd23bff2aa9054c6",
     "initial_state": {
+      "codex_service_tier": null,
       "session": "oracle",
       "state": "idle",
       "codex_mode": null,
@@ -360,6 +371,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "awaiting_input",
           "codex_mode": null,
@@ -409,6 +421,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "idle",
           "codex_mode": null,
@@ -438,6 +451,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "idle",
           "codex_mode": null,
@@ -472,6 +486,7 @@
     "provider": "codex",
     "base": "93ce2f657f028b0ed5e696e4bd23bff2aa9054c6",
     "initial_state": {
+      "codex_service_tier": null,
       "session": "oracle",
       "state": "idle",
       "codex_mode": null,
@@ -501,6 +516,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "awaiting_input",
           "codex_mode": null,
@@ -549,6 +565,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "awaiting_input",
           "codex_mode": null,
@@ -602,6 +619,7 @@
     "provider": "codex",
     "base": "93ce2f657f028b0ed5e696e4bd23bff2aa9054c6",
     "initial_state": {
+      "codex_service_tier": null,
       "session": "oracle",
       "state": "idle",
       "codex_mode": null,
@@ -631,6 +649,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "working",
           "codex_mode": null,
@@ -664,6 +683,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "idle",
           "codex_mode": null,
@@ -693,6 +713,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "idle",
           "codex_mode": null,
@@ -727,6 +748,7 @@
     "provider": "codex",
     "base": "93ce2f657f028b0ed5e696e4bd23bff2aa9054c6",
     "initial_state": {
+      "codex_service_tier": null,
       "session": "oracle",
       "state": "idle",
       "codex_mode": null,
@@ -756,6 +778,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "working",
           "codex_mode": null,
@@ -805,6 +828,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "working",
           "codex_mode": null,
@@ -841,6 +865,7 @@
     "provider": "codex",
     "base": "93ce2f657f028b0ed5e696e4bd23bff2aa9054c6",
     "initial_state": {
+      "codex_service_tier": null,
       "session": "oracle",
       "state": "idle",
       "codex_mode": null,
@@ -870,6 +895,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "working",
           "codex_mode": null,
@@ -899,6 +925,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "working",
           "codex_mode": null,
@@ -933,6 +960,7 @@
     "provider": "codex",
     "base": "93ce2f657f028b0ed5e696e4bd23bff2aa9054c6",
     "initial_state": {
+      "codex_service_tier": null,
       "session": "oracle",
       "state": "idle",
       "codex_mode": null,
@@ -962,6 +990,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "working",
           "codex_mode": null,
@@ -991,6 +1020,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "working",
           "codex_mode": null,
@@ -1027,6 +1057,7 @@
     "provider": "codex",
     "base": "93ce2f657f028b0ed5e696e4bd23bff2aa9054c6",
     "initial_state": {
+      "codex_service_tier": null,
       "session": "oracle",
       "state": "idle",
       "codex_mode": null,
@@ -1056,6 +1087,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "idle",
           "codex_mode": null,
@@ -1090,6 +1122,7 @@
     "provider": "codex",
     "base": "93ce2f657f028b0ed5e696e4bd23bff2aa9054c6",
     "initial_state": {
+      "codex_service_tier": null,
       "session": "oracle",
       "state": "idle",
       "codex_mode": null,
@@ -1136,6 +1169,7 @@
       {
         "channel": "state",
         "data": {
+          "codex_service_tier": null,
           "session": "oracle",
           "state": "idle",
           "codex_mode": null,

@@ -853,7 +853,9 @@ class CodexAdapter:
                     sess = self._sessions[name]
                     sess.update(headless=True, cano=cano)
                     self._restore_turn(sess, thread, include_turns=False)
-                    if meta.get("thread_id"):
+                    # `thread/resume` só com a thread parada: religar num cano vivo não mexe em turno em
+                    # andamento. Fora disso o modo rápido fica o do sidecar.
+                    if meta.get("thread_id") and (thread.get("status") or {}).get("type") == "idle":
                         revision = sess.get("settings_revision", 0)
                         try:
                             result = await client.request("thread/resume", {"threadId": meta["thread_id"]})
@@ -2369,7 +2371,13 @@ class CodexAdapter:
                         waiter = asyncio.get_running_loop().create_future()
                         sess["service_tier_waiter"] = waiter
                         revision = sess.get("settings_revision", 0)
-                        snapshot = await client.request("thread/resume", {"threadId": thread_id})
+                        try:
+                            snapshot = await client.request("thread/resume", {"threadId": thread_id})
+                        except RuntimeError as exc:
+                            if "no rollout found" not in str(exc):
+                                raise
+                            # Thread sem turno ainda não tem rollout: vale o aviso da própria thread.
+                            snapshot = {"thread": {"id": thread_id}, "serviceTier": applied}
                         if not still_current() or (snapshot.get("thread") or {}).get("id") != thread_id:
                             raise RuntimeError("A sessão mudou antes de confirmar Fast")
                         previous_tier = sess.get("service_tier")
