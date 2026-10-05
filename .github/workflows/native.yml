@@ -1,5 +1,5 @@
 # App desktop nativo (desktop-native/, Rust/GPUI). Conferir e publicar são jobs separados:
-# - `check` (cargo check + cargo test, Linux, sem --release) roda em todo push e PR que toque estes caminhos.
+# - `check` (cargo build + cargo test, Linux, sem --release) roda em todo push e PR que toque estes caminhos.
 # - `build` + `publish` só na main e no canal de testes. A main compila Linux, Windows e macOS e publica na release
 #   FIXA `native-latest`, cujo `native-latest.json` alimenta o "Atualizar" (desktop-native/src/update.rs). O canal
 #   compila Linux e Windows e publica na pré-release `native-<branch>` (fora de [A-Za-z0-9._-] vira `-`), que o app
@@ -60,9 +60,11 @@ jobs:
             desktop-native/target
           key: native-check-${{ runner.os }}-${{ hashFiles('desktop-native/Cargo.lock', 'desktop-native/rust-toolchain.toml') }}
           restore-keys: native-check-${{ runner.os }}-
-      - run: cargo check --locked
+      # `build` e não `check`: confere o mesmo binário e deixa as dependências no perfil que o `test` reaproveita;
+      # o `check` refazia todas elas só em metadados.
+      - run: cargo build --locked
       - run: cargo test --locked
-      - if: steps.cache.outputs.cache-hit != 'true' && github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'hangar-server-parte1')
+      - if: steps.cache.outputs.cache-hit != 'true' && github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'hangar-server-parte1' || github.ref_name == 'ci/faster-builds')
         uses: actions/cache/save@v4
         with:
           path: |
