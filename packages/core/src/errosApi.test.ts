@@ -22,3 +22,17 @@ describe('histórico recusado pelo Rust', () => {
     }
   });
 });
+
+describe('recusas novas dos mods', () => {
+  it.each([
+    'erro_mod_sem_digitacao',
+    'erro_mod_desenho_vencido',
+    'erro_mod_dialogo_aberto',
+    'erro_mod_rascunho_no_prompt',
+    'erro_mod_painel_nao_alcancavel',
+  ])('%s vira frase do app, não o texto do servidor', (code) => {
+    const texto = formataErro({ code, params: {}, msg: 'texto-do-servidor' });
+    expect(texto).not.toBe('texto-do-servidor');
+    expect(texto).not.toBe(code);
+  });
+});
