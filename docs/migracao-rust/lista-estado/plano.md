@@ -105,8 +105,8 @@ a varredura inteira. No Windows (Job) só muda a regra de gravação.
 
 **Falha sem ela:** `session_row_roundtrip` (amostra do Python lida, escrita e comparada canônica).
 
-- [ ] **Step 5: Amostras do `SessionInfo` real; teste visto falhar**
-- [ ] **Step 6: `SessionRow` com `null` no que falta e leitura que ignora campo desconhecido; testes focados; revisar**
+- [x] **Step 5: Amostras do `SessionInfo` real; teste visto falhar**
+- [x] **Step 6: `SessionRow` com `null` no que falta e leitura que ignora campo desconhecido; testes focados; revisar**
 
 ### Task 3: Leitores de processos e panes no Linux
 
