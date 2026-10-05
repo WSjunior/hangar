@@ -227,8 +227,8 @@ Fase B; Claude sem terminal pelo `RuntimeRegistry`; `registry.py:1691-1847`), tr
 **Falha sem ela:** `contract_list::state_sequences`, `classify::asks_demote_after_grace`,
 `classify::headless_from_runtime`.
 
-- [ ] **Step 25: Testes, vistos falhar**
-- [ ] **Step 26: Classificação com `terminal_state::analyze`; testes focados; revisar**
+- [x] **Step 25: Testes, vistos falhar**
+- [x] **Step 26: Classificação com `terminal_state::analyze`; testes focados; revisar**
 
 ---
 
