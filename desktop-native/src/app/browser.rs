@@ -306,7 +306,16 @@ impl BrowserPanel {
             }))
             // A tecla é da página: os atalhos do app (Esc, "/") não comem o que se digita nela.
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                if let Some(engine) = this.engine() { engine.key(true, &event.keystroke); }
+                if let Some(engine) = this.engine() {
+                    let k = &event.keystroke;
+                    // O Chromium sem janela tem área de transferência própria: colar lê a do sistema e digita o texto.
+                    let paste = (k.modifiers.control && !k.modifiers.alt && k.key == "v") || (k.modifiers.shift && k.key == "insert");
+                    if !paste {
+                        engine.key(true, k);
+                    } else if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                        engine.insert_text(&text);
+                    }
+                }
                 cx.stop_propagation();
             }))
             .on_key_up(cx.listener(|this, event: &KeyUpEvent, _, cx| {
