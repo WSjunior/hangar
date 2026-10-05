@@ -1,6 +1,7 @@
 <script lang="ts">
   import { useSessionServer } from '../lib/sessionServer';
   import { agruparConversa, type ItemConversa } from '@hangar/core';
+  import { toolLook } from '../lib/toolLook.svelte';
   import { tick } from 'svelte';
   import type { Snippet } from 'svelte';
   import { planDisplayText, parseContextoUso, dayStarts } from '@hangar/core';
@@ -439,7 +440,11 @@
       for (let j = i - 1; j >= 0; j--) if (!ehTask(visibleEvents[j]) && visibleEvents[j].kind !== 'tool_result') { ancora = visibleEvents[j].id; break; }
       break;
     }
-    const base: RenderItem[] = agruparConversa(visibleEvents.filter((ev) => !ehTask(ev)), { entraNoPensamento });
+    const base: RenderItem[] = agruparConversa(visibleEvents.filter((ev) => !ehTask(ev)), {
+      entraNoPensamento,
+      // Pele 'terminal': toda sequência é grupo, para a linha dobrada somar e contar até uma chamada só.
+      groupMin: toolLook.look === 'terminal' ? 1 : undefined,
+    });
     if (taskRows.ativo && tarefas.length && temTask) {
       const contem = (it: RenderItem) => it.type === 'event' || it.type === 'tool' ? it.id === ancora : it.type === 'group' ? it.tools.some((t) => t.id === ancora) : it.type === 'pensamento' ? it.eventos.some((e) => e.id === ancora) : false;
       const pos = ancora ? base.findIndex(contem) : -1;
