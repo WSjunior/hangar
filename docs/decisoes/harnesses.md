@@ -61,6 +61,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **A prévia corta cada linha na largura da conversa quando há painel ancorado.** A largura é o
   `bodyColumns` da faixa + 5; sem o corte, a borda `│` do painel vira texto da prévia.
 
+- **Na prévia do pane, bloco cujo parágrafo termina colado no `⎿` é chamada de ferramenta, não
+  prosa.** Vale com o `●` aceso ou apagado, no Python (`preview.py`) e no Rust
+  (`terminal_state.rs`). Medição em [prévia da chamada em voo](#prévia-da-chamada-em-voo-o--pisca).
+
 - **tok/s "agora" é medido no stream da resposta, nunca no transcript.** Do `message_start`
   ao fim da resposta, com o `output_tokens` real: sem terminal pelo `stream_event`; com
   terminal pelo `turn.step` do plugin (`rate.ts` → `POST /api/plugin/rate`). Nunca a partir
@@ -315,6 +319,24 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   Na captura stdio 0.159.3, manter `tool_output_token_limit` da sessão conservou 144.000
   caracteres após reinício. Essa captura simulada não comprova interface, modelo real ou
   restauração física. Ver [transferência em validação](#transferência-claude--codex-captura-nativa-em-validação).
+
+## Prévia da chamada em voo: o ● pisca
+
+Medido em 05/10/2026, Claude Code 2.1.289. Com um comando rodando, a TUI desenha a chamada como
+`● <descrição que o modelo escreveu> · 2s` e, embaixo, `⎿  $ comando (3s)`. Ao terminar, o bloco
+vira `Ran 1 shell command`. A primeira linha não começa por `Bash(` nem por um verbo da lista, e o
+`●` dela pisca: em quadros alternados ele some e a linha fica só recuada.
+
+A prévia elegia a descrição como prosa nos quadros com `●`. Nos quadros sem ele, a varredura caía
+no bloco de prosa anterior, e a descrição grudava nele como continuação. A prévia trocava a cada
+piscada, e a pele Terminal subia e descia o tempo todo. Uma sessão real com dois `sleep 6`
+registrou 36 trocas de prévia; com a regra, 4 (vazio, as duas frases e o "Pronto.").
+
+A regra olha a forma, não o vocabulário: o parágrafo da chamada termina colado no `⎿`, e o da
+prosa termina em linha em branco ou no próximo `●`. Os dois quadros reais estão em
+`backend/tests/fixtures/pane_ferramenta_em_voo_*.txt`, cobertos pelo teste da prévia e pelo
+contrato Python/Rust. Efeito colateral aceito: um aviso do sistema seguido de `⎿` (o limite de
+uso em `pane_limite_uso.txt`) também deixa de virar prévia, e ele nunca foi texto da resposta.
 
 ## Cliente tmux somente de leitura não bloqueia envios ao pane
 

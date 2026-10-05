@@ -750,7 +750,8 @@ impl Hangar {
                 Err(e) => eprintln!("[nav] servidor do hangar-preview nao subiu: {e}"),
             }
         }
-        let list_state = ListState::new(0, ListAlignment::Bottom, px(300.));
+        // O fim que encolhe vira folga embaixo: o histórico à vista não sobe e desce a cada linha que entra e sai no fim.
+        let list_state = ListState::new(0, ListAlignment::Bottom, px(300.)).hold_tail(px(160.));
         Self::watch_user_scroll(&list_state, cx);
         let sidebar = sidebar::Sidebar::new(window, cx);
         let panes = panes::Panes::new(cx);
@@ -1868,6 +1869,9 @@ impl Hangar {
                 let finished = self.chat.state.state == "working" && state.state != "working";
                 let resumed = self.chat.state.state == "awaiting_input" && state.state == "working";
                 let turned = (self.chat.state.state == "working") != (state.state == "working");
+                // A duração sai do começo antes de ele ser zerado: é ela que a linha final mostra.
+                if finished { self.chat.turn_done = Some(turn_done_text(self.turn_start())); }
+                else if state.state == "working" { self.chat.turn_done = None; }
                 // Estado vazio é a conversa recém-aberta: o turno já corria, e quem conta é o último envio.
                 if turned { self.turn_seen = (state.state == "working" && !self.chat.state.state.is_empty()).then(Instant::now); }
                 if state.state == "working" { self.sent_until = None; }
@@ -3007,7 +3011,7 @@ impl Hangar {
 
     /// A linha de trabalhando fica sob a última linha durante todo o turno, com pensamento, ferramenta ou texto chegando,
     /// e já no envio.
-    fn working_row_shown(&self) -> bool { self.chat.state.state == "working" || self.sending_shown() }
+    fn working_row_shown(&self) -> bool { self.chat.state.state == "working" || self.sending_shown() || self.chat.turn_done.is_some() }
 
     /// Envio pendente, ou entregue há pouco e ainda sem o turno: sem esta ponte a linha sairia e voltaria no meio.
     fn sending_shown(&self) -> bool {
@@ -3060,11 +3064,20 @@ impl Hangar {
     /// animam fora da conversa guardada (`working_mark_float`); aqui ficam só os lugares deles.
     fn render_working(&self, cx: &mut Context<Self>) -> AnyElement {
         let sending = self.sending_shown();
+        // Mesma caixa nos dois estados: trocar de um para o outro não muda a altura da linha.
+        let line = || div().relative().h(px(38.)).flex().items_center().gap(px(8.));
+        // Turno acabado: a mesma linha, parada, com quanto durou e quando terminou, como o "Worked for" do Claude Code.
+        if let Some(text) = self.chat.turn_done.clone().filter(|_| !sending) {
+            return line()
+                .child(div().w(px(14.)).flex_none().flex().justify_center().text_size(px(13.)).text_color(theme::faint()).child("✻"))
+                .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme::faint()).child(text))
+                .into_any_element();
+        }
         let verb = if sending { tr("sending") } else { working_verb(self.chat.state.label.as_deref()) };
         let since = if sending { None } else { self.turn_start() };
         let tokens = if sending { None } else { working_tokens(self.chat.state.label.as_deref()).map(SharedString::from) };
         // Sem recuo: a marca começa na borda da coluna, alinhada com o texto das mensagens.
-        let row = div().relative().h(px(38.)).flex().items_center().gap(px(8.))
+        let row = line()
             .child(self.working_mark_slot(panes::Area::Conversation, "working-line", 14., theme::accent()))
             .child(div().min_w_0().truncate().text_size(px(12.)).text_color(theme::muted()).child(verb))
             .map(|el| match since {
@@ -3136,16 +3149,10 @@ impl Hangar {
         let diff = edits::card(call, result, cx);
         let has_diff = diff.is_some();
         let mut body = div().flex().flex_col().gap_2().pt_1().pb_2();
-        // Imagem que o Read leu: o transcript não traz os bytes, o caminho citado vem pelo `/file` (regra do web).
-        if call.tool_name.as_deref().is_some_and(|name| name.eq_ignore_ascii_case("read")) {
-            let path = call.tool_input.as_ref().and_then(|input| input.get("file_path").or_else(|| input.get("path"))).and_then(|path| path.as_str()).unwrap_or("");
-            let refs: Vec<_> = composer::cited_paths(path).into_iter().map(|path| {
-                let name = composer::basename(&path).to_owned();
-                let image = composer::image_format(&name).is_some();
-                (Source::Cited(path), name, image)
-            }).collect();
-            if !refs.is_empty() { body = body.child(self.render_refs(&format!("{row}-read"), refs, cx)); }
-        }
+        // O arquivo que a ferramenta leu ou mandou: a pele Terminal mostra o do SendUserFile fora do corpo, sempre à vista.
+        let shown_outside = appearance::get().tool_look == appearance::ToolLook::Terminal && sends_files(call);
+        let refs = if shown_outside { Vec::new() } else { tool_file_refs(call) };
+        if !refs.is_empty() { body = body.child(self.render_refs(&format!("{row}-read"), refs, cx)); }
         if let Some(diff) = diff { body = body.child(diff); }
         else if matches!(input, Prepared::Detail { total, .. } if total > 0) {
             body = body.child(self.detail(row, &input_key, input, tr("tool_input"), tr("copy_input"), false, cx));
@@ -4505,16 +4512,37 @@ fn attachment_refs(event: &ChatEvent) -> Vec<(Source, String, bool)> {
             for i in 0..pasted { refs.push((Source::Transcript(event.id.clone(), i), format!("imagem-{}.png", i + 1), true)); }
         }
         "assistant_msg" => {
-            for path in composer::cited_paths(&body) {
-                let name = composer::basename(&path).to_owned();
-                let image = composer::image_format(&name).is_some();
-                refs.push((Source::Cited(path), name, image));
-            }
+            refs.extend(composer::cited_paths(&body).into_iter().map(cited_ref));
             for url in composer::image_urls(&body) { refs.push((Source::Remote(url.clone()), composer::url_name(&url).to_owned(), true)); }
         }
         _ => {}
     }
     refs
+}
+
+/// SendUserFile é como o agente põe um arquivo diante da pessoa: o caminho vai em `files`.
+pub(super) fn sends_files(call: &ChatEvent) -> bool {
+    call.tool_name.as_deref().is_some_and(|name| name.eq_ignore_ascii_case("senduserfile"))
+}
+
+/// Arquivos citados na entrada da ferramenta: o que o Read leu e o que o SendUserFile mandou. O transcript não traz os
+/// bytes; o caminho citado vem pelo `/file` (regra do web).
+pub(super) fn tool_file_refs(call: &ChatEvent) -> Vec<(Source, String, bool)> {
+    let input = call.tool_input.as_ref();
+    let paths: Vec<&str> = match call.tool_name.as_deref() {
+        Some(name) if name.eq_ignore_ascii_case("read") => vec![crate::editdiff::input_path(input)],
+        _ if sends_files(call) => input.and_then(|i| i.get("files")).and_then(|f| f.as_array())
+            .map(|files| files.iter().filter_map(|f| f.as_str()).collect()).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    paths.into_iter().flat_map(composer::cited_paths).map(cited_ref).collect()
+}
+
+/// Caminho citado como anexo: o nome que aparece embaixo e se ele abre como imagem.
+fn cited_ref(path: String) -> (Source, String, bool) {
+    let name = composer::basename(&path).to_owned();
+    let image = composer::image_format(&name).is_some();
+    (Source::Cited(path), name, image)
 }
 
 // Anexo que saiu do campo: tira a imagem inteira do cache de assets e do atlas da GPU, que não a soltam sozinhos.
@@ -4935,20 +4963,17 @@ impl Hangar {
         let avatar = div().relative().size(px(18.)).flex_shrink_0().flex().items_center().justify_center().child(mark);
         let state_label = tr(&format!("chip_{}", if limited { "limited" } else { state }));
         let reply = session.last_reply.as_deref().filter(|r| state == "idle" && !r.trim().is_empty());
+        let asking = state == "awaiting_input" || session.pending_questions > 0;
         let fresh = match reply {
             Some(r) => Some((conversation::one_line(r, 120), sidebar::Sub::Reply)),
-            None if state == "awaiting_input" || session.pending_questions > 0 =>
-                session.question.clone().map(|q| (conversation::one_line(&q, 80), sidebar::Sub::Question)),
+            None if asking => session.question.clone().map(|q| (conversation::one_line(&q, 80), sidebar::Sub::Question)),
             None if state == "working" => session.label.clone().filter(|l| !l.trim().is_empty())
                 .map(|l| (conversation::one_line(l.split(" (").next().unwrap_or(&l), 80), sidebar::Sub::Working)),
             None => None,
         };
-        // O tipo de linha que este estado mostra, na mesma ordem do `fresh`.
-        let kind = if state == "idle" && session.pending_questions == 0 { Some(sidebar::Sub::Reply) }
-            else if state == "awaiting_input" || session.pending_questions > 0 { Some(sidebar::Sub::Question) }
-            else if state == "working" { Some(sidebar::Sub::Working) } else { None };
-        let sub = self.sidebar.keep_sub(&target, session.jsonl.as_deref(), kind, fresh);
-        let sub_color = if matches!(sub, Some((_, sidebar::Sub::Question))) { theme::warning() } else { theme::muted() };
+        let sub = self.sidebar.keep_sub(&target, session.jsonl.as_deref(), fresh);
+        // Âmbar só com a pergunta aberta agora: a guardada de antes, já respondida, fica na cor de sempre.
+        let sub_color = if asking && matches!(sub, Some((_, sidebar::Sub::Question))) { theme::warning() } else { theme::muted() };
         let when = session.last_reply_at.filter(|_| state == "idle").map(side::since);
         let account = account_chip(session.conta.as_deref());
         // Como o web: a pasta só com a lista por servidor (por projeto o cabeçalho já a diz), e sempre na worktree.
@@ -5237,6 +5262,16 @@ fn cache_chip(cache: crate::chat::LastCache) -> impl IntoElement {
         .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx))
         .child(div().size(px(6.)).rounded_full().bg(dot))
         .child(label.unwrap_or_else(|| web("composer_expirou", &[])))
+}
+
+/// "Trabalhou por 7s · 14:59"; conversa aberta no meio do turno não sabe quando ele começou, e fica só a hora.
+fn turn_done_text(start: Option<Instant>) -> String {
+    let now = chrono::Local::now();
+    let clock = clock(Some(now.timestamp() as f64)).unwrap_or_default();
+    match start {
+        Some(start) => tr("turn_done").replace("{time}", &chrome::format_elapsed(start.elapsed())).replace("{clock}", &clock),
+        None => tr("turn_done_clock").replace("{clock}", &clock),
+    }
 }
 
 fn clock(ts: Option<f64>) -> Option<String> {
@@ -6151,6 +6186,22 @@ mod tests {
         let now = chrono::Local::now().timestamp() as f64;
         assert_eq!(super::stamp(Some(now)), super::clock(Some(now)));
         assert!(super::stamp(Some(now - 3. * 86_400.)).is_some_and(|s| s.len() > 5));
+    }
+
+    #[test]
+    fn sent_and_read_files_become_cited_refs() {
+        use crate::api::Source;
+        let call = |name: &str, input: serde_json::Value| ChatEvent { kind: "tool_use".into(), tool_name: Some(name.into()),
+            tool_input: input.as_object().cloned(), ..Default::default() };
+        let sent = call("SendUserFile", serde_json::json!({"files": ["/tmp/a/print.png", "/tmp/a/video.mp4"], "caption": "x"}));
+        assert!(super::sends_files(&sent));
+        assert_eq!(super::tool_file_refs(&sent), vec![
+            (Source::Cited("/tmp/a/print.png".into()), "print.png".into(), true),
+            (Source::Cited("/tmp/a/video.mp4".into()), "video.mp4".into(), false)]);
+        let read = call("Read", serde_json::json!({"file_path": "/tmp/a/print.png"}));
+        assert!(!super::sends_files(&read));
+        assert_eq!(super::tool_file_refs(&read), vec![(Source::Cited("/tmp/a/print.png".into()), "print.png".into(), true)]);
+        assert!(super::tool_file_refs(&call("Bash", serde_json::json!({"command": "ls /tmp/a/print.png"}))).is_empty());
     }
 
     #[test]

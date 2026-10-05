@@ -84,6 +84,12 @@ impl StickSpring {
     }
 }
 
+/// Colar no fim em vez de deslizar: sem animação pedida pelo sistema, ou na pele Terminal, onde o texto novo aparece
+/// no lugar como no terminal do Claude Code.
+fn snap_to_end(cx: &App) -> bool {
+    cx.reduce_motion() || appearance::get().tool_look == appearance::ToolLook::Terminal
+}
+
 pub(super) struct Follow {
     pinned: bool,
     spring: StickSpring,
@@ -146,7 +152,7 @@ impl Hangar {
         if !self.follow.pinned { return; }
         // Sem animação, colada acompanha colada, como o `FollowMode::Tail` fazia. Colar aqui, e não
         // no render, deixa o gesto de subir chegar ao handler antes: no render ele seria desfeito.
-        if cx.reduce_motion() { self.list_state.scroll_to_end(); return; }
+        if snap_to_end(cx) { self.list_state.scroll_to_end(); return; }
         self.follow.kick = true;
         self.unglue(0.75);
     }
@@ -165,7 +171,7 @@ impl Hangar {
     pub(super) fn follow_engage(&mut self, cx: &mut Context<Self>) {
         self.follow.pinned = true;
         self.follow.wheel = 0.;
-        if cx.reduce_motion() { self.list_state.scroll_to_end(); self.redraw(Area::Conversation, cx); return; }
+        if snap_to_end(cx) { self.list_state.scroll_to_end(); self.redraw(Area::Conversation, cx); return; }
         // Mais de uma janela longe do fim, deslizar vira espera: salta direto.
         let viewport = f32::from(self.list_state.viewport_bounds().size.height);
         if viewport > 0. && self.distance_from_bottom() > viewport {
@@ -281,7 +287,8 @@ impl Hangar {
         self.follow.last_top = self.visible_top();
         if cx.reduce_motion() { self.follow.wheel = 0.; return; }
         if self.follow.scheduled { return; }
-        let spring = self.follow.pinned && (self.follow.kick || self.distance_from_bottom() > 0.5);
+        // Na pele Terminal o fim cola sem mola; só a roda anda em quadros.
+        let spring = !snap_to_end(cx) && self.follow.pinned && (self.follow.kick || self.distance_from_bottom() > 0.5);
         if !spring && self.follow.wheel == 0. { return; }
         self.follow.scheduled = true;
         let view = cx.weak_entity();

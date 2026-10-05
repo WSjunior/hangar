@@ -13,6 +13,9 @@ pub struct Chat {
     pub ask: Option<Ask>,
     pub live_thinking: String,
     pub live_tool: Option<LiveTool>,
+    /// Turno visto terminar nesta conversa, já em texto: a linha de trabalhando fica no lugar com ele, como o
+    /// "Worked for 16s" do Claude Code, em vez de sair e puxar o chat para baixo.
+    pub turn_done: Option<String>,
     // Último registro durável que consolidou um item em voo; barra o quadro atrasado do mesmo item.
     settled_thinking: String,
     settled_tool: Option<(LiveTool, Option<String>)>,

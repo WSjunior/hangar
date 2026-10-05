@@ -29,3 +29,11 @@ trava isso.
 Bandeja: `PlatformWindow::set_hidden` (padrão sem efeito) e `Window::set_hidden(hidden)` escondem a janela sem
 destruí-la e a mostram de novo, para a opção "Manter na bandeja ao fechar". O upstream não tem como esconder uma janela;
 as implementações ficam nas cópias de gpui-pre-linux e gpui-pre-windows.
+
+Fim que encolhe vira folga: `ListState::hold_tail(max)` (desligado por padrão) faz `src/elements/list.rs` guardar, com o
+fim da lista à vista, a altura que o fim perdeu como espaço embaixo (até `max`; o Hangar usa 160 px), e o próximo crescimento consome
+esse espaço antes de empurrar as linhas de cima. A régua é a primeira linha à vista e a altura dela até o fim; `splice`
+a desloca, e `reset` zera a folga. Quando a folga muda, o layout é refeito no mesmo quadro, para não haver um quadro
+com o conteúdo fora do lugar. É o comportamento do terminal: o que já está na tela não sobe e desce quando uma linha
+do fim aparece e some. Os testes da lib não compilam nesta cópia (faltam as fontes do repositório de origem); a
+medição está na mensagem do commit.
