@@ -31,6 +31,9 @@ export function registerInput(on: On) {
     } else {
       $.clock.after(REARM_MS, () => void discover($));
     }
+    // Recarregado (atualização do plugin), o módulo começa sem a faixa e os painéis, e o engine não
+    // redesenha o que já está na tela: o ui.ts só os vê de novo com o desenho pedido.
+    $.ui.invalidate("ui.render");
     return next(e);
   });
 }
