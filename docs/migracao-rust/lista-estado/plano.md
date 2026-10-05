@@ -160,8 +160,8 @@ resolução com semear, esquecer e renomear), `crates/hangar-server/tests/contra
 
 **Falha sem ela:** `contract_list::discovery_claude_sequences`, `discover::seed_then_forget`.
 
-- [ ] **Step 13: Testes, vistos falhar**
-- [ ] **Step 14: Porte na ordem do Python, fd aberto só no Linux; testes focados; revisar**
+- [x] **Step 13: Testes, vistos falhar**
+- [x] **Step 14: Porte na ordem do Python, fd aberto só no Linux; testes focados; revisar**
 
 ### Task 7: Descoberta dos demais provedores e campos comuns
 
