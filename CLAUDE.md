@@ -276,6 +276,12 @@ registrado, fora do caminho de leitura, para não competir com o que vale hoje.
   Canvas o alvo é só a faixa de cabeçalho do card (tiles se sobrepõem livremente); no celular a
   alça mora na trilha do swipe; em tablet na largura desktop o arrasto HTML5 não responde ao
   toque, e ali o caminho é o `PairSheet` (também a alternativa exigida pela WCAG 2.2 SC 2.5.7).
+- **Bandeja do nativo: fechar ESCONDE a janela, nunca a destrói, e só com bandeja presente.** A tela
+  não sobrevive a fechar e reabrir; quem esconde é `Window::set_hidden`, ajuste nosso no GPUI
+  vendorizado, chamado de dentro do `should_close` (por isso ele não toca nos callbacks da
+  janela). Sem ícone de pé ou sem hospedeiro de bandeja, fechar encerra: o app nunca fica vivo e
+  invisível. No Wayland esconder troca os objetos xdg na mesma superfície; só desmapear com
+  buffer nulo não volta no Hyprland.
 
 ### Harnesses — Claude, Codex, Pi, omp, Kimi → [`docs/decisoes/harnesses.md`](docs/decisoes/harnesses.md)
 

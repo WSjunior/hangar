@@ -25,3 +25,7 @@ de conteúdo atual. O macOS mantém o `image_buffer` de antes. Os pixels da supe
 e a comparação de cenas já trata toda superfície como dano nos dois quadros (`accumulate_surface_damage` em
 `scene_damage.rs`), então um quadro com superfície nunca é pulado; o teste `identical_surface_frames_are_still_damaged`
 trava isso.
+
+Bandeja: `PlatformWindow::set_hidden` (padrão sem efeito) e `Window::set_hidden(hidden)` escondem a janela sem
+destruí-la e a mostram de novo, para a opção "Manter na bandeja ao fechar". O upstream não tem como esconder uma janela;
+as implementações ficam nas cópias de gpui-pre-linux e gpui-pre-windows.

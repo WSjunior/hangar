@@ -29,6 +29,7 @@ mod group_sheet;
 mod hangar_live;
 mod harness;
 mod viewer;
+mod window_tray;
 mod disk;
 mod player;
 mod machines;
@@ -524,6 +525,7 @@ pub struct Hangar {
     // Paleta "Buscar conversas" (Ctrl+K).
     search: search::Search,
     topbar: topbar::TopBar,
+    window_tray: window_tray::WindowTray,
     system_notifications: SystemNotifications,
     computer: computer::Computer,
     new_session: Option<Entity<create::NewSession>>,
@@ -599,6 +601,13 @@ impl Drop for Hangar {
     }
 }
 
+/// Bloqueante: o daemon de notificação pode demorar. Chamar fora da thread da janela.
+fn show_system_notification(title: &str, body: &str) {
+    if let Err(error) = notify_rust::Notification::new().appname("Hangar").summary(title).body(body).show() {
+        eprintln!("notification: {error}");
+    }
+}
+
 impl Hangar {
     pub fn new(runtime: Arc<Runtime>, appearance_error: Option<String>, crash: Option<String>, links: async_channel::Receiver<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         if let Some(error) = crash {
@@ -610,12 +619,26 @@ impl Hangar {
         }
         Self::watch_system(window, cx);
         Self::watch_dictation(window, cx);
+        let (tray_tx, tray_rx) = async_channel::unbounded::<crate::tray::TrayEvent>();
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok(event) = tray_rx.recv().await {
+                if this.update_in(cx, |this, window, cx| this.on_tray_event(event, window, cx)).is_err() { break; }
+            }
+        }).detach();
+        cx.defer_in(window, |this, _, cx| this.sync_tray(cx));
+        let tray_owner = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            let Some(this) = tray_owner.upgrade() else { return true };
+            if !this.read(cx).closes_to_tray() { return true; }
+            this.update(cx, |this, cx| this.hide_to_tray(window, cx));
+            false
+        });
         // Link `hangar://` desta ou de outra execução: abre o diálogo preenchido e traz a janela para a frente. Cada link entra
         // por um update novo, nunca de dentro de outro update do Hangar (reentrar dá pânico no GPUI).
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(link) = links.recv().await {
                 let alive = this.update_in(cx, |this, window, cx| {
-                    window.activate_window();
+                    this.show_from_tray(window, cx);
                     if !link.is_empty() { this.open_invite_dialog(Some(link), window, cx); }
                 });
                 if alive.is_err() { break; }
@@ -760,6 +783,7 @@ impl Hangar {
             costs: Default::default(), worktrees: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
             terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
+            window_tray: window_tray::WindowTray::new(tray_tx),
             act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), keyboard: keyboard::Keyboard::new(window, cx), session_picker: Default::default(),
             tree: tree::Tree::new(window, cx), find: find::Find::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
             new_chat: None, new_chat_focus: cx.focus_handle().tab_stop(true),
@@ -1816,11 +1840,7 @@ impl Hangar {
                     if let (Some(message), Some(session), Some(prefs)) = (notice, &self.selected, &self.system_notifications.prefs) {
                         if !prefs.suppressed(&session.name, chrono::Local::now().time()) {
                             let (title, body) = (format!("Hangar · {}", session.name), tr(message));
-                            self.runtime.spawn_blocking(move || {
-                                if let Err(error) = notify_rust::Notification::new().appname("Hangar").summary(&title).body(&body).show() {
-                                    eprintln!("notification: {error}");
-                                }
-                            });
+                            self.runtime.spawn_blocking(move || show_system_notification(&title, &body));
                         }
                     }
                 }

@@ -457,6 +457,11 @@ A barra lateral tem dois ajustes em **Aparência** (menu da conta), só no deskt
 - **Altura da barra** — aparece quando a de cima está ligada: **altura total** (de ponta a ponta) ou
   **só o conteúdo** (a barra encolhe até onde as sessões terminam e fica flutuando, centralizada).
 
+No app de desktop (Linux e Windows), **Configurações → Geral → Manter na bandeja ao fechar** põe um
+ícone do Hangar na bandeja do sistema. Ligada, fechar a janela esconde o app em vez de encerrar:
+ele continua aberto e avisando. Clique no ícone para mostrar ou esconder a janela; o menu dele
+tem **Abrir Hangar** e **Sair**. Sem bandeja no sistema, fechar encerra como sempre.
+
 ### Terminal de verdade (rodapé, só no desktop)
 
 O ícone de terminal no topo do chat abre um **terminal de verdade** no rodapé — não é mais uma foto
