@@ -22,8 +22,9 @@ fn claude_golden(g: &Value) -> Value {
 }
 
 fn sync_codex(ix: &Index, base: &Path, areas: &AreaMap) {
-    let mut files = hangar_server::costs::collect::list_files(&base.join("codex/sessions"),
-        |n| n.starts_with("rollout-") && n.ends_with(".jsonl"));
+    // Como a varredura (`rollout_owners`): o rollout entra no índice pelo caminho canônico.
+    let mut files: Vec<_> = hangar_server::costs::collect::list_files(&base.join("codex/sessions"),
+        |n| n.starts_with("rollout-") && n.ends_with(".jsonl")).iter().map(|p| std::fs::canonicalize(p).unwrap()).collect();
     files.sort();
     ix.sync(&format!("codex:{}", base.join("codex").display()), &files, &codex::new_fold,
         codex::VERSION, areas.signature(), &|e| areas.area_lines(e), &progress()).unwrap();

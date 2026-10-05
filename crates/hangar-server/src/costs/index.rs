@@ -174,7 +174,11 @@ pub fn dump_for_tests(ix: &Index, base: &Path, prefix: &str) -> serde_json::Valu
         .unwrap().collect::<Result<Vec<_>, _>>().unwrap();
     let mut output = Map::new();
     for (id, path) in files {
-        let relative = Path::new(&path).strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/");
+        // Rollouts do Codex ficam pela chave canônica (no Windows, `\\?\C:\...`).
+        let canonical = fs::canonicalize(base).ok();
+        let relative = Path::new(&path).strip_prefix(base).ok()
+            .or_else(|| canonical.as_deref().and_then(|c| Path::new(&path).strip_prefix(c).ok()))
+            .unwrap().to_string_lossy().replace('\\', "/");
         if !relative.starts_with(prefix) { continue; }
         let mut parts = Map::new();
         for (name, table, fields, filter) in [

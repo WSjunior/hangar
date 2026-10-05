@@ -199,7 +199,8 @@ fn checked_single_rollout_keeps_row_order_generation_and_existing_scope() {
     assert_eq!(codex::session_rows(&index, &path, &areas).unwrap(), rows);
     assert_eq!(codex::try_session_rows(&index, &path, &areas).unwrap(), rows);
     assert_eq!(index.generation(), unchanged);
-    index.sync("codex:synthetic", &[path.clone()], &codex::new_fold, codex::VERSION,
+    // A varredura grava pelo caminho canônico (`rollout_owners`), como o custo avulso.
+    index.sync("codex:synthetic", &[std::fs::canonicalize(&path).unwrap()], &codex::new_fold, codex::VERSION,
         areas.signature(), &|entries| areas.area_lines(entries), &Progress::default()).unwrap();
     assert!(index.read_costs(Some("codex:avulso"), None, None).unwrap().is_empty());
     let before_growth = index.generation();
