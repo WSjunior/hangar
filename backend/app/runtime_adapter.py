@@ -698,6 +698,8 @@ def apply_event(slot, event):
         elif channel in {"voice", "voice_target"}:
             if not isinstance(data, dict) or not isinstance(data.get("event"), dict):
                 raise ValueError("evento de voz inválido")
+        elif channel == "rate":
+            pass   # Não toca no estado: medida ruim é descartada pelo coordenador, sem invalidar o cache.
         else:
             raise ValueError("canal inválido")
     except (KeyError, ValueError):

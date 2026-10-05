@@ -462,6 +462,7 @@ pub struct Stats {
     pub tool_ms: Option<f64>,
     pub tok_s: Option<f64>,
     pub cache_pct: Option<f64>,
+    #[serde(default)] pub cache_read_tok: u64,
     pub ttft_ms: Option<f64>,
     pub tok_s_now: Option<f64>,
     pub tok_s_recent: Option<f64>,

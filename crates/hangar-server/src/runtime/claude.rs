@@ -56,6 +56,7 @@ pub struct ClaudeEngine {
     label_deadline: Option<f64>,
     tokens_closed: u64,
     tokens_message: Option<u64>,
+    gen_start: Option<f64>,
     token_chars: u64,
     thinking_start: Option<f64>,
     thought_s: f64,
@@ -91,7 +92,7 @@ impl ClaudeEngine {
             waiters:BTreeMap::new(),wires:BTreeMap::new(),retired_writes:BTreeSet::new(),policies:BTreeMap::new(),last_format_request:None,format_gate:FormatGate::default(),reload_deadline:clock.monotonic_s+10.0,
             rate_limit_info:Value::Null,commands:metadata.get("commands").filter(|commands|!commands.is_null()).cloned(),terminal_commands:metadata.get("terminal_commands").cloned().unwrap_or_else(||json!([])),
             preview:LiveBuffer::default(),thinking:LiveBuffer::default(),tool_input:LiveBuffer::default(),tool_name:None,tool_visible:false,
-            label:None,compacting:false,turn_start:None,label_deadline:None,tokens_closed:0,tokens_message:None,
+            label:None,compacting:false,turn_start:None,label_deadline:None,tokens_closed:0,tokens_message:None,gen_start:None,
             token_chars:0,thinking_start:None,thought_s:0.0,tasks:Vec::new(),usage:metadata.get("usage").cloned().unwrap_or(Value::Null),
             context_window:metadata["context_window"].as_u64(),cost:metadata["cost"].as_f64(),effort_intent,effort_deadline:None,active_input:None,unknown:BTreeSet::new(),metadata };
         if let Some(controls) = engine.metadata["control_carry"].as_array() {
@@ -716,6 +717,7 @@ impl ClaudeEngine {
             Some("message_start") => {
                 self.tokens_closed += self.tokens_message.unwrap_or(self.token_chars/4);
                 self.tokens_message = None; self.token_chars = 0;
+                self.gen_start = Some(self.clock.monotonic_s);
                 if self.turn_start.is_none() { self.start_turn(); }
                 self.changed(effects,true);
             }
@@ -754,7 +756,14 @@ impl ClaudeEngine {
                 self.tool_name = None; self.tool_input.clear();
                 if let Some(start) = self.thinking_start.take() { self.thought_s += self.clock.monotonic_s-start; }
             }
-            Some("message_delta") => self.tokens_message = event["usage"]["output_tokens"].as_u64(),
+            Some("message_delta") => {
+                self.tokens_message = event["usage"]["output_tokens"].as_u64();
+                // tok/s real: do message_start ao fim, com o output_tokens que só chega aqui.
+                if let (Some(tokens),Some(start),true) = (self.tokens_message,self.gen_start.take(),self.metadata["session_id"].is_string()) {
+                    effects.push(Effect::Publish { channel:"rate".into(),data:json!({"tokens":tokens,
+                        "seconds":(self.clock.monotonic_s-start).max(0.0),"conversation":self.metadata["session_id"]}) });
+                }
+            }
             _ => {},
         }
     }

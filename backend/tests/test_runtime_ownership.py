@@ -495,6 +495,34 @@ def test_problem_event_reaches_session_problem(tmp_path):
     asyncio.run(flow())
 
 
+def test_malformed_rate_event_keeps_runtime_state_valid(tmp_path):
+    async def flow():
+        from app.runtime_adapter import apply_event
+        gateway = Reopenable()
+        coordinator, slot, _, _ = _rust_session(tmp_path, gateway)
+        await _open(coordinator)
+        await coordinator.refresh_snapshot("session")
+        event = {"key": "key", "generation": 1, "revision": slot.view["revision"] + 1, "channel": "rate",
+                 "data": {"tokens": 1000, "seconds": 10.0, "conversation": None}}
+        assert apply_event(slot, event)
+        assert slot.cache_valid
+        gateway.lease.close()
+        coordinator.close_python_leases()
+    asyncio.run(flow())
+
+
+def test_rate_report_refuses_malformed_measurements():
+    from app.live_rate import rate_report
+    assert rate_report({"tokens": 1000, "seconds": 10, "conversation": "c1"}) == (1000, 10.0, "c1")
+    for bad in ({"tokens": True, "seconds": 1.0, "conversation": "c1"},
+                {"tokens": 10, "seconds": True, "conversation": "c1"},
+                {"tokens": 10, "seconds": float("inf"), "conversation": "c1"},
+                {"tokens": 10, "seconds": -1.0, "conversation": "c1"},
+                {"tokens": 10, "seconds": 1.0, "conversation": ""},
+                None):
+        assert rate_report(bad) is None
+
+
 def test_background_drain_never_reopens(tmp_path):
     async def flow():
         gateway = Reopenable()
