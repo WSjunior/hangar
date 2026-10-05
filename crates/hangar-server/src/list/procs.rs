@@ -30,6 +30,14 @@ pub trait ProcessView: Send + Sync {
 
 #[cfg(target_os = "linux")]
 pub use linux::ProcFs;
+#[cfg(not(target_os = "linux"))]
+pub use other::SysInfo;
+
+/// O leitor desta plataforma.
+#[cfg(target_os = "linux")]
+pub type SystemProcs = ProcFs;
+#[cfg(not(target_os = "linux"))]
+pub type SystemProcs = SysInfo;
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -143,6 +151,102 @@ mod linux {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+mod other {
+    use super::*;
+    use std::sync::Mutex;
+    use std::time::Instant;
+    use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+
+    /// O ramo `psutil` do `procinfo.py`.
+    pub struct SysInfo {
+        system: Mutex<System>,
+        cache: Mutex<Option<(Instant, Arc<ChildrenMap>)>>,
+    }
+
+    impl Default for SysInfo {
+        fn default() -> Self { Self { system: Mutex::new(System::new()), cache: Mutex::new(None) } }
+    }
+
+    impl SysInfo {
+        /// Relê só `pid`, com só o que `kind` pede; `None` = morto ou pid fora do alcance.
+        // ponytail: no Windows cada chamada tira o retrato de todos os processos
+        // (`CreateToolhelp32Snapshot`); se a medição na VM pesar, reler os pids da rodada juntos.
+        fn with<T>(&self, pid: i64, kind: ProcessRefreshKind, read: impl FnOnce(&Process) -> T) -> Option<T> {
+            let pid = Pid::from_u32(u32::try_from(pid).ok()?);
+            let mut system = self.system.lock().unwrap_or_else(|e| e.into_inner());
+            system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, kind);
+            system.process(pid).map(read)
+        }
+    }
+
+    fn as_i64(pid: Pid) -> i64 { i64::from(pid.as_u32()) }
+
+    impl ProcessView for SysInfo {
+        fn children(&self, max_age: Duration) -> io::Result<Arc<ChildrenMap>> {
+            let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((at, map)) = cache.as_ref() {
+                if at.elapsed() < max_age {
+                    return Ok(map.clone());
+                }
+            }
+            let mut system = self.system.lock().unwrap_or_else(|e| e.into_inner());
+            system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+            if system.processes().is_empty() {
+                return Err(io::Error::other("nenhum processo listado"));
+            }
+            // Em ordem de pid, como o `psutil.process_iter`; sem pai fica sob 0, como lá.
+            let mut pids: Vec<(i64, i64)> = system.processes().iter()
+                .map(|(pid, p)| (as_i64(*pid), p.parent().map_or(0, as_i64))).collect();
+            pids.sort_unstable();
+            let mut map = ChildrenMap::new();
+            for (pid, ppid) in pids {
+                map.entry(ppid).or_default().push(pid);
+            }
+            let map = Arc::new(map);
+            *cache = Some((Instant::now(), map.clone()));
+            Ok(map)
+        }
+
+        fn argv(&self, pid: i64) -> Vec<String> {
+            self.with(pid, ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+                |p| p.cmd().iter().map(|a| a.to_string_lossy().into_owned()).collect()).unwrap_or_default()
+        }
+
+        fn cwd(&self, pid: i64) -> Option<PathBuf> {
+            self.with(pid, ProcessRefreshKind::nothing().with_cwd(UpdateKind::Always),
+                |p| p.cwd().map(|c| c.to_path_buf())).flatten()
+        }
+
+        fn env_var(&self, pid: i64, name: &str) -> io::Result<Option<OsString>> {
+            let prefix = [name.as_bytes(), b"="].concat();
+            let found = self.with(pid, ProcessRefreshKind::nothing().with_environ(UpdateKind::Always), |p| {
+                // Ambiente vazio é o que o `sysinfo` devolve quando não consegue ler (outro dono).
+                (!p.environ().is_empty()).then(|| p.environ().iter().find_map(|kv| {
+                    let value = kv.as_encoded_bytes().strip_prefix(prefix.as_slice())?;
+                    // SAFETY: corte logo após o `=` ASCII, fronteira válida do encoding do OsStr.
+                    Some(unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(value) }.to_os_string())
+                }))
+            });
+            match found {
+                None => Err(io::Error::new(io::ErrorKind::NotFound, "processo ausente")),
+                Some(None) => Err(io::Error::new(io::ErrorKind::PermissionDenied, "ambiente ilegível")),
+                Some(Some(value)) => Ok(value),
+            }
+        }
+
+        fn start_time(&self, pid: i64) -> Option<f64> {
+            // Segundos inteiros: o `psutil` dava fração, o `sysinfo` não tem.
+            self.with(pid, ProcessRefreshKind::nothing(), |p| p.start_time())
+                .filter(|t| *t > 0).map(|t| t as f64)
+        }
+
+        /// Fora do Linux o transcript não sai do fd aberto (`procinfo._open_jsonl`): enumerar
+        /// handles leva segundos.
+        fn fds(&self, _pid: i64) -> Vec<PathBuf> { Vec::new() }
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
@@ -230,5 +334,56 @@ mod tests {
         let procs = ProcFs::with_root(root.path());
         assert!(procs.children(Duration::ZERO).unwrap()[&10].contains(&20));
         assert_eq!(procs.start_time(20), Some(1000.07));
+    }
+}
+
+#[cfg(test)]
+mod platform_tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// Filho real lido pelo leitor da plataforma (`/proc` no Linux, `sysinfo` nos outros).
+    #[test]
+    fn sysinfo_reads_argv_and_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut command = if cfg!(windows) {
+            let mut c = std::process::Command::new("ping");
+            c.args(["-n", "30", "127.0.0.1"]);
+            c
+        } else {
+            let mut c = std::process::Command::new("sleep");
+            c.arg("30");
+            c
+        };
+        let mut child = command.current_dir(dir.path()).env("PSMUX_SESSION", "sim")
+            .stdout(std::process::Stdio::null()).spawn().unwrap();
+        let pid = i64::from(child.id());
+        let procs = SystemProcs::default();
+        // Logo após o spawn o processo ainda pode ter o argv do pai (antes do exec).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let argv = loop {
+            let argv = procs.argv(pid);
+            if argv.last().is_some_and(|a| a == "30" || a == "127.0.0.1") || Instant::now() > deadline { break argv; }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let env = procs.env_var(pid, "PSMUX_SESSION");
+        let absent = procs.env_var(pid, "HANGAR_PROCS_ABSENT");
+        let cwd = procs.cwd(pid);
+        let start = procs.start_time(pid);
+        let kids = procs.children(Duration::ZERO).unwrap().get(&i64::from(std::process::id())).cloned();
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        assert!(argv.last().is_some_and(|a| a == "30" || a == "127.0.0.1"), "argv: {argv:?}");
+        assert_eq!(env.unwrap(), Some(OsString::from("sim")));
+        assert_eq!(absent.unwrap(), None);
+        let same = |p: &std::path::Path| std::fs::canonicalize(p).unwrap();
+        assert_eq!(cwd.as_deref().map(same), Some(same(dir.path())));
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+        assert!(start.is_some_and(|s| (now - s).abs() < 120.0), "start: {start:?}, now: {now}");
+        assert!(kids.is_some_and(|k| k.contains(&pid)), "o filho aparece no mapa sob o pai");
+        let gone = SystemProcs::default();
+        assert!(gone.argv(pid).is_empty() && gone.cwd(pid).is_none(), "processo morto responde vazio");
+        assert!(gone.env_var(pid, "PSMUX_SESSION").is_err(), "morto é ilegível, não ausência");
     }
 }
