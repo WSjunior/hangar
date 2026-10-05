@@ -447,7 +447,14 @@ impl Hangar {
                         let draft = self.device.channel.draft.clone();
                         input.update(cx, |input, cx| input.set_value(draft, window, cx));
                     }
-                    if saved { self.device.search = None; self.load_about(false, cx); }
+                    if saved {
+                        self.device.search = None;
+                        self.load_about(false, cx);
+                        // O app segue o canal do servidor desta máquina: a procura da release dele refaz já.
+                        if let Some(updater) = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone()) {
+                            updater.update(cx, |updater, cx| updater.refresh(cx));
+                        }
+                    }
                 }
             }
             DeviceReply::Rate(seq, result) => {
@@ -696,6 +703,8 @@ impl Hangar {
             crate::update::AppCheck::UpToDate => (Some(tr("settings_about_app_up_to_date")), theme::muted()),
             crate::update::AppCheck::Available(version) => (Some(tr("app_update_available").replace("{version}", version)), theme::text()),
             crate::update::AppCheck::Failed(reason) => (Some(tr("settings_about_failed").replace("{reason}", reason)), theme::danger()),
+            // A procura respondeu, só não há app da branch: não é falha de conexão, e o app atual continua.
+            crate::update::AppCheck::NoRelease(text) => (Some(text.clone()), theme::danger()),
         };
         let app_control = updater.map(|updater| match &check {
             crate::update::AppCheck::Available(_) => Button::new("app-update-start").primary().small().label(tr("app_update_now")).disabled(updating)

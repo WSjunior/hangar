@@ -28,6 +28,12 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   dist da main) e o auto-update fica parado. Passo de `docs/atualizacoes/` aplicado na branch de
   teste continua no registro ao voltar pra main; e, esvaziado o campo, o auto-update não tira o
   checkout da branch de teste: a volta é pelo botão.
+- **O app nativo segue o canal do servidor desta máquina.** `pre_voo.alvo` fora da main → release
+  `native-<branch>`, que o `native.yml` publica a cada push na branch (mesma limpeza de nome no
+  workflow e no `update.rs`); a `native-latest` continua só da main. Branch sem release, ou sem o
+  build da plataforma, mantém o app e avisa na página Sobre, nunca cai na main calada. Trocar de
+  canal aceita versão de contagem menor porque o CI embute a branch (`HANGAR_NATIVE_CHANNEL`); build
+  local não tem canal e só troca por versão mais nova. Os `install-native.*` seguem na `native-latest`.
 - **O botão Atualizar NÃO roda o instalador.** Sozinho ele faz dist do CI, `uv sync`, `npm ci` por
   hash do lock, restart e prova de vida por **pid** (HTTP o processo velho também responde).
   Wrapper/tarefa/statusline só chegam por passo em `docs/atualizacoes/` — o pre-commit e o CI

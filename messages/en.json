@@ -5395,6 +5395,7 @@
   "native_app_update_running": "Updating…",
   "native_app_update_retry": "Try again",
   "native_app_update_bad_sha": "The downloaded file doesn't match the release (sha256). Nothing was replaced.",
+  "native_app_update_channel_missing": "The test channel branch {branch} has no published native app yet; the current app stays.",
   "native_app_update_swap_failed": "Couldn't replace the app: {reason}. Nothing was replaced.",
   "native_app_update_rolled_back": "The new version didn't open. The previous one is back in place.",
   "native_app_update_rollback_failed": "The new version didn't open and the previous one wasn't restored ({reason}). It's kept next to it, with .old at the end of the name.",
