@@ -664,6 +664,11 @@ class PreviewBroker:
                     # idade máxima fica abaixo da cadência pra prévia não andar mais devagar.
                     pane = await (run_tmux(tmux.capture_pane, self.name, 200, True) if kimi
                                   else shared_capture(self.name, 0.1 if working else 0.5))
+                except terminal_observer.ObservationFailed:
+                    # Falha do Rust não troca de fonte nem apaga a bolha: o monitor de estado mostra
+                    # o erro, e a prévia espera a próxima rodada com o texto que tinha.
+                    await asyncio.sleep(0.75)
+                    continue
                 except Exception:
                     # Sem log isto congela a previa do Kimi no ultimo texto com full=True,
                     # indistinguivel de "geracao longa em andamento" (achado da review — o

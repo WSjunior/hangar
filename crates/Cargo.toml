@@ -11,6 +11,7 @@ edition = "2024"
 serde = { version = "=1.0.229", features = ["derive"] }
 # preserve_order: o tool_input reescrito sai com as chaves na ordem do dict do Python.
 serde_json = { version = "=1.0.151", features = ["preserve_order"] }
+indexmap = { version = "=2.14.2", features = ["serde"] }
 hangar-api = { path = "hangar-api" }
 tokio = { version = "=1.53.1" }
 chrono = { version = "=0.4.45", default-features = false, features = ["clock"] }
@@ -35,6 +36,8 @@ eventsource-stream = "=0.2.3"
 http-body-util = "=0.1.5"
 notify = "=7.0.0"
 percent-encoding = "=2.3.2"
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+rayon = "=1.12.0"
 
 [profile.release]
 strip = true

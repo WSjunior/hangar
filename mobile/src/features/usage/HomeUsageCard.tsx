@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Pressable, ScrollView, Text, View, type StyleProp, type TextStyle } from 'react-native';
 import Animated, { Easing, useAnimatedStyle, useSharedValue, withDelay, withTiming } from 'react-native-reanimated';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Aquecendo, fetchCostsForServer, intlLocale, localeAtual, type CostReport, type DimBucket, type Server } from '@hangar/core';
+import { Aquecendo, fetchCostsForServer, motivoDoServidor, intlLocale, localeAtual, type CostReport, type DimBucket, type Server } from '@hangar/core';
 import { useSettingsColors } from '../config/colors';
 import * as m from '../../paraglide/messages';
 
@@ -151,7 +151,7 @@ export function HomeUsageCard({ server, intro = null }: { server: Server; intro?
     (async () => {
       for (let tries = 0; ; tries++) {
         try {
-          const r = await fetchCostsForServer(serverRef.current, period);
+          const r = await fetchCostsForServer(serverRef.current, period, false, true);
           if (mine !== seq.current) return;
           if (r.applied?.period !== period) setError(m.home_usage_period_unsupported());
           else if (!r.totals) setError(m.home_usage_load_failed());
@@ -169,7 +169,7 @@ export function HomeUsageCard({ server, intro = null }: { server: Server; intro?
             if (mine !== seq.current) return;
             continue;
           }
-          setError(e instanceof Aquecendo ? m.home_usage_warming_timeout() : m.home_usage_load_failed());
+          setError(e instanceof Aquecendo ? m.home_usage_warming_timeout() : motivoDoServidor(e) ?? m.home_usage_load_failed());
           break;
         }
       }

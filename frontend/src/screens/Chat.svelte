@@ -2767,9 +2767,10 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     if (!problemaChave || problemaChave === problemaDispensado) return null;
     const texto = textoProblema(stateEvent?.problema ?? null);
     if (!texto) return null;
-    // Hook que barrou o prompt: o detalhe (qual hook e por quê) é a informação inteira, não cabe cortar.
-    const detalhe = stateEvent?.problema_detalhe?.split('\n')[0]
-      .slice(0, stateEvent.problema === 'codex_prompt_bloqueado' ? 300 : 80);
+    // Hook que barrou o prompt, ou código e motivo da falha do runtime: o detalhe é a informação
+    // inteira, não cabe cortar.
+    const inteiro = stateEvent?.problema === 'codex_prompt_bloqueado' || stateEvent?.problema === 'runtime_falhou';
+    const detalhe = stateEvent?.problema_detalhe?.split('\n')[0].slice(0, inteiro ? 300 : 80);
     return detalhe ? `${texto} — ${detalhe}` : texto;
   });
 

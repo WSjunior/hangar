@@ -1,6 +1,10 @@
-//! Servidor do Hangar: lê as conversas do Claude e do Codex e repassa o resto ao backend Python.
+//! Servidor do Hangar: lê conversas e custos das sessões e repassa o restante ao backend Python.
 pub mod auth;
 pub mod config;
+pub mod costs;
+pub mod costs_routes;
+pub mod costs_failure;
+pub mod diag;
 pub mod proxy;
 pub mod routes;
 pub mod runtime;
@@ -13,11 +17,12 @@ mod terminal_process;
 pub mod terminal_routes;
 pub mod transcript;
 pub mod workspace_routes;
+pub mod worktree_routes;
 mod warn_limit;
 
 /// Versão do contrato com o Python (rotas `/internal`, eventos do side-events, ambiente). O
 /// Python (`RUST_SERVER_PROTOCOL`) recusa um binário de outra versão e atende sozinho.
-pub const INTERNAL_PROTOCOL: u32 = 13;
+pub const INTERNAL_PROTOCOL: u32 = 20;
 
 /// Todo socket TCP do servidor, aceito ou aberto. Sem isso o Nagle segura o último pedaço de uma
 /// resposta em pedaços até o ACK atrasado do outro lado; o asyncio do Python já liga sozinho.
@@ -45,6 +50,15 @@ pub async fn serve_until(
     cfg: config::Config,
     stop: impl std::future::Future<Output = ()>,
 ) -> std::io::Result<()> {
+    serve_until_with_state(listener, routes::AppState::new(cfg), stop).await
+}
+
+pub async fn serve_until_with_state(
+    listener: tokio::net::TcpListener,
+    state: routes::AppState,
+    stop: impl std::future::Future<Output = ()>,
+) -> std::io::Result<()> {
+    let cfg = state.cfg.clone();
     if let Some(instance) = config::Config::runtime_instance().map_err(std::io::Error::other)? {
         let private = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = private.local_addr()?.port();
@@ -53,7 +67,7 @@ pub async fn serve_until(
         println!("{}",runtime::gateway::startup_line(INTERNAL_PROTOCOL,&instance,port));
         let gateway = runtime::gateway::serve(private,registry.clone(),cfg.internal_secret.clone(),instance,INTERNAL_PROTOCOL);
         let result = tokio::select! {
-            result = routes::serve(listener,cfg) => result,
+            result = routes::serve_with_state(listener,state) => result,
             result = gateway => result,
             () = stop => Ok(()),
         };
@@ -61,7 +75,7 @@ pub async fn serve_until(
         return result;
     }
     tokio::select! {
-        r = routes::serve(listener, cfg) => r,
+        r = routes::serve_with_state(listener, state) => r,
         () = stop => Ok(()),
     }
 }
@@ -70,6 +84,25 @@ pub async fn serve_until(
 fn panic_line(loc: Option<&std::panic::Location<'_>>, thread: Option<&str>) -> String {
     let at = loc.map_or_else(|| "?".to_string(), |l| format!("{}:{}", l.file(), l.line()));
     format!("pânico em {at} (thread {})", thread.unwrap_or("?"))
+}
+
+/// Fixa o limite de devolução de memória do glibc. Sem isso, o limite cresce sozinho depois de
+/// cada bloco grande liberado e a memória das leituras paralelas do índice de custos fica retida.
+/// Em plataformas sem glibc, não faz nada.
+///
+/// # Segurança
+///
+/// No Linux GNU, deve ser chamada durante a inicialização do processo, antes de criar qualquer
+/// outra thread, inclusive as do runtime Tokio. O glibc altera parâmetros do alocador sem
+/// sincronização com as threads que podem lê-los durante alocações.
+pub unsafe fn tune_allocator() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" { fn mallopt(param: i32, value: i32) -> i32; }
+        const M_TRIM_THRESHOLD: i32 = -1;
+        // A pré-condição do chamador impede alocações concorrentes durante a configuração do glibc.
+        unsafe { mallopt(M_TRIM_THRESHOLD, 128 * 1024); }
+    }
 }
 
 /// Troca o hook padrão, que imprime a mensagem no stderr (o Python o herda) mesmo quando o

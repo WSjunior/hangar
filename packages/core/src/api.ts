@@ -447,12 +447,14 @@ export async function confirmarNavForServer(s: Server, name: string): Promise<vo
 // não paga este tempo: conexão recusada volta em milissegundos. Quem espera são os lentos de
 // verdade, e é exatamente por eles que este número existe.
 // `fresco` = botão "Atualizar dados": o servidor coleta agora em vez de servir a última leitura.
-export async function fetchCostsForServer(s: Server, period: string, fresco = false): Promise<Partial<CostReport>> {
-  const res = await apiFetchRes(`/api/costs?period=${encodeURIComponent(period)}${fresco ? '&fresco=1' : ''}`, {
+// `summary` = tela inicial: só totals/by_day/by_model/sem_tarifa/applied/usd_brl, sem `combos`.
+// Servidor antigo ignora o parâmetro e manda o relatório inteiro, que tem os mesmos campos.
+export async function fetchCostsForServer(s: Server, period: string, fresco = false, summary = false): Promise<Partial<CostReport>> {
+  const res = await apiFetchRes(`/api/costs?period=${encodeURIComponent(period)}${fresco ? '&fresco=1' : ''}${summary ? '&view=summary' : ''}`, {
     signal: AbortSignal.timeout(20000),
   }, s);
   if (res.status === 202) throw await Aquecendo.de(res);
-  if (!res.ok) throw new Error(`${res.status}`);
+  if (!res.ok) throw await falhaDeCustos(res);
   return res.json() as Promise<Partial<CostReport>>;
 }
 
@@ -496,8 +498,15 @@ export async function fetchUsoForServer(s: Server, period: string, filtros: UsoF
     signal: AbortSignal.timeout(20000),
   }, s);
   if (res.status === 202) throw await Aquecendo.de(res);
-  if (!res.ok) throw new Error(`${res.status}`);
+  if (!res.ok) throw await falhaDeCustos(res);
   return res.json() as Promise<Partial<UsoReport>>;
+}
+
+// 503 do servidor de custos traz código e motivo: a frase traduzida vai no `message` e o código
+// no erro, como no resto do dono único. Sem envelope, `message` continua sendo o status.
+async function falhaDeCustos(res: Response): Promise<Error> {
+  const { msg, code } = await lerErro(res);
+  return Object.assign(new Error(code ? msg : `${res.status}`), { status: res.status, code });
 }
 
 // 202 do /api/costs e /api/uso: a primeira leitura do histórico daquela máquina ainda está rodando no

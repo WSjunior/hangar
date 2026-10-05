@@ -1,4 +1,4 @@
-use hangar_server::{routes::Fallback, runtime::gateway::{self, RuntimeRegistry}};
+use hangar_server::runtime::gateway::{self, RuntimeRegistry};
 use std::{io::Write, sync::{Arc, Mutex}};
 
 #[derive(Clone)]
@@ -13,7 +13,7 @@ impl Write for Buffer {
 
 /// Um teste só neste binário: o assinante de log é global.
 #[tokio::test]
-async fn refusals_and_fallback_leave_their_reason_in_the_log() {
+async fn refusals_leave_their_reason_in_the_log() {
     let output = Arc::new(Mutex::new(Vec::new()));
     let capture = output.clone();
     let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
@@ -43,9 +43,6 @@ async fn refusals_and_fallback_leave_their_reason_in_the_log() {
     }
     server.abort();
 
-    let fallback = Fallback::default();
-    for _ in 0..6 { fallback.failed("sessao-a", "history", "history_io"); }
-
     let log = String::from_utf8(output.lock().unwrap().clone()).unwrap();
     let count = |needle: &[&str]| log.lines().filter(|line| needle.iter().all(|n| line.contains(n))).count();
     assert_eq!(count(&["runtime recusou envelope", "status=400", "check=envelope"]), 1, "{log}");
@@ -53,5 +50,4 @@ async fn refusals_and_fallback_leave_their_reason_in_the_log() {
     assert_eq!(count(&["runtime recusou operação", "key=key-missing", "code=command_fields"]), 1, "{log}");
     assert_eq!(count(&["runtime recusou operação", "key=key-missing", "kind=snapshot", "code=runtime_binding"]), 1, "{log}");
     assert!(!log.contains("private-"), "corpo do pedido chegou ao log: {log}");
-    assert_eq!(count(&["parte passou para o Python: history sessao-a motivo=history_io"]), 1, "{log}");
 }

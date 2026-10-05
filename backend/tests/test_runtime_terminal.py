@@ -12,6 +12,12 @@ from app import runtime_coordinator as rc, runtime_adapter as ra, plugin_bridge 
 from app.runtime_coordinator import Binding, RuntimeCoordinator, Phase, WriterLease
 
 
+async def _to_rust(owner, name):
+    """Registro Python do terminal aberto no Rust (o caminho do vínculo pendente que provou a conversa)."""
+    await owner._open_slot_in_rust(name, owner.slot(name), launch=False)
+    return True
+
+
 def terminal_binding(tmp_path):
     terminal = dict(name='session', pane='%1', conversation='sid', generation=1,
         created=123, mux_argv=['tmux'], windows=False,
@@ -181,17 +187,17 @@ class TerminalGateway:
         self.fail_detach = False
     async def op(self,target,command,operation_id,clock):
         self.calls.append(command['kind'])
-        if command['kind'] == 'adopt':
+        if command['kind'] == 'open':
             self.lease = WriterLease(target['lock_path'])
-            return {'ready':True,'instance':self.instance,'key':target['key'],'generation':target['generation'],
+            return {'opened':True,'instance':self.instance,'key':target['key'],'generation':target['generation'],
                 'state':{'key':target['key'],'generation':target['generation'],'revision':0,
                     'view':{'terminal':True,'conversation':target['meta']['session_id']},'channels':{},'error':None}}
-        if command['kind'] == 'detach':
+        if command['kind'] == 'close':
             if self.fail_detach:
                 raise TimeoutError('silent Rust')
             self.lease.close()
             self.lease = None
-            return {'detached':True}
+            return {'closed':True}
         return {'operation_id':operation_id,'disposition':'accepted','payload':{}}
 
 
@@ -201,7 +207,7 @@ def test_terminal_prepare_adopt_without_cano(monkeypatch, tmp_path):
     async def flow():
         assert await owner.prepare_session('session','claude')
         assert slot.phase == Phase.Rust
-        assert gateway.calls == ['adopt']
+        assert gateway.calls == ['open']
         assert not slot.binding.headless and 'cano' not in slot.binding.meta
         assert ra.native_slot('session') is None
         await owner.detach('session')
@@ -283,44 +289,46 @@ def test_same_name_new_mux_does_not_import_old_queue(monkeypatch,tmp_path):
     asyncio.run(flow())
 
 
-def test_admin_detach_silent_has_zero_effect(monkeypatch,tmp_path):
+def test_admin_loan_refused_has_zero_effect(monkeypatch,tmp_path):
     from app.runtime_terminal import run_admin
-    gateway=TerminalGateway()
+    class Silent(LoanGateway):
+        async def op(self,target,command,operation_id,clock):
+            if command['kind'] == 'control' and command['control'] == 'keyboard_loan':
+                raise TimeoutError('silent Rust')
+            return await super().op(target,command,operation_id,clock)
+    gateway=Silent()
     owner,slot,_=live_owner(monkeypatch,tmp_path,gateway=gateway)
     calls=[]
     async def flow():
-        await owner.adopt('session')
-        gateway.fail_detach=True
+        await _to_rust(owner,'session')
         with pytest.raises(TimeoutError):
             await run_admin(owner,'session','permission',{},lambda:calls.append('BTab'))
-        assert calls==[] and slot.phase != Phase.Python
+        assert calls==[] and slot.phase == Phase.Rust
         gateway.lease.close()
     asyncio.run(flow())
 
 
-def test_admin_cancel_waits_thread_journal_and_readoption(monkeypatch,tmp_path):
+def test_admin_cancel_waits_thread_and_returns_keyboard(monkeypatch,tmp_path):
     from app.runtime_terminal import run_admin
-    gateway=TerminalGateway()
+    gateway=LoanGateway()
     owner,slot,_=live_owner(monkeypatch,tmp_path,gateway=gateway)
     entered,release=threading.Event(),threading.Event()
     def action():
         entered.set()
-        assert slot.frozen and slot.phase == Phase.Python
-        assert any(op['status'] == 'dispatching' and op['payload'].get('kind') == 'permission'
-            for op in slot.store.state['operations'].values())
+        assert slot.phase == Phase.Rust and slot.store is None
         release.wait(3)
         return 'mode'
     async def flow():
-        await owner.adopt('session')
+        await _to_rust(owner,'session')
         task=asyncio.create_task(run_admin(owner,'session','permission',{},action))
         while not entered.is_set(): await asyncio.sleep(.001)
         task.cancel()
         await asyncio.sleep(.01)
-        assert not task.done() and slot.frozen
-        with pytest.raises(RuntimeError): await owner.op('session',{'kind':'drain'},'drain')
+        assert not task.done(), 'o cancelamento espera a digitação em curso'
         release.set()
         with pytest.raises(asyncio.CancelledError): await task
-        assert slot.phase == Phase.Rust and not slot.frozen
+        assert [kind for kind,_ in gateway.controls] == ['keyboard_loan','keyboard_return']
+        assert slot.phase == Phase.Rust
         await owner.detach('session')
     asyncio.run(flow())
 
@@ -376,7 +384,7 @@ def test_rust_terminal_drain_shape_normalized_for_existing_callers(monkeypatch,t
         return await original(target,command,operation_id,clock)
     gateway.op=rpc
     async def flow():
-        await owner.adopt('session')
+        await _to_rust(owner,'session')
         assert (await owner.op('session',{'kind':'drain'},'drain'))['sent']==1
         await owner.detach('session')
     asyncio.run(flow())
@@ -386,12 +394,12 @@ def test_retire_old_rust_life_before_new_name_binding(monkeypatch,tmp_path):
     gateway=TerminalGateway()
     owner,slot,collected=live_owner(monkeypatch,tmp_path,gateway=gateway)
     async def flow():
-        await owner.adopt('session')
+        await _to_rust(owner,'session')
         collected['namespace']='socket:restarted:birth'
         assert await owner.prepare_session('session','claude')
         assert owner.slot('session') is not slot
         assert slot.lease is None and slot.phase==Phase.RecoveringPython
-        assert gateway.calls==['adopt','detach','adopt']
+        assert gateway.calls==['open','close','open']
         await owner.detach('session')
     asyncio.run(flow())
 
@@ -695,7 +703,7 @@ def test_answer_model_dump_reaches_terminal_contract(monkeypatch,tmp_path,kind):
         return await original(target,command,operation,clock)
     gateway.op=op
     async def flow():
-        await owner.adopt('session')
+        await _to_rust(owner,'session')
         # Id explícito de pergunta TUI evita o caminho composto para chat sem pedido.
         result=await asyncio.to_thread(answer_sync,'session',[item.model_dump()],'tui-request',None)
         assert result['disposition']=='accepted'
@@ -714,7 +722,7 @@ def test_explicit_claude_steer_uses_owner_and_transcript_confirmation(monkeypatc
     monkeypatch.setattr(api,'_pane_info',lambda name:('claude','%1'))
     monkeypatch.setattr(api.PromptQueue,'confirm_delivered',lambda *args:pytest.fail('confirmação por ausência de prova'))
     async def flow():
-        await owner.adopt('session')
+        await _to_rust(owner,'session')
         result=await api.steer_session('session')
         assert result['promoted'] and result['confirmed']==0
         assert owner.transport.calls[-2:]==['control','confirm']
@@ -747,7 +755,7 @@ def test_claude_terminal_all_producers_route_to_owner(monkeypatch,tmp_path,sourc
     monkeypatch.setattr(api,'_recusa_orq',lambda name:None)
     monkeypatch.setattr(api,'_cached_info_sync',lambda name:SimpleNamespace(jsonl=slot.binding.jsonl,provider='claude'))
     async def flow():
-        await owner.adopt('session')
+        await _to_rust(owner,'session')
         if source=='input':await api.input_prompt('session',api.InputBody(text='text',steer=True))
         elif source=='shared_send':await api._enviar('session','[grupo: sender] message')
         elif source=='send_one':await asyncio.to_thread(api._send_one,'session','text')
@@ -767,7 +775,7 @@ def test_claude_terminal_controls_route_to_owner(monkeypatch,tmp_path,control):
     gateway=TerminalGateway()
     owner,slot,_=live_owner(monkeypatch,tmp_path,gateway=gateway)
     async def flow():
-        await owner.adopt('session')
+        await _to_rust(owner,'session')
         terminal=ti.TerminalInput()
         if control in {'send_key','send_term_key'}:await asyncio.to_thread(getattr(terminal,control),'session','Up')
         elif control=='send_text':await asyncio.to_thread(terminal.send_text,'session','text')
@@ -775,7 +783,7 @@ def test_claude_terminal_controls_route_to_owner(monkeypatch,tmp_path,control):
         elif control in {'submeter_multipla','interrupt'}:await asyncio.to_thread(getattr(terminal,control),'session')
         elif control=='steer_now':await asyncio.to_thread(ti.steer_now,'session','claude')
         else:await asyncio.to_thread(ti.answer_questions,'session',[{'kind':'option','indices':[0],'labels':['A']}])
-        assert gateway.calls==['adopt','control']
+        assert gateway.calls==['open','control']
         await owner.detach('session')
     asyncio.run(flow())
 
@@ -805,11 +813,11 @@ def test_public_guest_routes_follow_owner_and_readonly_pair_zero_effect(monkeypa
         share_gate._life_cache.clear()
         client=TestClient(api.app,base_url='http://127.0.0.1:8766',client=('203.0.113.9',1))
     async def flow():
-        await owner.adopt('session')
+        await _to_rust(owner,'session')
         result=await asyncio.to_thread(client.post,'/api/sessions/session/input',
             json={'text':'text'},headers={'Authorization':'Bearer guest'})
         assert result.status_code==status
-        assert gateway.calls==(['adopt','submit'] if status==200 else ['adopt'])
+        assert gateway.calls==(['open','submit'] if status==200 else ['open'])
         await owner.detach('session')
     asyncio.run(flow())
 
@@ -903,6 +911,7 @@ def _reborn_terminal(monkeypatch, tmp_path):
         config_dir=str(tmp_path / 'other-account'), cwd=str(tmp_path), mux_argv=['tmux'], windows=False,
         agent_pid=77, agent_birth=456.7)
     monkeypatch.setattr(terminal, '_session_proof', lambda name: life['proof'])
+    monkeypatch.setattr(terminal, '_pane_life', lambda name: life.get('pane'), raising=False)
     monkeypatch.setattr(terminal, '_collect', lambda name: life['facts'])
     monkeypatch.setattr(sessions, 'load', lambda name: None)
     monkeypatch.setattr(pqueue, '_queue_dir', lambda: tmp_path)
@@ -954,3 +963,225 @@ def test_pending_terminal_reborn_again_keeps_key(monkeypatch, tmp_path):
         assert slot.binding.key == 'terminal_key' and slot.binding.meta['terminal']['pane'] == '%9'
         assert not slot.binding.meta.get('pending_terminal')
     asyncio.run(flow())
+
+
+# --- Riscos anotados no PR #43 e a troca pelo caminho Rust (dono único, Task 4) ---
+
+def test_reborn_terminal_with_other_conversation_does_not_inherit_key(monkeypatch, tmp_path):
+    owner, slot, life, born = _reborn_terminal(monkeypatch, tmp_path)
+    async def flow():
+        async def move():
+            life.update(proof='new-life', facts={**born, 'session_id': 'outra',
+                'jsonl': str(tmp_path / 'other-account' / 'outra.jsonl')})
+        await owner.change('session', move, reopen=False)
+        current = owner.slot('session')
+        assert current.binding.key != 'terminal_key' and current.binding.meta['session_id'] == 'outra'
+        assert current.store.state['rows'] == [], 'a fila da conversa antiga não vai para a nova'
+        assert 'terminal_key' not in owner.slots
+    asyncio.run(flow())
+
+
+def test_session_proof_survives_tmux_server_gone(monkeypatch):
+    from types import SimpleNamespace
+    from app import runtime_terminal as terminal, tmux
+    # O servidor tmux morreu entre o display-message e a leitura do processo dele.
+    monkeypatch.setattr(tmux, '_run', lambda args: SimpleNamespace(returncode=0,
+        stdout='/tmp/sock\t999999999\t5\tsession\t$1\t999999998\n'))
+    assert terminal._session_proof('session') is None
+    assert terminal._pane_life('session') is None
+    assert terminal.terminal_life(terminal_binding(Path('/tmp'))) is None
+
+
+def test_respawn_pane_in_same_tmux_session_keeps_key(monkeypatch, tmp_path):
+    owner, slot, life, born = _reborn_terminal(monkeypatch, tmp_path)
+    life['pane'] = 'pane-antigo'
+    async def flow():
+        async def respawn():
+            # `respawn-pane` na mesma sessão tmux: a prova da sessão fica, o pane é outro.
+            life.update(pane='pane-novo', facts={**born, 'session_proof': 'old-life'})
+        await owner.change('session', respawn, reopen=False)
+        assert slot.binding.key == 'terminal_key' and slot.binding.meta['terminal']['pane'] == '%7'
+        assert [row['text'] for row in slot.store.state['rows']] == ['carry']
+    asyncio.run(flow())
+
+
+def test_rust_account_move_reborn_terminal_reopens_with_key(monkeypatch, tmp_path):
+    from app import runtime_terminal as terminal
+    gateway = TerminalGateway()
+    owner, slot, collected = live_owner(monkeypatch, tmp_path, gateway=gateway)
+    facts = {'now': {**collected, 'session_proof': 'p1'}}
+    proof = {'now': 'p1'}
+    monkeypatch.setattr(terminal, '_collect', lambda name: {**facts['now'], 'name': name})
+    monkeypatch.setattr(terminal, '_session_proof', lambda name: proof['now'])
+    monkeypatch.setattr(terminal, '_pane_life', lambda name: None, raising=False)
+    slot.store.exec(1, 'append', {'monotonic_s': 1, 'epoch_s': .5},
+        {'kind': 'append', 'text': 'carry', 'delivered': False, 'ts': .5, 'pre_transcript': False, 'entry_id': 'carry'})
+    async def flow():
+        assert await owner.prepare_session('session', 'claude')
+        assert slot.phase == Phase.Rust
+        key = slot.binding.key
+        async def move():
+            assert gateway.calls[-1] == 'close' and gateway.lease is None
+            proof['now'] = 'p2'
+            facts['now'] = {**collected, 'pane': '%7', 'created': 456, 'namespace': 'mux-novo', 'session_proof': 'p2',
+                'jsonl': str(tmp_path / 'outra-conta' / 'sid.jsonl'), 'config_dir': str(tmp_path / 'outra-conta')}
+        await owner.change('session', move)
+        assert gateway.calls == ['open', 'snapshot', 'close', 'open']
+        assert slot.phase == Phase.Rust and slot.lease is None
+        assert slot.binding.key == key and slot.binding.generation == 2 and slot.binding.meta['terminal']['pane'] == '%7'
+        await owner.change('session', lambda: asyncio.sleep(0), remove=True)
+    asyncio.run(flow())
+    import json
+    state = json.loads(slot.binding.state_path.read_bytes())
+    assert [row['text'] for row in state['rows']] == ['carry']
+
+
+# --- Terminal nasce no Rust e o teclado emprestado (dono único, Task 6) ---
+
+class LoanGateway(TerminalGateway):
+    """Rust falso que empresta o teclado: guarda os pedidos de controle e o id do empréstimo."""
+    def __init__(self, seconds_seen=None):
+        super().__init__()
+        self.controls = []
+    async def op(self,target,command,operation_id,clock):
+        if command['kind'] == 'control' and command['control'] in {'keyboard_loan','keyboard_return'}:
+            self.calls.append(command['kind'])
+            self.controls.append((command['control'], dict(command['payload'])))
+            if command['control'] == 'keyboard_loan':
+                return {'operation_id':operation_id,'disposition':'accepted','payload':{'loan_id':'loan:1:7','seconds':command['payload']['seconds']}}
+            return {'operation_id':operation_id,'disposition':'accepted','payload':{'returned':True}}
+        return await super().op(target,command,operation_id,clock)
+
+
+def _born_terminal(monkeypatch, tmp_path, gateway):
+    from app import runtime_terminal as terminal, pqueue
+    from app.adapters.claude_headless import sessions
+    from app.runtime_adapter import LegacyBridge
+    collected = dict(name='session',pane='%1',created=1,namespace='socket:pid:birth',
+        jsonl=str(tmp_path / 'sid.jsonl'),session_id='sid',config_dir=str(tmp_path),cwd=str(tmp_path),
+        mux_argv=['tmux'],windows=False)
+    monkeypatch.setattr(terminal, '_collect', lambda name: {**collected, 'name': name})
+    monkeypatch.setattr(pqueue, '_queue_dir', lambda: tmp_path)
+    monkeypatch.setattr(sessions, 'load', lambda name: None)
+    owner = RuntimeCoordinator(gateway)
+    owner.legacy = LegacyBridge(owner, {'claude': object()})
+    rc._current = owner
+    return owner
+
+
+def test_terminal_session_registers_in_rust_without_python_phase(monkeypatch, tmp_path):
+    gateway = TerminalGateway()
+    owner = _born_terminal(monkeypatch, tmp_path, gateway)
+    monkeypatch.setattr(owner, 'register', lambda binding: pytest.fail('registro Python do terminal'))
+    async def flow():
+        owner.loop = asyncio.get_running_loop()
+        assert await owner.prepare_session('session', 'claude')
+        slot = owner.slot('session')
+        assert slot.phase == Phase.Rust and slot.lease is None and slot.store is None
+        assert gateway.calls == ['open']
+        await owner.change('session', lambda: asyncio.sleep(0), remove=True)
+    asyncio.run(flow())
+
+
+def test_admin_borrows_keyboard_without_moving_queue(monkeypatch, tmp_path):
+    from app import runtime_terminal as terminal
+    gateway = LoanGateway()
+    owner = _born_terminal(monkeypatch, tmp_path, gateway)
+    typed = []
+    def action():
+        terminal.assert_writer('session')       # é o que cada escrita no tmux confere
+        typed.append(owner.slot('session').phase)
+        return 'ok'
+    async def flow():
+        owner.loop = asyncio.get_running_loop()
+        assert await owner.prepare_session('session', 'claude')
+        assert await terminal.run_admin(owner, 'session', 'set_model', {'model':'haiku'}, action) == 'ok'
+        slot = owner.slot('session')
+        assert typed == [Phase.Rust], 'o Python digita com a sessão no Rust'
+        assert slot.phase == Phase.Rust and slot.lease is None and slot.store is None, 'fila e trava ficam no Rust'
+        assert [kind for kind, _ in gateway.controls] == ['keyboard_loan', 'keyboard_return']
+        assert gateway.controls[1][1] == {'loan_id': 'loan:1:7'}
+        assert 'close' not in gateway.calls and gateway.calls.count('open') == 1, 'sem fechar nem reabrir'
+        with pytest.raises(RuntimeError):
+            terminal.assert_writer('session')   # fora do empréstimo o Python não escreve
+        await owner.change('session', lambda: asyncio.sleep(0), remove=True)
+    asyncio.run(flow())
+
+
+def test_keyboard_loan_expires_and_fails_with_code(monkeypatch, tmp_path):
+    from app import runtime_terminal as terminal
+    gateway = LoanGateway()
+    owner = _born_terminal(monkeypatch, tmp_path, gateway)
+    monkeypatch.setattr(terminal, '_LOAN_S', 1)        # prazo menos a folga: já vencido ao digitar
+    def action():
+        terminal.assert_writer('session')
+    async def flow():
+        owner.loop = asyncio.get_running_loop()
+        assert await owner.prepare_session('session', 'claude')
+        with pytest.raises(RuntimeError) as caught:
+            await terminal.run_admin(owner, 'session', 'set_model', {'model':'haiku'}, action)
+        assert getattr(caught.value, 'code', '') == 'keyboard_loan_expired'
+        assert [kind for kind, _ in gateway.controls] == ['keyboard_loan', 'keyboard_return'], 'o teclado volta mesmo na falha'
+        with pytest.raises(RuntimeError):
+            terminal.assert_writer('session')
+        await owner.change('session', lambda: asyncio.sleep(0), remove=True)
+    asyncio.run(flow())
+
+
+def test_lost_loan_reply_is_returned_by_repeating_the_same_id(monkeypatch, tmp_path):
+    # O Rust concedeu e a resposta se perdeu: o mesmo pedido repetido traz a mesma concessão, que
+    # volta na hora em vez de deixar o teclado preso até o prazo.
+    from app import runtime_terminal as terminal
+
+    class Lossy(LoanGateway):
+        def __init__(self):
+            super().__init__()
+            self.loan_ids = []
+        async def op(self, target, command, operation_id, clock):
+            if command['kind'] == 'control' and command['control'] == 'keyboard_loan':
+                self.loan_ids.append(operation_id)
+                reply = await super().op(target, command, operation_id, clock)
+                if len(self.loan_ids) == 1:
+                    raise ConnectionResetError('resposta perdida')
+                return reply
+            return await super().op(target, command, operation_id, clock)
+
+    gateway = Lossy()
+    owner = _born_terminal(monkeypatch, tmp_path, gateway)
+    async def flow():
+        owner.loop = asyncio.get_running_loop()
+        assert await owner.prepare_session('session', 'claude')
+        with pytest.raises(ConnectionResetError):
+            await terminal.run_admin(owner, 'session', 'set_model', {'model':'haiku'}, lambda: pytest.fail('digitou sem teclado'))
+        assert len(gateway.loan_ids) == 2 and gateway.loan_ids[0] == gateway.loan_ids[1], 'o mesmo id repetido'
+        assert [kind for kind, _ in gateway.controls] == ['keyboard_loan', 'keyboard_loan', 'keyboard_return']
+        await owner.change('session', lambda: asyncio.sleep(0), remove=True)
+    asyncio.run(flow())
+
+
+def test_closed_terminal_state_is_not_a_registration_error_at_boot(monkeypatch, tmp_path):
+    # Sessão com terminal fechada deixa o estado da fila no disco: no boot ela não tem pane, e isso
+    # não é falha de registro (a prova via 14 erros por restart, um por terminal fechado).
+    from app import runtime_terminal as terminal, tmux, diag
+    events = []
+    monkeypatch.setattr(diag, 'registrar', lambda evento, nivel='ok', **campos: events.append((evento, campos.get('codigo'))))
+    owner, slot, _ = live_owner(monkeypatch, tmp_path)
+    owner.close_python_leases()
+    rc._current = None
+    monkeypatch.setattr(terminal, '_collect', lambda name: None)
+    panes = {}
+    monkeypatch.setattr(tmux, 'sessao_existe', lambda name: panes.get(name, False))
+    fresh = RuntimeCoordinator()
+    async def flow():
+        await fresh._register_durable_terminals(claude=None)
+    asyncio.run(flow())
+    assert ('runtime.registration_failed', 'terminal_binding') not in events
+    assert fresh.slot('session').awaiting_identity, 'o registro em espera continua'
+    panes['session'] = True      # há sessão com o nome e o vínculo não se prova: aí é erro
+    other = RuntimeCoordinator()
+    asyncio.run(other._register_durable_terminals(claude=None))
+    assert ('runtime.registration_failed', 'terminal_binding') in events
+    events.clear()
+    panes['session'] = None      # tmux sem resposta: não dá para dizer que fechou
+    asyncio.run(RuntimeCoordinator()._register_durable_terminals(claude=None))
+    assert ('runtime.registration_failed', 'terminal_binding') in events

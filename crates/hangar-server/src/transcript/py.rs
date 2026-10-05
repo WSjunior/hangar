@@ -96,7 +96,7 @@ pub(crate) fn iso_timestamp(s: &str) -> Option<f64> {
 /// (microssegundos desde a época lendo a hora como UTC, deslocamento do fuso em microssegundos).
 /// Porte do `_pydatetime.fromisoformat` (o C aceita fração vazia, e este segue o C). Datas por
 /// semana ISO (`2026-W40-5`) ficam de fora.
-fn fromisoformat(s: &str) -> Option<(i64, Option<i64>)> {
+pub(crate) fn fromisoformat(s: &str) -> Option<(i64, Option<i64>)> {
     let cs: Vec<char> = s.chars().collect();
     // Data sozinha de 7 caracteres só existe na forma por semana.
     if cs.len() < 8 {

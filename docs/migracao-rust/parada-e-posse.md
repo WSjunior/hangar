@@ -69,6 +69,11 @@ vivo (`religou`) porque é o dono até o Rust adotar; a adoção solta esse clie
 segue vivo)`). Na parada do systemd o Rust recebe o SIGTERM junto e morre primeiro; o Python recupera
 as sessões (`religou`) e o lifespan as solta de novo (`desligou`). Nos dois casos o cano segue vivo.
 
+> Deixou de valer em parte com o dono único (`dono-unico/plano.md`, Task 4): a administração
+> (renomear, parar, recarregar, trocar modo ou conta, transferir) fecha no Rust e reabre nele sem
+> religar cliente Python, e o lifespan não solta mais nada na parada. Sobra o par na readoção do
+> boot até a Task 5, que tira também esse.
+
 ## Testes
 
 Falham sem o conserto (conferido tirando só `backend/app`) e passam com ele:

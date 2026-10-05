@@ -103,6 +103,12 @@ fn failure_detail(body: Option<Value>, status: u16) -> String {
                     .map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_owned))).collect()).unwrap_or_default();
                 if let Some(message) = crate::i18n::tr_web(code, &params) { return Some(message); }
             }
+            // Custos e uso no Rust (503 do dono único): a frase do web pelo código, que já traz o código.
+            if let Some(code) = fields.get("code").and_then(Value::as_str).filter(|code| code.starts_with("costs_") || *code == "internal_info") {
+                // `internal_info` é o mesmo código do histórico, com a frase de lá.
+                let key = if code == "internal_info" { "history_internal_info" } else { code };
+                if let Some(message) = crate::i18n::tr_web(key, &std::collections::HashMap::new()) { return Some(message); }
+            }
             // Atalhos do projeto: a frase do web pelo código, com o motivo (`params.detalhe`) dentro; sem a frase, o `msg`.
             if let Some(code @ ("erro_project_shortcuts" | "erro_project_shortcuts_projeto" | "erro_project_shortcuts_arquivo" | "erro_shortcut_pasta")) = fields.get("code").and_then(Value::as_str) {
                 let reason = fields.get("params").and_then(|p| p.get("detalhe")).and_then(Value::as_str).or(msg).unwrap_or("");
@@ -687,6 +693,17 @@ mod tests {
         assert!(message.contains("test/channel"), "{message}");
         assert!(!message.contains("{branch}"));
         assert_ne!(message, "server fallback");
+    }
+
+    #[test]
+    fn costs_failure_shows_the_translated_reason_with_its_code() {
+        let message = failure_detail(Some(json!({"ok": false, "error_code": "costs_no_disk", "message": "índice de custos indisponível",
+            "detail": {"code": "costs_no_disk", "params": {"motivo": "índice de custos indisponível"},
+                "msg": "índice de custos indisponível — costs_no_disk"}})), 503);
+        assert_eq!(message, crate::i18n::tr_web("costs_no_disk", &Default::default()).unwrap());
+        assert!(message.contains("(costs_no_disk)"), "{message}");
+        let info = failure_detail(Some(json!({"detail": {"code": "internal_info", "params": {}, "msg": "x — internal_info"}})), 503);
+        assert_eq!(info, crate::i18n::tr_web("history_internal_info", &Default::default()).unwrap());
     }
 
     #[test]

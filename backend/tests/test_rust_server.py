@@ -127,6 +127,9 @@ class _App:
 
 @pytest.fixture
 def fake_bin(tmp_path, monkeypatch):
+    from app import costs_sources
+    # A reserva do teste não pode agendar uma varredura das contas reais.
+    monkeypatch.setattr(costs_sources, "agendar_aquecimento", lambda delay: None)
     path = tmp_path / "hangar-server"
     source = FAKE.replace("__PROTOCOL__", str(rust_server.RUST_SERVER_PROTOCOL))
     path.write_text(f"#!{sys.executable}\n{source}", encoding="utf-8")
@@ -251,9 +254,9 @@ def test_child_takes_public_port_and_gets_the_contract_env(fake_bin, tmp_path, e
     assert app.startups == 1
 
 
-def test_three_crashes_in_a_minute_hand_the_public_port_to_python(
-        fake_bin, tmp_path, monkeypatch, events, relog):
-    monkeypatch.setenv("FAKE_MODE", "cai")
+def _run_until_takeover(fake_bin, tmp_path, monkeypatch, *, crash):
+    if crash:
+        monkeypatch.setenv("FAKE_MODE", "cai")
     app, port = _App(), _free_port()
     server, internal, kw = _setup(app, port)
 
@@ -269,10 +272,25 @@ def test_three_crashes_in_a_minute_hand_the_public_port_to_python(
     assert len(spawns) == rust_server.MAX_CRASHES
     assert all(_dead(s["pid"]) for s in spawns)
     assert len({s["secret"] for s in spawns}) == rust_server.MAX_CRASHES   # segredo novo a cada subida
+    assert app.startups == 1                        # a porta pública não rodou o lifespan de novo
+
+
+def test_three_crashes_in_a_minute_hand_the_public_port_to_python(
+        fake_bin, tmp_path, monkeypatch, events, relog):
+    _run_until_takeover(fake_bin, tmp_path, monkeypatch, crash=True)
     assert [e for e in events if e[0] == "hangar_server.caiu"]
     assert ("hangar_server.reserva", "erro", {"codigo": "quedas"}) in events
-    assert app.startups == 1                        # a porta pública não rodou o lifespan de novo
     assert relog                                    # o diário voltou a ouvir o uvicorn
+
+
+def test_rust_up_marks_costs_served_and_takeover_warms_python(fake_bin, tmp_path, events, monkeypatch):
+    from app import costs_sources
+    marks, schedules = [], []
+    monkeypatch.setattr(costs_sources, "set_served_by_rust", marks.append)
+    monkeypatch.setattr(costs_sources, "agendar_aquecimento", schedules.append)
+    _run_until_takeover(fake_bin, tmp_path, monkeypatch, crash=True)
+    assert True in marks and marks[-1] is False
+    assert schedules == [0]
 
 
 def test_child_that_never_answers_is_killed_and_python_takes_over(
@@ -466,3 +484,54 @@ def test_watcher_failure_puts_the_cause_in_the_diary(monkeypatch, events):
     assert nivel == "erro"
     assert campos["erro_tipo"] == "RuntimeError"
     assert (campos["causa_tipo"], campos["errno"]) == ("PermissionError", 13)
+
+
+def test_protocol_is_the_same_number_on_both_sides():
+    lib = (Path(__file__).resolve().parents[2] / "crates/hangar-server/src/lib.rs").read_text()
+    rust = int(re.search(r"pub const INTERNAL_PROTOCOL: u32 = (\d+);", lib).group(1))
+    assert rust == rust_server.RUST_SERVER_PROTOCOL == 20
+
+
+# --- Modo do processo (dono único, Task 5) ---
+
+def _supervisor(stopping):
+    return rust_server.Supervisor(Path("/bin/true"), "127.0.0.1", 1, 2, "token", "127.0.0.1", stopping)
+
+
+def test_stop_is_decided_before_any_action(monkeypatch):
+    from types import SimpleNamespace
+    supervisor = _supervisor(lambda: True)
+    async def start():
+        supervisor.proc = SimpleNamespace(poll=lambda: 0, returncode=0)
+        return "up"
+    calls = []
+    async def deactivate(confirmed_dead):
+        calls.append("deactivate_runtime")
+    monkeypatch.setattr(supervisor, "_start", start)
+    monkeypatch.setattr(supervisor, "deactivate_runtime", deactivate)
+    monkeypatch.setattr(rust_server, "_POLL", 0.01)
+    assert asyncio.run(supervisor.run()) == "parada"
+    assert calls == [], "parada não desativa nem recupera nada"
+
+
+def test_invalid_private_address_is_startup_failure(monkeypatch):
+    from types import SimpleNamespace
+    supervisor = _supervisor(lambda: False)
+    monkeypatch.setattr(rust_server, "_spawn", lambda binary, env: SimpleNamespace(poll=lambda: None, pid=1))
+    monkeypatch.setattr(rust_server, "_runtime_ready", lambda proc, instance: {"type":"runtime_ready",
+        "protocol":rust_server.RUST_SERVER_PROTOCOL, "instance":instance, "port":1})
+    monkeypatch.setattr(rust_server, "_health", lambda host, port: {"protocol":rust_server.RUST_SERVER_PROTOCOL})
+    configured = []
+    monkeypatch.setattr(supervisor, "configure_runtime", lambda *args: configured.append(args))
+    try:
+        assert asyncio.run(supervisor._start()) == "address"
+    finally:
+        internal_api.set_secret(None)
+    assert configured == [], "endereço privado inválido não liga o Rust com as pontes desligadas"
+    async def address():
+        return "address"
+    async def stop():
+        configured.append("stop")
+    monkeypatch.setattr(supervisor, "_start", address)
+    monkeypatch.setattr(supervisor, "stop", stop)
+    assert asyncio.run(supervisor.run()) == "endereco_privado" and configured == ["stop"]

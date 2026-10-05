@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, untrack } from 'svelte';
-  import { Aquecendo, fetchCostsForServer, type CostReport, type DimBucket, type Server } from '@hangar/core';
+  import { Aquecendo, fetchCostsForServer, motivoDoServidor, type CostReport, type DimBucket, type Server } from '@hangar/core';
   import { dec, tok, money2 } from '../lib/fmt';
   import { moeda } from '../lib/moeda.svelte';
   import * as m from '../paraglide/messages';
@@ -85,7 +85,7 @@
     warming = null;
     for (let tries = 0; ; tries++) {
       try {
-        const r = await fetchCostsForServer(srv, per);
+        const r = await fetchCostsForServer(srv, per, false, true);
         if (mine !== seq) return;
         loadedAt = Date.now();
         if (r.applied?.period !== per) error = m.home_usage_period_unsupported();
@@ -102,7 +102,7 @@
           continue;
         }
         loadedAt = Date.now();
-        error = m.home_usage_load_failed();
+        error = motivoDoServidor(e) ?? m.home_usage_load_failed();
         break;
       }
     }

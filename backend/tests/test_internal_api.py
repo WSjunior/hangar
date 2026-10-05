@@ -1,4 +1,7 @@
 # backend/tests/test_internal_api.py
+import asyncio
+import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -67,6 +70,39 @@ def test_workspace_context_contains_only_registry_metadata(tmp_path):
     assert response.status_code == 200
     assert response.json() == {"roots":[str(tmp_path)], "sessions":[{"name":"s1","cwd":"/p"}],
                                "session":{"name":"s1","cwd":"/p","jsonl":"/p/abc-123.jsonl"}}
+
+
+def test_worktrees_context_has_folders_inside_roots_and_account_projects(tmp_path):
+    inside = tmp_path / "repo"
+    inputs = AsyncMock(return_value=([_info(cwd=str(inside), worktree_path=str(inside))], [str(inside)], [tmp_path]))
+    with patch("app.api._worktree_inputs", inputs), \
+            patch("app.archive._contas", return_value=[(None, "", tmp_path / "projects")]):
+        response = _client().get("/internal/worktrees/context", headers={"X-Hangar-Internal": SECRET})
+    assert response.status_code == 200
+    assert response.json() == {
+        "roots": [str(tmp_path)], "cwds": [str(inside)],
+        "sessions": [{"name": "s1", "cwd": str(inside), "worktree_path": str(inside), "jsonl": "/p/abc-123.jsonl"}],
+        "project_bases": [str(tmp_path / "projects")],
+    }
+
+
+def test_worktrees_context_refuses_before_reading_anything():
+    with patch("app.api._worktree_inputs") as inputs:
+        response = _client("203.0.113.7").get("/internal/worktrees/context", headers={"X-Hangar-Internal": SECRET})
+        assert _client().get("/internal/worktrees/context", headers={"X-Hangar-Internal": "errado"}).status_code == 404
+    assert response.status_code == 404
+    inputs.assert_not_called()
+
+
+def test_worktree_inputs_keep_recent_folders_inside_the_roots(tmp_path):
+    (tmp_path / "repo").mkdir()
+    sessions = [_info(cwd=str(tmp_path / "repo")), _info(name="s2", cwd="/fora")]
+    folders = [SimpleNamespace(cwd=str(tmp_path), mtime=0), SimpleNamespace(cwd="/fora-recente", mtime=time.time()),
+               SimpleNamespace(cwd=str(tmp_path / "recente"), mtime=time.time())]
+    with patch("app.api.registry.list", return_value=sessions), patch("app.api.list_folders", return_value=folders), \
+            patch("app.api.allowed_roots", return_value=[tmp_path]):
+        _sessions, cwds, roots = asyncio.run(api_mod._worktree_inputs())
+    assert cwds == [str(tmp_path / "repo"), str(tmp_path / "recente")] and roots == [tmp_path]
 
 
 def test_workspace_context_refuses_before_reading_the_registry():
@@ -173,3 +209,32 @@ def test_native_message_still_needs_its_journal_attempt(tmp_path, monkeypatch):
     response = _policy(client, "native_message", "op-1:native_message:x", {"text": "[de: a] oi"})
     assert response.status_code == 500
     coordinator.close_python_leases()
+
+
+def test_rust_diag_route_records_event():
+    body = {"evento": "rust.history_failed", "sessao": "s1", "codigo": "history_io", "motivo": "leitura falhou"}
+    with patch("app.internal_api.diag.registrar") as registrar:
+        ok = _client().post("/internal/diag", json=body, headers={"X-Hangar-Internal": SECRET})
+        refused = _client().post("/internal/diag", json=body, headers={"X-Hangar-Internal": "errado"})
+        missing = _client().post("/internal/diag", json=body)
+        invalid = _client().post("/internal/diag", json={**body, "evento": "runtime.parte_para_python"},
+                                 headers={"X-Hangar-Internal": SECRET})
+    assert ok.status_code == 200
+    assert (refused.status_code, missing.status_code) == (404, 404), "sem o segredo, nem de 127.0.0.1"
+    assert invalid.status_code == 400, "o Rust só escreve eventos rust.*"
+    rust_calls = [c for c in registrar.call_args_list if c.args[0].startswith("rust.")]
+    assert len(rust_calls) == 1
+    assert rust_calls[0].args[:2] == ("rust.history_failed", "erro")
+    assert rust_calls[0].kwargs == {"sessao": "s1", "codigo": "history_io", "detalhe": "leitura falhou"}
+
+
+@pytest.mark.parametrize("raw", [
+    b"x" * 9000, b"not json", b"[" * 8000, b'{"evento":"rust.a","sessao":"s1","codigo":"c"}',
+    b'{"evento":"rust.a","sessao":"s1","codigo":"C D","motivo":"m"}',
+    b'{"evento":"rust.a","sessao":"s1","codigo":"c","motivo":1}',
+])
+def test_rust_diag_refuses_malformed_body(raw):
+    with patch("app.internal_api.diag.registrar") as registrar:
+        response = _client().post("/internal/diag", content=raw, headers={"X-Hangar-Internal": SECRET})
+    assert response.status_code == 400
+    assert not [c for c in registrar.call_args_list if c.args[0].startswith("rust.")]

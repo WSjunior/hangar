@@ -13,9 +13,9 @@ fn warn_terminal(session: Option<&str>, code: &'static str) {
     if code == "invalid terminal request" {
         tracing::warn!(code, "observação terminal recusada");
     } else if let Some(session) = session {
-        tracing::warn!(session, code, "observação terminal usa reserva Python");
+        tracing::warn!(session, code, "observação terminal falhou");
     } else {
-        tracing::warn!(code, "observação terminal usa reserva Python");
+        tracing::warn!(code, "observação terminal falhou");
     }
 }
 

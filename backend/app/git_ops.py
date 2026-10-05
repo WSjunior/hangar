@@ -1321,9 +1321,12 @@ def push(cwd: str) -> dict:
 
 from app.workspace_bridge import delegate as _workspace_delegate
 
+# Estas prometem não levantar (a listagem de sessões depende disso); falha da ponte devolve o vazio delas.
+for _operation, _quiet in (("head_info", (None, False)), ("branch_of", None), ("git_summary", None),
+                           ("git_diffstat", None), ("git_log_since", [])):
+    globals()[_operation] = _workspace_delegate(_operation, GitError, quiet=_quiet)(globals()[_operation])
 for _operation in (
-    "head_info", "branch_of", "git_summary", "git_diffstat", "list_branches", "git_log",
-    "git_log_since", "changed_files", "file_diff", "commit_files", "commit_file_diff",
+    "list_branches", "git_log", "changed_files", "file_diff", "commit_files", "commit_file_diff",
     "path_diff", "commit_diff", "diff_vs_worktree", "sequencer_state", "branches_containing",
     "folder_status", "last_commit_message",
 ):

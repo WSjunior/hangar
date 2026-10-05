@@ -356,3 +356,76 @@ async fn history_never_serves_a_dead_transcript_from_the_info_cache() {
     assert_eq!(ids(serde_json::from_str(&r.text().await.unwrap()).unwrap()), ["u100"]);
     assert_eq!(fake.info_calls(), 2);
 }
+
+/// 503 do próprio Rust: o código no envelope do canal privado e no `detail` que o app lê.
+async fn assert_503(r: reqwest::Response, code: &str) {
+    assert_eq!(r.status(), 503);
+    assert_eq!(r.headers()["content-type"], "application/json");
+    assert_eq!(r.headers()["access-control-allow-origin"], "*");
+    let body: Value = serde_json::from_str(&r.text().await.unwrap()).unwrap();
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error_code"], code);
+    assert_eq!(body["detail"]["code"], code);
+    let message = body["message"].as_str().unwrap();
+    assert!(!message.is_empty());
+    assert_eq!(body["detail"]["params"]["motivo"], message, "mesmo envelope do Git/arquivos");
+    assert!(body["detail"]["msg"].as_str().unwrap().contains(code), "a tela mostra o código: {body}");
+}
+
+#[tokio::test]
+async fn history_io_error_answers_503_with_code() {
+    let (dir, _jsonl, _offs, fake, srv) = setup(0..2, "sess-io").await;
+    // Diretório no lugar do transcript: a leitura falha com E/S, não com "ausente".
+    let broken = dir.path().join("sess-io-dir.jsonl");
+    std::fs::create_dir(&broken).unwrap();
+    fake.set_info(info_json("claude", &broken));
+    let r = client().get(format!("http://{srv}/api/sessions/s-io/history")).bearer_auth(OWNER)
+        .header("origin", "http://outra").send().await.unwrap();
+    assert_503(r, "history_io").await;
+    assert_eq!(fake.hits_to("/api/sessions/s-io/history"), 0, "o Python não recebe o pedido");
+    wait_until(|| !fake.diag().is_empty()).await;
+    assert_eq!(fake.diag()[0], json!({"evento": "rust.history_failed", "sessao": "s-io", "codigo": "history_io",
+        "motivo": "a leitura do histórico falhou"}));
+}
+
+#[tokio::test]
+async fn events_without_info_answers_503() {
+    let (_dir, _jsonl, _offs, fake, srv) = setup(0..2, "sess-noinfo").await;
+    fake.fail_info(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    assert_503(open_events(srv, "s", "", &[("origin", "http://outra")]).await, "internal_info").await;
+    let r = client().get(format!("http://{srv}/api/sessions/s/history")).bearer_auth(OWNER)
+        .header("origin", "http://outra").send().await.unwrap();
+    assert_503(r, "internal_info").await;
+    assert_eq!(fake.hits_to("/api/sessions/s/events"), 0);
+    assert_eq!(fake.hits_to("/api/sessions/s/history"), 0);
+}
+
+#[tokio::test]
+async fn missing_session_still_reaches_python_404() {
+    let (_dir, _jsonl, _offs, fake, srv) = setup(0..2, "sess-missing").await;
+    fake.set_info(Value::Null);
+    let r = client().get(format!("http://{srv}/api/sessions/s/history")).bearer_auth(OWNER).send().await.unwrap();
+    assert_eq!(r.text().await.unwrap(), "from-python");
+    let r = open_events(srv, "s", "", &[]).await;
+    assert_eq!(r.text().await.unwrap(), "from-python");
+    assert_eq!(fake.hits_to("/api/sessions/s/history"), 1);
+    assert_eq!(fake.hits_to("/api/sessions/s/events"), 1);
+    assert!(fake.diag().is_empty(), "sessão inexistente não é falha");
+}
+
+#[tokio::test]
+async fn route_failure_is_sent_to_diary() {
+    let (_dir, _jsonl, _offs, fake, srv) = setup(0..2, "sess-diario").await;
+    fake.fail_info(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    client().get(format!("http://{srv}/api/sessions/diario-h/history")).bearer_auth(OWNER).send().await.unwrap();
+    drop(open_events(srv, "diario-e", "", &[]).await);
+    wait_until(|| fake.diag().len() == 2).await;
+    let mut got = fake.diag();
+    got.sort_by_key(|v| v["evento"].as_str().unwrap().to_owned());
+    assert_eq!(got[0]["evento"], "rust.events_failed");
+    assert_eq!(got[0]["sessao"], "diario-e");
+    assert_eq!(got[0]["codigo"], "internal_info");
+    assert_eq!(got[1]["evento"], "rust.history_failed");
+    assert_eq!(got[1]["sessao"], "diario-h");
+    assert_eq!(got[1]["codigo"], "internal_info");
+}
