@@ -4467,6 +4467,7 @@
   "native_browser_cookies_bring": "Bring login from Chrome",
   "native_browser_cookies_fetching": "Fetching the login from Chrome…",
   "native_browser_cookies_ok": "{n} cookies imported from Chrome",
+  "native_browser_cookies_none": "No cookies found in Chrome.",
   "native_browser_cookies_starting": "The browser is still opening. Try again in a moment.",
   "native_browser_cookies_chrome_off": "Your Chrome doesn't have remote debugging on. It's a switch on a page inside Chrome itself (once).",
   "native_browser_cookies_activate": "Opened a Chrome tab and copied the address. There: Ctrl+L, Ctrl+V, Enter → check \"Allow remote debugging for this browser\" → come back and click again.",

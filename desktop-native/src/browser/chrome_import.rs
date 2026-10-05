@@ -130,12 +130,15 @@ fn to_param(c: &Value) -> Value {
 /// parado costuma cair e as seguintes respondem.
 pub fn fetch_cookies(port: Option<u16>) -> Result<Vec<Value>, ImportError> {
     let mut candidates: Vec<String> = profile_roots().iter().filter_map(endpoint_from_profile).collect();
-    if let Some(p) = port
-        && let Some(ws) = url_from_port(p)?
-    {
-        candidates.push(ws);
-    }
+    // Headless na porta fixa não pode mascarar um perfil que funcionaria: fica como erro de reserva, não aborta.
     let mut last = ImportError::ChromeClosed;
+    if let Some(p) = port {
+        match url_from_port(p) {
+            Ok(Some(ws)) => candidates.push(ws),
+            Ok(None) => {}
+            Err(e) => last = keep_specific(last, e),
+        }
+    }
     for ws in candidates {
         for attempt in 0..2 {
             match cdp_once(&ws, "Storage.getCookies") {
@@ -144,7 +147,8 @@ pub fn fetch_cookies(port: Option<u16>) -> Result<Vec<Value>, ImportError> {
                     return Ok(cookies);
                 }
                 Err(e) => {
-                    last = e;
+                    // O erro mais específico vence: um candidato velho (porta morta) não apaga a recusa do Chrome do usuário.
+                    last = keep_specific(last, e);
                     if attempt == 0 {
                         std::thread::sleep(Duration::from_millis(400));
                     }
@@ -153,6 +157,18 @@ pub fn fetch_cookies(port: Option<u16>) -> Result<Vec<Value>, ImportError> {
         }
     }
     Err(last)
+}
+
+/// Mantém o erro mais informativo: `Failed`/`Headless` vencem o genérico `ChromeClosed`.
+fn keep_specific(current: ImportError, new: ImportError) -> ImportError {
+    fn rank(e: &ImportError) -> u8 {
+        match e {
+            ImportError::ChromeClosed => 0,
+            ImportError::Headless => 1,
+            ImportError::Failed(_) => 2,
+        }
+    }
+    if rank(&new) >= rank(&current) { new } else { current }
 }
 
 /// Uma troca CDP por WebSocket contra o Chrome do usuário: manda `method` (sem params) e devolve o
@@ -171,6 +187,8 @@ fn cdp_once(ws: &str, method: &str) -> Result<Value, ImportError> {
         Some(q) => format!("{}?{q}", url.path()),
         None => url.path().to_owned(),
     };
+    // Só a recusa de conexão é "Chrome desligado": uma vez conectado (a depuração estava ligada), qualquer falha é
+    // um erro real (porta velha, demora ou recusa no diálogo), não motivo para mandar ligar a depuração de novo.
     let mut stream = TcpStream::connect((host.as_str(), port)).map_err(|_| ImportError::ChromeClosed)?;
     stream.set_read_timeout(Some(IO_TIMEOUT)).ok();
     stream.set_write_timeout(Some(IO_TIMEOUT)).ok();
@@ -182,26 +200,27 @@ fn cdp_once(ws: &str, method: &str) -> Result<Value, ImportError> {
         "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
          Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {key}\r\n\r\n"
     );
-    stream.write_all(req.as_bytes()).map_err(|_| ImportError::ChromeClosed)?;
+    stream.write_all(req.as_bytes()).map_err(|_| ImportError::Failed("cdp: conexao caiu no handshake".into()))?;
 
     // Só os cabeçalhos: o servidor não manda quadro nenhum antes de a gente mandar o comando.
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
-        stream.read_exact(&mut byte).map_err(|_| ImportError::ChromeClosed)?;
+        // Timeout aqui é a pessoa demorando a aprovar "Permitir depuração remota?" (ou a conexão caindo), não Chrome off.
+        stream.read_exact(&mut byte).map_err(|_| ImportError::Failed("cdp: sem resposta ao handshake".into()))?;
         head.push(byte[0]);
         if head.len() > 8192 {
-            return Err(ImportError::ChromeClosed);
+            return Err(ImportError::Failed("cdp: handshake sem fim".into()));
         }
     }
     if !head.starts_with(b"HTTP/1.1 101") {
-        return Err(ImportError::ChromeClosed);
+        return Err(ImportError::Failed("cdp: depuracao recusada ou indisponivel".into()));
     }
 
     let payload = json!({"id": 1, "method": method}).to_string();
     let mut mask = [0u8; 4];
     SystemRandom::new().fill(&mut mask).ok();
-    stream.write_all(&masked_text(payload.as_bytes(), mask)).map_err(|_| ImportError::ChromeClosed)?;
+    stream.write_all(&masked_text(payload.as_bytes(), mask)).map_err(|_| ImportError::Failed("cdp: envio falhou".into()))?;
 
     // Mensagem grande chega em vários quadros (junta até o FIN). Evento vindo antes da resposta: ignora.
     let mut text = Vec::new();
@@ -335,7 +354,8 @@ mod passwords {
         let mut out = Vec::new();
         for db in login_data_dbs() {
             let tmp = tmp_base.join(format!("hangar-ld-{}-{}.db", std::process::id(), rand_suffix()));
-            if std::fs::copy(&db, &tmp).is_err() {
+            if let Err(e) = std::fs::copy(&db, &tmp) {
+                eprintln!("[senha] copia de {} falhou: {e}", db.display());
                 continue;
             }
             // Mais usada/mais recente primeiro: é a que o Chrome sugere, e a 1ª é a que preenche.
@@ -345,8 +365,13 @@ mod passwords {
                  where blacklisted_by_user=0 and length(password_value)>0 order by date_last_used desc, times_used desc",
             ]).output();
             std::fs::remove_file(&tmp).ok();
-            let Ok(dump) = dump else { continue };
+            // `sqlite3` ausente ou banco travado não é "sem senha salva": deixa rastro em vez de sumir calado.
+            let dump = match dump {
+                Ok(dump) => dump,
+                Err(e) => { eprintln!("[senha] sqlite3 nao rodou (instalado?): {e}"); continue; }
+            };
             if !dump.status.success() {
+                eprintln!("[senha] sqlite3 saiu com {}", dump.status);
                 continue;
             }
             let text = String::from_utf8_lossy(&dump.stdout);

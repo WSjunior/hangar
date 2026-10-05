@@ -4467,6 +4467,7 @@
   "native_browser_cookies_bring": "Trazer login do Chrome",
   "native_browser_cookies_fetching": "Buscando o login no Chrome…",
   "native_browser_cookies_ok": "{n} cookies trazidos do Chrome",
+  "native_browser_cookies_none": "Nenhum cookie encontrado no Chrome.",
   "native_browser_cookies_starting": "O navegador ainda está abrindo. Tente de novo em instantes.",
   "native_browser_cookies_chrome_off": "O seu Chrome está sem a depuração remota ligada. Ela se liga numa página do próprio Chrome (uma vez só).",
   "native_browser_cookies_activate": "Abri uma aba no Chrome e copiei o endereço. Lá: Ctrl+L, Ctrl+V, Enter → marque \"Permitir depuração remota para este navegador\" → volte e clique de novo.",

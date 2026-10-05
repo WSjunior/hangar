@@ -115,11 +115,21 @@ impl BrowserPanel {
                 if wait > 0 {
                     cx.background_executor().timer(std::time::Duration::from_millis(wait)).await;
                 }
-                let eval = cdp.call("Runtime.evaluate", params.clone());
-                if let Ok(v) = eval.await
-                    && v["result"]["value"].as_bool() == Some(true)
-                {
-                    break;
+                match cdp.call("Runtime.evaluate", params.clone()).await {
+                    Ok(v) => {
+                        // Exceção no script (ou página morta) não é "sem campo de senha": loga e para de tentar.
+                        if let Some(detail) = v.get("exceptionDetails") {
+                            eprintln!("[nav] autofill: exceção no script da página: {detail}");
+                            break;
+                        }
+                        if v["result"]["value"].as_bool() == Some(true) {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[nav] autofill: Runtime.evaluate falhou: {e}");
+                        break;
+                    }
                 }
             }
         }).detach();
@@ -324,6 +334,12 @@ impl BrowserPanel {
                 return;
             }
         };
+        // 0 cookies não é sucesso: a pessoa vê "nenhum cookie", não "0 trazidos" parecendo que deu certo.
+        if cookies.is_empty() {
+            self.cookies_status = Some(tr("browser_cookies_none"));
+            cx.notify();
+            return;
+        }
         let count = cookies.len();
         let set = cdp.call("Storage.setCookies", serde_json::json!({"cookies": cookies}));
         cx.spawn(async move |this, cx| {
