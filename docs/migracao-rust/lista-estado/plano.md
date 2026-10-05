@@ -193,8 +193,8 @@ regra de pid vivo de `hook_state.py:56-129`, `.hangar-askq`, `.hangar-status` co
 
 **Falha sem ela:** `contract_list::context_cases`.
 
-- [ ] **Step 19: Teste, visto falhar**
-- [ ] **Step 20: Porte com cache de 20 s por (nome, transcript); testes focados; revisar**
+- [x] **Step 19: Teste, visto falhar**
+- [x] **Step 20: Porte com cache de 20 s por (nome, transcript); testes focados; revisar**
 
 ### Task 10: Progresso do plano
 

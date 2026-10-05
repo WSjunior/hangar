@@ -1,7 +1,7 @@
 //! A descoberta do Rust repete, tique a tique, as entradas gravadas por `gen_list.py`.
 #![cfg(target_os = "linux")]
 
-mod common;
+use crate::common;
 
 use std::collections::HashMap;
 use std::ffi::OsString;
