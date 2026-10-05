@@ -293,6 +293,12 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   (`reborn_binding`), e só conversa nova esvazia a fila. Ver
   [Continuar a mesma conversa noutra conta](#continuar-a-mesma-conversa-noutra-conta).
 
+- **Só é incerta a entrada terminal que começou a escrever.** O ator Rust abre o despacho de
+  entrada como `staged`, e o escritor grava `MarkWriting` antes do primeiro efeito que pode
+  entregar (socket nativo, plugin, digitação, colagem). No `Recover` (Rust e Python, que roda
+  primeiro no boot) a tentativa só com despacho `staged` volta à fila (`interrupted_before_write`)
+  sem trava. Despacho comum (`dispatching`) continua virando incerto. Ver
+  [Reinício no meio de um adiamento](#reinício-no-meio-de-um-adiamento).
 - **Entrada terminal recusada sem escrita não espera calada.** O ator Rust conta a série de
   adiamentos do escritor com `stage` (fora `question_open`, `not_ready`, `overlay`,
   `input_unavailable`). A espera entre as tentativas dobra a partir do tique até 30 s; o log ganha
@@ -2579,4 +2585,14 @@ nativo os anéis passaram de "sem dado" para Contexto 54% e a conta 100% (semana
 `Deferred` com `cleanup: not_needed`, e `finalize_terminal` só conta tentativa quando a limpeza
 foi provada: o teto de duas tentativas nunca chegava. A série agora espaça as tentativas e
 aparece na tela depois de 30 s, sem desistir da entrada: rascunho do dono continua sendo do dono.
+
+## Reinício no meio de um adiamento
+
+(05/10/2026, DELPHI-02.) Com o composer ocupado, cada tentativa abre despacho, lê a tela e devolve
+`composer_busy` sem escrever nada. O Atualizar reiniciou o backend no meio de uma dessas
+tentativas: o `Recover` do boot transformou o despacho em incerto, a trava de escrita segurou a
+fila e a mensagem nunca mais saiu (sessões `Crack` às 09:09 e `Desktop` às 11:31). O despacho
+sozinho não diz se algo chegou ao terminal; daí o estado `staged` até o escritor avisar a escrita.
+Python antigo lendo `staged` continua conservador (incerta), e Rust antigo nunca grava `staged`:
+nenhuma combinação reenvia o que foi escrito.
 

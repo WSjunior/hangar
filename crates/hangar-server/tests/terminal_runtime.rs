@@ -5,14 +5,15 @@ use std::sync::{Arc,Mutex,atomic::AtomicU64};
 use std::time::Duration;
 use tokio::sync::{broadcast,Notify};
 
-struct Io { calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String> }
-impl Io { fn new()->Self { Self { calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()) } } }
+struct Io { calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String>, hold_capture:std::sync::atomic::AtomicBool }
+impl Io { fn new()->Self { Self { calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()),hold_capture:std::sync::atomic::AtomicBool::new(false) } } }
 impl TerminalIo for Io {
     fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput> { Box::pin(async move {
         let cmd=r.args[0].clone();
         self.calls.lock().unwrap().push(r.clone());
         let stdout=match cmd.as_str() {
             "display-message"=>b"session\t%1\t1\n".to_vec(),
+            "capture-pane" if self.hold_capture.load(std::sync::atomic::Ordering::Acquire)=>std::future::pending().await,
             "capture-pane"=>{let text=self.text.lock().unwrap().clone();let ghost=self.ghost.lock().unwrap().clone();
                 // O fantasma é rascunho que o `C-u` não apaga: o composer fica ocupado.
                 format!("────────────────────────────────\n❯ {}\n────────────────────────────────\n",if text.is_empty(){ghost}else{text}).into_bytes()},
@@ -407,7 +408,7 @@ async fn terminal_runtime_dispatching_recovers_unknown_not_redigitated() {
     let command=f.command("crash","Olá");
     store.exec(1,"prepare",clock,Action::Prepare {id:"crash".into(),payload:serde_json::to_value(&command).unwrap(),entry_id:Some("crash".into())}).unwrap();
     store.exec(1,"append",clock,Action::Append {text:"Olá".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("crash".into())}).unwrap();
-    store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"crash".into(),wire_id:"attempt".into()}).unwrap(); drop(store);
+    store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"crash".into(),wire_id:"attempt".into(),staged:false}).unwrap(); drop(store);
     let h=f.start(); assert_eq!(h.command(command).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Unknown);
     h.drain().await.unwrap(); assert!(f.io.calls.lock().unwrap().is_empty()); assert_eq!(f.state()["operations"]["crash"]["status"],"unknown");
     assert!(h.queue("unclaim".into(),Action::SetDelivered {entry_id:"crash".into(),value:false,steered:false}).await.is_err()); h.stop().await.unwrap();
@@ -495,7 +496,7 @@ async fn terminal_runtime_restart_after_clear_dispatch_conserves_barrier() {
     let mut store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
     let clock=ClockSample {monotonic_s:0.0,epoch_s:chrono::Utc::now().timestamp() as f64};
     store.exec(1,"prepare",clock,Action::Prepare {id:"clear-crash".into(),payload:serde_json::to_value(f.command("clear-crash","/clear")).unwrap(),entry_id:None}).unwrap();
-    store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"clear-crash".into(),wire_id:"terminal:1:clear-crash".into()}).unwrap(); drop(store);
+    store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"clear-crash".into(),wire_id:"terminal:1:clear-crash".into(),staged:false}).unwrap(); drop(store);
     let h=f.start();
     assert!(h.command(f.command("after-crash","Olá")).await.is_err()); assert_eq!(f.state()["runtime_state"]["preserve_binding"],true);
     assert!(f.io.calls.lock().unwrap().is_empty()); h.stop().await.unwrap();
@@ -605,7 +606,7 @@ async fn terminal_runtime_removed_recovered_root_has_no_further_delivery_or_publ
         store.exec(1,"recover-create",clock,Action::Recover).unwrap();
         if exhausted {for n in 0..2 {store.exec(1,&format!("bump:{n}"),clock,Action::BumpAttempts {entry_id:"removed-root".into()}).unwrap();}}
         store.exec(1,"prepare-attempt",clock,Action::Prepare {id:"old-attempt".into(),entry_id:Some("removed-root".into()),payload:json!({"operation_id":"old-attempt","kind":"input","payload":{"text":"[de: peer] Olá","_terminal_generation":1}})}).unwrap();
-        store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"old-attempt".into(),wire_id:"terminal:1:old-attempt".into()}).unwrap();
+        store.exec(1,"dispatch",clock,Action::BeginDispatch {id:"old-attempt".into(),wire_id:"terminal:1:old-attempt".into(),staged:false}).unwrap();
         store.exec(1,"finish",clock,Action::Finish {id:"old-attempt".into(),status:if exhausted{queue::Status::Deferred}else{queue::Status::Rejected},result:json!({"operation_id":"old-attempt","disposition":if exhausted{"deferred"}else{"rejected"},"payload":{"cleanup":"proved"}})}).unwrap();
         store.exec(1,"remove",clock,Action::Remove {entry_id:"removed-root".into()}).unwrap();drop(store);
         f.native.store(true,std::sync::atomic::Ordering::Release);f.unknown.store(true,std::sync::atomic::Ordering::Release);
@@ -673,3 +674,28 @@ async fn terminal_runtime_deferred_without_write_backs_off_and_surfaces_the_reas
     while !h.snapshot().await.unwrap()["view"]["input_stalled"].is_null() {assert!(start.elapsed()<WAIT,"o motivo não saiu da vista"); tokio::time::sleep(Duration::from_millis(5)).await;}
     h.stop().await.unwrap();
 }
+#[tokio::test(flavor="multi_thread")]
+async fn terminal_runtime_restart_during_a_deferral_without_write_requeues_and_delivers_once() {
+    let f=Fixture::new().await; *f.io.ghost.lock().unwrap()="rascunho".into();
+    f.io.hold_capture.store(true,std::sync::atomic::Ordering::Release);
+    // O backend cai com o ator lendo o composer: nada foi escrito no pane.
+    let dying=tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
+    let handle={let _inside=dying.enter(); f.start()};
+    let command=f.command("ola-id","ola");
+    dying.spawn(async move {let _=handle.command(command).await;});
+    f.wait_for("despacho começou",||f.state()["operations"]["ola-id"]["status"]=="dispatching").await;
+    dying.shutdown_background();
+    let start=std::time::Instant::now();
+    while queue::acquire_lease(&f.target.lease_path).is_err() {assert!(start.elapsed()<WAIT,"a trava do ator morto não saiu"); tokio::time::sleep(Duration::from_millis(5)).await;}
+    f.io.hold_capture.store(false,std::sync::atomic::Ordering::Release); f.io.ghost.lock().unwrap().clear();
+    let h=f.start();
+    f.wait_for("entregue depois do reinício",||f.state()["rows"][0]["confirmed"]==true || f.io.calls.lock().unwrap().iter().any(|r|r.args.contains(&"-l".into()) && r.args.last().is_some_and(|a|a=="ola"))).await;
+    let state=f.state();
+    assert!(state["runtime_state"]["terminal_write_barrier"].is_null(),"adiamento sem escrita não pode virar trava");
+    assert_ne!(state["operations"]["ola-id"]["status"],"unknown");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let typed=f.io.calls.lock().unwrap().iter().filter(|r|r.args.contains(&"-l".into()) && r.args.last().is_some_and(|a|a=="ola")).count();
+    assert_eq!(typed,1,"a mensagem sai uma vez");
+    h.stop().await.unwrap();
+}
+

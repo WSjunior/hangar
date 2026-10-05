@@ -191,3 +191,23 @@ def test_native_receipt_resolves_compacted_accepted_attempt_without_root(monkeyp
         assert store.state['rows'][0]['desistiu'] is True
         assert store.state['operations']['attempt']['result']['payload']['native_status'] == 'refused'
     asyncio.run(flow())
+
+
+@pytest.mark.parametrize('attempt', ['staged', 'dispatching'])
+def test_python_recover_requeues_only_attempts_that_never_started_writing(tmp_path, attempt):
+    """O boot recupera a fila no Python antes do Rust: a regra do `staged` vale dos dois lados."""
+    store = open_store(tmp_path)
+    store.exec(1, 'prepare', CLOCK, intent())
+    store.exec(1, 'append', CLOCK, {'kind': 'append', 'text': 'fixture-input', 'entry_id': 'entry'})
+    store.exec(1, 'dispatch', CLOCK, {'kind': 'begin_dispatch', 'id': 'root', 'wire_id': 'terminal:1:root'})
+    state = copy.deepcopy(store.state)
+    state['operations']['root']['wire_attempts']['terminal:1:root']['status'] = attempt   # como o Rust grava
+    store._persist(state)
+    store = open_store(tmp_path)
+    store.exec(1, 'recover', CLOCK, {'kind': 'recover'})
+    op, row = store.state['operations']['root'], store.state['rows'][0]
+    if attempt == 'staged':
+        assert op['status'] == 'deferred' and op['result']['payload']['code'] == 'interrupted_before_write'
+        assert row['delivered'] is False and 'terminal_write_barrier' not in store.state['runtime_state']
+    else:
+        assert op['status'] == 'unknown' and store.state['runtime_state'].get('terminal_write_barrier')

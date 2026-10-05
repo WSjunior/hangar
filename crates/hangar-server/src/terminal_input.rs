@@ -54,6 +54,8 @@ pub enum PluginReply { Unavailable, NotWritten, Filled, Accepted, Unknown }
 pub trait TerminalServices: Send + Sync {
     fn facts<'a>(&'a self, binding: &'a TerminalBinding) -> ServiceFuture<'a, InputFacts>;
     fn publish<'a>(&'a self, binding: &'a TerminalBinding, request: PluginRequest) -> ServiceFuture<'a, PluginReply>;
+    /// Grava no diário que a escrita vai começar: antes disso, cair não deixa a entrega incerta.
+    fn writing<'a>(&'a self) -> ServiceFuture<'a, ()> { Box::pin(async { Ok(()) }) }
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -493,6 +495,7 @@ impl TerminalDriver {
             let mid = native.message_id.as_deref().unwrap_or(id);
             let envelope = native_envelope(native, text, mid);
             if let Err(e) = self.verify().await { return Self::failed(e, DeliveryStage::Identity); }
+            if self.services.writing().await.is_err() { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Native, "write_journal"); }
             let outcome = self.io.socket(native, envelope).await.unwrap_or(WriteOutcome::Unknown);
             if outcome != WriteOutcome::NotWritten {
                 let mut result = DeliveryResult::new(if outcome == WriteOutcome::Written { Disposition::Accepted } else { Disposition::Unknown }, DeliveryStage::Native, "native_write");
@@ -512,6 +515,7 @@ impl TerminalDriver {
         if facts.plugin_live && !text.trim_start().starts_with('/') {
             let mode = if facts.plugin_user && facts.idle && !text.contains('@') && !text.trim_start().starts_with('!') { PluginMode::User } else { PluginMode::Fill };
             let request = PluginRequest { id: id.into(), text: text.into(), mode: mode.clone() };
+            if self.services.writing().await.is_err() { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Plugin, "write_journal"); }
             match self.services.publish(&self.binding, request).await {
                 Ok(PluginReply::Unavailable | PluginReply::NotWritten) => refresh_guard = true,
                 Ok(PluginReply::Accepted) if mode == PluginMode::User => return DeliveryResult::new(Disposition::Accepted, DeliveryStage::Plugin, "plugin_accepted"),
@@ -527,6 +531,7 @@ impl TerminalDriver {
         if refresh_guard || use_clipboard {
             before = match self.refresh_input_guard().await { Ok(b) => b, Err(e) => return Self::failed(e, DeliveryStage::Composer) };
         }
+        if self.services.writing().await.is_err() { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Write, "write_journal"); }
         let write = if use_clipboard { self.clipboard(text).await }
             else if text.contains('\n') { self.paste(text, id).await } else { self.literal(text).await };
         if let Err(e) = write {

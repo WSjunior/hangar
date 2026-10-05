@@ -107,7 +107,7 @@ fn terminal_v2_metadata_and_migration_roundtrip_rust_python_rust() {
     store.exec(1,"rust-recover",clock(),Action::Recover).unwrap();
     store.exec(1,"native-prepare",clock(),Action::Prepare {id:"native".into(),payload:intent(),entry_id:Some("native-entry".into())}).unwrap();
     store.exec(1,"native-append",clock(),Action::Append {text:"fixture-input".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("native-entry".into())}).unwrap();
-    store.exec(1,"native-dispatch",clock(),Action::BeginDispatch {id:"native".into(),wire_id:"terminal:1:native".into()}).unwrap();
+    store.exec(1,"native-dispatch",clock(),Action::BeginDispatch {id:"native".into(),wire_id:"terminal:1:native".into(),staged:false}).unwrap();
     store.exec(1,"native-finish",clock(),Action::Finish {id:"native".into(),status:Status::Accepted,
         result:json!({"operation_id":"native","disposition":"accepted","payload":payload()})}).unwrap();
     drop(store);drop(lease);
@@ -158,7 +158,7 @@ fn absent_transcript_one_echo_cannot_confirm_two_equal_inputs_after_compact_reop
         store.exec(1,&format!("append:{number}"),clock(),Action::Append {text:"same-input".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(id.clone())}).unwrap();
         store.exec(1,&format!("prepare:{number}"),clock(),Action::Prepare {id:id.clone(),payload:json!({"kind":"input"}),entry_id:Some(id.clone())}).unwrap();
         store.exec(1,&format!("cursor:{number}"),clock(),Action::BindDispatch {id:id.clone(),cursor:serde_json::to_value(&cursor).unwrap()}).unwrap();
-        store.exec(1,&format!("dispatch:{number}"),clock(),Action::BeginDispatch {id:id.clone(),wire_id:id}).unwrap();
+        store.exec(1,&format!("dispatch:{number}"),clock(),Action::BeginDispatch {id:id.clone(),wire_id:id,staged:false}).unwrap();
     }
     let millis=((cursor.absent_since.unwrap()+1.0)*1000.0) as i64;
     let timestamp=chrono::DateTime::from_timestamp_millis(millis).unwrap().to_rfc3339();
@@ -184,7 +184,7 @@ fn terminal_write_barrier_follows_remaining_uncertain_input_and_lifts_after_last
             store.exec(1,&format!("append:{text}"),clock(),Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(text.into())}).unwrap();
             store.exec(1,&format!("prepare:{text}"),clock(),Action::Prepare {id:text.into(),payload:json!({"kind":"input","payload":{"text":text,"_terminal_generation":1}}),entry_id:Some(text.into())}).unwrap();
             store.exec(1,&format!("cursor:{text}"),clock(),Action::BindDispatch {id:text.into(),cursor:serde_json::to_value(&cursor).unwrap()}).unwrap();
-            store.exec(1,&format!("dispatch:{text}"),clock(),Action::BeginDispatch {id:text.into(),wire_id:format!("terminal:1:{text}")}).unwrap();
+            store.exec(1,&format!("dispatch:{text}"),clock(),Action::BeginDispatch {id:text.into(),wire_id:format!("terminal:1:{text}"),staged:false}).unwrap();
             store.exec(1,&format!("finish:{text}"),clock(),Action::Finish {id:text.into(),status:Status::Unknown,
                 result:json!({"operation_id":text,"disposition":"unknown","payload":{"cleanup":"uncertain"}})}).unwrap();
         }
@@ -222,7 +222,7 @@ fn uncertain_input_of_a_second_conversation_blocks_writes_while_old_barrier_stay
         store.exec(1,&format!("append:{text}"),clock(),Action::Append {text:text.into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some(text.into())}).unwrap();
         store.exec(1,&format!("prepare:{text}"),clock(),Action::Prepare {id:text.into(),payload:json!({"kind":"input","payload":{"text":text,"_terminal_generation":generation}}),entry_id:Some(text.into())}).unwrap();
         store.exec(1,&format!("cursor:{text}"),clock(),Action::BindDispatch {id:text.into(),cursor:serde_json::to_value(&cursor).unwrap()}).unwrap();
-        store.exec(1,&format!("dispatch:{text}"),clock(),Action::BeginDispatch {id:text.into(),wire_id:format!("terminal:{generation}:{text}")}).unwrap();
+        store.exec(1,&format!("dispatch:{text}"),clock(),Action::BeginDispatch {id:text.into(),wire_id:format!("terminal:{generation}:{text}"),staged:false}).unwrap();
         store.exec(1,&format!("finish:{text}"),clock(),Action::Finish {id:text.into(),status:Status::Unknown,
             result:json!({"operation_id":text,"disposition":"unknown","payload":{"cleanup":"uncertain"}})}).unwrap();
     }
@@ -231,4 +231,27 @@ fn uncertain_input_of_a_second_conversation_blocks_writes_while_old_barrier_stay
     store.exec(1,"late:C",clock(),Action::Finish {id:"C".into(),status:Status::Accepted,result:json!({"operation_id":"C","disposition":"accepted","payload":{}})}).unwrap();
     assert!(!store.state().terminal_write_blocked("new-sid"));
     assert!(store.state().terminal_write_blocked("sid"));
+}
+
+#[test]
+fn terminal_recover_requeues_only_attempts_that_never_started_writing() {
+    for writing in [false,true] {
+        let dir=tempfile::tempdir().unwrap();
+        let mut store=Store::open(&dir.path().join("state"),dir.path(),State::new("key",1,"session",vec![])).unwrap();
+        store.exec(1,"prepare",clock(),Action::Prepare {id:"root".into(),payload:intent(),entry_id:Some("entry".into())}).unwrap();
+        store.exec(1,"append",clock(),Action::Append {text:"fixture-input".into(),delivered:false,ts:None,pre_transcript:false,entry_id:Some("entry".into())}).unwrap();
+        store.exec(1,"dispatch",clock(),Action::BeginDispatch {id:"root".into(),wire_id:"terminal:1:root".into(),staged:true}).unwrap();
+        if writing {store.exec(1,"writing",clock(),Action::MarkWriting {id:"root".into(),wire_id:"terminal:1:root".into()}).unwrap();}
+        store.exec(1,"recover",clock(),Action::Recover).unwrap();
+        let state=store.state();
+        if writing {
+            assert_eq!(serde_json::to_value(state.operations["root"].status).unwrap(),"unknown");
+            assert_eq!(state.runtime_state["terminal_write_barrier"]["operation_id"],"root");
+        } else {
+            assert_eq!(serde_json::to_value(state.operations["root"].status).unwrap(),"deferred");
+            assert_eq!(state.operations["root"].result["payload"]["code"],"interrupted_before_write");
+            assert_eq!(state.rows[0]["delivered"],false,"volta à fila");
+            assert!(state.runtime_state["terminal_write_barrier"].is_null());
+        }
+    }
 }

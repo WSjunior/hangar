@@ -422,8 +422,8 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                             if authoritative.operations.get(&logical_id).is_none_or(|op|op.status == Status::Prepared) {
                                 queue.exec(target.generation,&format!("logical-cursor:{wire}"),sample,Action::BindDispatch { id:logical_id.clone(),cursor }).await.map_err(io_failure)?;
                             }
-                            queue.exec(target.generation,&format!("dispatch:{wire}"),sample,Action::BeginDispatch { id:wire.clone(),wire_id:wire.clone() }).await.map_err(io_failure)?;
-                            queue.exec(target.generation,&format!("logical-dispatch:{wire}"),sample,Action::BeginDispatch { id:logical_id.clone(),wire_id:wire.clone() }).await.map_err(io_failure)?;
+                            queue.exec(target.generation,&format!("dispatch:{wire}"),sample,Action::BeginDispatch { id:wire.clone(),wire_id:wire.clone(),staged:false }).await.map_err(io_failure)?;
+                            queue.exec(target.generation,&format!("logical-dispatch:{wire}"),sample,Action::BeginDispatch { id:logical_id.clone(),wire_id:wire.clone(),staged:false }).await.map_err(io_failure)?;
                             Ok(())
                         }.await;
                         Job::Write { wire,result }
@@ -737,8 +737,8 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                                                 payload:json!({"kind":"native_message","request_id":id,"payload":payload}),entry_id:None }).await.map_err(io_failure)?;
                                             let cursor = capture_cursor(&target,&view).await?;
                                             queue.exec(target.generation,&format!("native-cursor:{phase}"),sample,Action::BindDispatch { id:id.clone(),cursor }).await.map_err(io_failure)?;
-                                            queue.exec(target.generation,&format!("native-dispatch:{phase}"),sample,Action::BeginDispatch { id:id.clone(),wire_id:phase.clone() }).await.map_err(io_failure)?;
-                                            queue.exec(target.generation,&format!("dispatch:{phase}"),sample,Action::BeginDispatch { id:phase.clone(),wire_id:phase.clone() }).await.map_err(io_failure)?;
+                                            queue.exec(target.generation,&format!("native-dispatch:{phase}"),sample,Action::BeginDispatch { id:id.clone(),wire_id:phase.clone(),staged:false }).await.map_err(io_failure)?;
+                                            queue.exec(target.generation,&format!("dispatch:{phase}"),sample,Action::BeginDispatch { id:phase.clone(),wire_id:phase.clone(),staged:false }).await.map_err(io_failure)?;
                                             let result = policy.run(&target,"native_message",&RequestId::String(id.clone()),payload,&phase).await?;
                                             let outcome = result["outcome"].as_str().ok_or_else(||failure("native_outcome"))?;
                                             let status = match outcome { "written"=>Status::Accepted,"not_written"=>Status::Rejected,"unknown"=>Status::Unknown,_=>return Err(failure("native_outcome")) };

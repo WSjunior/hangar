@@ -183,7 +183,10 @@ pub enum Action {
     Rename { name:String },
     Prepare { id:String, payload:Value, entry_id:Option<String> },
     BindDispatch { id:String, cursor:Value },
-    BeginDispatch { id:String, wire_id:String },
+    /// `staged`: o despacho começou sem efeito no terminal; `MarkWriting` avisa antes da primeira
+    /// escrita. Interrompida antes disso, a tentativa volta à fila em vez de ficar incerta.
+    BeginDispatch { id:String, wire_id:String, #[serde(default, skip_serializing_if = "std::ops::Not::not")] staged:bool },
+    MarkWriting { id:String, wire_id:String },
     Finish { id:String, status:Status, result:Value },
     ConfirmOccurrence { id:String, proof:super::receipt::ReceiptProof },
     LateRpcResolution { id:String, wire_id:String, request_id:RequestId, generation:u64, result:Value },
@@ -302,7 +305,7 @@ impl Store {
         let readonly = matches!(&action, Action::Load | Action::EntryDelivered { .. } | Action::EnsureProjection);
         if readonly { self.ensure_projection()?; }
         let target = match &action {
-            Action::Prepare { id, .. } | Action::BindDispatch { id, .. } | Action::BeginDispatch { id, .. }
+            Action::Prepare { id, .. } | Action::BindDispatch { id, .. } | Action::BeginDispatch { id, .. } | Action::MarkWriting { id, .. }
             | Action::Finish { id, .. } | Action::LateRpcResolution { id, .. } | Action::ConfirmOccurrence { id, .. } => Some(id.clone()),
             _ => None,
         };
@@ -581,12 +584,19 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
             op.dispatch_cursor = cursor;
             serde_json::to_value(op)?
         }
-        Action::BeginDispatch { id, wire_id } => {
+        Action::BeginDispatch { id, wire_id, staged } => {
             let op = state.operations.get_mut(&id).ok_or_else(||invalid("operação não preparada"))?;
             if !matches!(op.status,Status::Prepared | Status::Dispatching) { return Err(invalid("operação não pode ser reenviada")); }
-            op.wire_attempts.entry(wire_id).or_insert_with(||json!({"status":"dispatching","result":null}));
+            op.wire_attempts.entry(wire_id).or_insert_with(||json!({"status":if staged {"staged"} else {"dispatching"},"result":null}));
             op.status = Status::Dispatching;
             for row in &mut state.rows { if Some(row_id(row)) == op.entry_id.as_deref() { row["delivered"] = json!(true); } }
+            serde_json::to_value(op)?
+        }
+        Action::MarkWriting { id, wire_id } => {
+            let op = state.operations.get_mut(&id).ok_or_else(||invalid("operação não preparada"))?;
+            if op.status != Status::Dispatching { return Err(invalid("escrita fora do despacho")); }
+            let attempt = op.wire_attempts.get_mut(&wire_id).ok_or_else(||invalid("tentativa não registrada"))?;
+            if attempt["status"] == "staged" { attempt["status"] = json!("dispatching"); }
             serde_json::to_value(op)?
         }
         Action::Finish { id, status, result } => {
@@ -645,6 +655,13 @@ fn apply(state: &mut State, action: Action, clock: ClockSample, call_id: &str) -
         }
         Action::Recover => {
             for op in state.operations.values_mut() {
+                // Nenhuma tentativa chegou a escrever: nada pode ter alcançado o terminal.
+                if op.status == Status::Dispatching && !op.wire_attempts.is_empty() && op.wire_attempts.values().all(|a|a["status"]=="staged") {
+                    for attempt in op.wire_attempts.values_mut() { attempt["status"] = json!("not_written"); }
+                    op.status = Status::Deferred; op.terminal_finalized = false;
+                    op.result = json!({"operation_id":op.id,"disposition":"deferred","payload":{"code":"interrupted_before_write","queued":op.entry_id.is_some(),"cleanup":"not_needed"}});
+                    continue;
+                }
                 if op.status == Status::Dispatching { op.status = Status::Unknown; }
                 for attempt in op.wire_attempts.values_mut() {
                     if attempt["status"] == "dispatching" { attempt["status"] = json!("unknown"); }
