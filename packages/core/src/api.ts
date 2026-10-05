@@ -758,7 +758,7 @@ const SESSION_BIRTH_MS = 120_000;
 function withCreationWarnings<T extends { avisos?: string[] }>(result: T): T {
   if (result?.avisos?.length) {
     try { apiEnv().onSessionWarnings?.(result.avisos); }
-    catch (error) { console.error('Falha ao mostrar avisos da sessão criada', error); }
+    catch (error) { console.error('onSessionWarnings:', error); }
   }
   return result;
 }

@@ -490,7 +490,8 @@ if [[ "$1" == "--new" ]]; then
         API_PEER=""; API_CONNECT_TIMEOUT=8
     fi
     if [[ -z "$provider" ]]; then
-        if [[ -n "$engine" ]]; then
+        # --conta sem --provider sempre foi conta Claude; o padrão lembrado não a reinterpreta.
+        if [[ -n "$engine" || -n "$conta" ]]; then
             provider="claude"
         elif [[ -n "$perfil" ]]; then
             provider="omp"

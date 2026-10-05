@@ -1094,6 +1094,7 @@ describe('CreateSessionSheet — modelo e esforço do Codex', () => {
     // (nome, cwd, configDir, provider, engine, model, effort, permissao)
     expect(api.createSessionForServer).toHaveBeenCalledWith(expect.objectContaining({ id: 'B' }), {
       name: 'x', cwd: '/tmp/x', provider: 'codex', codex_account: 'default', headless: false, model: 'gpt-5.6-sol', effort: 'xhigh',
+      remember_provider: true,
     });
     expect(window.location.hash).toBe('#/chat/B/x');
     expect(onCreate).not.toHaveBeenCalled();

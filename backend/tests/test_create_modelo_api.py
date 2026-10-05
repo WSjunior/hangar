@@ -172,9 +172,12 @@ def test_criacao_codex_padrao_sem_campo_tambem_reserva(monkeypatch, tmp_path):
     class Service:
         def __init__(self):
             self.lease = Lease()
+        async def read_auth_rapido(self, _account):
+            return {"status": "connected"}
         def reserve_creation(self, _account):
             return self.lease
 
+    monkeypatch.setattr(codex_accounts, "list_visible_accounts", lambda: [account])
     service = Service()
     monkeypatch.setattr(app.state, "codex_contas_login", service, raising=False)
     monkeypatch.setattr(api.tmux, "has_session", lambda _name: False)
