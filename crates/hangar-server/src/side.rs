@@ -433,7 +433,9 @@ async fn side_once(hub: &Arc<Hub>, attempt: &mut u32) -> SideEnd {
                 let repeated = {
                     let mut cache = hub.cache.lock().unwrap();
                     // Igual ao último do mesmo tipo: o aparelho já o tem, reenviar só o faz redesenhar.
-                    let repeated = LATEST.iter().position(|e| *e == event).is_some_and(|i| cache.latest[i].as_ref() == Some(&frame));
+                    // Pergunta repetida é pergunta nova: o aparelho já fechou a anterior.
+                    let repeated = event != "ask_question"
+                        && LATEST.iter().position(|e| *e == event).is_some_and(|i| cache.latest[i].as_ref() == Some(&frame));
                     cache.record(event, &ev.data, &frame, pane_question);
                     repeated
                 };

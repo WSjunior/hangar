@@ -181,7 +181,10 @@ impl ClaudeEngine {
     fn deliverable(&self) -> bool { self.alive && self.initialized && !self.initializing && !self.in_progress
         && self.pending.is_empty() && self.question.is_none() && self.active_input.is_none() }
 
-    pub fn forget_policy(&mut self,request_id:&RequestId) { self.policies.remove(request_id); }
+    pub fn forget_policy(&mut self,request_id:&RequestId) {
+        // Pedido de status que falhou não pode barrar o próximo igual.
+        if self.policies.remove(request_id).as_deref() == Some("format_status") { self.format_gate.reset(); }
+    }
 
     fn policy(&mut self, kind:&str,payload:Value,effects:&mut Vec<Effect>) {
         self.counter += 1;
