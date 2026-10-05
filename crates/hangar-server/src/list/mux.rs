@@ -2,11 +2,11 @@
 use std::ffi::OsString;
 use std::time::Duration;
 
-/// Os 8 campos que a lista lê de cada pane, numa chamada só.
-pub const LIST_PANES_FORMAT: &str = "#{session_name}\t#{pane_active}\t#{pane_pid}\t#{pane_current_path}\t#{pane_id}\t#{@cp_hidden}\t#{CP_PROVIDER}\t#{session_created}";
+/// Os 8 campos de `list_panes_all` e o endereço do pane no psmux, numa chamada só.
+pub const LIST_PANES_FORMAT: &str = "#{session_name}\t#{pane_active}\t#{pane_pid}\t#{pane_current_path}\t#{pane_id}\t#{@cp_hidden}\t#{CP_PROVIDER}\t#{session_created}\t#{window_index}\t#{pane_index}";
 const PROVIDERS: [&str; 5] = ["claude", "codex", "pi", "omp", "kimi"];
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Pane {
     pub session: String,
     pub active: bool,
@@ -16,6 +16,20 @@ pub struct Pane {
     pub hidden: bool,
     pub provider: Option<String>,
     pub session_created: Option<u64>,
+    pub window_index: Option<u32>,
+    pub pane_index: Option<u32>,
+}
+
+impl Pane {
+    /// Endereço que mira este pane. O psmux numera `%N` por SESSÃO, e `-t %N` lá cai na sessão de
+    /// quem chama (`tmux.py:alvo_de_pane`); `None` = sem alvo preciso, quem chama usa `=<sessão>:`.
+    pub fn target(&self) -> Option<String> {
+        if cfg!(windows) { self.psmux_target() } else { Some(self.pane_id.clone()) }
+    }
+
+    fn psmux_target(&self) -> Option<String> {
+        Some(format!("={}:{}.{}", self.session, self.window_index?, self.pane_index?))
+    }
 }
 
 /// O multiplexador não respondeu: a lista é desconhecida, não vazia.
@@ -27,7 +41,7 @@ impl std::fmt::Display for MuxUnavailable {
 }
 impl std::error::Error for MuxUnavailable {}
 
-/// Uma linha por pane; linha com menos de 5 campos é ignorada. Os 3 últimos podem faltar (opção
+/// Uma linha por pane; linha com menos de 5 campos é ignorada. Os demais podem faltar (opção
 /// de usuário que o multiplexador não interpola): faltando, a sessão aparece como sempre.
 pub fn parse_list_panes(output: &str) -> Vec<Pane> {
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
@@ -46,6 +60,8 @@ pub fn parse_list_panes(output: &str) -> Vec<Pane> {
             hidden: field(5) == "1",
             provider: PROVIDERS.contains(&field(6)).then(|| field(6).to_string()),
             session_created: if digits(field(7)) { field(7).parse().ok().filter(|n| *n > 0) } else { None },
+            window_index: if digits(field(8)) { field(8).parse().ok() } else { None },
+            pane_index: if digits(field(9)) { field(9).parse().ok() } else { None },
         })
     }).collect()
 }
@@ -119,7 +135,8 @@ mod tests {
         let panes = parse_list_panes(out);
         assert_eq!(panes.len(), 5);
         assert_eq!(panes[0], Pane { session: "main".into(), active: true, pid: Some(100), cwd: "/home/a b".into(),
-            pane_id: "%0".into(), hidden: false, provider: Some("claude".into()), session_created: Some(1700000000) });
+            pane_id: "%0".into(), hidden: false, provider: Some("claude".into()), session_created: Some(1700000000),
+            ..Pane::default() });
         assert!(!panes[1].active);
         assert_eq!(panes[1].provider, None);
         assert_eq!(panes[2].session, "v1.2");
@@ -128,6 +145,21 @@ mod tests {
         assert_eq!(panes[2].session_created, None, "zero não é nascimento");
         assert_eq!((panes[3].pid, panes[3].hidden, &panes[3].provider, panes[3].session_created), (None, false, &None, None));
         assert_eq!((panes[4].hidden, &panes[4].provider), (false, &None), "campo cru e provedor desconhecido");
+    }
+
+    #[test]
+    fn parses_psmux_list_panes() {
+        // psmux numera `%N` por sessão: as duas têm `%1`, e só `=<sessão>:<janela>.<pane>` mira certo.
+        let out = b"zzX\t1\t40\tC:\\w\t%1\t\tclaude\t1700000000\t0\t0\n\
+                    zzY\t1\t41\tC:\\S\xe3o\t%1\t\tpi\t1700000001\t2\t1\n\
+                    zzZ\t1\t42\tC:\\z\t%1\n";
+        let panes = parse_list_panes(&String::from_utf8_lossy(out));
+        assert_eq!(panes.len(), 3);
+        assert_eq!(panes[0].psmux_target().as_deref(), Some("=zzX:0.0"));
+        assert_eq!(panes[1].psmux_target().as_deref(), Some("=zzY:2.1"));
+        assert_eq!(panes[1].cwd, "C:\\S\u{fffd}o", "byte inválido trocado, pane mantido");
+        assert_eq!(panes[2].psmux_target(), None, "sem janela/pane não há alvo preciso");
+        assert_eq!(panes[0].target().as_deref(), Some(if cfg!(windows) { "=zzX:0.0" } else { "%1" }));
     }
 
     #[cfg(unix)]

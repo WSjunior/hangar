@@ -1,11 +1,15 @@
-//! Lista de sessões contra as entradas e saídas gravadas pelo Python (`gen_list.py`).
-mod common;
+//! A lista inteira do Rust (descoberta da Task 6 + provedores, sidecars, campos comuns e colisão da
+//! Task 7) contra as linhas gravadas por `gen_list.py`, tique a tique.
+#![cfg(target_os = "linux")]
+
+use crate::common;
 
 use hangar_api::session::SessionRow;
+use hangar_server::list::discover::Resolver;
 use hangar_server::list::discover_other::{self, Dirs};
 use hangar_server::list::links;
 use hangar_server::list::mux::Pane;
-use hangar_server::list::procs::{ChildrenMap, ProcessView};
+use hangar_server::list::procs::{CHILDREN_TTL, ChildrenMap, ProcessView};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -63,9 +67,8 @@ impl World {
             let path = PathBuf::from(self.real_str(op["path"].as_str().unwrap()));
             match op["op"].as_str().unwrap() {
                 "mkdir" => std::fs::create_dir_all(&path).unwrap(),
-                "rm" => {
-                    if path.is_dir() { std::fs::remove_dir_all(&path).unwrap() } else { std::fs::remove_file(&path).unwrap() }
-                }
+                "rm" if path.is_dir() => std::fs::remove_dir_all(&path).unwrap(),
+                "rm" => std::fs::remove_file(&path).unwrap(),
                 "write" => {
                     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                     std::fs::write(&path, self.real_str(op["text"].as_str().unwrap())).unwrap();
@@ -83,19 +86,11 @@ fn set_mtime(path: &Path, at: f64) {
     file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs_f64(at)).unwrap();
 }
 
-/// O `/proc` do tique.
+/// O `/proc` do tique; pid ausente responde como processo morto.
 struct FakeProcs(HashMap<i64, Value>);
 
 impl ProcessView for FakeProcs {
-    fn children(&self, _: Duration) -> io::Result<Arc<ChildrenMap>> {
-        let mut pids: Vec<i64> = self.0.keys().copied().collect();
-        pids.sort();
-        let mut map = ChildrenMap::new();
-        for pid in pids {
-            map.entry(self.0[&pid]["ppid"].as_i64().unwrap()).or_default().push(pid);
-        }
-        Ok(Arc::new(map))
-    }
+    fn children(&self, _: Duration) -> io::Result<Arc<ChildrenMap>> { unreachable!("o teste monta o mapa") }
     fn argv(&self, pid: i64) -> Vec<String> {
         self.0.get(&pid).map(|p| p["argv"].as_array().unwrap().iter().map(|a| a.as_str().unwrap().to_owned()).collect()).unwrap_or_default()
     }
@@ -110,87 +105,29 @@ impl ProcessView for FakeProcs {
     }
 }
 
-const AGENTS: [&str; 7] = ["pi", "omp", "claude", "kimi", "kimi-code", "codex", "hangar-codex-tui"];
-
-/// Pid do agente no pane (a descida da Task 6), só para saber de quem ler motor e conta.
-fn agent_pid(procs: &FakeProcs, pane_pid: Option<i64>) -> Option<i64> {
-    let map = procs.children(Duration::ZERO).unwrap();
-    let mut stack = vec![pane_pid?];
-    while let Some(pid) = stack.pop() {
-        let argv = procs.argv(pid);
-        let cmd = argv.join(" ");
-        let skip = cmd.contains("daemon") || cmd.contains("--bg-") || cmd.contains("--agent");
-        if !skip && argv.first().is_some_and(|a| AGENTS.contains(&Path::new(a).file_name().unwrap().to_str().unwrap())) {
-            return Some(pid);
-        }
-        stack.extend(map.get(&pid).into_iter().flatten());
+/// Mapa pai→filhos em ordem crescente de pid, como o fake do gerador.
+fn scan(procs: &FakeProcs) -> ChildrenMap {
+    let mut pids: Vec<i64> = procs.0.keys().copied().collect();
+    pids.sort();
+    let mut map = ChildrenMap::new();
+    for pid in pids {
+        map.entry(procs.0[&pid]["ppid"].as_i64().unwrap()).or_default().push(pid);
     }
-    None
+    map
 }
 
 fn pane_of(p: &Value) -> Pane {
     Pane {
         session: p["name"].as_str().unwrap().to_owned(),
         active: p["active"].as_bool().unwrap(),
-        pid: p["pid"].as_u64().map(|v| v as u32),
+        pid: p["pid"].as_u64().map(|v| u32::try_from(v).unwrap()),
         cwd: p["cwd"].as_str().unwrap().to_owned(),
         pane_id: p["pane_id"].as_str().unwrap().to_owned(),
         hidden: p["hidden"].as_bool().unwrap(),
         provider: p["provider"].as_str().map(str::to_owned),
         session_created: p["session_created"].as_u64(),
+        ..Pane::default()
     }
-}
-
-/// O laço do `registry.list()` com as funções da Task 7. O provedor do pane e o transcript das
-/// linhas Claude vêm do golden (são da Task 6); a escolha do pane repete a regra do agente.
-fn list_rows(world: &World, tick: &Value, expected: &[Value]) -> Vec<SessionRow> {
-    let dirs = world.dirs();
-    let procs = FakeProcs(tick["procs"].as_array().unwrap().iter().map(|p| (p["pid"].as_i64().unwrap(), world.real(p))).collect());
-    let panes: Vec<Pane> = tick["panes"].as_array().unwrap().iter().map(|p| pane_of(&world.real(p))).collect();
-    let mut groups: Vec<(String, Vec<Pane>)> = Vec::new();
-    for pane in panes {
-        match groups.iter_mut().find(|(n, _)| *n == pane.session) {
-            Some((_, g)) => g.push(pane),
-            None => groups.push((pane.session.clone(), vec![pane])),
-        }
-    }
-    let births: HashMap<String, u64> = groups.iter().filter_map(|(n, g)| g[0].session_created.map(|b| (n.clone(), b))).collect();
-    let by_name = |name: &str| expected.iter().find(|r| r["name"] == name).cloned();
-    let mut rows = Vec::new();
-    for (name, group) in &groups {
-        if group[0].hidden || discover_other::has_codex_sidecar(name, &dirs) {
-            continue;
-        }
-        let mut ordered: Vec<&Pane> = group.iter().collect();
-        ordered.sort_by_key(|p| !p.active);
-        let pane = if group.len() > 1 {
-            ordered.iter().find(|p| agent_pid(&procs, p.pid.map(i64::from)).is_some()).copied().unwrap_or(ordered[0])
-        } else {
-            &group[0]
-        };
-        let golden = by_name(name).unwrap_or_else(|| panic!("linha {name} fora do golden"));
-        let provider = golden["provider"].as_str().unwrap_or("claude").to_owned();
-        let mut row = links::blank_row(name);
-        row.cwd = Some(pane.cwd.clone());
-        let (jsonl, tracked) = match provider.as_str() {
-            "pi" | "omp" | "kimi" => {
-                let t = discover_other::ticket_transcript(&provider, pane, &procs, &dirs);
-                let tracked = t.is_some();
-                (t, tracked)
-            }
-            "codex" => (None, false),
-            _ => (golden["jsonl"].as_str().map(str::to_owned), golden["tracked"].as_bool().unwrap_or(true)),
-        };
-        row.jsonl = jsonl;
-        row.tracked = tracked;
-        let pane_pid = pane.pid.map(i64::from);
-        let pid_env = agent_pid(&procs, pane_pid).or(pane_pid);
-        links::fill_pane_row(&mut row, &provider, pid_env, pane.session_created, &procs, &dirs);
-        rows.push(row);
-    }
-    rows.extend(discover_other::codex_rows(&dirs, &births, &procs));
-    rows.extend(discover_other::headless_rows(&dirs, &procs));
-    rows
 }
 
 /// A linha como o golden grava: campo igual ao padrão sai.
@@ -200,7 +137,8 @@ fn dump(row: &SessionRow, defaults: &Map<String, Value>) -> Value {
     Value::Object(map)
 }
 
-/// Repete cada caso tique a tique e devolve as divergências.
+/// Repete cada caso tique a tique, com o mapa de filhos em cache de 3 s e as operações do
+/// registro, e devolve as divergências.
 fn replay(golden: &Value, cases: &[&str]) -> Vec<String> {
     let defaults = golden["defaults"].as_object().unwrap();
     let t0 = golden["t0"].as_f64().unwrap();
@@ -208,14 +146,32 @@ fn replay(golden: &Value, cases: &[&str]) -> Vec<String> {
     for name in cases {
         let case = golden["cases"].as_array().unwrap().iter().find(|c| c["name"] == *name).unwrap_or_else(|| panic!("caso {name}"));
         let world = World::new();
+        let dirs = world.dirs();
+        let mut resolver = Resolver::default();
+        let mut children: Option<(f64, Arc<ChildrenMap>)> = None;
         for tick in case["ticks"].as_array().unwrap() {
             let at = tick["at"].as_f64().unwrap();
-            world.apply_fs(tick["fs"].as_array().map(Vec::as_slice).unwrap_or(&[]), at);
+            world.apply_fs(tick["fs"].as_array().map_or(&[][..], Vec::as_slice), at);
+            let procs = FakeProcs(tick["procs"].as_array().unwrap().iter().map(|p| (p["pid"].as_i64().unwrap(), world.real(p))).collect());
+            for op in tick["ops"].as_array().map_or(&[][..], Vec::as_slice) {
+                match op["op"].as_str().unwrap() {
+                    "seed" => resolver.seed(op["name"].as_str().unwrap(), &world.real_str(op["jsonl"].as_str().unwrap())),
+                    "forget" => resolver.forget(op["name"].as_str().unwrap()),
+                    "rename" => resolver.rename(op["old"].as_str().unwrap(), op["new"].as_str().unwrap()),
+                    "fresh" => children = None,
+                    other => panic!("op {other}"),
+                }
+            }
             if tick["expected"].get("raises").is_some() {
                 continue;
             }
+            if children.as_ref().is_none_or(|(when, _)| at - when >= CHILDREN_TTL.as_secs_f64()) {
+                children = Some((at, Arc::new(scan(&procs))));
+            }
+            let panes: Vec<Pane> = tick["panes"].as_array().unwrap().iter().map(|p| pane_of(&world.real(p))).collect();
+            let rows = discover_other::discover_rows(&panes, &procs, &children.as_ref().unwrap().1, &mut resolver, &dirs);
+            let got: Vec<Value> = rows.iter().map(|r| dump(r, defaults)).collect();
             let expected: Vec<Value> = tick["expected"]["rows"].as_array().unwrap().iter().map(|r| world.real(r)).collect();
-            let got: Vec<Value> = list_rows(&world, tick, &expected).iter().map(|r| dump(r, defaults)).collect();
             if got != expected {
                 failures.push(format!("{name} @{}:\n  Rust   {}\n  Python {}", at - t0, json!(got), json!(expected)));
             }
@@ -234,14 +190,16 @@ fn discovery_other_sequences() {
 #[test]
 fn links_cases() {
     let golden = common::golden("list_discovery.json");
-    // Os demais casos têm linhas Claude: aqui conferem vida, worktree, vínculos, motor e conta.
+    // As linhas Claude: vida, worktree, vínculos, motor, conta e a guarda de colisão.
     let failures = replay(&golden, &[
-        "links_worktree_engine_account", "claude_fd_open_then_locked", "claude_fd_aux_ignored",
+        "links_worktree_engine_account", "collision", "claude_fd_open_then_locked", "claude_fd_aux_ignored",
         "claude_session_id_then_clear", "claude_session_id_with_sibling", "claude_marker_by_pid_cache_newest",
         "claude_marker_by_session_id", "seed_rename_forget", "created_under_one_second", "mux_unavailable",
-        "agent_pane_choice", "collision",
+        "agent_pane_choice",
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let all: Vec<&str> = golden["cases"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
+    assert_eq!(all.len(), 16, "caso novo no golden: inclua em um dos dois testes");
 
     // Loop pelo sidecar, nas linhas da decoração.
     let golden = common::golden("list_decorate.json");
@@ -287,7 +245,7 @@ fn ticket_key_and_pi_paths() {
     assert!(discover_other::is_pi_subagent("/s/x/2027-01-15T08-00-00-000Z_88888888-8888-4888-8888-888888888888/44bad0fb/a.jsonl"));
     assert!(discover_other::is_pi_subagent("/s/x/run-2/a.jsonl"));
     assert!(!discover_other::is_pi_subagent("/s/x/2027-01-15T08-00-00-000Z_88888888-8888-4888-8888-888888888888.jsonl"));
-    // Valores calculados pelo `kimi_sessions.workdir_key` do Python.
+    // Valores calculados pelo `kimi_sessions.workdir_key` e pelo `sanitize_session_name` do Python.
     assert_eq!(discover_other::kimi_workdir_key("/tmp/kimi-acp-probe"), "wd_kimi-acp-probe_15ca61fc9ec9");
     assert_eq!(discover_other::sanitize_session_name("Área de trabalho."), "Area-de-trabalho");
 }

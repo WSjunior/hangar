@@ -1,15 +1,17 @@
 //! Descoberta dos provedores fora do Claude com terminal: bilhetes de Pi, omp e Kimi
 //! (`registry.py:739-888`) e as linhas dos sidecars Codex e Claude sem terminal (`:1438-1480`).
 //! A conta das linhas Pi, omp e Kimi casa credenciais (`cotas.py`) e chega pelos fatos do Python.
+use super::discover::{Resolver, discover_panes};
 use super::links;
 use super::mux::Pane;
-use super::procs::ProcessView;
+use super::procs::{ChildrenMap, ProcessView};
 use hangar_api::session::SessionRow;
 use regex::Regex;
 use serde_json::{Map, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
 use std::time::SystemTime;
 
 /// Pastas que o Python tira do ambiente do backend. Em parâmetro, para o teste rodar sem tocar no
@@ -38,14 +40,27 @@ impl Dirs {
     pub fn default_claude(&self) -> PathBuf { self.home.join(".claude") }
 }
 
-/// Variável do ambiente do processo; vazia ou ilegível é ausência, como o `_env_var_of`.
-pub(super) fn env(procs: &dyn ProcessView, pid: i64, name: &str) -> Option<String> {
-    let value = procs.env_var(pid, name).ok().flatten()?;
-    Some(value.to_string_lossy().into_owned()).filter(|v| !v.is_empty())
+/// Variável do ambiente do processo; vazia é ausência. Ilegível também cai na ausência, como o
+/// `_env_var_of`, mas avisa: motor e conta sairiam do padrão nesta rodada.
+fn env_os(procs: &dyn ProcessView, pid: i64, name: &str) -> Option<OsString> {
+    match procs.env_var(pid, name) {
+        Ok(v) => v.filter(|v| !v.is_empty()),
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound && crate::warn_limit::allow(None, "list_environ_unreadable") {
+                tracing::warn!(code = "list_environ_unreadable", pid, io_kind = ?error.kind(), "ambiente do processo ilegível");
+            }
+            None
+        }
+    }
 }
 
+pub(super) fn env(procs: &dyn ProcessView, pid: i64, name: &str) -> Option<String> {
+    env_os(procs, pid, name).map(|v| v.to_string_lossy().into_owned())
+}
+
+/// Bytes do caminho intactos, como o `surrogateescape` do Python: o caminho tem de existir no disco.
 pub(super) fn config_dir_of(procs: &dyn ProcessView, pid: i64) -> Option<PathBuf> {
-    env(procs, pid, "CLAUDE_CONFIG_DIR").map(PathBuf::from)
+    env_os(procs, pid, "CLAUDE_CONFIG_DIR").map(PathBuf::from)
 }
 
 /// Chave do bilhete, a mesma da extensão: no psmux o `%N` repete entre sessões e vale o
@@ -57,13 +72,51 @@ pub fn ticket_key(pane_id: &str, pid: Option<i64>, procs: &dyn ProcessView) -> S
     pane_id.trim_start_matches('%').to_owned()
 }
 
+/// `registry.list()` sem as linhas `orq` e de transferência (vêm dos fatos): sessões do
+/// multiplexador, guarda de colisão e as linhas dos sidecars Codex e Claude sem terminal.
+pub fn discover_rows(panes: &[Pane], procs: &dyn ProcessView, children: &ChildrenMap, resolver: &mut Resolver, dirs: &Dirs) -> Vec<SessionRow> {
+    let projects = dirs.claude.join("projects");
+    let skip = |name: &str| has_codex_sidecar(name, dirs);
+    let mut rows = Vec::new();
+    let mut sids = HashMap::new();
+    for s in discover_panes(panes, procs, children, &projects, resolver, &skip) {
+        let mut row = links::blank_row(&s.name);
+        row.cwd = Some(s.cwd.clone());
+        let (jsonl, tracked) = match (s.provider, s.transcript) {
+            (_, Some(t)) => (t.jsonl, t.tracked),
+            // Pane Codex sem sidecar: a TUI ainda não abriu a thread, não há rollout.
+            ("codex", None) => (None, false),
+            (provider, None) => {
+                let t = ticket_transcript(provider, &s.pane_id, s.pane_pid, &s.cwd, procs, dirs);
+                let tracked = t.is_some();
+                (t, tracked)
+            }
+        };
+        row.jsonl = jsonl;
+        row.tracked = tracked;
+        links::fill_pane_row(&mut row, s.provider, s.agent_pid.or(s.pane_pid), s.session_created, procs, dirs);
+        sids.insert(s.name, s.repl_sid);
+        rows.push(row);
+    }
+    links::dedupe_collisions(&mut rows, &sids);
+    // Nascimento do terminal de mesmo nome, escondidas incluídas, como o `terminal_births`.
+    let mut births = HashMap::new();
+    for pane in panes {
+        if let Some(b) = pane.session_created {
+            births.entry(pane.session.clone()).or_insert(b);
+        }
+    }
+    rows.extend(codex_rows(dirs, &births, procs));
+    rows.extend(headless_rows(dirs, procs));
+    rows
+}
+
 /// Transcript de um pane Pi, omp ou Kimi pelo bilhete (e, no Pi, pelo `CP_PI_SESSION`). `None` =
 /// sem vínculo, e a linha sai `tracked=false`. Lido do processo do pane, como faz a extensão.
-pub fn ticket_transcript(provider: &str, pane: &Pane, procs: &dyn ProcessView, dirs: &Dirs) -> Option<String> {
-    let pid = pane.pid.map(i64::from);
+pub fn ticket_transcript(provider: &str, pane_id: &str, pane_pid: Option<i64>, cwd: &str, procs: &dyn ProcessView, dirs: &Dirs) -> Option<String> {
     match provider {
-        "pi" | "omp" => pi_transcript(&pane.pane_id, pid, &pane.cwd, provider, procs, dirs),
-        "kimi" => kimi_transcript(&pane.pane_id, pid, &pane.cwd, procs, dirs),
+        "pi" | "omp" => pi_transcript(pane_id, pane_pid, cwd, provider, procs, dirs),
+        "kimi" => kimi_transcript(pane_id, pane_pid, cwd, procs, dirs),
         _ => None,
     }
 }
@@ -85,13 +138,10 @@ fn number(value: Option<&Value>) -> Option<f64> {
     }
 }
 
-static WARNED: LazyLock<Mutex<HashSet<(String, String, &'static str)>>> = LazyLock::new(Default::default);
-
-/// Um aviso por pane e motivo: a lista roda a cada segundo.
-fn warn_once(provider: &'static str, pane_id: &str, reason: &'static str) {
-    let mut seen = WARNED.lock().unwrap_or_else(|e| e.into_inner());
-    if seen.insert((provider.to_owned(), pane_id.to_owned(), reason)) {
-        tracing::warn!(provider, pane_id, reason, "list: ticket refused");
+/// A lista roda a cada 1,5 s: um aviso por minuto por chave e código.
+fn warn_limited(key: &str, code: &'static str, field: &str) {
+    if crate::warn_limit::allow(Some(key), code) {
+        tracing::warn!(code, key, field, "list: entrada recusada");
     }
 }
 
@@ -109,12 +159,12 @@ fn pi_transcript(pane_id: &str, pid: Option<i64>, cwd: &str, provider: &str, pro
         let born = pid.and_then(|p| procs.start_time(p));
         match (born, number(data.get("ts"))) {
             // Frescor que não dá para provar é recusa: o pane reusado abriria a conversa anterior.
-            (None, _) => { warn_once("pi", pane_id, "nascimento"); file = None }
-            (_, None) => { warn_once("pi", pane_id, "ts"); file = None }
+            (None, _) => { warn_limited(pane_id, "list_pi_ticket_refused", "nascimento"); file = None }
+            (_, None) => { warn_limited(pane_id, "list_pi_ticket_refused", "ts"); file = None }
             (Some(born), Some(ts)) if ts < born - TICKET_SLACK => file = None,
             _ => {
                 if file.as_deref().is_some_and(is_pi_subagent) {
-                    warn_once("pi", pane_id, "subagente");
+                    warn_limited(pane_id, "list_pi_ticket_subagent", "file");
                     file = file.as_deref().and_then(pi_root_transcript);
                 }
             }
@@ -147,7 +197,7 @@ static WINDOWS_RESERVED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^(C
 fn omp_agent_dir(profile: Option<&str>, dirs: &Dirs) -> PathBuf {
     let Some(p) = profile.map(str::trim).filter(|p| !p.is_empty() && *p != "default") else { return dirs.omp_agent.clone() };
     if p == "." || p == ".." || p.ends_with('.') || !OMP_PROFILE_RE.is_match(p) || WINDOWS_RESERVED.is_match(p) {
-        tracing::warn!(field = "OMP_PROFILE", "list: omp profile ignored");
+        warn_limited(p, "list_omp_profile_invalid", "OMP_PROFILE");
         return dirs.omp_agent.clone();
     }
     dirs.omp_config.join("profiles").join(p).join("agent")
@@ -231,13 +281,13 @@ fn kimi_transcript(pane_id: &str, pid: Option<i64>, cwd: &str, procs: &dyn Proce
     let sid = data.get("session_id").and_then(Value::as_str).filter(|s| !s.is_empty())?;
     let born = pid.and_then(|p| procs.start_time(p));
     match (born, number(data.get("ts"))) {
-        (None, _) => { warn_once("kimi", pane_id, "nascimento"); return None }
-        (_, None) => { warn_once("kimi", pane_id, "ts"); return None }
+        (None, _) => { warn_limited(pane_id, "list_kimi_ticket_refused", "nascimento"); return None }
+        (_, None) => { warn_limited(pane_id, "list_kimi_ticket_refused", "ts"); return None }
         (Some(born), Some(ts)) if ts < born - TICKET_SLACK => return None,
         _ => {}
     }
     let wd = data.get("cwd").and_then(Value::as_str).filter(|c| !c.is_empty()).unwrap_or(cwd);
-    Some(kimi_transcript_of_id(wd, sid, dirs)).filter(|w| !w.is_empty())
+    kimi_transcript_of_id(wd, sid, dirs)
 }
 
 fn kimi_wire(session_dir: &Path) -> String {
@@ -245,19 +295,20 @@ fn kimi_wire(session_dir: &Path) -> String {
 }
 
 /// `kimi_sessions.transcript_path`: o índice primeiro; a pasta calculada cobre o índice atrasado.
-fn kimi_transcript_of_id(cwd: &str, sid: &str, dirs: &Dirs) -> String {
+/// `None`: índice com byte inválido, que no Python levanta e deixa a sessão sem transcript.
+fn kimi_transcript_of_id(cwd: &str, sid: &str, dirs: &Dirs) -> Option<String> {
     if let Ok(raw) = std::fs::read(dirs.kimi_home.join("session_index.jsonl")) {
-        for line in String::from_utf8_lossy(&raw).lines() {
+        for line in std::str::from_utf8(&raw).ok()?.lines() {
             let Ok(Value::Object(o)) = serde_json::from_str::<Value>(line) else { continue };
             if o.get("sessionId").and_then(Value::as_str) == Some(sid)
                 && let Some(dir) = o.get("sessionDir").and_then(Value::as_str).filter(|d| !d.is_empty())
             {
-                return kimi_wire(Path::new(dir));
+                return Some(kimi_wire(Path::new(dir)));
             }
         }
     }
     let dir = dirs.kimi_home.join("sessions").join(kimi_workdir_key(cwd)).join(sid);
-    if dir.is_dir() { kimi_wire(&dir) } else { String::new() }
+    dir.is_dir().then(|| kimi_wire(&dir))
 }
 
 static KIMI_SLUG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^a-z0-9._-]+").unwrap());
@@ -279,6 +330,9 @@ pub fn sanitize_session_name(name: &str) -> String {
     // ponytail: só os acentos do português e vizinhos, sem NFKD completo (crate novo); outra letra
     // composta some em vez de virar a base. Nome criado pelo app já chega sanitizado.
     let ascii: String = name.chars().filter_map(fold_accent).collect();
+    if name.chars().any(|c| c.is_alphabetic() && fold_accent(c).is_none()) {
+        warn_limited(name, "list_session_name_unfolded", "name");
+    }
     ascii.trim().chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '-' }).collect::<String>().trim_matches('-').to_owned()
 }
 
@@ -299,12 +353,24 @@ pub fn has_codex_sidecar(name: &str, dirs: &Dirs) -> bool {
     dirs.home.join(".hangar").join("codex-sessions").join(format!("{}.json", sanitize_session_name(name))).exists()
 }
 
-/// Sidecars de uma pasta em ordem de nome; ilegível ou não-objeto fica de fora, como no Python.
-fn sidecars(dir: &Path) -> Vec<Map<String, Value>> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+/// Sidecars de uma pasta em ordem de nome, com o nome do arquivo; ilegível ou não-objeto fica de
+/// fora, como no Python. Pasta que existe e não se lê avisa: as sessões dela sumiriam caladas.
+fn sidecars(dir: &Path) -> Vec<(String, Map<String, Value>)> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                warn_limited(&dir.to_string_lossy(), "list_sidecar_dir_unreadable", "dir");
+            }
+            return Vec::new();
+        }
+    };
     let mut files: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
     files.sort();
-    files.iter().filter_map(|f| match read_ticket(f) { Ok(Value::Object(m)) => Some(m), _ => None }).collect()
+    files.into_iter().filter_map(|f| match read_ticket(&f) {
+        Ok(Value::Object(m)) => Some((f.file_name().unwrap_or_default().to_string_lossy().into_owned(), m)),
+        _ => None,
+    }).collect()
 }
 
 fn text(meta: &Map<String, Value>, key: &str) -> Option<String> {
@@ -334,7 +400,7 @@ fn current_cwd(meta: &Map<String, Value>, procs: &dyn ProcessView) -> Option<Str
 fn expand_user(path: &str, dirs: &Dirs) -> PathBuf {
     match path.strip_prefix('~') {
         Some("") => dirs.home.clone(),
-        Some(rest) if rest.starts_with(['/', '\\']) => dirs.home.join(&rest[1..]),
+        Some(rest) if rest.starts_with('/') => dirs.home.join(&rest[1..]),
         _ => PathBuf::from(path),
     }
 }
@@ -343,9 +409,9 @@ fn expand_user(path: &str, dirs: &Dirs) -> PathBuf {
 /// mesmo nome; a vida de uma transferência em curso vem dos fatos.
 pub fn codex_rows(dirs: &Dirs, births: &HashMap<String, u64>, procs: &dyn ProcessView) -> Vec<SessionRow> {
     let mut out = Vec::new();
-    for meta in sidecars(&dirs.home.join(".hangar").join("codex-sessions")) {
+    for (file, meta) in sidecars(&dirs.home.join(".hangar").join("codex-sessions")) {
         let Some(name) = text(&meta, "name") else {
-            tracing::warn!(field = "name", "list: codex sidecar without name skipped");
+            warn_limited(&file, "list_codex_sidecar_skipped", "name");
             continue;
         };
         let home = text(&meta, "codex_home").map(|h| expand_user(&h, dirs)).unwrap_or_else(|| dirs.codex_home.clone());
@@ -396,10 +462,11 @@ fn headless_transcript(cwd: &str, sid: &str, config_dir: Option<&str>, dirs: &Di
 /// Uma linha por sessão Claude sem terminal: a identidade vem do sidecar.
 pub fn headless_rows(dirs: &Dirs, procs: &dyn ProcessView) -> Vec<SessionRow> {
     let mut out = Vec::new();
-    for meta in sidecars(&dirs.home.join(".hangar").join("claude-headless")) {
+    for (file, meta) in sidecars(&dirs.home.join(".hangar").join("claude-headless")) {
+        // Sem nome ou sid o Python também filtra calado: é o sidecar ainda sendo escrito.
         let (Some(name), Some(sid)) = (text(&meta, "name"), text(&meta, "session_id")) else { continue };
         let Some(saved_cwd) = text(&meta, "cwd") else {
-            tracing::warn!(field = "cwd", "list: headless sidecar without cwd skipped");
+            warn_limited(&file, "list_headless_sidecar_skipped", "cwd");
             continue;
         };
         let config_dir = text(&meta, "config_dir");

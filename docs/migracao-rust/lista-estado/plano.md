@@ -131,7 +131,7 @@ inválido trocado), `docs/decisoes/windows.md` (regra nova, se houver).
 **Falha sem ela:** `mux::parses_psmux_list_panes` (`%N` repetido entre sessões),
 `procs::sysinfo_reads_argv_and_env` (nos três sistemas no CI).
 
-- [ ] **Step 9: Ler "Regras vigentes" de `docs/decisoes/windows.md`; testes, vistos falhar**
+- [x] **Step 9: Ler "Regras vigentes" de `docs/decisoes/windows.md`; testes, vistos falhar**
 - [ ] **Step 10: Leitor `sysinfo` e parse do psmux; jobs Windows e macOS do CI conferidos pelo log; revisar**
 
 ### Task 5: Gerador de entradas e saídas gravadas
@@ -160,20 +160,21 @@ resolução com semear, esquecer e renomear), `crates/hangar-server/tests/contra
 
 **Falha sem ela:** `contract_list::discovery_claude_sequences`, `discover::seed_then_forget`.
 
-- [ ] **Step 13: Testes, vistos falhar**
-- [ ] **Step 14: Porte na ordem do Python, fd aberto só no Linux; testes focados; revisar**
+- [x] **Step 13: Testes, vistos falhar**
+- [x] **Step 14: Porte na ordem do Python, fd aberto só no Linux; testes focados; revisar**
 
 ### Task 7: Descoberta dos demais provedores e campos comuns
 
 **Arquivos:** `list/discover_other.rs` (bilhetes Pi/omp/Kimi `registry.py:739-888`, sidecars Codex e
 Claude sem terminal `:1438-1480`), `list/links.rs` (par, encadeamento, loop, worktree, motor, conta,
-vida da sessão `:1376-1431`; colisões `:1219-1262`), `tests/contract_list.rs`. Linhas `orq` e de
-transferência não entram: vêm dos fatos (Task 14).
+vida da sessão `:1376-1431`; colisões `:1219-1262`), `tests/contract_list/other.rs`. Linhas `orq` e de
+transferência não entram: vêm dos fatos (Task 14), nem a `conta` de Kimi, Pi e omp (fato, Task 14).
+`discover_other::discover_rows` junta a descoberta da Task 6 com estas peças (o `registry.list()`).
 
 **Falha sem ela:** `contract_list::discovery_other_sequences`, `contract_list::links_cases`.
 
-- [ ] **Step 15: Testes, vistos falhar**
-- [ ] **Step 16: Porte; testes focados; revisar**
+- [x] **Step 15: Testes, vistos falhar**
+- [x] **Step 16: Porte; testes focados; revisar**
 
 ### Task 8: Marcadores, registro nativo, pergunta aberta, statusline e assinatura
 
@@ -183,8 +184,8 @@ regra de pid vivo de `hook_state.py:56-129`, `.hangar-askq`, `.hangar-status` co
 
 **Falha sem ela:** `contract_list::decorate_markers_cases`, `contract_list::list_sig_cases`.
 
-- [ ] **Step 17: Testes, vistos falhar**
-- [ ] **Step 18: Leitores e assinatura; testes focados; revisar**
+- [x] **Step 17: Testes, vistos falhar**
+- [x] **Step 18: Leitores e assinatura; testes focados; revisar**
 
 ### Task 9: Contexto e modelo da sessão Claude
 
@@ -193,8 +194,8 @@ regra de pid vivo de `hook_state.py:56-129`, `.hangar-askq`, `.hangar-status` co
 
 **Falha sem ela:** `contract_list::context_cases`.
 
-- [ ] **Step 19: Teste, visto falhar**
-- [ ] **Step 20: Porte com cache de 20 s por (nome, transcript); testes focados; revisar**
+- [x] **Step 19: Teste, visto falhar**
+- [x] **Step 20: Porte com cache de 20 s por (nome, transcript); testes focados; revisar**
 
 ### Task 10: Progresso do plano
 
@@ -202,8 +203,8 @@ regra de pid vivo de `hook_state.py:56-129`, `.hangar-askq`, `.hangar-status` co
 
 **Falha sem ela:** `contract_list::plan_cases`.
 
-- [ ] **Step 21: Teste, visto falhar**
-- [ ] **Step 22: Porte com cache por mtime e descoberta de 3 s; testes focados; revisar**
+- [x] **Step 21: Teste, visto falhar**
+- [x] **Step 22: Porte com cache por mtime e descoberta de 3 s; testes focados; revisar**
 
 ### Task 11: Última resposta da sessão parada
 
@@ -212,8 +213,8 @@ regra de pid vivo de `hook_state.py:56-129`, `.hangar-askq`, `.hangar-status` co
 
 **Falha sem ela:** `contract_list::last_reply_cases` (Claude, Claude sem terminal, Codex).
 
-- [ ] **Step 23: Teste, visto falhar**
-- [ ] **Step 24: Porte com cache por (transcript, mtime); testes focados; revisar**
+- [x] **Step 23: Teste, visto falhar**
+- [x] **Step 24: Porte com cache por (transcript, mtime); testes focados; revisar**
 
 ### Task 12: Classificação da lista
 

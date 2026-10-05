@@ -9,8 +9,8 @@ use regex::Regex;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 /// Linha com os padrões do `SessionInfo`.
@@ -30,16 +30,16 @@ pub fn session_life(key: Option<&str>, birth: Option<u64>) -> Option<String> {
 /// `Path.resolve(strict=False)`: segue o link no que existe e junta o resto como está.
 pub fn resolve_lenient(path: &Path) -> PathBuf {
     let abs = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir().unwrap_or_default().join(path) };
-    let abs = normpath(&abs);
+    // O link é seguido antes do `..`, como no `resolve`; só o pedaço que não existe é lexical.
     for base in abs.ancestors() {
         if let Ok(real) = std::fs::canonicalize(base) {
             return match abs.strip_prefix(base) {
-                Ok(rest) if !rest.as_os_str().is_empty() => real.join(rest),
+                Ok(rest) if !rest.as_os_str().is_empty() => normpath(&real.join(rest)),
                 _ => real,
             };
         }
     }
-    abs
+    normpath(&abs)
 }
 
 /// `pqueue._sanitize`: nome do sidecar de vínculo (mantém o ponto, ao contrário do da sessão).
@@ -86,25 +86,30 @@ fn legacy_gid(name: &str, peers: &[String]) -> String {
     sha1_smol::Sha1::from(all.join("\n")).digest().to_string()[..8].to_owned()
 }
 
-static EXTERNAL_WARNED: AtomicBool = AtomicBool::new(false);
+/// Campos do `ExternalPair`: faltando um, o Python recusa o arquivo inteiro.
+const EXTERNAL_FIELDS: [&str; 8] = ["share_id", "local_session", "alias", "peer_owner", "peer_session", "peer_address", "peer_token", "created_at"];
 
-/// `_pair_external`: o par de fora entre os peers da sessão. O Python põe o arquivo torto de lado
-/// ao ler; aqui só se avisa, uma vez.
+fn external_unreadable(field: &str) {
+    if crate::warn_limit::allow(None, "list_external_pairs_unreadable") {
+        tracing::warn!(code = "list_external_pairs_unreadable", field, "list: external_pairs.json recusado, sem par externo");
+    }
+}
+
+/// `_pair_external`: o par de fora entre os peers da sessão. Arquivo torto vale como vazio, como
+/// no Python; quem o põe de lado é o Python, aqui só se avisa.
 fn pair_external(name: &str, peers: &[String], dirs: &Dirs) -> Option<Map<String, Value>> {
     let path = dirs.claude.join(".hangar-pair").join("external_pairs.json");
-    let records = match std::fs::read(&path) {
-        Err(_) => return None,
-        Ok(raw) => match serde_json::from_slice::<Value>(&raw) {
-            Ok(Value::Array(items)) => items,
-            _ => {
-                if !EXTERNAL_WARNED.swap(true, Ordering::Relaxed) {
-                    tracing::warn!(file = "external_pairs.json", "list: unreadable, external pairs ignored");
-                }
-                return None;
-            }
-        },
+    let raw = match std::fs::read(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => { external_unreadable("file"); return None }
     };
-    records.iter().filter_map(Value::as_object).find_map(|r| {
+    let Ok(Value::Array(records)) = serde_json::from_slice::<Value>(&raw) else { external_unreadable("json"); return None };
+    let records: Option<Vec<&Map<String, Value>>> = records.iter()
+        .map(|r| r.as_object().filter(|r| EXTERNAL_FIELDS.iter().all(|f| r.contains_key(*f))))
+        .collect();
+    let Some(records) = records else { external_unreadable("record"); return None };
+    records.into_iter().find_map(|r| {
         let field = |k: &str| r.get(k).and_then(Value::as_str);
         if field("local_session")? != name {
             return None;
@@ -139,8 +144,14 @@ pub fn fill_links(row: &mut SessionRow, dirs: &Dirs) {
 pub fn fill_loop(row: &mut SessionRow, dirs: &Dirs) {
     let Some(d) = read_object(&link_file(&dirs.claude.join(".hangar-loop"), &row.name)) else { return };
     row.loop_status = d.get("status").and_then(Value::as_str).map(str::to_owned);
-    row.loop_iter = d.get("iter").and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok());
-    row.loop_max = d.get("max_iters").and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok());
+    row.loop_iter = count(d.get("iter"));
+    row.loop_max = count(d.get("max_iters"));
+}
+
+/// Inteiro não negativo, ou float de valor inteiro (o pydantic aceita `3.0` num `int`).
+fn count(v: Option<&Value>) -> Option<u32> {
+    let f = v?.as_f64().filter(|f| f.fract() == 0.0 && *f >= 0.0)?;
+    u32::try_from(f as u64).ok()
 }
 
 /// Campos de uma linha de pane depois do transcript resolvido: vida, worktree, vínculos, motor e
@@ -198,7 +209,7 @@ fn apply_location(row: &mut SessionRow, loc: Location) {
 pub fn dedupe_collisions(rows: &mut [SessionRow], sids: &HashMap<String, Option<String>>) {
     let mut groups: Vec<(PathBuf, Vec<usize>)> = Vec::new();
     for (i, row) in rows.iter().enumerate() {
-        let Some(jsonl) = row.jsonl.as_deref() else { continue };
+        let Some(jsonl) = row.jsonl.as_deref().filter(|j| !j.is_empty()) else { continue };
         let real = resolve_lenient(Path::new(jsonl));
         match groups.iter_mut().find(|(k, _)| *k == real) {
             Some((_, members)) => members.push(i),
@@ -209,7 +220,8 @@ pub fn dedupe_collisions(rows: &mut [SessionRow], sids: &HashMap<String, Option<
         if members.len() < 2 {
             continue;
         }
-        let base = jsonl.file_name().map(|n| n.to_string_lossy().trim_end_matches(".jsonl").to_owned()).unwrap_or_default();
+        let file = jsonl.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let base = file.strip_suffix(".jsonl").unwrap_or(&file).to_owned();
         let mut owner = members.iter().copied().find(|&i| sids.get(&rows[i].name).and_then(Option::as_deref) == Some(base.as_str()));
         if owner.is_none() {
             let tracked: Vec<usize> = members.iter().copied().filter(|&i| rows[i].tracked).collect();
@@ -221,7 +233,11 @@ pub fn dedupe_collisions(rows: &mut [SessionRow], sids: &HashMap<String, Option<
             if Some(i) == owner {
                 continue;
             }
-            tracing::info!(name = %rows[i].name, owner = owner.map(|o| rows[o].name.as_str()).unwrap_or("none"), "list: collision dropped borrowed transcript");
+            // Colisão dura enquanto as duas sessões vivem: uma linha por minuto basta.
+            if crate::warn_limit::allow(Some(&rows[i].name), "list_collision") {
+                tracing::info!(code = "list_collision", name = %rows[i].name, jsonl = %base,
+                    owner = owner.map(|o| rows[o].name.as_str()).unwrap_or("none"), "transcript emprestado descartado");
+            }
             rows[i].jsonl = None;
             rows[i].tracked = false;
         }
@@ -305,32 +321,35 @@ const TAIL: u64 = 256 * 1024;
 const DEEP_TAIL: u64 = 8 * 1024 * 1024;
 
 /// Linhas do fim para o começo, em blocos de `TAIL`, até `DEEP_TAIL` bytes (`reversed_lines`).
-fn reversed_lines(path: &Path) -> std::io::Result<Vec<Vec<u8>>> {
+/// `visit` devolve `Break` para parar de ler: numa sessão ativa basta o último bloco.
+fn reversed_lines(path: &Path, mut visit: impl FnMut(&[u8]) -> ControlFlow<()>) -> std::io::Result<()> {
     let mut fh = std::fs::File::open(path)?;
     let end = fh.seek(SeekFrom::End(0))?;
     let mut pos = end;
     let mut rest: Vec<u8> = Vec::new();
-    let mut out = Vec::new();
     while pos > 0 && end - pos < DEEP_TAIL {
         let step = TAIL.min(pos);
         pos -= step;
         fh.seek(SeekFrom::Start(pos))?;
         let mut block = vec![0; step as usize];
         fh.read_exact(&mut block)?;
-        if !block.contains(&b'\n') {
-            block.extend_from_slice(&rest);
+        block.extend_from_slice(&rest);
+        let Some(first) = block.iter().position(|b| *b == b'\n') else {
             rest = block;
             continue;
+        };
+        for line in block[first + 1..].rsplit(|b| *b == b'\n') {
+            if visit(line).is_break() {
+                return Ok(());
+            }
         }
-        block.extend_from_slice(&rest);
-        let mut lines: Vec<Vec<u8>> = block.split(|b| *b == b'\n').map(<[u8]>::to_vec).collect();
-        rest = lines.remove(0);
-        out.extend(lines.into_iter().rev());
+        block.truncate(first);
+        rest = block;
     }
     if pos == 0 {
-        out.push(rest);
+        let _ = visit(&rest);
     }
-    Ok(out)
+    Ok(())
 }
 
 static SHELL_DIR_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -361,13 +380,13 @@ fn claude_tail(jsonl: &Path) -> Option<ClaudeTail> {
     cached(&CLAUDE_TAILS, jsonl, || {
         let mut last: Option<String> = None;
         let mut hits = Vec::new();
-        for raw in reversed_lines(jsonl).ok()? {
-            let has_tool = contains(&raw, b"\"tool_use\"");
+        let read = reversed_lines(jsonl, |raw| {
+            let has_tool = contains(raw, b"\"tool_use\"");
             // Achado o último `cwd`, só interessa linha com chamada: o resto pode ser imagem de megas.
-            if !has_tool && (last.is_some() || !contains(&raw, b"\"cwd\"")) {
-                continue;
+            if !has_tool && (last.is_some() || !contains(raw, b"\"cwd\"")) {
+                return ControlFlow::Continue(());
             }
-            let Ok(Value::Object(line)) = serde_json::from_slice::<Value>(&raw) else { continue };
+            let Ok(Value::Object(line)) = serde_json::from_slice::<Value>(raw) else { return ControlFlow::Continue(()) };
             let cwd = line.get("cwd").and_then(Value::as_str).filter(|c| !c.is_empty()).map(str::to_owned);
             if last.is_none() {
                 last = cwd.clone();
@@ -379,9 +398,12 @@ fn claude_tail(jsonl: &Path) -> Option<ClaudeTail> {
                     }
                 }
             }
-            if hits.len() >= 20 {
-                break;
-            }
+            if hits.len() >= 20 { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+        });
+        if let Err(error) = read {
+            // Transcript ilegível nunca derruba a lista: a sessão fica no cwd, como no `locate`.
+            tracing::debug!(io_kind = ?error.kind(), "list: transcript sem leitura para a worktree");
+            return None;
         }
         Some((last, hits))
     })
@@ -483,7 +505,10 @@ fn tail_lines(path: &Path) -> std::io::Result<Vec<Vec<u8>>> {
 fn codex_paths(rollout: &Path) -> Option<Vec<(String, bool)>> {
     cached(&CODEX_PATHS, rollout, || {
         let mut out = Vec::new();
-        for raw in tail_lines(rollout).ok()?.into_iter().rev() {
+        let lines = tail_lines(rollout).inspect_err(|error| {
+            tracing::debug!(io_kind = ?error.kind(), "list: rollout sem leitura para a worktree");
+        }).ok()?;
+        for raw in lines.into_iter().rev() {
             if !contains(&raw, b"_call") {
                 continue;
             }
@@ -548,6 +573,21 @@ mod tests {
         assert_eq!(owner("/rx", &c), None);
         assert!(of_this_repo("/r-feat/a", "/r", &[]));
         assert!(!of_this_repo("/outro/a", "/r", &[]));
+    }
+
+    #[test]
+    fn reversed_lines_crosses_blocks_and_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        // Linhas de tamanho variado: alguma cruza a borda de 256 KB entre dois blocos.
+        let lines: Vec<String> = (0..9000).map(|i| format!("{i}:{}", "x".repeat(i % 97))).collect();
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        let mut seen = Vec::new();
+        reversed_lines(&path, |l| { seen.push(String::from_utf8(l.to_vec()).unwrap()); ControlFlow::Continue(()) }).unwrap();
+        assert_eq!(seen, lines.iter().rev().cloned().collect::<Vec<_>>());
+        let mut n = 0;
+        reversed_lines(&path, |_| { n += 1; if n == 3 { ControlFlow::Break(()) } else { ControlFlow::Continue(()) } }).unwrap();
+        assert_eq!(n, 3);
     }
 
     #[test]
