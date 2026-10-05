@@ -95,7 +95,7 @@ pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
         diag: Mutex::default(),
         release: Notify::new(),
         list_facts: Mutex::new((json!({"states": {}, "overrides": [], "frozen": [], "orq": [], "shared": [],
-            "owners": {}, "hidden": [], "problems": {}, "stall_seconds": 300.0, "nav": {}, "shortcuts": null}),
+            "owners": {}, "hidden": [], "problems": {}, "stall_seconds": 300.0, "nav": {}, "shortcuts": null, "shadow": null}),
             Duration::ZERO)),
         list_facts_calls: AtomicUsize::new(0),
         list_facts_last: Mutex::new(Value::Null),

@@ -296,8 +296,8 @@ O Python continua dono da lista nesta Task; nada do Rust é entregue.
 **Falha sem ela:** `shadow::diff_names_fields_only` (diferença no `label` grava `label`, nunca o
 texto), `shadow::off_by_default`.
 
-- [ ] **Step 32: Testes, vistos falhar**
-- [ ] **Step 33: Sombra; testes focados; revisar**
+- [x] **Step 32: Testes, vistos falhar**
+- [x] **Step 33: Sombra; testes focados; revisar**
 - [ ] **Step 34: Canal de testes na máquina do dono por 2 dias de uso normal; zerar as diferenças ou registrar cada uma aceita em `desenho.md` (verificação manual)**
 
 ### Task 16: Consumidores Python pela ponte

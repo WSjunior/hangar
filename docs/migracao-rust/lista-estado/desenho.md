@@ -98,6 +98,35 @@ pares mortos (sai de dentro da descoberta para um laço próprio de 2 s).
   Rust é entregue; o dono único não é violado.
 - `Monitor`: sequências em `contract_terminal.rs` com âncora do plugin, marcador, `em_troca` e `dead`.
 
+### Sombra (Task 15)
+
+`CP_LIST_SHADOW=1` no ambiente do `hangar-server` (`list/shadow.rs`). A cada 1,5 s o Rust produz a
+lista sem servir e sem rebaixar marcador; o pedido de fatos vai com `shadow: true`, e o Python não
+mexe na presença do app, não reclassifica (o estado de Codex/Pi/omp/Kimi sai da lista que ele
+serviu) e devolve a assinatura de cada linha dessa lista (`list_facts.SIG_FIELDS`, os campos do
+`_list_sig`). Sem lista do Python com até 3 s (ninguém com ela aberta), o Rust espera 10 s.
+Diferença vista em duas rodadas seguidas vai ao diário como `rust.list_shadow_diff`, `sessao` + o
+nome do campo em `codigo` (`row_missing`/`row_extra` para a linha inteira), uma vez enquanto durar.
+No máximo 50 por rodada (o resto sai nas seguintes). Rodada sem comparar zera a contagem e vai ao
+diário uma vez por sequência: falha (fatos sem resposta = `facts_unavailable`, erro da produção,
+pânico do laço, que recomeça) na hora, como `rust.list_shadow_failed`; motivo esperado
+(`python_list_absent`, `mux_refused`/`mux_unparsed`) só depois de 2 min seguidos, como
+`rust.list_shadow_blind`. A sombra tem cliente de fatos próprio: não espera a produção de verdade
+nem lhe passa uma falha. Ela só faz sentido com o Python dono (antes da Task 16).
+
+**Diferenças aceitas** (fora do diário, cada uma da Task que a criou):
+
+| Diferença | Onde aparece | Motivo |
+|---|---|---|
+| `mux_refused`/`mux_unparsed` | a rodada inteira | o Python lia a recusa do multiplexador como zero sessões; o Rust levanta (Task 6) |
+| `problema = list_capture_failed` | `state`, `problema`, `label` da linha | captura falhou: o Rust fica no marcador sem rebaixar e mostra a falha (Task 12) |
+| `problema = list_runtime_unavailable` | `state`, `problema` | runtime sem terminal com erro aparece na linha em vez de sessão parada calada (Task 12) |
+| Claude sem terminal | `state`, `label`, `question`, `status_line`, `pending_questions`, `problema` | o retrato do runtime por nome só chega com o hub (Task 17); na sombra elas ficam no marcador |
+| nome com letra fora do português | a linha casa pelo transcript e pela pasta (os dois conhecidos) e pelo nome do Rust contido no do Python, mesma primeira letra | `sanitize_session_name` do Rust só desfaz os acentos do português; outra letra some (Task 7) |
+| `conta` de Kimi/Pi/omp vazia no Rust | `conta` | a descoberta não sabe a credencial; só o fato a preenche (Tasks 7 e 14); preenchida, é comparada |
+
+Diferença nova que o canal de testes mostrar: corrigir, ou entrar aqui com o motivo (Step 34).
+
 ## O que não muda
 
 Formato da linha (`SessionInfo`, `models.py:73-210`), eventos, ping de 8 s, `list_error`, `nav`,

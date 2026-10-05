@@ -85,12 +85,16 @@ pub struct ProduceFacts {
     /// Retrato do runtime das sessões sem terminal, por nome (`RuntimeRegistry::snapshots`).
     pub headless: BTreeMap<String, Value>,
     pub owner_clients: u32,
+    /// Rodada em sombra: nada do que ela produz sai daqui, nem o rebaixamento de `awaiting`.
+    pub shadow: bool,
 }
 
 /// Lista decorada e os fatos do Python da mesma rodada (navegador, terminais de atalho, escondidas
 /// do dono), que o hub entrega junto.
 #[derive(Clone)]
-pub struct Produced { pub rows: Arc<Vec<SessionRow>>, pub facts: Arc<ListFacts> }
+pub struct Produced { pub rows: Arc<Vec<SessionRow>>, pub facts: Arc<ListFacts>,
+    /// `false`: o Python não respondeu nesta rodada e `facts` é o último bom.
+    pub facts_ok: bool }
 
 struct Discovery { at: Instant, wall: f64, epoch: u64,
     /// Mapa de processos relido nesta descoberta, não o do cache de 3 s.
@@ -117,6 +121,7 @@ struct Caches {
 pub struct ListBridge {
     env: Arc<ListEnv>,
     facts: FactsClient,
+    shadow_facts: FactsClient,
     caches: Arc<Mutex<Caches>>,
     /// À parte dos outros caches: a classificação segura a dela durante as capturas.
     classifier: Arc<Mutex<Classifier>>,
@@ -140,7 +145,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> { m.lock().unwrap_or_el
 
 impl ListBridge {
     pub fn new(env: ListEnv, facts: FactsClient) -> Self {
-        Self { env: Arc::new(env), facts, caches: Arc::default(), classifier: Arc::default(), discovery: tokio::sync::Mutex::new(None),
+        Self { env: Arc::new(env), shadow_facts: facts.sibling(), facts, caches: Arc::default(), classifier: Arc::default(), discovery: tokio::sync::Mutex::new(None),
             snapshot: tokio::sync::Mutex::new(None), git_running: Arc::default(),
             git_slots: Arc::new(tokio::sync::Semaphore::new(GIT_SLOTS)), epoch: AtomicU64::new(0) }
     }
@@ -207,7 +212,8 @@ impl ListBridge {
     pub async fn produce(&self, input: &ProduceFacts) -> Result<Produced, ListError> {
         let dirs = self.dirs()?;
         let (rows, agent_pids, panes, children) = self.discovery(None).await?;
-        let fetched = self.facts.fetch(&rows, input.owner_clients, &pi_pane_pids(&rows, &panes)).await;
+        let client = if input.shadow { &self.shadow_facts } else { &self.facts };
+        let fetched = client.fetch(&rows, input.owner_clients, &pi_pane_pids(&rows, &panes), input.shadow).await;
         let (mut rows, aside) = list_facts::apply((*rows).clone(), &fetched.facts, fetched.ok);
         let targets = pane_targets(&panes, &agent_pids, &children);
         let (env, caches, classifier) = (self.env.clone(), self.caches.clone(), self.classifier.clone());
@@ -253,12 +259,12 @@ impl ListBridge {
         }).await.map_err(|e| joined(e, "produção interrompida"))?;
         self.refresh_git(git_dirs);
         let demote: Vec<String> = effects.into_iter().map(|Effect::DemoteAwaiting { sid }| sid).collect();
-        if !demote.is_empty() {
+        if !demote.is_empty() && !input.shadow {
             self.facts.demote(demote);
         }
         let mut rows = rows;
         rows.extend(aside);
-        Ok(Produced { rows: Arc::new(rows), facts: fetched.facts })
+        Ok(Produced { rows: Arc::new(rows), facts: fetched.facts, facts_ok: fetched.ok })
     }
 
     /// Git em segundo plano, um por pasta: um repositório lento não atrasa o card de ninguém. Não

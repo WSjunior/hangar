@@ -13,4 +13,5 @@ pub mod mux;
 pub mod plan;
 pub mod procs;
 pub mod reply;
+pub mod shadow;
 pub mod sig;

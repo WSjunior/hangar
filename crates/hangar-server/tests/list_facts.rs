@@ -23,7 +23,7 @@ fn state(s: &str) -> Value {
 /// Resposta completa do Python, com `extra` por cima.
 fn full(extra: Value) -> Value {
     let mut v = json!({"states": {}, "overrides": [], "frozen": [], "orq": [], "shared": [], "owners": {},
-        "hidden": [], "problems": {}, "stall_seconds": 300.0, "nav": {}, "shortcuts": null});
+        "hidden": [], "problems": {}, "stall_seconds": 300.0, "nav": {}, "shortcuts": null, "shadow": null});
     for (k, x) in extra.as_object().unwrap() { v[k] = x.clone(); }
     v
 }
@@ -34,11 +34,11 @@ async fn timeout_keeps_last_and_marks_problem() {
     *fake.list_facts.lock().unwrap() = (full(json!({"states": {"cx": state("working")}, "stall_seconds": 60.0})), Duration::ZERO);
     let client = FactsClient::new(addr, SECRET.into());
     let rows = vec![row("cx", "codex"), row("cc", "claude")];
-    let first = client.fetch(&rows, 1, &BTreeMap::new()).await;
+    let first = client.fetch(&rows, 1, &BTreeMap::new(), false).await;
     assert!(first.ok);
     assert_eq!(first.facts.stall_seconds, 60.0);
     // Mesma entrada dentro do prazo: o Python não é perguntado de novo.
-    let again = client.fetch(&rows, 1, &BTreeMap::new()).await;
+    let again = client.fetch(&rows, 1, &BTreeMap::new(), false).await;
     assert!(again.ok);
     assert_eq!(fake.list_facts_calls.load(SeqCst), 1);
     assert_eq!(fake.list_facts_last.lock().unwrap()["owner_clients"], 1);
@@ -46,7 +46,7 @@ async fn timeout_keeps_last_and_marks_problem() {
     *fake.list_facts.lock().unwrap() = (full(json!({"states": {"cx": state("idle")}})), Duration::from_secs(3));
     let started = Instant::now();
     // Entrada nova (mais um cliente): pergunta, e o Python não responde em 1 s.
-    let late = client.fetch(&rows, 2, &BTreeMap::new()).await;
+    let late = client.fetch(&rows, 2, &BTreeMap::new(), false).await;
     assert!(started.elapsed() < Duration::from_millis(1800), "esperou além do prazo: {:?}", started.elapsed());
     assert!(!late.ok);
     let (work, aside) = facts::apply(rows.clone(), &late.facts, late.ok);
@@ -59,7 +59,7 @@ async fn timeout_keeps_last_and_marks_problem() {
     // Python travado não custa 1 s a cada tique: dentro do prazo, fica a falha sem perguntar.
     let asked = fake.list_facts_calls.load(SeqCst);
     let quick = Instant::now();
-    assert!(!client.fetch(&rows, 3, &BTreeMap::new()).await.ok);
+    assert!(!client.fetch(&rows, 3, &BTreeMap::new(), false).await.ok);
     assert!(quick.elapsed() < Duration::from_millis(100));
     assert_eq!(fake.list_facts_calls.load(SeqCst), asked);
 }
@@ -94,7 +94,7 @@ async fn no_answer_yet_marks_every_row_and_partial_answer_is_refused() {
     *fake.list_facts.lock().unwrap() = (json!({"states": {}}), Duration::ZERO);
     let client = FactsClient::new(addr, SECRET.into());
     let rows = vec![row("cc", "claude"), row("cx", "codex")];
-    let got = client.fetch(&rows, 0, &BTreeMap::new()).await;
+    let got = client.fetch(&rows, 0, &BTreeMap::new(), false).await;
     assert!(!got.ok && got.facts.unknown);
     let (work, _) = facts::apply(rows, &got.facts, got.ok);
     assert!(work.iter().all(|r| r.problema.as_deref() == Some("list_facts_unavailable")));
