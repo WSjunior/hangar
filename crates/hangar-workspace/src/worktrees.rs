@@ -555,6 +555,8 @@ pub fn list_all(
                 roots.iter().any(|r| within(&m, r))
             })
         })
+        // Sem worktree o repo sai da lista: não paga o `git config` do Repo::read.
+        .filter(|m| !admin_entries(m).is_empty())
         .map(|m| Repo::read(&m))
         .filter(|r| !r.admins.is_empty())
         .collect::<Vec<_>>();
