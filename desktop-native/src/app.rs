@@ -3136,16 +3136,10 @@ impl Hangar {
         let diff = edits::card(call, result, cx);
         let has_diff = diff.is_some();
         let mut body = div().flex().flex_col().gap_2().pt_1().pb_2();
-        // Imagem que o Read leu: o transcript não traz os bytes, o caminho citado vem pelo `/file` (regra do web).
-        if call.tool_name.as_deref().is_some_and(|name| name.eq_ignore_ascii_case("read")) {
-            let path = call.tool_input.as_ref().and_then(|input| input.get("file_path").or_else(|| input.get("path"))).and_then(|path| path.as_str()).unwrap_or("");
-            let refs: Vec<_> = composer::cited_paths(path).into_iter().map(|path| {
-                let name = composer::basename(&path).to_owned();
-                let image = composer::image_format(&name).is_some();
-                (Source::Cited(path), name, image)
-            }).collect();
-            if !refs.is_empty() { body = body.child(self.render_refs(&format!("{row}-read"), refs, cx)); }
-        }
+        // O arquivo que a ferramenta leu ou mandou: a pele Terminal mostra o do SendUserFile fora do corpo, sempre à vista.
+        let refs = tool_file_refs(call);
+        let shown_outside = appearance::get().tool_look == appearance::ToolLook::Terminal && sends_files(call);
+        if !refs.is_empty() && !shown_outside { body = body.child(self.render_refs(&format!("{row}-read"), refs, cx)); }
         if let Some(diff) = diff { body = body.child(diff); }
         else if matches!(input, Prepared::Detail { total, .. } if total > 0) {
             body = body.child(self.detail(row, &input_key, input, tr("tool_input"), tr("copy_input"), false, cx));
@@ -4515,6 +4509,29 @@ fn attachment_refs(event: &ChatEvent) -> Vec<(Source, String, bool)> {
         _ => {}
     }
     refs
+}
+
+/// SendUserFile é como o agente põe um arquivo diante da pessoa: o caminho vai em `files`.
+pub(super) fn sends_files(call: &ChatEvent) -> bool {
+    call.tool_name.as_deref().is_some_and(|name| name.eq_ignore_ascii_case("senduserfile"))
+}
+
+/// Arquivos citados na entrada da ferramenta: o que o Read leu e o que o SendUserFile mandou. O transcript não traz os
+/// bytes; o caminho citado vem pelo `/file` (regra do web).
+pub(super) fn tool_file_refs(call: &ChatEvent) -> Vec<(Source, String, bool)> {
+    let input = call.tool_input.as_ref();
+    let paths: Vec<&str> = match call.tool_name.as_deref() {
+        Some(name) if name.eq_ignore_ascii_case("read") => input.and_then(|i| i.get("file_path").or_else(|| i.get("path")))
+            .and_then(|p| p.as_str()).into_iter().collect(),
+        _ if sends_files(call) => input.and_then(|i| i.get("files")).and_then(|f| f.as_array())
+            .map(|files| files.iter().filter_map(|f| f.as_str()).collect()).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    paths.into_iter().flat_map(composer::cited_paths).map(|path| {
+        let name = composer::basename(&path).to_owned();
+        let image = composer::image_format(&name).is_some();
+        (Source::Cited(path), name, image)
+    }).collect()
 }
 
 // Anexo que saiu do campo: tira a imagem inteira do cache de assets e do atlas da GPU, que não a soltam sozinhos.
@@ -6151,6 +6168,22 @@ mod tests {
         let now = chrono::Local::now().timestamp() as f64;
         assert_eq!(super::stamp(Some(now)), super::clock(Some(now)));
         assert!(super::stamp(Some(now - 3. * 86_400.)).is_some_and(|s| s.len() > 5));
+    }
+
+    #[test]
+    fn sent_and_read_files_become_cited_refs() {
+        use crate::api::Source;
+        let call = |name: &str, input: serde_json::Value| ChatEvent { kind: "tool_use".into(), tool_name: Some(name.into()),
+            tool_input: input.as_object().cloned(), ..Default::default() };
+        let sent = call("SendUserFile", serde_json::json!({"files": ["/tmp/a/print.png", "/tmp/a/video.mp4"], "caption": "x"}));
+        assert!(super::sends_files(&sent));
+        assert_eq!(super::tool_file_refs(&sent), vec![
+            (Source::Cited("/tmp/a/print.png".into()), "print.png".into(), true),
+            (Source::Cited("/tmp/a/video.mp4".into()), "video.mp4".into(), false)]);
+        let read = call("Read", serde_json::json!({"file_path": "/tmp/a/print.png"}));
+        assert!(!super::sends_files(&read));
+        assert_eq!(super::tool_file_refs(&read), vec![(Source::Cited("/tmp/a/print.png".into()), "print.png".into(), true)]);
+        assert!(super::tool_file_refs(&call("Bash", serde_json::json!({"command": "ls /tmp/a/print.png"}))).is_empty());
     }
 
     #[test]

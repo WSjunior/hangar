@@ -203,6 +203,8 @@ fn mcp_server(name: &str) -> Option<&str> {
     Some(server.strip_prefix("hangar-").unwrap_or(server))
 }
 
+const SHELL_TOOLS: &[&str] = &["bash", "powershell", "shell", "exec", "exec_command"];
+
 /// Tipo da chamada na linha dobrada, como o Claude Code conta; `None` não dobra (edição, gravação, agente e o carregador
 /// de ferramentas ficam sempre à vista).
 fn fold_kind(name: Option<&str>, input: Option<&serde_json::Map<String, serde_json::Value>>) -> Option<FoldKind> {
@@ -210,7 +212,7 @@ fn fold_kind(name: Option<&str>, input: Option<&serde_json::Map<String, serde_js
     if is_any(name, &["read", "notebookread"]) { return Some(FoldKind::Read); }
     if is_any(name, &["grep", "glob", "find", "websearch", "webfetch"]) { return Some(FoldKind::Search); }
     if name.eq_ignore_ascii_case("ls") { return Some(FoldKind::List); }
-    if is_any(name, &["bash", "powershell", "shell", "exec", "exec_command"]) {
+    if is_any(name, SHELL_TOOLS) {
         let kind = match input.and_then(|i| i.get("command").or_else(|| i.get("cmd"))) {
             Some(serde_json::Value::String(command)) => shell_fold_kind(command),
             // O Codex manda o comando em lista de palavras.
@@ -315,7 +317,11 @@ impl Hangar {
             }
             None => open.then(|| self.tool_body(tool, row, cx).pl(px(INDENT + 16.))),
         };
-        div().flex().flex_col().child(header).child(outcome_line).children(body).into_any_element()
+        // O que o SendUserFile mandou fica à vista: é a razão da chamada, e no Claude Code a imagem chega à pessoa.
+        let sent = sends_files(&self.chat.events[tool.call]).then(|| tool_file_refs(&self.chat.events[tool.call]))
+            .filter(|refs| !refs.is_empty())
+            .map(|refs| div().pl(px(INDENT + 16.)).pt_1().child(self.render_refs(&format!("{row}-{key}-sent"), refs, cx)));
+        div().flex().flex_col().child(header).child(outcome_line).children(sent).children(body).into_any_element()
     }
 
     /// Chamadas seguidas na pele Terminal: uma embaixo da outra, sem moldura de grupo. Buscas, leituras, MCP e comandos
@@ -351,7 +357,10 @@ impl Hangar {
                     .child(div().min_w_0().truncate().text_color(color).child(text)).into_any_element();
                 if let Some(tool) = live {
                     let call = &self.chat.events[tool.call];
-                    block.push(sub(conversation::summarize_input(call.tool_name.as_deref(), call.tool_input.as_ref()), theme::muted()));
+                    let summary = conversation::summarize_input(call.tool_name.as_deref(), call.tool_input.as_ref());
+                    // Comando em voo com o `$` na frente, como o Claude Code desenha.
+                    let shell = call.tool_name.as_deref().is_some_and(|name| is_any(name, SHELL_TOOLS));
+                    block.push(sub(if shell { format!("$ {summary}") } else { summary }, theme::muted()));
                 }
                 for tool in folded.iter().filter(|t| t.result.is_some_and(|r| self.chat.events[r].is_error == Some(true))) {
                     block.push(sub(self.tool_status(*tool).0, theme::danger()));
