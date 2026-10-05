@@ -249,8 +249,8 @@ invalidado ou sem cliente → produz na hora), `list.invalidate`, `list.resolve`
 `list_bridge::newer_than_forces_fresh`; Python `test_list_bridge_returns_rows`,
 `test_list_bridge_error_raises_never_empty`, `test_list_bridge_mux_unavailable_raises_mux_error`.
 
-- [ ] **Step 27: Testes, vistos falhar**
-- [ ] **Step 28: Rota privada e cliente; testes focados; revisar**
+- [x] **Step 27: Testes, vistos falhar**
+- [x] **Step 28: Rota privada e cliente; testes focados; revisar**
 
 ### Task 14: Fatos por pergunta e resposta e rebaixamento pelo Python (contrato 23)
 

@@ -49,6 +49,7 @@ pub struct AppState {
     pub reports: Arc<crate::costs::ReportCache>,
     pub origins_home: std::path::PathBuf,
     pub origins: std::sync::Mutex<indexmap::IndexMap<std::path::PathBuf, crate::costs::origins::Origins>>,
+    pub list: Arc<crate::list::bridge::ListBridge>,
 }
 
 impl AppState {
@@ -83,7 +84,8 @@ impl AppState {
             workspace_meta_slots: Arc::new(tokio::sync::Semaphore::new(4)),
             costs, fx, reports: Arc::new(crate::costs::ReportCache::default()),
             origins_home: std::path::PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default()),
-            origins: std::sync::Mutex::new(indexmap::IndexMap::new()) }
+            origins: std::sync::Mutex::new(indexmap::IndexMap::new()),
+            list: Arc::new(crate::list::bridge::ListBridge::new(crate::list::bridge::ListEnv::from_env())) }
     }
 
     pub(crate) fn skill_origins(&self, repo: &std::path::Path) -> crate::costs::origins::Origins {
@@ -188,6 +190,7 @@ pub fn terminal_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/__hangar_server/terminal", axum::routing::post(crate::terminal_routes::terminal))
         .route("/__hangar_server/workspace", axum::routing::post(crate::workspace_routes::private))
+        .route("/__hangar_server/list", axum::routing::post(crate::list::bridge::private))
         .with_state(state)
 }
 
@@ -196,6 +199,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/health", get(health))
         .route("/__hangar_server/terminal", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/workspace", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+        .route("/__hangar_server/list", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.
         .route("/api/sessions/{name}/history", get(history).fallback(pass_any))
         .route("/api/sessions/{name}/events", get(events).fallback(pass_any))

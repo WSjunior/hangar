@@ -290,7 +290,15 @@ class Supervisor:
         # O segredo vai só no ambiente do filho; no os.environ ele vazaria para toda sessão que o
         # backend sobe. O require_internal lê da memória do módulo a cada pedido.
         internal_api.set_secret(secret)
-        return {**os.environ,
+        from app import list_bridge
+        try:
+            lists = {"HANGAR_LIST_DIRS": list_bridge.dirs_env()}
+        except Exception as e:                           # noqa: BLE001 — o Rust sobe e a ponte da lista recusa com código
+            _log.exception("pastas da lista sem resolver")
+            diag.registrar("hangar_server.pastas_lista", "erro", **diag.erro_campos(e))
+            # Vazia, e não a herdada do ambiente: o Rust recusa com código em vez de usar pastas velhas.
+            lists = {"HANGAR_LIST_DIRS": ""}
+        return {**os.environ, **lists,
                 "HANGAR_SERVER_LISTEN": listen_addr(self.host, self.port),
                 "HANGAR_SERVER_UPSTREAM": f"127.0.0.1:{self.upstream_port}",
                 "HANGAR_INTERNAL_SECRET": secret,
@@ -303,8 +311,9 @@ class Supervisor:
     async def _start(self) -> str:
         """`up`, `died` (morreu subindo), `silent` (vivo e calado até o prazo), `protocol` ou
         `address` (endereço privado ausente ou inválido na saúde)."""
-        from app import workspace_bridge
+        from app import list_bridge, workspace_bridge
         workspace_bridge.configure(None, None)
+        list_bridge.configure(None, None)
         terminal_observer.configure(None, None)
         if self.proc is not None:
             from app.runtime_process import cleanup
@@ -339,11 +348,13 @@ class Supervisor:
                         raise ValueError("missing terminal address")
                     terminal_observer.configure(address, env["HANGAR_INTERNAL_SECRET"])
                     workspace_bridge.configure(address, env["HANGAR_INTERNAL_SECRET"])
+                    list_bridge.configure(address, env["HANGAR_INTERNAL_SECRET"])
                 except ValueError:
                     # Sem o endereço privado o Rust não tem as pontes: é falha de partida, e o Python
                     # assume a porta inteira em vez de atender metade por trás dele.
                     terminal_observer.configure(None, None)
                     workspace_bridge.configure(None, None)
+                    list_bridge.configure(None, None)
                     _log.error("hangar-server sem endereço privado válido na saúde")
                     diag.registrar("hangar_server.partida", "erro", codigo="endereco_invalido")
                     return "address"
@@ -391,8 +402,9 @@ class Supervisor:
                             _log.warning("registro de contenção do hangar-server não gravou: %s", e)
                             diag.registrar("hangar_server.registro_falhou", "aviso", **diag.erro_campos(e))
                         record_failed = True
-                from app import workspace_bridge
+                from app import list_bridge, workspace_bridge
                 workspace_bridge.configure(None, None)
+                list_bridge.configure(None, None)
                 costs_sources.set_served_by_rust(False)
                 terminal_observer.configure(None, None)
                 # Parada normal (systemctl, Ctrl+C) leva o filho junto, no mesmo instante em que o uvicorn
@@ -417,8 +429,9 @@ class Supervisor:
             return "erro"
 
     async def stop(self) -> None:
-        from app import costs_sources, workspace_bridge
+        from app import costs_sources, list_bridge, workspace_bridge
         workspace_bridge.configure(None, None)
+        list_bridge.configure(None, None)
         costs_sources.set_served_by_rust(False)
         terminal_observer.configure(None, None)
         proc = self.proc
