@@ -17,6 +17,14 @@ Quem coordena e junta é a sessão `lista-org`.
   subagente da stack (`ecc:rust-reviewer`/`ecc:python-reviewer`) + `ecc:silent-failure-hunter`.
   Marque `- [x]` nos Steps da sua Task no `plano.md`.
 - Testes: só os dos arquivos tocados (comandos nas "Restrições globais").
+- **Desempenho (pedido do dono; a lista e o estado são lidos o tempo todo).** Cada item foi um
+  defeito real (`docs/migracao-rust/README.md`, "Desempenho: erros que já custaram"): nada de laço
+  apertado, reler/varrer só quando a entrada muda (cache por mtime) e com teto de frequência;
+  chamada ao Python só quando a entrada muda ou com prazo; não republicar o que não mudou; fsync
+  fora de trava e fora do laço de eventos, leitura nunca grava; processo filho só quando precisa
+  (Windows ~25 ms cada); estado em disco pequeno e podado; cache em memória com poda. Diga no
+  relatório o custo de um tique da sua parte com 20 sessões; código que roda a cada tique (Tasks
+  12–18) leva medida antes/depois em release no isolado.
 - **Cargo: sempre por `~/.cache/hangar-lista/cargo-slot <args>`** (fila de no máximo 2 `cargo`
   na máquina, `CARGO_BUILD_JOBS=4`), nunca `cargo` direto. Cada worktree usa o próprio `target/`;
   apague-o ao terminar. Não use a ferramenta LSP nem suba rust-analyzer: o `cargo check` dele fura
