@@ -452,6 +452,21 @@ pub fn discover_panes(panes: &[Pane], procs: &dyn ProcessView, children: &Childr
     out
 }
 
+/// Resolução de uma sessão só, fora da lista (`resolve_tracked` sem a varredura): `pid` é o do pane
+/// quando quem chama já o tem; sem ele, o pane do agente da sessão. Os irmãos no mesmo cwd contam
+/// pelos mesmos `panes`, escondidas fora.
+pub fn resolve_one(panes: &[Pane], procs: &dyn ProcessView, children: &ChildrenMap, projects_dir: &Path,
+                   resolver: &mut Resolver, name: &str, cwd: &str, pid: Option<i64>) -> Transcript {
+    let mine: Vec<&Pane> = panes.iter().filter(|p| p.session == name).collect();
+    let pid = pid.or_else(|| (!mine.is_empty()).then(|| agent_pane(&mine, procs, children))
+        .and_then(|p| p.pid).map(i64::from)).filter(|pid| *pid != 0);
+    let mut sessions: Vec<&str> = panes.iter().filter(|p| !p.hidden && p.cwd == cwd).map(|p| p.session.as_str()).collect();
+    sessions.sort_unstable();
+    sessions.dedup();
+    let tree = pid.map(|pid| Tree::new(procs, pid, children));
+    resolver.resolve(name, cwd, pid.zip(tree.as_ref()), procs, projects_dir, sessions.len() > 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
