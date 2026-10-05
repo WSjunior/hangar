@@ -325,7 +325,8 @@ fn preview(lines: &[&str]) -> String {
         let s = left(line);
         if P.rule.is_match(line) || boundary(line) || P.user.is_match(line) || tool(s)
             || mcp(s) || P.todo.is_match(line) || P.ascii_spinner.is_match(s)
-            || activity(s) || (!trim(s).is_empty() && tool_header(lines, j - 1)) { break; }
+            // Só no começo de parágrafo: as linhas do mesmo parágrafo dão a mesma resposta.
+            || activity(s) || (!trim(s).is_empty() && trim(lines[j - 1]).is_empty() && tool_header(lines, j - 1)) { break; }
         out.push(right(line));
     }
     while out.last().is_some_and(|l| trim(l).is_empty()) { out.pop(); }

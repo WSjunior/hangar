@@ -296,12 +296,11 @@ def _pi_bloco_de_tool(lines: list[str], i: int, corpo: str) -> bool:
     return False
 
 
-# Chamada em voo do Claude Code: a 1ª linha é a DESCRIÇÃO que o modelo escreveu ("● Aguardar 4 segundos
-# · 2s"), não "Bash(", então nenhuma regra de vocabulário a reconhece. E o ● dela PISCA: num quadro a
-# linha é eleita prosa, no seguinte (sem ●) vira continuação da prosa anterior, e a prévia cresce e
-# encolhe a cada piscada. O que a separa da prosa é a forma: o parágrafo dela termina colado no `⎿`.
+# Chamada em voo do Claude Code: a 1ª linha é a descrição do modelo, não "Bash(", e o ● dela pisca. O que
+# a separa da prosa é a forma: o parágrafo que começa depois de `i` termina colado no `⎿`.
 def _cabecalho_de_ferramenta(lines: list[str], i: int) -> bool:
-    for ln in lines[i + 1:]:
+    for j in range(i + 1, len(lines)):
+        ln = lines[j]
         if not ln.strip() or _is_boundary(ln):
             return ln.lstrip().startswith("⎿")
     return False
@@ -393,7 +392,8 @@ def extract_assistant_text(pane: str, provider: str = "claude", band_anchor: str
                 or _TODO_PANEL_RE.match(ln) or _ASCII_SPINNER_RE.match(s)
                 or (provider == "kimi" and _KIMI_USED_RE.match(s))
                 or _ACTIVITY_SUMMARY_RE.search(s)
-                or (s and _cabecalho_de_ferramenta(lines, j - 1))):
+                # Só no começo de parágrafo: as linhas do mesmo parágrafo dão a mesma resposta.
+                or (s and not lines[j - 1].strip() and _cabecalho_de_ferramenta(lines, j - 1))):
             break
         if any(r.match(ln) for r in stops):
             break

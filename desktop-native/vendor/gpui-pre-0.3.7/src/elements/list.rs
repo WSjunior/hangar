@@ -50,8 +50,10 @@ impl List {
     }
 }
 
-/// Hangar: teto da folga do fim. Um bloco grande recolhido perto do fim não deixa um vão do tamanho dele.
-const TAIL_SLACK_MAX: Pixels = px(160.);
+/// Hangar: altura das linhas antes de `ix`, a régua da folga do fim.
+fn height_before(items: &SumTree<ListItem>, ix: usize) -> Pixels {
+    items.find::<ListItemSummary, _>((), &Count(ix), Bias::Right).0.height
+}
 
 /// The list state that views must hold on behalf of the list element.
 #[derive(Clone)]
@@ -77,8 +79,8 @@ struct StateInner {
     measuring_behavior: ListMeasuringBehavior,
     pending_scroll: Option<PendingScroll>,
     follow_state: FollowState,
-    /// Hangar: ancorada no fim, o que encolhe no fim vira folga embaixo em vez de puxar o resto para baixo.
-    hold_tail: bool,
+    /// Hangar: com o teto da folga, o que encolhe no fim vira espaço embaixo em vez de puxar o resto para baixo.
+    hold_tail: Option<Pixels>,
     tail_slack: Pixels,
     /// Primeira linha à vista no último layout e a altura dela até o fim: a régua do que cresceu ou encolheu.
     tail_ref: Option<(usize, Pixels)>,
@@ -336,7 +338,7 @@ impl ListState {
             measuring_behavior: ListMeasuringBehavior::default(),
             pending_scroll: None,
             follow_state: FollowState::default(),
-            hold_tail: false,
+            hold_tail: None,
             tail_slack: px(0.),
             tail_ref: None,
             tail_visible: false,
@@ -347,8 +349,9 @@ impl ListState {
 
     /// Hangar: ancorada no fim, uma linha do fim que encolhe deixa folga embaixo, como o terminal, e a próxima que
     /// cresce a consome antes de empurrar o resto. O que já estava à vista não sobe e desce a cada troca no fim.
-    pub fn hold_tail(self) -> Self {
-        self.0.borrow_mut().hold_tail = true;
+    /// `max` é o teto da folga: um bloco grande recolhido perto do fim não deixa um vão do tamanho dele.
+    pub fn hold_tail(self, max: Pixels) -> Self {
+        self.0.borrow_mut().hold_tail = Some(max);
         self
     }
 
@@ -387,7 +390,6 @@ impl ListState {
         };
 
         self.splice(0..old_count, element_count);
-        self.0.borrow_mut().tail_ref = None;
     }
 
     /// Reset the list to `element_count` items, pre-populating every item with a
@@ -541,7 +543,6 @@ impl ListState {
 
         // A régua da folga acompanha a troca: linhas antes dela a deslocam; trocada a própria, ela recua para o começo
         // da troca, somando a altura das linhas que saíram entre os dois (lida antes de elas saírem).
-        let height_before = |items: &SumTree<ListItem>, ix: usize| items.find::<ListItemSummary, _>((), &Count(ix), Bias::Right).0.height;
         let tail_ref = state.tail_ref.map(|(ix, tail)| (ix, tail, height_before(&state.items, ix) - height_before(&state.items, old_range.start)));
 
         let mut old_items = state.items.cursor::<Count>(());
@@ -1068,19 +1069,16 @@ impl StateInner {
         window: &mut Window,
         cx: &mut App,
     ) -> LayoutItemsResponse {
-        if !self.hold_tail {
+        let Some(max) = self.hold_tail else {
             return self.layout_items_once(available_width, available_height, padding, render_item, window, cx);
-        }
-        // Vale com o fim à vista no último layout: colado nele ou pousado logo acima pela mola de quem acompanha.
-        let anchored = self.tail_visible;
+        };
         let held = |slack: Pixels| Edges { bottom: padding.bottom + slack, ..*padding };
         let mut response = self.layout_items_once(available_width, available_height, &held(self.tail_slack), render_item, window, cx);
-        let tail_from = |items: &SumTree<ListItem>, ix: usize| {
-            items.summary().height - items.find::<ListItemSummary, _>((), &Count(ix), Bias::Right).0.height
-        };
-        // O trecho da régua até o fim cresceu ou encolheu: a folga absorve, e quem estava à vista fica onde estava.
-        if let Some((ix, before)) = self.tail_ref.filter(|(ix, _)| anchored && *ix < self.items.summary().count) {
-            let slack = (self.tail_slack + before - tail_from(&self.items, ix)).clamp(px(0.), TAIL_SLACK_MAX);
+        let tail_from = |items: &SumTree<ListItem>, ix: usize| items.summary().height - height_before(items, ix);
+        // Com o fim à vista no último layout (colado nele ou pousado logo acima pela mola de quem acompanha), o trecho da
+        // régua até o fim que cresceu ou encolheu vai para a folga, e quem estava à vista fica onde estava.
+        if let Some((ix, before)) = self.tail_ref.filter(|(ix, _)| self.tail_visible && *ix < self.items.summary().count) {
+            let slack = (self.tail_slack + before - tail_from(&self.items, ix)).clamp(px(0.), max);
             if (slack - self.tail_slack).abs() >= px(0.5) {
                 self.tail_slack = slack;
                 response = self.layout_items_once(available_width, available_height, &held(slack), render_item, window, cx);
@@ -1090,7 +1088,7 @@ impl StateInner {
         self.tail_ref = Some((top, tail_from(&self.items, top)));
         let shown_until = self.scroll_top(&response.scroll_top) + available_height;
         // Folga de 2 px: a mola pousa um pixel acima do fim de propósito.
-        self.tail_visible = shown_until + padding.top + px(2.) >= self.items.summary().height + padding.top + padding.bottom + self.tail_slack;
+        self.tail_visible = shown_until + px(2.) >= self.items.summary().height + padding.bottom + self.tail_slack;
         response
     }
 
