@@ -2026,7 +2026,9 @@ Armadilhas que custaram tempo:
 - **Órfão mudou de sentido.** Antes, todo claude de backend anterior era órfão (marcador com o pid
   do pai). Agora órfão é só o cano cuja `HANGAR_CANO_KEY` não tem sidecar — os outros são de
   propósito, e o backend religa em todos na subida (`reconectar_todas`), senão a lista mostraria
-  "ociosa" uma sessão parada numa permissão.
+  "ociosa" uma sessão parada numa permissão. Com o `hangar-server` de pé (dono único, 04/10/2026)
+  quem abre os canos vivos é o Rust, ao entrar no modo `rust`; o `reconectar_todas` fica para o
+  Python dono da porta (sem binário ou depois da desistência).
 - **`makefile()` segura o socket**: fechar só o socket não entrega EOF ao outro lado. Cano e
   cliente de teste fecham os dois.
 - **Cano de outra versão** (`versao` no snapshot): com a sessão ociosa o adapter reabre na hora;

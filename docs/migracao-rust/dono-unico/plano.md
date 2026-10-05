@@ -729,7 +729,16 @@ a prévia do Codex com terminal continua na captura Python (lease com `provider=
 repasse, `quiesce`/`carry`, readoção a cada boot), `docs/migracao-rust/README.md` (estado das
 partes), `docs/decisoes/plataforma.md` (entrada nova com a medição da Task 11).
 
-- [ ] **Step 48: Mover o que deixou de existir para `superado.md` e atualizar o README da migração**
+- [x] **Step 48: Mover o que deixou de existir para `superado.md` e atualizar o README da migração**
+
+**Registro da execução (Task 10).** `superado.md` ganhou a entrada "Passagem de sessão e de pedido
+entre Python e Rust com o Rust vivo" (readoção a cada boot, adoção com `quiesce`/`carry`, administração
+por `detach` → Python → `adopt`, "três tentativas + uma", repasse das rotas públicas e do Git por falha,
+observação com reserva Python por erro), apontando a regra nova. O README da migração ganhou o estado
+do dono único (modo do processo, contrato 17, o que fica no Python) e a linha de `dono-unico/` deixou de
+dizer "aguardando aprovação". `harnesses.md` (órfão do cano) ganhou a ressalva de que, com o Rust de pé,
+quem abre os canos vivos é ele. A entrada nova de `plataforma.md` com a medição fica para a Task 11,
+que a produz. As regras que cada Task tornou falsas já tinham sido corrigidas no commit dela.
 
 ### Task 11: Prova de uso real
 
