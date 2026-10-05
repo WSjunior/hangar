@@ -6591,6 +6591,11 @@ impl Window {
         self.platform_window.minimize();
     }
 
+    /// Hangar: esconde a janela sem fechá-la, ou a mostra de novo. Sem efeito onde a plataforma não implementa.
+    pub fn set_hidden(&self, hidden: bool) {
+        self.platform_window.set_hidden(hidden);
+    }
+
     /// Toggle full screen status on the current window at the platform level.
     pub fn toggle_fullscreen(&self) {
         self.platform_window.toggle_fullscreen();

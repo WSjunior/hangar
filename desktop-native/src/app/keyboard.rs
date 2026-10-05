@@ -709,7 +709,7 @@ impl Hangar {
                     .label(tr("keyboard_restore")).disabled(self.keyboard.busy())
                     .on_click(cx.listener(move |this, _, window, cx| this.restore_keyboard_target(restore.clone(), window, cx)))))
                 .when(!keys.is_empty() && !matches!(target, Target::Hold), |el| el.child(Button::new(SharedString::from(format!("keyboard-remove-{id}"))).ghost().small()
-                    .icon(IconName::X).accessibility_label(tr("keyboard_remove_action").replace("{action}", &label)).disabled(self.keyboard.busy())
+                    .icon(IconName::Close).accessibility_label(tr("keyboard_remove_action").replace("{action}", &label)).disabled(self.keyboard.busy())
                     .on_click(cx.listener(move |this, _, window, cx| this.disable_keyboard_target(remove.clone(), window, cx))))));
         div().child(row).children(self.render_keyboard_edit(&target, cx)).into_any_element()
     }

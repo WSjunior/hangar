@@ -26,6 +26,7 @@ mod status;
 mod tables;
 mod ws;
 mod theme;
+mod tray;
 mod ui_map;
 mod update;
 use gpui_kit::{component::{Root, Theme, ThemeMode}, *};

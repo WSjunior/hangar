@@ -552,6 +552,7 @@ impl Hangar {
         if let Some(input) = self.device.channel_input.clone() {
             input.update(cx, |input, cx| input.set_placeholder(tr("settings_channel_branch_placeholder"), window, cx));
         }
+        if let Some(icon) = &self.window_tray.icon { icon.refresh(); }
         self.relabel_settings(window, cx);
         self.rebuild_accounts();
         // O texto preparado das mensagens de aviso e o separador decimal das tabelas dependem do idioma.
@@ -596,12 +597,28 @@ impl Hangar {
                 next.currency = if index == 1 { Currency::Brl } else { Currency::Usd };
                 this.apply_appearance(next, true, cx);
             }, cx);
+        let tray = crate::tray::SUPPORTED.then(|| {
+            let note = match (&self.window_tray.error, &self.window_tray.icon) {
+                (Some(reason), _) if a.keep_in_tray => tr("settings_tray_failed").replace("{reason}", reason),
+                (_, Some(icon)) if a.keep_in_tray && !icon.online() => tr("settings_tray_no_host"),
+                _ => tr("settings_tray_desc"),
+            };
+            let toggle = Switch::new("keep-in-tray").checked(a.keep_in_tray).accessibility_label(tr("settings_tray"))
+                .on_click(cx.listener(|this, on: &bool, _, cx| {
+                    let mut next = appearance::get();
+                    next.keep_in_tray = *on;
+                    this.apply_appearance(next, true, cx);
+                }));
+            settings_box().child(self.row(IconName::ArrowDownToLine, "settings_tray", Some(note), true, toggle.into_any_element()))
+        });
+        let lead = tr(if crate::tray::SUPPORTED { "settings_general_lead_window" } else { "settings_general_lead" });
         div().flex().flex_col()
-            .child(self.page_top("settings_page_general", tr("settings_general_lead")))
+            .child(self.page_top("settings_page_general", lead))
             .child(self.heading("settings_general_group"))
             .child(settings_box()
                 .child(self.row(IconName::Languages, "settings_language", Some(tr("settings_language_desc")), true, language))
                 .child(self.row(IconName::Banknote, "settings_currency", Some(rate_note), true, currency)))
+            .when_some(tray, |el, tray| el.child(self.heading("settings_window_group")).child(tray))
             .into_any_element()
     }
 

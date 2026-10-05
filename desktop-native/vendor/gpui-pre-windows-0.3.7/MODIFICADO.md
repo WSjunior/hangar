@@ -20,3 +20,5 @@ por cima de janelas filhas.
 Não conferido em Windows.
 
 Em 0.3.7 `DirectXAtlas::get_texture_view` passou a devolver `Option`; o desfoque não usa o atlas, então nada mudou aqui.
+
+Bandeja: `PlatformWindow::set_hidden` em `src/window.rs`, com `ShowWindowAsync` (`SW_HIDE`/`SW_SHOW`).
