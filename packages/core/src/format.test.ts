@@ -1139,6 +1139,28 @@ describe('terminalFoldKind', () => {
     expect(bash('(cd src && ls)')).toBe('shell');
   });
 
+  it('leitura que grava, apaga ou roda outro comando não dobra', () => {
+    for (const cmd of [
+      'sort a > b', 'cat x > y', 'cat x >> y', "awk '{print $1}' f > out", 'echo oi > f', 'cat x &> log', 'cat x >&log',
+      'cat x >| y', 'cat x | tee y', 'sort -o out in', 'sort -uo out in', 'sort --output=out in',
+      'find . -delete', 'find . -exec rm {} +', 'find . -execdir rm {} \\;', 'find . -ok rm {} \\;', 'find . -okdir rm {} \\;',
+      'find . -fprint f', 'find . -fprintf f %p', 'find . -fls f',
+      'cat $(rm -rf x)', 'cat `rm -rf x`', 'grep "$(rm x)" f', 'diff <(ls a) b', 'cat x | grep y > z',
+    ]) expect(bash(cmd), cmd).toBe('shell');
+  });
+
+  it('descartar a saída ou juntar stderr não é gravação, e o & do redirecionamento não quebra o comando', () => {
+    expect(bash('grep foo f 2>&1 | head')).toBe('search');
+    expect(bash('cat x 2>/dev/null')).toBe('read');
+    expect(bash('cat x > /dev/null 2>&1')).toBe('read');
+    expect(bash('rg x &>/dev/null')).toBe('search');
+    expect(bash('cat x >&2')).toBe('read');
+    expect(bash("awk '$1 > 5' f")).toBe('read');
+    expect(bash("grep '$(x)' f")).toBe('search');
+    expect(bash('grep -o foo f | sort')).toBe('search');
+    expect(bash('sort -n f')).toBe('read');
+  });
+
   it('nome sem diferenciar maiúsculas, com as ferramentas do Pi', () => {
     expect(terminalFoldKind('read')).toBe('read');
     expect(terminalFoldKind('ls')).toBe('list');
@@ -1163,6 +1185,11 @@ describe('terminalFoldTitle', () => {
       tool('mcp__hangar__send'), tool('mcp__hangar-computer-control__objetivo'),
     ];
     expect(terminalFoldTitle(tools, false)).toBe('Buscou 1 padrão, leu 2 arquivos, listou 1 diretório, chamou hangar, computer-control 2 vezes, rodou 1 comando de shell');
+  });
+
+  it('leituras sem caminho somam aos arquivos distintos', () => {
+    const tools = [tool('Read', { file_path: '/a' }), tool('Bash', { command: 'cat b' }), tool('Bash', { command: 'cat c' })];
+    expect(terminalFoldTitle(tools, false)).toBe('Leu 3 arquivos');
   });
 
   it('rodando vai para o gerúndio com reticências', () => {

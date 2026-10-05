@@ -707,7 +707,7 @@ def test_launcher_resume_uses_imported_account_policy_identity_and_explicit_over
                             stderr=subprocess.PIPE, text=True)
     try:
         assert _espera(lambda: sidecar.exists() and json.loads(sidecar.read_text()).get("tui_pid")
-                       and Path(env["FAKE_SERVER_ENV"]).exists())
+                       and Path(env["FAKE_SERVER_ENV"]).exists() and Path(env["FAKE_TUI_OUT"]).exists())
         saved = json.loads(sidecar.read_text())
         budget = 288000 if explicit_overrides else 144000
         expected_home = str(explicit_home if explicit_overrides else account_home)

@@ -849,7 +849,9 @@ export function separarComando(cmd: string, { pipes = false } = {}): string[] {
     if (c === '(' || c === '{') prof++;
     else if ((c === ')' || c === '}') && prof > 0) prof--;
     if (prof === 0 && (c === ';' || c === '\n')) { fechar(); continue; }
-    if (pipes && prof === 0 && (c === '|' || c === '&')) { fechar(); if (cmd[i + 1] === c) i++; continue; }
+    // O `&` de `2>&1`, `<&3` e `&>` é redirecionamento, não separa comando.
+    const redir = c === '&' && (cmd[i - 1] === '>' || cmd[i - 1] === '<' || cmd[i + 1] === '>');
+    if (pipes && prof === 0 && (c === '|' || (c === '&' && !redir))) { fechar(); if (cmd[i + 1] === c) i++; continue; }
     if (prof === 0 && (c === '&' || c === '|') && cmd[i + 1] === c) { fechar(); atual = c + c; i++; continue; }
     atual += c;
   }
@@ -887,9 +889,41 @@ const SHELL_LEITURA = new Set(['cat', 'head', 'tail', 'less', 'more', 'wc', 'sta
 const SHELL_LISTA = new Set(['ls', 'tree', 'du']);
 const SHELL_NEUTRO = new Set(['echo', 'printf', 'true', 'false', ':']);
 
+const FIND_GRAVA = new Set(['-delete', '-exec', '-execdir', '-ok', '-okdir', '-fls']);
+
+// Se a parte grava ou roda outra coisa por baixo, ela não é leitura e a dobra não pode escondê-la:
+// redirecionamento de saída (fora `/dev/null` e a cópia de descritor `2>&1`), substituição de comando,
+// ou as opções de `find`/`sort` que apagam, executam ou gravam. Espelho do `part_writes` do nativo.
+function parteGrava(parte: string): boolean {
+  let aspas: string | null = null;
+  for (let i = 0; i < parte.length; i++) {
+    const c = parte[i];
+    if (c === '\\' && aspas !== "'") { i++; continue; }
+    if (aspas === "'") { if (c === "'") aspas = null; continue; }
+    if (c === '`' || (c === '$' && parte[i + 1] === '(')) return true;
+    if (aspas === '"') { if (c === '"') aspas = null; continue; }
+    if (c === "'" || c === '"') { aspas = c; continue; }
+    if (c === '<' && parte[i + 1] === '(') return true;
+    if (c !== '>') continue;
+    let j = i + 1;
+    if (parte[j] === '>' || parte[j] === '|') j++;
+    const dup = parte[j] === '&';
+    if (dup) j++;
+    while (parte[j] === ' ' || parte[j] === '\t') j++;
+    const alvo = /^[^\s;&|<>()]*/.exec(parte.slice(j))![0];
+    if (alvo !== '/dev/null' && !(dup && /^(\d+|-)$/.test(alvo))) return true;
+    i = j + alvo.length - 1;
+  }
+  const palavras = parte.split(/\s+/);
+  if (palavras[0] === 'find') return palavras.some((w) => FIND_GRAVA.has(w) || w.startsWith('-fprint'));
+  if (palavras[0] === 'sort') return palavras.some((w) => w.startsWith('--o') || (w.startsWith('-') && !w.startsWith('--') && w.includes('o')));
+  return false;
+}
+
 function shellFoldKind(cmd: string): TerminalFoldKind {
   let busca = false, leitura = false, lista = false;
   for (const parte of separarComando(cmd, { pipes: true })) {
+    if (parteGrava(parte)) return 'shell';
     const palavra = /^\S+/.exec(parte)?.[0] ?? '';
     if (SHELL_NEUTRO.has(palavra)) continue;
     if (SHELL_BUSCA.has(palavra)) busca = true;
@@ -944,16 +978,17 @@ export function terminalFoldTitle(
   const n: Record<TerminalFoldKind, number> = { search: 0, read: 0, list: 0, mcp: 0, shell: 0 };
   const arquivos = new Set<string>();
   const servidores = new Set<string>();
+  let leiturasSemCaminho = 0;
   for (const t of tools) {
     const kind = terminalFoldKind(t.tool_name, t.tool_input);
     if (!kind) continue;
     n[kind]++;
-    const caminho = t.tool_input?.['file_path'] ?? t.tool_input?.['notebook_path'];
-    if (kind === 'read' && typeof caminho === 'string') arquivos.add(caminho);
+    const caminho = t.tool_input?.['file_path'] ?? t.tool_input?.['path'] ?? t.tool_input?.['notebook_path'];
+    if (kind === 'read') { if (typeof caminho === 'string' && caminho) arquivos.add(caminho); else leiturasSemCaminho++; }
     if (kind === 'mcp') servidores.add(partesMcp(t.tool_name)![0]);
   }
-  // Como no Claude Code: arquivos distintos quando há caminho, senão quantas leituras.
-  n.read = arquivos.size || n.read;
+  // Arquivos distintos, mais as leituras sem caminho (um `cat` no shell não diz qual arquivo leu).
+  n.read = arquivos.size + leiturasSemCaminho;
   const nome = [...servidores].join(', ');
   const partes = (Object.keys(DOBRA_FRASES) as TerminalFoldKind[]).filter((k) => n[k]).map((k) => {
     const [feito1, feito, vivo1, vivo] = DOBRA_FRASES[k];

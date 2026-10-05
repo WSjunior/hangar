@@ -618,6 +618,16 @@ impl Hangar {
                 }));
             settings_box().child(self.row(IconName::ArrowDownToLine, "settings_tray", Some(note), true, toggle.into_any_element()))
         });
+        // Senhas do Chrome só se leem no Linux; nos outros sistemas a opção não existe.
+        let autofill = cfg!(target_os = "linux").then(|| {
+            let toggle = Switch::new("chrome-autofill").checked(a.chrome_autofill).accessibility_label(tr("settings_chrome_autofill"))
+                .on_click(cx.listener(|this, on: &bool, _, cx| {
+                    let mut next = appearance::get();
+                    next.chrome_autofill = *on;
+                    this.apply_appearance(next, true, cx);
+                }));
+            settings_box().child(self.row(IconName::Key, "settings_chrome_autofill", Some(tr("settings_chrome_autofill_desc")), true, toggle.into_any_element()))
+        });
         let lead = tr(if crate::tray::SUPPORTED { "settings_general_lead_window" } else { "settings_general_lead" });
         div().flex().flex_col()
             .child(self.page_top("settings_page_general", lead))
@@ -626,6 +636,7 @@ impl Hangar {
                 .child(self.row(IconName::Languages, "settings_language", Some(tr("settings_language_desc")), true, language))
                 .child(self.row(IconName::Banknote, "settings_currency", Some(rate_note), true, currency)))
             .when_some(tray, |el, tray| el.child(self.heading("settings_window_group")).child(tray))
+            .when_some(autofill, |el, autofill| el.child(self.heading("settings_browser_group")).child(autofill))
             .into_any_element()
     }
 

@@ -120,11 +120,24 @@ def known_non_plan(name: str) -> str | None:
         return _ultimos_nao_plan.get(name)
 
 
+# Os fatos do terminal perguntam a cada tique enquanto há recado na fila; a varredura chega a 8 MB.
+_transcript_modes: dict[str, tuple[tuple[int, int], str | None]] = {}
+
+
 def transcript_non_plan_mode(jsonl: str) -> str | None:
     """`permissionMode` mais recente fora de `plan` que o próprio CLI gravou no transcript. `plan`
     é pulado porque o Claude Code conta plan vindo de bypass como bypass."""
     from app.worktrees import reversed_lines
 
+    try:
+        st = Path(jsonl).stat()
+    except OSError:
+        return None
+    version = (st.st_size, st.st_mtime_ns)
+    cached = _transcript_modes.get(jsonl)
+    if cached is not None and cached[0] == version:
+        return cached[1]
+    found = None
     try:
         for raw in reversed_lines(jsonl):
             if b'"permissionMode"' not in raw:
@@ -134,10 +147,14 @@ def transcript_non_plan_mode(jsonl: str) -> str | None:
             except ValueError:
                 continue
             if isinstance(modo, str) and modo not in ("", "plan"):
-                return modo
+                found = modo
+                break
     except OSError:
-        pass
-    return None
+        return None
+    if len(_transcript_modes) >= 256:
+        _transcript_modes.clear()
+    _transcript_modes[jsonl] = (version, found)
+    return found
 
 
 def session_non_plan_mode(jsonl: str | None) -> str | None:

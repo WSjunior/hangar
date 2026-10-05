@@ -21,6 +21,12 @@ from unittest.mock import patch
 
 BASE = "93ce2f657f028b0ed5e696e4bd23bff2aa9054c6"
 FIXTURES = Path(__file__).parent / "fixtures" / "headless_runtime"
+# Campos públicos do estado criados depois do BASE: o oráculo continua o do BASE, só ganha o padrão.
+STATE_FIELDS_AFTER_BASE = {"codex_service_tier": None}
+
+
+def _with_new_fields(state):
+    return {**STATE_FIELDS_AFTER_BASE, **state} if isinstance(state, dict) else state
 
 
 def generate(provider: str, scenarios: list[dict]) -> list[dict]:
@@ -211,6 +217,11 @@ def main():
     if "--worker" in sys.argv:
         for provider in ("claude", "codex"):
             data = generate(provider, scenarios)
+            for scenario in data:
+                scenario["initial_state"] = _with_new_fields(scenario["initial_state"])
+                for output in scenario["outputs"]:
+                    if output["channel"] == "state":
+                        output["data"] = _with_new_fields(output["data"])
             (FIXTURES / f"{provider}-golden.json").write_text(
                 json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return

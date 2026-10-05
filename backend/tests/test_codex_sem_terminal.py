@@ -335,7 +335,7 @@ def test_modo_de_permissao_vai_no_turno_e_troca_de_sandbox_reabre_o_servidor(amb
         assert not Path(f"/proc/{pid1}").exists()
         resume = json.loads((ambiente / "resume.txt").read_text())
         assert resume == {"threadId": "th-1", "cwd": str(ambiente), "approvalPolicy": "never",
-                          "sandbox": "danger-full-access"}
+                          "sandbox": "danger-full-access", "serviceTier": "default"}
         with pytest.raises(ValueError):
             await ad.set_permission_mode_sem_terminal("cx-modo", "yolo")
         await asyncio.to_thread(ad.close_sync, "cx-modo")

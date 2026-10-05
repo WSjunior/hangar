@@ -81,7 +81,7 @@ const PAGE_ROWS: &[(Page, &[(&str, Option<&str>)])] = &[
     (Page::Connect, &[("connect_code", Some("connect_code_help"))]),
     (Page::Appearance, &APPEARANCE_ROWS),
     (Page::General, &[("settings_language", Some("settings_language_desc")), ("settings_currency", Some("settings_currency_search")),
-        ("settings_tray", Some("settings_tray_desc"))]),
+        ("settings_tray", Some("settings_tray_desc")), ("settings_chrome_autofill", Some("settings_chrome_autofill_desc"))]),
     (Page::Diary, &[("settings_diary_rules", Some("settings_diary_rule_private")), ("settings_diary_download", Some("settings_diary_rule_local")),
         ("settings_diary_recent", None)]),
     (Page::About, &[("settings_about_app", None), ("settings_about_server", None), ("settings_about_update", Some("settings_about_update_desc")),
@@ -147,6 +147,7 @@ fn find(query: &str) -> Vec<Found> {
     let rows = PAGE_ROWS.iter().flat_map(|&(page, rows)| rows.iter()
         // Sem bandeja no sistema a linha não é desenhada.
         .filter(|(title, _)| crate::tray::SUPPORTED || *title != "settings_tray")
+        .filter(|(title, _)| cfg!(target_os = "linux") || *title != "settings_chrome_autofill")
         .map(move |&(title, desc)| (Found { page, row: Some(title) }, tr(title), desc.map(tr).unwrap_or_default())));
     // Páginas que ainda não têm linhas continuam achadas pelo nome e abrem no aviso delas.
     let pages = Page::DEVICE.into_iter().chain(Page::SERVER).map(|page| (Found { page, row: None }, page.title(), String::new()));
