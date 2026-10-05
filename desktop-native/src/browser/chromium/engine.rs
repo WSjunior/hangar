@@ -367,6 +367,8 @@ impl Engine {
         if let Some(event) = key_event(down, keystroke) { self.send("Input.dispatchKeyEvent", event); }
     }
 
+    pub fn insert_text(&self, text: &str) { self.send("Input.insertText", json!({"text": text})); }
+
     /// A página finge estar sempre focada (`setFocusEmulationEnabled`): o foco do painel não precisa ir a ela.
     pub fn focus(&self, _focused: bool) {}
     pub fn release_focus(&self) {}
