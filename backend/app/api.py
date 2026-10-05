@@ -551,6 +551,15 @@ async def terminal_control_failed(request: Request, exc: TerminalControlError):
     return JSONResponse(status_code=409, content={"detail":erro(code, str(exc))})
 
 
+from app.runtime_coordinator import TransferInProgress
+
+
+@app.exception_handler(TransferInProgress)
+async def _ownership_moving(request: Request, exc: TransferInProgress):
+    """Posse passando entre Python e Rust (sessão recém-criada, por exemplo): espera curta, não 500."""
+    return JSONResponse(status_code=409, content={"detail":erro("session_transfer_busy", str(exc))})
+
+
 @app.exception_handler(GitError)
 async def _git_failed(request: Request, exc: GitError):
     """GitError que escapou da rota (citação, resolver) sai com o status dele, nunca 500 sem corpo.
@@ -1216,7 +1225,10 @@ def _drenar(name: str, jsonl: str, provider: str) -> int:
     from app.runtime_adapter import run_sync
     coordinator = runtime_coordinator.current()
     if coordinator is not None and coordinator.managed_runtime(name):
-        return run_sync(lambda: coordinator.op(name, {"kind":"drain"}, uuid.uuid4().hex), coordinator.loop)["sent"]
+        try:
+            return run_sync(lambda: coordinator.op(name, {"kind":"drain"}, uuid.uuid4().hex), coordinator.loop)["sent"]
+        except runtime_coordinator.TransferInProgress:
+            return 0        # o novo dono drena quando a sessão fica entregável
     if provider == "codex":
         chave = "codex"
     elif _headless(name):
