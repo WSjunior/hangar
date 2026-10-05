@@ -24,8 +24,9 @@ export interface EditDiff {
 }
 
 // Abaixo disto vai no Myers completo; acima, so trim de prefixo/sufixo (meio vira del+add em bloco).
-// 1M pares ~ string de 1000x1000 linhas — Edit de verdade raramente passa de 100.
-const MYERS_MAX_PRODUCT = 1_000_000;
+// O teto e na SOMA: o Myers guarda D copias de 2(n+m)+1 inteiros, e D chega a n+m. Um teto no produto
+// deixava passar arquivo novo (n=0, produto 0) de dezenas de milhares de linhas.
+const MYERS_MAX_LINES = 2000;
 
 function splitLines(s: string): string[] {
   if (s === '') return [];
@@ -114,7 +115,7 @@ export function pairRows(ops: OpLine[]): SplitRow[] {
 export function computeEditDiff(oldText: string, newText: string): EditDiff {
   const a = splitLines(oldText);
   const b = splitLines(newText);
-  const ops = a.length * b.length > MYERS_MAX_PRODUCT ? prefixSuffixFallback(a, b) : myers(a, b);
+  const ops = a.length + b.length > MYERS_MAX_LINES ? prefixSuffixFallback(a, b) : myers(a, b);
   let add = 0, del = 0;
   for (const o of ops) { if (o.op === 'add') add++; else if (o.op === 'del') del++; }
   return { ops, rows: pairRows(ops), add, del };

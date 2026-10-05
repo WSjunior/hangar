@@ -73,7 +73,7 @@ describe('computeEditDiff', () => {
   });
 
   it('grande demais pro Myers cai no fallback prefixo/sufixo sem travar', () => {
-    const n = 1200; // 1200*1200 > MYERS_MAX_PRODUCT
+    const n = 1200; // 1200+1200 > MYERS_MAX_LINES
     const a = Array.from({ length: n }, (_, i) => `a${i}`);
     const b = Array.from({ length: n }, (_, i) => `b${i}`);
     a[0] = b[0] = 'igual';
@@ -81,6 +81,14 @@ describe('computeEditDiff', () => {
     expect(d.rows[0]).toEqual({ left: { num: 1, text: 'igual' }, right: { num: 1, text: 'igual' } });
     expect(d.del).toBe(n - 1);
     expect(d.add).toBe(n - 1);
+  });
+
+  it('edição desbalanceada grande também cai no fallback (arquivo novo não passa pelo Myers)', () => {
+    // O Myers acharia o 'b' em comum; o fallback, sem prefixo nem sufixo iguais, troca tudo.
+    const novo = ['b', ...Array.from({ length: 2500 }, (_, i) => `z${i}`), 'a'];
+    const d = computeEditDiff('a\nb', novo.join('\n'));
+    expect(d.del).toBe(2);
+    expect(d.add).toBe(novo.length);
   });
 });
 
