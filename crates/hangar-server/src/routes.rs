@@ -210,6 +210,16 @@ async fn pass_any(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     req: Request,
 ) -> Response {
+    if crate::worktree_routes::matches(req.method(), req.uri().path()) {
+        let (forward, owner) = gate(&st, peer, &req);
+        // Convidado segue ao Python, que o recusa como antes.
+        if owner {
+            let headers = req.headers().clone();
+            let mut response = crate::worktree_routes::public(st, req, forward).await;
+            cors(&headers, response.headers_mut());
+            return response;
+        }
+    }
     if crate::workspace_routes::matches(req.method(), req.uri().path()) {
         let (forward, owner) = gate(&st, peer, &req);
         if owner {
