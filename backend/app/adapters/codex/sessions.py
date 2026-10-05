@@ -96,7 +96,8 @@ def save(name: str, thread_id: str | None, rollout_path: str, cwd: str,
          headless: bool = False, key: str | None = None,
          permission_mode: str | None = None, jev: bool = False,
          transfer_id: str | None = None, tool_output_token_limit: int | None = None,
-         previous_non_plan: str | None = None, launching: bool = False) -> None:
+         previous_non_plan: str | None = None, launching: bool = False,
+         service_tier: str | None = None) -> None:
     """Grava (ou sobrescreve) o sidecar duravel da sessao Codex. Escrita ATOMICA (tmp + replace,
     mesmo padrao de PromptQueue._write_atomic em pqueue.py) -- write_text direto podia corromper
     o sidecar em crash/concorrencia no meio da escrita.
@@ -121,6 +122,8 @@ def save(name: str, thread_id: str | None, rollout_path: str, cwd: str,
         "endpoint": endpoint,
         "app_pid": app_pid,
     }
+    if service_tier is not None:
+        meta["service_tier"] = service_tier
     if codex_home is not None:
         meta["codex_home"] = str(Path(codex_home).expanduser().absolute())
     if codex_account is not None:
@@ -147,7 +150,7 @@ def save(name: str, thread_id: str | None, rollout_path: str, cwd: str,
         previous = load(name) or {}
         same_thread = previous.get("thread_id") == thread_id
         for field in ("key", "transfer_id", "tool_output_token_limit", "codex_home", "codex_account",
-                      "permission_mode", "previous_non_plan", "jev"):
+                      "permission_mode", "previous_non_plan", "jev", "service_tier"):
             if field not in meta and field in previous and (field == "key" or same_thread):
                 meta[field] = previous[field]
         _write(name, meta)
@@ -156,7 +159,7 @@ def save(name: str, thread_id: str | None, rollout_path: str, cwd: str,
 def _merge_conversation(meta: dict, fields: dict) -> dict:
     if (meta.get("thread_id") and "thread_id" in fields
             and fields["thread_id"] != meta["thread_id"]):
-        meta = {k: v for k, v in meta.items() if k not in {"transfer_id", "tool_output_token_limit"}}
+        meta = {k: v for k, v in meta.items() if k not in {"transfer_id", "tool_output_token_limit", "service_tier"}}
     return {**meta, **fields}
 
 
@@ -179,6 +182,18 @@ def update_model(name: str, model: str | None, effort: str | None) -> None:
         meta = load(name)
         if meta is not None:
             _write(name, {**meta, "model": model, "effort": effort})
+
+
+def update_service_tier(name: str, thread_id: str, service_tier: str | None) -> bool:
+    """Grava a escolha confirmada sem deixar evento de outra conversa sobrescrever o sidecar."""
+    with _locked(name):
+        meta = load(name)
+        if meta is None:
+            return True
+        if meta.get("thread_id") != thread_id:
+            return False
+        _write(name, {**meta, "service_tier": service_tier})
+        return True
 
 
 def update_app_pid(name: str, app_pid: int) -> None:

@@ -19,6 +19,7 @@ pub struct StateEvent {
     pub session: String,
     pub state: String,
     pub codex_mode: Option<String>,
+    pub codex_service_tier: Option<String>,
     pub codex_question: Option<Map<String, Value>>,
     pub codex_buffering: bool,
     pub claude_permission_mode: Option<String>,
@@ -40,4 +41,20 @@ pub struct StateEvent {
     pub headless: bool,
     pub recarregar_motivo: Option<String>,
     pub shells: Vec<ShellVivo>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StateEvent;
+
+    #[test]
+    fn codex_service_tier_survives_state_round_trip() {
+        let state: StateEvent = serde_json::from_value(serde_json::json!({
+            "session": "codex", "state": "idle", "codex_service_tier": "priority"
+        })).unwrap();
+        assert_eq!(state.codex_service_tier.as_deref(), Some("priority"));
+        assert_eq!(serde_json::to_value(state).unwrap()["codex_service_tier"], "priority");
+        let old: StateEvent = serde_json::from_value(serde_json::json!({"state": "idle"})).unwrap();
+        assert!(old.codex_service_tier.is_none());
+    }
 }

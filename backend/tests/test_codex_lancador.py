@@ -163,6 +163,47 @@ def _espera(cond, limite=15.0):
     return False
 
 
+@pytest.mark.parametrize("tier", [None, "priority", "default"])
+def test_launcher_command_transports_only_explicit_service_tier(tier):
+    from app.adapters.codex.lancador import comando_do_lancador
+    argv = comando_do_lancador("/tmp/proj", initial_prompt="primeiro prompt", service_tier=tier)
+    if tier is None:
+        assert "--service-tier" not in argv
+    else:
+        assert argv[argv.index("--service-tier") + 1] == tier
+        assert argv.index("--service-tier") < argv.index("--prompt")
+    with pytest.raises(ValueError, match="service_tier"):
+        comando_do_lancador("/tmp/proj", service_tier='priority"; rm -rf /')
+
+
+@pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
+@pytest.mark.parametrize("tier", [None, "priority", "default"])
+def test_launcher_applies_creation_tier_to_server_and_tui_before_prompt(tmp_path, tier):
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    env = _ambiente(tmp_path, cwd)
+    env["FAKE_TUI_SLEEP"] = "3"
+    env["FAKE_SERVER_OUT"] = str(tmp_path / "server-argv.json")
+    args = [sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd), "--prompt", "primeiro prompt"]
+    if tier is not None:
+        args += ["--service-tier", tier]
+    proc = subprocess.Popen(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert _espera(lambda: _sidecar(env, "sess").exists() and Path(env["FAKE_TUI_OUT"]).exists())
+        meta = json.loads(_sidecar(env, "sess").read_text())
+        server_args = json.loads(Path(env["FAKE_SERVER_OUT"]).read_text())
+        tui_args = Path(env["FAKE_TUI_OUT"]).read_text().splitlines()
+        assert meta.get("service_tier") == tier
+        assert tui_args[-1] == "primeiro prompt"
+        for argv in (server_args, tui_args):
+            if tier is None:
+                assert not any("service_tier=" in arg for arg in argv)
+            else:
+                assert f'service_tier="{tier}"' in argv
+    finally:
+        proc.wait(timeout=20)
+
+
 def test_conta_secundaria_espera_preparo_e_confia_a_pasta(monkeypatch):
     lancador = runpy.run_path(str(_LANCADOR))
     chamadas = []
@@ -281,7 +322,7 @@ def test_lancador_ressobe_o_servidor_na_mesma_porta_com_a_tui_viva(tmp_path):
     env["FAKE_SERVER_OUT"] = str(tmp_path / "server-argv.json")
     proc = subprocess.Popen(
         [sys.executable, str(_LANCADOR), "--name", "sess", "--cwd", str(cwd),
-         "--tool-output-token-limit", "144000"],
+         "--tool-output-token-limit", "144000", "--service-tier", "priority"],
         env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     try:
@@ -289,6 +330,10 @@ def test_lancador_ressobe_o_servidor_na_mesma_porta_com_a_tui_viva(tmp_path):
         meta = json.loads(_sidecar(env, "sess").read_text())
         assert meta["tool_output_token_limit"] == 144000
         assert "tool_output_token_limit=144000" in json.loads((tmp_path / "server-argv.json").read_text())
+        assert meta["service_tier"] == "priority"
+        assert 'service_tier="priority"' in json.loads((tmp_path / "server-argv.json").read_text())
+        # O usuário desligou Fast depois da abertura; reiniciar não pode repetir a escolha inicial.
+        _sidecar(env, "sess").write_text(json.dumps({**meta, "service_tier": "default"}))
         os.kill(meta["app_pid"], 9)
         assert _espera(lambda: not pid_vivo(meta["app_pid"]))
 
@@ -299,7 +344,11 @@ def test_lancador_ressobe_o_servidor_na_mesma_porta_com_a_tui_viva(tmp_path):
         novo = json.loads(_sidecar(env, "sess").read_text())
         assert novo["endpoint"] == meta["endpoint"]
         assert novo["tool_output_token_limit"] == 144000
-        assert "tool_output_token_limit=144000" in json.loads((tmp_path / "server-argv.json").read_text())
+        assert novo["service_tier"] == "default"
+        restarted_args = json.loads((tmp_path / "server-argv.json").read_text())
+        assert "tool_output_token_limit=144000" in restarted_args
+        assert 'service_tier="default"' in restarted_args
+        assert 'service_tier="priority"' not in restarted_args
         assert proc.poll() is None, "a TUI nao pode ser relançada"
     finally:
         if proc.poll() is None:
@@ -623,7 +672,8 @@ def test_lancador_nao_reclassifica_conta_pelo_codex_home_herdado(tmp_path):
 
 @pytest.mark.skipif(os.name != "posix", reason="binário falso POSIX")
 @pytest.mark.parametrize("explicit_overrides", [False, True])
-def test_launcher_resume_uses_imported_account_policy_identity_and_explicit_overrides(tmp_path, explicit_overrides):
+@pytest.mark.parametrize("service_tier", ["priority", "default"])
+def test_launcher_resume_uses_imported_account_policy_identity_and_explicit_overrides(tmp_path, explicit_overrides, service_tier):
     cwd = tmp_path / "project"
     cwd.mkdir()
     env = _ambiente(tmp_path, cwd)
@@ -645,7 +695,8 @@ def test_launcher_resume_uses_imported_account_policy_identity_and_explicit_over
     meta = {"name": "sess", "thread_id": thread_id, "rollout_path": env["FAKE_ROLLOUT"],
             "cwd": str(cwd), "codex_home": str(account_home), "key": "same-key",
             "codex_account": "work", "transfer_id": "import", "tool_output_token_limit": 144000,
-            "permission_mode": "Ask for approval", "jev": False, "model": "native-model", "effort": "high"}
+            "permission_mode": "Ask for approval", "jev": False, "model": "native-model", "effort": "high",
+            "service_tier": service_tier}
     sidecar.write_text(json.dumps(meta))
     overrides = (["--codex-home", str(explicit_home), "--codex-account", "alternate",
                   "--approval-policy", "never", "--sandbox", "danger-full-access",
@@ -669,6 +720,9 @@ def test_launcher_resume_uses_imported_account_policy_identity_and_explicit_over
         assert saved["key"] == "same-key" and saved["thread_id"] == thread_id
         server_args = json.loads((tmp_path / "server-argv.json").read_text())
         assert f"tool_output_token_limit={budget}" in server_args
+        assert saved["service_tier"] == service_tier
+        assert f'service_tier="{service_tier}"' in server_args
+        assert f'service_tier="{service_tier}"' in Path(env["FAKE_TUI_OUT"]).read_text().splitlines()
         assert ('approval_policy="never"' if explicit_overrides else 'approval_policy="on-request"') in server_args
         assert ('sandbox_mode="danger-full-access"' if explicit_overrides else 'sandbox_mode="read-only"') in server_args
         assert not any("project_doc_max_bytes" in arg for arg in server_args)

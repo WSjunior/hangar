@@ -637,6 +637,8 @@ _MODEL_LIST_RESULT = {
                 {"reasoningEffort": "high", "description": "mais capaz"},
             ],
             "defaultReasoningEffort": "medium",
+            "serviceTiers": [{"id": "priority", "name": "Fast", "description": "faster", "extra": True}],
+            "defaultServiceTier": "priority",
         },
         {
             "id": "gpt-5-legacy", "model": "gpt-5-legacy", "displayName": "GPT-5 (legacy)",
@@ -667,6 +669,8 @@ async def test_list_models_filters_hidden_and_normalizes():
             {"value": "high", "description": "mais capaz"},
         ],
         "defaultEffort": "medium",
+        "serviceTiers": [{"id": "priority", "name": "Fast", "description": "faster", "extra": True}],
+        "defaultServiceTier": "priority",
     }]  # o hidden=True foi filtrado
     assert ("model/list", {}) in client.requests
 
@@ -716,19 +720,19 @@ async def test_current_model_from_dict_when_set():
     adapter = CodexAdapter()
     adapter.attach("sess", _FakeClient([]), "thread-1")
     await adapter.set_model("sess", "gpt-5-codex", "high")
-    assert adapter.current_model("sess") == {"model": "gpt-5-codex", "effort": "high"}
+    assert adapter.current_model("sess") == {"model": "gpt-5-codex", "effort": "high", "service_tier": None}
 
 
 async def test_current_model_falls_back_to_sidecar_when_not_attached():
     codex_sessions.save("sess", "thread-1", "/rollout.jsonl", "/tmp/proj",
                          model="gpt-5-codex", effort="low")
     adapter = CodexAdapter()
-    assert adapter.current_model("sess") == {"model": "gpt-5-codex", "effort": "low"}
+    assert adapter.current_model("sess") == {"model": "gpt-5-codex", "effort": "low", "service_tier": None}
 
 
 async def test_current_model_null_when_never_chosen():
     adapter = CodexAdapter()
-    assert adapter.current_model("ghost") == {"model": None, "effort": None}
+    assert adapter.current_model("ghost") == {"model": None, "effort": None, "service_tier": None}
 
 
 # --- modelo/effort viajam no proprio turn/start ---------------------------------------------
@@ -739,7 +743,7 @@ async def test_send_prompt_herda_configuracao_viva_sem_sobrescrever_terminal():
     adapter.attach("sess", client, "thread-1")
     await adapter.set_model("sess", "gpt-5-codex", "high")
     await adapter.send_prompt("sess", "oi")
-    assert adapter.current_model("sess") == {"model": "gpt-5-codex", "effort": "high"}
+    assert adapter.current_model("sess") == {"model": "gpt-5-codex", "effort": "high", "service_tier": None}
     assert client.requests == [("thread/settings/update", {
         "threadId": "thread-1", "model": "gpt-5-codex", "effort": "high",
     }), ("turn/start", {
@@ -798,14 +802,14 @@ async def test_current_model_falls_back_to_default_when_no_explicit_choice():
     # (usado pelo GET /models e pelo pill do front) mostra o default, nao None.
     adapter = CodexAdapter()
     adapter.attach("sess", _FakeClient([]), "thread-1", default_model="gpt-5.6-sol")
-    assert adapter.current_model("sess") == {"model": "gpt-5.6-sol", "effort": None}
+    assert adapter.current_model("sess") == {"model": "gpt-5.6-sol", "effort": None, "service_tier": None}
 
 
 async def test_current_model_explicit_choice_wins_over_default():
     adapter = CodexAdapter()
     adapter.attach("sess", _FakeClient([]), "thread-1", default_model="gpt-5.6-sol")
     await adapter.set_model("sess", "gpt-5-codex", "high")
-    assert adapter.current_model("sess") == {"model": "gpt-5-codex", "effort": "high"}
+    assert adapter.current_model("sess") == {"model": "gpt-5-codex", "effort": "high", "service_tier": None}
 
 
 async def test_send_prompt_omits_default_model_even_when_present():
@@ -851,14 +855,16 @@ async def test_ensure_running_resume_captures_default_without_overwriting_choice
     sess = adapter._sessions["sess"]
     assert sess["model"] == "gpt-5-codex"       # escolha preservada
     assert sess["default_model"] == "gpt-5.6-sol"  # default capturado, so pra display
-    assert adapter.current_model("sess") == {"model": "gpt-5-codex", "effort": "high"}
+    assert adapter.current_model("sess") == {"model": "gpt-5-codex", "effort": "high", "service_tier": None}
 
 
 # O campo do esforco na resposta de thread/start|resume chama `reasoningEffort`, e nao `effort`
 # como o parametro do turn/start (medido no codex-cli 0.153.4). Lendo `effort` a pilula do app
 # nascia VAZIA com o terminal mostrando `max`, e o modelo aparecia -- ele vem da mesma resposta.
-async def test_resume_le_o_esforco_da_thread_em_reasoning_effort():
-    codex_sessions.save("sess", "thread-1", "/rollout.jsonl", "/tmp/proj")
+@pytest.mark.parametrize("service_tier", ["priority", "default", None])
+async def test_resume_le_o_esforco_da_thread_em_reasoning_effort(service_tier):
+    effective_tier = "default" if service_tier is None else service_tier
+    codex_sessions.save("sess", "thread-1", "/rollout.jsonl", "/tmp/proj", service_tier=effective_tier)
     adapter = CodexAdapter()
 
     class _ResumeClient(_FakeClient):
@@ -866,14 +872,16 @@ async def test_resume_le_o_esforco_da_thread_em_reasoning_effort():
             self.requests.append((method, params))
             if method == "thread/resume":
                 return {"thread": {"id": "thread-1"}, "model": "gpt-5.6-luna",
-                        "reasoningEffort": "max"}
+                        "reasoningEffort": "max", "serviceTier": service_tier}
             return {}
 
     client = _ResumeClient([])
     with patch("app.adapters.codex.adapter.AppServerClient", lambda *a, **k: client), \
          patch.object(codex_adapter.tmux, "has_session", return_value=False):
         await adapter.ensure_running("sess")
-    assert adapter.current_model("sess") == {"model": "gpt-5.6-luna", "effort": "max"}
+    assert adapter.current_model("sess") == {"model": "gpt-5.6-luna", "effort": "max", "service_tier": effective_tier}
+    assert codex_sessions.load("sess")["service_tier"] == effective_tier
+    assert next(params for method, params in client.requests if method == "thread/resume")["serviceTier"] == effective_tier
 
 
 def test_transcript_stream_creates_rollout_dir(tmp_path):
@@ -902,11 +910,11 @@ def test_ensure_tmux_tui_resumes_with_model_and_effort():
          patch.object(codex_adapter.tmux, "new_session", return_value=True) as new_session:
         ensure_tmux_tui(
             "cx", "/tmp/proj", "thread-42", "ws://127.0.0.1:45123",
-            model="gpt-5-codex", effort="high",
+            model="gpt-5-codex", effort="high", service_tier="default",
         )
     assert new_session.call_args.args[2] == (
         "codex resume --remote ws://127.0.0.1:45123 --no-alt-screen "
-        "--model gpt-5-codex --config 'model_reasoning_effort=\"high\"' thread-42"
+        "--model gpt-5-codex --config 'model_reasoning_effort=\"high\"' -c 'service_tier=\"default\"' thread-42"
     )
 
 
@@ -1031,7 +1039,7 @@ async def test_subscription_populates_default_model_for_display():
     adapter.attach("sess", _ResumeWithModel([]), "thread-1")
     adapter.start_subscription("sess", "/tmp/proj")
     await asyncio.wait_for(adapter._subscribers["sess"], timeout=5)
-    assert adapter.current_model("sess") == {"model": "gpt-5.6-sol", "effort": "medium"}
+    assert adapter.current_model("sess") == {"model": "gpt-5.6-sol", "effort": "medium", "service_tier": None}
 
 
 async def test_rename_rearma_assinatura_pendente():
@@ -1223,6 +1231,307 @@ class _LiveQueueClient:
     async def request(self, method: str, params: dict, timeout: float = 30.0) -> dict:
         self.requests.append((method, params))
         return {}
+
+
+@pytest.mark.parametrize("tier", ["priority", "default"])
+async def test_service_tier_waits_for_same_thread_notification_without_model_effort(tier):
+    adapter = CodexAdapter()
+    client = _LiveQueueClient()
+    requested = asyncio.Event()
+    original = client.request
+
+    async def request(method, params, timeout=30.0):
+        result = await original(method, params, timeout)
+        if method == "thread/read":
+            return {"thread": {"model": "custom-model", "reasoningEffort": "high"}}
+        if method == "model/list":
+            return {"data": [{"model": "custom-model", "serviceTiers": [{"id": "priority", "name": "Fast"}]}]}
+        if method == "thread/settings/update":
+            requested.set()
+        if method == "thread/resume":
+            assert params == {"threadId": "t"}
+            return {"thread": {"id": "t"}, "serviceTier": tier}
+        return result
+
+    client.request = request
+    codex_sessions.save("sess", "t", "/rollout.jsonl", "/tmp/proj", model="custom-model", effort="high")
+    adapter.attach("sess", client, "t", model="custom-model", effort="high", subscribed=True)
+    listener = asyncio.Queue()
+    adapter._sessions["sess"]["ouvintes"].append(listener)
+    operation = asyncio.create_task(adapter.set_service_tier("sess", tier))
+    try:
+        await asyncio.wait_for(requested.wait(), 1)
+        assert not operation.done()  # {} não confirma a aplicação.
+        await client._q.put({"method": "thread/settings/updated", "params": {
+            "threadId": "other", "threadSettings": {"serviceTier": tier}}})
+        await client._q.put({"method": "thread/settings/updated", "params": {
+            "threadId": "t", "threadSettings": {"model": "custom-model", "effort": "high"}}})
+        await asyncio.wait_for(listener.get(), 1)
+        assert not operation.done()
+        await client._q.put({"method": "thread/settings/updated", "params": {
+            "threadId": "t", "threadSettings": {"serviceTier": tier}}})
+        assert await asyncio.wait_for(operation, 1) == tier
+        event = await asyncio.wait_for(listener.get(), 1)
+        assert event.codex_service_tier == tier
+        assert adapter.current_model("sess") == {"model": "custom-model", "effort": "high", "service_tier": tier}
+        saved = codex_sessions.load("sess")
+        assert (saved["service_tier"], saved["model"], saved["effort"]) == (tier, "custom-model", "high")
+        assert [call for call in client.requests if call[0] == "thread/settings/update"] == [
+            ("thread/settings/update", {"threadId": "t", "serviceTier": tier})]
+        assert client.aberturas == 1
+    finally:
+        operation.cancel()
+        await asyncio.gather(operation, return_exceptions=True)
+        await client._q.put(None)
+        await adapter._sessions["sess"]["bomba"]
+
+
+@pytest.mark.parametrize("failure", ["rpc", "timeout", "refused", "replaced"])
+async def test_service_tier_unconfirmed_or_refused_never_reports_success(failure):
+    adapter = CodexAdapter()
+    adapter.SERVICE_TIER_TIMEOUT = 0.02
+    client = _LiveQueueClient()
+    original = client.request
+
+    async def request(method, params, timeout=30.0):
+        result = await original(method, params, timeout)
+        if method == "thread/settings/update":
+            if failure == "rpc":
+                raise RuntimeError("refused")
+            if failure == "refused":
+                await client._q.put({"method": "thread/settings/updated", "params": {
+                    "threadId": "t", "threadSettings": {"serviceTier": "priority"}}})
+            if failure == "replaced":
+                codex_sessions.update("sess", thread_id="new-thread")
+                await client._q.put({"method": "thread/settings/updated", "params": {
+                    "threadId": "t", "threadSettings": {"serviceTier": "default"}}})
+        return result
+
+    client.request = request
+    codex_sessions.save("sess", "t", "/rollout.jsonl", "/tmp/proj")
+    adapter.attach("sess", client, "t", subscribed=True)
+    try:
+        with pytest.raises(RuntimeError):
+            await adapter.set_service_tier("sess", "default")
+        assert adapter._sessions["sess"].get("service_tier_waiter") is None
+        assert codex_sessions.load("sess").get("service_tier") != "default"
+    finally:
+        await client._q.put(None)
+        await adapter._sessions["sess"]["bomba"]
+
+
+@pytest.mark.parametrize("blocked", ["startup", "lock"])
+async def test_service_tier_deadline_includes_startup_and_lifecycle_lock(monkeypatch, blocked):
+    adapter = CodexAdapter()
+    adapter.SERVICE_TIER_TIMEOUT = 0.01
+    client = _LiveQueueClient()
+    lock = asyncio.Lock()
+    adapter._locks["sess"] = lock
+    adapter._sessions["sess"] = {"client": client, "thread_id": "t"}
+    monkeypatch.setattr(codex_sessions, "load", lambda _name: None)
+
+    async def ensure_running(_name):
+        if blocked == "startup":
+            await asyncio.Event().wait()
+        return client
+
+    monkeypatch.setattr(adapter, "ensure_running", ensure_running)
+    if blocked == "lock":
+        await lock.acquire()
+    try:
+        with pytest.raises(RuntimeError, match="prazo"):
+            await asyncio.wait_for(adapter.set_service_tier("sess", "default"), 0.2)
+        assert not client.requests
+    finally:
+        if lock.locked():
+            lock.release()
+
+
+async def test_priority_refuses_model_changed_while_catalog_was_loading():
+    adapter = CodexAdapter()
+    client = _LiveQueueClient()
+    adapter.attach("sess", client, "t", model="supported", subscribed=True)
+
+    async def request(method, params, timeout=30.0):
+        if method == "thread/read":
+            return {"thread": {"model": "supported"}}
+        if method == "model/list":
+            adapter._sessions["sess"]["model"] = "unsupported"
+            return {"data": [{"model": "supported", "serviceTiers": [{"id": "priority"}]}]}
+        pytest.fail("alteração enviada para modelo sem suporte")
+
+    client.request = request
+    try:
+        with pytest.raises(RuntimeError):
+            await adapter.set_service_tier("sess", "priority")
+    finally:
+        await client._q.put(None)
+        await adapter._sessions["sess"]["bomba"]
+
+
+async def test_priority_uses_live_catalog_and_default_can_disable_unsupported_model():
+    adapter = CodexAdapter()
+    client = _LiveQueueClient()
+    advertised = []
+    effective = None
+    original = client.request
+
+    async def request(method, params, timeout=30.0):
+        nonlocal effective
+        result = await original(method, params, timeout)
+        if method == "thread/read":
+            return {"thread": {"model": "custom", "reasoningEffort": "high"}}
+        if method == "model/list":
+            return {"data": [{"model": "custom", "serviceTiers": list(advertised)}]}
+        if method == "thread/settings/update":
+            effective = params["serviceTier"]
+            await client._q.put({"method": "thread/settings/updated", "params": {
+                "threadId": "t", "threadSettings": {"serviceTier": effective}}})
+        if method == "thread/resume":
+            return {"thread": {"id": "t"}, "serviceTier": effective}
+        return result
+
+    client.request = request
+    adapter.attach("sess", client, "t", model="custom", subscribed=True)
+    try:
+        with pytest.raises(RuntimeError):
+            await adapter.set_service_tier("sess", "priority")
+        assert not any(method == "thread/settings/update" for method, _ in client.requests)
+        advertised.append({"id": "priority", "name": "Fast"})
+        assert await adapter.set_service_tier("sess", "priority") == "priority"
+        advertised.clear()
+        assert await adapter.set_service_tier("sess", "default") == "default"
+    finally:
+        await client._q.put(None)
+        await adapter._sessions["sess"]["bomba"]
+
+
+async def test_subscription_old_snapshot_does_not_overwrite_new_service_tier():
+    adapter = CodexAdapter()
+    client = _LiveQueueClient()
+    codex_sessions.save("sess", "t", "/rollout.jsonl", "/tmp/proj")
+    adapter.attach("sess", client, "t", model="old")
+    listener = asyncio.Queue()
+    sess = adapter._sessions["sess"]
+    sess["ouvintes"].append(listener)
+
+    async def request(method, params, timeout=30.0):
+        assert method == "thread/resume"
+        assert "serviceTier" not in params and "model" not in params and "effort" not in params
+        await client._q.put({"method": "thread/settings/updated", "params": {
+            "threadId": "t", "threadSettings": {"model": "new", "effort": "high", "serviceTier": "priority"}}})
+        await listener.get()
+        return {"thread": {"id": "t"}, "model": "old", "reasoningEffort": "low", "serviceTier": "default"}
+
+    client.request = request
+    try:
+        await adapter._subscribe_when_ready("sess", "/tmp/proj")
+        assert adapter.current_model("sess") == {"model": "new", "effort": "high", "service_tier": "priority"}
+        assert codex_sessions.load("sess")["service_tier"] == "priority"
+    finally:
+        await client._q.put(None)
+        await sess["bomba"]
+
+
+async def test_subscription_recovers_external_service_tier_and_persists_it():
+    adapter = CodexAdapter()
+    client = _LiveQueueClient()
+    codex_sessions.save("sess", "t", "/rollout.jsonl", "/tmp/proj", service_tier="default")
+    adapter.attach("sess", client, "t")
+
+    async def request(method, params, timeout=30.0):
+        return {"thread": {"id": "t", "serviceTier": "default"}, "serviceTier": "priority"}
+
+    client.request = request
+    try:
+        await adapter._subscribe_when_ready("sess", "/tmp/proj")
+        assert adapter.current_model("sess")["service_tier"] == "priority"
+        assert codex_sessions.load("sess")["service_tier"] == "priority"
+        assert (await adapter.read_settings("sess"))["service_tier"] == "priority"
+    finally:
+        await client._q.put(None)
+        await adapter._sessions["sess"]["bomba"]
+
+
+@pytest.mark.parametrize("before_ack", [False, True])
+async def test_service_tier_stale_candidates_need_effective_snapshot_and_capture_during_read(before_ack):
+    adapter = CodexAdapter()
+    client = _LiveQueueClient()
+    updated = asyncio.Event()
+    ack = asyncio.Event()
+    reading = asyncio.Event()
+    resume_reply = asyncio.get_running_loop().create_future()
+    snapshots = 0
+    adapter.attach("sess", client, "t", subscribed=True)
+    sess = adapter._sessions["sess"]
+    listener = asyncio.Queue()
+    sess["ouvintes"].append(listener)
+
+    async def request(method, params, timeout=30.0):
+        nonlocal snapshots
+        client.requests.append((method, params))
+        if method == "thread/settings/update":
+            updated.set()
+            await ack.wait()
+            return {}
+        assert method == "thread/resume" and params == {"threadId": "t"}
+        snapshots += 1
+        if snapshots == 1:
+            reading.set()
+            return await resume_reply
+        return {"thread": {"id": "t"}, "serviceTier": "default"}
+
+    async def notify(tier):
+        await client._q.put({"method": "thread/settings/updated", "params": {
+            "threadId": "t", "threadSettings": {"serviceTier": tier}}})
+        await asyncio.wait_for(listener.get(), 1)
+
+    client.request = request
+    operation = asyncio.create_task(adapter.set_service_tier("sess", "default"))
+    try:
+        await asyncio.wait_for(updated.wait(), 1)
+        await notify("priority")
+        assert not operation.done()
+        if before_ack:
+            await notify("default")
+            assert snapshots == 0
+        ack.set()
+        if not before_ack:
+            await notify("default")
+        await asyncio.wait_for(reading.wait(), 1)
+        assert not operation.done()
+        await notify("default")  # A próxima candidata não pode se perder durante a consulta.
+        resume_reply.set_result({"thread": {"id": "t"}, "serviceTier": "priority"})
+        assert await asyncio.wait_for(operation, 1) == "default"
+        assert snapshots == 2
+        assert len([call for call in client.requests if call[0] == "thread/settings/update"]) == 1
+    finally:
+        operation.cancel()
+        await asyncio.gather(operation, return_exceptions=True)
+        await client._q.put(None)
+        await sess["bomba"]
+
+
+async def test_service_tier_null_means_default_in_notification_and_resume():
+    adapter = CodexAdapter()
+    client = _LiveQueueClient()
+    adapter.attach("sess", client, "t", subscribed=True)
+
+    async def request(method, params, timeout=30.0):
+        if method == "thread/settings/update":
+            await client._q.put({"method": "thread/settings/updated", "params": {
+                "threadId": "t", "threadSettings": {"serviceTier": None}}})
+            return {}
+        assert method == "thread/resume"
+        return {"thread": {"id": "t"}, "serviceTier": None}
+
+    client.request = request
+    try:
+        assert await adapter.set_service_tier("sess", "default") == "default"
+        assert adapter.current_model("sess")["service_tier"] == "default"
+    finally:
+        await client._q.put(None)
+        await adapter._sessions["sess"]["bomba"]
 
 
 async def test_bomba_continua_consumindo_sem_sse_aberto():

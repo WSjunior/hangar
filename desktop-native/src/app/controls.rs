@@ -1,6 +1,7 @@
 //! Controles da sessão no compositor (modelo, esforço, modo, permissão) e os pedidos de plano que
 //! mudam o modo. Catálogo vem das rotas de cada provider no gesto; nada é lido do terminal ao montar.
 use super::*;
+use gpui_kit::component::switch::Switch;
 
 const CLAUDE_EFFORTS: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultracode"];
 const CLAUDE_MODES: [&str; 6] = ["plan", "auto", "manual", "acceptEdits", "bypassPermissions", "dontAsk"];
@@ -8,11 +9,11 @@ const CLAUDE_MODES: [&str; 6] = ["plan", "auto", "manual", "acceptEdits", "bypas
 const LONG_LIST: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(super) enum Ctl { Model, Effort, Mode, Permission }
+pub(super) enum Ctl { Model, Effort, Fast, Mode, Permission }
 
 impl Ctl {
     fn key(self) -> &'static str {
-        match self { Ctl::Model => "model", Ctl::Effort => "effort", Ctl::Mode => "mode", Ctl::Permission => "permission" }
+        match self { Ctl::Model => "model", Ctl::Effort => "effort", Ctl::Fast => "fast", Ctl::Mode => "mode", Ctl::Permission => "permission" }
     }
 }
 
@@ -71,6 +72,8 @@ impl Controls {
 fn shown(ctl: Ctl, value: String) -> String {
     match ctl {
         Ctl::Effort => effort_label(&value),
+        Ctl::Fast if value == "priority" => tr("ctl_fast_on"),
+        Ctl::Fast if value == "default" => tr("ctl_fast_off"),
         Ctl::Mode if CLAUDE_MODES.contains(&value.as_str()) => tr(&format!("mode_{value}")),
         Ctl::Mode if value == "default" => tr("codex_mode_default"),
         _ => value,
@@ -105,6 +108,18 @@ fn spaced(label: &str) -> String {
 }
 
 fn text(value: &Value, key: &str) -> String { value.get(key).and_then(Value::as_str).unwrap_or("").to_owned() }
+
+fn codex_fast_state(catalog: &Value, live: Option<&str>) -> (bool, bool) {
+    let tier = live.or_else(|| catalog.pointer("/current/service_tier").and_then(Value::as_str));
+    let on = tier == Some("priority");
+    let model = catalog.pointer("/current/model").and_then(Value::as_str);
+    let supported = catalog.get("models").and_then(Value::as_array).is_some_and(|models| models.iter()
+        .find(|m| model.is_some() && m.get("model").and_then(Value::as_str) == model)
+        .and_then(|m| m.get("serviceTiers")).and_then(Value::as_array)
+        .is_some_and(|tiers| tiers.iter().any(|t| t.get("id").and_then(Value::as_str) == Some("priority")
+            && t.get("hidden").and_then(Value::as_bool) != Some(true))));
+    (on, on || (tier == Some("default") && supported))
+}
 
 // A única linha com o nome exato; nome repetido entre providers não diz qual é a atual.
 fn only_match(names: &[String], current: &str) -> Option<usize> {
@@ -213,6 +228,8 @@ impl Hangar {
         let from_status = match ctl {
             Ctl::Model => status.as_ref().and_then(|s| s.model.clone()),
             Ctl::Effort => status.as_ref().and_then(|s| s.effort.clone()),
+            Ctl::Fast => self.chat.state.codex_service_tier.clone()
+                .or_else(|| self.selected.as_ref().and_then(|s| s.codex_service_tier.clone())),
             Ctl::Mode if self.provider().0 == "codex" => self.chat.state.codex_mode.clone(),
             Ctl::Mode => self.chat.state.claude_permission_mode.clone()
                 .or_else(|| self.controls.known.get(&(key.clone(), ctl)).map(|v| text(v, "current")).filter(|s| !s.is_empty())),
@@ -463,11 +480,13 @@ impl Hangar {
                             Ctl::Mode => Some(text(&value, "mode")).filter(|m| !m.is_empty()).or_else(|| Some(text(&value, "current")).filter(|m| !m.is_empty())).unwrap_or(label),
                             Ctl::Permission => Some(text(&value, "current")).filter(|m| !m.is_empty()).unwrap_or(label),
                             Ctl::Effort => value.get("thinking").or_else(|| value.get("effort")).and_then(Value::as_str).map(str::to_owned).unwrap_or(label),
+                            Ctl::Fast => value.get("service_tier").and_then(Value::as_str).map(str::to_owned).unwrap_or(label),
                             Ctl::Model => value.pointer("/current/name").or_else(|| value.get("model")).and_then(Value::as_str).map(str::to_owned).unwrap_or(label),
                         };
                         let pending = value.get("pending_confirm").is_some_and(|v| !v.is_null());
                         let partial = value.get("effort_error").is_some_and(|v| !v.is_null());
-                        if !pending && !matches!(ctl, Ctl::Mode) {
+                        // Fast confirmado já chegou pelo estado ao vivo; guardar o rótulo deixaria um valor velho vencer o SSE.
+                        if !pending && !matches!(ctl, Ctl::Mode | Ctl::Fast) {
                             self.controls.applied.insert((key.clone(), ctl), (label.clone(), before));
                         }
                         if matches!(ctl, Ctl::Mode | Ctl::Permission) {
@@ -534,15 +553,17 @@ impl Hangar {
             let value = self.ctl_label(ctl).map(|v| shown(ctl, v)).map(|v| if claude && ctl == Ctl::Model { spaced(&v) } else { v });
             if paired && ctl == Ctl::Model {
                 let effort = self.ctl_label(Ctl::Effort).map(|e| effort_label(&e));
-                let applying = match busy { Some(Ctl::Model) => Some(name.clone()), Some(Ctl::Effort) => Some(tr("ctl_effort")), _ => None };
+                let fast = self.provider().0 == "codex" && self.ctl_label(Ctl::Fast).as_deref() == Some("priority");
+                let applying = match busy { Some(Ctl::Model) => Some(name.clone()), Some(Ctl::Effort) => Some(tr("ctl_effort")), Some(Ctl::Fast) => Some(tr("ctl_fast")), _ => None };
                 let text = applying.map(|what| tr("ctl_applying").replace("{what}", &what)).or(value.clone()).unwrap_or_else(|| name.clone());
-                let aria = [Some(format!("{name}: {text}")), effort.clone().map(|e| format!("{}: {e}", tr("ctl_effort")))]
+                let aria = [Some(format!("{name}: {text}")), effort.clone().map(|e| format!("{}: {e}", tr("ctl_effort"))), fast.then(|| tr("ctl_fast"))]
                     .into_iter().flatten().collect::<Vec<_>>().join(" · ");
                 let id = SharedString::from(format!("ctl-{}", ctl.key()));
                 pills.push(popup::anchor(div(), id.clone()).child(chrome::pill_button(id, cx).gap(px(6.)).selected(open == Some(ctl)).disabled(!self.chat_online)
                     .tooltip(format!("{name} · {}", tr("ctl_effort"))).accessibility_label(aria)
                     .child(div().max_w(px(150.)).truncate().text_xs().font_weight(FontWeight::SEMIBOLD).child(text))
                     .when_some(effort.filter(|_| busy.is_none()), |el, effort| el.child(div().flex_shrink_0().text_xs().text_color(theme::muted()).child(effort)))
+                    .when(fast && busy.is_none(), |el| el.child(div().id("ctl-fast-active").flex_shrink_0().text_xs().text_color(theme::muted()).child(tr("ctl_fast"))))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_ctl(ctl, false, cx);
                         this.focus_ctl_panel(window, cx);
@@ -578,7 +599,7 @@ impl Hangar {
     fn focus_ctl_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.controls_open() { return; }
         if self.controls.focus.is_none() {
-            let handle = cx.focus_handle();
+            let handle = cx.focus_handle().tab_stop(true);
             let out = cx.on_focus_out(&handle, window, |this, _, window, cx| {
                 // O painel saiu da árvore com o foco (clique fora, troca de sessão, sessão ilegível): o foco volta à raiz.
                 let search = this.ctl_search.read(cx).focus_handle(cx);
@@ -688,6 +709,24 @@ impl Hangar {
             .into_any_element())
     }
 
+    fn render_fast_footer(&self, catalog: &Value, busy: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.provider().0 != "codex" { return None; }
+        let live = self.ctl_label(Ctl::Fast);
+        let (on, available) = codex_fast_state(catalog, live.as_deref());
+        Some(div().flex().items_center().gap_2().px_2().py_1()
+            .child(div().flex_1().min_w_0().flex().flex_col().gap_1()
+                .child(div().text_sm().child(tr("ctl_fast")))
+                .child(div().text_xs().text_color(theme::muted()).whitespace_normal()
+                    .child(tr(if available { "ctl_fast_hint" } else { "ctl_fast_unavailable" }))))
+            .child(Switch::new("ctl-fast").small().checked(on).accessibility_label(tr("ctl_fast"))
+                .disabled(busy || !self.chat_online || !available)
+                .on_change(cx.listener(|this, on: &bool, _, cx| {
+                    let tier = if *on { "priority" } else { "default" };
+                    this.apply_ctl(Ctl::Fast, vec!["service-tier"], json!({"service_tier": tier}), tier.into(), cx);
+                })))
+            .into_any_element())
+    }
+
     pub(super) fn render_ctl_panel(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let key = self.selected_key()?;
         let open = self.controls.open.as_ref().filter(|o| o.key == key)?;
@@ -760,6 +799,7 @@ impl Hangar {
                     .children(search)
                     .child(list)
                     .children(effort)
+                    .children((ctl == Ctl::Model).then(|| self.render_fast_footer(catalog, busy, cx)).flatten())
                     .when(ctl == Ctl::Effort, |el| el.child(popup::separator())
                         .child(div().px(px(8.)).pt(px(4.)).pb(px(2.)).text_xs().text_color(theme::muted()).child(tr("effort_hint"))))
                     .when_some(probe_note.filter(|_| needs_probe), |el, note| el.child(div().px(px(8.)).flex().items_center().gap_2()
@@ -773,6 +813,9 @@ impl Hangar {
             }
         };
         let keys = cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            let list_focused = this.controls.focus.as_ref().is_some_and(|(focus, _)| focus.is_focused(window))
+                || this.ctl_search.read(cx).focus_handle(cx).is_focused(window);
+            if !list_focused { return; }
             match event.keystroke.key.as_str() {
                 "up" => this.move_ctl(-1, false, cx),
                 "down" => this.move_ctl(1, false, cx),
@@ -1014,7 +1057,38 @@ impl Hangar {
 #[cfg(test)]
 mod tests {
     // Sem glob: o `test` da gpui colide com o atributo padrão.
-    use super::{Choice, claude_effort_current, claude_model_current, keep, only_match, spaced, step_free};
+    use super::{Choice, claude_effort_current, claude_model_current, codex_fast_state, keep, only_match, spaced, step_free};
+
+    #[test]
+    fn codex_fast_uses_the_selected_models_catalog_and_confirmed_tier() {
+        let mut catalog = serde_json::json!({
+            "current": {"model": "gpt-supported", "service_tier": "default"},
+            "models": [
+                {"model": "gpt-supported", "serviceTiers": [{"id": "priority", "name": "Fast"}]},
+                {"model": "gpt-standard", "serviceTiers": []}
+            ]
+        });
+        assert_eq!(codex_fast_state(&catalog, None), (false, true));
+        assert_eq!(codex_fast_state(&catalog, Some("priority")), (true, true));
+        catalog["current"]["model"] = serde_json::json!("gpt-standard");
+        assert_eq!(codex_fast_state(&catalog, None), (false, false));
+        assert_eq!(codex_fast_state(&catalog, Some("priority")), (true, true));
+        catalog["current"]["service_tier"] = serde_json::json!("priority");
+        assert_eq!(codex_fast_state(&catalog, Some("default")), (false, false));
+    }
+
+    #[test]
+    fn codex_fast_stays_disabled_until_the_current_tier_is_known() {
+        let catalog = serde_json::json!({
+            "current": {"model": "gpt-supported"},
+            "models": [{"model": "gpt-supported", "serviceTiers": [{"id": "priority"}]}]
+        });
+        assert_eq!(codex_fast_state(&catalog, None), (false, false));
+        assert_eq!(codex_fast_state(&catalog, Some("default")), (false, true));
+        assert_eq!(codex_fast_state(&serde_json::json!({}), Some("priority")), (true, true));
+        let hidden = serde_json::json!({"current": {"model": "m"}, "models": [{"model": "m", "serviceTiers": [{"id": "priority", "hidden": true}]}]});
+        assert_eq!(codex_fast_state(&hidden, Some("default")), (false, false));
+    }
 
     #[test]
     fn claude_model_label_gets_its_spaces_back() {

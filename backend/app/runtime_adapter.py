@@ -426,6 +426,7 @@ class LegacyBridge:
         elif kind == "control":
             control_kind, payload, entry_id = command["control"], command.get("payload") or {}, None
             method = {"answer_questions":"answer_questions", "set_model":"set_model", "set_effort":"set_model",
+                "set_service_tier":"set_service_tier",
                 "set_permission_mode":"set_permission_mode", "list_models":"list_models", "list_skills":"list_skills",
                 "read_rate_limits":"read_rate_limits", "read_settings":"read_settings", "interrupt":"interrupt",
                 "select":"select", "compact":"compact", "skip_question":"skip_question", "set_mode":"set_mode"}.get(control_kind)
@@ -456,6 +457,8 @@ class LegacyBridge:
             if provider == "codex" and control_kind == "set_permission_mode":
                 arguments["modo"] = payload["mode"]
             result = await original(adapter, name, **arguments)
+            if method == "set_service_tier":
+                result = {"service_tier": result}
             await io.finish_call(name, context, deferred=result == "deferred")
             disposition = "deferred" if result == "deferred" else "accepted"
             reply = {"operation_id":operation_id, "disposition":disposition,
@@ -751,7 +754,8 @@ class RuntimeAdapter:
 
     def current_model(self, name):
         data = self.view(name).data
-        return {"model":data.get("model"), "effort":data.get("effort")}
+        return {"model":data.get("model"), "effort":data.get("effort"),
+            **({"service_tier":data.get("service_tier")} if self.provider == "codex" else {})}
 
     def escolhas(self, name):
         data = self.current_model(name)
@@ -851,6 +855,11 @@ class RuntimeAdapter:
         if method == "set_model":
             result = await self.control(name, "set_model", {"model":arguments.get("model"), "effort":arguments.get("effort")}, allow_deferred=self.provider == "claude")
             return not (isinstance(result, dict) and result.get("_runtime_deferred")) if self.provider == "claude" else None
+        if method == "set_service_tier":
+            result = await self.control(name, "set_service_tier", {"service_tier":arguments["service_tier"]})
+            if not isinstance(result, dict) or result.get("service_tier") != arguments["service_tier"]:
+                raise RuntimeError("O Codex não confirmou a escolha Fast")
+            return result["service_tier"]
         if method == "set_permission_mode" and self.provider == "claude":
             await self.control(name, "set_permission_mode", {"mode":arguments["mode"]})
             return "manual" if arguments["mode"] == "default" else arguments["mode"]
@@ -1062,7 +1071,7 @@ async def owner_state_stream(legacy, native, name):
                 await source.aclose()
 
 _ASYNC = {"ensure_running", "send_prompt", "deliverable", "drain", "steer", "steer_queue", "interrupt", "select",
-    "answer_questions", "set_model", "set_permission_mode", "list_models", "read_settings", "read_rate_limits", "set_mode",
+    "answer_questions", "set_model", "set_service_tier", "set_permission_mode", "list_models", "read_settings", "read_rate_limits", "set_mode",
     "compact", "list_skills", "skip_question", "parar", "recarregar", "restart", "open_terminal", "open_headless", "set_permission_mode_sem_terminal"}
 _SYNC = {"snapshot", "escolhas", "comandos", "problema_de", "current_model", "aprovacao_pendente", "permission_modes_sem_terminal", "rename", "close_sync"}
 

@@ -1664,6 +1664,7 @@ class CreateBody(_StrictBody):
     # aqui, nunca no front: o valor entra num comando de shell.
     model: str | None = None
     effort: str | None = None
+    service_tier: Literal["default", "priority"] | None = None
     # Modo de permissão do Claude Code. None = padrão da conta (comportamento de hoje).
     permission_mode: str | None = None
     # CLAUDE_CODE_SUBAGENT_MODEL. Só claude sem motor: o motor exporta o dele e ganharia calado.
@@ -2229,6 +2230,8 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
     # ser rejeitado aqui não pode ter reconciliado a conta (deriva movida, memória criada) à toa.
     if body.provider not in ("claude", "codex", "pi", "kimi", "omp"):
         raise HTTPException(400, detail=erro("erro_provider_sessao_invalido", "provider invalido"))
+    if body.service_tier is not None and body.provider != "codex":
+        raise HTTPException(400, detail=erro("erro_criacao_sessao", "service_tier só vale para provider codex"))
     # Antes de qualquer efeito (worktree, registry.create): convidado só abre dentro da pasta dele.
     guest = guest_users.current.get()
     if guest is not None and not guest_users.inside_root(guest, body.cwd):
@@ -2312,15 +2315,20 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
     # O nível do Codex não tem lista fechada em model_args (varia POR MODELO), então quem cruza
     # modelo×nível é o catálogo. Sem isto, `--effort ultra` num `gpt-5.5` sobe a sessão e o binário
     # descarta o nível calado — sucesso reportado sobre escolha que não valeu.
-    if body.provider == "codex" and (body.model or body.effort):
+    if body.provider == "codex" and (body.model or body.effort or body.service_tier is not None):
         try:
             checar_kw = ({"codex_home": codex_account_obj.home}
                          if body.codex_account is not None else {})
+            if body.service_tier is not None:
+                checar_kw["service_tier"] = body.service_tier
             await asyncio.to_thread(codex_models.checar_escolha, body.model, body.effort,
                                     **checar_kw)
         except ValueError as e:
             raise HTTPException(422, detail=erro("erro_codex_escolha_invalida", str(e), erro=str(e))) from None
         except codex_models.CodexIndisponivel as e:
+            if body.service_tier == "priority":
+                raise HTTPException(502, detail=erro("erro_codex_catalogo_invalido",
+                                                     f"Fast não pôde ser conferido: {e}", erro=str(e))) from None
             # Catálogo fora do ar (ou `codex` ausente — o CodexAusente é um RuntimeError) não pode
             # IMPEDIR de abrir sessão: mesma decisão da janela do motor, logo abaixo. A escolha
             # segue pro comando e o CLI decide. A falha não some — fica no log.
@@ -2505,6 +2513,8 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
             _kw2["omp_profile"] = body.omp_profile
         if body.codex_account is not None:
             _kw2["codex_account"] = body.codex_account
+        if body.service_tier is not None:
+            _kw2["service_tier"] = body.service_tier
         if body.read_only:
             _kw2["read_only"] = True
         if body.headless:
@@ -5961,6 +5971,21 @@ async def set_codex_model(name: str, body: CodexModelBody):
     except RuntimeError:
         raise HTTPException(409, detail=erro("erro_codex_controle", "O Codex não aceitou a alteração; atualize a sessão e tente novamente.")) from None
     return {"ok": True}
+
+
+class CodexServiceTierBody(_StrictBody):
+    service_tier: Literal["default", "priority"]
+
+
+@app.post("/api/sessions/{name}/service-tier", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
+async def set_codex_service_tier(name: str, body: CodexServiceTierBody):
+    if _provider_of(name) != "codex":
+        raise HTTPException(400, detail=erro("erro_models_so_codex", "Somente sessões Codex."))
+    try:
+        tier = await get_adapter("codex").set_service_tier(name, body.service_tier)
+    except (RuntimeError, ValueError, TimeoutError):
+        raise HTTPException(409, detail=erro("erro_codex_controle", "O Codex não aceitou a alteração; atualize a sessão e tente novamente.")) from None
+    return {"ok": True, "service_tier": tier}
 
 
 class CodexPermissionBody(_StrictBody):

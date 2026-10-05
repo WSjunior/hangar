@@ -371,7 +371,7 @@ def _list_sig(infos) -> str:
            else bool(getattr(i, "label", None))),
           getattr(i, "startup_steps", []),
           getattr(i, "loop_status", None), getattr(i, "loop_iter", None),
-          getattr(i, "engine", None), getattr(i, "conta", None),
+          getattr(i, "engine", None), getattr(i, "conta", None), getattr(i, "codex_service_tier", None),
           getattr(i, "plan_name", None), getattr(i, "plan_done", None),
           getattr(i, "plan_total", None),
           getattr(i, "plan_task", None), getattr(i, "plan_task_total", None),

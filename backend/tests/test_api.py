@@ -627,15 +627,18 @@ def test_codex_models_returns_list_and_current(api_client):
     fake.list_models = AsyncMock(return_value=[{
         "model": "gpt-5-codex", "displayName": "GPT-5 Codex", "description": "padrao",
         "efforts": [{"value": "high", "description": "mais capaz"}], "defaultEffort": "medium",
+        "serviceTiers": [{"id": "priority", "name": "Fast"}], "defaultServiceTier": "priority",
     }])
-    fake.read_settings = AsyncMock(return_value={"model": "gpt-5-codex", "effort": "high"})
+    fake.read_settings = AsyncMock(return_value={"model": "gpt-5-codex", "effort": "high", "service_tier": "default"})
     with patch("app.api._provider_of", return_value="codex"), \
          patch("app.api.get_adapter", return_value=fake):
         r = api_client.get("/api/sessions/cx/models", headers=_h())
     assert r.status_code == 200
     body = r.json()
     assert body["models"][0]["model"] == "gpt-5-codex"
-    assert body["current"] == {"model": "gpt-5-codex", "effort": "high"}
+    assert body["models"][0]["serviceTiers"] == [{"id": "priority", "name": "Fast"}]
+    assert body["models"][0]["defaultServiceTier"] == "priority"
+    assert body["current"] == {"model": "gpt-5-codex", "effort": "high", "service_tier": "default"}
     fake.list_models.assert_awaited_once_with("cx")
     fake.read_settings.assert_awaited_once_with("cx")
 
@@ -705,6 +708,53 @@ def test_set_codex_model_claude_rejected_with_400(api_client):
         r = api_client.post("/api/sessions/cc/model", json={"model": "opus"}, headers=_h())
     assert r.status_code == 400
     fake.set_model.assert_not_awaited()
+
+
+@pytest.mark.parametrize("tier", ["priority", "default"])
+def test_codex_service_tier_returns_confirmed_value(api_client, tier):
+    fake = _fake_codex_adapter()
+    fake.set_service_tier = AsyncMock(return_value=tier)
+    with patch("app.api._provider_of", return_value="codex"), patch("app.api.get_adapter", return_value=fake):
+        response = api_client.post("/api/sessions/cx/service-tier", headers=_h(), json={"service_tier": tier})
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "service_tier": tier}
+    fake.set_service_tier.assert_awaited_once_with("cx", tier)
+
+
+@pytest.mark.parametrize("body", [{}, {"service_tier": None}, {"service_tier": "fast"},
+                                  {"service_tier": "priority", "model": "other"}])
+def test_codex_service_tier_body_is_strict(api_client, body):
+    assert api_client.post("/api/sessions/cx/service-tier", headers=_h(), json=body).status_code == 422
+
+
+def test_codex_service_tier_requires_auth_and_codex(api_client):
+    fake = _fake_codex_adapter()
+    fake.set_service_tier = AsyncMock()
+    with patch("app.api._provider_of", return_value="claude"), patch("app.api.get_adapter", return_value=fake):
+        assert api_client.post("/api/sessions/cc/service-tier", json={"service_tier": "priority"}).status_code == 401
+        assert api_client.post("/api/sessions/cc/service-tier", headers=_h(), json={"service_tier": "priority"}).status_code == 400
+    fake.set_service_tier.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failure", [RuntimeError("refused"), TimeoutError("unconfirmed")])
+def test_codex_service_tier_failure_is_not_success(api_client, failure):
+    fake = _fake_codex_adapter()
+    fake.set_service_tier = AsyncMock(side_effect=failure)
+    with patch("app.api._provider_of", return_value="codex"), patch("app.api.get_adapter", return_value=fake):
+        response = api_client.post("/api/sessions/cx/service-tier", headers=_h(), json={"service_tier": "priority"})
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "erro_codex_controle"
+
+
+def test_codex_service_tier_respects_transfer_guard(api_client):
+    from app import conversation_transfer as transfers
+    fake = _fake_codex_adapter()
+    fake.set_service_tier = AsyncMock()
+    with patch.object(transfers, "require_available", side_effect=transfers.TransferError("session_transfer_busy")), \
+         patch("app.api.get_adapter", return_value=fake):
+        response = api_client.post("/api/sessions/cx/service-tier", headers=_h(), json={"service_tier": "priority"})
+    assert response.status_code == 409
+    fake.set_service_tier.assert_not_awaited()
 
 
 def test_select_route(api_client):
@@ -1005,6 +1055,75 @@ def test_create_codex_forwards_wrapper_initial_prompt(api_client):
         })
     assert r.status_code == 200
     assert cr.call_args.kwargs["initial_prompt"] == "revise este projeto"
+
+
+@pytest.mark.parametrize("tier", ["fast", "", True, 1, ["priority"]])
+def test_create_rejects_invalid_service_tier(api_client, tier):
+    with patch("app.api.registry.create") as create:
+        response = api_client.post("/api/sessions", headers=_h(), json={
+            "name": "cx", "cwd": "/tmp", "provider": "codex", "service_tier": tier})
+    assert response.status_code == 422
+    create.assert_not_called()
+
+
+@pytest.mark.parametrize("provider", ["claude", "pi", "kimi", "omp"])
+def test_create_service_tier_only_accepts_codex(api_client, provider):
+    with patch("app.api.registry.create") as create:
+        response = api_client.post("/api/sessions", headers=_h(), json={
+            "name": "cx", "cwd": "/tmp", "provider": provider, "service_tier": "default"})
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "erro_criacao_sessao"
+    create.assert_not_called()
+
+
+@pytest.mark.parametrize("tier", ["priority", "default"])
+@pytest.mark.parametrize("headless", [False, True])
+def test_create_forwards_service_tier_before_codex_warmup(api_client, tier, headless):
+    from unittest.mock import AsyncMock
+    account = codex_contas.Account("work", Path("/tmp/codex-work"), False)
+    info = SessionInfo(name="cx", cwd="/tmp", provider="codex", headless=headless)
+    with patch("app.api._resolve_codex_account", return_value=account), \
+         patch("app.api._codex_require_idle_preparation"), \
+         patch("app.api._codex_service", return_value=None), \
+         patch("app.api.codex_models.checar_escolha") as check, \
+         patch("app.api.registry.create", return_value=info) as create, \
+         patch("app.api._aquecer_codex_sem_terminal", new_callable=AsyncMock) as warm:
+        # Sem codex_account: os clientes antigos continuam sem keyword codex_home.
+        response = api_client.post("/api/sessions", headers=_h(), json={
+            "name": "cx", "cwd": "/tmp", "provider": "codex", "headless": headless,
+            "model": "native-model", "service_tier": tier})
+    assert response.status_code == 200
+    check.assert_called_once_with("native-model", None, service_tier=tier)
+    assert create.call_args.kwargs["service_tier"] == tier
+    if not headless:
+        warm.assert_not_called()
+
+
+@pytest.mark.parametrize("tier,status", [("priority", 502), ("default", 200), (None, 200)])
+def test_create_priority_cannot_skip_unavailable_catalog(api_client, tier, status):
+    body = {"name": "cx", "cwd": "/tmp", "provider": "codex", "headless": False, "model": "native-model"}
+    if tier is not None:
+        body["service_tier"] = tier
+    with patch("app.api.codex_models.checar_escolha", side_effect=api_mod.codex_models.CodexIndisponivel("offline")), \
+         patch("app.api.registry.create", return_value=SessionInfo(name="cx", provider="codex")) as create:
+        response = api_client.post("/api/sessions", headers=_h(), json=body)
+    assert response.status_code == status
+    assert create.called == (status == 200)
+    if status == 502:
+        assert response.json()["detail"]["code"] == "erro_codex_catalogo_invalido"
+    elif tier is None:
+        assert "service_tier" not in create.call_args.kwargs
+
+
+def test_create_priority_without_announced_service_is_rejected(api_client, monkeypatch):
+    monkeypatch.setattr(api_mod.codex_models, "listar", lambda: [{
+        "id": "native-model", "efforts": [], "service_tiers": [], "additional_speed_tiers": ["fast"]}])
+    with patch("app.api.registry.create") as create:
+        response = api_client.post("/api/sessions", headers=_h(), json={
+            "name": "cx", "cwd": "/tmp", "provider": "codex", "model": "native-model", "service_tier": "priority"})
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "erro_codex_escolha_invalida"
+    create.assert_not_called()
 
 
 def test_create_pi_provider_routes_to_claude_create_with_provider(api_client):

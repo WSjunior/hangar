@@ -475,14 +475,24 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                     sequence += 1;
                     let phase_id = format!("policy:{}:{sequence}",target.generation);
                     let target = target.clone(); let policy = engine.policy.clone();
+                    let save = if kind == "session.patch_meta" && payload.get("service_tier").is_some() {
+                        state_version += 1;
+                        Some((state_version,engine.view()))
+                    } else { None };
+                    let queue = queue.clone(); let gate = state_gate.clone(); let sample = clock(start);
                     // Estes serviços não escrevem na CLI (formatar status, carimbo, sidecar, log): repetir é
                     // inofensivo, então não passam pelo diário. Quatro gravações por chamada, a cada mudança de
                     // estado, eram a maior parte do disco gasto por mensagem.
                     jobs.spawn(async move {
-                        let result = match policy {
-                            Some(policy) => policy.run(&target,&kind,&request_id,payload,&phase_id).await,
-                            None => Err(failure("policy_unavailable")),
-                        };
+                        let result = async {
+                            if let Some((version,view)) = save {
+                                save_view(&queue,target.generation,sample,&gate,version,&view,false).await?;
+                            }
+                            match policy {
+                                Some(policy) => policy.run(&target,&kind,&request_id,payload,&phase_id).await,
+                                None => Err(failure("policy_unavailable")),
+                            }
+                        }.await;
                         Job::Policy { request_id,kind,phase_id,result }
                     });
                 }

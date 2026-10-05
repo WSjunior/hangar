@@ -349,10 +349,10 @@ def build():
             # Duas perguntas assíncronas do Codex pendentes: a aba mostra "? 2".
             "info": info("p5-codex", "codex", branch="fix/cost", git_added=5, git_removed=2, git_dirty=1, limited=True, limit_reset="15:30",
                          pending_questions=2),
-            "state": state("idle", status_line="🤖 gpt-6-astra (high) │ 💬 ctx 41k/400k │ ⚡5h:98% ↺12m", codex_mode="default", limited=True, limit_reset="15:30"),
+            "state": state("idle", status_line="🤖 gpt-6-astra (high) │ 💬 ctx 41k/400k │ ⚡5h:98% ↺12m", codex_mode="default", codex_service_tier="default", limited=True, limit_reset="15:30"),
             "events": [msg("user_msg", "c1", "Quanto custou?"), msg("assistant_msg", "c2", "Veja o painel.")],
             "stats": {"turns": 1, "steps": 1, "in_tok": 41000, "out_tok": 700}, "permission": "Full Access",
-            "codex": {"model": "gpt-6-astra", "effort": "high", "mode": "default"},
+            "codex": {"model": "gpt-6-astra", "effort": "high", "mode": "default", "service_tier": "default"},
         },
         "p5-pre": {
             "info": info("p5-pre", "codex", jsonl=False, state="awaiting_input", question="Aprovar os hooks deste projeto?",
@@ -732,6 +732,17 @@ class Handler(BaseHTTPRequestHandler):
         parts = [unquote(p) for p in path.strip("/").split("/")]
         name = parts[2] if len(parts) > 2 else None
         action = "/".join(parts[3:])
+        if path == "/api/providers":
+            self.send_json({p: {"disponivel": True, "motivo": None} for p in ("claude", "codex", "pi", "kimi", "omp")})
+            return
+        if path == "/api/model-options" and query.get("provider", [""])[0] == "codex":
+            # Catálogo como o de criação: só o Astra anuncia o tier priority.
+            self.send_json({"kind": "codex", "reduced": False, "models": [
+                {"id": "gpt-6-astra", "name": "GPT-6-Astra", "desc": "", "efforts": ["low", "medium", "high"], "default_effort": "medium",
+                 "service_tiers": [{"id": "priority", "name": "Fast"}], "default_service_tier": None, "additional_speed_tiers": []},
+                {"id": "gpt-6-luna", "name": "GPT-6-Luna", "desc": "", "efforts": ["low", "medium"], "default_effort": "low",
+                 "service_tiers": [], "default_service_tier": None, "additional_speed_tiers": []}]})
+            return
         if path == "/api/sessions":
             with LOCK:
                 self.send_json([s["info"] for s in SESSIONS.values()])
@@ -799,6 +810,7 @@ class Handler(BaseHTTPRequestHandler):
             c = s["codex"]
             return self.send_json({"models": [
                 {"model": "gpt-6-astra", "displayName": "GPT-6 Astra", "description": "Padrão", "defaultEffort": "medium",
+                 "serviceTiers": [{"id": "priority", "name": "Fast"}], "defaultServiceTier": "default",
                  "efforts": [{"value": v, "description": ""} for v in ("low", "medium", "high")]},
                 {"model": "gpt-6-luna", "displayName": "GPT-6 Luna", "description": "Rápido", "defaultEffort": "low",
                  "efforts": [{"value": v, "description": ""} for v in ("low", "medium")]}], "current": dict(c)})
@@ -1164,6 +1176,13 @@ class Handler(BaseHTTPRequestHandler):
         if action == "model":
             s["codex"].update(model=body["model"], effort=body.get("effort", s["codex"]["effort"]))
             return 200, {"ok": True}
+        if action == "service-tier":
+            tier = body.get("service_tier")
+            if tier not in ("default", "priority") or (tier == "priority" and s["codex"]["model"] != "gpt-6-astra"):
+                return 409, fail("erro_codex_controle", "Fast indisponível")
+            s["codex"]["service_tier"] = st["codex_service_tier"] = tier
+            s["info"]["codex_service_tier"] = tier
+            return 200, {"ok": True, "service_tier": tier}
         if action == "codex/mode":
             s["codex"]["mode"] = body["mode"]
             st["codex_mode"] = body["mode"]

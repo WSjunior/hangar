@@ -314,6 +314,7 @@ def main() -> int:
     ap.add_argument("--model", default=None, help="modelo do Codex (vira `-m` na TUI)")
     ap.add_argument("--effort", default=None,
                     help="nivel de raciocinio; vira sobrescrita de config, nao flag")
+    ap.add_argument("--service-tier", choices=("default", "priority"), default=None, help=argparse.SUPPRESS)
     ap.add_argument("--codex-home", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--codex-account", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--approval-policy", choices=("never", "on-request"), default=None)
@@ -329,7 +330,8 @@ def main() -> int:
     _com_websockets()
     sys.path.insert(0, str(_REPO / "backend"))
     from app.adapters.codex import sessions as codex_sessions
-    from app.adapters.codex.lancador import APPROVAL, SANDBOX, PERMISSION_POLICIES, tool_output_override
+    from app.adapters.codex.lancador import (APPROVAL, SANDBOX, PERMISSION_POLICIES,
+                                            service_tier_override, tool_output_override)
     launch_key = None
     def runtime():
         live = codex_sessions.load(args.name)
@@ -473,6 +475,15 @@ def main() -> int:
     # O preparo conferiu a configuração da conta; a retomada não amplia as instruções.
     instruction_overrides = [] if imported_resume else ["-c", f"project_doc_max_bytes={limite}"]
 
+    previous_thread = None
+
+    def selected_service_tier():
+        if previous_thread is None and args.service_tier is not None:
+            return args.service_tier
+        saved = runtime() or {}
+        thread_id = previous_thread or args.resume
+        return saved.get("service_tier") if thread_id and saved.get("thread_id") == thread_id else None
+
     def subir_servidor() -> subprocess.Popen:
         try:
             return subprocess.Popen(
@@ -480,7 +491,8 @@ def main() -> int:
                 # nao repassa as flags dela, e a conversa caia em `Workspace` com aprovacao.
                 [_codex(), "app-server", "--listen", endpoint, *instruction_overrides,
                  "-c", f'sandbox_mode="{sandbox}"', "-c", f'approval_policy="{approval}"',
-                 *tool_output_override(args.tool_output_token_limit)],
+                 *tool_output_override(args.tool_output_token_limit),
+                 *service_tier_override(selected_service_tier())],
                 stdout=subprocess.DEVNULL, stderr=erros, cwd=cwd,
             )
         except (OSError, SystemExit) as exc:
@@ -488,8 +500,6 @@ def main() -> int:
             raise
 
     servidor = subir_servidor()
-
-    previous_thread = None
 
     def salvar(thread_id: str, rollout: str, thread: dict | None = None) -> None:
         nonlocal previous_thread
@@ -503,14 +513,16 @@ def main() -> int:
                 update_runtime(headless=False, cano=None, launching=False,
                                       endpoint=endpoint, app_pid=servidor.pid, launcher_pid=os.getpid(),
                                       model=args.model, effort=args.effort, rollout_path=rollout,
-                                      tool_output_token_limit=args.tool_output_token_limit, **resumed_metadata)
+                                      tool_output_token_limit=args.tool_output_token_limit, **resumed_metadata,
+                                      **({"service_tier": args.service_tier} if args.service_tier is not None else {}))
             else:
                 codex_sessions.save(args.name, thread_id, rollout, cwd,
                                 model=args.model, effort=args.effort,
                                 endpoint=endpoint, app_pid=servidor.pid,
                                 codex_home=str(codex_home),
                                 codex_account=args.codex_account,
-                                tool_output_token_limit=args.tool_output_token_limit)
+                                tool_output_token_limit=args.tool_output_token_limit,
+                                service_tier=args.service_tier)
         elif thread_id != previous_thread and thread is not None:
             if args.transfer_id:
                 from app.conversation_transfer import load_transfer, TransferPhase
@@ -570,10 +582,11 @@ def main() -> int:
         # `-C` fica de fora porque o pane ja nasce no cwd certo (`tmux new-session -c`) e a conversa
         # carrega o dela; o id vai no fim, onde o subcomando o espera.
         argv = [_codex(), "resume", "--remote", endpoint, "--no-alt-screen",
-                *flags_da_escolha, args.resume]
+                *service_tier_override(selected_service_tier()), *flags_da_escolha, args.resume]
     else:
         argv = [_codex(), "--remote", endpoint, "--no-alt-screen", "-C", cwd,
-                "--sandbox", sandbox, "--ask-for-approval", approval, *flags_da_escolha]
+                "--sandbox", sandbox, "--ask-for-approval", approval,
+                *service_tier_override(selected_service_tier()), *flags_da_escolha]
     if args.prompt:
         argv.append(args.prompt)
     try:

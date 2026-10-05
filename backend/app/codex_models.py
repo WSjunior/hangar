@@ -91,6 +91,10 @@ def parse(result: dict) -> list[dict]:
         efforts = m.get("supportedReasoningEfforts") or []
         if not isinstance(efforts, list):
             raise CodexRespostaInvalida("codex app-server retornou esforços inválidos")
+        services = m.get("serviceTiers") or []
+        speeds = m.get("additionalSpeedTiers") or []
+        if not isinstance(services, list) or not isinstance(speeds, list):
+            raise CodexRespostaInvalida("codex app-server retornou serviços inválidos")
         out.append({
             "id": m["model"],
             "name": m.get("displayName") or m["model"],
@@ -102,6 +106,10 @@ def parse(result: dict) -> list[dict]:
             # desta máquina é o `model` do `~/.codex/config.toml`, e mostrar o outro como "padrão"
             # apontaria pro modelo errado.
             "default_effort": m.get("defaultReasoningEffort"),
+            "service_tiers": [s for s in services if isinstance(s, dict)
+                              and isinstance(s.get("id"), str) and s["id"] and not s.get("hidden")],
+            "default_service_tier": m.get("defaultServiceTier"),
+            "additional_speed_tiers": speeds,
         })
     if not out:
         # Zero modelo com rc=0 é falha do provedor (login vencido, versão que mudou o schema), não
@@ -148,6 +156,9 @@ def _listar_http(raiz: Path) -> list[dict] | None:
                 "supportedReasoningEfforts": [{"reasoningEffort": n.get("effort")}
                                               for n in niveis if isinstance(n, dict)],
                 "defaultReasoningEffort": m.get("default_reasoning_level"),
+                "serviceTiers": m.get("service_tiers"),
+                "defaultServiceTier": m.get("default_service_tier"),
+                "additionalSpeedTiers": m.get("additional_speed_tiers"),
             })
         modelos = parse({"data": data})
     except (CodexIndisponivel, CodexRespostaInvalida) as e:
@@ -158,6 +169,29 @@ def _listar_http(raiz: Path) -> list[dict] | None:
         return None
     _log.debug("catalogo codex %s por http", raiz)
     return modelos
+
+
+def _fast_mode_enabled(root: Path) -> bool:
+    try:
+        config = tomllib.loads((root / "config.toml").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError) as exc:
+        _log.warning("codex: Fast indisponível, configuração ilegível em %s: %s", root, exc)
+        return False
+    features = config.get("features", {})
+    if not isinstance(features, dict):
+        return False
+    enabled = features.get("fast_mode", True)
+    profile = config.get("profile")
+    if profile is not None:
+        profiles = config.get("profiles", {})
+        selected = profiles.get(profile) if isinstance(profiles, dict) and isinstance(profile, str) else None
+        if not isinstance(selected, dict) or not isinstance(selected.get("features", {}), dict):
+            return False
+        enabled = selected.get("features", {}).get("fast_mode", enabled)
+    # O Codex habilita a feature por padrão; o perfil ativo vence a escolha da raiz.
+    return enabled is True
 
 
 def listar(fresco: bool = False, *, codex_home: str | Path | None = None) -> list[dict]:
@@ -179,12 +213,16 @@ def listar(fresco: bool = False, *, codex_home: str | Path | None = None) -> lis
         result = (codex_appserver.perguntar("model/list") if codex_home is None else
                   codex_appserver.perguntar("model/list", codex_home=Path(key[0])))
         modelos = parse(result)
+    if not _fast_mode_enabled(Path(key[0])):
+        modelos = [{**m, "service_tiers": [s for s in m.get("service_tiers", [])
+                                          if s.get("id") != "priority"]} for m in modelos]
     _cache[key] = (time.monotonic(), modelos)
     return modelos
 
 
 def checar_escolha(model: str | None, effort: str | None, *,
-                   codex_home: str | Path | None = None) -> None:
+                   codex_home: str | Path | None = None,
+                   service_tier: str | None = None) -> None:
     """Recusa (ValueError) modelo fora do catálogo, ou nível que AQUELE modelo não lista.
 
     `model_args` só valida a FORMA do nível — não pode ter lista fechada, porque os níveis variam
@@ -196,6 +234,10 @@ def checar_escolha(model: str | None, effort: str | None, *,
     Nível sem modelo não é checável (o modelo então é o do `~/.codex/config.toml`, que este
     catálogo não diz qual é) e passa.
     """
+    if service_tier is not None and service_tier not in ("default", "priority"):
+        raise ValueError("service_tier: use default ou priority")
+    if service_tier == "priority" and model is None:
+        raise ValueError("service_tier priority exige modelo explícito do catálogo do Codex")
     if model is None:
         return
     modelos = listar() if codex_home is None else listar(codex_home=codex_home)
@@ -204,6 +246,9 @@ def checar_escolha(model: str | None, effort: str | None, *,
             if effort is not None and effort not in m["efforts"]:
                 raise ValueError(f"nivel fora do suporte de {model}: {effort!r} "
                                  f"(use um de {', '.join(m['efforts']) or 'nenhum'})")
+            if service_tier == "priority" and not any(
+                    s.get("id") == "priority" for s in m.get("service_tiers", [])):
+                raise ValueError(f"service_tier priority indisponível para {model}")
             return
     raise ValueError(f"modelo fora do catalogo do Codex: {model}")
 
