@@ -4,7 +4,7 @@
 import {
   createSessionForServer, sendInputForServer, fetchSessionsForServer, getCodexAccountsForServer,
   getFolderBranchesForServer, getRootsForServer, listClaudeConfigs, getClaudeAccountSuggestion, getProviders,
-  uniqueSessionName, basename, effortLevels,
+  uniqueSessionName, basename, effortLevels, defaultCodexAccount, SESSION_PROVIDERS,
   type CodexAccount, type ConfigDirInfo, type FolderBranches, type FsRoot, type ModelOption, type Provider,
   type WorktreeChoice,
 } from '@hangar/core';
@@ -13,7 +13,7 @@ import { carregarModelos } from './modelosPorConta';
 import { bestAccountWithQuota, exhaustedWindow, type ContaCota } from './cota';
 import * as m from '../paraglide/messages';
 
-type ProviderProbe = Record<string, { disponivel: boolean; motivo: string | null }>;
+type ProviderProbe = Record<string, { disponivel: boolean; motivo: string | null; default?: boolean }>;
 
 const errText = (e: unknown, fallback: string) => (e instanceof Error && e.message ? e.message : fallback);
 export function isNotRepo(e: unknown): boolean {
@@ -52,6 +52,7 @@ export class NewChatDraft {
   branchName = $state('');
 
   providers = $state<ProviderProbe>({});
+  providersLoading = $state(false);
   providersError = $state('');
   roots = $state<FsRoot[] | null>(null);
   rootsError = $state('');
@@ -79,6 +80,7 @@ export class NewChatDraft {
   #modSeq = 0;
   #branchSeq = 0;
   #modelTouched = false;
+  #providerPicked = false;
   // Só a escolha manual de CONTA desliga a troca automática por cota.
   #accountPicked = false;
   // Sessão já criada cujo primeiro envio falhou: tentar de novo reenvia nela em vez de criar outra,
@@ -91,7 +93,7 @@ export class NewChatDraft {
       this.newBranch, this.base, this.branchName]);
   }
   /** Contas ou modelos ainda chegando: enviar agora mandaria conta/modelo vazios e cairia no padrão do servidor calado. */
-  get loading(): boolean { return this.configsLoading || this.codexLoading || this.modelsLoading; }
+  get loading(): boolean { return this.providersLoading || this.configsLoading || this.codexLoading || this.modelsLoading; }
   get levels(): readonly string[] { return effortLevels(this.provider, this.models, this.model); }
   get providerAvailable(): boolean { return this.providers[this.provider]?.disponivel !== false; }
 
@@ -103,6 +105,8 @@ export class NewChatDraft {
   }
 
   pickServer(id: string) {
+    this.#providerPicked = false;
+    this.#modelTouched = false;
     this.server = id;
     selectServer(id);
     this.cwd = readStorage(cwdKey(id));
@@ -121,6 +125,7 @@ export class NewChatDraft {
   }
 
   setProvider(p: Provider) {
+    this.#providerPicked = true;
     if (p === this.provider) return;
     this.provider = p;
     this.loadAccounts();
@@ -146,6 +151,7 @@ export class NewChatDraft {
   }
 
   setCodexAccount(id: string) {
+    this.#modelTouched = true;
     if (id === this.codexAccount) return;
     this.codexAccount = id;
     void this.loadModels();
@@ -166,12 +172,21 @@ export class NewChatDraft {
   async loadProviders() {
     const seq = ++this.#provSeq;
     this.providers = {};
+    this.providersLoading = true;
     this.providersError = '';
     try {
       const res = await getProviders();
-      if (seq === this.#provSeq) this.providers = res;
+      if (seq !== this.#provSeq) return;
+      this.providers = res;
+      const preferred = SESSION_PROVIDERS.find((provider) => res[provider]?.default && res[provider]?.disponivel);
+      if (!this.#providerPicked && !this.#modelTouched && !this.sending && preferred && preferred !== this.provider) {
+        this.provider = preferred;
+        this.loadAccounts();
+      }
     } catch (e) {
       if (seq === this.#provSeq) this.providersError = errText(e, m.criar_providers_erro());
+    } finally {
+      if (seq === this.#provSeq) this.providersLoading = false;
     }
   }
 
@@ -238,7 +253,7 @@ export class NewChatDraft {
       const list = await getCodexAccountsForServer(server);
       if (seq !== this.#codexSeq) return;
       this.codexAccounts = list;
-      this.codexAccount = (list.find((a) => a.is_default) ?? list[0])?.id ?? '';
+      this.codexAccount = defaultCodexAccount(list)?.id ?? '';
       this.codexLoading = false;
       void this.loadModels();
     } catch (e) {
@@ -329,7 +344,7 @@ export class NewChatDraft {
         const sessionName = uniqueSessionName(basename(cwd), taken);
         if (this.newBranch && !this.branchName.trim()) this.branchName = sessionName;
         const info = await createSessionForServer(server, {
-          name: sessionName, cwd, provider: this.provider,
+          name: sessionName, cwd, provider: this.provider, remember_provider: true,
           config_dir: this.provider === 'claude' ? this.configDir : null,
           codex_account: this.provider === 'codex' ? this.codexAccount : undefined,
           model: this.model || null, effort: this.effort || null,

@@ -3,7 +3,7 @@ import { Icon } from '../../ui/Icon';
 import { AccessibilityInfo, ActivityIndicator, Pressable, Text, TextInput, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { useRouter } from 'expo-router';
-import { getArchivePorCwd, getCodexAccountsForServer,
+import { getArchivePorCwd, getCodexAccountsForServer, defaultCodexAccount,
   getEnginesForServer, fetchSessionsForServer, listClaudeConfigsForServer, probeServerResponse,
   modelOptionsForServer, resumeArchivedConversation, getProvidersForServer } from '@hangar/core';
 import { basename, providerName, contaComFolga, cotaDaConta, cotaParada, janelaEsgotada, resumoCota, CLAUDE_PERMISSION_MODES, EFFORT_LEVELS,
@@ -25,7 +25,7 @@ import { superficie } from '../../theme/superficie';
 import { AnchoredPanel } from '../../ui/AnchoredPanel';
 import * as m from '../../paraglide/messages';
 
-type ProviderProbe = Record<string, { disponivel: boolean; motivo: string | null }>;
+type ProviderProbe = Record<string, { disponivel: boolean; motivo: string | null; default?: boolean }>;
 
 function valorModelo(mm: ModelOption): string {
   return mm.provider ? `${mm.provider}/${mm.id}` : mm.id;
@@ -106,6 +106,8 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
   // Padrão sem terminal; só Claude e Codex rodam assim.
   const [headless, setHeadless] = useState(remembered.headless ?? true);
   const [providerProbe, setProviderProbe] = useState<ProviderProbe | null>(null);
+  const providerTouched = useRef(false);
+  const [providersLoading, setProvidersLoading] = useState(true);
   const [modelsLoading, setModelsLoading] = useState(false);
 
   const [codexAccounts, setCodexAccounts] = useState<CodexAccount[]>([]);
@@ -181,8 +183,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
       .then((accounts) => {
         if (generation !== codexGeneration.current || controller.signal.aborted) return;
         setCodexAccounts(accounts);
-        setCodexAccount((accounts.find((account) => account.id === remembered.codexAccount)
-          ?? accounts.find((account) => account.is_default) ?? accounts[0])?.id ?? '');
+        setCodexAccount(defaultCodexAccount(accounts, remembered.codexAccount)?.id ?? '');
       })
       .catch((cause: unknown) => {
         if (generation !== codexGeneration.current || controller.signal.aborted) return;
@@ -218,10 +219,20 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
       })
       .finally(() => { if (alive) setConfigsLoading(false); });
     setProviderProbe(null);
+    setProvidersLoading(true);
     // Sonda falhou: todos ficam oferecidos, e o backend recusa o que não estiver instalado.
     void getProvidersForServer(active)
-      .then((probe) => { if (alive) setProviderProbe(probe); })
-      .catch(() => {});
+      .then((probe) => {
+        if (!alive) return;
+        setProviderProbe(probe);
+        const preferred = SESSION_PROVIDERS.find((p) => probe[p]?.default && probe[p]?.disponivel);
+        if (!providerTouched.current && preferred && preferred !== provider) {
+          desired.current = { model: '', effort: '' };
+          setProvider(preferred);
+        }
+      })
+      .catch(() => {})
+      .finally(() => { if (alive) setProvidersLoading(false); });
     void probeServerResponse(active, '/api/cotas')
       .then((response) => {
         if (!response.ok) throw new Error(String(response.status));
@@ -369,15 +380,17 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
       subagent_model: provider === 'claude' && !engine ? subagente || null : null,
       ...(canHeadless ? { headless } : {}),
     };
-  const body = picked && codexReady ? { ...settings, cwd: picked, ...(name.trim() ? { name: name.trim() } : {}), ...(worktree ?? {}) } : null;
+  const body = picked && codexReady && !providersLoading ? { ...settings, cwd: picked, remember_provider: true, ...(name.trim() ? { name: name.trim() } : {}), ...(worktree ?? {}) } : null;
 
   // Toda escolha feita aqui volta na próxima abertura desta máquina.
   const chooseProvider = (p: Provider) => {
+    providerTouched.current = true;
     desired.current = { model: '', effort: '' };
     setProvider(p);
     remember({ provider: p, model: '', effort: '' });
   };
   const chooseModel = (v: string) => {
+    providerTouched.current = true;
     let effort = esforco;
     if (provider === 'codex' && !esforcosDoModelo(v).includes(esforco)) effort = '';
     desired.current = { model: v, effort };
@@ -386,6 +399,7 @@ function CreateSessionForm({ active, machines, onPickMachine, keyboardOffset }: 
     remember({ model: v, effort });
   };
   const chooseEffort = (v: string) => {
+    providerTouched.current = true;
     desired.current = { ...desired.current, effort: v };
     setEsforco(v);
     remember({ effort: v });

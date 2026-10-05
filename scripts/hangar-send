@@ -34,7 +34,7 @@
 #                                  flags. cwd, --conta e --conta auto são resolvidos LÁ (cwd default
 #                                  = home de lá; --conta pelo nome da conta de lá).
 #                                  --provider <claude|codex|pi|omp|kimi> escolhe o AGENTE da sessão
-#                                  nova (default claude). Ex: --provider kimi abre o Kimi Code.
+#                                  nova (padrão do servidor). Ex: --provider kimi abre o Kimi Code.
 #                                  --read-only bloqueia escrita no código e metadados Git (Linux/bwrap).
 #                                  Sem modo explícito, herda o padrão escolhido no Hangar.
 #                                  --terminal abre com terminal; não combina com --headless.
@@ -414,7 +414,7 @@ if [[ "$1" == "--new" ]]; then
     # Anthropic. Serve pra parear com uma sessão rodando noutro modelo — o par continua no mesmo
     # ~/.claude (skills, hooks, contrato compartilhado), só o motor difere. Aceita o flag em
     # qualquer ordem: `--new nome --engine kimi` sem cwd é o uso mais comum.
-    # --provider: qual AGENTE roda na sessão nova (claude, o default, ou codex/pi/kimi). Mesma forma do
+    # --provider: qual AGENTE roda na sessão nova. Omitido, usa o padrão do servidor. Mesma forma do
     # --engine: repassa cru pro backend, que recusa com 400 o que não conhece — não duplica aqui a
     # lista de providers válidos.
     # --conta: a sessão nova nasce em OUTRA CONTA Anthropic (config dir ~/.claude-<nome>), que é o
@@ -477,16 +477,29 @@ if [[ "$1" == "--new" ]]; then
                else echo "erro: argumento inesperado '$1'" >&2; exit 2; fi ;;
         esac
     done
+    if [[ -n "$remoto" ]]; then
+        cfg=$(peer_cfg "$remoto") || exit 1
+        IFS=$'\t' read -r BASE rtok <<< "$cfg"
+        AUTH="Authorization: Bearer $rtok"
+        API_PEER=""; API_CONNECT_TIMEOUT=8
+    fi
+    if [[ -z "$provider" ]]; then
+        if [[ -n "$engine" ]]; then
+            provider="claude"
+        elif [[ -n "$perfil" ]]; then
+            provider="omp"
+        else
+            providers=$(api GET /api/providers) || exit 1
+            provider=$(python3 -c 'import json,sys
+print(next((p for p, probe in json.load(sys.stdin).items() if probe.get("default")), "claude"))' <<<"$providers")
+        fi
+    fi
     if [[ "$provider" == "codex" && -n "$conta" ]]; then
         [[ "$conta" == "auto" ]] && { echo "erro: --conta auto só vale para Claude" >&2; exit 2; }
         codex_conta="$conta"; [[ "$conta" == "openai-codex" ]] && codex_conta="default"
         conta=""
     fi
     if [[ -n "$remoto" ]]; then
-        cfg=$(peer_cfg "$remoto") || exit 1
-        IFS=$'\t' read -r BASE rtok <<< "$cfg"
-        AUTH="Authorization: Bearer $rtok"
-        API_PEER=""; API_CONNECT_TIMEOUT=8
         # O $HOME e o hangar-conta são DESTA máquina: pasta padrão e conta vêm das contas de LÁ.
         # A home é a mãe da conta `default` (~/.claude); `--conta auto` segue abaixo, já contra lá.
         if [[ -z "$cwd" || ( -n "$conta" && "$conta" != "auto" ) ]]; then
@@ -553,7 +566,7 @@ s = json.load(sys.stdin); print(s["path"] + "\t" + s["label"])' <<<"$sugestao")
     body=$(python3 -c 'import json,sys
 d = {"name": sys.argv[1], "cwd": sys.argv[2],
      "engine": sys.argv[3] or None,
-     "provider": sys.argv[4] or "claude"}
+     "provider": sys.argv[4], "remember_provider": True}
 if sys.argv[5]:
     d["config_dir"] = sys.argv[5]
 if sys.argv[6]:

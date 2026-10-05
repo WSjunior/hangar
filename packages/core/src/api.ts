@@ -708,6 +708,7 @@ export interface CreateSessionBody {
   cwd?: string | null;
   config_dir?: string | null;
   provider?: Provider;
+  remember_provider?: boolean;
   engine?: string | null;
   model?: string | null;
   effort?: string | null;
@@ -762,7 +763,7 @@ export function createSession(
   name: string,
   cwd?: string,
   configDir?: string | null,
-  provider: Provider = 'claude',
+  provider?: Provider,
   engine?: string | null,
   model?: string | null,
   effort?: string | null,
@@ -777,7 +778,7 @@ export function createSession(
   // `model`/`effort`/`permissionMode`/`ompProfile` no FIM de propósito: chamador antigo com 5 argumentos continua válido e abre
   // no padrão, byte por byte (o backend valida None = comportamento de hoje).
   const body: CreateSessionBody = { name, cwd, config_dir: configDir ?? null, provider, engine: engine ?? null,
-                           model: model ?? null, effort: effort ?? null, codex_account: codexAccount };
+                           model: model ?? null, effort: effort ?? null, codex_account: codexAccount, remember_provider: true };
   if (permissionMode) body.permission_mode = permissionMode;
   if (ompProfile) body.omp_profile = ompProfile;
   if (headless !== undefined && (provider === 'claude' || provider === 'codex')) body.headless = headless;
@@ -843,6 +844,7 @@ export function passarBastao(
     cwd?: string | null;
     config_dir?: string | null;
     provider?: Provider;
+    remember_provider?: boolean;
     engine?: string | null;
     model?: string | null;
     effort?: string | null;
@@ -1931,12 +1933,13 @@ export function getEngines(): Promise<EnginesResponse> {
   return apiFetch('/api/engines');
 }
 
-export function getProviders(): Promise<Record<string, { disponivel: boolean; motivo: string | null }>> {
-  return apiFetch('/api/providers');
+export function getProviders(): Promise<Record<string, { disponivel: boolean; motivo: string | null; default?: boolean }>> {
+  return apiFetch('/api/providers', { signal: AbortSignal.timeout(30_000) });
 }
 
-export function getProvidersForServer(s: Server, signal?: AbortSignal): Promise<Record<string, { disponivel: boolean; motivo: string | null }>> {
-  return apiFetchForServer(s, '/api/providers', { signal: comTeto(signal, 8000) });
+export function getProvidersForServer(s: Server, signal?: AbortSignal): Promise<Record<string, { disponivel: boolean; motivo: string | null; default?: boolean }>> {
+  // A sonda inclui leitura de login, que pode iniciar o CLI.
+  return apiFetchForServer(s, '/api/providers', { signal: comTeto(signal, 30_000) }, 30_000);
 }
 
 export function getEnginesForServer(s: Server): Promise<EnginesResponse> {

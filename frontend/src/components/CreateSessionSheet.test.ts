@@ -547,6 +547,19 @@ describe('CreateSessionSheet — B4/B6 da revisão final da branch', () => {
 });
 
 describe('CreateSessionSheet — provider sonda (C5)', () => {
+  it('pré-seleciona Codex quando é o padrão do servidor com Claude instalado', async () => {
+    vi.mocked(api.getProviders).mockResolvedValueOnce({
+      claude: { disponivel: true, motivo: null, default: false },
+      codex: { disponivel: true, motivo: null, default: true },
+    });
+    const { comp } = montar();
+    await flush();
+    await escolherPasta();
+    const selected = document.querySelector('.provider-tile[aria-pressed="true"]');
+    expect(selected?.textContent).toContain('Codex');
+    unmount(comp);
+  });
+
   it('provider ausente desabilita botão, mostra frase e bloqueia criação', async () => {
     vi.mocked(api.getProviders).mockResolvedValue({
       claude: { disponivel: false, motivo: 'nao_encontrado' },

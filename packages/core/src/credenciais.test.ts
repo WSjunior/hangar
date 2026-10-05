@@ -1,5 +1,5 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
-import { credentialAuth, credentialGroup, codexAccountMessage, contaCodexParaEntrar, codexCliAusente,
+import { credentialAuth, credentialGroup, codexAccountMessage, contaCodexParaEntrar, codexCliAusente, defaultCodexAccount,
   type Credencial, type CodexAccount } from './credenciais';
 import { configureApi } from './apiEnv';
 import { configureLocale } from './i18n';
@@ -152,7 +152,7 @@ describe('contas e servidor explícito', () => {
     await createSessionForServer(server, { name: 'claude', provider: 'claude', codex_account: 'work' });
     expect(JSON.parse(fetcher.mock.calls[2][1]?.body as string)).not.toHaveProperty('codex_account');
     await createSession('old');
-    expect(JSON.parse(fetcher.mock.calls[3][1]?.body as string)).toEqual({ name: 'old', provider: 'claude', config_dir: null, engine: null, model: null, effort: null });
+    expect(JSON.parse(fetcher.mock.calls[3][1]?.body as string)).toEqual({ name: 'old', config_dir: null, engine: null, model: null, effort: null, remember_provider: true });
   });
 
   it('catálogo, Arquivo e bastão carregam a conta', async () => {
@@ -200,5 +200,16 @@ describe('contaCodexParaEntrar', () => {
     expect(contaCodexParaEntrar([conta('default', true, 'connected'), conta('work', false, 'disconnected')])).toBeUndefined();
     expect(contaCodexParaEntrar([conta('default', true, 'unavailable')])).toBeUndefined();
     expect(contaCodexParaEntrar(undefined)).toBeUndefined();
+  });
+  it('escolhe a única conta GPT conectada mesmo com padrão deslogada', () => {
+    const accounts = [conta('default', true, 'disconnected'), conta('gpt', false, 'connected')];
+    expect(defaultCodexAccount(accounts)?.id).toBe('gpt');
+    expect(defaultCodexAccount(accounts, 'default')?.id).toBe('gpt');
+  });
+  it('preserva a conta lembrada conectada e mantém o caminho de login sem contas conectadas', () => {
+    const accounts = [conta('default', true, 'connected'), conta('gpt', false, 'connected')];
+    expect(defaultCodexAccount(accounts, 'gpt')?.id).toBe('gpt');
+    expect(defaultCodexAccount([conta('default', true, 'disconnected')])?.id).toBe('default');
+    expect(defaultCodexAccount([])).toBeUndefined();
   });
 });

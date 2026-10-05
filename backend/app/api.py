@@ -1628,9 +1628,10 @@ class CreateBody(_StrictBody):
     new_branch: bool = Field(default=False, strict=True)
     base: str | None = Field(default=None, min_length=1)
     config_dir: str | None = None
-    # Qual Adapter cria a sessao (app.adapters.get_adapter). Default "claude" preserva o
-    # comportamento de hoje pros clientes que ainda nao mandam o campo.
+    # O campo omitido é resolvido pelo servidor antes de validar as opções do provedor.
     provider: str = "claude"
+    # Somente a abertura humana muda o padrão; criação automatizada pode escolher outro provedor.
+    remember_provider: bool = Field(default=False, strict=True)
     # Conta Codex escolhida pelo usuário. Ausente mantém a conta padrão para clientes antigos.
     codex_account: str | None = None
     # Wrapper interativo do Codex pode iniciar a TUI ja com um prompt. Nao e argv arbitrario:
@@ -2133,6 +2134,9 @@ async def _kill_unclaimed(name: str) -> None:
 
 @app.post("/api/sessions", dependencies=[Depends(require_auth)], response_model=SessionInfo)
 async def create_session(body: CreateBody):
+    if "provider" not in body.model_fields_set:
+        provider = await _default_session_provider(body.config_dir, body.engine, body.codex_account, body.omp_profile)
+        body = body.model_copy(update={"provider": provider})
     if body.config_dir is None and body.provider == "claude" and not body.engine:
         # Sem conta pedida, a padrão só vale se tiver cota; senão nasce na de mais folga.
         from app import cotas
@@ -2160,6 +2164,13 @@ async def create_session(body: CreateBody):
                     await _kill_unclaimed(info.name)
                     raise
                 info = info.model_copy(update={"owner": guest.name})
+            if guest is None and body.remember_provider:
+                try:
+                    await asyncio.to_thread(runtime_config.aplicar, {"last_session_provider": info.provider})
+                except (OSError, ValueError) as exc:
+                    _log.warning("não consegui lembrar o provedor da sessão %s: %s", info.name, exc)
+                    info = info.model_copy(update={"avisos": [*info.avisos,
+                        f"A sessão foi criada, mas não consegui lembrar o provedor: {exc}"]})
             return info
         except BaseException:
             if worktree.get("path") and not worktree.get("session_created"):
@@ -2244,6 +2255,12 @@ async def _criar_sessao(body: CreateBody, worktree: dict):
     codex_account_obj = None
     codex_service = _codex_service() if body.provider == "codex" else None
     if body.provider == "codex":
+        if body.codex_account is None and codex_service is not None:
+            accounts = codex_accounts.list_visible_accounts()
+            auth = await asyncio.gather(*(codex_service.read_auth_rapido(account) for account in accounts))
+            connected = [account for account, login in zip(accounts, auth) if login.get("status") == "connected"]
+            if connected and not any(account.is_default for account in connected):
+                body = body.model_copy(update={"codex_account": connected[0].id})
         codex_account_obj = _resolve_codex_account(body.codex_account)
         if body.read_only:
             try:
@@ -3547,6 +3564,7 @@ class BastaoBody(_StrictBody):
     cwd: str | None = None                   # None = o cwd da origem
     config_dir: str | None = None
     provider: str = "claude"
+    remember_provider: bool = Field(default=False, strict=True)
     engine: str | None = None
     engine_account: str | None = None
     model: str | None = None
@@ -3616,6 +3634,9 @@ def _bastao_preparar(info: SessionInfo, origem: str, destino: str,
 
 @app.post("/api/sessions/{name}/bastao", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 async def bastao_passar(name: str, body: BastaoBody):
+    if "provider" not in body.model_fields_set:
+        provider = await _default_session_provider(body.config_dir, body.engine, body.codex_account, body.omp_profile)
+        body = body.model_copy(update={"provider": provider})
     with _acompanhar_criacao(body.name):
         return await _passar_bastao(name, body)
 
@@ -3726,6 +3747,7 @@ async def _passar_bastao(name: str, body: BastaoBody):
     # recolhe pelo nome (ver bastao_mod.caminho).
     creation = CreateBody(
         name=destino, cwd=cwd, config_dir=body.config_dir, provider=body.provider,
+        remember_provider=body.remember_provider,
         engine=body.engine, engine_account=body.engine_account, model=body.model, effort=body.effort,
         permission_mode=body.permission_mode, omp_profile=body.omp_profile,
         codex_account=sucessora_codex_account,
@@ -6288,7 +6310,46 @@ def _motores_para_cliente() -> dict[str, dict]:
 
 @app.get("/api/providers", dependencies=[Depends(require_auth)])
 async def get_providers():
-    return await asyncio.to_thread(cli_probe.sondar_providers)
+    return await _session_provider_catalog()
+
+
+async def _session_provider_catalog() -> dict[str, dict]:
+    from app import conta_estado, session_defaults
+
+    probes = {provider: dict(probe) for provider, probe in
+              (await asyncio.to_thread(cli_probe.sondar_providers)).items()}
+    connected: set[str] = set()
+    disconnected: set[str] = set()
+    if probes.get("claude", {}).get("disponivel"):
+        configs = await asyncio.to_thread(list_config_dirs, False)
+        logins = await asyncio.to_thread(conta_estado.logins, configs)
+        if any(login.loggedIn is True for login in logins) or engines.listar():
+            connected.add("claude")
+        elif logins and all(login.loggedIn is False for login in logins):
+            disconnected.add("claude")
+    service = _codex_service()
+    if probes.get("codex", {}).get("disponivel") and service is not None:
+        auth = await asyncio.gather(*(service.read_auth_rapido(account)
+                                    for account in codex_accounts.list_visible_accounts()))
+        if any(item.get("status") == "connected" for item in auth):
+            connected.add("codex")
+        elif auth and all(item.get("status") == "disconnected" for item in auth):
+            disconnected.add("codex")
+    default = session_defaults.choose_provider(probes, runtime_config.get("last_session_provider"),
+                                               connected, disconnected)
+    return {provider: {**probe, "default": provider == default} for provider, probe in probes.items()}
+
+
+async def _default_session_provider(config_dir=None, engine=None, codex_account=None, omp_profile=None) -> str:
+    # Opções exclusivas de um provedor continuam identificando o destino dos clientes antigos.
+    if config_dir is not None or engine:
+        return "claude"
+    if codex_account is not None:
+        return "codex"
+    if omp_profile:
+        return "omp"
+    probes = await _session_provider_catalog()
+    return next((provider for provider, probe in probes.items() if probe["default"]), "claude")
 
 
 @app.get("/api/engines", dependencies=[Depends(require_auth)])

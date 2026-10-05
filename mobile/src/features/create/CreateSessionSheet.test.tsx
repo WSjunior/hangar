@@ -7,6 +7,7 @@ const calls = vi.hoisted(() => ({
   roots: vi.fn(), scan: vi.fn(), sessions: vi.fn(), configs: vi.fn(), engines: vi.fn(), save: vi.fn(),
   target: null as null | { id: string; label: string; baseUrl: string; token: string },
   accounts: vi.fn(),
+  providers: vi.fn(),
   models: vi.fn(),
   prepare: vi.fn(),
   preparation: vi.fn(),
@@ -129,7 +130,7 @@ vi.mock('@hangar/core', async (original) => ({
   probeServerResponse: vi.fn().mockImplementation(async () => new Response('[]')),
   getEnginesForServer: calls.engines,
   // Sonda de providers da folha nova: sem ela o teste fazia fetch de verdade para b.local.
-  getProvidersForServer: vi.fn().mockResolvedValue({}),
+  getProvidersForServer: calls.providers,
   modelOptions: vi.fn().mockResolvedValue({ models: [], reduced: false }),
   getSessions: vi.fn().mockResolvedValue([]),
   getCodexAccountsForServer: calls.accounts,
@@ -248,6 +249,7 @@ describe('CreateSessionSheet Codex', () => {
     calls.configs.mockReset().mockResolvedValue([]);
     calls.engines.mockReset().mockResolvedValue({ motores: {} });
     calls.accounts.mockReset().mockResolvedValue([connected]);
+    calls.providers.mockReset().mockResolvedValue({});
     calls.models.mockReset().mockResolvedValue({ models: [], reduced: false });
     calls.prepare.mockReset().mockResolvedValue({ status: 'ready', trust_pending: false, issues: [] });
     calls.preparation.mockReset();
@@ -294,6 +296,22 @@ describe('CreateSessionSheet Codex', () => {
     await act(async () => Promise.resolve());
     return { container, root };
   }
+
+  it('usa o padrão GPT do servidor e sua conta conectada sem selecionar Claude', async () => {
+    calls.providers.mockResolvedValue({
+      claude: { disponivel: true, motivo: null, default: false },
+      codex: { disponivel: true, motivo: null, default: true },
+    });
+    calls.accounts.mockResolvedValue([
+      { ...defaultAccount, auth: { ...defaultAccount.auth, status: 'disconnected' } }, connected,
+    ]);
+    const { container, root } = await renderSheet();
+    await send(container);
+    expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({
+      provider: 'codex', codex_account: 'work', remember_provider: true,
+    }));
+    root.unmount();
+  });
 
   it('abre os resumos e conserva destino, seleções e texto ao fechar a folha', async () => {
     calls.accounts.mockResolvedValue([defaultAccount, connected]);
