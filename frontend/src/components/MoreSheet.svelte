@@ -4,6 +4,7 @@
   import ShortcutTiles from './ShortcutTiles.svelte';
   import ShortcutTransfer from './ShortcutTransfer.svelte';
   import { desktop } from '../lib/desktop.svelte';
+  import { rotuloModsCelular } from '../lib/modsCelular.svelte';
 import { useSessionServer } from '../lib/sessionServer';
   import { listAccountTargets, type AccountTarget, type LiveShortcutTerminal, type ShortcutSendText, type ShortcutShell } from '@hangar/core';
   import type { CustomScoped } from '../lib/shortcuts.svelte';
@@ -44,6 +45,11 @@ import { useSessionServer } from '../lib/sessionServer';
     /** Recicla o processo da sessão sem terminal (relê MCP/hooks/settings). Ausente = não é Claude sem terminal. */
     onRecarregar?: () => void;
     recarregarBloqueado?: boolean;
+    /** Liga e desliga a interface dos mods no celular. Ausente = sessão sem faixa nem painel de mod: sem item. */
+    onAlternarMods?: () => void;
+    modsLigado?: boolean;
+    /** Painéis de mod abertos na sessão, para a contagem do rótulo quando a interface está oculta. */
+    modsPaineis?: number;
     activityRunning?: boolean;
     activityBadge?: number;
   }
@@ -55,6 +61,7 @@ import { useSessionServer } from '../lib/sessionServer';
     onTrocarConta, contaBloqueada = false,
     onTrocarModo, modoDestinoTerminal = false, modoBloqueado = false,
     onRecarregar, recarregarBloqueado = false,
+    onAlternarMods, modsLigado = false, modsPaineis = 0,
   }: Props = $props();
   const sessionServer = useSessionServer();
 
@@ -241,6 +248,20 @@ import { useSessionServer } from '../lib/sessionServer';
             : modoDestinoTerminal ? m.modo_abrir_no_terminal_detalhe() : m.modo_continuar_sem_terminal_detalhe()}</span>
         </span>
         <span class="chev" aria-hidden="true">›</span>
+      </button>
+    {/if}
+
+    {#if onAlternarMods}
+      <button class="item" onclick={() => onAlternarMods && pick(onAlternarMods)}>
+        <span class="ico" class:on={modsLigado} aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18" />
+          </svg>
+        </span>
+        <span class="txt">
+          <span class="label">{rotuloModsCelular(modsLigado, modsPaineis)}</span>
+          <span class="sub">{m.mods_celular_sub()}</span>
+        </span>
       </button>
     {/if}
 

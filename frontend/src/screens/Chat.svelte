@@ -10,6 +10,8 @@
   import PluginToasts from '../components/PluginToasts.svelte';
   import { copyText } from '../lib/clipboard';
   import { openInNewTab } from '../lib/openTab';
+  import { desktop as janela } from '../lib/desktop.svelte';
+  import { itemModsCelular, modsCelular, modsNaTela } from '../lib/modsCelular.svelte';
   import { activePaneId, followLocalTab, inputPluginField, isMissingRoute, parsePluginToast, parsePluginUi, pressPluginButton, safeHref, showPluginPane, tabFollowsServer, type PluginInputKind, type PluginSource, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
@@ -475,6 +477,10 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
     const id = activePaneId(pluginPanes.map((p) => p.id), pluginShownId, pluginLocalTab);
     return pluginPanes.find((p) => p.id === id) ?? null;
   });
+  // Celular: a interface dos mods fica oculta até a pessoa ligar no "⋯" (preferência do aparelho). Os avisos
+  // (toasts) seguem, e com ela oculta o app não chama nenhuma rota de mod.
+  const modsVisiveis = $derived(modsNaTela(janela.atual, modsCelular.ligado));
+  const modsItem = $derived(itemModsCelular(janela.atual, pluginBand, pluginPanes.length));
   // Avisos (`$.ui.toast`) dos mods (SSE 'plugin_toast'). A reconexão repõe os que ainda não
   // venceram: o id diz quais já passaram por aqui.
   let pluginToasts = $state<PluginToast[]>([]);
@@ -506,6 +512,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // O clique vira clique de mouse no terminal da sessão; o que o mod copiar ou mandar abrir acontece
   // aqui, no aparelho de quem clicou, e não na máquina do terminal.
   async function pressPlugin(site: string, key: string) {
+    if (!modsVisiveis) return;
     try {
       const r = await pressPluginButton(sessionName, site, key, sessionServer());
       const texto = r.copied;
@@ -529,6 +536,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // Trocar de aba avisa o servidor. Seguindo o `shown_id`, a aba só muda quando o novo chega; sem ele (servidor
   // antigo), a troca é local, e o 404/405 da rota que ainda não existe não é erro.
   async function showPlugin(site: string) {
+    if (!modsVisiveis) return;
     if (!tabFollowsServer(pluginPanes.map((p) => p.id), pluginShownId)) pluginLocalTab = site;
     try {
       await showPluginPane(sessionName, site, sessionServer());
@@ -538,6 +546,7 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   }
   // Digitação num `Input` de mod: só a sessão sem terminal aceita (o campo nem fica habilitado nas outras).
   async function inputPlugin(site: string, key: string, kind: PluginInputKind, value: string) {
+    if (!modsVisiveis) return;
     try {
       await inputPluginField(sessionName, site, key, kind, value, sessionServer());
     } catch (err) {
@@ -3480,12 +3489,14 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
                   onclick={() => (problemaDispensado = problemaChave)}>×</button>
         </div>
       {/if}
-      {#if pluginActivePane}
-        <PluginPane pane={pluginActivePane} tabs={pluginPanes} onPress={pressPlugin} onShow={showPlugin}
-                    onInput={pluginSource === 'surface' ? inputPlugin : undefined} />
+      {#if modsVisiveis}
+        {#if pluginActivePane}
+          <PluginPane pane={pluginActivePane} tabs={pluginPanes} onPress={pressPlugin} onShow={showPlugin}
+                      onInput={pluginSource === 'surface' ? inputPlugin : undefined} />
+        {/if}
+        <PluginBand tree={pluginBand} columns={pluginColumns} onPress={pressPlugin}
+                    onInput={pluginSource === 'surface' ? inputPlugin : undefined} notice={pluginNotice} />
       {/if}
-      <PluginBand tree={pluginBand} columns={pluginColumns} onPress={pressPlugin}
-                  onInput={pluginSource === 'surface' ? inputPlugin : undefined} notice={pluginNotice} />
       <!-- Composer SEMPRE visivel (exceto sessao morta). Antes ele sumia em awaiting_input e,
            se as opcoes nao fossem parseadas, o usuario ficava sem input E sem botoes = preso.
            Os OptionButtons continuam aparecendo na lista; o composer fica como saida garantida. -->
@@ -3616,6 +3627,8 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
              modoBloqueado={!modoLivre || trocandoModo}
              onRecarregar={recarregavel ? recarregar : undefined}
              recarregarBloqueado={currentState !== 'idle' || recarregando}
+             onAlternarMods={modsItem ? () => (modsCelular.ligado = !modsCelular.ligado) : undefined}
+             modsLigado={modsCelular.ligado} modsPaineis={modsItem?.paineis ?? 0}
              {activityRunning} {activityBadge} />
   <ShareSessionSheet open={shareOpen} name={sessionName} serverId={chatServerId} onClose={() => (shareOpen = false)} />
   <ConfirmSheet open={confirmaModo}
