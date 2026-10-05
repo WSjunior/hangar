@@ -1,12 +1,13 @@
 //! Faixa acima do prompt e painéis que os mods do Claude Code desenham (SSE `plugin_ui`). A árvore
 //! chega como o engine a monta (`Box`, `Text`, `Raster`, `Svg`...) e é traduzida aqui sem saber de
 //! que mod veio: mod novo aparece sem código novo.
-use std::{borrow::Cow, collections::HashSet, rc::Rc};
+use std::{borrow::Cow, collections::{HashMap, HashSet}, rc::Rc};
 use std::sync::Arc;
 use std::time::Duration;
 use gpui_kit::*;
+use gpui_kit::component::{input::{Input, InputEvent, InputState}, Sizable};
 use gpui_kit::prelude::FluentBuilder;
-use serde_json::Value;
+use serde_json::{json, Value};
 use crate::theme;
 
 /// Medidas dos mods são em células de terminal; estas são as da fonte mono de 12 px.
@@ -28,6 +29,47 @@ pub type Show = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 /// O ponteiro entrou (`true`) ou saiu de um escopo de hover ou de um cartão absoluto; o id é o lugar e o caminho.
 pub type Hover = Rc<dyn Fn(&str, bool, &mut Window, &mut App)>;
 
+/// Envio de um `Input` pelo rótulo de envio: (lugar, key).
+pub type Submit = Rc<dyn Fn(&str, &str, &mut Window, &mut App)>;
+
+/// Um `Input` de mod como a árvore o traz.
+#[derive(Debug, PartialEq)]
+pub struct FieldSpec { pub key: String, pub placeholder: String, pub value: String }
+
+/// O campo de texto que o app mantém para um `Input`, pela `key`: `drawn` é o último valor que o mod desenhou.
+pub struct Field { pub state: Entity<InputState>, pub drawn: String, pub _changes: Subscription }
+
+/// Os `Input` com `key` de uma árvore, na ordem dela.
+pub fn fields(tree: &Value) -> Vec<FieldSpec> {
+    fn walk(v: &Value, out: &mut Vec<FieldSpec>) {
+        if let Some(key) = (v["type"] == "Input").then(|| v["props"]["key"].as_str()).flatten().filter(|k| !k.is_empty()) {
+            out.push(FieldSpec { key: key.to_owned(), placeholder: text_of(&v["props"]["placeholder"]), value: text_of(&v["props"]["value"]) });
+        }
+        for k in children(v) { walk(k, out); }
+    }
+    let mut out = Vec::new();
+    walk(tree, &mut out);
+    out
+}
+
+/// Chave do campo no app: o lugar e a `key`, que só é única dentro do lugar.
+pub fn field_id(site: &str, key: &str) -> String { format!("{site}\u{1f}{key}") }
+
+/// A sessão aceita digitação pelo app: interface vinda da superfície (sessão sem terminal) e fora do só leitura. Com
+/// terminal, ou com servidor que não diz a fonte, o campo do mod só aceita digitação no terminal.
+pub fn accepts_typing(source: Option<UiSource>, read_only: bool) -> bool { source == Some(UiSource::Surface) && !read_only }
+
+/// O que o campo manda à rota `plugin/input`: só `change` (cada mudança) e `submit` (Enter).
+pub fn input_kind(event: &InputEvent) -> Option<&'static str> {
+    match event { InputEvent::Change => Some("change"), InputEvent::PressEnter { .. } => Some("submit"), _ => None }
+}
+
+/// O corpo do `plugin/input`, ou `None` quando a sessão não aceita digitação pelo app. Não se compara com o valor
+/// desenhado: o `set_value` que repõe o campo não emite `Change`, então todo `change` que chega é da pessoa.
+pub fn input_request(source: Option<UiSource>, read_only: bool, site: &str, key: &str, kind: &str, value: &str) -> Option<Value> {
+    accepts_typing(source, read_only).then(|| json!({"site": site, "key": key, "kind": kind, "value": value}))
+}
+
 /// O que o app passa para desenhar a faixa e os painéis: quem atende o clique e a troca de aba, a largura da faixa
 /// (`columns`) e o hover: quem avisa o app do ponteiro e os trechos com o ponteiro em cima. Sem `press`, botão é só
 /// rótulo e não há `✕`. `columns` é a largura, em colunas, para a qual a faixa foi desenhada.
@@ -37,6 +79,10 @@ pub struct View<'a> {
     pub columns: Option<f64>,
     pub hover: Option<Hover>,
     pub hovered: &'a HashSet<String>,
+    /// Campos dos `Input`, por `field_id`.
+    pub fields: &'a HashMap<String, Field>,
+    /// Presente só quando a sessão aceita digitação pelo app (fonte superfície e fora do só leitura).
+    pub submit: Option<Submit>,
 }
 
 /// Onde a árvore está desenhada e o que o app oferece. `links` numera os links na ordem da árvore: o mesmo endereço
@@ -399,8 +445,37 @@ fn element(v: &Value, c: &Ctx, at: &Spot) -> AnyElement {
                 _ => base.child(label).into_any_element(),
             }
         }
+        "Input" => field(p, c),
         "Image" => div().text_color(theme::muted()).child(text_of(&p["alt"])).into_any_element(),
         _ => div().flex().children(children(v).iter().enumerate().map(|(i, k)| node(k, c, &at.child(i, lit)))).into_any_element(),
+    }
+}
+
+/// `Input` de mod: rótulo, campo e rótulo de envio. Sem `submit` (sessão com terminal, servidor que não diz a fonte ou só
+/// leitura) o campo fica desabilitado, com a dica de digitar no terminal.
+fn field(p: &Value, c: &Ctx) -> AnyElement {
+    let label = text_of(&p["label"]);
+    let key = p["key"].as_str().filter(|k| !k.is_empty());
+    let row = div().flex().flex_row().items_center().gap_2().min_w_0()
+        .when(!label.is_empty(), |el| el.child(div().flex_shrink_0().child(label)));
+    let Some(state) = key.and_then(|k| c.view.fields.get(&field_id(c.site, k))) else {
+        // Antes de o app criar o campo (o primeiro quadro), só o texto de ajuda.
+        return row.child(div().text_color(theme::muted()).child(text_of(&p["placeholder"]))).into_any_element();
+    };
+    let typing = c.view.submit.clone().zip(key.map(str::to_owned));
+    let row = row.child(div().flex_1().min_w_0().child(Input::new(&state.state).small().disabled(typing.is_none())));
+    match typing {
+        Some((submit, key)) => {
+            let site = c.site.to_owned();
+            let send = Some(text_of(&p["submitLabel"])).filter(|s| !s.is_empty())
+                .unwrap_or_else(|| crate::i18n::tr_shared("plugin_input_enviar", &[]));
+            row.child(div().id(SharedString::from(format!("plg-enviar-{site}-{key}"))).flex_shrink_0().cursor_pointer()
+                .px(px(CELL_W)).rounded(px(4.)).bg(theme::raised()).child(send)
+                .on_click(move |_, window, cx| submit(&site, &key, window, cx))).into_any_element()
+        }
+        None => div().flex().flex_col().min_w_0().child(row)
+            .child(div().text_color(theme::muted()).whitespace_normal().child(crate::i18n::tr_shared("plugin_input_no_terminal", &[])))
+            .into_any_element(),
     }
 }
 
@@ -693,9 +768,10 @@ fn unmark(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
-    use super::{active_pane, button_key, cell_color, color, fills_place, follow_local, follows_server, hover_props, is_empty,
-        keep_hovered, pane_ids, plain_deep, raster_row, raster_runs, safe_href, scope_active, surfaces, text_row, toast, wants_hover,
-        Surfaces, Toast, UiSource};
+    use super::{accepts_typing, active_pane, button_key, cell_color, color, field_id, fields, fills_place, follow_local, follows_server,
+        hover_props, input_kind, input_request, is_empty, keep_hovered, pane_ids, plain_deep, raster_row, raster_runs, safe_href,
+        scope_active, surfaces, text_row, toast, wants_hover, FieldSpec, Surfaces, Toast, UiSource};
+    use gpui_kit::component::input::InputEvent;
     use serde_json::{json, Value};
     use std::borrow::Cow;
     use std::collections::HashSet;
@@ -896,5 +972,48 @@ mod tests {
         let mut hovered = lit();
         keep_hovered(&mut hovered, &[("above-prompt", &json!({"type": "Box", "props": {"key": "k"}, "children": []}))]);
         assert!(hovered.is_empty());
+    }
+
+    #[test]
+    fn fields_are_the_inputs_with_a_key_in_tree_order() {
+        let tree = json!({"type": "Box", "children": [amostras()["campoV18"], {"type": "Input", "props": {"label": "sem key"}}]});
+        assert_eq!(fields(&tree), vec![FieldSpec { key: "V18-campo".into(), placeholder: "digite e tecle Enter".into(), value: String::new() }]);
+        assert!(fields(&json!({"type": "Text", "children": ["a"]})).is_empty());
+        // Ordem da árvore, inclusive dentro de filhos aninhados.
+        let two = json!({"type": "Box", "children": [
+            {"type": "Box", "children": [{"type": "Input", "props": {"key": "b", "value": "x"}}]},
+            {"type": "Input", "props": {"key": "a", "placeholder": "p"}}]});
+        assert_eq!(fields(&two).iter().map(|f| f.key.as_str()).collect::<Vec<_>>(), ["b", "a"]);
+        // A `key` só é única dentro do lugar.
+        assert_ne!(field_id("vitrine-campos", "V18-campo"), field_id("above-prompt", "V18-campo"));
+    }
+
+    #[test]
+    fn typing_reaches_the_route_only_from_a_surface_session_that_is_not_read_only() {
+        assert!(accepts_typing(Some(UiSource::Surface), false));
+        // Com terminal, servidor que não diz a fonte, ou só leitura: campo desabilitado, nada vai para a rota.
+        assert!(!accepts_typing(Some(UiSource::Terminal), false));
+        assert!(!accepts_typing(None, false));
+        assert!(!accepts_typing(Some(UiSource::Surface), true));
+        assert_eq!(input_request(Some(UiSource::Terminal), false, "s", "k", "change", "a"), None);
+        assert_eq!(input_request(None, false, "s", "k", "submit", "a"), None);
+        assert_eq!(input_request(Some(UiSource::Surface), true, "s", "k", "submit", "a"), None);
+    }
+
+    #[test]
+    fn typing_equal_to_the_drawn_value_still_reaches_the_route() {
+        // O `set_value` que repõe o valor desenhado não emite `Change`: a pessoa que apaga até voltar ao valor desenhado
+        // (aqui, vazio) está digitando, e o `change` precisa chegar ao mod.
+        let drawn = fields(&amostras()["campoV18"]).remove(0).value;
+        assert_eq!(input_request(Some(UiSource::Surface), false, "vitrine-campos", "V18-campo", "change", &drawn),
+            Some(json!({"site": "vitrine-campos", "key": "V18-campo", "kind": "change", "value": drawn})));
+    }
+
+    #[test]
+    fn change_and_enter_are_the_only_input_events_sent() {
+        assert_eq!(input_kind(&InputEvent::Change), Some("change"));
+        assert_eq!(input_kind(&InputEvent::PressEnter { secondary: false, shift: false }), Some("submit"));
+        assert_eq!(input_kind(&InputEvent::Focus), None);
+        assert_eq!(input_kind(&InputEvent::Blur), None);
     }
 }
