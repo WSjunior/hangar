@@ -769,10 +769,14 @@ como o instalador já não instalava o Electron, instalação nova no Linux esta
   sessões multiplexadas por `sessionId`. Respostas resolvem direto da thread de leitura; eventos
   vão à thread da interface, como no WebView2. `browser::cdp::Cdp` é o mesmo nome nos dois
   sistemas.
-- **O painel pinta o screencast.** Cada quadro (JPEG) é decodificado na thread de leitura e
+- **O painel pinta o screencast.** Cada quadro (PNG) é decodificado na thread de leitura e
   gravado numa textura do device wgpu da GPUI, a mesma a cada quadro (`paint_surface`); o ack sai
   dali mesmo. Painel escondido para o screencast; o controlador mantém a página em 1280×800 para
-  o `shot`.
+  o `shot`. O quadro é esticado até o painel: no resize, o do tamanho antigo cobre tudo até chegar
+  o do novo, em vez de deixar sobra vazia.
+- **PNG, não JPEG (05/10/2026).** O JPEG q85 borrava o texto. Medido com Chrome 154 sem janela,
+  página de 890×764 com animação e texto: JPEG 59,6 quadros/s e 65 KB por quadro, PNG 59,8
+  quadros/s e 84 KB. A tela remota do celular tem screencast próprio e não mudou.
 - **Duas sessões por alvo.** A do painel serve o controlador, o screencast do painel e a entrada.
   O espectador da tela remota ganha uma sessão própria no primeiro `Watch`, com screencast do
   tamanho do aparelho, e ela cai no `Unwatch`.

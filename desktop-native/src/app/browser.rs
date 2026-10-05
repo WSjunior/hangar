@@ -136,7 +136,7 @@ impl BrowserPanel {
     fn attach(&mut self, engine: &Rc<Engine>, cx: &mut Context<Self>) {
         use crate::browser::control::{CdpPage, Controller, EVENTS};
         let cdp = engine.cdp();
-        let ctl = Rc::new(Controller::new(CdpPage { cdp: cdp.clone(), executor: cx.background_executor().clone() }));
+        let ctl = Rc::new(Controller::new(CdpPage { cdp: cdp.clone(), executor: cx.background_executor().clone() }, !self.shown));
         for event in EVENTS {
             let weak = Rc::downgrade(&ctl);
             if let Err(e) = cdp.on(event, move |params| if let Some(ctl) = weak.upgrade() { ctl.on_event(event, &params) }) {
@@ -145,8 +145,8 @@ impl BrowserPanel {
         }
         #[cfg(target_os = "windows")]
         { self.listen_relay(&cdp); *self.relay.borrow_mut() = Some(cdp.clone()); }
-        let (setup, hidden) = (ctl.clone(), !self.shown);
-        cx.spawn(async move |_, _| setup.start(hidden).await).detach();
+        let setup = ctl.clone();
+        cx.spawn(async move |_, _| setup.start().await).detach();
         self.controller = Some(ctl);
         self.cdp = Some(cdp);
     }
@@ -351,16 +351,23 @@ impl Hangar {
     pub(super) fn open_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = self.browser_key() else { return };
         let browser = self.browser_for(key, window, cx);
-        self.side.browser_open = true;
-        self.choose_side_tab(SideTab::Browser, window, cx);
+        self.show_browser_tab(window, cx);
         browser.update(cx, |panel, cx| panel.focus_address(window, cx));
     }
 
-    /// O × da aba Navegador: a aba sai e a página se esconde, mas o painel e o motor ficam para o "+" reabrir a mesma
+    /// Painel aberto com a aba Navegador da sessão aberta à frente.
+    fn show_browser_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.side_key() else { return };
+        if !self.side.open { self.toggle_side(cx); }
+        self.side.browser_open.insert(key);
+        self.choose_side_tab(SideTab::Browser, window, cx);
+    }
+
+    /// O × da aba Navegador: a aba sai desta sessão e a página se esconde, mas o motor fica para o "+" reabrir a mesma
     /// página.
     pub(super) fn close_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let showing = self.side_tab() == SideTab::Browser;
-        self.side.browser_open = false;
+        if let Some(key) = self.side_key() { self.side.browser_open.remove(&key); }
         for browser in self.side.browsers.values().cloned().collect::<Vec<_>>() { browser.update(cx, |panel, cx| { panel.set_shown(false, cx); }); }
         if showing { self.choose_side_tab(SideTab::Context, window, cx); } else { cx.notify(); }
     }
@@ -395,17 +402,21 @@ impl Hangar {
 
     /// Dono do navegador na tela: a sessão aberta, com a máquina dela; uma chave só no macOS.
     pub(super) fn browser_key(&self) -> Option<String> {
-        if !cfg!(target_os = "macos") {
-            Some(format!("{}::{}", super::servers::norm(&self.session_server()?), self.selected.as_ref()?.name))
-        } else { Some("*".into()) }
+        if !cfg!(target_os = "macos") { self.side_key() } else { Some("*".into()) }
+    }
+
+    /// `servidor::sessão` da sessão aberta: dono da aba lembrada e da aba Navegador do painel.
+    pub(super) fn side_key(&self) -> Option<String> {
+        Some(format!("{}::{}", super::servers::norm(&self.session_server()?), self.selected.as_ref()?.name))
     }
 
     fn browser_for(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) -> Entity<BrowserPanel> {
         self.side.browsers.entry(key.clone()).or_insert_with(|| cx.new(|cx| BrowserPanel::new(key, window, cx))).clone()
     }
 
-    /// `hangar-preview open` → backend → evento `nav` na lista. O navegador nasce escondido se a sessão não estiver na
-    /// tela, e o CLI já consegue dirigi-lo. Só do servidor desta máquina: o CLI que pediu roda nela.
+    /// `hangar-preview open` → backend → evento `nav` na lista. Com a sessão na tela a aba Navegador vem à frente; fora
+    /// dela o navegador nasce escondido, o CLI já o dirige, e a aba aparece quando a sessão for aberta. Só do servidor
+    /// desta máquina: o CLI que pediu roda nela.
     pub(super) fn receive_nav(&mut self, data: serde_json::Value, window: &mut Window, cx: &mut Context<Self>) {
         if cfg!(target_os = "macos") { return; }
         if !self.api.as_ref().is_some_and(|api| api.is_loopback()) { eprintln!("[nav] nav ignorado: servidor ativo nao e desta maquina"); return; }
@@ -413,8 +424,12 @@ impl Hangar {
         // Mesma chave de `browser_key` com essa sessão aberta: a lista que traz o evento é a do servidor ativo.
         let Some(server) = self.server.as_deref() else { eprintln!("[nav] nav ignorado: sem servidor ativo"); return };
         let key = format!("{}::{name}", super::servers::norm(server));
-        let browser = self.browser_for(key, window, cx);
+        let browser = self.browser_for(key.clone(), window, cx);
         browser.update(cx, |panel, cx| panel.go(url.to_owned(), window, cx));
+        if self.browser_key().as_deref() == Some(key.as_str()) { self.show_browser_tab(window, cx); } else {
+            self.side.browser_open.insert(key.clone());
+            self.side.tabs.insert(key, SideTab::Browser);
+        }
         if let Some(api) = self.api.clone() {
             let name = name.to_owned();
             // Sem a confirmação o backend manda o mesmo `nav` de novo na próxima conexão; abrir duas vezes só renavega.
@@ -447,7 +462,7 @@ impl Hangar {
         if tab.is_some() { return answer(reply, "erro: o app nativo ainda nao tem abas: e um navegador por sessao".into()); }
         if verb == "close" {
             let closed = self.side.browsers.remove(&key).inspect(|b| b.read(cx).end_viewer()).is_some();
-            if closed { crate::browser::server::remove_sidecar(&key); cx.notify(); }
+            if closed { crate::browser::server::remove_sidecar(&key); self.side.browser_open.remove(&key); cx.notify(); }
             return answer(reply, if closed { "ok: close".into() } else { format!("erro: a sessao {key} nao tem navegador aberto") });
         }
         let Some(browser) = self.side.browsers.get(&key) else { return answer(reply, missing(&key)) };

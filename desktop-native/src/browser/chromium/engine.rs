@@ -26,9 +26,6 @@ use crate::browser::{Event, Pointer, model};
 struct Shown {
     texture: wgpu::Texture,
     device: wgpu::Device,
-    /// Tamanho da página em px lógicos (CSS), o que o quadro cobre.
-    width: f32,
-    height: f32,
 }
 
 /// Dividido com a thread de leitura do pipe, que decodifica o quadro sem passar pela interface.
@@ -46,7 +43,7 @@ impl Surface {
 
     fn upload(&self, params: &Value) -> Result<(), String> {
         let bytes = base64::engine::general_purpose::STANDARD.decode(params["data"].as_str().unwrap_or("")).map_err(|e| e.to_string())?;
-        let pixels = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).map_err(|e| e.to_string())?.into_rgba8();
+        let pixels = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png).map_err(|e| e.to_string())?.into_rgba8();
         let (width, height) = pixels.dimensions();
         let (device, queue) = gpui_wgpu::WgpuContext::shared_device().ok_or("a GPUI não expôs o device wgpu")?;
         let mut shown = self.shown.lock().unwrap_or_else(PoisonError::into_inner);
@@ -71,9 +68,7 @@ impl Surface {
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * width), rows_per_image: Some(height) },
             wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
-        let meta = &params["metadata"];
-        let css = |key: &str, fallback: u32| meta[key].as_f64().map_or(fallback as f32, |v| v as f32);
-        *shown = Some(Shown { texture, device, width: css("deviceWidth", width), height: css("deviceHeight", height) });
+        *shown = Some(Shown { texture, device });
         drop(shown);
         if !self.pending.swap(true, Ordering::SeqCst) { let _ = self.events.try_send(Event::Frame); }
         Ok(())
@@ -319,7 +314,8 @@ impl Engine {
         }
         if !self.visible.replace(true) || resized {
             let (pw, ph) = ((w * scale).round() as i64, (h * scale).round() as i64);
-            self.send("Page.startScreencast", json!({"format": "jpeg", "quality": 85, "maxWidth": pw.max(1), "maxHeight": ph.max(1), "everyNthFrame": 1}));
+            // PNG: o JPEG borra o texto, e o Chromium mantém os mesmos quadros/s nos dois.
+            self.send("Page.startScreencast", json!({"format": "png", "maxWidth": pw.max(1), "maxHeight": ph.max(1), "everyNthFrame": 1}));
         }
         // Zera antes de ler: um quadro que chegue no meio ainda avisa a tela.
         self.surface.pending.store(false, Ordering::SeqCst);
@@ -327,15 +323,10 @@ impl Engine {
         let shown = {
             let mut latest = self.surface.shown.lock().unwrap_or_else(PoisonError::into_inner);
             if latest.as_ref().is_some_and(|s| Some(&s.device) != device.as_ref()) { *latest = None; }
-            latest.as_ref().map(|s| (s.texture.clone(), s.width, s.height))
+            latest.as_ref().map(|s| s.texture.clone())
         };
-        if let Some((texture, width, height)) = shown {
-            // No tamanho da página que o quadro mostra: durante um resize a sobra fica vazia, nunca esticada.
-            let drawn = size(px(width), px(height));
-            window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                window.paint_surface(Bounds::new(bounds.origin, drawn), Arc::new(texture))
-            });
-        }
+        // Esticado até o painel: durante um resize o quadro do tamanho antigo cobre tudo até chegar o do novo.
+        if let Some(texture) = shown { window.paint_surface(bounds, Arc::new(texture)); }
     }
 
     /// Página fora da tela: sem screencast. O controlador cuida do tamanho dela para o `shot`.
