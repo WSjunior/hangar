@@ -13,6 +13,8 @@ hangar-workspace = { path = "../hangar-workspace" }
 regex.workspace = true
 md-5.workspace = true
 sha1_smol.workspace = true
+# sha256 do workdir_key do Kimi; já vem pelo rustls, sem crate novo.
+ring = "=0.17.14"
 serde.workspace = true
 axum = { workspace = true }
 bytes = { workspace = true }
