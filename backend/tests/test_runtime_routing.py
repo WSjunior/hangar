@@ -853,3 +853,71 @@ def test_connection_error_outside_an_opening_is_not_a_rust_crash(monkeypatch):
     monkeypatch.setattr(diag, "registrar", lambda evento, nivel="ok", **campos: events.append((evento, nivel)))
     runtime_coordinator._registration_failed("runtime.recover_failed", "s1", ConnectionResetError("cano"))
     assert events == [("runtime.recover_failed", "erro")]
+
+
+def test_bypass_reopen_closes_and_reopens_in_rust(birth, monkeypatch):
+    from app import adapters
+    from app.adapters import CLAUDE_HEADLESS
+    owner, transport, pid = _opened(birth)
+    monkeypatch.setitem(adapters.PROVIDERS, CLAUDE_HEADLESS, birth.adapter)
+    monkeypatch.setattr(api, "_invalidate_lists", lambda: None)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("s1")
+        transport.view = {"initialized":True, "iniciando":False}
+        await owner.refresh_snapshot("s1")
+        info = SimpleNamespace(name="s1", provider="claude", headless=True, jsonl=None)
+        return await api._bypass_reopen("s1", info)
+    result = asyncio.run(scenario())
+    assert result["reopened"] is True and result["mode"] == "bypassPermissions"
+    assert transport.kinds() == ["open", "snapshot", "queue", "snapshot", "close", "open"]
+    assert transport.ops[5][1]["meta"]["permission_mode"] == "bypassPermissions"
+    assert birth.kills == [pid] and len(birth.launches) == 1
+    assert owner.slot("s1").phase == runtime_coordinator.Phase.Rust
+
+
+def test_bypass_reopen_failure_stops_the_bypass_process_and_restores_mode(birth, monkeypatch):
+    from fastapi import HTTPException
+    from app import adapters
+    from app.adapters import CLAUDE_HEADLESS
+    owner, transport, pid = _opened(birth)
+    monkeypatch.setitem(adapters.PROVIDERS, CLAUDE_HEADLESS, birth.adapter)
+    monkeypatch.setattr(api, "_invalidate_lists", lambda: None)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("s1")
+        transport.view = {"iniciando":False, "public_state":{"session":"s1", "state":"idle", "headless":True,
+            "problema":"headless_nao_subiu", "problema_detalhe":"initialize recusado: bypass proibido"}}
+        await owner.refresh_snapshot("s1")
+        info = SimpleNamespace(name="s1", provider="claude", headless=True, jsonl=None)
+        with pytest.raises(HTTPException) as exc:
+            await api._bypass_reopen("s1", info)
+        return exc.value
+    error = asyncio.run(scenario())
+    assert error.status_code == 409 and error.detail["code"] == "erro_permissao_reabrir"
+    assert birth.sessions.load("s1")["permission_mode"] == "manual"
+    assert transport.kinds() == ["open", "snapshot", "queue", "snapshot", "close", "open", "snapshot", "close"]
+    assert transport.lease is None and birth.sessions.load("s1").get("cano") is None, "o processo em bypass parou"
+    assert len(birth.launches) == 1 and owner.slot("s1").phase == runtime_coordinator.Phase.Python, "fica parada no modo de antes"
+
+
+def test_bypass_reopen_refuses_a_working_rust_session(birth, monkeypatch):
+    from fastapi import HTTPException
+    from app import adapters
+    from app.adapters import CLAUDE_HEADLESS
+    owner, transport, pid = _opened(birth)
+    monkeypatch.setitem(adapters.PROVIDERS, CLAUDE_HEADLESS, birth.adapter)
+    monkeypatch.setattr(api, "_invalidate_lists", lambda: None)
+    async def scenario():
+        owner.loop = asyncio.get_running_loop()
+        await owner.ensure_open("s1")
+        transport.view = {"initialized":True, "iniciando":False, "public_state":{"session":"s1", "state":"working", "headless":True}}
+        await owner.refresh_snapshot("s1")
+        info = SimpleNamespace(name="s1", provider="claude", headless=True, jsonl=None)
+        with pytest.raises(HTTPException) as exc:
+            await api._bypass_reopen("s1", info)
+        return exc.value
+    error = asyncio.run(scenario())
+    assert error.status_code == 409 and error.detail["code"] == "erro_sessao_trabalhando"
+    assert birth.kills == [], "o turno em andamento não é morto"
+    assert owner.slot("s1").phase == runtime_coordinator.Phase.Rust

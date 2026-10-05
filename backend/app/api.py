@@ -9124,7 +9124,7 @@ async def permission_mode_set(name: str, body: PermissionModeBody):
             _log.warning("permissão: %s recusou bypass sem reiniciar (%s); reabrindo em bypass", name, e)
             ficou = None
         if alvo == "bypassPermissions" and ficou != alvo:
-            return await _durante_troca(name, _reabrir_em_bypass(name, info))
+            return await _bypass_reopen(name, info)
         vivo = hl._sessions.get(name)
         await asyncio.to_thread(_invalidate_lists)
         from app.runtime_adapter import runtime_data
@@ -9133,7 +9133,7 @@ async def permission_mode_set(name: str, body: PermissionModeBody):
                 "previous_non_plan":view.get("previous_non_plan") if view is not None else vivo.modo_nao_plan if vivo else None}
     _guard_perm(name, info)
     if alvo == "bypassPermissions" and not await asyncio.to_thread(_bypass_no_ciclo, name):
-        return await _durante_troca(name, _reabrir_em_bypass(name, info))
+        return await _bypass_reopen(name, info)
     tracking_key = _tracking_key_perm(name, info)
     try:
         inicial = await asyncio.to_thread(perm_mode.ler_modo, name)
@@ -9174,6 +9174,15 @@ def _bypass_no_ciclo(name: str) -> bool:
     return any(f in cmd for f in _FLAGS_BYPASS)
 
 
+async def _bypass_reopen(name: str, info):
+    # Com o Rust dono, dentro da barreira a sessão já foi fechada e a vista dele (trabalhando,
+    # pergunta pendente) não é mais lida: a ociosidade se confere antes de fechar.
+    motivo = await _motivo_ocupada(name, _headless(name))
+    if motivo:
+        raise HTTPException(409, detail=erro(motivo, "para entrar em bypass a sessão reinicia: " + _OCUPADA[motivo]))
+    return await _durante_troca(name, _reabrir_em_bypass(name, info))
+
+
 async def _reabrir_em_bypass(name: str, info):
     """Reabre a mesma conversa (`--resume`) já em bypass, como a troca de conta. Só ociosa."""
     hl = get_adapter(CLAUDE_HEADLESS)
@@ -9196,6 +9205,16 @@ async def _reabrir_em_bypass(name: str, info):
                 await hl.ensure_running(name, require_initialize=True)
             except Exception as e:
                 _log.exception("permissão: %s não reabriu em bypass; voltando ao modo de antes", name)
+                # O processo pode ter subido em bypass e seguir vivo (initialize recusado): sem
+                # parar, ele continua em bypass com o arquivo dizendo outro modo.
+                try:
+                    await hl.parar(name)
+                except Exception as stop_error:
+                    # Processo talvez vivo em bypass: o arquivo segue dizendo bypass, não o modo de antes.
+                    _log.exception("permissão: %s não parou depois de falhar em bypass", name)
+                    raise HTTPException(409, detail=erro("erro_permissao_reabrir",
+                        f"a sessão não reabriu em bypass ({e}) e não parou ({stop_error}); ela pode seguir em bypass",
+                        erro=str(e), stop_error=str(stop_error))) from e
                 headless_sessions.update(name, permission_mode=antes.get("permission_mode"),
                                          previous_non_plan=antes.get("previous_non_plan"))
                 hl.acordar(name)
