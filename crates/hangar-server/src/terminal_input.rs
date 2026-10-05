@@ -320,10 +320,8 @@ impl TerminalDriver {
     }
     /// Leitura sem conferir a conversa: só para provar o próprio `/clear`, que a troca.
     async fn composer_capture_unverified(&self) -> Result<(String, String), IoFailure> {
-        let mut args = vec!["capture-pane".into(), "-p".into()];
-        // psmux sem prova de que entende `-e`: no Windows a leitura continua sem estilo.
-        if !self.binding.windows { args.push("-e".into()); }
-        args.extend(["-t".into(), self.binding.pane.clone(), "-S".into(), "-200".into()]);
+        // Também no psmux: sem estilo, a sugestão esmaecida do composer vazio parece texto digitado.
+        let args = vec!["capture-pane".into(), "-p".into(), "-e".into(), "-t".into(), self.binding.pane.clone(), "-S".into(), "-200".into()];
         let output = self.raw(args, vec![]).await?;
         if !output.success { return Err(IoFailure { code: "capture_failed", may_have_written: false }); }
         let styled = String::from_utf8(output.stdout).map_err(|_| IoFailure { code: "capture_utf8", may_have_written: false })?;

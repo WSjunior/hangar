@@ -362,3 +362,28 @@ async fn terminal_input_sent_text_left_dim_in_composer_is_not_proof_of_submit() 
  let r=driver(io.clone(),Arc::new(Services::new())).prompt("ok","id").await;
  assert_eq!((r.disposition,r.code.as_str()),(Disposition::Unknown,"submit_unproved"));
 }
+/// Tela do psmux com `-e`: a sugestão vem esmaecida (`0;2m`) depois de um NBSP.
+fn psmux_screen(typed: &str) -> String {
+ let rule = format!("\u{1b}[0;38;2;136;136;136m{}\u{1b}[0m", "─".repeat(30));
+ let typed = if typed.is_empty() { "\u{1b}[0;2mTry \"fix typecheck errors\"\u{1b}[0m".to_string() } else { typed.to_string() };
+ format!("\u{1b}[0mhistory\u{1b}[0m\n{rule}\n\u{1b}[0m❯\u{a0}{typed}\n{rule}\n\u{1b}[0m  \u{1b}[0;38;2;255;193;7m⏵⏵ auto mode on\u{1b}[0m\n")
+}
+/// Como o psmux: sem `-e` a captura sai sem estilo, e a sugestão vira texto comum.
+struct PsmuxIo(FakeIo);
+impl TerminalIo for PsmuxIo {
+ fn command<'a>(&'a self, r: CommandRequest) -> IoFuture<'a, CommandOutput> { Box::pin(async move {
+  let styled = r.args.iter().any(|a| a == "-e");
+  let mut out = self.0.command(r.clone()).await?;
+  if r.args.iter().any(|a| a == "capture-pane") && !styled { out.stdout = unstyle(&String::from_utf8(out.stdout).unwrap(), true).into_bytes(); }
+  Ok(out) }) }
+ fn socket<'a>(&'a self, n: &'a NativeMessage, e: Vec<u8>) -> IoFuture<'a, WriteOutcome> { self.0.socket(n, e) }
+}
+#[tokio::test]
+async fn terminal_input_windows_dim_suggestion_is_an_empty_composer() {
+ let mut b=binding();b.windows=true;b.pane="=test:0.0".into();
+ let s=Arc::new(Services::new());s.facts.lock().unwrap().binding=b.clone();
+ let io=Arc::new(PsmuxIo(FakeIo::new(vec![psmux_screen(""),psmux_screen("ola"),psmux_screen("")])));
+ let r=TerminalDriver::new(b,s,io.clone(),instant_limits()).prompt("ola","id").await;
+ assert_eq!((r.disposition,r.code.as_str()),(Disposition::Accepted,"submitted"));
+ let writes=io.0.writes(); assert!(writes.iter().all(|w|w.args.last().unwrap()!="C-u"));
+}
