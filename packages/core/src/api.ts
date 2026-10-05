@@ -2464,6 +2464,25 @@ export async function pressPluginButton(
                 : apiFetch<{ ok: boolean; copied?: string; opened?: string }>(path, init);
 }
 
+/** Traz um painel de mod para a frente (`plugin/show`). Servidor sem a rota responde 404 ou 405 (`isMissingRoute`). */
+export async function showPluginPane(name: string, site: string, server?: Server): Promise<{ ok: boolean }> {
+  const path = `/api/sessions/${encodeURIComponent(name)}/plugin/show`;
+  const init = { method: 'POST', body: JSON.stringify({ site }) };
+  return server ? apiFetchForServer<{ ok: boolean }>(server, path, init) : apiFetch<{ ok: boolean }>(path, init);
+}
+
+export type PluginInputKind = 'change' | 'submit';
+
+/** Digitação num `Input` de mod (`plugin/input`): só a sessão sem terminal aceita; com terminal vem
+ *  `erro_mod_sem_digitacao`. */
+export async function inputPluginField(
+  name: string, site: string, key: string, kind: PluginInputKind, value: string, server?: Server,
+): Promise<{ ok: boolean }> {
+  const path = `/api/sessions/${encodeURIComponent(name)}/plugin/input`;
+  const init = { method: 'POST', body: JSON.stringify({ site, key, kind, value }) };
+  return server ? apiFetchForServer<{ ok: boolean }>(server, path, init) : apiFetch<{ ok: boolean }>(path, init);
+}
+
 // Pergunta lateral (/btw do Claude Code): o backend dirige o overlay da TUI e devolve a resposta.
 // Demora o que a resposta demorar (ate 120s no backend) — quem chama mostra espera.
 export interface PerguntaLateral {
