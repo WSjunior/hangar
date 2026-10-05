@@ -155,6 +155,17 @@ async def test_sem_posse_da_escrita_recusa_em_vez_de_500(sessao, monkeypatch):
     assert e.value.detail["code"] == "erro_mod_clique_sem_resposta"
 
 
+@pytest.mark.asyncio
+async def test_recusa_sem_posse_deixa_a_causa_no_log(sessao, monkeypatch, caplog):
+    # Sem posse, vínculo em dúvida e Rust mudo viram o mesmo 409: só o log separa um do outro.
+    def sem_posse(name, row, col):
+        raise RuntimeError("Python sem posse da escrita terminal")
+    monkeypatch.setattr(pc, "click", sem_posse)
+    with caplog.at_level("WARNING", logger="hangar.plugin_click"), pytest.raises(pc.PressRefused):
+        await pc.press("clk", "above-prompt", "rv-1")
+    assert "sem posse da escrita" in caplog.text
+
+
 def test_clique_sem_coordenador_vai_direto_ao_terminal(monkeypatch):
     # Sem o coordenador do runtime (a main e a reserva), o clique envolvido é o de sempre.
     from app import runtime_coordinator, tmux
