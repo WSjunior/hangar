@@ -471,7 +471,7 @@ mod tests {
 
     fn pane(name: &str, cwd: &str) -> Pane {
         Pane { session: name.into(), active: true, pid: None, cwd: cwd.into(), pane_id: "%1".into(), hidden: false,
-            provider: None, session_created: None }
+            provider: None, session_created: None, ..Pane::default() }
     }
 
     #[test]

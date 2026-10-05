@@ -88,6 +88,7 @@ fn pane(case: &Case, v: &Value) -> Pane {
         hidden: v["hidden"].as_bool().unwrap(),
         provider: v["provider"].as_str().map(String::from),
         session_created: v["session_created"].as_u64(),
+        ..Pane::default()
     }
 }
 
