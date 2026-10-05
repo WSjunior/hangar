@@ -568,3 +568,19 @@ fn fresh_blocking_inside_tokio_waits_while_async_prepare_stays_responsive() {
         assert_eq!(source.calls.load(Ordering::SeqCst), 2, "ambos compartilham a varredura");
     });
 }
+
+#[test]
+fn persistent_failure_does_not_start_a_scan_per_request() {
+    let (_d, base) = fixtures_copy();
+    let source = Fixed::new(Err(()));
+    let c = collector(&base, source.clone());
+    c.schedule_warmup(Duration::ZERO);
+    wait_failed(&c);
+    let after_first = source.calls.load(Ordering::SeqCst);
+    // Pedidos em rajada (a tela inicial e a de Custos abertas) dentro do intervalo: só a falha guardada.
+    for _ in 0..20 {
+        assert!(matches!(c.prepare(false), Err(CollectError::NoScopes)));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(source.calls.load(Ordering::SeqCst), after_first);
+}

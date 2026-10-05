@@ -156,6 +156,7 @@ enum Prepared {
 async fn finish(
     state: &AppState,
     request: Request,
+    // Nome da sessão no custo avulso; nas outras, a rota: o diário separa uma da outra.
     session: &str,
     result: Result<Prepared, FailureReason>,
 ) -> Response {
@@ -259,7 +260,7 @@ pub async fn costs(
         serde_json::to_vec(&report).map(Prepared::Body).map_err(|_| FailureReason::Json)
     })
     .await;
-    finish(&state, request, "", result).await
+    finish(&state, request, "costs", result).await
 }
 
 pub async fn cotacao(
@@ -280,7 +281,7 @@ pub async fn cotacao(
         Ok(Prepared::Body(serde_json::json!({"usd_brl":rate}).to_string().into_bytes()))
     })
     .await;
-    finish(&state, request, "", result).await
+    finish(&state, request, "cotacao", result).await
 }
 
 fn session_not_found(headers: &HeaderMap, message: &'static str) -> Response {
@@ -418,5 +419,5 @@ pub async fn usage(
         serde_json::to_vec(&report).map(Prepared::Body).map_err(|_| FailureReason::Json)
     })
     .await;
-    finish(&state, request, "", result).await
+    finish(&state, request, "uso", result).await
 }

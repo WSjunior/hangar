@@ -14,6 +14,8 @@ use super::{claude, codex, simple};
 
 const FRESHNESS: Duration = Duration::from_secs(30);
 const FRESH_WAIT: Duration = Duration::from_secs(3);
+// Falha que persiste (disco, escopos) não vira uma varredura por pedido.
+const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Scopes {
@@ -99,6 +101,7 @@ struct Scanner {
     completed: Option<Arc<ScanTicket>>,
     last_success: Option<Instant>,
     failure: Option<Failure>,
+    failed_at: Option<Instant>,
 }
 #[derive(Default)]
 struct Metadata {
@@ -154,8 +157,10 @@ impl Collector {
         if scanner.completed.is_none() { return Ok(self.warming()); }
         if !fresh {
             if let Some(failure) = scanner.failure {
-                // Sem isto a falha ficava presa até um `fresco`: o próximo pedido já pega a nova coleta.
-                if scanner.running.is_none() { self.start_scan(&mut scanner); }
+                // Sem isto a falha ficava presa até um `fresco`: um pedido seguinte já pega a nova coleta.
+                if scanner.running.is_none() && scanner.failed_at.is_none_or(|at| at.elapsed() >= RETRY_AFTER_FAILURE) {
+                    self.start_scan(&mut scanner);
+                }
                 return Err(failure.error());
             }
             if scanner.last_success.is_some_and(|at| at.elapsed() >= FRESHNESS) && scanner.running.is_none() {
@@ -200,6 +205,7 @@ impl Collector {
             scanner.running = None;
             scanner.completed = Some(running.clone());
             scanner.failure = result.err();
+            scanner.failed_at = scanner.failure.map(|_| Instant::now());
             if result.is_ok() { scanner.last_success = Some(Instant::now()); }
             *running.result.lock().unwrap() = Some(result);
             collector.completed_scans.fetch_add(1, Ordering::Release);
@@ -207,6 +213,7 @@ impl Collector {
         });
         if spawned.is_err() {
             scanner.running = None; scanner.completed = Some(ticket.clone()); scanner.failure = Some(Failure::Disk);
+            scanner.failed_at = Some(Instant::now());
             *ticket.result.lock().unwrap() = Some(Err(Failure::Disk));
             self.completed_scans.fetch_add(1, Ordering::Release);
             ticket.done.notify_all();

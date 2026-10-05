@@ -271,6 +271,16 @@ async fn non_finite_quote_and_reports_fail_with_code_instead_of_serializing_null
     for route in ["/api/cotacao", "/api/costs", "/api/uso"] {
         assert_eq!(h.failure(route).await, "costs_non_finite", "{route}");
     }
+    // Cada rota assina a própria linha: uma não esconde a outra no limite por minuto do diário.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut seen: Vec<String> = h.upstream.journal.lock().unwrap().iter()
+            .filter(|e| e["codigo"] == "costs_non_finite").map(|e| e["sessao"].as_str().unwrap().to_owned()).collect();
+        seen.sort();
+        if seen == ["costs", "cotacao", "uso"] { break; }
+        assert!(Instant::now() < deadline, "diário: {seen:?}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 #[tokio::test]

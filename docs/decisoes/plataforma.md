@@ -1126,9 +1126,12 @@ por pedido; falha interna vira 503 com `error_code` e `detail.{code,params.motiv
 envelope que o `lerErro` do app traduz), uma linha no `hangar-server.log` e o evento
 `rust.costs_failed` no diário pelo `POST /internal/diag`. Códigos fixos `costs_no_scopes`,
 `costs_no_disk`, `costs_reader_panic`, `costs_sqlite`, `costs_json`, `costs_worker_join`,
-`costs_io`, `costs_non_finite` e `internal_info`. Nada é repassado ao Python por falha. A
-coleta que falhou fica guardada até o próximo pedido, que já dispara outra atrás (sem esperar
-`fresco` nem os 30 s); por isso o pedido seguinte pode voltar 202 ou 200. Aquecimento 202,
+`costs_io`, `costs_non_finite` e `internal_info`; o campo `sessao` do diário leva o nome da
+sessão no custo avulso e a rota (`costs`, `uso`, `cotacao`) nas outras, para uma não esconder a
+outra no limite de uma linha por minuto. Nada é repassado ao Python por falha. A coleta que
+falhou fica guardada, e um pedido 5 s depois dela já dispara outra atrás (sem esperar `fresco`
+nem os 30 s; antes disso só a falha guardada, para disco ou escopos fora do ar não virarem uma
+varredura por pedido); por isso um pedido seguinte pode voltar 202 ou 200. Aquecimento 202,
 ausência legítima 404, relatório vazio e falta de tarifa/cotação não são falha. A versão
 anterior (contrato 8: quatro tentativas e passagem da parte ao Python, rota
 `/internal/rust-failure`) saiu na junção com o dono único, contrato 18.
