@@ -346,8 +346,8 @@ mod passwords {
     use std::num::NonZeroU32;
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::sync::{Arc, Mutex, OnceLock};
-    use std::time::SystemTime;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant, SystemTime};
 
     use cbc::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
     use ring::rand::{SecureRandom, SystemRandom};
@@ -472,10 +472,23 @@ mod passwords {
         ["Login Data", "Login Data For Account"].iter().map(|n| base.join(n)).filter(|p| p.exists()).collect()
     }
 
-    /// Uma consulta ao chaveiro por processo: travado, cada `secret-tool` pede a senha dele na tela.
-    fn keys() -> &'static [Vec<u8>] {
-        static KEYS: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
-        KEYS.get_or_init(key_candidates)
+    /// Chave do chaveiro achada vale pelo processo; sem ela (chaveiro travado, sem `secret-tool`) tenta de novo depois
+    /// de 5 min, em vez de pedir a senha do chaveiro a cada página ou desistir até reiniciar o app.
+    fn keys() -> Vec<Vec<u8>> {
+        static KEYS: Mutex<Option<(Option<Instant>, Vec<Vec<u8>>)>> = Mutex::new(None);
+        let mut cached = KEYS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((retry, keys)) = cached.as_ref()
+            && retry.is_none_or(|at| at.elapsed() < Duration::from_secs(300))
+        {
+            return keys.clone();
+        }
+        let keys = key_candidates();
+        if keys.len() == 1 {
+            eprintln!("[nav] autofill: chaveiro sem a chave do Chrome; nova tentativa em 5 min");
+        }
+        let retry = (keys.len() == 1).then(Instant::now);
+        *cached = Some((retry, keys.clone()));
+        keys
     }
 
     /// Chaves candidatas: o literal "peanuts" (armazenamento básico) e a do chaveiro ("Chrome Safe Storage"); perfis

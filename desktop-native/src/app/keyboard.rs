@@ -41,7 +41,9 @@ impl Command {
     /// Onde a tecla dispara; `context` continua sendo o grupo da tela e a chave de conflito.
     fn predicate(&self) -> &'static str {
         match self {
-            // Ctrl+W num campo de texto apaga a palavra, e na página do navegador é da página.
+            // Ctrl+W num campo de texto apaga a palavra, e na página do navegador é da página. No macOS a tecla é Cmd+W,
+            // que não edita texto: fecha a sessão de qualquer lugar fora do terminal.
+            Self::CloseSession if cfg!(target_os = "macos") => "!Terminal",
             Self::CloseSession => "!Terminal && !Input && !BrowserPage",
             _ => self.context(),
         }
