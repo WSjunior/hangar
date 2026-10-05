@@ -5616,7 +5616,7 @@ impl Hangar {
             let site = site.to_owned();
             let _ = view.update(cx, |this, cx| this.show_plugin(site, cx));
         });
-        crate::plugin_ui::View { press: self.plugin_press(cx), show: Some(show) }
+        crate::plugin_ui::View { press: self.plugin_press(cx), show: Some(show), columns: self.plugin_columns }
     }
 
     /// Troca de aba: seguindo o `shown_id`, a aba só muda quando o novo chega; sem ele (servidor antigo), a troca é
