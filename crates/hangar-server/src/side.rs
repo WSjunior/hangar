@@ -69,8 +69,9 @@ pub fn remember_info(cache: &InfoCache, name: &str, info: Option<InternalInfo>) 
 /// abre o chat depois ficava sem a faixa até o mod redesenhar.
 const LATEST: [&str; 8] = ["state", "suggest", "ask_question", "stats", "preview", "pensamento", "ferramenta", "plugin_ui"];
 const ASK_QUESTION: usize = 2;
-/// Mesmo teto do Python (`plugin_bridge.TOASTS_KEPT`).
+/// Mesmos tetos do Python (`plugin_bridge.TOASTS_KEPT`, `TOAST_MAX_MS`).
 const TOASTS_KEPT: usize = 20;
+const TOAST_MAX_MS: f64 = 5.0 * 60.0 * 1000.0;
 const CHANNEL: usize = 1024;
 const SIDE_CONNECT: Duration = Duration::from_secs(10);
 /// O Python manda `ping` a cada 10 s; três calados = conexão morta.
@@ -135,7 +136,7 @@ impl SideCache {
         let Ok(serde_json::Value::Object(toast)) = serde_json::from_str(data) else { return };
         let Some(id) = toast.get("id").and_then(|v| v.as_str()).map(str::to_owned) else { return };
         let Some(ms) = toast.get("timeoutMs").and_then(|v| v.as_f64()).filter(|ms| *ms > 0.0) else { return };
-        let expires = now + Duration::from_millis(ms as u64);
+        let expires = now + Duration::from_millis(ms.min(TOAST_MAX_MS) as u64);
         self.toasts.retain(|(k, at, _)| *k != id && *at > now);
         self.toasts.push((id, expires, toast));
         if self.toasts.len() > TOASTS_KEPT {
@@ -258,10 +259,8 @@ impl Hub {
             close_on_tail_death(Arc::downgrade(self), generation),
         );
         *bound = Some(Bound { binding, generation, tail });
-        let mut cache = self.cache.lock().unwrap();
-        cache.latest = Default::default();
-        cache.toasts.clear();
-        drop(cache);
+        // Os avisos de mod ficam: são da sessão, não do transcript, e o Python não os reenvia.
+        self.cache.lock().unwrap().latest = Default::default();
         let _ = self.tx.send(Out::Rebind);
     }
 
@@ -518,9 +517,10 @@ mod tests {
         // Paridade com `plugin_bridge.toasts_after`: quem chega depois recebe o aviso vivo com o
         // tempo que resta; vencido, sai. O mesmo id reenviado (religação interna) não duplica.
         let mut c = SideCache::default();
-        let t0 = Instant::now();
         let toast = |id: &str, ms: u64| format!("{{\"id\":\"{id}\",\"text\":\"Jenkins configurado.\",\"plugin\":\"demo\",\"timeoutMs\":{ms}}}");
-        c.record_toast(&toast("b-1", 9000), t0);
+        let data = toast("b-1", 9000);
+        c.record("plugin_toast", &data, &sse_frame("plugin_toast", &data, None), true);
+        let t0 = c.toasts[0].1 - Duration::from_millis(9000);
         c.record_toast(&toast("b-1", 9000), t0);
         c.record_toast("{\"id\":\"b-2\",\"text\":\"x\"}", t0);
         let at = |c: &SideCache, s: u64| -> Vec<serde_json::Value> {
@@ -539,7 +539,9 @@ mod tests {
         for i in 0..25 {
             c.record_toast(&toast(&format!("n-{i}"), 9000), t0);
         }
-        assert_eq!(at(&c, 1).len(), TOASTS_KEPT);
+        let kept = at(&c, 1);
+        assert_eq!(kept.len(), TOASTS_KEPT);
+        assert_eq!(kept[0]["id"], "n-5", "o mais antigo sai primeiro");
     }
 
     fn has_question(c: &SideCache) -> bool {
