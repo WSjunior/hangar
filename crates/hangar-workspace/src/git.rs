@@ -212,7 +212,8 @@ pub fn summary(cwd: Option<&str>, diff: bool) -> Value {
         } else {
             &["status", "--porcelain=v1", "--branch"]
         },
-        Duration::from_secs(2),
+        // Com a máquina ocupada um `git status` passa de 2 s sem nada errado.
+        Duration::from_secs(8),
     );
     let mut ttl = Duration::from_secs(3);
     let value = match result {
@@ -226,9 +227,10 @@ pub fn summary(cwd: Option<&str>, diff: bool) -> Value {
         }
         Ok(_) => Value::Null,
         Err(_) => {
-            ttl = Duration::from_secs(30);
+            ttl = Duration::from_secs(10);
             tracing::warn!(code = "git_summary_failed", "consulta de Git sem resposta");
-            Value::Null
+            // O painel fica com o último valor bom em vez de ficar vazio.
+            cache.as_ref().map_or(Value::Null, |c| c.value.clone())
         }
     };
     *cache = Some(Cache {

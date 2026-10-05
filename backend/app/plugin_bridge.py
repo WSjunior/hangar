@@ -125,7 +125,7 @@ def publish_terminal(name, conversation, generation, publication, validate):
             loop.call_soon_threadsafe(enqueue)
         except RuntimeError:
             return "not_written"
-        pending["event"].wait(CONFIRMA_S)
+        pending["event"].wait(PUBLICA_S)
         return pending["result"]
     finally:
         with _lock:
@@ -492,6 +492,10 @@ def _prova_user(aviso: threading.Event, texto: str, jsonl: str | None, antes: se
 # é enviado: apertar Enter num composer que não recebeu o texto submete o que
 # estiver lá — ou nada.
 CONFIRMA_S = 5.0
+# Espera do aviso de uma publicação do Rust no terminal. No modo `user` o aviso só sai depois dos
+# hooks do UserPromptSubmit, que com a máquina ocupada passam de 5 s. Fica abaixo do teto da
+# política `terminal_publish` no Rust (`PUBLISH_POLICY_TIMEOUT`).
+PUBLICA_S = 30.0
 
 _confirmacoes: dict[str, threading.Event] = {}
 _preenchido: dict[str, bool] = {}

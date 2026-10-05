@@ -469,6 +469,37 @@ def test_normal_shutdown_killing_the_child_is_not_a_crash(fake_bin, tmp_path, ev
     assert _dead(supervisor.proc.pid)
 
 
+def test_full_disk_in_the_containment_record_keeps_rust_and_the_watcher(fake_bin, tmp_path, monkeypatch, events):
+    # ENOSPC ao gravar o registro de contenção não derruba o Rust: avisa uma vez e segue vigiando.
+    from app import runtime_process
+    calls = []
+
+    def full_disk(proc):
+        calls.append(proc.pid)
+        if 2 <= len(calls) <= 4:        # a partida gravou; o disco encheu depois
+            raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(runtime_process, "refresh_members", full_disk)
+    port, stop = _free_port(), {"now": False}
+    supervisor = rust_server.Supervisor(fake_bin, "127.0.0.1", port, 1, "tok", "127.0.0.1",
+                                        lambda: stop["now"])
+
+    async def scenario():
+        task = asyncio.create_task(supervisor.run())
+        deadline = time.monotonic() + 10
+        while len(calls) < 5 and time.monotonic() < deadline:
+            await asyncio.sleep(.05)
+        assert not task.done(), "a vigia desistiu por causa do disco"
+        stop["now"] = True
+        os.kill(supervisor.proc.pid, 9)
+        return await asyncio.wait_for(task, 5)
+
+    assert asyncio.run(scenario()) == "parada"
+    assert len(calls) >= 5 and len(_spawns(tmp_path)) == 1
+    assert len([e for e in events if e[0] == "hangar_server.registro_falhou"]) == 1
+    assert not [e for e in events if e[0] == "hangar_server.vigia_falhou"]
+
+
 def test_watcher_failure_puts_the_cause_in_the_diary(monkeypatch, events):
     supervisor = rust_server.Supervisor(Path("/nao-existe"), "127.0.0.1", 1, 2, "tok", "", lambda: False)
 

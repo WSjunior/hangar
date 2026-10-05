@@ -148,7 +148,7 @@ def test_lost_fill_ack_retains_publication_across_generation_and_stale_ack_canno
     name = 'publication-barrier-test'
     conversation = {'sid': 'A'}
     monkeypatch.setattr(pb, 'tracked_session_id', lambda name: conversation['sid'])
-    monkeypatch.setattr(pb, 'CONFIRMA_S', .02)
+    monkeypatch.setattr(pb, 'PUBLICA_S', .02)
     async def flow():
         pb._loop = asyncio.get_running_loop()
         queue = pb._waiters[name] = asyncio.Queue()
@@ -265,7 +265,7 @@ def test_late_matching_fill_ack_drops_retained_publication_without_touching_queu
     from app import plugin_bridge as pb
     name = 'publication-late-ack-test'
     monkeypatch.setattr(pb, 'tracked_session_id', lambda name: 'A')
-    monkeypatch.setattr(pb, 'CONFIRMA_S', .02)
+    monkeypatch.setattr(pb, 'PUBLICA_S', .02)
     async def flow():
         pb._loop = asyncio.get_running_loop()
         queue = pb._waiters[name] = asyncio.Queue()
@@ -348,7 +348,7 @@ def test_new_plugin_instance_drops_returned_publication_but_same_instance_keeps_
     from app import plugin_bridge as pb
     name = 'publication-new-instance-test'
     monkeypatch.setattr(pb, 'tracked_session_id', lambda name: 'A')
-    monkeypatch.setattr(pb, 'CONFIRMA_S', .02)
+    monkeypatch.setattr(pb, 'PUBLICA_S', .02)
     monkeypatch.setattr(pb, 'ESPERA_S', .01)
     monkeypatch.setattr(pb, '_confere', lambda *a: None)
     monkeypatch.setattr(pb, '_conversation_mismatch', lambda *a: None)
@@ -532,3 +532,29 @@ def test_select_on_question_respects_open_panel_and_requires_cursor(monkeypatch,
     assert api.select('s', api.SelectBody(option=1)) == {'ok': True}
     assert bool(checked) == expect_panel_check
     assert routed[0]['payload'].get('require_cursor', False) == expect_cursor
+
+
+def test_queue_fsync_never_runs_on_the_event_loop(tmp_path, monkeypatch):
+    # Com o disco ocupado o fsync leva segundos: no laço de eventos ele parava o backend inteiro.
+    import threading
+    from types import SimpleNamespace
+    from app import runtime_coordinator as rc, runtime_queue, runtime_terminal as terminal
+    owner, slot, collected = live_owner(monkeypatch, tmp_path)
+    slot.phase = rc.Phase.Rust
+    monkeypatch.setattr(terminal, '_collect', lambda name: None)
+    on_loop, loop_thread = [], threading.get_ident()      # asyncio.run roda o laço nesta thread
+    atomic = runtime_queue.QueueStore._atomic
+    def watched(path, data):
+        on_loop.append(threading.get_ident() == loop_thread)
+        return atomic(path, data)
+    monkeypatch.setattr(runtime_queue.QueueStore, '_atomic', staticmethod(watched))
+    async def flow():
+        owner.loop = asyncio.get_running_loop()
+        with pytest.raises(RuntimeError):
+            await owner.recover('session', confirmed_dead=True, containment=SimpleNamespace(containment_clean=lambda: True))
+        monkeypatch.setattr(terminal, '_collect', lambda name: {**collected, 'name': name})
+        assert await owner.prepare_session('session', 'claude') is True     # registro novo: _restore
+        assert await owner.prepare_session('session', 'claude') is True     # vínculo gravado de novo
+        owner.slot('session').lease.close()
+    asyncio.run(flow())
+    assert on_loop and not any(on_loop)

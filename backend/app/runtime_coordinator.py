@@ -432,9 +432,22 @@ class RuntimeCoordinator:
             if slot.phase == Phase.Python:
                 with slot.guard:
                     slot.binding.meta = binding.meta
-                    state = copy.deepcopy(slot.store.state)
-                    state["runtime_state"]["_binding"] = slot.binding.descriptor()
-                    slot.store._persist(state)
+                    descriptor = slot.binding.descriptor()
+                    # Conta como operação em curso: a posse não troca de mãos durante o fsync.
+                    slot.active += 1
+                store = slot.store
+                def persist_binding():
+                    # O fsync espera o disco: fora do laço e fora da trava do slot.
+                    with store._lock:
+                        state = copy.deepcopy(store.state)
+                        state["runtime_state"]["_binding"] = descriptor
+                        store._persist(state)
+                try:
+                    await asyncio.to_thread(persist_binding)
+                finally:
+                    with slot.guard:
+                        slot.active -= 1
+                    self._signal(slot)
                 if self.transport is not None and binding.meta.get("terminal"):
                     # Registro Python do terminal (vínculo pendente que provou a conversa): vai ao Rust.
                     await self._open_slot_in_rust(name, slot, launch=False)
@@ -1289,9 +1302,13 @@ class RuntimeCoordinator:
     async def _restore(self, slot, *, reconnect=True):
         if slot.lease is None or slot.lease.closed:
             slot.lease = WriterLease(slot.binding.lock_path)
-        slot.store = runtime_queue.QueueStore(slot.binding.state_path, slot.binding.projection_dir,
-            runtime_queue.initial_state(slot.binding.key, slot.binding.generation, slot.binding.name, []))
-        slot.store.exec(slot.binding.generation, "recover:" + uuid.uuid4().hex, _clock(), {"kind": "recover"})
+        binding = slot.binding
+        def open_store():
+            store = runtime_queue.QueueStore(binding.state_path, binding.projection_dir,
+                runtime_queue.initial_state(binding.key, binding.generation, binding.name, []))
+            store.exec(binding.generation, "recover:" + uuid.uuid4().hex, _clock(), {"kind": "recover"})
+            return store
+        slot.store = await asyncio.to_thread(open_store)
         recovered_view = slot.store.state.get("runtime_state", {}).get("view") or {}
         slot.reserve_state = {"runtime_state":copy.deepcopy(recovered_view)} if recovered_view else slot.reserve_state
         if self.legacy is None:
@@ -1520,21 +1537,24 @@ class RuntimeCoordinator:
             return fresh
         if self.legacy is not None and not change["from_rust"]:
             await self.legacy.quiesce(binding.descriptor())
-        with slot.guard:
-            if slot.store.state["name"] != target_name:
-                slot.store.exec(slot.binding.generation, "rename:" + uuid.uuid4().hex, _clock(), {"kind":"rename", "name":target_name})
-            # Só conversa nova esvazia a fila: a conta nova muda o caminho do transcript, não a conversa.
-            if slot.binding.meta.get("terminal") and binding.meta.get("session_id") != slot.binding.meta.get("session_id"):
-                slot.store.exec(slot.binding.generation, "clear:" + uuid.uuid4().hex, _clock(), {"kind":"clear"})
-            binding.generation = slot.binding.generation + int(advance)
-            if isinstance(binding.meta.get("terminal"), dict):
-                binding.meta["terminal"]["generation"] = binding.generation
-            state = copy.deepcopy(slot.store.state)
-            if advance:
-                state["runtime_state"] = {key:value for key,value in state["runtime_state"].items() if key == "terminal_write_barrier"}
-            state["runtime_state"]["_binding"] = binding.descriptor()
-            slot.store._persist(state)
-        self.register(binding)
+        def commit():
+            # Grava com fsync: fora do laço de eventos.
+            with slot.guard:
+                if slot.store.state["name"] != target_name:
+                    slot.store.exec(slot.binding.generation, "rename:" + uuid.uuid4().hex, _clock(), {"kind":"rename", "name":target_name})
+                # Só conversa nova esvazia a fila: a conta nova muda o caminho do transcript, não a conversa.
+                if slot.binding.meta.get("terminal") and binding.meta.get("session_id") != slot.binding.meta.get("session_id"):
+                    slot.store.exec(slot.binding.generation, "clear:" + uuid.uuid4().hex, _clock(), {"kind":"clear"})
+                binding.generation = slot.binding.generation + int(advance)
+                if isinstance(binding.meta.get("terminal"), dict):
+                    binding.meta["terminal"]["generation"] = binding.generation
+                state = copy.deepcopy(slot.store.state)
+                if advance:
+                    state["runtime_state"] = {key:value for key,value in state["runtime_state"].items() if key == "terminal_write_barrier"}
+                state["runtime_state"]["_binding"] = binding.descriptor()
+                slot.store._persist(state)
+            self.register(binding)
+        await asyncio.to_thread(commit)
         slot.view, slot.cache_valid = {}, False
         self._signal(slot)
         return slot

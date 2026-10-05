@@ -860,7 +860,7 @@ def test_publication_racing_the_proxy_drop_is_not_written(monkeypatch):
     # Publicação que chegou junto com a queda: o plugin nunca a recebeu, então volta `not_written`
     # (o Rust digita pelo teclado), nunca `unknown` (que travaria a fila como entrega incerta).
     monkeypatch.setattr(pb, "ESPERA_S", 30)
-    monkeypatch.setattr(pb, "CONFIRMA_S", 5)
+    monkeypatch.setattr(pb, "PUBLICA_S", 5)
     monkeypatch.setattr(pb, "tracked_session_id", lambda name: UUID)
 
     class Proxy:
@@ -887,3 +887,37 @@ def test_publication_racing_the_proxy_drop_is_not_written(monkeypatch):
         return resultado
 
     assert asyncio.run(cena()) == "not_written"
+
+
+def test_user_publication_waits_for_ack_after_slow_prompt_hooks(monkeypatch):
+    # O aviso do modo `user` sai depois dos hooks do UserPromptSubmit: com a máquina ocupada ele
+    # passa do prazo do rascunho, e a entrega que chegou não pode voltar como incerta.
+    monkeypatch.setattr(pb, "CONFIRMA_S", .05)
+
+    async def cena():
+        pb._loop = asyncio.get_running_loop()
+        fila = pb._waiters["s1"] = asyncio.Queue()
+        pb._donos["s1"] = ("i", {"fill", "user", "receipt_v2"}, time.monotonic())
+        envio = asyncio.create_task(asyncio.to_thread(pb.publish_terminal, "s1", UUID, 1,
+            {"id": "pub-1", "mode": "user", "text": "oi"}, lambda: None))
+        await asyncio.wait_for(fila.get(), 1)
+        await asyncio.sleep(.3)         # hooks lentos antes do `/submitted`
+        assert pb._terminal_ack(pb.SubmittedBody(sessao="s1", token="t", ok=True,
+            publication_id="pub-1", generation=1, session_id=UUID), "user")
+        return await envio
+
+    try:
+        assert asyncio.run(cena()) == "accepted"
+    finally:
+        pb._publications.clear()
+
+
+def test_publication_wait_stays_below_rust_policy_timeout():
+    # Se o Rust desistir antes do Python, o aviso que chega no intervalo vira entrega incerta.
+    import re
+    actor = (Path(__file__).resolve().parents[2] / "crates/hangar-server/src/runtime/actor.rs").read_text()
+    rust_s = int(re.search(r"PUBLISH_POLICY_TIMEOUT:Duration=Duration::from_secs\((\d+)\)", actor).group(1))
+    assert pb.CONFIRMA_S < pb.PUBLICA_S < rust_s - 5
+    # O `op` do Python espera a entrada inteira no Rust: fatos (15 s) mais a publicação.
+    from app import rust_server
+    assert rust_server.OP_TIMEOUT_S > rust_s + 15

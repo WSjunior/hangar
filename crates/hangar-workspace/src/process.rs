@@ -69,7 +69,22 @@ pub fn run_program(command: &mut Command, timeout: Duration) -> Result<Output> {
     let mut stdout = None;
     let mut stderr = None;
     let status = loop {
-        while let Ok((which, result)) = rx.try_recv() {
+        let remaining = timeout.saturating_sub(start.elapsed());
+        // Dorme no canal até as duas saídas fecharem: girar a cada 1 ms custava CPU por git em voo.
+        if stdout.is_none() || stderr.is_none() {
+            let (which, result) = match rx.recv_timeout(remaining) {
+                Ok(received) => received,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    guard.kill();
+                    kill_tree(&mut child);
+                    return Err(error(504, "git timeout"));
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    guard.kill();
+                    kill_tree(&mut child);
+                    return Err(error(500, "git falhou ao ler a saída"));
+                }
+            };
             let bytes = match result {
                 Ok(b) => b,
                 Err(_) => {
@@ -91,21 +106,21 @@ pub fn run_program(command: &mut Command, timeout: Duration) -> Result<Output> {
                         .replace('\r', "\n"),
                 );
             }
+            continue;
         }
         if let Some(status) = child
             .try_wait()
             .map_err(|_| error(500, "git falhou ao aguardar o processo"))?
-            && stdout.is_some()
-            && stderr.is_some()
         {
             break status;
         }
-        if start.elapsed() >= timeout {
+        if remaining.is_zero() {
             guard.kill();
             kill_tree(&mut child);
             return Err(error(504, "git timeout"));
         }
-        std::thread::sleep(Duration::from_millis(1));
+        // Saídas fechadas: o processo já está saindo.
+        std::thread::sleep(Duration::from_millis(5));
     };
     guard.disarm();
     Ok(Output {
@@ -180,6 +195,20 @@ mod tests {
         );
         assert_eq!(result.err().unwrap().status, 504);
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn waiting_for_a_slow_command_sleeps_instead_of_spinning() {
+        fn wakeups() -> i64 {
+            let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+            unsafe { libc::getrusage(libc::RUSAGE_THREAD, &mut usage) };
+            usage.ru_nvcsw
+        }
+        let before = wakeups();
+        run_program(Command::new("sleep").arg("0.5"), Duration::from_secs(5)).unwrap();
+        let woke = wakeups() - before;
+        assert!(woke < 50, "a espera acordou {woke} vezes em 0,5 s");
     }
 
     #[test]

@@ -268,12 +268,14 @@ def refresh_members(proc):
     with _record_guard:
         path = containment.record
         path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as stream:
-            temporary = Path(stream.name)
-            stream.write(json.dumps(data).encode())
-            stream.flush()
-            os.fsync(stream.fileno())
+        stream = tempfile.NamedTemporaryFile(dir=path.parent, delete=False)
+        temporary = Path(stream.name)
+        # Disco cheio no meio da escrita não pode deixar o temporário: o vigia tenta de novo a cada volta.
         try:
+            with stream:
+                stream.write(json.dumps(data).encode())
+                stream.flush()
+                os.fsync(stream.fileno())
             atomico.substituir(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)

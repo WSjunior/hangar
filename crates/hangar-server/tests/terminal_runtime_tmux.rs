@@ -36,7 +36,8 @@ while True:
     let state_path=dir.path().join("state"); let policy_path=state_path.clone();
     let router=axum::Router::new().route("/internal/runtime/policy",axum::routing::post(move |body:String| {let (b,path)=(binding.clone(),policy_path.clone()); async move {
         let request:Value=serde_json::from_str(&body).unwrap(); let state:Value=serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert_eq!(state["operations"][request["phase_id"].as_str().unwrap()]["status"],"dispatching"); assert_eq!(request["kind"],"terminal_facts");
+        // Leitura de fatos não passa pelo diário.
+        assert!(state["operations"][request["phase_id"].as_str().unwrap()].is_null()); assert_eq!(request["kind"],"terminal_facts");
         ([("content-type","application/json")],json!({"ok":true,"data":{"binding":b,"ready":true,"idle":true,"open_question":false,"plugin_live":false,"plugin_user":false,"native":null}}).to_string())
     }}));
     let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(); let address=listener.local_addr().unwrap(); let policy_server=tokio::spawn(async move{axum::serve(listener,router).await.unwrap()});

@@ -50,8 +50,12 @@ impl Fixture {
             let v:Value=serde_json::from_str(&body).unwrap();
             let state:Value=serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
             let phase=&state["operations"][v["phase_id"].as_str().unwrap()];
-            assert_eq!(phase["status"],"dispatching");
-            assert_eq!(phase["payload"],json!({"kind":v["kind"],"request_id":v["request_id"],"payload":v["payload"]}));
+            // Leitura de fatos não tem efeito: não regrava o diário. As demais políticas, sim.
+            if v["kind"]=="terminal_facts" {assert!(phase.is_null(),"leitura de fatos passou pelo diário");}
+            else {
+                assert_eq!(phase["status"],"dispatching");
+                assert_eq!(phase["payload"],json!({"kind":v["kind"],"request_id":v["request_id"],"payload":v["payload"]}));
+            }
             let mut seen=v.clone(); seen["_ms"]=json!(t0.elapsed().as_millis() as u64); c.lock().unwrap().push(seen);
             b.generation=g.load(std::sync::atomic::Ordering::Acquire); b.conversation=conversation.lock().unwrap().clone();b.mux_argv=mux.lock().unwrap().clone();
             let data=match v["kind"].as_str().unwrap() {
@@ -270,6 +274,20 @@ async fn terminal_runtime_unknown_delivery_is_signaled_without_retyping() {
 }
 
 #[tokio::test]
+async fn terminal_runtime_unknown_delivery_seen_in_transcript_clears_error_once() {
+    let f=Fixture::new().await; f.unknown.store(true,std::sync::atomic::Ordering::Release); let h=f.start();
+    assert_eq!(h.command(f.command("late","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Unknown);
+    assert_eq!(h.snapshot().await.unwrap()["error"],"terminal_delivery_unknown");
+    std::fs::write(&f.target.transcript,"{\"type\":\"user\",\"uuid\":\"1\",\"message\":{\"content\":\"Olá\"}}\n").unwrap();
+    f.wait_for("reconciliada",||f.state()["rows"][0]["confirmed"]==true).await;
+    let start=std::time::Instant::now();
+    while !h.snapshot().await.unwrap()["error"].is_null() {assert!(start.elapsed()<WAIT,"erro não limpou"); tokio::time::sleep(Duration::from_millis(5)).await;}
+    assert_eq!(f.state()["operations"]["late"]["status"],"confirmed");
+    assert!(f.io.calls.lock().unwrap().iter().all(|r|r.args[0]!="send-keys"),"nada foi redigitado");
+    h.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn terminal_runtime_repeat_id_does_not_write_twice_and_conflicting_payload_fails() {
     let f=Fixture::new().await; let h=f.start(); let command=f.command("first","Olá");
     assert_eq!(h.command(command.clone()).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Accepted);
@@ -314,9 +332,17 @@ async fn terminal_runtime_cancel_http_does_not_release_lease_and_stop_waits() {
     f.io.blocked.store(false,std::sync::atomic::Ordering::Release); f.io.gate.notify_waiters(); stopping.await.unwrap().unwrap(); assert!(queue::acquire_lease(&f.target.lease_path).is_ok());
 }
 #[tokio::test]
-async fn terminal_runtime_policy_calls_are_journaled_and_root_id_is_stable() {
-    let f=Fixture::new().await; let h=f.start(); h.command(f.command("root","Olá")).await.unwrap();
-    for call in f.calls.lock().unwrap().iter() {let state=f.state(); let phase=call["phase_id"].as_str().unwrap(); assert!(state["operations"][phase]["payload"]==json!({"kind":call["kind"],"request_id":call["request_id"],"payload":call["payload"]})); assert_eq!(call["request_id"],"root");}
+async fn terminal_runtime_effect_policies_are_journaled_reads_are_not_and_root_id_is_stable() {
+    // A publicação no plugin tem efeito e fica no diário; a leitura de fatos não regrava o estado.
+    let f=Fixture::new().await; f.unknown.store(true,std::sync::atomic::Ordering::Release); let h=f.start(); h.command(f.command("root","Olá")).await.unwrap();
+    let calls=f.calls.lock().unwrap().clone(); let state=f.state();
+    assert!(calls.iter().any(|c|c["kind"]=="terminal_publish") && calls.iter().any(|c|c["kind"]=="terminal_facts"));
+    for call in &calls {
+        let phase=&state["operations"][call["phase_id"].as_str().unwrap()];
+        if call["kind"]=="terminal_facts" {assert!(phase.is_null());}
+        else {assert!(phase["payload"]==json!({"kind":call["kind"],"request_id":call["request_id"],"payload":call["payload"]}));}
+        assert_eq!(call["request_id"],"root");
+    }
     h.stop().await.unwrap();
 }
 #[tokio::test]
