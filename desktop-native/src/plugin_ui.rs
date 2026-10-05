@@ -26,12 +26,12 @@ pub const PANE_CLOSE_KEY: &str = "__close__";
 pub type Show = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 
 /// O que o app passa para desenhar a faixa e os painéis: quem atende o clique e a troca de aba. Sem `press`, botão é só
-/// rótulo e não há `✕`.
-pub struct View { pub press: Option<Press>, pub show: Option<Show> }
+/// rótulo e não há `✕`. `columns` é a largura, em colunas, para a qual a faixa foi desenhada.
+pub struct View { pub press: Option<Press>, pub show: Option<Show>, pub columns: Option<f64> }
 
 /// Onde a árvore está desenhada e o que o app oferece. `links` numera os links na ordem da árvore: o mesmo endereço
 /// duas vezes não repete o id do elemento.
-struct Ctx<'a> { site: &'a str, view: &'a View, links: std::cell::Cell<usize> }
+struct Ctx<'a> { site: &'a str, view: &'a View, place: Option<f64>, links: std::cell::Cell<usize> }
 
 pub fn button_key(v: &Value) -> Option<String> {
     (v["type"] == "Button").then(|| v["props"]["key"].as_str().filter(|k| !k.is_empty()).map(str::to_owned)).flatten()
@@ -124,7 +124,7 @@ fn frame() -> Div {
 
 pub fn band(tree: &Value, view: &View) -> Option<AnyElement> {
     if is_empty(tree) { return None; }
-    let c = Ctx { site: BAND_SITE, view, links: Default::default() };
+    let c = Ctx { site: BAND_SITE, view, place: view.columns, links: Default::default() };
     Some(frame().w_full().mb(px(4.)).overflow_hidden().child(node(tree, &c)).into_any_element())
 }
 
@@ -167,7 +167,7 @@ pub fn panes(panes: &[Value], active: Option<&str>, view: &View, max_h: f32) -> 
             .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(title))
             .children(close_mark(&id, view)).into_any_element()
     };
-    let c = Ctx { site: &id, view, links: Default::default() };
+    let c = Ctx { site: &id, view, place: pane["columns"].as_f64(), links: Default::default() };
     // Recorta o que passa da largura: no gpui, filho maior que a coluna desenha por cima do vizinho.
     Some(frame().flex().flex_col().gap_1().min_h_0().max_h(px(max_h)).w_full().overflow_hidden()
         .child(header)
@@ -241,6 +241,12 @@ fn element(v: &Value, c: &Ctx) -> AnyElement {
     }
 }
 
+/// `width` em colunas que alcança a largura do lugar ocupa o lugar inteiro: o mod desenhou para a coluna do terminal, e
+/// o app pode ser mais largo. Menor continua teto. Sem a largura do lugar (servidor antigo), sempre teto.
+pub fn fills_place(width: Option<f64>, place: Option<f64>) -> bool {
+    matches!((width, place), (Some(w), Some(p)) if p > 0. && w >= p)
+}
+
 fn cols(v: &Value) -> Option<f32> { v.as_f64().map(|n| n as f32 * CELL_W) }
 fn lines(v: &Value) -> Option<f32> { v.as_f64().map(|n| n as f32 * CELL_H) }
 
@@ -273,8 +279,11 @@ fn boxed(p: &Value, kids: &[Value], c: &Ctx) -> AnyElement {
     };
     if let Some(g) = p["flexGrow"].as_f64() { el = el.flex_grow(g as f32); }
     if p["flexWrap"] == "wrap" { el = el.flex_wrap(); }
-    // Largura fixa do terminal vira teto: a coluna da conversa pode ser mais estreita que o pane.
-    if let Some(w) = cols(&p["width"]) { el = el.w_full().max_w(px(w)); }
+    // Largura fixa do terminal vira teto (a coluna da conversa pode ser mais estreita que o pane), salvo quando ela
+    // alcança a largura do lugar: aí o mod quis a linha inteira.
+    if let Some(w) = cols(&p["width"]) {
+        el = if fills_place(p["width"].as_f64(), c.place) { el.w_full() } else { el.w_full().max_w(px(w)) };
+    }
     if let Some(w) = cols(&p["minWidth"]) { el = el.min_w(px(w)); }
     if let Some(g) = cols(&first(p, &["columnGap", "gap"])) { el = el.gap_x(px(g)); }
     if let Some(g) = lines(&first(p, &["rowGap", "gap"])) { el = el.gap_y(px(g)); }
@@ -499,7 +508,7 @@ fn unmark(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
-    use super::{active_pane, button_key, cell_color, color, follow_local, follows_server, is_empty, pane_ids, plain_deep,
+    use super::{active_pane, button_key, cell_color, color, fills_place, follow_local, follows_server, is_empty, pane_ids, plain_deep,
         raster_row, raster_runs, safe_href, surfaces, text_row, toast, Surfaces, Toast, UiSource};
     use serde_json::{json, Value};
     use std::time::Duration;
@@ -626,6 +635,14 @@ mod tests {
         assert_eq!(active_pane(&[], &Some(None), Some("a")), None);
         assert!(follows_server(&ids, &Some(Some("c".into()))));
         assert!(!follows_server(&ids, &None) && !follows_server(&ids, &Some(None)));
+    }
+
+    #[test]
+    fn width_that_reaches_the_place_fills_it_and_a_missing_place_keeps_the_cap() {
+        assert!(fills_place(Some(110.), Some(110.)) && fills_place(Some(120.), Some(110.)));
+        assert!(!fills_place(Some(24.), Some(58.)));
+        // Servidor de hoje, sem `columns`: continua teto, nada vira 100% por engano.
+        assert!(!fills_place(Some(110.), None) && !fills_place(None, Some(110.)) && !fills_place(Some(5.), Some(0.)));
     }
 
     #[test]
