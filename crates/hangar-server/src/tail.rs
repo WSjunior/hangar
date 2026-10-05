@@ -227,6 +227,10 @@ impl Watchers {
             let key = dir.to_path_buf();
             let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                 let (Ok(ev), Some(shared)) = (res, shared.upgrade()) else { return };
+                // O notify 7 assina abrir/fechar: a leitura do próprio leitor o acordaria sem fim.
+                if ev.kind.is_access() {
+                    return;
+                }
                 let map = shared.lock().unwrap();
                 let Some(d) = map.get(&key) else { return };
                 // Escrita de arquivo irmão (subagente) não acorda este leitor.
@@ -594,6 +598,21 @@ mod tests {
         assert_eq!(st.pos, Some(end));
         st.poll(&tx);
         assert!(rx.try_recv().is_err(), "nada da conversa é reenviado ao vivo");
+    }
+
+    #[tokio::test]
+    async fn reading_the_transcript_does_not_wake_its_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.jsonl");
+        write(&p, 0..3, "");
+        let watchers = Watchers::default();
+        let wake = Arc::new(Notify::new());
+        assert!(watchers.subscribe(&p, &wake));
+        std::fs::read(&p).unwrap();
+        let quiet = tokio::time::timeout(Duration::from_millis(300), wake.notified()).await;
+        assert!(quiet.is_err(), "abrir e ler o arquivo acordou o leitor");
+        write(&p, 3..4, "");
+        tokio::time::timeout(Duration::from_secs(2), wake.notified()).await.expect("escrita acorda o leitor");
     }
 
     #[test]
