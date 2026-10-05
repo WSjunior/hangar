@@ -6,6 +6,12 @@ Pedido: `../pedidos/2026-10-05-lista-estado-kickoff.md`. Inventário: `inventari
 > **Depois desta medição (05/10/2026):** o dono decidiu migrar a lista e o estado mesmo assim (o
 > critério é concentrar no Rust). O conserto do Supervisor recomendado abaixo virou a Task 1 do
 > plano completo.
+>
+> **Depois da Task 1 (05/10/2026):** backend isolado, zero sessões, sem cliente, janela de 30 s,
+> `hangar-server`/`hangar-cano` em release, ~615 processos na máquina. CPU do Python medida por
+> `utime+stime` de `/proc/<pid>/stat`; regravações contadas pelo mtime de `runtime-process.json`
+> a cada 50 ms. Antes (o `runtime_process.py` da base carregado no mesmo lançador): **4,33%** e
+> 115 regravações. Depois: **0,73%** (duas rodadas iguais) e nenhuma regravação.
 
 ## Conclusão
 

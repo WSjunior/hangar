@@ -16,6 +16,8 @@ from dataclasses import dataclass
 
 import psutil
 _record_guard = threading.RLock()
+_FULL_SWEEP = 5.0
+_tree_warned = False
 
 
 class WindowsJob:
@@ -106,6 +108,8 @@ class Containment:
     record_lease: object | None = None
     life: str | None = None
     members: dict | None = None
+    saved: bool = False
+    swept: float | None = None
 
 
 def spawn_contained(args, *, env, record_path=None):
@@ -155,6 +159,30 @@ def _group_members(containment):
                 members.append(proc.pid)
         except (psutil.NoSuchProcess, ProcessLookupError):
             continue
+    return members
+
+
+def _tree_members(containment):
+    """Desce do Rust pelos filhos que o kernel lista, sem olhar o resto da máquina.
+
+    None = o kernel não expõe `children`; quem chama varre a máquina."""
+    if not Path(f'/proc/{containment.pid}/task/{containment.pid}/children').exists():
+        return None
+    members, pending = [], [containment.pid]
+    while pending:
+        pid = pending.pop()
+        try:
+            if os.getsid(pid) != containment.pid or psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
+                continue
+            tasks = list(Path(f'/proc/{pid}/task').iterdir())
+        except (psutil.NoSuchProcess, ProcessLookupError, FileNotFoundError):
+            continue
+        members.append(pid)
+        for task in tasks:
+            try:
+                pending.extend(int(child) for child in (task / 'children').read_text().split())
+            except FileNotFoundError:
+                continue  # a thread saiu entre a listagem e a leitura
     return members
 
 
@@ -253,20 +281,37 @@ def refresh_members(proc):
         return
     members = {}
     if containment.job is None:
-        for pid in _group_members(containment):
+        # A árvore perde o neto cujo pai morreu (ele segue na sessão); a varredura periódica o pega.
+        now = time.monotonic()
+        sweep = (not sys.platform.startswith('linux') or containment.swept is None
+            or now - containment.swept >= _FULL_SWEEP)
+        found = None if sweep else _tree_members(containment)
+        if found is None:
+            global _tree_warned
+            if not sweep and not _tree_warned:
+                _tree_warned = True
+                logging.getLogger('hangar.runtime').warning('kernel sem /proc/<pid>/task/*/children; Supervisor varre a máquina a cada volta')
+            found = _group_members(containment)
+            containment.swept = now
+        for pid in found:
             try:
                 members[str(pid)] = psutil.Process(pid).create_time()
             except psutil.NoSuchProcess:
                 continue
-    containment.members = {**(containment.members or {}), **members}
-    owner = psutil.Process(os.getpid())
-    data = dict(version=1, life=containment.life, platform=sys.platform, owner_pid=owner.pid,
-        owner_birth=owner.create_time(), pid=containment.pid, birth=containment.birth,
-        pgid=containment.pid, members=containment.members, boot=boot_identity(),
-        job_name=containment.job.name if containment.job else None)
     from app import atomico
     with _record_guard:
         path = containment.record
+        merged = {**(containment.members or {}), **members}
+        # Registro apagado por fora volta na hora: sem ele o restart pós-queda não prova nada.
+        if containment.saved and merged == containment.members and path.exists():
+            return
+        containment.members = merged
+        containment.saved = False
+        owner = psutil.Process(os.getpid())
+        data = dict(version=1, life=containment.life, platform=sys.platform, owner_pid=owner.pid,
+            owner_birth=owner.create_time(), pid=containment.pid, birth=containment.birth,
+            pgid=containment.pid, members=containment.members, boot=boot_identity(),
+            job_name=containment.job.name if containment.job else None)
         path.parent.mkdir(parents=True, exist_ok=True)
         stream = tempfile.NamedTemporaryFile(dir=path.parent, delete=False)
         temporary = Path(stream.name)
@@ -277,6 +322,7 @@ def refresh_members(proc):
                 stream.flush()
                 os.fsync(stream.fileno())
             atomico.substituir(temporary, path)
+            containment.saved = True
         finally:
             temporary.unlink(missing_ok=True)
 
