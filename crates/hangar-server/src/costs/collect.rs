@@ -228,6 +228,8 @@ impl Collector {
     }
 
     fn scan(&self) -> Result<(), CollectError> {
+        // Varredura que falha antes da listagem não pode citar a pasta de uma varredura antiga.
+        *self.unread_issue.lock().unwrap() = None;
         let scopes = match self.source.fetch() {
             Ok(scopes) => {
                 let mut labels = IndexMap::new();
@@ -246,9 +248,9 @@ impl Collector {
         };
         let index = self.index()?;
         let mut unread_kinds = Vec::new();
-        let (owners, codex_unread) = rollout_listing(&scopes.codex, &mut unread_kinds);
+        let (owners, codex_unread, codex_blocked) = rollout_listing(&scopes.codex, &mut unread_kinds);
         let mut active = scopes.clone();
-        active.codex = owners.values().map(|(scope, _)| scope.clone()).collect();
+        active.codex = owners.values().map(|(scope, _)| scope.clone()).chain(codex_blocked.iter().cloned()).collect();
         let pi_root = scopes.pi.iter().find(|s| s.source == "pi").map(|s| &s.root);
         active.pi.retain(|scope| scope.root.is_dir() && !(scope.source == "omp" && pi_root == Some(&scope.root)));
         active.kimi = scopes.kimi.filter(|scope| scope.root.is_dir());
@@ -274,6 +276,8 @@ impl Collector {
             index.sync_keeping(&key, &listing.files, &listing.unread, &claude::new_fold(&scope.root), claude::VERSION, signature, &redo, &self.progress)?;
             keys.push(key);
         }
+        // Conta sem pasta resolvível: sem varredura, linhas como estavam, e ativa no relatório.
+        keys.extend(codex_blocked.iter().map(|scope| scope.account.clone()));
         for (scope, files) in owners.values() {
             index.sync_keeping(&scope.account, files, &codex_unread, &codex::new_fold, codex::VERSION, signature, &redo, &self.progress)?;
             keys.push(scope.account.clone());
@@ -419,18 +423,46 @@ pub fn rollout_owners(codex: &[CodexScope]) -> IndexMap<String, (CodexScope, Vec
 }
 
 /// Donos dos rollouts e as pastas que não deu para ler, que nenhum dono pode apagar.
+/// Pasta ou arquivo que não deu para ler: causa no log (uma linha por tipo e minuto) e na lista.
+fn unreadable(error: &std::io::Error, kinds: &mut Vec<std::io::ErrorKind>) {
+    if crate::warn_limit::allow(None, &format!("custos_pasta_ilegivel:{:?}", error.kind())) {
+        tracing::warn!(code = "custos_pasta_ilegivel", kind = ?error.kind(), os = ?error.raw_os_error());
+    }
+    kinds.push(error.kind());
+}
+
+/// Donos dos rollouts, as pastas que não deu para ler (chave canônica, que nenhum dono pode
+/// apagar) e as contas cuja pasta nem se resolve: essas seguem ativas sem varredura.
+#[allow(clippy::type_complexity)]
 fn rollout_listing(codex: &[CodexScope], kinds: &mut Vec<std::io::ErrorKind>)
-    -> (IndexMap<String, (CodexScope, Vec<PathBuf>)>, Vec<PathBuf>) {
-    let mut unread = Vec::new();
-    let homes: Vec<_> = codex.iter().map(|scope| std::fs::canonicalize(&scope.home).ok()).collect();
+    -> (IndexMap<String, (CodexScope, Vec<PathBuf>)>, Vec<PathBuf>, Vec<CodexScope>) {
+    let (mut unread, mut blocked) = (Vec::new(), Vec::new());
+    let homes: Vec<_> = codex.iter().map(|scope| match std::fs::canonicalize(&scope.home) {
+        Ok(home) => Some(home),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => { unreadable(&error, kinds); blocked.push(scope.clone()); None },
+    }).collect();
     let mut owners: IndexMap<String, (CodexScope, Vec<PathBuf>)> = IndexMap::new();
-    for scope in codex {
-        for root in [scope.home.join("sessions"), scope.home.join("archived_sessions")] {
+    for (scope, home) in codex.iter().zip(&homes) {
+        let Some(home) = home else { continue };
+        for name in ["sessions", "archived_sessions"] {
+            let root = scope.home.join(name);
             let listing = list_dir(&root, |n| n.starts_with("rollout-") && n.ends_with(".jsonl"), kinds);
-            // A chave do índice é canônica; a pasta mantida também, para casar no `starts_with`.
-            unread.extend(listing.unread.iter().map(|dir| std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone())));
+            // A chave do índice é canônica: a pasta mantida vira canônica pela raiz já resolvida,
+            // mesmo quando ela própria não se resolve.
+            unread.extend(listing.unread.iter().map(|dir| std::fs::canonicalize(dir)
+                .unwrap_or_else(|_| home.join(name).join(dir.strip_prefix(&root).unwrap_or(Path::new(""))))));
             for path in listing.files {
-                let Ok(path) = std::fs::canonicalize(path) else { continue };
+                let path = match std::fs::canonicalize(&path) {
+                    Ok(path) => path,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    // Arquivo que não deu para resolver não sumiu: a linha dele fica.
+                    Err(error) => {
+                        unreadable(&error, kinds);
+                        unread.push(home.join(name).join(path.strip_prefix(&root).unwrap_or(&path)));
+                        continue;
+                    },
+                };
                 let mut matches = codex.iter().zip(&homes).filter(|(_, home)| home.as_ref().is_some_and(|home| {
                     path.starts_with(home.join("sessions")) || path.starts_with(home.join("archived_sessions"))
                 }));
@@ -449,7 +481,7 @@ fn rollout_listing(codex: &[CodexScope], kinds: &mut Vec<std::io::ErrorKind>)
         }
     }
     for (_, files) in owners.values_mut() { files.sort(); }
-    (owners, unread)
+    (owners, unread, blocked)
 }
 
 /// Arquivos achados e as pastas que não deu para ler. Pasta ilegível não é pasta vazia: quem
@@ -466,8 +498,7 @@ pub fn list_files(root: &Path, matches: impl Fn(&str) -> bool) -> Vec<PathBuf> {
 pub fn list_dir(root: &Path, matches: impl Fn(&str) -> bool, kinds: &mut Vec<std::io::ErrorKind>) -> Listing {
     let (mut files, mut unread) = (Vec::new(), Vec::new());
     let mut failed = |path: PathBuf, error: std::io::Error, unread: &mut Vec<PathBuf>| {
-        tracing::warn!(code = "custos_pasta_ilegivel", kind = ?error.kind(), os = ?error.raw_os_error());
-        kinds.push(error.kind());
+        unreadable(&error, kinds);
         unread.push(path);
     };
     let mut stack = vec![root.to_path_buf()];

@@ -623,3 +623,23 @@ fn unreadable_folder_keeps_its_rows_and_reports_the_cause() {
     assert_eq!(c.read_costs(None).unwrap(), before);
     assert!(c.unread_issue().is_none());
 }
+
+#[cfg(unix)]
+#[test]
+fn codex_folder_listed_but_not_searchable_keeps_its_rows() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_d, base) = fixtures_copy();
+    let c = collector(&base, Fixed::new(Ok(scopes(&base))));
+    c.schedule_warmup(Duration::ZERO);
+    wait_ready(&c);
+    let before = c.read_costs(None).unwrap();
+    // `r--`: a listagem lê os nomes, mas resolver cada rollout falha com permissão negada.
+    let day = base.join("codex/sessions/2026/09/30");
+    std::fs::set_permissions(&day, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let restore = Restore(day.clone());
+    if std::fs::canonicalize(day.join("rollout-c1.jsonl")).is_ok() { return; }
+    assert!(matches!(c.prepare(true).unwrap(), Ready::Go));
+    assert_eq!(c.read_costs(None).unwrap(), before);
+    assert_eq!(c.unread_issue().as_deref(), Some("costs_dir_permission_denied"));
+    drop(restore);
+}

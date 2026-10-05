@@ -1131,7 +1131,19 @@ sessão no custo avulso e a rota (`costs`, `uso`, `cotacao`) nas outras, para um
 outra no limite de uma linha por minuto. Nada é repassado ao Python por falha. A coleta que
 falhou fica guardada, e um pedido 5 s depois dela já dispara outra atrás (sem esperar `fresco`
 nem os 30 s; antes disso só a falha guardada, para disco ou escopos fora do ar não virarem uma
-varredura por pedido); por isso um pedido seguinte pode voltar 202 ou 200. Aquecimento 202,
+varredura por pedido); por isso um pedido seguinte pode voltar 202 ou 200.
+
+**Pasta que não deu para ler nunca apaga linhas** (04/10/2026). A listagem separa pasta que
+sumiu (`NotFound`, as linhas dela saem) de pasta que não abriu, parou no meio ou cujo arquivo
+não se resolve (permissão, E/S): essas entram em `unread`, e `Index::sync_keeping` não apaga
+nenhuma linha conhecida debaixo delas. Conta Codex com pasta ilegível, ou cuja `home` nem se
+resolve, segue ativa no relatório com as linhas como estavam. `forget_outside` só apaga com
+`NotFound` (o `exists()` é falso também com permissão negada). A causa vai ao log
+(`custos_pasta_ilegivel`, tipo de erro, uma linha por tipo e minuto) e ao diário
+(`rust.costs_dir_unread`, código `costs_dir_<tipo>`, sessão = rota) no pedido seguinte; a
+resposta continua 200. Erro SQLite registra código e código estendido onde nasce (nunca a
+mensagem, que pode ecoar valor de coluna), e erro de disco registra a etapa e o tipo. Os cards
+da tela inicial mostram a frase traduzida do 503 com o código entre parênteses. Aquecimento 202,
 ausência legítima 404, relatório vazio e falta de tarifa/cotação não são falha. A versão
 anterior (contrato 8: quatro tentativas e passagem da parte ao Python, rota
 `/internal/rust-failure`) saiu na junção com o dono único, contrato 18.
