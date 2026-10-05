@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activePaneId, buttonKey, followLocalTab, hoverProps, isHoverScope, isMissingRoute, tabFollowsServer, decodeRaster, inkColor, isEmptyBand, parsePluginToast, parsePluginUi, textOf, type PluginElement } from './pluginUi';
+import { activePaneId, buttonKey, followLocalTab, hoverProps, inputKey, isHoverScope, isMissingRoute, tabFollowsServer, decodeRaster, inkColor, isEmptyBand, parsePluginToast, parsePluginUi, textOf, type PluginElement } from './pluginUi';
 import amostras from './__fixtures__/plugin-ui-arvores.json';
 
 function cells(words: number[]): string {
@@ -198,5 +198,11 @@ describe('hover', () => {
   it('hover com scope (grupo entre lugares) fica para depois: o nó segue sem hover', () => {
     const v30 = { type: 'Text', hover: { scope: 'vitrine-V30', color: '#e8a33d' } } as PluginElement;
     expect(hoverProps(v30, true)).toEqual({});
+  });
+
+  it('inputKey só para Input com key em texto', () => {
+    expect(inputKey(amostras.campoV18 as unknown as PluginElement)).toBe('V18-campo');
+    expect(inputKey({ type: 'Input', props: {} })).toBeNull();
+    expect(inputKey({ type: 'Button', props: { key: 'x' } })).toBeNull();
   });
 });

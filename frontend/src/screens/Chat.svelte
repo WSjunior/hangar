@@ -10,7 +10,7 @@
   import PluginToasts from '../components/PluginToasts.svelte';
   import { copyText } from '../lib/clipboard';
   import { openInNewTab } from '../lib/openTab';
-  import { activePaneId, followLocalTab, isMissingRoute, parsePluginToast, parsePluginUi, pressPluginButton, safeHref, showPluginPane, tabFollowsServer, type PluginSource, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
+  import { activePaneId, followLocalTab, inputPluginField, isMissingRoute, parsePluginToast, parsePluginUi, pressPluginButton, safeHref, showPluginPane, tabFollowsServer, type PluginInputKind, type PluginSource, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
   import UsageSheet from '../components/UsageSheet.svelte';
@@ -534,6 +534,14 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       await showPluginPane(sessionName, site, sessionServer());
     } catch (err) {
       if (!isMissingRoute(err)) showPluginNotice(err instanceof Error ? err.message : String(err), true);
+    }
+  }
+  // Digitação num `Input` de mod: só a sessão sem terminal aceita (o campo nem fica habilitado nas outras).
+  async function inputPlugin(site: string, key: string, kind: PluginInputKind, value: string) {
+    try {
+      await inputPluginField(sessionName, site, key, kind, value, sessionServer());
+    } catch (err) {
+      showPluginNotice(err instanceof Error ? err.message : String(err), true);
     }
   }
   let pensamentoTimer: ReturnType<typeof setTimeout> | undefined;
@@ -3473,9 +3481,11 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
         </div>
       {/if}
       {#if pluginActivePane}
-        <PluginPane pane={pluginActivePane} tabs={pluginPanes} onPress={pressPlugin} onShow={showPlugin} />
+        <PluginPane pane={pluginActivePane} tabs={pluginPanes} onPress={pressPlugin} onShow={showPlugin}
+                    onInput={pluginSource === 'surface' ? inputPlugin : undefined} />
       {/if}
-      <PluginBand tree={pluginBand} columns={pluginColumns} onPress={pressPlugin} notice={pluginNotice} />
+      <PluginBand tree={pluginBand} columns={pluginColumns} onPress={pressPlugin}
+                  onInput={pluginSource === 'surface' ? inputPlugin : undefined} notice={pluginNotice} />
       <!-- Composer SEMPRE visivel (exceto sessao morta). Antes ele sumia em awaiting_input e,
            se as opcoes nao fossem parseadas, o usuario ficava sem input E sem botoes = preso.
            Os OptionButtons continuam aparecendo na lista; o composer fica como saida garantida. -->

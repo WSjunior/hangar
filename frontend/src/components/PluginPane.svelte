@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { PANE_CLOSE_KEY, type PluginPane } from '@hangar/core';
+  import { PANE_CLOSE_KEY, type PluginInputKind, type PluginPane } from '@hangar/core';
   import * as m from '../paraglide/messages';
   import PluginNode from './PluginNode.svelte';
 
@@ -11,8 +11,10 @@
     onPress?: (site: string, key: string) => void;
     /** Troca de aba: quem chama decide se ela muda na hora ou espera o `shown_id` do servidor. */
     onShow?: (site: string) => void;
+    /** Digitação num `Input` do painel; só sem terminal. */
+    onInput?: (site: string, key: string, kind: PluginInputKind, value: string) => void;
   }
-  let { pane, tabs = [], onPress, onShow }: Props = $props();
+  let { pane, tabs = [], onPress, onShow, onInput }: Props = $props();
   const tabbed = $derived(tabs.length > 1);
 </script>
 
@@ -38,7 +40,8 @@
   <div class="body" role={tabbed ? 'tabpanel' : undefined}>
     <!-- Trocar de aba remonta o corpo: o hover aceso de um painel não passa para o outro. -->
     {#key pane.id}
-      <PluginNode node={pane.tree} place={pane.columns} onPress={onPress ? (key) => onPress(pane.id, key) : undefined} />
+      <PluginNode node={pane.tree} place={pane.columns} onPress={onPress ? (key) => onPress(pane.id, key) : undefined}
+                  onInput={onInput ? (key, kind, value) => onInput(pane.id, key, kind, value) : undefined} />
     {/key}
   </div>
 </section>
