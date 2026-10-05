@@ -119,6 +119,14 @@ export function registerUi(on: On) {
     return tree;
   });
 
+  // Reaberto com as mesmas props, o painel volta com o desenho que o engine guardou, sem `ui.render`:
+  // sem pedir o desenho de novo, o Hangar ficaria sem o painel que o terminal mostra.
+  on("ui.open", async ($, e, next) => {
+    const r = await next(e);
+    if (!panes.has(e.id)) $.ui.invalidate("ui.render");
+    return r;
+  });
+
   on("ui.close", async ($, e, next) => {
     const r = await next(e);
     if (!(r as { deny?: unknown } | undefined)?.deny && panes.delete(e.id)) schedule($);
