@@ -9,14 +9,12 @@ impl TerminalServices for Facts {
 }
 struct IsolatedMux(String);
 impl Drop for IsolatedMux {fn drop(&mut self){let _=std::process::Command::new("tmux").args(["-L",&self.0,"kill-server"]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();}}
-#[tokio::test]
-async fn terminal_input_tmux_isolated_fake_cli_unicode_multiline_and_clear() {
- let dir=tempfile::tempdir().unwrap();let cli=dir.path().join("fake_cli.py");let receipt=dir.path().join("receipt.json");
- std::fs::write(&cli,r#"import os, sys, tty, termios, json, codecs
+const FAKE_CLI:&str=r#"import os, sys, tty, termios, json, codecs
 fd=sys.stdin.fileno(); old=termios.tcgetattr(fd); tty.setraw(fd)
-text=''; incoming=''; messages=[]
+text=''; incoming=''; messages=[]; stash=None
 def render():
- sys.stdout.write('\x1b[2J\x1b[Hhistory\r\n'+'─'*40+'\r\n❯ '+text.replace('\n','\r\n')+'\r\n'+'─'*40+'\r\n⏵⏵ bypass permissions\r\n'); sys.stdout.flush()
+ hint='  › stashed\r\n' if stash is not None else ''
+ sys.stdout.write('\x1b[2J\x1b[Hhistory\r\n'+hint+'─'*40+'\r\n❯ '+text.replace('\n','\r\n')+'\r\n'+'─'*40+'\r\n⏵⏵ bypass permissions\r\n'); sys.stdout.flush()
 sys.stdout.write('\x1b[?2004h'); render(); decoder=codecs.getincrementaldecoder('utf-8')()
 try:
  while True:
@@ -30,18 +28,51 @@ try:
    c=incoming[0]; incoming=incoming[1:]
    if c=='\r':
     messages.append(text); open(sys.argv[1],'w',encoding='utf-8').write(json.dumps(messages,ensure_ascii=False)); text=''
+    # Como o Claude: o envio devolve o guardado ao composer.
+    if stash is not None: text=stash; stash=None
+   elif c=='\x13':
+    # Ctrl+S: uma vaga só; com texto guarda (por cima do que houver), vazio devolve.
+    if text: stash=text; text=''
+    elif stash is not None: text=stash; stash=None
    elif c=='\x15': text=''
    else: text+=c
    render()
 finally: termios.tcsetattr(fd,termios.TCSADRAIN,old)
-"#).unwrap();
- let label=format!("hangar-input-test-{}-{}",std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos());let _guard=IsolatedMux(label.clone());
+"#;
+struct FakeCli {_dir:tempfile::TempDir,receipt:std::path::PathBuf,label:String,_guard:IsolatedMux,driver:TerminalDriver}
+async fn fake_cli() -> FakeCli {
+ let dir=tempfile::tempdir().unwrap();let cli=dir.path().join("fake_cli.py");let receipt=dir.path().join("receipt.json");
+ std::fs::write(&cli,FAKE_CLI).unwrap();
+ let label=format!("hangar-input-test-{}-{}",std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos());let guard=IsolatedMux(label.clone());
  let cli_cmd=format!("python3 '{}' '{}'",cli.display(),receipt.display());
  let new=Command::new("tmux").args(["-L",&label,"new-session","-d","-s","test","-x","100","-y","40",&cli_cmd]).output().await.unwrap();assert!(new.status.success());
  let meta=Command::new("tmux").args(["-L",&label,"display-message","-p","-t","=test:0.0","#{pane_id}\t#{session_created}"]).output().await.unwrap();assert!(meta.status.success());let meta=String::from_utf8(meta.stdout).unwrap();let mut fields=meta.trim().split('\t');let pane=fields.next().unwrap().to_string();let created=fields.next().unwrap().parse().unwrap();
- let binding=TerminalBinding{name:"test".into(),pane,conversation:"fake-conversation".into(),generation:1,created,mux_argv:vec!["tmux".into(),"-L".into(),label],windows:false,clipboard_lock_path:None};
- let d=TerminalDriver::new(binding.clone(),Arc::new(Facts(binding)),Arc::new(ProcessIo::default()),InputLimits{settle:Duration::from_millis(10),literal_settle:Duration::from_millis(25),multiline_settle:Duration::from_millis(25),slash_settle:Duration::from_millis(25),proof_attempts:40,ready_attempts:40,cleanup_attempts:4});
- for _ in 0..100 {if d.capture().await.is_ok_and(|s|ComposerSnapshot::parse(&s).is_some()){break;}tokio::time::sleep(Duration::from_millis(10)).await;}
+ let binding=TerminalBinding{name:"test".into(),pane,conversation:"fake-conversation".into(),generation:1,created,mux_argv:vec!["tmux".into(),"-L".into(),label.clone()],windows:false,clipboard_lock_path:None};
+ let driver=TerminalDriver::new(binding.clone(),Arc::new(Facts(binding)),Arc::new(ProcessIo::default()),InputLimits{settle:Duration::from_millis(10),literal_settle:Duration::from_millis(25),multiline_settle:Duration::from_millis(25),slash_settle:Duration::from_millis(25),proof_attempts:40,ready_attempts:40,cleanup_attempts:4});
+ for _ in 0..100 {if driver.capture().await.is_ok_and(|s|ComposerSnapshot::parse(&s).is_some()){break;}tokio::time::sleep(Duration::from_millis(10)).await;}
+ FakeCli {_dir:dir,receipt,label,_guard:guard,driver}
+}
+#[tokio::test]
+async fn terminal_input_tmux_isolated_fake_cli_unicode_multiline_and_clear() {
+ let f=fake_cli().await;let d=&f.driver;
  for (id,text) in [("short","ok"),("unicode","ação 😀 C:\\Users\\test"),("multiline","first\nsecond\nthird"),("clear","/clear"),("semicolon","literal;")] {let r=d.prompt(text,id).await;assert_eq!(r.disposition,Disposition::Accepted,"{id}: {}; fake capture={:?}",r.code,d.capture().await);}
- let received:Vec<String>=serde_json::from_slice(&std::fs::read(receipt).unwrap()).unwrap();assert_eq!(received,vec!["ok","ação 😀 C:\\Users\\test","first\nsecond\nthird","/clear","literal;"]);
+ let received:Vec<String>=serde_json::from_slice(&std::fs::read(&f.receipt).unwrap()).unwrap();assert_eq!(received,vec!["ok","ação 😀 C:\\Users\\test","first\nsecond\nthird","/clear","literal;"]);
+}
+#[tokio::test]
+async fn terminal_input_tmux_owner_draft_is_stashed_and_comes_back_identical() {
+ let f=fake_cli().await;let d=&f.driver;let tmux=|args:&[&str]|{let mut a=vec!["-L",f.label.as_str()];a.extend_from_slice(args);std::process::Command::new("tmux").args(a).output().unwrap()};
+ // O dono deixou um rascunho de várias linhas, colado, sem Enter.
+ let draft="rascunho do dono\nação \"aspas\" $HOME \\ C:\\x;";
+ let mut load=std::process::Command::new("tmux").args(["-L",&f.label,"load-buffer","-b","dono","-"]).stdin(std::process::Stdio::piped()).spawn().unwrap();
+ std::io::Write::write_all(load.stdin.as_mut().unwrap(),draft.as_bytes()).unwrap();assert!(load.wait().unwrap().success());
+ assert!(tmux(&["paste-buffer","-t","=test:0.0","-b","dono","-p","-d"]).status.success());
+ for _ in 0..100 {if d.capture().await.is_ok_and(|s|s.contains("rascunho do dono")){break;}tokio::time::sleep(Duration::from_millis(10)).await;}
+ let r=d.prompt("mensagem do app","app").await;
+ assert_eq!(r.disposition,Disposition::Accepted,"{}; capture={:?}",r.code,d.capture().await);
+ assert_eq!(r.draft,Some(DraftOutcome::Returned));
+ // O Enter do dono manda o rascunho de volta igual: nada dele foi para a mensagem do app.
+ assert!(tmux(&["send-keys","-t","=test:0.0","-l","--","\r"]).status.success());
+ let mut received:Vec<String>=vec![];
+ for _ in 0..200 {received=std::fs::read(&f.receipt).ok().and_then(|b|serde_json::from_slice(&b).ok()).unwrap_or_default();if received.len()==2{break;}tokio::time::sleep(Duration::from_millis(10)).await;}
+ assert_eq!(received,vec!["mensagem do app".to_string(),draft.to_string()]);
 }

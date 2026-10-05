@@ -91,9 +91,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 - **A lista de modelos NUNCA é constante.** Conta Anthropic lê o picker ao vivo (cache de 1h,
   porque ler dirige o terminal); sessão de motor usa `/v1/models` do provedor. `/model <id>`
   grava default global — reponha o valor anterior.
-- **Antes de digitar no composer do Claude, ESVAZIE ele** (`C-u` enquanto o conteúdo diminui):
-  digitar por cima gruda as mensagens num Enter só e o reconcile reentrega. No Claude a decisão é
-  apagar, não adiar como no Pi — rascunho sendo escrito no terminal some junto.
+- **Antes de digitar no composer do Claude, ESVAZIE ele, e o rascunho do dono volta:** digitar por
+  cima gruda as mensagens num Enter só e o reconcile reentrega. O escritor Rust guarda o rascunho
+  com o Ctrl+S do próprio Claude (`› stashed`), que o devolve sozinho no envio; sem envio, devolve
+  com outro Ctrl+S só sobre composer vazio, e com envio incerto não aperta nada. Guardado já
+  ocupado adia: um segundo Ctrl+S jogaria fora o que está lá. Nunca redigitar o rascunho lido da
+  tela. O Python de reserva ainda apaga com `C-u`. Ver
+  [rascunho do dono](#rascunho-do-dono-no-guardado-do-claude-05102026).
 - **Antes de digitar no composer do Pi, PERGUNTE a ele** (`getEditorText`): a tela não distingue
   aviso de extensão de rascunho da pessoa, e comparar duas capturas não resolve.
 - **Statusline e prévia vêm de sidecar do agente, não do pane.** O pane corta na largura da
@@ -1300,6 +1304,40 @@ nova, que é montada pelo `sem_terminal` de hoje.
   paste, pra um `[Pasted text #N]` velho sair junto e não virar prova falsa de entrega.
   `_limpar_composer` (envio parcial, só apaga o que é NOSSO) mantém a regra antiga: são caminhos
   diferentes.
+
+## Rascunho do dono no guardado do Claude (05/10/2026)
+
+Na prova da VM Windows o rascunho `rascunho do dono`, parado no composer de uma sessão com
+terminal, sumiu quando o app mandou uma mensagem: o escritor Rust o apagava com `C-u`
+(`initial_composer`). Nova decisão do dono: **guardar e devolver**, igual, sem Enter.
+
+Redigitar o que a tela mostra não devolve igual. Medido no Claude Code 2.1.289 (pane de 100
+colunas): uma linha longa quebra na palavra (`… com` / `folga, sim`) e o espaço da quebra some, então
+quebra da tela e Enter do dono ficam iguais na captura; colagem aparece como `[Pasted text #1 +5
+lines]`, sem o conteúdo. O Claude tem guardado próprio no Ctrl+S, medido no mesmo pane:
+
+- com texto, guarda e esvazia o composer; a linha de dicas acima da régua passa a terminar em
+  `› stashed` (sozinha ou depois de `ctrl+g to edit in VS Code ·` / `Ctrl+Y to paste deleted text ·`)
+  e fica ali enquanto houver algo guardado;
+- com o composer vazio, devolve o guardado e a marca some;
+- **qualquer envio devolve o guardado ao composer**, já na primeira leitura 0,5 s depois do Enter,
+  inclusive `/clear`; o rascunho de várias linhas voltou idêntico, com acento, aspas, `$HOME` e
+  `\`, e o conteúdo colado voltou junto do marcador (enviado depois, saíram as 5 linhas);
+- é **uma vaga só**: guardar `rascunho A`, digitar `texto novo` e apertar Ctrl+S guarda o texto
+  novo e perde o A.
+
+Daí as regras do escritor (`stash_draft`/`settle_draft`/`submit` em
+`crates/hangar-server/src/terminal_input.rs`): rascunho com marca de guardado já presente adia
+com `composer_busy` sem tecla nenhuma; Ctrl+S sem efeito (CLI sem guardado) também adia, com o
+rascunho intacto. Depois do Enter o composer não fica vazio (o rascunho volta na hora): prova o
+envio a marca sumir com o composer igual ao rascunho guardado; com guardado alheio, de conteúdo
+desconhecido, a marca sumir sem o nosso texto no composer. Sem envio (`deferred`), o escritor
+aperta Ctrl+S só com o composer vazio e a marca presente; com envio incerto, só espera a devolução
+nativa. O desfecho (`returned`/`stashed`/`unverified`) vai no resultado da entrega (`draft`,
+mantido no diário da fila) e, quando não é `returned`, num aviso do log; o texto, nunca. O envio
+pelo plugin em modo `user` não passa pelo composer e não devolve o guardado (medido na prova
+isolada: `plugin_accepted`, marca ainda presente), então com algo guardado o escritor usa o modo
+`fill`. O Python (`_esvaziar_composer_claude`) continua apagando: é a reserva.
 
 ## Contas Codex adicionais têm origem própria
 

@@ -21,7 +21,7 @@ _RECENT_CALLS = 256
 _FINAL = {"accepted", "rejected", "confirmed"}
 _TARGETED = {"prepare", "bind_dispatch", "begin_dispatch", "finish", "late_rpc_resolution", "confirm_occurrence"}
 _RECEIPT_METADATA = {"native", "message_id", "native_status", "cleanup", "code", "stage",
-                     "preserve_binding", "queued", "already_confirmed", "disposition"}
+                     "preserve_binding", "queued", "already_confirmed", "disposition", "draft"}
 
 
 def configure(coordinator):

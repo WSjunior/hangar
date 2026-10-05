@@ -66,6 +66,10 @@ pub enum DeliveryStage { Validate, Identity, Ready, Composer, Native, Plugin, Wr
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Cleanup { NotNeeded, Proved, Unproved }
+/// Onde ficou o rascunho do dono que o escritor guardou para entregar.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DraftOutcome { Returned, Stashed, Unverified }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeliveryResult {
     pub disposition: Disposition,
@@ -74,10 +78,12 @@ pub struct DeliveryResult {
     pub native: bool,
     pub message_id: Option<String>,
     pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<DraftOutcome>,
 }
 impl DeliveryResult {
     fn new(disposition: Disposition, stage: DeliveryStage, code: &str) -> Self {
-        Self { disposition, stage, cleanup: Cleanup::NotNeeded, native: false, message_id: None, code: code.into() }
+        Self { disposition, stage, cleanup: Cleanup::NotNeeded, native: false, message_id: None, code: code.into(), draft: None }
     }
 }
 #[derive(Clone, Debug)]
@@ -182,11 +188,17 @@ impl Default for InputLimits {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Proof { Present, Absent, Unreadable }
 #[derive(Clone, Debug)]
-pub struct ComposerSnapshot { pub content: String, pub placeholders: BTreeSet<String> }
+pub struct ComposerSnapshot { pub content: String, pub placeholders: BTreeSet<String>, pub stashed: bool }
 static PLACEHOLDER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[(Pasted text|Image) #(\d+)").unwrap());
 static CURSOR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?m)^\s*[❯›]\s*(\d+)\.\s").unwrap());
 static NEXT_BUFFER: AtomicU64 = AtomicU64::new(0);
 fn compact(text: &str) -> String { text.chars().filter(|c| !c.is_whitespace() && !"│┃║".contains(*c)).collect() }
+/// O Claude marca `› stashed` na linha de dicas acima do composer enquanto guarda um rascunho.
+fn stash_held(screen: &str) -> bool {
+    let lines: Vec<_> = screen.split('\n').collect();
+    let rules: Vec<_> = lines.iter().enumerate().filter(|(_, s)| s.matches('─').count() >= 20).map(|(n, _)| n).collect();
+    rules.len().checked_sub(2).and_then(|n| rules[n].checked_sub(1)).is_some_and(|n| lines[n].contains("› stashed"))
+}
 impl ComposerSnapshot {
     pub fn parse(screen: &str) -> Option<Self> {
         let mut lines: Vec<_> = screen.split('\n').collect();
@@ -197,7 +209,7 @@ impl ComposerSnapshot {
         if lines.len() - bottom > 8 || bottom - top > 15 { return None; }
         let content = lines[top+1..bottom].iter().map(|s| s.trim().strip_prefix('❯').unwrap_or(s.trim()).trim()).collect::<Vec<_>>().join("\n");
         let placeholders = PLACEHOLDER.captures_iter(&content).map(|c| format!("{}:{}", &c[1], &c[2])).collect();
-        Some(Self { content, placeholders })
+        Some(Self { content, placeholders, stashed: stash_held(screen) })
     }
     pub fn is_empty(&self) -> bool { self.content.trim().is_empty() }
     pub fn proves(&self, text: &str, before: &Self) -> Proof {
@@ -394,8 +406,13 @@ impl TerminalDriver {
     }
     async fn snapshot(&self) -> Result<ComposerSnapshot, IoFailure> {
         let (screen, typed) = self.composer_capture().await?;
-        if overlay(&screen) { return Err(IoFailure { code: "overlay", may_have_written: false }); }
-        ComposerSnapshot::parse(&typed).ok_or(IoFailure { code: "composer_unreadable", may_have_written: false })
+        Self::composer(&screen, &typed)
+    }
+    fn composer(screen: &str, typed: &str) -> Result<ComposerSnapshot, IoFailure> {
+        if overlay(screen) { return Err(IoFailure { code: "overlay", may_have_written: false }); }
+        let mut snapshot = ComposerSnapshot::parse(typed).ok_or(IoFailure { code: "composer_unreadable", may_have_written: false })?;
+        snapshot.stashed = stash_held(screen);
+        Ok(snapshot)
     }
     async fn refresh_input_guard(&self) -> Result<ComposerSnapshot, IoFailure> {
         let facts = self.verify().await?;
@@ -407,17 +424,38 @@ impl TerminalDriver {
         if !before.is_empty() { return Err(IoFailure { code: "composer_busy", may_have_written: false }); }
         Ok(before)
     }
-    async fn initial_composer(&self) -> Result<ComposerSnapshot, IoFailure> {
-        let mut before = self.snapshot().await?;
-        for _ in 0..self.limits.cleanup_attempts {
-            if before.is_empty() { return Ok(before); }
-            self.key_inner("C-u").await?;
+    /// Põe o rascunho do dono no guardado do Claude (Ctrl+S), que o devolve sozinho no envio.
+    async fn stash_draft(&self, draft: &ComposerSnapshot) -> Result<ComposerSnapshot, IoFailure> {
+        let busy = IoFailure { code: "composer_busy", may_have_written: false };
+        // Nada da mensagem saiu: o Ctrl+S incerto é do rascunho, e o `settle_draft` o confere.
+        self.key_inner("C-s").await.map_err(|e| IoFailure { may_have_written: false, ..e })?;
+        for _ in 0..self.limits.cleanup_attempts.max(1) {
             self.settle().await;
-            let after = self.snapshot().await?;
-            if !after.is_empty() && after.content.chars().count() >= before.content.chars().count() { return Err(IoFailure { code: "composer_busy", may_have_written: false }); }
-            before = after;
+            let now = self.snapshot().await?;
+            if now.is_empty() && now.stashed { return Ok(now); }
+            // Tecla sem efeito é CLI sem guardado; texto diferente é o dono digitando.
+            if !now.is_empty() && now.content != draft.content { break; }
         }
-        if before.is_empty() { Ok(before) } else { Err(IoFailure { code: "composer_busy", may_have_written: false }) }
+        Err(busy)
+    }
+    /// Sem envio, o escritor devolve o guardado; com envio incerto, nenhum Ctrl+S às cegas. Só
+    /// sobre composer vazio: com texto novo do dono, o Ctrl+S guardaria esse texto por cima.
+    async fn settle_draft(&self, draft: &ComposerSnapshot, disposition: Disposition) -> DraftOutcome {
+        let mut pressed = false;
+        for _ in 0..self.limits.cleanup_attempts.max(1) {
+            // Só o pane: o `/clear` enviado já trocou a conversa.
+            let read = match self.verify_pane().await { Ok(()) => self.composer_capture_unverified().await, Err(e) => Err(e) };
+            let Ok(now) = read.and_then(|(screen, typed)| Self::composer(&screen, &typed)) else { return DraftOutcome::Unverified };
+            if !now.stashed {
+                return if compact(&now.content) == compact(&draft.content) { DraftOutcome::Returned } else { DraftOutcome::Unverified };
+            }
+            if disposition == Disposition::Deferred && !pressed && now.is_empty() {
+                if self.key_inner("C-s").await.is_err() { return DraftOutcome::Unverified; }
+                pressed = true;
+            } else if disposition == Disposition::Deferred && !pressed { return DraftOutcome::Stashed; }
+            self.settle().await;
+        }
+        DraftOutcome::Stashed
     }
     async fn prove_input(&self, text: &str, before: &ComposerSnapshot) -> bool {
         for _ in 0..self.limits.proof_attempts.max(1) {
@@ -449,7 +487,7 @@ impl TerminalDriver {
         result.cleanup = if cleaned { Cleanup::Proved } else { Cleanup::Unproved };
         result
     }
-    async fn submit(&self, text: &str, before: &ComposerSnapshot) -> DeliveryResult {
+    async fn submit(&self, text: &str, before: &ComposerSnapshot, draft: Option<&ComposerSnapshot>) -> DeliveryResult {
         if !self.verify().await.is_ok_and(|facts| !facts.open_question) {
             return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Submit, "submission_blocked");
         }
@@ -467,6 +505,15 @@ impl TerminalDriver {
                 // Só aceita se o texto também sumiu da tela com estilo: esmaecido nunca prova envio.
                 if ComposerSnapshot::parse(&typed).is_some_and(|now| now.is_empty())
                     && !ComposerSnapshot::parse(&screen).is_some_and(|now| now.proves(text, before) == Proof::Present) {
+                    return DeliveryResult::new(Disposition::Accepted, DeliveryStage::SubmitProof, "submitted");
+                }
+                // O guardado só sai do Ctrl+S sozinho no envio: ele volta ao composer e a marca some.
+                // Rascunho nosso tem que voltar igual; o guardado alheio, desconhecido, só sem o nosso texto.
+                let restored = |s: &str| ComposerSnapshot::parse(s).is_some_and(|now| match draft {
+                    Some(draft) => compact(&now.content) == compact(&draft.content),
+                    None => now.proves(text, before) != Proof::Present,
+                });
+                if before.stashed && !stash_held(&screen) && restored(&typed) && (draft.is_some() || restored(&screen)) {
                     return DeliveryResult::new(Disposition::Accepted, DeliveryStage::SubmitProof, "submitted");
                 }
                 if text.trim_start().starts_with('/') {
@@ -509,18 +556,30 @@ impl TerminalDriver {
             facts = match self.verify().await { Ok(f) => f, Err(e) => return Self::failed(e, DeliveryStage::Identity) };
         }
         if !facts.ready { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Ready, "not_ready"); }
-        let mut before = match self.initial_composer().await { Ok(b) => b, Err(e) => return Self::failed(e, DeliveryStage::Composer) };
-        facts = match self.verify().await { Ok(f) => f, Err(e) => return Self::failed(e, DeliveryStage::Identity) };
+        let draft = match self.snapshot().await { Ok(d) => d, Err(e) => return Self::failed(e, DeliveryStage::Composer) };
+        if draft.is_empty() { return self.deliver(text, id, draft, None).await; }
+        // O guardado tem uma vaga só: ocupado, o Ctrl+S jogaria fora o que já estava nele.
+        if draft.stashed { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Composer, "composer_busy"); }
+        let mut result = match self.stash_draft(&draft).await {
+            Ok(before) => self.deliver(text, id, before, Some(&draft)).await,
+            Err(e) => Self::failed(e, DeliveryStage::Composer),
+        };
+        result.draft = Some(self.settle_draft(&draft, result.disposition).await);
+        result
+    }
+    async fn deliver(&self, text: &str, id: &str, mut before: ComposerSnapshot, draft: Option<&ComposerSnapshot>) -> DeliveryResult {
+        let facts = match self.verify().await { Ok(f) => f, Err(e) => return Self::failed(e, DeliveryStage::Identity) };
         let mut refresh_guard = false;
         if facts.plugin_live && !text.trim_start().starts_with('/') {
-            let mode = if facts.plugin_user && facts.idle && !text.contains('@') && !text.trim_start().starts_with('!') { PluginMode::User } else { PluginMode::Fill };
+            // Com algo guardado, o envio vai pelo composer: só ele devolve o guardado.
+            let mode = if facts.plugin_user && facts.idle && !before.stashed && !text.contains('@') && !text.trim_start().starts_with('!') { PluginMode::User } else { PluginMode::Fill };
             let request = PluginRequest { id: id.into(), text: text.into(), mode: mode.clone() };
             if self.services.writing().await.is_err() { return DeliveryResult::new(Disposition::Deferred, DeliveryStage::Plugin, "write_journal"); }
             match self.services.publish(&self.binding, request).await {
                 Ok(PluginReply::Unavailable | PluginReply::NotWritten) => refresh_guard = true,
                 Ok(PluginReply::Accepted) if mode == PluginMode::User => return DeliveryResult::new(Disposition::Accepted, DeliveryStage::Plugin, "plugin_accepted"),
                 Ok(PluginReply::Filled) if mode == PluginMode::Fill => {
-                    if self.prove_input(text, &before).await { return self.submit(text, &before).await; }
+                    if self.prove_input(text, &before).await { return self.submit(text, &before, draft).await; }
                     return self.partial(text, &before, DeliveryStage::InputProof).await;
                 }
                 _ => return DeliveryResult::new(Disposition::Unknown, DeliveryStage::Plugin, "plugin_uncertain"),
@@ -541,7 +600,7 @@ impl TerminalDriver {
         let delay = if text.trim_start().starts_with('/') { self.limits.slash_settle }
             else if text.contains('\n') { self.limits.multiline_settle } else { self.limits.literal_settle };
         tokio::time::sleep(delay).await;
-        if self.prove_input(text, &before).await { drop(clipboard); return self.submit(text, &before).await; }
+        if self.prove_input(text, &before).await { drop(clipboard); return self.submit(text, &before, draft).await; }
         self.partial(text, &before, DeliveryStage::InputProof).await
     }
     pub async fn key(&self, key: &str, interactive: bool) -> DeliveryResult {
