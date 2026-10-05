@@ -337,3 +337,93 @@ def test_perm_post_sessao_trabalhando_409():
          patch("app.api.terminal._require_drivable", side_effect=TerminalInput.NaoDigitou(409, "trabalhando")):
         r = _client().post("/api/sessions/sess/permission-mode", headers=AUTH, json={"mode": "plan"})
     assert r.status_code == 409
+
+
+def _bypass_terminal(cmdline: str, ocupada: str | None = None):
+    from unittest.mock import AsyncMock, MagicMock
+    from app import api
+    api._perm_modes_cache.clear()
+    trocar, para_hl, para_term = MagicMock(return_value="bypassPermissions"), MagicMock(), MagicMock()
+    with patch("app.api._cached_info", return_value=_info_claude(name="sess-bp", jsonl="/tmp/bp.jsonl")), \
+         patch("app.api._recusa_se_painel_aberto"), \
+         patch("app.api._headless", return_value=False), \
+         patch("app.api._motivo_ocupada", AsyncMock(return_value=ocupada)), \
+         patch.object(api.registry, "_pane_of", return_value={"pid": 10}), \
+         patch.object(api.registry, "para_headless", para_hl), \
+         patch.object(api.registry, "para_terminal", para_term), \
+         patch("app.api.registry_mod._pid_do_agente", return_value=11), \
+         patch("app.procinfo._cmdline", return_value=cmdline), \
+         patch("app.permission_mode.ler_modo", return_value="manual"), \
+         patch("app.permission_mode.trocar_modo", trocar):
+        r = _client().post("/api/sessions/sess-bp/permission-mode", headers=AUTH, json={"mode": "bypassPermissions"})
+    return r, trocar, para_hl, para_term
+
+
+def test_bypass_fora_do_ciclo_reabre_a_sessao_em_bypass():
+    r, trocar, para_hl, para_term = _bypass_terminal("claude --resume abc --permission-mode manual")
+    assert r.status_code == 200
+    assert r.json()["mode"] == "bypassPermissions" and r.json()["reopened"] is True
+    para_hl.assert_called_once_with("sess-bp", "bypassPermissions")
+    para_term.assert_called_once_with("sess-bp")
+    trocar.assert_not_called()
+
+
+def test_bypass_ja_no_ciclo_troca_por_tecla_sem_reabrir():
+    r, trocar, para_hl, _ = _bypass_terminal("claude --resume abc --permission-mode bypassPermissions")
+    assert r.status_code == 200
+    trocar.assert_called_once()
+    para_hl.assert_not_called()
+
+
+def test_bypass_fora_do_ciclo_com_sessao_trabalhando_recusa_sem_reabrir():
+    r, trocar, para_hl, _ = _bypass_terminal("claude --resume abc", ocupada="erro_sessao_trabalhando")
+    assert r.status_code == 409
+    assert r.json()["detail"]["code"] == "erro_sessao_trabalhando"
+    para_hl.assert_not_called()
+    trocar.assert_not_called()
+
+
+def test_bypass_sem_terminal_que_nao_reabre_para_o_processo_e_volta_o_modo():
+    from unittest.mock import AsyncMock, MagicMock
+    from app import api
+    ordem = []
+    hl = MagicMock()
+    hl.set_permission_mode = AsyncMock(side_effect=RuntimeError("fora do ciclo"))
+    hl.parar = AsyncMock(side_effect=lambda name: ordem.append("parar"))
+    hl.ensure_running = AsyncMock(side_effect=RuntimeError("initialize recusado"))
+    hl.acordar = MagicMock(side_effect=lambda name: ordem.append("acordar"))
+    update = MagicMock(side_effect=lambda name, **kw: ordem.append(("update", kw.get("permission_mode"))) or {})
+    with patch("app.api._cached_info", return_value=_info_claude(name="sess-hl")), \
+         patch("app.api._headless", return_value=True), \
+         patch("app.api.get_adapter", return_value=hl), \
+         patch("app.api._motivo_ocupada", AsyncMock(return_value=None)), \
+         patch("app.api.headless_sessions.load", return_value={"permission_mode": "manual", "previous_non_plan": "manual"}), \
+         patch("app.api.headless_sessions.update", update):
+        r = _client().post("/api/sessions/sess-hl/permission-mode", headers=AUTH, json={"mode": "bypassPermissions"})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_permissao_reabrir"
+    assert ordem == ["parar", ("update", "bypassPermissions"), "parar", ("update", "manual"), "acordar"]
+
+
+def test_bypass_sem_terminal_que_nao_para_mantem_o_arquivo_em_bypass_e_avisa():
+    from unittest.mock import AsyncMock, MagicMock
+    paradas = []
+    def parar(name):
+        paradas.append(name)
+        if len(paradas) == 2:
+            raise RuntimeError("taskkill falhou")
+    hl = MagicMock()
+    hl.set_permission_mode = AsyncMock(side_effect=RuntimeError("fora do ciclo"))
+    hl.parar = AsyncMock(side_effect=parar)
+    hl.ensure_running = AsyncMock(side_effect=RuntimeError("initialize recusado"))
+    update = MagicMock(return_value={})
+    with patch("app.api._cached_info", return_value=_info_claude(name="sess-hl")), \
+         patch("app.api._headless", return_value=True), \
+         patch("app.api.get_adapter", return_value=hl), \
+         patch("app.api._motivo_ocupada", AsyncMock(return_value=None)), \
+         patch("app.api.headless_sessions.load", return_value={"permission_mode": "manual"}), \
+         patch("app.api.headless_sessions.update", update):
+        r = _client().post("/api/sessions/sess-hl/permission-mode", headers=AUTH, json={"mode": "bypassPermissions"})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "erro_permissao_reabrir"
+    assert r.json()["detail"]["params"]["stop_error"] == "taskkill falhou"
+    assert [c.kwargs.get("permission_mode") for c in update.call_args_list] == ["bypassPermissions"]
+    hl.acordar.assert_not_called()

@@ -1304,3 +1304,40 @@ def test_queue_inside_lifecycle_never_waits_for_the_mode(monkeypatch, tmp_path):
         handled, rows = await asyncio.wait_for(asyncio.to_thread(admin), 2)
         assert handled and rows == []
     asyncio.run(flow())
+
+
+def test_rust_bypass_reopen_of_terminal_closes_and_reopens_in_rust(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from app import api, runtime_terminal as terminal
+    gateway = TerminalGateway()
+    owner, slot, collected = live_owner(monkeypatch, tmp_path, gateway=gateway)
+    facts = {'now': {**collected, 'session_proof': 'p1'}}
+    proof = {'now': 'p1'}
+    monkeypatch.setattr(terminal, '_collect', lambda name: {**facts['now'], 'name': name})
+    monkeypatch.setattr(terminal, '_session_proof', lambda name: proof['now'])
+    monkeypatch.setattr(terminal, '_pane_life', lambda name: None, raising=False)
+    monkeypatch.setattr(api, '_headless', lambda name: False)
+    monkeypatch.setattr(api, '_invalidate_lists', lambda: None)
+    async def idle(name, headless):
+        return None
+    monkeypatch.setattr(api, '_motivo_ocupada', idle)
+    calls = []
+    def para_headless(name, mode):
+        assert gateway.calls[-1] == 'close' and gateway.lease is None, 'o Rust soltou antes de matar o pane'
+        calls.append(('para_headless', name, mode))
+    def para_terminal(name):
+        calls.append(('para_terminal', name))
+        proof['now'] = 'p2'
+        facts['now'] = {**collected, 'pane': '%7', 'created': 456, 'namespace': 'mux-novo', 'session_proof': 'p2'}
+    monkeypatch.setattr(api.registry, 'para_headless', para_headless)
+    monkeypatch.setattr(api.registry, 'para_terminal', para_terminal)
+    async def flow():
+        assert await owner.prepare_session('session', 'claude')
+        assert slot.phase == Phase.Rust
+        info = SimpleNamespace(name='session', provider='claude', headless=False, jsonl=None)
+        result = await api._durante_troca('session', api._reabrir_em_bypass('session', info))
+        assert result['reopened'] is True
+        assert calls == [('para_headless', 'session', 'bypassPermissions'), ('para_terminal', 'session')]
+        assert gateway.calls == ['open', 'snapshot', 'close', 'open']
+        assert slot.phase == Phase.Rust and slot.lease is None and slot.binding.meta['terminal']['pane'] == '%7'
+    asyncio.run(flow())
