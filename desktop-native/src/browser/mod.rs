@@ -3,6 +3,8 @@
 //! Windows e Linux falam CDP, e neles o app atende o hangar-preview e a tela remota.
 pub mod model;
 pub mod preview_fmt;
+#[cfg(not(target_os = "macos"))]
+pub mod chrome_import;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 pub mod control;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
