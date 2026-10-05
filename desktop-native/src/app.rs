@@ -483,6 +483,14 @@ pub struct Hangar {
     plugin_band: Value,
     /// Painéis que os mods abriram e o terminal desenhou, do mesmo SSE.
     plugin_panes: Vec<Value>,
+    /// Painel na frente segundo o servidor (`shown_id`); `None` quando o servidor não manda.
+    plugin_shown: Option<Option<String>>,
+    /// Largura, em colunas, para a qual a faixa foi desenhada; `None` num servidor antigo.
+    plugin_columns: Option<f64>,
+    /// De onde vem a interface dos mods; `None` vale como terminal (sem digitação).
+    plugin_source: Option<crate::plugin_ui::UiSource>,
+    /// Escolha local da aba: começa no último painel aberto e sobrevive aos redesenhos.
+    plugin_local_tab: Option<String>,
     /// Últimos ids de aviso de mod (SSE `plugin_toast`) já mostrados; só os recentes voltam na reconexão.
     plugin_toasts_seen: std::collections::VecDeque<String>,
     /// Avisos de mod na tela, do mais antigo ao mais novo.
@@ -794,7 +802,7 @@ impl Hangar {
             attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
             suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
-            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
+            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_shown: None, plugin_columns: None, plugin_source: None, plugin_local_tab: None, plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
             settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
@@ -1197,6 +1205,10 @@ impl Hangar {
         self.terminal_suggestion.clear();
         self.plugin_band = Value::Null;
         self.plugin_panes.clear();
+        self.plugin_shown = None;
+        self.plugin_columns = None;
+        self.plugin_source = None;
+        self.plugin_local_tab = None;
         self.recent = None;
         self.command_panel = false;
         // Os menus são da tela sem sessão: sem isto, o Esc seguinte seria gasto num deles, já fora da tela.
@@ -1787,10 +1799,15 @@ impl Hangar {
                 return (true, Changed::Screen);
             }
             "plugin_ui" => {
-                // A árvore chega por valor: `take` move em vez de copiar centenas de KB por evento.
-                let mut data = data;
-                self.plugin_band = data["above"].take();
-                self.plugin_panes = match data["panes"].take() { Value::Array(panes) => panes, _ => Vec::new() };
+                // A árvore chega por valor: `surfaces` move em vez de copiar centenas de KB por evento.
+                let s = crate::plugin_ui::surfaces(data);
+                self.plugin_local_tab = crate::plugin_ui::follow_local(&crate::plugin_ui::pane_ids(&self.plugin_panes),
+                    &crate::plugin_ui::pane_ids(&s.panes), self.plugin_local_tab.as_deref());
+                self.plugin_band = s.above;
+                self.plugin_panes = s.panes;
+                self.plugin_shown = s.shown_id;
+                self.plugin_columns = s.columns;
+                self.plugin_source = s.source;
                 return (true, Changed::Screen);
             }
             "plugin_toast" => {
@@ -1921,6 +1938,10 @@ impl Hangar {
                 self.terminal_suggestion.clear();
                 self.plugin_band = Value::Null;
                 self.plugin_panes.clear();
+                self.plugin_shown = None;
+                self.plugin_columns = None;
+                self.plugin_source = None;
+                self.plugin_local_tab = None;
                 if let Some(task) = self.history_task.take() { task.abort(); }
                 self.chat = Chat::default();
                 self.turn_seen = None;

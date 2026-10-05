@@ -57,6 +57,59 @@ fn short(text: &str) -> String {
     out
 }
 
+/// De onde vem a interface dos mods: superfície remota (sessão sem terminal) ou o plugin no terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiSource { Surface, Terminal }
+
+/// O evento `plugin_ui` lido. `shown_id`: `None` quando o servidor não manda (antigo), `Some(None)` sem painel.
+/// `columns` e `source` ausentes ou estranhos valem como "o servidor não mandou".
+#[derive(Debug, Default, PartialEq)]
+pub struct Surfaces { pub above: Value, pub panes: Vec<Value>, pub shown_id: Option<Option<String>>, pub columns: Option<f64>, pub source: Option<UiSource> }
+
+/// O dado do SSE `plugin_ui`, por valor: a árvore é movida, não copiada. Painel sem id fica de fora, como no web.
+pub fn surfaces(mut data: Value) -> Surfaces {
+    if !data.is_object() { return Surfaces::default(); }
+    let shown_id = match data.get("shown_id") {
+        Some(Value::String(id)) if !id.is_empty() => Some(Some(id.clone())),
+        Some(Value::Null) => Some(None),
+        _ => None,
+    };
+    let panes = match data["panes"].take() {
+        Value::Array(panes) => panes.into_iter().filter(|p| p["id"].as_str().is_some_and(|id| !id.is_empty())).collect(),
+        _ => Vec::new(),
+    };
+    Surfaces {
+        above: data["above"].take(),
+        panes,
+        shown_id,
+        columns: data["columns"].as_f64().filter(|c| c.is_finite() && *c > 0.),
+        source: match data["source"].as_str() { Some("surface") => Some(UiSource::Surface), Some("terminal") => Some(UiSource::Terminal), _ => None },
+    }
+}
+
+pub fn pane_ids(panes: &[Value]) -> Vec<String> { panes.iter().filter_map(|p| p["id"].as_str().map(str::to_owned)).collect() }
+
+/// O servidor diz qual painel está na frente, e ele está na lista: a aba segue o servidor.
+pub fn follows_server(ids: &[String], shown: &Option<Option<String>>) -> bool {
+    matches!(shown, Some(Some(id)) if ids.contains(id))
+}
+
+/// O painel desenhado: o do servidor quando ele diz um da lista; senão a escolha local; senão o último aberto.
+pub fn active_pane(ids: &[String], shown: &Option<Option<String>>, local: Option<&str>) -> Option<String> {
+    if let Some(Some(id)) = shown.as_ref().filter(|_| follows_server(ids, shown)) { return Some(id.clone()); }
+    local.filter(|l| ids.iter().any(|id| id == l)).map(str::to_owned).or_else(|| ids.last().cloned())
+}
+
+/// A escolha local depois de um evento novo. Painel que acabou de abrir vai para a frente, como no terminal; fechado o
+/// escolhido, fica o vizinho anterior (o seguinte, se não houver anterior); senão ela sobrevive ao redesenho.
+pub fn follow_local(prev: &[String], next: &[String], local: Option<&str>) -> Option<String> {
+    if next.is_empty() { return None; }
+    if let Some(opened) = next.iter().rev().find(|id| !prev.contains(id)) { return Some(opened.clone()); }
+    if let Some(local) = local.filter(|l| next.iter().any(|id| id == l)) { return Some(local.to_owned()); }
+    let Some(at) = local.and_then(|l| prev.iter().position(|id| id == l)) else { return next.last().cloned() };
+    prev[..at].iter().rev().find(|id| next.contains(id)).or_else(|| next.first()).cloned()
+}
+
 fn frame() -> Div {
     div().px(px(10.)).py(px(6.)).rounded(px(8.)).bg(theme::inset())
         .font_family(theme::MONO).text_size(px(TEXT_PX)).line_height(px(CELL_H)).text_color(theme::text())
@@ -413,7 +466,8 @@ fn unmark(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
-    use super::{button_key, cell_color, color, is_empty, plain_deep, raster_row, raster_runs, safe_href, text_row, toast, Toast};
+    use super::{active_pane, button_key, cell_color, color, follow_local, follows_server, is_empty, pane_ids, plain_deep,
+        raster_row, raster_runs, safe_href, surfaces, text_row, toast, Surfaces, Toast, UiSource};
     use serde_json::{json, Value};
     use std::time::Duration;
 
@@ -511,5 +565,44 @@ mod tests {
         assert!(color(&json!("#5aa6ff")).is_some());
         assert!(color(&json!("redBright")).is_some());
         assert_eq!(color(&json!("nope")), None);
+    }
+
+    fn amostras() -> Value { serde_json::from_str(include_str!("../../packages/core/src/__fixtures__/plugin-ui-arvores.json")).unwrap() }
+
+    #[test]
+    fn plugin_ui_event_reads_the_new_fields_and_tolerates_their_absence() {
+        let rol = amostras()["rolPm"]["panes"].clone();
+        let old = surfaces(json!({"above": amostras()["faixaPm"], "panes": rol}));
+        assert_eq!(pane_ids(&old.panes), ["pm-mock-pm", "pm-mock-mr", "pm-mock-jenkins"]);
+        assert_eq!((old.shown_id, old.columns, old.source), (None, None, None));
+        let new = surfaces(json!({"above": null, "panes": [{"title": "sem id"}], "shown_id": null, "columns": 110, "source": "surface"}));
+        assert!(new.panes.is_empty());
+        assert_eq!((new.shown_id, new.columns, new.source), (Some(None), Some(110.), Some(UiSource::Surface)));
+        let odd = surfaces(json!({"shown_id": 7, "columns": -1, "source": "mobile"}));
+        assert_eq!((odd.shown_id, odd.columns, odd.source), (None, None, None));
+        assert_eq!(surfaces(json!("texto")), Surfaces::default());
+    }
+
+    #[test]
+    fn active_pane_follows_the_server_only_when_it_names_a_pane_in_the_list() {
+        let ids: Vec<String> = ["a", "b", "c"].map(String::from).to_vec();
+        assert_eq!(active_pane(&ids, &Some(Some("a".into())), Some("b")).as_deref(), Some("a"));
+        // shown_id de painel que ainda não chegou: vale a escolha local, nunca o corpo vazio.
+        assert_eq!(active_pane(&ids, &Some(Some("z".into())), Some("b")).as_deref(), Some("b"));
+        assert_eq!(active_pane(&ids, &None, None).as_deref(), Some("c"));
+        assert_eq!(active_pane(&[], &Some(None), Some("a")), None);
+        assert!(follows_server(&ids, &Some(Some("c".into()))));
+        assert!(!follows_server(&ids, &None) && !follows_server(&ids, &Some(None)));
+    }
+
+    #[test]
+    fn local_tab_starts_on_the_newest_survives_redraws_and_falls_back_to_the_previous_neighbour() {
+        let v = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(follow_local(&[], &v(&["a", "b", "c"]), None).as_deref(), Some("c"));
+        assert_eq!(follow_local(&v(&["a", "b", "c"]), &v(&["a", "b", "c"]), Some("a")).as_deref(), Some("a"));
+        assert_eq!(follow_local(&v(&["a", "b"]), &v(&["a", "b", "d"]), Some("a")).as_deref(), Some("d"));
+        assert_eq!(follow_local(&v(&["a", "b", "c"]), &v(&["a", "c"]), Some("b")).as_deref(), Some("a"));
+        assert_eq!(follow_local(&v(&["a", "b"]), &v(&["b"]), Some("a")).as_deref(), Some("b"));
+        assert_eq!(follow_local(&v(&["a"]), &[], Some("a")), None);
     }
 }
