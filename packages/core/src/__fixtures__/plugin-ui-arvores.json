@@ -1,0 +1,33 @@
+{
+  "_origem": "Árvores reais de ui_render (Claude Code 2.1.289, superfície desktop), sem initialize, session_id, uuid nem e-mail; textos do mod de exemplo trocados por neutros.",
+  "faixaPm": {"type": "Box", "props": {"flexDirection": "column"}, "children": [
+    {"type": "engine", "ref": 1},
+    {"type": "Box", "props": {"key": "pm-linha", "flexDirection": "row", "width": 110}, "children": [
+      {"type": "Button", "props": {"key": "pm-abrir", "label": "▸ PM-1", "plain": true}, "press": {"plugin": "pm-mock", "handle": 66110318}},
+      {"type": "Text", "props": {"wrap": "truncate-end"}, "children": [
+        {"type": "Text", "props": {"dimColor": true}, "children": [" · "]},
+        {"type": "Text", "props": {"color": "#e8a33d"}, "children": ["● 2 threads abertas"]}
+      ]},
+      {"type": "Box", "props": {"position": "absolute", "top": 0, "left": 10, "width": 100, "display": "none"}, "hover": {"display": "flex"}, "children": [
+        {"type": "Text", "props": {"wrap": "truncate-end"}, "children": [" Título da PM revelado pelo hover "]}
+      ]}
+    ]}
+  ]},
+  "hoverV28": {"type": "Box", "props": {"key": "V28-escopo", "flexDirection": "row", "columnGap": 2, "paddingX": 1, "borderStyle": "round"}, "hover": {"borderColor": "#5aa6ff"}, "children": [
+    {"type": "Text", "hover": {"color": "#3fb97a", "bold": true}, "children": ["texto que muda de cor"]},
+    {"type": "Button", "props": {"key": "V28-botao", "label": "Botão no escopo"}, "press": {"plugin": "vitrine", "handle": 573898261}, "hover": {"color": "#e8a33d"}},
+    {"type": "Text", "children": ["V28-botao: 0"]}
+  ]},
+  "hoverV29": {"type": "Box", "props": {"key": "V29-escopo", "flexDirection": "row"}, "children": [
+    {"type": "Text", "children": ["◆ passe o ponteiro nesta linha"]},
+    {"type": "Box", "props": {"position": "absolute", "top": 1, "left": 2, "display": "none", "borderStyle": "round", "borderColor": "#5aa6ff", "backgroundColor": "#30363d", "paddingX": 1}, "hover": {"display": "flex"}, "children": [
+      {"type": "Text", "children": ["cartão por cima, sem mover os vizinhos"]}
+    ]}
+  ]},
+  "campoV18": {"type": "Input", "props": {"key": "V18-campo", "label": "V18 campo", "placeholder": "digite e tecle Enter", "value": "", "submitLabel": "ecoar"}, "press": {"plugin": "vitrine", "handle": 573898209}},
+  "rolPm": {"panes": [
+    {"id": "pm-mock-pm", "title": "PM-1"},
+    {"id": "pm-mock-mr", "title": "MR ●2"},
+    {"id": "pm-mock-jenkins", "title": "Jenkins"}
+  ], "shown_id": "pm-mock-mr"}
+}

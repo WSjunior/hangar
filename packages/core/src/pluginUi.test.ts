@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buttonKey, decodeRaster, inkColor, isEmptyBand, parsePluginToast, parsePluginUi, textOf } from './pluginUi';
+import amostras from './__fixtures__/plugin-ui-arvores.json';
 
 function cells(words: number[]): string {
   const bytes = new Uint8Array(new Uint32Array(words).buffer);
@@ -61,7 +62,7 @@ describe('parsePluginUi', () => {
   });
 
   it('aceita o formato antigo, só com a faixa', () => {
-    expect(parsePluginUi({ above: null })).toEqual({ above: null, panes: [] });
+    expect(parsePluginUi({ above: null })).toEqual({ above: null, panes: [], shownId: undefined, columns: null, source: null });
   });
 
   it('placement desconhecido vira inline', () => {
@@ -88,4 +89,39 @@ it('buttonKey só para Button com key em texto', () => {
   expect(buttonKey({ type: 'Button', props: { key: 'cp-1' } })).toBe('cp-1');
   expect(buttonKey({ type: 'Button', props: {} })).toBeNull();
   expect(buttonKey({ type: 'Text', props: { key: 'x' } })).toBeNull();
+});
+
+describe('parsePluginUi: campos novos da fase 1', () => {
+  const evento = (extra: Record<string, unknown>) => ({
+    above: amostras.faixaPm,
+    panes: amostras.rolPm.panes.map((p) => ({ ...p, placement: 'dock', columns: 58, tree: { type: 'engine', ref: 0 } })),
+    ...extra,
+  });
+
+  it('lê shown_id, columns e source quando o servidor manda', () => {
+    const s = parsePluginUi(evento({ shown_id: 'pm-mock-mr', columns: 110, source: 'surface' }));
+    expect([s.shownId, s.columns, s.source]).toEqual(['pm-mock-mr', 110, 'surface']);
+    expect(s.panes.map((p) => p.id)).toEqual(['pm-mock-pm', 'pm-mock-mr', 'pm-mock-jenkins']);
+  });
+
+  it('servidor de hoje: sem os campos, shownId fica undefined e o resto null', () => {
+    const s = parsePluginUi(evento({}));
+    expect(s.shownId).toBeUndefined();
+    expect(s.columns).toBeNull();
+    expect(s.source).toBeNull();
+  });
+
+  it('shown_id null quer dizer "sem painel"; valores estranhos valem como ausentes', () => {
+    expect(parsePluginUi({ shown_id: null }).shownId).toBeNull();
+    const s = parsePluginUi({ shown_id: 7, columns: -3, source: 'mobile' });
+    expect([s.shownId, s.columns, s.source]).toEqual([undefined, null, null]);
+    expect(parsePluginUi({ shown_id: '' }).shownId).toBeUndefined();
+  });
+
+  it('o hover da árvore real fica no nó, fora de props', () => {
+    const linha = parsePluginUi(evento({})).above as unknown as { children: { children?: { hover?: unknown; props?: Record<string, unknown> }[] }[] };
+    const cartao = linha.children[1].children![2];
+    expect(cartao.hover).toEqual({ display: 'flex' });
+    expect(cartao.props).not.toHaveProperty('hover');
+  });
 });
