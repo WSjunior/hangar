@@ -288,7 +288,8 @@ impl SubConversation {
         let error = tool.tone == Tone::Warning;
         let mut body = div().flex().flex_col().gap_2().pt_1().pb_2();
         // Edição de arquivo mostra o diff no lugar da entrada crua; o resultado só aparece se falhou.
-        let diff = (!tool.orphan).then(|| super::edits::card(&self.events[tool.call], cx)).flatten();
+        let result = tool.result.map(|i| &self.events[i]);
+        let diff = (!tool.orphan).then(|| super::edits::card(&self.events[tool.call], result, cx)).flatten();
         let has_diff = diff.is_some();
         if let Some(diff) = diff { body = body.child(diff); }
         else if !tool.orphan {

@@ -869,6 +869,23 @@ export function toolGroupTitulo(tools: { tool_name?: string | null; tool_input?:
   return texto.charAt(0).toUpperCase() + texto.slice(1);
 }
 
+/** Pele 'terminal': leituras e buscas seguidas somam numa linha; o resto mantém cartão próprio.
+ * Comando fica de fora de propósito — não dá para saber se ele só lê. Chamada com erro ou ainda
+ * rodando também fica solta (`settled` false): a linha resumida não pode esconder falha nem andamento. */
+export function splitTerminalRun<T extends { tool_name?: string | null }>(
+  tools: T[],
+  settled: (tool: T) => boolean,
+): ({ kind: 'reads'; tools: T[] } | { kind: 'tool'; tool: T })[] {
+  const out: ({ kind: 'reads'; tools: T[] } | { kind: 'tool'; tool: T })[] = [];
+  for (const tool of tools) {
+    const familia = familiaTool(tool.tool_name);
+    if ((familia !== 'leu' && familia !== 'buscou') || !settled(tool)) { out.push({ kind: 'tool', tool }); continue; }
+    const last = out[out.length - 1];
+    if (last?.kind === 'reads') last.tools.push(tool); else out.push({ kind: 'reads', tools: [tool] });
+  }
+  return out;
+}
+
 // Contagem por fase no cabeçalho do grupo ("2 rodando • 3 concluídos"), na ordem rodando → ok → erro.
 export function toolGroupCounts(phases: ToolPhase[]): string {
   const n = { pending: 0, done: 0, error: 0 };

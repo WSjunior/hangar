@@ -7,11 +7,11 @@ use gpui_kit::component::highlighter::{HighlightTheme, SyntaxHighlighter};
 use std::{cell::RefCell, ops::Range, rc::Rc};
 
 /// Linhas desenhadas por chamada: um Write de milhares de linhas travaria a conversa. O resto vai pelo Copiar.
-const SHOWN_MAX: usize = 400;
+pub(super) const SHOWN_MAX: usize = 400;
 
 type Marks = Vec<(Range<usize>, HighlightStyle)>;
 /// Realce de cada lado (antigo, novo) de cada edição, por linha.
-type Painted = Rc<Vec<(Vec<Marks>, Vec<Marks>)>>;
+pub(super) type Painted = Rc<Vec<(Vec<Marks>, Vec<Marks>)>>;
 
 thread_local! {
     /// Por chamada e tema: o parse roda uma vez, não a cada quadro.
@@ -49,17 +49,19 @@ fn paint(lang: &str, text: &str, upto: usize, theme: &HighlightTheme) -> Vec<Mar
     out
 }
 
-fn painted(call: &ChatEvent, edits: &[Edit], cx: &App) -> Painted {
+pub(super) fn painted(call: &ChatEvent, edits: &[Edit], cx: &App) -> Painted {
     let theme = cx.theme().highlight_theme.clone();
-    let key = (call.id.clone(), Arc::as_ptr(&theme) as usize);
+    let patched = edits.first().is_some_and(|e| e.patched);
+    let key = (format!("{}#{}", call.id, patched as u8), Arc::as_ptr(&theme) as usize);
     if let Some(found) = PAINTED.with(|p| p.borrow().get(&key).cloned()) { return found; }
     let mut left = SHOWN_MAX;
     let sides = edits.iter().map(|edit| {
         let lang = super::files::file_language(&edit.path);
         let shown = &edit.lines[..edit.lines.len().min(left)];
         left -= shown.len();
-        let upto = |number: fn(&editdiff::Line) -> Option<u32>| shown.iter().filter_map(number).max().unwrap_or(0) as usize;
-        (paint(lang, &edit.old, upto(|l| l.old), &theme), paint(lang, &edit.new, upto(|l| l.new), &theme))
+        let upto = |number: fn(&editdiff::Line) -> Option<u32>, start: u32| shown.iter().filter_map(number).max()
+            .map_or(0, |last| last.saturating_add(1).saturating_sub(start) as usize);
+        (paint(lang, &edit.old, upto(|l| l.old, edit.start.0), &theme), paint(lang, &edit.new, upto(|l| l.new, edit.start.1), &theme))
     }).collect::<Vec<_>>();
     let sides = Rc::new(sides);
     PAINTED.with(|p| {
@@ -81,8 +83,8 @@ fn path_label(path: &str) -> Div {
 }
 
 /// O diff da chamada, um cartão por edição; `None` quando a chamada não edita arquivo (fica a entrada crua).
-pub(super) fn card(call: &ChatEvent, cx: &App) -> Option<AnyElement> {
-    let edits = editdiff::of(call)?;
+pub(super) fn card(call: &ChatEvent, result: Option<&ChatEvent>, cx: &App) -> Option<AnyElement> {
+    let edits = editdiff::shown(call, result)?;
     let marks = painted(call, &edits, cx);
     let total: usize = edits.iter().map(|e| e.lines.len()).sum();
     let mut left = SHOWN_MAX;
@@ -106,16 +108,19 @@ pub(super) fn card(call: &ChatEvent, cx: &App) -> Option<AnyElement> {
             .child(Button::new(SharedString::from(format!("copy-diff-{}-{n}", call.id))).ghost().xsmall().icon(IconName::Copy)
                 .tooltip(tr("copy_new_text")).accessibility_label(tr("copy_new_text"))
                 .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(full.clone()))));
-        let rows = shown.iter().map(|line| {
-            let (kind, side, number) = match line.op {
-                Op::Add => (Kind::Add, new_marks, line.new),
-                Op::Del => (Kind::Del, old_marks, line.old),
-                Op::Same => (Kind::Context, new_marks, line.new),
+        let rows = shown.iter().zip(&edit.spans).map(|(line, spans)| {
+            let (kind, side, number, start, tint) = match line.op {
+                Op::Add => (Kind::Add, new_marks, line.new, edit.start.1, Some(theme::success())),
+                Op::Del => (Kind::Del, old_marks, line.old, edit.start.0, Some(theme::removed())),
+                Op::Same => (Kind::Context, new_marks, line.new, edit.start.1, None),
             };
             let len = line.text.len();
             // O realce foi medido no texto do lado; a linha do diff perde o `\r` do fim, então nada passa do tamanho dela.
-            let highlights = number.and_then(|n| side.get(n as usize - 1)).into_iter().flatten()
-                .filter(|(r, _)| r.start < len).map(|(r, s)| (r.start..r.end.min(len), *s)).collect::<Vec<_>>();
+            let syntax = number.and_then(|n| side.get(n.saturating_sub(start) as usize)).into_iter().flatten()
+                .filter(|(r, _)| r.start < len).map(|(r, s)| (r.start..r.end.min(len), *s));
+            let words = tint.into_iter().flat_map(|tint| spans.iter().filter(|r| r.start < len).map(move |r| (r.start..r.end.min(len),
+                HighlightStyle { background_color: Some(tint.opacity(0.28)), ..Default::default() })));
+            let highlights = gpui::combine_highlights(syntax, words).collect::<Vec<_>>();
             line_row(kind, line.old, line.new, StyledText::new(line.text.clone()).with_highlights(highlights), true)
         }).collect::<Vec<_>>();
         div().flex().flex_col().rounded(px(8.)).border_1().border_color(theme::border()).bg(theme::inset()).overflow_hidden()

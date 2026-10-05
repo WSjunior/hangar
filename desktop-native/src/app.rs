@@ -23,6 +23,7 @@ mod device;
 mod follow;
 mod landing;
 mod edits;
+mod terminal_look;
 mod git;
 mod grouping;
 mod group_sheet;
@@ -3081,6 +3082,7 @@ impl Hangar {
     fn render_tool(&mut self, tool: Tool, row: &str, cx: &mut Context<Self>) -> AnyElement {
         if let Some(card) = self.render_agent_card(tool, cx) { return card; }
         if appearance::get().tool_look == appearance::ToolLook::Chips { return self.render_single_chip(tool, row, cx); }
+        if appearance::get().tool_look == appearance::ToolLook::Terminal { return self.render_terminal_tool(tool, row, cx); }
         let call = &self.chat.events[tool.call];
         let key = call.id.clone();
         let name = call.tool_name.clone().unwrap_or_else(|| tr("tool"));
@@ -3112,7 +3114,8 @@ impl Hangar {
         let input_key = format!("{key}:input");
         let input = self.prepared_detail(&input_key, || conversation::pretty_input(call.tool_input.as_ref()));
         // Edição de arquivo mostra o diff no lugar da entrada crua; o resultado só aparece se falhou.
-        let diff = edits::card(call, cx);
+        let result = tool.result.map(|i| &self.chat.events[i]);
+        let diff = edits::card(call, result, cx);
         let has_diff = diff.is_some();
         let mut body = div().flex().flex_col().gap_2().pt_1().pb_2();
         // Imagem que o Read leu: o transcript não traz os bytes, o caminho citado vem pelo `/file` (regra do web).
@@ -3230,6 +3233,7 @@ impl Hangar {
     fn render_group(&mut self, row: &str, tools: &[Tool], cx: &mut Context<Self>) -> AnyElement {
         if appearance::get().tool_look == appearance::ToolLook::Chips { return self.render_chip_group(row, tools, cx); }
         if appearance::get().tool_look == appearance::ToolLook::Tree { return self.render_tree_group(row, tools, cx); }
+        if appearance::get().tool_look == appearance::ToolLook::Terminal { return self.render_terminal_group(row, tools, cx); }
         let events = &self.chat.events;
         let names: Vec<String> = tools.iter().map(|t| events[t.call].tool_name.clone().unwrap_or_else(|| tr("tool"))).collect();
         let mut distinct = names.clone();

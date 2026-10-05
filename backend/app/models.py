@@ -211,6 +211,9 @@ class ChatEvent(BaseModel):
     tool_use_id: Optional[str] = None
     result: Optional[str] = None
     is_error: Optional[bool] = None
+    # Só em tool_result de Edit/Write do Claude: os trechos que o próprio Claude Code calculou, com
+    # a linha real do arquivo. Sem isto o app só sabe numerar a partir do trecho trocado.
+    patch: Optional[list[dict]] = None
     ts: Optional[float] = None
     # Cache de prompt (só em assistant_msg): quantos tokens o turno LEU do cache e qual a janela
     # de expiração em segundos. O TTL não é chute — o usage do transcript separa

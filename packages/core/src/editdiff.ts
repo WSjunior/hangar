@@ -1,3 +1,5 @@
+import type { PatchHunk } from './types';
+
 // Diff linha-a-linha pro card de Edit/MultiEdit do chat (o "diff estilo Pi": old a esquerda, new a
 // direita). Fonte = old_string/new_string do tool_input — NAO e um unified diff de arquivo, entao os
 // numeros de linha sao relativos ao TRECHO editado (1-based), nao ao arquivo inteiro.
@@ -22,8 +24,9 @@ export interface EditDiff {
 }
 
 // Abaixo disto vai no Myers completo; acima, so trim de prefixo/sufixo (meio vira del+add em bloco).
-// 1M pares ~ string de 1000x1000 linhas — Edit de verdade raramente passa de 100.
-const MYERS_MAX_PRODUCT = 1_000_000;
+// O teto e na SOMA: o Myers guarda D copias de 2(n+m)+1 inteiros, e D chega a n+m. Um teto no produto
+// deixava passar arquivo novo (n=0, produto 0) de dezenas de milhares de linhas.
+const MYERS_MAX_LINES = 2000;
 
 function splitLines(s: string): string[] {
   if (s === '') return [];
@@ -112,7 +115,7 @@ export function pairRows(ops: OpLine[]): SplitRow[] {
 export function computeEditDiff(oldText: string, newText: string): EditDiff {
   const a = splitLines(oldText);
   const b = splitLines(newText);
-  const ops = a.length * b.length > MYERS_MAX_PRODUCT ? prefixSuffixFallback(a, b) : myers(a, b);
+  const ops = a.length + b.length > MYERS_MAX_LINES ? prefixSuffixFallback(a, b) : myers(a, b);
   let add = 0, del = 0;
   for (const o of ops) { if (o.op === 'add') add++; else if (o.op === 'del') del++; }
   return { ops, rows: pairRows(ops), add, del };
@@ -148,20 +151,23 @@ const MARCA_PATCH = /^\*\*\* (?:Begin|End) Patch\s*$/;
 // do diff, como se fosse texto do arquivo.
 const MARCA_MOVE = /^\*\*\* Move to: /;
 
-function patchEdits(patch: string): { oldText: string; newText: string }[] | null {
-  const out: { oldText: string; newText: string }[] = [];
+interface PatchBlock { path: string; oldText: string; newText: string }
+
+function patchBlocks(patch: string): PatchBlock[] | null {
+  const out: PatchBlock[] = [];
+  let caminho = '';
   let velho: string[] | null = null;
   let novo: string[] = [];
   const fecha = () => {
     if (velho === null) return;
     // Bloco sem nenhuma linha (`*** Delete File:` sozinho, arquivo vazio) não vira cartão de diff:
     // "sem mudança" seria mentira, e o <pre> com o texto do patch diz mais.
-    if (velho.length || novo.length) out.push({ oldText: velho.join('\n'), newText: novo.join('\n') });
+    if (velho.length || novo.length) out.push({ path: caminho, oldText: velho.join('\n'), newText: novo.join('\n') });
     velho = null;
     novo = [];
   };
   for (const linha of patch.split('\n')) {
-    if (MARCA_ARQUIVO.test(linha)) { fecha(); velho = []; novo = []; continue; }
+    if (MARCA_ARQUIVO.test(linha)) { fecha(); velho = []; novo = []; caminho = linha.replace(MARCA_ARQUIVO, '').trim(); continue; }
     if (MARCA_PATCH.test(linha)) { fecha(); continue; }    // Begin/End Patch
     if (velho === null) continue;
     if (MARCA_MOVE.test(linha)) continue;                  // renomear: metadado, não conteúdo
@@ -177,13 +183,28 @@ function patchEdits(patch: string): { oldText: string; newText: string }[] | nul
   return out.length ? out : null;
 }
 
-/** Extrai a lista de edicoes do tool_input (Edit/MultiEdit do Claude, edit do Pi — case-insensitive).
- * Write entra como edicao de oldText vazio (tudo adicao), que e como o proprio Claude Code desenha.
- * null = shape desconhecido (provider mudou o formato) -> o card cai no <pre> cru de sempre. */
-export function extractEdits(toolName: string | null | undefined, input: unknown): { oldText: string; newText: string }[] | null {
+/** Analisador único: cada edição com o arquivo dela. `extractEdits` e `extractEditPaths` são projeções daqui, então
+ * o alinhamento entre os dois é estrutural. Fora do patch o arquivo é o da entrada, igual para todas. */
+function extractEditBlocks(toolName: string | null | undefined, input: unknown): PatchBlock[] | null {
   if (!input || typeof input !== 'object') return null;
   const name = (toolName ?? '').toLowerCase();
   const rec = input as Record<string, unknown>;
+  if (name === 'apply_patch') {
+    // O `apply_patch` é a edição de arquivo do Codex. O backend entrega o patch já limpo em
+    // `patch` (nas versões novas ele chega escapado dentro de uma string JS); `code` é o que ficou
+    // do invólucro. Sem este caso a edição caía no <pre> cru, enquanto a mesma edição feita pelo
+    // Claude ganhava cartão de diff.
+    const patch = typeof rec.patch === 'string' ? rec.patch : rec.code;
+    return typeof patch === 'string' ? patchBlocks(patch) : null;
+  }
+  const edits = inputEdits(name, rec);
+  if (!edits) return null;
+  const path = extractFilePath(input);
+  return edits.map((e) => ({ path, ...e }));
+}
+
+/** As edições escritas nos campos da entrada (tudo, menos o patch do Codex). */
+function inputEdits(name: string, rec: Record<string, unknown>): { oldText: string; newText: string }[] | null {
   if (name === 'write') {
     // Os tres providers escrevem arquivo com `content`, mudando so o nome do caminho (medido
     // 24/08/2026 nos transcripts desta maquina: Claude `file_path`+`content`, Pi `path`+`content`,
@@ -203,14 +224,6 @@ export function extractEdits(toolName: string | null | undefined, input: unknown
       ? [{ oldText: '', newText: rec.content }]
       : null;
   }
-  if (name === 'apply_patch') {
-    // O `apply_patch` é a edição de arquivo do Codex. O backend entrega o patch já limpo em
-    // `patch` (nas versões novas ele chega escapado dentro de uma string JS); `code` é o que ficou
-    // do invólucro. Sem este caso a edição caía no <pre> cru, enquanto a mesma edição feita pelo
-    // Claude ganhava cartão de diff.
-    const patch = typeof rec.patch === 'string' ? rec.patch : rec.code;
-    return typeof patch === 'string' ? patchEdits(patch) : null;
-  }
   if (name !== 'edit' && name !== 'multiedit') return null;
   const single = normEdit(rec);
   if (single) return [single];
@@ -226,6 +239,19 @@ export function extractEdits(toolName: string | null | undefined, input: unknown
   return null;
 }
 
+/** Extrai a lista de edicoes do tool_input (Edit/MultiEdit do Claude, edit do Pi — case-insensitive).
+ * Write entra como edicao de oldText vazio (tudo adicao), que e como o proprio Claude Code desenha.
+ * null = shape desconhecido (provider mudou o formato) -> o card cai no <pre> cru de sempre. */
+export function extractEdits(toolName: string | null | undefined, input: unknown): { oldText: string; newText: string }[] | null {
+  return extractEditBlocks(toolName, input)?.map(({ oldText, newText }) => ({ oldText, newText })) ?? null;
+}
+
+/** O arquivo de cada edição que `extractEdits` devolve, na mesma ordem e quantidade. Só a pele Terminal usa,
+ * para separar os arquivos de um patch do Codex; fica fora do `extractEdits` para não mudar a assinatura dele. */
+export function extractEditPaths(toolName: string | null | undefined, input: unknown): string[] | null {
+  return extractEditBlocks(toolName, input)?.map((b) => b.path) ?? null;
+}
+
 /** file_path (Claude) ou path (Pi) do arquivo que a ferramenta toca (Edit, Read) — usado pra detectar a linguagem do highlight. */
 export function extractFilePath(input: unknown): string {
   if (!input || typeof input !== 'object') return '';
@@ -236,4 +262,107 @@ export function extractFilePath(input: unknown): string {
   // linguagem do realce), e o primeiro é o que o cartão está mostrando no topo.
   if (Array.isArray(bruto)) return bruto.length ? String(bruto[0]) : '';
   return String(bruto);
+}
+
+export type Span = [number, number];
+export interface NumberedLine { op: EditOp; oldNum: number | null; newNum: number | null; text: string; spans: Span[] }
+/** `paths`: o arquivo de cada trecho, quando a origem sabe (edições da entrada); o patch do resultado não traz. */
+export interface NumberedDiff { hunks: NumberedLine[][]; add: number; del: number; paths?: string[] }
+
+// Palavra, espaço ou UM símbolo: `+` e `'` soltos são justamente o que muda numa troca de concatenação.
+const TOKEN_RE = /[\p{L}\p{N}_]+|\s+|[^\p{L}\p{N}_\s]/gu;
+// Myers no nível de tokens pode ficar muito caro (memória e tempo crescem com o quadrado do número de tokens).
+// Uma linha minificada ou um blob JSON podem ter milhares de tokens; acima deste teto não vale a pena.
+const WORD_DIFF_MAX_TOKENS = 600;
+
+/** Trechos trocados dentro de um par de linhas. null = pouco em comum; marcar quase tudo não diz nada. */
+export function wordSpans(oldLine: string, newLine: string): { del: Span[]; add: Span[] } | null {
+  const a = oldLine.match(TOKEN_RE) ?? [];
+  const b = newLine.match(TOKEN_RE) ?? [];
+  if (!a.length || !b.length) return null;
+  if (a.length + b.length > WORD_DIFF_MAX_TOKENS) return null;
+  const del: Span[] = [], add: Span[] = [];
+  const push = (list: Span[], from: number, to: number) => {
+    const last = list[list.length - 1];
+    if (last && last[1] === from) last[1] = to; else list.push([from, to]);
+  };
+  let x = 0, y = 0, same = 0;
+  for (const o of myers(a, b)) {
+    const len = o.text.length;
+    if (o.op === 'ctx') { same += len; x += len; y += len; }
+    else if (o.op === 'del') { push(del, x, x + len); x += len; }
+    else { push(add, y, y + len); y += len; }
+  }
+  return same * 10 >= Math.max(oldLine.length, newLine.length) * 4 ? { del, add } : null;
+}
+
+// Dentro de um bloco alterado, a i-ésima removida faz par com a i-ésima adicionada.
+function markWords(lines: NumberedLine[]): void {
+  let i = 0;
+  while (i < lines.length) {
+    if (lines[i].op !== 'del') { i++; continue; }
+    let dels = 0;
+    while (i + dels < lines.length && lines[i + dels].op === 'del') dels++;
+    let adds = 0;
+    while (i + dels + adds < lines.length && lines[i + dels + adds].op === 'add') adds++;
+    for (let k = 0; k < Math.min(dels, adds); k++) {
+      const s = wordSpans(lines[i + k].text, lines[i + dels + k].text);
+      if (s) { lines[i + k].spans = s.del; lines[i + dels + k].spans = s.add; }
+    }
+    i += dels + adds;
+  }
+}
+
+function tally(hunks: NumberedLine[][]): NumberedDiff {
+  let add = 0, del = 0;
+  for (const h of hunks) for (const l of h) { if (l.op === 'add') add++; else if (l.op === 'del') del++; }
+  return { hunks, add, del };
+}
+
+/** Linhas numeradas pela posição real no arquivo, a partir dos trechos gravados pelo Claude Code. */
+export function diffFromPatch(patch: PatchHunk[]): NumberedDiff {
+  const hunks: NumberedLine[][] = [];
+  for (const h of patch) {
+    let o = h.old_start, n = h.new_start;
+    const lines: NumberedLine[] = [];
+    for (const raw of h.lines) {
+      if (raw.startsWith('\\')) continue;      // `\ No newline at end of file`: nota do diff
+      const text = raw.slice(1);
+      if (raw[0] === '-') lines.push({ op: 'del', oldNum: o++, newNum: null, text, spans: [] });
+      else if (raw[0] === '+') lines.push({ op: 'add', oldNum: null, newNum: n++, text, spans: [] });
+      else lines.push({ op: 'ctx', oldNum: o++, newNum: n++, text, spans: [] });
+    }
+    if (!lines.length) continue;
+    markWords(lines);
+    hunks.push(lines);
+  }
+  return tally(hunks);
+}
+
+/** O mesmo formato a partir de old/new: numeração relativa ao trecho, um bloco por edição. */
+export function diffFromEdits(edits: { oldText: string; newText: string }[], paths?: string[]): NumberedDiff {
+  const hunks: NumberedLine[][] = [];
+  const kept: string[] = [];
+  edits.forEach((e, i) => {
+    let o = 1, n = 1;
+    const lines = computeEditDiff(e.oldText, e.newText).ops.map<NumberedLine>((op) =>
+      op.op === 'del' ? { op: 'del', oldNum: o++, newNum: null, text: op.text, spans: [] }
+        : op.op === 'add' ? { op: 'add', oldNum: null, newNum: n++, text: op.text, spans: [] }
+          : { op: 'ctx', oldNum: o++, newNum: n++, text: op.text, spans: [] });
+    markWords(lines);
+    // Edição sem linha nenhuma não vira trecho, e o caminho dela sai junto.
+    if (!lines.length) return;
+    hunks.push(lines);
+    if (paths) kept.push(paths[i]);
+  });
+  const out = tally(hunks);
+  // Só vale quando há um caminho para cada edição; senão o desenho não sabe de quem é o trecho.
+  if (paths && paths.length === edits.length) out.paths = kept;
+  return out;
+}
+
+/** Patch quando o resultado trouxe; senão, as edições da entrada. */
+export function numberedDiff(patch: PatchHunk[] | null | undefined, edits: { oldText: string; newText: string }[], paths?: string[]): NumberedDiff {
+  const fromPatch = patch?.length ? diffFromPatch(patch) : null;
+  return fromPatch && fromPatch.hunks.length ? fromPatch : diffFromEdits(edits, paths);
 }

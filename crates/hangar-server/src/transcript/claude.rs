@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use hangar_api::chat::{ChatEvent, ChatKind};
+use hangar_api::chat::{ChatEvent, ChatKind, PatchHunk};
 use regex::Regex;
 use serde_json::{Map, Value};
 
@@ -462,11 +462,50 @@ fn user_text(uid: &str, s: &str) -> Vec<ChatEvent> {
     vec![text_event(ChatKind::UserMsg, uid.into(), cleaned)]
 }
 
+/// `_PATCH_MAX_LINES` (transcript.py).
+const PATCH_MAX_LINES: usize = 2000;
+
+/// `_patch_hunks` (transcript.py): os trechos do `structuredPatch`, sem o arquivo inteiro. Qualquer
+/// trecho fora do formato derruba o patch todo. Posição só aceita inteiro JSON (`6.0` é float no
+/// Python e cai) e até `u32::MAX`, o teto do tipo compartilhado, igual ao lado Python.
+fn patch_hunks(obj: &Map<String, Value>) -> Option<Vec<PatchHunk>> {
+    let raw = obj.get("toolUseResult")?.as_object()?.get("structuredPatch")?.as_array()?;
+    if raw.is_empty() {
+        return None;
+    }
+    let start = |h: &Map<String, Value>, key: &str| -> Option<u32> {
+        // ponytail: `-0` diverge do Python. Lá é o inteiro 0 e o patch fica com início 0; aqui o
+        // serde_json o lê como float (`-0.0`) e o patch cai. O Claude Code nunca grava `-0` como
+        // posição de linha, então a divergência não aparece na prática.
+        h.get(key)?.as_u64().and_then(|u| u32::try_from(u).ok())
+    };
+    let mut total = 0;
+    let mut hunks = Vec::with_capacity(raw.len());
+    for h in raw {
+        let h = h.as_object()?;
+        let (old_start, new_start) = (start(h, "oldStart")?, start(h, "newStart")?);
+        let lines = h
+            .get("lines")?
+            .as_array()?
+            .iter()
+            .map(|l| l.as_str().map(str::to_string))
+            .collect::<Option<Vec<_>>>()?;
+        total += lines.len();
+        if total > PATCH_MAX_LINES {
+            return None;
+        }
+        hunks.push(PatchHunk { old_start, new_start, lines });
+    }
+    Some(hunks)
+}
+
 fn user_blocks(obj: &Map<String, Value>, uid: &str, items: &[Value]) -> Vec<ChatEvent> {
     let is_type = |it: &&Map<String, Value>, t: &str| it.get("type").and_then(Value::as_str) == Some(t);
     let trs: Vec<_> = items.iter().filter_map(Value::as_object).filter(|it| is_type(it, "tool_result")).collect();
     if !trs.is_empty() {
         let ts = ts(obj);
+        // O `toolUseResult` é um por linha: com dois resultados não dá para saber de quem é.
+        let single = trs.len() == 1;
         return trs
             .into_iter()
             .enumerate()
@@ -483,10 +522,12 @@ fn user_blocks(obj: &Map<String, Value>, uid: &str, items: &[Value]) -> Vec<Chat
                     None | Some(Value::Null) => None,
                     Some(other) => Some(py::py_str(other)),
                 };
+                let failed = py::truthy(tr.get("is_error"));
                 ChatEvent {
                     tool_use_id: tr.get("tool_use_id").and_then(Value::as_str).map(str::to_string),
                     result,
-                    is_error: Some(py::truthy(tr.get("is_error"))),
+                    is_error: Some(failed),
+                    patch: if single && !failed { patch_hunks(obj) } else { None },
                     ts,
                     ..event(ChatKind::ToolResult, sub_id(uid, k))
                 }
@@ -569,4 +610,140 @@ fn assistant(obj: &Map<String, Value>, msg: &Map<String, Value>, uid: &str, item
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use hangar_api::chat::{ChatEvent, ChatKind, PatchHunk};
+    use serde_json::{json, Value};
+
+    use super::super::{LineParser, Provider};
+
+    fn hunk() -> Value {
+        json!({"oldStart": 6, "oldLines": 3, "newStart": 6, "newLines": 3, "lines": [" a", "-b", "+B", " c"]})
+    }
+
+    fn parse(tool_use_result: Value, extra: Vec<Value>, is_error: Value) -> Vec<ChatEvent> {
+        let mut content = vec![json!({
+            "type": "tool_result", "tool_use_id": "toolu_1", "is_error": is_error,
+            "content": "The file /a.ts has been updated successfully."})];
+        content.extend(extra);
+        let line = json!({
+            "type": "user", "uuid": "u1", "timestamp": "2026-10-04T19:11:00.000Z",
+            "message": {"role": "user", "content": content}, "toolUseResult": tool_use_result});
+        LineParser::new(Provider::Claude).feed(line.to_string().as_bytes(), 0)
+    }
+
+    fn patch_of(tool_use_result: Value) -> Option<Vec<PatchHunk>> {
+        let [ev] = <[ChatEvent; 1]>::try_from(parse(tool_use_result, vec![], Value::Null)).expect("um evento");
+        assert_eq!(ev.kind, ChatKind::ToolResult);
+        ev.patch
+    }
+
+    #[test]
+    fn edit_result_carries_patch_hunks_without_the_original_file() {
+        let patch = patch_of(json!({"filePath": "/a.ts", "originalFile": "x".repeat(5000), "structuredPatch": [hunk()]}));
+        let want = PatchHunk {
+            old_start: 6,
+            new_start: 6,
+            lines: [" a", "-b", "+B", " c"].map(String::from).to_vec(),
+        };
+        assert_eq!(patch, Some(vec![want]));
+    }
+
+    #[test]
+    fn serialized_event_has_no_original_file_and_no_line_counts() {
+        let [ev] = <[ChatEvent; 1]>::try_from(parse(
+            json!({"originalFile": "xxxxx", "structuredPatch": [hunk()]}), vec![], Value::Null))
+        .unwrap();
+        let out = serde_json::to_string(&ev).unwrap();
+        assert!(!out.contains("xxxxx") && !out.contains("oldLines") && !out.contains("newLines"), "{out}");
+        assert!(out.contains(r#""patch":[{"old_start":6,"new_start":6,"#), "{out}");
+    }
+
+    #[test]
+    fn created_file_and_text_result_have_no_patch() {
+        assert_eq!(patch_of(json!({"type": "create", "structuredPatch": []})), None);
+        assert_eq!(patch_of(json!("Error: String to replace not found in file.")), None);
+    }
+
+    #[test]
+    fn malformed_patch_is_dropped_and_the_result_still_parses() {
+        let bad = |k: &str, v: Value| {
+            let mut h = hunk();
+            h[k] = v;
+            h
+        };
+        for h in [
+            bad("oldStart", json!("6")),
+            bad("newStart", json!(true)),
+            bad("oldStart", json!(6.0)),
+            bad("oldStart", json!(6.5)),
+            bad("lines", json!("ab")),
+            bad("lines", json!([" a", 3])),
+            bad("oldStart", json!(-1)),
+            bad("oldStart", json!(4_294_967_296_u64)),
+            bad("newStart", json!(u64::MAX)),
+            json!("hunk"),
+        ] {
+            assert_eq!(patch_of(json!({"structuredPatch": [h.clone()]})), None, "{h}");
+        }
+        // Um trecho ruim derruba o patch inteiro, mesmo com o outro válido.
+        assert_eq!(patch_of(json!({"structuredPatch": [hunk(), "hunk"]})), None);
+        assert_eq!(patch_of(json!({"structuredPatch": "x"})), None);
+    }
+
+    #[test]
+    fn negative_zero_position_drops_the_patch_and_the_event_still_comes_out() {
+        // O serde_json lê `-0` como float; o Python o lê como int 0. Divergência conhecida (ver patch_hunks).
+        let line = r#"{"type":"user","uuid":"u1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"ok"}]},"toolUseResult":{"structuredPatch":[{"oldStart":-0,"newStart":1,"lines":["+x"]}]}}"#;
+        let [ev] = <[ChatEvent; 1]>::try_from(LineParser::new(Provider::Claude).feed(line.as_bytes(), 0)).unwrap();
+        assert_eq!((ev.kind, ev.patch), (ChatKind::ToolResult, None));
+    }
+
+    #[test]
+    fn u32_max_is_the_last_accepted_position() {
+        let mut h = hunk();
+        h["oldStart"] = json!(u32::MAX);
+        let patch = patch_of(json!({"structuredPatch": [h]})).expect("patch");
+        assert_eq!(patch[0].old_start, u32::MAX);
+    }
+
+    #[test]
+    fn patch_ceiling_is_two_thousand_lines_summed_over_hunks() {
+        let with = |n: usize| {
+            let mut h = hunk();
+            h["lines"] = json!(vec!["+x"; n]);
+            h
+        };
+        assert!(patch_of(json!({"structuredPatch": [with(2000)]})).is_some());
+        assert_eq!(patch_of(json!({"structuredPatch": [with(2001)]})), None);
+        assert_eq!(patch_of(json!({"structuredPatch": [with(1000), with(1001)]})), None);
+        assert!(patch_of(json!({"structuredPatch": [with(1000), with(1000)]})).is_some());
+    }
+
+    #[test]
+    fn line_with_two_results_carries_no_patch() {
+        let other = json!({"type": "tool_result", "tool_use_id": "toolu_2", "content": "ok"});
+        let events = parse(json!({"structuredPatch": [hunk()]}), vec![other], Value::Null);
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|e| e.patch.is_none()));
+    }
+
+    #[test]
+    fn lone_surrogate_in_a_patch_line_becomes_the_replacement_char() {
+        let line = r#"{"type":"user","uuid":"u1","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"ok"}]},"toolUseResult":{"structuredPatch":[{"oldStart":1,"newStart":1,"lines":["+meio \ud83d emoji"]}]}}"#;
+        let [ev] = <[ChatEvent; 1]>::try_from(LineParser::new(Provider::Claude).feed(line.as_bytes(), 0)).unwrap();
+        assert_eq!(ev.patch.unwrap()[0].lines, vec!["+meio \u{FFFD} emoji".to_string()]);
+    }
+
+    #[test]
+    fn failed_result_carries_no_patch() {
+        for failed in [json!(true), json!(1), json!("sim")] {
+            let [ev] = <[ChatEvent; 1]>::try_from(parse(json!({"structuredPatch": [hunk()]}), vec![], failed))
+                .unwrap();
+            assert_eq!(ev.is_error, Some(true));
+            assert_eq!(ev.patch, None);
+        }
+    }
 }

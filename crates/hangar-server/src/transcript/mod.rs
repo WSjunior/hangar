@@ -136,4 +136,7 @@ pub(crate) fn finish(ev: &mut ChatEvent) {
     for m in [&mut ev.tool_input, &mut ev.skill, &mut ev.orq].into_iter().flatten() {
         py::scrub_map(m);
     }
+    for hunk in ev.patch.iter_mut().flatten() {
+        hunk.lines.iter_mut().for_each(py::scrub_str);
+    }
 }
