@@ -64,6 +64,8 @@ pub struct SessionInfo {
     pub worktree_path: Option<String>,
     #[serde(default)]
     pub worktree_gone: bool,
+    /// Raiz do repositório onde o agente trabalha quando saiu do da pasta de abertura; `None` = o cwd.
+    pub git_cwd: Option<String>,
     /// Membros do grupo de trabalho além dela; `srv::nome` é par de outro servidor.
     pub pair_peers: Option<Vec<String>>,
     /// Id estável do grupo: a lista junta num bloco quem tem o mesmo.
@@ -99,6 +101,8 @@ pub struct CliProxyAccount {
 pub struct PairExternal { pub alias: String, pub owner: String, pub session: String }
 
 impl SessionInfo {
+    /// Onde o git da sessão roda: a worktree do agente, ou o cwd.
+    pub fn git_dir(&self) -> Option<&str> { self.git_cwd.as_deref().or(self.cwd.as_deref()) }
     pub fn uses_engine_account(&self) -> bool {
         self.provider == "claude" && self.engine_account.as_deref().is_some_and(|a| !a.is_empty())
     }

@@ -165,7 +165,9 @@ async def workspace_context(name: str | None = None) -> dict:
     return {
         "roots": [str(root) for root in allowed_roots()],
         "sessions": [{"name": s.name, "cwd": s.cwd} for s in infos if s.cwd],
-        "session": {"name": info.name, "cwd": info.cwd, "jsonl": info.jsonl} if info else None,
+        # `git_cwd`: onde o git da sessão roda (a worktree em que o agente trabalha, ou o cwd).
+        "session": {"name": info.name, "cwd": info.cwd, "jsonl": info.jsonl,
+                    "git_cwd": info.git_dir} if info else None,
     }
 
 

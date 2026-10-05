@@ -5060,8 +5060,9 @@ fn kind_of<'a>(items: &[Item], index: usize, events: &'a [ChatEvent]) -> Option<
     match items.get(index) { Some(Item::Event(i)) => events.get(*i).map(|e| e.kind.as_str()), _ => None }
 }
 
+/// A pasta onde o agente trabalha: a worktree para onde ele foi, ou a de abertura.
 fn folder_name(session: &SessionInfo) -> Option<String> {
-    session.cwd.as_deref().and_then(|cwd| cwd.trim_end_matches('/').rsplit('/').next()).filter(|f| !f.is_empty()).map(str::to_owned)
+    session.git_dir().map(composer::basename).filter(|f| !f.is_empty() && *f != "/").map(str::to_owned)
 }
 
 /// A branch que a linha mostra: main e master são o normal e ficam de fora, como no web.

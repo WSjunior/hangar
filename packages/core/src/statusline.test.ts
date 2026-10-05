@@ -18,6 +18,15 @@ it('mostra o Git do Claude headless sem depender da statusline', () => {
     .toMatchObject({ repo: 'hangar', branch: 'feature/headless', dirty: true });
 });
 
+it('com o agente numa worktree, mostra o Git da lista no lugar da pasta de abertura', () => {
+  const session = { name: 'cl', state: 'idle' as const, provider: 'claude' as const,
+    cwd: '/p/repo', git_cwd: '/p/repo-tray', branch: 'tray', git_dirty: 0 };
+  expect(parseStatusLine('🤖 Opus5 │ 📁 repo [main*]', session))
+    .toMatchObject({ repo: 'repo-tray', branch: 'tray', dirty: false });
+  expect(parseStatusLine('🤖 Opus5 │ 📁 repo [main*]', { ...session, git_cwd: null }))
+    .toMatchObject({ repo: 'repo', branch: 'main', dirty: true });
+});
+
 it('tira o nome do modelo da lista quando a statusline não o traz', () => {
   const session = { name: 'cl', state: 'idle' as const, provider: 'claude' as const, model: 'claude-fable-5-1[1m]' };
   // Barra própria da pessoa: o app não lê o nome dela.

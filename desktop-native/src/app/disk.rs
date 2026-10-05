@@ -270,7 +270,8 @@ impl Hangar {
     /// Resolve em segundo plano a pasta real das sessões ainda não vistas; até chegar, elas seguem pelo backend.
     pub(super) fn resolve_local_dirs(&mut self, cx: &mut Context<Self>) {
         if !self.api.as_ref().is_some_and(|api| api.is_loopback()) { return; }
-        let pending: Vec<String> = self.sessions.iter().filter_map(|s| s.cwd.clone())
+        // A worktree onde o agente trabalha também: é nela que o painel de git roda.
+        let pending: Vec<String> = self.sessions.iter().flat_map(|s| [s.cwd.clone(), s.git_cwd.clone()]).flatten()
             .filter(|cwd| !self.local_dirs.contains_key(cwd)).collect();
         if pending.is_empty() { return; }
         for cwd in &pending { self.local_dirs.insert(cwd.clone(), None); }

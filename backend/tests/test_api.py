@@ -2078,6 +2078,18 @@ def test_loop_create_409_on_main_branch(api_client, loop_dir):
     assert r.status_code == 409
 
 
+def test_loop_branch_guard_reads_the_agent_worktree(api_client, loop_dir):
+    # Aberta na main, o agente trabalha numa worktree: a trava olha a branch de onde ele trabalha.
+    info = SessionInfo(name="cc", cwd="/repo", jsonl="/repo/t.jsonl", git_cwd="/repo-feat")
+    with patch("app.api.registry.list", return_value=[info]), \
+         patch("app.api.automations_enabled", return_value=True), \
+         patch("app.api.drain", return_value=1), \
+         patch("app.api.branch_of", side_effect=lambda d: "feat" if d == "/repo-feat" else "main"):
+        r = api_client.post("/api/sessions/cc/loop",
+                            json={"goal": "g", "require_branch": True}, headers=_h())
+    assert r.status_code == 200
+
+
 def test_loop_create_ok(api_client, loop_dir):
     calls = []
     with patch("app.api.registry.list", return_value=[_info()]), \

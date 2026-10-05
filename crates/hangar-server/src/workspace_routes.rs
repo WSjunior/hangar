@@ -231,6 +231,11 @@ fn bool_param(value: Option<&String>, default: bool) -> Option<bool> {
         _ => None,
     }
 }
+/// Pasta do git da sessão: a worktree onde o agente trabalha, ou o cwd (o Python já decide).
+fn git_cwd(ctx: &Value) -> Option<&str> {
+    ctx["session"]["git_cwd"].as_str()
+}
+
 fn operation(name: &str, args: Value) -> Option<Operation> {
     serde_json::from_value(json!({"op":name,"args":args})).ok()
 }
@@ -444,7 +449,7 @@ async fn run(
         execute(st, op).await?
     };
     if tail == "git/files" {
-        let cwd = ctx["session"]["cwd"].as_str().unwrap_or("");
+        let cwd = git_cwd(&ctx).unwrap_or("");
         let sequencer = execute(st, Operation::SequencerState { cwd: cwd.into() }).await?;
         result = json!({"files":result,"sequencer":sequencer});
     }
@@ -455,7 +460,7 @@ async fn run(
         let summary = execute(
             st,
             Operation::GitSummary {
-                cwd: ctx["session"]["cwd"].as_str().map(str::to_owned),
+                cwd: git_cwd(&ctx).map(str::to_owned),
             },
         )
         .await
@@ -609,7 +614,9 @@ fn map_operation(
         };
     }
     let cwd = ctx["session"]["cwd"].as_str()?;
-    a.insert("cwd".into(), json!(cwd));
+    // O git segue o agente até a worktree; arquivos e citações continuam na pasta de abertura.
+    let git = tail == "branches" || tail == "checkout" || tail == "git" || tail.starts_with("git/");
+    a.insert("cwd".into(), json!(if git { git_cwd(ctx)? } else { cwd }));
     let op = match tail {
         "branches" => "list_branches",
         "checkout" => "switch_branch",
@@ -1165,4 +1172,19 @@ async fn serve_file(path: &Path, headers: &HeaderMap, download: bool) -> Respons
     }
     *r.body_mut() = file_stream(file, pieces);
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn git_follows_the_agent_worktree_and_files_stay_in_the_opening_folder() {
+        let ctx = json!({"session":{"name":"s","cwd":"/repo","jsonl":"/repo/s.jsonl","git_cwd":"/repo-x"}});
+        let q = HashMap::new();
+        let op = |tail: &str| format!("{:?}", map_operation(tail, &Method::GET, &q, &json!({}), &ctx).unwrap());
+        assert!(op("git/files").contains("\"/repo-x\""));
+        assert!(op("branches").contains("\"/repo-x\""));
+        assert!(op("files/list").contains("cwd: \"/repo\""));
+    }
 }

@@ -26,6 +26,8 @@ class Location:
     worktree: bool
     worktree_path: str | None
     worktree_gone: bool
+    # Raiz do repositório onde o agente trabalha, quando não é a da pasta de abertura.
+    git_cwd: str | None = None
 
 
 def repo_root_of(path: str | None) -> str | None:
@@ -101,21 +103,118 @@ def _tail_lines(path: str) -> list[bytes]:
     return lines[1:] if size > _TAIL else lines   # a primeira veio cortada
 
 
-def claude_cwd(jsonl: str) -> str | None:
-    """`cwd` da última linha que o tem: o Claude grava a pasta em cada linha, e ela muda no
-    `EnterWorktree` e no `cd`."""
-    def read(p: str) -> str | None:
-        for raw in reversed(_tail_lines(p)):
-            if b'"cwd"' not in raw:
+_DEEP_TAIL = 8 * 1024 * 1024
+
+
+def _reversed_lines(path: str):
+    """Linhas do fim para o começo, em blocos de `_TAIL`, até `_DEEP_TAIL` bytes. Imagem lida pela
+    sessão entra no transcript em base64 e enche sozinha os últimos 256 KB."""
+    with open(path, "rb") as fh:
+        end = pos = fh.seek(0, os.SEEK_END)
+        rest: list[bytes] = []   # pedaços da linha ainda cortada; juntar só no `\n` não recopia megas
+        while pos > 0 and end - pos < _DEEP_TAIL:
+            step = min(_TAIL, pos)
+            pos -= step
+            fh.seek(pos)
+            block = fh.read(step)
+            if b"\n" not in block:
+                rest.insert(0, block)
+                continue
+            lines = (block + b"".join(rest)).split(b"\n")
+            rest = [lines[0]]
+            yield from reversed(lines[1:])
+        if pos == 0:
+            yield b"".join(rest)
+
+
+# `cd X` no início de um comando, ou `git -C X`: o comando roda em X.
+_SHELL_DIR_RE = re.compile(r'(?:(?:^|[\n;&|(])\s*cd|\bgit\s+-C)\s+(["\']?)([^\s;&|"\')]+)\1')
+_EDIT_TOOLS = {"Edit": "file_path", "MultiEdit": "file_path", "Write": "file_path",
+               "NotebookEdit": "notebook_path"}
+
+
+def _tool_paths(block: dict) -> list[tuple[str, bool]]:
+    """(caminho, é `cd`?) de uma chamada, do último citado para o primeiro."""
+    args = block.get("input")
+    name = block.get("name")
+    if not isinstance(args, dict):
+        return []
+    if name == "Bash" and isinstance(args.get("command"), str):
+        return [(m.group(2), True) for m in reversed(list(_SHELL_DIR_RE.finditer(args["command"])))]
+    target = args.get(_EDIT_TOOLS[name]) if name in _EDIT_TOOLS else None
+    return [(target, False)] if isinstance(target, str) else []
+
+
+def _claude_tail(jsonl: str) -> tuple[str | None, list[tuple[str, bool, str | None]]]:
+    """(último `cwd`, caminhos citados pelas ferramentas como (caminho, é `cd`?, `cwd` da linha)),
+    do mais recente para o mais antigo. Uma leitura só: o cache é por arquivo."""
+    def read(p: str):
+        last: str | None = None
+        hits: list[tuple[str, bool, str | None]] = []
+        for raw in _reversed_lines(p):
+            has_tool = b'"tool_use"' in raw
+            # Achado o último `cwd`, só interessa linha com chamada: o resto pode ser imagem de megas.
+            if not has_tool and (last or b'"cwd"' not in raw):
                 continue
             try:
-                cwd = json.loads(raw).get("cwd")
-            except (ValueError, AttributeError):
+                line = json.loads(raw)
+            except ValueError:
                 continue
-            if isinstance(cwd, str) and cwd:
-                return cwd
+            if not isinstance(line, dict):
+                continue
+            cwd = line.get("cwd")
+            cwd = cwd if isinstance(cwd, str) and cwd else None
+            last = last or cwd   # a varredura vem do fim: o primeiro achado é o mais recente
+            content = (line.get("message") or {}).get("content") if has_tool else None
+            for block in reversed(content) if isinstance(content, list) else ():
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    hits.extend((path, is_cd, cwd) for path, is_cd in _tool_paths(block))
+            if len(hits) >= 20:
+                break
+        return last, hits
+    return _cached(jsonl, read) or (None, [])
+
+
+def claude_cwd(jsonl: str) -> str | None:
+    """`cwd` da última linha que o tem: o Claude grava a pasta em cada linha, e ela muda no
+    `EnterWorktree` e no `cd` dentro do projeto."""
+    return _claude_tail(jsonl)[0]
+
+
+def _repo_candidates(path: str | None) -> tuple[str, list[str], list[str]] | None:
+    """(principal, worktrees removidas, todas as pastas do repo) de quem contém `path`."""
+    root = repo_root_of(path)
+    if not root:
         return None
-    return _cached(jsonl, read)
+    main = main_repo_of(root)
+    gone = [k for k, v in removed().items() if v == main]
+    return main, gone, [main, *worktree_paths(main), *gone]
+
+
+def claude_worktree(cwd: str | None, jsonl: str) -> str | None:
+    """A pasta do mesmo repo onde o Claude trabalha. Numa worktree irmã o `cwd` do transcript nunca
+    sai da pasta de abertura: o sinal é `cd X`/`git -C X` e o arquivo editado. Nada na principal
+    (`cd` ou edição) tira a sessão da worktree: consultar a principal é rotina e faria o rótulo
+    alternar a cada comando."""
+    last, hits = _claude_tail(jsonl)
+    base = last or cwd
+    repo = _repo_candidates(base)
+    if not base or not repo:
+        return last
+    main, gone, candidates = repo
+    home = _owner(base, candidates)
+    for raw, is_cd, line_cwd in hits:
+        if line_cwd and _owner(line_cwd, candidates) != home:
+            break   # chamada anterior à última troca de `cwd` (EnterWorktree/ExitWorktree)
+        p = os.path.normpath(os.path.join(line_cwd or base, os.path.expanduser(raw)))
+        if os.path.exists(p):
+            owner = _owner(p, candidates)
+            if owner and owner != main:
+                return owner
+        elif is_cd and raw.startswith(("/", "~")) and _of_this_repo(p, main, gone):
+            # Pasta absoluta que sumiu: a worktree foi removida. `cd -` e `cd $W` não dizem nada.
+            return _owner(p, gone) or p
+    return last
 
 
 _WORKDIR_RE = re.compile(r'"?workdir"?\s*:\s*"(/[^"]+)"')
@@ -163,12 +262,10 @@ def _owner(path: str, candidates: list[str]) -> str | None:
 
 def codex_cwd(cwd: str, rollout: str) -> str | None:
     """A worktree (ou a principal) do MESMO repo onde o último comando rodou; outro repo não conta."""
-    root = repo_root_of(cwd)
-    if not root:
+    repo = _repo_candidates(cwd)
+    if not repo:
         return None
-    main = main_repo_of(root)
-    gone = [k for k, v in removed().items() if v == main]
-    candidates = [main, *worktree_paths(main), *gone]
+    main, gone, candidates = repo
     for p, is_dir in _codex_paths(rollout):
         if os.path.exists(p):
             owner = _owner(p, candidates)
@@ -203,9 +300,14 @@ def removed() -> dict[str, str]:
 
 def locate(provider: str, cwd: str | None, jsonl: str | None) -> Location:
     real = None
+    # Sessão que nasceu numa worktree (opção "Nova worktree" da criação, ou o agente aberto nela)
+    # fica nela: os sinais do transcript só valem para worktree criada no meio da conversa.
+    born_in_worktree = head_info(repo_root_of(cwd))[1]
     try:
-        if jsonl and provider == "claude":
-            real = claude_cwd(jsonl)
+        if born_in_worktree:
+            pass
+        elif jsonl and provider == "claude":
+            real = claude_worktree(cwd, jsonl)
         elif jsonl and provider == "codex" and cwd:
             real = codex_cwd(cwd, jsonl)
     except Exception as e:   # transcript torto nunca derruba a listagem inteira
@@ -218,9 +320,11 @@ def locate(provider: str, cwd: str | None, jsonl: str | None) -> Location:
         # comum apagada também cairia aqui. Afinar só se aparecer falso positivo.
         gone = real != cwd or real in removed()
         return Location(None, False, real if gone else None, gone)
-    root = repo_root_of(real) or real
-    branch, wt = head_info(root)
-    return Location(branch, wt, root if wt else None, False)
+    root = repo_root_of(real)
+    branch, wt = head_info(root or real)
+    # Só quando o agente saiu do repositório de abertura: sem isso, o git da sessão é o do `cwd`.
+    moved = root is not None and root != repo_root_of(cwd)
+    return Location(branch, wt, (root or real) if wt else None, False, root if moved else None)
 
 
 def _git(cwd: str, *args: str, failed: list) -> subprocess.CompletedProcess:
