@@ -3369,7 +3369,7 @@ def loop_create(name: str, body: LoopCreate):
         cur = link.get()
         if cur and cur["status"] in loop_mod.ACTIVE:
             raise HTTPException(409, detail=erro("erro_loop_ja_ativo", "já existe um loop ativo nesta sessão"))
-        br = branch_of(info.cwd) if info.cwd else None
+        br = branch_of(info.git_dir) if info.git_dir else None
         if body.require_branch and br in ("main", "master"):
             raise HTTPException(409, detail=erro("erro_loop_branch_invalida", f"sessão está na branch {br} — crie uma branch ou desligue 'exigir branch'", br=br))
         d = loop_mod.new_loop(body.goal, body.check_cmd, body.max_iters, body.require_branch)
