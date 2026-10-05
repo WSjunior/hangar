@@ -94,7 +94,7 @@ jobs:
           restore-keys: server-test-${{ runner.os }}-
       # Os testes do hangar-api leem as amostras de backend/tests/fixtures/, que vêm no mesmo checkout.
       - run: cargo test --locked --workspace
-      - if: steps.cache.outputs.cache-hit != 'true' && github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'hangar-server-parte1' || github.ref_name == 'ci/faster-builds')
+      - if: steps.cache.outputs.cache-hit != 'true' && github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'hangar-server-parte1')
         uses: actions/cache/save@v4
         with:
           path: |
