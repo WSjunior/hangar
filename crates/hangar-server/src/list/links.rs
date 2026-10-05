@@ -757,8 +757,16 @@ mod tests {
     }
 
     fn set_mtime(path: &Path, at: std::time::SystemTime) {
-        // Windows só muda o mtime com o arquivo aberto para escrita.
-        std::fs::File::options().write(true).open(path).unwrap().set_modified(at).unwrap();
+        // Também recebe pasta. No Windows o mtime pede FILE_WRITE_ATTRIBUTES, e pasta só abre com
+        // FILE_FLAG_BACKUP_SEMANTICS; no Linux pasta não abre para escrita.
+        #[cfg(windows)]
+        let file = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::File::options().access_mode(0x100).custom_flags(0x0200_0000).open(path).unwrap()
+        };
+        #[cfg(not(windows))]
+        let file = std::fs::File::open(path).unwrap();
+        file.set_modified(at).unwrap();
     }
 
     #[test]
