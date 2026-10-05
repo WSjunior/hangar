@@ -53,7 +53,7 @@ Frente B do pedido `pedidos/2026-10-04-custos-e-worktrees-rust-kickoff.md`. Bran
 - [x] **Step 1: Medição antes/depois** no backend de teste isolado (38 worktrees; meta ≤ 200 ms).
 - [x] **Step 2: Revisão por subagente** (`ecc:rust-reviewer`, `ecc:silent-failure-hunter`,
   `ecc:python-reviewer`) e correções.
-- [ ] **Step 3: Testes** (`cargo test --locked --workspace`, pytest dos arquivos tocados,
+- [x] **Step 3: Testes** (`cargo test --locked --workspace`, pytest dos arquivos tocados,
   `npm run check` na raiz) e CI do `server.yml` job por job.
 
 ## Resultado (04/10/2026, esta máquina)
