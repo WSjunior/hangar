@@ -77,7 +77,7 @@ fn shown(ctl: Ctl, value: String) -> String {
     }
 }
 
-fn capitalized(label: &str) -> String {
+pub(super) fn capitalized(label: &str) -> String {
     let mut chars = label.chars();
     chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }

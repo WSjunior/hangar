@@ -2657,7 +2657,7 @@ impl Hangar {
         self.sync_activity(cx);
         api::open_trace(|| format!("sync_rows activity {} events", self.chat.events.len()));
         self.items = conversation::build(&self.chat.events, conversation::View { thinking: a.thinking_tools, tasks: a.task_list,
-            merge_thinking: a.tool_look == appearance::ToolLook::Tree }, &self.pinned);
+            merge_thinking: a.tool_look == appearance::ToolLook::Tree, every_run_groups: a.tool_look == appearance::ToolLook::Terminal }, &self.pinned);
         self.paired = conversation::pair_results(&self.chat.events).0;
         self.orq_days = if self.selected.as_ref().is_some_and(SessionInfo::orq) { orq_timeline::day_starts(self.chat.events.iter().filter(|event| event.orq.is_some())) } else { HashSet::new() };
         self.sync_tables(a.table_chart, stable);
