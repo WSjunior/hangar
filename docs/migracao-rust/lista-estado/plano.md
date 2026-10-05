@@ -212,8 +212,8 @@ regra de pid vivo de `hook_state.py:56-129`, `.hangar-askq`, `.hangar-status` co
 
 **Falha sem ela:** `contract_list::last_reply_cases` (Claude, Claude sem terminal, Codex).
 
-- [ ] **Step 23: Teste, visto falhar**
-- [ ] **Step 24: Porte com cache por (transcript, mtime); testes focados; revisar**
+- [x] **Step 23: Teste, visto falhar**
+- [x] **Step 24: Porte com cache por (transcript, mtime); testes focados; revisar**
 
 ### Task 12: Classificação da lista
 
