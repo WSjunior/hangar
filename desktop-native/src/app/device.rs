@@ -447,7 +447,14 @@ impl Hangar {
                         let draft = self.device.channel.draft.clone();
                         input.update(cx, |input, cx| input.set_value(draft, window, cx));
                     }
-                    if saved { self.device.search = None; self.load_about(false, cx); }
+                    if saved {
+                        self.device.search = None;
+                        self.load_about(false, cx);
+                        // O app segue o canal do servidor desta máquina: a procura da release dele refaz já.
+                        if let Some(updater) = cx.try_global::<crate::update::Handle>().map(|handle| handle.0.clone()) {
+                            updater.update(cx, |updater, cx| updater.refresh(cx));
+                        }
+                    }
                 }
             }
             DeviceReply::Rate(seq, result) => {
