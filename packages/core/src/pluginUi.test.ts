@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activePaneId, buttonKey, followLocalTab, isMissingRoute, tabFollowsServer, decodeRaster, inkColor, isEmptyBand, parsePluginToast, parsePluginUi, textOf } from './pluginUi';
+import { activePaneId, buttonKey, followLocalTab, hoverProps, isHoverScope, isMissingRoute, tabFollowsServer, decodeRaster, inkColor, isEmptyBand, parsePluginToast, parsePluginUi, textOf, type PluginElement } from './pluginUi';
 import amostras from './__fixtures__/plugin-ui-arvores.json';
 
 function cells(words: number[]): string {
@@ -178,5 +178,25 @@ describe('rota ausente', () => {
     expect(isMissingRoute(Object.assign(new Error('x'), { status: 409, code: 'erro_mod_dialogo_aberto' }))).toBe(false);
     expect(isMissingRoute(new Error('rede'))).toBe(false);
     expect(isMissingRoute(null)).toBe(false);
+  });
+});
+
+describe('hover', () => {
+  it('Box com key é escopo; sem key ou outro tipo, não', () => {
+    expect(isHoverScope(amostras.hoverV29 as unknown as PluginElement)).toBe(true);
+    expect(isHoverScope({ type: 'Box', props: {} })).toBe(false);
+    expect(isHoverScope({ type: 'Text', props: { key: 'x' } })).toBe(false);
+  });
+
+  it('com o escopo aceso, o hover do nó vence as props; apagado, as props valem', () => {
+    const cartao = amostras.hoverV29.children[1] as unknown as PluginElement;
+    expect(hoverProps(cartao, false).display).toBe('none');
+    expect(hoverProps(cartao, true).display).toBe('flex');
+    expect(hoverProps(cartao, true).position).toBe('absolute');
+  });
+
+  it('hover com scope (grupo entre lugares) fica para depois: o nó segue sem hover', () => {
+    const v30 = { type: 'Text', hover: { scope: 'vitrine-V30', color: '#e8a33d' } } as PluginElement;
+    expect(hoverProps(v30, true)).toEqual({});
   });
 });
