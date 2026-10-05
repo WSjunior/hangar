@@ -516,7 +516,8 @@ mod tests {
         let dirs = [cfg.clone()];
         // Fora da janela de escrita recente: só aí a versão vale.
         for f in std::fs::read_dir(cfg.join(".hangar-state")).unwrap().chain(std::fs::read_dir(cfg.join("sessions")).unwrap()) {
-            std::fs::File::open(f.unwrap().path()).unwrap().set_modified(SystemTime::now() - std::time::Duration::from_secs(60)).unwrap();
+            // Windows só muda o mtime com o arquivo aberto para escrita.
+            std::fs::File::options().write(true).open(f.unwrap().path()).unwrap().set_modified(SystemTime::now() - std::time::Duration::from_secs(60)).unwrap();
         }
         let mut hs = HookStates::load(&dirs);
         assert_eq!(hs.reads, 6);

@@ -757,7 +757,8 @@ mod tests {
     }
 
     fn set_mtime(path: &Path, at: std::time::SystemTime) {
-        std::fs::File::open(path).unwrap().set_modified(at).unwrap();
+        // Windows só muda o mtime com o arquivo aberto para escrita.
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(at).unwrap();
     }
 
     #[test]
