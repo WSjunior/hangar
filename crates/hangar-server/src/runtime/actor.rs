@@ -432,7 +432,7 @@ async fn run(target:RuntimeTarget,queue:QueueActor,connection:CanoConnection,mut
                 Effect::Publish { channel,data } => {
                     if ["preview","thinking","tool"].contains(&channel.as_str()) {
                         channels.insert(channel.clone(),data.clone()); publish(&events,&target,&mut revision,&channel,data);
-                    } else if ["voice","voice_target"].contains(&channel.as_str()) {
+                    } else if ["voice","voice_target","rate"].contains(&channel.as_str()) {
                         publish(&events,&target,&mut revision,&channel,data);
                     }
                 }

@@ -119,6 +119,7 @@ class _Fold:
             out["tool_ms"] = int(self.tool_ms)
         if self.in_tok > 0:
             out["cache_pct"] = round(100.0 * self.cache_read_tok / self.in_tok)
+            out["cache_read_tok"] = self.cache_read_tok
         if self.ttft_n:
             out["ttft_ms"] = int(self.ttft_ms / self.ttft_n)
         return out

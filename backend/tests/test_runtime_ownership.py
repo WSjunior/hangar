@@ -495,6 +495,22 @@ def test_problem_event_reaches_session_problem(tmp_path):
     asyncio.run(flow())
 
 
+def test_rate_event_is_accepted_and_malformed_rate_is_refused(tmp_path):
+    async def flow():
+        from app.runtime_adapter import apply_event
+        gateway = Reopenable()
+        coordinator, slot, _, _ = _rust_session(tmp_path, gateway)
+        await _open(coordinator)
+        await coordinator.refresh_snapshot("session")
+        event = {"key": "key", "generation": 1, "revision": slot.view["revision"] + 1, "channel": "rate",
+                 "data": {"tokens": 1000, "seconds": 10.0, "conversation": "c1"}}
+        assert apply_event(slot, event)
+        assert not apply_event(slot, {**event, "revision": slot.view["revision"] + 1, "data": {"tokens": "1000"}})
+        gateway.lease.close()
+        coordinator.close_python_leases()
+    asyncio.run(flow())
+
+
 def test_background_drain_never_reopens(tmp_path):
     async def flow():
         gateway = Reopenable()

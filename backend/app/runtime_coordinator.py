@@ -849,6 +849,10 @@ class RuntimeCoordinator:
                             client = self.voice_clients.get((event["key"], event["data"].get("call_id")))
                             if client is not None:
                                 client.receive(event["channel"], event["data"]["event"])
+                        if event["channel"] == "rate":
+                            from app.live_rate import live_rate
+                            data = event["data"]
+                            live_rate(slot.binding.name).close(data["tokens"], data["seconds"], data["conversation"])
                     self._signal(slot)
                     if event.get("channel") in {"view", "snapshot"}:
                         conversation = (slot.view.get("view") or {}).get("conversation")
