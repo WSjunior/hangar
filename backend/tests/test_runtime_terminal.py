@@ -1206,3 +1206,101 @@ def test_closed_terminal_state_is_not_a_registration_error_at_boot(monkeypatch, 
     panes['session'] = None      # tmux sem resposta: não dá para dizer que fechou
     asyncio.run(RuntimeCoordinator()._register_durable_terminals(claude=None))
     assert ('runtime.registration_failed', 'terminal_binding') in events
+
+
+def test_queue_read_waiting_for_rust_mode_does_not_block_the_handover(monkeypatch, tmp_path):
+    """Boot com o Rust subindo: a leitura da fila (drain do SSE) espera o modo. Ela não pode segurar a
+    fila Python enquanto espera, senão a passagem ao Rust recusa com 'fila da sessão em uso'."""
+    from types import SimpleNamespace
+    from app import runtime_queue
+    gateway = TerminalGateway()
+    owner, slot, _ = live_owner(monkeypatch, tmp_path, gateway=gateway)
+    async def flow():
+        owner.loop = asyncio.get_running_loop()
+        owner.mode = 'pending'
+        reader = asyncio.ensure_future(asyncio.to_thread(runtime_queue.route_queue, SimpleNamespace(name='session'), 'load', {}))
+        await asyncio.sleep(0.3)
+        token = rc._mode_bypass.set(True)
+        try:
+            await owner._open_slot_in_rust('session', slot, launch=False)
+        finally:
+            rc._mode_bypass.reset(token)
+        assert slot.phase == Phase.Rust
+        owner._set_mode('rust')
+        handled, _ = await asyncio.wait_for(reader, 5)
+        assert handled and gateway.calls == ['open', 'queue']
+    try:
+        asyncio.run(flow())
+    finally:
+        if gateway.lease:
+            gateway.lease.close()
+
+
+def test_failure_reason_names_the_raise_site_without_copying_python_text(monkeypatch):
+    from app import diag
+    def runtime_raise():
+        raise RuntimeError("texto da conversa")
+    try:
+        runtime_raise()
+    except RuntimeError as exc:
+        raised = exc
+    reason = rc.failure_reason(raised)
+    assert reason['codigo'] == 'RuntimeError' and reason['detalhe'] == ''
+    assert reason['raise_site'].startswith('test_runtime_terminal.py:') and reason['raise_site'].endswith(' runtime_raise')
+    records = []
+    monkeypatch.setattr(diag, 'registrar', lambda event, level='ok', **fields: records.append(fields))
+    rc._registration_failed('runtime.reopen_failed', 'session', raised)
+    assert records[0]['raise_site'] == reason['raise_site']
+
+
+def test_handover_waits_for_a_short_python_queue_write_and_refuses_a_stuck_one(monkeypatch, tmp_path):
+    gateway = TerminalGateway()
+    owner, slot, _ = live_owner(monkeypatch, tmp_path, gateway=gateway)
+    monkeypatch.setattr(rc, '_ACTIVE_WAIT_S', 0.3)
+    async def flow():
+        owner.loop = asyncio.get_running_loop()
+        with slot.guard:
+            slot.active += 1
+        def release():
+            with slot.guard:
+                slot.active -= 1
+            owner._signal(slot)
+        owner.loop.call_later(0.05, release)
+        await owner._open_slot_in_rust('session', slot, launch=False)
+        assert slot.phase == Phase.Rust
+    try:
+        asyncio.run(flow())
+    finally:
+        if gateway.lease:
+            gateway.lease.close()
+    gateway = TerminalGateway()
+    owner, slot, _ = live_owner(monkeypatch, tmp_path / 'stuck', gateway=gateway)
+    async def stuck():
+        owner.loop = asyncio.get_running_loop()
+        with slot.guard:
+            slot.active += 1
+        with pytest.raises(RuntimeError, match='fila da sessão em uso'):
+            await owner._open_slot_in_rust('session', slot, launch=False)
+        assert slot.phase == Phase.Python and gateway.calls == []
+        with slot.guard:
+            slot.active -= 1
+    asyncio.run(stuck())
+
+
+def test_queue_inside_lifecycle_never_waits_for_the_mode(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from app import runtime_queue
+    owner, slot, _ = live_owner(monkeypatch, tmp_path)
+    async def flow():
+        owner.loop = asyncio.get_running_loop()
+        owner.mode = 'pending'
+        slot.lifecycle_token = object()
+        def admin():
+            token = rc._lifecycle.set(slot.lifecycle_token)
+            try:
+                return runtime_queue.route_queue(SimpleNamespace(name='session'), 'load', {})
+            finally:
+                rc._lifecycle.reset(token)
+        handled, rows = await asyncio.wait_for(asyncio.to_thread(admin), 2)
+        assert handled and rows == []
+    asyncio.run(flow())

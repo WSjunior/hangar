@@ -1416,3 +1416,18 @@ para a principal.
 **Prova:** janela de teste do nativo atrás de um repassador que acrescentava o campo à lista do
 backend instalado; rodapé, título, card e painel de git das três sessões em worktree passaram a
 mostrar a worktree e a branch dela.
+
+## Passagem ao Rust no boot com a fila Python ocupada
+
+(05/10/2026, DELPHI-02.) Nos dois reinícios do dia, a sessão terminal abriu no Python e
+`runtime.reopen_failed` saiu só com `RuntimeError`; a próxima ação a levou ao Rust. Reproduzido
+em teste: a leitura da fila do SSE entra no `queue_gate` (`slot.active`), delega pelo `op` e espera
+o modo sair de `pending`; o `_enter_rust` só termina depois de passar a sessão, e o
+`_open_slot_in_rust` recusava na hora com "fila da sessão em uso no Python". Agora a fila síncrona
+de sessão Claude espera o modo ANTES do portão (`settle_before_queue`), e a passagem espera até
+5 s o `active` zerar; dentro da barreira de lifecycle (renomear, fechar) a fila não espera o modo,
+porque quem o fecha espera a mesma barreira. O diário de falha do runtime leva `raise_site`
+(`arquivo:linha função` do `raise`): sem isso só o tipo chegava. A mensagem do Python continua
+fora, porque algumas carregam saída do modelo; o ponto do `raise` já diz qual frase foi. O campo
+não se chama `origem` porque o `diag.registrar` grava o dele por cima.
+

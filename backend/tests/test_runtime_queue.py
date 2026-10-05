@@ -152,6 +152,9 @@ def test_facade_and_reserve_share_authoritative_state(tmp_path, monkeypatch):
         def queue_rpc(self, route, call_id, clock, action):
             return route.exec(1, call_id, clock, action)
 
+        def settle_before_queue(self, name):
+            pass
+
     runtime_queue.configure(Coordinator())
     try:
         queue = PromptQueue("session")
@@ -614,6 +617,9 @@ def test_queue_read_during_hand_over_uses_projection(tmp_path, monkeypatch):
 
         def queue_rpc(self, route, call_id, clock, action):
             return route.exec(1, call_id, clock, action)
+
+        def settle_before_queue(self, name):
+            pass
 
     runtime_queue.configure(Coordinator())
     try:

@@ -669,6 +669,7 @@ def route_queue(queue, method: str, args: dict):
     if _coordinator is None or getattr(queue, "routing_disabled", False):
         return False, None
     from app.runtime_coordinator import TransferInProgress
+    _coordinator.settle_before_queue(queue.name)
     try:
         with _coordinator.queue_gate(queue.name) as route:
             if route is None:
