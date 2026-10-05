@@ -1962,7 +1962,7 @@ impl Hangar {
                 self.plugin_columns = None;
                 self.plugin_source = None;
                 self.plugin_local_tab = None;
-        self.plugin_hovered.clear();
+                self.plugin_hovered.clear();
                 if let Some(task) = self.history_task.take() { task.abort(); }
                 self.chat = Chat::default();
                 self.turn_seen = None;
