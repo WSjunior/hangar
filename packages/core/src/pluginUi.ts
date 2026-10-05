@@ -165,6 +165,39 @@ export function parsePluginUi(data: unknown): PluginSurfaces {
   };
 }
 
+/** O servidor diz qual painel está na frente, e ele está na lista: a aba segue o servidor. */
+export function tabFollowsServer(ids: readonly string[], shownId: string | null | undefined): boolean {
+  return typeof shownId === 'string' && ids.includes(shownId);
+}
+
+/** O painel desenhado: o do servidor quando ele diz um da lista; senão a escolha local; senão o último aberto. */
+export function activePaneId(ids: readonly string[], shownId: string | null | undefined, local: string | null): string | null {
+  if (typeof shownId === 'string' && ids.includes(shownId)) return shownId;
+  if (local && ids.includes(local)) return local;
+  return ids.length ? ids[ids.length - 1] : null;
+}
+
+/** A escolha local depois de um evento novo. Painel que acabou de abrir vai para a frente, como no terminal;
+ *  fechado o escolhido, fica o vizinho anterior (o seguinte, se não houver anterior); senão ela sobrevive. */
+export function followLocalTab(prev: readonly string[], next: readonly string[], local: string | null): string | null {
+  if (!next.length) return null;
+  const opened = next.filter((id) => !prev.includes(id));
+  if (opened.length) return opened[opened.length - 1];
+  if (local && next.includes(local)) return local;
+  const at = local ? prev.indexOf(local) : -1;
+  if (at < 0) return next[next.length - 1];
+  for (let i = at - 1; i >= 0; i--) if (next.includes(prev[i])) return prev[i];
+  return next[0];
+}
+
+/** Recusa de um servidor anterior à rota (`plugin/show` só chega nas fases 2 e 3): o servidor atual responde
+ *  405 a POST em rota desconhecida (o mount estático recusa o método) e um mais novo sem a rota, 404.
+ *  A troca de aba fica no app. */
+export function isMissingRoute(err: unknown): boolean {
+  const status = err && typeof err === 'object' ? (err as { status?: unknown }).status : undefined;
+  return status === 404 || status === 405;
+}
+
 /** Aviso (`$.ui.toast`) que um mod mostrou no terminal; `plugin` é o mod que o emitiu. */
 export interface PluginToast {
   id: string;

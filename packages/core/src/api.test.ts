@@ -16,7 +16,7 @@ import { mensagemDeErro, formataErro } from './errosApi';
 import { passarBastao, getSyncSetupForServer, setupSyncForServer, disableSyncForServer } from './api';
 import { probeServerResponse } from './api';
 import { scanDir, scanDirForServer, listClaudeConfigs, listClaudeConfigsForServer } from './api';
-import { answerQuestions, interrupt, openEventStreamForServer, pressPluginButton, sendInputForServer, skipQuestion } from './api';
+import { answerQuestions, inputPluginField, interrupt, openEventStreamForServer, pressPluginButton, sendInputForServer, showPluginPane, skipQuestion } from './api';
 import { discardFile, fileAuthHeader, fileUrlNative, getPairContract, getPlans, listFiles, pathDiff, readFile, searchFiles, setPlanPin, unpairSession, writeFile } from './api';
 import type { Server } from './servers';
 import { exportShortcuts } from './api';
@@ -348,6 +348,8 @@ describe('contratos de conversa com servidor explícito', () => {
     { path: '/interrupt', body: {}, run: (s?: Server) => interrupt('mesma/sessão', false, s) },
     { path: '/interrupt?clear=true', body: {}, run: (s?: Server) => interrupt('mesma/sessão', true, s) },
     { path: '/plugin/press', body: { site: 'above-prompt', key: 'rv-1' }, run: (s?: Server) => pressPluginButton('mesma/sessão', 'above-prompt', 'rv-1', s) },
+    { path: '/plugin/show', body: { site: 'pm-mock-mr' }, run: (s?: Server) => showPluginPane('mesma/sessão', 'pm-mock-mr', s) },
+    { path: '/plugin/input', body: { site: 'vitrine-campos', key: 'V18-campo', kind: 'change', value: 'oi' }, run: (s?: Server) => inputPluginField('mesma/sessão', 'vitrine-campos', 'V18-campo', 'change', 'oi', s) },
     { path: '/answer', body: { answers: [], request_id: 0 }, run: (s?: Server) => answerQuestions('mesma/sessão', [], 0, s) },
     { path: '/answer', body: { answers: [] }, run: (s?: Server) => answerQuestions('mesma/sessão', [], undefined, s) },
     { path: '/question/skip', body: { request_id: 'req-b' }, run: (s?: Server) => skipQuestion('mesma/sessão', 'req-b', s) },
@@ -1016,4 +1018,11 @@ it('503 de custos vira a frase traduzida com o código; sem envelope fica o stat
   const semEnvelope = await fetchCostsForServer(server, 'all').catch((e: unknown) => e);
   expect(motivoDoServidor(semEnvelope)).toBeNull();
   expect((semEnvelope as Error).message).toBe('502');
+});
+
+it.each([404, 405])('plugin/show num servidor sem a rota rejeita com status %i, que isMissingRoute reconhece', async (status) => {
+  const { isMissingRoute } = await import('./pluginUi');
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({ detail: 'Not Found' }), { status }));
+  const erro = await showPluginPane('sessao', 'pm-mock-mr', server).catch((e: unknown) => e);
+  expect(isMissingRoute(erro)).toBe(true);
 });

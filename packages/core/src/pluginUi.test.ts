@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buttonKey, decodeRaster, inkColor, isEmptyBand, parsePluginToast, parsePluginUi, textOf } from './pluginUi';
+import { activePaneId, buttonKey, followLocalTab, isMissingRoute, tabFollowsServer, decodeRaster, inkColor, isEmptyBand, parsePluginToast, parsePluginUi, textOf } from './pluginUi';
 import amostras from './__fixtures__/plugin-ui-arvores.json';
 
 function cells(words: number[]): string {
@@ -123,5 +123,60 @@ describe('parsePluginUi: campos novos da fase 1', () => {
     const cartao = linha.children[1].children![2];
     expect(cartao.hover).toEqual({ display: 'flex' });
     expect(cartao.props).not.toHaveProperty('hover');
+  });
+});
+
+describe('aba ativa', () => {
+  const ids = ['pm-mock-pm', 'pm-mock-mr', 'pm-mock-jenkins'];
+
+  it('segue o shown_id quando ele nomeia um painel da lista', () => {
+    expect(tabFollowsServer(ids, 'pm-mock-pm')).toBe(true);
+    expect(activePaneId(ids, 'pm-mock-pm', 'pm-mock-mr')).toBe('pm-mock-pm');
+  });
+
+  it('shown_id de painel que ainda não chegou: vale a escolha local, nunca nada', () => {
+    expect(tabFollowsServer(ids, 'pm-mock-novo')).toBe(false);
+    expect(activePaneId(ids, 'pm-mock-novo', 'pm-mock-mr')).toBe('pm-mock-mr');
+    expect(activePaneId(ids, 'pm-mock-novo', null)).toBe('pm-mock-jenkins');
+  });
+
+  it('sem shown_id (servidor antigo), escolha local; sem ela, o último aberto; sem painel, null', () => {
+    expect(activePaneId(ids, undefined, 'pm-mock-pm')).toBe('pm-mock-pm');
+    expect(activePaneId(ids, null, null)).toBe('pm-mock-jenkins');
+    expect(activePaneId([], 'x', 'y')).toBeNull();
+  });
+
+  it('escolha local que não está mais na lista cai no último aberto', () => {
+    expect(activePaneId(ids, undefined, 'fechado')).toBe('pm-mock-jenkins');
+  });
+});
+
+describe('escolha local da aba', () => {
+  it('começa no último painel aberto', () => {
+    expect(followLocalTab([], ['a', 'b', 'c'], null)).toBe('c');
+  });
+
+  it('sobrevive a um redesenho sem painel novo', () => {
+    expect(followLocalTab(['a', 'b', 'c'], ['a', 'b', 'c'], 'a')).toBe('a');
+  });
+
+  it('painel que acaba de abrir vai para a frente, como no terminal', () => {
+    expect(followLocalTab(['a', 'b'], ['a', 'b', 'd'], 'a')).toBe('d');
+  });
+
+  it('fechado o escolhido, fica o vizinho anterior; sem anterior, o seguinte', () => {
+    expect(followLocalTab(['a', 'b', 'c'], ['a', 'c'], 'b')).toBe('a');
+    expect(followLocalTab(['a', 'b'], ['b'], 'a')).toBe('b');
+    expect(followLocalTab(['a'], [], 'a')).toBeNull();
+  });
+});
+
+describe('rota ausente', () => {
+  it('404 e 405 são servidor anterior à rota; 409 e erro sem status não são', () => {
+    expect(isMissingRoute(Object.assign(new Error('Not Found'), { status: 404 }))).toBe(true);
+    expect(isMissingRoute(Object.assign(new Error('Method Not Allowed'), { status: 405 }))).toBe(true);
+    expect(isMissingRoute(Object.assign(new Error('x'), { status: 409, code: 'erro_mod_dialogo_aberto' }))).toBe(false);
+    expect(isMissingRoute(new Error('rede'))).toBe(false);
+    expect(isMissingRoute(null)).toBe(false);
   });
 });
