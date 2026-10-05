@@ -3480,6 +3480,9 @@ async def history(request: Request, response: Response, name: str, limit: int | 
     if coordinator is not None and coordinator.managed_queue(name):
         try:
             await coordinator.op(name, {"kind":"ensure_projection"}, uuid.uuid4().hex)
+        except runtime_coordinator.TransferInProgress:
+            # Na passagem ninguém grava: a projeção em disco é a última dos dois donos.
+            diag.registrar("runtime.info_during_transfer", "aviso", sessao=name)
         except Exception as exc:
             from app.runtime_coordinator import failure_reason
             diag.registrar("runtime.history_failed", "erro", sessao=name, **failure_reason(exc))

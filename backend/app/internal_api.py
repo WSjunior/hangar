@@ -203,8 +203,9 @@ async def session_info(name: str) -> dict:
         try:
             await coordinator.op(name, {"kind":"ensure_projection"}, uuid.uuid4().hex)
         except runtime_coordinator.TransferInProgress:
-            # Na passagem ninguém grava: a projeção em disco é a última dos dois donos.
-            pass
+            # Na passagem ninguém grava: a projeção em disco é a última dos dois donos. O aviso
+            # deixa rastro de uma passagem que não termina.
+            diag.registrar("runtime.info_during_transfer", "aviso", sessao=name)
         except Exception as exc:
             from app.runtime_coordinator import failure_reason
             diag.registrar("runtime.history_failed", "erro", sessao=name, **failure_reason(exc))
