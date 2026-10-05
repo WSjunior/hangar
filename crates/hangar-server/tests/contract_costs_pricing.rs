@@ -188,7 +188,8 @@ fn pricing_reload_invalidates_both_memos_and_keeps_alias_order() {
     assert_eq!(p.rate_for("MIXED").unwrap().input, 4.0);
     assert_eq!(p.rate_for("MIXED").unwrap().origin, "override");
     std::fs::write(&catalog, r#"{"modelos":{"mixed":{"input":3,"output":6,"provider":"openai","cache_read":0.3}}}"#).unwrap();
-    std::fs::File::open(&catalog).unwrap().set_modified(std::time::SystemTime::UNIX_EPOCH).unwrap();
+    // No Windows mudar a data exige o arquivo aberto para escrita; só leitura dá "Access is denied".
+    std::fs::OpenOptions::new().write(true).open(&catalog).unwrap().set_modified(std::time::SystemTime::UNIX_EPOCH).unwrap();
     assert!(p.reload_if_changed());
     assert_eq!(p.canonizar("MIXED"), "mixed");
     assert_eq!(p.rate_for("MIXED").unwrap().input, 3.0);
