@@ -132,7 +132,7 @@ inválido trocado), `docs/decisoes/windows.md` (regra nova, se houver).
 `procs::sysinfo_reads_argv_and_env` (nos três sistemas no CI).
 
 - [x] **Step 9: Ler "Regras vigentes" de `docs/decisoes/windows.md`; testes, vistos falhar**
-- [ ] **Step 10: Leitor `sysinfo` e parse do psmux; jobs Windows e macOS do CI conferidos pelo log; revisar**
+- [x] **Step 10: Leitor `sysinfo` e parse do psmux; jobs Windows e macOS do CI conferidos pelo log; revisar**
 
 ### Task 5: Gerador de entradas e saídas gravadas
 
