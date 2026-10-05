@@ -44,7 +44,7 @@ const {registerInput} = await import(data(stripTypeScriptTypes(source,{mode:'str
 let start, sid='A'; const timers=[], effects=[], receipts=[];
 registerInput((event,options,fn)=>{start=fn;});
 const $={env:{get:async key=>({HANGAR_PLUGIN_URL:'http://fake',HANGAR_PLUGIN_TOKEN:'test',CP_SESSION_NAME:'session'})[key]},
- clock:{after:(ms,fn)=>timers.push(fn)}, session:{id:async()=>sid}, ui:{log:()=>{}},
+ clock:{after:(ms,fn)=>timers.push(fn)}, session:{id:async()=>sid}, ui:{log:()=>{},invalidate:()=>{}},
  prompt:{fill:async()=>{effects.push({kind:'fill',sid});return {isFilled:true};},submit:async()=>effects.push({kind:'submit',sid})},
  http:{fetch:async(url,options)=>{if(url.endsWith('/pull')){sid='B';return {status:200,text:JSON.stringify({text:'text',modo:process.argv[3],publication_id:'pub-A',generation:1,session_id:process.argv[4]})};}
  receipts.push(JSON.parse(options.body)); return {status:200,text:'{}'};}}};
