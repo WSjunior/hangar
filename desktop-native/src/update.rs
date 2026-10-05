@@ -56,7 +56,7 @@ fn offered(remote: &str, channel: &str, current: &str, built: Option<&str>) -> b
 }
 
 /// Branch que o servidor segue. Sem o campo (servidor anterior ao canal, checkout ilegível), a main, como o backend.
-fn alvo(state: &Value) -> String {
+pub(crate) fn alvo(state: &Value) -> String {
     state["pre_voo"]["alvo"].as_str().filter(|alvo| !alvo.is_empty()).unwrap_or("main").to_owned()
 }
 
@@ -369,6 +369,18 @@ pub struct Updater {
     channel_blocked: Option<String>,
 }
 
+/// Linha "Canal de testes" da página Sobre: a main não mostra nada.
+pub fn test_channel(branch: &str) -> Option<String> {
+    (!branch.is_empty() && branch != "main").then(|| tr("about_test_channel").replace("{branch}", branch))
+}
+
+/// Canal do app na página Sobre: a branch do build e, quando a procura já segue outra, a próxima.
+pub fn app_channel(built: Option<&str>, following: &str) -> Vec<String> {
+    let built = built.filter(|built| !built.is_empty()).unwrap_or("main");
+    let next = (release_tag(following) != release_tag(built)).then(|| tr("about_following_channel").replace("{branch}", following));
+    test_channel(built).into_iter().chain(next).collect()
+}
+
 /// O que a página Sobre mostra na linha do app.
 pub enum AppCheck { Never, Checking, UpToDate, Available(String), Failed(String), NoRelease(String) }
 
@@ -484,6 +496,8 @@ impl Updater {
     pub fn start_update(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.run(window, cx) }
 
     pub fn is_busy(&self) -> bool { self.busy() }
+
+    pub fn channel_lines(&self) -> Vec<String> { app_channel(BUILT_CHANNEL, &self.channel()) }
 
     pub fn server_outdated(&self) -> bool { self.active_state.as_ref().is_some_and(|state| outdated(state, CURRENT)) }
 
@@ -754,6 +768,26 @@ mod tests {
     use super::*;
     // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
     use core::prelude::v1::test;
+
+    #[test]
+    fn about_shows_test_channel_only_off_main() {
+        assert_eq!(test_channel("main"), None);
+        assert_eq!(test_channel(""), None);
+        assert!(test_channel("feat/x").is_some_and(|text| text.contains("feat/x")));
+        assert!(app_channel(None, "main").is_empty());
+        assert!(app_channel(Some("main"), "main").is_empty());
+        assert!(app_channel(Some(""), "main").is_empty());
+        let same = app_channel(Some("feat/x"), "feat/x");
+        assert_eq!(same.len(), 1);
+        assert!(same[0].contains("feat/x"));
+        // `a/b` e `a-b` publicam na mesma release: não é outro canal.
+        assert_eq!(app_channel(Some("feat/x"), "feat-x").len(), 1);
+        let back = app_channel(Some("feat/x"), "main");
+        assert!(back[0].contains("feat/x") && back[1].contains("main"));
+        let local = app_channel(None, "feat/y");
+        assert_eq!(local.len(), 1);
+        assert!(local[0].contains("feat/y"));
+    }
 
     #[test]
     fn update_channel_draft_holds_only_its_local_server_update() {
