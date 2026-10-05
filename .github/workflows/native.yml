@@ -1,14 +1,17 @@
-# App desktop nativo (desktop-native/, Rust/GPUI): compila Linux, Windows e macOS e publica numa release FIXA
-# `native-latest`, reescrita a cada push na main — o mesmo esquema do `dist-latest` do ci.yml. O app lê o
-# `native-latest.json` dessa release para oferecer o "Atualizar" (desktop-native/src/update.rs).
-# Push em outra branch publica na pré-release `native-<branch>` (fora de [A-Za-z0-9._-] vira `-`), que é a que o app
-# procura quando o servidor da máquina está no canal de testes dessa branch. O manifesto mantém o nome em toda release.
+# App desktop nativo (desktop-native/, Rust/GPUI). Conferir e publicar são jobs separados:
+# - `check` (cargo build + cargo test, Linux, sem --release) roda em todo push e PR que toque estes caminhos.
+# - `build` + `publish` só na main e no canal de testes. A main compila Linux, Windows e macOS e publica na release
+#   FIXA `native-latest`, cujo `native-latest.json` alimenta o "Atualizar" (desktop-native/src/update.rs). O canal
+#   compila Linux e Windows e publica na pré-release `native-<branch>` (fora de [A-Za-z0-9._-] vira `-`), que o app
+#   procura quando o servidor da máquina está no canal dessa branch. O manifesto mantém o nome em toda release.
+# Canal de testes hoje: hangar-server-parte1. Trocar o canal é trocar esse nome aqui e no server.yml.
+# `workflow_dispatch` em outra branch compila Linux e Windows sem publicar, para conferir o build de release.
 name: Native
 
 on:
   push:
     branches: ["**"]
-    paths:
+    paths: &paths
       - "desktop-native/**"
       - "crates/hangar-api/**"
       - "crates/hangar-workspace/**"
@@ -17,40 +20,78 @@ on:
       - "messages/**"
       - "VERSION"
       - ".github/workflows/native.yml"
+  pull_request:
+    paths: *paths
   workflow_dispatch:
 
 # Dois pushes seguidos não publicam ao mesmo tempo: o segundo espera, e a release termina no commit mais novo.
+# Onde não publica, o push novo cancela a conferência do anterior.
 concurrency:
-  group: ${{ github.ref_name == 'main' && 'native-latest' || format('native-{0}', github.ref_name) }}
-  cancel-in-progress: false
+  group: native-${{ github.ref_name }}
+  cancel-in-progress: ${{ github.ref_name != 'main' && github.ref_name != 'hangar-server-parte1' }}
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux-x86_64
-            exe: ""
-            experimental: false
-          # Windows e macOS nunca foram compilados antes deste workflow: falha deles não segura a release do Linux.
-          - os: windows-latest
-            platform: windows-x86_64
-            exe: ".exe"
-            experimental: true
-          - os: macos-latest
-            platform: macos-aarch64
-            exe: ""
-            experimental: true
-    runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.experimental }}
+  # PR de branch deste repositório já roda pelo push; aqui só os de fork.
+  check:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     defaults:
       run:
         working-directory: desktop-native
         shell: bash
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libfontconfig-dev libfreetype-dev libwayland-dev \
+            libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev libvulkan-dev libzstd-dev
+      # Só a main e o canal gravam cache: cópia por branch estourava os 10 GB do repositório e o GitHub despejava
+      # justamente as da main. As outras branches leem o da main.
+      - id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop-native/target
+          key: native-check-${{ runner.os }}-${{ hashFiles('desktop-native/Cargo.lock', 'desktop-native/rust-toolchain.toml') }}
+          restore-keys: native-check-${{ runner.os }}-
+      # `build` e não `check`: confere o mesmo binário e deixa as dependências no perfil que o `test` reaproveita;
+      # o `check` refazia todas elas só em metadados.
+      - run: cargo build --locked
+      - run: cargo test --locked
+      - if: steps.cache.outputs.cache-hit != 'true' && github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'hangar-server-parte1')
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop-native/target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+  build:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'hangar-server-parte1'))
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS só na main: as máquinas do canal de testes são Linux e Windows.
+        os: ${{ fromJSON(github.ref_name == 'main' && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest","windows-latest"]') }}
+    runs-on: ${{ matrix.os }}
+    # Windows e macOS nunca foram compilados antes deste workflow: falha deles não segura a release do Linux.
+    continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: desktop-native
+        shell: bash
+    env:
+      PLATFORM: ${{ fromJSON('{"ubuntu-latest":"linux-x86_64","windows-latest":"windows-x86_64","macos-latest":"macos-aarch64"}')[matrix.os] }}
+      EXE: ${{ matrix.os == 'windows-latest' && '.exe' || '' }}
     steps:
       # Histórico inteiro: a versão embutida é `VERSION` + número de commits, e clone raso contaria 1.
       - uses: actions/checkout@v4
@@ -63,7 +104,8 @@ jobs:
             libx11-xcb-dev libxkbcommon-dev libxkbcommon-x11-dev libvulkan-dev libzstd-dev
       # O rustup do runner lê o rust-toolchain.toml (1.98.1) no primeiro cargo. actions/cache e não rust-cache: a
       # política do repositório só libera actions do GitHub e de criadores verificados.
-      - uses: actions/cache@v4
+      - id: cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/.cargo/registry
@@ -78,14 +120,22 @@ jobs:
           HANGAR_NATIVE_CHANNEL: ${{ github.ref_name }}
           CARGO_PROFILE_RELEASE_LTO: fat
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
+      - if: steps.cache.outputs.cache-hit != 'true' && github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop-native/target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
       # Binário cru com nome limpo (o que o app baixa para se atualizar) + arquivo compactado para quem baixa à mão.
       # O binário cru mantém o nome usado pelo atualizador. O arquivo manual leva o lançador/ícone no Linux,
       # o executável com ícone incorporado no Windows e o pacote .app com ICNS no macOS.
       - name: Empacotar
         run: |
-          name=Hangar-${{ matrix.platform }}
+          name=Hangar-$PLATFORM
           mkdir -p out stage
-          cp "target/release/hangar-native${{ matrix.exe }}" "out/$name${{ matrix.exe }}"
+          cp "target/release/hangar-native$EXE" "out/$name$EXE"
           case "$RUNNER_OS" in
             Linux)
               install -m755 target/release/hangar-native stage/hangar
@@ -102,14 +152,14 @@ jobs:
           ls -l out
       - uses: actions/upload-artifact@v4
         with:
-          name: native-${{ matrix.platform }}
+          name: native-${{ env.PLATFORM }}
           path: desktop-native/out/*
           retention-days: 1
 
-  # Só este job escreve, como o `publica-dist` do ci.yml.
+  # Só este job escreve, como o `publica-dist` do ci.yml. Teste vermelho no `check` segura a publicação.
   publish:
-    needs: build
-    if: startsWith(github.ref, 'refs/heads/')
+    needs: [check, build]
+    if: startsWith(github.ref, 'refs/heads/') && (github.ref_name == 'main' || github.ref_name == 'hangar-server-parte1')
     runs-on: ubuntu-latest
     permissions:
       contents: write
