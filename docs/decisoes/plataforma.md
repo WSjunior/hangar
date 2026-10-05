@@ -1038,6 +1038,16 @@ Python segura o stdin dele como cano, e o binário sai quando o cano fecha. Sem 
 não é seguro com threads vivas. No Windows o `Restart-HangarTask` reconhece o `hangar-server.exe`
 filho do backend: sem isso, a porta "de outro processo" barrava todo reinício.
 
+O vigia de 0,25 s (`refresh_members`) não varre a máquina: no Linux desce a árvore do filho por
+`/proc/<pid>/task/*/children` conferindo a sessão, e a varredura inteira (`psutil.process_iter`)
+fica como reforço a cada 5 s, porque o neto cujo pai morreu sai da árvore e segue na sessão. Fora
+do Linux, ou sem `children` no kernel (aviso no log uma vez), varre sempre. `runtime-process.json`
+só é regravado com pid novo, na primeira volta, depois de gravação que falhou ou se sumiu do disco.
+`cleanup` e `reconcile_startup` continuam com a varredura inteira. Medida (05/10/2026, backend
+isolado, zero sessões, sem cliente, ~615 processos): o Python caiu de 4,33% para 0,73% de um
+núcleo, e as regravações de 115 para 0 em 30 s. Cada varredura custava 9,5–11 ms; detalhes em
+`docs/migracao-rust/lista-estado/medicao.md`.
+
 A reserva é no mesmo processo, sem novo lifespan: dois lifespans rodariam watchers e hooks em
 dobro. O motivo vai ao diário como `hangar_server.reserva` (`sem_binario`, `sem_resposta`,
 `protocolo`, `endereco_privado`, `quedas`, `erro`, `porta_ocupada`); cada queda, como
