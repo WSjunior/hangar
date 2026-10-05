@@ -239,3 +239,9 @@ export function hoverProps(el: PluginElement, lit: boolean): Record<string, unkn
   if (!lit || !hover || typeof hover !== 'object' || 'scope' in hover) return base;
   return { ...base, ...hover };
 }
+
+/** A chave de um campo (`Input`) de mod, que é o que a digitação manda ao backend. */
+export function inputKey(el: PluginElement): string | null {
+  const key = el.props?.key;
+  return el.type === 'Input' && typeof key === 'string' && key ? key : null;
+}

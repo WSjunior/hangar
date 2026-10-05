@@ -1,19 +1,22 @@
 <script lang="ts">
-  import { buttonKey, decodeRaster, hoverProps, isHoverScope, safeHref, textOf, type PluginElement, type PluginNode as Node, type RasterCell } from '@hangar/core';
+  import { buttonKey, decodeRaster, hoverProps, inputKey, isHoverScope, safeHref, textOf, type PluginElement, type PluginInputKind, type PluginNode as Node, type RasterCell } from '@hangar/core';
   import { boxStyle, buttonStyle, textStyle } from '../lib/pluginUiStyle';
   import { renderMarkdown } from '../lib/markdown';
+  import PluginInput from './PluginInput.svelte';
   import PluginNode from './PluginNode.svelte';
 
   interface Props {
     node: Node;
     /** Clique num botão de mod, pela `key` dele; sem ele, os botões são só rótulo. */
     onPress?: (key: string) => void;
+    /** Digitação num `Input`, só sem terminal; sem ele, o campo fica desabilitado com a dica. */
+    onInput?: (key: string, kind: PluginInputKind, value: string) => void;
     /** Largura do lugar em colunas (faixa ou painel): `width` que a alcança vira 100%. */
     place?: number | null;
     /** O escopo de hover mais próximo (Box com `key`) está com o ponteiro em cima. */
     hoverOn?: boolean;
   }
-  let { node, onPress, place = null, hoverOn = false }: Props = $props();
+  let { node, onPress, onInput, place = null, hoverOn = false }: Props = $props();
 
   const el = $derived(node && typeof node === 'object' ? (node as PluginElement) : null);
   // Box com `key` é escopo: acende com o ponteiro nele, e os filhos herdam. Os outros nós seguem o escopo de cima.
@@ -44,7 +47,7 @@
 </script>
 
 {#snippet kids(list: Node[] | undefined)}
-  {#each list ?? [] as child, i (i)}<PluginNode node={child} {onPress} {place} hoverOn={lit} />{/each}
+  {#each list ?? [] as child, i (i)}<PluginNode node={child} {onPress} {onInput} {place} hoverOn={lit} />{/each}
 {/snippet}
 
 {#if typeof node === 'string' || typeof node === 'number'}{node}{:else if el}
@@ -85,6 +88,10 @@
       <span class="button" class:plain={p.plain === true} class:primary={p.variant === 'primary'}
             class:dim={p.dimColor === true} style={buttonStyle(p)}>{label}</span>
     {/if}
+  {:else if el.type === 'Input'}
+    {@const key = inputKey(el)}
+    <PluginInput label={str(p.label)} placeholder={str(p.placeholder)} value={str(p.value)} submitLabel={str(p.submitLabel)}
+                 onInput={onInput && key ? (kind, value) => onInput(key, kind, value) : undefined} />
   {:else if el.type === 'Image'}
     <span class="alt">{str(p.alt)}</span>
   {:else}
