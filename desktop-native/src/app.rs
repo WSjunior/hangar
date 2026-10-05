@@ -2067,7 +2067,8 @@ impl Hangar {
     }
 
     fn known_user_ids(&self) -> HashSet<String> {
-        self.chat.events.iter().filter(|event| event.kind == "user_msg" && !event.queued()).map(|event| event.id.clone()).collect()
+        // Bolha da fila que já existia antes do envio não confirma o envio novo, mesmo com o mesmo texto.
+        self.chat.events.iter().filter(|event| event.kind == "user_msg").map(|event| event.id.clone()).collect()
     }
 
     fn commands_key(&self) -> Option<String> {
