@@ -1,7 +1,11 @@
 # Lista de sessões + estado: medição (05/10/2026)
 
-Pedido: `../pedidos/2026-10-05-lista-estado-kickoff.md`. Inventário: `inventario.md`. Proposta no
-lugar desta parte: `plano.md`.
+Pedido: `../pedidos/2026-10-05-lista-estado-kickoff.md`. Inventário: `inventario.md`. Desenho:
+`desenho.md`. Plano: `plano.md`.
+
+> **Depois desta medição (05/10/2026):** o dono decidiu migrar a lista e o estado mesmo assim (o
+> critério é concentrar no Rust). O conserto do Supervisor recomendado abaixo virou a Task 1 do
+> plano completo.
 
 ## Conclusão
 
@@ -19,8 +23,8 @@ lugar desta parte: `plano.md`.
   responde em ~2 ms e o laço de eventos não atrasou mais de 10 ms em nenhuma janela. Não há
   problema de latência a resolver.
 
-**Recomendação:** não planejar a lista agora. Fazer antes o conserto do Supervisor (`plano.md`,
-2 Tasks pequenas): tira ~3,7–4,3 pontos fixos e ~345 mil `fsync` por dia, mais do que a lista
+**Recomendação desta medição:** não planejar a lista agora. Fazer antes o conserto do Supervisor
+(hoje a Task 1 de `plano.md`): tira ~3,7–4,3 pontos fixos e ~345 mil `fsync` por dia, mais do que a lista
 inteira renderia com 20 sessões. Depois, medir de novo o backend real; a lista volta à fila quando
 o número de sessões subir (a 50 sessões a projeção é ~5–6 pontos) ou junto da parte 4 (estado e
 terminal), com que divide captura e classificação.
