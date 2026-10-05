@@ -1,7 +1,6 @@
 //! Pele Terminal: a chamada como o Claude Code desenha no terminal. "● Update(arquivo)", a linha do desfecho com o
 //! cotovelo e, nas edições, o diff com uma numeração só, a do arquivo.
 use super::*;
-use crate::conversation::Family;
 use crate::editdiff::{self, Edit, Op};
 
 /// Linhas de um arquivo novo antes do "… +N linhas": o mesmo corte do Claude Code.
@@ -36,8 +35,12 @@ fn header_arg(name: Option<&str>, input: Option<&serde_json::Map<String, serde_j
     }
 }
 
-fn count(one: &str, many: &str, n: usize) -> String {
-    crate::i18n::tr_shared(if n == 1 { one } else { many }, &[("n", &n.to_string())])
+fn count(one: &str, many: &str, n: usize) -> String { count_with(one, many, n, &[]) }
+
+fn count_with(one: &str, many: &str, n: usize, extra: &[(&str, &str)]) -> String {
+    let n_text = n.to_string();
+    let params: Vec<(&str, &str)> = std::iter::once(("n", n_text.as_str())).chain(extra.iter().copied()).collect();
+    crate::i18n::tr_shared(if n == 1 { one } else { many }, &params)
 }
 
 /// "2 linhas adicionadas, 1 removida", ou a linha do arquivo novo.
@@ -141,11 +144,109 @@ fn diff_body(call: &ChatEvent, edits: &[Edit], limit: Option<usize>, cx: &App) -
     (rows, total - takes.iter().sum::<usize>(), total)
 }
 
-/// Leitura ou busca que já terminou sem erro entra na linha cinza; erro e chamada em andamento ficam à vista. O
-/// carregador de ferramentas fica fora, como na web.
-fn folds_into_reads(name: Option<&str>, has_result: bool, is_error: bool) -> bool {
-    has_result && !is_error && !name.is_some_and(|n| n.eq_ignore_ascii_case("toolsearch"))
-        && matches!(conversation::family(name), Family::Read | Family::Search)
+/// O que uma chamada conta na linha dobrada; a mesma regra do `terminalFoldKind` do core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FoldKind { Search, Read, List, Mcp, Shell }
+
+// Os conjuntos do Claude Code: comando de shell cujas partes só usam estes conta como busca, leitura ou listagem; os
+// neutros não decidem nada.
+const SHELL_SEARCH: [&str; 8] = ["find", "grep", "rg", "ag", "ack", "locate", "which", "whereis"];
+const SHELL_READ: [&str; 15] = ["cat", "head", "tail", "less", "more", "wc", "stat", "file", "strings", "jq", "awk", "cut", "sort", "uniq", "tr"];
+const SHELL_LIST: [&str; 3] = ["ls", "tree", "du"];
+const SHELL_NEUTRAL: [&str; 5] = ["echo", "printf", "true", "false", ":"];
+
+/// Classifica o comando parte a parte, separando em `|`, `&`, `;` e quebra de linha fora de aspas e parênteses, como o
+/// `separarComando` do core. Para no primeiro comando que não é de leitura: roda a cada quadro e não aloca.
+fn shell_fold_kind(cmd: &str) -> FoldKind {
+    let (mut search, mut read, mut list) = (false, false, false);
+    let mut classify = |part: &str| {
+        let word = part.split_whitespace().next().unwrap_or_default();
+        if word.is_empty() || SHELL_NEUTRAL.contains(&word) { return true; }
+        if SHELL_SEARCH.contains(&word) { search = true; }
+        else if SHELL_READ.contains(&word) { read = true; }
+        else if SHELL_LIST.contains(&word) { list = true; }
+        else { return false; }
+        true
+    };
+    let (mut start, mut depth, mut quote, mut escaped) = (0, 0usize, None::<u8>, false);
+    for (i, &c) in cmd.as_bytes().iter().enumerate() {
+        if escaped { escaped = false; continue; }
+        if let Some(q) = quote {
+            if c == b'\\' && q == b'"' { escaped = true; } else if c == q { quote = None; }
+            continue;
+        }
+        match c {
+            b'\\' => escaped = true,
+            b'\'' | b'"' | b'`' => quote = Some(c),
+            b'(' | b'{' => depth += 1,
+            b')' | b'}' => depth = depth.saturating_sub(1),
+            b'|' | b'&' | b';' | b'\n' if depth == 0 => {
+                if !classify(&cmd[start..i]) { return FoldKind::Shell; }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if !classify(&cmd[start..]) { return FoldKind::Shell; }
+    // A mesma precedência do Claude Code: listagem, depois busca, depois leitura.
+    if list { FoldKind::List } else if search { FoldKind::Search } else if read { FoldKind::Read } else { FoldKind::Shell }
+}
+
+fn is_any(name: &str, names: &[&str]) -> bool { names.iter().any(|n| name.eq_ignore_ascii_case(n)) }
+
+/// O servidor de um nome `mcp__<servidor>__<ferramenta>`, sem o prefixo `hangar-`, como o cartão mostra.
+fn mcp_server(name: &str) -> Option<&str> {
+    let mut parts = name.split("__");
+    (parts.next() == Some("mcp")).then_some(())?;
+    let server = parts.next()?;
+    parts.next()?;
+    Some(server.strip_prefix("hangar-").unwrap_or(server))
+}
+
+/// Tipo da chamada na linha dobrada, como o Claude Code conta; `None` não dobra (edição, gravação, agente e o carregador
+/// de ferramentas ficam sempre à vista).
+fn fold_kind(name: Option<&str>, input: Option<&serde_json::Map<String, serde_json::Value>>) -> Option<FoldKind> {
+    let name = name.unwrap_or_default();
+    if is_any(name, &["read", "notebookread"]) { return Some(FoldKind::Read); }
+    if is_any(name, &["grep", "glob", "find", "websearch", "webfetch"]) { return Some(FoldKind::Search); }
+    if name.eq_ignore_ascii_case("ls") { return Some(FoldKind::List); }
+    if is_any(name, &["bash", "powershell", "shell", "exec", "exec_command"]) {
+        let kind = match input.and_then(|i| i.get("command").or_else(|| i.get("cmd"))) {
+            Some(serde_json::Value::String(command)) => shell_fold_kind(command),
+            // O Codex manda o comando em lista de palavras.
+            Some(serde_json::Value::Array(words)) => shell_fold_kind(&words.iter().filter_map(|w| w.as_str()).collect::<Vec<_>>().join(" ")),
+            _ => FoldKind::Shell,
+        };
+        return Some(kind);
+    }
+    mcp_server(name).map(|_| FoldKind::Mcp)
+}
+
+/// A linha dobrada, na ordem e no tempo verbal do Claude Code: "Buscou 1 padrão, leu 2 arquivos, rodou 3 comandos de
+/// shell"; enquanto alguma roda, "Lendo 2 arquivos…". `kinds` é o tipo de cada chamada, já calculado pelo grupo.
+fn fold_title(events: &[ChatEvent], tools: &[Tool], kinds: &[FoldKind], running: bool) -> String {
+    let (mut counts, mut files, mut servers) = ([0usize; 5], std::collections::HashSet::new(), Vec::<&str>::new());
+    for (tool, &kind) in tools.iter().zip(kinds) {
+        counts[kind as usize] += 1;
+        let call = &events[tool.call];
+        match kind {
+            FoldKind::Read => { let path = editdiff::input_path(call.tool_input.as_ref()); if !path.is_empty() { files.insert(path); } }
+            FoldKind::Mcp => if let Some(server) = call.tool_name.as_deref().and_then(mcp_server) { if !servers.contains(&server) { servers.push(server); } },
+            _ => {}
+        }
+    }
+    // Como no Claude Code: arquivos distintos quando há caminho, senão quantas leituras.
+    if !files.is_empty() { counts[FoldKind::Read as usize] = files.len(); }
+    let names = servers.join(", ");
+    // Na ordem de `FoldKind`: a chave da frase concluída e a da que está em andamento.
+    const KEYS: [(&str, &str); 5] = [("term_dobra_buscou", "term_dobra_buscando"), ("term_dobra_leu", "term_dobra_lendo"),
+        ("term_dobra_listou", "term_dobra_listando"), ("term_dobra_chamou", "term_dobra_chamando"), ("term_dobra_rodou", "term_dobra_rodando")];
+    let parts: Vec<String> = KEYS.iter().zip(counts).filter(|(_, n)| *n > 0).map(|(&(done, live), n)| {
+        let key = if running { live } else { done };
+        count_with(&format!("{key}_1"), key, n, &[("nome", &names)])
+    }).collect();
+    let text = super::controls::capitalized(&parts.join(", "));
+    if running { format!("{text}…") } else { text }
 }
 
 impl Hangar {
@@ -217,29 +318,47 @@ impl Hangar {
         div().flex().flex_col().child(header).child(outcome_line).children(body).into_any_element()
     }
 
-    /// Chamadas seguidas na pele Terminal: uma embaixo da outra, sem moldura de grupo. Leituras e buscas seguidas somam
-    /// numa linha cinza que abre no clique; edição e comando nunca ficam escondidos.
+    /// Chamadas seguidas na pele Terminal: uma embaixo da outra, sem moldura de grupo. Buscas, leituras, MCP e comandos
+    /// seguidos somam numa linha cinza que abre no clique, rodando ou com erro, como no Claude Code; edição nunca fica
+    /// escondida.
     pub(super) fn render_terminal_group(&mut self, row: &str, tools: &[Tool], cx: &mut Context<Self>) -> AnyElement {
-        let reads = |this: &Self, tool: &Tool| {
-            let events = &this.chat.events;
-            folds_into_reads(events[tool.call].tool_name.as_deref(), tool.result.is_some(), tool.result.is_some_and(|i| events[i].is_error == Some(true)))
-        };
+        // Uma classificação por chamada e por quadro: o parse do comando não se repete no laço nem no título.
+        let kinds: Vec<Option<FoldKind>> = tools.iter().map(|t| {
+            let call = &self.chat.events[t.call];
+            fold_kind(call.tool_name.as_deref(), call.tool_input.as_ref())
+        }).collect();
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut i = 0;
         while i < tools.len() {
-            if !reads(self, &tools[i]) { rows.push(self.render_terminal_tool(tools[i], row, cx)); i += 1; continue; }
-            let run = tools[i..].iter().take_while(|t| reads(self, t)).count();
-            let key = format!("{row}#reads-{}", self.chat.events[tools[i].call].id);
+            if kinds[i].is_none() { rows.push(self.render_terminal_tool(tools[i], row, cx)); i += 1; continue; }
+            let run = kinds[i..].iter().take_while(|k| k.is_some()).count();
+            let folded = &tools[i..i + run];
+            let folded_kinds: Vec<FoldKind> = kinds[i..i + run].iter().flatten().copied().collect();
+            let key = format!("{row}#fold-{}", self.chat.events[tools[i].call].id);
             let open = self.expanded.contains(&key);
-            // A mesma frase da contagem por família que o grupo dos Chips usa.
-            let title = super::rows::family_title(&self.chat.events, &tools[i..i + run]);
+            let live = folded.iter().rev().find(|t| t.result.is_none() && self.running(t.call)).copied();
+            let title = fold_title(&self.chat.events, folded, &folded_kinds, live.is_some());
             let toggle_key = key.clone();
             // Botão: foca pelo teclado, ativa com Enter/Espaço e leva o rótulo, como o cabeçalho da chamada.
-            rows.push(div().pl(px(INDENT - 8.)).child(Button::new(SharedString::from(key)).ghost().w_full().h_auto().p_0().justify_start().toggled(open)
+            let mut block = vec![div().pl(px(INDENT - 8.)).child(Button::new(SharedString::from(key)).ghost().w_full().h_auto().p_0().justify_start().toggled(open)
                 .accessibility_label(title.clone())
                 .child(div().w_full().font_family(theme::MONO).text_size(px(12.5)).text_color(theme::muted()).child(title))
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle(toggle_key.clone(), cx)))).into_any_element());
-            if open { for tool in &tools[i..i + run] { rows.push(self.render_terminal_tool(*tool, row, cx)); } }
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle(toggle_key.clone(), cx)))).into_any_element()];
+            if !open {
+                // Recolhida, a linha mostra o que roda agora e a saída de cada falha, como o Claude Code.
+                let sub = |text: String, color: Hsla| div().flex().gap(px(8.)).pl(px(INDENT)).font_family(theme::MONO).text_size(px(12.5)).line_height(px(19.))
+                    .child(div().flex_none().text_color(theme::faint()).child("⎿"))
+                    .child(div().min_w_0().truncate().text_color(color).child(text)).into_any_element();
+                if let Some(tool) = live {
+                    let call = &self.chat.events[tool.call];
+                    block.push(sub(conversation::summarize_input(call.tool_name.as_deref(), call.tool_input.as_ref()), theme::muted()));
+                }
+                for tool in folded.iter().filter(|t| t.result.is_some_and(|r| self.chat.events[r].is_error == Some(true))) {
+                    block.push(sub(self.tool_status(*tool).0, theme::danger()));
+                }
+            }
+            rows.push(div().flex().flex_col().children(block).into_any_element());
+            if open { for tool in folded { rows.push(self.render_terminal_tool(*tool, row, cx)); } }
             i += run;
         }
         div().flex().flex_col().gap(px(10.)).children(rows).into_any_element()
@@ -248,7 +367,7 @@ impl Hangar {
 
 #[cfg(test)]
 mod tests {
-    use super::{Between, EDIT_SHOWN, between, folds_into_reads, header_arg, split_budget, visible_edits};
+    use super::{Between, EDIT_SHOWN, FoldKind, between, fold_kind, header_arg, mcp_server, shell_fold_kind, split_budget, visible_edits};
     use serde_json::json;
 
     #[test]
@@ -291,13 +410,39 @@ mod tests {
     }
 
     #[test]
-    fn only_settled_reads_and_searches_fold() {
-        assert!(folds_into_reads(Some("Read"), true, false));
-        assert!(!folds_into_reads(Some("Read"), true, true));
-        assert!(!folds_into_reads(Some("Read"), false, false));
-        assert!(folds_into_reads(Some("Grep"), true, false));
-        assert!(!folds_into_reads(Some("ToolSearch"), true, false));
-        assert!(!folds_into_reads(Some("Bash"), true, false));
-        assert!(!folds_into_reads(Some("Edit"), true, false));
+    fn fold_kind_counts_like_claude_code() {
+        let kind = |name: &str| fold_kind(Some(name), None);
+        assert_eq!(kind("Read"), Some(FoldKind::Read));
+        assert_eq!(kind("Grep"), Some(FoldKind::Search));
+        assert_eq!(kind("mcp__hangar__send"), Some(FoldKind::Mcp));
+        assert_eq!(kind("Bash"), Some(FoldKind::Shell));
+        assert_eq!(kind("mcp__x"), None);
+        assert_eq!(kind("ToolSearch"), None);
+        assert_eq!(kind("Edit"), None);
+        assert_eq!(kind("Write"), None);
+        assert_eq!(kind("Agent"), None);
+        let codex = json!({"cmd": ["rg", "-n", "x"]});
+        assert_eq!(fold_kind(Some("exec_command"), codex.as_object()), Some(FoldKind::Search));
+    }
+
+    #[test]
+    fn a_shell_command_made_only_of_reads_counts_as_a_read() {
+        assert_eq!(shell_fold_kind("rg -n foo src | head -5"), FoldKind::Search);
+        assert_eq!(shell_fold_kind("cat a.txt | jq .x"), FoldKind::Read);
+        assert_eq!(shell_fold_kind("ls -la && tree"), FoldKind::List);
+        assert_eq!(shell_fold_kind("echo oi; cat a"), FoldKind::Read);
+        assert_eq!(shell_fold_kind("cd src && ls"), FoldKind::Shell);
+        assert_eq!(shell_fold_kind("echo \"a | rg\""), FoldKind::Shell);
+        assert_eq!(shell_fold_kind("npm run build"), FoldKind::Shell);
+        assert_eq!(shell_fold_kind("(cd src && ls)"), FoldKind::Shell);
+        assert_eq!(shell_fold_kind("rg x | grep y"), FoldKind::Search);
+    }
+
+    #[test]
+    fn mcp_server_drops_the_hangar_prefix_like_the_card() {
+        assert_eq!(mcp_server("mcp__hangar-computer-control__objetivo"), Some("computer-control"));
+        assert_eq!(mcp_server("mcp__pmedico__progresso"), Some("pmedico"));
+        assert_eq!(mcp_server("mcp__x"), None);
+        assert_eq!(mcp_server("Bash"), None);
     }
 }

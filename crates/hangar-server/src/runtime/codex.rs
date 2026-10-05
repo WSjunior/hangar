@@ -132,6 +132,7 @@ pub struct Engine {
     wires:BTreeMap<String,Wire>,
     policies:BTreeMap<RequestId,String>,
     last_format_request:Option<RequestId>,
+    format_gate:FormatGate,
     async_questions:AsyncQuestions,
     voices:BTreeMap<String,Voice>,
     voice_wires:BTreeMap<String,(String,RequestId,u64)>,
@@ -180,7 +181,7 @@ impl Engine {
             model:string(&metadata["model"]),effort:string(&metadata["effort"]),mode:string(&metadata["mode"]),
             permission_mode:metadata["permission_mode"].as_str().unwrap_or("Full Access").into(),token_usage:Value::Null,rate_limits:Value::Null,
             preview:LiveBuffer::default(),response_started:false,compacting:false,rpc:BTreeMap::new(),server_requests:Vec::new(),
-            request_epochs:BTreeMap::new(),answering:BTreeSet::new(),wires:BTreeMap::new(),policies:BTreeMap::new(),last_format_request:None,async_questions,voices,voice_wires:BTreeMap::new(),skill_preparations:BTreeMap::new(),early_voice:BTreeMap::new(),early_voice_bytes:0,metadata }
+            request_epochs:BTreeMap::new(),answering:BTreeSet::new(),wires:BTreeMap::new(),policies:BTreeMap::new(),last_format_request:None,format_gate:FormatGate::default(),async_questions,voices,voice_wires:BTreeMap::new(),skill_preparations:BTreeMap::new(),early_voice:BTreeMap::new(),early_voice_bytes:0,metadata }
     }
 
     pub fn view(&self) -> Value {
@@ -232,7 +233,10 @@ impl Engine {
             || rpc.continuation.as_ref().is_some_and(|next|next["kind"] == "skill_lookup"))) }
     fn idle(&self) -> bool { self.deliverable() && !self.rpc.values().any(|rpc|!voice_rpc(rpc)) && self.answering.is_empty() && self.async_questions.pending.is_empty() }
 
-    pub fn forget_policy(&mut self,request_id:&RequestId) { self.policies.remove(request_id); }
+    pub fn forget_policy(&mut self,request_id:&RequestId) {
+        // Pedido de status que falhou não pode barrar o próximo igual.
+        if self.policies.remove(request_id).as_deref() == Some("format_status") { self.format_gate.reset(); }
+    }
 
     fn policy(&mut self,kind:&str,payload:Value,effects:&mut Vec<Effect>) {
         self.counter += 1;
@@ -244,7 +248,9 @@ impl Engine {
 
     fn changed(&mut self,effects:&mut Vec<Effect>,format:bool) {
         effects.push(Effect::StateChanged);
-        if format { self.policy("format_status",json!({"model":self.model,"effort":self.effort,"token_usage":self.token_usage,"rate_limits":self.rate_limits}),effects); }
+        if !format { return; }
+        let payload = json!({"model":self.model,"effort":self.effort,"token_usage":self.token_usage,"rate_limits":self.rate_limits});
+        if self.format_gate.due(&payload,self.clock.monotonic_s) { self.policy("format_status",payload,effects); }
     }
 
     fn rpc(&mut self,operation_id:String,method:&str,params:Value,continuation:Option<Value>,effects:&mut Vec<Effect>) {

@@ -171,7 +171,12 @@ impl Chat {
     }
 
     pub fn update_preview(&mut self, next: Preview) -> bool {
-        if next.text.is_empty() { return false; }
+        // Vazio vindo do motor (`vivo`) é a ordem de limpar: o bloco já foi gravado. Do pane, é só a tela piscando.
+        if next.text.is_empty() {
+            if !next.vivo || self.preview.text.is_empty() { return false; }
+            self.clear_preview();
+            return true;
+        }
         if self.preview.md == next.md && self.preview.full == next.full && self.preview.vivo == next.vivo
             && next.text.len() < self.preview.text.len() && self.preview.text.starts_with(&next.text) {
             return false;

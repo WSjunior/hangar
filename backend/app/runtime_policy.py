@@ -88,7 +88,7 @@ def native_message(payload, metadata):
     endpoint = uds_messaging.socket_da_sessao(metadata.get("session_id", ""), metadata.get("config_dir"))
     if not endpoint:
         return {"outcome": "not_written", "reason": "no_socket"}
-    mode = api._classe_modo(sender, metadata["name"], metadata.get("config_dir"))
+    mode = api._classe_modo(sender, metadata["name"], metadata.get("config_dir"), metadata.get("jsonl"))
     mid = str(uuid.uuid5(uuid.NAMESPACE_URL, "hangar:" + metadata["key"] + ":" + operation_id))
     validate = metadata.get("validate")
     if validate is None:

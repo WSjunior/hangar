@@ -78,7 +78,7 @@ mod stats;
 mod search;
 mod topbar;
 
-actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, FindProjectFile, FindProjectText, NextSession, PreviousSession, ToggleDictation, NewChat, OpenCosts, OpenSearch,
+actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, FindProjectFile, FindProjectText, NextSession, PreviousSession, ToggleDictation, NewChat, CloseSession, OpenCosts, OpenSearch,
     ToggleSidebar, CyclePermission, OpenWorktrees]);
 
 const LIVE_THINKING: &str = "__thinking__";
@@ -2669,7 +2669,7 @@ impl Hangar {
         self.sync_activity(cx);
         api::open_trace(|| format!("sync_rows activity {} events", self.chat.events.len()));
         self.items = conversation::build(&self.chat.events, conversation::View { thinking: a.thinking_tools, tasks: a.task_list,
-            merge_thinking: a.tool_look == appearance::ToolLook::Tree }, &self.pinned);
+            merge_thinking: a.tool_look == appearance::ToolLook::Tree, every_run_groups: a.tool_look == appearance::ToolLook::Terminal }, &self.pinned);
         self.paired = conversation::pair_results(&self.chat.events).0;
         self.orq_days = if self.selected.as_ref().is_some_and(SessionInfo::orq) { orq_timeline::day_starts(self.chat.events.iter().filter(|event| event.orq.is_some())) } else { HashSet::new() };
         self.sync_tables(a.table_chart, stable);
@@ -5857,6 +5857,7 @@ impl Render for Hangar {
             .on_action(cx.listener(|this, _: &NextSession, window, cx| this.step_session(1, window, cx)))
             .on_action(cx.listener(|this, _: &PreviousSession, window, cx| this.step_session(-1, window, cx)))
             .on_action(cx.listener(|this, _: &NewChat, window, cx| this.go_home(window, cx)))
+            .on_action(cx.listener(|this, _: &CloseSession, window, cx| this.close_selected(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| if !this.connection_dialog { this.toggle_rail(cx) }))
             .on_action(cx.listener(|this, _: &ToggleDictation, window, cx| this.toggle_dictation(window, cx)))
             .on_action(cx.listener(|this, _: &CopyLastReply, _, cx| {

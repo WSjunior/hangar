@@ -52,6 +52,10 @@ windows = { version = "=0.61.3", features = ["Win32_Foundation", "Win32_Graphics
 [target.'cfg(target_os = "linux")'.dependencies]
 # O navegador é um Chromium sem janela: o pipe do CDP vai nos fd 3 e 4 dele, e o quadro numa textura do device da GPUI.
 libc = "=0.2.189"
+# Decifrar as senhas salvas do Chrome do usuário (Login Data, AES-128-CBC v10) para preencher o login. Já no grafo
+# via oo7; a chave PBKDF2-SHA1 vem do `ring` que o app já usa.
+aes = "=0.8.4"
+cbc = { version = "=0.1.2", features = ["block-padding"] }
 gpui-pre-wgpu = "=0.3.7"
 # Ícone na bandeja (StatusNotifierItem) sobre o zbus que o notify-rust já traz. Sem a feature padrão `tokio`: ela
 # trocaria o executor do zbus para todos os usuários dele.

@@ -16,12 +16,13 @@ pub enum Item {
 }
 
 /// Escolhas de Aparência que mudam quais linhas a conversa tem. `merge_thinking` (visual Árvore): raciocínio e
-/// chamadas seguidas viram um grupo só, de qualquer tamanho, e o `thinking` deixa de valer.
+/// chamadas seguidas viram um grupo só, de qualquer tamanho, e o `thinking` deixa de valer. `every_run_groups` (visual
+/// Terminal): chamadas seguidas viram grupo de qualquer tamanho, para a linha dobrada somá-las como o Claude Code.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct View { pub thinking: ThinkingTools, pub tasks: bool, pub merge_thinking: bool }
+pub struct View { pub thinking: ThinkingTools, pub tasks: bool, pub merge_thinking: bool, pub every_run_groups: bool }
 
 impl Default for View {
-    fn default() -> Self { Self { thinking: ThinkingTools::Search, tasks: false, merge_thinking: false } }
+    fn default() -> Self { Self { thinking: ThinkingTools::Search, tasks: false, merge_thinking: false, every_run_groups: false } }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -89,7 +90,7 @@ pub fn build(events: &[ChatEvent], view: View, pinned: &HashSet<usize>) -> Vec<I
     // Posição e id do bloco de tarefas: onde estava a última chamada de tarefa, com o id da primeira.
     let mut tasks: Option<(usize, String)> = None;
     let flush_run = |run: &mut Vec<Tool>, items: &mut Vec<Item>| {
-        if run.len() >= GROUP_MIN || view.merge_thinking && !run.is_empty() {
+        if run.len() >= GROUP_MIN || (view.merge_thinking || view.every_run_groups) && !run.is_empty() {
             let id = format!("g-{}", events[run[0].call].id);
             items.push(Item::Group { id, tools: std::mem::take(run) });
         } else { items.extend(run.drain(..).map(Item::Tool)); }
@@ -583,6 +584,18 @@ mod tests {
             Item::Group { id: "g-t".into(), tools: vec![tool(0, None), tool(1, Some(2))] }, Item::Event(3),
             Item::Group { id: "g-b".into(), tools: vec![tool(4, None)] }, Item::Tool(tool(5, None)),
             Item::Group { id: "g-t2".into(), tools: vec![tool(6, None)] },
+        ]);
+    }
+
+    #[test]
+    fn terminal_groups_runs_of_any_size_but_thinking_still_splits_them() {
+        let events = vec![call("a", "1", "Bash"), call("b", "2", "Read"), ev("thinking", "t"), call("c", "3", "Bash")];
+        let tool = |call| Tool { call, result: None };
+        let view = View { every_run_groups: true, ..View::default() };
+        assert_eq!(super::build(&events, view, &HashSet::new()), vec![
+            Item::Group { id: "g-a".into(), tools: vec![tool(0), tool(1)] },
+            Item::Thinking { id: "p-t".into(), parts: vec![2] },
+            Item::Group { id: "g-c".into(), tools: vec![tool(3)] },
         ]);
     }
 

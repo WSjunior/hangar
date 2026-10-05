@@ -4027,15 +4027,19 @@ def _sessao_claude_de(name: str) -> tuple[Optional[str], Optional[str]]:
     return p.stem, str(p.parent.parent.parent)
 
 
-def _classe_modo(remetente: str, alvo: str, cfg_alvo: Optional[str]) -> str:
+def _classe_modo(remetente: str, alvo: str, cfg_alvo: Optional[str],
+                 jsonl_alvo: Optional[str] = None) -> str:
     """`from-mode` do envelope nativo: a classe (bypass/prompting) do REMETENTE quando conhecida;
-    senão a do alvo, que é o que o caminho pelo tmux sempre fez (sem checagem nenhuma)."""
-    def _modo(n: str) -> str:
+    senão a do alvo, que é o que o caminho pelo tmux sempre fez (sem checagem nenhuma). O modo da
+    conta é o último recurso: errado, ele faz o receptor reter o recado (decisoes/plataforma.md)."""
+    def _modo(n: str, jsonl: Optional[str] = None) -> Optional[str]:
         m = headless_sessions.load(n)
         if m and m.get("permission_mode"):
             return str(m["permission_mode"])
-        return permission_mode.ultimo_nao_plan(n, padrao="")
-    modo = _modo(remetente) or _modo(alvo) or permission_mode.modo_da_conta(cfg_alvo)
+        return permission_mode.session_non_plan_mode(jsonl or _jsonl_atual(n))
+    # Rótulo de aviso do app ([painel: …]) não é sessão; resolvê-lo só gastaria chamadas ao tmux.
+    modo_remetente = _modo(remetente) if sanitize_session_name(remetente) == remetente else None
+    modo = modo_remetente or _modo(alvo, jsonl_alvo) or permission_mode.modo_da_conta(cfg_alvo)
     return "bypass" if "bypass" in modo.lower() else "prompting"
 
 
@@ -4115,7 +4119,7 @@ def _jsonl_atual(name: str) -> str | None:
         _cwd = next((p["cwd"] for p in _tmux.list_panes_active() if p["name"] == name), "")
         return registry.resolve_tracked(name, _cwd)[0] or None
     except Exception:
-        _log.exception("jsonl da sessao %s nao resolvido para a prova do plugin", name)
+        _log.exception("jsonl da sessão %s não resolvido", name)
         return None
 
 

@@ -106,7 +106,7 @@ def _tail_lines(path: str) -> list[bytes]:
 _DEEP_TAIL = 8 * 1024 * 1024
 
 
-def _reversed_lines(path: str):
+def reversed_lines(path: str):
     """Linhas do fim para o começo, em blocos de `_TAIL`, até `_DEEP_TAIL` bytes. Imagem lida pela
     sessão entra no transcript em base64 e enche sozinha os últimos 256 KB."""
     with open(path, "rb") as fh:
@@ -151,7 +151,7 @@ def _claude_tail(jsonl: str) -> tuple[str | None, list[tuple[str, bool, str | No
     def read(p: str):
         last: str | None = None
         hits: list[tuple[str, bool, str | None]] = []
-        for raw in _reversed_lines(p):
+        for raw in reversed_lines(p):
             has_tool = b'"tool_use"' in raw
             # Achado o último `cwd`, só interessa linha com chamada: o resto pode ser imagem de megas.
             if not has_tool and (last or b'"cwd"' not in raw):

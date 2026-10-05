@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { ChatEvent } from '@hangar/core';
   import * as m from '../paraglide/messages';
-  import { summarizeToolInput, toolGroupCounts, splitTerminalRun, toolGroupLabel, toolGroupTitulo, toolPhase } from '@hangar/core';
+  import { summarizeToolInput, summarizeToolResult, toolGroupCounts, splitTerminalRun, terminalFoldTitle, toolGroupLabel, toolGroupTitulo, toolPhase } from '@hangar/core';
   import { toolLook } from '../lib/toolLook.svelte';
   import ToolCard from './ToolCard.svelte';
   import ToolGlyph from './ToolGlyph.svelte';
@@ -66,10 +66,13 @@
 
   const titulo = $derived(toolGroupTitulo(tools));
 
-  // Pele 'terminal': sem moldura de grupo. Leituras e buscas seguidas somam numa linha cinza; edição
-  // e comando nunca ficam escondidos.
-  const termParts = $derived(toolLook.look === 'terminal' ? splitTerminalRun(tools, (t) => toolPhase(resultOf(t)) === 'done') : []);
-  let openReads = $state<Record<string, boolean>>({});
+  // Pele 'terminal': sem moldura de grupo. Buscas, leituras, MCP e comandos seguidos somam numa linha
+  // cinza, como no Claude Code; edição nunca fica escondida.
+  const termParts = $derived(toolLook.look === 'terminal' ? splitTerminalRun(tools) : []);
+  let openFolds = $state<Record<string, boolean>>({});
+  const faseDe = $derived(new Map(tools.map((t, i) => [t, phases[i]])));
+  // Na pele 'terminal' uma chamada só também passa pela dobra, como o "Ran 1 shell command" do Claude Code.
+  const sozinha = $derived(tools.length === 1 && toolLook.look !== 'terminal');
 
   // A chamada viva: a ULTIMA pendente (a mais nova), como o "$ …" que o Claude mostra sob o resumo.
   const running = $derived.by(() => {
@@ -81,18 +84,27 @@
 <!-- Uma ferramenta so nao e grupo: "Executou 1 ferramenta ›" esconderia a query atras de um tap a
      mais. Desenha o bloco do ToolCard direto (a regra de agrupar vive no MessageList, mas o guarda
      fica aqui pra valer pra qualquer chamador). -->
-{#if tools.length === 1}
+{#if sozinha}
   <ToolCard event={tools[0]} result={resultOf(tools[0])} {sessionName} {animate} />
 {:else if toolLook.look === 'terminal'}
   <div class="tg-term">
-    {#each termParts as part (part.kind === 'reads' ? `r-${part.tools[0].id}` : part.tool.id)}
-      {#if part.kind === 'reads'}
+    {#each termParts as part (part.kind === 'fold' ? `f-${part.tools[0].id}` : part.tool.id)}
+      {#if part.kind === 'fold'}
         {@const key = part.tools[0].id}
-        <button type="button" class="tg-reads" aria-expanded={!!openReads[key]}
-                onclick={() => (openReads[key] = !openReads[key])}>{toolGroupTitulo(part.tools)}</button>
-        {#if openReads[key]}
+        {@const viva = part.tools.findLast((t) => faseDe.get(t) === 'pending') ?? null}
+        <button type="button" class="tg-fold" aria-expanded={!!openFolds[key]}
+                onclick={() => (openFolds[key] = !openFolds[key])}>{terminalFoldTitle(part.tools, viva !== null)}</button>
+        {#if openFolds[key]}
           {#each part.tools as t (t.id)}
             <ToolCard event={t} result={resultOf(t)} {sessionName} {animate} />
+          {/each}
+        {:else}
+          <!-- Recolhida, a linha mostra o que roda agora e a saída de cada falha, como o Claude Code. -->
+          {#if viva}
+            <div class="tg-fold-sub"><span aria-hidden="true">⎿</span><span class="tg-fold-txt">{summarizeToolInput(viva.tool_name, viva.tool_input)}</span></div>
+          {/if}
+          {#each part.tools.filter((t) => faseDe.get(t) === 'error') as t (t.id)}
+            <div class="tg-fold-sub tg-fold-erro"><span aria-hidden="true">⎿</span><span class="tg-fold-txt">{summarizeToolResult(resultOf(t), t.tool_name)}</span></div>
           {/each}
         {/if}
       {:else}
@@ -173,11 +185,17 @@
 
 <style>
   .tg-term { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
-  .tg-reads {
+  .tg-fold {
     justify-content: flex-start; min-height: 24px; padding: 0 0 0 14px; border: 0; background: transparent;
     font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.55;
     color: var(--text-muted); text-align: left; cursor: pointer;
   }
+  .tg-fold-sub {
+    display: flex; gap: 8px; min-width: 0; padding-left: 14px;
+    font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.55; color: var(--text-muted);
+  }
+  .tg-fold-txt { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tg-fold-erro { color: var(--error); }
   .tg { margin-bottom: var(--space-1); animation: bubble-in 180ms ease-out both; }
   .tg.noanim { animation: none; }
 
