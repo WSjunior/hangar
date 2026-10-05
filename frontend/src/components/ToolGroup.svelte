@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { ChatEvent } from '@hangar/core';
   import * as m from '../paraglide/messages';
-  import { summarizeToolInput, toolGroupCounts, toolGroupLabel, toolGroupTitulo, toolPhase } from '@hangar/core';
+  import { summarizeToolInput, toolGroupCounts, splitTerminalRun, toolGroupLabel, toolGroupTitulo, toolPhase } from '@hangar/core';
   import { toolLook } from '../lib/toolLook.svelte';
   import ToolCard from './ToolCard.svelte';
   import ToolGlyph from './ToolGlyph.svelte';
@@ -66,6 +66,11 @@
 
   const titulo = $derived(toolGroupTitulo(tools));
 
+  // Pele 'terminal': sem moldura de grupo. Leituras e buscas seguidas somam numa linha cinza; edição
+  // e comando nunca ficam escondidos.
+  const termParts = $derived(toolLook.look === 'terminal' ? splitTerminalRun(tools, (t) => toolPhase(resultOf(t)) === 'done') : []);
+  let openReads = $state<Record<string, boolean>>({});
+
   // A chamada viva: a ULTIMA pendente (a mais nova), como o "$ …" que o Claude mostra sob o resumo.
   const running = $derived.by(() => {
     for (let i = tools.length - 1; i >= 0; i--) if (phases[i] === 'pending') return { t: tools[i], i };
@@ -78,6 +83,23 @@
      fica aqui pra valer pra qualquer chamador). -->
 {#if tools.length === 1}
   <ToolCard event={tools[0]} result={resultOf(tools[0])} {sessionName} {animate} />
+{:else if toolLook.look === 'terminal'}
+  <div class="tg-term">
+    {#each termParts as part (part.kind === 'reads' ? `r-${part.tools[0].id}` : part.tool.id)}
+      {#if part.kind === 'reads'}
+        {@const key = part.tools[0].id}
+        <button type="button" class="tg-reads" aria-expanded={!!openReads[key]}
+                onclick={() => (openReads[key] = !openReads[key])}>{toolGroupTitulo(part.tools)}</button>
+        {#if openReads[key]}
+          {#each part.tools as t (t.id)}
+            <ToolCard event={t} result={resultOf(t)} {sessionName} {animate} />
+          {/each}
+        {/if}
+      {:else}
+        <ToolCard event={part.tool} result={resultOf(part.tool)} {sessionName} {animate} />
+      {/if}
+    {/each}
+  </div>
 {:else}
 <!-- Rajada de comandos do hangar: a trilha resume a sequência ANTES do grupo, e o grupo continua
      ali com os cartões um a um. Ela só aparece com 2+ comandos lidos — com um só o cartão já conta
@@ -150,6 +172,12 @@
 {/if}
 
 <style>
+  .tg-term { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+  .tg-reads {
+    justify-content: flex-start; min-height: 24px; padding: 0 0 0 14px; border: 0; background: transparent;
+    font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.55;
+    color: var(--text-muted); text-align: left; cursor: pointer;
+  }
   .tg { margin-bottom: var(--space-1); animation: bubble-in 180ms ease-out both; }
   .tg.noanim { animation: none; }
 

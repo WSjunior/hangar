@@ -36,7 +36,8 @@ def _models() -> dict:
         "chat_full": ChatEvent(
             kind="tool_use", id="toolu_01", text="acentuação e emoji 🚀", tool_name="Bash",
             tool_input={"command": "ls -la", "nested": {"list": [1, 2.5, None, True, "x"]}},
-            tool_use_id="toolu_01", result="ok", is_error=False, ts=1727712000.123,
+            tool_use_id="toolu_01", result="ok", is_error=False,
+            patch=[{"old_start": 6, "new_start": 6, "lines": [" a", "-b", "+B"]}], ts=1727712000.123,
             cache_read=1234, cache_ttl_s=3600, desistiu=True, hook_error="hook recusou",
             skill={"name": "pdf", "path": "/skills/pdf/SKILL.md", "body": "# PDF"},
             orq={"kind": "woke", "task": 4, "body": "texto", "alarm": False},

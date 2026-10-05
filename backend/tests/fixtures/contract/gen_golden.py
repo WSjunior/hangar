@@ -142,6 +142,40 @@ CLAUDE = [
     j({"type": "user", "uuid": "u-017", "timestamp": T(23), "message": {"role": "user", "content": "legenda da foto"}}),
     j({"type": "assistant", "uuid": "a-003", "timestamp": T(24),
        "message": {"role": "assistant", "content": [{"type": "text", "text": "Última resposta."}]}}),
+    # Resultados de Edit/Write com o `structuredPatch` gravado ao lado (`toolUseResult`). Ficam no fim
+    # para não deslocar o offset das linhas acima.
+    j({"type": "user", "uuid": "u-018", "timestamp": T(25), "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "toolu_10", "content": "The file /src/app.ts has been updated."}]},
+       "toolUseResult": {"filePath": "/src/app.ts", "oldString": "b", "newString": "B",
+                         "originalFile": "arquivo inteiro que não sai\n", "userModified": False,
+                         "structuredPatch": [
+                             {"oldStart": 6, "oldLines": 3, "newStart": 6, "newLines": 3,
+                              "lines": [" linha a", "-linha b", "+linha B", " linha c"]},
+                             {"oldStart": 40, "oldLines": 2, "newStart": 40, "newLines": 2,
+                              "lines": ["-fim sem quebra", "\\ No newline at end of file",
+                                        "+fim com acentuação ✓", "\\ No newline at end of file"]}]}}),
+    j({"type": "user", "uuid": "u-019", "timestamp": T(26), "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "toolu_11", "content": "The file /src/app.ts has been updated."}]},
+       "toolUseResult": {"structuredPatch": [
+           {"oldStart": 1, "newStart": 1, "lines": [" ok"]},
+           {"oldStart": "3", "newStart": 3, "lines": ["+quebrado"]}]}}),
+    j({"type": "user", "uuid": "u-020", "timestamp": T(27), "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "toolu_12", "content": "Edit recusado.", "is_error": True}]},
+       "toolUseResult": {"structuredPatch": [
+           {"oldStart": 2, "oldLines": 1, "newStart": 2, "newLines": 1, "lines": ["-x", "+y"]}]}}),
+    j({"type": "user", "uuid": "u-021", "timestamp": T(28), "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "toolu_13", "content": "File created successfully."}]},
+       "toolUseResult": {"type": "create", "filePath": "/src/novo.ts", "content": "novo\n",
+                         "structuredPatch": []}}),
+    # Dois resultados na mesma linha: o `toolUseResult` é um só e não se sabe de quem é.
+    j({"type": "user", "uuid": "u-022", "timestamp": T(29), "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "toolu_14", "content": "ok"},
+        {"type": "tool_result", "tool_use_id": "toolu_15", "content": "ok"}]},
+       "toolUseResult": {"structuredPatch": [{"oldStart": 1, "newStart": 1, "lines": ["+z"]}]}}),
+    # Posição acima do teto do u32 do tipo compartilhado do Rust: o Python recusa igual.
+    j({"type": "user", "uuid": "u-023", "timestamp": T(30), "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "toolu_16", "content": "ok"}]},
+       "toolUseResult": {"structuredPatch": [{"oldStart": 4294967296, "newStart": 1, "lines": ["+z"]}]}}),
 ]
 
 # Surrogate solto numa mensagem COM relógio: o RewriteFilter do Python estoura no md5

@@ -604,6 +604,60 @@ def test_sem_painel_ancorado_a_previa_nao_corta():
         pb.esquecer("pane-b")
 
 
+def test_mod_toast_stays_until_it_expires_and_carries_the_time_left(monkeypatch):
+    c = _cliente()
+    agora = [1000.0]
+    monkeypatch.setattr(pb.time, "monotonic", lambda: agora[0])
+    try:
+        r = c.post("/api/plugin/toast", json=_ponte("aviso-a", text="Jenkins configurado.", timeoutMs=9000, plugin="demo"))
+        assert r.status_code == 200
+        agora[0] += 2
+        ultimo, avisos = pb.toasts_after("aviso-a", 0)
+        assert [(a["text"], a["plugin"], a["timeoutMs"]) for a in avisos] == [("Jenkins configurado.", "demo", 7000)]
+        # Quem já viu este não o recebe de novo; quem conecta do zero recebe.
+        assert pb.toasts_after("aviso-a", ultimo) == (ultimo, [])
+        agora[0] += 8
+        assert pb.toasts_after("aviso-a", 0) == (ultimo, [])
+    finally:
+        pb.esquecer("aviso-a")
+
+
+def test_mod_toast_defaults_to_the_terminal_timeout_and_clips_long_text():
+    c = _cliente()
+    try:
+        c.post("/api/plugin/toast", json=_ponte("aviso-b", text="x" * 5000))
+        c.post("/api/plugin/toast", json=_ponte("aviso-b", text="   "))
+        _, avisos = pb.toasts_after("aviso-b", 0)
+        assert len(avisos) == 1
+        assert len(avisos[0]["text"]) == pb.TOAST_MAX_CHARS
+        assert avisos[0]["plugin"] == ""
+        assert 0 < avisos[0]["timeoutMs"] <= pb.TOAST_DEFAULT_MS
+    finally:
+        pb.esquecer("aviso-b")
+
+
+def test_mod_toast_requires_the_session_token():
+    r = _cliente().post("/api/plugin/toast", json={"sessao": "aviso-c", "token": "errado", "text": "oi"})
+    assert r.status_code == 403
+    assert pb.toasts_after("aviso-c", 0) == (0, [])
+
+
+@pytest.mark.asyncio
+async def test_wait_toasts_wakes_when_a_toast_arrives():
+    async def _chega():
+        await asyncio.sleep(0.05)
+        pb._store_toast("aviso-d", "oi", None, "mod")
+
+    chegada = asyncio.create_task(_chega())
+    try:
+        ultimo, avisos = await asyncio.wait_for(pb.wait_toasts("aviso-d", 0, 5), timeout=2)
+        assert ultimo > 0
+        assert [a["text"] for a in avisos] == ["oi"]
+    finally:
+        chegada.cancel()
+        pb.esquecer("aviso-d")
+
+
 def test_sem_faixa_devolve_payload_vazio():
     assert pb.band("nunca-desenhou") == (0, {"above": None, "panes": []})
 

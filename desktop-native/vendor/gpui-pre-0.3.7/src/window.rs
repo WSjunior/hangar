@@ -1255,6 +1255,7 @@ pub struct Window {
     #[cfg(feature = "profiler")]
     window_profiler: profiler::WindowProfiler,
     last_input_modality: InputModality,
+    current_key_down: Option<KeyDownEvent>,
     touch_gestures: TouchGestureRecognizer,
     touch_prediction_enabled: bool,
     long_press_timer: Option<Task<()>>,
@@ -2119,6 +2120,7 @@ impl Window {
             #[cfg(feature = "profiler")]
             window_profiler: profiler::WindowProfiler::new(handle.window_id())?,
             last_input_modality: InputModality::Mouse,
+            current_key_down: None,
             touch_gestures: TouchGestureRecognizer::new(
                 cx.platform
                     .gestures()
@@ -3295,6 +3297,11 @@ impl Window {
     /// The current state of the keyboard's modifiers
     pub fn modifiers(&self) -> Modifiers {
         self.modifiers
+    }
+
+    /// Preserva os metadados da tecla para interceptação anterior aos atalhos.
+    pub fn current_key_down_event(&self) -> Option<&KeyDownEvent> {
+        self.current_key_down.as_ref()
     }
 
     /// Returns true if the last input event was keyboard-based (key press, tab navigation, etc.)
@@ -5565,6 +5572,8 @@ impl Window {
         #[cfg(feature = "profiler")]
         self.window_profiler.begin_input(event.kind_name());
         let update_count_before = self.invalidator.update_count();
+        let previous_key_down = self.current_key_down.take();
+        self.current_key_down = match &event { PlatformInput::KeyDown(key) => Some(key.clone()), _ => None };
         // Track input modality for focus-visible styling and hover suppression.
         // Hover is suppressed during keyboard modality so that keyboard navigation
         // doesn't show hover highlights on the item under the mouse cursor.
@@ -5724,6 +5733,7 @@ impl Window {
         }
         #[cfg(feature = "profiler")]
         self.window_profiler.end_input(caused_invalidation);
+        self.current_key_down = previous_key_down;
 
         DispatchEventResult {
             propagate: cx.propagate_event,
@@ -6579,6 +6589,11 @@ impl Window {
     /// Minimize the current window at the platform level.
     pub fn minimize_window(&self) {
         self.platform_window.minimize();
+    }
+
+    /// Hangar: esconde a janela sem fechá-la, ou a mostra de novo. Sem efeito onde a plataforma não implementa.
+    pub fn set_hidden(&self, hidden: bool) {
+        self.platform_window.set_hidden(hidden);
     }
 
     /// Toggle full screen status on the current window at the platform level.
@@ -7878,6 +7893,42 @@ mod tests {
             .update(cx, |_, window, _| assert!(window.is_visible()))
             .unwrap();
         assert_eq!(test_window.frame_wake_count(), frame_wake_count);
+    }
+
+    #[gpui::test]
+    fn keystroke_interceptors_receive_input_metadata_before_dispatch(cx: &mut TestAppContext) {
+        let window = cx.add_window(|window, cx| {
+            let focus = cx.focus_handle();
+            focus.focus(window, cx);
+            RepeatStateView(focus)
+        });
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = window.update(cx, {
+            let seen = seen.clone();
+            move |_, _, cx| cx.intercept_keystrokes(move |_, window, cx| {
+                let event = window.current_key_down_event().unwrap();
+                seen.borrow_mut().push((event.is_held, event.prefer_character_input));
+                cx.stop_propagation();
+            })
+        }).unwrap();
+        window.update(cx, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            for (is_held, prefer_character_input) in [(false, false), (true, false), (false, true)] {
+                window.dispatch_event(PlatformInput::KeyDown(KeyDownEvent {
+                    keystroke: Keystroke::parse("ctrl-alt-r").unwrap(), is_held, prefer_character_input,
+                }), cx);
+                assert!(window.current_key_down_event().is_none());
+            }
+        }).unwrap();
+        assert_eq!(*seen.borrow(), [(false, false), (true, false), (false, true)]);
+    }
+
+    struct RepeatStateView(FocusHandle);
+
+    impl Render for RepeatStateView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().track_focus(&self.0)
+        }
     }
 
     #[gpui::test]

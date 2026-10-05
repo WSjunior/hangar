@@ -77,6 +77,11 @@ _git_em_voo: set[str] = set()
 _git_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="hangar-git")
 
 
+def _git_dir(info) -> str | None:
+    """Onde o git da sessão roda (`SessionInfo.git_dir`), aceitando os objetos mínimos da lista."""
+    return getattr(info, "git_cwd", None) or info.cwd
+
+
 async def _atualizar_git(cwd: str) -> None:
     try:
         summary, diffstat = await asyncio.get_running_loop().run_in_executor(
@@ -1375,7 +1380,7 @@ class SessionRegistry:
             info = SessionInfo(name=p["name"], cwd=p["cwd"], jsonl=jsonl, tracked=tracked,
                                lifecycle_id=session_life(p["name"], meta=None, birth=p.get("session_created")),
                                branch=loc.branch, worktree=loc.worktree,
-                               worktree_path=loc.worktree_path, worktree_gone=loc.worktree_gone,
+                               worktree_path=loc.worktree_path, worktree_gone=loc.worktree_gone, git_cwd=loc.git_cwd,
                                then_target=link.get("target") if link else None,
                                pair_peers=pair.get("peers") if pair else None,
                                pair_external=_pair_external(p["name"], pair.get("peers") if pair else None),
@@ -1441,7 +1446,7 @@ class SessionRegistry:
                 provider="codex", tracked=True, conta=f"codex:{codex_home}",
                 codex_home=codex_home, headless=bool(meta.get("headless")),
                 branch=loc.branch, worktree=loc.worktree,
-                worktree_path=loc.worktree_path, worktree_gone=loc.worktree_gone,
+                worktree_path=loc.worktree_path, worktree_gone=loc.worktree_gone, git_cwd=loc.git_cwd,
                 then_target=(ThenLink(meta["name"]).get() or {}).get("target"),
                 pair_peers=(PairLink(meta["name"]).get() or {}).get("peers"),
                 pair_external=_pair_external(meta["name"], (PairLink(meta["name"]).get() or {}).get("peers")),
@@ -1466,7 +1471,7 @@ class SessionRegistry:
                        f"chave:{meta['engine']}" if meta.get("engine") else
                        f"claude:{Path(cdir or Path.home() / '.claude').resolve()}"),
                 branch=loc.branch, worktree=loc.worktree,
-                worktree_path=loc.worktree_path, worktree_gone=loc.worktree_gone,
+                worktree_path=loc.worktree_path, worktree_gone=loc.worktree_gone, git_cwd=loc.git_cwd,
                 then_target=(ThenLink(meta["name"]).get() or {}).get("target"),
                 pair_peers=(PairLink(meta["name"]).get() or {}).get("peers"),
                 pair_external=_pair_external(meta["name"], (PairLink(meta["name"]).get() or {}).get("peers")),
@@ -1946,8 +1951,9 @@ class SessionRegistry:
         # O git NAO segura a lista: ela sai com o ultimo numero conhecido por cwd e o git atualiza
         # em segundo plano, um por repositorio (single-flight). Em serie, um repositorio lento
         # atrasava o card de TODAS as sessoes — inclusive as que acabaram de mudar de estado.
+        # O git é o de onde o agente trabalha: numa worktree, a pasta de abertura não diz nada.
         for info in infos:
-            summary, diffstat = _git_ultimo.get(info.cwd, (None, None))
+            summary, diffstat = _git_ultimo.get(_git_dir(info), (None, None))
             if summary is not None:
                 info.git_dirty = summary["dirty"]
                 info.git_ahead = summary["ahead"]
@@ -1955,7 +1961,7 @@ class SessionRegistry:
             if diffstat is not None:
                 info.git_added = diffstat["added"]
                 info.git_removed = diffstat["removed"]
-        for cwd in {i.cwd for i in infos if i.cwd}:
+        for cwd in {d for d in map(_git_dir, infos) if d}:
             if cwd not in _git_em_voo:
                 _git_em_voo.add(cwd)
                 asyncio.create_task(_atualizar_git(cwd))

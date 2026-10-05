@@ -642,3 +642,91 @@ def test_system_ruido_comum_nao_registra_aviso(caplog):
                                  "timestamp": "2026-08-18T00:36:42Z",
                                  "content": "Kept model as claude-opus-5"})) == []
     assert caplog.records == []
+
+
+def _tool_result_line(tool_use_result, extra_results=()):
+    content = [{"type": "tool_result", "tool_use_id": "toolu_1",
+                "content": "The file /a.ts has been updated successfully."}, *extra_results]
+    return _line({"type": "user", "uuid": "u1", "timestamp": "2026-10-04T19:11:00.000Z",
+                  "message": {"role": "user", "content": content},
+                  "toolUseResult": tool_use_result})
+
+
+_HUNK = {"oldStart": 6, "oldLines": 3, "newStart": 6, "newLines": 3, "lines": [" a", "-b", "+B", " c"]}
+
+
+def test_edit_result_carries_patch_hunks_without_the_original_file():
+    [ev] = parse_line(_tool_result_line(
+        {"filePath": "/a.ts", "originalFile": "x" * 5000, "structuredPatch": [_HUNK]}))
+    assert ev.kind == "tool_result"
+    assert ev.patch == [{"old_start": 6, "new_start": 6, "lines": [" a", "-b", "+B", " c"]}]
+    assert "xxxxx" not in ev.model_dump_json()
+
+
+def test_created_file_and_text_result_have_no_patch():
+    [created] = parse_line(_tool_result_line({"type": "create", "structuredPatch": []}))
+    [failed] = parse_line(_tool_result_line("Error: String to replace not found in file."))
+    assert created.patch is None
+    assert failed.patch is None
+
+
+@pytest.mark.parametrize("hunk", [
+    {**_HUNK, "oldStart": "6"},
+    {**_HUNK, "newStart": True},
+    {**_HUNK, "oldStart": 6.0},
+    {**_HUNK, "lines": "ab"},
+    {**_HUNK, "lines": [" a", 3]},
+    {**_HUNK, "oldStart": -1},
+    {**_HUNK, "newStart": -1},
+    {**_HUNK, "oldStart": 2**32},
+    {**_HUNK, "newStart": 2**64},
+    "hunk",
+])
+def test_malformed_patch_is_dropped_and_the_result_still_parses(hunk):
+    [ev] = parse_line(_tool_result_line({"structuredPatch": [hunk]}))
+    assert ev.kind == "tool_result"
+    assert ev.patch is None
+
+
+def test_patch_accepts_the_largest_u32_position():
+    [ev] = parse_line(_tool_result_line({"structuredPatch": [{**_HUNK, "oldStart": 2**32 - 1}]}))
+    assert ev.patch[0]["old_start"] == 2**32 - 1
+
+
+def test_patch_accepts_a_zero_start():
+    [ev] = parse_line(_tool_result_line({"structuredPatch": [{**_HUNK, "oldStart": 0, "newStart": 0}]}))
+    assert (ev.patch[0]["old_start"], ev.patch[0]["new_start"]) == (0, 0)
+
+
+def test_patch_keeps_exactly_the_line_ceiling():
+    full = {**_HUNK, "lines": ["+x"] * 2000}
+    [ev] = parse_line(_tool_result_line({"structuredPatch": [full]}))
+    assert len(ev.patch[0]["lines"]) == 2000
+
+
+def test_patch_over_the_ceiling_across_two_hunks_is_dropped():
+    first = {**_HUNK, "lines": ["+x"] * 1000}
+    second = {**_HUNK, "lines": ["+y"] * 1001}
+    [ev] = parse_line(_tool_result_line({"structuredPatch": [first, second]}))
+    assert ev.patch is None
+
+
+def test_error_result_carries_no_patch():
+    content = [{"type": "tool_result", "tool_use_id": "toolu_1", "is_error": True, "content": "falhou"}]
+    [ev] = parse_line(_line({"type": "user", "uuid": "u1", "timestamp": "2026-10-04T19:11:00.000Z",
+                             "message": {"role": "user", "content": content},
+                             "toolUseResult": {"structuredPatch": [_HUNK]}}))
+    assert ev.is_error is True
+    assert ev.patch is None
+
+
+def test_patch_over_the_line_ceiling_is_dropped():
+    big = {**_HUNK, "lines": ["+x"] * 2001}
+    [ev] = parse_line(_tool_result_line({"structuredPatch": [big]}))
+    assert ev.patch is None
+
+
+def test_line_with_two_results_carries_no_patch():
+    other = {"type": "tool_result", "tool_use_id": "toolu_2", "content": "ok"}
+    events = parse_line(_tool_result_line({"structuredPatch": [_HUNK]}, extra_results=[other]))
+    assert [e.patch for e in events] == [None, None]

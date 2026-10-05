@@ -936,6 +936,8 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn set_title(&mut self, title: &str);
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance);
     fn minimize(&self);
+    /// Hangar: tira a janela da tela sem destruí-la (`true`) e a mostra de novo (`false`).
+    fn set_hidden(&self, _hidden: bool) {}
     fn zoom(&self);
     fn toggle_fullscreen(&self);
     fn is_fullscreen(&self) -> bool;

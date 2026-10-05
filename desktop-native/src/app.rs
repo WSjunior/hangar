@@ -23,12 +23,14 @@ mod device;
 mod follow;
 mod landing;
 mod edits;
+mod terminal_look;
 mod git;
 mod grouping;
 mod group_sheet;
 mod hangar_live;
 mod harness;
 mod viewer;
+mod window_tray;
 mod disk;
 mod player;
 mod machines;
@@ -56,6 +58,9 @@ mod servers;
 pub(crate) use servers::{ServerEntry, new_id as new_server_id};
 mod shortcuts;
 mod shortcut_transfer;
+mod keyboard;
+mod session_numbers;
+mod session_picker;
 mod side;
 mod terminal;
 mod sidebar;
@@ -330,6 +335,9 @@ enum Prepared {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Changed { Nothing, Screen, Rows, Tail, Bottom }
 
+/// Tipo das notificações que espelham aviso de mod; a chave de cada uma é o id do aviso.
+struct PluginToast;
+
 // Formulário da pergunta atual; refeito quando a pergunta (identidade + conteúdo) muda.
 #[derive(Default)]
 struct AskForm { fingerprint: String, picks: Vec<Pick>, typing: Vec<bool>, inputs: Vec<Entity<InputState>>, _changes: Vec<Subscription>, tab: usize }
@@ -365,6 +373,7 @@ pub struct Hangar {
     composer: Entity<TextareaState>,
     composer_placeholder: String,
     _input_subscription: Subscription,
+    _keyboard_subscription: Subscription,
     connection_dialog: bool,
     list_online: bool,
     chat_online: bool,
@@ -462,6 +471,10 @@ pub struct Hangar {
     plugin_band: Value,
     /// Painéis que os mods abriram e o terminal desenhou, do mesmo SSE.
     plugin_panes: Vec<Value>,
+    /// Últimos ids de aviso de mod (SSE `plugin_toast`) já mostrados; só os recentes voltam na reconexão.
+    plugin_toasts_seen: std::collections::VecDeque<String>,
+    /// Avisos de mod na tela, do mais antigo ao mais novo.
+    plugin_toasts_shown: std::collections::VecDeque<SharedString>,
     recent: Option<Recent>,
     media: MediaCache<(SessionKey, Source)>,
     full_images: viewer::FullImages,
@@ -498,6 +511,8 @@ pub struct Hangar {
     recents: recent::Recents,
     reopen: Option<recent::ArchiveEntry>,
     shortcuts: shortcuts::Shortcuts,
+    keyboard: keyboard::Keyboard,
+    session_picker: session_picker::SessionPicker,
     harness: harness::Harnesses,
     server_config: server_config::ServerConfig,
     sync: sync::Sync,
@@ -511,6 +526,7 @@ pub struct Hangar {
     // Paleta "Buscar conversas" (Ctrl+K).
     search: search::Search,
     topbar: topbar::TopBar,
+    window_tray: window_tray::WindowTray,
     system_notifications: SystemNotifications,
     computer: computer::Computer,
     new_session: Option<Entity<create::NewSession>>,
@@ -586,6 +602,13 @@ impl Drop for Hangar {
     }
 }
 
+/// Bloqueante: o daemon de notificação pode demorar. Chamar fora da thread da janela.
+fn show_system_notification(title: &str, body: &str) {
+    if let Err(error) = notify_rust::Notification::new().appname("Hangar").summary(title).body(body).show() {
+        eprintln!("notification: {error}");
+    }
+}
+
 impl Hangar {
     pub fn new(runtime: Arc<Runtime>, appearance_error: Option<String>, crash: Option<String>, links: async_channel::Receiver<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         if let Some(error) = crash {
@@ -597,12 +620,26 @@ impl Hangar {
         }
         Self::watch_system(window, cx);
         Self::watch_dictation(window, cx);
+        let (tray_tx, tray_rx) = async_channel::unbounded::<crate::tray::TrayEvent>();
+        cx.spawn_in(window, async move |this, cx| {
+            while let Ok(event) = tray_rx.recv().await {
+                if this.update_in(cx, |this, window, cx| this.on_tray_event(event, window, cx)).is_err() { break; }
+            }
+        }).detach();
+        cx.defer_in(window, |this, _, cx| this.sync_tray(cx));
+        let tray_owner = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            let Some(this) = tray_owner.upgrade() else { return true };
+            if !this.read(cx).closes_to_tray() { return true; }
+            this.update(cx, |this, cx| this.hide_to_tray(window, cx));
+            false
+        });
         // Link `hangar://` desta ou de outra execução: abre o diálogo preenchido e traz a janela para a frente. Cada link entra
         // por um update novo, nunca de dentro de outro update do Hangar (reentrar dá pânico no GPUI).
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(link) = links.recv().await {
                 let alive = this.update_in(cx, |this, window, cx| {
-                    window.activate_window();
+                    this.show_from_tray(window, cx);
                     if !link.is_empty() { this.open_invite_dialog(Some(link), window, cx); }
                 });
                 if alive.is_err() { break; }
@@ -652,29 +689,12 @@ impl Hangar {
             }
         });
         cx.observe(&composer, |this, _, cx| this.refresh_mention(cx)).detach();
-        // Ctrl+L leva ao campo de mensagem; a raiz da janela trata a ação e segura o foco quando nada mais o tem.
-        // `secondary` é Ctrl no Linux e no Windows e Cmd no Mac. Ctrl+Espaço fica: no Mac, Cmd+Espaço é o Spotlight.
-        cx.bind_keys([KeyBinding::new("secondary-l", FocusComposer, Some("!Terminal")), KeyBinding::new("secondary-,", OpenSettings, Some("!Terminal")),
-            KeyBinding::new("secondary-shift-c", CopyLastReply, Some("!Terminal")), KeyBinding::new("secondary-f", FocusSettingsSearch, Some("!Terminal")),
-            KeyBinding::new("secondary-down", NextSession, Some("!Terminal")), KeyBinding::new("ctrl-space", ToggleDictation, Some("!Terminal")),
-            KeyBinding::new("secondary-up", PreviousSession, Some("!Terminal")), KeyBinding::new("secondary-n", NewChat, Some("!Terminal")),
-            // Ctrl+Shift+C já copia a última resposta: Custos fica no Ctrl+Alt+C.
-            KeyBinding::new("secondary-alt-c", OpenCosts, Some("!Terminal")), KeyBinding::new("secondary-k", OpenSearch, Some("!Terminal")),
-            KeyBinding::new("secondary-p", FindProjectFile, Some("!Terminal")), KeyBinding::new("secondary-shift-f", FindProjectText, Some("!Terminal")),
-            KeyBinding::new("secondary-b", ToggleSidebar, Some("!Terminal")), KeyBinding::new("alt-shift-p", CyclePermission, Some("!Terminal")),
-            KeyBinding::new("secondary-alt-w", OpenWorktrees, Some("!Terminal"))]);
-        cx.bind_keys([KeyBinding::new("ctrl-shift-c", terminal::CopyTerminal, Some("Terminal")),
-            KeyBinding::new("ctrl-shift-v", terminal::PasteTerminal, Some("Terminal")),
-            KeyBinding::new("tab", NoAction, Some("Terminal")),
+        cx.bind_keys([KeyBinding::new("tab", NoAction, Some("Terminal")),
             KeyBinding::new("shift-tab", NoAction, Some("Terminal")),
             KeyBinding::new("ctrl-c", NoAction, Some("Terminal")),
             // Tab dentro da página navega os campos dela, não o foco do app.
             KeyBinding::new("tab", NoAction, Some("BrowserPage")),
             KeyBinding::new("shift-tab", NoAction, Some("BrowserPage"))]);
-        // No Mac Ctrl+C vai para o programa do terminal; copiar e colar são Cmd+C e Cmd+V.
-        #[cfg(target_os = "macos")]
-        cx.bind_keys([KeyBinding::new("cmd-c", terminal::CopyTerminal, Some("Terminal")),
-            KeyBinding::new("cmd-v", terminal::PasteTerminal, Some("Terminal"))]);
         let settings_ui = settings::SettingsUi::new(window, cx);
         let root_focus = cx.focus_handle();
         cx.on_focus_lost(window, |this: &mut Self, window, cx| this.machines_focus_lost(window, cx)).detach();
@@ -722,10 +742,23 @@ impl Hangar {
         Self::watch_user_scroll(&list_state, cx);
         let sidebar = sidebar::Sidebar::new(window, cx);
         let panes = panes::Panes::new(cx);
+        let owner = window.window_handle();
+        let weak = cx.weak_entity();
+        let keyboard_subscription = cx.intercept_keystrokes(move |stroke, window, cx| {
+            if window.window_handle().window_id() != owner.window_id() { return; }
+            let Some(event) = window.current_key_down_event().cloned() else { return; };
+            if event.keystroke != stroke.keystroke { return; }
+            let _ = weak.update(cx, |this, cx| {
+                if (event.keystroke.key == "escape" && this.keyboard_escape(window, cx))
+                    || this.keyboard_key_down(&event, window, cx) || this.session_number_key(&event, window, cx) {
+                    cx.stop_propagation();
+                }
+            });
+        });
         Self {
             runtime, tx, api: None, server: None, connection: 0, selection: 0, revision: 0, sessions: Vec::new(), local_dirs: HashMap::new(), selected: None, open_api: None,
             chat: Chat::default(), list_task: None, session_task: None, history_task: None,
-            address, token, unsaved_connection: None, connection_focus, root_focus, composer, composer_placeholder: String::new(), _input_subscription: input_subscription,
+            address, token, unsaved_connection: None, connection_focus, root_focus, composer, composer_placeholder: String::new(), _input_subscription: input_subscription, _keyboard_subscription: keyboard_subscription,
             connection_dialog: true, list_online: false, chat_online: false, loading: false, history_started: false,
             history_installed: false, pending_chat: Vec::new(),
             history_limit: 400, has_older: false, etag: None, error: None, list_error: None,
@@ -740,7 +773,7 @@ impl Hangar {
             attachments: HashMap::new(), attach_seq: 0, uploading: HashMap::new(), commands: HashMap::new(),
             suggest_pick: 0, suggest_dismissed: None, command_panel: false, context_card: false, command_search, confirm: None, confirm_no_ask: false,
             mention: Default::default(),
-            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
+            terminal_suggestion: String::new(), plugin_band: Value::Null, plugin_panes: Vec::new(), plugin_toasts_seen: Default::default(), plugin_toasts_shown: Default::default(), recent: None, media: MediaCache::new(), full_images: viewer::full_images(), stats: None,
             side: side::Side::default(), controls: controls::Controls::default(),
             settings: None, settings_ui, tab_focus: HashMap::new(), tabs_scroll: ScrollHandle::new(),
             appearance_note: appearance_error.map(|error| tr("settings_not_loaded").replace("{error}", &error)),
@@ -751,7 +784,9 @@ impl Hangar {
             costs: Default::default(), worktrees: Default::default(), usage_stats: Default::default(), search: Default::default(), topbar: Default::default(), computer: computer::Computer::default(), new_session: None, sidebar,
             terminal: None, terminal_serial: 0,
             system_notifications: SystemNotifications::default(),
-            act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), tree: tree::Tree::new(window, cx), find: find::Find::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
+            window_tray: window_tray::WindowTray::new(tray_tx),
+            act: activity::ActivityState::new(cx), files: files::Files::new(window, cx), keyboard: keyboard::Keyboard::new(window, cx), session_picker: Default::default(),
+            tree: tree::Tree::new(window, cx), find: find::Find::new(window, cx), ctl_search: controls::search_field(window, cx), panes, dossier: None, turn_seen: None, sent_until: None,
             new_chat: None, new_chat_focus: cx.focus_handle().tab_stop(true),
             new_chat_folders: Default::default(), landing: None, opening: None, side_seen: None, side_slide: None, arrived: HashMap::new(), tree_parts: HashSet::new(), part_arrived: HashMap::new(), tree_folds: HashMap::new(), tree_motion: false, active_token: String::new(), ready_sessions: None,
             servers: known_servers, remote: HashMap::new(), remote_tasks: Vec::new(), remote_gen: 0, servers_rev: 0, invite_ended: HashSet::new(), pending_open: None, pending_remote: None,
@@ -777,7 +812,13 @@ impl Hangar {
         chrome::set_window_active(window.is_window_active());
         cx.observe_window_activation(window, |this, window, cx| {
             chrome::set_window_active(window.is_window_active());
-            if !window.is_window_active() { return; }
+            if !window.is_window_active() {
+                this.cancel_session_numbers(cx);
+                let editing = this.keyboard.is_editing();
+                this.keyboard.cancel_edit();
+                if editing { cx.notify(); }
+                return;
+            }
             this.refresh_desktop_palette(cx);
             // O papel de parede muda fora da janela; a volta do foco é quando repintar importa.
             let a = appearance::get();
@@ -875,6 +916,12 @@ impl Hangar {
     /// entrega incerta é do envio de mensagens.
     fn setting_failure(error: &Failure) -> String {
         if error.status.is_none() && error.uncertain { tr("connection_failed") } else { Self::failure(error) }
+    }
+
+    /// Clique num botão de mod: a recusa do backend (409) diz o motivo dela; sem resposta ou 5xx não é entrega de mensagem,
+    /// e a frase de reenviar enganaria.
+    fn press_failure(error: &Failure) -> String {
+        if error.status.is_none_or(|status| status >= 500) { tr("plugin_press_failed") } else { Self::failure(error) }
     }
 
     fn selected_key(&self) -> Option<SessionKey> {
@@ -1725,6 +1772,10 @@ impl Hangar {
                 self.plugin_panes = match data["panes"].take() { Value::Array(panes) => panes, _ => Vec::new() };
                 return (true, Changed::Screen);
             }
+            "plugin_toast" => {
+                self.show_plugin_toast(&data, window, cx);
+                return (true, Changed::Nothing);
+            }
             "stats" => {
                 return match serde_json::from_value::<Option<Stats>>(data) {
                     // Só o rodapé do compositor lê as estatísticas.
@@ -1796,11 +1847,7 @@ impl Hangar {
                     if let (Some(message), Some(session), Some(prefs)) = (notice, &self.selected, &self.system_notifications.prefs) {
                         if !prefs.suppressed(&session.name, chrono::Local::now().time()) {
                             let (title, body) = (format!("Hangar · {}", session.name), tr(message));
-                            self.runtime.spawn_blocking(move || {
-                                if let Err(error) = notify_rust::Notification::new().appname("Hangar").summary(&title).body(&body).show() {
-                                    eprintln!("notification: {error}");
-                                }
-                            });
+                            self.runtime.spawn_blocking(move || show_system_notification(&title, &body));
                         }
                     }
                 }
@@ -3035,6 +3082,7 @@ impl Hangar {
     fn render_tool(&mut self, tool: Tool, row: &str, cx: &mut Context<Self>) -> AnyElement {
         if let Some(card) = self.render_agent_card(tool, cx) { return card; }
         if appearance::get().tool_look == appearance::ToolLook::Chips { return self.render_single_chip(tool, row, cx); }
+        if appearance::get().tool_look == appearance::ToolLook::Terminal { return self.render_terminal_tool(tool, row, cx); }
         let call = &self.chat.events[tool.call];
         let key = call.id.clone();
         let name = call.tool_name.clone().unwrap_or_else(|| tr("tool"));
@@ -3066,7 +3114,8 @@ impl Hangar {
         let input_key = format!("{key}:input");
         let input = self.prepared_detail(&input_key, || conversation::pretty_input(call.tool_input.as_ref()));
         // Edição de arquivo mostra o diff no lugar da entrada crua; o resultado só aparece se falhou.
-        let diff = edits::card(call, cx);
+        let result = tool.result.map(|i| &self.chat.events[i]);
+        let diff = edits::card(call, result, cx);
         let has_diff = diff.is_some();
         let mut body = div().flex().flex_col().gap_2().pt_1().pb_2();
         // Imagem que o Read leu: o transcript não traz os bytes, o caminho citado vem pelo `/file` (regra do web).
@@ -3184,6 +3233,7 @@ impl Hangar {
     fn render_group(&mut self, row: &str, tools: &[Tool], cx: &mut Context<Self>) -> AnyElement {
         if appearance::get().tool_look == appearance::ToolLook::Chips { return self.render_chip_group(row, tools, cx); }
         if appearance::get().tool_look == appearance::ToolLook::Tree { return self.render_tree_group(row, tools, cx); }
+        if appearance::get().tool_look == appearance::ToolLook::Terminal { return self.render_terminal_group(row, tools, cx); }
         let events = &self.chat.events;
         let names: Vec<String> = tools.iter().map(|t| events[t.call].tool_name.clone().unwrap_or_else(|| tr("tool"))).collect();
         let mut distinct = names.clone();
@@ -4663,6 +4713,8 @@ impl Hangar {
             let pick = session.clone();
             let open = session.clone();
             let menu_target = sidebar::Target::new(&active, &session.name);
+            let label = self.session_number_label(&menu_target, label);
+            let number = self.session_number_badge(&menu_target);
             Some(div().id(SharedString::from(format!("tab-{}", session.name))).track_focus(&focus).flex_shrink_0().max_w(px(200.)).h(px(32.)).px(px(8.))
                 .flex().items_center().gap(px(6.)).rounded(px(6.)).border_1().cursor_pointer()
                 .map(|el| if on { el.bg(theme::accent_dim()).border_color(theme::accent()).text_color(theme::text()).font_weight(FontWeight::SEMIBOLD) }
@@ -4671,6 +4723,7 @@ impl Hangar {
                 .role(Role::Tab).aria_selected(on).aria_label(label.clone())
                 .tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx))
                 .child(mark)
+                .children(number)
                 .child(chrome::provider_glyph(&session.provider, 14.))
                 .child(div().min_w_0().truncate().text_size(px(13.)).child(session.name.clone()))
                 .when(session.pending_questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning())
@@ -4745,7 +4798,8 @@ impl Hangar {
         let state = conversation_row_state(&session, outcome, queued);
         let color = theme::conversation_status(state);
         let status_label = tr(&format!("sidebar_state_{state}"));
-        let label = match folder_name(&session) { Some(folder) => format!("{name} · {folder} · {status_label}"), None => format!("{name} · {status_label}") };
+        let label = self.session_number_label(&target,
+            match folder_name(&session) { Some(folder) => format!("{name} · {folder} · {status_label}"), None => format!("{name} · {status_label}") });
         let branch = shown_branch(&session).filter(|_| !compact);
         // Como a branch, o chip e o aviso de worktree apagada ficam fora do modo compacto.
         let worktree = worktree_label(&session).filter(|_| !compact && !session.worktree_gone);
@@ -4778,6 +4832,7 @@ impl Hangar {
         };
         let title = div().w_full().min_w_0().h(px(17.)).flex().items_center().gap(px(4.))
             .child(status)
+            .children(self.session_number_badge(&target))
             .when(!session.orq(), |el| el.child(badge(agent_name(&session.provider).to_owned(), theme::muted())))
             .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).line_height(px(17.)).child(name.clone()))
             .when(session.pending_questions > 0, |el| el.child(div().flex_shrink_0().text_xs().text_color(theme::warning())
@@ -4945,10 +5000,11 @@ impl Hangar {
                 cx.stop_propagation();
             }))
             .role(Role::Button).aria_selected(selected)
-            .aria_label(spoken.join(" · "))
+            .aria_label(self.session_number_label(&target, spoken.join(" · ")))
             // O ⋯ fica por cima do fim da linha do nome: ela cede o espaço dele.
             .child(div().flex().items_center().gap(px(8.)).when(show_menu, |el| el.pr(px(22.)))
                 .child(avatar)
+                .children(self.session_number_badge(&target))
                 .child(div().flex_1().min_w_0().flex().items_center().gap(px(6.)).when(untracked, |el| el.opacity(0.45)).child(name_el))
                 .when_some(account, |el, (label, color)| el.child(div().flex_shrink_1().min_w_0().max_w(px(96.)).h(px(16.)).px(px(6.))
                     .flex().items_center().gap(px(4.)).rounded_full().bg(theme::hover())
@@ -5004,8 +5060,9 @@ fn kind_of<'a>(items: &[Item], index: usize, events: &'a [ChatEvent]) -> Option<
     match items.get(index) { Some(Item::Event(i)) => events.get(*i).map(|e| e.kind.as_str()), _ => None }
 }
 
+/// A pasta onde o agente trabalha: a worktree para onde ele foi, ou a de abertura.
 fn folder_name(session: &SessionInfo) -> Option<String> {
-    session.cwd.as_deref().and_then(|cwd| cwd.trim_end_matches('/').rsplit('/').next()).filter(|f| !f.is_empty()).map(str::to_owned)
+    session.git_dir().map(composer::basename).filter(|f| !f.is_empty() && *f != "/").map(str::to_owned)
 }
 
 /// A branch que a linha mostra: main e master são o normal e ficam de fora, como no web.
@@ -5107,19 +5164,8 @@ fn save_connection(address: &str, token: &str, servers: &[servers::ServerEntry])
     std::fs::rename(&tmp, &path)
 }
 
-/// Conversa mínima que fica ao lado de um painel de mod ancorado.
-const MIN_CONVERSATION_BESIDE_PANE: f32 = 420.;
-
-/// Largura natural de um painel de mod: as colunas que o terminal deu a ele, mais a moldura.
-fn plugin_pane_width(pane: &Value) -> f32 {
-    pane["columns"].as_f64().map(|c| c as f32 * crate::plugin_ui::CELL_W).unwrap_or(420.) + 20.
-}
-
-/// Como o terminal, que só ancora o painel com largura de sobra: ao lado da conversa quando cabem os
-/// dois (`free` é a largura entre a lista e o painel lateral), senão acima do composer.
-fn plugin_pane_docks(pane: &Value, free: f32) -> bool {
-    crate::plugin_ui::is_dock(pane) && free - plugin_pane_width(pane) >= MIN_CONVERSATION_BESIDE_PANE
-}
+/// Fração da altura da janela que um painel de mod acima da faixa pode ocupar.
+const PLUGIN_PANE_MAX_SHARE: f32 = 0.45;
 
 fn select_snapshot(state: &SessionState) -> String { json!([state.question, state.options]).to_string() }
 
@@ -5440,21 +5486,7 @@ impl Hangar {
                 }
             }
         } else { content = content.child(self.render_new_chat(window, cx)); }
-        // Painel de mod ancorado: coluna à direita da conversa, como o terminal o põe.
-        let readable = self.selected.as_ref().is_some_and(|s| s.readable());
-        let free = self.plugin_pane_room(window);
-        let press = self.plugin_press(cx);
-        let dock: Vec<AnyElement> = self.plugin_panes.iter().filter(|p| readable && plugin_pane_docks(p, free))
-            .map(|p| div().h_full().flex_shrink_0().w(px(plugin_pane_width(p))).p_2().flex().flex_col()
-                .child(crate::plugin_ui::pane(p, press.clone())).into_any_element())
-            .collect();
-        if dock.is_empty() { return content.into_any_element(); }
-        div().size_full().flex().flex_row().child(content.flex_1().min_w_0()).children(dock).into_any_element()
-    }
-
-    /// Largura que sobra para a conversa e um painel de mod ancorado, entre a lista e o painel lateral.
-    fn plugin_pane_room(&self, window: &Window) -> f32 {
-        f32::from(window.viewport_size().width) - self.nav_width() - self.side_width(window).unwrap_or(0.)
+        content.into_any_element()
     }
 
     /// Quem atende o clique num botão de mod; sessão só leitura deixa os botões como rótulo.
@@ -5487,8 +5519,33 @@ impl Hangar {
                 }
                 if let Some(url) = crate::plugin_ui::safe_href(&reply["opened"]) { cx.open_url(&url); }
             }
-            Err(error) => window.push_notification(Notification::warning(Self::failure(&error)), cx),
+            Err(error) => window.push_notification(Notification::warning(Self::press_failure(&error)), cx),
         }
+    }
+
+    /// Aviso (`$.ui.toast`) de um mod: o terminal o desenha por alguns segundos e ele não entra na conversa.
+    fn show_plugin_toast(&mut self, data: &Value, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(toast) = crate::plugin_ui::toast(data) else { return };
+        // A reconexão do SSE repõe os avisos ainda vivos: o id diz quais já passaram por aqui.
+        if self.plugin_toasts_seen.contains(&toast.id) { return; }
+        if self.plugin_toasts_seen.len() >= 200 { self.plugin_toasts_seen.pop_front(); }
+        self.plugin_toasts_seen.push_back(toast.id.clone());
+        let key = SharedString::from(toast.id);
+        // No máximo 4 na tela: um mod insistente não cobre a conversa.
+        while self.plugin_toasts_shown.len() >= 4 {
+            if let Some(old) = self.plugin_toasts_shown.pop_front() { window.remove_notification1::<PluginToast>(old, cx); }
+        }
+        self.plugin_toasts_shown.push_back(key.clone());
+        // Sem o autohide: ele é fixo em 5 s, e o prazo do aviso é o que o mod pediu.
+        let note = Notification::info(toast.text).id1::<PluginToast>(key.clone()).autohide(false);
+        window.push_notification(if toast.plugin.is_empty() { note } else { note.title(toast.plugin) }, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(toast.timeout).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.plugin_toasts_shown.retain(|k| *k != key);
+                window.remove_notification1::<PluginToast>(key, cx);
+            });
+        }).detach();
     }
 
     /// Cartões, faixas e avisos entre a conversa e o compositor, e o compositor.
@@ -5551,9 +5608,12 @@ impl Hangar {
             .when_some(delivery_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
             .when_some(stop_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
             .children(readable.then(|| {
-                let (free, press) = (self.plugin_pane_room(window), self.plugin_press(cx));
-                let inline = self.plugin_panes.iter().filter(|p| !plugin_pane_docks(p, free))
-                    .map(|p| in_column(crate::plugin_ui::pane(p, press.clone()))).collect::<Vec<_>>();
+                let press = self.plugin_press(cx);
+                // Painel de mod fica acima da faixa, como o terminal o abre, em qualquer largura; a altura tem teto para o
+                // painel comprido rolar por dentro em vez de empurrar a conversa para fora.
+                let tallest = f32::from(window.viewport_size().height) * PLUGIN_PANE_MAX_SHARE;
+                let inline = self.plugin_panes.iter()
+                    .map(|p| in_column(crate::plugin_ui::pane(p, press.clone(), tallest))).collect::<Vec<_>>();
                 inline.into_iter().chain(crate::plugin_ui::band(&self.plugin_band, press).map(in_column))
             }).into_iter().flatten())
             .map(|el| match orq {
@@ -5758,6 +5818,14 @@ impl Render for Hangar {
             }).absolute().inset_0()))
             .when(!chat_background, |el| el.children(self.render_backdrop(window)))
             .font_family(theme::SANS)
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, window, cx| {
+                this.keyboard_modifiers_changed(event, window, cx);
+                this.session_number_modifiers(event.modifiers, window, cx);
+            }))
+            .capture_key_up(cx.listener(|this, _: &KeyUpEvent, window, cx| {
+                this.session_number_modifiers(window.modifiers(), window, cx);
+            }))
+            .on_action(cx.listener(|this, action: &keyboard::RunShortcut, window, cx| this.run_keyboard_shortcut(action, window, cx)))
             .on_action(cx.listener(|this, _: &FocusComposer, window, cx| {
                 let page_open = this.settings.is_some() && !this.settings_live() || this.costs.view.is_some() || this.worktrees.view.is_some();
                 if !this.connection_dialog && !page_open && (this.selected.as_ref().is_some_and(SessionInfo::takes_messages)
@@ -5930,6 +5998,15 @@ mod tests {
     use super::{message_card, preview_step, safe_markdown, stream_motion, working_tokens, working_verb};
     use crate::{api::dto::ChatEvent, cards::Card, i18n::tr};
     use std::{collections::HashSet, time::Duration};
+
+    #[test]
+    fn mod_click_failure_is_not_a_message_delivery() {
+        use super::{Failure, Hangar};
+        let failure = |status| Failure { status, detail: "x".into(), retry_after: None, uncertain: true };
+        assert_eq!(Hangar::press_failure(&failure(Some(500))), tr("plugin_press_failed"));
+        assert_eq!(Hangar::press_failure(&failure(None)), tr("plugin_press_failed"));
+        assert_eq!(Hangar::press_failure(&failure(Some(409))), Hangar::failure(&failure(Some(409))));
+    }
 
     #[test]
     fn worktree_label_prefers_real_location() {

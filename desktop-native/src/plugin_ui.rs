@@ -3,6 +3,7 @@
 //! que mod veio: mod novo aparece sem código novo.
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 use gpui_kit::*;
 use gpui_kit::prelude::FluentBuilder;
 use serde_json::Value;
@@ -21,8 +22,9 @@ pub type Press = Rc<dyn Fn(&str, &str, &mut Window, &mut App)>;
 pub const BAND_SITE: &str = "above-prompt";
 pub const PANE_CLOSE_KEY: &str = "__close__";
 
-/// Onde a árvore está desenhada e quem atende o clique; sem `press`, botão é só rótulo.
-struct Ctx<'a> { site: &'a str, press: &'a Option<Press> }
+/// Onde a árvore está desenhada e quem atende o clique; sem `press`, botão é só rótulo. `links` numera os links na ordem
+/// da árvore: o mesmo endereço duas vezes não repete o id do elemento.
+struct Ctx<'a> { site: &'a str, press: &'a Option<Press>, links: std::cell::Cell<usize> }
 
 pub fn button_key(v: &Value) -> Option<String> {
     (v["type"] == "Button").then(|| v["props"]["key"].as_str().filter(|k| !k.is_empty()).map(str::to_owned)).flatten()
@@ -33,7 +35,27 @@ pub fn safe_href(v: &Value) -> Option<String> {
     v.as_str().filter(|h| h.starts_with("https://") || h.starts_with("http://")).map(str::to_owned)
 }
 
-pub fn is_dock(pane: &Value) -> bool { pane["placement"] == "dock" }
+/// Aviso (`$.ui.toast`) que um mod mostrou no terminal; `plugin` é o mod que o emitiu.
+#[derive(Debug, PartialEq)]
+pub struct Toast { pub id: String, pub text: String, pub plugin: String, pub timeout: Duration }
+
+/// O dado do SSE `plugin_toast`; sem id, sem texto ou sem prazo não é aviso.
+pub fn toast(data: &Value) -> Option<Toast> {
+    let id = data["id"].as_str().filter(|id| !id.is_empty())?;
+    let text = data["text"].as_str().filter(|text| !text.trim().is_empty())?;
+    let ms = data["timeoutMs"].as_u64().filter(|ms| *ms > 0)?;
+    Some(Toast { id: id.to_owned(), text: short(text), plugin: data["plugin"].as_str().unwrap_or("").to_owned(), timeout: Duration::from_millis(ms) })
+}
+
+/// A notificação cresce com o texto: aviso longo vira no máximo 4 linhas e 300 caracteres.
+fn short(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out: String = lines.iter().take(4).copied().collect::<Vec<_>>().join("\n");
+    let mut cut = lines.len() > 4;
+    if out.chars().count() > 300 { out = out.chars().take(300).collect(); cut = true; }
+    if cut { out.push('…'); }
+    out
+}
 
 fn frame() -> Div {
     div().px(px(10.)).py(px(6.)).rounded(px(8.)).bg(theme::inset())
@@ -42,12 +64,13 @@ fn frame() -> Div {
 
 pub fn band(tree: &Value, press: Option<Press>) -> Option<AnyElement> {
     if is_empty(tree) { return None; }
-    let c = Ctx { site: BAND_SITE, press: &press };
+    let c = Ctx { site: BAND_SITE, press: &press, links: Default::default() };
     Some(frame().w_full().mb(px(4.)).overflow_hidden().child(node(tree, &c)).into_any_element())
 }
 
-/// Um painel que um mod abriu: título, fechar (o ✕ do engine) e o corpo rolável.
-pub fn pane(pane: &Value, press: Option<Press>) -> AnyElement {
+/// Um painel que um mod abriu, acima da faixa como o terminal o desenha: título, fechar (o ✕ do engine) e o corpo, que
+/// rola dentro de `max_h`.
+pub fn pane(pane: &Value, press: Option<Press>, max_h: f32) -> AnyElement {
     let id = pane["id"].as_str().unwrap_or("").to_owned();
     let title = pane["title"].as_str().filter(|t| !t.is_empty()).unwrap_or(&id).to_owned();
     let header = div().flex().items_center().justify_between().gap_2()
@@ -58,9 +81,9 @@ pub fn pane(pane: &Value, press: Option<Press>) -> AnyElement {
                 .text_color(theme::muted()).child("✕")
                 .on_click(move |_, window, cx| press(&site, PANE_CLOSE_KEY, window, cx)))
         });
-    let c = Ctx { site: &id, press: &press };
+    let c = Ctx { site: &id, press: &press, links: Default::default() };
     // Recorta o que passa da largura: no gpui, filho maior que a coluna desenha por cima do vizinho.
-    frame().flex().flex_col().gap_1().min_h_0().w_full().overflow_hidden()
+    frame().flex().flex_col().gap_1().min_h_0().max_h(px(max_h)).w_full().overflow_hidden()
         .child(header)
         .child(div().id(SharedString::from(format!("plg-body-{id}"))).flex_1().min_h_0().overflow_y_scroll()
             .child(node(&pane["tree"], &c)))
@@ -100,8 +123,12 @@ fn element(v: &Value, c: &Ctx) -> AnyElement {
             let shown = if label.is_empty() { text_of(&p["href"]) } else { label };
             let base = div().text_color(theme::accent()).underline();
             match safe_href(&p["href"]) {
-                Some(href) => base.id(SharedString::from(format!("lnk-{href}"))).cursor_pointer()
-                    .on_click(move |_, _, cx| cx.open_url(&href)).child(shown).into_any_element(),
+                Some(href) => {
+                    let n = c.links.get();
+                    c.links.set(n + 1);
+                    base.id(SharedString::from(format!("lnk-{}-{n}", c.site))).cursor_pointer()
+                        .on_click(move |_, _, cx| cx.open_url(&href)).child(shown).into_any_element()
+                }
                 None => base.child(shown).into_any_element(),
             }
         }
@@ -178,7 +205,94 @@ fn boxed(p: &Value, kids: &[Value], c: &Ctx) -> AnyElement {
         el = el.border_1().rounded(px(4.)).border_color(color(&p["borderColor"]).unwrap_or_else(theme::border));
     }
     if p["overflow"] == "hidden" { el = el.overflow_hidden(); }
-    el.children(kids.iter().map(|k| node(k, c))).into_any_element()
+    // Linha de texto logo abaixo de um Raster (os rótulos sob os traços da barra de progresso)
+    // segue a escala dele; sem isso o Raster cabe na coluna estreita e os rótulos saem do lugar.
+    el.children(kids.iter().enumerate().map(|(i, k)| {
+        match i.checked_sub(1).filter(|_| text_row(k)).and_then(|j| raster_row(&kids[j])) {
+            Some(frame) => aligned_row(k, frame, c),
+            None => node(k, c),
+        }
+    })).into_any_element()
+}
+
+/// Props do `Box` que o `boxed` desenha e o molde do Raster não reproduz: com qualquer uma, a
+/// linha segue o desenho comum em vez de perder o recuo, o espaçamento ou o fundo.
+const BOX_LAYOUT: &[&str] = &[
+    "justifyContent", "alignItems", "flexGrow", "flexWrap", "width", "minWidth", "gap", "columnGap", "rowGap",
+    "padding", "paddingX", "paddingY", "paddingTop", "paddingBottom", "paddingLeft", "paddingRight",
+    "margin", "marginX", "marginY", "marginTop", "marginBottom", "marginLeft", "marginRight",
+    "backgroundColor", "borderStyle", "overflow",
+];
+
+/// `Box` em linha sem nada além dos filhos: cada filho ocupa as suas células, como no terminal.
+fn plain_row(v: &Value) -> bool {
+    let p = &v["props"];
+    v["type"] == "Box" && matches!(p["flexDirection"].as_str(), None | Some("row"))
+        && BOX_LAYOUT.iter().all(|k| p[*k].is_null()) && p["display"] != "none"
+        && !children(v).is_empty()
+}
+
+/// Texto de um `Text` sem corte e sem texto aninhado, o único que se mede em células.
+fn flat_text(v: &Value) -> Option<String> {
+    let flat = v["type"] == "Text" && !v["props"]["wrap"].is_string()
+        && children(v).iter().all(|k| k.is_string() || k.is_number());
+    flat.then(|| plain(v))
+}
+
+fn text_cells(v: &Value) -> Option<usize> { flat_text(v).map(|t| t.chars().count()) }
+
+fn text_row(v: &Value) -> bool { plain_row(v) && children(v).iter().all(|k| flat_text(k).is_some()) }
+
+/// Molde de uma linha com Raster: células de texto antes, colunas do Raster e o texto depois.
+struct RasterFrame<'a> { before: usize, columns: usize, after: &'a [Value] }
+
+fn raster_row(v: &Value) -> Option<RasterFrame<'_>> {
+    if !plain_row(v) { return None; }
+    let kids = children(v);
+    let at = kids.iter().position(|k| k["type"] == "Raster")?;
+    let (before, after) = (&kids[..at], &kids[at + 1..]);
+    if after.iter().any(|k| flat_text(k).is_none()) { return None; }
+    let columns = kids[at]["props"]["columns"].as_u64().filter(|&n| n > 0)? as usize;
+    Some(RasterFrame { before: before.iter().map(text_cells).sum::<Option<usize>>()?, columns, after })
+}
+
+/// Trilho do Raster: ocupa o que sobra da linha até a largura natural das colunas. O Raster e a
+/// linha alinhada a ele usam o mesmo, para encolherem juntos.
+fn raster_track(columns: usize) -> Div {
+    div().flex().flex_basis(px(0.)).flex_grow(1.).min_w_0().max_w(px(columns as f32 * CELL_W))
+}
+
+/// Monta a linha de texto no molde do Raster de cima: o começo com a largura natural, o trecho
+/// sob o Raster na mesma escala dele e, no fim, o texto de depois invisível, só para ocupar o
+/// mesmo espaço. No trecho escalado cada palavra corta onde começa a próxima, não antes.
+fn aligned_row(row: &Value, frame: RasterFrame, c: &Ctx) -> AnyElement {
+    let piece = |k: &Value, t: &[char]| text(&k["props"], &[Value::from(t.iter().collect::<String>())], c);
+    let (mut head, mut words): (Vec<AnyElement>, Vec<(Vec<AnyElement>, usize)>) = (Vec::new(), Vec::new());
+    let mut seen = 0;
+    for k in children(row) {
+        let chars: Vec<char> = plain(k).chars().collect();
+        let cut = frame.before.saturating_sub(seen).min(chars.len());
+        seen += chars.len();
+        if cut > 0 { head.push(piece(k, &chars[..cut])); }
+        let rest = &chars[cut..];
+        if rest.is_empty() { continue; }
+        match words.last_mut() {
+            Some((els, cells)) if rest.iter().all(|ch| ch.is_whitespace()) => { els.push(piece(k, rest)); *cells += rest.len(); }
+            _ => words.push((vec![piece(k, rest)], rest.len())),
+        }
+    }
+    let last = words.len().saturating_sub(1);
+    let scaled = raster_track(frame.columns).flex_row()
+        .children(words.into_iter().enumerate().map(|(i, (els, cells))| {
+            div().flex().flex_row().flex_shrink_0().whitespace_nowrap().w(relative(cells as f32 / frame.columns as f32))
+                .when(i < last, |el| el.overflow_hidden())
+                .children(els)
+        }));
+    div().flex().flex_row().min_w_0()
+        .children(head)
+        .child(scaled)
+        .child(div().flex().flex_row().flex_shrink_0().opacity(0.).children(frame.after.iter().map(|n| node(n, c))))
+        .into_any_element()
 }
 
 /// `Text` do Ink: cor, ênfase e corte. `dimColor` é opacidade, como no terminal.
@@ -188,7 +302,7 @@ fn text(p: &Value, kids: &[Value], c: &Ctx) -> AnyElement {
     let (fg, bg) = if p["inverse"] == true { (bg.or(Some(theme::background())), fg.or(Some(theme::text()))) } else { (fg, bg) };
     let truncate = p["wrap"].as_str().is_some_and(|w| w.starts_with("truncate") || w == "end" || w == "middle");
     // Texto dentro de texto vira trechos lado a lado: o gpui não tem span em linha.
-    let mut el = div().flex().flex_row().min_w_0()
+    let el = div().flex().flex_row().min_w_0()
         .when(!truncate, |el| el.flex_shrink_0())
         .when_some(fg, |el, c| el.text_color(c))
         .when_some(bg, |el, c| el.bg(c))
@@ -196,21 +310,24 @@ fn text(p: &Value, kids: &[Value], c: &Ctx) -> AnyElement {
         .when(p["italic"] == true, |el| el.italic())
         .when(p["underline"] == true, |el| el.underline())
         .when(p["strikethrough"] == true, |el| el.line_through())
-        .when(p["dimColor"] == true, |el| el.opacity(0.6));
-    if truncate {
-        el = el.overflow_hidden().whitespace_nowrap();
-        return el.child(div().truncate().child(plain_deep(kids))).into_any_element();
+        .when(p["dimColor"] == true, |el| el.opacity(0.6))
+        .when(truncate, |el| el.overflow_hidden().whitespace_nowrap());
+    // Juntar em texto puro tiraria o clique de link e botão: com eles, a linha cortada só recorta, sem reticências.
+    if let Some(text) = truncate.then(|| plain_deep(kids)).flatten() {
+        return el.child(div().truncate().child(text)).into_any_element();
     }
     el.children(kids.iter().map(|k| node(k, c))).into_any_element()
 }
 
-/// Texto de uma subárvore inteira, para o corte com reticências que o gpui só faz num texto só.
-fn plain_deep(kids: &[Value]) -> String {
+/// Texto de uma subárvore inteira, para o corte com reticências que o gpui só faz num texto só; `None` quando ela tem
+/// algo que se clica.
+fn plain_deep(kids: &[Value]) -> Option<String> {
     kids.iter().map(|c| match c {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Object(_) if matches!(c["type"].as_str(), Some("Link" | "Button")) => None,
         Value::Object(_) => plain_deep(children(c)),
-        _ => String::new(),
+        _ => Some(String::new()),
     }).collect()
 }
 
@@ -219,7 +336,7 @@ fn plain_deep(kids: &[Value]) -> String {
 /// coluna mais estreita cada trecho encolhe na proporção das suas células, sem rolar de lado.
 fn raster(p: &Value) -> AnyElement {
     let columns = p["columns"].as_u64().unwrap_or(0) as usize;
-    let mut grid = div().flex().flex_col().flex_basis(px(0.)).flex_grow(1.).min_w_0().max_w(px(columns as f32 * CELL_W));
+    let mut grid = raster_track(columns).flex_col();
     for runs in raster_runs(p) {
         grid = grid.child(div().flex().flex_row().w_full().min_w_0().whitespace_nowrap().children(runs.into_iter().map(|(t, fg, bg)| {
             div().flex_basis(px(0.)).flex_grow(t.chars().count() as f32).flex_shrink(1.).min_w_0().overflow_hidden()
@@ -296,8 +413,22 @@ fn unmark(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
-    use super::{button_key, cell_color, color, is_dock, is_empty, raster_runs, safe_href};
+    use super::{button_key, cell_color, color, is_empty, plain_deep, raster_row, raster_runs, safe_href, text_row, toast, Toast};
     use serde_json::{json, Value};
+    use std::time::Duration;
+
+    #[test]
+    fn toast_keeps_the_mod_and_its_timeout_and_refuses_what_is_not_a_toast() {
+        assert_eq!(toast(&json!({"id": "ab-1", "text": "Jenkins configurado.", "plugin": "demo", "timeoutMs": 9000})),
+            Some(Toast { id: "ab-1".into(), text: "Jenkins configurado.".into(), plugin: "demo".into(), timeout: Duration::from_millis(9000) }));
+        assert_eq!(toast(&json!({"id": "ab-2", "text": "oi", "timeoutMs": 1})).map(|t| t.plugin), Some(String::new()));
+        assert_eq!(toast(&json!({"text": "oi", "timeoutMs": 4000})), None);
+        assert_eq!(toast(&json!({"id": "ab-3", "text": "  ", "timeoutMs": 4000})), None);
+        assert_eq!(toast(&json!({"id": "ab-4", "text": "oi"})), None);
+        let long = toast(&json!({"id": "ab-5", "text": "x".repeat(2000), "timeoutMs": 1})).unwrap().text;
+        assert_eq!((long.chars().count(), long.ends_with('…')), (301, true));
+        assert_eq!(toast(&json!({"id": "ab-6", "text": "1\n2\n3\n4\n5", "timeoutMs": 1})).unwrap().text, "1\n2\n3\n4…");
+    }
 
     fn cells(words: &[u32]) -> String {
         use base64::Engine as _;
@@ -313,6 +444,31 @@ mod tests {
         assert_eq!(runs[1][0].0, "C");
         assert!(raster_runs(&json!({"columns": 0, "rows": 1_000_000, "cells": three})).is_empty());
         assert!(raster_runs(&json!({"columns": u64::MAX, "rows": u64::MAX, "cells": three}))[0].len() == 1);
+    }
+
+    #[test]
+    fn label_row_follows_the_raster_frame_and_only_plain_text_counts() {
+        let text = |s: &str| json!({"type": "Text", "children": [s]});
+        let bar = json!({"type": "Box", "props": {"flexDirection": "row"}, "children": [
+            text("  "), {"type": "Raster", "props": {"columns": 20, "rows": 1, "cells": ""}}, text("  29%")]});
+        let frame = raster_row(&bar).unwrap();
+        assert_eq!((frame.before, frame.columns, frame.after.len()), (2, 20, 1));
+        let labels = json!({"type": "Box", "children": [text("  "), {"type": "Text", "props": {"bold": true}, "children": ["Correção"]}, text("   Entrega")]});
+        assert!(text_row(&labels) && raster_row(&labels).is_none());
+        // Largura, distribuição, corte e texto aninhado não são células: seguem o desenho comum.
+        assert!(!text_row(&json!({"type": "Box", "props": {"width": 30}, "children": [text("a")]})));
+        assert!(!text_row(&json!({"type": "Box", "props": {"justifyContent": "space-between"}, "children": [text("a")]})));
+        assert!(!text_row(&json!({"type": "Box", "children": [{"type": "Text", "props": {"wrap": "truncate-end"}, "children": ["a"]}]})));
+        assert!(!text_row(&json!({"type": "Box", "children": [{"type": "Text", "children": [text("a")]}]})));
+        assert!(!text_row(&json!({"type": "Box", "children": []})));
+        // Recuo, espaçamento e fundo o molde não reproduz: a linha fica no desenho comum.
+        for prop in ["paddingLeft", "marginLeft", "gap", "columnGap", "backgroundColor", "borderStyle"] {
+            let row = json!({"type": "Box", "props": {prop: 1}, "children": [text("a")]});
+            assert!(!text_row(&row), "{prop}");
+            let bar = json!({"type": "Box", "props": {prop: 1}, "children": [text("  "), {"type": "Raster", "props": {"columns": 20}}]});
+            assert!(raster_row(&bar).is_none(), "{prop}");
+        }
+        assert!(raster_row(&json!({"type": "Box", "children": [{"type": "Raster", "props": {"columns": 0}}]})).is_none());
     }
 
     #[test]
@@ -343,10 +499,11 @@ mod tests {
     }
 
     #[test]
-    fn dock_is_the_terminal_placement() {
-        assert!(is_dock(&json!({"placement": "dock"})));
-        assert!(!is_dock(&json!({"placement": "inline"})));
-        assert!(!is_dock(&json!({})));
+    fn cut_text_keeps_links_and_buttons_clickable() {
+        let link = json!({"type": "Link", "props": {"href": "https://gitlab.exemplo/pm/PM-1"}, "children": ["PM-1"]});
+        assert_eq!(plain_deep(&[json!({"type": "Text", "children": ["PM ", link]})]), None);
+        assert_eq!(plain_deep(&[json!({"type": "Button", "props": {"key": "k"}})]), None);
+        assert_eq!(plain_deep(&[json!("texto "), json!({"type": "Text", "children": ["só texto"]})]).as_deref(), Some("texto só texto"));
     }
 
     #[test]

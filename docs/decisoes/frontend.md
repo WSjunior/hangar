@@ -813,3 +813,90 @@ celular: quadros, url, layout celular/desktop, toque e rolagem, troca de aparelh
 ("o navegador desta sessão fechou"). Fechar o último navegador e fechar o app encerram o
 Chromium. O script de remoção foi conferido sem nativo, com nativo antigo, sem Chromium, com o
 Electron aberto, fechado e numa segunda execução.
+
+## Bandeja do nativo: fechar esconde a janela (04/10/2026)
+
+A opção "Manter na bandeja ao fechar" (Configurações → Geral, desligada por padrão) põe um ícone
+na bandeja e faz o pedido de fechar esconder a janela em vez de encerrar o app.
+
+- **A janela é escondida, nunca destruída.** A tela (`app::Hangar`) guarda dezenas de assinaturas
+  presas à janela e não sobrevive a fechar e reabrir. O pedido de fechar é interceptado com
+  `on_window_should_close`; o app esconde ali mesmo e responde `false`. O backend Wayland chama
+  esse aviso com os callbacks da janela emprestados, e um `cx.defer` não sai desse empréstimo (o
+  efeito adiado roda antes de o aviso voltar): por isso `set_hidden` não toca nos callbacks.
+- **`Window::set_hidden` é ajuste nosso no GPUI vendorizado** (`vendor/PATCHES.md`). Windows:
+  `SW_HIDE`/`SW_SHOW`. X11: `UnmapWindow`/`MapWindow`. Wayland: esconder destrói o toplevel e o
+  `xdg_surface`, tira o buffer da `wl_surface` e cria os dois de novo nela, sem commit; mostrar
+  reaplica título, `app_id`, tamanhos e decoração e faz o commit inicial. A superfície e o
+  renderer continuam os mesmos. Vale só para a janela principal (sem pai e sem diálogo), e o
+  estado de maximizada ou tela cheia não é reaplicado: quem decide o tamanho na volta é o
+  compositor.
+- **Só desmapear com buffer nulo não serve.** Medido com `WAYLAND_DEBUG=1` no Hyprland 0.56.2: o
+  buffer nulo desmapeia a janela, mas o commit sem buffer que viria depois não recebe
+  `xdg_surface.configure`, e a janela não volta. Desenhar sem esperar o configure funcionaria
+  ali e seria erro de protocolo num compositor estrito; um `xdg_surface` novo recebe o configure
+  inicial em qualquer compositor.
+- **Fechar só esconde com o ícone de pé e uma bandeja presente** (`hides_on_close`). Sem
+  `StatusNotifierWatcher`, ou se o ícone não pôde ser criado, fechar encerra como antes, e a linha
+  da opção diz o motivo. Se a bandeja some com a janela escondida, a janela volta.
+- **Linux: `ksni` 0.3.6 sem a feature padrão `tokio`.** Ela ligaria `zbus/tokio` para todos os
+  usuários do `zbus` (`notify-rust`, `ashpd`, `accesskit`), e o `notify-rust` é chamado fora do
+  runtime. Entram as features `async-io` e `blocking`. O ícone vai como pixmap, que não depende
+  do tema de ícones instalado, e `assume_sni_available(true)` deixa o serviço esperando a barra
+  que sobe depois do app.
+- **No Linux, "bandeja presente" é haver um HOSPEDEIRO, não só o serviço.** O serviço
+  (`org.kde.StatusNotifierWatcher`) pode sobreviver à barra: com o `kded6` no ar, ele assume o
+  nome quando a barra cai e responde `IsStatusNotifierHostRegistered = true` mesmo sem barra
+  nenhuma. O app acompanha os nomes que as barras registram no barramento
+  (`org.kde.StatusNotifierHost-*`, `org.freedesktop.StatusNotifierHost-*`); com o `kded` de dono
+  do serviço só esses nomes valem, e com outro dono vale a resposta do próprio serviço.
+- **O registro do ícone é repetido quando o serviço o recusa.** Ao voltar, a barra derruba e
+  reinicia o `kded6`, e o registro chega antes de ele atender (`No such object path`). O `ksni`
+  não tenta de novo; o app repete em 1, 2, 4, 8 e 16 s, pelo nome que o `ksni` deu ao ícone.
+- **Windows: `Shell_NotifyIconW` numa thread própria**, com janela oculta e laço de mensagens
+  dela. Não é janela "só de mensagens": essas não recebem o `TaskbarCreated`, usado para pôr o
+  ícone de volta quando o Explorer reinicia.
+
+- **Escondida, a janela Wayland ignora os eventos do toplevel e do `xdg_surface`**: o que chega
+  nesse intervalo é resto dos objetos trocados, e confirmar um configure antigo no objeto novo
+  seria erro de protocolo. O estado de apresentação volta a "sem quadro", para uma falha no
+  primeiro desenho repetir por timer.
+- **Dois pedidos do ícone em menos de meio segundo contam como um.** O duplo clique chega como
+  dois cliques, e sem isso a janela aparecia e sumia.
+- **"Sair" solta o ícone antes de encerrar**, e no Windows soltar espera a janela oculta morrer
+  (`SendMessageW`): encerrar com o ícone de pé deixa um ícone morto na bandeja.
+- **O clique só esconde a janela que está na tela.** Minimizada conta como fora da tela
+  (`Window::is_visible`), e o clique a traz de volta.
+- **No Windows o ícone tem estado.** O `TaskbarCreated` também chega com o ícone ainda lá (mudança
+  de escala): acrescentar falha e atualizar confirma que ele existe. Se o Explorer voltou e ainda
+  não aceita ícone, o app tenta de novo a cada 2 s e, enquanto isso, fechar não esconde.
+
+Medição (04/10/2026, Hyprland 0.56.2 com a bandeja do Quickshell 0.2.1, build de
+desenvolvimento): três ciclos de esconder e mostrar no Wayland e três no X11 (XWayland), com a
+janela redesenhada a cada volta e o processo vivo; fechar pelo compositor esconde com o ícone de
+pé; clique no ícone mostra e esconde, e dois pedidos seguidos valem por um; segunda execução e
+link `hangar://` mostram a janela escondida, o link com o diálogo de convite preenchido; conversa
+em andamento aberta volta atual depois de escondida; troca de idioma muda os textos do menu;
+desligar a opção remove o ícone e fechar encerra; "Sair" encerra; numa sessão D-Bus sem bandeja a
+linha avisa e fechar encerra.
+
+Medição no Windows (04/10/2026, Windows 11 build 26200 numa VM, build de desenvolvimento, com os
+cliques do ícone entregues como a mensagem que o Shell manda): fechar (`WM_CLOSE`) esconde a
+janela com o processo vivo e o aviso único aparece; clique esquerdo mostra e esconde; a segunda
+execução sai e a janela aparece; depois de reiniciar o Explorer o ícone continua registrado e o
+clique volta a mostrar a janela; o clique direito abre o menu com "Abrir Hangar" e "Sair", e
+"Sair" encerra o processo e a janela oculta; com a opção desligada não há ícone e fechar
+encerra; com a janela minimizada o clique a restaura; um `TaskbarCreated` repetido não derruba
+o ícone. Navegador embutido com a janela na bandeja (sessão fora da tela): `eval`, `snapshot`,
+`press`, `shot` de uma página repintada depois de escondida e `click` num link que navegou
+responderam igual a com a janela à mostra.
+
+Barra caindo com a janela escondida (04/10/2026, Quickshell 0.2.1 como hospedeiro e `kded6` como
+serviço): ao derrubar a barra, duas janelas escondidas voltaram sozinhas e fechar sem barra
+encerrou; com a barra de volta o ícone foi registrado de novo, fechar escondeu e o clique no
+ícone mostrou a janela. Antes do conserto a janela ficava escondida sem ícone em lugar nenhum, e
+depois da volta da barra fechar encerrava o app.
+
+Não conferido no uso real: o serviço da bandeja sumindo de vez, sem outro assumir (Linux); no Windows, o
+duplo clique físico, o Explorer que demora a aceitar o ícone e o navegador embutido com o
+painel dele aberto na tela na hora de esconder; compositores Wayland além do Hyprland.

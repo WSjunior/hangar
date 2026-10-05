@@ -289,6 +289,27 @@ def test_same_name_new_mux_does_not_import_old_queue(monkeypatch,tmp_path):
     asyncio.run(flow())
 
 
+def test_plugin_click_writes_with_the_terminal_ownership(monkeypatch,tmp_path):
+    # O clique de mod pelo app com o Rust dono do pane: sem a posse, era o 500 do log de 04/10/2026.
+    from app import plugin_click, tmux
+    gateway=LoanGateway()
+    owner,slot,_=live_owner(monkeypatch,tmp_path,gateway=gateway)
+    sent=[]
+    def send_keys(name, keys, literal=False):
+        from app.runtime_terminal import assert_writer
+        assert_writer(name)
+        sent.append((name, keys, slot.phase))
+        return True
+    monkeypatch.setattr(tmux,'send_keys',send_keys)
+    async def flow():
+        await _to_rust(owner,'session')
+        assert await asyncio.to_thread(plugin_click.click,'session',2,5)
+        assert [(name, phase) for name, _, phase in sent]==[('session',Phase.Rust)]
+        assert [kind for kind,_ in gateway.controls] == ['keyboard_loan','keyboard_return']
+        await owner.detach('session')
+    asyncio.run(flow())
+
+
 def test_admin_loan_refused_has_zero_effect(monkeypatch,tmp_path):
     from app.runtime_terminal import run_admin
     class Silent(LoanGateway):

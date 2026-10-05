@@ -1,5 +1,6 @@
 // Aparência das chamadas de ferramenta no chat: 'classico' (o bloco de duas linhas de sempre,
-// "● Bash <arg>" / "└ Pronto (38 linhas) • clique para ver") ou 'chips' (a pele portada do
+// "● Bash <arg>" / "└ Pronto (38 linhas) • clique para ver"), 'terminal' (como o terminal do
+// Claude Code: "● Update(arquivo)" / "⎿ resumo" / diff numerado) ou 'chips' (a pele portada do
 // beautiful-ui: uma linha por chamada, o argumento num chip, o detalhe abrindo embaixo, e a faixa
 // de chips de diff no fim da rodada).
 //
@@ -11,11 +12,14 @@
 // Mesmo padrão do navMode/sidebarPrefs: chave no localStorage + $state, reage na hora, sem reload.
 const LOOK_KEY = 'cp_tool_look';
 
-export type ToolLook = 'classico' | 'chips';
+export type ToolLook = 'classico' | 'chips' | 'terminal';
 
 // Ausência de chave = 'classico': ninguém é migrado por acidente.
 function loadLook(): ToolLook {
-  try { return localStorage.getItem(LOOK_KEY) === 'chips' ? 'chips' : 'classico'; } catch { return 'classico'; }
+  try {
+    const v = localStorage.getItem(LOOK_KEY);
+    return v === 'chips' || v === 'terminal' ? v : 'classico';
+  } catch { return 'classico'; }
 }
 
 let look = $state<ToolLook>(loadLook());
@@ -25,8 +29,8 @@ export const toolLook = {
   set look(v: ToolLook) {
     look = v;
     try {
-      if (v === 'chips') localStorage.setItem(LOOK_KEY, 'chips');
-      else localStorage.removeItem(LOOK_KEY);
+      if (v === 'classico') localStorage.removeItem(LOOK_KEY);
+      else localStorage.setItem(LOOK_KEY, v);
     } catch { /* modo privado: vale pela sessão */ }
   },
 };

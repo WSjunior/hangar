@@ -3071,6 +3071,8 @@ async def _trocar_conta(name: str, destino: str | None, *, engine_account: str |
                 if info.engine:
                     changes.update(engine=None, engine_account=None, engine_credential_id=None,
                                    engine_account_base_url=None, model=None, context_window=None)
+                # Confiança na pasta é por conta: sem isto o terminal (agora ou na troca de modo) abre no aviso, em "No, exit".
+                await asyncio.to_thread(registry_mod._pretrust_cwd, meta["cwd"], destino)
             # O aviso da conta anterior (limite batido, sem login) não vale na nova.
             if headless_sessions.update(name, **changes) is None:
                 raise RuntimeError("não gravei a conta nova no arquivo de estado da sessão")
@@ -3369,7 +3371,7 @@ def loop_create(name: str, body: LoopCreate):
         cur = link.get()
         if cur and cur["status"] in loop_mod.ACTIVE:
             raise HTTPException(409, detail=erro("erro_loop_ja_ativo", "já existe um loop ativo nesta sessão"))
-        br = branch_of(info.cwd) if info.cwd else None
+        br = branch_of(info.git_dir) if info.git_dir else None
         if body.require_branch and br in ("main", "master"):
             raise HTTPException(409, detail=erro("erro_loop_branch_invalida", f"sessão está na branch {br} — crie uma branch ou desligue 'exigir branch'", br=br))
         d = loop_mod.new_loop(body.goal, body.check_cmd, body.max_iters, body.require_branch)
@@ -6908,12 +6910,21 @@ class GitCommitBody(_StrictBody):
     new_branch: str | None = None
 
 
-def _session_cwd(name: str) -> str:
-    # cwd da sessao tmux (mesmo lookup do upload). 404 se a sessao/cwd nao existe.
+def _session_info_with_cwd(name: str):
+    # Mesmo lookup do upload. 404 se a sessão ou o cwd não existe.
     info = _cached_info_sync(name)
     if info is None or not info.cwd:
         raise HTTPException(404, detail=erro("erro_sessao_inexistente", "sessao nao encontrada"))
-    return info.cwd
+    return info
+
+
+def _session_cwd(name: str) -> str:
+    return _session_info_with_cwd(name).cwd
+
+
+def _session_git_cwd(name: str) -> str:
+    """O git segue o agente até a worktree; arquivos, uploads e execução ficam no cwd."""
+    return _session_info_with_cwd(name).git_dir
 
 
 @app.get("/api/sessions/{name}/plan", dependencies=[Depends(require_auth)])
@@ -7094,7 +7105,7 @@ async def session_plan_archive(name: str, body: PlanArchiveBody):
 @app.get("/api/sessions/{name}/branches", dependencies=[Depends(require_auth)])
 def branches(name: str):
     try:
-        return list_branches(_session_cwd(name))
+        return list_branches(_session_git_cwd(name))
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7102,7 +7113,7 @@ def branches(name: str):
 @app.post("/api/sessions/{name}/checkout", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def checkout(name: str, body: CheckoutBody):
     try:
-        return switch_branch(_session_cwd(name), body.branch)
+        return switch_branch(_session_git_cwd(name), body.branch)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7110,7 +7121,7 @@ def checkout(name: str, body: CheckoutBody):
 @app.post("/api/sessions/{name}/git", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def git(name: str, body: GitActionBody):
     try:
-        return git_action(_session_cwd(name), body.action)
+        return git_action(_session_git_cwd(name), body.action)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7118,7 +7129,7 @@ def git(name: str, body: GitActionBody):
 @app.get("/api/sessions/{name}/git/files", dependencies=[Depends(require_auth)])
 def git_files(name: str):
     try:
-        cwd = _session_cwd(name)
+        cwd = _session_git_cwd(name)
         # sequencer: revert/cherry-pick em andamento (conflito) — o front deriva o botao de abort
         # DAQUI, nao de memoria de sessao (ver gitStore.svelte.ts:pendingAbort).
         return {"files": changed_files(cwd), "sequencer": sequencer_state(cwd)}
@@ -7129,7 +7140,7 @@ def git_files(name: str):
 @app.get("/api/sessions/{name}/git/log", dependencies=[Depends(require_auth)])
 def git_log_route(name: str, q: str | None = None, n: int = 50):
     try:
-        cwd = _session_cwd(name)
+        cwd = _session_git_cwd(name)
         # `n` vem do "carregar mais" da coluna: a lista pede o dobro a cada vez. Teto de 2000 pra
         # uma URL forjada não fazer o git montar o histórico inteiro de um repo grande.
         commits = git_log(cwd, n=max(1, min(n, 2000)), grep=q)
@@ -7145,7 +7156,7 @@ def git_log_route(name: str, q: str | None = None, n: int = 50):
 @app.post("/api/sessions/{name}/git/diff", dependencies=[Depends(require_auth), Depends(_transfer_check)])
 def git_diff(name: str, body: GitPathBody):
     try:
-        return file_diff(_session_cwd(name), body.path)
+        return file_diff(_session_git_cwd(name), body.path)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7153,7 +7164,7 @@ def git_diff(name: str, body: GitPathBody):
 @app.post("/api/sessions/{name}/git/discard", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def git_discard(name: str, body: GitPathBody):
     try:
-        return discard_file(_session_cwd(name), body.path)
+        return discard_file(_session_git_cwd(name), body.path)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7161,7 +7172,7 @@ def git_discard(name: str, body: GitPathBody):
 @app.post("/api/sessions/{name}/git/commit", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def git_commit(name: str, body: GitCommitBody):
     try:
-        return commit(_session_cwd(name), body.message, body.paths, body.amend, body.new_branch)
+        return commit(_session_git_cwd(name), body.message, body.paths, body.amend, body.new_branch)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7169,7 +7180,7 @@ def git_commit(name: str, body: GitCommitBody):
 @app.get("/api/sessions/{name}/git/last-message", dependencies=[Depends(require_auth)])
 def git_last_message(name: str):
     try:
-        return last_commit_message(_session_cwd(name))
+        return last_commit_message(_session_git_cwd(name))
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7177,7 +7188,7 @@ def git_last_message(name: str):
 @app.get("/api/sessions/{name}/git/commit/{sha}/files", dependencies=[Depends(require_auth)])
 def git_commit_files(name: str, sha: str):
     try:
-        return {"files": commit_files(_session_cwd(name), sha)}
+        return {"files": commit_files(_session_git_cwd(name), sha)}
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7185,7 +7196,7 @@ def git_commit_files(name: str, sha: str):
 @app.get("/api/sessions/{name}/git/commit/{sha}/diff", dependencies=[Depends(require_auth)])
 def git_commit_diff(name: str, sha: str, path: str):
     try:
-        return commit_file_diff(_session_cwd(name), sha, path)
+        return commit_file_diff(_session_git_cwd(name), sha, path)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7214,7 +7225,7 @@ class GitTagBody(_StrictBody):
 @app.get("/api/sessions/{name}/git/commit/{sha}/diff-full", dependencies=[Depends(require_auth)])
 def git_commit_diff_full(name: str, sha: str):
     try:
-        return commit_diff(_session_cwd(name), sha)
+        return commit_diff(_session_git_cwd(name), sha)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7222,7 +7233,7 @@ def git_commit_diff_full(name: str, sha: str):
 @app.post("/api/sessions/{name}/git/revert", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def git_revert(name: str, body: GitShaBody):
     try:
-        return revert_commit(_session_cwd(name), body.sha)
+        return revert_commit(_session_git_cwd(name), body.sha)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7230,7 +7241,7 @@ def git_revert(name: str, body: GitShaBody):
 @app.post("/api/sessions/{name}/git/cherry-pick", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def git_cherry_pick(name: str, body: GitShaBody):
     try:
-        return cherry_pick(_session_cwd(name), body.sha)
+        return cherry_pick(_session_git_cwd(name), body.sha)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7238,7 +7249,7 @@ def git_cherry_pick(name: str, body: GitShaBody):
 @app.post("/api/sessions/{name}/git/push", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def git_push(name: str):
     try:
-        return push_branch(_session_cwd(name))
+        return push_branch(_session_git_cwd(name))
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7246,7 +7257,7 @@ def git_push(name: str):
 @app.post("/api/sessions/{name}/git/reset", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def git_reset(name: str, body: GitResetBody):
     try:
-        return reset_to(_session_cwd(name), body.sha, body.mode)
+        return reset_to(_session_git_cwd(name), body.sha, body.mode)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7254,7 +7265,7 @@ def git_reset(name: str, body: GitResetBody):
 @app.post("/api/sessions/{name}/git/branch", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def git_branch_create(name: str, body: GitBranchBody):
     try:
-        return create_branch_at(_session_cwd(name), body.name, body.sha, body.switch_after)
+        return create_branch_at(_session_git_cwd(name), body.name, body.sha, body.switch_after)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7262,7 +7273,7 @@ def git_branch_create(name: str, body: GitBranchBody):
 @app.post("/api/sessions/{name}/git/tag", dependencies=[Depends(require_auth), Depends(_transfer_guard)])
 def git_tag_create(name: str, body: GitTagBody):
     try:
-        return create_tag(_session_cwd(name), body.name, body.sha, body.message)
+        return create_tag(_session_git_cwd(name), body.name, body.sha, body.message)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7270,7 +7281,7 @@ def git_tag_create(name: str, body: GitTagBody):
 @app.get("/api/sessions/{name}/git/commit/{sha}/diff-worktree", dependencies=[Depends(require_auth)])
 def git_commit_diff_worktree(name: str, sha: str):
     try:
-        return diff_vs_worktree(_session_cwd(name), sha)
+        return diff_vs_worktree(_session_git_cwd(name), sha)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7278,7 +7289,7 @@ def git_commit_diff_worktree(name: str, sha: str):
 @app.get("/api/sessions/{name}/git/commit/{sha}/branches", dependencies=[Depends(require_auth)])
 def git_commit_branches(name: str, sha: str):
     try:
-        return branches_containing(_session_cwd(name), sha)
+        return branches_containing(_session_git_cwd(name), sha)
     except GitError as e:
         raise HTTPException(e.status, e.detail)
 
@@ -7398,7 +7409,7 @@ def files_resolver(name: str, body: ResolverBody):
 @app.post("/api/sessions/{name}/git/path-diff", dependencies=[Depends(require_auth), Depends(_transfer_check)])
 def git_path_diff(name: str, body: GitPathDiffBody):
     try:
-        return git_ops.path_diff(_session_cwd(name), body.path, body.escopo)
+        return git_ops.path_diff(_session_git_cwd(name), body.path, body.escopo)
     except GitError as e:
         _log.warning("path-diff: %s", git_ops._scrub(str(e)))
         d = erro("erro_git_diff", _MSG_DIFF)

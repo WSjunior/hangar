@@ -5,7 +5,7 @@ import {
   projectKey, projectLabel, encodeCompareIds, parseCompareIds, latestAssistantEvent, resetsIn, relativeTime,
   clusterByPair, railLabel, sortSessions, bubblesFromTail, ctxWindow, fileKind, fmtBytes, providerName, providerTag, isOrq,
   untrackedReason,
-  summarizeText, summarizeToolInput, summarizeToolResult, toolPhase, toolGroupLabel, toolGroupCounts, toolGroupTitulo, toolVerbo,
+  summarizeText, summarizeToolInput, summarizeToolResult, toolPhase, toolGroupLabel, toolGroupCounts, toolGroupTitulo, splitTerminalRun, toolVerbo,
   rotuloEstado,
   splitTodoBlock, parseImageMessage, parseCanal, parseRealtimeDelegation, parsePeerMessage, basename,
   parseFilePaths, separarComando, nomeFerramenta,
@@ -1097,5 +1097,29 @@ describe('formatElapsed', () => {
     overwriteGetLocale(() => 'pt');
     expect([undefined, null, -1, NaN].map(formatElapsed)).toEqual(['—', '—', '—', '—']);
     expect([0, 59, 60, 3599, 5400].map(formatElapsed)).toEqual(['0 s', '59 s', '1 min', '59 min', '1 h 30 min']);
+  });
+});
+
+describe('splitTerminalRun', () => {
+  const t = (tool_name: string, state: 'done' | 'error' | 'running' = 'done') => ({ tool_name, state });
+  const settled = (x: { state: string }) => x.state === 'done';
+  const shape = (run: ReturnType<typeof t>[]) =>
+    splitTerminalRun(run, settled).map((p) => (p.kind === 'reads' ? p.tools.map((x) => x.tool_name) : p.tool.tool_name));
+
+  it('leituras e buscas seguidas viram um bloco; edição e comando ficam soltos', () => {
+    const run = [t('Read'), t('Grep'), t('Edit'), t('Glob'), t('Bash'), t('Read')];
+    expect(shape(run)).toEqual([['Read', 'Grep'], 'Edit', ['Glob'], 'Bash', ['Read']]);
+  });
+
+  it('leitura com erro no meio parte o bloco em dois', () => {
+    expect(shape([t('Read'), t('Read', 'error'), t('Grep')])).toEqual([['Read'], 'Read', ['Grep']]);
+  });
+
+  it('leitura ainda rodando fica solta', () => {
+    expect(shape([t('Read'), t('Grep', 'running')])).toEqual([['Read'], 'Grep']);
+  });
+
+  it('lista vazia devolve lista vazia', () => {
+    expect(splitTerminalRun([], settled)).toEqual([]);
   });
 });

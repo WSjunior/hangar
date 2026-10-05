@@ -7,11 +7,11 @@ publish = false
 [dependencies]
 gpui-kit = { version = "=0.7.0", features = [
     "tree-sitter-bash", "tree-sitter-c", "tree-sitter-cpp", "tree-sitter-csharp",
-    "tree-sitter-css", "tree-sitter-go", "tree-sitter-html", "tree-sitter-java",
-    "tree-sitter-javascript", "tree-sitter-kotlin", "tree-sitter-lua", "tree-sitter-markdown",
-    "tree-sitter-php", "tree-sitter-python", "tree-sitter-ruby", "tree-sitter-rust",
-    "tree-sitter-sql", "tree-sitter-svelte", "tree-sitter-swift", "tree-sitter-toml",
-    "tree-sitter-tsx", "tree-sitter-typescript", "tree-sitter-yaml",
+    "tree-sitter-css", "tree-sitter-diff", "tree-sitter-elixir", "tree-sitter-go", "tree-sitter-html",
+    "tree-sitter-java", "tree-sitter-javascript", "tree-sitter-kotlin", "tree-sitter-lua", "tree-sitter-make",
+    "tree-sitter-markdown", "tree-sitter-php", "tree-sitter-python", "tree-sitter-ruby", "tree-sitter-rust",
+    "tree-sitter-scala", "tree-sitter-sql", "tree-sitter-svelte", "tree-sitter-swift", "tree-sitter-toml",
+    "tree-sitter-tsx", "tree-sitter-typescript", "tree-sitter-yaml", "tree-sitter-zig",
 ] }
 tokio = { version = "=1.53.1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 reqwest = { version = "=0.13.4", default-features = false, features = ["rustls", "json", "stream"] }
@@ -34,6 +34,12 @@ notify = "=7.0.0"
 cpal = "=0.18.2"
 notify-rust = "=4.18.0"
 symphonia = { version = "=0.5.4", features = ["mp3", "aac", "isomp4"] }
+tree-sitter = "=0.26.13"
+tree-sitter-c-sharp = "=0.23.5"
+tree-sitter-swift = "=0.7.3"
+tree-sitter-pascal = "=0.10.2"
+tree-sitter-dart = "=0.2.0"
+tree-sitter-kotlin-sg = "=0.4.1"
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 wry = "=0.55.1"
@@ -41,12 +47,17 @@ wry = "=0.55.1"
 [target.'cfg(target_os = "windows")'.dependencies]
 # Mesmas versões que o wry já usa: tipos COM de versões diferentes não se misturam.
 webview2-com = "=0.38.2"
-windows = "=0.61.3"
+windows = { version = "=0.61.3", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # O navegador é um Chromium sem janela: o pipe do CDP vai nos fd 3 e 4 dele, e o quadro numa textura do device da GPUI.
 libc = "=0.2.189"
 gpui-pre-wgpu = "=0.3.7"
+# Ícone na bandeja (StatusNotifierItem) sobre o zbus que o notify-rust já traz. Sem a feature padrão `tokio`: ela
+# trocaria o executor do zbus para todos os usuários dele.
+ksni = { version = "=0.3.6", default-features = false, features = ["async-io", "blocking"] }
+# O mesmo zbus do ksni, para perguntar à bandeja se há uma barra hospedando os ícones.
+zbus = { version = "=5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
 
 [build-dependencies]
 embed-resource = "=3.0.11"

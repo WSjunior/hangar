@@ -105,6 +105,10 @@ pub struct WaylandWindowState {
     children: FxHashMap<ObjectId, bool>,
     pub surface: wl_surface::WlSurface,
     app_id: Option<String>,
+    /// Hangar: o desmapeamento descarta os atributos do toplevel; estes voltam ao mostrar a janela de novo.
+    title: Option<String>,
+    min_size: Option<Size<Pixels>>,
+    hidden: bool,
     appearance: WindowAppearance,
     blur: Option<org_kde_kwin_blur::OrgKdeKwinBlur>,
     viewport: Option<wp_viewport::WpViewport>,
@@ -582,9 +586,14 @@ impl WaylandWindowState {
             WgpuRenderer::new(gpu_context, &raw_window, config, compositor_gpu)?
         };
 
+        let title = options
+            .titlebar
+            .and_then(|titlebar| titlebar.title)
+            .map(|title| title.to_string());
+        let min_size = options.window_min_size;
         if let WaylandSurfaceState::Xdg(ref xdg_state) = surface_state {
-            if let Some(title) = options.titlebar.and_then(|titlebar| titlebar.title) {
-                xdg_state.toplevel.set_title(title.to_string());
+            if let Some(title) = title.clone() {
+                xdg_state.toplevel.set_title(title);
             }
 
             if let Some(app_id) = options.app_id.as_ref() {
@@ -605,6 +614,9 @@ impl WaylandWindowState {
             children: FxHashMap::default(),
             surface,
             app_id: options.app_id,
+            title,
+            min_size,
+            hidden: false,
             blur: None,
             viewport,
             globals,
@@ -1084,6 +1096,72 @@ impl WaylandWindowStatePtr {
         self.schedule_frame();
     }
 
+    /// Hangar: esconde a janela sem destruir a superfície nem o renderer. O toplevel e o `xdg_surface` são trocados
+    /// por novos na mesma `wl_surface`: assim mostrar de novo é o commit inicial de sempre, com configure garantido.
+    /// Só desmapear com buffer nulo não serve: o Hyprland não manda configure no commit seguinte.
+    /// O app chama isto de dentro do aviso de fechar, com `callbacks` emprestado: nada aqui pode tocar neles.
+    pub fn set_hidden(&self, hidden: bool) {
+        let mut state = self.state.borrow_mut();
+        // Só a janela principal: diálogo e janela com pai voltariam sem o vínculo.
+        let main_window = state.parent.is_none()
+            && matches!(&state.surface_state, WaylandSurfaceState::Xdg(xdg) if xdg.dialog.is_none());
+        if state.hidden == hidden || !main_window {
+            return;
+        }
+        state.hidden = hidden;
+        if hidden {
+            state.pending_frame_callback = None;
+            state.in_progress_configure = None;
+            // A superfície volta a não ter buffer: uma falha no primeiro quadro tem de repetir por timer.
+            state.presentation = PresentationState::Unpresented;
+            if let Some(decoration) = state.surface_state.decoration() {
+                decoration.destroy();
+            }
+            state.surface_state.destroy();
+            // Um `xdg_surface` novo exige a superfície sem buffer.
+            state.surface.attach(None, 0, 0);
+            state.surface.commit();
+            let id = state.surface.id();
+            let xdg_surface = state
+                .globals
+                .wm_base
+                .get_xdg_surface(&state.surface, &state.globals.qh, id.clone());
+            let toplevel = xdg_surface.get_toplevel(&state.globals.qh, id.clone());
+            let decoration = state
+                .globals
+                .decoration_manager
+                .as_ref()
+                .map(|manager| manager.get_toplevel_decoration(&toplevel, &state.globals.qh, id));
+            state.surface_state = WaylandSurfaceState::Xdg(WaylandXdgSurfaceState {
+                xdg_surface,
+                toplevel,
+                decoration,
+                dialog: None,
+            });
+            // Sem configure não há quadro: retry e callback em voo viram no-op até a janela voltar.
+            self.frame_loop.set(FrameLoop::Unconfigured);
+            return;
+        }
+        if let Some(toplevel) = state.surface_state.toplevel() {
+            if let Some(title) = state.title.clone() {
+                toplevel.set_title(title);
+            }
+            if let Some(app_id) = state.app_id.clone() {
+                toplevel.set_app_id(app_id);
+            }
+            if let Some(size) = state.min_size {
+                toplevel.set_min_size(f32::from(size.width) as i32, f32::from(size.height) as i32);
+            }
+            let max = state.renderer.max_texture_size() as i32;
+            toplevel.set_max_size(max, max);
+        }
+        if let Some(decoration) = state.surface_state.decoration() {
+            decoration.set_mode(state.decorations.to_xdg());
+        }
+        state.redraw_requested = true;
+        state.surface.commit();
+    }
+
     fn update_ime_enabled(&self) {
         let mut state = self.state.borrow_mut();
         if !state.active {
@@ -1111,6 +1189,10 @@ impl WaylandWindowStatePtr {
     }
 
     pub fn handle_xdg_surface_event(&self, event: xdg_surface::Event) {
+        // Hangar: configure do `xdg_surface` antigo não pode ser confirmado no novo.
+        if self.state.borrow().hidden {
+            return;
+        }
         if let xdg_surface::Event::Configure { serial } = event {
             {
                 let mut state = self.state.borrow_mut();
@@ -1238,6 +1320,10 @@ impl WaylandWindowStatePtr {
     }
 
     pub fn handle_toplevel_event(&self, event: xdg_toplevel::Event) -> bool {
+        // Hangar: escondida, o que chega é resto do toplevel que `set_hidden` destruiu; o novo só fala depois do commit.
+        if self.state.borrow().hidden {
+            return false;
+        }
         match event {
             xdg_toplevel::Event::Configure {
                 width,
@@ -1867,9 +1953,11 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn set_title(&mut self, title: &str) {
-        if let Some(toplevel) = self.borrow().surface_state.toplevel() {
+        let mut state = self.borrow_mut();
+        if let Some(toplevel) = state.surface_state.toplevel() {
             toplevel.set_title(title.to_string());
         }
+        state.title = Some(title.to_string());
     }
 
     fn set_app_id(&mut self, app_id: &str) {
@@ -1908,6 +1996,10 @@ impl PlatformWindow for WaylandWindow {
         if let Some(toplevel) = self.borrow().surface_state.toplevel() {
             toplevel.set_minimized();
         }
+    }
+
+    fn set_hidden(&self, hidden: bool) {
+        self.0.set_hidden(hidden);
     }
 
     fn zoom(&self) {

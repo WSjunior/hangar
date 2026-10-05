@@ -124,11 +124,11 @@ pub enum SurfaceMaterial { Glass, Opaque }
 #[serde(rename_all = "snake_case")]
 pub enum Reading { Auto, None, Text, Sheet }
 
-/// Como a chamada de ferramenta aparece na conversa: linha com nome e resumo, verbo e chip, ou árvore com o
-/// raciocínio dentro do grupo.
+/// Como a chamada de ferramenta aparece na conversa: linha com nome e resumo, verbo e chip, árvore com o
+/// raciocínio dentro do grupo, ou o desenho do terminal do Claude Code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ToolLook { Classic, Chips, Tree }
+pub enum ToolLook { Classic, Chips, Tree, Terminal }
 
 /// Que chamadas feitas no meio do raciocínio ficam dentro do bloco do pensamento.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,6 +254,8 @@ pub struct Appearance {
     pub code_font: CodeFont,
     /// Meio pixel por unidade, para permitir 12,5 px sem arredondar o controle.
     pub code_size: u16,
+    /// Geral: fechar a janela esconde o app na bandeja em vez de encerrar.
+    pub keep_in_tray: bool,
 }
 
 const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeMode::Dark, palette: Palette::Classic,
@@ -264,7 +266,7 @@ const DEFAULT: Appearance = Appearance { panels: Panels::Attached, theme: ThemeM
     side_width: 300., side_browser_width: None, terminal_height: 260.,
     tool_look: ToolLook::Classic, task_list: false, thinking_tools: ThinkingTools::Search, table_chart: false, ask_highlight: AskHighlight::Accent,
     language: Language::System, currency: Currency::Usd, hands_free: false, skip_chat_confirmations: false, accounts_compact: false, sidebar_group: SidebarGroup::None, side_tab: SideTab::Context,
-    terminal_font: CodeFont::JetBrainsMono, terminal_size: 12, code_font: CodeFont::JetBrainsMono, code_size: 25 };
+    terminal_font: CodeFont::JetBrainsMono, terminal_size: 12, code_font: CodeFont::JetBrainsMono, code_size: 25, keep_in_tray: false };
 
 impl Default for Appearance {
     fn default() -> Self { DEFAULT }
@@ -286,7 +288,7 @@ impl Appearance {
             thinking_tools: self.thinking_tools, table_chart: self.table_chart, navigation: self.navigation, sidebar_width: self.sidebar_width, sidebar_compact: self.sidebar_compact, live_corner: self.live_corner,
             side_width: self.side_width, side_browser_width: self.side_browser_width, terminal_height: self.terminal_height,
             language: self.language, currency: self.currency, hands_free: self.hands_free, skip_chat_confirmations: self.skip_chat_confirmations, accounts_compact: self.accounts_compact, sidebar_group: self.sidebar_group, side_tab: self.side_tab,
-            code_font: self.code_font, terminal_font: self.terminal_font,
+            code_font: self.code_font, terminal_font: self.terminal_font, keep_in_tray: self.keep_in_tray,
             ..Self::default() }
     }
 
@@ -374,6 +376,12 @@ pub fn save_image_name(name: Option<&str>) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Aviso de "continua na bandeja": `true` só na primeira vez que a janela é escondida neste computador. Bloqueante.
+pub fn take_tray_notice() -> bool {
+    let Some(file) = dir().map(|dir| dir.join("tray-notice")) else { return false };
+    !file.exists() && std::fs::write(file, "1").is_ok()
+}
+
 /// A raiz escolhida por último em Nova sessão, como o `cp:last-root` do web; falha de disco só faz esquecer. Bloqueantes.
 pub fn last_root() -> Option<String> { std::fs::read_to_string(dir()?.join("last-root")).ok().map(|s| s.trim().to_owned()) }
 
@@ -455,6 +463,16 @@ mod tests {
     use super::*;
     // O glob pode trazer o `test` da gpui, que colide com o atributo padrão; o nome explícito vence o glob.
     use core::prelude::v1::test;
+
+    #[test]
+    fn file_from_before_the_tray_option_opens_with_it_off() {
+        let old: Appearance = serde_json::from_str("{}").unwrap();
+        assert!(!old.keep_in_tray);
+        let on: Appearance = serde_json::from_str(r#"{"keep_in_tray": true}"#).unwrap();
+        assert!(on.keep_in_tray);
+        // É de Geral: o "Voltar ao padrão" da Aparência não desliga.
+        assert!(on.reset_keeping_choices().keep_in_tray);
+    }
 
     #[test]
     fn compact_style_preserves_other_choices_and_keeps_adjustments_after_reload() {
@@ -624,6 +642,8 @@ mod tests {
         assert_eq!((reset.tool_look, reset.task_list, reset.thinking_tools, reset.table_chart), (ToolLook::Chips, true, ThinkingTools::All, true));
         let parsed: Appearance = serde_json::from_str(r#"{"tool_look":"chips","thinking_tools":"none"}"#).unwrap();
         assert_eq!((parsed.tool_look, parsed.thinking_tools), (ToolLook::Chips, ThinkingTools::None));
+        let terminal: Appearance = serde_json::from_str(r#"{"tool_look":"terminal"}"#).unwrap();
+        assert_eq!(terminal.tool_look, ToolLook::Terminal);
     }
 
     #[test]

@@ -90,7 +90,7 @@ async function fromApp($: EngineInterface, requestId: string, element: string): 
   return typeof attempt === "string" && attempt ? attempt : null;
 }
 
-/** Espelha no Hangar a faixa acima do prompt e os painéis, os de TODOS os mods.
+/** Espelha no Hangar a faixa acima do prompt, os painéis e os avisos, os de TODOS os mods.
  *
  * `next(e)` devolve a árvore que os plugins abaixo deste e o engine desenharam; ela segue
  * intacta para a tela, e uma cópia vai ao backend. Só a superfície do terminal: com o app da
@@ -119,10 +119,25 @@ export function registerUi(on: On) {
     return tree;
   });
 
+  // Reaberto com as mesmas props, o painel volta com o desenho que o engine guardou, sem `ui.render`:
+  // sem pedir o desenho de novo, o Hangar ficaria sem o painel que o terminal mostra.
+  on("ui.open", async ($, e, next) => {
+    const r = await next(e);
+    if (!panes.has(e.id)) $.ui.invalidate("ui.render");
+    return r;
+  });
+
   on("ui.close", async ($, e, next) => {
     const r = await next(e);
     if (!(r as { deny?: unknown } | undefined)?.deny && panes.delete(e.id)) schedule($);
     return r;
+  });
+
+  // O aviso só é desenhado no terminal e não entra no transcript: sem a cópia, quem acompanha a
+  // sessão pelo app não o vê. Leva o nome do mod que o emitiu, que é o título da caixa no terminal.
+  on("ui.toast", async ($, e, next) => {
+    void post($, "toast", fields({ text: e.text, timeoutMs: e.timeoutMs, plugin: originOf(next) }));
+    return next(e);
   });
 
   on("ui.press", async ($, e, next) => {

@@ -80,7 +80,8 @@ const PAGE_ROWS: &[(Page, &[(&str, Option<&str>)])] = &[
         ("sync_config_desativar", Some("sync_config_desativar_aviso")), ("sync_config_copiar", None)]),
     (Page::Connect, &[("connect_code", Some("connect_code_help"))]),
     (Page::Appearance, &APPEARANCE_ROWS),
-    (Page::General, &[("settings_language", Some("settings_language_desc")), ("settings_currency", Some("settings_currency_search"))]),
+    (Page::General, &[("settings_language", Some("settings_language_desc")), ("settings_currency", Some("settings_currency_search")),
+        ("settings_tray", Some("settings_tray_desc"))]),
     (Page::Diary, &[("settings_diary_rules", Some("settings_diary_rule_private")), ("settings_diary_download", Some("settings_diary_rule_local")),
         ("settings_diary_recent", None)]),
     (Page::About, &[("settings_about_app", None), ("settings_about_server", None), ("settings_about_update", Some("settings_about_update_desc")),
@@ -88,7 +89,8 @@ const PAGE_ROWS: &[(Page, &[(&str, Option<&str>)])] = &[
     (Page::Accounts, &[("accounts_subscriptions", Some("accounts_menu_note")), ("accounts_models", None),
         ("accounts_others", Some("accounts_others_empty")), ("accounts_density", None), ("accounts_refresh", None)]),
     (Page::Orchestration, &[("orchestration_intro", None), ("orchestration_unrestricted", None)]),
-    (Page::Shortcuts, &[("shortcuts_add", Some("shortcuts_lead")), ("shortcuts_restore", Some("shortcuts_restore_help"))]),
+    (Page::Shortcuts, &[("shortcuts_add", Some("shortcuts_lead")), ("shortcuts_restore", Some("shortcuts_restore_help")),
+        ("keyboard_title", Some("keyboard_lead")), ("keyboard_hold_title", Some("keyboard_hold_help"))]),
     (Page::Harnesses, &[("harness_legend", None)]),
     (Page::Voice, &[("voice_transcribe", Some("voice_transcribe_help")), ("voice_groq", Some("voice_groq_help")),
         ("voice_transcription_endpoint", Some("voice_transcription_endpoint_help")), ("voice_transcription_model", Some("voice_transcription_model_help")),
@@ -143,6 +145,8 @@ fn matching(query: &str, texts: &[(String, String)]) -> Vec<usize> {
 
 fn find(query: &str) -> Vec<Found> {
     let rows = PAGE_ROWS.iter().flat_map(|&(page, rows)| rows.iter()
+        // Sem bandeja no sistema a linha não é desenhada.
+        .filter(|(title, _)| crate::tray::SUPPORTED || *title != "settings_tray")
         .map(move |&(title, desc)| (Found { page, row: Some(title) }, tr(title), desc.map(tr).unwrap_or_default())));
     // Páginas que ainda não têm linhas continuam achadas pelo nome e abrem no aviso delas.
     let pages = Page::DEVICE.into_iter().chain(Page::SERVER).map(|page| (Found { page, row: None }, page.title(), String::new()));
@@ -441,6 +445,8 @@ fn swatch_ring(selected: bool) -> Hsla { if selected { theme::text() } else { tr
 
 impl Hangar {
     pub(super) fn open_settings(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_session_numbers(cx);
+        self.keyboard.cancel_edit();
         self.costs.view = None;
         (self.worktrees.view, self.worktrees.open) = (None, None);
         self.settings = Some(page);
@@ -468,6 +474,7 @@ impl Hangar {
 
     pub(super) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings.take().is_some() {
+            self.keyboard.cancel_edit();
             self.accounts_page_left();
             self.sync_page_left();
             self.connect_page_left();
@@ -561,6 +568,7 @@ impl Hangar {
             self.list_state.remeasure();
             self.restyle_subagent(cx);
         }
+        if before.keep_in_tray != next.keep_in_tray { self.sync_tray(cx); }
         if save {
             let (connection, tx) = (self.connection, self.tx.clone());
             self.runtime.spawn(async move {
@@ -1044,6 +1052,12 @@ mod tests {
         assert_eq!(matching("hyprland", &texts), vec![1]);
         assert!(matching("  ", &texts).is_empty());
         assert!(matching("nada disso", &texts).is_empty());
+    }
+
+    #[test]
+    fn general_search_finds_the_tray_option() {
+        let (_, rows) = super::PAGE_ROWS.iter().find(|(page, _)| *page == super::Page::General).expect("Geral na busca");
+        assert!(rows.iter().any(|(row, _)| *row == "settings_tray"), "settings_tray fora da busca");
     }
 
     #[test]

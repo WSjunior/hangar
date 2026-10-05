@@ -1173,10 +1173,11 @@ impl Hangar {
     /// O git da sessão aberta, lido do disco ou pelas rotas; `expand` faz dele a lista estreita da aba.
     fn new_git_panel(&self, expand: Option<Rc<dyn Fn(&mut Window, &mut App)>>, window: &mut Window, cx: &mut Context<Self>) -> Option<Entity<GitPanel>> {
         let (Some(api), Some(session)) = (self.session_api(), self.selected.clone()) else { return None };
+        let dir = session.git_dir();
         let title = folder_name(&session).unwrap_or_else(|| session.name.clone());
         let runtime = self.runtime.clone();
         // Servidor nesta máquina e a pasta existe aqui: o git roda direto no disco, pela pasta real da sessão.
-        let here = session.cwd.as_deref().filter(|_| api.is_loopback()).and_then(|cwd| self.local_dirs.get(cwd).cloned().flatten());
+        let here = dir.filter(|_| api.is_loopback()).and_then(|dir| self.local_dirs.get(dir).cloned().flatten());
         let source = match here { Some(cwd) => Source::Local(Arc::new(cwd)), None => Source::Remote(api, session.name.clone()) };
         let panel = cx.new(|cx| GitPanel::new(source, runtime, session.name.clone(), title, expand, window, cx));
         panel.update(cx, |panel, cx| panel.load(window, cx));

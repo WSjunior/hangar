@@ -360,6 +360,7 @@
       options={[
         { v: 'classico', label: m.config_aparencia_classico(), aria: m.config_aparencia_classico_aria() },
         { v: 'chips', label: m.config_aparencia_chips(), aria: m.config_aparencia_chips_aria() },
+        { v: 'terminal', label: m.config_aparencia_terminal(), aria: m.config_aparencia_terminal_aria() },
       ]}
       ariaLabel={m.config_aparencia_chamadas()}
       onPick={(v) => { toolLook.look = v as ToolLook; }}

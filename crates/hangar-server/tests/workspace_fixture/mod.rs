@@ -43,7 +43,7 @@ impl Fixture {
 pub async fn fixture(root: &std::path::Path, context_ok: bool) -> Fixture {
     let hits = Arc::new(AtomicUsize::new(0));
     let diags: Diags = Arc::default();
-    let context = json!({"roots":[root],"sessions":[{"name":"fixture","cwd":root}],"session":{"name":"fixture","cwd":root,"jsonl":root.join("fixture.jsonl")}});
+    let context = json!({"roots":[root],"sessions":[{"name":"fixture","cwd":root}],"session":{"name":"fixture","cwd":root,"jsonl":root.join("fixture.jsonl"),"git_cwd":root}});
     let worktrees = json!({"roots":[root],"cwds":[root.join("repo")],"sessions":[{"name":"fixture","cwd":root.join("repo-wt")}],"project_bases":[]});
     let app = Router::new()
         .route(

@@ -112,6 +112,9 @@ class SessionInfo(BaseModel):
     # fora de worktree. `worktree_gone`: ele estava numa worktree que não existe mais.
     worktree_path: Optional[str] = None
     worktree_gone: bool = False
+    # Raiz do repositório onde o agente trabalha quando ele saiu do da pasta de abertura (worktree
+    # irmã por `cd`/caminho absoluto, `EnterWorktree`). É onde o git da sessão é lido; None = o cwd.
+    git_cwd: Optional[str] = None
     # Estado de git do cwd, decorado em list_with_state (git_summary, cacheado). dirty = arquivos
     # não-commitados; ahead = commits não-pushados (None sem upstream real); behind idem. Non-repo
     # -> tudo None (sem badge no painel).
@@ -201,6 +204,11 @@ class SessionInfo(BaseModel):
     # ha plan_name — este campo e o que o mantem na tela pra dar o caminho de volta.
     plan_hidden: Optional[bool] = None
 
+    @property
+    def git_dir(self) -> Optional[str]:
+        """Onde o git da sessão roda: a worktree do agente, ou o cwd."""
+        return self.git_cwd or self.cwd
+
 
 class ChatEvent(BaseModel):
     kind: ChatKind
@@ -211,6 +219,9 @@ class ChatEvent(BaseModel):
     tool_use_id: Optional[str] = None
     result: Optional[str] = None
     is_error: Optional[bool] = None
+    # Só em tool_result de Edit/Write do Claude: os trechos que o próprio Claude Code calculou, com
+    # a linha real do arquivo. Sem isto o app só sabe numerar a partir do trecho trocado.
+    patch: Optional[list[dict]] = None
     ts: Optional[float] = None
     # Cache de prompt (só em assistant_msg): quantos tokens o turno LEU do cache e qual a janela
     # de expiração em segundos. O TTL não é chute — o usage do transcript separa
