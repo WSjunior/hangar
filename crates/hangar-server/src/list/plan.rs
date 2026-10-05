@@ -3,7 +3,6 @@
 //!
 //! Roda por sessão a cada rodada da lista, então tudo é cacheado e nada levanta: uma falha aqui
 //! derrubaria a lista inteira. Arquivo ilegível é avisado no log e o plano some da linha.
-use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -11,6 +10,8 @@ use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hangar_api::session::SessionRow;
+
+use super::capped::Capped;
 use regex::bytes::Regex;
 
 /// Quantos níveis subir do cwd atrás da pasta de planos; a subida para no primeiro `.git`, senão
@@ -46,11 +47,11 @@ pub struct Plan {
 #[derive(Default)]
 pub struct PlanTracker {
     /// (arquivo, exige começado) → (mtime, plano). O `None` memoriza "li e não serve".
-    files: HashMap<(PathBuf, bool), (SystemTime, Option<Plan>)>,
+    files: Capped<(PathBuf, bool), (SystemTime, Option<Plan>)>,
     /// pasta de planos → (relógio monotônico, eleito).
-    discovery: HashMap<PathBuf, (f64, Option<PathBuf>)>,
+    discovery: Capped<PathBuf, (f64, Option<PathBuf>)>,
     /// Eleito anterior: mantém o posto enquanto tiver step pendente.
-    sticky: HashMap<PathBuf, PathBuf>,
+    sticky: Capped<PathBuf, PathBuf>,
 }
 
 impl PlanTracker {
@@ -93,7 +94,9 @@ impl PlanTracker {
                     path
                 }
                 Err(e) => {
-                    tracing::warn!(root = %root.display(), error = %e, "pasta de planos ilegivel");
+                    if crate::warn_limit::allow(None, "list_plan_dir_unreadable") {
+                        tracing::warn!(code = "list_plan_dir_unreadable", kind = ?e.kind(), "pasta de planos ilegivel");
+                    }
                     return None;
                 }
             },
@@ -102,7 +105,7 @@ impl PlanTracker {
         match self.load(&path, m, true) {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "plano ilegivel");
+                plan_unreadable(&e);
                 None
             }
         }
@@ -134,7 +137,7 @@ impl PlanTracker {
                 Ok(meta) => meta,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
                 Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "plano ilegivel");
+                    plan_unreadable(&e);
                     continue;
                 }
             };
@@ -151,7 +154,7 @@ impl PlanTracker {
             match loaded {
                 Ok(Some((m, p))) => cands.push((m, path, p.complete)),
                 Ok(None) => {}
-                Err(e) => tracing::warn!(path = %path.display(), error = %e, "plano ilegivel"),
+                Err(e) => plan_unreadable(&e),
             }
         }
         if let Some(prev) = self.sticky.get(root) {
@@ -171,6 +174,13 @@ impl PlanTracker {
             self.sticky.insert(root.to_path_buf(), path.clone());
         }
         Ok(chosen)
+    }
+}
+
+/// Roda a cada tique: um aviso por minuto.
+fn plan_unreadable(e: &io::Error) {
+    if crate::warn_limit::allow(None, "list_plan_unreadable") {
+        tracing::warn!(code = "list_plan_unreadable", kind = ?e.kind(), "plano ilegivel");
     }
 }
 

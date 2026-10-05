@@ -48,6 +48,8 @@ mod linux {
     pub struct ProcFs {
         root: PathBuf,
         cache: Mutex<Option<(Instant, Arc<ChildrenMap>)>>,
+        /// O boot não muda enquanto o processo vive.
+        btime: std::sync::OnceLock<f64>,
     }
 
     impl Default for ProcFs {
@@ -57,7 +59,7 @@ mod linux {
     impl ProcFs {
         /// Raiz trocável só para o teste apontar para um /proc de mentira.
         pub fn with_root(root: impl Into<PathBuf>) -> Self {
-            Self { root: root.into(), cache: Mutex::new(None) }
+            Self { root: root.into(), cache: Mutex::new(None), btime: std::sync::OnceLock::new() }
         }
 
         fn path(&self, pid: i64, leaf: &str) -> PathBuf { self.root.join(pid.to_string()).join(leaf) }
@@ -93,8 +95,13 @@ mod linux {
         }
 
         fn btime(&self) -> Option<f64> {
+            if let Some(b) = self.btime.get() {
+                return Some(*b);
+            }
+            // Só o valor lido fica: uma falha guardada deixaria todo nascimento em branco.
             let raw = std::fs::read_to_string(self.root.join("stat")).ok()?;
-            raw.lines().find_map(|l| l.strip_prefix("btime ")).and_then(|v| v.trim().parse().ok())
+            let b = raw.lines().find_map(|l| l.strip_prefix("btime ")).and_then(|v| v.trim().parse().ok())?;
+            Some(*self.btime.get_or_init(|| b))
         }
     }
 
@@ -151,32 +158,58 @@ mod linux {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+// Compilado também no teste do Linux: é a única plataforma onde o CI local roda.
+#[cfg(any(not(target_os = "linux"), test))]
 mod other {
     use super::*;
     use std::sync::Mutex;
     use std::time::Instant;
     use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
-    /// O ramo `psutil` do `procinfo.py`.
+    struct Snapshot {
+        system: System,
+        /// Quando a tabela inteira foi relida (com argv e ambiente) e o mapa que saiu dela.
+        cache: Option<(Instant, Arc<ChildrenMap>)>,
+        /// Pids lidos por inteiro nesse retrato; um relido sozinho só tem o que aquela leitura pediu.
+        full: std::collections::HashSet<Pid>,
+    }
+
+    /// O ramo `psutil` do `procinfo.py`. No Windows toda releitura, mesmo de um pid, tira o retrato
+    /// de todos os processos (`CreateToolhelp32Snapshot`): uma por tique serve argv, ambiente e
+    /// nascimento de todos os pids da rodada.
     pub struct SysInfo {
-        system: Mutex<System>,
-        cache: Mutex<Option<(Instant, Arc<ChildrenMap>)>>,
+        state: Mutex<Snapshot>,
+        #[cfg(test)]
+        pub(super) refreshes: std::sync::atomic::AtomicUsize,
     }
 
     impl Default for SysInfo {
-        fn default() -> Self { Self { system: Mutex::new(System::new()), cache: Mutex::new(None) } }
+        fn default() -> Self {
+            Self {
+                state: Mutex::new(Snapshot { system: System::new(), cache: None, full: Default::default() }),
+                #[cfg(test)]
+                refreshes: Default::default(),
+            }
+        }
     }
 
     impl SysInfo {
-        /// Relê só `pid`, com só o que `kind` pede; `None` = morto ou pid fora do alcance.
-        // ponytail: no Windows cada chamada tira o retrato de todos os processos
-        // (`CreateToolhelp32Snapshot`); se a medição na VM pesar, reler os pids da rodada juntos.
-        fn with<T>(&self, pid: i64, kind: ProcessRefreshKind, read: impl FnOnce(&Process) -> T) -> Option<T> {
+        fn counted(&self) {
+            #[cfg(test)]
+            self.refreshes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        /// Do retrato da rodada quando `from_snapshot` e o pid está nele; senão relê só `pid`, com
+        /// só o que `kind` pede. `None` = morto ou pid fora do alcance.
+        fn with<T>(&self, pid: i64, from_snapshot: bool, kind: ProcessRefreshKind, read: impl FnOnce(&Process) -> T) -> Option<T> {
             let pid = Pid::from_u32(u32::try_from(pid).ok()?);
-            let mut system = self.system.lock().unwrap_or_else(|e| e.into_inner());
-            system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, kind);
-            system.process(pid).map(read)
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let fresh = state.cache.as_ref().is_some_and(|(at, _)| at.elapsed() < CHILDREN_TTL);
+            if !(from_snapshot && fresh && state.full.contains(&pid)) {
+                self.counted();
+                state.system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, kind);
+            }
+            state.system.process(pid).map(read)
         }
     }
 
@@ -184,19 +217,23 @@ mod other {
 
     impl ProcessView for SysInfo {
         fn children(&self, max_age: Duration) -> io::Result<Arc<ChildrenMap>> {
-            let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some((at, map)) = cache.as_ref() {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some((at, map)) = state.cache.as_ref() {
                 if at.elapsed() < max_age {
                     return Ok(map.clone());
                 }
             }
-            let mut system = self.system.lock().unwrap_or_else(|e| e.into_inner());
-            system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
-            if system.processes().is_empty() {
+            self.counted();
+            // `Always`: no macOS o pid sobrevive ao exec, e o argv guardado seria o do shell.
+            let kind = ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always).with_environ(UpdateKind::Always);
+            state.system.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
+            state.full = state.system.processes().keys().copied().collect();
+            if state.full.is_empty() {
+                state.cache = None;
                 return Err(io::Error::other("nenhum processo listado"));
             }
             // Em ordem de pid, como o `psutil.process_iter`; sem pai fica sob 0, como lá.
-            let mut pids: Vec<(i64, i64)> = system.processes().iter()
+            let mut pids: Vec<(i64, i64)> = state.system.processes().iter()
                 .map(|(pid, p)| (as_i64(*pid), p.parent().map_or(0, as_i64))).collect();
             pids.sort_unstable();
             let mut map = ChildrenMap::new();
@@ -204,23 +241,24 @@ mod other {
                 map.entry(ppid).or_default().push(pid);
             }
             let map = Arc::new(map);
-            *cache = Some((Instant::now(), map.clone()));
+            state.cache = Some((Instant::now(), map.clone()));
             Ok(map)
         }
 
         fn argv(&self, pid: i64) -> Vec<String> {
-            self.with(pid, ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+            self.with(pid, true, ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
                 |p| p.cmd().iter().map(|a| a.to_string_lossy().into_owned()).collect()).unwrap_or_default()
         }
 
+        /// Fora do retrato: só a sessão sem terminal com a pasta renomeada pergunta.
         fn cwd(&self, pid: i64) -> Option<PathBuf> {
-            self.with(pid, ProcessRefreshKind::nothing().with_cwd(UpdateKind::Always),
+            self.with(pid, false, ProcessRefreshKind::nothing().with_cwd(UpdateKind::Always),
                 |p| p.cwd().map(|c| c.to_path_buf())).flatten()
         }
 
         fn env_var(&self, pid: i64, name: &str) -> io::Result<Option<OsString>> {
             let prefix = [name.as_bytes(), b"="].concat();
-            let found = self.with(pid, ProcessRefreshKind::nothing().with_environ(UpdateKind::Always), |p| {
+            let found = self.with(pid, true, ProcessRefreshKind::nothing().with_environ(UpdateKind::Always), |p| {
                 // Ambiente vazio é o que o `sysinfo` devolve quando não consegue ler (outro dono).
                 (!p.environ().is_empty()).then(|| p.environ().iter().find_map(|kv| {
                     let value = kv.as_encoded_bytes().strip_prefix(prefix.as_slice())?;
@@ -237,13 +275,68 @@ mod other {
 
         fn start_time(&self, pid: i64) -> Option<f64> {
             // Segundos inteiros: o `psutil` dava fração, o `sysinfo` não tem.
-            self.with(pid, ProcessRefreshKind::nothing(), |p| p.start_time())
+            self.with(pid, true, ProcessRefreshKind::nothing(), |p| p.start_time())
                 .filter(|t| *t > 0).map(|t| t as f64)
         }
 
         /// Fora do Linux o transcript não sai do fd aberto (`procinfo._open_jsonl`): enumerar
         /// handles leva segundos.
         fn fds(&self, _pid: i64) -> Vec<PathBuf> { Vec::new() }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::atomic::Ordering;
+
+        fn sleeper(env: &str) -> std::process::Child {
+            let mut c = if cfg!(windows) {
+                let mut c = std::process::Command::new("ping");
+                c.args(["-n", "30", "127.0.0.1"]);
+                c
+            } else {
+                let mut c = std::process::Command::new("sleep");
+                c.arg("30");
+                c
+            };
+            c.env("HANGAR_PROCS_MARK", env).stdout(std::process::Stdio::null()).spawn().unwrap()
+        }
+
+        /// Depois do exec o argv é o do programa; antes dele, o do pai.
+        fn wait_exec(pid: i64) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let probe = SysInfo::default();
+            while !probe.argv(pid).last().is_some_and(|a| a == "30" || a == "127.0.0.1") && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        #[test]
+        fn one_snapshot_serves_the_round() {
+            let mut a = sleeper("a");
+            let pid_a = i64::from(a.id());
+            wait_exec(pid_a);
+            let procs = SysInfo::default();
+            assert!(procs.children(Duration::ZERO).unwrap().get(&i64::from(std::process::id())).is_some_and(|k| k.contains(&pid_a)));
+            for _ in 0..3 {
+                assert!(procs.argv(pid_a).last().is_some_and(|x| x == "30" || x == "127.0.0.1"));
+                assert_eq!(procs.env_var(pid_a, "HANGAR_PROCS_MARK").unwrap(), Some(OsString::from("a")));
+                assert!(procs.start_time(pid_a).is_some());
+            }
+            assert_eq!(procs.refreshes.load(Ordering::Relaxed), 1, "argv, ambiente e nascimento saem do retrato");
+            // Nascido depois do retrato: relido sozinho, sem esperar o próximo.
+            let mut b = sleeper("b");
+            let pid_b = i64::from(b.id());
+            wait_exec(pid_b);
+            assert!(!procs.argv(pid_b).is_empty());
+            // Relido só com o argv: o ambiente dele ainda não foi lido e não pode sair vazio.
+            assert_eq!(procs.env_var(pid_b, "HANGAR_PROCS_MARK").unwrap(), Some(OsString::from("b")));
+            assert_eq!(procs.refreshes.load(Ordering::Relaxed), 3);
+            for c in [&mut a, &mut b] {
+                c.kill().unwrap();
+                c.wait().unwrap();
+            }
+        }
     }
 }
 
@@ -299,6 +392,8 @@ mod tests {
         assert_eq!(procs.fds(11), [PathBuf::from("/p/s.jsonl")]);
         // 500 ticks / 100 Hz depois do boot em 1000.
         assert_eq!(procs.start_time(11), Some(1005.0));
+        fs::write(root.path().join("stat"), "btime 2000\n").unwrap();
+        assert_eq!(procs.start_time(11), Some(1005.0), "o boot é lido uma vez");
         assert_eq!(procs.argv(99), Vec::<String>::new());
         assert_eq!(procs.start_time(99), None);
     }

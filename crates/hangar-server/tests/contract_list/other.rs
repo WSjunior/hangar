@@ -169,7 +169,13 @@ fn replay(golden: &Value, cases: &[&str]) -> Vec<String> {
                 children = Some((at, Arc::new(scan(&procs))));
             }
             let panes: Vec<Pane> = tick["panes"].as_array().unwrap().iter().map(|p| pane_of(&world.real(p))).collect();
-            let rows = discover_other::discover_rows(&panes, &procs, &children.as_ref().unwrap().1, &mut resolver, &dirs);
+            let found = discover_other::discover_rows(&panes, &procs, &children.as_ref().unwrap().1, &mut resolver, &dirs);
+            let rows = found.rows;
+            // Pid do agente só de linha com terminal, e só o que o argv identificou.
+            for (n, pid) in &found.agent_pids {
+                assert!(rows.iter().any(|r| &r.name == n && !r.headless), "{name}: pid de linha sem terminal {n}");
+                assert!(procs.0.contains_key(&i64::from(*pid)), "{name}: pid {pid} fora do tique");
+            }
             let got: Vec<Value> = rows.iter().map(|r| dump(r, defaults)).collect();
             let expected: Vec<Value> = tick["expected"]["rows"].as_array().unwrap().iter().map(|r| world.real(r)).collect();
             if got != expected {

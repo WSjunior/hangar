@@ -112,6 +112,8 @@ struct Caches {
     /// Último resumo de Git por pasta: a lista não espera o `git status` (`_git_ultimo`).
     git: HashMap<String, (Value, Value)>,
     config_dirs: Option<(Instant, Arc<Vec<PathBuf>>)>,
+    /// Marcadores e registro nativo entre rodadas: só o arquivo que mudou é relido.
+    hooks: HookStates,
 }
 
 pub struct ListBridge {
@@ -217,8 +219,12 @@ impl ListBridge {
         // Classificação e decoração leem arquivo (marcador, transcript, plano) e esperam captura:
         // fora da thread do runtime, que atende todas as conexões.
         let (rows, effects, git_dirs) = tokio::task::spawn_blocking(move || {
-            let config_dirs = lock(&caches).config_dirs(&dirs);
-            let hooks = HookStates::load(&config_dirs);
+            // Tirado da trava durante a classificação; duas produções juntas só pagam uma releitura a mais.
+            let (config_dirs, mut hooks) = {
+                let mut c = lock(&caches);
+                (c.config_dirs(&dirs), std::mem::take(&mut c.hooks))
+            };
+            hooks.refresh(&config_dirs);
             let alive = |pid: i64| pid_alive(&*env.procs, pid);
             let facts = Facts { hooks: &hooks, alive: &alive, config_dirs: &config_dirs, headless: &headless,
                 problems: &problems, stall_seconds };
@@ -226,6 +232,7 @@ impl ListBridge {
             let effects = handle.block_on(lock(&classifier).classify(&mut rows, &facts, &io));
             let (wall, mono) = (io.wall(), io.mono());
             let mut c = lock(&caches);
+            c.hooks = hooks;
             for row in rows.iter_mut().filter(|r| r.provider == "claude") {
                 let pid = agent_pids.get(&row.name).map(|p| i64::from(*p));
                 decorate_context(&mut c.context, row, pid, &*env.procs, &dirs, &config_dirs, wall, mono);
@@ -367,11 +374,11 @@ fn labelled_path(item: &str) -> String {
     }
 }
 
-/// O mesmo que `run_discovery` da junção com a lista-tperf vai devolver (`Discovered`); até lá o
-/// pid do agente não sai da descoberta e o modelo de abertura fica de fora do contexto.
+/// Linhas descobertas e o pid do agente de cada uma (contexto de abertura e alvo da captura).
 fn run_discovery(panes: &[Pane], procs: &dyn ProcessView, children: &ChildrenMap, resolver: &mut Resolver, dirs: &Dirs)
     -> (Vec<SessionRow>, HashMap<String, u32>) {
-    (discover_other::discover_rows(panes, procs, children, resolver, dirs), HashMap::new())
+    let found = discover_other::discover_rows(panes, procs, children, resolver, dirs);
+    (found.rows, found.agent_pids)
 }
 
 /// Alvo da captura de cada sessão: o pane do agente; sem como saber, `=<sessão>:` (o ativo).
