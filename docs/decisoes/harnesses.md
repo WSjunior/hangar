@@ -5,6 +5,12 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
 
 ## Regras vigentes
 
+- **Provedor omitido usa a última abertura humana do servidor.** A memória só muda após a
+  criação confirmada; convidado e criação automatizada não a escrevem. Sem preferência válida,
+  conta conectada vence CLI apenas instalado. A seleção inicial respeita a escolha feita à
+  mão enquanto carrega; conta Codex padrão deslogada cede a uma adicional conectada.
+  Ver [provedor padrão da abertura](#provedor-padrão-da-abertura).
+
 - **O plugin do Hangar entra por `--plugin-dir` mesmo estando na pasta de skills.** Na cadeia
   de hooks, o primeiro plugin carregado fica por fora: `--plugin-dir` vem antes do marketplace,
   e a pasta de skills vem depois. A faixa dos mods (`plugins/hangar/hooks/ui.ts`) só recebe por
@@ -2379,3 +2385,44 @@ dado" o tempo todo, embora a informação existisse.
 Medição (03/10/2026, sessão Claude com barra própria, Opus em `[1m]`): o transcript deu 539.351
 tokens contra 489k a 510k da barra minutos antes (a conversa crescendo entre uma e outra); no
 nativo os anéis passaram de "sem dado" para Contexto 54% e a conta 100% (semanal).
+
+## Provedor padrão da abertura
+
+Em 05/10/2026, Nova conversa, o modal e a criação de worktree com sessão começavam em Claude.
+O mobile guardava a aba escolhida localmente, mesmo sem abrir uma sessão. CLI, MCP e API também
+preenchiam Claude quando o chamador não especificava o provedor.
+
+`last_session_provider` fica no `runtime-config.json` do servidor; `remember_provider` autoriza
+gravá-lo após a criação. As interfaces enviam esse campo; CLI, MCP e API automatizada apenas
+herdam o padrão. No CLI, `--remember-provider` permite gravá-lo explicitamente, sem a abertura
+de auxiliares mudar a preferência humana. `/providers` marca `default` por item, usando o estado de login do Claude e do Codex já
+existente, além dos motores configurados. Preferência indisponível ou sem conta conectada,
+quando há outra conectada, cede ao provedor utilizável. Escolha explícita continua prevalecendo.
+
+A abertura Codex sem conta explícita usa uma adicional conectada quando a padrão está
+deslogada. Isso é escolha inicial por login, sem rotação por cota. Transferência com conta
+explícita conserva a conta pedida.
+
+Cobertura escrita em `test_session_defaults.py`, `test_api_providers.py`, `credenciais.test.ts`,
+`newChatDraft.test.ts` e nos testes dos seletores: conta única GPT, último provedor, indisponibilidade, opção
+explícita, criação recusada e erro de gravação da preferência. Os testes automatizados só rodam
+quando solicitados.
+
+Conferência em uso: build `release` do nativo, janela e servidor de dados isolados. Nova conversa
+e o modal Nova sessão selecionaram Codex e uma conta adicional conectada com a padrão
+deslogada. A abertura simulada com gravação explícita gravou o último provedor, e a reabertura do modal
+refletiu Claude depois de uma criação Claude. A leitura do catálogo com contas reais também
+foi exercitada, sem abrir sessão.
+
+A PWA foi conferida em 393 × 852, formato de celular. A tela inicial `NewChatHome` tem seu
+próprio carregador (`newChatDraft.svelte.ts`), que também precisa aplicar o padrão, bloquear o
+envio durante a leitura e enviar `remember_provider`. No fluxo simulado, abriu Codex na conta
+conectada; depois de criar por Claude, reabriu em Claude; retirado o login Claude, selecionou
+Codex apesar da preferência anterior. Builds do nativo e da PWA passaram. O app Expo não foi
+conferido em aparelho; os testes automatizados não foram executados.
+
+A revisão de publicação acrescentou proteção para conta e retomada escolhidas durante a
+leitura de `/providers`, além da confirmação do provedor já selecionado. Falha dessa leitura
+aparece no mobile e requer uma escolha explícita. Avisos da gravação seguem pela resposta
+de criação e do bastão até as interfaces; falha ao mostrar um aviso não torna a criação uma
+falha nem provoca repetição. No nativo, a abertura por worktree também conserva esses avisos.

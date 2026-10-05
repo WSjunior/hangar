@@ -50,7 +50,7 @@ pub(super) struct Entry {
 pub(super) struct Scan { pub(super) entries: Vec<Entry>, pub(super) error: Option<String> }
 
 #[derive(Clone, Debug, Deserialize)]
-struct Probe { disponivel: bool }
+struct Probe { disponivel: bool, #[serde(default)] default: bool }
 
 #[derive(Clone, Debug, Deserialize)]
 pub(super) struct Checkout { current: Option<String>, branches: Vec<String>, remotes: Vec<String>, dirty: bool }
@@ -101,7 +101,9 @@ impl CodexAccount {
 fn choose_codex_account(accounts: &[CodexAccount], requested: Option<&str>) -> Option<usize> {
     match requested {
         Some(id) => accounts.iter().position(|a| a.id == id),
-        None => accounts.iter().position(|a| a.is_default).or((!accounts.is_empty()).then_some(0)),
+        None => accounts.iter().position(|a| a.is_default && a.auth.status == "connected")
+            .or_else(|| accounts.iter().position(|a| a.auth.status == "connected"))
+            .or_else(|| accounts.iter().position(|a| a.is_default)).or((!accounts.is_empty()).then_some(0)),
     }
 }
 
@@ -421,6 +423,7 @@ pub(in crate::app) struct NewSession {
     same_folder: bool,
     name: Entity<InputState>,
     provider: &'static str,
+    provider_touched: bool,
     providers: Remote<HashMap<String, Probe>>,
     configs: Remote<Vec<ConfigDir>>,
     config: Option<String>,
@@ -548,7 +551,7 @@ impl NewSession {
             checkout: Remote::default(), branch: String::new(), worktrees: Remote::default(), existing: None, switching: false, base_open: false,
             preset: None, new_branch: false, base: String::new(), new_branch_name,
             git: Default::default(), git_name,
-            sessions: Remote::default(), same_folder: false, name, provider: "claude", providers: Remote::default(), configs: Remote::default(),
+            sessions: Remote::default(), same_folder: false, name, provider: "claude", provider_touched: false, providers: Remote::default(), configs: Remote::default(),
             config: None, config_pick: None, codex: Remote::default(), codex_account: String::new(), codex_pick: None, headless: true, headless_owner: None, headless_touched: false, headless_saving: false,
             difference: false, manual_open: false, manual, choosing: false, choose_error: None, create_seq: 0, creating: false, started: None,
             step: String::new(), error: None, clock: None, models: Remote::default(), model: String::new(), model_choice_touched: false, account_touched: false, effort: String::new(),
@@ -715,6 +718,7 @@ impl NewSession {
         self.checkout.reset();
         self.sessions.reset();
         self.providers.reset();
+        self.provider_touched = false;
         self.configs.reset();
         self.engines.reset();
         self.engine.clear();
@@ -890,7 +894,9 @@ impl NewSession {
 
     /// Trocar de provider preserva o modo escolhido e relê as opções e permissões dele.
     fn set_provider(&mut self, provider: &'static str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_transfer() || provider == self.provider || self.creating { return; }
+        if self.is_transfer() || self.creating { return; }
+        self.provider_touched = true;
+        if provider == self.provider { return; }
         (self.provider, self.error) = (provider, None);
         self.permission = match provider { "codex" => "Full Access".into(), "claude" => "bypassPermissions".into(), _ => String::new() };
         self.permission_touched = false;
@@ -1069,6 +1075,10 @@ impl NewSession {
             if claude && self.proxy_accounts().is_some() { body["engine_account"] = json!(self.engine_account); }
             if self.headless_inherited() { body.as_object_mut().unwrap().remove("headless"); }
         }
+        // Sonda falhada deixa o Claude por omissão, e isso não é escolha a lembrar.
+        if self.provider_touched || self.providers.ok().is_some() {
+            body["remember_provider"] = json!(true);
+        }
         // A memória vai antes do POST: a escolha não se perde se a criação falhar.
         let (key, model, effort) = (self.memory_key(), self.model.clone(), self.effort.clone());
         self.link.runtime.spawn_blocking(move || crate::appearance::remember_model(&key, &model, &effort));
@@ -1189,7 +1199,18 @@ impl NewSession {
             CreateReply::Providers(seq, result) => {
                 let probes = result.map_err(|e| Hangar::fetch_failure(&e))
                     .and_then(|v| serde_json::from_value(v).map_err(|_| tr("invalid_response")));
-                self.providers.finish(seq, probes);
+                if !self.providers.finish(seq, probes) { return None; }
+                if !self.provider_touched && !self.model_choice_touched && !self.creating && !self.is_transfer()
+                    && self.providers.ok().is_some() {
+                    // Sem padrão marcado, volta ao Claude: o provedor do servidor anterior não vale aqui.
+                    let provider = self.providers.ok().and_then(|probes| PROVIDERS.into_iter()
+                        .find(|provider| probes.get(*provider).is_some_and(|probe| probe.default && probe.disponivel)))
+                        .unwrap_or("claude");
+                    if provider != self.provider {
+                        self.set_provider(provider, window, cx);
+                        self.provider_touched = false;
+                    }
+                }
             }
             CreateReply::Configs(seq, result) => {
                 let list = result.map_err(|e| Hangar::fetch_failure(&e))
@@ -1304,10 +1325,12 @@ async fn handed(api: &Api, result: Result<Value, Failure>, name: &str, cwd: &str
         Ok(list) => list.into_iter().find(|s| s.name == created),
         Err(error) => { eprintln!("bastao-lista: {}", error.detail); None }
     };
-    let (session, notes) = match listed {
+    let (session, mut notes) = match listed {
         Some(session) => (session, Vec::new()),
         None => (SessionInfo { name: created, cwd: Some(cwd.to_owned()), ..SessionInfo::default() }, vec![tr("create_baton_unlisted")]),
     };
+    notes.extend(value.get("avisos").and_then(Value::as_array).into_iter().flatten()
+        .filter_map(Value::as_str).map(str::to_owned));
     Ok(Opened { session, notes, warning })
 }
 
@@ -1860,6 +1883,7 @@ impl NewSession {
             self.error.clone(),
             self.proxy_note(),
             failed(&self.roots).map(|e| format!("{} {e}", tr("create_roots_failed"))),
+            failed(&self.providers).cloned(),
             failed(&self.configs).filter(|_| claude).cloned(),
             failed(&self.codex).filter(|_| self.provider == "codex").cloned(),
             failed(&self.models).map(|e| format!("{}: {e}", tr("create_models_failed"))),
@@ -2487,6 +2511,16 @@ mod tests {
         let checkout = super::checkout_of(Ok(json!({"current": null, "branches": ["dev", "main"],
             "remotes": ["r"], "dirty": false}))).unwrap().unwrap();
         assert_eq!(super::default_base(&checkout).as_deref(), Some("dev"));
+    }
+
+    #[test]
+    fn new_session_uses_connected_codex_account_when_default_is_disconnected() {
+        let accounts: Vec<super::CodexAccount> = serde_json::from_value(json!([
+            {"id":"default", "name":"Default", "is_default":true, "auth":{"status":"disconnected"}},
+            {"id":"gpt", "name":"GPT", "is_default":false, "auth":{"status":"connected"}}
+        ])).unwrap();
+        assert_eq!(super::choose_codex_account(&accounts, None), Some(1));
+        assert_eq!(super::choose_codex_account(&accounts, Some("default")), Some(0));
     }
 
     #[test]

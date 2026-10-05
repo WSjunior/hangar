@@ -674,7 +674,7 @@ impl Hangar {
             }
             // Com sessão, o mesmo caminho da tela de nova sessão: a worktree nasce com ela, no nome dela.
             if plan.fetch { api.server_send(reqwest::Method::POST, &["worktrees", "fetch"], Some(json!({"repo": &repo})), 150).await?; }
-            let mut body = json!({"name": plan.name, "cwd": repo, "provider": "claude", "branch": plan.branch, "new_branch": plan.new_branch});
+            let mut body = json!({"name": plan.name, "cwd": repo, "branch": plan.branch, "new_branch": plan.new_branch, "remember_provider": true});
             if let Some(base) = base { body["base"] = json!(base); }
             api.server_send(reqwest::Method::POST, &["sessions"], Some(body), 120).await
         });
@@ -695,6 +695,9 @@ impl Hangar {
                         this.close_worktrees(window, cx);
                         let key = this.active_key();
                         if this.select_on(&key, session.clone(), window, cx) { this.focus_composer_for(&session, window, cx); }
+                        for warning in &session.avisos {
+                            window.push_notification(Notification::warning(warning.clone()).autohide(false), cx);
+                        }
                     }
                     Ok(Err(path)) => {
                         this.worktrees.create = None;

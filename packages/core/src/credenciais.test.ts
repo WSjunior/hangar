@@ -1,5 +1,5 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
-import { credentialAuth, credentialGroup, codexAccountMessage, contaCodexParaEntrar, codexCliAusente,
+import { credentialAuth, credentialGroup, codexAccountMessage, contaCodexParaEntrar, codexCliAusente, defaultCodexAccount,
   type Credencial, type CodexAccount } from './credenciais';
 import { configureApi } from './apiEnv';
 import { configureLocale } from './i18n';
@@ -49,6 +49,31 @@ describe('autenticação explícita', () => {
 });
 
 describe('contas e servidor explícito', () => {
+  it.each(['active', 'server', 'baton'])('mostra avisos sem perder a sessão criada (%s)', async (source) => {
+    const warnings = ['preferencia-nao-salva'];
+    const notify = vi.fn();
+    configureApi({ getBaseUrl: () => 'https://a.test', getToken: () => 'token-a',
+      onUnauthorized: unauthorized, onSessionWarnings: notify, origin: null,
+      createEventSource: () => { throw new Error('unused'); } });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ name: 'created', avisos: warnings }));
+    const result = source === 'active' ? await createSession('created')
+      : source === 'server' ? await createSessionForServer(server, { name: 'created', provider: 'codex' })
+        : await passarBastao('origin', { name: 'created' }, server);
+    expect(result.name).toBe('created');
+    expect(notify).toHaveBeenCalledWith(warnings);
+  });
+
+  it('falha ao exibir aviso não transforma criação confirmada em falha', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    configureApi({ getBaseUrl: () => 'https://a.test', getToken: () => 'token-a',
+      onUnauthorized: unauthorized, onSessionWarnings: () => { throw new Error('display failed'); }, origin: null,
+      createEventSource: () => { throw new Error('unused'); } });
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ name: 'created', avisos: ['preferencia-nao-salva'] }));
+    await expect(createSession('created')).resolves.toMatchObject({ name: 'created' });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalled();
+  });
+
   it('propaga o cancelamento ao carregar credenciais de outro servidor', async () => {
     const controller = new AbortController();
     const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json([]));
@@ -152,7 +177,7 @@ describe('contas e servidor explícito', () => {
     await createSessionForServer(server, { name: 'claude', provider: 'claude', codex_account: 'work' });
     expect(JSON.parse(fetcher.mock.calls[2][1]?.body as string)).not.toHaveProperty('codex_account');
     await createSession('old');
-    expect(JSON.parse(fetcher.mock.calls[3][1]?.body as string)).toEqual({ name: 'old', provider: 'claude', config_dir: null, engine: null, model: null, effort: null });
+    expect(JSON.parse(fetcher.mock.calls[3][1]?.body as string)).toEqual({ name: 'old', config_dir: null, engine: null, model: null, effort: null, remember_provider: true });
   });
 
   it('catálogo, Arquivo e bastão carregam a conta', async () => {
@@ -200,5 +225,16 @@ describe('contaCodexParaEntrar', () => {
     expect(contaCodexParaEntrar([conta('default', true, 'connected'), conta('work', false, 'disconnected')])).toBeUndefined();
     expect(contaCodexParaEntrar([conta('default', true, 'unavailable')])).toBeUndefined();
     expect(contaCodexParaEntrar(undefined)).toBeUndefined();
+  });
+  it('escolhe a única conta GPT conectada mesmo com padrão deslogada', () => {
+    const accounts = [conta('default', true, 'disconnected'), conta('gpt', false, 'connected')];
+    expect(defaultCodexAccount(accounts)?.id).toBe('gpt');
+    expect(defaultCodexAccount(accounts, 'default')?.id).toBe('gpt');
+  });
+  it('preserva a conta lembrada conectada e mantém o caminho de login sem contas conectadas', () => {
+    const accounts = [conta('default', true, 'connected'), conta('gpt', false, 'connected')];
+    expect(defaultCodexAccount(accounts, 'gpt')?.id).toBe('gpt');
+    expect(defaultCodexAccount([conta('default', true, 'disconnected')])?.id).toBe('default');
+    expect(defaultCodexAccount([])).toBeUndefined();
   });
 });
