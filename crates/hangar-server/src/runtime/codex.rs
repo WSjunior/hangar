@@ -506,6 +506,10 @@ impl Engine {
                 if !payload.as_object().is_some_and(|fields|fields.len() == 1) { return Err(error("Escolha Fast inválida")); }
                 if !self.ready || self.thread_id.is_empty() { return Err(error("Sessão Codex indisponível")); }
                 if self.service_tier_pending.is_some() { return Err(error("Uma escolha Fast ainda está aguardando confirmação")); }
+                // Sem mudança o Codex não avisa nada e a espera só estouraria o prazo; None ainda não foi lido.
+                if self.service_tier.as_deref() == Some(tier) {
+                    return Ok(vec![Effect::Reply { operation_id:id,disposition:Disposition::Accepted,payload:json!({"service_tier":tier}) }]);
+                }
                 self.service_tier_pending = Some(ServiceTierChange { operation_id:id.clone(),thread_id:self.thread_id.clone(),model:self.model.clone(),
                     tier:tier.into(),deadline:clock.monotonic_s+10.0,acknowledged:false,candidate:false,verifying:false });
                 if tier == "priority" {

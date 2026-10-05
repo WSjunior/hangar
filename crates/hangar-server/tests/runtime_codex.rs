@@ -244,6 +244,18 @@ fn expired_service_tier_writes_cannot_reach_the_transport() {
 }
 
 #[test]
+fn service_tier_already_active_is_accepted_without_waiting() {
+    for tier in ["default","priority"] {
+        let mut engine = Engine::new(json!({"name":"session","thread_id":"thread-1","headless":true,"model":"gpt-6",
+            "initialized":true,"ready":true,"service_tier":tier}),1,clock(10.0));
+        assert_eq!(engine.control_view()["service_tier"],tier);
+        let effects = engine.command(command(OperationKind::SetServiceTier,json!({"service_tier":tier})),clock(10.0)).unwrap();
+        assert!(tier_accepted(&effects));
+        assert!(frames(&effects).is_empty());
+    }
+}
+
+#[test]
 fn service_tier_control_is_strict_and_catalog_keeps_tiers() {
     assert_eq!(serde_json::to_value(OperationKind::SetServiceTier).unwrap(),"set_service_tier");
     let mut engine = engine();
