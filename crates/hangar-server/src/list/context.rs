@@ -4,7 +4,7 @@
 //! O `usage` da última resposta do agente principal é o pedido inteiro. A janela não vem nele (o id
 //! do modelo não diz se é a variante de 1M): sai da janela declarada, do modelo da sessão ou da
 //! conta, e do próprio uso.
-use std::collections::HashMap;
+use super::capped::Capped;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -148,7 +148,7 @@ pub fn window(used: u64, account_dir: &Path, model: Option<&str>, window_tokens:
 /// Leitura por sessão com prazo de 20 s por (nome, transcript).
 #[derive(Default)]
 pub struct ContextCache {
-    entries: HashMap<String, Entry>,
+    entries: Capped<String, Entry>,
 }
 
 struct Entry {
@@ -163,7 +163,7 @@ struct Entry {
 impl ContextCache {
     /// `now` é relógio monotônico em segundos.
     pub fn stale(&self, name: &str, jsonl: &str, now: f64) -> bool {
-        !self.entries.get(name).is_some_and(|e| e.jsonl == jsonl && now - e.at <= TTL_SECS)
+        !self.entries.peek(name).is_some_and(|e| e.jsonl == jsonl && now - e.at <= TTL_SECS)
     }
 
     /// Grava a leitura nova e devolve o valor que a linha mostra.
@@ -185,7 +185,7 @@ impl ContextCache {
 
     /// Valor guardado, só se foi lido do mesmo transcript.
     pub fn cached(&self, name: &str, jsonl: &str) -> Reading {
-        match self.entries.get(name) {
+        match self.entries.peek(name) {
             Some(e) if e.jsonl == jsonl => (e.ctx, e.model.clone()),
             _ => (None, None),
         }

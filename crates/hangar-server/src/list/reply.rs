@@ -2,7 +2,6 @@
 //! Última resposta da sessão parada na linha da lista (`_decorate_replies`, registry.py:1919),
 //! lida pelo histórico Rust com o mesmo corte de 8 eventos do Python.
 
-use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -11,6 +10,7 @@ use hangar_api::chat::ChatKind;
 use hangar_api::session::SessionRow;
 use regex::Regex;
 
+use super::capped::Capped;
 use crate::transcript::py::{is_space, py_re};
 use crate::transcript::{merged_history, HistoryRequest, Provider, TAIL_WINDOW};
 
@@ -41,7 +41,7 @@ struct Cached {
 /// Por sessão, a resposta lida para (transcript, mtime, provider): a lista roda a cada 2 s e o
 /// transcript só é relido quando muda.
 #[derive(Default)]
-pub struct ReplyCache(HashMap<String, Cached>);
+pub struct ReplyCache(Capped<String, Cached>);
 
 impl ReplyCache {
     /// Preenche `last_reply`/`last_reply_at` das linhas Claude e Codex: só a parada com transcript
@@ -94,7 +94,7 @@ impl ReplyCache {
                     Cached { jsonl, mtime: row.last_activity, provider: row.provider.clone(), text, at };
                 self.0.insert(row.name.clone(), entry);
             }
-            let cached = &self.0[&row.name];
+            let Some(cached) = self.0.get(&row.name) else { continue };
             row.last_reply = cached.text.clone();
             row.last_reply_at = cached.at;
         }

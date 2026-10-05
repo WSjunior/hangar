@@ -331,8 +331,7 @@ fn kimi_transcript_of_id(cwd: &str, sid: &str, dirs: &Dirs) -> Option<String> {
 
 /// Achado no índice, o `sessionDir` de uma sessão Kimi não muda: o índice inteiro não é relido
 /// a cada tique. Só o positivo fica; a pasta calculada segue conferida.
-// ponytail: sem poda, como os caches do `links.rs`; a poda por sessão é da Task 17.
-static KIMI_WIRES: LazyLock<std::sync::Mutex<HashMap<(PathBuf, String), String>>> = LazyLock::new(Default::default);
+static KIMI_WIRES: LazyLock<std::sync::Mutex<super::capped::Capped<(PathBuf, String), String>>> = LazyLock::new(Default::default);
 
 static KIMI_SLUG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^a-z0-9._-]+").unwrap());
 
@@ -556,6 +555,7 @@ mod tests {
     /// Custo de um tique da descoberta + decoração com 20 sessões Claude num repositório com 5
     /// worktrees, transcripts de 2 MB (5 crescem por tique), 220 marcadores, pergunta e statusline.
     /// `cargo test --release -p hangar-server --lib list::discover_other::tests::tick_cost -- --ignored --nocapture`
+    #[cfg(target_os = "linux")]
     #[test]
     #[ignore]
     fn tick_cost() {
@@ -604,11 +604,9 @@ mod tests {
         let config_dirs = vec![claude.clone()];
         let mut resolver = Resolver::default();
         let mut hooks = HookStates::default();
-        let n = 50;
-        let t = std::time::Instant::now();
-        for tick in 0..n {
+        let mut tick = |n: usize| {
             for k in 0..5 {
-                let jsonl = projects.join(format!("{}.jsonl", sids[(tick * 5 + k) % 20]));
+                let jsonl = projects.join(format!("{}.jsonl", sids[(n * 5 + k) % 20]));
                 let mut f = std::fs::OpenOptions::new().append(true).open(jsonl).unwrap();
                 writeln!(f, "{filler}").unwrap();
             }
@@ -624,8 +622,25 @@ mod tests {
             }
             assert_eq!(rows.len(), 20);
             assert!(rows.iter().all(|r| r.worktree), "a worktree vem do transcript");
-        }
-        println!("descoberta+decoração: {:.0} µs/tique, {:.0} leituras de processo/tique",
-            t.elapsed().as_micros() as f64 / n as f64, procs.reads.load(Ordering::Relaxed) as f64 / n as f64);
+        };
+        // CPU da thread (ns) e pico de RSS (kB), zerado antes de cada fase.
+        let cpu = || std::fs::read_to_string("/proc/thread-self/schedstat").unwrap().split_whitespace().next().unwrap().parse::<u64>().unwrap();
+        let hwm = || std::fs::read_to_string("/proc/self/status").unwrap().lines()
+            .find_map(|l| l.strip_prefix("VmHWM:")).unwrap().trim().trim_end_matches("kB").trim().parse::<u64>().unwrap();
+        let reset = || std::fs::write("/proc/self/clear_refs", "5").unwrap();
+        let mut phase = |label: &str, ticks: std::ops::Range<usize>| {
+            reset();
+            let (n, c, t) = (ticks.len(), cpu(), std::time::Instant::now());
+            procs.reads.store(0, Ordering::Relaxed);
+            for i in ticks { tick(i); }
+            println!("{label}: {:.0} µs/tique, CPU {:.0} µs/tique, pico RSS {} kB, {:.0} leituras de processo/tique",
+                t.elapsed().as_micros() as f64 / n as f64, (cpu() - c) as f64 / 1000.0 / n as f64, hwm(),
+                procs.reads.load(Ordering::Relaxed) as f64 / n as f64);
+        };
+        phase("tique frio", 0..1);
+        phase("tiques seguintes", 1..51);
+        // Passado o teto de 10 s, cada transcript que cresceu é relido.
+        std::thread::sleep(std::time::Duration::from_millis(10_500));
+        phase("tique depois de 10 s", 51..52);
     }
 }

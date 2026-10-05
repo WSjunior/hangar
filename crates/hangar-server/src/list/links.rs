@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
+
+use super::capped::Capped;
 
 /// Linha com os padrões do `SessionInfo`.
 pub fn blank_row(name: &str) -> SessionRow {
@@ -100,7 +102,7 @@ static EXTERNAL_PAIRS: TailCache<ExternalRecords> = LazyLock::new(Default::defau
 
 /// Registros de `external_pairs.json`, lidos uma vez por versão do arquivo; `Err` = o campo que
 /// fez o Python recusar o arquivo inteiro.
-fn external_records(path: &Path) -> Option<ExternalRecords> {
+fn external_records(path: &Path) -> Option<Arc<ExternalRecords>> {
     cached(&EXTERNAL_PAIRS, path, || {
         let raw = match std::fs::read(path) {
             Ok(raw) => raw,
@@ -120,7 +122,8 @@ fn external_records(path: &Path) -> Option<ExternalRecords> {
 /// `_pair_external`: o par de fora entre os peers da sessão. Arquivo torto vale como vazio, como
 /// no Python; quem o põe de lado é o Python, aqui só se avisa.
 fn pair_external(name: &str, peers: &[String], dirs: &Dirs) -> Option<Map<String, Value>> {
-    let records = match external_records(&dirs.claude.join(".hangar-pair").join("external_pairs.json"))? {
+    let records = external_records(&dirs.claude.join(".hangar-pair").join("external_pairs.json"))?;
+    let records = match &*records {
         Ok(records) => records,
         Err(field) => { external_unreadable(field); return None }
     };
@@ -309,13 +312,14 @@ pub fn locate(provider: &str, cwd: Option<&str>, jsonl: Option<&str>, dirs: &Dir
 static REMOVED: TailCache<HashMap<String, String>> = LazyLock::new(Default::default);
 
 /// `worktrees-removidas.json`, relido só quando o arquivo muda; ausente é mapa vazio.
-fn removed(dirs: &Dirs) -> HashMap<String, String> {
+fn removed(dirs: &Dirs) -> Arc<HashMap<String, String>> {
     let file = dirs.home.join(".hangar").join("worktrees-removidas.json");
     cached(&REMOVED, &file, || Some(removed_at(&file))).unwrap_or_default()
 }
 
 /// Uma leitura por versão do arquivo: a lista roda a cada segundo e o transcript pode ter megas.
-type TailCache<T> = LazyLock<Mutex<HashMap<PathBuf, ((i128, u64), T)>>>;
+/// O valor sai por `Arc`: a mesma leitura serve todas as linhas do tique sem cópia.
+type TailCache<T> = LazyLock<Mutex<Capped<PathBuf, ((i128, u64), Arc<T>)>>>;
 
 fn file_key(path: &Path) -> Option<(i128, u64)> {
     let meta = std::fs::metadata(path).ok()?;
@@ -323,15 +327,14 @@ fn file_key(path: &Path) -> Option<(i128, u64)> {
     Some((mtime, meta.len()))
 }
 
-/// ponytail: sem poda, como o `_cache` do Python; o teto é o número de transcripts da máquina.
-fn cached<T: Clone>(cache: &TailCache<T>, path: &Path, read: impl FnOnce() -> Option<T>) -> Option<T> {
+fn cached<T>(cache: &TailCache<T>, path: &Path, read: impl FnOnce() -> Option<T>) -> Option<Arc<T>> {
     let key = file_key(path)?;
     if let Some((k, v)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(path)
         && *k == key
     {
         return Some(v.clone());
     }
-    let value = read()?;
+    let value = Arc::new(read()?);
     cache.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_path_buf(), (key, value.clone()));
     Some(value)
 }
@@ -345,25 +348,26 @@ fn reversed_lines(path: &Path, mut visit: impl FnMut(&[u8]) -> ControlFlow<()>) 
     let mut fh = std::fs::File::open(path)?;
     let end = fh.seek(SeekFrom::End(0))?;
     let mut pos = end;
-    let mut rest: Vec<u8> = Vec::new();
+    // Dois buffers trocados a cada bloco: nada é alocado nem zerado por bloco.
+    let (mut rest, mut block): (Vec<u8>, Vec<u8>) = (Vec::new(), Vec::with_capacity(TAIL as usize));
     while pos > 0 && end - pos < DEEP_TAIL {
         let step = TAIL.min(pos);
         pos -= step;
         fh.seek(SeekFrom::Start(pos))?;
-        let mut block = vec![0; step as usize];
-        fh.read_exact(&mut block)?;
-        block.extend_from_slice(&rest);
-        let Some(first) = block.iter().position(|b| *b == b'\n') else {
-            rest = block;
-            continue;
-        };
-        for line in block[first + 1..].rsplit(|b| *b == b'\n') {
-            if visit(line).is_break() {
-                return Ok(());
-            }
+        block.clear();
+        if (&mut fh).take(step).read_to_end(&mut block)? as u64 != step {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
         }
-        block.truncate(first);
-        rest = block;
+        block.extend_from_slice(&rest);
+        if let Some(first) = block.iter().position(|b| *b == b'\n') {
+            for line in block[first + 1..].rsplit(|b| *b == b'\n') {
+                if visit(line).is_break() {
+                    return Ok(());
+                }
+            }
+            block.truncate(first);
+        }
+        std::mem::swap(&mut rest, &mut block);
     }
     if pos == 0 {
         let _ = visit(&rest);
@@ -402,6 +406,8 @@ const TAIL_RECHECK: std::time::Duration = std::time::Duration::from_secs(10);
 /// onde o arquivo foi lido, para a próxima ler só o que cresceu.
 #[derive(Clone)]
 struct TailScan {
+    /// O que as linhas leem, montado uma vez por leitura.
+    value: Arc<ClaudeTail>,
     checked: std::time::Instant,
     key: (i128, u64),
     /// Fim lido quando o arquivo terminava em `\n`; sem isso, a próxima relê do fim para trás.
@@ -411,10 +417,13 @@ struct TailScan {
 }
 
 impl TailScan {
-    fn value(&self) -> ClaudeTail { (self.last.clone(), self.lines.iter().flatten().cloned().collect()) }
+    fn new(checked: std::time::Instant, key: (i128, u64), consumed: Option<u64>, last: Option<String>, lines: Vec<Vec<Hit>>) -> Self {
+        let value = Arc::new((last.clone(), lines.iter().flatten().cloned().collect()));
+        Self { value, checked, key, consumed, last, lines }
+    }
 }
 
-static CLAUDE_TAILS: LazyLock<Mutex<HashMap<PathBuf, TailScan>>> = LazyLock::new(Default::default);
+static CLAUDE_TAILS: LazyLock<Mutex<Capped<PathBuf, TailScan>>> = LazyLock::new(Default::default);
 
 /// Uma linha do transcript na leitura de trás para a frente: guarda o último `cwd` e as pastas das
 /// chamadas; `Break` quando já há chamadas bastantes.
@@ -461,7 +470,7 @@ fn scan_full(jsonl: &Path, key: (i128, u64), now: std::time::Instant) -> std::io
     reversed_lines(jsonl, |raw| scan_line(raw, &mut last, &mut lines, &mut count))?;
     let mut fh = std::fs::File::open(jsonl)?;
     let consumed = ends_line(&mut fh, key.1)?;
-    Ok(TailScan { checked: now, key, consumed, last, lines })
+    Ok(TailScan::new(now, key, consumed, last, lines))
 }
 
 /// Só o que cresceu desde `from`; os achados antigos completam os novos, na mesma regra de parada.
@@ -486,19 +495,19 @@ fn scan_growth(jsonl: &Path, old: &TailScan, from: u64, key: (i128, u64), now: s
         lines.push(group.clone());
     }
     let consumed = ends_line(&mut fh, key.1)?;
-    Ok(TailScan { checked: now, key, consumed, last: last.or_else(|| old.last.clone()), lines })
+    Ok(TailScan::new(now, key, consumed, last.or_else(|| old.last.clone()), lines))
 }
 
 /// (último `cwd`, caminhos citados pelas ferramentas com o `cwd` da linha), do mais recente para o
 /// mais antigo.
-fn claude_tail(jsonl: &Path) -> Option<ClaudeTail> { claude_tail_at(jsonl, std::time::Instant::now()) }
+fn claude_tail(jsonl: &Path) -> Option<Arc<ClaudeTail>> { claude_tail_at(jsonl, std::time::Instant::now()) }
 
-fn claude_tail_at(jsonl: &Path, now: std::time::Instant) -> Option<ClaudeTail> {
+fn claude_tail_at(jsonl: &Path, now: std::time::Instant) -> Option<Arc<ClaudeTail>> {
     let old = CLAUDE_TAILS.lock().unwrap_or_else(|e| e.into_inner()).get(jsonl).cloned();
     if let Some(old) = &old
         && now.saturating_duration_since(old.checked) < TAIL_RECHECK
     {
-        return Some(old.value());
+        return Some(old.value.clone());
     }
     let key = file_key(jsonl)?;
     let scan = match &old {
@@ -515,7 +524,7 @@ fn claude_tail_at(jsonl: &Path, now: std::time::Instant) -> Option<ClaudeTail> {
             return None;
         }
     };
-    let value = scan.value();
+    let value = scan.value.clone();
     CLAUDE_TAILS.lock().unwrap_or_else(|e| e.into_inner()).insert(jsonl.to_path_buf(), scan);
     Some(value)
 }
@@ -526,11 +535,11 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool { hay.windows(needle.len()).any(|
 /// `gitdir` lá dentro, e o teto cobre esse caso.
 const WORKTREES_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
 
-type WorktreeList = (Option<std::time::SystemTime>, std::time::Instant, Vec<String>);
-static WORKTREES: LazyLock<Mutex<HashMap<String, WorktreeList>>> = LazyLock::new(Default::default);
+type WorktreeList = (Option<std::time::SystemTime>, std::time::Instant, Arc<Vec<String>>);
+static WORKTREES: LazyLock<Mutex<Capped<String, WorktreeList>>> = LazyLock::new(Default::default);
 
 /// `worktree_paths` do repositório principal, relido só quando a pasta de administração muda.
-fn worktrees_of(main: &str) -> Vec<String> {
+fn worktrees_of(main: &str) -> Arc<Vec<String>> {
     let stamp = std::fs::metadata(Path::new(main).join(".git").join("worktrees")).and_then(|m| m.modified()).ok();
     if let Some((s, at, paths)) = WORKTREES.lock().unwrap_or_else(|e| e.into_inner()).get(main)
         && *s == stamp
@@ -538,7 +547,7 @@ fn worktrees_of(main: &str) -> Vec<String> {
     {
         return paths.clone();
     }
-    let paths = worktree_paths(main);
+    let paths = Arc::new(worktree_paths(main));
     WORKTREES.lock().unwrap_or_else(|e| e.into_inner()).insert(main.to_owned(), (stamp, std::time::Instant::now(), paths.clone()));
     paths
 }
@@ -546,9 +555,9 @@ fn worktrees_of(main: &str) -> Vec<String> {
 /// (principal, worktrees removidas, todas as pastas) do repositório que contém `path`.
 fn repo_candidates(path: &str, dirs: &Dirs) -> Option<(String, Vec<String>, Vec<String>)> {
     let main = main_repo_of(&repo_root_of(path)?);
-    let gone: Vec<String> = removed(dirs).into_iter().filter(|(_, v)| *v == main).map(|(k, _)| k).collect();
+    let gone: Vec<String> = removed(dirs).iter().filter(|(_, v)| **v == main).map(|(k, _)| k.clone()).collect();
     let mut all = vec![main.clone()];
-    all.extend(worktrees_of(&main));
+    all.extend(worktrees_of(&main).iter().cloned());
     all.extend(gone.iter().cloned());
     Some((main, gone, all))
 }
@@ -590,17 +599,20 @@ fn join_norm(base: &str, p: &str) -> String {
 /// A pasta do mesmo repositório onde o Claude trabalha: `cd X`/`git -C X` e o arquivo editado.
 /// Nada na principal tira a sessão da worktree.
 fn claude_worktree(cwd: Option<&str>, jsonl: &str, dirs: &Dirs) -> Option<String> {
-    let (last, hits) = claude_tail(Path::new(jsonl))?;
+    let tail = claude_tail(Path::new(jsonl))?;
+    let (last, hits) = &*tail;
+    let last = last.clone();
     let Some(base) = last.clone().or_else(|| cwd.map(str::to_owned)) else { return last };
     let Some((main, gone, candidates)) = repo_candidates(&base, dirs) else { return last };
     let home = owner(&base, &candidates);
     for (raw, is_cd, line_cwd) in hits {
+        let is_cd = *is_cd;
         if let Some(lc) = &line_cwd
             && owner(lc, &candidates) != home
         {
             break; // chamada anterior à última troca de `cwd` (EnterWorktree/ExitWorktree)
         }
-        let p = join_norm(line_cwd.as_deref().unwrap_or(&base), &expand_user(&raw, dirs));
+        let p = join_norm(line_cwd.as_deref().unwrap_or(&base), &expand_user(raw, dirs));
         if Path::new(&p).exists() {
             if let Some(o) = owner(&p, &candidates).filter(|o| *o != main) {
                 return Some(o);
@@ -634,7 +646,7 @@ fn tail_lines(path: &Path) -> std::io::Result<Vec<Vec<u8>>> {
 
 /// (caminho, é pasta?) dos comandos do Codex, da chamada mais recente para a mais antiga: `cd`
 /// vence `workdir`, e os dois vencem o arquivo do patch.
-fn codex_paths(rollout: &Path) -> Option<Vec<(String, bool)>> {
+fn codex_paths(rollout: &Path) -> Option<Arc<Vec<(String, bool)>>> {
     cached(&CODEX_PATHS, rollout, || {
         let mut out = Vec::new();
         let lines = tail_lines(rollout).inspect_err(|error| {
@@ -667,14 +679,14 @@ fn codex_paths(rollout: &Path) -> Option<Vec<(String, bool)>> {
 /// A worktree (ou a principal) do MESMO repositório onde o último comando do Codex rodou.
 fn codex_cwd(cwd: &str, rollout: &str, dirs: &Dirs) -> Option<String> {
     let (main, gone, candidates) = repo_candidates(cwd, dirs)?;
-    for (p, is_dir) in codex_paths(Path::new(rollout))? {
-        if Path::new(&p).exists() {
-            if let Some(o) = owner(&p, &candidates) {
+    for (p, is_dir) in codex_paths(Path::new(rollout))?.iter() {
+        if Path::new(p).exists() {
+            if let Some(o) = owner(p, &candidates) {
                 return Some(o);
             }
-        } else if is_dir && of_this_repo(&p, &main, &gone) {
+        } else if *is_dir && of_this_repo(p, &main, &gone) {
             // Pasta que sumiu: volta como está para o `locate` marcar "apagada".
-            return Some(owner(&p, &gone).unwrap_or(p));
+            return Some(owner(p, &gone).unwrap_or_else(|| p.clone()));
         }
     }
     None
@@ -735,7 +747,7 @@ mod tests {
         let first = line("/a", "/x1");
         std::fs::write(&path, &first).unwrap();
         let t0 = std::time::Instant::now();
-        let paths = |v: ClaudeTail| (v.0, v.1.into_iter().map(|h| h.0).collect::<Vec<_>>());
+        let paths = |v: Arc<ClaudeTail>| (v.0.clone(), v.1.iter().map(|h| h.0.clone()).collect::<Vec<_>>());
         assert_eq!(paths(claude_tail_at(&path, t0).unwrap()), (Some("/a".into()), vec!["/x1".into()]));
         // O começo muda sem mudar de tamanho (prova de que não é relido) e uma linha nova chega.
         std::fs::write(&path, first.replace("/x1", "/y1") + &line("/b", "/x2")).unwrap();
@@ -762,13 +774,13 @@ mod tests {
         add("a");
         let main_s = main.to_str().unwrap();
         let wt = |n: &str| dir.path().join(n).to_string_lossy().into_owned();
-        assert_eq!(worktrees_of(main_s), [wt("a")]);
+        assert_eq!(*worktrees_of(main_s), [wt("a")]);
         // `gitdir` reescrito sem a pasta de administração mudar: a lista guardada vale.
         std::fs::write(admin.join("a/gitdir"), format!("{}/z/.git\n", dir.path().display())).unwrap();
-        assert_eq!(worktrees_of(main_s), [wt("a")], "pasta de administração igual, nada relido");
+        assert_eq!(*worktrees_of(main_s), [wt("a")], "pasta de administração igual, nada relido");
         add("b");
         set_mtime(&admin, std::time::SystemTime::now() + std::time::Duration::from_secs(5));
-        assert_eq!(worktrees_of(main_s), [wt("z"), wt("b")]);
+        assert_eq!(*worktrees_of(main_s), [wt("z"), wt("b")]);
     }
 
     #[test]

@@ -9,6 +9,7 @@ use std::time::SystemTime;
 
 use hangar_workspace::worktrees::sanitize_cwd;
 
+use super::capped::SESSION_CAP;
 use super::mux::Pane;
 use super::procs::{ChildrenMap, ProcessView};
 
@@ -449,6 +450,13 @@ pub fn discover_panes(panes: &[Pane], procs: &dyn ProcessView, children: &Childr
             repl_sid: tree.as_ref().and_then(Tree::repl_sid),
         });
     }
+    // Teto do cache por nome: acima dele, quem não apareceu nesta rodada sai. O caminho normal é
+    // o `forget` de quem fecha a sessão.
+    if resolver.jsonl.len() > SESSION_CAP || resolver.fd_locked.len() > SESSION_CAP {
+        let live: HashSet<&str> = groups.iter().map(|g| g[0].session.as_str()).collect();
+        resolver.jsonl.retain(|n, _| live.contains(n.as_str()));
+        resolver.fd_locked.retain(|n| live.contains(n.as_str()));
+    }
     out
 }
 
@@ -494,6 +502,17 @@ mod tests {
         r.forget("b");
         assert_eq!(run(&mut r, "b"), Transcript { jsonl: Some(old.to_string_lossy().into()), tracked: false },
             "esquecida volta ao mais novo do cwd, sem vínculo");
+    }
+
+    #[test]
+    fn name_cache_has_a_ceiling() {
+        let mut r = Resolver::default();
+        for i in 0..=SESSION_CAP {
+            r.seed(&format!("gone{i}"), "/x.jsonl");
+        }
+        r.seed("live", "/live.jsonl");
+        discover_panes(&[pane("live", "/w")], &NoProcs, &ChildrenMap::new(), Path::new("/p"), &mut r, &|_| false);
+        assert_eq!(r.cached().keys().collect::<Vec<_>>(), ["live"], "acima do teto só fica quem apareceu");
     }
 
     #[test]

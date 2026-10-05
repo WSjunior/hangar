@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
+use super::capped::Capped;
 use crate::transcript::ts_of_iso;
 
 const MARKER_DIR: &str = ".hangar-state";
@@ -372,8 +373,7 @@ thread_local! {
 
 /// Resposta por transcript: (versão do transcript, mtime do sidecar) → respondida. O rabo de
 /// 256 KB só é relido quando um dos dois muda.
-// ponytail: sem poda, como os caches do `links.rs`; a poda por sessão é da Task 17.
-static ANSWERED: LazyLock<Mutex<HashMap<String, ((FileKey, f64), bool)>>> = LazyLock::new(Default::default);
+static ANSWERED: LazyLock<Mutex<Capped<String, ((FileKey, f64), bool)>>> = LazyLock::new(Default::default);
 
 fn answered_cached(session: &str, jsonl: &str, since: f64) -> bool {
     let Some(key) = std::fs::metadata(jsonl).ok().as_ref().and_then(file_key).map(|k| (k, since)) else {

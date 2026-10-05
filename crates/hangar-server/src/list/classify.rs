@@ -8,10 +8,11 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use futures_util::future::join_all;
+use futures_util::StreamExt;
 use hangar_api::session::SessionRow;
 use serde_json::Value;
 
+use super::capped::SESSION_CAP;
 use super::facts_files::{self, HookStates};
 use crate::terminal_state::{analyze, PaneAnalysis};
 
@@ -24,6 +25,16 @@ pub const STATUS_BUDGET: usize = 2;
 pub const LIMIT_TTL_S: f64 = 30.0;
 /// Intervalo da segunda captura: spinner que não mudou nele está congelado no scrollback.
 pub const SPINNER_RECHECK: Duration = Duration::from_millis(150);
+
+/// Capturas simultâneas numa rodada: cada uma é um processo do multiplexador.
+const CAPTURE_PARALLEL: usize = 4;
+
+/// Os quadros na ordem dos nomes, no máximo `CAPTURE_PARALLEL` processos de uma vez.
+async fn capture_all<C: CaptureSource>(io: &C, names: Vec<&str>) -> Vec<Result<String, CaptureFailed>> {
+    // Os futuros montados antes: um closure dentro do stream tira o `Send` da rodada.
+    let pending: Vec<_> = names.into_iter().map(|n| io.capture(n)).collect();
+    futures_util::stream::iter(pending).buffered(CAPTURE_PARALLEL).collect().await
+}
 
 /// Captura que não devolveu quadro; `code` vai ao log, nunca a saída do multiplexador.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,6 +141,21 @@ impl Classifier {
         self.limit.remove(name);
     }
 
+    /// Teto dos mapas por nome: acima dele, quem não está nas linhas da rodada sai. O caminho
+    /// normal é o `forget` de quem fecha a sessão.
+    fn cap(&mut self, rows: &[SessionRow]) {
+        let over = [self.idle_checked.len(), self.status.len(), self.label.len(), self.limit.len()]
+            .into_iter().any(|n| n > SESSION_CAP);
+        if !over {
+            return;
+        }
+        let live: HashSet<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        self.idle_checked.retain(|n, _| live.contains(n.as_str()));
+        self.status.retain(|n, _| live.contains(n.as_str()));
+        self.label.retain(|n, _| live.contains(n.as_str()));
+        self.limit.retain(|n, _| live.contains(n.as_str()));
+    }
+
     pub fn rename(&mut self, old: &str, new: &str) {
         if let Some(v) = self.idle_checked.remove(old) { self.idle_checked.insert(new.into(), v); }
         if let Some(v) = self.status.remove(old) { self.status.insert(new.into(), v); }
@@ -174,13 +200,13 @@ impl Classifier {
         }
 
         if !pending.is_empty() {
-            let frames = join_all(pending.iter().map(|&i| io.capture(&rows[i].name))).await;
+            let frames = capture_all(io, pending.iter().map(|&i| rows[i].name.as_str()).collect()).await;
             let mut analyses: Vec<Option<PaneAnalysis>> = frames.iter().map(|f| f.as_ref().ok().map(|t| analyze(t))).collect();
             let spinning: Vec<usize> = (0..pending.len())
                 .filter(|&k| analyses[k].as_ref().is_some_and(|a| a.state == "working")).collect();
             if !spinning.is_empty() {
                 io.pause(SPINNER_RECHECK).await;
-                let again = join_all(spinning.iter().map(|&k| io.capture(&rows[pending[k]].name))).await;
+                let again = capture_all(io, spinning.iter().map(|&k| rows[pending[k]].name.as_str()).collect()).await;
                 for (k, frame) in spinning.into_iter().zip(again) {
                     let a = analyses[k].as_mut().unwrap();
                     match frame {
@@ -285,6 +311,7 @@ impl Classifier {
             row.stalled = row.state == "working" && row.last_activity.is_some_and(|t| wall - t > facts.stall_seconds);
         }
         self.limit_radar(rows, &scraped, io).await;
+        self.cap(rows);
         effects
     }
 
@@ -298,7 +325,7 @@ impl Classifier {
         }).collect();
         let fresh: Vec<usize> = targets.iter().copied()
             .filter(|&i| now - self.limit.get(&rows[i].name).map_or(0.0, |v| v.0) > LIMIT_TTL_S).collect();
-        let frames = join_all(fresh.iter().map(|&i| io.capture(&rows[i].name))).await;
+        let frames = capture_all(io, fresh.iter().map(|&i| rows[i].name.as_str()).collect()).await;
         for (&i, frame) in fresh.iter().zip(frames) {
             let name = rows[i].name.clone();
             let reset = match frame {
@@ -460,6 +487,34 @@ mod tests {
             let calls = *io.calls.lock().unwrap() as f64 / n as f64;
             println!("{label}: {:.0} µs/tique, {calls:.1} capturas/tique", t.elapsed().as_micros() as f64 / n as f64);
         }
+    }
+
+    /// Captura que cede a vez enquanto está "rodando", contando quantas há ao mesmo tempo.
+    struct Slow { now: Mutex<usize>, peak: Mutex<usize> }
+
+    impl CaptureSource for Slow {
+        async fn capture(&self, _: &str) -> Result<String, CaptureFailed> {
+            { let mut n = self.now.lock().unwrap(); *n += 1; let mut p = self.peak.lock().unwrap(); *p = (*p).max(*n); }
+            for _ in 0..3 { tokio::task::yield_now().await; }
+            *self.now.lock().unwrap() -= 1;
+            Ok(IDLE.into())
+        }
+        async fn pause(&self, _: Duration) {}
+        fn wall(&self) -> f64 { 1000.0 }
+        fn mono(&self) -> f64 { 1000.0 }
+    }
+
+    #[tokio::test]
+    async fn captures_have_a_ceiling() {
+        let mut rows: Vec<SessionRow> = (0..20).map(|i| serde_json::from_value(serde_json::json!({"name": format!("s{i}")})).unwrap()).collect();
+        let hooks = HookStates::default();
+        let (headless, problems) = (BTreeMap::new(), BTreeMap::new());
+        let facts = Facts { hooks: &hooks, alive: &|_| false, config_dirs: &[], headless: &headless,
+                            problems: &problems, stall_seconds: 300.0 };
+        let io = Slow { now: Mutex::new(0), peak: Mutex::new(0) };
+        Classifier::default().classify(&mut rows, &facts, &io).await;
+        assert!(rows.iter().all(|r| r.state == "idle"));
+        assert_eq!(*io.peak.lock().unwrap(), CAPTURE_PARALLEL, "20 linhas sem marcador, no máximo 4 capturas juntas");
     }
 
     #[test]

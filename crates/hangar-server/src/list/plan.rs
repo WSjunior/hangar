@@ -3,7 +3,6 @@
 //!
 //! Roda por sessão a cada rodada da lista, então tudo é cacheado e nada levanta: uma falha aqui
 //! derrubaria a lista inteira. Arquivo ilegível é avisado no log e o plano some da linha.
-use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -11,6 +10,8 @@ use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use hangar_api::session::SessionRow;
+
+use super::capped::Capped;
 use regex::bytes::Regex;
 
 /// Quantos níveis subir do cwd atrás da pasta de planos; a subida para no primeiro `.git`, senão
@@ -46,11 +47,11 @@ pub struct Plan {
 #[derive(Default)]
 pub struct PlanTracker {
     /// (arquivo, exige começado) → (mtime, plano). O `None` memoriza "li e não serve".
-    files: HashMap<(PathBuf, bool), (SystemTime, Option<Plan>)>,
+    files: Capped<(PathBuf, bool), (SystemTime, Option<Plan>)>,
     /// pasta de planos → (relógio monotônico, eleito).
-    discovery: HashMap<PathBuf, (f64, Option<PathBuf>)>,
+    discovery: Capped<PathBuf, (f64, Option<PathBuf>)>,
     /// Eleito anterior: mantém o posto enquanto tiver step pendente.
-    sticky: HashMap<PathBuf, PathBuf>,
+    sticky: Capped<PathBuf, PathBuf>,
 }
 
 impl PlanTracker {
