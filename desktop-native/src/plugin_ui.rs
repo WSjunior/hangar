@@ -192,7 +192,7 @@ fn text(p: &Value, kids: &[Value], c: &Ctx) -> AnyElement {
     let (fg, bg) = if p["inverse"] == true { (bg.or(Some(theme::background())), fg.or(Some(theme::text()))) } else { (fg, bg) };
     let truncate = p["wrap"].as_str().is_some_and(|w| w.starts_with("truncate") || w == "end" || w == "middle");
     // Texto dentro de texto vira trechos lado a lado: o gpui não tem span em linha.
-    let mut el = div().flex().flex_row().min_w_0()
+    let el = div().flex().flex_row().min_w_0()
         .when(!truncate, |el| el.flex_shrink_0())
         .when_some(fg, |el, c| el.text_color(c))
         .when_some(bg, |el, c| el.bg(c))
@@ -200,28 +200,24 @@ fn text(p: &Value, kids: &[Value], c: &Ctx) -> AnyElement {
         .when(p["italic"] == true, |el| el.italic())
         .when(p["underline"] == true, |el| el.underline())
         .when(p["strikethrough"] == true, |el| el.line_through())
-        .when(p["dimColor"] == true, |el| el.opacity(0.6));
-    if truncate {
-        el = el.overflow_hidden().whitespace_nowrap();
-        // Juntar em texto puro tiraria o clique de link e botão: com eles, a linha só recorta, sem reticências.
-        if has_interactive(kids) { return el.children(kids.iter().map(|k| node(k, c))).into_any_element(); }
-        return el.child(div().truncate().child(plain_deep(kids))).into_any_element();
+        .when(p["dimColor"] == true, |el| el.opacity(0.6))
+        .when(truncate, |el| el.overflow_hidden().whitespace_nowrap());
+    // Juntar em texto puro tiraria o clique de link e botão: com eles, a linha cortada só recorta, sem reticências.
+    if let Some(text) = truncate.then(|| plain_deep(kids)).flatten() {
+        return el.child(div().truncate().child(text)).into_any_element();
     }
     el.children(kids.iter().map(|k| node(k, c))).into_any_element()
 }
 
-/// A subárvore tem algo que se clica.
-fn has_interactive(kids: &[Value]) -> bool {
-    kids.iter().any(|k| matches!(k["type"].as_str(), Some("Link" | "Button")) || has_interactive(children(k)))
-}
-
-/// Texto de uma subárvore inteira, para o corte com reticências que o gpui só faz num texto só.
-fn plain_deep(kids: &[Value]) -> String {
+/// Texto de uma subárvore inteira, para o corte com reticências que o gpui só faz num texto só; `None` quando ela tem
+/// algo que se clica.
+fn plain_deep(kids: &[Value]) -> Option<String> {
     kids.iter().map(|c| match c {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Object(_) if matches!(c["type"].as_str(), Some("Link" | "Button")) => None,
         Value::Object(_) => plain_deep(children(c)),
-        _ => String::new(),
+        _ => Some(String::new()),
     }).collect()
 }
 
@@ -307,7 +303,7 @@ fn unmark(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     // Importação explícita: `super::*` traz o `test` do gpui_kit, e o `#[test]` passaria a ser o dele.
-    use super::{button_key, cell_color, color, has_interactive, is_empty, raster_runs, safe_href};
+    use super::{button_key, cell_color, color, is_empty, plain_deep, raster_runs, safe_href};
     use serde_json::{json, Value};
 
     fn cells(words: &[u32]) -> String {
@@ -354,11 +350,11 @@ mod tests {
     }
 
     #[test]
-    fn link_or_button_anywhere_in_the_text_is_interactive() {
+    fn cut_text_keeps_links_and_buttons_clickable() {
         let link = json!({"type": "Link", "props": {"href": "https://gitlab.exemplo/pm/PM-1"}, "children": ["PM-1"]});
-        assert!(has_interactive(&[json!({"type": "Text", "children": ["PM ", link]})]));
-        assert!(has_interactive(&[json!({"type": "Button", "props": {"key": "k"}})]));
-        assert!(!has_interactive(&[json!("texto"), json!({"type": "Text", "children": ["só texto"]})]));
+        assert_eq!(plain_deep(&[json!({"type": "Text", "children": ["PM ", link]})]), None);
+        assert_eq!(plain_deep(&[json!({"type": "Button", "props": {"key": "k"}})]), None);
+        assert_eq!(plain_deep(&[json!("texto "), json!({"type": "Text", "children": ["só texto"]})]).as_deref(), Some("texto só texto"));
     }
 
     #[test]

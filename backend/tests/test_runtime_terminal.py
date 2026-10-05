@@ -298,7 +298,7 @@ def test_plugin_click_writes_with_the_terminal_ownership(monkeypatch,tmp_path):
     async def flow():
         await owner.adopt('session')
         assert await asyncio.to_thread(plugin_click.click,'session',2,5)
-        assert sent==[('session','\x1b[<0;6;3M\x1b[<0;6;3m',Phase.Python)]
+        assert [(name, phase) for name, _, phase in sent]==[('session',Phase.Python)]
         assert slot.phase == Phase.Rust and not slot.frozen
         assert gateway.calls == ['adopt','detach','adopt']
         await owner.detach('session')

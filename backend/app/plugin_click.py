@@ -104,8 +104,8 @@ async def _click(name: str, linha: int, coluna: int) -> None:
     """O clique pelo terminal; sem a posse da escrita (Rust mudo, vínculo em dúvida) é recusa, não 500."""
     try:
         chegou = await run_tmux(click, name, linha, coluna)
-    except (TimeoutError, RuntimeError) as e:
-        raise PressRefused("erro_mod_clique_sem_resposta", "O clique não chegou ao terminal.") from e
+    except (TimeoutError, RuntimeError):
+        chegou = False
     if not chegou:
         raise PressRefused("erro_mod_clique_sem_resposta", "O clique não chegou ao terminal.")
 

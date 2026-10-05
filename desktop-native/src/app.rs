@@ -877,6 +877,12 @@ impl Hangar {
         if error.status.is_none() && error.uncertain { tr("connection_failed") } else { Self::failure(error) }
     }
 
+    /// Clique num botão de mod: a recusa do backend (409) diz o motivo dela; sem resposta ou 5xx não é entrega de mensagem,
+    /// e a frase de reenviar enganaria.
+    fn press_failure(error: &Failure) -> String {
+        if error.status.is_none_or(|status| status >= 500) { tr("plugin_press_failed") } else { Self::failure(error) }
+    }
+
     fn selected_key(&self) -> Option<SessionKey> {
         SessionKey::new(&self.session_server()?, self.selected.as_ref()?)
     }
@@ -5110,12 +5116,6 @@ fn save_connection(address: &str, token: &str, servers: &[servers::ServerEntry])
 /// Fração da altura da janela que um painel de mod acima da faixa pode ocupar.
 const PLUGIN_PANE_MAX_SHARE: f32 = 0.45;
 
-/// Falha do clique num botão de mod: a recusa do backend (409) diz o motivo dela; sem resposta ou 5xx não é entrega de
-/// mensagem, e a frase de reenviar enganaria.
-fn plugin_press_failure(error: &Failure) -> Option<String> {
-    error.status.is_none_or(|status| status >= 500).then(|| tr("plugin_press_failed"))
-}
-
 fn select_snapshot(state: &SessionState) -> String { json!([state.question, state.options]).to_string() }
 
 fn display_body(event: &ChatEvent) -> String {
@@ -5468,7 +5468,7 @@ impl Hangar {
                 }
                 if let Some(url) = crate::plugin_ui::safe_href(&reply["opened"]) { cx.open_url(&url); }
             }
-            Err(error) => window.push_notification(Notification::warning(plugin_press_failure(&error).unwrap_or_else(|| Self::failure(&error))), cx),
+            Err(error) => window.push_notification(Notification::warning(Self::press_failure(&error)), cx),
         }
     }
 
@@ -5917,11 +5917,11 @@ mod tests {
 
     #[test]
     fn mod_click_failure_is_not_a_message_delivery() {
-        use super::{plugin_press_failure, Failure};
+        use super::{Failure, Hangar};
         let failure = |status| Failure { status, detail: "x".into(), retry_after: None, uncertain: true };
-        assert_eq!(plugin_press_failure(&failure(Some(500))), Some(tr("plugin_press_failed")));
-        assert_eq!(plugin_press_failure(&failure(None)), Some(tr("plugin_press_failed")));
-        assert_eq!(plugin_press_failure(&failure(Some(409))), None);
+        assert_eq!(Hangar::press_failure(&failure(Some(500))), tr("plugin_press_failed"));
+        assert_eq!(Hangar::press_failure(&failure(None)), tr("plugin_press_failed"));
+        assert_eq!(Hangar::press_failure(&failure(Some(409))), Hangar::failure(&failure(Some(409))));
     }
 
     #[test]
