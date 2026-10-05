@@ -10,7 +10,7 @@
   import PluginToasts from '../components/PluginToasts.svelte';
   import { copyText } from '../lib/clipboard';
   import { openInNewTab } from '../lib/openTab';
-  import { parsePluginToast, parsePluginUi, pressPluginButton, safeHref, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
+  import { activePaneId, followLocalTab, isMissingRoute, parsePluginToast, parsePluginUi, pressPluginButton, safeHref, showPluginPane, tabFollowsServer, type PluginSource, type PluginNode as PluginTree, type PluginPane as PluginPaneData, type PluginToast } from '@hangar/core';
   import SessionSwitcherSheet from '../components/SessionSwitcherSheet.svelte';
   import CreateSessionSheet from '../components/CreateSessionSheet.svelte';
   import UsageSheet from '../components/UsageSheet.svelte';
@@ -464,6 +464,17 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
   // Faixa acima do prompt que os mods do Claude Code desenham (SSE 'plugin_ui').
   let pluginBand = $state<PluginTree>(null);
   let pluginPanes = $state<PluginPaneData[]>([]);
+  // Campos novos do `plugin_ui`. Ausentes num servidor antigo: aba pela escolha local, faixa com o teto em colunas
+  // e `Input` desabilitado.
+  let pluginShownId = $state<string | null | undefined>(undefined);
+  let pluginColumns = $state<number | null>(null);
+  let pluginSource = $state<PluginSource | null>(null);
+  // Escolha local da aba: começa no último painel aberto e sobrevive aos redesenhos.
+  let pluginLocalTab = $state<string | null>(null);
+  const pluginActivePane = $derived.by(() => {
+    const id = activePaneId(pluginPanes.map((p) => p.id), pluginShownId, pluginLocalTab);
+    return pluginPanes.find((p) => p.id === id) ?? null;
+  });
   // Avisos (`$.ui.toast`) dos mods (SSE 'plugin_toast'). A reconexão repõe os que ainda não
   // venceram: o id diz quais já passaram por aqui.
   let pluginToasts = $state<PluginToast[]>([]);
@@ -513,6 +524,16 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       }
     } catch (err) {
       showPluginNotice(err instanceof Error ? err.message : String(err), true);
+    }
+  }
+  // Trocar de aba avisa o servidor. Seguindo o `shown_id`, a aba só muda quando o novo chega; sem ele (servidor
+  // antigo), a troca é local, e o 404/405 da rota que ainda não existe não é erro.
+  async function showPlugin(site: string) {
+    if (!tabFollowsServer(pluginPanes.map((p) => p.id), pluginShownId)) pluginLocalTab = site;
+    try {
+      await showPluginPane(sessionName, site, sessionServer());
+    } catch (err) {
+      if (!isMissingRoute(err)) showPluginNotice(err instanceof Error ? err.message : String(err), true);
     }
   }
   let pensamentoTimer: ReturnType<typeof setTimeout> | undefined;
@@ -2319,8 +2340,12 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       noteAlive();
       try {
         const s = parsePluginUi(JSON.parse(e.data));
+        pluginLocalTab = followLocalTab(pluginPanes.map((p) => p.id), s.panes.map((p) => p.id), pluginLocalTab);
         pluginBand = s.above;
         pluginPanes = s.panes;
+        pluginShownId = s.shownId;
+        pluginColumns = s.columns;
+        pluginSource = s.source;
       } catch {
         quadroFalhou('plugin_ui');
       }
@@ -2385,6 +2410,10 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
       sugestao = '';        // era do contexto que o /clear acabou de apagar
       pluginBand = null;    // idem: o mod redesenha para a conversa nova
       pluginPanes = [];
+      pluginShownId = undefined;
+      pluginColumns = null;
+      pluginSource = null;
+      pluginLocalTab = null;
       retiredQueuedIds.clear();
       idIndex.clear();
       reseedDerived();          // zera activity/asstCount junto (loadHistory re-semeia com o novo)
@@ -3443,10 +3472,10 @@ import ShareSessionSheet from '../components/ShareSessionSheet.svelte';
                   onclick={() => (problemaDispensado = problemaChave)}>×</button>
         </div>
       {/if}
-      {#each pluginPanes as pane (pane.id)}
-        <PluginPane {pane} onPress={pressPlugin} />
-      {/each}
-      <PluginBand tree={pluginBand} onPress={pressPlugin} notice={pluginNotice} />
+      {#if pluginActivePane}
+        <PluginPane pane={pluginActivePane} tabs={pluginPanes} onPress={pressPlugin} onShow={showPlugin} />
+      {/if}
+      <PluginBand tree={pluginBand} columns={pluginColumns} onPress={pressPlugin} notice={pluginNotice} />
       <!-- Composer SEMPRE visivel (exceto sessao morta). Antes ele sumia em awaiting_input e,
            se as opcoes nao fossem parseadas, o usuario ficava sem input E sem botoes = preso.
            Os OptionButtons continuam aparecendo na lista; o composer fica como saida garantida. -->
