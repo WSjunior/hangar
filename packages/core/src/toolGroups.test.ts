@@ -15,6 +15,11 @@ describe('agruparConversa', () => {
     expect(b).toEqual([{ type: 'group', id: 'g-a', tools: [tool('a'), tool('b'), tool('c')] }]);
   });
 
+  it('o agente fica fora do grupo e parte a sequência', () => {
+    const r = agruparConversa([tool('a'), tool('g', 'Agent'), tool('b')], { entraNoPensamento: semPensamento, groupMin: 1 });
+    expect(r.map((i) => `${i.type}:${i.id}`)).toEqual(['group:g-a', 'tool:g', 'group:g-b']);
+  });
+
   it('tool_result nunca vira item', () => {
     const r = agruparConversa([tool('a'), ev('tool_result', 'r', { tool_use_id: 'a' })], { entraNoPensamento: semPensamento });
     expect(r.map((i) => i.id)).toEqual(['a']);

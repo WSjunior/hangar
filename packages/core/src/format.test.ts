@@ -5,7 +5,7 @@ import {
   projectKey, projectLabel, encodeCompareIds, parseCompareIds, latestAssistantEvent, resetsIn, relativeTime,
   clusterByPair, railLabel, sortSessions, bubblesFromTail, ctxWindow, fileKind, fmtBytes, providerName, providerTag, isOrq,
   untrackedReason,
-  summarizeText, summarizeToolInput, summarizeToolResult, toolPhase, toolGroupLabel, toolGroupCounts, toolGroupTitulo, splitTerminalRun, toolVerbo,
+  summarizeText, summarizeToolInput, summarizeToolResult, toolPhase, toolGroupLabel, toolGroupCounts, toolGroupTitulo, splitTerminalRun, terminalFoldKind, terminalFoldTitle, toolVerbo,
   rotuloEstado,
   splitTodoBlock, parseImageMessage, parseCanal, parseRealtimeDelegation, parsePeerMessage, basename,
   parseFilePaths, separarComando, nomeFerramenta,
@@ -1101,25 +1101,71 @@ describe('formatElapsed', () => {
 });
 
 describe('splitTerminalRun', () => {
-  const t = (tool_name: string, state: 'done' | 'error' | 'running' = 'done') => ({ tool_name, state });
-  const settled = (x: { state: string }) => x.state === 'done';
+  const t = (tool_name: string, command?: string) => ({ tool_name, tool_input: command ? { command } : null });
   const shape = (run: ReturnType<typeof t>[]) =>
-    splitTerminalRun(run, settled).map((p) => (p.kind === 'reads' ? p.tools.map((x) => x.tool_name) : p.tool.tool_name));
+    splitTerminalRun(run).map((p) => (p.kind === 'fold' ? p.tools.map((x) => x.tool_name) : p.tool.tool_name));
 
-  it('leituras e buscas seguidas viram um bloco; edição e comando ficam soltos', () => {
-    const run = [t('Read'), t('Grep'), t('Edit'), t('Glob'), t('Bash'), t('Read')];
-    expect(shape(run)).toEqual([['Read', 'Grep'], 'Edit', ['Glob'], 'Bash', ['Read']]);
+  it('buscas, leituras, MCP e comandos seguidos viram um bloco; edição e gravação ficam soltas', () => {
+    const run = [t('Read'), t('Grep'), t('Bash', 'make'), t('Edit'), t('Glob'), t('mcp__hangar__send'), t('Write'), t('Read')];
+    expect(shape(run)).toEqual([['Read', 'Grep', 'Bash'], 'Edit', ['Glob', 'mcp__hangar__send'], 'Write', ['Read']]);
   });
 
-  it('leitura com erro no meio parte o bloco em dois', () => {
-    expect(shape([t('Read'), t('Read', 'error'), t('Grep')])).toEqual([['Read'], 'Read', ['Grep']]);
-  });
-
-  it('leitura ainda rodando fica solta', () => {
-    expect(shape([t('Read'), t('Grep', 'running')])).toEqual([['Read'], 'Grep']);
+  it('agente e carregador de ferramentas não dobram', () => {
+    expect(shape([t('Agent'), t('ToolSearch'), t('Bash', 'ls')])).toEqual(['Agent', 'ToolSearch', ['Bash']]);
   });
 
   it('lista vazia devolve lista vazia', () => {
-    expect(splitTerminalRun([], settled)).toEqual([]);
+    expect(splitTerminalRun([])).toEqual([]);
+  });
+});
+
+describe('terminalFoldKind', () => {
+  const bash = (command: string) => terminalFoldKind('Bash', { command });
+
+  it('comando só de busca, leitura ou listagem conta como esse tipo, como no Claude Code', () => {
+    expect(bash('rg -n foo src | head -5')).toBe('search');
+    expect(bash('cat a.txt | jq .x')).toBe('read');
+    expect(bash('ls -la && tree')).toBe('list');
+    expect(bash('echo oi; cat a')).toBe('read');
+  });
+
+  it('qualquer outro comando é comando de shell', () => {
+    expect(bash('cd src && ls')).toBe('shell');
+    expect(bash('npm run build')).toBe('shell');
+    expect(bash('echo "a | rg"')).toBe('shell');
+    expect(terminalFoldKind('Bash', null)).toBe('shell');
+    expect(terminalFoldKind('exec_command', { cmd: 'grep x y' })).toBe('search');
+    expect(terminalFoldKind('exec_command', { cmd: ['rg', '-n', 'x'] })).toBe('search');
+    expect(bash('(cd src && ls)')).toBe('shell');
+  });
+
+  it('nome sem diferenciar maiúsculas, com as ferramentas do Pi', () => {
+    expect(terminalFoldKind('read')).toBe('read');
+    expect(terminalFoldKind('ls')).toBe('list');
+    expect(terminalFoldKind('find')).toBe('search');
+  });
+
+  it('MCP dobra; nome sem servidor não', () => {
+    expect(terminalFoldKind('mcp__hangar__send')).toBe('mcp');
+    expect(terminalFoldKind('mcp__x')).toBeNull();
+    expect(terminalFoldKind('Edit')).toBeNull();
+  });
+});
+
+describe('terminalFoldTitle', () => {
+  beforeEach(() => overwriteGetLocale(() => 'pt'));
+  const tool = (tool_name: string, tool_input: Record<string, unknown> | null = null) => ({ tool_name, tool_input });
+
+  it('ordem e plural do Claude Code, arquivos distintos', () => {
+    const tools = [
+      tool('Read', { file_path: '/a' }), tool('Read', { file_path: '/a' }), tool('Read', { file_path: '/b' }),
+      tool('Grep'), tool('Bash', { command: 'make' }), tool('Bash', { command: 'ls' }),
+      tool('mcp__hangar__send'), tool('mcp__hangar-computer-control__objetivo'),
+    ];
+    expect(terminalFoldTitle(tools, false)).toBe('Buscou 1 padrão, leu 2 arquivos, listou 1 diretório, chamou hangar, computer-control 2 vezes, rodou 1 comando de shell');
+  });
+
+  it('rodando vai para o gerúndio com reticências', () => {
+    expect(terminalFoldTitle([tool('Bash', { command: 'make' }), tool('Bash', { command: 'make' })], true)).toBe('Rodando 2 comandos de shell…');
   });
 });
