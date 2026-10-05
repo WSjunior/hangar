@@ -167,13 +167,14 @@ resolução com semear, esquecer e renomear), `crates/hangar-server/tests/contra
 
 **Arquivos:** `list/discover_other.rs` (bilhetes Pi/omp/Kimi `registry.py:739-888`, sidecars Codex e
 Claude sem terminal `:1438-1480`), `list/links.rs` (par, encadeamento, loop, worktree, motor, conta,
-vida da sessão `:1376-1431`; colisões `:1219-1262`), `tests/contract_list.rs`. Linhas `orq` e de
-transferência não entram: vêm dos fatos (Task 14).
+vida da sessão `:1376-1431`; colisões `:1219-1262`), `tests/contract_list/other.rs`. Linhas `orq` e de
+transferência não entram: vêm dos fatos (Task 14), nem a `conta` de Kimi, Pi e omp (fato, Task 14).
+`discover_other::discover_rows` junta a descoberta da Task 6 com estas peças (o `registry.list()`).
 
 **Falha sem ela:** `contract_list::discovery_other_sequences`, `contract_list::links_cases`.
 
-- [ ] **Step 15: Testes, vistos falhar**
-- [ ] **Step 16: Porte; testes focados; revisar**
+- [x] **Step 15: Testes, vistos falhar**
+- [x] **Step 16: Porte; testes focados; revisar**
 
 ### Task 8: Marcadores, registro nativo, pergunta aberta, statusline e assinatura
 
@@ -260,13 +261,17 @@ invalidado ou sem cliente → produz na hora), `list.invalidate`, `list.resolve`
 `crates/hangar-server/tests/fake/mod.rs`, `rust_server.py:35`, `lib.rs:25`, testes nos dois lados.
 
 Pedido: linhas descobertas + contagem de clientes do dono. Resposta: estado das linhas Codex, Pi, omp
-e Kimi (código de hoje, `registry.py:1572-1690`, `1764-1780`, só sobre essas linhas); substituições
+e Kimi (código de hoje, `registry.py:1572-1690`, `1764-1780`, só sobre essas linhas); a `conta`
+das linhas Kimi, Pi e omp (`cotas.provider_padrao_kimi`, `pi_models.provider_atual` +
+`cotas.conta_de_provider_pi`, `registry.py:1408-1423`: casam credenciais, são da parte 6; a Task 7
+deixa `conta = None` nessas linhas e só o fato a preenche); substituições
 por nome e linhas sintéticas de transferência (`:165-206`); linhas `orq` (`:1483-1491`);
 `shared`/`owner`/escondida do dono; mapa de navegador vivo (`sse.py:254-263`); terminais de atalho
 (última leitura boa, sem esperar); a presença do app ajustada pela contagem (`sse.py:593-594,
 669-670`).
 
 **Falha sem ela:** Python `test_facts_compute_only_non_migrated_rows`,
+`test_facts_account_for_kimi_pi_omp_rows`,
 `test_facts_transfer_overrides_by_name`, `test_facts_owner_count_drives_app_presence`,
 `test_facts_nav_expired_not_returned`, `test_demote_service_updates_map_and_file`; Rust
 `list_facts::timeout_keeps_last_and_marks_problem`, `list_facts::transfer_rows_not_classified`;

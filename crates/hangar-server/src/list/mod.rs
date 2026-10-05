@@ -2,7 +2,9 @@
 //! consome sem saber de que plataforma veio cada dado.
 pub mod context;
 pub mod discover;
+pub mod discover_other;
 pub mod facts_files;
+pub mod links;
 pub mod mux;
 pub mod plan;
 pub mod procs;
