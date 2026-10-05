@@ -22,9 +22,16 @@ pub type Press = Rc<dyn Fn(&str, &str, &mut Window, &mut App)>;
 pub const BAND_SITE: &str = "above-prompt";
 pub const PANE_CLOSE_KEY: &str = "__close__";
 
-/// Onde a árvore está desenhada e quem atende o clique; sem `press`, botão é só rótulo. `links` numera os links na ordem
-/// da árvore: o mesmo endereço duas vezes não repete o id do elemento.
-struct Ctx<'a> { site: &'a str, press: &'a Option<Press>, links: std::cell::Cell<usize> }
+/// Troca de aba pedida no app: o id do painel.
+pub type Show = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+
+/// O que o app passa para desenhar a faixa e os painéis: quem atende o clique e a troca de aba. Sem `press`, botão é só
+/// rótulo e não há `✕`.
+pub struct View { pub press: Option<Press>, pub show: Option<Show> }
+
+/// Onde a árvore está desenhada e o que o app oferece. `links` numera os links na ordem da árvore: o mesmo endereço
+/// duas vezes não repete o id do elemento.
+struct Ctx<'a> { site: &'a str, view: &'a View, links: std::cell::Cell<usize> }
 
 pub fn button_key(v: &Value) -> Option<String> {
     (v["type"] == "Button").then(|| v["props"]["key"].as_str().filter(|k| !k.is_empty()).map(str::to_owned)).flatten()
@@ -115,32 +122,58 @@ fn frame() -> Div {
         .font_family(theme::MONO).text_size(px(TEXT_PX)).line_height(px(CELL_H)).text_color(theme::text())
 }
 
-pub fn band(tree: &Value, press: Option<Press>) -> Option<AnyElement> {
+pub fn band(tree: &Value, view: &View) -> Option<AnyElement> {
     if is_empty(tree) { return None; }
-    let c = Ctx { site: BAND_SITE, press: &press, links: Default::default() };
+    let c = Ctx { site: BAND_SITE, view, links: Default::default() };
     Some(frame().w_full().mb(px(4.)).overflow_hidden().child(node(tree, &c)).into_any_element())
 }
 
-/// Um painel que um mod abriu, acima da faixa como o terminal o desenha: título, fechar (o ✕ do engine) e o corpo, que
-/// rola dentro de `max_h`.
-pub fn pane(pane: &Value, press: Option<Press>, max_h: f32) -> AnyElement {
+/// O `✕` do lugar: fecha o painel da frente, como a marca do engine no terminal.
+fn close_mark(site: &str, view: &View) -> Option<AnyElement> {
+    let press = view.press.clone()?;
+    let site = site.to_owned();
+    Some(div().id(SharedString::from(format!("plg-close-{site}"))).flex_shrink_0().cursor_pointer().px(px(4.))
+        .text_color(theme::muted()).child("✕")
+        .on_click(move |_, window, cx| press(&site, PANE_CLOSE_KEY, window, cx)).into_any_element())
+}
+
+/// Fileira das abas: um título por painel, o ativo em destaque, e um `✕` só à direita.
+fn tabs(panes: &[Value], active: &str, view: &View) -> AnyElement {
+    let row = div().flex().flex_row().items_center().gap_1().min_w_0().overflow_hidden()
+        .children(panes.iter().map(|p| {
+            let id = p["id"].as_str().unwrap_or("").to_owned();
+            let title = p["title"].as_str().filter(|t| !t.is_empty()).unwrap_or(&id).to_owned();
+            let on = id == active;
+            let tab = div().id(SharedString::from(format!("plg-tab-{id}"))).flex_shrink_0().px(px(CELL_W)).rounded(px(4.))
+                .when(on, |el| el.bg(theme::raised()).font_weight(FontWeight::SEMIBOLD))
+                .when(!on, |el| el.text_color(theme::muted()).cursor_pointer())
+                .child(title);
+            match view.show.clone().filter(|_| !on) {
+                Some(show) => tab.on_click(move |_, window, cx| show(&id, window, cx)).into_any_element(),
+                None => tab.into_any_element(),
+            }
+        }));
+    div().flex().items_center().justify_between().gap_2().child(row).children(close_mark(active, view)).into_any_element()
+}
+
+/// Os painéis dos mods, acima da faixa como o terminal os abre. Com mais de um, uma fileira de abas e só o ativo
+/// desenhado; com um só, título e `✕`. O corpo rola dentro de `max_h`.
+pub fn panes(panes: &[Value], active: Option<&str>, view: &View, max_h: f32) -> Option<AnyElement> {
+    let pane = panes.iter().find(|p| p["id"].as_str() == active)?;
     let id = pane["id"].as_str().unwrap_or("").to_owned();
-    let title = pane["title"].as_str().filter(|t| !t.is_empty()).unwrap_or(&id).to_owned();
-    let header = div().flex().items_center().justify_between().gap_2()
-        .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(title))
-        .when_some(press.clone(), |el, press| {
-            let site = id.clone();
-            el.child(div().id(SharedString::from(format!("plg-close-{site}"))).flex_shrink_0().cursor_pointer().px(px(4.))
-                .text_color(theme::muted()).child("✕")
-                .on_click(move |_, window, cx| press(&site, PANE_CLOSE_KEY, window, cx)))
-        });
-    let c = Ctx { site: &id, press: &press, links: Default::default() };
+    let header = if panes.len() > 1 { tabs(panes, &id, view) } else {
+        let title = pane["title"].as_str().filter(|t| !t.is_empty()).unwrap_or(&id).to_owned();
+        div().flex().items_center().justify_between().gap_2()
+            .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).child(title))
+            .children(close_mark(&id, view)).into_any_element()
+    };
+    let c = Ctx { site: &id, view, links: Default::default() };
     // Recorta o que passa da largura: no gpui, filho maior que a coluna desenha por cima do vizinho.
-    frame().flex().flex_col().gap_1().min_h_0().max_h(px(max_h)).w_full().overflow_hidden()
+    Some(frame().flex().flex_col().gap_1().min_h_0().max_h(px(max_h)).w_full().overflow_hidden()
         .child(header)
         .child(div().id(SharedString::from(format!("plg-body-{id}"))).flex_1().min_h_0().overflow_y_scroll()
             .child(node(&pane["tree"], &c)))
-        .into_any_element()
+        .into_any_element())
 }
 
 fn node(v: &Value, c: &Ctx) -> AnyElement {
@@ -192,7 +225,7 @@ fn element(v: &Value, c: &Ctx) -> AnyElement {
                 .when(p["plain"] != true, |el| el.px(px(CELL_W)).rounded(px(4.)).bg(theme::raised()))
                 .when(p["dimColor"] == true, |el| el.opacity(0.6))
                 .when(p["variant"] == "primary", |el| el.text_color(theme::accent()));
-            match (button_key(v), c.press.clone()) {
+            match (button_key(v), c.view.press.clone()) {
                 (Some(key), Some(press)) => {
                     let site = c.site.to_owned();
                     base.id(SharedString::from(format!("plg-{site}-{key}"))).cursor_pointer()

@@ -218,6 +218,8 @@ enum Payload {
     Transfer(EntityId, create::TransferReply),
     // Clique num botão de mod: o que o mod copiou ou mandou abrir vem na resposta.
     PluginPressed(Result<Value, Failure>),
+    // Troca de aba de mod: só a falha interessa; a aba nova chega pelo `shown_id`.
+    PluginShown(Result<Value, Failure>),
     // Lista de outra máquina: a geração dos SSE de lista, a chave do servidor e o que chegou.
     Remote(u64, String, servers::RemoteUpdate),
     HeadlessPlan(SessionKey, controls::PlanOutcome),
@@ -953,6 +955,11 @@ impl Hangar {
         if error.status.is_none_or(|status| status >= 500) { tr("plugin_press_failed") } else { Self::failure(error) }
     }
 
+    /// Troca de aba recusada. Servidor sem a rota (404 ou 405) é servidor antigo, não erro: a troca local já valeu.
+    fn show_failure(error: &Failure) -> Option<String> {
+        (!matches!(error.status, Some(404 | 405))).then(|| Self::press_failure(error))
+    }
+
     fn selected_key(&self) -> Option<SessionKey> {
         SessionKey::new(&self.session_server()?, self.selected.as_ref()?)
     }
@@ -1607,6 +1614,12 @@ impl Hangar {
             Payload::Create(dialog, reply) => { self.receive_create(dialog, reply, window, cx); return; }
             Payload::Transfer(dialog, reply) => { self.receive_agent_transfer(dialog, reply, window, cx); return; }
             Payload::PluginPressed(result) => { self.receive_plugin_press(result, window, cx); return; }
+            Payload::PluginShown(result) => {
+                if let Some(text) = result.err().and_then(|error| Self::show_failure(&error)) {
+                    window.push_notification(Notification::warning(text), cx);
+                }
+                return;
+            }
             Payload::Sidebar(reply) => {
                 // Só o silenciar da máquina da conversa aberta muda as preferências que os avisos desta janela leem.
                 if matches!(&reply, sidebar::SidebarReply::Wrote(t, sidebar::Write::Mute(_), _) if t.server == self.open_server()) { self.load_notification_preferences(); }
@@ -5581,14 +5594,41 @@ impl Hangar {
         }))
     }
 
-    fn press_plugin(&mut self, site: String, key: String, cx: &mut Context<Self>) {
+    /// Chama uma rota `plugin/<ação>` da sessão aberta; a resposta volta como o `Payload` que `wrap` monta.
+    fn spawn_plugin(&mut self, action: &'static str, body: Value, wrap: fn(Result<Value, Failure>) -> Payload) {
         let (Some(api), Some(session)) = (self.session_api(), self.selected.clone()) else { return };
         let (connection, selection, tx) = (self.connection, self.selection, self.tx.clone());
         self.runtime.spawn(async move {
-            let result = api.act(&session.name, &["plugin", "press"], Some(json!({"site": site, "key": key})), false, 10).await;
-            let _ = tx.send(Envelope { connection, selection: Some(selection), payload: Payload::PluginPressed(result) }).await;
+            let result = api.act(&session.name, &["plugin", action], Some(body), false, 10).await;
+            let _ = tx.send(Envelope { connection, selection: Some(selection), payload: wrap(result) }).await;
         });
+    }
+
+    fn press_plugin(&mut self, site: String, key: String, cx: &mut Context<Self>) {
+        self.spawn_plugin("press", json!({"site": site, "key": key}), Payload::PluginPressed);
         cx.notify();
+    }
+
+    /// O que a faixa e os painéis dos mods precisam do app.
+    fn plugin_view(&self, cx: &mut Context<Self>) -> crate::plugin_ui::View {
+        let view = cx.entity().downgrade();
+        let show: crate::plugin_ui::Show = std::rc::Rc::new(move |site: &str, _: &mut Window, cx: &mut App| {
+            let site = site.to_owned();
+            let _ = view.update(cx, |this, cx| this.show_plugin(site, cx));
+        });
+        crate::plugin_ui::View { press: self.plugin_press(cx), show: Some(show) }
+    }
+
+    /// Troca de aba: seguindo o `shown_id`, a aba só muda quando o novo chega; sem ele (servidor antigo), a troca é
+    /// local. O servidor é avisado nos dois casos, menos em sessão só leitura.
+    fn show_plugin(&mut self, site: String, cx: &mut Context<Self>) {
+        if !crate::plugin_ui::follows_server(&crate::plugin_ui::pane_ids(&self.plugin_panes), &self.plugin_shown) {
+            self.plugin_local_tab = Some(site.clone());
+            cx.notify();
+            self.redraw(panes::Area::Bottom, cx);
+        }
+        if self.selected.as_ref().is_some_and(|s| s.read_only()) { return; }
+        self.spawn_plugin("show", json!({"site": site}), Payload::PluginShown);
     }
 
     // O que o mod copiou ou mandou abrir acontece aqui, na máquina de quem clicou, e não na do terminal.
@@ -5690,13 +5730,14 @@ impl Hangar {
             .when_some(delivery_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
             .when_some(stop_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
             .children(readable.then(|| {
-                let press = self.plugin_press(cx);
-                // Painel de mod fica acima da faixa, como o terminal o abre, em qualquer largura; a altura tem teto para o
-                // painel comprido rolar por dentro em vez de empurrar a conversa para fora.
+                let view = self.plugin_view(cx);
+                // Painéis de mod ficam acima da faixa, como o terminal os abre, em qualquer largura: com mais de um, em abas,
+                // só o da frente desenhado. A altura tem teto para o painel comprido rolar por dentro.
                 let tallest = f32::from(window.viewport_size().height) * PLUGIN_PANE_MAX_SHARE;
-                let inline = self.plugin_panes.iter()
-                    .map(|p| in_column(crate::plugin_ui::pane(p, press.clone(), tallest))).collect::<Vec<_>>();
-                inline.into_iter().chain(crate::plugin_ui::band(&self.plugin_band, press).map(in_column))
+                let ids = crate::plugin_ui::pane_ids(&self.plugin_panes);
+                let active = crate::plugin_ui::active_pane(&ids, &self.plugin_shown, self.plugin_local_tab.as_deref());
+                crate::plugin_ui::panes(&self.plugin_panes, active.as_deref(), &view, tallest).map(in_column).into_iter()
+                    .chain(crate::plugin_ui::band(&self.plugin_band, &view).map(in_column)).collect::<Vec<_>>()
             }).into_iter().flatten())
             .map(|el| match orq {
                 Some(orq) => el.child(in_column(self.render_orq_footer(&orq, cx))),
@@ -6081,6 +6122,16 @@ mod tests {
     use super::{message_card, preview_step, safe_markdown, stream_motion, working_tokens, working_verb};
     use crate::{api::dto::ChatEvent, cards::Card, i18n::tr};
     use std::{collections::HashSet, time::Duration};
+
+    #[test]
+    fn plugin_show_404_is_an_older_server_not_an_error() {
+        use super::{Failure, Hangar};
+        let failure = |status| Failure { status, detail: "x".into(), retry_after: None, uncertain: false };
+        assert_eq!(Hangar::show_failure(&failure(Some(404))), None);
+        assert_eq!(Hangar::show_failure(&failure(Some(405))), None);
+        assert_eq!(Hangar::show_failure(&failure(Some(409))), Some(Hangar::failure(&failure(Some(409)))));
+        assert_eq!(Hangar::show_failure(&failure(None)), Some(tr("plugin_press_failed")));
+    }
 
     #[test]
     fn mod_click_failure_is_not_a_message_delivery() {
