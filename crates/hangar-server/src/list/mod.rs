@@ -3,4 +3,5 @@
 pub mod context;
 pub mod discover;
 pub mod mux;
+pub mod plan;
 pub mod procs;

@@ -202,8 +202,8 @@ regra de pid vivo de `hook_state.py:56-129`, `.hangar-askq`, `.hangar-status` co
 
 **Falha sem ela:** `contract_list::plan_cases`.
 
-- [ ] **Step 21: Teste, visto falhar**
-- [ ] **Step 22: Porte com cache por mtime e descoberta de 3 s; testes focados; revisar**
+- [x] **Step 21: Teste, visto falhar**
+- [x] **Step 22: Porte com cache por mtime e descoberta de 3 s; testes focados; revisar**
 
 ### Task 11: Última resposta da sessão parada
 
