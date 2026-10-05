@@ -30,6 +30,13 @@ impl Hangar {
     pub(super) fn session_number_modifiers(&mut self, modifiers: Modifiers, window: &mut Window, cx: &mut Context<Self>) {
         if modifiers != self.keyboard.hold_modifiers() {
             self.session_picker.cancelled = false;
+            // Soltar o atalho com um número digitado é a confirmação, como Alt+Tab: não espera o prazo.
+            if !self.session_picker.selection.input().is_empty() && self.session_numbers_allowed(window, cx) {
+                self.session_picker.timer = None;
+                let input = self.session_picker.selection.input().to_owned();
+                let chosen = self.session_picker.selection.confirm();
+                self.select_numbered_session(chosen, &input, window, cx);
+            }
             self.cancel_session_numbers(cx);
             return;
         }
