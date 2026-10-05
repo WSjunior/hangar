@@ -207,12 +207,12 @@ def _codex_session(name):
     return codex_sessions.load(name) is not None
 
 
-def _registration_failed(event, name, exc, *, opening=False):
-    """`opening`: a falha veio de uma abertura no Rust, e só conexão caída ou recusada é queda dele;
-    prazo estourado ou resposta inválida é Rust vivo falhando."""
+def _registration_failed(event, name, exc, *, rust_dead=False):
+    """`rust_dead`: abertura no Rust com o processo dele já morto; só aí conexão caída ou recusada
+    é queda. Com ele vivo, conexão caída, prazo ou resposta inválida são falha dele."""
     from app import diag
     reason = failure_reason(exc)
-    if opening and isinstance(exc, ConnectionError):
+    if rust_dead and isinstance(exc, ConnectionError):
         # Queda do Rust durante a abertura: o próximo Rust ou a retomada pelo Python decide.
         _log.warning("abertura de %s interrompida pela queda do Rust (%s)", name, reason["codigo"])
         diag.registrar("runtime.reopen_interrupted", "aviso", sessao=name, etapa=event, **reason)
@@ -315,7 +315,7 @@ class RuntimeCoordinator:
                 try:
                     await self._reopen_registered(slot)
                 except Exception as exc:
-                    _registration_failed("runtime.reopen_failed", slot.binding.name, exc, opening=True)
+                    _registration_failed("runtime.reopen_failed", slot.binding.name, exc, rust_dead=not self._rust_alive())
             # Em paralelo: com muitas sessões, em série a janela passaria do teto de espera.
             await asyncio.gather(*(reopen(slot) for slot in tuple(self.slots.values())
                 if self.names.get(slot.binding.name) == slot.binding.key and slot.phase == Phase.Rust))
@@ -640,14 +640,14 @@ class RuntimeCoordinator:
             try:
                 await self.prepare_session(binding.name, "claude")
             except Exception as exc:
-                _registration_failed("runtime.reopen_failed", binding.name, exc, opening=True)
+                _registration_failed("runtime.reopen_failed", binding.name, exc, rust_dead=not self._rust_alive())
         async def open_listed(meta):
             try:
                 pending = await asyncio.to_thread(_has_pending, _queue_dir() / "runtime" / f"{meta.get('key')}.json")
                 if pending or await asyncio.to_thread(_cano_alive, meta):
                     await self.prepare_session(meta["name"], "claude", launch=pending)
             except Exception as exc:
-                _registration_failed("runtime.registration_failed", meta["name"], exc, opening=True)
+                _registration_failed("runtime.registration_failed", meta["name"], exc, rust_dead=not self._rust_alive())
         await asyncio.gather(*(open_listed(meta) for meta in metas
             if meta.get("headless") and not self.managed_queue(meta["name"])))
 

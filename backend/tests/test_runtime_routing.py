@@ -802,9 +802,10 @@ def test_rust_dying_during_reopen_is_an_interruption_not_a_passage(birth, monkey
     assert "runtime.close_unconfirmed" not in names     # Rust morto que nem escuta não segura a trava
 
 
-def test_live_rust_failing_reopen_stays_an_error(birth, monkeypatch):
-    # Prazo estourado com o Rust de pé não é queda: nenhum Rust novo vai reabrir a sessão. E o
-    # `close` recusado com o processo vivo também fica no diário.
+@pytest.mark.parametrize("failure", [TimeoutError("timed out"), ConnectionResetError("handler caiu")])
+def test_live_rust_failing_reopen_stays_an_error(birth, monkeypatch, failure):
+    # Prazo estourado ou conexão derrubada com o Rust de pé não é queda: nenhum Rust novo vai
+    # reabrir a sessão. E o `close` recusado com o processo vivo também fica no diário.
     from app import diag
     events = []
     monkeypatch.setattr(diag, "registrar", lambda evento, nivel="ok", **campos: events.append((evento, nivel)))
@@ -816,7 +817,7 @@ def test_live_rust_failing_reopen_stays_an_error(birth, monkeypatch):
         async def op(self, descriptor, command, operation_id, clock):
             self.ops.append((command["kind"], descriptor))
             if command["kind"] == "open":
-                raise TimeoutError("timed out")
+                raise failure
             raise ConnectionRefusedError("listener fechado")
 
     async def scenario():

@@ -792,8 +792,8 @@ vez; 53 com três quedas: Python assumiu, nada duplicado). Ficam **manuais pende
 parte do Step 54 com `terminal_delivery_unknown` forçado (congelar o agente faz o Rust adiar, não
 perder a prova do envio) e, no Step 55, a transferência Claude → Codex (o backend isolado não vê a
 conta Codex real). Antes da rodada: revisão de `891900a4` (`ecc:python-reviewer`,
-`ecc:silent-failure-hunter`) e conserto em `82b27772` (só a abertura rebaixa queda do Rust para
-aviso, e só por `ConnectionError`; `close` recusado só cala com o Rust morto; boot pergunta
+`ecc:silent-failure-hunter`) e conserto em `82b27772` e no commit seguinte (só a abertura rebaixa
+queda do Rust para aviso, e só por `ConnectionError` com o processo dele já morto; `close` recusado só cala com o Rust morto; boot pergunta
 `sessao_existe` ao tmux); o roteiro deixou de contar os nomes de diário que saíram (`d6dbdc36`).
 A primeira rodada teve um `reopen_failed[RuntimeError]` intermitente no Step 52, não reproduzido
 em seis repetições; descrição e candidatas em `prova-real.md`.
