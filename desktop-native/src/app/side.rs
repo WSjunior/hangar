@@ -158,15 +158,17 @@ pub(super) struct Side {
     /// No Windows, um navegador por sessão (chave `servidor::sessão`), como o do Electron, para o hangar-preview
     /// dirigir o da sessão certa. Nos outros sistemas a chave é uma só: no Linux um segundo motor não nasce no processo.
     pub(super) browsers: HashMap<String, Entity<super::browser::BrowserPanel>>,
-    /// A aba Navegador está na fileira. Fechar só esconde a página: no Linux o motor não nasce duas vezes no processo.
-    pub(super) browser_open: bool,
+    /// Sessões (chave de `browser_key`) com a aba Navegador na fileira. Fechar só esconde a página.
+    pub(super) browser_open: HashSet<String>,
+    /// Aba escolhida por sessão (chave de `browser_key`); sessão sem escolha usa a última preferência gravada.
+    pub(super) tabs: HashMap<String, SideTab>,
 }
 
 impl Default for Side {
     fn default() -> Self {
         let saved = appearance::get();
         Self { open: true, menu: false, width: saved.side_width, browser_width: saved.side_browser_width, drag: None, shortcuts: None, project: ProjectShortcuts::default(), cost: None, cost_task: None, cost_gen: 0, orq: Default::default(),
-            files: None, diff: None, reloading: HashSet::new(), run_code_pending: HashSet::new(), git: None, run: None, browsers: HashMap::new(), browser_open: false,
+            files: None, diff: None, reloading: HashSet::new(), run_code_pending: HashSet::new(), git: None, run: None, browsers: HashMap::new(), browser_open: HashSet::new(), tabs: HashMap::new(),
             shortcut_terms: HashMap::new(), shortcut_focus: HashMap::new(), shortcut_running: HashMap::new(), shortcut_recheck: HashMap::new() }
     }
 }

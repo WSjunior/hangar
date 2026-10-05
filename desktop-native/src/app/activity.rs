@@ -665,17 +665,19 @@ impl Hangar {
 
     pub(super) fn subagent_tab_open(&self) -> bool { self.act.active_tab.is_some() }
 
-    /// A aba lembrada, se esta sessão tem o que mostrar nela; senão, Contexto (a escolha fica para a próxima sessão).
+    /// A aba lembrada desta sessão, se ela tem o que mostrar nela; senão, Contexto.
     pub(super) fn side_tab(&self) -> SideTab {
         let readable = self.selected.as_ref().is_some_and(|s| s.readable());
         // Arquivos e git da sessão da outra pessoa são recusados pelo servidor dela.
         let own = readable && !self.open_read_only();
-        match appearance::get().side_tab {
+        let key = self.side_key();
+        let saved = key.as_ref().and_then(|k| self.side.tabs.get(k).copied()).unwrap_or(appearance::get().side_tab);
+        match saved {
             SideTab::Files if own => SideTab::Files,
             SideTab::Activity if self.has_activity() => SideTab::Activity,
             SideTab::Git if own && self.selected.as_ref().is_some_and(super::sidebar::has_git) => SideTab::Git,
             // Lembrada de outra execução ou fechada no ×, a aba só volta depois que o navegador for aberto de novo.
-            SideTab::Browser if self.side.browser_open => SideTab::Browser,
+            SideTab::Browser if key.is_some_and(|k| self.side.browser_open.contains(&k)) => SideTab::Browser,
             _ => SideTab::Context,
         }
     }
@@ -701,6 +703,7 @@ impl Hangar {
         self.act.active_tab = None;
         self.act.pending_tab = None;
         self.act.tab_error = None;
+        if let Some(key) = self.side_key() { self.side.tabs.insert(key, tab); }
         if appearance::get().side_tab != tab { self.apply_appearance(appearance::Appearance { side_tab: tab, ..appearance::get() }, true, cx); }
         if self.side_tab() == SideTab::Files { self.show_tree(true, Some(window), cx); }
         self.sync_activity(cx);
@@ -975,7 +978,7 @@ impl Hangar {
                     .accessibility_label(label).child(body)
                     .on_click(cx.listener(move |this, _, window, cx| this.choose_side_tab(which, window, cx))))
         };
-        let browser = self.side.browser_open.then(|| Button::new("side-tab-browser-close").ghost().xsmall().icon(TAB_CROSS)
+        let browser = self.side_key().is_some_and(|k| self.side.browser_open.contains(&k)).then(|| Button::new("side-tab-browser-close").ghost().xsmall().icon(TAB_CROSS)
             .tooltip(tr("browser_close")).accessibility_label(tr("browser_close"))
             .on_click(cx.listener(|this, _, window, cx| { cx.stop_propagation(); this.close_browser(window, cx); })));
         div().id("side-tabs").flex_1().h_full().min_w_0().flex().gap(px(2.)).overflow_hidden()
