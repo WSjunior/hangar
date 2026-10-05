@@ -432,8 +432,12 @@ impl Hangar {
         }
         if let Some(api) = self.api.clone() {
             let name = name.to_owned();
-            // Sem a confirmação o backend manda o mesmo `nav` de novo na próxima conexão; abrir duas vezes só renavega.
-            self.runtime.spawn(async move { let _ = api.server_send(reqwest::Method::DELETE, &["sessions", &name, "nav"], None, 15).await; });
+            // Sem a confirmação o backend manda o mesmo `nav` de novo na próxima conexão, que renavega e traz a aba de volta.
+            self.runtime.spawn(async move {
+                if let Err(e) = api.server_send(reqwest::Method::DELETE, &["sessions", &name, "nav"], None, 15).await {
+                    eprintln!("[nav] confirmação do nav de {name} falhou, ele volta na próxima conexão: {e:?}");
+                }
+            });
         }
     }
 
