@@ -211,11 +211,20 @@ fn boxed(p: &Value, kids: &[Value], c: &Ctx) -> AnyElement {
     })).into_any_element()
 }
 
-/// `Box` em linha sem largura nem distribuição: cada filho ocupa as suas células, como no terminal.
+/// Props do `Box` que o `boxed` desenha e o molde do Raster não reproduz: com qualquer uma, a
+/// linha segue o desenho comum em vez de perder o recuo, o espaçamento ou o fundo.
+const BOX_LAYOUT: &[&str] = &[
+    "justifyContent", "alignItems", "flexGrow", "flexWrap", "width", "minWidth", "gap", "columnGap", "rowGap",
+    "padding", "paddingX", "paddingY", "paddingTop", "paddingBottom", "paddingLeft", "paddingRight",
+    "margin", "marginX", "marginY", "marginTop", "marginBottom", "marginLeft", "marginRight",
+    "backgroundColor", "borderStyle", "overflow",
+];
+
+/// `Box` em linha sem nada além dos filhos: cada filho ocupa as suas células, como no terminal.
 fn plain_row(v: &Value) -> bool {
     let p = &v["props"];
     v["type"] == "Box" && matches!(p["flexDirection"].as_str(), None | Some("row"))
-        && p["justifyContent"].is_null() && p["width"].is_null() && p["display"] != "none"
+        && BOX_LAYOUT.iter().all(|k| p[*k].is_null()) && p["display"] != "none"
         && !children(v).is_empty()
 }
 
@@ -445,6 +454,13 @@ mod tests {
         assert!(!text_row(&json!({"type": "Box", "children": [{"type": "Text", "props": {"wrap": "truncate-end"}, "children": ["a"]}]})));
         assert!(!text_row(&json!({"type": "Box", "children": [{"type": "Text", "children": [text("a")]}]})));
         assert!(!text_row(&json!({"type": "Box", "children": []})));
+        // Recuo, espaçamento e fundo o molde não reproduz: a linha fica no desenho comum.
+        for prop in ["paddingLeft", "marginLeft", "gap", "columnGap", "backgroundColor", "borderStyle"] {
+            let row = json!({"type": "Box", "props": {prop: 1}, "children": [text("a")]});
+            assert!(!text_row(&row), "{prop}");
+            let bar = json!({"type": "Box", "props": {prop: 1}, "children": [text("  "), {"type": "Raster", "props": {"columns": 20}}]});
+            assert!(raster_row(&bar).is_none(), "{prop}");
+        }
         assert!(raster_row(&json!({"type": "Box", "children": [{"type": "Raster", "props": {"columns": 0}}]})).is_none());
     }
 
