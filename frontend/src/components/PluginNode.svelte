@@ -8,8 +8,10 @@
     node: Node;
     /** Clique num botão de mod, pela `key` dele; sem ele, os botões são só rótulo. */
     onPress?: (key: string) => void;
+    /** Largura do lugar em colunas (faixa ou painel): `width` que a alcança vira 100%. */
+    place?: number | null;
   }
-  let { node, onPress }: Props = $props();
+  let { node, onPress, place = null }: Props = $props();
 
   const el = $derived(node && typeof node === 'object' ? (node as PluginElement) : null);
   const p = $derived((el?.props ?? {}) as Record<string, unknown>);
@@ -35,13 +37,17 @@
     typeof props.source === 'string' ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(props.source)}` : '';
 </script>
 
+{#snippet kids(list: Node[] | undefined)}
+  {#each list ?? [] as child, i (i)}<PluginNode node={child} {onPress} {place} />{/each}
+{/snippet}
+
 {#if typeof node === 'string' || typeof node === 'number'}{node}{:else if el}
   {#if el.type === 'Box'}
-    <div class="box" style={boxStyle(p)}>
-      {#each el.children ?? [] as child, i (i)}<PluginNode node={child} {onPress} />{/each}
+    <div class="box" style={boxStyle(p, place)}>
+      {@render kids(el.children)}
     </div>
   {:else if el.type === 'Text'}
-    <span style={textStyle(p)}>{#each el.children ?? [] as child, i (i)}<PluginNode node={child} {onPress} />{/each}</span>
+    <span style={textStyle(p)}>{@render kids(el.children)}</span>
   {:else if el.type === 'Raster'}
     {@const raster = rasterRows(p)}
     <!-- O Raster vem com a largura do pane do terminal: em coluna mais estreita cada trecho encolhe na
@@ -73,12 +79,13 @@
   {:else if el.type === 'Image'}
     <span class="alt">{str(p.alt)}</span>
   {:else}
-    {#each el.children ?? [] as child, i (i)}<PluginNode node={child} {onPress} />{/each}
+    {@render kids(el.children)}
   {/if}
 {/if}
 
 <style>
-  .box { box-sizing: border-box; }
+  /* Âncora do `position: absolute` dos filhos, como o Box do Ink. */
+  .box { box-sizing: border-box; position: relative; }
   .raster { display: flex; flex-direction: column; flex: 1 1 0; min-width: 0; align-self: center; white-space: pre; line-height: 1; }
   .raster-row { display: flex; min-width: 0; }
   .run { flex-basis: 0; flex-shrink: 1; min-width: 0; overflow: hidden; }

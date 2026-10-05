@@ -20,12 +20,26 @@ function css(parts: Record<string, string | number | null | undefined | false>):
 
 type Props = Record<string, unknown>;
 
+/** `width` em colunas que alcança a largura do lugar ocupa o lugar inteiro: o mod desenhou para a coluna do
+ *  terminal, e o app pode ser mais largo. Menor continua teto. Sem a largura do lugar (servidor antigo), teto. */
+export function fillsPlace(width: unknown, place: number | null | undefined): boolean {
+  return typeof width === 'number' && typeof place === 'number' && place > 0 && width >= place;
+}
+
 /** `Box` do Ink em CSS de flexbox. O padrão do Ink é linha, não coluna. */
-export function boxStyle(p: Props): string {
+export function boxStyle(p: Props, place?: number | null): string {
   const pick = (...keys: string[]) => keys.map((k) => p[k]).find((v) => typeof v === 'number');
   const border = typeof p.borderStyle === 'string' && p.borderStyle;
+  // `absolute` sai do fluxo e pinta por cima, preso ao Box pai (que é `position: relative`) e recortado pelo lugar.
+  const absolute = p.position === 'absolute';
   return css({
     display: p.display === 'none' ? 'none' : 'flex',
+    position: absolute ? 'absolute' : null,
+    top: absolute ? lines(p.top) : null,
+    bottom: absolute ? lines(p.bottom) : null,
+    left: absolute ? cols(p.left) : null,
+    right: absolute ? cols(p.right) : null,
+    'z-index': absolute ? 1 : null,
     'flex-direction': typeof p.flexDirection === 'string' ? p.flexDirection : 'row',
     'flex-grow': typeof p.flexGrow === 'number' ? p.flexGrow : null,
     'flex-shrink': typeof p.flexShrink === 'number' ? p.flexShrink : null,
@@ -35,8 +49,9 @@ export function boxStyle(p: Props): string {
     'justify-content': typeof p.justifyContent === 'string' ? p.justifyContent : null,
     'column-gap': cols(pick('columnGap', 'gap')),
     'row-gap': lines(pick('rowGap', 'gap')),
-    // Largura fixa do terminal vira teto: no celular a coluna é mais estreita que a do pane.
-    'max-width': cols(p.width),
+    // Largura fixa do terminal vira teto (no celular a coluna é mais estreita que a do pane), salvo quando ela
+    // alcança a largura do lugar: aí o mod quis a linha inteira.
+    'max-width': fillsPlace(p.width, place) ? null : cols(p.width),
     width: typeof p.width === 'number' ? '100%' : cols(p.width),
     'min-width': cols(p.minWidth) ?? '0',
     'padding-top': lines(pick('paddingTop', 'paddingY', 'padding')),
