@@ -5,15 +5,17 @@ use std::sync::{Arc,Mutex,atomic::AtomicU64};
 use std::time::Duration;
 use tokio::sync::{broadcast,Notify};
 
-struct Io { calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>> }
-impl Io { fn new()->Self { Self { calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]) } } }
+struct Io { calls:Mutex<Vec<CommandRequest>>, text:Mutex<String>, gate:Notify, blocked:std::sync::atomic::AtomicBool, fail_write:std::sync::atomic::AtomicBool, fail_enter:std::sync::atomic::AtomicBool, rotate_enter:std::sync::atomic::AtomicBool, conversation:Arc<Mutex<String>>, socket_calls:Mutex<Vec<Vec<u8>>>, ghost:Mutex<String> }
+impl Io { fn new()->Self { Self { calls:Mutex::new(vec![]),text:Mutex::new(String::new()),gate:Notify::new(),blocked:std::sync::atomic::AtomicBool::new(false),fail_write:std::sync::atomic::AtomicBool::new(false),fail_enter:std::sync::atomic::AtomicBool::new(false),rotate_enter:std::sync::atomic::AtomicBool::new(false),conversation:Arc::new(Mutex::new("sid".into())),socket_calls:Mutex::new(vec![]),ghost:Mutex::new(String::new()) } } }
 impl TerminalIo for Io {
     fn command<'a>(&'a self,r:CommandRequest)->IoFuture<'a,CommandOutput> { Box::pin(async move {
         let cmd=r.args[0].clone();
         self.calls.lock().unwrap().push(r.clone());
         let stdout=match cmd.as_str() {
             "display-message"=>b"session\t%1\t1\n".to_vec(),
-            "capture-pane"=>format!("────────────────────────────────\n❯ {}\n────────────────────────────────\n",self.text.lock().unwrap()).into_bytes(),
+            "capture-pane"=>{let text=self.text.lock().unwrap().clone();let ghost=self.ghost.lock().unwrap().clone();
+                // O fantasma é rascunho que o `C-u` não apaga: o composer fica ocupado.
+                format!("────────────────────────────────\n❯ {}\n────────────────────────────────\n",if text.is_empty(){ghost}else{text}).into_bytes()},
             "send-keys"=>{
                 if self.blocked.load(std::sync::atomic::Ordering::Acquire) { self.gate.notified().await; }
                 let text=r.args.last().unwrap();
@@ -71,9 +73,12 @@ impl Fixture {
         self.start_with_events(broadcast::channel(128).0)
     }
     fn start_with_events(&self,events:broadcast::Sender<hangar_server::runtime::protocol::RuntimeEvent>)->hangar_server::runtime::terminal::TerminalHandle {
+        self.start_full(events,Duration::from_secs(30))
+    }
+    fn start_full(&self,events:broadcast::Sender<hangar_server::runtime::protocol::RuntimeEvent>,stall_notice:Duration)->hangar_server::runtime::terminal::TerminalHandle {
         let lease=queue::acquire_lease(&self.target.lease_path).unwrap();
         let store=Store::open(&self.target.state_path,&self.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
-        let options=TerminalOptions {io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15)};
+        let options=TerminalOptions {io:self.io.clone(),limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,multiline_settle:Duration::ZERO,slash_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1},tick:Duration::from_millis(15),stall_notice};
         TerminalActor::spawn(self.target.clone(),QueueActor::start(store,lease),self.policy.clone(),options,events,Arc::new(AtomicU64::new(0)))
     }
     fn command(&self,id:&str,text:&str)->RuntimeCommand { RuntimeCommand {operation_id:id.into(),kind:OperationKind::Input,payload:json!({"text":text,"pre_transcript":false})} }
@@ -122,7 +127,7 @@ elif mode=='send-keys' and '-l' in sys.argv:
     f.target.binding.mux_argv=vec![python,"-X".into(),"utf8".into(),script.to_str().unwrap().into()];*f.mux.lock().unwrap()=f.target.binding.mux_argv.clone();
     let lease=queue::acquire_lease(&f.target.lease_path).unwrap();let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",1,"session",vec![])).unwrap();
     let options=TerminalOptions {io:Arc::new(ProcessIo {command_timeout:Duration::from_millis(1500),socket_timeout:Duration::from_millis(150)}),
-        limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1,..InputLimits::default()},tick:Duration::from_secs(10)};
+        limits:InputLimits {settle:Duration::ZERO,literal_settle:Duration::ZERO,proof_attempts:1,ready_attempts:1,cleanup_attempts:1,..InputLimits::default()},tick:Duration::from_secs(10),stall_notice:Duration::from_secs(30)};
     let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
     let result=tokio::time::timeout(Duration::from_secs(10),h.command(f.command("timeout","A"))).await.unwrap().unwrap();
     assert_eq!(result.disposition,hangar_server::runtime::protocol::Disposition::Unknown);
@@ -214,7 +219,7 @@ async fn unknown_fill_blocks_second_input_after_detach_restart_and_same_sid_gene
     f.unknown.store(false,std::sync::atomic::Ordering::Release);
     let lease=queue::acquire_lease(&f.target.lease_path).unwrap();
     let store=Store::open(&f.target.state_path,&f.target.projection_dir,queue::State::new("key",2,"session",vec![])).unwrap();
-    let options=TerminalOptions {io:f.io.clone(),limits:InputLimits::default(),tick:Duration::from_millis(15)};
+    let options=TerminalOptions {io:f.io.clone(),limits:InputLimits::default(),tick:Duration::from_millis(15),stall_notice:Duration::from_secs(30)};
     let h=TerminalActor::spawn(f.target.clone(),QueueActor::start(store,lease),f.policy.clone(),options,broadcast::channel(128).0,Arc::new(AtomicU64::new(0)));
     assert_eq!(h.drain().await.unwrap()["drained"],0);
     assert_eq!(h.command(f.command("C","C")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
@@ -648,5 +653,23 @@ async fn keyboard_loan_expires_and_rust_takes_it_back() {
     let late=h.control("return-1".into(),"keyboard_return".into(),json!({"loan_id":loan_id})).await.unwrap();
     assert_eq!(serde_json::to_value(late.disposition).unwrap(),"rejected");
     assert_eq!(late.payload["code"],"keyboard_loan_expired");
+    h.stop().await.unwrap();
+}
+#[tokio::test]
+async fn terminal_runtime_deferred_without_write_backs_off_and_surfaces_the_reason() {
+    let f=Fixture::new().await; *f.io.ghost.lock().unwrap()="rascunho".into();
+    let h=f.start_full(broadcast::channel(128).0,Duration::from_millis(150));
+    assert_eq!(h.command(f.command("busy","Olá")).await.unwrap().disposition,hangar_server::runtime::protocol::Disposition::Deferred);
+    let start=std::time::Instant::now();
+    while h.snapshot().await.unwrap()["view"]["input_stalled"]!="composer_busy" {assert!(start.elapsed()<WAIT,"o motivo não chegou à vista"); tokio::time::sleep(Duration::from_millis(5)).await;}
+    // Parada visível, as tentativas seguem espaçadas: o tique de 15 ms daria ~30 em 500 ms.
+    let clears=||f.io.calls.lock().unwrap().iter().filter(|r|r.args.last().is_some_and(|a|a=="C-u")).count();
+    let before=clears(); tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(clears()-before<=6,"tentativas sem espera crescente: {}",clears()-before);
+    assert!(h.snapshot().await.unwrap()["error"].is_null(),"a fila não pode parar como erro");
+    f.io.ghost.lock().unwrap().clear();
+    f.wait_for("entregue depois do rascunho sair",||f.state()["rows"][0]["delivered"]==true).await;
+    let start=std::time::Instant::now();
+    while !h.snapshot().await.unwrap()["view"]["input_stalled"].is_null() {assert!(start.elapsed()<WAIT,"o motivo não saiu da vista"); tokio::time::sleep(Duration::from_millis(5)).await;}
     h.stop().await.unwrap();
 }

@@ -23,6 +23,10 @@ const problemLabels: Record<string, () => string> = {
   headless_sem_login: m.problema_headless_sem_login,
   runtime_falhou: m.problema_runtime_falhou,
   terminal_observacao_falhou: m.problema_terminal_observacao_falhou,
+  terminal_input_composer_busy: m.problema_terminal_input_composer_busy,
+  terminal_input_composer_unreadable: m.problema_terminal_input_composer_unreadable,
+  terminal_input_capture_failed: m.problema_terminal_input_capture_failed,
+  terminal_input_stalled: m.problema_terminal_input_stalled,
 };
 
 export function SessionProblem({ problem, detail }: Props) {
@@ -37,7 +41,7 @@ export function SessionProblem({ problem, detail }: Props) {
   const hasDetail = Number.isSafeInteger(exitCode);
   const label = problem && Object.hasOwn(problemLabels, problem) ? problemLabels[problem]() : m.session_problem_unknown();
   // Runtime e observação mandam código e frase fixa do Rust, sem texto da conversa: pode ir à tela.
-  const runtimeDetail = problem === 'runtime_falhou' || problem === 'terminal_observacao_falhou' ? detail?.split('\n')[0] : null;
+  const runtimeDetail = problem === 'runtime_falhou' || problem === 'terminal_observacao_falhou' || problem === 'terminal_input_stalled' ? detail?.split('\n')[0] : null;
 
   if (!problem) return null;
 

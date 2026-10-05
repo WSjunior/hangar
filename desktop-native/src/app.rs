@@ -139,6 +139,18 @@ fn in_column(el: impl IntoElement) -> Div {
     div().w_full().flex_shrink_0().px(px(16.)).flex().justify_center().child(column_box(false).px(px(column_padding())).child(el))
 }
 
+/// Faixa de problema da sessão: a frase do web pelo código, como no web; código sem frase mostra o detalhe cru.
+fn problem_banner(state: &SessionState) -> Option<String> {
+    let code = state.problema.as_deref().filter(|code| !code.trim().is_empty());
+    match code.and_then(|code| crate::i18n::tr_web(&format!("problema_{code}"), &HashMap::new())) {
+        Some(text) => Some(match state.problema_detalhe.as_deref().and_then(|d| d.lines().next()).filter(|d| !d.trim().is_empty()) {
+            Some(detail) => format!("{text} — {detail}"),
+            None => text,
+        }),
+        None => state.problema_detalhe.clone().or_else(|| code.map(str::to_owned)),
+    }
+}
+
 /// Texto da conversa com a fonte, o tamanho e a entrelinha escolhidos em Aparência. Em 100% são os do web no desktop:
 /// resposta 17 px/1,7 (`.prose`, AssistantBubble.svelte) e bolha do usuário 16 px/1,55 (`.bubble-text`, UserBubble.svelte).
 fn conversation_text(el: Div, user: bool) -> Div {
@@ -5600,7 +5612,7 @@ impl Hangar {
             .when(pending, |el| el.child(in_column(div().py_2().text_sm().text_color(theme::warning()).child(tr("pending_question")))))
             .when_some(self.chat.state.question.clone().filter(|_| pending), |el, question| el.child(in_column(div().text_sm().child(question))))
             .when_some(action_note, |el, (note, warning)| el.child(in_column(div().py_1().text_xs().text_color(if warning { theme::warning() } else { theme::muted() }).child(note))))
-            .when_some(self.chat.state.problema_detalhe.clone().or_else(|| self.chat.state.problema.clone()), |el, problem| el.child(in_column(div().text_sm().text_color(theme::warning()).child(problem))))
+            .when_some(problem_banner(&self.chat.state), |el, problem| el.child(in_column(div().text_sm().text_color(theme::warning()).child(problem))))
             .when_some(self.error.clone(), |el, error| el.child(in_column(div().py_2().text_sm().text_color(theme::warning()).child(error)
                 .child(Button::new("retry").small().ghost().label(tr("retry")).on_click(cx.listener(|this, _, window, cx| {
                     this.reselect(window, cx);
@@ -6036,6 +6048,20 @@ mod tests {
             session.state = state.into();
             assert_eq!(conversation_row_state(&session, None, false), expected);
         }
+    }
+
+    #[test]
+    fn problem_banner_translates_known_codes_and_keeps_raw_detail_otherwise() {
+        use super::{problem_banner, SessionState};
+        crate::i18n::set_language(crate::appearance::Language::Pt);
+        let mut state = SessionState { problema: Some("terminal_input_composer_busy".into()), problema_detalhe: Some("composer_busy".into()), ..Default::default() };
+        assert_eq!(problem_banner(&state).unwrap(), "A mensagem está esperando: o campo de digitação do terminal tem texto — composer_busy");
+        state.problema = Some("codigo_sem_frase".into());
+        assert_eq!(problem_banner(&state).unwrap(), "composer_busy");
+        state.problema_detalhe = None;
+        assert_eq!(problem_banner(&state).unwrap(), "codigo_sem_frase");
+        state.problema = None;
+        assert!(problem_banner(&state).is_none());
     }
 
     #[test]

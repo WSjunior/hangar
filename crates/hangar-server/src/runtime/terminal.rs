@@ -10,9 +10,10 @@ pub struct TerminalTarget {
     pub key:String,pub generation:u64,pub name:String,pub binding:TerminalBinding,
     pub lease_path:PathBuf,pub state_path:PathBuf,pub projection_dir:PathBuf,pub transcript:PathBuf,pub created:f64,
 }
-pub struct TerminalOptions { pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration }
+/// `stall_notice`: entrega adiada sem escrita por mais que isso aparece na vista e no log.
+pub struct TerminalOptions { pub io:Arc<dyn TerminalIo>,pub limits:InputLimits,pub tick:Duration,pub stall_notice:Duration }
 impl Default for TerminalOptions {
-    fn default()->Self {Self {io:Arc::new(input::ProcessIo::default()),limits:InputLimits::default(),tick:Duration::from_secs(1)}}
+    fn default()->Self {Self {io:Arc::new(input::ProcessIo::default()),limits:InputLimits::default(),tick:Duration::from_secs(1),stall_notice:Duration::from_secs(30)}}
 }
 fn error(code:&str)->RuntimeError {RuntimeError::new(code,"operação terminal conservada no diário")}
 fn sample()->ClockSample {ClockSample {monotonic_s:0.0,epoch_s:SystemTime::now().duration_since(UNIX_EPOCH).map(|d|d.as_secs_f64()).unwrap_or(0.0)}}
@@ -106,6 +107,16 @@ struct Executor {
     uncertain:Vec<String>,unprovable:bool,
     /// Teclado emprestado ao Python (administração que digita no pane): id, prazo e o pedido que o abriu.
     loan:Option<(String,tokio::time::Instant,String)>,
+    /// Entrada que o terminal recusa sem escrever (composer ocupado, tela ilegível): espera crescente
+    /// entre as tentativas e, passado o `stall_notice`, o motivo na vista.
+    stall:Option<Stall>,
+}
+struct Stall {code:String,since:tokio::time::Instant,wait:Duration,next:tokio::time::Instant,surfaced:bool}
+/// Esperas normais (o Claude ocupado, uma pergunta na tela) não contam como entrega parada, nem a
+/// escrita desfeita (`input_unproved`), que já tem o teto de tentativas da fila.
+fn stalled_code(result:&RuntimeReply)->Option<&str> {
+    if result.disposition!=Disposition::Deferred || result.payload["stage"].is_null() {return None;}
+    result.payload["code"].as_str().filter(|code|!matches!(*code,"question_open"|"not_ready"|"overlay"|"input_unavailable"|"input_unproved"))
 }
 /// Teto do empréstimo: a administração mais longa (troca de modelo/motor) leva segundos.
 const MAX_LOAN_S:u64=120;
@@ -117,7 +128,7 @@ impl TerminalActor {
         let sequence=Arc::new(AtomicU64::new(queue.initial_state().next_seq.max(previous.max(queue.initial_state().operations.len() as u64).saturating_add(1))));
         let receipt=ReceiptIndex::new("claude",&target.binding.conversation);
         let (sender,receiver)=mpsc::channel(64); let closed=Arc::new(AtomicBool::new(false));
-        let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,loan:None};
+        let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,loan:None,stall:None};
         let task=tokio::spawn(executor.run(receiver,closed.clone()));
         TerminalHandle {sender,closed,task:Arc::new(Mutex::new(Some(task))),stopped:Arc::new(Mutex::new(None))}
     }
@@ -165,7 +176,8 @@ impl Executor {
         let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
         if state.generation!=self.target.generation{return Err(error("runtime_generation"));}
         Ok(json!({"key":self.target.key,"generation":self.target.generation,"revision":self.revision.load(Ordering::Acquire),
-            "view":{"terminal":true,"conversation":self.target.binding.conversation,"deliverable":self.deliverable && !self.cleared(&state),"preserve_binding":state.runtime_state["preserve_binding"],"clear_barrier":state.runtime_state["clear_barrier"]},"channels":{},"error":self.last_error}))
+            "view":{"terminal":true,"conversation":self.target.binding.conversation,"deliverable":self.deliverable && !self.cleared(&state),"preserve_binding":state.runtime_state["preserve_binding"],"clear_barrier":state.runtime_state["clear_barrier"],
+                "input_stalled":self.stall.as_ref().filter(|s|s.surfaced).map(|s|s.code.clone())},"channels":{},"error":self.last_error}))
     }
     async fn publish(&self)->Result<(),RuntimeError> {
         self.revision.fetch_add(1,Ordering::AcqRel);
@@ -331,7 +343,8 @@ impl Executor {
             result.payload["preserve_binding"]=json!(true);
         }
         self.action(Action::Finish {id:id.into(),status:status(result.disposition),result:serde_json::to_value(&result).unwrap()}).await?;
-        if matches!(result.disposition,Disposition::Deferred|Disposition::Rejected) {
+        let repeated=row_id.is_some() && self.track_stall(&result);
+        if matches!(result.disposition,Disposition::Deferred|Disposition::Rejected) && !repeated {
             tracing::info!(key=%self.target.key,session=%self.target.name,code=%result.payload["code"].as_str().unwrap_or("terminal_not_executed"),
                 reason="operação adiada ou recusada; resultado conservado no diário",stage=%result.payload["stage"].as_str().unwrap_or("plugin"),"resultado da entrada terminal");
         }
@@ -343,16 +356,43 @@ impl Executor {
         }else{self.last_error=None; self.uncertain.clear(); self.unprovable=false; self.publish().await?;}
         Ok(result)
     }
+    /// Conta a série de recusas sem escrita; devolve se esta repete o código anterior (sem log novo).
+    fn track_stall(&mut self,result:&RuntimeReply)->bool {
+        let Some(code)=stalled_code(result) else {self.stall=None; return false;};
+        let now=tokio::time::Instant::now();
+        let stall=match self.stall.take() {
+            // Outro código na mesma série não zera o relógio: alternar entre dois nunca apareceria.
+            Some(mut stall)=>{let repeated=stall.code==code; stall.code=code.into(); stall.wait=(stall.wait*2).min(self.options.stall_notice); (stall,repeated)}
+            None=>(Stall {code:code.into(),since:now,wait:self.options.tick,next:now,surfaced:false},false),
+        };
+        let (stall,repeated)=stall;
+        let stall=self.stall.insert(Stall {next:now+stall.wait,..stall});
+        if !stall.surfaced && now.duration_since(stall.since)>=self.options.stall_notice {
+            stall.surfaced=true;
+            tracing::warn!(key=%self.target.key,session=%self.target.name,code=%stall.code,
+                waited_s=now.duration_since(stall.since).as_secs(),"entrada terminal parada: o terminal recusa a entrega sem escrever");
+        }
+        repeated
+    }
     async fn drain_once(&mut self,entry:Option<String>)->Result<Value,RuntimeError> {
         if self.loaned() {return Ok(json!({"drained":0,"keyboard_loan":true}));}
         let state=self.queue.snapshot().await.map_err(|_|error("queue_io"))?;
         if state.terminal_write_blocked(&self.target.binding.conversation) {return Ok(json!({"drained":0}));}
         if self.cleared(&state){return Ok(json!({"drained":0,"preserve_binding":true}));}
-        if !state.rows.iter().any(|r|r["delivered"]==false && entry.as_ref().is_none_or(|id|r["id"]==*id)) {return Ok(json!({"drained":0}));}
+        if !state.rows.iter().any(|r|r["delivered"]==false && entry.as_ref().is_none_or(|id|r["id"]==*id)) {
+            if self.stall.take().is_some_and(|s|s.surfaced) {self.publish().await?;}
+            return Ok(json!({"drained":0}));
+        }
         let services=self.services("maintenance","maintenance","");
         let facts=services.facts(&self.target.binding).await.map_err(|_|error("terminal_facts"))?;
         self.deliverable=facts.binding==self.target.binding && facts.ready && facts.idle && !facts.open_question;
-        if !self.deliverable || facts.binding!=self.target.binding {return Ok(json!({"drained":0}));}
+        if !self.deliverable || facts.binding!=self.target.binding {
+            // Terminal ocupado ou com pergunta é espera normal: o motivo antigo sai da tela.
+            if self.stall.take().is_some_and(|s|s.surfaced) {self.publish().await?;}
+            return Ok(json!({"drained":0}));
+        }
+        // A espera crescente só segura a escrita: os fatos (e o `deliverable`) seguem frescos.
+        if self.stall.as_ref().is_some_and(|s|tokio::time::Instant::now()<s.next) {return Ok(json!({"drained":0,"stalled":true}));}
         let rows=self.action(Action::Claim {min_ts:self.target.created,limit:Some(1),entry_id:entry}).await?;
         let Some(row)=rows.as_array().and_then(|r|r.first())else{return Ok(json!({"drained":0}));};
         let row_id=row["id"].as_str().ok_or_else(||error("queue_row"))?.to_string();

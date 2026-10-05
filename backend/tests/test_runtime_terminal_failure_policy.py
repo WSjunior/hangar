@@ -271,3 +271,29 @@ def test_terminal_error_snapshot_triggers_shared_maintenance_without_device(monk
     finally:
         gateway.close()
         owner.close_python_leases()
+
+
+def test_terminal_stalled_input_surfaces_reason_once_per_series(monkeypatch, tmp_path):
+    gateway = Gateway('runtime_lease', 0)
+    owner, slot, _, records = setup(monkeypatch, tmp_path, gateway)
+    async def flow():
+        assert await _to_rust(owner, 'session')
+        assert ra.runtime_problem('session') is None
+        for revision, stalled in enumerate(['composer_busy', 'composer_busy', 'capture_utf8', 'ui_novo', None], 1):
+            data = gateway.snapshot(slot.binding.descriptor(), revision)
+            data['view']['input_stalled'] = stalled
+            assert ra.apply_event(slot, {'key': slot.binding.key, 'generation': 1, 'revision': revision,
+                                          'channel': 'snapshot', 'data': data})
+            expected = {'composer_busy': 'terminal_input_composer_busy', 'capture_utf8': 'terminal_input_capture_failed',
+                        'ui_novo': 'terminal_input_stalled'}.get(stalled)
+            assert ra.runtime_problem('session') == ((expected, stalled) if stalled else None)
+        stalls = [fields['codigo'] for event, _, fields in records if event == 'terminal.input_stalled']
+        assert stalls == ['composer_busy', 'capture_utf8', 'ui_novo']
+        bad = gateway.snapshot(slot.binding.descriptor(), 9)
+        bad['view']['input_stalled'] = 7
+        assert not ra.apply_event(slot, {'key': slot.binding.key, 'generation': 1, 'revision': 9, 'channel': 'snapshot', 'data': bad})
+    try:
+        asyncio.run(flow())
+    finally:
+        gateway.close()
+        owner.close_python_leases()

@@ -596,13 +596,26 @@ def _problem_text(data):
     return (f"{data['error_code']}: {message}" if isinstance(message, str) and message else data["error_code"])[:300]
 
 
+# Entrada que o terminal recusa sem escrever, pelo código do escritor Rust: cada uma tem frase na tela.
+_STALLED_INPUT = {"composer_busy": "terminal_input_composer_busy",
+    "composer_unreadable": "terminal_input_composer_unreadable",
+    "capture_failed": "terminal_input_capture_failed", "capture_utf8": "terminal_input_capture_failed"}
+
+
 def runtime_problem(name):
-    """Problema publicado pelo Rust para a sessão: `("runtime_falhou", "<código>: <frase>")` ou None."""
+    """Problema publicado pelo Rust para a sessão: `("runtime_falhou", "<código>: <frase>")`, a entrada
+    parada (`("terminal_input_…", "<código>")`) ou None."""
     coordinator = runtime_coordinator.current()
     slot = coordinator.slots.get(coordinator.names.get(name, "")) if coordinator is not None else None
-    if slot is None or slot.phase != runtime_coordinator.Phase.Rust or not (slot.view or {}).get("problem"):
+    if slot is None or slot.phase != runtime_coordinator.Phase.Rust:
         return None
-    return "runtime_falhou", slot.view["problem"]
+    view = slot.view or {}
+    if view.get("problem"):
+        return "runtime_falhou", view["problem"]
+    stalled = (view.get("view") or {}).get("input_stalled")
+    if isinstance(stalled, str) and stalled:
+        return _STALLED_INPUT.get(stalled, "terminal_input_stalled"), stalled[:60]
+    return None
 
 
 def apply_event(slot, event):
@@ -624,8 +637,14 @@ def apply_event(slot, event):
             view = data["view"]
             if (view.get("terminal") is not True or view.get("conversation") != terminal["conversation"]
                     or type(view.get("deliverable")) is not bool or "public_state" in view
-                    or data["channels"] or data.get("error") is not None and not isinstance(data["error"], str)):
+                    or data["channels"] or data.get("error") is not None and not isinstance(data["error"], str)
+                    or view.get("input_stalled") is not None and not isinstance(view["input_stalled"], str)):
                 return False
+            stalled = view.get("input_stalled")
+            if stalled and stalled != ((cached.get("view") or {}).get("input_stalled")) and revision >= previous:
+                # Uma linha por série: o Rust só marca depois do teto, e repete o código enquanto durar.
+                from app import diag
+                diag.registrar("terminal.input_stalled", "aviso", sessao=slot.binding.name, codigo=stalled[:60])
         else:
             try:
                 StateEvent.model_validate(data["view"]["public_state"])

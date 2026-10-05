@@ -17,6 +17,10 @@ export function textoProblema(codigo: string | null | undefined): string | null 
     case 'headless_sem_login': return m.problema_headless_sem_login();
     case 'runtime_falhou': return m.problema_runtime_falhou();
     case 'terminal_observacao_falhou': return m.problema_terminal_observacao_falhou();
+    case 'terminal_input_composer_busy': return m.problema_terminal_input_composer_busy();
+    case 'terminal_input_composer_unreadable': return m.problema_terminal_input_composer_unreadable();
+    case 'terminal_input_capture_failed': return m.problema_terminal_input_capture_failed();
+    case 'terminal_input_stalled': return m.problema_terminal_input_stalled();
     default: return null;
   }
 }
