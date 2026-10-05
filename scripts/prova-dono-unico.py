@@ -685,17 +685,21 @@ class Prova:
                            f"Rust {velho} → {novo or 'não voltou'}; envio durante a queda {st} {codigo(corpo)}, "
                            f"{contagem[m][0]} entrega(s); Python assumiu: {'sim' if assumiu else 'não'}; {resumo}")
         # Três quedas em 60 s: o Python assume tudo, cada sessão retomada uma vez, nada duplicado.
+        # A queda da fase anterior já conta na janela de 60 s do Supervisor: o Python pode assumir
+        # depois de duas mortes aqui, e aí não há um terceiro Rust para matar.
         j = Janela(self)
         t0 = time.monotonic()
-        for i in range(3):
-            pid = esperar(self.rust_pid, 30)
-            if not pid:
+        assumiu_ja = lambda: j.contar(r"o Python assume a porta")
+        mortes = 0
+        while mortes < 3 and not assumiu_ja():
+            pid = esperar(lambda: self.rust_pid() or assumiu_ja() and -1, 30)
+            if not pid or pid == -1:
                 break
             os.kill(pid, signal.SIGKILL)
-            if i < 2:
-                esperar(lambda: (lambda p: p and p != pid)(self.rust_pid()), 30)
+            mortes += 1
+            esperar(lambda: assumiu_ja() or (lambda p: p and p != pid)(self.rust_pid()), 30)
         decorrido = round(time.monotonic() - t0, 1)
-        assumiu = esperar(lambda: j.contar(r"o Python assume a porta"), 30)
+        assumiu = esperar(assumiu_ja, 30)
         esperar(lambda: self.api("GET", "/api/sessions", timeout=5)[0] == 200, 60, 1)
         depois = {nome: self.enviar(nome) for nome in nomes}
         contagem = self.esperar_entregas([m for m, *_ in depois.values()])
@@ -703,10 +707,11 @@ class Prova:
         duplicadas = sorted(m for m, (n, _) in todas.items() if n > 1)
         retomadas = {nome: j.contar(rf"religou name={nome}\b") for nome, h in nomes.items() if h}
         _, _, passagem, resumo = j.resumo()
-        ok = (bool(assumiu) and decorrido <= 60 and all(contagem[m][0] == 1 for m, *_ in depois.values())
+        ok = (bool(assumiu) and all(contagem[m][0] == 1 for m, *_ in depois.values())
               and not duplicadas and all(n == 1 for n in retomadas.values()))
         self.registrar("53", "três quedas do Rust em 60 s", ok,
-                       f"três kills em {decorrido} s; Python assumiu: {'sim' if assumiu else 'não'}; retomadas sem terminal "
+                       f"{mortes} kill(s) nesta fase em {decorrido} s, mais a queda anterior; Python assumiu: "
+                       f"{'sim' if assumiu else 'não'}; retomadas sem terminal "
                        f"{retomadas}; mensagem depois {[contagem[m][0] for m, *_ in depois.values()]}; "
                        f"duplicadas {duplicadas or 'nenhuma'}; {resumo}")
         self.fechar(list(nomes))
