@@ -283,15 +283,23 @@ impl Hangar {
 
     fn apply_next_mode(&mut self, key: SessionKey, cx: &mut Context<Self>) {
         let catalog = self.controls.known.get(&(key.clone(), Ctl::Mode)).cloned().unwrap_or(Value::Null);
-        // O servidor diz quando o ciclo não dá para ler; sem ele, o atalho avisa em vez de morrer calado.
-        if catalog.get("sondavel").and_then(Value::as_bool) == Some(false) {
-            self.action_feedback.insert(key, (super::activity::web("permissao_sem_ciclo"), true));
-            cx.notify();
-            return;
-        }
         let modes: Vec<String> = catalog.get("modes").and_then(Value::as_array).map(|m| m.iter().filter_map(|m| m.as_str().map(str::to_owned)).collect())
             .unwrap_or_default();
-        if modes.is_empty() { return; }
+        if modes.is_empty() {
+            // Sessão sem terminal responde `sondavel:false` COM a lista: só lista vazia é o dontAsk sem volta.
+            if catalog.get("sondavel").and_then(Value::as_bool) == Some(false) {
+                let text = super::activity::web("permissao_sem_ciclo");
+                self.action_feedback.insert(key.clone(), (text.clone(), true));
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_secs(5)).await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.action_feedback.get(&key).is_some_and(|(t, _)| *t == text) { this.action_feedback.remove(&key); cx.notify(); }
+                    });
+                }).detach();
+                cx.notify();
+            }
+            return;
+        }
         let current = self.ctl_label(Ctl::Mode);
         let at = current.as_ref().and_then(|c| modes.iter().position(|m| m == c));
         let next = modes[at.map_or(0, |i| (i + 1) % modes.len())].clone();
