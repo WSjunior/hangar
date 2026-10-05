@@ -161,7 +161,8 @@ fn codex_json_literal_keeps_lone_surrogate_as_one_character() {
 fn codex_long_context_effective_resume_and_single_growth_keep_scope() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let (_d, base) = fixtures_copy();
-    let path = base.join("codex/sessions/2026/09/30/rollout-c3.jsonl");
+    // Canônico como a varredura (`rollout_owners`): o custo avulso abaixo cai na mesma entrada.
+    let path = std::fs::canonicalize(base.join("codex/sessions/2026/09/30/rollout-c3.jsonl")).unwrap();
     let areas = AreaMap::load(Path::new("/nao/existe.json"));
     let ix = Index::open(&base.join("../idx")).unwrap();
     let creations = AtomicUsize::new(0);
