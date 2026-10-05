@@ -20,11 +20,18 @@ impl<K: Hash + Eq + Clone, V> Capped<K, V> {
     where
         K: Borrow<Q>,
     {
+        self.get_mut(key).map(|v| &*v)
+    }
+
+    pub fn get_mut<Q: Hash + Eq + ?Sized>(&mut self, key: &Q) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+    {
         self.clock += 1;
         let clock = self.clock;
         self.map.get_mut(key).map(|e| {
             e.0 = clock;
-            &e.1
+            &mut e.1
         })
     }
 

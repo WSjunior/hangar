@@ -170,6 +170,8 @@ mod other {
         system: System,
         /// Quando a tabela inteira foi relida (com argv e ambiente) e o mapa que saiu dela.
         cache: Option<(Instant, Arc<ChildrenMap>)>,
+        /// Pids lidos por inteiro nesse retrato; um relido sozinho só tem o que aquela leitura pediu.
+        full: std::collections::HashSet<Pid>,
     }
 
     /// O ramo `psutil` do `procinfo.py`. No Windows toda releitura, mesmo de um pid, tira o retrato
@@ -184,7 +186,7 @@ mod other {
     impl Default for SysInfo {
         fn default() -> Self {
             Self {
-                state: Mutex::new(Snapshot { system: System::new(), cache: None }),
+                state: Mutex::new(Snapshot { system: System::new(), cache: None, full: Default::default() }),
                 #[cfg(test)]
                 refreshes: Default::default(),
             }
@@ -203,7 +205,7 @@ mod other {
             let pid = Pid::from_u32(u32::try_from(pid).ok()?);
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let fresh = state.cache.as_ref().is_some_and(|(at, _)| at.elapsed() < CHILDREN_TTL);
-            if !(from_snapshot && fresh && state.system.process(pid).is_some()) {
+            if !(from_snapshot && fresh && state.full.contains(&pid)) {
                 self.counted();
                 state.system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, kind);
             }
@@ -225,7 +227,8 @@ mod other {
             // `Always`: no macOS o pid sobrevive ao exec, e o argv guardado seria o do shell.
             let kind = ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always).with_environ(UpdateKind::Always);
             state.system.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
-            if state.system.processes().is_empty() {
+            state.full = state.system.processes().keys().copied().collect();
+            if state.full.is_empty() {
                 state.cache = None;
                 return Err(io::Error::other("nenhum processo listado"));
             }
@@ -325,8 +328,10 @@ mod other {
             let mut b = sleeper("b");
             let pid_b = i64::from(b.id());
             wait_exec(pid_b);
+            assert!(!procs.argv(pid_b).is_empty());
+            // Relido só com o argv: o ambiente dele ainda não foi lido e não pode sair vazio.
             assert_eq!(procs.env_var(pid_b, "HANGAR_PROCS_MARK").unwrap(), Some(OsString::from("b")));
-            assert_eq!(procs.refreshes.load(Ordering::Relaxed), 2);
+            assert_eq!(procs.refreshes.load(Ordering::Relaxed), 3);
             for c in [&mut a, &mut b] {
                 c.kill().unwrap();
                 c.wait().unwrap();

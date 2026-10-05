@@ -51,6 +51,9 @@ static UNKNOWN_STATUSES: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Defaul
 /// Versão de um arquivo: muda a cada escrita.
 type FileKey = (SystemTime, u64);
 
+/// Mais novo que isto, a versão não prova que o conteúdo é o mesmo (granularidade do mtime).
+const RACY_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
 fn file_key(meta: &std::fs::Metadata) -> Option<FileKey> { Some((meta.modified().ok()?, meta.len())) }
 
 #[derive(Clone)]
@@ -115,32 +118,33 @@ fn lax_bool(v: &Value) -> bool {
 
 /// Ausente é normal (sessão sem o arquivo, ou apagado no meio da varredura); outro erro avisa:
 /// calado, a sessão perderia o estado sem ninguém saber por quê.
-fn read_file(path: &Path, what: &'static str) -> Option<Vec<u8>> {
+/// `Err` = leitura falhou e o arquivo tem de ser tentado de novo no próximo tique.
+fn read_file(path: &Path, what: &'static str) -> Result<Option<Vec<u8>>, ()> {
     match std::fs::read(path) {
-        Ok(raw) => Some(raw),
-        Err(e) if e.kind() == ErrorKind::NotFound => None,
+        Ok(raw) => Ok(Some(raw)),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
         Err(e) => {
             if crate::warn_limit::allow(None, "list_state_file_unreadable") {
                 tracing::warn!(code = "list_state_file_unreadable", what, kind = ?e.kind(), "arquivo de estado ilegível");
             }
-            None
+            Err(())
         }
     }
 }
 
-fn read_json(path: &Path, what: &'static str) -> Option<Value> {
-    serde_json::from_slice(&read_file(path, what)?).ok()
+fn read_json(path: &Path, what: &'static str) -> Result<Option<Value>, ()> {
+    Ok(read_file(path, what)?.and_then(|raw| serde_json::from_slice(&raw).ok()))
 }
 
-fn read_marker(path: &Path) -> Option<Marker> {
-    let o = read_json(path, MARKER_DIR)?;
+fn read_marker(path: &Path) -> Result<Option<Marker>, ()> {
+    let Some(o) = read_json(path, MARKER_DIR)? else { return Ok(None) };
     // ponytail: o Python aceita `state` de qualquer tipo; só texto é estado que a lista conhece.
-    Some(Marker { state: o.get("state")?.as_str()?.to_owned(), ts: py_float(o.get("ts")?)? })
+    Ok((|| Some(Marker { state: o.get("state")?.as_str()?.to_owned(), ts: py_float(o.get("ts")?)? }))())
 }
 
 /// (session id, entrada), ou o campo que impediu a leitura. Status desconhecido avisa uma vez.
 fn read_native(path: &Path) -> Result<(String, Native), &'static str> {
-    let o = read_json(path, NATIVE_DIR).ok_or("json")?;
+    let o = read_json(path, NATIVE_DIR).map_err(|()| "io")?.ok_or("json")?;
     let sid = py_str(o.get("sessionId").ok_or("sessionId")?);
     let pid = match o.get("pid").ok_or("pid")? {
         Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f.trunc() as i64)),
@@ -191,15 +195,19 @@ impl HookStates {
     pub fn refresh(&mut self, dirs: &[PathBuf]) {
         let mut previous = std::mem::take(&mut self.files);
         let (mut markers, mut native) = (HashMap::new(), HashMap::new());
-        let mut visit = |path: PathBuf, parse: &dyn Fn(&Path) -> Parsed, files: &mut HashMap<PathBuf, (FileKey, Parsed)>| {
+        // `parse` devolve `None` quando a leitura falhou: nada é guardado, e o próximo tique tenta de novo.
+        let mut visit = |path: PathBuf, parse: &dyn Fn(&Path) -> Option<Parsed>, files: &mut HashMap<PathBuf, (FileKey, Parsed)>| {
             // Segue o symlink; sem versão não há como saber se mudou, e o arquivo fica de fora.
             let Some(key) = std::fs::metadata(&path).ok().as_ref().and_then(file_key) else { return };
+            // Escrito há pouco pode ser reescrito no mesmo tique do relógio com o mesmo tamanho.
+            let settled = key.0.elapsed().is_ok_and(|age| age > RACY_WINDOW);
             let parsed = match previous.remove(&path) {
-                Some((k, parsed)) if k == key => parsed,
+                Some((k, parsed)) if k == key && settled => parsed,
                 _ => {
                     #[cfg(test)]
                     { self.reads += 1; }
-                    parse(&path)
+                    let Some(parsed) = parse(&path) else { return };
+                    parsed
                 }
             };
             match &parsed {
@@ -218,7 +226,7 @@ impl HookStates {
             for e in entries(&base.join(MARKER_DIR), MARKER_DIR) {
                 let path = e.path();
                 if path.extension().is_some_and(|x| x == "json") {
-                    visit(path, &|p| Parsed::Marker(read_marker(p)), &mut files);
+                    visit(path, &|p| read_marker(p).ok().map(Parsed::Marker), &mut files);
                 }
             }
         }
@@ -234,15 +242,16 @@ impl HookStates {
             for e in entries(&d, NATIVE_DIR) {
                 let name = e.file_name();
                 let Some(name) = name.to_str().filter(|n| is_native_name(n)) else { continue };
-                visit(e.path(), &|p| Parsed::Native(match read_native(p) {
+                visit(e.path(), &|p| Some(Parsed::Native(match read_native(p) {
                     Ok(v) => Some(v),
+                    Err("io") => return None,
                     Err("status") => None,
                     // O arquivo pode estar no meio da escrita; formato novo do Claude aparece aqui.
                     Err(field) => {
                         tracing::debug!(file = name, field, "registro nativo ilegível; usando marcador ou pane");
                         None
                     }
-                }), &mut files);
+                })), &mut files);
             }
         }
         self.files = files;
@@ -306,7 +315,8 @@ fn first_question(data: &Value) -> Result<OpenQuestion, &'static str> {
 
 /// A pergunta já foi respondida depois de `since` (mtime do sidecar)? Sem como provar que não,
 /// responde sim: ficar do outro lado prenderia a sessão em `awaiting_input` para sempre.
-fn answered_after(session: &str, jsonl: &str, since: f64) -> bool {
+/// `(respondida, a leitura valeu)`: leitura que falhou não pode ser guardada.
+fn answered_after(session: &str, jsonl: &str, since: f64) -> (bool, bool) {
     #[cfg(test)]
     ANSWER_READS.with(|n| n.set(n.get() + 1));
     let read = || -> std::io::Result<(u64, Vec<u8>)> {
@@ -325,7 +335,7 @@ fn answered_after(session: &str, jsonl: &str, since: f64) -> bool {
             if e.kind() != ErrorKind::NotFound {
                 warn_file(session, "list_askq_transcript_unreadable", "transcript_path");
             }
-            return true;
+            return (true, false);
         }
     };
     let when = |obj: &Value| obj.get("timestamp").and_then(Value::as_str).and_then(ts_of_iso).unwrap_or(0.0);
@@ -353,7 +363,7 @@ fn answered_after(session: &str, jsonl: &str, since: f64) -> bool {
                 && ids.contains(b.get("tool_use_id").unwrap_or(&Value::Null))
                 && t > since
             {
-                return true;
+                return (true, true);
             }
         }
     }
@@ -363,7 +373,7 @@ fn answered_after(session: &str, jsonl: &str, since: f64) -> bool {
     if out_of_reach {
         tracing::debug!(session, "askq: janela do transcript não alcança a pergunta; trata como respondida");
     }
-    out_of_reach
+    (out_of_reach, true)
 }
 
 #[cfg(test)]
@@ -377,15 +387,17 @@ static ANSWERED: LazyLock<Mutex<Capped<String, ((FileKey, f64), bool)>>> = LazyL
 
 fn answered_cached(session: &str, jsonl: &str, since: f64) -> bool {
     let Some(key) = std::fs::metadata(jsonl).ok().as_ref().and_then(file_key).map(|k| (k, since)) else {
-        return answered_after(session, jsonl, since);
+        return answered_after(session, jsonl, since).0;
     };
     if let Some((k, answered)) = ANSWERED.lock().unwrap_or_else(|e| e.into_inner()).get(jsonl)
         && *k == key
     {
         return *answered;
     }
-    let answered = answered_after(session, jsonl, since);
-    ANSWERED.lock().unwrap_or_else(|e| e.into_inner()).insert(jsonl.to_owned(), (key, answered));
+    let (answered, read) = answered_after(session, jsonl, since);
+    if read {
+        ANSWERED.lock().unwrap_or_else(|e| e.into_inner()).insert(jsonl.to_owned(), (key, answered));
+    }
     answered
 }
 
@@ -502,6 +514,10 @@ mod tests {
         }
         write(&cfg.join("sessions/7.json"), r#"{"sessionId": "s0", "pid": 7, "status": "busy", "updatedAt": 2000}"#);
         let dirs = [cfg.clone()];
+        // Fora da janela de escrita recente: só aí a versão vale.
+        for f in std::fs::read_dir(cfg.join(".hangar-state")).unwrap().chain(std::fs::read_dir(cfg.join("sessions")).unwrap()) {
+            std::fs::File::open(f.unwrap().path()).unwrap().set_modified(SystemTime::now() - std::time::Duration::from_secs(60)).unwrap();
+        }
         let mut hs = HookStates::load(&dirs);
         assert_eq!(hs.reads, 6);
         hs.refresh(&dirs);
@@ -509,13 +525,28 @@ mod tests {
         let f = cfg.join(".hangar-state/s1.json");
         write(&f, r#"{"state": "idle", "ts": 22}"#);
         std::fs::File::options().write(true).open(&f).unwrap()
-            .set_modified(SystemTime::now() + std::time::Duration::from_secs(5)).unwrap();
+            .set_modified(SystemTime::now() - std::time::Duration::from_secs(30)).unwrap();
         std::fs::remove_file(cfg.join(".hangar-state/s2.json")).unwrap();
         hs.refresh(&dirs);
         assert_eq!(hs.reads, 7);
         assert_eq!(hs.get_state(Some("s1"), |_| false), Some(Marker { state: "idle".into(), ts: 22.0 }));
         assert_eq!(hs.get_state(Some("s2"), |_| false), None, "arquivo sumido sai do mapa");
         assert_eq!(hs.get_state(Some("s0"), |p| p == 7), Some(Marker { state: "working".into(), ts: 2.0 }));
+        // Leitura que falhou não fica guardada: consertada a permissão, a mesma versão é lida.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let f = cfg.join(".hangar-state/s3.json");
+            write(&f, r#"{"state": "idle", "ts": 5}"#);
+            std::fs::File::options().write(true).open(&f).unwrap()
+                .set_modified(SystemTime::now() - std::time::Duration::from_secs(20)).unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o000)).unwrap();
+            hs.refresh(&dirs);
+            let blocked = hs.get_state(Some("s3"), |_| false);
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+            hs.refresh(&dirs);
+            assert_eq!((blocked, hs.get_state(Some("s3"), |_| false)), (None, Some(Marker { state: "idle".into(), ts: 5.0 })));
+        }
     }
 
     #[test]

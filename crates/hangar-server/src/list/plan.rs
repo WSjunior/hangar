@@ -94,7 +94,9 @@ impl PlanTracker {
                     path
                 }
                 Err(e) => {
-                    tracing::warn!(root = %root.display(), error = %e, "pasta de planos ilegivel");
+                    if crate::warn_limit::allow(None, "list_plan_dir_unreadable") {
+                        tracing::warn!(code = "list_plan_dir_unreadable", kind = ?e.kind(), "pasta de planos ilegivel");
+                    }
                     return None;
                 }
             },
@@ -103,7 +105,7 @@ impl PlanTracker {
         match self.load(&path, m, true) {
             Ok(p) => p,
             Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "plano ilegivel");
+                plan_unreadable(&e);
                 None
             }
         }
@@ -135,7 +137,7 @@ impl PlanTracker {
                 Ok(meta) => meta,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
                 Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "plano ilegivel");
+                    plan_unreadable(&e);
                     continue;
                 }
             };
@@ -152,7 +154,7 @@ impl PlanTracker {
             match loaded {
                 Ok(Some((m, p))) => cands.push((m, path, p.complete)),
                 Ok(None) => {}
-                Err(e) => tracing::warn!(path = %path.display(), error = %e, "plano ilegivel"),
+                Err(e) => plan_unreadable(&e),
             }
         }
         if let Some(prev) = self.sticky.get(root) {
@@ -172,6 +174,13 @@ impl PlanTracker {
             self.sticky.insert(root.to_path_buf(), path.clone());
         }
         Ok(chosen)
+    }
+}
+
+/// Roda a cada tique: um aviso por minuto.
+fn plan_unreadable(e: &io::Error) {
+    if crate::warn_limit::allow(None, "list_plan_unreadable") {
+        tracing::warn!(code = "list_plan_unreadable", kind = ?e.kind(), "plano ilegivel");
     }
 }
 

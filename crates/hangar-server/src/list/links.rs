@@ -104,11 +104,8 @@ static EXTERNAL_PAIRS: TailCache<ExternalRecords> = LazyLock::new(Default::defau
 /// fez o Python recusar o arquivo inteiro.
 fn external_records(path: &Path) -> Option<Arc<ExternalRecords>> {
     cached(&EXTERNAL_PAIRS, path, || {
-        let raw = match std::fs::read(path) {
-            Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-            Err(_) => return Some(Err("file")),
-        };
+        // Leitura que falhou não é guardada: o próximo tique tenta de novo.
+        let raw = std::fs::read(path).ok()?;
         let Ok(Value::Array(records)) = serde_json::from_slice::<Value>(&raw) else { return Some(Err("json")) };
         Some(records.into_iter()
             .map(|r| match r {
@@ -122,7 +119,12 @@ fn external_records(path: &Path) -> Option<Arc<ExternalRecords>> {
 /// `_pair_external`: o par de fora entre os peers da sessão. Arquivo torto vale como vazio, como
 /// no Python; quem o põe de lado é o Python, aqui só se avisa.
 fn pair_external(name: &str, peers: &[String], dirs: &Dirs) -> Option<Map<String, Value>> {
-    let records = external_records(&dirs.claude.join(".hangar-pair").join("external_pairs.json"))?;
+    let path = dirs.claude.join(".hangar-pair").join("external_pairs.json");
+    let Some(records) = external_records(&path) else {
+        // Ausente é o normal; existir e não ler é falha.
+        if path.exists() { external_unreadable("file"); }
+        return None;
+    };
     let records = match &*records {
         Ok(records) => records,
         Err(field) => { external_unreadable(field); return None }
@@ -344,9 +346,10 @@ const DEEP_TAIL: u64 = 8 * 1024 * 1024;
 
 /// Linhas do fim para o começo, em blocos de `TAIL`, até `DEEP_TAIL` bytes (`reversed_lines`).
 /// `visit` devolve `Break` para parar de ler: numa sessão ativa basta o último bloco.
-fn reversed_lines(path: &Path, mut visit: impl FnMut(&[u8]) -> ControlFlow<()>) -> std::io::Result<()> {
+fn reversed_lines(path: &Path, limit: u64, mut visit: impl FnMut(&[u8]) -> ControlFlow<()>) -> std::io::Result<()> {
     let mut fh = std::fs::File::open(path)?;
-    let end = fh.seek(SeekFrom::End(0))?;
+    // Até `limit`: o que cresceu depois do tamanho medido fica para a próxima leitura.
+    let end = fh.seek(SeekFrom::End(0))?.min(limit);
     let mut pos = end;
     // Dois buffers trocados a cada bloco: nada é alocado nem zerado por bloco.
     let (mut rest, mut block): (Vec<u8>, Vec<u8>) = (Vec::new(), Vec::with_capacity(TAIL as usize));
@@ -467,7 +470,7 @@ fn ends_line(fh: &mut std::fs::File, end: u64) -> std::io::Result<Option<u64>> {
 /// Do zero: de trás para a frente até `DEEP_TAIL`.
 fn scan_full(jsonl: &Path, key: (i128, u64), now: std::time::Instant) -> std::io::Result<TailScan> {
     let (mut last, mut lines, mut count) = (None, Vec::new(), 0);
-    reversed_lines(jsonl, |raw| scan_line(raw, &mut last, &mut lines, &mut count))?;
+    reversed_lines(jsonl, key.1, |raw| scan_line(raw, &mut last, &mut lines, &mut count))?;
     let mut fh = std::fs::File::open(jsonl)?;
     let consumed = ends_line(&mut fh, key.1)?;
     Ok(TailScan::new(now, key, consumed, last, lines))
@@ -478,6 +481,10 @@ fn scan_full(jsonl: &Path, key: (i128, u64), now: std::time::Instant) -> std::io
 // chegaria; continua sendo um sinal da mesma conversa.
 fn scan_growth(jsonl: &Path, old: &TailScan, from: u64, key: (i128, u64), now: std::time::Instant) -> std::io::Result<TailScan> {
     let mut fh = std::fs::File::open(jsonl)?;
+    // Arquivo trocado por outro maior: onde a leitura parou já não é fim de linha.
+    if ends_line(&mut fh, from)? != Some(from) {
+        return scan_full(jsonl, key, now);
+    }
     fh.seek(SeekFrom::Start(from))?;
     let mut buf = Vec::new();
     (&mut fh).take(key.1 - from).read_to_end(&mut buf)?;
@@ -503,15 +510,27 @@ fn scan_growth(jsonl: &Path, old: &TailScan, from: u64, key: (i128, u64), now: s
 fn claude_tail(jsonl: &Path) -> Option<Arc<ClaudeTail>> { claude_tail_at(jsonl, std::time::Instant::now()) }
 
 fn claude_tail_at(jsonl: &Path, now: std::time::Instant) -> Option<Arc<ClaudeTail>> {
-    let old = CLAUDE_TAILS.lock().unwrap_or_else(|e| e.into_inner()).get(jsonl).cloned();
-    if let Some(old) = &old
-        && now.saturating_duration_since(old.checked) < TAIL_RECHECK
     {
-        return Some(old.value.clone());
+        let mut tails = CLAUDE_TAILS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(old) = tails.get(jsonl)
+            && now.saturating_duration_since(old.checked) < TAIL_RECHECK
+        {
+            return Some(old.value.clone());
+        }
     }
     let key = file_key(jsonl)?;
+    // Só a versão que mudou paga a cópia dos achados antigos.
+    let old = {
+        let mut tails = CLAUDE_TAILS.lock().unwrap_or_else(|e| e.into_inner());
+        match tails.get_mut(jsonl) {
+            Some(old) if old.key == key => {
+                old.checked = now;
+                return Some(old.value.clone());
+            }
+            other => other.cloned(),
+        }
+    };
     let scan = match &old {
-        Some(old) if old.key == key => Ok(TailScan { checked: now, ..old.clone() }),
         Some(old) if old.consumed.is_some_and(|c| c <= key.1 && key.1 - c <= DEEP_TAIL) =>
             scan_growth(jsonl, old, old.consumed.unwrap_or_default(), key, now),
         _ => scan_full(jsonl, key, now),
@@ -519,9 +538,11 @@ fn claude_tail_at(jsonl: &Path, now: std::time::Instant) -> Option<Arc<ClaudeTai
     let scan = match scan {
         Ok(scan) => scan,
         Err(error) => {
-            // Transcript ilegível nunca derruba a lista: a sessão fica no cwd, como no `locate`.
-            tracing::debug!(io_kind = ?error.kind(), "list: transcript sem leitura para a worktree");
-            return None;
+            // Transcript ilegível nunca derruba a lista: fica a última leitura boa, ou o cwd.
+            if crate::warn_limit::allow(None, "list_transcript_unreadable") {
+                tracing::warn!(code = "list_transcript_unreadable", io_kind = ?error.kind(), "list: transcript sem leitura para a worktree");
+            }
+            return old.map(|o| o.value);
         }
     };
     let value = scan.value.clone();
@@ -533,7 +554,8 @@ fn contains(hay: &[u8], needle: &[u8]) -> bool { hay.windows(needle.len()).any(|
 
 /// Criar ou remover worktree muda o mtime de `.git/worktrees`; o `git worktree move` só reescreve o
 /// `gitdir` lá dentro, e o teto cobre esse caso.
-const WORKTREES_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+/// Curto também porque o `git worktree add` cria a pasta antes de escrever o `gitdir` nela.
+const WORKTREES_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(5);
 
 type WorktreeList = (Option<std::time::SystemTime>, std::time::Instant, Arc<Vec<String>>);
 static WORKTREES: LazyLock<Mutex<Capped<String, WorktreeList>>> = LazyLock::new(Default::default);
@@ -727,10 +749,10 @@ mod tests {
         let lines: Vec<String> = (0..9000).map(|i| format!("{i}:{}", "x".repeat(i % 97))).collect();
         std::fs::write(&path, lines.join("\n")).unwrap();
         let mut seen = Vec::new();
-        reversed_lines(&path, |l| { seen.push(String::from_utf8(l.to_vec()).unwrap()); ControlFlow::Continue(()) }).unwrap();
+        reversed_lines(&path, u64::MAX, |l| { seen.push(String::from_utf8(l.to_vec()).unwrap()); ControlFlow::Continue(()) }).unwrap();
         assert_eq!(seen, lines.iter().rev().cloned().collect::<Vec<_>>());
         let mut n = 0;
-        reversed_lines(&path, |_| { n += 1; if n == 3 { ControlFlow::Break(()) } else { ControlFlow::Continue(()) } }).unwrap();
+        reversed_lines(&path, u64::MAX, |_| { n += 1; if n == 3 { ControlFlow::Break(()) } else { ControlFlow::Continue(()) } }).unwrap();
         assert_eq!(n, 3);
     }
 
@@ -760,6 +782,10 @@ mod tests {
         std::fs::write(&path, line("/c", "/x3")).unwrap();
         let again = later + TAIL_RECHECK + std::time::Duration::from_secs(1);
         assert_eq!(paths(claude_tail_at(&path, again).unwrap()), (Some("/c".into()), vec!["/x3".into()]));
+        // Trocado por outro maior cujo byte no ponto lido não é fim de linha: lido do zero.
+        std::fs::write(&path, line("/dddd", "/x4") + &line("/e", "/x5")).unwrap();
+        let last = again + TAIL_RECHECK + std::time::Duration::from_secs(1);
+        assert_eq!(paths(claude_tail_at(&path, last).unwrap()), (Some("/e".into()), vec!["/x5".into(), "/x4".into()]));
     }
 
     #[test]
