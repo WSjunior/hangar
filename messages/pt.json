@@ -5395,6 +5395,8 @@
   "native_app_update_running": "Atualizando…",
   "native_app_update_retry": "Tentar de novo",
   "native_app_update_bad_sha": "O arquivo baixado não confere com a release (sha256). Nada foi trocado.",
+  "native_about_test_channel": "Canal de testes: {branch}",
+  "native_about_following_channel": "Próxima atualização segue: {branch}",
   "native_app_update_channel_missing": "A branch {branch} do canal de testes ainda não tem app nativo publicado; o app atual continua.",
   "native_app_update_swap_failed": "Não consegui trocar o app: {reason}. Nada foi trocado.",
   "native_app_update_rolled_back": "A versão nova não abriu. A anterior voltou para o lugar.",
