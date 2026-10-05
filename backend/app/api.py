@@ -8867,12 +8867,19 @@ async def permission_mode_set(name: str, body: PermissionModeBody):
         try:
             ficou = await hl.set_permission_mode(name, alvo)
         except Exception as e:
-            raise HTTPException(409, detail=erro("erro_permissao_leitura", f"não consegui trocar o modo: {e}"))
+            if alvo != "bypassPermissions":
+                raise HTTPException(409, detail=erro("erro_permissao_leitura", f"não consegui trocar o modo: {e}"))
+            _log.warning("permissão: %s recusou bypass sem reiniciar (%s); reabrindo em bypass", name, e)
+            ficou = None
+        if alvo == "bypassPermissions" and ficou != alvo:
+            return await _durante_troca(name, _reabrir_em_bypass(name, info))
         vivo = hl._sessions.get(name)
         await asyncio.to_thread(_invalidate_lists)
         return {"mode": ficou, "current": ficou,
                 "previous_non_plan": vivo.modo_nao_plan if vivo else None}
     _guard_perm(name, info)
+    if alvo == "bypassPermissions" and not await asyncio.to_thread(_bypass_no_ciclo, name):
+        return await _durante_troca(name, _reabrir_em_bypass(name, info))
     tracking_key = _tracking_key_perm(name, info)
     try:
         inicial = await asyncio.to_thread(perm_mode.ler_modo, name)
@@ -8899,6 +8906,66 @@ async def permission_mode_set(name: str, body: PermissionModeBody):
         raise HTTPException(status_code=409, detail=erro("erro_permissao_teto", f"não alcançou {alvo!r} em {perm_mode.TETO_TECLAS} teclas — ficou em {ficou!r}", alvo=alvo, ficou=ficou, mode=ficou))
     return {"mode": ficou, "current": ficou,
             "previous_non_plan": perm_mode.observar_modo(tracking_key, ficou)}
+
+
+_FLAGS_BYPASS = ("--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
+                 "--permission-mode bypassPermissions")
+
+
+def _bypass_no_ciclo(name: str) -> bool:
+    """O Claude só põe o bypass no Shift+Tab de quem nasceu com ele. Sem a flag no comando do
+    processo, reabrir custa um restart; BTab às cegas giraria o modo sem chegar lá."""
+    agent = registry_mod._pid_do_agente((registry._pane_of(name) or {}).get("pid"))
+    cmd = " ".join(procinfo._cmdline(agent).split()).replace("--permission-mode=", "--permission-mode ") if agent else ""
+    return any(f in cmd for f in _FLAGS_BYPASS)
+
+
+async def _reabrir_em_bypass(name: str, info):
+    """Reabre a mesma conversa (`--resume`) já em bypass, como a troca de conta. Só ociosa."""
+    hl = get_adapter(CLAUDE_HEADLESS)
+    async with hl.delivery_lock(name):
+        # Uma troca que esperava na trava pode ter mudado o transporte da sessão.
+        await asyncio.to_thread(_invalidate_lists)
+        headless = _headless(name)
+        motivo = await _motivo_ocupada(name, headless)
+        if motivo:
+            raise HTTPException(409, detail=erro(motivo, "para entrar em bypass a sessão reinicia: " + _OCUPADA[motivo]))
+        if headless:
+            antes = headless_sessions.load(name) or {}
+            await hl.parar(name)
+            if headless_sessions.update(name, permission_mode="bypassPermissions",
+                                        previous_non_plan="bypassPermissions") is None:
+                hl.acordar(name)
+                raise HTTPException(409, detail=erro("erro_permissao_reabrir", "não gravei o modo novo no arquivo de estado da sessão"))
+            hl.reset_start_attempts(name)
+            try:
+                await hl.ensure_running(name, require_initialize=True)
+            except Exception as e:
+                _log.exception("permissão: %s não reabriu em bypass; voltando ao modo de antes", name)
+                headless_sessions.update(name, permission_mode=antes.get("permission_mode"),
+                                         previous_non_plan=antes.get("previous_non_plan"))
+                hl.acordar(name)
+                raise HTTPException(409, detail=erro("erro_permissao_reabrir", f"a sessão não reabriu em bypass e voltou ao modo de antes: {e}", erro=str(e)))
+        else:
+            try:
+                await asyncio.to_thread(registry.para_headless, name, "bypassPermissions")
+            except KillFailed as e:
+                raise HTTPException(500, str(e))
+            except (ValueError, OSError) as e:
+                raise HTTPException(409, detail=erro("erro_permissao_reabrir", f"não reabri em bypass: {e}", erro=str(e)))
+            try:
+                await asyncio.to_thread(registry.para_terminal, name)
+            except Exception as e:
+                _log.exception("permissão: terminal de %s não voltou após reabrir em bypass", name)
+                if headless_sessions.exists(name):
+                    hl.acordar(name)
+                    msg = f"o terminal não voltou; a sessão seguiu sem terminal, em bypass: {e}"
+                else:
+                    msg = f"o terminal não voltou e a sessão ficou sem processo: {e}"
+                raise HTTPException(409, detail=erro("erro_permissao_reabrir", msg, erro=str(e)))
+    _perm_modes_cache.pop(_cache_key_perm(name, info), None)
+    return {"mode": "bypassPermissions", "current": "bypassPermissions",
+            "previous_non_plan": "bypassPermissions", "reopened": True}
 
 
 # ── Catalogo de modelos de uma sessao Claude Code ───────────────────────────────────────────────
