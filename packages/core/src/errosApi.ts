@@ -383,6 +383,15 @@ const ERROS: Record<string, (params: Parametros) => string> = {
   erro_arq_nao_e_repo_git: () => m.erro_arq_nao_e_repo_git(),
   erro_arq_busca_vazia: () => m.erro_arq_busca_vazia(),
   erro_arq_busca_falhou: (p) => m.erro_arq_busca_falhou({ msg: String(p.msg) }),
+  // Git/arquivos que o Rust não rodou: 503 com o motivo, nunca repassado ao Python.
+  workspace_busy: () => m.workspace_busy(),
+  workspace_context: (p) => m.workspace_context({ motivo: String(p.motivo ?? '') }),
+  workspace_unavailable: (p) => m.workspace_unavailable({ motivo: String(p.motivo ?? '') }),
+  internal_info: () => m.history_internal_info(),
+  history_io: () => m.history_io(),
+  history_panic: () => m.history_panic(),
+  workspace_request_too_large: () => m.workspace_request_too_large(),
+  workspace_invalid_request: () => m.workspace_invalid_request(),
   erro_arq_modo_invalido: () => m.erro_arq_modo_invalido(),
   erro_git_diff: (p) => m.erro_git_diff({ msg: String(p.msg) }),
 

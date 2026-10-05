@@ -548,6 +548,38 @@ malformada não deixa o teclado preso; fase reconferida dentro da barreira nos d
 as falhas de antes do `open`; resposta por texto aceita `deferred` (na fila do Rust). Ficou anotado:
 prazo vencido no meio de uma administração pode deixar o composer sujo até o Rust digitar de novo.
 
+## Consertos achados pela prova (sobre a junção `e0d13084`, antes da Task 10)
+
+O roteiro `scripts/prova-dono-unico.py` (`4826cb5a`) rodado sobre `620c27c1` achou quatro defeitos;
+os consertos vieram pela causa, cada um com teste que falha sem ele, e os casos afetados rodaram de novo.
+
+- **Queda única do Rust, sessão com terminal (caso 53): envio voltava 400 e não saía.** A espera
+  longa do plugin (`/api/plugin/pull`) chega pelo `hangar-server`; quando ele morria, o Python não
+  percebia a conexão caída e mantinha a espera em `_waiters`. O Rust novo via o plugin "esperando",
+  publicava nela e a confirmação nunca vinha (`plugin_uncertain` → `terminal_delivery_unknown` →
+  "resultado incerto"). Agora a espera observa a desconexão do cliente e sai; publicação que corre
+  junto com a queda (ou com a espera que acabou de sair) volta `not_written`. Testes
+  `test_pull_drops_its_wait_when_the_proxy_connection_dies` e `test_publication_racing_the_proxy_drop_is_not_written`.
+- **Três quedas, a mensagem seguinte do terminal não saía.** Mesma causa: a entrada incerta da queda
+  anterior travava as seguintes. Com o conserto acima a rodada deu `[1, 1]`. O caso ainda acusou "61 s"
+  porque a queda da primeira fase conta na janela de 60 s do Supervisor (o Python assumiu depois de
+  duas mortes da segunda fase) e o roteiro esperou 30 s por um terceiro Rust: medição do roteiro.
+- **Fila travada por `chmod` (caso 54): destravada, o envio seguia com `queue_io`.** Depois de uma
+  gravação que falhou, o `Store` do Rust ficava bloqueado até um `EnsureProjection` que ninguém manda.
+  Agora qualquer operação seguinte (e o `Snapshot` do ator) relê o estado do disco e segue; com o
+  disco ainda recusando, a gravação falha e bloqueia de novo. Teste
+  `write_failure_heals_on_next_operation_once_disk_is_writable`. Caso 54 rodou: travado 400 com código,
+  destravado 200 e 1 entrega.
+- **Parada de ~5,2 s.** A espera do plugin órfã (o plugin refaz a espera pelo Rust novo e a velha sai
+  de `_waiters`, então o `stop_waits` da parada não a alcança) segurava o uvicorn até o
+  `timeout_graceful_shutdown`. Prova: o caso 52 sem o conserto teve uma parada de 5,21 s com "Cancel 1
+  running task"; com ele, todas entre 0,14 e 0,21 s.
+
+Ressalvas da junção tratadas junto: o pedido de teclado emprestado é idempotente pelo id no Rust, e
+resposta perdida do pedido é repetida com o mesmo id direto no canal para devolver a concessão na hora
+(`test_lost_loan_reply_is_returned_by_repeating_the_same_id`); `plataforma.md` diz que a captura e
+Git/arquivos pelo Python valem também com o Rust ausente (`pending`/`python`).
+
 ### Task 7: Rotas públicas do Rust (histórico e eventos) sem repasse por falha
 
 **Arquivos:** `crates/hangar-server/src/routes.rs`, `crates/hangar-server/tests/runtime_diagnostics.rs`,
@@ -561,10 +593,38 @@ cliente de diário da Task 1.
 **Código morto que sai:** `Fallback`, `FALLBACK_AFTER`, `MAX_FALLBACK`, `AppState.fallback`,
 `internal_refused`, o texto "Python atendeu" de `warn_if_internal_refused`, `routes.rs:567-602`.
 
-- [ ] **Step 36: Testes acima, vistos falhar**
-- [ ] **Step 37: Erros de `history`/`events` respondem 503 com código e vão ao diário; provedor fora do Rust e sessão inexistente seguem para o Python**
-- [ ] **Step 38: Conferir no chat web que o 503 aparece como erro de carregamento com a frase (verificação manual)**
-- [ ] **Step 39: Remover o código morto; `cargo test -p hangar-server` focado; revisar**
+- [x] **Step 36: Testes acima, vistos falhar**
+- [x] **Step 37: Erros de `history`/`events` respondem 503 com código e vão ao diário; provedor fora do Rust e sessão inexistente seguem para o Python**
+- [x] **Step 38: Conferir no chat web que o 503 aparece como erro de carregamento com a frase (verificação manual)**
+- [x] **Step 39: Remover o código morto; `cargo test -p hangar-server` focado; revisar**
+
+**Registro da execução (Task 7).** Os testes ficaram em `tests/conversations.rs` (a casa do
+histórico e do chat ao vivo com o Python falso; `runtime_diagnostics.rs` é de um teste só por causa
+do assinante de log global). `history_io_error_answers_503_with_code`, `events_without_info_answers_503`
+e `route_failure_is_sent_to_diary` falharam antes do código (200 do repasse);
+`missing_session_still_reaches_python_404` já passava e fica como regressão;
+`other_provider_history_still_goes_to_python` já existia como
+`history_without_owner_or_supported_provider_goes_to_python` (e, no `/events`,
+`provider_outside_rust_resets_and_next_connection_goes_to_python`). O `fetch_info` passou a separar
+404 (sessão inexistente ou segredo recusado, que o Python já registra como `internal.recusado`) de
+falha (sem resposta, outro status, corpo inválido): só a falha vira 503 `internal_info`. Corpo do
+503: `{ok:false,error_code,message}` mais `detail:{code,msg}`, que o `lerErro` do app já mostra sem
+mudar o front. Diário: `rust.history_failed` e `rust.events_failed`. **Desvio aprovado pela
+`migracao-rust-2`:** o `Fallback` (struct, `FALLBACK_AFTER`, `MAX_FALLBACK`, `AppState.fallback`) fica
+só para o Git/arquivos, que ainda o usa em `workspace_routes.rs:313-360`; a Task 8 apaga o struct
+junto com os contadores de workspace (sem mexer nas mesmas linhas aqui, a junção não conflita).
+Step 38 em backend isolado (HOME temporário, porta 19765, `tmux` próprio, `matar_orfaos`, reconciliação
+de conta e portas do convite/Connect neutralizadas, sessão sem terminal sem conta): fila virada pasta →
+503 `internal_info` no histórico e nos eventos; transcript virado pasta → 503 `history_io`; o chat
+mostrou "Não deu pra carregar o histórico." com "503: a leitura do histórico falhou — history_io", e
+o diário recebeu as três linhas `rust.*`.
+Revisão (`ecc:rust-reviewer`, `ecc:silent-failure-hunter`): sem achado crítico. Entraram: o
+`/history` só guarda no cache do `info` a sessão encontrada (o 404 guardado fazia o `/events`
+seguinte repassar sem perguntar) e os testes do 503 conferem CORS, `content-type` e a linha do
+diário do `history_io`. Ficaram de fora: `reset`/`Close`/atraso do canal ao vivo não são falha do
+Rust (troca de provedor, aparelho lento ou cliente que saiu); o 503 do `/events` invisível ao
+`EventSource` é o combinado do desenho (o histórico mostra o erro); o diário que não chega quando o
+Python está fora fica inteiro no `hangar-server.log` (`diag.rs`, da Task 1).
 
 ### Task 8: Git e arquivos sem repasse por falha
 
@@ -589,11 +649,36 @@ reescritos; `workspace_routes.rs:386` apagado, `:255`, `:273` reescritos, `Hando
 **Regra corrigida:** `docs/migracao-rust/git-arquivos/spec.md:38-42` (vaga cheia ou
 indisponível → repasse ao Python, registrado no diário).
 
-- [ ] **Step 40: Testes acima, vistos falhar**
-- [ ] **Step 41: Rust responde 503 com código e motivo para ocupado, contexto e indisponível; envia ao diário**
-- [ ] **Step 42: Ponte Python: `None` só com a ponte desligada; os outros casos levantam o erro de domínio; pedido acima de 4 MiB vira erro com código; contrato 17**
+- [x] **Step 40: Testes acima, vistos falhar**
+- [x] **Step 41: Rust responde 503 com código e motivo para ocupado, contexto e indisponível; envia ao diário**
+- [x] **Step 42: Ponte Python: `None` só com a ponte desligada; os outros casos levantam o erro de domínio; pedido acima de 4 MiB vira erro com código; contrato 17**
 - [ ] **Step 43: Textos dos três códigos na web e no app; conferir no painel do repositório (verificação manual)**
-- [ ] **Step 44: Remover o código morto e corrigir a regra; testes focados Rust e Python; revisar**
+- [x] **Step 44: Remover o código morto e corrigir a regra; testes focados Rust e Python; revisar**
+
+**Registro da execução (Task 8).** O 503 sai em `refuse` (`workspace_routes.rs`) no formato combinado
+com a Task 7 (`{ok:false,error_code,message,detail:{code,msg}}`), com `detail.params.motivo` para o
+front montar a frase; `Retry-After: 2` só no ocupado. Diário: `rust.workspace_busy`,
+`rust.workspace_failed` (contexto, indisponível e também 5xx comum, que inclui a escrita cujo git não
+iniciou e por isso responde 500). `DiagClient` virou campo `diag` do `AppState`. O teste
+`unavailable_answers_503_with_reason` mora em binário próprio (`tests/workspace_unavailable.rs`)
+porque esvazia o `PATH` do processo. A ponte Python devolve `None` só com ela desligada **ou com a
+conexão recusada** (Rust fora do ar, inventário §5 `:106-113` "fica"); os demais casos viram erro:
+`workspace_busy` (sem vaga local ou no Rust), `workspace_unavailable` (leitura sem resposta),
+`workspace_request_too_large` (413), `workspace_invalid_request` (500). O `detail` do
+`GitError`/`FsError` continua texto (dicionário quebrava `bastao`, `worktrees` e `_erro_arq`); o
+código vai em `exc.code`, e um `exception_handler(GitError)` no `api.py` responde o status com o
+envelope quando o erro escapa da rota (citação, resolver), em vez de 500. `head_info`, `branch_of`,
+`git_summary`, `git_diffstat` e `git_log_since` prometem não levantar (a listagem depende disso):
+falha da ponte devolve o vazio delas (`quiet=`), com log e diário em `_failed`. O `Fallback` de
+`routes.rs` fica nesta base porque `history`/`events` ainda o usam; ele e o teste `routes.rs:567-602`
+saem na junção depois da Task 7 (combinado com `migracao-rust-2`). `scripts/medir-rust.sh` perdeu o
+`git_ms`: com o Rust de pé a medição do lado Python passa pela ponte. O teste do diário
+(`diag.rs`, Task 1) passou a ignorar conexão sem segredo: sonda de porta desta máquina o derrubava.
+Revisão (`ecc:rust-reviewer`, `ecc:python-reviewer`, `ecc:silent-failure-hunter`): nenhum caminho em
+que falha do Rust rode no Python; entraram os consertos acima, a chave do limite de log com o motivo
+e as traduções dos dois códigos novos da ponte. Step 43: textos na web e no app pelo mapa comum
+(`errosApi.ts`, teste `errosApi.test.ts`); a conferência no painel do repositório fica para a prova
+de uso real (Task 11).
 
 ### Task 9: Observação do terminal sem troca de fonte por erro
 
@@ -618,9 +703,25 @@ mesmos fatos; Windows fica nesse caminho" vira "Erro vira problema visível e a 
 pergunta ao Rust; Windows e ponte desligada usam a captura Python"; em `plataforma.md`, o título
 "Observação terminal Rust com reserva Python" e o parágrafo da pausa por falhas.
 
-- [ ] **Step 45: Testes acima, vistos falhar**
-- [ ] **Step 46: Erro tipado do observador; problema visível; texto novo do log Rust**
-- [ ] **Step 47: Remover o código morto e corrigir as regras; testes focados; revisar**
+- [x] **Step 45: Testes acima, vistos falhar**
+- [x] **Step 46: Erro tipado do observador; problema visível; texto novo do log Rust**
+- [x] **Step 47: Remover o código morto e corrigir as regras; testes focados; revisar**
+
+**Registro da execução (Task 9).** `test_rust_capture_error_is_reported_not_replaced` falhou na
+base (o Python capturava e o estado virava `idle`); `test_windows_and_bridge_off_still_capture_in_python`
+passa também na base e fica como regressão. A falha sobe como `terminal_observer.ObservationFailed`
+(código seguro); `capture()` devolve `None` só para dono fixo (ponte desligada, Windows, nome fora
+da regra, provider fora do Rust, sem vínculo). O monitor repete o último evento com
+`problema="terminal_observacao_falhou"` e o código em `problema_detalhe`; a prévia segura o texto.
+Texto na web (`problema.ts`) e no app (`SessionProblem.tsx`) com chave em pt/en, fora da lista de
+arquivos da Task (o desenho pede a faixa; a Task 3 mexe nas mesmas linhas). Testes do disjuntor
+apagados (`:1012`, `:1058`, `:1297`, `:1353`, `:1634`); os de `_request`/lease reescritos para o erro
+tipado. Revisão (`ecc:python-reviewer`, `ecc:silent-failure-hunter`; no Rust só mudou o texto do
+log): entraram a checagem de sessão morta no erro (sem ela, tmux fechado ficava "observação
+falhou" para sempre), o primeiro evento com erro tirando o estado do plugin/hook em vez de `idle`,
+e o diário limitado a um registro por minuto por (sessão, código). Ficou de fora, sem regressão:
+a prévia do Codex com terminal continua na captura Python (lease com `provider=None` em
+`preview.py`), e exceção fora da lista do `_request` segue subindo crua, como antes.
 
 ### Task 10: Documentação restante
 

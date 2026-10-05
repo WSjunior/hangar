@@ -551,6 +551,16 @@ async def terminal_control_failed(request: Request, exc: TerminalControlError):
     return JSONResponse(status_code=409, content={"detail":erro(code, str(exc))})
 
 
+@app.exception_handler(GitError)
+async def _git_failed(request: Request, exc: GitError):
+    """GitError que escapou da rota (citação, resolver) sai com o status dele, nunca 500 sem corpo.
+
+    Falha da ponte de Git/arquivos traz o código (`workspace_busy`...), que o front traduz."""
+    code = getattr(exc, "code", None)
+    detail = erro(code, exc.detail, motivo=exc.detail) if code else exc.detail
+    return JSONResponse(status_code=exc.status, content={"detail": detail})
+
+
 @app.get("/api/omp/plugin-sync", dependencies=[Depends(require_auth)])
 async def omp_plugin_sync_status(request: Request):
     service = getattr(request.app.state, "omp_plugin_sync", None)
@@ -598,9 +608,6 @@ async def _correlaciona_diag(request: Request, call_next):
         if re.fullmatch(r"[A-Za-z0-9_-]{1,32}", candidate):
             req = candidate
     token = diag.req_atual.set(req)
-    from app import workspace_bridge
-    handoff = workspace_bridge.take_over(request.headers.get("x-hangar-workspace-fallback", ""),
-                                         request.client.host if request.client else None)
     started = time.monotonic()
     response = None
     failure = ""
@@ -623,7 +630,6 @@ async def _correlaciona_diag(request: Request, call_next):
             diag.registrar("api.servidor", "erro" if status >= 500 else "aviso" if status >= 400 else "ok",
                            detalhe=f"{request.method} {route}", codigo=str(status), ms=elapsed,
                            etapa="cabecalhos", sessao=request.path_params.get("name"), erro_tipo=failure)
-        workspace_bridge.release(handoff)
         diag.req_atual.reset(token)
 
 
@@ -7292,7 +7298,7 @@ def _erro_arq(e: FileError | SearchError) -> HTTPException:
     # funcao do paraglide exige o argumento — sem ele o front renderiza `undefined` ou
     # nem compila. O `erro()` tem `msg` como parametro nomeado, entao o valor entra no
     # dict de params DEPOIS, por chave.
-    fixo = e.msg if e.code == "workspace_action_uncertain" else (_MSG_BUSCA if isinstance(e, SearchError) else _MSG_ARQ)
+    fixo = e.msg if e.code.startswith("workspace_") else (_MSG_BUSCA if isinstance(e, SearchError) else _MSG_ARQ)
     _log.warning("files: %s", git_ops._scrub(e.msg))
     d = erro(e.code, fixo)
     d["params"]["msg"] = fixo
@@ -8496,7 +8502,7 @@ def _resolver_citado(name: str, path: str, *, write: bool = False) -> str:
             failure = result["error"]
             detail = failure["detail"]
             if failure.get("code"):
-                detail = erro(failure["code"], str(detail))
+                detail = erro(failure["code"], str(detail), motivo=str(detail))
             raise HTTPException(failure["status"], detail=detail)
     from app.transcript import citation_cwds
     cited = citation_cwds(info.jsonl, [path], rows=rows)
