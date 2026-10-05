@@ -98,7 +98,10 @@ fn url_from_port(port: u16) -> Result<Option<String>, ImportError> {
     stream.take(64 * 1024).read_to_end(&mut buf).ok();
     let text = String::from_utf8_lossy(&buf);
     let Some(body) = text.split("\r\n\r\n").nth(1) else { return Ok(None) };
-    let Ok(v) = serde_json::from_str::<Value>(body.trim()) else { return Ok(None) };
+    let Ok(v) = serde_json::from_str::<Value>(body.trim()) else {
+        eprintln!("[cookies] /json/version da porta {port} nao deu JSON (truncado ou nao e um Chrome)");
+        return Ok(None);
+    };
     if v["User-Agent"].as_str().unwrap_or("").to_lowercase().contains("headless") {
         return Err(ImportError::Headless);
     }
@@ -175,13 +178,21 @@ fn keep_specific(current: ImportError, new: ImportError) -> ImportError {
 /// `result`. Cliente mínimo em cima de `TcpStream` (bloqueante, roda em thread de fundo), não a pilha
 /// WS do terminal: o teto de quadro é outro, e a conexão é de uma chamada só.
 fn cdp_once(ws: &str, method: &str) -> Result<Value, ImportError> {
-    let url = url::Url::parse(ws).map_err(|_| ImportError::ChromeClosed)?;
-    let host = url.host_str().unwrap_or("127.0.0.1").to_owned();
+    // Endereço inválido ou fora de loopback é um `webSocketDebuggerUrl` torto da porta fixa, não "Chrome desligado":
+    // devolve `Failed` para não disparar o fluxo de "ligue a depuração".
+    let url = url::Url::parse(ws).map_err(|_| ImportError::Failed("cdp: endereco invalido".into()))?;
     // A porta fixa devolve o `webSocketDebuggerUrl` por conta própria: um processo local na porta poderia apontar para
-    // outro host e injetar cookies forjados. Só loopback.
-    if host != "127.0.0.1" && host != "localhost" && host != "::1" {
-        return Err(ImportError::ChromeClosed);
+    // outro host e injetar cookies forjados. Só loopback (IPv4, IPv6 ou localhost).
+    let loopback = match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(d)) => d == "localhost",
+        None => false,
+    };
+    if !loopback {
+        return Err(ImportError::Failed("cdp: endereco nao e loopback".into()));
     }
+    let host = url.host_str().unwrap_or("127.0.0.1").to_owned();
     let port = url.port().unwrap_or(80);
     let path = match url.query() {
         Some(q) => format!("{}?{q}", url.path()),
@@ -350,7 +361,10 @@ mod passwords {
         let keys = key_candidates();
         // Diretório só do usuário (`XDG_RUNTIME_DIR`, 0700) em vez de `/tmp`: fecha o symlink pré-plantado em `/tmp`
         // apontando a cópia do blob cifrado para outro arquivo.
-        let tmp_base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let tmp_base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|| {
+            eprintln!("[senha] XDG_RUNTIME_DIR ausente; cópia temporária vai para /tmp");
+            std::env::temp_dir()
+        });
         let mut out = Vec::new();
         for db in login_data_dbs() {
             let tmp = tmp_base.join(format!("hangar-ld-{}-{}.db", std::process::id(), rand_suffix()));
