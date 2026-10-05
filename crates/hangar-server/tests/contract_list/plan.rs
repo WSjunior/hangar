@@ -1,5 +1,5 @@
 //! Lista de sessões contra as entradas e saídas gravadas pelo Python (gen_list.py).
-mod common;
+use crate::common;
 
 use std::fs;
 use std::path::Path;
