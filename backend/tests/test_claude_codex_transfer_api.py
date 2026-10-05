@@ -846,7 +846,8 @@ async def test_terminal_plan_uses_only_observed_base_after_backend_restart(scena
     monkeypatch.setattr(permission_mode, "_ultimos_nao_plan", OrderedDict())
     monkeypatch.setattr(permission_mode, "_modos_confirmados", {})
     if previous is not None:
-        permission_mode.observar_ou_confirmado("s", previous)
+        # O monitor grava pelo session-id (stem do jsonl), não pelo nome da sessão.
+        permission_mode.observar_ou_confirmado(Path(scenario.info.jsonl).stem, previous)
     monkeypatch.setattr(scenario.reg, "_pane_of", lambda name: {"pane_id": "%test", "pid": None})
     monkeypatch.setattr(registry_module, "provider_of_pane", lambda pid: "claude")
     monkeypatch.setattr(registry_module, "_escolhas_status", lambda sid: (None, None))
@@ -863,6 +864,24 @@ async def test_terminal_plan_uses_only_observed_base_after_backend_restart(scena
     else:
         assert store._map_permission(public) == (
             "Ask for approval" if previous == "manual" else "Full Access", "plan")
+
+
+async def test_terminal_plan_without_observed_base_uses_transcript(scenario, monkeypatch):
+    from collections import OrderedDict
+    from app import permission_mode
+    hs.delete("s")
+    scenario.info.headless = False
+    monkeypatch.setattr(permission_mode, "_ultimos_nao_plan", OrderedDict())
+    with open(scenario.info.jsonl, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "user", "permissionMode": "bypassPermissions"}) + "\n")
+        f.write(json.dumps({"type": "user", "permissionMode": "plan"}) + "\n")
+    monkeypatch.setattr(scenario.reg, "_pane_of", lambda name: {"pane_id": "%test", "pid": None})
+    monkeypatch.setattr(registry_module, "provider_of_pane", lambda pid: "claude")
+    monkeypatch.setattr(registry_module, "_escolhas_status", lambda sid: (None, None))
+    monkeypatch.setattr(permission_mode, "ler_modo", lambda name: "plan")
+    public, _ = scenario.reg.transfer_origin(scenario.info)
+    assert public["previous_non_plan"] == "bypassPermissions"
+    assert store._map_permission(public) == ("Full Access", "plan")
 
 
 async def test_archive_api_passes_moved_rollout_to_first_runtime_spawn(scenario, monkeypatch):

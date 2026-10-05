@@ -120,6 +120,36 @@ def known_non_plan(name: str) -> str | None:
         return _ultimos_nao_plan.get(name)
 
 
+def transcript_non_plan_mode(jsonl: str) -> str | None:
+    """`permissionMode` mais recente fora de `plan` que o próprio CLI gravou no transcript. `plan`
+    é pulado porque o Claude Code conta plan vindo de bypass como bypass."""
+    from app.worktrees import reversed_lines
+
+    try:
+        for raw in reversed_lines(jsonl):
+            if b'"permissionMode"' not in raw:
+                continue
+            try:
+                modo = json.loads(raw).get("permissionMode")
+            except ValueError:
+                continue
+            if isinstance(modo, str) and modo not in ("", "plan"):
+                return modo
+    except OSError:
+        pass
+    return None
+
+
+def session_non_plan_mode(jsonl: str | None) -> str | None:
+    """Modo fora de `plan` da sessão Claude do transcript `jsonl`: o que o pane mostrou (a memória é
+    gravada pelo session-id, o stem do jsonl, como o monitor faz) ou, sem ele, o do transcript.
+    A memória vem antes porque um Shift+Tab só chega ao transcript na fala seguinte; e só ela não
+    basta, porque existe apenas para sessão com monitor aberto desde o último restart."""
+    if not jsonl:
+        return None
+    return known_non_plan(Path(jsonl).stem) or transcript_non_plan_mode(jsonl)
+
+
 def observar_pane(name: str, pane: str, sessao: str | None = None) -> str | None:
     """Atualiza a memória a partir de uma captura já feita e devolve o modo confirmado."""
     modo = parse_permission_mode(pane)
