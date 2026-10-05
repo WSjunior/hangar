@@ -87,10 +87,10 @@ a varredura inteira. No Windows (Job) só muda a regra de gravação.
 `test_windows_job_refresh_writes_once`, `test_refresh_members_retries_after_failed_write`,
 `test_reconcile_still_finds_orphan_grandchild`.
 
-- [ ] **Step 1: Ler "Regras vigentes" de `docs/decisoes/windows.md`; conferir as linhas citadas**
-- [ ] **Step 2: Testes acima, vistos falhar**
-- [ ] **Step 3: Descida pela árvore só no `refresh_members`, reforço de 5 s, gravação só com mudança ou falha anterior**
-- [ ] **Step 4: Medida no isolado: zero sessões e sem cliente abaixo de 1% de um núcleo (era 4,2%), registro regravado só com processo novo; registrar em `medicao.md` e `plataforma.md`; testes focados; revisar**
+- [x] **Step 1: Ler "Regras vigentes" de `docs/decisoes/windows.md`; conferir as linhas citadas**
+- [x] **Step 2: Testes acima, vistos falhar**
+- [x] **Step 3: Descida pela árvore só no `refresh_members`, reforço de 5 s, gravação só com mudança ou falha anterior**
+- [x] **Step 4: Medida no isolado: zero sessões e sem cliente abaixo de 1% de um núcleo (era 4,2%), registro regravado só com processo novo; registrar em `medicao.md` e `plataforma.md`; testes focados; revisar**
 
 ---
 
