@@ -32,7 +32,7 @@ pub struct Session {
 }
 
 /// Lexical, como o `os.path.normpath`: `..` sobe sem seguir link.
-fn normpath(path: &Path) -> PathBuf {
+pub fn normpath(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for part in path.components() {
         match part {
@@ -163,8 +163,13 @@ fn removed_file() -> Option<PathBuf> {
 }
 
 pub fn removed() -> HashMap<String, String> {
-    removed_file()
-        .and_then(|f| std::fs::read(f).ok())
+    removed_file().map(|f| removed_at(&f)).unwrap_or_default()
+}
+
+/// O mapa de remoções de um arquivo dado: a lista recebe a pasta de casa por parâmetro.
+pub fn removed_at(file: &Path) -> HashMap<String, String> {
+    std::fs::read(file)
+        .ok()
         .and_then(|b| serde_json::from_slice::<HashMap<String, Value>>(&b).ok())
         .map(|m| {
             m.into_iter()

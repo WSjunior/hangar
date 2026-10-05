@@ -11,6 +11,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `set -g <qualquer coisa>` volta do `show -g`. Endereço é `=<sessão>:<janela>.<pane>`.
 - **No psmux a sessão de quem chama sai do pid no `TMUX` (`/tmp/psmux-<pid>/…`)**, casado com
   `list-sessions '#{pid}'`: o pane é sempre `%1` e o terceiro campo do `TMUX` é sempre `0`.
+- **Fora do Linux o Rust lê processos pelo `sysinfo` (`list/procs.rs`), e ambiente vazio é
+  ilegível, não ausência**: é o que ele devolve para processo de outro dono, e a exclusão de conta
+  precisa separar os dois. Nascimento vem em segundos inteiros e não há fd aberto (o transcript não
+  sai do handle, como no `procinfo._open_jsonl`).
 - **Multi-linha vai pelo CLIPBOARD**, porque os buffers do psmux cortam no primeiro `\n`. O
   fallback ramifica pelo **código de retorno**, nunca pelo nome do sistema.
 - **O composer se lê com `capture-pane -e` também no psmux.** Sem estilo, a sugestão esmaecida

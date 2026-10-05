@@ -48,7 +48,7 @@ fn failure(e: WorkspaceError, route: &str) -> Response {
     };
     response(json!({"detail":detail}), e.status)
 }
-fn private_ok(st: &AppState, peer: SocketAddr, headers: &HeaderMap) -> bool {
+pub(crate) fn private_ok(st: &AppState, peer: SocketAddr, headers: &HeaderMap) -> bool {
     let token = headers
         .get("x-hangar-internal")
         .map(|h| h.as_bytes())

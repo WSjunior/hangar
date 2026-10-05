@@ -4,6 +4,7 @@ use hangar_api::{
     ask::AskQuestion,
     chat::{ChatEvent, ChatKind},
     preview::PreviewEvent,
+    session::{ContextUse, SessionRow},
     state::StateEvent,
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -61,6 +62,26 @@ fn preview_samples_round_trip() {
 #[test]
 fn ask_samples_round_trip() {
     round_trip::<AskQuestion>("ask_");
+}
+
+#[test]
+fn session_row_roundtrip() {
+    let rows = round_trip::<SessionRow>("session_");
+    let full = &rows.iter().find(|(name, _)| name == "session_full.json").unwrap().1;
+    assert_eq!(full.context, Some(ContextUse { used: 120_000, window: 1_000_000 }));
+    assert_eq!(full.plan_tasks.as_deref(), Some(&[(2, 2), (2, 4), (0, 3)][..]));
+
+    // Texto exato: a igualdade de `Value` não enxerga campo fora da ordem do model_dump_json.
+    for name in ["session_full.json", "session_minimal.json"] {
+        let text = fs::read_to_string(samples_dir().join(name)).unwrap();
+        let row: SessionRow = serde_json::from_str(&text).unwrap();
+        assert_eq!(serde_json::to_string(&row).unwrap(), text.trim_end(), "{name}");
+    }
+
+    // Só o nome é obrigatório; o resto cai no padrão do SessionInfo, conferido contra a amostra mínima.
+    let row: SessionRow = serde_json::from_value(json!({"name": "s1", "campo_novo": 1})).unwrap();
+    assert_eq!(serde_json::to_value(&row).unwrap(), samples("session_minimal")[0].1);
+    assert!(serde_json::from_value::<SessionRow>(json!({"state": "idle"})).is_err(), "name continua obrigatório");
 }
 
 #[test]

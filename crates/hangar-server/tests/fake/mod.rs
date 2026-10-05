@@ -42,6 +42,10 @@ pub struct Fake {
     info_status: Mutex<Option<StatusCode>>,
     diag: Mutex<Vec<Value>>,
     pub release: Notify,
+    /// Resposta e demora de `/internal/list/facts`; quantos pedidos chegaram e o último.
+    pub list_facts: Mutex<(Value, Duration)>,
+    pub list_facts_calls: AtomicUsize,
+    pub list_facts_last: Mutex<Value>,
 }
 
 impl Fake {
@@ -90,11 +94,17 @@ pub async fn spawn_fake() -> (Arc<Fake>, SocketAddr) {
         info_status: Mutex::default(),
         diag: Mutex::default(),
         release: Notify::new(),
+        list_facts: Mutex::new((json!({"states": {}, "overrides": [], "frozen": [], "orq": [], "shared": [],
+            "owners": {}, "hidden": [], "problems": {}, "stall_seconds": 300.0, "nav": {}, "shortcuts": null, "shadow": null}),
+            Duration::ZERO)),
+        list_facts_calls: AtomicUsize::new(0),
+        list_facts_last: Mutex::new(Value::Null),
     });
     let app = Router::new()
         .route("/internal/sessions/{name}/info", get(fake_info))
         .route("/internal/sessions/{name}/side-events", get(fake_side))
         .route("/internal/diag", axum::routing::post(fake_diag))
+        .route("/internal/list/facts", axum::routing::post(fake_list_facts))
         .fallback(fake_python)
         .with_state(fake.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -124,6 +134,17 @@ async fn fake_info(State(f): State<Arc<Fake>>, headers: HeaderMap) -> Response {
         .header("content-type", "application/json")
         .body(Body::from(info.to_string()))
         .unwrap()
+}
+
+async fn fake_list_facts(State(f): State<Arc<Fake>>, headers: HeaderMap, body: Bytes) -> Response {
+    if !internal_ok(&headers) {
+        return status(StatusCode::NOT_FOUND);
+    }
+    f.list_facts_calls.fetch_add(1, SeqCst);
+    *f.list_facts_last.lock().unwrap() = serde_json::from_slice(&body).unwrap();
+    let (reply, delay) = f.list_facts.lock().unwrap().clone();
+    tokio::time::sleep(delay).await;
+    Response::builder().header("content-type", "application/json").body(Body::from(reply.to_string())).unwrap()
 }
 
 async fn fake_diag(State(f): State<Arc<Fake>>, headers: HeaderMap, body: Bytes) -> Response {

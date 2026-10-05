@@ -2,8 +2,8 @@
 """Amostras JSON dos formatos da conversa, geradas pelos modelos reais de app/models.py.
 
 O crate crates/hangar-api lê cada arquivo, escreve de volta e compara: campo que mudar aqui e não
-lá quebra o teste de ida e volta. Depois de mexer em ChatEvent, StateEvent, PreviewEvent ou
-AskQuestion, rodar de backend/:
+lá quebra o teste de ida e volta. Depois de mexer em ChatEvent, StateEvent, PreviewEvent,
+AskQuestion ou SessionInfo, rodar de backend/:
 
     uv run python tests/fixtures/contract/gen_api_samples.py
 """
@@ -25,6 +25,7 @@ from app.models import (  # noqa: E402
     ChatEvent,
     ChatKind,
     PreviewEvent,
+    SessionInfo,
     ShellVivo,
     StateEvent,
 )
@@ -67,6 +68,28 @@ def _models() -> dict:
             options=[AskOption(label="A", description="primeiro", preview="```\nA\n```"),
                      AskOption(label="B")],
         )]),
+        "session_minimal": SessionInfo(name="s1"),
+        "session_full": SessionInfo(
+            name="s1", lifecycle_id="lc-1", transfer_id="tr-1", transfer_phase="copying",
+            cwd="/home/u/repo", jsonl="/home/u/.claude/projects/x/u.jsonl", provider="codex",
+            headless=True, engine="kimi", engine_account="kimi-coding", codex_home="/home/u/.codex",
+            codex_service_tier="priority",
+            conta="claude:/home/u/.claude", state="awaiting_input", last_activity=1727712000.5,
+            last_reply="acentuação e emoji 🚀", last_reply_at=1727712001.25, tracked=False,
+            branch="feat/x", worktree=True, worktree_path="/home/u/repo-wt", worktree_gone=True,
+            git_cwd="/home/u/repo-wt", git_dirty=3, git_ahead=1, git_behind=0, git_added=10,
+            git_removed=2, avisos=["plugin sem instalação"], label="Pensando…",
+            startup_steps=["hooks", "mcp"], question="Continuar?", pending_questions=2,
+            options=["Sim", "Não"], stalled=True, problema="codex_hooks_nao_aprovados",
+            limited=True, limit_reset="3pm", shared=True, guest_kind="pair", owner="ana",
+            then_target="s2", status_line="opus · 12%",
+            context={"used": 120000, "window": 1000000}, model="claude-opus-5-5[1m]",
+            pair_peers=["s2", "s3"], pair_external={"alias": "bia", "owner": "Bia", "session": "x"},
+            pair_gid="g1", pair_task="ABC-1234", orq_arbiter="arb-1", loop_status="rodando",
+            loop_iter=2, loop_max=5, plan_name="plano.md", plan_task=0, plan_task_total=3,
+            plan_done=4, plan_total=9, plan_complete=False, plan_tasks=[(2, 2), (2, 4), (0, 3)],
+            plan_hidden=True,
+        ),
     }
     # Um por tipo: tipo novo no models.py vira amostra nova, e o teste Rust cobra a variante.
     for kind in get_args(ChatKind):

@@ -5,6 +5,7 @@ pub mod costs;
 pub mod costs_routes;
 pub mod costs_failure;
 pub mod diag;
+pub mod list;
 pub mod proxy;
 pub mod routes;
 pub mod runtime;
@@ -22,7 +23,7 @@ mod warn_limit;
 
 /// Versão do contrato com o Python (rotas `/internal`, eventos do side-events, ambiente). O
 /// Python (`RUST_SERVER_PROTOCOL`) recusa um binário de outra versão e atende sozinho.
-pub const INTERNAL_PROTOCOL: u32 = 24;
+pub const INTERNAL_PROTOCOL: u32 = 26;
 
 /// Todo socket TCP do servidor, aceito ou aberto. Sem isso o Nagle segura o último pedaço de uma
 /// resposta em pedaços até o ACK atrasado do outro lado; o asyncio do Python já liga sozinho.
@@ -59,6 +60,8 @@ pub async fn serve_until_with_state(
     stop: impl std::future::Future<Output = ()>,
 ) -> std::io::Result<()> {
     let cfg = state.cfg.clone();
+    // Abortada na saída: o laço segura a ponte da lista, que sobreviveria ao servidor.
+    let _shadow = list::shadow::spawn(state.list.clone(), state.diag.clone()).map(AbortOnDrop);
     if let Some(instance) = config::Config::runtime_instance().map_err(std::io::Error::other)? {
         let private = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = private.local_addr()?.port();
@@ -78,6 +81,12 @@ pub async fn serve_until_with_state(
         r = routes::serve_with_state(listener, state) => r,
         () = stop => Ok(()),
     }
+}
+
+pub(crate) struct AbortOnDrop(pub(crate) tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) { self.0.abort(); }
 }
 
 /// Linha do log de um pânico: só local e thread. A mensagem do pânico pode citar texto de conversa.
