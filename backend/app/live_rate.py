@@ -4,6 +4,7 @@ Não importa nada do app: `stats` e os adapters se importam em ciclo.
 """
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from collections.abc import Sequence
@@ -14,6 +15,17 @@ RECENT_CALLS = 10
 MIN_GEN_S = 0.2
 # Transcript com resposta mais nova que a última medida por esta folga: a fonte parou de medir.
 _STALE_S = 30.0
+
+
+def rate_report(data) -> tuple[int, float, str] | None:
+    """Medida vinda do runtime Rust: (tokens, segundos, conversa), ou None se malformada."""
+    if not isinstance(data, dict):
+        return None
+    tokens, seconds, conversation = data.get("tokens"), data.get("seconds"), data.get("conversation")
+    if (type(tokens) is not int or type(seconds) not in (int, float) or not math.isfinite(seconds)
+            or seconds < 0 or not isinstance(conversation, str) or not conversation):
+        return None
+    return tokens, float(seconds), conversation
 
 
 def rates(calls: Sequence[tuple[int, float]]) -> dict:

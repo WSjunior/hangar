@@ -850,9 +850,12 @@ class RuntimeCoordinator:
                             if client is not None:
                                 client.receive(event["channel"], event["data"]["event"])
                         if event["channel"] == "rate":
-                            from app.live_rate import live_rate
-                            data = event["data"]
-                            live_rate(slot.binding.name).close(data["tokens"], data["seconds"], data["conversation"])
+                            from app.live_rate import live_rate, rate_report
+                            if (report := rate_report(event["data"])) is not None:
+                                live_rate(slot.binding.name).close(*report)
+                            else:
+                                from app import diag
+                                diag.registrar("runtime.rate_invalid", "aviso", sessao=slot.binding.name)
                     self._signal(slot)
                     if event.get("channel") in {"view", "snapshot"}:
                         conversation = (slot.view.get("view") or {}).get("conversation")

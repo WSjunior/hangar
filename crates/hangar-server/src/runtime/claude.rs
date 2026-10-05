@@ -759,7 +759,7 @@ impl ClaudeEngine {
             Some("message_delta") => {
                 self.tokens_message = event["usage"]["output_tokens"].as_u64();
                 // tok/s real: do message_start ao fim, com o output_tokens que só chega aqui.
-                if let (Some(tokens),Some(start)) = (self.tokens_message,self.gen_start.take()) {
+                if let (Some(tokens),Some(start),true) = (self.tokens_message,self.gen_start.take(),self.metadata["session_id"].is_string()) {
                     effects.push(Effect::Publish { channel:"rate".into(),data:json!({"tokens":tokens,
                         "seconds":(self.clock.monotonic_s-start).max(0.0),"conversation":self.metadata["session_id"]}) });
                 }
