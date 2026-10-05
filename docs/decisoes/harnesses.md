@@ -309,7 +309,9 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   [Reinício no meio de um adiamento](#reinício-no-meio-de-um-adiamento).
 - **Entrada terminal recusada sem escrita não espera calada.** O ator Rust conta a série de
   adiamentos do escritor com `stage` (fora `question_open`, `not_ready`, `overlay`,
-  `input_unavailable`). A espera entre as tentativas dobra a partir do tique até 30 s; o log ganha
+  `input_unavailable`). A espera entre as tentativas dobra a partir do tique até 8 s, a série é da
+  linha (linha que sai da fila não passa a espera adiante) e o composer lido vazio libera a
+  tentativa na hora; o log ganha
   uma linha por série; passados 30 s, `view.input_stalled` leva o código, o Python mostra
   `problema=terminal_input_*` e grava um `terminal.input_stalled` no diário. A fila continua
   tentando. Ver [Entrada terminal parada sem aviso](#entrada-terminal-parada-sem-aviso).
@@ -2645,6 +2647,12 @@ nativo os anéis passaram de "sem dado" para Contexto 54% e a conta 100% (semana
 `Deferred` com `cleanup: not_needed`, e `finalize_terminal` só conta tentativa quando a limpeza
 foi provada: o teto de duas tentativas nunca chegava. A série agora espaça as tentativas e
 aparece na tela depois de 30 s, sem desistir da entrada: rascunho do dono continua sendo do dono.
+
+Na revisão do mesmo dia: com teto de 30 s e nada zerando a série, o dono que enviava um rascunho
+longo deixava a mensagem do app parada até 30 s com o terminal livre, e a linha seguinte herdava a
+espera de uma linha apagada. O teto caiu para 8 s, a série guarda o id da linha e, durante a
+espera, uma captura só de leitura (`composer_free`) libera a tentativa quando o composer está
+vazio. O lado Python só traduz `view.input_stalled`; não há espera espelhada lá.
 
 ## Reinício no meio de um adiamento
 
