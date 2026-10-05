@@ -1318,10 +1318,12 @@ async fn handed(api: &Api, result: Result<Value, Failure>, name: &str, cwd: &str
         Ok(list) => list.into_iter().find(|s| s.name == created),
         Err(error) => { eprintln!("bastao-lista: {}", error.detail); None }
     };
-    let (session, notes) = match listed {
+    let (session, mut notes) = match listed {
         Some(session) => (session, Vec::new()),
         None => (SessionInfo { name: created, cwd: Some(cwd.to_owned()), ..SessionInfo::default() }, vec![tr("create_baton_unlisted")]),
     };
+    notes.extend(value.get("avisos").and_then(Value::as_array).into_iter().flatten()
+        .filter_map(Value::as_str).map(str::to_owned));
     Ok(Opened { session, notes, warning })
 }
 
@@ -1874,6 +1876,7 @@ impl NewSession {
             self.error.clone(),
             self.proxy_note(),
             failed(&self.roots).map(|e| format!("{} {e}", tr("create_roots_failed"))),
+            failed(&self.providers).cloned(),
             failed(&self.configs).filter(|_| claude).cloned(),
             failed(&self.codex).filter(|_| self.provider == "codex").cloned(),
             failed(&self.models).map(|e| format!("{}: {e}", tr("create_models_failed"))),

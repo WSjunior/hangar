@@ -286,13 +286,15 @@ describe('CreateSessionSheet Codex', () => {
     await act(async () => calls.dismiss!());
   }
 
-  async function renderSheet(strict = false) {
+  async function renderSheet(strict = false, chooseCodex = true) {
     const container = document.createElement('div');
     const root = createRoot(container);
     await act(async () => root.render(strict ? createElement(StrictMode, null, createElement(CreateSessionSheet)) : createElement(CreateSessionSheet)));
     await act(async () => Promise.resolve());
-    await act(async () => button(container, 'criar_mais_opcoes')!.click());
-    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Codex')!.click());
+    if (chooseCodex) {
+      await act(async () => button(container, 'criar_mais_opcoes')!.click());
+      await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Codex')!.click());
+    }
     await act(async () => Promise.resolve());
     return { container, root };
   }
@@ -305,11 +307,36 @@ describe('CreateSessionSheet Codex', () => {
     calls.accounts.mockResolvedValue([
       { ...defaultAccount, auth: { ...defaultAccount.auth, status: 'disconnected' } }, connected,
     ]);
-    const { container, root } = await renderSheet();
+    const { container, root } = await renderSheet(false, false);
     await send(container);
     expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({
       provider: 'codex', codex_account: 'work', remember_provider: true,
     }));
+    root.unmount();
+  });
+
+  it('confirmação manual de Claude não é trocada pela resposta tardia', async () => {
+    const pending = deferred<Record<string, unknown>>();
+    calls.providers.mockReturnValue(pending.promise);
+    const { container, root } = await renderSheet(false, false);
+    await act(async () => button(container, 'criar_mais_opcoes')!.click());
+    await act(async () => button(container, 'Claude')!.click());
+    await act(async () => pending.resolve({ codex: { disponivel: true, default: true } }));
+    await send(container);
+    expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ provider: 'claude' }));
+    root.unmount();
+  });
+
+  it('mostra erro da preferência e espera escolha explícita antes de enviar', async () => {
+    calls.providers.mockRejectedValue(new Error('provider-probe-failed'));
+    const { container, root } = await renderSheet(false, false);
+    expect(container.textContent).toContain('provider-probe-failed');
+    await send(container);
+    expect(calls.create).not.toHaveBeenCalled();
+    await act(async () => button(container, 'criar_mais_opcoes')!.click());
+    await act(async () => button(container, 'Codex')!.click());
+    await send(container);
+    expect(calls.create).toHaveBeenCalledWith(server, expect.objectContaining({ provider: 'codex' }));
     root.unmount();
   });
 

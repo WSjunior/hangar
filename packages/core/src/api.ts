@@ -755,8 +755,17 @@ export function uniqueSessionName(base: string, taken: Set<string>): string {
 // com a sessão nascendo e o reenvio duplicá-la.
 const SESSION_BIRTH_MS = 120_000;
 
+function withCreationWarnings<T extends { avisos?: string[] }>(result: T): T {
+  if (result?.avisos?.length) {
+    try { apiEnv().onSessionWarnings?.(result.avisos); }
+    catch (error) { console.error('Falha ao mostrar avisos da sessão criada', error); }
+  }
+  return result;
+}
+
 export function createSessionForServer(server: Server, body: CreateSessionBody): Promise<SessionInfo> {
-  return apiFetchForServer(server, '/api/sessions', { method: 'POST', body: JSON.stringify(buildCreateSessionBody(body)) }, SESSION_BIRTH_MS);
+  return apiFetchForServer<SessionInfo>(server, '/api/sessions', { method: 'POST', body: JSON.stringify(buildCreateSessionBody(body)) }, SESSION_BIRTH_MS)
+    .then(withCreationWarnings);
 }
 
 export function createSession(
@@ -788,7 +797,7 @@ export function createSession(
   return apiFetch<SessionInfo>('/api/sessions', {
     method: 'POST',
     body: JSON.stringify(buildCreateSessionBody(body)),
-  });
+  }).then(withCreationWarnings);
 }
 
 // ── Passagem de bastão ──────────────────────────────────────────────────────
@@ -825,6 +834,7 @@ export interface BastaoResult {
   // Só quando a reescrita pelo modelo foi pedida e não deu (cota, tempo, CLI ausente): a sessão
   // nasceu com o resumo montado por código, e quem pediu tem de saber que recebeu o outro.
   aviso?: string | null;
+  avisos?: string[];
 }
 
 // Passo em curso da criação de `name` (sessão nova ou sucessora do bastão); `step` null = nada em curso.
@@ -859,13 +869,13 @@ export function passarBastao(
   },
   server?: Server | null,
 ): Promise<BastaoResult> {
-  if (server) return apiFetchForServer(server, `/api/sessions/${encodeURIComponent(name)}/bastao`, {
+  if (server) return apiFetchForServer<BastaoResult>(server, `/api/sessions/${encodeURIComponent(name)}/bastao`, {
     method: 'POST', body: JSON.stringify(body),
-  });
+  }).then(withCreationWarnings);
   return apiFetch<BastaoResult>(`/api/sessions/${encodeURIComponent(name)}/bastao`, {
     method: 'POST',
     body: JSON.stringify(body),
-  });
+  }).then(withCreationWarnings);
 }
 
 // Modelo oferecido na tela de ABERTURA (GET /api/model-options). O backend devolve QUATRO formatos

@@ -49,6 +49,31 @@ describe('autenticação explícita', () => {
 });
 
 describe('contas e servidor explícito', () => {
+  it.each(['active', 'server', 'baton'])('mostra avisos sem perder a sessão criada (%s)', async (source) => {
+    const warnings = ['preferencia-nao-salva'];
+    const notify = vi.fn();
+    configureApi({ getBaseUrl: () => 'https://a.test', getToken: () => 'token-a',
+      onUnauthorized: unauthorized, onSessionWarnings: notify, origin: null,
+      createEventSource: () => { throw new Error('unused'); } });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ name: 'created', avisos: warnings }));
+    const result = source === 'active' ? await createSession('created')
+      : source === 'server' ? await createSessionForServer(server, { name: 'created', provider: 'codex' })
+        : await passarBastao('origin', { name: 'created' }, server);
+    expect(result.name).toBe('created');
+    expect(notify).toHaveBeenCalledWith(warnings);
+  });
+
+  it('falha ao exibir aviso não transforma criação confirmada em falha', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    configureApi({ getBaseUrl: () => 'https://a.test', getToken: () => 'token-a',
+      onUnauthorized: unauthorized, onSessionWarnings: () => { throw new Error('display failed'); }, origin: null,
+      createEventSource: () => { throw new Error('unused'); } });
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ name: 'created', avisos: ['preferencia-nao-salva'] }));
+    await expect(createSession('created')).resolves.toMatchObject({ name: 'created' });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalled();
+  });
+
   it('propaga o cancelamento ao carregar credenciais de outro servidor', async () => {
     const controller = new AbortController();
     const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json([]));

@@ -2393,8 +2393,9 @@ O mobile guardava a aba escolhida localmente, mesmo sem abrir uma sessão. CLI, 
 preenchiam Claude quando o chamador não especificava o provedor.
 
 `last_session_provider` fica no `runtime-config.json` do servidor; `remember_provider` autoriza
-gravá-lo após a criação. As interfaces e o CLI enviam esse campo; MCP e API automatizada não o
-enviam. `/providers` marca `default` por item, usando o estado de login do Claude e do Codex já
+gravá-lo após a criação. As interfaces enviam esse campo; CLI, MCP e API automatizada apenas
+herdam o padrão. No CLI, `--remember-provider` permite gravá-lo explicitamente, sem a abertura
+de auxiliares mudar a preferência humana. `/providers` marca `default` por item, usando o estado de login do Claude e do Codex já
 existente, além dos motores configurados. Preferência indisponível ou sem conta conectada,
 quando há outra conectada, cede ao provedor utilizável. Escolha explícita continua prevalecendo.
 
@@ -2409,7 +2410,7 @@ quando solicitados.
 
 Conferência em uso: build `release` do nativo, janela e servidor de dados isolados. Nova conversa
 e o modal Nova sessão selecionaram Codex e uma conta adicional conectada com a padrão
-deslogada. A abertura simulada pelo CLI gravou o último provedor, e a reabertura do modal
+deslogada. A abertura simulada com gravação explícita gravou o último provedor, e a reabertura do modal
 refletiu Claude depois de uma criação Claude. A leitura do catálogo com contas reais também
 foi exercitada, sem abrir sessão.
 
@@ -2419,3 +2420,9 @@ envio durante a leitura e enviar `remember_provider`. No fluxo simulado, abriu C
 conectada; depois de criar por Claude, reabriu em Claude; retirado o login Claude, selecionou
 Codex apesar da preferência anterior. Builds do nativo e da PWA passaram. O app Expo não foi
 conferido em aparelho; os testes automatizados não foram executados.
+
+A revisão de publicação acrescentou proteção para conta e retomada escolhidas durante a
+leitura de `/providers`, além da confirmação do provedor já selecionado. Falha dessa leitura
+aparece no mobile e requer uma escolha explícita. Avisos da gravação seguem pela resposta
+de criação e do bastão até as interfaces; falha ao mostrar um aviso não torna a criação uma
+falha nem provoca repetição. No nativo, a abertura por worktree também conserva esses avisos.

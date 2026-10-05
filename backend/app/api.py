@@ -3777,7 +3777,7 @@ async def _passar_bastao(name: str, body: BastaoBody):
     # `aviso`: a reescrita pelo modelo foi pedida e não deu (cota, tempo, CLI ausente). A sessão
     # nasceu e o resumo de código está lá — quem pediu precisa saber que recebeu o outro.
     return {"name": novo.name, "dossie": str(alvo), "texto": texto, "kickoff": kick,
-            "aviso": aviso_resumo}
+            "aviso": aviso_resumo, "avisos": novo.avisos}
 
 
 @app.get("/api/sessions/{name}/workflows", dependencies=[Depends(require_auth)])

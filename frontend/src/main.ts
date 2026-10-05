@@ -18,6 +18,7 @@ configureApi({
   getToken,
   rememberLan,
   onUnauthorized: () => { if (handleUnauthorized()) window.location.reload(); },
+  onSessionWarnings: (warnings) => window.alert(warnings.join('\n')),
   origin: window.location.origin,
   createEventSource: (url, { withCredentials }) =>
     new EventSource(url, { withCredentials }) as unknown as import('@hangar/core').EventSourceLike,

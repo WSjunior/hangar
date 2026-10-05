@@ -695,6 +695,9 @@ impl Hangar {
                         this.close_worktrees(window, cx);
                         let key = this.active_key();
                         if this.select_on(&key, session.clone(), window, cx) { this.focus_composer_for(&session, window, cx); }
+                        for warning in &session.avisos {
+                            window.push_notification(Notification::warning(warning.clone()).autohide(false), cx);
+                        }
                     }
                     Ok(Err(path)) => {
                         this.worktrees.create = None;

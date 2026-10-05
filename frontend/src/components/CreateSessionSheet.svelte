@@ -298,7 +298,8 @@
       if (seq !== provSeq || !aberta || targetServer !== srv || !open) return;
       providers = res;
       const preferred = PROVIDERS.find((p) => res[p]?.default && res[p]?.disponivel);
-      if (!providerTouched && !modelChoiceTouched && !loading && preferred && preferred !== provider) {
+      if (!providerTouched && !modelChoiceTouched && !contaEscolhidaAMao && !querRetomar && !conversaAlvo
+          && !retomando && !loading && preferred && preferred !== provider) {
         provider = preferred;
         permissao = preferred === 'codex' ? 'Full Access' : '';
         carregarModelos();

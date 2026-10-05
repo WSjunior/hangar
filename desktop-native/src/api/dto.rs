@@ -17,6 +17,7 @@ pub struct SessionInfo {
     pub transfer_id: Option<String>,
     pub transfer_phase: Option<String>,
     #[serde(default)] pub provider: String,
+    #[serde(default)] pub avisos: Vec<String>,
     pub engine: Option<String>,
     pub engine_account: Option<String>,
     #[serde(default)] pub headless: bool,
