@@ -1,0 +1,49 @@
+
+ ▐▛███▛█   Claude Code v2.1.289
+▝▜██████▀  Haiku 4.5 · Claude Max
+ ▝▝   ▝▝   ~/projeto · /rc
+
+
+❯ Rode em sequência, cada um numa chamada Bash separada, com description: 1) sleep 4; echo um  2) sleep 4; echo dois  3) cat /etc/hostname. Entre o 1 e o 2
+  escreva uma frase curta. No fim diga pronto.
+
+  Ran 1 shell command
+
+● Primeiro comando concluído.
+
+  Aguardando o segundo...
+
+  Aguardar 4 segundos e imprimir "dois" · 2s
+  ⎿  $ sleep 4; echo dois (3s)
+     (ctrl+b ctrl+b (twice) to run in background)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+· Photosynthesizing… (12s · ↓ 442 tokens)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ~/projeto | Haiku 4.5 | 54k/200k | 7d:38%
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

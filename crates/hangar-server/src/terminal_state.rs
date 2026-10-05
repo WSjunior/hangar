@@ -295,6 +295,12 @@ fn codex_menu(lines: &[&str]) -> Option<TerminalQuestion> {
     Some(TerminalQuestion { question, options })
 }
 
+/// Chamada em voo do Claude Code: a 1ª linha é a descrição escrita pelo modelo, não "Bash(", e o ● dela pisca. O que
+/// a separa da prosa é a forma: o parágrafo termina colado no `⎿`.
+fn tool_header(lines: &[&str], i: usize) -> bool {
+    lines[i + 1..].iter().find(|l| trim(l).is_empty() || boundary(l)).is_some_and(|l| left(l).starts_with('⎿'))
+}
+
 fn preview(lines: &[&str]) -> String {
     let end = lines.iter().rposition(|l| P.rule.is_match(l) || P.overlay_rule.is_match(l) || P.pi_box.is_match(l))
         .unwrap_or(lines.len());
@@ -310,16 +316,17 @@ fn preview(lines: &[&str]) -> String {
         let subagent = P.subagent.is_match(body) && lines[i + 1..].iter().find(|l| !trim(l).is_empty())
             .is_some_and(|l| P.subagent_body.is_match(l));
         if !tool(body) && !mcp(body) && !end_word(&P.finished, body)
-            && !P.todo.is_match(line) && !subagent { start = Some(i); }
+            && !P.todo.is_match(line) && !subagent && !tool_header(lines, i) { start = Some(i); }
     }
     let Some(start) = start else { return String::new(); };
     let first = left(lines[start]);
     let mut out = vec![right(left(first.strip_prefix('●').unwrap_or(first)))];
-    for line in &lines[start + 1..] {
+    for (j, line) in lines.iter().enumerate().skip(start + 1) {
         let s = left(line);
         if P.rule.is_match(line) || boundary(line) || P.user.is_match(line) || tool(s)
             || mcp(s) || P.todo.is_match(line) || P.ascii_spinner.is_match(s)
-            || activity(s) { break; }
+            // Só no começo de parágrafo: as linhas do mesmo parágrafo dão a mesma resposta.
+            || activity(s) || (!trim(s).is_empty() && trim(lines[j - 1]).is_empty() && tool_header(lines, j - 1)) { break; }
         out.push(right(line));
     }
     while out.last().is_some_and(|l| trim(l).is_empty()) { out.pop(); }

@@ -39,6 +39,11 @@ struct FileTab {
     preview: bool,
 }
 
+impl FileTab {
+    /// Imagem já à vista: só ela vai para o visor com zoom.
+    fn zoomable(&self) -> bool { matches!(self.picture, Some(Picture::Disk(_) | Picture::Ready(_))) }
+}
+
 #[derive(serde::Deserialize)]
 pub(super) struct Content { path: String, text: String, truncated: bool, digest: Option<String>, #[serde(skip)] external: bool }
 impl Content {
@@ -193,6 +198,27 @@ impl Hangar {
     fn files_visible(&self) -> bool {
         self.files.owner.is_some() && self.files.owner == self.session_owner() && !self.files.tabs.is_empty() && !self.files.hidden
             && (self.settings.is_none() || self.settings_live())
+    }
+
+    /// A imagem da aba vai para o visor da conversa, que tem o zoom; a aba só a mostra encaixada.
+    fn zoom_picture(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(key), Some(tab)) = (self.selected_key(), self.files.tabs.get(self.files.active)) else { return };
+        if !tab.zoomable() { return; }
+        let source = Source::Cited(tab.path.clone());
+        self.open_image(key, vec![source], 0, window, cx);
+    }
+
+    /// Clique ou Ctrl + roda na imagem abrem o visor com zoom; a roda sozinha continua livre.
+    fn picture_view(image: ImageSource, cx: &mut Context<Self>) -> AnyElement {
+        div().size_full().p_4().flex().items_center().justify_center()
+            .child(div().id("file-picture").max_w_full().max_h_full().flex().cursor_pointer()
+                .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new(tr("file_zoom")).build(window, cx))
+                .on_click(cx.listener(|this, _, window, cx| this.zoom_picture(window, cx)))
+                .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                    if event.modifiers.control { cx.stop_propagation(); this.zoom_picture(window, cx); }
+                }))
+                .child(img(image).max_w_full().max_h_full().object_fit(ObjectFit::Contain)))
+            .into_any_element()
     }
 
     pub(super) fn open_file(&mut self, path: String, line: Option<u32>, window: &mut Window, cx: &mut Context<Self>) {
@@ -660,6 +686,9 @@ impl Hangar {
                 .when(doc.markdown.is_some(), |el| el.child(chrome::icon_button("file-preview",
                         if tab.preview { IconName::FileCode } else { IconName::Eye }, tr(if tab.preview { "file_source" } else { "file_preview" }), cx)
                     .selected(tab.preview).on_click(cx.listener(|this, _, window, cx| this.toggle_preview(window, cx))))))
+            .when(tab.zoomable(), |el| el
+                .child(chrome::icon_button("file-zoom", IconName::Plus, tr("file_zoom"), cx)
+                    .on_click(cx.listener(|this, _, window, cx| this.zoom_picture(window, cx)))))
             // Arquivo citado fora da raiz não está na árvore da sessão.
             .child(chrome::icon_button("file-reveal", IconName::FolderOpen, tr("file_reveal"), cx).disabled(tab.path.starts_with(['/', '~']))
                 .on_click(cx.listener(|this, _, window, cx| this.file_reveal(window, cx))))
@@ -669,10 +698,8 @@ impl Hangar {
         let state = |text: String, color: Hsla| div().size_full().flex().items_center().justify_center().p_4().text_sm().text_color(color)
             .child(text).into_any_element();
         let content = match (&tab.picture, &tab.content) {
-            (Some(Picture::Disk(path)), _) => div().size_full().p_4().flex().items_center().justify_center()
-                .child(img(path.clone()).max_w_full().max_h_full().object_fit(ObjectFit::Contain)).into_any_element(),
-            (Some(Picture::Ready(image)), _) => div().size_full().p_4().flex().items_center().justify_center()
-                .child(img(image.clone()).max_w_full().max_h_full().object_fit(ObjectFit::Contain)).into_any_element(),
+            (Some(Picture::Disk(path)), _) => Self::picture_view(path.clone().into(), cx),
+            (Some(Picture::Ready(image)), _) => Self::picture_view(image.clone().into(), cx),
             (Some(Picture::Audio), _) => {
                 let (id, path) = (tab.id, tab.path.clone());
                 div().size_full().flex().items_center().justify_center()
