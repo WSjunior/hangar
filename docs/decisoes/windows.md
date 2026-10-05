@@ -13,6 +13,10 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   `list-sessions '#{pid}'`: o pane é sempre `%1` e o terceiro campo do `TMUX` é sempre `0`.
 - **Multi-linha vai pelo CLIPBOARD**, porque os buffers do psmux cortam no primeiro `\n`. O
   fallback ramifica pelo **código de retorno**, nunca pelo nome do sistema.
+- **O composer se lê com `capture-pane -e` também no psmux.** Sem estilo, a sugestão esmaecida
+  que o Claude desenha no composer vazio (`❯ Try "…"`) parece texto digitado, e o escritor Rust
+  adia toda entrega com `composer_busy`. Medição em
+  [O psmux entende `capture-pane -e`](#o-psmux-entende-capture-pane--e).
 - **Buffer do psmux é da SESSÃO e ignora `-b`**: sem `-t` o comando fala com outra sessão,
   `show-buffer -b` devolve vazio com rc 0 e o `-F '#{buffer_name}'` não dá o nome real. Leia o
   mais recente com `-t`; no tmux, `-t` é recusado e o código de retorno decide.
@@ -685,3 +689,18 @@ Medido em 02/10/2026, Windows 11, app nativo 0.1.0.3981. O botão de atualizar d
 O nome livre para o exe anterior entrou em `b9650562`/`eaf66071`. Reabrir sem baixar quando o
 disco já tem a versão, apagar o `.new` na falha e a mesma regra de nome no instalador vieram
 depois. No Linux nada disso acontece: o sistema deixa substituir o arquivo de um executável em uso.
+
+## O psmux entende `capture-pane -e`
+
+(05/10/2026, DELPHI-02, psmux da instalação, Claude Code 2.1.289, Hangar da branch `hangar-server-parte1`.)
+Sessão `Crack` nova com terminal: a primeira mensagem ficou na fila e o `hangar-server.log` gravou 35
+`composer_busy` em 54 s, um por tentativa. O composer estava vazio. Mostrava só a sugestão
+esmaecida `❯ Try "fix typecheck errors"`. O escritor Rust lia a tela sem `-e` no Windows, então a
+sugestão contava como rascunho do dono; `C-u` não a apaga, e o envio era adiado para sempre.
+`capture-pane -p -e -t =Crack:0.0 -S -200` no mesmo pane devolveu SGR completo: a sugestão vem
+como `❯\u00a0ESC[0;2mTry "fix typecheck errors"ESC[0m` (NBSP depois do `❯`), e as réguas e a
+statusline vêm em truecolor `0;38;2;r;g;b`. O `unstyle` já trata os dois formatos.
+
+Efeito em cadeia: o backend reiniciou (troca do canal de atualização) no meio de uma tentativa.
+A entrega ficou incerta, e a trava de escrita segurou as duas mensagens seguintes com
+`terminal_write_barrier`, como manda a regra da entrega incerta.
