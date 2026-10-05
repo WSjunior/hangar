@@ -293,6 +293,13 @@ só aponta para cá); a medição que sustenta cada uma mora na entrada de mesmo
   (`reborn_binding`), e só conversa nova esvazia a fila. Ver
   [Continuar a mesma conversa noutra conta](#continuar-a-mesma-conversa-noutra-conta).
 
+- **Entrada terminal recusada sem escrita não espera calada.** O ator Rust conta a série de
+  adiamentos do escritor com `stage` (fora `question_open`, `not_ready`, `overlay`,
+  `input_unavailable`). A espera entre as tentativas dobra a partir do tique até 30 s; o log ganha
+  uma linha por série; passados 30 s, `view.input_stalled` leva o código, o Python mostra
+  `problema=terminal_input_*` e grava um `terminal.input_stalled` no diário. A fila continua
+  tentando. Ver [Entrada terminal parada sem aviso](#entrada-terminal-parada-sem-aviso).
+
 - **Transferência Claude → Codex não está aceita só porque a importação persistiu.** A prova
   precisa conferir os itens enviados pelo CLI após retomada, incluindo resultados completos.
   Na captura stdio 0.159.3, manter `tool_output_token_limit` da sessão conservou 144.000
@@ -2563,3 +2570,13 @@ dado" o tempo todo, embora a informação existisse.
 Medição (03/10/2026, sessão Claude com barra própria, Opus em `[1m]`): o transcript deu 539.351
 tokens contra 489k a 510k da barra minutos antes (a conversa crescendo entre uma e outra); no
 nativo os anéis passaram de "sem dado" para Contexto 54% e a conta 100% (semanal).
+
+## Entrada terminal parada sem aviso
+
+(05/10/2026, DELPHI-02, `hangar-server-parte1`.) A sugestão esmaecida lida como rascunho
+(`docs/decisoes/windows.md`, "O psmux entende `capture-pane -e`") gerou 35 `composer_busy` em
+54 s, uma linha `info` por tentativa, e o app mostrou "Na fila" sem motivo. O escritor devolve
+`Deferred` com `cleanup: not_needed`, e `finalize_terminal` só conta tentativa quando a limpeza
+foi provada: o teto de duas tentativas nunca chegava. A série agora espaça as tentativas e
+aparece na tela depois de 30 s, sem desistir da entrada: rascunho do dono continua sendo do dono.
+

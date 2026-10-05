@@ -152,13 +152,22 @@ def _cano_alive(meta) -> bool:
     return pid is not None and pid_vivo(int(pid))
 
 
+def _raise_site(exc):
+    """`arquivo:linha função` de onde a exceção nasceu: aponta a frase sem copiar a mensagem."""
+    tb, frame = exc.__traceback__, None
+    while tb is not None:
+        frame, tb = (tb.tb_frame.f_code, tb.tb_lineno), tb.tb_next
+    return f"{Path(frame[0].co_filename).name}:{frame[1]} {frame[0].co_name}" if frame else ""
+
+
 def failure_reason(exc: BaseException) -> dict:
-    """Tipo e motivo de uma falha do runtime para o diário. Só falhas do caminho Rust levam o
-    detalhe: lá a mensagem é código e frase fixa. As do Python podem embutir texto da sessão."""
+    """Tipo, motivo e ponto do `raise` de uma falha do runtime para o diário. Só falhas do caminho
+    Rust levam o detalhe: lá a mensagem é código e frase fixa. As do Python podem embutir texto da
+    sessão; o `raise_site` diz qual delas foi sem copiar a mensagem."""
     from_rust = getattr(exc, "_hangar_rust", False) or type(exc).__name__ in {"RustOpError", "RustCacheInvalid"}
     plain = from_rust or getattr(exc, "safe_detail", False) or isinstance(exc, (TimeoutError, ConnectionError))
     code = getattr(exc, "code", "") if from_rust else ""
-    return {"codigo": code or type(exc).__name__, "detalhe": str(exc)[:200] if plain else ""}
+    return {"codigo": code or type(exc).__name__, "detalhe": str(exc)[:200] if plain else "", "raise_site": _raise_site(exc)}
 
 
 # Erro do terminal que o próprio Rust resolve na manutenção (confirm/drain), sem reabrir.
@@ -173,6 +182,7 @@ _INITIALIZE_WAIT_S = 185.0   # teto do `initialize` no Rust (180 s) com folga
 # O Rust não chegou ao cano recém-lançado: o processo é morto e a falha conta no teto de subidas.
 _CONNECT_CODES = frozenset({"cano_connect", "cano_auth", "cano_timeout"})
 _RESYNC_WAIT_S = 5.0     # o canal de eventos oscilou: a vista volta pelo snapshot em instantes
+_ACTIVE_WAIT_S = 5.0     # gravação da fila Python em curso na passagem ao Rust: leva milissegundos
 # O ator sumiu do Rust (morreu ou nunca abriu nesta instância): a sessão reabre.
 _ACTOR_GONE_CODES = frozenset({"runtime_binding", "runtime_closed", "runtime_panic"})
 _BACKGROUND_KINDS = frozenset({"snapshot", "drain", "confirm", "queue"})
@@ -217,7 +227,7 @@ def _registration_failed(event, name, exc, *, rust_dead=False):
         _log.warning("abertura de %s interrompida pela queda do Rust (%s)", name, reason["codigo"])
         diag.registrar("runtime.reopen_interrupted", "aviso", sessao=name, etapa=event, **reason)
         return
-    _log.error("%s: sessão %s (%s)", event, name, reason["codigo"])
+    _log.error("%s: sessão %s (%s: %s) em %s", event, name, reason["codigo"], reason["detalhe"] or "-", reason["raise_site"] or "?")
     diag.registrar(event, "erro", sessao=name, **reason)
 
 
@@ -987,6 +997,25 @@ class RuntimeCoordinator:
         if self.loop is not None and self.loop.is_running():
             self.loop.call_soon_threadsafe(slot.changed.set)
 
+    def settle_before_queue(self, name):
+        """Fila síncrona (thread) de sessão Claude espera o desfecho do Rust ANTES do portão: com o
+        `slot.active` preso nessa espera, a passagem ao Rust, que espera o `active` zerar, nunca
+        acontece. Codex é sempre do Python; a escrita da reserva e a administração já passaram por ele."""
+        if self.mode != "pending" and not self._settling or _mode_bypass.get() or self.loop is None:
+            return
+        slot = self.slots.get(self.names.get(name, ""))
+        from app.runtime_terminal import _writer
+        # Dentro da barreira (renomear, fechar) quem fecha o modo espera a mesma barreira.
+        if slot is None or slot.binding.provider != "claude" or _writer.get() is not None or self.in_lifecycle(slot):
+            return
+        try:
+            if asyncio.get_running_loop() is self.loop:
+                return      # no próprio laço não há como esperar; o `queue_rpc` decide, como antes
+        except RuntimeError:
+            pass
+        from app.runtime_adapter import run_sync
+        run_sync(self.await_mode, self.loop)
+
     @contextmanager
     def queue_gate(self, name):
         if not self.managed_queue(name):
@@ -1610,10 +1639,21 @@ class RuntimeCoordinator:
         if not headless:
             from app.runtime_terminal import validate_binding
             await asyncio.to_thread(validate_binding, slot.binding.descriptor())
-        with slot.guard:
-            if slot.active or slot.phase != Phase.Python:
+        deadline = self.loop.time() + _ACTIVE_WAIT_S
+        while True:
+            with slot.guard:
+                if slot.phase != Phase.Python:
+                    raise RuntimeError("sessão fora da posse Python")
+                if not slot.active:
+                    lease, slot.lease, slot.store = slot.lease, None, None
+                    break
+            # Quem está na fila Python sai em instantes; recusar aqui deixava a sessão no Python.
+            if self.loop.time() >= deadline:
                 raise RuntimeError("fila da sessão em uso no Python")
-            lease, slot.lease, slot.store = slot.lease, None, None
+            try:
+                await asyncio.wait_for(self._wait_active(slot), deadline - self.loop.time())
+            except TimeoutError:
+                pass
         if lease is not None:
             lease.close()
         try:
