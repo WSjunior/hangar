@@ -568,9 +568,20 @@ import { cachePrazo } from '../lib/cachePrazo';
     textareaEl?.focus();
   }
 
+  // Some sozinho: o aviso não pede ação e, preso, parecia que a sessão continuava travada.
+  let semCicloTimer: ReturnType<typeof setTimeout> | undefined;
+  function avisarSemCiclo() {
+    const texto = m.permissao_sem_ciclo();
+    permError = texto;
+    clearTimeout(semCicloTimer);
+    semCicloTimer = setTimeout(() => { if (permError === texto) permError = null; }, 5000);
+  }
+  onDestroy(() => clearTimeout(semCicloTimer));
+
   async function ciclarPermissao() {
     if (permCarregando) return;
-    if (!permSondavel) { permError = m.permissao_sem_ciclo(); return; }
+    // Sessão sem terminal responde `sondavel:false` COM a lista: só lista vazia é o dontAsk sem volta.
+    if (!permSondavel && permModes.length === 0) { avisarSemCiclo(); return; }
     // Mesmo token de sequência e mesma amarra de sessão do poll (permSeq / sn): a resposta de
     // uma sessão que saiu da tela não pode escrever o ciclo da que entrou, nem o atalho aplicar
     // na sessão atual um modo calculado pelo ciclo da anterior.
@@ -595,7 +606,7 @@ import { cachePrazo } from '../lib/cachePrazo';
         if (seq === permSeq) permCarregando = false;
       }
     }
-    if (modos.length === 0) return;
+    if (modos.length === 0) { if (!permSondavel) avisarSemCiclo(); return; }
     const i = permCurrent ? modos.indexOf(permCurrent) : -1;
     const alvo = modos[(i + 1) % modos.length];
     if (alvo === permCurrent) return;
