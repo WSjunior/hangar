@@ -9,10 +9,14 @@ from app import api, runtime_coordinator, sse
 class Owner:
     instance = "runtime"
 
-    def __init__(self, disposition="accepted"):
+    def __init__(self, disposition="accepted", terminal=True):
         self.calls = []
         self.disposition = disposition
         self.loop = None
+        self.terminal = terminal
+
+    def slot(self, name):
+        return SimpleNamespace(binding=SimpleNamespace(meta={"terminal": {}} if self.terminal else {}))
 
     def managed_runtime(self, name):
         return name == "session"
@@ -53,13 +57,24 @@ def test_all_send_producers_use_one_operation(monkeypatch, provider, path):
     assert owner.calls[0][1]
 
 
-def test_unknown_not_marked_unsent(monkeypatch):
+def test_unknown_send_waits_in_queue_without_error_or_retry(monkeypatch):
+    # Entrega sem prova não é erro na tela (o dono reenviaria e duplicaria): a fila confirma pelo
+    # transcript, uma vez.
     owner = Owner("unknown")
     monkeypatch.setattr(runtime_coordinator, "_current", owner)
     result = asyncio.run(api._send_managed("session", "Olá", "claude", track_entry=True))
-    assert not result["ok"]
+    assert result["ok"] and not result["delivered"] and result["uncertain"] and result["error"] is None
     assert result["entry_id"] == owner.calls[0][1]
     assert len(owner.calls) == 1
+
+
+@pytest.mark.parametrize("text,terminal", [("/model", True), ("Olá", False)])
+def test_unknown_without_transcript_proof_stays_an_error(monkeypatch, text, terminal):
+    # Comando `/` não tem linha na fila; sessão sem terminal não reconcilia pelo transcript.
+    owner = Owner("unknown", terminal=terminal)
+    monkeypatch.setattr(runtime_coordinator, "_current", owner)
+    result = asyncio.run(api._send_managed("session", text, "claude"))
+    assert not result["ok"] and len(owner.calls) == 1
 
 
 def test_send_without_rust_answer_is_uncertain_not_failed(monkeypatch):

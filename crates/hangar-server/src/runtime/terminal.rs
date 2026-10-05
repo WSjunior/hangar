@@ -86,7 +86,10 @@ impl Services {
 }
 impl TerminalServices for Services {
     fn facts<'a>(&'a self,binding:&'a TerminalBinding)->ServiceFuture<'a,InputFacts> {Box::pin(async move {
-        let value=self.call("terminal_facts",RequestId::String(self.root.clone()),json!({"binding":binding,"operation_id":self.root,"text":self.text})).await.map_err(|_|ServiceError("terminal_facts"))?;
+        // Leitura sem efeito: fora do diário, que regravaria o estado inteiro com fsync três vezes.
+        let phase=format!("terminal-facts:{}:{}:{}",self.target.generation,self.attempt,self.sequence.fetch_add(1,Ordering::Relaxed));
+        let value=self.policy.run_for(&self.target.key,self.target.generation,"terminal_facts",&RequestId::String(self.root.clone()),
+            json!({"binding":binding,"operation_id":self.root,"text":self.text}),&phase).await.map_err(|_|ServiceError("terminal_facts"))?;
         serde_json::from_value(value).map_err(|_|ServiceError("terminal_facts_shape"))
     })}
     fn publish<'a>(&'a self,binding:&'a TerminalBinding,request:PluginRequest)->ServiceFuture<'a,PluginReply> {Box::pin(async move {
@@ -98,6 +101,9 @@ impl TerminalServices for Services {
 struct Executor {
     target:TerminalTarget,queue:Arc<QueueActor>,policy:PolicyClient,options:TerminalOptions,
     events:broadcast::Sender<RuntimeEvent>,revision:Arc<AtomicU64>,sequence:Arc<AtomicU64>,receipt:ReceiptIndex,deliverable:bool,last_error:Option<String>,
+    /// Entradas com linha na fila cuja entrega ficou incerta nesta vida do ator: o transcript ainda
+    /// pode prová-las. Incerteza sem linha (tecla, seleção) não tem prova e só sai na reabertura.
+    uncertain:Vec<String>,unprovable:bool,
     /// Teclado emprestado ao Python (administração que digita no pane): id, prazo e o pedido que o abriu.
     loan:Option<(String,tokio::time::Instant,String)>,
 }
@@ -111,7 +117,7 @@ impl TerminalActor {
         let sequence=Arc::new(AtomicU64::new(queue.initial_state().next_seq.max(previous.max(queue.initial_state().operations.len() as u64).saturating_add(1))));
         let receipt=ReceiptIndex::new("claude",&target.binding.conversation);
         let (sender,receiver)=mpsc::channel(64); let closed=Arc::new(AtomicBool::new(false));
-        let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None,loan:None};
+        let executor=Executor {target,queue:Arc::new(queue),policy,options,events,revision,sequence,receipt,deliverable:false,last_error:None,uncertain:vec![],unprovable:false,loan:None};
         let task=tokio::spawn(executor.run(receiver,closed.clone()));
         TerminalHandle {sender,closed,task:Arc::new(Mutex::new(Some(task))),stopped:Arc::new(Mutex::new(None))}
     }
@@ -223,7 +229,8 @@ impl Executor {
                     },
                     None=>{let queue=Arc::try_unwrap(self.queue).map_err(|_|error("terminal_lease_inflight"))?;return queue.shutdown().await.map_err(|_|error("queue_stop"));}
                 },
-                _=timer.tick(),if !closed.load(Ordering::Acquire) && self.last_error.is_none()=>{
+                _=timer.tick(),if !closed.load(Ordering::Acquire) && (self.last_error.is_none() || self.reconciling())=>{
+                    if self.last_error.is_some() {self.reconcile_uncertain().await?;continue;}
                     let result=async {self.confirm_rows().await?;self.drain_once(None).await?;Ok::<_,RuntimeError>(())}.await;
                     if let Err(failure)=result {self.enter_error(failure).await?;}
                 }
@@ -331,8 +338,9 @@ impl Executor {
         if result.disposition==Disposition::Unknown {
             tracing::warn!(key=%self.target.key,session=%self.target.name,code=%result.payload["code"].as_str().unwrap_or("plugin_control_uncertain"),
                 reason="a entrega não foi comprovada",stage=%result.payload["stage"].as_str().unwrap_or("plugin"),"entrega terminal incerta");
+            if row_id.is_some() {self.uncertain.push(id.into());} else {self.unprovable=true;}
             self.enter_error(error("terminal_delivery_unknown")).await?;
-        }else{self.last_error=None; self.publish().await?;}
+        }else{self.last_error=None; self.uncertain.clear(); self.unprovable=false; self.publish().await?;}
         Ok(result)
     }
     async fn drain_once(&mut self,entry:Option<String>)->Result<Value,RuntimeError> {
@@ -366,6 +374,19 @@ impl Executor {
             }
         }
         if count>0{self.publish().await?;}Ok(json!({"confirmed":count}))
+    }
+    fn reconciling(&self)->bool {
+        self.last_error.as_deref()==Some("terminal_delivery_unknown") && !self.unprovable && !self.uncertain.is_empty()
+    }
+    /// Só lê o transcript: a entrega incerta que aparece lá é confirmada uma vez e o erro sai; sem
+    /// prova, o erro fica e nada é digitado.
+    async fn reconcile_uncertain(&mut self)->Result<(),RuntimeError> {
+        if self.confirm_rows().await.is_err() {return Ok(());}
+        let Ok(state)=self.queue.snapshot().await else {return Ok(());};
+        if !self.uncertain.iter().all(|id|state.operations.get(id).is_some_and(|op|op.status==Status::Confirmed)) {return Ok(());}
+        tracing::info!(key=%self.target.key,session=%self.target.name,code="terminal_delivery_proved","entrega incerta comprovada pelo transcript");
+        self.uncertain.clear();
+        self.clear_maintenance_error("terminal_delivery_unknown").await
     }
     async fn native_receipt(&self,id:&str,receipt_status:Status,result:Value)->Result<Value,RuntimeError> {
         let native_status=result["payload"]["native_status"].as_str().ok_or_else(||error("native_receipt"))?;

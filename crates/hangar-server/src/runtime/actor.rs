@@ -9,6 +9,11 @@ use tokio::task::{JoinHandle,JoinSet};
 
 enum Core { Claude(ClaudeEngine),Codex(CodexEngine) }
 
+/// Teto da política no Python. A publicação no terminal espera o aviso do plugin, que só sai depois
+/// dos hooks do UserPromptSubmit: o teto dela fica acima da espera do Python (`PUBLICA_S`).
+const POLICY_TIMEOUT:Duration=Duration::from_secs(15);
+const PUBLISH_POLICY_TIMEOUT:Duration=Duration::from_secs(40);
+
 #[derive(Clone)]
 pub struct PolicyClient {
     upstream:std::net::SocketAddr,
@@ -31,7 +36,8 @@ impl PolicyClient {
             .header("content-type","application/json").body(axum::body::Body::from(body.to_string()))
             .map_err(|_|failure("policy_request"))?;
         // Detalhe só de forma: status, tipo de erro, posição ou nome da exceção; nunca o corpo.
-        let result = tokio::time::timeout(Duration::from_secs(15),async {
+        let limit = if kind == "terminal_publish" { PUBLISH_POLICY_TIMEOUT } else { POLICY_TIMEOUT };
+        let result = tokio::time::timeout(limit,async {
             let response = self.http.request(request).await
                 .map_err(|error|(failure("policy_transport"),format!("connect={}",error.is_connect())))?;
             if !response.status().is_success() { return Err((failure("policy_refused"),format!("status={}",response.status().as_u16()))); }

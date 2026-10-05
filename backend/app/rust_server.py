@@ -34,6 +34,7 @@ HEALTH_PATH = "/__hangar_server/health"
 # `protocol` da saúde (hangar_server::INTERNAL_PROTOCOL); outro número = o Python atende sozinho.
 RUST_SERVER_PROTOCOL = 20
 START_TIMEOUT = 10.0
+OP_TIMEOUT_S = 75
 CRASH_WINDOW = 60.0
 MAX_CRASHES = 3
 _POLL = 0.25
@@ -166,8 +167,8 @@ class RuntimeTransport:
         task.add_done_callback(finished)
         return await asyncio.shield(task)
 
-    def _connection(self):
-        connection = http.client.HTTPConnection("127.0.0.1", self._port, timeout=35)
+    def _connection(self, timeout=35):
+        connection = http.client.HTTPConnection("127.0.0.1", self._port, timeout=timeout)
         with self._guard:
             if self._closed:
                 raise RuntimeError("transporte privado encerrado")
@@ -184,7 +185,9 @@ class RuntimeTransport:
                 "key": descriptor["key"], "generation": descriptor["generation"],
                 "operation_id": operation_id, "clock": clock, "command": command}
         def send():
-            connection = self._connection()
+            # Uma entrada no terminal soma os tetos das políticas no Rust: fatos (15 s) e
+            # publicação no plugin (40 s), mais os passos da fila.
+            connection = self._connection(timeout=OP_TIMEOUT_S)
             try:
                 connection.request("POST", "/runtime/op", body=json.dumps(body).encode(), headers=self._headers)
                 response = connection.getresponse()
@@ -371,10 +374,20 @@ class Supervisor:
                     diag.registrar("hangar_server.de_pe")
                 if state == "up":
                     costs_sources.set_served_by_rust(True)
+                record_failed = False
                 while state == "up" and self.proc.poll() is None:
                     await asyncio.sleep(_POLL)
                     from app.runtime_process import refresh_members
-                    await asyncio.to_thread(refresh_members, self.proc)
+                    try:
+                        await asyncio.to_thread(refresh_members, self.proc)
+                        record_failed = False
+                    except OSError as e:
+                        # Disco cheio é transitório e o filho segue vivo: desistir do Rust por isso
+                        # entregaria a porta ao Python até o próximo restart. Grava de novo na volta seguinte.
+                        if not record_failed:
+                            _log.warning("registro de contenção do hangar-server não gravou: %s", e)
+                            diag.registrar("hangar_server.registro_falhou", "aviso", **diag.erro_campos(e))
+                        record_failed = True
                 from app import workspace_bridge
                 workspace_bridge.configure(None, None)
                 costs_sources.set_served_by_rust(False)

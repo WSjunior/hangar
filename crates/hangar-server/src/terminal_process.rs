@@ -11,8 +11,11 @@ pub(crate) async fn finish(tree:&mut impl OwnedTree) {finish_after(tree,Duration
 // Sinal aceito sem a árvore acabar (estado D) não libera a posse; só passa a ficar visível.
 async fn finish_after(tree:&mut impl OwnedTree,stuck_after:Duration) {
     let started=tokio::time::Instant::now();let mut warned=false;
+    // No Linux a conferência varre o /proc inteiro: o worker passa as outras tarefas adiante antes.
+    let multi=tokio::runtime::Handle::current().runtime_flavor()==tokio::runtime::RuntimeFlavor::MultiThread;
     loop {
-        match tree.active() {
+        let active=if multi {tokio::task::block_in_place(||tree.active())} else {tree.active()};
+        match active {
             Ok(false)=>return,
             Ok(true)=>if let Err(error)=tree.terminate(){report(&error);},
             Err(error)=>report(&error),

@@ -4477,10 +4477,15 @@ async def _send_managed(name: str, text: str, provider: str, *, track_entry: boo
             command = {"kind":"submit", "text":text}
         reply = await coordinator.op(name, command, operation_id)
         disposition = reply.get("disposition")
-        if disposition == "unknown" and (reply.get("payload") or {}).get("transport_lost") is True:
-            # O Rust caiu no meio: a entrada pode estar na fila durável, que decide; a bolha espera.
+        queued = command["kind"] == "submit" and not text.lstrip().startswith("/")
+        # Com terminal, a entrega incerta é confirmada depois pelo transcript (uma vez, sem reenvio).
+        proved_later = (disposition == "unknown" and queued
+                        and isinstance(coordinator.slot(name).binding.meta.get("terminal"), dict))
+        if disposition == "unknown" and (proved_later or (reply.get("payload") or {}).get("transport_lost") is True):
+            # Entrega sem prova (aviso do plugin atrasado, ou o Rust caiu no meio): a mensagem está na
+            # fila durável, que só a confirma pelo transcript e nunca a reenvia; a bolha espera.
             return {"ok":True, "error":None, "delivered":False, "uncertain":True,
-                **({"entry_id":operation_id} if track_entry and command["kind"] == "submit" and not text.lstrip().startswith("/") else {})}
+                **({"entry_id":operation_id} if track_entry and queued else {})}
         if disposition not in {"accepted", "deferred"}:
             raise RuntimeError("resultado incerto; entrada conservada sem reenvio" if disposition == "unknown" else "entrada recusada pelo runtime")
         return {"ok":True, "error":None, "delivered":disposition == "accepted",

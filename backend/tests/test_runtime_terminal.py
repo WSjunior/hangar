@@ -101,7 +101,7 @@ def test_plugin_old_capability_refuses_before_enqueue(monkeypatch):
 
 @pytest.mark.parametrize('ack', ['old', 'uncorrelated', 'wrong_generation', 'wrong_conversation', 'matching'])
 def test_plugin_receipt_correlates_publication_generation_conversation(monkeypatch, ack):
-    monkeypatch.setattr(pb, 'CONFIRMA_S', .06)
+    monkeypatch.setattr(pb, 'PUBLICA_S', .06)
     monkeypatch.setattr(pb, 'tracked_session_id', lambda name:'sid')
     async def flow():
         pb._loop = asyncio.get_running_loop()
