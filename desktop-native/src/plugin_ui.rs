@@ -111,7 +111,18 @@ pub fn keep_hovered(hovered: &mut HashSet<String>, places: &[(&str, &Value)]) {
 
 /// Pinta o filho depois do resto da árvore, recortado onde ele está: é o `position: absolute` dos mods, que no terminal
 /// fica por cima dos vizinhos sem sair do lugar. O gpui não tem z-index, e o `deferred` dele pinta sem recorte.
-struct OnTop(Option<AnyElement>);
+///
+/// O recorte vai pelo `Clip`, que embrulha o filho: o `defer_draw` só aplica a máscara na pintura, e o prepaint adiado
+/// roda sem máscara, então o hitbox do trecho cortado pegaria hover e clique fora do lugar (sobre o compositor ou o
+/// cabeçalho do painel). A máscara é a do lugar, lida no prepaint do `OnTop` e passada ao `Clip` pela célula.
+struct OnTop { clip: Option<AnyElement>, mask: Rc<std::cell::Cell<Option<ContentMask<Pixels>>>> }
+
+impl OnTop {
+    fn new(child: AnyElement) -> OnTop {
+        let mask = Rc::new(std::cell::Cell::new(None));
+        OnTop { clip: Some(Clip { child, mask: mask.clone() }.into_any_element()), mask }
+    }
+}
 
 impl IntoElement for OnTop {
     type Element = Self;
@@ -127,18 +138,52 @@ impl Element for OnTop {
 
     fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App)
         -> (LayoutId, ()) {
-        (self.0.as_mut().expect("filho antes do prepaint").request_layout(window, cx), ())
+        (self.clip.as_mut().expect("filho antes do prepaint").request_layout(window, cx), ())
     }
 
     fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (),
         window: &mut Window, _: &mut App) {
-        let child = self.0.take().expect("prepaint uma vez só");
+        let clip = self.clip.take().expect("prepaint uma vez só");
         let (offset, mask) = (window.element_offset(), window.content_mask());
-        window.defer_draw(child, offset, 1, Some(mask));
+        self.mask.set(Some(mask));
+        window.defer_draw(clip, offset, 1, Some(mask));
     }
 
     fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), _: &mut (),
         _: &mut Window, _: &mut App) {}
+}
+
+/// Roda o prepaint e a pintura do filho dentro da máscara do lugar: o hitbox nasce recortado, como o desenho.
+struct Clip { child: AnyElement, mask: Rc<std::cell::Cell<Option<ContentMask<Pixels>>>> }
+
+impl IntoElement for Clip {
+    type Element = Self;
+    fn into_element(self) -> Self { self }
+}
+
+impl Element for Clip {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> { None }
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> { None }
+
+    fn request_layout(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, window: &mut Window, cx: &mut App)
+        -> (LayoutId, ()) {
+        (self.child.request_layout(window, cx), ())
+    }
+
+    fn prepaint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (),
+        window: &mut Window, cx: &mut App) {
+        let child = &mut self.child;
+        window.with_content_mask(self.mask.get(), |window| { child.prepaint(window, cx); });
+    }
+
+    fn paint(&mut self, _: Option<&GlobalElementId>, _: Option<&InspectorElementId>, _: Bounds<Pixels>, _: &mut (), _: &mut (),
+        window: &mut Window, cx: &mut App) {
+        let child = &mut self.child;
+        window.with_content_mask(self.mask.get(), |window| child.paint(window, cx));
+    }
 }
 
 pub fn button_key(v: &Value) -> Option<String> {
@@ -422,7 +467,9 @@ fn boxed(v: &Value, p: &Value, c: &Ctx, at: &Spot, lit: bool) -> AnyElement {
     // `absolute` sai do fluxo; deslocamento em células, negativo permitido.
     let absolute = p["position"] == "absolute";
     if absolute {
-        el = el.absolute();
+        // Por cima, o cartão fica com o ponteiro, como o `z-index` do web: hover e clique não chegam ao que está embaixo
+        // (o escopo dono segue aceso pelo id do cartão). A rolagem passa.
+        el = el.absolute().block_mouse_except_scroll();
         if let Some(n) = lines(&p["top"]) { el = el.top(px(n)); }
         if let Some(n) = lines(&p["bottom"]) { el = el.bottom(px(n)); }
         if let Some(n) = cols(&p["left"]) { el = el.left(px(n)); }
@@ -445,7 +492,7 @@ fn boxed(v: &Value, p: &Value, c: &Ctx, at: &Spot, lit: bool) -> AnyElement {
             .on_hover(move |on, window, cx| hover(&id, *on, window, cx)).into_any_element(),
         None => el.into_any_element(),
     };
-    if absolute { OnTop(Some(el)).into_any_element() } else { el }
+    if absolute { OnTop::new(el).into_any_element() } else { el }
 }
 
 /// Props do `Box` que o `boxed` desenha e o molde do Raster não reproduz: com qualquer uma, a
