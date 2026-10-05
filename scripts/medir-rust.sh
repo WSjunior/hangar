@@ -77,12 +77,36 @@ for rota in "branches" "git/files" "git/log?n=50" "files/list?so_modificados=fal
 done
 t=$(par pedido_ms /api/fs/roots) && linha "fs/roots" arquivos "$t"
 
-echo "— Telas de Custos e Uso (parte 3)"
-t=$(par pedido_ms /api/costs) && linha custos - "$t"
+echo "— Lista de worktrees (Rust desde feat/worktrees-rust; o Python ainda tem a rota antiga)"
+t=$(par pedido_ms /api/worktrees) && linha worktrees lista "$t" || echo "worktrees: não respondeu 200, pulado"
+
+# A tela inicial pede ?view=summary; o Python ignora o parâmetro e manda o relatório inteiro, que
+# era o que a tela recebia antes. Por isso a coluna Python desta linha é o "antes".
+echo "— Custos e Uso (parte 3)"
+aquecer() {  # $1 = caminho; o lado que não é dono responde 202 até montar o próprio índice
+  local alvo h c
+  for h in "$RUST" "$PY"; do
+    for _ in $(seq 1 120); do
+      c=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $token" "http://$h$1")
+      [ "$c" = 200 ] && break
+      sleep 1
+    done
+    [ "$c" = 200 ] || echo "$1 em $h ainda respondia $c depois de 120 s" >&2
+  done
+}
+aquecer "/api/costs?period=all"; aquecer /api/uso
+t=$(par pedido_ms "/api/costs?period=all&view=summary") && linha "custos: tela inicial" resumo "$t"
+t=$(par pedido_ms "/api/costs?period=all") && linha "custos: tela Custos" inteiro "$t"
 t=$(par pedido_ms /api/uso) && linha uso - "$t"
+for alvo in "/api/costs?period=all&view=summary" "/api/costs?period=all"; do
+  r=$(curl -s -H "Authorization: Bearer $token" -H 'Accept-Encoding: gzip' -o /dev/null -w '%{size_download}' "http://$RUST$alvo")
+  p=$(curl -s -H "Authorization: Bearer $token" -H 'Accept-Encoding: gzip' -o /dev/null -w '%{size_download}' "http://$PY$alvo")
+  printf '%-34s %-16s %6s KB %6s KB  (baixado, comprimido)\n' "${alvo#/api/}" tamanho "$((r / 1024))" "$((p / 1024))"
+done
 
 echo
 echo "Média de 5 medidas depois de 1 de aquecimento, Rust e Python alternados. Menos é melhor."
 echo "Ganho perto de 1x = o Rust ainda repassa essa parte ao Python."
-echo "Fora da medição: envio de mensagem, fila e controle das sessões (2B, 2C, 2D) e as ações de Git"
-echo "que escrevem — medir exigiria mandar mensagem ou mudar o repositório de verdade."
+echo "Fora da medição: envio de mensagem, fila e controle das sessões (2B, 2C, 2D, dono único), as"
+echo "ações de Git e de worktree que escrevem e a reconstrução do índice de custos — medir exigiria"
+echo "mandar mensagem, mudar o repositório ou apagar o índice de verdade."
