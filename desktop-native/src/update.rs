@@ -70,19 +70,30 @@ struct Manifest { version: String, files: HashMap<String, String> }
 #[derive(Clone)]
 struct Offer { version: String, url: String, sha256: String, channel: String }
 
-async fn check(client: &reqwest::Client, channel: &str) -> Result<Option<Offer>, String> {
+/// Por que a procura não achou o que oferecer: a rede falhou, ou a máquina respondeu e a branch não tem o app.
+#[derive(Clone, Debug, PartialEq)]
+enum CheckFail { Network(String), NoRelease(String) }
+
+impl std::fmt::Display for CheckFail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self { CheckFail::Network(text) | CheckFail::NoRelease(text) => f.write_str(text) }
+    }
+}
+
+async fn check(client: &reqwest::Client, channel: &str) -> Result<Option<Offer>, CheckFail> {
+    let network = |e: reqwest::Error| CheckFail::Network(e.to_string());
+    let missing = || if channel == "main" { Ok(None) }
+        else { Err(CheckFail::NoRelease(tr("app_update_channel_missing").replace("{branch}", channel))) };
     let Some(name) = asset() else { return Ok(None) };
     let base = base(channel);
-    let response = client.get(format!("{base}/native-latest.json")).send().await.map_err(|e| e.to_string())?;
+    let response = client.get(format!("{base}/native-latest.json")).send().await.map_err(network)?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         // Sem a release da main: nada a oferecer. Sem a da branch: avisa e fica, nunca oferece a da main no lugar.
-        return if channel == "main" { Ok(None) } else { Err(tr("app_update_channel_missing").replace("{branch}", channel)) };
+        return missing();
     }
-    let manifest: Manifest = response.error_for_status().map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
-    let Some(sha256) = manifest.files.get(name) else {
-        // Branch cujo build desta plataforma falhou: avisa como a release ausente, em vez de dizer "em dia".
-        return if channel == "main" { Ok(None) } else { Err(tr("app_update_channel_missing").replace("{branch}", channel)) };
-    };
+    let manifest: Manifest = response.error_for_status().map_err(network)?.json().await.map_err(network)?;
+    // Branch cujo build desta plataforma falhou: avisa como a release ausente, em vez de dizer "em dia".
+    let Some(sha256) = manifest.files.get(name) else { return missing() };
     Ok(offered(&manifest.version, channel, CURRENT, BUILT_CHANNEL).then(|| Offer { version: manifest.version,
         url: format!("{base}/{name}"), sha256: sha256.to_lowercase(), channel: channel.to_owned() }))
 }
@@ -350,7 +361,7 @@ pub struct Updater {
     run: Run,
     /// Procura do app em andamento e o desfecho da última, para a página Sobre.
     checking: bool,
-    checked: Option<Result<(), String>>,
+    checked: Option<Result<(), CheckFail>>,
     /// Branch da última procura que terminou: o canal do servidor mudar depois dela pede outra.
     checked_channel: Option<String>,
     /// Último `pre_voo.alvo` lido do servidor desta máquina: leitura que falha não muda o canal.
@@ -359,7 +370,7 @@ pub struct Updater {
 }
 
 /// O que a página Sobre mostra na linha do app.
-pub enum AppCheck { Never, Checking, UpToDate, Available(String), Failed(String) }
+pub enum AppCheck { Never, Checking, UpToDate, Available(String), Failed(String), NoRelease(String) }
 
 pub struct Handle(pub Entity<Updater>);
 impl Global for Handle {}
@@ -433,7 +444,7 @@ impl Updater {
         let (client, channel) = (self.client.clone(), self.channel());
         let task = { let channel = channel.clone(); self.runtime.spawn(async move { check(&client, &channel).await }) };
         cx.spawn(async move |this, cx| {
-            let result = task.await.unwrap_or_else(|e| Err(e.to_string()));
+            let result = task.await.unwrap_or_else(|e| Err(CheckFail::Network(e.to_string())));
             let _ = this.update(cx, |this, cx| {
                 this.checking = false;
                 // O canal mudou durante a procura: a resposta é de outra release.
@@ -463,7 +474,8 @@ impl Updater {
             (Some(offer), false, _) => AppCheck::Available(offer.version.clone()),
             (_, true, _) => AppCheck::Checking,
             (None, _, Some(Ok(()))) => AppCheck::UpToDate,
-            (None, _, Some(Err(error))) => AppCheck::Failed(error.clone()),
+            (None, _, Some(Err(CheckFail::Network(error)))) => AppCheck::Failed(error.clone()),
+            (None, _, Some(Err(CheckFail::NoRelease(text)))) => AppCheck::NoRelease(text.clone()),
             (None, _, None) => AppCheck::Never,
         }
     }
