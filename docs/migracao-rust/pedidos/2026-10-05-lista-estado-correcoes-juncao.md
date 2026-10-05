@@ -35,4 +35,17 @@ Divisão por arquivo, para um escritor por arquivo. Caminhos em `crates/hangar-s
 
 - Itens 2 e 13, antes de qualquer resultado do teste isolado (já pedido).
 
+## Rust: desempenho e correção, médios e baixo (da coordenação)
+
+Numeração da coordenação (1–6 são os ALTOS acima).
+
+- **lista-tdesc:** 9 e 10 (`procs.rs` sysinfo atualiza `cmd`/`environ` de todos os processos, e
+  pid ausente refaz o retrato inteiro); 11 (`links.rs` assume `/` como separador no Windows); 12 em
+  `links.rs` (`contains` ingênuo → `memchr::memmem`); baixo: `env_var` relê o `environ` 5–8× por
+  tique.
+- **lista-tfatos:** 7 (`mem::take` dos hooks: duas produções juntas releem tudo); 8 (travas);
+  13 (`Snapshot` com `ProduceFacts::default` alterna a chave do hash com o hub); 14 em
+  `context.rs` (`tail_lines` com `to_vec`); 12 se houver o mesmo `contains` em arquivo seu;
+  15 (`UNKNOWN_STATUSES` sem teto).
+
 Ao terminar, cada sessão manda a `lista-org` o hash, o que mudou por item e as medidas.
