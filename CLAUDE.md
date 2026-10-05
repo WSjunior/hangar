@@ -409,9 +409,12 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   Ele atende sozinho só `/history` e `/events` de Claude/Codex com o token do dono; o resto,
   convidado incluído, é repassado com `X-Forwarded-For`. 8766 e 8768 ficam no Python. Sem binário
   (`CP_RUST_SERVER_BIN`, `crates/target/release`, `~/.hangar/bin`), com `CP_RUST_SERVER=0`, com
-  `protocol` da saúde diferente de `RUST_SERVER_PROTOCOL` ou com 3 quedas em 60 s, um segundo
-  `uvicorn.Server` com `lifespan="off"` assume a porta: nunca um segundo lifespan. O segredo
-  interno nunca entra no `os.environ`. Formato de `ChatEvent`, ids de evento e contrato interno
+  `protocol` da saúde diferente de `RUST_SERVER_PROTOCOL`, sem endereço privado válido ou com 3
+  quedas em 60 s, um segundo `uvicorn.Server` com `lifespan="off"` assume a porta: nunca um segundo
+  lifespan. O processo tem um modo só (`pending`/`rust`/`python`): queda 1–2 deixa as sessões
+  Claude sem dono por segundos (`pending`, até 30 s) e o Rust novo as reabre; só a desistência as
+  passa ao Python, cada uma uma vez. O segredo interno nunca entra no `os.environ`. Formato de
+  `ChatEvent`, ids de evento e contrato interno
   mudam nos dois lados no mesmo commit. Mexeu no contrato interno (rotas `/internal`, eventos do
   `side-events`, variáveis do filho): suba `RUST_SERVER_PROTOCOL` (Python) e `INTERNAL_PROTOCOL`
   (Rust) juntos. O `versao` do snapshot do `hangar-cano` acompanha o `VERSAO` do `cano.py`.
@@ -421,10 +424,11 @@ criação de sessão sob escopo do systemd: **leia "Regras vigentes" de `docs/de
   Lease pertence ao produtor Claude que consome a captura, não ao aparelho. Codex nativo não
   abre observador sem consumidor. Uma captura canônica por rodada, sem grade auxiliar; o estado
   temporal fica no Python, sem segundo HTTP. Captura/análise conservam provider,
-  vínculo, época e geração; `/clear` ou troca do filho descartam leituras antigas. Erro usa a
-  captura/reducer Python com a mesma memória e os mesmos fatos; Windows fica nesse caminho.
+  vínculo, época e geração; `/clear` ou troca do filho descartam leituras antigas. Erro vira
+  problema visível e a rodada seguinte pergunta ao Rust; Windows e ponte desligada usam a
+  captura Python.
   Codex conserva estado e prévia nativos; sidecar Claude vazio continua sendo uma resposta.
-  Evidência isolada em [plataforma.md](docs/decisoes/plataforma.md#observação-terminal-rust-com-reserva-python).
+  Evidência isolada em [plataforma.md](docs/decisoes/plataforma.md#observação-terminal-rust-erro-visível-sem-captura-python).
 
 ## tmux + Claude Code truecolor
 

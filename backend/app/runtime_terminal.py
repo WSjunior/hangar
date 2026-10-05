@@ -18,6 +18,18 @@ from app.runtime_coordinator import Binding, Phase, WriterLease, _clock
 _writer = contextvars.ContextVar('runtime_terminal_writer', default=None)
 
 
+# Teto do teclado emprestado pelo Rust a uma administração (troca de modelo/motor, /btw, modo).
+_LOAN_S = 60
+# Folga sobre o prazo do Rust: o Python para de digitar antes de o Rust retomar o pane.
+_LOAN_MARGIN_S = 1
+
+
+class KeyboardLoanExpired(RuntimeError):
+    """O prazo do teclado emprestado venceu: o Rust retomou o pane e a operação do Python falha."""
+    code = 'keyboard_loan_expired'
+    safe_detail = True
+
+
 class TerminalControlError(RuntimeError):
     def __init__(self, control, disposition, code):
         self.control, self.disposition, self.code = control, disposition, code
@@ -141,13 +153,18 @@ def _collect(name):
 
 def resolve_binding(name, previous=None):
     from app.pqueue import _queue_dir
-    facts = _collect(name)
+    import psutil
+    try:
+        facts = _collect(name)
+    except psutil.Error:
+        return None     # pane, agente ou servidor tmux saiu no meio da leitura: não há vida a provar
     if facts is None:
         return None
     fingerprint = hashlib.sha256(json.dumps([facts['namespace'], facts['pane'].split(':')[-1],
         facts['created'], facts.get('pane_birth')], ensure_ascii=False).encode()).hexdigest()
     same = previous is not None and (previous.meta.get('fingerprint') == fingerprint
         or previous.meta.get('pending_terminal') and previous.meta['pending_terminal'] == facts.get('session_proof')
+            and previous.meta.get('session_id') in (None, facts['session_id'])
         or previous.headless and previous.meta.get('session_id') == facts['session_id'])
     key = previous.key if same else 'terminal_' + fingerprint
     directory = _queue_dir()
@@ -227,6 +244,17 @@ def writer(coordinator, descriptor):
         _writer.reset(token)
 
 
+@contextmanager
+def borrowed(coordinator, descriptor, deadline):
+    """Escrita do Python no pane de uma sessão do Rust, durante o teclado emprestado."""
+    token = _writer.set((coordinator, copy.deepcopy(descriptor), deadline))
+    try:
+        assert_writer(descriptor['name'])
+        yield
+    finally:
+        _writer.reset(token)
+
+
 def assert_writer(name):
     from app import runtime_coordinator
     coordinator = runtime_coordinator.current()
@@ -244,7 +272,16 @@ def assert_writer(name):
         assert_legacy(name)
         return
     authorization = _writer.get()
-    if (authorization is None or authorization[0] is not coordinator
+    if slot.phase == Phase.Rust:
+        # Sessão do Rust: só escreve quem tem o teclado emprestado, e só dentro do prazo.
+        if (authorization is None or len(authorization) != 3 or authorization[0] is not coordinator
+                or authorization[1]['key'] != slot.binding.key or authorization[1]['generation'] != slot.binding.generation):
+            raise RuntimeError('Python sem posse da escrita terminal')
+        if time.monotonic() >= authorization[2]:
+            raise KeyboardLoanExpired('prazo do teclado emprestado venceu; o Rust retomou o pane')
+        validate_binding(authorization[1])
+        return
+    if (authorization is None or len(authorization) != 2 or authorization[0] is not coordinator
             or authorization[1]['key'] != slot.binding.key
             or authorization[1]['generation'] != slot.binding.generation
             or slot.phase != Phase.Python or slot.lease is None or slot.lease.closed
@@ -351,15 +388,88 @@ def plugin_control(payload, metadata):
     return {'disposition':'unknown'}
 
 
+async def _return_lost_loan(coordinator, name, descriptor, request, request_id):
+    """A concessão pode ter saído e a resposta se perdido: o mesmo pedido repetido traz a mesma
+    concessão (o Rust deduplica pelo id), que volta na hora em vez de prender o teclado até o prazo.
+    Vai direto ao canal, sem a espera da vista que a perda de transporte acabou de invalidar."""
+    from app import diag
+    from app.runtime_coordinator import failure_reason
+    try:
+        again = await coordinator._rpc(descriptor, request, request_id)
+    except Exception as exc:
+        # Sem a concessão em mãos o teclado pode ficar com o Python até o prazo (`_LOAN_S`).
+        diag.registrar('runtime.keyboard_loan_unconfirmed', 'erro', sessao=name, **failure_reason(exc))
+        return
+    if again.get('disposition') != 'accepted':
+        return          # nada concedido a este pedido: não há o que devolver
+    try:
+        await coordinator._rpc(descriptor, {'kind':'control', 'control':'keyboard_return',
+            'payload':{'loan_id':again['payload']['loan_id']}}, 'admin:' + uuid.uuid4().hex)
+    except Exception as exc:
+        diag.registrar('runtime.keyboard_return_failed', 'erro', sessao=name, **failure_reason(exc))
+
+
+async def _borrow_keyboard(coordinator, name, action):
+    """Administração que digita no pane de uma sessão do Rust: ele pausa as próprias escritas e
+    empresta o teclado por uma operação, com prazo; fila, trava e estado continuam com ele."""
+    from app import diag
+    from app.runtime_coordinator import failure_reason
+    slot = coordinator.slot(name)
+    async with coordinator._barrier(slot):      # fechar/renomear espera; envios seguem para a fila
+        if coordinator.slots.get(coordinator.names.get(name, '')) is not slot or slot.phase != Phase.Rust:
+            raise RuntimeError('a sessão mudou de dono antes da administração; tente de novo')
+        descriptor = slot.binding.descriptor()
+        await asyncio.to_thread(validate_binding, descriptor)
+        asked = time.monotonic()        # o prazo do Rust começa antes de a resposta chegar aqui
+        request = {'kind':'control', 'control':'keyboard_loan', 'payload':{'seconds':_LOAN_S}}
+        request_id = 'admin:' + uuid.uuid4().hex
+        try:
+            loan = await coordinator.op(name, request, request_id)
+        except Exception as exc:
+            if getattr(exc, '_transport_lost', False):
+                await _return_lost_loan(coordinator, name, descriptor, request, request_id)
+            raise
+        if loan.get('disposition') != 'accepted':
+            raise TerminalControlError('keyboard_loan', loan.get('disposition'), (loan.get('payload') or {}).get('code'))
+        failure = None
+        try:
+            deadline = asked + int(loan['payload']['seconds']) - _LOAN_MARGIN_S
+            def execute():
+                with borrowed(coordinator, descriptor, deadline):
+                    return action()
+            result = await asyncio.to_thread(execute)
+            await asyncio.to_thread(validate_binding, descriptor)
+        except BaseException as exc:
+            failure = exc
+        try:
+            back = await coordinator.op(name, {'kind':'control', 'control':'keyboard_return',
+                'payload':{'loan_id':(loan.get('payload') or {}).get('loan_id')}}, 'admin:' + uuid.uuid4().hex)
+        except Exception as exc:
+            # Devolução sem resposta: o prazo devolve o teclado ao Rust sozinho.
+            diag.registrar('runtime.keyboard_return_failed', 'erro', sessao=name, **failure_reason(exc))
+            back = {'disposition':'unknown'}
+        if failure is not None:
+            raise failure
+        if back.get('disposition') != 'accepted':
+            raise KeyboardLoanExpired('o Rust retomou o pane antes do fim da operação')
+        return result
+
+
 async def run_admin(coordinator, name, operation, payload, action):
     if not await coordinator.prepare_session(name, 'claude') or not coordinator.slot(name).binding.meta.get('terminal'):
         return await asyncio.to_thread(action)
+    if coordinator.slot(name).phase == Phase.Rust:
+        task = asyncio.create_task(_borrow_keyboard(coordinator, name, action))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
     async def perform():
         async with coordinator.freeze(name):
             slot = coordinator.slot(name)
-            rust = slot.phase == Phase.Rust
-            if rust:
-                await coordinator.detach(name)
+            if slot.phase != Phase.Python:
+                raise RuntimeError('a sessão mudou de dono antes da administração; tente de novo')
             descriptor = slot.binding.descriptor()
             await asyncio.to_thread(validate_binding, descriptor)
             operation_id = 'admin:' + uuid.uuid4().hex
@@ -380,12 +490,8 @@ async def run_admin(coordinator, name, operation, payload, action):
                             {'kind':'finish','id':operation_id,'status':status,
                              'result':{'operation_id':operation_id,'disposition':status,'payload':{}}})
                     return result
-            try:
-                result = await asyncio.to_thread(execute)
-                await asyncio.to_thread(validate_binding, descriptor)
-            finally:
-                if rust:
-                    await coordinator.adopt(name)
+            result = await asyncio.to_thread(execute)
+            await asyncio.to_thread(validate_binding, descriptor)
             return result
     task = asyncio.create_task(perform())
     try:
@@ -742,6 +848,8 @@ async def route(coordinator, name, command):
     result = await coordinator.op(name, command, uuid.uuid4().hex)
     if command['kind'] == 'control' and result.get('disposition') != 'accepted':
         raise TerminalControlError(command['control'], result.get('disposition'), (result.get('payload') or {}).get('code'))
+    if result.get('disposition') == 'rejected':
+        raise RuntimeError(f"entrada recusada pelo terminal ({(result.get('payload') or {}).get('code') or 'sem código'})")
     if result.get('disposition') not in {None,'accepted','deferred'}:
         raise RuntimeError('resultado terminal incerto; não repetir por outro transporte')
     return result
@@ -851,6 +959,17 @@ def answer_sync(name, answers, request_id, jsonl):
             text = await asyncio.to_thread(api._askq_conversar_text, answers, jsonl)
             if not text:
                 raise ValueError('resposta sem texto para conversar')
+            if owner.slot(name).phase == Phase.Rust:
+                # Teclado emprestado só para fechar a pergunta; o texto entra pela fila do Rust.
+                def close_question():
+                    ti.TerminalInput().interrupt(name)
+                    api._espera_picker_fechar(name)
+                await run_admin(owner, name, 'answer_chat', payload, close_question)
+                # Na fila do Rust (`deferred`) a resposta sai quando o terminal ficar livre.
+                reply = await route(owner, name, {'kind':'submit','text':text})
+                if reply is None or reply.get('disposition') not in {'accepted', 'deferred'}:
+                    raise RuntimeError('a pergunta foi fechada, mas a resposta por texto não foi confirmada')
+                return reply
             def compound():
                 ti.TerminalInput().interrupt(name)
                 api._espera_picker_fechar(name)
@@ -920,8 +1039,25 @@ def _session_proof(name):
     if cp.returncode or len(fields) != 5 or not fields[0] or not fields[1].isdigit() or not fields[2].isdigit() or fields[3] != name:
         return None
     import psutil
-    namespace = f'{fields[0]}:{int(fields[1])}:{psutil.Process(int(fields[1])).create_time()}'
+    try:
+        namespace = f'{fields[0]}:{int(fields[1])}:{psutil.Process(int(fields[1])).create_time()}'
+    except psutil.Error:
+        return None     # o servidor tmux saiu entre a pergunta e a leitura do processo dele
     return _session_hash(namespace, fields[4], int(fields[2]))
+
+
+def _pane_life(name):
+    """Nascimento do processo do pane ativo: `respawn-pane` troca o pane sem trocar a sessão tmux."""
+    from app import tmux
+    cp = tmux._run(['tmux','display-message','-p','-t',f'={name}:','#{pane_pid}'])
+    pid = cp.stdout.strip()
+    if cp.returncode or not pid.isdigit():
+        return None
+    import psutil
+    try:
+        return f'{pid}:{psutil.Process(int(pid)).create_time()}'
+    except psutil.Error:
+        return None
 
 
 def pending_binding(name, previous):
@@ -939,13 +1075,15 @@ def terminal_life(binding):
     """Prova da vida do terminal de um vínculo Claude com pane, confirmado ou pendente."""
     if binding.provider != 'claude' or not (binding.meta.get('terminal') or binding.meta.get('pending_terminal')):
         return None
-    return _session_proof(binding.name)
+    proof = _session_proof(binding.name)
+    return None if proof is None else (proof, _pane_life(binding.name))
 
 
 def reborn_binding(name, previous, life_before):
-    """Terminal recriado dentro de uma troca: a vida muda, a sessão não, e a chave é da sessão."""
+    """Terminal recriado dentro de uma troca: a vida muda, a sessão não, e a chave é da sessão
+    quando o pane novo roda a mesma conversa (`resolve_binding` confere)."""
     pending = pending_binding(name, previous)
-    if pending is None or pending.meta['pending_terminal'] == life_before:
+    if pending is None or (pending.meta['pending_terminal'], _pane_life(name)) == life_before:
         return None
     # O pane antigo morreu com a vida antiga: nenhuma escrita pode mirar nele.
     pending.meta.pop('terminal', None)

@@ -1026,7 +1026,23 @@ filho do backend: sem isso, a porta "de outro processo" barrava todo reinício.
 
 A reserva é no mesmo processo, sem novo lifespan: dois lifespans rodariam watchers e hooks em
 dobro. O motivo vai ao diário como `hangar_server.reserva` (`sem_binario`, `sem_resposta`,
-`protocolo`, `quedas`, `erro`, `porta_ocupada`); cada queda, como `hangar_server.caiu`. A saúde
+`protocolo`, `endereco_privado`, `quedas`, `erro`, `porta_ocupada`); cada queda, como
+`hangar_server.caiu`.
+
+**Modo do processo (dono único, Task 5, 04/10/2026).** O coordenador tem um modo só para o processo:
+`pending` desde a subida com o binário esperado até o Supervisor decidir, e de novo entre uma queda 1
+ou 2 e a volta do Rust; `rust` quando a partida confirma; `python` sem binário, com
+`CP_RUST_SERVER=0`, `--reload`, ou quando o Supervisor desiste. Em `pending` as sessões Claude não
+passam ao Python: operações sobre elas esperam até `PENDING_WAIT_S = 30` s (uma partida leva até
+20 s) e depois falham com `runtime_starting`; as esperas longas (`run_sync`, fila síncrona) contam o
+próprio prazo depois disso. Com o Rust esperado, o lifespan não registra sessão Claude nem religa
+cano; ao entrar em `rust`, o Rust reabre as que eram dele e abre as do boot (cano vivo, ou morto
+com entrada não entregue, que é relançado), e só então roda a recuperação de transferência. Ao
+entrar em `python`, cada sessão do Rust é retomada uma vez e roda o que o lifespan fazia sem o Rust.
+A parada é decidida antes de qualquer ação (nem desativação nem retomada). Envio sem resposta
+porque o Rust morreu espera o Rust novo e repete o mesmo `operation_id` uma vez; senão fica
+incerto. Cliente Python no cano de sessão Claude em `pending`/`rust` é recusado
+(`refuse_python_client`); o Codex sem terminal segue no Python em qualquer modo. A saúde
 traz `protocol`, e o Python só aceita o mesmo `RUST_SERVER_PROTOCOL`: a `server-latest` é sempre a
 mais nova, e uma máquina atrasada pode baixar um binário que fala outro contrato interno. Com o
 Rust na frente, todo pedido chega ao uvicorn interno por `127.0.0.1`: o `forwarded_allow_ips`
@@ -1093,14 +1109,53 @@ Anotar valor e unidade, a sessão de cada `/history`, e o que não deu para medi
 | `/history` completo, Claude 300 MB / `limit=200` | |
 | Threads e inotify do Python com 4 chats abertos, contra 0 abertos | |
 
-## Observação terminal Rust com reserva Python
+### Prova de uso real do dono único (04/10/2026)
+
+Backend da branch `feat/rust-single-owner` (`d6dbdc36`) isolado pelo `scripts/prova-dono-unico.py`
+(unit transiente, HOME, portas e `tmux -L` próprios, Haiku). Criar e mandar na hora: 10/10 sem
+terminal e 10/10 com terminal, cada mensagem uma vez, nenhum "religou"/"desligou" e nenhum
+`runtime.*` no diário. Fila com o Claude ocupado (3 em ordem, uma vez cada), `/clear` com o chat
+aberto (não cai), restart com fila e com cano morto (uma entrega, parada em 0,2 s sem SIGKILL),
+uma queda do Rust (sessão segue no Rust novo, envio durante a queda sai uma vez), três quedas em
+60 s (o Python assume, nada duplicado), trava de escrita na fila (400 com código, sessão segue no
+Rust), Git ocupado (503 `workspace_busy` em 0,01 s, nada no Python) e troca de conta com e sem
+terminal (0,6–0,7 s, mesma chave, uma entrega na conta nova). Ficam manuais no app real a entrega
+incerta forçada no terminal e a transferência Claude → Codex. Tabela e achados (um
+`reopen_failed` intermitente no restart, e o 500 com pilha da política com geração antiga) em
+[`prova-real.md`](../migracao-rust/dono-unico/prova-real.md).
+
+## Observação terminal Rust: erro visível, sem captura Python
+
+(04/10/2026, dono único, decisão 3 do dono.) Com a ponte ligada, o Rust é o único dono da
+captura de quem tem lease: erro de transporte, resposta torta, quadro inválido, alvo do pane ou
+vínculo que não se lê sobem como `ObservationFailed(<código>)`, nunca como `None`. O monitor de
+estado repete o último evento com `problema="terminal_observacao_falhou"` e o código em
+`problema_detalhe` (faixa na web e no app), dorme a rodada e pergunta ao Rust de novo; a prévia
+mantém o texto que tinha. O erro ainda passa pelo `has-session`: sessão que sumiu vira `dead`, não
+um aviso eterno. Sem evento anterior, o estado sai do plugin ou do marcador do hook, nunca de um
+`idle` presumido. A pausa entre tentativas é só a do Rust (`terminal_control.rs`,
+`record_failure`, até 60 s); o disjuntor por sessão do Python (3 falhas, pausa de 1 s a 30 s e
+diários `fallback`/`paused`/`recovered`) saiu, porque com ele cada falha voltava a capturar pelo
+Python e o cartão mostrava uma leitura que o Rust não confirmou. O diário grava
+`terminal_observer.erro` no máximo uma vez por minuto por sessão e código (um Rust que alterna
+sucesso e falha não enche o diário); o log do Rust diz "observação terminal
+falhou". `None` (captura Python) fica só para dono fixo ou Rust ausente (modo `pending`/`python`):
+ponte desligada, Windows, nome fora de `[A-Za-z0-9._-]{1,64}`, provider fora do Rust ou sessão ainda
+sem vínculo. No `pending` (subida do Rust, ou os segundos entre uma queda e a volta dele) a ponte está
+desligada e o Python atende Git/arquivos e a captura do painel: o Rust não está lá para atender, e
+nenhuma posse de sessão passa por isso.
+
+O texto abaixo é o da Parte 2C, quando o erro caía na captura Python; a regra acima o substitui.
+
+### Parte 2C: observação terminal Rust com reserva Python
 
 (03/10/2026, Parte 2C, ensaios isolados.) O `hangar-server` abre uma segunda porta em
 `127.0.0.1:0`, no mesmo processo e sob a mesma parada do listener público. Isso cobre também
 um bind público em IP LAN específico, que não aceita conexões destinadas a `127.0.0.1`.
 A saúde anuncia `terminal_address`; o Supervisor só o usa depois de confirmar o protocolo e
-conferir IP literal de loopback e porta válida. Endereço ausente/torto desliga a ponte com
-aviso. A porta pública recusa o endpoint terminal e a privada só monta esse endpoint.
+conferir IP literal de loopback e porta válida. Endereço ausente/torto é falha de partida
+(`hangar_server.reserva` `endereco_privado`): o Python assume a porta inteira, em vez de ligar o
+Rust com as pontes desligadas (dono único, Task 5). A porta pública recusa o endpoint terminal e a privada só monta esse endpoint.
 
 `POST /__hangar_server/terminal` confere origem TCP de loopback e segredo interno em tempo
 constante antes de ler o corpo. Cabeçalho encaminhado externo, inclusive duplicado ou inválido,
@@ -1135,7 +1190,7 @@ dedupe, drain e SSE continuam no Python.
 
 Ao anexar, o observador vira o cliente "atual" do tmux (comando sem `-c`, hooks) e manda foco ao
 pane; isso é do `tmux -C` e fica. Por isso a saída avulsa de hook fora de `%begin/%end` é
-ignorada pelo parser, a liberação fura a pausa por falhas e a vaga cheia (senão o cliente segue
+ignorada pelo parser, a liberação fura a vaga cheia (senão o cliente segue
 anexado até 90 s), e nome fora de `[A-Za-z0-9._-]{1,64}` não chama o Rust (04/10/2026, revisão
 com sessões reais em `docs/migracao-rust/parte2b/revisao-real.md`).
 

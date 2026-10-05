@@ -315,23 +315,7 @@ async def _lifespan(app: FastAPI):
     except OSError:
         _log.warning("plugin: endereço da ponte não gravado; sessão de terminal fica no tmux",
                      exc_info=True)
-    # Claude sem terminal: o processo vive num cano fora do backend e sobrevive ao restart. Só
-    # morre aqui o cano cuja sessão foi encerrada enquanto o backend estava fora; nos outros o
-    # backend religa e recupera o que estava em aberto (turno, permissão pendente).
-    try:
-        from app.adapters.claude_headless.adapter import matar_orfaos
-        mortos = await asyncio.to_thread(matar_orfaos)
-        if mortos:
-            _log.info("claude headless: %d cano(s) de sessão já encerrada finalizado(s)", mortos)
-        religadas = await get_adapter(CLAUDE_HEADLESS).reconectar_todas()
-        if religadas:
-            _log.info("claude headless: %d sessão(ões) religada(s) ao cano", religadas)
-        # A conferência de entrega é um Timer em memória: o restart apagou as agendadas, e a
-        # mensagem que morreu com o processo ficava "entregue" pra sempre.
-        for meta in await asyncio.to_thread(headless_sessions.list_all):
-            get_adapter(CLAUDE_HEADLESS).apos_entrega(meta["name"])
-    except Exception:
-        _log.warning("claude headless: varredura/religação de canos falhou", exc_info=True)
+    await _boot_sessions(runtime)
     _state_dirs =list({Path(c.path) for c in list_config_dirs()} | {_backend_config_base().resolve()})
     hook_state.on_awaiting = _on_awaiting  # transicao -> awaiting_input dispara web push
     hook_state.on_transition = _on_hook_transition  # drain server-side + confirmacao de entrega
@@ -446,14 +430,8 @@ async def _lifespan(app: FastAPI):
     # threads (Timer da confirmacao, gatilho de hook). Ver `_drenar`.
     global _loop_servidor
     _loop_servidor = asyncio.get_running_loop()
-    async def recover_pending_transfers():
-        from app.conversation_transfer import list_incomplete, recover_transfer, TransferError
-        for record in await asyncio.to_thread(list_incomplete):
-            try:
-                await _durante_troca(record.name, recover_transfer(registry, record), transfer=True)
-            except TransferError:
-                pass  # A fase durável mantém o erro e a ação Recarregar disponíveis.
-    transfer_recovery_task = asyncio.create_task(recover_pending_transfers())
+    if runtime.mode == "python":
+        _start_transfer_recovery()
     codex_warm_task = asyncio.create_task(get_adapter("codex").watch_sessions())
     from app.codex_integracao import SERVICO as integracao_codex
     codex_contas_login = CodexContasLogin(
@@ -490,7 +468,8 @@ async def _lifespan(app: FastAPI):
         await connect_mod.stop()
         costs_sources.cancelar_aquecimento()
         # Claude sem terminal fica vivo no cano: só fecha a conexão; o próximo backend religa.
-        await asyncio.shield(transfer_recovery_task)
+        if _transfer_recovery is not None:
+            await asyncio.shield(_transfer_recovery)
         get_adapter(CLAUDE_HEADLESS).desligar_todas()
         codex_warm_task.cancel()
         app.state.codex_auth_aquecer.cancel()
@@ -572,6 +551,16 @@ async def terminal_control_failed(request: Request, exc: TerminalControlError):
     return JSONResponse(status_code=409, content={"detail":erro(code, str(exc))})
 
 
+@app.exception_handler(GitError)
+async def _git_failed(request: Request, exc: GitError):
+    """GitError que escapou da rota (citação, resolver) sai com o status dele, nunca 500 sem corpo.
+
+    Falha da ponte de Git/arquivos traz o código (`workspace_busy`...), que o front traduz."""
+    code = getattr(exc, "code", None)
+    detail = erro(code, exc.detail, motivo=exc.detail) if code else exc.detail
+    return JSONResponse(status_code=exc.status, content={"detail": detail})
+
+
 @app.get("/api/omp/plugin-sync", dependencies=[Depends(require_auth)])
 async def omp_plugin_sync_status(request: Request):
     service = getattr(request.app.state, "omp_plugin_sync", None)
@@ -619,9 +608,6 @@ async def _correlaciona_diag(request: Request, call_next):
         if re.fullmatch(r"[A-Za-z0-9_-]{1,32}", candidate):
             req = candidate
     token = diag.req_atual.set(req)
-    from app import workspace_bridge
-    handoff = workspace_bridge.take_over(request.headers.get("x-hangar-workspace-fallback", ""),
-                                         request.client.host if request.client else None)
     started = time.monotonic()
     response = None
     failure = ""
@@ -644,7 +630,6 @@ async def _correlaciona_diag(request: Request, call_next):
             diag.registrar("api.servidor", "erro" if status >= 500 else "aviso" if status >= 400 else "ok",
                            detalhe=f"{request.method} {route}", codigo=str(status), ms=elapsed,
                            etapa="cabecalhos", sessao=request.path_params.get("name"), erro_tipo=failure)
-        workspace_bridge.release(handoff)
         diag.req_atual.reset(token)
 
 
@@ -2678,6 +2663,71 @@ async def modo_execucao(name: str, body: ModoExecucaoBody):
     return await _durante_troca(name, _trocar_modo(name, body))
 
 
+async def _python_owns_headless() -> None:
+    """O Python é o dono das sessões Claude sem terminal: religa os canos vivos e reagenda as
+    conferências de entrega (Timers em memória que o restart apagou)."""
+    try:
+        religadas = await get_adapter(CLAUDE_HEADLESS).reconectar_todas()
+        if religadas:
+            _log.info("claude headless: %d sessão(ões) religada(s) ao cano", religadas)
+        for meta in await asyncio.to_thread(headless_sessions.list_all):
+            get_adapter(CLAUDE_HEADLESS).apos_entrega(meta["name"])
+    except Exception:
+        _log.warning("claude headless: religação de canos falhou", exc_info=True)
+
+
+_transfer_recovery: asyncio.Task | None = None
+
+
+async def _recover_pending_transfers() -> None:
+    from app.conversation_transfer import list_incomplete, recover_transfer, TransferError
+    for record in await asyncio.to_thread(list_incomplete):
+        try:
+            await _durante_troca(record.name, recover_transfer(registry, record), transfer=True)
+        except TransferError:
+            pass  # A fase durável mantém o erro e a ação Recarregar disponíveis.
+        except Exception:
+            _log.exception("recuperação da transferência de %s falhou", record.name)
+
+
+def _start_transfer_recovery() -> None:
+    """Uma vez por processo, depois que alguém é dono das sessões (Python, ou Rust de pé)."""
+    global _transfer_recovery
+    if _transfer_recovery is None:
+        _transfer_recovery = asyncio.create_task(_recover_pending_transfers())
+
+
+async def _boot_sessions(runtime) -> None:
+    """Sessões Claude sem terminal na subida. O cano sobrevive ao restart; só morre aqui o de
+    sessão encerrada com o backend fora. Com o Rust esperado, nada mais roda antes do desfecho
+    dele: o modo `rust` abre as sessões nele, e o `python` (desistência) faz o que vinha aqui."""
+    try:
+        from app.adapters.claude_headless.adapter import matar_orfaos
+        mortos = await asyncio.to_thread(matar_orfaos)
+        if mortos:
+            _log.info("claude headless: %d cano(s) de sessão já encerrada finalizado(s)", mortos)
+    except Exception:
+        _log.warning("claude headless: varredura de canos órfãos falhou", exc_info=True)
+
+    async def after_rust():
+        _start_transfer_recovery()
+
+    async def after_python():
+        # Cada etapa independe das outras: uma falha não deixa canos sem religar nem transferência parada.
+        try:
+            await runtime.register_claude_sessions()
+        except Exception:
+            _log.exception("registro das sessões Claude no Python falhou")
+        await _python_owns_headless()
+        _start_transfer_recovery()
+
+    global _transfer_recovery
+    _transfer_recovery = None       # um lifespan novo no mesmo processo (testes) recupera de novo
+    runtime.mode_hooks.update(rust=after_rust, python=after_python)
+    if runtime.mode == "python":
+        await _python_owns_headless()
+
+
 async def _durante_troca(name: str, troca, *, transfer: bool = False):
     from app.conversation_transfer import session_operation, require_available, TransferError, public_error
     if transfer:
@@ -4417,7 +4467,7 @@ async def _send_managed(name: str, text: str, provider: str, *, track_entry: boo
         return None
     operation_id = uuid.uuid4().hex
     try:
-        if not await coordinator.prepare_session(name, provider):
+        if not await coordinator.prepare_session(name, provider, launch=True):
             return None
         if provider == "codex" and text.strip().split(maxsplit=1)[0:1] == ["/compact"]:
             if text.strip() != "/compact":
@@ -4427,6 +4477,10 @@ async def _send_managed(name: str, text: str, provider: str, *, track_entry: boo
             command = {"kind":"submit", "text":text}
         reply = await coordinator.op(name, command, operation_id)
         disposition = reply.get("disposition")
+        if disposition == "unknown" and (reply.get("payload") or {}).get("transport_lost") is True:
+            # O Rust caiu no meio: a entrada pode estar na fila durável, que decide; a bolha espera.
+            return {"ok":True, "error":None, "delivered":False, "uncertain":True,
+                **({"entry_id":operation_id} if track_entry and command["kind"] == "submit" and not text.lstrip().startswith("/") else {})}
         if disposition not in {"accepted", "deferred"}:
             raise RuntimeError("resultado incerto; entrada conservada sem reenvio" if disposition == "unknown" else "entrada recusada pelo runtime")
         return {"ok":True, "error":None, "delivered":disposition == "accepted",
@@ -7244,7 +7298,7 @@ def _erro_arq(e: FileError | SearchError) -> HTTPException:
     # funcao do paraglide exige o argumento — sem ele o front renderiza `undefined` ou
     # nem compila. O `erro()` tem `msg` como parametro nomeado, entao o valor entra no
     # dict de params DEPOIS, por chave.
-    fixo = e.msg if e.code == "workspace_action_uncertain" else (_MSG_BUSCA if isinstance(e, SearchError) else _MSG_ARQ)
+    fixo = e.msg if e.code.startswith("workspace_") else (_MSG_BUSCA if isinstance(e, SearchError) else _MSG_ARQ)
     _log.warning("files: %s", git_ops._scrub(e.msg))
     d = erro(e.code, fixo)
     d["params"]["msg"] = fixo
@@ -8448,7 +8502,7 @@ def _resolver_citado(name: str, path: str, *, write: bool = False) -> str:
             failure = result["error"]
             detail = failure["detail"]
             if failure.get("code"):
-                detail = erro(failure["code"], str(detail))
+                detail = erro(failure["code"], str(detail), motivo=str(detail))
             raise HTTPException(failure["status"], detail=detail)
     from app.transcript import citation_cwds
     cited = citation_cwds(info.jsonl, [path], rows=rows)

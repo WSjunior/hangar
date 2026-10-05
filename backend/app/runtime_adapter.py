@@ -18,20 +18,15 @@ from app.models import StateEvent
 _legacy_operation = contextvars.ContextVar("runtime_legacy_operation", default=None)
 
 
-def assert_legacy(name, *, reading=False):
+def assert_legacy(name):
     coordinator = runtime_coordinator.current()
     if coordinator is None or not coordinator.managed_queue(name):
         return
     slot = coordinator.slot(name)
     with slot.guard:
         restoring = coordinator.in_lifecycle(slot) and slot.phase == runtime_coordinator.Phase.RecoveringPython
-        finishing = reading and slot.phase == runtime_coordinator.Phase.PreparingRust
-        context = _legacy_operation.get()
-        continuing = (context is not None and context.get("key") == slot.binding.key
-            and context.get("generation") == slot.binding.generation and context.get("operation_id") in getattr(coordinator, "legacy_active", set()))
         normal = slot.phase == runtime_coordinator.Phase.Python and (not slot.frozen or coordinator.in_lifecycle(slot))
-        if (slot.lease is None or slot.lease.closed or not (normal
-                or restoring or finishing or continuing and slot.phase == runtime_coordinator.Phase.PreparingRust)):
+        if slot.lease is None or slot.lease.closed or not (normal or restoring):
             raise RuntimeError("Python não possui a sessão; cliente Legacy bloqueado")
 
 
@@ -51,10 +46,10 @@ class LegacyIO:
     def __init__(self, coordinator):
         self.coordinator = coordinator
 
-    async def _exec(self, name, action, call_id=None, *, reading=False):
+    async def _exec(self, name, action, call_id=None):
         coordinator = self.coordinator
         slot = coordinator.slot(name)
-        assert_legacy(name, reading=reading)
+        assert_legacy(name)
         generation = slot.binding.generation
         with slot.guard:
             slot.active += 1
@@ -107,24 +102,23 @@ class LegacyIO:
         await self._exec(name, {"kind":"begin_dispatch", "id":operation_id, "wire_id":phase_id})
         return WireTicket(name, binding["key"], binding["generation"], operation_id, phase_id, copy.deepcopy(payload), bool(context))
 
-    async def finish_wire(self, ticket, outcome, result=None, *, definitive=False, settling=False):
+    async def finish_wire(self, ticket, outcome, result=None, *, definitive=False):
         slot = self.coordinator.slot(ticket.name)
         if slot.binding.key != ticket.key or slot.binding.generation != ticket.generation:
             raise RuntimeError("recibo de outra geração")
         status = {"written":"accepted", "not_written":"rejected", "unknown":"unknown"}[outcome]
         record = result if definitive else {"write_outcome":outcome}
-        reading = definitive or settling
-        await self._exec(ticket.name, {"kind":"finish", "id":ticket.phase_id, "status":status, "result":record}, reading=reading)
+        await self._exec(ticket.name, {"kind":"finish", "id":ticket.phase_id, "status":status, "result":record})
         is_request = ticket.frame.get("type") == "control_request" or ticket.frame.get("method") is not None and ticket.frame.get("id") is not None
         if ticket.aggregate and ticket.operation_id in getattr(self.coordinator, "legacy_active", set()):
             return
         if ticket.incomplete and outcome == "written":
             await self._exec(ticket.name, {"kind":"finish", "id":ticket.operation_id, "status":"unknown",
-                "result":{"operation_id":ticket.operation_id, "disposition":"unknown", "payload":{"remaining_phase":"effort"}}}, reading=reading)
+                "result":{"operation_id":ticket.operation_id, "disposition":"unknown", "payload":{"remaining_phase":"effort"}}})
             return
         parent_status = status if definitive or not is_request or outcome != "written" else "unknown"
         await self._exec(ticket.name, {"kind":"finish", "id":ticket.operation_id, "status":parent_status,
-            "result":{"operation_id":ticket.operation_id, "disposition":parent_status, "payload":record}}, reading=reading)
+            "result":{"operation_id":ticket.operation_id, "disposition":parent_status, "payload":record}})
 
     async def reply(self, name, endpoint, frame):
         request_id = frame.get("id") if frame.get("type") != "control_response" else (frame.get("response") or {}).get("request_id")
@@ -189,19 +183,18 @@ class LegacyIO:
             await writer.drain()
             outcome = await asyncio.wait_for(asyncio.shield(future), 30) if version == 2 else "unknown"
         except asyncio.CancelledError:
-            await self.finish_wire(ticket, "unknown", settling=True)
+            await self.finish_wire(ticket, "unknown")
             raise
         except Exception:
             with self.coordinator.slot(name).guard:
                 phase = copy.deepcopy(self.coordinator.slot(name).store.state["operations"].get(ticket.phase_id))
-            await self.finish_wire(ticket, "unknown", settling=True)
+            await self.finish_wire(ticket, "unknown")
             if not (phase and isinstance(phase.get("result"), dict) and phase["result"].get("disposition") in {"accepted", "rejected"}):
                 raise RuntimeError("escrita incerta; operação conservada sem reenvio") from None
             outcome = "written"
         finally:
             endpoint.runtime_acks.pop(ticket.phase_id, None)
-        # Já despachado: registrar o desfecho não é efeito novo e vale durante a passagem ao Rust.
-        await self.finish_wire(ticket, outcome, settling=True)
+        await self.finish_wire(ticket, outcome)
         if version != 2:
             return ticket
         if outcome != "written":
@@ -266,8 +259,6 @@ class LegacyBridge:
         name, provider = descriptor["name"], descriptor["provider"]
         adapter = self.adapters[provider]
         slot = self.coordinator.slots[descriptor["key"]]
-        with slot.guard:
-            carry = copy.deepcopy(slot.store.state.get("runtime_state", {}).get("view") or {})
         sess = adapter._sessions.get(name)
         if provider == "codex" and sess is not None and sess["client"].tem_processo_proprio:
             raise RuntimeError("reserva headless encontrou processo próprio; transferência recusada")
@@ -284,9 +275,6 @@ class LegacyBridge:
                     write.cancel()
                     await asyncio.gather(write, return_exceptions=True)
         if provider == "claude" and sess is not None:
-            carry.update(initialized=sess.initialized.is_set(), model=sess.model, effort=sess.effort,
-                permission_mode=sess.permission_mode, previous_non_plan=sess.modo_nao_plan,
-                commands=sess.comandos, terminal_commands=list(sess.comandos_terminal), usage=sess.usage, context_window=sess.context_window, cost=sess.cost)
             sess.desligando = True
             sess.live_active = lambda: False
             if sess.drenador is not None:
@@ -302,15 +290,6 @@ class LegacyBridge:
             if sess.leitor is not None:
                 tasks.append(sess.leitor)
         elif provider == "codex" and sess is not None:
-            carry.update(initialized=True, ready=True, thread_id=sess["thread_id"],
-                model=sess.get("model") or sess.get("default_model"), effort=sess.get("effort") or sess.get("default_effort"),
-                in_progress=sess.get("in_progress", False), turn_id=sess.get("turn_id"))
-            questions = sess.get("async_questions")
-            if questions is not None:
-                carry.update(async_questions=list(copy.deepcopy(questions._pending).items()),
-                    async_seen=sorted(questions._seen), async_resolved=sorted(questions._resolved),
-                    skipped_async_questions=sorted(questions.skipped), async_local_answers=copy.deepcopy(questions._local_answers),
-                    async_echoes=dict(questions._echoes), async_during_load=copy.deepcopy(questions._during_load))
             for collection in (adapter._subscribers, adapter._tmux_watchers):
                 if task := collection.pop(name, None):
                     tasks.append(task)
@@ -359,10 +338,6 @@ class LegacyBridge:
                 diag.registrar("runtime.unclaim_failed", "erro", sessao=name, **runtime_coordinator.failure_reason(exc))
         if provider == "claude" and sess is not None:
             await asyncio.gather(sess.preview_buffer.discard(), sess.thinking_buffer.discard(), sess.tool_buffer.discard())
-        carry["runtime_counter"] = max(carry.get("runtime_counter") or 0,
-            slot.store.state.get("runtime_state", {}).get("view", {}).get("runtime_counter") or 0)
-        carry["headless"], carry["name"] = True, name
-        return {"runtime_state":carry}
 
     async def reconnect(self, descriptor, carry):
         if descriptor["meta"].get("terminal"):
@@ -583,7 +558,8 @@ def run_sync(factory, loop):
         raise RuntimeError("operação síncrona exige o pool e o loop do servidor")
     future = asyncio.run_coroutine_threadsafe(factory(), loop)
     try:
-        return future.result(timeout=185)
+        # As operações esperam o desfecho do Rust (até `PENDING_WAIT_S`) antes do próprio prazo.
+        return future.result(timeout=185 + runtime_coordinator.PENDING_WAIT_S)
     except BaseException:
         future.cancel()
         raise
@@ -610,13 +586,23 @@ def native_slot(name):
         return None
     if slot.phase == runtime_coordinator.Phase.Python:
         return None
-    context = _legacy_operation.get()
-    if (slot.phase == runtime_coordinator.Phase.PreparingRust and slot.lease is not None and not slot.lease.closed
-            and context is not None and context.get("operation_id") in coordinator.legacy_active):
-        return None
     if slot.phase != runtime_coordinator.Phase.Rust:
         raise runtime_coordinator.TransferInProgress("sessão em transferência; aguarde a posse ser confirmada")
     return slot
+
+
+def _problem_text(data):
+    message = data.get("message")
+    return (f"{data['error_code']}: {message}" if isinstance(message, str) and message else data["error_code"])[:300]
+
+
+def runtime_problem(name):
+    """Problema publicado pelo Rust para a sessão: `("runtime_falhou", "<código>: <frase>")` ou None."""
+    coordinator = runtime_coordinator.current()
+    slot = coordinator.slots.get(coordinator.names.get(name, "")) if coordinator is not None else None
+    if slot is None or slot.phase != runtime_coordinator.Phase.Rust or not (slot.view or {}).get("problem"):
+        return None
+    return "runtime_falhou", slot.view["problem"]
 
 
 def apply_event(slot, event):
@@ -648,6 +634,10 @@ def apply_event(slot, event):
         if revision < previous:
             return True
         slot.view = copy.deepcopy(data)
+        if data.get("error") is not None:
+            # A frase veio no `problem`; o snapshot só traz o código.
+            same = (cached.get("problem") or "").split(":", 1)[0] == data["error"]
+            slot.view["problem"] = cached["problem"] if same else data["error"]
         slot.cache_valid = data.get("error") is None
         return True
     if revision <= previous:
@@ -658,7 +648,8 @@ def apply_event(slot, event):
         if revision != previous + 1:
             slot.cache_valid = False
             return False
-        slot.view = {**copy.deepcopy(cached), "revision": revision, "error": data["error_code"]}
+        slot.view = {**copy.deepcopy(cached), "revision": revision, "error": data["error_code"],
+                     "problem": _problem_text(data)}
         slot.cache_valid = False
         return True
     if not getattr(slot, "cache_valid", False) or revision != previous + 1:
@@ -683,6 +674,7 @@ def apply_event(slot, event):
             if not isinstance(data, dict) or not isinstance(data.get("error_code"), str):
                 raise ValueError("falha inválida")
             updated["error"] = data["error_code"]
+            updated["problem"] = _problem_text(data)
             slot.cache_valid = False
         elif channel in {"voice", "voice_target"}:
             if not isinstance(data, dict) or not isinstance(data.get("event"), dict):
@@ -750,7 +742,9 @@ class RuntimeAdapter:
             raise RuntimeError("snapshot de outra conversa")
         state = StateEvent.model_validate(view.data["public_state"])
         slot = runtime_coordinator.current().slot(name)
-        if not slot.cache_valid:
+        if problem := runtime_problem(name):
+            state = state.model_copy(update={"problema":problem[0], "problema_detalhe":problem[1]})
+        elif not slot.cache_valid:
             state = state.model_copy(update={"problema":"headless_turno_erro", "problema_detalhe":"Estado do runtime indisponível; aguarde a reposição."})
         return state
 
@@ -965,7 +959,6 @@ def voice_current(name, target, adapter):
 
 # ponytail: a posse é conferida por consulta a cada 0,25 s; a fase muda sem aviso único a quem espera.
 _OWNER_POLL_S = 0.25
-_OWNER_STUCK_S = 10.0
 
 
 def _hands_over(provider, name):
@@ -977,32 +970,22 @@ def _hands_over(provider, name):
 
 
 def _state_owner(name):
-    """Quem responde pelo estado agora; None durante a passagem entre Python e Rust."""
+    """Quem responde pelo estado agora: a sessão aberta no Rust, ou a vista do Python (parada,
+    Codex, Python dono da porta)."""
     coordinator = runtime_coordinator.current()
     if coordinator is None or not coordinator.managed_runtime(name):
         return ("python",)
     slot = coordinator.slot(name)
-    if not slot.binding.headless or slot.phase == runtime_coordinator.Phase.Python:
-        return ("python",)
-    if slot.phase == runtime_coordinator.Phase.Rust:
+    if slot.binding.headless and slot.phase == runtime_coordinator.Phase.Rust:
         return ("rust", coordinator.instance, slot.binding.key, slot.binding.generation)
-    return None
+    return ("python",)
 
 
 async def owner_state_stream(legacy, native, name):
-    """Estado que segue a posse. A passagem não derruba o chat: ele espera o novo dono e reabre a
-    fonte dele, e o erro de uma fonte cuja posse acabou de sair não sobe."""
+    """Estado que segue a sessão: aberta no Rust ou não. A troca de fonte não derruba o chat, e o
+    erro de uma fonte cuja sessão acabou de mudar não sobe."""
     while True:
         owner = _state_owner(name)
-        waited = time.monotonic()
-        while owner is None:
-            await asyncio.sleep(_OWNER_POLL_S)
-            owner = _state_owner(name)
-            if waited is not None and time.monotonic() - waited > _OWNER_STUCK_S:
-                # Os pings seguem e o front não reconecta: sem isto, o chat parado não deixa rastro.
-                from app import diag
-                diag.registrar("runtime.state_owner_stuck", "aviso", sessao=name)
-                waited = None
         source = native() if owner[0] == "rust" else legacy()
         # Uma tarefa só itera a fonte, e só avança quando o chat pede o próximo: como a iteração
         # direta. O monitor do Codex guarda estado da própria tarefa entre yields.
@@ -1133,7 +1116,18 @@ def install_adapter(cls, provider):
                 context = _legacy_operation.get()
                 if context is not None and coordinator is not None and context.get("operation_id") in coordinator.legacy_active:
                     return await _original(self, *args, **kwargs)
-                if (coordinator is not None and getattr(coordinator, "legacy", None) is not None
+                if (_method == "ensure_running" and _facade.provider == "claude" and coordinator is not None
+                        and getattr(coordinator, "legacy", None) is not None and getattr(coordinator, "transport", None) is not None
+                        and not bound.arguments.get("so_reconectar") and bound.arguments.get("transfer_id") is None):
+                    # Subir a sessão é abri-la no Rust, com a conta/motor pedidos e a espera do initialize;
+                    # dentro da barreira (troca de conta) é reabrir já o que a administração fechou.
+                    options = {"engine_models":bound.arguments.get("engine_models"),
+                        "wait_initialized":bool(bound.arguments.get("esperar_pronta") or bound.arguments.get("require_initialize"))}
+                    if coordinator.managed_queue(name) and coordinator.in_lifecycle(coordinator.slot(name)):
+                        await coordinator.reopen_in_change(name, **options)
+                    else:
+                        await coordinator.ensure_open(name, **options)
+                elif (coordinator is not None and getattr(coordinator, "legacy", None) is not None
                         and not (coordinator.managed_queue(name) and coordinator.in_lifecycle(coordinator.slot(name)))):
                     await coordinator.prepare_session(name, _facade.provider)
                 if native_slot(name) is not None:
@@ -1147,11 +1141,35 @@ def install_adapter(cls, provider):
     original = getattr(cls, "acordar", None)
     if original is not None and not getattr(original, "runtime_wrapped", False):
         @functools.wraps(original)
-        def wake(self, name, _original=original):
+        def wake(self, name, *, engine_models=None, _original=original):
             if native_slot(name) is not None:
                 runtime_coordinator.current().request_drain(name)
                 return
             coordinator = runtime_coordinator.current()
+            if provider == "claude" and coordinator is not None and coordinator.legacy is not None and coordinator.transport is not None:
+                from app.conversation_transfer import transfer_active
+                if transfer_active(name):
+                    return
+                self.reset_start_attempts(name)   # ação do usuário: nova rodada de tentativas
+                if coordinator.managed_queue(name) and (slot := coordinator.slot(name)).change is not None and coordinator.in_lifecycle(slot):
+                    slot.change["relaunch"] = True      # a administração reabre lançando o processo
+                    return
+                # Nasce direto no Rust: o processo sobe sem cliente Python e o ator drena a fila
+                # quando a sessão fica entregável.
+                async def open_in_rust():
+                    try:
+                        slot = await coordinator.ensure_open(name, engine_models=engine_models)
+                        if slot.phase != runtime_coordinator.Phase.Rust:
+                            await self.ensure_running(name)
+                            await coordinator.op(name, {"kind":"drain"}, uuid.uuid4().hex)
+                    except Exception as exc:
+                        from app import diag
+                        from app.runtime_coordinator import failure_reason
+                        diag.registrar("runtime.wake_failed", "erro", sessao=name, **failure_reason(exc))
+                task = coordinator.loop.create_task(open_in_rust())
+                self._tarefas.add(task)
+                task.add_done_callback(self._tarefas.discard)
+                return
             if coordinator is not None and coordinator.legacy is not None:
                 async def start():
                     try:
@@ -1166,6 +1184,6 @@ def install_adapter(cls, provider):
                 self._tarefas.add(task)
                 task.add_done_callback(self._tarefas.discard)
                 return
-            _original(self, name)
+            _original(self, name, **({"engine_models":engine_models} if engine_models is not None else {}))
         wake.runtime_wrapped = True
         cls.acordar = wake

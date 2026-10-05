@@ -1,6 +1,6 @@
 # Migração do backend para Rust — roteiro e estado
 
-Atualizado em 2026-10-03. Ponto de partida para cada parte nova: ler este arquivo, a análise
+Atualizado em 2026-10-04. Ponto de partida para cada parte nova: ler este arquivo, a análise
 inicial e a spec da parte 1. Tudo desta pasta vive na branch do PR #24 (`hangar-server-parte1`):
 um pull nela traz a documentação em qualquer máquina.
 
@@ -16,6 +16,7 @@ um pull nela traz a documentação em qualquer máquina.
 | `parte2c/` | Análise, desenho, planos, revisões e provas da 2C (com terminal no Rust) |
 | `parte3/` | Análise, spec e plano da parte 3 (custos e uso no Rust) |
 | `git-arquivos/` | Núcleo compartilhado de Git/arquivos, ponte privada, integração e evidências de validação |
+| `dono-unico/` | Inventário das passagens Python↔Rust com o Rust vivo, desenho do dono único, plano e o registro de cada Task — executado na `feat/rust-single-owner` (Tasks 1–10; falta a prova de uso real, Task 11) |
 | `parte2-descartada-lista-pi-kimi/` | Primeiro escopo da parte 2 (lista + Pi/Kimi/omp/orq), trocado pelo dono |
 | `pedidos/` | Pedidos enviados às sessões Codex e os achados de revisão da 2C |
 
@@ -35,7 +36,15 @@ trabalho da máquina de origem; nesta pasta os arquivos equivalentes são os da 
   partes migradas fica só de referência e sai na parte 7. Substitui a regra anterior ("3 tentativas
   + 1 e só aquela sessão vai para o Python"): o código de passagem entre os dois donos foi a origem
   da maioria dos defeitos de 04/10 (primeira mensagem sumindo, "sessão em transferência", entrega
-  marcada sem chegar, reserva circular de Git). Plano da mudança em `dono-unico/`.
+  marcada sem chegar, reserva circular de Git). Plano da mudança em `dono-unico/`; o que saiu está
+  em `docs/decisoes/superado.md`.
+- **Estado do dono único (04/10/2026, branch `feat/rust-single-owner`, contrato interno 17).** O
+  processo tem um modo só: `pending` (Rust esperado ou voltando de uma queda 1–2; operações esperam
+  até 30 s), `rust` ou `python` (sem binário, `CP_RUST_SERVER=0`, `--reload` ou desistência do
+  Supervisor). Sessão Claude sem terminal e com terminal nasce no Rust; a administração fecha e
+  reabre nele; o terminal empresta o teclado ao Python por uma operação; histórico, eventos,
+  Git/arquivos e a observação do terminal respondem erro com código em vez de repassar. Codex sem
+  terminal, Pi, Kimi, omp e orq seguem no Python (provedores não migrados).
 - **Contrato interno versionado à mão.** Mudou rota `/internal`, evento do `side-events` ou variável
   passada ao filho → subir `RUST_SERVER_PROTOCOL` (Python) e `INTERNAL_PROTOCOL` (Rust) juntos.
   O `versao` do snapshot do `hangar-cano` acompanha o `VERSAO` do `cano.py`.

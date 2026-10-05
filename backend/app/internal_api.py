@@ -4,6 +4,7 @@ import asyncio
 import secrets
 import json
 import copy
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
@@ -86,7 +87,7 @@ async def runtime_policy(request: Request):
         with slot.guard:
             if (coordinator.instance != instance or slot.binding.key != body["key"]
                     or slot.binding.generation != body["generation"]
-                    or slot.phase not in {runtime_coordinator.Phase.Rust, runtime_coordinator.Phase.PreparingRust}
+                    or slot.phase != runtime_coordinator.Phase.Rust
                     or slot.lease is not None and not slot.lease.closed):
                 raise RuntimeError("serviço de outra posse ou geração")
         if body["kind"] != "native_message":
@@ -126,6 +127,27 @@ async def runtime_policy(request: Request):
         # ou é inofensiva (as demais), e guardar cada resultado fazia o mapa crescer sem fim.
         task.add_done_callback(lambda _done: _policy_calls.pop(key, None))
     return await asyncio.shield(_policy_calls[key])
+
+
+_DIAG_EVENT = re.compile(r"rust\.[a-z_]{1,48}")
+_DIAG_CODE = re.compile(r"[a-z0-9_]{1,64}")
+
+
+@router.post("/diag")
+async def rust_diag(request: Request) -> dict:
+    """Falha que o Rust atendeu sozinho (histórico, eventos, Git): o log dele não entra no diário."""
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if len(raw) <= 8192 else None
+        if (not isinstance(body, dict) or set(body) != {"evento", "sessao", "codigo", "motivo"}
+                or not all(isinstance(v, str) for v in body.values())
+                or not _DIAG_EVENT.fullmatch(body["evento"]) or not _DIAG_CODE.fullmatch(body["codigo"])
+                or len(body["sessao"]) > 128 or len(body["motivo"]) > 300):
+            raise ValueError("diário inválido")
+    except (ValueError, RecursionError):
+        raise HTTPException(400) from None
+    diag.registrar(body["evento"], "erro", sessao=body["sessao"], codigo=body["codigo"], detalhe=body["motivo"])
+    return {"ok": True}
 
 
 @router.get("/workspace/context")

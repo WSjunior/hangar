@@ -732,9 +732,15 @@ async def _capture_and_store(name: str, started: float) -> str:
     tag = terminal_observer.stamp(name)
     # Idade conta do INÍCIO da captura: o quadro pode ser até isso mais velho, nunca mais novo.
     # Um argumento só, como antes: há dublê de teste com essa assinatura.
-    result = await terminal_observer.capture(name, started)
+    try:
+        result = await terminal_observer.capture(name, started)
+    except terminal_observer.ObservationFailed:
+        if tag != terminal_observer.stamp(name):
+            return ""
+        raise
     if tag != terminal_observer.stamp(name):
         return ""
+    # `None` só quando o Rust não é o dono (ponte desligada, Windows, nome ou provider fora dele).
     pane = result["text"] if result is not None else await run_tmux(tmux.capture_pane, name)
     if tag != terminal_observer.stamp(name):
         return ""
@@ -851,6 +857,7 @@ class StateMonitor:
 
     async def _stream(self) -> AsyncIterator[StateEvent]:
         last_key = object()
+        last_event: StateEvent | None = None
         prev_spinner = None
         frozen = 0          # polls com o mesmo spinner (congelado = turn acabou)
         no_spinner = 0      # polls consecutivos sem spinner (filtra redraw transiente)
@@ -870,7 +877,11 @@ class StateMonitor:
             # e so ai vale pagar o has-session pra separar "morreu" de "pane em branco". No psmux
             # cada comando custa ~50ms (medido na VM), e isto roda a 0,75s por chat aberto.
             frame_tag = terminal_observer.stamp(self.name)
-            pane = await shared_capture(self.name, max_age)
+            failed = None
+            try:
+                pane = await shared_capture(self.name, max_age)
+            except terminal_observer.ObservationFailed as exc:
+                failed, pane = exc.code, ""
             if frame_tag != terminal_observer.stamp(self.name) or terminal_observer.retired(self.name):
                 await asyncio.sleep(self.poll)
                 continue
@@ -887,6 +898,23 @@ class StateMonitor:
                     forget_frame(self.name)
                     yield StateEvent(session=self.name, state="dead")
                     return
+            if failed is not None:
+                # O Rust é o dono da observação: o estado fica no último quadro, o erro aparece e a
+                # rodada seguinte pergunta a ele de novo (a pausa entre tentativas é dele).
+                if last_event is None or last_event.problema_detalhe != failed:
+                    if last_event is None:
+                        # Sem quadro anterior, o estado sai das âncoras que não dependem do pane.
+                        anchor = plugin_bridge.estado_recente(self.name)
+                        if anchor is None and self.sid_get is not None:
+                            anchor = await asyncio.to_thread(self._marcador)
+                        last_event = StateEvent(session=self.name, state=(
+                            anchor[0] if anchor is not None and anchor[0] in ("working", "idle") else held_state))
+                    last_event = last_event.model_copy(
+                        update={"problema": "terminal_observacao_falhou", "problema_detalhe": failed})
+                    last_key = object()
+                    yield last_event
+                await asyncio.sleep(self.poll)
+                continue
             if self.observe_permission:
                 from app.permission_mode import observar_ou_confirmado, parse_permission_mode
                 permission_key = self.sid_get() or self.name
@@ -1032,7 +1060,7 @@ class StateMonitor:
             if key != last_key:
                 last_key = key
                 held_state, held_label = state, label
-                yield StateEvent(session=self.name, state=state, label=label,
+                last_event = StateEvent(session=self.name, state=state, label=label,
                                  question=question, options=options, status_line=status,
                                  overlay=overlay, login=login,
                                  limited=limited, limit_reset=limit_reset,
@@ -1040,6 +1068,7 @@ class StateMonitor:
                                  claude_permission_mode=permission_mode,
                                  claude_previous_non_plan=previous_non_plan,
                                  shells=shells)
+                yield last_event
             # Com o plugin vivo, aviso dele (turno, pergunta, fim) acorda o laço na hora; o tique
             # do pane segue igual por baixo. Sem plugin é o sleep de sempre.
             if plugin_bridge.vivo(self.name):

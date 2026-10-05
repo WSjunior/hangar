@@ -1,67 +1,13 @@
 mod fake;
-use axum::{
-    Router,
-    extract::{Query, State},
-    routing::get,
-};
-use fake::{OWNER, SECRET, client, config, spawn_server};
+mod workspace_fixture;
+use fake::{OWNER, SECRET, client};
 use serde_json::{Value, json};
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
-};
-
-type Handoffs = Arc<Mutex<Vec<String>>>;
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use workspace_fixture::refusal;
 
 async fn fixture(root: &std::path::Path) -> (std::net::SocketAddr, Arc<AtomicUsize>) {
-    let (addr, hits, _) = fixture_with(root, true).await;
-    (addr, hits)
-}
-
-/// O Python falso conta os repasses e guarda o motivo que o Rust mandou no cabeçalho.
-async fn fixture_with(
-    root: &std::path::Path,
-    context_ok: bool,
-) -> (std::net::SocketAddr, Arc<AtomicUsize>, Handoffs) {
-    let hits = Arc::new(AtomicUsize::new(0));
-    let handoffs: Handoffs = Arc::default();
-    let context = json!({"roots":[root],"sessions":[{"name":"fixture","cwd":root}],"session":{"name":"fixture","cwd":root,"jsonl":root.join("fixture.jsonl")}});
-    let app = Router::new()
-        .route(
-            "/internal/workspace/context",
-            get(
-                move |headers: axum::http::HeaderMap,
-                      Query(_): Query<std::collections::HashMap<String, String>>| {
-                    let context = context.clone();
-                    async move {
-                        assert_eq!(headers["x-hangar-internal"], SECRET);
-                        let status = if context_ok { 200 } else { 500 };
-                        (
-                            axum::http::StatusCode::from_u16(status).unwrap(),
-                            [(axum::http::header::CONTENT_TYPE, "application/json")],
-                            context.to_string(),
-                        )
-                    }
-                },
-            ),
-        )
-        .fallback(
-            |State((hits, handoffs)): State<(Arc<AtomicUsize>, Handoffs)>,
-             headers: axum::http::HeaderMap| async move {
-                hits.fetch_add(1, Ordering::Relaxed);
-                if let Some(code) = headers.get("x-hangar-workspace-fallback") {
-                    handoffs.lock().unwrap().push(code.to_str().unwrap().to_owned());
-                }
-                "python-reserva"
-            },
-        )
-        .with_state((hits.clone(), handoffs.clone()));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let upstream = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    (spawn_server(config(upstream, "127.0.0.1")).await, hits, handoffs)
+    let f = workspace_fixture::fixture(root, true).await;
+    (f.addr, f.hits)
 }
 
 fn git(dir: &std::path::Path, args: &[&str]) {
@@ -252,25 +198,25 @@ async fn every_public_mutation_rejects_private_context_fields_before_execution()
 }
 
 #[tokio::test]
-async fn broken_context_hands_the_request_to_python_code() {
+async fn broken_context_answers_503_with_reason() {
     let dir = tempfile::tempdir().unwrap();
-    let (addr, _, handoffs) = fixture_with(dir.path(), false).await;
-    let body = client()
-        .get(format!("http://{addr}/api/sessions/fixture/files/list"))
+    let f = workspace_fixture::fixture(dir.path(), false).await;
+    let response = client()
+        .get(format!("http://{}/api/sessions/fixture/files/list", f.addr))
         .bearer_auth(OWNER)
         .send()
         .await
-        .unwrap()
-        .text()
-        .await
         .unwrap();
-    assert_eq!(body, "python-reserva");
-    assert_eq!(*handoffs.lock().unwrap(), ["contexto"]);
+    let body = refusal(response, "workspace_context").await;
+    assert_eq!(body["detail"]["params"]["motivo"], "status");
+    assert_eq!(f.hits(), 0, "o Python não pode atender");
+    let diag = f.diag("rust.workspace_failed").await;
+    assert_eq!((&diag["sessao"], &diag["codigo"]), (&json!("fixture"), &json!("workspace_context")));
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn full_write_slots_refuse_at_once_and_python_serves_without_rust_running_it() {
+async fn full_write_slots_answer_busy_without_python() {
     let dir = tempfile::tempdir().unwrap();
     let remote = dir.path().join("remoto.git");
     let repo = dir.path().join("repo");
@@ -285,7 +231,8 @@ async fn full_write_slots_refuse_at_once_and_python_serves_without_rust_running_
     git(&repo, &["config", "branch.main.remote", "origin"]);
     git(&repo, &["config", "branch.main.merge", "refs/heads/main"]);
     std::fs::write(repo.join("novo.txt"), "x").unwrap();
-    let (addr, _, handoffs) = fixture_with(&repo, true).await;
+    let f = workspace_fixture::fixture(&repo, true).await;
+    let addr = f.addr;
     let c = client();
     let post = |route: &str, body: Value| {
         c.post(format!("http://{addr}/api/sessions/fixture/{route}"))
@@ -298,15 +245,16 @@ async fn full_write_slots_refuse_at_once_and_python_serves_without_rust_running_
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
     let started = std::time::Instant::now();
     let commit = post("git/commit", json!({"message":"m","paths":["novo.txt"]})).await.unwrap();
-    assert_eq!(commit.text().await.unwrap(), "python-reserva");
     assert!(started.elapsed() < std::time::Duration::from_secs(1), "esperou a vaga");
-    assert_eq!(*handoffs.lock().unwrap(), ["ocupado"]);
+    assert!(commit.headers().get("retry-after").is_some(), "sem Retry-After");
+    refusal(commit, "workspace_busy").await;
+    assert_eq!(f.diag("rust.workspace_busy").await["codigo"], "workspace_busy");
     let log = std::process::Command::new("git").arg("-C").arg(&repo).args(["log", "--oneline"]).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&log.stdout).lines().count(), 1, "o Rust não pode ter commitado");
     for push in pushes {
         assert_ne!(push.await.unwrap().unwrap().text().await.unwrap(), "python-reserva");
     }
-    assert_eq!(*handoffs.lock().unwrap(), ["ocupado"]);
+    assert_eq!(f.hits(), 0, "o Python não pode atender");
 }
 
 #[tokio::test]
@@ -380,20 +328,4 @@ async fn folder_git_refusal_keeps_the_python_error_shape() {
             json!({"code":"erro_criacao_sessao","params":{},"msg":"root not allowed"})
         );
     }
-}
-
-#[tokio::test]
-async fn client_cannot_forge_the_python_handoff_header() {
-    let dir = tempfile::tempdir().unwrap();
-    let (addr, _, handoffs) = fixture_with(dir.path(), true).await;
-    for (route, token) in [("files/list", "convidado"), ("history", OWNER)] {
-        client()
-            .get(format!("http://{addr}/api/sessions/fixture/{route}"))
-            .bearer_auth(token)
-            .header("x-hangar-workspace-fallback", "indisponivel")
-            .send()
-            .await
-            .unwrap();
-    }
-    assert!(handoffs.lock().unwrap().is_empty(), "{:?}", handoffs.lock().unwrap());
 }

@@ -2026,7 +2026,9 @@ Armadilhas que custaram tempo:
 - **Órfão mudou de sentido.** Antes, todo claude de backend anterior era órfão (marcador com o pid
   do pai). Agora órfão é só o cano cuja `HANGAR_CANO_KEY` não tem sidecar — os outros são de
   propósito, e o backend religa em todos na subida (`reconectar_todas`), senão a lista mostraria
-  "ociosa" uma sessão parada numa permissão.
+  "ociosa" uma sessão parada numa permissão. Com o `hangar-server` de pé (dono único, 04/10/2026)
+  quem abre os canos vivos é o Rust, ao entrar no modo `rust`; o `reconectar_todas` fica para o
+  Python dono da porta (sem binário ou depois da desistência).
 - **`makefile()` segura o socket**: fechar só o socket não entrega EOF ao outro lado. Cano e
   cliente de teste fecham os dois.
 - **Cano de outra versão** (`versao` no snapshot): com a sessão ociosa o adapter reabre na hora;
@@ -2128,6 +2130,19 @@ do transcript. `fonte_pensamento` e `fonte_ferramenta` (a chamada cujo pedido o 
 escreve, com o input parcial) são fontes `PushPreviewSource` à parte, com eventos SSE `pensamento`
 e `ferramenta`. O servidor limpa quando o bloco cai no `.jsonl`; o front espera o evento real do
 transcript pra tirar de cena, com 3s de carência, senão abria um buraco entre os dois.
+
+## Claude sem terminal: segundo `initialize` no mesmo processo (04/10/2026, CLI 2.1.289)
+
+O Rust que abre um cano já inicializado reenvia o `initialize`, porque o snapshot do cano não
+marca `initialized` (só reaplica o `system/init`). Medido com o CLI real (`claude -p` em
+stream-json com `--permission-prompt-tool stdio`, Haiku, conta `.claude-02-200`, sem cano nem
+backend): o segundo `initialize` responde `success` com o mesmo corpo do primeiro (244
+comandos), tanto logo depois do primeiro quanto depois de um turno completo, e o turno seguinte
+sai normal. Diferente do Codex, que recusa com `-32600 "Already initialized"`. Então a reabertura
+no Rust não precisa de tratamento especial: a resposta marca a sessão entregável como no
+primeiro. Se uma versão futura recusar, o sintoma é `headless_nao_subiu` com a frase do CLI na
+faixa (`claude.rs`, ramo `initialize` rejeitado). Teste de regressão:
+`reopen_of_initialized_cano_becomes_deliverable`.
 
 ## Codex sem terminal: o app-server é do cano (14/09/2026, codex-cli 0.154.0)
 
