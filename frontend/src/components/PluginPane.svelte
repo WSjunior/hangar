@@ -20,7 +20,7 @@
     {/if}
   </header>
   <div class="body">
-    <PluginNode node={pane.tree} onPress={onPress ? (key) => onPress(pane.id, key) : undefined} />
+    <PluginNode node={pane.tree} place={pane.columns} onPress={onPress ? (key) => onPress(pane.id, key) : undefined} />
   </div>
 </section>
 
