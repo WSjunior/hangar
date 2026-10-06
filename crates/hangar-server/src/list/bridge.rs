@@ -202,6 +202,8 @@ pub struct ListBridge {
     epoch: AtomicU64,
     /// Fatos do estado empurrados pelo Python (`state.facts`), lidos pelo `Monitor`.
     pub state_facts: Arc<crate::state::facts::FactsStore>,
+    /// Registros nativos rebaixados pela lista, lidos também pelo `Monitor`.
+    pub demoted: Arc<crate::state::demote::Demoted>,
 }
 
 /// Tarefa bloqueante que entrou em pânico: o hook já registrou onde; aqui fica qual operação.
@@ -216,12 +218,22 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> { m.lock().unwrap_or_el
 
 impl ListBridge {
     pub fn new(env: ListEnv, facts: FactsClient) -> Self {
-        Self { env: Arc::new(env), shadow_facts: facts.sibling(), facts, caches: Arc::default(), runtime: std::sync::OnceLock::new(),
+        let (caches, demoted) = (Arc::<Caches>::default(), Arc::<crate::state::demote::Demoted>::default());
+        caches.classify.with(|c| c.hooks.set_demoted(demoted.clone()));
+        Self { env: Arc::new(env), shadow_facts: facts.sibling(), facts, caches, runtime: std::sync::OnceLock::new(),
             owner_clients: AtomicU32::new(0), seen: Mutex::default(),
             discovery: tokio::sync::Mutex::new(None),
             snapshot: tokio::sync::Mutex::new(None), git_running: Arc::default(),
             git_slots: Arc::new(tokio::sync::Semaphore::new(GIT_SLOTS)), epoch: AtomicU64::new(0),
-            state_facts: Arc::default() }
+            state_facts: Arc::default(), demoted }
+    }
+
+    /// Rebaixamentos da rodada: valem já aqui (lista e `Monitor`), e os session ids vão ao Python.
+    fn demote(&self, effects: Vec<Effect>) -> Vec<String> {
+        effects.into_iter().map(|Effect::DemoteAwaiting { sid, ts }| {
+            self.demoted.demote(&sid, ts);
+            sid
+        }).collect()
     }
 
     /// Uma vez, na subida do servidor com o runtime de pé.
@@ -357,7 +369,7 @@ impl ListBridge {
         self.flush_notes();
         let Some((mut changed, effects)) = done else { return Ok(Partial::Unchanged) };
         list_facts::mark_stale(&mut changed, &snap.facts, snap.facts_ok);
-        let demote: Vec<String> = effects.into_iter().map(|Effect::DemoteAwaiting { sid }| sid).collect();
+        let demote = self.demote(effects);
         if !demote.is_empty() {
             self.facts.demote(demote);
         }
@@ -416,9 +428,11 @@ impl ListBridge {
         }).await.map_err(|e| joined(e, "produção interrompida"))?;
         self.flush_notes();
         self.refresh_git(git_dirs);
-        let demote: Vec<String> = effects.into_iter().map(|Effect::DemoteAwaiting { sid }| sid).collect();
-        if !demote.is_empty() && !input.shadow {
-            self.facts.demote(demote);
+        if !input.shadow {
+            let demote = self.demote(effects);
+            if !demote.is_empty() {
+                self.facts.demote(demote);
+            }
         }
         let mut rows = rows;
         rows.extend(aside);

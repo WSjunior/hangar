@@ -1491,7 +1491,9 @@ Contrato em `hook_state.py`: o registro vence o marcador enquanto `pid_vivo(pid)
 pid morto ou status desconhecido, vale o marcador e depois o pane, como antes. `waiting` vira
 `awaiting_input`, e o pane continua dono da pergunta e das opções (a lista raspa quem está
 `awaiting`) e do rebaixamento quando não há menu (`demote_awaiting`, só em memória — o arquivo é
-do Claude e nunca é escrito por nós). Marcador de hook não gera transição enquanto o registro
+do Claude e nunca é escrito por nós). No Rust (parte 4, Task 2) o rebaixamento que a lista decide
+vale também num mapa da própria ponte (`state/demote.rs`), lido pela lista e pelo `Monitor` e
+desfeito quando o `statusUpdatedAt` do registro muda; o aviso ao Python continua. Marcador de hook não gera transição enquanto o registro
 manda pela mesma sessão, senão o drain e o push disparariam duas vezes pelo mesmo evento.
 
 Em 19/09/2026, a reprodução com registro `idle` seguido de JSON parcial, status desconhecido
