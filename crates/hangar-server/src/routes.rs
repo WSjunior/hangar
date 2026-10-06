@@ -52,7 +52,7 @@ pub struct AppState {
     pub list: Arc<crate::list::bridge::ListBridge>,
     /// Produtor único da lista do dono; liga com a primeira lista aberta.
     pub hub: Arc<crate::list::hub::ListHub>,
-    /// Painéis de terminal real do dono; no Windows o painel ainda é do Python.
+    /// Painéis de terminal real de todas as portas; no Windows o painel ainda é do Python.
     #[cfg(unix)]
     pub term: Arc<crate::term::Terms>,
 }
@@ -196,11 +196,13 @@ pub async fn serve_with_state(listener: TcpListener, mut state: AppState) -> std
 }
 
 pub fn terminal_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/__hangar_server/terminal", axum::routing::post(crate::terminal_routes::terminal))
         .route("/__hangar_server/workspace", axum::routing::post(crate::workspace_routes::private))
-        .route("/__hangar_server/list", axum::routing::post(crate::list::bridge::private))
-        .with_state(state)
+        .route("/__hangar_server/list", axum::routing::post(crate::list::bridge::private));
+    #[cfg(unix)]
+    let router = router.route("/__hangar_server/term", get(crate::term::private_ws));
+    router.with_state(state)
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -214,6 +216,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/__hangar_server/terminal", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/workspace", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         .route("/__hangar_server/list", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
+        .route("/__hangar_server/term", axum::routing::any(|| async { StatusCode::NOT_FOUND }))
         // Outro método nessas rotas (preflight OPTIONS, HEAD) segue ao Python.
         .route("/api/sessions", get(crate::list::hub::list).fallback(pass_any))
         .route("/api/sessions/events", get(crate::list::hub::events).fallback(pass_any))
@@ -230,6 +233,8 @@ pub fn router(state: Arc<AppState>) -> Router {
 async fn health(State(st): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     let body = serde_json::json!({"ok": true, "version": env!("CARGO_PKG_VERSION"),
         "protocol": crate::INTERNAL_PROTOCOL,
+        // O painel de terminal real é do Rust; no Windows ainda é do Python (sem ConPTY aqui).
+        "terminal_panel": cfg!(unix),
         "terminal_address": st.terminal_address.map(|a| a.to_string())}).to_string();
     let mut resp = ([(header::CONTENT_TYPE, "application/json")], body).into_response();
     cors(&headers, resp.headers_mut());

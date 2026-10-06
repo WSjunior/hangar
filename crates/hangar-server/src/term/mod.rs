@@ -1,7 +1,7 @@
 //! Terminal real do dono: `WS /api/sessions/{name}/term` (`?shortcut=`) e
 //! `WS /api/hangar-terminals/{ident}/term`. Um cano de bytes para o `tmux attach` da sessão; o
 //! servidor não interpreta nada. Quem não é o dono pelo `?token=` segue ao Python (convidado,
-//! token errado, bloqueio), que responde como antes.
+//! token errado, bloqueio), que faz a porta de entrada e volta por `/__hangar_server/term`.
 mod origin;
 mod pty;
 mod resolve;
@@ -91,6 +91,10 @@ impl Terms {
         self.panels.lock().unwrap().keys().cloned().collect()
     }
 
+    pub fn is_active(&self, target: &str) -> bool {
+        self.panels.lock().unwrap().contains_key(target)
+    }
+
     fn slot(&self) -> Option<Arc<Slot>> {
         self.live.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < self.cfg.max_panels).then_some(n + 1))
             .ok().map(|_| Arc::new(Slot(self.live.clone())))
@@ -142,6 +146,36 @@ pub async fn session_ws(State(st): State<Arc<AppState>>, ConnectInfo(peer): Conn
 pub async fn hangar_ws(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>,
                        Path(ident): Path<String>, req: Request) -> Response {
     serve(st, peer, req, Want::Hangar(ident)).await
+}
+
+/// `/__hangar_server/term` na porta privada: o Python liga aqui quem entrou pelas portas dele
+/// (convidado, Connect) depois da porta de entrada dele. O alvo já vem conferido; o painel é o
+/// mesmo da 8765, então um dono e um convidado nunca anexam juntos.
+pub async fn private_ws(State(st): State<Arc<AppState>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, req: Request) -> Response {
+    if !crate::workspace_routes::private_ok(&st, peer, req.headers()) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let query = req.uri().query();
+    let Some(target) = auth::query_param(query, "target").filter(|t| !t.is_empty()) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let number = |key, default: i64| match auth::query_param(query, key) {
+        None => Some(default),
+        Some(v) => v.trim().parse::<i64>().ok(),
+    };
+    let (Some(cols), Some(rows)) = (number("cols", 80), number("rows", 24)) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let (mut parts, _) = req.into_parts();
+    let Ok(ws) = WebSocketUpgrade::from_request_parts(&mut parts, &()).await else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let (cols, rows) = pty::clamp(cols, rows);
+    let Some(slot) = st.term.slot() else {
+        st.diag.report("rust.term_failed", &target, "panel_cap", "teto de painéis de terminal atingido");
+        return close_after_accept(ws, 1013, "limite de paineis");
+    };
+    ws.on_upgrade(move |socket| run(st, socket, target, cols, rows, slot))
 }
 
 /// Recusa antes do aceite: o que o `ws.close` antes do `accept` do Python vira, um 403.

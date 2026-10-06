@@ -57,7 +57,7 @@ protocol = os.environ.get("FAKE_PROTOCOL", "__PROTOCOL__")
 
 class Health(BaseHTTPRequestHandler):
     def do_GET(self):
-        health = {"ok": True, "version": "0.0.0-test",
+        health = {"ok": True, "version": "0.0.0-test", "terminal_panel": True,
                   "terminal_address": f"127.0.0.1:{self.server.server_port}"}
         if protocol != "sem":
             health["protocol"] = int(protocol)
@@ -520,7 +520,7 @@ def test_watcher_failure_puts_the_cause_in_the_diary(monkeypatch, events):
 def test_protocol_is_the_same_number_on_both_sides():
     lib = (Path(__file__).resolve().parents[2] / "crates/hangar-server/src/lib.rs").read_text()
     rust = int(re.search(r"pub const INTERNAL_PROTOCOL: u32 = (\d+);", lib).group(1))
-    assert rust == rust_server.RUST_SERVER_PROTOCOL == 29
+    assert rust == rust_server.RUST_SERVER_PROTOCOL == 30
 
 
 # --- Modo do processo (dono único, Task 5) ---
@@ -566,3 +566,34 @@ def test_invalid_private_address_is_startup_failure(monkeypatch):
     monkeypatch.setattr(supervisor, "_start", address)
     monkeypatch.setattr(supervisor, "stop", stop)
     assert asyncio.run(supervisor.run()) == "endereco_privado" and configured == ["stop"]
+
+
+def test_terminal_panel_from_rust_health(monkeypatch):
+    from types import SimpleNamespace
+    from app import list_bridge, runtime_coordinator, terminal_observer, termsock, workspace_bridge
+    supervisor = _supervisor(lambda: False)
+    monkeypatch.setattr(rust_server, "_spawn", lambda binary, env: SimpleNamespace(poll=lambda: None, pid=1))
+    monkeypatch.setattr(rust_server, "_runtime_ready", lambda proc, instance: {"type":"runtime_ready",
+        "protocol":rust_server.RUST_SERVER_PROTOCOL, "instance":instance, "port":1})
+    monkeypatch.setattr(supervisor, "configure_runtime", lambda *args: None)
+    monkeypatch.setattr(termsock, "_RUST_PTY", True)
+    health = {"protocol": rust_server.RUST_SERVER_PROTOCOL, "terminal_address": "127.0.0.1:9"}
+    monkeypatch.setattr(rust_server, "_health", lambda host, port: health)
+    try:
+        for panel in (False, True):
+            health["terminal_panel"] = panel
+            supervisor.proc = None
+            assert asyncio.run(supervisor._start()) == "up"
+            monkeypatch.setattr(runtime_coordinator, "_current", SimpleNamespace(mode="rust"))
+            assert termsock.painel_disponivel() is panel, "no modo rust a capacidade é a do Rust"
+            monkeypatch.setattr(runtime_coordinator, "_current", SimpleNamespace(mode="python"))
+            assert termsock.painel_disponivel() is termsock._PTY_POSIX, "na reserva é a do Python"
+        # Sem o campo (ou fora do tipo) a saúde não diz a capacidade: falha de partida, não "sem painel".
+        for bad in (None, "sim"):
+            health["terminal_panel"] = bad
+            supervisor.proc = None
+            assert asyncio.run(supervisor._start()) == "address"
+    finally:
+        internal_api.set_secret(None)
+        for bridge in (terminal_observer, workspace_bridge, list_bridge):
+            bridge.configure(None, None)

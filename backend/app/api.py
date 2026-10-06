@@ -5787,7 +5787,13 @@ def _recusa_se_painel_aberto(name: str) -> None:
     #
     # O termsock NAO importa `pty` no topo justamente pra este import funcionar no Windows.
     from app import termsock
-    if name in termsock.clientes_ativos():
+    try:
+        aberto = termsock.painel_aberto(name)
+    except list_bridge.ListBridgeError as e:
+        # Sem resposta do Rust não dá pra dizer que o painel está fechado; a ponte já foi ao diário.
+        raise HTTPException(status_code=503, detail=erro(
+            "erro_terminal_indisponivel", "nao consegui conferir o painel de terminal", detalhe=e.code))
+    if aberto:
         raise HTTPException(status_code=409,
                             detail=erro("erro_terminal_aberto",
                                         "Terminal aberto nesta sessao. Feche o painel pra responder "
