@@ -1414,3 +1414,16 @@ def test_rust_bypass_reopen_of_terminal_closes_and_reopens_in_rust(monkeypatch, 
         assert gateway.calls == ['open', 'snapshot', 'close', 'open']
         assert slot.phase == Phase.Rust and slot.lease is None and slot.binding.meta['terminal']['pane'] == '%7'
     asyncio.run(flow())
+
+
+def test_clear_on_disk_counts_only_a_transcript_after_the_dispatch(tmp_path):
+    import os
+    from app import runtime_terminal as rt
+    atual = tmp_path / 'atual.jsonl'
+    atual.write_text('<command-name>/clear</command-name>\n')
+    antigo = tmp_path / 'antigo.jsonl'
+    antigo.write_text('{"message":{"content":"<command-name>/clear</command-name>"}}\n')
+    os.utime(antigo, (1000, 1000))
+    assert rt._clear_on_disk(str(atual), 2000) is False
+    (tmp_path / 'novo.jsonl').write_text('{"message":{"content":"<command-name>/clear</command-name>"}}\n')
+    assert rt._clear_on_disk(str(atual), 2000) is True

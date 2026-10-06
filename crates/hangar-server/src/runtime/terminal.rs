@@ -212,14 +212,19 @@ fn clear_on_disk(transcript:&std::path::Path,since:f64)->Result<bool,std::io::Er
     use std::io::Read;
     const MARK:&[u8]=b"<command-name>/clear</command-name>";
     let Some(dir)=transcript.parent() else {return Ok(false)};
+    let gone=|failure:&std::io::Error|failure.kind()==std::io::ErrorKind::NotFound;
     for entry in std::fs::read_dir(dir)? {
         let path=entry?.path();
         if path==transcript || path.extension().is_none_or(|e|e!="jsonl") {continue;}
-        let meta=std::fs::metadata(&path)?;
+        // Apagado no meio da varredura não é prova nem dúvida.
+        let meta=match std::fs::metadata(&path) {Ok(meta)=>meta,Err(failure) if gone(&failure)=>continue,Err(failure)=>return Err(failure)};
         let born=meta.created().or_else(|_|meta.modified())?.duration_since(UNIX_EPOCH).map_or(0.0,|t|t.as_secs_f64());
         if born<since-1.0 {continue;}
         let mut head=Vec::new();
-        std::fs::File::open(&path)?.take(16*1024).read_to_end(&mut head)?;
+        match std::fs::File::open(&path).and_then(|f|f.take(16*1024).read_to_end(&mut head)) {
+            Err(failure) if gone(&failure)=>continue,
+            other=>{other?;}
+        }
         if head.windows(MARK.len()).any(|w|w==MARK) {return Ok(true);}
     }
     Ok(false)
@@ -815,7 +820,9 @@ impl Executor {
         let barrier=state.runtime_state["clear_barrier"].clone();
         let since=barrier["since"].as_f64().unwrap_or(0.0);
         let on_disk=sample().epoch_s-since<CLEAR_DISK_TRUST_S && clear_on_disk(&self.target.transcript,since).unwrap_or_else(|failure|{
-            tracing::warn!(key=%self.target.key,session=%self.target.name,code="clear_barrier_disk",kind=?failure.kind(),"transcript ilegível; a trava do /clear fica");
+            if crate::warn_limit::allow(Some(self.target.key.as_str()),"clear_barrier_disk") {
+                tracing::warn!(key=%self.target.key,session=%self.target.name,code="clear_barrier_disk",kind=?failure.kind(),"transcript ilegível; a trava do /clear fica");
+            }
             true
         });
         // Ocupada, ou a conversa nova existe e só falta o Python reabrir: a troca do vínculo solta a trava.

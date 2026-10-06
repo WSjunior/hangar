@@ -586,12 +586,16 @@ def _clear_on_disk(jsonl, since):
     atual = Path(jsonl)
     try:
         for p in atual.parent.glob('*.jsonl'):
-            info = p.stat()
-            if p == atual or getattr(info, 'st_birthtime', info.st_mtime) < since - 1:
-                continue
-            with p.open('rb') as f:
-                if b'<command-name>/clear</command-name>' in f.read(16 * 1024):
-                    return True
+            try:
+                info = p.stat()
+                # Sem data de nascimento (Linux), vale a de escrita: o teto de 60 s limita o engano.
+                if p == atual or getattr(info, 'st_birthtime', info.st_mtime) < since - 1:
+                    continue
+                with p.open('rb') as f:
+                    if b'<command-name>/clear</command-name>' in f.read(16 * 1024):
+                        return True
+            except FileNotFoundError:
+                continue        # apagado no meio da varredura
     except OSError:
         _log.warning("trava do /clear: transcript ilegível em %s; a trava fica", atual.parent, exc_info=True)
         return True
@@ -613,9 +617,10 @@ def _expire_clear(coordinator, descriptor, operation_id):
     try:
         current = _service(coordinator, descriptor, operation_id, operation_id, 'terminal_facts',
             {'binding':descriptor['meta']['terminal'],'operation_id':operation_id,'text':''})
-    except Exception as exc:
-        # O vínculo mudou (a conversa nova existe, falta reabrir) ou os fatos falharam: a trava fica.
-        _log.info("trava do /clear de %s fica: %s", descriptor['name'], type(exc).__name__)
+    except BindingChanged:
+        return False        # a conversa nova existe, falta reabrir
+    except Exception:
+        _log.warning("trava do /clear de %s fica: fatos indisponíveis", descriptor['name'], exc_info=True)
         return False
     if not current['idle'] or agora - since < CLEAR_DISK_TRUST_S and _clear_on_disk(descriptor['jsonl'], since):
         return False
@@ -854,6 +859,7 @@ def _reserve_execute(coordinator, descriptor, command, operation_id, *, entry_id
     stage = (result.get('payload') or {}).get('stage') or ''
     if control == 'input' and payload['text'].strip().split()[0] == '/clear' and (result['disposition'] == 'accepted'
             or result['disposition'] == 'unknown' and (not stage or stage.endswith('submeter'))):
+        _CLEAR_NEXT.pop(descriptor['key'], None)
         state = copy.deepcopy(slot.store.state)
         state['runtime_state'].update(preserve_binding=True, clear_barrier={'generation':descriptor['generation'],
             'conversation':binding['conversation'],'operation_id':operation_id,'since':dispatched_at})
