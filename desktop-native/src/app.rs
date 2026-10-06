@@ -78,7 +78,7 @@ mod stats;
 mod search;
 mod topbar;
 
-actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, FindProjectFile, FindProjectText, NextSession, PreviousSession, ToggleDictation, NewChat, CloseSession, OpenCosts, OpenSearch,
+actions!(hangar, [FocusComposer, OpenSettings, CopyLastReply, FocusSettingsSearch, FindProjectFile, FindProjectText, NextSession, PreviousSession, ToggleDictation, NewChat, CloseSession, RenameSession, OpenCosts, OpenSearch,
     ToggleSidebar, CyclePermission, OpenWorktrees]);
 
 const LIVE_THINKING: &str = "__thinking__";
@@ -496,7 +496,7 @@ pub struct Hangar {
     // Página de configurações aberta por cima da janela inteira; `None` é a janela da conversa.
     settings: Option<settings::Page>,
     settings_ui: settings::SettingsUi,
-    // Abas no topo: foco de cada aba pelo nome da sessão (setas andam entre elas) e a rolagem da faixa,
+    // Abas: foco de cada aba pelo nome da sessão (setas andam entre elas) e a rolagem da faixa,
     // que traz a aba ativa para a vista quando a seleção muda.
     tab_focus: HashMap<String, FocusHandle>,
     tabs_scroll: ScrollHandle,
@@ -1159,7 +1159,7 @@ impl Hangar {
         self.open_api = open_api;
         // Avisos, atalhos globais e contas passam a ser os da máquina desta conversa.
         if !same_server { self.load_notification_preferences(); }
-        // Com as abas no topo (só a lista ativa), a aba da sessão aberta entra na vista da faixa.
+        // Com abas (só a lista ativa), a aba da sessão aberta entra na vista da faixa.
         if self.open_api.is_none() && let Some(ix) = self.sessions.iter().position(|s| s.name == session.name) { self.tabs_scroll.scroll_to_item(ix); }
         self.selection += 1;
         self.revision += 1;
@@ -4746,7 +4746,7 @@ impl Hangar {
             .into_any_element()
     }
 
-    /// Abas no topo (como o web): todas as sessões numa faixa, e o servidor e a conexão que moravam
+    /// Abas no topo (como o web) ou embaixo: todas as sessões numa faixa, e o servidor e a conexão que moravam
     /// no rodapé da barra lateral. ←/→ andam o foco entre as abas; Enter ou Espaço abrem a sessão.
     fn render_tabs(&mut self, selected_name: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let floating = theme::is_floating();
@@ -4817,8 +4817,9 @@ impl Hangar {
             .when(self.sessions.is_empty() && self.list_error.is_none(), |el| el.child(div().px_2().text_xs().text_color(theme::faint())
                 .child(tr(if self.list_online { "empty_sessions" } else { "connecting" }))));
         chrome::glass_panel(div().h(px(44.)).w_full().flex_shrink_0().px(px(8.)).flex().items_center().gap(px(6.))
-            .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().border_color(theme::border()).bg(theme::chrome()).shadow(theme::panel_shadow()) }
-                else { el.bg(theme::chrome()).border_b_1().border_color(theme::border()) })
+            .bg(theme::chrome()).border_color(theme::border())
+            .map(|el| if floating { el.rounded(px(theme::PANEL_RADIUS)).border_1().shadow(theme::panel_shadow()) }
+                else if appearance::get().navigation == appearance::Navigation::BottomTabs { el.border_t_1() } else { el.border_b_1() })
             .child(div().px(px(6.)).child(chrome::hangar_mark(16., theme::accent())))
             .children(self.render_hangar_chip(hangar_live::Chip::Label, cx))
             .child(strip)
@@ -5447,10 +5448,10 @@ async fn forward_stream(api: Api, name: Option<String>, connection: u64, selecti
 }
 
 impl Hangar {
-    /// Barra lateral ou abas no topo, conforme Aparência.
+    /// Barra lateral ou faixa de abas (em cima ou embaixo), conforme Aparência.
     fn render_nav(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let selected_name = self.selected.as_ref().map(|s| s.name.clone());
-        if appearance::get().navigation == appearance::Navigation::Tabs { self.render_tabs(selected_name.as_deref(), window, cx) }
+        if appearance::get().navigation.tabs() { self.render_tabs(selected_name.as_deref(), window, cx) }
             else { self.render_sidebar(selected_name.as_deref(), window, cx) }
     }
 
@@ -5720,7 +5721,8 @@ impl Render for Hangar {
         let page = self.settings.filter(|_| !self.settings_ui.live);
         let costs_page = self.costs.view.is_some();
         let worktrees_page = self.worktrees.view.is_some();
-        let tabs = appearance::get().navigation == appearance::Navigation::Tabs;
+        let navigation = appearance::get().navigation;
+        let (tabs, bottom_tabs) = (navigation.tabs(), navigation == appearance::Navigation::BottomTabs);
         let cutout = chat_background && page.is_none() && !costs_page && !worktrees_page && (desktop_window || floating);
         let chat_bounds = std::rc::Rc::new(std::cell::Cell::new(Bounds::<Pixels>::default()));
         // Colados com barra lateral, ela sobe até o topo e a barra do app começa na borda dela, como no Zeron. O fundo
@@ -5910,6 +5912,7 @@ impl Render for Hangar {
             .on_action(cx.listener(|this, _: &PreviousSession, window, cx| this.step_session(-1, window, cx)))
             .on_action(cx.listener(|this, _: &NewChat, window, cx| this.go_home(window, cx)))
             .on_action(cx.listener(|this, _: &CloseSession, window, cx| this.close_selected(window, cx)))
+            .on_action(cx.listener(|this, _: &RenameSession, window, cx| this.rename_selected(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| if !this.connection_dialog { this.toggle_rail(cx) }))
             .on_action(cx.listener(|this, _: &ToggleDictation, window, cx| this.toggle_dictation(window, cx)))
             .on_action(cx.listener(|this, _: &CopyLastReply, _, cx| {
@@ -6022,10 +6025,12 @@ impl Render for Hangar {
                 _ if worktrees_page => el.child(self.render_worktrees(window, cx)),
                 _ if costs_page => el.child(self.render_costs(window, cx)),
                 (Some(page), _) => el.child(self.render_settings(page, window, cx)),
-                // Abas no topo: a faixa em cima, a conversa e o painel embaixo, sem barra lateral.
-                (None, Some(bar)) if tabs => el.flex_col().child(bar)
-                    .child(self.working_mark_float(panes::Area::Nav, WORKING_FADE, cx.reduce_motion()))
-                    .child(div().flex_1().min_h_0().flex().when(floating, |el| el.gap(px(10.))).child(content).when_some(side, |el, side| el.child(side))),
+                // Abas: a faixa em cima (ou embaixo), a conversa e o painel do outro lado, sem barra lateral.
+                (None, Some(bar)) if tabs => {
+                    let body = div().flex_1().min_h_0().flex().when(floating, |el| el.gap(px(10.))).child(content).when_some(side, |el, side| el.child(side));
+                    el.flex_col().map(|el| if bottom_tabs { el.child(body).child(bar) } else { el.child(bar).child(body) })
+                        .child(self.working_mark_float(panes::Area::Nav, WORKING_FADE, cx.reduce_motion()))
+                }
                 (None, sidebar) => el.children(sidebar)
                     .when(page.is_none(), |el| el.child(self.working_mark_float(panes::Area::Nav, WORKING_FADE, cx.reduce_motion())))
                     .map(|el| match topbar_beside {
